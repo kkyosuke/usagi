@@ -1,8 +1,10 @@
-use usagi::usecase::doctor::check_dependencies;
+use usagi::infrastructure::storage::Storage;
+use usagi::usecase::doctor::diagnose;
 
 #[test]
-fn test_check_dependencies_reports_all_tools() {
-    let checks = check_dependencies();
-    let names: Vec<_> = checks.iter().map(|c| c.name).collect();
-    assert_eq!(names, vec!["git", "bash"]);
+fn test_diagnose_reports_all_subsystems() {
+    let dir = tempfile::tempdir().expect("failed to create temp dir");
+    let storage = Storage::new(dir.path().join("usagi"));
+    let names: Vec<_> = diagnose(&storage).iter().map(|c| c.name).collect();
+    assert_eq!(names, vec!["git", "bash", "notifications", "config"]);
 }
