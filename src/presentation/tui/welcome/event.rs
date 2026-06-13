@@ -22,7 +22,7 @@ pub type OpenOpen<'a> = dyn FnMut(&Term) -> Result<open::Outcome> + 'a;
 /// terminal: production wires it to [`new::run`], tests pass a stub.
 pub type OpenNew<'a> = dyn FnMut(&Term) -> Result<new::Outcome> + 'a;
 
-/// Runs the startup screen against the given terminal and key source until the
+/// Runs the welcome screen against the given terminal and key source until the
 /// user quits (or an unrecoverable read error occurs).
 pub fn event_loop(
     term: &Term,

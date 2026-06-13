@@ -15,7 +15,7 @@ struct Cli {
 enum Commands {
     /// Check that required tools are installed
     Doctor,
-    /// Hop into the usagi startup screen
+    /// Hop into the usagi welcome screen
     Hop,
     /// Sync the current repository's worktree state to .usagi/state.json
     Status,

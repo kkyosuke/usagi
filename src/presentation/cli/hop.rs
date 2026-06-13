@@ -1,6 +1,6 @@
 use crate::presentation::tui;
 
-/// Entry point for `usagi hop`: shows the interactive launch screen.
+/// Entry point for `usagi hop`: shows the interactive welcome screen.
 pub fn run() -> anyhow::Result<()> {
-    tui::launch::run()
+    tui::welcome::run()
 }

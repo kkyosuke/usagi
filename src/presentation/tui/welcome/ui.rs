@@ -2,7 +2,7 @@ use console::style;
 
 use crate::presentation::tui::widgets;
 
-/// A single entry in the startup-screen menu.
+/// A single entry in the welcome-screen menu.
 pub struct MenuItem {
     pub label: &'static str,
     pub key: char,
@@ -69,7 +69,7 @@ fn notice_lines(width: usize, notice: Option<&str>) -> Vec<String> {
     vec![format!("{padding}{}", style(notice).yellow())]
 }
 
-/// Builds the status footer shown at the bottom of the startup screen.
+/// Builds the status footer shown at the bottom of the welcome screen.
 ///
 /// Returns the footer text only; [`render_frame`] pins it to the bottom edge.
 fn footer_lines(width: usize) -> Vec<String> {
@@ -80,7 +80,7 @@ fn footer_lines(width: usize) -> Vec<String> {
     vec![widgets::dim_line(width, &footer)]
 }
 
-/// Builds the full startup-screen frame for a raw terminal size.
+/// Builds the full welcome-screen frame for a raw terminal size.
 pub fn render_frame(
     raw_height: usize,
     raw_width: usize,

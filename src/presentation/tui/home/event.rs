@@ -18,7 +18,7 @@ pub enum Outcome {
 
 /// Runs the home screen against the given terminal and key source until the
 /// user goes back or quits. Assumes the alternate screen is already active (it
-/// is owned by the launch screen, several levels up).
+/// is owned by the welcome screen, several levels up).
 ///
 /// Opening a worktree is a placeholder for now: selecting one shows a "coming
 /// soon" notice, since the per-worktree session screen is not implemented yet.

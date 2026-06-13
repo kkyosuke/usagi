@@ -22,7 +22,7 @@ impl KeyReader for TermKeyReader {
     }
 }
 
-/// Displays the startup screen and dispatches the selected menu action.
+/// Displays the welcome screen and dispatches the selected menu action.
 ///
 /// `Open` opens the project selection screen and `New` opens the New Project
 /// screen; the remaining non-Quit actions are placeholders for now and show a

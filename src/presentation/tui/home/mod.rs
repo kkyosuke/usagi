@@ -37,7 +37,7 @@ impl KeyReader for TermKeyReader {
 /// Runs the home screen for `workspace` on the given terminal until the user
 /// goes back or quits. Loads the workspace's worktree state from disk and wires
 /// it, with the real terminal, to the testable event loop in [`event`]. Assumes
-/// the alternate screen is already active (it is owned by the launch screen).
+/// the alternate screen is already active (it is owned by the welcome screen).
 pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
     let (list, notice) = match WorkspaceStore::new(&workspace.path).load() {
         Ok(Some(state)) => (
