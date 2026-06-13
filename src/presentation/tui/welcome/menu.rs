@@ -11,6 +11,8 @@ pub enum Action {
     OpenOpen,
     /// Open the New Project screen.
     OpenNew,
+    /// Open the Config screen.
+    OpenConfig,
     /// Leave the welcome screen.
     Quit,
 }
@@ -86,17 +88,14 @@ impl Menu {
 
     /// Activates the menu item with the given shortcut key, shared by Enter and
     /// the direct shortcut keys.
-    fn activate(&mut self, key: char) -> Action {
+    fn activate(&self, key: char) -> Action {
         match key {
-            'q' => Action::Quit,
             'o' => Action::OpenOpen,
             'e' => Action::OpenNew,
-            _ => {
-                if let Some(item) = self.items.iter().find(|item| item.key == key) {
-                    self.notice = Some(format!("{} is coming soon 🐰", item.label));
-                }
-                Action::Continue
-            }
+            'c' => Action::OpenConfig,
+            'q' => Action::Quit,
+            // Every real menu item maps above; an unknown key is a safe no-op.
+            _ => Action::Continue,
         }
     }
 
@@ -156,24 +155,23 @@ mod tests {
     #[test]
     fn movement_clears_an_existing_notice() {
         let mut menu = Menu::new();
-        menu.handle_key(Key::Char('c')); // Config is a placeholder; sets a notice
-        assert!(menu.notice().is_some());
+        // A notice left over from a returning sub-screen is cleared on movement.
+        menu.set_notice(Some("Saved 🐰".to_string()));
         menu.handle_key(Key::ArrowDown);
         assert_eq!(menu.notice(), None);
-        menu.handle_key(Key::Char('c'));
-        assert!(menu.notice().is_some());
+        menu.set_notice(Some("Saved 🐰".to_string()));
         menu.handle_key(Key::ArrowUp);
         assert_eq!(menu.notice(), None);
     }
 
     #[test]
-    fn enter_on_placeholder_shows_coming_soon() {
+    fn enter_on_config_item_opens_config_screen() {
         let mut menu = Menu::new();
         menu.handle_key(Key::ArrowDown); // New
-        menu.handle_key(Key::ArrowDown); // Config (a placeholder)
+        menu.handle_key(Key::ArrowDown); // Config
         assert_eq!(menu.selected_index(), 2);
-        assert_eq!(menu.handle_key(Key::Enter), Action::Continue);
-        assert_eq!(menu.notice(), Some("Config is coming soon 🐰"));
+        assert_eq!(menu.handle_key(Key::Enter), Action::OpenConfig);
+        assert_eq!(menu.notice(), None);
     }
 
     #[test]
@@ -228,10 +226,19 @@ mod tests {
     }
 
     #[test]
-    fn shortcut_key_shows_coming_soon() {
+    fn config_shortcut_opens_config_screen() {
         let mut menu = Menu::new();
-        assert_eq!(menu.handle_key(Key::Char('c')), Action::Continue);
-        assert_eq!(menu.notice(), Some("Config is coming soon 🐰"));
+        assert_eq!(menu.handle_key(Key::Char('c')), Action::OpenConfig);
+        assert_eq!(menu.notice(), None);
+    }
+
+    #[test]
+    fn activate_ignores_an_unknown_key() {
+        // Every menu item routes to a real action; a stray key is a no-op. This
+        // arm is unreachable via handle_key (which only activates known item
+        // keys), so it is exercised directly.
+        let menu = Menu::new();
+        assert_eq!(menu.activate('z'), Action::Continue);
     }
 
     #[test]
