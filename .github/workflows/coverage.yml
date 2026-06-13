@@ -10,10 +10,6 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  # 対象から外す端末 I/O 専用の薄いラッパ（テスト不能なため計測しない）。
-  COVERAGE_IGNORE: '(src/main\.rs|cli/hop\.rs|tui/welcome/mod\.rs|tui/home/mod\.rs|tui/new/mod\.rs|tui/open/mod\.rs|tui/config/mod\.rs)'
-  # 100% を要求するカバレッジ指標。
-  COVERAGE_MIN: 100
 
 jobs:
   coverage:
@@ -21,6 +17,13 @@ jobs:
 
     steps:
     - uses: actions/checkout@v4
+
+    # 除外条件・閾値は SSoT (scripts/coverage.sh) を lefthook と共有する。
+    - name: Load coverage config (SSoT)
+      run: |
+        . ./scripts/coverage.sh
+        echo "COVERAGE_IGNORE=$COVERAGE_IGNORE" >> "$GITHUB_ENV"
+        echo "COVERAGE_MIN=$COVERAGE_MIN" >> "$GITHUB_ENV"
 
     - name: Install Rust toolchain
       uses: dtolnay/rust-toolchain@stable

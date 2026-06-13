@@ -4,27 +4,39 @@
 //! workspace can cycle through, and the cursor position. Keeping the editing
 //! logic free of any terminal IO makes it directly testable.
 
-use crate::domain::settings::{Settings, Theme};
+use crate::domain::settings::{AgentCli, Settings, Theme};
 
 /// The themes in the order they cycle through.
 const THEMES: [Theme; 3] = [Theme::Light, Theme::Dark, Theme::System];
+
+/// The agent CLIs in the order they cycle through.
+pub(super) const AGENT_CLIS: [AgentCli; 2] = [AgentCli::Claude, AgentCli::Gemini];
 
 /// An editable settings field, in display order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Field {
     Theme,
     DefaultWorkspace,
+    Notifications,
+    AgentCli,
 }
 
 impl Field {
     /// The fields shown on the screen, top to bottom.
-    pub const ALL: [Field; 2] = [Field::Theme, Field::DefaultWorkspace];
+    pub const ALL: [Field; 4] = [
+        Field::Theme,
+        Field::DefaultWorkspace,
+        Field::Notifications,
+        Field::AgentCli,
+    ];
 
     /// The label shown beside the field's value.
     pub fn label(self) -> &'static str {
         match self {
             Field::Theme => "Theme",
             Field::DefaultWorkspace => "Default Workspace",
+            Field::Notifications => "Notifications",
+            Field::AgentCli => "Agent CLI",
         }
     }
 }
@@ -89,6 +101,13 @@ impl Config {
                 .default_workspace
                 .clone()
                 .unwrap_or_else(|| "(none)".to_string()),
+            Field::Notifications => if self.settings.notifications_enabled {
+                "On"
+            } else {
+                "Off"
+            }
+            .to_string(),
+            Field::AgentCli => agent_cli_label(self.settings.agent_cli).to_string(),
         }
     }
 
@@ -102,6 +121,15 @@ impl Config {
                 true
             }
             Field::DefaultWorkspace => self.cycle_default_workspace(forward),
+            Field::Notifications => {
+                // A boolean toggle: direction is irrelevant, it always flips.
+                self.settings.notifications_enabled = !self.settings.notifications_enabled;
+                true
+            }
+            Field::AgentCli => {
+                self.settings.agent_cli = cycle_agent_cli(self.settings.agent_cli, forward);
+                true
+            }
         }
     }
 
@@ -158,6 +186,27 @@ fn cycle_theme(theme: Theme, forward: bool) -> Theme {
     THEMES[next]
 }
 
+/// The human-readable label for an agent CLI.
+pub(super) fn agent_cli_label(cli: AgentCli) -> &'static str {
+    match cli {
+        AgentCli::Claude => "Claude",
+        AgentCli::Gemini => "Gemini",
+    }
+}
+
+/// The agent CLI one step after `cli` in cycle order (or before, when `forward`
+/// is false), wrapping at the ends.
+fn cycle_agent_cli(cli: AgentCli, forward: bool) -> AgentCli {
+    let i = AGENT_CLIS.iter().position(|&c| c == cli).unwrap_or(0);
+    let len = AGENT_CLIS.len();
+    let next = if forward {
+        (i + 1) % len
+    } else {
+        (i + len - 1) % len
+    };
+    AGENT_CLIS[next]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -173,7 +222,9 @@ mod tests {
     fn field_labels_are_distinct() {
         assert_eq!(Field::Theme.label(), "Theme");
         assert_eq!(Field::DefaultWorkspace.label(), "Default Workspace");
-        assert_eq!(Field::ALL.len(), 2);
+        assert_eq!(Field::Notifications.label(), "Notifications");
+        assert_eq!(Field::AgentCli.label(), "Agent CLI");
+        assert_eq!(Field::ALL.len(), 4);
     }
 
     #[test]
@@ -190,6 +241,10 @@ mod tests {
         let mut config = config_with_workspaces(&[]);
         config.move_down();
         assert_eq!(config.selected_field(), Field::DefaultWorkspace);
+        config.move_down();
+        assert_eq!(config.selected_field(), Field::Notifications);
+        config.move_down();
+        assert_eq!(config.selected_field(), Field::AgentCli);
         // Wraps from the last field back to the first.
         config.move_down();
         assert_eq!(config.selected_field(), Field::Theme);
@@ -199,9 +254,48 @@ mod tests {
     fn move_up_wraps_to_the_bottom() {
         let mut config = config_with_workspaces(&[]);
         config.move_up();
+        assert_eq!(config.selected_field(), Field::AgentCli);
+        config.move_up();
+        assert_eq!(config.selected_field(), Field::Notifications);
+        config.move_up();
         assert_eq!(config.selected_field(), Field::DefaultWorkspace);
         config.move_up();
         assert_eq!(config.selected_field(), Field::Theme);
+    }
+
+    #[test]
+    fn notifications_field_toggles_and_reports_its_value() {
+        let mut config = config_with_workspaces(&[]);
+        config.move_down();
+        config.move_down(); // select Notifications
+        assert_eq!(config.selected_field(), Field::Notifications);
+        // On by default.
+        assert_eq!(config.value_of(Field::Notifications), "On");
+        assert!(config.cycle_selected(true));
+        assert_eq!(config.value_of(Field::Notifications), "Off");
+        assert!(!config.settings().notifications_enabled);
+        // Toggling backward also just flips it back on.
+        assert!(config.cycle_selected(false));
+        assert_eq!(config.value_of(Field::Notifications), "On");
+    }
+
+    #[test]
+    fn agent_cli_field_cycles_between_claude_and_gemini() {
+        let mut config = config_with_workspaces(&[]);
+        config.move_down();
+        config.move_down();
+        config.move_down(); // select Agent CLI
+        assert_eq!(config.selected_field(), Field::AgentCli);
+        // Claude by default.
+        assert_eq!(config.value_of(Field::AgentCli), "Claude");
+        assert!(config.cycle_selected(true));
+        assert_eq!(config.value_of(Field::AgentCli), "Gemini");
+        // Wraps back to Claude.
+        assert!(config.cycle_selected(true));
+        assert_eq!(config.value_of(Field::AgentCli), "Claude");
+        // And cycles backward too.
+        assert!(config.cycle_selected(false));
+        assert_eq!(config.value_of(Field::AgentCli), "Gemini");
     }
 
     #[test]

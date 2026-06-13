@@ -96,6 +96,18 @@ pub fn clone(url: &str, dest: &Path, branch: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+/// Return `true` if `path` is inside a git working tree.
+///
+/// Used to decide whether an existing directory registered as a workspace can
+/// have its worktree state synced; a plain directory simply skips the sync.
+pub fn is_repository(path: &Path) -> bool {
+    git_capture(path, &["rev-parse", "--is-inside-work-tree"])
+        .ok()
+        .flatten()
+        .as_deref()
+        == Some("true")
+}
+
 /// Resolve the absolute path of the repository's primary (main) worktree.
 ///
 /// This is the directory under which `.usagi/` should live, regardless of which
@@ -438,5 +450,18 @@ mod tests {
     fn short_hash_takes_first_seven_chars() {
         assert_eq!(short_hash("0123456789abcdef"), "0123456");
         assert_eq!(short_hash("abc"), "abc");
+    }
+
+    #[test]
+    fn is_repository_detects_git_and_plain_dirs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        init_repo(&repo);
+        assert!(is_repository(&repo));
+
+        let plain = tmp.path().join("plain");
+        std::fs::create_dir_all(&plain).unwrap();
+        assert!(!is_repository(&plain));
     }
 }

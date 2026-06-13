@@ -57,6 +57,44 @@ pub fn dim_line(width: usize, text: &str) -> String {
     style(centered(width, text)).dim().to_string()
 }
 
+/// An on/off toggle, rendering the active state brightly and the inactive one
+/// dimmed: e.g. `On · off` when on, `on · Off` when off.
+///
+/// A shared rendering primitive for boolean settings — keeps every toggle
+/// looking the same wherever it is used.
+pub fn toggle(on: bool) -> String {
+    let on_label = if on {
+        style("On").green().bold().to_string()
+    } else {
+        style("on").dim().to_string()
+    };
+    let off_label = if on {
+        style("off").dim().to_string()
+    } else {
+        style("Off").red().bold().to_string()
+    };
+    format!("{on_label} · {off_label}")
+}
+
+/// An inline single-choice selector: each option is shown, with the selected
+/// one bracketed and highlighted and the rest dimmed — e.g. `[Claude]  Gemini`.
+///
+/// A shared rendering primitive for enum settings (theme, agent CLI, …).
+pub fn select(options: &[&str], selected: usize) -> String {
+    options
+        .iter()
+        .enumerate()
+        .map(|(i, option)| {
+            if i == selected {
+                style(format!("[{option}]")).cyan().bold().to_string()
+            } else {
+                style(format!(" {option} ")).dim().to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -99,5 +137,27 @@ mod tests {
     #[test]
     fn dim_line_contains_the_text() {
         assert!(dim_line(80, "hint").contains("hint"));
+    }
+
+    #[test]
+    fn toggle_shows_both_states_in_either_position() {
+        let on = toggle(true);
+        assert!(on.contains("On"));
+        assert!(on.contains("off"));
+        let off = toggle(false);
+        assert!(off.contains("on"));
+        assert!(off.contains("Off"));
+    }
+
+    #[test]
+    fn select_brackets_only_the_selected_option() {
+        let rendered = select(&["Claude", "Gemini"], 0);
+        assert!(rendered.contains("[Claude]"));
+        assert!(rendered.contains("Gemini"));
+        assert!(!rendered.contains("[Gemini]"));
+
+        let rendered = select(&["Claude", "Gemini"], 1);
+        assert!(rendered.contains("[Gemini]"));
+        assert!(!rendered.contains("[Claude]"));
     }
 }

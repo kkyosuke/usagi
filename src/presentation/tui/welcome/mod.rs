@@ -5,6 +5,7 @@ pub mod ui;
 use anyhow::Result;
 use console::Term;
 
+use crate::domain::workspace::Workspace;
 use crate::infrastructure::storage::Storage;
 use crate::presentation::tui::config;
 use crate::presentation::tui::new;
@@ -31,14 +32,19 @@ pub fn run() -> Result<()> {
     let mut reader = TermKeyReader::new(term.clone());
     let mut open_open = |t: &Term| open::run(t);
     let mut open_new = |t: &Term| new::run(t, &default_location);
-    let mut create_project = |form: &NewProject| {
-        project::create(
-            &storage,
-            &form.url,
-            &form.location,
-            &form.directory,
-            form.branch.as_deref(),
-        )
+    let mut create_project = |form: &NewProject| -> Result<Workspace> {
+        match form {
+            NewProject::Clone(spec) => project::create(
+                &storage,
+                &spec.url,
+                &spec.location,
+                &spec.directory,
+                spec.branch.as_deref(),
+            ),
+            NewProject::Existing(spec) => {
+                project::register_existing(&storage, &spec.path, &spec.name)
+            }
+        }
     };
     let mut open_config = |t: &Term| config::run(t);
     event::event_loop(
