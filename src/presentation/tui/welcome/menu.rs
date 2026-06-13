@@ -11,11 +11,11 @@ pub enum Action {
     OpenOpen,
     /// Open the New Project screen.
     OpenNew,
-    /// Leave the startup screen.
+    /// Leave the welcome screen.
     Quit,
 }
 
-/// Mutable state of the startup-screen menu, independent of any terminal I/O.
+/// Mutable state of the welcome-screen menu, independent of any terminal I/O.
 pub struct Menu {
     items: Vec<MenuItem>,
     selected_index: usize,
