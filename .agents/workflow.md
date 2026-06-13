@@ -1,7 +1,7 @@
 # 開発ワークフロー
 
 AI エージェントが `usagi` で作業する際の標準手順。**新規作業**と**追加修正**で手順が異なる。
-規約の詳細は [conventions.md](./conventions.md) を参照。
+コーディング・コミット・PR の規約は [document/conventions.md](../document/conventions.md) を参照。
 
 ## 新規作業（新しいタスクを始めるとき）
 

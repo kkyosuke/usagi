@@ -1,6 +1,7 @@
-# コーディング・コミット・PR 規約
+# 開発規約
 
-`usagi` の開発で守るべき規約。手順は [workflow.md](./workflow.md) を参照。
+`usagi` の開発で守るべき規約。**開発者・AI エージェントの双方**が従う。
+プロジェクト全体像は [overview.md](./overview.md) を参照。
 
 ## アーキテクチャ
 
@@ -44,6 +45,11 @@ presentation ──> usecase ──> domain
 - type: `feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert`
 - 例: `feat: doctor コマンドを追加` / `fix(cli): 引数解析のエラーを修正`
 - commit-msg フックでチェックされる。
+
+## プルリクエスト
+
+- タイトルは Conventional Commits 形式に合わせる。
+- 本文には「目的 / 変更内容 / テスト・確認方法」を含める。
 
 ## 品質チェック（コミット・push 前に必須）
 
