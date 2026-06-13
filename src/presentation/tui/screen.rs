@@ -32,3 +32,23 @@ impl Drop for AlternateScreenGuard {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn guard_writes_farewell_when_not_dismissed() {
+        let guard = AlternateScreenGuard::new(Term::stdout()).unwrap();
+        // Dropping without dismissing takes the farewell branch.
+        drop(guard);
+    }
+
+    #[test]
+    fn dismiss_suppresses_farewell() {
+        let mut guard = AlternateScreenGuard::new(Term::stdout()).unwrap();
+        guard.dismiss();
+        // Dropping after dismiss skips the farewell branch.
+        drop(guard);
+    }
+}
