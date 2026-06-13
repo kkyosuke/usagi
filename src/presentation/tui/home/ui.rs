@@ -23,19 +23,12 @@ pub fn normalize_size(height: usize, width: usize) -> (usize, usize) {
     (height, width)
 }
 
-/// Builds the ASCII-art mascot lines, centred for the given terminal size.
-fn rabbit_lines(height: usize, width: usize) -> Vec<String> {
+/// Builds the ASCII-art mascot lines plus title, centred horizontally.
+///
+/// Vertical placement is handled by [`render_frame`], which centres the whole
+/// body in the terminal, so this returns no leading padding.
+fn rabbit_lines(width: usize) -> Vec<String> {
     let mut lines = Vec::new();
-
-    let total_height = RABBIT_LINES.len() + 3;
-    let top_padding = if height > total_height + 10 {
-        (height - total_height) / 4
-    } else {
-        1
-    };
-    for _ in 0..top_padding {
-        lines.push(String::new());
-    }
 
     let rabbit_width = RABBIT_LINES
         .iter()
@@ -99,23 +92,29 @@ fn menu_lines(width: usize, items: &[MenuItem], selected_index: usize) -> Vec<St
     lines
 }
 
-/// Builds the transient notice line under the menu, if any.
+/// Builds the transient notice line under the menu.
+///
+/// Always returns exactly one line — a blank placeholder when there is no
+/// notice — so showing or clearing a notice never shifts the surrounding
+/// layout.
 fn notice_lines(width: usize, notice: Option<&str>) -> Vec<String> {
     let Some(notice) = notice else {
-        return Vec::new();
+        return vec![String::new()];
     };
     let padding = " ".repeat(centered_padding(width, notice.chars().count()));
     vec![format!("{padding}{}", style(notice).yellow())]
 }
 
 /// Builds the status footer shown at the bottom of the startup screen.
+///
+/// Returns the footer text only; [`render_frame`] pins it to the bottom edge.
 fn footer_lines(width: usize) -> Vec<String> {
     let footer = format!(
         " v{} | ↑↓: move / Enter: select / q: quit",
         env!("CARGO_PKG_VERSION")
     );
     let padding = " ".repeat(centered_padding(width, footer.chars().count()));
-    vec![String::new(), format!("{padding}{}", style(footer).dim())]
+    vec![format!("{padding}{}", style(footer).dim())]
 }
 
 /// Builds the full startup-screen frame for a raw terminal size.
@@ -127,10 +126,30 @@ pub fn render_frame(
     notice: Option<&str>,
 ) -> Vec<String> {
     let (height, width) = normalize_size(raw_height, raw_width);
-    let mut lines = rabbit_lines(height, width);
-    lines.extend(menu_lines(width, items, selected_index));
-    lines.extend(notice_lines(width, notice));
-    lines.extend(footer_lines(width));
+
+    // The body (mascot, title, menu and notice slot) is centred vertically;
+    // the footer is pinned to the bottom edge of the frame.
+    let mut body = rabbit_lines(width);
+    body.extend(menu_lines(width, items, selected_index));
+    body.extend(notice_lines(width, notice));
+    let footer = footer_lines(width);
+
+    let mut lines = Vec::with_capacity(height);
+
+    // Centre the body in the space above the footer.
+    let top_padding = height.saturating_sub(body.len() + footer.len()) / 2;
+    for _ in 0..top_padding {
+        lines.push(String::new());
+    }
+    lines.extend(body);
+
+    // Push the footer down to the bottom row of the frame.
+    let bottom_padding = height.saturating_sub(lines.len() + footer.len());
+    for _ in 0..bottom_padding {
+        lines.push(String::new());
+    }
+    lines.extend(footer);
+
     lines
 }
 
@@ -173,18 +192,12 @@ mod tests {
     }
 
     #[test]
-    fn rabbit_lines_uses_quarter_padding_in_tall_terminals() {
-        // total_height = 6, threshold = 16, so a height of 40 takes the tall branch.
-        let lines = rabbit_lines(40, 80);
-        // (40 - 6) / 4 == 8 leading blank lines.
-        assert_eq!(lines.iter().take_while(|l| l.is_empty()).count(), 8);
+    fn rabbit_lines_has_no_leading_padding() {
+        // Vertical placement is handled by render_frame, so the mascot block
+        // itself starts immediately with the first rabbit line.
+        let lines = rabbit_lines(80);
+        assert!(!lines[0].is_empty());
         assert!(lines.iter().any(|l| l.contains("USAGI")));
-    }
-
-    #[test]
-    fn rabbit_lines_uses_single_padding_in_short_terminals() {
-        let lines = rabbit_lines(10, 80);
-        assert_eq!(lines.iter().take_while(|l| l.is_empty()).count(), 1);
     }
 
     #[test]
@@ -198,8 +211,22 @@ mod tests {
     }
 
     #[test]
-    fn notice_lines_empty_when_absent() {
-        assert!(notice_lines(80, None).is_empty());
+    fn notice_lines_reserve_a_blank_slot_when_absent() {
+        // A reserved blank line keeps the layout from shifting when a notice
+        // appears or is cleared.
+        let lines = notice_lines(80, None);
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].is_empty());
+    }
+
+    #[test]
+    fn notice_slot_keeps_layout_stable_across_toggling() {
+        let items = sample_items();
+        let without = render_frame(24, 80, &items, 0, None);
+        let with = render_frame(24, 80, &items, 0, Some("Config is coming soon 🐰"));
+        // The frame height is identical whether or not a notice is shown, so
+        // the menu and footer never move.
+        assert_eq!(without.len(), with.len());
     }
 
     #[test]
@@ -224,5 +251,33 @@ mod tests {
         assert!(joined.contains("Open"));
         assert!(joined.contains("coming soon"));
         assert!(joined.contains(env!("CARGO_PKG_VERSION")));
+    }
+
+    #[test]
+    fn render_frame_centers_body_and_pins_footer() {
+        let items = sample_items();
+        let height = 40;
+        let frame = render_frame(height, 80, &items, 0, None);
+
+        // The frame fills exactly the terminal height...
+        assert_eq!(frame.len(), height);
+        // ...with the footer on the very last line...
+        assert!(frame.last().unwrap().contains(env!("CARGO_PKG_VERSION")));
+        // ...and leading blank lines that vertically centre the body.
+        let top_padding = frame.iter().take_while(|l| l.is_empty()).count();
+        assert!(top_padding > 0);
+        assert!(!frame[top_padding].is_empty());
+        assert!(frame.iter().any(|l| l.contains("USAGI")));
+    }
+
+    #[test]
+    fn render_frame_does_not_overflow_a_short_terminal() {
+        let items = sample_items();
+        // A terminal too short for the body: no centring padding is added, and
+        // the body is never truncated.
+        let frame = render_frame(3, 80, &items, 0, None);
+        assert!(!frame[0].is_empty());
+        assert!(frame.iter().any(|l| l.contains("USAGI")));
+        assert!(frame.last().unwrap().contains(env!("CARGO_PKG_VERSION")));
     }
 }
