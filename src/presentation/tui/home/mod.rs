@@ -3,13 +3,14 @@ pub mod ui;
 use anyhow::Result;
 use console::{Key, Term};
 
+use crate::presentation::tui::new;
 use crate::presentation::tui::screen::AlternateScreenGuard;
 use ui::MenuItem;
 
-/// Displays the startup screen and waits for the user to quit.
+/// Displays the startup screen and dispatches the selected menu action.
 ///
-/// Menu actions other than Quit are placeholders for now and show a
-/// "coming soon" notice when selected.
+/// `New` opens the New Project screen; the remaining non-Quit actions are
+/// placeholders for now and show a "coming soon" notice when selected.
 pub fn run() -> Result<()> {
     let menu_items = [
         MenuItem {
@@ -54,31 +55,47 @@ pub fn run() -> Result<()> {
             }
         };
 
-        match key {
+        // A key may select a menu item to activate (by Enter or by shortcut).
+        let activated = match key {
             Key::ArrowUp | Key::Char('k') => {
                 selected_index = selected_index
                     .checked_sub(1)
                     .unwrap_or(menu_items.len() - 1);
                 notice = None;
+                None
             }
             Key::ArrowDown | Key::Char('j') => {
                 selected_index = (selected_index + 1) % menu_items.len();
                 notice = None;
+                None
             }
-            Key::Enter => {
-                let item = &menu_items[selected_index];
-                if item.key == 'q' {
-                    return Ok(());
-                }
-                notice = Some(format!("{} is coming soon 🐰", item.label));
-            }
+            Key::Enter => Some(&menu_items[selected_index]),
             Key::Char('q') | Key::Escape | Key::CtrlC => return Ok(()),
-            Key::Char(c) => {
-                if let Some(item) = menu_items.iter().find(|item| item.key == c) {
-                    notice = Some(format!("{} is coming soon 🐰", item.label));
+            Key::Char(c) => menu_items.iter().find(|item| item.key == c),
+            _ => None,
+        };
+
+        let Some(item) = activated else {
+            continue;
+        };
+        match item.key {
+            'q' => return Ok(()),
+            'e' => match new::run(&term) {
+                Ok(new::Outcome::Back) => notice = None,
+                Ok(new::Outcome::Quit) => return Ok(()),
+                Ok(new::Outcome::Submitted(project)) => {
+                    notice = Some(format!(
+                        "Ready to init \"{}\" from {} 🐰",
+                        project.directory,
+                        project.url.as_str()
+                    ));
                 }
-            }
-            _ => {}
+                Err(e) => {
+                    guard.dismiss();
+                    return Err(e);
+                }
+            },
+            _ => notice = Some(format!("{} is coming soon 🐰", item.label)),
         }
     }
 }
