@@ -124,7 +124,7 @@ pub fn event_loop(
 mod tests {
     use super::*;
     use crate::domain::repository::RepoUrl;
-    use crate::presentation::tui::new::state::{CloneSpec, NewProject};
+    use crate::presentation::tui::new::state::{CloneSpec, ExistingSpec, NewProject};
     use console::Key;
     use std::collections::VecDeque;
 
@@ -170,6 +170,14 @@ mod tests {
             directory: "repo".to_string(),
             branch: None,
         })))
+    }
+    fn new_submitted_existing(_t: &Term) -> Result<new::Outcome> {
+        Ok(new::Outcome::Submitted(NewProject::Existing(
+            ExistingSpec {
+                path: std::path::PathBuf::from("/base/existing"),
+                name: "existing".to_string(),
+            },
+        )))
     }
     fn new_err(_t: &Term) -> Result<new::Outcome> {
         Err(anyhow::anyhow!("new screen blew up"))
@@ -353,6 +361,23 @@ mod tests {
             &mut reader,
             &mut open_screen_back,
             &mut new_submitted,
+            &mut create_ok,
+            &mut config_back
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn new_screen_submitted_existing_creates_and_sets_a_notice_then_quits() {
+        let term = Term::stdout();
+        let mut reader = ScriptedReader::new(vec![Ok(Key::Char('e')), Ok(Key::Char('q'))]);
+        // Submitting an existing-directory project routes through create_ok's
+        // Existing arm and yields an "Opened" notice.
+        assert!(event_loop(
+            &term,
+            &mut reader,
+            &mut open_screen_back,
+            &mut new_submitted_existing,
             &mut create_ok,
             &mut config_back
         )

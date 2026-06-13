@@ -487,13 +487,14 @@ mod tests {
         state.set_location("/base");
         focus_to(&mut state, Field::Url);
         type_str(&mut state, "git@github.com:owner/repo.git");
-        let NewProject::Clone(spec) = state.validate().unwrap() else {
-            panic!("expected a clone spec");
-        };
-        assert_eq!(spec.url.as_str(), "git@github.com:owner/repo.git");
-        assert_eq!(spec.location, PathBuf::from("/base"));
-        assert_eq!(spec.directory, "repo");
-        assert_eq!(spec.branch, None);
+        assert!(matches!(
+            state.validate().unwrap(),
+            NewProject::Clone(spec)
+                if spec.url.as_str() == "git@github.com:owner/repo.git"
+                    && spec.location == std::path::Path::new("/base")
+                    && spec.directory == "repo"
+                    && spec.branch.is_none()
+        ));
     }
 
     #[test]
@@ -510,11 +511,11 @@ mod tests {
         type_str(&mut state, "my-dir");
         focus_to(&mut state, Field::Branch);
         type_str(&mut state, "develop");
-        let NewProject::Clone(spec) = state.validate().unwrap() else {
-            panic!("expected a clone spec");
-        };
-        assert_eq!(spec.directory, "my-dir");
-        assert_eq!(spec.branch.as_deref(), Some("develop"));
+        assert!(matches!(
+            state.validate().unwrap(),
+            NewProject::Clone(spec)
+                if spec.directory == "my-dir" && spec.branch.as_deref() == Some("develop")
+        ));
     }
 
     #[test]
@@ -529,10 +530,10 @@ mod tests {
             state.backspace();
         }
         assert_eq!(state.directory(), "");
-        let NewProject::Clone(spec) = state.validate().unwrap() else {
-            panic!("expected a clone spec");
-        };
-        assert_eq!(spec.directory, "repo");
+        assert!(matches!(
+            state.validate().unwrap(),
+            NewProject::Clone(spec) if spec.directory == "repo"
+        ));
     }
 
     #[test]
@@ -557,11 +558,11 @@ mod tests {
         state.toggle_mode();
         focus_to(&mut state, Field::Path);
         type_str(&mut state, "/home/me/my-app");
-        let NewProject::Existing(spec) = state.validate().unwrap() else {
-            panic!("expected an existing spec");
-        };
-        assert_eq!(spec.path, PathBuf::from("/home/me/my-app"));
-        assert_eq!(spec.name, "my-app");
+        assert!(matches!(
+            state.validate().unwrap(),
+            NewProject::Existing(spec)
+                if spec.path == std::path::Path::new("/home/me/my-app") && spec.name == "my-app"
+        ));
     }
 
     #[test]
@@ -575,10 +576,10 @@ mod tests {
             state.backspace();
         }
         type_str(&mut state, "custom");
-        let NewProject::Existing(spec) = state.validate().unwrap() else {
-            panic!("expected an existing spec");
-        };
-        assert_eq!(spec.name, "custom");
+        assert!(matches!(
+            state.validate().unwrap(),
+            NewProject::Existing(spec) if spec.name == "custom"
+        ));
     }
 
     #[test]
@@ -587,6 +588,51 @@ mod tests {
         state.toggle_mode();
         let err = state.validate().unwrap_err();
         assert!(err.contains("directory"));
+    }
+
+    #[test]
+    fn validate_existing_rejects_a_path_with_no_final_segment() {
+        let mut state = FormState::new();
+        state.toggle_mode();
+        focus_to(&mut state, Field::Path);
+        // The root has no final segment, so no name can be derived.
+        type_str(&mut state, "/");
+        let err = state.validate().unwrap_err();
+        assert!(err.contains("name"));
+    }
+
+    #[test]
+    fn backspace_on_url_re_derives_the_directory() {
+        let mut state = FormState::new();
+        focus_to(&mut state, Field::Url);
+        type_str(&mut state, "https://github.com/owner/repos");
+        assert_eq!(state.directory(), "repos");
+        // Deleting the trailing character re-derives the directory.
+        state.backspace();
+        assert_eq!(state.url(), "https://github.com/owner/repo");
+        assert_eq!(state.directory(), "repo");
+    }
+
+    #[test]
+    fn backspace_edits_the_branch_field() {
+        let mut state = FormState::new();
+        focus_to(&mut state, Field::Branch);
+        type_str(&mut state, "dev");
+        state.backspace();
+        assert_eq!(state.branch(), "de");
+    }
+
+    #[test]
+    fn backspace_on_path_re_derives_the_name() {
+        let mut state = FormState::new();
+        state.toggle_mode();
+        focus_to(&mut state, Field::Path);
+        type_str(&mut state, "/home/me/apps");
+        assert_eq!(state.name(), "apps");
+        // Deleting the trailing character re-derives the name.
+        state.backspace();
+        assert_eq!(state.path(), "/home/me/app");
+        assert_eq!(state.name(), "app");
     }
 
     #[test]
