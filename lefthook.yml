@@ -30,19 +30,10 @@ pre-commit:
       run: cargo fmt -- {staged_files}
       stage_fixed: true
     coverage:
-      # Coverage CI (.github/workflows/coverage.yml) と同じ条件で 100% を強制する。
-      # 対象から外す端末 I/O 専用の薄いラッパ（テスト不能なため計測しない）。
+      # 除外条件・閾値は SSoT (scripts/coverage.sh) を Coverage CI と共有する。
       run: |
-        ignore='(src/main\.rs|cli/hop\.rs|tui/welcome/mod\.rs|tui/home/mod\.rs|tui/new/mod\.rs|tui/open/mod\.rs|tui/config/mod\.rs)'
-        if ! command -v cargo-llvm-cov >/dev/null 2>&1; then
-          echo "✗ cargo-llvm-cov が見つかりません" >&2
-          echo "  インストール: cargo install cargo-llvm-cov" >&2
-          exit 1
-        fi
-        cargo llvm-cov --workspace \
-          --ignore-filename-regex "$ignore" \
-          --fail-under-lines 100 \
-          --fail-under-functions 100
+        . ./scripts/coverage.sh
+        coverage_enforce
 
 commit-msg:
   commands:
