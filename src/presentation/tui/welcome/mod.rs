@@ -8,6 +8,7 @@ use anyhow::Result;
 use console::{Key, Term};
 
 use crate::infrastructure::storage::Storage;
+use crate::presentation::tui::config;
 use crate::presentation::tui::new;
 use crate::presentation::tui::new::state::NewProject;
 use crate::presentation::tui::open;
@@ -29,9 +30,9 @@ impl KeyReader for TermKeyReader {
 ///
 /// `Open` opens the project selection screen and `New` opens the New Project
 /// screen; submitting the New form clones the repository, registers it as a
-/// workspace, and opens it. This function wires the real terminal, the real
-/// sub-screens, and the project use case to the testable event loop in
-/// [`event`].
+/// workspace, and opens it. `Config` opens the configuration screen. This
+/// function wires the real terminal, the real sub-screens, and the project use
+/// case to the testable event loop in [`event`].
 pub fn run() -> Result<()> {
     let term = Term::stdout();
     let storage = Storage::open_default()?;
@@ -52,11 +53,13 @@ pub fn run() -> Result<()> {
             form.branch.as_deref(),
         )
     };
+    let mut open_config = |t: &Term| config::run(t);
     event::event_loop(
         &term,
         &mut reader,
         &mut open_open,
         &mut open_new,
         &mut create_project,
+        &mut open_config,
     )
 }
