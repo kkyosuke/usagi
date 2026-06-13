@@ -1,0 +1,75 @@
+# 開発ワークフロー
+
+AI エージェントが `usagi` で作業する際の標準手順。**新規作業**と**追加修正**で手順が異なる。
+規約の詳細は [conventions.md](./conventions.md) を参照。
+
+## 新規作業（新しいタスクを始めるとき）
+
+### 1. 開始時に worktree を作成する
+
+タスクごとに git worktree を切って隔離環境で作業する。`main` を直接触らない。
+
+```bash
+git worktree add .claude/worktrees/<name> -b <type>/<説明>
+cd .claude/worktrees/<name>
+```
+
+- ブランチ名は `<type>/<説明>` 形式（例: `feat/add-doctor-command`）。type は `feat|fix|docs|refactor|perf|test|build|ci|chore`。
+- worktree のディレクトリ名はタスク内容がわかる短い名前にする。
+
+### 2. 開発する
+
+- クリーンアーキテクチャ（`domain → usecase → infrastructure ← presentation`）の依存方向を守る。
+- 実装と同時にテストを追加・更新する（カバレッジ 100% を維持。CI でチェックされる）。
+- コミット前に必ず以下を通す:
+
+```bash
+cargo fmt
+cargo clippy --all-targets -- -D warnings
+cargo test
+```
+
+- コミットは [Conventional Commits](https://www.conventionalcommits.org/ja/) 形式（例: `feat: doctor コマンドを追加`）。
+
+### 3. ドキュメントを更新する
+
+実装内容に合わせて `document/` 配下を更新する。仕様・画面・データ構造に変更があれば対応するファイルを更新する。
+
+- `document/overview.md` — プロジェクト概要、コマンド体系、アーキテクチャ
+- `document/screen-design.md` — TUI 画面構成
+- `document/data-storage.md` — `state.json` / `history.json` / グローバルレジストリなどの永続化仕様
+
+ユーザー向けの変更があれば `README.md` も更新する。
+
+### 4. PR を作成する
+
+```bash
+git push -u origin <branch>
+gh pr create --title "<type>: <説明>" --body "<概要>"
+```
+
+- PR タイトルも Conventional Commits 形式に合わせる。
+- 本文には「目的 / 変更内容 / テスト・確認方法」を含める。
+
+---
+
+## 追加修正（既存 PR に変更を重ねるとき）
+
+すでに PR を出しているタスクへ追加の修正を入れる場合は、worktree とブランチをそのまま使い、以下を回す。
+
+### 1. 開発する
+
+新規作業と同じ。`cargo fmt` / `clippy` / `test` を通してからコミットする。
+
+### 2. ドキュメントを更新する
+
+追加した変更に合わせて `document/` および必要なら `README.md` を更新する。
+
+### 3. PR のタイトル・概要を更新する
+
+変更によって PR のスコープが変わった場合は、タイトルと本文を実態に合わせて更新する。
+
+```bash
+git push
+gh pr edit <number> --title "<新しいタイトル>" --body "<更新した概要>"
+```
