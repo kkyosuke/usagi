@@ -220,31 +220,28 @@ mod tests {
         run(dir, &["commit", "-q", "-m", "init"]);
     }
 
-    /// A repo cloned from a bare remote, so `origin/*` refs and an upstream exist.
+    /// A repo with a remote, so `origin/*` refs and an upstream exist.
+    ///
+    /// Built without `git clone` so the result does not depend on the host's
+    /// `init.defaultBranch` (which differs between developer machines and CI):
+    /// the work repo is created explicitly on `main`, then pushed with `-u` to
+    /// a bare remote to establish the upstream and `origin/main` ref.
     fn repo_with_remote() -> (tempfile::TempDir, std::path::PathBuf) {
         let tmp = tempfile::tempdir().unwrap();
         let bare = tmp.path().join("remote.git");
         let work = tmp.path().join("work");
+
         run(
             tmp.path(),
             &["init", "-q", "--bare", bare.to_str().unwrap()],
         );
 
-        let seed = tmp.path().join("seed");
-        std::fs::create_dir_all(&seed).unwrap();
-        init_repo(&seed);
-        run(&seed, &["remote", "add", "origin", bare.to_str().unwrap()]);
-        run(&seed, &["push", "-q", "-u", "origin", "main"]);
-
-        run(
-            tmp.path(),
-            &[
-                "clone",
-                "-q",
-                bare.to_str().unwrap(),
-                work.to_str().unwrap(),
-            ],
-        );
+        std::fs::create_dir_all(&work).unwrap();
+        init_repo(&work);
+        run(&work, &["remote", "add", "origin", bare.to_str().unwrap()]);
+        // `-u` records origin/main as the upstream and creates the remote ref.
+        run(&work, &["push", "-q", "-u", "origin", "main"]);
+        // Point refs/remotes/origin/HEAD at origin/main explicitly.
         run(&work, &["remote", "set-head", "origin", "main"]);
         (tmp, work)
     }
