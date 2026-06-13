@@ -1,1 +1,1 @@
-pub mod project;
+// Business entities (no external dependencies) live here.
