@@ -1,0 +1,58 @@
+# Git hooks 管理 (https://lefthook.dev)
+#
+# セットアップ:
+#   brew install lefthook   # または: npm i -g lefthook / go install github.com/evilmartians/lefthook@latest
+#   lefthook install
+#
+# ルール:
+#   - ブランチ名: main または <type>/<説明>  (type: feat|fix|docs|refactor|perf|test|build|ci|chore)
+#   - コミットメッセージ: Conventional Commits (例: feat: 〇〇を追加 / fix(cli): 〇〇を修正)
+#   - コミット時に staged な .rs ファイルを自動フォーマット
+#   - push 時に clippy とテストを実行 (CI と同条件)
+
+pre-commit:
+  parallel: true
+  commands:
+    branch-name:
+      run: |
+        branch=$(git symbolic-ref --short HEAD 2>/dev/null || echo detached)
+        pattern='^(main|(feat|fix|docs|refactor|perf|test|build|ci|chore)/[a-z0-9][a-z0-9._/-]*)$'
+        if ! echo "$branch" | grep -qE "$pattern"; then
+          echo "✗ ブランチ名 '$branch' が命名規則に従っていません" >&2
+          echo "  形式: <type>/<説明>  (type: feat|fix|docs|refactor|perf|test|build|ci|chore)" >&2
+          echo "  例:   feat/add-doctor-command" >&2
+          echo "  変更: git branch -m <新しい名前>" >&2
+          exit 1
+        fi
+    fmt:
+      glob: "*.rs"
+      run: cargo fmt -- {staged_files}
+      stage_fixed: true
+
+commit-msg:
+  commands:
+    lint-message:
+      run: |
+        subject=$(head -n1 {1})
+        # マージコミット・revert・fixup はそのまま許可
+        if echo "$subject" | grep -qE '^(Merge |Revert |fixup! |squash! )'; then
+          exit 0
+        fi
+        pattern='^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\([a-z0-9_-]+\))?!?: .+'
+        if ! echo "$subject" | grep -qE "$pattern"; then
+          echo "✗ コミットメッセージが Conventional Commits 形式ではありません" >&2
+          echo "  形式: <type>[(scope)][!]: <説明>" >&2
+          echo "  type: feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert" >&2
+          echo "  例:   feat: doctor コマンドを追加" >&2
+          echo "        fix(cli): 引数解析のエラーを修正" >&2
+          echo "  実際: $subject" >&2
+          exit 1
+        fi
+
+pre-push:
+  parallel: true
+  commands:
+    clippy:
+      run: cargo clippy --all-targets -- -D warnings
+    test:
+      run: cargo test

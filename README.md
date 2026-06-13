@@ -48,6 +48,26 @@ cargo fmt            # フォーマット
 cargo clippy         # Lint
 ```
 
+### Git Hooks
+
+[lefthook](https://lefthook.dev) で Git hooks を管理しています。クローン後に一度だけ実行してください:
+
+```bash
+brew install lefthook   # macOS 以外: npm i -g lefthook など
+lefthook install
+```
+
+| フック | 内容 |
+| --- | --- |
+| pre-commit | ブランチ名チェック / staged な `.rs` を `cargo fmt` で自動フォーマット |
+| commit-msg | [Conventional Commits](https://www.conventionalcommits.org/ja/) 形式のチェック |
+| pre-push | `cargo clippy -- -D warnings` / `cargo test`（CI と同条件） |
+
+- ブランチ名: `<type>/<説明>`（例: `feat/add-doctor-command`）
+- コミットメッセージ: `<type>[(scope)][!]: <説明>`（例: `feat: doctor コマンドを追加`）
+- type: `feat` `fix` `docs` `style` `refactor` `perf` `test` `build` `ci` `chore` `revert`
+- 緊急時のスキップ: `LEFTHOOK=0 git commit ...` または `git commit --no-verify`
+
 ## License
 
 MIT
