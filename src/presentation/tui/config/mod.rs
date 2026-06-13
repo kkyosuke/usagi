@@ -28,7 +28,10 @@ struct TermKeyReader {
 
 impl KeyReader for TermKeyReader {
     fn read_key(&mut self) -> io::Result<Key> {
-        self.term.read_key()
+        // `read_key_raw` surfaces Ctrl+C as `Key::CtrlC` instead of raising
+        // SIGINT, so the event loop can quit gracefully and the alternate
+        // screen guard restores the terminal on the way out.
+        self.term.read_key_raw()
     }
 }
 
