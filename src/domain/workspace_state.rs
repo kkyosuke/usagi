@@ -85,6 +85,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn branch_status_as_str_and_display_match() {
+        for (status, text) in [
+            (BranchStatus::Local, "local"),
+            (BranchStatus::Pushed, "pushed"),
+            (BranchStatus::Merged, "merged"),
+        ] {
+            assert_eq!(status.as_str(), text);
+            assert_eq!(format!("{status}"), text);
+        }
+    }
+
+    #[test]
     fn branch_status_serializes_to_snake_case() {
         let json = serde_json::to_string(&BranchStatus::Merged).unwrap();
         assert_eq!(json, "\"merged\"");

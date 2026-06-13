@@ -92,26 +92,7 @@ fn classify(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::process::Command;
-
-    /// Build a git command isolated from any inherited repo-scoping env vars
-    /// (so these tests still pass when run from inside a git hook).
-    fn git(dir: &Path) -> Command {
-        let mut command = Command::new("git");
-        command.arg("-C").arg(dir);
-        for var in [
-            "GIT_DIR",
-            "GIT_WORK_TREE",
-            "GIT_INDEX_FILE",
-            "GIT_OBJECT_DIRECTORY",
-            "GIT_COMMON_DIR",
-            "GIT_PREFIX",
-            "GIT_NAMESPACE",
-        ] {
-            command.env_remove(var);
-        }
-        command
-    }
+    use crate::infrastructure::git::test_command as git;
 
     /// Initialise a throwaway git repo with one commit on `main`.
     fn init_repo(dir: &Path) {
@@ -174,5 +155,45 @@ mod tests {
         let status = classify(dir.path(), Some("feature"), "main", false, false);
         assert_eq!(status, BranchStatus::Merged);
         assert_eq!(state.default_branch, "main");
+    }
+
+    #[test]
+    fn classify_reports_pushed_for_unmerged_tracked_branch() {
+        let dir = tempfile::tempdir().unwrap();
+        init_repo(dir.path());
+        // A branch with a commit ahead of main is not merged.
+        git(dir.path())
+            .args(["checkout", "-q", "-b", "feature"])
+            .status()
+            .unwrap();
+        std::fs::write(dir.path().join("ahead"), "y").unwrap();
+        git(dir.path()).args(["add", "."]).status().unwrap();
+        git(dir.path())
+            .args(["commit", "-q", "-m", "ahead"])
+            .status()
+            .unwrap();
+
+        // has_upstream = true, not merged, not primary -> pushed.
+        assert_eq!(
+            classify(dir.path(), Some("feature"), "main", true, false),
+            BranchStatus::Pushed
+        );
+    }
+
+    #[test]
+    fn classify_handles_detached_head_and_primary() {
+        let dir = tempfile::tempdir().unwrap();
+        init_repo(dir.path());
+        // Detached HEAD (branch = None): never merged, only local/pushed.
+        assert_eq!(
+            classify(dir.path(), None, "main", false, false),
+            BranchStatus::Local
+        );
+        // The primary worktree is never classified as merged against itself,
+        // even though its tip is trivially an ancestor of the default branch.
+        assert_eq!(
+            classify(dir.path(), Some("main"), "main", false, true),
+            BranchStatus::Local
+        );
     }
 }

@@ -53,17 +53,17 @@ impl WorkspaceStore {
         let text = match fs::read_to_string(&path) {
             Ok(text) => text,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => return Err(e).with_context(|| format!("failed to read {}", path.display())),
+            Err(e) => return Err(e).context(format!("failed to read {}", path.display())),
         };
-        let file: StateFile = serde_json::from_str(&text)
-            .with_context(|| format!("failed to parse {}", path.display()))?;
+        let file: StateFile =
+            serde_json::from_str(&text).context(format!("failed to parse {}", path.display()))?;
         Ok(Some(file.state))
     }
 
     /// Persist `state` to `<repo>/.usagi/state.json`.
     pub fn save(&self, state: &WorkspaceState) -> Result<()> {
         fs::create_dir_all(&self.dir)
-            .with_context(|| format!("failed to create {}", self.dir.display()))?;
+            .context(format!("failed to create {}", self.dir.display()))?;
 
         let file = StateFile {
             version: FILE_FORMAT_VERSION,
@@ -74,8 +74,8 @@ impl WorkspaceStore {
 
         let path = self.state_path();
         let tmp = path.with_extension("json.tmp");
-        fs::write(&tmp, text).with_context(|| format!("failed to write {}", tmp.display()))?;
-        fs::rename(&tmp, &path).with_context(|| format!("failed to replace {}", path.display()))?;
+        fs::write(&tmp, text).context(format!("failed to write {}", tmp.display()))?;
+        fs::rename(&tmp, &path).context(format!("failed to replace {}", path.display()))?;
         Ok(())
     }
 }
@@ -127,5 +127,30 @@ mod tests {
 
         let text = std::fs::read_to_string(store.state_path()).unwrap();
         assert!(text.contains("\"version\": 1"));
+    }
+
+    #[test]
+    fn dir_points_at_the_usagi_subdirectory() {
+        let store = WorkspaceStore::new("/repo");
+        assert_eq!(store.dir(), Path::new("/repo/.usagi"));
+        assert_eq!(store.state_path(), PathBuf::from("/repo/.usagi/state.json"));
+    }
+
+    #[test]
+    fn load_errors_on_corrupt_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = WorkspaceStore::new(dir.path());
+        fs::create_dir_all(store.dir()).unwrap();
+        fs::write(store.state_path(), "{ not json").unwrap();
+        assert!(store.load().is_err());
+    }
+
+    #[test]
+    fn load_errors_when_state_path_is_unreadable() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = WorkspaceStore::new(dir.path());
+        // Make state.json a directory so reading it fails with a non-NotFound error.
+        fs::create_dir_all(store.state_path()).unwrap();
+        assert!(store.load().is_err());
     }
 }
