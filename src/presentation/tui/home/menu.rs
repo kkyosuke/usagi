@@ -7,6 +7,8 @@ use super::ui::MenuItem;
 pub enum Action {
     /// Stay on the screen and redraw.
     Continue,
+    /// Open the project selection screen.
+    OpenOpen,
     /// Open the New Project screen.
     OpenNew,
     /// Leave the startup screen.
@@ -87,6 +89,7 @@ impl Menu {
     fn activate(&mut self, key: char) -> Action {
         match key {
             'q' => Action::Quit,
+            'o' => Action::OpenOpen,
             'e' => Action::OpenNew,
             _ => {
                 if let Some(item) = self.items.iter().find(|item| item.key == key) {
@@ -153,11 +156,11 @@ mod tests {
     #[test]
     fn movement_clears_an_existing_notice() {
         let mut menu = Menu::new();
-        menu.handle_key(Key::Char('o')); // sets a notice
+        menu.handle_key(Key::Char('c')); // Config is a placeholder; sets a notice
         assert!(menu.notice().is_some());
         menu.handle_key(Key::ArrowDown);
         assert_eq!(menu.notice(), None);
-        menu.handle_key(Key::Char('o'));
+        menu.handle_key(Key::Char('c'));
         assert!(menu.notice().is_some());
         menu.handle_key(Key::ArrowUp);
         assert_eq!(menu.notice(), None);
@@ -166,8 +169,28 @@ mod tests {
     #[test]
     fn enter_on_placeholder_shows_coming_soon() {
         let mut menu = Menu::new();
+        menu.handle_key(Key::ArrowDown); // New
+        menu.handle_key(Key::ArrowDown); // Config (a placeholder)
+        assert_eq!(menu.selected_index(), 2);
         assert_eq!(menu.handle_key(Key::Enter), Action::Continue);
-        assert_eq!(menu.notice(), Some("Open is coming soon 🐰"));
+        assert_eq!(menu.notice(), Some("Config is coming soon 🐰"));
+    }
+
+    #[test]
+    fn enter_on_open_item_opens_open_screen() {
+        let mut menu = Menu::new();
+        // "Open" is the first item.
+        assert_eq!(menu.selected_index(), 0);
+        assert_eq!(menu.handle_key(Key::Enter), Action::OpenOpen);
+        // Opening a sub-screen does not leave a "coming soon" notice behind.
+        assert_eq!(menu.notice(), None);
+    }
+
+    #[test]
+    fn open_shortcut_opens_open_screen() {
+        let mut menu = Menu::new();
+        assert_eq!(menu.handle_key(Key::Char('o')), Action::OpenOpen);
+        assert_eq!(menu.notice(), None);
     }
 
     #[test]

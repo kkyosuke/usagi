@@ -8,6 +8,7 @@ use anyhow::Result;
 use console::{Key, Term};
 
 use crate::presentation::tui::new;
+use crate::presentation::tui::open;
 use crate::presentation::tui::screen::KeyReader;
 
 /// Reads keys from a real terminal.
@@ -23,12 +24,14 @@ impl KeyReader for TermKeyReader {
 
 /// Displays the startup screen and dispatches the selected menu action.
 ///
-/// `New` opens the New Project screen; the remaining non-Quit actions are
-/// placeholders for now and show a "coming soon" notice when selected. This
-/// function wires the real terminal and the real New screen to the testable
-/// event loop in [`event`].
+/// `Open` opens the project selection screen and `New` opens the New Project
+/// screen; the remaining non-Quit actions are placeholders for now and show a
+/// "coming soon" notice when selected. This function wires the real terminal
+/// and the real sub-screens to the testable event loop in [`event`].
 pub fn run() -> Result<()> {
     let term = Term::stdout();
     let mut reader = TermKeyReader { term: term.clone() };
-    event::event_loop(&term, &mut reader, &mut |t| new::run(t))
+    event::event_loop(&term, &mut reader, &mut |t| open::run(t), &mut |t| {
+        new::run(t)
+    })
 }
