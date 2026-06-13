@@ -36,27 +36,48 @@ jobs:
 
     - name: Generate coverage summary
       run: |
-        # ヘッダー・区切り線・TOTAL行は常に表示し、
-        # カバレッジが100%に満たないファイルのみ抽出する
-        filtered=$(cargo llvm-cov report --summary-only | awk '
-          /^Filename/ || /^-+$/ { print; next }
-          /^TOTAL/ { print; next }
+        report=$(cargo llvm-cov report --summary-only)
+        total=$(echo "$report" | awk '/^TOTAL/ { print $10 }')
+
+        # カバレッジが100%に満たないファイルをMarkdownテーブルの行に整形する。
+        # Lines のカバレッジ帯に応じて信号機の絵文字を付ける。
+        rows=$(echo "$report" | awk '
+          function emoji(c,   v) {
+            v = c; sub(/%/, "", v); v = v + 0
+            if (v >= 90) return "🟢"
+            else if (v >= 70) return "🟡"
+            else return "🔴"
+          }
+          /^Filename/ || /^-+$/ || /^TOTAL/ { next }
           {
             incomplete = 0
             for (i = 1; i <= NF; i++) {
               if ($i ~ /%$/ && $i != "100.00%") { incomplete = 1 }
             }
-            if (incomplete) print
+            if (incomplete) {
+              printf "| `%s` | %s | %s | %s %s |\n", $1, $4, $7, emoji($10), $10
+            }
           }
         ')
+
+        total_row=$(echo "$report" | awk '/^TOTAL/ { printf "| **🧮 合計** | **%s** | **%s** | **%s** |", $4, $7, $10 }')
+
         {
           echo "## 📊 Test Coverage"
           echo ""
-          echo "_カバレッジが100%に満たないファイルのみ表示しています_"
-          echo ""
-          echo '```'
-          echo "$filtered"
-          echo '```'
+          echo "> 🎯 **全体カバレッジ: ${total}**"
+          if [ -z "$rows" ]; then
+            echo ">"
+            echo "> 🎉 すべてのファイルがカバレッジ100%です！"
+          else
+            echo ">"
+            echo "> 100% に届いていないファイルだけピックアップしました 👇"
+            echo ""
+            echo "| 📄 ファイル | 🌐 Regions | 🔧 Functions | 📈 Lines |"
+            echo "| :--- | ---: | ---: | ---: |"
+            echo "$rows"
+            echo "$total_row"
+          fi
         } > coverage-comment.md
 
     - name: Comment coverage on PR
