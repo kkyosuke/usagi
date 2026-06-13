@@ -268,6 +268,31 @@ mod tests {
     }
 
     #[test]
+    fn validate_derives_directory_when_field_is_empty() {
+        let mut state = FormState::new();
+        type_str(&mut state, "https://github.com/owner/repo.git");
+        // Clear the auto-filled directory so validate falls back to the URL.
+        state.focus_next();
+        for _ in 0.."repo".len() {
+            state.backspace();
+        }
+        assert_eq!(state.directory(), "");
+        let project = state.validate().unwrap();
+        assert_eq!(project.directory, "repo");
+    }
+
+    #[test]
+    fn backspace_edits_the_branch_field() {
+        let mut state = FormState::new();
+        state.focus_next(); // Directory
+        state.focus_next(); // Branch
+        assert_eq!(state.focus(), Field::Branch);
+        type_str(&mut state, "dev");
+        state.backspace();
+        assert_eq!(state.branch(), "de");
+    }
+
+    #[test]
     fn validate_rejects_empty_url() {
         let state = FormState::new();
         assert!(state.validate().is_err());

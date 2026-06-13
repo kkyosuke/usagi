@@ -136,6 +136,15 @@ mod tests {
     }
 
     #[test]
+    fn error_messages_are_human_readable() {
+        assert_eq!(RepoUrlError::Empty.to_string(), "enter a repository URL");
+        assert_eq!(
+            RepoUrlError::Invalid.to_string(),
+            "that does not look like a repository URL"
+        );
+    }
+
+    #[test]
     fn rejects_empty_input() {
         assert_eq!(RepoUrl::parse("   "), Err(RepoUrlError::Empty));
     }

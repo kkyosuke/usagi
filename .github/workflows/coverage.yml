@@ -10,6 +10,10 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # 対象から外す端末 I/O 専用の薄いラッパ（テスト不能なため計測しない）。
+  COVERAGE_IGNORE: '(src/main\.rs|cli/hop\.rs|tui/home/mod\.rs|tui/new/mod\.rs)'
+  # 100% を要求するカバレッジ指標。
+  COVERAGE_MIN: 100
 
 jobs:
   coverage:
@@ -32,14 +36,15 @@ jobs:
       uses: taiki-e/install-action@cargo-llvm-cov
 
     - name: Run tests with coverage
-      run: cargo llvm-cov --workspace --lcov --output-path lcov.info
+      run: cargo llvm-cov --workspace --lcov --output-path lcov.info --ignore-filename-regex "$COVERAGE_IGNORE"
 
     - name: Generate coverage summary
+      if: always()
       run: |
-        report=$(cargo llvm-cov report --summary-only)
+        report=$(cargo llvm-cov report --summary-only --ignore-filename-regex "$COVERAGE_IGNORE")
         total=$(echo "$report" | awk '/^TOTAL/ { print $10 }')
 
-        # カバレッジが100%に満たないファイルをMarkdownテーブルの行に整形する。
+        # Lines カバレッジが100%に満たないファイルをMarkdownテーブルの行に整形する。
         # Lines のカバレッジ帯に応じて信号機の絵文字を付ける。
         rows=$(echo "$report" | awk '
           function emoji(c,   v) {
@@ -50,11 +55,7 @@ jobs:
           }
           /^Filename/ || /^-+$/ || /^TOTAL/ { next }
           {
-            incomplete = 0
-            for (i = 1; i <= NF; i++) {
-              if ($i ~ /%$/ && $i != "100.00%") { incomplete = 1 }
-            }
-            if (incomplete) {
+            if ($10 != "100.00%") {
               printf "| `%s` | %s | %s | %s %s |\n", $1, $4, $7, emoji($10), $10
             }
           }
@@ -65,10 +66,10 @@ jobs:
         {
           echo "## 📊 Test Coverage"
           echo ""
-          echo "> 🎯 **全体カバレッジ: ${total}**"
+          echo "> 🎯 **全体カバレッジ (Lines): ${total}**"
           if [ -z "$rows" ]; then
             echo ">"
-            echo "> 🎉 すべてのファイルがカバレッジ100%です！"
+            echo "> 🎉 すべてのファイルが Lines カバレッジ100%です！"
           else
             echo ">"
             echo "> 100% に届いていないファイルだけピックアップしました 👇"
@@ -81,8 +82,16 @@ jobs:
         } > coverage-comment.md
 
     - name: Comment coverage on PR
+      if: always()
       uses: marocchino/sticky-pull-request-comment@v2
       with:
         header: coverage
         recreate: true
         path: coverage-comment.md
+
+    - name: Enforce 100% coverage
+      run: |
+        cargo llvm-cov report \
+          --ignore-filename-regex "$COVERAGE_IGNORE" \
+          --fail-under-lines "$COVERAGE_MIN" \
+          --fail-under-functions "$COVERAGE_MIN"

@@ -1,5 +1,15 @@
+use std::io;
+
 use anyhow::Result;
-use console::Term;
+use console::{Key, Term};
+
+/// Source of key presses driving an interactive screen.
+///
+/// Abstracting the read lets event loops be exercised without a real terminal:
+/// tests supply a scripted sequence of keys.
+pub trait KeyReader {
+    fn read_key(&mut self) -> io::Result<Key>;
+}
 
 /// RAII guard that activates the terminal alternate screen and restores it on drop.
 pub struct AlternateScreenGuard {
@@ -30,5 +40,25 @@ impl Drop for AlternateScreenGuard {
         if self.farewell {
             let _ = self.term.write_line("USAGI run away ( ^-^)ノ");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn guard_writes_farewell_when_not_dismissed() {
+        let guard = AlternateScreenGuard::new(Term::stdout()).unwrap();
+        // Dropping without dismissing takes the farewell branch.
+        drop(guard);
+    }
+
+    #[test]
+    fn dismiss_suppresses_farewell() {
+        let mut guard = AlternateScreenGuard::new(Term::stdout()).unwrap();
+        guard.dismiss();
+        // Dropping after dismiss skips the farewell branch.
+        drop(guard);
     }
 }

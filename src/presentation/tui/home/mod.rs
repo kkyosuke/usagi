@@ -1,101 +1,34 @@
+mod event;
+mod menu;
 pub mod ui;
+
+use std::io;
 
 use anyhow::Result;
 use console::{Key, Term};
 
 use crate::presentation::tui::new;
-use crate::presentation::tui::screen::AlternateScreenGuard;
-use ui::MenuItem;
+use crate::presentation::tui::screen::KeyReader;
+
+/// Reads keys from a real terminal.
+struct TermKeyReader {
+    term: Term,
+}
+
+impl KeyReader for TermKeyReader {
+    fn read_key(&mut self) -> io::Result<Key> {
+        self.term.read_key()
+    }
+}
 
 /// Displays the startup screen and dispatches the selected menu action.
 ///
 /// `New` opens the New Project screen; the remaining non-Quit actions are
-/// placeholders for now and show a "coming soon" notice when selected.
+/// placeholders for now and show a "coming soon" notice when selected. This
+/// function wires the real terminal and the real New screen to the testable
+/// event loop in [`event`].
 pub fn run() -> Result<()> {
-    let menu_items = [
-        MenuItem {
-            label: "Open",
-            key: 'o',
-        },
-        MenuItem {
-            label: "New",
-            key: 'e',
-        },
-        MenuItem {
-            label: "Config",
-            key: 'c',
-        },
-        MenuItem {
-            label: "Quit",
-            key: 'q',
-        },
-    ];
-
     let term = Term::stdout();
-    let mut guard = AlternateScreenGuard::new(term.clone())?;
-    let mut selected_index = 0;
-    let mut notice: Option<String> = None;
-
-    loop {
-        term.move_cursor_to(0, 0)?;
-        term.clear_screen()?;
-        ui::show_rabbit(&term);
-        ui::render_side_menu(&term, &menu_items, selected_index);
-        ui::render_notice(&term, notice.as_deref());
-        ui::render_footer(&term);
-
-        let key = match term.read_key() {
-            Ok(key) => key,
-            // Treat an interrupted read (e.g. Ctrl+C delivered as a signal) as quit.
-            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => return Ok(()),
-            Err(e) => {
-                // Restore the terminal without the farewell on an unexpected error.
-                guard.dismiss();
-                return Err(anyhow::Error::from(e).context("Failed to read key"));
-            }
-        };
-
-        // A key may select a menu item to activate (by Enter or by shortcut).
-        let activated = match key {
-            Key::ArrowUp | Key::Char('k') => {
-                selected_index = selected_index
-                    .checked_sub(1)
-                    .unwrap_or(menu_items.len() - 1);
-                notice = None;
-                None
-            }
-            Key::ArrowDown | Key::Char('j') => {
-                selected_index = (selected_index + 1) % menu_items.len();
-                notice = None;
-                None
-            }
-            Key::Enter => Some(&menu_items[selected_index]),
-            Key::Char('q') | Key::Escape | Key::CtrlC => return Ok(()),
-            Key::Char(c) => menu_items.iter().find(|item| item.key == c),
-            _ => None,
-        };
-
-        let Some(item) = activated else {
-            continue;
-        };
-        match item.key {
-            'q' => return Ok(()),
-            'e' => match new::run(&term) {
-                Ok(new::Outcome::Back) => notice = None,
-                Ok(new::Outcome::Quit) => return Ok(()),
-                Ok(new::Outcome::Submitted(project)) => {
-                    notice = Some(format!(
-                        "Ready to init \"{}\" from {} 🐰",
-                        project.directory,
-                        project.url.as_str()
-                    ));
-                }
-                Err(e) => {
-                    guard.dismiss();
-                    return Err(e);
-                }
-            },
-            _ => notice = Some(format!("{} is coming soon 🐰", item.label)),
-        }
-    }
+    let mut reader = TermKeyReader { term: term.clone() };
+    event::event_loop(&term, &mut reader, &mut |t| new::run(t))
 }
