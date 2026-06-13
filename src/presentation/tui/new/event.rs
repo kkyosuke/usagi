@@ -64,6 +64,13 @@ pub fn event_loop(
                 state.focus_prev();
                 notice = None;
             }
+            // Left/Right switch the creation mode from anywhere, so the user
+            // never has to focus the selector first; with only two modes either
+            // arrow simply toggles.
+            Key::ArrowLeft | Key::ArrowRight => {
+                state.toggle_mode();
+                notice = None;
+            }
             Key::Backspace => {
                 state.backspace();
                 notice = None;
@@ -128,17 +135,37 @@ mod tests {
     #[test]
     fn enter_with_valid_url_submits() {
         let term = Term::stdout();
-        let mut keys = type_keys("https://github.com/owner/repo.git");
+        // Tab off the mode selector onto the URL field before typing.
+        let mut keys = vec![Ok(Key::Tab)];
+        keys.extend(type_keys("https://github.com/owner/repo.git"));
         keys.push(Ok(Key::Enter));
         let mut reader = ScriptedReader::new(keys);
         // The pre-filled location lets validation succeed without editing it.
         let outcome = event_loop(&term, &mut reader, "/base").unwrap();
         assert!(matches!(
             &outcome,
-            Outcome::Submitted(project)
-                if project.directory == "repo"
-                    && project.url.as_str() == "https://github.com/owner/repo.git"
-                    && project.location == std::path::Path::new("/base")
+            Outcome::Submitted(NewProject::Clone(spec))
+                if spec.directory == "repo"
+                    && spec.url.as_str() == "https://github.com/owner/repo.git"
+                    && spec.location == std::path::Path::new("/base")
+        ));
+    }
+
+    #[test]
+    fn arrow_switches_to_existing_mode_and_submits_a_directory() {
+        let term = Term::stdout();
+        // Right toggles to the Existing mode, Tab focuses the Path field, then
+        // typing a directory and Enter submits it.
+        let mut keys = vec![Ok(Key::ArrowRight), Ok(Key::Tab)];
+        keys.extend(type_keys("/home/me/my-app"));
+        keys.push(Ok(Key::Enter));
+        let mut reader = ScriptedReader::new(keys);
+        let outcome = event_loop(&term, &mut reader, "/base").unwrap();
+        assert!(matches!(
+            &outcome,
+            Outcome::Submitted(NewProject::Existing(spec))
+                if spec.name == "my-app"
+                    && spec.path == std::path::Path::new("/home/me/my-app")
         ));
     }
 
