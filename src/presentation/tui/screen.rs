@@ -1,5 +1,15 @@
+use std::io;
+
 use anyhow::Result;
-use console::Term;
+use console::{Key, Term};
+
+/// Source of key presses driving an interactive screen.
+///
+/// Abstracting the read lets event loops be exercised without a real terminal:
+/// tests supply a scripted sequence of keys.
+pub trait KeyReader {
+    fn read_key(&mut self) -> io::Result<Key>;
+}
 
 /// RAII guard that activates the terminal alternate screen and restores it on drop.
 pub struct AlternateScreenGuard {

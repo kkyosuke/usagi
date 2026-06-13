@@ -11,7 +11,7 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   # 対象から外す端末 I/O 専用の薄いラッパ（テスト不能なため計測しない）。
-  COVERAGE_IGNORE: '(src/main\.rs|cli/hop\.rs|tui/home/mod\.rs)'
+  COVERAGE_IGNORE: '(src/main\.rs|cli/hop\.rs|tui/home/mod\.rs|tui/new/mod\.rs)'
   # 100% を要求するカバレッジ指標。
   COVERAGE_MIN: 100
 

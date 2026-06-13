@@ -7,6 +7,8 @@ use super::ui::MenuItem;
 pub enum Action {
     /// Stay on the screen and redraw.
     Continue,
+    /// Open the New Project screen.
+    OpenNew,
     /// Leave the startup screen.
     Quit,
 }
@@ -73,23 +75,31 @@ impl Menu {
                 self.notice = None;
                 Action::Continue
             }
-            Key::Enter => {
-                let item = &self.items[self.selected_index];
-                if item.key == 'q' {
-                    return Action::Quit;
-                }
-                self.notice = Some(format!("{} is coming soon 🐰", item.label));
-                Action::Continue
-            }
+            Key::Enter => self.activate(self.items[self.selected_index].key),
             Key::Char('q') | Key::Escape | Key::CtrlC => Action::Quit,
-            Key::Char(c) => {
-                if let Some(item) = self.items.iter().find(|item| item.key == c) {
+            Key::Char(c) if self.items.iter().any(|item| item.key == c) => self.activate(c),
+            _ => Action::Continue,
+        }
+    }
+
+    /// Activates the menu item with the given shortcut key, shared by Enter and
+    /// the direct shortcut keys.
+    fn activate(&mut self, key: char) -> Action {
+        match key {
+            'q' => Action::Quit,
+            'e' => Action::OpenNew,
+            _ => {
+                if let Some(item) = self.items.iter().find(|item| item.key == key) {
                     self.notice = Some(format!("{} is coming soon 🐰", item.label));
                 }
                 Action::Continue
             }
-            _ => Action::Continue,
         }
+    }
+
+    /// Replaces the transient notice, e.g. after returning from a sub-screen.
+    pub fn set_notice(&mut self, notice: Option<String>) {
+        self.notice = notice;
     }
 }
 
@@ -166,6 +176,32 @@ mod tests {
         menu.handle_key(Key::ArrowUp); // wrap to the last item, "Quit"
         assert_eq!(menu.selected_index(), 3);
         assert_eq!(menu.handle_key(Key::Enter), Action::Quit);
+    }
+
+    #[test]
+    fn enter_on_new_item_opens_new_screen() {
+        let mut menu = Menu::new();
+        menu.handle_key(Key::ArrowDown); // move to "New"
+        assert_eq!(menu.selected_index(), 1);
+        assert_eq!(menu.handle_key(Key::Enter), Action::OpenNew);
+        // Opening a sub-screen does not leave a "coming soon" notice behind.
+        assert_eq!(menu.notice(), None);
+    }
+
+    #[test]
+    fn new_shortcut_opens_new_screen() {
+        let mut menu = Menu::new();
+        assert_eq!(menu.handle_key(Key::Char('e')), Action::OpenNew);
+        assert_eq!(menu.notice(), None);
+    }
+
+    #[test]
+    fn set_notice_replaces_the_notice() {
+        let mut menu = Menu::new();
+        menu.set_notice(Some("done".to_string()));
+        assert_eq!(menu.notice(), Some("done"));
+        menu.set_notice(None);
+        assert_eq!(menu.notice(), None);
     }
 
     #[test]

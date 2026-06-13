@@ -7,7 +7,8 @@ use std::io;
 use anyhow::Result;
 use console::{Key, Term};
 
-use event::KeyReader;
+use crate::presentation::tui::new;
+use crate::presentation::tui::screen::KeyReader;
 
 /// Reads keys from a real terminal.
 struct TermKeyReader {
@@ -20,13 +21,14 @@ impl KeyReader for TermKeyReader {
     }
 }
 
-/// Displays the startup screen and waits for the user to quit.
+/// Displays the startup screen and dispatches the selected menu action.
 ///
-/// Menu actions other than Quit are placeholders for now and show a
-/// "coming soon" notice when selected. This function wires the real terminal
-/// to the testable event loop in [`event`].
+/// `New` opens the New Project screen; the remaining non-Quit actions are
+/// placeholders for now and show a "coming soon" notice when selected. This
+/// function wires the real terminal and the real New screen to the testable
+/// event loop in [`event`].
 pub fn run() -> Result<()> {
     let term = Term::stdout();
     let mut reader = TermKeyReader { term: term.clone() };
-    event::event_loop(&term, &mut reader)
+    event::event_loop(&term, &mut reader, &mut |t| new::run(t))
 }
