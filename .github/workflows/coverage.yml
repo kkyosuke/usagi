@@ -36,11 +36,26 @@ jobs:
 
     - name: Generate coverage summary
       run: |
+        # ヘッダー・区切り線・TOTAL行は常に表示し、
+        # カバレッジが100%に満たないファイルのみ抽出する
+        filtered=$(cargo llvm-cov report --summary-only | awk '
+          /^Filename/ || /^-+$/ { print; next }
+          /^TOTAL/ { print; next }
+          {
+            incomplete = 0
+            for (i = 1; i <= NF; i++) {
+              if ($i ~ /%$/ && $i != "100.00%") { incomplete = 1 }
+            }
+            if (incomplete) print
+          }
+        ')
         {
           echo "## 📊 Test Coverage"
           echo ""
+          echo "_カバレッジが100%に満たないファイルのみ表示しています_"
+          echo ""
           echo '```'
-          cargo llvm-cov report --summary-only
+          echo "$filtered"
           echo '```'
         } > coverage-comment.md
 
@@ -48,4 +63,5 @@ jobs:
       uses: marocchino/sticky-pull-request-comment@v2
       with:
         header: coverage
+        recreate: true
         path: coverage-comment.md
