@@ -17,11 +17,13 @@ cargo install --path .
 
 ## Quick Start
 
-依存ツールの確認:
+依存ツール・通知・設定ストレージの健全性確認:
 
 ```bash
 cargo run -- doctor
 ```
+
+`git` / `bash` の導入状況に加え、`usagi hop` のデスクトップ通知が利用可能か、設定ストレージが読めるかを `ok` / `warn` / `missing` で表示します。
 
 ## Project Structure
 

@@ -2,7 +2,7 @@ use console::style;
 
 use crate::presentation::tui::widgets;
 
-use super::state::{Config, Field};
+use super::state::{agent_cli_label, Config, Field, AGENT_CLIS};
 
 const TITLE: &str = "Config";
 const SUBTITLE: &str = "Adjust your preferences";
@@ -23,7 +23,10 @@ fn header_lines(width: usize) -> Vec<String> {
 }
 
 /// Builds one setting row: a `>` cursor for the selected entry, the label in a
-/// fixed-width column, and the current value dimmed beside it.
+/// fixed-width column, and the already-styled value beside it.
+///
+/// `value` arrives pre-styled (a dimmed string, a toggle, a selector) so each
+/// field can present its value with the widget that suits it.
 fn setting_row(
     block_pad: &str,
     label: &str,
@@ -44,9 +47,25 @@ fn setting_row(
         style(padded).cyan().to_string()
     };
 
-    let value = style(value).dim().to_string();
-
     format!("{block_pad}{marker} {label}  {value}")
+}
+
+/// Renders a field's current value with the widget that suits it: a toggle for
+/// the notifications switch, an inline selector for the agent CLI, and a plain
+/// dimmed label for the rest.
+fn value_display(config: &Config, field: Field) -> String {
+    match field {
+        Field::Notifications => widgets::toggle(config.settings().notifications_enabled),
+        Field::AgentCli => {
+            let labels: Vec<&str> = AGENT_CLIS.iter().map(|&c| agent_cli_label(c)).collect();
+            let selected = AGENT_CLIS
+                .iter()
+                .position(|&c| c == config.settings().agent_cli)
+                .unwrap_or(0);
+            widgets::select(&labels, selected)
+        }
+        _ => style(config.value_of(field)).dim().to_string(),
+    }
 }
 
 /// Builds the settings list: one row per editable field.
@@ -65,7 +84,7 @@ fn settings_lines(block_pad: &str, config: &Config) -> Vec<String> {
                 block_pad,
                 field.label(),
                 label_width,
-                &config.value_of(field),
+                &value_display(config, field),
                 i == config.selected_index(),
             )
         })
@@ -175,8 +194,27 @@ mod tests {
         assert!(lines[0].contains("Dark"));
         assert!(lines[1].contains("Default Workspace"));
         assert!(lines[1].contains("alpha"));
+        // The notifications toggle and agent selector render via their widgets.
+        assert!(lines[2].contains("Notifications"));
+        assert!(lines[2].contains("On"));
+        assert!(lines[3].contains("Agent CLI"));
+        assert!(lines[3].contains("[Claude]"));
+        assert!(lines[3].contains("Gemini"));
         // Only the first (selected) row carries the cursor.
         assert_eq!(lines.iter().filter(|l| l.contains('>')).count(), 1);
+    }
+
+    #[test]
+    fn value_display_uses_widgets_for_toggle_and_select() {
+        let config = sample_config();
+        // Notifications renders as an on/off toggle.
+        let notifications = value_display(&config, Field::Notifications);
+        assert!(notifications.contains("On"));
+        assert!(notifications.contains("off"));
+        // Agent CLI renders as an inline selector with the active one bracketed.
+        let agent = value_display(&config, Field::AgentCli);
+        assert!(agent.contains("[Claude]"));
+        assert!(!agent.contains("[Gemini]"));
     }
 
     #[test]
