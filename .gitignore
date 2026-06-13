@@ -1,0 +1,12 @@
+# Build artifacts
+target/
+
+# Test directory
+playground
+
+# IDE files
+.idea
+.usagi/
+
+# mac
+.DS_Store
