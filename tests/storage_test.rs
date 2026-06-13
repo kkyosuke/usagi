@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use usagi::domain::settings::Theme;
+use usagi::domain::settings::{AgentCli, Theme};
 use usagi::infrastructure::storage::{data_dir, Storage, DATA_DIR_ENV};
 use usagi::usecase::{settings, workspace};
 
@@ -57,10 +57,14 @@ fn settings_round_trip() {
 
     settings::set_theme(&storage, Theme::Dark).unwrap();
     settings::set_default_workspace(&storage, Some("alpha".into())).unwrap();
+    settings::set_notifications_enabled(&storage, false).unwrap();
+    settings::set_agent_cli(&storage, AgentCli::Gemini).unwrap();
 
     let loaded = settings::load(&storage).unwrap();
     assert_eq!(loaded.theme, Theme::Dark);
     assert_eq!(loaded.default_workspace.as_deref(), Some("alpha"));
+    assert!(!loaded.notifications_enabled);
+    assert_eq!(loaded.agent_cli, AgentCli::Gemini);
 }
 
 #[test]
