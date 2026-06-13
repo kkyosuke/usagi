@@ -2,32 +2,16 @@ mod event;
 mod menu;
 pub mod ui;
 
-use std::io;
-
 use anyhow::Result;
-use console::{Key, Term};
+use console::Term;
 
 use crate::infrastructure::storage::Storage;
 use crate::presentation::tui::config;
 use crate::presentation::tui::new;
 use crate::presentation::tui::new::state::NewProject;
 use crate::presentation::tui::open;
-use crate::presentation::tui::screen::KeyReader;
+use crate::presentation::tui::screen::TermKeyReader;
 use crate::usecase::project;
-
-/// Reads keys from a real terminal.
-struct TermKeyReader {
-    term: Term,
-}
-
-impl KeyReader for TermKeyReader {
-    fn read_key(&mut self) -> io::Result<Key> {
-        // `read_key_raw` surfaces Ctrl+C as `Key::CtrlC` instead of raising
-        // SIGINT, so the event loop can quit gracefully and the alternate
-        // screen guard restores the terminal on the way out.
-        self.term.read_key_raw()
-    }
-}
 
 /// Displays the welcome screen and dispatches the selected menu action.
 ///
@@ -44,7 +28,7 @@ pub fn run() -> Result<()> {
         .to_string_lossy()
         .into_owned();
 
-    let mut reader = TermKeyReader { term: term.clone() };
+    let mut reader = TermKeyReader::new(term.clone());
     let mut open_open = |t: &Term| open::run(t);
     let mut open_new = |t: &Term| new::run(t, &default_location);
     let mut create_project = |form: &NewProject| {

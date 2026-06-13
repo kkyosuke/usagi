@@ -8,34 +8,18 @@ pub mod event;
 pub mod state;
 pub mod ui;
 
-use std::io;
-
 use anyhow::Result;
-use console::{Key, Term};
+use console::Term;
 
 use crate::domain::workspace::Workspace;
 use crate::infrastructure::storage::Storage;
 use crate::presentation::tui::home;
-use crate::presentation::tui::screen::KeyReader;
+use crate::presentation::tui::screen::TermKeyReader;
 use crate::usecase::workspace;
 
 pub use event::Outcome;
 
 use state::ProjectList;
-
-/// Reads keys from a real terminal.
-struct TermKeyReader {
-    term: Term,
-}
-
-impl KeyReader for TermKeyReader {
-    fn read_key(&mut self) -> io::Result<Key> {
-        // `read_key_raw` surfaces Ctrl+C as `Key::CtrlC` instead of raising
-        // SIGINT, so the event loop can quit gracefully and the alternate
-        // screen guard restores the terminal on the way out.
-        self.term.read_key_raw()
-    }
-}
 
 /// Runs the project selection screen on the given terminal until the user goes
 /// back or quits. Wires the real terminal and storage-backed workspace list to
@@ -49,7 +33,7 @@ pub fn run(term: &Term) -> Result<Outcome> {
             Some(format!("Failed to load projects: {e}")),
         ),
     };
-    let mut reader = TermKeyReader { term: term.clone() };
+    let mut reader = TermKeyReader::new(term.clone());
     event::event_loop(term, &mut reader, list, notice, &mut |t, ws| {
         home::run(t, ws)
     })

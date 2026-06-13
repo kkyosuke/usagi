@@ -8,28 +8,12 @@ pub mod event;
 pub mod state;
 pub mod ui;
 
-use std::io;
-
 use anyhow::Result;
-use console::{Key, Term};
+use console::Term;
 
-use crate::presentation::tui::screen::KeyReader;
+use crate::presentation::tui::screen::TermKeyReader;
 
 pub use event::Outcome;
-
-/// Reads keys from a real terminal.
-struct TermKeyReader {
-    term: Term,
-}
-
-impl KeyReader for TermKeyReader {
-    fn read_key(&mut self) -> io::Result<Key> {
-        // `read_key_raw` surfaces Ctrl+C as `Key::CtrlC` instead of raising
-        // SIGINT, so the event loop can quit gracefully and the alternate
-        // screen guard restores the terminal on the way out.
-        self.term.read_key_raw()
-    }
-}
 
 /// Runs the New Project screen on the given terminal until the user submits,
 /// goes back, or quits. Wires the real terminal to the testable event loop in
@@ -38,6 +22,6 @@ impl KeyReader for TermKeyReader {
 /// `default_location` pre-fills the Location field with the base directory new
 /// projects are created under.
 pub fn run(term: &Term, default_location: &str) -> Result<Outcome> {
-    let mut reader = TermKeyReader { term: term.clone() };
+    let mut reader = TermKeyReader::new(term.clone());
     event::event_loop(term, &mut reader, default_location)
 }

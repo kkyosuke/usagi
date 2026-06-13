@@ -11,6 +11,26 @@ pub trait KeyReader {
     fn read_key(&mut self) -> io::Result<Key>;
 }
 
+/// Reads keys from a real terminal for the interactive screens.
+pub struct TermKeyReader {
+    term: Term,
+}
+
+impl TermKeyReader {
+    pub fn new(term: Term) -> Self {
+        Self { term }
+    }
+}
+
+impl KeyReader for TermKeyReader {
+    fn read_key(&mut self) -> io::Result<Key> {
+        // `read_key_raw` surfaces Ctrl+C as `Key::CtrlC` instead of raising
+        // SIGINT, so the event loop can quit gracefully and the alternate
+        // screen guard restores the terminal on the way out.
+        self.term.read_key_raw()
+    }
+}
+
 /// RAII guard that activates the terminal alternate screen and restores it on drop.
 pub struct AlternateScreenGuard {
     term: Term,
