@@ -1,0 +1,88 @@
+name: Coverage
+
+on:
+  pull_request:
+    branches: [ "main" ]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  coverage:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        components: llvm-tools-preview
+
+    - name: Rust Cache
+      uses: swatinem/rust-cache@v2
+      with:
+        cache-on-failure: true
+
+    - name: Install cargo-llvm-cov
+      uses: taiki-e/install-action@cargo-llvm-cov
+
+    - name: Run tests with coverage
+      run: cargo llvm-cov --workspace --lcov --output-path lcov.info
+
+    - name: Generate coverage summary
+      run: |
+        report=$(cargo llvm-cov report --summary-only)
+        total=$(echo "$report" | awk '/^TOTAL/ { print $10 }')
+
+        # カバレッジが100%に満たないファイルをMarkdownテーブルの行に整形する。
+        # Lines のカバレッジ帯に応じて信号機の絵文字を付ける。
+        rows=$(echo "$report" | awk '
+          function emoji(c,   v) {
+            v = c; sub(/%/, "", v); v = v + 0
+            if (v >= 90) return "🟢"
+            else if (v >= 70) return "🟡"
+            else return "🔴"
+          }
+          /^Filename/ || /^-+$/ || /^TOTAL/ { next }
+          {
+            incomplete = 0
+            for (i = 1; i <= NF; i++) {
+              if ($i ~ /%$/ && $i != "100.00%") { incomplete = 1 }
+            }
+            if (incomplete) {
+              printf "| `%s` | %s | %s | %s %s |\n", $1, $4, $7, emoji($10), $10
+            }
+          }
+        ')
+
+        total_row=$(echo "$report" | awk '/^TOTAL/ { printf "| **🧮 合計** | **%s** | **%s** | **%s** |", $4, $7, $10 }')
+
+        {
+          echo "## 📊 Test Coverage"
+          echo ""
+          echo "> 🎯 **全体カバレッジ: ${total}**"
+          if [ -z "$rows" ]; then
+            echo ">"
+            echo "> 🎉 すべてのファイルがカバレッジ100%です！"
+          else
+            echo ">"
+            echo "> 100% に届いていないファイルだけピックアップしました 👇"
+            echo ""
+            echo "| 📄 ファイル | 🌐 Regions | 🔧 Functions | 📈 Lines |"
+            echo "| :--- | ---: | ---: | ---: |"
+            echo "$rows"
+            echo "$total_row"
+          fi
+        } > coverage-comment.md
+
+    - name: Comment coverage on PR
+      uses: marocchino/sticky-pull-request-comment@v2
+      with:
+        header: coverage
+        recreate: true
+        path: coverage-comment.md
