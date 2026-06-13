@@ -124,7 +124,7 @@ pub fn event_loop(
 mod tests {
     use super::*;
     use crate::domain::repository::RepoUrl;
-    use crate::presentation::tui::new::state::NewProject;
+    use crate::presentation::tui::new::state::{CloneSpec, NewProject};
     use console::Key;
     use std::collections::VecDeque;
 
@@ -164,12 +164,12 @@ mod tests {
         Ok(new::Outcome::Quit)
     }
     fn new_submitted(_t: &Term) -> Result<new::Outcome> {
-        Ok(new::Outcome::Submitted(NewProject {
+        Ok(new::Outcome::Submitted(NewProject::Clone(CloneSpec {
             url: RepoUrl::parse("https://github.com/owner/repo.git").unwrap(),
             location: std::path::PathBuf::from("/base"),
             directory: "repo".to_string(),
             branch: None,
-        }))
+        })))
     }
     fn new_err(_t: &Term) -> Result<new::Outcome> {
         Err(anyhow::anyhow!("new screen blew up"))
@@ -177,7 +177,10 @@ mod tests {
 
     // Project-creation stubs paired with the New-screen launchers above.
     fn create_ok(p: &NewProject) -> Result<Workspace> {
-        Ok(Workspace::new(p.directory.clone(), &p.location))
+        match p {
+            NewProject::Clone(spec) => Ok(Workspace::new(spec.directory.clone(), &spec.location)),
+            NewProject::Existing(spec) => Ok(Workspace::new(spec.name.clone(), &spec.path)),
+        }
     }
     fn create_err(_p: &NewProject) -> Result<Workspace> {
         Err(anyhow::anyhow!("clone failed"))

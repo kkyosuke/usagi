@@ -54,6 +54,23 @@ pub fn create(
     Ok(workspace)
 }
 
+/// Register an existing directory as a workspace under `name`.
+///
+/// Unlike [`create`], nothing is cloned: the directory is used as-is. When it is
+/// a git repository its initial worktree state is synced; a plain directory is
+/// still registered (the sync is simply skipped), so usagi can track folders
+/// that are not yet under version control.
+pub fn register_existing(storage: &Storage, path: &Path, name: &str) -> Result<Workspace> {
+    if !path.is_dir() {
+        bail!("{} is not a directory", path.display());
+    }
+    let workspace = workspace::add(storage, name, path)?;
+    if git::is_repository(path) {
+        workspace_state::sync(path)?;
+    }
+    Ok(workspace)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -115,6 +132,47 @@ mod tests {
         assert!(dest.join(".git").is_dir());
         assert!(dest.join(".usagi/state.json").is_file());
         assert_eq!(storage.load_workspaces().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn register_existing_registers_a_git_repo_and_syncs_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        init_source(&repo);
+        let storage = Storage::new(tmp.path().join("usagi"));
+
+        let workspace = register_existing(&storage, &repo, "repo").unwrap();
+
+        assert_eq!(workspace.name, "repo");
+        assert_eq!(workspace.path, repo);
+        // A git repo gets its worktree state captured.
+        assert!(repo.join(".usagi/state.json").is_file());
+        assert_eq!(storage.load_workspaces().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn register_existing_registers_a_plain_dir_without_syncing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plain = tmp.path().join("plain");
+        std::fs::create_dir_all(&plain).unwrap();
+        let storage = Storage::new(tmp.path().join("usagi"));
+
+        let workspace = register_existing(&storage, &plain, "plain").unwrap();
+
+        assert_eq!(workspace.name, "plain");
+        // Not a git repo: registered, but no state file is written.
+        assert!(!plain.join(".usagi/state.json").exists());
+        assert_eq!(storage.load_workspaces().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn register_existing_fails_for_a_missing_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = Storage::new(tmp.path().join("usagi"));
+        let missing = tmp.path().join("nope");
+
+        let err = register_existing(&storage, &missing, "nope").unwrap_err();
+        assert!(err.to_string().contains("is not a directory"));
     }
 
     #[test]

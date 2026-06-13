@@ -2,10 +2,10 @@ use console::style;
 
 use crate::presentation::tui::widgets;
 
-use super::state::{Field, FormState};
+use super::state::{Field, FormState, Mode};
 
 const TITLE: &str = "New Project";
-const SUBTITLE: &str = "Clone a Git repository into a new workspace";
+const SUBTITLE: &str = "Clone a repository or register an existing directory";
 
 /// Fixed width of the form block; the whole block is centred in the terminal.
 const BLOCK_WIDTH: usize = 52;
@@ -50,6 +50,32 @@ fn input_line(block_pad: &str, value: &str, placeholder: &str, focused: bool) ->
     format!("{block_pad}{marker} {body}")
 }
 
+/// Builds the mode selector: two tabs (`Clone` / `Existing`) with the active
+/// one highlighted, and a `>` cursor plus brackets when the selector is focused.
+fn mode_lines(block_pad: &str, mode: Mode, focused: bool) -> Vec<String> {
+    let tab = |label: &str, active: bool| {
+        if active {
+            format!("[{}]", style(label).cyan().bold())
+        } else {
+            format!(" {} ", style(label).dim())
+        }
+    };
+    let marker = if focused {
+        style(">").red().bold().to_string()
+    } else {
+        " ".to_string()
+    };
+    let tabs = format!(
+        "{}  {}",
+        tab("Clone", mode == Mode::Clone),
+        tab("Existing", mode == Mode::Existing),
+    );
+    vec![
+        format!("{block_pad}{}", style("Type  (←→ to switch)").dim()),
+        format!("{block_pad}{marker} {tabs}"),
+    ]
+}
+
 /// Builds a labelled field: a dim label line followed by its input row.
 fn field_lines(
     block_pad: &str,
@@ -82,8 +108,63 @@ fn notice_lines(block_pad: &str, notice: Option<&str>) -> Vec<String> {
 fn footer_lines(width: usize) -> Vec<String> {
     vec![widgets::dim_line(
         width,
-        "↑↓/Tab: move field / Enter: create / Esc: back",
+        "←→: switch type / ↑↓/Tab: move field / Enter: create / Esc: back",
     )]
+}
+
+/// Appends the Clone-mode fields (URL, Location, Directory, Branch) to `body`,
+/// each separated by a blank line.
+fn extend_clone_fields(body: &mut Vec<String>, block_pad: &str, state: &FormState) {
+    body.extend(field_lines(
+        block_pad,
+        "Repository URL",
+        state.url(),
+        "https://github.com/owner/repo.git",
+        state.focus() == Field::Url,
+    ));
+    body.push(String::new());
+    body.extend(field_lines(
+        block_pad,
+        "Location",
+        state.location(),
+        "where to create the project",
+        state.focus() == Field::Location,
+    ));
+    body.push(String::new());
+    body.extend(field_lines(
+        block_pad,
+        "Directory",
+        state.directory(),
+        "derived from the URL",
+        state.focus() == Field::Directory,
+    ));
+    body.push(String::new());
+    body.extend(field_lines(
+        block_pad,
+        "Branch (optional)",
+        state.branch(),
+        "repository default",
+        state.focus() == Field::Branch,
+    ));
+}
+
+/// Appends the Existing-mode fields (Directory path, Name) to `body`.
+fn extend_existing_fields(body: &mut Vec<String>, block_pad: &str, state: &FormState) {
+    body.extend(field_lines(
+        block_pad,
+        "Directory",
+        state.path(),
+        "/path/to/an/existing/project",
+        state.focus() == Field::Path,
+    ));
+    body.push(String::new());
+    body.extend(field_lines(
+        block_pad,
+        "Name",
+        state.name(),
+        "derived from the directory",
+        state.focus() == Field::Name,
+    ));
 }
 
 /// Builds the full New Project screen frame for a raw terminal size.
@@ -96,41 +177,20 @@ pub fn render_frame(
     let (height, width) = widgets::normalize_size(raw_height, raw_width);
     let block_pad = " ".repeat(widgets::centered_padding(width, BLOCK_WIDTH));
 
-    // The body (mascot, title, form fields and notice slot) is centred
-    // vertically; the footer is pinned to the bottom edge of the frame.
+    // The body (mascot, title, mode selector, form fields and notice slot) is
+    // centred vertically; the footer is pinned to the bottom edge of the frame.
     let mut body = header_lines(width);
     body.push(String::new());
-    body.extend(field_lines(
+    body.extend(mode_lines(
         &block_pad,
-        "Repository URL",
-        state.url(),
-        "https://github.com/owner/repo.git",
-        state.focus() == Field::Url,
+        state.mode(),
+        state.focus() == Field::Mode,
     ));
     body.push(String::new());
-    body.extend(field_lines(
-        &block_pad,
-        "Location",
-        state.location(),
-        "where to create the project",
-        state.focus() == Field::Location,
-    ));
-    body.push(String::new());
-    body.extend(field_lines(
-        &block_pad,
-        "Directory",
-        state.directory(),
-        "derived from the URL",
-        state.focus() == Field::Directory,
-    ));
-    body.push(String::new());
-    body.extend(field_lines(
-        &block_pad,
-        "Branch (optional)",
-        state.branch(),
-        "repository default",
-        state.focus() == Field::Branch,
-    ));
+    match state.mode() {
+        Mode::Clone => extend_clone_fields(&mut body, &block_pad, state),
+        Mode::Existing => extend_existing_fields(&mut body, &block_pad, state),
+    }
     body.extend(notice_lines(&block_pad, notice));
     let footer = footer_lines(width);
 
@@ -164,7 +224,19 @@ mod tests {
         assert!(!lines[0].is_empty());
         let joined = lines.join("\n");
         assert!(joined.contains("New Project"));
-        assert!(joined.contains("Clone a Git repository"));
+        assert!(joined.contains("register an existing directory"));
+    }
+
+    #[test]
+    fn mode_lines_highlight_the_active_tab() {
+        let clone = mode_lines("", Mode::Clone, false).join("\n");
+        assert!(clone.contains("Clone"));
+        assert!(clone.contains("Existing"));
+        // Bracketing marks the active tab.
+        assert!(clone.contains('['));
+
+        let focused = mode_lines("", Mode::Existing, true).join("\n");
+        assert!(focused.contains('>'));
     }
 
     #[test]
@@ -228,6 +300,8 @@ mod tests {
     #[test]
     fn render_frame_combines_all_sections() {
         let mut state = FormState::new();
+        // Focus the URL field (default focus is the mode selector) before typing.
+        state.focus_next();
         for c in "https://github.com/owner/repo.git".chars() {
             state.insert_char(c);
         }
@@ -239,6 +313,21 @@ mod tests {
         assert!(joined.contains("repo")); // derived directory + url
         assert!(joined.contains("oops"));
         assert!(joined.contains("Esc"));
+        // The mode selector is shown above the fields.
+        assert!(joined.contains("Clone"));
+    }
+
+    #[test]
+    fn render_frame_shows_existing_mode_fields() {
+        let mut state = FormState::new();
+        state.toggle_mode();
+        let frame = render_frame(0, 0, &state, None);
+        let joined = frame.join("\n");
+        // Existing mode shows a Directory path and a Name field, not URL/Branch.
+        assert!(joined.contains("Directory"));
+        assert!(joined.contains("Name"));
+        assert!(!joined.contains("Repository URL"));
+        assert!(!joined.contains("Branch"));
     }
 
     #[test]
