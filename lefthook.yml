@@ -8,6 +8,7 @@
 #   - ブランチ名: main または <type>/<説明>  (type: feat|fix|docs|refactor|perf|test|build|ci|chore)
 #   - コミットメッセージ: Conventional Commits (例: feat: 〇〇を追加 / fix(cli): 〇〇を修正)
 #   - コミット時に staged な .rs ファイルを自動フォーマット
+#   - コミット時にテストカバレッジ100%を確認 (Coverage CI と同条件)
 #   - push 時に clippy とテストを実行 (CI と同条件)
 
 pre-commit:
@@ -28,6 +29,11 @@ pre-commit:
       glob: "*.rs"
       run: cargo fmt -- {staged_files}
       stage_fixed: true
+    coverage:
+      # 除外条件・閾値は SSoT (scripts/coverage.sh) を Coverage CI と共有する。
+      run: |
+        . ./scripts/coverage.sh
+        coverage_enforce
 
 commit-msg:
   commands:
