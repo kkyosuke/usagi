@@ -1,8 +1,8 @@
 use console::style;
 
-use super::state::{Field, FormState};
+use crate::presentation::tui::widgets;
 
-const RABBIT_LINES: [&str; 3] = ["  (\\(\\ ", " (='-') ", " o(_(\")(\")"];
+use super::state::{Field, FormState};
 
 const TITLE: &str = "New Project";
 const SUBTITLE: &str = "Clone a Git repository into a new workspace";
@@ -13,59 +13,15 @@ const BLOCK_WIDTH: usize = 52;
 /// Caret shown at the end of the focused input field.
 const CARET: &str = "▏";
 
-/// Left padding that centres content of the given width in the terminal.
-fn centered_padding(term_width: usize, content_width: usize) -> usize {
-    term_width.saturating_sub(content_width) / 2
-}
-
-/// Normalises a raw terminal size, substituting fallbacks for the zeroes that
-/// non-interactive environments report.
-fn normalize_size(height: usize, width: usize) -> (usize, usize) {
-    let height = if height == 0 { 24 } else { height };
-    let width = if width == 0 { 80 } else { width };
-    (height, width)
-}
-
-/// Builds the centred mascot, title, and subtitle lines.
-fn header_lines(height: usize, width: usize) -> Vec<String> {
-    let mut lines = Vec::new();
-
-    let top_padding = if height > RABBIT_LINES.len() + 14 {
-        2
-    } else {
-        1
-    };
-    for _ in 0..top_padding {
-        lines.push(String::new());
-    }
-
-    let rabbit_width = RABBIT_LINES
-        .iter()
-        .map(|l| l.chars().count())
-        .max()
-        .unwrap_or(0);
-    let rabbit_pad = " ".repeat(centered_padding(width, rabbit_width));
-    for line in RABBIT_LINES {
-        lines.push(
-            style(format!("{rabbit_pad}{line}"))
-                .magenta()
-                .bold()
-                .to_string(),
-        );
-    }
-
+/// Builds the centred mascot, title, and subtitle block.
+///
+/// Vertical placement is handled by [`render_frame`], so this adds no leading
+/// padding.
+fn header_lines(width: usize) -> Vec<String> {
+    let mut lines = widgets::rabbit_lines(width);
     lines.push(String::new());
-    let title_pad = " ".repeat(centered_padding(width, TITLE.chars().count()));
-    lines.push(
-        style(format!("{title_pad}{TITLE}"))
-            .green()
-            .bold()
-            .to_string(),
-    );
-    let subtitle_pad = " ".repeat(centered_padding(width, SUBTITLE.chars().count()));
-    lines.push(format!("{subtitle_pad}{}", style(SUBTITLE).dim()));
-    lines.push(String::new());
-
+    lines.push(widgets::title_line(width, TITLE));
+    lines.push(widgets::dim_line(width, SUBTITLE));
     lines
 }
 
@@ -108,22 +64,26 @@ fn field_lines(
     ]
 }
 
-/// Builds the transient notice (validation error) below the form, if any.
+/// Builds the transient notice (validation error) below the form.
+///
+/// Always returns two lines — a blank separator plus the notice slot (blank
+/// when absent) — so showing or clearing the error never shifts the form.
 fn notice_lines(block_pad: &str, notice: Option<&str>) -> Vec<String> {
-    match notice {
-        Some(notice) => vec![
-            String::new(),
-            format!("{block_pad}{}", style(notice).red().bold()),
-        ],
-        None => Vec::new(),
-    }
+    let slot = match notice {
+        Some(notice) => format!("{block_pad}{}", style(notice).red().bold()),
+        None => String::new(),
+    };
+    vec![String::new(), slot]
 }
 
 /// Builds the footer help line.
+///
+/// Returns the footer text only; [`render_frame`] pins it to the bottom edge.
 fn footer_lines(width: usize) -> Vec<String> {
-    let footer = "↑↓/Tab: move field / Enter: create / Esc: back";
-    let pad = " ".repeat(centered_padding(width, footer.chars().count()));
-    vec![String::new(), format!("{pad}{}", style(footer).dim())]
+    vec![widgets::dim_line(
+        width,
+        "↑↓/Tab: move field / Enter: create / Esc: back",
+    )]
 }
 
 /// Builds the full New Project screen frame for a raw terminal size.
@@ -133,35 +93,55 @@ pub fn render_frame(
     state: &FormState,
     notice: Option<&str>,
 ) -> Vec<String> {
-    let (height, width) = normalize_size(raw_height, raw_width);
-    let block_pad = " ".repeat(centered_padding(width, BLOCK_WIDTH));
+    let (height, width) = widgets::normalize_size(raw_height, raw_width);
+    let block_pad = " ".repeat(widgets::centered_padding(width, BLOCK_WIDTH));
 
-    let mut lines = header_lines(height, width);
-    lines.extend(field_lines(
+    // The body (mascot, title, form fields and notice slot) is centred
+    // vertically; the footer is pinned to the bottom edge of the frame.
+    let mut body = header_lines(width);
+    body.push(String::new());
+    body.extend(field_lines(
         &block_pad,
         "Repository URL",
         state.url(),
         "https://github.com/owner/repo.git",
         state.focus() == Field::Url,
     ));
-    lines.push(String::new());
-    lines.extend(field_lines(
+    body.push(String::new());
+    body.extend(field_lines(
         &block_pad,
         "Directory",
         state.directory(),
         "derived from the URL",
         state.focus() == Field::Directory,
     ));
-    lines.push(String::new());
-    lines.extend(field_lines(
+    body.push(String::new());
+    body.extend(field_lines(
         &block_pad,
         "Branch (optional)",
         state.branch(),
         "repository default",
         state.focus() == Field::Branch,
     ));
-    lines.extend(notice_lines(&block_pad, notice));
-    lines.extend(footer_lines(width));
+    body.extend(notice_lines(&block_pad, notice));
+    let footer = footer_lines(width);
+
+    let mut lines = Vec::with_capacity(height);
+
+    // Centre the body in the space above the footer.
+    let top_padding = height.saturating_sub(body.len() + footer.len()) / 2;
+    for _ in 0..top_padding {
+        lines.push(String::new());
+    }
+    lines.extend(body);
+
+    // Push the footer down to the bottom row of the frame.
+    let bottom_padding = height.saturating_sub(lines.len() + footer.len());
+    for _ in 0..bottom_padding {
+        lines.push(String::new());
+    }
+    lines.extend(footer);
+
     lines
 }
 
@@ -170,36 +150,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn centered_padding_centers_content() {
-        assert_eq!(centered_padding(80, BLOCK_WIDTH), (80 - BLOCK_WIDTH) / 2);
-    }
-
-    #[test]
-    fn centered_padding_handles_narrow_terminal() {
-        assert_eq!(centered_padding(10, BLOCK_WIDTH), 0);
-    }
-
-    #[test]
-    fn normalize_size_substitutes_fallbacks_for_zero() {
-        assert_eq!(normalize_size(0, 0), (24, 80));
-    }
-
-    #[test]
-    fn normalize_size_keeps_nonzero_values() {
-        assert_eq!(normalize_size(30, 100), (30, 100));
-    }
-
-    #[test]
-    fn header_uses_two_blank_lines_in_tall_terminals() {
-        let lines = header_lines(40, 80);
-        assert_eq!(lines.iter().take_while(|l| l.is_empty()).count(), 2);
-        assert!(lines.iter().any(|l| l.contains("New Project")));
-    }
-
-    #[test]
-    fn header_uses_one_blank_line_in_short_terminals() {
-        let lines = header_lines(10, 80);
-        assert_eq!(lines.iter().take_while(|l| l.is_empty()).count(), 1);
+    fn header_lines_render_mascot_title_and_subtitle() {
+        let lines = header_lines(80);
+        // No leading padding; the mascot block starts immediately.
+        assert!(!lines[0].is_empty());
+        let joined = lines.join("\n");
+        assert!(joined.contains("New Project"));
+        assert!(joined.contains("Clone a Git repository"));
     }
 
     #[test]
@@ -241,8 +198,10 @@ mod tests {
     }
 
     #[test]
-    fn notice_lines_empty_when_absent() {
-        assert!(notice_lines("", None).is_empty());
+    fn notice_lines_reserve_a_slot_when_absent() {
+        let lines = notice_lines("", None);
+        assert_eq!(lines.len(), 2);
+        assert!(lines.iter().all(|l| l.is_empty()));
     }
 
     #[test]
@@ -271,5 +230,39 @@ mod tests {
         assert!(joined.contains("repo")); // derived directory + url
         assert!(joined.contains("oops"));
         assert!(joined.contains("Esc"));
+    }
+
+    #[test]
+    fn render_frame_centers_body_and_pins_footer() {
+        let state = FormState::new();
+        let height = 40;
+        let frame = render_frame(height, 80, &state, None);
+
+        assert_eq!(frame.len(), height);
+        assert!(frame.last().unwrap().contains("Esc"));
+        let top_padding = frame.iter().take_while(|l| l.is_empty()).count();
+        assert!(top_padding > 0);
+        assert!(!frame[top_padding].is_empty());
+    }
+
+    #[test]
+    fn render_frame_does_not_overflow_a_short_terminal() {
+        let state = FormState::new();
+        let frame = render_frame(3, 80, &state, None);
+        assert!(!frame[0].is_empty());
+        assert!(frame.last().unwrap().contains("Esc"));
+    }
+
+    #[test]
+    fn notice_slot_keeps_layout_stable_across_toggling() {
+        let state = FormState::new();
+        let without = render_frame(24, 80, &state, None);
+        let with = render_frame(
+            24,
+            80,
+            &state,
+            Some("that does not look like a repository URL"),
+        );
+        assert_eq!(without.len(), with.len());
     }
 }

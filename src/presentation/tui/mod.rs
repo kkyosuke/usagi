@@ -2,3 +2,4 @@
 pub mod home;
 pub mod new;
 pub mod screen;
+pub mod widgets;
