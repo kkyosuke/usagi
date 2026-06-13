@@ -110,6 +110,14 @@ pub fn render_frame(
     body.push(String::new());
     body.extend(field_lines(
         &block_pad,
+        "Location",
+        state.location(),
+        "where to create the project",
+        state.focus() == Field::Location,
+    ));
+    body.push(String::new());
+    body.extend(field_lines(
+        &block_pad,
         "Directory",
         state.directory(),
         "derived from the URL",
@@ -227,6 +235,7 @@ mod tests {
         let joined = frame.join("\n");
         assert!(joined.contains("New Project"));
         assert!(joined.contains("Repository URL"));
+        assert!(joined.contains("Location"));
         assert!(joined.contains("repo")); // derived directory + url
         assert!(joined.contains("oops"));
         assert!(joined.contains("Esc"));

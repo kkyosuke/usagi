@@ -31,7 +31,10 @@ impl KeyReader for TermKeyReader {
 /// Runs the New Project screen on the given terminal until the user submits,
 /// goes back, or quits. Wires the real terminal to the testable event loop in
 /// [`event`]. Assumes the alternate screen is already active.
-pub fn run(term: &Term) -> Result<Outcome> {
+///
+/// `default_location` pre-fills the Location field with the base directory new
+/// projects are created under.
+pub fn run(term: &Term, default_location: &str) -> Result<Outcome> {
     let mut reader = TermKeyReader { term: term.clone() };
-    event::event_loop(term, &mut reader)
+    event::event_loop(term, &mut reader, default_location)
 }
