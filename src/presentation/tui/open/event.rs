@@ -2,6 +2,8 @@ use anyhow::Result;
 use console::Key;
 use console::Term;
 
+use crate::domain::workspace::Workspace;
+use crate::presentation::tui::home;
 use crate::presentation::tui::screen::KeyReader;
 
 use super::state::ProjectList;
@@ -16,17 +18,25 @@ pub enum Outcome {
     Quit,
 }
 
+/// Launches the home screen for a chosen workspace and returns the user's
+/// choice.
+///
+/// Taking this as a parameter lets the event loop be tested without a real
+/// terminal: production wires it to [`home::run`], tests pass a stub.
+pub type OpenHome<'a> = dyn FnMut(&Term, &Workspace) -> Result<home::Outcome> + 'a;
+
 /// Runs the project selection screen against the given terminal and key source
 /// until the user goes back or quits. Assumes the alternate screen is already
 /// active (it is owned by the caller).
 ///
-/// Opening a project is a placeholder for now: selecting one shows a "coming
-/// soon" notice, since the workspace screen is not implemented yet.
+/// Selecting a project opens the home screen for that workspace; returning from
+/// it leaves the user back on this list.
 pub fn event_loop(
     term: &Term,
     reader: &mut dyn KeyReader,
     mut list: ProjectList,
     initial_notice: Option<String>,
+    open_home: &mut OpenHome,
 ) -> Result<Outcome> {
     let mut notice = initial_notice;
 
@@ -57,7 +67,10 @@ pub fn event_loop(
             }
             Key::Enter => {
                 if let Some(workspace) = list.selected() {
-                    notice = Some(format!("Opening \"{}\" is coming soon 🐰", workspace.name));
+                    match open_home(term, workspace)? {
+                        home::Outcome::Back => notice = None,
+                        home::Outcome::Quit => return Ok(Outcome::Quit),
+                    }
                 }
             }
             Key::Char('q') | Key::Escape => return Ok(Outcome::Back),
@@ -92,6 +105,17 @@ mod tests {
         }
     }
 
+    // Home-screen launchers used as stubs; each is exercised by a test below.
+    fn home_back(_t: &Term, _w: &Workspace) -> Result<home::Outcome> {
+        Ok(home::Outcome::Back)
+    }
+    fn home_quit(_t: &Term, _w: &Workspace) -> Result<home::Outcome> {
+        Ok(home::Outcome::Quit)
+    }
+    fn home_err(_t: &Term, _w: &Workspace) -> Result<home::Outcome> {
+        Err(anyhow::anyhow!("home screen blew up"))
+    }
+
     fn sample_list() -> ProjectList {
         ProjectList::new(vec![
             Workspace::new("alpha", "/p/alpha"),
@@ -102,7 +126,7 @@ mod tests {
     fn run(keys: Vec<io::Result<Key>>, list: ProjectList) -> Result<Outcome> {
         let term = Term::stdout();
         let mut reader = ScriptedReader::new(keys);
-        event_loop(&term, &mut reader, list, None)
+        event_loop(&term, &mut reader, list, None, &mut home_back)
     }
 
     #[test]
@@ -145,18 +169,44 @@ mod tests {
     }
 
     #[test]
-    fn enter_on_a_project_shows_a_notice_then_back() {
-        // Enter selects a project (sets the "coming soon" notice), then Escape.
+    fn enter_opens_home_then_returns_to_the_list() {
+        // Enter opens the home screen (stub returns Back), then Escape leaves.
         let keys = vec![Ok(Key::Enter), Ok(Key::Escape)];
         assert!(matches!(run(keys, sample_list()).unwrap(), Outcome::Back));
     }
 
     #[test]
+    fn home_quit_propagates_as_quit() {
+        // Opening the home screen and quitting from it quits the whole app.
+        let term = Term::stdout();
+        let mut reader = ScriptedReader::new(vec![Ok(Key::Enter)]);
+        let outcome = event_loop(&term, &mut reader, sample_list(), None, &mut home_quit).unwrap();
+        assert!(matches!(outcome, Outcome::Quit));
+    }
+
+    #[test]
+    fn home_error_is_propagated() {
+        let term = Term::stdout();
+        let mut reader = ScriptedReader::new(vec![Ok(Key::Enter)]);
+        let err = event_loop(&term, &mut reader, sample_list(), None, &mut home_err).unwrap_err();
+        assert!(err.to_string().contains("home screen blew up"));
+    }
+
+    #[test]
     fn enter_on_empty_list_does_nothing() {
-        // With no workspaces there is nothing to select; Enter is a no-op.
-        let keys = vec![Ok(Key::Enter), Ok(Key::Escape)];
-        let list = ProjectList::new(Vec::new());
-        assert!(matches!(run(keys, list).unwrap(), Outcome::Back));
+        // With no workspaces there is nothing to select; Enter must not open the
+        // home screen (the erroring stub would surface if it were called).
+        let term = Term::stdout();
+        let mut reader = ScriptedReader::new(vec![Ok(Key::Enter), Ok(Key::Escape)]);
+        let outcome = event_loop(
+            &term,
+            &mut reader,
+            ProjectList::new(Vec::new()),
+            None,
+            &mut home_err,
+        )
+        .unwrap();
+        assert!(matches!(outcome, Outcome::Back));
     }
 
     #[test]
@@ -169,6 +219,7 @@ mod tests {
             &mut reader,
             ProjectList::new(Vec::new()),
             Some("Failed to load projects: boom".to_string()),
+            &mut home_back,
         )
         .unwrap();
         assert!(matches!(outcome, Outcome::Back));
@@ -187,7 +238,7 @@ mod tests {
     fn unexpected_read_error_is_propagated() {
         let term = Term::stdout();
         let mut reader = ScriptedReader::new(vec![Err(io::Error::other("boom"))]);
-        let err = event_loop(&term, &mut reader, sample_list(), None).unwrap_err();
+        let err = event_loop(&term, &mut reader, sample_list(), None, &mut home_back).unwrap_err();
         assert!(err.to_string().contains("Failed to read key"));
     }
 }

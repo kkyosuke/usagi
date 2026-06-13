@@ -1,9 +1,8 @@
 //! Project selection screen (画面 #2).
 //!
 //! Lists the registered workspaces (most recently used first) and lets the
-//! user pick one to open. Selecting a project is a placeholder for now — the
-//! workspace screen it should lead to is not implemented yet — so it shows a
-//! "coming soon" notice.
+//! user pick one to open. Selecting a project opens the home screen for that
+//! workspace; returning from the home screen leaves the user back on this list.
 
 pub mod event;
 pub mod state;
@@ -16,6 +15,7 @@ use console::{Key, Term};
 
 use crate::domain::workspace::Workspace;
 use crate::infrastructure::storage::Storage;
+use crate::presentation::tui::home;
 use crate::presentation::tui::screen::KeyReader;
 use crate::usecase::workspace;
 
@@ -47,7 +47,9 @@ pub fn run(term: &Term) -> Result<Outcome> {
         ),
     };
     let mut reader = TermKeyReader { term: term.clone() };
-    event::event_loop(term, &mut reader, list, notice)
+    event::event_loop(term, &mut reader, list, notice, &mut |t, ws| {
+        home::run(t, ws)
+    })
 }
 
 /// Loads the registered workspaces, most recently used first.
