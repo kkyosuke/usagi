@@ -2,7 +2,11 @@
 //!
 //! Keeping the form logic free of any terminal IO makes it directly testable
 //! and mirrors the editor "clone repository" UX: typing the URL live-updates
-//! the suggested directory until the user edits the directory themselves.
+//! the suggested directory until the user edits the directory themselves. The
+//! location field (where the project is created) is pre-filled by the caller
+//! and left for the user to adjust.
+
+use std::path::PathBuf;
 
 use crate::domain::repository::RepoUrl;
 
@@ -10,12 +14,13 @@ use crate::domain::repository::RepoUrl;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Field {
     Url,
+    Location,
     Directory,
     Branch,
 }
 
 impl Field {
-    const ORDER: [Field; 3] = [Field::Url, Field::Directory, Field::Branch];
+    const ORDER: [Field; 4] = [Field::Url, Field::Location, Field::Directory, Field::Branch];
 
     fn index(self) -> usize {
         Self::ORDER.iter().position(|f| *f == self).unwrap()
@@ -34,6 +39,9 @@ impl Field {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewProject {
     pub url: RepoUrl,
+    /// Base directory the project is cloned under.
+    pub location: PathBuf,
+    /// Final directory name created under `location`.
     pub directory: String,
     /// Branch to check out, or `None` for the repository default.
     pub branch: Option<String>,
@@ -43,6 +51,7 @@ pub struct NewProject {
 #[derive(Debug, Clone, Default)]
 pub struct FormState {
     url: String,
+    location: String,
     directory: String,
     branch: String,
     focus_field: FocusField,
@@ -55,6 +64,7 @@ pub struct FormState {
 enum FocusField {
     #[default]
     Url,
+    Location,
     Directory,
     Branch,
 }
@@ -63,6 +73,7 @@ impl From<FocusField> for Field {
     fn from(f: FocusField) -> Self {
         match f {
             FocusField::Url => Field::Url,
+            FocusField::Location => Field::Location,
             FocusField::Directory => Field::Directory,
             FocusField::Branch => Field::Branch,
         }
@@ -73,6 +84,7 @@ impl From<Field> for FocusField {
     fn from(f: Field) -> Self {
         match f {
             Field::Url => FocusField::Url,
+            Field::Location => FocusField::Location,
             Field::Directory => FocusField::Directory,
             Field::Branch => FocusField::Branch,
         }
@@ -88,6 +100,10 @@ impl FormState {
         &self.url
     }
 
+    pub fn location(&self) -> &str {
+        &self.location
+    }
+
     pub fn directory(&self) -> &str {
         &self.directory
     }
@@ -100,6 +116,11 @@ impl FormState {
         self.focus_field.into()
     }
 
+    /// Pre-fill the location field (the default place to create the project).
+    pub fn set_location(&mut self, value: &str) {
+        self.location = value.to_string();
+    }
+
     /// Append a character to the focused field.
     pub fn insert_char(&mut self, c: char) {
         match self.focus_field {
@@ -107,6 +128,7 @@ impl FormState {
                 self.url.push(c);
                 self.sync_directory();
             }
+            FocusField::Location => self.location.push(c),
             FocusField::Directory => {
                 self.directory.push(c);
                 self.directory_dirty = true;
@@ -121,6 +143,9 @@ impl FormState {
             FocusField::Url => {
                 self.url.pop();
                 self.sync_directory();
+            }
+            FocusField::Location => {
+                self.location.pop();
             }
             FocusField::Directory => {
                 self.directory.pop();
@@ -164,12 +189,18 @@ impl FormState {
         } else {
             directory.to_string()
         };
+        let location = self.location.trim();
+        if location.is_empty() {
+            return Err("choose where to create the project".to_string());
+        }
+        let location = PathBuf::from(location);
         let branch = match self.branch.trim() {
             "" => None,
             b => Some(b.to_string()),
         };
         Ok(NewProject {
             url,
+            location,
             directory,
             branch,
         })
@@ -186,6 +217,13 @@ mod tests {
         }
     }
 
+    /// Move focus to a specific field from anywhere, via repeated `focus_next`.
+    fn focus_to(state: &mut FormState, field: Field) {
+        while state.focus() != field {
+            state.focus_next();
+        }
+    }
+
     #[test]
     fn typing_url_auto_fills_directory() {
         let mut state = FormState::new();
@@ -199,13 +237,12 @@ mod tests {
         type_str(&mut state, "https://github.com/owner/repo");
         assert_eq!(state.directory(), "repo");
 
-        state.focus_next(); // move to directory
-        assert_eq!(state.focus(), Field::Directory);
+        focus_to(&mut state, Field::Directory);
         type_str(&mut state, "-fork");
         assert_eq!(state.directory(), "repo-fork");
 
         // Further URL edits must not clobber the user's directory.
-        state.focus_prev();
+        focus_to(&mut state, Field::Url);
         type_str(&mut state, "2");
         assert_eq!(state.directory(), "repo-fork");
     }
@@ -214,22 +251,37 @@ mod tests {
     fn clearing_directory_restores_auto_derivation() {
         let mut state = FormState::new();
         type_str(&mut state, "https://github.com/owner/repo");
-        state.focus_next();
+        focus_to(&mut state, Field::Directory);
         for _ in 0.."repo".len() {
             state.backspace();
         }
         // Cleared, and not immediately refilled, so a custom name is possible.
         assert_eq!(state.directory(), "");
         // Back on the URL field, typing should re-derive again.
-        state.focus_prev();
+        focus_to(&mut state, Field::Url);
         type_str(&mut state, "-x");
         assert_eq!(state.directory(), "repo-x");
+    }
+
+    #[test]
+    fn editing_the_location_field() {
+        let mut state = FormState::new();
+        state.set_location("/base");
+        assert_eq!(state.location(), "/base");
+
+        focus_to(&mut state, Field::Location);
+        state.insert_char('x');
+        assert_eq!(state.location(), "/basex");
+        state.backspace();
+        assert_eq!(state.location(), "/base");
     }
 
     #[test]
     fn focus_cycles_through_fields() {
         let mut state = FormState::new();
         assert_eq!(state.focus(), Field::Url);
+        state.focus_next();
+        assert_eq!(state.focus(), Field::Location);
         state.focus_next();
         assert_eq!(state.focus(), Field::Directory);
         state.focus_next();
@@ -243,9 +295,11 @@ mod tests {
     #[test]
     fn validate_succeeds_with_derived_directory() {
         let mut state = FormState::new();
+        state.set_location("/base");
         type_str(&mut state, "git@github.com:owner/repo.git");
         let project = state.validate().unwrap();
         assert_eq!(project.url.as_str(), "git@github.com:owner/repo.git");
+        assert_eq!(project.location, PathBuf::from("/base"));
         assert_eq!(project.directory, "repo");
         assert_eq!(project.branch, None);
     }
@@ -253,14 +307,15 @@ mod tests {
     #[test]
     fn validate_keeps_explicit_branch_and_directory() {
         let mut state = FormState::new();
+        state.set_location("/base");
         type_str(&mut state, "https://github.com/owner/repo.git");
         // Clear the auto-filled directory, then type a custom one.
-        state.focus_next();
+        focus_to(&mut state, Field::Directory);
         for _ in 0.."repo".len() {
             state.backspace();
         }
         type_str(&mut state, "my-dir");
-        state.focus_next();
+        focus_to(&mut state, Field::Branch);
         type_str(&mut state, "develop");
         let project = state.validate().unwrap();
         assert_eq!(project.directory, "my-dir");
@@ -270,9 +325,10 @@ mod tests {
     #[test]
     fn validate_derives_directory_when_field_is_empty() {
         let mut state = FormState::new();
+        state.set_location("/base");
         type_str(&mut state, "https://github.com/owner/repo.git");
         // Clear the auto-filled directory so validate falls back to the URL.
-        state.focus_next();
+        focus_to(&mut state, Field::Directory);
         for _ in 0.."repo".len() {
             state.backspace();
         }
@@ -284,9 +340,7 @@ mod tests {
     #[test]
     fn backspace_edits_the_branch_field() {
         let mut state = FormState::new();
-        state.focus_next(); // Directory
-        state.focus_next(); // Branch
-        assert_eq!(state.focus(), Field::Branch);
+        focus_to(&mut state, Field::Branch);
         type_str(&mut state, "dev");
         state.backspace();
         assert_eq!(state.branch(), "de");
@@ -296,5 +350,14 @@ mod tests {
     fn validate_rejects_empty_url() {
         let state = FormState::new();
         assert!(state.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_empty_location() {
+        let mut state = FormState::new();
+        type_str(&mut state, "https://github.com/owner/repo.git");
+        // Location left blank: validation fails even with a valid URL.
+        let err = state.validate().unwrap_err();
+        assert!(err.contains("create"));
     }
 }

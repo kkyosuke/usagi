@@ -7,7 +7,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 
 /// A worktree as reported by `git worktree list --porcelain`.
 #[derive(Debug, Clone, PartialEq)]
@@ -60,6 +60,40 @@ fn git_capture(repo: &Path, args: &[&str]) -> Result<Option<String>> {
     Ok(Some(
         String::from_utf8_lossy(&output.stdout).trim().to_string(),
     ))
+}
+
+/// Clone `url` into `dest`, optionally checking out `branch` after cloning.
+///
+/// Output is captured rather than inherited so it does not disturb an active
+/// TUI; on failure the captured stderr is surfaced in the error. Repo-scoping
+/// env vars are stripped so an inherited `GIT_DIR` (e.g. when usagi runs from a
+/// git hook) cannot redirect the clone.
+pub fn clone(url: &str, dest: &Path, branch: Option<&str>) -> Result<()> {
+    let mut command = Command::new("git");
+    for var in REPO_SCOPING_ENV {
+        command.env_remove(var);
+    }
+    command.arg("clone");
+    if let Some(branch) = branch {
+        command.args(["--branch", branch]);
+    }
+    command.arg(url).arg(dest);
+    // Anchor the command to the destination's parent so it never depends on the
+    // process's inherited working directory (which a concurrent test — or a
+    // caller running from a since-removed directory — may have invalidated).
+    // `dest` is passed absolute, so the clone target is unaffected.
+    if let Some(parent) = dest.parent() {
+        command.current_dir(parent);
+    }
+
+    let output = command.output().context("failed to run `git clone`")?;
+    if !output.status.success() {
+        bail!(
+            "git clone failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(())
 }
 
 /// Resolve the absolute path of the repository's primary (main) worktree.
@@ -357,6 +391,47 @@ mod tests {
         run(local.path(), &["add", "."]);
         run(local.path(), &["commit", "-q", "-m", "ahead"]);
         assert!(!is_merged(local.path(), "feature", "main"));
+    }
+
+    #[test]
+    fn clone_copies_a_repository() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        init_repo(&src);
+
+        let dest = tmp.path().join("dest");
+        clone(src.to_str().unwrap(), &dest, None).unwrap();
+
+        assert!(dest.join(".git").is_dir());
+        assert!(dest.join("f").is_file());
+    }
+
+    #[test]
+    fn clone_checks_out_the_requested_branch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        init_repo(&src);
+        run(&src, &["branch", "feature"]);
+
+        let dest = tmp.path().join("dest");
+        clone(src.to_str().unwrap(), &dest, Some("feature")).unwrap();
+
+        let head = git_capture(&dest, &["rev-parse", "--abbrev-ref", "HEAD"])
+            .unwrap()
+            .unwrap();
+        assert_eq!(head, "feature");
+    }
+
+    #[test]
+    fn clone_fails_for_a_missing_source() {
+        let tmp = tempfile::tempdir().unwrap();
+        let missing = tmp.path().join("nope");
+        let dest = tmp.path().join("dest");
+
+        let err = clone(missing.to_str().unwrap(), &dest, None).unwrap_err();
+        assert!(err.to_string().contains("git clone failed"));
     }
 
     #[test]

@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use serde::{Deserialize, Serialize};
 
 /// UI color theme.
@@ -18,4 +20,8 @@ pub struct Settings {
     pub theme: Theme,
     /// Name of the workspace to open by default, if any.
     pub default_workspace: Option<String>,
+    /// Base directory new projects are cloned under, if configured.
+    ///
+    /// When unset the New Project screen falls back to `~/git`.
+    pub workspace_root: Option<PathBuf>,
 }

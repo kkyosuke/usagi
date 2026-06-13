@@ -21,8 +21,16 @@ pub enum Outcome {
 /// Runs the New Project screen against the given terminal and key source until
 /// the user submits, goes back, or quits. Assumes the alternate screen is
 /// already active (it is owned by the caller).
-pub fn event_loop(term: &Term, reader: &mut dyn KeyReader) -> Result<Outcome> {
+///
+/// `default_location` pre-fills the Location field with the base directory new
+/// projects are created under; the user can edit it before submitting.
+pub fn event_loop(
+    term: &Term,
+    reader: &mut dyn KeyReader,
+    default_location: &str,
+) -> Result<Outcome> {
     let mut state = FormState::new();
+    state.set_location(default_location);
     let mut notice: Option<String> = None;
 
     loop {
@@ -102,7 +110,7 @@ mod tests {
         let term = Term::stdout();
         let mut reader = ScriptedReader::new(vec![Ok(Key::Escape)]);
         assert!(matches!(
-            event_loop(&term, &mut reader).unwrap(),
+            event_loop(&term, &mut reader, "/base").unwrap(),
             Outcome::Back
         ));
     }
@@ -112,7 +120,7 @@ mod tests {
         let term = Term::stdout();
         let mut reader = ScriptedReader::new(vec![Ok(Key::CtrlC)]);
         assert!(matches!(
-            event_loop(&term, &mut reader).unwrap(),
+            event_loop(&term, &mut reader, "/base").unwrap(),
             Outcome::Quit
         ));
     }
@@ -123,12 +131,14 @@ mod tests {
         let mut keys = type_keys("https://github.com/owner/repo.git");
         keys.push(Ok(Key::Enter));
         let mut reader = ScriptedReader::new(keys);
-        let outcome = event_loop(&term, &mut reader).unwrap();
+        // The pre-filled location lets validation succeed without editing it.
+        let outcome = event_loop(&term, &mut reader, "/base").unwrap();
         assert!(matches!(
             &outcome,
             Outcome::Submitted(project)
                 if project.directory == "repo"
                     && project.url.as_str() == "https://github.com/owner/repo.git"
+                    && project.location == std::path::Path::new("/base")
         ));
     }
 
@@ -138,7 +148,7 @@ mod tests {
         // Enter on an empty form fails validation (notice), then Escape goes back.
         let mut reader = ScriptedReader::new(vec![Ok(Key::Enter), Ok(Key::Escape)]);
         assert!(matches!(
-            event_loop(&term, &mut reader).unwrap(),
+            event_loop(&term, &mut reader, "/base").unwrap(),
             Outcome::Back
         ));
     }
@@ -157,7 +167,7 @@ mod tests {
             Ok(Key::Escape),    // back
         ]);
         assert!(matches!(
-            event_loop(&term, &mut reader).unwrap(),
+            event_loop(&term, &mut reader, "/base").unwrap(),
             Outcome::Back
         ));
     }
@@ -170,7 +180,7 @@ mod tests {
             "interrupted",
         ))]);
         assert!(matches!(
-            event_loop(&term, &mut reader).unwrap(),
+            event_loop(&term, &mut reader, "/base").unwrap(),
             Outcome::Quit
         ));
     }
@@ -179,7 +189,7 @@ mod tests {
     fn unexpected_read_error_is_propagated() {
         let term = Term::stdout();
         let mut reader = ScriptedReader::new(vec![Err(io::Error::other("boom"))]);
-        let err = event_loop(&term, &mut reader).unwrap_err();
+        let err = event_loop(&term, &mut reader, "/base").unwrap_err();
         assert!(err.to_string().contains("Failed to read key"));
     }
 }
