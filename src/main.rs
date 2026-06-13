@@ -17,6 +17,8 @@ enum Commands {
     Doctor,
     /// Hop into the usagi startup screen
     Hop,
+    /// Sync the current repository's worktree state to .usagi/state.json
+    Status,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -25,5 +27,6 @@ fn main() -> anyhow::Result<()> {
     match cli.command {
         Commands::Doctor => usagi::presentation::cli::doctor::run(),
         Commands::Hop => usagi::presentation::cli::hop::run(),
+        Commands::Status => usagi::presentation::cli::status::run(),
     }
 }
