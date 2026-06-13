@@ -8,6 +8,11 @@ pub fn load(storage: &Storage) -> Result<Settings> {
     storage.load_settings()
 }
 
+/// Persist the given settings as-is.
+pub fn save(storage: &Storage, settings: &Settings) -> Result<()> {
+    storage.save_settings(settings)
+}
+
 /// Change the UI theme and persist it.
 pub fn set_theme(storage: &Storage, theme: Theme) -> Result<Settings> {
     let mut settings = storage.load_settings()?;

@@ -64,6 +64,21 @@ fn settings_round_trip() {
 }
 
 #[test]
+fn save_persists_settings_as_a_whole() {
+    let (_dir, storage) = temp_storage();
+
+    let settings = usagi::domain::settings::Settings {
+        theme: Theme::Dark,
+        default_workspace: Some("beta".into()),
+        ..Default::default()
+    };
+    settings::save(&storage, &settings).unwrap();
+
+    let loaded = settings::load(&storage).unwrap();
+    assert_eq!(loaded, settings);
+}
+
+#[test]
 fn workspaces_and_settings_are_stored_in_separate_files() {
     let (_dir, storage) = temp_storage();
 
