@@ -1,4 +1,4 @@
-use console::{style, Term};
+use console::style;
 
 /// A single entry in the startup-screen menu.
 pub struct MenuItem {
@@ -15,17 +15,17 @@ fn centered_padding(term_width: usize, content_width: usize) -> usize {
     term_width.saturating_sub(content_width) / 2
 }
 
-/// Terminal size with fallbacks for environments that report zero.
-fn term_size(term: &Term) -> (usize, usize) {
-    let (height, width) = term.size();
-    let height = if height == 0 { 24 } else { height as usize };
-    let width = if width == 0 { 80 } else { width as usize };
+/// Normalises a raw terminal size, substituting fallbacks for the zeroes that
+/// non-interactive environments report.
+pub fn normalize_size(height: usize, width: usize) -> (usize, usize) {
+    let height = if height == 0 { 24 } else { height };
+    let width = if width == 0 { 80 } else { width };
     (height, width)
 }
 
-/// Renders the usagi ASCII-art mascot centred in the terminal.
-pub fn show_rabbit(term: &Term) {
-    let (height, width) = term_size(term);
+/// Builds the ASCII-art mascot lines, centred for the given terminal size.
+fn rabbit_lines(height: usize, width: usize) -> Vec<String> {
+    let mut lines = Vec::new();
 
     let total_height = RABBIT_LINES.len() + 3;
     let top_padding = if height > total_height + 10 {
@@ -34,7 +34,7 @@ pub fn show_rabbit(term: &Term) {
         1
     };
     for _ in 0..top_padding {
-        let _ = term.write_line("");
+        lines.push(String::new());
     }
 
     let rabbit_width = RABBIT_LINES
@@ -44,33 +44,33 @@ pub fn show_rabbit(term: &Term) {
         .unwrap_or(0);
     let rabbit_padding = " ".repeat(centered_padding(width, rabbit_width));
     for line in RABBIT_LINES {
-        let _ = term.write_line(
-            &style(format!("{rabbit_padding}{line}"))
+        lines.push(
+            style(format!("{rabbit_padding}{line}"))
                 .magenta()
                 .bold()
                 .to_string(),
         );
     }
 
-    let _ = term.write_line("");
+    lines.push(String::new());
     let title_padding = " ".repeat(centered_padding(width, TITLE.chars().count()));
-    let _ = term.write_line(
-        &style(format!("{title_padding}{TITLE}"))
+    lines.push(
+        style(format!("{title_padding}{TITLE}"))
             .green()
             .bold()
             .to_string(),
     );
+
+    lines
 }
 
-/// Renders the menu items, highlighting the selected entry.
-pub fn render_side_menu(term: &Term, items: &[MenuItem], selected_index: usize) {
-    let (_, width) = term_size(term);
-
+/// Builds the menu lines, highlighting the selected entry.
+fn menu_lines(width: usize, items: &[MenuItem], selected_index: usize) -> Vec<String> {
     // "> Label..... key" — cursor + 10-char label + right-aligned key.
     let menu_width = 18;
     let left_padding = " ".repeat(centered_padding(width, menu_width));
 
-    let _ = term.write_line("");
+    let mut lines = vec![String::new()];
     for (i, item) in items.iter().enumerate() {
         let is_selected = i == selected_index;
 
@@ -93,46 +93,136 @@ pub fn render_side_menu(term: &Term, items: &[MenuItem], selected_index: usize) 
             format!("{:>5}", item.key)
         };
 
-        let _ = term.write_line(&format!("{left_padding}{cursor} {label} {key}"));
-        let _ = term.write_line("");
+        lines.push(format!("{left_padding}{cursor} {label} {key}"));
+        lines.push(String::new());
     }
+    lines
 }
 
-/// Renders a transient notice line under the menu, if any.
-pub fn render_notice(term: &Term, notice: Option<&str>) {
+/// Builds the transient notice line under the menu, if any.
+fn notice_lines(width: usize, notice: Option<&str>) -> Vec<String> {
     let Some(notice) = notice else {
-        return;
+        return Vec::new();
     };
-    let (_, width) = term_size(term);
     let padding = " ".repeat(centered_padding(width, notice.chars().count()));
-    let _ = term.write_line(&format!("{padding}{}", style(notice).yellow()));
+    vec![format!("{padding}{}", style(notice).yellow())]
 }
 
-/// Renders the status footer at the bottom of the startup screen.
-pub fn render_footer(term: &Term) {
+/// Builds the status footer shown at the bottom of the startup screen.
+fn footer_lines(width: usize) -> Vec<String> {
     let footer = format!(
         " v{} | ↑↓: move / Enter: select / q: quit",
         env!("CARGO_PKG_VERSION")
     );
-    let (_, width) = term_size(term);
     let padding = " ".repeat(centered_padding(width, footer.chars().count()));
+    vec![String::new(), format!("{padding}{}", style(footer).dim())]
+}
 
-    let _ = term.write_line("");
-    let _ = term.write_line(&format!("{padding}{}", style(footer).dim()));
+/// Builds the full startup-screen frame for a raw terminal size.
+pub fn render_frame(
+    raw_height: usize,
+    raw_width: usize,
+    items: &[MenuItem],
+    selected_index: usize,
+    notice: Option<&str>,
+) -> Vec<String> {
+    let (height, width) = normalize_size(raw_height, raw_width);
+    let mut lines = rabbit_lines(height, width);
+    lines.extend(menu_lines(width, items, selected_index));
+    lines.extend(notice_lines(width, notice));
+    lines.extend(footer_lines(width));
+    lines
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn sample_items() -> Vec<MenuItem> {
+        vec![
+            MenuItem {
+                label: "Open",
+                key: 'o',
+            },
+            MenuItem {
+                label: "Quit",
+                key: 'q',
+            },
+        ]
+    }
+
     #[test]
-    fn test_centered_padding_centers_content() {
+    fn centered_padding_centers_content() {
         assert_eq!(centered_padding(80, 10), 35);
         assert_eq!(centered_padding(81, 10), 35);
     }
 
     #[test]
-    fn test_centered_padding_handles_narrow_terminal() {
+    fn centered_padding_handles_narrow_terminal() {
         assert_eq!(centered_padding(5, 10), 0);
+    }
+
+    #[test]
+    fn normalize_size_substitutes_fallbacks_for_zero() {
+        assert_eq!(normalize_size(0, 0), (24, 80));
+    }
+
+    #[test]
+    fn normalize_size_keeps_nonzero_values() {
+        assert_eq!(normalize_size(30, 100), (30, 100));
+    }
+
+    #[test]
+    fn rabbit_lines_uses_quarter_padding_in_tall_terminals() {
+        // total_height = 6, threshold = 16, so a height of 40 takes the tall branch.
+        let lines = rabbit_lines(40, 80);
+        // (40 - 6) / 4 == 8 leading blank lines.
+        assert_eq!(lines.iter().take_while(|l| l.is_empty()).count(), 8);
+        assert!(lines.iter().any(|l| l.contains("USAGI")));
+    }
+
+    #[test]
+    fn rabbit_lines_uses_single_padding_in_short_terminals() {
+        let lines = rabbit_lines(10, 80);
+        assert_eq!(lines.iter().take_while(|l| l.is_empty()).count(), 1);
+    }
+
+    #[test]
+    fn menu_lines_marks_only_the_selected_entry() {
+        let items = sample_items();
+        let lines = menu_lines(80, &items, 0);
+        assert!(lines.iter().any(|l| l.contains("Open")));
+        assert!(lines.iter().any(|l| l.contains("Quit")));
+        // The selected cursor ">" appears exactly once.
+        assert_eq!(lines.iter().filter(|l| l.contains('>')).count(), 1);
+    }
+
+    #[test]
+    fn notice_lines_empty_when_absent() {
+        assert!(notice_lines(80, None).is_empty());
+    }
+
+    #[test]
+    fn notice_lines_renders_text_when_present() {
+        let lines = notice_lines(80, Some("hello"));
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("hello"));
+    }
+
+    #[test]
+    fn footer_lines_include_version() {
+        let lines = footer_lines(80);
+        assert!(lines.iter().any(|l| l.contains(env!("CARGO_PKG_VERSION"))));
+    }
+
+    #[test]
+    fn render_frame_combines_all_sections() {
+        let items = sample_items();
+        let frame = render_frame(0, 0, &items, 1, Some("coming soon"));
+        let joined = frame.join("\n");
+        assert!(joined.contains("USAGI"));
+        assert!(joined.contains("Open"));
+        assert!(joined.contains("coming soon"));
+        assert!(joined.contains(env!("CARGO_PKG_VERSION")));
     }
 }
