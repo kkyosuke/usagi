@@ -15,7 +15,7 @@ use console::Term;
 
 use crate::domain::workspace::Workspace;
 use crate::infrastructure::workspace_store::WorkspaceStore;
-use crate::presentation::tui::screen::TermKeyReader;
+use crate::presentation::tui::term_reader::TermKeyReader;
 
 pub use event::Outcome;
 

@@ -12,7 +12,7 @@ use console::Term;
 
 use crate::domain::settings::Settings;
 use crate::infrastructure::storage::Storage;
-use crate::presentation::tui::screen::TermKeyReader;
+use crate::presentation::tui::term_reader::TermKeyReader;
 use crate::usecase::{settings, workspace};
 
 pub use event::Outcome;

@@ -11,7 +11,7 @@ pub mod ui;
 use anyhow::Result;
 use console::Term;
 
-use crate::presentation::tui::screen::TermKeyReader;
+use crate::presentation::tui::term_reader::TermKeyReader;
 
 pub use event::Outcome;
 

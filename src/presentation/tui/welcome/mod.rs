@@ -11,7 +11,7 @@ use crate::presentation::tui::config;
 use crate::presentation::tui::new;
 use crate::presentation::tui::new::state::NewProject;
 use crate::presentation::tui::open;
-use crate::presentation::tui::screen::TermKeyReader;
+use crate::presentation::tui::term_reader::TermKeyReader;
 use crate::usecase::project;
 
 /// Displays the welcome screen and dispatches the selected menu action.
