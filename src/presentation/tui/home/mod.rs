@@ -31,7 +31,7 @@ pub fn run() -> Result<()> {
     ];
 
     let term = Term::stdout();
-    let _guard = AlternateScreenGuard::new(term.clone())?;
+    let mut guard = AlternateScreenGuard::new(term.clone())?;
     let mut selected_index = 0;
     let mut notice: Option<String> = None;
 
@@ -47,7 +47,11 @@ pub fn run() -> Result<()> {
             Ok(key) => key,
             // Treat an interrupted read (e.g. Ctrl+C delivered as a signal) as quit.
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => return Ok(()),
-            Err(e) => return Err(anyhow::Error::from(e).context("Failed to read key")),
+            Err(e) => {
+                // Restore the terminal without the farewell on an unexpected error.
+                guard.dismiss();
+                return Err(anyhow::Error::from(e).context("Failed to read key"));
+            }
         };
 
         match key {
@@ -55,9 +59,11 @@ pub fn run() -> Result<()> {
                 selected_index = selected_index
                     .checked_sub(1)
                     .unwrap_or(menu_items.len() - 1);
+                notice = None;
             }
             Key::ArrowDown | Key::Char('j') => {
                 selected_index = (selected_index + 1) % menu_items.len();
+                notice = None;
             }
             Key::Enter => {
                 let item = &menu_items[selected_index];
