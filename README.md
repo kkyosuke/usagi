@@ -64,6 +64,23 @@ cargo run -- doctor
 
 `git` / `bash` の導入状況に加え、`usagi hop` のデスクトップ通知が利用可能か、設定ストレージが読めるかを `ok` / `warn` / `missing` で表示します。
 
+### ワークスペースで開発を始める
+
+```bash
+cd <project>      # usagi init 済みのプロジェクト
+cargo run -- hop  # TUI を起動
+```
+
+ワークスペースを開いたあと、コマンドモード（`:` で起動）から以下を実行できます。
+
+```text
+:session new feature-x   # .usagi/worktree/feature-x/ にセッション（worktree）を作成
+:session list            # セッション一覧
+:terminal                # 選択中の worktree で対話シェルを起動（シェル終了で TUI へ復帰）
+```
+
+作成した worktree は左ペインに表示されます。目的の worktree を選んで `terminal` を実行すると、その worktree を作業ディレクトリとしたシェルが開くので、そこで `claude` などの AI エージェントを起動して開発できます。
+
 ## Project Structure
 
 クリーンアーキテクチャを採用しています（domain → usecase → infrastructure ← presentation）。
@@ -111,6 +128,10 @@ lefthook install
 - コミットメッセージ: `<type>[(scope)][!]: <説明>`（例: `feat: doctor コマンドを追加`）
 - type: `feat` `fix` `docs` `style` `refactor` `perf` `test` `build` `ci` `chore` `revert`
 - 緊急時のスキップ: `LEFTHOOK=0 git commit ...` または `git commit --no-verify`
+
+### Release
+
+リリースは `Cargo.toml` の `version` 変更を起点に自動化されています。`version` を上げる変更を `main` にマージすると、`v<version>` タグと GitHub Release が自動作成され、各プラットフォーム向けバイナリが添付されます。リリースノートは GitHub Models（AI）がコミットログから自動生成します。詳細は [document/06-conventions.md#リリース](document/06-conventions.md#リリース) を参照してください。
 
 ## License
 

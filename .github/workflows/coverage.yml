@@ -69,10 +69,10 @@ jobs:
         {
           echo "## 📊 Test Coverage"
           echo ""
-          echo "> 🎯 **全体カバレッジ (Lines): ${total}**"
+          echo "> 🚀 **いまのカバレッジ (Lines): ${total}** — この調子でいこう！"
           if [ -z "$rows" ]; then
             echo ">"
-            echo "> 🎉 すべてのファイルが Lines カバレッジ100%です！"
+            echo "> 🎉✨ パーフェクト！全ファイル Lines カバレッジ 100% を達成しました 🏆🐰"
           else
             echo ">"
             echo "> 100% に届いていないファイルだけピックアップしました 👇"
