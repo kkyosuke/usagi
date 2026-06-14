@@ -60,10 +60,10 @@ pub fn dim_line(width: usize, text: &str) -> String {
 /// A left/right value chooser — the shared rendering primitive for every
 /// settings field that cycles through choices.
 ///
-/// When `focused`, the value is wrapped in chevrons — `< Dark >` — to signal it
-/// can be cycled with ←/→. When not focused it shows the value plainly, padded
-/// with the same two columns the chevrons occupy so the value never shifts as
-/// focus moves between rows.
+/// The value is always wrapped in chevrons — `< Dark >` — so every field reads
+/// as a left/right selector and the chevrons line up in a single column down
+/// the screen. Colour conveys state: the `focused` row is bright (cyan-bold),
+/// the rest are dimmed.
 ///
 /// `changed` marks a value that differs from what is saved on disk: it is
 /// painted yellow (taking priority over the focused/idle colours) so unsaved
@@ -81,12 +81,7 @@ pub fn chooser(value: &str, focused: bool, changed: bool) -> String {
         .to_string()
     };
 
-    if focused {
-        format!("{} {} {}", paint("<"), paint(value), paint(">"))
-    } else {
-        // Two spaces each side mirror the `< ` / ` >` of the focused form.
-        paint(&format!("  {value}  "))
-    }
+    format!("{} {} {}", paint("<"), paint(value), paint(">"))
 }
 
 #[cfg(test)]
@@ -134,25 +129,24 @@ mod tests {
     }
 
     #[test]
-    fn chooser_brackets_the_value_only_when_focused() {
-        let focused = chooser("Dark", true, false);
-        assert!(focused.contains("Dark"));
-        assert!(focused.contains('<'));
-        assert!(focused.contains('>'));
-
-        let idle = chooser("Dark", false, false);
-        assert!(idle.contains("Dark"));
-        assert!(!idle.contains('<'));
-        assert!(!idle.contains('>'));
+    fn chooser_always_brackets_the_value() {
+        // Chevrons show whether focused or not, so every field reads as a
+        // selector and the chevrons align down the column.
+        for focused in [true, false] {
+            let rendered = chooser("Dark", focused, false);
+            assert!(rendered.contains("Dark"));
+            assert!(rendered.contains('<'));
+            assert!(rendered.contains('>'));
+        }
     }
 
     #[test]
     fn chooser_keeps_the_value_aligned_across_focus() {
-        // The value plus its surrounding two columns occupies the same width
-        // whether focused (`< v >`) or not (`  v  `), so the column never jumps.
+        // Focus changes only the colour, not the layout, so the visible width is
+        // identical and the column never jumps.
         let focused = console::strip_ansi_codes(&chooser("On", true, false)).into_owned();
         let idle = console::strip_ansi_codes(&chooser("On", false, false)).into_owned();
-        assert_eq!(focused.chars().count(), idle.chars().count());
+        assert_eq!(focused, idle);
     }
 
     #[test]

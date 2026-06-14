@@ -34,12 +34,13 @@ fn label_width() -> usize {
         .unwrap_or(0)
 }
 
-/// Builds one setting row: a `>` cursor for the selected entry, the label in a
-/// fixed-width column, the already-styled `< value >` chooser, and a trailing
-/// `●` for fields carrying an unsaved edit.
+/// Builds one setting row. Two single-column gutters sit left of the label: the
+/// `>` cursor for the selected row, then a `●` flag for a field carrying an
+/// unsaved edit. The label follows in a fixed-width column, then the already
+/// styled `< value >` chooser.
 ///
-/// `value` arrives pre-styled from [`widgets::chooser`] so the value column
-/// stays aligned whether the row is focused or not.
+/// `value` arrives pre-styled from [`widgets::chooser`]; keeping the cursor and
+/// change flag in their own gutters keeps the label and value columns aligned.
 fn setting_row(
     block_pad: &str,
     label: &str,
@@ -48,8 +49,15 @@ fn setting_row(
     selected: bool,
     changed: bool,
 ) -> String {
-    let marker = if selected {
+    let cursor = if selected {
         style(">").red().bold().to_string()
+    } else {
+        " ".to_string()
+    };
+
+    // A dot to the left of the label flags an edit that has not been saved yet.
+    let mark = if changed {
+        style("●").yellow().bold().to_string()
     } else {
         " ".to_string()
     };
@@ -61,14 +69,7 @@ fn setting_row(
         style(padded).cyan().to_string()
     };
 
-    // A trailing dot flags an edit that has not been saved yet.
-    let mark = if changed {
-        format!("  {}", style("●").yellow().bold())
-    } else {
-        String::new()
-    };
-
-    format!("{block_pad}{marker} {label}  {value}{mark}")
+    format!("{block_pad}{cursor} {mark} {label}  {value}")
 }
 
 /// Builds the settings list: one row per editable field, each rendered as a
@@ -113,9 +114,10 @@ fn save_button_line(block_pad: &str, dirty: bool, selected: bool) -> String {
         style(SAVE_LABEL).dim().to_string()
     };
 
-    // Align the button under the value column (past the label gutter).
+    // Align the button under the value column: the cursor gutter, the (empty)
+    // change-flag gutter, then the label-width gutter, matching `setting_row`.
     let gutter = " ".repeat(label_width());
-    format!("{block_pad}{marker} {gutter}  {button}")
+    format!("{block_pad}{marker}   {gutter}  {button}")
 }
 
 /// Builds the transient notice line below the settings.
@@ -189,6 +191,15 @@ mod tests {
     use super::*;
     use crate::domain::settings::{Settings, Theme};
 
+    /// A row carries the cursor when its first non-space glyph is `>`. Chevrons
+    /// from the chooser also contain `>`, so position — not mere presence — is
+    /// what distinguishes the selected row.
+    fn has_cursor(line: &str) -> bool {
+        console::strip_ansi_codes(line)
+            .trim_start()
+            .starts_with('>')
+    }
+
     fn sample_config() -> Config {
         Config::new(
             Settings {
@@ -241,10 +252,11 @@ mod tests {
         assert!(lines[3].contains("Agent CLI"));
         // Each field shows its single current value via the chooser.
         assert!(lines[3].contains("Claude"));
-        // The focused (first) row is bracketed by the chooser chevrons; only it
-        // carries the cursor.
-        assert!(lines[0].contains('<') && lines[0].contains('>'));
-        assert_eq!(lines.iter().filter(|l| l.contains('>')).count(), 1);
+        // Every field is a chooser, so chevrons appear on all rows...
+        assert!(lines.iter().all(|l| l.contains('<') && l.contains('>')));
+        // ...but only the focused (first) row carries the cursor.
+        assert!(has_cursor(&lines[0]));
+        assert_eq!(lines.iter().filter(|l| has_cursor(l)).count(), 1);
         // Nothing is edited in a fresh config, so no row is flagged changed.
         assert!(lines.iter().all(|l| !l.contains('●')));
     }
@@ -315,7 +327,7 @@ mod tests {
         assert!(config.is_save_selected());
         let frame = render_frame(24, 80, &config, None);
         // No field row carries the cursor; the Save row does.
-        let cursor_rows: Vec<&String> = frame.iter().filter(|l| l.contains('>')).collect();
+        let cursor_rows: Vec<&String> = frame.iter().filter(|l| has_cursor(l)).collect();
         assert_eq!(cursor_rows.len(), 1);
         assert!(cursor_rows[0].contains("Save"));
     }
