@@ -98,6 +98,7 @@ pub fn event_loop(
                             let outcome = create_session(&name);
                             state.apply_session_outcome(outcome);
                         }
+                        Effect::ListSessions => state.log_sessions(),
                         _ => {}
                     }
                 }
@@ -130,6 +131,7 @@ mod tests {
         SessionOutcome {
             line: LogLine::output("created"),
             worktrees: None,
+            sessions: None,
         }
     }
 
@@ -336,6 +338,7 @@ mod tests {
         SessionOutcome {
             line: LogLine::output("created"),
             worktrees: None,
+            sessions: None,
         }
     }
 
@@ -348,6 +351,18 @@ mod tests {
         keys.push(Ok(Key::Enter)); // create via noop_create
         keys.push(Ok(Key::Escape)); // cancel command mode
         keys.push(Ok(Key::Escape)); // leave sidebar
+        assert!(matches!(run(keys, sample_state()).unwrap(), Outcome::Back));
+    }
+
+    #[test]
+    fn session_list_logs_the_sessions() {
+        // `:session list` triggers the list effect, which logs the sessions.
+        let mut keys = vec![Ok(Key::Char(':'))];
+        keys.extend(typed("session list"));
+        keys.push(Ok(Key::Enter));
+        keys.push(Ok(Key::Escape)); // cancel command mode
+        keys.push(Ok(Key::Escape)); // leave sidebar
+                                    // Empty session list still drives the ListSessions arm without panicking.
         assert!(matches!(run(keys, sample_state()).unwrap(), Outcome::Back));
     }
 
