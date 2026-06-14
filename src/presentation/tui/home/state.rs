@@ -138,6 +138,37 @@ pub struct Submission {
     pub recorded: Option<String>,
 }
 
+/// The open session-name modal: the name being typed plus an optional inline
+/// validation error (e.g. an empty or duplicate name).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SessionModal {
+    input: String,
+    error: Option<String>,
+}
+
+impl SessionModal {
+    /// The name typed so far.
+    pub fn input(&self) -> &str {
+        &self.input
+    }
+
+    /// The current validation error, if any.
+    pub fn error(&self) -> Option<&str> {
+        self.error.as_deref()
+    }
+}
+
+/// The result of attempting to create a session, applied back to the screen by
+/// [`HomeState::apply_session_outcome`]. The impure work (git / filesystem) is
+/// done by the event loop's callback; this carries only what the screen shows.
+#[derive(Debug, Clone)]
+pub struct SessionOutcome {
+    /// A line describing the result (success or failure) to append to the log.
+    pub line: LogLine,
+    /// The refreshed worktree list, when creation produced a new one.
+    pub worktrees: Option<Vec<WorktreeState>>,
+}
+
 /// The full state of the home screen.
 ///
 /// Not `Clone`/`Debug`: it owns a [`CommandRegistry`] of trait objects, which
@@ -154,6 +185,8 @@ pub struct HomeState {
     /// The commands available in command mode (the extension point for the
     /// follow-up command features).
     registry: CommandRegistry,
+    /// The session-name modal, when open. While set it captures all keys.
+    modal: Option<SessionModal>,
 }
 
 impl HomeState {
@@ -178,6 +211,7 @@ impl HomeState {
             recall: None,
             log,
             registry: CommandRegistry::with_builtins(),
+            modal: None,
         }
     }
 
@@ -315,6 +349,71 @@ impl HomeState {
         Submission {
             effect: result.effect,
             recorded: Some(entry),
+        }
+    }
+
+    /// The open session-name modal, if any.
+    pub fn modal(&self) -> Option<&SessionModal> {
+        self.modal.as_ref()
+    }
+
+    /// Open the session-name modal with an empty input.
+    pub fn open_session_modal(&mut self) {
+        self.modal = Some(SessionModal::default());
+    }
+
+    /// Append a typed character to the modal's name (no-op when closed).
+    pub fn modal_push_char(&mut self, c: char) {
+        if let Some(modal) = self.modal.as_mut() {
+            modal.input.push(c);
+            modal.error = None;
+        }
+    }
+
+    /// Delete the last character of the modal's name (no-op when closed).
+    pub fn modal_backspace(&mut self) {
+        if let Some(modal) = self.modal.as_mut() {
+            modal.input.pop();
+            modal.error = None;
+        }
+    }
+
+    /// Close the modal, discarding the half-typed name.
+    pub fn cancel_modal(&mut self) {
+        self.modal = None;
+    }
+
+    /// Validate and accept the modal's name. On success the modal closes and the
+    /// trimmed name is returned (for the event loop to create the session); on an
+    /// empty or duplicate name the modal stays open with an inline error and
+    /// `None` is returned. A no-op (returning `None`) when the modal is closed.
+    pub fn submit_modal(&mut self) -> Option<String> {
+        let modal = self.modal.as_mut()?;
+        let name = modal.input.trim().to_string();
+        if name.is_empty() {
+            modal.error = Some("Name must not be empty.".to_string());
+            return None;
+        }
+        if self
+            .list
+            .worktrees()
+            .iter()
+            .any(|w| w.branch.as_deref() == Some(name.as_str()))
+        {
+            modal.error = Some(format!("\"{name}\" already exists."));
+            return None;
+        }
+        self.modal = None;
+        Some(name)
+    }
+
+    /// Apply the result of a session-creation attempt: log its line and, when
+    /// creation refreshed the worktree list, swap it in.
+    pub fn apply_session_outcome(&mut self, outcome: SessionOutcome) {
+        self.log.push(outcome.line);
+        if let Some(worktrees) = outcome.worktrees {
+            let name = self.list.workspace_name().to_string();
+            self.list = WorktreeList::new(name, worktrees);
         }
     }
 }
@@ -612,6 +711,112 @@ mod tests {
         // No recall in progress: recall_next does nothing.
         state.recall_next();
         assert_eq!(state.input(), "");
+    }
+
+    #[test]
+    fn session_command_without_a_name_opens_the_modal() {
+        let mut state = state();
+        for c in "session".chars() {
+            state.push_char(c);
+        }
+        let submission = state.submit();
+        assert_eq!(submission.effect, Effect::OpenSessionModal);
+        // The event loop turns the effect into an open modal.
+        assert!(state.modal().is_none());
+        state.open_session_modal();
+        assert_eq!(state.modal().unwrap().input(), "");
+        assert!(state.modal().unwrap().error().is_none());
+    }
+
+    #[test]
+    fn modal_editing_appends_and_deletes_characters() {
+        let mut state = state();
+        state.open_session_modal();
+        state.modal_push_char('a');
+        state.modal_push_char('b');
+        assert_eq!(state.modal().unwrap().input(), "ab");
+        state.modal_backspace();
+        assert_eq!(state.modal().unwrap().input(), "a");
+    }
+
+    #[test]
+    fn modal_editing_is_a_noop_when_closed() {
+        let mut state = state();
+        // No modal open: editing keys are harmless.
+        state.modal_push_char('a');
+        state.modal_backspace();
+        assert!(state.modal().is_none());
+        assert!(state.submit_modal().is_none());
+    }
+
+    #[test]
+    fn cancel_modal_closes_it() {
+        let mut state = state();
+        state.open_session_modal();
+        state.modal_push_char('x');
+        state.cancel_modal();
+        assert!(state.modal().is_none());
+    }
+
+    #[test]
+    fn submit_modal_rejects_an_empty_name() {
+        let mut state = state();
+        state.open_session_modal();
+        // Whitespace only is empty after trimming.
+        state.modal_push_char(' ');
+        assert!(state.submit_modal().is_none());
+        let modal = state.modal().unwrap();
+        assert!(modal.error().unwrap().contains("must not be empty"));
+    }
+
+    #[test]
+    fn submit_modal_rejects_a_duplicate_name() {
+        // The sample state has a "feature" worktree; reusing it is rejected.
+        let mut state = state();
+        state.open_session_modal();
+        for c in "feature".chars() {
+            state.modal_push_char(c);
+        }
+        assert!(state.submit_modal().is_none());
+        assert!(state.modal().unwrap().error().unwrap().contains("feature"));
+    }
+
+    #[test]
+    fn submit_modal_accepts_a_fresh_name_and_closes() {
+        let mut state = state();
+        state.open_session_modal();
+        for c in "  fresh  ".chars() {
+            state.modal_push_char(c);
+        }
+        // The name is trimmed, the modal closes, and the name is returned.
+        assert_eq!(state.submit_modal().as_deref(), Some("fresh"));
+        assert!(state.modal().is_none());
+    }
+
+    #[test]
+    fn apply_session_outcome_logs_and_optionally_swaps_the_list() {
+        let mut state = state();
+        // A success outcome with a refreshed list replaces the worktrees.
+        state.apply_session_outcome(SessionOutcome {
+            line: LogLine::output("Created session \"x\""),
+            worktrees: Some(vec![worktree("main"), worktree("x")]),
+        });
+        assert!(state.log().last().unwrap().text.contains("Created session"));
+        assert_eq!(state.list().worktrees().len(), 2);
+        assert_eq!(state.list().workspace_name(), "usagi");
+        assert!(state
+            .list()
+            .worktrees()
+            .iter()
+            .any(|w| w.branch.as_deref() == Some("x")));
+
+        // A failure outcome (no list) only logs.
+        state.apply_session_outcome(SessionOutcome {
+            line: LogLine::error("session failed"),
+            worktrees: None,
+        });
+        assert_eq!(state.log().last().unwrap().kind, LineKind::Error);
+        assert_eq!(state.list().worktrees().len(), 2);
     }
 
     #[test]
