@@ -38,7 +38,7 @@ cargo test
 
 - `document/01-overview.md` — プロジェクト概要
 - `document/02-architecture.md` — クリーンアーキテクチャ・`src/` のモジュール構成
-- `document/03-commands.md` — CLI / TUI 内コマンドのリファレンス
+- `document/03-commands/` — CLI / TUI 内コマンドのリファレンス（系統ごとに分割）
 - `document/04-orchestration.md` — セッション・worktree オーケストレーション
 - `document/05-settings.md` — 設定項目・保存場所・変更方法
 - `document/06-conventions.md` — 開発規約

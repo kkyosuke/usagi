@@ -428,8 +428,8 @@ pub struct CommandRegistry {
 
 impl CommandRegistry {
     /// A registry with every built-in command, in display order. The not-yet
-    /// implemented feature commands (`session`, `space`, `ai`, `terminal`,
-    /// `doctor`) are present as discoverable "coming soon" placeholders.
+    /// implemented feature commands (`ai`, `doctor`) are present as discoverable
+    /// "coming soon" placeholders; `session` and `terminal` are fully implemented.
     pub fn with_builtins() -> Self {
         Self {
             commands: vec![
