@@ -34,5 +34,5 @@ ref: usagi.ai doc/app/tui/terminal.md
 - `infrastructure/pty.rs`：portable-pty で PTY を開き、解決したシェルを指定ディレクトリで spawn。出力をバックグラウンドスレッドで `vt100::Parser` に流し込み画面グリッドを保持。リサイズ・入力書き込み・生存判定に加え、出力を解析するたびに増える**世代カウンタ（`generation`）**を提供し、描画ループが新しい出力に即応できるようにする（端末 I/O のためカバレッジ計測対象外）。
 - `presentation/tui/home/terminal_view.rs`：`vt100::Screen` を 1 行 1 文字列＋カーソル位置の純粋なスナップショット（`TerminalView`）へ変換。各セルの**色（前景/背景・名前付き/256/RGB）と装飾（太字・淡色・イタリック・下線・反転）を ANSI（SGR）エスケープとして保持**し、同一スタイルの連続セルはまとめ、既定スタイルはエスケープを出さず、行末でリセットして色漏れを防ぐ。テスト済み。
 - `presentation/tui/home/terminal_pane.rs`：crossterm の raw モードでキー入力をシェルへ転送する描画/入力ループ。**キー入力か新しい出力（世代カウンタ）のどちらかで即座に起き**、**前フレームから変化した行だけ**を 1 回の書き込みでまとめて再描画する（ちらつき・遅延を抑制）。`Ctrl-O` でデタッチ（端末 I/O のためカバレッジ計測対象外）。
-- `terminal` コマンドは従来どおり `Effect::OpenTerminal` を返し、event loop が選択中 worktree（未選択ならワークスペースルート）を解決して右ペインをターミナルモードに切り替え、`home/mod.rs` の `open_terminal` 経由で埋め込みシェルを起動する。シェルの `exit` または `Ctrl-O` で右ペインがコマンド履歴/出力へ戻る。
+- `terminal` コマンドは従来どおり `Effect::OpenTerminal` を返し、event loop が選択中 worktree（先頭のルート行を選んでいればワークスペースルート。[031](031-root-mode.md) 参照）を解決して右ペインをターミナルモードに切り替え、`home/mod.rs` の `open_terminal` 経由で埋め込みシェルを起動する。シェルの `exit` または `Ctrl-O` で右ペインがコマンド履歴/出力へ戻る。
 - `presentation/tui/screen.rs`：TUI を表示する代替スクリーン中は端末の代替スクロールモード（DECSET 1007）を `AlternateScreenGuard` で無効化する。これによりマウスホイールで埋め込みターミナルがスクロールしたり、その動きが矢印キーとしてシェルへ転送されたりするのを防ぐ（TUI 終了時に再有効化）。

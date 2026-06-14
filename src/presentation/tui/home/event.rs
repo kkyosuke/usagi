@@ -39,8 +39,9 @@ pub enum Outcome {
 /// screen, keeping the loop itself free of that IO and directly testable.
 ///
 /// `terminal` embeds a live shell in the right pane, rooted at the selected
-/// worktree (or `workspace_root` when nothing is selected). `agent` does the
-/// same but launches the configured AI agent CLI inside that shell. The loop
+/// worktree — or at `workspace_root` when the cursor is on the root row (the
+/// entry that belongs to no session). `agent` does the same but launches the
+/// configured AI agent CLI inside that shell. The loop
 /// switches the right pane to terminal mode, then runs the embedded session via
 /// `open_terminal` (its `bool` is `true` for `agent`, `false` for a bare
 /// `terminal`) in a small switch loop: the callback returns a [`PaneExit`], and
@@ -158,11 +159,12 @@ pub fn event_loop(
                         Effect::OpenRemoveModal { force } => state.open_remove_modal(force),
                         effect @ (Effect::OpenTerminal | Effect::OpenAgent) => {
                             // Embed the shell in the right pane, rooted at the
-                            // selected worktree (or the workspace root when
-                            // nothing is selected). `agent` is the same shell
-                            // with the AI agent CLI launched inside it. The pane
-                            // is switched to terminal mode for the duration and
-                            // back afterwards.
+                            // selected worktree — or at the workspace root when
+                            // the cursor is on the root row (no session), which
+                            // makes `selected()` `None`. `agent` is the same
+                            // shell with the AI agent CLI launched inside it. The
+                            // pane is switched to terminal mode for the duration
+                            // and back afterwards.
                             let agent = effect == Effect::OpenAgent;
                             let (label, fail) = if agent {
                                 ("Agent", "agent")
@@ -780,13 +782,16 @@ mod tests {
 
     /// Drive a pane-opening command (`terminal` or `agent`) through the loop with
     /// a custom `open_terminal`, so the effect's directory resolution, agent flag,
-    /// and result handling are exercised.
-    fn run_pane(
+    /// and result handling are exercised. `nav` is replayed in sidebar mode first
+    /// (e.g. an `ArrowDown` to move the cursor off the root row onto a worktree).
+    fn run_pane_with_nav(
+        nav: Vec<io::Result<Key>>,
         command: &str,
         state: HomeState,
         open_terminal: &mut dyn FnMut(&mut HomeState, &Path, bool) -> Result<PaneExit>,
     ) -> Result<Outcome> {
-        let mut keys = vec![Ok(Key::Char(':'))];
+        let mut keys = nav;
+        keys.push(Ok(Key::Char(':')));
         keys.extend(typed(command));
         keys.push(Ok(Key::Enter));
         keys.push(Ok(Key::Escape)); // cancel command mode
@@ -811,6 +816,15 @@ mod tests {
             open_terminal,
             &mut open_config,
         )
+    }
+
+    /// Drive a pane-opening command from the default (root-row) cursor.
+    fn run_pane(
+        command: &str,
+        state: HomeState,
+        open_terminal: &mut dyn FnMut(&mut HomeState, &Path, bool) -> Result<PaneExit>,
+    ) -> Result<Outcome> {
+        run_pane_with_nav(Vec::new(), command, state, open_terminal)
     }
 
     #[test]
@@ -838,22 +852,44 @@ mod tests {
             *opened.borrow_mut() = Some(dir.to_path_buf());
             Ok(PaneExit::Closed)
         };
-        // sample_state's selected worktree path is /repo/wt.
+        // Move the cursor off the root row onto a worktree (path /repo/wt).
         assert!(matches!(
-            run_pane("terminal", sample_state(), &mut open).unwrap(),
+            run_pane_with_nav(
+                vec![Ok(Key::ArrowDown)],
+                "terminal",
+                sample_state(),
+                &mut open
+            )
+            .unwrap(),
             Outcome::Back
         ));
         assert_eq!(opened.into_inner(), Some(PathBuf::from("/repo/wt")));
     }
 
     #[test]
-    fn terminal_falls_back_to_the_workspace_root_without_selection() {
+    fn terminal_on_the_root_row_opens_in_the_workspace_root() {
         let opened = RefCell::new(None);
         let mut open = |_home: &mut HomeState, dir: &Path, _agent: bool| {
             *opened.borrow_mut() = Some(dir.to_path_buf());
             Ok(PaneExit::Closed)
         };
-        // No worktrees: the loop opens the shell in the workspace root (/ws).
+        // The cursor starts on the root row even with worktrees present, so the
+        // shell opens in the workspace root (/ws), not in a worktree.
+        assert!(matches!(
+            run_pane("terminal", sample_state(), &mut open).unwrap(),
+            Outcome::Back
+        ));
+        assert_eq!(opened.into_inner(), Some(PathBuf::from("/ws")));
+    }
+
+    #[test]
+    fn terminal_falls_back_to_the_workspace_root_without_worktrees() {
+        let opened = RefCell::new(None);
+        let mut open = |_home: &mut HomeState, dir: &Path, _agent: bool| {
+            *opened.borrow_mut() = Some(dir.to_path_buf());
+            Ok(PaneExit::Closed)
+        };
+        // No worktrees: only the root row, so the shell opens in /ws.
         let state = HomeState::new("usagi", Vec::new(), None);
         assert!(matches!(
             run_pane("terminal", state, &mut open).unwrap(),
@@ -884,8 +920,10 @@ mod tests {
             *saw_agent.borrow_mut() = Some((agent, dir.to_path_buf()));
             Ok(PaneExit::Closed)
         };
+        // Move the cursor onto a worktree (path /repo/wt) before opening.
         assert!(matches!(
-            run_pane("agent", sample_state(), &mut open).unwrap(),
+            run_pane_with_nav(vec![Ok(Key::ArrowDown)], "agent", sample_state(), &mut open)
+                .unwrap(),
             Outcome::Back
         ));
         assert_eq!(
@@ -976,7 +1014,8 @@ mod tests {
     fn leader_switch_next_reroots_the_pane_then_detaches() {
         // The pane opens on the selected worktree, a SwitchNext re-roots it at
         // the next one (the first shell stays alive in the pool), then it
-        // detaches.
+        // detaches. An ArrowDown first moves the cursor off the root row onto
+        // the first worktree.
         let dirs = RefCell::new(Vec::new());
         let exits = RefCell::new(vec![PaneExit::SwitchNext, PaneExit::Detach]);
         let mut open = |_home: &mut HomeState, dir: &Path, _agent: bool| {
@@ -984,7 +1023,13 @@ mod tests {
             Ok(exits.borrow_mut().remove(0))
         };
         assert!(matches!(
-            run_pane("terminal", two_worktree_state(), &mut open).unwrap(),
+            run_pane_with_nav(
+                vec![Ok(Key::ArrowDown)],
+                "terminal",
+                two_worktree_state(),
+                &mut open
+            )
+            .unwrap(),
             Outcome::Back
         ));
         assert_eq!(
@@ -995,7 +1040,8 @@ mod tests {
 
     #[test]
     fn leader_switch_prev_reroots_the_pane_then_detaches() {
-        // SwitchPrev from the top worktree wraps to the bottom one.
+        // SwitchPrev from the first worktree wraps to the last one. An ArrowDown
+        // first moves the cursor off the root row onto the first worktree.
         let dirs = RefCell::new(Vec::new());
         let exits = RefCell::new(vec![PaneExit::SwitchPrev, PaneExit::Detach]);
         let mut open = |_home: &mut HomeState, dir: &Path, _agent: bool| {
@@ -1003,7 +1049,13 @@ mod tests {
             Ok(exits.borrow_mut().remove(0))
         };
         assert!(matches!(
-            run_pane("terminal", two_worktree_state(), &mut open).unwrap(),
+            run_pane_with_nav(
+                vec![Ok(Key::ArrowDown)],
+                "terminal",
+                two_worktree_state(),
+                &mut open
+            )
+            .unwrap(),
             Outcome::Back
         ));
         assert_eq!(

@@ -18,7 +18,7 @@ dependson: [006]
 
 ## やること
 
-- `agent` で選択中の worktree（未選択時はワークスペースルート）を作業ディレクトリに、`terminal` と同じ埋め込みシェルを起動する。
+- `agent` で選択中の worktree（先頭のルート行を選んでいればワークスペースルート。[031](031-root-mode.md) 参照）を作業ディレクトリに、`terminal` と同じ埋め込みシェルを起動する。
 - 起動直後にシェルへ Agent CLI の起動コマンドを送る（実質 `terminal` → コマンド入力）。
 - 起動する Agent CLI は実効設定（グローバル設定にローカル上書きを適用）の `agent_cli` から解決する（既定は `claude`、`gemini` などに変更可）。
 - 起動コマンドには usagi 自身の issue MCP サーバ（`usagi mcp`）を、対応する Agent CLI へ組み込む。Claude はインラインの `--mcp-config` で注入する（Gemini はインライン注入用フラグを持たないため現状は素のまま起動）。
