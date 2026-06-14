@@ -4,6 +4,7 @@ use anyhow::Result;
 use console::Key;
 use console::Term;
 
+use crate::infrastructure::terminal_manager::MonitorHandle;
 use crate::presentation::tui::screen::KeyReader;
 
 use super::command::Effect;
@@ -44,18 +45,25 @@ pub enum Outcome {
 /// `open_terminal` (its `bool` is `true` for `agent`, `false` for a bare
 /// `terminal`), and switches back when it returns; the PTY I/O, rendering, and
 /// agent-command resolution live in that injected callback.
+///
+/// `monitor` is the shared terminal-session monitor: before every redraw the
+/// loop refreshes the screen's "waiting for input" set from it, so the sidebar
+/// marks any background session whose agent has rung the bell.
 #[allow(clippy::too_many_arguments)]
 pub fn event_loop(
     term: &Term,
     reader: &mut dyn KeyReader,
     mut state: HomeState,
     workspace_root: &Path,
+    monitor: &MonitorHandle,
     persist: &mut dyn FnMut(&str),
     create_session: &mut dyn FnMut(&str) -> SessionOutcome,
     remove_session: &mut dyn FnMut(&str, bool) -> SessionOutcome,
     open_terminal: &mut dyn FnMut(&mut HomeState, &Path, bool) -> Result<()>,
 ) -> Result<Outcome> {
     loop {
+        // Mark any background sessions waiting for input before painting.
+        state.set_waiting(monitor.waiting());
         term.move_cursor_to(0, 0)?;
         term.clear_screen()?;
         let (height, width) = term.size();
@@ -141,7 +149,7 @@ pub fn event_loop(
                             state.show_log();
                             match result {
                                 Ok(()) => state
-                                    .log_output(format!("{label} in {} closed.", dir.display())),
+                                    .log_output(format!("{label} in {} detached.", dir.display())),
                                 Err(e) => state.log_error(format!("{fail} failed: {e}")),
                             }
                         }
@@ -235,6 +243,7 @@ mod tests {
     fn run(keys: Vec<io::Result<Key>>, state: HomeState) -> Result<Outcome> {
         let term = Term::stdout();
         let mut reader = ScriptedReader::new(keys);
+        let monitor = MonitorHandle::detached();
         let mut persist = |_: &str| {};
         let mut create_session: fn(&str) -> SessionOutcome = noop_create;
         let mut remove_session: fn(&str, bool) -> SessionOutcome = noop_remove;
@@ -244,6 +253,7 @@ mod tests {
             &mut reader,
             state,
             Path::new("/ws"),
+            &monitor,
             &mut persist,
             &mut create_session,
             &mut remove_session,
@@ -344,6 +354,7 @@ mod tests {
 
         let term = Term::stdout();
         let mut reader = ScriptedReader::new(keys);
+        let monitor = MonitorHandle::detached();
         let mut recorded = Vec::new();
         let mut persist = |command: &str| recorded.push(command.to_string());
         let mut create_session: fn(&str) -> SessionOutcome = noop_create;
@@ -354,6 +365,7 @@ mod tests {
             &mut reader,
             sample_state(),
             Path::new("/ws"),
+            &monitor,
             &mut persist,
             &mut create_session,
             &mut remove_session,
@@ -399,6 +411,7 @@ mod tests {
     ) -> (Result<Outcome>, Vec<String>) {
         let term = Term::stdout();
         let mut reader = ScriptedReader::new(keys);
+        let monitor = MonitorHandle::detached();
         let mut persist = |_: &str| {};
         let mut created = Vec::new();
         let mut create_session = |name: &str| {
@@ -412,6 +425,7 @@ mod tests {
             &mut reader,
             state,
             Path::new("/ws"),
+            &monitor,
             &mut persist,
             &mut create_session,
             &mut remove_session,
@@ -461,6 +475,7 @@ mod tests {
 
         let term = Term::stdout();
         let mut reader = ScriptedReader::new(keys);
+        let monitor = MonitorHandle::detached();
         let mut persist = |_: &str| {};
         let mut create_session: fn(&str) -> SessionOutcome = noop_create;
         let mut removed = Vec::new();
@@ -474,6 +489,7 @@ mod tests {
             &mut reader,
             sample_state(),
             Path::new("/ws"),
+            &monitor,
             &mut persist,
             &mut create_session,
             &mut remove_session,
@@ -590,6 +606,7 @@ mod tests {
 
         let term = Term::stdout();
         let mut reader = ScriptedReader::new(keys);
+        let monitor = MonitorHandle::detached();
         let mut persist = |_: &str| {};
         let mut create_session: fn(&str) -> SessionOutcome = noop_create;
         let mut remove_session: fn(&str, bool) -> SessionOutcome = noop_remove;
@@ -598,6 +615,7 @@ mod tests {
             &mut reader,
             state,
             Path::new("/ws"),
+            &monitor,
             &mut persist,
             &mut create_session,
             &mut remove_session,

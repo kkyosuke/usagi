@@ -34,7 +34,7 @@
 | テーマ | `theme` | enum | `system` | `light` / `dark` / `system`（OS 追従）の UI カラーテーマ |
 | 既定ワークスペース | `default_workspace` | string?\| | `null` | 既定で開くワークスペース名。未設定なら `null` |
 | クローン先ベース | `workspace_root` | string?\| | `null`（→ `~/git`） | 新規プロジェクトのクローン先ベースディレクトリ。未設定時は `~/git` にフォールバック |
-| デスクトップ通知 | `notifications_enabled` | bool | `true` | `hop` 時などのデスクトップ通知の ON/OFF |
+| デスクトップ通知 | `notifications_enabled` | bool | `true` | `hop` 時や、バックグラウンドの `agent` が入力待ちになった時などのデスクトップ通知の ON/OFF |
 | Agent CLI | `agent_cli` | enum | `claude` | 起動する AI エージェント CLI（`claude` / `gemini`） |
 
 > すべての項目はフォーマットバージョン `version: 1` とともに `settings.json` に格納されます。
@@ -97,7 +97,7 @@ CLI からも設定を確認・編集できます（[issue 015](../issues/015-co
 | `theme` | TUI 全体の配色 |
 | `default_workspace` | 起動時に既定で開くワークスペースの選択 |
 | `workspace_root` | 新規プロジェクト画面（Clone）の Location 既定値（[design/03-new.md](design/03-new.md)） |
-| `notifications_enabled` | `hop` 時などのデスクトップ通知の表示可否 |
+| `notifications_enabled` | `hop` 時や、バックグラウンドの `agent` が入力待ちになった時などのデスクトップ通知の表示可否 |
 | `agent_cli` | `agent` / `ai` コマンドが起動する AI エージェント CLI の選択（[4. オーケストレーション](04-orchestration.md)） |
 
 > 設定の永続化は `usecase/settings.rs`（`load` / `save` / 各 `set_*`）と

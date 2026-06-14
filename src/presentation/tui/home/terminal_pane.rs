@@ -7,10 +7,18 @@
 //! forwarded to the shell as raw bytes; `Ctrl-O` detaches and closes it, as does
 //! the shell exiting on its own.
 //!
-//! `agent` reuses the same machinery: it spawns the shell and then sends an
-//! `initial` command line (the configured agent CLI, e.g. `claude`) so the pane
-//! lands the user straight in the agent — exactly as if they had run `terminal`
-//! and typed it themselves.
+//! `agent` reuses the same machinery: the shell is spawned with an `initial`
+//! command line (the configured agent CLI, e.g. `claude`) so the pane lands the
+//! user straight in the agent — exactly as if they had run `terminal` and typed
+//! it themselves.
+//!
+//! The shell itself is owned by the [`TerminalManager`], which keeps it running
+//! in the background after the user detaches; this loop only borrows it while
+//! attached. Each frame it also refreshes the sidebar's "waiting for input"
+//! markers from the shared monitor, so other background sessions flagged while
+//! the user is attached here show up live.
+//!
+//! [`TerminalManager`]: crate::infrastructure::terminal_manager::TerminalManager
 //!
 //! This is pure terminal I/O and threading, so it is excluded from coverage (cf.
 //! `term_reader.rs` / the screen `mod.rs` wirings). The pieces it leans on are
@@ -18,7 +26,6 @@
 //! screen snapshot ([`super::terminal_view`]).
 
 use std::fmt::Write as _;
-use std::path::Path;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -27,6 +34,7 @@ use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifier
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 
 use crate::infrastructure::pty::PtySession;
+use crate::infrastructure::terminal_manager::MonitorHandle;
 
 use super::state::HomeState;
 use super::terminal_view::TerminalView;
@@ -42,26 +50,22 @@ const POLL_SLICE: Duration = Duration::from_millis(4);
 /// is eventually noticed even while nothing else is happening.
 const IDLE_REDRAW: Duration = Duration::from_millis(100);
 
-/// Run the embedded terminal in the right pane, rooted at `dir`, until the user
-/// detaches (`Ctrl-O`) or the shell exits. The right-pane mode is set by the
-/// caller; here we own the PTY, raw mode, and the render/input loop.
+/// Attach to the embedded terminal `pty` in the right pane until the user
+/// detaches (`Ctrl-O`) or the shell exits. The PTY is owned by the
+/// [`TerminalManager`] and keeps running in the background after a detach; here
+/// we only own raw mode and the render/input loop. `monitor` is read each frame
+/// to refresh the sidebar's waiting markers.
 ///
-/// When `initial` is `Some`, that command line is sent to the shell on start
-/// (followed by a carriage return) — this is how `agent` lands the user in the
-/// configured agent CLI, just as if they had typed it into a fresh terminal.
-pub fn run(term: &Term, state: &mut HomeState, dir: &Path, initial: Option<&str>) -> Result<()> {
-    let (height, width) = term.size();
-    let geo = ui::terminal_geometry(height as usize, width as usize);
-    let mut pty = PtySession::spawn(dir, geo.rows, geo.cols)?;
-    if let Some(command) = initial {
-        // The shell buffers its input, so writing immediately is fine: it runs
-        // the command once it has started up.
-        pty.write(format!("{command}\r").as_bytes())?;
-    }
-
+/// [`TerminalManager`]: crate::infrastructure::terminal_manager::TerminalManager
+pub fn run(
+    term: &Term,
+    state: &mut HomeState,
+    pty: &mut PtySession,
+    monitor: &MonitorHandle,
+) -> Result<()> {
     enable_raw_mode().context("failed to enter raw mode for the embedded terminal")?;
     let _ = term.clear_screen();
-    let result = drive(term, state, &mut pty);
+    let result = drive(term, state, pty, monitor);
     let _ = disable_raw_mode();
     let _ = term.show_cursor();
     result
@@ -70,7 +74,12 @@ pub fn run(term: &Term, state: &mut HomeState, dir: &Path, initial: Option<&str>
 /// The render/input loop: snapshot the shell screen, draw whatever changed,
 /// then wait for a keystroke or fresh output and go again. Returns when the
 /// shell exits or the user detaches.
-fn drive(term: &Term, state: &mut HomeState, pty: &mut PtySession) -> Result<()> {
+fn drive(
+    term: &Term,
+    state: &mut HomeState,
+    pty: &mut PtySession,
+    monitor: &MonitorHandle,
+) -> Result<()> {
     // The frame drawn last pass, so we only repaint the rows that changed.
     let mut prev: Vec<String> = Vec::new();
     loop {
@@ -84,6 +93,9 @@ fn drive(term: &Term, state: &mut HomeState, pty: &mut PtySession) -> Result<()>
         let view = TerminalView::from_screen(pty.parser().screen());
         let cursor = view.cursor();
         state.set_terminal_view(view);
+        // Refresh the sidebar's waiting markers so other background sessions
+        // flagged while we are attached here show up in the next repaint.
+        state.set_waiting(monitor.waiting());
         render(term, state, cursor, geo, &mut prev)?;
 
         // The shell closed (e.g. the user typed `exit`): leave the pane.

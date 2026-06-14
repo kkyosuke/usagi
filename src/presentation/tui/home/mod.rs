@@ -21,6 +21,7 @@ use console::Term;
 use crate::domain::workspace::Workspace;
 use crate::domain::workspace_state::SessionRecord;
 use crate::infrastructure::history_store::HistoryStore;
+use crate::infrastructure::terminal_manager::TerminalManager;
 use crate::infrastructure::workspace_store::WorkspaceStore;
 use crate::presentation::tui::term_reader::TermKeyReader;
 
@@ -132,14 +133,52 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
         .unwrap_or_else(|_| crate::domain::settings::AgentCli::default().command())
         .to_string();
 
+    // Whether to surface desktop notifications when a background session starts
+    // waiting for input, from the effective settings (project-local over the
+    // global default). Any failure to read settings defaults to enabled, like
+    // `hop`'s welcome notification.
+    let notifications_enabled = crate::infrastructure::storage::Storage::open_default()
+        .and_then(|storage| crate::usecase::settings::effective(&storage, &workspace.path))
+        .map(|settings| settings.notifications_enabled)
+        .unwrap_or(true);
+
+    // Owns the background terminal sessions: a shell (and its agent) keeps
+    // running after the user detaches, and a watcher thread flags any session
+    // whose agent rings the bell to ask for input — notifying the user and
+    // marking it in the sidebar via this handle.
+    let mut manager = TerminalManager::new(notifications_enabled);
+    let monitor = manager.handle();
+
     // Opening a terminal embeds a live shell in the right pane: the pane stays
     // inside the workspace screen (sidebar still visible) and runs the shell
     // until the user detaches or it exits. `:agent` is the same, with the agent
-    // CLI sent to the shell on start. The right-pane mode is toggled by the event
-    // loop around this call; here we just drive the embedded session.
+    // CLI sent to the shell on start. The shell is owned by the manager so it
+    // persists across detaches; here we attach to (or spawn) it, mark it as the
+    // foreground session for the duration, and drive it. The right-pane mode is
+    // toggled by the event loop around this call.
     let mut open_terminal = |home: &mut HomeState, dir: &Path, agent: bool| -> Result<()> {
         let initial = agent.then_some(agent_command.as_str());
-        terminal_pane::run(term, home, dir, initial)
+        let label = home
+            .list()
+            .worktrees()
+            .iter()
+            .find(|w| w.path.as_path() == dir)
+            .map(state::worktree_name)
+            .map(str::to_string)
+            .unwrap_or_else(|| {
+                dir.file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| dir.display().to_string())
+            });
+        let (height, width) = term.size();
+        let geo = ui::terminal_geometry(height as usize, width as usize);
+        let handle = manager.handle();
+        let pty = manager.attach_or_spawn(dir, geo.rows, geo.cols, initial, &label)?;
+        handle.set_attached(Some(dir.to_path_buf()));
+        let result = terminal_pane::run(term, home, pty, &handle);
+        handle.set_attached(None);
+        manager.reap_if_dead(dir);
+        result
     };
 
     event::event_loop(
@@ -147,6 +186,7 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
         &mut reader,
         state,
         &workspace.path,
+        &monitor,
         &mut persist,
         &mut create_session,
         &mut remove_session,

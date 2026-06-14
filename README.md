@@ -76,11 +76,13 @@ cargo run -- hop  # TUI を起動
 ```text
 :session new feature-x   # .usagi/worktree/feature-x/ にセッション（worktree）を作成
 :session list            # セッション一覧
-:terminal                # 選択中の worktree でシェルを右ペインに埋め込み起動（Ctrl-O でデタッチ）
+:terminal                # 選択中の worktree でシェルを右ペインに埋め込み起動（Ctrl-O でデタッチ／バックグラウンド継続）
 :agent                   # terminal を開いて設定中の Agent CLI（既定 claude）を起動（実質 terminal → claude）
 ```
 
-作成した worktree は左ペインに表示されます。目的の worktree を選んで `terminal` を実行すると、左ペインの一覧を表示したまま、その worktree を作業ディレクトリとしたシェルが**右ペインにライブで埋め込まれます**。そこで `claude` などの AI エージェントを起動して開発できます。シェルを抜けるには `Ctrl-O`（デタッチ）か、シェル側で `exit` してください。`:agent` を使えば、この「`terminal` を開いて Agent CLI を起動する」操作を 1 コマンドで行えます（起動する Agent CLI は Config 画面・ローカル設定で選べます）。
+作成した worktree は左ペインに表示されます。目的の worktree を選んで `terminal` を実行すると、左ペインの一覧を表示したまま、その worktree を作業ディレクトリとしたシェルが**右ペインにライブで埋め込まれます**。そこで `claude` などの AI エージェントを起動して開発できます。`Ctrl-O` でデタッチするとコマンドモードへ戻りますが、**シェルや Agent はバックグラウンドで動き続け**、同じ worktree で再度 `terminal` / `agent` を実行すると動作中のセッションへ再アタッチします（シェル側で `exit` するとそのセッションは破棄されます）。`:agent` を使えば、この「`terminal` を開いて Agent CLI を起動する」操作を 1 コマンドで行えます（起動する Agent CLI は Config 画面・ローカル設定で選べます）。
+
+複数の worktree で `agent` を並行に走らせているとき、バックグラウンドの `claude` が処理を終えて入力待ちになる（ターミナルベルを鳴らす）と、左ペインの該当 worktree に `◆`（黄色）マーカーが付き、デスクトップ通知（`🐰 <ブランチ名> が入力待ちです`）で知らせます。入力が必要になったセッションだけに対応できます（通知は設定 `notifications_enabled` が ON のとき。検知はベルに依存するため `claude` 側でターミナルベル通知を有効にしてください）。
 
 ### タスクを管理する
 
