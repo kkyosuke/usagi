@@ -271,7 +271,7 @@ fn input_line(state: &HomeState) -> String {
 /// The footer help line, aware of the terminal pane and the current mode.
 fn footer_line(width: usize, state: &HomeState) -> String {
     let help = if state.right_pane() == RightPane::Terminal {
-        "Embedded terminal — Ctrl-O: detach and close"
+        "Embedded terminal — Ctrl-O: detach / Ctrl-O n,p: switch session"
     } else {
         match state.mode() {
             Mode::Sidebar => "↑↓: move / Enter: activate / :: command / Esc: back",

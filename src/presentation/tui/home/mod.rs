@@ -10,6 +10,7 @@ pub mod command;
 pub mod event;
 pub mod state;
 pub mod terminal_pane;
+pub mod terminal_pool;
 pub mod terminal_view;
 pub mod ui;
 
@@ -26,7 +27,7 @@ use crate::presentation::tui::term_reader::TermKeyReader;
 
 pub use event::Outcome;
 
-use state::{HomeState, LogLine, SessionOutcome};
+use state::{HomeState, LogLine, PaneExit, SessionOutcome};
 
 /// Refresh the workspace's session state from git (best-effort) and return the
 /// sessions to show. `sync` rewrites each session worktree's status; for a
@@ -132,14 +133,21 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
         .unwrap_or_else(|_| crate::domain::settings::AgentCli::default().command())
         .to_string();
 
+    // The live shells embedded in the right pane, one per worktree, kept alive
+    // across session switches and for as long as this screen is open. Dropped on
+    // return, which kills any shell still running.
+    let mut pool = terminal_pool::TerminalPool::new();
+
     // Opening a terminal embeds a live shell in the right pane: the pane stays
     // inside the workspace screen (sidebar still visible) and runs the shell
-    // until the user detaches or it exits. `:agent` is the same, with the agent
-    // CLI sent to the shell on start. The right-pane mode is toggled by the event
-    // loop around this call; here we just drive the embedded session.
-    let mut open_terminal = |home: &mut HomeState, dir: &Path, agent: bool| -> Result<()> {
+    // until the user detaches, switches sessions, or it exits. `:agent` is the
+    // same, with the agent CLI sent to the shell on its first spawn. The pool
+    // owns the shell so a detach leaves it running; the right-pane mode and the
+    // switch loop are handled by the event loop around this call.
+    let mut open_terminal = |home: &mut HomeState, dir: &Path, agent: bool| -> Result<PaneExit> {
         let initial = agent.then_some(agent_command.as_str());
-        terminal_pane::run(term, home, dir, initial)
+        let pty = pool.attach_or_spawn(term, dir, initial)?;
+        terminal_pane::run(term, home, pty)
     };
 
     event::event_loop(
