@@ -76,10 +76,10 @@ cargo run -- hop  # TUI を起動
 ```text
 :session new feature-x   # .usagi/worktree/feature-x/ にセッション（worktree）を作成
 :session list            # セッション一覧
-:terminal                # 選択中の worktree で対話シェルを起動（シェル終了で TUI へ復帰）
+:terminal                # 選択中の worktree でシェルを右ペインに埋め込み起動（Ctrl-O でデタッチ）
 ```
 
-作成した worktree は左ペインに表示されます。目的の worktree を選んで `terminal` を実行すると、その worktree を作業ディレクトリとしたシェルが開くので、そこで `claude` などの AI エージェントを起動して開発できます。
+作成した worktree は左ペインに表示されます。目的の worktree を選んで `terminal` を実行すると、左ペインの一覧を表示したまま、その worktree を作業ディレクトリとしたシェルが**右ペインにライブで埋め込まれます**。そこで `claude` などの AI エージェントを起動して開発できます。シェルを抜けるには `Ctrl-O`（デタッチ）か、シェル側で `exit` してください。
 
 ### タスクを管理する
 
