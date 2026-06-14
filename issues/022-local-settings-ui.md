@@ -1,11 +1,11 @@
 ---
-number: 021
+number: 022
 feature: local-settings-ui
-title: ローカル設定（プロジェクト単位の設定上書き）の編集 UI
+title: ローカル設定の編集 UI
 status: todo
 priority: medium
 category: tui
-dependson: []
+dependson: [021]
 ref: PR #33（ローカル設定のバックエンド実装）
 ---
 
@@ -13,7 +13,7 @@ ref: PR #33（ローカル設定のバックエンド実装）
 
 ## 概要
 
-プロジェクト単位のローカル設定（`<repo>/.usagi/settings.json`）の **読み書きロジック・永続化は実装済み**（`domain::settings::LocalSettings` / `usecase::settings` の `load_local` / `save_local` / `effective` / `set_local_*`）ですが、それを **編集する UI が未実装**です。現状ユーザーが値を変えるには JSON を直接編集するしかありません。本 issue でローカル設定を編集できる導線を追加します。
+プロジェクト単位のローカル設定（`<repo>/.usagi/settings.json`）の **読み書きロジック・永続化は #021 で実装済み**（`domain::settings::LocalSettings` / `usecase::settings` の `load_local` / `save_local` / `effective` / `set_local_*`）ですが、それを **編集する UI が未実装**です。現状ユーザーが値を変えるには JSON を直接編集するしかありません。本 issue でローカル設定を編集できる導線を追加します。
 
 対象項目は `agent_cli` と `notifications_enabled`（未設定ならグローバル設定にフォールバック）。詳細は [document/data-storage.md](../document/data-storage.md) の「`settings.json`: プロジェクト固有の設定上書き」を参照。
 

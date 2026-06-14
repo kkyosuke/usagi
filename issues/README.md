@@ -5,7 +5,7 @@
 
 ## 凡例
 
-- **status**: `todo` / `in-progress` / `done`
+- **status**: `todo` / `in-progress` / `done`（一覧では完了 issue を ✅ で示す）
 - **priority**: `high` / `medium` / `low`
 - **dependson**: 先に完了している必要がある issue 番号
 
@@ -13,7 +13,7 @@
 
 | # | feature | 概要 | category | priority | dependson |
 |---|---|---|---|---|---|
-| 001 | [init-cli](001-init-cli.md) | `usagi init <URL>` CLI コマンド | cli | high | — |
+| 001 | [init-cli](001-init-cli.md) ✅ | `usagi init <URL>` CLI コマンド | cli | high | — |
 | 002 | [workspace-screen](002-workspace-screen.md) | ワークスペース画面とコマンドモード基盤 | tui | high | — |
 | 003 | [session](003-session.md) | `session` セッション管理（branch + worktree） | tui | high | 002 |
 | 004 | [space](004-space.md) | `space` ワークスペース切り替え | tui | high | 002, 003 |
@@ -33,7 +33,8 @@
 | 018 | [alias](018-alias.md) | `usagi alias` コマンドエイリアス | cli | low | 005 |
 | 019 | [doctor-fix](019-doctor-fix.md) | `usagi doctor --fix` 依存自動修復 | cli | medium | — |
 | 020 | [gh-issue](020-gh-issue.md) | gh Issue 連携セッション作成 | cli | low | 003 |
-| 021 | [local-settings-ui](021-local-settings-ui.md) | ローカル設定の編集 UI | tui | medium | — |
+| 021 | [local-settings](021-local-settings.md) ✅ | プロジェクト単位のローカル設定（設定上書き） | core | medium | — |
+| 022 | [local-settings-ui](022-local-settings-ui.md) | ローカル設定の編集 UI | tui | medium | 021 |
 
 ## 依存関係
 
