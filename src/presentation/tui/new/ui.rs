@@ -108,63 +108,86 @@ fn notice_lines(block_pad: &str, notice: Option<&str>) -> Vec<String> {
 fn footer_lines(width: usize) -> Vec<String> {
     vec![widgets::dim_line(
         width,
-        "←→: switch type / ↑↓/Tab: move field / Enter: create / Esc: back",
+        "←→: switch type / ↑↓/Tab: move field / Space: browse dir / Enter: create / Esc: back",
     )]
 }
 
-/// Appends the Clone-mode fields (URL, Location, Directory, Branch) to `body`,
-/// each separated by a blank line.
-fn extend_clone_fields(body: &mut Vec<String>, block_pad: &str, state: &FormState) {
-    body.extend(field_lines(
+/// Builds the Clone-mode fields (URL, Location, Directory, Branch), each
+/// separated by a blank line.
+fn clone_fields(block_pad: &str, state: &FormState) -> Vec<String> {
+    let mut lines = field_lines(
         block_pad,
         "Repository URL",
         state.url(),
         "https://github.com/owner/repo.git",
         state.focus() == Field::Url,
-    ));
-    body.push(String::new());
-    body.extend(field_lines(
+    );
+    lines.push(String::new());
+    lines.extend(field_lines(
         block_pad,
-        "Location",
+        "Location  (Space to browse)",
         state.location(),
         "where to create the project",
         state.focus() == Field::Location,
     ));
-    body.push(String::new());
-    body.extend(field_lines(
+    lines.push(String::new());
+    lines.extend(field_lines(
         block_pad,
         "Directory",
         state.directory(),
         "derived from the URL",
         state.focus() == Field::Directory,
     ));
-    body.push(String::new());
-    body.extend(field_lines(
+    lines.push(String::new());
+    lines.extend(field_lines(
         block_pad,
         "Branch (optional)",
         state.branch(),
         "repository default",
         state.focus() == Field::Branch,
     ));
+    lines
 }
 
-/// Appends the Existing-mode fields (Directory path, Name) to `body`.
-fn extend_existing_fields(body: &mut Vec<String>, block_pad: &str, state: &FormState) {
-    body.extend(field_lines(
+/// Builds the Existing-mode fields (Directory path, Name).
+fn existing_fields(block_pad: &str, state: &FormState) -> Vec<String> {
+    let mut lines = field_lines(
         block_pad,
-        "Directory",
+        "Directory  (Space to browse)",
         state.path(),
         "/path/to/an/existing/project",
         state.focus() == Field::Path,
-    ));
-    body.push(String::new());
-    body.extend(field_lines(
+    );
+    lines.push(String::new());
+    lines.extend(field_lines(
         block_pad,
         "Name",
         state.name(),
         "derived from the directory",
         state.focus() == Field::Name,
     ));
+    lines
+}
+
+/// The reserved height of the field block, in lines: Clone is the taller mode
+/// (four fields, each a label + input separated by a blank line: 4 * 2 + 3).
+/// Both modes pad to this so switching modes never resizes the block.
+/// [`fields_block_matches_reserved_height`] guards this against field changes.
+const RESERVED_FIELDS_HEIGHT: usize = 11;
+
+/// Builds the active mode's field block, padded to [`RESERVED_FIELDS_HEIGHT`].
+///
+/// Clone shows four fields and Existing only two, so without padding the body
+/// would shrink and the vertically-centred layout would jump when switching
+/// modes with ←→. Reserving the taller block's height in both modes keeps the
+/// header, selector, and footer fixed across the switch.
+fn fields_lines(block_pad: &str, state: &FormState) -> Vec<String> {
+    let mut lines = match state.mode() {
+        Mode::Clone => clone_fields(block_pad, state),
+        Mode::Existing => existing_fields(block_pad, state),
+    };
+    lines.resize(lines.len().max(RESERVED_FIELDS_HEIGHT), String::new());
+    lines
 }
 
 /// Builds the full New Project screen frame for a raw terminal size.
@@ -187,10 +210,7 @@ pub fn render_frame(
         state.focus() == Field::Mode,
     ));
     body.push(String::new());
-    match state.mode() {
-        Mode::Clone => extend_clone_fields(&mut body, &block_pad, state),
-        Mode::Existing => extend_existing_fields(&mut body, &block_pad, state),
-    }
+    body.extend(fields_lines(&block_pad, state));
     body.extend(notice_lines(&block_pad, notice));
     let footer = footer_lines(width);
 
@@ -349,6 +369,43 @@ mod tests {
         let frame = render_frame(3, 80, &state, None);
         assert!(!frame[0].is_empty());
         assert!(frame.last().unwrap().contains("Esc"));
+    }
+
+    #[test]
+    fn fields_block_matches_reserved_height() {
+        // Clone is the taller mode, so its block must be exactly the reserved
+        // height, and Existing must never exceed it. This guards the constant
+        // against future field additions.
+        let state = FormState::new();
+        assert_eq!(clone_fields("", &state).len(), RESERVED_FIELDS_HEIGHT);
+        assert!(existing_fields("", &state).len() <= RESERVED_FIELDS_HEIGHT);
+    }
+
+    #[test]
+    fn fields_lines_pads_existing_mode_to_the_reserved_height() {
+        // Both modes occupy the reserved height, so the field block never
+        // resizes when switching modes.
+        let mut state = FormState::new();
+        let clone = fields_lines("", &state);
+        state.toggle_mode();
+        let existing = fields_lines("", &state);
+        assert_eq!(clone.len(), RESERVED_FIELDS_HEIGHT);
+        assert_eq!(existing.len(), RESERVED_FIELDS_HEIGHT);
+    }
+
+    #[test]
+    fn switching_modes_does_not_shift_the_layout() {
+        // The whole frame keeps its size and the header/selector stay put when
+        // toggling between Clone and Existing — no layout shift (CLS).
+        let mut state = FormState::new();
+        let clone = render_frame(24, 80, &state, None);
+        state.toggle_mode();
+        let existing = render_frame(24, 80, &state, None);
+        assert_eq!(clone.len(), existing.len());
+        // The mascot/title/selector rows above the fields are byte-for-byte
+        // identical, so nothing above the form moves.
+        let selector_row = clone.iter().position(|l| l.contains("Type")).unwrap();
+        assert_eq!(clone[..=selector_row], existing[..=selector_row]);
     }
 
     #[test]
