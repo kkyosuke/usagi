@@ -430,6 +430,11 @@ pub struct HomeState {
     /// agent rang the bell). Refreshed from the terminal monitor each redraw and
     /// rendered as a marker in the sidebar.
     waiting: HashSet<PathBuf>,
+    /// Worktree paths with a live (running) embedded session — an agent/shell is
+    /// in use, whether attached or left running in the background. Refreshed from
+    /// the terminal monitor each redraw and rendered with a "running" icon,
+    /// unless the path is also waiting (which takes precedence).
+    live: HashSet<PathBuf>,
     /// How many lines the command-log pane is scrolled up from its tail; `0`
     /// pins it to the newest line. Bumped by the wheel / `PageUp` over the right
     /// pane and reset to the bottom whenever fresh output arrives.
@@ -467,6 +472,7 @@ impl HomeState {
             right_pane: RightPane::Log,
             terminal_view: None,
             waiting: HashSet::new(),
+            live: HashSet::new(),
             right_scroll: 0,
             session_picker: None,
         }
@@ -631,6 +637,23 @@ impl HomeState {
     /// for the sidebar renderer.
     pub fn waiting_paths(&self) -> &HashSet<PathBuf> {
         &self.waiting
+    }
+
+    /// Replace the set of worktree paths with a live (running) embedded session,
+    /// refreshed from the terminal monitor before each redraw.
+    pub fn set_live(&mut self, live: HashSet<PathBuf>) {
+        self.live = live;
+    }
+
+    /// Whether the worktree at `path` has a live (running) embedded session.
+    pub fn is_live(&self, path: &Path) -> bool {
+        self.live.contains(path)
+    }
+
+    /// The set of worktree paths with a live (running) embedded session, for the
+    /// sidebar renderer.
+    pub fn live_paths(&self) -> &HashSet<PathBuf> {
+        &self.live
     }
 
     /// Move the worktree cursor up (sidebar mode).
@@ -1869,6 +1892,26 @@ mod tests {
         // A later (empty) snapshot clears it.
         state.set_waiting(HashSet::new());
         assert!(!state.is_waiting(Path::new("/repo/feature")));
+    }
+
+    #[test]
+    fn live_paths_track_sessions_with_a_running_agent() {
+        let mut state = state();
+        // Nothing is live by default.
+        assert!(!state.is_live(Path::new("/repo/feature")));
+        assert!(state.live_paths().is_empty());
+
+        // The monitor's snapshot of live sessions is swapped in wholesale.
+        let mut live = HashSet::new();
+        live.insert(PathBuf::from("/repo/feature"));
+        state.set_live(live);
+        assert!(state.is_live(Path::new("/repo/feature")));
+        assert!(!state.is_live(Path::new("/repo/main")));
+        assert_eq!(state.live_paths().len(), 1);
+
+        // A later (empty) snapshot clears it.
+        state.set_live(HashSet::new());
+        assert!(!state.is_live(Path::new("/repo/feature")));
     }
 
     #[test]
