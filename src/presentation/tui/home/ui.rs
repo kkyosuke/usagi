@@ -596,12 +596,11 @@ fn remove_modal_row(name: &str, cursor: bool, selected: bool, inner: usize) -> S
 /// Builds the centred session-removal modal: a scrolling checklist of the
 /// workspace's sessions, with the count selected and the key hints below.
 fn remove_modal_frame(raw_height: usize, raw_width: usize, modal: &RemoveModal) -> Vec<String> {
-    const INNER: usize = 40;
+    // Wide enough for the longest body line, the key-hints row below.
+    const INNER: usize = 44;
 
     let mut body = vec![
-        style("Select sessions to remove (Space to toggle).")
-            .dim()
-            .to_string(),
+        style("Select sessions to remove.").dim().to_string(),
         String::new(),
     ];
 
