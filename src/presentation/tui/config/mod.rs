@@ -7,30 +7,17 @@ pub mod event;
 pub mod state;
 pub mod ui;
 
-use std::io;
-
 use anyhow::Result;
-use console::{Key, Term};
+use console::Term;
 
 use crate::domain::settings::Settings;
 use crate::infrastructure::storage::Storage;
-use crate::presentation::tui::screen::KeyReader;
+use crate::presentation::tui::term_reader::TermKeyReader;
 use crate::usecase::{settings, workspace};
 
 pub use event::Outcome;
 
 use state::Config;
-
-/// Reads keys from a real terminal.
-struct TermKeyReader {
-    term: Term,
-}
-
-impl KeyReader for TermKeyReader {
-    fn read_key(&mut self) -> io::Result<Key> {
-        self.term.read_key()
-    }
-}
 
 /// Runs the configuration screen on the given terminal until the user goes back
 /// or quits. Wires the real terminal and storage-backed settings to the
@@ -45,7 +32,7 @@ pub fn run(term: &Term) -> Result<Outcome> {
             Some(format!("Failed to load settings: {e}")),
         ),
     };
-    let mut reader = TermKeyReader { term: term.clone() };
+    let mut reader = TermKeyReader::new(term.clone());
     let mut save = |s: &Settings| settings::save(&storage, s);
     event::event_loop(term, &mut reader, config, &mut save, notice)
 }
