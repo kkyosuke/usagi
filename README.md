@@ -14,6 +14,40 @@ AI Agent のワークフローを管理する TUI/CLI ツール。[usagi.ai](htt
 
 ## Installation
 
+### One-liner (macOS / Linux)
+
+ビルド済みバイナリを 1 行でダウンロードしてインストールできます:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/KKyosuke/usagi/main/scripts/install.sh | bash
+```
+
+`~/.usagi/bin` にインストールされます。表示される案内に従って PATH を通してください:
+
+```bash
+export PATH="$PATH:$HOME/.usagi/bin"
+```
+
+プラットフォームを指定してアーカイブから直接インストールすることもできます:
+
+#### macOS (Apple Silicon)
+```bash
+curl -L https://github.com/KKyosuke/usagi/releases/latest/download/usagi-macos-arm64.tar.gz | tar -xz && ./install.sh && rm install.sh
+```
+
+#### macOS (Intel)
+```bash
+curl -L https://github.com/KKyosuke/usagi/releases/latest/download/usagi-macos-amd64.tar.gz | tar -xz && ./install.sh && rm install.sh
+```
+
+#### Linux (AMD64)
+```bash
+curl -L https://github.com/KKyosuke/usagi/releases/latest/download/usagi-linux-amd64.tar.gz | tar -xz && ./install.sh && rm install.sh
+```
+
+#### Windows (AMD64)
+[Releases](https://github.com/KKyosuke/usagi/releases) ページから `usagi-windows-amd64.zip` をダウンロードして展開し、Git Bash で `install.sh` を実行するか、バイナリを手動で PATH に追加してください。
+
 ### From Source
 
 ```bash
