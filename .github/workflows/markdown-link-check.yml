@@ -1,0 +1,43 @@
+name: Markdown Link Check
+
+on:
+  push:
+    branches: [ "main" ]
+    paths:
+      - '**.md'
+      - 'lychee.toml'
+      - '.github/workflows/markdown-link-check.yml'
+  pull_request:
+    branches: [ "main" ]
+    paths:
+      - '**.md'
+      - 'lychee.toml'
+      - '.github/workflows/markdown-link-check.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  link-check:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # リポジトリ内の全 Markdown の相対リンク・アンカー・外部 URL を検証する。
+      # 設定（リトライ・除外・フラグメント検証）は lychee.toml に集約する。
+      - name: Check links in Markdown
+        uses: lycheeverse/lychee-action@v2
+        with:
+          args: >-
+            --config lychee.toml
+            --no-progress
+            '*.md'
+            'document/**/*.md'
+            'issues/**/*.md'
+            '.agents/**/*.md'
+            '.github/**/*.md'
+          fail: true
+        env:
+          # github.com のリンクをレートリミットを抑えて検証するため。
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

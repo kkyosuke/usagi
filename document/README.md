@@ -11,7 +11,7 @@
 |---|---|---|
 | 1 | [01-overview.md](01-overview.md) | プロジェクト概要・解決する課題・全体構造 |
 | 2 | [02-architecture.md](02-architecture.md) | クリーンアーキテクチャ 4 層・依存ルール・`src/` のモジュール構成 |
-| 3 | [03-commands.md](03-commands.md) | CLI コマンド・TUI 内コマンドのリファレンス（実装状況つき） |
+| 3 | [03-commands/](03-commands/README.md) | CLI コマンド・TUI 内コマンドのリファレンス（実装状況つき） |
 | 4 | [04-orchestration.md](04-orchestration.md) | セッション・worktree オーケストレーションの概念とライフサイクル |
 | 5 | [05-settings.md](05-settings.md) | 設定項目・保存場所・変更方法・環境変数 |
 | 6 | [06-conventions.md](06-conventions.md) | 開発規約（ブランチ・コミット・PR・品質チェック・hooks） |
