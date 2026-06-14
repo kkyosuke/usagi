@@ -15,7 +15,9 @@ use crate::domain::workspace_state::{BranchStatus, WorktreeState};
 use crate::presentation::tui::widgets;
 
 use super::command::{CommandHint, Hint};
-use super::state::{HomeState, LineKind, LogLine, Mode, RightPane, SessionModal, WorktreeList};
+use super::state::{
+    HomeState, LineKind, LogLine, Mode, RemoveModal, RightPane, SessionModal, WorktreeList,
+};
 use super::terminal_view::TerminalView;
 
 /// Shown in place of the list when the workspace has no recorded worktrees.
@@ -407,8 +409,91 @@ fn session_modal_frame(raw_height: usize, raw_width: usize, modal: &SessionModal
     widgets::render_modal(raw_height, raw_width, "New session", INNER, &body)
 }
 
+/// Most session rows the removal modal shows at once; a longer list scrolls to
+/// keep the cursor in view, with a count of the hidden rows above and below.
+const REMOVE_MODAL_VISIBLE: usize = 8;
+
+/// Builds one removal-modal row: a `>` cursor for the highlighted entry, a
+/// `[x]` / `[ ]` checkbox for its selection, and the (clipped) session name.
+/// The cursored row is emphasised, a checked row stays bright, and the rest are
+/// dimmed.
+fn remove_modal_row(name: &str, cursor: bool, selected: bool, inner: usize) -> String {
+    let marker = if cursor { ">" } else { " " };
+    let check = if selected { "[x]" } else { "[ ]" };
+    let text = clip_to_width(name, inner.saturating_sub(6));
+    let line = format!("{marker} {check} {text}");
+    if cursor {
+        style(line).cyan().bold().to_string()
+    } else if selected {
+        style(line).cyan().to_string()
+    } else {
+        style(line).dim().to_string()
+    }
+}
+
+/// Builds the centred session-removal modal: a scrolling checklist of the
+/// workspace's sessions, with the count selected and the key hints below.
+fn remove_modal_frame(raw_height: usize, raw_width: usize, modal: &RemoveModal) -> Vec<String> {
+    const INNER: usize = 40;
+
+    let mut body = vec![
+        style("Select sessions to remove (Space to toggle).")
+            .dim()
+            .to_string(),
+        String::new(),
+    ];
+
+    let names = modal.names();
+    if names.is_empty() {
+        body.push(style("No sessions to remove.").dim().to_string());
+    } else {
+        // Scroll the window so the cursor is always visible on a long list.
+        let total = names.len();
+        let start = if modal.cursor() < REMOVE_MODAL_VISIBLE {
+            0
+        } else {
+            modal.cursor() + 1 - REMOVE_MODAL_VISIBLE
+        };
+        let end = (start + REMOVE_MODAL_VISIBLE).min(total);
+        if start > 0 {
+            body.push(style(format!("  ↑ {start} more")).dim().to_string());
+        }
+        for (offset, name) in names[start..end].iter().enumerate() {
+            let i = start + offset;
+            body.push(remove_modal_row(
+                name,
+                i == modal.cursor(),
+                modal.is_selected(i),
+                INNER,
+            ));
+        }
+        if end < total {
+            body.push(style(format!("  ↓ {} more", total - end)).dim().to_string());
+        }
+        body.push(String::new());
+        body.push(
+            style(format!("{} selected", modal.selected_count()))
+                .dim()
+                .to_string(),
+        );
+    }
+
+    body.push(String::new());
+    body.push(
+        style("Space: toggle   Enter: remove   Esc: cancel")
+            .dim()
+            .to_string(),
+    );
+    widgets::render_modal(raw_height, raw_width, "Remove sessions", INNER, &body)
+}
+
 /// Builds the full home-screen frame for a raw terminal size.
 pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> Vec<String> {
+    // The session-removal modal, when open, overlays the whole screen.
+    if let Some(modal) = state.remove_modal() {
+        return remove_modal_frame(raw_height, raw_width, modal);
+    }
+
     // The session-name modal, when open, overlays the whole screen.
     if let Some(modal) = state.modal() {
         return session_modal_frame(raw_height, raw_width, modal);
@@ -863,6 +948,99 @@ mod tests {
             .map(|l| console::measure_text_width(l))
             .collect();
         assert!(widths.windows(2).all(|w| w[0] == w[1]));
+    }
+
+    /// A state seeded with `names` as recorded sessions, for the removal modal.
+    fn state_with_sessions(names: &[&str]) -> HomeState {
+        use crate::domain::workspace_state::SessionRecord;
+        let mut state = HomeState::new("usagi", Vec::new(), None);
+        let sessions = names
+            .iter()
+            .map(|n| SessionRecord {
+                name: n.to_string(),
+                root: PathBuf::from(format!("/ws/{n}")),
+                worktrees: Vec::new(),
+                created_at: Utc::now(),
+            })
+            .collect();
+        state.restore_sessions(sessions);
+        state
+    }
+
+    #[test]
+    fn remove_modal_row_marks_the_cursor_and_checkbox() {
+        let cursor =
+            console::strip_ansi_codes(&remove_modal_row("alpha", true, false, 40)).into_owned();
+        assert!(cursor.contains('>'));
+        assert!(cursor.contains("[ ]"));
+        assert!(cursor.contains("alpha"));
+
+        let checked =
+            console::strip_ansi_codes(&remove_modal_row("beta", false, true, 40)).into_owned();
+        assert!(!checked.contains('>'));
+        assert!(checked.contains("[x]"));
+        assert!(checked.contains("beta"));
+
+        let idle =
+            console::strip_ansi_codes(&remove_modal_row("gamma", false, false, 40)).into_owned();
+        assert!(idle.contains("[ ]"));
+        assert!(idle.contains("gamma"));
+    }
+
+    #[test]
+    fn remove_modal_row_clips_a_long_name() {
+        let row = remove_modal_row("a-very-long-session-name-indeed", false, false, 12);
+        assert!(console::strip_ansi_codes(&row).contains('…'));
+    }
+
+    #[test]
+    fn render_frame_overlays_the_removal_modal_with_a_checklist() {
+        let mut state = state_with_sessions(&["alpha", "beta"]);
+        state.open_remove_modal(false);
+        state.remove_modal_toggle(); // check "alpha"
+        let frame = render_frame(24, 80, &state);
+        let joined = console::strip_ansi_codes(&frame.join("\n")).into_owned();
+        assert!(joined.contains("Remove sessions"));
+        assert!(joined.contains("Select sessions to remove"));
+        assert!(joined.contains("alpha"));
+        assert!(joined.contains("beta"));
+        // The checked session shows a ticked box, and the count is reported.
+        assert!(joined.contains("[x]"));
+        assert!(joined.contains("1 selected"));
+        assert!(joined.contains("Enter: remove"));
+        // The three-pane chrome (its sidebar mode footer) is not drawn underneath.
+        assert!(!joined.contains("activate"));
+    }
+
+    #[test]
+    fn render_frame_removal_modal_reports_when_there_are_no_sessions() {
+        let mut state = HomeState::new("usagi", Vec::new(), None);
+        state.open_remove_modal(false);
+        let frame = render_frame(24, 80, &state);
+        let joined = console::strip_ansi_codes(&frame.join("\n")).into_owned();
+        assert!(joined.contains("No sessions to remove"));
+        // The selected-count line is omitted when the list is empty.
+        assert!(!joined.contains("selected"));
+    }
+
+    #[test]
+    fn remove_modal_frame_scrolls_to_keep_the_cursor_visible() {
+        // More sessions than fit: scrolling the cursor down past the first window
+        // shows both the "more above" and "more below" indicators.
+        let names: Vec<String> = (0..12).map(|i| format!("s{i:02}")).collect();
+        let refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
+        let mut state = state_with_sessions(&refs);
+        state.open_remove_modal(false);
+        for _ in 0..9 {
+            state.remove_modal_move_down(); // cursor on "s09"
+        }
+        let frame = render_frame(24, 80, &state);
+        let joined = console::strip_ansi_codes(&frame.join("\n")).into_owned();
+        assert!(joined.contains('↑'));
+        assert!(joined.contains('↓'));
+        assert!(joined.contains("more"));
+        // The cursor row stays within the visible window.
+        assert!(joined.contains("s09"));
     }
 
     #[test]

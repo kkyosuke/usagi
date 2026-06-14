@@ -85,6 +85,29 @@ pub fn event_loop(
             Err(e) => return Err(anyhow::Error::from(e).context("Failed to read key")),
         };
 
+        // The session-removal modal, when open, captures every key: the cursor
+        // moves with the arrows (or j/k), Space toggles the row's checkbox, and
+        // Enter removes every checked session (Esc cancels).
+        if state.remove_modal().is_some() {
+            match key {
+                Key::ArrowUp | Key::Char('k') => state.remove_modal_move_up(),
+                Key::ArrowDown | Key::Char('j') => state.remove_modal_move_down(),
+                Key::Char(' ') => state.remove_modal_toggle(),
+                Key::Enter => {
+                    if let Some((names, force)) = state.submit_remove_modal() {
+                        for name in names {
+                            let outcome = remove_session(&name, force);
+                            state.apply_session_outcome(outcome);
+                        }
+                    }
+                }
+                Key::Escape => state.cancel_remove_modal(),
+                Key::CtrlC => return Ok(Outcome::Quit),
+                _ => {}
+            }
+            continue;
+        }
+
         // The session-name modal, when open, captures every key until it is
         // confirmed (Enter) or cancelled (Esc), overlaying both modes.
         if state.modal().is_some() {
@@ -132,6 +155,7 @@ pub fn event_loop(
                             let outcome = remove_session(&name, force);
                             state.apply_session_outcome(outcome);
                         }
+                        Effect::OpenRemoveModal { force } => state.open_remove_modal(force),
                         effect @ (Effect::OpenTerminal | Effect::OpenAgent) => {
                             // Embed the shell in the right pane, rooted at the
                             // selected worktree (or the workspace root when
@@ -544,6 +568,124 @@ mod tests {
         .unwrap();
         assert!(matches!(outcome, Outcome::Back));
         assert_eq!(removed, vec![("old".to_string(), true)]);
+    }
+
+    /// A state seeded with `names` as recorded sessions, so the removal modal
+    /// has something to list (the worktree pane is rebuilt from them).
+    fn state_with_sessions(names: &[&str]) -> HomeState {
+        use crate::domain::workspace_state::SessionRecord;
+        let mut state = sample_state();
+        let sessions = names
+            .iter()
+            .map(|n| SessionRecord {
+                name: n.to_string(),
+                root: PathBuf::from(format!("/ws/.usagi/worktree/{n}")),
+                worktrees: vec![worktree(Some(n))],
+                created_at: Utc::now(),
+            })
+            .collect();
+        state.restore_sessions(sessions);
+        state
+    }
+
+    #[test]
+    fn session_remove_without_a_name_opens_the_picker_and_bulk_removes() {
+        // ":session remove" opens the picker; check the first and third sessions
+        // (toggling with Space, moving with arrows and j/k), then Enter removes
+        // both via remove_session, in display order.
+        let mut keys = vec![Ok(Key::Char(':'))];
+        keys.extend(typed("session remove"));
+        keys.push(Ok(Key::Enter)); // open the modal
+        keys.push(Ok(Key::Char(' '))); // check "alpha" (cursor 0)
+        keys.push(Ok(Key::ArrowDown)); // cursor 1 ("beta")
+        keys.push(Ok(Key::Char('j'))); // cursor 2 ("gamma")
+        keys.push(Ok(Key::Char(' '))); // check "gamma"
+        keys.push(Ok(Key::Char('k'))); // cursor 1
+        keys.push(Ok(Key::ArrowUp)); // cursor 0
+        keys.push(Ok(Key::Home)); // ignored key inside the modal
+        keys.push(Ok(Key::Enter)); // confirm -> remove alpha & gamma
+        keys.push(Ok(Key::Escape)); // cancel command mode
+        keys.push(Ok(Key::Escape)); // leave sidebar
+
+        let term = Term::stdout();
+        let mut reader = ScriptedReader::new(keys);
+        let monitor = MonitorHandle::detached();
+        let mut persist = |_: &str| {};
+        let mut create_session: fn(&str) -> SessionOutcome = noop_create;
+        let mut removed = Vec::new();
+        let mut remove_session = |name: &str, force: bool| {
+            removed.push((name.to_string(), force));
+            ok_outcome()
+        };
+        let mut open_terminal: fn(&mut HomeState, &Path, bool) -> Result<PaneExit> = noop_open;
+        let mut open_config: fn(&Term) -> Result<bool> = noop_config;
+        let outcome = event_loop(
+            &term,
+            &mut reader,
+            state_with_sessions(&["alpha", "beta", "gamma"]),
+            Path::new("/ws"),
+            &monitor,
+            &mut persist,
+            &mut create_session,
+            &mut remove_session,
+            &mut open_terminal,
+            &mut open_config,
+        )
+        .unwrap();
+        assert!(matches!(outcome, Outcome::Back));
+        assert_eq!(
+            removed,
+            vec![("alpha".to_string(), false), ("gamma".to_string(), false)]
+        );
+    }
+
+    #[test]
+    fn session_remove_picker_cancels_via_escape() {
+        // Open the picker, check a session, then Esc cancels the modal (the
+        // shared no-op `remove_session` would have recorded a removal, but the
+        // Escape arm closes without confirming).
+        let mut keys = vec![Ok(Key::Char(':'))];
+        keys.extend(typed("session remove"));
+        keys.push(Ok(Key::Enter)); // open the modal
+        keys.push(Ok(Key::Char(' '))); // check "alpha"
+        keys.push(Ok(Key::Escape)); // cancel the modal
+        keys.push(Ok(Key::Escape)); // cancel command mode
+        keys.push(Ok(Key::Escape)); // leave sidebar
+        assert!(matches!(
+            run(keys, state_with_sessions(&["alpha"])).unwrap(),
+            Outcome::Back
+        ));
+    }
+
+    #[test]
+    fn session_remove_picker_via_the_default_callback_succeeds() {
+        // ":session remove", check one session, confirm — routed through the
+        // shared no-op `remove_session`, with an empty-selection Enter first to
+        // exercise the "stays open" branch.
+        let mut keys = vec![Ok(Key::Char(':'))];
+        keys.extend(typed("session remove"));
+        keys.push(Ok(Key::Enter)); // open the modal
+        keys.push(Ok(Key::Enter)); // nothing checked -> modal stays open
+        keys.push(Ok(Key::Char(' '))); // check "alpha"
+        keys.push(Ok(Key::Enter)); // confirm -> remove via noop_remove
+        keys.push(Ok(Key::Escape)); // cancel command mode
+        keys.push(Ok(Key::Escape)); // leave sidebar
+        assert!(matches!(
+            run(keys, state_with_sessions(&["alpha"])).unwrap(),
+            Outcome::Back
+        ));
+    }
+
+    #[test]
+    fn ctrl_c_in_the_removal_modal_returns_quit() {
+        let mut keys = vec![Ok(Key::Char(':'))];
+        keys.extend(typed("session remove"));
+        keys.push(Ok(Key::Enter)); // open the modal
+        keys.push(Ok(Key::CtrlC)); // quit from within the modal
+        assert!(matches!(
+            run(keys, state_with_sessions(&["alpha"])).unwrap(),
+            Outcome::Quit
+        ));
     }
 
     #[test]

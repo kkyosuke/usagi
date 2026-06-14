@@ -29,6 +29,10 @@ pub enum Effect {
     ListSessions,
     /// Remove a session (the user ran `session remove <name> [--force]`).
     RemoveSession { name: String, force: bool },
+    /// Open the session-removal modal (the user ran `session remove` without a
+    /// name) to pick one or more sessions to delete at once. `force` carries the
+    /// `--force` flag so the confirmed removal can discard uncommitted changes.
+    OpenRemoveModal { force: bool },
     /// Switch the active worktree to the one named by the string. The screen
     /// resolves the name against its worktree list and reports the result.
     Activate(String),
@@ -272,7 +276,9 @@ impl Command for QuitCommand {
 /// - `session switch <name>` switches the active session (via
 ///   [`Effect::Activate`]); `session switch` with no name lists the sessions and
 ///   marks the active one.
-/// - `session remove <name> [--force]` removes a session.
+/// - `session remove <name> [--force]` removes a session; `session remove` with
+///   no name returns [`Effect::OpenRemoveModal`] so the screen can show a
+///   checklist of sessions to delete in one go.
 struct SessionCommand;
 
 impl Command for SessionCommand {
@@ -329,13 +335,16 @@ impl Command for SessionCommand {
                     }
                 }
                 match target {
+                    // A name removes that session directly.
                     Some(name) => CommandResult {
                         lines: Vec::new(),
                         effect: Effect::RemoveSession { name, force },
                     },
-                    None => CommandResult::line(LogLine::error(
-                        "usage: session remove <name> [--force]",
-                    )),
+                    // No name: open the picker to remove one or more at once.
+                    None => CommandResult {
+                        lines: Vec::new(),
+                        effect: Effect::OpenRemoveModal { force },
+                    },
                 }
             }
             _ => CommandResult::line(LogLine::error(format!("usage: {}", self.usage()))),
@@ -891,11 +900,16 @@ mod tests {
     }
 
     #[test]
-    fn session_remove_without_a_name_shows_usage() {
+    fn session_remove_without_a_name_opens_the_removal_modal() {
+        // A bare `session remove` opens the picker (no force).
         let result = registry().dispatch("session remove", &[], &[]);
-        assert_eq!(result.effect, Effect::None);
-        assert_eq!(result.lines[0].kind, LineKind::Error);
-        assert!(result.lines[0].text.contains("usage"));
+        assert!(result.lines.is_empty());
+        assert_eq!(result.effect, Effect::OpenRemoveModal { force: false });
+
+        // `session remove --force` opens the picker carrying the force flag.
+        let forced = registry().dispatch("session remove --force", &[], &[]);
+        assert!(forced.lines.is_empty());
+        assert_eq!(forced.effect, Effect::OpenRemoveModal { force: true });
     }
 
     #[test]
