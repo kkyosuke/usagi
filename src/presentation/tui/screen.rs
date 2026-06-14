@@ -54,23 +54,23 @@ pub trait KeyReader {
 const ENTER_ALT_SCREEN: &str = "\x1b[?1049h";
 /// Leave the alternate screen, restoring the prior contents.
 const LEAVE_ALT_SCREEN: &str = "\x1b[?1049l";
-/// Disable alternate scroll mode (DECSET 1007). Some terminals enable it by
-/// default, which makes the mouse wheel emit arrow-key presses while the
-/// alternate screen is active — those synthetic arrows would scroll the usagi
-/// lists and leak into the embedded terminal's shell. Turning it off helps on
-/// terminals that honour it, but many (e.g. Apple Terminal.app) ignore it
-/// entirely, so it is only a first line of defence — see [`ENABLE_MOUSE`].
-const DISABLE_ALT_SCROLL: &str = "\x1b[?1007l";
-/// Re-enable alternate scroll mode, restoring the terminal's usual behaviour
-/// once the TUI exits.
+/// Enable alternate scroll mode (DECSET 1007). While the alternate screen is
+/// active this makes the mouse wheel emit cursor-key presses (`ESC O A` /
+/// `ESC O B`) instead of scrolling the terminal's own viewport — which is what
+/// otherwise reveals the pre-launch scrollback "behind" the TUI on terminals
+/// that do not report the wheel as a mouse event (notably Apple Terminal.app,
+/// whose mouse reporting is off unless the user opts in). The key reader
+/// recognises those synthetic cursor keys and turns them into in-pane scrolls
+/// rather than letting them move the lists (see `term_reader`). On terminals
+/// that do report the wheel, mouse reporting takes precedence and this is inert
+/// — see [`ENABLE_MOUSE`].
 const ENABLE_ALT_SCROLL: &str = "\x1b[?1007h";
 /// Enable mouse reporting: normal tracking (DECSET 1000) plus SGR extended
-/// coordinates (DECSET 1006). With reporting on, the terminal hands wheel and
-/// click events to us as escape sequences instead of scrolling its own
-/// viewport or synthesising arrow keys — so the wheel can no longer move the
-/// usagi lists or leak into the embedded shell. The reported events are then
-/// dropped by the key reader (see `term_reader`). This is the robust stop that
-/// works even where alternate scroll mode (1007) is ignored.
+/// coordinates (DECSET 1006). With reporting on, a terminal that supports wheel
+/// reporting (e.g. iTerm2, the VS Code terminal) hands wheel and click events to
+/// us as escape sequences, which `term_reader` turns into in-pane scrolls. This
+/// takes precedence over alternate scroll, so the two settings coexist: wheel
+/// reporting where it exists, [`ENABLE_ALT_SCROLL`] as the fallback elsewhere.
 const ENABLE_MOUSE: &str = "\x1b[?1000h\x1b[?1006h";
 /// Disable mouse reporting, restoring the terminal's normal wheel / selection
 /// behaviour once the TUI exits. Reset in the reverse order of [`ENABLE_MOUSE`].
@@ -91,7 +91,7 @@ impl AlternateScreenGuard {
     pub fn new(term: Term) -> Result<Self> {
         let echo = EchoGuard::new();
         term.write_str(ENTER_ALT_SCREEN)?;
-        term.write_str(DISABLE_ALT_SCROLL)?;
+        term.write_str(ENABLE_ALT_SCROLL)?;
         term.write_str(ENABLE_MOUSE)?;
         term.hide_cursor()?;
         Ok(Self {
