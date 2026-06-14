@@ -21,20 +21,22 @@ dependson: [006]
 - `agent` で選択中の worktree（未選択時はワークスペースルート）を作業ディレクトリに、`terminal` と同じ埋め込みシェルを起動する。
 - 起動直後にシェルへ Agent CLI の起動コマンドを送る（実質 `terminal` → コマンド入力）。
 - 起動する Agent CLI は実効設定（グローバル設定にローカル上書きを適用）の `agent_cli` から解決する（既定は `claude`、`gemini` などに変更可）。
+- 起動コマンドには usagi 自身の issue MCP サーバ（`usagi mcp`）を、対応する Agent CLI へ組み込む。Claude はインラインの `--mcp-config` で注入する（Gemini はインライン注入用フラグを持たないため現状は素のまま起動）。
 - Agent / シェルの終了、または `Ctrl-O`（デタッチ）でコマンドモードへ戻る。
 
 ## 完了条件
 
 - `agent` で `terminal` と同等の埋め込みシェルが開き、設定中の Agent CLI が起動する。
 - 設定（Config 画面・ローカル設定）の Agent CLI 選択が起動コマンドに反映される。
+- 起動した Agent CLI から usagi の issue MCP tool（`issue_create` / `issue_list` など）が利用できる（対応 CLI のみ）。
 - Agent 終了後・`Ctrl-O` でワークスペース画面のコマンドモードへ正しく復帰する。
 
 ## 実装状況
 
 `terminal`（[006](006-terminal.md)）の仕組みをそのまま再利用して実装。
 
-- `domain/settings.rs`：`AgentCli::command()` で各 Agent CLI の起動コマンド名（`claude` / `gemini`）を解決。
+- `domain/settings.rs`：`AgentCli::command()` で各 Agent CLI の起動コマンド名（`claude` / `gemini`）を解決。`AgentCli::launch_command()` は起動コマンド**行**を返し、対応 CLI には usagi の issue MCP サーバ（`usagi mcp`）を組み込む（Claude は `--mcp-config '{"mcpServers":{"usagi":…}}'`、Gemini は素のまま）。
 - `presentation/tui/home/command.rs`：`agent` コマンドを追加し、`Effect::OpenAgent` を返す。
 - `presentation/tui/home/event.rs`：`Effect::OpenAgent` を `OpenTerminal` と同じ経路で処理し、`open_terminal` コールバックへ「Agent として開く」フラグ（`true`）を渡す。
 - `presentation/tui/home/terminal_pane.rs`：`run` に `initial` 引数を追加し、`Some(command)` のときシェル起動直後にそのコマンド行を送る（端末 I/O のためカバレッジ計測対象外）。
-- `presentation/tui/home/mod.rs`：実効設定から Agent CLI を解決し（読み取り失敗時は既定の `claude` にフォールバック）、`agent` フラグが立っているときだけそのコマンドを `terminal_pane::run` へ渡す（ワイヤリングのためカバレッジ計測対象外）。
+- `presentation/tui/home/mod.rs`：実効設定から Agent CLI を解決し、`AgentCli::launch_command()` で MCP サーバ込みの起動コマンド行を得る（読み取り失敗時は既定の `claude` にフォールバック）。`agent` フラグが立っているときだけそのコマンド行を `terminal_pane::run` へ渡す（ワイヤリングのためカバレッジ計測対象外）。

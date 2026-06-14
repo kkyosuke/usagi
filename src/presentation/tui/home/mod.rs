@@ -126,12 +126,13 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
 
     // The agent CLI launched by `:agent`, resolved from the effective settings
     // (project-local overrides on top of the global default, which is Claude).
-    // Any failure to read settings falls back to the default agent.
+    // The launch command wires in usagi's issue MCP server (where the agent CLI
+    // supports it) so the agent can manage issues from the start. Any failure to
+    // read settings falls back to the default agent.
     let agent_command = crate::infrastructure::storage::Storage::open_default()
         .and_then(|storage| crate::usecase::settings::effective(&storage, &workspace.path))
-        .map(|settings| settings.agent_cli.command())
-        .unwrap_or_else(|_| crate::domain::settings::AgentCli::default().command())
-        .to_string();
+        .map(|settings| settings.agent_cli.launch_command())
+        .unwrap_or_else(|_| crate::domain::settings::AgentCli::default().launch_command());
 
     // Whether to surface desktop notifications when a background session starts
     // waiting for input, from the effective settings (project-local over the
