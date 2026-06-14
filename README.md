@@ -1,5 +1,10 @@
 # usagi
 
+[![Test](https://github.com/KKyosuke/usagi/actions/workflows/test.yml/badge.svg)](https://github.com/KKyosuke/usagi/actions/workflows/test.yml)
+[![Release](https://github.com/KKyosuke/usagi/actions/workflows/release.yml/badge.svg)](https://github.com/KKyosuke/usagi/actions/workflows/release.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Rust](https://img.shields.io/badge/Rust-2021-orange.svg?logo=rust)](https://www.rust-lang.org/)
+
 AI Agent のワークフローを管理する TUI/CLI ツール。[usagi.ai](https://github.com/KKyosuke/usagi.ai) の設計を引き継いだ再構築プロジェクトです。
 
 ## Prerequisites
@@ -8,6 +13,40 @@ AI Agent のワークフローを管理する TUI/CLI ツール。[usagi.ai](htt
 - Git
 
 ## Installation
+
+### One-liner (macOS / Linux)
+
+ビルド済みバイナリを 1 行でダウンロードしてインストールできます:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/KKyosuke/usagi/main/scripts/install.sh | bash
+```
+
+`~/.usagi/bin` にインストールされます。表示される案内に従って PATH を通してください:
+
+```bash
+export PATH="$PATH:$HOME/.usagi/bin"
+```
+
+プラットフォームを指定してアーカイブから直接インストールすることもできます:
+
+#### macOS (Apple Silicon)
+```bash
+curl -L https://github.com/KKyosuke/usagi/releases/latest/download/usagi-macos-arm64.tar.gz | tar -xz && ./install.sh && rm install.sh
+```
+
+#### macOS (Intel)
+```bash
+curl -L https://github.com/KKyosuke/usagi/releases/latest/download/usagi-macos-amd64.tar.gz | tar -xz && ./install.sh && rm install.sh
+```
+
+#### Linux (AMD64)
+```bash
+curl -L https://github.com/KKyosuke/usagi/releases/latest/download/usagi-linux-amd64.tar.gz | tar -xz && ./install.sh && rm install.sh
+```
+
+#### Windows (AMD64)
+[Releases](https://github.com/KKyosuke/usagi/releases) ページから `usagi-windows-amd64.zip` をダウンロードして展開し、Git Bash で `install.sh` を実行するか、バイナリを手動で PATH に追加してください。
 
 ### From Source
 
@@ -38,8 +77,11 @@ src/
 ├── infrastructure/    # 永続化・Git 操作などの外部連携
 └── presentation/      # CLI/TUI インターフェース
 tests/                 # 統合テスト
-document/              # プロジェクトドキュメント
+document/              # プロジェクトドキュメント（仕様・規約。開発者 + AI 向け）
+.agents/               # AI エージェント固有の作業手順（CLAUDE.md/GEMINI.md から参照）
 ```
+
+> `document/` は開発者・AI の双方が読むプロジェクト仕様と[開発規約](document/conventions.md)、`.agents/` は AI に守らせる作業手順（worktree 運用・PR の進め方など）を置きます。
 
 ## Development
 

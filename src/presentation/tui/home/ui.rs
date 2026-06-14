@@ -1,15 +1,16 @@
+//! Rendering for the home (workspace) screen's three-pane layout.
+//!
+//! Top to bottom: a title bar, then a body split into the worktree list (left)
+//! and the command log (right), then the command input line and a mode-aware
+//! footer. All functions take plain data and return styled lines, so the layout
+//! is rendered without any terminal IO.
+
 use console::style;
 
 use crate::domain::workspace_state::{BranchStatus, WorktreeState};
 use crate::presentation::tui::widgets;
 
-use super::state::WorktreeList;
-
-/// Fixed width of the worktree block; the whole block is centred in the terminal.
-const BLOCK_WIDTH: usize = 56;
-
-/// Widest a branch name is allowed to grow before it is truncated.
-const BRANCH_MAX: usize = 24;
+use super::state::{HomeState, LineKind, LogLine, Mode, WorktreeList};
 
 /// Shown in place of the list when the workspace has no recorded worktrees.
 const EMPTY_MESSAGE: &str = "No worktrees recorded yet. Run usagi to sync.";
@@ -17,33 +18,78 @@ const EMPTY_MESSAGE: &str = "No worktrees recorded yet. Run usagi to sync.";
 /// Shown for a worktree whose HEAD is detached (no branch).
 const DETACHED: &str = "(detached)";
 
-/// Builds the centred mascot, title (workspace name), and subtitle block.
-///
-/// Vertical placement is handled by [`render_frame`], so this adds no leading
-/// padding.
-fn header_lines(width: usize, list: &WorktreeList) -> Vec<String> {
-    let count = list.worktrees().len();
-    let subtitle = format!("{count} worktree{}", if count == 1 { "" } else { "s" });
+/// Visible columns a worktree row spends on everything but the branch name
+/// (cursor, primary marker, separators, and the fixed-width status label).
+const ROW_OVERHEAD: usize = 12;
 
-    let mut lines = widgets::rabbit_lines(width);
-    lines.push(String::new());
-    lines.push(widgets::title_line(width, list.workspace_name()));
-    lines.push(widgets::dim_line(width, &subtitle));
-    lines
-}
+/// The vertical bar (with surrounding spaces) dividing the two panes.
+const SEP: &str = " │ ";
 
-/// Shortens `text` to at most `max` columns, keeping the head and appending an
-/// ellipsis when truncated (a branch's head is the most informative part).
-fn truncate_end(text: &str, max: usize) -> String {
-    let len = text.chars().count();
-    if len <= max {
+/// Visible width of [`SEP`].
+const SEP_WIDTH: usize = 3;
+
+/// Block caret drawn at the end of the command input.
+const CARET: &str = "▏";
+
+/// Narrowest and widest the left (worktree) pane is allowed to be.
+const LEFT_MIN: usize = 16;
+const LEFT_MAX: usize = 40;
+
+/// Shortens `text` to at most `max` display columns, appending an ellipsis when
+/// it has to cut (the head of the text is the most informative part).
+fn clip_to_width(text: &str, max: usize) -> String {
+    if console::measure_text_width(text) <= max {
         return text.to_string();
     }
     if max == 0 {
         return String::new();
     }
-    let head: String = text.chars().take(max - 1).collect();
-    format!("{head}…")
+    let mut out = String::new();
+    for ch in text.chars() {
+        let mut candidate = out.clone();
+        candidate.push(ch);
+        // Reserve one column for the ellipsis.
+        if console::measure_text_width(&candidate) > max - 1 {
+            break;
+        }
+        out = candidate;
+    }
+    out.push('…');
+    out
+}
+
+/// Right-pads `content` with spaces to fill `width` display columns. Content
+/// already at least that wide is returned unchanged.
+fn pad_to_width(content: String, width: usize) -> String {
+    let visible = console::measure_text_width(&content);
+    if visible >= width {
+        content
+    } else {
+        let mut content = content;
+        content.push_str(&" ".repeat(width - visible));
+        content
+    }
+}
+
+/// Splits the terminal `width` into the left pane width and the right pane
+/// width, leaving room for the divider. The left pane is clamped to a readable
+/// band and never overruns the terminal.
+fn layout(width: usize) -> (usize, usize) {
+    let left = (width / 3).clamp(LEFT_MIN, LEFT_MAX);
+    let left = left.min(width.saturating_sub(SEP_WIDTH));
+    let right = width.saturating_sub(left + SEP_WIDTH);
+    (left, right)
+}
+
+/// The centred title bar: workspace name and worktree count.
+fn title_bar(width: usize, list: &WorktreeList) -> String {
+    let count = list.worktrees().len();
+    let label = format!(
+        "{} · {count} worktree{}",
+        list.workspace_name(),
+        if count == 1 { "" } else { "s" }
+    );
+    widgets::title_line(width, &label)
 }
 
 /// The fixed-width, colour-coded label for a branch's lifecycle status.
@@ -57,13 +103,8 @@ fn status_label(status: BranchStatus) -> String {
 }
 
 /// Builds one worktree row: a `>` cursor for the selected entry, a `●` marker
-/// for the primary worktree, the branch name, its status, and its short hash.
-fn worktree_row(
-    block_pad: &str,
-    worktree: &WorktreeState,
-    branch_width: usize,
-    selected: bool,
-) -> String {
+/// for the primary worktree, the (truncated, padded) branch name, and status.
+fn worktree_row(worktree: &WorktreeState, branch_width: usize, selected: bool) -> String {
     let marker = if selected {
         style(">").red().bold().to_string()
     } else {
@@ -76,103 +117,104 @@ fn worktree_row(
         " ".to_string()
     };
 
-    let branch = worktree.branch.as_deref().unwrap_or(DETACHED);
-    let branch = format!("{:<branch_width$}", truncate_end(branch, BRANCH_MAX));
+    let branch_text = worktree.branch.as_deref().unwrap_or(DETACHED);
+    let branch_text = format!(
+        "{:<branch_width$}",
+        clip_to_width(branch_text, branch_width)
+    );
     let branch = if selected {
-        style(branch).cyan().bold().to_string()
+        style(branch_text).cyan().bold().to_string()
     } else {
-        style(branch).cyan().to_string()
+        style(branch_text).cyan().to_string()
     };
 
     let status = status_label(worktree.status);
-    let head = style(&worktree.head).dim().to_string();
-
-    format!("{block_pad}{marker} {primary} {branch}  {status}  {head}")
+    format!("{marker} {primary} {branch}  {status}")
 }
 
-/// Builds the list body: one row per worktree, or a centred empty message.
-fn list_lines(width: usize, block_pad: &str, list: &WorktreeList) -> Vec<String> {
-    if list.is_empty() {
-        return vec![widgets::dim_line(width, EMPTY_MESSAGE)];
-    }
-
-    let branch_width = list
-        .worktrees()
-        .iter()
-        .map(|w| {
-            w.branch
-                .as_deref()
-                .unwrap_or(DETACHED)
-                .chars()
-                .count()
-                .min(BRANCH_MAX)
-        })
-        .max()
-        .unwrap_or(0);
-
-    list.worktrees()
-        .iter()
-        .enumerate()
-        .map(|(i, w)| worktree_row(block_pad, w, branch_width, i == list.selected_index()))
-        .collect()
-}
-
-/// Builds the transient notice line below the list.
-///
-/// Always returns two lines — a blank separator plus the notice slot (blank
-/// when absent) — so showing or clearing a notice never shifts the layout.
-fn notice_lines(block_pad: &str, notice: Option<&str>) -> Vec<String> {
-    let slot = match notice {
-        Some(notice) => format!("{block_pad}{}", style(notice).yellow()),
-        None => String::new(),
+/// Builds the left pane: one row per worktree, or a single empty message,
+/// trimmed to the available `rows`.
+fn left_pane(list: &WorktreeList, left_w: usize, rows: usize) -> Vec<String> {
+    let mut lines = if list.is_empty() {
+        vec![clip_to_width(EMPTY_MESSAGE, left_w)]
+    } else {
+        let branch_width = left_w.saturating_sub(ROW_OVERHEAD);
+        list.worktrees()
+            .iter()
+            .enumerate()
+            .map(|(i, w)| worktree_row(w, branch_width, i == list.selected_index()))
+            .collect()
     };
-    vec![String::new(), slot]
+    lines.truncate(rows);
+    lines
 }
 
-/// Builds the footer help line.
-///
-/// Returns the footer text only; [`render_frame`] pins it to the bottom edge.
-fn footer_lines(width: usize) -> Vec<String> {
-    vec![widgets::dim_line(
-        width,
-        "↑↓: move / Enter: open / Esc: back",
-    )]
+/// Renders one log line, coloured by kind. Command lines get a `❯` prompt.
+fn log_line(line: &LogLine, width: usize) -> String {
+    let raw = match line.kind {
+        LineKind::Command => format!("❯ {}", line.text),
+        _ => line.text.clone(),
+    };
+    let clipped = clip_to_width(&raw, width);
+    match line.kind {
+        LineKind::Command => style(clipped).cyan().bold().to_string(),
+        LineKind::Output => clipped,
+        LineKind::Error => style(clipped).red().to_string(),
+        LineKind::Notice => style(clipped).yellow().to_string(),
+    }
+}
+
+/// Builds the right pane: the tail of the log that fits in `rows`.
+fn right_pane(log: &[LogLine], right_w: usize, rows: usize) -> Vec<String> {
+    let start = log.len().saturating_sub(rows);
+    log[start..].iter().map(|l| log_line(l, right_w)).collect()
+}
+
+/// The command input line: an editable prompt in command mode, or a hint in
+/// sidebar mode.
+fn input_line(state: &HomeState) -> String {
+    match state.mode() {
+        Mode::Command => {
+            let prompt = style("❯").red().bold();
+            let text = style(state.input()).cyan();
+            format!(" {prompt} {text}{CARET}")
+        }
+        Mode::Sidebar => style(" Press \":\" to enter a command".to_string())
+            .dim()
+            .to_string(),
+    }
+}
+
+/// The mode-aware footer help line.
+fn footer_line(width: usize, mode: Mode) -> String {
+    let help = match mode {
+        Mode::Sidebar => "↑↓: move / Enter: open / :: command / Esc: back",
+        Mode::Command => "Tab: complete / ↑↓: history / Enter: run / Esc: cancel",
+    };
+    widgets::dim_line(width, help)
 }
 
 /// Builds the full home-screen frame for a raw terminal size.
-pub fn render_frame(
-    raw_height: usize,
-    raw_width: usize,
-    list: &WorktreeList,
-    notice: Option<&str>,
-) -> Vec<String> {
+pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> Vec<String> {
     let (height, width) = widgets::normalize_size(raw_height, raw_width);
-    let block_pad = " ".repeat(widgets::centered_padding(width, BLOCK_WIDTH));
+    let (left_w, right_w) = layout(width);
 
-    // The body (mascot, title, list and notice slot) is centred vertically; the
-    // footer is pinned to the bottom edge of the frame.
-    let mut body = header_lines(width, list);
-    body.push(String::new());
-    body.extend(list_lines(width, &block_pad, list));
-    body.extend(notice_lines(&block_pad, notice));
-    let footer = footer_lines(width);
+    // Chrome around the body: title + blank separator on top, input + footer
+    // at the bottom. The rest is the two-pane body.
+    let pane_rows = height.saturating_sub(4).max(1);
+    let left = left_pane(state.list(), left_w, pane_rows);
+    let right = right_pane(state.log(), right_w, pane_rows);
 
     let mut lines = Vec::with_capacity(height);
-
-    // Centre the body in the space above the footer.
-    let top_padding = height.saturating_sub(body.len() + footer.len()) / 2;
-    for _ in 0..top_padding {
-        lines.push(String::new());
+    lines.push(title_bar(width, state.list()));
+    lines.push(String::new());
+    for row in 0..pane_rows {
+        let left_cell = pad_to_width(left.get(row).cloned().unwrap_or_default(), left_w);
+        let right_cell = right.get(row).cloned().unwrap_or_default();
+        lines.push(format!("{left_cell}{SEP}{right_cell}"));
     }
-    lines.extend(body);
-
-    // Push the footer down to the bottom row of the frame.
-    let bottom_padding = height.saturating_sub(lines.len() + footer.len());
-    for _ in 0..bottom_padding {
-        lines.push(String::new());
-    }
-    lines.extend(footer);
-
+    lines.push(input_line(state));
+    lines.push(footer_line(width, state.mode()));
     lines
 }
 
@@ -199,177 +241,215 @@ mod tests {
     }
 
     #[test]
-    fn header_lines_render_mascot_title_and_count() {
-        let list = list_with(vec![worktree(Some("main"), true, BranchStatus::Pushed)]);
-        let lines = header_lines(80, &list);
-        assert!(!lines[0].is_empty());
-        let joined = lines.join("\n");
-        assert!(joined.contains("usagi"));
-        // Singular when there is exactly one worktree.
-        assert!(joined.contains("1 worktree"));
-        assert!(!joined.contains("1 worktrees"));
+    fn clip_to_width_keeps_short_text() {
+        assert_eq!(clip_to_width("main", 10), "main");
     }
 
     #[test]
-    fn header_count_is_pluralised() {
-        let list = list_with(vec![
-            worktree(Some("main"), true, BranchStatus::Pushed),
-            worktree(Some("feature"), false, BranchStatus::Local),
-        ]);
-        let joined = header_lines(80, &list).join("\n");
-        assert!(joined.contains("2 worktrees"));
+    fn clip_to_width_truncates_with_an_ellipsis() {
+        let clipped = clip_to_width("feature/long", 5);
+        assert_eq!(console::measure_text_width(&clipped), 5);
+        assert!(clipped.ends_with('…'));
     }
 
     #[test]
-    fn truncate_end_keeps_short_text() {
-        assert_eq!(truncate_end("main", 10), "main");
+    fn clip_to_width_with_zero_budget_is_empty() {
+        assert_eq!(clip_to_width("main", 0), "");
     }
 
     #[test]
-    fn truncate_end_keeps_the_head_with_ellipsis() {
-        // Eight chars capped to five: first four characters + ellipsis.
-        assert_eq!(truncate_end("feature/x", 5), "feat…");
+    fn pad_to_width_fills_short_content() {
+        assert_eq!(pad_to_width("ab".to_string(), 5), "ab   ");
     }
 
     #[test]
-    fn truncate_end_with_zero_budget_is_empty() {
-        assert_eq!(truncate_end("main", 0), "");
+    fn pad_to_width_leaves_full_content_alone() {
+        assert_eq!(pad_to_width("abcde".to_string(), 5), "abcde");
+    }
+
+    #[test]
+    fn layout_splits_a_standard_width() {
+        let (left, right) = layout(80);
+        assert_eq!(left, 26);
+        assert_eq!(right, 80 - 26 - SEP_WIDTH);
+    }
+
+    #[test]
+    fn layout_does_not_overrun_a_narrow_terminal() {
+        // Far below LEFT_MIN: the left pane shrinks to fit and the right is 0.
+        let (left, right) = layout(4);
+        assert!(left <= 4);
+        assert_eq!(right, 0);
+    }
+
+    #[test]
+    fn title_bar_singular_and_plural() {
+        let one = title_bar(
+            80,
+            &list_with(vec![worktree(Some("main"), true, BranchStatus::Pushed)]),
+        );
+        assert!(one.contains("usagi"));
+        assert!(one.contains("1 worktree"));
+        assert!(!one.contains("1 worktrees"));
+
+        let two = title_bar(
+            80,
+            &list_with(vec![
+                worktree(Some("main"), true, BranchStatus::Pushed),
+                worktree(Some("x"), false, BranchStatus::Local),
+            ]),
+        );
+        assert!(two.contains("2 worktrees"));
     }
 
     #[test]
     fn status_label_colours_each_variant() {
-        // Each label keeps the underlying status text regardless of styling.
         assert!(status_label(BranchStatus::Local).contains("local"));
         assert!(status_label(BranchStatus::Pushed).contains("pushed"));
         assert!(status_label(BranchStatus::Merged).contains("merged"));
     }
 
     #[test]
-    fn worktree_row_marks_only_the_selected_entry() {
-        let wt = worktree(Some("main"), true, BranchStatus::Pushed);
-        let selected = worktree_row("", &wt, 7, true);
+    fn worktree_row_marks_selected_primary_and_detached() {
+        let selected = worktree_row(
+            &worktree(Some("main"), true, BranchStatus::Pushed),
+            10,
+            true,
+        );
         assert!(selected.contains('>'));
-        assert!(selected.contains("main"));
-        // The primary marker is present.
         assert!(selected.contains('●'));
+        assert!(selected.contains("main"));
 
-        let other = worktree(Some("feature"), false, BranchStatus::Local);
-        let unselected = worktree_row("", &other, 7, false);
-        assert!(!unselected.contains('>'));
-        assert!(unselected.contains("feature"));
+        let other = worktree_row(
+            &worktree(Some("feature"), false, BranchStatus::Local),
+            10,
+            false,
+        );
+        assert!(!other.contains('>'));
+        assert!(other.contains("feature"));
+
+        let detached = worktree_row(&worktree(None, false, BranchStatus::Local), 10, false);
+        assert!(detached.contains("(detached)"));
     }
 
     #[test]
-    fn worktree_row_renders_detached_head() {
-        let wt = worktree(None, false, BranchStatus::Local);
-        let row = worktree_row("", &wt, 10, false);
-        assert!(row.contains("(detached)"));
+    fn worktree_row_truncates_a_long_branch() {
+        let row = worktree_row(
+            &worktree(
+                Some("feature/a-very-long-branch-name"),
+                false,
+                BranchStatus::Local,
+            ),
+            8,
+            false,
+        );
+        assert!(row.contains('…'));
     }
 
     #[test]
-    fn list_lines_render_one_row_per_worktree() {
-        let list = list_with(vec![
-            worktree(Some("main"), true, BranchStatus::Pushed),
-            worktree(Some("feature"), false, BranchStatus::Local),
-        ]);
-        let lines = list_lines(80, "", &list);
-        assert_eq!(lines.len(), 2);
-        assert!(lines[0].contains("main"));
-        assert!(lines[1].contains("feature"));
-        // Only the first (selected) row carries the cursor.
-        assert_eq!(lines.iter().filter(|l| l.contains('>')).count(), 1);
-    }
-
-    #[test]
-    fn list_lines_show_empty_message_when_no_worktrees() {
-        let list = list_with(Vec::new());
-        let lines = list_lines(80, "", &list);
+    fn left_pane_renders_an_empty_message() {
+        let lines = left_pane(&list_with(Vec::new()), 80, 5);
         assert_eq!(lines.len(), 1);
         assert!(lines[0].contains("No worktrees recorded"));
     }
 
     #[test]
-    fn notice_lines_reserve_a_slot_when_absent() {
-        let lines = notice_lines("", None);
+    fn left_pane_renders_one_row_per_worktree() {
+        let list = list_with(vec![
+            worktree(Some("main"), true, BranchStatus::Pushed),
+            worktree(Some("feature"), false, BranchStatus::Local),
+        ]);
+        let lines = left_pane(&list, 30, 5);
         assert_eq!(lines.len(), 2);
-        assert!(lines.iter().all(|l| l.is_empty()));
+        assert!(lines[0].contains("main"));
+        assert!(lines[1].contains("feature"));
     }
 
     #[test]
-    fn notice_lines_render_text_when_present() {
-        let lines = notice_lines("", Some("coming soon"));
+    fn left_pane_is_trimmed_to_available_rows() {
+        let list = list_with(vec![
+            worktree(Some("a"), false, BranchStatus::Local),
+            worktree(Some("b"), false, BranchStatus::Local),
+            worktree(Some("c"), false, BranchStatus::Local),
+        ]);
+        let lines = left_pane(&list, 30, 2);
         assert_eq!(lines.len(), 2);
-        assert!(lines[1].contains("coming soon"));
     }
 
     #[test]
-    fn footer_lines_include_help_text() {
-        let lines = footer_lines(80);
-        assert!(lines.iter().any(|l| l.contains("Esc")));
+    fn log_line_colours_each_kind_and_prompts_commands() {
+        assert!(log_line(&LogLine::command("man"), 40).contains("❯ man"));
+        assert_eq!(log_line(&LogLine::output("plain"), 40), "plain");
+        assert!(log_line(&LogLine::error("boom"), 40).contains("boom"));
+        assert!(log_line(&LogLine::notice("note"), 40).contains("note"));
     }
 
     #[test]
-    fn render_frame_combines_all_sections() {
-        let list = list_with(vec![worktree(Some("main"), true, BranchStatus::Pushed)]);
-        let frame = render_frame(0, 0, &list, Some("coming soon"));
-        let joined = frame.join("\n");
-        assert!(joined.contains("usagi"));
-        assert!(joined.contains("main"));
-        assert!(joined.contains("coming soon"));
-        assert!(joined.contains("Esc"));
+    fn right_pane_shows_only_the_tail_that_fits() {
+        let log: Vec<LogLine> = (0..5)
+            .map(|i| LogLine::output(format!("line {i}")))
+            .collect();
+        let lines = right_pane(&log, 40, 3);
+        assert_eq!(lines.len(), 3);
+        // The oldest lines scroll off; the newest remain.
+        assert!(lines[0].contains("line 2"));
+        assert!(lines[2].contains("line 4"));
     }
 
     #[test]
-    fn render_frame_renders_empty_state() {
-        let list = list_with(Vec::new());
-        let frame = render_frame(24, 80, &list, None);
-        let joined = frame.join("\n");
-        assert!(joined.contains("No worktrees recorded"));
+    fn right_pane_keeps_everything_when_it_fits() {
+        let log = vec![LogLine::output("only")];
+        let lines = right_pane(&log, 40, 5);
+        assert_eq!(lines.len(), 1);
     }
 
     #[test]
-    fn render_frame_centers_body_and_pins_footer() {
-        let list = list_with(vec![worktree(Some("main"), true, BranchStatus::Pushed)]);
-        let height = 40;
-        let frame = render_frame(height, 80, &list, None);
-
-        assert_eq!(frame.len(), height);
-        assert!(frame.last().unwrap().contains("Esc"));
-        let top_padding = frame.iter().take_while(|l| l.is_empty()).count();
-        assert!(top_padding > 0);
-        assert!(!frame[top_padding].is_empty());
+    fn input_line_renders_prompt_in_command_mode() {
+        let mut state = HomeState::new("usagi", Vec::new(), None);
+        state.enter_command_mode();
+        state.push_char('m');
+        let line = input_line(&state);
+        assert!(line.contains('m'));
+        assert!(line.contains(CARET));
     }
 
     #[test]
-    fn render_frame_does_not_overflow_a_short_terminal() {
-        let list = list_with(vec![worktree(Some("main"), true, BranchStatus::Pushed)]);
-        let frame = render_frame(3, 80, &list, None);
-        assert!(!frame[0].is_empty());
-        assert!(frame.last().unwrap().contains("Esc"));
+    fn input_line_renders_hint_in_sidebar_mode() {
+        let state = HomeState::new("usagi", Vec::new(), None);
+        assert!(input_line(&state).contains("command"));
     }
 
     #[test]
-    fn notice_slot_keeps_layout_stable_across_toggling() {
-        let list = list_with(vec![worktree(Some("main"), true, BranchStatus::Pushed)]);
-        let without = render_frame(24, 80, &list, None);
-        let with = render_frame(
-            24,
-            80,
-            &list,
-            Some("Switching to \"main\" is coming soon 🐰"),
+    fn footer_line_differs_by_mode() {
+        assert!(footer_line(80, Mode::Sidebar).contains("move"));
+        assert!(footer_line(80, Mode::Command).contains("complete"));
+    }
+
+    #[test]
+    fn render_frame_combines_all_sections_at_full_height() {
+        let state = HomeState::new(
+            "usagi",
+            vec![worktree(Some("main"), true, BranchStatus::Pushed)],
+            None,
         );
-        assert_eq!(without.len(), with.len());
+        let frame = render_frame(24, 80, &state);
+        assert_eq!(frame.len(), 24);
+        assert!(frame[0].contains("usagi"));
+        // The body rows carry the divider.
+        assert!(frame[2].contains('│'));
+        assert!(frame.last().unwrap().contains("move"));
+        let joined = frame.join("\n");
+        assert!(joined.contains("main"));
+        assert!(joined.contains("man"));
     }
 
     #[test]
-    fn long_branch_names_are_truncated_into_the_block() {
-        let list = list_with(vec![worktree(
-            Some("feature/a-very-long-branch-name-that-keeps-going"),
-            false,
-            BranchStatus::Local,
-        )]);
-        let lines = list_lines(80, "", &list);
-        // The ellipsis marks that the long branch name was shortened.
-        assert!(lines[0].contains('…'));
+    fn render_frame_survives_a_short_terminal() {
+        let state = HomeState::new("usagi", Vec::new(), None);
+        let frame = render_frame(3, 80, &state);
+        // Title first, footer last, at least one body row in between.
+        assert!(frame[0].contains("usagi"));
+        assert!(frame.last().unwrap().contains("move"));
+        assert!(frame.len() >= 4);
     }
 }
