@@ -46,7 +46,7 @@
 
 ### セッションの worktree 配置
 
-`session new <name>` で作られる worktree は、ワークスペースルート直下の **`.usagi/worktree/<name>/`** に集約します（`.gitignore` 済み）。これによりセッションの所在が一意に定まり、一覧・削除・クリーンアップが扱いやすくなります。
+`session create <name>` で作られる worktree は、ワークスペースルート直下の **`.usagi/worktree/<name>/`** に集約します（`.gitignore` 済み）。これによりセッションの所在が一意に定まり、一覧・削除・クリーンアップが扱いやすくなります。
 
 ワークスペースのルートは git リポジトリである必要はありません。セッション作成時にルートを**再帰的に走査**し、
 
@@ -193,7 +193,7 @@ session "login"  (/Users/me/git/usagi/.usagi/worktree/login)
 |---|---|---|
 | `agent_cli` | enum?\| | このプロジェクトで起動する AI エージェント CLI（`claude` / `gemini`）。`null`（未設定）ならグローバル設定にフォールバック |
 | `notifications_enabled` | bool?\| | このプロジェクトでのデスクトップ通知 ON/OFF。`null`（未設定）ならグローバル設定にフォールバック |
-| `default_branch_source` | enum?\| | `session new` で worktree を切る新ブランチの基点（`local` = ローカル既定ブランチ / `remote` = リモート追従の既定ブランチ）。`null`（未設定）なら既定の `remote`。グローバル設定に対応項目はなく、**リポジトリ単位**の設定 |
+| `default_branch_source` | enum?\| | `session create` で worktree を切る新ブランチの基点（`local` = ローカル既定ブランチ / `remote` = リモート追従の既定ブランチ）。`null`（未設定）なら既定の `remote`。グローバル設定に対応項目はなく、**リポジトリ単位**の設定 |
 
 - `agent_cli` / `notifications_enabled` は `null`（未設定）で「グローバル設定に従う」を意味します。`light/dark` テーマやクローン先（`workspace_root`）のようにプロジェクト単位で変える意味の薄い項目は対象外です。
 - `default_branch_source` はグローバルに対応項目がなく、未設定時は既定（`remote`）として解決されます。`remote` 選択時に `origin/<既定>` が無ければローカル既定ブランチ → それも無ければ現在の HEAD にフォールバックします（`infrastructure/git.rs` の `resolve_base_ref`）。

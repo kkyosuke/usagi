@@ -51,7 +51,7 @@
 | デスクトップ通知 | `notifications_enabled` | bool?\| | グローバル設定にフォールバック |
 | デフォルトブランチ基点 | `default_branch_source` | enum?\| | 既定（`remote`） |
 
-> **デフォルトブランチ基点（`default_branch_source`）**: `session new` でセッションを作るとき、各 git
+> **デフォルトブランチ基点（`default_branch_source`）**: `session create` でセッションを作るとき、各 git
 > リポジトリの worktree を切る新ブランチの**基点**を選びます。選択肢は `local`（ローカルの既定ブランチ。例
 > `main`）と `remote`（リモート追従の既定ブランチ。例 `origin/main`）。グローバル設定に対応項目はなく、
 > 未設定時は `remote` として扱います（`origin/<既定>` が無ければローカル既定ブランチ → それも無ければ現在の

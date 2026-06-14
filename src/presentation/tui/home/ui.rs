@@ -1643,9 +1643,9 @@ mod tests {
         let state = typing("session ");
         let joined = stripped(&hint_lines(&state, 80));
         assert!(joined.contains("usage"));
-        assert!(joined.contains("session [new"));
+        assert!(joined.contains("session [create"));
         assert!(joined.contains("e.g."));
-        assert!(joined.contains("session new"));
+        assert!(joined.contains("session create"));
     }
 
     #[test]
