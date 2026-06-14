@@ -22,7 +22,7 @@ ref: PR #33
 - `domain::settings` に `LocalSettings` 型と、グローバルへローカルを適用する `Settings::with_local` を追加。
 - `infrastructure::workspace_store::WorkspaceStore` に `settings.json` の `load_settings` / `save_settings` を追加（`state.json` と共通の atomic read/write ヘルパーに集約）。
 - `usecase::settings` に `load_local` / `save_local` / `effective` / `set_local_agent_cli` / `set_local_notifications_enabled` を追加。
-- `document/data-storage.md` にローカル設定の仕様を追記。
+- `document/data/02-workspace.md` にローカル設定の仕様を追記。
 
 ## 完了条件
 

@@ -14,7 +14,7 @@ ref: usagi.ai doc/cli/init.md
 ## 概要
 
 リポジトリをクローンし、作業ディレクトリを初期化する CLI コマンドを追加します。
-現状 `main.rs` のサブコマンドは `doctor` / `hop` / `status` のみで、`overview.md` に記載のある `usagi init <URL>` が未実装です。TUI の New 画面（#016 既存ディレクトリ登録 / clone 作成）と同等の初期化ロジックを、ターミナルから一発で実行できるようにします。
+現状 `main.rs` のサブコマンドは `doctor` / `hop` / `status` のみで、`document/01-overview.md` に記載のある `usagi init <URL>` が未実装です。TUI の New 画面（#016 既存ディレクトリ登録 / clone 作成）と同等の初期化ロジックを、ターミナルから一発で実行できるようにします。
 
 ## やること
 
