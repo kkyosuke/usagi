@@ -15,7 +15,7 @@
 | `session` | `session new <name>` でセッション（`.usagi/worktree/<name>/` 配下に再帰的に worktree を構築）を作成（`session new` と名前省略時は名前入力モーダル）。`session list` で一覧、`session switch <name>` でアクティブセッション切り替え（引数なしで一覧、worktree 一覧の Enter でも切り替え）、`session remove <name> [--force]` で削除（未コミット変更があれば警告し `--force` で破棄） | [003](../../issues/003-session.md) / [004](../../issues/004-space.md) | ✅ 実装済み |
 | `ai` | 選択中の Agent CLI を起動し、現在の worktree をコンテキストに AI へ指示・対話する | [005](../../issues/005-ai.md) | 🚧 |
 | `terminal` | 選択中の worktree（未選択時はワークスペースルート）を作業ディレクトリに対話型シェルを**右ペインに埋め込んで**起動する。左ペインの worktree 一覧は表示したまま。`Ctrl-O` でデタッチ（シェル終了）して通常のコマンドモードへ戻る | [006](../../issues/006-terminal.md) | ✅ 実装済み |
-| `agent` | `terminal` と同じ埋め込みシェルを開き、設定中の Agent CLI（既定は `claude`、ローカル設定で上書き可）を起動コマンドとして自動入力する。実質 `terminal` → `claude` のショートカット。`Ctrl-O` または Agent/シェル終了でコマンドモードへ戻る | [026](../../issues/026-agent.md) | ✅ 実装済み |
+| `agent` | `terminal` と同じ埋め込みシェルを開き、設定中の Agent CLI（既定は `claude`、ローカル設定で上書き可）を起動コマンドとして自動入力する。対応する Agent CLI には usagi の issue MCP サーバ（`usagi mcp`）を組み込んで起動する。実質 `terminal` → `claude` のショートカット。`Ctrl-O` または Agent/シェル終了でコマンドモードへ戻る | [026](../../issues/026-agent.md) | ✅ 実装済み |
 | `doctor` | 依存関係チェック（TUI 版） | [019](../../issues/019-doctor-fix.md) | 🚧 |
 | `diff` | TUI Diff ビューア（セッションの差分閲覧） | [012](../../issues/012-diff.md) | 🚧 |
 
@@ -27,3 +27,5 @@
 > `terminal` は左ペインの worktree 一覧で選択中の worktree を作業ディレクトリに、**右ペインへ埋め込んだライブシェル**を開きます（疑似ターミナル: portable-pty + vt100）。左ペインの一覧は表示したままなので、シェルを操作しながら worktree を見渡せます。シェルを抜けるには `Ctrl-O`（デタッチ）か、シェル側で `exit` してください。`session new` で作ったセッションの worktree を選んで `terminal` を実行すれば、そこで `claude` などの AI エージェントを起動して開発できます。
 >
 > `agent` はその「`terminal` を開いて Agent CLI を起動する」一連の操作をまとめたショートカットです。`terminal` と同じ埋め込みシェルを起動し、設定の Agent CLI（既定は `claude`。Config 画面やローカル設定で `gemini` などに変更可能）をそのまま入力します。Agent を終了すると元のシェルに戻り、`Ctrl-O` または `exit` でコマンドモードへ復帰します。
+>
+> このとき usagi 自身の issue MCP サーバ（[`usagi mcp`](03-mcp.md)）を Agent CLI に組み込んで起動するため、エージェントは起動直後から `issue_create` / `issue_list` / `issue_update` などの tool でタスクを操作できます。Claude はインラインの `--mcp-config '{"mcpServers":{"usagi":{"command":"usagi","args":["mcp"]}}}'` で注入します。Gemini はインライン注入用のフラグを持たない（MCP サーバは `settings.json` 経由で設定）ため、現状は素のまま起動します。

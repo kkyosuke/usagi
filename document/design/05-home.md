@@ -196,9 +196,12 @@ event loop がセッション名を入力するモーダルを画面中央に表
   `home/terminal_pane.rs`（`home/mod.rs` の `open_terminal` から起動）。
 - `agent` は `terminal` と同じ埋め込みシェルを起動し、設定（Config 画面／ローカル設定）で選んだ Agent CLI
   （既定 `claude`、`gemini` などに変更可）を自動入力します。Agent CLI は `usecase::settings::effective` で
-  解決した実効設定の `agent_cli` から `AgentCli::command()` で起動コマンド名を得ます（読み取り失敗時は
-  既定 `claude` にフォールバック）。実装は `terminal` の仕組みを再利用し、`terminal_pane::run` の `initial`
-  引数にコマンドを渡すだけです。
+  解決した実効設定の `agent_cli` から `AgentCli::launch_command()` で**起動コマンド行**を得ます（読み取り失敗時は
+  既定 `claude` にフォールバック）。この起動コマンド行には usagi 自身の issue MCP サーバ（`usagi mcp`）が
+  対応する Agent CLI で組み込まれます。Claude はインラインの `--mcp-config '{"mcpServers":{"usagi":…}}'`
+  で注入し、エージェントが起動直後から `issue_create` / `issue_list` などの tool を使えます。Gemini は
+  インライン注入用フラグを持たない（MCP サーバは `settings.json` 経由）ため現状は素のまま起動します。
+  実装は `terminal` の仕組みを再利用し、`terminal_pane::run` の `initial` 引数にコマンド行を渡すだけです。
 - `ai` / `doctor` の本体実装は今後の作業で実装します（Git 操作・AI 連携などのインフラ層に
   依存するため別途）。これらが司る worktree オーケストレーションの全体像は
   [../04-orchestration.md](../04-orchestration.md) を参照してください。

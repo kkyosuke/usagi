@@ -24,6 +24,11 @@ pub enum AgentCli {
     Gemini,
 }
 
+/// JSON wiring usagi's own issue MCP server (`usagi mcp`, served over stdio)
+/// into an agent CLI, so the agent can create and query issues from the start.
+/// Kept as a literal — it is fixed and lets `domain` stay free of `serde_json`.
+const ISSUE_MCP_CONFIG: &str = r#"{"mcpServers":{"usagi":{"command":"usagi","args":["mcp"]}}}"#;
+
 impl AgentCli {
     /// The shell command (program name) usagi launches for this agent — the
     /// word the `agent` command runs inside the embedded terminal.
@@ -31,6 +36,20 @@ impl AgentCli {
         match self {
             AgentCli::Claude => "claude",
             AgentCli::Gemini => "gemini",
+        }
+    }
+
+    /// The full command line `:agent` sends to the embedded shell, with usagi's
+    /// issue MCP server wired in so the agent can manage issues immediately.
+    ///
+    /// Claude Code accepts the server inline via `--mcp-config`; the JSON is
+    /// single-quoted so the shell passes it through verbatim (it contains no
+    /// single quotes). Gemini has no inline flag — its MCP servers come from
+    /// `settings.json` — so it launches plain for now.
+    pub fn launch_command(self) -> String {
+        match self {
+            AgentCli::Claude => format!("claude --mcp-config '{ISSUE_MCP_CONFIG}'"),
+            AgentCli::Gemini => "gemini".to_string(),
         }
     }
 }
@@ -162,5 +181,22 @@ mod tests {
     fn agent_cli_maps_to_its_launch_command() {
         assert_eq!(AgentCli::Claude.command(), "claude");
         assert_eq!(AgentCli::Gemini.command(), "gemini");
+    }
+
+    #[test]
+    fn claude_launch_command_wires_in_the_issue_mcp_server() {
+        let launch = AgentCli::Claude.launch_command();
+        // The program is still `claude`, now with the issue MCP server passed
+        // inline via `--mcp-config` (single-quoted so the shell keeps the JSON).
+        assert_eq!(
+            launch,
+            "claude --mcp-config '{\"mcpServers\":{\"usagi\":{\"command\":\"usagi\",\"args\":[\"mcp\"]}}}'"
+        );
+    }
+
+    #[test]
+    fn gemini_launch_command_stays_plain() {
+        // Gemini has no inline MCP flag, so it launches as the bare command.
+        assert_eq!(AgentCli::Gemini.launch_command(), "gemini");
     }
 }
