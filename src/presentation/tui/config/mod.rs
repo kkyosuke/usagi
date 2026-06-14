@@ -32,10 +32,18 @@ use state::Config;
 ///
 /// When invoked from inside a git repository, the screen also edits that
 /// project's local overrides (`<repo>/.usagi/settings.json`); the global and
-/// local settings are saved together when the user saves.
+/// local settings are saved together when the user saves. The project context
+/// is the repository containing the current directory.
 pub fn run(term: &Term) -> Result<Outcome> {
+    run_in(term, current_repo_root())
+}
+
+/// Runs the configuration screen with an explicit project context: `repo_root`
+/// is the repository whose local overrides are edited alongside the global
+/// settings, or `None` to edit only the global settings. Used by the workspace
+/// screen's `config` command, which knows the workspace it was opened for.
+pub fn run_in(term: &Term, repo_root: Option<PathBuf>) -> Result<Outcome> {
     let storage = Storage::open_default()?;
-    let repo_root = current_repo_root();
 
     let (config, notice) = match load(&storage, repo_root.as_deref()) {
         Ok((settings, workspaces, local)) => {

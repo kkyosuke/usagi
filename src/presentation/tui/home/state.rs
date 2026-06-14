@@ -7,9 +7,12 @@
 //! terminal IO, so the navigation, editing, and command logic are all directly
 //! testable.
 
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
+
 use crate::domain::workspace_state::{SessionRecord, WorktreeState};
 
-use super::command::{CommandRegistry, Effect, WorktreeRef};
+use super::command::{CommandRegistry, Effect, Hint, WorktreeRef};
 use super::terminal_view::TerminalView;
 
 /// The display name of a worktree: its branch, or a placeholder when detached.
@@ -144,6 +147,27 @@ pub enum RightPane {
     Terminal,
 }
 
+/// Why the embedded terminal pane handed control back to the event loop.
+///
+/// The pane is driven by the impure terminal loop (`terminal_pane`); this enum
+/// is the small, testable vocabulary it returns so the event loop can decide
+/// what to do next — keep the shell alive and return to the sidebar, close it,
+/// or re-root the pane at the next / previous worktree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PaneExit {
+    /// The user detached (`Ctrl-O`): the shell stays alive in the pool and the
+    /// pane returns to the sidebar so a session can be switched.
+    Detach,
+    /// The shell exited on its own (e.g. the user typed `exit`); it is gone.
+    Closed,
+    /// Switch to the next worktree's terminal, keeping the pane focused
+    /// (`Ctrl-O` then `n` / `]`).
+    SwitchNext,
+    /// Switch to the previous worktree's terminal, keeping the pane focused
+    /// (`Ctrl-O` then `p` / `[`).
+    SwitchPrev,
+}
+
 /// The kind of a log line, which decides how it is coloured.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LineKind {
@@ -261,6 +285,10 @@ pub struct HomeState {
     /// The latest snapshot of the embedded terminal's screen, set while the
     /// `terminal` command is running and rendered in place of the log.
     terminal_view: Option<TerminalView>,
+    /// Worktree paths whose background session is waiting for the user (its
+    /// agent rang the bell). Refreshed from the terminal monitor each redraw and
+    /// rendered as a marker in the sidebar.
+    waiting: HashSet<PathBuf>,
 }
 
 impl HomeState {
@@ -289,6 +317,7 @@ impl HomeState {
             sessions: Vec::new(),
             right_pane: RightPane::Log,
             terminal_view: None,
+            waiting: HashSet::new(),
         }
     }
 
@@ -365,6 +394,13 @@ impl HomeState {
         &self.input
     }
 
+    /// The advisory input hint for the current command input (matching commands,
+    /// or the usage of the command being given arguments). Computed on demand
+    /// for rendering; see [`CommandRegistry::suggest`].
+    pub fn hint(&self) -> Hint {
+        self.registry.suggest(&self.input)
+    }
+
     pub fn log(&self) -> &[LogLine] {
         &self.log
     }
@@ -400,6 +436,23 @@ impl HomeState {
         self.terminal_view = Some(view);
     }
 
+    /// Replace the set of worktree paths whose background session is waiting for
+    /// the user, refreshed from the terminal monitor before each redraw.
+    pub fn set_waiting(&mut self, waiting: HashSet<PathBuf>) {
+        self.waiting = waiting;
+    }
+
+    /// Whether the worktree at `path` has a background session waiting for input.
+    pub fn is_waiting(&self, path: &Path) -> bool {
+        self.waiting.contains(path)
+    }
+
+    /// The set of worktree paths whose background session is waiting for input,
+    /// for the sidebar renderer.
+    pub fn waiting_paths(&self) -> &HashSet<PathBuf> {
+        &self.waiting
+    }
+
     /// Move the worktree cursor up (sidebar mode).
     pub fn move_up(&mut self) {
         self.list.move_up();
@@ -418,6 +471,22 @@ impl HomeState {
             self.log
                 .push(LogLine::notice(format!("Switched to workspace \"{name}\"")));
         }
+    }
+
+    /// Move the cursor to the next worktree (wrapping) and return its path, so
+    /// the embedded terminal can re-root there on a leader switch (`Ctrl-O` then
+    /// `n`). `None` when the list is empty (nothing to switch to).
+    pub fn focus_next_worktree(&mut self) -> Option<PathBuf> {
+        self.list.move_down();
+        self.list.selected().map(|w| w.path.clone())
+    }
+
+    /// Move the cursor to the previous worktree (wrapping) and return its path,
+    /// for the embedded terminal to re-root there (`Ctrl-O` then `p`). `None`
+    /// when the list is empty.
+    pub fn focus_prev_worktree(&mut self) -> Option<PathBuf> {
+        self.list.move_up();
+        self.list.selected().map(|w| w.path.clone())
     }
 
     /// Switch from the sidebar to the command input line.
@@ -1147,6 +1216,56 @@ mod tests {
         state.show_log();
         assert_eq!(state.right_pane(), RightPane::Log);
         assert!(state.terminal_view().is_none());
+    }
+
+    #[test]
+    fn focus_next_and_prev_cycle_the_cursor_and_yield_paths() {
+        // The sample worktrees live at /repo/main and /repo/feature.
+        let mut state = state();
+        assert_eq!(state.list().selected_index(), 0);
+        // Next advances the cursor and returns the now-selected path.
+        assert_eq!(
+            state.focus_next_worktree(),
+            Some(PathBuf::from("/repo/feature"))
+        );
+        assert_eq!(state.list().selected_index(), 1);
+        // It wraps from the bottom back to the top.
+        assert_eq!(
+            state.focus_next_worktree(),
+            Some(PathBuf::from("/repo/main"))
+        );
+        // Prev walks the other way, wrapping to the bottom.
+        assert_eq!(
+            state.focus_prev_worktree(),
+            Some(PathBuf::from("/repo/feature"))
+        );
+        assert_eq!(state.list().selected_index(), 1);
+    }
+
+    #[test]
+    fn focus_worktree_on_an_empty_list_is_none() {
+        let mut state = HomeState::new("usagi", Vec::new(), None);
+        assert_eq!(state.focus_next_worktree(), None);
+        assert_eq!(state.focus_prev_worktree(), None);
+    }
+
+    #[test]
+    fn waiting_paths_track_sessions_awaiting_input() {
+        let mut state = state();
+        // Nothing is waiting by default.
+        assert!(!state.is_waiting(Path::new("/repo/feature")));
+        assert!(state.waiting_paths().is_empty());
+
+        // The monitor's snapshot is swapped in wholesale before each redraw.
+        let mut waiting = HashSet::new();
+        waiting.insert(PathBuf::from("/repo/feature"));
+        state.set_waiting(waiting);
+        assert!(state.is_waiting(Path::new("/repo/feature")));
+        assert!(!state.is_waiting(Path::new("/repo/main")));
+
+        // A later (empty) snapshot clears it.
+        state.set_waiting(HashSet::new());
+        assert!(!state.is_waiting(Path::new("/repo/feature")));
     }
 
     #[test]

@@ -7,7 +7,8 @@ use console::Term;
 use crate::presentation::tui::screen::KeyReader;
 
 use super::command::Effect;
-use super::state::{HomeState, Mode, SessionOutcome};
+use super::state::{HomeState, Mode, PaneExit, SessionOutcome};
+use super::terminal_pool::MonitorHandle;
 use super::ui;
 
 /// What the user chose to do on the home (workspace) screen.
@@ -40,22 +41,35 @@ pub enum Outcome {
 /// `terminal` embeds a live shell in the right pane, rooted at the selected
 /// worktree (or `workspace_root` when nothing is selected). `agent` does the
 /// same but launches the configured AI agent CLI inside that shell. The loop
-/// switches the right pane to terminal mode, runs the embedded session via
+/// switches the right pane to terminal mode, then runs the embedded session via
 /// `open_terminal` (its `bool` is `true` for `agent`, `false` for a bare
-/// `terminal`), and switches back when it returns; the PTY I/O, rendering, and
-/// agent-command resolution live in that injected callback.
+/// `terminal`) in a small switch loop: the callback returns a [`PaneExit`], and
+/// [`PaneExit::SwitchNext`] / [`PaneExit::SwitchPrev`] re-root the pane at the
+/// next / previous worktree without leaving it (the shell behind it stays
+/// alive), while `Detach` / `Closed` switch the pane back. The PTY I/O,
+/// rendering, the persistent shell pool, and agent-command resolution all live
+/// in that injected callback.
+///
+/// `config` opens the settings screen via `open_config`, which runs it against
+/// the real terminal and returns `true` when the user quit the application from
+/// it (so the loop propagates [`Outcome::Quit`]) and `false` to return to the
+/// workspace screen. The screen wiring lives in that injected callback.
 #[allow(clippy::too_many_arguments)]
 pub fn event_loop(
     term: &Term,
     reader: &mut dyn KeyReader,
     mut state: HomeState,
     workspace_root: &Path,
+    monitor: &MonitorHandle,
     persist: &mut dyn FnMut(&str),
     create_session: &mut dyn FnMut(&str) -> SessionOutcome,
     remove_session: &mut dyn FnMut(&str, bool) -> SessionOutcome,
-    open_terminal: &mut dyn FnMut(&mut HomeState, &Path, bool) -> Result<()>,
+    open_terminal: &mut dyn FnMut(&mut HomeState, &Path, bool) -> Result<PaneExit>,
+    open_config: &mut dyn FnMut(&Term) -> Result<bool>,
 ) -> Result<Outcome> {
     loop {
+        // Mark any background sessions waiting for input before painting.
+        state.set_waiting(monitor.waiting());
         term.move_cursor_to(0, 0)?;
         term.clear_screen()?;
         let (height, width) = term.size();
@@ -131,19 +145,44 @@ pub fn event_loop(
                             } else {
                                 ("Terminal", "terminal")
                             };
-                            let dir = state
+                            let mut dir = state
                                 .list()
                                 .selected()
                                 .map(|w| w.path.clone())
                                 .unwrap_or_else(|| workspace_root.to_path_buf());
                             state.show_terminal();
-                            let result = open_terminal(&mut state, &dir, agent);
+                            // Stay in the pane across session switches: a leader
+                            // switch re-roots the shell at the next / previous
+                            // worktree (the one just left keeps running), and we
+                            // only leave on a detach, a close, or an error.
+                            let outcome = loop {
+                                match open_terminal(&mut state, &dir, agent) {
+                                    Ok(PaneExit::SwitchNext) => match state.focus_next_worktree() {
+                                        Some(next) => dir = next,
+                                        None => break Ok(PaneExit::Detach),
+                                    },
+                                    Ok(PaneExit::SwitchPrev) => match state.focus_prev_worktree() {
+                                        Some(prev) => dir = prev,
+                                        None => break Ok(PaneExit::Detach),
+                                    },
+                                    other => break other,
+                                }
+                            };
                             state.show_log();
-                            match result {
-                                Ok(()) => state
+                            match outcome {
+                                Ok(PaneExit::Detach) => {
+                                    state.log_output(format!("{label} detached (still running) 🐰"))
+                                }
+                                Ok(_) => state
                                     .log_output(format!("{label} in {} closed.", dir.display())),
                                 Err(e) => state.log_error(format!("{fail} failed: {e}")),
                             }
+                        }
+                        // Hand off to the settings screen; it owns the terminal
+                        // until dismissed. Quitting there (guard returns true)
+                        // quits the app; otherwise we resume the workspace screen.
+                        Effect::OpenConfig if open_config(term)? => {
+                            return Ok(Outcome::Quit);
                         }
                         _ => {}
                     }
@@ -227,27 +266,38 @@ mod tests {
         )
     }
 
-    /// A `open_terminal` callback that reports success without spawning a shell.
-    fn noop_open(_: &mut HomeState, _: &Path, _: bool) -> Result<()> {
-        Ok(())
+    /// A `open_terminal` callback that reports the shell closed without spawning
+    /// one (so the switch loop runs a single iteration and leaves the pane).
+    fn noop_open(_: &mut HomeState, _: &Path, _: bool) -> Result<PaneExit> {
+        Ok(PaneExit::Closed)
+    }
+
+    /// An `open_config` callback that returns to the workspace screen (does not
+    /// quit) without running the real settings screen.
+    fn noop_config(_: &Term) -> Result<bool> {
+        Ok(false)
     }
 
     fn run(keys: Vec<io::Result<Key>>, state: HomeState) -> Result<Outcome> {
         let term = Term::stdout();
         let mut reader = ScriptedReader::new(keys);
+        let monitor = MonitorHandle::detached();
         let mut persist = |_: &str| {};
         let mut create_session: fn(&str) -> SessionOutcome = noop_create;
         let mut remove_session: fn(&str, bool) -> SessionOutcome = noop_remove;
-        let mut open_terminal: fn(&mut HomeState, &Path, bool) -> Result<()> = noop_open;
+        let mut open_terminal: fn(&mut HomeState, &Path, bool) -> Result<PaneExit> = noop_open;
+        let mut open_config: fn(&Term) -> Result<bool> = noop_config;
         event_loop(
             &term,
             &mut reader,
             state,
             Path::new("/ws"),
+            &monitor,
             &mut persist,
             &mut create_session,
             &mut remove_session,
             &mut open_terminal,
+            &mut open_config,
         )
     }
 
@@ -344,20 +394,24 @@ mod tests {
 
         let term = Term::stdout();
         let mut reader = ScriptedReader::new(keys);
+        let monitor = MonitorHandle::detached();
         let mut recorded = Vec::new();
         let mut persist = |command: &str| recorded.push(command.to_string());
         let mut create_session: fn(&str) -> SessionOutcome = noop_create;
         let mut remove_session: fn(&str, bool) -> SessionOutcome = noop_remove;
-        let mut open_terminal: fn(&mut HomeState, &Path, bool) -> Result<()> = noop_open;
+        let mut open_terminal: fn(&mut HomeState, &Path, bool) -> Result<PaneExit> = noop_open;
+        let mut open_config: fn(&Term) -> Result<bool> = noop_config;
         let outcome = event_loop(
             &term,
             &mut reader,
             sample_state(),
             Path::new("/ws"),
+            &monitor,
             &mut persist,
             &mut create_session,
             &mut remove_session,
             &mut open_terminal,
+            &mut open_config,
         )
         .unwrap();
         assert!(matches!(outcome, Outcome::Back));
@@ -399,6 +453,7 @@ mod tests {
     ) -> (Result<Outcome>, Vec<String>) {
         let term = Term::stdout();
         let mut reader = ScriptedReader::new(keys);
+        let monitor = MonitorHandle::detached();
         let mut persist = |_: &str| {};
         let mut created = Vec::new();
         let mut create_session = |name: &str| {
@@ -406,16 +461,19 @@ mod tests {
             outcome.clone()
         };
         let mut remove_session: fn(&str, bool) -> SessionOutcome = noop_remove;
-        let mut open_terminal: fn(&mut HomeState, &Path, bool) -> Result<()> = noop_open;
+        let mut open_terminal: fn(&mut HomeState, &Path, bool) -> Result<PaneExit> = noop_open;
+        let mut open_config: fn(&Term) -> Result<bool> = noop_config;
         let result = event_loop(
             &term,
             &mut reader,
             state,
             Path::new("/ws"),
+            &monitor,
             &mut persist,
             &mut create_session,
             &mut remove_session,
             &mut open_terminal,
+            &mut open_config,
         );
         (result, created)
     }
@@ -461,6 +519,7 @@ mod tests {
 
         let term = Term::stdout();
         let mut reader = ScriptedReader::new(keys);
+        let monitor = MonitorHandle::detached();
         let mut persist = |_: &str| {};
         let mut create_session: fn(&str) -> SessionOutcome = noop_create;
         let mut removed = Vec::new();
@@ -468,16 +527,19 @@ mod tests {
             removed.push((name.to_string(), force));
             ok_outcome()
         };
-        let mut open_terminal: fn(&mut HomeState, &Path, bool) -> Result<()> = noop_open;
+        let mut open_terminal: fn(&mut HomeState, &Path, bool) -> Result<PaneExit> = noop_open;
+        let mut open_config: fn(&Term) -> Result<bool> = noop_config;
         let outcome = event_loop(
             &term,
             &mut reader,
             sample_state(),
             Path::new("/ws"),
+            &monitor,
             &mut persist,
             &mut create_session,
             &mut remove_session,
             &mut open_terminal,
+            &mut open_config,
         )
         .unwrap();
         assert!(matches!(outcome, Outcome::Back));
@@ -580,7 +642,7 @@ mod tests {
     fn run_pane(
         command: &str,
         state: HomeState,
-        open_terminal: &mut dyn FnMut(&mut HomeState, &Path, bool) -> Result<()>,
+        open_terminal: &mut dyn FnMut(&mut HomeState, &Path, bool) -> Result<PaneExit>,
     ) -> Result<Outcome> {
         let mut keys = vec![Ok(Key::Char(':'))];
         keys.extend(typed(command));
@@ -590,18 +652,22 @@ mod tests {
 
         let term = Term::stdout();
         let mut reader = ScriptedReader::new(keys);
+        let monitor = MonitorHandle::detached();
         let mut persist = |_: &str| {};
         let mut create_session: fn(&str) -> SessionOutcome = noop_create;
         let mut remove_session: fn(&str, bool) -> SessionOutcome = noop_remove;
+        let mut open_config: fn(&Term) -> Result<bool> = noop_config;
         event_loop(
             &term,
             &mut reader,
             state,
             Path::new("/ws"),
+            &monitor,
             &mut persist,
             &mut create_session,
             &mut remove_session,
             open_terminal,
+            &mut open_config,
         )
     }
 
@@ -628,7 +694,7 @@ mod tests {
             );
             assert!(!agent);
             *opened.borrow_mut() = Some(dir.to_path_buf());
-            Ok(())
+            Ok(PaneExit::Closed)
         };
         // sample_state's selected worktree path is /repo/wt.
         assert!(matches!(
@@ -643,7 +709,7 @@ mod tests {
         let opened = RefCell::new(None);
         let mut open = |_home: &mut HomeState, dir: &Path, _agent: bool| {
             *opened.borrow_mut() = Some(dir.to_path_buf());
-            Ok(())
+            Ok(PaneExit::Closed)
         };
         // No worktrees: the loop opens the shell in the workspace root (/ws).
         let state = HomeState::new("usagi", Vec::new(), None);
@@ -674,7 +740,7 @@ mod tests {
                 crate::presentation::tui::home::state::RightPane::Terminal
             );
             *saw_agent.borrow_mut() = Some((agent, dir.to_path_buf()));
-            Ok(())
+            Ok(PaneExit::Closed)
         };
         assert!(matches!(
             run_pane("agent", sample_state(), &mut open).unwrap(),
@@ -689,7 +755,7 @@ mod tests {
     #[test]
     fn agent_via_the_default_callback_succeeds() {
         // Drives `:agent` through the shared no-op `open_terminal`.
-        let mut open: fn(&mut HomeState, &Path, bool) -> Result<()> = noop_open;
+        let mut open: fn(&mut HomeState, &Path, bool) -> Result<PaneExit> = noop_open;
         assert!(matches!(
             run_pane("agent", sample_state(), &mut open).unwrap(),
             Outcome::Back
@@ -704,5 +770,165 @@ mod tests {
             run_pane("agent", sample_state(), &mut open).unwrap(),
             Outcome::Back
         ));
+    }
+
+    /// A worktree at a specific path, so the switch loop's re-rooting is
+    /// observable (the shared `worktree` helper pins every path to /repo/wt).
+    fn worktree_at(branch: &str, path: &str) -> WorktreeState {
+        WorktreeState {
+            branch: Some(branch.to_string()),
+            path: PathBuf::from(path),
+            head: "abc1234".to_string(),
+            primary: false,
+            upstream: None,
+            status: BranchStatus::Local,
+            updated_at: Utc::now(),
+        }
+    }
+
+    fn two_worktree_state() -> HomeState {
+        HomeState::new(
+            "usagi",
+            vec![
+                worktree_at("main", "/r/main"),
+                worktree_at("feat", "/r/feat"),
+            ],
+            None,
+        )
+    }
+
+    /// Drive `:config` through the loop with a custom `open_config`, so the
+    /// effect's hand-off and quit propagation are exercised.
+    fn run_config(
+        state: HomeState,
+        open_config: &mut dyn FnMut(&Term) -> Result<bool>,
+    ) -> Result<Outcome> {
+        let mut keys = vec![Ok(Key::Char(':'))];
+        keys.extend(typed("config"));
+        keys.push(Ok(Key::Enter));
+        keys.push(Ok(Key::Escape)); // cancel command mode
+        keys.push(Ok(Key::Escape)); // leave sidebar
+
+        let term = Term::stdout();
+        let mut reader = ScriptedReader::new(keys);
+        let monitor = MonitorHandle::detached();
+        let mut persist = |_: &str| {};
+        let mut create_session: fn(&str) -> SessionOutcome = noop_create;
+        let mut remove_session: fn(&str, bool) -> SessionOutcome = noop_remove;
+        let mut open_terminal: fn(&mut HomeState, &Path, bool) -> Result<PaneExit> = noop_open;
+        event_loop(
+            &term,
+            &mut reader,
+            state,
+            Path::new("/ws"),
+            &monitor,
+            &mut persist,
+            &mut create_session,
+            &mut remove_session,
+            &mut open_terminal,
+            open_config,
+        )
+    }
+
+    #[test]
+    fn leader_switch_next_reroots_the_pane_then_detaches() {
+        // The pane opens on the selected worktree, a SwitchNext re-roots it at
+        // the next one (the first shell stays alive in the pool), then it
+        // detaches.
+        let dirs = RefCell::new(Vec::new());
+        let exits = RefCell::new(vec![PaneExit::SwitchNext, PaneExit::Detach]);
+        let mut open = |_home: &mut HomeState, dir: &Path, _agent: bool| {
+            dirs.borrow_mut().push(dir.to_path_buf());
+            Ok(exits.borrow_mut().remove(0))
+        };
+        assert!(matches!(
+            run_pane("terminal", two_worktree_state(), &mut open).unwrap(),
+            Outcome::Back
+        ));
+        assert_eq!(
+            *dirs.borrow(),
+            vec![PathBuf::from("/r/main"), PathBuf::from("/r/feat")]
+        );
+    }
+
+    #[test]
+    fn leader_switch_prev_reroots_the_pane_then_detaches() {
+        // SwitchPrev from the top worktree wraps to the bottom one.
+        let dirs = RefCell::new(Vec::new());
+        let exits = RefCell::new(vec![PaneExit::SwitchPrev, PaneExit::Detach]);
+        let mut open = |_home: &mut HomeState, dir: &Path, _agent: bool| {
+            dirs.borrow_mut().push(dir.to_path_buf());
+            Ok(exits.borrow_mut().remove(0))
+        };
+        assert!(matches!(
+            run_pane("terminal", two_worktree_state(), &mut open).unwrap(),
+            Outcome::Back
+        ));
+        assert_eq!(
+            *dirs.borrow(),
+            vec![PathBuf::from("/r/main"), PathBuf::from("/r/feat")]
+        );
+    }
+
+    #[test]
+    fn leader_switch_with_no_worktrees_detaches() {
+        // With an empty list a switch has nowhere to go, so the pane detaches
+        // after the single opening call (both directions).
+        for exit in [PaneExit::SwitchNext, PaneExit::SwitchPrev] {
+            let calls = RefCell::new(0);
+            let mut open = |_home: &mut HomeState, _dir: &Path, _agent: bool| {
+                *calls.borrow_mut() += 1;
+                Ok(exit)
+            };
+            let state = HomeState::new("usagi", Vec::new(), None);
+            assert!(matches!(
+                run_pane("terminal", state, &mut open).unwrap(),
+                Outcome::Back
+            ));
+            assert_eq!(*calls.borrow(), 1);
+        }
+    }
+
+    #[test]
+    fn config_via_the_default_callback_returns_to_the_workspace_screen() {
+        // Drives `:config` through the shared no-op `open_config` (returns false),
+        // so the loop resumes the workspace screen and then leaves with Back.
+        let mut open: fn(&Term) -> Result<bool> = noop_config;
+        assert!(matches!(
+            run_config(sample_state(), &mut open).unwrap(),
+            Outcome::Back
+        ));
+    }
+
+    #[test]
+    fn config_opens_the_settings_screen() {
+        let opened = RefCell::new(false);
+        let mut open = |_: &Term| {
+            *opened.borrow_mut() = true;
+            Ok(false)
+        };
+        assert!(matches!(
+            run_config(sample_state(), &mut open).unwrap(),
+            Outcome::Back
+        ));
+        assert!(opened.into_inner());
+    }
+
+    #[test]
+    fn quitting_from_config_quits_the_app() {
+        // `open_config` returning true means the user quit the settings screen,
+        // so the workspace screen propagates Quit immediately.
+        let mut open = |_: &Term| Ok(true);
+        assert!(matches!(
+            run_config(sample_state(), &mut open).unwrap(),
+            Outcome::Quit
+        ));
+    }
+
+    #[test]
+    fn config_failure_is_propagated() {
+        let mut open = |_: &Term| Err(anyhow::anyhow!("settings blew up"));
+        let err = run_config(sample_state(), &mut open).unwrap_err();
+        assert!(err.to_string().contains("settings blew up"));
     }
 }

@@ -199,13 +199,14 @@ mod tests {
 
     #[test]
     fn save_then_load_settings_round_trips() {
-        use crate::domain::settings::AgentCli;
+        use crate::domain::settings::{AgentCli, BranchSource};
 
         let dir = tempfile::tempdir().unwrap();
         let store = WorkspaceStore::new(dir.path());
         let settings = LocalSettings {
             agent_cli: Some(AgentCli::Gemini),
             notifications_enabled: Some(false),
+            default_branch_source: Some(BranchSource::Local),
         };
 
         store.save_settings(&settings).unwrap();

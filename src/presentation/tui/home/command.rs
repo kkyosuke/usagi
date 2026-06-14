@@ -39,6 +39,10 @@ pub enum Effect {
     /// `agent`). This is `terminal` with the agent CLI launched inside it; the
     /// directory and agent command are resolved by the event loop / wiring.
     OpenAgent,
+    /// Open the configuration screen (the user ran `config`) to edit the global
+    /// settings and this workspace's local overrides. The screen is run by the
+    /// event loop, which returns to the workspace screen when it is dismissed.
+    OpenConfig,
 }
 
 /// The result of running a command: lines to append plus a side effect.
@@ -409,6 +413,29 @@ impl Command for AgentCommand {
     }
 }
 
+/// `config`: open the configuration screen to edit the global settings and the
+/// current workspace's local overrides. Opening the screen is a side effect
+/// ([`Effect::OpenConfig`]) performed by the event loop, which owns the terminal
+/// and returns to the workspace screen when the user dismisses it.
+struct ConfigCommand;
+
+impl Command for ConfigCommand {
+    fn name(&self) -> &'static str {
+        "config"
+    }
+
+    fn description(&self) -> &'static str {
+        "Open the settings screen to edit configuration"
+    }
+
+    fn run(&self, _args: &str, _ctx: &CommandContext) -> CommandResult {
+        CommandResult {
+            lines: Vec::new(),
+            effect: Effect::OpenConfig,
+        }
+    }
+}
+
 /// A recognised command whose real behaviour is not built yet. It produces a
 /// friendly "coming soon" line so the surface stays discoverable; the follow-up
 /// issues replace each one with a real [`Command`] implementation. It still
@@ -468,6 +495,7 @@ impl CommandRegistry {
                 }),
                 Box::new(TerminalCommand),
                 Box::new(AgentCommand),
+                Box::new(ConfigCommand),
                 Box::new(HistoryCommand),
                 Box::new(ComingSoonCommand {
                     name: "doctor",
@@ -580,6 +608,45 @@ impl CommandRegistry {
             },
         }
     }
+
+    /// Compute the advisory hint shown above the input as the user types.
+    ///
+    /// While the command word is being typed (no whitespace yet), it returns the
+    /// commands whose name starts with what has been typed — every command when
+    /// the input is empty, so the whole surface is discoverable the moment `:`
+    /// is pressed. Once arguments are being given to a known command, it returns
+    /// that command's usage syntax and examples instead. Unknown command words
+    /// produce no hint. This is purely advisory; it never affects [`dispatch`].
+    pub fn suggest(&self, input: &str) -> Hint {
+        let trimmed = input.trim_start();
+        match trimmed.split_once(char::is_whitespace) {
+            // Arguments are being typed: describe the resolved command, if known.
+            Some((word, _)) => match self.find(word) {
+                Some(command) => Hint::Usage {
+                    usage: command.usage(),
+                    examples: command.examples(),
+                },
+                None => Hint::None,
+            },
+            // Still on the command word: list the commands matching its prefix.
+            None => {
+                let hints: Vec<CommandHint> = self
+                    .commands
+                    .iter()
+                    .filter(|c| c.name().starts_with(trimmed))
+                    .map(|c| CommandHint {
+                        name: c.name(),
+                        description: c.description(),
+                    })
+                    .collect();
+                if hints.is_empty() {
+                    Hint::None
+                } else {
+                    Hint::Commands(hints)
+                }
+            }
+        }
+    }
 }
 
 impl Default for CommandRegistry {
@@ -594,6 +661,29 @@ impl Default for CommandRegistry {
 pub struct Completion {
     pub input: String,
     pub candidates: Vec<String>,
+}
+
+/// One command offered in the input hints: its name and one-line description.
+#[derive(Debug, PartialEq, Eq)]
+pub struct CommandHint {
+    pub name: &'static str,
+    pub description: &'static str,
+}
+
+/// The advisory hint rendered above the command input, computed by
+/// [`CommandRegistry::suggest`] from the current input.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Hint {
+    /// The command word is being typed: the matching commands (every command
+    /// when the input is empty), in display order.
+    Commands(Vec<CommandHint>),
+    /// A known command is being given arguments: its usage syntax and examples.
+    Usage {
+        usage: &'static str,
+        examples: &'static [&'static str],
+    },
+    /// Nothing to suggest (e.g. an unrecognised command word).
+    None,
 }
 
 /// Longest common prefix shared by every string in `names`.
@@ -880,6 +970,13 @@ mod tests {
     }
 
     #[test]
+    fn config_requests_opening_the_settings_screen() {
+        let result = registry().dispatch("config", &[], &[]);
+        assert!(result.lines.is_empty());
+        assert_eq!(result.effect, Effect::OpenConfig);
+    }
+
+    #[test]
     fn unknown_command_is_reported_as_an_error() {
         let result = registry().dispatch("frobnicate", &[], &[]);
         assert_eq!(result.lines[0].kind, LineKind::Error);
@@ -982,5 +1079,58 @@ mod tests {
     fn common_prefix_finds_the_shared_start() {
         assert_eq!(common_prefix(&["session", "space"]), "s");
         assert_eq!(common_prefix(&["terminal", "terminal"]), "terminal");
+    }
+
+    #[test]
+    fn suggest_lists_every_command_when_the_input_is_empty() {
+        // A bare prompt offers every command, each with its own description.
+        let registry = registry();
+        let expected: Vec<CommandHint> = registry
+            .infos()
+            .iter()
+            .map(|i| CommandHint {
+                name: i.name,
+                description: i.description,
+            })
+            .collect();
+        assert_eq!(registry.suggest(""), Hint::Commands(expected));
+    }
+
+    #[test]
+    fn suggest_filters_commands_by_prefix() {
+        // "s" only matches "session" among the built-ins.
+        assert_eq!(
+            registry().suggest("s"),
+            Hint::Commands(vec![CommandHint {
+                name: "session",
+                description: "Create, list, or switch sessions (branch + worktree)",
+            }])
+        );
+    }
+
+    #[test]
+    fn suggest_with_an_unknown_prefix_has_no_hint() {
+        assert_eq!(registry().suggest("zzz"), Hint::None);
+    }
+
+    #[test]
+    fn suggest_shows_usage_and_examples_once_arguments_are_typed() {
+        // A trailing space moves past the command word onto its arguments.
+        assert_eq!(
+            registry().suggest("session "),
+            Hint::Usage {
+                usage: "session [new|list|switch|remove] <name>",
+                examples: &[
+                    "session new feature-x",
+                    "session switch feature-x",
+                    "session list",
+                ],
+            }
+        );
+    }
+
+    #[test]
+    fn suggest_with_arguments_to_an_unknown_command_has_no_hint() {
+        assert_eq!(registry().suggest("frob bar"), Hint::None);
     }
 }
