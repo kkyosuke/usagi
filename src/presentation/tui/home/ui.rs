@@ -1549,6 +1549,24 @@ mod tests {
     }
 
     #[test]
+    fn remove_modal_frame_keeps_every_row_within_the_box() {
+        // Regression: the header and key-hint rows must fit inside the border so
+        // nothing spills past the right edge of the box.
+        let mut state = state_with_sessions(&["scroll", "session-new", "config"]);
+        state.open_remove_modal(false);
+        let frame = render_frame(24, 80, &state);
+        let widths: Vec<usize> = frame
+            .iter()
+            .map(|l| console::strip_ansi_codes(l))
+            .filter(|l| l.trim_start().starts_with(['┌', '│', '└']))
+            .map(|l| console::measure_text_width(l.trim_end()))
+            .collect();
+        assert!(!widths.is_empty());
+        // Every bordered row shares one width, so no line overflows the frame.
+        assert!(widths.iter().all(|&w| w == widths[0]));
+    }
+
+    #[test]
     fn render_frame_survives_a_short_terminal() {
         let state = HomeState::new("usagi", Vec::new(), None);
         let frame = render_frame(3, 80, &state);
