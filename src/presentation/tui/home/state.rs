@@ -7,6 +7,8 @@
 //! terminal IO, so the navigation, editing, and command logic are all directly
 //! testable.
 
+use std::path::PathBuf;
+
 use crate::domain::workspace_state::{SessionRecord, WorktreeState};
 
 use super::command::{CommandRegistry, Effect, Hint, WorktreeRef};
@@ -142,6 +144,27 @@ pub enum RightPane {
     Log,
     /// A live embedded terminal (the `terminal` command is running).
     Terminal,
+}
+
+/// Why the embedded terminal pane handed control back to the event loop.
+///
+/// The pane is driven by the impure terminal loop (`terminal_pane`); this enum
+/// is the small, testable vocabulary it returns so the event loop can decide
+/// what to do next — keep the shell alive and return to the sidebar, close it,
+/// or re-root the pane at the next / previous worktree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PaneExit {
+    /// The user detached (`Ctrl-O`): the shell stays alive in the pool and the
+    /// pane returns to the sidebar so a session can be switched.
+    Detach,
+    /// The shell exited on its own (e.g. the user typed `exit`); it is gone.
+    Closed,
+    /// Switch to the next worktree's terminal, keeping the pane focused
+    /// (`Ctrl-O` then `n` / `]`).
+    SwitchNext,
+    /// Switch to the previous worktree's terminal, keeping the pane focused
+    /// (`Ctrl-O` then `p` / `[`).
+    SwitchPrev,
 }
 
 /// The kind of a log line, which decides how it is coloured.
@@ -425,6 +448,22 @@ impl HomeState {
             self.log
                 .push(LogLine::notice(format!("Switched to workspace \"{name}\"")));
         }
+    }
+
+    /// Move the cursor to the next worktree (wrapping) and return its path, so
+    /// the embedded terminal can re-root there on a leader switch (`Ctrl-O` then
+    /// `n`). `None` when the list is empty (nothing to switch to).
+    pub fn focus_next_worktree(&mut self) -> Option<PathBuf> {
+        self.list.move_down();
+        self.list.selected().map(|w| w.path.clone())
+    }
+
+    /// Move the cursor to the previous worktree (wrapping) and return its path,
+    /// for the embedded terminal to re-root there (`Ctrl-O` then `p`). `None`
+    /// when the list is empty.
+    pub fn focus_prev_worktree(&mut self) -> Option<PathBuf> {
+        self.list.move_up();
+        self.list.selected().map(|w| w.path.clone())
     }
 
     /// Switch from the sidebar to the command input line.
@@ -1154,6 +1193,37 @@ mod tests {
         state.show_log();
         assert_eq!(state.right_pane(), RightPane::Log);
         assert!(state.terminal_view().is_none());
+    }
+
+    #[test]
+    fn focus_next_and_prev_cycle_the_cursor_and_yield_paths() {
+        // The sample worktrees live at /repo/main and /repo/feature.
+        let mut state = state();
+        assert_eq!(state.list().selected_index(), 0);
+        // Next advances the cursor and returns the now-selected path.
+        assert_eq!(
+            state.focus_next_worktree(),
+            Some(PathBuf::from("/repo/feature"))
+        );
+        assert_eq!(state.list().selected_index(), 1);
+        // It wraps from the bottom back to the top.
+        assert_eq!(
+            state.focus_next_worktree(),
+            Some(PathBuf::from("/repo/main"))
+        );
+        // Prev walks the other way, wrapping to the bottom.
+        assert_eq!(
+            state.focus_prev_worktree(),
+            Some(PathBuf::from("/repo/feature"))
+        );
+        assert_eq!(state.list().selected_index(), 1);
+    }
+
+    #[test]
+    fn focus_worktree_on_an_empty_list_is_none() {
+        let mut state = HomeState::new("usagi", Vec::new(), None);
+        assert_eq!(state.focus_next_worktree(), None);
+        assert_eq!(state.focus_prev_worktree(), None);
     }
 
     #[test]
