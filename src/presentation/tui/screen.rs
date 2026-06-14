@@ -15,16 +15,27 @@ pub trait KeyReader {
 const ENTER_ALT_SCREEN: &str = "\x1b[?1049h";
 /// Leave the alternate screen, restoring the prior contents.
 const LEAVE_ALT_SCREEN: &str = "\x1b[?1049l";
-/// Disable alternate scroll mode (DECSET 1007). Most terminals enable it by
+/// Disable alternate scroll mode (DECSET 1007). Some terminals enable it by
 /// default, which makes the mouse wheel emit arrow-key presses while the
 /// alternate screen is active — those synthetic arrows would scroll the usagi
-/// lists and leak into the embedded terminal's shell. Turning it off makes the
-/// wheel a no-op for the TUI's lifetime, so the screen never scrolls out from
-/// under the user.
+/// lists and leak into the embedded terminal's shell. Turning it off helps on
+/// terminals that honour it, but many (e.g. Apple Terminal.app) ignore it
+/// entirely, so it is only a first line of defence — see [`ENABLE_MOUSE`].
 const DISABLE_ALT_SCROLL: &str = "\x1b[?1007l";
 /// Re-enable alternate scroll mode, restoring the terminal's usual behaviour
 /// once the TUI exits.
 const ENABLE_ALT_SCROLL: &str = "\x1b[?1007h";
+/// Enable mouse reporting: normal tracking (DECSET 1000) plus SGR extended
+/// coordinates (DECSET 1006). With reporting on, the terminal hands wheel and
+/// click events to us as escape sequences instead of scrolling its own
+/// viewport or synthesising arrow keys — so the wheel can no longer move the
+/// usagi lists or leak into the embedded shell. The reported events are then
+/// dropped by the key reader (see `term_reader`). This is the robust stop that
+/// works even where alternate scroll mode (1007) is ignored.
+const ENABLE_MOUSE: &str = "\x1b[?1000h\x1b[?1006h";
+/// Disable mouse reporting, restoring the terminal's normal wheel / selection
+/// behaviour once the TUI exits. Reset in the reverse order of [`ENABLE_MOUSE`].
+const DISABLE_MOUSE: &str = "\x1b[?1006l\x1b[?1000l";
 
 /// RAII guard that activates the terminal alternate screen and restores it on drop.
 pub struct AlternateScreenGuard {
@@ -36,6 +47,7 @@ impl AlternateScreenGuard {
     pub fn new(term: Term) -> Result<Self> {
         term.write_str(ENTER_ALT_SCREEN)?;
         term.write_str(DISABLE_ALT_SCROLL)?;
+        term.write_str(ENABLE_MOUSE)?;
         term.hide_cursor()?;
         Ok(Self {
             term,
@@ -51,6 +63,7 @@ impl AlternateScreenGuard {
 
 impl Drop for AlternateScreenGuard {
     fn drop(&mut self) {
+        let _ = self.term.write_str(DISABLE_MOUSE);
         let _ = self.term.write_str(ENABLE_ALT_SCROLL);
         let _ = self.term.write_str(LEAVE_ALT_SCREEN);
         let _ = self.term.show_cursor();
