@@ -24,16 +24,21 @@ use super::terminal_view::TerminalView;
 /// Shown below the root row when the workspace has no recorded worktrees.
 const EMPTY_MESSAGE: &str = "No worktrees recorded yet. Run usagi to sync.";
 
-/// The status label shown for the root row (which has no git status).
-const ROOT_STATUS: &str = "—";
+/// The detail shown on the root row's second line (it has no git status).
+const ROOT_DETAIL: &str = "workspace root";
 
 /// Shown for a worktree whose HEAD is detached (no branch).
 const DETACHED: &str = "(detached)";
 
-/// Visible columns a worktree row spends on everything but the branch name
-/// (cursor, active marker, primary marker, waiting marker, separators, and the
-/// fixed-width status label).
-const ROW_OVERHEAD: usize = 16;
+/// Columns line 1 of a row spends before the branch name: a cursor cell, a
+/// kind-icon cell (`⌂`/`●`/`○`), and an agent-icon cell, each followed by a
+/// space.
+const ROW_PREFIX: usize = 6;
+
+/// Indent of line 2 (the detail line), aligning its text under the branch name:
+/// the [`ROW_PREFIX`] columns, less the active marker and its trailing space
+/// which the detail line draws itself.
+const DETAIL_INDENT: usize = 4;
 
 /// The vertical bar (with surrounding spaces) dividing the two panes.
 const SEP: &str = " │ ";
@@ -107,132 +112,195 @@ fn title_bar(width: usize, list: &WorktreeList) -> String {
     widgets::title_line(width, &label)
 }
 
-/// The fixed-width, colour-coded label for a branch's lifecycle status.
-fn status_label(status: BranchStatus) -> String {
-    let padded = format!("{:<6}", status.as_str());
+/// The colour-coded label for a branch's lifecycle status, clipped to `width`.
+fn status_label(status: BranchStatus, width: usize) -> String {
+    let text = clip_to_width(status.as_str(), width);
     match status {
-        BranchStatus::Local => style(padded).yellow().to_string(),
-        BranchStatus::Pushed => style(padded).green().to_string(),
-        BranchStatus::Merged => style(padded).dim().to_string(),
+        BranchStatus::Local => style(text).yellow().to_string(),
+        BranchStatus::Pushed => style(text).green().to_string(),
+        BranchStatus::Merged => style(text).dim().to_string(),
     }
 }
 
-/// Builds one worktree row: a `>` cursor for the selected entry, a `*` marker
-/// for the active worktree, a `●` marker for the primary worktree, a `◆` marker
-/// when its background session is waiting for input, the (truncated, padded)
-/// branch name, and status.
+/// The running/waiting state of a session's embedded agent, shown by an icon on
+/// the row's first line and spelled out on its detail line.
+#[derive(Clone, Copy)]
+enum AgentState {
+    /// No live embedded session.
+    Idle,
+    /// A live session whose agent is running (not awaiting input).
+    Running,
+    /// A live session whose agent rang the bell and awaits input.
+    Waiting,
+}
+
+impl AgentState {
+    /// Pick the state from the live / waiting flags. Waiting takes precedence: a
+    /// session awaiting input is necessarily live.
+    fn from_flags(live: bool, waiting: bool) -> Self {
+        if waiting {
+            AgentState::Waiting
+        } else if live {
+            AgentState::Running
+        } else {
+            AgentState::Idle
+        }
+    }
+
+    /// The line-1 icon cell: a green `▶` while running, a bright yellow `◆`
+    /// while waiting, and a blank cell while idle.
+    fn icon(self) -> String {
+        match self {
+            AgentState::Idle => " ".to_string(),
+            AgentState::Running => style("▶").green().bold().to_string(),
+            AgentState::Waiting => style("◆").yellow().bold().to_string(),
+        }
+    }
+
+    /// The detail-line label spelling out the state, clipped to `width`, or
+    /// `None` while idle (the row shows its git status instead).
+    fn label(self, width: usize) -> Option<String> {
+        match self {
+            AgentState::Idle => None,
+            AgentState::Running => Some(style(clip_to_width("running", width)).green().to_string()),
+            AgentState::Waiting => Some(
+                style(clip_to_width("waiting", width))
+                    .yellow()
+                    .bold()
+                    .to_string(),
+            ),
+        }
+    }
+}
+
+/// The `>` cursor cell for the selected row, or a blank cell otherwise.
+fn cursor_cell(selected: bool) -> String {
+    if selected {
+        style(">").red().bold().to_string()
+    } else {
+        " ".to_string()
+    }
+}
+
+/// The branch / root name cell: clipped and padded to `width`, cyan, and bold
+/// when the row is active or under the cursor.
+fn name_cell(text: &str, width: usize, emphasised: bool) -> String {
+    let padded = format!("{:<width$}", clip_to_width(text, width));
+    if emphasised {
+        style(padded).cyan().bold().to_string()
+    } else {
+        style(padded).cyan().to_string()
+    }
+}
+
+/// Builds a row's second (detail) line: indented under the branch name, a `*`
+/// marker for the active row, then the already-styled, already-clipped `detail`.
+fn detail_line(active: bool, detail: String) -> String {
+    let marker = if active {
+        style("*").green().bold().to_string()
+    } else {
+        " ".to_string()
+    };
+    let indent = " ".repeat(DETAIL_INDENT);
+    format!("{indent}{marker} {detail}")
+}
+
+/// Builds a worktree's two lines. Line 1 carries a `>` cursor for the selected
+/// entry, a `●`/`○` kind icon (primary or ordinary worktree), an agent-state
+/// icon (`▶` running / `◆` waiting), and the branch name. Line 2 is indented
+/// under the name with a `*` marker for the active worktree and a detail: the
+/// agent state while one runs, otherwise the git status.
 fn worktree_row(
     worktree: &WorktreeState,
     branch_width: usize,
+    detail_width: usize,
     selected: bool,
     active: bool,
+    live: bool,
     waiting: bool,
-) -> String {
-    let marker = if selected {
-        style(">").red().bold().to_string()
-    } else {
-        " ".to_string()
-    };
+) -> (String, String) {
+    let agent = AgentState::from_flags(live, waiting);
 
-    let active_marker = if active {
-        style("*").green().bold().to_string()
-    } else {
-        " ".to_string()
-    };
-
-    let primary = if worktree.primary {
+    let kind = if worktree.primary {
         style("●").magenta().to_string()
     } else {
-        " ".to_string()
+        style("○").dim().to_string()
     };
-
-    // A bright marker for a session whose agent has rung the bell to ask for
-    // input, so it stands out while the user is elsewhere in the screen.
-    let waiting_marker = if waiting {
-        style("◆").yellow().bold().to_string()
-    } else {
-        " ".to_string()
-    };
-
-    let branch_text = worktree.branch.as_deref().unwrap_or(DETACHED);
-    let branch_text = format!(
-        "{:<branch_width$}",
-        clip_to_width(branch_text, branch_width)
+    let branch = name_cell(
+        worktree.branch.as_deref().unwrap_or(DETACHED),
+        branch_width,
+        active || selected,
     );
-    // The active or cursored row is emphasized.
-    let branch = if active || selected {
-        style(branch_text).cyan().bold().to_string()
-    } else {
-        style(branch_text).cyan().to_string()
-    };
+    let line1 = format!("{} {kind} {} {branch}", cursor_cell(selected), agent.icon());
 
-    let status = status_label(worktree.status);
-    format!("{marker} {active_marker} {primary} {waiting_marker} {branch}  {status}")
+    let detail = agent
+        .label(detail_width)
+        .unwrap_or_else(|| status_label(worktree.status, detail_width));
+    let line2 = detail_line(active, detail);
+    (line1, line2)
 }
 
-/// Builds the root row: the workspace itself, belonging to no session. It uses
-/// the same cursor/active markers as a worktree row, a `⌂` icon in the primary
-/// column, a blank waiting column (the root never waits for input), the
-/// [`ROOT_NAME`] label, and a placeholder status.
-fn root_row(branch_width: usize, selected: bool, active: bool) -> String {
-    let marker = if selected {
-        style(">").red().bold().to_string()
-    } else {
-        " ".to_string()
-    };
+/// Builds the root's two lines: the workspace itself, belonging to no session.
+/// Line 1 carries the cursor cell, a `⌂` kind icon, a blank agent cell (the root
+/// runs no agent), and the [`ROOT_NAME`] label. Line 2 carries the active marker
+/// and a `workspace root` detail.
+fn root_row(
+    branch_width: usize,
+    detail_width: usize,
+    selected: bool,
+    active: bool,
+) -> (String, String) {
+    let kind = style("⌂").magenta().to_string();
+    // The root runs no agent, so its agent cell is blank.
+    let name = name_cell(ROOT_NAME, branch_width, active || selected);
+    let line1 = format!("{} {kind}   {name}", cursor_cell(selected));
 
-    let active_marker = if active {
-        style("*").green().bold().to_string()
-    } else {
-        " ".to_string()
-    };
-
-    let icon = style("⌂").magenta().to_string();
-
-    // The root never waits for input; a blank waiting column keeps the row
-    // column-aligned with `worktree_row`.
-    let waiting_marker = " ";
-
-    let label = format!("{:<branch_width$}", clip_to_width(ROOT_NAME, branch_width));
-    let label = if active || selected {
-        style(label).cyan().bold().to_string()
-    } else {
-        style(label).cyan().to_string()
-    };
-
-    let status = style(format!("{ROOT_STATUS:<6}")).dim().to_string();
-    format!("{marker} {active_marker} {icon} {waiting_marker} {label}  {status}")
+    let detail = style(clip_to_width(ROOT_DETAIL, detail_width))
+        .dim()
+        .to_string();
+    let line2 = detail_line(active, detail);
+    (line1, line2)
 }
 
-/// Builds the left pane: the root row, then one row per worktree (or the empty
-/// message when none are recorded), trimmed to the available `rows`. `waiting`
-/// holds the worktree paths whose background session is awaiting input, marked
-/// with `◆`.
+/// Builds the left pane: each entry spans two lines (an identity line and a
+/// detail line) — the root entry first, then one per worktree (or the empty
+/// message when none are recorded), trimmed to the available `rows`. `live`
+/// holds the worktree paths with a running agent (marked `▶`) and `waiting` the
+/// ones whose agent awaits input (marked `◆`, taking precedence over `▶`).
 fn left_pane(
     list: &WorktreeList,
+    live: &HashSet<PathBuf>,
     waiting: &HashSet<PathBuf>,
     left_w: usize,
     rows: usize,
 ) -> Vec<String> {
-    let branch_width = left_w.saturating_sub(ROW_OVERHEAD);
-    let mut lines = vec![root_row(
+    let branch_width = left_w.saturating_sub(ROW_PREFIX);
+    let detail_width = left_w.saturating_sub(DETAIL_INDENT + 2);
+    let (root_top, root_detail) = root_row(
         branch_width,
+        detail_width,
         list.root_selected(),
         list.root_active(),
-    )];
+    );
+    let mut lines = vec![root_top, root_detail];
     if list.is_empty() {
         lines.push(clip_to_width(EMPTY_MESSAGE, left_w));
     } else {
         for (i, w) in list.worktrees().iter().enumerate() {
-            // Row 0 is the root row, so worktree `i` sits at selectable row i + 1.
+            // The root occupies the first entry, so worktree `i` sits at
+            // selectable row i + 1.
             let row = i + 1;
-            lines.push(worktree_row(
+            let (top, detail) = worktree_row(
                 w,
                 branch_width,
+                detail_width,
                 row == list.selected_index(),
                 row == list.active_index(),
+                live.contains(&w.path),
                 waiting.contains(&w.path),
-            ));
+            );
+            lines.push(top);
+            lines.push(detail);
         }
     }
     lines.truncate(rows);
@@ -560,7 +628,13 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
     // overlay anchored to the input, appearing and vanishing without shifting
     // anything beneath them.
     let body_rows = height.saturating_sub(4).max(1);
-    let left = left_pane(state.list(), state.waiting_paths(), left_w, body_rows);
+    let left = left_pane(
+        state.list(),
+        state.live_paths(),
+        state.waiting_paths(),
+        left_w,
+        body_rows,
+    );
     let right = right_pane_contents(state, right_w, body_rows);
 
     let mut lines = Vec::with_capacity(height);
@@ -685,152 +759,217 @@ mod tests {
 
     #[test]
     fn status_label_colours_each_variant() {
-        assert!(status_label(BranchStatus::Local).contains("local"));
-        assert!(status_label(BranchStatus::Pushed).contains("pushed"));
-        assert!(status_label(BranchStatus::Merged).contains("merged"));
+        assert!(status_label(BranchStatus::Local, 10).contains("local"));
+        assert!(status_label(BranchStatus::Pushed, 10).contains("pushed"));
+        assert!(status_label(BranchStatus::Merged, 10).contains("merged"));
+    }
+
+    #[test]
+    fn status_label_clips_to_width() {
+        // A narrow detail column truncates the status word with an ellipsis.
+        let clipped = status_label(BranchStatus::Merged, 3);
+        assert!(console::strip_ansi_codes(&clipped).contains('…'));
     }
 
     #[test]
     fn worktree_row_marks_selected_primary_and_detached() {
-        let selected = worktree_row(
+        let (top, _) = worktree_row(
             &worktree(Some("main"), true, BranchStatus::Pushed),
             10,
+            10,
             true,
             false,
             false,
+            false,
         );
-        assert!(selected.contains('>'));
-        assert!(selected.contains('●'));
-        assert!(selected.contains("main"));
+        assert!(top.contains('>'));
+        assert!(top.contains('●'));
+        assert!(top.contains("main"));
 
-        let other = worktree_row(
+        let (other_top, _) = worktree_row(
             &worktree(Some("feature"), false, BranchStatus::Local),
+            10,
             10,
             false,
             false,
             false,
+            false,
         );
-        assert!(!other.contains('>'));
-        assert!(other.contains("feature"));
+        assert!(!other_top.contains('>'));
+        // An ordinary (non-primary) worktree shows the `○` kind icon.
+        assert!(other_top.contains('○'));
+        assert!(other_top.contains("feature"));
 
-        let detached = worktree_row(
+        let (detached_top, _) = worktree_row(
             &worktree(None, false, BranchStatus::Local),
             10,
+            10,
+            false,
             false,
             false,
             false,
         );
-        assert!(detached.contains("(detached)"));
+        assert!(detached_top.contains("(detached)"));
     }
 
     #[test]
-    fn worktree_row_marks_the_active_worktree() {
-        let active = worktree_row(
+    fn worktree_row_marks_the_active_worktree_on_the_detail_line() {
+        let (_, active_detail) = worktree_row(
             &worktree(Some("feature"), false, BranchStatus::Local),
+            10,
             10,
             false,
             true,
             false,
+            false,
         );
-        assert!(active.contains('*'));
+        assert!(active_detail.contains('*'));
 
-        let inactive = worktree_row(
+        let (_, idle_detail) = worktree_row(
             &worktree(Some("feature"), false, BranchStatus::Local),
+            10,
             10,
             false,
             false,
             false,
+            false,
         );
-        assert!(!inactive.contains('*'));
+        assert!(!idle_detail.contains('*'));
     }
 
     #[test]
-    fn worktree_row_marks_a_session_waiting_for_input() {
-        let waiting = worktree_row(
+    fn worktree_row_marks_a_running_agent_and_one_waiting_for_input() {
+        // A live session with no pending input shows the running icon and label.
+        let (running_top, running_detail) = worktree_row(
             &worktree(Some("feature"), false, BranchStatus::Local),
+            10,
             10,
             false,
             false,
             true,
+            false,
         );
-        assert!(waiting.contains('◆'));
+        assert!(running_top.contains('▶'));
+        assert!(running_detail.contains("running"));
 
-        let quiet = worktree_row(
+        // Waiting for input wins over running: the waiting icon and label show
+        // even though the session is also live.
+        let (waiting_top, waiting_detail) = worktree_row(
             &worktree(Some("feature"), false, BranchStatus::Local),
+            10,
+            10,
+            false,
+            false,
+            true,
+            true,
+        );
+        assert!(waiting_top.contains('◆'));
+        assert!(!waiting_top.contains('▶'));
+        assert!(waiting_detail.contains("waiting"));
+
+        // An idle worktree shows neither icon; its detail falls back to status.
+        let (idle_top, idle_detail) = worktree_row(
+            &worktree(Some("feature"), false, BranchStatus::Local),
+            10,
             10,
             false,
             false,
             false,
+            false,
         );
-        assert!(!quiet.contains('◆'));
+        assert!(!idle_top.contains('▶'));
+        assert!(!idle_top.contains('◆'));
+        assert!(idle_detail.contains("local"));
     }
 
     #[test]
     fn worktree_row_truncates_a_long_branch() {
-        let row = worktree_row(
+        let (top, _) = worktree_row(
             &worktree(
                 Some("feature/a-very-long-branch-name"),
                 false,
                 BranchStatus::Local,
             ),
             8,
+            8,
+            false,
             false,
             false,
             false,
         );
-        assert!(row.contains('…'));
+        assert!(top.contains('…'));
     }
 
     #[test]
     fn root_row_marks_selected_and_active() {
-        let selected = root_row(10, true, false);
-        assert!(selected.contains('>'));
-        assert!(selected.contains('⌂'));
-        assert!(selected.contains(ROOT_NAME));
+        let (top, detail) = root_row(10, 20, true, false);
+        assert!(top.contains('>'));
+        assert!(top.contains('⌂'));
+        assert!(top.contains(ROOT_NAME));
+        // The detail line names the workspace root.
+        assert!(detail.contains("workspace root"));
 
-        let active = root_row(10, false, true);
-        assert!(active.contains('*'));
+        let (_, active_detail) = root_row(10, 20, false, true);
+        assert!(active_detail.contains('*'));
 
-        let idle = root_row(10, false, false);
-        assert!(!idle.contains('>'));
-        assert!(!idle.contains('*'));
-        assert!(idle.contains(ROOT_NAME));
+        let (idle_top, idle_detail) = root_row(10, 20, false, false);
+        assert!(!idle_top.contains('>'));
+        assert!(!idle_detail.contains('*'));
+        assert!(idle_top.contains(ROOT_NAME));
     }
 
     #[test]
-    fn left_pane_renders_the_root_row_then_the_empty_message() {
-        let lines = left_pane(&list_with(Vec::new()), &HashSet::new(), 80, 5);
-        // The root row is always present, with the empty hint below it.
-        assert_eq!(lines.len(), 2);
+    fn left_pane_renders_the_root_entry_then_the_empty_message() {
+        let lines = left_pane(
+            &list_with(Vec::new()),
+            &HashSet::new(),
+            &HashSet::new(),
+            80,
+            6,
+        );
+        // The root entry (two lines) is always present, with the empty hint below.
+        assert_eq!(lines.len(), 3);
         assert!(lines[0].contains(ROOT_NAME));
-        assert!(lines[1].contains("No worktrees recorded"));
+        assert!(lines[1].contains("workspace root"));
+        assert!(lines[2].contains("No worktrees recorded"));
     }
 
     #[test]
-    fn left_pane_renders_the_root_row_then_one_row_per_worktree() {
+    fn left_pane_renders_the_root_entry_then_one_entry_per_worktree() {
         let list = list_with(vec![
             worktree(Some("main"), true, BranchStatus::Pushed),
             worktree(Some("feature"), false, BranchStatus::Local),
         ]);
-        let lines = left_pane(&list, &HashSet::new(), 30, 5);
-        assert_eq!(lines.len(), 3);
+        let lines = left_pane(&list, &HashSet::new(), &HashSet::new(), 30, 6);
+        // Each entry is two lines: root, main, feature.
+        assert_eq!(lines.len(), 6);
         assert!(lines[0].contains(ROOT_NAME));
-        assert!(lines[1].contains("main"));
-        assert!(lines[2].contains("feature"));
+        assert!(lines[2].contains("main"));
+        assert!(lines[4].contains("feature"));
     }
 
     #[test]
-    fn left_pane_marks_worktrees_whose_session_is_waiting() {
+    fn left_pane_marks_a_running_agent_and_one_waiting_for_input() {
         let list = list_with(vec![worktree(Some("feature"), false, BranchStatus::Local)]);
-        // The test worktree's path is "/repo/wt"; flagging it adds the marker.
-        // The root row is line 0, so the worktree is line 1.
-        let mut waiting = HashSet::new();
-        waiting.insert(PathBuf::from("/repo/wt"));
-        let marked = left_pane(&list, &waiting, 30, 5);
-        assert!(marked[1].contains('◆'));
-        // With nothing waiting the marker is absent.
-        let unmarked = left_pane(&list, &HashSet::new(), 30, 5);
-        assert!(!unmarked[1].contains('◆'));
+        // The test worktree's path is "/repo/wt". The root entry is lines 0-1, so
+        // the worktree's identity line is line 2 and its detail line is line 3.
+        let path: HashSet<PathBuf> = [PathBuf::from("/repo/wt")].into_iter().collect();
+
+        // A live session (not waiting) is marked with the running icon.
+        let running = left_pane(&list, &path, &HashSet::new(), 30, 6);
+        assert!(running[2].contains('▶'));
+        assert!(running[3].contains("running"));
+
+        // Waiting takes precedence: the waiting icon shows instead.
+        let waiting = left_pane(&list, &path, &path, 30, 6);
+        assert!(waiting[2].contains('◆'));
+        assert!(!waiting[2].contains('▶'));
+
+        // With nothing flagged, neither icon shows and the detail is the status.
+        let idle = left_pane(&list, &HashSet::new(), &HashSet::new(), 30, 6);
+        assert!(!idle[2].contains('▶'));
+        assert!(!idle[2].contains('◆'));
+        assert!(idle[3].contains("local"));
     }
 
     #[test]
@@ -840,25 +979,27 @@ mod tests {
             worktree(Some("b"), false, BranchStatus::Local),
             worktree(Some("c"), false, BranchStatus::Local),
         ]);
-        // Two rows: the root row and the first worktree.
-        let lines = left_pane(&list, &HashSet::new(), 30, 2);
-        assert_eq!(lines.len(), 2);
+        // Three lines fit: the root entry's two lines and the first worktree's
+        // identity line (its detail line is trimmed off).
+        let lines = left_pane(&list, &HashSet::new(), &HashSet::new(), 30, 3);
+        assert_eq!(lines.len(), 3);
         assert!(lines[0].contains(ROOT_NAME));
-        assert!(lines[1].contains('a'));
+        assert!(lines[2].contains('a'));
     }
 
     #[test]
-    fn left_pane_marks_the_active_worktree_below_the_root_row() {
+    fn left_pane_marks_the_active_worktree_below_the_root_entry() {
         let mut list = list_with(vec![
             worktree(Some("main"), true, BranchStatus::Pushed),
             worktree(Some("feature"), false, BranchStatus::Local),
         ]);
         list.activate_by_name("feature");
-        let lines = left_pane(&list, &HashSet::new(), 30, 5);
-        // The root row is no longer active; the "feature" row carries `*`.
-        assert!(!lines[0].contains('*'));
-        assert!(lines[2].contains('*'));
-        assert!(lines[2].contains("feature"));
+        let lines = left_pane(&list, &HashSet::new(), &HashSet::new(), 30, 6);
+        // The root entry is no longer active; its detail line carries no marker,
+        // while the "feature" entry's detail line carries `*`.
+        assert!(!lines[1].contains('*'));
+        assert!(lines[4].contains("feature"));
+        assert!(lines[5].contains('*'));
     }
 
     #[test]
@@ -1009,6 +1150,26 @@ mod tests {
         let joined = frame.join("\n");
         assert!(joined.contains("main"));
         assert!(joined.contains("man"));
+    }
+
+    #[test]
+    fn render_frame_surfaces_running_and_waiting_agent_icons() {
+        let mut running = worktree(Some("feat"), false, BranchStatus::Local);
+        running.path = PathBuf::from("/repo/run");
+        let mut waiting = worktree(Some("fix"), false, BranchStatus::Pushed);
+        waiting.path = PathBuf::from("/repo/wait");
+        let mut state = HomeState::new("usagi", vec![running, waiting], None);
+        state.set_live([PathBuf::from("/repo/run"), PathBuf::from("/repo/wait")].into());
+        state.set_waiting([PathBuf::from("/repo/wait")].into());
+
+        let frame = render_frame(24, 80, &state);
+        let joined = console::strip_ansi_codes(&frame.join("\n")).into_owned();
+        // The running session shows ▶ and the waiting one ◆, each spelled out on
+        // its detail line.
+        assert!(joined.contains('▶'));
+        assert!(joined.contains("running"));
+        assert!(joined.contains('◆'));
+        assert!(joined.contains("waiting"));
     }
 
     #[test]
