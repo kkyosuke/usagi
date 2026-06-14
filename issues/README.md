@@ -13,7 +13,7 @@
 
 | # | feature | 概要 | category | priority | dependson |
 |---|---|---|---|---|---|
-| 001 | [init-cli](001-init-cli.md) ✅ | `usagi init <URL>` CLI コマンド | cli | high | — |
+| 001 | [init-cli](001-init-cli.md) ✅ | `usagi init` / `usagi init --git <URL>` CLI コマンド | cli | high | — |
 | 002 | [workspace-screen](002-workspace-screen.md) ✅ | ワークスペース画面とコマンドモード基盤 | tui | high | — |
 | 003 | [session](003-session.md) ✅ | `session` セッション管理（`.usagi/worktree` 配下に再帰的に worktree 構築） | tui | high | 002 |
 | 004 | [space](004-space.md) ✅ | `session switch` セッション切り替え | tui | high | 002, 003 |
