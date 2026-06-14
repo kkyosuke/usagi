@@ -7,7 +7,7 @@
 //! terminal IO, so the navigation, editing, and command logic are all directly
 //! testable.
 
-use crate::domain::workspace_state::WorktreeState;
+use crate::domain::workspace_state::{SessionRecord, WorktreeState};
 
 use super::command::{CommandRegistry, Effect};
 
@@ -167,6 +167,8 @@ pub struct SessionOutcome {
     pub line: LogLine,
     /// The refreshed worktree list, when creation produced a new one.
     pub worktrees: Option<Vec<WorktreeState>>,
+    /// The refreshed session list, when creation updated it.
+    pub sessions: Option<Vec<SessionRecord>>,
 }
 
 /// The full state of the home screen.
@@ -187,6 +189,9 @@ pub struct HomeState {
     registry: CommandRegistry,
     /// The session-name modal, when open. While set it captures all keys.
     modal: Option<SessionModal>,
+    /// Sessions recorded for this workspace (from `state.json`), shown by
+    /// `session list` and kept current as sessions are created.
+    sessions: Vec<SessionRecord>,
 }
 
 impl HomeState {
@@ -212,6 +217,7 @@ impl HomeState {
             log,
             registry: CommandRegistry::with_builtins(),
             modal: None,
+            sessions: Vec::new(),
         }
     }
 
@@ -219,6 +225,36 @@ impl HomeState {
     /// so `history` and `↑`/`↓` recall reflect commands run in past sessions.
     pub fn restore_history(&mut self, entries: Vec<String>) {
         self.history = entries;
+    }
+
+    /// Seed the recorded sessions (from `state.json`), shown by `session list`.
+    pub fn restore_sessions(&mut self, sessions: Vec<SessionRecord>) {
+        self.sessions = sessions;
+    }
+
+    pub fn sessions(&self) -> &[SessionRecord] {
+        &self.sessions
+    }
+
+    /// Append the recorded sessions to the log (the `session list` command).
+    pub fn log_sessions(&mut self) {
+        if self.sessions.is_empty() {
+            self.log.push(LogLine::output(
+                "No sessions yet. Run \"session new <name>\" to create one.",
+            ));
+            return;
+        }
+        self.log.push(LogLine::output(format!(
+            "{} session(s):",
+            self.sessions.len()
+        )));
+        for session in &self.sessions {
+            self.log.push(LogLine::output(format!(
+                "  {}  ({} worktree(s))",
+                session.name,
+                session.worktrees.len()
+            )));
+        }
     }
 
     pub fn list(&self) -> &WorktreeList {
@@ -414,6 +450,9 @@ impl HomeState {
         if let Some(worktrees) = outcome.worktrees {
             let name = self.list.workspace_name().to_string();
             self.list = WorktreeList::new(name, worktrees);
+        }
+        if let Some(sessions) = outcome.sessions {
+            self.sessions = sessions;
         }
     }
 }
@@ -793,13 +832,25 @@ mod tests {
         assert!(state.modal().is_none());
     }
 
+    fn session_record(name: &str, worktrees: usize) -> SessionRecord {
+        SessionRecord {
+            name: name.to_string(),
+            root: std::path::PathBuf::from(format!("/repo/.usagi/worktree/{name}")),
+            worktrees: (0..worktrees)
+                .map(|i| std::path::PathBuf::from(format!("/repo/.usagi/worktree/{name}/r{i}")))
+                .collect(),
+            created_at: Utc::now(),
+        }
+    }
+
     #[test]
-    fn apply_session_outcome_logs_and_optionally_swaps_the_list() {
+    fn apply_session_outcome_logs_and_optionally_swaps_lists() {
         let mut state = state();
-        // A success outcome with a refreshed list replaces the worktrees.
+        // A success outcome with refreshed lists replaces worktrees and sessions.
         state.apply_session_outcome(SessionOutcome {
             line: LogLine::output("Created session \"x\""),
             worktrees: Some(vec![worktree("main"), worktree("x")]),
+            sessions: Some(vec![session_record("x", 1)]),
         });
         assert!(state.log().last().unwrap().text.contains("Created session"));
         assert_eq!(state.list().worktrees().len(), 2);
@@ -809,14 +860,40 @@ mod tests {
             .worktrees()
             .iter()
             .any(|w| w.branch.as_deref() == Some("x")));
+        assert_eq!(state.sessions().len(), 1);
 
-        // A failure outcome (no list) only logs.
+        // A failure outcome (no lists) only logs.
         state.apply_session_outcome(SessionOutcome {
             line: LogLine::error("session failed"),
             worktrees: None,
+            sessions: None,
         });
         assert_eq!(state.log().last().unwrap().kind, LineKind::Error);
         assert_eq!(state.list().worktrees().len(), 2);
+        assert_eq!(state.sessions().len(), 1);
+    }
+
+    #[test]
+    fn log_sessions_lists_recorded_sessions() {
+        let mut state = state();
+        state.restore_sessions(vec![session_record("alpha", 2), session_record("beta", 1)]);
+        state.log_sessions();
+        let text = state
+            .log()
+            .iter()
+            .map(|l| l.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("2 session(s)"));
+        assert!(text.contains("alpha"));
+        assert!(text.contains("beta"));
+    }
+
+    #[test]
+    fn log_sessions_reports_when_empty() {
+        let mut state = state();
+        state.log_sessions();
+        assert!(state.log().last().unwrap().text.contains("No sessions yet"));
     }
 
     #[test]

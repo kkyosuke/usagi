@@ -94,7 +94,7 @@ usagi.ai から移植予定の CLI コマンドです（[../issues/README.md](..
 | `history` | 入力したコマンドの履歴を番号付きで表示 | [007](../issues/007-history.md) | ✅ |
 | `clear` | 右ペインの出力ログを消去 | — | ✅ |
 | `quit` / `exit` | アプリを終了 | — | ✅ |
-| `session` | `session <name>`（または `session new <name>`）でセッション（`.usagi/worktree/<name>/` 配下に再帰的に worktree を構築）を作成。名前省略時は名前入力モーダルを表示。`list` / `remove` は今後 | [003](../issues/003-session.md) | ✅ 作成・モーダル（`list`/`remove` は🚧） |
+| `session` | `session <name>`（または `session new <name>`）でセッション（`.usagi/worktree/<name>/` 配下に再帰的に worktree を構築）を作成。名前省略時は名前入力モーダルを表示。`session list` で一覧表示。`remove` は今後 | [003](../issues/003-session.md) | ✅ 作成・モーダル・一覧（`remove` は🚧） |
 | `space` | アクティブなワークスペース（worktree）の切り替え | [004](../issues/004-space.md) | 🚧 |
 | `ai` | 選択中の Agent CLI を起動し、現在の worktree をコンテキストに AI へ指示・対話する | [005](../issues/005-ai.md) | 🚧 |
 | `terminal` | アクティブな worktree で対話型ターミナルを起動する | [006](../issues/006-terminal.md) | 🚧 |
