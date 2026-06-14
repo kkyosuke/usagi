@@ -6,12 +6,48 @@ use console::{Key, Term};
 
 use crate::presentation::tui::echo::EchoGuard;
 
-/// Source of key presses driving an interactive screen.
+/// A mouse-wheel scroll, surfaced to the screens that scroll a pane in place.
+///
+/// Most screens never see one — [`KeyReader::read_key`] drops scrolls — but the
+/// workspace screen routes a wheel turn over the right pane into an in-pane
+/// scroll instead of letting it move the terminal's own viewport.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScrollEvent {
+    /// Lines to scroll: negative scrolls up (toward older content), positive
+    /// scrolls down (toward the newest).
+    pub lines: i32,
+    /// The 0-based column the wheel was reported over, used to tell which pane
+    /// the cursor was in.
+    pub col: u16,
+    /// The 0-based row the wheel was reported over.
+    pub row: u16,
+}
+
+/// One unit of terminal input: a key press, or a mouse-wheel scroll.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Input {
+    Key(Key),
+    Scroll(ScrollEvent),
+}
+
+/// Source of input driving an interactive screen.
 ///
 /// Abstracting the read lets event loops be exercised without a real terminal:
-/// tests supply a scripted sequence of keys.
+/// tests supply a scripted sequence of inputs.
+///
+/// Implementors provide [`read_key`](KeyReader::read_key). The default
+/// [`read_input`](KeyReader::read_input) reports every read as a key, which is
+/// all the screens that do not scroll a pane need; a reader that surfaces wheel
+/// turns (the real terminal) overrides it.
 pub trait KeyReader {
+    /// The next key press, discarding any scrolls along the way.
     fn read_key(&mut self) -> io::Result<Key>;
+
+    /// The next input event (a key, or a mouse-wheel scroll). Defaults to a
+    /// key, so non-scrolling screens and their test stubs need not implement it.
+    fn read_input(&mut self) -> io::Result<Input> {
+        Ok(Input::Key(self.read_key()?))
+    }
 }
 
 /// Enter the alternate screen.
