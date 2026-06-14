@@ -62,42 +62,31 @@ pub fn dim_line(width: usize, text: &str) -> String {
     style(centered(width, text)).dim().to_string()
 }
 
-/// An on/off toggle, rendering the active state brightly and the inactive one
-/// dimmed: e.g. `On · off` when on, `on · Off` when off.
+/// A left/right value chooser — the shared rendering primitive for every
+/// settings field that cycles through choices.
 ///
-/// A shared rendering primitive for boolean settings — keeps every toggle
-/// looking the same wherever it is used.
-pub fn toggle(on: bool) -> String {
-    let on_label = if on {
-        style("On").green().bold().to_string()
-    } else {
-        style("on").dim().to_string()
+/// The value is always wrapped in chevrons — `< Dark >` — so every field reads
+/// as a left/right selector and the chevrons line up in a single column down
+/// the screen. Colour conveys state: the `focused` row is bright (cyan-bold),
+/// the rest are dimmed.
+///
+/// `changed` marks a value that differs from what is saved on disk: it is
+/// painted yellow (taking priority over the focused/idle colours) so unsaved
+/// edits stand out at a glance.
+pub fn chooser(value: &str, focused: bool, changed: bool) -> String {
+    let paint = |text: &str| {
+        let styled = style(text.to_string());
+        if changed {
+            styled.yellow().bold()
+        } else if focused {
+            styled.cyan().bold()
+        } else {
+            styled.dim()
+        }
+        .to_string()
     };
-    let off_label = if on {
-        style("off").dim().to_string()
-    } else {
-        style("Off").red().bold().to_string()
-    };
-    format!("{on_label} · {off_label}")
-}
 
-/// An inline single-choice selector: each option is shown, with the selected
-/// one bracketed and highlighted and the rest dimmed — e.g. `[Claude]  Gemini`.
-///
-/// A shared rendering primitive for enum settings (theme, agent CLI, …).
-pub fn select(options: &[&str], selected: usize) -> String {
-    options
-        .iter()
-        .enumerate()
-        .map(|(i, option)| {
-            if i == selected {
-                style(format!("[{option}]")).cyan().bold().to_string()
-            } else {
-                style(format!(" {option} ")).dim().to_string()
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
+    format!("{} {} {}", paint("<"), paint(value), paint(">"))
 }
 
 /// Wraps `lines` in a single-bordered box `inner_width` columns wide, with
@@ -206,25 +195,32 @@ mod tests {
     }
 
     #[test]
-    fn toggle_shows_both_states_in_either_position() {
-        let on = toggle(true);
-        assert!(on.contains("On"));
-        assert!(on.contains("off"));
-        let off = toggle(false);
-        assert!(off.contains("on"));
-        assert!(off.contains("Off"));
+    fn chooser_always_brackets_the_value() {
+        // Chevrons show whether focused or not, so every field reads as a
+        // selector and the chevrons align down the column.
+        for focused in [true, false] {
+            let rendered = chooser("Dark", focused, false);
+            assert!(rendered.contains("Dark"));
+            assert!(rendered.contains('<'));
+            assert!(rendered.contains('>'));
+        }
     }
 
     #[test]
-    fn select_brackets_only_the_selected_option() {
-        let rendered = select(&["Claude", "Gemini"], 0);
-        assert!(rendered.contains("[Claude]"));
-        assert!(rendered.contains("Gemini"));
-        assert!(!rendered.contains("[Gemini]"));
+    fn chooser_keeps_the_value_aligned_across_focus() {
+        // Focus changes only the colour, not the layout, so the visible width is
+        // identical and the column never jumps.
+        let focused = console::strip_ansi_codes(&chooser("On", true, false)).into_owned();
+        let idle = console::strip_ansi_codes(&chooser("On", false, false)).into_owned();
+        assert_eq!(focused, idle);
+    }
 
-        let rendered = select(&["Claude", "Gemini"], 1);
-        assert!(rendered.contains("[Gemini]"));
-        assert!(!rendered.contains("[Claude]"));
+    #[test]
+    fn chooser_marks_changed_values() {
+        // A changed value still renders its text; the colour difference is what
+        // signals the unsaved edit, and it applies whether focused or not.
+        assert!(chooser("Gemini", true, true).contains("Gemini"));
+        assert!(chooser("Gemini", false, true).contains("Gemini"));
     }
 
     #[test]
