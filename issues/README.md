@@ -43,6 +43,7 @@
 | 028 | [agent-wait-notify](028-agent-wait-notify.md) ✅ | 埋め込みターミナルの入力待ち検知と通知（サイドバーマーカー＋デスクトップ通知） | tui | medium | 006, 026 |
 | 029 | [home-config](029-home-config.md) ✅ | `config` ホーム画面から設定画面を開く | tui | medium | 002, 022 |
 | 030 | [default-branch-source](030-default-branch-source.md) ✅ | セッション開始時のデフォルトブランチ基点（local / remote）をローカル設定で選択 | tui | medium | 022 |
+| 031 | [root-mode](031-root-mode.md) ✅ | ルートモード（どのセッションにも属さず `terminal` / `agent` をワークスペースルートで起動） | tui | medium | 006, 026 |
 
 ## 依存関係
 
@@ -61,6 +62,8 @@ graph TD
     006 --> 026[026 agent]
     026 --> 028[028 agent-wait-notify]
     022 --> 030[030 default-branch-source]
+    006 --> 031[031 root-mode]
+    026 --> 031
     002 --> 007[007 history]
     002 --> 008[008 man]
     002 --> 027[027 command-hints]

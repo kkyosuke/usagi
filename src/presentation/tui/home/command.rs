@@ -368,9 +368,10 @@ fn switch(name: &str, ctx: &CommandContext) -> CommandResult {
     }
 }
 
-/// `terminal`: open an interactive shell in the selected worktree. The spawn is
-/// a side effect ([`Effect::OpenTerminal`]) performed by the event loop, which
-/// holds the worktree paths and the terminal handle.
+/// `terminal`: open an interactive shell in the selected worktree, or at the
+/// workspace root when the root row is selected. The spawn is a side effect
+/// ([`Effect::OpenTerminal`]) performed by the event loop, which holds the
+/// worktree paths and the terminal handle.
 struct TerminalCommand;
 
 impl Command for TerminalCommand {
@@ -379,7 +380,7 @@ impl Command for TerminalCommand {
     }
 
     fn description(&self) -> &'static str {
-        "Open an interactive terminal in the selected worktree"
+        "Open an interactive terminal in the selected worktree (or root)"
     }
 
     fn run(&self, _args: &str, _ctx: &CommandContext) -> CommandResult {
@@ -402,7 +403,7 @@ impl Command for AgentCommand {
     }
 
     fn description(&self) -> &'static str {
-        "Open the AI agent in the selected worktree (terminal + agent CLI)"
+        "Open the AI agent in the selected worktree or root (terminal + agent CLI)"
     }
 
     fn run(&self, _args: &str, _ctx: &CommandContext) -> CommandResult {
