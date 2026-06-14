@@ -60,6 +60,10 @@ pub struct PtySession {
     reader_thread: Option<JoinHandle<()>>,
 }
 
+/// How many lines of scrolled-off output the embedded terminal keeps, so the
+/// user can scroll the pane back over a command's earlier output.
+const SCROLLBACK_LINES: usize = 10_000;
+
 impl PtySession {
     /// Spawn the default shell into a fresh PTY of `rows`×`cols`, rooted at
     /// `dir`. The shell's output is streamed into a [`vt100::Parser`] on a
@@ -99,7 +103,7 @@ impl PtySession {
         let parser = Arc::new(Mutex::new(vt100::Parser::new_with_callbacks(
             rows,
             cols,
-            0,
+            SCROLLBACK_LINES,
             BellCounter {
                 count: Arc::clone(&bell),
             },
@@ -185,6 +189,20 @@ impl PtySession {
         });
         if let Ok(mut parser) = self.parser.lock() {
             parser.screen_mut().set_size(rows, cols);
+        }
+    }
+
+    /// Scroll the screen `offset` lines back into the buffered history (`0` is
+    /// the live screen), returning the offset actually applied — vt100 clamps it
+    /// to the buffered lines, so the caller can use the result to stop scrolling
+    /// past the oldest output.
+    pub fn set_scrollback(&mut self, offset: usize) -> usize {
+        if let Ok(mut parser) = self.parser.lock() {
+            let screen = parser.screen_mut();
+            screen.set_scrollback(offset);
+            screen.scrollback()
+        } else {
+            0
         }
     }
 

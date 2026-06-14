@@ -35,7 +35,9 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use console::Term;
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind,
+};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 
 use crate::infrastructure::pty::PtySession;
@@ -60,6 +62,9 @@ const IDLE_REDRAW: Duration = Duration::from_millis(100);
 /// and treating the lone `Ctrl-O` as a detach. Long enough to type the second
 /// key deliberately, short enough that a bare detach feels immediate.
 const LEADER_TIMEOUT: Duration = Duration::from_millis(400);
+
+/// How many lines one wheel notch scrolls the embedded terminal's history.
+const WHEEL_LINES: i32 = 3;
 
 /// Run the embedded terminal in the right pane, driving the pooled shell `pty`
 /// until the user detaches / switches (`Ctrl-O`) or the shell exits. The PTY is
@@ -93,16 +98,25 @@ fn drive(
 ) -> Result<PaneExit> {
     // The frame drawn last pass, so we only repaint the rows that changed.
     let mut prev: Vec<String> = Vec::new();
+    // How many lines the pane is scrolled back into the shell's history; `0` is
+    // the live screen. The wheel and `Shift`+`PageUp`/`PageDown` move it, typing
+    // snaps it back, and `set_scrollback` clamps it to the buffered output.
+    let mut scrollback: usize = 0;
     loop {
         let (height, width) = term.size();
         let geo = ui::terminal_geometry(height as usize, width as usize);
         pty.resize(geo.rows, geo.cols);
+        // Apply the scroll position and re-read what the parser actually allows,
+        // so an over-scroll past the oldest line settles at the top.
+        scrollback = pty.set_scrollback(scrollback);
 
         // Note the output seen before snapshotting, so the wait below redraws
         // again if more arrives between here and then.
         let drawn_gen = pty.generation();
         let view = TerminalView::from_screen(pty.parser().screen());
-        let cursor = view.cursor();
+        // The cursor belongs to the live screen, so hide it while the user is
+        // viewing scrolled-back history.
+        let cursor = if scrollback == 0 { view.cursor() } else { None };
         state.set_terminal_view(view);
         // Refresh the sidebar's waiting markers so other background sessions
         // flagged while we are attached here show up in the next repaint.
@@ -117,9 +131,10 @@ fn drive(
         match wait(pty, drawn_gen)? {
             // New output (or the idle timer): loop and redraw it.
             Wake::Output => {}
-            // Input is queued: forward every pending key, then redraw.
+            // Input is queued: forward every pending key (or scroll the
+            // history), then redraw.
             Wake::Input => {
-                if let Some(exit) = pump_input(pty)? {
+                if let Some(exit) = pump_input(pty, geo, &mut scrollback)? {
                     return Ok(exit);
                 }
             }
@@ -152,30 +167,94 @@ fn wait(pty: &PtySession, drawn_gen: u64) -> Result<Wake> {
     }
 }
 
-/// Forward every queued key press to the shell. Returns `Some(exit)` when the
-/// user detaches or switches (via the `Ctrl-O` leader); non-key events
-/// (resize, …) are ignored so the next redraw simply picks up the new size.
-fn pump_input(pty: &mut PtySession) -> Result<Option<PaneExit>> {
+/// Forward every queued key press to the shell, or — for the wheel and
+/// `Shift`+`PageUp`/`PageDown` — scroll the pane's history via `scrollback`.
+/// Returns `Some(exit)` when the user detaches or switches (via the `Ctrl-O`
+/// leader); other events are ignored so the next redraw picks up any new size.
+fn pump_input(
+    pty: &mut PtySession,
+    geo: ui::TerminalGeometry,
+    scrollback: &mut usize,
+) -> Result<Option<PaneExit>> {
     while event::poll(Duration::ZERO)? {
-        if let Event::Key(key) = event::read()? {
-            if !is_press(key) {
-                continue;
-            }
-            if is_leader(&key) {
-                match resolve_leader(pty)? {
-                    // The leader resolved to a pane action: hand it back.
-                    Leader::Exit(exit) => return Ok(Some(exit)),
-                    // `Ctrl-O Ctrl-O` sent a literal byte; keep driving.
-                    Leader::Stay => continue,
+        match event::read()? {
+            Event::Key(key) => {
+                if !is_press(key) {
+                    continue;
+                }
+                // Scroll keys move the history view in place rather than going
+                // to the shell.
+                if let Some(delta) = key_scroll_lines(&key, geo) {
+                    apply_scroll(scrollback, delta);
+                    continue;
+                }
+                if is_leader(&key) {
+                    match resolve_leader(pty)? {
+                        // The leader resolved to a pane action: hand it back.
+                        Leader::Exit(exit) => return Ok(Some(exit)),
+                        // `Ctrl-O Ctrl-O` sent a literal byte; keep driving.
+                        Leader::Stay => continue,
+                    }
+                }
+                let bytes = encode_key(&key);
+                if !bytes.is_empty() {
+                    // Typing returns to the live screen, like a real terminal.
+                    *scrollback = 0;
+                    pty.write(&bytes)?;
                 }
             }
-            let bytes = encode_key(&key);
-            if !bytes.is_empty() {
-                pty.write(&bytes)?;
+            // The wheel scrolls the history when it is over the terminal pane.
+            Event::Mouse(mouse) => {
+                if let Some(delta) = wheel_delta(mouse.kind) {
+                    if (mouse.column as usize) >= geo.origin_col as usize {
+                        apply_scroll(scrollback, delta);
+                    }
+                }
             }
+            _ => {}
         }
     }
     Ok(None)
+}
+
+/// The history scroll a key requests, in lines (negative scrolls up toward older
+/// output), or `None` for a key the shell should receive. `Shift` distinguishes
+/// the scroll keys from the `PageUp`/`PageDown`/arrows the shell expects.
+fn key_scroll_lines(key: &KeyEvent, geo: ui::TerminalGeometry) -> Option<i32> {
+    if !key.modifiers.contains(KeyModifiers::SHIFT) {
+        return None;
+    }
+    // A page keeps one row of overlap for context; at least one line.
+    let page = (geo.rows as i32 - 1).max(1);
+    match key.code {
+        KeyCode::PageUp => Some(-page),
+        KeyCode::PageDown => Some(page),
+        KeyCode::Up => Some(-1),
+        KeyCode::Down => Some(1),
+        _ => None,
+    }
+}
+
+/// The history scroll a mouse wheel turn requests, in lines, or `None` for a
+/// non-wheel mouse event.
+fn wheel_delta(kind: MouseEventKind) -> Option<i32> {
+    match kind {
+        MouseEventKind::ScrollUp => Some(-WHEEL_LINES),
+        MouseEventKind::ScrollDown => Some(WHEEL_LINES),
+        _ => None,
+    }
+}
+
+/// Move the scrollback offset by `delta` lines (negative scrolls up toward
+/// older output). The upper bound is enforced by `set_scrollback` on the next
+/// redraw, so this only has to keep the offset from underflowing past the live
+/// screen.
+fn apply_scroll(scrollback: &mut usize, delta: i32) {
+    *scrollback = if delta < 0 {
+        scrollback.saturating_add(delta.unsigned_abs() as usize)
+    } else {
+        scrollback.saturating_sub(delta as usize)
+    };
 }
 
 /// What the `Ctrl-O` leader resolved to: a pane action to return, or "stay" when
