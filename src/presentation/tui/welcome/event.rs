@@ -3,54 +3,41 @@ use std::io;
 use anyhow::Result;
 use console::Term;
 
-use crate::domain::workspace::Workspace;
-use crate::presentation::tui::config;
-use crate::presentation::tui::new;
-use crate::presentation::tui::new::state::NewProject;
-use crate::presentation::tui::open;
-use crate::presentation::tui::screen::{AlternateScreenGuard, KeyReader};
+use crate::presentation::tui::screen::KeyReader;
 
 use super::menu::{Action, Menu};
 use super::ui;
 
-/// Launches the project selection screen and returns the user's choice.
+/// What the user chose on the welcome menu.
 ///
-/// Taking this as a parameter lets the event loop be tested without a real
-/// terminal: production wires it to [`open::run`], tests pass a stub.
-pub type OpenOpen<'a> = dyn FnMut(&Term) -> Result<open::Outcome> + 'a;
+/// The welcome screen only reports the chosen action; deciding what each action
+/// does (opening a sub-screen, creating a project, …) is the orchestrator's job
+/// in [`crate::presentation::tui::app`].
+#[derive(Debug, PartialEq, Eq)]
+pub enum Outcome {
+    /// Open the project selection screen.
+    OpenProjects,
+    /// Open the New Project screen.
+    NewProject,
+    /// Open the Config screen.
+    Configure,
+    /// Leave the welcome screen (quit the application).
+    Quit,
+}
 
-/// Launches the New Project screen and returns the user's choice.
+/// Runs the welcome menu against the given terminal and key source until the
+/// user picks an action (or an unrecoverable read error occurs). Assumes the
+/// alternate screen is already active (it is owned by the orchestrator).
 ///
-/// Taking this as a parameter lets the event loop be tested without a real
-/// terminal: production wires it to [`new::run`], tests pass a stub.
-pub type OpenNew<'a> = dyn FnMut(&Term) -> Result<new::Outcome> + 'a;
-
-/// Creates a project from a submitted form: clone the repository, register it
-/// as a workspace, and capture its initial worktree state.
-///
-/// Injected for the same reason as the screen launchers: production wires it to
-/// the project use case, tests pass a stub so the loop runs without touching
-/// git or the filesystem.
-pub type CreateProject<'a> = dyn FnMut(&NewProject) -> Result<Workspace> + 'a;
-
-/// Launches the Config screen and returns the user's choice.
-///
-/// Taking this as a parameter lets the event loop be tested without a real
-/// terminal: production wires it to [`config::run`], tests pass a stub.
-pub type OpenConfig<'a> = dyn FnMut(&Term) -> Result<config::Outcome> + 'a;
-
-/// Runs the welcome screen against the given terminal and key source until the
-/// user quits (or an unrecoverable read error occurs).
+/// `initial_notice` seeds the notice line, e.g. an error carried back from a
+/// failed project creation; navigating clears it.
 pub fn event_loop(
     term: &Term,
     reader: &mut dyn KeyReader,
-    open_open: &mut OpenOpen,
-    open_new: &mut OpenNew,
-    create_project: &mut CreateProject,
-    open_config: &mut OpenConfig,
-) -> Result<()> {
-    let mut guard = AlternateScreenGuard::new(term.clone())?;
+    initial_notice: Option<String>,
+) -> Result<Outcome> {
     let mut menu = Menu::new();
+    menu.set_notice(initial_notice);
 
     loop {
         term.move_cursor_to(0, 0)?;
@@ -70,52 +57,14 @@ pub fn event_loop(
         match reader.read_key() {
             Ok(key) => match menu.handle_key(key) {
                 Action::Continue => {}
-                Action::Quit => return Ok(()),
-                Action::OpenOpen => match open_open(term) {
-                    Ok(open::Outcome::Back) => menu.set_notice(None),
-                    Ok(open::Outcome::Quit) => return Ok(()),
-                    Err(e) => {
-                        // Restore the terminal without the farewell on error.
-                        guard.dismiss();
-                        return Err(e);
-                    }
-                },
-                Action::OpenNew => match open_new(term) {
-                    Ok(new::Outcome::Back) => menu.set_notice(None),
-                    Ok(new::Outcome::Quit) => return Ok(()),
-                    Ok(new::Outcome::Submitted(project)) => {
-                        // Clone, register, and open the new workspace; a failure
-                        // (bad URL, network, name clash) is shown as a notice so
-                        // the user can correct it without losing the menu.
-                        let notice = match create_project(&project) {
-                            Ok(workspace) => format!("Opened \"{}\" 🐰", workspace.name),
-                            Err(e) => format!("Could not create project: {e}"),
-                        };
-                        menu.set_notice(Some(notice));
-                    }
-                    Err(e) => {
-                        // Restore the terminal without the farewell on error.
-                        guard.dismiss();
-                        return Err(e);
-                    }
-                },
-                Action::OpenConfig => match open_config(term) {
-                    Ok(config::Outcome::Back) => menu.set_notice(None),
-                    Ok(config::Outcome::Quit) => return Ok(()),
-                    Err(e) => {
-                        // Restore the terminal without the farewell on error.
-                        guard.dismiss();
-                        return Err(e);
-                    }
-                },
+                Action::OpenOpen => return Ok(Outcome::OpenProjects),
+                Action::OpenNew => return Ok(Outcome::NewProject),
+                Action::OpenConfig => return Ok(Outcome::Configure),
+                Action::Quit => return Ok(Outcome::Quit),
             },
             // Treat an interrupted read (e.g. Ctrl+C delivered as a signal) as quit.
-            Err(e) if e.kind() == io::ErrorKind::Interrupted => return Ok(()),
-            Err(e) => {
-                // Restore the terminal without the farewell on an unexpected error.
-                guard.dismiss();
-                return Err(anyhow::Error::from(e).context("Failed to read key"));
-            }
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => return Ok(Outcome::Quit),
+            Err(e) => return Err(anyhow::Error::from(e).context("Failed to read key")),
         }
     }
 }
@@ -123,8 +72,6 @@ pub fn event_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::repository::RepoUrl;
-    use crate::presentation::tui::new::state::{CloneSpec, ExistingSpec, NewProject};
     use console::Key;
     use std::collections::VecDeque;
 
@@ -141,325 +88,81 @@ mod tests {
 
     impl KeyReader for ScriptedReader {
         fn read_key(&mut self) -> io::Result<Key> {
+            // Default to 'q' so a test can never spin forever.
             self.keys.pop_front().unwrap_or(Ok(Key::Char('q')))
         }
     }
 
-    // Project-selection (Open) screen launchers used as stubs.
-    fn open_screen_back(_t: &Term) -> Result<open::Outcome> {
-        Ok(open::Outcome::Back)
-    }
-    fn open_screen_quit(_t: &Term) -> Result<open::Outcome> {
-        Ok(open::Outcome::Quit)
-    }
-    fn open_screen_err(_t: &Term) -> Result<open::Outcome> {
-        Err(anyhow::anyhow!("open screen blew up"))
-    }
-
-    // New-screen launchers used as stubs; each is exercised by a test below.
-    fn new_back(_t: &Term) -> Result<new::Outcome> {
-        Ok(new::Outcome::Back)
-    }
-    fn new_quit(_t: &Term) -> Result<new::Outcome> {
-        Ok(new::Outcome::Quit)
-    }
-    fn new_submitted(_t: &Term) -> Result<new::Outcome> {
-        Ok(new::Outcome::Submitted(NewProject::Clone(CloneSpec {
-            url: RepoUrl::parse("https://github.com/owner/repo.git").unwrap(),
-            location: std::path::PathBuf::from("/base"),
-            directory: "repo".to_string(),
-            branch: None,
-        })))
-    }
-    fn new_submitted_existing(_t: &Term) -> Result<new::Outcome> {
-        Ok(new::Outcome::Submitted(NewProject::Existing(
-            ExistingSpec {
-                path: std::path::PathBuf::from("/base/existing"),
-                name: "existing".to_string(),
-            },
-        )))
-    }
-    fn new_err(_t: &Term) -> Result<new::Outcome> {
-        Err(anyhow::anyhow!("new screen blew up"))
-    }
-
-    // Project-creation stubs paired with the New-screen launchers above.
-    fn create_ok(p: &NewProject) -> Result<Workspace> {
-        match p {
-            NewProject::Clone(spec) => Ok(Workspace::new(spec.directory.clone(), &spec.location)),
-            NewProject::Existing(spec) => Ok(Workspace::new(spec.name.clone(), &spec.path)),
-        }
-    }
-    fn create_err(_p: &NewProject) -> Result<Workspace> {
-        Err(anyhow::anyhow!("clone failed"))
-    }
-
-    // Config-screen launchers used as stubs; each is exercised by a test below.
-    fn config_back(_t: &Term) -> Result<config::Outcome> {
-        Ok(config::Outcome::Back)
-    }
-    fn config_quit(_t: &Term) -> Result<config::Outcome> {
-        Ok(config::Outcome::Quit)
-    }
-    fn config_err(_t: &Term) -> Result<config::Outcome> {
-        Err(anyhow::anyhow!("config screen blew up"))
+    fn run(keys: Vec<io::Result<Key>>) -> Result<Outcome> {
+        let term = Term::stdout();
+        let mut reader = ScriptedReader::new(keys);
+        event_loop(&term, &mut reader, None)
     }
 
     #[test]
-    fn loop_quits_when_quit_key_pressed() {
-        let term = Term::stdout();
-        let mut reader = ScriptedReader::new(vec![Ok(Key::Char('q'))]);
-        assert!(event_loop(
-            &term,
-            &mut reader,
-            &mut open_screen_back,
-            &mut new_back,
-            &mut create_ok,
-            &mut config_back
-        )
-        .is_ok());
+    fn quit_key_returns_quit() {
+        assert_eq!(run(vec![Ok(Key::Char('q'))]).unwrap(), Outcome::Quit);
     }
 
     #[test]
-    fn loop_redraws_across_several_keys_before_quitting() {
-        let term = Term::stdout();
-        let mut reader = ScriptedReader::new(vec![
+    fn navigation_keys_continue_then_select() {
+        // Exercises the Continue arm (arrows + redraw) before selecting "New".
+        let outcome = run(vec![
             Ok(Key::ArrowDown),
             Ok(Key::ArrowUp),
-            Ok(Key::Char('q')),
-        ]);
-        assert!(event_loop(
-            &term,
-            &mut reader,
-            &mut open_screen_back,
-            &mut new_back,
-            &mut create_ok,
-            &mut config_back
-        )
-        .is_ok());
+            Ok(Key::Char('e')),
+        ])
+        .unwrap();
+        assert_eq!(outcome, Outcome::NewProject);
     }
 
     #[test]
-    fn interrupted_read_is_treated_as_quit() {
-        let term = Term::stdout();
-        let mut reader = ScriptedReader::new(vec![Err(io::Error::new(
+    fn open_shortcut_returns_open_projects() {
+        assert_eq!(
+            run(vec![Ok(Key::Char('o'))]).unwrap(),
+            Outcome::OpenProjects
+        );
+    }
+
+    #[test]
+    fn new_shortcut_returns_new_project() {
+        assert_eq!(run(vec![Ok(Key::Char('e'))]).unwrap(), Outcome::NewProject);
+    }
+
+    #[test]
+    fn config_shortcut_returns_configure() {
+        assert_eq!(run(vec![Ok(Key::Char('c'))]).unwrap(), Outcome::Configure);
+    }
+
+    #[test]
+    fn interrupted_read_returns_quit() {
+        let keys = vec![Err(io::Error::new(
             io::ErrorKind::Interrupted,
             "interrupted",
-        ))]);
-        assert!(event_loop(
-            &term,
-            &mut reader,
-            &mut open_screen_back,
-            &mut new_back,
-            &mut create_ok,
-            &mut config_back
-        )
-        .is_ok());
+        ))];
+        assert_eq!(run(keys).unwrap(), Outcome::Quit);
     }
 
     #[test]
     fn unexpected_read_error_is_propagated() {
         let term = Term::stdout();
         let mut reader = ScriptedReader::new(vec![Err(io::Error::other("boom"))]);
-        let err = event_loop(
-            &term,
-            &mut reader,
-            &mut open_screen_back,
-            &mut new_back,
-            &mut create_ok,
-            &mut config_back,
-        )
-        .unwrap_err();
+        let err = event_loop(&term, &mut reader, None).unwrap_err();
         assert!(err.to_string().contains("Failed to read key"));
     }
 
     #[test]
-    fn open_screen_back_returns_to_menu() {
-        let term = Term::stdout();
-        // 'o' opens the project selection screen (stub returns Back), then 'q'.
-        let mut reader = ScriptedReader::new(vec![Ok(Key::Char('o')), Ok(Key::Char('q'))]);
-        assert!(event_loop(
-            &term,
-            &mut reader,
-            &mut open_screen_back,
-            &mut new_back,
-            &mut create_ok,
-            &mut config_back
-        )
-        .is_ok());
-    }
-
-    #[test]
-    fn open_screen_quit_exits_the_app() {
+    fn initial_notice_is_displayed_then_selection_returns() {
+        // A notice carried back from a failed creation is rendered on the first
+        // frame; selecting an action still returns its outcome.
         let term = Term::stdout();
         let mut reader = ScriptedReader::new(vec![Ok(Key::Char('o'))]);
-        assert!(event_loop(
+        let outcome = event_loop(
             &term,
             &mut reader,
-            &mut open_screen_quit,
-            &mut new_back,
-            &mut create_ok,
-            &mut config_back
+            Some("Could not create project: boom".to_string()),
         )
-        .is_ok());
-    }
-
-    #[test]
-    fn open_screen_error_is_propagated() {
-        let term = Term::stdout();
-        let mut reader = ScriptedReader::new(vec![Ok(Key::Char('o'))]);
-        let err = event_loop(
-            &term,
-            &mut reader,
-            &mut open_screen_err,
-            &mut new_back,
-            &mut create_ok,
-            &mut config_back,
-        )
-        .unwrap_err();
-        assert!(err.to_string().contains("open screen blew up"));
-    }
-
-    #[test]
-    fn new_screen_back_returns_to_menu() {
-        let term = Term::stdout();
-        // 'e' opens the New screen (stub returns Back), then 'q' quits.
-        let mut reader = ScriptedReader::new(vec![Ok(Key::Char('e')), Ok(Key::Char('q'))]);
-        assert!(event_loop(
-            &term,
-            &mut reader,
-            &mut open_screen_back,
-            &mut new_back,
-            &mut create_ok,
-            &mut config_back
-        )
-        .is_ok());
-    }
-
-    #[test]
-    fn new_screen_quit_exits_the_app() {
-        let term = Term::stdout();
-        let mut reader = ScriptedReader::new(vec![Ok(Key::Char('e'))]);
-        assert!(event_loop(
-            &term,
-            &mut reader,
-            &mut open_screen_back,
-            &mut new_quit,
-            &mut create_ok,
-            &mut config_back
-        )
-        .is_ok());
-    }
-
-    #[test]
-    fn new_screen_submitted_creates_and_sets_a_notice_then_quits() {
-        let term = Term::stdout();
-        let mut reader = ScriptedReader::new(vec![Ok(Key::Char('e')), Ok(Key::Char('q'))]);
-        // Submitting runs create_ok, which succeeds and yields an "Opened" notice.
-        assert!(event_loop(
-            &term,
-            &mut reader,
-            &mut open_screen_back,
-            &mut new_submitted,
-            &mut create_ok,
-            &mut config_back
-        )
-        .is_ok());
-    }
-
-    #[test]
-    fn new_screen_submitted_existing_creates_and_sets_a_notice_then_quits() {
-        let term = Term::stdout();
-        let mut reader = ScriptedReader::new(vec![Ok(Key::Char('e')), Ok(Key::Char('q'))]);
-        // Submitting an existing-directory project routes through create_ok's
-        // Existing arm and yields an "Opened" notice.
-        assert!(event_loop(
-            &term,
-            &mut reader,
-            &mut open_screen_back,
-            &mut new_submitted_existing,
-            &mut create_ok,
-            &mut config_back
-        )
-        .is_ok());
-    }
-
-    #[test]
-    fn new_screen_submitted_create_failure_sets_a_notice_then_quits() {
-        let term = Term::stdout();
-        let mut reader = ScriptedReader::new(vec![Ok(Key::Char('e')), Ok(Key::Char('q'))]);
-        // A failing create surfaces as a recoverable notice, not an error.
-        assert!(event_loop(
-            &term,
-            &mut reader,
-            &mut open_screen_back,
-            &mut new_submitted,
-            &mut create_err,
-            &mut config_back
-        )
-        .is_ok());
-    }
-
-    #[test]
-    fn new_screen_error_is_propagated() {
-        let term = Term::stdout();
-        let mut reader = ScriptedReader::new(vec![Ok(Key::Char('e'))]);
-        let err = event_loop(
-            &term,
-            &mut reader,
-            &mut open_screen_back,
-            &mut new_err,
-            &mut create_ok,
-            &mut config_back,
-        )
-        .unwrap_err();
-        assert!(err.to_string().contains("new screen blew up"));
-    }
-
-    #[test]
-    fn config_screen_back_returns_to_menu() {
-        let term = Term::stdout();
-        // 'c' opens the Config screen (stub returns Back), then 'q' quits.
-        let mut reader = ScriptedReader::new(vec![Ok(Key::Char('c')), Ok(Key::Char('q'))]);
-        assert!(event_loop(
-            &term,
-            &mut reader,
-            &mut open_screen_back,
-            &mut new_back,
-            &mut create_ok,
-            &mut config_back
-        )
-        .is_ok());
-    }
-
-    #[test]
-    fn config_screen_quit_exits_the_app() {
-        let term = Term::stdout();
-        let mut reader = ScriptedReader::new(vec![Ok(Key::Char('c'))]);
-        assert!(event_loop(
-            &term,
-            &mut reader,
-            &mut open_screen_back,
-            &mut new_back,
-            &mut create_ok,
-            &mut config_quit
-        )
-        .is_ok());
-    }
-
-    #[test]
-    fn config_screen_error_is_propagated() {
-        let term = Term::stdout();
-        let mut reader = ScriptedReader::new(vec![Ok(Key::Char('c'))]);
-        let err = event_loop(
-            &term,
-            &mut reader,
-            &mut open_screen_back,
-            &mut new_back,
-            &mut create_ok,
-            &mut config_err,
-        )
-        .unwrap_err();
-        assert!(err.to_string().contains("config screen blew up"));
+        .unwrap();
+        assert_eq!(outcome, Outcome::OpenProjects);
     }
 }
