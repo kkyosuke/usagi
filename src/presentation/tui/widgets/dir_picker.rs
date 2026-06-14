@@ -22,6 +22,12 @@ const INNER_WIDTH: usize = 56;
 /// Most directory rows shown at once; longer lists scroll under the cursor.
 const MAX_ROWS: usize = 10;
 
+/// Rows the list area always occupies: up to [`MAX_ROWS`] entries plus one row
+/// kept for the "… N more" overflow hint. Every listing state — error, empty,
+/// short, or scrolled — is padded to this height so the modal box never resizes
+/// and never jumps as you filter (no layout shift / CLS).
+const LIST_HEIGHT: usize = MAX_ROWS + 1;
+
 /// Lists the immediate subdirectories of a directory.
 ///
 /// Abstracting the filesystem behind this port keeps [`DirPicker`] testable: a
@@ -166,11 +172,20 @@ impl DirPicker {
     }
 }
 
-/// Builds the modal body lines for the directory list area.
+/// Builds the directory list area, padded to a fixed [`LIST_HEIGHT`].
 ///
-/// Shows the listing error, an empty-state hint, or the (possibly scrolled)
-/// window of matching subdirectories with the cursor marked.
+/// Padding every state to the same height keeps the modal box one size, so it
+/// never jumps as the listing changes while you filter (no layout shift / CLS).
 fn list_lines(dir: &DirPicker) -> Vec<String> {
+    let mut lines = list_content(dir);
+    lines.resize(LIST_HEIGHT, String::new());
+    lines
+}
+
+/// The varying content of the list area: a listing error, an empty-state hint,
+/// or the (possibly scrolled) window of matching subdirectories with the cursor
+/// marked. [`list_lines`] pads the result to a fixed height.
+fn list_content(dir: &DirPicker) -> Vec<String> {
     if let Some(error) = dir.error() {
         return vec![style(format!("⚠ {error}")).red().to_string()];
     }
@@ -455,6 +470,39 @@ mod tests {
         assert!(!frame.contains("dir00/"));
         assert!(frame.contains("dir10/"));
         assert!(frame.contains("more"));
+    }
+
+    #[test]
+    fn the_modal_box_keeps_its_size_across_listing_states() {
+        // The list area is padded to a fixed height, so the box — and thus the
+        // whole modal — stays the same size whatever the listing shows: a short
+        // list, an empty result, an error, or a scrolled long list all render
+        // an identically tall box, so it never jumps as you filter (no CLS).
+        let many: Vec<String> = (0..20).map(|i| format!("d{i:02}")).collect();
+        let refs: Vec<&str> = many.iter().map(String::as_str).collect();
+        let source = FakeSource::new(&[("/home", &["one"]), ("/big", &refs)]);
+
+        // Count the rows belonging to the box (its borders and content rows).
+        let box_height = |dir: &DirPicker| {
+            render(40, 80, dir)
+                .iter()
+                .filter(|l| l.contains('│') || l.contains('┌') || l.contains('└'))
+                .count()
+        };
+
+        let short = DirPicker::open(&source, Path::new("/home"));
+        let mut empty = short.clone();
+        empty.insert_char('z'); // filters everything out
+        let error = DirPicker::open(&source, Path::new("/denied"));
+        let mut scrolled = DirPicker::open(&source, Path::new("/big"));
+        for _ in 0..MAX_ROWS {
+            scrolled.move_down(); // past the first window, so it scrolls
+        }
+
+        let baseline = box_height(&short);
+        assert_eq!(box_height(&empty), baseline);
+        assert_eq!(box_height(&error), baseline);
+        assert_eq!(box_height(&scrolled), baseline);
     }
 
     #[test]
