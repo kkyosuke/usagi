@@ -2,11 +2,11 @@
 number: 024
 feature: issue-cli
 title: issue CLI（`usagi issue` サブコマンド）
-status: todo
+status: done
 priority: high
 category: cli
 dependson: [023]
-ref: —
+ref: PR #56
 ---
 
 # `usagi issue` コマンド（タスク issue の CLI 操作）

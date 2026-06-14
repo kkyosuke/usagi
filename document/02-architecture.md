@@ -37,7 +37,7 @@ presentation ──> usecase ──> domain
 | `domain/` | 外部依存のない純粋なエンティティ | `Workspace`, `Settings` / `Theme` / `AgentCli` / `LocalSettings`, `WorkspaceState` / `WorktreeState` / `BranchStatus`, `Repository`（URL パース・名前導出）, `HistoryEntry`, `Issue` / `IssueSummary` / `IssueStatus` / `IssuePriority`（frontmatter 読み書き） |
 | `usecase/` | ビジネスロジック（初期化・登録・状態同期・設定更新・セッション作成・依存チェック・issue 管理） | `project`, `workspace`, `workspace_state`, `settings`（実効設定の解決を含む）, `session`（worktree 構築）, `doctor`, `issue`（CRUD・検索・依存 readiness 判定） |
 | `infrastructure/` | Git 操作、各 JSON ファイルの永続化、シェル起動などの外部連携 | `git`（git CLI の読み取り専用検査 + `add_worktree`）, `storage`（グローバル `~/.usagi/`）, `workspace_store`（`<repo>/.usagi/` の `state.json` / `settings.json`）, `history_store`（`history.json`）, `terminal`（起動するシェルの解決）, `pty`（疑似ターミナルセッション）, `issue_store`（`<repo>/.usagi/issues/` の markdown + `index.json`） |
-| `presentation/` | CLI ルーティング、TUI 描画、TUI 内コマンドの実装 | `cli/`（`init` / `hop` / `status` / `doctor`）, `tui/`（各画面 + `app/` 画面遷移オーケストレーター） |
+| `presentation/` | CLI ルーティング、TUI 描画、TUI 内コマンド、MCP サーバ | `cli/`（`init` / `hop` / `status` / `doctor` / `issue` / `mcp`）, `tui/`（各画面 + `app/` 画面遷移オーケストレーター）, `mcp`（issue 操作の MCP/JSON-RPC ディスパッチ） |
 
 ## モジュール構成（`src/`）
 
@@ -73,8 +73,9 @@ src/
 │   ├── pty.rs                  # 疑似ターミナルセッション（portable-pty + vt100、terminal コマンド）
 │   └── issue_store.rs          # <repo>/.usagi/issues/ の markdown + index.json（IssueStore）
 │
-└── presentation/               # CLI ルーティング・TUI
-    ├── cli/                    # サブコマンド（init / hop / status / doctor）
+└── presentation/               # CLI ルーティング・TUI・MCP
+    ├── cli/                    # サブコマンド（init / hop / status / doctor / issue / mcp）
+    ├── mcp.rs                  # issue 操作の MCP/JSON-RPC ディスパッチ（McpServer）
     └── tui/                    # ratatui ベースの TUI
         ├── app/                # TUI オーケストレーター（画面グラフの遷移を管理 / event）
         ├── screen.rs           # 端末制御（代替スクリーン・RAII ガード）

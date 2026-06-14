@@ -35,9 +35,9 @@
 | 020 | [gh-issue](020-gh-issue.md) | gh Issue 連携セッション作成 | cli | low | 003 |
 | 021 | [local-settings](021-local-settings.md) ✅ | プロジェクト単位のローカル設定（設定上書き） | core | medium | — |
 | 022 | [local-settings-ui](022-local-settings-ui.md) ✅ | ローカル設定の編集 UI | tui | medium | 021 |
-| 023 | [issue-store](023-issue-store.md) | issue ストア（`.usagi/issues/` への永続化と採番） | core | high | — |
-| 024 | [issue-cli](024-issue-cli.md) | `usagi issue` サブコマンド（CRUD・検索） | cli | high | 023 |
-| 025 | [issue-mcp](025-issue-mcp.md) | `usagi mcp` で issue 操作を LLM に公開 | mcp | high | 023, 024 |
+| 023 | [issue-store](023-issue-store.md) ✅ | issue ストア（`.usagi/issues/` への永続化と採番） | core | high | — |
+| 024 | [issue-cli](024-issue-cli.md) ✅ | `usagi issue` サブコマンド（CRUD・検索） | cli | high | 023 |
+| 025 | [issue-mcp](025-issue-mcp.md) ✅ | `usagi mcp` で issue 操作を LLM に公開 | mcp | high | 023, 024 |
 | 026 | [agent](026-agent.md) ✅ | `agent` 埋め込みターミナルで Agent CLI を起動（`terminal` → `claude` のショートカット） | tui | medium | 006 |
 
 ## 依存関係
