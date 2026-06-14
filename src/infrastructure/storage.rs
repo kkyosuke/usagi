@@ -190,6 +190,8 @@ mod tests {
 
     #[test]
     fn data_dir_prefers_env_override_then_falls_back() {
+        // Serialize $USAGI_HOME mutation against other globals-mutating tests.
+        let _guard = crate::test_support::process_env_guard();
         std::env::set_var(DATA_DIR_ENV, "/tmp/usagi-unit-home");
         assert_eq!(data_dir().unwrap(), PathBuf::from("/tmp/usagi-unit-home"));
         assert_eq!(
