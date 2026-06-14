@@ -83,6 +83,13 @@ impl WorktreeList {
         self.worktrees.len() + 1
     }
 
+    /// Number of sessions listed in the left pane: the root row plus every
+    /// worktree (≥ 1). The title bar reports this so the header count matches
+    /// the rows the user actually sees.
+    pub fn session_count(&self) -> usize {
+        self.selectable_rows()
+    }
+
     /// The worktree at a selectable row: row 0 is the root (no worktree), and
     /// row `i` maps to `worktrees[i - 1]`.
     fn worktree_at(&self, row: usize) -> Option<&WorktreeState> {

@@ -94,11 +94,13 @@ fn layout(width: usize) -> (usize, usize) {
     (left, right)
 }
 
-/// The centred title bar: workspace name and worktree count.
+/// The centred title bar: workspace name and session count. The count covers
+/// every row in the left pane — the root row plus each worktree — so it matches
+/// what the user sees, rather than the bare worktree count.
 fn title_bar(width: usize, list: &WorktreeList) -> String {
-    let count = list.worktrees().len();
+    let count = list.session_count();
     let label = format!(
-        "{} · {count} worktree{}",
+        "{} · {count} session{}",
         list.workspace_name(),
         if count == 1 { "" } else { "s" }
     );
@@ -319,6 +321,13 @@ pub fn terminal_geometry(raw_height: usize, raw_width: usize) -> TerminalGeometr
 /// "… and N more" line stands in for the rest, so the hints never crowd out the
 /// body on a normal terminal.
 const HINT_MAX: usize = 6;
+
+/// Fixed height of the command-hint band overlaid on the body in command mode.
+/// It is tall enough for the largest hint list — a header line, [`HINT_MAX`]
+/// rows, and a trailing "… and N more" — so the band's height never changes as
+/// the match list grows or shrinks while typing. Because the band always covers
+/// the same body rows, nothing beneath it jitters when the count changes.
+const HINT_BAND: usize = HINT_MAX + 2;
 
 /// Display width of the command-name column in the hints.
 const HINT_NAME_COL: usize = 12;
@@ -564,14 +573,26 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
         lines.push(format!("{left_cell}{SEP}{right_cell}"));
     }
 
-    // Overlay the hints onto the bottom of the body, always leaving at least one
-    // body row uncovered. Padding each hint to the full width clears the body
-    // text it sits on top of.
+    // Overlay the hints onto a fixed-height band at the bottom of the body,
+    // always leaving at least one body row uncovered. The band is a constant
+    // height regardless of how many hints currently match, so the body rows it
+    // covers never change as the match list grows or shrinks while typing —
+    // only the band's own contents do, so nothing beneath it jitters. The whole
+    // band is cleared first (so no stale body text shows through), then the
+    // hints are bottom-anchored just above the input, with any slack appearing
+    // as blank rows between the body and the hints.
     let hints = hint_lines(state, width);
-    let hint_rows = hints.len().min(body_rows.saturating_sub(1));
-    let overlay_start = body_start + body_rows - hint_rows;
-    for (i, hint) in hints.into_iter().take(hint_rows).enumerate() {
-        lines[overlay_start + i] = pad_to_width(hint, width);
+    if !hints.is_empty() {
+        let band = HINT_BAND.min(body_rows.saturating_sub(1));
+        let band_start = body_start + body_rows - band;
+        for line in lines.iter_mut().skip(band_start).take(band) {
+            *line = pad_to_width(String::new(), width);
+        }
+        let shown = hints.len().min(band);
+        let hint_top = body_start + body_rows - shown;
+        for (i, hint) in hints.into_iter().take(shown).enumerate() {
+            lines[hint_top + i] = pad_to_width(hint, width);
+        }
     }
 
     lines.push(input_line(state));
@@ -645,22 +666,21 @@ mod tests {
 
     #[test]
     fn title_bar_singular_and_plural() {
-        let one = title_bar(
-            80,
-            &list_with(vec![worktree(Some("main"), true, BranchStatus::Pushed)]),
-        );
+        // No worktrees: only the root row counts, so the title reads "1 session".
+        let one = title_bar(80, &list_with(vec![]));
         assert!(one.contains("usagi"));
-        assert!(one.contains("1 worktree"));
-        assert!(!one.contains("1 worktrees"));
+        assert!(one.contains("1 session"));
+        assert!(!one.contains("1 sessions"));
 
-        let two = title_bar(
+        // Two worktrees plus the root row: three sessions.
+        let three = title_bar(
             80,
             &list_with(vec![
                 worktree(Some("main"), true, BranchStatus::Pushed),
                 worktree(Some("x"), false, BranchStatus::Local),
             ]),
         );
-        assert!(two.contains("2 worktrees"));
+        assert!(three.contains("3 sessions"));
     }
 
     #[test]
@@ -1267,9 +1287,10 @@ mod tests {
     #[test]
     fn render_frame_keeps_the_body_in_place_when_command_mode_opens() {
         // Entering command mode must not shift the body: the title, blank
-        // separator, and every body row stay at the same screen position whether
-        // or not the command hints are showing. Only the bottom rows the hints
-        // overlay differ, and the input / footer stay last.
+        // separator, and every body row above the fixed hint band stay at the
+        // same screen position whether or not the command hints are showing.
+        // Only the band the hints overlay differs, and the input / footer stay
+        // last.
         let sidebar = state_with_sessions(&["alpha", "beta"]);
         let command = {
             let mut s = state_with_sessions(&["alpha", "beta"]);
@@ -1281,16 +1302,56 @@ mod tests {
         let after = render_frame(24, 80, &command);
         assert_eq!(before.len(), after.len());
 
-        // The hints occupy the rows just above the input line; everything above
-        // that overlay region is byte-for-byte identical, so nothing jumps.
-        let hint_rows = hint_lines(&command, 80).len();
+        // The hints overlay a fixed-height band at the bottom of the body;
+        // everything above that band is byte-for-byte identical, so nothing
+        // jumps.
         let input_row = after.len() - 2;
-        let overlay_start = input_row - hint_rows;
-        for row in 0..overlay_start {
+        let body_rows = 24 - 4;
+        let band = HINT_BAND.min(body_rows - 1);
+        let band_start = input_row - band;
+        for row in 0..band_start {
             assert_eq!(before[row], after[row], "body row {row} shifted");
         }
-        // The hints really did land in the overlay region, directly above input.
-        assert!(stripped(&after[overlay_start..input_row]).contains("session"));
+        // The hints are bottom-anchored, landing directly above the input.
+        assert!(stripped(&after[(input_row - 1)..input_row]).contains("session"));
+    }
+
+    #[test]
+    fn command_hints_keep_the_body_fixed_as_the_match_count_changes() {
+        // The hint band is a fixed height, so narrowing or widening the match
+        // list while typing must not move the body: the rows above the band are
+        // identical whether one command matches or the whole menu shows.
+        let narrowed = {
+            let mut s = state_with_sessions(&["alpha", "beta"]);
+            s.enter_command_mode();
+            s.push_char('s'); // narrows to a single command ("session")
+            s
+        };
+        let full_menu = {
+            let mut s = state_with_sessions(&["alpha", "beta"]);
+            s.enter_command_mode(); // bare ":" lists every command
+            s
+        };
+        let one = render_frame(24, 80, &narrowed);
+        let many = render_frame(24, 80, &full_menu);
+
+        // The two states show a different number of hints…
+        assert_ne!(
+            hint_lines(&narrowed, 80).len(),
+            hint_lines(&full_menu, 80).len()
+        );
+
+        // …yet every body row above the fixed band is unchanged.
+        let input_row = one.len() - 2;
+        let body_rows = 24 - 4;
+        let band = HINT_BAND.min(body_rows - 1);
+        let band_start = input_row - band;
+        for row in 0..band_start {
+            assert_eq!(
+                one[row], many[row],
+                "body row {row} moved when the match count changed"
+            );
+        }
     }
 
     #[test]
