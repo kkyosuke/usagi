@@ -106,7 +106,7 @@ cargo run -- issue update 2 --status done
 }
 ```
 
-詳細は [document/03-commands/01-cli.md](document/03-commands/01-cli.md#usagi-mcp)。
+詳細は [document/03-commands/03-mcp.md](document/03-commands/03-mcp.md)。
 
 ## Project Structure
 

@@ -2,11 +2,11 @@
 number: 025
 feature: issue-mcp
 title: issue MCP サーバ（`usagi mcp` で LLM に issue 操作を公開）
-status: todo
+status: done
 priority: high
 category: mcp
 dependson: [023, 024]
-ref: —
+ref: PR #62
 ---
 
 # `usagi mcp` コマンド（MCP サーバとして issue 操作を LLM に公開）

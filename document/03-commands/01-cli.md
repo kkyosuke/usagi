@@ -89,32 +89,7 @@ $ usagi issue list
 
 ### `usagi mcp`
 
-`usagi issue` と同じ issue 操作を、**MCP（Model Context Protocol）サーバ**として AI エージェント（Claude Code など）に公開します。`usagi mcp` は stdio 上の JSON-RPC 2.0 サーバとして動作し、起動したカレントディレクトリのリポジトリ（`.usagi/issues/`）を対象にします。
-
-公開する tool（いずれも `usecase/issue` を呼ぶ薄いラッパ）:
-
-| tool | 説明 |
-|---|---|
-| `issue_create` | issue を作成して返す |
-| `issue_get` | 番号で 1 件取得（無ければ `null`） |
-| `issue_list` | 一覧。各 issue に着手可能（`ready`）と未達依存（`unmet_deps`）を付与 |
-| `issue_search` | タイトル・本文の全文検索 |
-| `issue_update` | 指定フィールドのみ更新 |
-| `issue_delete` | 番号で削除 |
-
-tool の結果は JSON テキストで返り、`list` / `search` は CLI と同じく **dependson が全て done の issue を `ready: true`** として返します。
-
-Claude Code への登録例（プロジェクト直下で実行する想定）:
-
-```json
-{
-  "mcpServers": {
-    "usagi": { "command": "usagi", "args": ["mcp"] }
-  }
-}
-```
-
-> プロトコルは `initialize` / `tools/list` / `tools/call` / `ping` の最小サブセットを自前実装しています（非同期ランタイム非依存）。実装は `presentation/mcp.rs`（プロトコル・tool ディスパッチ）と `presentation/cli/mcp.rs`（stdio ループ）。
+`usagi issue` と同じ issue 操作を、**MCP（Model Context Protocol）サーバ**として AI エージェント（Claude Code など）に stdio 経由で公開します。アーキテクチャ・対応 tool・JSON-RPC プロトコルの詳細は専用の章 [3.3 MCP サーバ](03-mcp.md) を参照してください。
 
 ## 予定の CLI コマンド
 
