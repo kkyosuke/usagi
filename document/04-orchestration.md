@@ -1,0 +1,141 @@
+# 4. オーケストレーション（セッション・worktree 管理）
+
+> [ドキュメント目次](README.md) ｜ ← 前へ [3. コマンドリファレンス](03-commands.md) ｜ 次へ → [5. 設定](05-settings.md)
+
+`usagi` の中核は、**複数の作業を worktree ベースの「セッション」として束ね、複数リポジトリ構成でも
+一括でオーケストレーションする**ことです。本書はその概念モデルとライフサイクル、関連コマンドの役割を
+まとめます。各コマンドの一覧は [3. コマンドリファレンス](03-commands.md)、永続化されるデータは
+[data/02-workspace.md](data/02-workspace.md) を参照してください。
+
+## 目次
+
+- [用語](#用語)
+- [なぜ worktree を 1 か所に集約するのか](#なぜ-worktree-を-1-か所に集約するのか)
+- [セッションの構築（再帰走査と複数リポジトリ対応）](#セッションの構築再帰走査と複数リポジトリ対応)
+  - [セッション名の指定（モーダル）](#セッション名の指定モーダル)
+- [セッションのライフサイクル](#セッションのライフサイクル)
+- [アクティブなワークスペースと AI 連携](#アクティブなワークスペースと-ai-連携)
+- [関連コマンドの役割分担](#関連コマンドの役割分担)
+- [実装状況](#実装状況)
+
+## 用語
+
+| 用語 | 意味 |
+|---|---|
+| ワークスペース | usagi に登録したプロジェクトのルートディレクトリ。git リポジトリでなくてもよい（複数リポジトリのルートでも可）。グローバルレジストリ `workspaces.json` に登録される |
+| セッション | 1 つの作業単位。`session new <name>` でワークスペースルート配下に作られる worktree 群（＋コピー）の集合。名前 `<name>` で識別する |
+| worktree | git の作業ツリー。各 git リポジトリにつき 1 つ、セッション用ブランチをチェックアウトして作られる |
+| アクティブな worktree | `space` で選択中の作業対象。以降の `ai` / `terminal` / `diff` などの実行カレントディレクトリになる |
+
+## なぜ worktree を 1 か所に集約するのか
+
+usagi は worktree を **リポジトリ任意の場所ではなく、ワークスペースルート直下の
+`.usagi/worktree/<name>/` に集約** して管理します。これにより、
+
+- セッションの所在が一意に定まる（どこに作られたか探さなくてよい）。
+- 一覧・削除・クリーンアップが扱いやすくなる。
+- `.usagi/` は `.gitignore` 済みのため、各 worktree がワークスペースのコミット対象に混入しない。
+
+## セッションの構築（再帰走査と複数リポジトリ対応）
+
+ワークスペースのルート自体が git リポジトリである必要はありません。`session new <name>` は
+ルートを**再帰的に走査**し、各エントリを次のように扱います。
+
+- **git リポジトリのディレクトリ** → そのリポジトリの `git worktree` を
+  `.usagi/worktree/<name>/<相対パス>/` に、新しい `<name>` ブランチを切って作成する。
+- **git 管理外のファイル・ディレクトリ** → 同じ相対パス `.usagi/worktree/<name>/<相対パス>/` へコピーする。
+
+これにより、単一リポジトリだけでなく、ルートが git でない複数リポジトリ構成（モノレポ的な
+ディレクトリツリー）にも対応できます。
+
+```text
+/root                         （git でなくてもよい）
+├── app-a/      = git    → app-a の worktree を作成
+├── app-b/      = git    → app-b の worktree を作成
+├── be/                  （git でない素のディレクトリ → 再帰）
+│   └── be1/    = git    → be/be1 の worktree を作成
+└── README.md            （git 管理外 → コピー）
+```
+
+セッション `feature-x` を作成すると、`.usagi/worktree/feature-x/` 配下にルートと同じディレクトリ
+構造が再現され、git 配下の各サブディレクトリはそれぞれ `feature-x` ブランチの worktree、それ以外は
+コピーになります。各 worktree の状態は `state.json` の `WorktreeState` 配列に記録されます
+（`path` が `.usagi/worktree/<name>/...` を指す）。データ構造は
+[data/02-workspace.md](data/02-workspace.md) を参照してください。
+
+### セッション名の指定（モーダル）
+
+`session new <name>` は引数でセッション名を渡せますが、**`session new` を名前なしで実行した場合は、
+セッション名を入力するモーダルを画面中央に表示して名前を尋ねます**。
+
+- `Enter` で入力を確定し、その名前でセッションを作成。`Esc` でキャンセル。
+- 空文字や既存セッションと重複する名前はバリデーションし、モーダル内にエラーを表示して確定させません。
+- モーダルは既存のモーダル基盤（`src/presentation/tui/widgets/` の `boxed` / `render_modal`、テキスト
+  入力フィールド）を再利用し、ディレクトリ選択モーダル（[design/03-new.md](design/03-new.md#ディレクトリ選択モーダル)）と
+  同じく中央寄せ・枠付きボックスで描画します。
+
+## セッションのライフサイクル
+
+セッションは「作成 → 作業 → 統合 → 破棄」の流れで完結します。
+
+```text
+  session new <name>          space <name> / ai / terminal        usagi sync
+        │                              │                              │
+        ▼                              ▼                              ▼
+   [セッション作成] ───────────▶ [作業（worktree 上）] ◀──── [main の最新を取り込む]
+        │                              │
+        │                              ▼
+        │                       usagi finish (--pr)
+        │                              │
+        │                              ▼
+        └────────────────────▶ [main へ統合 → worktree 削除]
+                                       │
+                                       ▼
+                                 usagi clean
+                              [古いセッションの整理]
+```
+
+| 段階 | コマンド | 役割 |
+|---|---|---|
+| 作成 | `session new [<name>]` | ルートを再帰走査して `.usagi/worktree/<name>/` 配下に worktree 群を構築（名前省略時はモーダルで名前を尋ねる） |
+| 一覧 | `session list` / `usagi list` | セッション一覧・各セッションの ahead/behind を俯瞰 |
+| 切替 | `space <name>` | アクティブな worktree を切り替え（以降のコマンドの対象） |
+| 同期 | `usagi sync` | origin の既定ブランチの最新をセッションへ取り込む |
+| 統合 | `usagi finish` / `submit` | 変更を main へ統合し、worktree を削除（`--pr` で PR 作成） |
+| 破棄 | `session remove <name>` / `usagi clean` | 不要になったセッションの worktree・ブランチ・コピーを削除 |
+
+`session remove` / `clean` は未コミット変更がある場合に警告し、安全に削除します。
+
+## アクティブなワークスペースと AI 連携
+
+- `space` で選択した worktree が「アクティブ」になり、ホーム画面で視覚的に強調表示されます。
+- 以降の `ai` / `terminal` / `diff` などは、アクティブな worktree をカレントディレクトリとして実行します。
+- `ai <prompt>` は設定の Agent CLI（`claude` / `gemini`）を起動し、アクティブな worktree 配下の
+  ファイルをコンテキストとして AI に指示を渡します。Agent CLI の選択は設定で行います
+  （[5. 設定](05-settings.md)）。
+- `usagi context` は AI に読み込ませるプロジェクト概要を生成し、`ai` や外部エージェントの入力に使えます。
+
+## 関連コマンドの役割分担
+
+| 関心事 | コマンド | 参照 |
+|---|---|---|
+| セッションの作成・一覧・削除 | `session` | [issue 003](../issues/003-session.md) |
+| アクティブ worktree の切替 | `space` | [issue 004](../issues/004-space.md) |
+| AI への指示・対話 | `ai` | [issue 005](../issues/005-ai.md) |
+| 対話ターミナル | `terminal` | [issue 006](../issues/006-terminal.md) |
+| main の同期 | `usagi sync` | [issue 009](../issues/009-sync.md) |
+| 統合・破棄 | `usagi finish` / `clean` | [issue 010](../issues/010-finish.md) / [014](../issues/014-clean.md) |
+| 俯瞰 | `usagi list` | [issue 011](../issues/011-list.md) |
+| 差分閲覧 | `diff` | [issue 012](../issues/012-diff.md) |
+| Issue 連携 | gh Issue → セッション | [issue 020](../issues/020-gh-issue.md) |
+
+## 実装状況
+
+- ✅ **worktree の集約場所**（`.usagi/worktree/<name>/`）と、`usagi status` による状態同期・表示は実装済み。
+- ✅ **セッション作成**（`session <name>` / `session new`）：ルートを再帰走査して git は worktree 構築・
+  非 git はコピー（`usecase/session.rs`、`infrastructure/git.rs` の `add_worktree`）。名前省略時は
+  名前入力モーダルを表示（[design/05-home.md](design/05-home.md#セッション名入力モーダル)）。単一リポジトリ構成では
+  作成後に `state.json` を再同期し worktree 一覧へ反映。
+- 🚧 **`session list` / `session remove`**、複数リポジトリ構成での state.json 集約表現と削除時の未コミット警告は今後。
+- 🚧 **切替・同期・統合・AI 連携**（`space` / `ai` / `terminal` / `sync` / `finish` / `list` / `clean` /
+  `diff`）は usagi.ai から移植予定です。詳細は各 issue を参照してください。
