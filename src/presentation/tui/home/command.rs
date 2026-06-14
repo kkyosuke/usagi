@@ -13,6 +13,10 @@ use super::state::LogLine;
 
 /// A side effect a command asks the screen / event loop to perform, beyond
 /// appending its produced log lines.
+///
+/// Effects that touch the filesystem or spawn processes (`Session`,
+/// `OpenTerminal`) are *requests*: the command stays pure and the event loop —
+/// which holds the workspace path and performs IO — carries them out.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Effect {
     /// Nothing extra — just append the produced lines.
@@ -21,6 +25,19 @@ pub enum Effect {
     Clear,
     /// Quit the whole application.
     Quit,
+    /// Run a session subcommand against the workspace.
+    Session(SessionRequest),
+    /// Open an interactive terminal in the active worktree.
+    OpenTerminal,
+}
+
+/// A `session` subcommand, parsed but not yet executed.
+#[derive(Debug, PartialEq, Eq)]
+pub enum SessionRequest {
+    /// Create a session (and its worktrees) with the given name.
+    New(String),
+    /// List the workspace's sessions.
+    List,
 }
 
 /// The result of running a command: lines to append plus a side effect.
@@ -191,6 +208,69 @@ impl Command for QuitCommand {
     }
 }
 
+/// `session`: create or list sessions. The actual worktree work is a side
+/// effect ([`Effect::Session`]) carried out by the event loop; this command only
+/// parses the subcommand.
+struct SessionCommand;
+
+impl Command for SessionCommand {
+    fn name(&self) -> &'static str {
+        "session"
+    }
+
+    fn description(&self) -> &'static str {
+        "Create or manage sessions (branch + worktree)"
+    }
+
+    fn run(&self, args: &str, _ctx: &CommandContext) -> CommandResult {
+        let mut parts = args.splitn(2, char::is_whitespace);
+        let sub = parts.next().unwrap_or("");
+        let rest = parts.next().unwrap_or("").trim();
+
+        match sub {
+            "new" => {
+                if rest.is_empty() {
+                    CommandResult::line(LogLine::error("usage: session new <name>"))
+                } else {
+                    CommandResult {
+                        lines: Vec::new(),
+                        effect: Effect::Session(SessionRequest::New(rest.to_string())),
+                    }
+                }
+            }
+            "list" => CommandResult {
+                lines: Vec::new(),
+                effect: Effect::Session(SessionRequest::List),
+            },
+            "" => CommandResult::line(LogLine::output("usage: session <new <name> | list>")),
+            other => CommandResult::line(LogLine::error(format!(
+                "unknown session subcommand: \"{other}\""
+            ))),
+        }
+    }
+}
+
+/// `terminal`: open an interactive shell in the active worktree. The spawn is a
+/// side effect ([`Effect::OpenTerminal`]) performed by the event loop.
+struct TerminalCommand;
+
+impl Command for TerminalCommand {
+    fn name(&self) -> &'static str {
+        "terminal"
+    }
+
+    fn description(&self) -> &'static str {
+        "Open an interactive terminal in the active worktree"
+    }
+
+    fn run(&self, _args: &str, _ctx: &CommandContext) -> CommandResult {
+        CommandResult {
+            lines: Vec::new(),
+            effect: Effect::OpenTerminal,
+        }
+    }
+}
+
 /// A recognised command whose real behaviour is not built yet. It produces a
 /// friendly "coming soon" line so the surface stays discoverable; the follow-up
 /// issues replace each one with a real [`Command`] implementation.
@@ -230,10 +310,7 @@ impl CommandRegistry {
     pub fn with_builtins() -> Self {
         Self {
             commands: vec![
-                Box::new(ComingSoonCommand {
-                    name: "session",
-                    description: "Create or manage sessions (branch + worktree)",
-                }),
+                Box::new(SessionCommand),
                 Box::new(ComingSoonCommand {
                     name: "space",
                     description: "Switch between worktrees",
@@ -242,10 +319,7 @@ impl CommandRegistry {
                     name: "ai",
                     description: "Talk to the AI agent",
                 }),
-                Box::new(ComingSoonCommand {
-                    name: "terminal",
-                    description: "Open an interactive terminal",
-                }),
+                Box::new(TerminalCommand),
                 Box::new(HistoryCommand),
                 Box::new(ComingSoonCommand {
                     name: "doctor",
@@ -467,13 +541,61 @@ mod tests {
     #[test]
     fn coming_soon_commands_are_recognised() {
         let registry = registry();
-        for name in ["session", "space", "ai", "terminal", "doctor"] {
+        for name in ["space", "ai", "doctor"] {
             let result = registry.dispatch(name, &[]);
             assert_eq!(result.effect, Effect::None);
             assert_eq!(result.lines[0].kind, LineKind::Output);
             assert!(result.lines[0].text.contains("coming soon"));
             assert!(result.lines[0].text.contains(name));
         }
+    }
+
+    #[test]
+    fn session_new_requests_creation_with_the_given_name() {
+        let result = registry().dispatch("session new feature-x", &[]);
+        assert!(result.lines.is_empty());
+        assert_eq!(
+            result.effect,
+            Effect::Session(SessionRequest::New("feature-x".to_string()))
+        );
+    }
+
+    #[test]
+    fn session_new_without_a_name_is_a_usage_error() {
+        let result = registry().dispatch("session new", &[]);
+        assert_eq!(result.effect, Effect::None);
+        assert_eq!(result.lines[0].kind, LineKind::Error);
+        assert!(result.lines[0].text.contains("usage: session new"));
+    }
+
+    #[test]
+    fn session_list_requests_a_listing() {
+        let result = registry().dispatch("session list", &[]);
+        assert!(result.lines.is_empty());
+        assert_eq!(result.effect, Effect::Session(SessionRequest::List));
+    }
+
+    #[test]
+    fn session_without_a_subcommand_shows_usage() {
+        let result = registry().dispatch("session", &[]);
+        assert_eq!(result.effect, Effect::None);
+        assert_eq!(result.lines[0].kind, LineKind::Output);
+        assert!(result.lines[0].text.contains("usage: session"));
+    }
+
+    #[test]
+    fn session_with_an_unknown_subcommand_is_an_error() {
+        let result = registry().dispatch("session frob", &[]);
+        assert_eq!(result.effect, Effect::None);
+        assert_eq!(result.lines[0].kind, LineKind::Error);
+        assert!(result.lines[0].text.contains("unknown session subcommand"));
+    }
+
+    #[test]
+    fn terminal_requests_opening_a_shell() {
+        let result = registry().dispatch("terminal", &[]);
+        assert!(result.lines.is_empty());
+        assert_eq!(result.effect, Effect::OpenTerminal);
     }
 
     #[test]

@@ -56,6 +56,7 @@ mod tests {
         let ts = Utc.with_ymd_and_hms(2026, 6, 13, 5, 1, 0).unwrap();
         WorkspaceState {
             default_branch: "main".to_string(),
+            sessions: Vec::new(),
             updated_at: ts,
             worktrees: vec![
                 WorktreeState {

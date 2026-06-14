@@ -66,6 +66,10 @@ pub struct WorkspaceState {
     pub default_branch: String,
     /// State of every worktree, primary first.
     pub worktrees: Vec<WorktreeState>,
+    /// Sessions created in this workspace (`session new`). Defaults to empty so
+    /// state files written before sessions existed still load.
+    #[serde(default)]
+    pub sessions: Vec<crate::domain::session::Session>,
     /// When the state was last synced from git.
     pub updated_at: DateTime<Utc>,
 }
@@ -75,6 +79,7 @@ impl WorkspaceState {
         Self {
             default_branch: default_branch.into(),
             worktrees,
+            sessions: Vec::new(),
             updated_at: Utc::now(),
         }
     }

@@ -68,6 +68,16 @@ impl WorktreeList {
         }
         self.selected_index = (self.selected_index + 1) % self.worktrees.len();
     }
+
+    /// Append `worktrees`, skipping any whose path is already listed. Used to
+    /// surface a freshly created session's worktrees without duplicating rows.
+    pub fn extend(&mut self, worktrees: Vec<WorktreeState>) {
+        for worktree in worktrees {
+            if !self.worktrees.iter().any(|w| w.path == worktree.path) {
+                self.worktrees.push(worktree);
+            }
+        }
+    }
 }
 
 /// Which part of the screen currently has the keyboard.
@@ -211,6 +221,29 @@ impl HomeState {
     /// Move the worktree cursor down (sidebar mode).
     pub fn move_down(&mut self) {
         self.list.move_down();
+    }
+
+    /// Append an ordinary output line to the log (used by the event loop to
+    /// report the result of a command's side effect).
+    pub fn log_output(&mut self, text: impl Into<String>) {
+        self.log.push(LogLine::output(text));
+    }
+
+    /// Append an error line to the log.
+    pub fn log_error(&mut self, text: impl Into<String>) {
+        self.log.push(LogLine::error(text));
+    }
+
+    /// Add worktrees to the sidebar list (e.g. a new session's worktrees),
+    /// skipping any already shown.
+    pub fn add_worktrees(&mut self, worktrees: Vec<WorktreeState>) {
+        self.list.extend(worktrees);
+    }
+
+    /// Path of the worktree under the cursor, if any. The event loop uses this
+    /// as the working directory for `terminal`.
+    pub fn selected_worktree_path(&self) -> Option<&std::path::Path> {
+        self.list.selected().map(|w| w.path.as_path())
     }
 
     /// Act on the selected worktree. Opening one is not built yet, so this just
@@ -393,10 +426,59 @@ mod tests {
         assert_eq!(list.selected_index(), 0);
     }
 
+    #[test]
+    fn extend_appends_new_worktrees_and_skips_duplicates() {
+        let mut list = WorktreeList::new("usagi", vec![worktree("main")]);
+        // "main" shares a path with the existing row and is skipped; "feature"
+        // is new and appended.
+        list.extend(vec![worktree("main"), worktree("feature")]);
+        let branches: Vec<_> = list
+            .worktrees()
+            .iter()
+            .filter_map(|w| w.branch.as_deref())
+            .collect();
+        assert_eq!(branches, vec!["main", "feature"]);
+    }
+
     // --- HomeState ---------------------------------------------------------
 
     fn state() -> HomeState {
         HomeState::new("usagi", vec![worktree("main"), worktree("feature")], None)
+    }
+
+    #[test]
+    fn log_helpers_append_output_and_error_lines() {
+        let mut state = state();
+        state.log_output("did a thing");
+        state.log_error("it broke");
+        let last_two: Vec<_> = state.log().iter().rev().take(2).collect();
+        assert_eq!(last_two[0].kind, LineKind::Error);
+        assert_eq!(last_two[0].text, "it broke");
+        assert_eq!(last_two[1].kind, LineKind::Output);
+        assert_eq!(last_two[1].text, "did a thing");
+    }
+
+    #[test]
+    fn add_worktrees_extends_the_sidebar_list() {
+        let mut state = state();
+        state.add_worktrees(vec![worktree("session-wt")]);
+        assert_eq!(state.list().worktrees().len(), 3);
+        assert!(state
+            .list()
+            .worktrees()
+            .iter()
+            .any(|w| w.branch.as_deref() == Some("session-wt")));
+    }
+
+    #[test]
+    fn selected_worktree_path_follows_the_cursor() {
+        let state = state();
+        assert_eq!(
+            state.selected_worktree_path(),
+            Some(PathBuf::from("/repo/main").as_path())
+        );
+        let empty = HomeState::new("usagi", Vec::new(), None);
+        assert_eq!(empty.selected_worktree_path(), None);
     }
 
     #[test]

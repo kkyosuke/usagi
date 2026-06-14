@@ -14,10 +14,18 @@ use crate::infrastructure::git;
 use crate::infrastructure::workspace_store::WorkspaceStore;
 
 /// Inspect the repository containing `cwd`, persist its state, and return it.
+///
+/// Worktrees are rebuilt from git, but any sessions already recorded are
+/// preserved (git inspection has no notion of them), so a sync never discards
+/// the user's `session new` records.
 pub fn sync(cwd: &Path) -> Result<WorkspaceState> {
-    let state = inspect(cwd)?;
+    let mut state = inspect(cwd)?;
     let root = git::primary_worktree(cwd)?;
-    WorkspaceStore::new(root).save(&state)?;
+    let store = WorkspaceStore::new(root);
+    if let Some(previous) = store.load()? {
+        state.sessions = previous.sessions;
+    }
+    store.save(&state)?;
     Ok(state)
 }
 
@@ -61,6 +69,7 @@ pub fn inspect(cwd: &Path) -> Result<WorkspaceState> {
     Ok(WorkspaceState {
         default_branch: default,
         worktrees: states,
+        sessions: Vec::new(),
         updated_at: now,
     })
 }
@@ -136,6 +145,32 @@ mod tests {
         let loaded = load(dir.path()).unwrap();
         assert_eq!(loaded.as_ref(), Some(&state));
         assert!(dir.path().join(".usagi/state.json").exists());
+    }
+
+    #[test]
+    fn sync_preserves_previously_recorded_sessions() {
+        use crate::domain::session::{Session, SessionRepo};
+        use crate::infrastructure::workspace_store::WorkspaceStore;
+
+        let dir = tempfile::tempdir().unwrap();
+        init_repo(dir.path());
+
+        // Seed a state file that already carries a session.
+        let mut seeded = inspect(dir.path()).unwrap();
+        seeded.sessions = vec![Session::new(
+            "feature-x",
+            dir.path().join(".usagi/worktree/feature-x"),
+            vec![SessionRepo {
+                relative: std::path::PathBuf::new(),
+                path: dir.path().join(".usagi/worktree/feature-x"),
+                branch: "feature-x".to_string(),
+            }],
+        )];
+        WorkspaceStore::new(dir.path()).save(&seeded).unwrap();
+
+        // A sync rebuilds worktrees from git but must keep the session.
+        let synced = sync(dir.path()).unwrap();
+        assert_eq!(synced.sessions, seeded.sessions);
     }
 
     #[test]

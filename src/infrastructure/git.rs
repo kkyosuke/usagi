@@ -108,6 +108,58 @@ pub fn is_repository(path: &Path) -> bool {
         == Some("true")
 }
 
+/// Absolute path of the top-level directory of the work tree containing `path`,
+/// or `None` when `path` is not inside a git repository.
+pub fn toplevel(path: &Path) -> Option<PathBuf> {
+    git_capture(path, &["rev-parse", "--show-toplevel"])
+        .ok()
+        .flatten()
+        .map(PathBuf::from)
+}
+
+/// Return `true` if `path` is itself the root of a git work tree (its own
+/// repository), as opposed to a subdirectory of one or a plain directory.
+///
+/// Used when building a session: a directory that is its own repository root
+/// gets a `git worktree`, while a plain directory is recursed into.
+pub fn is_repository_root(path: &Path) -> bool {
+    match toplevel(path) {
+        Some(top) => same_dir(&top, path),
+        None => false,
+    }
+}
+
+/// Compare two directory paths for identity, tolerating symlinked ancestors
+/// (e.g. macOS `/var` → `/private/var`) by canonicalizing when both resolve.
+fn same_dir(a: &Path, b: &Path) -> bool {
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
+    }
+}
+
+/// Create a new worktree of `repo` at `dest`, checked out on a freshly created
+/// branch `branch` (branched from the current HEAD).
+///
+/// Output is captured rather than inherited so it does not disturb an active
+/// TUI; on failure the captured stderr is surfaced in the error. Repo-scoping
+/// env vars are stripped so an inherited `GIT_DIR` cannot redirect the
+/// operation.
+pub fn add_worktree(repo: &Path, dest: &Path, branch: &str) -> Result<()> {
+    let output = git_command(repo)
+        .args(["worktree", "add", "-b", branch])
+        .arg(dest)
+        .output()
+        .context("failed to run `git worktree add`")?;
+    if !output.status.success() {
+        bail!(
+            "git worktree add failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
 /// Resolve the absolute path of the repository's primary (main) worktree.
 ///
 /// This is the directory under which `.usagi/` should live, regardless of which
@@ -450,6 +502,58 @@ mod tests {
     fn short_hash_takes_first_seven_chars() {
         assert_eq!(short_hash("0123456789abcdef"), "0123456");
         assert_eq!(short_hash("abc"), "abc");
+    }
+
+    #[test]
+    fn add_worktree_creates_a_new_branch_worktree() {
+        let dir = tempfile::tempdir().unwrap();
+        init_repo(dir.path());
+        let dest = dir.path().join("wt");
+
+        add_worktree(dir.path(), &dest, "feature").unwrap();
+
+        assert!(dest.join("f").is_file());
+        let head = git_capture(&dest, &["rev-parse", "--abbrev-ref", "HEAD"])
+            .unwrap()
+            .unwrap();
+        assert_eq!(head, "feature");
+    }
+
+    #[test]
+    fn add_worktree_fails_for_a_duplicate_branch() {
+        let dir = tempfile::tempdir().unwrap();
+        init_repo(dir.path());
+        add_worktree(dir.path(), &dir.path().join("wt1"), "feature").unwrap();
+        // Reusing the branch name is rejected by git.
+        let err = add_worktree(dir.path(), &dir.path().join("wt2"), "feature").unwrap_err();
+        assert!(err.to_string().contains("git worktree add failed"));
+    }
+
+    #[test]
+    fn toplevel_and_repository_root_detection() {
+        let dir = tempfile::tempdir().unwrap();
+        init_repo(dir.path());
+        let sub = dir.path().join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+
+        // The repo root reports itself as the toplevel and as a repository root.
+        assert!(same_dir(&toplevel(dir.path()).unwrap(), dir.path()));
+        assert!(is_repository_root(dir.path()));
+        // A subdirectory is inside the work tree but is not its own root.
+        assert!(same_dir(&toplevel(&sub).unwrap(), dir.path()));
+        assert!(!is_repository_root(&sub));
+
+        // A plain directory outside any repo has no toplevel.
+        let plain = tempfile::tempdir().unwrap();
+        assert!(toplevel(plain.path()).is_none());
+        assert!(!is_repository_root(plain.path()));
+    }
+
+    #[test]
+    fn same_dir_falls_back_when_canonicalize_fails() {
+        // Neither path exists, so canonicalize fails and the raw comparison wins.
+        assert!(same_dir(Path::new("/no/such/a"), Path::new("/no/such/a")));
+        assert!(!same_dir(Path::new("/no/such/a"), Path::new("/no/such/b")));
     }
 
     #[test]
