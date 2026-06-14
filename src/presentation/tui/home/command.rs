@@ -29,6 +29,9 @@ pub enum Effect {
     ListSessions,
     /// Remove a session (the user ran `session remove <name> [--force]`).
     RemoveSession { name: String, force: bool },
+    /// Switch the active worktree to the one named by the string. The screen
+    /// resolves the name against its worktree list and reports the result.
+    Activate(String),
 }
 
 /// The result of running a command: lines to append plus a side effect.
@@ -66,12 +69,23 @@ pub struct CommandInfo {
     pub examples: &'static [&'static str],
 }
 
+/// A worktree as seen by commands: its display name and whether it is the
+/// currently active one. Exposed via [`CommandContext`] so `space` can list the
+/// available worktrees without reaching into the screen state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorktreeRef {
+    pub name: String,
+    pub active: bool,
+}
+
 /// Everything a command may read while running, beyond its own argument string.
 pub struct CommandContext<'a> {
     /// Commands entered so far this session (oldest first), for `history`.
     pub history: &'a [String],
     /// Every registered command, in display order, for `man`.
     pub commands: &'a [CommandInfo],
+    /// The workspace's worktrees, in display order, for `space`.
+    pub worktrees: &'a [WorktreeRef],
 }
 
 /// A command available in the workspace screen's command mode.
@@ -239,12 +253,15 @@ impl Command for QuitCommand {
     }
 }
 
-/// `session`: create or manage sessions (a new branch + worktree per repo).
+/// `session`: create, list, or switch sessions (a branch + worktree per repo).
 ///
-/// `session new <name>` (or just `session <name>`) creates a session with that
-/// name; `session` or `session new` with no name returns [`Effect::OpenSessionModal`]
-/// so the screen can prompt for one. `list` / `remove` are recognised subcommands
-/// that are not built yet.
+/// - `session new <name>` (or just `session <name>`) creates a session; with no
+///   name it returns [`Effect::OpenSessionModal`] so the screen can prompt.
+/// - `session list` lists the sessions.
+/// - `session switch <name>` switches the active session (via
+///   [`Effect::Activate`]); `session switch` with no name lists the sessions and
+///   marks the active one.
+/// - `session remove <name> [--force]` removes a session.
 struct SessionCommand;
 
 impl Command for SessionCommand {
@@ -253,18 +270,22 @@ impl Command for SessionCommand {
     }
 
     fn description(&self) -> &'static str {
-        "Create or manage sessions (branch + worktree)"
+        "Create, list, or switch sessions (branch + worktree)"
     }
 
     fn usage(&self) -> &'static str {
-        "session [new] <name>"
+        "session [new|list|switch|remove] <name>"
     }
 
     fn examples(&self) -> &'static [&'static str] {
-        &["session", "session new feature-x"]
+        &[
+            "session new feature-x",
+            "session switch feature-x",
+            "session list",
+        ]
     }
 
-    fn run(&self, args: &str, _ctx: &CommandContext) -> CommandResult {
+    fn run(&self, args: &str, ctx: &CommandContext) -> CommandResult {
         let mut parts = args.splitn(2, char::is_whitespace);
         let sub = parts.next().unwrap_or("");
         let rest = parts.next().unwrap_or("").trim();
@@ -286,6 +307,7 @@ impl Command for SessionCommand {
                 lines: Vec::new(),
                 effect: Effect::ListSessions,
             },
+            "switch" => switch(rest, ctx),
             "remove" => {
                 let mut force = false;
                 let mut target = None;
@@ -308,6 +330,31 @@ impl Command for SessionCommand {
             }
             _ => create(args.trim()),
         }
+    }
+}
+
+/// `session switch [name]`: switch the active session, or list the available
+/// ones when no name is given.
+///
+/// With a name, the resolution (and the success/not-found message) happens in
+/// the screen, which owns the worktree list and the active selection.
+fn switch(name: &str, ctx: &CommandContext) -> CommandResult {
+    if name.is_empty() {
+        if ctx.worktrees.is_empty() {
+            return CommandResult::line(LogLine::output("No sessions to switch between."));
+        }
+        let mut lines = vec![LogLine::output("Sessions:")];
+        for worktree in ctx.worktrees {
+            let marker = if worktree.active { "*" } else { " " };
+            lines.push(LogLine::output(format!("  {marker} {}", worktree.name)));
+        }
+        lines.push(LogLine::output("Use \"session switch <name>\" to switch."));
+        return CommandResult::lines(lines);
+    }
+
+    CommandResult {
+        lines: Vec::new(),
+        effect: Effect::Activate(name.to_string()),
     }
 }
 
@@ -363,12 +410,6 @@ impl CommandRegistry {
             commands: vec![
                 Box::new(SessionCommand),
                 Box::new(ComingSoonCommand {
-                    name: "space",
-                    description: "Switch between worktrees",
-                    usage: "space [name]",
-                    examples: &["space", "space main"],
-                }),
-                Box::new(ComingSoonCommand {
                     name: "ai",
                     description: "Talk to the AI agent",
                     usage: "ai <prompt>",
@@ -422,9 +463,14 @@ impl CommandRegistry {
     }
 
     /// Parse and run `input`, given the command `history` entered so far (not
-    /// including the current input). Returns the lines to append and a side
-    /// effect. Unknown commands produce an error line.
-    pub fn dispatch(&self, input: &str, history: &[String]) -> CommandResult {
+    /// including the current input) and the workspace's `worktrees`. Returns the
+    /// lines to append and a side effect. Unknown commands produce an error line.
+    pub fn dispatch(
+        &self,
+        input: &str,
+        history: &[String],
+        worktrees: &[WorktreeRef],
+    ) -> CommandResult {
         let trimmed = input.trim();
         let mut parts = trimmed.splitn(2, char::is_whitespace);
         let name = parts.next().unwrap_or("");
@@ -438,6 +484,7 @@ impl CommandRegistry {
         let ctx = CommandContext {
             history,
             commands: &infos,
+            worktrees,
         };
 
         match self.find(name) {
@@ -529,7 +576,7 @@ mod tests {
 
     #[test]
     fn empty_input_does_nothing() {
-        let result = registry().dispatch("   ", &[]);
+        let result = registry().dispatch("   ", &[], &[]);
         assert!(result.lines.is_empty());
         assert_eq!(result.effect, Effect::None);
     }
@@ -537,7 +584,7 @@ mod tests {
     #[test]
     fn man_without_argument_lists_every_command() {
         let registry = registry();
-        let result = registry.dispatch("man", &[]);
+        let result = registry.dispatch("man", &[], &[]);
         assert_eq!(result.effect, Effect::None);
         let joined = result
             .lines
@@ -553,24 +600,24 @@ mod tests {
 
     #[test]
     fn help_is_an_alias_for_man() {
-        let result = registry().dispatch("help", &[]);
+        let result = registry().dispatch("help", &[], &[]);
         assert!(result.lines[0].text.contains("Available commands"));
     }
 
     #[test]
     fn man_without_argument_hints_at_per_command_help() {
-        let result = registry().dispatch("man", &[]);
+        let result = registry().dispatch("man", &[], &[]);
         let last = result.lines.last().unwrap();
         assert!(last.text.contains("man <command>"));
     }
 
     #[test]
     fn man_with_a_known_command_shows_usage_and_examples() {
-        let result = registry().dispatch("man space", &[]);
+        let result = registry().dispatch("man session", &[], &[]);
         assert!(result.lines.len() > 1);
         // Header, then a Usage block, then an Examples block.
         assert_eq!(result.lines[0].kind, LineKind::Output);
-        assert!(result.lines[0].text.starts_with("space —"));
+        assert!(result.lines[0].text.starts_with("session —"));
         let joined = result
             .lines
             .iter()
@@ -578,15 +625,15 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(joined.contains("Usage:"));
-        assert!(joined.contains("space [name]"));
+        assert!(joined.contains("session [new|list|switch|remove] <name>"));
         assert!(joined.contains("Examples:"));
-        assert!(joined.contains("space main"));
+        assert!(joined.contains("session switch feature-x"));
     }
 
     #[test]
     fn man_with_a_command_without_examples_omits_the_examples_block() {
         // `clear` takes no arguments and has no examples (trait defaults).
-        let result = registry().dispatch("man clear", &[]);
+        let result = registry().dispatch("man clear", &[], &[]);
         let joined = result
             .lines
             .iter()
@@ -602,14 +649,14 @@ mod tests {
 
     #[test]
     fn man_with_an_unknown_command_is_an_error() {
-        let result = registry().dispatch("man nope", &[]);
+        let result = registry().dispatch("man nope", &[], &[]);
         assert_eq!(result.lines[0].kind, LineKind::Error);
         assert!(result.lines[0].text.contains("no manual entry"));
     }
 
     #[test]
     fn history_is_empty_when_nothing_was_entered() {
-        let result = registry().dispatch("history", &[]);
+        let result = registry().dispatch("history", &[], &[]);
         assert_eq!(result.lines.len(), 1);
         assert!(result.lines[0].text.contains("No commands in history"));
     }
@@ -617,7 +664,7 @@ mod tests {
     #[test]
     fn history_numbers_previous_entries() {
         let entries = vec!["man".to_string(), "doctor".to_string()];
-        let result = registry().dispatch("history", &entries);
+        let result = registry().dispatch("history", &entries, &[]);
         assert_eq!(result.lines.len(), 2);
         assert!(result.lines[0].text.contains("1"));
         assert!(result.lines[0].text.contains("man"));
@@ -626,22 +673,22 @@ mod tests {
 
     #[test]
     fn clear_requests_the_clear_effect_with_no_lines() {
-        let result = registry().dispatch("clear", &[]);
+        let result = registry().dispatch("clear", &[], &[]);
         assert!(result.lines.is_empty());
         assert_eq!(result.effect, Effect::Clear);
     }
 
     #[test]
     fn quit_and_exit_request_the_quit_effect() {
-        assert_eq!(registry().dispatch("quit", &[]).effect, Effect::Quit);
-        assert_eq!(registry().dispatch("exit", &[]).effect, Effect::Quit);
+        assert_eq!(registry().dispatch("quit", &[], &[]).effect, Effect::Quit);
+        assert_eq!(registry().dispatch("exit", &[], &[]).effect, Effect::Quit);
     }
 
     #[test]
     fn session_without_a_name_opens_the_modal() {
         // Bare `session` and `session new` both ask for a name via the modal.
         for input in ["session", "session new"] {
-            let result = registry().dispatch(input, &[]);
+            let result = registry().dispatch(input, &[], &[]);
             assert!(result.lines.is_empty());
             assert_eq!(result.effect, Effect::OpenSessionModal);
         }
@@ -651,7 +698,7 @@ mod tests {
     fn session_with_a_name_requests_creation() {
         // `session new <name>` and the shorthand `session <name>` both create.
         for input in ["session new feature-x", "session feature-x"] {
-            let result = registry().dispatch(input, &[]);
+            let result = registry().dispatch(input, &[], &[]);
             assert!(result.lines.is_empty());
             assert_eq!(
                 result.effect,
@@ -662,7 +709,7 @@ mod tests {
 
     #[test]
     fn session_list_requests_the_list_effect() {
-        let result = registry().dispatch("session list", &[]);
+        let result = registry().dispatch("session list", &[], &[]);
         assert!(result.lines.is_empty());
         assert_eq!(result.effect, Effect::ListSessions);
     }
@@ -670,7 +717,7 @@ mod tests {
     #[test]
     fn session_remove_parses_name_and_force_flag() {
         // A bare name removes without force.
-        let result = registry().dispatch("session remove old", &[]);
+        let result = registry().dispatch("session remove old", &[], &[]);
         assert!(result.lines.is_empty());
         assert_eq!(
             result.effect,
@@ -687,7 +734,7 @@ mod tests {
             "session remove -f old",
             "session remove old --force extra",
         ] {
-            let result = registry().dispatch(input, &[]);
+            let result = registry().dispatch(input, &[], &[]);
             assert_eq!(
                 result.effect,
                 Effect::RemoveSession {
@@ -700,7 +747,7 @@ mod tests {
 
     #[test]
     fn session_remove_without_a_name_shows_usage() {
-        let result = registry().dispatch("session remove", &[]);
+        let result = registry().dispatch("session remove", &[], &[]);
         assert_eq!(result.effect, Effect::None);
         assert_eq!(result.lines[0].kind, LineKind::Error);
         assert!(result.lines[0].text.contains("usage"));
@@ -709,8 +756,8 @@ mod tests {
     #[test]
     fn coming_soon_commands_are_recognised() {
         let registry = registry();
-        for name in ["space", "ai", "terminal", "doctor"] {
-            let result = registry.dispatch(name, &[]);
+        for name in ["ai", "terminal", "doctor"] {
+            let result = registry.dispatch(name, &[], &[]);
             assert_eq!(result.effect, Effect::None);
             assert_eq!(result.lines[0].kind, LineKind::Output);
             assert!(result.lines[0].text.contains("coming soon"));
@@ -718,9 +765,54 @@ mod tests {
         }
     }
 
+    fn worktree_refs() -> Vec<WorktreeRef> {
+        vec![
+            WorktreeRef {
+                name: "main".to_string(),
+                active: true,
+            },
+            WorktreeRef {
+                name: "feature".to_string(),
+                active: false,
+            },
+        ]
+    }
+
+    #[test]
+    fn session_switch_with_a_name_requests_activation() {
+        let result = registry().dispatch("session switch feature", &[], &worktree_refs());
+        assert_eq!(result.effect, Effect::Activate("feature".to_string()));
+        // Resolution and messaging happen in the screen, so no lines here.
+        assert!(result.lines.is_empty());
+    }
+
+    #[test]
+    fn session_switch_without_a_name_lists_sessions_and_marks_the_active_one() {
+        let result = registry().dispatch("session switch", &[], &worktree_refs());
+        assert_eq!(result.effect, Effect::None);
+        let joined = result
+            .lines
+            .iter()
+            .map(|l| l.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(joined.contains("Sessions:"));
+        // The active session is marked with `*`.
+        assert!(joined.contains("* main"));
+        assert!(joined.contains("feature"));
+        assert!(joined.contains("session switch <name>"));
+    }
+
+    #[test]
+    fn session_switch_without_sessions_says_so() {
+        let result = registry().dispatch("session switch", &[], &[]);
+        assert_eq!(result.effect, Effect::None);
+        assert!(result.lines[0].text.contains("No sessions"));
+    }
+
     #[test]
     fn unknown_command_is_reported_as_an_error() {
-        let result = registry().dispatch("frobnicate", &[]);
+        let result = registry().dispatch("frobnicate", &[], &[]);
         assert_eq!(result.lines[0].kind, LineKind::Error);
         assert!(result.lines[0].text.contains("unknown command"));
     }
@@ -742,7 +834,7 @@ mod tests {
 
         let mut registry = registry();
         registry.register(Box::new(Greet));
-        let result = registry.dispatch("greet world", &[]);
+        let result = registry.dispatch("greet world", &[], &[]);
         assert_eq!(result.lines[0].text, "hello world");
         // The newcomer also shows up in `man` (via the shared info list).
         assert!(registry.infos().iter().any(|i| i.name == "greet"));
@@ -766,10 +858,28 @@ mod tests {
 
     #[test]
     fn complete_extends_to_the_common_prefix_and_lists_candidates() {
-        // "s" matches both "session" and "space"; common prefix is "s".
-        let completion = registry().complete("s");
+        // Register a second "s…" command so the prefix is ambiguous.
+        struct Sync;
+        impl Command for Sync {
+            fn name(&self) -> &'static str {
+                "sync"
+            }
+            fn description(&self) -> &'static str {
+                "Sync"
+            }
+            fn run(&self, _args: &str, _ctx: &CommandContext) -> CommandResult {
+                CommandResult::lines(Vec::new())
+            }
+        }
+        let mut registry = registry();
+        registry.register(Box::new(Sync));
+        // The newcomer is fully wired (listed in `man`, dispatchable).
+        assert!(registry.infos().iter().any(|i| i.name == "sync"));
+        assert!(registry.dispatch("sync", &[], &[]).lines.is_empty());
+        // "s" matches both "session" and "sync"; common prefix is "s".
+        let completion = registry.complete("s");
         assert_eq!(completion.input, "s");
-        assert_eq!(completion.candidates, vec!["session", "space"]);
+        assert_eq!(completion.candidates, vec!["session", "sync"]);
     }
 
     #[test]
