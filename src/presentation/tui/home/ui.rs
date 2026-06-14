@@ -94,11 +94,13 @@ fn layout(width: usize) -> (usize, usize) {
     (left, right)
 }
 
-/// The centred title bar: workspace name and worktree count.
+/// The centred title bar: workspace name and session count. The count covers
+/// every row in the left pane — the root row plus each worktree — so it matches
+/// what the user sees, rather than the bare worktree count.
 fn title_bar(width: usize, list: &WorktreeList) -> String {
-    let count = list.worktrees().len();
+    let count = list.session_count();
     let label = format!(
-        "{} · {count} worktree{}",
+        "{} · {count} session{}",
         list.workspace_name(),
         if count == 1 { "" } else { "s" }
     );
@@ -634,22 +636,21 @@ mod tests {
 
     #[test]
     fn title_bar_singular_and_plural() {
-        let one = title_bar(
-            80,
-            &list_with(vec![worktree(Some("main"), true, BranchStatus::Pushed)]),
-        );
+        // No worktrees: only the root row counts, so the title reads "1 session".
+        let one = title_bar(80, &list_with(vec![]));
         assert!(one.contains("usagi"));
-        assert!(one.contains("1 worktree"));
-        assert!(!one.contains("1 worktrees"));
+        assert!(one.contains("1 session"));
+        assert!(!one.contains("1 sessions"));
 
-        let two = title_bar(
+        // Two worktrees plus the root row: three sessions.
+        let three = title_bar(
             80,
             &list_with(vec![
                 worktree(Some("main"), true, BranchStatus::Pushed),
                 worktree(Some("x"), false, BranchStatus::Local),
             ]),
         );
-        assert!(two.contains("2 worktrees"));
+        assert!(three.contains("3 sessions"));
     }
 
     #[test]
