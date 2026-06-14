@@ -14,8 +14,8 @@
 | # | feature | 概要 | category | priority | dependson |
 |---|---|---|---|---|---|
 | 001 | [init-cli](001-init-cli.md) ✅ | `usagi init <URL>` CLI コマンド | cli | high | — |
-| 002 | [workspace-screen](002-workspace-screen.md) | ワークスペース画面とコマンドモード基盤 | tui | high | — |
-| 003 | [session](003-session.md) | `session` セッション管理（`.usagi/worktree` 配下に再帰的に worktree 構築） | tui | high | 002 |
+| 002 | [workspace-screen](002-workspace-screen.md) ✅ | ワークスペース画面とコマンドモード基盤 | tui | high | — |
+| 003 | [session](003-session.md) ✅ | `session` セッション管理（`.usagi/worktree` 配下に再帰的に worktree 構築） | tui | high | 002 |
 | 004 | [space](004-space.md) ✅ | `session switch` セッション切り替え | tui | high | 002, 003 |
 | 005 | [ai](005-ai.md) | `ai` AI エージェントへの指示・対話 | tui | high | 002 |
 | 006 | [terminal](006-terminal.md) ✅ | `terminal` 対話型ターミナル | tui | medium | 002, 003 |
