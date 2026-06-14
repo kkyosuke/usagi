@@ -64,7 +64,7 @@
 |---|---|---|
 | Theme | UI のカラーテーマ | `Light` → `Dark` → `System`（OS 追従）の順に循環 |
 | Default Workspace | 既定で開くワークスペース | `(none)` ＋ 登録済みワークスペース名を順に循環。未登録時は変更不可（ヒントを表示） |
-| Notifications | デスクトップ通知（`hop` 時など）の ON/OFF | `On` ⇄ `Off` をトグル |
+| Notifications | デスクトップ通知（`agent` の入力待ちなど）の ON/OFF | `On` ⇄ `Off` をトグル |
 | Agent CLI | usagi が起動する AI エージェント CLI | `Claude` → `Gemini` の順に循環 |
 
 > 全項目を共通の chooser widget で描画し、現在値のみを常に `< 値 >` の形で表示します。
