@@ -32,6 +32,9 @@ pub enum Effect {
     /// Switch the active worktree to the one named by the string. The screen
     /// resolves the name against its worktree list and reports the result.
     Activate(String),
+    /// Open an interactive terminal in the selected worktree (the user ran
+    /// `terminal`). The directory is resolved by the event loop.
+    OpenTerminal,
 }
 
 /// The result of running a command: lines to append plus a side effect.
@@ -358,6 +361,28 @@ fn switch(name: &str, ctx: &CommandContext) -> CommandResult {
     }
 }
 
+/// `terminal`: open an interactive shell in the selected worktree. The spawn is
+/// a side effect ([`Effect::OpenTerminal`]) performed by the event loop, which
+/// holds the worktree paths and the terminal handle.
+struct TerminalCommand;
+
+impl Command for TerminalCommand {
+    fn name(&self) -> &'static str {
+        "terminal"
+    }
+
+    fn description(&self) -> &'static str {
+        "Open an interactive terminal in the selected worktree"
+    }
+
+    fn run(&self, _args: &str, _ctx: &CommandContext) -> CommandResult {
+        CommandResult {
+            lines: Vec::new(),
+            effect: Effect::OpenTerminal,
+        }
+    }
+}
+
 /// A recognised command whose real behaviour is not built yet. It produces a
 /// friendly "coming soon" line so the surface stays discoverable; the follow-up
 /// issues replace each one with a real [`Command`] implementation. It still
@@ -415,12 +440,7 @@ impl CommandRegistry {
                     usage: "ai <prompt>",
                     examples: &["ai fix the failing test"],
                 }),
-                Box::new(ComingSoonCommand {
-                    name: "terminal",
-                    description: "Open an interactive terminal",
-                    usage: "terminal",
-                    examples: &[],
-                }),
+                Box::new(TerminalCommand),
                 Box::new(HistoryCommand),
                 Box::new(ComingSoonCommand {
                     name: "doctor",
@@ -756,7 +776,7 @@ mod tests {
     #[test]
     fn coming_soon_commands_are_recognised() {
         let registry = registry();
-        for name in ["ai", "terminal", "doctor"] {
+        for name in ["ai", "doctor"] {
             let result = registry.dispatch(name, &[], &[]);
             assert_eq!(result.effect, Effect::None);
             assert_eq!(result.lines[0].kind, LineKind::Output);
@@ -808,6 +828,13 @@ mod tests {
         let result = registry().dispatch("session switch", &[], &[]);
         assert_eq!(result.effect, Effect::None);
         assert!(result.lines[0].text.contains("No sessions"));
+    }
+
+    #[test]
+    fn terminal_requests_opening_a_shell() {
+        let result = registry().dispatch("terminal", &[], &[]);
+        assert!(result.lines.is_empty());
+        assert_eq!(result.effect, Effect::OpenTerminal);
     }
 
     #[test]
