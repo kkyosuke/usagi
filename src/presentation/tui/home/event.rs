@@ -4,7 +4,8 @@ use console::Term;
 
 use crate::presentation::tui::screen::KeyReader;
 
-use super::state::WorktreeList;
+use super::command::Effect;
+use super::state::{HomeState, Mode};
 use super::ui;
 
 /// What the user chose to do on the home (workspace) screen.
@@ -20,21 +21,20 @@ pub enum Outcome {
 /// user goes back or quits. Assumes the alternate screen is already active (it
 /// is owned by the welcome screen, several levels up).
 ///
-/// Opening a worktree is a placeholder for now: selecting one shows a "coming
-/// soon" notice, since the per-worktree session screen is not implemented yet.
+/// The screen has two modes. In sidebar mode the worktree list is navigated and
+/// `:` (or `i`) opens the command line; in command mode the user types a
+/// command, with Tab completion and `↑`/`↓` history recall. Opening a worktree
+/// and most commands are placeholders for now (they log a notice).
 pub fn event_loop(
     term: &Term,
     reader: &mut dyn KeyReader,
-    mut list: WorktreeList,
-    initial_notice: Option<String>,
+    mut state: HomeState,
 ) -> Result<Outcome> {
-    let mut notice = initial_notice;
-
     loop {
         term.move_cursor_to(0, 0)?;
         term.clear_screen()?;
         let (height, width) = term.size();
-        let frame = ui::render_frame(height as usize, width as usize, &list, notice.as_deref());
+        let frame = ui::render_frame(height as usize, width as usize, &state);
         for line in &frame {
             term.write_line(line)?;
         }
@@ -46,24 +46,31 @@ pub fn event_loop(
             Err(e) => return Err(anyhow::Error::from(e).context("Failed to read key")),
         };
 
-        match key {
-            Key::ArrowUp | Key::Char('k') => {
-                list.move_up();
-                notice = None;
-            }
-            Key::ArrowDown | Key::Char('j') => {
-                list.move_down();
-                notice = None;
-            }
-            Key::Enter => {
-                if let Some(worktree) = list.selected() {
-                    let branch = worktree.branch.as_deref().unwrap_or("(detached)");
-                    notice = Some(format!("Opening \"{branch}\" is coming soon 🐰"));
+        match state.mode() {
+            Mode::Sidebar => match key {
+                Key::ArrowUp | Key::Char('k') => state.move_up(),
+                Key::ArrowDown | Key::Char('j') => state.move_down(),
+                Key::Enter => state.select_worktree(),
+                Key::Char(':') | Key::Char('i') => state.enter_command_mode(),
+                Key::Char('q') | Key::Escape => return Ok(Outcome::Back),
+                Key::CtrlC => return Ok(Outcome::Quit),
+                _ => {}
+            },
+            Mode::Command => match key {
+                Key::Enter => {
+                    if let Effect::Quit = state.submit() {
+                        return Ok(Outcome::Quit);
+                    }
                 }
-            }
-            Key::Char('q') | Key::Escape => return Ok(Outcome::Back),
-            Key::CtrlC => return Ok(Outcome::Quit),
-            _ => {}
+                Key::Tab => state.complete(),
+                Key::Backspace => state.backspace(),
+                Key::ArrowUp => state.recall_prev(),
+                Key::ArrowDown => state.recall_next(),
+                Key::Escape => state.leave_command_mode(),
+                Key::CtrlC => return Ok(Outcome::Quit),
+                Key::Char(c) => state.push_char(c),
+                _ => {}
+            },
         }
     }
 }
@@ -107,23 +114,29 @@ mod tests {
         }
     }
 
-    fn sample_list() -> WorktreeList {
-        WorktreeList::new(
+    fn sample_state() -> HomeState {
+        HomeState::new(
             "usagi",
             vec![worktree(Some("main")), worktree(Some("feature"))],
+            None,
         )
     }
 
-    fn run(keys: Vec<io::Result<Key>>, list: WorktreeList) -> Result<Outcome> {
+    fn run(keys: Vec<io::Result<Key>>, state: HomeState) -> Result<Outcome> {
         let term = Term::stdout();
         let mut reader = ScriptedReader::new(keys);
-        event_loop(&term, &mut reader, list, None)
+        event_loop(&term, &mut reader, state)
+    }
+
+    /// Types each character of `s` as a `Char` key.
+    fn typed(s: &str) -> Vec<io::Result<Key>> {
+        s.chars().map(|c| Ok(Key::Char(c))).collect()
     }
 
     #[test]
     fn escape_returns_back() {
         assert!(matches!(
-            run(vec![Ok(Key::Escape)], sample_list()).unwrap(),
+            run(vec![Ok(Key::Escape)], sample_state()).unwrap(),
             Outcome::Back
         ));
     }
@@ -131,70 +144,96 @@ mod tests {
     #[test]
     fn q_returns_back() {
         assert!(matches!(
-            run(vec![Ok(Key::Char('q'))], sample_list()).unwrap(),
+            run(vec![Ok(Key::Char('q'))], sample_state()).unwrap(),
             Outcome::Back
         ));
     }
 
     #[test]
-    fn ctrl_c_returns_quit() {
+    fn ctrl_c_in_sidebar_returns_quit() {
         assert!(matches!(
-            run(vec![Ok(Key::CtrlC)], sample_list()).unwrap(),
+            run(vec![Ok(Key::CtrlC)], sample_state()).unwrap(),
             Outcome::Quit
         ));
     }
 
     #[test]
-    fn navigation_keys_move_the_cursor_then_back() {
-        // Exercises every navigation arm (arrows + j/k aliases) and the
-        // ignored-key arm, then leaves via Escape.
+    fn sidebar_navigation_and_select_then_back() {
+        // Every sidebar navigation arm (arrows + j/k), Enter to select, and an
+        // ignored key, then Escape.
         let keys = vec![
             Ok(Key::ArrowDown),
             Ok(Key::ArrowUp),
             Ok(Key::Char('j')),
             Ok(Key::Char('k')),
+            Ok(Key::Enter),
             Ok(Key::Home), // ignored (the `_` arm)
             Ok(Key::Escape),
         ];
-        assert!(matches!(run(keys, sample_list()).unwrap(), Outcome::Back));
+        assert!(matches!(run(keys, sample_state()).unwrap(), Outcome::Back));
     }
 
     #[test]
-    fn enter_on_a_worktree_shows_a_notice_then_back() {
-        // Enter selects a worktree (sets the "coming soon" notice), then Escape.
-        let keys = vec![Ok(Key::Enter), Ok(Key::Escape)];
-        assert!(matches!(run(keys, sample_list()).unwrap(), Outcome::Back));
+    fn entering_command_mode_and_cancelling_returns_to_sidebar() {
+        // ':' enters command mode, Escape cancels back to sidebar, then 'q'
+        // leaves the screen. (Reaching the final Back proves the mode switched.)
+        let keys = vec![Ok(Key::Char(':')), Ok(Key::Escape), Ok(Key::Char('q'))];
+        assert!(matches!(run(keys, sample_state()).unwrap(), Outcome::Back));
     }
 
     #[test]
-    fn enter_on_detached_worktree_shows_a_notice() {
-        // A detached HEAD has no branch name; Enter still produces a notice.
-        let keys = vec![Ok(Key::Enter), Ok(Key::Escape)];
-        let list = WorktreeList::new("usagi", vec![worktree(None)]);
-        assert!(matches!(run(keys, list).unwrap(), Outcome::Back));
+    fn i_also_enters_command_mode() {
+        // 'i' enters command mode; in command mode 'q' is just typed, so the
+        // screen does not exit — the scripted Escape default cancels, and the
+        // trailing Escape leaves the sidebar.
+        let mut keys = vec![Ok(Key::Char('i'))];
+        keys.extend(typed("q"));
+        keys.push(Ok(Key::Escape)); // cancel command mode
+        keys.push(Ok(Key::Escape)); // leave sidebar
+        assert!(matches!(run(keys, sample_state()).unwrap(), Outcome::Back));
     }
 
     #[test]
-    fn enter_on_empty_list_does_nothing() {
-        // With no worktrees there is nothing to select; Enter is a no-op.
-        let keys = vec![Ok(Key::Enter), Ok(Key::Escape)];
-        let list = WorktreeList::new("usagi", Vec::new());
-        assert!(matches!(run(keys, list).unwrap(), Outcome::Back));
+    fn command_mode_edits_completes_and_recalls_before_running() {
+        // Type "ma", Backspace to "m", complete to "man", run it; then recall
+        // it with the arrows and run again; finally cancel and leave.
+        let mut keys = vec![Ok(Key::Char(':'))];
+        keys.extend(typed("ma"));
+        keys.push(Ok(Key::Backspace));
+        keys.push(Ok(Key::Tab)); // "m" -> "man" (unique)
+        keys.push(Ok(Key::Enter)); // run "man"
+        keys.push(Ok(Key::ArrowUp)); // recall "man"
+        keys.push(Ok(Key::ArrowDown)); // back to empty
+        keys.push(Ok(Key::Tab)); // Tab on empty: ambiguous, lists candidates
+        keys.push(Ok(Key::Escape)); // cancel command mode
+        keys.push(Ok(Key::Escape)); // leave sidebar
+        assert!(matches!(run(keys, sample_state()).unwrap(), Outcome::Back));
     }
 
     #[test]
-    fn initial_notice_is_displayed() {
-        // A load-error notice passed in is rendered on the first frame.
-        let term = Term::stdout();
-        let mut reader = ScriptedReader::new(vec![Ok(Key::Escape)]);
-        let outcome = event_loop(
-            &term,
-            &mut reader,
-            WorktreeList::new("usagi", Vec::new()),
-            Some("Failed to load worktrees: boom".to_string()),
-        )
-        .unwrap();
-        assert!(matches!(outcome, Outcome::Back));
+    fn quit_command_exits_the_app() {
+        let mut keys = vec![Ok(Key::Char(':'))];
+        keys.extend(typed("quit"));
+        keys.push(Ok(Key::Enter));
+        assert!(matches!(run(keys, sample_state()).unwrap(), Outcome::Quit));
+    }
+
+    #[test]
+    fn ctrl_c_in_command_mode_returns_quit() {
+        let keys = vec![Ok(Key::Char(':')), Ok(Key::CtrlC)];
+        assert!(matches!(run(keys, sample_state()).unwrap(), Outcome::Quit));
+    }
+
+    #[test]
+    fn ignored_key_in_command_mode_is_a_noop() {
+        // Home has no binding in command mode; it falls through the `_` arm.
+        let keys = vec![
+            Ok(Key::Char(':')),
+            Ok(Key::Home),
+            Ok(Key::Escape),
+            Ok(Key::Escape),
+        ];
+        assert!(matches!(run(keys, sample_state()).unwrap(), Outcome::Back));
     }
 
     #[test]
@@ -203,14 +242,14 @@ mod tests {
             io::ErrorKind::Interrupted,
             "interrupted",
         ))];
-        assert!(matches!(run(keys, sample_list()).unwrap(), Outcome::Quit));
+        assert!(matches!(run(keys, sample_state()).unwrap(), Outcome::Quit));
     }
 
     #[test]
     fn unexpected_read_error_is_propagated() {
         let term = Term::stdout();
         let mut reader = ScriptedReader::new(vec![Err(io::Error::other("boom"))]);
-        let err = event_loop(&term, &mut reader, sample_list(), None).unwrap_err();
+        let err = event_loop(&term, &mut reader, sample_state()).unwrap_err();
         assert!(err.to_string().contains("Failed to read key"));
     }
 }
