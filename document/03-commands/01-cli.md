@@ -32,7 +32,7 @@
 カレントディレクトリ（または `--git` 指定時はクローン先）を usagi のワークスペースとして登録します。
 
 - `.usagi/` を初期化し、グローバルレジストリ `~/.usagi/workspaces.json` にエントリを追加。
-- `.gitignore` に `.usagi/` のローカル状態を無視する設定を追記（ただし共有対象の `.usagi/issues/` は追跡。詳細は [data/02-workspace.md](../data/02-workspace.md#保存場所)）。
+- `.usagi/.gitignore` を生成してローカル状態を無視する設定を自己完結で書き込む（ただし共有対象の `.usagi/issues/` は追跡。リポジトリルートの `.gitignore` は汚さない。詳細は [data/02-workspace.md](../data/02-workspace.md#保存場所)）。
 - `--git <URL>` 指定時は、カレントディレクトリ配下に `<リポジトリ名>/` を作って `git clone` してから登録。
 
 ### `usagi hop`
