@@ -13,7 +13,7 @@ ref: usagi.ai doc/app/ui/layout.md, doc/app/ui/mode.md
 
 ## 概要
 
-`usagi hop` 起動後の中核となるワークスペース操作画面を実装します。現状の TUI は welcome / home / new / open / config 画面までで、`overview.md` が説明する「左ペイン：worktree 一覧」「右ペイン：コマンド履歴」「下部：コマンド入力欄」のワークスペース画面が存在しません。この画面と、その上で動くコマンドモードの基盤が、後続の TUI 内コマンド（`session` / `space` / `ai` / `terminal` / `history` / `man`）すべての土台になります。
+`usagi hop` 起動後の中核となるワークスペース操作画面を実装します。現状の TUI は welcome / home / new / open / config 画面までで、`document/01-overview.md` が説明する「左ペイン：worktree 一覧」「右ペイン：コマンド履歴」「下部：コマンド入力欄」のワークスペース画面が存在しません。この画面と、その上で動くコマンドモードの基盤が、後続の TUI 内コマンド（`session` / `space` / `ai` / `terminal` / `history` / `man`）すべての土台になります。
 
 ## やること
 
