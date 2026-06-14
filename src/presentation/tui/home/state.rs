@@ -320,6 +320,46 @@ impl SessionModal {
     }
 }
 
+/// The open session-removal modal: the workspace's session names with a
+/// checklist the user toggles to pick which to delete in one go. A cursor marks
+/// the row the keyboard acts on, `selected` holds the checked rows, and `force`
+/// carries the `--force` flag from `session remove --force` so the confirmed
+/// removal can discard uncommitted changes.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RemoveModal {
+    names: Vec<String>,
+    cursor: usize,
+    selected: HashSet<usize>,
+    force: bool,
+}
+
+impl RemoveModal {
+    /// The session names, in display order.
+    pub fn names(&self) -> &[String] {
+        &self.names
+    }
+
+    /// The row the keyboard cursor sits on.
+    pub fn cursor(&self) -> usize {
+        self.cursor
+    }
+
+    /// Whether the row at `index` is checked for removal.
+    pub fn is_selected(&self, index: usize) -> bool {
+        self.selected.contains(&index)
+    }
+
+    /// How many sessions are checked for removal.
+    pub fn selected_count(&self) -> usize {
+        self.selected.len()
+    }
+
+    /// Whether there are no sessions to remove.
+    pub fn is_empty(&self) -> bool {
+        self.names.is_empty()
+    }
+}
+
 /// The result of attempting to create a session, applied back to the screen by
 /// [`HomeState::apply_session_outcome`]. The impure work (git / filesystem) is
 /// done by the event loop's callback; this carries only what the screen shows.
@@ -350,6 +390,9 @@ pub struct HomeState {
     registry: CommandRegistry,
     /// The session-name modal, when open. While set it captures all keys.
     modal: Option<SessionModal>,
+    /// The session-removal modal, when open (the user ran `session remove`
+    /// without a name). While set it captures all keys, like `modal`.
+    remove_modal: Option<RemoveModal>,
     /// Sessions recorded for this workspace (from `state.json`), shown by
     /// `session list` and kept current as sessions are created.
     sessions: Vec<SessionRecord>,
@@ -387,6 +430,7 @@ impl HomeState {
             log,
             registry: CommandRegistry::with_builtins(),
             modal: None,
+            remove_modal: None,
             sessions: Vec::new(),
             right_pane: RightPane::Log,
             terminal_view: None,
@@ -729,6 +773,84 @@ impl HomeState {
             self.sessions = sessions;
             self.rebuild_list();
         }
+    }
+
+    /// The open session-removal modal, if any.
+    pub fn remove_modal(&self) -> Option<&RemoveModal> {
+        self.remove_modal.as_ref()
+    }
+
+    /// Open the session-removal modal, seeded with the current session names and
+    /// nothing selected. `force` is carried from `session remove --force`.
+    pub fn open_remove_modal(&mut self, force: bool) {
+        self.remove_modal = Some(RemoveModal {
+            names: self.sessions.iter().map(|s| s.name.clone()).collect(),
+            cursor: 0,
+            selected: HashSet::new(),
+            force,
+        });
+    }
+
+    /// Move the removal cursor up one row, wrapping to the bottom. No-op when
+    /// the modal is closed or has no sessions.
+    pub fn remove_modal_move_up(&mut self) {
+        if let Some(modal) = self.remove_modal.as_mut() {
+            if modal.names.is_empty() {
+                return;
+            }
+            modal.cursor = modal.cursor.checked_sub(1).unwrap_or(modal.names.len() - 1);
+        }
+    }
+
+    /// Move the removal cursor down one row, wrapping to the top. No-op when the
+    /// modal is closed or has no sessions.
+    pub fn remove_modal_move_down(&mut self) {
+        if let Some(modal) = self.remove_modal.as_mut() {
+            if modal.names.is_empty() {
+                return;
+            }
+            modal.cursor = (modal.cursor + 1) % modal.names.len();
+        }
+    }
+
+    /// Toggle the checked state of the session under the cursor. No-op when the
+    /// modal is closed or has no sessions.
+    pub fn remove_modal_toggle(&mut self) {
+        if let Some(modal) = self.remove_modal.as_mut() {
+            if modal.names.is_empty() {
+                return;
+            }
+            if !modal.selected.insert(modal.cursor) {
+                modal.selected.remove(&modal.cursor);
+            }
+        }
+    }
+
+    /// Close the removal modal, discarding any selection.
+    pub fn cancel_remove_modal(&mut self) {
+        self.remove_modal = None;
+    }
+
+    /// Confirm the removal modal: close it and return the checked session names
+    /// (in display order) together with the `--force` flag, for the event loop
+    /// to remove each. Returns `None` when nothing is checked, leaving the modal
+    /// open so the user can pick something or cancel. A no-op (returning `None`)
+    /// when the modal is closed.
+    pub fn submit_remove_modal(&mut self) -> Option<(Vec<String>, bool)> {
+        let modal = self.remove_modal.as_ref()?;
+        if modal.selected.is_empty() {
+            return None;
+        }
+        let names = modal
+            .names
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| modal.selected.contains(i))
+            .map(|(_, name)| name.clone())
+            .collect();
+        let force = modal.force;
+        self.remove_modal = None;
+        Some((names, force))
     }
 }
 
@@ -1288,6 +1410,112 @@ mod tests {
         assert_eq!(state.log().last().unwrap().kind, LineKind::Error);
         assert_eq!(state.list().worktrees().len(), 2);
         assert_eq!(state.sessions().len(), 2);
+    }
+
+    #[test]
+    fn open_remove_modal_lists_the_session_names() {
+        let mut state = state();
+        state.restore_sessions(vec![session_record("alpha", 1), session_record("beta", 1)]);
+        assert!(state.remove_modal().is_none());
+        state.open_remove_modal(false);
+        let modal = state.remove_modal().unwrap();
+        assert_eq!(modal.names(), ["alpha", "beta"]);
+        assert_eq!(modal.cursor(), 0);
+        assert_eq!(modal.selected_count(), 0);
+        assert!(!modal.is_empty());
+        assert!(!modal.is_selected(0));
+    }
+
+    #[test]
+    fn remove_modal_cursor_wraps_in_both_directions() {
+        let mut state = state();
+        state.restore_sessions(vec![
+            session_record("a", 1),
+            session_record("b", 1),
+            session_record("c", 1),
+        ]);
+        state.open_remove_modal(false);
+        state.remove_modal_move_down();
+        assert_eq!(state.remove_modal().unwrap().cursor(), 1);
+        // Up from the top wraps to the bottom.
+        state.remove_modal_move_up();
+        state.remove_modal_move_up();
+        assert_eq!(state.remove_modal().unwrap().cursor(), 2);
+        // Down from the bottom wraps to the top.
+        state.remove_modal_move_down();
+        assert_eq!(state.remove_modal().unwrap().cursor(), 0);
+    }
+
+    #[test]
+    fn remove_modal_toggle_checks_and_unchecks_the_cursor_row() {
+        let mut state = state();
+        state.restore_sessions(vec![session_record("a", 1), session_record("b", 1)]);
+        state.open_remove_modal(false);
+        state.remove_modal_toggle(); // check "a"
+        state.remove_modal_move_down();
+        state.remove_modal_toggle(); // check "b"
+        let modal = state.remove_modal().unwrap();
+        assert!(modal.is_selected(0));
+        assert!(modal.is_selected(1));
+        assert_eq!(modal.selected_count(), 2);
+        // Toggling again unchecks it.
+        state.remove_modal_toggle();
+        assert!(!state.remove_modal().unwrap().is_selected(1));
+    }
+
+    #[test]
+    fn remove_modal_navigation_is_a_noop_when_empty_or_closed() {
+        let mut state = state();
+        // No sessions: opening yields an empty modal that ignores movement.
+        state.open_remove_modal(false);
+        assert!(state.remove_modal().unwrap().is_empty());
+        state.remove_modal_move_up();
+        state.remove_modal_move_down();
+        state.remove_modal_toggle();
+        assert_eq!(state.remove_modal().unwrap().cursor(), 0);
+        assert_eq!(state.remove_modal().unwrap().selected_count(), 0);
+
+        // Closed: every removal-modal action is harmless.
+        state.cancel_remove_modal();
+        state.remove_modal_move_up();
+        state.remove_modal_move_down();
+        state.remove_modal_toggle();
+        assert!(state.remove_modal().is_none());
+        assert!(state.submit_remove_modal().is_none());
+    }
+
+    #[test]
+    fn submit_remove_modal_returns_checked_names_in_order_and_closes() {
+        let mut state = state();
+        state.restore_sessions(vec![
+            session_record("a", 1),
+            session_record("b", 1),
+            session_record("c", 1),
+        ]);
+        // Open carrying the force flag; check "c" then "a".
+        state.open_remove_modal(true);
+        state.remove_modal_move_down();
+        state.remove_modal_move_down();
+        state.remove_modal_toggle(); // "c"
+        state.remove_modal_move_up();
+        state.remove_modal_move_up();
+        state.remove_modal_toggle(); // "a"
+        let (names, force) = state.submit_remove_modal().unwrap();
+        // Names come back in display order regardless of the toggle order.
+        assert_eq!(names, vec!["a".to_string(), "c".to_string()]);
+        assert!(force);
+        // Confirming closes the modal.
+        assert!(state.remove_modal().is_none());
+    }
+
+    #[test]
+    fn submit_remove_modal_with_nothing_checked_keeps_it_open() {
+        let mut state = state();
+        state.restore_sessions(vec![session_record("a", 1)]);
+        state.open_remove_modal(false);
+        // Nothing checked: there is nothing to remove, so the modal stays open.
+        assert!(state.submit_remove_modal().is_none());
+        assert!(state.remove_modal().is_some());
     }
 
     #[test]
