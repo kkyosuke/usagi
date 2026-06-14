@@ -84,10 +84,13 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
                 created.worktrees.len()
             )),
             sessions: reload_sessions(&root),
+            // Select the freshly created session so it is active straight away.
+            select: Some(created.name),
         },
         Err(e) => SessionOutcome {
             line: LogLine::error(format!("session failed: {e}")),
             sessions: None,
+            select: None,
         },
     };
 
@@ -102,6 +105,7 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
         Ok(outcome) if outcome.removed => SessionOutcome {
             line: LogLine::output(format!("Removed session \"{name}\" 🧹")),
             sessions: reload_sessions(&remove_root),
+            select: None,
         },
         Ok(outcome) => {
             let paths = outcome
@@ -116,11 +120,13 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
                          Use \"session remove {name} --force\" to discard."
                 )),
                 sessions: None,
+                select: None,
             }
         }
         Err(e) => SessionOutcome {
             line: LogLine::error(format!("session remove failed: {e}")),
             sessions: None,
+            select: None,
         },
     };
 

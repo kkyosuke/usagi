@@ -147,6 +147,21 @@ impl WorktreeList {
         }
     }
 
+    /// Move both the cursor and the active row onto the first worktree named
+    /// `name` (a freshly created session's branch), returning whether one
+    /// matched. Used after creating a session so the new one is selected and
+    /// active without the user navigating to it.
+    pub fn select_by_name(&mut self, name: &str) -> bool {
+        match self.worktrees.iter().position(|w| worktree_name(w) == name) {
+            Some(index) => {
+                self.selected_index = index + 1;
+                self.active_index = index + 1;
+                true
+            }
+            None => false,
+        }
+    }
+
     /// The rows as command-facing [`WorktreeRef`]s (name + active flag): the
     /// root row first, then every worktree.
     pub fn refs(&self) -> Vec<WorktreeRef> {
@@ -377,6 +392,10 @@ pub struct SessionOutcome {
     /// The refreshed session list, when the action changed it. The worktree
     /// pane is rebuilt from this (each session contributes its worktrees).
     pub sessions: Option<Vec<SessionRecord>>,
+    /// The name of a session to select (and make active) once the pane is
+    /// rebuilt — set when creating a session so the new one is selected. `None`
+    /// leaves the cursor on the root row (e.g. removals and failures).
+    pub select: Option<String>,
 }
 
 /// The full state of the home screen.
@@ -815,6 +834,9 @@ impl HomeState {
         if let Some(sessions) = outcome.sessions {
             self.sessions = sessions;
             self.rebuild_list();
+            if let Some(name) = outcome.select {
+                self.list.select_by_name(&name);
+            }
         }
     }
 
@@ -1035,6 +1057,20 @@ mod tests {
         assert!(!list.activate_by_name("nope"));
         // A failed lookup leaves the active row unchanged.
         assert_eq!(list.active_index(), 0);
+    }
+
+    #[test]
+    fn select_by_name_moves_the_cursor_and_active_row_to_the_match() {
+        let mut list = sample(); // root, main, feature, fix
+        assert!(list.select_by_name("feature"));
+        // Both the cursor and the active row land on the matched worktree.
+        assert_eq!(list.selected_index(), 2);
+        assert_eq!(list.active_index(), 2);
+        assert_eq!(list.selected().unwrap().branch.as_deref(), Some("feature"));
+        // An unknown name leaves both cursors unchanged.
+        assert!(!list.select_by_name("nope"));
+        assert_eq!(list.selected_index(), 2);
+        assert_eq!(list.active_index(), 2);
     }
 
     #[test]
@@ -1434,6 +1470,7 @@ mod tests {
         state.apply_session_outcome(SessionOutcome {
             line: LogLine::output("Created session \"x\""),
             sessions: Some(vec![session_record("main", 1), session_record("x", 1)]),
+            select: Some("x".to_string()),
         });
         assert!(state.log().last().unwrap().text.contains("Created session"));
         assert_eq!(state.sessions().len(), 2);
@@ -1444,11 +1481,19 @@ mod tests {
             .worktrees()
             .iter()
             .any(|w| w.branch.as_deref() == Some("x")));
+        // The freshly created session is selected and active (row 2: root, main, x).
+        assert_eq!(state.list().selected_index(), 2);
+        assert_eq!(state.list().active_index(), 2);
+        assert_eq!(
+            state.list().selected().unwrap().branch.as_deref(),
+            Some("x")
+        );
 
         // A failure outcome (no sessions) only logs; the pane is unchanged.
         state.apply_session_outcome(SessionOutcome {
             line: LogLine::error("session failed"),
             sessions: None,
+            select: None,
         });
         assert_eq!(state.log().last().unwrap().kind, LineKind::Error);
         assert_eq!(state.list().worktrees().len(), 2);
