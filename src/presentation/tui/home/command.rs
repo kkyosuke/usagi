@@ -21,6 +21,14 @@ pub enum Effect {
     Clear,
     /// Quit the whole application.
     Quit,
+    /// Open the session-name modal (the user ran `session` without a name).
+    OpenSessionModal,
+    /// Create a session with the given name (the user supplied one).
+    CreateSession(String),
+    /// List the workspace's sessions (the user ran `session list`).
+    ListSessions,
+    /// Remove a session (the user ran `session remove <name> [--force]`).
+    RemoveSession { name: String, force: bool },
 }
 
 /// The result of running a command: lines to append plus a side effect.
@@ -45,13 +53,17 @@ impl CommandResult {
     }
 }
 
-/// Name and one-line description of a registered command, exposed to commands
-/// (via [`CommandContext`]) so e.g. `man` can list the whole surface without
-/// reaching back into the registry.
+/// Name, description, and usage detail of a registered command, exposed to
+/// commands (via [`CommandContext`]) so e.g. `man` can list the whole surface,
+/// and describe any single command, without reaching back into the registry.
 #[derive(Debug, Clone, Copy)]
 pub struct CommandInfo {
     pub name: &'static str,
     pub description: &'static str,
+    /// One-line usage syntax, e.g. `man [command]`.
+    pub usage: &'static str,
+    /// Example invocations shown by `man <command>`.
+    pub examples: &'static [&'static str],
 }
 
 /// Everything a command may read while running, beyond its own argument string.
@@ -79,6 +91,17 @@ pub trait Command {
         &[]
     }
 
+    /// One-line usage syntax shown by `man <command>`. Defaults to just the
+    /// command name (i.e. the command takes no arguments).
+    fn usage(&self) -> &'static str {
+        self.name()
+    }
+
+    /// Example invocations shown by `man <command>`. Empty by default.
+    fn examples(&self) -> &'static [&'static str] {
+        &[]
+    }
+
     /// Run the command with its (trimmed) argument string and the context.
     fn run(&self, args: &str, ctx: &CommandContext) -> CommandResult;
 }
@@ -99,6 +122,14 @@ impl Command for ManCommand {
         &["help"]
     }
 
+    fn usage(&self) -> &'static str {
+        "man [command]"
+    }
+
+    fn examples(&self) -> &'static [&'static str] {
+        &["man", "man session"]
+    }
+
     fn run(&self, args: &str, ctx: &CommandContext) -> CommandResult {
         if args.is_empty() {
             let mut lines = vec![LogLine::output("Available commands:")];
@@ -108,17 +139,34 @@ impl Command for ManCommand {
                     info.name, info.description
                 )));
             }
+            lines.push(LogLine::output(
+                "Type \"man <command>\" for usage and examples.",
+            ));
             return CommandResult::lines(lines);
         }
 
         match ctx.commands.iter().find(|info| info.name == args) {
-            Some(info) => CommandResult::line(LogLine::output(format!(
-                "{} — {}",
-                info.name, info.description
-            ))),
+            Some(info) => CommandResult::lines(describe(info)),
             None => CommandResult::line(LogLine::error(format!("no manual entry for \"{args}\""))),
         }
     }
+}
+
+/// The detailed help shown by `man <command>`: a header, a usage line, and any
+/// example invocations.
+fn describe(info: &CommandInfo) -> Vec<LogLine> {
+    let mut lines = vec![
+        LogLine::output(format!("{} — {}", info.name, info.description)),
+        LogLine::output("Usage:"),
+        LogLine::output(format!("  {}", info.usage)),
+    ];
+    if !info.examples.is_empty() {
+        lines.push(LogLine::output("Examples:"));
+        for example in info.examples {
+            lines.push(LogLine::output(format!("  {example}")));
+        }
+    }
+    lines
 }
 
 /// `history`: lists the commands entered so far this session.
@@ -191,12 +239,87 @@ impl Command for QuitCommand {
     }
 }
 
+/// `session`: create or manage sessions (a new branch + worktree per repo).
+///
+/// `session new <name>` (or just `session <name>`) creates a session with that
+/// name; `session` or `session new` with no name returns [`Effect::OpenSessionModal`]
+/// so the screen can prompt for one. `list` / `remove` are recognised subcommands
+/// that are not built yet.
+struct SessionCommand;
+
+impl Command for SessionCommand {
+    fn name(&self) -> &'static str {
+        "session"
+    }
+
+    fn description(&self) -> &'static str {
+        "Create or manage sessions (branch + worktree)"
+    }
+
+    fn usage(&self) -> &'static str {
+        "session [new] <name>"
+    }
+
+    fn examples(&self) -> &'static [&'static str] {
+        &["session", "session new feature-x"]
+    }
+
+    fn run(&self, args: &str, _ctx: &CommandContext) -> CommandResult {
+        let mut parts = args.splitn(2, char::is_whitespace);
+        let sub = parts.next().unwrap_or("");
+        let rest = parts.next().unwrap_or("").trim();
+
+        let open = || CommandResult {
+            lines: Vec::new(),
+            effect: Effect::OpenSessionModal,
+        };
+        let create = |name: &str| CommandResult {
+            lines: Vec::new(),
+            effect: Effect::CreateSession(name.to_string()),
+        };
+
+        match sub {
+            "" => open(),
+            "new" if rest.is_empty() => open(),
+            "new" => create(rest),
+            "list" => CommandResult {
+                lines: Vec::new(),
+                effect: Effect::ListSessions,
+            },
+            "remove" => {
+                let mut force = false;
+                let mut target = None;
+                for tok in rest.split_whitespace() {
+                    match tok {
+                        "--force" | "-f" => force = true,
+                        _ if target.is_none() => target = Some(tok.to_string()),
+                        _ => {}
+                    }
+                }
+                match target {
+                    Some(name) => CommandResult {
+                        lines: Vec::new(),
+                        effect: Effect::RemoveSession { name, force },
+                    },
+                    None => CommandResult::line(LogLine::error(
+                        "usage: session remove <name> [--force]",
+                    )),
+                }
+            }
+            _ => create(args.trim()),
+        }
+    }
+}
+
 /// A recognised command whose real behaviour is not built yet. It produces a
 /// friendly "coming soon" line so the surface stays discoverable; the follow-up
-/// issues replace each one with a real [`Command`] implementation.
+/// issues replace each one with a real [`Command`] implementation. It still
+/// carries usage/examples so `man <command>` is useful ahead of implementation.
 struct ComingSoonCommand {
     name: &'static str,
     description: &'static str,
+    usage: &'static str,
+    examples: &'static [&'static str],
 }
 
 impl Command for ComingSoonCommand {
@@ -206,6 +329,14 @@ impl Command for ComingSoonCommand {
 
     fn description(&self) -> &'static str {
         self.description
+    }
+
+    fn usage(&self) -> &'static str {
+        self.usage
+    }
+
+    fn examples(&self) -> &'static [&'static str] {
+        self.examples
     }
 
     fn run(&self, _args: &str, _ctx: &CommandContext) -> CommandResult {
@@ -230,26 +361,31 @@ impl CommandRegistry {
     pub fn with_builtins() -> Self {
         Self {
             commands: vec![
-                Box::new(ComingSoonCommand {
-                    name: "session",
-                    description: "Create or manage sessions (branch + worktree)",
-                }),
+                Box::new(SessionCommand),
                 Box::new(ComingSoonCommand {
                     name: "space",
                     description: "Switch between worktrees",
+                    usage: "space [name]",
+                    examples: &["space", "space main"],
                 }),
                 Box::new(ComingSoonCommand {
                     name: "ai",
                     description: "Talk to the AI agent",
+                    usage: "ai <prompt>",
+                    examples: &["ai fix the failing test"],
                 }),
                 Box::new(ComingSoonCommand {
                     name: "terminal",
                     description: "Open an interactive terminal",
+                    usage: "terminal",
+                    examples: &[],
                 }),
                 Box::new(HistoryCommand),
                 Box::new(ComingSoonCommand {
                     name: "doctor",
                     description: "Check that required tools are installed",
+                    usage: "doctor",
+                    examples: &[],
                 }),
                 Box::new(ManCommand),
                 Box::new(ClearCommand),
@@ -263,13 +399,15 @@ impl CommandRegistry {
         self.commands.push(command);
     }
 
-    /// Name + description of every command, in display order.
+    /// Name, description, usage, and examples of every command, in display order.
     fn infos(&self) -> Vec<CommandInfo> {
         self.commands
             .iter()
             .map(|c| CommandInfo {
                 name: c.name(),
                 description: c.description(),
+                usage: c.usage(),
+                examples: c.examples(),
             })
             .collect()
     }
@@ -420,11 +558,46 @@ mod tests {
     }
 
     #[test]
-    fn man_with_a_known_command_shows_its_description() {
-        let result = registry().dispatch("man session", &[]);
-        assert_eq!(result.lines.len(), 1);
+    fn man_without_argument_hints_at_per_command_help() {
+        let result = registry().dispatch("man", &[]);
+        let last = result.lines.last().unwrap();
+        assert!(last.text.contains("man <command>"));
+    }
+
+    #[test]
+    fn man_with_a_known_command_shows_usage_and_examples() {
+        let result = registry().dispatch("man space", &[]);
+        assert!(result.lines.len() > 1);
+        // Header, then a Usage block, then an Examples block.
         assert_eq!(result.lines[0].kind, LineKind::Output);
-        assert!(result.lines[0].text.starts_with("session —"));
+        assert!(result.lines[0].text.starts_with("space —"));
+        let joined = result
+            .lines
+            .iter()
+            .map(|l| l.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(joined.contains("Usage:"));
+        assert!(joined.contains("space [name]"));
+        assert!(joined.contains("Examples:"));
+        assert!(joined.contains("space main"));
+    }
+
+    #[test]
+    fn man_with_a_command_without_examples_omits_the_examples_block() {
+        // `clear` takes no arguments and has no examples (trait defaults).
+        let result = registry().dispatch("man clear", &[]);
+        let joined = result
+            .lines
+            .iter()
+            .map(|l| l.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(joined.starts_with("clear —"));
+        assert!(joined.contains("Usage:"));
+        // Default usage is just the command name.
+        assert!(joined.contains("  clear"));
+        assert!(!joined.contains("Examples:"));
     }
 
     #[test]
@@ -465,9 +638,78 @@ mod tests {
     }
 
     #[test]
+    fn session_without_a_name_opens_the_modal() {
+        // Bare `session` and `session new` both ask for a name via the modal.
+        for input in ["session", "session new"] {
+            let result = registry().dispatch(input, &[]);
+            assert!(result.lines.is_empty());
+            assert_eq!(result.effect, Effect::OpenSessionModal);
+        }
+    }
+
+    #[test]
+    fn session_with_a_name_requests_creation() {
+        // `session new <name>` and the shorthand `session <name>` both create.
+        for input in ["session new feature-x", "session feature-x"] {
+            let result = registry().dispatch(input, &[]);
+            assert!(result.lines.is_empty());
+            assert_eq!(
+                result.effect,
+                Effect::CreateSession("feature-x".to_string())
+            );
+        }
+    }
+
+    #[test]
+    fn session_list_requests_the_list_effect() {
+        let result = registry().dispatch("session list", &[]);
+        assert!(result.lines.is_empty());
+        assert_eq!(result.effect, Effect::ListSessions);
+    }
+
+    #[test]
+    fn session_remove_parses_name_and_force_flag() {
+        // A bare name removes without force.
+        let result = registry().dispatch("session remove old", &[]);
+        assert!(result.lines.is_empty());
+        assert_eq!(
+            result.effect,
+            Effect::RemoveSession {
+                name: "old".to_string(),
+                force: false,
+            }
+        );
+
+        // `--force` (in any position) sets the force flag; extra positional
+        // tokens after the name are ignored.
+        for input in [
+            "session remove old --force",
+            "session remove -f old",
+            "session remove old --force extra",
+        ] {
+            let result = registry().dispatch(input, &[]);
+            assert_eq!(
+                result.effect,
+                Effect::RemoveSession {
+                    name: "old".to_string(),
+                    force: true,
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn session_remove_without_a_name_shows_usage() {
+        let result = registry().dispatch("session remove", &[]);
+        assert_eq!(result.effect, Effect::None);
+        assert_eq!(result.lines[0].kind, LineKind::Error);
+        assert!(result.lines[0].text.contains("usage"));
+    }
+
+    #[test]
     fn coming_soon_commands_are_recognised() {
         let registry = registry();
-        for name in ["session", "space", "ai", "terminal", "doctor"] {
+        for name in ["space", "ai", "terminal", "doctor"] {
             let result = registry.dispatch(name, &[]);
             assert_eq!(result.effect, Effect::None);
             assert_eq!(result.lines[0].kind, LineKind::Output);

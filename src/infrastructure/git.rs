@@ -96,6 +96,89 @@ pub fn clone(url: &str, dest: &Path, branch: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+/// Create a worktree at `dest` checking out a new branch `branch` in `repo`.
+///
+/// Runs `git -C <repo> worktree add -b <branch> <dest>`, which fails if `branch`
+/// already exists or `dest` is not empty. Output is captured (not inherited) so
+/// it never disturbs an active TUI; on failure the captured stderr is surfaced.
+/// Repo-scoping env vars are stripped so an inherited `GIT_DIR` cannot redirect
+/// the operation to another repository.
+pub fn add_worktree(repo: &Path, dest: &Path, branch: &str) -> Result<()> {
+    let output = git_command(repo)
+        .args(["worktree", "add", "-b", branch])
+        .arg(dest)
+        .output()
+        .context("failed to run `git worktree add`")?;
+    if !output.status.success() {
+        bail!(
+            "git worktree add failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
+/// The checked-out branch (`None` if detached) and full HEAD commit at the
+/// worktree `path`, or `None` if it is not a git worktree.
+pub fn worktree_head(path: &Path) -> Option<(Option<String>, String)> {
+    let head = git_capture(path, &["rev-parse", "HEAD"]).ok().flatten()?;
+    let branch = git_capture(path, &["rev-parse", "--abbrev-ref", "HEAD"])
+        .ok()
+        .flatten()
+        .filter(|b| b != "HEAD");
+    Some((branch, head))
+}
+
+/// Return `true` if the worktree at `path` has uncommitted changes — modified,
+/// staged, or untracked files (anything `git status --porcelain` reports).
+///
+/// A git failure (e.g. not a worktree) is treated as "no changes" so it never
+/// blocks a removal on its own.
+pub fn has_uncommitted_changes(path: &Path) -> bool {
+    git_capture(path, &["status", "--porcelain"])
+        .ok()
+        .flatten()
+        .map(|out| !out.is_empty())
+        .unwrap_or(false)
+}
+
+/// Remove the worktree at `worktree` from `repo`. With `force`, discard
+/// uncommitted changes; without it, git refuses a dirty worktree.
+pub fn remove_worktree(repo: &Path, worktree: &Path, force: bool) -> Result<()> {
+    let mut command = git_command(repo);
+    command.args(["worktree", "remove"]);
+    if force {
+        command.arg("--force");
+    }
+    let output = command
+        .arg(worktree)
+        .output()
+        .context("failed to run `git worktree remove`")?;
+    if !output.status.success() {
+        bail!(
+            "git worktree remove failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
+/// Force-delete `branch` in `repo` (`git branch -D`). Used when discarding a
+/// session, so the branch is removed regardless of merge status.
+pub fn delete_branch(repo: &Path, branch: &str) -> Result<()> {
+    let output = git_command(repo)
+        .args(["branch", "-D", branch])
+        .output()
+        .context("failed to run `git branch -D`")?;
+    if !output.status.success() {
+        bail!(
+            "git branch -D failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
 /// Return `true` if `path` is inside a git working tree.
 ///
 /// Used to decide whether an existing directory registered as a workspace can
@@ -450,6 +533,99 @@ mod tests {
     fn short_hash_takes_first_seven_chars() {
         assert_eq!(short_hash("0123456789abcdef"), "0123456");
         assert_eq!(short_hash("abc"), "abc");
+    }
+
+    #[test]
+    fn add_worktree_creates_a_new_branch_checkout() {
+        let dir = tempfile::tempdir().unwrap();
+        init_repo(dir.path());
+        let dest = dir.path().join("wt");
+
+        add_worktree(dir.path(), &dest, "feature").unwrap();
+
+        // The new worktree exists and is checked out on the new branch.
+        assert!(dest.join("f").is_file());
+        let head = git_capture(&dest, &["rev-parse", "--abbrev-ref", "HEAD"])
+            .unwrap()
+            .unwrap();
+        assert_eq!(head, "feature");
+        // It is registered as a worktree of the repo (compare canonical paths,
+        // since git resolves symlinks like macOS's /var -> /private/var).
+        let canonical = dest.canonicalize().unwrap();
+        let worktrees = list_worktrees(dir.path()).unwrap();
+        assert!(worktrees.iter().any(|w| w
+            .path
+            .canonicalize()
+            .map(|p| p == canonical)
+            .unwrap_or(false)));
+    }
+
+    #[test]
+    fn worktree_head_reports_branch_and_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        init_repo(dir.path());
+        let (branch, head) = worktree_head(dir.path()).unwrap();
+        assert_eq!(branch.as_deref(), Some("main"));
+        assert_eq!(head.len(), 40);
+        // Detached HEAD reports no branch.
+        run(dir.path(), &["checkout", "-q", "--detach"]);
+        assert_eq!(worktree_head(dir.path()).unwrap().0, None);
+        // A non-repo path yields nothing.
+        let plain = tempfile::tempdir().unwrap();
+        assert!(worktree_head(plain.path()).is_none());
+    }
+
+    #[test]
+    fn has_uncommitted_changes_detects_a_dirty_tree() {
+        let dir = tempfile::tempdir().unwrap();
+        init_repo(dir.path());
+        assert!(!has_uncommitted_changes(dir.path()));
+        // An untracked file makes the tree dirty.
+        std::fs::write(dir.path().join("new"), "y").unwrap();
+        assert!(has_uncommitted_changes(dir.path()));
+        // A non-repo path reports clean rather than erroring.
+        let plain = tempfile::tempdir().unwrap();
+        assert!(!has_uncommitted_changes(plain.path()));
+    }
+
+    #[test]
+    fn remove_worktree_deletes_a_clean_one_and_needs_force_when_dirty() {
+        let dir = tempfile::tempdir().unwrap();
+        init_repo(dir.path());
+        let clean = dir.path().join("clean");
+        add_worktree(dir.path(), &clean, "clean").unwrap();
+        remove_worktree(dir.path(), &clean, false).unwrap();
+        assert!(!clean.exists());
+
+        // A dirty worktree cannot be removed without force.
+        let dirty = dir.path().join("dirty");
+        add_worktree(dir.path(), &dirty, "dirty").unwrap();
+        std::fs::write(dirty.join("scratch"), "z").unwrap();
+        assert!(remove_worktree(dir.path(), &dirty, false).is_err());
+        // ...but force discards it.
+        remove_worktree(dir.path(), &dirty, true).unwrap();
+        assert!(!dirty.exists());
+    }
+
+    #[test]
+    fn delete_branch_removes_a_branch_and_errors_when_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        init_repo(dir.path());
+        run(dir.path(), &["branch", "doomed"]);
+        delete_branch(dir.path(), "doomed").unwrap();
+        // Deleting it again fails (it is gone).
+        assert!(delete_branch(dir.path(), "doomed").is_err());
+    }
+
+    #[test]
+    fn add_worktree_fails_for_an_existing_branch() {
+        let dir = tempfile::tempdir().unwrap();
+        init_repo(dir.path());
+        run(dir.path(), &["branch", "feature"]);
+
+        // `-b feature` cannot create a branch that already exists.
+        let err = add_worktree(dir.path(), &dir.path().join("wt"), "feature").unwrap_err();
+        assert!(err.to_string().contains("git worktree add failed"));
     }
 
     #[test]

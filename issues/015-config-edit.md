@@ -2,7 +2,7 @@
 number: 015
 feature: config-edit
 title: usagi config --edit（usagi.config の編集）
-status: todo
+status: done
 priority: medium
 category: cli
 dependson: [001]

@@ -20,18 +20,18 @@
 | 005 | [ai](005-ai.md) | `ai` AI エージェントへの指示・対話 | tui | high | 002 |
 | 006 | [terminal](006-terminal.md) | `terminal` 対話型ターミナル | tui | medium | 002 |
 | 007 | [history](007-history.md) | `history` コマンド履歴表示 | tui | medium | 002 |
-| 008 | [man](008-man.md) | `man` ヘルプ表示 | tui | low | 002 |
+| 008 | [man](008-man.md) ✅ | `man` ヘルプ表示 | tui | low | 002 |
 | 009 | [sync](009-sync.md) | `usagi sync` main の変更を同期 | cli | medium | 003 |
 | 010 | [finish](010-finish.md) | `usagi finish` セッション統合・削除 | cli | high | 003 |
 | 011 | [list](011-list.md) | `usagi list` 全セッション俯瞰 | cli | medium | 003 |
 | 012 | [diff](012-diff.md) | TUI Diff ビューア | tui | medium | 002, 003 |
 | 013 | [logs](013-logs.md) | `usagi logs` 履歴の閲覧・検索 | cli | low | 007 |
 | 014 | [clean](014-clean.md) | `usagi clean` 古いセッション整理 | cli | low | 003 |
-| 015 | [config-edit](015-config-edit.md) | `usagi config --edit` 設定編集 | cli | medium | 001 |
+| 015 | [config-edit](015-config-edit.md) ✅ | `usagi config --edit` 設定編集 | cli | medium | 001 |
 | 016 | [context](016-context.md) | `usagi context` AI 用コンテキスト生成 | cli | low | 001 |
 | 017 | [init-agent](017-init-agent.md) | `usagi init-agent` エージェント設定生成 | cli | low | 001 |
 | 018 | [alias](018-alias.md) | `usagi alias` コマンドエイリアス | cli | low | 005 |
-| 019 | [doctor-fix](019-doctor-fix.md) | `usagi doctor --fix` 依存自動修復 | cli | medium | — |
+| 019 | [doctor-fix](019-doctor-fix.md) ✅ | `usagi doctor --fix` 依存自動修復 | cli | medium | — |
 | 020 | [gh-issue](020-gh-issue.md) | gh Issue 連携セッション作成 | cli | low | 003 |
 | 021 | [local-settings](021-local-settings.md) ✅ | プロジェクト単位のローカル設定（設定上書き） | core | medium | — |
 | 022 | [local-settings-ui](022-local-settings-ui.md) | ローカル設定の編集 UI | tui | medium | 021 |

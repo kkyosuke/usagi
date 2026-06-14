@@ -1,7 +1,8 @@
 # 開発ワークフロー
 
 AI エージェントが `usagi` で作業する際の標準手順。**新規作業**と**追加修正**で手順が異なる。
-コーディング・コミット・PR の規約は [document/conventions.md](../document/conventions.md) を参照。
+コーディング・コミット・PR の規約は [document/06-conventions.md](../document/06-conventions.md) を参照。
+ドキュメント全体の目次は [document/README.md](../document/README.md)。
 
 ## 新規作業（新しいタスクを始めるとき）
 
@@ -33,11 +34,16 @@ cargo test
 
 ### 3. ドキュメントを更新する
 
-実装内容に合わせて `document/` 配下を更新する。仕様・画面・データ構造に変更があれば対応するファイルを更新する。
+実装内容に合わせて `document/` 配下を更新する。仕様・画面・データ構造に変更があれば対応するファイルを更新する。目次は [document/README.md](../document/README.md)。
 
-- `document/overview.md` — プロジェクト概要、コマンド体系、アーキテクチャ
-- `document/screen-design.md` — TUI 画面構成
-- `document/data-storage.md` — `state.json` / `history.json` / グローバルレジストリなどの永続化仕様
+- `document/01-overview.md` — プロジェクト概要
+- `document/02-architecture.md` — クリーンアーキテクチャ・`src/` のモジュール構成
+- `document/03-commands.md` — CLI / TUI 内コマンドのリファレンス
+- `document/04-orchestration.md` — セッション・worktree オーケストレーション
+- `document/05-settings.md` — 設定項目・保存場所・変更方法
+- `document/06-conventions.md` — 開発規約
+- `document/design/` — TUI 画面構成（画面ごとに分割）
+- `document/data/` — `state.json` / `workspaces.json` / `settings.json` などの永続化仕様
 
 ユーザー向けの変更があれば `README.md` も更新する。
 

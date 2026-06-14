@@ -5,7 +5,7 @@ use console::Term;
 use crate::presentation::tui::screen::KeyReader;
 
 use super::command::Effect;
-use super::state::{HomeState, Mode};
+use super::state::{HomeState, Mode, SessionOutcome};
 use super::ui;
 
 /// What the user chose to do on the home (workspace) screen.
@@ -28,11 +28,19 @@ pub enum Outcome {
 ///
 /// Each command the user runs is handed to `persist` so the caller can append
 /// it to the workspace's `history.json`; tests pass a no-op.
+///
+/// Creating a session (the user ran `session <name>`, or confirmed the name in
+/// the modal) is delegated to `create_session`; removing one (`session remove
+/// <name>`) to `remove_session` (its `bool` is the `--force` flag). Both perform
+/// the git / filesystem work and return a [`SessionOutcome`] to apply to the
+/// screen, keeping the loop itself free of that IO and directly testable.
 pub fn event_loop(
     term: &Term,
     reader: &mut dyn KeyReader,
     mut state: HomeState,
     persist: &mut dyn FnMut(&str),
+    create_session: &mut dyn FnMut(&str) -> SessionOutcome,
+    remove_session: &mut dyn FnMut(&str, bool) -> SessionOutcome,
 ) -> Result<Outcome> {
     loop {
         term.move_cursor_to(0, 0)?;
@@ -50,6 +58,25 @@ pub fn event_loop(
             Err(e) => return Err(anyhow::Error::from(e).context("Failed to read key")),
         };
 
+        // The session-name modal, when open, captures every key until it is
+        // confirmed (Enter) or cancelled (Esc), overlaying both modes.
+        if state.modal().is_some() {
+            match key {
+                Key::Enter => {
+                    if let Some(name) = state.submit_modal() {
+                        let outcome = create_session(&name);
+                        state.apply_session_outcome(outcome);
+                    }
+                }
+                Key::Backspace => state.modal_backspace(),
+                Key::Escape => state.cancel_modal(),
+                Key::CtrlC => return Ok(Outcome::Quit),
+                Key::Char(c) => state.modal_push_char(c),
+                _ => {}
+            }
+            continue;
+        }
+
         match state.mode() {
             Mode::Sidebar => match key {
                 Key::ArrowUp | Key::Char('k') => state.move_up(),
@@ -66,8 +93,19 @@ pub fn event_loop(
                     if let Some(command) = submission.recorded.as_deref() {
                         persist(command);
                     }
-                    if let Effect::Quit = submission.effect {
-                        return Ok(Outcome::Quit);
+                    match submission.effect {
+                        Effect::Quit => return Ok(Outcome::Quit),
+                        Effect::OpenSessionModal => state.open_session_modal(),
+                        Effect::CreateSession(name) => {
+                            let outcome = create_session(&name);
+                            state.apply_session_outcome(outcome);
+                        }
+                        Effect::ListSessions => state.log_sessions(),
+                        Effect::RemoveSession { name, force } => {
+                            let outcome = remove_session(&name, force);
+                            state.apply_session_outcome(outcome);
+                        }
+                        _ => {}
                     }
                 }
                 Key::Tab => state.complete(),
@@ -85,12 +123,30 @@ pub fn event_loop(
 
 #[cfg(test)]
 mod tests {
+    use super::super::state::LogLine;
     use super::*;
     use crate::domain::workspace_state::{BranchStatus, WorktreeState};
     use chrono::Utc;
     use std::collections::VecDeque;
     use std::io;
     use std::path::PathBuf;
+
+    /// A `create_session` callback that does nothing but report success — shared
+    /// by tests that exercise the event loop without inspecting creation.
+    fn noop_create(_: &str) -> SessionOutcome {
+        SessionOutcome {
+            line: LogLine::output("created"),
+            sessions: None,
+        }
+    }
+
+    /// A `remove_session` callback that reports success without touching disk.
+    fn noop_remove(_: &str, _: bool) -> SessionOutcome {
+        SessionOutcome {
+            line: LogLine::output("removed"),
+            sessions: None,
+        }
+    }
 
     /// A key source that replays a scripted sequence of results.
     struct ScriptedReader {
@@ -134,7 +190,16 @@ mod tests {
         let term = Term::stdout();
         let mut reader = ScriptedReader::new(keys);
         let mut persist = |_: &str| {};
-        event_loop(&term, &mut reader, state, &mut persist)
+        let mut create_session: fn(&str) -> SessionOutcome = noop_create;
+        let mut remove_session: fn(&str, bool) -> SessionOutcome = noop_remove;
+        event_loop(
+            &term,
+            &mut reader,
+            state,
+            &mut persist,
+            &mut create_session,
+            &mut remove_session,
+        )
     }
 
     /// Types each character of `s` as a `Char` key.
@@ -232,7 +297,17 @@ mod tests {
         let mut reader = ScriptedReader::new(keys);
         let mut recorded = Vec::new();
         let mut persist = |command: &str| recorded.push(command.to_string());
-        let outcome = event_loop(&term, &mut reader, sample_state(), &mut persist).unwrap();
+        let mut create_session: fn(&str) -> SessionOutcome = noop_create;
+        let mut remove_session: fn(&str, bool) -> SessionOutcome = noop_remove;
+        let outcome = event_loop(
+            &term,
+            &mut reader,
+            sample_state(),
+            &mut persist,
+            &mut create_session,
+            &mut remove_session,
+        )
+        .unwrap();
         assert!(matches!(outcome, Outcome::Back));
         assert_eq!(recorded, vec!["man"]);
     }
@@ -261,6 +336,169 @@ mod tests {
             Ok(Key::Escape),
         ];
         assert!(matches!(run(keys, sample_state()).unwrap(), Outcome::Back));
+    }
+
+    /// Run with a `create_session` callback that records the names it is asked
+    /// to create and returns a fixed outcome.
+    fn run_with_create(
+        keys: Vec<io::Result<Key>>,
+        state: HomeState,
+        outcome: SessionOutcome,
+    ) -> (Result<Outcome>, Vec<String>) {
+        let term = Term::stdout();
+        let mut reader = ScriptedReader::new(keys);
+        let mut persist = |_: &str| {};
+        let mut created = Vec::new();
+        let mut create_session = |name: &str| {
+            created.push(name.to_string());
+            outcome.clone()
+        };
+        let mut remove_session: fn(&str, bool) -> SessionOutcome = noop_remove;
+        let result = event_loop(
+            &term,
+            &mut reader,
+            state,
+            &mut persist,
+            &mut create_session,
+            &mut remove_session,
+        );
+        (result, created)
+    }
+
+    fn ok_outcome() -> SessionOutcome {
+        SessionOutcome {
+            line: LogLine::output("created"),
+            sessions: None,
+        }
+    }
+
+    #[test]
+    fn creating_a_session_via_the_default_callback_succeeds() {
+        // Drives `:session x` through the shared no-op `create_session`, then
+        // leaves — exercising the create branch with the default callback.
+        let mut keys = vec![Ok(Key::Char(':'))];
+        keys.extend(typed("session x"));
+        keys.push(Ok(Key::Enter)); // create via noop_create
+        keys.push(Ok(Key::Escape)); // cancel command mode
+        keys.push(Ok(Key::Escape)); // leave sidebar
+        assert!(matches!(run(keys, sample_state()).unwrap(), Outcome::Back));
+    }
+
+    #[test]
+    fn removing_a_session_via_the_default_callback_succeeds() {
+        // Drives `:session remove x` through the shared no-op `remove_session`.
+        let mut keys = vec![Ok(Key::Char(':'))];
+        keys.extend(typed("session remove x"));
+        keys.push(Ok(Key::Enter)); // remove via noop_remove
+        keys.push(Ok(Key::Escape)); // cancel command mode
+        keys.push(Ok(Key::Escape)); // leave sidebar
+        assert!(matches!(run(keys, sample_state()).unwrap(), Outcome::Back));
+    }
+
+    #[test]
+    fn session_remove_invokes_the_remove_callback_with_force() {
+        // ":session remove old --force" routes to remove_session("old", true).
+        let mut keys = vec![Ok(Key::Char(':'))];
+        keys.extend(typed("session remove old --force"));
+        keys.push(Ok(Key::Enter));
+        keys.push(Ok(Key::Escape)); // cancel command mode
+        keys.push(Ok(Key::Escape)); // leave sidebar
+
+        let term = Term::stdout();
+        let mut reader = ScriptedReader::new(keys);
+        let mut persist = |_: &str| {};
+        let mut create_session: fn(&str) -> SessionOutcome = noop_create;
+        let mut removed = Vec::new();
+        let mut remove_session = |name: &str, force: bool| {
+            removed.push((name.to_string(), force));
+            ok_outcome()
+        };
+        let outcome = event_loop(
+            &term,
+            &mut reader,
+            sample_state(),
+            &mut persist,
+            &mut create_session,
+            &mut remove_session,
+        )
+        .unwrap();
+        assert!(matches!(outcome, Outcome::Back));
+        assert_eq!(removed, vec![("old".to_string(), true)]);
+    }
+
+    #[test]
+    fn session_list_logs_the_sessions() {
+        // `:session list` triggers the list effect, which logs the sessions.
+        let mut keys = vec![Ok(Key::Char(':'))];
+        keys.extend(typed("session list"));
+        keys.push(Ok(Key::Enter));
+        keys.push(Ok(Key::Escape)); // cancel command mode
+        keys.push(Ok(Key::Escape)); // leave sidebar
+                                    // Empty session list still drives the ListSessions arm without panicking.
+        assert!(matches!(run(keys, sample_state()).unwrap(), Outcome::Back));
+    }
+
+    #[test]
+    fn session_command_with_a_name_creates_immediately() {
+        // ":session feature-x" then Enter creates without opening the modal.
+        let mut keys = vec![Ok(Key::Char(':'))];
+        keys.extend(typed("session feature-x"));
+        keys.push(Ok(Key::Enter));
+        keys.push(Ok(Key::Escape)); // cancel command mode
+        keys.push(Ok(Key::Escape)); // leave sidebar
+
+        let (result, created) = run_with_create(keys, sample_state(), ok_outcome());
+        assert!(matches!(result.unwrap(), Outcome::Back));
+        assert_eq!(created, vec!["feature-x"]);
+    }
+
+    #[test]
+    fn bare_session_opens_the_modal_then_confirms_to_create() {
+        // ":session" + Enter opens the modal; type a fresh name; Enter creates.
+        let mut keys = vec![Ok(Key::Char(':'))];
+        keys.extend(typed("session"));
+        keys.push(Ok(Key::Enter)); // open modal
+        keys.extend(typed("wip"));
+        keys.push(Ok(Key::Backspace)); // edit: "wi"
+        keys.push(Ok(Key::Char('p'))); // "wip"
+        keys.push(Ok(Key::Home)); // ignored key inside the modal
+        keys.push(Ok(Key::Enter)); // confirm -> create
+        keys.push(Ok(Key::Escape)); // back to sidebar (modal closed) -> cancel cmd
+        keys.push(Ok(Key::Escape)); // leave sidebar
+
+        let (result, created) = run_with_create(keys, sample_state(), ok_outcome());
+        assert!(matches!(result.unwrap(), Outcome::Back));
+        assert_eq!(created, vec!["wip"]);
+    }
+
+    #[test]
+    fn modal_escape_cancels_without_creating() {
+        let mut keys = vec![Ok(Key::Char(':'))];
+        keys.extend(typed("session"));
+        keys.push(Ok(Key::Enter)); // open modal
+        keys.extend(typed("x"));
+        keys.push(Ok(Key::Escape)); // cancel modal
+        keys.push(Ok(Key::Escape)); // cancel command mode
+        keys.push(Ok(Key::Escape)); // leave sidebar
+
+        let (result, created) = run_with_create(keys, sample_state(), ok_outcome());
+        assert!(matches!(result.unwrap(), Outcome::Back));
+        assert!(created.is_empty());
+    }
+
+    #[test]
+    fn modal_invalid_name_keeps_it_open() {
+        // Confirming an empty name does not create and keeps the modal open, so
+        // the trailing CtrlC (handled by the modal) is what ends the run.
+        let mut keys = vec![Ok(Key::Char(':'))];
+        keys.extend(typed("session"));
+        keys.push(Ok(Key::Enter)); // open modal
+        keys.push(Ok(Key::Enter)); // empty name -> error, stays open
+        keys.push(Ok(Key::CtrlC)); // quit from within the modal
+
+        let (result, created) = run_with_create(keys, sample_state(), ok_outcome());
+        assert!(matches!(result.unwrap(), Outcome::Quit));
+        assert!(created.is_empty());
     }
 
     #[test]

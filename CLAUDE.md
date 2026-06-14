@@ -5,7 +5,7 @@
 ## 手順書
 
 @.agents/workflow.md
-@document/conventions.md
+@document/06-conventions.md
 
 ## 要点
 

@@ -1,7 +1,8 @@
-//! Build and persist a repository's workspace state.
+//! Refresh and persist a workspace's session state.
 //!
-//! This inspects the git repository containing a given directory, derives the
-//! [`BranchStatus`] of every worktree, and writes the result to
+//! A workspace is described by its sessions (recorded by `usecase::session`).
+//! This module re-reads the git status of every session's per-repository
+//! worktree, derives each [`BranchStatus`], and writes the result to
 //! `<repo>/.usagi/state.json`.
 
 use std::path::Path;
@@ -13,11 +14,21 @@ use crate::domain::workspace_state::{BranchStatus, WorkspaceState, WorktreeState
 use crate::infrastructure::git;
 use crate::infrastructure::workspace_store::WorkspaceStore;
 
-/// Inspect the repository containing `cwd`, persist its state, and return it.
+/// Refresh the saved state for the repository containing `cwd`, persist it, and
+/// return it. Every recorded session worktree's git status is recomputed; a
+/// workspace with no sessions yields an empty (but saved) state.
 pub fn sync(cwd: &Path) -> Result<WorkspaceState> {
-    let state = inspect(cwd)?;
     let root = git::primary_worktree(cwd)?;
-    WorkspaceStore::new(root).save(&state)?;
+    let store = WorkspaceStore::new(&root);
+    let mut state = store.load()?.unwrap_or_default();
+
+    for session in &mut state.sessions {
+        for wt in &mut session.worktrees {
+            *wt = inspect_worktree(&wt.path);
+        }
+    }
+    state.updated_at = Utc::now();
+    store.save(&state)?;
     Ok(state)
 }
 
@@ -27,58 +38,33 @@ pub fn load(cwd: &Path) -> Result<Option<WorkspaceState>> {
     WorkspaceStore::new(root).load()
 }
 
-/// Build the current workspace state from git without persisting it.
-pub fn inspect(cwd: &Path) -> Result<WorkspaceState> {
-    let default = git::default_branch(cwd);
-    let worktrees = git::list_worktrees(cwd)?;
-    let now = Utc::now();
-
-    let states = worktrees
-        .into_iter()
-        .enumerate()
-        .map(|(idx, wt)| {
-            let primary = idx == 0;
-            let upstream = wt.branch.as_deref().and_then(|b| git::upstream_of(cwd, b));
-            let status = classify(
-                cwd,
-                wt.branch.as_deref(),
-                &default,
-                upstream.is_some(),
-                primary,
-            );
-            WorktreeState {
-                branch: wt.branch,
-                path: wt.path,
-                head: git::short_hash(&wt.head),
-                primary,
-                upstream,
-                status,
-                updated_at: now,
-            }
-        })
-        .collect();
-
-    Ok(WorkspaceState {
-        default_branch: default,
-        worktrees: states,
-        updated_at: now,
-    })
+/// Build the [`WorktreeState`] of a single worktree at `path`. Its branch is
+/// classified against **its own repository's** default branch (resolved from the
+/// worktree), since a workspace may span repositories with differing defaults.
+pub fn inspect_worktree(path: &Path) -> WorktreeState {
+    let (branch, head) = git::worktree_head(path).unwrap_or((None, String::new()));
+    let default = git::default_branch(path);
+    let upstream = branch.as_deref().and_then(|b| git::upstream_of(path, b));
+    let status = classify(path, branch.as_deref(), &default, upstream.is_some());
+    WorktreeState {
+        branch,
+        path: path.to_path_buf(),
+        head: git::short_hash(&head),
+        primary: false,
+        upstream,
+        status,
+        updated_at: Utc::now(),
+    }
 }
 
 /// Derive a branch's lifecycle status.
 ///
-/// `merged` takes priority over `pushed`, which takes priority over `local`.
-/// The primary worktree is never reported as `merged` against itself — it is
-/// the integration branch, so it is only ever `local` or `pushed`.
-fn classify(
-    repo: &Path,
-    branch: Option<&str>,
-    default: &str,
-    has_upstream: bool,
-    primary: bool,
-) -> BranchStatus {
+/// `merged` takes priority over `pushed`, which takes priority over `local`. A
+/// branch equal to the default branch is never reported as `merged` against
+/// itself, so it is only ever `local` or `pushed`.
+fn classify(repo: &Path, branch: Option<&str>, default: &str, has_upstream: bool) -> BranchStatus {
     if let Some(branch) = branch {
-        if !primary && branch != default && git::is_merged(repo, branch, default) {
+        if branch != default && git::is_merged(repo, branch, default) {
             return BranchStatus::Merged;
         }
     }
@@ -109,52 +95,91 @@ mod tests {
     }
 
     #[test]
-    fn inspect_reports_local_default_branch() {
+    fn inspect_worktree_reports_branch_and_local_status() {
         let dir = tempfile::tempdir().unwrap();
         init_repo(dir.path());
 
-        let state = inspect(dir.path()).unwrap();
-        assert_eq!(state.default_branch, "main");
-        assert_eq!(state.worktrees.len(), 1);
-
-        let primary = &state.worktrees[0];
-        assert!(primary.primary);
-        assert_eq!(primary.branch.as_deref(), Some("main"));
-        // No remote configured, so the default branch is purely local.
-        assert_eq!(primary.status, BranchStatus::Local);
-        assert_eq!(primary.upstream, None);
+        let wt = inspect_worktree(dir.path());
+        assert_eq!(wt.branch.as_deref(), Some("main"));
+        // The worktree is on the repo's own default branch → not "merged".
+        assert_eq!(wt.status, BranchStatus::Local);
+        assert_eq!(wt.upstream, None);
+        assert_eq!(wt.head.len(), 7);
+        assert!(!wt.primary);
     }
 
     #[test]
-    fn sync_writes_state_file_to_primary_worktree() {
+    fn sync_writes_an_empty_state_for_a_repo_without_sessions() {
         let dir = tempfile::tempdir().unwrap();
         init_repo(dir.path());
 
         let state = sync(dir.path()).unwrap();
-        assert_eq!(state.worktrees.len(), 1);
-
-        let loaded = load(dir.path()).unwrap();
-        assert_eq!(loaded.as_ref(), Some(&state));
+        assert!(state.sessions.is_empty());
         assert!(dir.path().join(".usagi/state.json").exists());
+        assert_eq!(load(dir.path()).unwrap().as_ref(), Some(&state));
     }
 
     #[test]
-    fn merged_branch_is_reported_as_merged() {
+    fn sync_refreshes_recorded_session_worktrees() {
+        use crate::domain::workspace_state::{SessionRecord, WorktreeState};
+        use crate::infrastructure::workspace_store::WorkspaceStore;
+
         let dir = tempfile::tempdir().unwrap();
         init_repo(dir.path());
-        // Create a branch with no new commits: its tip is an ancestor of main,
-        // so it counts as merged.
+        // A real worktree on a feature branch stands in for a session worktree.
+        let wt_path = dir.path().join(".usagi/worktree/wip");
+        git(dir.path())
+            .args([
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "wip",
+                wt_path.to_str().unwrap(),
+            ])
+            .status()
+            .unwrap();
+
+        // Seed a session whose recorded worktree has stale, empty git fields.
+        let store = WorkspaceStore::new(dir.path());
+        let mut state = WorkspaceState::new();
+        state.sessions.push(SessionRecord {
+            name: "wip".to_string(),
+            root: wt_path.clone(),
+            worktrees: vec![WorktreeState {
+                branch: None,
+                path: wt_path.clone(),
+                head: String::new(),
+                primary: false,
+                upstream: None,
+                status: BranchStatus::Local,
+                updated_at: Utc::now(),
+            }],
+            created_at: Utc::now(),
+        });
+        store.save(&state).unwrap();
+
+        // sync re-reads the worktree's git status from disk.
+        let synced = sync(dir.path()).unwrap();
+        assert_eq!(synced.sessions.len(), 1);
+        let wt = &synced.sessions[0].worktrees[0];
+        assert_eq!(wt.branch.as_deref(), Some("wip"));
+        assert!(!wt.head.is_empty());
+    }
+
+    #[test]
+    fn classify_reports_merged_for_an_ancestor_branch() {
+        let dir = tempfile::tempdir().unwrap();
+        init_repo(dir.path());
+        // A branch with no new commits is an ancestor of main → merged.
         git(dir.path())
             .args(["branch", "feature"])
             .status()
             .unwrap();
-
-        let state = inspect(dir.path()).unwrap();
-        // Primary (main) worktree only; check the classifier directly for the
-        // sibling branch since it isn't checked out as a worktree.
-        let status = classify(dir.path(), Some("feature"), "main", false, false);
-        assert_eq!(status, BranchStatus::Merged);
-        assert_eq!(state.default_branch, "main");
+        assert_eq!(
+            classify(dir.path(), Some("feature"), "main", false),
+            BranchStatus::Merged
+        );
     }
 
     #[test]
@@ -173,26 +198,25 @@ mod tests {
             .status()
             .unwrap();
 
-        // has_upstream = true, not merged, not primary -> pushed.
+        // has_upstream = true, not merged → pushed.
         assert_eq!(
-            classify(dir.path(), Some("feature"), "main", true, false),
+            classify(dir.path(), Some("feature"), "main", true),
             BranchStatus::Pushed
         );
     }
 
     #[test]
-    fn classify_handles_detached_head_and_primary() {
+    fn classify_handles_detached_head_and_the_default_branch() {
         let dir = tempfile::tempdir().unwrap();
         init_repo(dir.path());
         // Detached HEAD (branch = None): never merged, only local/pushed.
         assert_eq!(
-            classify(dir.path(), None, "main", false, false),
+            classify(dir.path(), None, "main", false),
             BranchStatus::Local
         );
-        // The primary worktree is never classified as merged against itself,
-        // even though its tip is trivially an ancestor of the default branch.
+        // The default branch is never classified as merged against itself.
         assert_eq!(
-            classify(dir.path(), Some("main"), "main", false, true),
+            classify(dir.path(), Some("main"), "main", false),
             BranchStatus::Local
         );
     }
