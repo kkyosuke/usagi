@@ -33,6 +33,7 @@
 | 018 | [alias](018-alias.md) | `usagi alias` コマンドエイリアス | cli | low | 005 |
 | 019 | [doctor-fix](019-doctor-fix.md) | `usagi doctor --fix` 依存自動修復 | cli | medium | — |
 | 020 | [gh-issue](020-gh-issue.md) | gh Issue 連携セッション作成 | cli | low | 003 |
+| 021 | [local-settings-ui](021-local-settings-ui.md) | ローカル設定の編集 UI | tui | medium | — |
 
 ## 依存関係
 
