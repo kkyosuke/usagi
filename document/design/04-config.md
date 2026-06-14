@@ -103,7 +103,7 @@
 |---|---|---|
 | Agent CLI | このワークスペースの Agent CLI 上書き | `Global (実効値)` → `Override: Claude` → `Override: Gemini` の順に循環 |
 | Notifications | このワークスペースの通知 ON/OFF 上書き | `Global (実効値)` → `Override: On` → `Override: Off` の順に循環 |
-| Default Branch | `session new` で worktree を切る基点 | `Local` ⇄ `Remote` をトグル（未設定時は `Default (Remote)` を表示） |
+| Default Branch | `session create` で worktree を切る基点 | `Local` ⇄ `Remote` をトグル（未設定時は `Default (Remote)` を表示） |
 
 - Agent CLI と Notifications は **「グローバルに従う / ローカルで上書き」** を 1 つの chooser で切り替えます。
   `Global (...)` は未上書き（グローバル設定にフォールバック）で、かっこ内に現在の実効値を表示します。

@@ -23,7 +23,7 @@ fn render(state: &WorkspaceState) -> Vec<String> {
     ];
 
     if state.sessions.is_empty() {
-        lines.push("No sessions yet. Run \"session new <name>\" to create one.".to_string());
+        lines.push("No sessions yet. Run \"session create <name>\" to create one.".to_string());
         return lines;
     }
 
