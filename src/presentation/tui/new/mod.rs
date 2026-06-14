@@ -12,6 +12,7 @@ use anyhow::Result;
 use console::Term;
 
 use crate::presentation::tui::term_reader::TermKeyReader;
+use crate::presentation::tui::widgets::dir_picker::FsDirSource;
 
 pub use event::Outcome;
 
@@ -23,5 +24,5 @@ pub use event::Outcome;
 /// projects are created under.
 pub fn run(term: &Term, default_location: &str) -> Result<Outcome> {
     let mut reader = TermKeyReader::new(term.clone());
-    event::event_loop(term, &mut reader, default_location)
+    event::event_loop(term, &mut reader, default_location, &FsDirSource)
 }
