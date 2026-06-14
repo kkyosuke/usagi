@@ -4,9 +4,6 @@ use crate::presentation::tui::widgets;
 
 use super::state::{Config, Field, LocalField};
 
-const TITLE: &str = "Config";
-const SUBTITLE: &str = "Adjust your preferences";
-
 /// The label of the Save button row.
 const SAVE_LABEL: &str = "[ Save ]";
 
@@ -15,13 +12,14 @@ const BLOCK_WIDTH: usize = 52;
 
 /// Builds the centred mascot, title, and subtitle block.
 ///
-/// Vertical placement is handled by [`render_frame`], so this adds no leading
-/// padding.
-fn header_lines(width: usize) -> Vec<String> {
+/// The title and subtitle reflect the screen's scope (global vs. workspace), so
+/// they are passed in. Vertical placement is handled by [`render_frame`], so
+/// this adds no leading padding.
+fn header_lines(width: usize, title: &str, subtitle: &str) -> Vec<String> {
     let mut lines = widgets::rabbit_lines(width);
     lines.push(String::new());
-    lines.push(widgets::title_line(width, TITLE));
-    lines.push(widgets::dim_line(width, SUBTITLE));
+    lines.push(widgets::title_line(width, title));
+    lines.push(widgets::dim_line(width, subtitle));
     lines
 }
 
@@ -155,7 +153,7 @@ pub fn render_frame(
 
     // The body (mascot, title, settings and notice slot) is centred vertically;
     // the footer is pinned to the bottom edge of the frame.
-    let mut body = header_lines(width);
+    let mut body = header_lines(width, config.title(), config.subtitle());
     body.push(String::new());
     body.extend(settings_lines(&block_pad, config));
     // A blank line sets the Save button apart from the fields above it.
@@ -214,11 +212,11 @@ mod tests {
 
     #[test]
     fn header_lines_render_mascot_title_and_subtitle() {
-        let lines = header_lines(80);
+        let lines = header_lines(80, "Config", "Adjust your global preferences");
         assert!(!lines[0].is_empty());
         let joined = lines.join("\n");
         assert!(joined.contains("Config"));
-        assert!(joined.contains("Adjust your preferences"));
+        assert!(joined.contains("Adjust your global preferences"));
     }
 
     #[test]

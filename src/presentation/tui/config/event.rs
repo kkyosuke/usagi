@@ -348,20 +348,19 @@ mod tests {
 
     #[test]
     fn saving_a_local_override_passes_it_to_save() {
-        // Open with a project context, set a local agent-CLI override, then save:
-        // the local settings reach the save callback alongside the global ones.
+        // Open in the local scope, set a local agent-CLI override, then save: the
+        // local settings reach the save callback. The local scope shows only the
+        // three override rows, with Agent CLI selected from the start.
         let term = Term::stdout();
-        let config = Config::with_local(Settings::default(), Vec::new(), LocalSettings::default());
-        let mut keys = Vec::new();
-        for _ in 0..4 {
-            keys.push(Ok(Key::ArrowDown)); // descend onto the first local field
-        }
-        keys.push(Ok(Key::ArrowRight)); // override: Global -> Claude
-        keys.push(Ok(Key::ArrowDown)); // Local Notifications
-        keys.push(Ok(Key::ArrowDown)); // Local Default Branch
-        keys.push(Ok(Key::ArrowDown)); // Save button
-        keys.push(Ok(Key::Enter)); // save
-        keys.push(Ok(Key::Escape));
+        let config = Config::workspace(Settings::default(), LocalSettings::default());
+        let keys = vec![
+            Ok(Key::ArrowRight), // Agent CLI override: Global -> Claude
+            Ok(Key::ArrowDown),  // Notifications
+            Ok(Key::ArrowDown),  // Default Branch
+            Ok(Key::ArrowDown),  // Save button
+            Ok(Key::Enter),      // save
+            Ok(Key::Escape),
+        ];
 
         let mut reader = ScriptedReader::new(keys);
         let captured: RefCell<Option<LocalSettings>> = RefCell::new(None);
