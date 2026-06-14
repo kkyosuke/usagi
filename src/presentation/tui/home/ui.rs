@@ -11,6 +11,7 @@ use console::style;
 use crate::domain::workspace_state::{BranchStatus, WorktreeState};
 use crate::presentation::tui::widgets;
 
+use super::command::{CommandHint, Hint};
 use super::state::{HomeState, LineKind, LogLine, Mode, RightPane, SessionModal, WorktreeList};
 use super::terminal_view::TerminalView;
 
@@ -250,6 +251,84 @@ pub fn terminal_geometry(raw_height: usize, raw_width: usize) -> TerminalGeometr
     }
 }
 
+/// Most command-hint rows drawn above the input at once. Beyond this a
+/// "… and N more" line stands in for the rest, so the hints never crowd out the
+/// body on a normal terminal.
+const HINT_MAX: usize = 6;
+
+/// Display width of the command-name column in the hints.
+const HINT_NAME_COL: usize = 12;
+
+/// Columns before the name column in a hint row: `"  "` indent + the marker
+/// cell + a space.
+const HINT_INDENT: usize = 4;
+
+/// Renders one command-hint row: a `›` marker for the highlighted best match,
+/// the command name with its already-typed prefix emphasised, and the dimmed
+/// description, clipped to `width`.
+fn command_hint_row(hint: &CommandHint, typed_len: usize, selected: bool, width: usize) -> String {
+    let marker = if selected {
+        style("›").red().bold().to_string()
+    } else {
+        " ".to_string()
+    };
+    // Bold the part of the name the user has already typed, so it reads as a
+    // continuation of what is in the input line.
+    let split = typed_len.min(hint.name.len());
+    let (head, tail) = hint.name.split_at(split);
+    let name = format!("{}{}", style(head).cyan().bold(), style(tail).cyan());
+    let name_col = pad_to_width(name, HINT_NAME_COL);
+    let desc_budget = width.saturating_sub(HINT_INDENT + HINT_NAME_COL);
+    let desc = style(clip_to_width(hint.description, desc_budget)).dim();
+    format!("  {marker} {name_col}{desc}")
+}
+
+/// The advisory hint lines drawn just above the command input: the matching
+/// commands while the command word is typed, or the usage and examples once a
+/// known command is given arguments. Empty outside command mode and while the
+/// terminal pane is live.
+fn hint_lines(state: &HomeState, width: usize) -> Vec<String> {
+    if state.right_pane() == RightPane::Terminal || state.mode() != Mode::Command {
+        return Vec::new();
+    }
+    match state.hint() {
+        Hint::Commands(hints) => {
+            let typed = state.input().trim_start();
+            // Only point a marker at a best match once something is typed; a
+            // bare ":" shows the whole menu with nothing pre-selected.
+            let highlight = !typed.is_empty();
+            let header = if highlight { "matches" } else { "commands" };
+            let mut lines = vec![style(format!("  {header}")).dim().to_string()];
+            for (i, hint) in hints.iter().take(HINT_MAX).enumerate() {
+                lines.push(command_hint_row(
+                    hint,
+                    typed.len(),
+                    highlight && i == 0,
+                    width,
+                ));
+            }
+            if hints.len() > HINT_MAX {
+                let rest = hints.len() - HINT_MAX;
+                lines.push(style(format!("    … and {rest} more")).dim().to_string());
+            }
+            lines
+        }
+        Hint::Usage { usage, examples } => {
+            let mut lines = vec![format!(
+                "  {} {}",
+                style("usage").dim(),
+                style(usage).cyan()
+            )];
+            for example in examples.iter().take(HINT_MAX) {
+                let text = clip_to_width(example, width.saturating_sub(HINT_INDENT + 6));
+                lines.push(format!("    {} {}", style("e.g.").dim(), style(text).dim()));
+            }
+            lines
+        }
+        Hint::None => Vec::new(),
+    }
+}
+
 /// The command input line: a status line while the terminal runs, an editable
 /// prompt in command mode, or a hint in sidebar mode.
 fn input_line(state: &HomeState) -> String {
@@ -318,9 +397,13 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
     let (height, width) = widgets::normalize_size(raw_height, raw_width);
     let (left_w, right_w) = layout(width);
 
-    // Chrome around the body: title + blank separator on top, input + footer
-    // at the bottom. The rest is the two-pane body.
-    let pane_rows = height.saturating_sub(4).max(1);
+    // Chrome around the body: title + blank separator on top, the command-mode
+    // hints (if any) + input + footer at the bottom. The rest is the two-pane
+    // body. The hints borrow rows from the body, always leaving it at least one.
+    let body_rows = height.saturating_sub(4).max(1);
+    let hints = hint_lines(state, width);
+    let hint_rows = hints.len().min(body_rows.saturating_sub(1));
+    let pane_rows = body_rows - hint_rows;
     let left = left_pane(state.list(), left_w, pane_rows);
     let right = right_pane_contents(state, right_w, pane_rows);
 
@@ -332,6 +415,7 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
         let right_cell = right.get(row).cloned().unwrap_or_default();
         lines.push(format!("{left_cell}{SEP}{right_cell}"));
     }
+    lines.extend(hints.into_iter().take(hint_rows));
     lines.push(input_line(state));
     lines.push(footer_line(width, state));
     lines
@@ -729,5 +813,137 @@ mod tests {
         assert!(frame[0].contains("usagi"));
         assert!(frame.last().unwrap().contains("move"));
         assert!(frame.len() >= 4);
+    }
+
+    /// A `HomeState` in command mode with `typed` already entered.
+    fn typing(typed: &str) -> HomeState {
+        let mut state = HomeState::new("usagi", Vec::new(), None);
+        state.enter_command_mode();
+        for c in typed.chars() {
+            state.push_char(c);
+        }
+        state
+    }
+
+    fn stripped(lines: &[String]) -> String {
+        console::strip_ansi_codes(&lines.join("\n")).into_owned()
+    }
+
+    #[test]
+    fn command_hint_row_emphasises_the_typed_prefix_and_marks_the_selection() {
+        let hint = CommandHint {
+            name: "session",
+            description: "Create, list, or switch sessions",
+        };
+        let selected = command_hint_row(&hint, 3, true, 80);
+        let plain = console::strip_ansi_codes(&selected).into_owned();
+        assert!(plain.contains('›'));
+        assert!(plain.contains("session"));
+        assert!(plain.contains("Create, list"));
+
+        // Without selection there is no marker.
+        let plain = console::strip_ansi_codes(&command_hint_row(&hint, 0, false, 80)).into_owned();
+        assert!(!plain.contains('›'));
+    }
+
+    #[test]
+    fn command_hint_row_clips_a_long_description_to_width() {
+        let hint = CommandHint {
+            name: "session",
+            description: "A very long description that should be cut down to fit the pane width",
+        };
+        let row = command_hint_row(&hint, 0, false, 30);
+        assert!(console::measure_text_width(&row) <= 30);
+        assert!(console::strip_ansi_codes(&row).contains('…'));
+    }
+
+    #[test]
+    fn hint_lines_are_empty_outside_command_mode() {
+        let state = HomeState::new("usagi", Vec::new(), None);
+        assert!(hint_lines(&state, 80).is_empty());
+    }
+
+    #[test]
+    fn hint_lines_are_empty_while_the_terminal_runs() {
+        let mut state = typing("session");
+        state.show_terminal();
+        assert!(hint_lines(&state, 80).is_empty());
+    }
+
+    #[test]
+    fn hint_lines_list_every_command_for_a_bare_prompt() {
+        let state = typing("");
+        let lines = hint_lines(&state, 80);
+        let joined = stripped(&lines);
+        // The header reads "commands" and nothing is pre-selected.
+        assert!(joined.contains("commands"));
+        assert!(!joined.contains('›'));
+        // More commands than fit, so a summary line stands in for the rest.
+        assert!(joined.contains("more"));
+        assert!(joined.contains("session"));
+    }
+
+    #[test]
+    fn hint_lines_highlight_the_best_match_while_typing() {
+        let state = typing("s");
+        let joined = stripped(&hint_lines(&state, 80));
+        // "s" narrows to "session", shown under a "matches" header with a marker.
+        assert!(joined.contains("matches"));
+        assert!(joined.contains('›'));
+        assert!(joined.contains("session"));
+        assert!(!joined.contains("more"));
+    }
+
+    #[test]
+    fn hint_lines_show_usage_and_examples_for_arguments() {
+        let state = typing("session ");
+        let joined = stripped(&hint_lines(&state, 80));
+        assert!(joined.contains("usage"));
+        assert!(joined.contains("session [new"));
+        assert!(joined.contains("e.g."));
+        assert!(joined.contains("session new"));
+    }
+
+    #[test]
+    fn hint_lines_show_usage_without_examples_when_a_command_has_none() {
+        // `terminal` takes no arguments and lists no examples.
+        let state = typing("terminal ");
+        let joined = stripped(&hint_lines(&state, 80));
+        assert!(joined.contains("usage"));
+        assert!(joined.contains("terminal"));
+        assert!(!joined.contains("e.g."));
+    }
+
+    #[test]
+    fn hint_lines_are_empty_for_an_unknown_command() {
+        assert!(hint_lines(&typing("frobnicate "), 80).is_empty());
+        assert!(hint_lines(&typing("zzz"), 80).is_empty());
+    }
+
+    #[test]
+    fn render_frame_shows_command_hints_above_the_input_and_keeps_its_height() {
+        let state = typing("s");
+        let frame = render_frame(24, 80, &state);
+        // The hints take rows from the body but the overall height is unchanged.
+        assert_eq!(frame.len(), 24);
+        let joined = console::strip_ansi_codes(&frame.join("\n")).into_owned();
+        assert!(joined.contains("matches"));
+        assert!(joined.contains("session"));
+        // The hints sit directly above the input prompt and footer.
+        let prompt_row = frame.len() - 2;
+        assert!(frame[prompt_row].contains('❯'));
+        let above = console::strip_ansi_codes(&frame[prompt_row - 1]).into_owned();
+        assert!(above.contains("session"));
+    }
+
+    #[test]
+    fn render_frame_keeps_a_body_row_when_hints_would_fill_a_short_screen() {
+        // A short screen in command mode: hints must not crowd out the body
+        // entirely, and the height is still respected.
+        let state = typing("");
+        let frame = render_frame(8, 80, &state);
+        assert_eq!(frame.len(), 8);
+        // The body divider row survives between the title and the hints/input.
+        assert!(frame[2].contains('│'));
     }
 }
