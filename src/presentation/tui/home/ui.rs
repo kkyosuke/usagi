@@ -449,11 +449,15 @@ fn input_line(state: &HomeState) -> String {
 /// The footer help line, aware of the terminal pane and the current mode.
 fn footer_line(width: usize, state: &HomeState) -> String {
     let help = if state.right_pane() == RightPane::Terminal {
-        "Embedded terminal — Ctrl-O: switch session / detach"
+        "Embedded terminal — Ctrl-O: switch session / detach / Shift+PgUp/PgDn: scroll"
     } else {
         match state.mode() {
-            Mode::Sidebar => "↑↓: move / Enter: activate / :: command / Esc: back",
-            Mode::Command => "Tab: complete / ↑↓: history / Enter: run / Esc: cancel",
+            Mode::Sidebar => {
+                "↑↓: move / Enter: activate / :: command / PgUp/PgDn: scroll / Esc: back"
+            }
+            Mode::Command => {
+                "Tab: complete / ↑↓: history / Enter: run / PgUp/PgDn: scroll / Esc: cancel"
+            }
         }
     };
     widgets::dim_line(width, help)
