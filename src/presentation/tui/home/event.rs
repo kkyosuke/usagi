@@ -49,6 +49,11 @@ pub enum Outcome {
 /// alive), while `Detach` / `Closed` switch the pane back. The PTY I/O,
 /// rendering, the persistent shell pool, and agent-command resolution all live
 /// in that injected callback.
+///
+/// `config` opens the settings screen via `open_config`, which runs it against
+/// the real terminal and returns `true` when the user quit the application from
+/// it (so the loop propagates [`Outcome::Quit`]) and `false` to return to the
+/// workspace screen. The screen wiring lives in that injected callback.
 #[allow(clippy::too_many_arguments)]
 pub fn event_loop(
     term: &Term,
@@ -60,6 +65,7 @@ pub fn event_loop(
     create_session: &mut dyn FnMut(&str) -> SessionOutcome,
     remove_session: &mut dyn FnMut(&str, bool) -> SessionOutcome,
     open_terminal: &mut dyn FnMut(&mut HomeState, &Path, bool) -> Result<PaneExit>,
+    open_config: &mut dyn FnMut(&Term) -> Result<bool>,
 ) -> Result<Outcome> {
     loop {
         // Mark any background sessions waiting for input before painting.
@@ -172,6 +178,12 @@ pub fn event_loop(
                                 Err(e) => state.log_error(format!("{fail} failed: {e}")),
                             }
                         }
+                        // Hand off to the settings screen; it owns the terminal
+                        // until dismissed. Quitting there (guard returns true)
+                        // quits the app; otherwise we resume the workspace screen.
+                        Effect::OpenConfig if open_config(term)? => {
+                            return Ok(Outcome::Quit);
+                        }
                         _ => {}
                     }
                 }
@@ -260,6 +272,12 @@ mod tests {
         Ok(PaneExit::Closed)
     }
 
+    /// An `open_config` callback that returns to the workspace screen (does not
+    /// quit) without running the real settings screen.
+    fn noop_config(_: &Term) -> Result<bool> {
+        Ok(false)
+    }
+
     fn run(keys: Vec<io::Result<Key>>, state: HomeState) -> Result<Outcome> {
         let term = Term::stdout();
         let mut reader = ScriptedReader::new(keys);
@@ -268,6 +286,7 @@ mod tests {
         let mut create_session: fn(&str) -> SessionOutcome = noop_create;
         let mut remove_session: fn(&str, bool) -> SessionOutcome = noop_remove;
         let mut open_terminal: fn(&mut HomeState, &Path, bool) -> Result<PaneExit> = noop_open;
+        let mut open_config: fn(&Term) -> Result<bool> = noop_config;
         event_loop(
             &term,
             &mut reader,
@@ -278,6 +297,7 @@ mod tests {
             &mut create_session,
             &mut remove_session,
             &mut open_terminal,
+            &mut open_config,
         )
     }
 
@@ -380,6 +400,7 @@ mod tests {
         let mut create_session: fn(&str) -> SessionOutcome = noop_create;
         let mut remove_session: fn(&str, bool) -> SessionOutcome = noop_remove;
         let mut open_terminal: fn(&mut HomeState, &Path, bool) -> Result<PaneExit> = noop_open;
+        let mut open_config: fn(&Term) -> Result<bool> = noop_config;
         let outcome = event_loop(
             &term,
             &mut reader,
@@ -390,6 +411,7 @@ mod tests {
             &mut create_session,
             &mut remove_session,
             &mut open_terminal,
+            &mut open_config,
         )
         .unwrap();
         assert!(matches!(outcome, Outcome::Back));
@@ -440,6 +462,7 @@ mod tests {
         };
         let mut remove_session: fn(&str, bool) -> SessionOutcome = noop_remove;
         let mut open_terminal: fn(&mut HomeState, &Path, bool) -> Result<PaneExit> = noop_open;
+        let mut open_config: fn(&Term) -> Result<bool> = noop_config;
         let result = event_loop(
             &term,
             &mut reader,
@@ -450,6 +473,7 @@ mod tests {
             &mut create_session,
             &mut remove_session,
             &mut open_terminal,
+            &mut open_config,
         );
         (result, created)
     }
@@ -504,6 +528,7 @@ mod tests {
             ok_outcome()
         };
         let mut open_terminal: fn(&mut HomeState, &Path, bool) -> Result<PaneExit> = noop_open;
+        let mut open_config: fn(&Term) -> Result<bool> = noop_config;
         let outcome = event_loop(
             &term,
             &mut reader,
@@ -514,6 +539,7 @@ mod tests {
             &mut create_session,
             &mut remove_session,
             &mut open_terminal,
+            &mut open_config,
         )
         .unwrap();
         assert!(matches!(outcome, Outcome::Back));
@@ -630,6 +656,7 @@ mod tests {
         let mut persist = |_: &str| {};
         let mut create_session: fn(&str) -> SessionOutcome = noop_create;
         let mut remove_session: fn(&str, bool) -> SessionOutcome = noop_remove;
+        let mut open_config: fn(&Term) -> Result<bool> = noop_config;
         event_loop(
             &term,
             &mut reader,
@@ -640,6 +667,7 @@ mod tests {
             &mut create_session,
             &mut remove_session,
             open_terminal,
+            &mut open_config,
         )
     }
 
@@ -769,6 +797,39 @@ mod tests {
         )
     }
 
+    /// Drive `:config` through the loop with a custom `open_config`, so the
+    /// effect's hand-off and quit propagation are exercised.
+    fn run_config(
+        state: HomeState,
+        open_config: &mut dyn FnMut(&Term) -> Result<bool>,
+    ) -> Result<Outcome> {
+        let mut keys = vec![Ok(Key::Char(':'))];
+        keys.extend(typed("config"));
+        keys.push(Ok(Key::Enter));
+        keys.push(Ok(Key::Escape)); // cancel command mode
+        keys.push(Ok(Key::Escape)); // leave sidebar
+
+        let term = Term::stdout();
+        let mut reader = ScriptedReader::new(keys);
+        let monitor = MonitorHandle::detached();
+        let mut persist = |_: &str| {};
+        let mut create_session: fn(&str) -> SessionOutcome = noop_create;
+        let mut remove_session: fn(&str, bool) -> SessionOutcome = noop_remove;
+        let mut open_terminal: fn(&mut HomeState, &Path, bool) -> Result<PaneExit> = noop_open;
+        event_loop(
+            &term,
+            &mut reader,
+            state,
+            Path::new("/ws"),
+            &monitor,
+            &mut persist,
+            &mut create_session,
+            &mut remove_session,
+            &mut open_terminal,
+            open_config,
+        )
+    }
+
     #[test]
     fn leader_switch_next_reroots_the_pane_then_detaches() {
         // The pane opens on the selected worktree, a SwitchNext re-roots it at
@@ -826,5 +887,48 @@ mod tests {
             ));
             assert_eq!(*calls.borrow(), 1);
         }
+    }
+
+    #[test]
+    fn config_via_the_default_callback_returns_to_the_workspace_screen() {
+        // Drives `:config` through the shared no-op `open_config` (returns false),
+        // so the loop resumes the workspace screen and then leaves with Back.
+        let mut open: fn(&Term) -> Result<bool> = noop_config;
+        assert!(matches!(
+            run_config(sample_state(), &mut open).unwrap(),
+            Outcome::Back
+        ));
+    }
+
+    #[test]
+    fn config_opens_the_settings_screen() {
+        let opened = RefCell::new(false);
+        let mut open = |_: &Term| {
+            *opened.borrow_mut() = true;
+            Ok(false)
+        };
+        assert!(matches!(
+            run_config(sample_state(), &mut open).unwrap(),
+            Outcome::Back
+        ));
+        assert!(opened.into_inner());
+    }
+
+    #[test]
+    fn quitting_from_config_quits_the_app() {
+        // `open_config` returning true means the user quit the settings screen,
+        // so the workspace screen propagates Quit immediately.
+        let mut open = |_: &Term| Ok(true);
+        assert!(matches!(
+            run_config(sample_state(), &mut open).unwrap(),
+            Outcome::Quit
+        ));
+    }
+
+    #[test]
+    fn config_failure_is_propagated() {
+        let mut open = |_: &Term| Err(anyhow::anyhow!("settings blew up"));
+        let err = run_config(sample_state(), &mut open).unwrap_err();
+        assert!(err.to_string().contains("settings blew up"));
     }
 }

@@ -17,6 +17,7 @@
 | `ai` | 選択中の Agent CLI を起動し、現在の worktree をコンテキストに AI へ指示・対話する | [005](../../issues/005-ai.md) | 🚧 |
 | `terminal` | 選択中の worktree（未選択時はワークスペースルート）を作業ディレクトリに対話型シェルを**右ペインに埋め込んで**起動する。左ペインの worktree 一覧は表示したまま。`Ctrl-O`（リーダーキー）単独でデタッチし、**シェルは生かしたまま**コマンドモードへ戻る | [006](../../issues/006-terminal.md) | ✅ 実装済み |
 | `agent` | `terminal` と同じ埋め込みシェルを開き、設定中の Agent CLI（既定は `claude`、ローカル設定で上書き可）を起動コマンドとして自動入力する。実質 `terminal` → `claude` のショートカット。`Ctrl-O` でデタッチしても **Agent は裏で動き続け**、**入力待ちになると左ペインに `◆` マーカー＋デスクトップ通知**で知らせる | [026](../../issues/026-agent.md) / [028](../../issues/028-agent-wait-notify.md) | ✅ 実装済み |
+| `config` | Config（設定）画面を開き、グローバル設定と現在のワークスペースのローカル上書き（`<workspace>/.usagi/settings.json`）を編集する。`Esc` / `q` でワークスペース画面へ復帰、`Ctrl+C` でアプリ終了 | [029](../../issues/029-home-config.md) | ✅ 実装済み |
 | `doctor` | 依存関係チェック（TUI 版） | [019](../../issues/019-doctor-fix.md) | 🚧 |
 | `diff` | TUI Diff ビューア（セッションの差分閲覧） | [012](../../issues/012-diff.md) | 🚧 |
 
