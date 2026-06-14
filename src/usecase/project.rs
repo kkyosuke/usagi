@@ -51,6 +51,7 @@ pub fn create(
     git::clone(url.as_str(), &dest, branch)?;
     let workspace = workspace::add(storage, directory, &dest)?;
     workspace_state::sync(&dest)?;
+    ignore_usagi_dir(&dest)?;
     Ok(workspace)
 }
 
@@ -67,8 +68,40 @@ pub fn register_existing(storage: &Storage, path: &Path, name: &str) -> Result<W
     let workspace = workspace::add(storage, name, path)?;
     if git::is_repository(path) {
         workspace_state::sync(path)?;
+        ignore_usagi_dir(path)?;
     }
     Ok(workspace)
+}
+
+/// Ensure the repository's `.gitignore` excludes usagi's `.usagi/` metadata
+/// directory so per-project state is never committed.
+///
+/// Idempotent: if `.usagi/` (with or without a trailing slash) is already
+/// listed it does nothing; otherwise it appends the entry, creating the
+/// `.gitignore` file when absent and preserving any existing content.
+fn ignore_usagi_dir(repo: &Path) -> Result<()> {
+    const ENTRY: &str = ".usagi/";
+    let gitignore = repo.join(".gitignore");
+
+    let mut existing = match fs::read_to_string(&gitignore) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(e).context(format!("failed to read {}", gitignore.display())),
+    };
+
+    if existing
+        .lines()
+        .any(|line| matches!(line.trim(), ".usagi" | ".usagi/"))
+    {
+        return Ok(());
+    }
+
+    if !existing.is_empty() && !existing.ends_with('\n') {
+        existing.push('\n');
+    }
+    existing.push_str(ENTRY);
+    existing.push('\n');
+    fs::write(&gitignore, existing).context(format!("failed to write {}", gitignore.display()))
 }
 
 #[cfg(test)]
@@ -131,6 +164,11 @@ mod tests {
         assert_eq!(workspace.path, dest);
         assert!(dest.join(".git").is_dir());
         assert!(dest.join(".usagi/state.json").is_file());
+        // The clone's .gitignore is created with the usagi metadata entry.
+        assert_eq!(
+            std::fs::read_to_string(dest.join(".gitignore")).unwrap(),
+            ".usagi/\n"
+        );
         assert_eq!(storage.load_workspaces().unwrap().len(), 1);
     }
 
@@ -147,6 +185,11 @@ mod tests {
         assert_eq!(workspace.path, repo);
         // A git repo gets its worktree state captured.
         assert!(repo.join(".usagi/state.json").is_file());
+        // ...and its .gitignore is updated to exclude the metadata directory.
+        assert!(std::fs::read_to_string(repo.join(".gitignore"))
+            .unwrap()
+            .lines()
+            .any(|l| l.trim() == ".usagi/"));
         assert_eq!(storage.load_workspaces().unwrap().len(), 1);
     }
 
@@ -160,8 +203,9 @@ mod tests {
         let workspace = register_existing(&storage, &plain, "plain").unwrap();
 
         assert_eq!(workspace.name, "plain");
-        // Not a git repo: registered, but no state file is written.
+        // Not a git repo: registered, but no state file or .gitignore is written.
         assert!(!plain.join(".usagi/state.json").exists());
+        assert!(!plain.join(".gitignore").exists());
         assert_eq!(storage.load_workspaces().unwrap().len(), 1);
     }
 
@@ -185,5 +229,68 @@ mod tests {
 
         let err = create(&storage, &url, &location, "repo", None).unwrap_err();
         assert!(err.to_string().contains("already exists"));
+    }
+
+    #[test]
+    fn ignore_usagi_dir_appends_to_existing_gitignore_preserving_content() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path();
+        // Pre-existing content without a trailing newline.
+        std::fs::write(repo.join(".gitignore"), "target\n/build").unwrap();
+
+        ignore_usagi_dir(repo).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(repo.join(".gitignore")).unwrap(),
+            "target\n/build\n.usagi/\n"
+        );
+    }
+
+    #[test]
+    fn ignore_usagi_dir_is_idempotent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path();
+        std::fs::write(repo.join(".gitignore"), "node_modules\n.usagi/\n").unwrap();
+
+        ignore_usagi_dir(repo).unwrap();
+
+        // Already present: left untouched, no duplicate entry.
+        assert_eq!(
+            std::fs::read_to_string(repo.join(".gitignore")).unwrap(),
+            "node_modules\n.usagi/\n"
+        );
+    }
+
+    #[test]
+    fn ignore_usagi_dir_accepts_a_bare_entry_without_a_slash() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path();
+        // The slashless form `.usagi` also counts as already ignored.
+        std::fs::write(repo.join(".gitignore"), ".usagi\n").unwrap();
+
+        ignore_usagi_dir(repo).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(repo.join(".gitignore")).unwrap(),
+            ".usagi\n"
+        );
+    }
+
+    #[test]
+    fn ignore_usagi_dir_reports_a_read_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        // A directory where .gitignore is expected fails to read with an error
+        // other than NotFound, exercising that arm.
+        std::fs::create_dir(tmp.path().join(".gitignore")).unwrap();
+        assert!(ignore_usagi_dir(tmp.path()).is_err());
+    }
+
+    #[test]
+    fn ignore_usagi_dir_reports_a_write_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        // The repo directory does not exist, so the read returns NotFound (empty)
+        // and the subsequent write fails, exercising the write error arm.
+        let missing = tmp.path().join("nope");
+        assert!(ignore_usagi_dir(&missing).is_err());
     }
 }
