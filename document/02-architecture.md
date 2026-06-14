@@ -34,9 +34,9 @@ presentation ──> usecase ──> domain
 
 | 層 | 責務 | 代表的な型・モジュール |
 |---|---|---|
-| `domain/` | 外部依存のない純粋なエンティティ | `Workspace`, `Settings` / `Theme` / `AgentCli` / `LocalSettings`, `WorkspaceState` / `WorktreeState` / `BranchStatus`, `Repository`（URL パース・名前導出）, `HistoryEntry` |
-| `usecase/` | ビジネスロジック（初期化・登録・状態同期・設定更新・セッション作成・依存チェック） | `project`, `workspace`, `workspace_state`, `settings`（実効設定の解決を含む）, `session`（worktree 構築）, `doctor` |
-| `infrastructure/` | Git 操作、各 JSON ファイルの永続化、シェル起動などの外部連携 | `git`（git CLI の読み取り専用検査 + `add_worktree`）, `storage`（グローバル `~/.usagi/`）, `workspace_store`（`<repo>/.usagi/` の `state.json` / `settings.json`）, `history_store`（`history.json`）, `terminal`（対話シェルの起動） |
+| `domain/` | 外部依存のない純粋なエンティティ | `Workspace`, `Settings` / `Theme` / `AgentCli` / `LocalSettings`, `WorkspaceState` / `WorktreeState` / `BranchStatus`, `Repository`（URL パース・名前導出）, `HistoryEntry`, `Issue` / `IssueSummary` / `IssueStatus` / `IssuePriority`（frontmatter 読み書き） |
+| `usecase/` | ビジネスロジック（初期化・登録・状態同期・設定更新・セッション作成・依存チェック・issue 管理） | `project`, `workspace`, `workspace_state`, `settings`（実効設定の解決を含む）, `session`（worktree 構築）, `doctor`, `issue`（CRUD・検索・依存 readiness 判定） |
+| `infrastructure/` | Git 操作、各 JSON ファイルの永続化、シェル起動などの外部連携 | `git`（git CLI の読み取り専用検査 + `add_worktree`）, `storage`（グローバル `~/.usagi/`）, `workspace_store`（`<repo>/.usagi/` の `state.json` / `settings.json`）, `history_store`（`history.json`）, `terminal`（対話シェルの起動）, `issue_store`（`<repo>/.usagi/issues/` の markdown + `index.json`） |
 | `presentation/` | CLI ルーティング、TUI 描画、TUI 内コマンドの実装 | `cli/`（`init` / `hop` / `status` / `doctor`）, `tui/`（各画面 + `app/` 画面遷移オーケストレーター） |
 
 ## モジュール構成（`src/`）
@@ -52,7 +52,8 @@ src/
 │   ├── settings.rs             # Settings / Theme / AgentCli、LocalSettings（with_local で上書き解決）
 │   ├── workspace.rs            # グローバル登録エントリ Workspace
 │   ├── workspace_state.rs      # WorkspaceState / WorktreeState / BranchStatus
-│   └── history.rs              # コマンド履歴の 1 件 HistoryEntry
+│   ├── history.rs              # コマンド履歴の 1 件 HistoryEntry
+│   └── issue.rs                # Issue / IssueSummary / IssueStatus / IssuePriority（frontmatter 読み書き）
 │
 ├── usecase/                    # ビジネスロジック
 │   ├── project.rs              # クローン・既存登録 + 状態同期
@@ -60,14 +61,16 @@ src/
 │   ├── workspace_state.rs      # リポジトリ状態の inspect/sync/load
 │   ├── settings.rs             # グローバル設定の load/更新、ローカル設定と実効設定の解決（effective）
 │   ├── session.rs              # セッション作成（ルート再帰走査・worktree 構築・非 git コピー）
-│   └── doctor.rs               # 依存ツールの導入状況チェック
+│   ├── doctor.rs               # 依存ツールの導入状況チェック
+│   └── issue.rs                # issue の CRUD・検索・依存 readiness 判定
 │
 ├── infrastructure/             # 外部連携（Git・永続化・シェル）
 │   ├── git.rs                  # git CLI 経由の読み取り専用検査 + worktree 追加（add_worktree）
 │   ├── storage.rs              # グローバル ~/.usagi/ の load/save（Storage）
 │   ├── workspace_store.rs      # <repo>/.usagi/ の state.json / settings.json（WorkspaceStore）
 │   ├── history_store.rs        # <repo>/.usagi/history.json の load/append（HistoryStore）
-│   └── terminal.rs             # 対話シェルの起動（terminal コマンド）
+│   ├── terminal.rs             # 対話シェルの起動（terminal コマンド）
+│   └── issue_store.rs          # <repo>/.usagi/issues/ の markdown + index.json（IssueStore）
 │
 └── presentation/               # CLI ルーティング・TUI
     ├── cli/                    # サブコマンド（init / hop / status / doctor）
