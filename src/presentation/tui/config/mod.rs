@@ -9,14 +9,12 @@ pub mod event;
 pub mod state;
 pub mod ui;
 
-use std::env;
 use std::path::PathBuf;
 
 use anyhow::Result;
 use console::Term;
 
 use crate::domain::settings::{LocalSettings, Settings};
-use crate::infrastructure::git;
 use crate::infrastructure::storage::Storage;
 use crate::presentation::tui::term_reader::TermKeyReader;
 use crate::usecase::{settings, workspace};
@@ -25,30 +23,31 @@ pub use event::Outcome;
 
 use state::Config;
 
-/// Runs the configuration screen on the given terminal until the user goes back
-/// or quits. Wires the real terminal and storage-backed settings to the
-/// testable event loop in [`event`]. Assumes the alternate screen is already
-/// active.
-///
-/// When invoked from inside a git repository, the screen also edits that
-/// project's local overrides (`<repo>/.usagi/settings.json`); the global and
-/// local settings are saved together when the user saves. The project context
-/// is the repository containing the current directory.
+/// Runs the configuration screen for the application-wide **global** settings
+/// (`~/.usagi/settings.json`). Used by the CLI and the welcome menu, neither of
+/// which is tied to a particular workspace. Assumes the alternate screen is
+/// already active.
 pub fn run(term: &Term) -> Result<Outcome> {
-    run_in(term, current_repo_root())
+    run_in(term, None)
 }
 
-/// Runs the configuration screen with an explicit project context: `repo_root`
-/// is the repository whose local overrides are edited alongside the global
-/// settings, or `None` to edit only the global settings. Used by the workspace
-/// screen's `config` command, which knows the workspace it was opened for.
+/// Runs the configuration screen, choosing its scope from `repo_root`:
+///
+/// - `Some(root)` edits only that project's **local** overrides
+///   (`<root>/.usagi/settings.json`). Used by the workspace home screen's
+///   `config` command.
+/// - `None` edits only the **global** settings. Used by [`run`].
+///
+/// The two scopes never share a screen: the global settings are loaded in the
+/// local scope as well, but only to display the value each unset override falls
+/// back to.
 pub fn run_in(term: &Term, repo_root: Option<PathBuf>) -> Result<Outcome> {
     let storage = Storage::open_default()?;
 
     let (config, notice) = match load(&storage, repo_root.as_deref()) {
         Ok((settings, workspaces, local)) => {
             let config = match (repo_root.as_ref(), local) {
-                (Some(_), Some(local)) => Config::with_local(settings, workspaces, local),
+                (Some(_), Some(local)) => Config::workspace(settings, local),
                 _ => Config::new(settings, workspaces),
             };
             (config, None)
@@ -60,28 +59,22 @@ pub fn run_in(term: &Term, repo_root: Option<PathBuf>) -> Result<Outcome> {
     };
 
     let mut reader = TermKeyReader::new(term.clone());
-    // Saving writes the global settings, plus the project-local overrides when
-    // the screen has a project context.
+    // The scope decides what is written: a project context saves only the
+    // project-local overrides, otherwise only the global settings.
     let mut save = |global: &Settings, local: Option<&LocalSettings>| -> Result<()> {
-        settings::save(&storage, global)?;
-        if let (Some(root), Some(local)) = (repo_root.as_ref(), local) {
-            // Always write the file, even when every override is cleared: an
-            // empty file simply means "defer entirely to the global settings".
-            settings::save_local(root, local)?;
+        match repo_root.as_ref() {
+            Some(root) => {
+                if let Some(local) = local {
+                    // Always write the file, even when every override is cleared:
+                    // an empty file simply means "defer to the global settings".
+                    settings::save_local(root, local)?;
+                }
+            }
+            None => settings::save(&storage, global)?,
         }
         Ok(())
     };
     event::event_loop(term, &mut reader, config, &mut save, notice)
-}
-
-/// The primary worktree of the repository containing the current directory, or
-/// `None` when usagi is not run from inside a git repository.
-fn current_repo_root() -> Option<PathBuf> {
-    let cwd = env::current_dir().ok()?;
-    if !git::is_repository(&cwd) {
-        return None;
-    }
-    git::primary_worktree(&cwd).ok()
 }
 
 /// Loads the global settings, the registered workspace names the

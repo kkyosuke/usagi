@@ -596,12 +596,11 @@ fn remove_modal_row(name: &str, cursor: bool, selected: bool, inner: usize) -> S
 /// Builds the centred session-removal modal: a scrolling checklist of the
 /// workspace's sessions, with the count selected and the key hints below.
 fn remove_modal_frame(raw_height: usize, raw_width: usize, modal: &RemoveModal) -> Vec<String> {
-    const INNER: usize = 40;
+    // Wide enough for the longest body line, the key-hints row below.
+    const INNER: usize = 44;
 
     let mut body = vec![
-        style("Select sessions to remove (Space to toggle).")
-            .dim()
-            .to_string(),
+        style("Select sessions to remove.").dim().to_string(),
         String::new(),
     ];
 
@@ -1547,6 +1546,24 @@ mod tests {
         assert!(joined.contains("more"));
         // The cursor row stays within the visible window.
         assert!(joined.contains("s09"));
+    }
+
+    #[test]
+    fn remove_modal_frame_keeps_every_row_within_the_box() {
+        // Regression: the header and key-hint rows must fit inside the border so
+        // nothing spills past the right edge of the box.
+        let mut state = state_with_sessions(&["scroll", "session-new", "config"]);
+        state.open_remove_modal(false);
+        let frame = render_frame(24, 80, &state);
+        let widths: Vec<usize> = frame
+            .iter()
+            .map(|l| console::strip_ansi_codes(l))
+            .filter(|l| l.trim_start().starts_with(['┌', '│', '└']))
+            .map(|l| console::measure_text_width(l.trim_end()))
+            .collect();
+        assert!(!widths.is_empty());
+        // Every bordered row shares one width, so no line overflows the frame.
+        assert!(widths.iter().all(|&w| w == widths[0]));
     }
 
     #[test]

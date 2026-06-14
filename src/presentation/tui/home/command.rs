@@ -437,10 +437,11 @@ impl Command for AgentCommand {
     }
 }
 
-/// `config`: open the configuration screen to edit the global settings and the
-/// current workspace's local overrides. Opening the screen is a side effect
-/// ([`Effect::OpenConfig`]) performed by the event loop, which owns the terminal
-/// and returns to the workspace screen when the user dismisses it.
+/// `config`: open the configuration screen to edit **this workspace's** local
+/// overrides (the global settings are edited from the CLI or welcome menu).
+/// Opening the screen is a side effect ([`Effect::OpenConfig`]) performed by the
+/// event loop, which owns the terminal and returns to the workspace screen when
+/// the user dismisses it.
 struct ConfigCommand;
 
 impl Command for ConfigCommand {
@@ -449,7 +450,7 @@ impl Command for ConfigCommand {
     }
 
     fn description(&self) -> &'static str {
-        "Open the settings screen to edit configuration"
+        "Edit this workspace's local settings"
     }
 
     fn run(&self, _args: &str, _ctx: &CommandContext) -> CommandResult {
