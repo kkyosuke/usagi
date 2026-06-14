@@ -13,7 +13,7 @@
 
 use std::io::{Read, Write};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 
@@ -29,6 +29,10 @@ pub struct PtySession {
     writer: Box<dyn Write + Send>,
     parser: Arc<Mutex<vt100::Parser>>,
     alive: Arc<AtomicBool>,
+    /// Bumped by the reader thread after every chunk it parses, so the render
+    /// loop can tell at a glance whether the screen has changed since it last
+    /// drew — and wake immediately when it has, instead of on a fixed timer.
+    generation: Arc<AtomicU64>,
     child: Box<dyn Child + Send + Sync>,
     reader_thread: Option<JoinHandle<()>>,
 }
@@ -70,10 +74,12 @@ impl PtySession {
 
         let parser = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, 0)));
         let alive = Arc::new(AtomicBool::new(true));
+        let generation = Arc::new(AtomicU64::new(0));
 
         let reader_thread = {
             let parser = Arc::clone(&parser);
             let alive = Arc::clone(&alive);
+            let generation = Arc::clone(&generation);
             std::thread::spawn(move || {
                 let mut buf = [0u8; 8192];
                 loop {
@@ -83,10 +89,14 @@ impl PtySession {
                             if let Ok(mut parser) = parser.lock() {
                                 parser.process(&buf[..n]);
                             }
+                            // Announce the new output so a waiting render loop
+                            // redraws it without waiting out its idle timer.
+                            generation.fetch_add(1, Ordering::SeqCst);
                         }
                     }
                 }
                 alive.store(false, Ordering::SeqCst);
+                generation.fetch_add(1, Ordering::SeqCst);
             })
         };
 
@@ -95,6 +105,7 @@ impl PtySession {
             writer,
             parser,
             alive,
+            generation,
             child,
             reader_thread: Some(reader_thread),
         })
@@ -129,6 +140,13 @@ impl PtySession {
     /// Whether the shell is still running (the reader has not hit EOF).
     pub fn is_alive(&self) -> bool {
         self.alive.load(Ordering::SeqCst)
+    }
+
+    /// A counter bumped each time the shell's output is parsed (and once more
+    /// when it exits). The render loop compares it against the value at its last
+    /// draw to decide whether the screen needs redrawing.
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::SeqCst)
     }
 }
 
