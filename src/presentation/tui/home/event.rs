@@ -37,9 +37,11 @@ pub enum Outcome {
 /// the git / filesystem work and return a [`SessionOutcome`] to apply to the
 /// screen, keeping the loop itself free of that IO and directly testable.
 ///
-/// `terminal` opens an interactive shell in the selected worktree (or
-/// `workspace_root` when nothing is selected) via `open_terminal`; the terminal
-/// I/O (suspending the TUI, spawning the shell) lives in that injected callback.
+/// `terminal` embeds a live shell in the right pane, rooted at the selected
+/// worktree (or `workspace_root` when nothing is selected). The loop switches
+/// the right pane to terminal mode, runs the embedded session via
+/// `open_terminal`, and switches back when it returns; the PTY I/O and rendering
+/// live in that injected callback.
 #[allow(clippy::too_many_arguments)]
 pub fn event_loop(
     term: &Term,
@@ -49,7 +51,7 @@ pub fn event_loop(
     persist: &mut dyn FnMut(&str),
     create_session: &mut dyn FnMut(&str) -> SessionOutcome,
     remove_session: &mut dyn FnMut(&str, bool) -> SessionOutcome,
-    open_terminal: &mut dyn FnMut(&Path) -> Result<()>,
+    open_terminal: &mut dyn FnMut(&mut HomeState, &Path) -> Result<()>,
 ) -> Result<Outcome> {
     loop {
         term.move_cursor_to(0, 0)?;
@@ -115,14 +117,19 @@ pub fn event_loop(
                             state.apply_session_outcome(outcome);
                         }
                         Effect::OpenTerminal => {
-                            // Open the shell in the selected worktree, falling
-                            // back to the workspace root when nothing is selected.
+                            // Embed the shell in the right pane, rooted at the
+                            // selected worktree (or the workspace root when
+                            // nothing is selected). The pane is switched to
+                            // terminal mode for the duration and back afterwards.
                             let dir = state
                                 .list()
                                 .selected()
                                 .map(|w| w.path.clone())
                                 .unwrap_or_else(|| workspace_root.to_path_buf());
-                            match open_terminal(&dir) {
+                            state.show_terminal();
+                            let result = open_terminal(&mut state, &dir);
+                            state.show_log();
+                            match result {
                                 Ok(()) => state
                                     .log_output(format!("Terminal in {} closed.", dir.display())),
                                 Err(e) => state.log_error(format!("terminal failed: {e}")),
@@ -211,7 +218,7 @@ mod tests {
     }
 
     /// A `open_terminal` callback that reports success without spawning a shell.
-    fn noop_open(_: &Path) -> Result<()> {
+    fn noop_open(_: &mut HomeState, _: &Path) -> Result<()> {
         Ok(())
     }
 
@@ -221,7 +228,7 @@ mod tests {
         let mut persist = |_: &str| {};
         let mut create_session: fn(&str) -> SessionOutcome = noop_create;
         let mut remove_session: fn(&str, bool) -> SessionOutcome = noop_remove;
-        let mut open_terminal: fn(&Path) -> Result<()> = noop_open;
+        let mut open_terminal: fn(&mut HomeState, &Path) -> Result<()> = noop_open;
         event_loop(
             &term,
             &mut reader,
@@ -331,7 +338,7 @@ mod tests {
         let mut persist = |command: &str| recorded.push(command.to_string());
         let mut create_session: fn(&str) -> SessionOutcome = noop_create;
         let mut remove_session: fn(&str, bool) -> SessionOutcome = noop_remove;
-        let mut open_terminal: fn(&Path) -> Result<()> = noop_open;
+        let mut open_terminal: fn(&mut HomeState, &Path) -> Result<()> = noop_open;
         let outcome = event_loop(
             &term,
             &mut reader,
@@ -389,7 +396,7 @@ mod tests {
             outcome.clone()
         };
         let mut remove_session: fn(&str, bool) -> SessionOutcome = noop_remove;
-        let mut open_terminal: fn(&Path) -> Result<()> = noop_open;
+        let mut open_terminal: fn(&mut HomeState, &Path) -> Result<()> = noop_open;
         let result = event_loop(
             &term,
             &mut reader,
@@ -451,7 +458,7 @@ mod tests {
             removed.push((name.to_string(), force));
             ok_outcome()
         };
-        let mut open_terminal: fn(&Path) -> Result<()> = noop_open;
+        let mut open_terminal: fn(&mut HomeState, &Path) -> Result<()> = noop_open;
         let outcome = event_loop(
             &term,
             &mut reader,
@@ -561,7 +568,7 @@ mod tests {
     /// terminal effect's directory resolution and result handling are exercised.
     fn run_terminal(
         state: HomeState,
-        open_terminal: &mut dyn FnMut(&Path) -> Result<()>,
+        open_terminal: &mut dyn FnMut(&mut HomeState, &Path) -> Result<()>,
     ) -> Result<Outcome> {
         let mut keys = vec![Ok(Key::Char(':'))];
         keys.extend(typed("terminal"));
@@ -600,7 +607,12 @@ mod tests {
     #[test]
     fn terminal_opens_in_the_selected_worktree() {
         let opened = RefCell::new(None);
-        let mut open = |dir: &Path| {
+        let mut open = |home: &mut HomeState, dir: &Path| {
+            // The pane is in terminal mode while the embedded session runs.
+            assert_eq!(
+                home.right_pane(),
+                crate::presentation::tui::home::state::RightPane::Terminal
+            );
             *opened.borrow_mut() = Some(dir.to_path_buf());
             Ok(())
         };
@@ -615,7 +627,7 @@ mod tests {
     #[test]
     fn terminal_falls_back_to_the_workspace_root_without_selection() {
         let opened = RefCell::new(None);
-        let mut open = |dir: &Path| {
+        let mut open = |_home: &mut HomeState, dir: &Path| {
             *opened.borrow_mut() = Some(dir.to_path_buf());
             Ok(())
         };
@@ -630,7 +642,7 @@ mod tests {
 
     #[test]
     fn terminal_failure_is_reported() {
-        let mut open = |_: &Path| Err(anyhow::anyhow!("no shell"));
+        let mut open = |_: &mut HomeState, _: &Path| Err(anyhow::anyhow!("no shell"));
         // A launch failure logs an error but the screen continues to Back.
         assert!(matches!(
             run_terminal(sample_state(), &mut open).unwrap(),

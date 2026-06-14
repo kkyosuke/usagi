@@ -2,6 +2,7 @@
 pub mod git;
 pub mod history_store;
 pub mod issue_store;
+pub mod pty;
 pub mod storage;
 pub mod terminal;
 pub mod workspace_store;

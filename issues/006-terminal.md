@@ -28,7 +28,10 @@ ref: usagi.ai doc/app/tui/terminal.md
 
 ## 実装状況
 
-「一時的に TUI を抜けてシェルに入り、終了後に復帰する」方式で実装（PTY 埋め込みは将来課題）。
+**疑似ターミナル（portable-pty + vt100）を右ペインに埋め込む**方式で実装。`terminal` を実行すると、左ペインの worktree 一覧を表示したまま、右ペインがライブシェルに切り替わる。
 
-- `infrastructure/terminal.rs`：`$SHELL`（未設定なら `bash` / Windows は `cmd.exe`）を指定ディレクトリで起動。シェルの終了コードは無視し、起動失敗のみエラーにする。
-- `terminal` コマンドは `Effect::OpenTerminal` を返し、event loop が左ペインで選択中の worktree（未選択ならワークスペースルート）を作業ディレクトリに解決。実行時は alternate screen を一旦抜けてシェルに入り、終了後に復帰する（`presentation/tui/home/mod.rs` の `open_terminal`）。
+- `infrastructure/terminal.rs`：起動するシェルの解決（`$SHELL`、未設定なら `bash` / Windows は `cmd.exe`）。テスト可能な純粋ロジックに限定。
+- `infrastructure/pty.rs`：portable-pty で PTY を開き、解決したシェルを指定ディレクトリで spawn。出力をバックグラウンドスレッドで `vt100::Parser` に流し込み画面グリッドを保持。リサイズ・入力書き込み・生存判定を提供（端末 I/O のためカバレッジ計測対象外）。
+- `presentation/tui/home/terminal_view.rs`：`vt100::Screen` を 1 行 1 文字列＋カーソル位置の純粋なスナップショット（`TerminalView`）へ変換。テスト済み。
+- `presentation/tui/home/terminal_pane.rs`：crossterm の raw モード＋イベントポーリングでキー入力をシェルへ転送し、毎フレーム `TerminalView` を右ペインに描画する描画/入力ループ。`Ctrl-O` でデタッチ（端末 I/O のためカバレッジ計測対象外）。
+- `terminal` コマンドは従来どおり `Effect::OpenTerminal` を返し、event loop が選択中 worktree（未選択ならワークスペースルート）を解決して右ペインをターミナルモードに切り替え、`home/mod.rs` の `open_terminal` 経由で埋め込みシェルを起動する。シェルの `exit` または `Ctrl-O` で右ペインがコマンド履歴/出力へ戻る。

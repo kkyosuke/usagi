@@ -9,6 +9,8 @@
 pub mod command;
 pub mod event;
 pub mod state;
+pub mod terminal_pane;
+pub mod terminal_view;
 pub mod ui;
 
 use std::path::Path;
@@ -121,16 +123,12 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
         },
     };
 
-    // Opening a terminal temporarily leaves the alternate screen so the user
-    // gets a normal shell, then restores it once the shell exits.
-    let mut open_terminal = |dir: &Path| -> Result<()> {
-        term.write_str("\x1b[?1049l")?;
-        term.show_cursor()?;
-        let result = crate::infrastructure::terminal::open(dir);
-        term.write_str("\x1b[?1049h")?;
-        term.hide_cursor()?;
-        result
-    };
+    // Opening a terminal embeds a live shell in the right pane: the pane stays
+    // inside the workspace screen (sidebar still visible) and runs the shell
+    // until the user detaches or it exits. The right-pane mode is toggled by the
+    // event loop around this call; here we just drive the embedded session.
+    let mut open_terminal =
+        |home: &mut HomeState, dir: &Path| -> Result<()> { terminal_pane::run(term, home, dir) };
 
     event::event_loop(
         term,

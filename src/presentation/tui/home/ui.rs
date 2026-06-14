@@ -1,16 +1,18 @@
 //! Rendering for the home (workspace) screen's three-pane layout.
 //!
 //! Top to bottom: a title bar, then a body split into the worktree list (left)
-//! and the command log (right), then the command input line and a mode-aware
-//! footer. All functions take plain data and return styled lines, so the layout
-//! is rendered without any terminal IO.
+//! and the command log — or, while the `terminal` command runs, a live embedded
+//! terminal — (right), then the command input line and a mode-aware footer. All
+//! functions take plain data and return styled lines, so the layout is rendered
+//! without any terminal IO.
 
 use console::style;
 
 use crate::domain::workspace_state::{BranchStatus, WorktreeState};
 use crate::presentation::tui::widgets;
 
-use super::state::{HomeState, LineKind, LogLine, Mode, SessionModal, WorktreeList};
+use super::state::{HomeState, LineKind, LogLine, Mode, RightPane, SessionModal, WorktreeList};
+use super::terminal_view::TerminalView;
 
 /// Shown in place of the list when the workspace has no recorded worktrees.
 const EMPTY_MESSAGE: &str = "No worktrees recorded yet. Run usagi to sync.";
@@ -191,9 +193,69 @@ fn right_pane(log: &[LogLine], right_w: usize, rows: usize) -> Vec<String> {
     log[start..].iter().map(|l| log_line(l, right_w)).collect()
 }
 
-/// The command input line: an editable prompt in command mode, or a hint in
-/// sidebar mode.
+/// Shown in the right pane between starting the `terminal` command and its
+/// first screen snapshot arriving.
+const TERMINAL_STARTING: &str = "Starting terminal…";
+
+/// Builds the right pane from an embedded terminal snapshot: each grid row,
+/// clipped to the pane width, up to `rows` rows.
+fn terminal_pane(view: &TerminalView, right_w: usize, rows: usize) -> Vec<String> {
+    view.rows()
+        .iter()
+        .take(rows)
+        .map(|row| clip_to_width(row, right_w))
+        .collect()
+}
+
+/// Chooses the right pane's contents: the command log, or — while the
+/// `terminal` command runs — the live terminal snapshot (or a starting hint
+/// until the first one arrives).
+fn right_pane_contents(state: &HomeState, right_w: usize, rows: usize) -> Vec<String> {
+    match state.right_pane() {
+        RightPane::Log => right_pane(state.log(), right_w, rows),
+        RightPane::Terminal => match state.terminal_view() {
+            Some(view) => terminal_pane(view, right_w, rows),
+            None => vec![style(clip_to_width(TERMINAL_STARTING, right_w))
+                .dim()
+                .to_string()],
+        },
+    }
+}
+
+/// Where the embedded terminal lives on screen: the size of the right pane and
+/// the screen coordinates of its top-left cell. The PTY is sized to `rows`×
+/// `cols`, and the real cursor is placed relative to (`origin_col`,
+/// `origin_row`) so it tracks the shell's cursor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TerminalGeometry {
+    pub rows: u16,
+    pub cols: u16,
+    pub origin_col: u16,
+    pub origin_row: u16,
+}
+
+/// Computes the [`TerminalGeometry`] for a raw terminal size, matching the
+/// layout [`render_frame`] draws (title + blank above the body, the left pane
+/// and divider to its left). `rows` and `cols` are at least 1.
+pub fn terminal_geometry(raw_height: usize, raw_width: usize) -> TerminalGeometry {
+    let (height, width) = widgets::normalize_size(raw_height, raw_width);
+    let (left_w, right_w) = layout(width);
+    let pane_rows = height.saturating_sub(4).max(1);
+    TerminalGeometry {
+        rows: pane_rows.max(1) as u16,
+        cols: right_w.max(1) as u16,
+        origin_col: (left_w + SEP_WIDTH) as u16,
+        // The body starts below the title bar and its blank separator.
+        origin_row: 2,
+    }
+}
+
+/// The command input line: a status line while the terminal runs, an editable
+/// prompt in command mode, or a hint in sidebar mode.
 fn input_line(state: &HomeState) -> String {
+    if state.right_pane() == RightPane::Terminal {
+        return style(" ● live terminal".to_string()).green().to_string();
+    }
     match state.mode() {
         Mode::Command => {
             let prompt = style("❯").red().bold();
@@ -206,11 +268,15 @@ fn input_line(state: &HomeState) -> String {
     }
 }
 
-/// The mode-aware footer help line.
-fn footer_line(width: usize, mode: Mode) -> String {
-    let help = match mode {
-        Mode::Sidebar => "↑↓: move / Enter: activate / :: command / Esc: back",
-        Mode::Command => "Tab: complete / ↑↓: history / Enter: run / Esc: cancel",
+/// The footer help line, aware of the terminal pane and the current mode.
+fn footer_line(width: usize, state: &HomeState) -> String {
+    let help = if state.right_pane() == RightPane::Terminal {
+        "Embedded terminal — Ctrl-O: detach and close"
+    } else {
+        match state.mode() {
+            Mode::Sidebar => "↑↓: move / Enter: activate / :: command / Esc: back",
+            Mode::Command => "Tab: complete / ↑↓: history / Enter: run / Esc: cancel",
+        }
     };
     widgets::dim_line(width, help)
 }
@@ -256,7 +322,7 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
     // at the bottom. The rest is the two-pane body.
     let pane_rows = height.saturating_sub(4).max(1);
     let left = left_pane(state.list(), left_w, pane_rows);
-    let right = right_pane(state.log(), right_w, pane_rows);
+    let right = right_pane_contents(state, right_w, pane_rows);
 
     let mut lines = Vec::with_capacity(height);
     lines.push(title_bar(width, state.list()));
@@ -267,7 +333,7 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
         lines.push(format!("{left_cell}{SEP}{right_cell}"));
     }
     lines.push(input_line(state));
-    lines.push(footer_line(width, state.mode()));
+    lines.push(footer_line(width, state));
     lines
 }
 
@@ -501,8 +567,91 @@ mod tests {
 
     #[test]
     fn footer_line_differs_by_mode() {
-        assert!(footer_line(80, Mode::Sidebar).contains("move"));
-        assert!(footer_line(80, Mode::Command).contains("complete"));
+        let mut state = HomeState::new("usagi", Vec::new(), None);
+        assert!(footer_line(80, &state).contains("move"));
+        state.enter_command_mode();
+        assert!(footer_line(80, &state).contains("complete"));
+    }
+
+    #[test]
+    fn footer_and_input_switch_to_a_terminal_hint_when_it_runs() {
+        let mut state = HomeState::new("usagi", Vec::new(), None);
+        state.show_terminal();
+        // Both the footer and the status line advertise the embedded terminal.
+        assert!(footer_line(80, &state).contains("detach"));
+        assert!(input_line(&state).contains("live terminal"));
+    }
+
+    #[test]
+    fn terminal_pane_clips_rows_to_the_pane_width() {
+        let view = TerminalView::from_rows(
+            vec!["a long command line".to_string(), "$ ".to_string()],
+            Some((1, 2)),
+        );
+        let lines = terminal_pane(&view, 8, 5);
+        assert_eq!(lines.len(), 2);
+        assert!(console::measure_text_width(&lines[0]) <= 8);
+        assert!(lines[0].ends_with('…'));
+        assert!(lines[1].starts_with("$ "));
+    }
+
+    #[test]
+    fn right_pane_contents_follows_the_pane_mode() {
+        let mut state = HomeState::new("usagi", Vec::new(), None);
+        // Log mode shows the seeded hint line.
+        let log = right_pane_contents(&state, 40, 5);
+        assert!(log.iter().any(|l| l.contains("man")));
+
+        // Terminal mode with no snapshot yet shows the starting hint.
+        state.show_terminal();
+        let starting = right_pane_contents(&state, 40, 5);
+        assert!(starting[0].contains("Starting terminal"));
+
+        // Once a snapshot arrives, its rows are shown instead.
+        state.set_terminal_view(TerminalView::from_rows(vec!["$ echo hi".to_string()], None));
+        let running = right_pane_contents(&state, 40, 5);
+        assert!(running[0].contains("$ echo hi"));
+    }
+
+    #[test]
+    fn terminal_geometry_matches_the_rendered_layout() {
+        let geo = terminal_geometry(24, 80);
+        // The left pane (26) plus the divider (3) is where the terminal starts.
+        let (left, _) = layout(80);
+        assert_eq!(geo.origin_col as usize, left + SEP_WIDTH);
+        // The body sits below the title bar and its blank separator.
+        assert_eq!(geo.origin_row, 2);
+        // The pane is the body height (24 - 4 chrome rows) and the right width.
+        assert_eq!(geo.rows, 20);
+        assert_eq!(geo.cols as usize, 80 - left - SEP_WIDTH);
+    }
+
+    #[test]
+    fn terminal_geometry_stays_positive_in_a_tiny_terminal() {
+        // Far too small for a real layout: rows and cols are clamped to 1.
+        let geo = terminal_geometry(1, 1);
+        assert!(geo.rows >= 1);
+        assert!(geo.cols >= 1);
+    }
+
+    #[test]
+    fn render_frame_draws_the_terminal_in_the_right_pane() {
+        let mut state = HomeState::new(
+            "usagi",
+            vec![worktree(Some("main"), true, BranchStatus::Pushed)],
+            None,
+        );
+        state.show_terminal();
+        state.set_terminal_view(TerminalView::from_rows(
+            vec!["$ cargo test".to_string()],
+            None,
+        ));
+        let frame = render_frame(24, 80, &state);
+        let joined = console::strip_ansi_codes(&frame.join("\n")).into_owned();
+        // The sidebar is still drawn alongside the live terminal output.
+        assert!(joined.contains("main"));
+        assert!(joined.contains("$ cargo test"));
+        assert!(joined.contains("detach"));
     }
 
     #[test]

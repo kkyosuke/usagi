@@ -10,6 +10,7 @@
 use crate::domain::workspace_state::{SessionRecord, WorktreeState};
 
 use super::command::{CommandRegistry, Effect, WorktreeRef};
+use super::terminal_view::TerminalView;
 
 /// The display name of a worktree: its branch, or a placeholder when detached.
 pub fn worktree_name(worktree: &WorktreeState) -> &str {
@@ -134,6 +135,15 @@ pub enum Mode {
     Command,
 }
 
+/// What the right pane is currently showing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RightPane {
+    /// The command output log (the default).
+    Log,
+    /// A live embedded terminal (the `terminal` command is running).
+    Terminal,
+}
+
 /// The kind of a log line, which decides how it is coloured.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LineKind {
@@ -246,6 +256,11 @@ pub struct HomeState {
     /// Sessions recorded for this workspace (from `state.json`), shown by
     /// `session list` and kept current as sessions are created.
     sessions: Vec<SessionRecord>,
+    /// What the right pane shows: the command log, or a live terminal.
+    right_pane: RightPane,
+    /// The latest snapshot of the embedded terminal's screen, set while the
+    /// `terminal` command is running and rendered in place of the log.
+    terminal_view: Option<TerminalView>,
 }
 
 impl HomeState {
@@ -272,6 +287,8 @@ impl HomeState {
             registry: CommandRegistry::with_builtins(),
             modal: None,
             sessions: Vec::new(),
+            right_pane: RightPane::Log,
+            terminal_view: None,
         }
     }
 
@@ -350,6 +367,37 @@ impl HomeState {
 
     pub fn log(&self) -> &[LogLine] {
         &self.log
+    }
+
+    /// What the right pane is currently showing.
+    pub fn right_pane(&self) -> RightPane {
+        self.right_pane
+    }
+
+    /// The current embedded-terminal snapshot, when the terminal is running.
+    pub fn terminal_view(&self) -> Option<&TerminalView> {
+        self.terminal_view.as_ref()
+    }
+
+    /// Switch the right pane to the live terminal (the `terminal` command is
+    /// starting). The first snapshot arrives via [`set_terminal_view`].
+    ///
+    /// [`set_terminal_view`]: Self::set_terminal_view
+    pub fn show_terminal(&mut self) {
+        self.right_pane = RightPane::Terminal;
+    }
+
+    /// Switch the right pane back to the command log (the terminal closed),
+    /// dropping the last terminal snapshot.
+    pub fn show_log(&mut self) {
+        self.right_pane = RightPane::Log;
+        self.terminal_view = None;
+    }
+
+    /// Store the latest embedded-terminal screen snapshot, shown in the right
+    /// pane while the terminal is running.
+    pub fn set_terminal_view(&mut self, view: TerminalView) {
+        self.terminal_view = Some(view);
     }
 
     /// Move the worktree cursor up (sidebar mode).
@@ -1077,6 +1125,28 @@ mod tests {
         assert_eq!(last_two[0].text, "it broke");
         assert_eq!(last_two[1].kind, LineKind::Output);
         assert_eq!(last_two[1].text, "did a thing");
+    }
+
+    #[test]
+    fn right_pane_starts_on_the_log_and_toggles_with_the_terminal() {
+        let mut state = state();
+        // The log is shown by default, with no terminal snapshot.
+        assert_eq!(state.right_pane(), RightPane::Log);
+        assert!(state.terminal_view().is_none());
+
+        // Starting the terminal switches the pane; a snapshot then arrives.
+        state.show_terminal();
+        assert_eq!(state.right_pane(), RightPane::Terminal);
+        state.set_terminal_view(TerminalView::from_rows(
+            vec!["$ ".to_string()],
+            Some((0, 2)),
+        ));
+        assert_eq!(state.terminal_view().unwrap().rows(), ["$ "]);
+
+        // Closing the terminal returns to the log and drops the snapshot.
+        state.show_log();
+        assert_eq!(state.right_pane(), RightPane::Log);
+        assert!(state.terminal_view().is_none());
     }
 
     #[test]
