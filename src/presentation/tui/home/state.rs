@@ -9,23 +9,35 @@
 
 use crate::domain::workspace_state::{SessionRecord, WorktreeState};
 
-use super::command::{CommandRegistry, Effect};
+use super::command::{CommandRegistry, Effect, WorktreeRef};
+
+/// The display name of a worktree: its branch, or a placeholder when detached.
+pub fn worktree_name(worktree: &WorktreeState) -> &str {
+    worktree.branch.as_deref().unwrap_or("(detached)")
+}
 
 /// The opened workspace and the selectable list of its worktrees.
+///
+/// Two cursors are tracked: `selected_index` is where the keyboard cursor sits
+/// while navigating, and `active_index` is the worktree subsequent commands
+/// (`space`, and later `terminal`/`ai`) act on.
 #[derive(Debug, Clone)]
 pub struct WorktreeList {
     workspace_name: String,
     worktrees: Vec<WorktreeState>,
     selected_index: usize,
+    active_index: usize,
 }
 
 impl WorktreeList {
-    /// Builds a list for the named workspace, with the cursor at the top.
+    /// Builds a list for the named workspace, with the cursor at the top and
+    /// the first worktree (the primary) active.
     pub fn new(workspace_name: impl Into<String>, worktrees: Vec<WorktreeState>) -> Self {
         Self {
             workspace_name: workspace_name.into(),
             worktrees,
             selected_index: 0,
+            active_index: 0,
         }
     }
 
@@ -41,6 +53,11 @@ impl WorktreeList {
         self.selected_index
     }
 
+    /// Index of the active worktree (the one commands act on).
+    pub fn active_index(&self) -> usize {
+        self.active_index
+    }
+
     pub fn is_empty(&self) -> bool {
         self.worktrees.is_empty()
     }
@@ -48,6 +65,44 @@ impl WorktreeList {
     /// The worktree under the cursor, or `None` when the list is empty.
     pub fn selected(&self) -> Option<&WorktreeState> {
         self.worktrees.get(self.selected_index)
+    }
+
+    /// The active worktree, or `None` when the list is empty.
+    pub fn active(&self) -> Option<&WorktreeState> {
+        self.worktrees.get(self.active_index)
+    }
+
+    /// Make the worktree under the cursor active, returning its name. No-op
+    /// (returning `None`) when the list is empty.
+    pub fn activate_selected(&mut self) -> Option<&str> {
+        if self.worktrees.is_empty() {
+            return None;
+        }
+        self.active_index = self.selected_index;
+        self.active().map(worktree_name)
+    }
+
+    /// Make the worktree named `name` active, returning whether one matched.
+    pub fn activate_by_name(&mut self, name: &str) -> bool {
+        match self.worktrees.iter().position(|w| worktree_name(w) == name) {
+            Some(index) => {
+                self.active_index = index;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// The worktrees as command-facing [`WorktreeRef`]s (name + active flag).
+    pub fn refs(&self) -> Vec<WorktreeRef> {
+        self.worktrees
+            .iter()
+            .enumerate()
+            .map(|(i, w)| WorktreeRef {
+                name: worktree_name(w).to_string(),
+                active: i == self.active_index,
+            })
+            .collect()
     }
 
     /// Move the cursor up one row, wrapping to the bottom. No-op when empty.
@@ -270,6 +325,17 @@ impl HomeState {
         }
     }
 
+    /// Append an ordinary output line to the log (used by the event loop to
+    /// report the result of a command's side effect, e.g. `terminal`).
+    pub fn log_output(&mut self, text: impl Into<String>) {
+        self.log.push(LogLine::output(text));
+    }
+
+    /// Append an error line to the log.
+    pub fn log_error(&mut self, text: impl Into<String>) {
+        self.log.push(LogLine::error(text));
+    }
+
     pub fn list(&self) -> &WorktreeList {
         &self.list
     }
@@ -296,14 +362,13 @@ impl HomeState {
         self.list.move_down();
     }
 
-    /// Act on the selected worktree. Opening one is not built yet, so this just
-    /// logs a "coming soon" notice. No-op when the list is empty.
+    /// Make the worktree under the cursor the active one (the target of
+    /// subsequent commands), logging the switch. No-op when the list is empty.
     pub fn select_worktree(&mut self) {
-        if let Some(worktree) = self.list.selected() {
-            let branch = worktree.branch.as_deref().unwrap_or("(detached)");
-            self.log.push(LogLine::notice(format!(
-                "Opening \"{branch}\" is coming soon 🐰"
-            )));
+        if let Some(name) = self.list.activate_selected() {
+            let name = name.to_string();
+            self.log
+                .push(LogLine::notice(format!("Switched to workspace \"{name}\"")));
         }
     }
 
@@ -388,11 +453,24 @@ impl HomeState {
         }
 
         self.log.push(LogLine::command(entry.clone()));
-        let result = self.registry.dispatch(&entry, &self.history);
+        let result = self
+            .registry
+            .dispatch(&entry, &self.history, &self.list.refs());
         self.history.push(entry.clone());
 
         match result.effect {
             Effect::Clear => self.log.clear(),
+            // `session switch <name>`: the screen owns the worktree list, so it resolves
+            // the name and reports success or failure here.
+            Effect::Activate(ref name) => {
+                if self.list.activate_by_name(name) {
+                    self.log
+                        .push(LogLine::notice(format!("Switched to workspace \"{name}\"")));
+                } else {
+                    self.log
+                        .push(LogLine::error(format!("no worktree named \"{name}\"")));
+                }
+            }
             _ => self.log.extend(result.lines),
         }
         Submission {
@@ -541,6 +619,61 @@ mod tests {
         assert_eq!(list.selected_index(), 0);
     }
 
+    #[test]
+    fn the_first_worktree_is_active_by_default() {
+        let list = sample();
+        assert_eq!(list.active_index(), 0);
+        assert_eq!(list.active().unwrap().branch.as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn activate_selected_follows_the_cursor() {
+        let mut list = sample();
+        list.move_down(); // cursor on "feature"
+        assert_eq!(list.activate_selected(), Some("feature"));
+        assert_eq!(list.active_index(), 1);
+        // The cursor and the active worktree are independent afterwards.
+        list.move_down(); // cursor on "fix"
+        assert_eq!(list.active_index(), 1);
+        assert_eq!(list.selected_index(), 2);
+    }
+
+    #[test]
+    fn activate_selected_on_an_empty_list_is_a_noop() {
+        let mut list = WorktreeList::new("usagi", Vec::new());
+        assert_eq!(list.activate_selected(), None);
+        assert!(list.active().is_none());
+    }
+
+    #[test]
+    fn activate_by_name_matches_or_reports_missing() {
+        let mut list = sample();
+        assert!(list.activate_by_name("fix"));
+        assert_eq!(list.active_index(), 2);
+        assert!(!list.activate_by_name("nope"));
+        // A failed lookup leaves the active worktree unchanged.
+        assert_eq!(list.active_index(), 2);
+    }
+
+    #[test]
+    fn refs_expose_names_and_the_active_flag() {
+        let mut list = sample();
+        list.activate_by_name("feature");
+        let refs = list.refs();
+        assert_eq!(refs.len(), 3);
+        assert_eq!(refs[0].name, "main");
+        assert!(!refs[0].active);
+        assert_eq!(refs[1].name, "feature");
+        assert!(refs[1].active);
+    }
+
+    #[test]
+    fn worktree_name_falls_back_to_detached() {
+        let mut detached = worktree("main");
+        detached.branch = None;
+        assert_eq!(worktree_name(&detached), "(detached)");
+    }
+
     // --- HomeState ---------------------------------------------------------
 
     fn state() -> HomeState {
@@ -576,13 +709,15 @@ mod tests {
     }
 
     #[test]
-    fn selecting_a_worktree_logs_a_coming_soon_notice() {
+    fn selecting_a_worktree_activates_it() {
         let mut state = state();
+        state.move_down(); // cursor on "feature"
         state.select_worktree();
+        assert_eq!(state.list().active_index(), 1);
         let last = state.log().last().unwrap();
         assert_eq!(last.kind, LineKind::Notice);
-        assert!(last.text.contains("main"));
-        assert!(last.text.contains("coming soon"));
+        assert!(last.text.contains("feature"));
+        assert!(last.text.contains("Switched"));
     }
 
     #[test]
@@ -633,12 +768,12 @@ mod tests {
     #[test]
     fn tab_lists_candidates_when_ambiguous() {
         let mut state = state();
-        state.push_char('s');
+        // Empty input matches every command, so Tab lists them all as candidates.
         state.complete();
-        assert_eq!(state.input(), "s");
+        assert_eq!(state.input(), "");
         let last = state.log().last().unwrap();
         assert!(last.text.contains("session"));
-        assert!(last.text.contains("space"));
+        assert!(last.text.contains("man"));
     }
 
     #[test]
@@ -665,6 +800,34 @@ mod tests {
         assert_eq!(echoed.unwrap().text, "man");
         assert!(state.log().iter().any(|l| l.text.contains("Available")));
         assert_eq!(state.input(), "");
+    }
+
+    #[test]
+    fn session_switch_changes_the_active_worktree() {
+        let mut state = state(); // main (active), feature
+        for c in "session switch feature".chars() {
+            state.push_char(c);
+        }
+        let submission = state.submit();
+        assert!(matches!(submission.effect, Effect::Activate(_)));
+        assert_eq!(state.list().active_index(), 1);
+        let last = state.log().last().unwrap();
+        assert_eq!(last.kind, LineKind::Notice);
+        assert!(last.text.contains("feature"));
+    }
+
+    #[test]
+    fn session_switch_with_an_unknown_name_errors() {
+        let mut state = state();
+        for c in "session switch nope".chars() {
+            state.push_char(c);
+        }
+        state.submit();
+        // The active worktree is unchanged and an error is logged.
+        assert_eq!(state.list().active_index(), 0);
+        let last = state.log().last().unwrap();
+        assert_eq!(last.kind, LineKind::Error);
+        assert!(last.text.contains("no worktree named"));
     }
 
     #[test]
@@ -902,6 +1065,18 @@ mod tests {
         let mut state = state();
         state.log_sessions();
         assert!(state.log().last().unwrap().text.contains("No sessions yet"));
+    }
+
+    #[test]
+    fn log_output_and_error_append_lines() {
+        let mut state = state();
+        state.log_output("did a thing");
+        state.log_error("it broke");
+        let last_two: Vec<_> = state.log().iter().rev().take(2).collect();
+        assert_eq!(last_two[0].kind, LineKind::Error);
+        assert_eq!(last_two[0].text, "it broke");
+        assert_eq!(last_two[1].kind, LineKind::Output);
+        assert_eq!(last_two[1].text, "did a thing");
     }
 
     #[test]
