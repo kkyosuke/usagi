@@ -73,35 +73,77 @@ pub fn register_existing(storage: &Storage, path: &Path, name: &str) -> Result<W
     Ok(workspace)
 }
 
-/// Ensure the repository's `.gitignore` excludes usagi's `.usagi/` metadata
-/// directory so per-project state is never committed.
+/// The `.gitignore` block usagi maintains: ignore everything under `.usagi/`
+/// *except* the shared `issues/` directory, while still keeping the derived
+/// `index.json` cache out of git.
 ///
-/// Idempotent: if `.usagi/` (with or without a trailing slash) is already
-/// listed it does nothing; otherwise it appends the entry, creating the
-/// `.gitignore` file when absent and preserving any existing content.
+/// Task issues are meant to be committed and shared with the team, so they are
+/// re-included; the machine-local state (`state.json`, `settings.json`,
+/// `history.json`, `worktree/`) and the rebuildable issue index stay ignored.
+const USAGI_IGNORE_BLOCK: &[&str] = &[".usagi/*", "!.usagi/issues/", ".usagi/issues/index.json"];
+
+/// Whether `line` is one of the gitignore entries usagi manages (including the
+/// legacy `.usagi/` form), so it can be normalized to the current block.
+fn is_usagi_ignore_line(line: &str) -> bool {
+    matches!(
+        line.trim(),
+        ".usagi"
+            | ".usagi/"
+            | ".usagi/*"
+            | "!.usagi/issues"
+            | "!.usagi/issues/"
+            | ".usagi/issues/index.json"
+    )
+}
+
+/// Ensure the repository's `.gitignore` ignores usagi's per-project metadata
+/// while keeping the shared `.usagi/issues/` directory tracked.
+///
+/// Idempotent: if the current [`USAGI_IGNORE_BLOCK`] is already present it does
+/// nothing. Otherwise it strips any usagi-managed lines (including a legacy
+/// `.usagi/` entry, which would wrongly hide the issues directory) and appends
+/// the current block, preserving all other content and creating the file when
+/// absent.
 fn ignore_usagi_dir(repo: &Path) -> Result<()> {
-    const ENTRY: &str = ".usagi/";
     let gitignore = repo.join(".gitignore");
 
-    let mut existing = match fs::read_to_string(&gitignore) {
+    let existing = match fs::read_to_string(&gitignore) {
         Ok(text) => text,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
         Err(e) => return Err(e).context(format!("failed to read {}", gitignore.display())),
     };
 
-    if existing
+    // Already normalized: every managed line is present and nothing else needs
+    // changing.
+    let present: Vec<&str> = existing
         .lines()
-        .any(|line| matches!(line.trim(), ".usagi" | ".usagi/"))
-    {
+        .filter(|l| is_usagi_ignore_line(l))
+        .map(str::trim)
+        .collect();
+    if present == USAGI_IGNORE_BLOCK {
         return Ok(());
     }
 
-    if !existing.is_empty() && !existing.ends_with('\n') {
-        existing.push('\n');
+    // Drop any managed lines (e.g. a legacy `.usagi/`) and keep the rest.
+    let mut kept: Vec<&str> = existing
+        .lines()
+        .filter(|l| !is_usagi_ignore_line(l))
+        .collect();
+    // Trim trailing blank lines so the appended block sits flush.
+    while kept.last().is_some_and(|l| l.trim().is_empty()) {
+        kept.pop();
     }
-    existing.push_str(ENTRY);
-    existing.push('\n');
-    fs::write(&gitignore, existing).context(format!("failed to write {}", gitignore.display()))
+
+    let mut out = String::new();
+    for line in kept {
+        out.push_str(line);
+        out.push('\n');
+    }
+    for entry in USAGI_IGNORE_BLOCK {
+        out.push_str(entry);
+        out.push('\n');
+    }
+    fs::write(&gitignore, out).context(format!("failed to write {}", gitignore.display()))
 }
 
 #[cfg(test)]
@@ -164,10 +206,11 @@ mod tests {
         assert_eq!(workspace.path, dest);
         assert!(dest.join(".git").is_dir());
         assert!(dest.join(".usagi/state.json").is_file());
-        // The clone's .gitignore is created with the usagi metadata entry.
+        // The clone's .gitignore is created with the usagi metadata block,
+        // which keeps the shared issues directory tracked.
         assert_eq!(
             std::fs::read_to_string(dest.join(".gitignore")).unwrap(),
-            ".usagi/\n"
+            ".usagi/*\n!.usagi/issues/\n.usagi/issues/index.json\n"
         );
         assert_eq!(storage.load_workspaces().unwrap().len(), 1);
     }
@@ -189,7 +232,7 @@ mod tests {
         assert!(std::fs::read_to_string(repo.join(".gitignore"))
             .unwrap()
             .lines()
-            .any(|l| l.trim() == ".usagi/"));
+            .any(|l| l.trim() == ".usagi/*"));
         assert_eq!(storage.load_workspaces().unwrap().len(), 1);
     }
 
@@ -231,6 +274,9 @@ mod tests {
         assert!(err.to_string().contains("already exists"));
     }
 
+    /// The canonical block usagi appends, as it appears in the file.
+    const IGNORE_BLOCK: &str = ".usagi/*\n!.usagi/issues/\n.usagi/issues/index.json\n";
+
     #[test]
     fn ignore_usagi_dir_appends_to_existing_gitignore_preserving_content() {
         let tmp = tempfile::tempdir().unwrap();
@@ -242,7 +288,7 @@ mod tests {
 
         assert_eq!(
             std::fs::read_to_string(repo.join(".gitignore")).unwrap(),
-            "target\n/build\n.usagi/\n"
+            format!("target\n/build\n{IGNORE_BLOCK}")
         );
     }
 
@@ -250,30 +296,38 @@ mod tests {
     fn ignore_usagi_dir_is_idempotent() {
         let tmp = tempfile::tempdir().unwrap();
         let repo = tmp.path();
-        std::fs::write(repo.join(".gitignore"), "node_modules\n.usagi/\n").unwrap();
+        std::fs::write(
+            repo.join(".gitignore"),
+            format!("node_modules\n{IGNORE_BLOCK}"),
+        )
+        .unwrap();
 
         ignore_usagi_dir(repo).unwrap();
 
-        // Already present: left untouched, no duplicate entry.
+        // Already normalized: left untouched, no duplicate entries.
         assert_eq!(
             std::fs::read_to_string(repo.join(".gitignore")).unwrap(),
-            "node_modules\n.usagi/\n"
+            format!("node_modules\n{IGNORE_BLOCK}")
         );
     }
 
     #[test]
-    fn ignore_usagi_dir_accepts_a_bare_entry_without_a_slash() {
+    fn ignore_usagi_dir_migrates_a_legacy_bare_entry() {
         let tmp = tempfile::tempdir().unwrap();
         let repo = tmp.path();
-        // The slashless form `.usagi` also counts as already ignored.
-        std::fs::write(repo.join(".gitignore"), ".usagi\n").unwrap();
-
-        ignore_usagi_dir(repo).unwrap();
-
-        assert_eq!(
-            std::fs::read_to_string(repo.join(".gitignore")).unwrap(),
-            ".usagi\n"
-        );
+        // A legacy `.usagi/` (or slashless `.usagi`) hid the issues directory;
+        // it must be replaced by the selective block so issues are tracked.
+        for legacy in [".usagi\n", ".usagi/\n", "node_modules\n.usagi/\n\n"] {
+            std::fs::write(repo.join(".gitignore"), legacy).unwrap();
+            ignore_usagi_dir(repo).unwrap();
+            let result = std::fs::read_to_string(repo.join(".gitignore")).unwrap();
+            assert!(result.contains(".usagi/*\n"));
+            assert!(result.contains("!.usagi/issues/\n"));
+            // No bare legacy entry survives.
+            assert!(!result
+                .lines()
+                .any(|l| matches!(l.trim(), ".usagi" | ".usagi/")));
+        }
     }
 
     #[test]

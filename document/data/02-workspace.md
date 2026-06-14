@@ -14,6 +14,7 @@
 - [git 検査の方針](#git-検査の方針)
 - [`settings.json`: プロジェクト固有の設定上書き（ローカル設定）](#settingsjson-プロジェクト固有の設定上書きローカル設定)
 - [`history.json`](#historyjson)
+- [`issues/`: タスク issue](#issues-タスク-issue)
 
 ## 保存場所
 
@@ -23,11 +24,21 @@
 <repo>/.usagi/
 ├── state.json      # worktree / ブランチの状態スナップショット
 ├── settings.json   # プロジェクト固有の設定上書き（ローカル設定）
-└── history.json    # ワークスペース画面で実行したコマンドの履歴
+├── history.json    # ワークスペース画面で実行したコマンドの履歴
+└── issues/         # タスク issue（git で共有する。後述）
+    ├── 001-*.md    # 1 issue = 1 ファイル（frontmatter 付き markdown）
+    └── index.json  # 一覧・検索を速くする派生キャッシュ（git 管理外）
 ```
 
 - どの worktree からコマンドを実行しても、`git worktree list` の先頭（＝プライマリ worktree）を基準に保存先を解決します（`infrastructure/git.rs` の `primary_worktree`）。これによりリポジトリ内で 1 つの `.usagi/` に集約されます。
-- `.usagi/` は `.gitignore` 済みのため、これらのファイルは **コミットされずローカルにのみ保持** されます（マシンごとのローカルな状態・設定という位置づけ）。
+- `.usagi/` の大半（`state.json` / `settings.json` / `history.json` / `worktree/`）は **マシンローカルな状態・設定** で、`.gitignore` 済みのため **コミットされません**。
+- 例外は **`.usagi/issues/`**。タスク issue はチームで共有したいので git 管理対象とし、`usagi init` は次の選択的な `.gitignore` を書き込みます（既存の `.usagi/` 単独エントリは移行されます）。派生キャッシュの `index.json` だけは再生成可能なので除外したままにします。
+
+  ```gitignore
+  .usagi/*
+  !.usagi/issues/
+  .usagi/issues/index.json
+  ```
 
 ### セッションの worktree 配置
 
@@ -211,3 +222,83 @@ session "login"  (/Users/me/git/usagi/.usagi/worktree/login)
 - `HistoryStore::append` は「読み込み → 1 件追加 → アトミック書き込み」を行う。読み込み時にファイルが無ければ空の履歴として扱う。
 - ワークスペース画面での永続化は **ベストエフォート**。書き込みに失敗しても画面の操作は止めない（履歴が残らないだけ）。
 - 対応するドメイン型は `domain/history.rs` の `HistoryEntry`。表示側の挙動は [../design/05-home.md](../design/05-home.md#履歴の永続化) を参照。
+
+## `issues/`: タスク issue
+
+プロジェクトのタスクを管理する issue です。`.usagi/` の他のファイルと異なり **git で共有** され、チームで同じタスク一覧を見られます。`infrastructure/issue_store.rs` の `IssueStore` が管理します。
+
+```
+<repo>/.usagi/issues/
+├── 001-add-doctor-command.md   # 1 issue = 1 ファイル
+├── 002-fix-login.md
+└── index.json                  # 派生キャッシュ（git 管理外）
+```
+
+### issue ファイル（`NNN-<slug>.md`）
+
+本リポジトリが `issues/` 配下で使う形式と同じく、上部に **frontmatter**（行ベースのメタデータ）、その下に自由記述の markdown 本文を持ちます。ファイル名は `番号(3桁ゼロ詰め)-タイトルのスラッグ.md`。
+
+```markdown
+---
+number: 1
+title: doctor コマンドを追加
+status: todo
+priority: medium
+labels: [cli, infra]
+dependson: [2, 3]
+created_at: 2026-06-14T00:00:00+00:00
+updated_at: 2026-06-14T00:00:00+00:00
+---
+
+# doctor コマンドを追加
+
+本文（markdown 自由記述）。
+```
+
+| フィールド | 型 | 意味 |
+|---|---|---|
+| `number` | u32 | 採番された一意な番号（ファイル名の接頭辞と一致）。新規作成時に「既存の最大値 + 1」で振る |
+| `title` | string | タイトル |
+| `status` | enum | `todo` / `in-progress` / `done` |
+| `priority` | enum | `high` / `medium` / `low`（既定 `medium`） |
+| `labels` | array&lt;string&gt; | 任意のラベル |
+| `dependson` | array&lt;u32&gt; | 先に `done` になっている必要がある issue 番号 |
+| `created_at` / `updated_at` | RFC3339(UTC) | 作成・更新日時 |
+
+- frontmatter は JSON 標準（serde_yaml 不採用）の方針に合わせ、既知フィールドを対象にした軽量パーサで読み書きします。未知のキーは無視するので、フォーマットを後方互換に拡張できます。
+- 書き込みはアトミック（一時ファイル + `rename`）。タイトル変更でスラッグが変わった場合は、同じ番号の旧ファイルを削除して 1 issue = 1 ファイルを保ちます。
+
+### `index.json`（派生キャッシュ）
+
+一覧・検索を速くするための、各 issue のメタデータ（本文を除く）のキャッシュです。`version` を持ち、markdown ファイルが常に **正**。`index.json` が無い／壊れている場合は markdown 群から自動再構築されるため、欠落しても整合性は損なわれません（だから git 管理外でよい）。
+
+```jsonc
+{
+  "version": 1,
+  "issues": [
+    {
+      "number": 1,
+      "title": "doctor コマンドを追加",
+      "status": "todo",
+      "priority": "medium",
+      "labels": ["cli"],
+      "dependson": [2, 3],
+      "file": "001-add-doctor-command.md",
+      "created_at": "2026-06-14T00:00:00+00:00",
+      "updated_at": "2026-06-14T00:00:00+00:00"
+    }
+  ]
+}
+```
+
+### 依存関係の解決（着手可能な issue）
+
+一覧・検索では各 issue に **着手可能か（ready）** を付与します。`dependson` に挙げた issue が **すべて `done`** で、かつ自身が `done` でないものを ready とみなします（存在しない依存番号は未達として扱う）。これにより「今すぐ着手できるタスク」を絞り込めます。
+
+| 層 | モジュール | 役割 |
+|---|---|---|
+| domain | `domain/issue.rs` | `Issue` / `IssueSummary` / `IssueStatus` / `IssuePriority`、frontmatter の読み書き |
+| infrastructure | `infrastructure/issue_store.rs` | `.usagi/issues/` の走査・読み書き、`index.json` の生成・再構築・採番 |
+| usecase | `usecase/issue.rs` | `create` / `get` / `list` / `search` / `update` / `delete` と ready 判定 |
+
+> CLI（`usagi issue`）からの操作は [issue 024](../../issues/024-issue-cli.md)、AI エージェント（MCP）からの操作は [issue 025](../../issues/025-issue-mcp.md) で扱います。永続化基盤そのものは [issue 023](../../issues/023-issue-store.md)。
