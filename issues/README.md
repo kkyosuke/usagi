@@ -20,7 +20,7 @@
 | 005 | [ai](005-ai.md) | `ai` AI エージェントへの指示・対話 | tui | high | 002 |
 | 006 | [terminal](006-terminal.md) | `terminal` 対話型ターミナル | tui | medium | 002 |
 | 007 | [history](007-history.md) | `history` コマンド履歴表示 | tui | medium | 002 |
-| 008 | [man](008-man.md) | `man` ヘルプ表示 | tui | low | 002 |
+| 008 | [man](008-man.md) ✅ | `man` ヘルプ表示 | tui | low | 002 |
 | 009 | [sync](009-sync.md) | `usagi sync` main の変更を同期 | cli | medium | 003 |
 | 010 | [finish](010-finish.md) | `usagi finish` セッション統合・削除 | cli | high | 003 |
 | 011 | [list](011-list.md) | `usagi list` 全セッション俯瞰 | cli | medium | 003 |

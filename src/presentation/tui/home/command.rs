@@ -53,13 +53,17 @@ impl CommandResult {
     }
 }
 
-/// Name and one-line description of a registered command, exposed to commands
-/// (via [`CommandContext`]) so e.g. `man` can list the whole surface without
-/// reaching back into the registry.
+/// Name, description, and usage detail of a registered command, exposed to
+/// commands (via [`CommandContext`]) so e.g. `man` can list the whole surface,
+/// and describe any single command, without reaching back into the registry.
 #[derive(Debug, Clone, Copy)]
 pub struct CommandInfo {
     pub name: &'static str,
     pub description: &'static str,
+    /// One-line usage syntax, e.g. `man [command]`.
+    pub usage: &'static str,
+    /// Example invocations shown by `man <command>`.
+    pub examples: &'static [&'static str],
 }
 
 /// Everything a command may read while running, beyond its own argument string.
@@ -87,6 +91,17 @@ pub trait Command {
         &[]
     }
 
+    /// One-line usage syntax shown by `man <command>`. Defaults to just the
+    /// command name (i.e. the command takes no arguments).
+    fn usage(&self) -> &'static str {
+        self.name()
+    }
+
+    /// Example invocations shown by `man <command>`. Empty by default.
+    fn examples(&self) -> &'static [&'static str] {
+        &[]
+    }
+
     /// Run the command with its (trimmed) argument string and the context.
     fn run(&self, args: &str, ctx: &CommandContext) -> CommandResult;
 }
@@ -107,6 +122,14 @@ impl Command for ManCommand {
         &["help"]
     }
 
+    fn usage(&self) -> &'static str {
+        "man [command]"
+    }
+
+    fn examples(&self) -> &'static [&'static str] {
+        &["man", "man session"]
+    }
+
     fn run(&self, args: &str, ctx: &CommandContext) -> CommandResult {
         if args.is_empty() {
             let mut lines = vec![LogLine::output("Available commands:")];
@@ -116,17 +139,34 @@ impl Command for ManCommand {
                     info.name, info.description
                 )));
             }
+            lines.push(LogLine::output(
+                "Type \"man <command>\" for usage and examples.",
+            ));
             return CommandResult::lines(lines);
         }
 
         match ctx.commands.iter().find(|info| info.name == args) {
-            Some(info) => CommandResult::line(LogLine::output(format!(
-                "{} — {}",
-                info.name, info.description
-            ))),
+            Some(info) => CommandResult::lines(describe(info)),
             None => CommandResult::line(LogLine::error(format!("no manual entry for \"{args}\""))),
         }
     }
+}
+
+/// The detailed help shown by `man <command>`: a header, a usage line, and any
+/// example invocations.
+fn describe(info: &CommandInfo) -> Vec<LogLine> {
+    let mut lines = vec![
+        LogLine::output(format!("{} — {}", info.name, info.description)),
+        LogLine::output("Usage:"),
+        LogLine::output(format!("  {}", info.usage)),
+    ];
+    if !info.examples.is_empty() {
+        lines.push(LogLine::output("Examples:"));
+        for example in info.examples {
+            lines.push(LogLine::output(format!("  {example}")));
+        }
+    }
+    lines
 }
 
 /// `history`: lists the commands entered so far this session.
@@ -216,6 +256,14 @@ impl Command for SessionCommand {
         "Create or manage sessions (branch + worktree)"
     }
 
+    fn usage(&self) -> &'static str {
+        "session [new] <name>"
+    }
+
+    fn examples(&self) -> &'static [&'static str] {
+        &["session", "session new feature-x"]
+    }
+
     fn run(&self, args: &str, _ctx: &CommandContext) -> CommandResult {
         let mut parts = args.splitn(2, char::is_whitespace);
         let sub = parts.next().unwrap_or("");
@@ -265,10 +313,13 @@ impl Command for SessionCommand {
 
 /// A recognised command whose real behaviour is not built yet. It produces a
 /// friendly "coming soon" line so the surface stays discoverable; the follow-up
-/// issues replace each one with a real [`Command`] implementation.
+/// issues replace each one with a real [`Command`] implementation. It still
+/// carries usage/examples so `man <command>` is useful ahead of implementation.
 struct ComingSoonCommand {
     name: &'static str,
     description: &'static str,
+    usage: &'static str,
+    examples: &'static [&'static str],
 }
 
 impl Command for ComingSoonCommand {
@@ -278,6 +329,14 @@ impl Command for ComingSoonCommand {
 
     fn description(&self) -> &'static str {
         self.description
+    }
+
+    fn usage(&self) -> &'static str {
+        self.usage
+    }
+
+    fn examples(&self) -> &'static [&'static str] {
+        self.examples
     }
 
     fn run(&self, _args: &str, _ctx: &CommandContext) -> CommandResult {
@@ -306,19 +365,27 @@ impl CommandRegistry {
                 Box::new(ComingSoonCommand {
                     name: "space",
                     description: "Switch between worktrees",
+                    usage: "space [name]",
+                    examples: &["space", "space main"],
                 }),
                 Box::new(ComingSoonCommand {
                     name: "ai",
                     description: "Talk to the AI agent",
+                    usage: "ai <prompt>",
+                    examples: &["ai fix the failing test"],
                 }),
                 Box::new(ComingSoonCommand {
                     name: "terminal",
                     description: "Open an interactive terminal",
+                    usage: "terminal",
+                    examples: &[],
                 }),
                 Box::new(HistoryCommand),
                 Box::new(ComingSoonCommand {
                     name: "doctor",
                     description: "Check that required tools are installed",
+                    usage: "doctor",
+                    examples: &[],
                 }),
                 Box::new(ManCommand),
                 Box::new(ClearCommand),
@@ -332,13 +399,15 @@ impl CommandRegistry {
         self.commands.push(command);
     }
 
-    /// Name + description of every command, in display order.
+    /// Name, description, usage, and examples of every command, in display order.
     fn infos(&self) -> Vec<CommandInfo> {
         self.commands
             .iter()
             .map(|c| CommandInfo {
                 name: c.name(),
                 description: c.description(),
+                usage: c.usage(),
+                examples: c.examples(),
             })
             .collect()
     }
@@ -489,11 +558,46 @@ mod tests {
     }
 
     #[test]
-    fn man_with_a_known_command_shows_its_description() {
-        let result = registry().dispatch("man session", &[]);
-        assert_eq!(result.lines.len(), 1);
+    fn man_without_argument_hints_at_per_command_help() {
+        let result = registry().dispatch("man", &[]);
+        let last = result.lines.last().unwrap();
+        assert!(last.text.contains("man <command>"));
+    }
+
+    #[test]
+    fn man_with_a_known_command_shows_usage_and_examples() {
+        let result = registry().dispatch("man space", &[]);
+        assert!(result.lines.len() > 1);
+        // Header, then a Usage block, then an Examples block.
         assert_eq!(result.lines[0].kind, LineKind::Output);
-        assert!(result.lines[0].text.starts_with("session —"));
+        assert!(result.lines[0].text.starts_with("space —"));
+        let joined = result
+            .lines
+            .iter()
+            .map(|l| l.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(joined.contains("Usage:"));
+        assert!(joined.contains("space [name]"));
+        assert!(joined.contains("Examples:"));
+        assert!(joined.contains("space main"));
+    }
+
+    #[test]
+    fn man_with_a_command_without_examples_omits_the_examples_block() {
+        // `clear` takes no arguments and has no examples (trait defaults).
+        let result = registry().dispatch("man clear", &[]);
+        let joined = result
+            .lines
+            .iter()
+            .map(|l| l.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(joined.starts_with("clear —"));
+        assert!(joined.contains("Usage:"));
+        // Default usage is just the command name.
+        assert!(joined.contains("  clear"));
+        assert!(!joined.contains("Examples:"));
     }
 
     #[test]
