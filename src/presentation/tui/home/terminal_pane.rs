@@ -6,15 +6,15 @@
 //! a detach); this module borrows it and runs the render/input loop. Keystrokes
 //! are forwarded to the shell as raw bytes.
 //!
-//! `Ctrl-O` is a leader key, so the user can switch sessions without losing the
-//! shell:
+//! `Ctrl-O` opens the **session picker**, so the user can switch sessions
+//! without losing the shell:
 //!
-//! - `Ctrl-O` alone (no follow-up within [`LEADER_TIMEOUT`]) **detaches** — the
-//!   pane returns to the sidebar but the shell stays alive in the pool.
-//! - `Ctrl-O` then `n` / `]` or `p` / `[` switches the pane to the next /
-//!   previous worktree's terminal, staying focused.
-//! - `Ctrl-O` twice sends a literal `Ctrl-O` to the shell (the escape hatch for
-//!   programs that bind it).
+//! - `Ctrl-O` overlays a list of every session (the root plus each worktree);
+//!   `1`–`9` or `↑`/`↓` + `Enter` switches the pane to that session's terminal,
+//!   staying focused. The shell just left keeps running in the pool.
+//! - `Esc` closes the picker and resumes the current shell.
+//! - `Ctrl-O` again **detaches** — the pane returns to the sidebar but the shell
+//!   stays alive in the pool.
 //!
 //! Each outcome is reported to the event loop as a [`PaneExit`]; the shell
 //! exiting on its own reports [`PaneExit::Closed`].
@@ -57,11 +57,6 @@ const POLL_SLICE: Duration = Duration::from_millis(4);
 /// presses wake it far sooner; this is only a safety net so a terminal resize
 /// is eventually noticed even while nothing else is happening.
 const IDLE_REDRAW: Duration = Duration::from_millis(100);
-
-/// How long the leader (`Ctrl-O`) waits for its follow-up key before giving up
-/// and treating the lone `Ctrl-O` as a detach. Long enough to type the second
-/// key deliberately, short enough that a bare detach feels immediate.
-const LEADER_TIMEOUT: Duration = Duration::from_millis(400);
 
 /// How many lines one wheel notch scrolls the embedded terminal's history.
 const WHEEL_LINES: i32 = 3;
@@ -136,7 +131,7 @@ fn drive(
             // Input is queued: forward every pending key (or scroll the
             // history), then redraw.
             Wake::Input => {
-                if let Some(exit) = pump_input(pty, geo, &mut scrollback)? {
+                if let Some(exit) = pump_input(term, state, pty, geo, &mut scrollback, &mut prev)? {
                     return Ok(exit);
                 }
             }
@@ -171,12 +166,16 @@ fn wait(pty: &PtySession, drawn_gen: u64) -> Result<Wake> {
 
 /// Forward every queued key press to the shell, or — for the wheel and
 /// `Shift`+`PageUp`/`PageDown` — scroll the pane's history via `scrollback`.
-/// Returns `Some(exit)` when the user detaches or switches (via the `Ctrl-O`
-/// leader); other events are ignored so the next redraw picks up any new size.
+/// `Ctrl-O` opens the session picker instead. Returns `Some(exit)` when the user
+/// switches or detaches; other events are ignored so the next redraw picks up
+/// any new size.
 fn pump_input(
+    term: &Term,
+    state: &mut HomeState,
     pty: &mut PtySession,
     geo: ui::TerminalGeometry,
     scrollback: &mut usize,
+    prev: &mut Vec<String>,
 ) -> Result<Option<PaneExit>> {
     while event::poll(Duration::ZERO)? {
         match event::read()? {
@@ -191,12 +190,12 @@ fn pump_input(
                     continue;
                 }
                 if is_leader(&key) {
-                    match resolve_leader(pty)? {
-                        // The leader resolved to a pane action: hand it back.
-                        Leader::Exit(exit) => return Ok(Some(exit)),
-                        // `Ctrl-O Ctrl-O` sent a literal byte; keep driving.
-                        Leader::Stay => continue,
+                    // `Ctrl-O` opens the picker; it returns the pane action to
+                    // leave on (switch / detach), or `None` to resume the shell.
+                    if let Some(exit) = run_session_picker(term, state, geo, prev)? {
+                        return Ok(Some(exit));
                     }
+                    continue;
                 }
                 let bytes = encode_key(&key);
                 if !bytes.is_empty() {
@@ -259,42 +258,53 @@ fn apply_scroll(scrollback: &mut usize, delta: i32) {
     };
 }
 
-/// What the `Ctrl-O` leader resolved to: a pane action to return, or "stay" when
-/// the follow-up was handled in place (a literal `Ctrl-O` sent to the shell).
-enum Leader {
-    Exit(PaneExit),
-    Stay,
-}
-
-/// Resolve the `Ctrl-O` leader by waiting up to [`LEADER_TIMEOUT`] for a
-/// follow-up key. A lone `Ctrl-O` (timeout, or any unrecognised follow-up)
-/// detaches; `n`/`]` and `p`/`[` switch sessions; a second `Ctrl-O` sends a
-/// literal one to the shell and stays.
-fn resolve_leader(pty: &mut PtySession) -> Result<Leader> {
-    let deadline = Instant::now() + LEADER_TIMEOUT;
-    loop {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() || !event::poll(remaining)? {
-            return Ok(Leader::Exit(PaneExit::Detach));
+/// Run the in-pane session picker (`Ctrl-O`): overlay the session list and read
+/// keys until the user switches to a session (`1`-`9` or `↑`/`↓` + `Enter`),
+/// cancels (`Esc`), or detaches (`Ctrl-O` again). Returns the [`PaneExit`] to
+/// leave the pane on, or `None` to resume the current shell. The picker is drawn
+/// over the live frame, so it shares the caller's `prev` diff buffer.
+fn run_session_picker(
+    term: &Term,
+    state: &mut HomeState,
+    geo: ui::TerminalGeometry,
+    prev: &mut Vec<String>,
+) -> Result<Option<PaneExit>> {
+    state.open_session_picker();
+    // The shell cursor has no place under the overlay.
+    let _ = term.hide_cursor();
+    let exit = loop {
+        render(term, state, None, geo, prev)?;
+        let Event::Key(key) = event::read()? else {
+            continue;
+        };
+        if !is_press(key) {
+            continue;
         }
-        if let Event::Key(key) = event::read()? {
-            if !is_press(key) {
-                continue;
-            }
-            let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-            return Ok(match key.code {
-                KeyCode::Char('n') | KeyCode::Char(']') => Leader::Exit(PaneExit::SwitchNext),
-                KeyCode::Char('p') | KeyCode::Char('[') => Leader::Exit(PaneExit::SwitchPrev),
-                // `Ctrl-O Ctrl-O`: forward a literal Ctrl-O (0x0f) and stay.
-                KeyCode::Char('o') if ctrl => {
-                    pty.write(&[0x0f])?;
-                    Leader::Stay
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') => state.session_picker_move_up(),
+            KeyCode::Down | KeyCode::Char('j') => state.session_picker_move_down(),
+            // A 1-based session number jumps to and selects that row.
+            KeyCode::Char(c) if c.is_ascii_digit() => {
+                if state.session_picker_select_number(c as usize - '0' as usize) {
+                    break Some(PaneExit::Switch);
                 }
-                // Anything else: the lone Ctrl-O was a detach.
-                _ => Leader::Exit(PaneExit::Detach),
-            });
+            }
+            KeyCode::Enter => break Some(PaneExit::Switch),
+            KeyCode::Esc => break None,
+            // A second `Ctrl-O` detaches, leaving the shell alive in the pool.
+            KeyCode::Char('o') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                break Some(PaneExit::Detach)
+            }
+            _ => {}
         }
+    };
+    // `Switch` commits the highlighted session; everything else just closes.
+    if exit == Some(PaneExit::Switch) {
+        state.confirm_session_picker();
+    } else {
+        state.cancel_session_picker();
     }
+    Ok(exit)
 }
 
 /// Draw the workspace frame (sidebar + terminal pane), repainting only the rows
@@ -336,8 +346,7 @@ fn is_press(key: KeyEvent) -> bool {
     matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat)
 }
 
-/// `Ctrl-O` is the leader key: on its own it detaches, and it prefixes the
-/// session-switch keys (see [`resolve_leader`]).
+/// `Ctrl-O` opens the session picker (see [`run_session_picker`]).
 fn is_leader(key: &KeyEvent) -> bool {
     key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('o')
 }

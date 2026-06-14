@@ -84,10 +84,13 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
                 created.worktrees.len()
             )),
             sessions: reload_sessions(&root),
+            // Select the freshly created session so it is active straight away.
+            select: Some(created.name),
         },
         Err(e) => SessionOutcome {
             line: LogLine::error(format!("session failed: {e}")),
             sessions: None,
+            select: None,
         },
     };
 
@@ -102,6 +105,7 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
         Ok(outcome) if outcome.removed => SessionOutcome {
             line: LogLine::output(format!("Removed session \"{name}\" 🧹")),
             sessions: reload_sessions(&remove_root),
+            select: None,
         },
         Ok(outcome) => {
             let paths = outcome
@@ -116,11 +120,13 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
                          Use \"session remove {name} --force\" to discard."
                 )),
                 sessions: None,
+                select: None,
             }
         }
         Err(e) => SessionOutcome {
             line: LogLine::error(format!("session remove failed: {e}")),
             sessions: None,
+            select: None,
         },
     };
 
@@ -177,9 +183,9 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
         handle.set_attached(Some(dir.to_path_buf()));
         let result = terminal_pane::run(term, home, pty, &handle);
         // Switching keeps a session in the foreground (the loop re-attaches to
-        // the next one immediately); detaching, closing, or erroring returns to
-        // the sidebar, so nothing is attached any more.
-        if !matches!(result, Ok(PaneExit::SwitchNext) | Ok(PaneExit::SwitchPrev)) {
+        // the chosen one immediately); detaching, closing, or erroring returns
+        // to the sidebar, so nothing is attached any more.
+        if !matches!(result, Ok(PaneExit::Switch)) {
             handle.set_attached(None);
         }
         result
