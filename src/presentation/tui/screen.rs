@@ -3,6 +3,8 @@ use std::io;
 use anyhow::Result;
 use console::{Key, Term};
 
+use crate::presentation::tui::echo::EchoGuard;
+
 /// Source of key presses driving an interactive screen.
 ///
 /// Abstracting the read lets event loops be exercised without a real terminal:
@@ -41,10 +43,16 @@ const DISABLE_MOUSE: &str = "\x1b[?1006l\x1b[?1000l";
 pub struct AlternateScreenGuard {
     term: Term,
     farewell: bool,
+    /// Disables terminal echo while the TUI is up so the mouse-report flood that
+    /// arrives once [`ENABLE_MOUSE`] is set is not echoed to the screen between
+    /// `console`'s per-key raw reads. Dropped (echo restored) after this guard's
+    /// own `drop` body runs.
+    _echo: EchoGuard,
 }
 
 impl AlternateScreenGuard {
     pub fn new(term: Term) -> Result<Self> {
+        let echo = EchoGuard::new();
         term.write_str(ENTER_ALT_SCREEN)?;
         term.write_str(DISABLE_ALT_SCROLL)?;
         term.write_str(ENABLE_MOUSE)?;
@@ -52,6 +60,7 @@ impl AlternateScreenGuard {
         Ok(Self {
             term,
             farewell: true,
+            _echo: echo,
         })
     }
 
