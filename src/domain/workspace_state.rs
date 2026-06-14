@@ -59,6 +59,25 @@ pub struct WorktreeState {
     pub updated_at: DateTime<Utc>,
 }
 
+/// A session created under `.usagi/worktree/<name>/`: a parallel working tree
+/// spanning every repository found under the workspace root (each as a git
+/// worktree on the session branch) plus any copied non-git files.
+///
+/// Recorded so the workspace knows its sessions even when the root is not a git
+/// repository — `worktrees` (synced from `git worktree list`) only covers a
+/// single repo, whereas `sessions` aggregates across a multi-repo tree.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionRecord {
+    /// Session name (also the branch name created in every repository).
+    pub name: String,
+    /// Root of the session tree: `<workspace>/.usagi/worktree/<name>`.
+    pub root: PathBuf,
+    /// The mirrored path of every repository that received a worktree.
+    pub worktrees: Vec<PathBuf>,
+    /// When the session was created.
+    pub created_at: DateTime<Utc>,
+}
+
 /// State of an entire repository and all of its worktrees.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WorkspaceState {
@@ -66,6 +85,10 @@ pub struct WorkspaceState {
     pub default_branch: String,
     /// State of every worktree, primary first.
     pub worktrees: Vec<WorktreeState>,
+    /// Sessions created under `.usagi/worktree/`, across all repositories in the
+    /// workspace tree. Empty (and omitted from older files) when none exist.
+    #[serde(default)]
+    pub sessions: Vec<SessionRecord>,
     /// When the state was last synced from git.
     pub updated_at: DateTime<Utc>,
 }
@@ -75,6 +98,7 @@ impl WorkspaceState {
         Self {
             default_branch: default_branch.into(),
             worktrees,
+            sessions: Vec::new(),
             updated_at: Utc::now(),
         }
     }
@@ -122,5 +146,31 @@ mod tests {
         let json = serde_json::to_string_pretty(&state).unwrap();
         let parsed: WorkspaceState = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, state);
+    }
+
+    #[test]
+    fn new_state_starts_with_no_sessions() {
+        let state = WorkspaceState::new("main", Vec::new());
+        assert!(state.sessions.is_empty());
+    }
+
+    #[test]
+    fn sessions_round_trip_and_default_to_empty_when_absent() {
+        let mut state = WorkspaceState::new("main", Vec::new());
+        state.sessions.push(SessionRecord {
+            name: "feature-x".to_string(),
+            root: PathBuf::from("/repo/.usagi/worktree/feature-x"),
+            worktrees: vec![PathBuf::from("/repo/.usagi/worktree/feature-x/app-a")],
+            created_at: Utc::now(),
+        });
+
+        let json = serde_json::to_string_pretty(&state).unwrap();
+        let parsed: WorkspaceState = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, state);
+
+        // An older file without a `sessions` key still parses (defaults empty).
+        let legacy = r#"{"default_branch":"main","worktrees":[],"updated_at":"2026-06-13T05:01:18.659149Z"}"#;
+        let parsed: WorkspaceState = serde_json::from_str(legacy).unwrap();
+        assert!(parsed.sessions.is_empty());
     }
 }

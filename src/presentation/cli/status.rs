@@ -57,6 +57,7 @@ mod tests {
         WorkspaceState {
             default_branch: "main".to_string(),
             updated_at: ts,
+            sessions: Vec::new(),
             worktrees: vec![
                 WorktreeState {
                     branch: Some("main".to_string()),
