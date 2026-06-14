@@ -1485,6 +1485,7 @@ dependencies = [
  "console",
  "crossterm",
  "dirs",
+ "libc",
  "notify-rust",
  "portable-pty",
  "serde",
