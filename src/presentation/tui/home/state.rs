@@ -9,7 +9,7 @@
 
 use crate::domain::workspace_state::{SessionRecord, WorktreeState};
 
-use super::command::{CommandRegistry, Effect, WorktreeRef};
+use super::command::{CommandRegistry, Effect, Hint, WorktreeRef};
 use super::terminal_view::TerminalView;
 
 /// The display name of a worktree: its branch, or a placeholder when detached.
@@ -363,6 +363,13 @@ impl HomeState {
 
     pub fn input(&self) -> &str {
         &self.input
+    }
+
+    /// The advisory input hint for the current command input (matching commands,
+    /// or the usage of the command being given arguments). Computed on demand
+    /// for rendering; see [`CommandRegistry::suggest`].
+    pub fn hint(&self) -> Hint {
+        self.registry.suggest(&self.input)
     }
 
     pub fn log(&self) -> &[LogLine] {
