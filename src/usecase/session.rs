@@ -21,9 +21,10 @@ use std::path::{Path, PathBuf};
 use anyhow::{anyhow, bail, Context, Result};
 use chrono::Utc;
 
-use crate::domain::workspace_state::{SessionRecord, WorkspaceState};
+use crate::domain::workspace_state::SessionRecord;
 use crate::infrastructure::git;
 use crate::infrastructure::workspace_store::WorkspaceStore;
+use crate::usecase::workspace_state;
 
 /// Names never descended into or copied while building a session: usagi's own
 /// data directory (which holds the session tree itself) and any `.git`.
@@ -84,19 +85,22 @@ pub fn create(workspace_root: &Path, name: &str) -> Result<CreatedSession> {
 }
 
 /// Append the session to `<workspace>/.usagi/state.json`, creating the state
-/// (with a git-derived default branch) when none exists yet. This is what lets
-/// a multi-repo, non-git root still track its sessions.
+/// when none exists yet. This is what lets a multi-repo, non-git root still
+/// track its sessions. Each worktree's git status is captured at record time.
 fn record(workspace_root: &Path, name: &str, root: &Path, worktrees: &[PathBuf]) -> Result<()> {
     let store = WorkspaceStore::new(workspace_root);
-    let mut state = store
-        .load()?
-        .unwrap_or_else(|| WorkspaceState::new(git::default_branch(workspace_root), Vec::new()));
+    let mut state = store.load()?.unwrap_or_default();
+
+    let worktree_states = worktrees
+        .iter()
+        .map(|path| workspace_state::inspect_worktree(path))
+        .collect();
 
     let now = Utc::now();
     state.sessions.push(SessionRecord {
         name: name.to_string(),
         root: root.to_path_buf(),
-        worktrees: worktrees.to_vec(),
+        worktrees: worktree_states,
         created_at: now,
     });
     state.updated_at = now;
@@ -136,8 +140,8 @@ pub fn remove(workspace_root: &Path, name: &str, force: bool) -> Result<RemovalO
     let dirty: Vec<PathBuf> = session
         .worktrees
         .iter()
-        .filter(|wt| git::has_uncommitted_changes(wt))
-        .cloned()
+        .filter(|wt| git::has_uncommitted_changes(&wt.path))
+        .map(|wt| wt.path.clone())
         .collect();
     if !dirty.is_empty() && !force {
         return Ok(RemovalOutcome {
@@ -148,8 +152,8 @@ pub fn remove(workspace_root: &Path, name: &str, force: bool) -> Result<RemovalO
 
     // Remove each repository's worktree and its now-orphaned session branch.
     for wt in &session.worktrees {
-        let source = git::primary_worktree(wt)?;
-        git::remove_worktree(&source, wt, force)?;
+        let source = git::primary_worktree(&wt.path)?;
+        git::remove_worktree(&source, &wt.path, force)?;
         // The branch may already be gone (e.g. a partial earlier removal).
         let _ = git::delete_branch(&source, name);
     }

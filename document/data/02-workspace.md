@@ -45,37 +45,28 @@
 
 ## `state.json`
 
-リポジトリ全体と、その全 worktree の状態です。
+ワークスペースの**セッション**一覧と、各セッションの worktree の状態です。usagi が
+追跡する状態の単位はセッションだけで、トップレベルの worktree 一覧は持ちません
+（各 worktree は所属するセッションの中に記録されます）。
 
 ```jsonc
 {
   "version": 1,
-  "default_branch": "main",
-  "worktrees": [
-    {
-      "branch": "main",
-      "path": "/Users/me/git/usagi",
-      "head": "76e906f",
-      "primary": true,
-      "upstream": "origin/main",
-      "status": "pushed",
-      "updated_at": "2026-06-13T05:01:18.659149Z"
-    },
-    {
-      "branch": "feat/login",
-      "path": "/Users/me/git/usagi/.usagi/worktree/login",
-      "head": "aaf5459",
-      "primary": false,
-      "upstream": null,
-      "status": "local",
-      "updated_at": "2026-06-13T05:01:18.659149Z"
-    }
-  ],
   "sessions": [
     {
       "name": "login",
       "root": "/Users/me/git/usagi/.usagi/worktree/login",
-      "worktrees": ["/Users/me/git/usagi/.usagi/worktree/login"],
+      "worktrees": [
+        {
+          "branch": "login",
+          "path": "/Users/me/git/usagi/.usagi/worktree/login/app-a",
+          "head": "aaf5459",
+          "primary": false,
+          "upstream": null,
+          "status": "local",
+          "updated_at": "2026-06-13T05:01:18.659149Z"
+        }
+      ],
       "created_at": "2026-06-13T05:01:18.659149Z"
     }
   ],
@@ -87,33 +78,40 @@
 
 | フィールド | 型 | 意味 |
 |---|---|---|
-| `default_branch` | string | リポジトリの既定ブランチ（例 `main`） |
-| `worktrees` | array | 各 worktree の状態（プライマリが先頭） |
 | `sessions` | array | 作成済みセッションの一覧（`.usagi/worktree/` 配下）。古いファイルには無く、その場合は空として扱う |
-| `updated_at` | RFC3339(UTC) | この状態を git から同期した日時 |
+| `updated_at` | RFC3339(UTC) | この状態を git から最後に更新した日時 |
+
+> ワークスペース共通の「既定ブランチ」は持ちません。複数リポジトリで既定ブランチが異なり得る（`main` / `master` など）ため、各 worktree の status は**その worktree のリポジトリの既定ブランチ**に対して個別に判定します。
 
 ### セッションごと（`SessionRecord`）
 
-`worktrees` は単一リポジトリの `git worktree list` 由来でリポジトリ 1 つ分しか表せないのに対し、`sessions` は**ルート配下の全リポジトリを横断**してセッション単位で集約します。これにより、ルートが git でない複数リポジトリ構成でもセッションの所在を追跡できます。
+セッションは usagi が追跡する唯一の状態単位で、**ルート配下の全リポジトリを横断**して
+worktree を束ねます。各 worktree は git ステータス付き（下記 `WorktreeState`）で記録される
+ため、ワークスペースの状態はセッションだけで完全に表現でき、ルートが git でない複数
+リポジトリ構成にも対応できます。
 
 | フィールド | 型 | 意味 |
 |---|---|---|
 | `name` | string | セッション名（各リポジトリで作成したブランチ名でもある） |
 | `root` | path | セッションツリーのルート（`<workspace>/.usagi/worktree/<name>`） |
-| `worktrees` | array&lt;path&gt; | worktree を作成した各リポジトリのミラー先パス |
+| `worktrees` | array&lt;WorktreeState&gt; | worktree を作成した各リポジトリの状態（下記） |
 | `created_at` | RFC3339(UTC) | セッションの作成日時 |
 
-セッション作成（`usecase/session.rs`）はこの `SessionRecord` を `state.json` に追記します。git 検査由来の再同期（`usecase/workspace_state::sync`）は `sessions` をそのまま引き継ぎ、git からは再構築しません。
+セッション作成（`usecase/session.rs`）はこの `SessionRecord` を `state.json` に追記します。
+再同期（`usecase/workspace_state::sync`）は各セッション worktree の git ステータスを
+読み直して更新します。
 
 ### worktree ごと（`WorktreeState`）
+
+各セッションの `worktrees` 配列の要素。1 リポジトリにつき 1 つ。
 
 | フィールド | 型 | 意味 |
 |---|---|---|
 | `branch` | string?\| | チェックアウト中のブランチ名。detached HEAD なら `null` |
-| `path` | path | worktree ディレクトリの絶対パス |
+| `path` | path | worktree ディレクトリの絶対パス（`.usagi/worktree/<name>/...`） |
 | `head` | string | チェックアウト中コミットの短縮ハッシュ（7 桁） |
-| `primary` | bool | リポジトリのプライマリ（main）worktree なら `true` |
-| `upstream` | string?\| | 上流追跡ブランチ（例 `origin/feat/login`）。無ければ `null` |
+| `primary` | bool | 予約フィールド（セッション worktree では常に `false`） |
+| `upstream` | string?\| | 上流追跡ブランチ（例 `origin/login`）。無ければ `null` |
 | `status` | enum | ブランチのライフサイクル状態（下記） |
 | `updated_at` | RFC3339(UTC) | この worktree の状態を更新した日時 |
 
@@ -131,31 +129,30 @@
 
 優先度は **merged > pushed > local**。
 
-1. **merged**: そのブランチの先端が既定ブランチの ancestor（`git merge-base --is-ancestor`）であればマージ済みとみなす。リモートの既定ブランチ（`origin/<default>`）を優先的に基準にするため、ローカル fetch 前でも「リモート main に取り込まれたか」を反映できる。
-   - ただしプライマリ worktree と既定ブランチ自身は、自分自身に対する merged 判定から除外する（統合先ブランチなので `local` / `pushed` のみ）。
+1. **merged**: そのブランチの先端が、**その worktree のリポジトリの**既定ブランチの ancestor（`git merge-base --is-ancestor`）であればマージ済みとみなす。リモートの既定ブランチ（`origin/<default>`）を優先的に基準にするため、ローカル fetch 前でも「リモート main に取り込まれたか」を反映できる。
+   - ただし既定ブランチと同名のブランチは、自分自身に対する merged 判定から除外する（`local` / `pushed` のみ）。
 2. **pushed**: 上流追跡ブランチ（`<branch>@{upstream}`）があれば push 済み。
 3. **local**: 上記いずれにも当てはまらない。
 
 ## 同期と参照
 
-`usecase/workspace_state.rs` が git 検査 → status 分類 → 保存をまとめます。
+`usecase/workspace_state.rs` がセッション worktree の git 検査 → status 分類 → 保存をまとめます。
 
 | 関数 | 役割 |
 |---|---|
-| `inspect(cwd)` | git を検査して `WorkspaceState` を組み立てる（保存しない） |
-| `sync(cwd)` | `inspect` の結果を `<repo>/.usagi/state.json` に保存して返す |
+| `inspect_worktree(path)` | 1 つの worktree の git ステータスから `WorktreeState` を組み立てる（既定ブランチはその worktree のリポジトリから解決） |
+| `sync(cwd)` | 保存済み state を読み込み、各セッション worktree のステータスを再計算して `<repo>/.usagi/state.json` に保存して返す（セッションが無ければ空の state を保存） |
 | `load(cwd)` | 保存済みの状態を読み込む（無ければ `None`） |
 
-CLI からは `usagi status` で `sync` が走り、最新状態を保存しつつ一覧表示します。
+CLI からは `usagi status` で `sync` が走り、最新状態を保存しつつセッションごとに一覧表示します。
 
 ```
 $ usagi status
-default branch: main  (updated 2026-06-13 05:01 UTC)
+updated 2026-06-13 05:01 UTC
 
-* pushed   main                     76e906f → origin/main
-    /Users/me/git/usagi
-  local    feat/login               aaf5459
-    /Users/me/git/usagi/.usagi/worktree/login
+session "login"  (/Users/me/git/usagi/.usagi/worktree/login)
+  local    login                    aaf5459
+    /Users/me/git/usagi/.usagi/worktree/login/app-a
 ```
 
 ## git 検査の方針（`infrastructure/git.rs`）
