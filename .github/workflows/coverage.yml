@@ -70,12 +70,11 @@ jobs:
           echo "## 📊 Test Coverage"
           echo ""
           echo "> 🚀 **いまのカバレッジ (Lines): ${total}** — この調子でいこう！"
+          echo ""
           if [ -z "$rows" ]; then
-            echo ">"
-            echo "> 🎉✨ パーフェクト！全ファイル Lines カバレッジ 100% を達成しました 🏆🐰"
+            echo "🎉✨ パーフェクト！全ファイル Lines カバレッジ 100% を達成しました 🏆🐰"
           else
-            echo ">"
-            echo "> 100% に届いていないファイルだけピックアップしました 👇"
+            echo "100% に届いていないファイルだけピックアップしました 👇"
             echo ""
             echo "| 📄 ファイル | 🌐 Regions | 🔧 Functions | 📈 Lines |"
             echo "| :--- | ---: | ---: | ---: |"

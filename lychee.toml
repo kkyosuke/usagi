@@ -1,0 +1,27 @@
+# lychee 設定 — Markdown のリンク切れチェック
+# https://github.com/lycheeverse/lychee
+
+# ファイル内アンカー(#見出し)・相対リンクのフラグメントも検証する。
+# document/ 配下は目次から各見出しへのアンカーリンクを多用しているため必須。
+include_fragments = true
+
+# 一時的なネットワークエラーはリトライする（外部リンクの揺らぎ対策）。
+max_retries = 3
+retry_wait_time = 2
+
+# 同時接続数を抑えてレートリミットを避ける。
+max_concurrency = 8
+
+# 1 リクエストのタイムアウト（秒）。
+timeout = 20
+
+# 成功とみなす HTTP ステータス。429（レートリミット）は到達できているため許容する。
+accept = ["200..=206", "429"]
+
+# チェック対象から除外する URL パターン。
+exclude = [
+  # ローカル・例示用 URL
+  "^https?://localhost",
+  "^https?://127\\.0\\.0\\.1",
+  "^https?://example\\.(com|org)",
+]
