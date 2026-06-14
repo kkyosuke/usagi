@@ -14,6 +14,7 @@
 - [プルリクエスト](#プルリクエスト)
 - [品質チェック（コミット・push 前に必須）](#品質チェックコミットpush-前に必須)
 - [Git Hooks（lefthook）](#git-hookslefthook)
+- [リリース](#リリース)
 
 ## アーキテクチャ
 
@@ -82,3 +83,32 @@ cargo test                                 # テスト
 | pre-commit | ブランチ名チェック / staged な `.rs` を `cargo fmt` |
 | commit-msg | Conventional Commits 形式チェック |
 | pre-push | `cargo clippy -- -D warnings` / `cargo test` |
+
+## リリース
+
+リリースは **`Cargo.toml` の `version` 変更を起点に自動化**されている。手動でタグを切る必要はない。
+
+### 手順
+
+1. リリースしたい変更を `main` にマージする。
+2. `Cargo.toml` の `version` を上げる PR を作成し `main` にマージする（例: `0.1.0` → `0.2.0`）。
+3. 以降は自動で進む:
+   - `auto-release.yml` が `main` への `Cargo.toml` 変更 push を検知し、version が前コミットから変わっていれば `v<version>` タグを対象にリリースを起動する。
+   - reusable な `release.yml` が呼ばれ、4 プラットフォーム（Linux / macOS amd64・arm64 / Windows）のバイナリをビルドし、`v<version>` タグと GitHub Release を作成して成果物を添付する。
+
+> version が変わらない push、または同名タグが既に存在する場合はスキップされる。
+
+### リリースノート
+
+- リリースノートは **GitHub Models（AI）** が前回タグからのコミットログをもとに日本語で自動生成する（`release.yml` の `release-notes` ジョブ）。
+- AI 生成に失敗した場合はコミットログをそのまま本文にフォールバックする。
+- あわせて GitHub 標準の自動生成ノート（PR 一覧）も付与される。
+
+### ワークフロー構成
+
+| ファイル | トリガー | 役割 |
+|---|---|---|
+| `.github/workflows/auto-release.yml` | `main` への `Cargo.toml` 変更 push | version 変更を検知し `release.yml` を呼び出す |
+| `.github/workflows/release.yml` | `v*` タグ push / `workflow_call` | リリースノート生成・ビルド・GitHub Release 作成 |
+
+`release.yml` は `v*` タグの手動 push でも従来どおり動作する（`workflow_call` は追加のトリガー）。

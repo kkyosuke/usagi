@@ -4,13 +4,108 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_call:
+    inputs:
+      tag:
+        description: 'Tag to release (e.g. v0.2.0). Defaults to the pushed tag.'
+        required: true
+        type: string
 
 permissions:
   contents: write
 
 jobs:
+  release-notes:
+    name: Generate release notes
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      models: read
+    outputs:
+      notes: ${{ steps.notes.outputs.notes }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Collect changelog
+        id: changelog
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          # 直近の「自分以外の」タグを前回リリースとして範囲を決める
+          PREV_TAG="$(git tag --sort=-v:refname | grep -vxF "$TAG" | head -n1 || true)"
+          if [ -n "$PREV_TAG" ]; then
+            RANGE="$PREV_TAG..HEAD"
+            echo "range: $PREV_TAG..HEAD"
+          else
+            RANGE="HEAD"
+            echo "range: (all history)"
+          fi
+          {
+            echo 'log<<__CHANGELOG_EOF__'
+            git log --no-merges --pretty=format:'- %s (%h)' "$RANGE"
+            echo
+            echo '__CHANGELOG_EOF__'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Generate release notes via GitHub Models
+        id: notes
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag || github.ref_name }}
+          CHANGELOG: ${{ steps.changelog.outputs.log }}
+        run: |
+          set -euo pipefail
+
+          SYSTEM_PROMPT='あなたは Rust 製 CLI/TUI ツール「usagi」のリリース担当です。与えられた git コミットログをもとに、日本語で簡潔なリリースノートを Markdown で書いてください。要件: (1) 冒頭にこのリリースの概要を 1〜2 文。(2) 変更を「✨ 新機能 / 🐛 修正 / 🔧 内部改善 / 📝 ドキュメント」などの見出しで分類し箇条書き。(3) 該当のないカテゴリは省略。(4) コミットハッシュや PR 番号は省いて読み手にわかりやすく言い換える。(5) 文書タイトル(# 見出し)は付けず本文から始める。'
+
+          USER_PROMPT="$(printf 'バージョン %s のリリースノートを作成してください。以下はコミットログです:\n\n%s' "$TAG" "$CHANGELOG")"
+
+          # GitHub Models API へのリクエストボディを jq で安全に組み立てる
+          REQ_BODY="$(jq -n \
+            --arg model "openai/gpt-4o-mini" \
+            --arg system "$SYSTEM_PROMPT" \
+            --arg user "$USER_PROMPT" \
+            '{
+              model: $model,
+              temperature: 0.3,
+              messages: [
+                {role: "system", content: $system},
+                {role: "user", content: $user}
+              ]
+            }')"
+
+          HTTP_CODE="$(curl -sS -w '%{http_code}' -o response.json \
+            -X POST "https://models.github.ai/inference/chat/completions" \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -H "Accept: application/json" \
+            -d "$REQ_BODY" || echo "000")"
+
+          NOTES=""
+          if [ "$HTTP_CODE" = "200" ]; then
+            NOTES="$(jq -r '.choices[0].message.content // ""' response.json)"
+          else
+            echo "::warning::GitHub Models API failed (HTTP ${HTTP_CODE}); falling back to commit log."
+            cat response.json || true
+          fi
+
+          # 取得失敗時はコミットログをそのままノートにフォールバック
+          if [ -z "$NOTES" ] || [ "$NOTES" = "null" ]; then
+            NOTES="$CHANGELOG"
+          fi
+
+          {
+            echo 'notes<<__NOTES_EOF__'
+            echo "$NOTES"
+            echo '__NOTES_EOF__'
+          } >> "$GITHUB_OUTPUT"
+
   build-and-release:
     name: Build and Release
+    needs: release-notes
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -72,7 +167,9 @@ jobs:
       - name: Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
           files: ${{ env.ASSET_FILENAME }}
+          body: ${{ needs.release-notes.outputs.notes }}
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

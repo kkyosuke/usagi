@@ -129,6 +129,10 @@ lefthook install
 - type: `feat` `fix` `docs` `style` `refactor` `perf` `test` `build` `ci` `chore` `revert`
 - 緊急時のスキップ: `LEFTHOOK=0 git commit ...` または `git commit --no-verify`
 
+### Release
+
+リリースは `Cargo.toml` の `version` 変更を起点に自動化されています。`version` を上げる変更を `main` にマージすると、`v<version>` タグと GitHub Release が自動作成され、各プラットフォーム向けバイナリが添付されます。リリースノートは GitHub Models（AI）がコミットログから自動生成します。詳細は [document/06-conventions.md#リリース](document/06-conventions.md#リリース) を参照してください。
+
 ## License
 
 MIT
