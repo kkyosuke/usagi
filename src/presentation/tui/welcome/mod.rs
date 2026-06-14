@@ -8,6 +8,7 @@ use console::Term;
 use crate::domain::workspace::Workspace;
 use crate::infrastructure::storage::Storage;
 use crate::presentation::tui::config;
+use crate::presentation::tui::home;
 use crate::presentation::tui::new;
 use crate::presentation::tui::new::state::NewProject;
 use crate::presentation::tui::open;
@@ -46,6 +47,7 @@ pub fn run() -> Result<()> {
             }
         }
     };
+    let mut open_home = |t: &Term, ws: &Workspace| home::run(t, ws);
     let mut open_config = |t: &Term| config::run(t);
     event::event_loop(
         &term,
@@ -53,6 +55,7 @@ pub fn run() -> Result<()> {
         &mut open_open,
         &mut open_new,
         &mut create_project,
+        &mut open_home,
         &mut open_config,
     )
 }
