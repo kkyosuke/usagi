@@ -2,7 +2,7 @@
 number: 002
 feature: workspace-screen
 title: ワークスペース画面とコマンドモード基盤
-status: todo
+status: done
 priority: high
 category: tui
 dependson: []

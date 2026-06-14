@@ -21,7 +21,7 @@ pub enum Effect {
     Clear,
     /// Quit the whole application.
     Quit,
-    /// Open the session-name modal (the user ran `session` without a name).
+    /// Open the session-name modal (the user ran `session new` without a name).
     OpenSessionModal,
     /// Create a session with the given name (the user supplied one).
     CreateSession(String),
@@ -258,8 +258,8 @@ impl Command for QuitCommand {
 
 /// `session`: create, list, or switch sessions (a branch + worktree per repo).
 ///
-/// - `session new <name>` (or just `session <name>`) creates a session; with no
-///   name it returns [`Effect::OpenSessionModal`] so the screen can prompt.
+/// - `session new <name>` creates a session; `session new` with no name returns
+///   [`Effect::OpenSessionModal`] so the screen can prompt.
 /// - `session list` lists the sessions.
 /// - `session switch <name>` switches the active session (via
 ///   [`Effect::Activate`]); `session switch` with no name lists the sessions and
@@ -303,7 +303,6 @@ impl Command for SessionCommand {
         };
 
         match sub {
-            "" => open(),
             "new" if rest.is_empty() => open(),
             "new" => create(rest),
             "list" => CommandResult {
@@ -331,7 +330,7 @@ impl Command for SessionCommand {
                     )),
                 }
             }
-            _ => create(args.trim()),
+            _ => CommandResult::line(LogLine::error(format!("usage: {}", self.usage()))),
         }
     }
 }
@@ -428,8 +427,8 @@ pub struct CommandRegistry {
 
 impl CommandRegistry {
     /// A registry with every built-in command, in display order. The not-yet
-    /// implemented feature commands (`session`, `space`, `ai`, `terminal`,
-    /// `doctor`) are present as discoverable "coming soon" placeholders.
+    /// implemented feature commands (`ai`, `doctor`) are present as discoverable
+    /// "coming soon" placeholders; `session` and `terminal` are fully implemented.
     pub fn with_builtins() -> Self {
         Self {
             commands: vec![
@@ -705,25 +704,33 @@ mod tests {
     }
 
     #[test]
-    fn session_without_a_name_opens_the_modal() {
-        // Bare `session` and `session new` both ask for a name via the modal.
-        for input in ["session", "session new"] {
-            let result = registry().dispatch(input, &[], &[]);
-            assert!(result.lines.is_empty());
-            assert_eq!(result.effect, Effect::OpenSessionModal);
-        }
+    fn session_new_without_a_name_opens_the_modal() {
+        // `session new` asks for a name via the modal.
+        let result = registry().dispatch("session new", &[], &[]);
+        assert!(result.lines.is_empty());
+        assert_eq!(result.effect, Effect::OpenSessionModal);
     }
 
     #[test]
-    fn session_with_a_name_requests_creation() {
-        // `session new <name>` and the shorthand `session <name>` both create.
-        for input in ["session new feature-x", "session feature-x"] {
+    fn session_new_with_a_name_requests_creation() {
+        // Creation goes through `session new <name>` only.
+        let result = registry().dispatch("session new feature-x", &[], &[]);
+        assert!(result.lines.is_empty());
+        assert_eq!(
+            result.effect,
+            Effect::CreateSession("feature-x".to_string())
+        );
+    }
+
+    #[test]
+    fn bare_session_and_the_old_name_shorthand_show_usage() {
+        // Bare `session` and the removed `session <name>` shorthand no longer
+        // create or open the modal; they fall through to a usage error.
+        for input in ["session", "session feature-x"] {
             let result = registry().dispatch(input, &[], &[]);
-            assert!(result.lines.is_empty());
-            assert_eq!(
-                result.effect,
-                Effect::CreateSession("feature-x".to_string())
-            );
+            assert_eq!(result.effect, Effect::None);
+            assert_eq!(result.lines.len(), 1);
+            assert!(result.lines[0].text.contains("usage:"));
         }
     }
 

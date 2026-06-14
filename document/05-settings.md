@@ -77,7 +77,7 @@
 
 ### CLI
 
-CLI からも設定を確認・編集できます（[issue 015](../issues/015-config-edit.md)、[3. コマンドリファレンス](03-commands.md)）。
+CLI からも設定を確認・編集できます（[issue 015](../issues/015-config-edit.md)、[3. コマンドリファレンス](03-commands/README.md)）。
 
 - `usagi config` — 現在のグローバル設定を `key  value` 形式で一覧表示。
 - `usagi config --edit` — 設定ファイルを `$EDITOR`（→ `$VISUAL` → OS 既定）で開いて編集。保存後に

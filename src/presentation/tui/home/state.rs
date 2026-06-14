@@ -976,7 +976,7 @@ mod tests {
     #[test]
     fn session_command_without_a_name_opens_the_modal() {
         let mut state = state();
-        for c in "session".chars() {
+        for c in "session new".chars() {
             state.push_char(c);
         }
         let submission = state.submit();
