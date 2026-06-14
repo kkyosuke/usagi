@@ -1,0 +1,81 @@
+name: Auto Release on Version Bump
+
+# main へ Cargo.toml の version 変更が入ったら、自動でタグを作成しリリースする。
+# GITHUB_TOKEN で push したタグは他ワークフローを発火させないため、
+# タグ push をトリガーにする代わりに reusable な release.yml を直接呼び出す。
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'Cargo.toml'
+
+permissions:
+  contents: write
+
+jobs:
+  check-version:
+    name: Check version bump
+    runs-on: ubuntu-latest
+    outputs:
+      bumped: ${{ steps.detect.outputs.bumped }}
+      tag: ${{ steps.detect.outputs.tag }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect version change
+        id: detect
+        run: |
+          set -euo pipefail
+
+          read_version() {
+            # Cargo.toml の [package] 直下 version を取り出す
+            grep -m1 '^version[[:space:]]*=' "$1" \
+              | sed -E 's/^version[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/'
+          }
+
+          CURRENT="$(read_version Cargo.toml)"
+          echo "current version: ${CURRENT}"
+
+          # 直前コミットの Cargo.toml の version
+          if git show 'HEAD^:Cargo.toml' > /tmp/prev_cargo.toml 2>/dev/null; then
+            PREVIOUS="$(read_version /tmp/prev_cargo.toml)"
+          else
+            PREVIOUS=""
+          fi
+          echo "previous version: ${PREVIOUS:-<none>}"
+
+          TAG="v${CURRENT}"
+
+          if [ "$CURRENT" = "$PREVIOUS" ]; then
+            echo "version unchanged; skipping release."
+            echo "bumped=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # 既に同名タグが存在する場合は二重リリースを避ける
+          if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
+            echo "::warning::tag ${TAG} already exists; skipping release."
+            echo "bumped=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "version bumped: ${PREVIOUS:-<none>} -> ${CURRENT} (tag ${TAG})"
+          echo "bumped=true" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+  release:
+    name: Release
+    needs: check-version
+    if: needs.check-version.outputs.bumped == 'true'
+    permissions:
+      contents: write
+      models: read
+    uses: ./.github/workflows/release.yml
+    with:
+      tag: ${{ needs.check-version.outputs.tag }}
+    secrets: inherit
