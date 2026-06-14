@@ -30,7 +30,7 @@
 |---|---|---|
 | domain | `domain/workspace.rs` | グローバル登録エントリ `Workspace` |
 | domain | `domain/settings.rs` | アプリ設定 `Settings` / `Theme` / `AgentCli`、ローカル設定 `LocalSettings`（`with_local` で上書き解決） |
-| domain | `domain/workspace_state.rs` | リポジトリ状態 `WorkspaceState` / `WorktreeState` / `BranchStatus` |
+| domain | `domain/workspace_state.rs` | リポジトリ状態 `WorkspaceState` / `WorktreeState` / `SessionRecord` / `BranchStatus` |
 | domain | `domain/history.rs` | コマンド履歴の 1 件 `HistoryEntry` |
 | infrastructure | `infrastructure/storage.rs` | グローバル `~/.usagi/` の load/save（`Storage`） |
 | infrastructure | `infrastructure/workspace_store.rs` | リポジトリ `<repo>/.usagi/` の `state.json` / `settings.json` の load/save（`WorkspaceStore`） |
@@ -38,7 +38,8 @@
 | infrastructure | `infrastructure/git.rs` | git CLI 経由の読み取り専用検査 |
 | usecase | `usecase/workspace.rs` | グローバル登録の add/list/remove/touch |
 | usecase | `usecase/settings.rs` | グローバル設定の load/更新、ローカル設定の load/save と実効設定の解決（`effective`） |
-| usecase | `usecase/workspace_state.rs` | リポジトリ状態の inspect/sync/load |
+| usecase | `usecase/workspace_state.rs` | リポジトリ状態の inspect/sync/load（`sync` は `sessions` を保持） |
+| usecase | `usecase/session.rs` | セッション作成（再帰 worktree + コピー）と `state.json` への `SessionRecord` 追記 |
 
 ---
 

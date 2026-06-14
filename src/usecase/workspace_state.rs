@@ -14,10 +14,18 @@ use crate::infrastructure::git;
 use crate::infrastructure::workspace_store::WorkspaceStore;
 
 /// Inspect the repository containing `cwd`, persist its state, and return it.
+///
+/// Any sessions already recorded in the saved state are carried forward, since
+/// `inspect` rebuilds only the git-derived fields (`git worktree list` does not
+/// know about usagi sessions).
 pub fn sync(cwd: &Path) -> Result<WorkspaceState> {
-    let state = inspect(cwd)?;
+    let mut state = inspect(cwd)?;
     let root = git::primary_worktree(cwd)?;
-    WorkspaceStore::new(root).save(&state)?;
+    let store = WorkspaceStore::new(root);
+    if let Ok(Some(existing)) = store.load() {
+        state.sessions = existing.sessions;
+    }
+    store.save(&state)?;
     Ok(state)
 }
 
@@ -61,6 +69,7 @@ pub fn inspect(cwd: &Path) -> Result<WorkspaceState> {
     Ok(WorkspaceState {
         default_branch: default,
         worktrees: states,
+        sessions: Vec::new(),
         updated_at: now,
     })
 }
@@ -136,6 +145,31 @@ mod tests {
         let loaded = load(dir.path()).unwrap();
         assert_eq!(loaded.as_ref(), Some(&state));
         assert!(dir.path().join(".usagi/state.json").exists());
+    }
+
+    #[test]
+    fn sync_preserves_recorded_sessions() {
+        use crate::domain::workspace_state::SessionRecord;
+        use crate::infrastructure::workspace_store::WorkspaceStore;
+
+        let dir = tempfile::tempdir().unwrap();
+        init_repo(dir.path());
+
+        // Seed a saved state that already carries a session record.
+        let store = WorkspaceStore::new(dir.path());
+        let mut seeded = inspect(dir.path()).unwrap();
+        seeded.sessions.push(SessionRecord {
+            name: "wip".to_string(),
+            root: dir.path().join(".usagi/worktree/wip"),
+            worktrees: vec![dir.path().join(".usagi/worktree/wip")],
+            created_at: Utc::now(),
+        });
+        store.save(&seeded).unwrap();
+
+        // A fresh sync rebuilds the git fields but keeps the session.
+        let state = sync(dir.path()).unwrap();
+        assert_eq!(state.sessions.len(), 1);
+        assert_eq!(state.sessions[0].name, "wip");
     }
 
     #[test]

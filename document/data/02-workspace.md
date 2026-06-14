@@ -71,6 +71,14 @@
       "updated_at": "2026-06-13T05:01:18.659149Z"
     }
   ],
+  "sessions": [
+    {
+      "name": "login",
+      "root": "/Users/me/git/usagi/.usagi/worktree/login",
+      "worktrees": ["/Users/me/git/usagi/.usagi/worktree/login"],
+      "created_at": "2026-06-13T05:01:18.659149Z"
+    }
+  ],
   "updated_at": "2026-06-13T05:01:18.659149Z"
 }
 ```
@@ -81,7 +89,21 @@
 |---|---|---|
 | `default_branch` | string | リポジトリの既定ブランチ（例 `main`） |
 | `worktrees` | array | 各 worktree の状態（プライマリが先頭） |
+| `sessions` | array | 作成済みセッションの一覧（`.usagi/worktree/` 配下）。古いファイルには無く、その場合は空として扱う |
 | `updated_at` | RFC3339(UTC) | この状態を git から同期した日時 |
+
+### セッションごと（`SessionRecord`）
+
+`worktrees` は単一リポジトリの `git worktree list` 由来でリポジトリ 1 つ分しか表せないのに対し、`sessions` は**ルート配下の全リポジトリを横断**してセッション単位で集約します。これにより、ルートが git でない複数リポジトリ構成でもセッションの所在を追跡できます。
+
+| フィールド | 型 | 意味 |
+|---|---|---|
+| `name` | string | セッション名（各リポジトリで作成したブランチ名でもある） |
+| `root` | path | セッションツリーのルート（`<workspace>/.usagi/worktree/<name>`） |
+| `worktrees` | array&lt;path&gt; | worktree を作成した各リポジトリのミラー先パス |
+| `created_at` | RFC3339(UTC) | セッションの作成日時 |
+
+セッション作成（`usecase/session.rs`）はこの `SessionRecord` を `state.json` に追記します。git 検査由来の再同期（`usecase/workspace_state::sync`）は `sessions` をそのまま引き継ぎ、git からは再構築しません。
 
 ### worktree ごと（`WorktreeState`）
 
