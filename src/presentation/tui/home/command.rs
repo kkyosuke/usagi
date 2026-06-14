@@ -25,6 +25,8 @@ pub enum Effect {
     OpenSessionModal,
     /// Create a session with the given name (the user supplied one).
     CreateSession(String),
+    /// List the workspace's sessions (the user ran `session list`).
+    ListSessions,
 }
 
 /// The result of running a command: lines to append plus a side effect.
@@ -230,9 +232,13 @@ impl Command for SessionCommand {
             "" => open(),
             "new" if rest.is_empty() => open(),
             "new" => create(rest),
-            "list" | "remove" => CommandResult::line(LogLine::output(format!(
-                "\"session {sub}\" is coming soon 🐰"
-            ))),
+            "list" => CommandResult {
+                lines: Vec::new(),
+                effect: Effect::ListSessions,
+            },
+            "remove" => {
+                CommandResult::line(LogLine::output("\"session remove\" is coming soon 🐰"))
+            }
             _ => create(args.trim()),
         }
     }
@@ -532,13 +538,18 @@ mod tests {
     }
 
     #[test]
-    fn session_list_and_remove_are_coming_soon() {
-        for sub in ["list", "remove"] {
-            let result = registry().dispatch(&format!("session {sub}"), &[]);
-            assert_eq!(result.effect, Effect::None);
-            assert!(result.lines[0].text.contains("coming soon"));
-            assert!(result.lines[0].text.contains(sub));
-        }
+    fn session_list_requests_the_list_effect() {
+        let result = registry().dispatch("session list", &[]);
+        assert!(result.lines.is_empty());
+        assert_eq!(result.effect, Effect::ListSessions);
+    }
+
+    #[test]
+    fn session_remove_is_coming_soon() {
+        let result = registry().dispatch("session remove", &[]);
+        assert_eq!(result.effect, Effect::None);
+        assert!(result.lines[0].text.contains("coming soon"));
+        assert!(result.lines[0].text.contains("remove"));
     }
 
     #[test]
