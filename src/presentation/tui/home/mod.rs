@@ -30,12 +30,17 @@ use state::{HomeState, LogLine, SessionOutcome};
 /// workspace's `history.json` (best-effort). Assumes the alternate screen is
 /// already active (it is owned by the orchestrator).
 pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
-    let (worktrees, notice) = match WorkspaceStore::new(&workspace.path).load() {
-        Ok(Some(state)) => (state.worktrees, None),
-        Ok(None) => (Vec::new(), None),
-        Err(e) => (Vec::new(), Some(format!("Failed to load worktrees: {e}"))),
+    let (worktrees, sessions, notice) = match WorkspaceStore::new(&workspace.path).load() {
+        Ok(Some(state)) => (state.worktrees, state.sessions, None),
+        Ok(None) => (Vec::new(), Vec::new(), None),
+        Err(e) => (
+            Vec::new(),
+            Vec::new(),
+            Some(format!("Failed to load worktrees: {e}")),
+        ),
     };
     let mut state = HomeState::new(workspace.name.clone(), worktrees, notice);
+    state.restore_sessions(sessions);
 
     // Restore past commands so `history` and `↑`/`↓` recall span sessions.
     // A read failure is non-fatal: just start with an empty history.
@@ -66,12 +71,69 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
             worktrees: crate::usecase::workspace_state::sync(&root)
                 .ok()
                 .map(|s| s.worktrees),
+            // Sessions are recorded in state.json by `create`; reload them so
+            // `session list` reflects the new one (works for multi-repo too).
+            sessions: WorkspaceStore::new(&root)
+                .load()
+                .ok()
+                .flatten()
+                .map(|s| s.sessions),
         },
         Err(e) => SessionOutcome {
             line: LogLine::error(format!("session failed: {e}")),
             worktrees: None,
+            sessions: None,
         },
     };
 
-    event::event_loop(term, &mut reader, state, &mut persist, &mut create_session)
+    // Removing a session deletes its worktrees/branches and forgets it. A
+    // session with uncommitted changes is left untouched unless `--force`.
+    let remove_root = workspace.path.clone();
+    let mut remove_session = |name: &str, force: bool| match crate::usecase::session::remove(
+        &remove_root,
+        name,
+        force,
+    ) {
+        Ok(outcome) if outcome.removed => SessionOutcome {
+            line: LogLine::output(format!("Removed session \"{name}\" 🧹")),
+            worktrees: crate::usecase::workspace_state::sync(&remove_root)
+                .ok()
+                .map(|s| s.worktrees),
+            sessions: WorkspaceStore::new(&remove_root)
+                .load()
+                .ok()
+                .flatten()
+                .map(|s| s.sessions),
+        },
+        Ok(outcome) => {
+            let paths = outcome
+                .dirty
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            SessionOutcome {
+                line: LogLine::error(format!(
+                    "session \"{name}\" has uncommitted changes ({paths}). \
+                         Use \"session remove {name} --force\" to discard."
+                )),
+                worktrees: None,
+                sessions: None,
+            }
+        }
+        Err(e) => SessionOutcome {
+            line: LogLine::error(format!("session remove failed: {e}")),
+            worktrees: None,
+            sessions: None,
+        },
+    };
+
+    event::event_loop(
+        term,
+        &mut reader,
+        state,
+        &mut persist,
+        &mut create_session,
+        &mut remove_session,
+    )
 }

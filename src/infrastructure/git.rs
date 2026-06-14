@@ -118,6 +118,56 @@ pub fn add_worktree(repo: &Path, dest: &Path, branch: &str) -> Result<()> {
     Ok(())
 }
 
+/// Return `true` if the worktree at `path` has uncommitted changes — modified,
+/// staged, or untracked files (anything `git status --porcelain` reports).
+///
+/// A git failure (e.g. not a worktree) is treated as "no changes" so it never
+/// blocks a removal on its own.
+pub fn has_uncommitted_changes(path: &Path) -> bool {
+    git_capture(path, &["status", "--porcelain"])
+        .ok()
+        .flatten()
+        .map(|out| !out.is_empty())
+        .unwrap_or(false)
+}
+
+/// Remove the worktree at `worktree` from `repo`. With `force`, discard
+/// uncommitted changes; without it, git refuses a dirty worktree.
+pub fn remove_worktree(repo: &Path, worktree: &Path, force: bool) -> Result<()> {
+    let mut command = git_command(repo);
+    command.args(["worktree", "remove"]);
+    if force {
+        command.arg("--force");
+    }
+    let output = command
+        .arg(worktree)
+        .output()
+        .context("failed to run `git worktree remove`")?;
+    if !output.status.success() {
+        bail!(
+            "git worktree remove failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
+/// Force-delete `branch` in `repo` (`git branch -D`). Used when discarding a
+/// session, so the branch is removed regardless of merge status.
+pub fn delete_branch(repo: &Path, branch: &str) -> Result<()> {
+    let output = git_command(repo)
+        .args(["branch", "-D", branch])
+        .output()
+        .context("failed to run `git branch -D`")?;
+    if !output.status.success() {
+        bail!(
+            "git branch -D failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
 /// Return `true` if `path` is inside a git working tree.
 ///
 /// Used to decide whether an existing directory registered as a workspace can
@@ -497,6 +547,48 @@ mod tests {
             .canonicalize()
             .map(|p| p == canonical)
             .unwrap_or(false)));
+    }
+
+    #[test]
+    fn has_uncommitted_changes_detects_a_dirty_tree() {
+        let dir = tempfile::tempdir().unwrap();
+        init_repo(dir.path());
+        assert!(!has_uncommitted_changes(dir.path()));
+        // An untracked file makes the tree dirty.
+        std::fs::write(dir.path().join("new"), "y").unwrap();
+        assert!(has_uncommitted_changes(dir.path()));
+        // A non-repo path reports clean rather than erroring.
+        let plain = tempfile::tempdir().unwrap();
+        assert!(!has_uncommitted_changes(plain.path()));
+    }
+
+    #[test]
+    fn remove_worktree_deletes_a_clean_one_and_needs_force_when_dirty() {
+        let dir = tempfile::tempdir().unwrap();
+        init_repo(dir.path());
+        let clean = dir.path().join("clean");
+        add_worktree(dir.path(), &clean, "clean").unwrap();
+        remove_worktree(dir.path(), &clean, false).unwrap();
+        assert!(!clean.exists());
+
+        // A dirty worktree cannot be removed without force.
+        let dirty = dir.path().join("dirty");
+        add_worktree(dir.path(), &dirty, "dirty").unwrap();
+        std::fs::write(dirty.join("scratch"), "z").unwrap();
+        assert!(remove_worktree(dir.path(), &dirty, false).is_err());
+        // ...but force discards it.
+        remove_worktree(dir.path(), &dirty, true).unwrap();
+        assert!(!dirty.exists());
+    }
+
+    #[test]
+    fn delete_branch_removes_a_branch_and_errors_when_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        init_repo(dir.path());
+        run(dir.path(), &["branch", "doomed"]);
+        delete_branch(dir.path(), "doomed").unwrap();
+        // Deleting it again fails (it is gone).
+        assert!(delete_branch(dir.path(), "doomed").is_err());
     }
 
     #[test]

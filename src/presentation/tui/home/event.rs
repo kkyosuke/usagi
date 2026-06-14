@@ -30,15 +30,17 @@ pub enum Outcome {
 /// it to the workspace's `history.json`; tests pass a no-op.
 ///
 /// Creating a session (the user ran `session <name>`, or confirmed the name in
-/// the modal) is delegated to `create_session`, which performs the git /
-/// filesystem work and returns a [`SessionOutcome`] to apply to the screen. This
-/// keeps the loop itself free of that IO and directly testable.
+/// the modal) is delegated to `create_session`; removing one (`session remove
+/// <name>`) to `remove_session` (its `bool` is the `--force` flag). Both perform
+/// the git / filesystem work and return a [`SessionOutcome`] to apply to the
+/// screen, keeping the loop itself free of that IO and directly testable.
 pub fn event_loop(
     term: &Term,
     reader: &mut dyn KeyReader,
     mut state: HomeState,
     persist: &mut dyn FnMut(&str),
     create_session: &mut dyn FnMut(&str) -> SessionOutcome,
+    remove_session: &mut dyn FnMut(&str, bool) -> SessionOutcome,
 ) -> Result<Outcome> {
     loop {
         term.move_cursor_to(0, 0)?;
@@ -98,6 +100,11 @@ pub fn event_loop(
                             let outcome = create_session(&name);
                             state.apply_session_outcome(outcome);
                         }
+                        Effect::ListSessions => state.log_sessions(),
+                        Effect::RemoveSession { name, force } => {
+                            let outcome = remove_session(&name, force);
+                            state.apply_session_outcome(outcome);
+                        }
                         _ => {}
                     }
                 }
@@ -130,6 +137,16 @@ mod tests {
         SessionOutcome {
             line: LogLine::output("created"),
             worktrees: None,
+            sessions: None,
+        }
+    }
+
+    /// A `remove_session` callback that reports success without touching disk.
+    fn noop_remove(_: &str, _: bool) -> SessionOutcome {
+        SessionOutcome {
+            line: LogLine::output("removed"),
+            worktrees: None,
+            sessions: None,
         }
     }
 
@@ -176,7 +193,15 @@ mod tests {
         let mut reader = ScriptedReader::new(keys);
         let mut persist = |_: &str| {};
         let mut create_session: fn(&str) -> SessionOutcome = noop_create;
-        event_loop(&term, &mut reader, state, &mut persist, &mut create_session)
+        let mut remove_session: fn(&str, bool) -> SessionOutcome = noop_remove;
+        event_loop(
+            &term,
+            &mut reader,
+            state,
+            &mut persist,
+            &mut create_session,
+            &mut remove_session,
+        )
     }
 
     /// Types each character of `s` as a `Char` key.
@@ -275,12 +300,14 @@ mod tests {
         let mut recorded = Vec::new();
         let mut persist = |command: &str| recorded.push(command.to_string());
         let mut create_session: fn(&str) -> SessionOutcome = noop_create;
+        let mut remove_session: fn(&str, bool) -> SessionOutcome = noop_remove;
         let outcome = event_loop(
             &term,
             &mut reader,
             sample_state(),
             &mut persist,
             &mut create_session,
+            &mut remove_session,
         )
         .unwrap();
         assert!(matches!(outcome, Outcome::Back));
@@ -328,7 +355,15 @@ mod tests {
             created.push(name.to_string());
             outcome.clone()
         };
-        let result = event_loop(&term, &mut reader, state, &mut persist, &mut create_session);
+        let mut remove_session: fn(&str, bool) -> SessionOutcome = noop_remove;
+        let result = event_loop(
+            &term,
+            &mut reader,
+            state,
+            &mut persist,
+            &mut create_session,
+            &mut remove_session,
+        );
         (result, created)
     }
 
@@ -336,6 +371,7 @@ mod tests {
         SessionOutcome {
             line: LogLine::output("created"),
             worktrees: None,
+            sessions: None,
         }
     }
 
@@ -348,6 +384,60 @@ mod tests {
         keys.push(Ok(Key::Enter)); // create via noop_create
         keys.push(Ok(Key::Escape)); // cancel command mode
         keys.push(Ok(Key::Escape)); // leave sidebar
+        assert!(matches!(run(keys, sample_state()).unwrap(), Outcome::Back));
+    }
+
+    #[test]
+    fn removing_a_session_via_the_default_callback_succeeds() {
+        // Drives `:session remove x` through the shared no-op `remove_session`.
+        let mut keys = vec![Ok(Key::Char(':'))];
+        keys.extend(typed("session remove x"));
+        keys.push(Ok(Key::Enter)); // remove via noop_remove
+        keys.push(Ok(Key::Escape)); // cancel command mode
+        keys.push(Ok(Key::Escape)); // leave sidebar
+        assert!(matches!(run(keys, sample_state()).unwrap(), Outcome::Back));
+    }
+
+    #[test]
+    fn session_remove_invokes_the_remove_callback_with_force() {
+        // ":session remove old --force" routes to remove_session("old", true).
+        let mut keys = vec![Ok(Key::Char(':'))];
+        keys.extend(typed("session remove old --force"));
+        keys.push(Ok(Key::Enter));
+        keys.push(Ok(Key::Escape)); // cancel command mode
+        keys.push(Ok(Key::Escape)); // leave sidebar
+
+        let term = Term::stdout();
+        let mut reader = ScriptedReader::new(keys);
+        let mut persist = |_: &str| {};
+        let mut create_session: fn(&str) -> SessionOutcome = noop_create;
+        let mut removed = Vec::new();
+        let mut remove_session = |name: &str, force: bool| {
+            removed.push((name.to_string(), force));
+            ok_outcome()
+        };
+        let outcome = event_loop(
+            &term,
+            &mut reader,
+            sample_state(),
+            &mut persist,
+            &mut create_session,
+            &mut remove_session,
+        )
+        .unwrap();
+        assert!(matches!(outcome, Outcome::Back));
+        assert_eq!(removed, vec![("old".to_string(), true)]);
+    }
+
+    #[test]
+    fn session_list_logs_the_sessions() {
+        // `:session list` triggers the list effect, which logs the sessions.
+        let mut keys = vec![Ok(Key::Char(':'))];
+        keys.extend(typed("session list"));
+        keys.push(Ok(Key::Enter));
+        keys.push(Ok(Key::Escape)); // cancel command mode
+        keys.push(Ok(Key::Escape)); // leave sidebar
+                                    // Empty session list still drives the ListSessions arm without panicking.
         assert!(matches!(run(keys, sample_state()).unwrap(), Outcome::Back));
     }
 

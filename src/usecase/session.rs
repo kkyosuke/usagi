@@ -18,7 +18,7 @@ use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use chrono::Utc;
 
 use crate::domain::workspace_state::{SessionRecord, WorkspaceState};
@@ -101,6 +101,73 @@ fn record(workspace_root: &Path, name: &str, root: &Path, worktrees: &[PathBuf])
     });
     state.updated_at = now;
     store.save(&state)
+}
+
+/// The result of attempting to remove a session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemovalOutcome {
+    /// `true` when the session was removed; `false` when blocked by `dirty`.
+    pub removed: bool,
+    /// Worktrees with uncommitted changes that blocked a non-forced removal.
+    /// Empty when the session was removed.
+    pub dirty: Vec<PathBuf>,
+}
+
+/// Remove session `name` under `workspace_root`: delete every repository's
+/// worktree and session branch, drop any copied files, and forget it in
+/// `state.json`.
+///
+/// Without `force`, a session whose worktrees have uncommitted changes is left
+/// untouched and the dirty worktrees are returned for the caller to warn about.
+/// With `force`, those changes are discarded.
+pub fn remove(workspace_root: &Path, name: &str, force: bool) -> Result<RemovalOutcome> {
+    let store = WorkspaceStore::new(workspace_root);
+    let mut state = store
+        .load()?
+        .ok_or_else(|| anyhow!("no sessions recorded for this workspace"))?;
+    let index = state
+        .sessions
+        .iter()
+        .position(|s| s.name == name)
+        .ok_or_else(|| anyhow!("no such session: \"{name}\""))?;
+    let session = state.sessions[index].clone();
+
+    // Refuse to discard uncommitted work unless forced.
+    let dirty: Vec<PathBuf> = session
+        .worktrees
+        .iter()
+        .filter(|wt| git::has_uncommitted_changes(wt))
+        .cloned()
+        .collect();
+    if !dirty.is_empty() && !force {
+        return Ok(RemovalOutcome {
+            removed: false,
+            dirty,
+        });
+    }
+
+    // Remove each repository's worktree and its now-orphaned session branch.
+    for wt in &session.worktrees {
+        let source = git::primary_worktree(wt)?;
+        git::remove_worktree(&source, wt, force)?;
+        // The branch may already be gone (e.g. a partial earlier removal).
+        let _ = git::delete_branch(&source, name);
+    }
+
+    // Drop any copied files and now-empty directories left in the tree.
+    if session.root.exists() {
+        fs::remove_dir_all(&session.root)
+            .context(format!("failed to remove {}", session.root.display()))?;
+    }
+
+    state.sessions.remove(index);
+    state.updated_at = Utc::now();
+    store.save(&state)?;
+
+    Ok(RemovalOutcome {
+        removed: true,
+        dirty: Vec::new(),
+    })
 }
 
 /// Recursively mirror `src` into the already-created `dest`: a git repository
@@ -293,5 +360,88 @@ mod tests {
 
         let err = create(root.path(), "x").unwrap_err();
         assert!(err.to_string().contains("failed to create"));
+    }
+
+    // --- remove ------------------------------------------------------------
+
+    fn sessions_of(root: &Path) -> Vec<String> {
+        WorkspaceStore::new(root)
+            .load()
+            .unwrap()
+            .map(|s| s.sessions.into_iter().map(|r| r.name).collect())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn remove_errors_without_state_or_session() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        // No state.json yet.
+        let err = remove(root.path(), "x", false).unwrap_err();
+        assert!(err.to_string().contains("no sessions recorded"));
+
+        // State exists but the named session does not.
+        create(root.path(), "present").unwrap();
+        let err = remove(root.path(), "absent", false).unwrap_err();
+        assert!(err.to_string().contains("no such session"));
+    }
+
+    #[test]
+    fn remove_deletes_a_clean_single_repo_session() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        let created = create(root.path(), "feature").unwrap();
+        assert!(created.root.exists());
+
+        let outcome = remove(root.path(), "feature", false).unwrap();
+        assert!(outcome.removed);
+        assert!(outcome.dirty.is_empty());
+        // The worktree directory and the state record are both gone.
+        assert!(!created.root.exists());
+        assert!(sessions_of(root.path()).is_empty());
+        // The branch was deleted in the source repo.
+        assert!(!git_cmd(root.path())
+            .args(["rev-parse", "--verify", "--quiet", "feature"])
+            .status()
+            .unwrap()
+            .success());
+    }
+
+    #[test]
+    fn remove_cleans_a_multi_repo_session_including_copied_files() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(&root.path().join("app-a"));
+        init_repo(&root.path().join("be/be1"));
+        fs::write(root.path().join("README.md"), "hi").unwrap();
+        let created = create(root.path(), "wip").unwrap();
+        assert!(created.root.join("README.md").exists());
+
+        let outcome = remove(root.path(), "wip", false).unwrap();
+        assert!(outcome.removed);
+        // The whole session tree (worktrees + copied files) is gone.
+        assert!(!created.root.exists());
+        assert!(sessions_of(root.path()).is_empty());
+    }
+
+    #[test]
+    fn remove_warns_on_uncommitted_changes_and_forces_through() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        let created = create(root.path(), "dirty").unwrap();
+        // Make the worktree dirty.
+        fs::write(created.root.join("scratch.txt"), "wip").unwrap();
+
+        // Without force: blocked, nothing removed, the dirty worktree reported.
+        let outcome = remove(root.path(), "dirty", false).unwrap();
+        assert!(!outcome.removed);
+        assert_eq!(outcome.dirty, vec![created.root.clone()]);
+        assert!(created.root.exists());
+        assert_eq!(sessions_of(root.path()), vec!["dirty".to_string()]);
+
+        // With force: removed despite the changes.
+        let outcome = remove(root.path(), "dirty", true).unwrap();
+        assert!(outcome.removed);
+        assert!(!created.root.exists());
+        assert!(sessions_of(root.path()).is_empty());
     }
 }
