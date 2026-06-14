@@ -94,15 +94,14 @@ usagi.ai から移植予定の CLI コマンドです（[../issues/README.md](..
 | `history` | 入力したコマンドの履歴を番号付きで表示 | [007](../issues/007-history.md) | ✅ |
 | `clear` | 右ペインの出力ログを消去 | — | ✅ |
 | `quit` / `exit` | アプリを終了 | — | ✅ |
-| `session` | `session <name>`（または `session new <name>`）でセッション（`.usagi/worktree/<name>/` 配下に再帰的に worktree を構築）を作成。名前省略時は名前入力モーダルを表示。`session list` で一覧表示。`session remove <name> [--force]` で削除（未コミット変更があれば警告し、`--force` で破棄） | [003](../issues/003-session.md) | ✅ 実装済み |
-| `space` | アクティブなワークスペース（worktree）の切り替え | [004](../issues/004-space.md) | 🚧 |
+| `session` | `session <name>`（または `session new <name>`）でセッション（`.usagi/worktree/<name>/` 配下に再帰的に worktree を構築）を作成（名前省略時は名前入力モーダル）。`session list` で一覧、`session switch <name>` でアクティブセッション切り替え（引数なしで一覧、worktree 一覧の Enter でも切り替え）、`session remove <name> [--force]` で削除（未コミット変更があれば警告し `--force` で破棄） | [003](../issues/003-session.md) / [004](../issues/004-space.md) | ✅ 実装済み |
 | `ai` | 選択中の Agent CLI を起動し、現在の worktree をコンテキストに AI へ指示・対話する | [005](../issues/005-ai.md) | 🚧 |
 | `terminal` | アクティブな worktree で対話型ターミナルを起動する | [006](../issues/006-terminal.md) | 🚧 |
 | `doctor` | 依存関係チェック（TUI 版） | [019](../issues/019-doctor-fix.md) | 🚧 |
 | `diff` | TUI Diff ビューア（セッションの差分閲覧） | [012](../issues/012-diff.md) | 🚧 |
 
 > 🚧 のコマンドはホーム画面で名前としては認識されますが、本体は未実装で「coming soon」を表示します
-> （`session` / `space` / `ai` / `terminal` / `doctor`）。`session` / `space` / `ai` などが司る
+> （`ai` / `terminal` / `doctor`）。`session` / `ai` などが司る
 > worktree オーケストレーションの全体像は [4. オーケストレーション](04-orchestration.md) を参照してください。
 
 ## 凡例

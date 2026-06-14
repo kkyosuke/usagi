@@ -19,8 +19,9 @@ const EMPTY_MESSAGE: &str = "No worktrees recorded yet. Run usagi to sync.";
 const DETACHED: &str = "(detached)";
 
 /// Visible columns a worktree row spends on everything but the branch name
-/// (cursor, primary marker, separators, and the fixed-width status label).
-const ROW_OVERHEAD: usize = 12;
+/// (cursor, active marker, primary marker, separators, and the fixed-width
+/// status label).
+const ROW_OVERHEAD: usize = 14;
 
 /// The vertical bar (with surrounding spaces) dividing the two panes.
 const SEP: &str = " │ ";
@@ -102,11 +103,23 @@ fn status_label(status: BranchStatus) -> String {
     }
 }
 
-/// Builds one worktree row: a `>` cursor for the selected entry, a `●` marker
-/// for the primary worktree, the (truncated, padded) branch name, and status.
-fn worktree_row(worktree: &WorktreeState, branch_width: usize, selected: bool) -> String {
+/// Builds one worktree row: a `>` cursor for the selected entry, a `*` marker
+/// for the active worktree, a `●` marker for the primary worktree, the
+/// (truncated, padded) branch name, and status.
+fn worktree_row(
+    worktree: &WorktreeState,
+    branch_width: usize,
+    selected: bool,
+    active: bool,
+) -> String {
     let marker = if selected {
         style(">").red().bold().to_string()
+    } else {
+        " ".to_string()
+    };
+
+    let active_marker = if active {
+        style("*").green().bold().to_string()
     } else {
         " ".to_string()
     };
@@ -122,14 +135,15 @@ fn worktree_row(worktree: &WorktreeState, branch_width: usize, selected: bool) -
         "{:<branch_width$}",
         clip_to_width(branch_text, branch_width)
     );
-    let branch = if selected {
+    // The active or cursored row is emphasized.
+    let branch = if active || selected {
         style(branch_text).cyan().bold().to_string()
     } else {
         style(branch_text).cyan().to_string()
     };
 
     let status = status_label(worktree.status);
-    format!("{marker} {primary} {branch}  {status}")
+    format!("{marker} {active_marker} {primary} {branch}  {status}")
 }
 
 /// Builds the left pane: one row per worktree, or a single empty message,
@@ -142,7 +156,14 @@ fn left_pane(list: &WorktreeList, left_w: usize, rows: usize) -> Vec<String> {
         list.worktrees()
             .iter()
             .enumerate()
-            .map(|(i, w)| worktree_row(w, branch_width, i == list.selected_index()))
+            .map(|(i, w)| {
+                worktree_row(
+                    w,
+                    branch_width,
+                    i == list.selected_index(),
+                    i == list.active_index(),
+                )
+            })
             .collect()
     };
     lines.truncate(rows);
@@ -188,7 +209,7 @@ fn input_line(state: &HomeState) -> String {
 /// The mode-aware footer help line.
 fn footer_line(width: usize, mode: Mode) -> String {
     let help = match mode {
-        Mode::Sidebar => "↑↓: move / Enter: open / :: command / Esc: back",
+        Mode::Sidebar => "↑↓: move / Enter: activate / :: command / Esc: back",
         Mode::Command => "Tab: complete / ↑↓: history / Enter: run / Esc: cancel",
     };
     widgets::dim_line(width, help)
@@ -347,6 +368,7 @@ mod tests {
             &worktree(Some("main"), true, BranchStatus::Pushed),
             10,
             true,
+            false,
         );
         assert!(selected.contains('>'));
         assert!(selected.contains('●'));
@@ -356,12 +378,37 @@ mod tests {
             &worktree(Some("feature"), false, BranchStatus::Local),
             10,
             false,
+            false,
         );
         assert!(!other.contains('>'));
         assert!(other.contains("feature"));
 
-        let detached = worktree_row(&worktree(None, false, BranchStatus::Local), 10, false);
+        let detached = worktree_row(
+            &worktree(None, false, BranchStatus::Local),
+            10,
+            false,
+            false,
+        );
         assert!(detached.contains("(detached)"));
+    }
+
+    #[test]
+    fn worktree_row_marks_the_active_worktree() {
+        let active = worktree_row(
+            &worktree(Some("feature"), false, BranchStatus::Local),
+            10,
+            false,
+            true,
+        );
+        assert!(active.contains('*'));
+
+        let inactive = worktree_row(
+            &worktree(Some("feature"), false, BranchStatus::Local),
+            10,
+            false,
+            false,
+        );
+        assert!(!inactive.contains('*'));
     }
 
     #[test]
@@ -373,6 +420,7 @@ mod tests {
                 BranchStatus::Local,
             ),
             8,
+            false,
             false,
         );
         assert!(row.contains('…'));
