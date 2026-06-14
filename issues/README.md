@@ -16,7 +16,7 @@
 | 001 | [init-cli](001-init-cli.md) ✅ | `usagi init <URL>` CLI コマンド | cli | high | — |
 | 002 | [workspace-screen](002-workspace-screen.md) | ワークスペース画面とコマンドモード基盤 | tui | high | — |
 | 003 | [session](003-session.md) | `session` セッション管理（`.usagi/worktree` 配下に再帰的に worktree 構築） | tui | high | 002 |
-| 004 | [space](004-space.md) | `space` ワークスペース切り替え | tui | high | 002, 003 |
+| 004 | [space](004-space.md) ✅ | `session switch` セッション切り替え | tui | high | 002, 003 |
 | 005 | [ai](005-ai.md) | `ai` AI エージェントへの指示・対話 | tui | high | 002 |
 | 006 | [terminal](006-terminal.md) | `terminal` 対話型ターミナル | tui | medium | 002 |
 | 007 | [history](007-history.md) | `history` コマンド履歴表示 | tui | medium | 002 |
@@ -35,6 +35,9 @@
 | 020 | [gh-issue](020-gh-issue.md) | gh Issue 連携セッション作成 | cli | low | 003 |
 | 021 | [local-settings](021-local-settings.md) ✅ | プロジェクト単位のローカル設定（設定上書き） | core | medium | — |
 | 022 | [local-settings-ui](022-local-settings-ui.md) | ローカル設定の編集 UI | tui | medium | 021 |
+| 023 | [issue-store](023-issue-store.md) | issue ストア（`.usagi/issues/` への永続化と採番） | core | high | — |
+| 024 | [issue-cli](024-issue-cli.md) | `usagi issue` サブコマンド（CRUD・検索） | cli | high | 023 |
+| 025 | [issue-mcp](025-issue-mcp.md) | `usagi mcp` で issue 操作を LLM に公開 | mcp | high | 023, 024 |
 
 ## 依存関係
 
@@ -64,6 +67,10 @@ graph TD
     001 --> 017[017 init-agent]
     005 --> 018[018 alias]
     003 --> 020[020 gh-issue]
+    023[023 issue-store]
+    023 --> 024[024 issue-cli]
+    023 --> 025[025 issue-mcp]
+    024 --> 025
 ```
 
 ## 推奨着手順
@@ -72,6 +79,7 @@ graph TD
 2. **セッション中核**: 003 session → 004 space / 010 finish / 011 list
 3. **作業支援**: 005 ai / 006 terminal / 007 history / 012 diff
 4. **後続・拡張**: 009 sync / 013 logs / 014 clean / 015〜018 / 020
+5. **issue 管理（タスク管理）**: 023 issue-store → 024 issue-cli → 025 issue-mcp
 
 > [!NOTE]
 > 本一覧は `usagi.ai` の `issue/` および `doc/` を参照して作成しています。実装済みの機能（`doctor` / `hop` / `status`、Welcome/Home/New/Open/Config 画面、通知）は対象外です。
