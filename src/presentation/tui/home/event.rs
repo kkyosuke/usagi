@@ -45,11 +45,10 @@ pub enum Outcome {
 /// switches the right pane to terminal mode, then runs the embedded session via
 /// `open_terminal` (its `bool` is `true` for `agent`, `false` for a bare
 /// `terminal`) in a small switch loop: the callback returns a [`PaneExit`], and
-/// [`PaneExit::SwitchNext`] / [`PaneExit::SwitchPrev`] re-root the pane at the
-/// next / previous worktree without leaving it (the shell behind it stays
-/// alive), while `Detach` / `Closed` switch the pane back. The PTY I/O,
-/// rendering, the persistent shell pool, and agent-command resolution all live
-/// in that injected callback.
+/// [`PaneExit::Switch`] re-roots the pane at the session the picker focused
+/// without leaving it (the shell behind it stays alive), while `Detach` /
+/// `Closed` switch the pane back. The PTY I/O, rendering, the persistent shell
+/// pool, and agent-command resolution all live in that injected callback.
 ///
 /// `config` opens the settings screen via `open_config`, which runs it against
 /// the real terminal and returns `true` when the user quit the application from
@@ -198,20 +197,20 @@ pub fn event_loop(
                                 .map(|w| w.path.clone())
                                 .unwrap_or_else(|| workspace_root.to_path_buf());
                             state.show_terminal();
-                            // Stay in the pane across session switches: a leader
-                            // switch re-roots the shell at the next / previous
-                            // worktree (the one just left keeps running), and we
-                            // only leave on a detach, a close, or an error.
+                            // Stay in the pane across session switches: the picker
+                            // (`Ctrl-O`) focuses a session and returns `Switch`, so
+                            // we re-root the shell at the now-selected session (the
+                            // one just left keeps running), and only leave on a
+                            // detach, a close, or an error.
                             let outcome = loop {
                                 match open_terminal(&mut state, &dir, agent) {
-                                    Ok(PaneExit::SwitchNext) => match state.focus_next_worktree() {
-                                        Some(next) => dir = next,
-                                        None => break Ok(PaneExit::Detach),
-                                    },
-                                    Ok(PaneExit::SwitchPrev) => match state.focus_prev_worktree() {
-                                        Some(prev) => dir = prev,
-                                        None => break Ok(PaneExit::Detach),
-                                    },
+                                    Ok(PaneExit::Switch) => {
+                                        dir = state
+                                            .list()
+                                            .selected()
+                                            .map(|w| w.path.clone())
+                                            .unwrap_or_else(|| workspace_root.to_path_buf());
+                                    }
                                     other => break other,
                                 }
                             };
@@ -1230,16 +1229,24 @@ mod tests {
     }
 
     #[test]
-    fn leader_switch_next_reroots_the_pane_then_detaches() {
-        // The pane opens on the selected worktree, a SwitchNext re-roots it at
-        // the next one (the first shell stays alive in the pool), then it
-        // detaches. An ArrowDown first moves the cursor off the root row onto
-        // the first worktree.
+    fn picker_switch_reroots_the_pane_at_the_focused_session_then_detaches() {
+        // The pane opens on the selected worktree; the picker focuses another
+        // session and returns Switch, so the loop re-roots there (the first
+        // shell stays alive in the pool), then it detaches. An ArrowDown first
+        // moves the cursor off the root row onto the first worktree.
         let dirs = RefCell::new(Vec::new());
-        let exits = RefCell::new(vec![PaneExit::SwitchNext, PaneExit::Detach]);
-        let mut open = |_home: &mut HomeState, dir: &Path, _agent: bool| {
+        let calls = RefCell::new(0);
+        let mut open = |home: &mut HomeState, dir: &Path, _agent: bool| {
             dirs.borrow_mut().push(dir.to_path_buf());
-            Ok(exits.borrow_mut().remove(0))
+            let mut n = calls.borrow_mut();
+            *n += 1;
+            if *n == 1 {
+                // The picker focuses the second worktree (row 2) before switching.
+                home.focus_session(2);
+                Ok(PaneExit::Switch)
+            } else {
+                Ok(PaneExit::Detach)
+            }
         };
         assert!(matches!(
             run_pane_with_nav(
@@ -1258,14 +1265,21 @@ mod tests {
     }
 
     #[test]
-    fn leader_switch_prev_reroots_the_pane_then_detaches() {
-        // SwitchPrev from the first worktree wraps to the last one. An ArrowDown
-        // first moves the cursor off the root row onto the first worktree.
+    fn picker_switch_to_the_root_row_reroots_at_the_workspace_root() {
+        // Switching to the root row (which belongs to no session) re-roots the
+        // pane at the workspace root rather than a worktree path.
         let dirs = RefCell::new(Vec::new());
-        let exits = RefCell::new(vec![PaneExit::SwitchPrev, PaneExit::Detach]);
-        let mut open = |_home: &mut HomeState, dir: &Path, _agent: bool| {
+        let calls = RefCell::new(0);
+        let mut open = |home: &mut HomeState, dir: &Path, _agent: bool| {
             dirs.borrow_mut().push(dir.to_path_buf());
-            Ok(exits.borrow_mut().remove(0))
+            let mut n = calls.borrow_mut();
+            *n += 1;
+            if *n == 1 {
+                home.focus_session(0); // the root row
+                Ok(PaneExit::Switch)
+            } else {
+                Ok(PaneExit::Detach)
+            }
         };
         assert!(matches!(
             run_pane_with_nav(
@@ -1279,27 +1293,8 @@ mod tests {
         ));
         assert_eq!(
             *dirs.borrow(),
-            vec![PathBuf::from("/r/main"), PathBuf::from("/r/feat")]
+            vec![PathBuf::from("/r/main"), PathBuf::from("/ws")]
         );
-    }
-
-    #[test]
-    fn leader_switch_with_no_worktrees_detaches() {
-        // With an empty list a switch has nowhere to go, so the pane detaches
-        // after the single opening call (both directions).
-        for exit in [PaneExit::SwitchNext, PaneExit::SwitchPrev] {
-            let calls = RefCell::new(0);
-            let mut open = |_home: &mut HomeState, _dir: &Path, _agent: bool| {
-                *calls.borrow_mut() += 1;
-                Ok(exit)
-            };
-            let state = HomeState::new("usagi", Vec::new(), None);
-            assert!(matches!(
-                run_pane("terminal", state, &mut open).unwrap(),
-                Outcome::Back
-            ));
-            assert_eq!(*calls.borrow(), 1);
-        }
     }
 
     #[test]

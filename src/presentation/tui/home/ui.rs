@@ -16,8 +16,8 @@ use crate::presentation::tui::widgets;
 
 use super::command::{CommandHint, Hint};
 use super::state::{
-    HomeState, LineKind, LogLine, Mode, RemoveModal, RightPane, SessionModal, WorktreeList,
-    ROOT_NAME,
+    HomeState, LineKind, LogLine, Mode, RemoveModal, RightPane, SessionModal, SessionPicker,
+    WorktreeList, ROOT_NAME,
 };
 use super::terminal_view::TerminalView;
 
@@ -449,7 +449,7 @@ fn input_line(state: &HomeState) -> String {
 /// The footer help line, aware of the terminal pane and the current mode.
 fn footer_line(width: usize, state: &HomeState) -> String {
     let help = if state.right_pane() == RightPane::Terminal {
-        "Embedded terminal — Ctrl-O: detach / Ctrl-O n,p: switch session"
+        "Embedded terminal — Ctrl-O: switch session / detach"
     } else {
         match state.mode() {
             Mode::Sidebar => "↑↓: move / Enter: activate / :: command / Esc: back",
@@ -564,6 +564,76 @@ fn remove_modal_frame(raw_height: usize, raw_width: usize, modal: &RemoveModal) 
     widgets::render_modal(raw_height, raw_width, "Remove sessions", INNER, &body)
 }
 
+/// Inner width of the session-picker box.
+const PICKER_INNER: usize = 32;
+
+/// Builds one session-picker row: a `>` cursor for the highlighted entry, its
+/// 1-based number, a `●` "here" marker for the session the pane is rooted at,
+/// and the (clipped) session name. The cursored row is emphasised, the current
+/// row stays bright, and the rest are dimmed.
+fn session_picker_row(
+    index: usize,
+    name: &str,
+    cursor: bool,
+    current: bool,
+    inner: usize,
+) -> String {
+    let marker = if cursor { ">" } else { " " };
+    let here = if current { "●" } else { " " };
+    // Leading columns: cursor + space + "N." + space + here-marker + space.
+    let number = format!("{}.", index + 1);
+    let text = clip_to_width(name, inner.saturating_sub(number.len() + 6));
+    let line = format!("{marker} {number} {here} {text}");
+    if cursor {
+        style(line).cyan().bold().to_string()
+    } else if current {
+        style(line).cyan().to_string()
+    } else {
+        style(line).dim().to_string()
+    }
+}
+
+/// Builds the body of the session-picker box: a short prompt, one row per
+/// session, and the key hints.
+fn session_picker_body(picker: &SessionPicker) -> Vec<String> {
+    let mut body = vec![
+        style("Switch the terminal to a session:").dim().to_string(),
+        String::new(),
+    ];
+    for (i, name) in picker.names().iter().enumerate() {
+        body.push(session_picker_row(
+            i,
+            name,
+            i == picker.cursor(),
+            i == picker.current(),
+            PICKER_INNER,
+        ));
+    }
+    body.push(String::new());
+    body.push(
+        style("1-9/↑↓+Enter: switch   Esc: cancel   Ctrl-O: detach")
+            .dim()
+            .to_string(),
+    );
+    body
+}
+
+/// Stamps the session-picker box, centred, over the already-built `lines` of the
+/// live frame — so the terminal and sidebar stay visible above and below it
+/// while the user chooses a session. The rows the box lands on are cleared first
+/// so no stale pane content shows through beside the border.
+fn overlay_session_picker(lines: &mut [String], width: usize, picker: &SessionPicker) {
+    let box_lines = widgets::boxed("Switch session", PICKER_INNER, &session_picker_body(picker));
+    // The box spans the inner width plus its two spaces of padding and borders.
+    let pad = " ".repeat(widgets::centered_padding(width, PICKER_INNER + 4));
+    let top = lines.len().saturating_sub(box_lines.len()) / 2;
+    for (i, box_line) in box_lines.iter().enumerate() {
+        if let Some(row) = lines.get_mut(top + i) {
+            *row = pad_to_width(format!("{pad}{box_line}"), width);
+        }
+    }
+}
+
 /// Builds the full home-screen frame for a raw terminal size.
 pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> Vec<String> {
     // The session-removal modal, when open, overlays the whole screen.
@@ -623,6 +693,12 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
 
     lines.push(input_line(state));
     lines.push(footer_line(width, state));
+
+    // The session picker floats a small box over the live frame, so the
+    // terminal stays visible behind it while the user chooses a session.
+    if let Some(picker) = state.session_picker() {
+        overlay_session_picker(&mut lines, width, picker);
+    }
     lines
 }
 
@@ -1058,6 +1134,66 @@ mod tests {
         assert!(joined.contains("main"));
         assert!(joined.contains("$ cargo test"));
         assert!(joined.contains("detach"));
+    }
+
+    #[test]
+    fn session_picker_row_marks_the_cursor_number_and_current_session() {
+        let cursor = console::strip_ansi_codes(&session_picker_row(0, ROOT_NAME, true, false, 32))
+            .into_owned();
+        assert!(cursor.contains('>'));
+        assert!(cursor.contains("1."));
+        assert!(cursor.contains(ROOT_NAME));
+
+        // The current (rooted) session carries the "here" dot but no cursor.
+        let current =
+            console::strip_ansi_codes(&session_picker_row(1, "main", false, true, 32)).into_owned();
+        assert!(!current.contains('>'));
+        assert!(current.contains("2."));
+        assert!(current.contains('●'));
+        assert!(current.contains("main"));
+
+        // An idle row has neither marker.
+        let idle = console::strip_ansi_codes(&session_picker_row(2, "feature", false, false, 32))
+            .into_owned();
+        assert!(!idle.contains('>'));
+        assert!(!idle.contains('●'));
+        assert!(idle.contains("feature"));
+    }
+
+    #[test]
+    fn session_picker_row_clips_a_long_name() {
+        let row = session_picker_row(0, "a-very-long-session-name-indeed", false, false, 16);
+        assert!(console::strip_ansi_codes(&row).contains('…'));
+    }
+
+    #[test]
+    fn render_frame_overlays_the_session_picker_over_the_live_terminal() {
+        let mut state = HomeState::new(
+            "usagi",
+            vec![
+                worktree(Some("main"), true, BranchStatus::Pushed),
+                worktree(Some("feature"), false, BranchStatus::Local),
+            ],
+            None,
+        );
+        state.show_terminal();
+        state.set_terminal_view(TerminalView::from_rows(
+            vec!["$ cargo test".to_string()],
+            None,
+        ));
+        state.open_session_picker();
+        let frame = render_frame(24, 80, &state);
+        let joined = console::strip_ansi_codes(&frame.join("\n")).into_owned();
+        // The picker box, its prompt, every session row, and the key hints show.
+        assert!(joined.contains("Switch session"));
+        assert!(joined.contains("Switch the terminal to a session"));
+        assert!(joined.contains(ROOT_NAME));
+        assert!(joined.contains("main"));
+        assert!(joined.contains("feature"));
+        assert!(joined.contains("Esc: cancel"));
+        // The frame keeps its full height and the title bar behind the box.
+        assert_eq!(frame.len(), 24);
+        assert!(joined.contains("usagi"));
     }
 
     #[test]

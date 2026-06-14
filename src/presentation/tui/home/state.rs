@@ -161,38 +161,11 @@ impl WorktreeList {
         refs
     }
 
-    /// Move the cursor to the next worktree row, wrapping among the worktrees
-    /// and **skipping the root row**, and return it. `None` when there are no
-    /// worktrees (only the root row exists, so there is nothing to cycle). Used
-    /// by the embedded terminal's leader switch (`Ctrl-O` then `n`), which
-    /// cycles between session terminals.
-    pub fn focus_next_worktree(&mut self) -> Option<&WorktreeState> {
-        if self.worktrees.is_empty() {
-            return None;
-        }
-        // Worktrees occupy rows 1..=N; advancing past the last wraps to row 1.
-        self.selected_index = if self.selected_index >= self.worktrees.len() {
-            1
-        } else {
-            self.selected_index + 1
-        };
-        self.selected()
-    }
-
-    /// Move the cursor to the previous worktree row, wrapping among the
-    /// worktrees and **skipping the root row**, and return it. `None` when there
-    /// are no worktrees (`Ctrl-O` then `p`).
-    pub fn focus_prev_worktree(&mut self) -> Option<&WorktreeState> {
-        if self.worktrees.is_empty() {
-            return None;
-        }
-        // From the first worktree (or the root row) wrap to the last worktree.
-        self.selected_index = if self.selected_index <= 1 {
-            self.worktrees.len()
-        } else {
-            self.selected_index - 1
-        };
-        self.selected()
+    /// Move the cursor directly to a selectable `row` (0 is the root row, `i`
+    /// maps to `worktrees[i - 1]`), clamped to the rows that exist. Used by the
+    /// session picker (`Ctrl-O`) to jump straight to the chosen session.
+    pub fn focus_index(&mut self, row: usize) {
+        self.selected_index = row.min(self.selectable_rows() - 1);
     }
 
     /// Move the cursor up one row, wrapping from the root row to the bottom.
@@ -232,20 +205,17 @@ pub enum RightPane {
 /// The pane is driven by the impure terminal loop (`terminal_pane`); this enum
 /// is the small, testable vocabulary it returns so the event loop can decide
 /// what to do next — keep the shell alive and return to the sidebar, close it,
-/// or re-root the pane at the next / previous worktree.
+/// or re-root the pane at the session the picker just focused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PaneExit {
-    /// The user detached (`Ctrl-O`): the shell stays alive in the pool and the
-    /// pane returns to the sidebar so a session can be switched.
+    /// The user detached (`Ctrl-O` then `Ctrl-O`): the shell stays alive in the
+    /// pool and the pane returns to the sidebar.
     Detach,
     /// The shell exited on its own (e.g. the user typed `exit`); it is gone.
     Closed,
-    /// Switch to the next worktree's terminal, keeping the pane focused
-    /// (`Ctrl-O` then `n` / `]`).
-    SwitchNext,
-    /// Switch to the previous worktree's terminal, keeping the pane focused
-    /// (`Ctrl-O` then `p` / `[`).
-    SwitchPrev,
+    /// The session picker (`Ctrl-O`) chose a session — already focused in the
+    /// list — so re-root the pane there, keeping it open.
+    Switch,
 }
 
 /// The kind of a log line, which decides how it is coloured.
@@ -379,6 +349,35 @@ pub struct SessionOutcome {
     pub sessions: Option<Vec<SessionRecord>>,
 }
 
+/// The open session picker: the in-terminal overlay (`Ctrl-O`) that lists every
+/// session — the root row plus each worktree — so the user can switch the live
+/// pane to another without leaving it. `names` are the rows in display order
+/// (index 0 is the root), `cursor` is the highlighted row, and `current` marks
+/// the session the pane is presently rooted at.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SessionPicker {
+    names: Vec<String>,
+    cursor: usize,
+    current: usize,
+}
+
+impl SessionPicker {
+    /// The session names, in display order (index 0 is the root row).
+    pub fn names(&self) -> &[String] {
+        &self.names
+    }
+
+    /// The row the keyboard cursor sits on.
+    pub fn cursor(&self) -> usize {
+        self.cursor
+    }
+
+    /// The row the live pane is currently rooted at (marked as "here").
+    pub fn current(&self) -> usize {
+        self.current
+    }
+}
+
 /// The full state of the home screen.
 ///
 /// Not `Clone`/`Debug`: it owns a [`CommandRegistry`] of trait objects, which
@@ -416,6 +415,9 @@ pub struct HomeState {
     /// pins it to the newest line. Bumped by the wheel / `PageUp` over the right
     /// pane and reset to the bottom whenever fresh output arrives.
     right_scroll: usize,
+    /// The session picker, when open (the user pressed `Ctrl-O` inside the live
+    /// terminal). While set it overlays the pane and captures its keys.
+    session_picker: Option<SessionPicker>,
 }
 
 impl HomeState {
@@ -447,6 +449,7 @@ impl HomeState {
             terminal_view: None,
             waiting: HashSet::new(),
             right_scroll: 0,
+            session_picker: None,
         }
     }
 
@@ -629,19 +632,84 @@ impl HomeState {
             .push(LogLine::notice(format!("Switched to \"{name}\"")));
     }
 
-    /// Move the cursor to the next worktree (wrapping among worktrees, skipping
-    /// the root row) and return its path, so the embedded terminal can re-root
-    /// there on a leader switch (`Ctrl-O` then `n`). `None` when there are no
-    /// worktrees (nothing to switch to).
-    pub fn focus_next_worktree(&mut self) -> Option<PathBuf> {
-        self.list.focus_next_worktree().map(|w| w.path.clone())
+    /// Focus the session at `row` (0 is the root row, `i` maps to worktree
+    /// `i - 1`) in the list, so the embedded terminal re-roots there. Used by
+    /// the session picker on confirm.
+    pub fn focus_session(&mut self, row: usize) {
+        self.list.focus_index(row);
     }
 
-    /// Move the cursor to the previous worktree (wrapping among worktrees,
-    /// skipping the root row) and return its path, for the embedded terminal to
-    /// re-root there (`Ctrl-O` then `p`). `None` when there are no worktrees.
-    pub fn focus_prev_worktree(&mut self) -> Option<PathBuf> {
-        self.list.focus_prev_worktree().map(|w| w.path.clone())
+    /// The open session picker, if any.
+    pub fn session_picker(&self) -> Option<&SessionPicker> {
+        self.session_picker.as_ref()
+    }
+
+    /// Open the session picker, listing the root row then every worktree, with
+    /// the cursor on — and "here" marking — the session the pane is rooted at.
+    pub fn open_session_picker(&mut self) {
+        let mut names = vec![ROOT_NAME.to_string()];
+        names.extend(
+            self.list
+                .worktrees()
+                .iter()
+                .map(worktree_name)
+                .map(String::from),
+        );
+        let current = self.list.selected_index();
+        self.session_picker = Some(SessionPicker {
+            names,
+            cursor: current,
+            current,
+        });
+    }
+
+    /// Move the picker cursor up one row, wrapping to the bottom. No-op when the
+    /// picker is closed.
+    pub fn session_picker_move_up(&mut self) {
+        if let Some(picker) = self.session_picker.as_mut() {
+            picker.cursor = picker
+                .cursor
+                .checked_sub(1)
+                .unwrap_or(picker.names.len() - 1);
+        }
+    }
+
+    /// Move the picker cursor down one row, wrapping to the top. No-op when the
+    /// picker is closed.
+    pub fn session_picker_move_down(&mut self) {
+        if let Some(picker) = self.session_picker.as_mut() {
+            picker.cursor = (picker.cursor + 1) % picker.names.len();
+        }
+    }
+
+    /// Move the picker cursor to the 1-based session `number`, returning whether
+    /// it was in range. No-op (returning `false`) when out of range or the
+    /// picker is closed.
+    pub fn session_picker_select_number(&mut self, number: usize) -> bool {
+        let Some(picker) = self.session_picker.as_mut() else {
+            return false;
+        };
+        match number.checked_sub(1) {
+            Some(row) if row < picker.names.len() => {
+                picker.cursor = row;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Close the picker without switching.
+    pub fn cancel_session_picker(&mut self) {
+        self.session_picker = None;
+    }
+
+    /// Confirm the picker: close it, focus the highlighted session, and return
+    /// its row (so the terminal pane re-roots there). A no-op returning `None`
+    /// when the picker is closed.
+    pub fn confirm_session_picker(&mut self) -> Option<usize> {
+        let picker = self.session_picker.take()?;
+        self.focus_session(picker.cursor);
+        Some(picker.cursor)
     }
 
     /// Switch from the sidebar to the command input line.
@@ -1649,47 +1717,94 @@ mod tests {
     }
 
     #[test]
-    fn focus_next_and_prev_cycle_worktrees_skipping_the_root_row() {
-        // root (row 0), main@/repo/main (row 1), feature@/repo/feature (row 2).
+    fn focus_session_jumps_to_a_row_and_clamps_to_the_list() {
+        // root (row 0), main (row 1), feature (row 2).
         let mut state = state();
-        assert_eq!(state.list().selected_index(), 0); // root
-                                                      // Next moves from the root row onto the first worktree.
-        assert_eq!(
-            state.focus_next_worktree(),
-            Some(PathBuf::from("/repo/main"))
-        );
-        assert_eq!(state.list().selected_index(), 1);
-        // Then onto the next worktree.
-        assert_eq!(
-            state.focus_next_worktree(),
-            Some(PathBuf::from("/repo/feature"))
-        );
+        state.focus_session(2);
         assert_eq!(state.list().selected_index(), 2);
-        // It wraps among the worktrees (skipping the root row) back to the first.
         assert_eq!(
-            state.focus_next_worktree(),
-            Some(PathBuf::from("/repo/main"))
+            state.list().selected().unwrap().branch.as_deref(),
+            Some("feature")
         );
-        assert_eq!(state.list().selected_index(), 1);
-        // Prev walks the other way, wrapping to the last worktree.
-        assert_eq!(
-            state.focus_prev_worktree(),
-            Some(PathBuf::from("/repo/feature"))
-        );
+        // The root row is reachable too.
+        state.focus_session(0);
+        assert_eq!(state.list().selected_index(), 0);
+        assert!(state.list().root_selected());
+        // A row past the end clamps to the last worktree.
+        state.focus_session(99);
         assert_eq!(state.list().selected_index(), 2);
-        // Prev again steps back one worktree (no wrap).
-        assert_eq!(
-            state.focus_prev_worktree(),
-            Some(PathBuf::from("/repo/main"))
-        );
+    }
+
+    #[test]
+    fn session_picker_opens_listing_the_root_then_each_worktree() {
+        let mut state = state();
+        // Open it from the second worktree, so the cursor and "here" land there.
+        state.focus_session(2);
+        assert!(state.session_picker().is_none());
+        state.open_session_picker();
+        let picker = state.session_picker().unwrap();
+        assert_eq!(picker.names(), [ROOT_NAME, "main", "feature"]);
+        assert_eq!(picker.cursor(), 2);
+        assert_eq!(picker.current(), 2);
+    }
+
+    #[test]
+    fn session_picker_cursor_moves_and_wraps() {
+        let mut state = state(); // root + 2 worktrees → 3 rows
+        state.open_session_picker(); // cursor on the root row (0)
+                                     // Up from the top wraps to the bottom.
+        state.session_picker_move_up();
+        assert_eq!(state.session_picker().unwrap().cursor(), 2);
+        // Down from the bottom wraps to the top.
+        state.session_picker_move_down();
+        assert_eq!(state.session_picker().unwrap().cursor(), 0);
+        state.session_picker_move_down();
+        assert_eq!(state.session_picker().unwrap().cursor(), 1);
+    }
+
+    #[test]
+    fn session_picker_select_number_jumps_in_range_only() {
+        let mut state = state();
+        state.open_session_picker();
+        // Session 3 is the second worktree (row 2).
+        assert!(state.session_picker_select_number(3));
+        assert_eq!(state.session_picker().unwrap().cursor(), 2);
+        // 0 and out-of-range numbers are ignored, leaving the cursor put.
+        assert!(!state.session_picker_select_number(0));
+        assert!(!state.session_picker_select_number(4));
+        assert_eq!(state.session_picker().unwrap().cursor(), 2);
+    }
+
+    #[test]
+    fn session_picker_confirm_focuses_the_cursor_and_closes() {
+        let mut state = state();
+        state.open_session_picker();
+        state.session_picker_move_down(); // cursor → row 1 (main)
+        assert_eq!(state.confirm_session_picker(), Some(1));
+        assert!(state.session_picker().is_none());
         assert_eq!(state.list().selected_index(), 1);
     }
 
     #[test]
-    fn focus_worktree_on_an_empty_list_is_none() {
-        let mut state = HomeState::new("usagi", Vec::new(), None);
-        assert_eq!(state.focus_next_worktree(), None);
-        assert_eq!(state.focus_prev_worktree(), None);
+    fn session_picker_cancel_closes_without_switching() {
+        let mut state = state();
+        state.open_session_picker();
+        state.session_picker_move_down();
+        state.cancel_session_picker();
+        assert!(state.session_picker().is_none());
+        // The list cursor never moved off the root row.
+        assert_eq!(state.list().selected_index(), 0);
+    }
+
+    #[test]
+    fn session_picker_methods_are_noops_while_closed() {
+        let mut state = state();
+        // Nothing is open, so every mutator is inert and confirm returns None.
+        state.session_picker_move_up();
+        state.session_picker_move_down();
+        assert!(!state.session_picker_select_number(1));
+        assert_eq!(state.confirm_session_picker(), None);
+        assert!(state.session_picker().is_none());
     }
 
     #[test]
