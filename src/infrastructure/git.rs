@@ -118,6 +118,17 @@ pub fn add_worktree(repo: &Path, dest: &Path, branch: &str) -> Result<()> {
     Ok(())
 }
 
+/// The checked-out branch (`None` if detached) and full HEAD commit at the
+/// worktree `path`, or `None` if it is not a git worktree.
+pub fn worktree_head(path: &Path) -> Option<(Option<String>, String)> {
+    let head = git_capture(path, &["rev-parse", "HEAD"]).ok().flatten()?;
+    let branch = git_capture(path, &["rev-parse", "--abbrev-ref", "HEAD"])
+        .ok()
+        .flatten()
+        .filter(|b| b != "HEAD");
+    Some((branch, head))
+}
+
 /// Return `true` if the worktree at `path` has uncommitted changes — modified,
 /// staged, or untracked files (anything `git status --porcelain` reports).
 ///
@@ -547,6 +558,21 @@ mod tests {
             .canonicalize()
             .map(|p| p == canonical)
             .unwrap_or(false)));
+    }
+
+    #[test]
+    fn worktree_head_reports_branch_and_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        init_repo(dir.path());
+        let (branch, head) = worktree_head(dir.path()).unwrap();
+        assert_eq!(branch.as_deref(), Some("main"));
+        assert_eq!(head.len(), 40);
+        // Detached HEAD reports no branch.
+        run(dir.path(), &["checkout", "-q", "--detach"]);
+        assert_eq!(worktree_head(dir.path()).unwrap().0, None);
+        // A non-repo path yields nothing.
+        let plain = tempfile::tempdir().unwrap();
+        assert!(worktree_head(plain.path()).is_none());
     }
 
     #[test]

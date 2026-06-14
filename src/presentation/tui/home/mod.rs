@@ -11,10 +11,13 @@ pub mod event;
 pub mod state;
 pub mod ui;
 
+use std::path::Path;
+
 use anyhow::Result;
 use console::Term;
 
 use crate::domain::workspace::Workspace;
+use crate::domain::workspace_state::SessionRecord;
 use crate::infrastructure::history_store::HistoryStore;
 use crate::infrastructure::workspace_store::WorkspaceStore;
 use crate::presentation::tui::term_reader::TermKeyReader;
@@ -23,6 +26,20 @@ pub use event::Outcome;
 
 use state::{HomeState, LogLine, SessionOutcome};
 
+/// Refresh the workspace's session state from git (best-effort) and return the
+/// sessions to show. `sync` rewrites each session worktree's status; for a
+/// non-git root it fails harmlessly, so we fall back to the saved sessions.
+fn reload_sessions(root: &Path) -> Option<Vec<SessionRecord>> {
+    if let Ok(state) = crate::usecase::workspace_state::sync(root) {
+        return Some(state.sessions);
+    }
+    WorkspaceStore::new(root)
+        .load()
+        .ok()
+        .flatten()
+        .map(|s| s.sessions)
+}
+
 /// Runs the home screen for `workspace` on the given terminal until the user
 /// goes back or quits. Loads the workspace's worktree state and prior command
 /// history from disk and wires it, with the real terminal, to the testable
@@ -30,16 +47,12 @@ use state::{HomeState, LogLine, SessionOutcome};
 /// workspace's `history.json` (best-effort). Assumes the alternate screen is
 /// already active (it is owned by the orchestrator).
 pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
-    let (worktrees, sessions, notice) = match WorkspaceStore::new(&workspace.path).load() {
-        Ok(Some(state)) => (state.worktrees, state.sessions, None),
-        Ok(None) => (Vec::new(), Vec::new(), None),
-        Err(e) => (
-            Vec::new(),
-            Vec::new(),
-            Some(format!("Failed to load worktrees: {e}")),
-        ),
+    let (sessions, notice) = match WorkspaceStore::new(&workspace.path).load() {
+        Ok(Some(state)) => (state.sessions, None),
+        Ok(None) => (Vec::new(), None),
+        Err(e) => (Vec::new(), Some(format!("Failed to load sessions: {e}"))),
     };
-    let mut state = HomeState::new(workspace.name.clone(), worktrees, notice);
+    let mut state = HomeState::new(workspace.name.clone(), Vec::new(), notice);
     state.restore_sessions(sessions);
 
     // Restore past commands so `history` and `↑`/`↓` recall span sessions.
@@ -56,10 +69,9 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
         let _ = history.append(command);
     };
 
-    // Creating a session does the git / filesystem work and reports back. When
-    // the workspace root is a single repository, re-syncing yields the refreshed
-    // worktree list (including the new session); a multi-repo root has no single
-    // `state.json` to sync, so `sync` fails harmlessly and the list is unchanged.
+    // Creating a session does the git / filesystem work and reports back. The
+    // refreshed sessions (with each worktree's git status) are read back so the
+    // worktree pane and `session list` reflect the new session.
     let root = workspace.path.clone();
     let mut create_session = |name: &str| match crate::usecase::session::create(&root, name) {
         Ok(created) => SessionOutcome {
@@ -68,20 +80,10 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
                 created.name,
                 created.worktrees.len()
             )),
-            worktrees: crate::usecase::workspace_state::sync(&root)
-                .ok()
-                .map(|s| s.worktrees),
-            // Sessions are recorded in state.json by `create`; reload them so
-            // `session list` reflects the new one (works for multi-repo too).
-            sessions: WorkspaceStore::new(&root)
-                .load()
-                .ok()
-                .flatten()
-                .map(|s| s.sessions),
+            sessions: reload_sessions(&root),
         },
         Err(e) => SessionOutcome {
             line: LogLine::error(format!("session failed: {e}")),
-            worktrees: None,
             sessions: None,
         },
     };
@@ -96,14 +98,7 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
     ) {
         Ok(outcome) if outcome.removed => SessionOutcome {
             line: LogLine::output(format!("Removed session \"{name}\" 🧹")),
-            worktrees: crate::usecase::workspace_state::sync(&remove_root)
-                .ok()
-                .map(|s| s.worktrees),
-            sessions: WorkspaceStore::new(&remove_root)
-                .load()
-                .ok()
-                .flatten()
-                .map(|s| s.sessions),
+            sessions: reload_sessions(&remove_root),
         },
         Ok(outcome) => {
             let paths = outcome
@@ -117,13 +112,11 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
                     "session \"{name}\" has uncommitted changes ({paths}). \
                          Use \"session remove {name} --force\" to discard."
                 )),
-                worktrees: None,
                 sessions: None,
             }
         }
         Err(e) => SessionOutcome {
             line: LogLine::error(format!("session remove failed: {e}")),
-            worktrees: None,
             sessions: None,
         },
     };

@@ -136,7 +136,6 @@ mod tests {
     fn noop_create(_: &str) -> SessionOutcome {
         SessionOutcome {
             line: LogLine::output("created"),
-            worktrees: None,
             sessions: None,
         }
     }
@@ -145,7 +144,6 @@ mod tests {
     fn noop_remove(_: &str, _: bool) -> SessionOutcome {
         SessionOutcome {
             line: LogLine::output("removed"),
-            worktrees: None,
             sessions: None,
         }
     }
@@ -370,7 +368,6 @@ mod tests {
     fn ok_outcome() -> SessionOutcome {
         SessionOutcome {
             line: LogLine::output("created"),
-            worktrees: None,
             sessions: None,
         }
     }
