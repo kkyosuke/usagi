@@ -25,10 +25,14 @@ pub enum Outcome {
 /// `:` (or `i`) opens the command line; in command mode the user types a
 /// command, with Tab completion and `↑`/`↓` history recall. Opening a worktree
 /// and most commands are placeholders for now (they log a notice).
+///
+/// Each command the user runs is handed to `persist` so the caller can append
+/// it to the workspace's `history.json`; tests pass a no-op.
 pub fn event_loop(
     term: &Term,
     reader: &mut dyn KeyReader,
     mut state: HomeState,
+    persist: &mut dyn FnMut(&str),
 ) -> Result<Outcome> {
     loop {
         term.move_cursor_to(0, 0)?;
@@ -58,7 +62,11 @@ pub fn event_loop(
             },
             Mode::Command => match key {
                 Key::Enter => {
-                    if let Effect::Quit = state.submit() {
+                    let submission = state.submit();
+                    if let Some(command) = submission.recorded.as_deref() {
+                        persist(command);
+                    }
+                    if let Effect::Quit = submission.effect {
                         return Ok(Outcome::Quit);
                     }
                 }
@@ -125,7 +133,8 @@ mod tests {
     fn run(keys: Vec<io::Result<Key>>, state: HomeState) -> Result<Outcome> {
         let term = Term::stdout();
         let mut reader = ScriptedReader::new(keys);
-        event_loop(&term, &mut reader, state)
+        let mut persist = |_: &str| {};
+        event_loop(&term, &mut reader, state, &mut persist)
     }
 
     /// Types each character of `s` as a `Char` key.
@@ -211,6 +220,24 @@ mod tests {
     }
 
     #[test]
+    fn submitted_commands_are_handed_to_persist() {
+        // Run "man", then leave: the persist callback receives "man".
+        let mut keys = vec![Ok(Key::Char(':'))];
+        keys.extend(typed("man"));
+        keys.push(Ok(Key::Enter));
+        keys.push(Ok(Key::Escape)); // cancel command mode
+        keys.push(Ok(Key::Escape)); // leave sidebar
+
+        let term = Term::stdout();
+        let mut reader = ScriptedReader::new(keys);
+        let mut recorded = Vec::new();
+        let mut persist = |command: &str| recorded.push(command.to_string());
+        let outcome = event_loop(&term, &mut reader, sample_state(), &mut persist).unwrap();
+        assert!(matches!(outcome, Outcome::Back));
+        assert_eq!(recorded, vec!["man"]);
+    }
+
+    #[test]
     fn quit_command_exits_the_app() {
         let mut keys = vec![Ok(Key::Char(':'))];
         keys.extend(typed("quit"));
@@ -247,9 +274,7 @@ mod tests {
 
     #[test]
     fn unexpected_read_error_is_propagated() {
-        let term = Term::stdout();
-        let mut reader = ScriptedReader::new(vec![Err(io::Error::other("boom"))]);
-        let err = event_loop(&term, &mut reader, sample_state()).unwrap_err();
+        let err = run(vec![Err(io::Error::other("boom"))], sample_state()).unwrap_err();
         assert!(err.to_string().contains("Failed to read key"));
     }
 }

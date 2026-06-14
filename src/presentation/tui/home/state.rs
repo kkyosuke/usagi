@@ -9,7 +9,7 @@
 
 use crate::domain::workspace_state::WorktreeState;
 
-use super::command::{self, Effect};
+use super::command::{CommandRegistry, Effect};
 
 /// The opened workspace and the selectable list of its worktrees.
 #[derive(Debug, Clone)]
@@ -129,8 +129,19 @@ impl LogLine {
     }
 }
 
+/// The outcome of submitting the command line: the side effect to act on, plus
+/// the command that was recorded in history (so the event loop can persist it).
+#[derive(Debug)]
+pub struct Submission {
+    pub effect: Effect,
+    /// The command that was run and added to history, or `None` for empty input.
+    pub recorded: Option<String>,
+}
+
 /// The full state of the home screen.
-#[derive(Debug, Clone)]
+///
+/// Not `Clone`/`Debug`: it owns a [`CommandRegistry`] of trait objects, which
+/// are neither. Nothing needs to clone or format the whole screen state.
 pub struct HomeState {
     list: WorktreeList,
     mode: Mode,
@@ -140,6 +151,9 @@ pub struct HomeState {
     /// a fresh line.
     recall: Option<usize>,
     log: Vec<LogLine>,
+    /// The commands available in command mode (the extension point for the
+    /// follow-up command features).
+    registry: CommandRegistry,
 }
 
 impl HomeState {
@@ -163,7 +177,14 @@ impl HomeState {
             history: Vec::new(),
             recall: None,
             log,
+            registry: CommandRegistry::with_builtins(),
         }
+    }
+
+    /// Seed the command history with entries restored from disk (oldest first),
+    /// so `history` and `↑`/`↓` recall reflect commands run in past sessions.
+    pub fn restore_history(&mut self, entries: Vec<String>) {
+        self.history = entries;
     }
 
     pub fn list(&self) -> &WorktreeList {
@@ -229,7 +250,7 @@ impl HomeState {
 
     /// Tab-complete the command word, listing candidates when ambiguous.
     pub fn complete(&mut self) {
-        let completion = command::complete(&self.input);
+        let completion = self.registry.complete(&self.input);
         self.input = completion.input;
         if !completion.candidates.is_empty() {
             self.log
@@ -268,25 +289,33 @@ impl HomeState {
     }
 
     /// Run the current input as a command: echo it, dispatch it, record it in
-    /// history, and apply the resulting log lines and side effect. Returns the
-    /// [`Effect`] so the event loop can act on `Quit`. Empty input is a no-op.
-    pub fn submit(&mut self) -> Effect {
+    /// history, and apply the resulting log lines and side effect. Returns a
+    /// [`Submission`] carrying the side effect (so the event loop can act on
+    /// `Quit`) and the recorded command (so it can be persisted). Empty input is
+    /// a no-op.
+    pub fn submit(&mut self) -> Submission {
         let entry = self.input.trim().to_string();
         self.input.clear();
         self.recall = None;
         if entry.is_empty() {
-            return Effect::None;
+            return Submission {
+                effect: Effect::None,
+                recorded: None,
+            };
         }
 
         self.log.push(LogLine::command(entry.clone()));
-        let result = command::dispatch(&entry, &self.history);
-        self.history.push(entry);
+        let result = self.registry.dispatch(&entry, &self.history);
+        self.history.push(entry.clone());
 
         match result.effect {
             Effect::Clear => self.log.clear(),
             _ => self.log.extend(result.lines),
         }
-        result.effect
+        Submission {
+            effect: result.effect,
+            recorded: Some(entry),
+        }
     }
 }
 
@@ -468,7 +497,9 @@ mod tests {
     fn submitting_an_empty_line_is_a_noop() {
         let mut state = state();
         let before = state.log().len();
-        assert_eq!(state.submit(), Effect::None);
+        let submission = state.submit();
+        assert_eq!(submission.effect, Effect::None);
+        assert!(submission.recorded.is_none());
         assert_eq!(state.log().len(), before);
     }
 
@@ -478,7 +509,9 @@ mod tests {
         for c in "man".chars() {
             state.push_char(c);
         }
-        assert_eq!(state.submit(), Effect::None);
+        let submission = state.submit();
+        assert_eq!(submission.effect, Effect::None);
+        assert_eq!(submission.recorded.as_deref(), Some("man"));
         // The echoed command line is followed by the man output.
         let echoed = state.log().iter().find(|l| l.kind == LineKind::Command);
         assert_eq!(echoed.unwrap().text, "man");
@@ -492,7 +525,7 @@ mod tests {
         for c in "clear".chars() {
             state.push_char(c);
         }
-        assert_eq!(state.submit(), Effect::Clear);
+        assert_eq!(state.submit().effect, Effect::Clear);
         assert!(state.log().is_empty());
     }
 
@@ -502,7 +535,7 @@ mod tests {
         for c in "quit".chars() {
             state.push_char(c);
         }
-        assert_eq!(state.submit(), Effect::Quit);
+        assert_eq!(state.submit().effect, Effect::Quit);
     }
 
     #[test]
@@ -517,6 +550,22 @@ mod tests {
         }
         state.submit();
         assert_eq!(state.history, vec!["man", "doctor"]);
+    }
+
+    #[test]
+    fn restored_history_feeds_recall_and_new_commands_append_to_it() {
+        let mut state = state();
+        state.restore_history(vec!["session".to_string(), "space".to_string()]);
+        // Recall walks the restored entries.
+        state.enter_command_mode();
+        state.recall_prev();
+        assert_eq!(state.input(), "space");
+        state.recall_prev();
+        assert_eq!(state.input(), "session");
+        // A freshly run command is appended after the restored ones.
+        state.input = "man".to_string();
+        state.submit();
+        assert_eq!(state.history, vec!["session", "space", "man"]);
     }
 
     #[test]
