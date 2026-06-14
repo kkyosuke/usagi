@@ -1,0 +1,144 @@
+//! A live pseudo-terminal session, embedded in the workspace screen's right pane.
+//!
+//! The `terminal` command spawns the user's shell ([`terminal::default_shell`])
+//! into a real PTY rooted at the selected worktree. A background thread streams
+//! the shell's output into a [`vt100::Parser`], which maintains an in-memory
+//! screen grid; the presentation layer snapshots that grid each frame and draws
+//! it into the right pane (see `presentation::tui::home::terminal_pane`).
+//!
+//! This module is pure I/O and threading, so it is excluded from coverage (cf.
+//! `term_reader.rs`); the pure pieces it feeds — the shell choice
+//! ([`terminal`]) and the grid-to-lines rendering (`home::terminal_view`) — are
+//! tested on their own.
+
+use std::io::{Read, Write};
+use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::thread::JoinHandle;
+
+use anyhow::{Context, Result};
+use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
+
+use crate::infrastructure::terminal;
+
+/// A running shell attached to a pseudo-terminal, with its output parsed into a
+/// terminal screen grid.
+pub struct PtySession {
+    master: Box<dyn MasterPty + Send>,
+    writer: Box<dyn Write + Send>,
+    parser: Arc<Mutex<vt100::Parser>>,
+    alive: Arc<AtomicBool>,
+    child: Box<dyn Child + Send + Sync>,
+    reader_thread: Option<JoinHandle<()>>,
+}
+
+impl PtySession {
+    /// Spawn the default shell into a fresh PTY of `rows`×`cols`, rooted at
+    /// `dir`. The shell's output is streamed into a [`vt100::Parser`] on a
+    /// background thread until it closes (the reader sees EOF), at which point
+    /// the session is marked no longer [`alive`](Self::is_alive).
+    pub fn spawn(dir: &Path, rows: u16, cols: u16) -> Result<Self> {
+        let pty_system = native_pty_system();
+        let pair = pty_system
+            .openpty(PtySize {
+                rows,
+                cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .context("failed to open a pseudo-terminal")?;
+
+        let mut cmd = CommandBuilder::new(terminal::default_shell());
+        cmd.cwd(dir);
+        let child = pair
+            .slave
+            .spawn_command(cmd)
+            .context("failed to spawn the shell in the pseudo-terminal")?;
+        // The child now holds the slave end; drop ours so the reader below sees
+        // EOF once the shell exits.
+        drop(pair.slave);
+
+        let mut reader = pair
+            .master
+            .try_clone_reader()
+            .context("failed to read from the pseudo-terminal")?;
+        let writer = pair
+            .master
+            .take_writer()
+            .context("failed to write to the pseudo-terminal")?;
+
+        let parser = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, 0)));
+        let alive = Arc::new(AtomicBool::new(true));
+
+        let reader_thread = {
+            let parser = Arc::clone(&parser);
+            let alive = Arc::clone(&alive);
+            std::thread::spawn(move || {
+                let mut buf = [0u8; 8192];
+                loop {
+                    match reader.read(&mut buf) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => {
+                            if let Ok(mut parser) = parser.lock() {
+                                parser.process(&buf[..n]);
+                            }
+                        }
+                    }
+                }
+                alive.store(false, Ordering::SeqCst);
+            })
+        };
+
+        Ok(Self {
+            master: pair.master,
+            writer,
+            parser,
+            alive,
+            child,
+            reader_thread: Some(reader_thread),
+        })
+    }
+
+    /// Lock the screen-grid parser to read the current contents (for rendering).
+    pub fn parser(&self) -> MutexGuard<'_, vt100::Parser> {
+        self.parser.lock().expect("pty parser mutex poisoned")
+    }
+
+    /// Forward raw input bytes to the shell.
+    pub fn write(&mut self, bytes: &[u8]) -> Result<()> {
+        self.writer.write_all(bytes)?;
+        self.writer.flush()?;
+        Ok(())
+    }
+
+    /// Resize the PTY (and its screen grid) to `rows`×`cols`. Best-effort: a
+    /// failure to inform the kernel is ignored, the grid is resized regardless.
+    pub fn resize(&mut self, rows: u16, cols: u16) {
+        let _ = self.master.resize(PtySize {
+            rows,
+            cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        });
+        if let Ok(mut parser) = self.parser.lock() {
+            parser.screen_mut().set_size(rows, cols);
+        }
+    }
+
+    /// Whether the shell is still running (the reader has not hit EOF).
+    pub fn is_alive(&self) -> bool {
+        self.alive.load(Ordering::SeqCst)
+    }
+}
+
+impl Drop for PtySession {
+    fn drop(&mut self) {
+        // Terminate the shell and let the reader thread finish on EOF.
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        if let Some(thread) = self.reader_thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
