@@ -2,7 +2,7 @@
 number: 022
 feature: local-settings-ui
 title: ローカル設定の編集 UI
-status: todo
+status: done
 priority: medium
 category: tui
 dependson: [021]
