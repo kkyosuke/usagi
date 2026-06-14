@@ -38,6 +38,7 @@
 | 023 | [issue-store](023-issue-store.md) | issue ストア（`.usagi/issues/` への永続化と採番） | core | high | — |
 | 024 | [issue-cli](024-issue-cli.md) | `usagi issue` サブコマンド（CRUD・検索） | cli | high | 023 |
 | 025 | [issue-mcp](025-issue-mcp.md) | `usagi mcp` で issue 操作を LLM に公開 | mcp | high | 023, 024 |
+| 026 | [agent](026-agent.md) ✅ | `agent` 埋め込みターミナルで Agent CLI を起動（`terminal` → `claude` のショートカット） | tui | medium | 006 |
 
 ## 依存関係
 
@@ -53,6 +54,7 @@ graph TD
     003 --> 004
     002 --> 005[005 ai]
     002 --> 006[006 terminal]
+    006 --> 026[026 agent]
     002 --> 007[007 history]
     002 --> 008[008 man]
     003 --> 009[009 sync]
@@ -77,7 +79,7 @@ graph TD
 
 1. **基盤**: 001 init-cli / 002 workspace-screen / 019 doctor-fix（依存なし、並行可能）
 2. **セッション中核**: 003 session → 004 space / 010 finish / 011 list
-3. **作業支援**: 005 ai / 006 terminal / 007 history / 012 diff
+3. **作業支援**: 005 ai / 006 terminal → 026 agent / 007 history / 012 diff
 4. **後続・拡張**: 009 sync / 013 logs / 014 clean / 015〜018 / 020
 5. **issue 管理（タスク管理）**: 023 issue-store → 024 issue-cli → 025 issue-mcp
 
