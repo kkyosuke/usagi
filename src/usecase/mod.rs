@@ -1,4 +1,5 @@
 pub mod doctor;
+pub mod issue;
 pub mod project;
 pub mod session;
 pub mod settings;
