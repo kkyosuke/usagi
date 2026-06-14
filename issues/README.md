@@ -27,7 +27,7 @@
 | 012 | [diff](012-diff.md) | TUI Diff ビューア | tui | medium | 002, 003 |
 | 013 | [logs](013-logs.md) | `usagi logs` 履歴の閲覧・検索 | cli | low | 007 |
 | 014 | [clean](014-clean.md) | `usagi clean` 古いセッション整理 | cli | low | 003 |
-| 015 | [config-edit](015-config-edit.md) | `usagi config --edit` 設定編集 | cli | medium | 001 |
+| 015 | [config-edit](015-config-edit.md) ✅ | `usagi config --edit` 設定編集 | cli | medium | 001 |
 | 016 | [context](016-context.md) | `usagi context` AI 用コンテキスト生成 | cli | low | 001 |
 | 017 | [init-agent](017-init-agent.md) | `usagi init-agent` エージェント設定生成 | cli | low | 001 |
 | 018 | [alias](018-alias.md) | `usagi alias` コマンドエイリアス | cli | low | 005 |

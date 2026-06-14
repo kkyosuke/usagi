@@ -63,6 +63,11 @@ impl Storage {
         &self.dir
     }
 
+    /// Path to the global `settings.json` file (it may not exist yet).
+    pub fn settings_path(&self) -> PathBuf {
+        self.dir.join(SETTINGS_FILE)
+    }
+
     /// Load all workspaces; returns an empty list if the file does not exist.
     pub fn load_workspaces(&self) -> Result<Vec<Workspace>> {
         let file: Option<WorkspacesFile> = self.read_json(WORKSPACES_FILE)?;

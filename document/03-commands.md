@@ -25,6 +25,8 @@
 | `usagi init --git <URL>` | カレントディレクトリ配下に `<リポジトリ名>/` を作成して clone し、プロジェクトとして登録する | ✅ |
 | `usagi hop` | メインの TUI を起動する。起動画面 → プロジェクト選択 → ホーム画面へ遷移（[design/](design/README.md)） | ✅ |
 | `usagi status` | カレントリポジトリの worktree 状態を `.usagi/state.json` に同期し一覧表示する（[data/02-workspace.md](data/02-workspace.md)） | ✅ |
+| `usagi config` | 現在のグローバル設定（`settings.json`）を一覧表示する（[5. 設定](05-settings.md)） | ✅ |
+| `usagi config --edit` | グローバル設定ファイルを `$EDITOR` で開いて編集し、保存時に形式（JSON / 必須 `version` / 型）を検証する。不正な場合は直前の内容に巻き戻す | ✅ |
 | `usagi doctor` | Git / Bash / AWS CLI / Node.js / Python などの依存ツールの導入状況を確認する | ✅ |
 | `usagi doctor --fix` | 不足ツールを OS のパッケージマネージャ（brew / apt-get / dnf / pacman）で導入を試行し、修復不可なら手動手順を提示する | ✅ |
 
@@ -45,6 +47,15 @@ TUI を起動します。代替スクリーン上で起動画面を表示し、O
 
 `git worktree list` などを読み取り専用で検査し、`<repo>/.usagi/state.json` を同期したうえで、
 各 worktree のブランチ・HEAD・`local` / `pushed` / `merged` 状態を一覧表示します。
+
+#### `usagi config`
+
+usagi の設定ファイル（グローバルな `settings.json`、`~/.usagi/` または `$USAGI_HOME` 配下）を扱います。
+
+- 引数なし: 現在の設定を `key  value` 形式で一覧表示します。
+- `--edit`: 設定ファイルを `$EDITOR`（→ `$VISUAL` → OS 既定の `vi` / `notepad`）で開いて編集します。
+  保存後に再パースして形式（JSON 構文・必須 `version`・各フィールドの型）を検証し、不正な場合は
+  **編集前の内容へ巻き戻して** エラーを表示するため、設定ミスで usagi が壊れません。
 
 #### `usagi doctor`
 
@@ -67,7 +78,6 @@ usagi.ai から移植予定の CLI コマンドです（[../issues/README.md](..
 | `usagi list` | 全セッション（worktree）を ahead/behind とともに俯瞰表示する | [011](../issues/011-list.md) | 🚧 |
 | `usagi logs` | コマンド実行履歴（`history.json`）を閲覧・検索する | [013](../issues/013-logs.md) | 🚧 |
 | `usagi clean` | 古い・統合済みのセッションを整理する | [014](../issues/014-clean.md) | 🚧 |
-| `usagi config --edit` | 設定（`settings.json`）を CLI から編集する | [015](../issues/015-config-edit.md) | 🚧 |
 | `usagi context` | AI エージェントに読み込ませるプロジェクトコンテキストを生成・出力する | [016](../issues/016-context.md) | 🚧 |
 | `usagi init-agent` | `.clinerules` / `CLAUDE.md` などのエージェント設定ファイルを初期化する | [017](../issues/017-init-agent.md) | 🚧 |
 | `usagi alias` | コマンドエイリアスを定義する | [018](../issues/018-alias.md) | 🚧 |
