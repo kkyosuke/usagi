@@ -1,7 +1,7 @@
 ---
 number: 001
 feature: init-cli
-title: usagi init <URL> CLI コマンド
+title: usagi init / usagi init --git <URL> CLI コマンド
 status: done
 priority: high
 category: cli
@@ -9,7 +9,7 @@ dependson: []
 ref: usagi.ai doc/cli/init.md
 ---
 
-# usagi init `<URL>`
+# usagi init / `usagi init --git <URL>`
 
 ## 概要
 
