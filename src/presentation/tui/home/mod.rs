@@ -183,9 +183,9 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
         handle.set_attached(Some(dir.to_path_buf()));
         let result = terminal_pane::run(term, home, pty, &handle);
         // Switching keeps a session in the foreground (the loop re-attaches to
-        // the next one immediately); detaching, closing, or erroring returns to
-        // the sidebar, so nothing is attached any more.
-        if !matches!(result, Ok(PaneExit::SwitchNext) | Ok(PaneExit::SwitchPrev)) {
+        // the chosen one immediately); detaching, closing, or erroring returns
+        // to the sidebar, so nothing is attached any more.
+        if !matches!(result, Ok(PaneExit::Switch)) {
             handle.set_attached(None);
         }
         result
