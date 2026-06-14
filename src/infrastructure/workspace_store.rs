@@ -129,22 +129,26 @@ impl WorkspaceStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::workspace_state::{BranchStatus, WorktreeState};
+    use crate::domain::workspace_state::{BranchStatus, SessionRecord, WorktreeState};
     use chrono::Utc;
 
     fn sample_state() -> WorkspaceState {
-        WorkspaceState::new(
-            "main",
-            vec![WorktreeState {
+        let mut state = WorkspaceState::new();
+        state.sessions.push(SessionRecord {
+            name: "feature".to_string(),
+            root: PathBuf::from("/repo/.usagi/worktree/feature"),
+            worktrees: vec![WorktreeState {
                 branch: Some("feature".to_string()),
-                path: PathBuf::from("/repo/feature"),
+                path: PathBuf::from("/repo/.usagi/worktree/feature"),
                 head: "deadbee".to_string(),
                 primary: false,
                 upstream: Some("origin/feature".to_string()),
                 status: BranchStatus::Pushed,
                 updated_at: Utc::now(),
             }],
-        )
+            created_at: Utc::now(),
+        });
+        state
     }
 
     #[test]

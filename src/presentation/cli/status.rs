@@ -14,32 +14,41 @@ pub fn run() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Formats a [`WorkspaceState`] into the lines printed by `usagi status`.
+/// Formats a [`WorkspaceState`] into the lines printed by `usagi status`:
+/// one block per session, listing each repository's worktree and its status.
 fn render(state: &WorkspaceState) -> Vec<String> {
     let mut lines = vec![
-        format!(
-            "default branch: {}  (updated {})",
-            state.default_branch,
-            state.updated_at.format("%Y-%m-%d %H:%M UTC")
-        ),
+        format!("updated {}", state.updated_at.format("%Y-%m-%d %H:%M UTC")),
         String::new(),
     ];
-    for wt in &state.worktrees {
-        let marker = if wt.primary { "*" } else { " " };
-        let branch = wt.branch.as_deref().unwrap_or("(detached)");
-        let upstream = wt
-            .upstream
-            .as_deref()
-            .map(|u| format!(" → {u}"))
-            .unwrap_or_default();
+
+    if state.sessions.is_empty() {
+        lines.push("No sessions yet. Run \"session new <name>\" to create one.".to_string());
+        return lines;
+    }
+
+    for session in &state.sessions {
         lines.push(format!(
-            "{marker} {:<8} {:<24} {}{}",
-            wt.status.as_str(),
-            branch,
-            wt.head,
-            upstream
+            "session \"{}\"  ({})",
+            session.name,
+            session.root.display()
         ));
-        lines.push(format!("    {}", wt.path.display()));
+        for wt in &session.worktrees {
+            let branch = wt.branch.as_deref().unwrap_or("(detached)");
+            let upstream = wt
+                .upstream
+                .as_deref()
+                .map(|u| format!(" → {u}"))
+                .unwrap_or_default();
+            lines.push(format!(
+                "  {:<8} {:<24} {}{}",
+                wt.status.as_str(),
+                branch,
+                wt.head,
+                upstream
+            ));
+            lines.push(format!("    {}", wt.path.display()));
+        }
     }
     lines
 }
@@ -47,7 +56,7 @@ fn render(state: &WorkspaceState) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::workspace_state::{BranchStatus, WorktreeState};
+    use crate::domain::workspace_state::{BranchStatus, SessionRecord, WorktreeState};
     use crate::infrastructure::git::test_command;
     use chrono::{TimeZone, Utc};
     use std::path::PathBuf;
@@ -55,49 +64,58 @@ mod tests {
     fn state() -> WorkspaceState {
         let ts = Utc.with_ymd_and_hms(2026, 6, 13, 5, 1, 0).unwrap();
         WorkspaceState {
-            default_branch: "main".to_string(),
             updated_at: ts,
-            sessions: Vec::new(),
-            worktrees: vec![
-                WorktreeState {
-                    branch: Some("main".to_string()),
-                    path: PathBuf::from("/repo"),
-                    head: "76e906f".to_string(),
-                    primary: true,
-                    upstream: Some("origin/main".to_string()),
-                    status: BranchStatus::Pushed,
-                    updated_at: ts,
-                },
-                WorktreeState {
-                    branch: None,
-                    path: PathBuf::from("/repo/wt"),
-                    head: "aaf5459".to_string(),
-                    primary: false,
-                    upstream: None,
-                    status: BranchStatus::Local,
-                    updated_at: ts,
-                },
-            ],
+            sessions: vec![SessionRecord {
+                name: "login".to_string(),
+                root: PathBuf::from("/repo/.usagi/worktree/login"),
+                created_at: ts,
+                worktrees: vec![
+                    WorktreeState {
+                        branch: Some("login".to_string()),
+                        path: PathBuf::from("/repo/.usagi/worktree/login/app-a"),
+                        head: "76e906f".to_string(),
+                        primary: false,
+                        upstream: Some("origin/login".to_string()),
+                        status: BranchStatus::Pushed,
+                        updated_at: ts,
+                    },
+                    WorktreeState {
+                        branch: None,
+                        path: PathBuf::from("/repo/.usagi/worktree/login/app-b"),
+                        head: "aaf5459".to_string(),
+                        primary: false,
+                        upstream: None,
+                        status: BranchStatus::Local,
+                        updated_at: ts,
+                    },
+                ],
+            }],
         }
     }
 
     #[test]
-    fn render_marks_primary_upstream_and_detached_head() {
+    fn render_lists_sessions_with_their_worktrees() {
         let lines = render(&state());
-        assert_eq!(
-            lines[0],
-            "default branch: main  (updated 2026-06-13 05:01 UTC)"
-        );
+        assert_eq!(lines[0], "updated 2026-06-13 05:01 UTC");
         assert_eq!(lines[1], "");
-        // Primary worktree: leading "*", status, branch, head and upstream.
+        assert_eq!(lines[2], "session \"login\"  (/repo/.usagi/worktree/login)");
+        // First worktree: status, branch, head and upstream arrow.
         assert_eq!(
-            lines[2],
-            "* pushed   main                     76e906f → origin/main"
+            lines[3],
+            "  pushed   login                    76e906f → origin/login"
         );
-        assert_eq!(lines[3], "    /repo");
-        // Secondary worktree: leading space, detached label, no upstream arrow.
-        assert_eq!(lines[4], "  local    (detached)               aaf5459");
-        assert_eq!(lines[5], "    /repo/wt");
+        assert_eq!(lines[4], "    /repo/.usagi/worktree/login/app-a");
+        // Second worktree: detached label, no upstream arrow.
+        assert_eq!(lines[5], "  local    (detached)               aaf5459");
+        assert_eq!(lines[6], "    /repo/.usagi/worktree/login/app-b");
+    }
+
+    #[test]
+    fn render_reports_when_there_are_no_sessions() {
+        let mut s = state();
+        s.sessions.clear();
+        let lines = render(&s);
+        assert!(lines.last().unwrap().contains("No sessions yet"));
     }
 
     #[test]

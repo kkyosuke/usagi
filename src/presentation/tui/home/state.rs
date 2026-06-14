@@ -165,9 +165,8 @@ impl SessionModal {
 pub struct SessionOutcome {
     /// A line describing the result (success or failure) to append to the log.
     pub line: LogLine,
-    /// The refreshed worktree list, when creation produced a new one.
-    pub worktrees: Option<Vec<WorktreeState>>,
-    /// The refreshed session list, when creation updated it.
+    /// The refreshed session list, when the action changed it. The worktree
+    /// pane is rebuilt from this (each session contributes its worktrees).
     pub sessions: Option<Vec<SessionRecord>>,
 }
 
@@ -227,9 +226,23 @@ impl HomeState {
         self.history = entries;
     }
 
-    /// Seed the recorded sessions (from `state.json`), shown by `session list`.
+    /// Seed the recorded sessions (from `state.json`), shown by `session list`,
+    /// and rebuild the worktree pane from them.
     pub fn restore_sessions(&mut self, sessions: Vec<SessionRecord>) {
         self.sessions = sessions;
+        self.rebuild_list();
+    }
+
+    /// Rebuild the worktree pane from the current sessions: every session
+    /// contributes its per-repository worktrees, in order.
+    fn rebuild_list(&mut self) {
+        let name = self.list.workspace_name().to_string();
+        let worktrees = self
+            .sessions
+            .iter()
+            .flat_map(|s| s.worktrees.iter().cloned())
+            .collect();
+        self.list = WorktreeList::new(name, worktrees);
     }
 
     pub fn sessions(&self) -> &[SessionRecord] {
@@ -447,12 +460,9 @@ impl HomeState {
     /// creation refreshed the worktree list, swap it in.
     pub fn apply_session_outcome(&mut self, outcome: SessionOutcome) {
         self.log.push(outcome.line);
-        if let Some(worktrees) = outcome.worktrees {
-            let name = self.list.workspace_name().to_string();
-            self.list = WorktreeList::new(name, worktrees);
-        }
         if let Some(sessions) = outcome.sessions {
             self.sessions = sessions;
+            self.rebuild_list();
         }
     }
 }
@@ -836,23 +846,23 @@ mod tests {
         SessionRecord {
             name: name.to_string(),
             root: std::path::PathBuf::from(format!("/repo/.usagi/worktree/{name}")),
-            worktrees: (0..worktrees)
-                .map(|i| std::path::PathBuf::from(format!("/repo/.usagi/worktree/{name}/r{i}")))
-                .collect(),
+            // Each repository's worktree is on the session branch `name`.
+            worktrees: (0..worktrees).map(|_| worktree(name)).collect(),
             created_at: Utc::now(),
         }
     }
 
     #[test]
-    fn apply_session_outcome_logs_and_optionally_swaps_lists() {
+    fn apply_session_outcome_logs_and_rebuilds_the_pane_from_sessions() {
         let mut state = state();
-        // A success outcome with refreshed lists replaces worktrees and sessions.
+        // A success outcome with refreshed sessions rebuilds the worktree pane
+        // from them (one worktree per session here).
         state.apply_session_outcome(SessionOutcome {
             line: LogLine::output("Created session \"x\""),
-            worktrees: Some(vec![worktree("main"), worktree("x")]),
-            sessions: Some(vec![session_record("x", 1)]),
+            sessions: Some(vec![session_record("main", 1), session_record("x", 1)]),
         });
         assert!(state.log().last().unwrap().text.contains("Created session"));
+        assert_eq!(state.sessions().len(), 2);
         assert_eq!(state.list().worktrees().len(), 2);
         assert_eq!(state.list().workspace_name(), "usagi");
         assert!(state
@@ -860,17 +870,15 @@ mod tests {
             .worktrees()
             .iter()
             .any(|w| w.branch.as_deref() == Some("x")));
-        assert_eq!(state.sessions().len(), 1);
 
-        // A failure outcome (no lists) only logs.
+        // A failure outcome (no sessions) only logs; the pane is unchanged.
         state.apply_session_outcome(SessionOutcome {
             line: LogLine::error("session failed"),
-            worktrees: None,
             sessions: None,
         });
         assert_eq!(state.log().last().unwrap().kind, LineKind::Error);
         assert_eq!(state.list().worktrees().len(), 2);
-        assert_eq!(state.sessions().len(), 1);
+        assert_eq!(state.sessions().len(), 2);
     }
 
     #[test]
