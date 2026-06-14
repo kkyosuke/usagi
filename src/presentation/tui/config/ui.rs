@@ -2,10 +2,13 @@ use console::style;
 
 use crate::presentation::tui::widgets;
 
-use super::state::{agent_cli_label, Config, Field, AGENT_CLIS};
+use super::state::{Config, Field};
 
 const TITLE: &str = "Config";
 const SUBTITLE: &str = "Adjust your preferences";
+
+/// The label of the Save button row.
+const SAVE_LABEL: &str = "[ Save ]";
 
 /// Fixed width of the settings block; the whole block is centred in the terminal.
 const BLOCK_WIDTH: usize = 52;
@@ -22,20 +25,39 @@ fn header_lines(width: usize) -> Vec<String> {
     lines
 }
 
-/// Builds one setting row: a `>` cursor for the selected entry, the label in a
-/// fixed-width column, and the already-styled value beside it.
+/// The width of the label column: the widest field label.
+fn label_width() -> usize {
+    Field::ALL
+        .iter()
+        .map(|f| f.label().chars().count())
+        .max()
+        .unwrap_or(0)
+}
+
+/// Builds one setting row. Two single-column gutters sit left of the label: the
+/// `>` cursor for the selected row, then a `●` flag for a field carrying an
+/// unsaved edit. The label follows in a fixed-width column, then the already
+/// styled `< value >` chooser.
 ///
-/// `value` arrives pre-styled (a dimmed string, a toggle, a selector) so each
-/// field can present its value with the widget that suits it.
+/// `value` arrives pre-styled from [`widgets::chooser`]; keeping the cursor and
+/// change flag in their own gutters keeps the label and value columns aligned.
 fn setting_row(
     block_pad: &str,
     label: &str,
     label_width: usize,
     value: &str,
     selected: bool,
+    changed: bool,
 ) -> String {
-    let marker = if selected {
+    let cursor = if selected {
         style(">").red().bold().to_string()
+    } else {
+        " ".to_string()
+    };
+
+    // A dot to the left of the label flags an edit that has not been saved yet.
+    let mark = if changed {
+        style("●").yellow().bold().to_string()
     } else {
         " ".to_string()
     };
@@ -47,48 +69,55 @@ fn setting_row(
         style(padded).cyan().to_string()
     };
 
-    format!("{block_pad}{marker} {label}  {value}")
+    format!("{block_pad}{cursor} {mark} {label}  {value}")
 }
 
-/// Renders a field's current value with the widget that suits it: a toggle for
-/// the notifications switch, an inline selector for the agent CLI, and a plain
-/// dimmed label for the rest.
-fn value_display(config: &Config, field: Field) -> String {
-    match field {
-        Field::Notifications => widgets::toggle(config.settings().notifications_enabled),
-        Field::AgentCli => {
-            let labels: Vec<&str> = AGENT_CLIS.iter().map(|&c| agent_cli_label(c)).collect();
-            let selected = AGENT_CLIS
-                .iter()
-                .position(|&c| c == config.settings().agent_cli)
-                .unwrap_or(0);
-            widgets::select(&labels, selected)
-        }
-        _ => style(config.value_of(field)).dim().to_string(),
-    }
-}
-
-/// Builds the settings list: one row per editable field.
+/// Builds the settings list: one row per editable field, each rendered as a
+/// `< value >` chooser that lights up when focused and turns yellow when edited.
 fn settings_lines(block_pad: &str, config: &Config) -> Vec<String> {
-    let label_width = Field::ALL
-        .iter()
-        .map(|f| f.label().chars().count())
-        .max()
-        .unwrap_or(0);
+    let label_width = label_width();
 
     Field::ALL
         .iter()
         .enumerate()
         .map(|(i, &field)| {
+            let selected = i == config.selected_index();
+            let changed = config.is_changed(field);
+            let value = widgets::chooser(&config.value_of(field), selected, changed);
             setting_row(
                 block_pad,
                 field.label(),
                 label_width,
-                &value_display(config, field),
-                i == config.selected_index(),
+                &value,
+                selected,
+                changed,
             )
         })
         .collect()
+}
+
+/// Builds the Save button row, sat in the value column below the fields.
+///
+/// The button is enabled (green) only when there are unsaved changes; with
+/// nothing to save it is dimmed, so its state mirrors whether pressing it would
+/// do anything. The `>` cursor marks it when focused, like any other row.
+fn save_button_line(block_pad: &str, dirty: bool, selected: bool) -> String {
+    let marker = if selected {
+        style(">").red().bold().to_string()
+    } else {
+        " ".to_string()
+    };
+
+    let button = if dirty {
+        style(SAVE_LABEL).green().bold().to_string()
+    } else {
+        style(SAVE_LABEL).dim().to_string()
+    };
+
+    // Align the button under the value column: the cursor gutter, the (empty)
+    // change-flag gutter, then the label-width gutter, matching `setting_row`.
+    let gutter = " ".repeat(label_width());
+    format!("{block_pad}{marker}   {gutter}  {button}")
 }
 
 /// Builds the transient notice line below the settings.
@@ -109,7 +138,7 @@ fn notice_lines(block_pad: &str, notice: Option<&str>) -> Vec<String> {
 fn footer_lines(width: usize) -> Vec<String> {
     vec![widgets::dim_line(
         width,
-        "↑↓: move / ←→/Enter: change / Esc: back",
+        "↑↓: move · ←→: change · Enter: save · Esc: back",
     )]
 }
 
@@ -128,6 +157,13 @@ pub fn render_frame(
     let mut body = header_lines(width);
     body.push(String::new());
     body.extend(settings_lines(&block_pad, config));
+    // A blank line sets the Save button apart from the fields above it.
+    body.push(String::new());
+    body.push(save_button_line(
+        &block_pad,
+        config.is_dirty(),
+        config.is_save_selected(),
+    ));
     body.extend(notice_lines(&block_pad, notice));
     let footer = footer_lines(width);
 
@@ -155,6 +191,15 @@ mod tests {
     use super::*;
     use crate::domain::settings::{Settings, Theme};
 
+    /// A row carries the cursor when its first non-space glyph is `>`. Chevrons
+    /// from the chooser also contain `>`, so position — not mere presence — is
+    /// what distinguishes the selected row.
+    fn has_cursor(line: &str) -> bool {
+        console::strip_ansi_codes(line)
+            .trim_start()
+            .starts_with('>')
+    }
+
     fn sample_config() -> Config {
         Config::new(
             Settings {
@@ -177,12 +222,20 @@ mod tests {
 
     #[test]
     fn setting_row_marks_only_the_selected_entry() {
-        let selected = setting_row("", "Theme", 17, "Dark", true);
+        let selected = setting_row("", "Theme", 17, "Dark", true, false);
         assert!(selected.contains('>'));
         assert!(selected.contains("Theme"));
         assert!(selected.contains("Dark"));
-        let unselected = setting_row("", "Theme", 17, "Dark", false);
+        let unselected = setting_row("", "Theme", 17, "Dark", false, false);
         assert!(!unselected.contains('>'));
+    }
+
+    #[test]
+    fn setting_row_flags_changed_fields_with_a_dot() {
+        let changed = setting_row("", "Theme", 17, "Dark", false, true);
+        assert!(changed.contains('●'));
+        let unchanged = setting_row("", "Theme", 17, "Dark", false, false);
+        assert!(!unchanged.contains('●'));
     }
 
     #[test]
@@ -194,27 +247,27 @@ mod tests {
         assert!(lines[0].contains("Dark"));
         assert!(lines[1].contains("Default Workspace"));
         assert!(lines[1].contains("alpha"));
-        // The notifications toggle and agent selector render via their widgets.
         assert!(lines[2].contains("Notifications"));
         assert!(lines[2].contains("On"));
         assert!(lines[3].contains("Agent CLI"));
-        assert!(lines[3].contains("[Claude]"));
-        assert!(lines[3].contains("Gemini"));
-        // Only the first (selected) row carries the cursor.
-        assert_eq!(lines.iter().filter(|l| l.contains('>')).count(), 1);
+        // Each field shows its single current value via the chooser.
+        assert!(lines[3].contains("Claude"));
+        // Every field is a chooser, so chevrons appear on all rows...
+        assert!(lines.iter().all(|l| l.contains('<') && l.contains('>')));
+        // ...but only the focused (first) row carries the cursor.
+        assert!(has_cursor(&lines[0]));
+        assert_eq!(lines.iter().filter(|l| has_cursor(l)).count(), 1);
+        // Nothing is edited in a fresh config, so no row is flagged changed.
+        assert!(lines.iter().all(|l| !l.contains('●')));
     }
 
     #[test]
-    fn value_display_uses_widgets_for_toggle_and_select() {
-        let config = sample_config();
-        // Notifications renders as an on/off toggle.
-        let notifications = value_display(&config, Field::Notifications);
-        assert!(notifications.contains("On"));
-        assert!(notifications.contains("off"));
-        // Agent CLI renders as an inline selector with the active one bracketed.
-        let agent = value_display(&config, Field::AgentCli);
-        assert!(agent.contains("[Claude]"));
-        assert!(!agent.contains("[Gemini]"));
+    fn settings_lines_flag_an_edited_field() {
+        let mut config = sample_config();
+        config.cycle_selected(true); // edit the focused Theme field
+        let lines = settings_lines("", &config);
+        assert!(lines[0].contains('●'));
+        assert!(lines[1..].iter().all(|l| !l.contains('●')));
     }
 
     #[test]
@@ -235,6 +288,19 @@ mod tests {
     fn footer_lines_include_help_text() {
         let lines = footer_lines(80);
         assert!(lines.iter().any(|l| l.contains("Esc")));
+        assert!(lines.iter().any(|l| l.contains("save")));
+    }
+
+    #[test]
+    fn save_button_line_renders_the_button_and_cursor() {
+        // Dirty + selected: shows the label and carries the cursor.
+        let selected = save_button_line("", true, true);
+        assert!(selected.contains("Save"));
+        assert!(selected.contains('>'));
+        // Clean + unselected: still shows the label, no cursor.
+        let idle = save_button_line("", false, false);
+        assert!(idle.contains("Save"));
+        assert!(!idle.contains('>'));
     }
 
     #[test]
@@ -245,8 +311,25 @@ mod tests {
         assert!(joined.contains("Config"));
         assert!(joined.contains("Theme"));
         assert!(joined.contains("Dark"));
+        // The Save button is part of every frame.
+        assert!(joined.contains("Save"));
         assert!(joined.contains("Saved"));
         assert!(joined.contains("Esc"));
+    }
+
+    #[test]
+    fn render_frame_marks_the_save_button_when_focused() {
+        let mut config = sample_config();
+        // Move the cursor down onto the Save button (past all the fields).
+        for _ in 0..Field::ALL.len() {
+            config.move_down();
+        }
+        assert!(config.is_save_selected());
+        let frame = render_frame(24, 80, &config, None);
+        // No field row carries the cursor; the Save row does.
+        let cursor_rows: Vec<&String> = frame.iter().filter(|l| has_cursor(l)).collect();
+        assert_eq!(cursor_rows.len(), 1);
+        assert!(cursor_rows[0].contains("Save"));
     }
 
     #[test]
