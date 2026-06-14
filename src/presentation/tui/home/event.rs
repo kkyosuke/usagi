@@ -4,7 +4,7 @@ use anyhow::Result;
 use console::Key;
 use console::Term;
 
-use crate::presentation::tui::screen::KeyReader;
+use crate::presentation::tui::screen::{FramePainter, KeyReader};
 
 use super::command::Effect;
 use super::state::{HomeState, Mode, PaneExit, SessionOutcome};
@@ -68,16 +68,13 @@ pub fn event_loop(
     open_terminal: &mut dyn FnMut(&mut HomeState, &Path, bool) -> Result<PaneExit>,
     open_config: &mut dyn FnMut(&Term) -> Result<bool>,
 ) -> Result<Outcome> {
+    let mut painter = FramePainter::new();
     loop {
         // Mark any background sessions waiting for input before painting.
         state.set_waiting(monitor.waiting());
-        term.move_cursor_to(0, 0)?;
-        term.clear_screen()?;
         let (height, width) = term.size();
         let frame = ui::render_frame(height as usize, width as usize, &state);
-        for line in &frame {
-            term.write_line(line)?;
-        }
+        painter.paint(term, frame)?;
 
         let key = match reader.read_key() {
             Ok(key) => key,
@@ -195,6 +192,10 @@ pub fn event_loop(
                                 }
                             };
                             state.show_log();
+                            // The embedded terminal drew over the whole screen,
+                            // so the remembered frame is stale: force a full
+                            // repaint on the next pass.
+                            painter.reset();
                             match outcome {
                                 Ok(PaneExit::Detach) => {
                                     state.log_output(format!("{label} detached (still running) 🐰"))
@@ -205,10 +206,14 @@ pub fn event_loop(
                             }
                         }
                         // Hand off to the settings screen; it owns the terminal
-                        // until dismissed. Quitting there (guard returns true)
-                        // quits the app; otherwise we resume the workspace screen.
-                        Effect::OpenConfig if open_config(term)? => {
-                            return Ok(Outcome::Quit);
+                        // until dismissed. Quitting there quits the app;
+                        // otherwise we resume the workspace screen, forcing a
+                        // full repaint over the screen it drew.
+                        Effect::OpenConfig => {
+                            if open_config(term)? {
+                                return Ok(Outcome::Quit);
+                            }
+                            painter.reset();
                         }
                         _ => {}
                     }
