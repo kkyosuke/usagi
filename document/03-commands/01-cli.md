@@ -9,6 +9,7 @@
 
 - [実装済みの CLI コマンド](#実装済みの-cli-コマンド)
   - [`usagi issue`](#usagi-issue)
+  - [`usagi mcp`](#usagi-mcp)
 - [予定の CLI コマンド](#予定の-cli-コマンド)
 
 ## 実装済みの CLI コマンド
@@ -24,6 +25,7 @@
 | `usagi doctor` | Git / Bash / AWS CLI / Node.js / Python などの依存ツールの導入状況を確認する | ✅ |
 | `usagi doctor --fix` | 不足ツールを OS のパッケージマネージャ（brew / apt-get / dnf / pacman）で導入を試行し、修復不可なら手動手順を提示する | ✅ |
 | `usagi issue <create\|list\|show\|update\|search\|delete>` | カレントリポジトリのタスク issue（`.usagi/issues/`）を操作する（[data/02-workspace.md](../data/02-workspace.md#issues-タスク-issue)） | ✅ |
+| `usagi mcp` | issue 操作を MCP（Model Context Protocol）サーバとして stdio で公開し、AI エージェントから使えるようにする | ✅ |
 
 ### `usagi init`
 
@@ -84,6 +86,35 @@ $ usagi issue list
 #2   todo         medium ready     ログイン画面
 #3   todo         low    blocked   ログアウト  (blocked by 2)
 ```
+
+### `usagi mcp`
+
+`usagi issue` と同じ issue 操作を、**MCP（Model Context Protocol）サーバ**として AI エージェント（Claude Code など）に公開します。`usagi mcp` は stdio 上の JSON-RPC 2.0 サーバとして動作し、起動したカレントディレクトリのリポジトリ（`.usagi/issues/`）を対象にします。
+
+公開する tool（いずれも `usecase/issue` を呼ぶ薄いラッパ）:
+
+| tool | 説明 |
+|---|---|
+| `issue_create` | issue を作成して返す |
+| `issue_get` | 番号で 1 件取得（無ければ `null`） |
+| `issue_list` | 一覧。各 issue に着手可能（`ready`）と未達依存（`unmet_deps`）を付与 |
+| `issue_search` | タイトル・本文の全文検索 |
+| `issue_update` | 指定フィールドのみ更新 |
+| `issue_delete` | 番号で削除 |
+
+tool の結果は JSON テキストで返り、`list` / `search` は CLI と同じく **dependson が全て done の issue を `ready: true`** として返します。
+
+Claude Code への登録例（プロジェクト直下で実行する想定）:
+
+```json
+{
+  "mcpServers": {
+    "usagi": { "command": "usagi", "args": ["mcp"] }
+  }
+}
+```
+
+> プロトコルは `initialize` / `tools/list` / `tools/call` / `ping` の最小サブセットを自前実装しています（非同期ランタイム非依存）。実装は `presentation/mcp.rs`（プロトコル・tool ディスパッチ）と `presentation/cli/mcp.rs`（stdio ループ）。
 
 ## 予定の CLI コマンド
 
