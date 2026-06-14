@@ -6,7 +6,9 @@ playground
 
 # IDE files
 .idea
-.usagi/
+
+# Claude Code local files
+.claude/
 
 # mac
 .DS_Store
