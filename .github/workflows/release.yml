@@ -56,6 +56,8 @@ jobs:
           cd target/${{ matrix.target }}/release
           mkdir -p dist
           cp ${{ matrix.artifact_name }} dist/
+          cp ../../../scripts/install.sh dist/
+          chmod +x dist/install.sh
           cd dist
           if [ "${{ matrix.os }}" = "windows-latest" ]; then
             ASSET_FILENAME="${{ matrix.asset_name }}.zip"
