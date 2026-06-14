@@ -203,12 +203,13 @@ session "login"  (/Users/me/git/usagi/.usagi/worktree/login)
 `set_local_agent_cli` / `set_local_notifications_enabled`。
 
 > 編集 UI（[issue 022](../../issues/022-local-settings-ui.md), [issue 030](../../issues/030-default-branch-source.md)）:
-> git リポジトリ内で開いた設定画面（Config）に、グローバル設定の下へ「Local · Agent CLI」「Local · Notifications」
-> 「Local · Default Branch」の行が追加されます。Agent CLI と Notifications は **「グローバルに従う / ローカルで
-> 上書き」** を 1 つのセレクタで切り替えられ、未上書き時は現在の実効値（`Global (...)`）を表示します。Default
-> Branch はグローバル対応項目がないため `local` / `remote` の 2 値を切り替え、未設定時は既定値（`Default (Remote)`）
-> を表示します。保存時にグローバル設定とローカル設定（`save_local`）をまとめて書き込みます。全項目を未上書きに
-> 戻しても `settings.json` は残し（中身は実質空）、「グローバルに従う／既定に従う」を意味します。
+> ホーム画面のコマンドモードで `config` を実行すると、設定画面が**ワークスペーススコープ**で開き、「Agent CLI」
+> 「Notifications」「Default Branch」の 3 項目だけを表示します（グローバル設定はここには出ません）。Agent CLI と
+> Notifications は **「グローバルに従う / ローカルで上書き」** を 1 つのセレクタで切り替えられ、未上書き時は現在の
+> 実効値（`Global (...)`）を表示します。Default Branch はグローバル対応項目がないため `local` / `remote` の 2 値を
+> 切り替え、未設定時は既定値（`Default (Remote)`）を表示します。保存時はこのワークスペースのローカル設定
+> （`save_local`）のみを書き込みます。全項目を未上書きに戻しても `settings.json` は残し（中身は実質空）、
+> 「グローバルに従う／既定に従う」を意味します。
 
 ## `history.json`
 
