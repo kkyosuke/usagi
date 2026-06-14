@@ -79,7 +79,7 @@ src/
     ├── mcp.rs                  # issue 操作の MCP/JSON-RPC ディスパッチ（McpServer）
     └── tui/                    # ratatui ベースの TUI
         ├── app/                # TUI オーケストレーター（画面グラフの遷移を管理 / event）
-        ├── screen.rs           # 端末制御（代替スクリーン・RAII ガード）
+        ├── screen.rs           # 端末制御（代替スクリーン・RAII ガード）・差分描画（FramePainter）
         ├── term_reader.rs      # キー入力読み取り
         ├── welcome/            # 起動画面（menu / state / ui / event）
         ├── open/               # プロジェクト選択画面（state / ui / event）

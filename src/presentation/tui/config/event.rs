@@ -3,7 +3,7 @@ use console::Key;
 use console::Term;
 
 use crate::domain::settings::{LocalSettings, Settings};
-use crate::presentation::tui::screen::KeyReader;
+use crate::presentation::tui::screen::{FramePainter, KeyReader};
 
 use super::state::Config;
 use super::ui;
@@ -41,15 +41,12 @@ pub fn event_loop(
     initial_notice: Option<String>,
 ) -> Result<Outcome> {
     let mut notice = initial_notice;
+    let mut painter = FramePainter::new();
 
     loop {
-        term.move_cursor_to(0, 0)?;
-        term.clear_screen()?;
         let (height, width) = term.size();
         let frame = ui::render_frame(height as usize, width as usize, &config, notice.as_deref());
-        for line in &frame {
-            term.write_line(line)?;
-        }
+        painter.paint(term, frame)?;
 
         let key = match reader.read_key() {
             Ok(key) => key,

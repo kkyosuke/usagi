@@ -39,6 +39,7 @@ use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifier
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 
 use crate::infrastructure::pty::PtySession;
+use crate::presentation::tui::screen::diff_frame;
 
 use super::state::{HomeState, PaneExit};
 use super::terminal_pool::MonitorHandle;
@@ -230,19 +231,9 @@ fn render(
     let (height, width) = term.size();
     let frame = ui::render_frame(height as usize, width as usize, state);
 
-    let mut buf = String::from("\x1b[?25l"); // hide the cursor while repainting
-    for (row, line) in frame.iter().enumerate() {
-        if prev.get(row) != Some(line) {
-            // Move to the row (1-based), clear it, then write the new content.
-            let _ = write!(buf, "\x1b[{};1H\x1b[2K", row + 1);
-            buf.push_str(line);
-        }
-    }
-    // A shorter frame than last time (e.g. after a resize) leaves stale rows
-    // below; clear them.
-    for row in frame.len()..prev.len() {
-        let _ = write!(buf, "\x1b[{};1H\x1b[2K", row + 1);
-    }
+    // Repaint only the changed rows (see [`diff_frame`]); the cursor is hidden
+    // for the repaint and re-shown below over the shell's cell.
+    let mut buf = diff_frame(prev, &frame);
 
     if let Some((row, col)) = cursor {
         // Translate the pane-relative cursor to a 1-based screen position and

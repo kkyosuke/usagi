@@ -4,7 +4,7 @@ use console::Term;
 
 use crate::domain::workspace::Workspace;
 use crate::presentation::tui::home;
-use crate::presentation::tui::screen::KeyReader;
+use crate::presentation::tui::screen::{FramePainter, KeyReader};
 
 use super::state::ProjectList;
 use super::ui;
@@ -39,15 +39,12 @@ pub fn event_loop(
     open_home: &mut OpenHome,
 ) -> Result<Outcome> {
     let mut notice = initial_notice;
+    let mut painter = FramePainter::new();
 
     loop {
-        term.move_cursor_to(0, 0)?;
-        term.clear_screen()?;
         let (height, width) = term.size();
         let frame = ui::render_frame(height as usize, width as usize, &list, notice.as_deref());
-        for line in &frame {
-            term.write_line(line)?;
-        }
+        painter.paint(term, frame)?;
 
         let key = match reader.read_key() {
             Ok(key) => key,
@@ -68,7 +65,12 @@ pub fn event_loop(
             Key::Enter => {
                 if let Some(workspace) = list.selected() {
                     match open_home(term, workspace)? {
-                        home::Outcome::Back => notice = None,
+                        // The home screen drew over the list; force a full
+                        // repaint of it on the next pass.
+                        home::Outcome::Back => {
+                            notice = None;
+                            painter.reset();
+                        }
                         home::Outcome::Quit => return Ok(Outcome::Quit),
                     }
                 }

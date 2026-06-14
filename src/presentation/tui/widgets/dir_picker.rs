@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use console::{style, Key, Term};
 
-use crate::presentation::tui::screen::KeyReader;
+use crate::presentation::tui::screen::{FramePainter, KeyReader};
 
 use super::picker::Picker;
 
@@ -268,15 +268,12 @@ pub fn event_loop(
     start: &Path,
 ) -> Result<Choice> {
     let mut dir = DirPicker::open(source, start);
+    let mut painter = FramePainter::new();
 
     loop {
-        term.move_cursor_to(0, 0)?;
-        term.clear_screen()?;
         let (height, width) = term.size();
         let frame = render(height as usize, width as usize, &dir);
-        for line in &frame {
-            term.write_line(line)?;
-        }
+        painter.paint(term, frame)?;
 
         let key = match reader.read_key() {
             Ok(key) => key,

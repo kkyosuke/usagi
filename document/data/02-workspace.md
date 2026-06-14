@@ -22,6 +22,7 @@
 
 ```
 <repo>/.usagi/
+├── .gitignore      # .usagi/ 配下の git 管理を制御（usagi が生成・後述）
 ├── state.json      # worktree / ブランチの状態スナップショット
 ├── settings.json   # プロジェクト固有の設定上書き（ローカル設定）
 ├── history.json    # ワークスペース画面で実行したコマンドの履歴
@@ -31,13 +32,16 @@
 ```
 
 - どの worktree からコマンドを実行しても、`git worktree list` の先頭（＝プライマリ worktree）を基準に保存先を解決します（`infrastructure/git.rs` の `primary_worktree`）。これによりリポジトリ内で 1 つの `.usagi/` に集約されます。
-- `.usagi/` の大半（`state.json` / `settings.json` / `history.json` / `worktree/`）は **マシンローカルな状態・設定** で、`.gitignore` 済みのため **コミットされません**。
-- 例外は **`.usagi/issues/`**。タスク issue はチームで共有したいので git 管理対象とし、`usagi init` は次の選択的な `.gitignore` を書き込みます（既存の `.usagi/` 単独エントリは移行されます）。派生キャッシュの `index.json` だけは再生成可能なので除外したままにします。
+- `.usagi/` の大半（`state.json` / `settings.json` / `history.json` / `worktree/`）は **マシンローカルな状態・設定** で、後述の `.gitignore` により **コミットされません**。
+- 例外は **`.usagi/issues/`**。タスク issue はチームで共有したいので git 管理対象とします。派生キャッシュの `index.json` だけは再生成可能なので除外したままにします。
+- git 管理の制御は **リポジトリルートの `.gitignore` には書かず、`.usagi/.gitignore` に自己完結させます**（`usagi::usecase::project::ignore_usagi_dir`）。リポジトリルートを汚さず、`.usagi/` 配下だけで完結するのが利点です。`usagi init` 時に次の内容（`.usagi/` 配下からの相対パターン）を書き込み、旧バージョンがルート `.gitignore` に追記していた `.usagi/` 系エントリがあれば除去します。
 
   ```gitignore
-  .usagi/*
-  !.usagi/issues/
-  .usagi/issues/index.json
+  # <repo>/.usagi/.gitignore
+  /*
+  !/.gitignore
+  !/issues/
+  /issues/index.json
   ```
 
 ### セッションの worktree 配置
