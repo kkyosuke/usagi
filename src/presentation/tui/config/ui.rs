@@ -2,7 +2,7 @@ use console::style;
 
 use crate::presentation::tui::widgets;
 
-use super::state::{Config, Field};
+use super::state::{Config, Field, LocalField};
 
 const TITLE: &str = "Config";
 const SUBTITLE: &str = "Adjust your preferences";
@@ -25,13 +25,13 @@ fn header_lines(width: usize) -> Vec<String> {
     lines
 }
 
-/// The width of the label column: the widest field label.
+/// The width of the label column: the widest field label across both the
+/// global and project-local fields, so the value column aligns whether or not
+/// the local override rows are shown.
 fn label_width() -> usize {
-    Field::ALL
-        .iter()
-        .map(|f| f.label().chars().count())
-        .max()
-        .unwrap_or(0)
+    let global = Field::ALL.iter().map(|f| f.label().chars().count());
+    let local = LocalField::ALL.iter().map(|f| f.label().chars().count());
+    global.chain(local).max().unwrap_or(0)
 }
 
 /// Builds one setting row. Two single-column gutters sit left of the label: the
@@ -72,25 +72,26 @@ fn setting_row(
     format!("{block_pad}{cursor} {mark} {label}  {value}")
 }
 
-/// Builds the settings list: one row per editable field, each rendered as a
-/// `< value >` chooser that lights up when focused and turns yellow when edited.
+/// Builds the settings list: one row per editable field (global, then any
+/// project-local overrides), each rendered as a `< value >` chooser that lights
+/// up when focused and turns yellow when edited.
 fn settings_lines(block_pad: &str, config: &Config) -> Vec<String> {
     let label_width = label_width();
 
-    Field::ALL
+    config
+        .rows()
         .iter()
         .enumerate()
-        .map(|(i, &field)| {
+        .map(|(i, row)| {
             let selected = i == config.selected_index();
-            let changed = config.is_changed(field);
-            let value = widgets::chooser(&config.value_of(field), selected, changed);
+            let value = widgets::chooser(&row.value, selected, row.changed);
             setting_row(
                 block_pad,
-                field.label(),
+                row.label,
                 label_width,
                 &value,
                 selected,
-                changed,
+                row.changed,
             )
         })
         .collect()

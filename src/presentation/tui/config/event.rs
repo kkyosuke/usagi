@@ -2,7 +2,7 @@ use anyhow::Result;
 use console::Key;
 use console::Term;
 
-use crate::domain::settings::Settings;
+use crate::domain::settings::{LocalSettings, Settings};
 use crate::presentation::tui::screen::KeyReader;
 
 use super::state::Config;
@@ -17,11 +17,12 @@ pub enum Outcome {
     Quit,
 }
 
-/// Persists the edited settings.
+/// Persists the edited settings: the global [`Settings`] plus, when the screen
+/// has a project context, that project's [`LocalSettings`] overrides.
 ///
 /// Taking this as a parameter lets the event loop be tested without touching
 /// disk: production wires it to the settings use case, tests pass a stub.
-pub type Save<'a> = dyn FnMut(&Settings) -> Result<()> + 'a;
+pub type Save<'a> = dyn FnMut(&Settings, Option<&LocalSettings>) -> Result<()> + 'a;
 
 /// Runs the configuration screen against the given terminal and key source
 /// until the user goes back or quits. Assumes the alternate screen is already
@@ -108,7 +109,7 @@ fn save_changes(config: &mut Config, save: &mut Save) -> Option<String> {
     if !config.is_dirty() {
         return Some("No changes to save 🐰".to_string());
     }
-    Some(match save(config.settings()) {
+    Some(match save(config.settings(), config.local()) {
         Ok(()) => {
             config.mark_saved();
             "Saved 🐰".to_string()
@@ -120,7 +121,7 @@ fn save_changes(config: &mut Config, save: &mut Save) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::settings::{Settings, Theme};
+    use crate::domain::settings::{AgentCli, LocalSettings, Settings, Theme};
     use std::cell::RefCell;
     use std::collections::VecDeque;
     use std::io;
@@ -149,7 +150,7 @@ mod tests {
 
     /// A persistence stub that accepts every change (and is itself exercised by
     /// [`saving_succeeds_with_a_noop_save`]).
-    fn noop_save(_: &Settings) -> Result<()> {
+    fn noop_save(_: &Settings, _: Option<&LocalSettings>) -> Result<()> {
         Ok(())
     }
 
@@ -158,7 +159,7 @@ mod tests {
         let term = Term::stdout();
         let mut reader = ScriptedReader::new(keys);
         let saved = RefCell::new(Vec::new());
-        let mut save = |s: &Settings| {
+        let mut save = |s: &Settings, _: Option<&LocalSettings>| {
             saved.borrow_mut().push(s.clone());
             Ok(())
         };
@@ -311,7 +312,7 @@ mod tests {
             Ok(Key::Enter),      // attempt the save
             Ok(Key::Escape),
         ]);
-        let mut save = |_: &Settings| Err(anyhow::anyhow!("disk full"));
+        let mut save = |_: &Settings, _: Option<&LocalSettings>| Err(anyhow::anyhow!("disk full"));
         let outcome = event_loop(&term, &mut reader, sample_config(), &mut save, None).unwrap();
         assert!(matches!(outcome, Outcome::Back));
     }
@@ -326,7 +327,7 @@ mod tests {
             Ok(Key::Enter),
             Ok(Key::Escape),
         ]);
-        let mut save: fn(&Settings) -> Result<()> = noop_save;
+        let mut save: fn(&Settings, Option<&LocalSettings>) -> Result<()> = noop_save;
         let outcome = event_loop(&term, &mut reader, sample_config(), &mut save, None).unwrap();
         assert!(matches!(outcome, Outcome::Back));
     }
@@ -336,7 +337,7 @@ mod tests {
         // A load-error notice passed in is rendered on the first frame.
         let term = Term::stdout();
         let mut reader = ScriptedReader::new(vec![Ok(Key::Escape)]);
-        let mut save: fn(&Settings) -> Result<()> = noop_save;
+        let mut save: fn(&Settings, Option<&LocalSettings>) -> Result<()> = noop_save;
         let outcome = event_loop(
             &term,
             &mut reader,
@@ -346,6 +347,34 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(outcome, Outcome::Back));
+    }
+
+    #[test]
+    fn saving_a_local_override_passes_it_to_save() {
+        // Open with a project context, set a local agent-CLI override, then save:
+        // the local settings reach the save callback alongside the global ones.
+        let term = Term::stdout();
+        let config = Config::with_local(Settings::default(), Vec::new(), LocalSettings::default());
+        let mut keys = Vec::new();
+        for _ in 0..4 {
+            keys.push(Ok(Key::ArrowDown)); // descend onto the first local field
+        }
+        keys.push(Ok(Key::ArrowRight)); // override: Global -> Claude
+        keys.push(Ok(Key::ArrowDown)); // Local Notifications
+        keys.push(Ok(Key::ArrowDown)); // Save button
+        keys.push(Ok(Key::Enter)); // save
+        keys.push(Ok(Key::Escape));
+
+        let mut reader = ScriptedReader::new(keys);
+        let captured: RefCell<Option<LocalSettings>> = RefCell::new(None);
+        let mut save = |_: &Settings, local: Option<&LocalSettings>| {
+            *captured.borrow_mut() = local.cloned();
+            Ok(())
+        };
+        let outcome = event_loop(&term, &mut reader, config, &mut save, None).unwrap();
+        assert!(matches!(outcome, Outcome::Back));
+        let local = captured.into_inner().expect("save received local settings");
+        assert_eq!(local.agent_cli, Some(AgentCli::Claude));
     }
 
     #[test]
@@ -362,7 +391,7 @@ mod tests {
     fn unexpected_read_error_is_propagated() {
         let term = Term::stdout();
         let mut reader = ScriptedReader::new(vec![Err(io::Error::other("boom"))]);
-        let mut save: fn(&Settings) -> Result<()> = noop_save;
+        let mut save: fn(&Settings, Option<&LocalSettings>) -> Result<()> = noop_save;
         let err = event_loop(&term, &mut reader, sample_config(), &mut save, None).unwrap_err();
         assert!(err.to_string().contains("Failed to read key"));
     }

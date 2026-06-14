@@ -59,6 +59,25 @@
 > `settings.json` には `workspace_root`（新規プロジェクトのクローン先ベースディレクトリ）も
 > 保存されますが、本画面での編集には未対応です（今後追加予定）。
 
+### プロジェクト単位のローカル設定（#022）
+
+git リポジトリ内で usagi を起動した場合、グローバル設定の下に **ローカル設定**の行が追加されます。
+これは現在のプロジェクト（`<repo>/.usagi/settings.json`）だけに効く上書きで、対象は次の 2 項目です。
+
+| 項目 | 値 | 循環する選択肢 |
+|---|---|---|
+| Local · Agent CLI | このプロジェクトの Agent CLI 上書き | `Global (実効値)` → `Override: Claude` → `Override: Gemini` の順に循環 |
+| Local · Notifications | このプロジェクトの通知 ON/OFF 上書き | `Global (実効値)` → `Override: On` → `Override: Off` の順に循環 |
+
+- **「グローバルに従う / ローカルで上書き」** を 1 つの chooser で切り替えます。`Global (...)` は未上書き
+  （グローバル設定にフォールバック）で、かっこ内に現在の実効値を表示します。`Override: ...` を選ぶとその
+  プロジェクト専用の値になります。再度 `Global` まで循環させれば上書きを解除できます。
+- Save を押すと、グローバル設定（`~/.usagi/settings.json`）とローカル設定（`<repo>/.usagi/settings.json`）が
+  まとめて保存されます。全項目を未上書きに戻した場合もファイルは残し（中身は空に近い JSON）、「グローバルに
+  従う」を意味します（削除はしません）。
+- git リポジトリ外で起動した場合はローカル設定の行は表示されず、従来どおりグローバル設定のみを編集します。
+- 詳細なデータ仕様は [../data/02-workspace.md](../data/02-workspace.md) の `settings.json`（ローカル設定）を参照。
+
 ## widget による値の表示
 
 設定値は共通の chooser widget（`src/presentation/tui/widgets/` の `chooser`）で統一して描画します。
