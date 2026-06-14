@@ -73,9 +73,14 @@
 > 現状 Config 画面で編集できるのは Theme / Default Workspace / Notifications / Agent CLI の 4 項目です。
 > `workspace_root` は `settings.json` に保存されますが、画面からの編集は今後対応予定です。
 
-### CLI（予定）
+### CLI
 
-`usagi config --edit` で CLI から設定を編集できるようにする予定です（[issue 015](../issues/015-config-edit.md)）。
+CLI からも設定を確認・編集できます（[issue 015](../issues/015-config-edit.md)、[3. コマンドリファレンス](03-commands.md)）。
+
+- `usagi config` — 現在のグローバル設定を `key  value` 形式で一覧表示。
+- `usagi config --edit` — 設定ファイルを `$EDITOR`（→ `$VISUAL` → OS 既定）で開いて編集。保存後に
+  再パースで形式（JSON 構文・必須 `version`・各フィールドの型）を検証し、不正なら編集前の内容へ
+  巻き戻します。
 
 ## 環境変数
 

@@ -13,6 +13,12 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Show usagi's configuration (or edit it with --edit)
+    Config {
+        /// Open the configuration file in $EDITOR and validate it on save
+        #[arg(long)]
+        edit: bool,
+    },
     /// Check that required tools are installed
     Doctor {
         /// Try to install missing tools (or print manual steps)
@@ -35,6 +41,7 @@ fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
+        Commands::Config { edit } => usagi::presentation::cli::config::run(edit),
         Commands::Doctor { fix } => usagi::presentation::cli::doctor::run(fix),
         Commands::Hop => usagi::presentation::cli::hop::run(),
         Commands::Init { git } => usagi::presentation::cli::init::run(git),
