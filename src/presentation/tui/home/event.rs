@@ -4,7 +4,7 @@ use anyhow::Result;
 use console::Key;
 use console::Term;
 
-use crate::presentation::tui::screen::{FramePainter, KeyReader};
+use crate::presentation::tui::screen::{FramePainter, Input, KeyReader, ScrollEvent};
 
 use super::command::Effect;
 use super::state::{HomeState, Mode, PaneExit, SessionOutcome};
@@ -78,12 +78,36 @@ pub fn event_loop(
         let frame = ui::render_frame(height as usize, width as usize, &state);
         painter.paint(term, frame)?;
 
-        let key = match reader.read_key() {
-            Ok(key) => key,
+        let key = match reader.read_input() {
+            Ok(Input::Key(key)) => key,
+            // A wheel turn scrolls the command-log pane in place (never the host
+            // terminal's viewport) and otherwise changes nothing, so redraw and
+            // wait for the next event.
+            Ok(Input::Scroll(scroll)) => {
+                scroll_log(term, &mut state, scroll);
+                continue;
+            }
             // An interrupted read (e.g. a delivered signal) means quit.
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => return Ok(Outcome::Quit),
             Err(e) => return Err(anyhow::Error::from(e).context("Failed to read key")),
         };
+
+        // `PageUp` / `PageDown` scroll the command-log pane by a page, in either
+        // mode (they are bound nowhere else). Skipped while a modal is capturing
+        // keys; otherwise handled here so neither mode has to thread them through.
+        if state.modal().is_none() && state.remove_modal().is_none() {
+            match key {
+                Key::PageUp => {
+                    state.scroll_log_up(log_page(term), log_rows(term));
+                    continue;
+                }
+                Key::PageDown => {
+                    state.scroll_log_down(log_page(term));
+                    continue;
+                }
+                _ => {}
+            }
+        }
 
         // The session-removal modal, when open, captures every key: the cursor
         // moves with the arrows (or j/k), Space toggles the row's checkbox, and
@@ -233,6 +257,38 @@ pub fn event_loop(
     }
 }
 
+/// The right pane's window height (the rows the command log scrolls within) for
+/// the current terminal size.
+fn log_rows(term: &Term) -> usize {
+    let (height, width) = term.size();
+    ui::log_pane_rows(height as usize, width as usize)
+}
+
+/// One page of log scrolling: the visible window minus a row of overlap, and at
+/// least one line so a tiny pane still moves.
+fn log_page(term: &Term) -> usize {
+    log_rows(term).saturating_sub(1).max(1)
+}
+
+/// Apply a wheel turn to the command-log pane. It scrolls only when the turn
+/// happened over the right pane (not the worktree list) and no modal is open,
+/// so the wheel never disturbs the rest of the screen.
+fn scroll_log(term: &Term, state: &mut HomeState, scroll: ScrollEvent) {
+    if state.modal().is_some() || state.remove_modal().is_some() {
+        return;
+    }
+    let (height, width) = term.size();
+    if (scroll.col as usize) < ui::right_pane_col_start(width as usize) {
+        return;
+    }
+    let rows = ui::log_pane_rows(height as usize, width as usize);
+    if scroll.lines < 0 {
+        state.scroll_log_up(scroll.lines.unsigned_abs() as usize, rows);
+    } else {
+        state.scroll_log_down(scroll.lines as usize);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::state::LogLine;
@@ -276,6 +332,32 @@ mod tests {
         fn read_key(&mut self) -> io::Result<Key> {
             // Default to Escape so a test can never spin forever.
             self.keys.pop_front().unwrap_or(Ok(Key::Escape))
+        }
+    }
+
+    /// A reader that replays a scripted sequence of full [`Input`]s, so a test
+    /// can feed wheel scrolls (not just keys) into the loop.
+    struct InputReader {
+        inputs: VecDeque<io::Result<Input>>,
+    }
+
+    impl KeyReader for InputReader {
+        fn read_key(&mut self) -> io::Result<Key> {
+            loop {
+                match self.inputs.pop_front() {
+                    Some(Ok(Input::Key(key))) => return Ok(key),
+                    Some(Ok(Input::Scroll(_))) => {}
+                    Some(Err(e)) => return Err(e),
+                    // Default to Escape so a test can never spin forever.
+                    None => return Ok(Key::Escape),
+                }
+            }
+        }
+
+        fn read_input(&mut self) -> io::Result<Input> {
+            self.inputs
+                .pop_front()
+                .unwrap_or(Ok(Input::Key(Key::Escape)))
         }
     }
 
@@ -332,6 +414,138 @@ mod tests {
             &mut open_terminal,
             &mut open_config,
         )
+    }
+
+    /// Drive the loop with a scripted sequence of full inputs (keys and scrolls).
+    fn run_inputs(inputs: Vec<io::Result<Input>>, state: HomeState) -> Result<Outcome> {
+        let term = Term::stdout();
+        let mut reader = InputReader {
+            inputs: inputs.into(),
+        };
+        let monitor = MonitorHandle::detached();
+        let mut persist = |_: &str| {};
+        let mut create_session: fn(&str) -> SessionOutcome = noop_create;
+        let mut remove_session: fn(&str, bool) -> SessionOutcome = noop_remove;
+        let mut open_terminal: fn(&mut HomeState, &Path, bool) -> Result<PaneExit> = noop_open;
+        let mut open_config: fn(&Term) -> Result<bool> = noop_config;
+        event_loop(
+            &term,
+            &mut reader,
+            state,
+            Path::new("/ws"),
+            &monitor,
+            &mut persist,
+            &mut create_session,
+            &mut remove_session,
+            &mut open_terminal,
+            &mut open_config,
+        )
+    }
+
+    #[test]
+    fn input_reader_read_key_skips_scrolls_errors_and_defaults_to_escape() {
+        // A scroll is skipped and the following key returned.
+        let mut reader = InputReader {
+            inputs: VecDeque::from(vec![
+                Ok(Input::Scroll(scroll_right(-3))),
+                Ok(Input::Key(Key::Char('z'))),
+            ]),
+        };
+        assert_eq!(reader.read_key().unwrap(), Key::Char('z'));
+
+        // A read error propagates.
+        let mut reader = InputReader {
+            inputs: VecDeque::from(vec![Err(io::Error::other("boom"))]),
+        };
+        assert!(reader.read_key().is_err());
+
+        // Drained input defaults to Escape so a test never spins forever.
+        let mut reader = InputReader {
+            inputs: VecDeque::new(),
+        };
+        assert_eq!(reader.read_key().unwrap(), Key::Escape);
+    }
+
+    #[test]
+    fn a_wheel_scroll_is_consumed_and_the_loop_continues() {
+        // A scroll over the right pane is handled in place; the loop then keeps
+        // running normally — a command runs (exercising the persist hook) and
+        // the trailing Escapes leave the screen.
+        let mut inputs = vec![
+            Ok(Input::Scroll(scroll_right(-3))),
+            Ok(Input::Key(Key::Char(':'))),
+        ];
+        inputs.extend("man".chars().map(|c| Ok(Input::Key(Key::Char(c)))));
+        inputs.extend([
+            Ok(Input::Key(Key::Enter)),  // run "man" (persisted)
+            Ok(Input::Key(Key::Escape)), // cancel command mode
+            Ok(Input::Key(Key::Escape)), // leave sidebar
+        ]);
+        assert!(matches!(
+            run_inputs(inputs, sample_state()).unwrap(),
+            Outcome::Back
+        ));
+    }
+
+    #[test]
+    fn page_up_and_page_down_scroll_the_log_then_the_loop_continues() {
+        // Both page keys are handled before the mode dispatch; the trailing
+        // Escape leaves the screen.
+        let keys = vec![
+            Ok(Key::PageUp),
+            Ok(Key::PageDown),
+            Ok(Key::PageUp),
+            Ok(Key::Escape),
+        ];
+        assert!(matches!(run(keys, sample_state()).unwrap(), Outcome::Back));
+    }
+
+    #[test]
+    fn scroll_log_moves_the_pane_only_over_the_right_pane() {
+        let term = Term::stdout();
+        let mut state = sample_state();
+        for i in 0..200 {
+            state.log_output(format!("line {i}"));
+        }
+
+        // A wheel turn over the left pane (column 0) is ignored.
+        scroll_log(
+            &term,
+            &mut state,
+            ScrollEvent {
+                lines: -3,
+                col: 0,
+                row: 1,
+            },
+        );
+        assert_eq!(state.right_scroll(), 0);
+
+        // Over the right pane it scrolls up, then back down toward the bottom.
+        scroll_log(&term, &mut state, scroll_right(-3));
+        assert_eq!(state.right_scroll(), 3);
+        scroll_log(&term, &mut state, scroll_right(2));
+        assert_eq!(state.right_scroll(), 1);
+    }
+
+    #[test]
+    fn scroll_log_is_ignored_while_a_modal_is_open() {
+        let term = Term::stdout();
+        let mut state = sample_state();
+        for i in 0..200 {
+            state.log_output(format!("line {i}"));
+        }
+        state.open_session_modal();
+        scroll_log(&term, &mut state, scroll_right(-3));
+        assert_eq!(state.right_scroll(), 0);
+    }
+
+    /// The `ScrollEvent` of a wheel turn over the right pane (a high column).
+    fn scroll_right(lines: i32) -> ScrollEvent {
+        ScrollEvent {
+            lines,
+            col: 200,
+            row: 1,
+        }
     }
 
     /// Types each character of `s` as a `Char` key.

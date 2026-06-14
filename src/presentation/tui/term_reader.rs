@@ -2,14 +2,17 @@ use std::io;
 
 use console::{Key, Term};
 
-use crate::presentation::tui::screen::KeyReader;
+use crate::presentation::tui::screen::{Input, KeyReader, ScrollEvent};
 
-/// Reads keys from a real terminal for the interactive screens.
+/// How many lines one wheel notch scrolls a pane.
+const WHEEL_LINES: i32 = 3;
+
+/// Reads input from a real terminal for the interactive screens.
 ///
 /// This is a thin wrapper over `console::Term` whose terminal I/O can only be
 /// exercised against a live terminal, so it is excluded from coverage; the
 /// event loops are tested with scripted [`KeyReader`] stubs instead. The pure
-/// mouse-filtering logic ([`next_non_mouse_key`]) is unit-tested below.
+/// mouse-parsing logic ([`next_input`]) is unit-tested below.
 pub struct TermKeyReader {
     term: Term,
 }
@@ -21,16 +24,34 @@ impl TermKeyReader {
 }
 
 impl KeyReader for TermKeyReader {
-    fn read_key(&mut self) -> io::Result<Key> {
+    fn read_input(&mut self) -> io::Result<Input> {
         // `read_key_raw` surfaces Ctrl+C as `Key::CtrlC` instead of raising
         // SIGINT, so the event loop can quit gracefully and the alternate
         // screen guard restores the terminal on the way out.
         //
         // The alternate screen guard turns on mouse reporting so the wheel
-        // can't scroll the terminal (see `screen`), which means stray mouse
+        // can't scroll the host terminal (see `screen`), which means mouse
         // events now arrive on stdin. `console` does not understand them, so we
-        // drain each report and hand back only the next real key.
-        next_non_mouse_key(|| self.term.read_key_raw())
+        // parse each report here: a wheel turn becomes a [`ScrollEvent`] (the
+        // screens that scroll a pane in place act on it), and every other report
+        // is swallowed so it never leaks into the key stream.
+        next_input(|| self.term.read_key_raw())
+    }
+
+    fn read_key(&mut self) -> io::Result<Key> {
+        // The screens that do not scroll a pane just want the next key, so drop
+        // any wheel turns along the way.
+        key_from_inputs(|| self.read_input())
+    }
+}
+
+/// Read inputs until one is a key, discarding any scrolls. Backs the key-only
+/// reads of the screens that do not scroll a pane.
+fn key_from_inputs(mut next: impl FnMut() -> io::Result<Input>) -> io::Result<Key> {
+    loop {
+        if let Input::Key(key) = next()? {
+            return Ok(key);
+        }
     }
 }
 
@@ -38,56 +59,127 @@ impl KeyReader for TermKeyReader {
 ///
 /// `console` does not recognise either, so it returns the head of the sequence
 /// as a [`Key::UnknownEscSeq`] and leaves the remaining bytes to surface as
-/// stray keys on subsequent reads. We classify the head here so the caller can
-/// drain exactly the trailing bytes that belong to the report.
+/// stray `Char` keys on subsequent reads. We classify the head here, keeping
+/// whatever payload bytes `console` already consumed so the caller can resume
+/// reading the rest of the report.
 enum MouseSeq {
-    /// SGR extended mode (DECSET 1006): `ESC [ < params... (M|m)`. `console`
-    /// has consumed `[ < <first-digit>`; the rest runs through the `M`/`m`
-    /// terminator.
+    /// SGR extended mode (DECSET 1006): `ESC [ < Cb ; Cx ; Cy (M|m)`. The
+    /// numeric parameters run until the `M` (press) / `m` (release) terminator.
     Sgr,
-    /// Legacy X10 mode: `ESC [ M Cb Cx Cy` — always exactly three bytes after
-    /// `M`. `console` has consumed `[ M Cb`; two coordinate bytes remain.
+    /// Legacy X10 mode: `ESC [ M Cb Cx Cy` — three bytes, each the value plus
+    /// 32, after the `M`.
     X10,
 }
 
 /// Classify an escape sequence `console` could not decode as the head of a
-/// mouse report, or `None` if it is some other unknown sequence we should pass
-/// through untouched.
-fn mouse_seq_kind(key: &Key) -> Option<MouseSeq> {
+/// mouse report, returning the report kind and any payload chars already in the
+/// `UnknownEscSeq`. `None` for any other unknown sequence (passed through).
+fn mouse_seq_kind(key: &Key) -> Option<(MouseSeq, Vec<char>)> {
     let Key::UnknownEscSeq(seq) = key else {
         return None;
     };
     match seq.as_slice() {
         // `ESC [ <` only ever begins an SGR mouse report.
-        ['[', '<', ..] => Some(MouseSeq::Sgr),
+        ['[', '<', rest @ ..] => Some((MouseSeq::Sgr, rest.to_vec())),
         // `ESC [ M` only ever begins an X10 mouse report.
-        ['[', 'M', ..] => Some(MouseSeq::X10),
+        ['[', 'M', rest @ ..] => Some((MouseSeq::X10, rest.to_vec())),
         _ => None,
     }
 }
 
-/// Read keys until one is not part of a mouse report, discarding any reports in
-/// between. `read` yields successive keys from the terminal (each call reads the
-/// next key, blocking for real input once the buffered report bytes are gone).
-fn next_non_mouse_key(mut read: impl FnMut() -> io::Result<Key>) -> io::Result<Key> {
+/// Read the next input event: a key, or — for a wheel turn — a [`ScrollEvent`].
+/// Mouse reports that are not wheel turns (clicks, motion) are swallowed so they
+/// never reach the event loop. `read` yields successive keys from the terminal.
+fn next_input(mut read: impl FnMut() -> io::Result<Key>) -> io::Result<Input> {
     loop {
         let key = read()?;
-        match mouse_seq_kind(&key) {
-            // SGR: swallow the remaining bytes through the `M`/`m` terminator.
-            Some(MouseSeq::Sgr) => loop {
-                if matches!(read()?, Key::Char('M') | Key::Char('m')) {
-                    break;
-                }
-            },
-            // X10: the report is a fixed length — drop the two coordinate bytes.
-            Some(MouseSeq::X10) => {
-                let _ = read()?;
-                let _ = read()?;
-            }
+        let scroll = match mouse_seq_kind(&key) {
+            Some((MouseSeq::Sgr, head)) => read_sgr(head, &mut read)?,
+            Some((MouseSeq::X10, head)) => read_x10(head, &mut read)?,
             // A real key (or an unrelated escape sequence): hand it back.
-            None => return Ok(key),
+            None => return Ok(Input::Key(key)),
+        };
+        // A wheel turn surfaces as a scroll; any other mouse report drains to
+        // `None` and we loop for the next real input.
+        if let Some(scroll) = scroll {
+            return Ok(Input::Scroll(scroll));
         }
     }
+}
+
+/// Drain an SGR report (the parameters plus the `M`/`m` terminator), starting
+/// from the `head` bytes `console` already consumed, and turn a wheel turn into
+/// a [`ScrollEvent`]. Returns `None` for a non-wheel report or a malformed one.
+fn read_sgr(
+    head: Vec<char>,
+    read: &mut impl FnMut() -> io::Result<Key>,
+) -> io::Result<Option<ScrollEvent>> {
+    let mut payload: String = head.into_iter().collect();
+    let release = loop {
+        match read()? {
+            Key::Char('M') => break false,
+            Key::Char('m') => break true,
+            Key::Char(c) => payload.push(c),
+            // An unexpected key mid-report: abandon it (swallowed).
+            _ => return Ok(None),
+        }
+    };
+    Ok(parse_sgr(&payload, release))
+}
+
+/// Parse the `Cb;Cx;Cy` parameters of an SGR report into a wheel [`ScrollEvent`].
+fn parse_sgr(payload: &str, release: bool) -> Option<ScrollEvent> {
+    // Wheel turns report only a press; ignore the release reports of clicks.
+    if release {
+        return None;
+    }
+    let mut params = payload.split(';');
+    let cb: u32 = params.next()?.parse().ok()?;
+    let cx: u32 = params.next()?.parse().ok()?;
+    let cy: u32 = params.next()?.parse().ok()?;
+    wheel_event(cb, cx, cy)
+}
+
+/// Drain an X10 report (three bytes, each value + 32), starting from the `head`
+/// bytes `console` already consumed, and turn a wheel turn into a
+/// [`ScrollEvent`]. Returns `None` for a non-wheel or malformed report.
+fn read_x10(
+    head: Vec<char>,
+    read: &mut impl FnMut() -> io::Result<Key>,
+) -> io::Result<Option<ScrollEvent>> {
+    let mut bytes = head;
+    while bytes.len() < 3 {
+        match read()? {
+            Key::Char(c) => bytes.push(c),
+            _ => return Ok(None),
+        }
+    }
+    // Every X10 value is offset by 32; the coordinates are otherwise the same
+    // 1-based column/row as SGR.
+    let cb = (bytes[0] as u32).saturating_sub(32);
+    let cx = (bytes[1] as u32).saturating_sub(32);
+    let cy = (bytes[2] as u32).saturating_sub(32);
+    Ok(wheel_event(cb, cx, cy))
+}
+
+/// Build a [`ScrollEvent`] from a decoded button code and 1-based coordinates,
+/// or `None` when the button is not a vertical wheel turn.
+fn wheel_event(cb: u32, cx: u32, cy: u32) -> Option<ScrollEvent> {
+    // Wheel turns set bit 6 (64); the low two bits pick the axis and direction:
+    // 0 = up, 1 = down (2 / 3 are the horizontal wheel, which we ignore).
+    if cb & 0x40 == 0 {
+        return None;
+    }
+    let lines = match cb & 0b11 {
+        0 => -WHEEL_LINES,
+        1 => WHEEL_LINES,
+        _ => return None,
+    };
+    Some(ScrollEvent {
+        lines,
+        col: cx.saturating_sub(1).min(u16::MAX as u32) as u16,
+        row: cy.saturating_sub(1).min(u16::MAX as u32) as u16,
+    })
 }
 
 #[cfg(test)]
@@ -95,10 +187,10 @@ mod tests {
     use super::*;
     use std::collections::VecDeque;
 
-    /// Feed `next_non_mouse_key` a scripted run of keys.
-    fn drive(keys: Vec<Key>) -> Key {
+    /// Feed `next_input` a scripted run of keys.
+    fn drive(keys: Vec<Key>) -> Input {
         let mut queue: VecDeque<Key> = keys.into();
-        next_non_mouse_key(|| {
+        next_input(|| {
             queue
                 .pop_front()
                 .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "drained"))
@@ -106,40 +198,77 @@ mod tests {
         .unwrap()
     }
 
+    /// The SGR wheel report `ESC [ < cb ; cx ; cy M` as `console` decodes it: a
+    /// `[< <first-digit>` head, then each remaining byte as a `Char`.
+    fn sgr(cb: u32, cx: u32, cy: u32) -> Vec<Key> {
+        let digits = format!("{cb};{cx};{cy}");
+        let mut chars = digits.chars();
+        let first = chars.next().unwrap();
+        let mut keys = vec![Key::UnknownEscSeq(vec!['[', '<', first])];
+        keys.extend(chars.map(Key::Char));
+        keys.push(Key::Char('M'));
+        keys
+    }
+
     #[test]
     fn plain_key_passes_through() {
-        assert_eq!(drive(vec![Key::Char('j')]), Key::Char('j'));
+        assert_eq!(drive(vec![Key::Char('j')]), Input::Key(Key::Char('j')));
     }
 
     #[test]
     fn unrelated_escape_sequence_passes_through() {
         // Not a mouse report (e.g. an unmapped function key): leave it alone.
         let seq = Key::UnknownEscSeq(vec!['[', '3', '0']);
-        assert_eq!(drive(vec![seq.clone()]), seq);
+        assert_eq!(drive(vec![seq.clone()]), Input::Key(seq));
     }
 
     #[test]
-    fn sgr_report_is_swallowed_then_next_key_returned() {
-        // `ESC [ < 6 4 ; 1 0 ; 2 0 M` wheel-up, as console decodes it: the head
-        // is an UnknownEscSeq and the tail leaks as individual chars up to `M`.
-        let keys = vec![
-            Key::UnknownEscSeq(vec!['[', '<', '6']),
-            Key::Char('4'),
-            Key::Char(';'),
-            Key::Char('1'),
-            Key::Char('0'),
-            Key::Char(';'),
-            Key::Char('2'),
-            Key::Char('0'),
-            Key::Char('M'),
-            Key::Enter,
-        ];
-        assert_eq!(drive(keys), Key::Enter);
+    fn sgr_wheel_up_becomes_a_scroll_up_at_its_position() {
+        // Wheel up (cb 64) at column 10, row 20 (both 1-based).
+        let input = drive(sgr(64, 10, 20));
+        assert_eq!(
+            input,
+            Input::Scroll(ScrollEvent {
+                lines: -WHEEL_LINES,
+                col: 9,
+                row: 19,
+            })
+        );
     }
 
     #[test]
-    fn sgr_release_terminator_is_also_swallowed() {
-        // SGR release reports end with a lowercase `m`.
+    fn sgr_wheel_down_becomes_a_scroll_down() {
+        let input = drive(sgr(65, 5, 5));
+        assert_eq!(
+            input,
+            Input::Scroll(ScrollEvent {
+                lines: WHEEL_LINES,
+                col: 4,
+                row: 4,
+            })
+        );
+    }
+
+    #[test]
+    fn sgr_non_wheel_report_is_swallowed_then_next_key_returned() {
+        // A left-click press (cb 0) is not a wheel turn, so it is dropped and the
+        // following key is returned.
+        let mut keys = sgr(0, 1, 1);
+        keys.push(Key::Enter);
+        assert_eq!(drive(keys), Input::Key(Key::Enter));
+    }
+
+    #[test]
+    fn sgr_horizontal_wheel_is_ignored() {
+        // cb 66 / 67 are the horizontal wheel; we only scroll vertically.
+        let mut keys = sgr(66, 1, 1);
+        keys.push(Key::Char('q'));
+        assert_eq!(drive(keys), Input::Key(Key::Char('q')));
+    }
+
+    #[test]
+    fn sgr_release_report_is_swallowed() {
+        // SGR release reports end with a lowercase `m`; never a wheel turn.
         let keys = vec![
             Key::UnknownEscSeq(vec!['[', '<', '0']),
             Key::Char(';'),
@@ -149,42 +278,117 @@ mod tests {
             Key::Char('m'),
             Key::Char('q'),
         ];
-        assert_eq!(drive(keys), Key::Char('q'));
+        assert_eq!(drive(keys), Input::Key(Key::Char('q')));
     }
 
     #[test]
-    fn x10_report_drops_exactly_two_trailing_bytes() {
-        // `ESC [ M Cb Cx Cy`: console yields the head plus two stray coordinate
-        // chars, which must not reach the event loop.
+    fn sgr_unexpected_key_mid_report_is_abandoned() {
+        // A non-Char interrupting the parameters bails out of the report; the
+        // following key is returned.
+        let keys = vec![
+            Key::UnknownEscSeq(vec!['[', '<', '6']),
+            Key::ArrowUp, // unexpected mid-report
+            Key::Char('k'),
+        ];
+        assert_eq!(drive(keys), Input::Key(Key::Char('k')));
+    }
+
+    #[test]
+    fn sgr_malformed_parameters_are_swallowed() {
+        // Too few parameters: parsing fails and the report is dropped.
+        let keys = vec![
+            Key::UnknownEscSeq(vec!['[', '<', '6']),
+            Key::Char('4'),
+            Key::Char('M'),
+            Key::Char('z'),
+        ];
+        assert_eq!(drive(keys), Input::Key(Key::Char('z')));
+    }
+
+    #[test]
+    fn x10_wheel_up_becomes_a_scroll() {
+        // `ESC [ M Cb Cx Cy`: wheel up is cb 64 (+32 = '`'); column/row 1 are
+        // (1 + 32) = '!'. console yields the head plus two stray coordinate
+        // chars.
         let keys = vec![
             Key::UnknownEscSeq(vec!['[', 'M', '`']),
+            Key::Char('!'),
+            Key::Char('!'),
+        ];
+        assert_eq!(
+            drive(keys),
+            Input::Scroll(ScrollEvent {
+                lines: -WHEEL_LINES,
+                col: 0,
+                row: 0,
+            })
+        );
+    }
+
+    #[test]
+    fn x10_non_wheel_report_drops_exactly_two_trailing_bytes() {
+        // A non-wheel X10 report is swallowed, and its two coordinate chars must
+        // not reach the event loop.
+        let keys = vec![
+            Key::UnknownEscSeq(vec!['[', 'M', ' ']), // cb 0 (space = 32)
             Key::Char('!'),
             Key::Char('"'),
             Key::ArrowDown,
         ];
-        assert_eq!(drive(keys), Key::ArrowDown);
+        assert_eq!(drive(keys), Input::Key(Key::ArrowDown));
     }
 
     #[test]
-    fn consecutive_reports_are_all_swallowed() {
-        // A fast wheel spin produces several reports back to back.
+    fn x10_unexpected_key_mid_report_is_abandoned() {
         let keys = vec![
-            Key::UnknownEscSeq(vec!['[', '<', '6']),
-            Key::Char('5'),
-            Key::Char('M'),
-            Key::UnknownEscSeq(vec!['[', '<', '6']),
-            Key::Char('5'),
-            Key::Char('M'),
-            Key::Char('k'),
+            Key::UnknownEscSeq(vec!['[', 'M', '`']),
+            Key::Enter, // unexpected before the coordinates complete
+            Key::Char('x'),
         ];
-        assert_eq!(drive(keys), Key::Char('k'));
+        assert_eq!(drive(keys), Input::Key(Key::Char('x')));
+    }
+
+    #[test]
+    fn consecutive_wheel_reports_each_surface() {
+        // A fast wheel spin produces several reports back to back; the first
+        // turn is returned and the rest wait for the next read.
+        let mut keys = sgr(64, 1, 1);
+        keys.extend(sgr(64, 1, 1));
+        assert!(matches!(drive(keys), Input::Scroll(_)));
     }
 
     #[test]
     fn read_error_propagates() {
         let mut queue: VecDeque<Key> = VecDeque::new();
-        let err = next_non_mouse_key(|| queue.pop_front().ok_or_else(|| io::Error::other("boom")))
-            .unwrap_err();
+        let err =
+            next_input(|| queue.pop_front().ok_or_else(|| io::Error::other("boom"))).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::Other);
+    }
+
+    #[test]
+    fn key_from_inputs_drops_scrolls_and_returns_the_next_key() {
+        // The key-only reads of the non-scrolling screens skip a wheel turn and
+        // return the following key.
+        let mut inputs: VecDeque<Input> = VecDeque::from(vec![
+            Input::Scroll(ScrollEvent {
+                lines: -WHEEL_LINES,
+                col: 1,
+                row: 1,
+            }),
+            Input::Key(Key::Char('a')),
+        ]);
+        let key = key_from_inputs(|| {
+            inputs
+                .pop_front()
+                .ok_or_else(|| io::Error::other("drained"))
+        })
+        .unwrap();
+        assert_eq!(key, Key::Char('a'));
+    }
+
+    #[test]
+    fn key_from_inputs_propagates_a_read_error() {
+        let err = key_from_inputs(|| Err::<Input, _>(io::Error::other("boom"))).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::Other);
     }
 }

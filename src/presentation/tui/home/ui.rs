@@ -30,15 +30,16 @@ const ROOT_DETAIL: &str = "workspace root";
 /// Shown for a worktree whose HEAD is detached (no branch).
 const DETACHED: &str = "(detached)";
 
-/// Columns line 1 of a row spends before the branch name: a cursor cell, a
-/// kind-icon cell (`⌂`/`●`/`○`), and an agent-icon cell, each followed by a
-/// space.
-const ROW_PREFIX: usize = 6;
+/// Columns line 1 spends before the branch name: a cursor cell and a kind-icon
+/// cell (`⌂`/`●`/`○`), each followed by a space.
+const NAME_PREFIX: usize = 4;
 
-/// Indent of line 2 (the detail line), aligning its text under the branch name:
-/// the [`ROW_PREFIX`] columns, less the active marker and its trailing space
-/// which the detail line draws itself.
-const DETAIL_INDENT: usize = 4;
+/// Right-edge field width for the git `status` label on line 1.
+const STATUS_COL: usize = 6;
+
+/// Indent of line 2 (the detail line) before the active marker; the marker and
+/// its trailing space then put the detail text under the branch name.
+const DETAIL_INDENT: usize = 2;
 
 /// The vertical bar (with surrounding spaces) dividing the two panes.
 const SEP: &str = " │ ";
@@ -99,6 +100,25 @@ fn layout(width: usize) -> (usize, usize) {
     (left, right)
 }
 
+/// The 0-based column where the right pane begins (past the left pane and the
+/// divider) for a raw terminal width. A wheel report's column is tested against
+/// this to tell whether the turn happened over the scrollable right pane.
+pub fn right_pane_col_start(raw_width: usize) -> usize {
+    let (_, width) = widgets::normalize_size(0, raw_width);
+    let (left_w, _) = layout(width);
+    left_w + SEP_WIDTH
+}
+
+/// The number of body rows the right pane spans for a raw terminal size — the
+/// window height the wheel / `PageUp` scroll the command log within. Matches the
+/// body height [`render_frame`] draws (the command-mode hints overlay the body's
+/// bottom rows rather than shrinking it, so the pane height never depends on the
+/// mode).
+pub fn log_pane_rows(raw_height: usize, raw_width: usize) -> usize {
+    let (height, _) = widgets::normalize_size(raw_height, raw_width);
+    height.saturating_sub(4).max(1)
+}
+
 /// The centred title bar: workspace name and session count. The count covers
 /// every row in the left pane — the root row plus each worktree — so it matches
 /// what the user sees, rather than the bare worktree count.
@@ -119,6 +139,20 @@ fn status_label(status: BranchStatus, width: usize) -> String {
         BranchStatus::Local => style(text).yellow().to_string(),
         BranchStatus::Pushed => style(text).green().to_string(),
         BranchStatus::Merged => style(text).dim().to_string(),
+    }
+}
+
+/// The line-1 right-edge status field: the colour-coded status word
+/// right-aligned within [`STATUS_COL`] columns, or all blanks when there is no
+/// status (the root row).
+fn status_cell(status: Option<BranchStatus>) -> String {
+    match status {
+        None => " ".repeat(STATUS_COL),
+        Some(status) => {
+            let label = status_label(status, STATUS_COL);
+            let pad = STATUS_COL.saturating_sub(console::measure_text_width(&label));
+            format!("{}{label}", " ".repeat(pad))
+        }
     }
 }
 
@@ -147,24 +181,20 @@ impl AgentState {
         }
     }
 
-    /// The line-1 icon cell: a green `▶` while running, a bright yellow `◆`
-    /// while waiting, and a blank cell while idle.
-    fn icon(self) -> String {
-        match self {
-            AgentState::Idle => " ".to_string(),
-            AgentState::Running => style("▶").green().bold().to_string(),
-            AgentState::Waiting => style("◆").yellow().bold().to_string(),
-        }
-    }
-
-    /// The detail-line label spelling out the state, clipped to `width`, or
-    /// `None` while idle (the row shows its git status instead).
-    fn label(self, width: usize) -> Option<String> {
+    /// The detail-line content: an icon together with its label — `▶ running`
+    /// (green) or `◆ waiting` (yellow) — clipped to `width`, or `None` while idle
+    /// (the row has no agent in use).
+    fn detail(self, width: usize) -> Option<String> {
         match self {
             AgentState::Idle => None,
-            AgentState::Running => Some(style(clip_to_width("running", width)).green().to_string()),
+            AgentState::Running => Some(
+                style(clip_to_width("▶ running", width))
+                    .green()
+                    .bold()
+                    .to_string(),
+            ),
             AgentState::Waiting => Some(
-                style(clip_to_width("waiting", width))
+                style(clip_to_width("◆ waiting", width))
                     .yellow()
                     .bold()
                     .to_string(),
@@ -206,21 +236,19 @@ fn detail_line(active: bool, detail: String) -> String {
 }
 
 /// Builds a worktree's two lines. Line 1 carries a `>` cursor for the selected
-/// entry, a `●`/`○` kind icon (primary or ordinary worktree), an agent-state
-/// icon (`▶` running / `◆` waiting), and the branch name. Line 2 is indented
-/// under the name with a `*` marker for the active worktree and a detail: the
-/// agent state while one runs, otherwise the git status.
+/// entry, a `●`/`○` kind icon (primary or ordinary worktree), the branch name,
+/// and the git `status` at the right edge. Line 2 is indented under the name
+/// with a `*` marker for the active worktree and, when an agent is in use, its
+/// icon + label (`▶ running` / `◆ waiting`).
 fn worktree_row(
     worktree: &WorktreeState,
-    branch_width: usize,
+    name_width: usize,
     detail_width: usize,
     selected: bool,
     active: bool,
     live: bool,
     waiting: bool,
 ) -> (String, String) {
-    let agent = AgentState::from_flags(live, waiting);
-
     let kind = if worktree.primary {
         style("●").magenta().to_string()
     } else {
@@ -228,32 +256,34 @@ fn worktree_row(
     };
     let branch = name_cell(
         worktree.branch.as_deref().unwrap_or(DETACHED),
-        branch_width,
+        name_width,
         active || selected,
     );
-    let line1 = format!("{} {kind} {} {branch}", cursor_cell(selected), agent.icon());
+    let status = status_cell(Some(worktree.status));
+    let line1 = format!("{} {kind} {branch} {status}", cursor_cell(selected));
 
-    let detail = agent
-        .label(detail_width)
-        .unwrap_or_else(|| status_label(worktree.status, detail_width));
+    // Line 2 spells out the agent state with its icon, or is blank when idle.
+    let detail = AgentState::from_flags(live, waiting)
+        .detail(detail_width)
+        .unwrap_or_default();
     let line2 = detail_line(active, detail);
     (line1, line2)
 }
 
 /// Builds the root's two lines: the workspace itself, belonging to no session.
-/// Line 1 carries the cursor cell, a `⌂` kind icon, a blank agent cell (the root
-/// runs no agent), and the [`ROOT_NAME`] label. Line 2 carries the active marker
-/// and a `workspace root` detail.
+/// Line 1 carries the cursor cell, a `⌂` kind icon, the [`ROOT_NAME`] label, and
+/// a blank status field (the root has no git status). Line 2 carries the active
+/// marker and a `workspace root` detail.
 fn root_row(
-    branch_width: usize,
+    name_width: usize,
     detail_width: usize,
     selected: bool,
     active: bool,
 ) -> (String, String) {
     let kind = style("⌂").magenta().to_string();
-    // The root runs no agent, so its agent cell is blank.
-    let name = name_cell(ROOT_NAME, branch_width, active || selected);
-    let line1 = format!("{} {kind}   {name}", cursor_cell(selected));
+    let name = name_cell(ROOT_NAME, name_width, active || selected);
+    let status = status_cell(None);
+    let line1 = format!("{} {kind} {name} {status}", cursor_cell(selected));
 
     let detail = style(clip_to_width(ROOT_DETAIL, detail_width))
         .dim()
@@ -265,8 +295,8 @@ fn root_row(
 /// Builds the left pane: each entry spans two lines (an identity line and a
 /// detail line) — the root entry first, then one per worktree (or the empty
 /// message when none are recorded), trimmed to the available `rows`. `live`
-/// holds the worktree paths with a running agent (marked `▶`) and `waiting` the
-/// ones whose agent awaits input (marked `◆`, taking precedence over `▶`).
+/// holds the worktree paths with a running agent (`▶ running`) and `waiting` the
+/// ones whose agent awaits input (`◆ waiting`, taking precedence over running).
 fn left_pane(
     list: &WorktreeList,
     live: &HashSet<PathBuf>,
@@ -274,10 +304,12 @@ fn left_pane(
     left_w: usize,
     rows: usize,
 ) -> Vec<String> {
-    let branch_width = left_w.saturating_sub(ROW_PREFIX);
+    // Line 1: prefix + name + a space + the right-edge status field.
+    let name_width = left_w.saturating_sub(NAME_PREFIX + 1 + STATUS_COL);
+    // Line 2: indent + active marker + a space + the detail text.
     let detail_width = left_w.saturating_sub(DETAIL_INDENT + 2);
     let (root_top, root_detail) = root_row(
-        branch_width,
+        name_width,
         detail_width,
         list.root_selected(),
         list.root_active(),
@@ -292,7 +324,7 @@ fn left_pane(
             let row = i + 1;
             let (top, detail) = worktree_row(
                 w,
-                branch_width,
+                name_width,
                 detail_width,
                 row == list.selected_index(),
                 row == list.active_index(),
@@ -322,10 +354,17 @@ fn log_line(line: &LogLine, width: usize) -> String {
     }
 }
 
-/// Builds the right pane: the tail of the log that fits in `rows`.
-fn right_pane(log: &[LogLine], right_w: usize, rows: usize) -> Vec<String> {
-    let start = log.len().saturating_sub(rows);
-    log[start..].iter().map(|l| log_line(l, right_w)).collect()
+/// Builds the right pane: a `rows`-tall window of the log, scrolled up from the
+/// tail by `scroll` lines (`0` shows the newest lines, like a terminal).
+fn right_pane(log: &[LogLine], right_w: usize, rows: usize, scroll: usize) -> Vec<String> {
+    // The window's top when pinned to the bottom; scrolling up moves it earlier.
+    let max_start = log.len().saturating_sub(rows);
+    let start = max_start.saturating_sub(scroll);
+    log[start..]
+        .iter()
+        .take(rows)
+        .map(|l| log_line(l, right_w))
+        .collect()
 }
 
 /// Shown in the right pane between starting the `terminal` command and its
@@ -347,7 +386,7 @@ fn terminal_pane(view: &TerminalView, right_w: usize, rows: usize) -> Vec<String
 /// until the first one arrives).
 fn right_pane_contents(state: &HomeState, right_w: usize, rows: usize) -> Vec<String> {
     match state.right_pane() {
-        RightPane::Log => right_pane(state.log(), right_w, rows),
+        RightPane::Log => right_pane(state.log(), right_w, rows, state.right_scroll()),
         RightPane::Terminal => match state.terminal_view() {
             Some(view) => terminal_pane(view, right_w, rows),
             None => vec![style(clip_to_width(TERMINAL_STARTING, right_w))
@@ -838,48 +877,62 @@ mod tests {
     }
 
     #[test]
-    fn worktree_row_marks_a_running_agent_and_one_waiting_for_input() {
-        // A live session with no pending input shows the running icon and label.
-        let (running_top, running_detail) = worktree_row(
+    fn worktree_row_shows_a_running_agent_and_one_waiting_for_input() {
+        // A live session with no pending input shows `▶ running` (icon + text
+        // together) on the detail line.
+        let (_, running_detail) = worktree_row(
             &worktree(Some("feature"), false, BranchStatus::Local),
             10,
-            10,
+            12,
             false,
             false,
             true,
             false,
         );
-        assert!(running_top.contains('▶'));
+        assert!(running_detail.contains('▶'));
         assert!(running_detail.contains("running"));
 
-        // Waiting for input wins over running: the waiting icon and label show
-        // even though the session is also live.
-        let (waiting_top, waiting_detail) = worktree_row(
+        // Waiting for input wins over running: `◆ waiting` shows instead.
+        let (_, waiting_detail) = worktree_row(
             &worktree(Some("feature"), false, BranchStatus::Local),
             10,
-            10,
+            12,
             false,
             false,
             true,
             true,
         );
-        assert!(waiting_top.contains('◆'));
-        assert!(!waiting_top.contains('▶'));
+        assert!(waiting_detail.contains('◆'));
+        assert!(!waiting_detail.contains('▶'));
         assert!(waiting_detail.contains("waiting"));
 
-        // An idle worktree shows neither icon; its detail falls back to status.
+        // An idle worktree has no agent on its detail line; its status sits on
+        // the identity line's right edge instead.
         let (idle_top, idle_detail) = worktree_row(
             &worktree(Some("feature"), false, BranchStatus::Local),
             10,
-            10,
+            12,
             false,
             false,
             false,
             false,
         );
-        assert!(!idle_top.contains('▶'));
-        assert!(!idle_top.contains('◆'));
-        assert!(idle_detail.contains("local"));
+        assert!(!idle_detail.contains('▶'));
+        assert!(!idle_detail.contains('◆'));
+        assert!(idle_top.contains("local"));
+    }
+
+    #[test]
+    fn status_cell_right_aligns_the_status_and_blanks_the_root() {
+        let pushed =
+            console::strip_ansi_codes(&status_cell(Some(BranchStatus::Pushed))).into_owned();
+        assert_eq!(console::measure_text_width(&pushed), STATUS_COL);
+        assert!(pushed.ends_with("pushed"));
+        // "local" (5 cols) is right-aligned within the 6-col field (one lead space).
+        let local = console::strip_ansi_codes(&status_cell(Some(BranchStatus::Local))).into_owned();
+        assert_eq!(local, " local");
+        // The root has no status: an all-blank field of the same width.
+        assert_eq!(status_cell(None), " ".repeat(STATUS_COL));
     }
 
     #[test]
@@ -955,21 +1008,22 @@ mod tests {
         // the worktree's identity line is line 2 and its detail line is line 3.
         let path: HashSet<PathBuf> = [PathBuf::from("/repo/wt")].into_iter().collect();
 
-        // A live session (not waiting) is marked with the running icon.
+        // A live session (not waiting) shows `▶ running` on its detail line (3).
         let running = left_pane(&list, &path, &HashSet::new(), 30, 6);
-        assert!(running[2].contains('▶'));
+        assert!(running[3].contains('▶'));
         assert!(running[3].contains("running"));
 
-        // Waiting takes precedence: the waiting icon shows instead.
+        // Waiting takes precedence: `◆ waiting` shows instead.
         let waiting = left_pane(&list, &path, &path, 30, 6);
-        assert!(waiting[2].contains('◆'));
-        assert!(!waiting[2].contains('▶'));
+        assert!(waiting[3].contains('◆'));
+        assert!(!waiting[3].contains('▶'));
 
-        // With nothing flagged, neither icon shows and the detail is the status.
+        // With nothing flagged, the detail line has no agent and the status sits
+        // on the identity line (2).
         let idle = left_pane(&list, &HashSet::new(), &HashSet::new(), 30, 6);
-        assert!(!idle[2].contains('▶'));
-        assert!(!idle[2].contains('◆'));
-        assert!(idle[3].contains("local"));
+        assert!(!idle[3].contains('▶'));
+        assert!(!idle[3].contains('◆'));
+        assert!(idle[2].contains("local"));
     }
 
     #[test]
@@ -1015,7 +1069,7 @@ mod tests {
         let log: Vec<LogLine> = (0..5)
             .map(|i| LogLine::output(format!("line {i}")))
             .collect();
-        let lines = right_pane(&log, 40, 3);
+        let lines = right_pane(&log, 40, 3, 0);
         assert_eq!(lines.len(), 3);
         // The oldest lines scroll off; the newest remain.
         assert!(lines[0].contains("line 2"));
@@ -1025,8 +1079,49 @@ mod tests {
     #[test]
     fn right_pane_keeps_everything_when_it_fits() {
         let log = vec![LogLine::output("only")];
-        let lines = right_pane(&log, 40, 5);
+        let lines = right_pane(&log, 40, 5, 0);
         assert_eq!(lines.len(), 1);
+    }
+
+    #[test]
+    fn right_pane_scrolls_up_to_show_older_lines() {
+        let log: Vec<LogLine> = (0..5)
+            .map(|i| LogLine::output(format!("line {i}")))
+            .collect();
+        // Scrolling up by two slides the 3-row window to the very top.
+        let lines = right_pane(&log, 40, 3, 2);
+        assert_eq!(lines.len(), 3);
+        assert!(lines[0].contains("line 0"));
+        assert!(lines[2].contains("line 2"));
+    }
+
+    #[test]
+    fn right_pane_scroll_is_clamped_to_the_oldest_line() {
+        let log: Vec<LogLine> = (0..5)
+            .map(|i| LogLine::output(format!("line {i}")))
+            .collect();
+        // An over-large scroll still stops at the top window (start clamps to 0).
+        let lines = right_pane(&log, 40, 3, 99);
+        assert!(lines[0].contains("line 0"));
+    }
+
+    #[test]
+    fn right_pane_col_start_clears_the_left_pane_and_divider() {
+        let (left, _) = layout(80);
+        assert_eq!(right_pane_col_start(80), left + SEP_WIDTH);
+    }
+
+    #[test]
+    fn log_pane_rows_matches_the_body_height() {
+        // The pane is the whole body (height minus the 4 chrome rows). The
+        // command-mode hints overlay the body rather than shrinking it, so the
+        // height never depends on the mode.
+        assert_eq!(log_pane_rows(24, 80), 20);
+    }
+
+    #[test]
+    fn log_pane_rows_stays_at_least_one_in_a_tiny_terminal() {
+        assert_eq!(log_pane_rows(1, 80), 1);
     }
 
     #[test]
