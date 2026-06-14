@@ -60,19 +60,24 @@
 > `settings.json` には `workspace_root`（新規プロジェクトのクローン先ベースディレクトリ）も
 > 保存されますが、本画面での編集には未対応です（今後追加予定）。
 
-### プロジェクト単位のローカル設定（#022）
+### プロジェクト単位のローカル設定（#022, #030）
 
 git リポジトリ内で usagi を起動した場合、グローバル設定の下に **ローカル設定**の行が追加されます。
-これは現在のプロジェクト（`<repo>/.usagi/settings.json`）だけに効く上書きで、対象は次の 2 項目です。
+これは現在のプロジェクト（`<repo>/.usagi/settings.json`）だけに効く上書きで、対象は次の 3 項目です。
 
 | 項目 | 値 | 循環する選択肢 |
 |---|---|---|
 | Local · Agent CLI | このプロジェクトの Agent CLI 上書き | `Global (実効値)` → `Override: Claude` → `Override: Gemini` の順に循環 |
 | Local · Notifications | このプロジェクトの通知 ON/OFF 上書き | `Global (実効値)` → `Override: On` → `Override: Off` の順に循環 |
+| Local · Default Branch | `session new` で worktree を切る基点 | `Local` ⇄ `Remote` をトグル（未設定時は `Default (Remote)` を表示） |
 
-- **「グローバルに従う / ローカルで上書き」** を 1 つの chooser で切り替えます。`Global (...)` は未上書き
-  （グローバル設定にフォールバック）で、かっこ内に現在の実効値を表示します。`Override: ...` を選ぶとその
-  プロジェクト専用の値になります。再度 `Global` まで循環させれば上書きを解除できます。
+- Agent CLI と Notifications は **「グローバルに従う / ローカルで上書き」** を 1 つの chooser で切り替えます。
+  `Global (...)` は未上書き（グローバル設定にフォールバック）で、かっこ内に現在の実効値を表示します。
+  `Override: ...` を選ぶとそのプロジェクト専用の値になります。再度 `Global` まで循環させれば上書きを解除できます。
+- Default Branch はグローバルに対応項目がないため、`local`（ローカル既定ブランチ）と `remote`（リモート追従の
+  既定ブランチ）の 2 値だけを切り替えます。未設定時は既定値を `Default (Remote)` と表示し、`←→` で切り替えると
+  明示値（`Local` / `Remote`）として保存されます。複数 git を含むワークスペースでは各リポジトリ内で Config を
+  開いて個別に設定します。
 - Save を押すと、グローバル設定（`~/.usagi/settings.json`）とローカル設定（`<repo>/.usagi/settings.json`）が
   まとめて保存されます。全項目を未上書きに戻した場合もファイルは残し（中身は空に近い JSON）、「グローバルに
   従う」を意味します（削除はしません）。

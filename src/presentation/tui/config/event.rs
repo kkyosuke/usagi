@@ -361,6 +361,7 @@ mod tests {
         }
         keys.push(Ok(Key::ArrowRight)); // override: Global -> Claude
         keys.push(Ok(Key::ArrowDown)); // Local Notifications
+        keys.push(Ok(Key::ArrowDown)); // Local Default Branch
         keys.push(Ok(Key::ArrowDown)); // Save button
         keys.push(Ok(Key::Enter)); // save
         keys.push(Ok(Key::Escape));

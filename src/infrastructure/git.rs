@@ -9,6 +9,8 @@ use std::process::Command;
 
 use anyhow::{anyhow, bail, Context, Result};
 
+use crate::domain::settings::BranchSource;
+
 /// A worktree as reported by `git worktree list --porcelain`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WorktreeInfo {
@@ -98,15 +100,20 @@ pub fn clone(url: &str, dest: &Path, branch: Option<&str>) -> Result<()> {
 
 /// Create a worktree at `dest` checking out a new branch `branch` in `repo`.
 ///
-/// Runs `git -C <repo> worktree add -b <branch> <dest>`, which fails if `branch`
+/// Runs `git -C <repo> worktree add -b <branch> <dest> [<base>]`. When `base` is
+/// given the new branch starts from that ref (e.g. `main` or `origin/main`);
+/// otherwise it starts from the repository's current `HEAD`. Fails if `branch`
 /// already exists or `dest` is not empty. Output is captured (not inherited) so
 /// it never disturbs an active TUI; on failure the captured stderr is surfaced.
 /// Repo-scoping env vars are stripped so an inherited `GIT_DIR` cannot redirect
 /// the operation to another repository.
-pub fn add_worktree(repo: &Path, dest: &Path, branch: &str) -> Result<()> {
-    let output = git_command(repo)
-        .args(["worktree", "add", "-b", branch])
-        .arg(dest)
+pub fn add_worktree(repo: &Path, dest: &Path, branch: &str, base: Option<&str>) -> Result<()> {
+    let mut command = git_command(repo);
+    command.args(["worktree", "add", "-b", branch]).arg(dest);
+    if let Some(base) = base {
+        command.arg(base);
+    }
+    let output = command
         .output()
         .context("failed to run `git worktree add`")?;
     if !output.status.success() {
@@ -248,6 +255,27 @@ pub fn default_branch(repo: &Path) -> String {
     remote_default_branch(repo)
         .or_else(|| current_branch(repo))
         .unwrap_or_else(|| "main".to_string())
+}
+
+/// Resolve the base ref a new session worktree should branch from, honouring the
+/// project's [`BranchSource`].
+///
+/// - [`BranchSource::Remote`] prefers `origin/<default>`, falling back to the
+///   local `<default>` branch when no remote ref exists.
+/// - [`BranchSource::Local`] uses the local `<default>` branch.
+///
+/// Returns `None` when the chosen ref does not exist (e.g. a brand-new repo with
+/// no commits), so the caller branches from the current `HEAD` instead.
+pub fn resolve_base_ref(repo: &Path, source: BranchSource) -> Option<String> {
+    let default = default_branch(repo);
+    let local = rev_exists(repo, &default).then(|| default.clone());
+    match source {
+        BranchSource::Remote => {
+            let remote = format!("origin/{default}");
+            rev_exists(repo, &remote).then_some(remote).or(local)
+        }
+        BranchSource::Local => local,
+    }
 }
 
 /// The branch the remote's `HEAD` points at (e.g. `main`), if a remote exists.
@@ -541,7 +569,7 @@ mod tests {
         init_repo(dir.path());
         let dest = dir.path().join("wt");
 
-        add_worktree(dir.path(), &dest, "feature").unwrap();
+        add_worktree(dir.path(), &dest, "feature", None).unwrap();
 
         // The new worktree exists and is checked out on the new branch.
         assert!(dest.join("f").is_file());
@@ -593,13 +621,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         init_repo(dir.path());
         let clean = dir.path().join("clean");
-        add_worktree(dir.path(), &clean, "clean").unwrap();
+        add_worktree(dir.path(), &clean, "clean", None).unwrap();
         remove_worktree(dir.path(), &clean, false).unwrap();
         assert!(!clean.exists());
 
         // A dirty worktree cannot be removed without force.
         let dirty = dir.path().join("dirty");
-        add_worktree(dir.path(), &dirty, "dirty").unwrap();
+        add_worktree(dir.path(), &dirty, "dirty", None).unwrap();
         std::fs::write(dirty.join("scratch"), "z").unwrap();
         assert!(remove_worktree(dir.path(), &dirty, false).is_err());
         // ...but force discards it.
@@ -624,8 +652,66 @@ mod tests {
         run(dir.path(), &["branch", "feature"]);
 
         // `-b feature` cannot create a branch that already exists.
-        let err = add_worktree(dir.path(), &dir.path().join("wt"), "feature").unwrap_err();
+        let err = add_worktree(dir.path(), &dir.path().join("wt"), "feature", None).unwrap_err();
         assert!(err.to_string().contains("git worktree add failed"));
+    }
+
+    #[test]
+    fn add_worktree_branches_from_the_given_base() {
+        // A repo with two commits: the session branch is cut from the *first*
+        // commit (tagged `base`), proving the base ref is honoured rather than
+        // the current HEAD.
+        let dir = tempfile::tempdir().unwrap();
+        init_repo(dir.path());
+        let base = git_capture(dir.path(), &["rev-parse", "HEAD"])
+            .unwrap()
+            .unwrap();
+        run(dir.path(), &["branch", "base"]);
+        std::fs::write(dir.path().join("f"), "second").unwrap();
+        run(dir.path(), &["commit", "-aqm", "second"]);
+
+        let dest = dir.path().join("wt");
+        add_worktree(dir.path(), &dest, "feature", Some("base")).unwrap();
+
+        let head = git_capture(&dest, &["rev-parse", "HEAD"]).unwrap().unwrap();
+        assert_eq!(head, base);
+    }
+
+    #[test]
+    fn resolve_base_ref_prefers_remote_then_falls_back_to_local() {
+        let (_tmp, work) = repo_with_remote();
+        // With a remote, Remote resolves to origin/<default>...
+        assert_eq!(
+            resolve_base_ref(&work, BranchSource::Remote).as_deref(),
+            Some("origin/main")
+        );
+        // ...while Local stays on the local branch.
+        assert_eq!(
+            resolve_base_ref(&work, BranchSource::Local).as_deref(),
+            Some("main")
+        );
+
+        // Without a remote, Remote falls back to the local default branch.
+        let local = tempfile::tempdir().unwrap();
+        init_repo(local.path());
+        assert_eq!(
+            resolve_base_ref(local.path(), BranchSource::Remote).as_deref(),
+            Some("main")
+        );
+        assert_eq!(
+            resolve_base_ref(local.path(), BranchSource::Local).as_deref(),
+            Some("main")
+        );
+    }
+
+    #[test]
+    fn resolve_base_ref_is_none_without_the_default_branch() {
+        // A fresh repo with no commits has no `main` ref, so there is nothing to
+        // branch from and the caller should fall back to HEAD.
+        let dir = tempfile::tempdir().unwrap();
+        run(dir.path(), &["init", "-q", "-b", "main"]);
+        assert_eq!(resolve_base_ref(dir.path(), BranchSource::Local), None);
+        assert_eq!(resolve_base_ref(dir.path(), BranchSource::Remote), None);
     }
 
     #[test]

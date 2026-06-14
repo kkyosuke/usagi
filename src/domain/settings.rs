@@ -35,6 +35,21 @@ impl AgentCli {
     }
 }
 
+/// Which ref a new session worktree is branched from.
+///
+/// When a session is created, each repository's worktree is cut on a new branch
+/// off this base. The choice is project-local (see [`LocalSettings`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BranchSource {
+    /// Branch off the repository's local default branch (e.g. `main`).
+    Local,
+    /// Branch off the remote-tracking default branch (e.g. `origin/main`), so
+    /// sessions start from what has landed on the remote.
+    #[default]
+    Remote,
+}
+
 /// User-configurable application settings.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -94,12 +109,22 @@ pub struct LocalSettings {
     pub agent_cli: Option<AgentCli>,
     /// Override whether desktop notifications are shown for this project.
     pub notifications_enabled: Option<bool>,
+    /// Which ref new session worktrees branch from in this repository. `None`
+    /// defers to the default ([`BranchSource::Remote`]).
+    pub default_branch_source: Option<BranchSource>,
 }
 
 impl LocalSettings {
     /// Whether every field is unset, i.e. the project adds no local override.
     pub fn is_empty(&self) -> bool {
-        self.agent_cli.is_none() && self.notifications_enabled.is_none()
+        self.agent_cli.is_none()
+            && self.notifications_enabled.is_none()
+            && self.default_branch_source.is_none()
+    }
+
+    /// The branch source to use, resolving an unset value to the default.
+    pub fn branch_source(&self) -> BranchSource {
+        self.default_branch_source.unwrap_or_default()
     }
 }
 
@@ -113,6 +138,7 @@ mod tests {
         let local = LocalSettings {
             agent_cli: Some(AgentCli::Gemini),
             notifications_enabled: None,
+            default_branch_source: None,
         };
 
         let effective = global.with_local(&local);
@@ -129,6 +155,7 @@ mod tests {
         let local = LocalSettings {
             agent_cli: None,
             notifications_enabled: Some(false),
+            default_branch_source: None,
         };
 
         let effective = global.with_local(&local);
@@ -149,11 +176,20 @@ mod tests {
         assert!(!LocalSettings {
             agent_cli: Some(AgentCli::Claude),
             notifications_enabled: None,
+            default_branch_source: None,
         }
         .is_empty());
         assert!(!LocalSettings {
             agent_cli: None,
             notifications_enabled: Some(true),
+            default_branch_source: None,
+        }
+        .is_empty());
+        // The branch source counts as an override too.
+        assert!(!LocalSettings {
+            agent_cli: None,
+            notifications_enabled: None,
+            default_branch_source: Some(BranchSource::Local),
         }
         .is_empty());
     }
@@ -162,5 +198,40 @@ mod tests {
     fn agent_cli_maps_to_its_launch_command() {
         assert_eq!(AgentCli::Claude.command(), "claude");
         assert_eq!(AgentCli::Gemini.command(), "gemini");
+    }
+
+    #[test]
+    fn branch_source_defaults_to_remote_when_unset() {
+        // An unset override resolves to the default (Remote)...
+        assert_eq!(
+            LocalSettings::default().branch_source(),
+            BranchSource::Remote
+        );
+        assert_eq!(BranchSource::default(), BranchSource::Remote);
+        // ...and a set value is returned as-is.
+        assert_eq!(
+            LocalSettings {
+                default_branch_source: Some(BranchSource::Local),
+                ..Default::default()
+            }
+            .branch_source(),
+            BranchSource::Local
+        );
+    }
+
+    #[test]
+    fn branch_source_serializes_in_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&BranchSource::Local).unwrap(),
+            "\"local\""
+        );
+        assert_eq!(
+            serde_json::to_string(&BranchSource::Remote).unwrap(),
+            "\"remote\""
+        );
+        assert_eq!(
+            serde_json::from_str::<BranchSource>("\"remote\"").unwrap(),
+            BranchSource::Remote
+        );
     }
 }
