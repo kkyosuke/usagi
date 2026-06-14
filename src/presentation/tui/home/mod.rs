@@ -86,5 +86,54 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
         },
     };
 
-    event::event_loop(term, &mut reader, state, &mut persist, &mut create_session)
+    // Removing a session deletes its worktrees/branches and forgets it. A
+    // session with uncommitted changes is left untouched unless `--force`.
+    let remove_root = workspace.path.clone();
+    let mut remove_session = |name: &str, force: bool| match crate::usecase::session::remove(
+        &remove_root,
+        name,
+        force,
+    ) {
+        Ok(outcome) if outcome.removed => SessionOutcome {
+            line: LogLine::output(format!("Removed session \"{name}\" 🧹")),
+            worktrees: crate::usecase::workspace_state::sync(&remove_root)
+                .ok()
+                .map(|s| s.worktrees),
+            sessions: WorkspaceStore::new(&remove_root)
+                .load()
+                .ok()
+                .flatten()
+                .map(|s| s.sessions),
+        },
+        Ok(outcome) => {
+            let paths = outcome
+                .dirty
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            SessionOutcome {
+                line: LogLine::error(format!(
+                    "session \"{name}\" has uncommitted changes ({paths}). \
+                         Use \"session remove {name} --force\" to discard."
+                )),
+                worktrees: None,
+                sessions: None,
+            }
+        }
+        Err(e) => SessionOutcome {
+            line: LogLine::error(format!("session remove failed: {e}")),
+            worktrees: None,
+            sessions: None,
+        },
+    };
+
+    event::event_loop(
+        term,
+        &mut reader,
+        state,
+        &mut persist,
+        &mut create_session,
+        &mut remove_session,
+    )
 }

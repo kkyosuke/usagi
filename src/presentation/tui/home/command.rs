@@ -27,6 +27,8 @@ pub enum Effect {
     CreateSession(String),
     /// List the workspace's sessions (the user ran `session list`).
     ListSessions,
+    /// Remove a session (the user ran `session remove <name> [--force]`).
+    RemoveSession { name: String, force: bool },
 }
 
 /// The result of running a command: lines to append plus a side effect.
@@ -237,7 +239,24 @@ impl Command for SessionCommand {
                 effect: Effect::ListSessions,
             },
             "remove" => {
-                CommandResult::line(LogLine::output("\"session remove\" is coming soon 🐰"))
+                let mut force = false;
+                let mut target = None;
+                for tok in rest.split_whitespace() {
+                    match tok {
+                        "--force" | "-f" => force = true,
+                        _ if target.is_none() => target = Some(tok.to_string()),
+                        _ => {}
+                    }
+                }
+                match target {
+                    Some(name) => CommandResult {
+                        lines: Vec::new(),
+                        effect: Effect::RemoveSession { name, force },
+                    },
+                    None => CommandResult::line(LogLine::error(
+                        "usage: session remove <name> [--force]",
+                    )),
+                }
             }
             _ => create(args.trim()),
         }
@@ -545,11 +564,42 @@ mod tests {
     }
 
     #[test]
-    fn session_remove_is_coming_soon() {
+    fn session_remove_parses_name_and_force_flag() {
+        // A bare name removes without force.
+        let result = registry().dispatch("session remove old", &[]);
+        assert!(result.lines.is_empty());
+        assert_eq!(
+            result.effect,
+            Effect::RemoveSession {
+                name: "old".to_string(),
+                force: false,
+            }
+        );
+
+        // `--force` (in any position) sets the force flag; extra positional
+        // tokens after the name are ignored.
+        for input in [
+            "session remove old --force",
+            "session remove -f old",
+            "session remove old --force extra",
+        ] {
+            let result = registry().dispatch(input, &[]);
+            assert_eq!(
+                result.effect,
+                Effect::RemoveSession {
+                    name: "old".to_string(),
+                    force: true,
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn session_remove_without_a_name_shows_usage() {
         let result = registry().dispatch("session remove", &[]);
         assert_eq!(result.effect, Effect::None);
-        assert!(result.lines[0].text.contains("coming soon"));
-        assert!(result.lines[0].text.contains("remove"));
+        assert_eq!(result.lines[0].kind, LineKind::Error);
+        assert!(result.lines[0].text.contains("usage"));
     }
 
     #[test]
