@@ -80,7 +80,7 @@ src/
     └── tui/                    # ratatui ベースの TUI
         ├── app/                # TUI オーケストレーター（画面グラフの遷移を管理 / event）
         ├── screen.rs           # 端末制御（代替スクリーン・RAII ガード）・差分描画（FramePainter）
-        ├── term_reader.rs      # キー入力読み取り
+        ├── term_reader.rs      # キー入力・マウスホイール読み取り（ホイールはスクロールに変換）
         ├── welcome/            # 起動画面（menu / state / ui / event）
         ├── open/               # プロジェクト選択画面（state / ui / event）
         ├── new/                # 新規プロジェクト画面（state / ui / event）
