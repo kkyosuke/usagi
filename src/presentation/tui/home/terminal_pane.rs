@@ -1,29 +1,34 @@
 //! Driving the live terminal embedded in the workspace screen's right pane.
 //!
-//! When the user runs `terminal`, the right pane switches to a live shell: this
-//! module spawns the PTY ([`crate::infrastructure::pty`]), then runs a small
-//! render/input loop that keeps the whole workspace frame on screen — sidebar
-//! and all — with the shell's output drawn into the right pane. Keystrokes are
-//! forwarded to the shell as raw bytes; `Ctrl-O` detaches and closes it, as does
-//! the shell exiting on its own.
+//! When the user runs `terminal`, the right pane switches to a live shell drawn
+//! into the right pane while the whole workspace frame — sidebar and all — stays
+//! on screen. The shell itself is owned by the [`TerminalPool`] (so it survives
+//! a detach); this module borrows it and runs the render/input loop. Keystrokes
+//! are forwarded to the shell as raw bytes.
 //!
-//! `agent` reuses the same machinery: the shell is spawned with an `initial`
-//! command line (the configured agent CLI, e.g. `claude`) so the pane lands the
-//! user straight in the agent — exactly as if they had run `terminal` and typed
-//! it themselves.
+//! `Ctrl-O` is a leader key, so the user can switch sessions without losing the
+//! shell:
 //!
-//! The shell itself is owned by the [`TerminalManager`], which keeps it running
-//! in the background after the user detaches; this loop only borrows it while
-//! attached. Each frame it also refreshes the sidebar's "waiting for input"
-//! markers from the shared monitor, so other background sessions flagged while
-//! the user is attached here show up live.
+//! - `Ctrl-O` alone (no follow-up within [`LEADER_TIMEOUT`]) **detaches** — the
+//!   pane returns to the sidebar but the shell stays alive in the pool.
+//! - `Ctrl-O` then `n` / `]` or `p` / `[` switches the pane to the next /
+//!   previous worktree's terminal, staying focused.
+//! - `Ctrl-O` twice sends a literal `Ctrl-O` to the shell (the escape hatch for
+//!   programs that bind it).
 //!
-//! [`TerminalManager`]: crate::infrastructure::terminal_manager::TerminalManager
+//! Each outcome is reported to the event loop as a [`PaneExit`]; the shell
+//! exiting on its own reports [`PaneExit::Closed`].
+//!
+//! `agent` reuses the same machinery: the pool sends the configured agent CLI to
+//! the shell on first spawn, so the pane lands the user straight in the agent.
 //!
 //! This is pure terminal I/O and threading, so it is excluded from coverage (cf.
 //! `term_reader.rs` / the screen `mod.rs` wirings). The pieces it leans on are
-//! tested elsewhere: the layout geometry and frame ([`super::ui`]) and the
-//! screen snapshot ([`super::terminal_view`]).
+//! tested elsewhere: the layout geometry and frame ([`super::ui`]), the screen
+//! snapshot ([`super::terminal_view`]), and the [`PaneExit`] vocabulary
+//! ([`super::state`]).
+//!
+//! [`TerminalPool`]: super::terminal_pool::TerminalPool
 
 use std::fmt::Write as _;
 use std::time::{Duration, Instant};
@@ -34,9 +39,9 @@ use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifier
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 
 use crate::infrastructure::pty::PtySession;
-use crate::infrastructure::terminal_manager::MonitorHandle;
 
-use super::state::HomeState;
+use super::state::{HomeState, PaneExit};
+use super::terminal_pool::MonitorHandle;
 use super::terminal_view::TerminalView;
 use super::ui;
 
@@ -50,19 +55,24 @@ const POLL_SLICE: Duration = Duration::from_millis(4);
 /// is eventually noticed even while nothing else is happening.
 const IDLE_REDRAW: Duration = Duration::from_millis(100);
 
-/// Attach to the embedded terminal `pty` in the right pane until the user
-/// detaches (`Ctrl-O`) or the shell exits. The PTY is owned by the
-/// [`TerminalManager`] and keeps running in the background after a detach; here
-/// we only own raw mode and the render/input loop. `monitor` is read each frame
-/// to refresh the sidebar's waiting markers.
+/// How long the leader (`Ctrl-O`) waits for its follow-up key before giving up
+/// and treating the lone `Ctrl-O` as a detach. Long enough to type the second
+/// key deliberately, short enough that a bare detach feels immediate.
+const LEADER_TIMEOUT: Duration = Duration::from_millis(400);
+
+/// Run the embedded terminal in the right pane, driving the pooled shell `pty`
+/// until the user detaches / switches (`Ctrl-O`) or the shell exits. The PTY is
+/// owned by the caller's [`TerminalPool`] so it survives a detach; here we own
+/// only raw mode and the render/input loop. The reason for returning is the
+/// [`PaneExit`] the event loop acts on.
 ///
-/// [`TerminalManager`]: crate::infrastructure::terminal_manager::TerminalManager
+/// [`TerminalPool`]: super::terminal_pool::TerminalPool
 pub fn run(
     term: &Term,
     state: &mut HomeState,
     pty: &mut PtySession,
     monitor: &MonitorHandle,
-) -> Result<()> {
+) -> Result<PaneExit> {
     enable_raw_mode().context("failed to enter raw mode for the embedded terminal")?;
     let _ = term.clear_screen();
     let result = drive(term, state, pty, monitor);
@@ -72,14 +82,14 @@ pub fn run(
 }
 
 /// The render/input loop: snapshot the shell screen, draw whatever changed,
-/// then wait for a keystroke or fresh output and go again. Returns when the
-/// shell exits or the user detaches.
+/// then wait for a keystroke or fresh output and go again. Returns the
+/// [`PaneExit`] reason when the shell exits or the user detaches / switches.
 fn drive(
     term: &Term,
     state: &mut HomeState,
     pty: &mut PtySession,
     monitor: &MonitorHandle,
-) -> Result<()> {
+) -> Result<PaneExit> {
     // The frame drawn last pass, so we only repaint the rows that changed.
     let mut prev: Vec<String> = Vec::new();
     loop {
@@ -100,7 +110,7 @@ fn drive(
 
         // The shell closed (e.g. the user typed `exit`): leave the pane.
         if !pty.is_alive() {
-            return Ok(());
+            return Ok(PaneExit::Closed);
         }
 
         match wait(pty, drawn_gen)? {
@@ -108,8 +118,8 @@ fn drive(
             Wake::Output => {}
             // Input is queued: forward every pending key, then redraw.
             Wake::Input => {
-                if pump_input(pty)? {
-                    return Ok(());
+                if let Some(exit) = pump_input(pty)? {
+                    return Ok(exit);
                 }
             }
         }
@@ -141,17 +151,22 @@ fn wait(pty: &PtySession, drawn_gen: u64) -> Result<Wake> {
     }
 }
 
-/// Forward every queued key press to the shell. Returns `true` if the user asked
-/// to detach (`Ctrl-O`); non-key events (resize, …) are ignored so the next
-/// redraw simply picks up the new size.
-fn pump_input(pty: &mut PtySession) -> Result<bool> {
+/// Forward every queued key press to the shell. Returns `Some(exit)` when the
+/// user detaches or switches (via the `Ctrl-O` leader); non-key events
+/// (resize, …) are ignored so the next redraw simply picks up the new size.
+fn pump_input(pty: &mut PtySession) -> Result<Option<PaneExit>> {
     while event::poll(Duration::ZERO)? {
         if let Event::Key(key) = event::read()? {
             if !is_press(key) {
                 continue;
             }
-            if is_detach(&key) {
-                return Ok(true);
+            if is_leader(&key) {
+                match resolve_leader(pty)? {
+                    // The leader resolved to a pane action: hand it back.
+                    Leader::Exit(exit) => return Ok(Some(exit)),
+                    // `Ctrl-O Ctrl-O` sent a literal byte; keep driving.
+                    Leader::Stay => continue,
+                }
             }
             let bytes = encode_key(&key);
             if !bytes.is_empty() {
@@ -159,7 +174,45 @@ fn pump_input(pty: &mut PtySession) -> Result<bool> {
             }
         }
     }
-    Ok(false)
+    Ok(None)
+}
+
+/// What the `Ctrl-O` leader resolved to: a pane action to return, or "stay" when
+/// the follow-up was handled in place (a literal `Ctrl-O` sent to the shell).
+enum Leader {
+    Exit(PaneExit),
+    Stay,
+}
+
+/// Resolve the `Ctrl-O` leader by waiting up to [`LEADER_TIMEOUT`] for a
+/// follow-up key. A lone `Ctrl-O` (timeout, or any unrecognised follow-up)
+/// detaches; `n`/`]` and `p`/`[` switch sessions; a second `Ctrl-O` sends a
+/// literal one to the shell and stays.
+fn resolve_leader(pty: &mut PtySession) -> Result<Leader> {
+    let deadline = Instant::now() + LEADER_TIMEOUT;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() || !event::poll(remaining)? {
+            return Ok(Leader::Exit(PaneExit::Detach));
+        }
+        if let Event::Key(key) = event::read()? {
+            if !is_press(key) {
+                continue;
+            }
+            let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+            return Ok(match key.code {
+                KeyCode::Char('n') | KeyCode::Char(']') => Leader::Exit(PaneExit::SwitchNext),
+                KeyCode::Char('p') | KeyCode::Char('[') => Leader::Exit(PaneExit::SwitchPrev),
+                // `Ctrl-O Ctrl-O`: forward a literal Ctrl-O (0x0f) and stay.
+                KeyCode::Char('o') if ctrl => {
+                    pty.write(&[0x0f])?;
+                    Leader::Stay
+                }
+                // Anything else: the lone Ctrl-O was a detach.
+                _ => Leader::Exit(PaneExit::Detach),
+            });
+        }
+    }
 }
 
 /// Draw the workspace frame (sidebar + terminal pane), repainting only the rows
@@ -211,8 +264,9 @@ fn is_press(key: KeyEvent) -> bool {
     matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat)
 }
 
-/// `Ctrl-O` detaches from the embedded terminal and closes it.
-fn is_detach(key: &KeyEvent) -> bool {
+/// `Ctrl-O` is the leader key: on its own it detaches, and it prefixes the
+/// session-switch keys (see [`resolve_leader`]).
+fn is_leader(key: &KeyEvent) -> bool {
     key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('o')
 }
 

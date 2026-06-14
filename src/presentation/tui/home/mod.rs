@@ -10,6 +10,7 @@ pub mod command;
 pub mod event;
 pub mod state;
 pub mod terminal_pane;
+pub mod terminal_pool;
 pub mod terminal_view;
 pub mod ui;
 
@@ -21,13 +22,12 @@ use console::Term;
 use crate::domain::workspace::Workspace;
 use crate::domain::workspace_state::SessionRecord;
 use crate::infrastructure::history_store::HistoryStore;
-use crate::infrastructure::terminal_manager::TerminalManager;
 use crate::infrastructure::workspace_store::WorkspaceStore;
 use crate::presentation::tui::term_reader::TermKeyReader;
 
 pub use event::Outcome;
 
-use state::{HomeState, LogLine, SessionOutcome};
+use state::{HomeState, LogLine, PaneExit, SessionOutcome};
 
 /// Refresh the workspace's session state from git (best-effort) and return the
 /// sessions to show. `sync` rewrites each session worktree's status; for a
@@ -142,21 +142,22 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
         .map(|settings| settings.notifications_enabled)
         .unwrap_or(true);
 
-    // Owns the background terminal sessions: a shell (and its agent) keeps
-    // running after the user detaches, and a watcher thread flags any session
-    // whose agent rings the bell to ask for input — notifying the user and
-    // marking it in the sidebar via this handle.
-    let mut manager = TerminalManager::new(notifications_enabled);
-    let monitor = manager.handle();
+    // The live shells embedded in the right pane, one per worktree, kept alive
+    // across session switches and for as long as this screen is open. Dropped on
+    // return, which kills any shell still running. The pool also watches every
+    // shell's bell and flags / notifies the ones waiting for input.
+    let mut pool = terminal_pool::TerminalPool::new(notifications_enabled);
+    let monitor = pool.monitor();
 
     // Opening a terminal embeds a live shell in the right pane: the pane stays
     // inside the workspace screen (sidebar still visible) and runs the shell
-    // until the user detaches or it exits. `:agent` is the same, with the agent
-    // CLI sent to the shell on start. The shell is owned by the manager so it
-    // persists across detaches; here we attach to (or spawn) it, mark it as the
-    // foreground session for the duration, and drive it. The right-pane mode is
-    // toggled by the event loop around this call.
-    let mut open_terminal = |home: &mut HomeState, dir: &Path, agent: bool| -> Result<()> {
+    // until the user detaches, switches sessions, or it exits. `:agent` is the
+    // same, with the agent CLI sent to the shell on its first spawn. The pool
+    // owns the shell so a detach leaves it running; the right-pane mode and the
+    // switch loop are handled by the event loop around this call. The attached
+    // session is declared to the monitor (so it is never flagged as waiting) and
+    // cleared again on detach / close.
+    let mut open_terminal = |home: &mut HomeState, dir: &Path, agent: bool| -> Result<PaneExit> {
         let initial = agent.then_some(agent_command.as_str());
         let label = home
             .list()
@@ -170,14 +171,16 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
                     .map(|n| n.to_string_lossy().into_owned())
                     .unwrap_or_else(|| dir.display().to_string())
             });
-        let (height, width) = term.size();
-        let geo = ui::terminal_geometry(height as usize, width as usize);
-        let handle = manager.handle();
-        let pty = manager.attach_or_spawn(dir, geo.rows, geo.cols, initial, &label)?;
+        let handle = pool.monitor();
+        let pty = pool.attach_or_spawn(term, dir, initial, &label)?;
         handle.set_attached(Some(dir.to_path_buf()));
         let result = terminal_pane::run(term, home, pty, &handle);
-        handle.set_attached(None);
-        manager.reap_if_dead(dir);
+        // Switching keeps a session in the foreground (the loop re-attaches to
+        // the next one immediately); detaching, closing, or erroring returns to
+        // the sidebar, so nothing is attached any more.
+        if !matches!(result, Ok(PaneExit::SwitchNext) | Ok(PaneExit::SwitchPrev)) {
+            handle.set_attached(None);
+        }
         result
     };
 

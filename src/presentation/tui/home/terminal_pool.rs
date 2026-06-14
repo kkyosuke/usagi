@@ -1,22 +1,29 @@
-//! Keeps embedded terminal sessions alive in the background and watches them.
+//! A pool of live embedded terminals, one per worktree directory.
 //!
-//! The workspace screen can attach to a worktree's live shell (and an agent CLI
-//! inside it). Unlike a one-shot terminal, these sessions persist after the user
-//! detaches: [`TerminalManager`] owns one [`PtySession`] per worktree path, so a
-//! background agent keeps running — and keeps producing output — while the user
-//! works elsewhere in the screen.
+//! The workspace screen embeds at most one shell per worktree in its right
+//! pane. To let the user switch sessions while a `terminal` or `agent` keeps
+//! running, the [`PtySession`]s cannot live on the stack of the terminal loop
+//! (where leaving would drop — and so kill — them). Instead they are owned here,
+//! keyed by worktree directory, for the lifetime of the screen: detaching
+//! (`Ctrl-O`) returns to the sidebar but leaves the shell — and any agent CLI
+//! running inside it — alive in the pool, so re-attaching later finds it exactly
+//! where it was left.
 //!
-//! A background watcher thread polls every session's bell count through a
-//! [`SessionMonitor`] (see [`crate::infrastructure::session_monitor`]). When a
-//! detached session's agent rings the bell to ask for input, the watcher fires a
-//! one-shot desktop notification and flags the session as waiting; the flag is
-//! exposed through a [`MonitorHandle`] the presentation layer reads to mark the
-//! session in the sidebar. Sessions whose shell has exited are pruned.
+//! Because those shells keep running in the background, the pool also watches
+//! them: a background thread polls every session's bell count through a
+//! [`SessionMonitor`]. Interactive agents ring the terminal bell when they
+//! finish a turn and want input, so when a detached session rings it, the
+//! watcher fires a one-shot desktop notification and flags the session as
+//! waiting. The flag is exposed through a [`MonitorHandle`] the render loops read
+//! to mark the session in the sidebar (`◆`). The session the user is attached to
+//! is excluded — its bells are seen live.
 //!
-//! This module is pure I/O and threading (PTYs, a watcher thread, desktop
-//! notifications), so it is excluded from coverage — like [`crate::infrastructure::pty`].
-//! Its pure core, the waiting-state bookkeeping, lives in [`SessionMonitor`] and
-//! is tested there.
+//! This is pure I/O and process ownership (it spawns shells, holds their
+//! handles, runs a watcher thread, and shows desktop notifications), so — like
+//! [`PtySession`] itself — it is excluded from coverage. Its pure core, the
+//! waiting-state bookkeeping, lives in [`SessionMonitor`] and is tested there.
+//! The geometry it spawns at ([`super::ui::terminal_geometry`]) is tested on its
+//! own.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -26,9 +33,12 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use anyhow::Result;
+use console::Term;
 
 use crate::infrastructure::pty::PtySession;
 use crate::infrastructure::session_monitor::SessionMonitor;
+
+use super::ui;
 
 /// How often the watcher thread samples every session's bell count.
 const POLL_INTERVAL: Duration = Duration::from_millis(200);
@@ -44,7 +54,7 @@ struct Watched {
     label: String,
 }
 
-/// State shared between the manager, the watcher thread, and the UI.
+/// State shared between the pool, the watcher thread, and the render loops.
 #[derive(Default)]
 struct Shared {
     monitor: SessionMonitor,
@@ -52,8 +62,8 @@ struct Shared {
 }
 
 /// A cloneable read/notify handle onto the shared waiting state, given to the
-/// presentation layer so its render loops can mark waiting sessions and declare
-/// which session is in the foreground.
+/// render loops so they can mark waiting sessions and declare which session is
+/// in the foreground.
 #[derive(Clone)]
 pub struct MonitorHandle {
     shared: Arc<Mutex<Shared>>,
@@ -84,18 +94,20 @@ impl MonitorHandle {
     }
 }
 
-/// Owns the workspace screen's background terminal sessions and the watcher
-/// thread monitoring them.
-pub struct TerminalManager {
-    /// Live shells, one per worktree path, borrowed by the attach loop.
-    ptys: HashMap<PathBuf, PtySession>,
+/// The live shells embedded in the workspace screen, keyed by worktree path.
+///
+/// Owned by the screen ([`super::run`]); dropped when the user leaves it, which
+/// kills every shell it still holds (via [`PtySession`]'s `Drop`) and stops the
+/// watcher thread.
+pub struct TerminalPool {
+    sessions: HashMap<PathBuf, PtySession>,
     shared: Arc<Mutex<Shared>>,
     stop: Arc<AtomicBool>,
     watcher: Option<JoinHandle<()>>,
 }
 
-impl TerminalManager {
-    /// Build a manager and start its watcher thread. `notifications_enabled`
+impl TerminalPool {
+    /// An empty pool with its watcher thread running. `notifications_enabled`
     /// gates the desktop notification fired when a detached session starts
     /// waiting for input.
     pub fn new(notifications_enabled: bool) -> Self {
@@ -107,64 +119,68 @@ impl TerminalManager {
             notifications_enabled,
         );
         Self {
-            ptys: HashMap::new(),
+            sessions: HashMap::new(),
             shared,
             stop,
             watcher: Some(watcher),
         }
     }
 
-    /// A handle the presentation layer reads to render waiting markers and to
-    /// declare the foreground session.
-    pub fn handle(&self) -> MonitorHandle {
+    /// A handle the render loops read to mark waiting sessions and to declare
+    /// the foreground session.
+    pub fn monitor(&self) -> MonitorHandle {
         MonitorHandle {
             shared: Arc::clone(&self.shared),
         }
     }
 
-    /// Attach to the worktree's existing background session, spawning one (sized
-    /// `rows`×`cols`, with `initial` sent to the shell on start) if none is
-    /// running. Returns a mutable borrow of the live shell for the attach loop
-    /// to drive.
+    /// Borrow the live shell rooted at `dir`, spawning one if none exists yet
+    /// (or the previous one has exited). On a fresh spawn the `initial` command
+    /// line is sent once — this is how `agent` lands the user in the configured
+    /// agent CLI; re-attaching to an existing shell never re-sends it. `label`
+    /// (the worktree branch) is shown in the waiting notification.
+    ///
+    /// The shell is sized to the right pane's current geometry; the terminal
+    /// loop resizes it from then on as the window changes.
     pub fn attach_or_spawn(
         &mut self,
+        term: &Term,
         dir: &Path,
-        rows: u16,
-        cols: u16,
         initial: Option<&str>,
         label: &str,
     ) -> Result<&mut PtySession> {
-        if !self.ptys.contains_key(dir) {
-            let mut pty = PtySession::spawn(dir, rows, cols)?;
+        let key = dir.to_path_buf();
+        let alive = self.sessions.get(&key).is_some_and(|s| s.is_alive());
+        if !alive {
+            let (height, width) = term.size();
+            let geo = ui::terminal_geometry(height as usize, width as usize);
+            let mut pty = PtySession::spawn(dir, geo.rows, geo.cols)?;
             if let Some(command) = initial {
+                // The shell buffers its input, so writing immediately is fine:
+                // it runs the command once it has started up.
                 pty.write(format!("{command}\r").as_bytes())?;
             }
-            self.lock().sessions.insert(
-                dir.to_path_buf(),
-                Watched {
-                    bell: pty.bell_handle(),
-                    alive: pty.alive_handle(),
-                    label: label.to_string(),
-                },
-            );
-            self.ptys.insert(dir.to_path_buf(), pty);
+            // Register (or refresh) the watched handles for this path; a fresh
+            // spawn over an exited one resets its bell baseline.
+            {
+                let mut shared = self.lock();
+                shared.monitor.forget(dir);
+                shared.sessions.insert(
+                    key.clone(),
+                    Watched {
+                        bell: pty.bell_handle(),
+                        alive: pty.alive_handle(),
+                        label: label.to_string(),
+                    },
+                );
+            }
+            // Overwrites (and so drops/kills) any exited shell at this path.
+            self.sessions.insert(key.clone(), pty);
         }
         Ok(self
-            .ptys
-            .get_mut(dir)
-            .expect("session was just spawned or already present"))
-    }
-
-    /// Forget the worktree's session if its shell has exited, so it stops being
-    /// tracked and a later attach spawns a fresh one.
-    pub fn reap_if_dead(&mut self, dir: &Path) {
-        let dead = self.ptys.get(dir).map(|p| !p.is_alive()).unwrap_or(false);
-        if dead {
-            self.ptys.remove(dir);
-            let mut shared = self.lock();
-            shared.sessions.remove(dir);
-            shared.monitor.forget(dir);
-        }
+            .sessions
+            .get_mut(&key)
+            .expect("the session was just inserted or already present"))
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Shared> {
@@ -172,7 +188,7 @@ impl TerminalManager {
     }
 }
 
-impl Drop for TerminalManager {
+impl Drop for TerminalPool {
     fn drop(&mut self) {
         // Stop the watcher and wait for it, then the owned PTYs drop and kill
         // their shells.
@@ -245,4 +261,10 @@ fn notify_waiting(label: &str) {
         .summary("usagi")
         .body(&format!("🐰 {label} が入力待ちです"))
         .show();
+}
+
+impl Default for TerminalPool {
+    fn default() -> Self {
+        Self::new(true)
+    }
 }
