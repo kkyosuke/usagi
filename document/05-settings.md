@@ -49,6 +49,14 @@
 |---|---|---|---|
 | Agent CLI | `agent_cli` | enum?\| | グローバル設定にフォールバック |
 | デスクトップ通知 | `notifications_enabled` | bool?\| | グローバル設定にフォールバック |
+| デフォルトブランチ基点 | `default_branch_source` | enum?\| | 既定（`remote`） |
+
+> **デフォルトブランチ基点（`default_branch_source`）**: `session new` でセッションを作るとき、各 git
+> リポジトリの worktree を切る新ブランチの**基点**を選びます。選択肢は `local`（ローカルの既定ブランチ。例
+> `main`）と `remote`（リモート追従の既定ブランチ。例 `origin/main`）。グローバル設定に対応項目はなく、
+> 未設定時は `remote` として扱います（`origin/<既定>` が無ければローカル既定ブランチ → それも無ければ現在の
+> HEAD にフォールバック）。**リポジトリ単位**の設定なので、複数 git を含むワークスペースでは各リポジトリ内で
+> Config を開いて個別に設定します。
 
 - 全フィールドが任意（`Option`）で、`null` は「グローバル設定に従う」を意味します。テーマ（`theme`）や
   クローン先（`workspace_root`）のようにプロジェクト単位で変える意味の薄い項目は対象外です。
@@ -56,8 +64,9 @@
   `Settings::with_local`、ユースケースは `usecase/settings.rs` の `effective(storage, repo_root)` が担います。
 - 読み書きロジック・永続化（[issue 021](../issues/021-local-settings.md)）に加え、編集 UI も実装済み
   （[issue 022](../issues/022-local-settings-ui.md)）。git リポジトリ内で設定画面（Config）を開くと、グローバル
-  設定の下に「Local · Agent CLI」「Local · Notifications」の行が現れ、**「グローバルに従う / ローカルで上書き」**
-  を切り替えられます。詳細は [design/04-config.md](design/04-config.md) を参照。
+  設定の下に「Local · Agent CLI」「Local · Notifications」「Local · Default Branch」の行が現れ、Agent CLI と
+  Notifications は **「グローバルに従う / ローカルで上書き」**、Default Branch は **`local` / `remote`** を
+  切り替えられます。詳細は [design/04-config.md](design/04-config.md) を参照。
 - JSON 例・フィールド詳細は [data/02-workspace.md](data/02-workspace.md#settingsjson-プロジェクト固有の設定上書きローカル設定) を参照。
 
 ## 設定の変更方法

@@ -9,13 +9,16 @@
 //! for the agent CLI and notifications that fall back to the global settings
 //! when left unset. Those rows are appended below the global fields.
 
-use crate::domain::settings::{AgentCli, LocalSettings, Settings, Theme};
+use crate::domain::settings::{AgentCli, BranchSource, LocalSettings, Settings, Theme};
 
 /// The themes in the order they cycle through.
 const THEMES: [Theme; 3] = [Theme::Light, Theme::Dark, Theme::System];
 
 /// The agent CLIs in the order they cycle through.
 pub(super) const AGENT_CLIS: [AgentCli; 2] = [AgentCli::Claude, AgentCli::Gemini];
+
+/// The branch sources in the order they cycle through.
+pub(super) const BRANCH_SOURCES: [BranchSource; 2] = [BranchSource::Local, BranchSource::Remote];
 
 /// An editable global settings field, in display order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,17 +55,23 @@ impl Field {
 pub enum LocalField {
     AgentCli,
     Notifications,
+    DefaultBranch,
 }
 
 impl LocalField {
     /// The local override fields shown on the screen, top to bottom.
-    pub const ALL: [LocalField; 2] = [LocalField::AgentCli, LocalField::Notifications];
+    pub const ALL: [LocalField; 3] = [
+        LocalField::AgentCli,
+        LocalField::Notifications,
+        LocalField::DefaultBranch,
+    ];
 
     /// The label shown beside the field's value.
     pub fn label(self) -> &'static str {
         match self {
             LocalField::AgentCli => "Local · Agent CLI",
             LocalField::Notifications => "Local · Notifications",
+            LocalField::DefaultBranch => "Local · Default Branch",
         }
     }
 }
@@ -232,6 +241,9 @@ impl Config {
             LocalField::Notifications => {
                 local.settings.notifications_enabled != local.baseline.notifications_enabled
             }
+            LocalField::DefaultBranch => {
+                local.settings.default_branch_source != local.baseline.default_branch_source
+            }
         }
     }
 
@@ -285,6 +297,12 @@ impl Config {
             LocalField::Notifications => match local.settings.notifications_enabled {
                 None => format!("Global ({})", on_off(self.settings.notifications_enabled)),
                 Some(on) => format!("Override: {}", on_off(on)),
+            },
+            // The branch source has no global counterpart: an unset value simply
+            // shows the default it resolves to, and a set value shows itself.
+            LocalField::DefaultBranch => match local.settings.default_branch_source {
+                None => format!("Default ({})", branch_source_label(BranchSource::default())),
+                Some(source) => branch_source_label(source).to_string(),
             },
         }
     }
@@ -366,6 +384,13 @@ impl Config {
                     &[true, false],
                     forward,
                 );
+            }
+            LocalField::DefaultBranch => {
+                // Local-only setting: toggle between the two concrete sources,
+                // treating an unset value as the default. It is always stored.
+                let current = local.settings.default_branch_source.unwrap_or_default();
+                local.settings.default_branch_source =
+                    Some(cycle_enum(current, &BRANCH_SOURCES, forward));
             }
         }
         true
@@ -452,6 +477,27 @@ fn cycle_agent_cli(cli: AgentCli, forward: bool) -> AgentCli {
         (i + len - 1) % len
     };
     AGENT_CLIS[next]
+}
+
+/// The human-readable label for a branch source.
+pub(super) fn branch_source_label(source: BranchSource) -> &'static str {
+    match source {
+        BranchSource::Local => "Local",
+        BranchSource::Remote => "Remote",
+    }
+}
+
+/// The value one step after `current` in `choices` (or before, when `forward` is
+/// false), wrapping at the ends. Used for a fixed, non-optional set of choices.
+fn cycle_enum<T: Copy + PartialEq>(current: T, choices: &[T], forward: bool) -> T {
+    let i = choices.iter().position(|&c| c == current).unwrap_or(0);
+    let len = choices.len();
+    let next = if forward {
+        (i + 1) % len
+    } else {
+        (i + len - 1) % len
+    };
+    choices[next]
 }
 
 /// Cycle an optional override through `None` (follow global) then each value in
@@ -759,18 +805,22 @@ mod tests {
     fn with_local_appends_local_rows_and_grows_the_layout() {
         let config = local_config();
         assert!(config.local().is_some());
-        // Four global fields + two local fields.
-        assert_eq!(config.field_count(), 6);
-        assert_eq!(config.save_index(), 6);
+        // Four global fields + three local fields.
+        assert_eq!(config.field_count(), 7);
+        assert_eq!(config.save_index(), 7);
         let rows = config.rows();
-        assert_eq!(rows.len(), 6);
+        assert_eq!(rows.len(), 7);
         assert_eq!(rows[4].label, "Local · Agent CLI");
         assert_eq!(rows[5].label, "Local · Notifications");
-        // Unset overrides display the global value they fall back to.
+        assert_eq!(rows[6].label, "Local · Default Branch");
+        // Unset overrides display the value they fall back to.
         assert!(rows[4].value.contains("Global"));
         assert!(rows[4].value.contains("Claude"));
         assert!(rows[5].value.contains("Global"));
         assert!(rows[5].value.contains("On"));
+        // The branch source has no global counterpart: it shows its default.
+        assert!(rows[6].value.contains("Default"));
+        assert!(rows[6].value.contains("Remote"));
     }
 
     #[test]
@@ -788,8 +838,49 @@ mod tests {
             Some(LocalField::Notifications)
         );
         config.move_down();
+        assert_eq!(
+            config.selected_local_field(),
+            Some(LocalField::DefaultBranch)
+        );
+        config.move_down();
         assert!(config.is_save_selected());
         assert!(config.selected_local_field().is_none());
+    }
+
+    #[test]
+    fn cycling_a_local_default_branch_override_toggles_local_and_remote() {
+        let mut config = local_config();
+        for _ in 0..Field::ALL.len() + 2 {
+            config.move_down();
+        }
+        assert_eq!(
+            config.selected_local_field(),
+            Some(LocalField::DefaultBranch)
+        );
+        // Unset shows the default it resolves to.
+        assert_eq!(
+            config.value_of_local(LocalField::DefaultBranch),
+            "Default (Remote)"
+        );
+        // Forward from the default (Remote) wraps to Local, then back to Remote.
+        assert!(config.cycle_selected(true));
+        assert_eq!(
+            config.local().unwrap().default_branch_source,
+            Some(BranchSource::Local)
+        );
+        assert_eq!(config.value_of_local(LocalField::DefaultBranch), "Local");
+        assert!(config.cycle_selected(true));
+        assert_eq!(
+            config.local().unwrap().default_branch_source,
+            Some(BranchSource::Remote)
+        );
+        assert_eq!(config.value_of_local(LocalField::DefaultBranch), "Remote");
+        // Backward toggles the other way.
+        assert!(config.cycle_selected(false));
+        assert_eq!(
+            config.local().unwrap().default_branch_source,
+            Some(BranchSource::Local)
+        );
     }
 
     #[test]
@@ -884,6 +975,7 @@ mod tests {
     fn local_field_labels_are_distinct() {
         assert_eq!(LocalField::AgentCli.label(), "Local · Agent CLI");
         assert_eq!(LocalField::Notifications.label(), "Local · Notifications");
-        assert_eq!(LocalField::ALL.len(), 2);
+        assert_eq!(LocalField::DefaultBranch.label(), "Local · Default Branch");
+        assert_eq!(LocalField::ALL.len(), 3);
     }
 }

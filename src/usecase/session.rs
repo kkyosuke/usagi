@@ -24,7 +24,7 @@ use chrono::Utc;
 use crate::domain::workspace_state::SessionRecord;
 use crate::infrastructure::git;
 use crate::infrastructure::workspace_store::WorkspaceStore;
-use crate::usecase::workspace_state;
+use crate::usecase::{settings, workspace_state};
 
 /// Names never descended into or copied while building a session: usagi's own
 /// data directory (which holds the session tree itself) and any `.git`.
@@ -67,7 +67,8 @@ pub fn create(workspace_root: &Path, name: &str) -> Result<CreatedSession> {
             .parent()
             .expect("dest_root always has a .usagi/worktree parent");
         fs::create_dir_all(parent).context(format!("failed to create {}", parent.display()))?;
-        git::add_worktree(workspace_root, &dest_root, name)?;
+        let base = base_ref(workspace_root);
+        git::add_worktree(workspace_root, &dest_root, name, base.as_deref())?;
         worktrees.push(dest_root.clone());
     } else {
         fs::create_dir_all(&dest_root)
@@ -198,7 +199,8 @@ fn build_dir(src: &Path, dest: &Path, branch: &str, worktrees: &mut Vec<PathBuf>
 
         if file_type.is_dir() {
             if is_repo_root(&from) {
-                git::add_worktree(&from, &to, branch)?;
+                let base = base_ref(&from);
+                git::add_worktree(&from, &to, branch, base.as_deref())?;
                 worktrees.push(to);
             } else {
                 fs::create_dir_all(&to).context(format!("failed to create {}", to.display()))?;
@@ -215,6 +217,20 @@ fn build_dir(src: &Path, dest: &Path, branch: &str, worktrees: &mut Vec<PathBuf>
 /// a directory for a normal clone, or a file for a linked worktree.
 fn is_repo_root(path: &Path) -> bool {
     path.join(".git").exists()
+}
+
+/// The ref a new session worktree in `repo` should branch from, per the repo's
+/// project-local [`BranchSource`](crate::domain::settings::BranchSource).
+///
+/// Reading the local settings is best-effort: a missing or unreadable file
+/// resolves to the default ([`BranchSource::Remote`]). `None` means "branch from
+/// the current HEAD" — either the chosen ref does not exist, or the resolution
+/// fell through.
+fn base_ref(repo: &Path) -> Option<String> {
+    let source = settings::load_local(repo)
+        .unwrap_or_default()
+        .branch_source();
+    git::resolve_base_ref(repo, source)
 }
 
 #[cfg(test)]
@@ -245,6 +261,12 @@ mod tests {
             .args(["rev-parse", "--abbrev-ref", "HEAD"])
             .output()
             .unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// The full HEAD commit at the worktree `dir`.
+    fn head_commit(dir: &Path) -> String {
+        let out = git_cmd(dir).args(["rev-parse", "HEAD"]).output().unwrap();
         String::from_utf8_lossy(&out.stdout).trim().to_string()
     }
 
@@ -354,6 +376,51 @@ mod tests {
 
         let err = create(root.path(), "taken").unwrap_err();
         assert!(err.to_string().contains("git worktree add failed"));
+    }
+
+    #[test]
+    fn branches_from_remote_by_default_and_from_local_when_configured() {
+        use crate::domain::settings::{BranchSource, LocalSettings};
+
+        // A repo whose local `main` is one commit ahead of `origin/main`, so the
+        // two refs resolve to different commits and the chosen base is provable.
+        let tmp = tempfile::tempdir().unwrap();
+        let bare = tmp.path().join("remote.git");
+        let root = tmp.path().join("work");
+        let run = |dir: &Path, args: &[&str]| {
+            assert!(git_cmd(dir).args(args).status().unwrap().success());
+        };
+
+        run(
+            tmp.path(),
+            &["init", "-q", "--bare", bare.to_str().unwrap()],
+        );
+        init_repo(&root);
+        run(&root, &["remote", "add", "origin", bare.to_str().unwrap()]);
+        run(&root, &["push", "-q", "-u", "origin", "main"]);
+        run(&root, &["remote", "set-head", "origin", "main"]);
+        let remote_commit = head_commit(&root); // origin/main == first commit
+                                                // Advance local main ahead of the remote.
+        fs::write(root.join("code.txt"), "second").unwrap();
+        run(&root, &["commit", "-aqm", "second"]);
+        let local_commit = head_commit(&root);
+        assert_ne!(remote_commit, local_commit);
+
+        // Default (no local settings): session branches from origin/main.
+        let created = create(&root, "from-remote").unwrap();
+        assert_eq!(head_commit(&created.root), remote_commit);
+
+        // Configured Local: session branches from the local default branch.
+        settings::save_local(
+            &root,
+            &LocalSettings {
+                default_branch_source: Some(BranchSource::Local),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let created = create(&root, "from-local").unwrap();
+        assert_eq!(head_commit(&created.root), local_commit);
     }
 
     #[test]

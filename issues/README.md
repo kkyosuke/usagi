@@ -42,6 +42,7 @@
 | 027 | [command-hints](027-command-hints.md) ✅ | コマンドモードの入力候補・ヒント表示 | tui | low | 002, 008 |
 | 028 | [agent-wait-notify](028-agent-wait-notify.md) ✅ | 埋め込みターミナルの入力待ち検知と通知（サイドバーマーカー＋デスクトップ通知） | tui | medium | 006, 026 |
 | 029 | [home-config](029-home-config.md) ✅ | `config` ホーム画面から設定画面を開く | tui | medium | 002, 022 |
+| 030 | [default-branch-source](030-default-branch-source.md) ✅ | セッション開始時のデフォルトブランチ基点（local / remote）をローカル設定で選択 | tui | medium | 022 |
 
 ## 依存関係
 
@@ -59,6 +60,7 @@ graph TD
     002 --> 006[006 terminal]
     006 --> 026[026 agent]
     026 --> 028[028 agent-wait-notify]
+    022 --> 030[030 default-branch-source]
     002 --> 007[007 history]
     002 --> 008[008 man]
     002 --> 027[027 command-hints]
