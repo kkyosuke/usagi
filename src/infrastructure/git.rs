@@ -96,6 +96,28 @@ pub fn clone(url: &str, dest: &Path, branch: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+/// Create a worktree at `dest` checking out a new branch `branch` in `repo`.
+///
+/// Runs `git -C <repo> worktree add -b <branch> <dest>`, which fails if `branch`
+/// already exists or `dest` is not empty. Output is captured (not inherited) so
+/// it never disturbs an active TUI; on failure the captured stderr is surfaced.
+/// Repo-scoping env vars are stripped so an inherited `GIT_DIR` cannot redirect
+/// the operation to another repository.
+pub fn add_worktree(repo: &Path, dest: &Path, branch: &str) -> Result<()> {
+    let output = git_command(repo)
+        .args(["worktree", "add", "-b", branch])
+        .arg(dest)
+        .output()
+        .context("failed to run `git worktree add`")?;
+    if !output.status.success() {
+        bail!(
+            "git worktree add failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
 /// Return `true` if `path` is inside a git working tree.
 ///
 /// Used to decide whether an existing directory registered as a workspace can
@@ -450,6 +472,42 @@ mod tests {
     fn short_hash_takes_first_seven_chars() {
         assert_eq!(short_hash("0123456789abcdef"), "0123456");
         assert_eq!(short_hash("abc"), "abc");
+    }
+
+    #[test]
+    fn add_worktree_creates_a_new_branch_checkout() {
+        let dir = tempfile::tempdir().unwrap();
+        init_repo(dir.path());
+        let dest = dir.path().join("wt");
+
+        add_worktree(dir.path(), &dest, "feature").unwrap();
+
+        // The new worktree exists and is checked out on the new branch.
+        assert!(dest.join("f").is_file());
+        let head = git_capture(&dest, &["rev-parse", "--abbrev-ref", "HEAD"])
+            .unwrap()
+            .unwrap();
+        assert_eq!(head, "feature");
+        // It is registered as a worktree of the repo (compare canonical paths,
+        // since git resolves symlinks like macOS's /var -> /private/var).
+        let canonical = dest.canonicalize().unwrap();
+        let worktrees = list_worktrees(dir.path()).unwrap();
+        assert!(worktrees.iter().any(|w| w
+            .path
+            .canonicalize()
+            .map(|p| p == canonical)
+            .unwrap_or(false)));
+    }
+
+    #[test]
+    fn add_worktree_fails_for_an_existing_branch() {
+        let dir = tempfile::tempdir().unwrap();
+        init_repo(dir.path());
+        run(dir.path(), &["branch", "feature"]);
+
+        // `-b feature` cannot create a branch that already exists.
+        let err = add_worktree(dir.path(), &dir.path().join("wt"), "feature").unwrap_err();
+        assert!(err.to_string().contains("git worktree add failed"));
     }
 
     #[test]

@@ -21,6 +21,10 @@ pub enum Effect {
     Clear,
     /// Quit the whole application.
     Quit,
+    /// Open the session-name modal (the user ran `session` without a name).
+    OpenSessionModal,
+    /// Create a session with the given name (the user supplied one).
+    CreateSession(String),
 }
 
 /// The result of running a command: lines to append plus a side effect.
@@ -191,6 +195,49 @@ impl Command for QuitCommand {
     }
 }
 
+/// `session`: create or manage sessions (a new branch + worktree per repo).
+///
+/// `session new <name>` (or just `session <name>`) creates a session with that
+/// name; `session` or `session new` with no name returns [`Effect::OpenSessionModal`]
+/// so the screen can prompt for one. `list` / `remove` are recognised subcommands
+/// that are not built yet.
+struct SessionCommand;
+
+impl Command for SessionCommand {
+    fn name(&self) -> &'static str {
+        "session"
+    }
+
+    fn description(&self) -> &'static str {
+        "Create or manage sessions (branch + worktree)"
+    }
+
+    fn run(&self, args: &str, _ctx: &CommandContext) -> CommandResult {
+        let mut parts = args.splitn(2, char::is_whitespace);
+        let sub = parts.next().unwrap_or("");
+        let rest = parts.next().unwrap_or("").trim();
+
+        let open = || CommandResult {
+            lines: Vec::new(),
+            effect: Effect::OpenSessionModal,
+        };
+        let create = |name: &str| CommandResult {
+            lines: Vec::new(),
+            effect: Effect::CreateSession(name.to_string()),
+        };
+
+        match sub {
+            "" => open(),
+            "new" if rest.is_empty() => open(),
+            "new" => create(rest),
+            "list" | "remove" => CommandResult::line(LogLine::output(format!(
+                "\"session {sub}\" is coming soon 🐰"
+            ))),
+            _ => create(args.trim()),
+        }
+    }
+}
+
 /// A recognised command whose real behaviour is not built yet. It produces a
 /// friendly "coming soon" line so the surface stays discoverable; the follow-up
 /// issues replace each one with a real [`Command`] implementation.
@@ -230,10 +277,7 @@ impl CommandRegistry {
     pub fn with_builtins() -> Self {
         Self {
             commands: vec![
-                Box::new(ComingSoonCommand {
-                    name: "session",
-                    description: "Create or manage sessions (branch + worktree)",
-                }),
+                Box::new(SessionCommand),
                 Box::new(ComingSoonCommand {
                     name: "space",
                     description: "Switch between worktrees",
@@ -465,9 +509,42 @@ mod tests {
     }
 
     #[test]
+    fn session_without_a_name_opens_the_modal() {
+        // Bare `session` and `session new` both ask for a name via the modal.
+        for input in ["session", "session new"] {
+            let result = registry().dispatch(input, &[]);
+            assert!(result.lines.is_empty());
+            assert_eq!(result.effect, Effect::OpenSessionModal);
+        }
+    }
+
+    #[test]
+    fn session_with_a_name_requests_creation() {
+        // `session new <name>` and the shorthand `session <name>` both create.
+        for input in ["session new feature-x", "session feature-x"] {
+            let result = registry().dispatch(input, &[]);
+            assert!(result.lines.is_empty());
+            assert_eq!(
+                result.effect,
+                Effect::CreateSession("feature-x".to_string())
+            );
+        }
+    }
+
+    #[test]
+    fn session_list_and_remove_are_coming_soon() {
+        for sub in ["list", "remove"] {
+            let result = registry().dispatch(&format!("session {sub}"), &[]);
+            assert_eq!(result.effect, Effect::None);
+            assert!(result.lines[0].text.contains("coming soon"));
+            assert!(result.lines[0].text.contains(sub));
+        }
+    }
+
+    #[test]
     fn coming_soon_commands_are_recognised() {
         let registry = registry();
-        for name in ["session", "space", "ai", "terminal", "doctor"] {
+        for name in ["space", "ai", "terminal", "doctor"] {
             let result = registry.dispatch(name, &[]);
             assert_eq!(result.effect, Effect::None);
             assert_eq!(result.lines[0].kind, LineKind::Output);

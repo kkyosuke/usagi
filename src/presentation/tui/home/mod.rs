@@ -21,7 +21,7 @@ use crate::presentation::tui::term_reader::TermKeyReader;
 
 pub use event::Outcome;
 
-use state::HomeState;
+use state::{HomeState, LogLine, SessionOutcome};
 
 /// Runs the home screen for `workspace` on the given terminal until the user
 /// goes back or quits. Loads the workspace's worktree state and prior command
@@ -50,5 +50,28 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
     let mut persist = |command: &str| {
         let _ = history.append(command);
     };
-    event::event_loop(term, &mut reader, state, &mut persist)
+
+    // Creating a session does the git / filesystem work and reports back. When
+    // the workspace root is a single repository, re-syncing yields the refreshed
+    // worktree list (including the new session); a multi-repo root has no single
+    // `state.json` to sync, so `sync` fails harmlessly and the list is unchanged.
+    let root = workspace.path.clone();
+    let mut create_session = |name: &str| match crate::usecase::session::create(&root, name) {
+        Ok(created) => SessionOutcome {
+            line: LogLine::output(format!(
+                "Created session \"{}\" ({} worktree(s)) 🐰",
+                created.name,
+                created.worktrees.len()
+            )),
+            worktrees: crate::usecase::workspace_state::sync(&root)
+                .ok()
+                .map(|s| s.worktrees),
+        },
+        Err(e) => SessionOutcome {
+            line: LogLine::error(format!("session failed: {e}")),
+            worktrees: None,
+        },
+    };
+
+    event::event_loop(term, &mut reader, state, &mut persist, &mut create_session)
 }

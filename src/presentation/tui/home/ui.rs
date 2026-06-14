@@ -10,7 +10,7 @@ use console::style;
 use crate::domain::workspace_state::{BranchStatus, WorktreeState};
 use crate::presentation::tui::widgets;
 
-use super::state::{HomeState, LineKind, LogLine, Mode, WorktreeList};
+use super::state::{HomeState, LineKind, LogLine, Mode, SessionModal, WorktreeList};
 
 /// Shown in place of the list when the workspace has no recorded worktrees.
 const EMPTY_MESSAGE: &str = "No worktrees recorded yet. Run usagi to sync.";
@@ -194,8 +194,40 @@ fn footer_line(width: usize, mode: Mode) -> String {
     widgets::dim_line(width, help)
 }
 
+/// Builds the centred session-name modal over an otherwise blank frame.
+fn session_modal_frame(raw_height: usize, raw_width: usize, modal: &SessionModal) -> Vec<String> {
+    const INNER: usize = 36;
+    const PROMPT: &str = "❯ ";
+
+    // Reserve room for the prompt and trailing caret so a long name never
+    // overruns the box border.
+    let max_name = INNER.saturating_sub(console::measure_text_width(PROMPT) + 1);
+    let name = clip_to_width(modal.input(), max_name);
+    let input_line = style(format!("{PROMPT}{name}{CARET}")).cyan().to_string();
+
+    let error_line = match modal.error() {
+        Some(err) => style(clip_to_width(err, INNER)).red().to_string(),
+        None => String::new(),
+    };
+
+    let body = vec![
+        style("Enter a name for the new session.").dim().to_string(),
+        String::new(),
+        input_line,
+        error_line,
+        String::new(),
+        style("Enter: create   Esc: cancel").dim().to_string(),
+    ];
+    widgets::render_modal(raw_height, raw_width, "New session", INNER, &body)
+}
+
 /// Builds the full home-screen frame for a raw terminal size.
 pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> Vec<String> {
+    // The session-name modal, when open, overlays the whole screen.
+    if let Some(modal) = state.modal() {
+        return session_modal_frame(raw_height, raw_width, modal);
+    }
+
     let (height, width) = widgets::normalize_size(raw_height, raw_width);
     let (left_w, right_w) = layout(width);
 
@@ -441,6 +473,55 @@ mod tests {
         let joined = frame.join("\n");
         assert!(joined.contains("main"));
         assert!(joined.contains("man"));
+    }
+
+    #[test]
+    fn render_frame_overlays_the_session_modal_when_open() {
+        let mut state = HomeState::new("usagi", Vec::new(), None);
+        state.open_session_modal();
+        state.modal_push_char('w');
+        state.modal_push_char('i');
+        state.modal_push_char('p');
+
+        let frame = render_frame(24, 80, &state);
+        let joined = console::strip_ansi_codes(&frame.join("\n")).into_owned();
+        // The modal title, prompt, typed name, and hints are shown.
+        assert!(joined.contains("New session"));
+        assert!(joined.contains("Enter a name"));
+        assert!(joined.contains("wip"));
+        assert!(joined.contains("Enter: create"));
+        // The three-pane chrome (its mode footer) is not drawn underneath.
+        assert!(!joined.contains("move"));
+    }
+
+    #[test]
+    fn session_modal_frame_shows_a_validation_error() {
+        let mut state = HomeState::new("usagi", Vec::new(), None);
+        state.open_session_modal();
+        // An empty submit sets an inline error.
+        assert!(state.submit_modal().is_none());
+        let frame = render_frame(24, 80, &state);
+        let joined = console::strip_ansi_codes(&frame.join("\n")).into_owned();
+        assert!(joined.contains("must not be empty"));
+    }
+
+    #[test]
+    fn session_modal_frame_clips_a_very_long_name() {
+        let mut state = HomeState::new("usagi", Vec::new(), None);
+        state.open_session_modal();
+        for _ in 0..80 {
+            state.modal_push_char('x');
+        }
+        let frame = session_modal_frame(24, 80, state.modal().unwrap());
+        // The clipped name carries the ellipsis and every box row is equal width.
+        let joined = frame.join("\n");
+        assert!(joined.contains('…'));
+        let widths: Vec<usize> = frame
+            .iter()
+            .filter(|l| l.contains('│'))
+            .map(|l| console::measure_text_width(l))
+            .collect();
+        assert!(widths.windows(2).all(|w| w[0] == w[1]));
     }
 
     #[test]
