@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use anyhow::Result;
 use console::Key;
 use console::Term;
@@ -34,13 +36,20 @@ pub enum Outcome {
 /// <name>`) to `remove_session` (its `bool` is the `--force` flag). Both perform
 /// the git / filesystem work and return a [`SessionOutcome`] to apply to the
 /// screen, keeping the loop itself free of that IO and directly testable.
+///
+/// `terminal` opens an interactive shell in the selected worktree (or
+/// `workspace_root` when nothing is selected) via `open_terminal`; the terminal
+/// I/O (suspending the TUI, spawning the shell) lives in that injected callback.
+#[allow(clippy::too_many_arguments)]
 pub fn event_loop(
     term: &Term,
     reader: &mut dyn KeyReader,
     mut state: HomeState,
+    workspace_root: &Path,
     persist: &mut dyn FnMut(&str),
     create_session: &mut dyn FnMut(&str) -> SessionOutcome,
     remove_session: &mut dyn FnMut(&str, bool) -> SessionOutcome,
+    open_terminal: &mut dyn FnMut(&Path) -> Result<()>,
 ) -> Result<Outcome> {
     loop {
         term.move_cursor_to(0, 0)?;
@@ -105,6 +114,20 @@ pub fn event_loop(
                             let outcome = remove_session(&name, force);
                             state.apply_session_outcome(outcome);
                         }
+                        Effect::OpenTerminal => {
+                            // Open the shell in the selected worktree, falling
+                            // back to the workspace root when nothing is selected.
+                            let dir = state
+                                .list()
+                                .selected()
+                                .map(|w| w.path.clone())
+                                .unwrap_or_else(|| workspace_root.to_path_buf());
+                            match open_terminal(&dir) {
+                                Ok(()) => state
+                                    .log_output(format!("Terminal in {} closed.", dir.display())),
+                                Err(e) => state.log_error(format!("terminal failed: {e}")),
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -127,6 +150,7 @@ mod tests {
     use super::*;
     use crate::domain::workspace_state::{BranchStatus, WorktreeState};
     use chrono::Utc;
+    use std::cell::RefCell;
     use std::collections::VecDeque;
     use std::io;
     use std::path::PathBuf;
@@ -186,19 +210,27 @@ mod tests {
         )
     }
 
+    /// A `open_terminal` callback that reports success without spawning a shell.
+    fn noop_open(_: &Path) -> Result<()> {
+        Ok(())
+    }
+
     fn run(keys: Vec<io::Result<Key>>, state: HomeState) -> Result<Outcome> {
         let term = Term::stdout();
         let mut reader = ScriptedReader::new(keys);
         let mut persist = |_: &str| {};
         let mut create_session: fn(&str) -> SessionOutcome = noop_create;
         let mut remove_session: fn(&str, bool) -> SessionOutcome = noop_remove;
+        let mut open_terminal: fn(&Path) -> Result<()> = noop_open;
         event_loop(
             &term,
             &mut reader,
             state,
+            Path::new("/ws"),
             &mut persist,
             &mut create_session,
             &mut remove_session,
+            &mut open_terminal,
         )
     }
 
@@ -299,13 +331,16 @@ mod tests {
         let mut persist = |command: &str| recorded.push(command.to_string());
         let mut create_session: fn(&str) -> SessionOutcome = noop_create;
         let mut remove_session: fn(&str, bool) -> SessionOutcome = noop_remove;
+        let mut open_terminal: fn(&Path) -> Result<()> = noop_open;
         let outcome = event_loop(
             &term,
             &mut reader,
             sample_state(),
+            Path::new("/ws"),
             &mut persist,
             &mut create_session,
             &mut remove_session,
+            &mut open_terminal,
         )
         .unwrap();
         assert!(matches!(outcome, Outcome::Back));
@@ -354,13 +389,16 @@ mod tests {
             outcome.clone()
         };
         let mut remove_session: fn(&str, bool) -> SessionOutcome = noop_remove;
+        let mut open_terminal: fn(&Path) -> Result<()> = noop_open;
         let result = event_loop(
             &term,
             &mut reader,
             state,
+            Path::new("/ws"),
             &mut persist,
             &mut create_session,
             &mut remove_session,
+            &mut open_terminal,
         );
         (result, created)
     }
@@ -413,13 +451,16 @@ mod tests {
             removed.push((name.to_string(), force));
             ok_outcome()
         };
+        let mut open_terminal: fn(&Path) -> Result<()> = noop_open;
         let outcome = event_loop(
             &term,
             &mut reader,
             sample_state(),
+            Path::new("/ws"),
             &mut persist,
             &mut create_session,
             &mut remove_session,
+            &mut open_terminal,
         )
         .unwrap();
         assert!(matches!(outcome, Outcome::Back));
@@ -514,5 +555,86 @@ mod tests {
     fn unexpected_read_error_is_propagated() {
         let err = run(vec![Err(io::Error::other("boom"))], sample_state()).unwrap_err();
         assert!(err.to_string().contains("Failed to read key"));
+    }
+
+    /// Drive `:terminal` through the loop with a custom `open_terminal`, so the
+    /// terminal effect's directory resolution and result handling are exercised.
+    fn run_terminal(
+        state: HomeState,
+        open_terminal: &mut dyn FnMut(&Path) -> Result<()>,
+    ) -> Result<Outcome> {
+        let mut keys = vec![Ok(Key::Char(':'))];
+        keys.extend(typed("terminal"));
+        keys.push(Ok(Key::Enter));
+        keys.push(Ok(Key::Escape)); // cancel command mode
+        keys.push(Ok(Key::Escape)); // leave sidebar
+
+        let term = Term::stdout();
+        let mut reader = ScriptedReader::new(keys);
+        let mut persist = |_: &str| {};
+        let mut create_session: fn(&str) -> SessionOutcome = noop_create;
+        let mut remove_session: fn(&str, bool) -> SessionOutcome = noop_remove;
+        event_loop(
+            &term,
+            &mut reader,
+            state,
+            Path::new("/ws"),
+            &mut persist,
+            &mut create_session,
+            &mut remove_session,
+            open_terminal,
+        )
+    }
+
+    #[test]
+    fn terminal_via_the_default_callback_succeeds() {
+        // Drives `:terminal` through the shared no-op `open_terminal`.
+        let mut keys = vec![Ok(Key::Char(':'))];
+        keys.extend(typed("terminal"));
+        keys.push(Ok(Key::Enter));
+        keys.push(Ok(Key::Escape)); // cancel command mode
+        keys.push(Ok(Key::Escape)); // leave sidebar
+        assert!(matches!(run(keys, sample_state()).unwrap(), Outcome::Back));
+    }
+
+    #[test]
+    fn terminal_opens_in_the_selected_worktree() {
+        let opened = RefCell::new(None);
+        let mut open = |dir: &Path| {
+            *opened.borrow_mut() = Some(dir.to_path_buf());
+            Ok(())
+        };
+        // sample_state's selected worktree path is /repo/wt.
+        assert!(matches!(
+            run_terminal(sample_state(), &mut open).unwrap(),
+            Outcome::Back
+        ));
+        assert_eq!(opened.into_inner(), Some(PathBuf::from("/repo/wt")));
+    }
+
+    #[test]
+    fn terminal_falls_back_to_the_workspace_root_without_selection() {
+        let opened = RefCell::new(None);
+        let mut open = |dir: &Path| {
+            *opened.borrow_mut() = Some(dir.to_path_buf());
+            Ok(())
+        };
+        // No worktrees: the loop opens the shell in the workspace root (/ws).
+        let state = HomeState::new("usagi", Vec::new(), None);
+        assert!(matches!(
+            run_terminal(state, &mut open).unwrap(),
+            Outcome::Back
+        ));
+        assert_eq!(opened.into_inner(), Some(PathBuf::from("/ws")));
+    }
+
+    #[test]
+    fn terminal_failure_is_reported() {
+        let mut open = |_: &Path| Err(anyhow::anyhow!("no shell"));
+        // A launch failure logs an error but the screen continues to Back.
+        assert!(matches!(
+            run_terminal(sample_state(), &mut open).unwrap(),
+            Outcome::Back
+        ));
     }
 }

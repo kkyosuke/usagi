@@ -325,6 +325,17 @@ impl HomeState {
         }
     }
 
+    /// Append an ordinary output line to the log (used by the event loop to
+    /// report the result of a command's side effect, e.g. `terminal`).
+    pub fn log_output(&mut self, text: impl Into<String>) {
+        self.log.push(LogLine::output(text));
+    }
+
+    /// Append an error line to the log.
+    pub fn log_error(&mut self, text: impl Into<String>) {
+        self.log.push(LogLine::error(text));
+    }
+
     pub fn list(&self) -> &WorktreeList {
         &self.list
     }
@@ -1054,6 +1065,18 @@ mod tests {
         let mut state = state();
         state.log_sessions();
         assert!(state.log().last().unwrap().text.contains("No sessions yet"));
+    }
+
+    #[test]
+    fn log_output_and_error_append_lines() {
+        let mut state = state();
+        state.log_output("did a thing");
+        state.log_error("it broke");
+        let last_two: Vec<_> = state.log().iter().rev().take(2).collect();
+        assert_eq!(last_two[0].kind, LineKind::Error);
+        assert_eq!(last_two[0].text, "it broke");
+        assert_eq!(last_two[1].kind, LineKind::Output);
+        assert_eq!(last_two[1].text, "did a thing");
     }
 
     #[test]
