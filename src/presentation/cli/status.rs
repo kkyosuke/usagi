@@ -102,6 +102,8 @@ mod tests {
     #[test]
     fn run_syncs_and_prints_for_the_current_repo() {
         // `run` reads the current directory, so point it at a throwaway repo.
+        // The guard serializes the cwd change against other globals-mutating tests.
+        let _guard = crate::test_support::process_env_guard();
         let dir = tempfile::tempdir().unwrap();
         for args in [
             &["init", "-q", "-b", "main"][..],

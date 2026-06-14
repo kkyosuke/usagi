@@ -17,6 +17,12 @@ enum Commands {
     Doctor,
     /// Hop into the usagi welcome screen
     Hop,
+    /// Register the current directory as a project (or clone one into it with --git)
+    Init {
+        /// Clone this repository URL into <repo-name>/ under the current directory
+        #[arg(long, value_name = "URL")]
+        git: Option<String>,
+    },
     /// Sync the current repository's worktree state to .usagi/state.json
     Status,
 }
@@ -27,6 +33,7 @@ fn main() -> anyhow::Result<()> {
     match cli.command {
         Commands::Doctor => usagi::presentation::cli::doctor::run(),
         Commands::Hop => usagi::presentation::cli::hop::run(),
+        Commands::Init { git } => usagi::presentation::cli::init::run(git),
         Commands::Status => usagi::presentation::cli::status::run(),
     }
 }
