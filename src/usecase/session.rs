@@ -19,8 +19,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
+use chrono::Utc;
 
+use crate::domain::workspace_state::{SessionRecord, WorkspaceState};
 use crate::infrastructure::git;
+use crate::infrastructure::workspace_store::WorkspaceStore;
 
 /// Names never descended into or copied while building a session: usagi's own
 /// data directory (which holds the session tree itself) and any `.git`.
@@ -71,11 +74,33 @@ pub fn create(workspace_root: &Path, name: &str) -> Result<CreatedSession> {
         build_dir(workspace_root, &dest_root, name, &mut worktrees)?;
     }
 
+    record(workspace_root, name, &dest_root, &worktrees)?;
+
     Ok(CreatedSession {
         name: name.to_string(),
         root: dest_root,
         worktrees,
     })
+}
+
+/// Append the session to `<workspace>/.usagi/state.json`, creating the state
+/// (with a git-derived default branch) when none exists yet. This is what lets
+/// a multi-repo, non-git root still track its sessions.
+fn record(workspace_root: &Path, name: &str, root: &Path, worktrees: &[PathBuf]) -> Result<()> {
+    let store = WorkspaceStore::new(workspace_root);
+    let mut state = store
+        .load()?
+        .unwrap_or_else(|| WorkspaceState::new(git::default_branch(workspace_root), Vec::new()));
+
+    let now = Utc::now();
+    state.sessions.push(SessionRecord {
+        name: name.to_string(),
+        root: root.to_path_buf(),
+        worktrees: worktrees.to_vec(),
+        created_at: now,
+    });
+    state.updated_at = now;
+    store.save(&state)
 }
 
 /// Recursively mirror `src` into the already-created `dest`: a git repository
@@ -181,6 +206,11 @@ mod tests {
         // The new worktree is on the session branch and carries the repo files.
         assert_eq!(head_branch(&wt), "feature-x");
         assert!(wt.join("code.txt").is_file());
+        // The session is recorded in state.json.
+        let state = WorkspaceStore::new(root.path()).load().unwrap().unwrap();
+        assert_eq!(state.sessions.len(), 1);
+        assert_eq!(state.sessions[0].name, "feature-x");
+        assert_eq!(state.sessions[0].root, wt);
     }
 
     #[test]
@@ -194,7 +224,7 @@ mod tests {
         fs::write(root.path().join("README.md"), "hi").unwrap();
         // A pre-existing .usagi dir must be skipped, not copied into the session.
         fs::create_dir_all(root.path().join(".usagi")).unwrap();
-        fs::write(root.path().join(".usagi/state.json"), "{}").unwrap();
+        fs::write(root.path().join(".usagi/marker"), "x").unwrap();
 
         let created = create(root.path(), "wip").unwrap();
 
@@ -210,6 +240,24 @@ mod tests {
         // The loose file was copied; usagi's own data dir was not.
         assert_eq!(fs::read_to_string(base.join("README.md")).unwrap(), "hi");
         assert!(!base.join(".usagi").exists());
+        // The session is recorded even though the root is not a git repository.
+        let state = WorkspaceStore::new(root.path()).load().unwrap().unwrap();
+        assert_eq!(state.sessions.len(), 1);
+        assert_eq!(state.sessions[0].worktrees.len(), 3);
+    }
+
+    #[test]
+    fn records_multiple_sessions_in_order() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+
+        create(root.path(), "first").unwrap();
+        // The second create loads the existing state and appends to it.
+        create(root.path(), "second").unwrap();
+
+        let state = WorkspaceStore::new(root.path()).load().unwrap().unwrap();
+        let names: Vec<&str> = state.sessions.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, vec!["first", "second"]);
     }
 
     #[test]
