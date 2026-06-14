@@ -1,7 +1,9 @@
 //! Configuration screen (画面 #4).
 //!
 //! Lists the user-configurable settings and lets each be cycled through its
-//! choices. Changes are applied and persisted immediately.
+//! choices with ←/→. Edits are held in memory and flagged as changed; they are
+//! written to disk only when the user presses the Save button, which stays
+//! disabled until there is something to save.
 
 pub mod event;
 pub mod state;
