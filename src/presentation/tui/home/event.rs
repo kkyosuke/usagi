@@ -412,10 +412,10 @@ mod tests {
 
     #[test]
     fn creating_a_session_via_the_default_callback_succeeds() {
-        // Drives `:session x` through the shared no-op `create_session`, then
+        // Drives `:session new x` through the shared no-op `create_session`, then
         // leaves — exercising the create branch with the default callback.
         let mut keys = vec![Ok(Key::Char(':'))];
-        keys.extend(typed("session x"));
+        keys.extend(typed("session new x"));
         keys.push(Ok(Key::Enter)); // create via noop_create
         keys.push(Ok(Key::Escape)); // cancel command mode
         keys.push(Ok(Key::Escape)); // leave sidebar
@@ -481,9 +481,9 @@ mod tests {
 
     #[test]
     fn session_command_with_a_name_creates_immediately() {
-        // ":session feature-x" then Enter creates without opening the modal.
+        // ":session new feature-x" then Enter creates without opening the modal.
         let mut keys = vec![Ok(Key::Char(':'))];
-        keys.extend(typed("session feature-x"));
+        keys.extend(typed("session new feature-x"));
         keys.push(Ok(Key::Enter));
         keys.push(Ok(Key::Escape)); // cancel command mode
         keys.push(Ok(Key::Escape)); // leave sidebar
@@ -494,10 +494,10 @@ mod tests {
     }
 
     #[test]
-    fn bare_session_opens_the_modal_then_confirms_to_create() {
-        // ":session" + Enter opens the modal; type a fresh name; Enter creates.
+    fn session_new_opens_the_modal_then_confirms_to_create() {
+        // ":session new" + Enter opens the modal; type a fresh name; Enter creates.
         let mut keys = vec![Ok(Key::Char(':'))];
-        keys.extend(typed("session"));
+        keys.extend(typed("session new"));
         keys.push(Ok(Key::Enter)); // open modal
         keys.extend(typed("wip"));
         keys.push(Ok(Key::Backspace)); // edit: "wi"
@@ -515,7 +515,7 @@ mod tests {
     #[test]
     fn modal_escape_cancels_without_creating() {
         let mut keys = vec![Ok(Key::Char(':'))];
-        keys.extend(typed("session"));
+        keys.extend(typed("session new"));
         keys.push(Ok(Key::Enter)); // open modal
         keys.extend(typed("x"));
         keys.push(Ok(Key::Escape)); // cancel modal
@@ -532,7 +532,7 @@ mod tests {
         // Confirming an empty name does not create and keeps the modal open, so
         // the trailing CtrlC (handled by the modal) is what ends the run.
         let mut keys = vec![Ok(Key::Char(':'))];
-        keys.extend(typed("session"));
+        keys.extend(typed("session new"));
         keys.push(Ok(Key::Enter)); // open modal
         keys.push(Ok(Key::Enter)); // empty name -> error, stays open
         keys.push(Ok(Key::CtrlC)); // quit from within the modal
