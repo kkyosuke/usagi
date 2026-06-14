@@ -27,9 +27,11 @@ pub type Save<'a> = dyn FnMut(&Settings) -> Result<()> + 'a;
 /// until the user goes back or quits. Assumes the alternate screen is already
 /// active (it is owned by the caller).
 ///
-/// Changing a setting (←/→ or Enter) applies and persists it immediately; a
-/// persistence failure is shown as a notice so the user is not left wondering
-/// whether the change took.
+/// Changing a setting (←/→, or Enter on a field) edits it in memory only — the
+/// row is flagged as changed but nothing touches disk. The edits are written
+/// only when the user moves to the Save button and presses Enter; a persistence
+/// failure is shown as a notice so the user is not left wondering whether the
+/// change took.
 pub fn event_loop(
     term: &Term,
     reader: &mut dyn KeyReader,
@@ -64,11 +66,20 @@ pub fn event_loop(
                 config.move_down();
                 notice = None;
             }
-            Key::Enter | Key::ArrowRight | Key::Char('l') => {
-                notice = cycle_and_save(&mut config, true, save);
+            Key::ArrowRight | Key::Char('l') => {
+                notice = change_field(&mut config, true);
             }
             Key::ArrowLeft | Key::Char('h') => {
-                notice = cycle_and_save(&mut config, false, save);
+                notice = change_field(&mut config, false);
+            }
+            Key::Enter => {
+                // Enter saves on the Save button, and otherwise advances the
+                // focused field — a convenient alias for →.
+                notice = if config.is_save_selected() {
+                    save_changes(&mut config, save)
+                } else {
+                    change_field(&mut config, true)
+                };
             }
             Key::Char('q') | Key::Escape => return Ok(Outcome::Back),
             Key::CtrlC => return Ok(Outcome::Quit),
@@ -77,15 +88,31 @@ pub fn event_loop(
     }
 }
 
-/// Cycles the selected field and persists the change, returning the notice to
-/// show: a confirmation, a save error, or a hint when there was nothing to
-/// change.
-fn cycle_and_save(config: &mut Config, forward: bool, save: &mut Save) -> Option<String> {
-    if !config.cycle_selected(forward) {
-        return Some("No workspaces to choose from 🐰".to_string());
+/// Cycles the focused field's value (in memory only), returning a hint when
+/// there was nothing to change and clearing the notice otherwise. A no-op on
+/// the Save button, where ←/→ have nothing to cycle.
+fn change_field(config: &mut Config, forward: bool) -> Option<String> {
+    if config.is_save_selected() {
+        return None;
+    }
+    if config.cycle_selected(forward) {
+        None
+    } else {
+        Some("No workspaces to choose from 🐰".to_string())
+    }
+}
+
+/// Persists the edits when there are any, returning the notice to show: a
+/// confirmation, a save error, or a hint when there is nothing to save.
+fn save_changes(config: &mut Config, save: &mut Save) -> Option<String> {
+    if !config.is_dirty() {
+        return Some("No changes to save 🐰".to_string());
     }
     Some(match save(config.settings()) {
-        Ok(()) => "Saved 🐰".to_string(),
+        Ok(()) => {
+            config.mark_saved();
+            "Saved 🐰".to_string()
+        }
         Err(e) => format!("Failed to save: {e}"),
     })
 }
@@ -177,33 +204,86 @@ mod tests {
     }
 
     #[test]
-    fn enter_and_right_cycle_forward_and_save() {
-        // Enter then ArrowRight then 'l' each advance the theme and persist.
+    fn arrows_edit_the_focused_field_without_saving() {
+        // ←/→ and their h/l aliases all edit the focused field in memory only —
+        // nothing is persisted until the Save button is pressed.
         let keys = vec![
-            Ok(Key::Enter),
             Ok(Key::ArrowRight),
             Ok(Key::Char('l')),
+            Ok(Key::ArrowLeft),
+            Ok(Key::Char('h')),
+            Ok(Key::Escape),
+        ];
+        let (outcome, saved) = run_recording(keys, sample_config());
+        assert!(matches!(outcome, Outcome::Back));
+        assert!(saved.is_empty());
+    }
+
+    #[test]
+    fn enter_on_a_field_cycles_it_forward_then_the_save_button_persists() {
+        // Enter on the Theme field advances it (System -> Light); Up wraps onto
+        // the Save button, where Enter writes the edit exactly once.
+        let keys = vec![
+            Ok(Key::Enter),
+            Ok(Key::ArrowUp),
+            Ok(Key::Enter),
             Ok(Key::Escape),
         ];
         let (_, saved) = run_recording(keys, sample_config());
-        // System -> Light -> Dark -> System.
-        let themes: Vec<Theme> = saved.iter().map(|s| s.theme).collect();
-        assert_eq!(themes, vec![Theme::Light, Theme::Dark, Theme::System]);
+        assert_eq!(saved.len(), 1);
+        assert_eq!(saved[0].theme, Theme::Light);
     }
 
     #[test]
-    fn left_and_h_cycle_backward_and_save() {
-        let keys = vec![Ok(Key::ArrowLeft), Ok(Key::Char('h')), Ok(Key::Escape)];
+    fn the_save_button_persists_once_and_clears_the_dirty_state() {
+        // Edit the theme, save it, then press Save again with nothing pending:
+        // the second press finds no changes and does not persist again.
+        let keys = vec![
+            Ok(Key::ArrowRight), // System -> Light
+            Ok(Key::ArrowUp),    // onto the Save button
+            Ok(Key::Enter),      // saves Light
+            Ok(Key::Enter),      // nothing left to save
+            Ok(Key::Escape),
+        ];
         let (_, saved) = run_recording(keys, sample_config());
-        // System -> Dark -> Light (reverse order).
-        let themes: Vec<Theme> = saved.iter().map(|s| s.theme).collect();
-        assert_eq!(themes, vec![Theme::Dark, Theme::Light]);
+        assert_eq!(saved.len(), 1);
+        assert_eq!(saved[0].theme, Theme::Light);
     }
 
     #[test]
-    fn cycling_default_workspace_persists_the_selection() {
-        // Move down to Default Workspace, then cycle forward onto "alpha".
-        let keys = vec![Ok(Key::ArrowDown), Ok(Key::Enter), Ok(Key::Escape)];
+    fn enter_on_the_save_button_with_no_edits_does_not_persist() {
+        let keys = vec![Ok(Key::ArrowUp), Ok(Key::Enter), Ok(Key::Escape)];
+        let (outcome, saved) = run_recording(keys, sample_config());
+        assert!(matches!(outcome, Outcome::Back));
+        assert!(saved.is_empty());
+    }
+
+    #[test]
+    fn arrows_on_the_save_button_do_nothing() {
+        // ←/→ have no value to cycle on the Save button, so they are no-ops.
+        let keys = vec![
+            Ok(Key::ArrowUp), // onto the Save button
+            Ok(Key::ArrowRight),
+            Ok(Key::ArrowLeft),
+            Ok(Key::Escape),
+        ];
+        let (outcome, saved) = run_recording(keys, sample_config());
+        assert!(matches!(outcome, Outcome::Back));
+        assert!(saved.is_empty());
+    }
+
+    #[test]
+    fn cycling_default_workspace_persists_when_saved() {
+        // Move down to Default Workspace, cycle onto "alpha", then save.
+        let keys = vec![
+            Ok(Key::ArrowDown),  // Default Workspace
+            Ok(Key::ArrowRight), // -> alpha
+            Ok(Key::ArrowDown),  // Notifications
+            Ok(Key::ArrowDown),  // Agent CLI
+            Ok(Key::ArrowDown),  // Save button
+            Ok(Key::Enter),      // saves
+            Ok(Key::Escape),
+        ];
         let (_, saved) = run_recording(keys, sample_config());
         assert_eq!(saved.len(), 1);
         assert_eq!(saved[0].default_workspace.as_deref(), Some("alpha"));
@@ -212,9 +292,9 @@ mod tests {
     #[test]
     fn cycling_default_workspace_without_workspaces_shows_a_hint_and_does_not_save() {
         // No registered workspaces: cycling the field is a no-op that only
-        // surfaces a hint, so nothing is persisted.
+        // surfaces a hint, and there is nothing to save.
         let config = Config::new(Settings::default(), Vec::new());
-        let keys = vec![Ok(Key::ArrowDown), Ok(Key::Enter), Ok(Key::Escape)];
+        let keys = vec![Ok(Key::ArrowDown), Ok(Key::ArrowRight), Ok(Key::Escape)];
         let (outcome, saved) = run_recording(keys, config);
         assert!(matches!(outcome, Outcome::Back));
         assert!(saved.is_empty());
@@ -222,10 +302,15 @@ mod tests {
 
     #[test]
     fn a_save_failure_is_shown_as_a_notice_and_recovers() {
-        // The first change fails to persist; the loop keeps running so the user
-        // can try again or leave.
+        // The save fails to persist; the loop keeps running so the user can try
+        // again or leave.
         let term = Term::stdout();
-        let mut reader = ScriptedReader::new(vec![Ok(Key::Enter), Ok(Key::Escape)]);
+        let mut reader = ScriptedReader::new(vec![
+            Ok(Key::ArrowRight), // edit the theme so there is something to save
+            Ok(Key::ArrowUp),    // onto the Save button
+            Ok(Key::Enter),      // attempt the save
+            Ok(Key::Escape),
+        ]);
         let mut save = |_: &Settings| Err(anyhow::anyhow!("disk full"));
         let outcome = event_loop(&term, &mut reader, sample_config(), &mut save, None).unwrap();
         assert!(matches!(outcome, Outcome::Back));
@@ -233,9 +318,14 @@ mod tests {
 
     #[test]
     fn saving_succeeds_with_a_noop_save() {
-        // Cycling the theme persists via `noop_save`, exercising that stub.
+        // Editing then saving persists via `noop_save`, exercising that stub.
         let term = Term::stdout();
-        let mut reader = ScriptedReader::new(vec![Ok(Key::Enter), Ok(Key::Escape)]);
+        let mut reader = ScriptedReader::new(vec![
+            Ok(Key::ArrowRight),
+            Ok(Key::ArrowUp),
+            Ok(Key::Enter),
+            Ok(Key::Escape),
+        ]);
         let mut save: fn(&Settings) -> Result<()> = noop_save;
         let outcome = event_loop(&term, &mut reader, sample_config(), &mut save, None).unwrap();
         assert!(matches!(outcome, Outcome::Back));
