@@ -83,6 +83,20 @@ impl MonitorHandle {
         self.lock().monitor.waiting().clone()
     }
 
+    /// A snapshot of the worktree paths with a live (running) embedded session:
+    /// a shell — and any agent CLI inside it — is still alive, whether attached
+    /// or left running in the background. The render loops read this to mark
+    /// sessions that have an agent in use.
+    pub fn live(&self) -> HashSet<PathBuf> {
+        let shared = self.lock();
+        shared
+            .sessions
+            .iter()
+            .filter(|(_, w)| w.alive.load(Ordering::SeqCst))
+            .map(|(path, _)| path.clone())
+            .collect()
+    }
+
     /// Declare the foreground (attached) session, or clear it with `None`. The
     /// attached session is never reported as waiting.
     pub fn set_attached(&self, path: Option<PathBuf>) {

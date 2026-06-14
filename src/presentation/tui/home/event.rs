@@ -69,8 +69,10 @@ pub fn event_loop(
 ) -> Result<Outcome> {
     let mut painter = FramePainter::new();
     loop {
-        // Mark any background sessions waiting for input before painting.
+        // Mark any background sessions waiting for input, and which have a live
+        // (running) agent, before painting.
         state.set_waiting(monitor.waiting());
+        state.set_live(monitor.live());
         let (height, width) = term.size();
         let frame = ui::render_frame(height as usize, width as usize, &state);
         painter.paint(term, frame)?;
