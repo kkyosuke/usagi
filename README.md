@@ -81,6 +81,19 @@ cargo run -- hop  # TUI を起動
 
 作成した worktree は左ペインに表示されます。目的の worktree を選んで `terminal` を実行すると、その worktree を作業ディレクトリとしたシェルが開くので、そこで `claude` などの AI エージェントを起動して開発できます。
 
+### タスクを管理する
+
+プロジェクトのタスクは `usagi issue` で管理できます（`<repo>/.usagi/issues/` に frontmatter 付き markdown で保存。git で共有されます）:
+
+```bash
+cargo run -- issue create --title "ログイン画面" --priority high --depends-on 1
+cargo run -- issue list            # 着手可能(ready)/ブロック中を可視化
+cargo run -- issue list --ready    # いま着手できる issue だけ
+cargo run -- issue update 2 --status done
+```
+
+`list` / `search` は依存（`--depends-on`）がすべて `done` になった「着手可能」な issue を `ready` と表示し、ブロック中のものには未達の依存番号を併記します。詳細は [document/03-commands/01-cli.md](document/03-commands/01-cli.md#usagi-issue)。
+
 ## Project Structure
 
 クリーンアーキテクチャを採用しています（domain → usecase → infrastructure ← presentation）。

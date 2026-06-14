@@ -33,6 +33,11 @@ enum Commands {
         #[arg(long, value_name = "URL")]
         git: Option<String>,
     },
+    /// Manage task issues stored in .usagi/issues/
+    Issue {
+        #[command(subcommand)]
+        command: usagi::presentation::cli::issue::IssueCommand,
+    },
     /// Sync the current repository's worktree state to .usagi/state.json
     Status,
 }
@@ -45,6 +50,7 @@ fn main() -> anyhow::Result<()> {
         Commands::Doctor { fix } => usagi::presentation::cli::doctor::run(fix),
         Commands::Hop => usagi::presentation::cli::hop::run(),
         Commands::Init { git } => usagi::presentation::cli::init::run(git),
+        Commands::Issue { command } => usagi::presentation::cli::issue::run(command),
         Commands::Status => usagi::presentation::cli::status::run(),
     }
 }
