@@ -4,7 +4,7 @@ use anyhow::Result;
 use console::Key;
 use console::Term;
 
-use crate::presentation::tui::screen::KeyReader;
+use crate::presentation::tui::screen::{FramePainter, KeyReader};
 use crate::presentation::tui::widgets::dir_picker::{self, Choice, DirSource};
 
 use super::state::{FormState, NewProject};
@@ -39,15 +39,12 @@ pub fn event_loop(
     let mut state = FormState::new();
     state.set_location(default_location);
     let mut notice: Option<String> = None;
+    let mut painter = FramePainter::new();
 
     loop {
-        term.move_cursor_to(0, 0)?;
-        term.clear_screen()?;
         let (height, width) = term.size();
         let frame = ui::render_frame(height as usize, width as usize, &state, notice.as_deref());
-        for line in &frame {
-            term.write_line(line)?;
-        }
+        painter.paint(term, frame)?;
 
         let key = match reader.read_key() {
             Ok(key) => key,
@@ -93,6 +90,8 @@ pub fn event_loop(
                     Choice::Cancelled => {}
                     Choice::Quit => return Ok(Outcome::Quit),
                 }
+                // The browser modal drew over the form; force a full repaint.
+                painter.reset();
                 notice = None;
             }
             Key::Char(c) => {

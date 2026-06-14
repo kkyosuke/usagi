@@ -3,7 +3,7 @@ use std::io;
 use anyhow::Result;
 use console::Term;
 
-use crate::presentation::tui::screen::KeyReader;
+use crate::presentation::tui::screen::{FramePainter, KeyReader};
 
 use super::menu::{Action, Menu};
 use super::ui;
@@ -38,10 +38,9 @@ pub fn event_loop(
 ) -> Result<Outcome> {
     let mut menu = Menu::new();
     menu.set_notice(initial_notice);
+    let mut painter = FramePainter::new();
 
     loop {
-        term.move_cursor_to(0, 0)?;
-        term.clear_screen()?;
         let (height, width) = term.size();
         let frame = ui::render_frame(
             height as usize,
@@ -50,9 +49,7 @@ pub fn event_loop(
             menu.selected_index(),
             menu.notice(),
         );
-        for line in &frame {
-            term.write_line(line)?;
-        }
+        painter.paint(term, frame)?;
 
         match reader.read_key() {
             Ok(key) => match menu.handle_key(key) {

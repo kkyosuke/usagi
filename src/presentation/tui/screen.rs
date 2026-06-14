@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::io;
 
 use anyhow::Result;
@@ -82,6 +83,76 @@ impl Drop for AlternateScreenGuard {
     }
 }
 
+/// Repaints a screen by rewriting only the rows that changed since the last
+/// frame, batched into a single terminal write — so an update lands in one pass
+/// without the flicker of clearing the whole screen and redrawing every row on
+/// each keystroke.
+///
+/// A *frame* is the `Vec<String>` an `ui::render_frame` returns: one styled line
+/// per terminal row. The painter remembers the frame it last drew and, on the
+/// next paint, moves to and rewrites only the rows whose text differs. The first
+/// paint — and any paint after [`reset`](FramePainter::reset) — clears the
+/// screen first, so leftover content from another screen can't show through.
+#[derive(Default)]
+pub struct FramePainter {
+    prev: Vec<String>,
+}
+
+impl FramePainter {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Forget the last frame so the next [`paint`](Self::paint) clears the
+    /// screen and repaints every row. Call this after another screen (a modal,
+    /// the embedded terminal, the settings screen) has drawn over ours and left
+    /// the remembered frame stale.
+    pub fn reset(&mut self) {
+        self.prev.clear();
+    }
+
+    /// Draw `frame`, rewriting only the rows that changed since the previous
+    /// paint, then remember it for the next diff.
+    pub fn paint(&mut self, term: &Term, frame: Vec<String>) -> Result<()> {
+        term.write_str(&diff_frame(&self.prev, &frame))?;
+        term.flush()?;
+        self.prev = frame;
+        Ok(())
+    }
+}
+
+/// Builds the escape sequence that turns the `prev` frame into `frame` on
+/// screen. Hides the cursor for the repaint, rewrites each row whose text
+/// changed (moving to it and clearing it first), and clears any trailing rows a
+/// shorter new frame leaves behind. When `prev` is empty — the first paint, or
+/// after a [`FramePainter::reset`] — the whole screen is cleared first and every
+/// row is drawn.
+///
+/// Exposed to the crate so the embedded terminal pane — which also parks the
+/// real cursor over the shell after the repaint — can share the same diff.
+pub(crate) fn diff_frame(prev: &[String], frame: &[String]) -> String {
+    let fresh = prev.is_empty();
+    // Hide the cursor while repainting so it does not flicker across the rows.
+    let mut buf = String::from("\x1b[?25l");
+    if fresh {
+        // Nothing remembered: clear whatever another screen left behind.
+        buf.push_str("\x1b[2J");
+    }
+    for (row, line) in frame.iter().enumerate() {
+        if fresh || prev.get(row) != Some(line) {
+            // Move to the row (1-based), clear it, then write the new content.
+            let _ = write!(buf, "\x1b[{};1H\x1b[2K", row + 1);
+            buf.push_str(line);
+        }
+    }
+    // A shorter frame than last time (e.g. after a resize) leaves stale rows
+    // below; clear them.
+    for row in frame.len()..prev.len() {
+        let _ = write!(buf, "\x1b[{};1H\x1b[2K", row + 1);
+    }
+    buf
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -99,5 +170,54 @@ mod tests {
         guard.dismiss();
         // Dropping after dismiss skips the farewell branch.
         drop(guard);
+    }
+
+    fn lines(texts: &[&str]) -> Vec<String> {
+        texts.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn diff_frame_clears_and_draws_every_row_on_the_first_paint() {
+        let out = diff_frame(&[], &lines(&["a", "b"]));
+        // Hide cursor, clear the screen, then place and write both rows.
+        assert!(out.starts_with("\x1b[?25l\x1b[2J"));
+        assert!(out.contains("\x1b[1;1H\x1b[2Ka"));
+        assert!(out.contains("\x1b[2;1H\x1b[2Kb"));
+    }
+
+    #[test]
+    fn diff_frame_rewrites_only_the_changed_rows() {
+        let prev = lines(&["a", "b", "c"]);
+        let out = diff_frame(&prev, &lines(&["a", "B", "c"]));
+        // No full-screen clear once a frame is remembered.
+        assert!(!out.contains("\x1b[2J"));
+        // Only row 2 (1-based) is repainted; the unchanged rows are skipped.
+        assert!(out.contains("\x1b[2;1H\x1b[2KB"));
+        assert!(!out.contains("\x1b[1;1H"));
+        assert!(!out.contains("\x1b[3;1H"));
+    }
+
+    #[test]
+    fn diff_frame_clears_rows_a_shorter_frame_leaves_behind() {
+        let prev = lines(&["a", "b", "c"]);
+        let out = diff_frame(&prev, &lines(&["a", "b"]));
+        // Row 3 is gone from the new frame, so it is cleared but not rewritten.
+        assert!(out.contains("\x1b[3;1H\x1b[2K"));
+        assert!(!out.contains("\x1b[3;1H\x1b[2Kc"));
+    }
+
+    #[test]
+    fn frame_painter_repaints_in_full_after_a_reset() {
+        let term = Term::stdout();
+        let mut painter = FramePainter::new();
+        // First paint remembers the frame.
+        painter.paint(&term, lines(&["a", "b"])).unwrap();
+        // An identical frame now diffs to nothing but the cursor-hide prefix.
+        assert_eq!(diff_frame(&painter.prev, &lines(&["a", "b"])), "\x1b[?25l");
+        // After a reset the remembered frame is forgotten, forcing a full repaint.
+        painter.reset();
+        assert!(painter.prev.is_empty());
+        painter.paint(&term, lines(&["a", "b"])).unwrap();
+        assert_eq!(painter.prev, lines(&["a", "b"]));
     }
 }
