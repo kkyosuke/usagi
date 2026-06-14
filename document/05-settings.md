@@ -98,7 +98,7 @@ CLI からも設定を確認・編集できます（[issue 015](../issues/015-co
 | `default_workspace` | 起動時に既定で開くワークスペースの選択 |
 | `workspace_root` | 新規プロジェクト画面（Clone）の Location 既定値（[design/03-new.md](design/03-new.md)） |
 | `notifications_enabled` | `hop` 時などのデスクトップ通知の表示可否 |
-| `agent_cli` | `ai` コマンドが起動する AI エージェント CLI の選択（[4. オーケストレーション](04-orchestration.md)） |
+| `agent_cli` | `agent` / `ai` コマンドが起動する AI エージェント CLI の選択（[4. オーケストレーション](04-orchestration.md)） |
 
 > 設定の永続化は `usecase/settings.rs`（`load` / `save` / 各 `set_*`）と
 > `infrastructure/storage.rs`（`Storage`）に実装されています。

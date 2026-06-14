@@ -35,6 +35,10 @@ pub enum Effect {
     /// Open an interactive terminal in the selected worktree (the user ran
     /// `terminal`). The directory is resolved by the event loop.
     OpenTerminal,
+    /// Open the configured AI agent in the selected worktree (the user ran
+    /// `agent`). This is `terminal` with the agent CLI launched inside it; the
+    /// directory and agent command are resolved by the event loop / wiring.
+    OpenAgent,
 }
 
 /// The result of running a command: lines to append plus a side effect.
@@ -382,6 +386,29 @@ impl Command for TerminalCommand {
     }
 }
 
+/// `agent`: open the configured AI agent in the selected worktree. This is a
+/// shortcut for running `terminal` and then launching the agent CLI inside it,
+/// so it produces the same [`Effect::OpenAgent`] side effect the event loop
+/// turns into an embedded terminal with the agent command sent on start.
+struct AgentCommand;
+
+impl Command for AgentCommand {
+    fn name(&self) -> &'static str {
+        "agent"
+    }
+
+    fn description(&self) -> &'static str {
+        "Open the AI agent in the selected worktree (terminal + agent CLI)"
+    }
+
+    fn run(&self, _args: &str, _ctx: &CommandContext) -> CommandResult {
+        CommandResult {
+            lines: Vec::new(),
+            effect: Effect::OpenAgent,
+        }
+    }
+}
+
 /// A recognised command whose real behaviour is not built yet. It produces a
 /// friendly "coming soon" line so the surface stays discoverable; the follow-up
 /// issues replace each one with a real [`Command`] implementation. It still
@@ -440,6 +467,7 @@ impl CommandRegistry {
                     examples: &["ai fix the failing test"],
                 }),
                 Box::new(TerminalCommand),
+                Box::new(AgentCommand),
                 Box::new(HistoryCommand),
                 Box::new(ComingSoonCommand {
                     name: "doctor",
@@ -842,6 +870,13 @@ mod tests {
         let result = registry().dispatch("terminal", &[], &[]);
         assert!(result.lines.is_empty());
         assert_eq!(result.effect, Effect::OpenTerminal);
+    }
+
+    #[test]
+    fn agent_requests_opening_the_agent() {
+        let result = registry().dispatch("agent", &[], &[]);
+        assert!(result.lines.is_empty());
+        assert_eq!(result.effect, Effect::OpenAgent);
     }
 
     #[test]
