@@ -54,8 +54,10 @@
   クローン先（`workspace_root`）のようにプロジェクト単位で変える意味の薄い項目は対象外です。
 - **実効設定 = グローバル設定にローカルの上書きを適用した結果**。解決は `domain/settings.rs` の
   `Settings::with_local`、ユースケースは `usecase/settings.rs` の `effective(storage, repo_root)` が担います。
-- 読み書きロジック・永続化は実装済みですが、編集 UI は未実装で現状は JSON を直接編集します
-  （バックエンドは [issue 021](../issues/021-local-settings.md) で実装済み、TUI への導線は [issue 022](../issues/022-local-settings-ui.md) で予定）。
+- 読み書きロジック・永続化（[issue 021](../issues/021-local-settings.md)）に加え、編集 UI も実装済み
+  （[issue 022](../issues/022-local-settings-ui.md)）。git リポジトリ内で設定画面（Config）を開くと、グローバル
+  設定の下に「Local · Agent CLI」「Local · Notifications」の行が現れ、**「グローバルに従う / ローカルで上書き」**
+  を切り替えられます。詳細は [design/04-config.md](design/04-config.md) を参照。
 - JSON 例・フィールド詳細は [data/02-workspace.md](data/02-workspace.md#settingsjson-プロジェクト固有の設定上書きローカル設定) を参照。
 
 ## 設定の変更方法

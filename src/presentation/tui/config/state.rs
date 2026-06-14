@@ -3,8 +3,13 @@
 //! Holds the settings being edited, the registered workspace names the default
 //! workspace can cycle through, and the cursor position. Keeping the editing
 //! logic free of any terminal IO makes it directly testable.
+//!
+//! When the screen is opened for a specific project (see [`Config::with_local`])
+//! it additionally edits that project's **local overrides** — per-project values
+//! for the agent CLI and notifications that fall back to the global settings
+//! when left unset. Those rows are appended below the global fields.
 
-use crate::domain::settings::{AgentCli, Settings, Theme};
+use crate::domain::settings::{AgentCli, LocalSettings, Settings, Theme};
 
 /// The themes in the order they cycle through.
 const THEMES: [Theme; 3] = [Theme::Light, Theme::Dark, Theme::System];
@@ -12,7 +17,7 @@ const THEMES: [Theme; 3] = [Theme::Light, Theme::Dark, Theme::System];
 /// The agent CLIs in the order they cycle through.
 pub(super) const AGENT_CLIS: [AgentCli; 2] = [AgentCli::Claude, AgentCli::Gemini];
 
-/// An editable settings field, in display order.
+/// An editable global settings field, in display order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Field {
     Theme,
@@ -41,17 +46,51 @@ impl Field {
     }
 }
 
-/// The cursor row index of the Save button: it sits just below the fields.
-pub const SAVE_INDEX: usize = Field::ALL.len();
+/// An editable project-local override field, in display order. Each can either
+/// follow the global setting or override it for the current project.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocalField {
+    AgentCli,
+    Notifications,
+}
 
-/// The total number of selectable rows: every field plus the Save button.
-pub const ROW_COUNT: usize = Field::ALL.len() + 1;
+impl LocalField {
+    /// The local override fields shown on the screen, top to bottom.
+    pub const ALL: [LocalField; 2] = [LocalField::AgentCli, LocalField::Notifications];
+
+    /// The label shown beside the field's value.
+    pub fn label(self) -> &'static str {
+        match self {
+            LocalField::AgentCli => "Local · Agent CLI",
+            LocalField::Notifications => "Local · Notifications",
+        }
+    }
+}
+
+/// One selectable row's display data, used by the renderer regardless of whether
+/// the row is a global field or a project-local override.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RowView {
+    pub label: &'static str,
+    pub value: String,
+    pub changed: bool,
+}
+
+/// A project's local overrides being edited, plus the last-saved baseline so
+/// unsaved edits can be detected.
+#[derive(Debug, Clone)]
+struct LocalEdit {
+    settings: LocalSettings,
+    baseline: LocalSettings,
+}
 
 /// The settings being edited together with the cursor position.
 ///
 /// Edits are held in `settings` and not written anywhere until the user saves.
 /// `baseline` is the last-saved snapshot, so comparing the two tells us which
-/// fields carry unsaved changes (and whether anything is dirty at all).
+/// fields carry unsaved changes (and whether anything is dirty at all). When a
+/// project context is present, `local` carries that project's overrides the same
+/// way.
 #[derive(Debug, Clone)]
 pub struct Config {
     settings: Settings,
@@ -59,11 +98,14 @@ pub struct Config {
     baseline: Settings,
     /// Registered workspace names the default workspace cycles through.
     workspaces: Vec<String>,
+    /// The project-local overrides being edited, when opened for a project.
+    local: Option<LocalEdit>,
     selected_index: usize,
 }
 
 impl Config {
-    /// Builds the editor for the given settings, with the cursor at the top.
+    /// Builds the editor for the given global settings, with the cursor at the
+    /// top and no project-local section.
     ///
     /// `workspaces` are the names the default-workspace field can cycle through.
     /// The supplied settings double as the initial saved baseline, so a freshly
@@ -73,12 +115,34 @@ impl Config {
             baseline: settings.clone(),
             settings,
             workspaces,
+            local: None,
+            selected_index: 0,
+        }
+    }
+
+    /// Builds the editor with a project-local overrides section seeded from
+    /// `local`. The global fields come first, then the local override rows.
+    pub fn with_local(settings: Settings, workspaces: Vec<String>, local: LocalSettings) -> Self {
+        Self {
+            baseline: settings.clone(),
+            settings,
+            workspaces,
+            local: Some(LocalEdit {
+                baseline: local.clone(),
+                settings: local,
+            }),
             selected_index: 0,
         }
     }
 
     pub fn settings(&self) -> &Settings {
         &self.settings
+    }
+
+    /// The project-local overrides being edited, if this screen has a project
+    /// context.
+    pub fn local(&self) -> Option<&LocalSettings> {
+        self.local.as_ref().map(|l| &l.settings)
     }
 
     pub fn workspaces(&self) -> &[String] {
@@ -89,22 +153,62 @@ impl Config {
         self.selected_index
     }
 
-    /// Whether the cursor is on the Save button rather than a field.
-    pub fn is_save_selected(&self) -> bool {
-        self.selected_index == SAVE_INDEX
+    /// Number of local override rows (0 when there is no project context).
+    fn local_count(&self) -> usize {
+        if self.local.is_some() {
+            LocalField::ALL.len()
+        } else {
+            0
+        }
     }
 
-    /// The field currently under the cursor, or `None` when the Save button is.
+    /// Number of selectable field rows (global fields plus any local ones).
+    fn field_count(&self) -> usize {
+        Field::ALL.len() + self.local_count()
+    }
+
+    /// The cursor row index of the Save button: it sits just below the fields.
+    pub fn save_index(&self) -> usize {
+        self.field_count()
+    }
+
+    /// The total number of selectable rows: every field plus the Save button.
+    fn row_count(&self) -> usize {
+        self.field_count() + 1
+    }
+
+    /// Whether the cursor is on the Save button rather than a field.
+    pub fn is_save_selected(&self) -> bool {
+        self.selected_index == self.save_index()
+    }
+
+    /// The global field currently under the cursor, or `None` when a local field
+    /// or the Save button is selected.
     pub fn selected_field(&self) -> Option<Field> {
         Field::ALL.get(self.selected_index).copied()
     }
 
-    /// Whether any field has been edited away from the last-saved baseline.
-    pub fn is_dirty(&self) -> bool {
-        self.settings != self.baseline
+    /// The local override field under the cursor, or `None` otherwise.
+    pub fn selected_local_field(&self) -> Option<LocalField> {
+        self.local.as_ref()?;
+        let base = Field::ALL.len();
+        if self.selected_index >= base && self.selected_index < base + LocalField::ALL.len() {
+            Some(LocalField::ALL[self.selected_index - base])
+        } else {
+            None
+        }
     }
 
-    /// Whether a specific field's value differs from the last-saved baseline.
+    /// Whether any field — global or local — differs from its last-saved baseline.
+    pub fn is_dirty(&self) -> bool {
+        self.settings != self.baseline
+            || self
+                .local
+                .as_ref()
+                .is_some_and(|l| l.settings != l.baseline)
+    }
+
+    /// Whether a specific global field's value differs from the saved baseline.
     pub fn is_changed(&self, field: Field) -> bool {
         match field {
             Field::Theme => self.settings.theme != self.baseline.theme,
@@ -118,23 +222,42 @@ impl Config {
         }
     }
 
-    /// Adopt the current edits as the saved baseline, clearing the dirty state.
-    /// Call this once the settings have been persisted.
+    /// Whether a specific local override field differs from the saved baseline.
+    fn is_local_changed(&self, field: LocalField) -> bool {
+        let Some(local) = &self.local else {
+            return false;
+        };
+        match field {
+            LocalField::AgentCli => local.settings.agent_cli != local.baseline.agent_cli,
+            LocalField::Notifications => {
+                local.settings.notifications_enabled != local.baseline.notifications_enabled
+            }
+        }
+    }
+
+    /// Adopt the current edits (global and local) as the saved baseline, clearing
+    /// the dirty state. Call this once the settings have been persisted.
     pub fn mark_saved(&mut self) {
         self.baseline = self.settings.clone();
+        if let Some(local) = &mut self.local {
+            local.baseline = local.settings.clone();
+        }
     }
 
     /// Move the cursor up one row, wrapping to the bottom (the Save button).
     pub fn move_up(&mut self) {
-        self.selected_index = self.selected_index.checked_sub(1).unwrap_or(ROW_COUNT - 1);
+        self.selected_index = self
+            .selected_index
+            .checked_sub(1)
+            .unwrap_or(self.row_count() - 1);
     }
 
     /// Move the cursor down one row, wrapping to the top.
     pub fn move_down(&mut self) {
-        self.selected_index = (self.selected_index + 1) % ROW_COUNT;
+        self.selected_index = (self.selected_index + 1) % self.row_count();
     }
 
-    /// The display value for a field, e.g. `"Dark"` or `"(none)"`.
+    /// The display value for a global field, e.g. `"Dark"` or `"(none)"`.
     pub fn value_of(&self, field: Field) -> String {
         match field {
             Field::Theme => theme_label(self.settings.theme).to_string(),
@@ -143,14 +266,50 @@ impl Config {
                 .default_workspace
                 .clone()
                 .unwrap_or_else(|| "(none)".to_string()),
-            Field::Notifications => if self.settings.notifications_enabled {
-                "On"
-            } else {
-                "Off"
-            }
-            .to_string(),
+            Field::Notifications => on_off(self.settings.notifications_enabled).to_string(),
             Field::AgentCli => agent_cli_label(self.settings.agent_cli).to_string(),
         }
+    }
+
+    /// The display value for a local override field. When unset it shows the
+    /// effective (global) value it falls back to; when set it shows the override.
+    pub fn value_of_local(&self, field: LocalField) -> String {
+        let Some(local) = &self.local else {
+            return String::new();
+        };
+        match field {
+            LocalField::AgentCli => match local.settings.agent_cli {
+                None => format!("Global ({})", agent_cli_label(self.settings.agent_cli)),
+                Some(cli) => format!("Override: {}", agent_cli_label(cli)),
+            },
+            LocalField::Notifications => match local.settings.notifications_enabled {
+                None => format!("Global ({})", on_off(self.settings.notifications_enabled)),
+                Some(on) => format!("Override: {}", on_off(on)),
+            },
+        }
+    }
+
+    /// The display rows, in order: each global field, then each local override
+    /// field (when present). The Save button is not included.
+    pub fn rows(&self) -> Vec<RowView> {
+        let mut rows: Vec<RowView> = Field::ALL
+            .iter()
+            .map(|&field| RowView {
+                label: field.label(),
+                value: self.value_of(field),
+                changed: self.is_changed(field),
+            })
+            .collect();
+        if self.local.is_some() {
+            for &field in &LocalField::ALL {
+                rows.push(RowView {
+                    label: field.label(),
+                    value: self.value_of_local(field),
+                    changed: self.is_local_changed(field),
+                });
+            }
+        }
+        rows
     }
 
     /// Advance the selected field's value to its next (or previous) choice,
@@ -159,10 +318,18 @@ impl Config {
     /// when there was nothing to cycle (the Save button, or a default-workspace
     /// field with no registered workspaces).
     pub fn cycle_selected(&mut self, forward: bool) -> bool {
-        let Some(field) = self.selected_field() else {
-            // The cursor is on the Save button: nothing to cycle.
-            return false;
-        };
+        if let Some(field) = self.selected_field() {
+            return self.cycle_global(field, forward);
+        }
+        if let Some(field) = self.selected_local_field() {
+            return self.cycle_local(field, forward);
+        }
+        // The cursor is on the Save button: nothing to cycle.
+        false
+    }
+
+    /// Cycle a global field's value.
+    fn cycle_global(&mut self, field: Field, forward: bool) -> bool {
         match field {
             Field::Theme => {
                 self.settings.theme = cycle_theme(self.settings.theme, forward);
@@ -179,6 +346,29 @@ impl Config {
                 true
             }
         }
+    }
+
+    /// Cycle a local override field through "follow global" then each concrete
+    /// value. Always changes something, so returns `true`.
+    fn cycle_local(&mut self, field: LocalField, forward: bool) -> bool {
+        let local = self
+            .local
+            .as_mut()
+            .expect("a local field is only selectable with a local context");
+        match field {
+            LocalField::AgentCli => {
+                local.settings.agent_cli =
+                    cycle_optional(local.settings.agent_cli, &AGENT_CLIS, forward);
+            }
+            LocalField::Notifications => {
+                local.settings.notifications_enabled = cycle_optional(
+                    local.settings.notifications_enabled,
+                    &[true, false],
+                    forward,
+                );
+            }
+        }
+        true
     }
 
     /// Cycle the default workspace through `None` then each registered name.
@@ -221,6 +411,15 @@ fn theme_label(theme: Theme) -> &'static str {
     }
 }
 
+/// `"On"`/`"Off"` for a boolean notification toggle.
+fn on_off(enabled: bool) -> &'static str {
+    if enabled {
+        "On"
+    } else {
+        "Off"
+    }
+}
+
 /// The theme one step after `theme` in cycle order (or before, when `forward`
 /// is false), wrapping at the ends.
 fn cycle_theme(theme: Theme, forward: bool) -> Theme {
@@ -255,6 +454,34 @@ fn cycle_agent_cli(cli: AgentCli, forward: bool) -> AgentCli {
     AGENT_CLIS[next]
 }
 
+/// Cycle an optional override through `None` (follow global) then each value in
+/// `choices`, wrapping. Forward order is `None → choices[0] → … → None`.
+fn cycle_optional<T: Copy + PartialEq>(
+    current: Option<T>,
+    choices: &[T],
+    forward: bool,
+) -> Option<T> {
+    // Index 0 is `None`; indices 1.. map onto `choices`.
+    let len = choices.len() + 1;
+    let current_index = match current {
+        None => 0,
+        Some(value) => choices
+            .iter()
+            .position(|&c| c == value)
+            .map_or(0, |i| i + 1),
+    };
+    let next = if forward {
+        (current_index + 1) % len
+    } else {
+        (current_index + len - 1) % len
+    };
+    if next == 0 {
+        None
+    } else {
+        Some(choices[next - 1])
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -283,8 +510,13 @@ mod tests {
         assert!(!config.is_save_selected());
         assert_eq!(config.workspaces(), ["alpha"]);
         assert_eq!(*config.settings(), Settings::default());
-        // A freshly loaded screen has nothing to save.
+        // A freshly loaded screen has nothing to save, and no local context.
         assert!(!config.is_dirty());
+        assert!(config.local().is_none());
+        assert!(config.selected_local_field().is_none());
+        // Global-only: four field rows.
+        assert_eq!(config.rows().len(), 4);
+        assert_eq!(config.save_index(), 4);
     }
 
     #[test]
@@ -503,5 +735,155 @@ mod tests {
         assert!(!config.cycle_selected(false));
         // The settings are untouched by cycling the button.
         assert!(!config.is_dirty());
+    }
+
+    #[test]
+    fn rows_render_global_field_values() {
+        let config = config_with_workspaces(&["alpha"]);
+        let rows = config.rows();
+        assert_eq!(rows.len(), 4);
+        assert_eq!(rows[0].label, "Theme");
+        assert_eq!(rows[0].value, "System");
+        assert_eq!(rows[3].label, "Agent CLI");
+        assert_eq!(rows[3].value, "Claude");
+        assert!(rows.iter().all(|r| !r.changed));
+    }
+
+    // --- local overrides ---------------------------------------------------
+
+    fn local_config() -> Config {
+        Config::with_local(Settings::default(), Vec::new(), LocalSettings::default())
+    }
+
+    #[test]
+    fn with_local_appends_local_rows_and_grows_the_layout() {
+        let config = local_config();
+        assert!(config.local().is_some());
+        // Four global fields + two local fields.
+        assert_eq!(config.field_count(), 6);
+        assert_eq!(config.save_index(), 6);
+        let rows = config.rows();
+        assert_eq!(rows.len(), 6);
+        assert_eq!(rows[4].label, "Local · Agent CLI");
+        assert_eq!(rows[5].label, "Local · Notifications");
+        // Unset overrides display the global value they fall back to.
+        assert!(rows[4].value.contains("Global"));
+        assert!(rows[4].value.contains("Claude"));
+        assert!(rows[5].value.contains("Global"));
+        assert!(rows[5].value.contains("On"));
+    }
+
+    #[test]
+    fn local_fields_are_selectable_after_the_global_ones() {
+        let mut config = local_config();
+        for _ in 0..Field::ALL.len() {
+            config.move_down();
+        }
+        // First local field.
+        assert_eq!(config.selected_field(), None);
+        assert_eq!(config.selected_local_field(), Some(LocalField::AgentCli));
+        config.move_down();
+        assert_eq!(
+            config.selected_local_field(),
+            Some(LocalField::Notifications)
+        );
+        config.move_down();
+        assert!(config.is_save_selected());
+        assert!(config.selected_local_field().is_none());
+    }
+
+    #[test]
+    fn cycling_a_local_agent_cli_override_walks_global_then_each_value() {
+        let mut config = local_config();
+        for _ in 0..Field::ALL.len() {
+            config.move_down();
+        }
+        assert_eq!(config.selected_local_field(), Some(LocalField::AgentCli));
+
+        // None (follow global) -> Claude -> Gemini -> None.
+        assert!(config.cycle_selected(true));
+        assert_eq!(config.local().unwrap().agent_cli, Some(AgentCli::Claude));
+        assert!(config
+            .value_of_local(LocalField::AgentCli)
+            .contains("Override"));
+        assert!(config.cycle_selected(true));
+        assert_eq!(config.local().unwrap().agent_cli, Some(AgentCli::Gemini));
+        assert!(config.cycle_selected(true));
+        assert_eq!(config.local().unwrap().agent_cli, None);
+        // Backward from None wraps to the last value.
+        assert!(config.cycle_selected(false));
+        assert_eq!(config.local().unwrap().agent_cli, Some(AgentCli::Gemini));
+    }
+
+    #[test]
+    fn cycling_a_local_notifications_override_walks_global_on_off() {
+        let mut config = local_config();
+        for _ in 0..Field::ALL.len() + 1 {
+            config.move_down();
+        }
+        assert_eq!(
+            config.selected_local_field(),
+            Some(LocalField::Notifications)
+        );
+        assert!(config.cycle_selected(true));
+        assert_eq!(config.local().unwrap().notifications_enabled, Some(true));
+        assert!(config
+            .value_of_local(LocalField::Notifications)
+            .contains("Override"));
+        assert!(config.cycle_selected(true));
+        assert_eq!(config.local().unwrap().notifications_enabled, Some(false));
+        assert!(config.cycle_selected(true));
+        assert_eq!(config.local().unwrap().notifications_enabled, None);
+    }
+
+    #[test]
+    fn editing_a_local_override_marks_the_config_dirty_and_mark_saved_clears_it() {
+        let mut config = local_config();
+        for _ in 0..Field::ALL.len() {
+            config.move_down();
+        }
+        assert!(!config.is_dirty());
+        assert!(config.cycle_selected(true)); // set a local agent override
+        assert!(config.is_dirty());
+        assert!(config.is_local_changed(LocalField::AgentCli));
+        assert!(!config.is_local_changed(LocalField::Notifications));
+        // The corresponding row is flagged changed.
+        assert!(config.rows()[4].changed);
+
+        config.mark_saved();
+        assert!(!config.is_dirty());
+        assert!(!config.is_local_changed(LocalField::AgentCli));
+    }
+
+    #[test]
+    fn value_of_local_shows_overrides_and_is_empty_without_a_context() {
+        // Without a local context the helper yields an empty string (it is never
+        // rendered in that case).
+        let config = config_with_workspaces(&[]);
+        assert_eq!(config.value_of_local(LocalField::AgentCli), "");
+        // is_local_changed is also false without a context.
+        assert!(!config.is_local_changed(LocalField::AgentCli));
+
+        // With a context and an override set, it shows the override value.
+        let mut local = local_config();
+        for _ in 0..Field::ALL.len() {
+            local.move_down();
+        }
+        local.cycle_selected(true); // Claude override
+        assert_eq!(
+            local.value_of_local(LocalField::AgentCli),
+            "Override: Claude"
+        );
+        assert_eq!(
+            local.value_of_local(LocalField::Notifications),
+            "Global (On)"
+        );
+    }
+
+    #[test]
+    fn local_field_labels_are_distinct() {
+        assert_eq!(LocalField::AgentCli.label(), "Local · Agent CLI");
+        assert_eq!(LocalField::Notifications.label(), "Local · Notifications");
+        assert_eq!(LocalField::ALL.len(), 2);
     }
 }
