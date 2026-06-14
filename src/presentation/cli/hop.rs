@@ -7,7 +7,7 @@ pub fn run() -> anyhow::Result<()> {
     if notifications_enabled() {
         notify_hop();
     }
-    tui::welcome::run()
+    tui::app::run()
 }
 
 /// Whether desktop notifications are enabled in the user's settings.

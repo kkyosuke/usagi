@@ -19,7 +19,7 @@ pub enum Outcome {
 
 /// Runs the home screen against the given terminal and key source until the
 /// user goes back or quits. Assumes the alternate screen is already active (it
-/// is owned by the welcome screen, several levels up).
+/// is owned by the orchestrator, several levels up).
 ///
 /// The screen has two modes. In sidebar mode the worktree list is navigated and
 /// `:` (or `i`) opens the command line; in command mode the user types a
