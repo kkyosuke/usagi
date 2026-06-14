@@ -41,6 +41,7 @@ use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use crate::infrastructure::pty::PtySession;
 
 use super::state::{HomeState, PaneExit};
+use super::terminal_pool::MonitorHandle;
 use super::terminal_view::TerminalView;
 use super::ui;
 
@@ -66,10 +67,15 @@ const LEADER_TIMEOUT: Duration = Duration::from_millis(400);
 /// [`PaneExit`] the event loop acts on.
 ///
 /// [`TerminalPool`]: super::terminal_pool::TerminalPool
-pub fn run(term: &Term, state: &mut HomeState, pty: &mut PtySession) -> Result<PaneExit> {
+pub fn run(
+    term: &Term,
+    state: &mut HomeState,
+    pty: &mut PtySession,
+    monitor: &MonitorHandle,
+) -> Result<PaneExit> {
     enable_raw_mode().context("failed to enter raw mode for the embedded terminal")?;
     let _ = term.clear_screen();
-    let result = drive(term, state, pty);
+    let result = drive(term, state, pty, monitor);
     let _ = disable_raw_mode();
     let _ = term.show_cursor();
     result
@@ -78,7 +84,12 @@ pub fn run(term: &Term, state: &mut HomeState, pty: &mut PtySession) -> Result<P
 /// The render/input loop: snapshot the shell screen, draw whatever changed,
 /// then wait for a keystroke or fresh output and go again. Returns the
 /// [`PaneExit`] reason when the shell exits or the user detaches / switches.
-fn drive(term: &Term, state: &mut HomeState, pty: &mut PtySession) -> Result<PaneExit> {
+fn drive(
+    term: &Term,
+    state: &mut HomeState,
+    pty: &mut PtySession,
+    monitor: &MonitorHandle,
+) -> Result<PaneExit> {
     // The frame drawn last pass, so we only repaint the rows that changed.
     let mut prev: Vec<String> = Vec::new();
     loop {
@@ -92,6 +103,9 @@ fn drive(term: &Term, state: &mut HomeState, pty: &mut PtySession) -> Result<Pan
         let view = TerminalView::from_screen(pty.parser().screen());
         let cursor = view.cursor();
         state.set_terminal_view(view);
+        // Refresh the sidebar's waiting markers so other background sessions
+        // flagged while we are attached here show up in the next repaint.
+        state.set_waiting(monitor.waiting());
         render(term, state, cursor, geo, &mut prev)?;
 
         // The shell closed (e.g. the user typed `exit`): leave the pane.

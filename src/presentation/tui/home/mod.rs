@@ -133,21 +133,55 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
         .unwrap_or_else(|_| crate::domain::settings::AgentCli::default().command())
         .to_string();
 
+    // Whether to surface desktop notifications when a background session starts
+    // waiting for input, from the effective settings (project-local over the
+    // global default). Any failure to read settings defaults to enabled, like
+    // `hop`'s welcome notification.
+    let notifications_enabled = crate::infrastructure::storage::Storage::open_default()
+        .and_then(|storage| crate::usecase::settings::effective(&storage, &workspace.path))
+        .map(|settings| settings.notifications_enabled)
+        .unwrap_or(true);
+
     // The live shells embedded in the right pane, one per worktree, kept alive
     // across session switches and for as long as this screen is open. Dropped on
-    // return, which kills any shell still running.
-    let mut pool = terminal_pool::TerminalPool::new();
+    // return, which kills any shell still running. The pool also watches every
+    // shell's bell and flags / notifies the ones waiting for input.
+    let mut pool = terminal_pool::TerminalPool::new(notifications_enabled);
+    let monitor = pool.monitor();
 
     // Opening a terminal embeds a live shell in the right pane: the pane stays
     // inside the workspace screen (sidebar still visible) and runs the shell
     // until the user detaches, switches sessions, or it exits. `:agent` is the
     // same, with the agent CLI sent to the shell on its first spawn. The pool
     // owns the shell so a detach leaves it running; the right-pane mode and the
-    // switch loop are handled by the event loop around this call.
+    // switch loop are handled by the event loop around this call. The attached
+    // session is declared to the monitor (so it is never flagged as waiting) and
+    // cleared again on detach / close.
     let mut open_terminal = |home: &mut HomeState, dir: &Path, agent: bool| -> Result<PaneExit> {
         let initial = agent.then_some(agent_command.as_str());
-        let pty = pool.attach_or_spawn(term, dir, initial)?;
-        terminal_pane::run(term, home, pty)
+        let label = home
+            .list()
+            .worktrees()
+            .iter()
+            .find(|w| w.path.as_path() == dir)
+            .map(state::worktree_name)
+            .map(str::to_string)
+            .unwrap_or_else(|| {
+                dir.file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| dir.display().to_string())
+            });
+        let handle = pool.monitor();
+        let pty = pool.attach_or_spawn(term, dir, initial, &label)?;
+        handle.set_attached(Some(dir.to_path_buf()));
+        let result = terminal_pane::run(term, home, pty, &handle);
+        // Switching keeps a session in the foreground (the loop re-attaches to
+        // the next one immediately); detaching, closing, or erroring returns to
+        // the sidebar, so nothing is attached any more.
+        if !matches!(result, Ok(PaneExit::SwitchNext) | Ok(PaneExit::SwitchPrev)) {
+            handle.set_attached(None);
+        }
+        result
     };
 
     event::event_loop(
@@ -155,6 +189,7 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
         &mut reader,
         state,
         &workspace.path,
+        &monitor,
         &mut persist,
         &mut create_session,
         &mut remove_session,

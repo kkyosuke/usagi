@@ -22,17 +22,40 @@ use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize}
 
 use crate::infrastructure::terminal;
 
+/// Counts the audible bells (`^G`) the shell emits, recorded into a shared
+/// counter as the parser processes output.
+///
+/// Interactive agents such as Claude Code ring the terminal bell when they
+/// finish a turn and wait for the user — so a rising bell count is the signal
+/// the session monitor watches to flag a worktree as "waiting for input".
+///
+/// Public only because it appears in [`PtySession::parser`]'s return type; it
+/// carries no usable surface of its own.
+pub struct BellCounter {
+    count: Arc<AtomicU64>,
+}
+
+impl vt100::Callbacks for BellCounter {
+    fn audible_bell(&mut self, _: &mut vt100::Screen) {
+        self.count.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
 /// A running shell attached to a pseudo-terminal, with its output parsed into a
 /// terminal screen grid.
 pub struct PtySession {
     master: Box<dyn MasterPty + Send>,
     writer: Box<dyn Write + Send>,
-    parser: Arc<Mutex<vt100::Parser>>,
+    parser: Arc<Mutex<vt100::Parser<BellCounter>>>,
     alive: Arc<AtomicBool>,
     /// Bumped by the reader thread after every chunk it parses, so the render
     /// loop can tell at a glance whether the screen has changed since it last
     /// drew — and wake immediately when it has, instead of on a fixed timer.
     generation: Arc<AtomicU64>,
+    /// The running count of audible bells the shell has emitted, kept outside
+    /// the parser mutex so the session monitor can poll it without contending
+    /// with the render loop.
+    bell: Arc<AtomicU64>,
     child: Box<dyn Child + Send + Sync>,
     reader_thread: Option<JoinHandle<()>>,
 }
@@ -72,7 +95,15 @@ impl PtySession {
             .take_writer()
             .context("failed to write to the pseudo-terminal")?;
 
-        let parser = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, 0)));
+        let bell = Arc::new(AtomicU64::new(0));
+        let parser = Arc::new(Mutex::new(vt100::Parser::new_with_callbacks(
+            rows,
+            cols,
+            0,
+            BellCounter {
+                count: Arc::clone(&bell),
+            },
+        )));
         let alive = Arc::new(AtomicBool::new(true));
         let generation = Arc::new(AtomicU64::new(0));
 
@@ -106,14 +137,34 @@ impl PtySession {
             parser,
             alive,
             generation,
+            bell,
             child,
             reader_thread: Some(reader_thread),
         })
     }
 
     /// Lock the screen-grid parser to read the current contents (for rendering).
-    pub fn parser(&self) -> MutexGuard<'_, vt100::Parser> {
+    pub fn parser(&self) -> MutexGuard<'_, vt100::Parser<BellCounter>> {
         self.parser.lock().expect("pty parser mutex poisoned")
+    }
+
+    /// The running count of audible bells the shell has emitted so far. The
+    /// session monitor compares it against a baseline to tell when an embedded
+    /// agent has rung the bell to ask for input.
+    pub fn bell_count(&self) -> u64 {
+        self.bell.load(Ordering::SeqCst)
+    }
+
+    /// A shared handle to the bell counter, so a background watcher can poll it
+    /// without owning (or borrowing) the session.
+    pub fn bell_handle(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.bell)
+    }
+
+    /// A shared handle to the liveness flag, so a background watcher can tell
+    /// when the shell has exited and stop tracking it.
+    pub fn alive_handle(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.alive)
     }
 
     /// Forward raw input bytes to the shell.

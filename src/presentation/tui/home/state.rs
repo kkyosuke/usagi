@@ -7,7 +7,8 @@
 //! terminal IO, so the navigation, editing, and command logic are all directly
 //! testable.
 
-use std::path::PathBuf;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 
 use crate::domain::workspace_state::{SessionRecord, WorktreeState};
 
@@ -284,6 +285,10 @@ pub struct HomeState {
     /// The latest snapshot of the embedded terminal's screen, set while the
     /// `terminal` command is running and rendered in place of the log.
     terminal_view: Option<TerminalView>,
+    /// Worktree paths whose background session is waiting for the user (its
+    /// agent rang the bell). Refreshed from the terminal monitor each redraw and
+    /// rendered as a marker in the sidebar.
+    waiting: HashSet<PathBuf>,
 }
 
 impl HomeState {
@@ -312,6 +317,7 @@ impl HomeState {
             sessions: Vec::new(),
             right_pane: RightPane::Log,
             terminal_view: None,
+            waiting: HashSet::new(),
         }
     }
 
@@ -428,6 +434,23 @@ impl HomeState {
     /// pane while the terminal is running.
     pub fn set_terminal_view(&mut self, view: TerminalView) {
         self.terminal_view = Some(view);
+    }
+
+    /// Replace the set of worktree paths whose background session is waiting for
+    /// the user, refreshed from the terminal monitor before each redraw.
+    pub fn set_waiting(&mut self, waiting: HashSet<PathBuf>) {
+        self.waiting = waiting;
+    }
+
+    /// Whether the worktree at `path` has a background session waiting for input.
+    pub fn is_waiting(&self, path: &Path) -> bool {
+        self.waiting.contains(path)
+    }
+
+    /// The set of worktree paths whose background session is waiting for input,
+    /// for the sidebar renderer.
+    pub fn waiting_paths(&self) -> &HashSet<PathBuf> {
+        &self.waiting
     }
 
     /// Move the worktree cursor up (sidebar mode).
@@ -1224,6 +1247,25 @@ mod tests {
         let mut state = HomeState::new("usagi", Vec::new(), None);
         assert_eq!(state.focus_next_worktree(), None);
         assert_eq!(state.focus_prev_worktree(), None);
+    }
+
+    #[test]
+    fn waiting_paths_track_sessions_awaiting_input() {
+        let mut state = state();
+        // Nothing is waiting by default.
+        assert!(!state.is_waiting(Path::new("/repo/feature")));
+        assert!(state.waiting_paths().is_empty());
+
+        // The monitor's snapshot is swapped in wholesale before each redraw.
+        let mut waiting = HashSet::new();
+        waiting.insert(PathBuf::from("/repo/feature"));
+        state.set_waiting(waiting);
+        assert!(state.is_waiting(Path::new("/repo/feature")));
+        assert!(!state.is_waiting(Path::new("/repo/main")));
+
+        // A later (empty) snapshot clears it.
+        state.set_waiting(HashSet::new());
+        assert!(!state.is_waiting(Path::new("/repo/feature")));
     }
 
     #[test]

@@ -6,6 +6,9 @@
 //! functions take plain data and return styled lines, so the layout is rendered
 //! without any terminal IO.
 
+use std::collections::HashSet;
+use std::path::PathBuf;
+
 use console::style;
 
 use crate::domain::workspace_state::{BranchStatus, WorktreeState};
@@ -22,9 +25,9 @@ const EMPTY_MESSAGE: &str = "No worktrees recorded yet. Run usagi to sync.";
 const DETACHED: &str = "(detached)";
 
 /// Visible columns a worktree row spends on everything but the branch name
-/// (cursor, active marker, primary marker, separators, and the fixed-width
-/// status label).
-const ROW_OVERHEAD: usize = 14;
+/// (cursor, active marker, primary marker, waiting marker, separators, and the
+/// fixed-width status label).
+const ROW_OVERHEAD: usize = 16;
 
 /// The vertical bar (with surrounding spaces) dividing the two panes.
 const SEP: &str = " │ ";
@@ -107,13 +110,15 @@ fn status_label(status: BranchStatus) -> String {
 }
 
 /// Builds one worktree row: a `>` cursor for the selected entry, a `*` marker
-/// for the active worktree, a `●` marker for the primary worktree, the
-/// (truncated, padded) branch name, and status.
+/// for the active worktree, a `●` marker for the primary worktree, a `◆` marker
+/// when its background session is waiting for input, the (truncated, padded)
+/// branch name, and status.
 fn worktree_row(
     worktree: &WorktreeState,
     branch_width: usize,
     selected: bool,
     active: bool,
+    waiting: bool,
 ) -> String {
     let marker = if selected {
         style(">").red().bold().to_string()
@@ -133,6 +138,14 @@ fn worktree_row(
         " ".to_string()
     };
 
+    // A bright marker for a session whose agent has rung the bell to ask for
+    // input, so it stands out while the user is elsewhere in the screen.
+    let waiting_marker = if waiting {
+        style("◆").yellow().bold().to_string()
+    } else {
+        " ".to_string()
+    };
+
     let branch_text = worktree.branch.as_deref().unwrap_or(DETACHED);
     let branch_text = format!(
         "{:<branch_width$}",
@@ -146,12 +159,18 @@ fn worktree_row(
     };
 
     let status = status_label(worktree.status);
-    format!("{marker} {active_marker} {primary} {branch}  {status}")
+    format!("{marker} {active_marker} {primary} {waiting_marker} {branch}  {status}")
 }
 
 /// Builds the left pane: one row per worktree, or a single empty message,
-/// trimmed to the available `rows`.
-fn left_pane(list: &WorktreeList, left_w: usize, rows: usize) -> Vec<String> {
+/// trimmed to the available `rows`. `waiting` holds the worktree paths whose
+/// background session is awaiting input, marked with `◆`.
+fn left_pane(
+    list: &WorktreeList,
+    waiting: &HashSet<PathBuf>,
+    left_w: usize,
+    rows: usize,
+) -> Vec<String> {
     let mut lines = if list.is_empty() {
         vec![clip_to_width(EMPTY_MESSAGE, left_w)]
     } else {
@@ -165,6 +184,7 @@ fn left_pane(list: &WorktreeList, left_w: usize, rows: usize) -> Vec<String> {
                     branch_width,
                     i == list.selected_index(),
                     i == list.active_index(),
+                    waiting.contains(&w.path),
                 )
             })
             .collect()
@@ -404,7 +424,7 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
     let hints = hint_lines(state, width);
     let hint_rows = hints.len().min(body_rows.saturating_sub(1));
     let pane_rows = body_rows - hint_rows;
-    let left = left_pane(state.list(), left_w, pane_rows);
+    let left = left_pane(state.list(), state.waiting_paths(), left_w, pane_rows);
     let right = right_pane_contents(state, right_w, pane_rows);
 
     let mut lines = Vec::with_capacity(height);
@@ -519,6 +539,7 @@ mod tests {
             10,
             true,
             false,
+            false,
         );
         assert!(selected.contains('>'));
         assert!(selected.contains('●'));
@@ -529,6 +550,7 @@ mod tests {
             10,
             false,
             false,
+            false,
         );
         assert!(!other.contains('>'));
         assert!(other.contains("feature"));
@@ -536,6 +558,7 @@ mod tests {
         let detached = worktree_row(
             &worktree(None, false, BranchStatus::Local),
             10,
+            false,
             false,
             false,
         );
@@ -549,6 +572,7 @@ mod tests {
             10,
             false,
             true,
+            false,
         );
         assert!(active.contains('*'));
 
@@ -557,8 +581,30 @@ mod tests {
             10,
             false,
             false,
+            false,
         );
         assert!(!inactive.contains('*'));
+    }
+
+    #[test]
+    fn worktree_row_marks_a_session_waiting_for_input() {
+        let waiting = worktree_row(
+            &worktree(Some("feature"), false, BranchStatus::Local),
+            10,
+            false,
+            false,
+            true,
+        );
+        assert!(waiting.contains('◆'));
+
+        let quiet = worktree_row(
+            &worktree(Some("feature"), false, BranchStatus::Local),
+            10,
+            false,
+            false,
+            false,
+        );
+        assert!(!quiet.contains('◆'));
     }
 
     #[test]
@@ -572,13 +618,14 @@ mod tests {
             8,
             false,
             false,
+            false,
         );
         assert!(row.contains('…'));
     }
 
     #[test]
     fn left_pane_renders_an_empty_message() {
-        let lines = left_pane(&list_with(Vec::new()), 80, 5);
+        let lines = left_pane(&list_with(Vec::new()), &HashSet::new(), 80, 5);
         assert_eq!(lines.len(), 1);
         assert!(lines[0].contains("No worktrees recorded"));
     }
@@ -589,10 +636,23 @@ mod tests {
             worktree(Some("main"), true, BranchStatus::Pushed),
             worktree(Some("feature"), false, BranchStatus::Local),
         ]);
-        let lines = left_pane(&list, 30, 5);
+        let lines = left_pane(&list, &HashSet::new(), 30, 5);
         assert_eq!(lines.len(), 2);
         assert!(lines[0].contains("main"));
         assert!(lines[1].contains("feature"));
+    }
+
+    #[test]
+    fn left_pane_marks_worktrees_whose_session_is_waiting() {
+        let list = list_with(vec![worktree(Some("feature"), false, BranchStatus::Local)]);
+        // The test worktree's path is "/repo/wt"; flagging it adds the marker.
+        let mut waiting = HashSet::new();
+        waiting.insert(PathBuf::from("/repo/wt"));
+        let marked = left_pane(&list, &waiting, 30, 5);
+        assert!(marked[0].contains('◆'));
+        // With nothing waiting the marker is absent.
+        let unmarked = left_pane(&list, &HashSet::new(), 30, 5);
+        assert!(!unmarked[0].contains('◆'));
     }
 
     #[test]
@@ -602,7 +662,7 @@ mod tests {
             worktree(Some("b"), false, BranchStatus::Local),
             worktree(Some("c"), false, BranchStatus::Local),
         ]);
-        let lines = left_pane(&list, 30, 2);
+        let lines = left_pane(&list, &HashSet::new(), 30, 2);
         assert_eq!(lines.len(), 2);
     }
 
