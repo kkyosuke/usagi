@@ -81,7 +81,8 @@ usagi.ai を踏襲し、Rust で実装します。
 - **AWS CLI**（必須）: AWS SSO ログインなど
 - **Node.js / npm、Python**（任意）: AI エージェントや開発環境で利用
 
-導入状況は `usagi doctor` で確認できます（[3. コマンドリファレンス](03-commands.md) 参照）。
+導入状況は `usagi doctor` で確認できます（[3. コマンドリファレンス](03-commands.md) 参照）。不足ツールは
+`usagi doctor --fix` で OS のパッケージマネージャ経由の導入を試行でき、修復できないものは手動手順が表示されます。
 
 ## usagi.ai との関係
 

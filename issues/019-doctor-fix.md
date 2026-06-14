@@ -2,7 +2,7 @@
 number: 019
 feature: doctor-fix
 title: usagi doctor --fix（依存関係の自動修復）
-status: todo
+status: done
 priority: medium
 category: cli
 dependson: []
