@@ -26,6 +26,7 @@
 | `usagi hop` | メインの TUI を起動する。起動画面 → プロジェクト選択 → ホーム画面へ遷移（[design/](design/README.md)） | ✅ |
 | `usagi status` | カレントリポジトリの worktree 状態を `.usagi/state.json` に同期し一覧表示する（[data/02-workspace.md](data/02-workspace.md)） | ✅ |
 | `usagi doctor` | Git / Bash / AWS CLI / Node.js / Python などの依存ツールの導入状況を確認する | ✅ |
+| `usagi doctor --fix` | 不足ツールを OS のパッケージマネージャ（brew / apt-get / dnf / pacman）で導入を試行し、修復不可なら手動手順を提示する | ✅ |
 
 #### `usagi init`
 
@@ -50,6 +51,11 @@ TUI を起動します。代替スクリーン上で起動画面を表示し、O
 依存ツールの導入状況を診断します。システムの `git` などを読み取り専用で確認し、ユーザーの
 環境設定を尊重します。
 
+`--fix` を付けると、`missing` の依存ツールを OS に合わせたパッケージマネージャでの導入を試行します
+（macOS: `brew install`、Linux: 利用可能な `sudo apt-get` / `dnf` / `pacman` を優先順に選択）。
+自動修復できない場合（パッケージマネージャ未検出・インストール失敗）は、手動インストール手順を提示します。
+不足が無ければ何もしません。
+
 ### 予定の CLI コマンド
 
 usagi.ai から移植予定の CLI コマンドです（[../issues/README.md](../issues/README.md)）。
@@ -65,7 +71,6 @@ usagi.ai から移植予定の CLI コマンドです（[../issues/README.md](..
 | `usagi context` | AI エージェントに読み込ませるプロジェクトコンテキストを生成・出力する | [016](../issues/016-context.md) | 🚧 |
 | `usagi init-agent` | `.clinerules` / `CLAUDE.md` などのエージェント設定ファイルを初期化する | [017](../issues/017-init-agent.md) | 🚧 |
 | `usagi alias` | コマンドエイリアスを定義する | [018](../issues/018-alias.md) | 🚧 |
-| `usagi doctor --fix` | 不足している依存ツールを自動修復する | [019](../issues/019-doctor-fix.md) | 🚧 |
 | gh Issue 連携 | GitHub Issue からセッションを作成する | [020](../issues/020-gh-issue.md) | 🚧 |
 
 ## TUI 内コマンド

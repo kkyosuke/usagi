@@ -31,7 +31,7 @@
 | 016 | [context](016-context.md) | `usagi context` AI 用コンテキスト生成 | cli | low | 001 |
 | 017 | [init-agent](017-init-agent.md) | `usagi init-agent` エージェント設定生成 | cli | low | 001 |
 | 018 | [alias](018-alias.md) | `usagi alias` コマンドエイリアス | cli | low | 005 |
-| 019 | [doctor-fix](019-doctor-fix.md) | `usagi doctor --fix` 依存自動修復 | cli | medium | — |
+| 019 | [doctor-fix](019-doctor-fix.md) ✅ | `usagi doctor --fix` 依存自動修復 | cli | medium | — |
 | 020 | [gh-issue](020-gh-issue.md) | gh Issue 連携セッション作成 | cli | low | 003 |
 | 021 | [local-settings](021-local-settings.md) ✅ | プロジェクト単位のローカル設定（設定上書き） | core | medium | — |
 | 022 | [local-settings-ui](022-local-settings-ui.md) | ローカル設定の編集 UI | tui | medium | 021 |
