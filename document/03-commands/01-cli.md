@@ -9,6 +9,7 @@
 
 - [実装済みの CLI コマンド](#実装済みの-cli-コマンド)
   - [`usagi issue`](#usagi-issue)
+  - [`usagi mcp`](#usagi-mcp)
 - [予定の CLI コマンド](#予定の-cli-コマンド)
 
 ## 実装済みの CLI コマンド
@@ -24,6 +25,7 @@
 | `usagi doctor` | Git / Bash / AWS CLI / Node.js / Python などの依存ツールの導入状況を確認する | ✅ |
 | `usagi doctor --fix` | 不足ツールを OS のパッケージマネージャ（brew / apt-get / dnf / pacman）で導入を試行し、修復不可なら手動手順を提示する | ✅ |
 | `usagi issue <create\|list\|show\|update\|search\|delete>` | カレントリポジトリのタスク issue（`.usagi/issues/`）を操作する（[data/02-workspace.md](../data/02-workspace.md#issues-タスク-issue)） | ✅ |
+| `usagi mcp` | issue 操作を MCP（Model Context Protocol）サーバとして stdio で公開し、AI エージェントから使えるようにする | ✅ |
 
 ### `usagi init`
 
@@ -84,6 +86,10 @@ $ usagi issue list
 #2   todo         medium ready     ログイン画面
 #3   todo         low    blocked   ログアウト  (blocked by 2)
 ```
+
+### `usagi mcp`
+
+`usagi issue` と同じ issue 操作を、**MCP（Model Context Protocol）サーバ**として AI エージェント（Claude Code など）に stdio 経由で公開します。アーキテクチャ・対応 tool・JSON-RPC プロトコルの詳細は専用の章 [3.3 MCP サーバ](03-mcp.md) を参照してください。
 
 ## 予定の CLI コマンド
 

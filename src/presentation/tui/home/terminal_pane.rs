@@ -7,6 +7,11 @@
 //! forwarded to the shell as raw bytes; `Ctrl-O` detaches and closes it, as does
 //! the shell exiting on its own.
 //!
+//! `agent` reuses the same machinery: it spawns the shell and then sends an
+//! `initial` command line (the configured agent CLI, e.g. `claude`) so the pane
+//! lands the user straight in the agent — exactly as if they had run `terminal`
+//! and typed it themselves.
+//!
 //! This is pure terminal I/O and threading, so it is excluded from coverage (cf.
 //! `term_reader.rs` / the screen `mod.rs` wirings). The pieces it leans on are
 //! tested elsewhere: the layout geometry and frame ([`super::ui`]) and the
@@ -40,10 +45,19 @@ const IDLE_REDRAW: Duration = Duration::from_millis(100);
 /// Run the embedded terminal in the right pane, rooted at `dir`, until the user
 /// detaches (`Ctrl-O`) or the shell exits. The right-pane mode is set by the
 /// caller; here we own the PTY, raw mode, and the render/input loop.
-pub fn run(term: &Term, state: &mut HomeState, dir: &Path) -> Result<()> {
+///
+/// When `initial` is `Some`, that command line is sent to the shell on start
+/// (followed by a carriage return) — this is how `agent` lands the user in the
+/// configured agent CLI, just as if they had typed it into a fresh terminal.
+pub fn run(term: &Term, state: &mut HomeState, dir: &Path, initial: Option<&str>) -> Result<()> {
     let (height, width) = term.size();
     let geo = ui::terminal_geometry(height as usize, width as usize);
     let mut pty = PtySession::spawn(dir, geo.rows, geo.cols)?;
+    if let Some(command) = initial {
+        // The shell buffers its input, so writing immediately is fine: it runs
+        // the command once it has started up.
+        pty.write(format!("{command}\r").as_bytes())?;
+    }
 
     enable_raw_mode().context("failed to enter raw mode for the embedded terminal")?;
     let _ = term.clear_screen();

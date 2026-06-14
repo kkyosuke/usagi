@@ -77,9 +77,10 @@ cargo run -- hop  # TUI を起動
 :session new feature-x   # .usagi/worktree/feature-x/ にセッション（worktree）を作成
 :session list            # セッション一覧
 :terminal                # 選択中の worktree でシェルを右ペインに埋め込み起動（Ctrl-O でデタッチ）
+:agent                   # terminal を開いて設定中の Agent CLI（既定 claude）を起動（実質 terminal → claude）
 ```
 
-作成した worktree は左ペインに表示されます。目的の worktree を選んで `terminal` を実行すると、左ペインの一覧を表示したまま、その worktree を作業ディレクトリとしたシェルが**右ペインにライブで埋め込まれます**。そこで `claude` などの AI エージェントを起動して開発できます。シェルを抜けるには `Ctrl-O`（デタッチ）か、シェル側で `exit` してください。
+作成した worktree は左ペインに表示されます。目的の worktree を選んで `terminal` を実行すると、左ペインの一覧を表示したまま、その worktree を作業ディレクトリとしたシェルが**右ペインにライブで埋め込まれます**。そこで `claude` などの AI エージェントを起動して開発できます。シェルを抜けるには `Ctrl-O`（デタッチ）か、シェル側で `exit` してください。`:agent` を使えば、この「`terminal` を開いて Agent CLI を起動する」操作を 1 コマンドで行えます（起動する Agent CLI は Config 画面・ローカル設定で選べます）。
 
 ### タスクを管理する
 
@@ -93,6 +94,20 @@ cargo run -- issue update 2 --status done
 ```
 
 `list` / `search` は依存（`--depends-on`）がすべて `done` になった「着手可能」な issue を `ready` と表示し、ブロック中のものには未達の依存番号を併記します。詳細は [document/03-commands/01-cli.md](document/03-commands/01-cli.md#usagi-issue)。
+
+### AI エージェントから使う（MCP）
+
+`usagi mcp` で同じ issue 操作を MCP（Model Context Protocol）サーバとして公開できます。Claude Code などに登録すると、エージェントが `issue_create` / `issue_list` / `issue_update` などの tool でタスクを起票・参照できます。
+
+```json
+{
+  "mcpServers": {
+    "usagi": { "command": "usagi", "args": ["mcp"] }
+  }
+}
+```
+
+詳細は [document/03-commands/03-mcp.md](document/03-commands/03-mcp.md)。
 
 ## Project Structure
 

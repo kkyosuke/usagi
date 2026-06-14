@@ -13,6 +13,7 @@
 |---|---|---|
 | 1 | [01-cli.md](01-cli.md) | CLI コマンド（シェルから `usagi <cmd>` で実行）の一覧と詳細 |
 | 2 | [02-tui.md](02-tui.md) | TUI 内コマンド（`usagi hop` のホーム画面で実行）の一覧 |
+| 3 | [03-mcp.md](03-mcp.md) | MCP サーバ（`usagi mcp`）。アーキテクチャ・対応 tool・プロトコル |
 
 ## 凡例
 

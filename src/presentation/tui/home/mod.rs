@@ -123,12 +123,24 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
         },
     };
 
+    // The agent CLI launched by `:agent`, resolved from the effective settings
+    // (project-local overrides on top of the global default, which is Claude).
+    // Any failure to read settings falls back to the default agent.
+    let agent_command = crate::infrastructure::storage::Storage::open_default()
+        .and_then(|storage| crate::usecase::settings::effective(&storage, &workspace.path))
+        .map(|settings| settings.agent_cli.command())
+        .unwrap_or_else(|_| crate::domain::settings::AgentCli::default().command())
+        .to_string();
+
     // Opening a terminal embeds a live shell in the right pane: the pane stays
     // inside the workspace screen (sidebar still visible) and runs the shell
-    // until the user detaches or it exits. The right-pane mode is toggled by the
-    // event loop around this call; here we just drive the embedded session.
-    let mut open_terminal =
-        |home: &mut HomeState, dir: &Path| -> Result<()> { terminal_pane::run(term, home, dir) };
+    // until the user detaches or it exits. `:agent` is the same, with the agent
+    // CLI sent to the shell on start. The right-pane mode is toggled by the event
+    // loop around this call; here we just drive the embedded session.
+    let mut open_terminal = |home: &mut HomeState, dir: &Path, agent: bool| -> Result<()> {
+        let initial = agent.then_some(agent_command.as_str());
+        terminal_pane::run(term, home, dir, initial)
+    };
 
     event::event_loop(
         term,

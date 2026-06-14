@@ -38,6 +38,8 @@ enum Commands {
         #[command(subcommand)]
         command: usagi::presentation::cli::issue::IssueCommand,
     },
+    /// Run the issue MCP server over stdio (for AI agents)
+    Mcp,
     /// Sync the current repository's worktree state to .usagi/state.json
     Status,
 }
@@ -51,6 +53,7 @@ fn main() -> anyhow::Result<()> {
         Commands::Hop => usagi::presentation::cli::hop::run(),
         Commands::Init { git } => usagi::presentation::cli::init::run(git),
         Commands::Issue { command } => usagi::presentation::cli::issue::run(command),
+        Commands::Mcp => usagi::presentation::cli::mcp::run(),
         Commands::Status => usagi::presentation::cli::status::run(),
     }
 }

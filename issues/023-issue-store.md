@@ -2,11 +2,11 @@
 number: 023
 feature: issue-store
 title: issue ストア（`.usagi/issues/` への永続化と採番）
-status: todo
+status: done
 priority: high
 category: core
 dependson: []
-ref: —
+ref: PR #54
 ---
 
 # issue ストア（タスク issue の永続化基盤）
