@@ -11,7 +11,7 @@
 - [`state.json`](#statejson)
 - [`status`: ブランチのライフサイクル状態](#status-ブランチのライフサイクル状態)
 - [同期と参照](#同期と参照)
-- [git 検査の方針](#git-検査の方針)
+- [git 検査の方針](#git-検査の方針infrastructuregitrs)
 - [`settings.json`: プロジェクト固有の設定上書き（ローカル設定）](#settingsjson-プロジェクト固有の設定上書きローカル設定)
 - [`history.json`](#historyjson)
 
