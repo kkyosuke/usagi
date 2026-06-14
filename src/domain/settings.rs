@@ -24,6 +24,17 @@ pub enum AgentCli {
     Gemini,
 }
 
+impl AgentCli {
+    /// The shell command (program name) usagi launches for this agent — the
+    /// word the `agent` command runs inside the embedded terminal.
+    pub fn command(self) -> &'static str {
+        match self {
+            AgentCli::Claude => "claude",
+            AgentCli::Gemini => "gemini",
+        }
+    }
+}
+
 /// User-configurable application settings.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -145,5 +156,11 @@ mod tests {
             notifications_enabled: Some(true),
         }
         .is_empty());
+    }
+
+    #[test]
+    fn agent_cli_maps_to_its_launch_command() {
+        assert_eq!(AgentCli::Claude.command(), "claude");
+        assert_eq!(AgentCli::Gemini.command(), "gemini");
     }
 }

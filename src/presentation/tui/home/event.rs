@@ -38,10 +38,12 @@ pub enum Outcome {
 /// screen, keeping the loop itself free of that IO and directly testable.
 ///
 /// `terminal` embeds a live shell in the right pane, rooted at the selected
-/// worktree (or `workspace_root` when nothing is selected). The loop switches
-/// the right pane to terminal mode, runs the embedded session via
-/// `open_terminal`, and switches back when it returns; the PTY I/O and rendering
-/// live in that injected callback.
+/// worktree (or `workspace_root` when nothing is selected). `agent` does the
+/// same but launches the configured AI agent CLI inside that shell. The loop
+/// switches the right pane to terminal mode, runs the embedded session via
+/// `open_terminal` (its `bool` is `true` for `agent`, `false` for a bare
+/// `terminal`), and switches back when it returns; the PTY I/O, rendering, and
+/// agent-command resolution live in that injected callback.
 #[allow(clippy::too_many_arguments)]
 pub fn event_loop(
     term: &Term,
@@ -51,7 +53,7 @@ pub fn event_loop(
     persist: &mut dyn FnMut(&str),
     create_session: &mut dyn FnMut(&str) -> SessionOutcome,
     remove_session: &mut dyn FnMut(&str, bool) -> SessionOutcome,
-    open_terminal: &mut dyn FnMut(&mut HomeState, &Path) -> Result<()>,
+    open_terminal: &mut dyn FnMut(&mut HomeState, &Path, bool) -> Result<()>,
 ) -> Result<Outcome> {
     loop {
         term.move_cursor_to(0, 0)?;
@@ -116,23 +118,31 @@ pub fn event_loop(
                             let outcome = remove_session(&name, force);
                             state.apply_session_outcome(outcome);
                         }
-                        Effect::OpenTerminal => {
+                        effect @ (Effect::OpenTerminal | Effect::OpenAgent) => {
                             // Embed the shell in the right pane, rooted at the
                             // selected worktree (or the workspace root when
-                            // nothing is selected). The pane is switched to
-                            // terminal mode for the duration and back afterwards.
+                            // nothing is selected). `agent` is the same shell
+                            // with the AI agent CLI launched inside it. The pane
+                            // is switched to terminal mode for the duration and
+                            // back afterwards.
+                            let agent = effect == Effect::OpenAgent;
+                            let (label, fail) = if agent {
+                                ("Agent", "agent")
+                            } else {
+                                ("Terminal", "terminal")
+                            };
                             let dir = state
                                 .list()
                                 .selected()
                                 .map(|w| w.path.clone())
                                 .unwrap_or_else(|| workspace_root.to_path_buf());
                             state.show_terminal();
-                            let result = open_terminal(&mut state, &dir);
+                            let result = open_terminal(&mut state, &dir, agent);
                             state.show_log();
                             match result {
                                 Ok(()) => state
-                                    .log_output(format!("Terminal in {} closed.", dir.display())),
-                                Err(e) => state.log_error(format!("terminal failed: {e}")),
+                                    .log_output(format!("{label} in {} closed.", dir.display())),
+                                Err(e) => state.log_error(format!("{fail} failed: {e}")),
                             }
                         }
                         _ => {}
@@ -218,7 +228,7 @@ mod tests {
     }
 
     /// A `open_terminal` callback that reports success without spawning a shell.
-    fn noop_open(_: &mut HomeState, _: &Path) -> Result<()> {
+    fn noop_open(_: &mut HomeState, _: &Path, _: bool) -> Result<()> {
         Ok(())
     }
 
@@ -228,7 +238,7 @@ mod tests {
         let mut persist = |_: &str| {};
         let mut create_session: fn(&str) -> SessionOutcome = noop_create;
         let mut remove_session: fn(&str, bool) -> SessionOutcome = noop_remove;
-        let mut open_terminal: fn(&mut HomeState, &Path) -> Result<()> = noop_open;
+        let mut open_terminal: fn(&mut HomeState, &Path, bool) -> Result<()> = noop_open;
         event_loop(
             &term,
             &mut reader,
@@ -338,7 +348,7 @@ mod tests {
         let mut persist = |command: &str| recorded.push(command.to_string());
         let mut create_session: fn(&str) -> SessionOutcome = noop_create;
         let mut remove_session: fn(&str, bool) -> SessionOutcome = noop_remove;
-        let mut open_terminal: fn(&mut HomeState, &Path) -> Result<()> = noop_open;
+        let mut open_terminal: fn(&mut HomeState, &Path, bool) -> Result<()> = noop_open;
         let outcome = event_loop(
             &term,
             &mut reader,
@@ -396,7 +406,7 @@ mod tests {
             outcome.clone()
         };
         let mut remove_session: fn(&str, bool) -> SessionOutcome = noop_remove;
-        let mut open_terminal: fn(&mut HomeState, &Path) -> Result<()> = noop_open;
+        let mut open_terminal: fn(&mut HomeState, &Path, bool) -> Result<()> = noop_open;
         let result = event_loop(
             &term,
             &mut reader,
@@ -458,7 +468,7 @@ mod tests {
             removed.push((name.to_string(), force));
             ok_outcome()
         };
-        let mut open_terminal: fn(&mut HomeState, &Path) -> Result<()> = noop_open;
+        let mut open_terminal: fn(&mut HomeState, &Path, bool) -> Result<()> = noop_open;
         let outcome = event_loop(
             &term,
             &mut reader,
@@ -564,14 +574,16 @@ mod tests {
         assert!(err.to_string().contains("Failed to read key"));
     }
 
-    /// Drive `:terminal` through the loop with a custom `open_terminal`, so the
-    /// terminal effect's directory resolution and result handling are exercised.
-    fn run_terminal(
+    /// Drive a pane-opening command (`terminal` or `agent`) through the loop with
+    /// a custom `open_terminal`, so the effect's directory resolution, agent flag,
+    /// and result handling are exercised.
+    fn run_pane(
+        command: &str,
         state: HomeState,
-        open_terminal: &mut dyn FnMut(&mut HomeState, &Path) -> Result<()>,
+        open_terminal: &mut dyn FnMut(&mut HomeState, &Path, bool) -> Result<()>,
     ) -> Result<Outcome> {
         let mut keys = vec![Ok(Key::Char(':'))];
-        keys.extend(typed("terminal"));
+        keys.extend(typed(command));
         keys.push(Ok(Key::Enter));
         keys.push(Ok(Key::Escape)); // cancel command mode
         keys.push(Ok(Key::Escape)); // leave sidebar
@@ -607,18 +619,20 @@ mod tests {
     #[test]
     fn terminal_opens_in_the_selected_worktree() {
         let opened = RefCell::new(None);
-        let mut open = |home: &mut HomeState, dir: &Path| {
-            // The pane is in terminal mode while the embedded session runs.
+        let mut open = |home: &mut HomeState, dir: &Path, agent: bool| {
+            // The pane is in terminal mode while the embedded session runs, and
+            // `:terminal` is a bare shell (not the agent).
             assert_eq!(
                 home.right_pane(),
                 crate::presentation::tui::home::state::RightPane::Terminal
             );
+            assert!(!agent);
             *opened.borrow_mut() = Some(dir.to_path_buf());
             Ok(())
         };
         // sample_state's selected worktree path is /repo/wt.
         assert!(matches!(
-            run_terminal(sample_state(), &mut open).unwrap(),
+            run_pane("terminal", sample_state(), &mut open).unwrap(),
             Outcome::Back
         ));
         assert_eq!(opened.into_inner(), Some(PathBuf::from("/repo/wt")));
@@ -627,14 +641,14 @@ mod tests {
     #[test]
     fn terminal_falls_back_to_the_workspace_root_without_selection() {
         let opened = RefCell::new(None);
-        let mut open = |_home: &mut HomeState, dir: &Path| {
+        let mut open = |_home: &mut HomeState, dir: &Path, _agent: bool| {
             *opened.borrow_mut() = Some(dir.to_path_buf());
             Ok(())
         };
         // No worktrees: the loop opens the shell in the workspace root (/ws).
         let state = HomeState::new("usagi", Vec::new(), None);
         assert!(matches!(
-            run_terminal(state, &mut open).unwrap(),
+            run_pane("terminal", state, &mut open).unwrap(),
             Outcome::Back
         ));
         assert_eq!(opened.into_inner(), Some(PathBuf::from("/ws")));
@@ -642,10 +656,52 @@ mod tests {
 
     #[test]
     fn terminal_failure_is_reported() {
-        let mut open = |_: &mut HomeState, _: &Path| Err(anyhow::anyhow!("no shell"));
+        let mut open = |_: &mut HomeState, _: &Path, _: bool| Err(anyhow::anyhow!("no shell"));
         // A launch failure logs an error but the screen continues to Back.
         assert!(matches!(
-            run_terminal(sample_state(), &mut open).unwrap(),
+            run_pane("terminal", sample_state(), &mut open).unwrap(),
+            Outcome::Back
+        ));
+    }
+
+    #[test]
+    fn agent_opens_a_terminal_with_the_agent_flag_set() {
+        let saw_agent = RefCell::new(None);
+        let mut open = |home: &mut HomeState, dir: &Path, agent: bool| {
+            // `:agent` is `:terminal` with the agent CLI launched inside it.
+            assert_eq!(
+                home.right_pane(),
+                crate::presentation::tui::home::state::RightPane::Terminal
+            );
+            *saw_agent.borrow_mut() = Some((agent, dir.to_path_buf()));
+            Ok(())
+        };
+        assert!(matches!(
+            run_pane("agent", sample_state(), &mut open).unwrap(),
+            Outcome::Back
+        ));
+        assert_eq!(
+            saw_agent.into_inner(),
+            Some((true, PathBuf::from("/repo/wt")))
+        );
+    }
+
+    #[test]
+    fn agent_via_the_default_callback_succeeds() {
+        // Drives `:agent` through the shared no-op `open_terminal`.
+        let mut open: fn(&mut HomeState, &Path, bool) -> Result<()> = noop_open;
+        assert!(matches!(
+            run_pane("agent", sample_state(), &mut open).unwrap(),
+            Outcome::Back
+        ));
+    }
+
+    #[test]
+    fn agent_failure_is_reported() {
+        let mut open = |_: &mut HomeState, _: &Path, _: bool| Err(anyhow::anyhow!("no agent"));
+        // A launch failure logs an error but the screen continues to Back.
+        assert!(matches!(
+            run_pane("agent", sample_state(), &mut open).unwrap(),
             Outcome::Back
         ));
     }
