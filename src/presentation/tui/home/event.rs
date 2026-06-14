@@ -304,6 +304,7 @@ mod tests {
         SessionOutcome {
             line: LogLine::output("created"),
             sessions: None,
+            select: None,
         }
     }
 
@@ -312,6 +313,7 @@ mod tests {
         SessionOutcome {
             line: LogLine::output("removed"),
             sessions: None,
+            select: None,
         }
     }
 
@@ -727,6 +729,7 @@ mod tests {
         SessionOutcome {
             line: LogLine::output("created"),
             sessions: None,
+            select: None,
         }
     }
 
