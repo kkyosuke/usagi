@@ -544,25 +544,36 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
     let (height, width) = widgets::normalize_size(raw_height, raw_width);
     let (left_w, right_w) = layout(width);
 
-    // Chrome around the body: title + blank separator on top, the command-mode
-    // hints (if any) + input + footer at the bottom. The rest is the two-pane
-    // body. The hints borrow rows from the body, always leaving it at least one.
+    // Chrome around the body: title + blank separator on top, input + footer at
+    // the bottom. Everything between is the two-pane body, whose height never
+    // depends on the mode — so entering or leaving command mode never resizes
+    // the panes. The command-mode hints float over the body's bottom rows as an
+    // overlay anchored to the input, appearing and vanishing without shifting
+    // anything beneath them.
     let body_rows = height.saturating_sub(4).max(1);
-    let hints = hint_lines(state, width);
-    let hint_rows = hints.len().min(body_rows.saturating_sub(1));
-    let pane_rows = body_rows - hint_rows;
-    let left = left_pane(state.list(), state.waiting_paths(), left_w, pane_rows);
-    let right = right_pane_contents(state, right_w, pane_rows);
+    let left = left_pane(state.list(), state.waiting_paths(), left_w, body_rows);
+    let right = right_pane_contents(state, right_w, body_rows);
 
     let mut lines = Vec::with_capacity(height);
     lines.push(title_bar(width, state.list()));
     lines.push(String::new());
-    for row in 0..pane_rows {
+    let body_start = lines.len();
+    for row in 0..body_rows {
         let left_cell = pad_to_width(left.get(row).cloned().unwrap_or_default(), left_w);
         let right_cell = right.get(row).cloned().unwrap_or_default();
         lines.push(format!("{left_cell}{SEP}{right_cell}"));
     }
-    lines.extend(hints.into_iter().take(hint_rows));
+
+    // Overlay the hints onto the bottom of the body, always leaving at least one
+    // body row uncovered. Padding each hint to the full width clears the body
+    // text it sits on top of.
+    let hints = hint_lines(state, width);
+    let hint_rows = hints.len().min(body_rows.saturating_sub(1));
+    let overlay_start = body_start + body_rows - hint_rows;
+    for (i, hint) in hints.into_iter().take(hint_rows).enumerate() {
+        lines[overlay_start + i] = pad_to_width(hint, width);
+    }
+
     lines.push(input_line(state));
     lines.push(footer_line(width, state));
     lines
@@ -1241,7 +1252,7 @@ mod tests {
     fn render_frame_shows_command_hints_above_the_input_and_keeps_its_height() {
         let state = typing("s");
         let frame = render_frame(24, 80, &state);
-        // The hints take rows from the body but the overall height is unchanged.
+        // The hints overlay the body's bottom rows; the overall height is unchanged.
         assert_eq!(frame.len(), 24);
         let joined = console::strip_ansi_codes(&frame.join("\n")).into_owned();
         assert!(joined.contains("matches"));
@@ -1251,6 +1262,35 @@ mod tests {
         assert!(frame[prompt_row].contains('❯'));
         let above = console::strip_ansi_codes(&frame[prompt_row - 1]).into_owned();
         assert!(above.contains("session"));
+    }
+
+    #[test]
+    fn render_frame_keeps_the_body_in_place_when_command_mode_opens() {
+        // Entering command mode must not shift the body: the title, blank
+        // separator, and every body row stay at the same screen position whether
+        // or not the command hints are showing. Only the bottom rows the hints
+        // overlay differ, and the input / footer stay last.
+        let sidebar = state_with_sessions(&["alpha", "beta"]);
+        let command = {
+            let mut s = state_with_sessions(&["alpha", "beta"]);
+            s.enter_command_mode();
+            s.push_char('s');
+            s
+        };
+        let before = render_frame(24, 80, &sidebar);
+        let after = render_frame(24, 80, &command);
+        assert_eq!(before.len(), after.len());
+
+        // The hints occupy the rows just above the input line; everything above
+        // that overlay region is byte-for-byte identical, so nothing jumps.
+        let hint_rows = hint_lines(&command, 80).len();
+        let input_row = after.len() - 2;
+        let overlay_start = input_row - hint_rows;
+        for row in 0..overlay_start {
+            assert_eq!(before[row], after[row], "body row {row} shifted");
+        }
+        // The hints really did land in the overlay region, directly above input.
+        assert!(stripped(&after[overlay_start..input_row]).contains("session"));
     }
 
     #[test]
