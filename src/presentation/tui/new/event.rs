@@ -1,8 +1,11 @@
+use std::path::PathBuf;
+
 use anyhow::Result;
 use console::Key;
 use console::Term;
 
 use crate::presentation::tui::screen::KeyReader;
+use crate::presentation::tui::widgets::dir_picker::{self, Choice, DirSource};
 
 use super::state::{FormState, NewProject};
 use super::ui;
@@ -24,10 +27,14 @@ pub enum Outcome {
 ///
 /// `default_location` pre-fills the Location field with the base directory new
 /// projects are created under; the user can edit it before submitting.
+///
+/// `dir_source` backs the directory browser opened with Space on a directory
+/// field (Location in Clone mode, the path in Existing mode).
 pub fn event_loop(
     term: &Term,
     reader: &mut dyn KeyReader,
     default_location: &str,
+    dir_source: &dyn DirSource,
 ) -> Result<Outcome> {
     let mut state = FormState::new();
     state.set_location(default_location);
@@ -75,6 +82,19 @@ pub fn event_loop(
                 state.backspace();
                 notice = None;
             }
+            // Space on a directory field opens the browser instead of typing a
+            // space; on any other field it is an ordinary character.
+            Key::Char(' ') if state.focus_is_directory() => {
+                let start = resolve_start(state.directory_field_value(), default_location);
+                match dir_picker::event_loop(term, reader, dir_source, &start)? {
+                    Choice::Selected(path) => {
+                        state.set_directory_field(&path.to_string_lossy());
+                    }
+                    Choice::Cancelled => {}
+                    Choice::Quit => return Ok(Outcome::Quit),
+                }
+                notice = None;
+            }
             Key::Char(c) => {
                 state.insert_char(c);
                 notice = None;
@@ -82,6 +102,20 @@ pub fn event_loop(
             _ => {}
         }
     }
+}
+
+/// The directory the browser should start in: the field's current value if set,
+/// otherwise the default location, falling back to the filesystem root.
+fn resolve_start(value: &str, fallback: &str) -> PathBuf {
+    let value = value.trim();
+    if !value.is_empty() {
+        return PathBuf::from(value);
+    }
+    let fallback = fallback.trim();
+    if !fallback.is_empty() {
+        return PathBuf::from(fallback);
+    }
+    PathBuf::from("/")
 }
 
 #[cfg(test)]
@@ -112,12 +146,22 @@ mod tests {
         s.chars().map(|c| Ok(Key::Char(c))).collect()
     }
 
+    /// A directory source that lists the same two children for any directory,
+    /// enough to drive the browser in the integration tests.
+    struct FakeDirs;
+
+    impl DirSource for FakeDirs {
+        fn entries(&self, _dir: &std::path::Path) -> std::result::Result<Vec<String>, String> {
+            Ok(vec!["projects".to_string(), "docs".to_string()])
+        }
+    }
+
     #[test]
     fn escape_returns_back() {
         let term = Term::stdout();
         let mut reader = ScriptedReader::new(vec![Ok(Key::Escape)]);
         assert!(matches!(
-            event_loop(&term, &mut reader, "/base").unwrap(),
+            event_loop(&term, &mut reader, "/base", &FakeDirs).unwrap(),
             Outcome::Back
         ));
     }
@@ -127,7 +171,7 @@ mod tests {
         let term = Term::stdout();
         let mut reader = ScriptedReader::new(vec![Ok(Key::CtrlC)]);
         assert!(matches!(
-            event_loop(&term, &mut reader, "/base").unwrap(),
+            event_loop(&term, &mut reader, "/base", &FakeDirs).unwrap(),
             Outcome::Quit
         ));
     }
@@ -141,7 +185,7 @@ mod tests {
         keys.push(Ok(Key::Enter));
         let mut reader = ScriptedReader::new(keys);
         // The pre-filled location lets validation succeed without editing it.
-        let outcome = event_loop(&term, &mut reader, "/base").unwrap();
+        let outcome = event_loop(&term, &mut reader, "/base", &FakeDirs).unwrap();
         assert!(matches!(
             &outcome,
             Outcome::Submitted(NewProject::Clone(spec))
@@ -160,7 +204,7 @@ mod tests {
         keys.extend(type_keys("/home/me/my-app"));
         keys.push(Ok(Key::Enter));
         let mut reader = ScriptedReader::new(keys);
-        let outcome = event_loop(&term, &mut reader, "/base").unwrap();
+        let outcome = event_loop(&term, &mut reader, "/base", &FakeDirs).unwrap();
         assert!(matches!(
             &outcome,
             Outcome::Submitted(NewProject::Existing(spec))
@@ -175,7 +219,7 @@ mod tests {
         // Enter on an empty form fails validation (notice), then Escape goes back.
         let mut reader = ScriptedReader::new(vec![Ok(Key::Enter), Ok(Key::Escape)]);
         assert!(matches!(
-            event_loop(&term, &mut reader, "/base").unwrap(),
+            event_loop(&term, &mut reader, "/base", &FakeDirs).unwrap(),
             Outcome::Back
         ));
     }
@@ -194,7 +238,7 @@ mod tests {
             Ok(Key::Escape),    // back
         ]);
         assert!(matches!(
-            event_loop(&term, &mut reader, "/base").unwrap(),
+            event_loop(&term, &mut reader, "/base", &FakeDirs).unwrap(),
             Outcome::Back
         ));
     }
@@ -207,7 +251,7 @@ mod tests {
             "interrupted",
         ))]);
         assert!(matches!(
-            event_loop(&term, &mut reader, "/base").unwrap(),
+            event_loop(&term, &mut reader, "/base", &FakeDirs).unwrap(),
             Outcome::Quit
         ));
     }
@@ -216,7 +260,87 @@ mod tests {
     fn unexpected_read_error_is_propagated() {
         let term = Term::stdout();
         let mut reader = ScriptedReader::new(vec![Err(io::Error::other("boom"))]);
-        let err = event_loop(&term, &mut reader, "/base").unwrap_err();
+        let err = event_loop(&term, &mut reader, "/base", &FakeDirs).unwrap_err();
         assert!(err.to_string().contains("Failed to read key"));
+    }
+
+    #[test]
+    fn space_on_the_path_field_browses_and_fills_the_chosen_directory() {
+        let term = Term::stdout();
+        // Switch to Existing, focus the Path field, open the browser with Space,
+        // pick the current directory (the "/base" default) with Enter, then
+        // submit the form with a second Enter.
+        let mut reader = ScriptedReader::new(vec![
+            Ok(Key::ArrowRight), // -> Existing mode
+            Ok(Key::Tab),        // focus the Path field
+            Ok(Key::Char(' ')),  // open the directory browser
+            Ok(Key::Enter),      // browser: select "/base"
+            Ok(Key::Enter),      // form: submit
+        ]);
+        let outcome = event_loop(&term, &mut reader, "/base", &FakeDirs).unwrap();
+        // The picked directory fills Path, and the name is derived from it.
+        assert!(matches!(
+            &outcome,
+            Outcome::Submitted(NewProject::Existing(spec))
+                if spec.path == std::path::Path::new("/base") && spec.name == "base"
+        ));
+    }
+
+    #[test]
+    fn space_on_the_location_field_opens_the_browser_and_cancel_leaves_the_form() {
+        let term = Term::stdout();
+        // Clone mode: focus Location, open the browser, cancel it with Esc, then
+        // leave the form with Esc.
+        let mut reader = ScriptedReader::new(vec![
+            Ok(Key::Tab),       // Mode -> Url
+            Ok(Key::Tab),       // Url -> Location (a directory field)
+            Ok(Key::Char(' ')), // open the browser
+            Ok(Key::Escape),    // browser: cancel
+            Ok(Key::Escape),    // form: back
+        ]);
+        assert!(matches!(
+            event_loop(&term, &mut reader, "/base", &FakeDirs).unwrap(),
+            Outcome::Back
+        ));
+    }
+
+    #[test]
+    fn quitting_the_browser_quits_the_screen() {
+        let term = Term::stdout();
+        let mut reader = ScriptedReader::new(vec![
+            Ok(Key::ArrowRight), // -> Existing mode
+            Ok(Key::Tab),        // focus the Path field
+            Ok(Key::Char(' ')),  // open the browser
+            Ok(Key::CtrlC),      // browser: quit
+        ]);
+        assert!(matches!(
+            event_loop(&term, &mut reader, "/base", &FakeDirs).unwrap(),
+            Outcome::Quit
+        ));
+    }
+
+    #[test]
+    fn space_on_a_non_directory_field_types_a_space() {
+        let term = Term::stdout();
+        // On the URL field Space is an ordinary character (the browser guard is
+        // false), so the form keeps running until Escape.
+        let mut reader = ScriptedReader::new(vec![
+            Ok(Key::Tab),       // focus the URL field
+            Ok(Key::Char(' ')), // typed, not a browser trigger
+            Ok(Key::Escape),
+        ]);
+        assert!(matches!(
+            event_loop(&term, &mut reader, "/base", &FakeDirs).unwrap(),
+            Outcome::Back
+        ));
+    }
+
+    #[test]
+    fn resolve_start_prefers_value_then_fallback_then_root() {
+        assert_eq!(resolve_start("/here", "/base"), PathBuf::from("/here"));
+        // A blank field falls back to the default location.
+        assert_eq!(resolve_start("   ", "/base"), PathBuf::from("/base"));
+        // Both blank: the filesystem root.
+        assert_eq!(resolve_start("", "  "), PathBuf::from("/"));
     }
 }

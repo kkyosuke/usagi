@@ -157,6 +157,36 @@ impl FormState {
         self.location = value.to_string();
     }
 
+    /// Whether the focused field holds a directory path that can be picked from
+    /// the directory browser: Location in Clone mode, the path in Existing mode.
+    pub fn focus_is_directory(&self) -> bool {
+        matches!(self.focus(), Field::Location | Field::Path)
+    }
+
+    /// The current value of the focused directory field, used as the browser's
+    /// starting point. Empty for any non-directory field.
+    pub fn directory_field_value(&self) -> &str {
+        match self.focus() {
+            Field::Location => &self.location,
+            Field::Path => &self.path,
+            _ => "",
+        }
+    }
+
+    /// Set the focused directory field to a path chosen in the browser,
+    /// re-deriving the workspace name for the Existing path. A no-op when the
+    /// focused field is not a directory.
+    pub fn set_directory_field(&mut self, value: &str) {
+        match self.focus() {
+            Field::Location => self.location = value.to_string(),
+            Field::Path => {
+                self.path = value.to_string();
+                self.sync_name();
+            }
+            _ => {}
+        }
+    }
+
     /// Switch to the other mode, keeping focus on the mode selector so the next
     /// arrow press keeps toggling without first having to move focus.
     pub fn toggle_mode(&mut self) {
@@ -633,6 +663,67 @@ mod tests {
         state.backspace();
         assert_eq!(state.path(), "/home/me/app");
         assert_eq!(state.name(), "app");
+    }
+
+    #[test]
+    fn directory_fields_are_the_clone_location_and_existing_path() {
+        let mut state = FormState::new();
+        // Clone mode: only Location is a directory field.
+        focus_to(&mut state, Field::Location);
+        assert!(state.focus_is_directory());
+        focus_to(&mut state, Field::Url);
+        assert!(!state.focus_is_directory());
+
+        // Existing mode: only Path is a directory field.
+        state.toggle_mode();
+        focus_to(&mut state, Field::Path);
+        assert!(state.focus_is_directory());
+        focus_to(&mut state, Field::Name);
+        assert!(!state.focus_is_directory());
+    }
+
+    #[test]
+    fn directory_field_value_reads_the_focused_directory_field() {
+        let mut state = FormState::new();
+        state.set_location("/base");
+        focus_to(&mut state, Field::Location);
+        assert_eq!(state.directory_field_value(), "/base");
+
+        state.toggle_mode();
+        focus_to(&mut state, Field::Path);
+        type_str(&mut state, "/here");
+        assert_eq!(state.directory_field_value(), "/here");
+
+        // A non-directory field reports no value.
+        focus_to(&mut state, Field::Name);
+        assert_eq!(state.directory_field_value(), "");
+    }
+
+    #[test]
+    fn set_directory_field_updates_the_focused_directory_field() {
+        let mut state = FormState::new();
+        // Clone Location is set verbatim.
+        focus_to(&mut state, Field::Location);
+        state.set_directory_field("/chosen");
+        assert_eq!(state.location(), "/chosen");
+
+        // Existing Path is set and re-derives the name.
+        state.toggle_mode();
+        focus_to(&mut state, Field::Path);
+        state.set_directory_field("/home/me/picked");
+        assert_eq!(state.path(), "/home/me/picked");
+        assert_eq!(state.name(), "picked");
+    }
+
+    #[test]
+    fn set_directory_field_is_a_noop_on_a_non_directory_field() {
+        let mut state = FormState::new();
+        focus_to(&mut state, Field::Url);
+        state.set_directory_field("/ignored");
+        // Neither the URL nor the directory paths change.
+        assert_eq!(state.url(), "");
+        assert_eq!(state.location(), "");
+        assert_eq!(state.path(), "");
     }
 
     #[test]
