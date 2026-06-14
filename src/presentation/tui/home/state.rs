@@ -20,11 +20,22 @@ pub fn worktree_name(worktree: &WorktreeState) -> &str {
     worktree.branch.as_deref().unwrap_or("(detached)")
 }
 
-/// The opened workspace and the selectable list of its worktrees.
+/// The name of the root row: the workspace itself, belonging to no session.
+/// Used as its display label and to target it from `session switch root`.
+pub const ROOT_NAME: &str = "root";
+
+/// The opened workspace and the selectable list of its worktrees, preceded by a
+/// synthetic *root row*.
+///
+/// The first row (index 0) is the workspace root, which belongs to no session:
+/// activating it and running `terminal`/`agent` there works at the workspace
+/// root rather than inside a session's worktree. Indices `1..=worktrees.len()`
+/// are the recorded worktrees, so row `i` maps to `worktrees[i - 1]`.
 ///
 /// Two cursors are tracked: `selected_index` is where the keyboard cursor sits
-/// while navigating, and `active_index` is the worktree subsequent commands
-/// (`space`, and later `terminal`/`ai`) act on.
+/// while navigating, and `active_index` is the row subsequent commands
+/// (`session switch`, and later `terminal`/`ai`) act on. Both default to the
+/// root row.
 #[derive(Debug, Clone)]
 pub struct WorktreeList {
     workspace_name: String,
@@ -34,8 +45,8 @@ pub struct WorktreeList {
 }
 
 impl WorktreeList {
-    /// Builds a list for the named workspace, with the cursor at the top and
-    /// the first worktree (the primary) active.
+    /// Builds a list for the named workspace, with both the cursor and the
+    /// active row on the root (no session selected yet).
     pub fn new(workspace_name: impl Into<String>, worktrees: Vec<WorktreeState>) -> Self {
         Self {
             workspace_name: workspace_name.into(),
@@ -57,75 +68,137 @@ impl WorktreeList {
         self.selected_index
     }
 
-    /// Index of the active worktree (the one commands act on).
+    /// Index of the active row (the one commands act on).
     pub fn active_index(&self) -> usize {
         self.active_index
     }
 
+    /// Whether the workspace has no recorded worktrees (only the root row).
     pub fn is_empty(&self) -> bool {
         self.worktrees.is_empty()
     }
 
-    /// The worktree under the cursor, or `None` when the list is empty.
+    /// Number of selectable rows: the root row plus every worktree (≥ 1).
+    fn selectable_rows(&self) -> usize {
+        self.worktrees.len() + 1
+    }
+
+    /// The worktree at a selectable row: row 0 is the root (no worktree), and
+    /// row `i` maps to `worktrees[i - 1]`.
+    fn worktree_at(&self, row: usize) -> Option<&WorktreeState> {
+        row.checked_sub(1).and_then(|i| self.worktrees.get(i))
+    }
+
+    /// The worktree under the cursor, or `None` when the cursor is on the root
+    /// row (which belongs to no session).
     pub fn selected(&self) -> Option<&WorktreeState> {
-        self.worktrees.get(self.selected_index)
+        self.worktree_at(self.selected_index)
     }
 
-    /// The active worktree, or `None` when the list is empty.
+    /// The active worktree, or `None` when the root row is active.
     pub fn active(&self) -> Option<&WorktreeState> {
-        self.worktrees.get(self.active_index)
+        self.worktree_at(self.active_index)
     }
 
-    /// Make the worktree under the cursor active, returning its name. No-op
-    /// (returning `None`) when the list is empty.
-    pub fn activate_selected(&mut self) -> Option<&str> {
-        if self.worktrees.is_empty() {
-            return None;
-        }
+    /// Whether the cursor is on the root row.
+    pub fn root_selected(&self) -> bool {
+        self.selected_index == 0
+    }
+
+    /// Whether the root row is the active one.
+    pub fn root_active(&self) -> bool {
+        self.active_index == 0
+    }
+
+    /// Make the row under the cursor active, returning its display name (the
+    /// branch name, or [`ROOT_NAME`] for the root row).
+    pub fn activate_selected(&mut self) -> &str {
         self.active_index = self.selected_index;
-        self.active().map(worktree_name)
+        self.active_name()
     }
 
-    /// Make the worktree named `name` active, returning whether one matched.
+    /// The display name of the active row: its branch, or [`ROOT_NAME`] for the
+    /// root row.
+    fn active_name(&self) -> &str {
+        self.active().map(worktree_name).unwrap_or(ROOT_NAME)
+    }
+
+    /// Make the row named `name` active, returning whether one matched. The
+    /// root row matches [`ROOT_NAME`]; every other name is matched against the
+    /// worktree branches.
     pub fn activate_by_name(&mut self, name: &str) -> bool {
+        if name == ROOT_NAME {
+            self.active_index = 0;
+            return true;
+        }
         match self.worktrees.iter().position(|w| worktree_name(w) == name) {
             Some(index) => {
-                self.active_index = index;
+                self.active_index = index + 1;
                 true
             }
             None => false,
         }
     }
 
-    /// The worktrees as command-facing [`WorktreeRef`]s (name + active flag).
+    /// The rows as command-facing [`WorktreeRef`]s (name + active flag): the
+    /// root row first, then every worktree.
     pub fn refs(&self) -> Vec<WorktreeRef> {
-        self.worktrees
-            .iter()
-            .enumerate()
-            .map(|(i, w)| WorktreeRef {
-                name: worktree_name(w).to_string(),
-                active: i == self.active_index,
-            })
-            .collect()
+        let mut refs = vec![WorktreeRef {
+            name: ROOT_NAME.to_string(),
+            active: self.active_index == 0,
+        }];
+        refs.extend(self.worktrees.iter().enumerate().map(|(i, w)| WorktreeRef {
+            name: worktree_name(w).to_string(),
+            active: i + 1 == self.active_index,
+        }));
+        refs
     }
 
-    /// Move the cursor up one row, wrapping to the bottom. No-op when empty.
-    pub fn move_up(&mut self) {
+    /// Move the cursor to the next worktree row, wrapping among the worktrees
+    /// and **skipping the root row**, and return it. `None` when there are no
+    /// worktrees (only the root row exists, so there is nothing to cycle). Used
+    /// by the embedded terminal's leader switch (`Ctrl-O` then `n`), which
+    /// cycles between session terminals.
+    pub fn focus_next_worktree(&mut self) -> Option<&WorktreeState> {
         if self.worktrees.is_empty() {
-            return;
+            return None;
         }
+        // Worktrees occupy rows 1..=N; advancing past the last wraps to row 1.
+        self.selected_index = if self.selected_index >= self.worktrees.len() {
+            1
+        } else {
+            self.selected_index + 1
+        };
+        self.selected()
+    }
+
+    /// Move the cursor to the previous worktree row, wrapping among the
+    /// worktrees and **skipping the root row**, and return it. `None` when there
+    /// are no worktrees (`Ctrl-O` then `p`).
+    pub fn focus_prev_worktree(&mut self) -> Option<&WorktreeState> {
+        if self.worktrees.is_empty() {
+            return None;
+        }
+        // From the first worktree (or the root row) wrap to the last worktree.
+        self.selected_index = if self.selected_index <= 1 {
+            self.worktrees.len()
+        } else {
+            self.selected_index - 1
+        };
+        self.selected()
+    }
+
+    /// Move the cursor up one row, wrapping from the root row to the bottom.
+    pub fn move_up(&mut self) {
         self.selected_index = self
             .selected_index
             .checked_sub(1)
-            .unwrap_or(self.worktrees.len() - 1);
+            .unwrap_or(self.selectable_rows() - 1);
     }
 
-    /// Move the cursor down one row, wrapping to the top. No-op when empty.
+    /// Move the cursor down one row, wrapping from the bottom to the root row.
     pub fn move_down(&mut self) {
-        if self.worktrees.is_empty() {
-            return;
-        }
-        self.selected_index = (self.selected_index + 1) % self.worktrees.len();
+        self.selected_index = (self.selected_index + 1) % self.selectable_rows();
     }
 }
 
@@ -463,30 +536,27 @@ impl HomeState {
         self.list.move_down();
     }
 
-    /// Make the worktree under the cursor the active one (the target of
-    /// subsequent commands), logging the switch. No-op when the list is empty.
+    /// Make the row under the cursor the active one (the target of subsequent
+    /// commands), logging the switch. The root row switches to "root".
     pub fn select_worktree(&mut self) {
-        if let Some(name) = self.list.activate_selected() {
-            let name = name.to_string();
-            self.log
-                .push(LogLine::notice(format!("Switched to workspace \"{name}\"")));
-        }
+        let name = self.list.activate_selected().to_string();
+        self.log
+            .push(LogLine::notice(format!("Switched to \"{name}\"")));
     }
 
-    /// Move the cursor to the next worktree (wrapping) and return its path, so
-    /// the embedded terminal can re-root there on a leader switch (`Ctrl-O` then
-    /// `n`). `None` when the list is empty (nothing to switch to).
+    /// Move the cursor to the next worktree (wrapping among worktrees, skipping
+    /// the root row) and return its path, so the embedded terminal can re-root
+    /// there on a leader switch (`Ctrl-O` then `n`). `None` when there are no
+    /// worktrees (nothing to switch to).
     pub fn focus_next_worktree(&mut self) -> Option<PathBuf> {
-        self.list.move_down();
-        self.list.selected().map(|w| w.path.clone())
+        self.list.focus_next_worktree().map(|w| w.path.clone())
     }
 
-    /// Move the cursor to the previous worktree (wrapping) and return its path,
-    /// for the embedded terminal to re-root there (`Ctrl-O` then `p`). `None`
-    /// when the list is empty.
+    /// Move the cursor to the previous worktree (wrapping among worktrees,
+    /// skipping the root row) and return its path, for the embedded terminal to
+    /// re-root there (`Ctrl-O` then `p`). `None` when there are no worktrees.
     pub fn focus_prev_worktree(&mut self) -> Option<PathBuf> {
-        self.list.move_up();
-        self.list.selected().map(|w| w.path.clone())
+        self.list.focus_prev_worktree().map(|w| w.path.clone())
     }
 
     /// Switch from the sidebar to the command input line.
@@ -582,7 +652,7 @@ impl HomeState {
             Effect::Activate(ref name) => {
                 if self.list.activate_by_name(name) {
                     self.log
-                        .push(LogLine::notice(format!("Switched to workspace \"{name}\"")));
+                        .push(LogLine::notice(format!("Switched to \"{name}\"")));
                 } else {
                     self.log
                         .push(LogLine::error(format!("no worktree named \"{name}\"")));
@@ -689,47 +759,57 @@ mod tests {
     }
 
     #[test]
-    fn new_list_starts_at_the_top() {
+    fn new_list_starts_on_the_root_row() {
         let list = sample();
         assert_eq!(list.workspace_name(), "usagi");
+        // The cursor starts on the root row, which belongs to no session.
         assert_eq!(list.selected_index(), 0);
+        assert!(list.root_selected());
+        assert!(list.selected().is_none());
         assert_eq!(list.worktrees().len(), 3);
         assert!(!list.is_empty());
-        assert_eq!(list.selected().unwrap().branch.as_deref(), Some("main"));
     }
 
     #[test]
-    fn empty_list_has_no_selection() {
+    fn empty_list_still_has_the_root_row() {
         let list = WorktreeList::new("usagi", Vec::new());
         assert!(list.is_empty());
+        assert!(list.root_selected());
+        // The root row has no worktree behind it.
         assert!(list.selected().is_none());
     }
 
     #[test]
-    fn move_down_advances_and_wraps() {
-        let mut list = sample();
+    fn move_down_advances_past_the_root_row_and_wraps() {
+        let mut list = sample(); // root, main, feature, fix
         list.move_down();
         assert_eq!(list.selected_index(), 1);
-        list.move_down();
-        list.move_down();
-        // Wraps from the last item back to the first.
-        assert_eq!(list.selected_index(), 0);
         assert_eq!(list.selected().unwrap().branch.as_deref(), Some("main"));
+        list.move_down();
+        list.move_down();
+        assert_eq!(list.selected_index(), 3);
+        assert_eq!(list.selected().unwrap().branch.as_deref(), Some("fix"));
+        // Wraps from the last worktree back to the root row.
+        list.move_down();
+        assert_eq!(list.selected_index(), 0);
+        assert!(list.root_selected());
     }
 
     #[test]
-    fn move_up_wraps_to_the_bottom() {
-        let mut list = sample();
+    fn move_up_wraps_from_the_root_row_to_the_bottom() {
+        let mut list = sample(); // root, main, feature, fix
         list.move_up();
-        assert_eq!(list.selected_index(), 2);
+        assert_eq!(list.selected_index(), 3);
         assert_eq!(list.selected().unwrap().branch.as_deref(), Some("fix"));
         list.move_up();
-        assert_eq!(list.selected_index(), 1);
+        assert_eq!(list.selected_index(), 2);
+        assert_eq!(list.selected().unwrap().branch.as_deref(), Some("feature"));
     }
 
     #[test]
-    fn movement_is_a_noop_on_an_empty_list() {
+    fn movement_wraps_around_the_lone_root_row_when_empty() {
         let mut list = WorktreeList::new("usagi", Vec::new());
+        // Only the root row exists, so movement keeps the cursor on it.
         list.move_up();
         assert_eq!(list.selected_index(), 0);
         list.move_down();
@@ -737,51 +817,80 @@ mod tests {
     }
 
     #[test]
-    fn the_first_worktree_is_active_by_default() {
+    fn the_root_row_is_active_by_default() {
         let list = sample();
         assert_eq!(list.active_index(), 0);
-        assert_eq!(list.active().unwrap().branch.as_deref(), Some("main"));
-    }
-
-    #[test]
-    fn activate_selected_follows_the_cursor() {
-        let mut list = sample();
-        list.move_down(); // cursor on "feature"
-        assert_eq!(list.activate_selected(), Some("feature"));
-        assert_eq!(list.active_index(), 1);
-        // The cursor and the active worktree are independent afterwards.
-        list.move_down(); // cursor on "fix"
-        assert_eq!(list.active_index(), 1);
-        assert_eq!(list.selected_index(), 2);
-    }
-
-    #[test]
-    fn activate_selected_on_an_empty_list_is_a_noop() {
-        let mut list = WorktreeList::new("usagi", Vec::new());
-        assert_eq!(list.activate_selected(), None);
+        assert!(list.root_active());
         assert!(list.active().is_none());
     }
 
     #[test]
-    fn activate_by_name_matches_or_reports_missing() {
-        let mut list = sample();
-        assert!(list.activate_by_name("fix"));
+    fn activate_selected_follows_the_cursor() {
+        let mut list = sample(); // root, main, feature, fix
+        list.move_down();
+        list.move_down(); // cursor on "feature"
+        assert_eq!(list.activate_selected(), "feature");
         assert_eq!(list.active_index(), 2);
-        assert!(!list.activate_by_name("nope"));
-        // A failed lookup leaves the active worktree unchanged.
+        assert!(!list.root_active());
+        // The cursor and the active row are independent afterwards.
+        list.move_down(); // cursor on "fix"
         assert_eq!(list.active_index(), 2);
+        assert_eq!(list.selected_index(), 3);
     }
 
     #[test]
-    fn refs_expose_names_and_the_active_flag() {
+    fn activate_selected_can_return_to_the_root_row() {
+        let mut list = sample();
+        list.move_down(); // cursor on "main"
+        list.activate_selected();
+        assert!(!list.root_active());
+        // Moving back to the root row and activating it returns to "root".
+        list.move_up(); // cursor on the root row
+        assert_eq!(list.activate_selected(), ROOT_NAME);
+        assert!(list.root_active());
+    }
+
+    #[test]
+    fn activate_selected_on_an_empty_list_picks_the_root_row() {
+        let mut list = WorktreeList::new("usagi", Vec::new());
+        assert_eq!(list.activate_selected(), ROOT_NAME);
+        assert!(list.root_active());
+        assert!(list.active().is_none());
+    }
+
+    #[test]
+    fn activate_by_name_matches_worktrees_the_root_or_reports_missing() {
+        let mut list = sample(); // root, main, feature, fix
+        assert!(list.activate_by_name("fix"));
+        assert_eq!(list.active_index(), 3);
+        // The root row is reachable by name too.
+        assert!(list.activate_by_name(ROOT_NAME));
+        assert_eq!(list.active_index(), 0);
+        assert!(list.root_active());
+        assert!(!list.activate_by_name("nope"));
+        // A failed lookup leaves the active row unchanged.
+        assert_eq!(list.active_index(), 0);
+    }
+
+    #[test]
+    fn refs_expose_the_root_row_then_worktrees_with_the_active_flag() {
         let mut list = sample();
         list.activate_by_name("feature");
         let refs = list.refs();
-        assert_eq!(refs.len(), 3);
-        assert_eq!(refs[0].name, "main");
+        assert_eq!(refs.len(), 4);
+        assert_eq!(refs[0].name, ROOT_NAME);
         assert!(!refs[0].active);
-        assert_eq!(refs[1].name, "feature");
-        assert!(refs[1].active);
+        assert_eq!(refs[1].name, "main");
+        assert!(!refs[1].active);
+        assert_eq!(refs[2].name, "feature");
+        assert!(refs[2].active);
+    }
+
+    #[test]
+    fn refs_mark_the_root_row_active_by_default() {
+        let refs = sample().refs();
+        assert_eq!(refs[0].name, ROOT_NAME);
+        assert!(refs[0].active);
     }
 
     #[test]
@@ -827,10 +936,11 @@ mod tests {
 
     #[test]
     fn selecting_a_worktree_activates_it() {
-        let mut state = state();
+        let mut state = state(); // root, main, feature
+        state.move_down();
         state.move_down(); // cursor on "feature"
         state.select_worktree();
-        assert_eq!(state.list().active_index(), 1);
+        assert_eq!(state.list().active_index(), 2);
         let last = state.log().last().unwrap();
         assert_eq!(last.kind, LineKind::Notice);
         assert!(last.text.contains("feature"));
@@ -838,11 +948,15 @@ mod tests {
     }
 
     #[test]
-    fn selecting_on_an_empty_list_does_nothing() {
+    fn selecting_the_root_row_switches_to_root() {
+        // The cursor starts on the root row; activating it switches to "root".
         let mut state = HomeState::new("usagi", Vec::new(), None);
-        let before = state.log().len();
         state.select_worktree();
-        assert_eq!(state.log().len(), before);
+        assert!(state.list().root_active());
+        let last = state.log().last().unwrap();
+        assert_eq!(last.kind, LineKind::Notice);
+        assert!(last.text.contains("root"));
+        assert!(last.text.contains("Switched"));
     }
 
     #[test]
@@ -921,16 +1035,31 @@ mod tests {
 
     #[test]
     fn session_switch_changes_the_active_worktree() {
-        let mut state = state(); // main (active), feature
+        let mut state = state(); // root (active), main, feature
         for c in "session switch feature".chars() {
             state.push_char(c);
         }
         let submission = state.submit();
         assert!(matches!(submission.effect, Effect::Activate(_)));
-        assert_eq!(state.list().active_index(), 1);
+        assert_eq!(state.list().active_index(), 2);
         let last = state.log().last().unwrap();
         assert_eq!(last.kind, LineKind::Notice);
         assert!(last.text.contains("feature"));
+    }
+
+    #[test]
+    fn session_switch_root_returns_to_the_root_row() {
+        let mut state = state(); // root (active), main, feature
+        state.list.activate_by_name("feature");
+        assert!(!state.list().root_active());
+        for c in "session switch root".chars() {
+            state.push_char(c);
+        }
+        state.submit();
+        assert!(state.list().root_active());
+        let last = state.log().last().unwrap();
+        assert_eq!(last.kind, LineKind::Notice);
+        assert!(last.text.contains("root"));
     }
 
     #[test]
@@ -1219,25 +1348,38 @@ mod tests {
     }
 
     #[test]
-    fn focus_next_and_prev_cycle_the_cursor_and_yield_paths() {
-        // The sample worktrees live at /repo/main and /repo/feature.
+    fn focus_next_and_prev_cycle_worktrees_skipping_the_root_row() {
+        // root (row 0), main@/repo/main (row 1), feature@/repo/feature (row 2).
         let mut state = state();
-        assert_eq!(state.list().selected_index(), 0);
-        // Next advances the cursor and returns the now-selected path.
-        assert_eq!(
-            state.focus_next_worktree(),
-            Some(PathBuf::from("/repo/feature"))
-        );
-        assert_eq!(state.list().selected_index(), 1);
-        // It wraps from the bottom back to the top.
+        assert_eq!(state.list().selected_index(), 0); // root
+                                                      // Next moves from the root row onto the first worktree.
         assert_eq!(
             state.focus_next_worktree(),
             Some(PathBuf::from("/repo/main"))
         );
-        // Prev walks the other way, wrapping to the bottom.
+        assert_eq!(state.list().selected_index(), 1);
+        // Then onto the next worktree.
+        assert_eq!(
+            state.focus_next_worktree(),
+            Some(PathBuf::from("/repo/feature"))
+        );
+        assert_eq!(state.list().selected_index(), 2);
+        // It wraps among the worktrees (skipping the root row) back to the first.
+        assert_eq!(
+            state.focus_next_worktree(),
+            Some(PathBuf::from("/repo/main"))
+        );
+        assert_eq!(state.list().selected_index(), 1);
+        // Prev walks the other way, wrapping to the last worktree.
         assert_eq!(
             state.focus_prev_worktree(),
             Some(PathBuf::from("/repo/feature"))
+        );
+        assert_eq!(state.list().selected_index(), 2);
+        // Prev again steps back one worktree (no wrap).
+        assert_eq!(
+            state.focus_prev_worktree(),
+            Some(PathBuf::from("/repo/main"))
         );
         assert_eq!(state.list().selected_index(), 1);
     }
