@@ -29,6 +29,14 @@ pub enum AgentCli {
 /// Kept as a literal — it is fixed and lets `domain` stay free of `serde_json`.
 const ISSUE_MCP_CONFIG: &str = r#"{"mcpServers":{"usagi":{"command":"usagi","args":["mcp"]}}}"#;
 
+/// System-prompt addendum injected into agents launched from a usagi session.
+///
+/// Every agent `:agent` starts already lives inside the session's dedicated
+/// worktree, so the usual "create a worktree first" workflow step is redundant
+/// here. We tell the agent up front to skip it and work in place. Kept free of
+/// single quotes so it survives the single-quoted shell argument verbatim.
+const SESSION_WORKTREE_PROMPT: &str = "あなたは usagi が管理するセッション専用の worktree 内で起動されています。このディレクトリは既に独立した作業環境のため、新たに git worktree を作成する必要はありません。ここで直接作業を進めてください。";
+
 impl AgentCli {
     /// The shell command (program name) usagi launches for this agent — the
     /// word the `agent` command runs inside the embedded terminal.
@@ -42,13 +50,19 @@ impl AgentCli {
     /// The full command line `:agent` sends to the embedded shell, with usagi's
     /// issue MCP server wired in so the agent can manage issues immediately.
     ///
-    /// Claude Code accepts the server inline via `--mcp-config`; the JSON is
-    /// single-quoted so the shell passes it through verbatim (it contains no
-    /// single quotes). Gemini has no inline flag — its MCP servers come from
-    /// `settings.json` — so it launches plain for now.
+    /// Claude Code accepts the server inline via `--mcp-config` and a
+    /// session-scoped instruction via `--append-system-prompt`; both arguments
+    /// are single-quoted so the shell passes them through verbatim (neither
+    /// value contains a single quote). The system prompt tells the agent it is
+    /// already inside a usagi worktree, so it skips creating one. Gemini has no
+    /// inline flags — its MCP servers come from `settings.json` — so it launches
+    /// plain for now.
     pub fn launch_command(self) -> String {
         match self {
-            AgentCli::Claude => format!("claude --mcp-config '{ISSUE_MCP_CONFIG}'"),
+            AgentCli::Claude => format!(
+                "claude --mcp-config '{ISSUE_MCP_CONFIG}' \
+                 --append-system-prompt '{SESSION_WORKTREE_PROMPT}'"
+            ),
             AgentCli::Gemini => "gemini".to_string(),
         }
     }
@@ -223,10 +237,12 @@ mod tests {
     fn claude_launch_command_wires_in_the_issue_mcp_server() {
         let launch = AgentCli::Claude.launch_command();
         // The program is still `claude`, now with the issue MCP server passed
-        // inline via `--mcp-config` (single-quoted so the shell keeps the JSON).
+        // inline via `--mcp-config` and a session-scoped instruction passed via
+        // `--append-system-prompt` (both single-quoted so the shell keeps them).
         assert_eq!(
             launch,
-            "claude --mcp-config '{\"mcpServers\":{\"usagi\":{\"command\":\"usagi\",\"args\":[\"mcp\"]}}}'"
+            "claude --mcp-config '{\"mcpServers\":{\"usagi\":{\"command\":\"usagi\",\"args\":[\"mcp\"]}}}' \
+             --append-system-prompt 'あなたは usagi が管理するセッション専用の worktree 内で起動されています。このディレクトリは既に独立した作業環境のため、新たに git worktree を作成する必要はありません。ここで直接作業を進めてください。'"
         );
     }
 
