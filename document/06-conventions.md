@@ -14,6 +14,7 @@
 - [プルリクエスト](#プルリクエスト)
 - [品質チェック（コミット・push 前に必須）](#品質チェックコミットpush-前に必須)
 - [Git Hooks（lefthook）](#git-hookslefthook)
+- [CI（GitHub Actions）](#cigithub-actions)
 - [リリース](#リリース)
 
 ## アーキテクチャ
@@ -83,6 +84,19 @@ cargo test                                 # テスト
 | pre-commit | ブランチ名チェック / staged な `.rs` を `cargo fmt` |
 | commit-msg | Conventional Commits 形式チェック |
 | pre-push | `cargo clippy -- -D warnings` / `cargo test` |
+
+## CI（GitHub Actions）
+
+`main` への push / PR をトリガーに自動チェックが走る。
+
+| ファイル | トリガー | 役割 |
+|---|---|---|
+| `.github/workflows/test.yml` | `main` への push / PR | `cargo fmt --check` / `clippy` / `build` / `test` |
+| `.github/workflows/coverage.yml` | PR | カバレッジ計測・PR コメント・100% 未満で失敗 |
+| `.github/workflows/markdown-link-check.yml` | `.md` 変更を含む push / PR | Markdown のリンク切れ（相対リンク・アンカー・外部 URL）を [lychee](https://github.com/lycheeverse/lychee) で検証 |
+| `.github/workflows/enforce-pr-base.yml` | PR | ベースブランチが `main` であることを強制 |
+
+- リンクチェックの設定（リトライ・除外・アンカー検証）は `lychee.toml` に集約する。ファイル内の見出しアンカー（`#見出し`）も検証するため、目次リンク等が見出しと一致していないと失敗する。
 
 ## リリース
 
