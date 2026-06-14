@@ -41,6 +41,7 @@
 | 026 | [agent](026-agent.md) ✅ | `agent` 埋め込みターミナルで Agent CLI を起動（`terminal` → `claude` のショートカット） | tui | medium | 006 |
 | 027 | [command-hints](027-command-hints.md) ✅ | コマンドモードの入力候補・ヒント表示 | tui | low | 002, 008 |
 | 028 | [agent-wait-notify](028-agent-wait-notify.md) ✅ | 埋め込みターミナルの入力待ち検知と通知（サイドバーマーカー＋デスクトップ通知） | tui | medium | 006, 026 |
+| 029 | [home-config](029-home-config.md) ✅ | `config` ホーム画面から設定画面を開く | tui | medium | 002, 022 |
 
 ## 依存関係
 
@@ -62,6 +63,8 @@ graph TD
     002 --> 008[008 man]
     002 --> 027[027 command-hints]
     008 --> 027
+    002 --> 029[029 home-config]
+    022[022 local-settings-ui] --> 029
     003 --> 009[009 sync]
     003 --> 010[010 finish]
     003 --> 011[011 list]

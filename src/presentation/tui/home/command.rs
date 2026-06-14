@@ -39,6 +39,10 @@ pub enum Effect {
     /// `agent`). This is `terminal` with the agent CLI launched inside it; the
     /// directory and agent command are resolved by the event loop / wiring.
     OpenAgent,
+    /// Open the configuration screen (the user ran `config`) to edit the global
+    /// settings and this workspace's local overrides. The screen is run by the
+    /// event loop, which returns to the workspace screen when it is dismissed.
+    OpenConfig,
 }
 
 /// The result of running a command: lines to append plus a side effect.
@@ -409,6 +413,29 @@ impl Command for AgentCommand {
     }
 }
 
+/// `config`: open the configuration screen to edit the global settings and the
+/// current workspace's local overrides. Opening the screen is a side effect
+/// ([`Effect::OpenConfig`]) performed by the event loop, which owns the terminal
+/// and returns to the workspace screen when the user dismisses it.
+struct ConfigCommand;
+
+impl Command for ConfigCommand {
+    fn name(&self) -> &'static str {
+        "config"
+    }
+
+    fn description(&self) -> &'static str {
+        "Open the settings screen to edit configuration"
+    }
+
+    fn run(&self, _args: &str, _ctx: &CommandContext) -> CommandResult {
+        CommandResult {
+            lines: Vec::new(),
+            effect: Effect::OpenConfig,
+        }
+    }
+}
+
 /// A recognised command whose real behaviour is not built yet. It produces a
 /// friendly "coming soon" line so the surface stays discoverable; the follow-up
 /// issues replace each one with a real [`Command`] implementation. It still
@@ -468,6 +495,7 @@ impl CommandRegistry {
                 }),
                 Box::new(TerminalCommand),
                 Box::new(AgentCommand),
+                Box::new(ConfigCommand),
                 Box::new(HistoryCommand),
                 Box::new(ComingSoonCommand {
                     name: "doctor",
@@ -939,6 +967,13 @@ mod tests {
         let result = registry().dispatch("agent", &[], &[]);
         assert!(result.lines.is_empty());
         assert_eq!(result.effect, Effect::OpenAgent);
+    }
+
+    #[test]
+    fn config_requests_opening_the_settings_screen() {
+        let result = registry().dispatch("config", &[], &[]);
+        assert!(result.lines.is_empty());
+        assert_eq!(result.effect, Effect::OpenConfig);
     }
 
     #[test]
