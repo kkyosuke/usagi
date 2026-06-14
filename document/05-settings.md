@@ -55,34 +55,41 @@
 > リポジトリの worktree を切る新ブランチの**基点**を選びます。選択肢は `local`（ローカルの既定ブランチ。例
 > `main`）と `remote`（リモート追従の既定ブランチ。例 `origin/main`）。グローバル設定に対応項目はなく、
 > 未設定時は `remote` として扱います（`origin/<既定>` が無ければローカル既定ブランチ → それも無ければ現在の
-> HEAD にフォールバック）。**リポジトリ単位**の設定なので、複数 git を含むワークスペースでは各リポジトリ内で
-> Config を開いて個別に設定します。
+> HEAD にフォールバック）。ワークスペースのローカル設定（`<workspace>/.usagi/settings.json`）に保存され、
+> ホーム画面の `config` から編集します。
 
 - 全フィールドが任意（`Option`）で、`null` は「グローバル設定に従う」を意味します。テーマ（`theme`）や
   クローン先（`workspace_root`）のようにプロジェクト単位で変える意味の薄い項目は対象外です。
 - **実効設定 = グローバル設定にローカルの上書きを適用した結果**。解決は `domain/settings.rs` の
   `Settings::with_local`、ユースケースは `usecase/settings.rs` の `effective(storage, repo_root)` が担います。
 - 読み書きロジック・永続化（[issue 021](../issues/021-local-settings.md)）に加え、編集 UI も実装済み
-  （[issue 022](../issues/022-local-settings-ui.md)）。git リポジトリ内で設定画面（Config）を開くと、グローバル
-  設定の下に「Local · Agent CLI」「Local · Notifications」「Local · Default Branch」の行が現れ、Agent CLI と
-  Notifications は **「グローバルに従う / ローカルで上書き」**、Default Branch は **`local` / `remote`** を
-  切り替えられます。詳細は [design/04-config.md](design/04-config.md) を参照。
+  （[issue 022](../issues/022-local-settings-ui.md)）。ホーム画面のコマンドモードで `config` を実行すると
+  設定画面が**ワークスペーススコープ**で開き、「Agent CLI」「Notifications」「Default Branch」の 3 項目を
+  編集できます。Agent CLI と Notifications は **「グローバルに従う / ローカルで上書き」**、Default Branch は
+  **`local` / `remote`** を切り替えられます。詳細は [design/04-config.md](design/04-config.md) を参照。
 - JSON 例・フィールド詳細は [data/02-workspace.md](data/02-workspace.md#settingsjson-プロジェクト固有の設定上書きローカル設定) を参照。
 
 ## 設定の変更方法
 
 ### 設定画面（Config）
 
-`usagi hop` の起動画面で `Config`（`c`）を選ぶか、ホーム画面のコマンドモードで `config` を実行すると
-設定画面に入ります（ホーム画面から開いた場合は、起動中のワークスペースのローカル設定が編集対象になります）。
+設定画面は **開いた場所でスコープが分かれます**。
+
+- `usagi hop` の起動画面で `Config`（`c`）を選ぶ → **グローバルスコープ**。アプリ全体の設定
+  （`~/.usagi/settings.json`）を編集します。
+- ホーム画面のコマンドモードで `config` を実行する → **ワークスペーススコープ**。起動中のワークスペースの
+  ローカル設定（`<workspace>/.usagi/settings.json`）だけを編集します。
+
+どちらのスコープも操作は共通です。
 
 - 各項目は `< 値 >` の左右セレクタ。`↑↓` で項目移動、`←→` で値の切り替え。
 - 変更はメモリ上に保持され、未保存の項目はラベル左の黄色 `●` と黄色の値で明示されます。
-- 末尾の **Save ボタン**で `Enter` を押すと `settings.json` へ保存します（変更があるときだけ有効）。
+- 末尾の **Save ボタン**で `Enter` を押すとそのスコープの `settings.json` へ保存します（変更があるときだけ有効）。
 
 操作の詳細・レイアウトは [design/04-config.md](design/04-config.md) を参照してください。
 
-> 現状 Config 画面で編集できるのは Theme / Default Workspace / Notifications / Agent CLI の 4 項目です。
+> グローバルスコープで編集できるのは Theme / Default Workspace / Notifications / Agent CLI の 4 項目、
+> ワークスペーススコープで編集できるのは Agent CLI / Notifications / Default Branch の 3 項目です。
 > `workspace_root` は `settings.json` に保存されますが、画面からの編集は今後対応予定です。
 
 ### CLI
