@@ -1,0 +1,18 @@
+name: Enforce PR base branch
+
+on:
+  pull_request:
+    types: [opened, reopened, edited, synchronize]
+
+jobs:
+  enforce-base-main:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ensure PR targets main
+        run: |
+          echo "PR base branch: ${{ github.base_ref }}"
+          if [ "${{ github.base_ref }}" != "main" ]; then
+            echo "::error::PR のベースブランチは 'main' でなければなりません（現在: '${{ github.base_ref }}'）。"
+            exit 1
+          fi
+          echo "PR は main に向いています。OK。"
