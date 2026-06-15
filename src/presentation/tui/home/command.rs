@@ -34,8 +34,12 @@ pub enum Effect {
     /// name) to pick one or more sessions to delete at once. `force` carries the
     /// `--force` flag so the confirmed removal can discard uncommitted changes.
     OpenRemoveModal { force: bool },
-    /// Switch the active worktree to the one named by the string. The screen
-    /// resolves the name against its worktree list and reports the result.
+    /// Enter 切替 (Switch) to pick a session in the left pane (the user ran
+    /// `session switch` with no name).
+    EnterSwitch,
+    /// Focus the session named by the string (the user ran `session switch
+    /// <name>`). The event loop resolves the name against the worktree list and,
+    /// for a live session, attaches the pane.
     Activate(String),
     /// Open an interactive terminal in the selected worktree (the user ran
     /// `terminal`). The directory is resolved by the event loop.
@@ -72,6 +76,38 @@ impl CommandResult {
     }
 }
 
+/// Which of the home screen's command scopes a command belongs to.
+///
+/// The two surfaces are *physically separate* in the redesigned home screen
+/// (統括 / 切替 / 在席 / 没入, see `document/design/05-home.md`): the bottom
+/// command line in *統括 (Overview)* operates the whole workspace
+/// ([`CommandScope::Workspace`]), while the *在席 (Focus)* right pane operates one
+/// session ([`CommandScope::Session`]). Because the two never share a line, the
+/// scopes do not nest — a command is offered only in its own scope (plus the
+/// shared utilities). Commands are offered (completion, hints, `man` grouping)
+/// accordingly; [`CommandScope::Both`] commands are utilities available
+/// everywhere.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandScope {
+    /// Operating the whole workspace, the *統括 (Overview)* line: `session`,
+    /// `config`, `doctor`.
+    Workspace,
+    /// Operating a single session, the *在席 (Focus)* right pane: `terminal`,
+    /// `agent`, `ai`.
+    Session,
+    /// A utility available in every scope: `man`, `history`, `clear`, `quit`.
+    Both,
+}
+
+impl CommandScope {
+    /// Whether a command of this scope is offered while the screen is in
+    /// `current` scope. A command is offered in its own scope only;
+    /// [`CommandScope::Both`] utilities are offered everywhere.
+    pub fn visible_in(self, current: CommandScope) -> bool {
+        self == CommandScope::Both || self == current
+    }
+}
+
 /// Name, description, and usage detail of a registered command, exposed to
 /// commands (via [`CommandContext`]) so e.g. `man` can list the whole surface,
 /// and describe any single command, without reaching back into the registry.
@@ -83,6 +119,8 @@ pub struct CommandInfo {
     pub usage: &'static str,
     /// Example invocations shown by `man <command>`.
     pub examples: &'static [&'static str],
+    /// Which command scope it belongs to, for `man`'s grouping.
+    pub scope: CommandScope,
 }
 
 /// A worktree as seen by commands: its display name and whether it is the
@@ -132,6 +170,13 @@ pub trait Command {
         &[]
     }
 
+    /// Which command scope the command belongs to. Defaults to
+    /// [`CommandScope::Both`] (a utility offered in every scope); the
+    /// workspace- and session-specific commands override it.
+    fn scope(&self) -> CommandScope {
+        CommandScope::Both
+    }
+
     /// Run the command with its (trimmed) argument string and the context.
     fn run(&self, args: &str, ctx: &CommandContext) -> CommandResult;
 }
@@ -163,11 +208,20 @@ impl Command for ManCommand {
     fn run(&self, args: &str, ctx: &CommandContext) -> CommandResult {
         if args.is_empty() {
             let mut lines = vec![LogLine::output("Available commands:")];
-            for info in ctx.commands {
-                lines.push(LogLine::output(format!(
-                    "  {:<9}{}",
-                    info.name, info.description
-                )));
+            // Group by scope so the two modes are obvious: workspace-wide
+            // commands first, then per-session ones, then the utilities.
+            for (scope, header) in [
+                (CommandScope::Workspace, "Workspace (root):"),
+                (CommandScope::Session, "Session (selected):"),
+                (CommandScope::Both, "General:"),
+            ] {
+                lines.push(LogLine::output(format!("  {header}")));
+                for info in ctx.commands.iter().filter(|i| i.scope == scope) {
+                    lines.push(LogLine::output(format!(
+                        "    {:<9}{}",
+                        info.name, info.description
+                    )));
+                }
             }
             lines.push(LogLine::output(
                 "Type \"man <command>\" for usage and examples.",
@@ -307,6 +361,10 @@ impl Command for SessionCommand {
         ]
     }
 
+    fn scope(&self) -> CommandScope {
+        CommandScope::Workspace
+    }
+
     fn run(&self, args: &str, ctx: &CommandContext) -> CommandResult {
         let mut parts = args.splitn(2, char::is_whitespace);
         let sub = parts.next().unwrap_or("");
@@ -366,23 +424,18 @@ impl Command for SessionCommand {
     }
 }
 
-/// `session switch [name]`: switch the active session, or list the available
-/// ones when no name is given.
+/// `session switch [name]`: enter 切替 (Switch) to pick a session in the left
+/// pane when no name is given ([`Effect::EnterSwitch`]), or focus the named one
+/// directly ([`Effect::Activate`]).
 ///
-/// With a name, the resolution (and the success/not-found message) happens in
-/// the screen, which owns the worktree list and the active selection.
-fn switch(name: &str, ctx: &CommandContext) -> CommandResult {
+/// Either way the mode transition (and, for a live session, attaching the pane)
+/// happens in the event loop, which owns the worktree list and the modes.
+fn switch(name: &str, _ctx: &CommandContext) -> CommandResult {
     if name.is_empty() {
-        if ctx.worktrees.is_empty() {
-            return CommandResult::line(LogLine::output("No sessions to switch between."));
-        }
-        let mut lines = vec![LogLine::output("Sessions:")];
-        for worktree in ctx.worktrees {
-            let marker = if worktree.active { "*" } else { " " };
-            lines.push(LogLine::output(format!("  {marker} {}", worktree.name)));
-        }
-        lines.push(LogLine::output("Use \"session switch <name>\" to switch."));
-        return CommandResult::lines(lines);
+        return CommandResult {
+            lines: Vec::new(),
+            effect: Effect::EnterSwitch,
+        };
     }
 
     CommandResult {
@@ -403,7 +456,11 @@ impl Command for TerminalCommand {
     }
 
     fn description(&self) -> &'static str {
-        "Open an interactive terminal in the selected worktree (or root)"
+        "Open an interactive terminal in the selected session"
+    }
+
+    fn scope(&self) -> CommandScope {
+        CommandScope::Session
     }
 
     fn run(&self, _args: &str, _ctx: &CommandContext) -> CommandResult {
@@ -426,7 +483,11 @@ impl Command for AgentCommand {
     }
 
     fn description(&self) -> &'static str {
-        "Open the AI agent in the selected worktree or root (terminal + agent CLI)"
+        "Open the AI agent in the selected session (terminal + agent CLI)"
+    }
+
+    fn scope(&self) -> CommandScope {
+        CommandScope::Session
     }
 
     fn run(&self, _args: &str, _ctx: &CommandContext) -> CommandResult {
@@ -453,6 +514,10 @@ impl Command for ConfigCommand {
         "Edit this workspace's local settings"
     }
 
+    fn scope(&self) -> CommandScope {
+        CommandScope::Workspace
+    }
+
     fn run(&self, _args: &str, _ctx: &CommandContext) -> CommandResult {
         CommandResult {
             lines: Vec::new(),
@@ -470,6 +535,7 @@ struct ComingSoonCommand {
     description: &'static str,
     usage: &'static str,
     examples: &'static [&'static str],
+    scope: CommandScope,
 }
 
 impl Command for ComingSoonCommand {
@@ -487,6 +553,10 @@ impl Command for ComingSoonCommand {
 
     fn examples(&self) -> &'static [&'static str] {
         self.examples
+    }
+
+    fn scope(&self) -> CommandScope {
+        self.scope
     }
 
     fn run(&self, _args: &str, _ctx: &CommandContext) -> CommandResult {
@@ -512,14 +582,18 @@ impl CommandRegistry {
         Self {
             commands: vec![
                 Box::new(SessionCommand),
+                Box::new(TerminalCommand),
+                Box::new(AgentCommand),
+                // The not-yet-implemented `ai` placeholder sits after the working
+                // session commands so the 在席 (Focus) menu lists (and highlights)
+                // `terminal` first, matching `document/design/05-home.md`.
                 Box::new(ComingSoonCommand {
                     name: "ai",
                     description: "Talk to the AI agent",
                     usage: "ai <prompt>",
                     examples: &["ai fix the failing test"],
+                    scope: CommandScope::Session,
                 }),
-                Box::new(TerminalCommand),
-                Box::new(AgentCommand),
                 Box::new(ConfigCommand),
                 Box::new(HistoryCommand),
                 Box::new(ComingSoonCommand {
@@ -527,6 +601,7 @@ impl CommandRegistry {
                     description: "Check that required tools are installed",
                     usage: "doctor",
                     examples: &[],
+                    scope: CommandScope::Workspace,
                 }),
                 Box::new(ManCommand),
                 Box::new(ClearCommand),
@@ -549,7 +624,19 @@ impl CommandRegistry {
                 description: c.description(),
                 usage: c.usage(),
                 examples: c.examples(),
+                scope: c.scope(),
             })
+            .collect()
+    }
+
+    /// The commands belonging exactly to `scope`, in display order — used by the
+    /// 在席 (Focus) menu to list a session's runnable commands (`terminal`,
+    /// `agent`, `ai`). Unlike completion this is an exact-scope filter, so it
+    /// excludes the shared [`CommandScope::Both`] utilities.
+    pub fn commands_in_scope(&self, scope: CommandScope) -> Vec<CommandInfo> {
+        self.infos()
+            .into_iter()
+            .filter(|i| i.scope == scope)
             .collect()
     }
 
@@ -603,7 +690,7 @@ impl CommandRegistry {
     /// unchanged. A unique match is filled in; an ambiguous one extends to the
     /// longest common prefix and reports the candidates; no match leaves the
     /// input untouched.
-    pub fn complete(&self, input: &str) -> Completion {
+    pub fn complete(&self, input: &str, scope: CommandScope) -> Completion {
         if input.contains(char::is_whitespace) {
             return Completion {
                 input: input.to_string(),
@@ -614,6 +701,7 @@ impl CommandRegistry {
         let matches: Vec<&str> = self
             .commands
             .iter()
+            .filter(|c| c.scope().visible_in(scope))
             .map(|c| c.name())
             .filter(|name| name.starts_with(input))
             .collect();
@@ -642,7 +730,7 @@ impl CommandRegistry {
     /// is pressed. Once arguments are being given to a known command, it returns
     /// that command's usage syntax and examples instead. Unknown command words
     /// produce no hint. This is purely advisory; it never affects [`dispatch`].
-    pub fn suggest(&self, input: &str) -> Hint {
+    pub fn suggest(&self, input: &str, scope: CommandScope) -> Hint {
         let trimmed = input.trim_start();
         match trimmed.split_once(char::is_whitespace) {
             // Arguments are being typed: describe the resolved command, if known.
@@ -653,11 +741,14 @@ impl CommandRegistry {
                 },
                 None => Hint::None,
             },
-            // Still on the command word: list the commands matching its prefix.
+            // Still on the command word: list the in-scope commands matching its
+            // prefix (out-of-scope commands stay hidden so each mode's surface
+            // is small and clear).
             None => {
                 let hints: Vec<CommandHint> = self
                     .commands
                     .iter()
+                    .filter(|c| c.scope().visible_in(scope))
                     .filter(|c| c.name().starts_with(trimmed))
                     .map(|c| CommandHint {
                         name: c.name(),
@@ -1002,27 +1093,18 @@ mod tests {
     }
 
     #[test]
-    fn session_switch_without_a_name_lists_sessions_and_marks_the_active_one() {
+    fn session_switch_without_a_name_enters_switch_mode() {
+        // `session switch` with no name hands off to 切替 (Switch); the event loop
+        // owns the mode transition, so no lines are produced here.
         let result = registry().dispatch("session switch", &[], &worktree_refs());
-        assert_eq!(result.effect, Effect::None);
-        let joined = result
-            .lines
-            .iter()
-            .map(|l| l.text.as_str())
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(joined.contains("Sessions:"));
-        // The active session is marked with `*`.
-        assert!(joined.contains("* main"));
-        assert!(joined.contains("feature"));
-        assert!(joined.contains("session switch <name>"));
-    }
-
-    #[test]
-    fn session_switch_without_sessions_says_so() {
-        let result = registry().dispatch("session switch", &[], &[]);
-        assert_eq!(result.effect, Effect::None);
-        assert!(result.lines[0].text.contains("No sessions"));
+        assert_eq!(result.effect, Effect::EnterSwitch);
+        assert!(result.lines.is_empty());
+        // Even with no sessions it still enters Switch (the left pane has the root
+        // row to pick or create from).
+        assert_eq!(
+            registry().dispatch("session switch", &[], &[]).effect,
+            Effect::EnterSwitch
+        );
     }
 
     #[test]
@@ -1086,8 +1168,8 @@ mod tests {
 
     #[test]
     fn complete_fills_in_a_unique_match() {
-        // "doc" only matches "doctor".
-        let completion = registry().complete("doc");
+        // "doc" only matches "doctor" (a workspace command).
+        let completion = registry().complete("doc", CommandScope::Workspace);
         assert_eq!(completion.input, "doctor");
         assert!(completion.candidates.is_empty());
     }
@@ -1112,22 +1194,23 @@ mod tests {
         // The newcomer is fully wired (listed in `man`, dispatchable).
         assert!(registry.infos().iter().any(|i| i.name == "sync"));
         assert!(registry.dispatch("sync", &[], &[]).lines.is_empty());
-        // "s" matches both "session" and "sync"; common prefix is "s".
-        let completion = registry.complete("s");
+        // "s" matches both "session" (workspace) and "sync" (a `Both` utility);
+        // common prefix is "s". Completing in workspace scope offers both.
+        let completion = registry.complete("s", CommandScope::Workspace);
         assert_eq!(completion.input, "s");
         assert_eq!(completion.candidates, vec!["session", "sync"]);
     }
 
     #[test]
     fn complete_with_no_match_leaves_input_untouched() {
-        let completion = registry().complete("zzz");
+        let completion = registry().complete("zzz", CommandScope::Workspace);
         assert_eq!(completion.input, "zzz");
         assert!(completion.candidates.is_empty());
     }
 
     #[test]
     fn complete_does_not_touch_input_with_arguments() {
-        let completion = registry().complete("man ses");
+        let completion = registry().complete("man ses", CommandScope::Workspace);
         assert_eq!(completion.input, "man ses");
         assert!(completion.candidates.is_empty());
     }
@@ -1135,7 +1218,7 @@ mod tests {
     #[test]
     fn complete_does_not_offer_aliases() {
         // "h" matches "history" but not the "help" alias.
-        let completion = registry().complete("h");
+        let completion = registry().complete("h", CommandScope::Workspace);
         assert_eq!(completion.input, "history");
         assert!(completion.candidates.is_empty());
     }
@@ -1151,43 +1234,69 @@ mod tests {
         assert_eq!(common_prefix(&["terminal", "terminal"]), "terminal");
     }
 
+    /// The command names offered for an empty input in `scope`. Completion lists
+    /// every in-scope command when the input is empty, so its candidates are the
+    /// scope's surface (avoiding an unreachable match arm on the hint enum).
+    fn suggested_names(scope: CommandScope) -> Vec<String> {
+        registry().complete("", scope).candidates
+    }
+
     #[test]
-    fn suggest_lists_every_command_when_the_input_is_empty() {
-        // A bare prompt offers every command, each with its own description.
-        let registry = registry();
-        let expected: Vec<CommandHint> = registry
-            .infos()
-            .iter()
-            .map(|i| CommandHint {
-                name: i.name,
-                description: i.description,
-            })
-            .collect();
-        assert_eq!(registry.suggest(""), Hint::Commands(expected));
+    fn suggest_splits_the_command_surface_by_scope() {
+        let has = |names: &[String], name: &str| names.iter().any(|n| n == name);
+
+        // The 統括 (Overview) line offers the workspace commands and the shared
+        // utilities, but never the session-specific ones.
+        let workspace = suggested_names(CommandScope::Workspace);
+        assert!(has(&workspace, "session"));
+        assert!(has(&workspace, "config"));
+        assert!(has(&workspace, "doctor"));
+        assert!(has(&workspace, "man")); // a shared utility
+        assert!(!has(&workspace, "terminal"));
+        assert!(!has(&workspace, "agent"));
+        assert!(!has(&workspace, "ai"));
+
+        // The 在席 (Focus) prompt offers the session-specific commands and the
+        // shared utilities, but never the workspace ones — the two surfaces are
+        // physically separate, so they do not nest.
+        let session = suggested_names(CommandScope::Session);
+        assert!(has(&session, "terminal"));
+        assert!(has(&session, "agent"));
+        assert!(has(&session, "ai"));
+        assert!(has(&session, "man")); // a shared utility
+        assert!(!has(&session, "session"));
+        assert!(!has(&session, "config"));
+        assert!(!has(&session, "doctor"));
     }
 
     #[test]
     fn suggest_filters_commands_by_prefix() {
-        // "s" only matches "session" among the built-ins.
+        // "s" only matches "session" in workspace scope.
         assert_eq!(
-            registry().suggest("s"),
+            registry().suggest("s", CommandScope::Workspace),
             Hint::Commands(vec![CommandHint {
                 name: "session",
                 description: "Create, list, or switch sessions (branch + worktree)",
             }])
         );
+        // The scopes are separate, so "s" matches nothing in session scope (no
+        // session-specific command begins with it).
+        assert_eq!(registry().suggest("s", CommandScope::Session), Hint::None);
     }
 
     #[test]
     fn suggest_with_an_unknown_prefix_has_no_hint() {
-        assert_eq!(registry().suggest("zzz"), Hint::None);
+        assert_eq!(
+            registry().suggest("zzz", CommandScope::Workspace),
+            Hint::None
+        );
     }
 
     #[test]
     fn suggest_shows_usage_and_examples_once_arguments_are_typed() {
         // A trailing space moves past the command word onto its arguments.
         assert_eq!(
-            registry().suggest("session "),
+            registry().suggest("session ", CommandScope::Workspace),
             Hint::Usage {
                 usage:
                     "session [create|list|switch|remove] <name>  (aliases: create=c/new, list=ls, remove=rm)",
@@ -1203,6 +1312,74 @@ mod tests {
 
     #[test]
     fn suggest_with_arguments_to_an_unknown_command_has_no_hint() {
-        assert_eq!(registry().suggest("frob bar"), Hint::None);
+        assert_eq!(
+            registry().suggest("frob bar", CommandScope::Workspace),
+            Hint::None
+        );
+    }
+
+    #[test]
+    fn command_scope_visibility_is_same_scope_or_both() {
+        // A command is offered in its own scope only; `Both` utilities everywhere.
+        assert!(CommandScope::Workspace.visible_in(CommandScope::Workspace));
+        assert!(!CommandScope::Workspace.visible_in(CommandScope::Session));
+        assert!(CommandScope::Session.visible_in(CommandScope::Session));
+        assert!(!CommandScope::Session.visible_in(CommandScope::Workspace));
+        assert!(CommandScope::Both.visible_in(CommandScope::Workspace));
+        assert!(CommandScope::Both.visible_in(CommandScope::Session));
+    }
+
+    #[test]
+    fn commands_in_scope_lists_a_scopes_own_commands_in_order() {
+        // The 在席 menu lists exactly the Session-scope commands, in registry
+        // order, excluding the shared utilities. `terminal` comes first (and is
+        // highlighted by default); the coming-soon `ai` placeholder comes last.
+        let session: Vec<&str> = registry()
+            .commands_in_scope(CommandScope::Session)
+            .iter()
+            .map(|i| i.name)
+            .collect();
+        assert_eq!(session, vec!["terminal", "agent", "ai"]);
+        // Workspace scope lists its own commands and none of the session ones.
+        let workspace: Vec<&str> = registry()
+            .commands_in_scope(CommandScope::Workspace)
+            .iter()
+            .map(|i| i.name)
+            .collect();
+        assert!(workspace.contains(&"session"));
+        assert!(workspace.contains(&"config"));
+        assert!(!workspace.contains(&"terminal"));
+    }
+
+    #[test]
+    fn complete_respects_the_current_scope() {
+        // "a" matches the session commands "agent" and "ai" — offered in session
+        // scope, in registration order (common prefix "a")…
+        let session = registry().complete("a", CommandScope::Session);
+        assert_eq!(session.input, "a");
+        assert_eq!(session.candidates, vec!["agent", "ai"]);
+        // …but nothing in workspace scope, so the input is left untouched.
+        let workspace = registry().complete("a", CommandScope::Workspace);
+        assert_eq!(workspace.input, "a");
+        assert!(workspace.candidates.is_empty());
+    }
+
+    #[test]
+    fn man_groups_commands_by_scope() {
+        let joined = registry()
+            .dispatch("man", &[], &[])
+            .lines
+            .iter()
+            .map(|l| l.text.clone())
+            .collect::<Vec<_>>()
+            .join("\n");
+        // The listing is split into the two scopes plus the shared utilities.
+        assert!(joined.contains("Workspace (root):"));
+        assert!(joined.contains("Session (selected):"));
+        assert!(joined.contains("General:"));
+        // Every command still appears under one of the groups.
+        for info in registry().infos() {
+            assert!(joined.contains(info.name));
+        }
     }
 }

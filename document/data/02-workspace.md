@@ -183,9 +183,10 @@ session "login"  (/Users/me/git/usagi/.usagi/worktree/login)
 ```jsonc
 {
   "version": 1,
-  "agent_cli": "gemini",            // 任意。未設定ならグローバル値を使う
-  "notifications_enabled": false,   // 任意。未設定ならグローバル値を使う
-  "default_branch_source": "local" // 任意。未設定なら既定（remote）を使う
+  "agent_cli": "gemini",             // 任意。未設定ならグローバル値を使う
+  "notifications_enabled": false,    // 任意。未設定ならグローバル値を使う
+  "default_branch": "develop",       // 任意。未設定なら検出済み既定ブランチ（auto）
+  "default_branch_source": "local"   // 任意。未設定なら既定（remote）を使う
 }
 ```
 
@@ -193,10 +194,11 @@ session "login"  (/Users/me/git/usagi/.usagi/worktree/login)
 |---|---|---|
 | `agent_cli` | enum?\| | このプロジェクトで起動する AI エージェント CLI（`claude` / `gemini`）。`null`（未設定）ならグローバル設定にフォールバック |
 | `notifications_enabled` | bool?\| | このプロジェクトでのデスクトップ通知 ON/OFF。`null`（未設定）ならグローバル設定にフォールバック |
-| `default_branch_source` | enum?\| | `session create` で worktree を切る新ブランチの基点（`local` = ローカル既定ブランチ / `remote` = リモート追従の既定ブランチ）。`null`（未設定）なら既定の `remote`。グローバル設定に対応項目はなく、**リポジトリ単位**の設定 |
+| `default_branch` | string?\| | `session create` で worktree を切る新ブランチを**どのブランチから**切るか（例 `develop`）。`null`（未設定）ならリポジトリの検出済み既定ブランチ（auto）。グローバル設定に対応項目はなく、**リポジトリ単位**の設定 |
+| `default_branch_source` | enum?\| | 上のブランチを**ローカル形／リモート形のどちらで**基点にするか（`local` = ローカルのブランチ / `remote` = リモート追従のブランチ）。`null`（未設定）なら既定の `remote`。グローバル設定に対応項目はなく、**リポジトリ単位**の設定 |
 
 - `agent_cli` / `notifications_enabled` は `null`（未設定）で「グローバル設定に従う」を意味します。`light/dark` テーマやクローン先（`workspace_root`）のようにプロジェクト単位で変える意味の薄い項目は対象外です。
-- `default_branch_source` はグローバルに対応項目がなく、未設定時は既定（`remote`）として解決されます。`remote` 選択時に `origin/<既定>` が無ければローカル既定ブランチ → それも無ければ現在の HEAD にフォールバックします（`infrastructure/git.rs` の `resolve_base_ref`）。
+- `default_branch` / `default_branch_source` はグローバルに対応項目がなく、未設定時はそれぞれ検出済み既定ブランチ・`remote` として解決されます。`session create` は `default_branch`（未設定なら `origin/HEAD` → 現在のブランチ → `main` で解決した既定）を基点ブランチとし、`remote` 選択時に `origin/<ブランチ>` が無ければローカルのブランチ → それも無ければ現在の HEAD にフォールバックします（`infrastructure/git.rs` の `resolve_base_ref`）。Config 画面の選択肢は対象リポジトリの実在ブランチ（`infrastructure/git.rs` の `list_branches`）から作られます。
 - **実効設定 = グローバル設定にローカルの上書きを適用した結果**。解決は `domain/settings.rs` の `Settings::with_local`、ユースケースは `usecase/settings.rs` の `effective(storage, repo_root)` が担います。
 
 対応するユースケース（`usecase/settings.rs`）: `load_local` / `save_local` / `effective` /
@@ -204,12 +206,13 @@ session "login"  (/Users/me/git/usagi/.usagi/worktree/login)
 
 > 編集 UI（[issue 022](../../issues/022-local-settings-ui.md), [issue 030](../../issues/030-default-branch-source.md)）:
 > ホーム画面のコマンドモードで `config` を実行すると、設定画面が**ワークスペーススコープ**で開き、「Agent CLI」
-> 「Notifications」「Default Branch」の 3 項目だけを表示します（グローバル設定はここには出ません）。Agent CLI と
-> Notifications は **「グローバルに従う / ローカルで上書き」** を 1 つのセレクタで切り替えられ、未上書き時は現在の
-> 実効値（`Global (...)`）を表示します。Default Branch はグローバル対応項目がないため `local` / `remote` の 2 値を
-> 切り替え、未設定時は既定値（`Default (Remote)`）を表示します。保存時はこのワークスペースのローカル設定
-> （`save_local`）のみを書き込みます。全項目を未上書きに戻しても `settings.json` は残し（中身は実質空）、
-> 「グローバルに従う／既定に従う」を意味します。
+> 「Notifications」「Default Branch」「Branch Source」の 4 項目だけを表示します（グローバル設定はここには出ません）。
+> Agent CLI と Notifications は **「グローバルに従う / ローカルで上書き」** を 1 つのセレクタで切り替えられ、未上書き
+> 時は現在の実効値（`Global (...)`）を表示します。Default Branch はリポジトリの実在ブランチを検出して `auto`（検出済み
+> 既定）＋各ブランチ名を循環選択でき、未設定時は `Default (auto)` を表示します（リポジトリでない・ブランチが無い場合は
+> 選択肢が無く no-op）。Branch Source はグローバル対応項目がないため `local` / `remote` の 2 値を切り替え、未設定時は
+> 既定値（`Default (Remote)`）を表示します。保存時はこのワークスペースのローカル設定（`save_local`）のみを書き込みます。
+> 全項目を未上書きに戻しても `settings.json` は残し（中身は実質空）、「グローバルに従う／既定に従う」を意味します。
 
 ## `history.json`
 

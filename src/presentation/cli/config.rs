@@ -133,6 +133,10 @@ fn render_settings(settings: &Settings) -> Vec<String> {
         ),
         format!("notifications_enabled  {}", settings.notifications_enabled),
         format!("agent_cli              {}", agent_label(settings.agent_cli)),
+        format!(
+            "session_action_ui      {}",
+            session_action_ui_label(settings.session_action_ui)
+        ),
         format!("local_llm_enabled      {}", settings.local_llm.enabled),
         format!("local_llm_model        {}", settings.local_llm.model),
     ]
@@ -152,6 +156,15 @@ fn agent_label(agent: AgentCli) -> &'static str {
     match agent {
         AgentCli::Claude => "claude",
         AgentCli::Gemini => "gemini",
+    }
+}
+
+/// The on-disk label for a [`SessionActionUi`].
+fn session_action_ui_label(ui: crate::domain::settings::SessionActionUi) -> &'static str {
+    use crate::domain::settings::SessionActionUi;
+    match ui {
+        SessionActionUi::Menu => "menu",
+        SessionActionUi::Prompt => "prompt",
     }
 }
 
@@ -188,6 +201,7 @@ mod tests {
             workspace_root: Some("/home/me/git".into()),
             notifications_enabled: false,
             agent_cli: AgentCli::Gemini,
+            session_action_ui: crate::domain::settings::SessionActionUi::Prompt,
             local_llm: crate::domain::settings::LocalLlm {
                 enabled: true,
                 model: "qwen2.5-coder:3b".to_string(),
@@ -199,8 +213,9 @@ mod tests {
         assert!(lines[2].contains("/home/me/git"));
         assert!(lines[3].contains("false"));
         assert!(lines[4].contains("gemini"));
-        assert!(lines[5].contains("true"));
-        assert!(lines[6].contains("qwen2.5-coder:3b"));
+        assert!(lines[5].contains("prompt"));
+        assert!(lines[6].contains("true"));
+        assert!(lines[7].contains("qwen2.5-coder:3b"));
     }
 
     #[test]

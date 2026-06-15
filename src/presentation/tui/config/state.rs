@@ -11,7 +11,7 @@
 //! settings when left unset. Only one scope's fields are shown at a time.
 
 use crate::domain::settings::{
-    AgentCli, BranchSource, LocalSettings, Settings, Theme, LOCAL_LLM_MODELS,
+    AgentCli, BranchSource, LocalSettings, SessionActionUi, Settings, Theme, LOCAL_LLM_MODELS,
 };
 
 /// The themes in the order they cycle through.
@@ -19,6 +19,10 @@ const THEMES: [Theme; 3] = [Theme::Light, Theme::Dark, Theme::System];
 
 /// The agent CLIs in the order they cycle through.
 pub(super) const AGENT_CLIS: [AgentCli; 2] = [AgentCli::Claude, AgentCli::Gemini];
+
+/// The 在席 (Focus) action UIs in the order they cycle through.
+pub(super) const SESSION_ACTION_UIS: [SessionActionUi; 2] =
+    [SessionActionUi::Menu, SessionActionUi::Prompt];
 
 /// The branch sources in the order they cycle through.
 pub(super) const BRANCH_SOURCES: [BranchSource; 2] = [BranchSource::Local, BranchSource::Remote];
@@ -30,6 +34,8 @@ pub enum Field {
     DefaultWorkspace,
     Notifications,
     AgentCli,
+    /// How 在席 (Focus) mode presents a session's runnable commands.
+    SessionActionUi,
     /// The local LLM enable toggle — or an "Install" action when the runtime /
     /// model is not yet present.
     LocalLlm,
@@ -39,11 +45,12 @@ pub enum Field {
 
 impl Field {
     /// The fields shown on the screen, top to bottom.
-    pub const ALL: [Field; 6] = [
+    pub const ALL: [Field; 7] = [
         Field::Theme,
         Field::DefaultWorkspace,
         Field::Notifications,
         Field::AgentCli,
+        Field::SessionActionUi,
         Field::LocalLlm,
         Field::LocalLlmModel,
     ];
@@ -55,6 +62,7 @@ impl Field {
             Field::DefaultWorkspace => "Default Workspace",
             Field::Notifications => "Notifications",
             Field::AgentCli => "Agent CLI",
+            Field::SessionActionUi => "Session Action UI",
             Field::LocalLlm => "Local LLM",
             Field::LocalLlmModel => "Local LLM Model",
         }
@@ -67,15 +75,20 @@ impl Field {
 pub enum LocalField {
     AgentCli,
     Notifications,
+    /// Which branch new session worktrees are cut from (the detected default, or
+    /// a specific branch).
     DefaultBranch,
+    /// Whether that branch is taken in its local or remote-tracking form.
+    BranchSource,
 }
 
 impl LocalField {
     /// The local override fields shown on the screen, top to bottom.
-    pub const ALL: [LocalField; 3] = [
+    pub const ALL: [LocalField; 4] = [
         LocalField::AgentCli,
         LocalField::Notifications,
         LocalField::DefaultBranch,
+        LocalField::BranchSource,
     ];
 
     /// The label shown beside the field's value.
@@ -84,6 +97,7 @@ impl LocalField {
             LocalField::AgentCli => "Agent CLI",
             LocalField::Notifications => "Notifications",
             LocalField::DefaultBranch => "Default Branch",
+            LocalField::BranchSource => "Branch Source",
         }
     }
 }
@@ -159,6 +173,10 @@ pub struct Config {
     baseline: Settings,
     /// Registered workspace names the default workspace cycles through.
     workspaces: Vec<String>,
+    /// The repository's branch names the local Default Branch field cycles
+    /// through (after the "auto" choice). Empty outside the local scope, or when
+    /// the workspace is not a single git repository.
+    branches: Vec<String>,
     /// The project-local overrides being edited, present in the local scope.
     local: Option<LocalEdit>,
     /// Whether the local LLM runtime and the selected model are present. Seeded
@@ -185,6 +203,7 @@ impl Config {
             baseline: settings.clone(),
             settings,
             workspaces,
+            branches: Vec::new(),
             local: None,
             local_llm_installed: false,
             install_modal: None,
@@ -196,11 +215,16 @@ impl Config {
     /// Builds the editor for a single project's local overrides, seeded from
     /// `local`. Only the local override rows are shown; `global` is kept
     /// read-only so each unset override can display the value it falls back to.
-    pub fn workspace(global: Settings, local: LocalSettings) -> Self {
+    ///
+    /// `branches` are the repository's branch names the Default Branch field can
+    /// cycle through (after the "auto" choice); pass an empty list when the
+    /// workspace is not a single git repository.
+    pub fn workspace(global: Settings, local: LocalSettings, branches: Vec<String>) -> Self {
         Self {
             baseline: global.clone(),
             settings: global,
             workspaces: Vec::new(),
+            branches,
             local: Some(LocalEdit {
                 baseline: local.clone(),
                 settings: local,
@@ -387,6 +411,9 @@ impl Config {
                 self.settings.notifications_enabled != self.baseline.notifications_enabled
             }
             Field::AgentCli => self.settings.agent_cli != self.baseline.agent_cli,
+            Field::SessionActionUi => {
+                self.settings.session_action_ui != self.baseline.session_action_ui
+            }
             Field::LocalLlm => self.settings.local_llm.enabled != self.baseline.local_llm.enabled,
             Field::LocalLlmModel => self.settings.local_llm.model != self.baseline.local_llm.model,
         }
@@ -403,6 +430,9 @@ impl Config {
                 local.settings.notifications_enabled != local.baseline.notifications_enabled
             }
             LocalField::DefaultBranch => {
+                local.settings.default_branch != local.baseline.default_branch
+            }
+            LocalField::BranchSource => {
                 local.settings.default_branch_source != local.baseline.default_branch_source
             }
         }
@@ -445,6 +475,9 @@ impl Config {
                 .unwrap_or_else(|| "(none)".to_string()),
             Field::Notifications => on_off(self.settings.notifications_enabled).to_string(),
             Field::AgentCli => agent_cli_label(self.settings.agent_cli).to_string(),
+            Field::SessionActionUi => {
+                session_action_ui_label(self.settings.session_action_ui).to_string()
+            }
             // Before the runtime/model are present the row is an install action;
             // once installed it becomes a plain on/off toggle.
             Field::LocalLlm => {
@@ -473,9 +506,16 @@ impl Config {
                 None => format!("Global ({})", on_off(self.settings.notifications_enabled)),
                 Some(on) => format!("Override: {}", on_off(on)),
             },
-            // The branch source has no global counterpart: an unset value simply
-            // shows the default it resolves to, and a set value shows itself.
-            LocalField::DefaultBranch => match local.settings.default_branch_source {
+            // The default branch has no global counterpart: an unset value uses
+            // the repository's detected default ("auto"), a set value names the
+            // branch to cut from.
+            LocalField::DefaultBranch => match &local.settings.default_branch {
+                None => "Default (auto)".to_string(),
+                Some(branch) => branch.clone(),
+            },
+            // The branch source likewise has no global counterpart: an unset
+            // value shows the default it resolves to, a set value shows itself.
+            LocalField::BranchSource => match local.settings.default_branch_source {
                 None => format!("Default ({})", branch_source_label(BranchSource::default())),
                 Some(source) => branch_source_label(source).to_string(),
             },
@@ -542,6 +582,14 @@ impl Config {
                 self.settings.agent_cli = cycle_agent_cli(self.settings.agent_cli, forward);
                 true
             }
+            Field::SessionActionUi => {
+                self.settings.session_action_ui = cycle_enum(
+                    self.settings.session_action_ui,
+                    &SESSION_ACTION_UIS,
+                    forward,
+                );
+                true
+            }
             Field::LocalLlm => {
                 // Only meaningful once installed: flip the on/off toggle. While
                 // not installed the row is an install action handled by the
@@ -565,32 +613,81 @@ impl Config {
     }
 
     /// Cycle a local override field through "follow global" then each concrete
-    /// value. Always changes something, so returns `true`.
+    /// value. Returns `true` when a value changed, and `false` when there was
+    /// nothing to cycle (the Default Branch field with no branches to choose).
     fn cycle_local(&mut self, field: LocalField, forward: bool) -> bool {
-        let local = self
-            .local
-            .as_mut()
-            .expect("a local field is only selectable with a local context");
+        // The Default Branch cycles branch names, so it needs both the branch
+        // list and the local edit; it is handled separately to keep the borrows
+        // disjoint. Every other local field cycles a fixed set in place.
         match field {
+            LocalField::DefaultBranch => self.cycle_default_branch(forward),
             LocalField::AgentCli => {
+                let local = self.local_edit_mut();
                 local.settings.agent_cli =
                     cycle_optional(local.settings.agent_cli, &AGENT_CLIS, forward);
+                true
             }
             LocalField::Notifications => {
+                let local = self.local_edit_mut();
                 local.settings.notifications_enabled = cycle_optional(
                     local.settings.notifications_enabled,
                     &[true, false],
                     forward,
                 );
+                true
             }
-            LocalField::DefaultBranch => {
+            LocalField::BranchSource => {
                 // Local-only setting: toggle between the two concrete sources,
                 // treating an unset value as the default. It is always stored.
+                let local = self.local_edit_mut();
                 let current = local.settings.default_branch_source.unwrap_or_default();
                 local.settings.default_branch_source =
                     Some(cycle_enum(current, &BRANCH_SOURCES, forward));
+                true
             }
         }
+    }
+
+    /// The local edit being modified. Only called from a local-field cycle,
+    /// which is reachable solely when a local context exists.
+    fn local_edit_mut(&mut self) -> &mut LocalEdit {
+        self.local
+            .as_mut()
+            .expect("a local field is only selectable with a local context")
+    }
+
+    /// Cycle the local Default Branch through "auto" (the detected default) then
+    /// each of the repository's branches, wrapping. A no-op (returns `false`)
+    /// when no branches are available to choose from.
+    fn cycle_default_branch(&mut self, forward: bool) -> bool {
+        if self.branches.is_empty() {
+            return false;
+        }
+        let local = self
+            .local
+            .as_mut()
+            .expect("a local field is only selectable with a local context");
+        // The choices are "auto" (`None`, index 0) followed by each branch name.
+        let len = self.branches.len() + 1;
+        let current = match &local.settings.default_branch {
+            None => 0,
+            // A branch that is no longer present behaves like "auto".
+            Some(name) => self
+                .branches
+                .iter()
+                .position(|b| b == name)
+                .map_or(0, |i| i + 1),
+        };
+        let next = if forward {
+            (current + 1) % len
+        } else {
+            (current + len - 1) % len
+        };
+        local.settings.default_branch = if next == 0 {
+            None
+        } else {
+            Some(self.branches[next - 1].clone())
+        };
         true
     }
 
@@ -677,6 +774,14 @@ fn cycle_agent_cli(cli: AgentCli, forward: bool) -> AgentCli {
     AGENT_CLIS[next]
 }
 
+/// The human-readable label for a 在席 (Focus) action UI style.
+pub(super) fn session_action_ui_label(ui: SessionActionUi) -> &'static str {
+    match ui {
+        SessionActionUi::Menu => "Menu",
+        SessionActionUi::Prompt => "Prompt",
+    }
+}
+
 /// The human-readable label for a branch source.
 pub(super) fn branch_source_label(source: BranchSource) -> &'static str {
     match source {
@@ -757,9 +862,10 @@ mod tests {
         assert_eq!(Field::DefaultWorkspace.label(), "Default Workspace");
         assert_eq!(Field::Notifications.label(), "Notifications");
         assert_eq!(Field::AgentCli.label(), "Agent CLI");
+        assert_eq!(Field::SessionActionUi.label(), "Session Action UI");
         assert_eq!(Field::LocalLlm.label(), "Local LLM");
         assert_eq!(Field::LocalLlmModel.label(), "Local LLM Model");
-        assert_eq!(Field::ALL.len(), 6);
+        assert_eq!(Field::ALL.len(), 7);
     }
 
     #[test]
@@ -774,9 +880,9 @@ mod tests {
         assert!(!config.is_dirty());
         assert!(config.local().is_none());
         assert!(config.selected_local_field().is_none());
-        // Global-only: six field rows.
-        assert_eq!(config.rows().len(), 6);
-        assert_eq!(config.save_index(), 6);
+        // Global-only: seven field rows.
+        assert_eq!(config.rows().len(), 7);
+        assert_eq!(config.save_index(), 7);
     }
 
     #[test]
@@ -788,6 +894,8 @@ mod tests {
         assert_eq!(config.selected_field(), Some(Field::Notifications));
         config.move_down();
         assert_eq!(config.selected_field(), Some(Field::AgentCli));
+        config.move_down();
+        assert_eq!(config.selected_field(), Some(Field::SessionActionUi));
         config.move_down();
         assert_eq!(config.selected_field(), Some(Field::LocalLlm));
         config.move_down();
@@ -811,6 +919,8 @@ mod tests {
         assert_eq!(config.selected_field(), Some(Field::LocalLlmModel));
         config.move_up();
         assert_eq!(config.selected_field(), Some(Field::LocalLlm));
+        config.move_up();
+        assert_eq!(config.selected_field(), Some(Field::SessionActionUi));
         config.move_up();
         assert_eq!(config.selected_field(), Some(Field::AgentCli));
         config.move_up();
@@ -854,6 +964,25 @@ mod tests {
         // And cycles backward too.
         assert!(config.cycle_selected(false));
         assert_eq!(config.value_of(Field::AgentCli), "Gemini");
+    }
+
+    #[test]
+    fn session_action_ui_field_cycles_between_menu_and_prompt() {
+        let mut config = config_with_workspaces(&[]);
+        // Navigate down until the Session Action UI row is selected.
+        while config.selected_field() != Some(Field::SessionActionUi) {
+            config.move_down();
+        }
+        // Menu by default.
+        assert_eq!(config.value_of(Field::SessionActionUi), "Menu");
+        assert!(config.cycle_selected(true));
+        assert_eq!(config.value_of(Field::SessionActionUi), "Prompt");
+        // Wraps back to Menu.
+        assert!(config.cycle_selected(true));
+        assert_eq!(config.value_of(Field::SessionActionUi), "Menu");
+        // And cycles backward too.
+        assert!(config.cycle_selected(false));
+        assert_eq!(config.value_of(Field::SessionActionUi), "Prompt");
     }
 
     #[test]
@@ -1009,16 +1138,18 @@ mod tests {
     fn rows_render_global_field_values() {
         let config = config_with_workspaces(&["alpha"]);
         let rows = config.rows();
-        assert_eq!(rows.len(), 6);
+        assert_eq!(rows.len(), 7);
         assert_eq!(rows[0].label, "Theme");
         assert_eq!(rows[0].value, "System");
         assert_eq!(rows[3].label, "Agent CLI");
         assert_eq!(rows[3].value, "Claude");
+        assert_eq!(rows[4].label, "Session Action UI");
+        assert_eq!(rows[4].value, "Menu");
         // The local LLM is off and not yet installed: the row offers "Install".
-        assert_eq!(rows[4].label, "Local LLM");
-        assert_eq!(rows[4].value, "Install");
-        assert_eq!(rows[5].label, "Local LLM Model");
-        assert_eq!(rows[5].value, "qwen2.5-coder:7b");
+        assert_eq!(rows[5].label, "Local LLM");
+        assert_eq!(rows[5].value, "Install");
+        assert_eq!(rows[6].label, "Local LLM Model");
+        assert_eq!(rows[6].value, "qwen2.5-coder:7b");
         assert!(rows.iter().all(|r| !r.changed));
     }
 
@@ -1144,32 +1275,44 @@ mod tests {
     // --- local overrides ---------------------------------------------------
 
     fn local_config() -> Config {
-        Config::workspace(Settings::default(), LocalSettings::default())
+        Config::workspace(Settings::default(), LocalSettings::default(), Vec::new())
+    }
+
+    fn local_config_with_branches(branches: &[&str]) -> Config {
+        Config::workspace(
+            Settings::default(),
+            LocalSettings::default(),
+            branches.iter().map(|b| b.to_string()).collect(),
+        )
     }
 
     #[test]
     fn local_scope_shows_only_the_local_override_rows() {
         let config = local_config();
         assert!(config.local().is_some());
-        // The local scope shows just the three override rows — no global fields.
-        assert_eq!(config.field_count(), 3);
-        assert_eq!(config.save_index(), 3);
+        // The local scope shows just the four override rows — no global fields.
+        assert_eq!(config.field_count(), 4);
+        assert_eq!(config.save_index(), 4);
         // The cursor starts on the first local field, not a global one.
         assert_eq!(config.selected_field(), None);
         assert_eq!(config.selected_local_field(), Some(LocalField::AgentCli));
         let rows = config.rows();
-        assert_eq!(rows.len(), 3);
+        assert_eq!(rows.len(), 4);
         assert_eq!(rows[0].label, "Agent CLI");
         assert_eq!(rows[1].label, "Notifications");
         assert_eq!(rows[2].label, "Default Branch");
+        assert_eq!(rows[3].label, "Branch Source");
         // Unset overrides display the value they fall back to.
         assert!(rows[0].value.contains("Global"));
         assert!(rows[0].value.contains("Claude"));
         assert!(rows[1].value.contains("Global"));
         assert!(rows[1].value.contains("On"));
-        // The branch source has no global counterpart: it shows its default.
+        // The default branch has no global counterpart: unset means "auto".
         assert!(rows[2].value.contains("Default"));
-        assert!(rows[2].value.contains("Remote"));
+        assert!(rows[2].value.contains("auto"));
+        // The branch source likewise shows its default (Remote).
+        assert!(rows[3].value.contains("Default"));
+        assert!(rows[3].value.contains("Remote"));
     }
 
     #[test]
@@ -1189,22 +1332,29 @@ mod tests {
             Some(LocalField::DefaultBranch)
         );
         config.move_down();
+        assert_eq!(
+            config.selected_local_field(),
+            Some(LocalField::BranchSource)
+        );
+        config.move_down();
         assert!(config.is_save_selected());
         assert!(config.selected_local_field().is_none());
     }
 
+    /// Move the cursor onto the given local field.
+    fn select_local(config: &mut Config, field: LocalField) {
+        while config.selected_local_field() != Some(field) {
+            config.move_down();
+        }
+    }
+
     #[test]
-    fn cycling_a_local_default_branch_override_toggles_local_and_remote() {
+    fn cycling_a_local_branch_source_override_toggles_local_and_remote() {
         let mut config = local_config();
-        config.move_down();
-        config.move_down(); // select Default Branch (third local field)
-        assert_eq!(
-            config.selected_local_field(),
-            Some(LocalField::DefaultBranch)
-        );
+        select_local(&mut config, LocalField::BranchSource);
         // Unset shows the default it resolves to.
         assert_eq!(
-            config.value_of_local(LocalField::DefaultBranch),
+            config.value_of_local(LocalField::BranchSource),
             "Default (Remote)"
         );
         // Forward from the default (Remote) wraps to Local, then back to Remote.
@@ -1213,18 +1363,74 @@ mod tests {
             config.local().unwrap().default_branch_source,
             Some(BranchSource::Local)
         );
-        assert_eq!(config.value_of_local(LocalField::DefaultBranch), "Local");
+        assert_eq!(config.value_of_local(LocalField::BranchSource), "Local");
         assert!(config.cycle_selected(true));
         assert_eq!(
             config.local().unwrap().default_branch_source,
             Some(BranchSource::Remote)
         );
-        assert_eq!(config.value_of_local(LocalField::DefaultBranch), "Remote");
+        assert_eq!(config.value_of_local(LocalField::BranchSource), "Remote");
         // Backward toggles the other way.
         assert!(config.cycle_selected(false));
         assert_eq!(
             config.local().unwrap().default_branch_source,
             Some(BranchSource::Local)
+        );
+    }
+
+    #[test]
+    fn cycling_a_local_default_branch_walks_auto_then_each_branch() {
+        let mut config = local_config_with_branches(&["develop", "main"]);
+        select_local(&mut config, LocalField::DefaultBranch);
+        // Unset means "auto" (the detected default branch).
+        assert_eq!(
+            config.value_of_local(LocalField::DefaultBranch),
+            "Default (auto)"
+        );
+        assert_eq!(config.local().unwrap().default_branch, None);
+
+        // auto -> develop -> main -> auto.
+        assert!(config.cycle_selected(true));
+        assert_eq!(
+            config.local().unwrap().default_branch.as_deref(),
+            Some("develop")
+        );
+        assert_eq!(config.value_of_local(LocalField::DefaultBranch), "develop");
+        assert!(config.cycle_selected(true));
+        assert_eq!(
+            config.local().unwrap().default_branch.as_deref(),
+            Some("main")
+        );
+        assert!(config.cycle_selected(true));
+        assert_eq!(config.local().unwrap().default_branch, None);
+        // Backward from auto wraps to the last branch.
+        assert!(config.cycle_selected(false));
+        assert_eq!(
+            config.local().unwrap().default_branch.as_deref(),
+            Some("main")
+        );
+    }
+
+    #[test]
+    fn cycling_the_default_branch_without_branches_is_a_noop() {
+        let mut config = local_config(); // no branches available
+        select_local(&mut config, LocalField::DefaultBranch);
+        assert!(!config.cycle_selected(true));
+        assert_eq!(config.local().unwrap().default_branch, None);
+        assert!(!config.cycle_selected(false));
+        assert_eq!(config.local().unwrap().default_branch, None);
+    }
+
+    #[test]
+    fn an_unknown_default_branch_resets_to_the_first_choice() {
+        let mut config = local_config_with_branches(&["develop", "main"]);
+        // A branch that is no longer present behaves like "auto" (index 0).
+        config.local.as_mut().unwrap().settings.default_branch = Some("ghost".to_string());
+        select_local(&mut config, LocalField::DefaultBranch);
+        assert!(config.cycle_selected(true));
+        assert_eq!(
+            config.local().unwrap().default_branch.as_deref(),
+            Some("develop")
         );
     }
 
@@ -1313,7 +1519,8 @@ mod tests {
         assert_eq!(LocalField::AgentCli.label(), "Agent CLI");
         assert_eq!(LocalField::Notifications.label(), "Notifications");
         assert_eq!(LocalField::DefaultBranch.label(), "Default Branch");
-        assert_eq!(LocalField::ALL.len(), 3);
+        assert_eq!(LocalField::BranchSource.label(), "Branch Source");
+        assert_eq!(LocalField::ALL.len(), 4);
     }
 
     #[test]
