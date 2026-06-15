@@ -107,6 +107,31 @@ pub struct RowView {
     pub label: &'static str,
     pub value: String,
     pub changed: bool,
+    /// Whether this row is an action button (e.g. the Local LLM "Install"
+    /// prompt) rather than a left/right value chooser. Action rows render as a
+    /// plain label with no chevrons.
+    pub action: bool,
+}
+
+/// The open local-LLM install modal: collects the sudo password before the
+/// runtime is provisioned in the background. Kept terminal-independent so the
+/// password entry and confirmation flow are unit-testable.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct InstallModal {
+    password: String,
+}
+
+impl InstallModal {
+    /// The sudo password typed so far.
+    pub fn password(&self) -> &str {
+        &self.password
+    }
+
+    /// The password rendered as bullets, one per character, so it is never
+    /// shown in the clear.
+    pub fn masked(&self) -> String {
+        "•".repeat(self.password.chars().count())
+    }
 }
 
 /// A project's local overrides being edited, plus the last-saved baseline so
@@ -140,6 +165,9 @@ pub struct Config {
     /// when the screen opens; drives whether the Local LLM row shows an
     /// "Install" action or an on/off toggle.
     local_llm_installed: bool,
+    /// The open install modal, when the user has triggered provisioning and is
+    /// entering the sudo password. While set it captures all keys.
+    install_modal: Option<InstallModal>,
     /// Which settings the screen edits.
     scope: Scope,
     selected_index: usize,
@@ -159,6 +187,7 @@ impl Config {
             workspaces,
             local: None,
             local_llm_installed: false,
+            install_modal: None,
             scope: Scope::Global,
             selected_index: 0,
         }
@@ -177,6 +206,7 @@ impl Config {
                 settings: local,
             }),
             local_llm_installed: false,
+            install_modal: None,
             scope: Scope::Local,
             selected_index: 0,
         }
@@ -202,29 +232,51 @@ impl Config {
         &self.settings.local_llm.model
     }
 
-    /// The model to install when the focused row is activated with **Enter**, or
-    /// `None` when Enter should behave normally (save / toggle / cycle).
-    ///
-    /// Enter installs when the Local LLM row needs it (not yet installed) or when
-    /// the model row is focused (selecting a model installs it).
-    pub fn enter_installs_model(&self) -> Option<String> {
-        match self.selected_field() {
-            Some(Field::LocalLlm) if !self.local_llm_installed => Some(self.model_string()),
-            Some(Field::LocalLlmModel) => Some(self.model_string()),
-            _ => None,
+    /// Whether the focused row is the Local LLM "Install" action — the row that,
+    /// when activated (Space/Enter), opens the install modal instead of cycling
+    /// a value. True only while the runtime/model is not yet present.
+    pub fn local_llm_needs_install(&self) -> bool {
+        matches!(self.selected_field(), Some(Field::LocalLlm)) && !self.local_llm_installed
+    }
+
+    /// Open the install modal, ready to collect the sudo password. A no-op
+    /// unless the focused row is the Local LLM install action.
+    pub fn open_install_modal(&mut self) {
+        if self.local_llm_needs_install() {
+            self.install_modal = Some(InstallModal::default());
         }
     }
 
-    /// The model to install when the focused row is activated with an **arrow**
-    /// key, or `None` when arrows should cycle/toggle as usual.
-    ///
-    /// Only the not-yet-installed Local LLM row installs on arrows — there is no
-    /// toggle to cycle until it is installed. The model row keeps cycling.
-    pub fn arrow_installs_model(&self) -> Option<String> {
-        match self.selected_field() {
-            Some(Field::LocalLlm) if !self.local_llm_installed => Some(self.model_string()),
-            _ => None,
+    /// The open install modal, if any. While present the event loop routes every
+    /// key into it.
+    pub fn install_modal(&self) -> Option<&InstallModal> {
+        self.install_modal.as_ref()
+    }
+
+    /// Close the install modal (cancel, or after provisioning finishes).
+    pub fn close_install_modal(&mut self) {
+        self.install_modal = None;
+    }
+
+    /// Append a typed character to the modal's password. A no-op when no modal
+    /// is open.
+    pub fn install_modal_push(&mut self, c: char) {
+        if let Some(modal) = &mut self.install_modal {
+            modal.password.push(c);
         }
+    }
+
+    /// Delete the last character of the modal's password (Backspace).
+    pub fn install_modal_backspace(&mut self) {
+        if let Some(modal) = &mut self.install_modal {
+            modal.password.pop();
+        }
+    }
+
+    /// The sudo password entered in the modal, ready to hand to the installer.
+    /// `None` when no modal is open.
+    pub fn install_modal_password(&self) -> Option<String> {
+        self.install_modal.as_ref().map(|m| m.password.clone())
     }
 
     /// Mark the local LLM as installed and turn it on, so the row becomes an
@@ -234,8 +286,12 @@ impl Config {
         self.settings.local_llm.enabled = true;
     }
 
-    fn model_string(&self) -> String {
-        self.settings.local_llm.model.clone()
+    /// Move the cursor onto the Local LLM Model row, so the user can pick which
+    /// model to use right after the runtime is installed.
+    pub fn focus_model_row(&mut self) {
+        if let Some(i) = Field::ALL.iter().position(|f| *f == Field::LocalLlmModel) {
+            self.selected_index = i;
+        }
     }
 
     /// The project-local overrides being edited, if this screen has a project
@@ -436,6 +492,9 @@ impl Config {
                     label: field.label(),
                     value: self.value_of(field),
                     changed: self.is_changed(field),
+                    // The Local LLM row is an action button while the runtime is
+                    // not yet installed; everything else is a value chooser.
+                    action: field == Field::LocalLlm && !self.local_llm_installed,
                 })
                 .collect(),
             Scope::Local => LocalField::ALL
@@ -444,6 +503,7 @@ impl Config {
                     label: field.label(),
                     value: self.value_of_local(field),
                     changed: self.is_local_changed(field),
+                    action: false,
                 })
                 .collect(),
         }
@@ -982,19 +1042,19 @@ mod tests {
     fn local_llm_row_shows_install_until_installed_then_a_toggle() {
         let mut config = config_with_workspaces(&[]);
         select_local_llm(&mut config);
-        // Not installed yet: the row is an install action, and an arrow press
-        // wants to install the current model rather than cycle.
+        // Not installed yet: the row is an install action that opens the modal,
+        // and the rows() flag marks it as an action button.
         assert!(!config.local_llm_installed());
         assert_eq!(config.value_of(Field::LocalLlm), "Install");
-        assert_eq!(
-            config.arrow_installs_model().as_deref(),
-            Some("qwen2.5-coder:7b")
+        assert!(config.local_llm_needs_install());
+        assert!(
+            config.rows()[Field::ALL
+                .iter()
+                .position(|f| *f == Field::LocalLlm)
+                .unwrap()]
+            .action
         );
-        assert_eq!(
-            config.enter_installs_model().as_deref(),
-            Some("qwen2.5-coder:7b")
-        );
-        // Cycling does nothing while uninstalled (the event layer installs).
+        // Cycling does nothing while uninstalled (activation opens the modal).
         assert!(!config.cycle_selected(true));
 
         // Once installed it turns on and becomes an on/off toggle.
@@ -1003,11 +1063,50 @@ mod tests {
         assert_eq!(config.value_of(Field::LocalLlm), "On");
         assert!(config.settings().local_llm.enabled);
         assert!(config.is_changed(Field::LocalLlm));
-        // Now arrows/Enter toggle rather than install.
-        assert!(config.arrow_installs_model().is_none());
-        assert!(config.enter_installs_model().is_none());
+        // Now it is a value chooser, not an install action.
+        assert!(!config.local_llm_needs_install());
+        assert!(
+            !config.rows()[Field::ALL
+                .iter()
+                .position(|f| *f == Field::LocalLlm)
+                .unwrap()]
+            .action
+        );
         assert!(config.cycle_selected(true));
         assert_eq!(config.value_of(Field::LocalLlm), "Off");
+    }
+
+    #[test]
+    fn install_modal_collects_a_masked_password_and_focuses_the_model_row() {
+        let mut config = config_with_workspaces(&[]);
+        // The modal only opens from the uninstalled Local LLM install action.
+        config.open_install_modal();
+        assert!(config.install_modal().is_none());
+        select_local_llm(&mut config);
+        config.open_install_modal();
+        let modal = config.install_modal().expect("modal opened");
+        assert_eq!(modal.password(), "");
+        assert_eq!(modal.masked(), "");
+
+        // Typing builds the password; it renders only as bullets.
+        config.install_modal_push('p');
+        config.install_modal_push('w');
+        config.install_modal_backspace();
+        config.install_modal_push('z');
+        assert_eq!(config.install_modal_password().as_deref(), Some("pz"));
+        assert_eq!(config.install_modal().unwrap().masked(), "••");
+
+        // Finishing the install closes the modal, marks it installed, and drops
+        // the cursor onto the model row so a model can be chosen.
+        config.mark_local_llm_installed();
+        config.focus_model_row();
+        config.close_install_modal();
+        assert!(config.install_modal().is_none());
+        assert_eq!(config.selected_field(), Some(Field::LocalLlmModel));
+        // Edits to a closed modal are no-ops (and yield no password).
+        config.install_modal_push('x');
+        config.install_modal_backspace();
+        assert!(config.install_modal_password().is_none());
     }
 
     #[test]
@@ -1016,19 +1115,14 @@ mod tests {
         config.mark_local_llm_installed(); // pretend the default model is present
         select_local_llm_model(&mut config);
         assert_eq!(config.local_llm_model(), "qwen2.5-coder:7b");
-        // Enter on the model row always installs the selected model.
-        assert_eq!(
-            config.enter_installs_model().as_deref(),
-            Some("qwen2.5-coder:7b")
-        );
+        // The model row is a chooser, not an install action.
+        assert!(!config.local_llm_needs_install());
         // Arrows cycle the model and reset the installed flag (the new model may
         // not be pulled), so the Local LLM row reverts to "Install".
         assert!(config.cycle_selected(true));
         assert_eq!(config.local_llm_model(), "qwen2.5-coder:3b");
         assert!(!config.local_llm_installed());
         assert!(config.is_changed(Field::LocalLlmModel));
-        // The model row does not install on arrows (only on Enter).
-        assert!(config.arrow_installs_model().is_none());
         // Cycling backward wraps to the last model.
         select_local_llm_model(&mut config);
         assert!(config.cycle_selected(false));

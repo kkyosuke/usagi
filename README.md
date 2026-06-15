@@ -118,7 +118,7 @@ cargo run -- issue update 2 --status done
 ローカルで動く LLM（[Ollama](https://ollama.com)）を MCP サーバとして公開し、要約・命名・定型文生成などの**軽量タスクをローカル LLM に委譲**することで、クラウド Agent（Claude など）のトークン消費を抑えられます。**既定は無効**で、usagi が勝手に有効化することはありません。
 
 - **有効化**: Config 画面（`config`）または `settings.json` の `local_llm.enabled` を `true` にします。委譲先モデルは `local_llm.model`（既定 `qwen2.5-coder:7b`）。
-- **資材の導入**: `ollama` 本体やモデルが無い場合、Config 画面では `Local LLM` 行が `Install` と表示され、その場で導入できます（導入後は on/off トグルに変わります）。`usagi doctor --fix` でも導入できます。
+- **資材の導入**: `ollama` 本体やモデルが無い場合、Config 画面では `Local LLM` 行が `Install` と表示されます。`Space` / `Enter` でインストールモーダルを開き、sudo パスワードを入力して確定すると、公式インストーラ（`curl … | sh`）をバックグラウンドで実行します（スピナー表示）。完了すると on/off トグルに変わり、続けてモデルを選べます。`usagi doctor --fix` でも導入できます。
 - **Agent への組み込み**: 有効時、`agent` 起動コマンドに `usagi-llm` サーバ（`usagi llm-mcp`）が自動で追加され、エージェントは `local_llm_ask` tool でローカル LLM に問い合わせられます。
 
 詳細は [document/03-commands/04-llm-mcp.md](document/03-commands/04-llm-mcp.md)。

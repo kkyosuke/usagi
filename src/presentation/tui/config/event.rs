@@ -24,11 +24,12 @@ pub enum Outcome {
 /// disk: production wires it to the settings use case, tests pass a stub.
 pub type Save<'a> = dyn FnMut(&Settings, Option<&LocalSettings>) -> Result<()> + 'a;
 
-/// Provisions the local LLM for the given model (installing the `ollama`
-/// runtime and pulling the model as needed). Injected like [`Save`] so the
-/// event loop is testable without shelling out: production wires it to the
-/// `local_llm` use case, tests pass a stub.
-pub type Install<'a> = dyn FnMut(&str) -> Result<()> + 'a;
+/// Provisions the local LLM for the given model, taking the sudo password
+/// entered in the install modal so the runtime install can elevate
+/// non-interactively. Injected like [`Save`] so the event loop is testable
+/// without shelling out: production wires it to the `local_llm` use case (which
+/// runs the install on a background thread behind a spinner), tests pass a stub.
+pub type Install<'a> = dyn FnMut(&str, &str) -> Result<()> + 'a;
 
 /// Runs the configuration screen against the given terminal and key source
 /// until the user goes back or quits. Assumes the alternate screen is already
@@ -38,9 +39,10 @@ pub type Install<'a> = dyn FnMut(&str) -> Result<()> + 'a;
 /// row is flagged as changed but nothing touches disk. The edits are written
 /// only when the user moves to the Save button and presses Enter; a persistence
 /// failure is shown as a notice so the user is not left wondering whether the
-/// change took. The Local LLM rows are the exception: activating one while the
-/// runtime/model is missing runs `install` straight away (provisioning is an
-/// action, not a saved setting).
+/// change took. The Local LLM row is the exception: while the runtime/model is
+/// missing it is an "Install" action — Space or Enter opens a modal that
+/// collects the sudo password, and confirming runs `install` (provisioning is
+/// an action, not a saved setting). The cursor then drops onto the model row.
 pub fn event_loop(
     term: &Term,
     reader: &mut dyn KeyReader,
@@ -64,6 +66,26 @@ pub fn event_loop(
             Err(e) => return Err(anyhow::Error::from(e).context("Failed to read key")),
         };
 
+        // While the install modal is open it captures every key: printable
+        // characters build the sudo password, Enter confirms (running the
+        // install), and Esc cancels.
+        if config.install_modal().is_some() {
+            match key {
+                Key::Enter => {
+                    notice = run_install(&mut config, install);
+                    // The install painted its own spinner frames over ours, so
+                    // forget the remembered frame and repaint the screen fully.
+                    painter.reset();
+                }
+                Key::Backspace => config.install_modal_backspace(),
+                Key::Char(c) => config.install_modal_push(c),
+                Key::Escape => config.close_install_modal(),
+                Key::CtrlC => return Ok(Outcome::Quit),
+                _ => {}
+            }
+            continue;
+        }
+
         match key {
             Key::ArrowUp | Key::Char('k') => {
                 config.move_up();
@@ -74,22 +96,29 @@ pub fn event_loop(
                 notice = None;
             }
             Key::ArrowRight | Key::Char('l') => {
-                notice = activate_field(&mut config, install, true);
+                notice = activate_field(&mut config, true);
             }
             Key::ArrowLeft | Key::Char('h') => {
-                notice = activate_field(&mut config, install, false);
+                notice = activate_field(&mut config, false);
+            }
+            Key::Char(' ') => {
+                // Space opens the install modal when the Local LLM install
+                // action is focused; elsewhere it does nothing.
+                config.open_install_modal();
+                notice = None;
             }
             Key::Enter => {
-                // Enter saves on the Save button. On a Local LLM row that needs
-                // it, Enter installs; otherwise it advances the focused field
-                // (a convenient alias for →).
-                notice = if config.is_save_selected() {
-                    save_changes(&mut config, save)
-                } else if let Some(model) = config.enter_installs_model() {
-                    run_install(&mut config, install, &model)
+                // Enter saves on the Save button, opens the install modal on the
+                // Local LLM install action, and otherwise advances the focused
+                // field (a convenient alias for →).
+                if config.is_save_selected() {
+                    notice = save_changes(&mut config, save);
+                } else if config.local_llm_needs_install() {
+                    config.open_install_modal();
+                    notice = None;
                 } else {
-                    activate_field(&mut config, install, true)
-                };
+                    notice = activate_field(&mut config, true);
+                }
             }
             Key::Char('q') | Key::Escape => return Ok(Outcome::Back),
             Key::CtrlC => return Ok(Outcome::Quit),
@@ -98,11 +127,12 @@ pub fn event_loop(
     }
 }
 
-/// Handles an arrow press on the focused field: installs the local LLM when the
-/// Local LLM row needs it, otherwise cycles the value.
-fn activate_field(config: &mut Config, install: &mut Install, forward: bool) -> Option<String> {
-    if let Some(model) = config.arrow_installs_model() {
-        run_install(config, install, &model)
+/// Handles an arrow press on the focused field. The Local LLM install action
+/// has no value to cycle (it is provisioned via the modal), so arrows are a
+/// no-op there; otherwise the field's value is cycled.
+fn activate_field(config: &mut Config, forward: bool) -> Option<String> {
+    if config.local_llm_needs_install() {
+        None
     } else {
         change_field(config, forward)
     }
@@ -122,12 +152,19 @@ fn change_field(config: &mut Config, forward: bool) -> Option<String> {
     }
 }
 
-/// Provisions the local LLM for `model`, returning the notice to show. On
-/// success the Local LLM row flips from "Install" to an on/off toggle (now on).
-fn run_install(config: &mut Config, install: &mut Install, model: &str) -> Option<String> {
-    Some(match install(model) {
+/// Runs the install with the sudo password from the modal, closes the modal,
+/// and returns the notice to show. On success the Local LLM row flips from
+/// "Install" to an on/off toggle (now on) and the cursor drops onto the model
+/// row so a model can be chosen.
+fn run_install(config: &mut Config, install: &mut Install) -> Option<String> {
+    let model = config.local_llm_model().to_string();
+    let password = config.install_modal_password().unwrap_or_default();
+    let result = install(&model, &password);
+    config.close_install_modal();
+    Some(match result {
         Ok(()) => {
             config.mark_local_llm_installed();
+            config.focus_model_row();
             format!("Installed {model} 🐰")
         }
         Err(e) => format!("Install failed: {e}"),
@@ -187,7 +224,7 @@ mod tests {
 
     /// An install stub that succeeds without doing anything (its body is
     /// exercised by the install tests below).
-    fn ok_install(_: &str) -> Result<()> {
+    fn ok_install(_: &str, _: &str) -> Result<()> {
         Ok(())
     }
 
@@ -200,7 +237,7 @@ mod tests {
             saved.borrow_mut().push(s.clone());
             Ok(())
         };
-        let mut install: fn(&str) -> Result<()> = ok_install;
+        let mut install: fn(&str, &str) -> Result<()> = ok_install;
         let outcome =
             event_loop(&term, &mut reader, config, &mut save, &mut install, None).unwrap();
         (outcome, saved.into_inner())
@@ -354,7 +391,7 @@ mod tests {
             Ok(Key::Escape),
         ]);
         let mut save = |_: &Settings, _: Option<&LocalSettings>| Err(anyhow::anyhow!("disk full"));
-        let mut install: fn(&str) -> Result<()> = ok_install;
+        let mut install: fn(&str, &str) -> Result<()> = ok_install;
         let outcome = event_loop(
             &term,
             &mut reader,
@@ -378,7 +415,7 @@ mod tests {
             Ok(Key::Escape),
         ]);
         let mut save: fn(&Settings, Option<&LocalSettings>) -> Result<()> = noop_save;
-        let mut install: fn(&str) -> Result<()> = ok_install;
+        let mut install: fn(&str, &str) -> Result<()> = ok_install;
         let outcome = event_loop(
             &term,
             &mut reader,
@@ -397,7 +434,7 @@ mod tests {
         let term = Term::stdout();
         let mut reader = ScriptedReader::new(vec![Ok(Key::Escape)]);
         let mut save: fn(&Settings, Option<&LocalSettings>) -> Result<()> = noop_save;
-        let mut install: fn(&str) -> Result<()> = ok_install;
+        let mut install: fn(&str, &str) -> Result<()> = ok_install;
         let outcome = event_loop(
             &term,
             &mut reader,
@@ -432,7 +469,7 @@ mod tests {
             *captured.borrow_mut() = local.cloned();
             Ok(())
         };
-        let mut install: fn(&str) -> Result<()> = ok_install;
+        let mut install: fn(&str, &str) -> Result<()> = ok_install;
         let outcome =
             event_loop(&term, &mut reader, config, &mut save, &mut install, None).unwrap();
         assert!(matches!(outcome, Outcome::Back));
@@ -455,7 +492,7 @@ mod tests {
         let term = Term::stdout();
         let mut reader = ScriptedReader::new(vec![Err(io::Error::other("boom"))]);
         let mut save: fn(&Settings, Option<&LocalSettings>) -> Result<()> = noop_save;
-        let mut install: fn(&str) -> Result<()> = ok_install;
+        let mut install: fn(&str, &str) -> Result<()> = ok_install;
         let err = event_loop(
             &term,
             &mut reader,
@@ -470,92 +507,133 @@ mod tests {
 
     // --- local LLM install action -----------------------------------------
 
-    /// Drives the loop with a recording install stub, returning the final
-    /// settings saved (if any) and the models passed to `install`.
+    /// Drives the loop with a recording install stub, returning the outcome and
+    /// the (model, sudo-password) pairs passed to `install`.
     fn run_with_install(
         keys: Vec<io::Result<Key>>,
         config: Config,
-        install_result: fn(&str) -> Result<()>,
-    ) -> (Outcome, Vec<String>) {
+        install_result: fn(&str, &str) -> Result<()>,
+    ) -> (Outcome, Vec<(String, String)>) {
         let term = Term::stdout();
         let mut reader = ScriptedReader::new(keys);
         let mut save: fn(&Settings, Option<&LocalSettings>) -> Result<()> = noop_save;
         let installed = RefCell::new(Vec::new());
-        let mut install = |model: &str| {
-            installed.borrow_mut().push(model.to_string());
-            install_result(model)
+        let mut install = |model: &str, password: &str| {
+            installed
+                .borrow_mut()
+                .push((model.to_string(), password.to_string()));
+            install_result(model, password)
         };
         let outcome =
             event_loop(&term, &mut reader, config, &mut save, &mut install, None).unwrap();
         (outcome, installed.into_inner())
     }
 
-    fn failing_install(_: &str) -> Result<()> {
-        Err(anyhow::anyhow!("no brew"))
+    fn failing_install(_: &str, _: &str) -> Result<()> {
+        Err(anyhow::anyhow!("sudo failed"))
     }
 
-    #[test]
-    fn enter_on_the_local_llm_row_installs_the_current_model() {
-        // Down past the four other fields onto the Local LLM row, then Enter
-        // installs the default model (it is not yet present).
-        let keys = vec![
+    /// Press ArrowDown four times to land on the Local LLM install row.
+    fn keys_to_local_llm() -> Vec<io::Result<Key>> {
+        vec![
             Ok(Key::ArrowDown), // Default Workspace
             Ok(Key::ArrowDown), // Notifications
             Ok(Key::ArrowDown), // Agent CLI
             Ok(Key::ArrowDown), // Local LLM
-            Ok(Key::Enter),     // install
+        ]
+    }
+
+    #[test]
+    fn space_opens_the_install_modal_and_confirms_with_the_typed_password() {
+        let mut keys = keys_to_local_llm();
+        keys.extend([
+            Ok(Key::Char(' ')), // open the install modal
+            Ok(Key::Char('p')), // type the sudo password
+            Ok(Key::Char('w')),
+            Ok(Key::ArrowUp), // ignored inside the modal
+            Ok(Key::Enter),   // confirm -> install
             Ok(Key::Escape),
-        ];
+        ]);
         let (outcome, installed) = run_with_install(keys, sample_config(), ok_install);
         assert!(matches!(outcome, Outcome::Back));
-        assert_eq!(installed, vec!["qwen2.5-coder:7b"]);
+        assert_eq!(
+            installed,
+            vec![("qwen2.5-coder:7b".to_string(), "pw".to_string())]
+        );
     }
 
     #[test]
-    fn arrow_on_the_uninstalled_local_llm_row_also_installs() {
-        let keys = vec![
-            Ok(Key::ArrowDown),  // Default Workspace
-            Ok(Key::ArrowDown),  // Notifications
-            Ok(Key::ArrowDown),  // Agent CLI
-            Ok(Key::ArrowDown),  // Local LLM
-            Ok(Key::ArrowRight), // install (no toggle to cycle yet)
+    fn enter_on_the_install_action_also_opens_the_modal() {
+        let mut keys = keys_to_local_llm();
+        keys.extend([
+            Ok(Key::Enter), // open the modal (install action focused)
+            Ok(Key::Enter), // confirm with an empty password
             Ok(Key::Escape),
-        ];
+        ]);
         let (_, installed) = run_with_install(keys, sample_config(), ok_install);
-        assert_eq!(installed, vec!["qwen2.5-coder:7b"]);
+        assert_eq!(
+            installed,
+            vec![("qwen2.5-coder:7b".to_string(), String::new())]
+        );
     }
 
     #[test]
-    fn enter_on_the_model_row_cycles_then_installs_the_chosen_model() {
-        // On the model row: → cycles to the next model, then Enter installs it.
-        let keys = vec![
-            Ok(Key::ArrowDown),  // Default Workspace
-            Ok(Key::ArrowDown),  // Notifications
-            Ok(Key::ArrowDown),  // Agent CLI
-            Ok(Key::ArrowDown),  // Local LLM
-            Ok(Key::ArrowDown),  // Local LLM Model
-            Ok(Key::ArrowRight), // -> qwen2.5-coder:3b
-            Ok(Key::Enter),      // install that model
-            Ok(Key::Escape),
-        ];
-        let (_, installed) = run_with_install(keys, sample_config(), ok_install);
-        assert_eq!(installed, vec!["qwen2.5-coder:3b"]);
+    fn arrows_on_the_install_action_do_not_install() {
+        let mut keys = keys_to_local_llm();
+        keys.extend([Ok(Key::ArrowRight), Ok(Key::ArrowLeft), Ok(Key::Escape)]);
+        let (outcome, installed) = run_with_install(keys, sample_config(), ok_install);
+        assert!(matches!(outcome, Outcome::Back));
+        assert!(installed.is_empty());
+    }
+
+    #[test]
+    fn space_off_the_install_action_does_nothing() {
+        // Space on a normal field (Theme) neither opens a modal nor installs.
+        let keys = vec![Ok(Key::Char(' ')), Ok(Key::Escape)];
+        let (outcome, installed) = run_with_install(keys, sample_config(), ok_install);
+        assert!(matches!(outcome, Outcome::Back));
+        assert!(installed.is_empty());
+    }
+
+    #[test]
+    fn escape_cancels_the_install_modal_without_installing() {
+        let mut keys = keys_to_local_llm();
+        keys.extend([
+            Ok(Key::Char(' ')), // open
+            Ok(Key::Char('x')), // type a character
+            Ok(Key::Backspace), // delete it
+            Ok(Key::Escape),    // cancel the modal
+            Ok(Key::Escape),    // leave the screen
+        ]);
+        let (outcome, installed) = run_with_install(keys, sample_config(), ok_install);
+        assert!(matches!(outcome, Outcome::Back));
+        assert!(installed.is_empty());
+    }
+
+    #[test]
+    fn ctrl_c_in_the_install_modal_quits() {
+        let mut keys = keys_to_local_llm();
+        keys.extend([Ok(Key::Char(' ')), Ok(Key::CtrlC)]);
+        let (outcome, installed) = run_with_install(keys, sample_config(), ok_install);
+        assert!(matches!(outcome, Outcome::Quit));
+        assert!(installed.is_empty());
     }
 
     #[test]
     fn a_failed_install_is_shown_as_a_notice_and_recovers() {
-        let keys = vec![
-            Ok(Key::ArrowDown),
-            Ok(Key::ArrowDown),
-            Ok(Key::ArrowDown),
-            Ok(Key::ArrowDown), // Local LLM
-            Ok(Key::Enter),     // install fails
+        let mut keys = keys_to_local_llm();
+        keys.extend([
+            Ok(Key::Char(' ')),
+            Ok(Key::Enter), // confirm -> install fails
             Ok(Key::Escape),
-        ];
+        ]);
         let (outcome, installed) = run_with_install(keys, sample_config(), failing_install);
         // The loop keeps running (the user can retry or leave).
         assert!(matches!(outcome, Outcome::Back));
-        assert_eq!(installed, vec!["qwen2.5-coder:7b"]);
+        assert_eq!(
+            installed,
+            vec![("qwen2.5-coder:7b".to_string(), String::new())]
+        );
     }
 
     #[test]

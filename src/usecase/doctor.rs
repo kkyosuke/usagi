@@ -201,6 +201,17 @@ pub trait CommandRunner {
     /// exited successfully. Its output is shown to the user.
     fn run(&self, program: &str, args: &[&str]) -> std::io::Result<bool>;
 
+    /// Run `program args...`, feeding `input` to its standard input, returning
+    /// whether it exited successfully. Used to hand a command a secret it must
+    /// not appear on the process's argument list — notably the sudo password
+    /// piped to `sudo -S`. The default delegates to [`run`](Self::run)
+    /// (ignoring the input), which is all a test fake needs; the real runner
+    /// overrides it to actually pipe the bytes.
+    fn run_with_input(&self, program: &str, args: &[&str], input: &str) -> std::io::Result<bool> {
+        let _ = input;
+        self.run(program, args)
+    }
+
     /// Run `program args...` quietly (stdout/stderr suppressed), returning
     /// whether it exited successfully. Used for capability probes — e.g.
     /// "is this Ollama model already pulled?" — where the command's own output
@@ -228,6 +239,25 @@ impl CommandRunner for SystemRunner {
             .args(args)
             .status()
             .map(|status| status.success())
+    }
+
+    fn run_with_input(&self, program: &str, args: &[&str], input: &str) -> std::io::Result<bool> {
+        use std::io::Write as _;
+        // Pipe the input (e.g. the sudo password) on stdin so it never reaches
+        // the argument list; stdout/stderr stay inherited so progress shows.
+        let mut child = std::process::Command::new(program)
+            .args(args)
+            .stdin(std::process::Stdio::piped())
+            .spawn()?;
+        if let Some(mut stdin) = child.stdin.take() {
+            // A trailing newline so the reading program (sudo) treats it as a
+            // complete line. Dropping the handle afterwards closes the pipe, so
+            // a reader waiting on EOF (e.g. `cat`) does not block `wait`. A write
+            // failure (the child already exited) is ignored: `wait` then reports
+            // the command's own non-zero exit.
+            let _ = writeln!(stdin, "{input}");
+        }
+        child.wait().map(|status| status.success())
     }
 
     fn check(&self, program: &str, args: &[&str]) -> bool {
@@ -545,6 +575,18 @@ mod tests {
     }
 
     #[test]
+    fn run_with_input_defaults_to_run_ignoring_the_input() {
+        // The trait's default delegates to `run` and discards the piped input,
+        // so a runner that does not override it mirrors its `run` result.
+        let ok = FakeRunner::new(vec![], Ok(true));
+        assert!(ok.run_with_input("sudo", &["-S", "-v"], "secret").unwrap());
+        let fail = FakeRunner::new(vec![], Ok(false));
+        assert!(!fail
+            .run_with_input("sudo", &["-S", "-v"], "secret")
+            .unwrap());
+    }
+
+    #[test]
     fn fake_runner_spawn_is_inert() {
         // The remediation logic never starts a daemon, so the fake's `spawn`
         // (required by the trait, exercised for real in `local_llm`) is a
@@ -688,6 +730,13 @@ mod tests {
         // Running an installed tool succeeds; a missing program errors out.
         assert!(runner.run("git", &["--version"]).unwrap());
         assert!(runner.run("definitely-not-a-real-binary-xyz", &[]).is_err());
+
+        // Feeding input on stdin: `cat` consumes it and exits cleanly, while a
+        // missing binary still errors out before anything is piped.
+        assert!(runner.run_with_input("cat", &[], "secret").unwrap());
+        assert!(runner
+            .run_with_input("definitely-not-a-real-binary-xyz", &[], "secret")
+            .is_err());
 
         // A quiet probe returns true for a clean exit and false otherwise
         // (a non-zero exit or a missing binary).

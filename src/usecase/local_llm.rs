@@ -20,6 +20,15 @@ use crate::usecase::doctor::CommandRunner;
 /// The Ollama runtime binary usagi drives.
 const OLLAMA: &str = "ollama";
 
+/// How [`SetupStep::OllamaInstalled`] labels the install path: the official
+/// one-line installer rather than a system package manager.
+const INSTALLER: &str = "ollama.com/install.sh";
+
+/// The official Ollama install command, run through a shell so the pipe works.
+/// It supports both macOS and Linux and elevates with `sudo` itself where
+/// needed (pre-authenticated by [`ensure`] when a password is supplied).
+const INSTALL_SCRIPT: &str = "curl -fsSL https://ollama.com/install.sh | sh";
+
 /// Whether the `ollama` runtime is installed and runnable.
 pub fn ollama_installed(runner: &dyn CommandRunner) -> bool {
     runner.available(OLLAMA)
@@ -100,6 +109,12 @@ pub enum SetupError {
 /// missing, start its server if it is not already running, then pull the model
 /// if it is not already present.
 ///
+/// `sudo` carries the password used to pre-authenticate the privileged steps of
+/// the runtime installer non-interactively: `Some(password)` (the TUI install
+/// flow) caches sudo credentials up front so nothing prompts mid-install;
+/// `None` (the `usagi doctor --fix` CLI) lets the installer prompt on the
+/// terminal as usual.
+///
 /// Returns the ordered list of steps taken on success, or the first error that
 /// stopped provisioning. Idempotent — re-running when everything is already in
 /// place simply reports the "already present" steps.
@@ -107,35 +122,52 @@ pub fn ensure(
     os: &str,
     runner: &dyn CommandRunner,
     model: &str,
+    sudo: Option<&str>,
 ) -> Result<Vec<SetupStep>, SetupError> {
     // The runtime must be installed, then its server brought up, before the
     // model can be pulled — so these run left-to-right and `?` short-circuits
     // on the first failure.
-    let ollama = install_ollama(os, runner)?;
+    let ollama = install_ollama(os, runner, sudo)?;
     let server = ensure_server(runner, ServerWait::default())?;
     let model = pull_model(runner, model)?;
     Ok(vec![ollama, server, model])
 }
 
-/// Install the `ollama` runtime if it is not already present.
-fn install_ollama(os: &str, runner: &dyn CommandRunner) -> Result<SetupStep, SetupError> {
+/// Install the `ollama` runtime if it is not already present, using the
+/// official installer. `sudo` pre-authenticates the privileged steps when set.
+fn install_ollama(
+    os: &str,
+    runner: &dyn CommandRunner,
+    sudo: Option<&str>,
+) -> Result<SetupStep, SetupError> {
     if runner.available(OLLAMA) {
         return Ok(SetupStep::OllamaAlreadyPresent);
     }
-    // Homebrew (macOS) is the only package manager that ships Ollama directly;
-    // elsewhere we point at the official installer rather than guess.
-    if os == "macos" && runner.available("brew") {
-        match runner.run("brew", &["install", "ollama"]) {
-            Ok(true) => Ok(SetupStep::OllamaInstalled { manager: "brew" }),
-            Ok(false) | Err(_) => Err(SetupError::OllamaInstallFailed {
-                manager: "brew",
-                manual: ollama_manual(),
-            }),
-        }
-    } else {
-        Err(SetupError::OllamaUnavailable {
+    // The official installer only supports macOS and Linux; elsewhere there is
+    // no automatic path, so point at the manual download instead of guessing.
+    if os != "macos" && os != "linux" {
+        return Err(SetupError::OllamaUnavailable {
             manual: ollama_manual(),
-        })
+        });
+    }
+    let install_failed = || SetupError::OllamaInstallFailed {
+        manager: INSTALLER,
+        manual: ollama_manual(),
+    };
+    // Caching sudo credentials first (reading the password from stdin) lets the
+    // installer's privileged steps run unattended. A failure here means the
+    // password was wrong or sudo is unavailable, so stop before installing.
+    if let Some(password) = sudo {
+        if !runner
+            .run_with_input("sudo", &["-S", "-v"], password)
+            .unwrap_or(false)
+        {
+            return Err(install_failed());
+        }
+    }
+    match runner.run("sh", &["-c", INSTALL_SCRIPT]) {
+        Ok(true) => Ok(SetupStep::OllamaInstalled { manager: INSTALLER }),
+        Ok(false) | Err(_) => Err(install_failed()),
     }
 }
 
@@ -211,7 +243,11 @@ mod tests {
         present_models: Vec<&'static str>,
         /// Result returned by `run` (install / pull).
         run: std::io::Result<bool>,
+        /// Result returned by the sudo pre-authentication (`run_with_input`).
+        sudo: std::io::Result<bool>,
         ran: RefCell<Vec<String>>,
+        /// The input piped to the last `run_with_input` call (the password).
+        piped: RefCell<Option<String>>,
         /// Number of `ollama ps` probes that report the server DOWN before it
         /// comes UP. `0` means the server is up from the first probe.
         server_down_for: usize,
@@ -227,7 +263,9 @@ mod tests {
                 available,
                 present_models: Vec::new(),
                 run,
+                sudo: Ok(true),
                 ran: RefCell::new(Vec::new()),
+                piped: RefCell::new(None),
                 // By default the server is already up, so `ensure` tests focused
                 // on install/pull need not opt into the start path.
                 server_down_for: 0,
@@ -239,6 +277,11 @@ mod tests {
 
         fn with_present_models(mut self, models: Vec<&'static str>) -> Self {
             self.present_models = models;
+            self
+        }
+
+        fn with_sudo(mut self, sudo: std::io::Result<bool>) -> Self {
+            self.sudo = sudo;
             self
         }
 
@@ -265,6 +308,22 @@ mod tests {
                 .borrow_mut()
                 .push(format!("{program} {}", args.join(" ")));
             match &self.run {
+                Ok(ok) => Ok(*ok),
+                Err(e) => Err(std::io::Error::new(e.kind(), e.to_string())),
+            }
+        }
+
+        fn run_with_input(
+            &self,
+            program: &str,
+            args: &[&str],
+            input: &str,
+        ) -> std::io::Result<bool> {
+            self.ran
+                .borrow_mut()
+                .push(format!("{program} {}", args.join(" ")));
+            *self.piped.borrow_mut() = Some(input.to_string());
+            match &self.sudo {
                 Ok(ok) => Ok(*ok),
                 Err(e) => Err(std::io::Error::new(e.kind(), e.to_string())),
             }
@@ -313,7 +372,7 @@ mod tests {
         // ollama installed, server already up, model already pulled.
         let runner =
             FakeRunner::new(vec!["ollama"], Ok(true)).with_present_models(vec!["qwen2.5-coder:7b"]);
-        let steps = ensure("macos", &runner, "qwen2.5-coder:7b").unwrap();
+        let steps = ensure("macos", &runner, "qwen2.5-coder:7b", None).unwrap();
         assert_eq!(
             steps,
             vec![
@@ -330,15 +389,15 @@ mod tests {
     }
 
     #[test]
-    fn ensure_installs_ollama_starts_the_server_and_pulls_the_model_when_missing() {
-        // ollama absent but brew present; the server is down until started; the
-        // model is not yet pulled.
-        let runner = FakeRunner::new(vec!["brew"], Ok(true)).with_server_down_for(1);
-        let steps = ensure("macos", &runner, "qwen2.5:7b").unwrap();
+    fn ensure_installs_ollama_starts_the_server_and_pulls_the_model() {
+        // ollama absent, no sudo password (the CLI path): the official installer
+        // runs directly; the server is down until started; the model is pulled.
+        let runner = FakeRunner::new(vec![], Ok(true)).with_server_down_for(1);
+        let steps = ensure("linux", &runner, "qwen2.5:7b", None).unwrap();
         assert_eq!(
             steps,
             vec![
-                SetupStep::OllamaInstalled { manager: "brew" },
+                SetupStep::OllamaInstalled { manager: INSTALLER },
                 SetupStep::ServerStarted,
                 SetupStep::ModelPulled {
                     model: "qwen2.5:7b".to_string()
@@ -347,41 +406,88 @@ mod tests {
         );
         assert_eq!(
             *runner.ran.borrow(),
-            vec!["brew install ollama", "ollama pull qwen2.5:7b"]
+            vec![
+                format!("sh -c {INSTALL_SCRIPT}"),
+                "ollama pull qwen2.5:7b".to_string(),
+            ]
         );
-        // The server was started in the background before the pull.
+        // No sudo pre-authentication without a password; the server was started
+        // in the background before the pull.
+        assert!(runner.piped.borrow().is_none());
         assert_eq!(*runner.spawned.borrow(), vec!["ollama serve"]);
     }
 
     #[test]
-    fn ensure_reports_when_ollama_cannot_be_auto_installed() {
-        // No brew on macOS -> no auto-install path.
-        let no_brew = FakeRunner::new(vec![], Ok(true));
+    fn ensure_preauthenticates_sudo_when_a_password_is_supplied() {
+        // The TUI path hands over a password: sudo is validated first (reading
+        // the password from stdin), then the installer and pull run.
+        let runner = FakeRunner::new(vec![], Ok(true));
+        let steps = ensure("macos", &runner, "qwen2.5:7b", Some("hunter2")).unwrap();
+        assert_eq!(steps[0], SetupStep::OllamaInstalled { manager: INSTALLER });
         assert_eq!(
-            ensure("macos", &no_brew, "qwen2.5:7b"),
-            Err(SetupError::OllamaUnavailable {
-                manual: ollama_manual()
-            })
+            *runner.ran.borrow(),
+            vec![
+                "sudo -S -v".to_string(),
+                format!("sh -c {INSTALL_SCRIPT}"),
+                "ollama pull qwen2.5:7b".to_string(),
+            ]
         );
+        assert_eq!(runner.piped.borrow().as_deref(), Some("hunter2"));
+    }
 
-        // Linux has no package-manager path for ollama either.
-        let linux = FakeRunner::new(vec!["apt-get"], Ok(true));
+    #[test]
+    fn ensure_reports_when_the_os_has_no_installer() {
+        // The official installer supports only macOS and Linux.
+        let runner = FakeRunner::new(vec![], Ok(true));
         assert_eq!(
-            ensure("linux", &linux, "qwen2.5:7b"),
+            ensure("windows", &runner, "qwen2.5:7b", None),
             Err(SetupError::OllamaUnavailable {
                 manual: ollama_manual()
             })
         );
+        // Nothing was attempted on an unsupported OS.
+        assert!(runner.ran.borrow().is_empty());
+    }
+
+    #[test]
+    fn ensure_stops_when_sudo_preauthentication_fails() {
+        // A wrong password (sudo exits non-zero) aborts before the installer.
+        let runner = FakeRunner::new(vec![], Ok(true)).with_sudo(Ok(false));
+        assert_eq!(
+            ensure("linux", &runner, "qwen2.5:7b", Some("wrong")),
+            Err(SetupError::OllamaInstallFailed {
+                manager: INSTALLER,
+                manual: ollama_manual()
+            })
+        );
+        // The installer never ran; only the failed sudo validation did.
+        assert_eq!(*runner.ran.borrow(), vec!["sudo -S -v".to_string()]);
+    }
+
+    #[test]
+    fn ensure_stops_when_sudo_validation_errors() {
+        // sudo itself fails to spawn (an I/O error rather than a clean non-zero
+        // exit): treated like a failed install, and the installer never runs.
+        let runner =
+            FakeRunner::new(vec![], Ok(true)).with_sudo(Err(std::io::Error::other("no sudo")));
+        assert_eq!(
+            ensure("linux", &runner, "qwen2.5:7b", Some("pw")),
+            Err(SetupError::OllamaInstallFailed {
+                manager: INSTALLER,
+                manual: ollama_manual()
+            })
+        );
+        assert_eq!(*runner.ran.borrow(), vec!["sudo -S -v".to_string()]);
     }
 
     #[test]
     fn ensure_reports_a_failed_ollama_install() {
-        // brew present but the install command exits non-zero.
-        let runner = FakeRunner::new(vec!["brew"], Ok(false));
+        // The installer script exits non-zero.
+        let runner = FakeRunner::new(vec![], Ok(false));
         assert_eq!(
-            ensure("macos", &runner, "qwen2.5:7b"),
+            ensure("macos", &runner, "qwen2.5:7b", None),
             Err(SetupError::OllamaInstallFailed {
-                manager: "brew",
+                manager: INSTALLER,
                 manual: ollama_manual()
             })
         );
@@ -392,7 +498,7 @@ mod tests {
         // ollama present, model missing, and the pull fails (spawn error here).
         let runner = FakeRunner::new(vec!["ollama"], Err(std::io::Error::other("boom")));
         assert_eq!(
-            ensure("macos", &runner, "qwen2.5:7b"),
+            ensure("macos", &runner, "qwen2.5:7b", None),
             Err(SetupError::ModelPullFailed {
                 model: "qwen2.5:7b".to_string()
             })
