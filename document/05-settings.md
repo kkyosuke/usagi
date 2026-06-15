@@ -36,6 +36,11 @@
 | クローン先ベース | `workspace_root` | string?\| | `null`（→ `~/git`） | 新規プロジェクトのクローン先ベースディレクトリ。未設定時は `~/git` にフォールバック |
 | デスクトップ通知 | `notifications_enabled` | bool | `true` | バックグラウンドの `agent` が入力待ちになった時などのデスクトップ通知の ON/OFF |
 | Agent CLI | `agent_cli` | enum | `claude` | 起動する AI エージェント CLI（`claude` / `gemini`） |
+| ローカル LLM 有効化 | `local_llm.enabled` | bool | `false` | 有効にすると `agent` 起動時に [ローカル LLM MCP サーバ](03-commands/04-llm-mcp.md)（`usagi-llm`）を wire し、軽量タスクをローカル LLM に委譲できる |
+| ローカル LLM モデル | `local_llm.model` | string | `qwen2.5-coder:7b` | 委譲先の Ollama モデル名（`qwen2.5-coder:7b` / `:3b` / `:1.5b` / `qwen2.5:7b`） |
+
+> ローカル LLM は **オプトイン**（既定 `false`）です。資材（`ollama`・モデル）は Config 画面の
+> Install アクション、または `usagi doctor --fix` で導入します。詳細は [3.4 ローカル LLM MCP サーバ](03-commands/04-llm-mcp.md)。
 
 > すべての項目はフォーマットバージョン `version: 1` とともに `settings.json` に格納されます。
 > 完全な JSON 例は [data/01-global.md](data/01-global.md#settingsjson) を参照してください。
@@ -50,6 +55,7 @@
 | Agent CLI | `agent_cli` | enum?\| | グローバル設定にフォールバック |
 | デスクトップ通知 | `notifications_enabled` | bool?\| | グローバル設定にフォールバック |
 | デフォルトブランチ基点 | `default_branch_source` | enum?\| | 既定（`remote`） |
+| ローカル LLM 有効化 | `local_llm_enabled` | bool?\| | グローバル設定（`local_llm.enabled`）にフォールバック |
 
 > **デフォルトブランチ基点（`default_branch_source`）**: `session create` でセッションを作るとき、各 git
 > リポジトリの worktree を切る新ブランチの**基点**を選びます。選択肢は `local`（ローカルの既定ブランチ。例
@@ -116,6 +122,7 @@ CLI からも設定を確認・編集できます（[issue 015](../issues/015-co
 | `workspace_root` | 新規プロジェクト画面（Clone）の Location 既定値（[design/03-new.md](design/03-new.md)） |
 | `notifications_enabled` | バックグラウンドの `agent` が入力待ちになった時などのデスクトップ通知の表示可否 |
 | `agent_cli` | `agent` / `ai` コマンドが起動する AI エージェント CLI の選択（[4. オーケストレーション](04-orchestration.md)） |
+| `local_llm.enabled` / `local_llm.model` | 有効時、`agent` 起動コマンドに `usagi-llm` MCP サーバを追加し、軽量タスクをローカル LLM に委譲する（[3.4 ローカル LLM MCP サーバ](03-commands/04-llm-mcp.md)） |
 
 > 設定の永続化は `usecase/settings.rs`（`load` / `save` / 各 `set_*`）と
 > `infrastructure/storage.rs`（`Storage`）に実装されています。
