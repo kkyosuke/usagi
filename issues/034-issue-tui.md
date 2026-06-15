@@ -30,7 +30,7 @@ TUI から離れずに issue を一覧・参照・更新できるようにしま
 
 - ホーム画面のコマンドレジストリ（`presentation/tui/home/command.rs`）に `issue` コマンドを追加する。
   - `issue list` — issue 一覧をテーブル表示（number / title / status / priority / dependson）。
-  - `issue show <number>` — frontmatter + 本文を右ペインに表示（[033-preview-viewer](033-preview-viewer.md) の
+  - `issue show <number>` — frontmatter + 本文を右ペインに表示（033 preview-viewer の
     Markdown レンダリングを活用できれば再利用する）。
   - `issue update <number> --status …` 等 — status / priority などの更新（CLI / MCP と同じ usecase を呼ぶ）。
   - 引数なしは一覧（あるいは issue 一覧モーダル / 専用ビュー）を開く。
@@ -53,5 +53,5 @@ TUI から離れずに issue を一覧・参照・更新できるようにしま
 
 - issue の永続化基盤は [023-issue-store](023-issue-store.md)、CLI は [024-issue-cli](024-issue-cli.md)、
   MCP 公開は [025-issue-mcp](025-issue-mcp.md)。本 issue はそれらの usecase を TUI から再利用する。
-- 詳細表示の Markdown レンダリングは [033-preview-viewer](033-preview-viewer.md) と共有できる。
+- 詳細表示の Markdown レンダリングは 033 preview-viewer（別 PR で追加）と共有できる。
 - コマンドレジストリ（拡張点）は [document/design/05-home.md](../document/design/05-home.md) を参照。
