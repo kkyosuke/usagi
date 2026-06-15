@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 
 use crate::domain::workspace_state::{SessionRecord, WorktreeState};
 
-use super::command::{CommandRegistry, Effect, Hint, WorktreeRef};
+use super::command::{CommandRegistry, CommandScope, Effect, Hint, WorktreeRef};
 use super::terminal_view::TerminalView;
 
 /// The display name of a worktree: its branch, or a placeholder when detached.
@@ -538,12 +538,36 @@ impl HomeState {
         self.log.push(LogLine::error(text));
     }
 
+    /// Append a hint that the session under the cursor has no live shell/agent,
+    /// so navigating to (or selecting) it only moved the cursor — pointing at
+    /// the commands that actually start one. Selecting an idle session never
+    /// spawns a shell on its own; starting one is always explicit and launches
+    /// the agent (with its MCP wiring) by default.
+    pub fn hint_no_live_session(&mut self) {
+        self.log.push(LogLine::notice(
+            "No live session here — run \":agent\" to start one (\":terminal\" for a plain shell).",
+        ));
+    }
+
     pub fn list(&self) -> &WorktreeList {
         &self.list
     }
 
     pub fn mode(&self) -> Mode {
         self.mode
+    }
+
+    /// Which command scope the bottom command line is operating in: the whole
+    /// workspace when the cursor is on the root row, or the selected session
+    /// otherwise. The command line offers, completes, and hints only the
+    /// commands of this scope (plus the shared utilities), so the two modes stay
+    /// visually distinct.
+    pub fn command_scope(&self) -> CommandScope {
+        if self.list.root_selected() {
+            CommandScope::Workspace
+        } else {
+            CommandScope::Session
+        }
     }
 
     pub fn input(&self) -> &str {
@@ -554,7 +578,7 @@ impl HomeState {
     /// or the usage of the command being given arguments). Computed on demand
     /// for rendering; see [`CommandRegistry::suggest`].
     pub fn hint(&self) -> Hint {
-        self.registry.suggest(&self.input)
+        self.registry.suggest(&self.input, self.command_scope())
     }
 
     pub fn log(&self) -> &[LogLine] {
@@ -761,7 +785,7 @@ impl HomeState {
 
     /// Tab-complete the command word, listing candidates when ambiguous.
     pub fn complete(&mut self) {
-        let completion = self.registry.complete(&self.input);
+        let completion = self.registry.complete(&self.input, self.command_scope());
         self.input = completion.input;
         if !completion.candidates.is_empty() {
             self.log
@@ -1709,6 +1733,16 @@ mod tests {
         assert_eq!(last_two[0].text, "it broke");
         assert_eq!(last_two[1].kind, LineKind::Output);
         assert_eq!(last_two[1].text, "did a thing");
+    }
+
+    #[test]
+    fn hint_no_live_session_logs_a_notice_pointing_at_the_launch_commands() {
+        let mut state = state();
+        state.hint_no_live_session();
+        let last = state.log().last().unwrap();
+        assert_eq!(last.kind, LineKind::Notice);
+        assert!(last.text.contains(":agent"));
+        assert!(last.text.contains(":terminal"));
     }
 
     #[test]

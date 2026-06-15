@@ -14,10 +14,10 @@ use console::style;
 use crate::domain::workspace_state::{BranchStatus, WorktreeState};
 use crate::presentation::tui::widgets;
 
-use super::command::{CommandHint, Hint};
+use super::command::{CommandHint, CommandScope, Hint};
 use super::state::{
-    HomeState, LineKind, LogLine, Mode, RemoveModal, RightPane, SessionModal, SessionPicker,
-    WorktreeList, ROOT_NAME,
+    worktree_name, HomeState, LineKind, LogLine, Mode, RemoveModal, RightPane, SessionModal,
+    SessionPicker, WorktreeList, ROOT_NAME,
 };
 use super::terminal_view::TerminalView;
 
@@ -473,7 +473,20 @@ fn hint_lines(state: &HomeState, width: usize) -> Vec<String> {
             // Only point a marker at a best match once something is typed; a
             // bare ":" shows the whole menu with nothing pre-selected.
             let highlight = !typed.is_empty();
-            let header = if highlight { "matches" } else { "commands" };
+            // The menu names its scope so the two command modes read clearly; a
+            // partial match just says "matches".
+            let header = if highlight {
+                "matches".to_string()
+            } else {
+                // `command_scope()` only ever yields Workspace or Session; the
+                // unused `Both` is folded in so there is no dead arm.
+                match state.command_scope() {
+                    CommandScope::Session => "session commands".to_string(),
+                    CommandScope::Workspace | CommandScope::Both => {
+                        "workspace commands".to_string()
+                    }
+                }
+            };
             let mut lines = vec![style(format!("  {header}")).dim().to_string()];
             for (i, hint) in hints.iter().take(HINT_MAX).enumerate() {
                 lines.push(command_hint_row(
@@ -523,19 +536,45 @@ fn input_line(state: &HomeState) -> String {
     }
 }
 
-/// The footer help line, aware of the terminal pane and the current mode.
+/// The current command scope spelled out for the footer: `workspace` on the
+/// root row, or `session: <name>` on a worktree row. Makes it obvious which of
+/// the two command modes the bottom line is operating in.
+fn scope_label(state: &HomeState) -> String {
+    match state.command_scope() {
+        CommandScope::Session => {
+            let name = state
+                .list()
+                .selected()
+                .map(worktree_name)
+                .unwrap_or(ROOT_NAME);
+            format!("session: {name}")
+        }
+        // `command_scope()` never yields `Both`; fold it into the workspace label.
+        CommandScope::Workspace | CommandScope::Both => "workspace".to_string(),
+    }
+}
+
+/// The footer help line, aware of the terminal pane and the current mode. Off
+/// the terminal it leads with the active command scope (`workspace` /
+/// `session: <name>`) so the two modes are always distinguishable.
 fn footer_line(width: usize, state: &HomeState) -> String {
     let help = if state.right_pane() == RightPane::Terminal {
         "Embedded terminal — Ctrl-O: switch session / detach / Shift+↑↓/PgUp/PgDn: scroll"
+            .to_string()
     } else {
+        let scope = scope_label(state);
         match state.mode() {
             Mode::Sidebar => {
-                "↑↓: move / Enter: open / Ctrl-O: switch session / :: command / Esc: back"
+                format!(
+                    "[{scope}]  ↑↓: move / Enter: open / Ctrl-O: switch / :: command / Esc: back"
+                )
             }
-            Mode::Command => "Tab: complete / ↑↓: history / Enter: run / Esc: cancel",
+            Mode::Command => {
+                format!("[{scope}]  Tab: complete / ↑↓: history / Enter: run / Esc: cancel")
+            }
         }
     };
-    widgets::dim_line(width, help)
+    widgets::dim_line(width, &help)
 }
 
 /// Builds the centred session-name modal over an otherwise blank frame.
@@ -677,10 +716,7 @@ fn session_picker_row(
 /// Builds the body of the session-picker box: a short prompt, one row per
 /// session, and the key hints.
 fn session_picker_body(picker: &SessionPicker) -> Vec<String> {
-    let mut body = vec![
-        style("Switch the terminal to a session:").dim().to_string(),
-        String::new(),
-    ];
+    let mut body = vec![style("Jump to a session:").dim().to_string(), String::new()];
     for (i, name) in picker.names().iter().enumerate() {
         body.push(session_picker_row(
             i,
@@ -691,8 +727,8 @@ fn session_picker_body(picker: &SessionPicker) -> Vec<String> {
         ));
     }
     body.push(String::new());
-    body.push(style("1-9/↑↓+Enter: switch   c: create").dim().to_string());
-    body.push(style("Esc: cancel   Ctrl-O: detach").dim().to_string());
+    body.push(style("↑↓ move   l/Enter switch   c new").dim().to_string());
+    body.push(style("h/Esc back   Ctrl-O detach").dim().to_string());
     body
 }
 
@@ -1332,11 +1368,14 @@ mod tests {
         let joined = console::strip_ansi_codes(&frame.join("\n")).into_owned();
         // The picker box, its prompt, every session row, and the key hints show.
         assert!(joined.contains("Switch session"));
-        assert!(joined.contains("Switch the terminal to a session"));
+        assert!(joined.contains("Jump to a session"));
         assert!(joined.contains(ROOT_NAME));
         assert!(joined.contains("main"));
         assert!(joined.contains("feature"));
-        assert!(joined.contains("Esc: cancel"));
+        // The key hints advertise the spatial keys and the back/detach actions.
+        assert!(joined.contains("l/Enter switch"));
+        assert!(joined.contains("back"));
+        assert!(joined.contains("detach"));
         // The frame keeps its full height and the title bar behind the box.
         assert_eq!(frame.len(), 24);
         assert!(joined.contains("usagi"));
