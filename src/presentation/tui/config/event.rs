@@ -148,7 +148,7 @@ fn change_field(config: &mut Config, forward: bool) -> Option<String> {
     if config.cycle_selected(forward) {
         None
     } else {
-        Some("No workspaces to choose from 🐰".to_string())
+        Some("Nothing to choose from 🐰".to_string())
     }
 }
 
@@ -453,11 +453,12 @@ mod tests {
         // local settings reach the save callback. The local scope shows only the
         // three override rows, with Agent CLI selected from the start.
         let term = Term::stdout();
-        let config = Config::workspace(Settings::default(), LocalSettings::default());
+        let config = Config::workspace(Settings::default(), LocalSettings::default(), Vec::new());
         let keys = vec![
             Ok(Key::ArrowRight), // Agent CLI override: Global -> Claude
             Ok(Key::ArrowDown),  // Notifications
             Ok(Key::ArrowDown),  // Default Branch
+            Ok(Key::ArrowDown),  // Branch Source
             Ok(Key::ArrowDown),  // Save button
             Ok(Key::Enter),      // save
             Ok(Key::Escape),

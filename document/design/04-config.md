@@ -94,7 +94,7 @@
 
 ホーム画面のコマンドモードで `config` を実行したときのスコープ。起動中のワークスペース
 （`<workspace>/.usagi/settings.json`）だけに効く **ローカルの上書き**を編集します。グローバル設定は
-ここには表示されず、対象は次の 3 項目だけです。
+ここには表示されず、対象は次の 4 項目だけです。
 
 ```text
 ┌────────────────────────────────────────────────────┐
@@ -104,9 +104,10 @@
 │                   Workspace Config                   │  ← タイトル（緑・太字）
 │            Adjust this workspace's settings          │  ← サブタイトル（淡色）
 │                                                      │
-│      >   Agent CLI       < Global (Claude) >          │  ┐ ローカル設定一覧（3 項目）
+│      >   Agent CLI       < Global (Claude) >          │  ┐ ローカル設定一覧（4 項目）
 │        ● Notifications   < Override: Off >            │  │  選択行：左端の赤 ">"
-│          Default Branch  < Local >                   │  ┘  変更済み：ラベル左に黄色 ●
+│          Default Branch  < develop >                  │  │  変更済み：ラベル左に黄色 ●
+│          Branch Source   < Remote >                   │  ┘
 │                                                      │
 │                           [ Save ]                   │  ← Save ボタン
 │                                                      │
@@ -118,13 +119,17 @@
 |---|---|---|
 | Agent CLI | このワークスペースの Agent CLI 上書き | `Global (実効値)` → `Override: Claude` → `Override: Gemini` の順に循環 |
 | Notifications | このワークスペースの通知 ON/OFF 上書き | `Global (実効値)` → `Override: On` → `Override: Off` の順に循環 |
-| Default Branch | `session create` で worktree を切る基点 | `Local` ⇄ `Remote` をトグル（未設定時は `Default (Remote)` を表示） |
+| Default Branch | `session create` で worktree を切る基点ブランチ | `Default (auto)` → リポジトリの各ブランチ名 の順に循環（実在ブランチを検出） |
+| Branch Source | 上のブランチをローカル形／リモート形のどちらで使うか | `Local` ⇄ `Remote` をトグル（未設定時は `Default (Remote)` を表示） |
 
 - Agent CLI と Notifications は **「グローバルに従う / ローカルで上書き」** を 1 つの chooser で切り替えます。
   `Global (...)` は未上書き（グローバル設定にフォールバック）で、かっこ内に現在の実効値を表示します。
   `Override: ...` を選ぶとそのワークスペース専用の値になります。再度 `Global` まで循環させれば上書きを解除できます。
-- Default Branch はグローバルに対応項目がないため、`Local`（ローカル既定ブランチ）と `Remote`（リモート追従の
-  既定ブランチ）の 2 値だけを切り替えます。未設定時は既定値を `Default (Remote)` と表示し、`←→` で切り替えると
+- Default Branch はグローバルに対応項目がなく、`Default (auto)`（リポジトリの検出済み既定ブランチ）と、対象
+  リポジトリの実在ブランチ（`list_branches` で検出）を循環選択します。`auto` から `←→` でブランチ名を選ぶとその
+  ブランチを基点として保存されます。リポジトリでない・ブランチが無いワークスペースでは選択肢が無く no-op です。
+- Branch Source もグローバルに対応項目がないため、`Local`（ローカルのブランチ）と `Remote`（リモート追従の
+  ブランチ）の 2 値だけを切り替えます。未設定時は既定値を `Default (Remote)` と表示し、`←→` で切り替えると
   明示値（`Local` / `Remote`）として保存されます。
 - Save を押すと、そのワークスペースのローカル設定（`<workspace>/.usagi/settings.json`）のみを保存します。
   全項目を未上書きに戻した場合もファイルは残し（中身は空に近い JSON）、「グローバルに従う」を意味します

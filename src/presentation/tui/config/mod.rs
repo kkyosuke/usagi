@@ -15,6 +15,7 @@ use anyhow::Result;
 use console::Term;
 
 use crate::domain::settings::{LocalSettings, Settings};
+use crate::infrastructure::git;
 use crate::infrastructure::storage::Storage;
 use crate::presentation::tui::screen::FramePainter;
 use crate::presentation::tui::term_reader::TermKeyReader;
@@ -49,7 +50,10 @@ pub fn run_in(term: &Term, repo_root: Option<PathBuf>) -> Result<Outcome> {
     let (mut config, notice) = match load(&storage, repo_root.as_deref()) {
         Ok((settings, workspaces, local)) => {
             let config = match (repo_root.as_ref(), local) {
-                (Some(_), Some(local)) => Config::workspace(settings, local),
+                (Some(root), Some(local)) => {
+                    // Offer the repository's branches as Default Branch choices.
+                    Config::workspace(settings, local, git::list_branches(root))
+                }
                 _ => Config::new(settings, workspaces),
             };
             (config, None)

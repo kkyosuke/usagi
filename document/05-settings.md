@@ -55,15 +55,22 @@
 |---|---|---|---|
 | Agent CLI | `agent_cli` | enum?\| | グローバル設定にフォールバック |
 | デスクトップ通知 | `notifications_enabled` | bool?\| | グローバル設定にフォールバック |
+| デフォルトブランチ | `default_branch` | string?\| | リポジトリの検出済み既定ブランチ（auto） |
 | デフォルトブランチ基点 | `default_branch_source` | enum?\| | 既定（`remote`） |
 | ローカル LLM 有効化 | `local_llm_enabled` | bool?\| | グローバル設定（`local_llm.enabled`）にフォールバック |
 
-> **デフォルトブランチ基点（`default_branch_source`）**: `session create` でセッションを作るとき、各 git
-> リポジトリの worktree を切る新ブランチの**基点**を選びます。選択肢は `local`（ローカルの既定ブランチ。例
-> `main`）と `remote`（リモート追従の既定ブランチ。例 `origin/main`）。グローバル設定に対応項目はなく、
-> 未設定時は `remote` として扱います（`origin/<既定>` が無ければローカル既定ブランチ → それも無ければ現在の
-> HEAD にフォールバック）。ワークスペースのローカル設定（`<workspace>/.usagi/settings.json`）に保存され、
-> ホーム画面の `config` から編集します。
+> **デフォルトブランチ（`default_branch`）**: `session create` でセッションを作るとき、各 git リポジトリの
+> worktree を切る新ブランチを**どのブランチから**切るかを選びます。未設定（`null` = auto）ならリポジトリの
+> 検出済み既定ブランチ（`origin/HEAD` → 現在のブランチ → `main` の順で解決）を使い、`develop` のように
+> 値を指定するとそのブランチを基点にします。Config 画面では対象リポジトリの**実在ブランチ**を検出して
+> 選択肢に並べます（`auto` ＋ 各ブランチ名）。
+
+> **デフォルトブランチ基点（`default_branch_source`）**: 上で選んだブランチを**ローカル形・リモート形の
+> どちらで**基点にするかを選びます。選択肢は `local`（ローカルのブランチ。例 `develop`）と `remote`（リモート
+> 追従のブランチ。例 `origin/develop`）。グローバル設定に対応項目はなく、未設定時は `remote` として扱います
+> （`origin/<ブランチ>` が無ければローカルのブランチ → それも無ければ現在の HEAD にフォールバック）。
+> いずれもワークスペースのローカル設定（`<workspace>/.usagi/settings.json`）に保存され、ホーム画面の
+> `config` から編集します。
 
 - 全フィールドが任意（`Option`）で、`null` は「グローバル設定に従う」を意味します。テーマ（`theme`）や
   クローン先（`workspace_root`）のようにプロジェクト単位で変える意味の薄い項目は対象外です。
@@ -71,9 +78,10 @@
   `Settings::with_local`、ユースケースは `usecase/settings.rs` の `effective(storage, repo_root)` が担います。
 - 読み書きロジック・永続化（[issue 021](../issues/021-local-settings.md)）に加え、編集 UI も実装済み
   （[issue 022](../issues/022-local-settings-ui.md)）。ホーム画面のコマンドモードで `config` を実行すると
-  設定画面が**ワークスペーススコープ**で開き、「Agent CLI」「Notifications」「Default Branch」の 3 項目を
-  編集できます。Agent CLI と Notifications は **「グローバルに従う / ローカルで上書き」**、Default Branch は
-  **`local` / `remote`** を切り替えられます。詳細は [design/04-config.md](design/04-config.md) を参照。
+  設定画面が**ワークスペーススコープ**で開き、「Agent CLI」「Notifications」「Default Branch」「Branch Source」
+  の 4 項目を編集できます。Agent CLI と Notifications は **「グローバルに従う / ローカルで上書き」**、Default
+  Branch は **`auto`（検出済み既定）／ リポジトリの各ブランチ**、Branch Source は **`local` / `remote`** を
+  切り替えられます。詳細は [design/04-config.md](design/04-config.md) を参照。
 - JSON 例・フィールド詳細は [data/02-workspace.md](data/02-workspace.md#settingsjson-プロジェクト固有の設定上書きローカル設定) を参照。
 
 ## 設定の変更方法
@@ -96,7 +104,7 @@
 操作の詳細・レイアウトは [design/04-config.md](design/04-config.md) を参照してください。
 
 > グローバルスコープで編集できるのは Theme / Default Workspace / Notifications / Agent CLI の 4 項目、
-> ワークスペーススコープで編集できるのは Agent CLI / Notifications / Default Branch の 3 項目です。
+> ワークスペーススコープで編集できるのは Agent CLI / Notifications / Default Branch / Branch Source の 4 項目です。
 > `workspace_root` は `settings.json` に保存されますが、画面からの編集は今後対応予定です。
 
 ### CLI
