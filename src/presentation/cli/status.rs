@@ -67,12 +67,12 @@ mod tests {
             updated_at: ts,
             sessions: vec![SessionRecord {
                 name: "login".to_string(),
-                root: PathBuf::from("/repo/.usagi/worktree/login"),
+                root: PathBuf::from("/repo/.usagi/sessions/login"),
                 created_at: ts,
                 worktrees: vec![
                     WorktreeState {
                         branch: Some("login".to_string()),
-                        path: PathBuf::from("/repo/.usagi/worktree/login/app-a"),
+                        path: PathBuf::from("/repo/.usagi/sessions/login/app-a"),
                         head: "76e906f".to_string(),
                         primary: false,
                         upstream: Some("origin/login".to_string()),
@@ -81,7 +81,7 @@ mod tests {
                     },
                     WorktreeState {
                         branch: None,
-                        path: PathBuf::from("/repo/.usagi/worktree/login/app-b"),
+                        path: PathBuf::from("/repo/.usagi/sessions/login/app-b"),
                         head: "aaf5459".to_string(),
                         primary: false,
                         upstream: None,
@@ -98,16 +98,16 @@ mod tests {
         let lines = render(&state());
         assert_eq!(lines[0], "updated 2026-06-13 05:01 UTC");
         assert_eq!(lines[1], "");
-        assert_eq!(lines[2], "session \"login\"  (/repo/.usagi/worktree/login)");
+        assert_eq!(lines[2], "session \"login\"  (/repo/.usagi/sessions/login)");
         // First worktree: status, branch, head and upstream arrow.
         assert_eq!(
             lines[3],
             "  pushed   login                    76e906f → origin/login"
         );
-        assert_eq!(lines[4], "    /repo/.usagi/worktree/login/app-a");
+        assert_eq!(lines[4], "    /repo/.usagi/sessions/login/app-a");
         // Second worktree: detached label, no upstream arrow.
         assert_eq!(lines[5], "  local    (detached)               aaf5459");
-        assert_eq!(lines[6], "    /repo/.usagi/worktree/login/app-b");
+        assert_eq!(lines[6], "    /repo/.usagi/sessions/login/app-b");
     }
 
     #[test]

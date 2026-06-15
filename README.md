@@ -74,7 +74,7 @@ cargo run -- hop  # TUI を起動
 ワークスペースを開いたあと、コマンドモード（`:` で起動）から以下を実行できます。
 
 ```text
-:session create feature-x   # .usagi/worktree/feature-x/ にセッション（worktree）を作成（短縮形: c / new）
+:session create feature-x   # .usagi/sessions/feature-x/ にセッション（worktree）を作成（短縮形: c / new）
 :session ls              # セッション一覧（list の短縮形。rm で削除）
 :terminal                # 選択中の worktree でシェルを右ペインに埋め込み起動（サイドバーの Enter でも可。Ctrl-O でセッション切り替え／デタッチ）
 :agent                   # terminal を開いて設定中の Agent CLI（既定 claude）を起動。issue MCP サーバを組み込んで起動する
