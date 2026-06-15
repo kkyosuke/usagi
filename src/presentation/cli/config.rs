@@ -43,23 +43,36 @@ struct EnvEditor;
 
 impl Editor for EnvEditor {
     fn edit(&self, path: &Path) -> Result<()> {
-        let editor = editor_command();
-        let status = std::process::Command::new(&editor)
+        let editor_args = editor_command();
+        let editor_bin = &editor_args[0];
+        let status = std::process::Command::new(editor_bin)
+            .args(&editor_args[1..])
             .arg(path)
             .status()
-            .with_context(|| format!("failed to launch editor `{editor}`"))?;
+            .with_context(|| format!("failed to launch editor `{editor_bin}`"))?;
         if !status.success() {
-            bail!("editor `{editor}` exited with an error");
+            bail!("editor `{editor_bin}` exited with an error");
         }
         Ok(())
     }
 }
 
-/// The editor command to run: `$EDITOR`, then `$VISUAL`, then a platform default.
-fn editor_command() -> String {
-    non_empty_env("EDITOR")
-        .or_else(|| non_empty_env("VISUAL"))
-        .unwrap_or_else(|| default_editor(std::env::consts::OS).to_string())
+/// The editor command (binary + arguments) to run: `$EDITOR`, then `$VISUAL`,
+/// then a platform default.
+fn editor_command() -> Vec<String> {
+    editor_command_env("EDITOR")
+        .or_else(|| editor_command_env("VISUAL"))
+        .unwrap_or_else(|| vec![default_editor(std::env::consts::OS).to_string()])
+}
+
+/// Parse an editor environment variable into a command vector using POSIX shell
+/// rules, so values like `code --wait` split into `["code", "--wait"]` without
+/// spawning a shell. Returns `None` when the variable is unset/empty, fails to
+/// parse (e.g. an unbalanced quote), or contains only whitespace.
+fn editor_command_env(name: &str) -> Option<Vec<String>> {
+    let value = non_empty_env(name)?;
+    let args = shell_words::split(&value).ok()?;
+    (!args.is_empty()).then_some(args)
 }
 
 /// Read an environment variable, treating an unset or empty value as absent.
@@ -273,16 +286,68 @@ mod tests {
 
         std::env::set_var("EDITOR", "my-editor");
         std::env::set_var("VISUAL", "my-visual");
-        assert_eq!(editor_command(), "my-editor");
+        assert_eq!(editor_command(), vec!["my-editor".to_string()]);
 
         // An empty EDITOR falls through to VISUAL.
         std::env::set_var("EDITOR", "");
-        assert_eq!(editor_command(), "my-visual");
+        assert_eq!(editor_command(), vec!["my-visual".to_string()]);
 
         // Neither set: the platform default.
         std::env::remove_var("EDITOR");
         std::env::remove_var("VISUAL");
-        assert_eq!(editor_command(), default_editor(std::env::consts::OS));
+        assert_eq!(
+            editor_command(),
+            vec![default_editor(std::env::consts::OS).to_string()]
+        );
+    }
+
+    #[test]
+    fn editor_command_parses_complex_string() {
+        let _guard = crate::test_support::process_env_guard();
+
+        std::env::set_var("EDITOR", "vim -p");
+        assert_eq!(editor_command(), vec!["vim".to_string(), "-p".to_string()]);
+
+        std::env::set_var("EDITOR", "code --wait --new-window");
+        assert_eq!(
+            editor_command(),
+            vec![
+                "code".to_string(),
+                "--wait".to_string(),
+                "--new-window".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn editor_command_falls_through_unusable_values() {
+        let _guard = crate::test_support::process_env_guard();
+
+        // EDITOR fails shell parsing (unbalanced quote) → fall back to VISUAL.
+        std::env::set_var("EDITOR", "vim \"x");
+        std::env::set_var("VISUAL", "nano");
+        assert_eq!(editor_command(), vec!["nano".to_string()]);
+
+        // EDITOR parses to no words (whitespace only) → fall back to VISUAL.
+        std::env::set_var("EDITOR", "   ");
+        std::env::set_var("VISUAL", "nano");
+        assert_eq!(editor_command(), vec!["nano".to_string()]);
+
+        // VISUAL also fails shell parsing → platform default.
+        std::env::set_var("EDITOR", "   ");
+        std::env::set_var("VISUAL", "code \"y");
+        assert_eq!(
+            editor_command(),
+            vec![default_editor(std::env::consts::OS).to_string()]
+        );
+
+        // VISUAL parses to no words → platform default.
+        std::env::set_var("EDITOR", "code \"z");
+        std::env::set_var("VISUAL", "   ");
+        assert_eq!(
+            editor_command(),
+            vec![default_editor(std::env::consts::OS).to_string()]
+        );
     }
 
     #[test]
