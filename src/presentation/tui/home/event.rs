@@ -428,6 +428,30 @@ mod tests {
         }
     }
 
+    #[test]
+    fn input_reader_skips_scrolls_propagates_errors_and_defaults_to_escape() {
+        // Exercise every arm of the scroll-skipping stub used by the wheel tests,
+        // so it mirrors the real reader: a wheel turn is dropped and the next key
+        // returned; an error surfaces; a drained queue falls back to Escape.
+        let mut reader = InputReader {
+            inputs: VecDeque::from(vec![
+                Ok(Input::Scroll(scroll_right(-3))),
+                Ok(Input::Key(Key::Char('x'))),
+            ]),
+        };
+        assert_eq!(reader.read_key().unwrap(), Key::Char('x'));
+
+        let mut reader = InputReader {
+            inputs: VecDeque::from(vec![Err(io::Error::other("boom"))]),
+        };
+        assert!(reader.read_key().is_err());
+
+        let mut reader = InputReader {
+            inputs: VecDeque::new(),
+        };
+        assert_eq!(reader.read_key().unwrap(), Key::Escape);
+    }
+
     fn worktree(branch: Option<&str>) -> WorktreeState {
         WorktreeState {
             branch: branch.map(|b| b.to_string()),
