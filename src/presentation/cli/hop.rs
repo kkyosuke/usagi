@@ -16,7 +16,7 @@ mod tests {
     use std::cell::RefCell;
 
     thread_local! {
-        static MOCK_RESULT: RefCell<Option<Result<(), &'static str>>> = RefCell::new(None);
+        static MOCK_RESULT: RefCell<Option<Result<(), &'static str>>> = const { RefCell::new(None) };
     }
 
     pub(super) fn mock_app_run() -> anyhow::Result<()> {
