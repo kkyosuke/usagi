@@ -1522,12 +1522,14 @@ mod tests {
 
     #[test]
     fn focus_menu_can_run_the_coming_soon_ai_command() {
-        // The first menu command is "ai"; Enter on it just logs (no attach).
+        // The menu lists terminal (0, default), agent (1), ai (2). ArrowUp from
+        // the top wraps to "ai"; Enter on it just logs (no attach).
         let mut keys = typed("session switch feat");
         keys.push(Ok(Key::Enter)); // Focus
         keys.push(Ok(Key::Home)); // ignored in the menu
-        keys.push(Ok(Key::ArrowUp)); // wrap to "agent"
-        keys.push(Ok(Key::ArrowDown)); // back to "ai"
+        keys.push(Ok(Key::ArrowDown)); // terminal -> agent
+        keys.push(Ok(Key::ArrowUp)); // back to terminal
+        keys.push(Ok(Key::ArrowUp)); // wrap to "ai"
         keys.push(Ok(Key::Enter)); // run ai (coming soon)
         keys.push(Ok(Key::Escape)); // -> Overview
         keys.push(Ok(Key::Escape)); // -> Back
