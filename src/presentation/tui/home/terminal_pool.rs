@@ -38,6 +38,7 @@ use console::Term;
 use crate::infrastructure::pty::PtySession;
 use crate::infrastructure::session_monitor::SessionMonitor;
 
+use super::terminal_view::TerminalView;
 use super::ui;
 
 /// How often the watcher thread samples every session's bell count.
@@ -168,12 +169,10 @@ impl TerminalPool {
         if !alive {
             let (height, width) = term.size();
             let geo = ui::terminal_geometry(height as usize, width as usize);
-            let mut pty = PtySession::spawn(dir, geo.rows, geo.cols)?;
-            if let Some(command) = initial {
-                // The shell buffers its input, so writing immediately is fine:
-                // it runs the command once it has started up.
-                pty.write(format!("{command}\r").as_bytes())?;
-            }
+            // The launch command is handed to the shell as an argument (not typed
+            // into its stdin) so the shell never echoes the long line into the
+            // pane before the agent draws over it — see [`PtySession::spawn`].
+            let pty = PtySession::spawn(dir, geo.rows, geo.cols, initial)?;
             // Register (or refresh) the watched handles for this path; a fresh
             // spawn over an exited one resets its bell baseline.
             {
@@ -195,6 +194,22 @@ impl TerminalPool {
             .sessions
             .get_mut(&key)
             .expect("the session was just inserted or already present"))
+    }
+
+    /// Snapshot the live terminal for the session rooted at `dir`, resized to the
+    /// current pane geometry, for the sidebar's read-only preview. Returns `None`
+    /// when no live session is rooted there, so the right pane falls back to the
+    /// command log. Resizing here keeps a backgrounded session's screen reflowed
+    /// to the visible pane, exactly as attaching to it would.
+    pub fn snapshot(&mut self, term: &Term, dir: &Path) -> Option<TerminalView> {
+        let session = self.sessions.get_mut(dir)?;
+        if !session.is_alive() {
+            return None;
+        }
+        let (height, width) = term.size();
+        let geo = ui::terminal_geometry(height as usize, width as usize);
+        session.resize(geo.rows, geo.cols);
+        Some(TerminalView::from_screen(session.parser().screen()))
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Shared> {

@@ -374,15 +374,18 @@ fn terminal_pane(view: &TerminalView, right_w: usize, rows: usize) -> Vec<String
         .collect()
 }
 
-/// Chooses the right pane's contents: the command log, or — while the
-/// `terminal` command runs — the live terminal snapshot (or a starting hint
-/// until the first one arrives).
+/// Chooses the right pane's contents. A terminal snapshot wins whenever one is
+/// present: the live screen while the `terminal`/`agent` pane is attached
+/// ([`RightPane::Terminal`]), and — in the sidebar ([`RightPane::Log`]) — a
+/// read-only preview of the selected session's running shell/agent, so moving
+/// the cursor switches the pane like a tab. With no snapshot the attached pane
+/// shows a starting hint and the sidebar falls back to the command log.
 fn right_pane_contents(state: &HomeState, right_w: usize, rows: usize) -> Vec<String> {
-    match state.right_pane() {
-        RightPane::Log => right_pane(state.log(), right_w, rows),
-        RightPane::Terminal => match state.terminal_view() {
-            Some(view) => terminal_pane(view, right_w, rows),
-            None => vec![style(clip_to_width(TERMINAL_STARTING, right_w))
+    match state.terminal_view() {
+        Some(view) => terminal_pane(view, right_w, rows),
+        None => match state.right_pane() {
+            RightPane::Log => right_pane(state.log(), right_w, rows),
+            RightPane::Terminal => vec![style(clip_to_width(TERMINAL_STARTING, right_w))
                 .dim()
                 .to_string()],
         },
@@ -526,7 +529,9 @@ fn footer_line(width: usize, state: &HomeState) -> String {
         "Embedded terminal — Ctrl-O: switch session / detach / Shift+↑↓/PgUp/PgDn: scroll"
     } else {
         match state.mode() {
-            Mode::Sidebar => "↑↓: move / Enter: activate / :: command / Esc: back",
+            Mode::Sidebar => {
+                "↑↓: move / Enter: open / Ctrl-O: switch session / :: command / Esc: back"
+            }
             Mode::Command => "Tab: complete / ↑↓: history / Enter: run / Esc: cancel",
         }
     };
@@ -1219,6 +1224,21 @@ mod tests {
         state.set_terminal_view(TerminalView::from_rows(vec!["$ echo hi".to_string()], None));
         let running = right_pane_contents(&state, 40, 5);
         assert!(running[0].contains("$ echo hi"));
+    }
+
+    #[test]
+    fn right_pane_contents_previews_a_snapshot_in_the_sidebar() {
+        // In the sidebar (Log mode), a terminal snapshot is the selected
+        // session's live preview, so it is shown in place of the command log.
+        let mut state = HomeState::new("usagi", Vec::new(), None);
+        assert_eq!(state.right_pane(), RightPane::Log);
+        state.set_terminal_view(TerminalView::from_rows(vec!["$ preview".to_string()], None));
+        let preview = right_pane_contents(&state, 40, 5);
+        assert!(preview[0].contains("$ preview"));
+        // Clearing the preview falls back to the command log.
+        state.clear_terminal_view();
+        let log = right_pane_contents(&state, 40, 5);
+        assert!(log.iter().any(|l| l.contains("man")));
     }
 
     #[test]

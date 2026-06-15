@@ -64,12 +64,41 @@ pub struct PtySession {
 /// user can scroll the pane back over a command's earlier output.
 const SCROLLBACK_LINES: usize = 10_000;
 
+/// Configure `cmd` to run `command` in `shell` and then drop into an
+/// interactive shell, so the launch line is passed as an argument (never echoed)
+/// rather than typed into the shell's stdin. See [`PtySession::spawn`].
+#[cfg(not(windows))]
+fn configure_initial_command(cmd: &mut CommandBuilder, shell: &str, command: &str) {
+    cmd.arg("-i");
+    cmd.arg("-c");
+    // `command` is already shell-quoted; chain a fresh interactive shell after
+    // it so the user lands at a prompt when the agent exits.
+    cmd.arg(format!("{command}; exec \"{shell}\" -i"));
+}
+
+/// Windows fallback: `cmd.exe` / PowerShell take `/c` and have no `exec`, so the
+/// command runs and the shell then exits — close enough for the rare Windows
+/// case, and still without echoing the launch line.
+#[cfg(windows)]
+fn configure_initial_command(cmd: &mut CommandBuilder, _shell: &str, command: &str) {
+    cmd.arg("/c");
+    cmd.arg(command);
+}
+
 impl PtySession {
     /// Spawn the default shell into a fresh PTY of `rows`×`cols`, rooted at
     /// `dir`. The shell's output is streamed into a [`vt100::Parser`] on a
     /// background thread until it closes (the reader sees EOF), at which point
     /// the session is marked no longer [`alive`](Self::is_alive).
-    pub fn spawn(dir: &Path, rows: u16, cols: u16) -> Result<Self> {
+    ///
+    /// When `command` is `Some`, it is run as a shell argument rather than typed
+    /// into the shell's stdin: a typed command is echoed back by the shell's
+    /// line editor, which would splash the long `:agent` launch line (with its
+    /// `--append-system-prompt`) across the pane before the agent draws over it.
+    /// Passed as an argument it is never echoed. The shell then execs a fresh
+    /// interactive shell so the user is left at a prompt once the command exits,
+    /// exactly as if they had run it themselves.
+    pub fn spawn(dir: &Path, rows: u16, cols: u16, command: Option<&str>) -> Result<Self> {
         let pty_system = native_pty_system();
         let pair = pty_system
             .openpty(PtySize {
@@ -80,8 +109,12 @@ impl PtySession {
             })
             .context("failed to open a pseudo-terminal")?;
 
-        let mut cmd = CommandBuilder::new(terminal::default_shell());
+        let shell = terminal::default_shell();
+        let mut cmd = CommandBuilder::new(&shell);
         cmd.cwd(dir);
+        if let Some(command) = command {
+            configure_initial_command(&mut cmd, &shell, command);
+        }
         let child = pair
             .slave
             .spawn_command(cmd)
