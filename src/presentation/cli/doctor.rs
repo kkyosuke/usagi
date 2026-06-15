@@ -55,6 +55,8 @@ fn render_setup_step(step: &SetupStep) -> String {
     match step {
         SetupStep::OllamaAlreadyPresent => "ollama is already installed".to_string(),
         SetupStep::OllamaInstalled { manager } => format!("installed `ollama` via {manager}"),
+        SetupStep::ServerAlreadyRunning => "ollama server is already running".to_string(),
+        SetupStep::ServerStarted => "started the ollama server".to_string(),
         SetupStep::ModelAlreadyPresent { model } => {
             format!("local LLM model `{model}` is already pulled")
         }
@@ -70,6 +72,7 @@ fn render_setup_error(error: &SetupError) -> String {
         SetupError::OllamaInstallFailed { manager, manual } => {
             format!("could not install `ollama` via {manager}; {manual}")
         }
+        SetupError::ServerStartFailed => local_llm::server_start_failed_message(),
         SetupError::ModelPullFailed { model } => {
             format!("could not pull local LLM model `{model}`")
         }
@@ -205,9 +208,30 @@ mod tests {
         fn run(&self, _program: &str, _args: &[&str]) -> std::io::Result<bool> {
             Ok(true)
         }
-        fn check(&self, _program: &str, _args: &[&str]) -> bool {
+        fn check(&self, _program: &str, args: &[&str]) -> bool {
+            // The server is treated as already running (the start path is
+            // covered in `usecase::local_llm`); `self.check` answers only the
+            // model-presence probe.
+            if args.first() == Some(&"ps") {
+                return true;
+            }
             self.check
         }
+        fn spawn(&self, _program: &str, _args: &[&str]) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn fake_runner_spawn_is_inert() {
+        // The fake reports the server as already running, so its `spawn` is
+        // never hit by `fix_lines`; the start path is covered in
+        // `usecase::local_llm`. Assert the no-op directly.
+        let runner = FakeRunner {
+            available: vec![],
+            check: false,
+        };
+        assert!(runner.spawn("ollama", &["serve"]).is_ok());
     }
 
     #[test]
@@ -239,6 +263,7 @@ mod tests {
             vec![
                 "All required tools are installed 🎉",
                 "ollama is already installed",
+                "ollama server is already running",
                 "local LLM model `qwen2.5-coder:7b` is already pulled",
             ]
         );
@@ -262,6 +287,7 @@ mod tests {
             vec![
                 "All required tools are installed 🎉",
                 "installed `ollama` via brew",
+                "ollama server is already running",
                 "pulled local LLM model `qwen2.5:7b`",
             ]
         );
@@ -272,6 +298,8 @@ mod tests {
         let steps = vec![
             SetupStep::OllamaInstalled { manager: "brew" },
             SetupStep::OllamaAlreadyPresent,
+            SetupStep::ServerStarted,
+            SetupStep::ServerAlreadyRunning,
             SetupStep::ModelPulled {
                 model: "qwen2.5:7b".to_string(),
             },
@@ -285,6 +313,8 @@ mod tests {
             vec![
                 "installed `ollama` via brew",
                 "ollama is already installed",
+                "started the ollama server",
+                "ollama server is already running",
                 "pulled local LLM model `qwen2.5:7b`",
                 "local LLM model `qwen2.5:7b` is already pulled",
             ]
@@ -305,6 +335,10 @@ mod tests {
                 manual: "x".to_string(),
             })),
             vec!["could not install `ollama` via brew; x"]
+        );
+        assert_eq!(
+            render_local_llm_fix(&Err(SetupError::ServerStartFailed)),
+            vec!["could not start the ollama server; try running `ollama serve`"]
         );
         assert_eq!(
             render_local_llm_fix(&Err(SetupError::ModelPullFailed {

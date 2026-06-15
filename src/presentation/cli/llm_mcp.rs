@@ -11,6 +11,8 @@ use std::process::{Command, Stdio};
 use anyhow::Result;
 
 use crate::presentation::mcp_llm::{LlmBackend, LlmMcpServer};
+use crate::usecase::doctor::SystemRunner;
+use crate::usecase::local_llm;
 
 /// The production [`LlmBackend`]: each completion runs `ollama run <model>`,
 /// feeding the prompt on stdin and returning the captured stdout.
@@ -20,6 +22,11 @@ struct OllamaBackend {
 
 impl LlmBackend for OllamaBackend {
     fn ask(&self, prompt: &str, system: Option<&str>) -> Result<String, String> {
+        // A Homebrew-installed `ollama` runs no server until one is started, and
+        // `run` does not auto-start it — so make sure the server is up first,
+        // otherwise every call fails with "could not connect to ollama server".
+        local_llm::ensure_server_started(&SystemRunner)?;
+
         // Ollama's `run` takes a single prompt; a system instruction is folded
         // in ahead of the prompt, separated by a blank line.
         let full = match system {

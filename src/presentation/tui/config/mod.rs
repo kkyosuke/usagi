@@ -99,6 +99,7 @@ fn install_error_message(error: &local_llm::SetupError) -> String {
     match error {
         local_llm::SetupError::OllamaUnavailable { manual }
         | local_llm::SetupError::OllamaInstallFailed { manual, .. } => manual.clone(),
+        local_llm::SetupError::ServerStartFailed => local_llm::server_start_failed_message(),
         local_llm::SetupError::ModelPullFailed { model } => {
             format!("could not pull `{model}`")
         }
