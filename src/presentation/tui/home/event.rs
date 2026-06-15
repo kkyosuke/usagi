@@ -441,7 +441,9 @@ fn switch_key(
 
 /// Back out of 切替 on `Esc` / `h`: return to the mode it was opened from. From
 /// 統括 / 在席 this just restores the mode; from 没入 it re-attaches the focused
-/// session's pane.
+/// session's pane when that session is still live, mirroring how `Enter` only
+/// attaches a live session (so backing out onto an idle row lands in 在席 rather
+/// than spawning a surprise shell).
 #[allow(clippy::too_many_arguments)]
 fn leave_switch(
     term: &Term,
@@ -459,19 +461,24 @@ fn leave_switch(
             state.enter_focus(row);
         }
         ReturnMode::Attached => {
-            // Re-attach the (still focused) session's pane.
             let row = state.list().selected_index();
+            let dir = selected_dir(state, workspace_root);
             state.enter_focus(row);
-            open_pane(
-                term,
-                reader,
-                state,
-                painter,
-                workspace_root,
-                open_terminal,
-                preview,
-                false,
-            );
+            // Re-attach only when the focused session is live (it always is when
+            // the cursor never left the just-detached session); an idle row stays
+            // in 在席.
+            if preview(&dir).is_some() {
+                open_pane(
+                    term,
+                    reader,
+                    state,
+                    painter,
+                    workspace_root,
+                    open_terminal,
+                    preview,
+                    false,
+                );
+            }
         }
     }
 }
@@ -1448,8 +1455,9 @@ mod tests {
 
     #[test]
     fn focus_menu_moves_and_runs_terminal_via_enter() {
-        // Switch -> focus "main" (idle, so just Focus). The menu's first command
-        // is "ai"; move down to "terminal" and Enter runs it (attaches).
+        // Switch -> focus "main" (idle, so just Focus). The menu highlights
+        // "terminal" by default; move down to "agent" and back up to "terminal",
+        // then Enter runs it (attaches).
         let opened = RefCell::new(Vec::new());
         let mut open = |_h: &mut HomeState, d: &Path, a: bool| {
             opened.borrow_mut().push((d.to_path_buf(), a));
@@ -1461,7 +1469,8 @@ mod tests {
         keys.push(Ok(Key::Enter)); // Switch
         keys.push(Ok(Key::ArrowDown)); // cursor "main" (/r/main)
         keys.push(Ok(Key::Enter)); // focus main (idle)
-        keys.push(Ok(Key::Char('j'))); // ai -> terminal
+        keys.push(Ok(Key::Char('j'))); // terminal -> agent
+        keys.push(Ok(Key::ArrowUp)); // agent -> terminal
         keys.push(Ok(Key::Enter)); // run terminal (attach) -> Closed -> Focus
         keys.push(Ok(Key::Escape)); // Focus -> Overview
         keys.push(Ok(Key::Escape)); // -> Back
@@ -1676,6 +1685,47 @@ mod tests {
             Outcome::Back
         ));
         assert_eq!(*calls.borrow(), 2);
+    }
+
+    #[test]
+    fn pane_to_switch_then_esc_onto_an_idle_session_lands_in_focus() {
+        // ToSwitch -> Switch(return=Attached). Moving the cursor onto an idle
+        // session and pressing Esc lands in 在席 *without* spawning a second pane
+        // — only a live session re-attaches, mirroring how Enter behaves.
+        let calls = RefCell::new(0);
+        let mut open = |_h: &mut HomeState, _d: &Path, _a: bool| {
+            *calls.borrow_mut() += 1;
+            Ok(PaneExit::ToSwitch)
+        };
+        let mut create: fn(&str) -> SessionOutcome = noop_create;
+        // Only the root (/ws) is live; the worktree rows are idle.
+        let mut preview = |p: &Path| {
+            if p == Path::new("/ws") {
+                Some(TerminalView::from_rows(vec!["live".to_string()], None))
+            } else {
+                None
+            }
+        };
+        let mut keys = typed("session switch root");
+        keys.push(Ok(Key::Enter)); // attach root -> ToSwitch -> Switch(return Attached)
+        keys.push(Ok(Key::ArrowDown)); // cursor -> an idle worktree row
+        keys.push(Ok(Key::Escape)); // Esc -> idle row stays in Focus (no re-attach)
+        keys.push(Ok(Key::Escape)); // Focus -> Overview
+        keys.push(Ok(Key::Escape)); // -> Back
+        assert!(matches!(
+            run_full(
+                keys,
+                sample_state(),
+                &mut open,
+                &mut create,
+                &mut preview,
+                &mut noop_config
+            )
+            .unwrap(),
+            Outcome::Back
+        ));
+        // The pane opened only once (the initial attach); the Esc did not re-attach.
+        assert_eq!(*calls.borrow(), 1);
     }
 
     #[test]

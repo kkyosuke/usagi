@@ -582,6 +582,11 @@ impl CommandRegistry {
         Self {
             commands: vec![
                 Box::new(SessionCommand),
+                Box::new(TerminalCommand),
+                Box::new(AgentCommand),
+                // The not-yet-implemented `ai` placeholder sits after the working
+                // session commands so the 在席 (Focus) menu lists (and highlights)
+                // `terminal` first, matching `document/design/05-home.md`.
                 Box::new(ComingSoonCommand {
                     name: "ai",
                     description: "Talk to the AI agent",
@@ -589,8 +594,6 @@ impl CommandRegistry {
                     examples: &["ai fix the failing test"],
                     scope: CommandScope::Session,
                 }),
-                Box::new(TerminalCommand),
-                Box::new(AgentCommand),
                 Box::new(ConfigCommand),
                 Box::new(HistoryCommand),
                 Box::new(ComingSoonCommand {
@@ -1329,13 +1332,14 @@ mod tests {
     #[test]
     fn commands_in_scope_lists_a_scopes_own_commands_in_order() {
         // The 在席 menu lists exactly the Session-scope commands, in registry
-        // order, excluding the shared utilities.
+        // order, excluding the shared utilities. `terminal` comes first (and is
+        // highlighted by default); the coming-soon `ai` placeholder comes last.
         let session: Vec<&str> = registry()
             .commands_in_scope(CommandScope::Session)
             .iter()
             .map(|i| i.name)
             .collect();
-        assert_eq!(session, vec!["ai", "terminal", "agent"]);
+        assert_eq!(session, vec!["terminal", "agent", "ai"]);
         // Workspace scope lists its own commands and none of the session ones.
         let workspace: Vec<&str> = registry()
             .commands_in_scope(CommandScope::Workspace)
@@ -1349,11 +1353,11 @@ mod tests {
 
     #[test]
     fn complete_respects_the_current_scope() {
-        // "a" matches the session commands "ai" and "agent" — offered in session
+        // "a" matches the session commands "agent" and "ai" — offered in session
         // scope, in registration order (common prefix "a")…
         let session = registry().complete("a", CommandScope::Session);
         assert_eq!(session.input, "a");
-        assert_eq!(session.candidates, vec!["ai", "agent"]);
+        assert_eq!(session.candidates, vec!["agent", "ai"]);
         // …but nothing in workspace scope, so the input is left untouched.
         let workspace = registry().complete("a", CommandScope::Workspace);
         assert_eq!(workspace.input, "a");

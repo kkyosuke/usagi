@@ -1576,23 +1576,23 @@ mod tests {
     fn focus_menu_lists_the_session_commands_in_order() {
         let state = state();
         let names: Vec<&str> = state.focus_menu_commands().iter().map(|i| i.name).collect();
-        assert_eq!(names, vec!["ai", "terminal", "agent"]);
+        assert_eq!(names, vec!["terminal", "agent", "ai"]);
     }
 
     #[test]
     fn focus_menu_cursor_moves_and_wraps_and_selects() {
         let mut state = state();
         state.enter_focus(1);
-        // ai (0), terminal (1), agent (2).
-        assert_eq!(state.focus_selected_command().name, "ai");
-        state.focus_menu_move_down();
+        // terminal (0, highlighted by default), agent (1), ai (2).
         assert_eq!(state.focus_selected_command().name, "terminal");
+        state.focus_menu_move_down();
+        assert_eq!(state.focus_selected_command().name, "agent");
         state.focus_menu_move_down();
         state.focus_menu_move_down(); // wraps to the top
         assert_eq!(state.focus_menu_cursor(), 0);
         // Up from the top wraps to the bottom.
         state.focus_menu_move_up();
-        assert_eq!(state.focus_selected_command().name, "agent");
+        assert_eq!(state.focus_selected_command().name, "ai");
     }
 
     #[test]
