@@ -22,7 +22,7 @@ use super::state::{
 use super::terminal_view::TerminalView;
 
 /// Shown below the root row when the workspace has no recorded worktrees.
-const EMPTY_MESSAGE: &str = "No worktrees recorded yet. Run usagi to sync.";
+const EMPTY_MESSAGE: &str = "no sessions";
 
 /// The detail shown on the root row's second line (it has no git status).
 const ROOT_DETAIL: &str = "workspace root";
@@ -316,7 +316,11 @@ fn left_pane(
     );
     let mut lines = vec![root_top, root_detail];
     if list.is_empty() {
-        lines.push(clip_to_width(EMPTY_MESSAGE, left_w));
+        lines.push(
+            style(clip_to_width(EMPTY_MESSAGE, left_w))
+                .dim()
+                .to_string(),
+        );
     } else {
         for (i, w) in list.worktrees().iter().enumerate() {
             // The root occupies the first entry, so worktree `i` sits at
@@ -1063,7 +1067,7 @@ mod tests {
         assert_eq!(lines.len(), 3);
         assert!(lines[0].contains(ROOT_NAME));
         assert!(lines[1].contains("workspace root"));
-        assert!(lines[2].contains("No worktrees recorded"));
+        assert!(lines[2].contains("no sessions"));
     }
 
     #[test]
