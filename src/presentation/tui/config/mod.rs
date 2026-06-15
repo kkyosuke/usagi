@@ -17,7 +17,8 @@ use console::Term;
 use crate::domain::settings::{LocalSettings, Settings};
 use crate::infrastructure::storage::Storage;
 use crate::presentation::tui::term_reader::TermKeyReader;
-use crate::usecase::{settings, workspace};
+use crate::usecase::doctor::SystemRunner;
+use crate::usecase::{local_llm, settings, workspace};
 
 pub use event::Outcome;
 
@@ -44,7 +45,7 @@ pub fn run(term: &Term) -> Result<Outcome> {
 pub fn run_in(term: &Term, repo_root: Option<PathBuf>) -> Result<Outcome> {
     let storage = Storage::open_default()?;
 
-    let (config, notice) = match load(&storage, repo_root.as_deref()) {
+    let (mut config, notice) = match load(&storage, repo_root.as_deref()) {
         Ok((settings, workspaces, local)) => {
             let config = match (repo_root.as_ref(), local) {
                 (Some(_), Some(local)) => Config::workspace(settings, local),
@@ -57,6 +58,15 @@ pub fn run_in(term: &Term, repo_root: Option<PathBuf>) -> Result<Outcome> {
             Some(format!("Failed to load settings: {e}")),
         ),
     };
+
+    // Probe whether the local LLM runtime and selected model are already
+    // present, so the Local LLM row opens as an "Install" action or an on/off
+    // toggle accordingly.
+    let runner = SystemRunner;
+    let model = config.local_llm_model().to_string();
+    config.set_local_llm_installed(
+        local_llm::ollama_installed(&runner) && local_llm::model_present(&runner, &model),
+    );
 
     let mut reader = TermKeyReader::new(term.clone());
     // The scope decides what is written: a project context saves only the
@@ -74,7 +84,25 @@ pub fn run_in(term: &Term, repo_root: Option<PathBuf>) -> Result<Outcome> {
         }
         Ok(())
     };
-    event::event_loop(term, &mut reader, config, &mut save, notice)
+    // Installing the local LLM provisions the runtime + model on demand (this
+    // blocks the screen while `ollama pull` runs, then the row becomes a toggle).
+    let mut install = |model: &str| -> Result<()> {
+        local_llm::ensure(std::env::consts::OS, &SystemRunner, model)
+            .map(|_| ())
+            .map_err(|e| anyhow::anyhow!(install_error_message(&e)))
+    };
+    event::event_loop(term, &mut reader, config, &mut save, &mut install, notice)
+}
+
+/// A short human message for a local LLM provisioning failure.
+fn install_error_message(error: &local_llm::SetupError) -> String {
+    match error {
+        local_llm::SetupError::OllamaUnavailable { manual }
+        | local_llm::SetupError::OllamaInstallFailed { manual, .. } => manual.clone(),
+        local_llm::SetupError::ModelPullFailed { model } => {
+            format!("could not pull `{model}`")
+        }
+    }
 }
 
 /// Loads the global settings, the registered workspace names the

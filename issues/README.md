@@ -44,6 +44,7 @@
 | 029 | [home-config](029-home-config.md) ✅ | `config` ホーム画面から設定画面を開く | tui | medium | 002, 022 |
 | 030 | [default-branch-source](030-default-branch-source.md) ✅ | セッション開始時のデフォルトブランチ基点（local / remote）をローカル設定で選択 | tui | medium | 022 |
 | 031 | [root-mode](031-root-mode.md) ✅ | ルートモード（どのセッションにも属さず `terminal` / `agent` をワークスペースルートで起動） | tui | medium | 006, 026 |
+| 032 | [local-llm-mcp](032-local-llm-mcp.md) ✅ | ローカル LLM を MCP 公開しクラウド Agent のトークン消費を抑制（config 有効化・未導入時 install） | mcp | medium | 019, 025 |
 
 ## 依存関係
 
@@ -86,6 +87,8 @@ graph TD
     023 --> 024[024 issue-cli]
     023 --> 025[025 issue-mcp]
     024 --> 025
+    019[019 doctor-fix] --> 032[032 local-llm-mcp]
+    025 --> 032
 ```
 
 ## 推奨着手順
@@ -95,6 +98,7 @@ graph TD
 3. **作業支援**: 005 ai / 006 terminal → 026 agent → 028 agent-wait-notify / 007 history / 008 man → 027 command-hints / 012 diff
 4. **後続・拡張**: 009 sync / 013 logs / 014 clean / 015〜018 / 020
 5. **issue 管理（タスク管理）**: 023 issue-store → 024 issue-cli → 025 issue-mcp
+6. **拡張（トークン最適化）**: 019 doctor-fix / 025 issue-mcp → 032 local-llm-mcp
 
 > [!NOTE]
 > 本一覧は `usagi.ai` の `issue/` および `doc/` を参照して作成しています。実装済みの機能（`doctor` / `hop` / `status`、Welcome/Home/New/Open/Config 画面、通知）は対象外です。

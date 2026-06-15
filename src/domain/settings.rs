@@ -37,6 +37,55 @@ const ISSUE_MCP_CONFIG: &str = r#"{"mcpServers":{"usagi":{"command":"usagi","arg
 /// single quotes so it survives the single-quoted shell argument verbatim.
 const SESSION_WORKTREE_PROMPT: &str = "あなたは usagi が管理するセッション専用の worktree 内で起動されています。このディレクトリは既に独立した作業環境のため、新たに git worktree を作成する必要はありません。ここで直接作業を進めてください。";
 
+/// System-prompt addendum added when a local LLM MCP server is wired in.
+///
+/// It nudges the cloud agent to offload light, low-stakes work (summaries,
+/// naming, boilerplate, simple transforms) to the `local_llm_ask` tool so the
+/// cloud model's tokens are spent on the work that actually needs it. Kept free
+/// of single quotes so it survives the single-quoted shell argument verbatim.
+const LOCAL_LLM_PROMPT: &str = "トークン節約のため、要約・命名・定型文の生成・単純な変換といった軽量で重要度の低いタスクは、MCP ツール local_llm_ask（ローカル LLM）に委譲してください。判断が必要な作業や重要な実装はあなた自身が行ってください。";
+
+/// The local LLM models usagi can delegate work to, in the order the config
+/// screen cycles through them. All are Qwen variants pullable with
+/// `ollama pull <model>`; the coder variants are tuned for code/technical
+/// tasks, with smaller sizes for lower-spec machines.
+pub const LOCAL_LLM_MODELS: [&str; 4] = [
+    "qwen2.5-coder:7b",
+    "qwen2.5-coder:3b",
+    "qwen2.5-coder:1.5b",
+    "qwen2.5:7b",
+];
+
+/// The model selected by default — the most capable coder variant in
+/// [`LOCAL_LLM_MODELS`].
+pub const DEFAULT_LOCAL_LLM_MODEL: &str = LOCAL_LLM_MODELS[0];
+
+/// Configuration for the optional local LLM the agent can offload work to.
+///
+/// Disabled by default: usagi never enables it automatically. When enabled, the
+/// chosen `model` is served to the agent through usagi's local LLM MCP server
+/// (`usagi llm-mcp`) so the cloud agent can delegate light tasks to it and spend
+/// fewer of its own tokens.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LocalLlm {
+    /// Whether the local LLM MCP server is wired into launched agents.
+    pub enabled: bool,
+    /// The Ollama model name delegated work runs against (e.g.
+    /// `qwen2.5-coder:7b`).
+    pub model: String,
+}
+
+impl Default for LocalLlm {
+    fn default() -> Self {
+        Self {
+            // Opt-in: off until the user turns it on (and installs the model).
+            enabled: false,
+            model: DEFAULT_LOCAL_LLM_MODEL.to_string(),
+        }
+    }
+}
+
 impl AgentCli {
     /// The shell command (program name) usagi launches for this agent — the
     /// word the `agent` command runs inside the embedded terminal.
@@ -48,23 +97,48 @@ impl AgentCli {
     }
 
     /// The full command line `:agent` sends to the embedded shell, with usagi's
-    /// issue MCP server wired in so the agent can manage issues immediately.
+    /// issue MCP server wired in so the agent can manage issues immediately —
+    /// plus the local LLM MCP server when `local_llm_model` is `Some` (i.e. the
+    /// local LLM is enabled), so the agent can offload light work to it.
     ///
-    /// Claude Code accepts the server inline via `--mcp-config` and a
+    /// Claude Code accepts the servers inline via `--mcp-config` and a
     /// session-scoped instruction via `--append-system-prompt`; both arguments
     /// are single-quoted so the shell passes them through verbatim (neither
     /// value contains a single quote). The system prompt tells the agent it is
-    /// already inside a usagi worktree, so it skips creating one. Gemini has no
-    /// inline flags — its MCP servers come from `settings.json` — so it launches
-    /// plain for now.
-    pub fn launch_command(self) -> String {
+    /// already inside a usagi worktree, so it skips creating one, and — when the
+    /// local LLM is on — to delegate light tasks to it. Gemini has no inline
+    /// flags — its MCP servers come from `settings.json` — so it launches plain
+    /// for now.
+    pub fn launch_command(self, local_llm_model: Option<&str>) -> String {
         match self {
-            AgentCli::Claude => format!(
-                "claude --mcp-config '{ISSUE_MCP_CONFIG}' \
-                 --append-system-prompt '{SESSION_WORKTREE_PROMPT}'"
-            ),
+            AgentCli::Claude => {
+                let mcp_config = mcp_config_json(local_llm_model);
+                let system_prompt = match local_llm_model {
+                    Some(_) => format!("{SESSION_WORKTREE_PROMPT}{LOCAL_LLM_PROMPT}"),
+                    None => SESSION_WORKTREE_PROMPT.to_string(),
+                };
+                format!(
+                    "claude --mcp-config '{mcp_config}' \
+                     --append-system-prompt '{system_prompt}'"
+                )
+            }
             AgentCli::Gemini => "gemini".to_string(),
         }
+    }
+}
+
+/// The `--mcp-config` JSON for Claude Code: always the issue server, plus the
+/// local LLM server (`usagi llm-mcp --model <model>`) when a model is given.
+///
+/// Built by string formatting rather than `serde_json` so `domain` stays free
+/// of that dependency; the model name comes from a fixed allowlist
+/// ([`LOCAL_LLM_MODELS`]) with no characters that need JSON escaping.
+fn mcp_config_json(local_llm_model: Option<&str>) -> String {
+    match local_llm_model {
+        None => ISSUE_MCP_CONFIG.to_string(),
+        Some(model) => format!(
+            r#"{{"mcpServers":{{"usagi":{{"command":"usagi","args":["mcp"]}},"usagi-llm":{{"command":"usagi","args":["llm-mcp","--model","{model}"]}}}}}}"#
+        ),
     }
 }
 
@@ -98,6 +172,8 @@ pub struct Settings {
     pub notifications_enabled: bool,
     /// Which agent CLI usagi drives.
     pub agent_cli: AgentCli,
+    /// The optional local LLM the agent can offload light work to.
+    pub local_llm: LocalLlm,
 }
 
 impl Default for Settings {
@@ -109,6 +185,7 @@ impl Default for Settings {
             // Notifications are opt-out: on unless the user disables them.
             notifications_enabled: true,
             agent_cli: AgentCli::default(),
+            local_llm: LocalLlm::default(),
         }
     }
 }
@@ -126,7 +203,21 @@ impl Settings {
         if let Some(notifications_enabled) = local.notifications_enabled {
             self.notifications_enabled = notifications_enabled;
         }
+        if let Some(local_llm_enabled) = local.local_llm_enabled {
+            self.local_llm.enabled = local_llm_enabled;
+        }
         self
+    }
+
+    /// The command line that launches the configured agent CLI with usagi's MCP
+    /// servers wired in: always the issue server, plus the local LLM server when
+    /// [`LocalLlm::enabled`] is set (so the agent can offload work to it).
+    pub fn agent_launch_command(&self) -> String {
+        let model = self
+            .local_llm
+            .enabled
+            .then_some(self.local_llm.model.as_str());
+        self.agent_cli.launch_command(model)
     }
 }
 
@@ -145,6 +236,9 @@ pub struct LocalSettings {
     /// Which ref new session worktrees branch from in this repository. `None`
     /// defers to the default ([`BranchSource::Remote`]).
     pub default_branch_source: Option<BranchSource>,
+    /// Override whether the local LLM is enabled for this project. `None` defers
+    /// to the global [`LocalLlm::enabled`] setting.
+    pub local_llm_enabled: Option<bool>,
 }
 
 impl LocalSettings {
@@ -153,6 +247,7 @@ impl LocalSettings {
         self.agent_cli.is_none()
             && self.notifications_enabled.is_none()
             && self.default_branch_source.is_none()
+            && self.local_llm_enabled.is_none()
     }
 
     /// The branch source to use, resolving an unset value to the default.
@@ -170,8 +265,7 @@ mod tests {
         let global = Settings::default(); // agent_cli = Claude, notifications = true
         let local = LocalSettings {
             agent_cli: Some(AgentCli::Gemini),
-            notifications_enabled: None,
-            default_branch_source: None,
+            ..Default::default()
         };
 
         let effective = global.with_local(&local);
@@ -186,15 +280,31 @@ mod tests {
     fn with_local_overrides_notifications_when_set() {
         let global = Settings::default();
         let local = LocalSettings {
-            agent_cli: None,
             notifications_enabled: Some(false),
-            default_branch_source: None,
+            ..Default::default()
         };
 
         let effective = global.with_local(&local);
 
         assert_eq!(effective.agent_cli, AgentCli::Claude);
         assert!(!effective.notifications_enabled);
+    }
+
+    #[test]
+    fn with_local_overrides_the_local_llm_toggle_when_set() {
+        // The global default leaves the local LLM off; a local override turns it
+        // on for just this project (the model is untouched).
+        let global = Settings::default();
+        assert!(!global.local_llm.enabled);
+        let local = LocalSettings {
+            local_llm_enabled: Some(true),
+            ..Default::default()
+        };
+
+        let effective = global.with_local(&local);
+
+        assert!(effective.local_llm.enabled);
+        assert_eq!(effective.local_llm.model, DEFAULT_LOCAL_LLM_MODEL);
     }
 
     #[test]
@@ -208,21 +318,24 @@ mod tests {
         assert!(LocalSettings::default().is_empty());
         assert!(!LocalSettings {
             agent_cli: Some(AgentCli::Claude),
-            notifications_enabled: None,
-            default_branch_source: None,
+            ..Default::default()
         }
         .is_empty());
         assert!(!LocalSettings {
-            agent_cli: None,
             notifications_enabled: Some(true),
-            default_branch_source: None,
+            ..Default::default()
         }
         .is_empty());
         // The branch source counts as an override too.
         assert!(!LocalSettings {
-            agent_cli: None,
-            notifications_enabled: None,
             default_branch_source: Some(BranchSource::Local),
+            ..Default::default()
+        }
+        .is_empty());
+        // So does the local LLM toggle.
+        assert!(!LocalSettings {
+            local_llm_enabled: Some(false),
+            ..Default::default()
         }
         .is_empty());
     }
@@ -235,7 +348,9 @@ mod tests {
 
     #[test]
     fn claude_launch_command_wires_in_the_issue_mcp_server() {
-        let launch = AgentCli::Claude.launch_command();
+        // With the local LLM off (`None`), only the issue server is wired in and
+        // the system prompt is just the worktree note.
+        let launch = AgentCli::Claude.launch_command(None);
         // The program is still `claude`, now with the issue MCP server passed
         // inline via `--mcp-config` and a session-scoped instruction passed via
         // `--append-system-prompt` (both single-quoted so the shell keeps them).
@@ -247,9 +362,54 @@ mod tests {
     }
 
     #[test]
-    fn gemini_launch_command_stays_plain() {
-        // Gemini has no inline MCP flag, so it launches as the bare command.
-        assert_eq!(AgentCli::Gemini.launch_command(), "gemini");
+    fn claude_launch_command_wires_in_the_local_llm_server_when_enabled() {
+        // With a model given, the local LLM server joins the issue server in the
+        // MCP config and the delegation prompt is appended after the worktree note.
+        let launch = AgentCli::Claude.launch_command(Some("qwen2.5-coder:7b"));
+        assert!(launch.contains(
+            "\"usagi-llm\":{\"command\":\"usagi\",\"args\":[\"llm-mcp\",\"--model\",\"qwen2.5-coder:7b\"]}"
+        ));
+        // The issue server is still present alongside it.
+        assert!(launch.contains("\"usagi\":{\"command\":\"usagi\",\"args\":[\"mcp\"]}"));
+        // The delegation instruction is appended to the worktree note.
+        assert!(launch.contains("local_llm_ask"));
+    }
+
+    #[test]
+    fn gemini_launch_command_stays_plain_regardless_of_local_llm() {
+        // Gemini has no inline MCP flag, so it launches as the bare command even
+        // when the local LLM is enabled.
+        assert_eq!(AgentCli::Gemini.launch_command(None), "gemini");
+        assert_eq!(
+            AgentCli::Gemini.launch_command(Some("qwen2.5-coder:7b")),
+            "gemini"
+        );
+    }
+
+    #[test]
+    fn agent_launch_command_wires_the_local_llm_only_when_enabled() {
+        // Disabled (the default): no local LLM server, no delegation prompt.
+        let mut settings = Settings::default();
+        let off = settings.agent_launch_command();
+        assert!(!off.contains("usagi-llm"));
+        assert!(!off.contains("local_llm_ask"));
+
+        // Enabled: the configured model is served and the prompt is added.
+        settings.local_llm.enabled = true;
+        settings.local_llm.model = "qwen2.5-coder:3b".to_string();
+        let on = settings.agent_launch_command();
+        assert!(on.contains("\"--model\",\"qwen2.5-coder:3b\""));
+        assert!(on.contains("local_llm_ask"));
+    }
+
+    #[test]
+    fn local_llm_defaults_to_off_with_the_default_model() {
+        let local_llm = LocalLlm::default();
+        assert!(!local_llm.enabled);
+        assert_eq!(local_llm.model, "qwen2.5-coder:7b");
+        assert_eq!(DEFAULT_LOCAL_LLM_MODEL, LOCAL_LLM_MODELS[0]);
+        // The default model is one of the offered choices.
+        assert!(LOCAL_LLM_MODELS.contains(&DEFAULT_LOCAL_LLM_MODEL));
     }
 
     #[test]

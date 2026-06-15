@@ -35,9 +35,9 @@ presentation ──> usecase ──> domain
 | 層 | 責務 | 代表的な型・モジュール |
 |---|---|---|
 | `domain/` | 外部依存のない純粋なエンティティ | `Workspace`, `Settings` / `Theme` / `AgentCli` / `LocalSettings`, `WorkspaceState` / `WorktreeState` / `BranchStatus`, `Repository`（URL パース・名前導出）, `HistoryEntry`, `Issue` / `IssueSummary` / `IssueStatus` / `IssuePriority`（frontmatter 読み書き） |
-| `usecase/` | ビジネスロジック（初期化・登録・状態同期・設定更新・セッション作成・依存チェック・issue 管理） | `project`, `workspace`, `workspace_state`, `settings`（実効設定の解決を含む）, `session`（worktree 構築）, `doctor`, `issue`（CRUD・検索・依存 readiness 判定） |
+| `usecase/` | ビジネスロジック（初期化・登録・状態同期・設定更新・セッション作成・依存チェック・issue 管理・ローカル LLM 導入） | `project`, `workspace`, `workspace_state`, `settings`（実効設定の解決を含む）, `session`（worktree 構築）, `doctor`, `issue`（CRUD・検索・依存 readiness 判定）, `local_llm`（`ollama`・モデルの有無判定とインストール） |
 | `infrastructure/` | Git 操作、各 JSON ファイルの永続化、シェル起動などの外部連携 | `git`（git CLI の読み取り専用検査 + `add_worktree`）, `storage`（グローバル `~/.usagi/`）, `workspace_store`（`<repo>/.usagi/` の `state.json` / `settings.json`）, `history_store`（`history.json`）, `terminal`（起動するシェルの解決）, `pty`（疑似ターミナルセッション・ベル計測）, `session_monitor`（入力待ち判定の純粋ロジック）, `issue_store`（`<repo>/.usagi/issues/` の markdown + `index.json`） |
-| `presentation/` | CLI ルーティング、TUI 描画、TUI 内コマンド、MCP サーバ | `cli/`（`init` / `hop` / `status` / `doctor` / `issue` / `mcp`）, `tui/`（各画面 + `app/` 画面遷移オーケストレーター）, `mcp`（issue 操作の MCP/JSON-RPC ディスパッチ） |
+| `presentation/` | CLI ルーティング、TUI 描画、TUI 内コマンド、MCP サーバ | `cli/`（`init` / `hop` / `status` / `doctor` / `issue` / `mcp` / `llm_mcp`）, `tui/`（各画面 + `app/` 画面遷移オーケストレーター）, `mcp`（issue 操作の MCP/JSON-RPC ディスパッチ）, `mcp_llm`（ローカル LLM 委譲ツールの MCP/JSON-RPC ディスパッチ） |
 
 ## モジュール構成（`src/`）
 
@@ -49,7 +49,7 @@ src/
 │
 ├── domain/                     # 純粋なエンティティ（外部依存なし）
 │   ├── repository.rs           # Git URL パース・ディレクトリ名導出
-│   ├── settings.rs             # Settings / Theme / AgentCli、LocalSettings（with_local で上書き解決）
+│   ├── settings.rs             # Settings / Theme / AgentCli / LocalLlm、LocalSettings（with_local で上書き解決）・agent 起動コマンド生成
 │   ├── workspace.rs            # グローバル登録エントリ Workspace
 │   ├── workspace_state.rs      # WorkspaceState / WorktreeState / BranchStatus
 │   ├── history.rs              # コマンド履歴の 1 件 HistoryEntry
@@ -61,8 +61,9 @@ src/
 │   ├── workspace_state.rs      # リポジトリ状態の inspect/sync/load
 │   ├── settings.rs             # グローバル設定の load/更新、ローカル設定と実効設定の解決（effective）
 │   ├── session.rs              # セッション作成（ルート再帰走査・worktree 構築・非 git コピー）
-│   ├── doctor.rs               # 依存ツールの導入状況チェック
-│   └── issue.rs                # issue の CRUD・検索・依存 readiness 判定
+│   ├── doctor.rs               # 依存ツールの導入状況チェック（ローカル LLM の健全性・--fix 導入を含む）
+│   ├── issue.rs                # issue の CRUD・検索・依存 readiness 判定
+│   └── local_llm.rs            # ollama・モデルの有無判定とインストール（ensure）
 │
 ├── infrastructure/             # 外部連携（Git・永続化・シェル）
 │   ├── git.rs                  # git CLI 経由の読み取り専用検査 + worktree 追加（add_worktree）
@@ -75,8 +76,9 @@ src/
 │   └── issue_store.rs          # <repo>/.usagi/issues/ の markdown + index.json（IssueStore）
 │
 └── presentation/               # CLI ルーティング・TUI・MCP
-    ├── cli/                    # サブコマンド（init / hop / status / doctor / issue / mcp）
+    ├── cli/                    # サブコマンド（init / hop / status / doctor / issue / mcp / llm_mcp）
     ├── mcp.rs                  # issue 操作の MCP/JSON-RPC ディスパッチ（McpServer）
+    ├── mcp_llm.rs              # ローカル LLM 委譲ツールの MCP/JSON-RPC ディスパッチ（LlmMcpServer）
     └── tui/                    # ratatui ベースの TUI
         ├── app/                # TUI オーケストレーター（画面グラフの遷移を管理 / event）
         ├── screen.rs           # 端末制御（代替スクリーン・RAII ガード）・差分描画（FramePainter）

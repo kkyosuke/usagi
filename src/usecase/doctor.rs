@@ -6,6 +6,7 @@
 //! those subsystems.
 
 use crate::infrastructure::storage::Storage;
+use crate::usecase::local_llm;
 
 /// Health of a single diagnostic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,6 +77,10 @@ impl Check {
 const REQUIRED_TOOLS: &[&str] = &["git", "bash"];
 
 /// Run every diagnostic and return the checks in display order.
+///
+/// The local LLM checks are appended only when it is enabled in the saved
+/// settings — they are irrelevant (and `ollama` need not be installed) when the
+/// feature is off, which is the default.
 pub fn diagnose(storage: &Storage) -> Vec<Check> {
     let mut checks: Vec<Check> = REQUIRED_TOOLS
         .iter()
@@ -83,7 +88,40 @@ pub fn diagnose(storage: &Storage) -> Vec<Check> {
         .collect();
     checks.push(notification_check());
     checks.push(config_check(storage));
+    if let Ok(settings) = storage.load_settings() {
+        checks.extend(local_llm_checks(
+            settings.local_llm.enabled,
+            &settings.local_llm.model,
+            &SystemRunner,
+        ));
+    }
     checks
+}
+
+/// Diagnostics for the optional local LLM, or an empty list when it is
+/// disabled. Reports whether the `ollama` runtime and the selected model are
+/// installed; the remedy for either is `usagi doctor --fix`.
+fn local_llm_checks(enabled: bool, model: &str, runner: &dyn CommandRunner) -> Vec<Check> {
+    if !enabled {
+        return Vec::new();
+    }
+    let ollama = if local_llm::ollama_installed(runner) {
+        Check::ok("ollama")
+    } else {
+        Check::missing(
+            "ollama",
+            "`ollama` runtime not installed; run `usagi doctor --fix`",
+        )
+    };
+    let model_check = if local_llm::model_present(runner, model) {
+        Check::ok_with("local-llm model", model.to_string())
+    } else {
+        Check::missing(
+            "local-llm model",
+            format!("model `{model}` not pulled; run `usagi doctor --fix`"),
+        )
+    };
+    vec![ollama, model_check]
 }
 
 /// Check that an external tool is installed and runnable.
@@ -162,6 +200,12 @@ pub trait CommandRunner {
     /// Run an install command (`program args...`), returning whether it
     /// exited successfully. Its output is shown to the user.
     fn run(&self, program: &str, args: &[&str]) -> std::io::Result<bool>;
+
+    /// Run `program args...` quietly (stdout/stderr suppressed), returning
+    /// whether it exited successfully. Used for capability probes — e.g.
+    /// "is this Ollama model already pulled?" — where the command's own output
+    /// should not reach the user.
+    fn check(&self, program: &str, args: &[&str]) -> bool;
 }
 
 /// The production [`CommandRunner`], backed by [`std::process::Command`].
@@ -178,6 +222,16 @@ impl CommandRunner for SystemRunner {
             .args(args)
             .status()
             .map(|status| status.success())
+    }
+
+    fn check(&self, program: &str, args: &[&str]) -> bool {
+        std::process::Command::new(program)
+            .args(args)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
     }
 }
 
@@ -382,8 +436,51 @@ mod tests {
     fn diagnose_covers_tools_notifications_and_config() {
         let dir = tempfile::tempdir().expect("failed to create temp dir");
         let storage = Storage::new(dir.path().join("usagi"));
+        // The local LLM is off by default, so its checks are not appended.
         let names: Vec<_> = diagnose(&storage).into_iter().map(|c| c.name).collect();
         assert_eq!(names, vec!["git", "bash", "notifications", "config"]);
+    }
+
+    #[test]
+    fn diagnose_skips_local_llm_when_settings_cannot_be_read() {
+        let dir = tempfile::tempdir().expect("failed to create temp dir");
+        let storage = Storage::new(dir.path().join("usagi"));
+        // A directory where `settings.json` is expected makes the load fail, so
+        // diagnose cannot know whether the local LLM is on and skips its checks.
+        std::fs::create_dir_all(storage.dir().join("settings.json")).unwrap();
+        let names: Vec<_> = diagnose(&storage).into_iter().map(|c| c.name).collect();
+        assert_eq!(names, vec!["git", "bash", "notifications", "config"]);
+    }
+
+    #[test]
+    fn local_llm_checks_are_empty_when_disabled() {
+        let runner = FakeRunner::new(vec![], Ok(true));
+        assert!(local_llm_checks(false, "qwen2.5-coder:7b", &runner).is_empty());
+    }
+
+    #[test]
+    fn local_llm_checks_report_ollama_and_model_presence() {
+        // Both present: ollama available and the model probe (run -> Ok(true))
+        // succeeds.
+        let ready = FakeRunner::new(vec!["ollama"], Ok(true));
+        let checks = local_llm_checks(true, "qwen2.5-coder:7b", &ready);
+        assert_eq!(checks[0].name, "ollama");
+        assert_eq!(checks[0].health, Health::Ok);
+        assert_eq!(checks[1].name, "local-llm model");
+        assert_eq!(checks[1].health, Health::Ok);
+        assert_eq!(checks[1].detail.as_deref(), Some("qwen2.5-coder:7b"));
+
+        // Neither present: ollama missing and the probe fails.
+        let missing = FakeRunner::new(vec![], Ok(false));
+        let checks = local_llm_checks(true, "qwen2.5-coder:7b", &missing);
+        assert_eq!(checks[0].health, Health::Missing);
+        assert!(checks[0]
+            .detail
+            .as_deref()
+            .unwrap()
+            .contains("doctor --fix"));
+        assert_eq!(checks[1].health, Health::Missing);
+        assert!(checks[1].detail.as_deref().unwrap().contains("not pulled"));
     }
 
     // --- `doctor --fix` ----------------------------------------------------
@@ -411,6 +508,11 @@ mod tests {
                 Ok(ok) => Ok(*ok),
                 Err(e) => Err(std::io::Error::new(e.kind(), e.to_string())),
             }
+        }
+
+        fn check(&self, _program: &str, _args: &[&str]) -> bool {
+            // A probe succeeds when the configured run result is a clean exit.
+            matches!(self.run, Ok(true))
         }
     }
 
@@ -553,5 +655,11 @@ mod tests {
         // Running an installed tool succeeds; a missing program errors out.
         assert!(runner.run("git", &["--version"]).unwrap());
         assert!(runner.run("definitely-not-a-real-binary-xyz", &[]).is_err());
+
+        // A quiet probe returns true for a clean exit and false otherwise
+        // (a non-zero exit or a missing binary).
+        assert!(runner.check("git", &["--version"]));
+        assert!(!runner.check("git", &["--no-such-flag-zzz"]));
+        assert!(!runner.check("definitely-not-a-real-binary-xyz", &[]));
     }
 }

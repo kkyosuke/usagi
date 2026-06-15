@@ -136,8 +136,7 @@ mod tests {
             repo,
             &LocalSettings {
                 agent_cli: Some(AgentCli::Gemini),
-                notifications_enabled: None,
-                default_branch_source: None,
+                ..Default::default()
             },
         )
         .unwrap();

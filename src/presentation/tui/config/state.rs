@@ -10,7 +10,9 @@
 //! the agent CLI, notifications, and default branch that fall back to the global
 //! settings when left unset. Only one scope's fields are shown at a time.
 
-use crate::domain::settings::{AgentCli, BranchSource, LocalSettings, Settings, Theme};
+use crate::domain::settings::{
+    AgentCli, BranchSource, LocalSettings, Settings, Theme, LOCAL_LLM_MODELS,
+};
 
 /// The themes in the order they cycle through.
 const THEMES: [Theme; 3] = [Theme::Light, Theme::Dark, Theme::System];
@@ -28,15 +30,22 @@ pub enum Field {
     DefaultWorkspace,
     Notifications,
     AgentCli,
+    /// The local LLM enable toggle — or an "Install" action when the runtime /
+    /// model is not yet present.
+    LocalLlm,
+    /// Which local LLM model is used (and installed on selection).
+    LocalLlmModel,
 }
 
 impl Field {
     /// The fields shown on the screen, top to bottom.
-    pub const ALL: [Field; 4] = [
+    pub const ALL: [Field; 6] = [
         Field::Theme,
         Field::DefaultWorkspace,
         Field::Notifications,
         Field::AgentCli,
+        Field::LocalLlm,
+        Field::LocalLlmModel,
     ];
 
     /// The label shown beside the field's value.
@@ -46,6 +55,8 @@ impl Field {
             Field::DefaultWorkspace => "Default Workspace",
             Field::Notifications => "Notifications",
             Field::AgentCli => "Agent CLI",
+            Field::LocalLlm => "Local LLM",
+            Field::LocalLlmModel => "Local LLM Model",
         }
     }
 }
@@ -125,6 +136,10 @@ pub struct Config {
     workspaces: Vec<String>,
     /// The project-local overrides being edited, present in the local scope.
     local: Option<LocalEdit>,
+    /// Whether the local LLM runtime and the selected model are present. Seeded
+    /// when the screen opens; drives whether the Local LLM row shows an
+    /// "Install" action or an on/off toggle.
+    local_llm_installed: bool,
     /// Which settings the screen edits.
     scope: Scope,
     selected_index: usize,
@@ -143,6 +158,7 @@ impl Config {
             settings,
             workspaces,
             local: None,
+            local_llm_installed: false,
             scope: Scope::Global,
             selected_index: 0,
         }
@@ -160,6 +176,7 @@ impl Config {
                 baseline: local.clone(),
                 settings: local,
             }),
+            local_llm_installed: false,
             scope: Scope::Local,
             selected_index: 0,
         }
@@ -167,6 +184,58 @@ impl Config {
 
     pub fn settings(&self) -> &Settings {
         &self.settings
+    }
+
+    /// Record whether the local LLM runtime and selected model are installed.
+    /// Called when the screen opens, after probing the system.
+    pub fn set_local_llm_installed(&mut self, installed: bool) {
+        self.local_llm_installed = installed;
+    }
+
+    /// Whether the local LLM runtime and selected model are present.
+    pub fn local_llm_installed(&self) -> bool {
+        self.local_llm_installed
+    }
+
+    /// The currently selected local LLM model name.
+    pub fn local_llm_model(&self) -> &str {
+        &self.settings.local_llm.model
+    }
+
+    /// The model to install when the focused row is activated with **Enter**, or
+    /// `None` when Enter should behave normally (save / toggle / cycle).
+    ///
+    /// Enter installs when the Local LLM row needs it (not yet installed) or when
+    /// the model row is focused (selecting a model installs it).
+    pub fn enter_installs_model(&self) -> Option<String> {
+        match self.selected_field() {
+            Some(Field::LocalLlm) if !self.local_llm_installed => Some(self.model_string()),
+            Some(Field::LocalLlmModel) => Some(self.model_string()),
+            _ => None,
+        }
+    }
+
+    /// The model to install when the focused row is activated with an **arrow**
+    /// key, or `None` when arrows should cycle/toggle as usual.
+    ///
+    /// Only the not-yet-installed Local LLM row installs on arrows — there is no
+    /// toggle to cycle until it is installed. The model row keeps cycling.
+    pub fn arrow_installs_model(&self) -> Option<String> {
+        match self.selected_field() {
+            Some(Field::LocalLlm) if !self.local_llm_installed => Some(self.model_string()),
+            _ => None,
+        }
+    }
+
+    /// Mark the local LLM as installed and turn it on, so the row becomes an
+    /// on/off toggle (now "On") and the change is saved with the rest.
+    pub fn mark_local_llm_installed(&mut self) {
+        self.local_llm_installed = true;
+        self.settings.local_llm.enabled = true;
+    }
+
+    fn model_string(&self) -> String {
+        self.settings.local_llm.model.clone()
     }
 
     /// The project-local overrides being edited, if this screen has a project
@@ -262,6 +331,8 @@ impl Config {
                 self.settings.notifications_enabled != self.baseline.notifications_enabled
             }
             Field::AgentCli => self.settings.agent_cli != self.baseline.agent_cli,
+            Field::LocalLlm => self.settings.local_llm.enabled != self.baseline.local_llm.enabled,
+            Field::LocalLlmModel => self.settings.local_llm.model != self.baseline.local_llm.model,
         }
     }
 
@@ -318,6 +389,16 @@ impl Config {
                 .unwrap_or_else(|| "(none)".to_string()),
             Field::Notifications => on_off(self.settings.notifications_enabled).to_string(),
             Field::AgentCli => agent_cli_label(self.settings.agent_cli).to_string(),
+            // Before the runtime/model are present the row is an install action;
+            // once installed it becomes a plain on/off toggle.
+            Field::LocalLlm => {
+                if self.local_llm_installed {
+                    on_off(self.settings.local_llm.enabled).to_string()
+                } else {
+                    "Install".to_string()
+                }
+            }
+            Field::LocalLlmModel => self.settings.local_llm.model.clone(),
         }
     }
 
@@ -399,6 +480,25 @@ impl Config {
             }
             Field::AgentCli => {
                 self.settings.agent_cli = cycle_agent_cli(self.settings.agent_cli, forward);
+                true
+            }
+            Field::LocalLlm => {
+                // Only meaningful once installed: flip the on/off toggle. While
+                // not installed the row is an install action handled by the
+                // event layer, so there is nothing to cycle.
+                if self.local_llm_installed {
+                    self.settings.local_llm.enabled = !self.settings.local_llm.enabled;
+                    true
+                } else {
+                    false
+                }
+            }
+            Field::LocalLlmModel => {
+                self.settings.local_llm.model =
+                    cycle_str(&self.settings.local_llm.model, &LOCAL_LLM_MODELS, forward);
+                // A different model may not be pulled yet, so it must be
+                // (re)installed before use.
+                self.local_llm_installed = false;
                 true
             }
         }
@@ -525,6 +625,20 @@ pub(super) fn branch_source_label(source: BranchSource) -> &'static str {
     }
 }
 
+/// The string one step after `current` in `choices` (or before, when `forward`
+/// is false), wrapping at the ends. An unknown `current` (e.g. a model no longer
+/// offered) starts from the first choice.
+fn cycle_str(current: &str, choices: &[&str], forward: bool) -> String {
+    let i = choices.iter().position(|&c| c == current).unwrap_or(0);
+    let len = choices.len();
+    let next = if forward {
+        (i + 1) % len
+    } else {
+        (i + len - 1) % len
+    };
+    choices[next].to_string()
+}
+
 /// The value one step after `current` in `choices` (or before, when `forward` is
 /// false), wrapping at the ends. Used for a fixed, non-optional set of choices.
 fn cycle_enum<T: Copy + PartialEq>(current: T, choices: &[T], forward: bool) -> T {
@@ -583,7 +697,9 @@ mod tests {
         assert_eq!(Field::DefaultWorkspace.label(), "Default Workspace");
         assert_eq!(Field::Notifications.label(), "Notifications");
         assert_eq!(Field::AgentCli.label(), "Agent CLI");
-        assert_eq!(Field::ALL.len(), 4);
+        assert_eq!(Field::LocalLlm.label(), "Local LLM");
+        assert_eq!(Field::LocalLlmModel.label(), "Local LLM Model");
+        assert_eq!(Field::ALL.len(), 6);
     }
 
     #[test]
@@ -598,9 +714,9 @@ mod tests {
         assert!(!config.is_dirty());
         assert!(config.local().is_none());
         assert!(config.selected_local_field().is_none());
-        // Global-only: four field rows.
-        assert_eq!(config.rows().len(), 4);
-        assert_eq!(config.save_index(), 4);
+        // Global-only: six field rows.
+        assert_eq!(config.rows().len(), 6);
+        assert_eq!(config.save_index(), 6);
     }
 
     #[test]
@@ -612,6 +728,10 @@ mod tests {
         assert_eq!(config.selected_field(), Some(Field::Notifications));
         config.move_down();
         assert_eq!(config.selected_field(), Some(Field::AgentCli));
+        config.move_down();
+        assert_eq!(config.selected_field(), Some(Field::LocalLlm));
+        config.move_down();
+        assert_eq!(config.selected_field(), Some(Field::LocalLlmModel));
         // The Save button sits below the last field.
         config.move_down();
         assert_eq!(config.selected_field(), None);
@@ -627,6 +747,10 @@ mod tests {
         // From the top field, up wraps to the Save button at the bottom.
         config.move_up();
         assert!(config.is_save_selected());
+        config.move_up();
+        assert_eq!(config.selected_field(), Some(Field::LocalLlmModel));
+        config.move_up();
+        assert_eq!(config.selected_field(), Some(Field::LocalLlm));
         config.move_up();
         assert_eq!(config.selected_field(), Some(Field::AgentCli));
         config.move_up();
@@ -825,12 +949,102 @@ mod tests {
     fn rows_render_global_field_values() {
         let config = config_with_workspaces(&["alpha"]);
         let rows = config.rows();
-        assert_eq!(rows.len(), 4);
+        assert_eq!(rows.len(), 6);
         assert_eq!(rows[0].label, "Theme");
         assert_eq!(rows[0].value, "System");
         assert_eq!(rows[3].label, "Agent CLI");
         assert_eq!(rows[3].value, "Claude");
+        // The local LLM is off and not yet installed: the row offers "Install".
+        assert_eq!(rows[4].label, "Local LLM");
+        assert_eq!(rows[4].value, "Install");
+        assert_eq!(rows[5].label, "Local LLM Model");
+        assert_eq!(rows[5].value, "qwen2.5-coder:7b");
         assert!(rows.iter().all(|r| !r.changed));
+    }
+
+    // --- local LLM field ---------------------------------------------------
+
+    /// Move the cursor onto the Local LLM toggle row.
+    fn select_local_llm(config: &mut Config) {
+        while config.selected_field() != Some(Field::LocalLlm) {
+            config.move_down();
+        }
+    }
+
+    /// Move the cursor onto the Local LLM Model row.
+    fn select_local_llm_model(config: &mut Config) {
+        while config.selected_field() != Some(Field::LocalLlmModel) {
+            config.move_down();
+        }
+    }
+
+    #[test]
+    fn local_llm_row_shows_install_until_installed_then_a_toggle() {
+        let mut config = config_with_workspaces(&[]);
+        select_local_llm(&mut config);
+        // Not installed yet: the row is an install action, and an arrow press
+        // wants to install the current model rather than cycle.
+        assert!(!config.local_llm_installed());
+        assert_eq!(config.value_of(Field::LocalLlm), "Install");
+        assert_eq!(
+            config.arrow_installs_model().as_deref(),
+            Some("qwen2.5-coder:7b")
+        );
+        assert_eq!(
+            config.enter_installs_model().as_deref(),
+            Some("qwen2.5-coder:7b")
+        );
+        // Cycling does nothing while uninstalled (the event layer installs).
+        assert!(!config.cycle_selected(true));
+
+        // Once installed it turns on and becomes an on/off toggle.
+        config.mark_local_llm_installed();
+        assert!(config.local_llm_installed());
+        assert_eq!(config.value_of(Field::LocalLlm), "On");
+        assert!(config.settings().local_llm.enabled);
+        assert!(config.is_changed(Field::LocalLlm));
+        // Now arrows/Enter toggle rather than install.
+        assert!(config.arrow_installs_model().is_none());
+        assert!(config.enter_installs_model().is_none());
+        assert!(config.cycle_selected(true));
+        assert_eq!(config.value_of(Field::LocalLlm), "Off");
+    }
+
+    #[test]
+    fn local_llm_model_row_cycles_and_requires_reinstall() {
+        let mut config = config_with_workspaces(&[]);
+        config.mark_local_llm_installed(); // pretend the default model is present
+        select_local_llm_model(&mut config);
+        assert_eq!(config.local_llm_model(), "qwen2.5-coder:7b");
+        // Enter on the model row always installs the selected model.
+        assert_eq!(
+            config.enter_installs_model().as_deref(),
+            Some("qwen2.5-coder:7b")
+        );
+        // Arrows cycle the model and reset the installed flag (the new model may
+        // not be pulled), so the Local LLM row reverts to "Install".
+        assert!(config.cycle_selected(true));
+        assert_eq!(config.local_llm_model(), "qwen2.5-coder:3b");
+        assert!(!config.local_llm_installed());
+        assert!(config.is_changed(Field::LocalLlmModel));
+        // The model row does not install on arrows (only on Enter).
+        assert!(config.arrow_installs_model().is_none());
+        // Cycling backward wraps to the last model.
+        select_local_llm_model(&mut config);
+        assert!(config.cycle_selected(false));
+        assert_eq!(config.local_llm_model(), "qwen2.5-coder:7b");
+        assert!(config.cycle_selected(false));
+        assert_eq!(config.local_llm_model(), "qwen2.5:7b");
+    }
+
+    #[test]
+    fn cycle_str_starts_from_the_first_choice_for_an_unknown_value() {
+        // A model no longer offered behaves like index 0, so forward lands on
+        // the second choice.
+        assert_eq!(
+            cycle_str("ghost-model", &LOCAL_LLM_MODELS, true),
+            LOCAL_LLM_MODELS[1]
+        );
     }
 
     // --- local overrides ---------------------------------------------------

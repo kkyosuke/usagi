@@ -1,5 +1,9 @@
+use crate::domain::settings::LocalLlm;
 use crate::infrastructure::storage::Storage;
-use crate::usecase::doctor::{diagnose, fix_missing, Check, FixOutcome, SystemRunner};
+use crate::usecase::doctor::{
+    diagnose, fix_missing, Check, CommandRunner, FixOutcome, SystemRunner,
+};
+use crate::usecase::local_llm::{self, SetupError, SetupStep};
 
 /// Entry point for `usagi doctor`. With `fix`, attempts to install missing
 /// tools (or prints manual steps); otherwise just prints the diagnostics.
@@ -7,8 +11,12 @@ pub fn run(fix: bool) -> anyhow::Result<()> {
     let storage = Storage::open_default()?;
     let checks = diagnose(&storage);
     let lines = if fix {
-        let outcomes = fix_missing(&checks, std::env::consts::OS, &SystemRunner);
-        render_fixes(&outcomes)
+        // Fall back to defaults (local LLM off) if settings cannot be read.
+        let local_llm = storage
+            .load_settings()
+            .map(|s| s.local_llm)
+            .unwrap_or_default();
+        fix_lines(&checks, std::env::consts::OS, &local_llm, &SystemRunner)
     } else {
         render(&checks)
     };
@@ -16,6 +24,56 @@ pub fn run(fix: bool) -> anyhow::Result<()> {
         println!("{line}");
     }
     Ok(())
+}
+
+/// The lines printed by `usagi doctor --fix`: the standard tool remediation,
+/// followed by local LLM provisioning when it is enabled. Pure (the side
+/// effects are confined to `runner`) so every branch is unit-testable.
+fn fix_lines(
+    checks: &[Check],
+    os: &str,
+    local_llm: &LocalLlm,
+    runner: &dyn CommandRunner,
+) -> Vec<String> {
+    let mut lines = render_fixes(&fix_missing(checks, os, runner));
+    if local_llm.enabled {
+        let result = local_llm::ensure(os, runner, &local_llm.model);
+        lines.extend(render_local_llm_fix(&result));
+    }
+    lines
+}
+
+/// Formats local LLM provisioning ([`local_llm::ensure`]) into printable lines.
+fn render_local_llm_fix(result: &Result<Vec<SetupStep>, SetupError>) -> Vec<String> {
+    match result {
+        Ok(steps) => steps.iter().map(render_setup_step).collect(),
+        Err(error) => vec![render_setup_error(error)],
+    }
+}
+
+fn render_setup_step(step: &SetupStep) -> String {
+    match step {
+        SetupStep::OllamaAlreadyPresent => "ollama is already installed".to_string(),
+        SetupStep::OllamaInstalled { manager } => format!("installed `ollama` via {manager}"),
+        SetupStep::ModelAlreadyPresent { model } => {
+            format!("local LLM model `{model}` is already pulled")
+        }
+        SetupStep::ModelPulled { model } => format!("pulled local LLM model `{model}`"),
+    }
+}
+
+fn render_setup_error(error: &SetupError) -> String {
+    match error {
+        SetupError::OllamaUnavailable { manual } => {
+            format!("could not install `ollama` automatically; {manual}")
+        }
+        SetupError::OllamaInstallFailed { manager, manual } => {
+            format!("could not install `ollama` via {manager}; {manual}")
+        }
+        SetupError::ModelPullFailed { model } => {
+            format!("could not pull local LLM model `{model}`")
+        }
+    }
 }
 
 /// Formats the `--fix` outcomes into the lines printed by `usagi doctor --fix`.
@@ -129,5 +187,130 @@ mod tests {
     #[test]
     fn run_succeeds() {
         assert!(run(false).is_ok());
+    }
+
+    // --- local LLM provisioning -------------------------------------------
+
+    /// A [`CommandRunner`] whose probe/availability are configurable, used to
+    /// drive `fix_lines` without touching a real `ollama`/package manager.
+    struct FakeRunner {
+        available: Vec<&'static str>,
+        check: bool,
+    }
+
+    impl CommandRunner for FakeRunner {
+        fn available(&self, program: &str) -> bool {
+            self.available.contains(&program)
+        }
+        fn run(&self, _program: &str, _args: &[&str]) -> std::io::Result<bool> {
+            Ok(true)
+        }
+        fn check(&self, _program: &str, _args: &[&str]) -> bool {
+            self.check
+        }
+    }
+
+    #[test]
+    fn fix_lines_omits_local_llm_when_disabled() {
+        // All checks healthy + local LLM off: only the standard success line.
+        let runner = FakeRunner {
+            available: vec![],
+            check: false,
+        };
+        let lines = fix_lines(&[], "macos", &LocalLlm::default(), &runner);
+        assert_eq!(lines, vec!["All required tools are installed 🎉"]);
+    }
+
+    #[test]
+    fn fix_lines_appends_local_llm_provisioning_when_enabled() {
+        // ollama + model already present: provisioning reports the no-op steps
+        // after the standard tools line.
+        let runner = FakeRunner {
+            available: vec!["ollama"],
+            check: true,
+        };
+        let local_llm = LocalLlm {
+            enabled: true,
+            model: "qwen2.5-coder:7b".to_string(),
+        };
+        let lines = fix_lines(&[], "macos", &local_llm, &runner);
+        assert_eq!(
+            lines,
+            vec![
+                "All required tools are installed 🎉",
+                "ollama is already installed",
+                "local LLM model `qwen2.5-coder:7b` is already pulled",
+            ]
+        );
+    }
+
+    #[test]
+    fn fix_lines_installs_ollama_and_pulls_when_missing() {
+        // ollama absent but brew present, and the model is not pulled: both the
+        // install and the pull run (exercising the runner's `run`).
+        let runner = FakeRunner {
+            available: vec!["brew"],
+            check: false,
+        };
+        let local_llm = LocalLlm {
+            enabled: true,
+            model: "qwen2.5:7b".to_string(),
+        };
+        let lines = fix_lines(&[], "macos", &local_llm, &runner);
+        assert_eq!(
+            lines,
+            vec![
+                "All required tools are installed 🎉",
+                "installed `ollama` via brew",
+                "pulled local LLM model `qwen2.5:7b`",
+            ]
+        );
+    }
+
+    #[test]
+    fn render_local_llm_fix_describes_each_step() {
+        let steps = vec![
+            SetupStep::OllamaInstalled { manager: "brew" },
+            SetupStep::OllamaAlreadyPresent,
+            SetupStep::ModelPulled {
+                model: "qwen2.5:7b".to_string(),
+            },
+            SetupStep::ModelAlreadyPresent {
+                model: "qwen2.5:7b".to_string(),
+            },
+        ];
+        let lines = render_local_llm_fix(&Ok(steps));
+        assert_eq!(
+            lines,
+            vec![
+                "installed `ollama` via brew",
+                "ollama is already installed",
+                "pulled local LLM model `qwen2.5:7b`",
+                "local LLM model `qwen2.5:7b` is already pulled",
+            ]
+        );
+    }
+
+    #[test]
+    fn render_local_llm_fix_describes_each_error() {
+        assert_eq!(
+            render_local_llm_fix(&Err(SetupError::OllamaUnavailable {
+                manual: "install Ollama from https://ollama.com/download".to_string(),
+            })),
+            vec!["could not install `ollama` automatically; install Ollama from https://ollama.com/download"]
+        );
+        assert_eq!(
+            render_local_llm_fix(&Err(SetupError::OllamaInstallFailed {
+                manager: "brew",
+                manual: "x".to_string(),
+            })),
+            vec!["could not install `ollama` via brew; x"]
+        );
+        assert_eq!(
+            render_local_llm_fix(&Err(SetupError::ModelPullFailed {
+                model: "qwen2.5:7b".to_string(),
+            })),
+            vec!["could not pull local LLM model `qwen2.5:7b`"]
+        );
     }
 }
