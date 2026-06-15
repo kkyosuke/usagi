@@ -11,7 +11,12 @@
 //!
 //! - `Ctrl-O` overlays a list of every session (the root plus each worktree);
 //!   `1`–`9` or `↑`/`↓` + `Enter` switches the pane to that session's terminal,
-//!   staying focused. The shell just left keeps running in the pool.
+//!   staying focused. The shell just left keeps running in the pool. Switching
+//!   shows the target's own state — its running shell / agent if it has one, or
+//!   a fresh idle shell if not — rather than re-running whatever command opened
+//!   the pane.
+//! - `c` creates a new session (the event loop opens the name modal) and drops
+//!   the pane into it as a plain shell.
 //! - `Esc` closes the picker and resumes the current shell.
 //! - `Ctrl-O` again **detaches** — the pane returns to the sidebar but the shell
 //!   stays alive in the pool.
@@ -260,9 +265,10 @@ fn apply_scroll(scrollback: &mut usize, delta: i32) {
 
 /// Run the in-pane session picker (`Ctrl-O`): overlay the session list and read
 /// keys until the user switches to a session (`1`-`9` or `↑`/`↓` + `Enter`),
-/// cancels (`Esc`), or detaches (`Ctrl-O` again). Returns the [`PaneExit`] to
-/// leave the pane on, or `None` to resume the current shell. The picker is drawn
-/// over the live frame, so it shares the caller's `prev` diff buffer.
+/// creates a new one (`c`), cancels (`Esc`), or detaches (`Ctrl-O` again).
+/// Returns the [`PaneExit`] to leave the pane on, or `None` to resume the
+/// current shell. The picker is drawn over the live frame, so it shares the
+/// caller's `prev` diff buffer.
 fn run_session_picker(
     term: &Term,
     state: &mut HomeState,
@@ -291,6 +297,12 @@ fn run_session_picker(
             }
             KeyCode::Enter => break Some(PaneExit::Switch),
             KeyCode::Esc => break None,
+            // `c` creates a new session: the event loop opens the name modal and
+            // re-roots the pane there. Guarded against `Ctrl-C` (which arrives as
+            // `Char('c')` with the control modifier and must not create).
+            KeyCode::Char('c') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                break Some(PaneExit::Create)
+            }
             // A second `Ctrl-O` detaches, leaving the shell alive in the pool.
             KeyCode::Char('o') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 break Some(PaneExit::Detach)
@@ -298,7 +310,8 @@ fn run_session_picker(
             _ => {}
         }
     };
-    // `Switch` commits the highlighted session; everything else just closes.
+    // `Switch` commits the highlighted session; everything else (including
+    // `Create`, driven by the event loop's name modal) just closes the overlay.
     if exit == Some(PaneExit::Switch) {
         state.confirm_session_picker();
     } else {

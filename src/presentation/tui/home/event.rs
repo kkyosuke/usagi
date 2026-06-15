@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use console::Key;
@@ -132,20 +132,12 @@ pub fn event_loop(
         }
 
         // The session-name modal, when open, captures every key until it is
-        // confirmed (Enter) or cancelled (Esc), overlaying both modes.
+        // confirmed (Enter) or cancelled (Esc), overlaying both modes. The same
+        // key handling drives the picker's `c` create action (see
+        // [`create_session_inline`]), so it lives in [`apply_modal_key`].
         if state.modal().is_some() {
-            match key {
-                Key::Enter => {
-                    if let Some(name) = state.submit_modal() {
-                        let outcome = create_session(&name);
-                        state.apply_session_outcome(outcome);
-                    }
-                }
-                Key::Backspace => state.modal_backspace(),
-                Key::Escape => state.cancel_modal(),
-                Key::CtrlC => return Ok(Outcome::Quit),
-                Key::Char(c) => state.modal_push_char(c),
-                _ => {}
+            if let ModalStep::Quit = apply_modal_key(&mut state, key, create_session) {
+                return Ok(Outcome::Quit);
             }
             continue;
         }
@@ -187,31 +179,50 @@ pub fn event_loop(
                             // shell with the AI agent CLI launched inside it. The
                             // pane is switched to terminal mode for the duration
                             // and back afterwards.
-                            let agent = effect == Effect::OpenAgent;
+                            // `agent` only governs the *first* shell opened here.
+                            // Switching (or creating) clears it so a freshly
+                            // spawned session lands in a plain shell instead of
+                            // re-running the opening command — see below.
+                            let mut agent = effect == Effect::OpenAgent;
                             let (label, fail) = if agent {
                                 ("Agent", "agent")
                             } else {
                                 ("Terminal", "terminal")
                             };
-                            let mut dir = state
-                                .list()
-                                .selected()
-                                .map(|w| w.path.clone())
-                                .unwrap_or_else(|| workspace_root.to_path_buf());
+                            let mut dir = selected_dir(&state, workspace_root);
                             state.show_terminal();
-                            // Stay in the pane across session switches: the picker
-                            // (`Ctrl-O`) focuses a session and returns `Switch`, so
-                            // we re-root the shell at the now-selected session (the
-                            // one just left keeps running), and only leave on a
-                            // detach, a close, or an error.
+                            // Stay in the pane across session switches and
+                            // creations: the picker (`Ctrl-O`) focuses a session
+                            // and returns `Switch` — so we re-root the shell at the
+                            // now-selected session (the one just left keeps
+                            // running) and show *its* own state, never the opening
+                            // command's agent — or returns `Create`, so we open the
+                            // name modal and drop into the new session. We only
+                            // leave on a detach, a close, or an error.
                             let outcome = loop {
                                 match open_terminal(&mut state, &dir, agent) {
                                     Ok(PaneExit::Switch) => {
-                                        dir = state
-                                            .list()
-                                            .selected()
-                                            .map(|w| w.path.clone())
-                                            .unwrap_or_else(|| workspace_root.to_path_buf());
+                                        agent = false;
+                                        dir = selected_dir(&state, workspace_root);
+                                    }
+                                    Ok(PaneExit::Create) => {
+                                        match create_session_inline(
+                                            term,
+                                            reader,
+                                            &mut state,
+                                            &mut painter,
+                                            create_session,
+                                        )? {
+                                            ModalStep::Quit => return Ok(Outcome::Quit),
+                                            // The new session is selected; drop into
+                                            // it as a plain shell.
+                                            ModalStep::Created => {
+                                                agent = false;
+                                                dir = selected_dir(&state, workspace_root);
+                                            }
+                                            // Cancelled: resume the current session.
+                                            _ => {}
+                                        }
                                     }
                                     other => break other,
                                 }
@@ -252,6 +263,101 @@ pub fn event_loop(
                 Key::Char(c) => state.push_char(c),
                 _ => {}
             },
+        }
+    }
+}
+
+/// The directory the pane should root at for the currently selected list row:
+/// the selected worktree's path, or `workspace_root` when the cursor is on the
+/// root row (which belongs to no session, so `selected()` is `None`).
+fn selected_dir(state: &HomeState, workspace_root: &Path) -> PathBuf {
+    state
+        .list()
+        .selected()
+        .map(|w| w.path.clone())
+        .unwrap_or_else(|| workspace_root.to_path_buf())
+}
+
+/// One step of driving the new-session name modal: what the captured key did.
+enum ModalStep {
+    /// The modal stays open (a character typed, an edit, or an invalid submit).
+    Stay,
+    /// A valid name was submitted and the session created.
+    Created,
+    /// The modal was cancelled (`Esc`) without creating.
+    Cancelled,
+    /// `Ctrl-C`: quit the application.
+    Quit,
+}
+
+/// Apply one key press to the open new-session modal, performing the creation
+/// (via `create_session`) on a valid submit. Shared by the command-mode modal
+/// (`:session create`) and the picker's `c` create action so both behave
+/// identically. Assumes the modal is open.
+fn apply_modal_key(
+    state: &mut HomeState,
+    key: Key,
+    create_session: &mut dyn FnMut(&str) -> SessionOutcome,
+) -> ModalStep {
+    match key {
+        Key::Enter => match state.submit_modal() {
+            Some(name) => {
+                let outcome = create_session(&name);
+                state.apply_session_outcome(outcome);
+                ModalStep::Created
+            }
+            // An empty or duplicate name keeps the modal open with its error.
+            None => ModalStep::Stay,
+        },
+        Key::Backspace => {
+            state.modal_backspace();
+            ModalStep::Stay
+        }
+        Key::Escape => {
+            state.cancel_modal();
+            ModalStep::Cancelled
+        }
+        Key::CtrlC => ModalStep::Quit,
+        Key::Char(c) => {
+            state.modal_push_char(c);
+            ModalStep::Stay
+        }
+        _ => ModalStep::Stay,
+    }
+}
+
+/// Capture a new-session name with the standard modal while the terminal pane is
+/// suspended for the picker's `c` create action: open the modal, then paint and
+/// read keys until it is confirmed, cancelled, or `Ctrl-C` quits. Returns the
+/// terminal [`ModalStep`] (`Created` / `Cancelled` / `Quit`); `Stay` only keeps
+/// the loop running, so it never escapes.
+fn create_session_inline(
+    term: &Term,
+    reader: &mut dyn KeyReader,
+    state: &mut HomeState,
+    painter: &mut FramePainter,
+    create_session: &mut dyn FnMut(&str) -> SessionOutcome,
+) -> Result<ModalStep> {
+    state.open_session_modal();
+    // The pane drew over the whole screen, so the remembered frame is stale:
+    // force a full repaint of the modal.
+    painter.reset();
+    loop {
+        let (height, width) = term.size();
+        let frame = ui::render_frame(height as usize, width as usize, state);
+        painter.paint(term, frame)?;
+
+        let key = match reader.read_input() {
+            Ok(Input::Key(key)) => key,
+            // A wheel turn has no meaning over the modal; ignore it and read on.
+            Ok(Input::Scroll(_)) => continue,
+            // An interrupted read (e.g. a delivered signal) means quit.
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => return Ok(ModalStep::Quit),
+            Err(e) => return Err(anyhow::Error::from(e).context("Failed to read key")),
+        };
+        match apply_modal_key(state, key, create_session) {
+            ModalStep::Stay => {}
+            step => return Ok(step),
         }
     }
 }
@@ -1343,5 +1449,235 @@ mod tests {
         let mut open = |_: &Term| Err(anyhow::anyhow!("settings blew up"));
         let err = run_config(sample_state(), &mut open).unwrap_err();
         assert!(err.to_string().contains("settings blew up"));
+    }
+
+    /// Drive the loop with scripted keys and caller-supplied `open_terminal` /
+    /// `create_session` callbacks, so the picker's `c` create flow (which re-uses
+    /// both) can be exercised end to end.
+    fn run_keys_with(
+        keys: Vec<io::Result<Key>>,
+        state: HomeState,
+        open_terminal: &mut dyn FnMut(&mut HomeState, &Path, bool) -> Result<PaneExit>,
+        create_session: &mut dyn FnMut(&str) -> SessionOutcome,
+    ) -> Result<Outcome> {
+        let term = Term::stdout();
+        let mut reader = ScriptedReader::new(keys);
+        let monitor = MonitorHandle::detached();
+        let mut persist = |_: &str| {};
+        let mut remove_session: fn(&str, bool) -> SessionOutcome = noop_remove;
+        let mut open_config: fn(&Term) -> Result<bool> = noop_config;
+        event_loop(
+            &term,
+            &mut reader,
+            state,
+            Path::new("/ws"),
+            &monitor,
+            &mut persist,
+            create_session,
+            &mut remove_session,
+            open_terminal,
+            &mut open_config,
+        )
+    }
+
+    /// As [`run_keys_with`], but driven by full [`Input`]s so a wheel scroll can
+    /// be fed into the inline create modal.
+    fn run_inputs_with(
+        inputs: Vec<io::Result<Input>>,
+        state: HomeState,
+        open_terminal: &mut dyn FnMut(&mut HomeState, &Path, bool) -> Result<PaneExit>,
+        create_session: &mut dyn FnMut(&str) -> SessionOutcome,
+    ) -> Result<Outcome> {
+        let term = Term::stdout();
+        let mut reader = InputReader {
+            inputs: inputs.into(),
+        };
+        let monitor = MonitorHandle::detached();
+        let mut persist = |_: &str| {};
+        let mut remove_session: fn(&str, bool) -> SessionOutcome = noop_remove;
+        let mut open_config: fn(&Term) -> Result<bool> = noop_config;
+        event_loop(
+            &term,
+            &mut reader,
+            state,
+            Path::new("/ws"),
+            &monitor,
+            &mut persist,
+            create_session,
+            &mut remove_session,
+            open_terminal,
+            &mut open_config,
+        )
+    }
+
+    /// A `create_session` returning a single session "newsess" rooted at /r/new,
+    /// selected — so a successful create re-roots the pane there.
+    fn create_newsess(name: &str, recorded: &RefCell<Vec<String>>) -> SessionOutcome {
+        recorded.borrow_mut().push(name.to_string());
+        SessionOutcome {
+            line: LogLine::output("created"),
+            sessions: Some(vec![crate::domain::workspace_state::SessionRecord {
+                name: "newsess".to_string(),
+                root: PathBuf::from("/r/new"),
+                worktrees: vec![worktree_at("newsess", "/r/new")],
+                created_at: Utc::now(),
+            }]),
+            select: Some("newsess".to_string()),
+        }
+    }
+
+    #[test]
+    fn picker_create_opens_the_modal_and_reroots_into_the_new_session() {
+        // `:agent` opens the first worktree (agent=true); in the pane the picker's
+        // `c` returns Create, the inline modal names "newsess" and Enter creates
+        // it, and the pane re-roots there as a *plain* shell (agent=false) before
+        // it closes.
+        let dirs = RefCell::new(Vec::new());
+        let agents = RefCell::new(Vec::new());
+        let calls = RefCell::new(0);
+        let mut open = |_home: &mut HomeState, dir: &Path, agent: bool| {
+            dirs.borrow_mut().push(dir.to_path_buf());
+            agents.borrow_mut().push(agent);
+            let mut n = calls.borrow_mut();
+            *n += 1;
+            if *n == 1 {
+                Ok(PaneExit::Create)
+            } else {
+                Ok(PaneExit::Closed)
+            }
+        };
+        let created = RefCell::new(Vec::new());
+        let mut create = |name: &str| create_newsess(name, &created);
+
+        let mut keys = vec![Ok(Key::ArrowDown), Ok(Key::Char(':'))];
+        keys.extend(typed("agent"));
+        keys.push(Ok(Key::Enter)); // open pane -> Create
+        keys.extend(typed("newsess")); // inline modal name
+        keys.push(Ok(Key::Enter)); // create -> re-root, second open -> Closed
+        keys.push(Ok(Key::Escape)); // cancel command mode
+        keys.push(Ok(Key::Escape)); // leave sidebar
+
+        assert!(matches!(
+            run_keys_with(keys, two_worktree_state(), &mut open, &mut create).unwrap(),
+            Outcome::Back
+        ));
+        assert_eq!(*created.borrow(), vec!["newsess"]);
+        assert_eq!(*agents.borrow(), vec![true, false]);
+        assert_eq!(
+            *dirs.borrow(),
+            vec![PathBuf::from("/r/main"), PathBuf::from("/r/new")]
+        );
+    }
+
+    #[test]
+    fn picker_create_cancelled_resumes_the_current_session() {
+        // The picker's `c` returns Create, but the inline modal is cancelled
+        // (Esc), so the pane re-enters the *same* session it was on.
+        let dirs = RefCell::new(Vec::new());
+        let calls = RefCell::new(0);
+        let mut open = |_home: &mut HomeState, dir: &Path, _agent: bool| {
+            dirs.borrow_mut().push(dir.to_path_buf());
+            let mut n = calls.borrow_mut();
+            *n += 1;
+            if *n == 1 {
+                Ok(PaneExit::Create)
+            } else {
+                Ok(PaneExit::Detach)
+            }
+        };
+        let mut create: fn(&str) -> SessionOutcome = noop_create;
+
+        let mut keys = vec![Ok(Key::ArrowDown), Ok(Key::Char(':'))];
+        keys.extend(typed("terminal"));
+        keys.push(Ok(Key::Enter)); // open -> Create
+        keys.push(Ok(Key::Escape)); // inline modal -> Cancelled
+        keys.push(Ok(Key::Escape)); // cancel command mode
+        keys.push(Ok(Key::Escape)); // leave sidebar
+
+        assert!(matches!(
+            run_keys_with(keys, two_worktree_state(), &mut open, &mut create).unwrap(),
+            Outcome::Back
+        ));
+        assert_eq!(
+            *dirs.borrow(),
+            vec![PathBuf::from("/r/main"), PathBuf::from("/r/main")]
+        );
+    }
+
+    #[test]
+    fn picker_create_ctrl_c_quits_the_app() {
+        // Ctrl-C inside the inline create modal propagates a quit.
+        let mut open = |_h: &mut HomeState, _d: &Path, _a: bool| Ok(PaneExit::Create);
+        let mut create: fn(&str) -> SessionOutcome = noop_create;
+        let mut keys = vec![Ok(Key::Char(':'))];
+        keys.extend(typed("terminal"));
+        keys.push(Ok(Key::Enter)); // open -> Create
+        keys.push(Ok(Key::CtrlC)); // inline modal -> Quit
+        assert!(matches!(
+            run_keys_with(keys, sample_state(), &mut open, &mut create).unwrap(),
+            Outcome::Quit
+        ));
+    }
+
+    #[test]
+    fn picker_create_interrupted_read_quits() {
+        // An interrupted read while the inline create modal is open means quit.
+        let mut open = |_h: &mut HomeState, _d: &Path, _a: bool| Ok(PaneExit::Create);
+        let mut create: fn(&str) -> SessionOutcome = noop_create;
+        let mut keys = vec![Ok(Key::Char(':'))];
+        keys.extend(typed("terminal"));
+        keys.push(Ok(Key::Enter));
+        keys.push(Err(io::Error::new(
+            io::ErrorKind::Interrupted,
+            "interrupted",
+        )));
+        assert!(matches!(
+            run_keys_with(keys, sample_state(), &mut open, &mut create).unwrap(),
+            Outcome::Quit
+        ));
+    }
+
+    #[test]
+    fn picker_create_read_error_is_propagated() {
+        // An unexpected read error while the inline create modal is open bubbles
+        // up with context.
+        let mut open = |_h: &mut HomeState, _d: &Path, _a: bool| Ok(PaneExit::Create);
+        let mut create: fn(&str) -> SessionOutcome = noop_create;
+        let mut keys = vec![Ok(Key::Char(':'))];
+        keys.extend(typed("terminal"));
+        keys.push(Ok(Key::Enter));
+        keys.push(Err(io::Error::other("boom")));
+        let err = run_keys_with(keys, sample_state(), &mut open, &mut create).unwrap_err();
+        assert!(err.to_string().contains("Failed to read key"));
+    }
+
+    #[test]
+    fn picker_create_ignores_a_wheel_scroll_in_the_modal() {
+        // A wheel turn over the open create modal is skipped; the following keys
+        // still name and create the session.
+        let calls = RefCell::new(0);
+        let mut open = |_h: &mut HomeState, _d: &Path, _a: bool| {
+            let mut n = calls.borrow_mut();
+            *n += 1;
+            if *n == 1 {
+                Ok(PaneExit::Create)
+            } else {
+                Ok(PaneExit::Closed)
+            }
+        };
+        let mut create: fn(&str) -> SessionOutcome = noop_create;
+
+        let mut inputs = vec![Ok(Input::Key(Key::Char(':')))];
+        inputs.extend("terminal".chars().map(|c| Ok(Input::Key(Key::Char(c)))));
+        inputs.push(Ok(Input::Key(Key::Enter))); // open -> Create
+        inputs.push(Ok(Input::Scroll(scroll_right(-3)))); // skipped in the modal
+        inputs.extend("x".chars().map(|c| Ok(Input::Key(Key::Char(c)))));
+        inputs.push(Ok(Input::Key(Key::Enter))); // create -> re-root -> Closed
+        inputs.push(Ok(Input::Key(Key::Escape))); // cancel command mode
+        inputs.push(Ok(Input::Key(Key::Escape))); // leave sidebar
+        assert!(matches!(
+            run_inputs_with(inputs, sample_state(), &mut open, &mut create).unwrap(),
+            Outcome::Back
+        ));
     }
 }
