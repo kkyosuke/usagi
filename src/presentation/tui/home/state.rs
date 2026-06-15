@@ -512,7 +512,7 @@ impl HomeState {
         self.reset_right_scroll();
         if self.sessions.is_empty() {
             self.log.push(LogLine::output(
-                "No sessions yet. Run \"session new <name>\" to create one.",
+                "No sessions yet. Run \"session create <name>\" to create one.",
             ));
             return;
         }

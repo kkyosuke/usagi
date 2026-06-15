@@ -268,12 +268,14 @@ fn spawn_watcher(
 /// Show a desktop notification that a background session is waiting for input.
 ///
 /// Best-effort: failures (e.g. a headless environment without a notification
-/// daemon) are ignored so they never disturb the watcher loop, exactly as
-/// `hop`'s welcome notification does.
+/// daemon) are ignored so they never disturb the watcher loop.
+///
+/// The body leads with a small ASCII-art rabbit rather than an emoji so it
+/// renders consistently across notification daemons that lack emoji glyphs.
 fn notify_waiting(label: &str) {
     let _ = notify_rust::Notification::new()
         .summary("usagi")
-        .body(&format!("🐰 {label} が入力待ちです"))
+        .body(&format!("(\\_/)\n(='.'=)\n{label} が入力待ちです"))
         .show();
 }
 

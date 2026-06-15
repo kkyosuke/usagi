@@ -21,7 +21,8 @@ pub enum Effect {
     Clear,
     /// Quit the whole application.
     Quit,
-    /// Open the session-name modal (the user ran `session new` without a name).
+    /// Open the session-name modal (the user ran `session create` without a
+    /// name).
     OpenSessionModal,
     /// Create a session with the given name (the user supplied one).
     CreateSession(String),
@@ -270,8 +271,11 @@ impl Command for QuitCommand {
 
 /// `session`: create, list, or switch sessions (a branch + worktree per repo).
 ///
-/// - `session new <name>` creates a session; `session new` with no name returns
-///   [`Effect::OpenSessionModal`] so the screen can prompt.
+/// Each subcommand accepts short aliases: `create` (`c`, `new`), `list` (`ls`),
+/// and `remove` (`rm`).
+///
+/// - `session create <name>` creates a session; `session create` with no name
+///   returns [`Effect::OpenSessionModal`] so the screen can prompt.
 /// - `session list` lists the sessions.
 /// - `session switch <name>` switches the active session (via
 ///   [`Effect::Activate`]); `session switch` with no name lists the sessions and
@@ -291,14 +295,15 @@ impl Command for SessionCommand {
     }
 
     fn usage(&self) -> &'static str {
-        "session [new|list|switch|remove] <name>"
+        "session [create|list|switch|remove] <name>  (aliases: create=c/new, list=ls, remove=rm)"
     }
 
     fn examples(&self) -> &'static [&'static str] {
         &[
-            "session new feature-x",
+            "session create feature-x",
             "session switch feature-x",
-            "session list",
+            "session ls",
+            "session rm feature-x",
         ]
     }
 
@@ -306,6 +311,15 @@ impl Command for SessionCommand {
         let mut parts = args.splitn(2, char::is_whitespace);
         let sub = parts.next().unwrap_or("");
         let rest = parts.next().unwrap_or("").trim();
+
+        // Normalize subcommand aliases to their canonical name so the rest of the
+        // dispatch only deals with one spelling each.
+        let sub = match sub {
+            "create" | "c" | "new" => "create",
+            "list" | "ls" => "list",
+            "remove" | "rm" => "remove",
+            other => other,
+        };
 
         let open = || CommandResult {
             lines: Vec::new(),
@@ -317,8 +331,8 @@ impl Command for SessionCommand {
         };
 
         match sub {
-            "new" if rest.is_empty() => open(),
-            "new" => create(rest),
+            "create" if rest.is_empty() => open(),
+            "create" => create(rest),
             "list" => CommandResult {
                 lines: Vec::new(),
                 effect: Effect::ListSessions,
@@ -423,10 +437,11 @@ impl Command for AgentCommand {
     }
 }
 
-/// `config`: open the configuration screen to edit the global settings and the
-/// current workspace's local overrides. Opening the screen is a side effect
-/// ([`Effect::OpenConfig`]) performed by the event loop, which owns the terminal
-/// and returns to the workspace screen when the user dismisses it.
+/// `config`: open the configuration screen to edit **this workspace's** local
+/// overrides (the global settings are edited from the CLI or welcome menu).
+/// Opening the screen is a side effect ([`Effect::OpenConfig`]) performed by the
+/// event loop, which owns the terminal and returns to the workspace screen when
+/// the user dismisses it.
 struct ConfigCommand;
 
 impl Command for ConfigCommand {
@@ -435,7 +450,7 @@ impl Command for ConfigCommand {
     }
 
     fn description(&self) -> &'static str {
-        "Open the settings screen to edit configuration"
+        "Edit this workspace's local settings"
     }
 
     fn run(&self, _args: &str, _ctx: &CommandContext) -> CommandResult {
@@ -772,7 +787,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(joined.contains("Usage:"));
-        assert!(joined.contains("session [new|list|switch|remove] <name>"));
+        assert!(joined.contains("session [create|list|switch|remove] <name>"));
         assert!(joined.contains("Examples:"));
         assert!(joined.contains("session switch feature-x"));
     }
@@ -848,6 +863,46 @@ mod tests {
             result.effect,
             Effect::CreateSession("feature-x".to_string())
         );
+    }
+
+    #[test]
+    fn session_create_and_its_aliases_behave_like_new() {
+        // `create` is the canonical name; `c` and `new` are aliases. Each opens
+        // the modal with no name and creates with one.
+        for sub in ["create", "c", "new"] {
+            let opened = registry().dispatch(&format!("session {sub}"), &[], &[]);
+            assert_eq!(opened.effect, Effect::OpenSessionModal, "{sub} (no name)");
+
+            let created = registry().dispatch(&format!("session {sub} feature-x"), &[], &[]);
+            assert_eq!(
+                created.effect,
+                Effect::CreateSession("feature-x".to_string()),
+                "{sub} feature-x"
+            );
+        }
+    }
+
+    #[test]
+    fn session_ls_is_an_alias_for_list() {
+        let result = registry().dispatch("session ls", &[], &[]);
+        assert!(result.lines.is_empty());
+        assert_eq!(result.effect, Effect::ListSessions);
+    }
+
+    #[test]
+    fn session_rm_is_an_alias_for_remove() {
+        // `rm` with a name removes directly...
+        let result = registry().dispatch("session rm old", &[], &[]);
+        assert_eq!(
+            result.effect,
+            Effect::RemoveSession {
+                name: "old".to_string(),
+                force: false,
+            }
+        );
+        // ...and `rm` with no name opens the picker, just like `remove`.
+        let bare = registry().dispatch("session rm", &[], &[]);
+        assert_eq!(bare.effect, Effect::OpenRemoveModal { force: false });
     }
 
     #[test]
@@ -1134,11 +1189,13 @@ mod tests {
         assert_eq!(
             registry().suggest("session "),
             Hint::Usage {
-                usage: "session [new|list|switch|remove] <name>",
+                usage:
+                    "session [create|list|switch|remove] <name>  (aliases: create=c/new, list=ls, remove=rm)",
                 examples: &[
-                    "session new feature-x",
+                    "session create feature-x",
                     "session switch feature-x",
-                    "session list",
+                    "session ls",
+                    "session rm feature-x",
                 ],
             }
         );

@@ -22,7 +22,7 @@ use super::state::{
 use super::terminal_view::TerminalView;
 
 /// Shown below the root row when the workspace has no recorded worktrees.
-const EMPTY_MESSAGE: &str = "No worktrees recorded yet. Run usagi to sync.";
+const EMPTY_MESSAGE: &str = "no sessions";
 
 /// The detail shown on the root row's second line (it has no git status).
 const ROOT_DETAIL: &str = "workspace root";
@@ -316,7 +316,11 @@ fn left_pane(
     );
     let mut lines = vec![root_top, root_detail];
     if list.is_empty() {
-        lines.push(clip_to_width(EMPTY_MESSAGE, left_w));
+        lines.push(
+            style(clip_to_width(EMPTY_MESSAGE, left_w))
+                .dim()
+                .to_string(),
+        );
     } else {
         for (i, w) in list.worktrees().iter().enumerate() {
             // The root occupies the first entry, so worktree `i` sits at
@@ -596,12 +600,11 @@ fn remove_modal_row(name: &str, cursor: bool, selected: bool, inner: usize) -> S
 /// Builds the centred session-removal modal: a scrolling checklist of the
 /// workspace's sessions, with the count selected and the key hints below.
 fn remove_modal_frame(raw_height: usize, raw_width: usize, modal: &RemoveModal) -> Vec<String> {
-    const INNER: usize = 40;
+    // Wide enough for the longest body line, the key-hints row below.
+    const INNER: usize = 44;
 
     let mut body = vec![
-        style("Select sessions to remove (Space to toggle).")
-            .dim()
-            .to_string(),
+        style("Select sessions to remove.").dim().to_string(),
         String::new(),
     ];
 
@@ -1064,7 +1067,7 @@ mod tests {
         assert_eq!(lines.len(), 3);
         assert!(lines[0].contains(ROOT_NAME));
         assert!(lines[1].contains("workspace root"));
-        assert!(lines[2].contains("No worktrees recorded"));
+        assert!(lines[2].contains("no sessions"));
     }
 
     #[test]
@@ -1550,6 +1553,24 @@ mod tests {
     }
 
     #[test]
+    fn remove_modal_frame_keeps_every_row_within_the_box() {
+        // Regression: the header and key-hint rows must fit inside the border so
+        // nothing spills past the right edge of the box.
+        let mut state = state_with_sessions(&["scroll", "session-new", "config"]);
+        state.open_remove_modal(false);
+        let frame = render_frame(24, 80, &state);
+        let widths: Vec<usize> = frame
+            .iter()
+            .map(|l| console::strip_ansi_codes(l))
+            .filter(|l| l.trim_start().starts_with(['┌', '│', '└']))
+            .map(|l| console::measure_text_width(l.trim_end()))
+            .collect();
+        assert!(!widths.is_empty());
+        // Every bordered row shares one width, so no line overflows the frame.
+        assert!(widths.iter().all(|&w| w == widths[0]));
+    }
+
+    #[test]
     fn render_frame_survives_a_short_terminal() {
         let state = HomeState::new("usagi", Vec::new(), None);
         let frame = render_frame(3, 80, &state);
@@ -1643,9 +1664,9 @@ mod tests {
         let state = typing("session ");
         let joined = stripped(&hint_lines(&state, 80));
         assert!(joined.contains("usage"));
-        assert!(joined.contains("session [new"));
+        assert!(joined.contains("session [create"));
         assert!(joined.contains("e.g."));
-        assert!(joined.contains("session new"));
+        assert!(joined.contains("session create"));
     }
 
     #[test]

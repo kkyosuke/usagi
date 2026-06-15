@@ -192,10 +192,12 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
         result
     };
 
-    // Opening `config` hands off to the settings screen, editing this
-    // workspace's local overrides (`<workspace>/.usagi/settings.json`) on top of
-    // the global settings. Quitting there (Ctrl+C) quits the app, reported back
-    // as `true` so the event loop propagates the quit; `Back` returns `false`.
+    // Opening `config` hands off to the settings screen in its workspace scope,
+    // editing only this workspace's local overrides
+    // (`<workspace>/.usagi/settings.json`); the global settings are changed from
+    // the CLI or welcome menu instead. Quitting there (Ctrl+C) quits the app,
+    // reported back as `true` so the event loop propagates the quit; `Back`
+    // returns `false`.
     let config_root = workspace.path.clone();
     let mut open_config = |t: &Term| -> Result<bool> {
         match crate::presentation::tui::config::run_in(t, Some(config_root.clone()))? {

@@ -46,7 +46,7 @@
 
 ### セッションの worktree 配置
 
-`session new <name>` で作られる worktree は、ワークスペースルート直下の **`.usagi/worktree/<name>/`** に集約します（`.gitignore` 済み）。これによりセッションの所在が一意に定まり、一覧・削除・クリーンアップが扱いやすくなります。
+`session create <name>` で作られる worktree は、ワークスペースルート直下の **`.usagi/worktree/<name>/`** に集約します（`.gitignore` 済み）。これによりセッションの所在が一意に定まり、一覧・削除・クリーンアップが扱いやすくなります。
 
 ワークスペースのルートは git リポジトリである必要はありません。セッション作成時にルートを**再帰的に走査**し、
 
@@ -193,7 +193,7 @@ session "login"  (/Users/me/git/usagi/.usagi/worktree/login)
 |---|---|---|
 | `agent_cli` | enum?\| | このプロジェクトで起動する AI エージェント CLI（`claude` / `gemini`）。`null`（未設定）ならグローバル設定にフォールバック |
 | `notifications_enabled` | bool?\| | このプロジェクトでのデスクトップ通知 ON/OFF。`null`（未設定）ならグローバル設定にフォールバック |
-| `default_branch_source` | enum?\| | `session new` で worktree を切る新ブランチの基点（`local` = ローカル既定ブランチ / `remote` = リモート追従の既定ブランチ）。`null`（未設定）なら既定の `remote`。グローバル設定に対応項目はなく、**リポジトリ単位**の設定 |
+| `default_branch_source` | enum?\| | `session create` で worktree を切る新ブランチの基点（`local` = ローカル既定ブランチ / `remote` = リモート追従の既定ブランチ）。`null`（未設定）なら既定の `remote`。グローバル設定に対応項目はなく、**リポジトリ単位**の設定 |
 
 - `agent_cli` / `notifications_enabled` は `null`（未設定）で「グローバル設定に従う」を意味します。`light/dark` テーマやクローン先（`workspace_root`）のようにプロジェクト単位で変える意味の薄い項目は対象外です。
 - `default_branch_source` はグローバルに対応項目がなく、未設定時は既定（`remote`）として解決されます。`remote` 選択時に `origin/<既定>` が無ければローカル既定ブランチ → それも無ければ現在の HEAD にフォールバックします（`infrastructure/git.rs` の `resolve_base_ref`）。
@@ -203,12 +203,13 @@ session "login"  (/Users/me/git/usagi/.usagi/worktree/login)
 `set_local_agent_cli` / `set_local_notifications_enabled`。
 
 > 編集 UI（[issue 022](../../issues/022-local-settings-ui.md), [issue 030](../../issues/030-default-branch-source.md)）:
-> git リポジトリ内で開いた設定画面（Config）に、グローバル設定の下へ「Local · Agent CLI」「Local · Notifications」
-> 「Local · Default Branch」の行が追加されます。Agent CLI と Notifications は **「グローバルに従う / ローカルで
-> 上書き」** を 1 つのセレクタで切り替えられ、未上書き時は現在の実効値（`Global (...)`）を表示します。Default
-> Branch はグローバル対応項目がないため `local` / `remote` の 2 値を切り替え、未設定時は既定値（`Default (Remote)`）
-> を表示します。保存時にグローバル設定とローカル設定（`save_local`）をまとめて書き込みます。全項目を未上書きに
-> 戻しても `settings.json` は残し（中身は実質空）、「グローバルに従う／既定に従う」を意味します。
+> ホーム画面のコマンドモードで `config` を実行すると、設定画面が**ワークスペーススコープ**で開き、「Agent CLI」
+> 「Notifications」「Default Branch」の 3 項目だけを表示します（グローバル設定はここには出ません）。Agent CLI と
+> Notifications は **「グローバルに従う / ローカルで上書き」** を 1 つのセレクタで切り替えられ、未上書き時は現在の
+> 実効値（`Global (...)`）を表示します。Default Branch はグローバル対応項目がないため `local` / `remote` の 2 値を
+> 切り替え、未設定時は既定値（`Default (Remote)`）を表示します。保存時はこのワークスペースのローカル設定
+> （`save_local`）のみを書き込みます。全項目を未上書きに戻しても `settings.json` は残し（中身は実質空）、
+> 「グローバルに従う／既定に従う」を意味します。
 
 ## `history.json`
 
