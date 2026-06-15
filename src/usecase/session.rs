@@ -220,17 +220,18 @@ fn is_repo_root(path: &Path) -> bool {
 }
 
 /// The ref a new session worktree in `repo` should branch from, per the repo's
-/// project-local [`BranchSource`](crate::domain::settings::BranchSource).
+/// project-local settings: the chosen
+/// [`default_branch`](crate::domain::settings::LocalSettings::default_branch)
+/// (or the detected default when unset) resolved through the
+/// [`BranchSource`](crate::domain::settings::BranchSource).
 ///
 /// Reading the local settings is best-effort: a missing or unreadable file
-/// resolves to the default ([`BranchSource::Remote`]). `None` means "branch from
-/// the current HEAD" — either the chosen ref does not exist, or the resolution
-/// fell through.
+/// resolves to the defaults (detected branch, [`BranchSource::Remote`]). `None`
+/// means "branch from the current HEAD" — either the chosen ref does not exist,
+/// or the resolution fell through.
 fn base_ref(repo: &Path) -> Option<String> {
-    let source = settings::load_local(repo)
-        .unwrap_or_default()
-        .branch_source();
-    git::resolve_base_ref(repo, source)
+    let local = settings::load_local(repo).unwrap_or_default();
+    git::resolve_base_ref(repo, local.branch_source(), local.default_branch())
 }
 
 #[cfg(test)]
@@ -421,6 +422,40 @@ mod tests {
         .unwrap();
         let created = create(&root, "from-local").unwrap();
         assert_eq!(head_commit(&created.root), local_commit);
+    }
+
+    #[test]
+    fn branches_from_a_configured_specific_branch() {
+        use crate::domain::settings::LocalSettings;
+
+        // A repo whose `develop` branch sits at a different commit than `main`,
+        // so the chosen base is provable from the resulting HEAD.
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        let main_commit = head_commit(root.path());
+        let run = |args: &[&str]| {
+            assert!(git_cmd(root.path()).args(args).status().unwrap().success());
+        };
+        run(&["checkout", "-q", "-b", "develop"]);
+        fs::write(root.path().join("code.txt"), "on develop").unwrap();
+        run(&["commit", "-aqm", "develop work"]);
+        let develop_commit = head_commit(root.path());
+        run(&["checkout", "-q", "main"]);
+        assert_ne!(main_commit, develop_commit);
+
+        // Configure the session base to the `develop` branch (local form).
+        settings::save_local(
+            root.path(),
+            &LocalSettings {
+                default_branch_source: Some(crate::domain::settings::BranchSource::Local),
+                default_branch: Some("develop".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let created = create(root.path(), "from-develop").unwrap();
+        assert_eq!(head_commit(&created.root), develop_commit);
     }
 
     #[test]

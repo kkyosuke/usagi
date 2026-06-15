@@ -258,16 +258,23 @@ pub fn default_branch(repo: &Path) -> String {
 }
 
 /// Resolve the base ref a new session worktree should branch from, honouring the
-/// project's [`BranchSource`].
+/// project's [`BranchSource`] and chosen branch.
 ///
-/// - [`BranchSource::Remote`] prefers `origin/<default>`, falling back to the
-///   local `<default>` branch when no remote ref exists.
-/// - [`BranchSource::Local`] uses the local `<default>` branch.
+/// `branch` names the branch to cut from; `None` uses the repository's detected
+/// default branch (e.g. `main`). The source then selects which form of that
+/// branch is used:
+///
+/// - [`BranchSource::Remote`] prefers `origin/<branch>`, falling back to the
+///   local `<branch>` when no remote ref exists.
+/// - [`BranchSource::Local`] uses the local `<branch>`.
 ///
 /// Returns `None` when the chosen ref does not exist (e.g. a brand-new repo with
-/// no commits), so the caller branches from the current `HEAD` instead.
-pub fn resolve_base_ref(repo: &Path, source: BranchSource) -> Option<String> {
-    let default = default_branch(repo);
+/// no commits, or a branch name that no longer resolves), so the caller branches
+/// from the current `HEAD` instead.
+pub fn resolve_base_ref(repo: &Path, source: BranchSource, branch: Option<&str>) -> Option<String> {
+    let default = branch
+        .map(str::to_string)
+        .unwrap_or_else(|| default_branch(repo));
     let local = rev_exists(repo, &default).then(|| default.clone());
     match source {
         BranchSource::Remote => {
@@ -276,6 +283,66 @@ pub fn resolve_base_ref(repo: &Path, source: BranchSource) -> Option<String> {
         }
         BranchSource::Local => local,
     }
+}
+
+/// List the candidate base branches in `repo`: the short names of every local
+/// and remote-tracking branch, with the remote prefix stripped, de-duplicated
+/// and sorted. The `<remote>/HEAD` pseudo-refs are skipped. Returns an empty
+/// list when `repo` is not a git repository (or has no branches yet).
+///
+/// These are offered in the config screen so a project can branch new sessions
+/// off a specific branch rather than the detected default.
+pub fn list_branches(repo: &Path) -> Vec<String> {
+    use std::collections::BTreeSet;
+
+    // Local branches: `lstrip=2` drops `refs/heads/`, leaving the bare name.
+    let mut names: BTreeSet<String> = ref_names(repo, "refs/heads", 2).into_iter().collect();
+
+    // Remote-tracking branches: `lstrip=3` drops `refs/remotes/<remote>/`, so a
+    // branch name keeps any embedded slashes. The `HEAD` pseudo-ref is skipped.
+    for remote in remotes(repo) {
+        for name in ref_names(repo, &format!("refs/remotes/{remote}"), 3) {
+            if name != "HEAD" {
+                names.insert(name);
+            }
+        }
+    }
+
+    names.into_iter().collect()
+}
+
+/// The branch names under `refspec`, with the leading `lstrip` path components
+/// removed (so `refs/heads/feature/x` with `lstrip=2` yields `feature/x`).
+/// Empty when `repo` is not a git repository or has no matching refs.
+fn ref_names(repo: &Path, refspec: &str, lstrip: u32) -> Vec<String> {
+    let format = format!("--format=%(refname:lstrip={lstrip})");
+    git_capture(repo, &["for-each-ref", &format, refspec])
+        .ok()
+        .flatten()
+        .map(|out| {
+            out.lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The configured remote names of `repo` (e.g. `["origin"]`), or empty when
+/// there are none.
+fn remotes(repo: &Path) -> Vec<String> {
+    git_capture(repo, &["remote"])
+        .ok()
+        .flatten()
+        .map(|out| {
+            out.lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// The branch the remote's `HEAD` points at (e.g. `main`), if a remote exists.
@@ -682,12 +749,12 @@ mod tests {
         let (_tmp, work) = repo_with_remote();
         // With a remote, Remote resolves to origin/<default>...
         assert_eq!(
-            resolve_base_ref(&work, BranchSource::Remote).as_deref(),
+            resolve_base_ref(&work, BranchSource::Remote, None).as_deref(),
             Some("origin/main")
         );
         // ...while Local stays on the local branch.
         assert_eq!(
-            resolve_base_ref(&work, BranchSource::Local).as_deref(),
+            resolve_base_ref(&work, BranchSource::Local, None).as_deref(),
             Some("main")
         );
 
@@ -695,12 +762,35 @@ mod tests {
         let local = tempfile::tempdir().unwrap();
         init_repo(local.path());
         assert_eq!(
-            resolve_base_ref(local.path(), BranchSource::Remote).as_deref(),
+            resolve_base_ref(local.path(), BranchSource::Remote, None).as_deref(),
             Some("main")
         );
         assert_eq!(
-            resolve_base_ref(local.path(), BranchSource::Local).as_deref(),
+            resolve_base_ref(local.path(), BranchSource::Local, None).as_deref(),
             Some("main")
+        );
+    }
+
+    #[test]
+    fn resolve_base_ref_honours_an_explicit_branch() {
+        let dir = tempfile::tempdir().unwrap();
+        init_repo(dir.path());
+        run(dir.path(), &["branch", "develop"]);
+
+        // A named branch overrides the detected default, in both forms.
+        assert_eq!(
+            resolve_base_ref(dir.path(), BranchSource::Local, Some("develop")).as_deref(),
+            Some("develop")
+        );
+        // No origin/develop exists, so Remote falls back to the local branch.
+        assert_eq!(
+            resolve_base_ref(dir.path(), BranchSource::Remote, Some("develop")).as_deref(),
+            Some("develop")
+        );
+        // A branch that does not resolve yields None (caller falls back to HEAD).
+        assert_eq!(
+            resolve_base_ref(dir.path(), BranchSource::Local, Some("ghost")),
+            None
         );
     }
 
@@ -710,8 +800,37 @@ mod tests {
         // branch from and the caller should fall back to HEAD.
         let dir = tempfile::tempdir().unwrap();
         run(dir.path(), &["init", "-q", "-b", "main"]);
-        assert_eq!(resolve_base_ref(dir.path(), BranchSource::Local), None);
-        assert_eq!(resolve_base_ref(dir.path(), BranchSource::Remote), None);
+        assert_eq!(
+            resolve_base_ref(dir.path(), BranchSource::Local, None),
+            None
+        );
+        assert_eq!(
+            resolve_base_ref(dir.path(), BranchSource::Remote, None),
+            None
+        );
+    }
+
+    #[test]
+    fn list_branches_returns_local_and_remote_names_deduped() {
+        // A repo with a remote: local `main` plus a local `develop`, and the
+        // remote-tracking `origin/main`. The duplicate `main` collapses and the
+        // remote prefix is stripped, leaving a sorted, unique list.
+        let (_tmp, work) = repo_with_remote();
+        run(&work, &["branch", "develop"]);
+
+        assert_eq!(list_branches(&work), vec!["develop", "main"]);
+
+        // A branch that lives only on the remote still surfaces (prefix stripped).
+        run(&work, &["branch", "feature/x"]);
+        run(&work, &["push", "-q", "origin", "feature/x"]);
+        run(&work, &["branch", "-D", "feature/x"]);
+        assert_eq!(list_branches(&work), vec!["develop", "feature/x", "main"]);
+    }
+
+    #[test]
+    fn list_branches_is_empty_for_a_non_repo() {
+        let plain = tempfile::tempdir().unwrap();
+        assert!(list_branches(plain.path()).is_empty());
     }
 
     #[test]

@@ -256,6 +256,12 @@ pub struct LocalSettings {
     /// Which ref new session worktrees branch from in this repository. `None`
     /// defers to the default ([`BranchSource::Remote`]).
     pub default_branch_source: Option<BranchSource>,
+    /// The branch new session worktrees are cut from in this repository. `None`
+    /// means "use the repository's detected default branch" (e.g. `main`); a
+    /// value names a specific branch (e.g. `develop`) to branch off instead. The
+    /// [`default_branch_source`](Self::default_branch_source) still decides
+    /// whether the local or remote-tracking form of that branch is used.
+    pub default_branch: Option<String>,
     /// Override whether the local LLM is enabled for this project. `None` defers
     /// to the global [`LocalLlm::enabled`] setting.
     pub local_llm_enabled: Option<bool>,
@@ -267,12 +273,19 @@ impl LocalSettings {
         self.agent_cli.is_none()
             && self.notifications_enabled.is_none()
             && self.default_branch_source.is_none()
+            && self.default_branch.is_none()
             && self.local_llm_enabled.is_none()
     }
 
     /// The branch source to use, resolving an unset value to the default.
     pub fn branch_source(&self) -> BranchSource {
         self.default_branch_source.unwrap_or_default()
+    }
+
+    /// The specific branch new sessions should branch from, or `None` to use the
+    /// repository's detected default branch.
+    pub fn default_branch(&self) -> Option<&str> {
+        self.default_branch.as_deref()
     }
 }
 
@@ -349,6 +362,12 @@ mod tests {
         // The branch source counts as an override too.
         assert!(!LocalSettings {
             default_branch_source: Some(BranchSource::Local),
+            ..Default::default()
+        }
+        .is_empty());
+        // ...as does a specific default branch.
+        assert!(!LocalSettings {
+            default_branch: Some("develop".to_string()),
             ..Default::default()
         }
         .is_empty());
@@ -448,6 +467,21 @@ mod tests {
             }
             .branch_source(),
             BranchSource::Local
+        );
+    }
+
+    #[test]
+    fn default_branch_resolves_to_none_or_the_named_branch() {
+        // Unset: use the repository's detected default branch.
+        assert_eq!(LocalSettings::default().default_branch(), None);
+        // Set: the named branch is returned.
+        assert_eq!(
+            LocalSettings {
+                default_branch: Some("develop".to_string()),
+                ..Default::default()
+            }
+            .default_branch(),
+            Some("develop")
         );
     }
 
