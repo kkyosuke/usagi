@@ -57,25 +57,22 @@ impl Editor for EnvEditor {
     }
 }
 
-/// The editor command to run: `$EDITOR`, then `$VISUAL`, then a platform default.
+/// The editor command (binary + arguments) to run: `$EDITOR`, then `$VISUAL`,
+/// then a platform default.
 fn editor_command() -> Vec<String> {
-    if let Some(editor) = non_empty_env("EDITOR") {
-        if let Ok(args) = shell_words::split(&editor) {
-            if !args.is_empty() {
-                return args;
-            }
-        }
-    }
+    editor_command_env("EDITOR")
+        .or_else(|| editor_command_env("VISUAL"))
+        .unwrap_or_else(|| vec![default_editor(std::env::consts::OS).to_string()])
+}
 
-    if let Some(visual) = non_empty_env("VISUAL") {
-        if let Ok(args) = shell_words::split(&visual) {
-            if !args.is_empty() {
-                return args;
-            }
-        }
-    }
-
-    vec![default_editor(std::env::consts::OS).to_string()]
+/// Parse an editor environment variable into a command vector using POSIX shell
+/// rules, so values like `code --wait` split into `["code", "--wait"]` without
+/// spawning a shell. Returns `None` when the variable is unset/empty, fails to
+/// parse (e.g. an unbalanced quote), or contains only whitespace.
+fn editor_command_env(name: &str) -> Option<Vec<String>> {
+    let value = non_empty_env(name)?;
+    let args = shell_words::split(&value).ok()?;
+    (!args.is_empty()).then_some(args)
 }
 
 /// Read an environment variable, treating an unset or empty value as absent.
