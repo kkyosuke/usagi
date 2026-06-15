@@ -1,9 +1,12 @@
 //! `usagi llm-mcp`: run the local LLM MCP server over stdio.
 //!
 //! A thin transport wrapper around [`crate::presentation::mcp_llm::LlmMcpServer`]
-//! (which holds the unit-tested protocol logic). This file owns the two pieces
-//! that cannot be unit-tested and so are excluded from coverage: the blocking
-//! stdin loop and the [`OllamaBackend`] that shells out to the `ollama` CLI.
+//! (which holds the unit-tested protocol logic). The read/write loop lives in
+//! [`serve`], which is generic over its I/O streams so it can be exercised with
+//! in-memory buffers and a mock backend. The remaining pieces are the parts that
+//! cannot be unit-tested: [`run`], which only binds the real stdio handles, and
+//! the [`OllamaBackend`] that shells out to the `ollama` CLI. This file is
+//! excluded from coverage (see `scripts/coverage.sh`).
 
 use std::io::{self, BufRead, Write};
 use std::process::{Command, Stdio};
