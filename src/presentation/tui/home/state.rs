@@ -231,6 +231,10 @@ pub enum PaneExit {
     /// The session picker (`Ctrl-O`) chose a session — already focused in the
     /// list — so re-root the pane there, keeping it open.
     Switch,
+    /// The session picker (`Ctrl-O` then `c`) asked to create a new session: the
+    /// event loop opens the name modal, and on success re-roots the pane at the
+    /// freshly created session (as a plain shell), keeping it open.
+    Create,
 }
 
 /// The kind of a log line, which decides how it is coloured.

@@ -316,8 +316,17 @@ fn left_pane(
     );
     let mut lines = vec![root_top, root_detail];
     if list.is_empty() {
+        // A divider under the root, then the empty message — both indented to
+        // start under the `root` label (past the cursor and kind-icon cells).
+        let indent = " ".repeat(NAME_PREFIX);
+        let inner_w = left_w.saturating_sub(NAME_PREFIX);
         lines.push(
-            style(clip_to_width(EMPTY_MESSAGE, left_w))
+            style(format!("{indent}{}", "─".repeat(inner_w)))
+                .dim()
+                .to_string(),
+        );
+        lines.push(
+            style(format!("{indent}{}", clip_to_width(EMPTY_MESSAGE, inner_w)))
                 .dim()
                 .to_string(),
         );
@@ -698,11 +707,8 @@ fn session_picker_body(picker: &SessionPicker) -> Vec<String> {
         ));
     }
     body.push(String::new());
-    body.push(
-        style("1-9/↑↓+Enter: switch   Esc: cancel   Ctrl-O: detach")
-            .dim()
-            .to_string(),
-    );
+    body.push(style("1-9/↑↓+Enter: switch   c: create").dim().to_string());
+    body.push(style("Esc: cancel   Ctrl-O: detach").dim().to_string());
     body
 }
 
@@ -1063,11 +1069,17 @@ mod tests {
             80,
             6,
         );
-        // The root entry (two lines) is always present, with the empty hint below.
-        assert_eq!(lines.len(), 3);
+        // The root entry (two lines) is always present, then a divider and the
+        // empty hint below it.
+        assert_eq!(lines.len(), 4);
         assert!(lines[0].contains(ROOT_NAME));
         assert!(lines[1].contains("workspace root"));
-        assert!(lines[2].contains("no sessions"));
+        assert!(lines[2].contains('─'));
+        assert!(lines[3].contains("no sessions"));
+        // The divider and the hint start under the `root` label, not at column 0.
+        let hint = console::strip_ansi_codes(&lines[3]);
+        assert!(hint.starts_with(&" ".repeat(NAME_PREFIX)));
+        assert!(hint[NAME_PREFIX..].starts_with("no sessions"));
     }
 
     #[test]
