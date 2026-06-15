@@ -592,6 +592,17 @@ impl HomeState {
         self.terminal_view = Some(view);
     }
 
+    /// Drop the embedded-terminal snapshot without otherwise touching the right
+    /// pane. Used between frames in the sidebar: when the selected session has no
+    /// live terminal to preview, the pane falls back to the command log (whereas
+    /// [`show_log`] also resets the pane mode and scroll, which the per-frame
+    /// preview must not do).
+    ///
+    /// [`show_log`]: Self::show_log
+    pub fn clear_terminal_view(&mut self) {
+        self.terminal_view = None;
+    }
+
     /// Replace the set of worktree paths whose background session is waiting for
     /// the user, refreshed from the terminal monitor before each redraw.
     pub fn set_waiting(&mut self, waiting: HashSet<PathBuf>) {

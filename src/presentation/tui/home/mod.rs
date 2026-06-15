@@ -154,8 +154,12 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
     // across session switches and for as long as this screen is open. Dropped on
     // return, which kills any shell still running. The pool also watches every
     // shell's bell and flags / notifies the ones waiting for input.
-    let mut pool = terminal_pool::TerminalPool::new(notifications_enabled);
-    let monitor = pool.monitor();
+    //
+    // Wrapped in a `RefCell` so both the pane driver (`open_terminal`) and the
+    // sidebar preview (`preview`) can reach it: their borrows never overlap in
+    // time (the event loop calls one or the other, never both at once).
+    let pool = std::cell::RefCell::new(terminal_pool::TerminalPool::new(notifications_enabled));
+    let monitor = pool.borrow().monitor();
 
     // Opening a terminal embeds a live shell in the right pane: the pane stays
     // inside the workspace screen (sidebar still visible) and runs the shell
@@ -179,6 +183,7 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
                     .map(|n| n.to_string_lossy().into_owned())
                     .unwrap_or_else(|| dir.display().to_string())
             });
+        let mut pool = pool.borrow_mut();
         let handle = pool.monitor();
         let pty = pool.attach_or_spawn(term, dir, initial, &label)?;
         handle.set_attached(Some(dir.to_path_buf()));
@@ -191,6 +196,13 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
         }
         result
     };
+
+    // Snapshot the selected session's live terminal for the sidebar's right-pane
+    // preview (the tab-like view), or `None` when it has no running shell/agent.
+    let mut preview =
+        |dir: &Path| -> Option<crate::presentation::tui::home::terminal_view::TerminalView> {
+            pool.borrow_mut().snapshot(term, dir)
+        };
 
     // Opening `config` hands off to the settings screen in its workspace scope,
     // editing only this workspace's local overrides
@@ -217,5 +229,6 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
         &mut remove_session,
         &mut open_terminal,
         &mut open_config,
+        &mut preview,
     )
 }
