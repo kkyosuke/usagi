@@ -33,7 +33,7 @@ pub const ROOT_NAME: &str = "root";
 /// A session is one branch name checked out into a worktree in every repository
 /// under the workspace, so the home list shows one row per *session*, not per
 /// repository. The row is keyed on the session tree root (`<workspace>/.usagi/
-/// worktree/<name>`) — where the embedded terminal/agent roots and the key for
+/// sessions/<name>`) — where the embedded terminal/agent roots and the key for
 /// its live/waiting state — and carries:
 ///
 /// - the session name as its branch label,
@@ -1739,7 +1739,7 @@ mod tests {
     fn session_record(name: &str, worktrees: usize) -> SessionRecord {
         SessionRecord {
             name: name.to_string(),
-            root: std::path::PathBuf::from(format!("/repo/.usagi/worktree/{name}")),
+            root: std::path::PathBuf::from(format!("/repo/.usagi/sessions/{name}")),
             worktrees: (0..worktrees).map(|_| worktree(name)).collect(),
             created_at: Utc::now(),
         }
@@ -1780,21 +1780,21 @@ mod tests {
     fn multi_repo_session_collapses_to_one_row_with_an_aggregated_status() {
         // A session spanning three repositories: two merged, one still local.
         let mut merged_a = worktree("feature");
-        merged_a.path = PathBuf::from("/repo/.usagi/worktree/feature/app-a");
+        merged_a.path = PathBuf::from("/repo/.usagi/sessions/feature/app-a");
         merged_a.primary = true;
         merged_a.status = BranchStatus::Merged;
         merged_a.upstream = Some("origin/feature".to_string());
         let mut merged_b = worktree("feature");
-        merged_b.path = PathBuf::from("/repo/.usagi/worktree/feature/app-b");
+        merged_b.path = PathBuf::from("/repo/.usagi/sessions/feature/app-b");
         merged_b.status = BranchStatus::Merged;
         let mut local_c = worktree("feature");
-        local_c.path = PathBuf::from("/repo/.usagi/worktree/feature/app-c");
+        local_c.path = PathBuf::from("/repo/.usagi/sessions/feature/app-c");
         local_c.status = BranchStatus::Local;
 
         let mut state = state();
         state.restore_sessions(vec![SessionRecord {
             name: "feature".to_string(),
-            root: PathBuf::from("/repo/.usagi/worktree/feature"),
+            root: PathBuf::from("/repo/.usagi/sessions/feature"),
             worktrees: vec![merged_a, merged_b, local_c],
             created_at: Utc::now(),
         }]);
@@ -1804,7 +1804,7 @@ mod tests {
         let row = &state.list().worktrees()[0];
         assert_eq!(row.branch.as_deref(), Some("feature"));
         // Keyed on the session tree root (not any single repository's worktree).
-        assert_eq!(row.path, PathBuf::from("/repo/.usagi/worktree/feature"));
+        assert_eq!(row.path, PathBuf::from("/repo/.usagi/sessions/feature"));
         // Least-progressed wins: one local repo keeps the whole session `local`.
         assert_eq!(row.status, BranchStatus::Local);
         // Primary is set because one repository's worktree is primary.
@@ -1818,7 +1818,7 @@ mod tests {
         let mut state = state();
         state.restore_sessions(vec![SessionRecord {
             name: "empty".to_string(),
-            root: PathBuf::from("/repo/.usagi/worktree/empty"),
+            root: PathBuf::from("/repo/.usagi/sessions/empty"),
             worktrees: Vec::new(),
             created_at: Utc::now(),
         }]);
