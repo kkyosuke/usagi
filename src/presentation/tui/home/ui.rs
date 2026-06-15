@@ -1,10 +1,12 @@
-//! Rendering for the home (workspace) screen's three-pane layout.
+//! Rendering for the home (workspace) screen's mode-aware layout.
 //!
-//! Top to bottom: a title bar, then a body split into the worktree list (left)
-//! and the command log — or, while the `terminal` command runs, a live embedded
-//! terminal — (right), then the command input line and a mode-aware footer. All
-//! functions take plain data and return styled lines, so the layout is rendered
-//! without any terminal IO.
+//! Top to bottom: a title bar, a body split into the worktree list (left) and a
+//! mode-dependent right pane, the command input line, and a footer. The right
+//! pane is blank in 統括 (Overview) and 切替 (Switch); it is the session's action
+//! surface (a menu or a prompt) in 在席 (Focus); and the live embedded terminal in
+//! 没入 (Attached). In Overview the command results render as a band below the
+//! input line. All functions take plain data and return styled lines, so the
+//! layout is rendered without any terminal IO.
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -14,11 +16,10 @@ use console::style;
 use crate::domain::workspace_state::{BranchStatus, WorktreeState};
 use crate::presentation::tui::widgets;
 
-use super::command::{CommandHint, CommandScope, Hint};
-use super::state::{
-    worktree_name, HomeState, LineKind, LogLine, Mode, RemoveModal, RightPane, SessionModal,
-    SessionPicker, WorktreeList, ROOT_NAME,
-};
+use crate::domain::settings::SessionActionUi;
+
+use super::command::{CommandHint, CommandInfo, Hint};
+use super::state::{HomeState, LineKind, LogLine, Mode, RemoveModal, WorktreeList, ROOT_NAME};
 use super::terminal_view::TerminalView;
 
 /// Shown below the root row when the workspace has no recorded worktrees.
@@ -34,8 +35,17 @@ const DETACHED: &str = "(detached)";
 /// cell (`⌂`/`●`/`○`), each followed by a space.
 const NAME_PREFIX: usize = 4;
 
-/// Right-edge field width for the git `status` label on line 1.
-const STATUS_COL: usize = 6;
+/// Right-edge field width for the git `status` label on line 1: a status icon,
+/// a space, and the widest status word (`merged` / `pushed`, 6 columns).
+const STATUS_COL: usize = 8;
+
+/// Nerd Font (git) glyphs paired with each branch lifecycle status, for an
+/// at-a-glance read of the right-edge status field. They need a patched "Nerd
+/// Font" terminal font to render; without one the terminal shows a fallback box,
+/// but the colour-coded word beside the icon still carries the meaning.
+const LOCAL_ICON: char = '\u{e725}'; // nf-dev-git_branch — lives only locally
+const PUSHED_ICON: char = '\u{f0ee}'; // nf-fa-cloud_upload — pushed to the remote
+const MERGED_ICON: char = '\u{e727}'; // nf-dev-git_merge — merged into the default branch
 
 /// Indent of line 2 (the detail line) before the active marker; the marker and
 /// its trailing space then put the detail text under the branch name.
@@ -101,8 +111,8 @@ fn layout(width: usize) -> (usize, usize) {
 }
 
 /// The centred title bar: workspace name and session count. The count covers
-/// every row in the left pane — the root row plus each worktree — so it matches
-/// what the user sees, rather than the bare worktree count.
+/// every row in the left pane — the root row plus each session (one row per
+/// session, not per repository) — so it matches what the user sees.
 fn title_bar(width: usize, list: &WorktreeList) -> String {
     let count = list.session_count();
     let label = format!(
@@ -113,9 +123,20 @@ fn title_bar(width: usize, list: &WorktreeList) -> String {
     widgets::title_line(width, &label)
 }
 
-/// The colour-coded label for a branch's lifecycle status, clipped to `width`.
-fn status_label(status: BranchStatus, width: usize) -> String {
-    let text = clip_to_width(status.as_str(), width);
+/// The Nerd Font git glyph for a branch lifecycle status.
+fn status_icon(status: BranchStatus) -> char {
+    match status {
+        BranchStatus::Local => LOCAL_ICON,
+        BranchStatus::Pushed => PUSHED_ICON,
+        BranchStatus::Merged => MERGED_ICON,
+    }
+}
+
+/// The colour-coded `<icon> <word>` label for a branch's lifecycle status. The
+/// icon gives an at-a-glance read; the word keeps it legible without a Nerd
+/// Font and disambiguates the colour.
+fn status_label(status: BranchStatus) -> String {
+    let text = format!("{} {}", status_icon(status), status.as_str());
     match status {
         BranchStatus::Local => style(text).yellow().to_string(),
         BranchStatus::Pushed => style(text).green().to_string(),
@@ -123,14 +144,14 @@ fn status_label(status: BranchStatus, width: usize) -> String {
     }
 }
 
-/// The line-1 right-edge status field: the colour-coded status word
+/// The line-1 right-edge status field: the colour-coded `<icon> <word>` label
 /// right-aligned within [`STATUS_COL`] columns, or all blanks when there is no
 /// status (the root row).
 fn status_cell(status: Option<BranchStatus>) -> String {
     match status {
         None => " ".repeat(STATUS_COL),
         Some(status) => {
-            let label = status_label(status, STATUS_COL);
+            let label = status_label(status);
             let pad = STATUS_COL.saturating_sub(console::measure_text_width(&label));
             format!("{}{label}", " ".repeat(pad))
         }
@@ -348,20 +369,20 @@ fn log_line(line: &LogLine, width: usize) -> String {
     }
 }
 
-/// Builds the right pane: a `rows`-tall window pinned to the tail of the log, so
-/// the newest lines are always shown (like a terminal). The TUI never scrolls,
-/// so the window is always at the bottom.
-fn right_pane(log: &[LogLine], right_w: usize, rows: usize) -> Vec<String> {
+/// Builds a `rows`-tall window pinned to the tail of the log, so the newest
+/// lines are always shown (like a terminal). The TUI never scrolls, so the
+/// window is always at the bottom. Used for the Overview results band.
+fn log_tail(log: &[LogLine], width: usize, rows: usize) -> Vec<String> {
     let start = log.len().saturating_sub(rows);
     log[start..]
         .iter()
         .take(rows)
-        .map(|l| log_line(l, right_w))
+        .map(|l| log_line(l, width))
         .collect()
 }
 
-/// Shown in the right pane between starting the `terminal` command and its
-/// first screen snapshot arriving.
+/// Shown in the right pane between attaching the terminal and its first screen
+/// snapshot arriving.
 const TERMINAL_STARTING: &str = "Starting terminal…";
 
 /// Builds the right pane from an embedded terminal snapshot: each grid row,
@@ -374,18 +395,118 @@ fn terminal_pane(view: &TerminalView, right_w: usize, rows: usize) -> Vec<String
         .collect()
 }
 
-/// Chooses the right pane's contents. A terminal snapshot wins whenever one is
-/// present: the live screen while the `terminal`/`agent` pane is attached
-/// ([`RightPane::Terminal`]), and — in the sidebar ([`RightPane::Log`]) — a
-/// read-only preview of the selected session's running shell/agent, so moving
-/// the cursor switches the pane like a tab. With no snapshot the attached pane
-/// shows a starting hint and the sidebar falls back to the command log.
+/// The `›` cursor cell for a highlighted action-menu row, or a blank otherwise.
+fn menu_marker(selected: bool) -> String {
+    if selected {
+        style("›").red().bold().to_string()
+    } else {
+        " ".to_string()
+    }
+}
+
+/// Builds one 在席 (Focus) menu row: a `›` cursor for the highlighted command,
+/// its name, and its dimmed description, clipped to `width`.
+fn focus_menu_row(info: &CommandInfo, selected: bool, width: usize) -> String {
+    let marker = menu_marker(selected);
+    let name = if selected {
+        style(format!("{:<9}", info.name)).cyan().bold().to_string()
+    } else {
+        style(format!("{:<9}", info.name)).cyan().to_string()
+    };
+    let desc_budget = width.saturating_sub(HINT_INDENT + 9);
+    let desc = style(clip_to_width(info.description, desc_budget)).dim();
+    clip_to_width(&format!("  {marker} {name}{desc}"), width)
+}
+
+/// Builds the 在席 (Focus) menu: a short header, one row per Session-scope
+/// command (`›` cursor on the highlighted one), and a key hint.
+fn focus_menu(state: &HomeState, width: usize) -> Vec<String> {
+    let mut lines = vec![
+        style(format!("session: {}", state.focused_session_name()))
+            .cyan()
+            .bold()
+            .to_string(),
+        String::new(),
+        style("Run a command:").dim().to_string(),
+    ];
+    let cursor = state.focus_menu_cursor();
+    for (i, info) in state.focus_menu_commands().iter().enumerate() {
+        lines.push(focus_menu_row(info, i == cursor, width));
+    }
+    lines.push(String::new());
+    lines.push(
+        style("↑↓ move   Enter run   t terminal   a agent")
+            .dim()
+            .to_string(),
+    );
+    lines
+}
+
+/// Builds the 在席 (Focus) prompt surface: a header, the session-scoped command
+/// line (`❯ <input>▏`), and the Session-scope hint below it.
+fn focus_prompt(state: &HomeState, width: usize) -> Vec<String> {
+    let mut lines = vec![
+        style(format!("session: {}", state.focused_session_name()))
+            .cyan()
+            .bold()
+            .to_string(),
+        String::new(),
+    ];
+    let prompt = style("❯").red().bold();
+    let text = style(state.focus_prompt()).cyan();
+    lines.push(clip_to_width(&format!("{prompt} {text}{CARET}"), width));
+    lines.push(String::new());
+    lines.extend(focus_hint_lines(state.focus_prompt_hint(), width));
+    lines
+}
+
+/// The hint rows for the 在席 prompt's Session-scope hint: the matching commands
+/// while the word is typed, or the usage / examples once arguments are given.
+fn focus_hint_lines(hint: Hint, width: usize) -> Vec<String> {
+    match hint {
+        Hint::Commands(hints) => hints
+            .iter()
+            .take(HINT_MAX)
+            .map(|h| {
+                let name = style(format!("{:<9}", h.name)).cyan().to_string();
+                let desc = style(clip_to_width(
+                    h.description,
+                    width.saturating_sub(HINT_INDENT + 9),
+                ))
+                .dim();
+                clip_to_width(&format!("    {name}{desc}"), width)
+            })
+            .collect(),
+        Hint::Usage { usage, examples } => {
+            let mut lines = vec![format!(
+                "  {} {}",
+                style("usage").dim(),
+                style(usage).cyan()
+            )];
+            for example in examples.iter().take(HINT_MAX) {
+                let text = clip_to_width(example, width.saturating_sub(HINT_INDENT + 6));
+                lines.push(format!("    {} {}", style("e.g.").dim(), style(text).dim()));
+            }
+            lines
+        }
+        Hint::None => Vec::new(),
+    }
+}
+
+/// The right pane's contents, by mode. Blank in 統括 / 切替 (the user is on the
+/// bottom line or the left pane); the session's action surface — a menu or a
+/// prompt, per [`SessionActionUi`] — in 在席; and the live embedded terminal in
+/// 没入 (a starting hint until the first snapshot arrives).
 fn right_pane_contents(state: &HomeState, right_w: usize, rows: usize) -> Vec<String> {
-    match state.terminal_view() {
-        Some(view) => terminal_pane(view, right_w, rows),
-        None => match state.right_pane() {
-            RightPane::Log => right_pane(state.log(), right_w, rows),
-            RightPane::Terminal => vec![style(clip_to_width(TERMINAL_STARTING, right_w))
+    match state.mode() {
+        Mode::Overview | Mode::Switch => Vec::new(),
+        Mode::Focus => match state.session_action_ui() {
+            SessionActionUi::Menu => focus_menu(state, right_w),
+            SessionActionUi::Prompt => focus_prompt(state, right_w),
+        },
+        Mode::Attached => match state.terminal_view() {
+            Some(view) => terminal_pane(view, right_w, rows),
+            None => vec![style(clip_to_width(TERMINAL_STARTING, right_w))
                 .dim()
                 .to_string()],
         },
@@ -459,33 +580,25 @@ fn command_hint_row(hint: &CommandHint, typed_len: usize, selected: bool, width:
     format!("  {marker} {name_col}{desc}")
 }
 
-/// The advisory hint lines drawn just above the command input: the matching
-/// commands while the command word is typed, or the usage and examples once a
-/// known command is given arguments. Empty outside command mode and while the
-/// terminal pane is live.
+/// The advisory hint lines drawn just above the command input in 統括: the
+/// matching commands while the command word is typed, or the usage and examples
+/// once a known command is given arguments. Empty outside Overview.
 fn hint_lines(state: &HomeState, width: usize) -> Vec<String> {
-    if state.right_pane() == RightPane::Terminal || state.mode() != Mode::Command {
+    if state.mode() != Mode::Overview {
         return Vec::new();
     }
     match state.hint() {
         Hint::Commands(hints) => {
             let typed = state.input().trim_start();
             // Only point a marker at a best match once something is typed; a
-            // bare ":" shows the whole menu with nothing pre-selected.
+            // bare prompt shows the whole menu with nothing pre-selected.
             let highlight = !typed.is_empty();
-            // The menu names its scope so the two command modes read clearly; a
-            // partial match just says "matches".
+            // The Overview line is always workspace-scoped; a partial match just
+            // says "matches".
             let header = if highlight {
                 "matches".to_string()
             } else {
-                // `command_scope()` only ever yields Workspace or Session; the
-                // unused `Both` is folded in so there is no dead arm.
-                match state.command_scope() {
-                    CommandScope::Session => "session commands".to_string(),
-                    CommandScope::Workspace | CommandScope::Both => {
-                        "workspace commands".to_string()
-                    }
-                }
+                "workspace commands".to_string()
             };
             let mut lines = vec![style(format!("  {header}")).dim().to_string()];
             for (i, hint) in hints.iter().take(HINT_MAX).enumerate() {
@@ -518,90 +631,63 @@ fn hint_lines(state: &HomeState, width: usize) -> Vec<String> {
     }
 }
 
-/// The command input line: a status line while the terminal runs, an editable
-/// prompt in command mode, or a hint in sidebar mode.
+/// The command input line, by mode: the editable 統括 (Overview) command prompt,
+/// a left-pane hint in 切替 (Switch), the focused session in 在席 (Focus), and a
+/// live-terminal status in 没入 (Attached).
 fn input_line(state: &HomeState) -> String {
-    if state.right_pane() == RightPane::Terminal {
-        return style(" ● live terminal".to_string()).green().to_string();
-    }
     match state.mode() {
-        Mode::Command => {
+        Mode::Overview => {
             let prompt = style("❯").red().bold();
             let text = style(state.input()).cyan();
             format!(" {prompt} {text}{CARET}")
         }
-        Mode::Sidebar => style(" Press \":\" to enter a command".to_string())
+        Mode::Switch => style(" Pick a session — ↑↓ move, Enter focus, c new".to_string())
             .dim()
             .to_string(),
+        Mode::Focus => style(format!(
+            " Operating session: {}",
+            state.focused_session_name()
+        ))
+        .dim()
+        .to_string(),
+        Mode::Attached => style(" ● live terminal".to_string()).green().to_string(),
     }
 }
 
-/// The current command scope spelled out for the footer: `workspace` on the
-/// root row, or `session: <name>` on a worktree row. Makes it obvious which of
-/// the two command modes the bottom line is operating in.
-fn scope_label(state: &HomeState) -> String {
-    match state.command_scope() {
-        CommandScope::Session => {
-            let name = state
-                .list()
-                .selected()
-                .map(worktree_name)
-                .unwrap_or(ROOT_NAME);
-            format!("session: {name}")
-        }
-        // `command_scope()` never yields `Both`; fold it into the workspace label.
-        CommandScope::Workspace | CommandScope::Both => "workspace".to_string(),
-    }
-}
-
-/// The footer help line, aware of the terminal pane and the current mode. Off
-/// the terminal it leads with the active command scope (`workspace` /
-/// `session: <name>`) so the two modes are always distinguishable.
+/// The footer help line, aware of the current mode. It leads with a mode tag so
+/// it is always clear which engagement level the keys act on.
 fn footer_line(width: usize, state: &HomeState) -> String {
-    let help = if state.right_pane() == RightPane::Terminal {
-        "Embedded terminal — Ctrl-O: switch session / detach / Shift+↑↓/PgUp/PgDn: scroll"
-            .to_string()
-    } else {
-        let scope = scope_label(state);
-        match state.mode() {
-            Mode::Sidebar => {
-                format!(
-                    "[{scope}]  ↑↓: move / Enter: open / Ctrl-O: switch / :: command / Esc: back"
-                )
-            }
-            Mode::Command => {
-                format!("[{scope}]  Tab: complete / ↑↓: history / Enter: run / Esc: cancel")
-            }
+    let help = match state.mode() {
+        Mode::Overview => {
+            "[overview]  Tab: complete / ↑↓: history / Enter: run / \"session switch\": pick session"
+                .to_string()
+        }
+        Mode::Switch => {
+            "[switch]  ↑↓ move / Enter focus / c new / Esc back / Ctrl-O overview".to_string()
+        }
+        Mode::Focus => {
+            format!(
+                "[session: {}]  Enter: run / Ctrl-O: switch / Esc: overview",
+                state.focused_session_name()
+            )
+        }
+        Mode::Attached => {
+            "[attached]  Ctrl-O: switch session / Shift+↑↓/PgUp/PgDn: scroll".to_string()
         }
     };
     widgets::dim_line(width, &help)
 }
 
-/// Builds the centred session-name modal over an otherwise blank frame.
-fn session_modal_frame(raw_height: usize, raw_width: usize, modal: &SessionModal) -> Vec<String> {
-    const INNER: usize = 36;
-    const PROMPT: &str = "❯ ";
-
-    // Reserve room for the prompt and trailing caret so a long name never
-    // overruns the box border.
-    let max_name = INNER.saturating_sub(console::measure_text_width(PROMPT) + 1);
-    let name = clip_to_width(modal.input(), max_name);
-    let input_line = style(format!("{PROMPT}{name}{CARET}")).cyan().to_string();
-
-    let error_line = match modal.error() {
-        Some(err) => style(clip_to_width(err, INNER)).red().to_string(),
-        None => String::new(),
-    };
-
-    let body = vec![
-        style("Enter a name for the new session.").dim().to_string(),
-        String::new(),
-        input_line,
-        error_line,
-        String::new(),
-        style("Enter: create   Esc: cancel").dim().to_string(),
-    ];
-    widgets::render_modal(raw_height, raw_width, "New session", INNER, &body)
+/// Builds the inline create row appended to the left pane in 切替 (Switch) while
+/// naming a new session: `+ new: <input>▏`, with an inline error below it. The
+/// rows are clipped to the pane width.
+fn switch_create_rows(input: &str, error: Option<&str>, left_w: usize) -> Vec<String> {
+    let label = clip_to_width(&format!("+ new: {input}{CARET}"), left_w);
+    let mut rows = vec![style(label).green().bold().to_string()];
+    if let Some(err) = error {
+        rows.push(style(clip_to_width(err, left_w)).red().to_string());
+    }
+    rows
 }
 
 /// Most session rows the removal modal shows at once; a longer list scrolls to
@@ -681,72 +767,9 @@ fn remove_modal_frame(raw_height: usize, raw_width: usize, modal: &RemoveModal) 
     widgets::render_modal(raw_height, raw_width, "Remove sessions", INNER, &body)
 }
 
-/// Inner width of the session-picker box. Wide enough for the longest body
-/// line — the prompt and the first key-hints row — so nothing overflows the
-/// border. Kept in line with the other modals rather than stretched to fit the
-/// hints on a single row.
-const PICKER_INNER: usize = 36;
-
-/// Builds one session-picker row: a `>` cursor for the highlighted entry, its
-/// 1-based number, a `●` "here" marker for the session the pane is rooted at,
-/// and the (clipped) session name. The cursored row is emphasised, the current
-/// row stays bright, and the rest are dimmed.
-fn session_picker_row(
-    index: usize,
-    name: &str,
-    cursor: bool,
-    current: bool,
-    inner: usize,
-) -> String {
-    let marker = if cursor { ">" } else { " " };
-    let here = if current { "●" } else { " " };
-    // Leading columns: cursor + space + "N." + space + here-marker + space.
-    let number = format!("{}.", index + 1);
-    let text = clip_to_width(name, inner.saturating_sub(number.len() + 6));
-    let line = format!("{marker} {number} {here} {text}");
-    if cursor {
-        style(line).cyan().bold().to_string()
-    } else if current {
-        style(line).cyan().to_string()
-    } else {
-        style(line).dim().to_string()
-    }
-}
-
-/// Builds the body of the session-picker box: a short prompt, one row per
-/// session, and the key hints.
-fn session_picker_body(picker: &SessionPicker) -> Vec<String> {
-    let mut body = vec![style("Jump to a session:").dim().to_string(), String::new()];
-    for (i, name) in picker.names().iter().enumerate() {
-        body.push(session_picker_row(
-            i,
-            name,
-            i == picker.cursor(),
-            i == picker.current(),
-            PICKER_INNER,
-        ));
-    }
-    body.push(String::new());
-    body.push(style("↑↓ move   l/Enter switch   c new").dim().to_string());
-    body.push(style("h/Esc back   Ctrl-O detach").dim().to_string());
-    body
-}
-
-/// Stamps the session-picker box, centred, over the already-built `lines` of the
-/// live frame — so the terminal and sidebar stay visible above and below it
-/// while the user chooses a session. The rows the box lands on are cleared first
-/// so no stale pane content shows through beside the border.
-fn overlay_session_picker(lines: &mut [String], width: usize, picker: &SessionPicker) {
-    let box_lines = widgets::boxed("Switch session", PICKER_INNER, &session_picker_body(picker));
-    // The box spans the inner width plus its two spaces of padding and borders.
-    let pad = " ".repeat(widgets::centered_padding(width, PICKER_INNER + 4));
-    let top = lines.len().saturating_sub(box_lines.len()) / 2;
-    for (i, box_line) in box_lines.iter().enumerate() {
-        if let Some(row) = lines.get_mut(top + i) {
-            *row = pad_to_width(format!("{pad}{box_line}"), width);
-        }
-    }
-}
+/// How many rows the 統括 (Overview) results band spends below the input on the
+/// command log tail. The newest output stays visible while typing.
+const RESULTS_BAND: usize = 6;
 
 /// Builds the full home-screen frame for a raw terminal size.
 pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> Vec<String> {
@@ -755,28 +778,39 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
         return remove_modal_frame(raw_height, raw_width, modal);
     }
 
-    // The session-name modal, when open, overlays the whole screen.
-    if let Some(modal) = state.modal() {
-        return session_modal_frame(raw_height, raw_width, modal);
-    }
-
     let (height, width) = widgets::normalize_size(raw_height, raw_width);
     let (left_w, right_w) = layout(width);
 
-    // Chrome around the body: title + blank separator on top, input + footer at
-    // the bottom. Everything between is the two-pane body, whose height never
-    // depends on the mode — so entering or leaving command mode never resizes
-    // the panes. The command-mode hints float over the body's bottom rows as an
-    // overlay anchored to the input, appearing and vanishing without shifting
-    // anything beneath them.
-    let body_rows = height.saturating_sub(4).max(1);
-    let left = left_pane(
+    // In 統括 the command log renders as a band below the input; it is sized so
+    // the body keeps at least one row. Other modes use no results band.
+    let results = if state.mode() == Mode::Overview {
+        RESULTS_BAND.min(height.saturating_sub(5))
+    } else {
+        0
+    };
+
+    // Chrome: title + blank separator on top, input + footer + the optional
+    // results band at the bottom. Everything between is the two-pane body.
+    let body_rows = height.saturating_sub(4 + results).max(1);
+    let mut left = left_pane(
         state.list(),
         state.live_paths(),
         state.waiting_paths(),
         left_w,
         body_rows,
     );
+    // While naming a new session in 切替, append the inline create row(s) to the
+    // left pane (trimmed back to the body if it would overflow).
+    if state.is_creating() {
+        for row in switch_create_rows(
+            state.create_input().unwrap_or_default(),
+            state.create_error(),
+            left_w,
+        ) {
+            left.push(row);
+        }
+        left.truncate(body_rows);
+    }
     let right = right_pane_contents(state, right_w, body_rows);
 
     let mut lines = Vec::with_capacity(height);
@@ -789,14 +823,12 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
         lines.push(format!("{left_cell}{SEP}{right_cell}"));
     }
 
-    // Overlay the hints onto a fixed-height band at the bottom of the body,
-    // always leaving at least one body row uncovered. The band is a constant
-    // height regardless of how many hints currently match, so the body rows it
-    // covers never change as the match list grows or shrinks while typing —
-    // only the band's own contents do, so nothing beneath it jitters. The whole
-    // band is cleared first (so no stale body text shows through), then the
-    // hints are bottom-anchored just above the input, with any slack appearing
-    // as blank rows between the body and the hints.
+    // Overlay the 統括 command hints onto a fixed-height band at the bottom of the
+    // body, always leaving at least one body row uncovered. The band is a
+    // constant height regardless of how many hints currently match, so the body
+    // rows it covers never change as the match list grows or shrinks while
+    // typing. The band is cleared first (so no stale body text shows through),
+    // then the hints are bottom-anchored just above the input.
     let hints = hint_lines(state, width);
     if !hints.is_empty() {
         let band = HINT_BAND.min(body_rows.saturating_sub(1));
@@ -812,13 +844,17 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
     }
 
     lines.push(input_line(state));
-    lines.push(footer_line(width, state));
-
-    // The session picker floats a small box over the live frame, so the
-    // terminal stays visible behind it while the user chooses a session.
-    if let Some(picker) = state.session_picker() {
-        overlay_session_picker(&mut lines, width, picker);
+    // The 統括 results band: the command log tail, drawn below the input. Always
+    // exactly `results` rows tall (blank-padded) so the footer stays at the
+    // bottom regardless of how much output there is.
+    if results > 0 {
+        let tail = log_tail(state.log(), width, results);
+        for row in 0..results {
+            let line = tail.get(row).cloned().unwrap_or_default();
+            lines.push(pad_to_width(line, width));
+        }
     }
+    lines.push(footer_line(width, state));
     lines
 }
 
@@ -842,6 +878,14 @@ mod tests {
 
     fn list_with(worktrees: Vec<WorktreeState>) -> WorktreeList {
         WorktreeList::new("usagi", worktrees)
+    }
+
+    fn state_with(worktrees: Vec<WorktreeState>) -> HomeState {
+        HomeState::new("usagi", worktrees, None)
+    }
+
+    fn stripped(lines: &[String]) -> String {
+        console::strip_ansi_codes(&lines.join("\n")).into_owned()
     }
 
     #[test]
@@ -880,7 +924,6 @@ mod tests {
 
     #[test]
     fn layout_does_not_overrun_a_narrow_terminal() {
-        // Far below LEFT_MIN: the left pane shrinks to fit and the right is 0.
         let (left, right) = layout(4);
         assert!(left <= 4);
         assert_eq!(right, 0);
@@ -888,13 +931,10 @@ mod tests {
 
     #[test]
     fn title_bar_singular_and_plural() {
-        // No worktrees: only the root row counts, so the title reads "1 session".
         let one = title_bar(80, &list_with(vec![]));
         assert!(one.contains("usagi"));
         assert!(one.contains("1 session"));
         assert!(!one.contains("1 sessions"));
-
-        // Two worktrees plus the root row: three sessions.
         let three = title_bar(
             80,
             &list_with(vec![
@@ -906,17 +946,18 @@ mod tests {
     }
 
     #[test]
-    fn status_label_colours_each_variant() {
-        assert!(status_label(BranchStatus::Local, 10).contains("local"));
-        assert!(status_label(BranchStatus::Pushed, 10).contains("pushed"));
-        assert!(status_label(BranchStatus::Merged, 10).contains("merged"));
-    }
-
-    #[test]
-    fn status_label_clips_to_width() {
-        // A narrow detail column truncates the status word with an ellipsis.
-        let clipped = status_label(BranchStatus::Merged, 3);
-        assert!(console::strip_ansi_codes(&clipped).contains('…'));
+    fn status_label_pairs_a_git_icon_with_each_word() {
+        for (status, icon, word) in [
+            (BranchStatus::Local, LOCAL_ICON, "local"),
+            (BranchStatus::Pushed, PUSHED_ICON, "pushed"),
+            (BranchStatus::Merged, MERGED_ICON, "merged"),
+        ] {
+            let plain = console::strip_ansi_codes(&status_label(status)).into_owned();
+            assert!(plain.contains(icon), "{plain:?} missing its icon");
+            assert!(plain.contains(word), "{plain:?} missing its word");
+            // The icon leads the word: `<icon> <word>`.
+            assert_eq!(plain, format!("{icon} {word}"));
+        }
     }
 
     #[test]
@@ -944,7 +985,6 @@ mod tests {
             false,
         );
         assert!(!other_top.contains('>'));
-        // An ordinary (non-primary) worktree shows the `○` kind icon.
         assert!(other_top.contains('○'));
         assert!(other_top.contains("feature"));
 
@@ -972,7 +1012,6 @@ mod tests {
             false,
         );
         assert!(active_detail.contains('*'));
-
         let (_, idle_detail) = worktree_row(
             &worktree(Some("feature"), false, BranchStatus::Local),
             10,
@@ -987,8 +1026,6 @@ mod tests {
 
     #[test]
     fn worktree_row_shows_a_running_agent_and_one_waiting_for_input() {
-        // A live session with no pending input shows `▶ running` (icon + text
-        // together) on the detail line.
         let (_, running_detail) = worktree_row(
             &worktree(Some("feature"), false, BranchStatus::Local),
             10,
@@ -1001,7 +1038,6 @@ mod tests {
         assert!(running_detail.contains('▶'));
         assert!(running_detail.contains("running"));
 
-        // Waiting for input wins over running: `◆ waiting` shows instead.
         let (_, waiting_detail) = worktree_row(
             &worktree(Some("feature"), false, BranchStatus::Local),
             10,
@@ -1015,8 +1051,6 @@ mod tests {
         assert!(!waiting_detail.contains('▶'));
         assert!(waiting_detail.contains("waiting"));
 
-        // An idle worktree has no agent on its detail line; its status sits on
-        // the identity line's right edge instead.
         let (idle_top, idle_detail) = worktree_row(
             &worktree(Some("feature"), false, BranchStatus::Local),
             10,
@@ -1037,9 +1071,12 @@ mod tests {
             console::strip_ansi_codes(&status_cell(Some(BranchStatus::Pushed))).into_owned();
         assert_eq!(console::measure_text_width(&pushed), STATUS_COL);
         assert!(pushed.ends_with("pushed"));
-        // "local" (5 cols) is right-aligned within the 6-col field (one lead space).
+        // The icon leads the word inside the field.
+        assert!(pushed.contains(PUSHED_ICON));
+        // "local" (icon + space + 5 cols = 7) is right-aligned within the 8-col
+        // field, so a single lead space precedes the icon.
         let local = console::strip_ansi_codes(&status_cell(Some(BranchStatus::Local))).into_owned();
-        assert_eq!(local, " local");
+        assert_eq!(local, format!(" {LOCAL_ICON} local"));
         // The root has no status: an all-blank field of the same width.
         assert_eq!(status_cell(None), " ".repeat(STATUS_COL));
     }
@@ -1068,7 +1105,6 @@ mod tests {
         assert!(top.contains('>'));
         assert!(top.contains('⌂'));
         assert!(top.contains(ROOT_NAME));
-        // The detail line names the workspace root.
         assert!(detail.contains("workspace root"));
 
         let (_, active_detail) = root_row(10, 20, false, true);
@@ -1089,14 +1125,11 @@ mod tests {
             80,
             6,
         );
-        // The root entry (two lines) is always present, then a divider and the
-        // empty hint below it.
         assert_eq!(lines.len(), 4);
         assert!(lines[0].contains(ROOT_NAME));
         assert!(lines[1].contains("workspace root"));
         assert!(lines[2].contains('─'));
         assert!(lines[3].contains("no sessions"));
-        // The divider and the hint start under the `root` label, not at column 0.
         let hint = console::strip_ansi_codes(&lines[3]);
         assert!(hint.starts_with(&" ".repeat(NAME_PREFIX)));
         assert!(hint[NAME_PREFIX..].starts_with("no sessions"));
@@ -1109,7 +1142,6 @@ mod tests {
             worktree(Some("feature"), false, BranchStatus::Local),
         ]);
         let lines = left_pane(&list, &HashSet::new(), &HashSet::new(), 30, 6);
-        // Each entry is two lines: root, main, feature.
         assert_eq!(lines.len(), 6);
         assert!(lines[0].contains(ROOT_NAME));
         assert!(lines[2].contains("main"));
@@ -1119,22 +1151,13 @@ mod tests {
     #[test]
     fn left_pane_marks_a_running_agent_and_one_waiting_for_input() {
         let list = list_with(vec![worktree(Some("feature"), false, BranchStatus::Local)]);
-        // The test worktree's path is "/repo/wt". The root entry is lines 0-1, so
-        // the worktree's identity line is line 2 and its detail line is line 3.
         let path: HashSet<PathBuf> = [PathBuf::from("/repo/wt")].into_iter().collect();
-
-        // A live session (not waiting) shows `▶ running` on its detail line (3).
         let running = left_pane(&list, &path, &HashSet::new(), 30, 6);
         assert!(running[3].contains('▶'));
         assert!(running[3].contains("running"));
-
-        // Waiting takes precedence: `◆ waiting` shows instead.
         let waiting = left_pane(&list, &path, &path, 30, 6);
         assert!(waiting[3].contains('◆'));
         assert!(!waiting[3].contains('▶'));
-
-        // With nothing flagged, the detail line has no agent and the status sits
-        // on the identity line (2).
         let idle = left_pane(&list, &HashSet::new(), &HashSet::new(), 30, 6);
         assert!(!idle[3].contains('▶'));
         assert!(!idle[3].contains('◆'));
@@ -1148,8 +1171,6 @@ mod tests {
             worktree(Some("b"), false, BranchStatus::Local),
             worktree(Some("c"), false, BranchStatus::Local),
         ]);
-        // Three lines fit: the root entry's two lines and the first worktree's
-        // identity line (its detail line is trimmed off).
         let lines = left_pane(&list, &HashSet::new(), &HashSet::new(), 30, 3);
         assert_eq!(lines.len(), 3);
         assert!(lines[0].contains(ROOT_NAME));
@@ -1164,8 +1185,6 @@ mod tests {
         ]);
         list.activate_by_name("feature");
         let lines = left_pane(&list, &HashSet::new(), &HashSet::new(), 30, 6);
-        // The root entry is no longer active; its detail line carries no marker,
-        // while the "feature" entry's detail line carries `*`.
         assert!(!lines[1].contains('*'));
         assert!(lines[4].contains("feature"));
         assert!(lines[5].contains('*'));
@@ -1180,55 +1199,114 @@ mod tests {
     }
 
     #[test]
-    fn right_pane_shows_only_the_tail_that_fits() {
+    fn log_tail_shows_only_the_tail_that_fits() {
         let log: Vec<LogLine> = (0..5)
             .map(|i| LogLine::output(format!("line {i}")))
             .collect();
-        let lines = right_pane(&log, 40, 3);
+        let lines = log_tail(&log, 40, 3);
         assert_eq!(lines.len(), 3);
-        // The oldest lines scroll off; the newest remain (pinned to the tail).
         assert!(lines[0].contains("line 2"));
         assert!(lines[2].contains("line 4"));
     }
 
     #[test]
-    fn right_pane_keeps_everything_when_it_fits() {
+    fn log_tail_keeps_everything_when_it_fits() {
         let log = vec![LogLine::output("only")];
-        let lines = right_pane(&log, 40, 5);
-        assert_eq!(lines.len(), 1);
+        assert_eq!(log_tail(&log, 40, 5).len(), 1);
+    }
+
+    // --- right pane by mode ------------------------------------------------
+
+    #[test]
+    fn right_pane_is_blank_in_overview_and_switch() {
+        let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
+        assert!(right_pane_contents(&state, 40, 5).is_empty());
+        state.enter_switch(super::super::state::ReturnMode::Overview);
+        assert!(right_pane_contents(&state, 40, 5).is_empty());
     }
 
     #[test]
-    fn input_line_renders_prompt_in_command_mode() {
-        let mut state = HomeState::new("usagi", Vec::new(), None);
-        state.enter_command_mode();
-        state.push_char('m');
-        let line = input_line(&state);
-        assert!(line.contains('m'));
-        assert!(line.contains(CARET));
+    fn right_pane_shows_the_focus_menu_or_prompt() {
+        let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
+        state.enter_focus(1);
+        // Menu (the default) lists the session commands.
+        let menu = stripped(&right_pane_contents(&state, 40, 12));
+        assert!(menu.contains("session: main"));
+        assert!(menu.contains("terminal"));
+        assert!(menu.contains("agent"));
+        assert!(menu.contains('›'));
+
+        // Prompt shows a typed command line with the session-scope hint.
+        state.set_session_action_ui(SessionActionUi::Prompt);
+        state.enter_focus(1);
+        for c in "ter".chars() {
+            state.focus_prompt_push_char(c);
+        }
+        let prompt = stripped(&right_pane_contents(&state, 40, 12));
+        assert!(prompt.contains("session: main"));
+        assert!(prompt.contains("❯ ter"));
+        // The session-scope hint lists terminal as a match.
+        assert!(prompt.contains("terminal"));
     }
 
     #[test]
-    fn input_line_renders_hint_in_sidebar_mode() {
-        let state = HomeState::new("usagi", Vec::new(), None);
-        assert!(input_line(&state).contains("command"));
+    fn focus_prompt_shows_usage_for_arguments() {
+        let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
+        state.set_session_action_ui(SessionActionUi::Prompt);
+        state.enter_focus(1);
+        for c in "terminal ".chars() {
+            state.focus_prompt_push_char(c);
+        }
+        let prompt = stripped(&right_pane_contents(&state, 60, 12));
+        assert!(prompt.contains("usage"));
+        assert!(prompt.contains("terminal"));
     }
 
     #[test]
-    fn footer_line_differs_by_mode() {
-        let mut state = HomeState::new("usagi", Vec::new(), None);
-        assert!(footer_line(80, &state).contains("move"));
-        state.enter_command_mode();
-        assert!(footer_line(80, &state).contains("complete"));
+    fn focus_prompt_has_no_hint_for_an_unknown_command_word() {
+        // An unknown word yields `Hint::None`, so no hint rows are drawn.
+        let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
+        state.set_session_action_ui(SessionActionUi::Prompt);
+        state.enter_focus(1);
+        for c in "zzz".chars() {
+            state.focus_prompt_push_char(c);
+        }
+        // The header, blank, and prompt lines are present, but no hint rows follow.
+        let rows = right_pane_contents(&state, 60, 12);
+        assert!(stripped(&rows).contains("❯ zzz"));
+        // The prompt body has exactly the header, a blank, the prompt, and a blank
+        // separator — no hint rows after it.
+        assert_eq!(rows.len(), 4);
     }
 
     #[test]
-    fn footer_and_input_switch_to_a_terminal_hint_when_it_runs() {
-        let mut state = HomeState::new("usagi", Vec::new(), None);
-        state.show_terminal();
-        // Both the footer and the status line advertise the embedded terminal.
-        assert!(footer_line(80, &state).contains("detach"));
-        assert!(input_line(&state).contains("live terminal"));
+    fn right_pane_shows_the_terminal_when_attached() {
+        let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
+        state.enter_focus(1);
+        state.show_attached();
+        // No snapshot yet: a starting hint.
+        let starting = right_pane_contents(&state, 40, 5);
+        assert!(starting[0].contains("Starting terminal"));
+        // Once a snapshot arrives, its rows are shown.
+        state.set_terminal_view(TerminalView::from_rows(vec!["$ echo hi".to_string()], None));
+        let running = right_pane_contents(&state, 40, 5);
+        assert!(running[0].contains("$ echo hi"));
+    }
+
+    #[test]
+    fn focus_menu_row_marks_the_cursor() {
+        let info = CommandInfo {
+            name: "terminal",
+            description: "Open a shell",
+            usage: "terminal",
+            examples: &[],
+            scope: super::super::command::CommandScope::Session,
+        };
+        let selected = console::strip_ansi_codes(&focus_menu_row(&info, true, 60)).into_owned();
+        assert!(selected.contains('›'));
+        assert!(selected.contains("terminal"));
+        let idle = console::strip_ansi_codes(&focus_menu_row(&info, false, 60)).into_owned();
+        assert!(!idle.contains('›'));
     }
 
     #[test]
@@ -1245,250 +1323,206 @@ mod tests {
     }
 
     #[test]
-    fn right_pane_contents_follows_the_pane_mode() {
-        let mut state = HomeState::new("usagi", Vec::new(), None);
-        // Log mode shows the seeded hint line.
-        let log = right_pane_contents(&state, 40, 5);
-        assert!(log.iter().any(|l| l.contains("man")));
-
-        // Terminal mode with no snapshot yet shows the starting hint.
-        state.show_terminal();
-        let starting = right_pane_contents(&state, 40, 5);
-        assert!(starting[0].contains("Starting terminal"));
-
-        // Once a snapshot arrives, its rows are shown instead.
-        state.set_terminal_view(TerminalView::from_rows(vec!["$ echo hi".to_string()], None));
-        let running = right_pane_contents(&state, 40, 5);
-        assert!(running[0].contains("$ echo hi"));
-    }
-
-    #[test]
-    fn right_pane_contents_previews_a_snapshot_in_the_sidebar() {
-        // In the sidebar (Log mode), a terminal snapshot is the selected
-        // session's live preview, so it is shown in place of the command log.
-        let mut state = HomeState::new("usagi", Vec::new(), None);
-        assert_eq!(state.right_pane(), RightPane::Log);
-        state.set_terminal_view(TerminalView::from_rows(vec!["$ preview".to_string()], None));
-        let preview = right_pane_contents(&state, 40, 5);
-        assert!(preview[0].contains("$ preview"));
-        // Clearing the preview falls back to the command log.
-        state.clear_terminal_view();
-        let log = right_pane_contents(&state, 40, 5);
-        assert!(log.iter().any(|l| l.contains("man")));
-    }
-
-    #[test]
     fn terminal_geometry_matches_the_rendered_layout() {
         let geo = terminal_geometry(24, 80);
-        // The left pane (26) plus the divider (3) is where the terminal starts.
         let (left, _) = layout(80);
         assert_eq!(geo.origin_col as usize, left + SEP_WIDTH);
-        // The body sits below the title bar and its blank separator.
         assert_eq!(geo.origin_row, 2);
-        // The pane is the body height (24 - 4 chrome rows) and the right width.
         assert_eq!(geo.rows, 20);
         assert_eq!(geo.cols as usize, 80 - left - SEP_WIDTH);
     }
 
     #[test]
     fn terminal_geometry_stays_positive_in_a_tiny_terminal() {
-        // Far too small for a real layout: rows and cols are clamped to 1.
         let geo = terminal_geometry(1, 1);
         assert!(geo.rows >= 1);
         assert!(geo.cols >= 1);
     }
 
     #[test]
-    fn render_frame_draws_the_terminal_in_the_right_pane() {
-        let mut state = HomeState::new(
-            "usagi",
-            vec![worktree(Some("main"), true, BranchStatus::Pushed)],
-            None,
-        );
-        state.show_terminal();
+    fn render_frame_draws_the_terminal_in_the_right_pane_when_attached() {
+        let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Pushed)]);
+        state.enter_focus(1);
+        state.show_attached();
         state.set_terminal_view(TerminalView::from_rows(
             vec!["$ cargo test".to_string()],
             None,
         ));
         let frame = render_frame(24, 80, &state);
         let joined = console::strip_ansi_codes(&frame.join("\n")).into_owned();
-        // The sidebar is still drawn alongside the live terminal output.
         assert!(joined.contains("main"));
         assert!(joined.contains("$ cargo test"));
-        assert!(joined.contains("detach"));
+        // The attached footer advertises Ctrl-O.
+        assert!(joined.contains("attached"));
+    }
+
+    // --- input / footer by mode --------------------------------------------
+
+    #[test]
+    fn input_line_renders_prompt_in_overview() {
+        let mut state = state_with(Vec::new());
+        state.push_char('m');
+        let line = input_line(&state);
+        assert!(line.contains('m'));
+        assert!(line.contains(CARET));
     }
 
     #[test]
-    fn session_picker_row_marks_the_cursor_number_and_current_session() {
-        let cursor = console::strip_ansi_codes(&session_picker_row(0, ROOT_NAME, true, false, 32))
-            .into_owned();
-        assert!(cursor.contains('>'));
-        assert!(cursor.contains("1."));
-        assert!(cursor.contains(ROOT_NAME));
-
-        // The current (rooted) session carries the "here" dot but no cursor.
-        let current =
-            console::strip_ansi_codes(&session_picker_row(1, "main", false, true, 32)).into_owned();
-        assert!(!current.contains('>'));
-        assert!(current.contains("2."));
-        assert!(current.contains('●'));
-        assert!(current.contains("main"));
-
-        // An idle row has neither marker.
-        let idle = console::strip_ansi_codes(&session_picker_row(2, "feature", false, false, 32))
-            .into_owned();
-        assert!(!idle.contains('>'));
-        assert!(!idle.contains('●'));
-        assert!(idle.contains("feature"));
+    fn input_line_differs_by_mode() {
+        let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
+        state.enter_switch(super::super::state::ReturnMode::Overview);
+        assert!(input_line(&state).contains("Pick a session"));
+        state.enter_focus(1);
+        assert!(input_line(&state).contains("Operating session: main"));
+        state.show_attached();
+        assert!(input_line(&state).contains("live terminal"));
     }
 
     #[test]
-    fn session_picker_row_clips_a_long_name() {
-        let row = session_picker_row(0, "a-very-long-session-name-indeed", false, false, 16);
+    fn footer_line_differs_by_mode() {
+        let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
+        assert!(footer_line(80, &state).contains("overview"));
+        state.enter_switch(super::super::state::ReturnMode::Overview);
+        assert!(footer_line(80, &state).contains("switch"));
+        state.enter_focus(1);
+        assert!(footer_line(80, &state).contains("session: main"));
+        state.show_attached();
+        assert!(footer_line(80, &state).contains("attached"));
+    }
+
+    // --- Switch inline create ----------------------------------------------
+
+    #[test]
+    fn switch_create_rows_show_the_input_and_an_error() {
+        let rows = switch_create_rows("wip", None, 30);
+        assert_eq!(rows.len(), 1);
+        let plain = console::strip_ansi_codes(&rows[0]).into_owned();
+        assert!(plain.contains("+ new: wip"));
+        assert!(plain.contains(CARET));
+
+        let with_error = switch_create_rows("feature", Some("\"feature\" already exists."), 40);
+        assert_eq!(with_error.len(), 2);
+        assert!(console::strip_ansi_codes(&with_error[1]).contains("already exists"));
+    }
+
+    #[test]
+    fn render_frame_shows_the_inline_create_row_in_switch() {
+        let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
+        state.enter_switch(super::super::state::ReturnMode::Overview);
+        state.switch_begin_create();
+        for c in "wip".chars() {
+            state.create_push_char(c);
+        }
+        let frame = render_frame(24, 80, &state);
+        let joined = console::strip_ansi_codes(&frame.join("\n")).into_owned();
+        assert!(joined.contains("+ new: wip"));
+        assert!(joined.contains("switch"));
+    }
+
+    // --- command hints (Overview) ------------------------------------------
+
+    fn typing(typed: &str) -> HomeState {
+        let mut state = HomeState::new("usagi", Vec::new(), None);
+        for c in typed.chars() {
+            state.push_char(c);
+        }
+        state
+    }
+
+    #[test]
+    fn command_hint_row_emphasises_the_typed_prefix_and_marks_the_selection() {
+        let hint = CommandHint {
+            name: "session",
+            description: "Create, list, or switch sessions",
+        };
+        let selected = command_hint_row(&hint, 3, true, 80);
+        let plain = console::strip_ansi_codes(&selected).into_owned();
+        assert!(plain.contains('›'));
+        assert!(plain.contains("session"));
+        assert!(plain.contains("Create, list"));
+        let plain = console::strip_ansi_codes(&command_hint_row(&hint, 0, false, 80)).into_owned();
+        assert!(!plain.contains('›'));
+    }
+
+    #[test]
+    fn command_hint_row_clips_a_long_description_to_width() {
+        let hint = CommandHint {
+            name: "session",
+            description: "A very long description that should be cut down to fit the pane width",
+        };
+        let row = command_hint_row(&hint, 0, false, 30);
+        assert!(console::measure_text_width(&row) <= 30);
         assert!(console::strip_ansi_codes(&row).contains('…'));
     }
 
     #[test]
-    fn render_frame_overlays_the_session_picker_over_the_live_terminal() {
+    fn hint_lines_are_empty_outside_overview() {
         let mut state = HomeState::new(
             "usagi",
-            vec![
-                worktree(Some("main"), true, BranchStatus::Pushed),
-                worktree(Some("feature"), false, BranchStatus::Local),
-            ],
+            vec![worktree(Some("m"), true, BranchStatus::Local)],
             None,
         );
-        state.show_terminal();
-        state.set_terminal_view(TerminalView::from_rows(
-            vec!["$ cargo test".to_string()],
-            None,
-        ));
-        state.open_session_picker();
+        state.enter_focus(1);
+        assert!(hint_lines(&state, 80).is_empty());
+    }
+
+    #[test]
+    fn hint_lines_list_every_command_for_a_bare_prompt() {
+        let state = typing("");
+        let joined = stripped(&hint_lines(&state, 80));
+        assert!(joined.contains("commands"));
+        assert!(!joined.contains('›'));
+        assert!(joined.contains("more"));
+        assert!(joined.contains("session"));
+    }
+
+    #[test]
+    fn hint_lines_highlight_the_best_match_while_typing() {
+        let state = typing("s");
+        let joined = stripped(&hint_lines(&state, 80));
+        assert!(joined.contains("matches"));
+        assert!(joined.contains('›'));
+        assert!(joined.contains("session"));
+        assert!(!joined.contains("more"));
+    }
+
+    #[test]
+    fn hint_lines_show_usage_and_examples_for_arguments() {
+        let state = typing("session ");
+        let joined = stripped(&hint_lines(&state, 80));
+        assert!(joined.contains("usage"));
+        assert!(joined.contains("session [create"));
+        assert!(joined.contains("e.g."));
+        assert!(joined.contains("session create"));
+    }
+
+    #[test]
+    fn hint_lines_show_usage_without_examples_when_a_command_has_none() {
+        let state = typing("doctor ");
+        let joined = stripped(&hint_lines(&state, 80));
+        assert!(joined.contains("usage"));
+        assert!(joined.contains("doctor"));
+        assert!(!joined.contains("e.g."));
+    }
+
+    #[test]
+    fn hint_lines_are_empty_for_an_unknown_command() {
+        assert!(hint_lines(&typing("frobnicate "), 80).is_empty());
+        assert!(hint_lines(&typing("zzz"), 80).is_empty());
+    }
+
+    #[test]
+    fn render_frame_shows_command_hints_above_the_input_and_keeps_its_height() {
+        let state = typing("s");
         let frame = render_frame(24, 80, &state);
-        let joined = console::strip_ansi_codes(&frame.join("\n")).into_owned();
-        // The picker box, its prompt, every session row, and the key hints show.
-        assert!(joined.contains("Switch session"));
-        assert!(joined.contains("Jump to a session"));
-        assert!(joined.contains(ROOT_NAME));
-        assert!(joined.contains("main"));
-        assert!(joined.contains("feature"));
-        // The key hints advertise the spatial keys and the back/detach actions.
-        assert!(joined.contains("l/Enter switch"));
-        assert!(joined.contains("back"));
-        assert!(joined.contains("detach"));
-        // The frame keeps its full height and the title bar behind the box.
         assert_eq!(frame.len(), 24);
-        assert!(joined.contains("usagi"));
-    }
-
-    #[test]
-    fn session_picker_body_stays_within_the_box_width() {
-        let mut state = HomeState::new(
-            "usagi",
-            vec![
-                worktree(Some("main"), true, BranchStatus::Pushed),
-                worktree(Some("feature"), false, BranchStatus::Local),
-            ],
-            None,
-        );
-        state.open_session_picker();
-        for line in session_picker_body(state.session_picker().unwrap()) {
-            let visible = console::strip_ansi_codes(&line);
-            assert!(
-                console::measure_text_width(&visible) <= PICKER_INNER,
-                "line overflows the box: {visible:?}",
-            );
-        }
-    }
-
-    #[test]
-    fn render_frame_combines_all_sections_at_full_height() {
-        let state = HomeState::new(
-            "usagi",
-            vec![worktree(Some("main"), true, BranchStatus::Pushed)],
-            None,
-        );
-        let frame = render_frame(24, 80, &state);
-        assert_eq!(frame.len(), 24);
-        assert!(frame[0].contains("usagi"));
-        // The body rows carry the divider.
-        assert!(frame[2].contains('│'));
-        assert!(frame.last().unwrap().contains("move"));
-        let joined = frame.join("\n");
-        assert!(joined.contains("main"));
-        assert!(joined.contains("man"));
-    }
-
-    #[test]
-    fn render_frame_surfaces_running_and_waiting_agent_icons() {
-        let mut running = worktree(Some("feat"), false, BranchStatus::Local);
-        running.path = PathBuf::from("/repo/run");
-        let mut waiting = worktree(Some("fix"), false, BranchStatus::Pushed);
-        waiting.path = PathBuf::from("/repo/wait");
-        let mut state = HomeState::new("usagi", vec![running, waiting], None);
-        state.set_live([PathBuf::from("/repo/run"), PathBuf::from("/repo/wait")].into());
-        state.set_waiting([PathBuf::from("/repo/wait")].into());
-
-        let frame = render_frame(24, 80, &state);
         let joined = console::strip_ansi_codes(&frame.join("\n")).into_owned();
-        // The running session shows ▶ and the waiting one ◆, each spelled out on
-        // its detail line.
-        assert!(joined.contains('▶'));
-        assert!(joined.contains("running"));
-        assert!(joined.contains('◆'));
-        assert!(joined.contains("waiting"));
+        assert!(joined.contains("matches"));
+        assert!(joined.contains("session"));
     }
 
-    #[test]
-    fn render_frame_overlays_the_session_modal_when_open() {
-        let mut state = HomeState::new("usagi", Vec::new(), None);
-        state.open_session_modal();
-        state.modal_push_char('w');
-        state.modal_push_char('i');
-        state.modal_push_char('p');
+    // --- removal modal -----------------------------------------------------
 
-        let frame = render_frame(24, 80, &state);
-        let joined = console::strip_ansi_codes(&frame.join("\n")).into_owned();
-        // The modal title, prompt, typed name, and hints are shown.
-        assert!(joined.contains("New session"));
-        assert!(joined.contains("Enter a name"));
-        assert!(joined.contains("wip"));
-        assert!(joined.contains("Enter: create"));
-        // The three-pane chrome (its mode footer) is not drawn underneath.
-        assert!(!joined.contains("move"));
-    }
-
-    #[test]
-    fn session_modal_frame_shows_a_validation_error() {
-        let mut state = HomeState::new("usagi", Vec::new(), None);
-        state.open_session_modal();
-        // An empty submit sets an inline error.
-        assert!(state.submit_modal().is_none());
-        let frame = render_frame(24, 80, &state);
-        let joined = console::strip_ansi_codes(&frame.join("\n")).into_owned();
-        assert!(joined.contains("must not be empty"));
-    }
-
-    #[test]
-    fn session_modal_frame_clips_a_very_long_name() {
-        let mut state = HomeState::new("usagi", Vec::new(), None);
-        state.open_session_modal();
-        for _ in 0..80 {
-            state.modal_push_char('x');
-        }
-        let frame = session_modal_frame(24, 80, state.modal().unwrap());
-        // The clipped name carries the ellipsis and every box row is equal width.
-        let joined = frame.join("\n");
-        assert!(joined.contains('…'));
-        let widths: Vec<usize> = frame
-            .iter()
-            .filter(|l| l.contains('│'))
-            .map(|l| console::measure_text_width(l))
-            .collect();
-        assert!(widths.windows(2).all(|w| w[0] == w[1]));
-    }
-
-    /// A state seeded with `names` as recorded sessions, for the removal modal.
     fn state_with_sessions(names: &[&str]) -> HomeState {
         use crate::domain::workspace_state::SessionRecord;
         let mut state = HomeState::new("usagi", Vec::new(), None);
@@ -1512,13 +1546,10 @@ mod tests {
         assert!(cursor.contains('>'));
         assert!(cursor.contains("[ ]"));
         assert!(cursor.contains("alpha"));
-
         let checked =
             console::strip_ansi_codes(&remove_modal_row("beta", false, true, 40)).into_owned();
         assert!(!checked.contains('>'));
         assert!(checked.contains("[x]"));
-        assert!(checked.contains("beta"));
-
         let idle =
             console::strip_ansi_codes(&remove_modal_row("gamma", false, false, 40)).into_owned();
         assert!(idle.contains("[ ]"));
@@ -1535,19 +1566,18 @@ mod tests {
     fn render_frame_overlays_the_removal_modal_with_a_checklist() {
         let mut state = state_with_sessions(&["alpha", "beta"]);
         state.open_remove_modal(false);
-        state.remove_modal_toggle(); // check "alpha"
+        state.remove_modal_toggle();
         let frame = render_frame(24, 80, &state);
         let joined = console::strip_ansi_codes(&frame.join("\n")).into_owned();
         assert!(joined.contains("Remove sessions"));
         assert!(joined.contains("Select sessions to remove"));
         assert!(joined.contains("alpha"));
         assert!(joined.contains("beta"));
-        // The checked session shows a ticked box, and the count is reported.
         assert!(joined.contains("[x]"));
         assert!(joined.contains("1 selected"));
         assert!(joined.contains("Enter: remove"));
-        // The three-pane chrome (its sidebar mode footer) is not drawn underneath.
-        assert!(!joined.contains("activate"));
+        // The mode chrome is not drawn underneath.
+        assert!(!joined.contains("overview"));
     }
 
     #[test]
@@ -1557,34 +1587,28 @@ mod tests {
         let frame = render_frame(24, 80, &state);
         let joined = console::strip_ansi_codes(&frame.join("\n")).into_owned();
         assert!(joined.contains("No sessions to remove"));
-        // The selected-count line is omitted when the list is empty.
         assert!(!joined.contains("selected"));
     }
 
     #[test]
     fn remove_modal_frame_scrolls_to_keep_the_cursor_visible() {
-        // More sessions than fit: scrolling the cursor down past the first window
-        // shows both the "more above" and "more below" indicators.
         let names: Vec<String> = (0..12).map(|i| format!("s{i:02}")).collect();
         let refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
         let mut state = state_with_sessions(&refs);
         state.open_remove_modal(false);
         for _ in 0..9 {
-            state.remove_modal_move_down(); // cursor on "s09"
+            state.remove_modal_move_down();
         }
         let frame = render_frame(24, 80, &state);
         let joined = console::strip_ansi_codes(&frame.join("\n")).into_owned();
         assert!(joined.contains('↑'));
         assert!(joined.contains('↓'));
         assert!(joined.contains("more"));
-        // The cursor row stays within the visible window.
         assert!(joined.contains("s09"));
     }
 
     #[test]
     fn remove_modal_frame_keeps_every_row_within_the_box() {
-        // Regression: the header and key-hint rows must fit inside the border so
-        // nothing spills past the right edge of the box.
         let mut state = state_with_sessions(&["scroll", "session-new", "config"]);
         state.open_remove_modal(false);
         let frame = render_frame(24, 80, &state);
@@ -1595,219 +1619,75 @@ mod tests {
             .map(|l| console::measure_text_width(l.trim_end()))
             .collect();
         assert!(!widths.is_empty());
-        // Every bordered row shares one width, so no line overflows the frame.
         assert!(widths.iter().all(|&w| w == widths[0]));
+    }
+
+    // --- render_frame composition ------------------------------------------
+
+    #[test]
+    fn render_frame_combines_all_sections_at_full_height() {
+        let state = state_with(vec![worktree(Some("main"), true, BranchStatus::Pushed)]);
+        let frame = render_frame(24, 80, &state);
+        assert_eq!(frame.len(), 24);
+        assert!(frame[0].contains("usagi"));
+        assert!(frame[2].contains('│'));
+        assert!(frame.last().unwrap().contains("overview"));
+        let joined = frame.join("\n");
+        assert!(joined.contains("main"));
+        // The Overview results band carries the seeded log hint below the input.
+        assert!(joined.contains("man"));
+    }
+
+    #[test]
+    fn render_frame_results_band_shows_command_output_below_the_input() {
+        let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
+        for c in "session list".chars() {
+            state.push_char(c);
+        }
+        state.submit();
+        let frame = render_frame(24, 80, &state);
+        let input_row = frame.iter().position(|l| l.contains('❯')).unwrap();
+        let joined_below =
+            console::strip_ansi_codes(&frame[input_row + 1..].join("\n")).into_owned();
+        // The echoed command shows in the results band, below the input.
+        assert!(joined_below.contains("session list"));
+    }
+
+    #[test]
+    fn render_frame_surfaces_running_and_waiting_agent_icons() {
+        let mut running = worktree(Some("feat"), false, BranchStatus::Local);
+        running.path = PathBuf::from("/repo/run");
+        let mut waiting = worktree(Some("fix"), false, BranchStatus::Pushed);
+        waiting.path = PathBuf::from("/repo/wait");
+        let mut state = HomeState::new("usagi", vec![running, waiting], None);
+        state.set_live([PathBuf::from("/repo/run"), PathBuf::from("/repo/wait")].into());
+        state.set_waiting([PathBuf::from("/repo/wait")].into());
+        let frame = render_frame(24, 80, &state);
+        let joined = console::strip_ansi_codes(&frame.join("\n")).into_owned();
+        assert!(joined.contains('▶'));
+        assert!(joined.contains("running"));
+        assert!(joined.contains('◆'));
+        assert!(joined.contains("waiting"));
     }
 
     #[test]
     fn render_frame_survives_a_short_terminal() {
-        let state = HomeState::new("usagi", Vec::new(), None);
+        let state = state_with(Vec::new());
         let frame = render_frame(3, 80, &state);
-        // Title first, footer last, at least one body row in between.
         assert!(frame[0].contains("usagi"));
-        assert!(frame.last().unwrap().contains("move"));
+        assert!(frame.last().unwrap().contains("overview"));
         assert!(frame.len() >= 4);
     }
 
-    /// A `HomeState` in command mode with `typed` already entered.
-    fn typing(typed: &str) -> HomeState {
-        let mut state = HomeState::new("usagi", Vec::new(), None);
-        state.enter_command_mode();
-        for c in typed.chars() {
-            state.push_char(c);
-        }
-        state
-    }
-
-    fn stripped(lines: &[String]) -> String {
-        console::strip_ansi_codes(&lines.join("\n")).into_owned()
-    }
-
     #[test]
-    fn command_hint_row_emphasises_the_typed_prefix_and_marks_the_selection() {
-        let hint = CommandHint {
-            name: "session",
-            description: "Create, list, or switch sessions",
-        };
-        let selected = command_hint_row(&hint, 3, true, 80);
-        let plain = console::strip_ansi_codes(&selected).into_owned();
-        assert!(plain.contains('›'));
-        assert!(plain.contains("session"));
-        assert!(plain.contains("Create, list"));
-
-        // Without selection there is no marker.
-        let plain = console::strip_ansi_codes(&command_hint_row(&hint, 0, false, 80)).into_owned();
-        assert!(!plain.contains('›'));
-    }
-
-    #[test]
-    fn command_hint_row_clips_a_long_description_to_width() {
-        let hint = CommandHint {
-            name: "session",
-            description: "A very long description that should be cut down to fit the pane width",
-        };
-        let row = command_hint_row(&hint, 0, false, 30);
-        assert!(console::measure_text_width(&row) <= 30);
-        assert!(console::strip_ansi_codes(&row).contains('…'));
-    }
-
-    #[test]
-    fn hint_lines_are_empty_outside_command_mode() {
-        let state = HomeState::new("usagi", Vec::new(), None);
-        assert!(hint_lines(&state, 80).is_empty());
-    }
-
-    #[test]
-    fn hint_lines_are_empty_while_the_terminal_runs() {
-        let mut state = typing("session");
-        state.show_terminal();
-        assert!(hint_lines(&state, 80).is_empty());
-    }
-
-    #[test]
-    fn hint_lines_list_every_command_for_a_bare_prompt() {
-        let state = typing("");
-        let lines = hint_lines(&state, 80);
-        let joined = stripped(&lines);
-        // The header reads "commands" and nothing is pre-selected.
-        assert!(joined.contains("commands"));
-        assert!(!joined.contains('›'));
-        // More commands than fit, so a summary line stands in for the rest.
-        assert!(joined.contains("more"));
-        assert!(joined.contains("session"));
-    }
-
-    #[test]
-    fn hint_lines_highlight_the_best_match_while_typing() {
-        let state = typing("s");
-        let joined = stripped(&hint_lines(&state, 80));
-        // "s" narrows to "session", shown under a "matches" header with a marker.
-        assert!(joined.contains("matches"));
-        assert!(joined.contains('›'));
-        assert!(joined.contains("session"));
-        assert!(!joined.contains("more"));
-    }
-
-    #[test]
-    fn hint_lines_show_usage_and_examples_for_arguments() {
-        let state = typing("session ");
-        let joined = stripped(&hint_lines(&state, 80));
-        assert!(joined.contains("usage"));
-        assert!(joined.contains("session [create"));
-        assert!(joined.contains("e.g."));
-        assert!(joined.contains("session create"));
-    }
-
-    #[test]
-    fn hint_lines_show_usage_without_examples_when_a_command_has_none() {
-        // `terminal` takes no arguments and lists no examples.
-        let state = typing("terminal ");
-        let joined = stripped(&hint_lines(&state, 80));
-        assert!(joined.contains("usage"));
-        assert!(joined.contains("terminal"));
-        assert!(!joined.contains("e.g."));
-    }
-
-    #[test]
-    fn hint_lines_are_empty_for_an_unknown_command() {
-        assert!(hint_lines(&typing("frobnicate "), 80).is_empty());
-        assert!(hint_lines(&typing("zzz"), 80).is_empty());
-    }
-
-    #[test]
-    fn render_frame_shows_command_hints_above_the_input_and_keeps_its_height() {
-        let state = typing("s");
+    fn render_frame_focus_menu_keeps_its_height() {
+        let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
+        state.enter_focus(1);
         let frame = render_frame(24, 80, &state);
-        // The hints overlay the body's bottom rows; the overall height is unchanged.
         assert_eq!(frame.len(), 24);
         let joined = console::strip_ansi_codes(&frame.join("\n")).into_owned();
-        assert!(joined.contains("matches"));
-        assert!(joined.contains("session"));
-        // The hints sit directly above the input prompt and footer.
-        let prompt_row = frame.len() - 2;
-        assert!(frame[prompt_row].contains('❯'));
-        let above = console::strip_ansi_codes(&frame[prompt_row - 1]).into_owned();
-        assert!(above.contains("session"));
-    }
-
-    #[test]
-    fn render_frame_keeps_the_body_in_place_when_command_mode_opens() {
-        // Entering command mode must not shift the body: the title, blank
-        // separator, and every body row above the fixed hint band stay at the
-        // same screen position whether or not the command hints are showing.
-        // Only the band the hints overlay differs, and the input / footer stay
-        // last.
-        let sidebar = state_with_sessions(&["alpha", "beta"]);
-        let command = {
-            let mut s = state_with_sessions(&["alpha", "beta"]);
-            s.enter_command_mode();
-            s.push_char('s');
-            s
-        };
-        let before = render_frame(24, 80, &sidebar);
-        let after = render_frame(24, 80, &command);
-        assert_eq!(before.len(), after.len());
-
-        // The hints overlay a fixed-height band at the bottom of the body;
-        // everything above that band is byte-for-byte identical, so nothing
-        // jumps.
-        let input_row = after.len() - 2;
-        let body_rows = 24 - 4;
-        let band = HINT_BAND.min(body_rows - 1);
-        let band_start = input_row - band;
-        for row in 0..band_start {
-            assert_eq!(before[row], after[row], "body row {row} shifted");
-        }
-        // The hints are bottom-anchored, landing directly above the input.
-        assert!(stripped(&after[(input_row - 1)..input_row]).contains("session"));
-    }
-
-    #[test]
-    fn command_hints_keep_the_body_fixed_as_the_match_count_changes() {
-        // The hint band is a fixed height, so narrowing or widening the match
-        // list while typing must not move the body: the rows above the band are
-        // identical whether one command matches or the whole menu shows.
-        let narrowed = {
-            let mut s = state_with_sessions(&["alpha", "beta"]);
-            s.enter_command_mode();
-            s.push_char('s'); // narrows to a single command ("session")
-            s
-        };
-        let full_menu = {
-            let mut s = state_with_sessions(&["alpha", "beta"]);
-            s.enter_command_mode(); // bare ":" lists every command
-            s
-        };
-        let one = render_frame(24, 80, &narrowed);
-        let many = render_frame(24, 80, &full_menu);
-
-        // The two states show a different number of hints…
-        assert_ne!(
-            hint_lines(&narrowed, 80).len(),
-            hint_lines(&full_menu, 80).len()
-        );
-
-        // …yet every body row above the fixed band is unchanged.
-        let input_row = one.len() - 2;
-        let body_rows = 24 - 4;
-        let band = HINT_BAND.min(body_rows - 1);
-        let band_start = input_row - band;
-        for row in 0..band_start {
-            assert_eq!(
-                one[row], many[row],
-                "body row {row} moved when the match count changed"
-            );
-        }
-    }
-
-    #[test]
-    fn render_frame_keeps_a_body_row_when_hints_would_fill_a_short_screen() {
-        // A short screen in command mode: hints must not crowd out the body
-        // entirely, and the height is still respected.
-        let state = typing("");
-        let frame = render_frame(8, 80, &state);
-        assert_eq!(frame.len(), 8);
-        // The body divider row survives between the title and the hints/input.
-        assert!(frame[2].contains('│'));
+        // The right pane carries the action menu; no results band in Focus.
+        assert!(joined.contains("terminal"));
+        assert!(joined.contains("session: main"));
     }
 }

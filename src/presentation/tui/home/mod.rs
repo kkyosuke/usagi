@@ -58,6 +58,15 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
     let mut state = HomeState::new(workspace.name.clone(), Vec::new(), notice);
     state.restore_sessions(sessions);
 
+    // Which right-pane action surface 在席 (Focus) presents — a pickable menu or
+    // a typed prompt — from the effective settings (project-local over the global
+    // default). Any failure to read settings falls back to the default (Menu).
+    let session_action_ui = crate::infrastructure::storage::Storage::open_default()
+        .and_then(|storage| crate::usecase::settings::effective(&storage, &workspace.path))
+        .map(|settings| settings.session_action_ui)
+        .unwrap_or_default();
+    state.set_session_action_ui(session_action_ui);
+
     // Restore past commands so `history` and `↑`/`↓` recall span sessions.
     // A read failure is non-fatal: just start with an empty history.
     let history = HistoryStore::new(&workspace.path);
@@ -188,12 +197,9 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
         let pty = pool.attach_or_spawn(term, dir, initial, &label)?;
         handle.set_attached(Some(dir.to_path_buf()));
         let result = terminal_pane::run(term, home, pty, &handle);
-        // Switching keeps a session in the foreground (the loop re-attaches to
-        // the chosen one immediately); detaching, closing, or erroring returns
-        // to the sidebar, so nothing is attached any more.
-        if !matches!(result, Ok(PaneExit::Switch)) {
-            handle.set_attached(None);
-        }
+        // Leaving the pane (Ctrl-O → 切替, the shell closing, or an error) means
+        // nothing is attached any more; the shell itself stays alive in the pool.
+        handle.set_attached(None);
         result
     };
 

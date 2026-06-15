@@ -318,16 +318,18 @@ mod tests {
         assert!(lines[3].contains("Agent CLI"));
         // Each field shows its single current value via the chooser.
         assert!(lines[3].contains("Claude"));
-        // The Local LLM row (index 4) is an action button: plain "Install",
+        assert!(lines[4].contains("Session Action UI"));
+        assert!(lines[4].contains("Menu"));
+        // The Local LLM row (index 5) is an action button: plain "Install",
         // with no chevrons.
-        assert!(lines[4].contains("Local LLM"));
-        assert!(lines[4].contains("Install"));
-        assert!(!lines[4].contains('<'));
+        assert!(lines[5].contains("Local LLM"));
+        assert!(lines[5].contains("Install"));
+        assert!(!lines[5].contains('<'));
         // Every other field is a chooser, so chevrons appear on those rows...
         assert!(lines
             .iter()
             .enumerate()
-            .filter(|(i, _)| *i != 4)
+            .filter(|(i, _)| *i != 5)
             .all(|(_, l)| l.contains('<') && l.contains('>')));
         // ...but only the focused (first) row carries the cursor.
         assert!(has_cursor(&lines[0]));

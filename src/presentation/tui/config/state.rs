@@ -11,7 +11,7 @@
 //! settings when left unset. Only one scope's fields are shown at a time.
 
 use crate::domain::settings::{
-    AgentCli, BranchSource, LocalSettings, Settings, Theme, LOCAL_LLM_MODELS,
+    AgentCli, BranchSource, LocalSettings, SessionActionUi, Settings, Theme, LOCAL_LLM_MODELS,
 };
 
 /// The themes in the order they cycle through.
@@ -19,6 +19,10 @@ const THEMES: [Theme; 3] = [Theme::Light, Theme::Dark, Theme::System];
 
 /// The agent CLIs in the order they cycle through.
 pub(super) const AGENT_CLIS: [AgentCli; 2] = [AgentCli::Claude, AgentCli::Gemini];
+
+/// The 在席 (Focus) action UIs in the order they cycle through.
+pub(super) const SESSION_ACTION_UIS: [SessionActionUi; 2] =
+    [SessionActionUi::Menu, SessionActionUi::Prompt];
 
 /// The branch sources in the order they cycle through.
 pub(super) const BRANCH_SOURCES: [BranchSource; 2] = [BranchSource::Local, BranchSource::Remote];
@@ -30,6 +34,8 @@ pub enum Field {
     DefaultWorkspace,
     Notifications,
     AgentCli,
+    /// How 在席 (Focus) mode presents a session's runnable commands.
+    SessionActionUi,
     /// The local LLM enable toggle — or an "Install" action when the runtime /
     /// model is not yet present.
     LocalLlm,
@@ -39,11 +45,12 @@ pub enum Field {
 
 impl Field {
     /// The fields shown on the screen, top to bottom.
-    pub const ALL: [Field; 6] = [
+    pub const ALL: [Field; 7] = [
         Field::Theme,
         Field::DefaultWorkspace,
         Field::Notifications,
         Field::AgentCli,
+        Field::SessionActionUi,
         Field::LocalLlm,
         Field::LocalLlmModel,
     ];
@@ -55,6 +62,7 @@ impl Field {
             Field::DefaultWorkspace => "Default Workspace",
             Field::Notifications => "Notifications",
             Field::AgentCli => "Agent CLI",
+            Field::SessionActionUi => "Session Action UI",
             Field::LocalLlm => "Local LLM",
             Field::LocalLlmModel => "Local LLM Model",
         }
@@ -403,6 +411,9 @@ impl Config {
                 self.settings.notifications_enabled != self.baseline.notifications_enabled
             }
             Field::AgentCli => self.settings.agent_cli != self.baseline.agent_cli,
+            Field::SessionActionUi => {
+                self.settings.session_action_ui != self.baseline.session_action_ui
+            }
             Field::LocalLlm => self.settings.local_llm.enabled != self.baseline.local_llm.enabled,
             Field::LocalLlmModel => self.settings.local_llm.model != self.baseline.local_llm.model,
         }
@@ -464,6 +475,9 @@ impl Config {
                 .unwrap_or_else(|| "(none)".to_string()),
             Field::Notifications => on_off(self.settings.notifications_enabled).to_string(),
             Field::AgentCli => agent_cli_label(self.settings.agent_cli).to_string(),
+            Field::SessionActionUi => {
+                session_action_ui_label(self.settings.session_action_ui).to_string()
+            }
             // Before the runtime/model are present the row is an install action;
             // once installed it becomes a plain on/off toggle.
             Field::LocalLlm => {
@@ -566,6 +580,14 @@ impl Config {
             }
             Field::AgentCli => {
                 self.settings.agent_cli = cycle_agent_cli(self.settings.agent_cli, forward);
+                true
+            }
+            Field::SessionActionUi => {
+                self.settings.session_action_ui = cycle_enum(
+                    self.settings.session_action_ui,
+                    &SESSION_ACTION_UIS,
+                    forward,
+                );
                 true
             }
             Field::LocalLlm => {
@@ -752,6 +774,14 @@ fn cycle_agent_cli(cli: AgentCli, forward: bool) -> AgentCli {
     AGENT_CLIS[next]
 }
 
+/// The human-readable label for a 在席 (Focus) action UI style.
+pub(super) fn session_action_ui_label(ui: SessionActionUi) -> &'static str {
+    match ui {
+        SessionActionUi::Menu => "Menu",
+        SessionActionUi::Prompt => "Prompt",
+    }
+}
+
 /// The human-readable label for a branch source.
 pub(super) fn branch_source_label(source: BranchSource) -> &'static str {
     match source {
@@ -832,9 +862,10 @@ mod tests {
         assert_eq!(Field::DefaultWorkspace.label(), "Default Workspace");
         assert_eq!(Field::Notifications.label(), "Notifications");
         assert_eq!(Field::AgentCli.label(), "Agent CLI");
+        assert_eq!(Field::SessionActionUi.label(), "Session Action UI");
         assert_eq!(Field::LocalLlm.label(), "Local LLM");
         assert_eq!(Field::LocalLlmModel.label(), "Local LLM Model");
-        assert_eq!(Field::ALL.len(), 6);
+        assert_eq!(Field::ALL.len(), 7);
     }
 
     #[test]
@@ -849,9 +880,9 @@ mod tests {
         assert!(!config.is_dirty());
         assert!(config.local().is_none());
         assert!(config.selected_local_field().is_none());
-        // Global-only: six field rows.
-        assert_eq!(config.rows().len(), 6);
-        assert_eq!(config.save_index(), 6);
+        // Global-only: seven field rows.
+        assert_eq!(config.rows().len(), 7);
+        assert_eq!(config.save_index(), 7);
     }
 
     #[test]
@@ -863,6 +894,8 @@ mod tests {
         assert_eq!(config.selected_field(), Some(Field::Notifications));
         config.move_down();
         assert_eq!(config.selected_field(), Some(Field::AgentCli));
+        config.move_down();
+        assert_eq!(config.selected_field(), Some(Field::SessionActionUi));
         config.move_down();
         assert_eq!(config.selected_field(), Some(Field::LocalLlm));
         config.move_down();
@@ -886,6 +919,8 @@ mod tests {
         assert_eq!(config.selected_field(), Some(Field::LocalLlmModel));
         config.move_up();
         assert_eq!(config.selected_field(), Some(Field::LocalLlm));
+        config.move_up();
+        assert_eq!(config.selected_field(), Some(Field::SessionActionUi));
         config.move_up();
         assert_eq!(config.selected_field(), Some(Field::AgentCli));
         config.move_up();
@@ -929,6 +964,25 @@ mod tests {
         // And cycles backward too.
         assert!(config.cycle_selected(false));
         assert_eq!(config.value_of(Field::AgentCli), "Gemini");
+    }
+
+    #[test]
+    fn session_action_ui_field_cycles_between_menu_and_prompt() {
+        let mut config = config_with_workspaces(&[]);
+        // Navigate down until the Session Action UI row is selected.
+        while config.selected_field() != Some(Field::SessionActionUi) {
+            config.move_down();
+        }
+        // Menu by default.
+        assert_eq!(config.value_of(Field::SessionActionUi), "Menu");
+        assert!(config.cycle_selected(true));
+        assert_eq!(config.value_of(Field::SessionActionUi), "Prompt");
+        // Wraps back to Menu.
+        assert!(config.cycle_selected(true));
+        assert_eq!(config.value_of(Field::SessionActionUi), "Menu");
+        // And cycles backward too.
+        assert!(config.cycle_selected(false));
+        assert_eq!(config.value_of(Field::SessionActionUi), "Prompt");
     }
 
     #[test]
@@ -1084,16 +1138,18 @@ mod tests {
     fn rows_render_global_field_values() {
         let config = config_with_workspaces(&["alpha"]);
         let rows = config.rows();
-        assert_eq!(rows.len(), 6);
+        assert_eq!(rows.len(), 7);
         assert_eq!(rows[0].label, "Theme");
         assert_eq!(rows[0].value, "System");
         assert_eq!(rows[3].label, "Agent CLI");
         assert_eq!(rows[3].value, "Claude");
+        assert_eq!(rows[4].label, "Session Action UI");
+        assert_eq!(rows[4].value, "Menu");
         // The local LLM is off and not yet installed: the row offers "Install".
-        assert_eq!(rows[4].label, "Local LLM");
-        assert_eq!(rows[4].value, "Install");
-        assert_eq!(rows[5].label, "Local LLM Model");
-        assert_eq!(rows[5].value, "qwen2.5-coder:7b");
+        assert_eq!(rows[5].label, "Local LLM");
+        assert_eq!(rows[5].value, "Install");
+        assert_eq!(rows[6].label, "Local LLM Model");
+        assert_eq!(rows[6].value, "qwen2.5-coder:7b");
         assert!(rows.iter().all(|r| !r.changed));
     }
 

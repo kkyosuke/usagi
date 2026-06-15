@@ -24,6 +24,22 @@ pub enum AgentCli {
     Gemini,
 }
 
+/// How the **在席 (Focus)** mode presents a session's runnable commands in the
+/// right pane: as a pickable menu, or as a typed command prompt.
+///
+/// In the home screen's Focus mode the right pane is the session's action
+/// surface. `Menu` lists the runnable commands (`terminal` / `agent`) for the
+/// user to pick; `Prompt` offers a session-scoped command line to type into.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionActionUi {
+    /// A pickable list of the session's runnable commands (the default).
+    #[default]
+    Menu,
+    /// A session-scoped command prompt the user types into.
+    Prompt,
+}
+
 /// JSON wiring usagi's own issue MCP server (`usagi mcp`, served over stdio)
 /// into an agent CLI, so the agent can create and query issues from the start.
 /// Kept as a literal — it is fixed and lets `domain` stay free of `serde_json`.
@@ -172,6 +188,9 @@ pub struct Settings {
     pub notifications_enabled: bool,
     /// Which agent CLI usagi drives.
     pub agent_cli: AgentCli,
+    /// How the home screen's 在席 (Focus) mode presents a session's runnable
+    /// commands in the right pane.
+    pub session_action_ui: SessionActionUi,
     /// The optional local LLM the agent can offload light work to.
     pub local_llm: LocalLlm,
 }
@@ -185,6 +204,7 @@ impl Default for Settings {
             // Notifications are opt-out: on unless the user disables them.
             notifications_enabled: true,
             agent_cli: AgentCli::default(),
+            session_action_ui: SessionActionUi::default(),
             local_llm: LocalLlm::default(),
         }
     }
