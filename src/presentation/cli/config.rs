@@ -295,15 +295,16 @@ mod tests {
         let _guard = crate::test_support::process_env_guard();
 
         std::env::set_var("EDITOR", "vim -p");
-        assert_eq!(
-            editor_command(),
-            vec!["vim".to_string(), "-p".to_string()]
-        );
+        assert_eq!(editor_command(), vec!["vim".to_string(), "-p".to_string()]);
 
         std::env::set_var("EDITOR", "code --wait --new-window");
         assert_eq!(
             editor_command(),
-            vec!["code".to_string(), "--wait".to_string(), "--new-window".to_string()]
+            vec![
+                "code".to_string(),
+                "--wait".to_string(),
+                "--new-window".to_string()
+            ]
         );
     }
 
