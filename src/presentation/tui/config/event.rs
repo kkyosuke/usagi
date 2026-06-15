@@ -24,6 +24,12 @@ pub enum Outcome {
 /// disk: production wires it to the settings use case, tests pass a stub.
 pub type Save<'a> = dyn FnMut(&Settings, Option<&LocalSettings>) -> Result<()> + 'a;
 
+/// Provisions the local LLM for the given model (installing the `ollama`
+/// runtime and pulling the model as needed). Injected like [`Save`] so the
+/// event loop is testable without shelling out: production wires it to the
+/// `local_llm` use case, tests pass a stub.
+pub type Install<'a> = dyn FnMut(&str) -> Result<()> + 'a;
+
 /// Runs the configuration screen against the given terminal and key source
 /// until the user goes back or quits. Assumes the alternate screen is already
 /// active (it is owned by the caller).
@@ -32,12 +38,15 @@ pub type Save<'a> = dyn FnMut(&Settings, Option<&LocalSettings>) -> Result<()> +
 /// row is flagged as changed but nothing touches disk. The edits are written
 /// only when the user moves to the Save button and presses Enter; a persistence
 /// failure is shown as a notice so the user is not left wondering whether the
-/// change took.
+/// change took. The Local LLM rows are the exception: activating one while the
+/// runtime/model is missing runs `install` straight away (provisioning is an
+/// action, not a saved setting).
 pub fn event_loop(
     term: &Term,
     reader: &mut dyn KeyReader,
     mut config: Config,
     save: &mut Save,
+    install: &mut Install,
     initial_notice: Option<String>,
 ) -> Result<Outcome> {
     let mut notice = initial_notice;
@@ -65,24 +74,37 @@ pub fn event_loop(
                 notice = None;
             }
             Key::ArrowRight | Key::Char('l') => {
-                notice = change_field(&mut config, true);
+                notice = activate_field(&mut config, install, true);
             }
             Key::ArrowLeft | Key::Char('h') => {
-                notice = change_field(&mut config, false);
+                notice = activate_field(&mut config, install, false);
             }
             Key::Enter => {
-                // Enter saves on the Save button, and otherwise advances the
-                // focused field — a convenient alias for →.
+                // Enter saves on the Save button. On a Local LLM row that needs
+                // it, Enter installs; otherwise it advances the focused field
+                // (a convenient alias for →).
                 notice = if config.is_save_selected() {
                     save_changes(&mut config, save)
+                } else if let Some(model) = config.enter_installs_model() {
+                    run_install(&mut config, install, &model)
                 } else {
-                    change_field(&mut config, true)
+                    activate_field(&mut config, install, true)
                 };
             }
             Key::Char('q') | Key::Escape => return Ok(Outcome::Back),
             Key::CtrlC => return Ok(Outcome::Quit),
             _ => {}
         }
+    }
+}
+
+/// Handles an arrow press on the focused field: installs the local LLM when the
+/// Local LLM row needs it, otherwise cycles the value.
+fn activate_field(config: &mut Config, install: &mut Install, forward: bool) -> Option<String> {
+    if let Some(model) = config.arrow_installs_model() {
+        run_install(config, install, &model)
+    } else {
+        change_field(config, forward)
     }
 }
 
@@ -98,6 +120,18 @@ fn change_field(config: &mut Config, forward: bool) -> Option<String> {
     } else {
         Some("No workspaces to choose from 🐰".to_string())
     }
+}
+
+/// Provisions the local LLM for `model`, returning the notice to show. On
+/// success the Local LLM row flips from "Install" to an on/off toggle (now on).
+fn run_install(config: &mut Config, install: &mut Install, model: &str) -> Option<String> {
+    Some(match install(model) {
+        Ok(()) => {
+            config.mark_local_llm_installed();
+            format!("Installed {model} 🐰")
+        }
+        Err(e) => format!("Install failed: {e}"),
+    })
 }
 
 /// Persists the edits when there are any, returning the notice to show: a
@@ -117,6 +151,7 @@ fn save_changes(config: &mut Config, save: &mut Save) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::state::Field;
     use super::*;
     use crate::domain::settings::{AgentCli, LocalSettings, Settings, Theme};
     use std::cell::RefCell;
@@ -151,6 +186,12 @@ mod tests {
         Ok(())
     }
 
+    /// An install stub that succeeds without doing anything (its body is
+    /// exercised by the install tests below).
+    fn ok_install(_: &str) -> Result<()> {
+        Ok(())
+    }
+
     /// Runs the loop, recording every settings snapshot handed to `save`.
     fn run_recording(keys: Vec<io::Result<Key>>, config: Config) -> (Outcome, Vec<Settings>) {
         let term = Term::stdout();
@@ -160,7 +201,9 @@ mod tests {
             saved.borrow_mut().push(s.clone());
             Ok(())
         };
-        let outcome = event_loop(&term, &mut reader, config, &mut save, None).unwrap();
+        let mut install: fn(&str) -> Result<()> = ok_install;
+        let outcome =
+            event_loop(&term, &mut reader, config, &mut save, &mut install, None).unwrap();
         (outcome, saved.into_inner())
     }
 
@@ -278,6 +321,8 @@ mod tests {
             Ok(Key::ArrowRight), // -> alpha
             Ok(Key::ArrowDown),  // Notifications
             Ok(Key::ArrowDown),  // Agent CLI
+            Ok(Key::ArrowDown),  // Local LLM
+            Ok(Key::ArrowDown),  // Local LLM Model
             Ok(Key::ArrowDown),  // Save button
             Ok(Key::Enter),      // saves
             Ok(Key::Escape),
@@ -310,7 +355,16 @@ mod tests {
             Ok(Key::Escape),
         ]);
         let mut save = |_: &Settings, _: Option<&LocalSettings>| Err(anyhow::anyhow!("disk full"));
-        let outcome = event_loop(&term, &mut reader, sample_config(), &mut save, None).unwrap();
+        let mut install: fn(&str) -> Result<()> = ok_install;
+        let outcome = event_loop(
+            &term,
+            &mut reader,
+            sample_config(),
+            &mut save,
+            &mut install,
+            None,
+        )
+        .unwrap();
         assert!(matches!(outcome, Outcome::Back));
     }
 
@@ -325,7 +379,16 @@ mod tests {
             Ok(Key::Escape),
         ]);
         let mut save: fn(&Settings, Option<&LocalSettings>) -> Result<()> = noop_save;
-        let outcome = event_loop(&term, &mut reader, sample_config(), &mut save, None).unwrap();
+        let mut install: fn(&str) -> Result<()> = ok_install;
+        let outcome = event_loop(
+            &term,
+            &mut reader,
+            sample_config(),
+            &mut save,
+            &mut install,
+            None,
+        )
+        .unwrap();
         assert!(matches!(outcome, Outcome::Back));
     }
 
@@ -335,11 +398,13 @@ mod tests {
         let term = Term::stdout();
         let mut reader = ScriptedReader::new(vec![Ok(Key::Escape)]);
         let mut save: fn(&Settings, Option<&LocalSettings>) -> Result<()> = noop_save;
+        let mut install: fn(&str) -> Result<()> = ok_install;
         let outcome = event_loop(
             &term,
             &mut reader,
             sample_config(),
             &mut save,
+            &mut install,
             Some("Failed to load settings: boom".to_string()),
         )
         .unwrap();
@@ -353,7 +418,7 @@ mod tests {
         let term = Term::stdout();
         let config = Config::with_local(Settings::default(), Vec::new(), LocalSettings::default());
         let mut keys = Vec::new();
-        for _ in 0..4 {
+        for _ in 0..Field::ALL.len() {
             keys.push(Ok(Key::ArrowDown)); // descend onto the first local field
         }
         keys.push(Ok(Key::ArrowRight)); // override: Global -> Claude
@@ -369,7 +434,9 @@ mod tests {
             *captured.borrow_mut() = local.cloned();
             Ok(())
         };
-        let outcome = event_loop(&term, &mut reader, config, &mut save, None).unwrap();
+        let mut install: fn(&str) -> Result<()> = ok_install;
+        let outcome =
+            event_loop(&term, &mut reader, config, &mut save, &mut install, None).unwrap();
         assert!(matches!(outcome, Outcome::Back));
         let local = captured.into_inner().expect("save received local settings");
         assert_eq!(local.agent_cli, Some(AgentCli::Claude));
@@ -390,7 +457,128 @@ mod tests {
         let term = Term::stdout();
         let mut reader = ScriptedReader::new(vec![Err(io::Error::other("boom"))]);
         let mut save: fn(&Settings, Option<&LocalSettings>) -> Result<()> = noop_save;
-        let err = event_loop(&term, &mut reader, sample_config(), &mut save, None).unwrap_err();
+        let mut install: fn(&str) -> Result<()> = ok_install;
+        let err = event_loop(
+            &term,
+            &mut reader,
+            sample_config(),
+            &mut save,
+            &mut install,
+            None,
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("Failed to read key"));
+    }
+
+    // --- local LLM install action -----------------------------------------
+
+    /// Drives the loop with a recording install stub, returning the final
+    /// settings saved (if any) and the models passed to `install`.
+    fn run_with_install(
+        keys: Vec<io::Result<Key>>,
+        config: Config,
+        install_result: fn(&str) -> Result<()>,
+    ) -> (Outcome, Vec<String>) {
+        let term = Term::stdout();
+        let mut reader = ScriptedReader::new(keys);
+        let mut save: fn(&Settings, Option<&LocalSettings>) -> Result<()> = noop_save;
+        let installed = RefCell::new(Vec::new());
+        let mut install = |model: &str| {
+            installed.borrow_mut().push(model.to_string());
+            install_result(model)
+        };
+        let outcome =
+            event_loop(&term, &mut reader, config, &mut save, &mut install, None).unwrap();
+        (outcome, installed.into_inner())
+    }
+
+    fn failing_install(_: &str) -> Result<()> {
+        Err(anyhow::anyhow!("no brew"))
+    }
+
+    #[test]
+    fn enter_on_the_local_llm_row_installs_the_current_model() {
+        // Down past the four other fields onto the Local LLM row, then Enter
+        // installs the default model (it is not yet present).
+        let keys = vec![
+            Ok(Key::ArrowDown), // Default Workspace
+            Ok(Key::ArrowDown), // Notifications
+            Ok(Key::ArrowDown), // Agent CLI
+            Ok(Key::ArrowDown), // Local LLM
+            Ok(Key::Enter),     // install
+            Ok(Key::Escape),
+        ];
+        let (outcome, installed) = run_with_install(keys, sample_config(), ok_install);
+        assert!(matches!(outcome, Outcome::Back));
+        assert_eq!(installed, vec!["qwen2.5-coder:7b"]);
+    }
+
+    #[test]
+    fn arrow_on_the_uninstalled_local_llm_row_also_installs() {
+        let keys = vec![
+            Ok(Key::ArrowDown),  // Default Workspace
+            Ok(Key::ArrowDown),  // Notifications
+            Ok(Key::ArrowDown),  // Agent CLI
+            Ok(Key::ArrowDown),  // Local LLM
+            Ok(Key::ArrowRight), // install (no toggle to cycle yet)
+            Ok(Key::Escape),
+        ];
+        let (_, installed) = run_with_install(keys, sample_config(), ok_install);
+        assert_eq!(installed, vec!["qwen2.5-coder:7b"]);
+    }
+
+    #[test]
+    fn enter_on_the_model_row_cycles_then_installs_the_chosen_model() {
+        // On the model row: → cycles to the next model, then Enter installs it.
+        let keys = vec![
+            Ok(Key::ArrowDown),  // Default Workspace
+            Ok(Key::ArrowDown),  // Notifications
+            Ok(Key::ArrowDown),  // Agent CLI
+            Ok(Key::ArrowDown),  // Local LLM
+            Ok(Key::ArrowDown),  // Local LLM Model
+            Ok(Key::ArrowRight), // -> qwen2.5-coder:3b
+            Ok(Key::Enter),      // install that model
+            Ok(Key::Escape),
+        ];
+        let (_, installed) = run_with_install(keys, sample_config(), ok_install);
+        assert_eq!(installed, vec!["qwen2.5-coder:3b"]);
+    }
+
+    #[test]
+    fn a_failed_install_is_shown_as_a_notice_and_recovers() {
+        let keys = vec![
+            Ok(Key::ArrowDown),
+            Ok(Key::ArrowDown),
+            Ok(Key::ArrowDown),
+            Ok(Key::ArrowDown), // Local LLM
+            Ok(Key::Enter),     // install fails
+            Ok(Key::Escape),
+        ];
+        let (outcome, installed) = run_with_install(keys, sample_config(), failing_install);
+        // The loop keeps running (the user can retry or leave).
+        assert!(matches!(outcome, Outcome::Back));
+        assert_eq!(installed, vec!["qwen2.5-coder:7b"]);
+    }
+
+    #[test]
+    fn toggling_the_local_llm_after_install_persists_the_enabled_flag() {
+        // Pretend the model is already installed, so the row is an on/off
+        // toggle. Down onto it, → toggles On, then save persists enabled = true.
+        let mut config = sample_config();
+        config.set_local_llm_installed(true);
+        let keys = vec![
+            Ok(Key::ArrowDown),  // Default Workspace
+            Ok(Key::ArrowDown),  // Notifications
+            Ok(Key::ArrowDown),  // Agent CLI
+            Ok(Key::ArrowDown),  // Local LLM
+            Ok(Key::ArrowRight), // toggle On
+            Ok(Key::ArrowDown),  // Local LLM Model
+            Ok(Key::ArrowDown),  // Save button
+            Ok(Key::Enter),      // save
+            Ok(Key::Escape),
+        ];
+        let (_, saved) = run_recording(keys, config);
+        assert_eq!(saved.len(), 1);
+        assert!(saved[0].local_llm.enabled);
     }
 }

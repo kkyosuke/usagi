@@ -10,6 +10,7 @@
 - [実装済みの CLI コマンド](#実装済みの-cli-コマンド)
   - [`usagi issue`](#usagi-issue)
   - [`usagi mcp`](#usagi-mcp)
+  - [`usagi llm-mcp`](#usagi-llm-mcp)
 - [予定の CLI コマンド](#予定の-cli-コマンド)
 
 ## 実装済みの CLI コマンド
@@ -23,9 +24,10 @@
 | `usagi config` | 現在のグローバル設定（`settings.json`）を一覧表示する（[5. 設定](../05-settings.md)） | ✅ |
 | `usagi config --edit` | グローバル設定ファイルを `$EDITOR` で開いて編集し、保存時に形式（JSON / 必須 `version` / 型）を検証する。不正な場合は直前の内容に巻き戻す | ✅ |
 | `usagi doctor` | Git / Bash / AWS CLI / Node.js / Python などの依存ツールの導入状況を確認する | ✅ |
-| `usagi doctor --fix` | 不足ツールを OS のパッケージマネージャ（brew / apt-get / dnf / pacman）で導入を試行し、修復不可なら手動手順を提示する | ✅ |
+| `usagi doctor --fix` | 不足ツールを OS のパッケージマネージャ（brew / apt-get / dnf / pacman）で導入を試行し、修復不可なら手動手順を提示する。ローカル LLM が有効なら `ollama`・モデルも導入する | ✅ |
 | `usagi issue <create\|list\|show\|update\|search\|delete>` | カレントリポジトリのタスク issue（`.usagi/issues/`）を操作する（[data/02-workspace.md](../data/02-workspace.md#issues-タスク-issue)） | ✅ |
 | `usagi mcp` | issue 操作を MCP（Model Context Protocol）サーバとして stdio で公開し、AI エージェントから使えるようにする | ✅ |
+| `usagi llm-mcp [--model <MODEL>]` | ローカル LLM（Ollama）を MCP サーバとして公開し、クラウド Agent が軽量タスクを委譲できるようにする（トークン節約） | ✅ |
 
 ### `usagi init`
 
@@ -90,6 +92,10 @@ $ usagi issue list
 ### `usagi mcp`
 
 `usagi issue` と同じ issue 操作を、**MCP（Model Context Protocol）サーバ**として AI エージェント（Claude Code など）に stdio 経由で公開します。アーキテクチャ・対応 tool・JSON-RPC プロトコルの詳細は専用の章 [3.3 MCP サーバ](03-mcp.md) を参照してください。
+
+### `usagi llm-mcp`
+
+ローカル LLM（Ollama）を **MCP サーバ**として公開し、クラウド Agent が要約・命名・定型文生成などの軽量タスクを `local_llm_ask` ツールで委譲できるようにします。`--model` で委譲先モデルを指定します（既定は `qwen2.5-coder:7b`）。設定での有効化・資材のインストール・対応 tool の詳細は専用の章 [3.4 ローカル LLM MCP サーバ](04-llm-mcp.md) を参照してください。
 
 ## 予定の CLI コマンド
 

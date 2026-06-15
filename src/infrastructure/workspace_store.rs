@@ -207,6 +207,7 @@ mod tests {
             agent_cli: Some(AgentCli::Gemini),
             notifications_enabled: Some(false),
             default_branch_source: Some(BranchSource::Local),
+            local_llm_enabled: Some(true),
         };
 
         store.save_settings(&settings).unwrap();

@@ -120,6 +120,8 @@ fn render_settings(settings: &Settings) -> Vec<String> {
         ),
         format!("notifications_enabled  {}", settings.notifications_enabled),
         format!("agent_cli              {}", agent_label(settings.agent_cli)),
+        format!("local_llm_enabled      {}", settings.local_llm.enabled),
+        format!("local_llm_model        {}", settings.local_llm.model),
     ]
 }
 
@@ -173,6 +175,10 @@ mod tests {
             workspace_root: Some("/home/me/git".into()),
             notifications_enabled: false,
             agent_cli: AgentCli::Gemini,
+            local_llm: crate::domain::settings::LocalLlm {
+                enabled: true,
+                model: "qwen2.5-coder:3b".to_string(),
+            },
         };
         let lines = render_settings(&settings);
         assert!(lines[0].contains("dark"));
@@ -180,6 +186,8 @@ mod tests {
         assert!(lines[2].contains("/home/me/git"));
         assert!(lines[3].contains("false"));
         assert!(lines[4].contains("gemini"));
+        assert!(lines[5].contains("true"));
+        assert!(lines[6].contains("qwen2.5-coder:3b"));
     }
 
     #[test]

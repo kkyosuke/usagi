@@ -1,6 +1,6 @@
 # 3.3 MCP サーバ（`usagi mcp`）
 
-> [コマンドリファレンス](README.md) ｜ ← 前へ [3.2 TUI 内コマンド](02-tui.md)
+> [コマンドリファレンス](README.md) ｜ ← 前へ [3.2 TUI 内コマンド](02-tui.md) ｜ 次へ → [3.4 ローカル LLM MCP サーバ](04-llm-mcp.md)
 
 `usagi mcp` は、`usagi issue`（[01-cli.md](01-cli.md#usagi-issue)）と同じタスク issue 操作を
 **MCP（Model Context Protocol）サーバ**として AI エージェントに公開するコマンドです。エージェント

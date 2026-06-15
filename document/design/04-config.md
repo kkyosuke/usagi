@@ -36,7 +36,9 @@
 │          Theme              < System >               │  ┐ 設定一覧（全項目 `< 値 >`）
 │          Default Workspace  < (none) >               │  │  値は常に山かっこで囲み列を揃える
 │      >   Notifications      < On >                    │  │  選択行：左端の赤 ">" + 値が明色
-│        ● Agent CLI          < Gemini >               │  ┘  変更済み：ラベル左に黄色 ● + 値も黄色
+│        ● Agent CLI          < Gemini >               │  │  変更済み：ラベル左に黄色 ● + 値も黄色
+│          Local LLM          < Install >              │  │  未導入は `Install`、導入後は `On`/`Off`
+│          Local LLM Model    < qwen2.5-coder:7b >     │  ┘  ←→ でモデルを選び Enter で導入
 │                                                      │
 │                           [ Save ]                   │  ← Save ボタン（変更時のみ緑で有効）
 │                                                      │
@@ -54,8 +56,16 @@
 | Default Workspace | 既定で開くワークスペース | `(none)` ＋ 登録済みワークスペース名を順に循環。未登録時は変更不可（ヒントを表示） |
 | Notifications | デスクトップ通知（`hop` 時など）の ON/OFF | `On` ⇄ `Off` をトグル |
 | Agent CLI | usagi が起動する AI エージェント CLI | `Claude` → `Gemini` の順に循環 |
+| Local LLM | ローカル LLM 委譲の有効化 | 未導入時は値が `Install` で、Enter / ←→ で `ollama`・モデルを導入。導入後は `On` ⇄ `Off` をトグル |
+| Local LLM Model | 委譲先の Ollama モデル | `qwen2.5-coder:7b` → `:3b` → `:1.5b` → `qwen2.5:7b` を循環。←→ で選び **Enter でそのモデルを導入** |
 
 > 全項目を共通の chooser widget で描画し、現在値のみを常に `< 値 >` の形で表示します。
+
+> **ローカル LLM の導入（#032）**: `Local LLM` 行は資材（`ollama` 本体＋選択モデル）の有無で振る舞いが変わります。
+> 未導入のうちは値が `Install` で、Enter / ←→ がその場でインストール（`ollama` 導入と `ollama pull <model>`）を実行し、
+> 完了すると `On`（有効）の **on/off トグル**に切り替わります。`Local LLM Model` 行は ←→ でモデルを選び、Enter で
+> そのモデルを導入します（モデルを変えると未導入扱いに戻ります）。インストール中は画面が一時的にブロックし、結果は通知行に表示します。
+> 既定は無効で、usagi が勝手に有効化することはありません（[3.4 ローカル LLM MCP サーバ](../03-commands/04-llm-mcp.md)）。
 
 > `settings.json` には `workspace_root`（新規プロジェクトのクローン先ベースディレクトリ）も
 > 保存されますが、本画面での編集には未対応です（今後追加予定）。
@@ -115,7 +125,7 @@ git リポジトリ内で usagi を起動した場合、グローバル設定の
 | `↓` / `j` | 選択を 1 つ下へ移動（末尾の Save ボタンの次は先頭へラップ）。通知をクリア |
 | `→` / `l` | 選択中の項目の値を次の選択肢へ切り替え（メモリ上のみ。保存はしない）。Save ボタン上では無効 |
 | `←` / `h` | 選択中の項目の値を前の選択肢へ切り替え（メモリ上のみ。保存はしない）。Save ボタン上では無効 |
-| `Enter` | Save ボタン上では編集内容を `settings.json` へ保存。設定項目上では `→` と同じく値を次へ切り替え |
+| `Enter` | Save ボタン上では編集内容を `settings.json` へ保存。`Local LLM`（未導入時）/ `Local LLM Model` 上では資材をインストール。その他の設定項目上では `→` と同じく値を次へ切り替え |
 | `q` / `Esc` | 前の画面へ戻る（起動画面から開いた場合は起動画面、ホーム画面の `config` から開いた場合はホーム画面。未保存の編集は破棄） |
 | `Ctrl+C` | アプリを終了 |
 
