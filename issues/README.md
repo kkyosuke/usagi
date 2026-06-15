@@ -45,7 +45,9 @@
 | 030 | [default-branch-source](030-default-branch-source.md) ✅ | セッション開始時のデフォルトブランチ基点（local / remote）をローカル設定で選択 | tui | medium | 022 |
 | 031 | [root-mode](031-root-mode.md) ✅ | ルートモード（どのセッションにも属さず `terminal` / `agent` をワークスペースルートで起動） | tui | medium | 006, 026 |
 | 032 | [local-llm-mcp](032-local-llm-mcp.md) ✅ | ローカル LLM を MCP 公開しクラウド Agent のトークン消費を抑制（config 有効化・未導入時 install） | mcp | medium | 019, 025 |
-| 033 | [engagement-ladder](033-engagement-ladder.md) ✅ | ホーム画面を 4 モード（統括・切替・在席・没入）の状態機械に再構成（`Ctrl-O` ズームアウト／スコープ物理分離／`session_action_ui` 追加） | tui | medium | 027, 031 |
+| 033 | [preview-viewer](033-preview-viewer.md) | 右ペイン統合プレビュー（diff / Markdown / ファイルのレンダリング表示） | tui | medium | 002, 003, 012 |
+| 034 | [issue-tui](034-issue-tui.md) | TUI `issue` コマンド（関連性テーブル・進捗の可視化） | tui | medium | 002, 023, 024 |
+| 035 | [engagement-ladder](035-engagement-ladder.md) ✅ | ホーム画面を 4 モード（統括・切替・在席・没入）の状態機械に再構成（`Ctrl-O` ズームアウト／スコープ物理分離／`session_action_ui` 追加） | tui | medium | 027, 031 |
 
 ## 依存関係
 
@@ -77,6 +79,8 @@ graph TD
     003 --> 011[011 list]
     002 --> 012[012 diff]
     003 --> 012
+    012 --> 033[033 preview-viewer]
+    003 --> 033
     007 --> 013[013 logs]
     003 --> 014[014 clean]
     001 --> 015[015 config-edit]
@@ -88,19 +92,22 @@ graph TD
     023 --> 024[024 issue-cli]
     023 --> 025[025 issue-mcp]
     024 --> 025
+    023 --> 034[034 issue-tui]
+    024 --> 034
+    002 --> 034
     019[019 doctor-fix] --> 032[032 local-llm-mcp]
     025 --> 032
-    027 --> 033[033 engagement-ladder]
-    031 --> 033
+    027 --> 035[035 engagement-ladder]
+    031 --> 035
 ```
 
 ## 推奨着手順
 
 1. **基盤**: 001 init-cli / 002 workspace-screen / 019 doctor-fix（依存なし、並行可能）
 2. **セッション中核**: 003 session → 004 space / 010 finish / 011 list
-3. **作業支援**: 005 ai / 006 terminal → 026 agent → 028 agent-wait-notify / 007 history / 008 man → 027 command-hints / 012 diff
+3. **作業支援**: 005 ai / 006 terminal → 026 agent → 028 agent-wait-notify / 007 history / 008 man → 027 command-hints / 012 diff → 033 preview-viewer
 4. **後続・拡張**: 009 sync / 013 logs / 014 clean / 015〜018 / 020
-5. **issue 管理（タスク管理）**: 023 issue-store → 024 issue-cli → 025 issue-mcp
+5. **issue 管理（タスク管理）**: 023 issue-store → 024 issue-cli → 025 issue-mcp → 034 issue-tui
 6. **拡張（トークン最適化）**: 019 doctor-fix / 025 issue-mcp → 032 local-llm-mcp
 
 > [!NOTE]
