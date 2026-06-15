@@ -166,6 +166,7 @@ pub fn event_loop(
                 workspace_root,
                 open_terminal,
                 create_session,
+                preview,
             )? {
                 return Ok(Outcome::Quit);
             }
@@ -176,21 +177,29 @@ pub fn event_loop(
             Mode::Sidebar => match key {
                 Key::ArrowUp | Key::Char('k') => state.move_up(),
                 Key::ArrowDown | Key::Char('j') => state.move_down(),
-                // `Enter` opens (or re-attaches to) the selected session's
-                // terminal, so the user operates the session the pane is
-                // previewing.
+                // `Enter` attaches to the selected session's live shell/agent so
+                // the user can operate the session the pane is previewing. An
+                // idle session (no live shell) is just selected — the cursor is
+                // already on it — and a hint points at the launch commands;
+                // navigating never spawns a shell on its own.
                 Key::Enter => {
-                    if let PaneFlow::Quit = open_pane(
-                        term,
-                        reader,
-                        &mut state,
-                        &mut painter,
-                        workspace_root,
-                        open_terminal,
-                        create_session,
-                        false,
-                    )? {
-                        return Ok(Outcome::Quit);
+                    let dir = selected_dir(&state, workspace_root);
+                    if preview(&dir).is_some() {
+                        if let PaneFlow::Quit = open_pane(
+                            term,
+                            reader,
+                            &mut state,
+                            &mut painter,
+                            workspace_root,
+                            open_terminal,
+                            create_session,
+                            preview,
+                            false,
+                        )? {
+                            return Ok(Outcome::Quit);
+                        }
+                    } else {
+                        state.hint_no_live_session();
                     }
                 }
                 Key::Char(':') | Key::Char('i') => state.enter_command_mode(),
@@ -233,6 +242,7 @@ pub fn event_loop(
                                 workspace_root,
                                 open_terminal,
                                 create_session,
+                                preview,
                                 agent,
                             )? {
                                 return Ok(Outcome::Quit);
@@ -288,12 +298,18 @@ enum PaneFlow {
 /// user leaves it, then report whether the application should quit.
 ///
 /// `agent` governs only the *first* shell opened here (`:agent` launches the AI
-/// agent CLI inside it; `:terminal` / `Enter` open a plain shell). Switching
-/// sessions with the in-pane `Ctrl-O` picker (`Switch`) re-roots the pane at the
-/// now-selected session — the one just left keeps running in the pool — and
-/// always as a plain shell, so a freshly spawned session never re-runs the
-/// opening command. `Create` opens the name modal and drops into the new
-/// session. The loop only ends on a detach, a close, or an error.
+/// agent CLI inside it; `:terminal` opens a plain shell). This is only reached
+/// for an explicit launch (`:terminal` / `:agent`) or when attaching to a
+/// session that already has a live shell, so the first call always spawns or
+/// re-attaches.
+///
+/// Switching sessions with the in-pane `Ctrl-O` picker (`Switch`) re-roots the
+/// pane at the now-selected session — but only when that session already has a
+/// live shell (`preview` returns a snapshot); an idle target is just selected,
+/// so the pane leaves (the shell just left keeps running in the pool) without
+/// spawning a plain shell. `Create` makes a new session, which has no live shell
+/// yet, so it is likewise just selected. The loop ends on a detach, a close, a
+/// switch / create to an idle session, or an error.
 ///
 /// Shared by `:terminal` / `:agent`, the sidebar `Enter`, and the `Ctrl-O`
 /// session switcher.
@@ -306,6 +322,7 @@ fn open_pane(
     workspace_root: &Path,
     open_terminal: &mut dyn FnMut(&mut HomeState, &Path, bool) -> Result<PaneExit>,
     create_session: &mut dyn FnMut(&str) -> SessionOutcome,
+    preview: &mut dyn FnMut(&Path) -> Option<TerminalView>,
     agent: bool,
 ) -> Result<PaneFlow> {
     let (label, fail) = if agent {
@@ -321,15 +338,20 @@ fn open_pane(
             Ok(PaneExit::Switch) => {
                 agent = false;
                 dir = selected_dir(state, workspace_root);
+                // Re-attach only when the chosen session has a live shell/agent;
+                // an idle session is just selected, so leave the pane (the shell
+                // we were in stays alive in the pool) without spawning anything.
+                if preview(&dir).is_none() {
+                    break Ok(PaneExit::Detach);
+                }
             }
             Ok(PaneExit::Create) => {
                 match create_session_inline(term, reader, state, painter, create_session)? {
                     ModalStep::Quit => return Ok(PaneFlow::Quit),
-                    // The new session is selected; drop into it as a plain shell.
-                    ModalStep::Created => {
-                        agent = false;
-                        dir = selected_dir(state, workspace_root);
-                    }
+                    // A freshly created session has no live shell yet: it is now
+                    // selected, so leave the pane (start it with `:agent` /
+                    // `:terminal`) rather than spawning a plain shell.
+                    ModalStep::Created => break Ok(PaneExit::Detach),
                     // Cancelled: resume the current session.
                     _ => {}
                 }
@@ -371,6 +393,12 @@ enum PickerChoice {
 /// This is the home-screen counterpart of the in-terminal picker: the same
 /// overlay, driven by the home screen's key reader instead of the embedded
 /// terminal's raw input.
+///
+/// Attaching only opens the pane when the chosen session has a live shell/agent
+/// (`preview` returns a snapshot); an idle session — including a freshly created
+/// one — is just selected, leaving the user on the sidebar with a hint to start
+/// it via `:agent` / `:terminal`. So switching sessions never spawns a shell on
+/// its own.
 #[allow(clippy::too_many_arguments)]
 fn switch_session(
     term: &Term,
@@ -380,27 +408,19 @@ fn switch_session(
     workspace_root: &Path,
     open_terminal: &mut dyn FnMut(&mut HomeState, &Path, bool) -> Result<PaneExit>,
     create_session: &mut dyn FnMut(&str) -> SessionOutcome,
+    preview: &mut dyn FnMut(&Path) -> Option<TerminalView>,
 ) -> Result<PaneFlow> {
     let choice = run_home_picker(term, reader, state, painter)?;
     // The overlay drew over the frame; force a clean repaint of whatever the
     // choice resolves to.
     painter.reset();
     match choice {
-        PickerChoice::Attach => open_pane(
-            term,
-            reader,
-            state,
-            painter,
-            workspace_root,
-            open_terminal,
-            create_session,
-            false,
-        ),
-        PickerChoice::Create => {
-            match create_session_inline(term, reader, state, painter, create_session)? {
-                ModalStep::Quit => Ok(PaneFlow::Quit),
-                // The new session is selected: drop straight into it.
-                ModalStep::Created => open_pane(
+        PickerChoice::Attach => {
+            // The picker already focused the chosen session. Attach only when it
+            // has a live shell/agent; otherwise it is just selected (no spawn).
+            let dir = selected_dir(state, workspace_root);
+            if preview(&dir).is_some() {
+                open_pane(
                     term,
                     reader,
                     state,
@@ -408,8 +428,23 @@ fn switch_session(
                     workspace_root,
                     open_terminal,
                     create_session,
+                    preview,
                     false,
-                ),
+                )
+            } else {
+                state.hint_no_live_session();
+                Ok(PaneFlow::Continue)
+            }
+        }
+        PickerChoice::Create => {
+            match create_session_inline(term, reader, state, painter, create_session)? {
+                ModalStep::Quit => Ok(PaneFlow::Quit),
+                // The new session has no live shell yet: it is now selected, so
+                // stay on the sidebar with a hint rather than spawning a shell.
+                ModalStep::Created => {
+                    state.hint_no_live_session();
+                    Ok(PaneFlow::Continue)
+                }
                 // Cancelled: stay on the sidebar.
                 _ => Ok(PaneFlow::Continue),
             }
@@ -420,10 +455,11 @@ fn switch_session(
 }
 
 /// Drive the session-switcher overlay on the home screen: open the picker, then
-/// paint and read keys until the user picks a session (`1`-`9` or `↑`/`↓` +
-/// `Enter`), asks to create one (`c`), or dismisses it (`Esc` / a second
-/// `Ctrl-O`). `Ctrl-C` quits. Returns the resolved [`PickerChoice`]; on `Attach`
-/// the highlighted session is focused so the caller re-roots the pane there.
+/// paint and read keys until the user picks a session (`1`-`9`, or `↑`/`↓` +
+/// `Enter` / `l` / `Tab`), asks to create one (`c`), or dismisses it (`Esc` /
+/// `h` / a second `Ctrl-O`). `Ctrl-C` quits. Returns the resolved
+/// [`PickerChoice`]; on `Attach` the highlighted session is focused so the
+/// caller can attach to (or just select) it.
 fn run_home_picker(
     term: &Term,
     reader: &mut dyn KeyReader,
@@ -453,10 +489,13 @@ fn run_home_picker(
                     break PickerChoice::Attach;
                 }
             }
-            Key::Enter => break PickerChoice::Attach,
-            // `Esc` or a second `Ctrl-O` dismisses the switcher (there is no live
-            // pane to detach from on the sidebar).
-            Key::Escape => break PickerChoice::Cancel,
+            // `Enter`, `l`, or `Tab` attaches the pane to the highlighted session
+            // — focus moves right, onto the pane (the tmux-style `l` = "go right").
+            Key::Enter | Key::Tab | Key::Char('l') => break PickerChoice::Attach,
+            // `Esc`, `h`, or a second `Ctrl-O` dismisses the switcher, leaving
+            // focus on the sidebar (`h` = "go left"); there is no live pane to
+            // detach from here.
+            Key::Escape | Key::Char('h') => break PickerChoice::Cancel,
             Key::Char(CTRL_O) => break PickerChoice::Cancel,
             // `c` creates a new session; guarded against `Ctrl-C`, which arrives
             // as the dedicated `CtrlC` key, not `Char('c')`.
@@ -708,6 +747,13 @@ mod tests {
     /// on the command log — the default for tests not exercising the preview.
     fn noop_preview(_: &Path) -> Option<TerminalView> {
         None
+    }
+
+    /// A `preview` callback that reports every session as live (a non-empty
+    /// snapshot), so navigating to one (`Enter` / the `Ctrl-O` switcher) attaches
+    /// the pane instead of just selecting an idle session.
+    fn live_preview(_: &Path) -> Option<TerminalView> {
+        Some(TerminalView::from_rows(vec!["live".to_string()], None))
     }
 
     /// A `persist` callback that drops the command — the default for tests not
@@ -1224,6 +1270,20 @@ mod tests {
         state: HomeState,
         open_terminal: &mut dyn FnMut(&mut HomeState, &Path, bool) -> Result<PaneExit>,
     ) -> Result<Outcome> {
+        let mut preview: fn(&Path) -> Option<TerminalView> = noop_preview;
+        run_pane_with_nav_preview(nav, command, state, open_terminal, &mut preview)
+    }
+
+    /// As [`run_pane_with_nav`], but with a caller-supplied `preview` so the
+    /// in-pane `Ctrl-O` switch can find a live (or idle) target — the switch
+    /// re-roots only when the chosen session reports a live snapshot.
+    fn run_pane_with_nav_preview(
+        nav: Vec<io::Result<Key>>,
+        command: &str,
+        state: HomeState,
+        open_terminal: &mut dyn FnMut(&mut HomeState, &Path, bool) -> Result<PaneExit>,
+        preview: &mut dyn FnMut(&Path) -> Option<TerminalView>,
+    ) -> Result<Outcome> {
         let mut keys = nav;
         keys.push(Ok(Key::Char(':')));
         keys.extend(typed(command));
@@ -1238,7 +1298,6 @@ mod tests {
         let mut create_session: fn(&str) -> SessionOutcome = noop_create;
         let mut remove_session: fn(&str, bool) -> SessionOutcome = noop_remove;
         let mut open_config: fn(&Term) -> Result<bool> = noop_config;
-        let mut preview: fn(&Path) -> Option<TerminalView> = noop_preview;
         event_loop(
             &term,
             &mut reader,
@@ -1250,7 +1309,7 @@ mod tests {
             &mut remove_session,
             open_terminal,
             &mut open_config,
-            &mut preview,
+            preview,
         )
     }
 
@@ -1468,12 +1527,16 @@ mod tests {
                 Ok(PaneExit::Detach)
             }
         };
+        // The switch target is live, so the pane re-roots there rather than just
+        // selecting it.
+        let mut preview: fn(&Path) -> Option<TerminalView> = live_preview;
         assert!(matches!(
-            run_pane_with_nav(
+            run_pane_with_nav_preview(
                 vec![Ok(Key::ArrowDown)],
                 "terminal",
                 two_worktree_state(),
-                &mut open
+                &mut open,
+                &mut preview,
             )
             .unwrap(),
             Outcome::Back
@@ -1501,12 +1564,15 @@ mod tests {
                 Ok(PaneExit::Detach)
             }
         };
+        // The root row is live here, so switching re-roots the pane at /ws.
+        let mut preview: fn(&Path) -> Option<TerminalView> = live_preview;
         assert!(matches!(
-            run_pane_with_nav(
+            run_pane_with_nav_preview(
                 vec![Ok(Key::ArrowDown)],
                 "terminal",
                 two_worktree_state(),
-                &mut open
+                &mut open,
+                &mut preview,
             )
             .unwrap(),
             Outcome::Back
@@ -1591,6 +1657,37 @@ mod tests {
         )
     }
 
+    /// As [`run_keys_with`], but every session reports a live preview, so
+    /// attaching (the sidebar `Enter` or the `Ctrl-O` switcher) actually opens
+    /// the pane instead of just selecting an idle session.
+    fn run_keys_live(
+        keys: Vec<io::Result<Key>>,
+        state: HomeState,
+        open_terminal: &mut dyn FnMut(&mut HomeState, &Path, bool) -> Result<PaneExit>,
+        create_session: &mut dyn FnMut(&str) -> SessionOutcome,
+    ) -> Result<Outcome> {
+        let term = Term::stdout();
+        let mut reader = ScriptedReader::new(keys);
+        let monitor = MonitorHandle::detached();
+        let mut persist: fn(&str) = noop_persist;
+        let mut remove_session: fn(&str, bool) -> SessionOutcome = noop_remove;
+        let mut open_config: fn(&Term) -> Result<bool> = noop_config;
+        let mut preview: fn(&Path) -> Option<TerminalView> = live_preview;
+        event_loop(
+            &term,
+            &mut reader,
+            state,
+            Path::new("/ws"),
+            &monitor,
+            &mut persist,
+            create_session,
+            &mut remove_session,
+            open_terminal,
+            &mut open_config,
+            &mut preview,
+        )
+    }
+
     /// As [`run_keys_with`], but driven by full [`Input`]s so a wheel scroll can
     /// be fed into the inline create modal.
     fn run_inputs_with(
@@ -1640,24 +1737,18 @@ mod tests {
     }
 
     #[test]
-    fn picker_create_opens_the_modal_and_reroots_into_the_new_session() {
+    fn picker_create_makes_the_session_then_just_selects_it() {
         // `:agent` opens the first worktree (agent=true); in the pane the picker's
-        // `c` returns Create, the inline modal names "newsess" and Enter creates
-        // it, and the pane re-roots there as a *plain* shell (agent=false) before
-        // it closes.
+        // `c` returns Create and the inline modal names "newsess". The new session
+        // has no live shell yet, so the pane leaves (the original shell stays
+        // alive) and the new session is just selected — it is NOT spawned, so
+        // `open` is called only once (for the original `:agent`).
         let dirs = RefCell::new(Vec::new());
         let agents = RefCell::new(Vec::new());
-        let calls = RefCell::new(0);
         let mut open = |_home: &mut HomeState, dir: &Path, agent: bool| {
             dirs.borrow_mut().push(dir.to_path_buf());
             agents.borrow_mut().push(agent);
-            let mut n = calls.borrow_mut();
-            *n += 1;
-            if *n == 1 {
-                Ok(PaneExit::Create)
-            } else {
-                Ok(PaneExit::Closed)
-            }
+            Ok(PaneExit::Create)
         };
         let created = RefCell::new(Vec::new());
         let mut create = |name: &str| create_newsess(name, &created);
@@ -1666,7 +1757,7 @@ mod tests {
         keys.extend(typed("agent"));
         keys.push(Ok(Key::Enter)); // open pane -> Create
         keys.extend(typed("newsess")); // inline modal name
-        keys.push(Ok(Key::Enter)); // create -> re-root, second open -> Closed
+        keys.push(Ok(Key::Enter)); // create -> select the new session, leave pane
         keys.push(Ok(Key::Escape)); // cancel command mode
         keys.push(Ok(Key::Escape)); // leave sidebar
 
@@ -1675,11 +1766,10 @@ mod tests {
             Outcome::Back
         ));
         assert_eq!(*created.borrow(), vec!["newsess"]);
-        assert_eq!(*agents.borrow(), vec![true, false]);
-        assert_eq!(
-            *dirs.borrow(),
-            vec![PathBuf::from("/r/main"), PathBuf::from("/r/new")]
-        );
+        // Only the original `:agent` opened a pane; the new session was not
+        // spawned, just selected.
+        assert_eq!(*agents.borrow(), vec![true]);
+        assert_eq!(*dirs.borrow(), vec![PathBuf::from("/r/main")]);
     }
 
     #[test]
@@ -1767,17 +1857,10 @@ mod tests {
     #[test]
     fn picker_create_ignores_a_wheel_scroll_in_the_modal() {
         // A wheel turn over the open create modal is skipped; the following keys
-        // still name and create the session.
-        let calls = RefCell::new(0);
-        let mut open = |_h: &mut HomeState, _d: &Path, _a: bool| {
-            let mut n = calls.borrow_mut();
-            *n += 1;
-            if *n == 1 {
-                Ok(PaneExit::Create)
-            } else {
-                Ok(PaneExit::Closed)
-            }
-        };
+        // still name and create the session. The picker's `c` returns Create
+        // once; the new session is then just selected (no re-open), so `open` is
+        // called exactly once.
+        let mut open = |_h: &mut HomeState, _d: &Path, _a: bool| Ok(PaneExit::Create);
         let mut create: fn(&str) -> SessionOutcome = noop_create;
 
         let mut inputs = vec![Ok(Input::Key(Key::Char(':')))];
@@ -1785,7 +1868,7 @@ mod tests {
         inputs.push(Ok(Input::Key(Key::Enter))); // open -> Create
         inputs.push(Ok(Input::Scroll(scroll_right(-3)))); // skipped in the modal
         inputs.extend("x".chars().map(|c| Ok(Input::Key(Key::Char(c)))));
-        inputs.push(Ok(Input::Key(Key::Enter))); // create -> re-root -> Closed
+        inputs.push(Ok(Input::Key(Key::Enter))); // create -> select, leave pane
         inputs.push(Ok(Input::Key(Key::Escape))); // cancel command mode
         inputs.push(Ok(Input::Key(Key::Escape))); // leave sidebar
         assert!(matches!(
@@ -1856,7 +1939,7 @@ mod tests {
         let mut create: fn(&str) -> SessionOutcome = noop_create;
         let keys = vec![Ok(Key::Char(CTRL_O)), Ok(Key::Enter), Ok(Key::Escape)];
         assert!(matches!(
-            run_keys_with(keys, two_worktree_state(), &mut open, &mut create).unwrap(),
+            run_keys_live(keys, two_worktree_state(), &mut open, &mut create).unwrap(),
             Outcome::Back
         ));
         assert_eq!(*opened.borrow(), 1);
@@ -1897,7 +1980,7 @@ mod tests {
         // "1" picks the first row (the root), so the pane re-roots at /ws.
         let keys = vec![Ok(Key::Char(CTRL_O)), Ok(Key::Char('1')), Ok(Key::Escape)];
         assert!(matches!(
-            run_keys_with(keys, two_worktree_state(), &mut open, &mut create).unwrap(),
+            run_keys_live(keys, two_worktree_state(), &mut open, &mut create).unwrap(),
             Outcome::Back
         ));
         assert_eq!(*opened.borrow(), vec![PathBuf::from("/ws")]);
@@ -1919,28 +2002,23 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_o_switcher_create_opens_the_modal_and_attaches_to_the_new_session() {
-        let opened = RefCell::new(Vec::new());
-        let agents = RefCell::new(Vec::new());
-        let mut open = |_h: &mut HomeState, d: &Path, a: bool| {
-            opened.borrow_mut().push(d.to_path_buf());
-            agents.borrow_mut().push(a);
-            Ok(PaneExit::Closed)
-        };
+    fn ctrl_o_switcher_create_makes_the_session_then_just_selects_it() {
+        // The switcher's `c` opens the inline modal; naming "newsess" and Enter
+        // creates it. The new session has no live shell yet, so the switcher just
+        // selects it — `noop_open` (which would spawn a pane) is never reached.
+        let mut open: fn(&mut HomeState, &Path, bool) -> Result<PaneExit> = noop_open;
         let created = RefCell::new(Vec::new());
         let mut create = |name: &str| create_newsess(name, &created);
         let mut keys = vec![Ok(Key::Char(CTRL_O)), Ok(Key::Char('c'))];
         keys.extend(typed("newsess")); // inline modal name
-        keys.push(Ok(Key::Enter)); // create -> attach to the new session
+        keys.push(Ok(Key::Enter)); // create -> select the new session (no attach)
         keys.push(Ok(Key::Escape)); // leave the sidebar
         assert!(matches!(
             run_keys_with(keys, two_worktree_state(), &mut open, &mut create).unwrap(),
             Outcome::Back
         ));
+        // The session is created and then just selected (the pane is not opened).
         assert_eq!(*created.borrow(), vec!["newsess"]);
-        // Attached as a plain shell at the freshly created session's root.
-        assert_eq!(*opened.borrow(), vec![PathBuf::from("/r/new")]);
-        assert_eq!(*agents.borrow(), vec![false]);
     }
 
     #[test]
@@ -2008,12 +2086,15 @@ mod tests {
 
     #[test]
     fn ctrl_o_switcher_ignores_a_wheel_scroll() {
-        let mut open = |_h: &mut HomeState, _d: &Path, _a: bool| Ok(PaneExit::Closed);
+        // The wheel turn is dropped inside the picker; Enter then resolves the
+        // selection. The root row is idle here (no live preview), so it is just
+        // selected and the pane-opening `noop_open` is never reached.
+        let mut open: fn(&mut HomeState, &Path, bool) -> Result<PaneExit> = noop_open;
         let mut create: fn(&str) -> SessionOutcome = noop_create;
         let inputs = vec![
             Ok(Input::Key(Key::Char(CTRL_O))),
             Ok(Input::Scroll(scroll_right(-3))), // skipped inside the picker
-            Ok(Input::Key(Key::Enter)),          // attach
+            Ok(Input::Key(Key::Enter)),          // resolve the selection
             Ok(Input::Key(Key::Escape)),         // leave the sidebar
         ];
         assert!(matches!(
@@ -2032,10 +2113,11 @@ mod tests {
             Ok(PaneExit::Closed)
         };
         let mut create: fn(&str) -> SessionOutcome = noop_create;
-        // Move onto the first worktree, then Enter opens its terminal (plain).
+        // Move onto the first worktree (a live session), then Enter attaches to
+        // its terminal (plain shell).
         let keys = vec![Ok(Key::ArrowDown), Ok(Key::Enter), Ok(Key::Escape)];
         assert!(matches!(
-            run_keys_with(keys, two_worktree_state(), &mut open, &mut create).unwrap(),
+            run_keys_live(keys, two_worktree_state(), &mut open, &mut create).unwrap(),
             Outcome::Back
         ));
         assert_eq!(*opened.borrow(), vec![PathBuf::from("/r/main")]);
@@ -2044,25 +2126,126 @@ mod tests {
 
     #[test]
     fn sidebar_enter_propagates_a_quit_from_the_inline_create_modal() {
-        // Enter opens the pane; the terminal returns Create, opening the inline
-        // modal, where Ctrl-C quits — and the quit propagates out of the loop.
+        // The selected session is live, so Enter opens the pane; the terminal
+        // returns Create, opening the inline modal, where Ctrl-C quits — and the
+        // quit propagates out of the loop.
         let mut open = |_h: &mut HomeState, _d: &Path, _a: bool| Ok(PaneExit::Create);
         let mut create: fn(&str) -> SessionOutcome = noop_create;
         let keys = vec![Ok(Key::Enter), Ok(Key::CtrlC)];
         assert!(matches!(
-            run_keys_with(keys, sample_state(), &mut open, &mut create).unwrap(),
+            run_keys_live(keys, sample_state(), &mut open, &mut create).unwrap(),
             Outcome::Quit
         ));
     }
 
     #[test]
     fn sidebar_enter_propagates_a_read_error_from_the_pane() {
-        // Enter opens the pane; the terminal returns Create, and a read error in
-        // the inline modal bubbles up through the sidebar `Enter` handler.
+        // The selected session is live, so Enter opens the pane; the terminal
+        // returns Create, and a read error in the inline modal bubbles up through
+        // the sidebar `Enter` handler.
         let mut open = |_h: &mut HomeState, _d: &Path, _a: bool| Ok(PaneExit::Create);
         let mut create: fn(&str) -> SessionOutcome = noop_create;
         let keys = vec![Ok(Key::Enter), Err(io::Error::other("boom"))];
-        let err = run_keys_with(keys, sample_state(), &mut open, &mut create).unwrap_err();
+        let err = run_keys_live(keys, sample_state(), &mut open, &mut create).unwrap_err();
         assert!(err.to_string().contains("Failed to read key"));
+    }
+
+    // --- Idle sessions are selected, not spawned (launch is explicit) ------
+
+    #[test]
+    fn sidebar_enter_on_an_idle_session_just_selects_it() {
+        // With no live preview, Enter on the selected session opens nothing — it
+        // is just selected, with a hint pointing at the launch commands — so the
+        // pane-opening `noop_open` is never reached.
+        let mut open: fn(&mut HomeState, &Path, bool) -> Result<PaneExit> = noop_open;
+        let mut create: fn(&str) -> SessionOutcome = noop_create;
+        // Move onto a worktree, press Enter (idle → just selected), then leave.
+        let keys = vec![Ok(Key::ArrowDown), Ok(Key::Enter), Ok(Key::Escape)];
+        assert!(matches!(
+            run_keys_with(keys, two_worktree_state(), &mut open, &mut create).unwrap(),
+            Outcome::Back
+        ));
+    }
+
+    #[test]
+    fn ctrl_o_switcher_attach_on_an_idle_session_just_selects_it() {
+        // The switcher picks a session, but with no live preview it is just
+        // selected — the pane-opening `noop_open` is never reached.
+        let mut open: fn(&mut HomeState, &Path, bool) -> Result<PaneExit> = noop_open;
+        let mut create: fn(&str) -> SessionOutcome = noop_create;
+        let keys = vec![Ok(Key::Char(CTRL_O)), Ok(Key::Enter), Ok(Key::Escape)];
+        assert!(matches!(
+            run_keys_with(keys, two_worktree_state(), &mut open, &mut create).unwrap(),
+            Outcome::Back
+        ));
+    }
+
+    #[test]
+    fn picker_switch_to_an_idle_session_detaches_without_spawning() {
+        // `:terminal` opens the first worktree; the in-pane picker switches to a
+        // session with no live preview, so the pane leaves (the original shell
+        // stays alive) without spawning a plain shell there — `open` is called
+        // only once.
+        let dirs = RefCell::new(Vec::new());
+        let mut open = |home: &mut HomeState, dir: &Path, _agent: bool| {
+            dirs.borrow_mut().push(dir.to_path_buf());
+            // Focus the second worktree, then ask to switch to it.
+            home.focus_session(2);
+            Ok(PaneExit::Switch)
+        };
+        // noop preview (no live sessions) → the switch target is idle.
+        assert!(matches!(
+            run_pane_with_nav(
+                vec![Ok(Key::ArrowDown)],
+                "terminal",
+                two_worktree_state(),
+                &mut open,
+            )
+            .unwrap(),
+            Outcome::Back
+        ));
+        assert_eq!(*dirs.borrow(), vec![PathBuf::from("/r/main")]);
+    }
+
+    // --- Spatial picker keys (h / l / Tab) ---------------------------------
+
+    #[test]
+    fn ctrl_o_switcher_l_and_tab_attach_to_a_live_session() {
+        // In the switcher, `l` (and `Tab`) attach to the highlighted session,
+        // like `Enter`. Two switcher trips, each attaching to the live root.
+        let opened = RefCell::new(0);
+        let mut open = |_h: &mut HomeState, _d: &Path, _a: bool| {
+            *opened.borrow_mut() += 1;
+            Ok(PaneExit::Closed)
+        };
+        let mut create: fn(&str) -> SessionOutcome = noop_create;
+        let keys = vec![
+            Ok(Key::Char(CTRL_O)),
+            Ok(Key::Char('l')), // attach
+            Ok(Key::Char(CTRL_O)),
+            Ok(Key::Tab), // attach again
+            Ok(Key::Escape),
+        ];
+        assert!(matches!(
+            run_keys_live(keys, two_worktree_state(), &mut open, &mut create).unwrap(),
+            Outcome::Back
+        ));
+        assert_eq!(*opened.borrow(), 2);
+    }
+
+    #[test]
+    fn ctrl_o_switcher_h_dismisses_without_attaching() {
+        // `h` (focus left) dismisses the switcher like `Esc`, never attaching.
+        let mut open: fn(&mut HomeState, &Path, bool) -> Result<PaneExit> = noop_open;
+        let mut create: fn(&str) -> SessionOutcome = noop_create;
+        let keys = vec![
+            Ok(Key::Char(CTRL_O)),
+            Ok(Key::Char('h')), // dismiss
+            Ok(Key::Escape),    // leave the sidebar
+        ];
+        assert!(matches!(
+            run_keys_live(keys, two_worktree_state(), &mut open, &mut create).unwrap(),
+            Outcome::Back
+        ));
     }
 }
