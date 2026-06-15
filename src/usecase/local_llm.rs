@@ -3,12 +3,17 @@
 //! usagi delegates light tasks to a local model served through Ollama (see the
 //! `usagi llm-mcp` server). This module decides whether the required materials —
 //! the `ollama` runtime and the selected model — are present, and installs the
-//! missing ones on request. It never runs on its own: the user opts in via the
-//! config screen or `usagi doctor --fix`.
+//! missing ones on request. It also makes sure the Ollama *server* is running:
+//! a Homebrew-installed `ollama` ships no background service, and the CLI does
+//! not auto-start one for `run`/`pull`, so without this every model call fails
+//! with "could not connect to ollama server". It never runs on its own: the
+//! user opts in via the config screen or `usagi doctor --fix`.
 //!
 //! All command execution goes through the shared [`CommandRunner`] abstraction
 //! (defined alongside `doctor`'s remediation), so the logic here is exercised
 //! with a fake runner and never shells out during tests.
+
+use std::time::Duration;
 
 use crate::usecase::doctor::CommandRunner;
 
@@ -37,6 +42,34 @@ pub fn model_present(runner: &dyn CommandRunner, model: &str) -> bool {
     runner.check(OLLAMA, &["show", model])
 }
 
+/// Whether the Ollama server is currently reachable.
+///
+/// Probed with `ollama ps`, which connects to the server and exits zero only
+/// when it is up. Unlike `run`/`pull`, `ps` never auto-starts the server, so it
+/// is a clean liveness check.
+pub fn server_running(runner: &dyn CommandRunner) -> bool {
+    runner.check(OLLAMA, &["ps"])
+}
+
+/// How long [`ensure_server`] waits for a freshly-spawned server to start
+/// accepting connections: at most `polls` probes spaced `interval` apart.
+#[derive(Debug, Clone, Copy)]
+struct ServerWait {
+    polls: usize,
+    interval: Duration,
+}
+
+impl Default for ServerWait {
+    fn default() -> Self {
+        // ~5s total — comfortably longer than a cold `ollama serve` start
+        // (~0.4s locally) without hanging a wedged install indefinitely.
+        Self {
+            polls: 25,
+            interval: Duration::from_millis(200),
+        }
+    }
+}
+
 /// One thing [`ensure`] did (or found already done) while provisioning.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SetupStep {
@@ -44,6 +77,10 @@ pub enum SetupStep {
     OllamaAlreadyPresent,
     /// The `ollama` runtime was installed during this run.
     OllamaInstalled { manager: &'static str },
+    /// The Ollama server was already running.
+    ServerAlreadyRunning,
+    /// The Ollama server was not running and was started during this run.
+    ServerStarted,
     /// The model was already pulled.
     ModelAlreadyPresent { model: String },
     /// The model was pulled during this run.
@@ -61,12 +98,16 @@ pub enum SetupError {
         manager: &'static str,
         manual: String,
     },
+    /// The Ollama server was not running and could not be started (or did not
+    /// come up in time after being started).
+    ServerStartFailed,
     /// `ollama pull <model>` failed.
     ModelPullFailed { model: String },
 }
 
 /// Ensure the local LLM is ready to use for `model`: install `ollama` if it is
-/// missing, then pull the model if it is not already present.
+/// missing, start its server if it is not already running, then pull the model
+/// if it is not already present.
 ///
 /// `sudo` carries the password used to pre-authenticate the privileged steps of
 /// the runtime installer non-interactively: `Some(password)` (the TUI install
@@ -83,11 +124,13 @@ pub fn ensure(
     model: &str,
     sudo: Option<&str>,
 ) -> Result<Vec<SetupStep>, SetupError> {
-    // The runtime must be installed before the model can be pulled, so these
-    // run left-to-right; `?` short-circuits on the first failure.
+    // The runtime must be installed, then its server brought up, before the
+    // model can be pulled — so these run left-to-right and `?` short-circuits
+    // on the first failure.
     let ollama = install_ollama(os, runner, sudo)?;
+    let server = ensure_server(runner, ServerWait::default())?;
     let model = pull_model(runner, model)?;
-    Ok(vec![ollama, model])
+    Ok(vec![ollama, server, model])
 }
 
 /// Install the `ollama` runtime if it is not already present, using the
@@ -128,6 +171,29 @@ fn install_ollama(
     }
 }
 
+/// Ensure the Ollama server is running, starting it in the background if not.
+///
+/// A Homebrew-installed `ollama` runs no server on its own, and `run`/`pull`
+/// do not auto-start one — so without this every model call fails with "could
+/// not connect to ollama server". When the server is down we spawn
+/// `ollama serve` detached and poll until it accepts connections, so the model
+/// pull that follows (and later `ollama run` calls) do not race the start-up.
+fn ensure_server(runner: &dyn CommandRunner, wait: ServerWait) -> Result<SetupStep, SetupError> {
+    if server_running(runner) {
+        return Ok(SetupStep::ServerAlreadyRunning);
+    }
+    runner
+        .spawn(OLLAMA, &["serve"])
+        .map_err(|_| SetupError::ServerStartFailed)?;
+    for _ in 0..wait.polls {
+        if server_running(runner) {
+            return Ok(SetupStep::ServerStarted);
+        }
+        std::thread::sleep(wait.interval);
+    }
+    Err(SetupError::ServerStartFailed)
+}
+
 /// Pull `model` if it is not already present.
 fn pull_model(runner: &dyn CommandRunner, model: &str) -> Result<SetupStep, SetupError> {
     if model_present(runner, model) {
@@ -150,6 +216,20 @@ pub fn ollama_manual() -> String {
     "install Ollama from https://ollama.com/download".to_string()
 }
 
+/// The message shown when the Ollama server cannot be brought up.
+pub fn server_start_failed_message() -> String {
+    "could not start the ollama server; try running `ollama serve`".to_string()
+}
+
+/// Make sure the Ollama server is running before a model call, starting it in
+/// the background if necessary. Used by the MCP backend at request time (where
+/// no provisioning step has run), returning a short error message on failure.
+pub fn ensure_server_started(runner: &dyn CommandRunner) -> Result<(), String> {
+    ensure_server(runner, ServerWait::default())
+        .map(|_| ())
+        .map_err(|_| server_start_failed_message())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -168,6 +248,13 @@ mod tests {
         ran: RefCell<Vec<String>>,
         /// The input piped to the last `run_with_input` call (the password).
         piped: RefCell<Option<String>>,
+        /// Number of `ollama ps` probes that report the server DOWN before it
+        /// comes UP. `0` means the server is up from the first probe.
+        server_down_for: usize,
+        ps_probes: RefCell<usize>,
+        /// Result returned by `spawn` (starting `ollama serve`).
+        spawn: std::io::Result<()>,
+        spawned: RefCell<Vec<String>>,
     }
 
     impl FakeRunner {
@@ -179,6 +266,12 @@ mod tests {
                 sudo: Ok(true),
                 ran: RefCell::new(Vec::new()),
                 piped: RefCell::new(None),
+                // By default the server is already up, so `ensure` tests focused
+                // on install/pull need not opt into the start path.
+                server_down_for: 0,
+                ps_probes: RefCell::new(0),
+                spawn: Ok(()),
+                spawned: RefCell::new(Vec::new()),
             }
         }
 
@@ -189,6 +282,18 @@ mod tests {
 
         fn with_sudo(mut self, sudo: std::io::Result<bool>) -> Self {
             self.sudo = sudo;
+            self
+        }
+
+        /// Report the server DOWN for the first `n` `ps` probes, then UP.
+        fn with_server_down_for(mut self, n: usize) -> Self {
+            self.server_down_for = n;
+            self
+        }
+
+        /// Make `spawn` (starting the server) fail.
+        fn with_spawn_error(mut self) -> Self {
+            self.spawn = Err(std::io::Error::other("spawn failed"));
             self
         }
     }
@@ -225,9 +330,26 @@ mod tests {
         }
 
         fn check(&self, _program: &str, args: &[&str]) -> bool {
+            if args.first() == Some(&"ps") {
+                // Mimics `ollama ps`: DOWN for the first `server_down_for`
+                // probes, UP thereafter.
+                let mut probes = self.ps_probes.borrow_mut();
+                *probes += 1;
+                return *probes > self.server_down_for;
+            }
             // Mimics `ollama show <model>`: succeeds only for known models.
             args.last()
                 .is_some_and(|model| self.present_models.contains(model))
+        }
+
+        fn spawn(&self, program: &str, args: &[&str]) -> std::io::Result<()> {
+            self.spawned
+                .borrow_mut()
+                .push(format!("{program} {}", args.join(" ")));
+            match &self.spawn {
+                Ok(()) => Ok(()),
+                Err(e) => Err(std::io::Error::new(e.kind(), e.to_string())),
+            }
         }
     }
 
@@ -247,6 +369,7 @@ mod tests {
 
     #[test]
     fn ensure_is_a_no_op_when_everything_is_present() {
+        // ollama installed, server already up, model already pulled.
         let runner =
             FakeRunner::new(vec!["ollama"], Ok(true)).with_present_models(vec!["qwen2.5-coder:7b"]);
         let steps = ensure("macos", &runner, "qwen2.5-coder:7b", None).unwrap();
@@ -254,25 +377,28 @@ mod tests {
             steps,
             vec![
                 SetupStep::OllamaAlreadyPresent,
+                SetupStep::ServerAlreadyRunning,
                 SetupStep::ModelAlreadyPresent {
                     model: "qwen2.5-coder:7b".to_string()
                 }
             ]
         );
-        // Nothing was installed or pulled.
+        // Nothing was installed, started, or pulled.
         assert!(runner.ran.borrow().is_empty());
+        assert!(runner.spawned.borrow().is_empty());
     }
 
     #[test]
-    fn ensure_installs_ollama_via_the_official_script_and_pulls_the_model() {
-        // ollama absent and no sudo password supplied (the CLI path): the
-        // installer runs directly, then the model is pulled.
-        let runner = FakeRunner::new(vec![], Ok(true));
+    fn ensure_installs_ollama_starts_the_server_and_pulls_the_model() {
+        // ollama absent, no sudo password (the CLI path): the official installer
+        // runs directly; the server is down until started; the model is pulled.
+        let runner = FakeRunner::new(vec![], Ok(true)).with_server_down_for(1);
         let steps = ensure("linux", &runner, "qwen2.5:7b", None).unwrap();
         assert_eq!(
             steps,
             vec![
                 SetupStep::OllamaInstalled { manager: INSTALLER },
+                SetupStep::ServerStarted,
                 SetupStep::ModelPulled {
                     model: "qwen2.5:7b".to_string()
                 }
@@ -285,8 +411,10 @@ mod tests {
                 "ollama pull qwen2.5:7b".to_string(),
             ]
         );
-        // No sudo pre-authentication without a password.
+        // No sudo pre-authentication without a password; the server was started
+        // in the background before the pull.
         assert!(runner.piped.borrow().is_none());
+        assert_eq!(*runner.spawned.borrow(), vec!["ollama serve"]);
     }
 
     #[test]
@@ -380,5 +508,94 @@ mod tests {
     #[test]
     fn ollama_manual_points_at_the_official_download() {
         assert!(ollama_manual().contains("ollama.com"));
+    }
+
+    // --- server start-up ---------------------------------------------------
+
+    /// A near-instant wait so the start-up tests never sleep for real.
+    fn fast_wait(polls: usize) -> ServerWait {
+        ServerWait {
+            polls,
+            interval: Duration::ZERO,
+        }
+    }
+
+    #[test]
+    fn server_running_uses_the_ps_probe() {
+        let up = FakeRunner::new(vec!["ollama"], Ok(true));
+        assert!(server_running(&up));
+
+        let down = FakeRunner::new(vec!["ollama"], Ok(true)).with_server_down_for(1);
+        assert!(!server_running(&down));
+    }
+
+    #[test]
+    fn ensure_server_reports_an_already_running_server() {
+        let runner = FakeRunner::new(vec!["ollama"], Ok(true));
+        assert_eq!(
+            ensure_server(&runner, ServerWait::default()),
+            Ok(SetupStep::ServerAlreadyRunning)
+        );
+        // A running server is never (re)started.
+        assert!(runner.spawned.borrow().is_empty());
+    }
+
+    #[test]
+    fn ensure_server_starts_it_and_waits_until_it_is_ready() {
+        // Down for the initial probe and one more poll, then up: this exercises
+        // both the spawn and the poll/sleep loop.
+        let runner = FakeRunner::new(vec!["ollama"], Ok(true)).with_server_down_for(2);
+        assert_eq!(
+            ensure_server(&runner, fast_wait(5)),
+            Ok(SetupStep::ServerStarted)
+        );
+        assert_eq!(*runner.spawned.borrow(), vec!["ollama serve"]);
+    }
+
+    #[test]
+    fn ensure_server_reports_a_failed_spawn() {
+        // Server down and `ollama serve` cannot be launched at all.
+        let runner = FakeRunner::new(vec!["ollama"], Ok(true))
+            .with_server_down_for(usize::MAX)
+            .with_spawn_error();
+        assert_eq!(
+            ensure_server(&runner, fast_wait(3)),
+            Err(SetupError::ServerStartFailed)
+        );
+    }
+
+    #[test]
+    fn ensure_server_times_out_when_the_server_never_comes_up() {
+        // Spawn succeeds but the server never accepts connections; after the
+        // bounded poll budget is spent, give up with ServerStartFailed.
+        let runner = FakeRunner::new(vec!["ollama"], Ok(true)).with_server_down_for(usize::MAX);
+        assert_eq!(
+            ensure_server(&runner, fast_wait(3)),
+            Err(SetupError::ServerStartFailed)
+        );
+        assert_eq!(*runner.spawned.borrow(), vec!["ollama serve"]);
+    }
+
+    #[test]
+    fn ensure_server_started_is_ok_when_the_server_is_running() {
+        let runner = FakeRunner::new(vec!["ollama"], Ok(true));
+        assert_eq!(ensure_server_started(&runner), Ok(()));
+    }
+
+    #[test]
+    fn ensure_server_started_reports_a_short_message_on_failure() {
+        // Server down and the spawn fails -> the caller gets the guidance text.
+        let runner = FakeRunner::new(vec!["ollama"], Ok(true))
+            .with_server_down_for(usize::MAX)
+            .with_spawn_error();
+        assert_eq!(
+            ensure_server_started(&runner),
+            Err(server_start_failed_message())
+        );
+    }
+
+    #[test]
+    fn server_start_failed_message_mentions_ollama_serve() {
+        assert!(server_start_failed_message().contains("ollama serve"));
     }
 }

@@ -217,6 +217,12 @@ pub trait CommandRunner {
     /// "is this Ollama model already pulled?" — where the command's own output
     /// should not reach the user.
     fn check(&self, program: &str, args: &[&str]) -> bool;
+
+    /// Spawn `program args...` as a detached background process, returning as
+    /// soon as it has launched (without waiting for it to exit). Used to bring
+    /// up a long-running daemon — the Ollama server — that other commands
+    /// depend on. Its output is discarded.
+    fn spawn(&self, program: &str, args: &[&str]) -> std::io::Result<()>;
 }
 
 /// The production [`CommandRunner`], backed by [`std::process::Command`].
@@ -262,6 +268,18 @@ impl CommandRunner for SystemRunner {
             .status()
             .map(|status| status.success())
             .unwrap_or(false)
+    }
+
+    fn spawn(&self, program: &str, args: &[&str]) -> std::io::Result<()> {
+        // Detach from our stdio so the daemon outlives this call and never
+        // writes onto the user's terminal; the handle is dropped on purpose.
+        std::process::Command::new(program)
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map(|_| ())
     }
 }
 
@@ -544,6 +562,12 @@ mod tests {
             // A probe succeeds when the configured run result is a clean exit.
             matches!(self.run, Ok(true))
         }
+
+        fn spawn(&self, _program: &str, _args: &[&str]) -> std::io::Result<()> {
+            // No background daemons are needed to exercise the remediation
+            // logic, so the fake treats every spawn as a clean launch.
+            Ok(())
+        }
     }
 
     fn missing(name: &'static str) -> Check {
@@ -560,6 +584,15 @@ mod tests {
         assert!(!fail
             .run_with_input("sudo", &["-S", "-v"], "secret")
             .unwrap());
+    }
+
+    #[test]
+    fn fake_runner_spawn_is_inert() {
+        // The remediation logic never starts a daemon, so the fake's `spawn`
+        // (required by the trait, exercised for real in `local_llm`) is a
+        // no-op; assert it stays one.
+        let runner = FakeRunner::new(vec![], Ok(true));
+        assert!(runner.spawn("ollama", &["serve"]).is_ok());
     }
 
     #[test]
@@ -710,5 +743,12 @@ mod tests {
         assert!(runner.check("git", &["--version"]));
         assert!(!runner.check("git", &["--no-such-flag-zzz"]));
         assert!(!runner.check("definitely-not-a-real-binary-xyz", &[]));
+
+        // Spawning a real binary launches it without waiting; a missing
+        // program surfaces the spawn error.
+        assert!(runner.spawn("git", &["--version"]).is_ok());
+        assert!(runner
+            .spawn("definitely-not-a-real-binary-xyz", &[])
+            .is_err());
     }
 }

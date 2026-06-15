@@ -21,6 +21,10 @@
 
 - **トランスポート**: stdio 上の **JSON-RPC 2.0**（[issue MCP サーバ](03-mcp.md) と同じ実装）。
 - **バックエンド**: `ollama run <model>` へシェルアウト。プロンプトを標準入力で渡し、標準出力を返す。
+- **サーバの自動起動**: 呼び出しのたびに Ollama サーバの起動を確認し、停止していれば
+  `ollama serve` をバックグラウンドで起動して接続できるまで待ちます。Homebrew で入れた `ollama` は
+  サーバを常駐させず、`run` / `pull` も自動起動しないため、これがないと
+  `could not connect to ollama server` で失敗します。
 - **既定は無効**: usagi が勝手に有効化することはありません。下記の通り config で明示的に on にします。
 
 ## 有効化（config）
@@ -49,11 +53,14 @@ Config 画面（`usagi hop` → `config`、または `usagi config --edit`）か
 
 - **Config 画面の Install アクション**（上記）。`Space` / `Enter` でモーダルを開いて sudo パスワードを入力し、
   確定すると公式インストーラ（`curl -fsSL https://ollama.com/install.sh | sh`）をバックグラウンドで実行します。
-  sudo は入力したパスワードで事前認証し、ランタイム導入を非対話で進めたうえでモデルを `ollama pull` します。
-  実行中はスピナーを表示し、TUI はブロックしません。
-- **`usagi doctor --fix`**: `local_llm.enabled` が `true` のとき、`ollama` 本体（公式インストーラ）と
-  モデル（`ollama pull <model>`）を導入します。CLI 上では sudo が必要に応じて対話的にパスワードを尋ねます。
-  `usagi doctor` は導入状況を健全性チェックとして表示します。
+  sudo は入力したパスワードで事前認証し、ランタイム導入を非対話で進め、必要なら Ollama サーバを起動してから
+  モデルを `ollama pull` します。実行中はスピナーを表示し、TUI はブロックしません。
+- **`usagi doctor --fix`**: `local_llm.enabled` が `true` のとき、`ollama` 本体（公式インストーラ）を導入し、
+  必要なら Ollama サーバを起動してから、モデル（`ollama pull <model>`）を導入します。
+  CLI 上では sudo が必要に応じて対話的にパスワードを尋ねます。`usagi doctor` は導入状況を健全性チェックとして表示します。
+
+> 導入は「`ollama` 本体 → サーバ起動 → モデル取得」の順に進みます。サーバ起動はモデル取得が
+> `could not connect to ollama server` で失敗しないための前提ステップです。
 
 公式インストーラが対応しない OS（macOS / Linux 以外）では、
 [公式ダウンロードページ](https://ollama.com/download) を案内します。
@@ -107,7 +114,7 @@ presentation/mcp_llm.rs       … LlmMcpServer：JSON-RPC ディスパッチ + t
 |---|---|
 | `presentation/cli/llm_mcp.rs` | `usagi llm-mcp` のエントリ。stdin ループと `ollama` へのシェルアウト。`mcp` 同様カバレッジ対象外。 |
 | `presentation/mcp_llm.rs` | `LlmMcpServer`。プロトコル分岐・tool ディスパッチを純粋関数として実装し、`LlmBackend` トレイトでモデル呼び出しを抽象化。ユニットテストで網羅。 |
-| `usecase/local_llm.rs` | `ollama` / モデルの有無判定とインストール（`doctor::CommandRunner` を再利用）。 |
+| `usecase/local_llm.rs` | `ollama` / モデルの有無判定とインストール、および Ollama サーバの起動確認・自動起動（`doctor::CommandRunner` を再利用）。 |
 
 ## 設計上の選択
 
