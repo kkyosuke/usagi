@@ -30,6 +30,27 @@ impl BranchStatus {
             BranchStatus::Merged => "merged",
         }
     }
+
+    /// Rank by lifecycle progress: `Local` < `Pushed` < `Merged`.
+    fn rank(self) -> u8 {
+        match self {
+            BranchStatus::Local => 0,
+            BranchStatus::Pushed => 1,
+            BranchStatus::Merged => 2,
+        }
+    }
+
+    /// Aggregate the per-repository statuses of one session's branch into a
+    /// single status: the *least-progressed* of them. So a session reads as
+    /// `merged` only when every repository's branch has merged, and `pushed`
+    /// only when none is still local — a conservative summary where `merged`
+    /// always means "fully landed everywhere". An empty iterator yields `Local`.
+    pub fn aggregate(statuses: impl IntoIterator<Item = BranchStatus>) -> BranchStatus {
+        statuses
+            .into_iter()
+            .min_by_key(|s| s.rank())
+            .unwrap_or(BranchStatus::Local)
+    }
 }
 
 impl std::fmt::Display for BranchStatus {
@@ -122,6 +143,21 @@ mod tests {
             assert_eq!(status.as_str(), text);
             assert_eq!(format!("{status}"), text);
         }
+    }
+
+    #[test]
+    fn aggregate_reports_the_least_progressed_status() {
+        use BranchStatus::*;
+        // Uniform sets keep their status.
+        assert_eq!(BranchStatus::aggregate([Merged, Merged]), Merged);
+        assert_eq!(BranchStatus::aggregate([Pushed, Pushed]), Pushed);
+        // Mixed sets fall to the least-progressed member, regardless of order.
+        assert_eq!(BranchStatus::aggregate([Merged, Local]), Local);
+        assert_eq!(BranchStatus::aggregate([Pushed, Merged]), Pushed);
+        assert_eq!(BranchStatus::aggregate([Merged, Pushed, Local]), Local);
+        // A single repository reports its own status; an empty set is `Local`.
+        assert_eq!(BranchStatus::aggregate([Merged]), Merged);
+        assert_eq!(BranchStatus::aggregate([]), Local);
     }
 
     #[test]

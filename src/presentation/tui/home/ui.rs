@@ -35,8 +35,17 @@ const DETACHED: &str = "(detached)";
 /// cell (`⌂`/`●`/`○`), each followed by a space.
 const NAME_PREFIX: usize = 4;
 
-/// Right-edge field width for the git `status` label on line 1.
-const STATUS_COL: usize = 6;
+/// Right-edge field width for the git `status` label on line 1: a status icon,
+/// a space, and the widest status word (`merged` / `pushed`, 6 columns).
+const STATUS_COL: usize = 8;
+
+/// Nerd Font (git) glyphs paired with each branch lifecycle status, for an
+/// at-a-glance read of the right-edge status field. They need a patched "Nerd
+/// Font" terminal font to render; without one the terminal shows a fallback box,
+/// but the colour-coded word beside the icon still carries the meaning.
+const LOCAL_ICON: char = '\u{e725}'; // nf-dev-git_branch — lives only locally
+const PUSHED_ICON: char = '\u{f0ee}'; // nf-fa-cloud_upload — pushed to the remote
+const MERGED_ICON: char = '\u{e727}'; // nf-dev-git_merge — merged into the default branch
 
 /// Indent of line 2 (the detail line) before the active marker; the marker and
 /// its trailing space then put the detail text under the branch name.
@@ -102,8 +111,8 @@ fn layout(width: usize) -> (usize, usize) {
 }
 
 /// The centred title bar: workspace name and session count. The count covers
-/// every row in the left pane — the root row plus each worktree — so it matches
-/// what the user sees, rather than the bare worktree count.
+/// every row in the left pane — the root row plus each session (one row per
+/// session, not per repository) — so it matches what the user sees.
 fn title_bar(width: usize, list: &WorktreeList) -> String {
     let count = list.session_count();
     let label = format!(
@@ -114,9 +123,20 @@ fn title_bar(width: usize, list: &WorktreeList) -> String {
     widgets::title_line(width, &label)
 }
 
-/// The colour-coded label for a branch's lifecycle status, clipped to `width`.
-fn status_label(status: BranchStatus, width: usize) -> String {
-    let text = clip_to_width(status.as_str(), width);
+/// The Nerd Font git glyph for a branch lifecycle status.
+fn status_icon(status: BranchStatus) -> char {
+    match status {
+        BranchStatus::Local => LOCAL_ICON,
+        BranchStatus::Pushed => PUSHED_ICON,
+        BranchStatus::Merged => MERGED_ICON,
+    }
+}
+
+/// The colour-coded `<icon> <word>` label for a branch's lifecycle status. The
+/// icon gives an at-a-glance read; the word keeps it legible without a Nerd
+/// Font and disambiguates the colour.
+fn status_label(status: BranchStatus) -> String {
+    let text = format!("{} {}", status_icon(status), status.as_str());
     match status {
         BranchStatus::Local => style(text).yellow().to_string(),
         BranchStatus::Pushed => style(text).green().to_string(),
@@ -124,14 +144,14 @@ fn status_label(status: BranchStatus, width: usize) -> String {
     }
 }
 
-/// The line-1 right-edge status field: the colour-coded status word
+/// The line-1 right-edge status field: the colour-coded `<icon> <word>` label
 /// right-aligned within [`STATUS_COL`] columns, or all blanks when there is no
 /// status (the root row).
 fn status_cell(status: Option<BranchStatus>) -> String {
     match status {
         None => " ".repeat(STATUS_COL),
         Some(status) => {
-            let label = status_label(status, STATUS_COL);
+            let label = status_label(status);
             let pad = STATUS_COL.saturating_sub(console::measure_text_width(&label));
             format!("{}{label}", " ".repeat(pad))
         }
@@ -926,16 +946,18 @@ mod tests {
     }
 
     #[test]
-    fn status_label_colours_each_variant() {
-        assert!(status_label(BranchStatus::Local, 10).contains("local"));
-        assert!(status_label(BranchStatus::Pushed, 10).contains("pushed"));
-        assert!(status_label(BranchStatus::Merged, 10).contains("merged"));
-    }
-
-    #[test]
-    fn status_label_clips_to_width() {
-        let clipped = status_label(BranchStatus::Merged, 3);
-        assert!(console::strip_ansi_codes(&clipped).contains('…'));
+    fn status_label_pairs_a_git_icon_with_each_word() {
+        for (status, icon, word) in [
+            (BranchStatus::Local, LOCAL_ICON, "local"),
+            (BranchStatus::Pushed, PUSHED_ICON, "pushed"),
+            (BranchStatus::Merged, MERGED_ICON, "merged"),
+        ] {
+            let plain = console::strip_ansi_codes(&status_label(status)).into_owned();
+            assert!(plain.contains(icon), "{plain:?} missing its icon");
+            assert!(plain.contains(word), "{plain:?} missing its word");
+            // The icon leads the word: `<icon> <word>`.
+            assert_eq!(plain, format!("{icon} {word}"));
+        }
     }
 
     #[test]
@@ -1049,8 +1071,13 @@ mod tests {
             console::strip_ansi_codes(&status_cell(Some(BranchStatus::Pushed))).into_owned();
         assert_eq!(console::measure_text_width(&pushed), STATUS_COL);
         assert!(pushed.ends_with("pushed"));
+        // The icon leads the word inside the field.
+        assert!(pushed.contains(PUSHED_ICON));
+        // "local" (icon + space + 5 cols = 7) is right-aligned within the 8-col
+        // field, so a single lead space precedes the icon.
         let local = console::strip_ansi_codes(&status_cell(Some(BranchStatus::Local))).into_owned();
-        assert_eq!(local, " local");
+        assert_eq!(local, format!(" {LOCAL_ICON} local"));
+        // The root has no status: an all-blank field of the same width.
         assert_eq!(status_cell(None), " ".repeat(STATUS_COL));
     }
 
