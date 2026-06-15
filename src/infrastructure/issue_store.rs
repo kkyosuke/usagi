@@ -56,14 +56,19 @@ impl IssueStore {
 
     /// Read and parse every issue markdown file, sorted by number.
     pub fn scan(&self) -> Result<Vec<Issue>> {
-        let mut issues = Vec::new();
-        for path in self.issue_files()? {
-            let text =
-                fs::read_to_string(&path).context(format!("failed to read {}", path.display()))?;
-            let issue = Issue::from_markdown(&text)
-                .with_context(|| format!("failed to parse {}", path.display()))?;
-            issues.push(issue);
-        }
+        use rayon::prelude::*;
+
+        let mut issues: Vec<Issue> = self
+            .issue_files()?
+            .into_par_iter()
+            .map(|path| {
+                let text = fs::read_to_string(&path)
+                    .context(format!("failed to read {}", path.display()))?;
+                Issue::from_markdown(&text)
+                    .with_context(|| format!("failed to parse {}", path.display()))
+            })
+            .collect::<Result<Vec<_>>>()?;
+
         issues.sort_by_key(|i| i.number);
         Ok(issues)
     }
