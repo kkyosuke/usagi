@@ -357,6 +357,7 @@ mod tests {
             Ok(Key::ArrowRight), // -> alpha
             Ok(Key::ArrowDown),  // Notifications
             Ok(Key::ArrowDown),  // Agent CLI
+            Ok(Key::ArrowDown),  // Session Action UI
             Ok(Key::ArrowDown),  // Local LLM
             Ok(Key::ArrowDown),  // Local LLM Model
             Ok(Key::ArrowDown),  // Save button
@@ -539,6 +540,7 @@ mod tests {
             Ok(Key::ArrowDown), // Default Workspace
             Ok(Key::ArrowDown), // Notifications
             Ok(Key::ArrowDown), // Agent CLI
+            Ok(Key::ArrowDown), // Session Action UI
             Ok(Key::ArrowDown), // Local LLM
         ]
     }
@@ -646,6 +648,7 @@ mod tests {
             Ok(Key::ArrowDown),  // Default Workspace
             Ok(Key::ArrowDown),  // Notifications
             Ok(Key::ArrowDown),  // Agent CLI
+            Ok(Key::ArrowDown),  // Session Action UI
             Ok(Key::ArrowDown),  // Local LLM
             Ok(Key::ArrowRight), // toggle On
             Ok(Key::ArrowDown),  // Local LLM Model

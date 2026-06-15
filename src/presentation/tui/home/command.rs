@@ -34,8 +34,12 @@ pub enum Effect {
     /// name) to pick one or more sessions to delete at once. `force` carries the
     /// `--force` flag so the confirmed removal can discard uncommitted changes.
     OpenRemoveModal { force: bool },
-    /// Switch the active worktree to the one named by the string. The screen
-    /// resolves the name against its worktree list and reports the result.
+    /// Enter 切替 (Switch) to pick a session in the left pane (the user ran
+    /// `session switch` with no name).
+    EnterSwitch,
+    /// Focus the session named by the string (the user ran `session switch
+    /// <name>`). The event loop resolves the name against the worktree list and,
+    /// for a live session, attaches the pane.
     Activate(String),
     /// Open an interactive terminal in the selected worktree (the user ran
     /// `terminal`). The directory is resolved by the event loop.
@@ -72,30 +76,33 @@ impl CommandResult {
     }
 }
 
-/// Which of the home screen's two command scopes a command belongs to.
+/// Which of the home screen's command scopes a command belongs to.
 ///
-/// The command line is split in two so the surface stays small and clear: when
-/// the cursor is on the workspace **root** row the user is operating the
-/// workspace as a whole, and when it is on a **session** (worktree) row they are
-/// operating that one session. Commands are offered (completion, hints, `man`
-/// grouping) according to the current scope; [`CommandScope::Both`] commands are
-/// utilities available everywhere.
+/// The two surfaces are *physically separate* in the redesigned home screen
+/// (統括 / 切替 / 在席 / 没入, see `document/design/05-home.md`): the bottom
+/// command line in *統括 (Overview)* operates the whole workspace
+/// ([`CommandScope::Workspace`]), while the *在席 (Focus)* right pane operates one
+/// session ([`CommandScope::Session`]). Because the two never share a line, the
+/// scopes do not nest — a command is offered only in its own scope (plus the
+/// shared utilities). Commands are offered (completion, hints, `man` grouping)
+/// accordingly; [`CommandScope::Both`] commands are utilities available
+/// everywhere.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommandScope {
-    /// Operating the whole workspace (the root row): `session`, `config`,
-    /// `doctor`.
+    /// Operating the whole workspace, the *統括 (Overview)* line: `session`,
+    /// `config`, `doctor`.
     Workspace,
-    /// Operating a single selected session (a worktree row): `terminal`,
+    /// Operating a single session, the *在席 (Focus)* right pane: `terminal`,
     /// `agent`, `ai`.
     Session,
-    /// A utility available in both scopes: `man`, `history`, `clear`, `quit`.
+    /// A utility available in every scope: `man`, `history`, `clear`, `quit`.
     Both,
 }
 
 impl CommandScope {
     /// Whether a command of this scope is offered while the screen is in
-    /// `current` scope (`Workspace` or `Session`). [`CommandScope::Both`]
-    /// commands are always offered.
+    /// `current` scope. A command is offered in its own scope only;
+    /// [`CommandScope::Both`] utilities are offered everywhere.
     pub fn visible_in(self, current: CommandScope) -> bool {
         self == CommandScope::Both || self == current
     }
@@ -417,23 +424,18 @@ impl Command for SessionCommand {
     }
 }
 
-/// `session switch [name]`: switch the active session, or list the available
-/// ones when no name is given.
+/// `session switch [name]`: enter 切替 (Switch) to pick a session in the left
+/// pane when no name is given ([`Effect::EnterSwitch`]), or focus the named one
+/// directly ([`Effect::Activate`]).
 ///
-/// With a name, the resolution (and the success/not-found message) happens in
-/// the screen, which owns the worktree list and the active selection.
-fn switch(name: &str, ctx: &CommandContext) -> CommandResult {
+/// Either way the mode transition (and, for a live session, attaching the pane)
+/// happens in the event loop, which owns the worktree list and the modes.
+fn switch(name: &str, _ctx: &CommandContext) -> CommandResult {
     if name.is_empty() {
-        if ctx.worktrees.is_empty() {
-            return CommandResult::line(LogLine::output("No sessions to switch between."));
-        }
-        let mut lines = vec![LogLine::output("Sessions:")];
-        for worktree in ctx.worktrees {
-            let marker = if worktree.active { "*" } else { " " };
-            lines.push(LogLine::output(format!("  {marker} {}", worktree.name)));
-        }
-        lines.push(LogLine::output("Use \"session switch <name>\" to switch."));
-        return CommandResult::lines(lines);
+        return CommandResult {
+            lines: Vec::new(),
+            effect: Effect::EnterSwitch,
+        };
     }
 
     CommandResult {
@@ -580,6 +582,11 @@ impl CommandRegistry {
         Self {
             commands: vec![
                 Box::new(SessionCommand),
+                Box::new(TerminalCommand),
+                Box::new(AgentCommand),
+                // The not-yet-implemented `ai` placeholder sits after the working
+                // session commands so the 在席 (Focus) menu lists (and highlights)
+                // `terminal` first, matching `document/design/05-home.md`.
                 Box::new(ComingSoonCommand {
                     name: "ai",
                     description: "Talk to the AI agent",
@@ -587,8 +594,6 @@ impl CommandRegistry {
                     examples: &["ai fix the failing test"],
                     scope: CommandScope::Session,
                 }),
-                Box::new(TerminalCommand),
-                Box::new(AgentCommand),
                 Box::new(ConfigCommand),
                 Box::new(HistoryCommand),
                 Box::new(ComingSoonCommand {
@@ -621,6 +626,17 @@ impl CommandRegistry {
                 examples: c.examples(),
                 scope: c.scope(),
             })
+            .collect()
+    }
+
+    /// The commands belonging exactly to `scope`, in display order — used by the
+    /// 在席 (Focus) menu to list a session's runnable commands (`terminal`,
+    /// `agent`, `ai`). Unlike completion this is an exact-scope filter, so it
+    /// excludes the shared [`CommandScope::Both`] utilities.
+    pub fn commands_in_scope(&self, scope: CommandScope) -> Vec<CommandInfo> {
+        self.infos()
+            .into_iter()
+            .filter(|i| i.scope == scope)
             .collect()
     }
 
@@ -1077,27 +1093,18 @@ mod tests {
     }
 
     #[test]
-    fn session_switch_without_a_name_lists_sessions_and_marks_the_active_one() {
+    fn session_switch_without_a_name_enters_switch_mode() {
+        // `session switch` with no name hands off to 切替 (Switch); the event loop
+        // owns the mode transition, so no lines are produced here.
         let result = registry().dispatch("session switch", &[], &worktree_refs());
-        assert_eq!(result.effect, Effect::None);
-        let joined = result
-            .lines
-            .iter()
-            .map(|l| l.text.as_str())
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(joined.contains("Sessions:"));
-        // The active session is marked with `*`.
-        assert!(joined.contains("* main"));
-        assert!(joined.contains("feature"));
-        assert!(joined.contains("session switch <name>"));
-    }
-
-    #[test]
-    fn session_switch_without_sessions_says_so() {
-        let result = registry().dispatch("session switch", &[], &[]);
-        assert_eq!(result.effect, Effect::None);
-        assert!(result.lines[0].text.contains("No sessions"));
+        assert_eq!(result.effect, Effect::EnterSwitch);
+        assert!(result.lines.is_empty());
+        // Even with no sessions it still enters Switch (the left pane has the root
+        // row to pick or create from).
+        assert_eq!(
+            registry().dispatch("session switch", &[], &[]).effect,
+            Effect::EnterSwitch
+        );
     }
 
     #[test]
@@ -1238,8 +1245,8 @@ mod tests {
     fn suggest_splits_the_command_surface_by_scope() {
         let has = |names: &[String], name: &str| names.iter().any(|n| n == name);
 
-        // Workspace scope offers the workspace commands and the shared utilities,
-        // but never the session ones.
+        // The 統括 (Overview) line offers the workspace commands and the shared
+        // utilities, but never the session-specific ones.
         let workspace = suggested_names(CommandScope::Workspace);
         assert!(has(&workspace, "session"));
         assert!(has(&workspace, "config"));
@@ -1249,8 +1256,9 @@ mod tests {
         assert!(!has(&workspace, "agent"));
         assert!(!has(&workspace, "ai"));
 
-        // Session scope is the mirror image: session commands plus utilities,
-        // never the workspace ones.
+        // The 在席 (Focus) prompt offers the session-specific commands and the
+        // shared utilities, but never the workspace ones — the two surfaces are
+        // physically separate, so they do not nest.
         let session = suggested_names(CommandScope::Session);
         assert!(has(&session, "terminal"));
         assert!(has(&session, "agent"));
@@ -1263,7 +1271,7 @@ mod tests {
 
     #[test]
     fn suggest_filters_commands_by_prefix() {
-        // "s" only matches "session" among the workspace-scope built-ins.
+        // "s" only matches "session" in workspace scope.
         assert_eq!(
             registry().suggest("s", CommandScope::Workspace),
             Hint::Commands(vec![CommandHint {
@@ -1271,8 +1279,8 @@ mod tests {
                 description: "Create, list, or switch sessions (branch + worktree)",
             }])
         );
-        // The same prefix in session scope matches nothing (no session command
-        // starts with "s"), so there is no hint.
+        // The scopes are separate, so "s" matches nothing in session scope (no
+        // session-specific command begins with it).
         assert_eq!(registry().suggest("s", CommandScope::Session), Hint::None);
     }
 
@@ -1311,9 +1319,8 @@ mod tests {
     }
 
     #[test]
-    fn command_scope_visible_in_matches_same_scope_or_both() {
-        // A scoped command is offered only in its own scope; a `Both` utility is
-        // offered everywhere.
+    fn command_scope_visibility_is_same_scope_or_both() {
+        // A command is offered in its own scope only; `Both` utilities everywhere.
         assert!(CommandScope::Workspace.visible_in(CommandScope::Workspace));
         assert!(!CommandScope::Workspace.visible_in(CommandScope::Session));
         assert!(CommandScope::Session.visible_in(CommandScope::Session));
@@ -1323,12 +1330,34 @@ mod tests {
     }
 
     #[test]
+    fn commands_in_scope_lists_a_scopes_own_commands_in_order() {
+        // The 在席 menu lists exactly the Session-scope commands, in registry
+        // order, excluding the shared utilities. `terminal` comes first (and is
+        // highlighted by default); the coming-soon `ai` placeholder comes last.
+        let session: Vec<&str> = registry()
+            .commands_in_scope(CommandScope::Session)
+            .iter()
+            .map(|i| i.name)
+            .collect();
+        assert_eq!(session, vec!["terminal", "agent", "ai"]);
+        // Workspace scope lists its own commands and none of the session ones.
+        let workspace: Vec<&str> = registry()
+            .commands_in_scope(CommandScope::Workspace)
+            .iter()
+            .map(|i| i.name)
+            .collect();
+        assert!(workspace.contains(&"session"));
+        assert!(workspace.contains(&"config"));
+        assert!(!workspace.contains(&"terminal"));
+    }
+
+    #[test]
     fn complete_respects_the_current_scope() {
-        // "a" matches the session commands "ai" and "agent" — offered in session
+        // "a" matches the session commands "agent" and "ai" — offered in session
         // scope, in registration order (common prefix "a")…
         let session = registry().complete("a", CommandScope::Session);
         assert_eq!(session.input, "a");
-        assert_eq!(session.candidates, vec!["ai", "agent"]);
+        assert_eq!(session.candidates, vec!["agent", "ai"]);
         // …but nothing in workspace scope, so the input is left untouched.
         let workspace = registry().complete("a", CommandScope::Workspace);
         assert_eq!(workspace.input, "a");

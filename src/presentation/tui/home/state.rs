@@ -10,9 +10,12 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
+use crate::domain::settings::SessionActionUi;
 use crate::domain::workspace_state::{SessionRecord, WorktreeState};
 
-use super::command::{CommandRegistry, CommandScope, Effect, Hint, WorktreeRef};
+use super::command::{
+    CommandInfo, CommandRegistry, CommandScope, Completion, Effect, Hint, WorktreeRef,
+};
 use super::terminal_view::TerminalView;
 
 /// The display name of a worktree: its branch, or a placeholder when detached.
@@ -197,44 +200,57 @@ impl WorktreeList {
     }
 }
 
-/// Which part of the screen currently has the keyboard.
+/// The home screen's mode — the "engagement ladder" the design is built around
+/// (統括 / 切替 / 在席 / 没入). Each step moves from overseeing the whole
+/// workspace toward operating deeper inside one session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
-    /// Navigating the worktree list (the default).
-    Sidebar,
-    /// Typing into the command input line.
-    Command,
+    /// 統括 (Overview): the workspace-wide command line, the default. The user
+    /// types `session` / `config` / `doctor`; results render *below the input*
+    /// and the right pane stays blank.
+    Overview,
+    /// 切替 (Switch): the session picker. The left pane has the keyboard for
+    /// choosing a session (Enter), creating one inline (`c`), or backing out
+    /// (Esc). Entered from Overview via `session switch`, and from Focus /
+    /// Attached via `Ctrl-O`.
+    Switch,
+    /// 在席 (Focus): a session is selected and operated in the *right pane* —
+    /// either a menu of its runnable commands or a session-scoped prompt
+    /// (chosen by [`crate::domain::settings::SessionActionUi`]).
+    Focus,
+    /// 没入 (Attached): an embedded terminal / agent is live in the right pane
+    /// and keys flow to it. `Ctrl-O` zooms out to Switch; `Ctrl-O` again to
+    /// Overview.
+    Attached,
 }
 
-/// What the right pane is currently showing.
+/// Where a [`Mode::Switch`] should return to when cancelled (`Esc` / `h`) — the
+/// mode it was opened from. `Ctrl-O` while in Switch always zooms out to
+/// Overview regardless of this.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RightPane {
-    /// The command output log (the default).
-    Log,
-    /// A live embedded terminal (the `terminal` command is running).
-    Terminal,
+pub enum ReturnMode {
+    /// Opened from 統括 via `session switch`.
+    Overview,
+    /// Opened from 在席 via `Ctrl-O`.
+    Focus,
+    /// Opened from 没入 via `Ctrl-O`; cancelling re-attaches the session.
+    Attached,
 }
 
 /// Why the embedded terminal pane handed control back to the event loop.
 ///
 /// The pane is driven by the impure terminal loop (`terminal_pane`); this enum
 /// is the small, testable vocabulary it returns so the event loop can decide
-/// what to do next — keep the shell alive and return to the sidebar, close it,
-/// or re-root the pane at the session the picker just focused.
+/// what to do next.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PaneExit {
-    /// The user detached (`Ctrl-O` then `Ctrl-O`): the shell stays alive in the
-    /// pool and the pane returns to the sidebar.
-    Detach,
-    /// The shell exited on its own (e.g. the user typed `exit`); it is gone.
+    /// The shell exited on its own (e.g. the user typed `exit`); it is gone, so
+    /// the pane returns to 在席 (Focus).
     Closed,
-    /// The session picker (`Ctrl-O`) chose a session — already focused in the
-    /// list — so re-root the pane there, keeping it open.
-    Switch,
-    /// The session picker (`Ctrl-O` then `c`) asked to create a new session: the
-    /// event loop opens the name modal, and on success re-roots the pane at the
-    /// freshly created session (as a plain shell), keeping it open.
-    Create,
+    /// The user pressed `Ctrl-O`: leave the pane to the 切替 (Switch) mode on the
+    /// left pane. Re-selecting the same session re-attaches; `Ctrl-O` again zooms
+    /// out to 統括 (Overview).
+    ToSwitch,
 }
 
 /// The kind of a log line, which decides how it is coloured.
@@ -296,24 +312,14 @@ pub struct Submission {
     pub recorded: Option<String>,
 }
 
-/// The open session-name modal: the name being typed plus an optional inline
-/// validation error (e.g. an empty or duplicate name).
+/// The inline session-name input shown in the left pane while creating a session
+/// from 切替 (Switch): the name being typed plus an optional inline validation
+/// error (e.g. an empty or duplicate name). Read through [`HomeState`]'s
+/// `create_input` / `create_error` accessors.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct SessionModal {
+struct CreateInput {
     input: String,
     error: Option<String>,
-}
-
-impl SessionModal {
-    /// The name typed so far.
-    pub fn input(&self) -> &str {
-        &self.input
-    }
-
-    /// The current validation error, if any.
-    pub fn error(&self) -> Option<&str> {
-        self.error.as_deref()
-    }
 }
 
 /// The open session-removal modal: the workspace's session names with a
@@ -372,35 +378,6 @@ pub struct SessionOutcome {
     pub select: Option<String>,
 }
 
-/// The open session picker: the in-terminal overlay (`Ctrl-O`) that lists every
-/// session — the root row plus each worktree — so the user can switch the live
-/// pane to another without leaving it. `names` are the rows in display order
-/// (index 0 is the root), `cursor` is the highlighted row, and `current` marks
-/// the session the pane is presently rooted at.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct SessionPicker {
-    names: Vec<String>,
-    cursor: usize,
-    current: usize,
-}
-
-impl SessionPicker {
-    /// The session names, in display order (index 0 is the root row).
-    pub fn names(&self) -> &[String] {
-        &self.names
-    }
-
-    /// The row the keyboard cursor sits on.
-    pub fn cursor(&self) -> usize {
-        self.cursor
-    }
-
-    /// The row the live pane is currently rooted at (marked as "here").
-    pub fn current(&self) -> usize {
-        self.current
-    }
-}
-
 /// The full state of the home screen.
 ///
 /// Not `Clone`/`Debug`: it owns a [`CommandRegistry`] of trait objects, which
@@ -417,18 +394,27 @@ pub struct HomeState {
     /// The commands available in command mode (the extension point for the
     /// follow-up command features).
     registry: CommandRegistry,
-    /// The session-name modal, when open. While set it captures all keys.
-    modal: Option<SessionModal>,
+    /// Which right-pane action surface 在席 (Focus) presents — a pickable menu
+    /// or a typed prompt. Injected from the effective settings by `mod.rs`.
+    session_action_ui: SessionActionUi,
+    /// Where a 切替 (Switch) returns to on `Esc` / `h`; only meaningful in
+    /// [`Mode::Switch`].
+    switch_return: ReturnMode,
+    /// The inline session-name input, when creating a session from 切替. While
+    /// set it captures the Switch mode's keys.
+    create: Option<CreateInput>,
+    /// The 在席 (Focus) menu cursor: which Session-scope command is highlighted.
+    focus_menu_cursor: usize,
+    /// The 在席 (Focus) prompt buffer (the session-scoped command line).
+    focus_prompt: String,
     /// The session-removal modal, when open (the user ran `session remove`
-    /// without a name). While set it captures all keys, like `modal`.
+    /// without a name). While set it captures all keys.
     remove_modal: Option<RemoveModal>,
     /// Sessions recorded for this workspace (from `state.json`), shown by
     /// `session list` and kept current as sessions are created.
     sessions: Vec<SessionRecord>,
-    /// What the right pane shows: the command log, or a live terminal.
-    right_pane: RightPane,
-    /// The latest snapshot of the embedded terminal's screen, set while the
-    /// `terminal` command is running and rendered in place of the log.
+    /// The latest snapshot of the embedded terminal's screen, set while a session
+    /// is 没入 (Attached) and rendered in the right pane.
     terminal_view: Option<TerminalView>,
     /// Worktree paths whose background session is waiting for the user (its
     /// agent rang the bell). Refreshed from the terminal monitor each redraw and
@@ -439,9 +425,6 @@ pub struct HomeState {
     /// the terminal monitor each redraw and rendered with a "running" icon,
     /// unless the path is also waiting (which takes precedence).
     live: HashSet<PathBuf>,
-    /// The session picker, when open (the user pressed `Ctrl-O` inside the live
-    /// terminal). While set it overlays the pane and captures its keys.
-    session_picker: Option<SessionPicker>,
 }
 
 impl HomeState {
@@ -460,21 +443,34 @@ impl HomeState {
         }
         Self {
             list: WorktreeList::new(workspace_name, worktrees),
-            mode: Mode::Sidebar,
+            mode: Mode::Overview,
             input: String::new(),
             history: Vec::new(),
             recall: None,
             log,
             registry: CommandRegistry::with_builtins(),
-            modal: None,
+            session_action_ui: SessionActionUi::default(),
+            switch_return: ReturnMode::Overview,
+            create: None,
+            focus_menu_cursor: 0,
+            focus_prompt: String::new(),
             remove_modal: None,
             sessions: Vec::new(),
-            right_pane: RightPane::Log,
             terminal_view: None,
             waiting: HashSet::new(),
             live: HashSet::new(),
-            session_picker: None,
         }
+    }
+
+    /// Set which right-pane action surface 在席 (Focus) presents (injected from
+    /// the effective settings by `mod.rs` at construction).
+    pub fn set_session_action_ui(&mut self, ui: SessionActionUi) {
+        self.session_action_ui = ui;
+    }
+
+    /// Which right-pane action surface 在席 (Focus) presents.
+    pub fn session_action_ui(&self) -> SessionActionUi {
+        self.session_action_ui
     }
 
     /// Seed the command history with entries restored from disk (oldest first),
@@ -557,17 +553,13 @@ impl HomeState {
         self.mode
     }
 
-    /// Which command scope the bottom command line is operating in: the whole
-    /// workspace when the cursor is on the root row, or the selected session
-    /// otherwise. The command line offers, completes, and hints only the
-    /// commands of this scope (plus the shared utilities), so the two modes stay
-    /// visually distinct.
+    /// Which command scope the 統括 (Overview) command line operates in: always
+    /// the whole workspace, since Overview is workspace-only (the session-scoped
+    /// surface lives in the 在席 right pane instead). Completion, hints, and `man`
+    /// grouping follow this. The 在席 prompt calls the registry with
+    /// [`CommandScope::Session`] directly via [`Self::focus_prompt_hint`] etc.
     pub fn command_scope(&self) -> CommandScope {
-        if self.list.root_selected() {
-            CommandScope::Workspace
-        } else {
-            CommandScope::Session
-        }
+        CommandScope::Workspace
     }
 
     pub fn input(&self) -> &str {
@@ -585,44 +577,34 @@ impl HomeState {
         &self.log
     }
 
-    /// What the right pane is currently showing.
-    pub fn right_pane(&self) -> RightPane {
-        self.right_pane
-    }
-
-    /// The current embedded-terminal snapshot, when the terminal is running.
+    /// The current embedded-terminal snapshot, when a session is 没入 (Attached).
     pub fn terminal_view(&self) -> Option<&TerminalView> {
         self.terminal_view.as_ref()
     }
 
-    /// Switch the right pane to the live terminal (the `terminal` command is
-    /// starting). The first snapshot arrives via [`set_terminal_view`].
+    /// Enter 没入 (Attached): an embedded terminal / agent is going live in the
+    /// right pane. The first snapshot arrives via [`set_terminal_view`].
     ///
     /// [`set_terminal_view`]: Self::set_terminal_view
-    pub fn show_terminal(&mut self) {
-        self.right_pane = RightPane::Terminal;
+    pub fn show_attached(&mut self) {
+        self.mode = Mode::Attached;
     }
 
-    /// Switch the right pane back to the command log (the terminal closed),
-    /// dropping the last terminal snapshot.
-    pub fn show_log(&mut self) {
-        self.right_pane = RightPane::Log;
+    /// Leave 没入 for 在席 (Focus): the embedded session was closed or detached,
+    /// so drop the snapshot and return to the focused session's action surface.
+    pub fn leave_attached(&mut self) {
+        self.mode = Mode::Focus;
         self.terminal_view = None;
     }
 
     /// Store the latest embedded-terminal screen snapshot, shown in the right
-    /// pane while the terminal is running.
+    /// pane while the session is 没入 (Attached).
     pub fn set_terminal_view(&mut self, view: TerminalView) {
         self.terminal_view = Some(view);
     }
 
-    /// Drop the embedded-terminal snapshot without otherwise touching the right
-    /// pane. Used between frames in the sidebar: when the selected session has no
-    /// live terminal to preview, the pane falls back to the command log (whereas
-    /// [`show_log`] also resets the pane mode and scroll, which the per-frame
-    /// preview must not do).
-    ///
-    /// [`show_log`]: Self::show_log
+    /// Drop the embedded-terminal snapshot without changing the mode. Used
+    /// between frames so a stale snapshot never lingers in the right pane.
     pub fn clear_terminal_view(&mut self) {
         self.terminal_view = None;
     }
@@ -661,117 +643,238 @@ impl HomeState {
         &self.live
     }
 
-    /// Move the worktree cursor up (sidebar mode).
-    pub fn move_up(&mut self) {
-        self.list.move_up();
-    }
-
-    /// Move the worktree cursor down (sidebar mode).
-    pub fn move_down(&mut self) {
-        self.list.move_down();
-    }
-
-    /// Make the row under the cursor the active one (the target of subsequent
-    /// commands), logging the switch. The root row switches to "root".
-    pub fn select_worktree(&mut self) {
-        let name = self.list.activate_selected().to_string();
-        self.log
-            .push(LogLine::notice(format!("Switched to \"{name}\"")));
-    }
-
     /// Focus the session at `row` (0 is the root row, `i` maps to worktree
-    /// `i - 1`) in the list, so the embedded terminal re-roots there. Used by
-    /// the session picker on confirm.
+    /// `i - 1`) in the list, so the embedded terminal re-roots there.
     pub fn focus_session(&mut self, row: usize) {
         self.list.focus_index(row);
     }
 
-    /// The open session picker, if any.
-    pub fn session_picker(&self) -> Option<&SessionPicker> {
-        self.session_picker.as_ref()
-    }
+    // --- 統括 (Overview) ---------------------------------------------------
 
-    /// Open the session picker, listing the root row then every worktree, with
-    /// the cursor on — and "here" marking — the session the pane is rooted at.
-    pub fn open_session_picker(&mut self) {
-        let mut names = vec![ROOT_NAME.to_string()];
-        names.extend(
-            self.list
-                .worktrees()
-                .iter()
-                .map(worktree_name)
-                .map(String::from),
-        );
-        let current = self.list.selected_index();
-        self.session_picker = Some(SessionPicker {
-            names,
-            cursor: current,
-            current,
-        });
-    }
-
-    /// Move the picker cursor up one row, wrapping to the bottom. No-op when the
-    /// picker is closed.
-    pub fn session_picker_move_up(&mut self) {
-        if let Some(picker) = self.session_picker.as_mut() {
-            picker.cursor = picker
-                .cursor
-                .checked_sub(1)
-                .unwrap_or(picker.names.len() - 1);
-        }
-    }
-
-    /// Move the picker cursor down one row, wrapping to the top. No-op when the
-    /// picker is closed.
-    pub fn session_picker_move_down(&mut self) {
-        if let Some(picker) = self.session_picker.as_mut() {
-            picker.cursor = (picker.cursor + 1) % picker.names.len();
-        }
-    }
-
-    /// Move the picker cursor to the 1-based session `number`, returning whether
-    /// it was in range. No-op (returning `false`) when out of range or the
-    /// picker is closed.
-    pub fn session_picker_select_number(&mut self, number: usize) -> bool {
-        let Some(picker) = self.session_picker.as_mut() else {
-            return false;
-        };
-        match number.checked_sub(1) {
-            Some(row) if row < picker.names.len() => {
-                picker.cursor = row;
-                true
-            }
-            _ => false,
-        }
-    }
-
-    /// Close the picker without switching.
-    pub fn cancel_session_picker(&mut self) {
-        self.session_picker = None;
-    }
-
-    /// Confirm the picker: close it, focus the highlighted session, and return
-    /// its row (so the terminal pane re-roots there). A no-op returning `None`
-    /// when the picker is closed.
-    pub fn confirm_session_picker(&mut self) -> Option<usize> {
-        let picker = self.session_picker.take()?;
-        self.focus_session(picker.cursor);
-        Some(picker.cursor)
-    }
-
-    /// Switch from the sidebar to the command input line.
-    pub fn enter_command_mode(&mut self) {
-        self.mode = Mode::Command;
-    }
-
-    /// Leave the command input line, discarding the half-typed input.
-    pub fn leave_command_mode(&mut self) {
-        self.mode = Mode::Sidebar;
+    /// Return to 統括 (Overview), clearing the transient 切替 / 在席 state.
+    pub fn enter_overview(&mut self) {
+        self.mode = Mode::Overview;
+        self.create = None;
+        self.focus_prompt.clear();
+        self.focus_menu_cursor = 0;
         self.input.clear();
         self.recall = None;
     }
 
-    /// Append a typed character to the input (command mode).
+    // --- 切替 (Switch) -----------------------------------------------------
+
+    /// Enter 切替 (Switch): move keyboard focus to the left pane to pick a
+    /// session, remembering where to return on `Esc` / `h`.
+    pub fn enter_switch(&mut self, return_to: ReturnMode) {
+        self.mode = Mode::Switch;
+        self.switch_return = return_to;
+        self.create = None;
+    }
+
+    /// Where the current 切替 returns to on `Esc` / `h`.
+    pub fn switch_return(&self) -> ReturnMode {
+        self.switch_return
+    }
+
+    /// Move the Switch cursor up one row, wrapping (delegates to the list).
+    pub fn switch_move_up(&mut self) {
+        self.list.move_up();
+    }
+
+    /// Move the Switch cursor down one row, wrapping (delegates to the list).
+    pub fn switch_move_down(&mut self) {
+        self.list.move_down();
+    }
+
+    /// Begin inline session creation in 切替: open an empty name input that
+    /// captures the mode's keys until confirmed (Enter) or cancelled (Esc).
+    pub fn switch_begin_create(&mut self) {
+        self.create = Some(CreateInput::default());
+    }
+
+    /// Whether an inline create input is open in 切替.
+    pub fn is_creating(&self) -> bool {
+        self.create.is_some()
+    }
+
+    /// The inline create input's name typed so far, if open.
+    pub fn create_input(&self) -> Option<&str> {
+        self.create.as_ref().map(|c| c.input.as_str())
+    }
+
+    /// The inline create input's current validation error, if any.
+    pub fn create_error(&self) -> Option<&str> {
+        self.create.as_ref().and_then(|c| c.error.as_deref())
+    }
+
+    /// Append a character to the inline create name (no-op when not creating).
+    pub fn create_push_char(&mut self, c: char) {
+        if let Some(create) = self.create.as_mut() {
+            create.input.push(c);
+            create.error = None;
+        }
+    }
+
+    /// Delete the last character of the inline create name (no-op when not
+    /// creating).
+    pub fn create_backspace(&mut self) {
+        if let Some(create) = self.create.as_mut() {
+            create.input.pop();
+            create.error = None;
+        }
+    }
+
+    /// Cancel inline creation, staying in 切替.
+    pub fn create_cancel(&mut self) {
+        self.create = None;
+    }
+
+    /// Validate and accept the inline create name. On success the input closes
+    /// and the trimmed name is returned (for the event loop to create the
+    /// session); on an empty or duplicate name the input stays open with an
+    /// inline error and `None` is returned. A no-op (returning `None`) when not
+    /// creating.
+    pub fn switch_confirm_create(&mut self) -> Option<String> {
+        let create = self.create.as_mut()?;
+        let name = create.input.trim().to_string();
+        if name.is_empty() {
+            create.error = Some("Name must not be empty.".to_string());
+            return None;
+        }
+        if self
+            .list
+            .worktrees()
+            .iter()
+            .any(|w| w.branch.as_deref() == Some(name.as_str()))
+        {
+            create.error = Some(format!("\"{name}\" already exists."));
+            return None;
+        }
+        self.create = None;
+        Some(name)
+    }
+
+    // --- 在席 (Focus) ------------------------------------------------------
+
+    /// Enter 在席 (Focus) on the session at `row` (0 is the root row): make it the
+    /// active and selected row, switch to the right-pane action surface, and reset
+    /// the menu cursor and prompt buffer.
+    pub fn enter_focus(&mut self, row: usize) {
+        self.list.focus_index(row);
+        self.list.activate_selected();
+        self.mode = Mode::Focus;
+        self.create = None;
+        self.focus_menu_cursor = 0;
+        self.focus_prompt.clear();
+    }
+
+    /// The display name of the focused (active) session: its branch, or
+    /// [`ROOT_NAME`] for the root row.
+    pub fn focused_session_name(&self) -> String {
+        self.list
+            .selected()
+            .map(worktree_name)
+            .unwrap_or(ROOT_NAME)
+            .to_string()
+    }
+
+    /// Leave 在席 for 統括 (Overview).
+    pub fn leave_focus(&mut self) {
+        self.enter_overview();
+    }
+
+    /// The Session-scope commands the 在席 menu lists, in registry order
+    /// (`terminal`, `agent`, `ai`).
+    pub fn focus_menu_commands(&self) -> Vec<CommandInfo> {
+        self.registry.commands_in_scope(CommandScope::Session)
+    }
+
+    /// The 在席 menu cursor (which Session-scope command is highlighted).
+    pub fn focus_menu_cursor(&self) -> usize {
+        self.focus_menu_cursor
+    }
+
+    /// Move the 在席 menu cursor up one row, wrapping. The Session-scope command
+    /// list is always non-empty, so `count` is clamped to at least 1 to stay
+    /// underflow-safe.
+    pub fn focus_menu_move_up(&mut self) {
+        let count = self.focus_menu_commands().len().max(1);
+        self.focus_menu_cursor = self.focus_menu_cursor.checked_sub(1).unwrap_or(count - 1);
+    }
+
+    /// Move the 在席 menu cursor down one row, wrapping. See [`focus_menu_move_up`]
+    /// for the non-empty invariant.
+    ///
+    /// [`focus_menu_move_up`]: Self::focus_menu_move_up
+    pub fn focus_menu_move_down(&mut self) {
+        let count = self.focus_menu_commands().len().max(1);
+        self.focus_menu_cursor = (self.focus_menu_cursor + 1) % count;
+    }
+
+    /// The 在席 command under the menu cursor, clamped to the available commands.
+    pub fn focus_selected_command(&self) -> CommandInfo {
+        let commands = self.focus_menu_commands();
+        let index = self.focus_menu_cursor.min(commands.len().saturating_sub(1));
+        commands[index]
+    }
+
+    /// The 在席 prompt buffer (the session-scoped command line).
+    pub fn focus_prompt(&self) -> &str {
+        &self.focus_prompt
+    }
+
+    /// Append a character to the 在席 prompt.
+    pub fn focus_prompt_push_char(&mut self, c: char) {
+        self.focus_prompt.push(c);
+    }
+
+    /// Delete the last character of the 在席 prompt.
+    pub fn focus_prompt_backspace(&mut self) {
+        self.focus_prompt.pop();
+    }
+
+    /// Tab-complete the 在席 prompt's command word against the Session-scope
+    /// commands, returning the candidates when ambiguous (so the caller can log
+    /// them, mirroring the Overview line's `complete`).
+    pub fn focus_prompt_complete(&mut self) -> Completion {
+        let completion = self
+            .registry
+            .complete(&self.focus_prompt, CommandScope::Session);
+        self.focus_prompt = completion.input.clone();
+        completion
+    }
+
+    /// The advisory hint for the 在席 prompt, computed in the Session scope.
+    pub fn focus_prompt_hint(&self) -> Hint {
+        self.registry
+            .suggest(&self.focus_prompt, CommandScope::Session)
+    }
+
+    /// Run the 在席 prompt as a Session-scope command: dispatch it, append its
+    /// produced lines to the log, clear the prompt, and return the resulting
+    /// [`Submission`] (so the event loop can act on `OpenTerminal` / `OpenAgent`).
+    /// Empty input is a no-op.
+    pub fn focus_prompt_submit(&mut self) -> Submission {
+        let entry = self.focus_prompt.trim().to_string();
+        self.focus_prompt.clear();
+        if entry.is_empty() {
+            return Submission {
+                effect: Effect::None,
+                recorded: None,
+            };
+        }
+        let result = self
+            .registry
+            .dispatch(&entry, &self.history, &self.list.refs());
+        self.history.push(entry.clone());
+        self.log.extend(result.lines);
+        Submission {
+            effect: result.effect,
+            recorded: Some(entry),
+        }
+    }
+
+    /// Append a typed character to the input (Overview line).
     pub fn push_char(&mut self, c: char) {
         self.input.push(c);
         self.recall = None;
@@ -847,78 +950,16 @@ impl HomeState {
 
         match result.effect {
             Effect::Clear => self.log.clear(),
-            // `session switch <name>`: the screen owns the worktree list, so it resolves
-            // the name and reports success or failure here.
-            Effect::Activate(ref name) => {
-                if self.list.activate_by_name(name) {
-                    self.log
-                        .push(LogLine::notice(format!("Switched to \"{name}\"")));
-                } else {
-                    self.log
-                        .push(LogLine::error(format!("no worktree named \"{name}\"")));
-                }
-            }
+            // `session switch` (→ 切替) and `session switch <name>` (→ 在席) are
+            // resolved by the event loop, which owns the mode transitions (and, for
+            // a live session, the pane). They append no lines here.
+            Effect::EnterSwitch | Effect::Activate(_) => {}
             _ => self.log.extend(result.lines),
         }
         Submission {
             effect: result.effect,
             recorded: Some(entry),
         }
-    }
-
-    /// The open session-name modal, if any.
-    pub fn modal(&self) -> Option<&SessionModal> {
-        self.modal.as_ref()
-    }
-
-    /// Open the session-name modal with an empty input.
-    pub fn open_session_modal(&mut self) {
-        self.modal = Some(SessionModal::default());
-    }
-
-    /// Append a typed character to the modal's name (no-op when closed).
-    pub fn modal_push_char(&mut self, c: char) {
-        if let Some(modal) = self.modal.as_mut() {
-            modal.input.push(c);
-            modal.error = None;
-        }
-    }
-
-    /// Delete the last character of the modal's name (no-op when closed).
-    pub fn modal_backspace(&mut self) {
-        if let Some(modal) = self.modal.as_mut() {
-            modal.input.pop();
-            modal.error = None;
-        }
-    }
-
-    /// Close the modal, discarding the half-typed name.
-    pub fn cancel_modal(&mut self) {
-        self.modal = None;
-    }
-
-    /// Validate and accept the modal's name. On success the modal closes and the
-    /// trimmed name is returned (for the event loop to create the session); on an
-    /// empty or duplicate name the modal stays open with an inline error and
-    /// `None` is returned. A no-op (returning `None`) when the modal is closed.
-    pub fn submit_modal(&mut self) -> Option<String> {
-        let modal = self.modal.as_mut()?;
-        let name = modal.input.trim().to_string();
-        if name.is_empty() {
-            modal.error = Some("Name must not be empty.".to_string());
-            return None;
-        }
-        if self
-            .list
-            .worktrees()
-            .iter()
-            .any(|w| w.branch.as_deref() == Some(name.as_str()))
-        {
-            modal.error = Some(format!("\"{name}\" already exists."));
-            return None;
-        }
-        self.modal = None;
-        Some(name)
     }
 
     /// Apply the result of a session-creation attempt: log its line and, when
@@ -1202,14 +1243,18 @@ mod tests {
     }
 
     #[test]
-    fn new_state_starts_in_sidebar_with_a_hint() {
+    fn new_state_starts_in_overview_with_a_hint() {
         let state = state();
-        assert_eq!(state.mode(), Mode::Sidebar);
+        assert_eq!(state.mode(), Mode::Overview);
         assert_eq!(state.input(), "");
         assert_eq!(state.list().worktrees().len(), 2);
         // The seed log carries the usage hint.
         assert_eq!(state.log().len(), 1);
         assert!(state.log()[0].text.contains("man"));
+        // The default action surface is the menu.
+        assert_eq!(state.session_action_ui(), SessionActionUi::Menu);
+        // The Overview line is always workspace-scoped.
+        assert_eq!(state.command_scope(), CommandScope::Workspace);
     }
 
     #[test]
@@ -1221,50 +1266,10 @@ mod tests {
     }
 
     #[test]
-    fn worktree_navigation_delegates_to_the_list() {
+    fn set_session_action_ui_overrides_the_default() {
         let mut state = state();
-        state.move_down();
-        assert_eq!(state.list().selected_index(), 1);
-        state.move_up();
-        assert_eq!(state.list().selected_index(), 0);
-    }
-
-    #[test]
-    fn selecting_a_worktree_activates_it() {
-        let mut state = state(); // root, main, feature
-        state.move_down();
-        state.move_down(); // cursor on "feature"
-        state.select_worktree();
-        assert_eq!(state.list().active_index(), 2);
-        let last = state.log().last().unwrap();
-        assert_eq!(last.kind, LineKind::Notice);
-        assert!(last.text.contains("feature"));
-        assert!(last.text.contains("Switched"));
-    }
-
-    #[test]
-    fn selecting_the_root_row_switches_to_root() {
-        // The cursor starts on the root row; activating it switches to "root".
-        let mut state = HomeState::new("usagi", Vec::new(), None);
-        state.select_worktree();
-        assert!(state.list().root_active());
-        let last = state.log().last().unwrap();
-        assert_eq!(last.kind, LineKind::Notice);
-        assert!(last.text.contains("root"));
-        assert!(last.text.contains("Switched"));
-    }
-
-    #[test]
-    fn mode_switching_clears_half_typed_input() {
-        let mut state = state();
-        state.enter_command_mode();
-        assert_eq!(state.mode(), Mode::Command);
-        state.push_char('a');
-        state.push_char('b');
-        assert_eq!(state.input(), "ab");
-        state.leave_command_mode();
-        assert_eq!(state.mode(), Mode::Sidebar);
-        assert_eq!(state.input(), "");
+        state.set_session_action_ui(SessionActionUi::Prompt);
+        assert_eq!(state.session_action_ui(), SessionActionUi::Prompt);
     }
 
     #[test]
@@ -1294,7 +1299,7 @@ mod tests {
     #[test]
     fn tab_lists_candidates_when_ambiguous() {
         let mut state = state();
-        // Empty input matches every command, so Tab lists them all as candidates.
+        // Empty input matches every workspace command, so Tab lists them.
         state.complete();
         assert_eq!(state.input(), "");
         let last = state.log().last().unwrap();
@@ -1321,7 +1326,6 @@ mod tests {
         let submission = state.submit();
         assert_eq!(submission.effect, Effect::None);
         assert_eq!(submission.recorded.as_deref(), Some("man"));
-        // The echoed command line is followed by the man output.
         let echoed = state.log().iter().find(|l| l.kind == LineKind::Command);
         assert_eq!(echoed.unwrap().text, "man");
         assert!(state.log().iter().any(|l| l.text.contains("Available")));
@@ -1329,46 +1333,30 @@ mod tests {
     }
 
     #[test]
-    fn session_switch_changes_the_active_worktree() {
-        let mut state = state(); // root (active), main, feature
+    fn session_switch_with_no_name_yields_the_enter_switch_effect() {
+        // The screen leaves the mode transition to the event loop; submit only
+        // surfaces the effect and logs no resolution line.
+        let mut state = state();
+        for c in "session switch".chars() {
+            state.push_char(c);
+        }
+        let before = state.log().len();
+        let submission = state.submit();
+        assert_eq!(submission.effect, Effect::EnterSwitch);
+        // Only the echoed command line was appended.
+        assert_eq!(state.log().len(), before + 1);
+    }
+
+    #[test]
+    fn session_switch_with_a_name_yields_the_activate_effect() {
+        let mut state = state();
         for c in "session switch feature".chars() {
             state.push_char(c);
         }
         let submission = state.submit();
-        assert!(matches!(submission.effect, Effect::Activate(_)));
-        assert_eq!(state.list().active_index(), 2);
-        let last = state.log().last().unwrap();
-        assert_eq!(last.kind, LineKind::Notice);
-        assert!(last.text.contains("feature"));
-    }
-
-    #[test]
-    fn session_switch_root_returns_to_the_root_row() {
-        let mut state = state(); // root (active), main, feature
-        state.list.activate_by_name("feature");
-        assert!(!state.list().root_active());
-        for c in "session switch root".chars() {
-            state.push_char(c);
-        }
-        state.submit();
-        assert!(state.list().root_active());
-        let last = state.log().last().unwrap();
-        assert_eq!(last.kind, LineKind::Notice);
-        assert!(last.text.contains("root"));
-    }
-
-    #[test]
-    fn session_switch_with_an_unknown_name_errors() {
-        let mut state = state();
-        for c in "session switch nope".chars() {
-            state.push_char(c);
-        }
-        state.submit();
-        // The active worktree is unchanged and an error is logged.
+        assert_eq!(submission.effect, Effect::Activate("feature".to_string()));
+        // The list is not resolved here (the event loop does it).
         assert_eq!(state.list().active_index(), 0);
-        let last = state.log().last().unwrap();
-        assert_eq!(last.kind, LineKind::Error);
-        assert!(last.text.contains("no worktree named"));
     }
 
     #[test]
@@ -1408,13 +1396,10 @@ mod tests {
     fn restored_history_feeds_recall_and_new_commands_append_to_it() {
         let mut state = state();
         state.restore_history(vec!["session".to_string(), "space".to_string()]);
-        // Recall walks the restored entries.
-        state.enter_command_mode();
         state.recall_prev();
         assert_eq!(state.input(), "space");
         state.recall_prev();
         assert_eq!(state.input(), "session");
-        // A freshly run command is appended after the restored ones.
         state.input = "man".to_string();
         state.submit();
         assert_eq!(state.history, vec!["session", "space", "man"]);
@@ -1429,20 +1414,14 @@ mod tests {
             }
             state.submit();
         }
-
-        // Recalling with no prior recall jumps to the most recent entry.
         state.recall_prev();
         assert_eq!(state.input(), "doctor");
-        // Older.
         state.recall_prev();
         assert_eq!(state.input(), "man");
-        // Already at the oldest — stays put.
         state.recall_prev();
         assert_eq!(state.input(), "man");
-        // Forward again towards the newest.
         state.recall_next();
         assert_eq!(state.input(), "doctor");
-        // Past the newest returns to an empty line.
         state.recall_next();
         assert_eq!(state.input(), "");
     }
@@ -1461,96 +1440,277 @@ mod tests {
             state.push_char(c);
         }
         state.submit();
-        // No recall in progress: recall_next does nothing.
         state.recall_next();
         assert_eq!(state.input(), "");
     }
 
     #[test]
-    fn session_command_without_a_name_opens_the_modal() {
+    fn typing_or_completing_cancels_an_active_recall() {
         let mut state = state();
-        for c in "session new".chars() {
+        for c in "man".chars() {
             state.push_char(c);
         }
-        let submission = state.submit();
-        assert_eq!(submission.effect, Effect::OpenSessionModal);
-        // The event loop turns the effect into an open modal.
-        assert!(state.modal().is_none());
-        state.open_session_modal();
-        assert_eq!(state.modal().unwrap().input(), "");
-        assert!(state.modal().unwrap().error().is_none());
+        state.submit();
+        state.recall_prev();
+        assert_eq!(state.input(), "man");
+        state.push_char('!');
+        state.recall_next();
+        assert_eq!(state.input(), "man!");
+    }
+
+    // --- 切替 (Switch) -----------------------------------------------------
+
+    #[test]
+    fn enter_switch_remembers_its_return_mode_and_moves_the_cursor() {
+        let mut state = state(); // root, main, feature
+        state.enter_switch(ReturnMode::Overview);
+        assert_eq!(state.mode(), Mode::Switch);
+        assert_eq!(state.switch_return(), ReturnMode::Overview);
+        state.switch_move_down();
+        assert_eq!(state.list().selected_index(), 1);
+        state.switch_move_up();
+        assert_eq!(state.list().selected_index(), 0);
+        // Up from the root wraps to the bottom (the last worktree row, 2).
+        state.switch_move_up();
+        assert_eq!(state.list().selected_index(), 2);
     }
 
     #[test]
-    fn modal_editing_appends_and_deletes_characters() {
+    fn switch_return_carries_each_origin() {
         let mut state = state();
-        state.open_session_modal();
-        state.modal_push_char('a');
-        state.modal_push_char('b');
-        assert_eq!(state.modal().unwrap().input(), "ab");
-        state.modal_backspace();
-        assert_eq!(state.modal().unwrap().input(), "a");
+        state.enter_switch(ReturnMode::Focus);
+        assert_eq!(state.switch_return(), ReturnMode::Focus);
+        state.enter_switch(ReturnMode::Attached);
+        assert_eq!(state.switch_return(), ReturnMode::Attached);
     }
 
     #[test]
-    fn modal_editing_is_a_noop_when_closed() {
+    fn switch_inline_create_edits_then_confirms_a_fresh_name() {
         let mut state = state();
-        // No modal open: editing keys are harmless.
-        state.modal_push_char('a');
-        state.modal_backspace();
-        assert!(state.modal().is_none());
-        assert!(state.submit_modal().is_none());
+        state.enter_switch(ReturnMode::Overview);
+        assert!(!state.is_creating());
+        state.switch_begin_create();
+        assert!(state.is_creating());
+        assert_eq!(state.create_input(), Some(""));
+        for c in "  wip  ".chars() {
+            state.create_push_char(c);
+        }
+        state.create_backspace(); // drop a trailing space
+                                  // A fresh, trimmed name is accepted and the input closes.
+        assert_eq!(state.switch_confirm_create().as_deref(), Some("wip"));
+        assert!(!state.is_creating());
     }
 
     #[test]
-    fn cancel_modal_closes_it() {
-        let mut state = state();
-        state.open_session_modal();
-        state.modal_push_char('x');
-        state.cancel_modal();
-        assert!(state.modal().is_none());
-    }
-
-    #[test]
-    fn submit_modal_rejects_an_empty_name() {
-        let mut state = state();
-        state.open_session_modal();
+    fn switch_inline_create_rejects_empty_and_duplicate_names() {
+        let mut state = state(); // has a "feature" worktree
+        state.enter_switch(ReturnMode::Overview);
+        state.switch_begin_create();
         // Whitespace only is empty after trimming.
-        state.modal_push_char(' ');
-        assert!(state.submit_modal().is_none());
-        let modal = state.modal().unwrap();
-        assert!(modal.error().unwrap().contains("must not be empty"));
-    }
-
-    #[test]
-    fn submit_modal_rejects_a_duplicate_name() {
-        // The sample state has a "feature" worktree; reusing it is rejected.
-        let mut state = state();
-        state.open_session_modal();
+        state.create_push_char(' ');
+        assert!(state.switch_confirm_create().is_none());
+        assert!(state.create_error().unwrap().contains("must not be empty"));
+        // Typing clears the error, then a duplicate name is rejected.
         for c in "feature".chars() {
-            state.modal_push_char(c);
+            state.create_push_char(c);
         }
-        assert!(state.submit_modal().is_none());
-        assert!(state.modal().unwrap().error().unwrap().contains("feature"));
+        assert!(state.create_error().is_none());
+        assert!(state.switch_confirm_create().is_none());
+        assert!(state.create_error().unwrap().contains("feature"));
+        assert!(state.is_creating());
     }
 
     #[test]
-    fn submit_modal_accepts_a_fresh_name_and_closes() {
+    fn switch_inline_create_can_be_cancelled() {
         let mut state = state();
-        state.open_session_modal();
-        for c in "  fresh  ".chars() {
-            state.modal_push_char(c);
+        state.enter_switch(ReturnMode::Overview);
+        state.switch_begin_create();
+        state.create_push_char('x');
+        state.create_cancel();
+        assert!(!state.is_creating());
+    }
+
+    #[test]
+    fn create_editing_is_a_noop_when_not_creating() {
+        let mut state = state();
+        // Nothing open: editing keys are harmless and confirm returns None.
+        state.create_push_char('a');
+        state.create_backspace();
+        assert!(!state.is_creating());
+        assert!(state.create_input().is_none());
+        assert!(state.create_error().is_none());
+        assert!(state.switch_confirm_create().is_none());
+    }
+
+    // --- 在席 (Focus) ------------------------------------------------------
+
+    #[test]
+    fn enter_focus_activates_a_row_and_resets_the_surface() {
+        let mut state = state(); // root, main, feature
+        state.enter_focus(2); // feature
+        assert_eq!(state.mode(), Mode::Focus);
+        assert_eq!(state.list().active_index(), 2);
+        assert_eq!(state.list().selected_index(), 2);
+        assert_eq!(state.focused_session_name(), "feature");
+        assert_eq!(state.focus_menu_cursor(), 0);
+        assert_eq!(state.focus_prompt(), "");
+    }
+
+    #[test]
+    fn enter_focus_on_the_root_row_names_root() {
+        let mut state = state();
+        state.enter_focus(0);
+        assert!(state.list().root_active());
+        assert_eq!(state.focused_session_name(), ROOT_NAME);
+    }
+
+    #[test]
+    fn leave_focus_returns_to_overview() {
+        let mut state = state();
+        state.enter_focus(1);
+        state.leave_focus();
+        assert_eq!(state.mode(), Mode::Overview);
+    }
+
+    #[test]
+    fn focus_menu_lists_the_session_commands_in_order() {
+        let state = state();
+        let names: Vec<&str> = state.focus_menu_commands().iter().map(|i| i.name).collect();
+        assert_eq!(names, vec!["terminal", "agent", "ai"]);
+    }
+
+    #[test]
+    fn focus_menu_cursor_moves_and_wraps_and_selects() {
+        let mut state = state();
+        state.enter_focus(1);
+        // terminal (0, highlighted by default), agent (1), ai (2).
+        assert_eq!(state.focus_selected_command().name, "terminal");
+        state.focus_menu_move_down();
+        assert_eq!(state.focus_selected_command().name, "agent");
+        state.focus_menu_move_down();
+        state.focus_menu_move_down(); // wraps to the top
+        assert_eq!(state.focus_menu_cursor(), 0);
+        // Up from the top wraps to the bottom.
+        state.focus_menu_move_up();
+        assert_eq!(state.focus_selected_command().name, "ai");
+    }
+
+    #[test]
+    fn focus_prompt_edits_completes_and_hints_in_session_scope() {
+        let mut state = state();
+        state.enter_focus(1);
+        for c in "ter".chars() {
+            state.focus_prompt_push_char(c);
         }
-        // The name is trimmed, the modal closes, and the name is returned.
-        assert_eq!(state.submit_modal().as_deref(), Some("fresh"));
-        assert!(state.modal().is_none());
+        state.focus_prompt_backspace(); // "te"
+                                        // "te" uniquely completes to "terminal" (a session command).
+        let completion = state.focus_prompt_complete();
+        assert_eq!(state.focus_prompt(), "terminal");
+        assert!(completion.candidates.is_empty());
+        // The hint is computed in the session scope: arguments show usage.
+        state.focus_prompt_push_char(' ');
+        assert!(matches!(state.focus_prompt_hint(), Hint::Usage { .. }));
+    }
+
+    #[test]
+    fn focus_prompt_submit_runs_a_session_command() {
+        let mut state = state();
+        state.enter_focus(1);
+        for c in "terminal".chars() {
+            state.focus_prompt_push_char(c);
+        }
+        let submission = state.focus_prompt_submit();
+        assert_eq!(submission.effect, Effect::OpenTerminal);
+        assert_eq!(submission.recorded.as_deref(), Some("terminal"));
+        // The prompt is cleared and the command recorded in history.
+        assert_eq!(state.focus_prompt(), "");
+        assert_eq!(state.history, vec!["terminal"]);
+    }
+
+    #[test]
+    fn focus_prompt_submit_on_empty_input_is_a_noop() {
+        let mut state = state();
+        state.enter_focus(1);
+        let submission = state.focus_prompt_submit();
+        assert_eq!(submission.effect, Effect::None);
+        assert!(submission.recorded.is_none());
+        assert!(state.history.is_empty());
+    }
+
+    #[test]
+    fn focus_prompt_runs_the_coming_soon_ai_command() {
+        let mut state = state();
+        state.enter_focus(1);
+        for c in "ai hi".chars() {
+            state.focus_prompt_push_char(c);
+        }
+        let submission = state.focus_prompt_submit();
+        assert_eq!(submission.effect, Effect::None);
+        assert!(state.log().last().unwrap().text.contains("coming soon"));
+    }
+
+    // --- 没入 (Attached) ---------------------------------------------------
+
+    #[test]
+    fn attached_holds_a_terminal_view_and_leaving_drops_it() {
+        let mut state = state();
+        state.enter_focus(1);
+        state.show_attached();
+        assert_eq!(state.mode(), Mode::Attached);
+        state.set_terminal_view(TerminalView::from_rows(
+            vec!["$ ".to_string()],
+            Some((0, 2)),
+        ));
+        assert_eq!(state.terminal_view().unwrap().rows(), ["$ "]);
+        // Leaving 没入 returns to 在席 and drops the snapshot.
+        state.leave_attached();
+        assert_eq!(state.mode(), Mode::Focus);
+        assert!(state.terminal_view().is_none());
+    }
+
+    #[test]
+    fn clear_terminal_view_drops_the_snapshot_without_changing_the_mode() {
+        let mut state = state();
+        state.enter_focus(1);
+        state.show_attached();
+        state.set_terminal_view(TerminalView::from_rows(vec!["x".to_string()], None));
+        state.clear_terminal_view();
+        assert!(state.terminal_view().is_none());
+        // The mode is untouched (the per-frame cleanup must not leave 没入).
+        assert_eq!(state.mode(), Mode::Attached);
+    }
+
+    #[test]
+    fn enter_overview_clears_transient_state() {
+        let mut state = state();
+        state.enter_switch(ReturnMode::Overview);
+        state.switch_begin_create();
+        state.enter_focus(1);
+        state.focus_prompt_push_char('x');
+        state.focus_menu_move_down();
+        state.enter_overview();
+        assert_eq!(state.mode(), Mode::Overview);
+        assert!(!state.is_creating());
+        assert_eq!(state.focus_prompt(), "");
+        assert_eq!(state.focus_menu_cursor(), 0);
+        assert_eq!(state.input(), "");
+    }
+
+    #[test]
+    fn focus_session_jumps_to_a_row_and_clamps_to_the_list() {
+        let mut state = state(); // root (0), main (1), feature (2)
+        state.focus_session(2);
+        assert_eq!(state.list().selected_index(), 2);
+        state.focus_session(0);
+        assert!(state.list().root_selected());
+        state.focus_session(99);
+        assert_eq!(state.list().selected_index(), 2);
     }
 
     fn session_record(name: &str, worktrees: usize) -> SessionRecord {
         SessionRecord {
             name: name.to_string(),
             root: std::path::PathBuf::from(format!("/repo/.usagi/worktree/{name}")),
-            // Each repository's worktree is on the session branch `name`.
             worktrees: (0..worktrees).map(|_| worktree(name)).collect(),
             created_at: Utc::now(),
         }
@@ -1559,8 +1719,6 @@ mod tests {
     #[test]
     fn apply_session_outcome_logs_and_rebuilds_the_pane_from_sessions() {
         let mut state = state();
-        // A success outcome with refreshed sessions rebuilds the worktree pane
-        // from them (one worktree per session here).
         state.apply_session_outcome(SessionOutcome {
             line: LogLine::output("Created session \"x\""),
             sessions: Some(vec![session_record("main", 1), session_record("x", 1)]),
@@ -1575,15 +1733,10 @@ mod tests {
             .worktrees()
             .iter()
             .any(|w| w.branch.as_deref() == Some("x")));
-        // The freshly created session is selected and active (row 2: root, main, x).
         assert_eq!(state.list().selected_index(), 2);
         assert_eq!(state.list().active_index(), 2);
-        assert_eq!(
-            state.list().selected().unwrap().branch.as_deref(),
-            Some("x")
-        );
 
-        // A failure outcome (no sessions) only logs; the pane is unchanged.
+        // A failure outcome only logs; the pane is unchanged.
         state.apply_session_outcome(SessionOutcome {
             line: LogLine::error("session failed"),
             sessions: None,
@@ -1619,11 +1772,9 @@ mod tests {
         state.open_remove_modal(false);
         state.remove_modal_move_down();
         assert_eq!(state.remove_modal().unwrap().cursor(), 1);
-        // Up from the top wraps to the bottom.
         state.remove_modal_move_up();
         state.remove_modal_move_up();
         assert_eq!(state.remove_modal().unwrap().cursor(), 2);
-        // Down from the bottom wraps to the top.
         state.remove_modal_move_down();
         assert_eq!(state.remove_modal().unwrap().cursor(), 0);
     }
@@ -1633,14 +1784,13 @@ mod tests {
         let mut state = state();
         state.restore_sessions(vec![session_record("a", 1), session_record("b", 1)]);
         state.open_remove_modal(false);
-        state.remove_modal_toggle(); // check "a"
+        state.remove_modal_toggle();
         state.remove_modal_move_down();
-        state.remove_modal_toggle(); // check "b"
+        state.remove_modal_toggle();
         let modal = state.remove_modal().unwrap();
         assert!(modal.is_selected(0));
         assert!(modal.is_selected(1));
         assert_eq!(modal.selected_count(), 2);
-        // Toggling again unchecks it.
         state.remove_modal_toggle();
         assert!(!state.remove_modal().unwrap().is_selected(1));
     }
@@ -1648,7 +1798,6 @@ mod tests {
     #[test]
     fn remove_modal_navigation_is_a_noop_when_empty_or_closed() {
         let mut state = state();
-        // No sessions: opening yields an empty modal that ignores movement.
         state.open_remove_modal(false);
         assert!(state.remove_modal().unwrap().is_empty());
         state.remove_modal_move_up();
@@ -1657,7 +1806,6 @@ mod tests {
         assert_eq!(state.remove_modal().unwrap().cursor(), 0);
         assert_eq!(state.remove_modal().unwrap().selected_count(), 0);
 
-        // Closed: every removal-modal action is harmless.
         state.cancel_remove_modal();
         state.remove_modal_move_up();
         state.remove_modal_move_down();
@@ -1674,7 +1822,6 @@ mod tests {
             session_record("b", 1),
             session_record("c", 1),
         ]);
-        // Open carrying the force flag; check "c" then "a".
         state.open_remove_modal(true);
         state.remove_modal_move_down();
         state.remove_modal_move_down();
@@ -1683,10 +1830,8 @@ mod tests {
         state.remove_modal_move_up();
         state.remove_modal_toggle(); // "a"
         let (names, force) = state.submit_remove_modal().unwrap();
-        // Names come back in display order regardless of the toggle order.
         assert_eq!(names, vec!["a".to_string(), "c".to_string()]);
         assert!(force);
-        // Confirming closes the modal.
         assert!(state.remove_modal().is_none());
     }
 
@@ -1695,7 +1840,6 @@ mod tests {
         let mut state = state();
         state.restore_sessions(vec![session_record("a", 1)]);
         state.open_remove_modal(false);
-        // Nothing checked: there is nothing to remove, so the modal stays open.
         assert!(state.submit_remove_modal().is_none());
         assert!(state.remove_modal().is_some());
     }
@@ -1746,133 +1890,15 @@ mod tests {
     }
 
     #[test]
-    fn right_pane_starts_on_the_log_and_toggles_with_the_terminal() {
-        let mut state = state();
-        // The log is shown by default, with no terminal snapshot.
-        assert_eq!(state.right_pane(), RightPane::Log);
-        assert!(state.terminal_view().is_none());
-
-        // Starting the terminal switches the pane; a snapshot then arrives.
-        state.show_terminal();
-        assert_eq!(state.right_pane(), RightPane::Terminal);
-        state.set_terminal_view(TerminalView::from_rows(
-            vec!["$ ".to_string()],
-            Some((0, 2)),
-        ));
-        assert_eq!(state.terminal_view().unwrap().rows(), ["$ "]);
-
-        // Closing the terminal returns to the log and drops the snapshot.
-        state.show_log();
-        assert_eq!(state.right_pane(), RightPane::Log);
-        assert!(state.terminal_view().is_none());
-    }
-
-    #[test]
-    fn focus_session_jumps_to_a_row_and_clamps_to_the_list() {
-        // root (row 0), main (row 1), feature (row 2).
-        let mut state = state();
-        state.focus_session(2);
-        assert_eq!(state.list().selected_index(), 2);
-        assert_eq!(
-            state.list().selected().unwrap().branch.as_deref(),
-            Some("feature")
-        );
-        // The root row is reachable too.
-        state.focus_session(0);
-        assert_eq!(state.list().selected_index(), 0);
-        assert!(state.list().root_selected());
-        // A row past the end clamps to the last worktree.
-        state.focus_session(99);
-        assert_eq!(state.list().selected_index(), 2);
-    }
-
-    #[test]
-    fn session_picker_opens_listing_the_root_then_each_worktree() {
-        let mut state = state();
-        // Open it from the second worktree, so the cursor and "here" land there.
-        state.focus_session(2);
-        assert!(state.session_picker().is_none());
-        state.open_session_picker();
-        let picker = state.session_picker().unwrap();
-        assert_eq!(picker.names(), [ROOT_NAME, "main", "feature"]);
-        assert_eq!(picker.cursor(), 2);
-        assert_eq!(picker.current(), 2);
-    }
-
-    #[test]
-    fn session_picker_cursor_moves_and_wraps() {
-        let mut state = state(); // root + 2 worktrees → 3 rows
-        state.open_session_picker(); // cursor on the root row (0)
-                                     // Up from the top wraps to the bottom.
-        state.session_picker_move_up();
-        assert_eq!(state.session_picker().unwrap().cursor(), 2);
-        // Down from the bottom wraps to the top.
-        state.session_picker_move_down();
-        assert_eq!(state.session_picker().unwrap().cursor(), 0);
-        state.session_picker_move_down();
-        assert_eq!(state.session_picker().unwrap().cursor(), 1);
-    }
-
-    #[test]
-    fn session_picker_select_number_jumps_in_range_only() {
-        let mut state = state();
-        state.open_session_picker();
-        // Session 3 is the second worktree (row 2).
-        assert!(state.session_picker_select_number(3));
-        assert_eq!(state.session_picker().unwrap().cursor(), 2);
-        // 0 and out-of-range numbers are ignored, leaving the cursor put.
-        assert!(!state.session_picker_select_number(0));
-        assert!(!state.session_picker_select_number(4));
-        assert_eq!(state.session_picker().unwrap().cursor(), 2);
-    }
-
-    #[test]
-    fn session_picker_confirm_focuses_the_cursor_and_closes() {
-        let mut state = state();
-        state.open_session_picker();
-        state.session_picker_move_down(); // cursor → row 1 (main)
-        assert_eq!(state.confirm_session_picker(), Some(1));
-        assert!(state.session_picker().is_none());
-        assert_eq!(state.list().selected_index(), 1);
-    }
-
-    #[test]
-    fn session_picker_cancel_closes_without_switching() {
-        let mut state = state();
-        state.open_session_picker();
-        state.session_picker_move_down();
-        state.cancel_session_picker();
-        assert!(state.session_picker().is_none());
-        // The list cursor never moved off the root row.
-        assert_eq!(state.list().selected_index(), 0);
-    }
-
-    #[test]
-    fn session_picker_methods_are_noops_while_closed() {
-        let mut state = state();
-        // Nothing is open, so every mutator is inert and confirm returns None.
-        state.session_picker_move_up();
-        state.session_picker_move_down();
-        assert!(!state.session_picker_select_number(1));
-        assert_eq!(state.confirm_session_picker(), None);
-        assert!(state.session_picker().is_none());
-    }
-
-    #[test]
     fn waiting_paths_track_sessions_awaiting_input() {
         let mut state = state();
-        // Nothing is waiting by default.
         assert!(!state.is_waiting(Path::new("/repo/feature")));
         assert!(state.waiting_paths().is_empty());
-
-        // The monitor's snapshot is swapped in wholesale before each redraw.
         let mut waiting = HashSet::new();
         waiting.insert(PathBuf::from("/repo/feature"));
         state.set_waiting(waiting);
         assert!(state.is_waiting(Path::new("/repo/feature")));
         assert!(!state.is_waiting(Path::new("/repo/main")));
-
-        // A later (empty) snapshot clears it.
         state.set_waiting(HashSet::new());
         assert!(!state.is_waiting(Path::new("/repo/feature")));
     }
@@ -1880,35 +1906,15 @@ mod tests {
     #[test]
     fn live_paths_track_sessions_with_a_running_agent() {
         let mut state = state();
-        // Nothing is live by default.
         assert!(!state.is_live(Path::new("/repo/feature")));
         assert!(state.live_paths().is_empty());
-
-        // The monitor's snapshot of live sessions is swapped in wholesale.
         let mut live = HashSet::new();
         live.insert(PathBuf::from("/repo/feature"));
         state.set_live(live);
         assert!(state.is_live(Path::new("/repo/feature")));
         assert!(!state.is_live(Path::new("/repo/main")));
         assert_eq!(state.live_paths().len(), 1);
-
-        // A later (empty) snapshot clears it.
         state.set_live(HashSet::new());
         assert!(!state.is_live(Path::new("/repo/feature")));
-    }
-
-    #[test]
-    fn typing_or_completing_cancels_an_active_recall() {
-        let mut state = state();
-        for c in "man".chars() {
-            state.push_char(c);
-        }
-        state.submit();
-        state.recall_prev();
-        assert_eq!(state.input(), "man");
-        // Editing resets the recall cursor, so recall_next no longer advances.
-        state.push_char('!');
-        state.recall_next();
-        assert_eq!(state.input(), "man!");
     }
 }

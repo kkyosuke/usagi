@@ -36,6 +36,7 @@
 | クローン先ベース | `workspace_root` | string?\| | `null`（→ `~/git`） | 新規プロジェクトのクローン先ベースディレクトリ。未設定時は `~/git` にフォールバック |
 | デスクトップ通知 | `notifications_enabled` | bool | `true` | バックグラウンドの `agent` が入力待ちになった時などのデスクトップ通知の ON/OFF |
 | Agent CLI | `agent_cli` | enum | `claude` | 起動する AI エージェント CLI（`claude` / `gemini`） |
+| セッションアクション UI | `session_action_ui` | enum | `menu` | ホーム画面の[在席](design/05-home.md#在席focus)で右ペインに出すアクション UI のスタイル。`menu`（選べるリスト）/ `prompt`（セッションスコープのコマンドライン） |
 | ローカル LLM 有効化 | `local_llm.enabled` | bool | `false` | 有効にすると `agent` 起動時に [ローカル LLM MCP サーバ](03-commands/04-llm-mcp.md)（`usagi-llm`）を wire し、軽量タスクをローカル LLM に委譲できる |
 | ローカル LLM モデル | `local_llm.model` | string | `qwen2.5-coder:7b` | 委譲先の Ollama モデル名（`qwen2.5-coder:7b` / `:3b` / `:1.5b` / `qwen2.5:7b`） |
 
@@ -95,8 +96,9 @@
 
 操作の詳細・レイアウトは [design/04-config.md](design/04-config.md) を参照してください。
 
-> グローバルスコープで編集できるのは Theme / Default Workspace / Notifications / Agent CLI の 4 項目、
-> ワークスペーススコープで編集できるのは Agent CLI / Notifications / Default Branch の 3 項目です。
+> グローバルスコープで編集できるのは Theme / Default Workspace / Notifications / Agent CLI /
+> Session Action UI（「Agent CLI」と「Local LLM」の間）の各項目、ワークスペーススコープで編集できるのは
+> Agent CLI / Notifications / Default Branch の 3 項目です。
 > `workspace_root` は `settings.json` に保存されますが、画面からの編集は今後対応予定です。
 
 ### CLI
@@ -123,6 +125,7 @@ CLI からも設定を確認・編集できます（[issue 015](../issues/015-co
 | `workspace_root` | 新規プロジェクト画面（Clone）の Location 既定値（[design/03-new.md](design/03-new.md)） |
 | `notifications_enabled` | バックグラウンドの `agent` が入力待ちになった時などのデスクトップ通知の表示可否 |
 | `agent_cli` | `agent` / `ai` コマンドが起動する AI エージェント CLI の選択（[4. オーケストレーション](04-orchestration.md)） |
+| `session_action_ui` | ホーム画面の[在席](design/05-home.md#在席focus)で右ペインに出すアクション UI（`menu` / `prompt`）の選択 |
 | `local_llm.enabled` / `local_llm.model` | 有効時、`agent` 起動コマンドに `usagi-llm` MCP サーバを追加し、軽量タスクをローカル LLM に委譲する（[3.4 ローカル LLM MCP サーバ](03-commands/04-llm-mcp.md)） |
 
 > 設定の永続化は `usecase/settings.rs`（`load` / `save` / 各 `set_*`）と

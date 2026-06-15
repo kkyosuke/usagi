@@ -47,6 +47,7 @@
 | 032 | [local-llm-mcp](032-local-llm-mcp.md) ✅ | ローカル LLM を MCP 公開しクラウド Agent のトークン消費を抑制（config 有効化・未導入時 install） | mcp | medium | 019, 025 |
 | 033 | [preview-viewer](033-preview-viewer.md) | 右ペイン統合プレビュー（diff / Markdown / ファイルのレンダリング表示） | tui | medium | 002, 003, 012 |
 | 034 | [issue-tui](034-issue-tui.md) | TUI `issue` コマンド（関連性テーブル・進捗の可視化） | tui | medium | 002, 023, 024 |
+| 035 | [engagement-ladder](035-engagement-ladder.md) ✅ | ホーム画面を 4 モード（統括・切替・在席・没入）の状態機械に再構成（`Ctrl-O` ズームアウト／スコープ物理分離／`session_action_ui` 追加） | tui | medium | 027, 031 |
 
 ## 依存関係
 
@@ -96,6 +97,8 @@ graph TD
     002 --> 034
     019[019 doctor-fix] --> 032[032 local-llm-mcp]
     025 --> 032
+    027 --> 035[035 engagement-ladder]
+    031 --> 035
 ```
 
 ## 推奨着手順

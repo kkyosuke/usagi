@@ -1,28 +1,17 @@
 //! Driving the live terminal embedded in the workspace screen's right pane.
 //!
-//! When the user runs `terminal`, the right pane switches to a live shell drawn
-//! into the right pane while the whole workspace frame — sidebar and all — stays
+//! When the user runs `terminal` / `agent`, the right pane switches to a live
+//! shell (没入) drawn while the whole workspace frame — sidebar and all — stays
 //! on screen. The shell itself is owned by the [`TerminalPool`] (so it survives
-//! a detach); this module borrows it and runs the render/input loop. Keystrokes
-//! are forwarded to the shell as raw bytes.
+//! leaving the pane); this module borrows it and runs the render/input loop.
+//! Keystrokes are forwarded to the shell as raw bytes.
 //!
-//! `Ctrl-O` opens the **session picker**, so the user can switch sessions
-//! without losing the shell:
-//!
-//! - `Ctrl-O` overlays a list of every session (the root plus each worktree);
-//!   `1`–`9` or `↑`/`↓` + `Enter` switches the pane to that session's terminal,
-//!   staying focused. The shell just left keeps running in the pool. Switching
-//!   shows the target's own state — its running shell / agent if it has one, or
-//!   a fresh idle shell if not — rather than re-running whatever command opened
-//!   the pane.
-//! - `c` creates a new session (the event loop opens the name modal) and drops
-//!   the pane into it as a plain shell.
-//! - `Esc` closes the picker and resumes the current shell.
-//! - `Ctrl-O` again **detaches** — the pane returns to the sidebar but the shell
-//!   stays alive in the pool.
-//!
-//! Each outcome is reported to the event loop as a [`PaneExit`]; the shell
-//! exiting on its own reports [`PaneExit::Closed`].
+//! `Ctrl-O` is the **only reserved key**: everything else, including `Esc`, flows
+//! to the shell. It zooms out one engagement level by returning
+//! [`PaneExit::ToSwitch`] immediately, leaving the pane for 切替 (Switch) on the
+//! left pane while the shell stays alive in the pool — there the user re-selects
+//! a session to re-attach, presses `Ctrl-O` again to reach 統括, or `Esc` to
+//! re-attach this one. The shell exiting on its own reports [`PaneExit::Closed`].
 //!
 //! `agent` reuses the same machinery: the pool sends the configured agent CLI to
 //! the shell on first spawn, so the pane lands the user straight in the agent.
@@ -171,16 +160,16 @@ fn wait(pty: &PtySession, drawn_gen: u64) -> Result<Wake> {
 
 /// Forward every queued key press to the shell, or — for the wheel and
 /// `Shift`+`PageUp`/`PageDown` — scroll the pane's history via `scrollback`.
-/// `Ctrl-O` opens the session picker instead. Returns `Some(exit)` when the user
-/// switches or detaches; other events are ignored so the next redraw picks up
+/// `Ctrl-O` leaves the pane for 切替 (Switch) instead, returning
+/// [`PaneExit::ToSwitch`]. Other events are ignored so the next redraw picks up
 /// any new size.
 fn pump_input(
-    term: &Term,
-    state: &mut HomeState,
+    _term: &Term,
+    _state: &mut HomeState,
     pty: &mut PtySession,
     geo: ui::TerminalGeometry,
     scrollback: &mut usize,
-    prev: &mut Vec<String>,
+    _prev: &mut Vec<String>,
 ) -> Result<Option<PaneExit>> {
     while event::poll(Duration::ZERO)? {
         match event::read()? {
@@ -195,12 +184,8 @@ fn pump_input(
                     continue;
                 }
                 if is_leader(&key) {
-                    // `Ctrl-O` opens the picker; it returns the pane action to
-                    // leave on (switch / detach), or `None` to resume the shell.
-                    if let Some(exit) = run_session_picker(term, state, geo, prev)? {
-                        return Ok(Some(exit));
-                    }
-                    continue;
+                    // `Ctrl-O` zooms out one level: leave the pane for 切替.
+                    return Ok(Some(PaneExit::ToSwitch));
                 }
                 let bytes = encode_key(&key);
                 if !bytes.is_empty() {
@@ -261,73 +246,6 @@ fn apply_scroll(scrollback: &mut usize, delta: i32) {
     } else {
         scrollback.saturating_sub(delta as usize)
     };
-}
-
-/// Run the in-pane session picker (`Ctrl-O`): overlay the session list and read
-/// keys until the user switches to a session (`1`-`9` or `↑`/`↓` + `Enter`),
-/// creates a new one (`c`), cancels (`Esc`), or detaches (`Ctrl-O` again).
-/// Returns the [`PaneExit`] to leave the pane on, or `None` to resume the
-/// current shell. The picker is drawn over the live frame, so it shares the
-/// caller's `prev` diff buffer.
-fn run_session_picker(
-    term: &Term,
-    state: &mut HomeState,
-    geo: ui::TerminalGeometry,
-    prev: &mut Vec<String>,
-) -> Result<Option<PaneExit>> {
-    state.open_session_picker();
-    // The shell cursor has no place under the overlay.
-    let _ = term.hide_cursor();
-    let exit = loop {
-        render(term, state, None, geo, prev)?;
-        let Event::Key(key) = event::read()? else {
-            continue;
-        };
-        if !is_press(key) {
-            continue;
-        }
-        match key.code {
-            KeyCode::Up | KeyCode::Char('k') => state.session_picker_move_up(),
-            KeyCode::Down | KeyCode::Char('j') => state.session_picker_move_down(),
-            // A 1-based session number jumps to and selects that row.
-            KeyCode::Char(c) if c.is_ascii_digit() => {
-                if state.session_picker_select_number(c as usize - '0' as usize) {
-                    break Some(PaneExit::Switch);
-                }
-            }
-            // `Enter`, `l`, or `Tab` switches to the highlighted session (focus
-            // stays on the right pane — the tmux-style `l` = "go right").
-            KeyCode::Enter | KeyCode::Tab => break Some(PaneExit::Switch),
-            KeyCode::Char('l') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                break Some(PaneExit::Switch)
-            }
-            KeyCode::Esc => break None,
-            // `c` creates a new session: the event loop opens the name modal.
-            // Guarded against `Ctrl-C` (which arrives as `Char('c')` with the
-            // control modifier and must not create).
-            KeyCode::Char('c') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                break Some(PaneExit::Create)
-            }
-            // `h` moves focus to the sidebar (left) — detaching, the same as a
-            // second `Ctrl-O` — while the shell stays alive in the pool.
-            KeyCode::Char('h') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                break Some(PaneExit::Detach)
-            }
-            // A second `Ctrl-O` detaches, leaving the shell alive in the pool.
-            KeyCode::Char('o') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                break Some(PaneExit::Detach)
-            }
-            _ => {}
-        }
-    };
-    // `Switch` commits the highlighted session; everything else (including
-    // `Create`, driven by the event loop's name modal) just closes the overlay.
-    if exit == Some(PaneExit::Switch) {
-        state.confirm_session_picker();
-    } else {
-        state.cancel_session_picker();
-    }
-    Ok(exit)
 }
 
 /// Draw the workspace frame (sidebar + terminal pane), repainting only the rows
