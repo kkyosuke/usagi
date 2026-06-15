@@ -39,7 +39,7 @@ Config 画面（`usagi hop` → `config`、または `usagi config --edit`）か
 - **Local LLM Model** 行: ←→ でモデルを選び、Enter でそのモデルを導入します。
   モデルを変更すると（新モデルが未取得の可能性があるため）再導入が必要な状態になります。
 
-`local_llm.enabled` はプロジェクト単位の[ローカル設定](../05-settings.md#プロジェクトローカル設定)でも上書きできます。
+`local_llm.enabled` はプロジェクト単位の[ローカル設定](../05-settings.md#ローカル設定プロジェクト単位の上書き)でも上書きできます。
 
 ## 資材のインストール
 
