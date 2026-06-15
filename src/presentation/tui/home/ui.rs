@@ -707,11 +707,8 @@ fn session_picker_body(picker: &SessionPicker) -> Vec<String> {
         ));
     }
     body.push(String::new());
-    body.push(
-        style("1-9/↑↓+Enter: switch   Esc: cancel   Ctrl-O: detach")
-            .dim()
-            .to_string(),
-    );
+    body.push(style("1-9/↑↓+Enter: switch   c: create").dim().to_string());
+    body.push(style("Esc: cancel   Ctrl-O: detach").dim().to_string());
     body
 }
 
