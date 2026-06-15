@@ -126,11 +126,25 @@ pub fn list(repo_root: &Path, filter: &IssueFilter) -> Result<Vec<ListedIssue>> 
 pub fn search(repo_root: &Path, query: &str, filter: &IssueFilter) -> Result<Vec<ListedIssue>> {
     let issues = IssueStore::new(repo_root).scan()?;
     let done = done_numbers(issues.iter().map(|i| (i.number, i.status)));
-    let needle = query.to_lowercase();
+    let needle = query.to_ascii_lowercase();
+    let needle_bytes = needle.as_bytes();
     let matched: Vec<IssueSummary> = issues
         .into_iter()
         .filter(|i| {
-            i.title.to_lowercase().contains(&needle) || i.body.to_lowercase().contains(&needle)
+            if needle_bytes.is_empty() {
+                return true;
+            }
+            let title_match = i
+                .title
+                .as_bytes()
+                .windows(needle_bytes.len())
+                .any(|w| w.eq_ignore_ascii_case(needle_bytes));
+            let body_match = i
+                .body
+                .as_bytes()
+                .windows(needle_bytes.len())
+                .any(|w| w.eq_ignore_ascii_case(needle_bytes));
+            title_match || body_match
         })
         .map(|i| i.summary())
         .collect();
