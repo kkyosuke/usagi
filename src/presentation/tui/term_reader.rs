@@ -143,6 +143,11 @@ fn parse_sgr(payload: &str, release: bool) -> Option<ScrollEvent> {
 /// Drain an X10 report (three bytes, each value + 32), starting from the `head`
 /// bytes `console` already consumed, and turn a wheel turn into a
 /// [`ScrollEvent`]. Returns `None` for a non-wheel or malformed report.
+///
+/// Best-effort: we always request SGR coordinates (DECSET 1006), so a compliant
+/// terminal never sends X10 and this path is effectively a fallback. It assumes
+/// each coordinate byte is a single `char`; columns/rows past 95 (byte ≥ 128)
+/// would mis-frame, but at worst the report is dropped — it cannot move a list.
 fn read_x10(
     head: Vec<char>,
     read: &mut impl FnMut() -> io::Result<Key>,

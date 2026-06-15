@@ -61,23 +61,29 @@ const ENTER_ALT_SCREEN: &str = "\x1b[?1049h";
 /// Leave the alternate screen, restoring the prior contents.
 const LEAVE_ALT_SCREEN: &str = "\x1b[?1049l";
 /// Enable mouse reporting: normal tracking (DECSET 1000) plus SGR extended
-/// coordinates (DECSET 1006). Claiming the mouse this way does two jobs at once:
+/// coordinates (DECSET 1006).
 ///
-/// - it stops the terminal from acting on the wheel itself — which is what would
-///   otherwise scroll the host viewport and reveal the pre-launch scrollback
-///   "behind" the TUI — and
-/// - it hands wheel and click events to us as escape sequences instead, which
-///   `term_reader` decodes: a wheel turn becomes a [`ScrollEvent`] (swallowed by
-///   the management screens, acted on by the embedded pane), everything else is
-///   dropped.
+/// What keeps the pre-launch scrollback hidden is the **alternate screen**
+/// ([`ENTER_ALT_SCREEN`]) — that scrollback lives in the primary buffer, which
+/// the alternate screen replaces, so on every mainstream terminal (including
+/// Apple Terminal.app, which ignores mouse reporting entirely) the wheel cannot
+/// reveal it. Mouse reporting then does two further jobs on terminals that
+/// honour it:
+///
+/// - it makes the terminal hand wheel and click events to us as escape sequences
+///   rather than acting on the wheel itself, which `term_reader` decodes: a wheel
+///   turn becomes a [`ScrollEvent`] (swallowed by the management screens, acted on
+///   by the embedded pane), everything else is dropped.
 ///
 /// We deliberately do *not* enable alternate scroll (DECSET 1007). Alternate
 /// scroll makes the wheel masquerade as cursor-key presses, and those are
 /// indistinguishable from real arrow keys — so on a terminal that does not report
 /// the wheel as a mouse event the wheel would silently move the lists (and never
 /// reach the pane as a scroll). Relying on mouse reporting alone keeps the TUI
-/// itself unscrollable on every terminal; where the wheel is not reported, the
-/// embedded pane still scrolls via `Shift`+`PageUp`/`PageDown`.
+/// itself unscrollable on every terminal. The cost is that on a terminal that
+/// ignores mouse reporting (Apple Terminal.app) the wheel does nothing in the
+/// embedded pane either; there the pane scrolls via `Shift`+`↑`/`↓` (and
+/// `Shift`+`PageUp`/`PageDown` where the terminal does not bind them itself).
 const ENABLE_MOUSE: &str = "\x1b[?1000h\x1b[?1006h";
 /// Disable mouse reporting, restoring the terminal's normal wheel / selection
 /// behaviour once the TUI exits. Reset in the reverse order of [`ENABLE_MOUSE`].
