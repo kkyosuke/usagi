@@ -38,10 +38,12 @@
 
 Config 画面（`usagi hop` → `config`、または `usagi config --edit`）からも編集できます。
 
-- **Local LLM** 行: 資材が未導入のうちは値が `Install` になり、Enter / ←→ で導入を実行します。
-  導入が完了すると **on/off トグル**に変わり、有効状態になります。
-- **Local LLM Model** 行: ←→ でモデルを選び、Enter でそのモデルを導入します。
-  モデルを変更すると（新モデルが未取得の可能性があるため）再導入が必要な状態になります。
+- **Local LLM** 行: 資材が未導入のうちは値が `Install`（緑のアクションラベル）になり、`Space` / `Enter` で
+  **インストールモーダル**を開きます。モーダルで sudo パスワードを入力し `Enter` で確定すると、導入を
+  バックグラウンドで実行します（スピナー表示）。完了すると **on/off トグル**に変わって有効状態になり、
+  カーソルが `Local LLM Model` 行へ移動してモデルを選べます。
+- **Local LLM Model** 行: ←→ でモデルを選びます。モデルを変更すると（新モデルが未取得の可能性があるため）
+  再導入が必要な状態に戻ります。
 
 `local_llm.enabled` はプロジェクト単位の[ローカル設定](../05-settings.md#ローカル設定プロジェクト単位の上書き)でも上書きできます。
 
@@ -49,16 +51,19 @@ Config 画面（`usagi hop` → `config`、または `usagi config --edit`）か
 
 「資材」= `ollama` 本体と選択モデルです。次のいずれからも導入できます。
 
-- **Config 画面の Install アクション**（上記）。`ollama pull` の実行中は画面がブロックします。
-- **`usagi doctor --fix`**: `local_llm.enabled` が `true` のとき、`ollama` 本体（macOS は `brew install ollama`）を導入し、
+- **Config 画面の Install アクション**（上記）。`Space` / `Enter` でモーダルを開いて sudo パスワードを入力し、
+  確定すると公式インストーラ（`curl -fsSL https://ollama.com/install.sh | sh`）をバックグラウンドで実行します。
+  sudo は入力したパスワードで事前認証し、ランタイム導入を非対話で進め、必要なら Ollama サーバを起動してから
+  モデルを `ollama pull` します。実行中はスピナーを表示し、TUI はブロックしません。
+- **`usagi doctor --fix`**: `local_llm.enabled` が `true` のとき、`ollama` 本体（公式インストーラ）を導入し、
   必要なら Ollama サーバを起動してから、モデル（`ollama pull <model>`）を導入します。
-  `usagi doctor` は導入状況を健全性チェックとして表示します。
+  CLI 上では sudo が必要に応じて対話的にパスワードを尋ねます。`usagi doctor` は導入状況を健全性チェックとして表示します。
 
 > 導入は「`ollama` 本体 → サーバ起動 → モデル取得」の順に進みます。サーバ起動はモデル取得が
 > `could not connect to ollama server` で失敗しないための前提ステップです。
 
-自動導入できない環境（Homebrew の無い macOS / Linux など）では、
-[公式インストーラ](https://ollama.com/download) を案内します。
+公式インストーラが対応しない OS（macOS / Linux 以外）では、
+[公式ダウンロードページ](https://ollama.com/download) を案内します。
 
 ## 起動と登録
 

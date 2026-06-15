@@ -2,13 +2,19 @@ use console::style;
 
 use crate::presentation::tui::widgets;
 
-use super::state::{Config, Field, LocalField};
+use super::state::{Config, Field, InstallModal, LocalField};
 
 /// The label of the Save button row.
 const SAVE_LABEL: &str = "[ Save ]";
 
 /// Fixed width of the settings block; the whole block is centred in the terminal.
 const BLOCK_WIDTH: usize = 52;
+
+/// Inner width of the local-LLM install / progress modal box.
+const MODAL_INNER_WIDTH: usize = 40;
+
+/// The spinner frames cycled through while the install runs in the background.
+const SPINNER: [&str; 4] = ["⠋", "⠙", "⠹", "⠸"];
 
 /// Builds the centred mascot, title, and subtitle block.
 ///
@@ -70,9 +76,23 @@ fn setting_row(
     format!("{block_pad}{cursor} {mark} {label}  {value}")
 }
 
+/// Renders an action row's value (e.g. the Local LLM "Install" prompt) as a
+/// plain green label — no chevrons, since it triggers an action rather than
+/// cycling through choices. It brightens (bold) when focused.
+fn action_label(text: &str, selected: bool) -> String {
+    let styled = style(text.to_string());
+    if selected {
+        styled.green().bold()
+    } else {
+        styled.green()
+    }
+    .to_string()
+}
+
 /// Builds the settings list: one row per editable field (global, then any
-/// project-local overrides), each rendered as a `< value >` chooser that lights
-/// up when focused and turns yellow when edited.
+/// project-local overrides). Most rows are a `< value >` chooser that lights up
+/// when focused and turns yellow when edited; an action row (the Local LLM
+/// "Install" prompt) is a plain label instead.
 fn settings_lines(block_pad: &str, config: &Config) -> Vec<String> {
     let label_width = label_width();
 
@@ -82,7 +102,11 @@ fn settings_lines(block_pad: &str, config: &Config) -> Vec<String> {
         .enumerate()
         .map(|(i, row)| {
             let selected = i == config.selected_index();
-            let value = widgets::chooser(&row.value, selected, row.changed);
+            let value = if row.action {
+                action_label(&row.value, selected)
+            } else {
+                widgets::chooser(&row.value, selected, row.changed)
+            };
             setting_row(
                 block_pad,
                 row.label,
@@ -141,6 +165,44 @@ fn footer_lines(width: usize) -> Vec<String> {
     )]
 }
 
+/// Builds the local-LLM install confirmation modal: it explains the action,
+/// shows the chosen model, and masks the sudo password as it is typed.
+fn install_modal_frame(
+    raw_height: usize,
+    raw_width: usize,
+    model: &str,
+    modal: &InstallModal,
+) -> Vec<String> {
+    let body = vec![
+        "ローカル LLM (ollama) をインストールします".to_string(),
+        String::new(),
+        format!("モデル: {model}"),
+        "ランタイム導入には sudo 権限が必要です".to_string(),
+        String::new(),
+        format!("sudo パスワード: {}", modal.masked()),
+        String::new(),
+        style("Enter: 開始   Esc: キャンセル").dim().to_string(),
+    ];
+    widgets::render_modal(raw_height, raw_width, "Local LLM", MODAL_INNER_WIDTH, &body)
+}
+
+/// Builds the install progress modal shown while provisioning runs in the
+/// background: a spinner (advanced by `tick`) plus the model being installed.
+pub(super) fn installing_frame(
+    raw_height: usize,
+    raw_width: usize,
+    model: &str,
+    tick: usize,
+) -> Vec<String> {
+    let spinner = SPINNER[tick % SPINNER.len()];
+    let body = vec![
+        format!("{spinner} インストール中…"),
+        String::new(),
+        format!("モデル: {model}"),
+    ];
+    widgets::render_modal(raw_height, raw_width, "Local LLM", MODAL_INNER_WIDTH, &body)
+}
+
 /// Builds the full configuration frame for a raw terminal size.
 pub fn render_frame(
     raw_height: usize,
@@ -148,6 +210,11 @@ pub fn render_frame(
     config: &Config,
     notice: Option<&str>,
 ) -> Vec<String> {
+    // When the install modal is open it overlays the whole screen.
+    if let Some(modal) = config.install_modal() {
+        return install_modal_frame(raw_height, raw_width, config.local_llm_model(), modal);
+    }
+
     let (height, width) = widgets::normalize_size(raw_height, raw_width);
     let block_pad = " ".repeat(widgets::centered_padding(width, BLOCK_WIDTH));
 
@@ -251,8 +318,17 @@ mod tests {
         assert!(lines[3].contains("Agent CLI"));
         // Each field shows its single current value via the chooser.
         assert!(lines[3].contains("Claude"));
-        // Every field is a chooser, so chevrons appear on all rows...
-        assert!(lines.iter().all(|l| l.contains('<') && l.contains('>')));
+        // The Local LLM row (index 4) is an action button: plain "Install",
+        // with no chevrons.
+        assert!(lines[4].contains("Local LLM"));
+        assert!(lines[4].contains("Install"));
+        assert!(!lines[4].contains('<'));
+        // Every other field is a chooser, so chevrons appear on those rows...
+        assert!(lines
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != 4)
+            .all(|(_, l)| l.contains('<') && l.contains('>')));
         // ...but only the focused (first) row carries the cursor.
         assert!(has_cursor(&lines[0]));
         assert_eq!(lines.iter().filter(|l| has_cursor(l)).count(), 1);
@@ -358,5 +434,58 @@ mod tests {
         let without = render_frame(24, 80, &config, None);
         let with = render_frame(24, 80, &config, Some("Saved 🐰"));
         assert_eq!(without.len(), with.len());
+    }
+
+    #[test]
+    fn action_label_is_a_plain_button_without_chevrons() {
+        let focused = action_label("Install", true);
+        let idle = action_label("Install", false);
+        assert!(focused.contains("Install"));
+        assert!(idle.contains("Install"));
+        // No chevrons: it reads as an action, not a left/right chooser.
+        assert!(!focused.contains('<') && !focused.contains('>'));
+    }
+
+    /// A config focused on the (uninstalled) Local LLM row with the install
+    /// modal open and `password` typed in.
+    fn config_with_open_modal(password: &str) -> Config {
+        let mut config = sample_config();
+        while config.selected_field() != Some(Field::LocalLlm) {
+            config.move_down();
+        }
+        config.open_install_modal();
+        for c in password.chars() {
+            config.install_modal_push(c);
+        }
+        config
+    }
+
+    #[test]
+    fn render_frame_overlays_the_install_modal_and_masks_the_password() {
+        let config = config_with_open_modal("ab");
+        let joined = render_frame(24, 80, &config, None).join("\n");
+        assert!(joined.contains("Local LLM"));
+        assert!(joined.contains("sudo"));
+        assert!(joined.contains("インストール"));
+        // The password shows only as bullets, never in the clear.
+        assert!(joined.contains("••"));
+        assert!(!joined.contains("ab"));
+        // The modal replaces the settings list (no Save button behind it).
+        assert!(!joined.contains("Save"));
+    }
+
+    #[test]
+    fn installing_frame_shows_a_spinner_and_the_model() {
+        let first = installing_frame(24, 80, "qwen2.5-coder:7b", 0).join("\n");
+        assert!(first.contains("qwen2.5-coder:7b"));
+        assert!(first.contains("インストール中"));
+        assert!(first.contains(SPINNER[0]));
+        // Advancing the tick advances the spinner frame, and it wraps around.
+        assert!(installing_frame(24, 80, "m", 1)
+            .join("\n")
+            .contains(SPINNER[1]));
+        assert!(installing_frame(24, 80, "m", SPINNER.len())
+            .join("\n")
+            .contains(SPINNER[0]));
     }
 }
