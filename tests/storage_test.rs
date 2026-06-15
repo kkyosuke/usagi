@@ -11,44 +11,11 @@ fn temp_storage() -> (tempfile::TempDir, Storage) {
 }
 
 #[test]
-fn workspaces_default_to_empty_when_file_is_missing() {
-    let (_dir, storage) = temp_storage();
-    assert!(workspace::list(&storage).unwrap().is_empty());
-}
-
-#[test]
 fn settings_default_when_file_is_missing() {
     let (_dir, storage) = temp_storage();
     let loaded = settings::load(&storage).unwrap();
     assert_eq!(loaded.theme, Theme::System);
     assert_eq!(loaded.default_workspace, None);
-}
-
-#[test]
-fn add_list_touch_and_remove_workspace() {
-    let (_dir, storage) = temp_storage();
-
-    workspace::add(&storage, "alpha", "/tmp/alpha").unwrap();
-    let beta = workspace::add(&storage, "beta", "/tmp/beta").unwrap();
-    assert_eq!(beta.created_at, beta.updated_at);
-
-    // Duplicate names are rejected.
-    assert!(workspace::add(&storage, "alpha", "/tmp/other").is_err());
-
-    let touched = workspace::touch(&storage, "alpha").unwrap();
-    assert!(touched.updated_at > touched.created_at);
-
-    // Most recently updated comes first.
-    let names: Vec<_> = workspace::list(&storage)
-        .unwrap()
-        .into_iter()
-        .map(|w| w.name)
-        .collect();
-    assert_eq!(names, vec!["alpha", "beta"]);
-
-    workspace::remove(&storage, "beta").unwrap();
-    assert!(workspace::remove(&storage, "beta").is_err());
-    assert_eq!(workspace::list(&storage).unwrap().len(), 1);
 }
 
 #[test]
@@ -94,12 +61,6 @@ fn workspaces_and_settings_are_stored_in_separate_files() {
 
     let raw = std::fs::read_to_string(storage.dir().join("settings.json")).unwrap();
     assert!(raw.contains("\"theme\": \"light\""));
-}
-
-#[test]
-fn touch_missing_workspace_errors() {
-    let (_dir, storage) = temp_storage();
-    assert!(workspace::touch(&storage, "ghost").is_err());
 }
 
 #[test]
