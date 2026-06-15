@@ -439,10 +439,6 @@ pub struct HomeState {
     /// the terminal monitor each redraw and rendered with a "running" icon,
     /// unless the path is also waiting (which takes precedence).
     live: HashSet<PathBuf>,
-    /// How many lines the command-log pane is scrolled up from its tail; `0`
-    /// pins it to the newest line. Bumped by the wheel / `PageUp` over the right
-    /// pane and reset to the bottom whenever fresh output arrives.
-    right_scroll: usize,
     /// The session picker, when open (the user pressed `Ctrl-O` inside the live
     /// terminal). While set it overlays the pane and captures its keys.
     session_picker: Option<SessionPicker>,
@@ -477,7 +473,6 @@ impl HomeState {
             terminal_view: None,
             waiting: HashSet::new(),
             live: HashSet::new(),
-            right_scroll: 0,
             session_picker: None,
         }
     }
@@ -513,7 +508,6 @@ impl HomeState {
 
     /// Append the recorded sessions to the log (the `session list` command).
     pub fn log_sessions(&mut self) {
-        self.reset_right_scroll();
         if self.sessions.is_empty() {
             self.log.push(LogLine::output(
                 "No sessions yet. Run \"session create <name>\" to create one.",
@@ -536,13 +530,11 @@ impl HomeState {
     /// Append an ordinary output line to the log (used by the event loop to
     /// report the result of a command's side effect, e.g. `terminal`).
     pub fn log_output(&mut self, text: impl Into<String>) {
-        self.reset_right_scroll();
         self.log.push(LogLine::output(text));
     }
 
     /// Append an error line to the log.
     pub fn log_error(&mut self, text: impl Into<String>) {
-        self.reset_right_scroll();
         self.log.push(LogLine::error(text));
     }
 
@@ -574,31 +566,6 @@ impl HomeState {
         self.right_pane
     }
 
-    /// How many lines the command-log pane is scrolled up from its newest line
-    /// (`0` is pinned to the bottom).
-    pub fn right_scroll(&self) -> usize {
-        self.right_scroll
-    }
-
-    /// Scroll the command-log pane up by `lines` toward older output, never past
-    /// the oldest line that a `viewport_rows`-tall pane could show.
-    pub fn scroll_log_up(&mut self, lines: usize, viewport_rows: usize) {
-        let max = self.log.len().saturating_sub(viewport_rows);
-        self.right_scroll = (self.right_scroll + lines).min(max);
-    }
-
-    /// Scroll the command-log pane down by `lines` toward the newest output,
-    /// stopping when it is pinned to the bottom.
-    pub fn scroll_log_down(&mut self, lines: usize) {
-        self.right_scroll = self.right_scroll.saturating_sub(lines);
-    }
-
-    /// Pin the command-log pane back to its newest line, so fresh output is
-    /// always in view after it arrives.
-    fn reset_right_scroll(&mut self) {
-        self.right_scroll = 0;
-    }
-
     /// The current embedded-terminal snapshot, when the terminal is running.
     pub fn terminal_view(&self) -> Option<&TerminalView> {
         self.terminal_view.as_ref()
@@ -617,7 +584,6 @@ impl HomeState {
     pub fn show_log(&mut self) {
         self.right_pane = RightPane::Log;
         self.terminal_view = None;
-        self.reset_right_scroll();
     }
 
     /// Store the latest embedded-terminal screen snapshot, shown in the right
@@ -838,7 +804,6 @@ impl HomeState {
             };
         }
 
-        self.reset_right_scroll();
         self.log.push(LogLine::command(entry.clone()));
         let result = self
             .registry
@@ -924,7 +889,6 @@ impl HomeState {
     /// Apply the result of a session-creation attempt: log its line and, when
     /// creation refreshed the worktree list, swap it in.
     pub fn apply_session_outcome(&mut self, outcome: SessionOutcome) {
-        self.reset_right_scroll();
         self.log.push(outcome.line);
         if let Some(sessions) = outcome.sessions {
             self.sessions = sessions;
@@ -1734,36 +1698,6 @@ mod tests {
         assert_eq!(last_two[0].text, "it broke");
         assert_eq!(last_two[1].kind, LineKind::Output);
         assert_eq!(last_two[1].text, "did a thing");
-    }
-
-    #[test]
-    fn log_scroll_moves_clamps_and_sticks_to_the_bottom() {
-        let mut state = state();
-        for i in 0..10 {
-            state.log_output(format!("line {i}"));
-        }
-        let len = state.log().len();
-        // It starts pinned to the newest line.
-        assert_eq!(state.right_scroll(), 0);
-
-        // Scrolling up moves the window earlier, up to the oldest line a
-        // 4-row pane could show (len - 4).
-        state.scroll_log_up(3, 4);
-        assert_eq!(state.right_scroll(), 3);
-        state.scroll_log_up(100, 4);
-        assert_eq!(state.right_scroll(), len - 4);
-
-        // Scrolling down walks back toward the bottom and stops there.
-        state.scroll_log_down(2);
-        assert_eq!(state.right_scroll(), len - 4 - 2);
-        state.scroll_log_down(1000);
-        assert_eq!(state.right_scroll(), 0);
-
-        // Fresh output snaps the pane back to the bottom.
-        state.scroll_log_up(2, 4);
-        assert_ne!(state.right_scroll(), 0);
-        state.log_output("new output");
-        assert_eq!(state.right_scroll(), 0);
     }
 
     #[test]

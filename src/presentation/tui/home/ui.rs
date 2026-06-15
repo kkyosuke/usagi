@@ -100,25 +100,6 @@ fn layout(width: usize) -> (usize, usize) {
     (left, right)
 }
 
-/// The 0-based column where the right pane begins (past the left pane and the
-/// divider) for a raw terminal width. A wheel report's column is tested against
-/// this to tell whether the turn happened over the scrollable right pane.
-pub fn right_pane_col_start(raw_width: usize) -> usize {
-    let (_, width) = widgets::normalize_size(0, raw_width);
-    let (left_w, _) = layout(width);
-    left_w + SEP_WIDTH
-}
-
-/// The number of body rows the right pane spans for a raw terminal size — the
-/// window height the wheel / `PageUp` scroll the command log within. Matches the
-/// body height [`render_frame`] draws (the command-mode hints overlay the body's
-/// bottom rows rather than shrinking it, so the pane height never depends on the
-/// mode).
-pub fn log_pane_rows(raw_height: usize, raw_width: usize) -> usize {
-    let (height, _) = widgets::normalize_size(raw_height, raw_width);
-    height.saturating_sub(4).max(1)
-}
-
 /// The centred title bar: workspace name and session count. The count covers
 /// every row in the left pane — the root row plus each worktree — so it matches
 /// what the user sees, rather than the bare worktree count.
@@ -367,12 +348,11 @@ fn log_line(line: &LogLine, width: usize) -> String {
     }
 }
 
-/// Builds the right pane: a `rows`-tall window of the log, scrolled up from the
-/// tail by `scroll` lines (`0` shows the newest lines, like a terminal).
-fn right_pane(log: &[LogLine], right_w: usize, rows: usize, scroll: usize) -> Vec<String> {
-    // The window's top when pinned to the bottom; scrolling up moves it earlier.
-    let max_start = log.len().saturating_sub(rows);
-    let start = max_start.saturating_sub(scroll);
+/// Builds the right pane: a `rows`-tall window pinned to the tail of the log, so
+/// the newest lines are always shown (like a terminal). The TUI never scrolls,
+/// so the window is always at the bottom.
+fn right_pane(log: &[LogLine], right_w: usize, rows: usize) -> Vec<String> {
+    let start = log.len().saturating_sub(rows);
     log[start..]
         .iter()
         .take(rows)
@@ -399,7 +379,7 @@ fn terminal_pane(view: &TerminalView, right_w: usize, rows: usize) -> Vec<String
 /// until the first one arrives).
 fn right_pane_contents(state: &HomeState, right_w: usize, rows: usize) -> Vec<String> {
     match state.right_pane() {
-        RightPane::Log => right_pane(state.log(), right_w, rows, state.right_scroll()),
+        RightPane::Log => right_pane(state.log(), right_w, rows),
         RightPane::Terminal => match state.terminal_view() {
             Some(view) => terminal_pane(view, right_w, rows),
             None => vec![style(clip_to_width(TERMINAL_STARTING, right_w))
@@ -546,12 +526,8 @@ fn footer_line(width: usize, state: &HomeState) -> String {
         "Embedded terminal — Ctrl-O: switch session / detach / Shift+PgUp/PgDn: scroll"
     } else {
         match state.mode() {
-            Mode::Sidebar => {
-                "↑↓: move / Enter: activate / :: command / PgUp/PgDn: scroll / Esc: back"
-            }
-            Mode::Command => {
-                "Tab: complete / ↑↓: history / Enter: run / PgUp/PgDn: scroll / Esc: cancel"
-            }
+            Mode::Sidebar => "↑↓: move / Enter: activate / :: command / Esc: back",
+            Mode::Command => "Tab: complete / ↑↓: history / Enter: run / Esc: cancel",
         }
     };
     widgets::dim_line(width, help)
@@ -1167,9 +1143,9 @@ mod tests {
         let log: Vec<LogLine> = (0..5)
             .map(|i| LogLine::output(format!("line {i}")))
             .collect();
-        let lines = right_pane(&log, 40, 3, 0);
+        let lines = right_pane(&log, 40, 3);
         assert_eq!(lines.len(), 3);
-        // The oldest lines scroll off; the newest remain.
+        // The oldest lines scroll off; the newest remain (pinned to the tail).
         assert!(lines[0].contains("line 2"));
         assert!(lines[2].contains("line 4"));
     }
@@ -1177,49 +1153,8 @@ mod tests {
     #[test]
     fn right_pane_keeps_everything_when_it_fits() {
         let log = vec![LogLine::output("only")];
-        let lines = right_pane(&log, 40, 5, 0);
+        let lines = right_pane(&log, 40, 5);
         assert_eq!(lines.len(), 1);
-    }
-
-    #[test]
-    fn right_pane_scrolls_up_to_show_older_lines() {
-        let log: Vec<LogLine> = (0..5)
-            .map(|i| LogLine::output(format!("line {i}")))
-            .collect();
-        // Scrolling up by two slides the 3-row window to the very top.
-        let lines = right_pane(&log, 40, 3, 2);
-        assert_eq!(lines.len(), 3);
-        assert!(lines[0].contains("line 0"));
-        assert!(lines[2].contains("line 2"));
-    }
-
-    #[test]
-    fn right_pane_scroll_is_clamped_to_the_oldest_line() {
-        let log: Vec<LogLine> = (0..5)
-            .map(|i| LogLine::output(format!("line {i}")))
-            .collect();
-        // An over-large scroll still stops at the top window (start clamps to 0).
-        let lines = right_pane(&log, 40, 3, 99);
-        assert!(lines[0].contains("line 0"));
-    }
-
-    #[test]
-    fn right_pane_col_start_clears_the_left_pane_and_divider() {
-        let (left, _) = layout(80);
-        assert_eq!(right_pane_col_start(80), left + SEP_WIDTH);
-    }
-
-    #[test]
-    fn log_pane_rows_matches_the_body_height() {
-        // The pane is the whole body (height minus the 4 chrome rows). The
-        // command-mode hints overlay the body rather than shrinking it, so the
-        // height never depends on the mode.
-        assert_eq!(log_pane_rows(24, 80), 20);
-    }
-
-    #[test]
-    fn log_pane_rows_stays_at_least_one_in_a_tiny_terminal() {
-        assert_eq!(log_pane_rows(1, 80), 1);
     }
 
     #[test]

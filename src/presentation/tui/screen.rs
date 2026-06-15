@@ -6,11 +6,14 @@ use console::{Key, Term};
 
 use crate::presentation::tui::echo::EchoGuard;
 
-/// A mouse-wheel scroll, surfaced to the screens that scroll a pane in place.
+/// A mouse-wheel scroll, decoded from a terminal mouse report.
 ///
-/// Most screens never see one — [`KeyReader::read_key`] drops scrolls — but the
-/// workspace screen routes a wheel turn over the right pane into an in-pane
-/// scroll instead of letting it move the terminal's own viewport.
+/// No management screen acts on one: the TUI itself never scrolls (the embedded
+/// terminal pane has its own history scroll, handled separately via
+/// `crossterm`). [`KeyReader::read_key`] drops scrolls, so they are read and
+/// swallowed rather than reaching the host terminal's own viewport and
+/// revealing the pre-launch scrollback. This type stays the unit a decoded wheel
+/// turn drains through in [`term_reader`](crate::presentation::tui::term_reader).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ScrollEvent {
     /// Lines to scroll: negative scrolls up (toward older content), positive
@@ -37,14 +40,17 @@ pub enum Input {
 ///
 /// Implementors provide [`read_key`](KeyReader::read_key). The default
 /// [`read_input`](KeyReader::read_input) reports every read as a key, which is
-/// all the screens that do not scroll a pane need; a reader that surfaces wheel
-/// turns (the real terminal) overrides it.
+/// all most screens and their test stubs need; the real terminal's reader
+/// overrides it to decode (and swallow) mouse reports so a wheel turn never
+/// leaks into the key stream.
 pub trait KeyReader {
     /// The next key press, discarding any scrolls along the way.
     fn read_key(&mut self) -> io::Result<Key>;
 
     /// The next input event (a key, or a mouse-wheel scroll). Defaults to a
-    /// key, so non-scrolling screens and their test stubs need not implement it.
+    /// key, so screens and their test stubs need not implement it. The real
+    /// terminal decodes mouse reports here; [`read_key`](Self::read_key) then
+    /// drops the scrolls, since no screen scrolls the TUI in place.
     fn read_input(&mut self) -> io::Result<Input> {
         Ok(Input::Key(self.read_key()?))
     }
@@ -87,12 +93,26 @@ pub struct AlternateScreenGuard {
     _echo: EchoGuard,
 }
 
+/// Write the wheel-capture input modes — alternate scroll ([`ENABLE_ALT_SCROLL`])
+/// then mouse reporting ([`ENABLE_MOUSE`]) — so the wheel is reported to us (and
+/// swallowed) rather than scrolling the host terminal's own viewport and
+/// revealing the pre-launch scrollback behind the TUI.
+///
+/// Set once when the alternate screen is entered, and re-asserted after the
+/// embedded terminal pane hands control back: that pane toggles `crossterm`'s
+/// raw mode around itself, so re-asserting here keeps the capture intact no
+/// matter what the pane (or the shell it ran) left behind.
+pub(crate) fn write_input_modes(term: &Term) -> Result<()> {
+    term.write_str(ENABLE_ALT_SCROLL)?;
+    term.write_str(ENABLE_MOUSE)?;
+    Ok(())
+}
+
 impl AlternateScreenGuard {
     pub fn new(term: Term) -> Result<Self> {
         let echo = EchoGuard::new();
         term.write_str(ENTER_ALT_SCREEN)?;
-        term.write_str(ENABLE_ALT_SCROLL)?;
-        term.write_str(ENABLE_MOUSE)?;
+        write_input_modes(&term)?;
         term.hide_cursor()?;
         Ok(Self {
             term,
@@ -192,6 +212,24 @@ pub(crate) fn diff_frame(prev: &[String], frame: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A reader that yields one scripted key, used to exercise the default
+    /// [`KeyReader::read_input`] (the real terminal overrides it; the stubbed
+    /// screens only implement [`KeyReader::read_key`]).
+    struct OneKey(Key);
+
+    impl KeyReader for OneKey {
+        fn read_key(&mut self) -> io::Result<Key> {
+            Ok(self.0.clone())
+        }
+    }
+
+    #[test]
+    fn default_read_input_wraps_a_key() {
+        // The default implementation reports each read as a key, never a scroll.
+        let mut reader = OneKey(Key::Char('a'));
+        assert_eq!(reader.read_input().unwrap(), Input::Key(Key::Char('a')));
+    }
 
     #[test]
     fn guard_writes_farewell_when_not_dismissed() {
