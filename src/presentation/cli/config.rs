@@ -10,6 +10,7 @@ use std::fs;
 use std::path::Path;
 
 use anyhow::{bail, Context, Result};
+use shell_words;
 
 use crate::domain::settings::{AgentCli, Settings, Theme};
 use crate::infrastructure::storage::Storage;
@@ -43,23 +44,39 @@ struct EnvEditor;
 
 impl Editor for EnvEditor {
     fn edit(&self, path: &Path) -> Result<()> {
-        let editor = editor_command();
-        let status = std::process::Command::new(&editor)
+        let editor_args = editor_command();
+        let editor_bin = &editor_args[0];
+        let status = std::process::Command::new(editor_bin)
+            .args(&editor_args[1..])
             .arg(path)
             .status()
-            .with_context(|| format!("failed to launch editor `{editor}`"))?;
+            .with_context(|| format!("failed to launch editor `{editor_bin}`"))?;
         if !status.success() {
-            bail!("editor `{editor}` exited with an error");
+            bail!("editor `{editor_bin}` exited with an error");
         }
         Ok(())
     }
 }
 
 /// The editor command to run: `$EDITOR`, then `$VISUAL`, then a platform default.
-fn editor_command() -> String {
-    non_empty_env("EDITOR")
-        .or_else(|| non_empty_env("VISUAL"))
-        .unwrap_or_else(|| default_editor(std::env::consts::OS).to_string())
+fn editor_command() -> Vec<String> {
+    if let Some(editor) = non_empty_env("EDITOR") {
+        if let Ok(args) = shell_words::split(&editor) {
+            if !args.is_empty() {
+                return args;
+            }
+        }
+    }
+
+    if let Some(visual) = non_empty_env("VISUAL") {
+        if let Ok(args) = shell_words::split(&visual) {
+            if !args.is_empty() {
+                return args;
+            }
+        }
+    }
+
+    vec![default_editor(std::env::consts::OS).to_string()]
 }
 
 /// Read an environment variable, treating an unset or empty value as absent.
@@ -258,16 +275,36 @@ mod tests {
 
         std::env::set_var("EDITOR", "my-editor");
         std::env::set_var("VISUAL", "my-visual");
-        assert_eq!(editor_command(), "my-editor");
+        assert_eq!(editor_command(), vec!["my-editor".to_string()]);
 
         // An empty EDITOR falls through to VISUAL.
         std::env::set_var("EDITOR", "");
-        assert_eq!(editor_command(), "my-visual");
+        assert_eq!(editor_command(), vec!["my-visual".to_string()]);
 
         // Neither set: the platform default.
         std::env::remove_var("EDITOR");
         std::env::remove_var("VISUAL");
-        assert_eq!(editor_command(), default_editor(std::env::consts::OS));
+        assert_eq!(
+            editor_command(),
+            vec![default_editor(std::env::consts::OS).to_string()]
+        );
+    }
+
+    #[test]
+    fn editor_command_parses_complex_string() {
+        let _guard = crate::test_support::process_env_guard();
+
+        std::env::set_var("EDITOR", "vim -p");
+        assert_eq!(
+            editor_command(),
+            vec!["vim".to_string(), "-p".to_string()]
+        );
+
+        std::env::set_var("EDITOR", "code --wait --new-window");
+        assert_eq!(
+            editor_command(),
+            vec!["code".to_string(), "--wait".to_string(), "--new-window".to_string()]
+        );
     }
 
     #[test]
