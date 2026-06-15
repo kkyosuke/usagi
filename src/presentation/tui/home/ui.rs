@@ -652,8 +652,11 @@ fn remove_modal_frame(raw_height: usize, raw_width: usize, modal: &RemoveModal) 
     widgets::render_modal(raw_height, raw_width, "Remove sessions", INNER, &body)
 }
 
-/// Inner width of the session-picker box.
-const PICKER_INNER: usize = 32;
+/// Inner width of the session-picker box. Wide enough for the longest body
+/// line — the prompt and the first key-hints row — so nothing overflows the
+/// border. Kept in line with the other modals rather than stretched to fit the
+/// hints on a single row.
+const PICKER_INNER: usize = 36;
 
 /// Builds one session-picker row: a `>` cursor for the highlighted entry, its
 /// 1-based number, a `●` "here" marker for the session the pane is rooted at,
@@ -698,11 +701,15 @@ fn session_picker_body(picker: &SessionPicker) -> Vec<String> {
         ));
     }
     body.push(String::new());
-    body.push(
-        style("1-9/↑↓+Enter: switch   Esc: cancel   Ctrl-O: detach")
-            .dim()
-            .to_string(),
-    );
+    // Two hint rows so the box stays compact instead of stretching to fit the
+    // whole legend on one line; the detach hint is centred under the first row.
+    body.push(style("1-9/↑↓+Enter: switch  Esc: cancel").dim().to_string());
+    let detach = "Ctrl-O: detach";
+    let detach_pad = " ".repeat(widgets::centered_padding(
+        PICKER_INNER,
+        detach.chars().count(),
+    ));
+    body.push(style(format!("{detach_pad}{detach}")).dim().to_string());
     body
 }
 
@@ -1370,6 +1377,26 @@ mod tests {
         // The frame keeps its full height and the title bar behind the box.
         assert_eq!(frame.len(), 24);
         assert!(joined.contains("usagi"));
+    }
+
+    #[test]
+    fn session_picker_body_stays_within_the_box_width() {
+        let mut state = HomeState::new(
+            "usagi",
+            vec![
+                worktree(Some("main"), true, BranchStatus::Pushed),
+                worktree(Some("feature"), false, BranchStatus::Local),
+            ],
+            None,
+        );
+        state.open_session_picker();
+        for line in session_picker_body(state.session_picker().unwrap()) {
+            let visible = console::strip_ansi_codes(&line);
+            assert!(
+                console::measure_text_width(&visible) <= PICKER_INNER,
+                "line overflows the box: {visible:?}",
+            );
+        }
     }
 
     #[test]
