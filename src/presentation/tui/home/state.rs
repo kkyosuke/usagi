@@ -11,7 +11,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use crate::domain::settings::SessionActionUi;
-use crate::domain::workspace_state::{SessionRecord, WorktreeState};
+use crate::domain::workspace_state::{BranchStatus, SessionRecord, WorktreeState};
 
 use super::command::{
     CommandInfo, CommandRegistry, CommandScope, Completion, Effect, Hint, WorktreeRef,
@@ -26,6 +26,38 @@ pub fn worktree_name(worktree: &WorktreeState) -> &str {
 /// The name of the root row: the workspace itself, belonging to no session.
 /// Used as its display label and to target it from `session switch root`.
 pub const ROOT_NAME: &str = "root";
+
+/// Collapse a session's per-repository worktrees into the single list row that
+/// represents it.
+///
+/// A session is one branch name checked out into a worktree in every repository
+/// under the workspace, so the home list shows one row per *session*, not per
+/// repository. The row is keyed on the session tree root (`<workspace>/.usagi/
+/// worktree/<name>`) — where the embedded terminal/agent roots and the key for
+/// its live/waiting state — and carries:
+///
+/// - the session name as its branch label,
+/// - a status [aggregated](BranchStatus::aggregate) across the repositories (the
+///   least-progressed, so `merged` means every repository's branch has landed),
+/// - `primary` set when any repository's worktree is the primary checkout,
+/// - the first repository's `head` / `upstream` as representative detail.
+///
+/// For a single-repository workspace the session root *is* that repository's
+/// worktree, so the row matches the lone worktree exactly.
+fn session_row(session: &SessionRecord) -> WorktreeState {
+    let status = BranchStatus::aggregate(session.worktrees.iter().map(|w| w.status));
+    let primary = session.worktrees.iter().any(|w| w.primary);
+    let first = session.worktrees.first();
+    WorktreeState {
+        branch: Some(session.name.clone()),
+        path: session.root.clone(),
+        head: first.map(|w| w.head.clone()).unwrap_or_default(),
+        primary,
+        upstream: first.and_then(|w| w.upstream.clone()),
+        status,
+        updated_at: session.created_at,
+    }
+}
 
 /// The opened workspace and the selectable list of its worktrees, preceded by a
 /// synthetic *root row*.
@@ -486,16 +518,13 @@ impl HomeState {
         self.rebuild_list();
     }
 
-    /// Rebuild the worktree pane from the current sessions: every session
-    /// contributes its per-repository worktrees, in order.
+    /// Rebuild the worktree pane from the current sessions: one row per session
+    /// (not per repository), in order. A session spanning several git
+    /// repositories is collapsed into a single row by [`session_row`].
     fn rebuild_list(&mut self) {
         let name = self.list.workspace_name().to_string();
-        let worktrees = self
-            .sessions
-            .iter()
-            .flat_map(|s| s.worktrees.iter().cloned())
-            .collect();
-        self.list = WorktreeList::new(name, worktrees);
+        let rows = self.sessions.iter().map(session_row).collect();
+        self.list = WorktreeList::new(name, rows);
     }
 
     pub fn sessions(&self) -> &[SessionRecord] {
@@ -1745,6 +1774,63 @@ mod tests {
         assert_eq!(state.log().last().unwrap().kind, LineKind::Error);
         assert_eq!(state.list().worktrees().len(), 2);
         assert_eq!(state.sessions().len(), 2);
+    }
+
+    #[test]
+    fn multi_repo_session_collapses_to_one_row_with_an_aggregated_status() {
+        // A session spanning three repositories: two merged, one still local.
+        let mut merged_a = worktree("feature");
+        merged_a.path = PathBuf::from("/repo/.usagi/worktree/feature/app-a");
+        merged_a.primary = true;
+        merged_a.status = BranchStatus::Merged;
+        merged_a.upstream = Some("origin/feature".to_string());
+        let mut merged_b = worktree("feature");
+        merged_b.path = PathBuf::from("/repo/.usagi/worktree/feature/app-b");
+        merged_b.status = BranchStatus::Merged;
+        let mut local_c = worktree("feature");
+        local_c.path = PathBuf::from("/repo/.usagi/worktree/feature/app-c");
+        local_c.status = BranchStatus::Local;
+
+        let mut state = state();
+        state.restore_sessions(vec![SessionRecord {
+            name: "feature".to_string(),
+            root: PathBuf::from("/repo/.usagi/worktree/feature"),
+            worktrees: vec![merged_a, merged_b, local_c],
+            created_at: Utc::now(),
+        }]);
+
+        // The three repositories collapse into a single row.
+        assert_eq!(state.list().worktrees().len(), 1);
+        let row = &state.list().worktrees()[0];
+        assert_eq!(row.branch.as_deref(), Some("feature"));
+        // Keyed on the session tree root (not any single repository's worktree).
+        assert_eq!(row.path, PathBuf::from("/repo/.usagi/worktree/feature"));
+        // Least-progressed wins: one local repo keeps the whole session `local`.
+        assert_eq!(row.status, BranchStatus::Local);
+        // Primary is set because one repository's worktree is primary.
+        assert!(row.primary);
+        // Representative detail comes from the first repository.
+        assert_eq!(row.upstream.as_deref(), Some("origin/feature"));
+    }
+
+    #[test]
+    fn a_session_with_no_worktrees_still_yields_a_row() {
+        let mut state = state();
+        state.restore_sessions(vec![SessionRecord {
+            name: "empty".to_string(),
+            root: PathBuf::from("/repo/.usagi/worktree/empty"),
+            worktrees: Vec::new(),
+            created_at: Utc::now(),
+        }]);
+        assert_eq!(state.list().worktrees().len(), 1);
+        let row = &state.list().worktrees()[0];
+        assert_eq!(row.branch.as_deref(), Some("empty"));
+        // No repositories: a conservative `local`, no primary, no upstream, and
+        // an empty representative head.
+        assert_eq!(row.status, BranchStatus::Local);
+        assert!(!row.primary);
+        assert!(row.upstream.is_none());
+        assert!(row.head.is_empty());
     }
 
     #[test]
