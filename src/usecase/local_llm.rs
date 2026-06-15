@@ -27,7 +27,7 @@ const INSTALLER: &str = "ollama.com/install.sh";
 /// The official Ollama install command, run through a shell so the pipe works.
 /// It supports both macOS and Linux and elevates with `sudo` itself where
 /// needed (pre-authenticated by [`ensure`] when a password is supplied).
-const INSTALL_SCRIPT: &str = "tmp=$(mktemp -d) && curl -fsSL https://ollama.com/install.sh -o \"$tmp/install.sh\" && (echo '25f64b810b947145095956533e1bdf56eacea2673c55a7e586be4515fc882c9f *install.sh' > \"$tmp/checksum.txt\") && cd \"$tmp\" && (sha256sum -c checksum.txt || shasum -a 256 -c checksum.txt) && sh install.sh; err=$?; rm -rf \"$tmp\"; exit $err";
+const INSTALL_SCRIPT: &str = "curl -fsSL https://ollama.com/install.sh | sh";
 
 /// Whether the `ollama` runtime is installed and runnable.
 pub fn ollama_installed(runner: &dyn CommandRunner) -> bool {
