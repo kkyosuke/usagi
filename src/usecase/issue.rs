@@ -482,6 +482,10 @@ mod tests {
         assert!(search(repo, "zzzzz", &IssueFilter::default())
             .unwrap()
             .is_empty());
+
+        // An empty query matches every issue.
+        let all = search(repo, "", &IssueFilter::default()).unwrap();
+        assert_eq!(all.len(), 2);
     }
 
     #[test]
