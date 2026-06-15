@@ -45,6 +45,7 @@
 | 030 | [default-branch-source](030-default-branch-source.md) ✅ | セッション開始時のデフォルトブランチ基点（local / remote）をローカル設定で選択 | tui | medium | 022 |
 | 031 | [root-mode](031-root-mode.md) ✅ | ルートモード（どのセッションにも属さず `terminal` / `agent` をワークスペースルートで起動） | tui | medium | 006, 026 |
 | 032 | [local-llm-mcp](032-local-llm-mcp.md) ✅ | ローカル LLM を MCP 公開しクラウド Agent のトークン消費を抑制（config 有効化・未導入時 install） | mcp | medium | 019, 025 |
+| 033 | [engagement-ladder](033-engagement-ladder.md) ✅ | ホーム画面を 4 モード（統括・切替・在席・没入）の状態機械に再構成（`Ctrl-O` ズームアウト／スコープ物理分離／`session_action_ui` 追加） | tui | medium | 027, 031 |
 
 ## 依存関係
 
@@ -89,6 +90,8 @@ graph TD
     024 --> 025
     019[019 doctor-fix] --> 032[032 local-llm-mcp]
     025 --> 032
+    027 --> 033[033 engagement-ladder]
+    031 --> 033
 ```
 
 ## 推奨着手順
