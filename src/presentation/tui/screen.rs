@@ -60,23 +60,24 @@ pub trait KeyReader {
 const ENTER_ALT_SCREEN: &str = "\x1b[?1049h";
 /// Leave the alternate screen, restoring the prior contents.
 const LEAVE_ALT_SCREEN: &str = "\x1b[?1049l";
-/// Enable alternate scroll mode (DECSET 1007). While the alternate screen is
-/// active this makes the mouse wheel emit cursor-key presses (`ESC O A` /
-/// `ESC O B`) instead of scrolling the terminal's own viewport — which is what
-/// otherwise reveals the pre-launch scrollback "behind" the TUI on terminals
-/// that do not report the wheel as a mouse event (notably Apple Terminal.app,
-/// whose mouse reporting is off unless the user opts in). The key reader
-/// recognises those synthetic cursor keys and turns them into in-pane scrolls
-/// rather than letting them move the lists (see `term_reader`). On terminals
-/// that do report the wheel, mouse reporting takes precedence and this is inert
-/// — see [`ENABLE_MOUSE`].
-const ENABLE_ALT_SCROLL: &str = "\x1b[?1007h";
 /// Enable mouse reporting: normal tracking (DECSET 1000) plus SGR extended
-/// coordinates (DECSET 1006). With reporting on, a terminal that supports wheel
-/// reporting (e.g. iTerm2, the VS Code terminal) hands wheel and click events to
-/// us as escape sequences, which `term_reader` turns into in-pane scrolls. This
-/// takes precedence over alternate scroll, so the two settings coexist: wheel
-/// reporting where it exists, [`ENABLE_ALT_SCROLL`] as the fallback elsewhere.
+/// coordinates (DECSET 1006). Claiming the mouse this way does two jobs at once:
+///
+/// - it stops the terminal from acting on the wheel itself — which is what would
+///   otherwise scroll the host viewport and reveal the pre-launch scrollback
+///   "behind" the TUI — and
+/// - it hands wheel and click events to us as escape sequences instead, which
+///   `term_reader` decodes: a wheel turn becomes a [`ScrollEvent`] (swallowed by
+///   the management screens, acted on by the embedded pane), everything else is
+///   dropped.
+///
+/// We deliberately do *not* enable alternate scroll (DECSET 1007). Alternate
+/// scroll makes the wheel masquerade as cursor-key presses, and those are
+/// indistinguishable from real arrow keys — so on a terminal that does not report
+/// the wheel as a mouse event the wheel would silently move the lists (and never
+/// reach the pane as a scroll). Relying on mouse reporting alone keeps the TUI
+/// itself unscrollable on every terminal; where the wheel is not reported, the
+/// embedded pane still scrolls via `Shift`+`PageUp`/`PageDown`.
 const ENABLE_MOUSE: &str = "\x1b[?1000h\x1b[?1006h";
 /// Disable mouse reporting, restoring the terminal's normal wheel / selection
 /// behaviour once the TUI exits. Reset in the reverse order of [`ENABLE_MOUSE`].
@@ -93,17 +94,16 @@ pub struct AlternateScreenGuard {
     _echo: EchoGuard,
 }
 
-/// Write the wheel-capture input modes — alternate scroll ([`ENABLE_ALT_SCROLL`])
-/// then mouse reporting ([`ENABLE_MOUSE`]) — so the wheel is reported to us (and
-/// swallowed) rather than scrolling the host terminal's own viewport and
-/// revealing the pre-launch scrollback behind the TUI.
+/// Write the wheel-capture input mode — mouse reporting ([`ENABLE_MOUSE`]) — so
+/// the wheel is reported to us (and swallowed) rather than scrolling the host
+/// terminal's own viewport and revealing the pre-launch scrollback behind the
+/// TUI.
 ///
 /// Set once when the alternate screen is entered, and re-asserted after the
 /// embedded terminal pane hands control back: that pane toggles `crossterm`'s
 /// raw mode around itself, so re-asserting here keeps the capture intact no
 /// matter what the pane (or the shell it ran) left behind.
 pub(crate) fn write_input_modes(term: &Term) -> Result<()> {
-    term.write_str(ENABLE_ALT_SCROLL)?;
     term.write_str(ENABLE_MOUSE)?;
     Ok(())
 }
@@ -130,7 +130,6 @@ impl AlternateScreenGuard {
 impl Drop for AlternateScreenGuard {
     fn drop(&mut self) {
         let _ = self.term.write_str(DISABLE_MOUSE);
-        let _ = self.term.write_str(ENABLE_ALT_SCROLL);
         let _ = self.term.write_str(LEAVE_ALT_SCREEN);
         let _ = self.term.show_cursor();
         if self.farewell {

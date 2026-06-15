@@ -93,16 +93,6 @@ fn mouse_seq_kind(key: &Key) -> Option<(MouseSeq, Vec<char>)> {
 fn next_input(mut read: impl FnMut() -> io::Result<Key>) -> io::Result<Input> {
     loop {
         let key = read()?;
-        // Alternate scroll mode (DECSET 1007) reports the wheel as an SS3 cursor
-        // key (`ESC O A` / `ESC O B`). `console` decodes the `ESC O` head as a
-        // bare `UnknownEscSeq(['O'])` and leaves the final letter as the next
-        // `Char`, so a vertical turn becomes a scroll and anything else drains.
-        if is_ss3_head(&key) {
-            if let Some(scroll) = read_alt_scroll(&mut read)? {
-                return Ok(Input::Scroll(scroll));
-            }
-            continue;
-        }
         let scroll = match mouse_seq_kind(&key) {
             Some((MouseSeq::Sgr, head)) => read_sgr(head, &mut read)?,
             Some((MouseSeq::X10, head)) => read_x10(head, &mut read)?,
@@ -115,31 +105,6 @@ fn next_input(mut read: impl FnMut() -> io::Result<Key>) -> io::Result<Input> {
             return Ok(Input::Scroll(scroll));
         }
     }
-}
-
-/// Whether `key` is the `ESC O` head of an SS3 sequence, as `console` surfaces
-/// it: a lone `UnknownEscSeq(['O'])` (the trailing letter arrives as a `Char`).
-fn is_ss3_head(key: &Key) -> bool {
-    matches!(key, Key::UnknownEscSeq(seq) if seq.as_slice() == ['O'])
-}
-
-/// After the `ESC O` head, read the final byte of an SS3 sequence and turn a
-/// vertical cursor key (the alternate-scroll wheel) into a [`ScrollEvent`]. The
-/// turn carries no column, so it is reported over the far right (`u16::MAX`) and
-/// always routed to the scrollable pane. Horizontal or other SS3 keys drain to
-/// `None` (the report is swallowed). Real arrow keys are unaffected: with the
-/// cursor keys in their default mode they arrive as `ESC [ A`, not `ESC O A`.
-fn read_alt_scroll(read: &mut impl FnMut() -> io::Result<Key>) -> io::Result<Option<ScrollEvent>> {
-    let lines = match read()? {
-        Key::Char('A') | Key::ArrowUp => -WHEEL_LINES,
-        Key::Char('B') | Key::ArrowDown => WHEEL_LINES,
-        _ => return Ok(None),
-    };
-    Ok(Some(ScrollEvent {
-        lines,
-        col: u16::MAX,
-        row: 0,
-    }))
 }
 
 /// Drain an SGR report (the parameters plus the `M`/`m` terminator), starting
@@ -381,48 +346,6 @@ mod tests {
             Key::Char('x'),
         ];
         assert_eq!(drive(keys), Input::Key(Key::Char('x')));
-    }
-
-    /// The SS3 cursor key `ESC O <letter>` an alternate-scroll wheel emits, as
-    /// `console` decodes it: an `ESC O` head (`UnknownEscSeq(['O'])`) then the
-    /// letter as a `Char`.
-    fn ss3(letter: char) -> Vec<Key> {
-        vec![Key::UnknownEscSeq(vec!['O']), Key::Char(letter)]
-    }
-
-    #[test]
-    fn ss3_up_becomes_a_scroll_up_over_the_right_pane() {
-        // Alternate scroll's wheel-up (`ESC O A`) scrolls up; with no column it
-        // is reported at the far right so it routes to the scrollable pane.
-        assert_eq!(
-            drive(ss3('A')),
-            Input::Scroll(ScrollEvent {
-                lines: -WHEEL_LINES,
-                col: u16::MAX,
-                row: 0,
-            })
-        );
-    }
-
-    #[test]
-    fn ss3_down_becomes_a_scroll_down() {
-        assert_eq!(
-            drive(ss3('B')),
-            Input::Scroll(ScrollEvent {
-                lines: WHEEL_LINES,
-                col: u16::MAX,
-                row: 0,
-            })
-        );
-    }
-
-    #[test]
-    fn ss3_horizontal_or_other_keys_are_swallowed_then_next_key_returned() {
-        // A horizontal SS3 key (`ESC O C`) is not a vertical wheel turn, so it
-        // is dropped and the following key is returned.
-        let mut keys = ss3('C');
-        keys.push(Key::Char('q'));
-        assert_eq!(drive(keys), Input::Key(Key::Char('q')));
     }
 
     #[test]
