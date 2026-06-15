@@ -7,6 +7,8 @@
 表示されます。`Tab` で補完、`↑↓` で履歴を遡れます。状態記号の凡例は [README.md](README.md#凡例) を、
 画面側の挙動・入力候補の詳細は [design/05-home.md](../design/05-home.md#入力候補ヒントコマンドモード時) を参照してください。
 
+コマンドは選択行に応じた**スコープ**で絞られます。`root` 行を選んでいるときは**ワークスペース全体**のコマンド（`session` / `config` / `doctor`）、各セッション（worktree）行を選んでいるときは**個別セッション**のコマンド（`terminal` / `agent` / `ai`）が候補・補完の対象になり、`man` / `history` / `clear` / `quit` は共通です。補完・候補・`man` の一覧は現在のスコープで切り替わり、フッターに `[workspace]` / `[session: <名前>]` が表示されます。詳細は [design/05-home.md](../design/05-home.md#コマンドスコープ) を参照。
+
 | コマンド | 説明 | issue | 状態 |
 |---|---|---|---|
 | `man` / `help` | コマンド一覧、または `man <command>` で個別の説明を表示 | [008](../../issues/008-man.md) | ✅ |
@@ -15,7 +17,7 @@
 | `quit` / `exit` | アプリを終了 | — | ✅ |
 | `session` | `session create <name>` でセッション（`.usagi/worktree/<name>/` 配下に再帰的に worktree を構築）を作成（`session create` と名前省略時は名前入力モーダル）。`session list` で一覧、`session switch <name>` でアクティブセッション切り替え（引数なしで一覧、`session switch root` でルート行へ）、`session remove <name> [--force]` で削除（未コミット変更があれば警告し `--force` で破棄。名前省略時はセッション一覧モーダルを開き、Space で選択/解除して Enter で一括削除）。サブコマンドは短縮形を受け付ける（`create`=`c`/`new`、`list`=`ls`、`remove`=`rm`） | [003](../../issues/003-session.md) / [004](../../issues/004-space.md) | ✅ 実装済み |
 | `ai` | 選択中の Agent CLI を起動し、現在の worktree をコンテキストに AI へ指示・対話する | [005](../../issues/005-ai.md) | 🚧 |
-| `terminal` | 選択中の worktree（先頭の **ルート行**を選んでいればワークスペースルート）を作業ディレクトリに対話型シェルを**右ペインに埋め込んで**起動する。左ペインの worktree 一覧は表示したまま。サイドバーでは `Enter` でも同じく選択中セッションのターミナルを開ける。`Ctrl-O` でセッション切り替えのオーバーレイを開き番号 / `↑↓`+`Enter` で別セッションへ切り替え（切り替え先はそのセッション自身の状態を表示）、`c` で新規セッションを作成してそのシェルへ、もう一度 `Ctrl-O` でデタッチして**シェルは生かしたまま**コマンドモードへ戻る | [006](../../issues/006-terminal.md) / [031](../../issues/031-root-mode.md) | ✅ 実装済み |
+| `terminal` | 選択中の worktree（先頭の **ルート行**を選んでいればワークスペースルート）を作業ディレクトリに対話型シェルを**右ペインに埋め込んで**起動する。左ペインの worktree 一覧は表示したまま。サイドバーの `Enter` や `Ctrl-O` 切り替えは、対象が**ライブのときだけ**アタッチし、アイドルなら選択するだけ（新規起動はこの `:terminal` / `:agent` から）。`Ctrl-O` でセッション切り替えのオーバーレイを開き番号 / `↑↓`+`Enter`（`l`/`Tab`）で別セッションへ切り替え（ライブなら再アタッチ、アイドルならデタッチして選択）、`c` で新規セッションを作成して選択、`h` またはもう一度 `Ctrl-O` でデタッチして**シェルは生かしたまま**コマンドモードへ戻る | [006](../../issues/006-terminal.md) / [031](../../issues/031-root-mode.md) | ✅ 実装済み |
 | `agent` | `terminal` と同じ埋め込みシェルを開き、設定中の Agent CLI（既定は `claude`、ローカル設定で上書き可）を起動コマンドとして**シェルの引数で渡して**起動する（stdin にタイプしないので長いコマンド行がペインにエコーされない）。対応する Agent CLI には usagi の issue MCP サーバ（`usagi mcp`）を組み込んで起動する。実質 `terminal` → `claude` のショートカット。ルート行選択時はワークスペースルートで起動。`Ctrl-O` でセッションを切り替え／デタッチしても **Agent は裏で動き続け**、**入力待ちになると左ペインに `◆` マーカー＋デスクトップ通知**で知らせる | [026](../../issues/026-agent.md) / [028](../../issues/028-agent-wait-notify.md) / [031](../../issues/031-root-mode.md) | ✅ 実装済み |
 | `config` | Config（設定）画面を**ワークスペーススコープ**で開き、現在のワークスペースのローカル設定（`<workspace>/.usagi/settings.json`）のみを編集する。グローバル設定は CLI（`usagi config`）／起動画面の Config で編集する。`Esc` / `q` でワークスペース画面へ復帰、`Ctrl+C` でアプリ終了 | [029](../../issues/029-home-config.md) | ✅ 実装済み |
 | `doctor` | 依存関係チェック（TUI 版） | [019](../../issues/019-doctor-fix.md) | 🚧 |

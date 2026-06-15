@@ -295,13 +295,23 @@ fn run_session_picker(
                     break Some(PaneExit::Switch);
                 }
             }
-            KeyCode::Enter => break Some(PaneExit::Switch),
+            // `Enter`, `l`, or `Tab` switches to the highlighted session (focus
+            // stays on the right pane — the tmux-style `l` = "go right").
+            KeyCode::Enter | KeyCode::Tab => break Some(PaneExit::Switch),
+            KeyCode::Char('l') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                break Some(PaneExit::Switch)
+            }
             KeyCode::Esc => break None,
-            // `c` creates a new session: the event loop opens the name modal and
-            // re-roots the pane there. Guarded against `Ctrl-C` (which arrives as
-            // `Char('c')` with the control modifier and must not create).
+            // `c` creates a new session: the event loop opens the name modal.
+            // Guarded against `Ctrl-C` (which arrives as `Char('c')` with the
+            // control modifier and must not create).
             KeyCode::Char('c') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                 break Some(PaneExit::Create)
+            }
+            // `h` moves focus to the sidebar (left) — detaching, the same as a
+            // second `Ctrl-O` — while the shell stays alive in the pool.
+            KeyCode::Char('h') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                break Some(PaneExit::Detach)
             }
             // A second `Ctrl-O` detaches, leaving the shell alive in the pool.
             KeyCode::Char('o') if key.modifiers.contains(KeyModifiers::CONTROL) => {
