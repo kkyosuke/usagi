@@ -1,5 +1,5 @@
 ---
-number: 033
+number: 035
 feature: engagement-ladder
 title: ホーム画面を 4 モード（統括・切替・在席・没入）の状態機械に再構成
 status: done
