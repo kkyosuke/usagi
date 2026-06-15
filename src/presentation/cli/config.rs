@@ -10,7 +10,6 @@ use std::fs;
 use std::path::Path;
 
 use anyhow::{bail, Context, Result};
-use shell_words;
 
 use crate::domain::settings::{AgentCli, Settings, Theme};
 use crate::infrastructure::storage::Storage;
@@ -305,6 +304,37 @@ mod tests {
                 "--wait".to_string(),
                 "--new-window".to_string()
             ]
+        );
+    }
+
+    #[test]
+    fn editor_command_falls_through_unusable_values() {
+        let _guard = crate::test_support::process_env_guard();
+
+        // EDITOR fails shell parsing (unbalanced quote) → fall back to VISUAL.
+        std::env::set_var("EDITOR", "vim \"x");
+        std::env::set_var("VISUAL", "nano");
+        assert_eq!(editor_command(), vec!["nano".to_string()]);
+
+        // EDITOR parses to no words (whitespace only) → fall back to VISUAL.
+        std::env::set_var("EDITOR", "   ");
+        std::env::set_var("VISUAL", "nano");
+        assert_eq!(editor_command(), vec!["nano".to_string()]);
+
+        // VISUAL also fails shell parsing → platform default.
+        std::env::set_var("EDITOR", "   ");
+        std::env::set_var("VISUAL", "code \"y");
+        assert_eq!(
+            editor_command(),
+            vec![default_editor(std::env::consts::OS).to_string()]
+        );
+
+        // VISUAL parses to no words → platform default.
+        std::env::set_var("EDITOR", "code \"z");
+        std::env::set_var("VISUAL", "   ");
+        assert_eq!(
+            editor_command(),
+            vec![default_editor(std::env::consts::OS).to_string()]
         );
     }
 
