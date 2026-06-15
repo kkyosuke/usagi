@@ -102,10 +102,12 @@ mod tests {
     use std::cell::RefCell;
     use std::rc::Rc;
 
+    type CallList = Vec<(String, Option<String>)>;
+
     /// A mock backend to verify the loop's interactions.
     struct FakeBackend {
         result: Result<String, String>,
-        calls: Rc<RefCell<Vec<(String, Option<String>)>>>,
+        calls: Rc<RefCell<CallList>>,
     }
 
     impl FakeBackend {
