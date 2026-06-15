@@ -37,7 +37,9 @@ fn fix_lines(
 ) -> Vec<String> {
     let mut lines = render_fixes(&fix_missing(checks, os, runner));
     if local_llm.enabled {
-        let result = local_llm::ensure(os, runner, &local_llm.model);
+        // The CLI runs on a real terminal, so the installer can prompt for
+        // sudo itself; no pre-supplied password (that is the TUI flow).
+        let result = local_llm::ensure(os, runner, &local_llm.model, None);
         lines.extend(render_local_llm_fix(&result));
     }
     lines
@@ -246,10 +248,10 @@ mod tests {
 
     #[test]
     fn fix_lines_installs_ollama_and_pulls_when_missing() {
-        // ollama absent but brew present, and the model is not pulled: both the
-        // install and the pull run (exercising the runner's `run`).
+        // ollama absent and the model not pulled: the official installer and
+        // the pull both run (exercising the runner's `run`).
         let runner = FakeRunner {
-            available: vec!["brew"],
+            available: vec![],
             check: false,
         };
         let local_llm = LocalLlm {
@@ -261,7 +263,7 @@ mod tests {
             lines,
             vec![
                 "All required tools are installed 🎉",
-                "installed `ollama` via brew",
+                "installed `ollama` via ollama.com/install.sh",
                 "pulled local LLM model `qwen2.5:7b`",
             ]
         );

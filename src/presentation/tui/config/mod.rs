@@ -16,6 +16,7 @@ use console::Term;
 
 use crate::domain::settings::{LocalSettings, Settings};
 use crate::infrastructure::storage::Storage;
+use crate::presentation::tui::screen::FramePainter;
 use crate::presentation::tui::term_reader::TermKeyReader;
 use crate::usecase::doctor::SystemRunner;
 use crate::usecase::{local_llm, settings, workspace};
@@ -84,14 +85,58 @@ pub fn run_in(term: &Term, repo_root: Option<PathBuf>) -> Result<Outcome> {
         }
         Ok(())
     };
-    // Installing the local LLM provisions the runtime + model on demand (this
-    // blocks the screen while `ollama pull` runs, then the row becomes a toggle).
-    let mut install = |model: &str| -> Result<()> {
-        local_llm::ensure(std::env::consts::OS, &SystemRunner, model)
-            .map(|_| ())
-            .map_err(|e| anyhow::anyhow!(install_error_message(&e)))
+    // Installing the local LLM provisions the runtime + model on demand. The
+    // work runs on a background thread so the screen can animate a spinner
+    // while `ollama pull` (and the runtime install) proceed; the sudo password
+    // entered in the modal pre-authenticates the privileged steps.
+    let mut install = |model: &str, password: &str| -> Result<()> {
+        run_install_with_spinner(term, model, password)
     };
     event::event_loop(term, &mut reader, config, &mut save, &mut install, notice)
+}
+
+/// Provisions the local LLM on a background thread, animating the install
+/// spinner on the main thread until it finishes. The sudo password is forwarded
+/// to [`local_llm::ensure`] so the runtime installer can elevate unattended.
+fn run_install_with_spinner(term: &Term, model: &str, password: &str) -> Result<()> {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    // The worker owns its copies so it can outlive this stack frame's borrows.
+    let model_owned = model.to_string();
+    let password_owned = password.to_string();
+    let (tx, rx) = mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        let result = local_llm::ensure(
+            std::env::consts::OS,
+            &SystemRunner,
+            &model_owned,
+            Some(&password_owned),
+        )
+        .map(|_| ())
+        .map_err(|e| anyhow::anyhow!(install_error_message(&e)));
+        // The receiver is only dropped once we have the result, so this send
+        // cannot fail in practice; ignore the error if it somehow does.
+        let _ = tx.send(result);
+    });
+
+    let mut painter = FramePainter::new();
+    let mut tick = 0usize;
+    let result = loop {
+        let (height, width) = term.size();
+        let frame = ui::installing_frame(height as usize, width as usize, model, tick);
+        let _ = painter.paint(term, frame);
+        // Poll for completion on a short cadence so the spinner keeps moving.
+        match rx.recv_timeout(Duration::from_millis(120)) {
+            Ok(result) => break result,
+            Err(mpsc::RecvTimeoutError::Timeout) => tick = tick.wrapping_add(1),
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                break Err(anyhow::anyhow!("install worker stopped unexpectedly"))
+            }
+        }
+    };
+    let _ = worker.join();
+    result
 }
 
 /// A short human message for a local LLM provisioning failure.
