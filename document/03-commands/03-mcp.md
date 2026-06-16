@@ -58,7 +58,7 @@ AIエージェント ⇄ (stdio JSON-RPC)
 presentation/cli/mcp.rs   … stdin ループ（薄い I/O ラッパ。カバレッジ対象外）
         │  handle_line(line) ごとに委譲
         ▼
-presentation/mcp.rs       … McpServer：JSON-RPC ディスパッチ + tool 実装（100% テスト）
+presentation/mcp/issue.rs … McpServer：tool 実装（JSON-RPC フレーミングは mcp/mod.rs と共有・100% テスト）
         │  各 tool が呼ぶ
         ▼
 usecase/issue             … create / get / list / search / update / delete・readiness 判定
@@ -70,7 +70,8 @@ infrastructure/issue_store … <repo>/.usagi/issues/ の markdown + index.json
 | モジュール | 役割 |
 |---|---|
 | `presentation/cli/mcp.rs` | `usagi mcp` のエントリ。stdin を 1 行ずつ読み、`McpServer::handle_line` の戻り値を stdout へ書く。ブロッキング I/O のみで、`hop` 同様カバレッジ計測の対象外。 |
-| `presentation/mcp.rs` | `McpServer`。`handle_line(&str) -> Option<String>` を純粋関数として実装（副作用は usecase 経由のファイル操作のみ）。プロトコル分岐・tool ディスパッチ・JSON 整形を担う。ユニットテストで網羅。 |
+| `presentation/mcp/mod.rs` | JSON-RPC 2.0 の共有フレーミング（`dispatch_line` / レスポンス整形 / `McpService` トレイト）。issue・llm 両サーバが共有。 |
+| `presentation/mcp/issue.rs` | `McpServer`。`McpService` を実装し issue tool を提供（`handle_line` は `mod.rs` の `dispatch_line` に委譲）。副作用は usecase 経由のファイル操作のみ。ユニットテストで網羅。 |
 | `usecase/issue` ほか | tool が呼ぶビジネスロジック。MCP 固有の知識は持たない。 |
 
 依存方向はクリーンアーキテクチャに従い `presentation → usecase → infrastructure`。MCP 層は

@@ -104,7 +104,7 @@ usagi llm-mcp --model qwen2.5-coder:7b   # stdin から JSON-RPC を読み、std
 presentation/cli/llm_mcp.rs   … stdin ループ + Ollama バックエンド（テスト不能・カバレッジ対象外）
         │  handle_line(line) ごとに委譲
         ▼
-presentation/mcp_llm.rs       … LlmMcpServer：JSON-RPC ディスパッチ + tool 実装（100% テスト）
+presentation/mcp/llm.rs       … LlmMcpServer：tool 実装（JSON-RPC フレーミングは mcp/mod.rs と共有・100% テスト）
         │  LlmBackend::ask 経由
         ▼
 （テスト時）FakeBackend / （本番）OllamaBackend → `ollama run <model>`
@@ -113,7 +113,7 @@ presentation/mcp_llm.rs       … LlmMcpServer：JSON-RPC ディスパッチ + t
 | モジュール | 役割 |
 |---|---|
 | `presentation/cli/llm_mcp.rs` | `usagi llm-mcp` のエントリ。stdin ループと `ollama` へのシェルアウト。`mcp` 同様カバレッジ対象外。 |
-| `presentation/mcp_llm.rs` | `LlmMcpServer`。プロトコル分岐・tool ディスパッチを純粋関数として実装し、`LlmBackend` トレイトでモデル呼び出しを抽象化。ユニットテストで網羅。 |
+| `presentation/mcp/llm.rs` | `LlmMcpServer`。`McpService` を実装し `local_llm_ask` tool を提供（JSON-RPC フレーミングは `mcp/mod.rs` と共有）。`LlmBackend` トレイトでモデル呼び出しを抽象化。ユニットテストで網羅。 |
 | `usecase/local_llm.rs` | `ollama` / モデルの有無判定とインストール、および Ollama サーバの起動確認・自動起動（`doctor::CommandRunner` を再利用）。 |
 
 ## 設計上の選択

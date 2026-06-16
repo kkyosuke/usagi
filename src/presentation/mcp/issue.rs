@@ -1,15 +1,9 @@
-//! MCP (Model Context Protocol) server for issue management.
-//!
-//! usagi speaks MCP over stdio so AI agents (Claude Code etc.) can create,
-//! query and update a project's task issues through the same tools a human uses
-//! on the CLI. The protocol is JSON-RPC 2.0 with newline-delimited messages; we
-//! implement the small subset MCP needs (`initialize`, `tools/list`,
-//! `tools/call`, `ping`) directly over `serde_json` rather than pulling in an
-//! async runtime, which keeps the dependency surface small and the dispatch
-//! logic synchronous and unit-testable.
+//! MCP server exposing a repository's task issues as tools.
 //!
 //! Every tool delegates to [`crate::usecase::issue`], so the MCP surface stays a
-//! thin protocol adapter over the same business logic the CLI uses.
+//! thin protocol adapter over the same business logic the CLI uses. The
+//! JSON-RPC framing is shared with the other server and lives in the parent
+//! [`super`] module; this file only supplies the issue tools.
 
 use std::path::{Path, PathBuf};
 
@@ -17,11 +11,9 @@ use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+use super::McpService;
 use crate::domain::issue::{Issue, IssuePriority, IssueStatus};
 use crate::usecase::issue::{self, IssueChanges, IssueFilter, ListedIssue, NewIssue};
-
-/// MCP protocol version this server implements.
-const PROTOCOL_VERSION: &str = "2024-11-05";
 
 /// A JSON-RPC server exposing issue tools for one repository.
 pub struct McpServer {
@@ -40,67 +32,7 @@ impl McpServer {
     /// response to write back, or `None` for notifications (which take no
     /// reply).
     pub fn handle_line(&self, line: &str) -> Option<String> {
-        let value: Value = match serde_json::from_str(line) {
-            Ok(value) => value,
-            Err(_) => return Some(error_response(Value::Null, -32700, "parse error")),
-        };
-
-        let method = value.get("method").and_then(Value::as_str);
-        let id = value.get("id").cloned();
-        match (method, id) {
-            // A request without a method is malformed.
-            (None, _) => Some(error_response(
-                Value::Null,
-                -32600,
-                "invalid request: missing method",
-            )),
-            // No id means a notification: act on it but send no reply.
-            (Some(_), None) => None,
-            (Some(method), Some(id)) => Some(self.handle_request(method, value.get("params"), id)),
-        }
-    }
-
-    /// Dispatch a request (one that expects a reply) to its handler.
-    fn handle_request(&self, method: &str, params: Option<&Value>, id: Value) -> String {
-        match method {
-            "initialize" => success_response(id, initialize_result()),
-            "ping" => success_response(id, json!({})),
-            "tools/list" => success_response(id, json!({ "tools": tool_schemas() })),
-            "tools/call" => self.handle_tool_call(params, id),
-            other => error_response(id, -32601, &format!("method not found: {other}")),
-        }
-    }
-
-    /// Handle `tools/call`: resolve the tool name, run it, and wrap the outcome
-    /// as MCP tool result content.
-    fn handle_tool_call(&self, params: Option<&Value>, id: Value) -> String {
-        let Some(name) = params.and_then(|p| p.get("name")).and_then(Value::as_str) else {
-            return error_response(id, -32602, "invalid params: missing tool name");
-        };
-        let arguments = params
-            .and_then(|p| p.get("arguments"))
-            .cloned()
-            .unwrap_or_else(|| json!({}));
-
-        let result = match self.call_tool(name, arguments) {
-            Ok(text) => json!({ "content": [{ "type": "text", "text": text }], "isError": false }),
-            Err(text) => json!({ "content": [{ "type": "text", "text": text }], "isError": true }),
-        };
-        success_response(id, result)
-    }
-
-    /// Run a single tool by name, returning its text payload (`Ok`) or an error
-    /// message to surface to the agent (`Err`).
-    fn call_tool(&self, name: &str, arguments: Value) -> Result<String, String> {
-        match name {
-            "issue_create" => self.tool_create(arguments),
-            "issue_get" => self.tool_get(arguments),
-            "issue_list" => self.tool_list(arguments),
-            "issue_search" => self.tool_search(arguments),
-            "issue_update" => self.tool_update(arguments),
-            "issue_delete" => self.tool_delete(arguments),
-            other => Err(format!("unknown tool: {other}")),
-        }
+        super::dispatch_line(self, line)
     }
 
     fn tool_create(&self, arguments: Value) -> Result<String, String> {
@@ -155,6 +87,28 @@ impl McpServer {
         Ok(to_pretty(
             &json!({ "number": args.number, "deleted": deleted }),
         ))
+    }
+}
+
+impl McpService for McpServer {
+    fn server_name(&self) -> &str {
+        "usagi"
+    }
+
+    fn tool_schemas(&self) -> Value {
+        issue_tool_schemas()
+    }
+
+    fn call_tool(&self, name: &str, arguments: Value) -> Result<String, String> {
+        match name {
+            "issue_create" => self.tool_create(arguments),
+            "issue_get" => self.tool_get(arguments),
+            "issue_list" => self.tool_list(arguments),
+            "issue_search" => self.tool_search(arguments),
+            "issue_update" => self.tool_update(arguments),
+            "issue_delete" => self.tool_delete(arguments),
+            other => Err(format!("unknown tool: {other}")),
+        }
     }
 }
 
@@ -303,28 +257,8 @@ fn to_pretty(value: &Value) -> String {
     serde_json::to_string_pretty(value).unwrap_or_default()
 }
 
-fn success_response(id: Value, result: Value) -> String {
-    serde_json::to_string(&json!({ "jsonrpc": "2.0", "id": id, "result": result }))
-        .unwrap_or_default()
-}
-
-fn error_response(id: Value, code: i64, message: &str) -> String {
-    serde_json::to_string(
-        &json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } }),
-    )
-    .unwrap_or_default()
-}
-
-fn initialize_result() -> Value {
-    json!({
-        "protocolVersion": PROTOCOL_VERSION,
-        "capabilities": { "tools": {} },
-        "serverInfo": { "name": "usagi", "version": env!("CARGO_PKG_VERSION") },
-    })
-}
-
 /// JSON Schemas for the issue tools advertised via `tools/list`.
-fn tool_schemas() -> Value {
+fn issue_tool_schemas() -> Value {
     let status = json!({ "type": "string", "enum": ["todo", "in-progress", "done"] });
     let priority = json!({ "type": "string", "enum": ["high", "medium", "low"] });
     let labels = json!({ "type": "array", "items": { "type": "string" } });
@@ -416,6 +350,7 @@ fn tool_schemas() -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::presentation::mcp::PROTOCOL_VERSION;
 
     /// Parse a handler reply back into JSON for assertions.
     fn reply(server: &McpServer, request: Value) -> Value {

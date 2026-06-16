@@ -2,7 +2,7 @@
 //!
 //! This is a thin transport wrapper that reads newline-delimited JSON-RPC
 //! messages from stdin and writes replies to stdout, delegating all protocol
-//! and tool logic to [`crate::presentation::mcp::McpServer`] (which is unit
+//! and tool logic to [`crate::presentation::mcp::issue::McpServer`] (which is unit
 //! tested). The blocking stdin loop itself is not unit tested — like `hop`'s
 //! TUI entry point it is excluded from coverage.
 
@@ -11,7 +11,7 @@ use std::io::{self, BufRead, Write};
 
 use anyhow::Result;
 
-use crate::presentation::mcp::McpServer;
+use crate::presentation::mcp::issue::McpServer;
 
 /// Entry point for `usagi mcp`: serve issue tools for the current repository
 /// over stdio until the client closes the input stream.
