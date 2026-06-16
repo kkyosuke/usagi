@@ -951,9 +951,7 @@ fn text_modal_frame(raw_height: usize, raw_width: usize, modal: &TextModal) -> V
     const INNER: usize = 60;
 
     let total = modal.lines.len();
-    let start = modal
-        .scroll
-        .min(total.saturating_sub(TEXT_MODAL_VISIBLE).max(0));
+    let start = modal.scroll.min(total.saturating_sub(TEXT_MODAL_VISIBLE));
     let end = (start + TEXT_MODAL_VISIBLE).min(total);
 
     let mut body = Vec::new();
