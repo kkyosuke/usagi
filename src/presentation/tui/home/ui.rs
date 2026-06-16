@@ -591,9 +591,20 @@ fn switch_preview(state: &HomeState, width: usize, rows: usize) -> Vec<String> {
     let mut lines = vec![header, String::new()];
 
     if live {
-        // Selecting re-attaches the running shell / agent.
-        lines.push(style("● live terminal").green().to_string());
-        lines.push(style("Enter / l で再アタッチ").dim().to_string());
+        // Selecting re-attaches the running shell / agent: preview its actual
+        // screen (the live snapshot taken before painting) so the choice shows
+        // what re-attaching reveals. Fall back to a label until the first
+        // snapshot is available.
+        match state.terminal_view() {
+            Some(view) => {
+                let body = rows.saturating_sub(lines.len());
+                lines.extend(terminal_pane(view, width, body));
+            }
+            None => {
+                lines.push(style("● live terminal").green().to_string());
+                lines.push(style("Enter / l で再アタッチ").dim().to_string());
+            }
+        }
     } else {
         // Selecting opens 在席 on this session: preview its action menu.
         lines.push(style("Run a command:").dim().to_string());
@@ -1449,8 +1460,30 @@ mod tests {
         // Header carries the git status and the running agent state.
         assert!(preview.contains("local"));
         assert!(preview.contains("running"));
-        // A live session previews the live-terminal re-attach, not the menu.
+        // A live session with no snapshot yet falls back to the re-attach label,
+        // not the action menu.
         assert!(preview.contains("live terminal"));
+        assert!(!preview.contains("Run a command"));
+    }
+
+    #[test]
+    fn switch_preview_shows_a_live_session_as_its_actual_screen() {
+        let mut running = worktree(Some("feat"), false, BranchStatus::Local);
+        running.path = PathBuf::from("/repo/run");
+        let mut state = HomeState::new("usagi", vec![running], None);
+        state.set_live([PathBuf::from("/repo/run")].into());
+        // The event loop snapshots the highlighted live session before painting.
+        state.set_terminal_view(TerminalView::from_rows(
+            vec!["$ echo hi".to_string(), "hi".to_string()],
+            None,
+        ));
+        state.enter_switch(super::super::state::ReturnMode::Overview);
+        state.switch_move_down();
+        let preview = stripped(&switch_preview(&state, 40, 12));
+        // The real terminal screen is shown, not the placeholder label.
+        assert!(preview.contains("$ echo hi"));
+        assert!(preview.contains("hi"));
+        assert!(!preview.contains("live terminal"));
         assert!(!preview.contains("Run a command"));
     }
 
