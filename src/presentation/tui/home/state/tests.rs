@@ -281,6 +281,35 @@ fn submitting_a_command_echoes_and_runs_it() {
 }
 
 #[test]
+fn issue_command_reads_injected_issues() {
+    use crate::domain::issue::{Issue, IssuePriority, IssueStatus};
+    let mut state = state();
+    let ts = Utc::now();
+    state.set_issues(vec![Issue {
+        number: 1,
+        title: "task".to_string(),
+        status: IssueStatus::Todo,
+        priority: IssuePriority::Medium,
+        labels: vec![],
+        dependson: vec![],
+        related: vec![],
+        parent: None,
+        milestone: None,
+        created_at: ts,
+        updated_at: ts,
+        body: String::new(),
+    }]);
+    for c in "issue".chars() {
+        state.push_char(c);
+    }
+    let submission = state.submit();
+    // The injected issue is surfaced through the `issue` command's modal.
+    assert_eq!(submission.effect, Effect::ShowText("Issues"));
+    let modal = state.text_modal().expect("issue opens a text modal");
+    assert!(modal.lines.iter().any(|l| l.text.contains("task")));
+}
+
+#[test]
 fn session_switch_with_no_name_yields_the_enter_switch_effect() {
     // The screen leaves the mode transition to the event loop; submit only
     // surfaces the effect and logs no resolution line.
