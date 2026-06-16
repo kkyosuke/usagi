@@ -44,6 +44,8 @@ cargo test
 
 実装内容に合わせて `document/` 配下を更新する。仕様・画面・データ構造に変更があれば対応するファイルを更新する。目次は [document/README.md](../document/README.md)。
 
+**書き方のルールは [document/06-conventions.md#ドキュメント規約](../document/06-conventions.md#ドキュメント規約) に従う**（記載＝実装済み・SSoT・1 ファイル 1 トピック・表と図の活用・相対リンクとアンカーの整合）。
+
 - `document/01-overview.md` — プロジェクト概要
 - `document/02-architecture.md` — クリーンアーキテクチャ・`src/` のモジュール構成
 - `document/03-commands/` — CLI / TUI 内コマンドのリファレンス（系統ごとに分割）

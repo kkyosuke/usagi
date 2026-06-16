@@ -1,4 +1,4 @@
-# 4. 設定画面（Config）✅ 実装済み
+# 4. 設定画面（Config）
 
 > [画面設計トップ](README.md) ｜ ← 前へ [3. 新規プロジェクト画面（New）](03-new.md) ｜ 次へ → [5. ホーム画面（Home）](05-home.md)
 
@@ -51,6 +51,7 @@
 │          Default Workspace  < (none) >               │  │  値は常に山かっこで囲み列を揃える
 │      >   Notifications      < On >                    │  │  選択行：左端の赤 ">" + 値が明色
 │        ● Agent CLI          < Gemini >               │  │  変更済み：ラベル左に黄色 ● + 値も黄色
+│          Session Action UI  < Menu >                 │  │  在席の右ペイン UI（Menu / Prompt）
 │          Local LLM            Install                │  │  未導入は `Install`（緑・山かっこなし）、導入後は `< On >`/`< Off >`
 │          Local LLM Model    < qwen2.5-coder:7b >     │  ┘  ←→ でモデルを選ぶ
 │                                                      │
@@ -68,6 +69,7 @@
 | Default Workspace | 既定で開くワークスペース | `(none)` ＋ 登録済みワークスペース名を順に循環。未登録時は変更不可（ヒントを表示） |
 | Notifications | デスクトップ通知（`agent` の入力待ちなど）の ON/OFF | `On` ⇄ `Off` をトグル |
 | Agent CLI | usagi が起動する AI エージェント CLI | `Claude` → `Gemini` の順に循環 |
+| Session Action UI | 在席（Focus）の右ペインのアクション UI スタイル | `Menu`（選べるリスト）⇄ `Prompt`（コマンドライン）をトグル（[05-home.md](05-home.md#在席のアクション-uimenu--prompt)） |
 | Local LLM | ローカル LLM 委譲の有効化 | 未導入時は値が `Install`（アクション）で、`Space` / `Enter` でインストールモーダルを開く。導入後は `On` ⇄ `Off` をトグル |
 | Local LLM Model | 委譲先の Ollama モデル | `qwen2.5-coder:7b` → `:3b` → `:1.5b` → `qwen2.5:7b` を循環。←→ で選ぶ（変更すると未導入扱いに戻り、再インストールが必要） |
 
@@ -85,7 +87,7 @@
 > 既定は無効で、usagi が勝手に有効化することはありません（[3.4 ローカル LLM MCP サーバ](../03-commands/04-llm-mcp.md)）。
 
 > `settings.json` には `workspace_root`（新規プロジェクトのクローン先ベースディレクトリ）も
-> 保存されますが、本画面での編集には未対応です（今後追加予定）。
+> 保存されますが、本画面では編集しません（`usagi config --edit` で変更します）。
 
 > Save を押すとグローバル設定（`~/.usagi/settings.json`）のみを保存します。このスコープでは
 > ワークスペース固有の設定は表示・編集しません。
