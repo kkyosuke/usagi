@@ -60,7 +60,7 @@ enum Commands {
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
-    match cli.command {
+    let result = match cli.command {
         Commands::AgentPhase { phase } => usagi::presentation::cli::agent_phase::run(phase),
         Commands::Config { edit } => usagi::presentation::cli::config::run(edit),
         Commands::Doctor { fix } => usagi::presentation::cli::doctor::run(fix),
@@ -70,5 +70,24 @@ fn main() -> anyhow::Result<()> {
         Commands::LlmMcp { model } => usagi::presentation::cli::llm_mcp::run(model),
         Commands::Mcp => usagi::presentation::cli::mcp::run(),
         Commands::Status => usagi::presentation::cli::status::run(),
+    };
+
+    if let Err(error) = &result {
+        log_error(error);
     }
+    result
+}
+
+/// Best-effort: append `error` to today's log file and prune files older than
+/// the retention window. Any failure here is swallowed so logging never masks
+/// the original error on its way to stderr.
+fn log_error(error: &anyhow::Error) {
+    use usagi::infrastructure::error_log::{ErrorLog, RETENTION_DAYS};
+
+    let Ok(log) = ErrorLog::open_default() else {
+        return;
+    };
+    let now = chrono::Local::now();
+    let _ = log.prune(now.date_naive(), RETENTION_DAYS);
+    let _ = log.append(now, &format!("{error:#}"));
 }
