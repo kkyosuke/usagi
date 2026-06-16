@@ -1,0 +1,289 @@
+//! Rendering for the home (workspace) screen's mode-aware layout.
+//!
+//! Top to bottom: a title bar, the engagement-ladder mode indicator, a body
+//! split into the worktree list (left) and a mode-dependent right pane, the
+//! command input, and a footer. The right pane is blank in 統括 (Overview); a
+//! detail card for the highlighted session in 切替 (Switch); the session's action
+//! surface (a menu or a prompt) in 在席 (Focus); and the live embedded terminal in
+//! 没入 (Attached). In Overview the input is a bordered box and the command
+//! results render as a band below it. All functions take plain data and return
+//! styled lines, so the layout is rendered without any terminal IO.
+//!
+//! This module owns the shared text/layout helpers and the top-level
+//! [`render_frame`] that stitches the screen together. The pane bodies live in
+//! [`panes`]; the surrounding chrome (title, ladder, input, footer, hints,
+//! modals) lives in [`chrome`].
+
+mod chrome;
+mod panes;
+
+use crate::presentation::tui::widgets;
+
+use chrome::{
+    footer_line, hint_lines, input_line, mode_ladder, overview_input_box, quit_confirm_frame,
+    remove_modal_frame, switch_create_rows, title_bar,
+};
+use panes::{left_pane, log_tail, right_pane_contents};
+
+use super::state::{HomeState, Mode};
+
+/// Shown below the root row when the workspace has no recorded worktrees.
+const EMPTY_MESSAGE: &str = "no sessions";
+
+/// The detail shown on the root row's second line (it has no git status).
+const ROOT_DETAIL: &str = "workspace root";
+
+/// Shown for a worktree whose HEAD is detached (no branch).
+const DETACHED: &str = "(detached)";
+
+/// Columns line 1 spends before the branch name: a cursor cell and a kind-icon
+/// cell (`⌂`/`●`/`○`), each followed by a space.
+const NAME_PREFIX: usize = 4;
+
+/// Right-edge field width for the git `status` label on line 1: a status icon,
+/// a space, and the widest status word (`merged` / `pushed`, 6 columns).
+const STATUS_COL: usize = 8;
+
+/// Nerd Font (git) glyphs paired with each branch lifecycle status, for an
+/// at-a-glance read of the right-edge status field. They need a patched "Nerd
+/// Font" terminal font to render; without one the terminal shows a fallback box,
+/// but the colour-coded word beside the icon still carries the meaning.
+const LOCAL_ICON: char = '\u{e725}'; // nf-dev-git_branch — lives only locally
+const PUSHED_ICON: char = '\u{f0ee}'; // nf-fa-cloud_upload — pushed to the remote
+const SYNCED_ICON: char = '\u{f00c}'; // nf-fa-check — up to date, nothing un-merged
+
+/// Width of the active-session marker cell on line 1: the `*` marker (or a
+/// blank) plus the space that separates it from the branch name. It sits
+/// between the branch name and the right-edge status field.
+const ACTIVE_COL: usize = 2;
+
+/// The vertical bar (with surrounding spaces) dividing the two panes.
+const SEP: &str = " │ ";
+
+/// Visible width of [`SEP`].
+const SEP_WIDTH: usize = 3;
+
+/// Block caret drawn at the end of the command input.
+const CARET: &str = "▏";
+
+/// Narrowest and widest the left (worktree) pane is allowed to be.
+const LEFT_MIN: usize = 16;
+const LEFT_MAX: usize = 40;
+
+/// Shown in the right pane between attaching the terminal and its first screen
+/// snapshot arriving.
+const TERMINAL_STARTING: &str = "Starting terminal…";
+
+/// Most command-hint rows drawn above the input at once. Beyond this a
+/// "… and N more" line stands in for the rest, so the hints never crowd out the
+/// body on a normal terminal.
+const HINT_MAX: usize = 6;
+
+/// Fixed height of the command-hint band overlaid on the body in command mode.
+/// It is tall enough for the largest hint list — a header line, [`HINT_MAX`]
+/// rows, and a trailing "… and N more" — so the band's height never changes as
+/// the match list grows or shrinks while typing. Because the band always covers
+/// the same body rows, nothing beneath it jitters when the count changes.
+const HINT_BAND: usize = HINT_MAX + 2;
+
+/// Display width of the command-name column in the hints.
+const HINT_NAME_COL: usize = 12;
+
+/// Columns before the name column in a hint row: `"  "` indent + the marker
+/// cell + a space.
+const HINT_INDENT: usize = 4;
+
+/// Minimum frame height at which the 統括 input is drawn as a bordered box. Below
+/// it the chrome (the box is 3 rows) would crowd out the body, so a short
+/// terminal falls back to the single-line [`input_line`].
+const INPUT_BOX_MIN_HEIGHT: usize = 8;
+
+/// Most session rows the removal modal shows at once; a longer list scrolls to
+/// keep the cursor in view, with a count of the hidden rows above and below.
+const REMOVE_MODAL_VISIBLE: usize = 8;
+
+/// How many rows the 統括 (Overview) results band spends below the input on the
+/// command log tail. The newest output stays visible while typing. Kept small
+/// so the bordered input box and the band together leave the session list its
+/// full height.
+const RESULTS_BAND: usize = 4;
+
+/// Shortens `text` to at most `max` display columns, appending an ellipsis when
+/// it has to cut (the head of the text is the most informative part).
+fn clip_to_width(text: &str, max: usize) -> String {
+    if console::measure_text_width(text) <= max {
+        return text.to_string();
+    }
+    if max == 0 {
+        return String::new();
+    }
+    let mut out = String::new();
+    for ch in text.chars() {
+        let mut candidate = out.clone();
+        candidate.push(ch);
+        // Reserve one column for the ellipsis.
+        if console::measure_text_width(&candidate) > max - 1 {
+            break;
+        }
+        out = candidate;
+    }
+    out.push('…');
+    out
+}
+
+/// Right-pads `content` with spaces to fill `width` display columns. Content
+/// already at least that wide is returned unchanged.
+fn pad_to_width(content: String, width: usize) -> String {
+    let visible = console::measure_text_width(&content);
+    if visible >= width {
+        content
+    } else {
+        let mut content = content;
+        content.push_str(&" ".repeat(width - visible));
+        content
+    }
+}
+
+/// Splits the terminal `width` into the left pane width and the right pane
+/// width, leaving room for the divider. The left pane is clamped to a readable
+/// band and never overruns the terminal.
+fn layout(width: usize) -> (usize, usize) {
+    let left = (width / 3).clamp(LEFT_MIN, LEFT_MAX);
+    let left = left.min(width.saturating_sub(SEP_WIDTH));
+    let right = width.saturating_sub(left + SEP_WIDTH);
+    (left, right)
+}
+
+/// Where the embedded terminal lives on screen: the size of the right pane and
+/// the screen coordinates of its top-left cell. The PTY is sized to `rows`×
+/// `cols`, and the real cursor is placed relative to (`origin_col`,
+/// `origin_row`) so it tracks the shell's cursor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TerminalGeometry {
+    pub rows: u16,
+    pub cols: u16,
+    pub origin_col: u16,
+    pub origin_row: u16,
+}
+
+/// Computes the [`TerminalGeometry`] for a raw terminal size, matching the
+/// layout [`render_frame`] draws (title + blank above the body, the left pane
+/// and divider to its left). `rows` and `cols` are at least 1.
+pub fn terminal_geometry(raw_height: usize, raw_width: usize) -> TerminalGeometry {
+    let (height, width) = widgets::normalize_size(raw_height, raw_width);
+    let (left_w, right_w) = layout(width);
+    let pane_rows = height.saturating_sub(4).max(1);
+    TerminalGeometry {
+        rows: pane_rows.max(1) as u16,
+        cols: right_w.max(1) as u16,
+        origin_col: (left_w + SEP_WIDTH) as u16,
+        // The body starts below the title bar and its blank separator.
+        origin_row: 2,
+    }
+}
+
+/// Builds the full home-screen frame for a raw terminal size.
+pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> Vec<String> {
+    // The quit-confirmation modal, when open, overlays everything else.
+    if state.quit_confirm() {
+        return quit_confirm_frame(raw_height, raw_width, state.live_count());
+    }
+    // The session-removal modal, when open, overlays the whole screen.
+    if let Some(modal) = state.remove_modal() {
+        return remove_modal_frame(raw_height, raw_width, modal);
+    }
+
+    let (height, width) = widgets::normalize_size(raw_height, raw_width);
+    let (left_w, right_w) = layout(width);
+
+    // The 統括 input is a bordered box (3 rows) when there is height for it;
+    // every other mode — and a short terminal — uses a single status line.
+    let input_lines = if state.mode() == Mode::Overview && height >= INPUT_BOX_MIN_HEIGHT {
+        overview_input_box(state, width)
+    } else {
+        vec![input_line(state)]
+    };
+    let input_h = input_lines.len();
+
+    // In 統括 the command log renders as a band below the input; it is sized so
+    // the body keeps at least one row. Other modes use no results band.
+    let results = if state.mode() == Mode::Overview {
+        RESULTS_BAND.min(height.saturating_sub(4 + input_h))
+    } else {
+        0
+    };
+
+    // Chrome: title + mode ladder on top, the input block + footer + the
+    // optional results band at the bottom. Everything between is the two-pane
+    // body.
+    let body_rows = height.saturating_sub(3 + input_h + results).max(1);
+    let mut left = left_pane(
+        state.list(),
+        state.live_paths(),
+        state.waiting_paths(),
+        left_w,
+        body_rows,
+        // In 切替 the keyboard is on the list: fade the rows the cursor is not on.
+        state.mode() == Mode::Switch,
+    );
+    // While naming a new session in 切替, append the inline create row(s) to the
+    // left pane (trimmed back to the body if it would overflow).
+    if state.is_creating() {
+        for row in switch_create_rows(
+            state.create_input().unwrap_or_default(),
+            state.create_error(),
+            left_w,
+        ) {
+            left.push(row);
+        }
+        left.truncate(body_rows);
+    }
+    let right = right_pane_contents(state, right_w, body_rows);
+
+    let mut lines = Vec::with_capacity(height);
+    lines.push(title_bar(width, state.list()));
+    lines.push(mode_ladder(width, state.mode()));
+    let body_start = lines.len();
+    for row in 0..body_rows {
+        let left_cell = pad_to_width(left.get(row).cloned().unwrap_or_default(), left_w);
+        let right_cell = right.get(row).cloned().unwrap_or_default();
+        lines.push(format!("{left_cell}{SEP}{right_cell}"));
+    }
+
+    // Overlay the 統括 command hints onto a fixed-height band at the bottom of the
+    // body, always leaving at least one body row uncovered. The band is a
+    // constant height regardless of how many hints currently match, so the body
+    // rows it covers never change as the match list grows or shrinks while
+    // typing. The band is cleared first (so no stale body text shows through),
+    // then the hints are bottom-anchored just above the input.
+    let hints = hint_lines(state, width);
+    if !hints.is_empty() {
+        let band = HINT_BAND.min(body_rows.saturating_sub(1));
+        let band_start = body_start + body_rows - band;
+        for line in lines.iter_mut().skip(band_start).take(band) {
+            *line = pad_to_width(String::new(), width);
+        }
+        let shown = hints.len().min(band);
+        let hint_top = body_start + body_rows - shown;
+        for (i, hint) in hints.into_iter().take(shown).enumerate() {
+            lines[hint_top + i] = pad_to_width(hint, width);
+        }
+    }
+
+    lines.extend(input_lines);
+    // The 統括 results band: the command log tail, drawn below the input. Always
+    // exactly `results` rows tall (blank-padded) so the footer stays at the
+    // bottom regardless of how much output there is.
+    if results > 0 {
+        let tail = log_tail(state.log(), width, results);
+        for row in 0..results {
+            let line = tail.get(row).cloned().unwrap_or_default();
+            lines.push(pad_to_width(line, width));
+        }
+    }
+    lines.push(footer_line(width, state));
+    lines
+}
+
+#[cfg(test)]
+mod tests;
