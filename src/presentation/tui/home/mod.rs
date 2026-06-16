@@ -121,6 +121,13 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
         },
     };
 
+    // The branch names already taken across the workspace, read fresh each time
+    // the inline create input opens so the typed name can be validated live
+    // against duplicates and branch-namespace clashes.
+    let branches_root = workspace.path.clone();
+    let mut existing_branches =
+        move || crate::usecase::session::existing_branch_names(&branches_root);
+
     // The effective settings for this workspace (project-local overrides on top
     // of the global default), read once. Any failure falls back to the defaults.
     let settings = crate::infrastructure::storage::Storage::open_default()
@@ -302,6 +309,7 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
         &mut persist,
         &mut create_session,
         &mut remove_session,
+        &mut existing_branches,
         &mut open_terminal,
         &mut open_config,
         &mut preview,
