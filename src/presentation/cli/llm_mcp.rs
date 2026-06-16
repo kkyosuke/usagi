@@ -1,6 +1,6 @@
 //! `usagi llm-mcp`: run the local LLM MCP server over stdio.
 //!
-//! A thin transport wrapper around [`crate::presentation::mcp_llm::LlmMcpServer`]
+//! A thin transport wrapper around [`crate::presentation::mcp::llm::LlmMcpServer`]
 //! (which holds the unit-tested protocol logic). The read/write loop lives in
 //! [`serve`], which is generic over its I/O streams so it can be exercised with
 //! in-memory buffers and a mock backend. The remaining pieces are the parts that
@@ -13,7 +13,7 @@ use std::process::{Command, Stdio};
 
 use anyhow::Result;
 
-use crate::presentation::mcp_llm::{LlmBackend, LlmMcpServer};
+use crate::presentation::mcp::llm::{LlmBackend, LlmMcpServer};
 use crate::usecase::doctor::SystemRunner;
 use crate::usecase::local_llm;
 

@@ -1,24 +1,20 @@
-//! MCP (Model Context Protocol) server exposing a local LLM as a tool.
+//! MCP server exposing a local LLM as a single delegation tool.
 //!
-//! Where [`crate::presentation::mcp`] exposes issue operations, this server
-//! exposes a single `local_llm_ask` tool backed by a locally-running model
-//! (served via Ollama). A cloud agent (Claude Code etc.) can delegate light,
-//! low-stakes work — summaries, naming, boilerplate, simple transforms — to the
-//! local model, spending its own (metered) tokens only on the work that needs
-//! them.
+//! Where [`super::issue`] exposes issue operations, this server exposes a single
+//! `local_llm_ask` tool backed by a locally-running model (served via Ollama). A
+//! cloud agent (Claude Code etc.) can delegate light, low-stakes work —
+//! summaries, naming, boilerplate, simple transforms — to the local model,
+//! spending its own (metered) tokens only on the work that needs them.
 //!
-//! Like the issue server, the protocol is JSON-RPC 2.0 over stdio with
-//! newline-delimited messages, implemented directly over `serde_json` (no async
-//! runtime). The model call itself is abstracted behind [`LlmBackend`] so the
-//! dispatch logic is fully unit-tested without invoking a real model; the
-//! production Ollama backend lives in the thin stdio entry point
-//! (`presentation/cli/llm_mcp.rs`).
+//! The JSON-RPC framing is shared with the issue server (see [`super`]). The
+//! model call itself is abstracted behind [`LlmBackend`] so the dispatch logic
+//! is fully unit-tested without invoking a real model; the production Ollama
+//! backend lives in the thin stdio entry point (`presentation/cli/llm_mcp.rs`).
 
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-/// MCP protocol version this server implements (matches the issue server).
-const PROTOCOL_VERSION: &str = "2024-11-05";
+use super::McpService;
 
 /// Runs a prompt against the local model. Abstracted so the server's protocol
 /// handling can be tested with a fake backend that never shells out.
@@ -49,57 +45,9 @@ impl LlmMcpServer {
 
     /// Handle one JSON-RPC message (a single line of input). Returns the JSON
     /// response to write back, or `None` for notifications (which take no
-    /// reply). Mirrors the issue server's dispatch.
+    /// reply).
     pub fn handle_line(&self, line: &str) -> Option<String> {
-        let value: Value = match serde_json::from_str(line) {
-            Ok(value) => value,
-            Err(_) => return Some(error_response(Value::Null, -32700, "parse error")),
-        };
-
-        let method = value.get("method").and_then(Value::as_str);
-        let id = value.get("id").cloned();
-        match (method, id) {
-            (None, _) => Some(error_response(
-                Value::Null,
-                -32600,
-                "invalid request: missing method",
-            )),
-            (Some(_), None) => None,
-            (Some(method), Some(id)) => Some(self.handle_request(method, value.get("params"), id)),
-        }
-    }
-
-    fn handle_request(&self, method: &str, params: Option<&Value>, id: Value) -> String {
-        match method {
-            "initialize" => success_response(id, initialize_result()),
-            "ping" => success_response(id, json!({})),
-            "tools/list" => success_response(id, json!({ "tools": self.tool_schemas() })),
-            "tools/call" => self.handle_tool_call(params, id),
-            other => error_response(id, -32601, &format!("method not found: {other}")),
-        }
-    }
-
-    fn handle_tool_call(&self, params: Option<&Value>, id: Value) -> String {
-        let Some(name) = params.and_then(|p| p.get("name")).and_then(Value::as_str) else {
-            return error_response(id, -32602, "invalid params: missing tool name");
-        };
-        let arguments = params
-            .and_then(|p| p.get("arguments"))
-            .cloned()
-            .unwrap_or_else(|| json!({}));
-
-        let result = match self.call_tool(name, arguments) {
-            Ok(text) => json!({ "content": [{ "type": "text", "text": text }], "isError": false }),
-            Err(text) => json!({ "content": [{ "type": "text", "text": text }], "isError": true }),
-        };
-        success_response(id, result)
-    }
-
-    fn call_tool(&self, name: &str, arguments: Value) -> Result<String, String> {
-        match name {
-            "local_llm_ask" => self.tool_ask(arguments),
-            other => Err(format!("unknown tool: {other}")),
-        }
+        super::dispatch_line(self, line)
     }
 
     fn tool_ask(&self, arguments: Value) -> Result<String, String> {
@@ -107,8 +55,13 @@ impl LlmMcpServer {
             serde_json::from_value(arguments).map_err(|e| format!("invalid arguments: {e}"))?;
         self.backend.ask(&args.prompt, args.system.as_deref())
     }
+}
 
-    /// JSON Schema for the single tool advertised via `tools/list`.
+impl McpService for LlmMcpServer {
+    fn server_name(&self) -> &str {
+        "usagi-llm"
+    }
+
     fn tool_schemas(&self) -> Value {
         json!([
             {
@@ -130,6 +83,13 @@ impl LlmMcpServer {
             }
         ])
     }
+
+    fn call_tool(&self, name: &str, arguments: Value) -> Result<String, String> {
+        match name {
+            "local_llm_ask" => self.tool_ask(arguments),
+            other => Err(format!("unknown tool: {other}")),
+        }
+    }
 }
 
 /// Arguments for the `local_llm_ask` tool.
@@ -140,31 +100,10 @@ struct AskArgs {
     system: Option<String>,
 }
 
-// --- JSON helpers (mirrors the issue server) -------------------------------
-
-fn success_response(id: Value, result: Value) -> String {
-    serde_json::to_string(&json!({ "jsonrpc": "2.0", "id": id, "result": result }))
-        .unwrap_or_default()
-}
-
-fn error_response(id: Value, code: i64, message: &str) -> String {
-    serde_json::to_string(
-        &json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } }),
-    )
-    .unwrap_or_default()
-}
-
-fn initialize_result() -> Value {
-    json!({
-        "protocolVersion": PROTOCOL_VERSION,
-        "capabilities": { "tools": {} },
-        "serverInfo": { "name": "usagi-llm", "version": env!("CARGO_PKG_VERSION") },
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::presentation::mcp::PROTOCOL_VERSION;
     use std::cell::RefCell;
 
     /// A backend that records the calls it received and returns a scripted
