@@ -9,6 +9,14 @@ REPO="KKyosuke/usagi"
 USAGI_DIR="$HOME/.usagi"
 BIN_DIR="$USAGI_DIR/bin"
 
+# バイナリからバージョン文字列を取り出す（取得できなければ空文字）
+function read_version() {
+    local bin="$1"
+    [ -x "$bin" ] || return 0
+    # `usagi --version` は "usagi 0.0.1" の形式。バージョン部分のみ取り出す
+    "$bin" --version 2>/dev/null | awk '{print $NF}'
+}
+
 # OS/Arch 判別とダウンロード
 function download_binary() {
     echo "Binary not found in current directory. Attempting to download..."
@@ -56,6 +64,9 @@ if [ ! -f "usagi" ] && [ ! -f "usagi.exe" ]; then
     download_binary
 fi
 
+# 既存インストールのバージョンを記録（アップデート判定用）
+OLD_VERSION="$(read_version "$BIN_DIR/usagi")"
+
 # ディレクトリ作成
 echo "Creating directory $BIN_DIR..."
 mkdir -p "$BIN_DIR"
@@ -86,10 +97,30 @@ fi
 echo "Changing permissions for $BIN_DIR/$BINARY_NAME..."
 chmod +x "$BIN_DIR/$BINARY_NAME"
 
+# 新しくインストールされたバージョン
+NEW_VERSION="$(read_version "$BIN_DIR/$BINARY_NAME")"
+
 echo ""
-echo "Successfully installed usagi to $BIN_DIR"
-echo ""
-echo "Please add the following line to your shell configuration file (e.g., ~/.bashrc, ~/.zshrc):"
-echo "  export PATH=\"\$PATH:$BIN_DIR\""
-echo ""
-echo "After adding, restart your shell or run 'source <your-rc-file>' to apply the changes."
+if [ -z "$OLD_VERSION" ]; then
+    # 既存インストールなし → 新規
+    echo "usagi v${NEW_VERSION} をインストールしたよ！ぴょん🐰"
+elif [ "$OLD_VERSION" = "$NEW_VERSION" ]; then
+    # 同じバージョン → 再インストール
+    echo "usagi v${NEW_VERSION} は既に最新だよ！再インストールしたぴょん🐰"
+else
+    # バージョンが変わった → アップデート
+    echo "usagi を v${OLD_VERSION} から v${NEW_VERSION} にアップデートしたよ！ぴょん🐰"
+fi
+echo "  -> $BIN_DIR/$BINARY_NAME"
+
+# PATH 案内（まだ PATH に入っていない場合のみ）
+case ":$PATH:" in
+    *":$BIN_DIR:"*) ;;
+    *)
+        echo ""
+        echo "Please add the following line to your shell configuration file (e.g., ~/.bashrc, ~/.zshrc):"
+        echo "  export PATH=\"\$PATH:$BIN_DIR\""
+        echo ""
+        echo "After adding, restart your shell or run 'source <your-rc-file>' to apply the changes."
+        ;;
+esac
