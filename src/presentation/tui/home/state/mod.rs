@@ -522,8 +522,17 @@ impl HomeState {
 
     /// Begin inline session creation in 切替: open an empty name input that
     /// captures the mode's keys until confirmed (Enter) or cancelled (Esc).
-    pub fn switch_begin_create(&mut self) {
-        self.create = Some(CreateInput::default());
+    ///
+    /// `taken` is the set of branch names that already exist across the
+    /// workspace's repositories (from
+    /// [`crate::usecase::session::existing_branch_names`]); the typed name is
+    /// validated against it live so a duplicate or branch-namespace clash is
+    /// flagged before Enter.
+    pub fn switch_begin_create(&mut self, taken: Vec<String>) {
+        self.create = Some(CreateInput {
+            taken,
+            ..Default::default()
+        });
     }
 
     /// Whether an inline create input is open in 切替.
@@ -541,20 +550,21 @@ impl HomeState {
         self.create.as_ref().and_then(|c| c.error.as_deref())
     }
 
-    /// Append a character to the inline create name (no-op when not creating).
+    /// Append a character to the inline create name (no-op when not creating),
+    /// re-validating live so the error reflects the new name.
     pub fn create_push_char(&mut self, c: char) {
         if let Some(create) = self.create.as_mut() {
             create.input.push(c);
-            create.error = None;
+            create.error = validate_session_name(&create.input, &create.taken);
         }
     }
 
     /// Delete the last character of the inline create name (no-op when not
-    /// creating).
+    /// creating), re-validating live.
     pub fn create_backspace(&mut self) {
         if let Some(create) = self.create.as_mut() {
             create.input.pop();
-            create.error = None;
+            create.error = validate_session_name(&create.input, &create.taken);
         }
     }
 
@@ -565,23 +575,21 @@ impl HomeState {
 
     /// Validate and accept the inline create name. On success the input closes
     /// and the trimmed name is returned (for the event loop to create the
-    /// session); on an empty or duplicate name the input stays open with an
-    /// inline error and `None` is returned. A no-op (returning `None`) when not
+    /// session); on an invalid name (empty, a path separator, a duplicate, or a
+    /// branch-namespace clash) the input stays open with the same inline error
+    /// shown live and `None` is returned. A no-op (returning `None`) when not
     /// creating.
     pub fn switch_confirm_create(&mut self) -> Option<String> {
         let create = self.create.as_mut()?;
         let name = create.input.trim().to_string();
+        // Enter on an empty name is the one case live validation stays quiet
+        // about (it does not nag while nothing is typed), so guard it here.
         if name.is_empty() {
             create.error = Some("Name must not be empty.".to_string());
             return None;
         }
-        if self
-            .list
-            .worktrees()
-            .iter()
-            .any(|w| w.branch.as_deref() == Some(name.as_str()))
-        {
-            create.error = Some(format!("\"{name}\" already exists."));
+        if let Some(error) = validate_session_name(&create.input, &create.taken) {
+            create.error = Some(error);
             return None;
         }
         self.create = None;
@@ -904,6 +912,38 @@ impl HomeState {
         self.remove_modal = None;
         Some((names, force))
     }
+}
+
+/// Validate a typed session name against the branch names already taken, used
+/// for the live inline-create feedback. Returns the reason the name cannot be
+/// used, or `None` when it is usable.
+///
+/// An empty (or all-whitespace) name returns `None` — the input does not nag
+/// while nothing has been typed; the empty case is rejected only on Enter (see
+/// [`HomeState::switch_confirm_create`]). The checks mirror what
+/// [`crate::usecase::session::create`] enforces, so the inline message matches
+/// the eventual outcome:
+///
+/// - a path separator (`/`, `\`, `.`, `..`) — not a legal session name;
+/// - an exact duplicate of an existing branch;
+/// - a clash with an existing branch nested under `<name>/` (git cannot create
+///   the `<name>` branch alongside `<name>/…`).
+fn validate_session_name(name: &str, taken: &[String]) -> Option<String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return None;
+    }
+    if name.contains('/') || name.contains('\\') || name == "." || name == ".." {
+        return Some("\"/\" cannot be used in a name.".to_string());
+    }
+    if taken.iter().any(|b| b == name) {
+        return Some(format!("\"{name}\" already exists."));
+    }
+    let prefix = format!("{name}/");
+    if let Some(conflict) = taken.iter().find(|b| b.starts_with(&prefix)) {
+        return Some(format!("\"{name}\" conflicts with branch \"{conflict}\"."));
+    }
+    None
 }
 
 #[cfg(test)]

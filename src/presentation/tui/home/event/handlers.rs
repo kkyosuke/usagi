@@ -33,6 +33,7 @@ pub(super) fn overview_key(
     persist: &mut dyn FnMut(&str),
     create_session: &mut dyn FnMut(&str) -> SessionOutcome,
     remove_session: &mut dyn FnMut(&str, bool) -> SessionOutcome,
+    existing_branches: &mut dyn FnMut() -> Vec<String>,
     open_terminal: &mut dyn FnMut(&mut HomeState, &Path, bool) -> Result<PaneExit>,
     open_config: &mut dyn FnMut(&Term) -> Result<bool>,
     preview: &mut dyn FnMut(&Path) -> Option<TerminalView>,
@@ -70,7 +71,7 @@ pub(super) fn overview_key(
                 // name input there (creation lives in Switch now).
                 Effect::OpenSessionModal => {
                     state.enter_switch(ReturnMode::Overview);
-                    state.switch_begin_create();
+                    state.switch_begin_create(existing_branches());
                 }
                 Effect::ListSessions => state.log_sessions(),
                 Effect::RemoveSession { name, force } => {
@@ -191,6 +192,7 @@ pub(super) fn switch_key(
     workspace_root: &Path,
     key: Key,
     create_session: &mut dyn FnMut(&str) -> SessionOutcome,
+    existing_branches: &mut dyn FnMut() -> Vec<String>,
     open_terminal: &mut dyn FnMut(&mut HomeState, &Path, bool) -> Result<PaneExit>,
     preview: &mut dyn FnMut(&Path) -> Option<TerminalView>,
 ) -> Flow {
@@ -237,7 +239,7 @@ pub(super) fn switch_key(
             }
         }
         // `c` begins inline session creation.
-        Key::Char('c') => state.switch_begin_create(),
+        Key::Char('c') => state.switch_begin_create(existing_branches()),
         // Esc / h backs out to where Switch was opened from.
         Key::Escape | Key::Char('h') => leave_switch(
             term,

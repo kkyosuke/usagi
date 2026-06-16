@@ -466,7 +466,7 @@ fn switch_inline_create_edits_then_confirms_a_fresh_name() {
     let mut state = state();
     state.enter_switch(ReturnMode::Overview);
     assert!(!state.is_creating());
-    state.switch_begin_create();
+    state.switch_begin_create(Vec::new());
     assert!(state.is_creating());
     assert_eq!(state.create_input(), Some(""));
     for c in "  wip  ".chars() {
@@ -480,28 +480,53 @@ fn switch_inline_create_edits_then_confirms_a_fresh_name() {
 
 #[test]
 fn switch_inline_create_rejects_empty_and_duplicate_names() {
-    let mut state = state(); // has a "feature" worktree
+    let mut state = state();
     state.enter_switch(ReturnMode::Overview);
-    state.switch_begin_create();
-    // Whitespace only is empty after trimming.
+    // "feature" is an existing branch, so it is in the taken set.
+    state.switch_begin_create(vec!["feature".to_string()]);
+    // Whitespace only is empty after trimming: no live error (it does not nag),
+    // but Enter rejects it.
     state.create_push_char(' ');
+    assert!(state.create_error().is_none());
     assert!(state.switch_confirm_create().is_none());
     assert!(state.create_error().unwrap().contains("must not be empty"));
-    // Typing clears the error, then a duplicate name is rejected.
+    // Typing a duplicate name flags it live, before Enter, and Enter rejects it.
     for c in "feature".chars() {
         state.create_push_char(c);
     }
-    assert!(state.create_error().is_none());
+    assert!(state.create_error().unwrap().contains("feature"));
     assert!(state.switch_confirm_create().is_none());
     assert!(state.create_error().unwrap().contains("feature"));
     assert!(state.is_creating());
 }
 
 #[test]
+fn switch_inline_create_flags_a_branch_namespace_clash_live() {
+    let mut state = state();
+    state.enter_switch(ReturnMode::Overview);
+    // Branches nested under `test/` make a plain `test` session impossible.
+    state.switch_begin_create(vec!["test/home-ui-e2e".to_string()]);
+    for c in "test".chars() {
+        state.create_push_char(c);
+    }
+    // The clash is shown live and blocks confirmation.
+    let err = state.create_error().unwrap();
+    assert!(err.contains("conflicts with branch"), "{err}");
+    assert!(err.contains("test/home-ui-e2e"), "{err}");
+    assert!(state.switch_confirm_create().is_none());
+    // Backspacing to "tes" (no longer a clash) clears the error.
+    state.create_backspace();
+    assert!(state.create_error().is_none());
+    // Typing a path separator is itself rejected (not a legal session name).
+    state.create_push_char('/');
+    assert!(state.create_error().unwrap().contains("cannot be used"));
+}
+
+#[test]
 fn switch_inline_create_can_be_cancelled() {
     let mut state = state();
     state.enter_switch(ReturnMode::Overview);
-    state.switch_begin_create();
+    state.switch_begin_create(Vec::new());
     state.create_push_char('x');
     state.create_cancel();
     assert!(!state.is_creating());
@@ -704,7 +729,7 @@ fn clear_terminal_view_drops_the_snapshot_without_changing_the_mode() {
 fn enter_overview_clears_transient_state() {
     let mut state = state();
     state.enter_switch(ReturnMode::Overview);
-    state.switch_begin_create();
+    state.switch_begin_create(Vec::new());
     state.enter_focus(1);
     state.focus_prompt_push_char('x');
     state.focus_menu_move_down();

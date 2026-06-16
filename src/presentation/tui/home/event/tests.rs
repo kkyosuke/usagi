@@ -92,6 +92,10 @@ fn live_preview(_: &Path) -> Option<TerminalView> {
 
 fn noop_persist(_: &str) {}
 
+fn no_branches() -> Vec<String> {
+    Vec::new()
+}
+
 /// Run the loop with all-default callbacks (idle preview, no-op pane).
 fn run(keys: Vec<io::Result<Key>>, state: HomeState) -> Result<Outcome> {
     let mut open: fn(&mut HomeState, &Path, bool) -> Result<PaneExit> = noop_open;
@@ -136,6 +140,7 @@ fn run_full(
     let monitor = MonitorHandle::detached();
     let mut persist: fn(&str) = noop_persist;
     let mut remove_session: fn(&str, bool) -> SessionOutcome = noop_remove;
+    let mut branches: fn() -> Vec<String> = no_branches;
     event_loop(
         &term,
         &mut reader,
@@ -146,6 +151,7 @@ fn run_full(
         &mut persist,
         create_session,
         &mut remove_session,
+        &mut branches,
         open_terminal,
         open_config,
         preview,
@@ -169,6 +175,7 @@ fn run_with_live_monitor(
     let mut open: fn(&mut HomeState, &Path, bool) -> Result<PaneExit> = noop_open;
     let mut config: fn(&Term) -> Result<bool> = noop_config;
     let mut preview: fn(&Path) -> Option<TerminalView> = noop_preview;
+    let mut branches: fn() -> Vec<String> = no_branches;
     event_loop(
         &term,
         &mut reader,
@@ -179,6 +186,7 @@ fn run_with_live_monitor(
         persist,
         &mut create,
         &mut remove_session,
+        &mut branches,
         &mut open,
         &mut config,
         &mut preview,
@@ -217,6 +225,7 @@ fn a_populated_update_handle_is_read_before_painting() {
         &mut persist,
         &mut create,
         &mut remove,
+        &mut (no_branches as fn() -> Vec<String>),
         &mut open,
         &mut config,
         &mut preview,
@@ -342,6 +351,7 @@ fn submitted_commands_are_handed_to_persist() {
         &mut persist,
         &mut create,
         &mut remove,
+        &mut (no_branches as fn() -> Vec<String>),
         &mut open,
         &mut config,
         &mut preview,
@@ -479,6 +489,7 @@ fn session_remove_with_a_name_and_force_routes_to_remove() {
         &mut persist,
         &mut create,
         &mut remove,
+        &mut (no_branches as fn() -> Vec<String>),
         &mut open,
         &mut config,
         &mut preview,
@@ -526,6 +537,7 @@ fn session_remove_without_a_name_opens_the_modal_and_bulk_removes() {
         &mut persist,
         &mut create,
         &mut remove,
+        &mut (no_branches as fn() -> Vec<String>),
         &mut open,
         &mut config,
         &mut preview,
