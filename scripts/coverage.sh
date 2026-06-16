@@ -10,7 +10,7 @@
 #   coverage_enforce          # ローカルで計測して 100% を強制する (lefthook 用)
 
 # 対象から外す端末 I/O 専用の薄いラッパ（テスト不能なため計測しない）。
-export COVERAGE_IGNORE='(src/main\.rs|cli/hop\.rs|cli/mcp\.rs|cli/llm_mcp\.rs|infrastructure/pty\.rs|tui/echo\.rs|tui/term_reader\.rs|tui/app/mod\.rs|tui/welcome/mod\.rs|tui/home/mod\.rs|tui/home/terminal_pane\.rs|tui/home/terminal_pool\.rs|tui/new/mod\.rs|tui/open/mod\.rs|tui/config/mod\.rs)'
+export COVERAGE_IGNORE='(src/main\.rs|cli/hop\.rs|cli/mcp\.rs|cli/llm_mcp\.rs|cli/session_mcp\.rs|infrastructure/pty\.rs|tui/echo\.rs|tui/term_reader\.rs|tui/app/mod\.rs|tui/welcome/mod\.rs|tui/home/mod\.rs|tui/home/terminal_pane\.rs|tui/home/terminal_pool\.rs|tui/new/mod\.rs|tui/open/mod\.rs|tui/config/mod\.rs)'
 # 100% を要求するカバレッジ指標。
 export COVERAGE_MIN=100
 

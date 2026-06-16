@@ -1,12 +1,13 @@
 //! MCP (Model Context Protocol) servers and their shared JSON-RPC plumbing.
 //!
 //! usagi speaks MCP over stdio so AI agents (Claude Code etc.) can drive it with
-//! the same operations a human uses on the CLI. Two servers live here:
+//! the same operations a human uses on the CLI. Three servers live here:
 //!
 //! - [`issue`] exposes a repository's task issues as tools.
 //! - [`llm`] exposes a locally-running model as a single delegation tool.
+//! - [`session`] exposes session orchestration (create / list / prompt) as tools.
 //!
-//! Both speak JSON-RPC 2.0 with newline-delimited messages and implement the
+//! All speak JSON-RPC 2.0 with newline-delimited messages and implement the
 //! small subset MCP needs (`initialize`, `tools/list`, `tools/call`, `ping`)
 //! directly over `serde_json` — no async runtime, so dispatch stays synchronous
 //! and unit-testable. The framing (parsing, method dispatch, response shaping)
@@ -15,6 +16,7 @@
 
 pub mod issue;
 pub mod llm;
+pub mod session;
 
 use serde_json::{json, Value};
 

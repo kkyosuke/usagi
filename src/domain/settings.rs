@@ -40,10 +40,13 @@ pub enum SessionActionUi {
     Prompt,
 }
 
-/// JSON wiring usagi's own issue MCP server (`usagi mcp`, served over stdio)
-/// into an agent CLI, so the agent can create and query issues from the start.
-/// Kept as a literal — it is fixed and lets `domain` stay free of `serde_json`.
-const ISSUE_MCP_CONFIG: &str = r#"{"mcpServers":{"usagi":{"command":"usagi","args":["mcp"]}}}"#;
+/// The always-present usagi MCP servers wired into an agent CLI: the issue
+/// server (`usagi mcp`) so the agent can create and query issues, and the
+/// session server (`usagi session-mcp`) so it can create sessions and delegate
+/// prompts to them. This is the inner `"mcpServers"` object's body (no enclosing
+/// braces). Kept as a literal — it is fixed and lets `domain` stay free of
+/// `serde_json`.
+const USAGI_MCP_SERVERS: &str = r#""usagi":{"command":"usagi","args":["mcp"]},"usagi-session":{"command":"usagi","args":["session-mcp"]}"#;
 
 /// System-prompt addendum injected into agents launched from a usagi session.
 ///
@@ -143,19 +146,22 @@ impl AgentCli {
     }
 }
 
-/// The `--mcp-config` JSON for Claude Code: always the issue server, plus the
-/// local LLM server (`usagi llm-mcp --model <model>`) when a model is given.
+/// The `--mcp-config` JSON for Claude Code: always the usagi issue and session
+/// servers, plus the local LLM server (`usagi llm-mcp --model <model>`) when a
+/// model is given.
 ///
 /// Built by string formatting rather than `serde_json` so `domain` stays free
 /// of that dependency; the model name comes from a fixed allowlist
 /// ([`LOCAL_LLM_MODELS`]) with no characters that need JSON escaping.
 fn mcp_config_json(local_llm_model: Option<&str>) -> String {
-    match local_llm_model {
-        None => ISSUE_MCP_CONFIG.to_string(),
+    let base = USAGI_MCP_SERVERS;
+    let servers = match local_llm_model {
+        None => base.to_string(),
         Some(model) => format!(
-            r#"{{"mcpServers":{{"usagi":{{"command":"usagi","args":["mcp"]}},"usagi-llm":{{"command":"usagi","args":["llm-mcp","--model","{model}"]}}}}}}"#
+            r#"{base},"usagi-llm":{{"command":"usagi","args":["llm-mcp","--model","{model}"]}}"#
         ),
-    }
+    };
+    format!(r#"{{"mcpServers":{{{servers}}}}}"#)
 }
 
 /// Which ref a new session worktree is branched from.
@@ -386,16 +392,16 @@ mod tests {
     }
 
     #[test]
-    fn claude_launch_command_wires_in_the_issue_mcp_server() {
-        // With the local LLM off (`None`), only the issue server is wired in and
-        // the system prompt is just the worktree note.
+    fn claude_launch_command_wires_in_the_usagi_mcp_servers() {
+        // With the local LLM off (`None`), the issue and session servers are wired
+        // in and the system prompt is just the worktree note.
         let launch = AgentCli::Claude.launch_command(None);
-        // The program is still `claude`, now with the issue MCP server passed
+        // The program is still `claude`, now with usagi's MCP servers passed
         // inline via `--mcp-config` and a session-scoped instruction passed via
         // `--append-system-prompt` (both single-quoted so the shell keeps them).
         assert_eq!(
             launch,
-            "claude --mcp-config '{\"mcpServers\":{\"usagi\":{\"command\":\"usagi\",\"args\":[\"mcp\"]}}}' \
+            "claude --mcp-config '{\"mcpServers\":{\"usagi\":{\"command\":\"usagi\",\"args\":[\"mcp\"]},\"usagi-session\":{\"command\":\"usagi\",\"args\":[\"session-mcp\"]}}}' \
              --append-system-prompt 'あなたは usagi が管理するセッション専用の worktree 内で起動されています。このディレクトリは既に独立した作業環境のため、新たに git worktree を作成する必要はありません。ここで直接作業を進めてください。'"
         );
     }

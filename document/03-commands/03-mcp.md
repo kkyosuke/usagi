@@ -70,7 +70,7 @@ infrastructure/issue_store … <repo>/.usagi/issues/ の markdown + index.json
 | モジュール | 役割 |
 |---|---|
 | `presentation/cli/mcp.rs` | `usagi mcp` のエントリ。stdin を 1 行ずつ読み、`McpServer::handle_line` の戻り値を stdout へ書く。ブロッキング I/O のみで、`hop` 同様カバレッジ計測の対象外。 |
-| `presentation/mcp/mod.rs` | JSON-RPC 2.0 の共有フレーミング（`dispatch_line` / レスポンス整形 / `McpService` トレイト）。issue・llm 両サーバが共有。 |
+| `presentation/mcp/mod.rs` | JSON-RPC 2.0 の共有フレーミング（`dispatch_line` / レスポンス整形 / `McpService` トレイト）。issue・llm・session の各サーバが共有。 |
 | `presentation/mcp/issue.rs` | `McpServer`。`McpService` を実装し issue tool を提供（`handle_line` は `mod.rs` の `dispatch_line` に委譲）。副作用は usecase 経由のファイル操作のみ。ユニットテストで網羅。 |
 | `usecase/issue` ほか | tool が呼ぶビジネスロジック。MCP 固有の知識は持たない。 |
 

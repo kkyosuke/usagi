@@ -76,11 +76,12 @@ src/
 │   └── issue_store.rs          # <repo>/.usagi/issues/ の markdown + index.json（IssueStore）
 │
 └── presentation/               # CLI ルーティング・TUI・MCP
-    ├── cli/                    # サブコマンド（init / hop / status / config / doctor / issue / mcp / llm_mcp）
+    ├── cli/                    # サブコマンド（init / hop / status / config / doctor / issue / mcp / llm_mcp / session_mcp）
     ├── mcp/                    # MCP サーバ（JSON-RPC 2.0 フレーミングを共有）
     │   ├── mod.rs              # 共有プロトコル（dispatch_line / レスポンス整形 / McpService）
     │   ├── issue.rs            # issue 操作ツール（McpServer）
-    │   └── llm.rs              # ローカル LLM 委譲ツール（LlmMcpServer / LlmBackend）
+    │   ├── llm.rs              # ローカル LLM 委譲ツール（LlmMcpServer / LlmBackend）
+    │   └── session.rs          # セッション操作ツール（SessionMcpServer / AgentBackend）
     └── tui/                    # 自前レンダリングの TUI（console + crossterm、ratatui は不使用）
         ├── app/                # TUI オーケストレーター（画面グラフの遷移を管理 / event）
         ├── screen.rs           # 端末制御（代替スクリーン・RAII ガード）・差分描画（FramePainter）

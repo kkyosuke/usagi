@@ -118,6 +118,37 @@ fn record(workspace_root: &Path, name: &str, root: &Path, worktrees: &[PathBuf])
     store.save(&state)
 }
 
+/// List the sessions recorded for `workspace_root`, in creation order.
+///
+/// Returns an empty list when no state has been written yet (a workspace with
+/// no sessions). This reads `state.json` only — it does not reconcile the
+/// on-disk tree, so it is a cheap query callers can run freely.
+pub fn list(workspace_root: &Path) -> Result<Vec<SessionRecord>> {
+    let store = WorkspaceStore::new(workspace_root);
+    Ok(store
+        .load()?
+        .map(|state| state.sessions)
+        .unwrap_or_default())
+}
+
+/// The workspace root that owns `path` when `path` lies inside a session tree
+/// (`<root>/.usagi/sessions/<name>/...`): the part of the path before its
+/// `.usagi/sessions` segment.
+///
+/// When `path` is not inside a session tree (no such segment), `path` itself is
+/// returned — the caller is treated as its own workspace root. This lets a tool
+/// running inside a session worktree recover the workspace whose `state.json`
+/// tracks every session.
+pub fn workspace_root_for(path: &Path) -> PathBuf {
+    let comps: Vec<_> = path.components().collect();
+    for i in 0..comps.len().saturating_sub(1) {
+        if comps[i].as_os_str() == ".usagi" && comps[i + 1].as_os_str() == "sessions" {
+            return comps[..i].iter().collect();
+        }
+    }
+    path.to_path_buf()
+}
+
 /// The result of attempting to remove a session.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemovalOutcome {
@@ -423,6 +454,47 @@ mod tests {
 
         let err = create(root.path(), "x").unwrap_err();
         assert!(err.to_string().contains("failed to create"));
+    }
+
+    // --- list / workspace_root_for -----------------------------------------
+
+    #[test]
+    fn list_returns_recorded_sessions_in_order() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        // No state yet: an empty list, not an error.
+        assert!(list(root.path()).unwrap().is_empty());
+
+        create(root.path(), "first").unwrap();
+        create(root.path(), "second").unwrap();
+
+        let names: Vec<String> = list(root.path())
+            .unwrap()
+            .into_iter()
+            .map(|s| s.name)
+            .collect();
+        assert_eq!(names, vec!["first", "second"]);
+    }
+
+    #[test]
+    fn workspace_root_for_recovers_the_root_from_a_session_path() {
+        // A path inside a single-repo session tree resolves to the workspace.
+        let root = Path::new("/home/me/proj");
+        let inside = root.join(".usagi/sessions/feature-x");
+        assert_eq!(workspace_root_for(&inside), root);
+        // A deeper path (multi-repo worktree under the session) resolves too.
+        let deeper = root.join(".usagi/sessions/feature-x/app-a/src");
+        assert_eq!(workspace_root_for(&deeper), root);
+    }
+
+    #[test]
+    fn workspace_root_for_returns_the_path_itself_outside_a_session() {
+        // No `.usagi/sessions` segment: the path is its own workspace root.
+        let plain = Path::new("/home/me/proj");
+        assert_eq!(workspace_root_for(plain), plain);
+        // A `.usagi` without a following `sessions` segment is not a session tree.
+        let other = Path::new("/home/me/proj/.usagi/issues");
+        assert_eq!(workspace_root_for(other), other);
     }
 
     // --- remove ------------------------------------------------------------
