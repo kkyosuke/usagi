@@ -155,10 +155,22 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
     // supports it) so the agent can manage issues from the start, plus the local
     // LLM server when it is enabled. Any failure to read settings falls back to
     // the default agent.
+    //
+    // The wired-in MCP servers and lifecycle hooks invoke usagi back, so they are
+    // pointed at this process's own executable path rather than the bare name
+    // `usagi`: that way they resolve even when usagi is run straight from a build
+    // (`cargo run`) and is not installed on `$PATH`. If the path can't be
+    // determined we fall back to the bare name.
+    let usagi_bin = std::env::current_exe()
+        .ok()
+        .and_then(|path| path.into_os_string().into_string().ok())
+        .unwrap_or_else(|| "usagi".to_string());
     let agent_command = crate::infrastructure::storage::Storage::open_default()
         .and_then(|storage| crate::usecase::settings::effective(&storage, &workspace.path))
-        .map(|settings| settings.agent_launch_command())
-        .unwrap_or_else(|_| crate::domain::settings::Settings::default().agent_launch_command());
+        .map(|settings| settings.agent_launch_command(&usagi_bin))
+        .unwrap_or_else(|_| {
+            crate::domain::settings::Settings::default().agent_launch_command(&usagi_bin)
+        });
 
     // Whether to surface desktop notifications when a background session starts
     // waiting for input, from the effective settings (project-local over the
