@@ -179,6 +179,25 @@ impl HomeState {
         self.rebuild_list();
     }
 
+    /// Swap in a freshly re-synced set of sessions while keeping the cursor and
+    /// the active row on the same session names (when they still exist).
+    ///
+    /// Used after the user works in an embedded terminal / agent — where they may
+    /// commit, push, or merge — so the worktree status reflects what they just
+    /// did, without yanking the cursor back to the root row the way
+    /// [`restore_sessions`](Self::restore_sessions) (which resets it) would.
+    pub fn refresh_sessions(&mut self, sessions: Vec<SessionRecord>) {
+        let selected = self.list.selected_name().to_string();
+        let active = self.list.active_name().to_string();
+        self.sessions = sessions;
+        self.rebuild_list();
+        // Restore the cursor (`select_by_name` moves both cursor and active onto
+        // the row; it is a no-op for the root row / a vanished session, leaving
+        // the rebuilt default on the root), then correct the active row.
+        self.list.select_by_name(&selected);
+        self.list.activate_by_name(&active);
+    }
+
     /// Rebuild the worktree pane from the current sessions: one row per session
     /// (not per repository), in order. A session spanning several git
     /// repositories is collapsed into a single row by [`session_row`].

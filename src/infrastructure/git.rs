@@ -381,23 +381,37 @@ pub fn upstream_of(repo: &Path, branch: &str) -> Option<String> {
     .filter(|s| !s.is_empty())
 }
 
-/// Return `true` if `branch` has been merged into `into` (an ancestor check).
+/// Count how many commits `branch` is **ahead of** and **behind** its
+/// integration target, as `(ahead, behind)`.
 ///
-/// `into` is resolved against the remote default branch first
-/// (`origin/<into>`), then the local branch, so the answer reflects what has
-/// landed on the integration branch even before a local fetch updates it.
-pub fn is_merged(repo: &Path, branch: &str, into: &str) -> bool {
+/// - `ahead` — commits on `branch` that are not on the target (its own,
+///   un-merged work). `0` means everything it carries is already on the target.
+/// - `behind` — commits on the target that are not on `branch` (the target has
+///   moved past it). `0` means it is even with (or ahead of) the target.
+///
+/// `into` is resolved against the remote default branch first (`origin/<into>`),
+/// then the local branch, so the answer reflects what has landed on the
+/// integration branch even before a local fetch updates it. Returns `None` when
+/// the counts cannot be computed (e.g. an unrelated history or a ref that does
+/// not resolve).
+pub fn ahead_behind(repo: &Path, branch: &str, into: &str) -> Option<(usize, usize)> {
     let target = if rev_exists(repo, &format!("origin/{into}")) {
         format!("origin/{into}")
     } else {
         into.to_string()
     };
 
-    git_command(repo)
-        .args(["merge-base", "--is-ancestor", branch, &target])
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+    // `--left-right --count A...B` prints "<left>\t<right>": commits reachable
+    // from the target but not the branch (behind), then from the branch but not
+    // the target (ahead).
+    let range = format!("{target}...{branch}");
+    let output = git_capture(repo, &["rev-list", "--left-right", "--count", &range])
+        .ok()
+        .flatten()?;
+    let mut counts = output.split_whitespace();
+    let behind = counts.next()?.parse().ok()?;
+    let ahead = counts.next()?.parse().ok()?;
+    Some((ahead, behind))
 }
 
 /// Return `true` if `rev` resolves to a commit in the repository.
@@ -565,22 +579,33 @@ mod tests {
     }
 
     #[test]
-    fn is_merged_detects_ancestor_against_local_and_remote() {
+    fn ahead_behind_counts_against_local_and_remote() {
         let (_tmp, work) = repo_with_remote();
-        // origin/main exists, so the remote ref is used as the target.
-        assert!(is_merged(&work, "main", "main"));
+        // origin/main exists, so the remote ref is used as the target. main is
+        // even with itself: nothing ahead, nothing behind.
+        assert_eq!(ahead_behind(&work, "main", "main"), Some((0, 0)));
 
         let local = tempfile::tempdir().unwrap();
         init_repo(local.path());
         run(local.path(), &["branch", "feature"]);
-        // No origin/main: the local branch is used. An unrelated, ahead branch
-        // is not an ancestor.
-        assert!(is_merged(local.path(), "feature", "main"));
+        // No origin/main: the local branch is used. A freshly cut branch carries
+        // no commits of its own and the default has not moved → (0, 0).
+        assert_eq!(ahead_behind(local.path(), "feature", "main"), Some((0, 0)));
+
+        // A commit on feature puts it one ahead of main, still zero behind.
         run(local.path(), &["checkout", "-q", "feature"]);
         std::fs::write(local.path().join("g"), "y").unwrap();
         run(local.path(), &["add", "."]);
         run(local.path(), &["commit", "-q", "-m", "ahead"]);
-        assert!(!is_merged(local.path(), "feature", "main"));
+        assert_eq!(ahead_behind(local.path(), "feature", "main"), Some((1, 0)));
+
+        // Advancing main past feature's base (a separate commit on main) makes
+        // feature one behind as well as one ahead.
+        run(local.path(), &["checkout", "-q", "main"]);
+        std::fs::write(local.path().join("h"), "z").unwrap();
+        run(local.path(), &["add", "."]);
+        run(local.path(), &["commit", "-q", "-m", "main ahead"]);
+        assert_eq!(ahead_behind(local.path(), "feature", "main"), Some((1, 1)));
     }
 
     #[test]
