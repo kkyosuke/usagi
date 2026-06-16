@@ -139,45 +139,38 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
         },
     };
 
-    // The agent CLI launched by `:agent`, resolved from the effective settings
-    // (project-local overrides on top of the global default, which is Claude).
-    // The launch command wires in usagi's issue MCP server (where the agent CLI
-    // supports it) so the agent can manage issues from the start, plus the local
-    // LLM server when it is enabled. Any failure to read settings falls back to
-    // the default agent.
-    let agent_command = crate::infrastructure::storage::Storage::open_default()
+    // The effective settings for this workspace (project-local overrides on top
+    // of the global default), read once. Any failure falls back to the defaults.
+    let settings = crate::infrastructure::storage::Storage::open_default()
         .and_then(|storage| crate::usecase::settings::effective(&storage, &workspace.path))
-        .map(|settings| settings.agent_launch_command())
-        .unwrap_or_else(|_| crate::domain::settings::Settings::default().agent_launch_command());
+        .unwrap_or_default();
+
+    // The agent adapter `:agent` drives, picked from the configured CLI. It is
+    // the single source of both the launch command and the per-session usage the
+    // pool's watcher polls for the sidebar gauge, so it is shared with the pool.
+    let agent = crate::infrastructure::agent::agent_for(settings.agent_cli);
+
+    // The command line `:agent` sends to the shell: the agent renders usagi's
+    // wiring policy (issue MCP server always; local-LLM server and delegation
+    // prompt when enabled) into its own invocation.
+    let agent_command = agent.launch_command(&settings.agent_wiring());
 
     // Whether to surface desktop notifications when a background session starts
-    // waiting for input, from the effective settings (project-local over the
-    // global default). Any failure to read settings defaults to enabled, like
-    // `hop`'s welcome notification.
-    let notifications_enabled = crate::infrastructure::storage::Storage::open_default()
-        .and_then(|storage| crate::usecase::settings::effective(&storage, &workspace.path))
-        .map(|settings| settings.notifications_enabled)
-        .unwrap_or(true);
-
-    // The agent CLI in effect for this workspace, used to pick the usage reader
-    // the pool's watcher polls for the sidebar's context-window gauge. Falls back
-    // to the default agent if settings cannot be read.
-    let agent_cli = crate::infrastructure::storage::Storage::open_default()
-        .and_then(|storage| crate::usecase::settings::effective(&storage, &workspace.path))
-        .map(|settings| settings.agent_cli)
-        .unwrap_or_default();
+    // waiting for input. Opt-out: on unless the user disabled it.
+    let notifications_enabled = settings.notifications_enabled;
 
     // The live shells embedded in the right pane, one per worktree, kept alive
     // across session switches and for as long as this screen is open. Dropped on
     // return, which kills any shell still running. The pool also watches every
-    // shell's bell and flags / notifies the ones waiting for input.
+    // shell's bell and flags / notifies the ones waiting for input, and polls the
+    // agent for each session's context-window usage.
     //
     // Wrapped in a `RefCell` so both the pane driver (`open_terminal`) and the
     // sidebar preview (`preview`) can reach it: their borrows never overlap in
     // time (the event loop calls one or the other, never both at once).
     let pool = std::cell::RefCell::new(terminal_pool::TerminalPool::new(
         notifications_enabled,
-        agent_cli,
+        agent,
     ));
     let monitor = pool.borrow().monitor();
 

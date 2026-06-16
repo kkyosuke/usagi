@@ -1,33 +1,66 @@
-//! Reading agent context-window usage from each CLI's on-disk transcript.
+//! Agent adapters: one per CLI, each converting usagi's [`Agent`] interface into
+//! that CLI's own invocation and on-disk artifacts.
 //!
-//! The home screen's session watcher polls a [`UsageReader`] for every live
-//! session to drive the sidebar's aggregate usage gauge. The reader is chosen
-//! per the configured agent CLI via [`reader_for`], so a new agent only needs
-//! its own [`UsageReader`] implementation wired in here — the call sites never
-//! change.
-//!
-//! The Claude reader's transcript discovery and file reads are I/O (excluded
-//! from coverage, like the rest of the embedded-terminal plumbing); the pieces
-//! that turn bytes into a [`AgentUsage`] — [`parse_claude_transcript`] and
-//! [`encode_project_dir`] — are pure and tested here.
+//! [`agent_for`] is the single place that maps the configured [`AgentCli`] to its
+//! adapter, so adding a new agent is one adapter module plus one arm here. The
+//! adapters' I/O (reading a transcript) lives in their own files and is excluded
+//! from coverage; the pure pieces — the Claude launch-command rendering and
+//! transcript parsing — live here and are tested directly.
 
 mod claude;
 mod gemini;
 
 use std::path::Path;
+use std::sync::Arc;
 
-pub use claude::ClaudeUsageReader;
-pub use gemini::GeminiUsageReader;
+pub use claude::ClaudeAgent;
+pub use gemini::GeminiAgent;
 
-use crate::domain::agent_usage::{context_window_for, AgentUsage, UsageReader};
+use crate::domain::agent::{Agent, AgentWiring};
+use crate::domain::agent_usage::{context_window_for, AgentUsage};
 use crate::domain::settings::AgentCli;
 
-/// The usage reader for the configured agent CLI.
-pub fn reader_for(cli: AgentCli) -> Box<dyn UsageReader> {
+/// The agent adapter for the configured CLI, shared (via `Arc`) between the
+/// render loop and the background session watcher.
+pub fn agent_for(cli: AgentCli) -> Arc<dyn Agent> {
     match cli {
-        AgentCli::Claude => Box::new(ClaudeUsageReader::new()),
-        AgentCli::Gemini => Box::new(GeminiUsageReader::new()),
+        AgentCli::Claude => Arc::new(ClaudeAgent::new()),
+        AgentCli::Gemini => Arc::new(GeminiAgent::new()),
     }
+}
+
+/// Render usagi's [`AgentWiring`] into Claude Code's launch command.
+///
+/// Claude accepts the MCP servers inline via `--mcp-config` and the
+/// session-scoped instruction via `--append-system-prompt`; both are
+/// single-quoted so the shell passes them through verbatim (no value contains a
+/// single quote). The MCP config is built by string formatting — the values come
+/// from usagi's own fixed wiring and the local-LLM model allowlist, so nothing
+/// needs JSON escaping.
+pub(crate) fn claude_launch_command(wiring: &AgentWiring) -> String {
+    let servers = wiring
+        .mcp_servers
+        .iter()
+        .map(|server| {
+            let args = server
+                .args
+                .iter()
+                .map(|arg| format!("\"{arg}\""))
+                .collect::<Vec<_>>()
+                .join(",");
+            format!(
+                "\"{}\":{{\"command\":\"{}\",\"args\":[{}]}}",
+                server.name, server.command, args
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    let mcp_config = format!("{{\"mcpServers\":{{{servers}}}}}");
+    format!(
+        "claude --mcp-config '{mcp_config}' \
+         --append-system-prompt '{}'",
+        wiring.system_prompt
+    )
 }
 
 /// Parse the latest context-window usage from a Claude Code transcript.
@@ -90,7 +123,53 @@ pub(crate) fn encode_project_dir(worktree: &Path) -> String {
 mod tests {
     use super::*;
     use crate::domain::agent_usage::{DEFAULT_CONTEXT_WINDOW, EXTENDED_CONTEXT_WINDOW};
+    use crate::domain::settings::Settings;
     use std::path::PathBuf;
+
+    #[test]
+    fn claude_launch_command_matches_the_expected_invocation() {
+        // The default wiring (issue server only) renders the exact command line
+        // `:agent` sends to the shell.
+        let wiring = Settings::default().agent_wiring();
+        assert_eq!(
+            claude_launch_command(&wiring),
+            "claude --mcp-config '{\"mcpServers\":{\"usagi\":{\"command\":\"usagi\",\"args\":[\"mcp\"]}}}' \
+             --append-system-prompt 'あなたは usagi が管理するセッション専用の worktree 内で起動されています。このディレクトリは既に独立した作業環境のため、新たに git worktree を作成する必要はありません。ここで直接作業を進めてください。'"
+        );
+    }
+
+    #[test]
+    fn claude_launch_command_appends_the_local_llm_server_when_wired() {
+        let mut settings = Settings::default();
+        settings.local_llm.enabled = true;
+        settings.local_llm.model = "qwen2.5-coder:7b".to_string();
+        let launch = claude_launch_command(&settings.agent_wiring());
+        assert!(launch.contains("\"usagi\":{\"command\":\"usagi\",\"args\":[\"mcp\"]}"));
+        assert!(launch.contains(
+            "\"usagi-llm\":{\"command\":\"usagi\",\"args\":[\"llm-mcp\",\"--model\",\"qwen2.5-coder:7b\"]}"
+        ));
+        assert!(launch.contains("local_llm_ask"));
+    }
+
+    #[test]
+    fn agent_for_gemini_reports_no_usage_yet() {
+        // Gemini has no transcript usagi reads, so its adapter returns None for
+        // any worktree — the dispatch still hands back a working agent.
+        let agent = agent_for(AgentCli::Gemini);
+        assert_eq!(agent.program(), "gemini");
+        assert_eq!(agent.usage(&PathBuf::from("/anywhere")), None);
+    }
+
+    #[test]
+    fn agent_for_claude_returns_an_agent() {
+        // A worktree with no transcript reads as None rather than panicking.
+        let agent = agent_for(AgentCli::Claude);
+        assert_eq!(agent.program(), "claude");
+        assert_eq!(
+            agent.usage(&PathBuf::from("/nonexistent/usagi/worktree/path")),
+            None
+        );
+    }
 
     #[test]
     fn encode_project_dir_replaces_non_alphanumerics_with_dashes() {
@@ -149,23 +228,5 @@ mod tests {
     fn parse_returns_none_without_any_usage() {
         assert_eq!(parse_claude_transcript(""), None);
         assert_eq!(parse_claude_transcript("garbage\n{}\n"), None);
-    }
-
-    #[test]
-    fn reader_for_gemini_reports_no_usage_yet() {
-        // Gemini has no transcript usagi reads, so its reader returns None for any
-        // worktree — the dispatch still hands back a working reader.
-        let reader = reader_for(AgentCli::Gemini);
-        assert_eq!(reader.read(&PathBuf::from("/anywhere")), None);
-    }
-
-    #[test]
-    fn reader_for_claude_returns_a_reader() {
-        // A worktree with no transcript reads as None rather than panicking.
-        let reader = reader_for(AgentCli::Claude);
-        assert_eq!(
-            reader.read(&PathBuf::from("/nonexistent/usagi/worktree/path")),
-            None
-        );
     }
 }

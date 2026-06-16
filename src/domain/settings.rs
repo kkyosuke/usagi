@@ -2,6 +2,8 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use crate::domain::agent::{AgentWiring, McpServer};
+
 /// UI color theme.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -39,11 +41,6 @@ pub enum SessionActionUi {
     /// A session-scoped command prompt the user types into.
     Prompt,
 }
-
-/// JSON wiring usagi's own issue MCP server (`usagi mcp`, served over stdio)
-/// into an agent CLI, so the agent can create and query issues from the start.
-/// Kept as a literal — it is fixed and lets `domain` stay free of `serde_json`.
-const ISSUE_MCP_CONFIG: &str = r#"{"mcpServers":{"usagi":{"command":"usagi","args":["mcp"]}}}"#;
 
 /// System-prompt addendum injected into agents launched from a usagi session.
 ///
@@ -99,62 +96,6 @@ impl Default for LocalLlm {
             enabled: false,
             model: DEFAULT_LOCAL_LLM_MODEL.to_string(),
         }
-    }
-}
-
-impl AgentCli {
-    /// The shell command (program name) usagi launches for this agent — the
-    /// word the `agent` command runs inside the embedded terminal.
-    pub fn command(self) -> &'static str {
-        match self {
-            AgentCli::Claude => "claude",
-            AgentCli::Gemini => "gemini",
-        }
-    }
-
-    /// The full command line `:agent` sends to the embedded shell, with usagi's
-    /// issue MCP server wired in so the agent can manage issues immediately —
-    /// plus the local LLM MCP server when `local_llm_model` is `Some` (i.e. the
-    /// local LLM is enabled), so the agent can offload light work to it.
-    ///
-    /// Claude Code accepts the servers inline via `--mcp-config` and a
-    /// session-scoped instruction via `--append-system-prompt`; both arguments
-    /// are single-quoted so the shell passes them through verbatim (neither
-    /// value contains a single quote). The system prompt tells the agent it is
-    /// already inside a usagi worktree, so it skips creating one, and — when the
-    /// local LLM is on — to delegate light tasks to it. Gemini has no inline
-    /// flags — its MCP servers come from `settings.json` — so it launches plain
-    /// for now.
-    pub fn launch_command(self, local_llm_model: Option<&str>) -> String {
-        match self {
-            AgentCli::Claude => {
-                let mcp_config = mcp_config_json(local_llm_model);
-                let system_prompt = match local_llm_model {
-                    Some(_) => format!("{SESSION_WORKTREE_PROMPT}{LOCAL_LLM_PROMPT}"),
-                    None => SESSION_WORKTREE_PROMPT.to_string(),
-                };
-                format!(
-                    "claude --mcp-config '{mcp_config}' \
-                     --append-system-prompt '{system_prompt}'"
-                )
-            }
-            AgentCli::Gemini => "gemini".to_string(),
-        }
-    }
-}
-
-/// The `--mcp-config` JSON for Claude Code: always the issue server, plus the
-/// local LLM server (`usagi llm-mcp --model <model>`) when a model is given.
-///
-/// Built by string formatting rather than `serde_json` so `domain` stays free
-/// of that dependency; the model name comes from a fixed allowlist
-/// ([`LOCAL_LLM_MODELS`]) with no characters that need JSON escaping.
-fn mcp_config_json(local_llm_model: Option<&str>) -> String {
-    match local_llm_model {
-        None => ISSUE_MCP_CONFIG.to_string(),
-        Some(model) => format!(
-            r#"{{"mcpServers":{{"usagi":{{"command":"usagi","args":["mcp"]}},"usagi-llm":{{"command":"usagi","args":["llm-mcp","--model","{model}"]}}}}}}"#
-        ),
     }
 }
 
@@ -229,15 +170,35 @@ impl Settings {
         self
     }
 
-    /// The command line that launches the configured agent CLI with usagi's MCP
-    /// servers wired in: always the issue server, plus the local LLM server when
-    /// [`LocalLlm::enabled`] is set (so the agent can offload work to it).
-    pub fn agent_launch_command(&self) -> String {
-        let model = self
-            .local_llm
-            .enabled
-            .then_some(self.local_llm.model.as_str());
-        self.agent_cli.launch_command(model)
+    /// usagi's wiring policy for a launched agent: which MCP servers to expose
+    /// and the system prompt to append. The issue server is always wired in (so
+    /// the agent can manage issues from the start); the local-LLM server and its
+    /// delegation prompt are added when [`LocalLlm::enabled`] is set. An
+    /// [`Agent`](crate::domain::agent::Agent) adapter renders this into its CLI's
+    /// own invocation.
+    pub fn agent_wiring(&self) -> AgentWiring {
+        let mut mcp_servers = vec![McpServer {
+            name: "usagi".to_string(),
+            command: "usagi".to_string(),
+            args: vec!["mcp".to_string()],
+        }];
+        let mut system_prompt = SESSION_WORKTREE_PROMPT.to_string();
+        if self.local_llm.enabled {
+            mcp_servers.push(McpServer {
+                name: "usagi-llm".to_string(),
+                command: "usagi".to_string(),
+                args: vec![
+                    "llm-mcp".to_string(),
+                    "--model".to_string(),
+                    self.local_llm.model.clone(),
+                ],
+            });
+            system_prompt.push_str(LOCAL_LLM_PROMPT);
+        }
+        AgentWiring {
+            mcp_servers,
+            system_prompt,
+        }
     }
 }
 
@@ -380,65 +341,52 @@ mod tests {
     }
 
     #[test]
-    fn agent_cli_maps_to_its_launch_command() {
-        assert_eq!(AgentCli::Claude.command(), "claude");
-        assert_eq!(AgentCli::Gemini.command(), "gemini");
-    }
-
-    #[test]
-    fn claude_launch_command_wires_in_the_issue_mcp_server() {
-        // With the local LLM off (`None`), only the issue server is wired in and
-        // the system prompt is just the worktree note.
-        let launch = AgentCli::Claude.launch_command(None);
-        // The program is still `claude`, now with the issue MCP server passed
-        // inline via `--mcp-config` and a session-scoped instruction passed via
-        // `--append-system-prompt` (both single-quoted so the shell keeps them).
+    fn agent_wiring_wires_only_the_issue_server_when_the_local_llm_is_off() {
+        // The default leaves the local LLM off: just the issue server and the
+        // bare worktree note (no delegation prompt).
+        let wiring = Settings::default().agent_wiring();
         assert_eq!(
-            launch,
-            "claude --mcp-config '{\"mcpServers\":{\"usagi\":{\"command\":\"usagi\",\"args\":[\"mcp\"]}}}' \
-             --append-system-prompt 'あなたは usagi が管理するセッション専用の worktree 内で起動されています。このディレクトリは既に独立した作業環境のため、新たに git worktree を作成する必要はありません。ここで直接作業を進めてください。'"
+            wiring.mcp_servers,
+            vec![McpServer {
+                name: "usagi".to_string(),
+                command: "usagi".to_string(),
+                args: vec!["mcp".to_string()],
+            }]
         );
+        assert_eq!(wiring.system_prompt, SESSION_WORKTREE_PROMPT);
+        assert!(!wiring.system_prompt.contains("local_llm_ask"));
     }
 
     #[test]
-    fn claude_launch_command_wires_in_the_local_llm_server_when_enabled() {
-        // With a model given, the local LLM server joins the issue server in the
-        // MCP config and the delegation prompt is appended after the worktree note.
-        let launch = AgentCli::Claude.launch_command(Some("qwen2.5-coder:7b"));
-        assert!(launch.contains(
-            "\"usagi-llm\":{\"command\":\"usagi\",\"args\":[\"llm-mcp\",\"--model\",\"qwen2.5-coder:7b\"]}"
-        ));
-        // The issue server is still present alongside it.
-        assert!(launch.contains("\"usagi\":{\"command\":\"usagi\",\"args\":[\"mcp\"]}"));
-        // The delegation instruction is appended to the worktree note.
-        assert!(launch.contains("local_llm_ask"));
-    }
-
-    #[test]
-    fn gemini_launch_command_stays_plain_regardless_of_local_llm() {
-        // Gemini has no inline MCP flag, so it launches as the bare command even
-        // when the local LLM is enabled.
-        assert_eq!(AgentCli::Gemini.launch_command(None), "gemini");
-        assert_eq!(
-            AgentCli::Gemini.launch_command(Some("qwen2.5-coder:7b")),
-            "gemini"
-        );
-    }
-
-    #[test]
-    fn agent_launch_command_wires_the_local_llm_only_when_enabled() {
-        // Disabled (the default): no local LLM server, no delegation prompt.
+    fn agent_wiring_adds_the_local_llm_server_and_prompt_when_enabled() {
         let mut settings = Settings::default();
-        let off = settings.agent_launch_command();
-        assert!(!off.contains("usagi-llm"));
-        assert!(!off.contains("local_llm_ask"));
-
-        // Enabled: the configured model is served and the prompt is added.
         settings.local_llm.enabled = true;
         settings.local_llm.model = "qwen2.5-coder:3b".to_string();
-        let on = settings.agent_launch_command();
-        assert!(on.contains("\"--model\",\"qwen2.5-coder:3b\""));
-        assert!(on.contains("local_llm_ask"));
+        let wiring = settings.agent_wiring();
+
+        // The issue server stays first, with the local-LLM server appended.
+        assert_eq!(
+            wiring.mcp_servers,
+            vec![
+                McpServer {
+                    name: "usagi".to_string(),
+                    command: "usagi".to_string(),
+                    args: vec!["mcp".to_string()],
+                },
+                McpServer {
+                    name: "usagi-llm".to_string(),
+                    command: "usagi".to_string(),
+                    args: vec![
+                        "llm-mcp".to_string(),
+                        "--model".to_string(),
+                        "qwen2.5-coder:3b".to_string(),
+                    ],
+                },
+            ]
+        );
+        // The delegation note is appended after the worktree note.
+        assert!(wiring.system_prompt.starts_with(SESSION_WORKTREE_PROMPT));
+        assert!(wiring.system_prompt.contains("local_llm_ask"));
     }
 
     #[test]

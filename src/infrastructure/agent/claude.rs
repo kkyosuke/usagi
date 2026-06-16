@@ -1,16 +1,14 @@
-//! Claude Code usage reader.
+//! Claude Code adapter.
 //!
-//! Claude Code appends every turn to `~/.claude/projects/<encoded-cwd>/<id>.jsonl`,
-//! where each assistant message records a `usage` block. This reader maps a
-//! worktree to that per-project directory, reads the newest transcript, and
-//! parses its latest usage. Results are cached by the transcript's mtime so the
-//! home screen's 200ms watcher does not re-read (and re-parse) an unchanged file
-//! on every tick.
+//! Builds Claude's launch command (delegating to the pure
+//! [`super::claude_launch_command`]) and reads its context-window usage from the
+//! transcript Claude Code appends under `~/.claude/projects/<encoded-cwd>/<id>.jsonl`.
+//! Usage results are cached by the transcript's mtime so the home screen's 200ms
+//! watcher does not re-read (and re-parse) an unchanged file every tick.
 //!
-//! This is pure filesystem I/O, so it is excluded from coverage (see
-//! `scripts/coverage.sh`); the parsing and path-encoding it delegates to —
-//! [`super::parse_claude_transcript`] and [`super::encode_project_dir`] — are
-//! pure and tested in the parent module.
+//! The launch rendering and transcript parsing are pure and tested in the parent
+//! module; only the filesystem I/O here (locating and reading the transcript) is
+//! excluded from coverage (see `scripts/coverage.sh`).
 
 use std::collections::HashMap;
 use std::fs;
@@ -18,14 +16,15 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::SystemTime;
 
-use crate::domain::agent_usage::{AgentUsage, UsageReader};
+use crate::domain::agent::{Agent, AgentWiring};
+use crate::domain::agent_usage::AgentUsage;
 
-use super::{encode_project_dir, parse_claude_transcript};
+use super::{claude_launch_command, encode_project_dir, parse_claude_transcript};
 
-/// A reader of Claude Code's transcripts, with an mtime cache keyed by the
-/// transcript path so an unchanged file is parsed at most once.
+/// The Claude Code adapter, with an mtime cache keyed by the transcript path so
+/// an unchanged file is parsed at most once.
 #[derive(Default)]
-pub struct ClaudeUsageReader {
+pub struct ClaudeAgent {
     cache: Mutex<HashMap<PathBuf, Cached>>,
 }
 
@@ -36,15 +35,23 @@ struct Cached {
     usage: Option<AgentUsage>,
 }
 
-impl ClaudeUsageReader {
-    /// A reader with an empty cache.
+impl ClaudeAgent {
+    /// A Claude adapter with an empty usage cache.
     pub fn new() -> Self {
         Self::default()
     }
 }
 
-impl UsageReader for ClaudeUsageReader {
-    fn read(&self, worktree: &Path) -> Option<AgentUsage> {
+impl Agent for ClaudeAgent {
+    fn program(&self) -> &'static str {
+        "claude"
+    }
+
+    fn launch_command(&self, wiring: &AgentWiring) -> String {
+        claude_launch_command(wiring)
+    }
+
+    fn usage(&self, worktree: &Path) -> Option<AgentUsage> {
         let dir = projects_root()?.join(encode_project_dir(worktree));
         let transcript = newest_jsonl(&dir)?;
         let mtime = fs::metadata(&transcript).ok()?.modified().ok()?;

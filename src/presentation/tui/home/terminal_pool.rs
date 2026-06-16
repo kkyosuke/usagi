@@ -35,9 +35,10 @@ use std::time::Duration;
 use anyhow::Result;
 use console::Term;
 
-use crate::domain::agent_usage::{AggregateUsage, UsageReader};
+use crate::domain::agent::Agent;
+use crate::domain::agent_usage::AggregateUsage;
 use crate::domain::settings::AgentCli;
-use crate::infrastructure::agent_usage::reader_for;
+use crate::infrastructure::agent::agent_for;
 use crate::infrastructure::pty::PtySession;
 use crate::infrastructure::session_monitor::SessionMonitor;
 
@@ -158,16 +159,16 @@ pub struct TerminalPool {
 impl TerminalPool {
     /// An empty pool with its watcher thread running. `notifications_enabled`
     /// gates the desktop notification fired when a detached session starts
-    /// waiting for input. `agent_cli` selects the usage reader the watcher polls
-    /// for the sidebar's context-window gauge.
-    pub fn new(notifications_enabled: bool, agent_cli: AgentCli) -> Self {
+    /// waiting for input. `agent` is the adapter the watcher polls for each live
+    /// session's context-window usage (the sidebar gauge).
+    pub fn new(notifications_enabled: bool, agent: Arc<dyn Agent>) -> Self {
         let shared = Arc::new(Mutex::new(Shared::default()));
         let stop = Arc::new(AtomicBool::new(false));
         let watcher = spawn_watcher(
             Arc::clone(&shared),
             Arc::clone(&stop),
             notifications_enabled,
-            reader_for(agent_cli),
+            agent,
         );
         Self {
             sessions: HashMap::new(),
@@ -273,7 +274,7 @@ fn spawn_watcher(
     shared: Arc<Mutex<Shared>>,
     stop: Arc<AtomicBool>,
     notifications_enabled: bool,
-    reader: Box<dyn UsageReader>,
+    agent: Arc<dyn Agent>,
 ) -> JoinHandle<()> {
     std::thread::spawn(move || loop {
         if stop.load(Ordering::SeqCst) {
@@ -318,7 +319,7 @@ fn spawn_watcher(
         };
 
         // Read usage off-lock (file I/O), then store the combined gauge.
-        let usage = AggregateUsage::from_sessions(live_paths.iter().filter_map(|p| reader.read(p)));
+        let usage = AggregateUsage::from_sessions(live_paths.iter().filter_map(|p| agent.usage(p)));
         if let Ok(mut shared) = shared.lock() {
             shared.usage = usage;
         }
@@ -347,6 +348,6 @@ fn notify_waiting(label: &str) {
 
 impl Default for TerminalPool {
     fn default() -> Self {
-        Self::new(true, AgentCli::default())
+        Self::new(true, agent_for(AgentCli::default()))
     }
 }

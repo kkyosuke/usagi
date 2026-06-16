@@ -1,13 +1,11 @@
 //! Agent context-window usage: how full each running agent's context window is,
 //! and the combined gauge the home screen shows at the bottom of the sidebar.
 //!
-//! This module is pure domain: value types plus a [`UsageReader`] trait that the
-//! infrastructure layer implements per agent CLI (Claude, Gemini, …). Reading a
-//! transcript is I/O, so it lives in `infrastructure::agent_usage`; everything
-//! here — the per-model context-window sizes, the aggregation, and the display
-//! ratios — is computed without touching the filesystem and is tested directly.
-
-use std::path::Path;
+//! This module is pure domain: the value types and the per-model context-window
+//! sizes, the aggregation, and the display ratios — all computed without touching
+//! the filesystem and tested directly. Reading a transcript to produce an
+//! [`AgentUsage`] is I/O and lives behind the [`Agent`](crate::domain::agent::Agent)
+//! port in `infrastructure::agent`.
 
 /// The default context-window size (tokens) assumed for a model whose id we do
 /// not recognise — the standard window for current Claude models.
@@ -99,18 +97,6 @@ impl AggregateUsage {
     pub fn remaining_percent(&self) -> u32 {
         (self.remaining_ratio() * 100.0).round() as u32
     }
-}
-
-/// Reads the current context-window usage for the agent running in a worktree.
-///
-/// Implemented once per agent CLI in `infrastructure::agent_usage`; the home
-/// screen's session watcher holds the reader for the configured agent and polls
-/// it alongside the bell/liveness checks. `Send` so the watcher thread can own
-/// it.
-pub trait UsageReader: Send {
-    /// The agent's current usage, or `None` when there is no readable transcript
-    /// for `worktree` (no agent running, or an agent whose usage we cannot read).
-    fn read(&self, worktree: &Path) -> Option<AgentUsage>;
 }
 
 #[cfg(test)]

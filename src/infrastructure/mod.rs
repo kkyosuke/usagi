@@ -1,5 +1,5 @@
 // Persistence, Git operations, and other external integrations live here.
-pub mod agent_usage;
+pub mod agent;
 pub mod git;
 pub mod history_store;
 pub mod issue_store;
