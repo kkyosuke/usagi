@@ -924,7 +924,9 @@ fn remove_modal_frame(raw_height: usize, raw_width: usize, modal: &RemoveModal) 
 /// `Ctrl-C` while a session is still live: it names how many sessions are still
 /// running and asks whether to close anyway.
 fn quit_confirm_frame(raw_height: usize, raw_width: usize, live: usize) -> Vec<String> {
-    const INNER: usize = 40;
+    // Wide enough for the longest body line ("Close anyway? Running agents
+    // will be stopped." = 45 columns) so it does not overflow the box.
+    const INNER: usize = 46;
     let body = vec![
         style(format!("{live} session(s) still running."))
             .dim()
@@ -2020,6 +2022,14 @@ mod tests {
         assert!(joined.contains("2 session(s) still running"));
         assert!(joined.contains("Close anyway?"));
         assert!(joined.contains("y / Enter: close"));
+        // Every bordered line of the modal must share the same width: a line
+        // that overflows `INNER` would lose its right border and break this.
+        let widths: Vec<usize> = joined
+            .lines()
+            .filter(|line| line.trim_start().starts_with('│'))
+            .map(|line| console::measure_text_width(line.trim()))
+            .collect();
+        assert!(widths.iter().all(|&w| w == widths[0]));
     }
 
     #[test]
