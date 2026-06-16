@@ -253,6 +253,7 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
         state.list(),
         state.live_paths(),
         state.waiting_paths(),
+        state.done_paths(),
         left_w,
         body_rows,
         // In 切替 the keyboard is on the list: fade the rows the cursor is not on.

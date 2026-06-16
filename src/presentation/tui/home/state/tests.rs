@@ -1027,6 +1027,21 @@ fn live_paths_track_sessions_with_a_running_agent() {
 }
 
 #[test]
+fn done_paths_track_finished_sessions() {
+    let mut state = state();
+    assert!(!state.is_done(Path::new("/repo/feature")));
+    assert!(state.done_paths().is_empty());
+    let mut done = HashSet::new();
+    done.insert(PathBuf::from("/repo/feature"));
+    state.set_done(done);
+    assert!(state.is_done(Path::new("/repo/feature")));
+    assert!(!state.is_done(Path::new("/repo/main")));
+    assert_eq!(state.done_paths().len(), 1);
+    state.set_done(HashSet::new());
+    assert!(!state.is_done(Path::new("/repo/feature")));
+}
+
+#[test]
 fn update_holds_the_latest_release_once_set() {
     use crate::domain::version::Version;
     let mut state = state();

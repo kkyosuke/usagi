@@ -106,8 +106,12 @@ pub struct HomeState {
     /// Worktree paths with a live (running) embedded session — an agent/shell is
     /// in use, whether attached or left running in the background. Refreshed from
     /// the terminal monitor each redraw and rendered with a "running" icon,
-    /// unless the path is also waiting (which takes precedence).
+    /// unless the path is also waiting or done (which take precedence).
     live: HashSet<PathBuf>,
+    /// Worktree paths whose agent has finished (its process exited), shown with a
+    /// "完了" badge. Refreshed from the terminal monitor each redraw; takes
+    /// precedence over waiting and running.
+    done: HashSet<PathBuf>,
     /// Whether the quit-confirmation modal is open. It is raised when the user
     /// presses `Ctrl-C` while a session is still live, so an accidental close
     /// does not drop a running agent/shell; confirming it quits the app.
@@ -158,6 +162,7 @@ impl HomeState {
             terminal_view: None,
             waiting: HashSet::new(),
             live: HashSet::new(),
+            done: HashSet::new(),
             quit_confirm: false,
             text_modal: None,
             response_start: 0,
@@ -413,6 +418,24 @@ impl HomeState {
     /// sidebar renderer.
     pub fn live_paths(&self) -> &HashSet<PathBuf> {
         &self.live
+    }
+
+    /// Replace the set of worktree paths whose agent has finished, refreshed from
+    /// the terminal monitor before each redraw.
+    pub fn set_done(&mut self, done: HashSet<PathBuf>) {
+        self.done = done;
+    }
+
+    /// Whether the worktree at `path` has a background session whose agent has
+    /// finished (exited).
+    pub fn is_done(&self, path: &Path) -> bool {
+        self.done.contains(path)
+    }
+
+    /// The set of worktree paths whose agent has finished, for the sidebar
+    /// renderer.
+    pub fn done_paths(&self) -> &HashSet<PathBuf> {
+        &self.done
     }
 
     /// Record the latest released version found by the background update check,
