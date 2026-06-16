@@ -142,6 +142,7 @@ fn run_full(
         state,
         Path::new("/ws"),
         &monitor,
+        &UpdateHandle::new(),
         &mut persist,
         create_session,
         &mut remove_session,
@@ -174,6 +175,7 @@ fn run_with_live_monitor(
         state,
         Path::new("/ws"),
         &monitor,
+        &UpdateHandle::new(),
         persist,
         &mut create,
         &mut remove_session,
@@ -181,6 +183,46 @@ fn run_with_live_monitor(
         &mut config,
         &mut preview,
     )
+}
+
+#[test]
+fn a_populated_update_handle_is_read_before_painting() {
+    // With the background check reporting a newer release, the loop reads the
+    // handle each frame and renders the top-right notice. It still quits on the
+    // trailing Ctrl-C, proving the update path does not disturb the loop.
+    use crate::domain::version::Version;
+    use crate::usecase::update_check::UpdateStatus;
+
+    let term = Term::stdout();
+    let mut reader = ScriptedReader::new(vec![Ok(Key::CtrlC)]);
+    let monitor = MonitorHandle::detached();
+    let update = UpdateHandle::new();
+    update.set(UpdateStatus {
+        current: Version::parse("0.0.1").unwrap(),
+        latest: Version::parse("0.2.0").unwrap(),
+    });
+    let mut persist: fn(&str) = noop_persist;
+    let mut create: fn(&str) -> SessionOutcome = noop_create;
+    let mut remove: fn(&str, bool) -> SessionOutcome = noop_remove;
+    let mut open: fn(&mut HomeState, &Path, bool) -> Result<PaneExit> = noop_open;
+    let mut config: fn(&Term) -> Result<bool> = noop_config;
+    let mut preview: fn(&Path) -> Option<TerminalView> = noop_preview;
+    let outcome = event_loop(
+        &term,
+        &mut reader,
+        sample_state(),
+        Path::new("/ws"),
+        &monitor,
+        &update,
+        &mut persist,
+        &mut create,
+        &mut remove,
+        &mut open,
+        &mut config,
+        &mut preview,
+    )
+    .unwrap();
+    assert!(matches!(outcome, Outcome::Quit));
 }
 
 fn typed(s: &str) -> Vec<io::Result<Key>> {
@@ -296,6 +338,7 @@ fn submitted_commands_are_handed_to_persist() {
         sample_state(),
         Path::new("/ws"),
         &monitor,
+        &UpdateHandle::new(),
         &mut persist,
         &mut create,
         &mut remove,
@@ -432,6 +475,7 @@ fn session_remove_with_a_name_and_force_routes_to_remove() {
         sample_state(),
         Path::new("/ws"),
         &monitor,
+        &UpdateHandle::new(),
         &mut persist,
         &mut create,
         &mut remove,
@@ -478,6 +522,7 @@ fn session_remove_without_a_name_opens_the_modal_and_bulk_removes() {
         state_with_sessions(&["alpha", "beta", "gamma"]),
         Path::new("/ws"),
         &monitor,
+        &UpdateHandle::new(),
         &mut persist,
         &mut create,
         &mut remove,

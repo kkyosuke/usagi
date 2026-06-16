@@ -25,6 +25,7 @@ use super::state::{HomeState, LogLine, PaneExit, ReturnMode, SessionOutcome};
 use super::terminal_pool::MonitorHandle;
 use super::terminal_view::TerminalView;
 use super::ui::render_frame;
+use super::update::UpdateHandle;
 
 /// A full-size frame: the journey is meaningless at a cramped size, and the
 /// component tests already cover the narrow-terminal fallbacks.
@@ -171,6 +172,7 @@ fn event_loop_attaches_a_live_session_end_to_end() {
         .collect(),
     };
     let monitor = MonitorHandle::detached();
+    let update = UpdateHandle::new();
 
     // The attached frame the loop paints, captured the moment the pane opens —
     // that is when the screen is in 没入 with the embedded terminal showing.
@@ -208,6 +210,7 @@ fn event_loop_attaches_a_live_session_end_to_end() {
         workspace(),
         Path::new("/repo"),
         &monitor,
+        &update,
         &mut persist,
         &mut create,
         &mut remove,

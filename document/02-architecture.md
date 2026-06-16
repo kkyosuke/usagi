@@ -51,7 +51,8 @@ src/
 │   ├── workspace.rs            # グローバル登録エントリ Workspace
 │   ├── workspace_state.rs      # WorkspaceState / WorktreeState / BranchStatus
 │   ├── history.rs              # コマンド履歴の 1 件 HistoryEntry
-│   └── issue.rs                # Issue / IssueSummary / IssueStatus / IssuePriority（frontmatter 読み書き）
+│   ├── issue.rs                # Issue / IssueSummary / IssueStatus / IssuePriority（frontmatter 読み書き）
+│   └── version.rs              # セマンティックバージョン Version（パース・比較）
 │
 ├── usecase/                    # ビジネスロジック
 │   ├── project.rs              # クローン・既存登録 + 状態同期
@@ -64,7 +65,8 @@ src/
 │   │   └── reconcile.rs       # state.json と .usagi/sessions/ の照合・孤児ディレクトリの強制削除
 │   ├── doctor.rs               # 依存ツールの導入状況チェック（ローカル LLM の健全性・--fix 導入を含む）
 │   ├── issue.rs                # issue の CRUD・検索・依存 readiness 判定
-│   └── local_llm.rs            # ollama・モデルの有無判定とインストール（ensure）
+│   ├── local_llm.rs            # ollama・モデルの有無判定とインストール（ensure）
+│   └── update_check.rs         # リモートのタグから最新リリースを判定（純粋・fetch は注入）
 │
 ├── infrastructure/             # 外部連携（Git・永続化・シェル）
 │   ├── error_log.rs            # 実行時エラーの日次ログ（~/.usagi/logs/・30 日保持・ErrorLog）
@@ -75,6 +77,7 @@ src/
 │   ├── history_store.rs        # <repo>/.usagi/history.json の load/append（HistoryStore）
 │   ├── terminal.rs             # 起動するシェルの解決（$SHELL / フォールバック）
 │   ├── pty.rs                  # 疑似ターミナルセッション（portable-pty + vt100、ベル回数の計測）
+│   ├── release.rs              # git ls-remote --tags でリリースタグを取得（薄い IO ラッパ）
 │   ├── session_monitor.rs      # 入力待ち判定の純粋ロジック（phase 優先・ベル基準値・待ち集合・アタッチ）
 │   ├── agent_state_store.rs    # worktree 別の Agent phase の記録/読み出し（~/.usagi/agent-state/）
 │   └── issue_store.rs          # <repo>/.usagi/issues/ の markdown + index.json（IssueStore）
