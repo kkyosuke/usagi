@@ -114,11 +114,12 @@ fn drive(
         // viewing scrolled-back history.
         let cursor = if scrollback == 0 { view.cursor() } else { None };
         state.set_terminal_view(view);
-        // Refresh the sidebar's waiting and live-agent markers so other
-        // background sessions flagged while we are attached here show up in the
-        // next repaint.
+        // Refresh the sidebar's waiting, live-agent, and finished markers so
+        // sessions (including this one) show their current state in the next
+        // repaint.
         state.set_waiting(monitor.waiting());
         state.set_live(monitor.live());
+        state.set_done(monitor.done());
         render(term, state, cursor, geo, &mut prev)?;
 
         // The shell closed (e.g. the user typed `exit`): leave the pane.

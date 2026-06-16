@@ -157,6 +157,7 @@ fn worktree_row_marks_selected_primary_and_detached() {
         true,
         false,
         false,
+        false,
     );
     assert!(top.contains('>'));
     assert!(top.contains('●'));
@@ -168,6 +169,7 @@ fn worktree_row_marks_selected_primary_and_detached() {
         10,
         10,
         true,
+        false,
         false,
         false,
         false,
@@ -184,6 +186,7 @@ fn worktree_row_marks_selected_primary_and_detached() {
         true,
         false,
         false,
+        false,
     );
     assert!(!other_top.contains('>'));
     assert!(other_top.contains('○'));
@@ -193,6 +196,7 @@ fn worktree_row_marks_selected_primary_and_detached() {
         &worktree(None, false, BranchStatus::Local),
         10,
         10,
+        false,
         false,
         false,
         false,
@@ -213,6 +217,7 @@ fn worktree_row_marks_the_active_worktree_with_a_gutter_bar_on_both_lines() {
         false,
         true,
         false,
+        false,
     );
     // The green `▎` accent bar runs down both lines of the active row (the
     // detail line carries it too, to the left of the agent state).
@@ -224,6 +229,7 @@ fn worktree_row_marks_the_active_worktree_with_a_gutter_bar_on_both_lines() {
         &worktree(Some("feature"), false, BranchStatus::Local),
         10,
         10,
+        false,
         false,
         false,
         false,
@@ -245,6 +251,7 @@ fn worktree_row_shows_a_running_agent_and_one_waiting_for_input() {
         false,
         true,
         false,
+        false,
     );
     assert!(running_detail.contains('▶'));
     assert!(running_detail.contains("running"));
@@ -258,15 +265,33 @@ fn worktree_row_shows_a_running_agent_and_one_waiting_for_input() {
         false,
         true,
         true,
+        false,
     );
     assert!(waiting_detail.contains('◆'));
     assert!(!waiting_detail.contains('▶'));
     assert!(waiting_detail.contains("waiting"));
 
+    // A finished agent shows the idle badge, taking precedence over running.
+    let (_, done_detail) = worktree_row(
+        &worktree(Some("feature"), false, BranchStatus::Local),
+        10,
+        12,
+        false,
+        false,
+        false,
+        true,
+        false,
+        true,
+    );
+    assert!(done_detail.contains('⏸'));
+    assert!(done_detail.contains("idle"));
+    assert!(!done_detail.contains('▶'));
+
     let (idle_top, idle_detail) = worktree_row(
         &worktree(Some("feature"), false, BranchStatus::Local),
         10,
         12,
+        false,
         false,
         false,
         false,
@@ -308,6 +333,7 @@ fn worktree_row_truncates_a_long_branch() {
         false,
         false,
         false,
+        false,
     );
     assert!(top.contains('…'));
 }
@@ -343,6 +369,7 @@ fn left_pane_renders_the_root_entry_then_the_empty_message() {
         &list_with(Vec::new()),
         &HashSet::new(),
         &HashSet::new(),
+        &HashSet::new(),
         80,
         6,
         false,
@@ -363,7 +390,15 @@ fn left_pane_renders_the_root_entry_then_one_entry_per_worktree() {
         worktree(Some("main"), true, BranchStatus::Pushed),
         worktree(Some("feature"), false, BranchStatus::Local),
     ]);
-    let lines = left_pane(&list, &HashSet::new(), &HashSet::new(), 30, 6, false);
+    let lines = left_pane(
+        &list,
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashSet::new(),
+        30,
+        6,
+        false,
+    );
     assert_eq!(lines.len(), 6);
     assert!(lines[0].contains(ROOT_NAME));
     assert!(lines[2].contains("main"));
@@ -374,13 +409,21 @@ fn left_pane_renders_the_root_entry_then_one_entry_per_worktree() {
 fn left_pane_marks_a_running_agent_and_one_waiting_for_input() {
     let list = list_with(vec![worktree(Some("feature"), false, BranchStatus::Local)]);
     let path: HashSet<PathBuf> = [PathBuf::from("/repo/wt")].into_iter().collect();
-    let running = left_pane(&list, &path, &HashSet::new(), 30, 6, false);
+    let running = left_pane(&list, &path, &HashSet::new(), &HashSet::new(), 30, 6, false);
     assert!(running[3].contains('▶'));
     assert!(running[3].contains("running"));
-    let waiting = left_pane(&list, &path, &path, 30, 6, false);
+    let waiting = left_pane(&list, &path, &path, &HashSet::new(), 30, 6, false);
     assert!(waiting[3].contains('◆'));
     assert!(!waiting[3].contains('▶'));
-    let idle = left_pane(&list, &HashSet::new(), &HashSet::new(), 30, 6, false);
+    let idle = left_pane(
+        &list,
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashSet::new(),
+        30,
+        6,
+        false,
+    );
     assert!(!idle[3].contains('▶'));
     assert!(!idle[3].contains('◆'));
     assert!(idle[2].contains("local"));
@@ -393,7 +436,15 @@ fn left_pane_is_trimmed_to_available_rows() {
         worktree(Some("b"), false, BranchStatus::Local),
         worktree(Some("c"), false, BranchStatus::Local),
     ]);
-    let lines = left_pane(&list, &HashSet::new(), &HashSet::new(), 30, 3, false);
+    let lines = left_pane(
+        &list,
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashSet::new(),
+        30,
+        3,
+        false,
+    );
     assert_eq!(lines.len(), 3);
     assert!(lines[0].contains(ROOT_NAME));
     assert!(lines[2].contains('a'));
@@ -406,7 +457,15 @@ fn left_pane_marks_the_active_worktree_with_a_gutter_bar() {
         worktree(Some("feature"), false, BranchStatus::Local),
     ]);
     list.activate_by_name("feature");
-    let lines = left_pane(&list, &HashSet::new(), &HashSet::new(), 30, 6, false);
+    let lines = left_pane(
+        &list,
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashSet::new(),
+        30,
+        6,
+        false,
+    );
     // The root is not active; the active "feature" row carries the green `▎`
     // accent bar down both of its lines (identity + detail).
     assert!(!lines[0].contains('▎'));
@@ -434,7 +493,15 @@ fn left_pane_fades_every_row_but_the_cursor_when_asked() {
     ]);
     // Cursor is on the root row (index 0). Dimming on fades the non-cursor
     // session rows; every row keeps its text.
-    let dimmed = left_pane(&list, &HashSet::new(), &HashSet::new(), 30, 6, true);
+    let dimmed = left_pane(
+        &list,
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashSet::new(),
+        30,
+        6,
+        true,
+    );
     assert_eq!(dimmed.len(), 6);
     assert!(console::strip_ansi_codes(&dimmed[0]).contains(ROOT_NAME));
     assert!(console::strip_ansi_codes(&dimmed[2]).contains("main"));

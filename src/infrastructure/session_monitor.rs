@@ -1,30 +1,40 @@
-//! Tracks which background terminal sessions are waiting for the user.
+//! Tracks each background terminal session's agent state for the home screen.
 //!
 //! Two signals feed this, in priority order:
 //!
 //! 1. **Agent lifecycle hooks** (authoritative). Agents launched by usagi report
 //!    their own [`AgentPhase`] through hooks (see
 //!    [`crate::domain::settings::AgentCli::launch_command`]); the watcher reads
-//!    the recorded phase and passes it in. `Waiting` means the agent finished a
-//!    turn (or paused for input); `Running` means it is working again.
+//!    the recorded phase and passes it in. `Running` means it is working a turn;
+//!    `Waiting` means it finished a turn (or paused for input); `Ended` means the
+//!    agent process exited (the task is done).
 //! 2. **The terminal bell** (fallback). When no phase is reported — an agent
 //!    without hooks (e.g. Gemini), or before its first hook fires — usagi falls
 //!    back to the audible-bell heuristic: interactive agents ring the bell when
 //!    they want input, so a count rising above a per-session baseline marks the
 //!    session as waiting.
 //!
-//! [`SessionMonitor`] is the pure bookkeeping over both: per-session bell
-//! baselines, the last phase seen, the set currently flagged as waiting, and
-//! which session (if any) is in the foreground (attached). [`observe`] is fed
-//! the latest readings each tick and returns the sessions that have *just*
-//! transitioned into waiting — so the caller can fire a one-shot notification —
-//! while [`waiting`] exposes the full set for rendering. All of this is free of
-//! threads and IO, so the transition logic is directly testable; the live PTY
-//! polling and phase-file reading that drive it live in
+//! [`SessionMonitor`] is the pure bookkeeping over both. It keeps each session's
+//! display state — **running**, **waiting**, or **done** ([`waiting`] / [`done`])
+//! — which the sidebar renders, plus the per-session bell baselines and which
+//! session is in the foreground (attached).
+//!
+//! Display vs. notification are kept separate. The displayed state always
+//! reflects the agent's true phase, **including the attached session** — so a
+//! session shows the same state whether the user is looking at it or has switched
+//! away (this is what keeps 切替 and 没入 consistent). Being attached only
+//! suppresses two things: the bell heuristic (its bells are seen live, so they
+//! never mark it waiting) and the desktop notification (the user is already
+//! looking at it). [`observe`] is fed the latest readings each tick and returns
+//! the sessions that have *just* transitioned into waiting or done — for the
+//! background ones only — so the caller can fire a one-shot notification. All of
+//! this is free of threads and IO, so the transition logic is directly testable;
+//! the live PTY polling and phase-file reading that drive it live in
 //! [`crate::presentation::tui::home::terminal_pool`].
 //!
 //! [`observe`]: SessionMonitor::observe
 //! [`waiting`]: SessionMonitor::waiting
+//! [`done`]: SessionMonitor::done
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -36,19 +46,39 @@ use crate::domain::agent_phase::AgentPhase;
 /// agent runs there, so the bell heuristic decides).
 pub type Reading = (PathBuf, u64, Option<AgentPhase>);
 
-/// Pure tracker of per-session "waiting for input" state, keyed by worktree path.
+/// A session that has *just* transitioned into a state worth notifying about,
+/// returned by [`SessionMonitor::observe`] so the watcher can fire a one-shot
+/// desktop notification for it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Notice {
+    /// The worktree whose session transitioned.
+    pub path: PathBuf,
+    /// What it transitioned into.
+    pub kind: NoticeKind,
+}
+
+/// The kind of transition a [`Notice`] reports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NoticeKind {
+    /// The agent finished a turn (or paused for input) and now awaits the user.
+    Waiting,
+    /// The agent process exited: the session's work is done.
+    Done,
+}
+
+/// Pure tracker of per-session agent state, keyed by worktree path.
 #[derive(Debug, Default)]
 pub struct SessionMonitor {
     /// The bell count last seen for each session. With no reported phase, a
     /// session is "newly waiting" when its count rises above this baseline.
     baselines: HashMap<PathBuf, u64>,
-    /// The last phase reported for each session, so a carried-over `Waiting`
-    /// (e.g. seen again right after detaching) is not mistaken for a fresh one.
-    last_phase: HashMap<PathBuf, AgentPhase>,
-    /// Sessions currently flagged as waiting for the user.
+    /// Sessions whose agent is waiting for the user (finished a turn / paused).
     waiting: HashSet<PathBuf>,
-    /// The session the user is attached to, if any. Its bells and phases are
-    /// seen live, so it never counts as waiting.
+    /// Sessions whose agent has exited (the task is done); the bare shell it ran
+    /// in may still be alive.
+    done: HashSet<PathBuf>,
+    /// The session the user is attached to, if any. Its bells are seen live (so
+    /// the bell heuristic is skipped for it) and it never fires a notification.
     attached: Option<PathBuf>,
 }
 
@@ -59,12 +89,14 @@ impl SessionMonitor {
     }
 
     /// Mark `path` as the foreground (attached) session, or clear the foreground
-    /// with `None`. The attached session is removed from the waiting set
-    /// immediately — the user is looking right at it.
+    /// with `None`.
+    ///
+    /// This only changes which session is exempt from the bell heuristic and from
+    /// notifications; it does **not** touch the displayed state, which keeps
+    /// reflecting the agent's true phase so 切替 and 没入 agree. The next
+    /// [`observe`](Self::observe) reconciles a bell-only session that was flagged
+    /// waiting before it was attached.
     pub fn set_attached(&mut self, path: Option<PathBuf>) {
-        if let Some(path) = path.as_ref() {
-            self.waiting.remove(path);
-        }
         self.attached = path;
     }
 
@@ -72,79 +104,88 @@ impl SessionMonitor {
     /// later session reusing the same path starts clean.
     pub fn forget(&mut self, path: &Path) {
         self.baselines.remove(path);
-        self.last_phase.remove(path);
         self.waiting.remove(path);
+        self.done.remove(path);
         if self.attached.as_deref() == Some(path) {
             self.attached = None;
         }
     }
 
-    /// The sessions currently waiting for the user.
+    /// The sessions whose agent is waiting for the user.
     pub fn waiting(&self) -> &HashSet<PathBuf> {
         &self.waiting
     }
 
-    /// Whether `path` is currently flagged as waiting.
+    /// Whether `path`'s agent is currently waiting for input.
     pub fn is_waiting(&self, path: &Path) -> bool {
         self.waiting.contains(path)
     }
 
+    /// The sessions whose agent has finished (exited).
+    pub fn done(&self) -> &HashSet<PathBuf> {
+        &self.done
+    }
+
+    /// Whether `path`'s agent has finished (exited).
+    pub fn is_done(&self, path: &Path) -> bool {
+        self.done.contains(path)
+    }
+
     /// Feed the latest [`Reading`]s (one per live session) and return the
-    /// sessions that have *just* become waiting since the last call — each at
-    /// most once, until it is cleared by resuming, attaching, or forgetting.
+    /// background sessions that have *just* transitioned into waiting or done
+    /// since the last call — each at most once, until the state changes again.
     ///
-    /// The foreground (attached) session never waits — the user is looking right
-    /// at it — but its baseline and last phase are kept synced so it does not
-    /// fire the instant it is detached. For every other session:
+    /// The displayed state always tracks the agent's true phase, **whether or not
+    /// the session is attached**. Being attached only suppresses the bell
+    /// heuristic (its bells are seen live) and the returned notices (the user is
+    /// already looking). For each session:
     ///
-    /// - A reported phase is authoritative. `Running` clears any waiting flag;
-    ///   `Waiting` sets it (and fires once, unless the previous phase was already
-    ///   `Waiting`, i.e. it merely carried over from being attached); `Ended`
-    ///   clears it, dropping back to the bare shell.
+    /// - A reported phase is authoritative. `Running` clears waiting and done;
+    ///   `Waiting` marks it waiting (notifying once, unless it was already
+    ///   waiting); `Ended` marks it done (notifying once, unless already done).
     /// - With no phase, the bell heuristic decides: a first sighting only records
     ///   a baseline (so bells rung before monitoring began never fire), and a
-    ///   later count above that baseline transitions the session into waiting.
-    pub fn observe(&mut self, readings: &[Reading]) -> Vec<PathBuf> {
-        let mut newly_waiting = Vec::new();
+    ///   later count above that baseline transitions the session into waiting —
+    ///   except while attached, where the bell is ignored and any prior bell-based
+    ///   waiting is cleared.
+    pub fn observe(&mut self, readings: &[Reading]) -> Vec<Notice> {
+        let mut notices = Vec::new();
         for (path, count, phase) in readings {
             let count = *count;
-            // The foreground session's signals are seen live: keep its baseline
-            // and phase current and make sure it is never marked waiting.
-            if self.attached.as_deref() == Some(path.as_path()) {
-                self.waiting.remove(path);
-                self.baselines.insert(path.clone(), count);
-                if let Some(phase) = phase {
-                    self.last_phase.insert(path.clone(), *phase);
-                }
-                continue;
-            }
+            let attached = self.attached.as_deref() == Some(path.as_path());
             match phase {
-                // A working agent is not waiting; sync the bell baseline so a
-                // stale bell rung while it worked never fires later.
+                // A working agent is neither waiting nor done; sync the bell
+                // baseline so a stale bell rung while it worked never fires later.
                 Some(AgentPhase::Running) => {
                     self.waiting.remove(path);
-                    self.last_phase.insert(path.clone(), AgentPhase::Running);
+                    self.done.remove(path);
                     self.baselines.insert(path.clone(), count);
                 }
                 // The agent finished a turn (or paused for input): it waits. Fire
-                // a one-shot only on a genuine transition — not when the same
-                // `Waiting` simply reappears after the session was detached.
+                // a one-shot only on a genuine transition, and never for the
+                // attached session (the user is looking right at it).
                 Some(AgentPhase::Waiting) => {
-                    let was_waiting = self.waiting.contains(path);
-                    let carried_over = self.last_phase.insert(path.clone(), AgentPhase::Waiting)
-                        == Some(AgentPhase::Waiting);
-                    self.waiting.insert(path.clone());
+                    self.done.remove(path);
                     self.baselines.insert(path.clone(), count);
-                    if !was_waiting && !carried_over {
-                        newly_waiting.push(path.clone());
+                    let newly = self.waiting.insert(path.clone());
+                    if newly && !attached {
+                        notices.push(Notice {
+                            path: path.clone(),
+                            kind: NoticeKind::Waiting,
+                        });
                     }
                 }
-                // The agent exited: drop any waiting flag and fall back to the
-                // bare shell's bell from here on.
+                // The agent exited: the task is done. Same one-shot rule.
                 Some(AgentPhase::Ended) => {
                     self.waiting.remove(path);
-                    self.last_phase.insert(path.clone(), AgentPhase::Ended);
                     self.baselines.insert(path.clone(), count);
+                    let newly = self.done.insert(path.clone());
+                    if newly && !attached {
+                        notices.push(Notice {
+                            path: path.clone(),
+                            kind: NoticeKind::Done,
+                        });
+                    }
                 }
                 // No reported phase: the bell heuristic decides.
                 None => match self.baselines.get(path) {
@@ -153,16 +194,24 @@ impl SessionMonitor {
                         self.baselines.insert(path.clone(), count);
                     }
                     Some(&base) => {
-                        if count > base && !self.waiting.contains(path) {
+                        if attached {
+                            // Seen live: the bell is not trusted, and any earlier
+                            // bell-based waiting is cleared.
+                            self.waiting.remove(path);
+                        } else if count > base && !self.waiting.contains(path) {
+                            self.done.remove(path);
                             self.waiting.insert(path.clone());
-                            newly_waiting.push(path.clone());
+                            notices.push(Notice {
+                                path: path.clone(),
+                                kind: NoticeKind::Waiting,
+                            });
                         }
                         self.baselines.insert(path.clone(), count);
                     }
                 },
             }
         }
-        newly_waiting
+        notices
     }
 }
 
@@ -184,11 +233,27 @@ mod tests {
         (p(s), count, Some(phase))
     }
 
+    fn waiting(s: &str) -> Notice {
+        Notice {
+            path: p(s),
+            kind: NoticeKind::Waiting,
+        }
+    }
+
+    fn done(s: &str) -> Notice {
+        Notice {
+            path: p(s),
+            kind: NoticeKind::Done,
+        }
+    }
+
     #[test]
     fn new_monitor_tracks_nothing() {
         let monitor = SessionMonitor::new();
         assert!(monitor.waiting().is_empty());
+        assert!(monitor.done().is_empty());
         assert!(!monitor.is_waiting(&p("/a")));
+        assert!(!monitor.is_done(&p("/a")));
     }
 
     #[test]
@@ -206,7 +271,7 @@ mod tests {
         let mut monitor = SessionMonitor::new();
         monitor.observe(&[bell("/a", 0)]); // baseline
         let newly = monitor.observe(&[bell("/a", 1)]);
-        assert_eq!(newly, vec![p("/a")]);
+        assert_eq!(newly, vec![waiting("/a")]);
         assert!(monitor.is_waiting(&p("/a")));
 
         // A further bell does not re-fire while already waiting.
@@ -225,7 +290,7 @@ mod tests {
     }
 
     #[test]
-    fn the_attached_session_never_waits_and_keeps_its_baseline_synced() {
+    fn the_attached_sessions_bell_is_ignored_and_its_baseline_synced() {
         let mut monitor = SessionMonitor::new();
         monitor.observe(&[bell("/a", 0)]);
         monitor.set_attached(Some(p("/a")));
@@ -238,16 +303,19 @@ mod tests {
         // After detaching, only bells *beyond* the synced baseline fire.
         monitor.set_attached(None);
         assert!(monitor.observe(&[bell("/a", 4)]).is_empty());
-        assert_eq!(monitor.observe(&[bell("/a", 5)]), vec![p("/a")]);
+        assert_eq!(monitor.observe(&[bell("/a", 5)]), vec![waiting("/a")]);
     }
 
     #[test]
-    fn attaching_clears_an_existing_waiting_flag() {
+    fn attaching_reconciles_a_bell_based_waiting_on_the_next_tick() {
         let mut monitor = SessionMonitor::new();
         monitor.observe(&[bell("/a", 0)]);
         monitor.observe(&[bell("/a", 1)]);
         assert!(monitor.is_waiting(&p("/a")));
+        // Attaching alone does not rewrite state; the next reading (its bells now
+        // seen live) clears the bell-based waiting flag.
         monitor.set_attached(Some(p("/a")));
+        monitor.observe(&[bell("/a", 2)]);
         assert!(!monitor.is_waiting(&p("/a")));
     }
 
@@ -256,7 +324,7 @@ mod tests {
         let mut monitor = SessionMonitor::new();
         monitor.observe(&[bell("/a", 0), bell("/b", 0)]);
         let newly = monitor.observe(&[bell("/a", 1), bell("/b", 0)]);
-        assert_eq!(newly, vec![p("/a")]);
+        assert_eq!(newly, vec![waiting("/a")]);
         assert!(monitor.is_waiting(&p("/a")));
         assert!(!monitor.is_waiting(&p("/b")));
     }
@@ -276,10 +344,13 @@ mod tests {
     }
 
     #[test]
-    fn forget_leaves_other_sessions_attachment_intact() {
+    fn forget_drops_a_done_session_and_leaves_others_attachment_intact() {
         let mut monitor = SessionMonitor::new();
+        monitor.observe(&[phased("/b", 0, AgentPhase::Ended)]);
+        assert!(monitor.is_done(&p("/b")));
         monitor.set_attached(Some(p("/a")));
         monitor.forget(&p("/b"));
+        assert!(!monitor.is_done(&p("/b")));
         assert_eq!(monitor.attached.as_deref(), Some(p("/a").as_path()));
     }
 
@@ -292,7 +363,7 @@ mod tests {
         // genuine transition into waiting and fires exactly once.
         monitor.observe(&[phased("/a", 0, AgentPhase::Running)]);
         let newly = monitor.observe(&[phased("/a", 0, AgentPhase::Waiting)]);
-        assert_eq!(newly, vec![p("/a")]);
+        assert_eq!(newly, vec![waiting("/a")]);
         assert!(monitor.is_waiting(&p("/a")));
         // Still waiting next tick, but no re-fire.
         let again = monitor.observe(&[phased("/a", 0, AgentPhase::Waiting)]);
@@ -326,30 +397,59 @@ mod tests {
     }
 
     #[test]
-    fn an_ended_phase_clears_waiting_and_falls_back_to_the_bell() {
+    fn an_ended_phase_marks_done_and_fires_once() {
         let mut monitor = SessionMonitor::new();
-        monitor.observe(&[phased("/a", 7, AgentPhase::Waiting)]);
+        monitor.observe(&[phased("/a", 0, AgentPhase::Waiting)]);
         assert!(monitor.is_waiting(&p("/a")));
-        // The agent exits: it no longer waits, and the bare shell's baseline is
-        // synced to the current count.
-        monitor.observe(&[phased("/a", 7, AgentPhase::Ended)]);
+        // The agent exits: it is no longer waiting but done, firing exactly once.
+        let newly = monitor.observe(&[phased("/a", 0, AgentPhase::Ended)]);
+        assert_eq!(newly, vec![done("/a")]);
         assert!(!monitor.is_waiting(&p("/a")));
-        // From here the bell heuristic governs the bare shell again.
-        assert_eq!(monitor.observe(&[bell("/a", 8)]), vec![p("/a")]);
+        assert!(monitor.is_done(&p("/a")));
+        // Still done next tick, but no re-fire.
+        let again = monitor.observe(&[phased("/a", 0, AgentPhase::Ended)]);
+        assert!(again.is_empty());
+        assert!(monitor.is_done(&p("/a")));
+    }
+
+    #[test]
+    fn an_ended_phase_then_a_bell_falls_back_to_the_bell() {
+        let mut monitor = SessionMonitor::new();
+        monitor.observe(&[phased("/a", 7, AgentPhase::Ended)]);
+        assert!(monitor.is_done(&p("/a")));
+        // If the phase later drops away (the bare shell lives on), the bell
+        // heuristic governs again: a count beyond the synced baseline waits.
+        assert_eq!(monitor.observe(&[bell("/a", 8)]), vec![waiting("/a")]);
         assert!(monitor.is_waiting(&p("/a")));
+        assert!(!monitor.is_done(&p("/a")));
+    }
+
+    #[test]
+    fn the_attached_session_still_shows_its_phase_but_never_notifies() {
+        let mut monitor = SessionMonitor::new();
+        monitor.set_attached(Some(p("/a")));
+        // Attached: the waiting phase is shown (so 切替 and 没入 agree) but no
+        // notice fires.
+        let newly = monitor.observe(&[phased("/a", 0, AgentPhase::Waiting)]);
+        assert!(newly.is_empty());
+        assert!(monitor.is_waiting(&p("/a")));
+        // Likewise on done while attached: shown, not notified.
+        let after = monitor.observe(&[phased("/a", 0, AgentPhase::Ended)]);
+        assert!(after.is_empty());
+        assert!(monitor.is_done(&p("/a")));
     }
 
     #[test]
     fn a_waiting_phase_does_not_re_fire_just_because_a_session_was_detached() {
         let mut monitor = SessionMonitor::new();
-        // While attached, the agent stops: the user sees it live, so no waiting
-        // flag — but its phase is synced.
+        // While attached, the agent stops: shown waiting, but no notice.
         monitor.set_attached(Some(p("/a")));
-        let newly = monitor.observe(&[phased("/a", 0, AgentPhase::Waiting)]);
-        assert!(newly.is_empty());
-        assert!(!monitor.is_waiting(&p("/a")));
-        // After detaching, the same still-waiting state marks the session for
-        // rendering but does not fire a fresh notification.
+        assert!(monitor
+            .observe(&[phased("/a", 0, AgentPhase::Waiting)])
+            .is_empty());
+        assert!(monitor.is_waiting(&p("/a")));
+        // After detaching, the same still-waiting state does not fire a fresh
+        // notice — it was already waiting.
         monitor.set_attached(None);
         let after = monitor.observe(&[phased("/a", 0, AgentPhase::Waiting)]);
         assert!(after.is_empty());
@@ -362,6 +462,14 @@ mod tests {
         // A detached session whose very first reading is already waiting is a
         // real transition worth surfacing.
         let newly = monitor.observe(&[phased("/a", 0, AgentPhase::Waiting)]);
-        assert_eq!(newly, vec![p("/a")]);
+        assert_eq!(newly, vec![waiting("/a")]);
+    }
+
+    #[test]
+    fn a_first_seen_ended_phase_fires() {
+        let mut monitor = SessionMonitor::new();
+        let newly = monitor.observe(&[phased("/a", 0, AgentPhase::Ended)]);
+        assert_eq!(newly, vec![done("/a")]);
+        assert!(monitor.is_done(&p("/a")));
     }
 }

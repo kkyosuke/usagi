@@ -67,7 +67,7 @@
 |---|---|---|
 | Theme | UI のカラーテーマ | `Light` → `Dark` → `System`（OS 追従）の順に循環 |
 | Default Workspace | 既定で開くワークスペース | `(none)` ＋ 登録済みワークスペース名を順に循環。未登録時は変更不可（ヒントを表示） |
-| Notifications | デスクトップ通知（`agent` の入力待ちなど）の ON/OFF | `On` ⇄ `Off` をトグル |
+| Notifications | デスクトップ通知（`agent` の入力待ち・完了）の ON/OFF | `On` ⇄ `Off` をトグル |
 | Agent CLI | usagi が起動する AI エージェント CLI | `Claude` → `Gemini` の順に循環 |
 | Session Action UI | 在席（Focus）の右ペインのアクション UI スタイル | `Menu`（選べるリスト）⇄ `Prompt`（コマンドライン）をトグル（[05-home.md](05-home.md#在席のアクション-uimenu--prompt)） |
 | Local LLM | ローカル LLM 委譲の有効化 | 未導入時は値が `Install`（アクション）で、`Space` / `Enter` でインストールモーダルを開く。導入後は `On` ⇄ `Off` をトグル |
