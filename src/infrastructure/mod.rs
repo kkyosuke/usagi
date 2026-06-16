@@ -1,4 +1,5 @@
 // Persistence, Git operations, and other external integrations live here.
+pub mod error_log;
 pub mod git;
 pub mod history_store;
 pub mod issue_store;
