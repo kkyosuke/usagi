@@ -304,14 +304,24 @@ fn is_press(key: KeyEvent) -> bool {
     matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat)
 }
 
-/// `Ctrl-O` opens the session picker (see [`run_session_picker`]).
+/// Whether this key is the reserved `Ctrl-O` leader (zoom out one engagement
+/// level). Terminals report `Ctrl-O` inconsistently, and every form must be
+/// caught — otherwise [`encode_key`] forwards the raw `0x0F` (SI) byte to the
+/// agent, whose input renders the unprintable control char as a `?`-like
+/// placeholder (like a masked password) instead of zooming out:
 ///
-/// Match the letter case-insensitively: with `Shift`/`Caps Lock` (or terminals
-/// that report `Ctrl`+letter as uppercase) the key arrives as `'O'`. Missing
-/// that would let [`encode_key`] forward the raw `0x0F` byte to the agent, which
-/// renders the unprintable control char as a `?`-like placeholder instead of
-/// zooming out.
+/// - `Ctrl`+`o` — the common case (lowercase letter + `CONTROL`).
+/// - `Ctrl`+`O` — with `Shift`/`Caps Lock`, or terminals that uppercase the
+///   letter of a `Ctrl`+letter chord.
+/// - the bare `0x0F` control char — some terminals/keyboard protocols deliver
+///   `Ctrl-O` as the raw SI codepoint with no `CONTROL` modifier (this is how
+///   `console` reports it on the other home-screen surfaces).
 fn is_leader(key: &KeyEvent) -> bool {
+    // The raw SI control char only ever comes from `Ctrl-O`, so accept it
+    // regardless of the reported modifiers.
+    if key.code == KeyCode::Char('\u{0f}') {
+        return true;
+    }
     key.modifiers.contains(KeyModifiers::CONTROL)
         && matches!(key.code, KeyCode::Char('o') | KeyCode::Char('O'))
 }
@@ -385,8 +395,8 @@ mod tests {
     }
 
     #[test]
-    fn is_leader_matches_ctrl_o_regardless_of_letter_case() {
-        // The common case: `Ctrl-O` arrives as lowercase `'o'`.
+    fn is_leader_matches_every_form_of_ctrl_o() {
+        // The common case: `Ctrl-O` arrives as lowercase `'o'` + `CONTROL`.
         assert!(is_leader(&key(KeyCode::Char('o'), KeyModifiers::CONTROL)));
         // With `Shift`/`Caps Lock` (or terminals that uppercase `Ctrl`+letter)
         // it arrives as `'O'` — still the leader, must not reach the agent.
@@ -394,6 +404,13 @@ mod tests {
         assert!(is_leader(&key(
             KeyCode::Char('O'),
             KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        )));
+        // Some terminals deliver the bare `0x0F` (SI) codepoint, with no
+        // `CONTROL` modifier reported — still the leader.
+        assert!(is_leader(&key(KeyCode::Char('\u{0f}'), KeyModifiers::NONE)));
+        assert!(is_leader(&key(
+            KeyCode::Char('\u{0f}'),
+            KeyModifiers::CONTROL
         )));
     }
 
