@@ -14,6 +14,7 @@
 //! └── README.md   → copied
 //! ```
 
+use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -54,6 +55,11 @@ pub fn create(workspace_root: &Path, name: &str) -> Result<CreatedSession> {
     if name.contains('/') || name.contains('\\') || name == "." || name == ".." {
         bail!("session name must not contain path separators");
     }
+
+    // Sync the on-disk tree with the recorded sessions first: a leftover
+    // directory `state.json` does not know about is force-removed, so a stale
+    // directory of the same name never blocks a fresh session.
+    reconcile(workspace_root)?;
 
     let dest_root = workspace_root.join(".usagi").join("sessions").join(name);
     if dest_root.exists() {
@@ -126,6 +132,11 @@ pub struct RemovalOutcome {
 /// untouched and the dirty worktrees are returned for the caller to warn about.
 /// With `force`, those changes are discarded.
 pub fn remove(workspace_root: &Path, name: &str, force: bool) -> Result<RemovalOutcome> {
+    // Sync the on-disk tree with the recorded sessions: any session directory
+    // `state.json` does not know about is force-removed regardless of
+    // uncommitted changes (the recorded `name` itself keeps its dirty guard).
+    reconcile(workspace_root)?;
+
     let store = WorkspaceStore::new(workspace_root);
     let mut state = store
         .load()?
@@ -173,6 +184,101 @@ pub fn remove(workspace_root: &Path, name: &str, force: bool) -> Result<RemovalO
         removed: true,
         dirty: Vec::new(),
     })
+}
+
+/// Reconcile the on-disk session tree under `.usagi/sessions/` with the sessions
+/// recorded in `state.json`. Every *directory* there that has no matching record
+/// is a stray — left by an interrupted create, a hand-edited `state.json`, or a
+/// crash — and is force-removed: its per-repository git worktrees are
+/// unregistered, the session branch is dropped, and any copied files are
+/// deleted, regardless of uncommitted changes. Loose files are left untouched.
+///
+/// Called at the start of [`create`] and [`remove`] so the tree never drifts
+/// from the recorded state. Returns the stray directories that were removed.
+pub fn reconcile(workspace_root: &Path) -> Result<Vec<PathBuf>> {
+    let sessions_base = workspace_root.join(".usagi").join("sessions");
+    if !sessions_base.is_dir() {
+        return Ok(Vec::new());
+    }
+
+    let store = WorkspaceStore::new(workspace_root);
+    let recorded: HashSet<String> = store
+        .load()?
+        .map(|state| state.sessions.into_iter().map(|s| s.name).collect())
+        .unwrap_or_default();
+
+    let repos = source_repos(workspace_root);
+    let mut removed = Vec::new();
+
+    for entry in fs::read_dir(&sessions_base).into_iter().flatten().flatten() {
+        let stray = entry.path();
+        if !stray.is_dir() {
+            continue;
+        }
+        let file_name = entry.file_name();
+        let name = file_name.to_string_lossy();
+        if recorded.contains(name.as_ref()) {
+            continue;
+        }
+        prune_stray(&stray, &name, &repos)?;
+        removed.push(stray);
+    }
+
+    Ok(removed)
+}
+
+/// Force-remove one stray session directory `stray` whose session branch is
+/// `branch`: unregister any worktree on that branch from each source repository,
+/// drop the now-orphaned branch, then delete whatever files remain. Git steps
+/// are best-effort (a stray may be partly torn down already); only deleting the
+/// directory itself is allowed to fail the call.
+fn prune_stray(stray: &Path, branch: &str, repos: &[PathBuf]) -> Result<()> {
+    for repo in repos {
+        for wt in git::list_worktrees(repo)? {
+            if wt.branch.as_deref() == Some(branch) {
+                // Untracked and possibly dirty: force the worktree out.
+                let _ = git::remove_worktree(repo, &wt.path, true);
+            }
+        }
+        let _ = git::delete_branch(repo, branch);
+    }
+    if stray.exists() {
+        fs::remove_dir_all(stray).context(format!("failed to remove {}", stray.display()))?;
+    }
+    Ok(())
+}
+
+/// The source git repositories a session under `workspace_root` spans: the root
+/// itself when it is a repository, otherwise every repository reached by the
+/// same recursive walk [`create`] uses.
+fn source_repos(workspace_root: &Path) -> Vec<PathBuf> {
+    let mut repos = Vec::new();
+    if is_repo_root(workspace_root) {
+        repos.push(workspace_root.to_path_buf());
+    } else {
+        collect_repos(workspace_root, &mut repos);
+    }
+    repos
+}
+
+/// Append every repository root reachable under `dir` to `repos`, recursing into
+/// plain directories and skipping [`SKIP`] entries. Best-effort: unreadable
+/// directories and entries are silently skipped.
+fn collect_repos(dir: &Path, repos: &mut Vec<PathBuf>) {
+    for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
+        if SKIP.iter().any(|s| OsStr::new(s) == entry.file_name()) {
+            continue;
+        }
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        if is_repo_root(&path) {
+            repos.push(path);
+        } else {
+            collect_repos(&path, repos);
+        }
+    }
 }
 
 /// Recursively mirror `src` into the already-created `dest`: a git repository
@@ -548,6 +654,149 @@ mod tests {
         let outcome = remove(root.path(), "dirty", true).unwrap();
         assert!(outcome.removed);
         assert!(!created.root.exists());
+        assert!(sessions_of(root.path()).is_empty());
+    }
+
+    /// Forget session `name` in `state.json` while leaving its on-disk directory
+    /// in place — the exact "stray" state reconcile is meant to clean up.
+    fn drop_record(root: &Path, name: &str) {
+        let store = WorkspaceStore::new(root);
+        let mut state = store.load().unwrap().unwrap();
+        state.sessions.retain(|s| s.name != name);
+        store.save(&state).unwrap();
+    }
+
+    fn branch_exists(repo: &Path, branch: &str) -> bool {
+        git_cmd(repo)
+            .args(["rev-parse", "--verify", "--quiet", branch])
+            .status()
+            .unwrap()
+            .success()
+    }
+
+    #[test]
+    fn reconcile_is_a_noop_without_a_sessions_directory() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        // No `.usagi/sessions/` exists yet, so there is nothing to reconcile.
+        assert!(reconcile(root.path()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn reconcile_force_removes_an_untracked_session_and_keeps_tracked_ones() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        let kept = create(root.path(), "keep").unwrap();
+        let stray = create(root.path(), "stray").unwrap();
+        // Forget "stray" in state.json while its worktree stays on disk.
+        drop_record(root.path(), "stray");
+
+        let removed = reconcile(root.path()).unwrap();
+
+        // The stray worktree directory and its branch are gone...
+        assert_eq!(removed, vec![stray.root.clone()]);
+        assert!(!stray.root.exists());
+        assert!(!branch_exists(root.path(), "stray"));
+        // ...while the tracked session and its branch survive untouched.
+        assert!(kept.root.exists());
+        assert_eq!(head_branch(&kept.root), "keep");
+        assert!(branch_exists(root.path(), "keep"));
+        assert_eq!(sessions_of(root.path()), vec!["keep".to_string()]);
+    }
+
+    #[test]
+    fn reconcile_force_removes_a_dirty_untracked_session() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        let stray = create(root.path(), "stray").unwrap();
+        // Uncommitted work must not stop the sync.
+        fs::write(stray.root.join("scratch.txt"), "wip").unwrap();
+        drop_record(root.path(), "stray");
+
+        let removed = reconcile(root.path()).unwrap();
+
+        assert_eq!(removed, vec![stray.root.clone()]);
+        assert!(!stray.root.exists());
+        assert!(!branch_exists(root.path(), "stray"));
+    }
+
+    #[test]
+    fn reconcile_ignores_loose_files_under_the_sessions_dir() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        create(root.path(), "keep").unwrap();
+        // A loose *file* (not a directory) is not a session: leave it be.
+        let loose = root.path().join(".usagi/sessions/NOTES.txt");
+        fs::write(&loose, "scratch").unwrap();
+
+        let removed = reconcile(root.path()).unwrap();
+
+        assert!(removed.is_empty());
+        assert!(loose.is_file());
+    }
+
+    #[test]
+    fn reconcile_removes_a_stray_when_no_state_exists() {
+        let root = tempfile::tempdir().unwrap();
+        // A non-git root with a leftover session directory but no state.json.
+        let ghost = root.path().join(".usagi/sessions/ghost");
+        fs::create_dir_all(&ghost).unwrap();
+        fs::write(ghost.join("leftover.txt"), "x").unwrap();
+
+        let removed = reconcile(root.path()).unwrap();
+
+        assert_eq!(removed, vec![ghost.clone()]);
+        assert!(!ghost.exists());
+    }
+
+    #[test]
+    fn reconcile_removes_a_stray_across_a_multi_repo_workspace() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(&root.path().join("app-a"));
+        init_repo(&root.path().join("be/be1"));
+        fs::write(root.path().join("README.md"), "hi").unwrap();
+        let stray = create(root.path(), "wip").unwrap();
+        drop_record(root.path(), "wip");
+
+        let removed = reconcile(root.path()).unwrap();
+
+        assert_eq!(removed, vec![stray.root.clone()]);
+        assert!(!stray.root.exists());
+        // The session branch is gone from every source repository.
+        assert!(!branch_exists(&root.path().join("app-a"), "wip"));
+        assert!(!branch_exists(&root.path().join("be/be1"), "wip"));
+    }
+
+    #[test]
+    fn create_clears_a_stale_directory_of_the_same_name() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        create(root.path(), "dup").unwrap();
+        // Forget the record but leave the worktree behind, as a crash might.
+        drop_record(root.path(), "dup");
+
+        // Re-creating "dup" succeeds: reconcile clears the stale tree first.
+        let recreated = create(root.path(), "dup").unwrap();
+
+        assert!(recreated.root.exists());
+        assert_eq!(head_branch(&recreated.root), "dup");
+        assert_eq!(sessions_of(root.path()), vec!["dup".to_string()]);
+    }
+
+    #[test]
+    fn remove_also_prunes_other_strays() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        let a = create(root.path(), "a").unwrap();
+        let b = create(root.path(), "b").unwrap();
+        // "b" becomes a stray; removing "a" should sync it away as well.
+        drop_record(root.path(), "b");
+
+        let outcome = remove(root.path(), "a", false).unwrap();
+
+        assert!(outcome.removed);
+        assert!(!a.root.exists());
+        assert!(!b.root.exists());
         assert!(sessions_of(root.path()).is_empty());
     }
 }

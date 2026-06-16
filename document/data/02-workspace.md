@@ -161,6 +161,8 @@ worktree を束ねます。各 worktree は git ステータス付き（下記 `
 
 CLI からは `usagi status` で `sync` が走り、最新状態を保存しつつセッションごとに一覧表示します。
 
+セッションの作成・削除時（`usecase/session.rs` の `reconcile`）には、`.usagi/sessions/` 配下のディレクトリと `state.json` の記録を照合し、**記録のない孤児ディレクトリを未コミット変更の有無にかかわらず強制削除**してディスクと state の同期を保ちます。記録済みセッション本体の削除には引き続き `--force` のガードが効きます。詳細は [4. オーケストレーション](../04-orchestration.md) を参照。
+
 ```
 $ usagi status
 updated 2026-06-13 05:01 UTC
