@@ -843,7 +843,7 @@ fn switch_create_rows_show_the_input_and_an_error() {
 fn render_frame_shows_the_inline_create_row_in_switch() {
     let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
     state.enter_switch(super::super::state::ReturnMode::Overview);
-    state.switch_begin_create();
+    state.switch_begin_create(Vec::new());
     for c in "wip".chars() {
         state.create_push_char(c);
     }

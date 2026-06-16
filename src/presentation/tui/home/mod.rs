@@ -121,6 +121,13 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
         },
     };
 
+    // The branch names already taken across the workspace, read fresh each time
+    // the inline create input opens so the typed name can be validated live
+    // against duplicates and branch-namespace clashes.
+    let branches_root = workspace.path.clone();
+    let mut existing_branches =
+        move || crate::usecase::session::existing_branch_names(&branches_root);
+
     // Removing a session deletes its worktrees/branches and forgets it. A
     // session with uncommitted changes is left untouched unless `--force`.
     let remove_root = workspace.path.clone();
@@ -292,6 +299,7 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
         &mut persist,
         &mut create_session,
         &mut remove_session,
+        &mut existing_branches,
         &mut open_terminal,
         &mut open_config,
         &mut preview,

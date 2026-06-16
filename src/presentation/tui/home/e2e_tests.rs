@@ -214,6 +214,7 @@ fn event_loop_attaches_a_live_session_end_to_end() {
         &mut persist,
         &mut create,
         &mut remove,
+        &mut (Vec::new as fn() -> Vec<String>),
         &mut open_terminal,
         &mut config,
         &mut preview,

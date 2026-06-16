@@ -71,6 +71,21 @@ pub fn create(workspace_root: &Path, name: &str) -> Result<CreatedSession> {
         bail!("session \"{name}\" already exists");
     }
 
+    // A session creates a branch named after it in every source repository.
+    // If a repo already has branches nested under `<name>/` (e.g. `test/foo`),
+    // git cannot create the `<name>` branch and fails partway with a cryptic
+    // `cannot lock ref` error. Refuse up front with a clear, actionable message
+    // before touching any repository.
+    for repo in tree::source_repos(workspace_root) {
+        if let Some(conflict) = git::branch_namespace_conflict(&repo, name) {
+            bail!(
+                "session \"{name}\" conflicts with the existing branch \"{conflict}\": \
+                 a branch named \"{name}\" cannot be created alongside branches under \
+                 \"{name}/\". Choose a different session name."
+            );
+        }
+    }
+
     let mut worktrees = Vec::new();
     if tree::is_repo_root(workspace_root) {
         // The whole workspace is one repository: a single worktree at the root.
@@ -94,6 +109,25 @@ pub fn create(workspace_root: &Path, name: &str) -> Result<CreatedSession> {
         root: dest_root,
         worktrees,
     })
+}
+
+/// The local branch names that already exist across every source repository a
+/// session under `workspace_root` would span, de-duplicated and sorted.
+///
+/// A new session cuts a `<name>` branch in each of these repos, so this is the
+/// set its name must avoid — both as an exact duplicate and as a namespace
+/// clash (a branch under `<name>/`). The TUI reads it once when the inline
+/// create input opens to validate the typed name live (see
+/// [`git::branch_namespace_conflict`]). Best-effort: a non-git or unreadable
+/// repo simply contributes no names.
+pub fn existing_branch_names(workspace_root: &Path) -> Vec<String> {
+    use std::collections::BTreeSet;
+    tree::source_repos(workspace_root)
+        .iter()
+        .flat_map(|repo| git::local_branches(repo))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
 }
 
 /// Append the session to `<workspace>/.usagi/state.json`, creating the state
@@ -414,6 +448,58 @@ mod tests {
 
         let err = create(root.path(), "taken").unwrap_err();
         assert!(err.to_string().contains("git worktree add failed"));
+    }
+
+    #[test]
+    fn existing_branch_names_unions_local_branches_across_repos() {
+        // A multi-repo workspace: each repo's local branches are unioned, sorted
+        // and de-duplicated; remote-tracking refs are excluded.
+        let root = tempfile::tempdir().unwrap();
+        init_repo(&root.path().join("app-a"));
+        init_repo(&root.path().join("be/be1"));
+        let run = |dir: &Path, args: &[&str]| {
+            assert!(git_cmd(dir).args(args).status().unwrap().success());
+        };
+        run(&root.path().join("app-a"), &["branch", "test/x"]);
+        run(&root.path().join("be/be1"), &["branch", "feature"]);
+
+        let names = existing_branch_names(root.path());
+        // Both repos start on `main` (deduped) plus each one's extra branch.
+        assert_eq!(
+            names,
+            vec![
+                "feature".to_string(),
+                "main".to_string(),
+                "test/x".to_string()
+            ]
+        );
+
+        // A non-git, empty root contributes nothing.
+        let empty = tempfile::tempdir().unwrap();
+        assert!(existing_branch_names(empty.path()).is_empty());
+    }
+
+    #[test]
+    fn rejects_a_name_that_clashes_with_a_branch_namespace() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        // Pre-create branches under `test/`, mirroring a repo that already has
+        // `test/home-ui-e2e` etc. A plain `test` branch then cannot be created.
+        for branch in ["test/home-ui-e2e", "test/tui-e2e-pty"] {
+            assert!(git_cmd(root.path())
+                .args(["branch", branch])
+                .status()
+                .unwrap()
+                .success());
+        }
+
+        let err = create(root.path(), "test").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("conflicts with the existing branch"), "{msg}");
+        assert!(msg.contains("test/home-ui-e2e"), "{msg}");
+        // Nothing was created on the failed attempt.
+        assert!(!root.path().join(".usagi/sessions/test").exists());
+        assert!(sessions_of(root.path()).is_empty());
     }
 
     #[test]

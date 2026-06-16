@@ -285,6 +285,36 @@ pub fn resolve_base_ref(repo: &Path, source: BranchSource, branch: Option<&str>)
     }
 }
 
+/// The first local branch nested under `name/` in `repo`, if any.
+///
+/// Git stores branches as files under `.git/refs/heads/`, so a branch named
+/// `<name>` cannot coexist with branches under `<name>/` — creating
+/// `refs/heads/<name>` (a file) clashes with the existing `refs/heads/<name>/…`
+/// (a directory). In that state `git worktree add -b <name>` fails with a
+/// cryptic `cannot lock ref` error, so callers check this first to refuse the
+/// name with a clear message. An exact existing branch `<name>` is *not* a
+/// conflict here (git reports that on its own); only nested branches are.
+/// Returns `None` when no nested branch exists (or `repo` has none).
+pub fn branch_namespace_conflict(repo: &Path, name: &str) -> Option<String> {
+    // `for-each-ref refs/heads/<name>` matches the exact ref and everything
+    // nested under it; the nested entries (short name `!= name`) are the clash.
+    ref_names(repo, &format!("refs/heads/{name}"), 2)
+        .into_iter()
+        .find(|branch| branch != name)
+}
+
+/// The short names of every **local** branch in `repo` (e.g. `main`,
+/// `test/foo`), in ref order. Empty when `repo` is not a git repository or has
+/// no branches yet.
+///
+/// Unlike [`list_branches`] this excludes remote-tracking branches: only local
+/// refs constrain what `git worktree add -b <name>` can create, so this is the
+/// set a new session name is validated against (see
+/// [`branch_namespace_conflict`]).
+pub fn local_branches(repo: &Path) -> Vec<String> {
+    ref_names(repo, "refs/heads", 2)
+}
+
 /// List the candidate base branches in `repo`: the short names of every local
 /// and remote-tracking branch, with the remote prefix stripped, de-duplicated
 /// and sorted. The `<remote>/HEAD` pseudo-refs are skipped. Returns an empty
@@ -856,6 +886,44 @@ mod tests {
     fn list_branches_is_empty_for_a_non_repo() {
         let plain = tempfile::tempdir().unwrap();
         assert!(list_branches(plain.path()).is_empty());
+    }
+
+    #[test]
+    fn local_branches_lists_only_local_refs() {
+        let (_tmp, work) = repo_with_remote();
+        run(&work, &["branch", "feature/x"]);
+        // origin/main exists as a remote-tracking ref but must not appear: only
+        // local branches constrain `worktree add -b`.
+        let mut names = local_branches(&work);
+        names.sort();
+        assert_eq!(names, vec!["feature/x".to_string(), "main".to_string()]);
+
+        // A non-repo has none.
+        let plain = tempfile::tempdir().unwrap();
+        assert!(local_branches(plain.path()).is_empty());
+    }
+
+    #[test]
+    fn branch_namespace_conflict_detects_nested_branches_only() {
+        let dir = tempfile::tempdir().unwrap();
+        init_repo(dir.path());
+        // Branches nested under `test/` make a plain `test` branch impossible.
+        run(dir.path(), &["branch", "test/tui-e2e"]);
+        run(dir.path(), &["branch", "test/home-ui"]);
+
+        // The clash is reported (first nested branch in ref order).
+        assert_eq!(
+            branch_namespace_conflict(dir.path(), "test").as_deref(),
+            Some("test/home-ui")
+        );
+
+        // An exact branch is not a namespace clash (git reports that itself), and
+        // an unrelated name is clear.
+        assert_eq!(branch_namespace_conflict(dir.path(), "main"), None);
+        assert_eq!(branch_namespace_conflict(dir.path(), "feature"), None);
+        // A non-repo simply has no conflicts.
+        let plain = tempfile::tempdir().unwrap();
+        assert_eq!(branch_namespace_conflict(plain.path(), "test"), None);
     }
 
     #[test]
