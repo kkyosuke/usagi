@@ -254,20 +254,12 @@ impl IssueStats {
 
     /// Completion as a whole-number percentage (0 when there are no issues).
     pub fn completion_percent(&self) -> u32 {
-        if self.total == 0 {
-            0
-        } else {
-            ((self.done * 100) / self.total) as u32
-        }
+        (self.done * 100).checked_div(self.total).unwrap_or(0) as u32
     }
 
     /// A fixed-width `[####----]` bar reflecting completion.
     pub fn progress_bar(&self, width: usize) -> String {
-        let filled = if self.total == 0 {
-            0
-        } else {
-            (self.done * width) / self.total
-        };
+        let filled = (self.done * width).checked_div(self.total).unwrap_or(0);
         let mut bar = String::with_capacity(width + 2);
         bar.push('[');
         for i in 0..width {
