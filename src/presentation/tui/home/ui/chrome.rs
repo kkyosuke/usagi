@@ -282,7 +282,9 @@ pub(super) fn remove_modal_frame(
 /// `Ctrl-C` while a session is still live: it names how many sessions are still
 /// running and asks whether to close anyway.
 pub(super) fn quit_confirm_frame(raw_height: usize, raw_width: usize, live: usize) -> Vec<String> {
-    const INNER: usize = 40;
+    // Wide enough for the longest body line ("Close anyway? Running agents
+    // will be stopped." = 45 columns) so it does not overflow the box.
+    const INNER: usize = 46;
     let body = vec![
         style(format!("{live} session(s) still running."))
             .dim()

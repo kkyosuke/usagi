@@ -936,6 +936,14 @@ fn render_frame_overlays_the_quit_confirmation_modal() {
     assert!(joined.contains("2 session(s) still running"));
     assert!(joined.contains("Close anyway?"));
     assert!(joined.contains("y / Enter: close"));
+    // Every bordered line of the modal must share the same width: a line
+    // that overflows `INNER` would lose its right border and break this.
+    let widths: Vec<usize> = joined
+        .lines()
+        .filter(|line| line.trim_start().starts_with('│'))
+        .map(|line| console::measure_text_width(line.trim()))
+        .collect();
+    assert!(widths.iter().all(|&w| w == widths[0]));
 }
 
 #[test]
