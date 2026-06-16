@@ -132,20 +132,24 @@ worktree を束ねます。各 worktree は git ステータス付き（下記 `
 
 ## `status`: ブランチのライフサイクル状態
 
-`local` → `pushed` → `merged` の 3 状態で、ブランチがリモート・既定ブランチに対してどの段階にあるかを表します。
+`local` → `pushed` → `up_to_date`（synced）の 3 状態で、ブランチがリモート・既定ブランチに対してどの段階にあるかを表します。
 
-| 値 | 意味 |
-|---|---|
-| `local` | ローカルにのみ存在。上流追跡ブランチが無い（未 push） |
-| `pushed` | 上流追跡ブランチがある（push 済み） |
-| `merged` | 既定ブランチにマージ済み（既定ブランチの ancestor） |
+| 値（JSON） | 表示 | 意味 |
+|---|---|---|
+| `local` | `local` | ローカルにのみ存在。上流追跡ブランチが無い（未 push） |
+| `pushed` | `pushed` | 上流追跡ブランチがある（push 済み） |
+| `up_to_date` | `synced` | **独自コミットが 0**（既定ブランチの ancestor）。未マージの変更が無く最新に追従済み＝ up to date |
+
+> **後方互換**: 旧 `state.json` はこの状態を `"merged"` と綴っていました。`BranchStatus` に `#[serde(alias = "merged")]` を付けているため、旧データの `"merged"` も `up_to_date` として読み込めます（書き出しは常に `"up_to_date"`）。
+
+> **なぜ「merged」ではなく「up to date / synced」なのか**: 判定は「ブランチ先端が既定ブランチの ancestor か（＝独自コミットが 0 か）」だけを見ます。**新規に切っただけでまだコミットしていないブランチ**も、**完全にマージ済みのブランチ**も、git 上はどちらも「独自コミット 0・ancestor」で区別できません。そのため「マージ済み」と断定せず、「未マージの変更が無い＝最新に追従済み（up to date）」という事実だけを表す `synced` にしています。
 
 ### 判定ロジック（`usecase/workspace_state.rs` の `classify`）
 
-優先度は **merged > pushed > local**。
+優先度は **up_to_date（synced） > pushed > local**。
 
-1. **merged**: そのブランチの先端が、**その worktree のリポジトリの**既定ブランチの ancestor（`git merge-base --is-ancestor`）であればマージ済みとみなす。リモートの既定ブランチ（`origin/<default>`）を優先的に基準にするため、ローカル fetch 前でも「リモート main に取り込まれたか」を反映できる。
-   - ただし既定ブランチと同名のブランチは、自分自身に対する merged 判定から除外する（`local` / `pushed` のみ）。
+1. **up_to_date（synced）**: そのブランチの先端が、**その worktree のリポジトリの**既定ブランチの ancestor（`git merge-base --is-ancestor`）であれば、独自コミットが 0 ＝未マージの変更が無いとみなす。リモートの既定ブランチ（`origin/<default>`）を優先的に基準にするため、ローカル fetch 前でも「リモート main に対して追従済みか」を反映できる。
+   - ただし既定ブランチと同名のブランチは、自分自身に対する判定から除外する（`local` / `pushed` のみ）。
 2. **pushed**: 上流追跡ブランチ（`<branch>@{upstream}`）があれば push 済み。
 3. **local**: 上記いずれにも当てはまらない。
 
