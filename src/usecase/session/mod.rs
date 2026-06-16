@@ -1,4 +1,5 @@
-//! Create a session: a parallel working tree under `.usagi/sessions/<name>/`.
+//! Create and remove sessions: parallel working trees under
+//! `.usagi/sessions/<name>/`.
 //!
 //! The workspace root need not itself be a git repository. The root is walked
 //! recursively: every git repository found gets a fresh `git worktree` (on a new
@@ -13,9 +14,16 @@
 //! │   └── be1/=git → worktree
 //! └── README.md   → copied
 //! ```
+//!
+//! This module owns the session lifecycle and state recording. The recursive
+//! mirroring and repository discovery live in [`tree`]; reconciling the on-disk
+//! tree with `state.json` lives in [`reconcile`].
 
-use std::collections::HashSet;
-use std::ffi::OsStr;
+mod reconcile;
+mod tree;
+
+pub use reconcile::reconcile;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -25,11 +33,7 @@ use chrono::Utc;
 use crate::domain::workspace_state::SessionRecord;
 use crate::infrastructure::git;
 use crate::infrastructure::workspace_store::WorkspaceStore;
-use crate::usecase::{settings, workspace_state};
-
-/// Names never descended into or copied while building a session: usagi's own
-/// data directory (which holds the session tree itself) and any `.git`.
-const SKIP: &[&str] = &[".git", ".usagi"];
+use crate::usecase::workspace_state;
 
 /// The outcome of creating a session.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,19 +71,19 @@ pub fn create(workspace_root: &Path, name: &str) -> Result<CreatedSession> {
     }
 
     let mut worktrees = Vec::new();
-    if is_repo_root(workspace_root) {
+    if tree::is_repo_root(workspace_root) {
         // The whole workspace is one repository: a single worktree at the root.
         let parent = dest_root
             .parent()
             .expect("dest_root always has a .usagi/sessions parent");
         fs::create_dir_all(parent).context(format!("failed to create {}", parent.display()))?;
-        let base = base_ref(workspace_root);
+        let base = tree::base_ref(workspace_root);
         git::add_worktree(workspace_root, &dest_root, name, base.as_deref())?;
         worktrees.push(dest_root.clone());
     } else {
         fs::create_dir_all(&dest_root)
             .context(format!("failed to create {}", dest_root.display()))?;
-        build_dir(workspace_root, &dest_root, name, &mut worktrees)?;
+        tree::build_dir(workspace_root, &dest_root, name, &mut worktrees)?;
     }
 
     record(workspace_root, name, &dest_root, &worktrees)?;
@@ -186,164 +190,11 @@ pub fn remove(workspace_root: &Path, name: &str, force: bool) -> Result<RemovalO
     })
 }
 
-/// Reconcile the on-disk session tree under `.usagi/sessions/` with the sessions
-/// recorded in `state.json`. Every *directory* there that has no matching record
-/// is a stray — left by an interrupted create, a hand-edited `state.json`, or a
-/// crash — and is force-removed: its per-repository git worktrees are
-/// unregistered, the session branch is dropped, and any copied files are
-/// deleted, regardless of uncommitted changes. Loose files are left untouched.
-///
-/// Called at the start of [`create`] and [`remove`] so the tree never drifts
-/// from the recorded state. Returns the stray directories that were removed.
-pub fn reconcile(workspace_root: &Path) -> Result<Vec<PathBuf>> {
-    let sessions_base = workspace_root.join(".usagi").join("sessions");
-    if !sessions_base.is_dir() {
-        return Ok(Vec::new());
-    }
-
-    let store = WorkspaceStore::new(workspace_root);
-    let recorded: HashSet<String> = store
-        .load()?
-        .map(|state| state.sessions.into_iter().map(|s| s.name).collect())
-        .unwrap_or_default();
-
-    let repos = source_repos(workspace_root);
-    let mut removed = Vec::new();
-
-    for entry in fs::read_dir(&sessions_base).into_iter().flatten().flatten() {
-        let stray = entry.path();
-        if !stray.is_dir() {
-            continue;
-        }
-        let file_name = entry.file_name();
-        let name = file_name.to_string_lossy();
-        if recorded.contains(name.as_ref()) {
-            continue;
-        }
-        prune_stray(&stray, &name, &repos)?;
-        removed.push(stray);
-    }
-
-    Ok(removed)
-}
-
-/// Force-remove one stray session directory `stray` whose session branch is
-/// `branch`: unregister any worktree on that branch from each source repository,
-/// drop the now-orphaned branch, then delete whatever files remain. Git steps
-/// are best-effort (a stray may be partly torn down already); only deleting the
-/// directory itself is allowed to fail the call.
-fn prune_stray(stray: &Path, branch: &str, repos: &[PathBuf]) -> Result<()> {
-    for repo in repos {
-        for wt in git::list_worktrees(repo)? {
-            if wt.branch.as_deref() == Some(branch) {
-                // Untracked and possibly dirty: force the worktree out.
-                let _ = git::remove_worktree(repo, &wt.path, true);
-            }
-        }
-        let _ = git::delete_branch(repo, branch);
-    }
-    if stray.exists() {
-        fs::remove_dir_all(stray).context(format!("failed to remove {}", stray.display()))?;
-    }
-    Ok(())
-}
-
-/// The source git repositories a session under `workspace_root` spans: the root
-/// itself when it is a repository, otherwise every repository reached by the
-/// same recursive walk [`create`] uses.
-fn source_repos(workspace_root: &Path) -> Vec<PathBuf> {
-    let mut repos = Vec::new();
-    if is_repo_root(workspace_root) {
-        repos.push(workspace_root.to_path_buf());
-    } else {
-        collect_repos(workspace_root, &mut repos);
-    }
-    repos
-}
-
-/// Append every repository root reachable under `dir` to `repos`, recursing into
-/// plain directories and skipping [`SKIP`] entries. Best-effort: unreadable
-/// directories and entries are silently skipped.
-fn collect_repos(dir: &Path, repos: &mut Vec<PathBuf>) {
-    for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
-        if SKIP.iter().any(|s| OsStr::new(s) == entry.file_name()) {
-            continue;
-        }
-        let path = entry.path();
-        if !path.is_dir() {
-            continue;
-        }
-        if is_repo_root(&path) {
-            repos.push(path);
-        } else {
-            collect_repos(&path, repos);
-        }
-    }
-}
-
-/// Recursively mirror `src` into the already-created `dest`: a git repository
-/// becomes a new worktree, a plain directory is recreated and descended into,
-/// and a plain file is copied.
-fn build_dir(src: &Path, dest: &Path, branch: &str, worktrees: &mut Vec<PathBuf>) -> Result<()> {
-    let mut entries = fs::read_dir(src)
-        .context(format!("failed to read {}", src.display()))?
-        .collect::<std::io::Result<Vec<_>>>()
-        .context(format!("failed to read {}", src.display()))?;
-    // A stable order keeps the created tree (and tests) deterministic.
-    entries.sort_by_key(|e| e.file_name());
-
-    for entry in entries {
-        let name = entry.file_name();
-        if SKIP.iter().any(|s| OsStr::new(s) == name) {
-            continue;
-        }
-        let from = entry.path();
-        let to = dest.join(&name);
-        let file_type = entry
-            .file_type()
-            .context(format!("failed to inspect {}", from.display()))?;
-
-        if file_type.is_dir() {
-            if is_repo_root(&from) {
-                let base = base_ref(&from);
-                git::add_worktree(&from, &to, branch, base.as_deref())?;
-                worktrees.push(to);
-            } else {
-                fs::create_dir_all(&to).context(format!("failed to create {}", to.display()))?;
-                build_dir(&from, &to, branch, worktrees)?;
-            }
-        } else {
-            fs::copy(&from, &to).context(format!("failed to copy {}", from.display()))?;
-        }
-    }
-    Ok(())
-}
-
-/// A directory is a repository root when it directly contains a `.git` entry —
-/// a directory for a normal clone, or a file for a linked worktree.
-fn is_repo_root(path: &Path) -> bool {
-    path.join(".git").exists()
-}
-
-/// The ref a new session worktree in `repo` should branch from, per the repo's
-/// project-local settings: the chosen
-/// [`default_branch`](crate::domain::settings::LocalSettings::default_branch)
-/// (or the detected default when unset) resolved through the
-/// [`BranchSource`](crate::domain::settings::BranchSource).
-///
-/// Reading the local settings is best-effort: a missing or unreadable file
-/// resolves to the defaults (detected branch, [`BranchSource::Remote`]). `None`
-/// means "branch from the current HEAD" — either the chosen ref does not exist,
-/// or the resolution fell through.
-fn base_ref(repo: &Path) -> Option<String> {
-    let local = settings::load_local(repo).unwrap_or_default();
-    git::resolve_base_ref(repo, local.branch_source(), local.default_branch())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::infrastructure::git::test_command as git_cmd;
+    use crate::usecase::settings;
 
     /// Initialise a throwaway git repo with one commit on `main`.
     fn init_repo(dir: &Path) {

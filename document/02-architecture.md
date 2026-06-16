@@ -56,7 +56,10 @@ src/
 │   ├── workspace.rs            # グローバル登録の add/list/remove/touch
 │   ├── workspace_state.rs      # リポジトリ状態の inspect/sync/load
 │   ├── settings.rs             # グローバル設定の load/更新、ローカル設定と実効設定の解決（effective）
-│   ├── session.rs              # セッション作成（ルート再帰走査・worktree 構築・非 git コピー）
+│   ├── session/               # セッションのライフサイクル
+│   │   ├── mod.rs             # create / remove と state.json への記録（SessionRecord）
+│   │   ├── tree.rs            # ルート再帰走査・worktree 構築・非 git コピー・リポジトリ探索
+│   │   └── reconcile.rs       # state.json と .usagi/sessions/ の照合・孤児ディレクトリの強制削除
 │   ├── doctor.rs               # 依存ツールの導入状況チェック（ローカル LLM の健全性・--fix 導入を含む）
 │   ├── issue.rs                # issue の CRUD・検索・依存 readiness 判定
 │   └── local_llm.rs            # ollama・モデルの有無判定とインストール（ensure）
