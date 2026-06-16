@@ -5,14 +5,14 @@
 //! (project-local setting overrides). Writes go through a temp file + rename so
 //! a crash never leaves a half-written file behind.
 
-use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use anyhow::Result;
+use serde::{Deserialize, Serialize};
 
 use crate::domain::settings::LocalSettings;
 use crate::domain::workspace_state::WorkspaceState;
+use crate::infrastructure::json_file;
 
 /// Directory created inside the repository to hold usagi's per-repo data.
 const STATE_DIR_NAME: &str = ".usagi";
@@ -64,13 +64,14 @@ impl WorkspaceStore {
 
     /// Load the saved state, or `None` if it has never been written.
     pub fn load(&self) -> Result<Option<WorkspaceState>> {
-        let file: Option<StateFile> = self.read_json(&self.state_path())?;
+        let file: Option<StateFile> = json_file::read(&self.state_path())?;
         Ok(file.map(|f| f.state))
     }
 
     /// Persist `state` to `<repo>/.usagi/state.json`.
     pub fn save(&self, state: &WorkspaceState) -> Result<()> {
-        self.write_json(
+        json_file::write_atomic(
+            &self.dir,
             &self.state_path(),
             &StateFile {
                 version: FILE_FORMAT_VERSION,
@@ -82,47 +83,20 @@ impl WorkspaceStore {
     /// Load the project-local settings, or defaults (all fields unset) if none
     /// have been written.
     pub fn load_settings(&self) -> Result<LocalSettings> {
-        let file: Option<LocalSettingsFile> = self.read_json(&self.settings_path())?;
+        let file: Option<LocalSettingsFile> = json_file::read(&self.settings_path())?;
         Ok(file.map(|f| f.settings).unwrap_or_default())
     }
 
     /// Persist the project-local `settings` to `<repo>/.usagi/settings.json`.
     pub fn save_settings(&self, settings: &LocalSettings) -> Result<()> {
-        self.write_json(
+        json_file::write_atomic(
+            &self.dir,
             &self.settings_path(),
             &LocalSettingsFile {
                 version: FILE_FORMAT_VERSION,
                 settings: settings.clone(),
             },
         )
-    }
-
-    /// Read and deserialize a JSON file under `.usagi/`, returning `None` if it
-    /// does not exist.
-    fn read_json<T: DeserializeOwned>(&self, path: &Path) -> Result<Option<T>> {
-        let text = match fs::read_to_string(path) {
-            Ok(text) => text,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => return Err(e).context(format!("failed to read {}", path.display())),
-        };
-        let value =
-            serde_json::from_str(&text).context(format!("failed to parse {}", path.display()))?;
-        Ok(Some(value))
-    }
-
-    /// Serialize `value` and write it atomically (temp file + rename) to `path`,
-    /// creating the `.usagi/` directory if needed.
-    fn write_json<T: Serialize>(&self, path: &Path, value: &T) -> Result<()> {
-        fs::create_dir_all(&self.dir)
-            .context(format!("failed to create {}", self.dir.display()))?;
-
-        let mut text = serde_json::to_string_pretty(value)?;
-        text.push('\n');
-
-        let tmp = path.with_extension("json.tmp");
-        fs::write(&tmp, text).context(format!("failed to write {}", tmp.display()))?;
-        fs::rename(&tmp, path).context(format!("failed to replace {}", path.display()))?;
-        Ok(())
     }
 }
 
@@ -131,6 +105,7 @@ mod tests {
     use super::*;
     use crate::domain::workspace_state::{BranchStatus, SessionRecord, WorktreeState};
     use chrono::Utc;
+    use std::fs;
 
     fn sample_state() -> WorkspaceState {
         let mut state = WorkspaceState::new();
