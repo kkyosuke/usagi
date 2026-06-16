@@ -1,4 +1,5 @@
 // Business entities (no external dependencies) live here.
+pub mod agent_phase;
 pub mod history;
 pub mod issue;
 pub mod repository;

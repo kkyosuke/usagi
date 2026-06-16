@@ -13,6 +13,13 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Record a running agent's lifecycle phase (invoked by agent hooks)
+    #[command(hide = true)]
+    AgentPhase {
+        /// The phase the agent's hook is reporting
+        #[arg(value_enum)]
+        phase: usagi::presentation::cli::agent_phase::Phase,
+    },
     /// Show usagi's configuration (or edit it with --edit)
     Config {
         /// Open the configuration file in $EDITOR and validate it on save
@@ -54,6 +61,7 @@ fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
+        Commands::AgentPhase { phase } => usagi::presentation::cli::agent_phase::run(phase),
         Commands::Config { edit } => usagi::presentation::cli::config::run(edit),
         Commands::Doctor { fix } => usagi::presentation::cli::doctor::run(fix),
         Commands::Hop => usagi::presentation::cli::hop::run(),

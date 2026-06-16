@@ -10,13 +10,14 @@
 //! where it was left.
 //!
 //! Because those shells keep running in the background, the pool also watches
-//! them: a background thread polls every session's bell count through a
-//! [`SessionMonitor`]. Interactive agents ring the terminal bell when they
-//! finish a turn and want input, so when a detached session rings it, the
-//! watcher fires a one-shot desktop notification and flags the session as
-//! waiting. The flag is exposed through a [`MonitorHandle`] the render loops read
-//! to mark the session in the sidebar (`◆`). The session the user is attached to
-//! is excluded — its bells are seen live.
+//! them: a background thread polls every session through a [`SessionMonitor`].
+//! For each it reads two signals — the phase the agent's lifecycle hooks
+//! recorded (via [`agent_state_store`]) and the shell's bell count — and lets
+//! the monitor decide (the phase wins; the bell is the fallback for agents
+//! without hooks). When a detached session starts waiting, the watcher fires a
+//! one-shot desktop notification and flags it. The flag is exposed through a
+//! [`MonitorHandle`] the render loops read to mark the session in the sidebar
+//! (`◆`). The session the user is attached to is excluded — it is seen live.
 //!
 //! This is pure I/O and process ownership (it spawns shells, holds their
 //! handles, runs a watcher thread, and shows desktop notifications), so — like
@@ -37,6 +38,7 @@ use console::Term;
 
 use crate::infrastructure::pty::PtySession;
 use crate::infrastructure::session_monitor::SessionMonitor;
+use crate::infrastructure::{agent_state_store, session_monitor};
 
 use super::terminal_view::TerminalView;
 use super::ui;
@@ -195,6 +197,10 @@ impl TerminalPool {
             let pty = PtySession::spawn(dir, geo.rows, geo.cols, initial)?;
             // Register (or refresh) the watched handles for this path; a fresh
             // spawn over an exited one resets its bell baseline.
+            // Forget any phase recorded by a previous agent at this worktree so
+            // the fresh session does not inherit a stale running / waiting state
+            // before its own hooks fire.
+            agent_state_store::clear(dir);
             {
                 let mut shared = self.lock();
                 shared.monitor.forget(dir);
@@ -278,12 +284,22 @@ fn spawn_watcher(
             for path in dead {
                 shared.sessions.remove(&path);
                 shared.monitor.forget(&path);
+                agent_state_store::clear(&path);
             }
 
-            let readings: Vec<(PathBuf, u64)> = shared
+            // Each session's reading pairs its bell count with the phase its
+            // agent's hooks last recorded (if any); the monitor prefers the phase
+            // and falls back to the bell.
+            let readings: Vec<session_monitor::Reading> = shared
                 .sessions
                 .iter()
-                .map(|(path, w)| (path.clone(), w.bell.load(Ordering::SeqCst)))
+                .map(|(path, w)| {
+                    (
+                        path.clone(),
+                        w.bell.load(Ordering::SeqCst),
+                        agent_state_store::read(path),
+                    )
+                })
                 .collect();
             let newly = shared.monitor.observe(&readings);
             newly

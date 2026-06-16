@@ -1,0 +1,72 @@
+use serde::{Deserialize, Serialize};
+
+/// The lifecycle phase of an agent CLI (e.g. Claude Code) running inside a
+/// session's embedded shell, as reported by the agent's own lifecycle hooks.
+///
+/// usagi launches the agent with hooks that report each transition (see
+/// [`crate::domain::settings::AgentCli::launch_command`]). Each hook writes the
+/// new phase to a small per-worktree file, which the home screen's session
+/// watcher reads back to drive the running / waiting indicator. Agents without
+/// such hooks — or before their first hook fires — report no phase at all, and
+/// usagi falls back to its terminal-bell heuristic
+/// ([`crate::infrastructure::session_monitor`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentPhase {
+    /// The agent is actively working a turn: a prompt was submitted and it is
+    /// generating a response or running tools.
+    Running,
+    /// The agent has finished its turn (or paused for permission) and is waiting
+    /// for the user's input.
+    Waiting,
+    /// The agent process has exited; the bare shell it launched in may still be
+    /// alive.
+    Ended,
+}
+
+impl AgentPhase {
+    /// Whether this phase authoritatively decides the running / waiting state.
+    ///
+    /// [`Running`](Self::Running) and [`Waiting`](Self::Waiting) come straight
+    /// from the agent and override the bell heuristic; [`Ended`](Self::Ended)
+    /// means the agent is gone, so the state falls back to the bare shell's bell.
+    pub fn is_active(self) -> bool {
+        matches!(self, AgentPhase::Running | AgentPhase::Waiting)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn serializes_in_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&AgentPhase::Running).unwrap(),
+            "\"running\""
+        );
+        assert_eq!(
+            serde_json::to_string(&AgentPhase::Waiting).unwrap(),
+            "\"waiting\""
+        );
+        assert_eq!(
+            serde_json::to_string(&AgentPhase::Ended).unwrap(),
+            "\"ended\""
+        );
+    }
+
+    #[test]
+    fn deserializes_from_snake_case() {
+        assert_eq!(
+            serde_json::from_str::<AgentPhase>("\"waiting\"").unwrap(),
+            AgentPhase::Waiting
+        );
+    }
+
+    #[test]
+    fn only_running_and_waiting_are_active() {
+        assert!(AgentPhase::Running.is_active());
+        assert!(AgentPhase::Waiting.is_active());
+        assert!(!AgentPhase::Ended.is_active());
+    }
+}
