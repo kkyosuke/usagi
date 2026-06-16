@@ -31,16 +31,18 @@ use anyhow::{Context, Result};
 use console::Term;
 use crossterm::event::{
     self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyEventKind,
-    KeyModifiers, MouseEventKind,
+    KeyModifiers, MouseButton, MouseEventKind,
 };
 use crossterm::execute;
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 
 use crate::infrastructure::pty::PtySession;
+use crate::presentation::tui::clipboard;
 use crate::presentation::tui::screen::diff_frame;
 
 use super::state::{HomeState, PaneExit};
 use super::terminal_pool::MonitorHandle;
+use super::terminal_selection::{Cell, Selection};
 use super::terminal_view::TerminalView;
 use super::ui;
 
@@ -98,6 +100,10 @@ fn drive(
     // the live screen. The wheel and `Shift`+`PageUp`/`PageDown` move it, typing
     // snaps it back, and `set_scrollback` clamps it to the buffered output.
     let mut scrollback: usize = 0;
+    // The in-progress / just-finished mouse selection, drawn inverted over the
+    // pane. A drag builds it, releasing copies it, and typing or scrolling
+    // clears it.
+    let mut selection: Option<Selection> = None;
     loop {
         let (height, width) = term.size();
         let geo = ui::terminal_geometry(height as usize, width as usize);
@@ -109,7 +115,8 @@ fn drive(
         // Note the output seen before snapshotting, so the wait below redraws
         // again if more arrives between here and then.
         let drawn_gen = pty.generation();
-        let view = TerminalView::from_screen(pty.parser().screen());
+        let view =
+            TerminalView::from_screen_with_selection(pty.parser().screen(), selection.as_ref());
         // The cursor belongs to the live screen, so hide it while the user is
         // viewing scrolled-back history.
         let cursor = if scrollback == 0 { view.cursor() } else { None };
@@ -132,7 +139,15 @@ fn drive(
             // Input is queued: forward every pending key (or scroll the
             // history), then redraw.
             Wake::Input => {
-                if let Some(exit) = pump_input(term, state, pty, geo, &mut scrollback, &mut prev)? {
+                if let Some(exit) = pump_input(
+                    term,
+                    state,
+                    pty,
+                    geo,
+                    &mut scrollback,
+                    &mut selection,
+                    &mut prev,
+                )? {
                     return Ok(exit);
                 }
             }
@@ -166,16 +181,18 @@ fn wait(pty: &PtySession, drawn_gen: u64) -> Result<Wake> {
 }
 
 /// Forward every queued key press to the shell, or — for the wheel and
-/// `Shift`+`PageUp`/`PageDown` — scroll the pane's history via `scrollback`.
-/// `Ctrl-O` leaves the pane for 切替 (Switch) instead, returning
-/// [`PaneExit::ToSwitch`]. Other events are ignored so the next redraw picks up
-/// any new size.
+/// `Shift`+`PageUp`/`PageDown` — scroll the pane's history via `scrollback`. A
+/// left-button drag builds a text `selection` instead, and releasing it copies
+/// the selected text to the clipboard (see [`copy_selection`]). `Ctrl-O` leaves
+/// the pane for 切替 (Switch), returning [`PaneExit::ToSwitch`]. Other events are
+/// ignored so the next redraw picks up any new size.
 fn pump_input(
-    _term: &Term,
+    term: &Term,
     _state: &mut HomeState,
     pty: &mut PtySession,
     geo: ui::TerminalGeometry,
     scrollback: &mut usize,
+    selection: &mut Option<Selection>,
     _prev: &mut Vec<String>,
 ) -> Result<Option<PaneExit>> {
     while event::poll(Duration::ZERO)? {
@@ -185,8 +202,9 @@ fn pump_input(
                     continue;
                 }
                 // Scroll keys move the history view in place rather than going
-                // to the shell.
+                // to the shell; the view shifts under any selection, so drop it.
                 if let Some(delta) = key_scroll_lines(&key, geo) {
+                    *selection = None;
                     apply_scroll(scrollback, delta);
                     continue;
                 }
@@ -196,8 +214,10 @@ fn pump_input(
                 }
                 let bytes = encode_key(&key);
                 if !bytes.is_empty() {
-                    // Typing returns to the live screen, like a real terminal.
+                    // Typing returns to the live screen and ends any selection,
+                    // like a real terminal.
                     *scrollback = 0;
+                    *selection = None;
                     pty.write(&bytes)?;
                 }
             }
@@ -205,22 +225,70 @@ fn pump_input(
             // agent that supports bracketed paste inserts the multi-line text
             // instead of submitting on each embedded newline.
             Event::Paste(text) => {
-                // Pasting returns to the live screen, like typing.
+                // Pasting returns to the live screen and ends any selection.
                 *scrollback = 0;
+                *selection = None;
                 pty.write(&encode_paste(&text, pty.bracketed_paste()))?;
             }
-            // The wheel scrolls the history when it is over the terminal pane.
-            Event::Mouse(mouse) => {
-                if let Some(delta) = wheel_delta(mouse.kind) {
-                    if (mouse.column as usize) >= geo.origin_col as usize {
-                        apply_scroll(scrollback, delta);
+            Event::Mouse(mouse) => match mouse.kind {
+                // A left press starts a fresh selection at the clicked cell;
+                // pressing outside the pane just clears any existing one.
+                MouseEventKind::Down(MouseButton::Left) => {
+                    *selection = pane_cell(mouse.column, mouse.row, geo).map(Selection::new);
+                }
+                // Dragging the left button stretches the selection's loose end.
+                MouseEventKind::Drag(MouseButton::Left) => {
+                    if let (Some(sel), Some(cell)) =
+                        (selection.as_mut(), pane_cell(mouse.column, mouse.row, geo))
+                    {
+                        sel.extend(cell);
                     }
                 }
-            }
+                // Releasing copies whatever was selected to the clipboard.
+                MouseEventKind::Up(MouseButton::Left) => {
+                    copy_selection(term, pty, selection.as_ref())?;
+                }
+                // The wheel scrolls the history when it is over the terminal
+                // pane; the view shifts, so any selection is dropped.
+                kind => {
+                    if let Some(delta) = wheel_delta(kind) {
+                        if (mouse.column as usize) >= geo.origin_col as usize {
+                            *selection = None;
+                            apply_scroll(scrollback, delta);
+                        }
+                    }
+                }
+            },
             _ => {}
         }
     }
     Ok(None)
+}
+
+/// Copy `selection`'s text to the user's clipboard via an OSC 52 escape written
+/// to `term` (see [`clipboard`]). A click without a drag selects nothing, so
+/// there is nothing to copy.
+fn copy_selection(term: &Term, pty: &PtySession, selection: Option<&Selection>) -> Result<()> {
+    let Some(sel) = selection.filter(|s| !s.is_empty()) else {
+        return Ok(());
+    };
+    let text = sel.extract_text(pty.parser().screen());
+    let seq = clipboard::osc52_copy(&text);
+    if !seq.is_empty() {
+        term.write_str(&seq)?;
+    }
+    Ok(())
+}
+
+/// Translate an absolute mouse position (0-based screen `col`/`row`) to a cell
+/// in the terminal pane's grid, or `None` when the pointer is outside the pane.
+fn pane_cell(col: u16, row: u16, geo: ui::TerminalGeometry) -> Option<Cell> {
+    let rel_col = col.checked_sub(geo.origin_col)?;
+    let rel_row = row.checked_sub(geo.origin_row)?;
+    if rel_col >= geo.cols || rel_row >= geo.rows {
+        return None;
+    }
+    Some(Cell::new(rel_row, rel_col))
 }
 
 /// The history scroll a key requests, in lines (negative scrolls up toward older

@@ -18,6 +18,8 @@
 //! conversion directly testable: a test drives a [`vt100::Parser`] with bytes
 //! and asserts the resulting rows and cursor.
 
+use super::terminal_selection::Selection;
+
 /// An owned snapshot of an embedded terminal's visible screen.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TerminalView {
@@ -28,11 +30,25 @@ pub struct TerminalView {
 }
 
 impl TerminalView {
+    /// Build a snapshot from a parsed terminal `screen`. See
+    /// [`from_screen_with_selection`](Self::from_screen_with_selection); this is
+    /// the no-selection case.
+    pub fn from_screen(screen: &vt100::Screen) -> Self {
+        Self::from_screen_with_selection(screen, None)
+    }
+
     /// Build a snapshot from a parsed terminal `screen`: each grid row becomes a
     /// string of its cells' contents, carrying the cells' colours and text
     /// attributes as embedded ANSI escapes (blank cells render as spaces, and
     /// the trailing cell of a wide character is skipped so widths line up).
-    pub fn from_screen(screen: &vt100::Screen) -> Self {
+    ///
+    /// Cells within `selection` are drawn inverted (their `inverse` attribute is
+    /// flipped), so a mouse drag over the pane shows what it has picked out — see
+    /// [`terminal_selection`](super::terminal_selection).
+    pub fn from_screen_with_selection(
+        screen: &vt100::Screen,
+        selection: Option<&Selection>,
+    ) -> Self {
         let (rows, cols) = screen.size();
         let mut out = Vec::with_capacity(rows as usize);
         for row in 0..rows {
@@ -47,7 +63,12 @@ impl TerminalView {
                 if cell.is_some_and(vt100::Cell::is_wide_continuation) {
                     continue;
                 }
-                let style = cell.map(CellStyle::of).unwrap_or_default();
+                let mut style = cell.map(CellStyle::of).unwrap_or_default();
+                // A selected cell is inverted so the drag is visible; flipping
+                // (rather than forcing) keeps already-inverse text readable.
+                if selection.is_some_and(|s| s.contains(row, col)) {
+                    style.inverse = !style.inverse;
+                }
                 if style != active {
                     line.push_str(&style.sgr());
                     active = style;
@@ -181,12 +202,51 @@ fn push_color(params: &mut String, color: vt100::Color, background: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::presentation::tui::home::terminal_selection::Cell;
 
     /// A parser sized `rows`×`cols`, fed `bytes`, returned for inspection.
     fn parsed(rows: u16, cols: u16, bytes: &[u8]) -> vt100::Parser {
         let mut parser = vt100::Parser::new(rows, cols, 0);
         parser.process(bytes);
         parser
+    }
+
+    #[test]
+    fn from_screen_with_selection_inverts_selected_cells() {
+        // Select the first two columns of "abcd"; they pick up the inverse (7)
+        // attribute while the rest of the row stays plain.
+        let parser = parsed(1, 4, b"abcd");
+        let mut sel = Selection::new(Cell::new(0, 0));
+        sel.extend(Cell::new(0, 1));
+        let view = TerminalView::from_screen_with_selection(parser.screen(), Some(&sel));
+        let row = &view.rows()[0];
+        // The selected run opens with an inverse escape and the cells after it
+        // reset back to plain before the row ends.
+        assert!(row.contains("\x1b[0;7mab"));
+        assert!(row.contains("\x1b[0mcd"));
+    }
+
+    #[test]
+    fn from_screen_with_selection_flips_already_inverse_text() {
+        // Text drawn with SGR 7 (inverse) becomes non-inverse where selected, so
+        // the highlight is still visible against it.
+        let parser = parsed(1, 2, b"\x1b[7mAB");
+        let mut sel = Selection::new(Cell::new(0, 0));
+        sel.extend(Cell::new(0, 0));
+        let view = TerminalView::from_screen_with_selection(parser.screen(), Some(&sel));
+        let row = &view.rows()[0];
+        // Column 0 (selected) drops the inverse, so it renders plain (no escape);
+        // column 1 keeps inverse (SGR 7), and the row resets at its end.
+        assert_eq!(row, "A\x1b[0;7mB\x1b[0m");
+    }
+
+    #[test]
+    fn from_screen_without_selection_matches_the_plain_snapshot() {
+        // Passing no selection is identical to `from_screen`.
+        let parser = parsed(1, 4, b"abcd");
+        let plain = TerminalView::from_screen(parser.screen());
+        let none = TerminalView::from_screen_with_selection(parser.screen(), None);
+        assert_eq!(plain, none);
     }
 
     #[test]
