@@ -24,20 +24,28 @@ const CTRL_O: char = '\u{000f}';
 #[derive(Debug)]
 pub enum Outcome {
     /// Return to the project selection screen without acting on a worktree.
+    /// Retained for the screens that open the home screen ([`super::super::open`]
+    /// / [`super::super::app`]); the home loop itself no longer emits it, since
+    /// `Esc` is inert here and the only way out is quitting via `Ctrl-C`.
     Back,
     /// The user asked to quit the application entirely.
     Quit,
 }
 
 /// Runs the home screen against the given terminal and key source until the
-/// user goes back or quits. Assumes the alternate screen is already active (it
-/// is owned by the orchestrator, several levels up).
+/// user quits. Assumes the alternate screen is already active (it is owned by
+/// the orchestrator, several levels up).
+///
+/// `Ctrl-C` is the only way out: it closes the app, but when a session is still
+/// live (an agent/shell is running) it first raises a quit-confirmation modal so
+/// an accidental press does not drop running work — confirming it quits.
 ///
 /// The screen is a four-step engagement ladder:
 ///
 /// - **統括 (Overview)** — the default. The bottom command line operates the
 ///   whole workspace (`session` / `config` / `doctor` / `man` / …); results are
 ///   appended to the log, rendered below the input. The right pane is blank.
+///   `Esc` is inert here (it does not back out to the project list).
 /// - **切替 (Switch)** — pick a session in the left pane (entered from Overview
 ///   via `session switch`, or from Focus / Attached via `Ctrl-O`). `↑`/`↓`
 ///   move, `Enter` focuses (attaching when the session is live), `c` creates one
@@ -113,6 +121,32 @@ pub fn event_loop(
             Err(e) => return Err(anyhow::Error::from(e).context("Failed to read key")),
         };
 
+        // The quit-confirmation modal, when open, captures every key: `y` /
+        // `Enter` (or a second `Ctrl-C`) confirms the close, `n` / `Esc` cancels.
+        if state.quit_confirm() {
+            match key {
+                Key::Char('y') | Key::Char('Y') | Key::Enter | Key::CtrlC => {
+                    return Ok(Outcome::Quit)
+                }
+                Key::Char('n') | Key::Char('N') | Key::Escape => state.cancel_quit_confirm(),
+                _ => {}
+            }
+            continue;
+        }
+
+        // `Ctrl-C` closes the app from anywhere on the home screen. Quitting
+        // would drop any session whose shell / agent is still running, so when
+        // one is live we raise the quit-confirmation modal first instead of
+        // closing outright; an idle screen quits immediately.
+        if let Key::CtrlC = key {
+            if state.has_live_sessions() {
+                state.open_quit_confirm();
+            } else {
+                return Ok(Outcome::Quit);
+            }
+            continue;
+        }
+
         // The session-removal modal, when open, captures every key: the cursor
         // moves with the arrows (or j/k), Space toggles the row's checkbox, and
         // Enter removes every checked session (Esc cancels).
@@ -130,7 +164,6 @@ pub fn event_loop(
                     }
                 }
                 Key::Escape => state.cancel_remove_modal(),
-                Key::CtrlC => return Ok(Outcome::Quit),
                 _ => {}
             }
             continue;
@@ -179,7 +212,6 @@ pub fn event_loop(
         };
         match flow {
             Flow::Continue => {}
-            Flow::Back => return Ok(Outcome::Back),
             Flow::Quit => return Ok(Outcome::Quit),
         }
     }
@@ -189,8 +221,6 @@ pub fn event_loop(
 enum Flow {
     /// Resume the home screen.
     Continue,
-    /// Return to the project selection screen (`Esc` at the top level, 統括).
-    Back,
     /// Quit the application.
     Quit,
 }
@@ -297,11 +327,11 @@ fn overview_key(
         Key::Backspace => state.backspace(),
         Key::ArrowUp => state.recall_prev(),
         Key::ArrowDown => state.recall_next(),
-        // `Esc` backs out of the top level, to the project selection screen.
-        // `Ctrl-O` is inert here (Overview is already the outermost level).
-        Key::Escape => return Ok(Flow::Back),
-        Key::Char(CTRL_O) => {}
-        Key::CtrlC => return Ok(Flow::Quit),
+        // `Esc` is inert at the top level: the home screen is not left by backing
+        // out (that would drop into the project list); the only way out is
+        // `Ctrl-C`, handled centrally in the event loop. `Ctrl-O` is likewise
+        // inert here (Overview is already the outermost engagement level).
+        Key::Escape | Key::Char(CTRL_O) => {}
         Key::Char(c) => state.push_char(c),
         _ => {}
     }
@@ -390,7 +420,6 @@ fn switch_key(
             }
             Key::Backspace => state.create_backspace(),
             Key::Escape => state.create_cancel(),
-            Key::CtrlC => return Flow::Quit,
             Key::Char(c) => state.create_push_char(c),
             _ => {}
         }
@@ -433,7 +462,6 @@ fn switch_key(
         ),
         // Ctrl-O zooms one level further out, to 統括.
         Key::Char(CTRL_O) => state.enter_overview(),
-        Key::CtrlC => return Flow::Quit,
         _ => {}
     }
     Flow::Continue
@@ -508,7 +536,6 @@ fn focus_key(
             state.enter_switch(ReturnMode::Focus);
             return Flow::Continue;
         }
-        Key::CtrlC => return Flow::Quit,
         _ => {}
     }
 
@@ -771,9 +798,10 @@ mod tests {
 
     impl KeyReader for ScriptedReader {
         fn read_key(&mut self) -> io::Result<Key> {
-            // Default to Escape so a test can never spin forever (Escape backs out
-            // a level, eventually returning Back from Overview).
-            self.keys.pop_front().unwrap_or(Ok(Key::Escape))
+            // Default to Ctrl-C so a test can never spin forever: Esc no longer
+            // leaves Overview, so Ctrl-C (which quits when no session is live, as
+            // in these tests) is the terminator the loop falls back to.
+            self.keys.pop_front().unwrap_or(Ok(Key::CtrlC))
         }
     }
 
@@ -884,6 +912,38 @@ mod tests {
         )
     }
 
+    /// Run the loop with a monitor reporting a live session, so `Ctrl-C` raises
+    /// the quit-confirmation modal instead of quitting outright. `persist`
+    /// records the commands run, so a test can prove the screen kept running
+    /// after the modal was cancelled.
+    fn run_with_live_monitor(
+        keys: Vec<io::Result<Key>>,
+        state: HomeState,
+        persist: &mut dyn FnMut(&str),
+    ) -> Result<Outcome> {
+        let term = Term::stdout();
+        let mut reader = ScriptedReader::new(keys);
+        let monitor = MonitorHandle::with_live(vec![PathBuf::from("/r/main")]);
+        let mut create: fn(&str) -> SessionOutcome = noop_create;
+        let mut remove_session: fn(&str, bool) -> SessionOutcome = noop_remove;
+        let mut open: fn(&mut HomeState, &Path, bool) -> Result<PaneExit> = noop_open;
+        let mut config: fn(&Term) -> Result<bool> = noop_config;
+        let mut preview: fn(&Path) -> Option<TerminalView> = noop_preview;
+        event_loop(
+            &term,
+            &mut reader,
+            state,
+            Path::new("/ws"),
+            &monitor,
+            persist,
+            &mut create,
+            &mut remove_session,
+            &mut open,
+            &mut config,
+            &mut preview,
+        )
+    }
+
     fn typed(s: &str) -> Vec<io::Result<Key>> {
         s.chars().map(|c| Ok(Key::Char(c))).collect()
     }
@@ -906,10 +966,13 @@ mod tests {
     // --- 統括 (Overview) ---------------------------------------------------
 
     #[test]
-    fn escape_in_overview_returns_back() {
+    fn escape_in_overview_is_inert_and_does_not_leave() {
+        // Esc no longer backs out to the project list: it is a no-op in Overview,
+        // so the loop runs on and only the fallback Ctrl-C (no live session) quits.
+        // A Back-returning Esc would instead resolve to `Outcome::Back` here.
         assert!(matches!(
             run(vec![Ok(Key::Escape)], sample_state()).unwrap(),
-            Outcome::Back
+            Outcome::Quit
         ));
     }
 
@@ -923,9 +986,9 @@ mod tests {
 
     #[test]
     fn ctrl_o_in_overview_is_inert() {
-        // Ctrl-O does nothing at the top level; the trailing Escape backs out.
+        // Ctrl-O and Esc are both inert at the top level; the fallback Ctrl-C quits.
         let keys = vec![Ok(Key::Char(CTRL_O)), Ok(Key::Escape)];
-        assert!(matches!(run(keys, sample_state()).unwrap(), Outcome::Back));
+        assert!(matches!(run(keys, sample_state()).unwrap(), Outcome::Quit));
     }
 
     #[test]
@@ -938,7 +1001,7 @@ mod tests {
         keys.push(Ok(Key::ArrowDown)); // back to empty
         keys.push(Ok(Key::Home)); // ignored
         keys.push(Ok(Key::Escape)); // back
-        assert!(matches!(run(keys, sample_state()).unwrap(), Outcome::Back));
+        assert!(matches!(run(keys, sample_state()).unwrap(), Outcome::Quit));
     }
 
     #[test]
@@ -977,7 +1040,7 @@ mod tests {
             &mut preview,
         )
         .unwrap();
-        assert!(matches!(outcome, Outcome::Back));
+        assert!(matches!(outcome, Outcome::Quit));
         assert_eq!(recorded, vec!["man"]);
     }
 
@@ -998,7 +1061,7 @@ mod tests {
         keys.extend(typed("agent"));
         keys.push(Ok(Key::Enter)); // wait — we are back in Overview after Esc
         keys.push(Ok(Key::Escape)); // Focus -> Overview
-        keys.push(Ok(Key::Escape)); // Overview -> Back
+        keys.push(Ok(Key::Escape)); // Esc inert in Overview; fallback Ctrl-C quits
         assert!(matches!(
             run_full(
                 keys,
@@ -1009,7 +1072,7 @@ mod tests {
                 &mut noop_config
             )
             .unwrap(),
-            Outcome::Back
+            Outcome::Quit
         ));
         assert_eq!(*opened.borrow(), vec![false, true]);
     }
@@ -1019,7 +1082,7 @@ mod tests {
         let mut keys = typed("session list");
         keys.push(Ok(Key::Enter));
         keys.push(Ok(Key::Escape));
-        assert!(matches!(run(keys, sample_state()).unwrap(), Outcome::Back));
+        assert!(matches!(run(keys, sample_state()).unwrap(), Outcome::Quit));
     }
 
     #[test]
@@ -1044,7 +1107,7 @@ mod tests {
                 &mut noop_config
             )
             .unwrap(),
-            Outcome::Back
+            Outcome::Quit
         ));
         assert_eq!(*created.borrow(), vec!["newx"]);
     }
@@ -1058,7 +1121,7 @@ mod tests {
         keys.extend(typed("wip"));
         keys.push(Ok(Key::Enter)); // confirm create -> Focus
         keys.push(Ok(Key::Escape)); // Focus Esc -> Overview
-        keys.push(Ok(Key::Escape)); // Overview Esc -> Back
+        keys.push(Ok(Key::Escape)); // Esc inert in Overview; fallback Ctrl-C quits
         let created = RefCell::new(Vec::new());
         let mut create = |name: &str| {
             created.borrow_mut().push(name.to_string());
@@ -1076,7 +1139,7 @@ mod tests {
                 &mut noop_config
             )
             .unwrap(),
-            Outcome::Back
+            Outcome::Quit
         ));
         assert_eq!(*created.borrow(), vec!["wip"]);
     }
@@ -1113,7 +1176,7 @@ mod tests {
             &mut preview,
         )
         .unwrap();
-        assert!(matches!(outcome, Outcome::Back));
+        assert!(matches!(outcome, Outcome::Quit));
         assert_eq!(removed, vec![("old".to_string(), true)]);
     }
 
@@ -1159,7 +1222,7 @@ mod tests {
             &mut preview,
         )
         .unwrap();
-        assert!(matches!(outcome, Outcome::Back));
+        assert!(matches!(outcome, Outcome::Quit));
         assert_eq!(
             removed,
             vec![("alpha".to_string(), false), ("gamma".to_string(), false)]
@@ -1176,7 +1239,7 @@ mod tests {
         keys.push(Ok(Key::Escape)); // Overview back
         assert!(matches!(
             run(keys, state_with_sessions(&["alpha"])).unwrap(),
-            Outcome::Back
+            Outcome::Quit
         ));
     }
 
@@ -1189,6 +1252,69 @@ mod tests {
             run(keys, state_with_sessions(&["alpha"])).unwrap(),
             Outcome::Quit
         ));
+    }
+
+    // --- quit-confirmation modal (Ctrl-C with a live session) --------------
+
+    #[test]
+    fn ctrl_c_quits_outright_when_no_session_is_live() {
+        // The default `run` harness has no live session, so Ctrl-C closes the app
+        // without asking — the gate only triggers when something is running.
+        assert!(matches!(
+            run(vec![Ok(Key::CtrlC)], sample_state()).unwrap(),
+            Outcome::Quit
+        ));
+    }
+
+    #[test]
+    fn ctrl_c_with_a_live_session_quits_only_after_confirming() {
+        // 'y' confirms the close.
+        let mut persist: fn(&str) = noop_persist;
+        assert!(matches!(
+            run_with_live_monitor(
+                vec![Ok(Key::CtrlC), Ok(Key::Char('y'))],
+                sample_state(),
+                &mut persist,
+            )
+            .unwrap(),
+            Outcome::Quit
+        ));
+
+        // A second Ctrl-C inside the modal confirms too.
+        assert!(matches!(
+            run_with_live_monitor(
+                vec![Ok(Key::CtrlC), Ok(Key::CtrlC)],
+                sample_state(),
+                &mut persist,
+            )
+            .unwrap(),
+            Outcome::Quit
+        ));
+    }
+
+    #[test]
+    fn confirm_modal_cancel_keeps_the_screen_running() {
+        // Ctrl-C raises the modal (a session is live); an ignored key is a no-op
+        // in it; 'n' cancels back to Overview, where a command still runs (proving
+        // the first Ctrl-C did not quit). Esc also cancels; Enter finally confirms.
+        let mut keys = vec![
+            Ok(Key::CtrlC),     // raise the modal
+            Ok(Key::Home),      // ignored inside the modal
+            Ok(Key::Char('n')), // cancel -> Overview
+        ];
+        keys.extend(typed("man"));
+        keys.push(Ok(Key::Enter)); // runs `man` -> persisted
+        keys.push(Ok(Key::CtrlC)); // raise again
+        keys.push(Ok(Key::Escape)); // cancel via Esc
+        keys.push(Ok(Key::CtrlC)); // raise again
+        keys.push(Ok(Key::Enter)); // confirm via Enter -> quit
+
+        let mut recorded = Vec::new();
+        let mut persist = |c: &str| recorded.push(c.to_string());
+        let outcome = run_with_live_monitor(keys, sample_state(), &mut persist).unwrap();
+        assert!(matches!(outcome, Outcome::Quit));
+        // The command ran between the cancelled closes, so the screen kept going.
+        assert_eq!(recorded, vec!["man"]);
     }
 
     // --- config hand-off ---------------------------------------------------
@@ -1221,7 +1347,7 @@ mod tests {
                 &mut config
             )
             .unwrap(),
-            Outcome::Back
+            Outcome::Quit
         ));
         assert!(opened.into_inner());
 
@@ -1267,8 +1393,8 @@ mod tests {
     fn session_switch_unknown_name_logs_an_error_and_stays_in_overview() {
         let mut keys = typed("session switch nope");
         keys.push(Ok(Key::Enter));
-        keys.push(Ok(Key::Escape)); // still Overview -> Back
-        assert!(matches!(run(keys, sample_state()).unwrap(), Outcome::Back));
+        keys.push(Ok(Key::Escape)); // still in Overview; Esc inert, fallback Ctrl-C quits
+        assert!(matches!(run(keys, sample_state()).unwrap(), Outcome::Quit));
     }
 
     #[test]
@@ -1277,14 +1403,14 @@ mod tests {
         let mut keys = typed("session switch feat");
         keys.push(Ok(Key::Enter)); // -> Focus
         keys.push(Ok(Key::Escape)); // Focus -> Overview
-        keys.push(Ok(Key::Escape)); // Overview -> Back
-        assert!(matches!(run(keys, sample_state()).unwrap(), Outcome::Back));
+        keys.push(Ok(Key::Escape)); // Esc inert in Overview; fallback Ctrl-C quits
+        assert!(matches!(run(keys, sample_state()).unwrap(), Outcome::Quit));
     }
 
     #[test]
     fn session_switch_known_live_name_attaches_then_returns_to_focus() {
         // "root" resolves and is live, so it attaches; noop_open closes the pane,
-        // returning to Focus, then Esc -> Overview -> Back.
+        // returning to Focus, then Esc -> Overview (fallback Ctrl-C quits).
         let opened = RefCell::new(0);
         let mut open = |_h: &mut HomeState, _d: &Path, _a: bool| {
             *opened.borrow_mut() += 1;
@@ -1295,7 +1421,7 @@ mod tests {
         let mut keys = typed("session switch root");
         keys.push(Ok(Key::Enter)); // -> Focus -> attach -> Closed -> Focus
         keys.push(Ok(Key::Escape)); // Focus -> Overview
-        keys.push(Ok(Key::Escape)); // Overview -> Back
+        keys.push(Ok(Key::Escape)); // Esc inert in Overview; fallback Ctrl-C quits
         assert!(matches!(
             run_full(
                 keys,
@@ -1306,7 +1432,7 @@ mod tests {
                 &mut noop_config
             )
             .unwrap(),
-            Outcome::Back
+            Outcome::Quit
         ));
         assert_eq!(*opened.borrow(), 1);
     }
@@ -1316,7 +1442,7 @@ mod tests {
     #[test]
     fn switch_navigates_and_backs_out_to_overview() {
         // `session switch` enters Switch; arrows / jk move; Esc returns to Overview
-        // (the origin), then Esc -> Back.
+        // (the origin); Esc is then inert, so the fallback Ctrl-C quits.
         let mut keys = typed("session switch");
         keys.push(Ok(Key::Enter)); // -> Switch (origin Overview)
         keys.push(Ok(Key::ArrowDown));
@@ -1325,8 +1451,8 @@ mod tests {
         keys.push(Ok(Key::Char('k')));
         keys.push(Ok(Key::Home)); // ignored
         keys.push(Ok(Key::Char('h'))); // back to Overview
-        keys.push(Ok(Key::Escape)); // Overview -> Back
-        assert!(matches!(run(keys, sample_state()).unwrap(), Outcome::Back));
+        keys.push(Ok(Key::Escape)); // Esc inert in Overview; fallback Ctrl-C quits
+        assert!(matches!(run(keys, sample_state()).unwrap(), Outcome::Quit));
     }
 
     #[test]
@@ -1334,8 +1460,8 @@ mod tests {
         let mut keys = typed("session switch");
         keys.push(Ok(Key::Enter)); // -> Switch
         keys.push(Ok(Key::Char(CTRL_O))); // -> Overview
-        keys.push(Ok(Key::Escape)); // Overview -> Back
-        assert!(matches!(run(keys, sample_state()).unwrap(), Outcome::Back));
+        keys.push(Ok(Key::Escape)); // Esc inert in Overview; fallback Ctrl-C quits
+        assert!(matches!(run(keys, sample_state()).unwrap(), Outcome::Quit));
     }
 
     #[test]
@@ -1353,8 +1479,8 @@ mod tests {
         keys.push(Ok(Key::ArrowDown)); // cursor on "main"
         keys.push(Ok(Key::Enter)); // focus (idle -> no attach)
         keys.push(Ok(Key::Escape)); // Focus -> Overview
-        keys.push(Ok(Key::Escape)); // -> Back
-        assert!(matches!(run(keys, sample_state()).unwrap(), Outcome::Back));
+        keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
+        assert!(matches!(run(keys, sample_state()).unwrap(), Outcome::Quit));
     }
 
     #[test]
@@ -1370,7 +1496,7 @@ mod tests {
         keys.push(Ok(Key::Enter)); // -> Switch
         keys.push(Ok(Key::Char('l'))); // focus + attach (live)
         keys.push(Ok(Key::Escape)); // Focus -> Overview
-        keys.push(Ok(Key::Escape)); // -> Back
+        keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
         assert!(matches!(
             run_full(
                 keys,
@@ -1381,7 +1507,7 @@ mod tests {
                 &mut noop_config
             )
             .unwrap(),
-            Outcome::Back
+            Outcome::Quit
         ));
         assert_eq!(*opened.borrow(), 1);
     }
@@ -1397,7 +1523,7 @@ mod tests {
         keys.push(Ok(Key::Home)); // ignored inside create
         keys.push(Ok(Key::Enter)); // confirm -> Focus
         keys.push(Ok(Key::Escape)); // Focus -> Overview
-        keys.push(Ok(Key::Escape)); // -> Back
+        keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
         let created = RefCell::new(Vec::new());
         let mut create = |name: &str| {
             created.borrow_mut().push(name.to_string());
@@ -1415,22 +1541,22 @@ mod tests {
                 &mut noop_config
             )
             .unwrap(),
-            Outcome::Back
+            Outcome::Quit
         ));
         assert_eq!(*created.borrow(), vec!["wip"]);
     }
 
     #[test]
     fn switch_inline_create_can_be_cancelled_and_ctrl_c_quits() {
-        // Cancel path: Esc closes the input, staying in Switch; then Ctrl-O -> Overview -> Back.
+        // Cancel path: Esc closes the input, staying in Switch; then Ctrl-O -> Overview (fallback Ctrl-C quits).
         let mut keys = typed("session switch");
         keys.push(Ok(Key::Enter));
         keys.push(Ok(Key::Char('c'))); // begin create
         keys.push(Ok(Key::Char('x')));
         keys.push(Ok(Key::Escape)); // cancel create (stay in Switch)
         keys.push(Ok(Key::Char(CTRL_O))); // Switch -> Overview
-        keys.push(Ok(Key::Escape)); // -> Back
-        assert!(matches!(run(keys, sample_state()).unwrap(), Outcome::Back));
+        keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
+        assert!(matches!(run(keys, sample_state()).unwrap(), Outcome::Quit));
 
         // Ctrl-C inside the create input quits.
         let mut keys = typed("session switch");
@@ -1473,7 +1599,7 @@ mod tests {
         keys.push(Ok(Key::ArrowUp)); // agent -> terminal
         keys.push(Ok(Key::Enter)); // run terminal (attach) -> Closed -> Focus
         keys.push(Ok(Key::Escape)); // Focus -> Overview
-        keys.push(Ok(Key::Escape)); // -> Back
+        keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
         assert!(matches!(
             run_full(
                 keys,
@@ -1484,7 +1610,7 @@ mod tests {
                 &mut noop_config
             )
             .unwrap(),
-            Outcome::Back
+            Outcome::Quit
         ));
         assert_eq!(*opened.borrow(), vec![(PathBuf::from("/r/main"), false)]);
     }
@@ -1504,7 +1630,7 @@ mod tests {
         keys.push(Ok(Key::Char('k'))); // a menu move (no-op effect here)
         keys.push(Ok(Key::Char('a'))); // agent
         keys.push(Ok(Key::Escape)); // -> Overview
-        keys.push(Ok(Key::Escape)); // -> Back
+        keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
         assert!(matches!(
             run_full(
                 keys,
@@ -1515,7 +1641,7 @@ mod tests {
                 &mut noop_config
             )
             .unwrap(),
-            Outcome::Back
+            Outcome::Quit
         ));
         assert_eq!(*opened.borrow(), vec![false, true]);
     }
@@ -1532,21 +1658,21 @@ mod tests {
         keys.push(Ok(Key::ArrowUp)); // wrap to "ai"
         keys.push(Ok(Key::Enter)); // run ai (coming soon)
         keys.push(Ok(Key::Escape)); // -> Overview
-        keys.push(Ok(Key::Escape)); // -> Back
-        assert!(matches!(run(keys, sample_state()).unwrap(), Outcome::Back));
+        keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
+        assert!(matches!(run(keys, sample_state()).unwrap(), Outcome::Quit));
     }
 
     #[test]
     fn focus_ctrl_o_opens_switch_then_esc_re_focuses() {
         // Focus -> Ctrl-O -> Switch(return=Focus); Esc/h re-enters Focus; Esc ->
-        // Overview; Esc -> Back.
+        // Overview; Esc inert, fallback Ctrl-C quits.
         let mut keys = typed("session switch feat");
         keys.push(Ok(Key::Enter)); // Focus feat
         keys.push(Ok(Key::Char(CTRL_O))); // -> Switch(return Focus)
         keys.push(Ok(Key::Char('h'))); // back -> Focus
         keys.push(Ok(Key::Escape)); // Focus -> Overview
-        keys.push(Ok(Key::Escape)); // -> Back
-        assert!(matches!(run(keys, sample_state()).unwrap(), Outcome::Back));
+        keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
+        assert!(matches!(run(keys, sample_state()).unwrap(), Outcome::Quit));
     }
 
     #[test]
@@ -1576,7 +1702,7 @@ mod tests {
         keys.push(Ok(Key::Tab)); // -> "terminal"
         keys.push(Ok(Key::Enter)); // run terminal (attach)
         keys.push(Ok(Key::Escape)); // -> Overview
-        keys.push(Ok(Key::Escape)); // -> Back
+        keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
         assert!(matches!(
             run_full(
                 keys,
@@ -1587,7 +1713,7 @@ mod tests {
                 &mut noop_config
             )
             .unwrap(),
-            Outcome::Back
+            Outcome::Quit
         ));
         assert_eq!(*opened.borrow(), 1);
     }
@@ -1610,7 +1736,7 @@ mod tests {
         keys.extend(typed("agent"));
         keys.push(Ok(Key::Enter)); // attach agent
         keys.push(Ok(Key::Escape)); // -> Overview
-        keys.push(Ok(Key::Escape)); // -> Back
+        keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
         assert!(matches!(
             run_full(
                 keys,
@@ -1621,7 +1747,7 @@ mod tests {
                 &mut noop_config
             )
             .unwrap(),
-            Outcome::Back
+            Outcome::Quit
         ));
         assert_eq!(*opened.borrow(), vec![true]);
     }
@@ -1631,14 +1757,14 @@ mod tests {
     #[test]
     fn ctrl_o_in_the_pane_zooms_out_to_switch() {
         // Attaching to a live session; the pane returns ToSwitch (Ctrl-O), so the
-        // loop enters Switch with return=Attached. Then Ctrl-O -> Overview -> Back.
+        // loop enters Switch with return=Attached. Then Ctrl-O -> Overview (fallback Ctrl-C quits).
         let mut open = |_h: &mut HomeState, _d: &Path, _a: bool| Ok(PaneExit::ToSwitch);
         let mut create: fn(&str) -> SessionOutcome = noop_create;
         let mut preview: fn(&Path) -> Option<TerminalView> = live_preview;
         let mut keys = typed("session switch root");
         keys.push(Ok(Key::Enter)); // Focus root -> attach -> ToSwitch -> Switch
         keys.push(Ok(Key::Char(CTRL_O))); // Switch -> Overview
-        keys.push(Ok(Key::Escape)); // -> Back
+        keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
         assert!(matches!(
             run_full(
                 keys,
@@ -1649,7 +1775,7 @@ mod tests {
                 &mut noop_config
             )
             .unwrap(),
-            Outcome::Back
+            Outcome::Quit
         ));
     }
 
@@ -1673,7 +1799,7 @@ mod tests {
         keys.push(Ok(Key::Enter)); // attach -> ToSwitch -> Switch(return Attached)
         keys.push(Ok(Key::Escape)); // Switch Esc -> re-attach -> Closed -> Focus
         keys.push(Ok(Key::Escape)); // Focus -> Overview
-        keys.push(Ok(Key::Escape)); // -> Back
+        keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
         assert!(matches!(
             run_full(
                 keys,
@@ -1684,7 +1810,7 @@ mod tests {
                 &mut noop_config
             )
             .unwrap(),
-            Outcome::Back
+            Outcome::Quit
         ));
         assert_eq!(*calls.borrow(), 2);
     }
@@ -1713,7 +1839,7 @@ mod tests {
         keys.push(Ok(Key::ArrowDown)); // cursor -> an idle worktree row
         keys.push(Ok(Key::Escape)); // Esc -> idle row stays in Focus (no re-attach)
         keys.push(Ok(Key::Escape)); // Focus -> Overview
-        keys.push(Ok(Key::Escape)); // -> Back
+        keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
         assert!(matches!(
             run_full(
                 keys,
@@ -1724,7 +1850,7 @@ mod tests {
                 &mut noop_config
             )
             .unwrap(),
-            Outcome::Back
+            Outcome::Quit
         ));
         // The pane opened only once (the initial attach); the Esc did not re-attach.
         assert_eq!(*calls.borrow(), 1);
@@ -1738,7 +1864,7 @@ mod tests {
         let mut keys = typed("session switch root");
         keys.push(Ok(Key::Enter)); // attach -> Err -> Focus (logged)
         keys.push(Ok(Key::Escape)); // Focus -> Overview
-        keys.push(Ok(Key::Escape)); // -> Back
+        keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
         assert!(matches!(
             run_full(
                 keys,
@@ -1749,7 +1875,7 @@ mod tests {
                 &mut noop_config
             )
             .unwrap(),
-            Outcome::Back
+            Outcome::Quit
         ));
     }
 
@@ -1773,7 +1899,7 @@ mod tests {
     #[test]
     fn page_keys_are_inert_in_overview() {
         let keys = vec![Ok(Key::PageUp), Ok(Key::PageDown), Ok(Key::Escape)];
-        assert!(matches!(run(keys, sample_state()).unwrap(), Outcome::Back));
+        assert!(matches!(run(keys, sample_state()).unwrap(), Outcome::Quit));
     }
 
     #[test]
@@ -1784,16 +1910,16 @@ mod tests {
         let mut keys = typed("session switch root");
         keys.push(Ok(Key::Enter)); // live -> attach via noop_open -> Closed -> Focus
         keys.push(Ok(Key::Escape)); // Focus -> Overview
-        keys.push(Ok(Key::Escape)); // Overview -> Back
+        keys.push(Ok(Key::Escape)); // Esc inert in Overview; fallback Ctrl-C quits
         assert!(matches!(
             run_live(keys, sample_state()).unwrap(),
-            Outcome::Back
+            Outcome::Quit
         ));
 
         // `config` through the default `noop_config` (returns false -> resume).
         let mut keys = typed("config");
         keys.push(Ok(Key::Enter));
         keys.push(Ok(Key::Escape));
-        assert!(matches!(run(keys, sample_state()).unwrap(), Outcome::Back));
+        assert!(matches!(run(keys, sample_state()).unwrap(), Outcome::Quit));
     }
 }
