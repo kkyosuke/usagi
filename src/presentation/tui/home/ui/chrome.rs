@@ -6,9 +6,11 @@
 use console::style;
 
 use super::super::command::{CommandHint, Hint};
-use super::super::state::{HomeState, Mode, RemoveModal, WorktreeList};
+use super::super::state::{HomeState, Mode, RemoveModal, TextModal, WorktreeList};
+use super::panes::log_line;
 use super::{
     clip_to_width, pad_to_width, CARET, HINT_INDENT, HINT_MAX, HINT_NAME_COL, REMOVE_MODAL_VISIBLE,
+    TEXT_MODAL_VISIBLE,
 };
 use crate::presentation::tui::widgets;
 
@@ -293,4 +295,37 @@ pub(super) fn quit_confirm_frame(raw_height: usize, raw_width: usize, live: usiz
             .to_string(),
     ];
     widgets::render_modal(raw_height, raw_width, "Quit usagi?", INNER, &body)
+}
+
+/// Builds the centred text modal: a scrollable window over a text-dumping
+/// command's output (`man` / `history` / `session list`), coloured by line kind,
+/// with `↑`/`↓` more-counts and the dismiss hint below.
+pub(super) fn text_modal_frame(
+    raw_height: usize,
+    raw_width: usize,
+    modal: &TextModal,
+) -> Vec<String> {
+    const INNER: usize = 60;
+
+    let total = modal.lines.len();
+    let start = modal.scroll.min(total.saturating_sub(TEXT_MODAL_VISIBLE));
+    let end = (start + TEXT_MODAL_VISIBLE).min(total);
+
+    let mut body = Vec::new();
+    if start > 0 {
+        body.push(style(format!("  ↑ {start} more")).dim().to_string());
+    }
+    for line in &modal.lines[start..end] {
+        body.push(log_line(line, INNER));
+    }
+    if end < total {
+        body.push(style(format!("  ↓ {} more", total - end)).dim().to_string());
+    }
+    body.push(String::new());
+    body.push(
+        style("↑↓ scroll   Esc / Enter / q: close")
+            .dim()
+            .to_string(),
+    );
+    widgets::render_modal(raw_height, raw_width, &modal.title, INNER, &body)
 }

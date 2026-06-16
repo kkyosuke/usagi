@@ -52,6 +52,10 @@ pub enum Effect {
     /// settings and this workspace's local overrides. The screen is run by the
     /// event loop, which returns to the workspace screen when it is dismissed.
     OpenConfig,
+    /// Show the result lines in a scrollable text modal (rather than the results
+    /// band), for commands whose output is text to read — `man` / `history`. The
+    /// string is the modal title.
+    ShowText(&'static str),
 }
 
 /// The result of running a command: lines to append plus a side effect.
@@ -73,6 +77,16 @@ impl CommandResult {
     /// A result that appends a single line, with no extra side effect.
     fn line(line: LogLine) -> Self {
         Self::lines(vec![line])
+    }
+
+    /// A result whose `lines` are shown in a scrollable text modal titled `title`
+    /// (used by text-dumping commands like `man` / `history`) instead of the
+    /// results band.
+    fn modal(title: &'static str, lines: Vec<LogLine>) -> Self {
+        Self {
+            lines,
+            effect: Effect::ShowText(title),
+        }
     }
 }
 
@@ -226,11 +240,11 @@ impl Command for ManCommand {
             lines.push(LogLine::output(
                 "Type \"man <command>\" for usage and examples.",
             ));
-            return CommandResult::lines(lines);
+            return CommandResult::modal("Help", lines);
         }
 
         match ctx.commands.iter().find(|info| info.name == args) {
-            Some(info) => CommandResult::lines(describe(info)),
+            Some(info) => CommandResult::modal("Help", describe(info)),
             None => CommandResult::line(LogLine::error(format!("no manual entry for \"{args}\""))),
         }
     }
@@ -275,7 +289,7 @@ impl Command for HistoryCommand {
             .enumerate()
             .map(|(i, entry)| LogLine::output(format!("  {:>3}  {entry}", i + 1)))
             .collect();
-        CommandResult::lines(lines)
+        CommandResult::modal("History", lines)
     }
 }
 
@@ -838,7 +852,8 @@ mod tests {
     fn man_without_argument_lists_every_command() {
         let registry = registry();
         let result = registry.dispatch("man", &[], &[]);
-        assert_eq!(result.effect, Effect::None);
+        // `man`'s help text opens a scrollable modal rather than the band.
+        assert_eq!(result.effect, Effect::ShowText("Help"));
         let joined = result
             .lines
             .iter()

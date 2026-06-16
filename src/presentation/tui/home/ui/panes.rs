@@ -99,10 +99,18 @@ impl AgentState {
     }
 }
 
-/// The `>` cursor cell for the selected row, or a blank cell otherwise.
-fn cursor_cell(selected: bool) -> String {
-    if selected {
+/// The far-left gutter cell shared by both of a row's lines. In 切替 (Switch) the
+/// keyboard is on the list, so the selected row shows a red `>` cursor. The
+/// **active** session — the one subsequent commands operate on — is marked by a
+/// green `▎` accent bar that runs down both of its lines (this replaces the old
+/// `*` marker, whose meaning and mid-row position read poorly). Outside Switch
+/// there is no cursor, so the gutter only ever carries the active bar; when the
+/// cursor and the active row coincide in Switch, the cursor takes the column.
+fn gutter_cell(selected: bool, active: bool, in_switch: bool) -> String {
+    if in_switch && selected {
         style(">").red().bold().to_string()
+    } else if active {
+        style("▎").green().bold().to_string()
     } else {
         " ".to_string()
     }
@@ -119,35 +127,28 @@ fn name_cell(text: &str, width: usize, emphasised: bool) -> String {
     }
 }
 
-/// Builds a row's second (detail) line: indented to sit under the branch name,
-/// then the already-styled, already-clipped `detail`.
-fn detail_line(detail: String) -> String {
-    let indent = " ".repeat(NAME_PREFIX);
-    format!("{indent}{detail}")
+/// Builds a row's second (detail) line: the row's `gutter` cell at the far-left
+/// column (so the active accent bar runs down both lines), padded to sit under
+/// the branch name, then the already-styled, already-clipped `detail`.
+fn detail_line(gutter: &str, detail: String) -> String {
+    let indent = " ".repeat(NAME_PREFIX - 1);
+    format!("{gutter}{indent}{detail}")
 }
 
-/// The line-1 active-session marker cell: a `*` for the active worktree (the one
-/// subsequent commands operate on), or a blank. Kept on the identity line — not
-/// the detail line — so it never crowds the agent's `▶`/`◆` state icon.
-fn active_cell(active: bool) -> String {
-    if active {
-        style("*").green().bold().to_string()
-    } else {
-        " ".to_string()
-    }
-}
-
-/// Builds a worktree's two lines. Line 1 carries a `>` cursor for the selected
-/// entry, a `●`/`○` kind icon (primary or ordinary worktree), the branch name, a
-/// `*` marker for the active worktree, and the git `status` at the right edge.
-/// Line 2 is indented under the name and, when an agent is in use, carries its
-/// icon + label (`▶ running` / `◆ waiting`).
+/// Builds a worktree's two lines. The far-left gutter carries a `>` cursor for
+/// the selected entry in 切替 (Switch) or a green `▎` accent bar down the active
+/// worktree's two lines; line 1 then has a `●`/`○` kind icon (primary or ordinary
+/// worktree), the branch name, and the git `status` at the right edge. Line 2 is
+/// indented under the name and, when an agent is in use, carries its icon + label
+/// (`▶ running` / `◆ waiting`).
+#[allow(clippy::too_many_arguments)]
 pub(super) fn worktree_row(
     worktree: &WorktreeState,
     name_width: usize,
     detail_width: usize,
     selected: bool,
     active: bool,
+    in_switch: bool,
     live: bool,
     waiting: bool,
 ) -> (String, String) {
@@ -162,43 +163,44 @@ pub(super) fn worktree_row(
         active || selected,
     );
     let status = status_cell(Some(worktree.status));
-    let line1 = format!(
-        "{} {kind} {branch} {} {status}",
-        cursor_cell(selected),
-        active_cell(active)
-    );
+    let gutter = gutter_cell(selected, active, in_switch);
+    // Three columns sit between the name and the right-edge status (the old
+    // active-marker cell, now blank — the active bar lives in the gutter).
+    let line1 = format!("{gutter} {kind} {branch}   {status}");
 
     // Line 2 spells out the agent state with its icon, or is blank when idle.
+    // Only the active bar runs down to it — the `>` cursor stays a single point
+    // on line 1, so the detail-line gutter ignores the cursor.
     let detail = AgentState::from_flags(live, waiting)
         .detail(detail_width)
         .unwrap_or_default();
-    let line2 = detail_line(detail);
+    let line2 = detail_line(&gutter_cell(false, active, in_switch), detail);
     (line1, line2)
 }
 
 /// Builds the root's two lines: the workspace itself, belonging to no session.
-/// Line 1 carries the cursor cell, a `⌂` kind icon, the [`ROOT_NAME`] label, a
-/// `*` marker when active, and a blank status field (the root has no git
-/// status). Line 2 carries a `workspace root` detail.
+/// The far-left gutter carries the `>` cursor (in 切替 (Switch)) or the green `▎`
+/// active bar; line 1 then has a `⌂` kind icon, the [`ROOT_NAME`] label, and a
+/// blank status field (the root has no git status). Line 2 carries a
+/// `workspace root` detail.
 pub(super) fn root_row(
     name_width: usize,
     detail_width: usize,
     selected: bool,
     active: bool,
+    in_switch: bool,
 ) -> (String, String) {
     let kind = style("⌂").magenta().to_string();
     let name = name_cell(ROOT_NAME, name_width, active || selected);
     let status = status_cell(None);
-    let line1 = format!(
-        "{} {kind} {name} {} {status}",
-        cursor_cell(selected),
-        active_cell(active)
-    );
+    let gutter = gutter_cell(selected, active, in_switch);
+    let line1 = format!("{gutter} {kind} {name}   {status}");
 
+    // Only the active bar reaches line 2; the cursor stays a point on line 1.
     let detail = style(clip_to_width(ROOT_DETAIL, detail_width))
         .dim()
         .to_string();
-    let line2 = detail_line(detail);
+    let line2 = detail_line(&gutter_cell(false, active, in_switch), detail);
     (line1, line2)
 }
 
@@ -216,18 +218,19 @@ pub(super) fn dim_row(line: &str) -> String {
 /// message when none are recorded), trimmed to the available `rows`. `live`
 /// holds the worktree paths with a running agent (`▶ running`) and `waiting` the
 /// ones whose agent awaits input (`◆ waiting`, taking precedence over running).
-/// When `dim_unselected` is set (in 切替), every row except the cursor's is
-/// faded so the highlighted session reads first.
+/// When `in_switch` is set (in 切替), the keyboard is on the list: the selected
+/// row shows a `>` cursor and every other row is faded so the highlighted session
+/// reads first.
 pub(super) fn left_pane(
     list: &WorktreeList,
     live: &HashSet<PathBuf>,
     waiting: &HashSet<PathBuf>,
     left_w: usize,
     rows: usize,
-    dim_unselected: bool,
+    in_switch: bool,
 ) -> Vec<String> {
-    // Line 1: prefix + name + the active-marker cell + a space + the right-edge
-    // status field.
+    // Line 1: prefix + name + the (now-blank) active-marker cell + a space + the
+    // right-edge status field.
     let name_width = left_w.saturating_sub(NAME_PREFIX + ACTIVE_COL + 1 + STATUS_COL);
     // Line 2: indented under the branch name, then the detail text.
     let detail_width = left_w.saturating_sub(NAME_PREFIX);
@@ -236,8 +239,9 @@ pub(super) fn left_pane(
         detail_width,
         list.root_selected(),
         list.root_active(),
+        in_switch,
     );
-    if dim_unselected && !list.root_selected() {
+    if in_switch && !list.root_selected() {
         root_top = dim_row(&root_top);
         root_detail = dim_row(&root_detail);
     }
@@ -269,10 +273,11 @@ pub(super) fn left_pane(
                 detail_width,
                 selected,
                 row == list.active_index(),
+                in_switch,
                 live.contains(&w.path),
                 waiting.contains(&w.path),
             );
-            if dim_unselected && !selected {
+            if in_switch && !selected {
                 top = dim_row(&top);
                 detail = dim_row(&detail);
             }
@@ -453,9 +458,20 @@ pub(super) fn switch_preview(state: &HomeState, width: usize, rows: usize) -> Ve
     let mut lines = vec![header, String::new()];
 
     if live {
-        // Selecting re-attaches the running shell / agent.
-        lines.push(style("● live terminal").green().to_string());
-        lines.push(style("Enter / l で再アタッチ").dim().to_string());
+        // Selecting re-attaches the running shell / agent: preview its actual
+        // screen (the live snapshot taken before painting) so the choice shows
+        // what re-attaching reveals. Fall back to a label until the first
+        // snapshot is available.
+        match state.terminal_view() {
+            Some(view) => {
+                let body = rows.saturating_sub(lines.len());
+                lines.extend(terminal_pane(view, width, body));
+            }
+            None => {
+                lines.push(style("● live terminal").green().to_string());
+                lines.push(style("Enter / l で再アタッチ").dim().to_string());
+            }
+        }
     } else {
         // Selecting opens 在席 on this session: preview its action menu.
         lines.push(style("Run a command:").dim().to_string());

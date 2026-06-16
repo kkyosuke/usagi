@@ -21,7 +21,7 @@ use crate::presentation::tui::widgets;
 
 use chrome::{
     footer_line, hint_lines, input_line, mode_ladder, overview_input_box, quit_confirm_frame,
-    remove_modal_frame, switch_create_rows, title_bar,
+    remove_modal_frame, switch_create_rows, text_modal_frame, title_bar,
 };
 use panes::{left_pane, log_tail, right_pane_contents};
 
@@ -101,6 +101,11 @@ const INPUT_BOX_MIN_HEIGHT: usize = 8;
 /// Most session rows the removal modal shows at once; a longer list scrolls to
 /// keep the cursor in view, with a count of the hidden rows above and below.
 const REMOVE_MODAL_VISIBLE: usize = 8;
+
+/// Body lines the text modal shows at once; a longer dump scrolls, with a count
+/// of the hidden lines above and below. Shared with the event loop's scroll
+/// clamp and paging step.
+pub const TEXT_MODAL_VISIBLE: usize = 16;
 
 /// How many rows the 統括 (Overview) results band spends below the input on the
 /// command log tail. The newest output stays visible while typing. Kept small
@@ -192,6 +197,10 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
     if let Some(modal) = state.remove_modal() {
         return remove_modal_frame(raw_height, raw_width, modal);
     }
+    // The text modal (a text-dumping command's output) overlays the screen too.
+    if let Some(modal) = state.text_modal() {
+        return text_modal_frame(raw_height, raw_width, modal);
+    }
 
     let (height, width) = widgets::normalize_size(raw_height, raw_width);
     let (left_w, right_w) = layout(width);
@@ -271,11 +280,11 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
     }
 
     lines.extend(input_lines);
-    // The 統括 results band: the command log tail, drawn below the input. Always
-    // exactly `results` rows tall (blank-padded) so the footer stays at the
-    // bottom regardless of how much output there is.
+    // The 統括 results band: only the latest command's response, drawn below the
+    // input. Always exactly `results` rows tall (blank-padded) so the footer stays
+    // at the bottom regardless of how much output there is.
     if results > 0 {
-        let tail = log_tail(state.log(), width, results);
+        let tail = log_tail(state.response_lines(), width, results);
         for row in 0..results {
             let line = tail.get(row).cloned().unwrap_or_default();
             lines.push(pad_to_width(line, width));

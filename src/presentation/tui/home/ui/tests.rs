@@ -3,7 +3,7 @@ use super::panes::*;
 use super::*;
 
 use super::super::command::{CommandHint, CommandInfo};
-use super::super::state::{LogLine, WorktreeList, ROOT_NAME};
+use super::super::state::{LogLine, TextModal, WorktreeList, ROOT_NAME};
 use super::super::terminal_view::TerminalView;
 use crate::domain::settings::SessionActionUi;
 use crate::domain::workspace_state::{BranchStatus, WorktreeState};
@@ -33,6 +33,41 @@ fn state_with(worktrees: Vec<WorktreeState>) -> HomeState {
 
 fn stripped(lines: &[String]) -> String {
     console::strip_ansi_codes(&lines.join("\n")).into_owned()
+}
+
+#[test]
+fn text_modal_frame_windows_a_long_dump_with_more_counts() {
+    let lines: Vec<LogLine> = (0..30)
+        .map(|i| LogLine::output(format!("entry {i}")))
+        .collect();
+    let modal = TextModal {
+        title: "Help".to_string(),
+        lines,
+        scroll: 5,
+    };
+    let frame = stripped(&text_modal_frame(40, 120, &modal));
+    // The title and the hidden-line counts above and below the window show.
+    assert!(frame.contains("Help"));
+    assert!(frame.contains("↑ 5 more"));
+    // 30 total - (scroll 5 + 16 visible) = 9 hidden below.
+    assert!(frame.contains("↓ 9 more"));
+    // A windowed line is visible; ones outside the window are not.
+    assert!(frame.contains("entry 5"));
+    assert!(!frame.contains("entry 0"));
+    assert!(frame.contains("Esc / Enter / q: close"));
+}
+
+#[test]
+fn text_modal_frame_shows_a_short_dump_without_scroll_counts() {
+    let modal = TextModal {
+        title: "History".to_string(),
+        lines: vec![LogLine::output("  1  man"), LogLine::output("  2  history")],
+        scroll: 0,
+    };
+    let frame = stripped(&text_modal_frame(40, 120, &modal));
+    assert!(frame.contains("History"));
+    assert!(frame.contains("man"));
+    assert!(!frame.contains("more"));
 }
 
 #[test]
@@ -109,12 +144,15 @@ fn status_label_pairs_a_git_icon_with_each_word() {
 
 #[test]
 fn worktree_row_marks_selected_primary_and_detached() {
+    // The `>` cursor only appears in 切替 (Switch): the selected row carries it
+    // when `in_switch` is set.
     let (top, _) = worktree_row(
         &worktree(Some("main"), true, BranchStatus::Pushed),
         10,
         10,
         true,
         false,
+        true,
         false,
         false,
     );
@@ -122,12 +160,26 @@ fn worktree_row_marks_selected_primary_and_detached() {
     assert!(top.contains('●'));
     assert!(top.contains("main"));
 
+    // The same selected row outside Switch shows no cursor.
+    let (top_no_switch, _) = worktree_row(
+        &worktree(Some("main"), true, BranchStatus::Pushed),
+        10,
+        10,
+        true,
+        false,
+        false,
+        false,
+        false,
+    );
+    assert!(!top_no_switch.contains('>'));
+
     let (other_top, _) = worktree_row(
         &worktree(Some("feature"), false, BranchStatus::Local),
         10,
         10,
         false,
         false,
+        true,
         false,
         false,
     );
@@ -143,12 +195,13 @@ fn worktree_row_marks_selected_primary_and_detached() {
         false,
         false,
         false,
+        false,
     );
     assert!(detached_top.contains("(detached)"));
 }
 
 #[test]
-fn worktree_row_marks_the_active_worktree_on_the_identity_line() {
+fn worktree_row_marks_the_active_worktree_with_a_gutter_bar_on_both_lines() {
     let (active_top, active_detail) = worktree_row(
         &worktree(Some("feature"), false, BranchStatus::Local),
         10,
@@ -156,12 +209,16 @@ fn worktree_row_marks_the_active_worktree_on_the_identity_line() {
         false,
         true,
         false,
+        true,
         false,
     );
-    // The `*` marker sits on line 1, clear of the agent-state detail line.
-    assert!(active_top.contains('*'));
-    assert!(!active_detail.contains('*'));
-    let (idle_top, _) = worktree_row(
+    // The green `▎` accent bar runs down both lines of the active row (the
+    // detail line carries it too, to the left of the agent state).
+    assert!(active_top.contains('▎'));
+    assert!(active_detail.contains('▎'));
+    // The old `*` marker is gone.
+    assert!(!active_top.contains('*'));
+    let (idle_top, idle_detail) = worktree_row(
         &worktree(Some("feature"), false, BranchStatus::Local),
         10,
         10,
@@ -169,8 +226,10 @@ fn worktree_row_marks_the_active_worktree_on_the_identity_line() {
         false,
         false,
         false,
+        false,
     );
-    assert!(!idle_top.contains('*'));
+    assert!(!idle_top.contains('▎'));
+    assert!(!idle_detail.contains('▎'));
 }
 
 #[test]
@@ -179,6 +238,7 @@ fn worktree_row_shows_a_running_agent_and_one_waiting_for_input() {
         &worktree(Some("feature"), false, BranchStatus::Local),
         10,
         12,
+        false,
         false,
         false,
         true,
@@ -193,6 +253,7 @@ fn worktree_row_shows_a_running_agent_and_one_waiting_for_input() {
         12,
         false,
         false,
+        false,
         true,
         true,
     );
@@ -204,6 +265,7 @@ fn worktree_row_shows_a_running_agent_and_one_waiting_for_input() {
         &worktree(Some("feature"), false, BranchStatus::Local),
         10,
         12,
+        false,
         false,
         false,
         false,
@@ -243,26 +305,33 @@ fn worktree_row_truncates_a_long_branch() {
         false,
         false,
         false,
+        false,
     );
     assert!(top.contains('…'));
 }
 
 #[test]
 fn root_row_marks_selected_and_active() {
-    let (top, detail) = root_row(10, 20, true, false);
+    // The `>` cursor shows on the selected root only in 切替 (Switch).
+    let (top, detail) = root_row(10, 20, true, false, true);
     assert!(top.contains('>'));
     assert!(top.contains('⌂'));
     assert!(top.contains(ROOT_NAME));
     assert!(detail.contains("workspace root"));
+    // The same selected root outside Switch shows no cursor.
+    let (top_no_switch, _) = root_row(10, 20, true, false, false);
+    assert!(!top_no_switch.contains('>'));
 
-    // The active marker now lives on the identity line, not the detail line.
-    let (active_top, active_detail) = root_row(10, 20, false, true);
-    assert!(active_top.contains('*'));
-    assert!(!active_detail.contains('*'));
+    // The active root carries the green `▎` bar down both lines, not a `*`.
+    let (active_top, active_detail) = root_row(10, 20, false, true, false);
+    assert!(active_top.contains('▎'));
+    assert!(active_detail.contains('▎'));
+    assert!(!active_top.contains('*'));
 
-    let (idle_top, _) = root_row(10, 20, false, false);
+    let (idle_top, idle_detail) = root_row(10, 20, false, false, false);
     assert!(!idle_top.contains('>'));
-    assert!(!idle_top.contains('*'));
+    assert!(!idle_top.contains('▎'));
+    assert!(!idle_detail.contains('▎'));
     assert!(idle_top.contains(ROOT_NAME));
 }
 
@@ -329,19 +398,19 @@ fn left_pane_is_trimmed_to_available_rows() {
 }
 
 #[test]
-fn left_pane_marks_the_active_worktree_on_its_identity_line() {
+fn left_pane_marks_the_active_worktree_with_a_gutter_bar() {
     let mut list = list_with(vec![
         worktree(Some("main"), true, BranchStatus::Pushed),
         worktree(Some("feature"), false, BranchStatus::Local),
     ]);
     list.activate_by_name("feature");
     let lines = left_pane(&list, &HashSet::new(), &HashSet::new(), 30, 6, false);
-    // The root identity line is not marked; the active "feature" row carries
-    // the `*` on its identity line (line 1), not its detail line (line 2).
-    assert!(!lines[0].contains('*'));
+    // The root is not active; the active "feature" row carries the green `▎`
+    // accent bar down both of its lines (identity + detail).
+    assert!(!lines[0].contains('▎'));
     assert!(lines[4].contains("feature"));
-    assert!(lines[4].contains('*'));
-    assert!(!lines[5].contains('*'));
+    assert!(lines[4].contains('▎'));
+    assert!(lines[5].contains('▎'));
 }
 
 #[test]
@@ -424,8 +493,30 @@ fn switch_preview_shows_a_live_session_as_a_reattach() {
     // Header carries the git status and the running agent state.
     assert!(preview.contains("local"));
     assert!(preview.contains("running"));
-    // A live session previews the live-terminal re-attach, not the menu.
+    // A live session with no snapshot yet falls back to the re-attach label,
+    // not the action menu.
     assert!(preview.contains("live terminal"));
+    assert!(!preview.contains("Run a command"));
+}
+
+#[test]
+fn switch_preview_shows_a_live_session_as_its_actual_screen() {
+    let mut running = worktree(Some("feat"), false, BranchStatus::Local);
+    running.path = PathBuf::from("/repo/run");
+    let mut state = HomeState::new("usagi", vec![running], None);
+    state.set_live([PathBuf::from("/repo/run")].into());
+    // The event loop snapshots the highlighted live session before painting.
+    state.set_terminal_view(TerminalView::from_rows(
+        vec!["$ echo hi".to_string(), "hi".to_string()],
+        None,
+    ));
+    state.enter_switch(super::super::state::ReturnMode::Overview);
+    state.switch_move_down();
+    let preview = stripped(&switch_preview(&state, 40, 12));
+    // The real terminal screen is shown, not the placeholder label.
+    assert!(preview.contains("$ echo hi"));
+    assert!(preview.contains("hi"));
+    assert!(!preview.contains("live terminal"));
     assert!(!preview.contains("Run a command"));
 }
 
