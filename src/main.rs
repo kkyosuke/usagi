@@ -53,6 +53,9 @@ enum Commands {
     },
     /// Run the issue MCP server over stdio (for AI agents)
     Mcp,
+    /// Run the session orchestration MCP server over stdio (for AI agents to
+    /// create sessions and delegate prompts to them)
+    SessionMcp,
     /// Sync the current repository's worktree state to .usagi/state.json
     Status,
 }
@@ -69,6 +72,7 @@ fn main() -> anyhow::Result<()> {
         Commands::Issue { command } => usagi::presentation::cli::issue::run(command),
         Commands::LlmMcp { model } => usagi::presentation::cli::llm_mcp::run(model),
         Commands::Mcp => usagi::presentation::cli::mcp::run(),
+        Commands::SessionMcp => usagi::presentation::cli::session_mcp::run(),
         Commands::Status => usagi::presentation::cli::status::run(),
     };
 

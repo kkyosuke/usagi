@@ -111,10 +111,11 @@ pub fn event_loop(
 ) -> Result<Outcome> {
     let mut painter = FramePainter::new();
     loop {
-        // Mark any background sessions waiting for input, and which have a live
-        // (running) agent, before painting.
+        // Mark any background sessions waiting for input, which have a live
+        // (running) agent, and which have finished, before painting.
         state.set_waiting(monitor.waiting());
         state.set_live(monitor.live());
+        state.set_done(monitor.done());
         // Surface the top-right "update available" notice once the background
         // release check has found a newer version than this build.
         state.set_update(update.status().map(|status| status.latest));

@@ -14,10 +14,12 @@
 //! For each it reads two signals — the phase the agent's lifecycle hooks
 //! recorded (via [`agent_state_store`]) and the shell's bell count — and lets
 //! the monitor decide (the phase wins; the bell is the fallback for agents
-//! without hooks). When a detached session starts waiting, the watcher fires a
-//! one-shot desktop notification and flags it. The flag is exposed through a
-//! [`MonitorHandle`] the render loops read to mark the session in the sidebar
-//! (`◆`). The session the user is attached to is excluded — it is seen live.
+//! without hooks). When a **background** session starts waiting (`◆`) or its
+//! agent finishes (`✓`), the watcher fires a one-shot desktop notification. The
+//! per-session state is exposed through a [`MonitorHandle`] the render loops read
+//! to mark the session in the sidebar. The attached session is shown with the
+//! same state as anywhere else (it is seen live) — being attached only suppresses
+//! its notification, not its badge.
 //!
 //! This is pure I/O and process ownership (it spawns shells, holds their
 //! handles, runs a watcher thread, and shows desktop notifications), so — like
@@ -106,6 +108,11 @@ impl MonitorHandle {
         self.lock().monitor.waiting().clone()
     }
 
+    /// A snapshot of the worktree paths whose agent has finished (exited).
+    pub fn done(&self) -> HashSet<PathBuf> {
+        self.lock().monitor.done().clone()
+    }
+
     /// A snapshot of the worktree paths with a live (running) embedded session:
     /// a shell — and any agent CLI inside it — is still alive, whether attached
     /// or left running in the background. The render loops read this to mark
@@ -121,7 +128,8 @@ impl MonitorHandle {
     }
 
     /// Declare the foreground (attached) session, or clear it with `None`. The
-    /// attached session is never reported as waiting.
+    /// attached session is shown with its true state like any other; being
+    /// attached only suppresses its desktop notification and the bell heuristic.
     pub fn set_attached(&self, path: Option<PathBuf>) {
         self.lock().monitor.set_attached(path);
     }
@@ -222,6 +230,37 @@ impl TerminalPool {
             .expect("the session was just inserted or already present"))
     }
 
+    /// Kill and forget every live shell whose worktree lies at or under `root`.
+    ///
+    /// Called when a session is removed: deleting its worktree directory does not
+    /// stop the shell (and any agent CLI) still running there, so without this the
+    /// exited-looking-but-alive shell lingers in the pool keyed by its path. A
+    /// session later recreated at the same path would then re-attach to that stale
+    /// shell — inheriting the previous run's agent and scrollback — instead of
+    /// spawning fresh. Dropping each [`PtySession`] kills its shell (via `Drop`),
+    /// and the watched / monitor / phase state for the path is cleared too.
+    pub fn remove_under(&mut self, root: &Path) {
+        let removed: Vec<PathBuf> = self
+            .sessions
+            .keys()
+            .filter(|path| path.as_path() == root || path.starts_with(root))
+            .cloned()
+            .collect();
+        if removed.is_empty() {
+            return;
+        }
+        for path in &removed {
+            // Dropping the PtySession kills the shell it owns.
+            self.sessions.remove(path);
+        }
+        let mut shared = self.lock();
+        for path in &removed {
+            shared.sessions.remove(path);
+            shared.monitor.forget(path);
+            agent_state_store::clear(path);
+        }
+    }
+
     /// Snapshot the live terminal for the session rooted at `dir`, resized to the
     /// current pane geometry, for the sidebar's read-only preview. Returns `None`
     /// when no live session is rooted there, so the right pane falls back to the
@@ -256,7 +295,8 @@ impl Drop for TerminalPool {
 
 /// Spawn the watcher thread: every [`POLL_INTERVAL`] it prunes exited sessions,
 /// feeds the live bell counts to the [`SessionMonitor`], and fires a one-shot
-/// notification for each session that has just begun waiting for input.
+/// notification for each background session that has just begun waiting for input
+/// or whose agent has just finished.
 fn spawn_watcher(
     shared: Arc<Mutex<Shared>>,
     stop: Arc<AtomicBool>,
@@ -268,7 +308,7 @@ fn spawn_watcher(
         }
         std::thread::sleep(POLL_INTERVAL);
 
-        let labels: Vec<String> = {
+        let notices: Vec<(String, session_monitor::NoticeKind)> = {
             let mut shared = match shared.lock() {
                 Ok(shared) => shared,
                 Err(_) => break,
@@ -301,32 +341,43 @@ fn spawn_watcher(
                     )
                 })
                 .collect();
-            let newly = shared.monitor.observe(&readings);
-            newly
-                .iter()
-                .filter_map(|path| shared.sessions.get(path).map(|w| w.label.clone()))
+            shared
+                .monitor
+                .observe(&readings)
+                .into_iter()
+                .filter_map(|notice| {
+                    shared
+                        .sessions
+                        .get(&notice.path)
+                        .map(|w| (w.label.clone(), notice.kind))
+                })
                 .collect()
         };
 
         if notifications_enabled {
-            for label in labels {
-                notify_waiting(&label);
+            for (label, kind) in notices {
+                notify(&label, kind);
             }
         }
     })
 }
 
-/// Show a desktop notification that a background session is waiting for input.
+/// Show a desktop notification that a background session changed state: it began
+/// waiting for input, or its agent finished.
 ///
 /// Best-effort: failures (e.g. a headless environment without a notification
 /// daemon) are ignored so they never disturb the watcher loop.
 ///
 /// The body leads with a small ASCII-art rabbit rather than an emoji so it
 /// renders consistently across notification daemons that lack emoji glyphs.
-fn notify_waiting(label: &str) {
+fn notify(label: &str, kind: session_monitor::NoticeKind) {
+    let message = match kind {
+        session_monitor::NoticeKind::Waiting => format!("{label} が入力待ちです"),
+        session_monitor::NoticeKind::Done => format!("{label} が完了しました"),
+    };
     let _ = notify_rust::Notification::new()
         .summary("usagi")
-        .body(&format!("(\\_/)\n(='.'=)\n{label} が入力待ちです"))
+        .body(&format!("(\\_/)\n(='.'=)\n{message}"))
         .show();
 }
 

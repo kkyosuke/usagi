@@ -10,6 +10,7 @@
   - [`usagi issue`](#usagi-issue)
   - [`usagi mcp`](#usagi-mcp)
   - [`usagi llm-mcp`](#usagi-llm-mcp)
+  - [`usagi session-mcp`](#usagi-session-mcp)
 
 ## CLI コマンド一覧
 
@@ -26,6 +27,7 @@
 | `usagi issue <create\|list\|graph\|show\|update\|search\|delete>` | カレントリポジトリのタスク issue（`.usagi/issues/`）を操作する（[data/02-workspace.md](../data/02-workspace.md#issues-タスク-issue)） |
 | `usagi mcp` | issue 操作を MCP（Model Context Protocol）サーバとして stdio で公開し、AI エージェントから使えるようにする |
 | `usagi llm-mcp [--model <MODEL>]` | ローカル LLM（Ollama）を MCP サーバとして公開し、クラウド Agent が軽量タスクを委譲できるようにする（トークン節約） |
+| `usagi session-mcp` | セッション操作（作成・一覧・別セッションへのプロンプト委譲）を MCP サーバとして stdio で公開し、AI エージェントがセッションをオーケストレーションできるようにする |
 
 ### `usagi init`
 
@@ -109,3 +111,7 @@ $ usagi issue graph
 ### `usagi llm-mcp`
 
 ローカル LLM（Ollama）を **MCP サーバ**として公開し、クラウド Agent が要約・命名・定型文生成などの軽量タスクを `local_llm_ask` ツールで委譲できるようにします。`--model` で委譲先モデルを指定します（既定は `qwen2.5-coder:7b`）。設定での有効化・資材のインストール・対応 tool の詳細は専用の章 [3.4 ローカル LLM MCP サーバ](04-llm-mcp.md) を参照してください。
+
+### `usagi session-mcp`
+
+usagi のセッション操作を **MCP サーバ**として公開し、AI エージェントが `session_create`（作成）・`session_list`（一覧）・`session_prompt`（別セッションのエージェントへプロンプトを委譲）でセッションをオーケストレーションできるようにします。対応 tool・`session_prompt` の挙動・アーキテクチャの詳細は専用の章 [3.5 セッション MCP サーバ](05-session-mcp.md) を参照してください。

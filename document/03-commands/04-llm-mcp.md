@@ -1,6 +1,6 @@
 # 3.4 ローカル LLM MCP サーバ（`usagi llm-mcp`）
 
-> [コマンドリファレンス](README.md) ｜ ← 前へ [3.3 MCP サーバ](03-mcp.md)
+> [コマンドリファレンス](README.md) ｜ ← 前へ [3.3 MCP サーバ](03-mcp.md) ｜ 次へ → [3.5 セッション MCP サーバ](05-session-mcp.md)
 
 `usagi llm-mcp` は、ローカルで動く LLM（[Ollama](https://ollama.com) 経由）を
 **MCP（Model Context Protocol）サーバ**として AI エージェントに公開するコマンドです。

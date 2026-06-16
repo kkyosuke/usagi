@@ -128,6 +128,27 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
     let mut existing_branches =
         move || crate::usecase::session::existing_branch_names(&branches_root);
 
+    // Whether to surface desktop notifications when a background session starts
+    // waiting for input, from the effective settings (project-local over the
+    // global default). Any failure to read settings defaults to enabled, like
+    // `hop`'s welcome notification.
+    let notifications_enabled = crate::infrastructure::storage::Storage::open_default()
+        .and_then(|storage| crate::usecase::settings::effective(&storage, &workspace.path))
+        .map(|settings| settings.notifications_enabled)
+        .unwrap_or(true);
+
+    // The live shells embedded in the right pane, one per worktree, kept alive
+    // across session switches and for as long as this screen is open. Dropped on
+    // return, which kills any shell still running. The pool also watches every
+    // shell's bell and flags / notifies the ones waiting for input.
+    //
+    // Wrapped in a `RefCell` so the pane driver (`open_terminal`), the sidebar
+    // preview (`preview`), and `remove_session` (which evicts a removed session's
+    // shell) can all reach it: their borrows never overlap in time (the event
+    // loop calls one at a time).
+    let pool = std::cell::RefCell::new(terminal_pool::TerminalPool::new(notifications_enabled));
+    let monitor = pool.borrow().monitor();
+
     // Removing a session deletes its worktrees/branches and forgets it. A
     // session with uncommitted changes is left untouched unless `--force`.
     let remove_root = workspace.path.clone();
@@ -136,11 +157,18 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
         name,
         force,
     ) {
-        Ok(outcome) if outcome.removed => SessionOutcome {
-            line: LogLine::output(format!("Removed session \"{name}\" 🧹")),
-            sessions: reload_sessions(&remove_root),
-            select: None,
-        },
+        Ok(outcome) if outcome.removed => {
+            // Kill any shell still running under the removed session so a session
+            // later recreated at the same path starts fresh instead of
+            // re-attaching to this run's agent and its history.
+            let session_root = remove_root.join(".usagi").join("sessions").join(name);
+            pool.borrow_mut().remove_under(&session_root);
+            SessionOutcome {
+                line: LogLine::output(format!("Removed session \"{name}\" 🧹")),
+                sessions: reload_sessions(&remove_root),
+                select: None,
+            }
+        }
         Ok(outcome) => {
             let paths = outcome
                 .dirty
@@ -186,26 +214,6 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
         .unwrap_or_else(|_| {
             crate::domain::settings::Settings::default().agent_launch_command(&usagi_bin)
         });
-
-    // Whether to surface desktop notifications when a background session starts
-    // waiting for input, from the effective settings (project-local over the
-    // global default). Any failure to read settings defaults to enabled, like
-    // `hop`'s welcome notification.
-    let notifications_enabled = crate::infrastructure::storage::Storage::open_default()
-        .and_then(|storage| crate::usecase::settings::effective(&storage, &workspace.path))
-        .map(|settings| settings.notifications_enabled)
-        .unwrap_or(true);
-
-    // The live shells embedded in the right pane, one per worktree, kept alive
-    // across session switches and for as long as this screen is open. Dropped on
-    // return, which kills any shell still running. The pool also watches every
-    // shell's bell and flags / notifies the ones waiting for input.
-    //
-    // Wrapped in a `RefCell` so both the pane driver (`open_terminal`) and the
-    // sidebar preview (`preview`) can reach it: their borrows never overlap in
-    // time (the event loop calls one or the other, never both at once).
-    let pool = std::cell::RefCell::new(terminal_pool::TerminalPool::new(notifications_enabled));
-    let monitor = pool.borrow().monitor();
 
     // Check the project's git remote for a newer release than this build, on a
     // background thread so a slow or unreachable network never delays the screen.
