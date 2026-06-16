@@ -30,8 +30,10 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use console::Term;
 use crossterm::event::{
-    self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind,
+    self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyEventKind,
+    KeyModifiers, MouseEventKind,
 };
+use crossterm::execute;
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 
 use crate::infrastructure::pty::PtySession;
@@ -69,8 +71,13 @@ pub fn run(
     monitor: &MonitorHandle,
 ) -> Result<PaneExit> {
     enable_raw_mode().context("failed to enter raw mode for the embedded terminal")?;
+    // Capture pastes as a single `Event::Paste` so a multi-line paste reaches the
+    // shell as one block instead of a key stream whose embedded Enters each
+    // submit a line to the agent (see `pump_input`).
+    let _ = execute!(std::io::stdout(), EnableBracketedPaste);
     let _ = term.clear_screen();
     let result = drive(term, state, pty, monitor);
+    let _ = execute!(std::io::stdout(), DisableBracketedPaste);
     let _ = disable_raw_mode();
     let _ = term.show_cursor();
     result
@@ -194,6 +201,14 @@ fn pump_input(
                     pty.write(&bytes)?;
                 }
             }
+            // A bracketed paste arrives as one block: forward it whole, so an
+            // agent that supports bracketed paste inserts the multi-line text
+            // instead of submitting on each embedded newline.
+            Event::Paste(text) => {
+                // Pasting returns to the live screen, like typing.
+                *scrollback = 0;
+                pty.write(&encode_paste(&text, pty.bracketed_paste()))?;
+            }
             // The wheel scrolls the history when it is over the terminal pane.
             Event::Mouse(mouse) => {
                 if let Some(delta) = wheel_delta(mouse.kind) {
@@ -290,6 +305,27 @@ fn is_press(key: KeyEvent) -> bool {
 /// `Ctrl-O` opens the session picker (see [`run_session_picker`]).
 fn is_leader(key: &KeyEvent) -> bool {
     key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('o')
+}
+
+/// Bracketed-paste start / end markers (DECSET 2004). A program that requested
+/// the mode treats everything between them as one paste.
+const PASTE_START: &[u8] = b"\x1b[200~";
+const PASTE_END: &[u8] = b"\x1b[201~";
+
+/// Encode a paste for the shell. When the running program asked for bracketed
+/// paste (`bracketed`), wrap the text in the start/end markers so it lands as a
+/// single block — the agent inserts the multi-line text rather than submitting
+/// on each newline. Otherwise forward the raw bytes (the program never opted in,
+/// so there is nothing to wrap).
+fn encode_paste(text: &str, bracketed: bool) -> Vec<u8> {
+    if !bracketed {
+        return text.as_bytes().to_vec();
+    }
+    let mut bytes = Vec::with_capacity(PASTE_START.len() + text.len() + PASTE_END.len());
+    bytes.extend_from_slice(PASTE_START);
+    bytes.extend_from_slice(text.as_bytes());
+    bytes.extend_from_slice(PASTE_END);
+    bytes
 }
 
 /// Translate a key event into the bytes a shell expects on its input. Unknown

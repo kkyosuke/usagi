@@ -185,6 +185,14 @@ impl PtySession {
         self.parser.lock().expect("pty parser mutex poisoned")
     }
 
+    /// Whether the running program has asked for bracketed paste mode
+    /// (DECSET 2004). When it has, pasted text must be wrapped in the
+    /// `ESC [ 200~` / `ESC [ 201~` markers so the program treats the whole block
+    /// as a single paste (newlines insert rather than submit each line).
+    pub fn bracketed_paste(&self) -> bool {
+        self.parser().screen().bracketed_paste()
+    }
+
     /// The running count of audible bells the shell has emitted so far. The
     /// session monitor compares it against a baseline to tell when an embedded
     /// agent has rung the bell to ask for input.
