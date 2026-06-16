@@ -45,7 +45,7 @@ TUI を起動します。代替スクリーン上で起動画面を表示し、O
 ### `usagi status`
 
 `git worktree list` などを読み取り専用で検査し、`<repo>/.usagi/state.json` を同期したうえで、
-各 worktree のブランチ・HEAD・`local` / `pushed` / `merged` 状態を一覧表示します。
+各 worktree のブランチ・HEAD・`local` / `pushed` / `synced`（up to date）状態を一覧表示します。
 
 ### `usagi config`
 

@@ -1810,15 +1810,15 @@ mod tests {
 
     #[test]
     fn multi_repo_session_collapses_to_one_row_with_an_aggregated_status() {
-        // A session spanning three repositories: two merged, one still local.
+        // A session spanning three repositories: two synced, one still local.
         let mut merged_a = worktree("feature");
         merged_a.path = PathBuf::from("/repo/.usagi/sessions/feature/app-a");
         merged_a.primary = true;
-        merged_a.status = BranchStatus::Merged;
+        merged_a.status = BranchStatus::UpToDate;
         merged_a.upstream = Some("origin/feature".to_string());
         let mut merged_b = worktree("feature");
         merged_b.path = PathBuf::from("/repo/.usagi/sessions/feature/app-b");
-        merged_b.status = BranchStatus::Merged;
+        merged_b.status = BranchStatus::UpToDate;
         let mut local_c = worktree("feature");
         local_c.path = PathBuf::from("/repo/.usagi/sessions/feature/app-c");
         local_c.status = BranchStatus::Local;
