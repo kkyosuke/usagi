@@ -21,7 +21,7 @@ use crate::presentation::tui::widgets;
 
 use chrome::{
     footer_line, hint_lines, input_line, mode_ladder, overview_input_box, quit_confirm_frame,
-    remove_modal_frame, switch_create_rows, text_modal_frame, title_bar,
+    remove_modal_frame, switch_create_rows, text_modal_frame, title_bar, update_banner,
 };
 use panes::{left_pane, log_tail, right_pane_contents};
 
@@ -314,7 +314,44 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
         }
     }
     lines.push(footer_line(width, state));
+
+    // Overlay the top-right "update available" notice once the background check
+    // has found a newer release than this build. It is anchored to the top of the
+    // right pane (the rows just below the title bar and mode ladder), where the
+    // default Overview screen is blank — so the mascot reads cleanly in the
+    // top-right corner of the content.
+    if let Some(latest) = state.update() {
+        overlay_top_right(&mut lines, body_start, width, &update_banner(&latest));
+    }
+
     lines
+}
+
+/// Right-anchors each line of `banner` onto the `lines` starting at row `top`,
+/// appending it after the existing content. A row is only overlaid when its
+/// current content does not reach the banner's left column, so busy rows (a
+/// session card, a live terminal) are never clobbered; the banner is skipped
+/// entirely when it cannot fit the width.
+fn overlay_top_right(lines: &mut [String], top: usize, width: usize, banner: &[String]) {
+    let block_w = banner
+        .iter()
+        .map(|line| console::measure_text_width(line))
+        .max()
+        .unwrap_or(0);
+    if block_w == 0 || block_w >= width {
+        return;
+    }
+    let target_left = width - block_w;
+    for (offset, segment) in banner.iter().enumerate() {
+        let Some(base) = lines.get_mut(top + offset) else {
+            break;
+        };
+        let base_w = console::measure_text_width(base);
+        if base_w <= target_left {
+            base.push_str(&" ".repeat(target_left - base_w));
+            base.push_str(segment);
+        }
+    }
 }
 
 #[cfg(test)]

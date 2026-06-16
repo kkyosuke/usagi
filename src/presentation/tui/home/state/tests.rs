@@ -998,6 +998,18 @@ fn live_paths_track_sessions_with_a_running_agent() {
 }
 
 #[test]
+fn update_holds_the_latest_release_once_set() {
+    use crate::domain::version::Version;
+    let mut state = state();
+    assert!(state.update().is_none());
+    let latest = Version::parse("0.2.0");
+    state.set_update(latest);
+    assert_eq!(state.update(), latest);
+    state.set_update(None);
+    assert!(state.update().is_none());
+}
+
+#[test]
 fn has_live_sessions_and_live_count_follow_the_live_set() {
     let mut state = state();
     assert!(!state.has_live_sessions());

@@ -13,6 +13,7 @@ pub mod terminal_pane;
 pub mod terminal_pool;
 pub mod terminal_view;
 pub mod ui;
+pub mod update;
 
 use std::path::Path;
 
@@ -177,6 +178,26 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
     let pool = std::cell::RefCell::new(terminal_pool::TerminalPool::new(notifications_enabled));
     let monitor = pool.borrow().monitor();
 
+    // Check the project's git remote for a newer release than this build, on a
+    // background thread so a slow or unreachable network never delays the screen.
+    // The result is written to the handle the event loop reads each redraw; when
+    // a newer version is published it surfaces the top-right "update available"
+    // notice. Any failure (offline, git missing, already up to date) simply
+    // leaves the handle empty and the notice hidden.
+    let update = update::UpdateHandle::new();
+    {
+        let handle = update.clone();
+        std::thread::spawn(move || {
+            if let Some(status) =
+                crate::usecase::update_check::check(env!("CARGO_PKG_VERSION"), || {
+                    crate::infrastructure::release::fetch_tags(env!("CARGO_PKG_REPOSITORY"))
+                })
+            {
+                handle.set(status);
+            }
+        });
+    }
+
     // Opening a terminal embeds a live shell in the right pane: the pane stays
     // inside the workspace screen (sidebar still visible) and runs the shell
     // until the user detaches, switches sessions, or it exits. `:agent` is the
@@ -245,6 +266,7 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
         state,
         &workspace.path,
         &monitor,
+        &update,
         &mut persist,
         &mut create_session,
         &mut remove_session,

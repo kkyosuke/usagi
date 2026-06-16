@@ -16,6 +16,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use crate::domain::settings::SessionActionUi;
+use crate::domain::version::Version;
 use crate::domain::workspace_state::{SessionRecord, WorktreeState};
 
 use super::command::{CommandInfo, CommandRegistry, CommandScope, Completion, Effect, Hint};
@@ -117,6 +118,10 @@ pub struct HomeState {
     /// 統括 (Overview) results band renders only `log[response_start..]`, so it
     /// shows the response to the latest command and nothing earlier.
     response_start: usize,
+    /// The latest released version, set once the background update check finds a
+    /// release newer than this build. While `None` (the check is pending, or the
+    /// build is up to date) the top-right "update available" notice is hidden.
+    update: Option<Version>,
 }
 
 impl HomeState {
@@ -152,6 +157,7 @@ impl HomeState {
             quit_confirm: false,
             text_modal: None,
             response_start: 0,
+            update: None,
         }
     }
 
@@ -396,6 +402,18 @@ impl HomeState {
     /// sidebar renderer.
     pub fn live_paths(&self) -> &HashSet<PathBuf> {
         &self.live
+    }
+
+    /// Record the latest released version found by the background update check,
+    /// or clear it with `None`. Set before each redraw from the update handle.
+    pub fn set_update(&mut self, latest: Option<Version>) {
+        self.update = latest;
+    }
+
+    /// The latest released version, when it is newer than this build — the
+    /// top-right "update available" notice is shown only while this is `Some`.
+    pub fn update(&self) -> Option<Version> {
+        self.update
     }
 
     /// How many sessions currently have a live (running) embedded shell/agent.

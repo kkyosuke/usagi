@@ -18,6 +18,7 @@ use super::state::{HomeState, Mode, PaneExit, SessionOutcome};
 use super::terminal_pool::MonitorHandle;
 use super::terminal_view::TerminalView;
 use super::ui;
+use super::update::UpdateHandle;
 
 mod handlers;
 
@@ -99,6 +100,7 @@ pub fn event_loop(
     mut state: HomeState,
     workspace_root: &Path,
     monitor: &MonitorHandle,
+    update: &UpdateHandle,
     persist: &mut dyn FnMut(&str),
     create_session: &mut dyn FnMut(&str) -> SessionOutcome,
     remove_session: &mut dyn FnMut(&str, bool) -> SessionOutcome,
@@ -112,6 +114,9 @@ pub fn event_loop(
         // (running) agent, before painting.
         state.set_waiting(monitor.waiting());
         state.set_live(monitor.live());
+        // Surface the top-right "update available" notice once the background
+        // release check has found a newer version than this build.
+        state.set_update(update.status().map(|status| status.latest));
         // Drop any stale snapshot every frame, then refresh it for the modes that
         // draw the embedded terminal: 没入 (driven directly by `open_pane`) and
         // 切替, where the right pane previews the highlighted session's live
