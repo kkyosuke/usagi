@@ -109,7 +109,7 @@ pub struct HomeState {
     /// unless the path is also waiting or done (which take precedence).
     live: HashSet<PathBuf>,
     /// Worktree paths whose agent has finished (its process exited), shown with a
-    /// "完了" badge. Refreshed from the terminal monitor each redraw; takes
+    /// "idle" badge. Refreshed from the terminal monitor each redraw; takes
     /// precedence over waiting and running.
     done: HashSet<PathBuf>,
     /// Whether the quit-confirmation modal is open. It is raised when the user

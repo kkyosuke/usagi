@@ -67,8 +67,8 @@ enum AgentState {
     Running,
     /// A live session whose agent finished a turn and awaits input.
     Waiting,
-    /// A session whose agent has finished (its process exited); the bare shell it
-    /// ran in may still be alive.
+    /// A session whose agent has finished (its process exited) and is now idle;
+    /// the bare shell it ran in may still be alive. Displayed as `⏸ idle`.
     Done,
 }
 
@@ -89,7 +89,7 @@ impl AgentState {
     }
 
     /// The detail-line content: an icon together with its label — `▶ running`
-    /// (green), `◆ waiting` (yellow), or `✓ 完了` (cyan) — clipped to `width`, or
+    /// (green), `◆ waiting` (yellow), or `⏸ idle` (cyan) — clipped to `width`, or
     /// `None` while idle (the row has no agent in use).
     fn detail(self, width: usize) -> Option<String> {
         match self {
@@ -107,7 +107,7 @@ impl AgentState {
                     .to_string(),
             ),
             AgentState::Done => Some(
-                style(clip_to_width("✓ 完了", width))
+                style(clip_to_width("⏸ idle", width))
                     .cyan()
                     .bold()
                     .to_string(),
@@ -157,7 +157,7 @@ fn detail_line(gutter: &str, detail: String) -> String {
 /// worktree's two lines; line 1 then has a `●`/`○` kind icon (primary or ordinary
 /// worktree), the branch name, and the git `status` at the right edge. Line 2 is
 /// indented under the name and, when an agent is in use, carries its icon + label
-/// (`▶ running` / `◆ waiting` / `✓ 完了`).
+/// (`▶ running` / `◆ waiting` / `⏸ idle`).
 #[allow(clippy::too_many_arguments)]
 pub(super) fn worktree_row(
     worktree: &WorktreeState,

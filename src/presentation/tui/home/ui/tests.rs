@@ -271,7 +271,7 @@ fn worktree_row_shows_a_running_agent_and_one_waiting_for_input() {
     assert!(!waiting_detail.contains('▶'));
     assert!(waiting_detail.contains("waiting"));
 
-    // A finished agent shows the 完了 badge, taking precedence over running.
+    // A finished agent shows the idle badge, taking precedence over running.
     let (_, done_detail) = worktree_row(
         &worktree(Some("feature"), false, BranchStatus::Local),
         10,
@@ -283,8 +283,8 @@ fn worktree_row_shows_a_running_agent_and_one_waiting_for_input() {
         false,
         true,
     );
-    assert!(done_detail.contains('✓'));
-    assert!(done_detail.contains("完了"));
+    assert!(done_detail.contains('⏸'));
+    assert!(done_detail.contains("idle"));
     assert!(!done_detail.contains('▶'));
 
     let (idle_top, idle_detail) = worktree_row(
