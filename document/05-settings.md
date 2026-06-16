@@ -77,8 +77,7 @@
   クローン先（`workspace_root`）のようにプロジェクト単位で変える意味の薄い項目は対象外です。
 - **実効設定 = グローバル設定にローカルの上書きを適用した結果**。解決は `domain/settings.rs` の
   `Settings::with_local`、ユースケースは `usecase/settings.rs` の `effective(storage, repo_root)` が担います。
-- 読み書きロジック・永続化（[issue 021](../issues/021-local-settings.md)）に加え、編集 UI も実装済み
-  （[issue 022](../issues/022-local-settings-ui.md)）。ホーム画面のコマンドモードで `config` を実行すると
+- 読み書きロジック・永続化に加え、編集 UI も実装済みです。ホーム画面のコマンドモードで `config` を実行すると
   設定画面が**ワークスペーススコープ**で開き、「Agent CLI」「Notifications」「Default Branch」「Branch Source」
   の 4 項目を編集できます。Agent CLI と Notifications は **「グローバルに従う / ローカルで上書き」**、Default
   Branch は **`auto`（検出済み既定）／ リポジトリの各ブランチ**、Branch Source は **`local` / `remote`** を
@@ -111,7 +110,7 @@
 
 ### CLI
 
-CLI からも設定を確認・編集できます（[issue 015](../issues/015-config-edit.md)、[3. コマンドリファレンス](03-commands/README.md)）。
+CLI からも設定を確認・編集できます（[3. コマンドリファレンス](03-commands/README.md)）。
 
 - `usagi config` — 現在のグローバル設定を `key  value` 形式で一覧表示。
 - `usagi config --edit` — 設定ファイルを `$EDITOR`（→ `$VISUAL` → OS 既定）で開いて編集。保存後に

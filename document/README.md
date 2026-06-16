@@ -39,5 +39,4 @@
 ## 関連
 
 - [../README.md](../README.md) — リポジトリの README（インストール・使い方）
-- [../issues/README.md](../issues/README.md) — 開発タスク（issue）一覧
 - [../.agents/workflow.md](../.agents/workflow.md) — AI エージェント向けの開発ワークフロー

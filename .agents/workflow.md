@@ -8,11 +8,11 @@ AI エージェントが `usagi` で作業する際の標準手順。**新規作
 
 ### 0. 着手する issue を選ぶ
 
-実装すべきタスク（issue）は `issues/` 配下に `NNN-feature.md` 形式で管理されている。一覧と凡例・依存関係・推奨着手順は [issues/README.md](../issues/README.md) を参照。
+実装すべきタスク（issue）は usagi の issue ストア（`.usagi/issues/`）に `NNN-feature.md` 形式で管理されている。`usagi issue list` / `usagi issue show <番号>`（CLI）や MCP ツール（`issue_list` / `issue_search` / `issue_get`）で一覧・参照する。
 
-- 各 issue の上部メタデータ（`status` / `priority` / `dependson`）を確認し、`dependson` が満たされている `todo` を選ぶ。
-- 着手したら `status` を `in-progress`、完了したら `done` に更新する。
-- worktree 名・ブランチ名は対象 issue の feature 名に合わせると対応がわかりやすい。
+- 各 issue のメタデータ（`status` / `priority` / `dependson`）を確認し、`dependson` が満たされている `todo` を選ぶ。
+- 着手したら `status` を `in-progress`、完了したら `done` に更新する（`usagi issue update <番号> --status ...` または MCP `issue_update`）。
+- worktree 名・ブランチ名は対象 issue の内容に合わせると対応がわかりやすい。
 
 ### 1. 開始時に worktree を作成する
 

@@ -34,7 +34,6 @@ jobs:
             --no-progress
             '*.md'
             'document/**/*.md'
-            'issues/**/*.md'
             '.agents/**/*.md'
             '.github/**/*.md'
           fail: true
