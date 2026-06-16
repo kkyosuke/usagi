@@ -273,6 +273,7 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
     let mut left = left_pane(
         state.list(),
         state.live_paths(),
+        state.running_paths(),
         state.waiting_paths(),
         state.done_paths(),
         left_w,

@@ -100,18 +100,23 @@ pub struct HomeState {
     /// The latest snapshot of the embedded terminal's screen, set while a session
     /// is 没入 (Attached) and rendered in the right pane.
     terminal_view: Option<TerminalView>,
+    /// Worktree paths whose agent is actively working a turn (reported the
+    /// `running` phase). Refreshed from the terminal monitor each redraw and
+    /// rendered with a "running" icon, unless the path is also waiting or done
+    /// (which take precedence).
+    running: HashSet<PathBuf>,
     /// Worktree paths whose background session is waiting for the user (its
-    /// agent rang the bell). Refreshed from the terminal monitor each redraw and
-    /// rendered as a marker in the sidebar.
+    /// agent finished a turn or rang the bell). Refreshed from the terminal
+    /// monitor each redraw and rendered as a marker in the sidebar.
     waiting: HashSet<PathBuf>,
-    /// Worktree paths with a live (running) embedded session — an agent/shell is
-    /// in use, whether attached or left running in the background. Refreshed from
-    /// the terminal monitor each redraw and rendered with a "running" icon,
-    /// unless the path is also waiting or done (which take precedence).
+    /// Worktree paths with a live embedded session — an agent/shell is in use,
+    /// whether attached or left running in the background. Refreshed from the
+    /// terminal monitor each redraw; a live path that is not running, waiting, or
+    /// done renders as "ready" (idle, awaiting the first prompt).
     live: HashSet<PathBuf>,
     /// Worktree paths whose agent has finished (its process exited), shown with a
-    /// "idle" badge. Refreshed from the terminal monitor each redraw; takes
-    /// precedence over waiting and running.
+    /// "done" badge. Refreshed from the terminal monitor each redraw; takes
+    /// precedence over running and waiting.
     done: HashSet<PathBuf>,
     /// Whether the quit-confirmation modal is open. It is raised when the user
     /// presses `Ctrl-C` while a session is still live, so an accidental close
@@ -165,6 +170,7 @@ impl HomeState {
             remove_modal: None,
             sessions: Vec::new(),
             terminal_view: None,
+            running: HashSet::new(),
             waiting: HashSet::new(),
             live: HashSet::new(),
             done: HashSet::new(),
@@ -390,6 +396,24 @@ impl HomeState {
     /// between frames so a stale snapshot never lingers in the right pane.
     pub fn clear_terminal_view(&mut self) {
         self.terminal_view = None;
+    }
+
+    /// Replace the set of worktree paths whose agent is actively working a turn,
+    /// refreshed from the terminal monitor before each redraw.
+    pub fn set_running(&mut self, running: HashSet<PathBuf>) {
+        self.running = running;
+    }
+
+    /// Whether the worktree at `path` has a background session actively working a
+    /// turn.
+    pub fn is_running(&self, path: &Path) -> bool {
+        self.running.contains(path)
+    }
+
+    /// The set of worktree paths whose agent is actively working a turn, for the
+    /// sidebar renderer.
+    pub fn running_paths(&self) -> &HashSet<PathBuf> {
+        &self.running
     }
 
     /// Replace the set of worktree paths whose background session is waiting for

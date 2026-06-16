@@ -111,8 +111,9 @@ pub fn event_loop(
 ) -> Result<Outcome> {
     let mut painter = FramePainter::new();
     loop {
-        // Mark any background sessions waiting for input, which have a live
-        // (running) agent, and which have finished, before painting.
+        // Mark each background session's agent state — running, waiting for
+        // input, live (ready), and finished — before painting.
+        state.set_running(monitor.running());
         state.set_waiting(monitor.waiting());
         state.set_live(monitor.live());
         state.set_done(monitor.done());

@@ -114,9 +114,10 @@ fn drive(
         // viewing scrolled-back history.
         let cursor = if scrollback == 0 { view.cursor() } else { None };
         state.set_terminal_view(view);
-        // Refresh the sidebar's waiting, live-agent, and finished markers so
-        // sessions (including this one) show their current state in the next
-        // repaint.
+        // Refresh the sidebar's running, waiting, live-agent, and finished
+        // markers so sessions (including this one) show their current state in
+        // the next repaint.
+        state.set_running(monitor.running());
         state.set_waiting(monitor.waiting());
         state.set_live(monitor.live());
         state.set_done(monitor.done());
@@ -304,8 +305,15 @@ fn is_press(key: KeyEvent) -> bool {
 }
 
 /// `Ctrl-O` opens the session picker (see [`run_session_picker`]).
+///
+/// Match the letter case-insensitively: with `Shift`/`Caps Lock` (or terminals
+/// that report `Ctrl`+letter as uppercase) the key arrives as `'O'`. Missing
+/// that would let [`encode_key`] forward the raw `0x0F` byte to the agent, which
+/// renders the unprintable control char as a `?`-like placeholder instead of
+/// zooming out.
 fn is_leader(key: &KeyEvent) -> bool {
-    key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('o')
+    key.modifiers.contains(KeyModifiers::CONTROL)
+        && matches!(key.code, KeyCode::Char('o') | KeyCode::Char('O'))
 }
 
 /// Bracketed-paste start / end markers (DECSET 2004). A program that requested
@@ -365,5 +373,44 @@ fn encode_key(key: &KeyEvent) -> Vec<u8> {
         KeyCode::Insert => b"\x1b[2~".to_vec(),
         KeyCode::Delete => b"\x1b[3~".to_vec(),
         _ => Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn key(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
+        KeyEvent::new(code, modifiers)
+    }
+
+    #[test]
+    fn is_leader_matches_ctrl_o_regardless_of_letter_case() {
+        // The common case: `Ctrl-O` arrives as lowercase `'o'`.
+        assert!(is_leader(&key(KeyCode::Char('o'), KeyModifiers::CONTROL)));
+        // With `Shift`/`Caps Lock` (or terminals that uppercase `Ctrl`+letter)
+        // it arrives as `'O'` — still the leader, must not reach the agent.
+        assert!(is_leader(&key(KeyCode::Char('O'), KeyModifiers::CONTROL)));
+        assert!(is_leader(&key(
+            KeyCode::Char('O'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        )));
+    }
+
+    #[test]
+    fn is_leader_rejects_non_leader_keys() {
+        // No `Ctrl` modifier, or a different letter, is not the leader.
+        assert!(!is_leader(&key(KeyCode::Char('o'), KeyModifiers::NONE)));
+        assert!(!is_leader(&key(KeyCode::Char('a'), KeyModifiers::CONTROL)));
+    }
+
+    #[test]
+    fn uppercase_ctrl_o_would_encode_to_si_without_the_leader_guard() {
+        // Regression guard: when `is_leader` misses uppercase `'O'`, `encode_key`
+        // turns it into the bare `0x0F` (SI) byte the agent shows as `?`.
+        assert_eq!(
+            encode_key(&key(KeyCode::Char('O'), KeyModifiers::CONTROL)),
+            vec![0x0f],
+        );
     }
 }

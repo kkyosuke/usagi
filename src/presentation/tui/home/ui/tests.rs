@@ -159,6 +159,7 @@ fn worktree_row_marks_selected_primary_and_detached() {
         false,
         false,
         false,
+        false,
     );
     assert!(top.contains('>'));
     assert!(top.contains('●'));
@@ -170,6 +171,7 @@ fn worktree_row_marks_selected_primary_and_detached() {
         10,
         10,
         true,
+        false,
         false,
         false,
         false,
@@ -188,6 +190,7 @@ fn worktree_row_marks_selected_primary_and_detached() {
         false,
         false,
         false,
+        false,
     );
     assert!(!other_top.contains('>'));
     assert!(other_top.contains('○'));
@@ -197,6 +200,7 @@ fn worktree_row_marks_selected_primary_and_detached() {
         &worktree(None, false, BranchStatus::Local),
         10,
         10,
+        false,
         false,
         false,
         false,
@@ -219,6 +223,7 @@ fn worktree_row_marks_the_active_worktree_with_a_gutter_bar_on_both_lines() {
         true,
         false,
         false,
+        false,
     );
     // The green `▎` accent bar runs down both lines of the active row (the
     // detail line carries it too, to the left of the agent state).
@@ -236,14 +241,16 @@ fn worktree_row_marks_the_active_worktree_with_a_gutter_bar_on_both_lines() {
         false,
         false,
         false,
+        false,
     );
     assert!(!idle_top.contains('▎'));
     assert!(!idle_detail.contains('▎'));
 }
 
 #[test]
-fn worktree_row_shows_a_running_agent_and_one_waiting_for_input() {
-    let (_, running_detail) = worktree_row(
+fn worktree_row_shows_the_agent_state_through_its_lifecycle() {
+    // A live session that has not begun a turn yet is idle: `◌ ready`.
+    let (_, ready_detail) = worktree_row(
         &worktree(Some("feature"), false, BranchStatus::Local),
         10,
         12,
@@ -253,10 +260,28 @@ fn worktree_row_shows_a_running_agent_and_one_waiting_for_input() {
         true,
         false,
         false,
+        false,
+    );
+    assert!(ready_detail.contains('◌'));
+    assert!(ready_detail.contains("ready"));
+
+    // Working a turn: `▶ running`.
+    let (_, running_detail) = worktree_row(
+        &worktree(Some("feature"), false, BranchStatus::Local),
+        10,
+        12,
+        false,
+        false,
+        false,
+        true,
+        true,
+        false,
+        false,
     );
     assert!(running_detail.contains('▶'));
     assert!(running_detail.contains("running"));
 
+    // Awaiting input wins over running: `◆ waiting`.
     let (_, waiting_detail) = worktree_row(
         &worktree(Some("feature"), false, BranchStatus::Local),
         10,
@@ -266,13 +291,14 @@ fn worktree_row_shows_a_running_agent_and_one_waiting_for_input() {
         false,
         true,
         true,
+        true,
         false,
     );
     assert!(waiting_detail.contains('◆'));
     assert!(!waiting_detail.contains('▶'));
     assert!(waiting_detail.contains("waiting"));
 
-    // A finished agent shows the idle badge, taking precedence over running.
+    // A finished agent shows `✓ done`, taking precedence over running.
     let (_, done_detail) = worktree_row(
         &worktree(Some("feature"), false, BranchStatus::Local),
         10,
@@ -281,14 +307,16 @@ fn worktree_row_shows_a_running_agent_and_one_waiting_for_input() {
         false,
         false,
         true,
+        true,
         false,
         true,
     );
-    assert!(done_detail.contains('⏸'));
-    assert!(done_detail.contains("idle"));
+    assert!(done_detail.contains('✓'));
+    assert!(done_detail.contains("done"));
     assert!(!done_detail.contains('▶'));
 
-    let (idle_top, idle_detail) = worktree_row(
+    // No live session: the detail line carries no agent state.
+    let (absent_top, absent_detail) = worktree_row(
         &worktree(Some("feature"), false, BranchStatus::Local),
         10,
         12,
@@ -298,10 +326,12 @@ fn worktree_row_shows_a_running_agent_and_one_waiting_for_input() {
         false,
         false,
         false,
+        false,
     );
-    assert!(!idle_detail.contains('▶'));
-    assert!(!idle_detail.contains('◆'));
-    assert!(idle_top.contains("local"));
+    assert!(!absent_detail.contains('▶'));
+    assert!(!absent_detail.contains('◆'));
+    assert!(!absent_detail.contains('◌'));
+    assert!(absent_top.contains("local"));
 }
 
 #[test]
@@ -329,6 +359,7 @@ fn worktree_row_truncates_a_long_branch() {
         ),
         8,
         8,
+        false,
         false,
         false,
         false,
@@ -371,6 +402,7 @@ fn left_pane_renders_the_root_entry_then_the_empty_message() {
         &HashSet::new(),
         &HashSet::new(),
         &HashSet::new(),
+        &HashSet::new(),
         80,
         6,
         false,
@@ -396,6 +428,7 @@ fn left_pane_renders_the_root_entry_then_one_entry_per_worktree() {
         &HashSet::new(),
         &HashSet::new(),
         &HashSet::new(),
+        &HashSet::new(),
         30,
         6,
         false,
@@ -407,27 +440,28 @@ fn left_pane_renders_the_root_entry_then_one_entry_per_worktree() {
 }
 
 #[test]
-fn left_pane_marks_a_running_agent_and_one_waiting_for_input() {
+fn left_pane_marks_the_agent_state_through_its_lifecycle() {
     let list = list_with(vec![worktree(Some("feature"), false, BranchStatus::Local)]);
     let path: HashSet<PathBuf> = [PathBuf::from("/repo/wt")].into_iter().collect();
-    let running = left_pane(&list, &path, &HashSet::new(), &HashSet::new(), 30, 6, false);
+    let empty = HashSet::new();
+    // Live but no turn yet: `◌ ready`.
+    let ready = left_pane(&list, &path, &empty, &empty, &empty, 30, 6, false);
+    assert!(ready[3].contains('◌'));
+    assert!(ready[3].contains("ready"));
+    // Working a turn: `▶ running`.
+    let running = left_pane(&list, &path, &path, &empty, &empty, 30, 6, false);
     assert!(running[3].contains('▶'));
     assert!(running[3].contains("running"));
-    let waiting = left_pane(&list, &path, &path, &HashSet::new(), 30, 6, false);
+    // Awaiting input wins over running: `◆ waiting`.
+    let waiting = left_pane(&list, &path, &path, &path, &empty, 30, 6, false);
     assert!(waiting[3].contains('◆'));
     assert!(!waiting[3].contains('▶'));
-    let idle = left_pane(
-        &list,
-        &HashSet::new(),
-        &HashSet::new(),
-        &HashSet::new(),
-        30,
-        6,
-        false,
-    );
-    assert!(!idle[3].contains('▶'));
-    assert!(!idle[3].contains('◆'));
-    assert!(idle[2].contains("local"));
+    // No live session: no agent detail at all.
+    let absent = left_pane(&list, &empty, &empty, &empty, &empty, 30, 6, false);
+    assert!(!absent[3].contains('▶'));
+    assert!(!absent[3].contains('◆'));
+    assert!(!absent[3].contains('◌'));
+    assert!(absent[2].contains("local"));
 }
 
 #[test]
@@ -439,6 +473,7 @@ fn left_pane_is_trimmed_to_available_rows() {
     ]);
     let lines = left_pane(
         &list,
+        &HashSet::new(),
         &HashSet::new(),
         &HashSet::new(),
         &HashSet::new(),
@@ -460,6 +495,7 @@ fn left_pane_marks_the_active_worktree_with_a_gutter_bar() {
     list.activate_by_name("feature");
     let lines = left_pane(
         &list,
+        &HashSet::new(),
         &HashSet::new(),
         &HashSet::new(),
         &HashSet::new(),
@@ -496,6 +532,7 @@ fn left_pane_fades_every_row_but_the_cursor_when_asked() {
     // session rows; every row keeps its text.
     let dimmed = left_pane(
         &list,
+        &HashSet::new(),
         &HashSet::new(),
         &HashSet::new(),
         &HashSet::new(),
@@ -560,9 +597,10 @@ fn switch_preview_shows_a_live_session_as_a_reattach() {
     state.switch_move_down();
     let preview = stripped(&switch_preview(&state, 40, 12));
     assert!(preview.contains("feat"));
-    // Header carries the git status and the running agent state.
+    // Header carries the git status and the agent state. The session is live but
+    // has reported no turn, so it shows as `ready` (idle, awaiting input).
     assert!(preview.contains("local"));
-    assert!(preview.contains("running"));
+    assert!(preview.contains("ready"));
     // A live session with no snapshot yet falls back to the re-attach label,
     // not the action menu.
     assert!(preview.contains("live terminal"));
@@ -1184,6 +1222,7 @@ fn render_frame_surfaces_running_and_waiting_agent_icons() {
     waiting.path = PathBuf::from("/repo/wait");
     let mut state = HomeState::new("usagi", vec![running, waiting], None);
     state.set_live([PathBuf::from("/repo/run"), PathBuf::from("/repo/wait")].into());
+    state.set_running([PathBuf::from("/repo/run")].into());
     state.set_waiting([PathBuf::from("/repo/wait")].into());
     let frame = render_frame(24, 80, &state);
     let joined = console::strip_ansi_codes(&frame.join("\n")).into_owned();
