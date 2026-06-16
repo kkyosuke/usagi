@@ -32,8 +32,8 @@
 | 項目 | JSON キー | 型 | 既定値 | 選択肢 / 意味 |
 |---|---|---|---|---|
 | テーマ | `theme` | enum | `system` | `light` / `dark` / `system`（OS 追従）の UI カラーテーマ |
-| 既定ワークスペース | `default_workspace` | string?\| | `null` | 既定で開くワークスペース名。未設定なら `null` |
-| クローン先ベース | `workspace_root` | string?\| | `null`（→ `~/git`） | 新規プロジェクトのクローン先ベースディレクトリ。未設定時は `~/git` にフォールバック |
+| 既定ワークスペース | `default_workspace` | string? | `null` | 既定で開くワークスペース名。未設定なら `null` |
+| クローン先ベース | `workspace_root` | string? | `null`（→ `~/git`） | 新規プロジェクトのクローン先ベースディレクトリ。未設定時は `~/git` にフォールバック |
 | デスクトップ通知 | `notifications_enabled` | bool | `true` | バックグラウンドの `agent` が入力待ちになった時などのデスクトップ通知の ON/OFF |
 | Agent CLI | `agent_cli` | enum | `claude` | 起動する AI エージェント CLI（`claude` / `gemini`） |
 | セッションアクション UI | `session_action_ui` | enum | `menu` | ホーム画面の[在席](design/05-home.md#在席focus)で右ペインに出すアクション UI のスタイル。`menu`（選べるリスト）/ `prompt`（セッションスコープのコマンドライン） |
@@ -54,11 +54,11 @@
 
 | 項目 | JSON キー | 型 | 未設定時 |
 |---|---|---|---|
-| Agent CLI | `agent_cli` | enum?\| | グローバル設定にフォールバック |
-| デスクトップ通知 | `notifications_enabled` | bool?\| | グローバル設定にフォールバック |
-| デフォルトブランチ | `default_branch` | string?\| | リポジトリの検出済み既定ブランチ（auto） |
-| デフォルトブランチ基点 | `default_branch_source` | enum?\| | 既定（`remote`） |
-| ローカル LLM 有効化 | `local_llm_enabled` | bool?\| | グローバル設定（`local_llm.enabled`）にフォールバック |
+| Agent CLI | `agent_cli` | enum? | グローバル設定にフォールバック |
+| デスクトップ通知 | `notifications_enabled` | bool? | グローバル設定にフォールバック |
+| デフォルトブランチ | `default_branch` | string? | リポジトリの検出済み既定ブランチ（auto） |
+| デフォルトブランチ基点 | `default_branch_source` | enum? | 既定（`remote`） |
+| ローカル LLM 有効化 | `local_llm_enabled` | bool? | グローバル設定（`local_llm.enabled`）にフォールバック |
 
 > **デフォルトブランチ（`default_branch`）**: `session create` でセッションを作るとき、各 git リポジトリの
 > worktree を切る新ブランチを**どのブランチから**切るかを選びます。未設定（`null` = auto）ならリポジトリの
@@ -107,7 +107,7 @@
 > グローバルスコープで編集できるのは Theme / Default Workspace / Notifications / Agent CLI /
 > Session Action UI（「Agent CLI」と「Local LLM」の間）の各項目、ワークスペーススコープで編集できるのは
 > Agent CLI / Notifications / Default Branch / Branch Source の 4 項目です。
-> `workspace_root` は `settings.json` に保存されますが、画面からの編集は今後対応予定です。
+> `workspace_root` は `settings.json` に保存されますが、設定画面では編集せず、`usagi config --edit` で変更します。
 
 ### CLI
 
@@ -132,7 +132,7 @@ CLI からも設定を確認・編集できます（[issue 015](../issues/015-co
 | `default_workspace` | 起動時に既定で開くワークスペースの選択 |
 | `workspace_root` | 新規プロジェクト画面（Clone）の Location 既定値（[design/03-new.md](design/03-new.md)） |
 | `notifications_enabled` | バックグラウンドの `agent` が入力待ちになった時などのデスクトップ通知の表示可否 |
-| `agent_cli` | `agent` / `ai` コマンドが起動する AI エージェント CLI の選択（[4. オーケストレーション](04-orchestration.md)） |
+| `agent_cli` | `agent` コマンドが起動する AI エージェント CLI の選択（[4. オーケストレーション](04-orchestration.md)） |
 | `session_action_ui` | ホーム画面の[在席](design/05-home.md#在席focus)で右ペインに出すアクション UI（`menu` / `prompt`）の選択 |
 | `local_llm.enabled` / `local_llm.model` | 有効時、`agent` 起動コマンドに `usagi-llm` MCP サーバを追加し、軽量タスクをローカル LLM に委譲する（[3.4 ローカル LLM MCP サーバ](03-commands/04-llm-mcp.md)） |
 
