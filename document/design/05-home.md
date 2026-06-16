@@ -502,13 +502,13 @@ TUI 内コマンド（`session` / `terminal` / `agent` / `config` ＋ 共通の 
 ライブなセッションが 1 つもなければ確認なしで即終了します。
 
 ```text
-┌─ Quit usagi? ──────────────────────────────┐
-│ 2 session(s) still running.                │
-│                                            │
-│ Close anyway? Running agents will be ...   │
-│                                            │
-│ y / Enter: close   n / Esc: cancel         │
-└────────────────────────────────────────────┘
+┌─ Quit usagi? ──────────────────────────────────┐
+│ 2 session(s) still running.                    │
+│                                                │
+│ Close anyway? Running agents will be stopped.  │
+│                                                │
+│ y / Enter: close   n / Esc: cancel             │
+└────────────────────────────────────────────────┘
 ```
 
 - `y` / `Y` / `Enter`（またはもう一度 `Ctrl+C`）で**終了を確定**（`Outcome::Quit`）。
