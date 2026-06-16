@@ -49,6 +49,7 @@ src/
 │   ├── settings.rs             # Settings / Theme / AgentCli / LocalLlm、LocalSettings（with_local で上書き解決）・agent 起動コマンド生成
 │   ├── workspace.rs            # グローバル登録エントリ Workspace
 │   ├── workspace_state.rs      # WorkspaceState / WorktreeState / BranchStatus
+│   ├── agent_usage.rs          # AgentUsage / AggregateUsage・上限テーブル・UsageReader trait
 │   ├── history.rs              # コマンド履歴の 1 件 HistoryEntry
 │   └── issue.rs                # Issue / IssueSummary / IssueStatus / IssuePriority（frontmatter 読み書き）
 │
@@ -74,6 +75,7 @@ src/
 │   ├── terminal.rs             # 起動するシェルの解決（$SHELL / フォールバック）
 │   ├── pty.rs                  # 疑似ターミナルセッション（portable-pty + vt100、ベル回数の計測）
 │   ├── session_monitor.rs      # 入力待ち判定の純粋ロジック（ベル基準値・待ち集合・アタッチ）
+│   ├── agent_usage/            # Agent 使用量 reader（Claude transcript パース・パス導出 / Gemini スタブ）
 │   └── issue_store.rs          # <repo>/.usagi/issues/ の markdown + index.json（IssueStore）
 │
 └── presentation/               # CLI ルーティング・TUI・MCP

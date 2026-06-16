@@ -119,6 +119,7 @@ fn drive(
         // next repaint.
         state.set_waiting(monitor.waiting());
         state.set_live(monitor.live());
+        state.set_usage(monitor.usage());
         render(term, state, cursor, geo, &mut prev)?;
 
         // The shell closed (e.g. the user typed `exit`): leave the pane.

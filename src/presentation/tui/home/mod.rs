@@ -159,6 +159,14 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
         .map(|settings| settings.notifications_enabled)
         .unwrap_or(true);
 
+    // The agent CLI in effect for this workspace, used to pick the usage reader
+    // the pool's watcher polls for the sidebar's context-window gauge. Falls back
+    // to the default agent if settings cannot be read.
+    let agent_cli = crate::infrastructure::storage::Storage::open_default()
+        .and_then(|storage| crate::usecase::settings::effective(&storage, &workspace.path))
+        .map(|settings| settings.agent_cli)
+        .unwrap_or_default();
+
     // The live shells embedded in the right pane, one per worktree, kept alive
     // across session switches and for as long as this screen is open. Dropped on
     // return, which kills any shell still running. The pool also watches every
@@ -167,7 +175,10 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
     // Wrapped in a `RefCell` so both the pane driver (`open_terminal`) and the
     // sidebar preview (`preview`) can reach it: their borrows never overlap in
     // time (the event loop calls one or the other, never both at once).
-    let pool = std::cell::RefCell::new(terminal_pool::TerminalPool::new(notifications_enabled));
+    let pool = std::cell::RefCell::new(terminal_pool::TerminalPool::new(
+        notifications_enabled,
+        agent_cli,
+    ));
     let monitor = pool.borrow().monitor();
 
     // Opening a terminal embeds a live shell in the right pane: the pane stays

@@ -112,6 +112,7 @@ pub fn event_loop(
         // (running) agent, before painting.
         state.set_waiting(monitor.waiting());
         state.set_live(monitor.live());
+        state.set_usage(monitor.usage());
         // Drop any stale snapshot every frame, then refresh it for the modes that
         // draw the embedded terminal: 没入 (driven directly by `open_pane`) and
         // 切替, where the right pane previews the highlighted session's live

@@ -1,4 +1,5 @@
 use super::*;
+use crate::domain::agent_usage::AggregateUsage;
 use crate::domain::workspace_state::BranchStatus;
 use chrono::Utc;
 use std::path::PathBuf;
@@ -980,6 +981,20 @@ fn has_live_sessions_and_live_count_follow_the_live_set() {
     state.set_live(live);
     assert!(state.has_live_sessions());
     assert_eq!(state.live_count(), 2);
+}
+
+#[test]
+fn usage_round_trips_the_aggregate() {
+    let mut state = state();
+    assert_eq!(state.usage(), None);
+    let usage = AggregateUsage {
+        used_tokens: 60_000,
+        limit_tokens: 200_000,
+    };
+    state.set_usage(Some(usage));
+    assert_eq!(state.usage(), Some(usage));
+    state.set_usage(None);
+    assert_eq!(state.usage(), None);
 }
 
 #[test]

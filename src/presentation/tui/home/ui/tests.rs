@@ -5,6 +5,7 @@ use super::*;
 use super::super::command::{CommandHint, CommandInfo};
 use super::super::state::{LogLine, TextModal, WorktreeList, ROOT_NAME};
 use super::super::terminal_view::TerminalView;
+use crate::domain::agent_usage::AggregateUsage;
 use crate::domain::settings::SessionActionUi;
 use crate::domain::workspace_state::{BranchStatus, WorktreeState};
 use chrono::Utc;
@@ -1079,4 +1080,101 @@ fn render_frame_focus_menu_keeps_its_height() {
     // The right pane carries the action menu; no results band in Focus.
     assert!(joined.contains("terminal"));
     assert!(joined.contains("session: main"));
+}
+
+// --- aggregate usage gauge -------------------------------------------------
+
+#[test]
+fn usage_gauge_shows_a_bar_and_the_remaining_headroom() {
+    let usage = AggregateUsage {
+        used_tokens: 50_000,
+        limit_tokens: 200_000,
+    };
+    let lines = usage_gauge(usage, 30, USAGE_BAND);
+    assert_eq!(lines.len(), 2);
+    let text = stripped(&lines);
+    // A dim divider, a filled/empty bar, and the headroom (200k → 75% left).
+    assert!(text.contains('─'));
+    assert!(text.contains('▰'));
+    assert!(text.contains('▱'));
+    assert!(text.contains("残り75%"));
+}
+
+#[test]
+fn usage_gauge_colours_by_headroom_and_never_overruns() {
+    // Plenty / tightening / nearly gone exercise the green / yellow / red arms.
+    for (used, limit) in [
+        (40_000u64, 200_000u64),
+        (120_000, 200_000),
+        (190_000, 200_000),
+    ] {
+        let lines = usage_gauge(
+            AggregateUsage {
+                used_tokens: used,
+                limit_tokens: limit,
+            },
+            30,
+            USAGE_BAND,
+        );
+        assert_eq!(lines.len(), 2);
+        for line in &lines {
+            let visible = console::measure_text_width(&console::strip_ansi_codes(line));
+            assert!(visible <= 30, "gauge line overran the pane: {visible}");
+        }
+    }
+}
+
+#[test]
+fn usage_gauge_fits_a_tiny_pane_without_a_bar() {
+    // Just wide enough for the label but not a bar: the label shows, no bar
+    // glyphs are drawn, and nothing overruns the pane.
+    let lines = usage_gauge(
+        AggregateUsage {
+            used_tokens: 0,
+            limit_tokens: 200_000,
+        },
+        13,
+        USAGE_BAND,
+    );
+    for line in &lines {
+        let visible = console::measure_text_width(&console::strip_ansi_codes(line));
+        assert!(visible <= 13, "gauge line overran the tiny pane: {visible}");
+    }
+    let text = stripped(&lines);
+    assert!(text.contains("残り100%"));
+    assert!(!text.contains('▰'));
+    assert!(!text.contains('▱'));
+}
+
+#[test]
+fn render_frame_draws_the_usage_gauge_at_the_bottom_of_the_left_pane() {
+    let mut wt = worktree(Some("main"), true, BranchStatus::Local);
+    wt.path = PathBuf::from("/repo/run");
+    let mut state = HomeState::new("usagi", vec![wt], None);
+    state.set_live([PathBuf::from("/repo/run")].into());
+    state.set_usage(Some(AggregateUsage {
+        used_tokens: 40_000,
+        limit_tokens: 200_000,
+    }));
+    let frame = render_frame(24, 80, &state);
+    assert_eq!(frame.len(), 24);
+    // The gauge (200k window 20% used → 80% left) shows in the frame.
+    assert!(stripped(&frame).contains("残り80%"));
+}
+
+#[test]
+fn render_frame_omits_the_usage_gauge_without_usage() {
+    let state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
+    assert!(!stripped(&render_frame(24, 80, &state)).contains("残り"));
+}
+
+#[test]
+fn render_frame_drops_the_usage_gauge_on_a_short_terminal() {
+    let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
+    state.set_usage(Some(AggregateUsage {
+        used_tokens: 40_000,
+        limit_tokens: 200_000,
+    }));
+    // Too few body rows to spare for the gauge — the session list keeps them.
+    assert!(!stripped(&render_frame(8, 80, &state)).contains("残り"));
 }
