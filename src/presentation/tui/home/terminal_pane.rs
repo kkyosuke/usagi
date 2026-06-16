@@ -283,10 +283,9 @@ fn render(
     let mut buf = diff_frame(prev, &frame);
 
     if let Some((row, col)) = cursor {
-        // Translate the pane-relative cursor to a 1-based screen position and
-        // reveal it there.
-        let x = geo.origin_col as usize + col as usize + 1;
-        let y = geo.origin_row as usize + row as usize + 1;
+        // Translate the pane-relative cursor to a 1-based screen position
+        // (clamping a deferred-wrap column back onto the pane) and reveal it.
+        let (x, y) = geo.cursor_screen_pos(row, col);
         let _ = write!(buf, "\x1b[{y};{x}H\x1b[?25h");
     }
 

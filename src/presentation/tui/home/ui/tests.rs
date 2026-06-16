@@ -650,6 +650,31 @@ fn terminal_geometry_stays_positive_in_a_tiny_terminal() {
 }
 
 #[test]
+fn cursor_screen_pos_places_the_cursor_one_past_the_origin() {
+    let geo = terminal_geometry(24, 80);
+    // A cursor at the pane's top-left maps to the 1-based cell just inside it.
+    let (x, y) = geo.cursor_screen_pos(0, 0);
+    assert_eq!(x, geo.origin_col + 1);
+    assert_eq!(y, geo.origin_row + 1);
+    // An interior cursor is offset straight through.
+    let (x, y) = geo.cursor_screen_pos(3, 5);
+    assert_eq!(x, geo.origin_col + 6);
+    assert_eq!(y, geo.origin_row + 4);
+}
+
+#[test]
+fn cursor_screen_pos_clamps_a_deferred_wrap_onto_the_last_cell() {
+    let geo = terminal_geometry(24, 80);
+    // vt100 parks the cursor one column/row past the grid on a deferred wrap;
+    // the placed cursor must stay on the last cell instead of spilling past the
+    // pane (which would jump the real cursor to the screen edge).
+    let (x, _) = geo.cursor_screen_pos(0, geo.cols);
+    assert_eq!(x, geo.origin_col + geo.cols);
+    let (_, y) = geo.cursor_screen_pos(geo.rows, 0);
+    assert_eq!(y, geo.origin_row + geo.rows);
+}
+
+#[test]
 fn render_frame_draws_the_terminal_in_the_right_pane_when_attached() {
     let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Pushed)]);
     state.enter_focus(1);

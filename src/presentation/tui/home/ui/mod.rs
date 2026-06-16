@@ -171,6 +171,26 @@ pub struct TerminalGeometry {
     pub origin_row: u16,
 }
 
+impl TerminalGeometry {
+    /// Translate the embedded terminal's `(row, col)` cursor into a 1-based
+    /// screen position inside the pane.
+    ///
+    /// vt100 reports a *deferred wrap* by parking the cursor one column past the
+    /// last cell (`col == cols`) once a row is filled exactly to its width — and
+    /// a full-width (CJK) line reaches that edge at half the keystrokes, so it is
+    /// hit often while typing Japanese. Placed verbatim, that column spills past
+    /// the pane's right edge and the real cursor jumps to the screen edge, so the
+    /// column (and, defensively, the row) is clamped back onto the last cell, the
+    /// way a standalone terminal shows a pending-wrap cursor.
+    pub fn cursor_screen_pos(self, row: u16, col: u16) -> (u16, u16) {
+        let col = col.min(self.cols.saturating_sub(1));
+        let row = row.min(self.rows.saturating_sub(1));
+        let x = self.origin_col + col + 1;
+        let y = self.origin_row + row + 1;
+        (x, y)
+    }
+}
+
 /// Computes the [`TerminalGeometry`] for a raw terminal size, matching the
 /// layout [`render_frame`] draws (title + blank above the body, the left pane
 /// and divider to its left). `rows` and `cols` are at least 1.
