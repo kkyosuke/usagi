@@ -1,12 +1,13 @@
 //! Rendering for the home (workspace) screen's mode-aware layout.
 //!
-//! Top to bottom: a title bar, a body split into the worktree list (left) and a
-//! mode-dependent right pane, the command input line, and a footer. The right
-//! pane is blank in 統括 (Overview) and 切替 (Switch); it is the session's action
+//! Top to bottom: a title bar, the engagement-ladder mode indicator, a body
+//! split into the worktree list (left) and a mode-dependent right pane, the
+//! command input, and a footer. The right pane is blank in 統括 (Overview); a
+//! detail card for the highlighted session in 切替 (Switch); the session's action
 //! surface (a menu or a prompt) in 在席 (Focus); and the live embedded terminal in
-//! 没入 (Attached). In Overview the command results render as a band below the
-//! input line. All functions take plain data and return styled lines, so the
-//! layout is rendered without any terminal IO.
+//! 没入 (Attached). In Overview the input is a bordered box and the command
+//! results render as a band below it. All functions take plain data and return
+//! styled lines, so the layout is rendered without any terminal IO.
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -47,9 +48,10 @@ const LOCAL_ICON: char = '\u{e725}'; // nf-dev-git_branch — lives only locally
 const PUSHED_ICON: char = '\u{f0ee}'; // nf-fa-cloud_upload — pushed to the remote
 const MERGED_ICON: char = '\u{e727}'; // nf-dev-git_merge — merged into the default branch
 
-/// Indent of line 2 (the detail line) before the active marker; the marker and
-/// its trailing space then put the detail text under the branch name.
-const DETAIL_INDENT: usize = 2;
+/// Width of the active-session marker cell on line 1: the `*` marker (or a
+/// blank) plus the space that separates it from the branch name. It sits
+/// between the branch name and the right-edge status field.
+const ACTIVE_COL: usize = 2;
 
 /// The vertical bar (with surrounding spaces) dividing the two panes.
 const SEP: &str = " │ ";
@@ -121,6 +123,32 @@ fn title_bar(width: usize, list: &WorktreeList) -> String {
         if count == 1 { "" } else { "s" }
     );
     widgets::title_line(width, &label)
+}
+
+/// The engagement-ladder indicator drawn just under the title bar: the four
+/// modes in order with the current one highlighted (cyan-bold) and the rest
+/// dimmed, so the screen always shows which step the keys act on. Centred for
+/// the terminal width.
+fn mode_ladder(width: usize, current: Mode) -> String {
+    const STEPS: [(Mode, &str); 4] = [
+        (Mode::Overview, "Overview"),
+        (Mode::Switch, "Switch"),
+        (Mode::Focus, "Focus"),
+        (Mode::Attached, "Attached"),
+    ];
+    let steps: Vec<String> = STEPS
+        .iter()
+        .map(|(mode, label)| {
+            if *mode == current {
+                style(*label).cyan().bold().to_string()
+            } else {
+                style(*label).dim().to_string()
+            }
+        })
+        .collect();
+    let ladder = steps.join(&style(" › ").dim().to_string());
+    let pad = widgets::centered_padding(width, console::measure_text_width(&ladder));
+    format!("{}{ladder}", " ".repeat(pad))
 }
 
 /// The Nerd Font git glyph for a branch lifecycle status.
@@ -225,22 +253,28 @@ fn name_cell(text: &str, width: usize, emphasised: bool) -> String {
     }
 }
 
-/// Builds a row's second (detail) line: indented under the branch name, a `*`
-/// marker for the active row, then the already-styled, already-clipped `detail`.
-fn detail_line(active: bool, detail: String) -> String {
-    let marker = if active {
+/// Builds a row's second (detail) line: indented to sit under the branch name,
+/// then the already-styled, already-clipped `detail`.
+fn detail_line(detail: String) -> String {
+    let indent = " ".repeat(NAME_PREFIX);
+    format!("{indent}{detail}")
+}
+
+/// The line-1 active-session marker cell: a `*` for the active worktree (the one
+/// subsequent commands operate on), or a blank. Kept on the identity line — not
+/// the detail line — so it never crowds the agent's `▶`/`◆` state icon.
+fn active_cell(active: bool) -> String {
+    if active {
         style("*").green().bold().to_string()
     } else {
         " ".to_string()
-    };
-    let indent = " ".repeat(DETAIL_INDENT);
-    format!("{indent}{marker} {detail}")
+    }
 }
 
 /// Builds a worktree's two lines. Line 1 carries a `>` cursor for the selected
-/// entry, a `●`/`○` kind icon (primary or ordinary worktree), the branch name,
-/// and the git `status` at the right edge. Line 2 is indented under the name
-/// with a `*` marker for the active worktree and, when an agent is in use, its
+/// entry, a `●`/`○` kind icon (primary or ordinary worktree), the branch name, a
+/// `*` marker for the active worktree, and the git `status` at the right edge.
+/// Line 2 is indented under the name and, when an agent is in use, carries its
 /// icon + label (`▶ running` / `◆ waiting`).
 fn worktree_row(
     worktree: &WorktreeState,
@@ -262,20 +296,24 @@ fn worktree_row(
         active || selected,
     );
     let status = status_cell(Some(worktree.status));
-    let line1 = format!("{} {kind} {branch} {status}", cursor_cell(selected));
+    let line1 = format!(
+        "{} {kind} {branch} {} {status}",
+        cursor_cell(selected),
+        active_cell(active)
+    );
 
     // Line 2 spells out the agent state with its icon, or is blank when idle.
     let detail = AgentState::from_flags(live, waiting)
         .detail(detail_width)
         .unwrap_or_default();
-    let line2 = detail_line(active, detail);
+    let line2 = detail_line(detail);
     (line1, line2)
 }
 
 /// Builds the root's two lines: the workspace itself, belonging to no session.
-/// Line 1 carries the cursor cell, a `⌂` kind icon, the [`ROOT_NAME`] label, and
-/// a blank status field (the root has no git status). Line 2 carries the active
-/// marker and a `workspace root` detail.
+/// Line 1 carries the cursor cell, a `⌂` kind icon, the [`ROOT_NAME`] label, a
+/// `*` marker when active, and a blank status field (the root has no git
+/// status). Line 2 carries a `workspace root` detail.
 fn root_row(
     name_width: usize,
     detail_width: usize,
@@ -285,12 +323,16 @@ fn root_row(
     let kind = style("⌂").magenta().to_string();
     let name = name_cell(ROOT_NAME, name_width, active || selected);
     let status = status_cell(None);
-    let line1 = format!("{} {kind} {name} {status}", cursor_cell(selected));
+    let line1 = format!(
+        "{} {kind} {name} {} {status}",
+        cursor_cell(selected),
+        active_cell(active)
+    );
 
     let detail = style(clip_to_width(ROOT_DETAIL, detail_width))
         .dim()
         .to_string();
-    let line2 = detail_line(active, detail);
+    let line2 = detail_line(detail);
     (line1, line2)
 }
 
@@ -306,10 +348,11 @@ fn left_pane(
     left_w: usize,
     rows: usize,
 ) -> Vec<String> {
-    // Line 1: prefix + name + a space + the right-edge status field.
-    let name_width = left_w.saturating_sub(NAME_PREFIX + 1 + STATUS_COL);
-    // Line 2: indent + active marker + a space + the detail text.
-    let detail_width = left_w.saturating_sub(DETAIL_INDENT + 2);
+    // Line 1: prefix + name + the active-marker cell + a space + the right-edge
+    // status field.
+    let name_width = left_w.saturating_sub(NAME_PREFIX + ACTIVE_COL + 1 + STATUS_COL);
+    // Line 2: indented under the branch name, then the detail text.
+    let detail_width = left_w.saturating_sub(NAME_PREFIX);
     let (root_top, root_detail) = root_row(
         name_width,
         detail_width,
@@ -493,13 +536,74 @@ fn focus_hint_lines(hint: Hint, width: usize) -> Vec<String> {
     }
 }
 
-/// The right pane's contents, by mode. Blank in 統括 / 切替 (the user is on the
-/// bottom line or the left pane); the session's action surface — a menu or a
-/// prompt, per [`SessionActionUi`] — in 在席; and the live embedded terminal in
-/// 没入 (a starting hint until the first snapshot arrives).
+/// Columns the 切替 detail card spends on a field's label before its value.
+const FIELD_LABEL_COL: usize = 9;
+
+/// A `label   value` detail row for the 切替 session card: a dimmed, fixed-width
+/// label followed by the already-styled `value`. The value is clipped by its
+/// caller (on the plain text) so styling is never cut mid-escape.
+fn detail_field(label: &str, value: &str) -> String {
+    let label = style(format!("{label:<width$}", width = FIELD_LABEL_COL)).dim();
+    format!("{label}{value}")
+}
+
+/// The 切替 (Switch) right pane: a detail card for the session currently under
+/// the cursor in the left pane, so the choice is informed by its status and
+/// agent state. The root row shows the workspace-root note instead.
+fn switch_detail(state: &HomeState, width: usize, rows: usize) -> Vec<String> {
+    let list = state.list();
+    let mut lines = Vec::new();
+    if list.root_selected() {
+        lines.push(
+            style(clip_to_width(&format!("session: {ROOT_NAME}"), width))
+                .cyan()
+                .bold()
+                .to_string(),
+        );
+        lines.push(String::new());
+        lines.push(style(clip_to_width(ROOT_DETAIL, width)).dim().to_string());
+    } else if let Some(w) = list.selected() {
+        let name = w.branch.as_deref().unwrap_or(DETACHED);
+        lines.push(
+            style(clip_to_width(&format!("session: {name}"), width))
+                .cyan()
+                .bold()
+                .to_string(),
+        );
+        lines.push(String::new());
+        let value_w = width.saturating_sub(FIELD_LABEL_COL);
+        lines.push(detail_field("status", &status_label(w.status)));
+        let agent = match AgentState::from_flags(state.is_live(&w.path), state.is_waiting(&w.path))
+        {
+            AgentState::Idle => style("idle").dim().to_string(),
+            running_or_waiting => running_or_waiting.detail(value_w).unwrap_or_default(),
+        };
+        lines.push(detail_field("agent", &agent));
+        if !w.head.is_empty() {
+            let head = style(clip_to_width(&w.head, value_w)).to_string();
+            lines.push(detail_field("head", &head));
+        }
+        if let Some(upstream) = &w.upstream {
+            let upstream = style(clip_to_width(upstream, value_w)).dim().to_string();
+            lines.push(detail_field("upstream", &upstream));
+        }
+        let path = style(clip_to_width(&w.path.display().to_string(), value_w))
+            .dim()
+            .to_string();
+        lines.push(detail_field("path", &path));
+    }
+    lines.truncate(rows);
+    lines
+}
+
+/// The right pane's contents, by mode. Blank in 統括 (the user is on the command
+/// line); a detail card for the highlighted session in 切替; the session's action
+/// surface — a menu or a prompt, per [`SessionActionUi`] — in 在席; and the live
+/// embedded terminal in 没入 (a starting hint until the first snapshot arrives).
 fn right_pane_contents(state: &HomeState, right_w: usize, rows: usize) -> Vec<String> {
     match state.mode() {
-        Mode::Overview | Mode::Switch => Vec::new(),
+        Mode::Overview => Vec::new(),
+        Mode::Switch => switch_detail(state, right_w, rows),
         Mode::Focus => match state.session_action_ui() {
             SessionActionUi::Menu => focus_menu(state, right_w),
             SessionActionUi::Prompt => focus_prompt(state, right_w),
@@ -654,6 +758,24 @@ fn input_line(state: &HomeState) -> String {
     }
 }
 
+/// Minimum frame height at which the 統括 input is drawn as a bordered box. Below
+/// it the chrome (the box is 3 rows) would crowd out the body, so a short
+/// terminal falls back to the single-line [`input_line`].
+const INPUT_BOX_MIN_HEIGHT: usize = 8;
+
+/// The 統括 (Overview) command input rendered as a bordered field — an
+/// HTML-input-like box — so it reads clearly as *where you type*, set apart from
+/// the hints above it and the results band below. Spans the full `width` (three
+/// rows: top border, the `❯ <input>▏` line, bottom border).
+fn overview_input_box(state: &HomeState, width: usize) -> Vec<String> {
+    let prompt = style("❯").red().bold();
+    let text = style(state.input()).cyan();
+    let content = format!("{prompt} {text}{CARET}");
+    // `boxed` adds the two borders and one space of padding on each side, so the
+    // inner content area is the width less those four columns.
+    widgets::boxed("", width.saturating_sub(4), &[content])
+}
+
 /// The footer help line, aware of the current mode. It leads with a mode tag so
 /// it is always clear which engagement level the keys act on.
 fn footer_line(width: usize, state: &HomeState) -> String {
@@ -787,8 +909,10 @@ fn quit_confirm_frame(raw_height: usize, raw_width: usize, live: usize) -> Vec<S
 }
 
 /// How many rows the 統括 (Overview) results band spends below the input on the
-/// command log tail. The newest output stays visible while typing.
-const RESULTS_BAND: usize = 6;
+/// command log tail. The newest output stays visible while typing. Kept small
+/// so the bordered input box and the band together leave the session list its
+/// full height.
+const RESULTS_BAND: usize = 4;
 
 /// Builds the full home-screen frame for a raw terminal size.
 pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> Vec<String> {
@@ -804,17 +928,27 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
     let (height, width) = widgets::normalize_size(raw_height, raw_width);
     let (left_w, right_w) = layout(width);
 
+    // The 統括 input is a bordered box (3 rows) when there is height for it;
+    // every other mode — and a short terminal — uses a single status line.
+    let input_lines = if state.mode() == Mode::Overview && height >= INPUT_BOX_MIN_HEIGHT {
+        overview_input_box(state, width)
+    } else {
+        vec![input_line(state)]
+    };
+    let input_h = input_lines.len();
+
     // In 統括 the command log renders as a band below the input; it is sized so
     // the body keeps at least one row. Other modes use no results band.
     let results = if state.mode() == Mode::Overview {
-        RESULTS_BAND.min(height.saturating_sub(5))
+        RESULTS_BAND.min(height.saturating_sub(4 + input_h))
     } else {
         0
     };
 
-    // Chrome: title + blank separator on top, input + footer + the optional
-    // results band at the bottom. Everything between is the two-pane body.
-    let body_rows = height.saturating_sub(4 + results).max(1);
+    // Chrome: title + mode ladder on top, the input block + footer + the
+    // optional results band at the bottom. Everything between is the two-pane
+    // body.
+    let body_rows = height.saturating_sub(3 + input_h + results).max(1);
     let mut left = left_pane(
         state.list(),
         state.live_paths(),
@@ -838,7 +972,7 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
 
     let mut lines = Vec::with_capacity(height);
     lines.push(title_bar(width, state.list()));
-    lines.push(String::new());
+    lines.push(mode_ladder(width, state.mode()));
     let body_start = lines.len();
     for row in 0..body_rows {
         let left_cell = pad_to_width(left.get(row).cloned().unwrap_or_default(), left_w);
@@ -866,7 +1000,7 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
         }
     }
 
-    lines.push(input_line(state));
+    lines.extend(input_lines);
     // The 統括 results band: the command log tail, drawn below the input. Always
     // exactly `results` rows tall (blank-padded) so the footer stays at the
     // bottom regardless of how much output there is.
@@ -1024,8 +1158,8 @@ mod tests {
     }
 
     #[test]
-    fn worktree_row_marks_the_active_worktree_on_the_detail_line() {
-        let (_, active_detail) = worktree_row(
+    fn worktree_row_marks_the_active_worktree_on_the_identity_line() {
+        let (active_top, active_detail) = worktree_row(
             &worktree(Some("feature"), false, BranchStatus::Local),
             10,
             10,
@@ -1034,8 +1168,10 @@ mod tests {
             false,
             false,
         );
-        assert!(active_detail.contains('*'));
-        let (_, idle_detail) = worktree_row(
+        // The `*` marker sits on line 1, clear of the agent-state detail line.
+        assert!(active_top.contains('*'));
+        assert!(!active_detail.contains('*'));
+        let (idle_top, _) = worktree_row(
             &worktree(Some("feature"), false, BranchStatus::Local),
             10,
             10,
@@ -1044,7 +1180,7 @@ mod tests {
             false,
             false,
         );
-        assert!(!idle_detail.contains('*'));
+        assert!(!idle_top.contains('*'));
     }
 
     #[test]
@@ -1130,12 +1266,14 @@ mod tests {
         assert!(top.contains(ROOT_NAME));
         assert!(detail.contains("workspace root"));
 
-        let (_, active_detail) = root_row(10, 20, false, true);
-        assert!(active_detail.contains('*'));
+        // The active marker now lives on the identity line, not the detail line.
+        let (active_top, active_detail) = root_row(10, 20, false, true);
+        assert!(active_top.contains('*'));
+        assert!(!active_detail.contains('*'));
 
-        let (idle_top, idle_detail) = root_row(10, 20, false, false);
+        let (idle_top, _) = root_row(10, 20, false, false);
         assert!(!idle_top.contains('>'));
-        assert!(!idle_detail.contains('*'));
+        assert!(!idle_top.contains('*'));
         assert!(idle_top.contains(ROOT_NAME));
     }
 
@@ -1201,16 +1339,19 @@ mod tests {
     }
 
     #[test]
-    fn left_pane_marks_the_active_worktree_below_the_root_entry() {
+    fn left_pane_marks_the_active_worktree_on_its_identity_line() {
         let mut list = list_with(vec![
             worktree(Some("main"), true, BranchStatus::Pushed),
             worktree(Some("feature"), false, BranchStatus::Local),
         ]);
         list.activate_by_name("feature");
         let lines = left_pane(&list, &HashSet::new(), &HashSet::new(), 30, 6);
-        assert!(!lines[1].contains('*'));
+        // The root identity line is not marked; the active "feature" row carries
+        // the `*` on its identity line (line 1), not its detail line (line 2).
+        assert!(!lines[0].contains('*'));
         assert!(lines[4].contains("feature"));
-        assert!(lines[5].contains('*'));
+        assert!(lines[4].contains('*'));
+        assert!(!lines[5].contains('*'));
     }
 
     #[test]
@@ -1241,11 +1382,44 @@ mod tests {
     // --- right pane by mode ------------------------------------------------
 
     #[test]
-    fn right_pane_is_blank_in_overview_and_switch() {
+    fn right_pane_is_blank_in_overview_but_shows_a_card_in_switch() {
         let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
         assert!(right_pane_contents(&state, 40, 5).is_empty());
+        // In 切替 the right pane carries a detail card for the highlighted session.
         state.enter_switch(super::super::state::ReturnMode::Overview);
-        assert!(right_pane_contents(&state, 40, 5).is_empty());
+        let card = stripped(&right_pane_contents(&state, 40, 12));
+        assert!(card.contains("session: root"));
+    }
+
+    #[test]
+    fn switch_detail_describes_the_highlighted_session() {
+        let mut running = worktree(Some("feat"), false, BranchStatus::Local);
+        running.path = PathBuf::from("/repo/run");
+        let mut state = HomeState::new("usagi", vec![running], None);
+        state.set_live([PathBuf::from("/repo/run")].into());
+        state.enter_switch(super::super::state::ReturnMode::Overview);
+        // Move the cursor off the root onto the session row.
+        state.switch_move_down();
+        let card = stripped(&switch_detail(&state, 40, 12));
+        assert!(card.contains("session: feat"));
+        assert!(card.contains("status"));
+        assert!(card.contains("local"));
+        assert!(card.contains("running"));
+        assert!(card.contains("path"));
+    }
+
+    #[test]
+    fn switch_detail_reports_an_idle_session_and_its_upstream() {
+        let mut idle = worktree(Some("feat"), false, BranchStatus::Pushed);
+        idle.upstream = Some("origin/feat".to_string());
+        let mut state = HomeState::new("usagi", vec![idle], None);
+        state.enter_switch(super::super::state::ReturnMode::Overview);
+        state.switch_move_down();
+        let card = stripped(&switch_detail(&state, 40, 12));
+        // No live agent: the agent field reads "idle"; the upstream is listed.
+        assert!(card.contains("idle"));
+        assert!(card.contains("upstream"));
+        assert!(card.contains("origin/feat"));
     }
 
     #[test]
@@ -1411,6 +1585,40 @@ mod tests {
         assert!(footer_line(80, &state).contains("session: main"));
         state.show_attached();
         assert!(footer_line(80, &state).contains("attached"));
+    }
+
+    #[test]
+    fn mode_ladder_lists_every_step_and_keeps_them_for_each_mode() {
+        for mode in [Mode::Overview, Mode::Switch, Mode::Focus, Mode::Attached] {
+            let ladder = console::strip_ansi_codes(&mode_ladder(80, mode)).into_owned();
+            for step in ["Overview", "Switch", "Focus", "Attached"] {
+                assert!(ladder.contains(step), "{mode:?} ladder missing {step}");
+            }
+        }
+    }
+
+    #[test]
+    fn overview_input_is_a_bordered_box_at_full_height() {
+        let mut state = state_with(Vec::new());
+        for c in "session".chars() {
+            state.push_char(c);
+        }
+        let frame = render_frame(24, 80, &state);
+        let joined = console::strip_ansi_codes(&frame.join("\n")).into_owned();
+        // The input is framed (top/bottom borders) and still carries the prompt.
+        assert!(joined.contains('┌'));
+        assert!(joined.contains('└'));
+        assert!(joined.contains("❯ session"));
+    }
+
+    #[test]
+    fn overview_input_falls_back_to_a_single_line_on_a_short_terminal() {
+        let state = state_with(Vec::new());
+        // Too short for the 3-row box: the input is the plain prompt line.
+        let lines = render_frame(6, 80, &state);
+        let joined = console::strip_ansi_codes(&lines.join("\n")).into_owned();
+        assert!(!joined.contains('┌'));
+        assert!(joined.contains('❯'));
     }
 
     // --- Switch inline create ----------------------------------------------
