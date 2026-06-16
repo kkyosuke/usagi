@@ -297,6 +297,59 @@ mod tests {
         assert_eq!(state.sessions[0].worktrees.len(), 3);
     }
 
+    /// Add a linked worktree of `repo` at `dest` on a throwaway branch; its
+    /// `.git` is a file pointer, marking it as an existing worktree to skip.
+    fn add_linked_worktree(repo: &Path, dest: &Path, branch: &str) {
+        assert!(git_cmd(repo)
+            .args([
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                branch,
+                dest.to_str().unwrap()
+            ])
+            .status()
+            .unwrap()
+            .success());
+        assert!(dest.join(".git").is_file());
+    }
+
+    #[test]
+    fn create_skips_existing_linked_worktrees() {
+        let root = tempfile::tempdir().unwrap();
+        // A real repo at the root is mirrored, but a linked worktree sitting
+        // alongside it (e.g. a `.workspace` or `.claude/worktrees/*`) is left
+        // untouched: not branched, not copied into the session.
+        init_repo(&root.path().join("app"));
+        add_linked_worktree(
+            &root.path().join("app"),
+            &root.path().join(".workspace"),
+            "wt",
+        );
+
+        let created = create(root.path(), "wip").unwrap();
+
+        let base = root.path().join(".usagi/sessions/wip");
+        assert_eq!(created.worktrees, vec![base.join("app")]);
+        assert!(!base.join(".workspace").exists());
+    }
+
+    #[test]
+    fn source_repos_skips_linked_worktrees() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(&root.path().join("app"));
+        add_linked_worktree(
+            &root.path().join("app"),
+            &root.path().join(".workspace"),
+            "wt",
+        );
+
+        // Only the real repository is a source repo; the linked worktree is not.
+        let repos = tree::source_repos(root.path());
+        assert_eq!(repos, vec![root.path().join("app")]);
+    }
+
     #[test]
     fn records_multiple_sessions_in_order() {
         let root = tempfile::tempdir().unwrap();

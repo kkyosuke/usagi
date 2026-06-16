@@ -25,6 +25,15 @@ pub(super) fn is_repo_root(path: &Path) -> bool {
     path.join(".git").exists()
 }
 
+/// A directory is a *linked worktree* when its `.git` is a file (a `gitdir:`
+/// pointer) rather than a directory. Such directories are existing worktrees
+/// managed elsewhere — `git worktree` checkouts like `.claude/worktrees/*` or a
+/// `.workspace` — and must never be mirrored, branched, or descended into when
+/// building a session.
+pub(super) fn is_linked_worktree(path: &Path) -> bool {
+    path.join(".git").is_file()
+}
+
 /// The ref a new session worktree in `repo` should branch from, per the repo's
 /// project-local settings: the chosen
 /// [`default_branch`](crate::domain::settings::LocalSettings::default_branch)
@@ -42,7 +51,8 @@ pub(super) fn base_ref(repo: &Path) -> Option<String> {
 
 /// Recursively mirror `src` into the already-created `dest`: a git repository
 /// becomes a new worktree, a plain directory is recreated and descended into,
-/// and a plain file is copied.
+/// and a plain file is copied. Existing linked worktrees
+/// ([`is_linked_worktree`]) are skipped entirely.
 pub(super) fn build_dir(
     src: &Path,
     dest: &Path,
@@ -62,6 +72,11 @@ pub(super) fn build_dir(
             continue;
         }
         let from = entry.path();
+        // An existing linked worktree is not a source repository: skip it
+        // outright rather than branch from it or descend into it.
+        if is_linked_worktree(&from) {
+            continue;
+        }
         let to = dest.join(&name);
         let file_type = entry
             .file_type()
@@ -97,8 +112,9 @@ pub(super) fn source_repos(workspace_root: &Path) -> Vec<PathBuf> {
 }
 
 /// Append every repository root reachable under `dir` to `repos`, recursing into
-/// plain directories and skipping [`SKIP`] entries. Best-effort: unreadable
-/// directories and entries are silently skipped.
+/// plain directories and skipping [`SKIP`] entries and existing linked worktrees
+/// ([`is_linked_worktree`]). Best-effort: unreadable directories and entries are
+/// silently skipped.
 fn collect_repos(dir: &Path, repos: &mut Vec<PathBuf>) {
     for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
         if SKIP.iter().any(|s| OsStr::new(s) == entry.file_name()) {
@@ -106,6 +122,10 @@ fn collect_repos(dir: &Path, repos: &mut Vec<PathBuf>) {
         }
         let path = entry.path();
         if !path.is_dir() {
+            continue;
+        }
+        // An existing linked worktree is not a source repository.
+        if is_linked_worktree(&path) {
             continue;
         }
         if is_repo_root(&path) {
