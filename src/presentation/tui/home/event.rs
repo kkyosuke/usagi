@@ -177,6 +177,30 @@ pub fn event_loop(
             continue;
         }
 
+        // The text modal (a text-dumping command's output, e.g. `man`), when open,
+        // captures every key: the arrows / `j`/`k` and PageUp/PageDown scroll it,
+        // and `Esc` / `Enter` / `q` dismiss it.
+        if state.text_modal().is_some() {
+            let page = ui::TEXT_MODAL_VISIBLE;
+            match key {
+                Key::ArrowUp | Key::Char('k') => state.text_modal_scroll_up(),
+                Key::ArrowDown | Key::Char('j') => state.text_modal_scroll_down(page),
+                Key::PageUp => {
+                    for _ in 0..page {
+                        state.text_modal_scroll_up();
+                    }
+                }
+                Key::PageDown => {
+                    for _ in 0..page {
+                        state.text_modal_scroll_down(page);
+                    }
+                }
+                Key::Escape | Key::Enter | Key::Char('q') => state.close_text_modal(),
+                _ => {}
+            }
+            continue;
+        }
+
         let flow = match state.mode() {
             Mode::Overview => overview_key(
                 term,
@@ -328,7 +352,9 @@ fn overview_key(
                     }
                     painter.reset();
                 }
-                Effect::None | Effect::Clear => {}
+                // `ShowText` already opened its modal inside `submit`; nothing
+                // more for the event loop to do.
+                Effect::None | Effect::Clear | Effect::ShowText(_) => {}
             }
         }
         Key::Tab => state.complete(),
@@ -1007,15 +1033,35 @@ mod tests {
     }
 
     #[test]
+    fn text_modal_scrolls_and_dismisses() {
+        // `man` opens a scrollable text modal; the arrows / j/k and PageUp/PageDown
+        // scroll it, and Esc dismisses it (back to Overview, where the fallback
+        // Ctrl-C quits).
+        let mut keys = typed("man");
+        keys.push(Ok(Key::Enter)); // run `man` -> opens the text modal
+        keys.push(Ok(Key::ArrowDown)); // scroll down a line
+        keys.push(Ok(Key::Char('j')));
+        keys.push(Ok(Key::ArrowUp)); // scroll up a line
+        keys.push(Ok(Key::Char('k')));
+        keys.push(Ok(Key::PageDown)); // page down
+        keys.push(Ok(Key::PageUp)); // page up
+        keys.push(Ok(Key::Char('z'))); // ignored inside the modal
+        keys.push(Ok(Key::Escape)); // dismiss -> Overview
+        keys.push(Ok(Key::Escape)); // Esc inert in Overview; fallback Ctrl-C quits
+        assert!(matches!(run(keys, sample_state()).unwrap(), Outcome::Quit));
+    }
+
+    #[test]
     fn overview_edits_completes_and_recalls_then_runs() {
         let mut keys = typed("ma");
         keys.push(Ok(Key::Backspace));
         keys.push(Ok(Key::Tab)); // "m" -> "man"
-        keys.push(Ok(Key::Enter)); // run
-        keys.push(Ok(Key::ArrowUp)); // recall
+        keys.push(Ok(Key::Enter)); // run -> `man` opens its text modal
+        keys.push(Ok(Key::Escape)); // dismiss the modal -> Overview
+        keys.push(Ok(Key::ArrowUp)); // recall the previous command
         keys.push(Ok(Key::ArrowDown)); // back to empty
         keys.push(Ok(Key::Home)); // ignored
-        keys.push(Ok(Key::Escape)); // back
+        keys.push(Ok(Key::Escape)); // Esc inert in Overview; fallback Ctrl-C quits
         assert!(matches!(run(keys, sample_state()).unwrap(), Outcome::Quit));
     }
 

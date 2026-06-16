@@ -354,6 +354,16 @@ struct CreateInput {
     error: Option<String>,
 }
 
+/// An open scrollable text modal: the read-only output of a text-dumping command
+/// (`man` / `history` / `session list`). `scroll` is the index of the first
+/// visible body line, advanced by the arrow / page keys and clamped on render.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TextModal {
+    pub title: String,
+    pub lines: Vec<LogLine>,
+    pub scroll: usize,
+}
+
 /// The open session-removal modal: the workspace's session names with a
 /// checklist the user toggles to pick which to delete in one go. A cursor marks
 /// the row the keyboard acts on, `selected` holds the checked rows, and `force`
@@ -461,6 +471,13 @@ pub struct HomeState {
     /// presses `Ctrl-C` while a session is still live, so an accidental close
     /// does not drop a running agent/shell; confirming it quits the app.
     quit_confirm: bool,
+    /// The open text modal (a text-dumping command's output, e.g. `man`), when
+    /// set. While open it captures the keys (scroll / dismiss).
+    text_modal: Option<TextModal>,
+    /// Index into `log` where the most recent command's response begins. The
+    /// 統括 (Overview) results band renders only `log[response_start..]`, so it
+    /// shows the response to the latest command and nothing earlier.
+    response_start: usize,
 }
 
 impl HomeState {
@@ -496,6 +513,8 @@ impl HomeState {
             waiting: HashSet::new(),
             live: HashSet::new(),
             quit_confirm: false,
+            text_modal: None,
+            response_start: 0,
         }
     }
 
@@ -536,7 +555,9 @@ impl HomeState {
         &self.sessions
     }
 
-    /// Append the recorded sessions to the log (the `session list` command).
+    /// Show the recorded sessions (the `session list` command). With sessions it
+    /// opens a scrollable text modal; with none it reports the empty state in the
+    /// results band (a one-liner needs no modal).
     pub fn log_sessions(&mut self) {
         if self.sessions.is_empty() {
             self.log.push(LogLine::output(
@@ -544,17 +565,61 @@ impl HomeState {
             ));
             return;
         }
-        self.log.push(LogLine::output(format!(
+        let mut lines = vec![LogLine::output(format!(
             "{} session(s):",
             self.sessions.len()
-        )));
+        ))];
         for session in &self.sessions {
-            self.log.push(LogLine::output(format!(
+            lines.push(LogLine::output(format!(
                 "  {}  ({} worktree(s))",
                 session.name,
                 session.worktrees.len()
             )));
         }
+        self.open_text_modal("Sessions", lines);
+    }
+
+    /// Open a scrollable text modal showing `lines` under `title` (used by the
+    /// text-dumping commands). Replaces any modal already open.
+    pub fn open_text_modal(&mut self, title: impl Into<String>, lines: Vec<LogLine>) {
+        self.text_modal = Some(TextModal {
+            title: title.into(),
+            lines,
+            scroll: 0,
+        });
+    }
+
+    /// The open text modal, if any.
+    pub fn text_modal(&self) -> Option<&TextModal> {
+        self.text_modal.as_ref()
+    }
+
+    /// Close the text modal (the user dismissed it).
+    pub fn close_text_modal(&mut self) {
+        self.text_modal = None;
+    }
+
+    /// Scroll the text modal up one line (no-op when closed or at the top).
+    pub fn text_modal_scroll_up(&mut self) {
+        if let Some(modal) = self.text_modal.as_mut() {
+            modal.scroll = modal.scroll.saturating_sub(1);
+        }
+    }
+
+    /// Scroll the text modal down one line, clamped so the last line stays in
+    /// view (no-op when closed). `visible` is the body height the view can show.
+    pub fn text_modal_scroll_down(&mut self, visible: usize) {
+        if let Some(modal) = self.text_modal.as_mut() {
+            let max = modal.lines.len().saturating_sub(visible);
+            modal.scroll = (modal.scroll + 1).min(max);
+        }
+    }
+
+    /// The lines of the most recent command's response (what the 統括 results band
+    /// shows): everything in the log from `response_start` onward.
+    pub fn response_lines(&self) -> &[LogLine] {
+        let start = self.response_start.min(self.log.len());
+        &self.log[start..]
     }
 
     /// Append an ordinary output line to the log (used by the event loop to
@@ -928,7 +993,13 @@ impl HomeState {
             .registry
             .dispatch(&entry, &self.history, &self.list.refs());
         self.history.push(entry.clone());
-        self.log.extend(result.lines);
+        // A text-dumping utility (`man` / `history`) run from the prompt shows its
+        // output in a modal, like in 統括; everything else appends to the log.
+        if let Effect::ShowText(title) = result.effect {
+            self.open_text_modal(title, result.lines);
+        } else {
+            self.log.extend(result.lines);
+        }
         Submission {
             effect: result.effect,
             recorded: Some(entry),
@@ -1003,6 +1074,9 @@ impl HomeState {
             };
         }
 
+        // The results band shows only this command's response: mark where it
+        // begins (the command echo), so everything earlier drops out of view.
+        self.response_start = self.log.len();
         self.log.push(LogLine::command(entry.clone()));
         let result = self
             .registry
@@ -1010,11 +1084,20 @@ impl HomeState {
         self.history.push(entry.clone());
 
         match result.effect {
-            Effect::Clear => self.log.clear(),
+            Effect::Clear => {
+                self.log.clear();
+                self.response_start = 0;
+            }
             // `session switch` (→ 切替) and `session switch <name>` (→ 在席) are
             // resolved by the event loop, which owns the mode transitions (and, for
             // a live session, the pane). They append no lines here.
             Effect::EnterSwitch | Effect::Activate(_) => {}
+            // Text-dumping commands (`man` / `history`) show their output in a
+            // scrollable modal, not the band; leave the band empty for them.
+            Effect::ShowText(title) => {
+                self.open_text_modal(title, result.lines);
+                self.response_start = self.log.len();
+            }
             _ => self.log.extend(result.lines),
         }
         Submission {
@@ -1385,11 +1468,20 @@ mod tests {
             state.push_char(c);
         }
         let submission = state.submit();
-        assert_eq!(submission.effect, Effect::None);
+        // `man` is a text-dumping command: it echoes, then opens a text modal
+        // (its output does not land in the band's log).
+        assert_eq!(submission.effect, Effect::ShowText("Help"));
         assert_eq!(submission.recorded.as_deref(), Some("man"));
         let echoed = state.log().iter().find(|l| l.kind == LineKind::Command);
         assert_eq!(echoed.unwrap().text, "man");
-        assert!(state.log().iter().any(|l| l.text.contains("Available")));
+        let modal = state.text_modal().expect("man opens a text modal");
+        assert_eq!(modal.title, "Help");
+        assert!(modal.lines.iter().any(|l| l.text.contains("Available")));
+        // The band shows none of the modal's output.
+        assert!(!state
+            .response_lines()
+            .iter()
+            .any(|l| l.text.contains("Available")));
         assert_eq!(state.input(), "");
     }
 
@@ -1689,6 +1781,49 @@ mod tests {
     }
 
     #[test]
+    fn focus_prompt_runs_a_text_command_into_a_modal() {
+        // A text-dumping utility (`man`) typed in the 在席 prompt opens the text
+        // modal too, rather than appending to the log.
+        let mut state = state();
+        state.enter_focus(1);
+        for c in "man".chars() {
+            state.focus_prompt_push_char(c);
+        }
+        let submission = state.focus_prompt_submit();
+        assert_eq!(submission.effect, Effect::ShowText("Help"));
+        let modal = state.text_modal().expect("man opens a modal");
+        assert!(modal.lines.iter().any(|l| l.text.contains("Available")));
+    }
+
+    #[test]
+    fn text_modal_opens_scrolls_and_closes() {
+        let mut state = state();
+        let lines: Vec<LogLine> = (0..30)
+            .map(|i| LogLine::output(format!("line {i}")))
+            .collect();
+        state.open_text_modal("Help", lines);
+        assert_eq!(state.text_modal().unwrap().scroll, 0);
+        // Scrolling up at the top is a no-op.
+        state.text_modal_scroll_up();
+        assert_eq!(state.text_modal().unwrap().scroll, 0);
+        // Scrolling down advances, clamped so the last `visible` lines stay shown.
+        state.text_modal_scroll_down(10);
+        assert_eq!(state.text_modal().unwrap().scroll, 1);
+        for _ in 0..100 {
+            state.text_modal_scroll_down(10);
+        }
+        assert_eq!(state.text_modal().unwrap().scroll, 30 - 10);
+        state.text_modal_scroll_up();
+        assert_eq!(state.text_modal().unwrap().scroll, 30 - 10 - 1);
+        state.close_text_modal();
+        assert!(state.text_modal().is_none());
+        // Scroll calls are no-ops once closed.
+        state.text_modal_scroll_down(10);
+        state.text_modal_scroll_up();
+        assert!(state.text_modal().is_none());
+    }
+
+    #[test]
     fn focus_prompt_submit_on_empty_input_is_a_noop() {
         let mut state = state();
         state.enter_focus(1);
@@ -1963,12 +2098,15 @@ mod tests {
     }
 
     #[test]
-    fn log_sessions_lists_recorded_sessions() {
+    fn log_sessions_lists_recorded_sessions_in_a_modal() {
         let mut state = state();
         state.restore_sessions(vec![session_record("alpha", 2), session_record("beta", 1)]);
         state.log_sessions();
-        let text = state
-            .log()
+        // With sessions, `session list` opens a scrollable text modal.
+        let modal = state.text_modal().expect("session list opens a modal");
+        assert_eq!(modal.title, "Sessions");
+        let text = modal
+            .lines
             .iter()
             .map(|l| l.text.as_str())
             .collect::<Vec<_>>()
