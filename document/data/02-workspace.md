@@ -112,7 +112,7 @@ worktree を束ねます。各 worktree は git ステータス付き（下記 `
 | `worktrees` | array&lt;WorktreeState&gt; | worktree を作成した各リポジトリの状態（下記） |
 | `created_at` | RFC3339(UTC) | セッションの作成日時 |
 
-セッション作成（`usecase/session.rs`）はこの `SessionRecord` を `state.json` に追記します。
+セッション作成（`usecase/session`）はこの `SessionRecord` を `state.json` に追記します。
 再同期（`usecase/workspace_state::sync`）は各セッション worktree の git ステータスを
 読み直して更新します。
 
@@ -165,7 +165,7 @@ worktree を束ねます。各 worktree は git ステータス付き（下記 `
 
 CLI からは `usagi status` で `sync` が走り、最新状態を保存しつつセッションごとに一覧表示します。
 
-セッションの作成・削除時（`usecase/session.rs` の `reconcile`）には、`.usagi/sessions/` 配下のディレクトリと `state.json` の記録を照合し、**記録のない孤児ディレクトリを未コミット変更の有無にかかわらず強制削除**してディスクと state の同期を保ちます。記録済みセッション本体の削除には引き続き `--force` のガードが効きます。詳細は [4. オーケストレーション](../04-orchestration.md) を参照。
+セッションの作成・削除時（`usecase/session` の `reconcile`）には、`.usagi/sessions/` 配下のディレクトリと `state.json` の記録を照合し、**記録のない孤児ディレクトリを未コミット変更の有無にかかわらず強制削除**してディスクと state の同期を保ちます。記録済みセッション本体の削除には引き続き `--force` のガードが効きます。詳細は [4. オーケストレーション](../04-orchestration.md) を参照。
 
 ```
 $ usagi status
