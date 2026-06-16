@@ -1,6 +1,6 @@
 # 2. workspace 毎（リポジトリ単位）
 
-> [データ永続化トップ](README.md) ｜ ← 前へ [1. usagi 全体（グローバル）](01-global.md)
+> [データ永続化トップ](README.md) ｜ ← 前へ [1. usagi 全体（グローバル）](01-global.md) ｜ 次へ → [3. タスク issue（`issues/`）](03-issues.md)
 
 「そのリポジトリの中で各 worktree が今どういう状態か」を保持する層です。各リポジトリ内に
 `state.json` として保存され、`infrastructure/workspace_store.rs` の `WorkspaceStore` が管理します。
@@ -32,7 +32,7 @@
 ```
 
 - どの worktree からコマンドを実行しても、`git worktree list` の先頭（＝プライマリ worktree）を基準に保存先を解決します（`infrastructure/git.rs` の `primary_worktree`）。これによりリポジトリ内で 1 つの `.usagi/` に集約されます。
-- `.usagi/` の大半（`state.json` / `settings.json` / `history.json` / `worktree/`）は **マシンローカルな状態・設定** で、後述の `.gitignore` により **コミットされません**。
+- `.usagi/` の大半（`state.json` / `settings.json` / `history.json` / `sessions/`）は **マシンローカルな状態・設定** で、後述の `.gitignore` により **コミットされません**。
 - 例外は **`.usagi/issues/`**。タスク issue はチームで共有したいので git 管理対象とします。派生キャッシュの `index.json` だけは再生成可能なので除外したままにします。
 - git 管理の制御は **リポジトリルートの `.gitignore` には書かず、`.usagi/.gitignore` に自己完結させます**（`usagi::usecase::project::ignore_usagi_dir`）。リポジトリルートを汚さず、`.usagi/` 配下だけで完結するのが利点です。`usagi init` 時に次の内容（`.usagi/` 配下からの相対パターン）を書き込み、旧バージョンがルート `.gitignore` に追記していた `.usagi/` 系エントリがあれば除去します。
 
@@ -122,11 +122,11 @@ worktree を束ねます。各 worktree は git ステータス付き（下記 `
 
 | フィールド | 型 | 意味 |
 |---|---|---|
-| `branch` | string?\| | チェックアウト中のブランチ名。detached HEAD なら `null` |
+| `branch` | string? | チェックアウト中のブランチ名。detached HEAD なら `null` |
 | `path` | path | worktree ディレクトリの絶対パス（`.usagi/sessions/<name>/...`） |
 | `head` | string | チェックアウト中コミットの短縮ハッシュ（7 桁） |
 | `primary` | bool | 予約フィールド（セッション worktree では常に `false`） |
-| `upstream` | string?\| | 上流追跡ブランチ（例 `origin/login`）。無ければ `null` |
+| `upstream` | string? | 上流追跡ブランチ（例 `origin/login`）。無ければ `null` |
 | `status` | enum | ブランチのライフサイクル状態（下記） |
 | `updated_at` | RFC3339(UTC) | この worktree の状態を更新した日時 |
 
@@ -185,36 +185,31 @@ session "login"  (/Users/me/git/usagi/.usagi/sessions/login)
 ```jsonc
 {
   "version": 1,
-  "agent_cli": "gemini",             // 任意。未設定ならグローバル値を使う
-  "notifications_enabled": false,    // 任意。未設定ならグローバル値を使う
+  "agent_cli": "gemini",             // 任意。未設定ならグローバル値
+  "notifications_enabled": false,    // 任意。未設定ならグローバル値
   "default_branch": "develop",       // 任意。未設定なら検出済み既定ブランチ（auto）
-  "default_branch_source": "local"   // 任意。未設定なら既定（remote）を使う
+  "default_branch_source": "local",  // 任意。未設定なら remote
+  "local_llm_enabled": true          // 任意。未設定ならグローバル値（local_llm.enabled）
 }
 ```
 
-| フィールド | 型 | 意味 |
+| フィールド | 型 | 未設定（`null`）時 |
 |---|---|---|
-| `agent_cli` | enum?\| | このプロジェクトで起動する AI エージェント CLI（`claude` / `gemini`）。`null`（未設定）ならグローバル設定にフォールバック |
-| `notifications_enabled` | bool?\| | このプロジェクトでのデスクトップ通知 ON/OFF。`null`（未設定）ならグローバル設定にフォールバック |
-| `default_branch` | string?\| | `session create` で worktree を切る新ブランチを**どのブランチから**切るか（例 `develop`）。`null`（未設定）ならリポジトリの検出済み既定ブランチ（auto）。グローバル設定に対応項目はなく、**リポジトリ単位**の設定 |
-| `default_branch_source` | enum?\| | 上のブランチを**ローカル形／リモート形のどちらで**基点にするか（`local` = ローカルのブランチ / `remote` = リモート追従のブランチ）。`null`（未設定）なら既定の `remote`。グローバル設定に対応項目はなく、**リポジトリ単位**の設定 |
+| `agent_cli` | enum? | グローバル `agent_cli` にフォールバック |
+| `notifications_enabled` | bool? | グローバル `notifications_enabled` にフォールバック |
+| `default_branch` | string? | リポジトリの検出済み既定ブランチ（auto）。**リポジトリ単位**（グローバルに対応項目なし） |
+| `default_branch_source` | enum? | `remote`。**リポジトリ単位**（グローバルに対応項目なし） |
+| `local_llm_enabled` | bool? | グローバル `local_llm.enabled` にフォールバック |
 
-- `agent_cli` / `notifications_enabled` は `null`（未設定）で「グローバル設定に従う」を意味します。`light/dark` テーマやクローン先（`workspace_root`）のようにプロジェクト単位で変える意味の薄い項目は対象外です。
-- `default_branch` / `default_branch_source` はグローバルに対応項目がなく、未設定時はそれぞれ検出済み既定ブランチ・`remote` として解決されます。`session create` は `default_branch`（未設定なら `origin/HEAD` → 現在のブランチ → `main` で解決した既定）を基点ブランチとし、`remote` 選択時に `origin/<ブランチ>` が無ければローカルのブランチ → それも無ければ現在の HEAD にフォールバックします（`infrastructure/git.rs` の `resolve_base_ref`）。Config 画面の選択肢は対象リポジトリの実在ブランチ（`infrastructure/git.rs` の `list_branches`）から作られます。
+- 全フィールドが任意（`Option`）で、`null` は「グローバル設定に従う」を意味します。各項目の意味・選択肢は
+  [../05-settings.md#ローカル設定プロジェクト単位の上書き](../05-settings.md#ローカル設定プロジェクト単位の上書き)、`default_branch` / `default_branch_source` を使った
+  新ブランチの基点解決は [4. オーケストレーション#新ブランチの基点local--remote](../04-orchestration.md#新ブランチの基点local--remote)、編集画面は
+  [design/04-config.md](../design/04-config.md) が正本です。
 - **実効設定 = グローバル設定にローカルの上書きを適用した結果**。解決は `domain/settings.rs` の `Settings::with_local`、ユースケースは `usecase/settings.rs` の `effective(storage, repo_root)` が担います。
+- 全項目を未上書きに戻しても `settings.json` は残し（中身は実質空）、「グローバルに従う／既定に従う」を意味します。
 
 対応するユースケース（`usecase/settings.rs`）: `load_local` / `save_local` / `effective` /
 `set_local_agent_cli` / `set_local_notifications_enabled`。
-
-> 編集 UI（[issue 022](../../issues/022-local-settings-ui.md), [issue 030](../../issues/030-default-branch-source.md)）:
-> ホーム画面のコマンドモードで `config` を実行すると、設定画面が**ワークスペーススコープ**で開き、「Agent CLI」
-> 「Notifications」「Default Branch」「Branch Source」の 4 項目だけを表示します（グローバル設定はここには出ません）。
-> Agent CLI と Notifications は **「グローバルに従う / ローカルで上書き」** を 1 つのセレクタで切り替えられ、未上書き
-> 時は現在の実効値（`Global (...)`）を表示します。Default Branch はリポジトリの実在ブランチを検出して `auto`（検出済み
-> 既定）＋各ブランチ名を循環選択でき、未設定時は `Default (auto)` を表示します（リポジトリでない・ブランチが無い場合は
-> 選択肢が無く no-op）。Branch Source はグローバル対応項目がないため `local` / `remote` の 2 値を切り替え、未設定時は
-> 既定値（`Default (Remote)`）を表示します。保存時はこのワークスペースのローカル設定（`save_local`）のみを書き込みます。
-> 全項目を未上書きに戻しても `settings.json` は残し（中身は実質空）、「グローバルに従う／既定に従う」を意味します。
 
 ## `history.json`
 
@@ -243,80 +238,6 @@ session "login"  (/Users/me/git/usagi/.usagi/sessions/login)
 
 ## `issues/`: タスク issue
 
-プロジェクトのタスクを管理する issue です。`.usagi/` の他のファイルと異なり **git で共有** され、チームで同じタスク一覧を見られます。`infrastructure/issue_store.rs` の `IssueStore` が管理します。
-
-```
-<repo>/.usagi/issues/
-├── 001-add-doctor-command.md   # 1 issue = 1 ファイル
-├── 002-fix-login.md
-└── index.json                  # 派生キャッシュ（git 管理外）
-```
-
-### issue ファイル（`NNN-<slug>.md`）
-
-本リポジトリが `issues/` 配下で使う形式と同じく、上部に **frontmatter**（行ベースのメタデータ）、その下に自由記述の markdown 本文を持ちます。ファイル名は `番号(3桁ゼロ詰め)-タイトルのスラッグ.md`。
-
-```markdown
----
-number: 1
-title: doctor コマンドを追加
-status: todo
-priority: medium
-labels: [cli, infra]
-dependson: [2, 3]
-created_at: 2026-06-14T00:00:00+00:00
-updated_at: 2026-06-14T00:00:00+00:00
----
-
-# doctor コマンドを追加
-
-本文（markdown 自由記述）。
-```
-
-| フィールド | 型 | 意味 |
-|---|---|---|
-| `number` | u32 | 採番された一意な番号（ファイル名の接頭辞と一致）。新規作成時に「既存の最大値 + 1」で振る |
-| `title` | string | タイトル |
-| `status` | enum | `todo` / `in-progress` / `done` |
-| `priority` | enum | `high` / `medium` / `low`（既定 `medium`） |
-| `labels` | array&lt;string&gt; | 任意のラベル |
-| `dependson` | array&lt;u32&gt; | 先に `done` になっている必要がある issue 番号 |
-| `created_at` / `updated_at` | RFC3339(UTC) | 作成・更新日時 |
-
-- frontmatter は JSON 標準（serde_yaml 不採用）の方針に合わせ、既知フィールドを対象にした軽量パーサで読み書きします。未知のキーは無視するので、フォーマットを後方互換に拡張できます。
-- 書き込みはアトミック（一時ファイル + `rename`）。タイトル変更でスラッグが変わった場合は、同じ番号の旧ファイルを削除して 1 issue = 1 ファイルを保ちます。
-
-### `index.json`（派生キャッシュ）
-
-一覧・検索を速くするための、各 issue のメタデータ（本文を除く）のキャッシュです。`version` を持ち、markdown ファイルが常に **正**。`index.json` が無い／壊れている場合は markdown 群から自動再構築されるため、欠落しても整合性は損なわれません（だから git 管理外でよい）。
-
-```jsonc
-{
-  "version": 1,
-  "issues": [
-    {
-      "number": 1,
-      "title": "doctor コマンドを追加",
-      "status": "todo",
-      "priority": "medium",
-      "labels": ["cli"],
-      "dependson": [2, 3],
-      "file": "001-add-doctor-command.md",
-      "created_at": "2026-06-14T00:00:00+00:00",
-      "updated_at": "2026-06-14T00:00:00+00:00"
-    }
-  ]
-}
-```
-
-### 依存関係の解決（着手可能な issue）
-
-一覧・検索では各 issue に **着手可能か（ready）** を付与します。`dependson` に挙げた issue が **すべて `done`** で、かつ自身が `done` でないものを ready とみなします（存在しない依存番号は未達として扱う）。これにより「今すぐ着手できるタスク」を絞り込めます。
-
-| 層 | モジュール | 役割 |
-|---|---|---|
-| domain | `domain/issue.rs` | `Issue` / `IssueSummary` / `IssueStatus` / `IssuePriority`、frontmatter の読み書き |
-| infrastructure | `infrastructure/issue_store.rs` | `.usagi/issues/` の走査・読み書き、`index.json` の生成・再構築・採番 |
-| usecase | `usecase/issue.rs` | `create` / `get` / `list` / `search` / `update` / `delete` と ready 判定 |
-
-> CLI（`usagi issue`）からの操作は [issue 024](../../issues/024-issue-cli.md)、AI エージェント（MCP）からの操作は [issue 025](../../issues/025-issue-mcp.md) で扱います。永続化基盤そのものは [issue 023](../../issues/023-issue-store.md)。
+`.usagi/issues/` のタスク issue は、`.usagi/` の他のファイルと異なり **git で共有**されます。保存フォーマット
+（issue ファイルの frontmatter・`index.json`・依存解決）は独立した [3. タスク issue（`issues/`）](03-issues.md) に
+まとめています。

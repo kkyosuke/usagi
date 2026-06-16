@@ -19,31 +19,15 @@
 
 ## アーキテクチャ
 
-クリーンアーキテクチャの 4 層構成。依存は矢印の方向にのみ許可される。
-詳細・モジュール構成は [2. アーキテクチャ](02-architecture.md) を参照。
-
-```
-presentation ──> usecase ──> domain
-      │              │          ▲
-      └──────────────┴──> infrastructure
-```
-
-| 層 | 責務 |
-|---|---|
-| `domain/` | 外部依存のない純粋なエンティティ |
-| `usecase/` | ビジネスロジック |
-| `infrastructure/` | Git 操作・永続化などの外部連携 |
-| `presentation/` | CLI ルーティング・TUI 描画・TUI 内コマンド |
+クリーンアーキテクチャの 4 層構成（`presentation → usecase → domain ← infrastructure`）。
+**層の責務・依存方向・モジュール構成・依存ルールは [2. アーキテクチャ](02-architecture.md) が正本**。開発時は次の 2 点だけ守ること。
 
 - `domain/` は他層・外部クレートに依存しない。
 - 依存方向を逆流させない（例: `domain` から `infrastructure` を参照しない）。
 
 ## 技術スタック
 
-- 言語: Rust (edition 2021)
-- CLI: clap / TUI: ratatui + crossterm
-- 疑似ターミナル: portable-pty + vt100 / Git 操作: git2
-- 非同期: tokio / シリアライズ: serde・serde_json
+使用クレートと用途の一覧は [2. アーキテクチャ#技術スタック](02-architecture.md#技術スタック) を正本とする（Rust 2021 / clap / console + crossterm / portable-pty + vt100 / git CLI / serde）。
 
 ## ブランチ名
 

@@ -11,7 +11,7 @@
 |---|---|---|
 | 1 | [01-overview.md](01-overview.md) | プロジェクト概要・解決する課題・全体構造 |
 | 2 | [02-architecture.md](02-architecture.md) | クリーンアーキテクチャ 4 層・依存ルール・`src/` のモジュール構成 |
-| 3 | [03-commands/](03-commands/README.md) | CLI コマンド・TUI 内コマンドのリファレンス（実装状況つき） |
+| 3 | [03-commands/](03-commands/README.md) | CLI コマンド・TUI 内コマンド・MCP サーバのリファレンス |
 | 4 | [04-orchestration.md](04-orchestration.md) | セッション・worktree オーケストレーションの概念とライフサイクル |
 | 5 | [05-settings.md](05-settings.md) | 設定項目・保存場所・変更方法・環境変数 |
 | 6 | [06-conventions.md](06-conventions.md) | 開発規約（ブランチ・コミット・PR・品質チェック・hooks） |
@@ -33,10 +33,11 @@
 |---|---|---|
 | — | [data/README.md](data/README.md) | 2 層の概要・共通方針・関連モジュール |
 | 1 | [data/01-global.md](data/01-global.md) | usagi 全体（`~/.usagi/` の `workspaces.json` / `settings.json`） |
-| 2 | [data/02-workspace.md](data/02-workspace.md) | workspace 毎（`<repo>/.usagi/state.json`） |
+| 2 | [data/02-workspace.md](data/02-workspace.md) | workspace 毎（`<repo>/.usagi/` の `state.json` / `settings.json` / `history.json`） |
+| 3 | [data/03-issues.md](data/03-issues.md) | タスク issue（`<repo>/.usagi/issues/` の markdown + `index.json`） |
 
 ## 関連
 
 - [../README.md](../README.md) — リポジトリの README（インストール・使い方）
-- [../issues/README.md](../issues/README.md) — usagi.ai からの移植 issue 一覧
+- [../issues/README.md](../issues/README.md) — 開発タスク（issue）一覧
 - [../.agents/workflow.md](../.agents/workflow.md) — AI エージェント向けの開発ワークフロー
