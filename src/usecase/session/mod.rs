@@ -24,6 +24,7 @@ mod tree;
 
 pub use reconcile::reconcile;
 
+use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -188,6 +189,32 @@ pub fn remove(workspace_root: &Path, name: &str, force: bool) -> Result<RemovalO
         removed: true,
         dirty: Vec::new(),
     })
+}
+
+/// Resolve the workspace root from a working directory that may sit inside a
+/// session tree.
+///
+/// A session is mirrored at `<workspace>/.usagi/sessions/<name>/...`. When a
+/// process runs from within such a tree (e.g. an agent's `usagi mcp` server),
+/// its data stores still belong to the *workspace* — issues live at
+/// `<workspace>/.usagi/issues/`, not in a throwaway copy under the session that
+/// `usagi clean` later deletes. So we strip everything from the
+/// `.usagi/sessions` segment onward and return the workspace root. A path that
+/// is not inside a session tree is returned unchanged.
+pub fn workspace_root(start: &Path) -> PathBuf {
+    let mut prefix = PathBuf::new();
+    let mut components = start.components().peekable();
+    while let Some(component) = components.next() {
+        if component.as_os_str() == OsStr::new(".usagi")
+            && components
+                .peek()
+                .is_some_and(|next| next.as_os_str() == OsStr::new("sessions"))
+        {
+            return prefix;
+        }
+        prefix.push(component);
+    }
+    start.to_path_buf()
 }
 
 #[cfg(test)]
@@ -702,5 +729,35 @@ mod tests {
         assert!(!a.root.exists());
         assert!(!b.root.exists());
         assert!(sessions_of(root.path()).is_empty());
+    }
+
+    #[test]
+    fn workspace_root_strips_a_session_subtree() {
+        // A cwd inside a session resolves back to the workspace root.
+        assert_eq!(
+            workspace_root(Path::new("/repo/.usagi/sessions/mcp")),
+            PathBuf::from("/repo")
+        );
+        // ...including a subdirectory deeper within the session.
+        assert_eq!(
+            workspace_root(Path::new("/repo/.usagi/sessions/mcp/crate/src")),
+            PathBuf::from("/repo")
+        );
+        // A doubly nested copy stops at the first session segment.
+        assert_eq!(
+            workspace_root(Path::new("/repo/.usagi/sessions/mcp/.usagi/issues")),
+            PathBuf::from("/repo")
+        );
+    }
+
+    #[test]
+    fn workspace_root_leaves_a_plain_path_unchanged() {
+        // Not inside a session tree: returned as-is.
+        assert_eq!(workspace_root(Path::new("/repo")), PathBuf::from("/repo"));
+        // A bare `.usagi` without a `sessions` child is not a session tree.
+        assert_eq!(
+            workspace_root(Path::new("/repo/.usagi/issues")),
+            PathBuf::from("/repo/.usagi/issues")
+        );
     }
 }
