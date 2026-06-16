@@ -45,6 +45,21 @@ pub enum SessionActionUi {
 /// Kept as a literal — it is fixed and lets `domain` stay free of `serde_json`.
 const ISSUE_MCP_CONFIG: &str = r#"{"mcpServers":{"usagi":{"command":"usagi","args":["mcp"]}}}"#;
 
+/// JSON wiring Claude Code's lifecycle hooks back into usagi, so the agent
+/// reports its own running / waiting state instead of usagi guessing from the
+/// terminal bell. Each hook runs `usagi agent-phase <phase>`, which records the
+/// phase for the worktree the agent runs in (the hook delivers its `cwd` on
+/// stdin); the home screen's session watcher reads it back to mark the session.
+///
+/// The events: a submitted prompt starts a turn (`running`); the turn ending or
+/// pausing for input (`Stop` / `Notification`) means it `waits`; a resumed or
+/// freshly started session also begins by waiting for input; the session ending
+/// drops back to the bare shell (`ended`). Passed via `--settings`, which
+/// *merges* with the user's own settings rather than replacing them. Kept as a
+/// literal (only double quotes, so it survives the single-quoted shell argument)
+/// to keep `domain` free of `serde_json`.
+const CLAUDE_HOOKS_SETTINGS: &str = r#"{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"usagi agent-phase running"}]}],"Stop":[{"hooks":[{"type":"command","command":"usagi agent-phase waiting"}]}],"Notification":[{"hooks":[{"type":"command","command":"usagi agent-phase waiting"}]}],"SessionStart":[{"hooks":[{"type":"command","command":"usagi agent-phase waiting"}]}],"SessionEnd":[{"hooks":[{"type":"command","command":"usagi agent-phase ended"}]}]}}"#;
+
 /// System-prompt addendum injected into agents launched from a usagi session.
 ///
 /// Every agent `:agent` starts already lives inside the session's dedicated
@@ -117,14 +132,15 @@ impl AgentCli {
     /// plus the local LLM MCP server when `local_llm_model` is `Some` (i.e. the
     /// local LLM is enabled), so the agent can offload light work to it.
     ///
-    /// Claude Code accepts the servers inline via `--mcp-config` and a
-    /// session-scoped instruction via `--append-system-prompt`; both arguments
-    /// are single-quoted so the shell passes them through verbatim (neither
-    /// value contains a single quote). The system prompt tells the agent it is
-    /// already inside a usagi worktree, so it skips creating one, and — when the
-    /// local LLM is on — to delegate light tasks to it. Gemini has no inline
-    /// flags — its MCP servers come from `settings.json` — so it launches plain
-    /// for now.
+    /// Claude Code accepts the servers inline via `--mcp-config`, a
+    /// session-scoped instruction via `--append-system-prompt`, and lifecycle
+    /// hooks via `--settings` ([`CLAUDE_HOOKS_SETTINGS`], so the agent reports
+    /// its own running / waiting state); all three arguments are single-quoted so
+    /// the shell passes them through verbatim (no value contains a single quote).
+    /// The system prompt tells the agent it is already inside a usagi worktree,
+    /// so it skips creating one, and — when the local LLM is on — to delegate
+    /// light tasks to it. Gemini has no inline flags — its MCP servers come from
+    /// `settings.json` — so it launches plain for now.
     pub fn launch_command(self, local_llm_model: Option<&str>) -> String {
         match self {
             AgentCli::Claude => {
@@ -135,7 +151,8 @@ impl AgentCli {
                 };
                 format!(
                     "claude --mcp-config '{mcp_config}' \
-                     --append-system-prompt '{system_prompt}'"
+                     --append-system-prompt '{system_prompt}' \
+                     --settings '{CLAUDE_HOOKS_SETTINGS}'"
                 )
             }
             AgentCli::Gemini => "gemini".to_string(),
@@ -396,7 +413,8 @@ mod tests {
         assert_eq!(
             launch,
             "claude --mcp-config '{\"mcpServers\":{\"usagi\":{\"command\":\"usagi\",\"args\":[\"mcp\"]}}}' \
-             --append-system-prompt 'あなたは usagi が管理するセッション専用の worktree 内で起動されています。このディレクトリは既に独立した作業環境のため、新たに git worktree を作成する必要はありません。ここで直接作業を進めてください。'"
+             --append-system-prompt 'あなたは usagi が管理するセッション専用の worktree 内で起動されています。このディレクトリは既に独立した作業環境のため、新たに git worktree を作成する必要はありません。ここで直接作業を進めてください。' \
+             --settings '{\"hooks\":{\"UserPromptSubmit\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase running\"}]}],\"Stop\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase waiting\"}]}],\"Notification\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase waiting\"}]}],\"SessionStart\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase waiting\"}]}],\"SessionEnd\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase ended\"}]}]}}'"
         );
     }
 
@@ -412,6 +430,19 @@ mod tests {
         assert!(launch.contains("\"usagi\":{\"command\":\"usagi\",\"args\":[\"mcp\"]}"));
         // The delegation instruction is appended to the worktree note.
         assert!(launch.contains("local_llm_ask"));
+    }
+
+    #[test]
+    fn claude_launch_command_wires_in_lifecycle_hooks() {
+        // The phase-reporting hooks ride along via --settings whether or not the
+        // local LLM is enabled, so usagi always learns the agent's state.
+        for model in [None, Some("qwen2.5-coder:7b")] {
+            let launch = AgentCli::Claude.launch_command(model);
+            assert!(launch.contains("--settings '{\"hooks\":"));
+            assert!(launch.contains("usagi agent-phase running"));
+            assert!(launch.contains("usagi agent-phase waiting"));
+            assert!(launch.contains("usagi agent-phase ended"));
+        }
     }
 
     #[test]

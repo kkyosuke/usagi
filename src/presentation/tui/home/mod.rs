@@ -14,6 +14,9 @@ pub mod terminal_pool;
 pub mod terminal_view;
 pub mod ui;
 
+#[cfg(test)]
+mod e2e_tests;
+
 use std::path::Path;
 
 use anyhow::Result;
