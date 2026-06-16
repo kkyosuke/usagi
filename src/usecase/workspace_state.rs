@@ -59,13 +59,16 @@ pub fn inspect_worktree(path: &Path) -> WorktreeState {
 
 /// Derive a branch's lifecycle status.
 ///
-/// `merged` takes priority over `pushed`, which takes priority over `local`. A
-/// branch equal to the default branch is never reported as `merged` against
-/// itself, so it is only ever `local` or `pushed`.
+/// `synced` (up to date) takes priority over `pushed`, which takes priority over
+/// `local`. A branch is `synced` when it has **no commits of its own** beyond the
+/// default branch — every commit it carries is already on the integration branch
+/// (it is an ancestor), so there is nothing un-merged. A branch equal to the
+/// default branch is never compared against itself, so it is only ever `local`
+/// or `pushed`.
 fn classify(repo: &Path, branch: Option<&str>, default: &str, has_upstream: bool) -> BranchStatus {
     if let Some(branch) = branch {
         if branch != default && git::is_merged(repo, branch, default) {
-            return BranchStatus::Merged;
+            return BranchStatus::UpToDate;
         }
     }
     if has_upstream {
@@ -168,17 +171,18 @@ mod tests {
     }
 
     #[test]
-    fn classify_reports_merged_for_an_ancestor_branch() {
+    fn classify_reports_synced_for_an_ancestor_branch() {
         let dir = tempfile::tempdir().unwrap();
         init_repo(dir.path());
-        // A branch with no new commits is an ancestor of main → merged.
+        // A branch with no commits of its own is an ancestor of main, so it has
+        // nothing un-merged → synced (up to date).
         git(dir.path())
             .args(["branch", "feature"])
             .status()
             .unwrap();
         assert_eq!(
             classify(dir.path(), Some("feature"), "main", false),
-            BranchStatus::Merged
+            BranchStatus::UpToDate
         );
     }
 

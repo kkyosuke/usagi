@@ -1,12 +1,13 @@
 //! Rendering for the home (workspace) screen's mode-aware layout.
 //!
-//! Top to bottom: a title bar, a body split into the worktree list (left) and a
-//! mode-dependent right pane, the command input line, and a footer. The right
-//! pane is blank in 統括 (Overview) and 切替 (Switch); it is the session's action
+//! Top to bottom: a title bar, the engagement-ladder mode indicator, a body
+//! split into the worktree list (left) and a mode-dependent right pane, the
+//! command input, and a footer. The right pane is blank in 統括 (Overview); a
+//! detail card for the highlighted session in 切替 (Switch); the session's action
 //! surface (a menu or a prompt) in 在席 (Focus); and the live embedded terminal in
-//! 没入 (Attached). In Overview the command results render as a band below the
-//! input line. All functions take plain data and return styled lines, so the
-//! layout is rendered without any terminal IO.
+//! 没入 (Attached). In Overview the input is a bordered box and the command
+//! results render as a band below it. All functions take plain data and return
+//! styled lines, so the layout is rendered without any terminal IO.
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -45,11 +46,12 @@ const STATUS_COL: usize = 8;
 /// but the colour-coded word beside the icon still carries the meaning.
 const LOCAL_ICON: char = '\u{e725}'; // nf-dev-git_branch — lives only locally
 const PUSHED_ICON: char = '\u{f0ee}'; // nf-fa-cloud_upload — pushed to the remote
-const MERGED_ICON: char = '\u{e727}'; // nf-dev-git_merge — merged into the default branch
+const SYNCED_ICON: char = '\u{f00c}'; // nf-fa-check — up to date, nothing un-merged
 
-/// Indent of line 2 (the detail line) before the active marker; the marker and
-/// its trailing space then put the detail text under the branch name.
-const DETAIL_INDENT: usize = 2;
+/// Width of the active-session marker cell on line 1: the `*` marker (or a
+/// blank) plus the space that separates it from the branch name. It sits
+/// between the branch name and the right-edge status field.
+const ACTIVE_COL: usize = 2;
 
 /// The vertical bar (with surrounding spaces) dividing the two panes.
 const SEP: &str = " │ ";
@@ -123,12 +125,38 @@ fn title_bar(width: usize, list: &WorktreeList) -> String {
     widgets::title_line(width, &label)
 }
 
+/// The engagement-ladder indicator drawn just under the title bar: the four
+/// modes in order with the current one highlighted (cyan-bold) and the rest
+/// dimmed, so the screen always shows which step the keys act on. Centred for
+/// the terminal width.
+fn mode_ladder(width: usize, current: Mode) -> String {
+    const STEPS: [(Mode, &str); 4] = [
+        (Mode::Overview, "Overview"),
+        (Mode::Switch, "Switch"),
+        (Mode::Focus, "Focus"),
+        (Mode::Attached, "Attached"),
+    ];
+    let steps: Vec<String> = STEPS
+        .iter()
+        .map(|(mode, label)| {
+            if *mode == current {
+                style(*label).cyan().bold().to_string()
+            } else {
+                style(*label).dim().to_string()
+            }
+        })
+        .collect();
+    let ladder = steps.join(&style(" › ").dim().to_string());
+    let pad = widgets::centered_padding(width, console::measure_text_width(&ladder));
+    format!("{}{ladder}", " ".repeat(pad))
+}
+
 /// The Nerd Font git glyph for a branch lifecycle status.
 fn status_icon(status: BranchStatus) -> char {
     match status {
         BranchStatus::Local => LOCAL_ICON,
         BranchStatus::Pushed => PUSHED_ICON,
-        BranchStatus::Merged => MERGED_ICON,
+        BranchStatus::UpToDate => SYNCED_ICON,
     }
 }
 
@@ -140,7 +168,7 @@ fn status_label(status: BranchStatus) -> String {
     match status {
         BranchStatus::Local => style(text).yellow().to_string(),
         BranchStatus::Pushed => style(text).green().to_string(),
-        BranchStatus::Merged => style(text).dim().to_string(),
+        BranchStatus::UpToDate => style(text).cyan().to_string(),
     }
 }
 
@@ -225,22 +253,28 @@ fn name_cell(text: &str, width: usize, emphasised: bool) -> String {
     }
 }
 
-/// Builds a row's second (detail) line: indented under the branch name, a `*`
-/// marker for the active row, then the already-styled, already-clipped `detail`.
-fn detail_line(active: bool, detail: String) -> String {
-    let marker = if active {
+/// Builds a row's second (detail) line: indented to sit under the branch name,
+/// then the already-styled, already-clipped `detail`.
+fn detail_line(detail: String) -> String {
+    let indent = " ".repeat(NAME_PREFIX);
+    format!("{indent}{detail}")
+}
+
+/// The line-1 active-session marker cell: a `*` for the active worktree (the one
+/// subsequent commands operate on), or a blank. Kept on the identity line — not
+/// the detail line — so it never crowds the agent's `▶`/`◆` state icon.
+fn active_cell(active: bool) -> String {
+    if active {
         style("*").green().bold().to_string()
     } else {
         " ".to_string()
-    };
-    let indent = " ".repeat(DETAIL_INDENT);
-    format!("{indent}{marker} {detail}")
+    }
 }
 
 /// Builds a worktree's two lines. Line 1 carries a `>` cursor for the selected
-/// entry, a `●`/`○` kind icon (primary or ordinary worktree), the branch name,
-/// and the git `status` at the right edge. Line 2 is indented under the name
-/// with a `*` marker for the active worktree and, when an agent is in use, its
+/// entry, a `●`/`○` kind icon (primary or ordinary worktree), the branch name, a
+/// `*` marker for the active worktree, and the git `status` at the right edge.
+/// Line 2 is indented under the name and, when an agent is in use, carries its
 /// icon + label (`▶ running` / `◆ waiting`).
 fn worktree_row(
     worktree: &WorktreeState,
@@ -262,20 +296,24 @@ fn worktree_row(
         active || selected,
     );
     let status = status_cell(Some(worktree.status));
-    let line1 = format!("{} {kind} {branch} {status}", cursor_cell(selected));
+    let line1 = format!(
+        "{} {kind} {branch} {} {status}",
+        cursor_cell(selected),
+        active_cell(active)
+    );
 
     // Line 2 spells out the agent state with its icon, or is blank when idle.
     let detail = AgentState::from_flags(live, waiting)
         .detail(detail_width)
         .unwrap_or_default();
-    let line2 = detail_line(active, detail);
+    let line2 = detail_line(detail);
     (line1, line2)
 }
 
 /// Builds the root's two lines: the workspace itself, belonging to no session.
-/// Line 1 carries the cursor cell, a `⌂` kind icon, the [`ROOT_NAME`] label, and
-/// a blank status field (the root has no git status). Line 2 carries the active
-/// marker and a `workspace root` detail.
+/// Line 1 carries the cursor cell, a `⌂` kind icon, the [`ROOT_NAME`] label, a
+/// `*` marker when active, and a blank status field (the root has no git
+/// status). Line 2 carries a `workspace root` detail.
 fn root_row(
     name_width: usize,
     detail_width: usize,
@@ -285,13 +323,26 @@ fn root_row(
     let kind = style("⌂").magenta().to_string();
     let name = name_cell(ROOT_NAME, name_width, active || selected);
     let status = status_cell(None);
-    let line1 = format!("{} {kind} {name} {status}", cursor_cell(selected));
+    let line1 = format!(
+        "{} {kind} {name} {} {status}",
+        cursor_cell(selected),
+        active_cell(active)
+    );
 
     let detail = style(clip_to_width(ROOT_DETAIL, detail_width))
         .dim()
         .to_string();
-    let line2 = detail_line(active, detail);
+    let line2 = detail_line(detail);
     (line1, line2)
+}
+
+/// Re-renders an already-styled row uniformly dimmed: strips its colours and
+/// wraps the plain text in `dim`. Used to fade the rows the cursor is *not* on
+/// in 切替 (Switch), so the highlighted session stands out without a box.
+fn dim_row(line: &str) -> String {
+    style(console::strip_ansi_codes(line).into_owned())
+        .dim()
+        .to_string()
 }
 
 /// Builds the left pane: each entry spans two lines (an identity line and a
@@ -299,23 +350,31 @@ fn root_row(
 /// message when none are recorded), trimmed to the available `rows`. `live`
 /// holds the worktree paths with a running agent (`▶ running`) and `waiting` the
 /// ones whose agent awaits input (`◆ waiting`, taking precedence over running).
+/// When `dim_unselected` is set (in 切替), every row except the cursor's is
+/// faded so the highlighted session reads first.
 fn left_pane(
     list: &WorktreeList,
     live: &HashSet<PathBuf>,
     waiting: &HashSet<PathBuf>,
     left_w: usize,
     rows: usize,
+    dim_unselected: bool,
 ) -> Vec<String> {
-    // Line 1: prefix + name + a space + the right-edge status field.
-    let name_width = left_w.saturating_sub(NAME_PREFIX + 1 + STATUS_COL);
-    // Line 2: indent + active marker + a space + the detail text.
-    let detail_width = left_w.saturating_sub(DETAIL_INDENT + 2);
-    let (root_top, root_detail) = root_row(
+    // Line 1: prefix + name + the active-marker cell + a space + the right-edge
+    // status field.
+    let name_width = left_w.saturating_sub(NAME_PREFIX + ACTIVE_COL + 1 + STATUS_COL);
+    // Line 2: indented under the branch name, then the detail text.
+    let detail_width = left_w.saturating_sub(NAME_PREFIX);
+    let (mut root_top, mut root_detail) = root_row(
         name_width,
         detail_width,
         list.root_selected(),
         list.root_active(),
     );
+    if dim_unselected && !list.root_selected() {
+        root_top = dim_row(&root_top);
+        root_detail = dim_row(&root_detail);
+    }
     let mut lines = vec![root_top, root_detail];
     if list.is_empty() {
         // A divider under the root, then the empty message — both indented to
@@ -337,15 +396,20 @@ fn left_pane(
             // The root occupies the first entry, so worktree `i` sits at
             // selectable row i + 1.
             let row = i + 1;
-            let (top, detail) = worktree_row(
+            let selected = row == list.selected_index();
+            let (mut top, mut detail) = worktree_row(
                 w,
                 name_width,
                 detail_width,
-                row == list.selected_index(),
+                selected,
                 row == list.active_index(),
                 live.contains(&w.path),
                 waiting.contains(&w.path),
             );
+            if dim_unselected && !selected {
+                top = dim_row(&top);
+                detail = dim_row(&detail);
+            }
             lines.push(top);
             lines.push(detail);
         }
@@ -493,13 +557,65 @@ fn focus_hint_lines(hint: Hint, width: usize) -> Vec<String> {
     }
 }
 
-/// The right pane's contents, by mode. Blank in 統括 / 切替 (the user is on the
-/// bottom line or the left pane); the session's action surface — a menu or a
-/// prompt, per [`SessionActionUi`] — in 在席; and the live embedded terminal in
-/// 没入 (a starting hint until the first snapshot arrives).
+/// The 切替 (Switch) right pane: a **preview of the screen that selecting the
+/// session under the cursor will open**, so the choice is informed by what comes
+/// next. A live session (an embedded shell / agent already running) previews the
+/// live-terminal re-attach; an idle session previews its 在席 action menu. The
+/// header line carries the session's status and agent state.
+fn switch_preview(state: &HomeState, width: usize, rows: usize) -> Vec<String> {
+    // Identify the highlighted row. `selected()` is `Some` for a real session
+    // row and `None` on the root row (which carries no git status / tracked
+    // path), so the match doubles as the root/session split.
+    let (name, live, waiting, status) = match state.list().selected() {
+        Some(w) => (
+            w.branch.as_deref().unwrap_or(DETACHED).to_string(),
+            state.is_live(&w.path),
+            state.is_waiting(&w.path),
+            Some(w.status),
+        ),
+        None => (ROOT_NAME.to_string(), false, false, None),
+    };
+
+    // Header: the name, then either the git status + agent state (a session) or
+    // the workspace-root note (the root row).
+    let mut header = style(clip_to_width(&name, width)).cyan().bold().to_string();
+    match status {
+        Some(status) => {
+            header.push_str(&format!("   {}", status_label(status)));
+            if let Some(agent) = AgentState::from_flags(live, waiting).detail(width) {
+                header.push_str(&format!("   {agent}"));
+            }
+        }
+        None => header.push_str(&format!("   {}", style(ROOT_DETAIL).dim())),
+    }
+    let mut lines = vec![header, String::new()];
+
+    if live {
+        // Selecting re-attaches the running shell / agent.
+        lines.push(style("● live terminal").green().to_string());
+        lines.push(style("Enter / l で再アタッチ").dim().to_string());
+    } else {
+        // Selecting opens 在席 on this session: preview its action menu.
+        lines.push(style("Run a command:").dim().to_string());
+        for (i, info) in state.focus_menu_commands().iter().enumerate() {
+            lines.push(focus_menu_row(info, i == 0, width));
+        }
+        lines.push(String::new());
+        lines.push(style("Enter / l で開く").dim().to_string());
+    }
+
+    lines.truncate(rows);
+    lines
+}
+
+/// The right pane's contents, by mode. Blank in 統括 (the user is on the command
+/// line); a preview of the would-be session screen in 切替; the session's action
+/// surface — a menu or a prompt, per [`SessionActionUi`] — in 在席; and the live
+/// embedded terminal in 没入 (a starting hint until the first snapshot arrives).
 fn right_pane_contents(state: &HomeState, right_w: usize, rows: usize) -> Vec<String> {
     match state.mode() {
-        Mode::Overview | Mode::Switch => Vec::new(),
+        Mode::Overview => Vec::new(),
+        Mode::Switch => switch_preview(state, right_w, rows),
         Mode::Focus => match state.session_action_ui() {
             SessionActionUi::Menu => focus_menu(state, right_w),
             SessionActionUi::Prompt => focus_prompt(state, right_w),
@@ -654,6 +770,24 @@ fn input_line(state: &HomeState) -> String {
     }
 }
 
+/// Minimum frame height at which the 統括 input is drawn as a bordered box. Below
+/// it the chrome (the box is 3 rows) would crowd out the body, so a short
+/// terminal falls back to the single-line [`input_line`].
+const INPUT_BOX_MIN_HEIGHT: usize = 8;
+
+/// The 統括 (Overview) command input rendered as a bordered field — an
+/// HTML-input-like box — so it reads clearly as *where you type*, set apart from
+/// the hints above it and the results band below. Spans the full `width` (three
+/// rows: top border, the `❯ <input>▏` line, bottom border).
+fn overview_input_box(state: &HomeState, width: usize) -> Vec<String> {
+    let prompt = style("❯").red().bold();
+    let text = style(state.input()).cyan();
+    let content = format!("{prompt} {text}{CARET}");
+    // `boxed` adds the two borders and one space of padding on each side, so the
+    // inner content area is the width less those four columns.
+    widgets::boxed("", width.saturating_sub(4), &[content])
+}
+
 /// The footer help line, aware of the current mode. It leads with a mode tag so
 /// it is always clear which engagement level the keys act on.
 fn footer_line(width: usize, state: &HomeState) -> String {
@@ -787,8 +921,10 @@ fn quit_confirm_frame(raw_height: usize, raw_width: usize, live: usize) -> Vec<S
 }
 
 /// How many rows the 統括 (Overview) results band spends below the input on the
-/// command log tail. The newest output stays visible while typing.
-const RESULTS_BAND: usize = 6;
+/// command log tail. The newest output stays visible while typing. Kept small
+/// so the bordered input box and the band together leave the session list its
+/// full height.
+const RESULTS_BAND: usize = 4;
 
 /// Builds the full home-screen frame for a raw terminal size.
 pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> Vec<String> {
@@ -804,23 +940,35 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
     let (height, width) = widgets::normalize_size(raw_height, raw_width);
     let (left_w, right_w) = layout(width);
 
+    // The 統括 input is a bordered box (3 rows) when there is height for it;
+    // every other mode — and a short terminal — uses a single status line.
+    let input_lines = if state.mode() == Mode::Overview && height >= INPUT_BOX_MIN_HEIGHT {
+        overview_input_box(state, width)
+    } else {
+        vec![input_line(state)]
+    };
+    let input_h = input_lines.len();
+
     // In 統括 the command log renders as a band below the input; it is sized so
     // the body keeps at least one row. Other modes use no results band.
     let results = if state.mode() == Mode::Overview {
-        RESULTS_BAND.min(height.saturating_sub(5))
+        RESULTS_BAND.min(height.saturating_sub(4 + input_h))
     } else {
         0
     };
 
-    // Chrome: title + blank separator on top, input + footer + the optional
-    // results band at the bottom. Everything between is the two-pane body.
-    let body_rows = height.saturating_sub(4 + results).max(1);
+    // Chrome: title + mode ladder on top, the input block + footer + the
+    // optional results band at the bottom. Everything between is the two-pane
+    // body.
+    let body_rows = height.saturating_sub(3 + input_h + results).max(1);
     let mut left = left_pane(
         state.list(),
         state.live_paths(),
         state.waiting_paths(),
         left_w,
         body_rows,
+        // In 切替 the keyboard is on the list: fade the rows the cursor is not on.
+        state.mode() == Mode::Switch,
     );
     // While naming a new session in 切替, append the inline create row(s) to the
     // left pane (trimmed back to the body if it would overflow).
@@ -838,7 +986,7 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
 
     let mut lines = Vec::with_capacity(height);
     lines.push(title_bar(width, state.list()));
-    lines.push(String::new());
+    lines.push(mode_ladder(width, state.mode()));
     let body_start = lines.len();
     for row in 0..body_rows {
         let left_cell = pad_to_width(left.get(row).cloned().unwrap_or_default(), left_w);
@@ -866,7 +1014,7 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
         }
     }
 
-    lines.push(input_line(state));
+    lines.extend(input_lines);
     // The 統括 results band: the command log tail, drawn below the input. Always
     // exactly `results` rows tall (blank-padded) so the footer stays at the
     // bottom regardless of how much output there is.
@@ -973,7 +1121,7 @@ mod tests {
         for (status, icon, word) in [
             (BranchStatus::Local, LOCAL_ICON, "local"),
             (BranchStatus::Pushed, PUSHED_ICON, "pushed"),
-            (BranchStatus::Merged, MERGED_ICON, "merged"),
+            (BranchStatus::UpToDate, SYNCED_ICON, "synced"),
         ] {
             let plain = console::strip_ansi_codes(&status_label(status)).into_owned();
             assert!(plain.contains(icon), "{plain:?} missing its icon");
@@ -1024,8 +1172,8 @@ mod tests {
     }
 
     #[test]
-    fn worktree_row_marks_the_active_worktree_on_the_detail_line() {
-        let (_, active_detail) = worktree_row(
+    fn worktree_row_marks_the_active_worktree_on_the_identity_line() {
+        let (active_top, active_detail) = worktree_row(
             &worktree(Some("feature"), false, BranchStatus::Local),
             10,
             10,
@@ -1034,8 +1182,10 @@ mod tests {
             false,
             false,
         );
-        assert!(active_detail.contains('*'));
-        let (_, idle_detail) = worktree_row(
+        // The `*` marker sits on line 1, clear of the agent-state detail line.
+        assert!(active_top.contains('*'));
+        assert!(!active_detail.contains('*'));
+        let (idle_top, _) = worktree_row(
             &worktree(Some("feature"), false, BranchStatus::Local),
             10,
             10,
@@ -1044,7 +1194,7 @@ mod tests {
             false,
             false,
         );
-        assert!(!idle_detail.contains('*'));
+        assert!(!idle_top.contains('*'));
     }
 
     #[test]
@@ -1130,12 +1280,14 @@ mod tests {
         assert!(top.contains(ROOT_NAME));
         assert!(detail.contains("workspace root"));
 
-        let (_, active_detail) = root_row(10, 20, false, true);
-        assert!(active_detail.contains('*'));
+        // The active marker now lives on the identity line, not the detail line.
+        let (active_top, active_detail) = root_row(10, 20, false, true);
+        assert!(active_top.contains('*'));
+        assert!(!active_detail.contains('*'));
 
-        let (idle_top, idle_detail) = root_row(10, 20, false, false);
+        let (idle_top, _) = root_row(10, 20, false, false);
         assert!(!idle_top.contains('>'));
-        assert!(!idle_detail.contains('*'));
+        assert!(!idle_top.contains('*'));
         assert!(idle_top.contains(ROOT_NAME));
     }
 
@@ -1147,6 +1299,7 @@ mod tests {
             &HashSet::new(),
             80,
             6,
+            false,
         );
         assert_eq!(lines.len(), 4);
         assert!(lines[0].contains(ROOT_NAME));
@@ -1164,7 +1317,7 @@ mod tests {
             worktree(Some("main"), true, BranchStatus::Pushed),
             worktree(Some("feature"), false, BranchStatus::Local),
         ]);
-        let lines = left_pane(&list, &HashSet::new(), &HashSet::new(), 30, 6);
+        let lines = left_pane(&list, &HashSet::new(), &HashSet::new(), 30, 6, false);
         assert_eq!(lines.len(), 6);
         assert!(lines[0].contains(ROOT_NAME));
         assert!(lines[2].contains("main"));
@@ -1175,13 +1328,13 @@ mod tests {
     fn left_pane_marks_a_running_agent_and_one_waiting_for_input() {
         let list = list_with(vec![worktree(Some("feature"), false, BranchStatus::Local)]);
         let path: HashSet<PathBuf> = [PathBuf::from("/repo/wt")].into_iter().collect();
-        let running = left_pane(&list, &path, &HashSet::new(), 30, 6);
+        let running = left_pane(&list, &path, &HashSet::new(), 30, 6, false);
         assert!(running[3].contains('▶'));
         assert!(running[3].contains("running"));
-        let waiting = left_pane(&list, &path, &path, 30, 6);
+        let waiting = left_pane(&list, &path, &path, 30, 6, false);
         assert!(waiting[3].contains('◆'));
         assert!(!waiting[3].contains('▶'));
-        let idle = left_pane(&list, &HashSet::new(), &HashSet::new(), 30, 6);
+        let idle = left_pane(&list, &HashSet::new(), &HashSet::new(), 30, 6, false);
         assert!(!idle[3].contains('▶'));
         assert!(!idle[3].contains('◆'));
         assert!(idle[2].contains("local"));
@@ -1194,23 +1347,52 @@ mod tests {
             worktree(Some("b"), false, BranchStatus::Local),
             worktree(Some("c"), false, BranchStatus::Local),
         ]);
-        let lines = left_pane(&list, &HashSet::new(), &HashSet::new(), 30, 3);
+        let lines = left_pane(&list, &HashSet::new(), &HashSet::new(), 30, 3, false);
         assert_eq!(lines.len(), 3);
         assert!(lines[0].contains(ROOT_NAME));
         assert!(lines[2].contains('a'));
     }
 
     #[test]
-    fn left_pane_marks_the_active_worktree_below_the_root_entry() {
+    fn left_pane_marks_the_active_worktree_on_its_identity_line() {
         let mut list = list_with(vec![
             worktree(Some("main"), true, BranchStatus::Pushed),
             worktree(Some("feature"), false, BranchStatus::Local),
         ]);
         list.activate_by_name("feature");
-        let lines = left_pane(&list, &HashSet::new(), &HashSet::new(), 30, 6);
-        assert!(!lines[1].contains('*'));
+        let lines = left_pane(&list, &HashSet::new(), &HashSet::new(), 30, 6, false);
+        // The root identity line is not marked; the active "feature" row carries
+        // the `*` on its identity line (line 1), not its detail line (line 2).
+        assert!(!lines[0].contains('*'));
         assert!(lines[4].contains("feature"));
-        assert!(lines[5].contains('*'));
+        assert!(lines[4].contains('*'));
+        assert!(!lines[5].contains('*'));
+    }
+
+    #[test]
+    fn dim_row_strips_existing_colour_but_keeps_the_text() {
+        // Fading a row drops its colour codes (so it reads as muted) while the
+        // text survives. (Styling is off in non-TTY tests, so we assert the
+        // colour is gone rather than that a dim code was added.)
+        let coloured = "\u{1b}[36mfeature\u{1b}[0m";
+        let dimmed = dim_row(coloured);
+        assert!(!dimmed.contains("\u{1b}[36m"));
+        assert!(console::strip_ansi_codes(&dimmed).contains("feature"));
+    }
+
+    #[test]
+    fn left_pane_fades_every_row_but_the_cursor_when_asked() {
+        let list = list_with(vec![
+            worktree(Some("main"), true, BranchStatus::Pushed),
+            worktree(Some("feature"), false, BranchStatus::Local),
+        ]);
+        // Cursor is on the root row (index 0). Dimming on fades the non-cursor
+        // session rows; every row keeps its text.
+        let dimmed = left_pane(&list, &HashSet::new(), &HashSet::new(), 30, 6, true);
+        assert_eq!(dimmed.len(), 6);
+        assert!(console::strip_ansi_codes(&dimmed[0]).contains(ROOT_NAME));
+        assert!(console::strip_ansi_codes(&dimmed[2]).contains("main"));
+        assert!(console::strip_ansi_codes(&dimmed[4]).contains("feature"));
     }
 
     #[test]
@@ -1241,11 +1423,50 @@ mod tests {
     // --- right pane by mode ------------------------------------------------
 
     #[test]
-    fn right_pane_is_blank_in_overview_and_switch() {
+    fn right_pane_is_blank_in_overview_but_previews_in_switch() {
         let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
         assert!(right_pane_contents(&state, 40, 5).is_empty());
+        // In 切替 the right pane previews the would-be screen for the cursor row.
         state.enter_switch(super::super::state::ReturnMode::Overview);
-        assert!(right_pane_contents(&state, 40, 5).is_empty());
+        let preview = stripped(&right_pane_contents(&state, 40, 12));
+        // The root row previews its action menu (the workspace-root note shows).
+        assert!(preview.contains("root"));
+        assert!(preview.contains("workspace root"));
+        assert!(preview.contains("terminal"));
+    }
+
+    #[test]
+    fn switch_preview_shows_a_live_session_as_a_reattach() {
+        let mut running = worktree(Some("feat"), false, BranchStatus::Local);
+        running.path = PathBuf::from("/repo/run");
+        let mut state = HomeState::new("usagi", vec![running], None);
+        state.set_live([PathBuf::from("/repo/run")].into());
+        state.enter_switch(super::super::state::ReturnMode::Overview);
+        // Move the cursor off the root onto the session row.
+        state.switch_move_down();
+        let preview = stripped(&switch_preview(&state, 40, 12));
+        assert!(preview.contains("feat"));
+        // Header carries the git status and the running agent state.
+        assert!(preview.contains("local"));
+        assert!(preview.contains("running"));
+        // A live session previews the live-terminal re-attach, not the menu.
+        assert!(preview.contains("live terminal"));
+        assert!(!preview.contains("Run a command"));
+    }
+
+    #[test]
+    fn switch_preview_shows_an_idle_session_as_its_action_menu() {
+        let idle = worktree(Some("feat"), false, BranchStatus::Pushed);
+        let mut state = HomeState::new("usagi", vec![idle], None);
+        state.enter_switch(super::super::state::ReturnMode::Overview);
+        state.switch_move_down();
+        let preview = stripped(&switch_preview(&state, 40, 12));
+        // An idle session previews the 在席 action menu it would open.
+        assert!(preview.contains("pushed"));
+        assert!(preview.contains("Run a command"));
+        assert!(preview.contains("terminal"));
+        assert!(preview.contains("agent"));
+        assert!(!preview.contains("live terminal"));
     }
 
     #[test]
@@ -1411,6 +1632,40 @@ mod tests {
         assert!(footer_line(80, &state).contains("session: main"));
         state.show_attached();
         assert!(footer_line(80, &state).contains("attached"));
+    }
+
+    #[test]
+    fn mode_ladder_lists_every_step_and_keeps_them_for_each_mode() {
+        for mode in [Mode::Overview, Mode::Switch, Mode::Focus, Mode::Attached] {
+            let ladder = console::strip_ansi_codes(&mode_ladder(80, mode)).into_owned();
+            for step in ["Overview", "Switch", "Focus", "Attached"] {
+                assert!(ladder.contains(step), "{mode:?} ladder missing {step}");
+            }
+        }
+    }
+
+    #[test]
+    fn overview_input_is_a_bordered_box_at_full_height() {
+        let mut state = state_with(Vec::new());
+        for c in "session".chars() {
+            state.push_char(c);
+        }
+        let frame = render_frame(24, 80, &state);
+        let joined = console::strip_ansi_codes(&frame.join("\n")).into_owned();
+        // The input is framed (top/bottom borders) and still carries the prompt.
+        assert!(joined.contains('┌'));
+        assert!(joined.contains('└'));
+        assert!(joined.contains("❯ session"));
+    }
+
+    #[test]
+    fn overview_input_falls_back_to_a_single_line_on_a_short_terminal() {
+        let state = state_with(Vec::new());
+        // Too short for the 3-row box: the input is the plain prompt line.
+        let lines = render_frame(6, 80, &state);
+        let joined = console::strip_ansi_codes(&lines.join("\n")).into_owned();
+        assert!(!joined.contains('┌'));
+        assert!(joined.contains('❯'));
     }
 
     // --- Switch inline create ----------------------------------------------
