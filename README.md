@@ -28,6 +28,8 @@ curl -fsSL https://raw.githubusercontent.com/KKyosuke/usagi/main/scripts/install
 export PATH="$PATH:$HOME/.usagi/bin"
 ```
 
+同じコマンドを再実行すると、常に最新リリースを取得して既存のバイナリを置き換えます（アップデート）。インストール後はバージョンの変化に応じて「新規インストール / アップデート / 再インストール」を判別したメッセージが表示されます。
+
 プラットフォームを指定してアーカイブから直接インストールすることもできます:
 
 #### macOS (Apple Silicon)
@@ -91,6 +93,8 @@ agent                      # 選んだセッションで Agent CLI（既定 clau
 `agent` は選択中セッションの worktree でシェルを右ペインに埋め込み、設定中の Agent CLI（既定 `claude`、Config・ローカル設定で変更可）を起動します。このとき usagi の issue MCP サーバ（後述）を組み込むため、エージェントは起動直後から `issue_*` tool でタスクを操作できます（Claude は `--mcp-config` で注入。Gemini は `settings.json` 経由のため現状は組み込みません）。素のシェルだけ欲しいときは `terminal` を使います。
 
 各セッションのシェルは画面を開いている間プールに常駐するので、`Ctrl-O` で切替へズームアウトして別セッションへ移っても、裏で `claude` は動き続けます。左ペインは各セッションを 2 行で表示し、**稼働中は `▶ running`（緑）／入力待ちは `◆ waiting`（黄色）** でひと目で状態がわかります。アタッチしていないセッションが入力待ちになるとデスクトップ通知（`🐰 <ブランチ名> が入力待ちです`）も出るため、複数セッションを並行で走らせ、入力が必要になったものだけに対応できます（通知は `notifications_enabled` が ON のとき。検知はターミナルベルに依存します）。
+
+ホーム画面を開くと、実行中ビルドより新しいリリースが公開されていれば右上にうさぎのアスキーアートと「最新版があります v\<X.Y.Z\>」を表示します（GitHub のリリースタグをバックグラウンドで確認。差分が無い・オフライン時は何も出ません）。
 
 画面・モード・キー操作の詳細は [document/design/05-home.md](document/design/05-home.md)、コマンドの仕様は [document/03-commands/02-tui.md](document/03-commands/02-tui.md) を参照してください。
 

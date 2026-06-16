@@ -55,7 +55,7 @@ impl AgentBackend for CliAgentBackend {
 /// workspace that owns the launch directory over stdio until the client closes
 /// the input stream.
 pub fn run() -> Result<()> {
-    let workspace_root = session::workspace_root_for(&env::current_dir()?);
+    let workspace_root = session::workspace_root(&env::current_dir()?);
 
     // The agent CLI used to fulfil `session_prompt`, resolved from the effective
     // settings (project-local over the global default, which is Claude). Any

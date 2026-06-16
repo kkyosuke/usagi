@@ -90,7 +90,7 @@ presentation/cli/session_mcp.rs … stdin ループ + エージェント CLI バ
 presentation/mcp/session.rs     … SessionMcpServer：tool 実装（JSON-RPC フレーミングは mcp/mod.rs と共有・100% テスト）
         │  create / list は usecase へ、prompt は AgentBackend 経由
         ▼
-usecase/session                 … create / list / workspace_root_for（reconcile・state.json 記録）
+usecase/session                 … create / list / workspace_root（reconcile・state.json 記録）
 （テスト時）FakeBackend / （本番）CliAgentBackend → `<agent> -p <prompt>`
 ```
 
@@ -98,7 +98,7 @@ usecase/session                 … create / list / workspace_root_for（reconci
 |---|---|
 | `presentation/cli/session_mcp.rs` | `usagi session-mcp` のエントリ。ワークスペースルート解決・stdin ループ・エージェント CLI へのシェルアウト。`mcp` 同様カバレッジ対象外。 |
 | `presentation/mcp/session.rs` | `SessionMcpServer`。`McpService` を実装しセッション tool を提供（JSON-RPC フレーミングは `mcp/mod.rs` と共有）。`session_prompt` のエージェント起動を `AgentBackend` トレイトで抽象化。ユニットテストで網羅。 |
-| `usecase/session` | tool が呼ぶビジネスロジック（`create` / `list` / `workspace_root_for`）。MCP 固有の知識は持たない。 |
+| `usecase/session` | tool が呼ぶビジネスロジック（`create` / `list` / `workspace_root`）。MCP 固有の知識は持たない。 |
 
 依存方向はクリーンアーキテクチャに従い `presentation → usecase`。MCP 層は presentation に閉じています
 （[2. アーキテクチャ](../02-architecture.md) 参照）。

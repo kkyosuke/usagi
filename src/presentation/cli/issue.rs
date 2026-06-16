@@ -14,7 +14,10 @@ use clap::Subcommand;
 use serde::Serialize;
 
 use crate::domain::issue::{Issue, IssuePriority, IssueStatus, IssueSummary};
-use crate::usecase::issue::{self, IssueChanges, IssueFilter, ListedIssue, NewIssue};
+use crate::usecase::issue::{
+    self, dependency_tree, group, GroupBy, IssueChanges, IssueFilter, IssueStats, ListedIssue,
+    NewIssue,
+};
 
 #[derive(Subcommand)]
 pub enum IssueCommand {
@@ -30,6 +33,15 @@ pub enum IssueCommand {
         /// Number of an issue this one depends on (repeat for multiple)
         #[arg(long = "depends-on", value_name = "NUMBER")]
         dependson: Vec<u32>,
+        /// Number of a related (non-blocking) issue (repeat for multiple)
+        #[arg(long = "related", value_name = "NUMBER")]
+        related: Vec<u32>,
+        /// Number of the parent issue this one belongs to
+        #[arg(long, value_name = "NUMBER")]
+        parent: Option<u32>,
+        /// Milestone to group this issue under
+        #[arg(long, value_name = "NAME")]
+        milestone: Option<String>,
         /// Markdown body
         #[arg(long, default_value = "")]
         body: String,
@@ -45,12 +57,23 @@ pub enum IssueCommand {
         priority: Option<IssuePriority>,
         #[arg(long = "label", value_name = "LABEL")]
         label: Option<String>,
+        /// Keep only issues whose parent is this number
+        #[arg(long, value_name = "NUMBER")]
+        parent: Option<u32>,
+        /// Keep only issues in this milestone
+        #[arg(long, value_name = "NAME")]
+        milestone: Option<String>,
+        /// Group the listing by an axis (status, priority, milestone, parent)
+        #[arg(long = "group-by", value_name = "AXIS")]
+        group_by: Option<GroupBy>,
         /// Show only issues ready to start (all dependencies done)
         #[arg(long)]
         ready: bool,
         #[arg(long)]
         json: bool,
     },
+    /// Print the dependency tree (issues nested under what they depend on)
+    Graph,
     /// Show a single issue
     Show {
         number: u32,
@@ -72,6 +95,21 @@ pub enum IssueCommand {
         /// Replace all dependencies (omit to leave unchanged)
         #[arg(long = "depends-on", value_name = "NUMBER")]
         dependson: Option<Vec<u32>>,
+        /// Replace all related issues (omit to leave unchanged)
+        #[arg(long = "related", value_name = "NUMBER")]
+        related: Option<Vec<u32>>,
+        /// Set the parent issue
+        #[arg(long, value_name = "NUMBER", conflicts_with = "clear_parent")]
+        parent: Option<u32>,
+        /// Clear the parent issue
+        #[arg(long)]
+        clear_parent: bool,
+        /// Set the milestone
+        #[arg(long, value_name = "NAME", conflicts_with = "clear_milestone")]
+        milestone: Option<String>,
+        /// Clear the milestone
+        #[arg(long)]
+        clear_milestone: bool,
         #[arg(long)]
         body: Option<String>,
         #[arg(long)]
@@ -86,6 +124,12 @@ pub enum IssueCommand {
         priority: Option<IssuePriority>,
         #[arg(long = "label", value_name = "LABEL")]
         label: Option<String>,
+        /// Keep only issues whose parent is this number
+        #[arg(long, value_name = "NUMBER")]
+        parent: Option<u32>,
+        /// Keep only issues in this milestone
+        #[arg(long, value_name = "NAME")]
+        milestone: Option<String>,
         #[arg(long)]
         ready: bool,
         #[arg(long)]
@@ -120,6 +164,9 @@ fn execute(repo: &Path, command: IssueCommand) -> Result<Vec<String>> {
             priority,
             labels,
             dependson,
+            related,
+            parent,
+            milestone,
             body,
             json,
         } => {
@@ -130,6 +177,9 @@ fn execute(repo: &Path, command: IssueCommand) -> Result<Vec<String>> {
                     priority,
                     labels,
                     dependson,
+                    related,
+                    parent,
+                    milestone,
                     body,
                 },
             )?;
@@ -143,6 +193,9 @@ fn execute(repo: &Path, command: IssueCommand) -> Result<Vec<String>> {
             status,
             priority,
             label,
+            parent,
+            milestone,
+            group_by,
             ready,
             json,
         } => {
@@ -150,15 +203,33 @@ fn execute(repo: &Path, command: IssueCommand) -> Result<Vec<String>> {
                 status,
                 priority,
                 label,
+                parent,
+                milestone,
                 ready_only: ready,
             };
-            render_listing(issue::list(repo, &filter)?, json)
+            let items = issue::list(repo, &filter)?;
+            match group_by {
+                Some(axis) if !json => Ok(render_grouped(items, axis)),
+                _ => render_listing(items, json),
+            }
+        }
+        IssueCommand::Graph => {
+            let items = issue::list(repo, &IssueFilter::default())?;
+            if items.is_empty() {
+                return Ok(vec!["No issues found.".to_string()]);
+            }
+            let mut lines = dependency_tree(&items);
+            lines.push(String::new());
+            lines.push(format_stats(&IssueStats::from_listed(&items)));
+            Ok(lines)
         }
         IssueCommand::Search {
             query,
             status,
             priority,
             label,
+            parent,
+            milestone,
             ready,
             json,
         } => {
@@ -166,6 +237,8 @@ fn execute(repo: &Path, command: IssueCommand) -> Result<Vec<String>> {
                 status,
                 priority,
                 label,
+                parent,
+                milestone,
                 ready_only: ready,
             };
             render_listing(issue::search(repo, &query, &filter)?, json)
@@ -182,6 +255,11 @@ fn execute(repo: &Path, command: IssueCommand) -> Result<Vec<String>> {
             priority,
             labels,
             dependson,
+            related,
+            parent,
+            clear_parent,
+            milestone,
+            clear_milestone,
             body,
             json,
         } => {
@@ -191,6 +269,9 @@ fn execute(repo: &Path, command: IssueCommand) -> Result<Vec<String>> {
                 priority,
                 labels,
                 dependson,
+                related,
+                parent: optional_change(parent, clear_parent),
+                milestone: optional_change(milestone, clear_milestone),
                 body,
             };
             match issue::update(repo, number, changes)? {
@@ -215,6 +296,18 @@ fn execute(repo: &Path, command: IssueCommand) -> Result<Vec<String>> {
     }
 }
 
+/// Translate a `--field VALUE` / `--clear-field` pair into the tri-state an
+/// [`IssueChanges`] optional field expects: `Some(None)` clears, `Some(Some(v))`
+/// sets, and `None` leaves the field unchanged. A set value wins over a clear
+/// flag, though clap rejects passing both.
+fn optional_change<T>(value: Option<T>, clear: bool) -> Option<Option<T>> {
+    match (value, clear) {
+        (Some(v), _) => Some(Some(v)),
+        (None, true) => Some(None),
+        (None, false) => None,
+    }
+}
+
 /// Render a listing (from `list` or `search`) either as JSON or as aligned
 /// human-readable lines.
 fn render_listing(items: Vec<ListedIssue>, json: bool) -> Result<Vec<String>> {
@@ -223,6 +316,39 @@ fn render_listing(items: Vec<ListedIssue>, json: bool) -> Result<Vec<String>> {
         return json_lines(&views);
     }
     Ok(render_list(&items))
+}
+
+/// Render a listing split into labelled groups, each with its own progress
+/// footer, followed by an overall total.
+fn render_grouped(items: Vec<ListedIssue>, axis: GroupBy) -> Vec<String> {
+    if items.is_empty() {
+        return vec!["No issues found.".to_string()];
+    }
+    let overall = IssueStats::from_listed(&items);
+    let mut out = Vec::new();
+    for (label, group_items) in group(items, axis) {
+        out.push(format!("== {label} =="));
+        out.extend(render_list(&group_items));
+        out.push(format!(
+            "   {}",
+            format_stats(&IssueStats::from_listed(&group_items))
+        ));
+        out.push(String::new());
+    }
+    out.push(format_stats(&overall));
+    out
+}
+
+/// A one-line progress summary: totals, completion, and readiness.
+fn format_stats(stats: &IssueStats) -> String {
+    format!(
+        "{} issues · {} done ({}%) · {} ready  {}",
+        stats.total,
+        stats.done,
+        stats.completion_percent(),
+        stats.ready,
+        stats.progress_bar(20),
+    )
 }
 
 /// Format a listing as aligned, one-line-per-issue text.
@@ -284,6 +410,9 @@ struct IssueJson<'a> {
     priority: IssuePriority,
     labels: &'a [String],
     dependson: &'a [u32],
+    related: &'a [u32],
+    parent: Option<u32>,
+    milestone: Option<&'a str>,
     created_at: String,
     updated_at: String,
     body: &'a str,
@@ -297,6 +426,9 @@ fn issue_json(issue: &Issue) -> IssueJson<'_> {
         priority: issue.priority,
         labels: &issue.labels,
         dependson: &issue.dependson,
+        related: &issue.related,
+        parent: issue.parent,
+        milestone: issue.milestone.as_deref(),
         created_at: issue.created_at.to_rfc3339(),
         updated_at: issue.updated_at.to_rfc3339(),
         body: &issue.body,
@@ -334,6 +466,9 @@ mod tests {
                 priority: IssuePriority::Medium,
                 labels: vec![],
                 dependson: deps,
+                related: vec![],
+                parent: None,
+                milestone: None,
                 body: String::new(),
                 json: false,
             },
@@ -353,6 +488,9 @@ mod tests {
                 priority: IssuePriority::High,
                 labels: vec!["cli".to_string()],
                 dependson: vec![],
+                related: vec![],
+                parent: None,
+                milestone: None,
                 body: "details".to_string(),
                 json: false,
             },
@@ -376,6 +514,9 @@ mod tests {
                 priority: IssuePriority::Low,
                 labels: vec![],
                 dependson: vec![],
+                related: vec![],
+                parent: None,
+                milestone: None,
                 body: String::new(),
                 json: true,
             },
@@ -399,6 +540,9 @@ mod tests {
                 status: None,
                 priority: None,
                 label: None,
+                parent: None,
+                milestone: None,
+                group_by: None,
                 ready: false,
                 json: false,
             },
@@ -421,6 +565,9 @@ mod tests {
                 status: None,
                 priority: None,
                 label: None,
+                parent: None,
+                milestone: None,
+                group_by: None,
                 ready: false,
                 json: false,
             },
@@ -443,6 +590,9 @@ mod tests {
                 status: None,
                 priority: None,
                 label: None,
+                parent: None,
+                milestone: None,
+                group_by: None,
                 ready: true,
                 json: false,
             },
@@ -458,6 +608,9 @@ mod tests {
                 status: None,
                 priority: None,
                 label: None,
+                parent: None,
+                milestone: None,
+                group_by: None,
                 ready: false,
                 json: true,
             },
@@ -482,6 +635,11 @@ mod tests {
                 priority: None,
                 labels: None,
                 dependson: None,
+                related: None,
+                parent: None,
+                clear_parent: false,
+                milestone: None,
+                clear_milestone: false,
                 body: None,
                 json: false,
             },
@@ -545,6 +703,11 @@ mod tests {
                 priority: None,
                 labels: Some(vec!["x".to_string()]),
                 dependson: Some(vec![2]),
+                related: None,
+                parent: None,
+                clear_parent: false,
+                milestone: None,
+                clear_milestone: false,
                 body: Some("b".to_string()),
                 json: false,
             },
@@ -565,6 +728,11 @@ mod tests {
                 priority: None,
                 labels: None,
                 dependson: None,
+                related: None,
+                parent: None,
+                clear_parent: false,
+                milestone: None,
+                clear_milestone: false,
                 body: None,
                 json: true,
             },
@@ -583,6 +751,11 @@ mod tests {
                 priority: None,
                 labels: None,
                 dependson: None,
+                related: None,
+                parent: None,
+                clear_parent: false,
+                milestone: None,
+                clear_milestone: false,
                 body: None,
                 json: false,
             },
@@ -605,6 +778,8 @@ mod tests {
                 status: None,
                 priority: None,
                 label: None,
+                parent: None,
+                milestone: None,
                 ready: false,
                 json: false,
             },
@@ -620,6 +795,8 @@ mod tests {
                 status: None,
                 priority: None,
                 label: None,
+                parent: None,
+                milestone: None,
                 ready: false,
                 json: true,
             },
@@ -671,6 +848,265 @@ mod tests {
     }
 
     #[test]
+    fn optional_change_maps_value_clear_and_absent() {
+        assert_eq!(optional_change(Some(5), false), Some(Some(5)));
+        assert_eq!(optional_change::<u32>(None, true), Some(None));
+        assert_eq!(optional_change::<u32>(None, false), None);
+        // A value wins over a stray clear flag (clap normally forbids both).
+        assert_eq!(optional_change(Some(5), true), Some(Some(5)));
+    }
+
+    #[test]
+    fn create_accepts_relations_and_milestone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path();
+        execute(
+            repo,
+            IssueCommand::Create {
+                title: "child".to_string(),
+                priority: IssuePriority::Medium,
+                labels: vec![],
+                dependson: vec![],
+                related: vec![3],
+                parent: Some(2),
+                milestone: Some("v1".to_string()),
+                body: String::new(),
+                json: false,
+            },
+        )
+        .unwrap();
+        let stored = issue::get(repo, 1).unwrap().unwrap();
+        assert_eq!(stored.related, vec![3]);
+        assert_eq!(stored.parent, Some(2));
+        assert_eq!(stored.milestone, Some("v1".to_string()));
+    }
+
+    #[test]
+    fn update_sets_then_clears_parent_and_milestone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path();
+        create(repo, "task", vec![]);
+
+        // Set parent + milestone, replace related.
+        execute(
+            repo,
+            IssueCommand::Update {
+                number: 1,
+                title: None,
+                status: None,
+                priority: None,
+                labels: None,
+                dependson: None,
+                related: Some(vec![9]),
+                parent: Some(5),
+                clear_parent: false,
+                milestone: Some("v2".to_string()),
+                clear_milestone: false,
+                body: None,
+                json: false,
+            },
+        )
+        .unwrap();
+        let after_set = issue::get(repo, 1).unwrap().unwrap();
+        assert_eq!(after_set.parent, Some(5));
+        assert_eq!(after_set.milestone, Some("v2".to_string()));
+        assert_eq!(after_set.related, vec![9]);
+
+        // Clear flags remove the optional fields; related left untouched.
+        execute(
+            repo,
+            IssueCommand::Update {
+                number: 1,
+                title: None,
+                status: None,
+                priority: None,
+                labels: None,
+                dependson: None,
+                related: None,
+                parent: None,
+                clear_parent: true,
+                milestone: None,
+                clear_milestone: true,
+                body: None,
+                json: false,
+            },
+        )
+        .unwrap();
+        let after_clear = issue::get(repo, 1).unwrap().unwrap();
+        assert_eq!(after_clear.parent, None);
+        assert_eq!(after_clear.milestone, None);
+        assert_eq!(after_clear.related, vec![9]);
+    }
+
+    #[test]
+    fn list_filters_by_parent_and_milestone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path();
+        create(repo, "epic", vec![]);
+        execute(
+            repo,
+            IssueCommand::Create {
+                title: "child".to_string(),
+                priority: IssuePriority::Medium,
+                labels: vec![],
+                dependson: vec![],
+                related: vec![],
+                parent: Some(1),
+                milestone: Some("v1".to_string()),
+                body: String::new(),
+                json: false,
+            },
+        )
+        .unwrap();
+
+        let by_parent = execute(
+            repo,
+            IssueCommand::List {
+                status: None,
+                priority: None,
+                label: None,
+                parent: Some(1),
+                milestone: None,
+                group_by: None,
+                ready: false,
+                json: false,
+            },
+        )
+        .unwrap();
+        assert_eq!(by_parent.len(), 1);
+        assert!(by_parent[0].contains("child"));
+
+        let by_milestone = execute(
+            repo,
+            IssueCommand::Search {
+                query: String::new(),
+                status: None,
+                priority: None,
+                label: None,
+                parent: None,
+                milestone: Some("v1".to_string()),
+                ready: false,
+                json: false,
+            },
+        )
+        .unwrap();
+        assert_eq!(by_milestone.len(), 1);
+    }
+
+    #[test]
+    fn graph_renders_a_tree_with_a_progress_footer() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path();
+        create(repo, "root", vec![]);
+        create(repo, "child", vec![1]);
+
+        let lines = execute(repo, IssueCommand::Graph).unwrap();
+        assert!(lines[0].contains("#1 root"));
+        assert!(lines.iter().any(|l| l.contains("└─ #2 child")));
+        assert!(lines.iter().any(|l| l.contains("2 issues")));
+        assert!(lines.iter().any(|l| l.contains("ready")));
+    }
+
+    #[test]
+    fn graph_reports_when_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let lines = execute(tmp.path(), IssueCommand::Graph).unwrap();
+        assert_eq!(lines, vec!["No issues found."]);
+    }
+
+    #[test]
+    fn list_grouped_by_status_emits_headers_and_footers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path();
+        create(repo, "a", vec![]);
+        create(repo, "b", vec![]);
+        execute(
+            repo,
+            IssueCommand::Update {
+                number: 1,
+                title: None,
+                status: Some(IssueStatus::Done),
+                priority: None,
+                labels: None,
+                dependson: None,
+                related: None,
+                parent: None,
+                clear_parent: false,
+                milestone: None,
+                clear_milestone: false,
+                body: None,
+                json: false,
+            },
+        )
+        .unwrap();
+
+        let lines = execute(
+            repo,
+            IssueCommand::List {
+                status: None,
+                priority: None,
+                label: None,
+                parent: None,
+                milestone: None,
+                group_by: Some(GroupBy::Status),
+                ready: false,
+                json: false,
+            },
+        )
+        .unwrap();
+        let text = lines.join("\n");
+        assert!(text.contains("== todo =="));
+        assert!(text.contains("== done =="));
+        // Overall footer reflects 1 of 2 done.
+        assert!(text.contains("2 issues · 1 done (50%)"));
+    }
+
+    #[test]
+    fn list_grouped_reports_when_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let lines = execute(
+            tmp.path(),
+            IssueCommand::List {
+                status: None,
+                priority: None,
+                label: None,
+                parent: None,
+                milestone: None,
+                group_by: Some(GroupBy::Priority),
+                ready: false,
+                json: false,
+            },
+        )
+        .unwrap();
+        assert_eq!(lines, vec!["No issues found."]);
+    }
+
+    #[test]
+    fn grouping_is_ignored_for_json_output() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path();
+        create(repo, "a", vec![]);
+        // With --json the grouped rendering is bypassed in favor of the array.
+        let json = execute(
+            repo,
+            IssueCommand::List {
+                status: None,
+                priority: None,
+                label: None,
+                parent: None,
+                milestone: None,
+                group_by: Some(GroupBy::Status),
+                ready: false,
+                json: true,
+            },
+        )
+        .unwrap()
+        .join("\n");
+        assert!(json.contains("\"number\": 1"));
+        assert!(!json.contains("=="));
+    }
+
+    #[test]
     fn execute_propagates_store_errors() {
         let tmp = tempfile::tempdir().unwrap();
         // A file where the `.usagi` directory should be makes the store fail,
@@ -683,6 +1119,9 @@ mod tests {
                 priority: IssuePriority::Medium,
                 labels: vec![],
                 dependson: vec![],
+                related: vec![],
+                parent: None,
+                milestone: None,
                 body: String::new(),
                 json: false,
             },
@@ -701,6 +1140,9 @@ mod tests {
             status: None,
             priority: None,
             label: None,
+            parent: None,
+            milestone: None,
+            group_by: None,
             ready: false,
             json: false,
         });

@@ -24,6 +24,7 @@ mod tree;
 
 pub use reconcile::reconcile;
 
+use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -131,24 +132,6 @@ pub fn list(workspace_root: &Path) -> Result<Vec<SessionRecord>> {
         .unwrap_or_default())
 }
 
-/// The workspace root that owns `path` when `path` lies inside a session tree
-/// (`<root>/.usagi/sessions/<name>/...`): the part of the path before its
-/// `.usagi/sessions` segment.
-///
-/// When `path` is not inside a session tree (no such segment), `path` itself is
-/// returned — the caller is treated as its own workspace root. This lets a tool
-/// running inside a session worktree recover the workspace whose `state.json`
-/// tracks every session.
-pub fn workspace_root_for(path: &Path) -> PathBuf {
-    let comps: Vec<_> = path.components().collect();
-    for i in 0..comps.len().saturating_sub(1) {
-        if comps[i].as_os_str() == ".usagi" && comps[i + 1].as_os_str() == "sessions" {
-            return comps[..i].iter().collect();
-        }
-    }
-    path.to_path_buf()
-}
-
 /// The result of attempting to remove a session.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemovalOutcome {
@@ -219,6 +202,32 @@ pub fn remove(workspace_root: &Path, name: &str, force: bool) -> Result<RemovalO
         removed: true,
         dirty: Vec::new(),
     })
+}
+
+/// Resolve the workspace root from a working directory that may sit inside a
+/// session tree.
+///
+/// A session is mirrored at `<workspace>/.usagi/sessions/<name>/...`. When a
+/// process runs from within such a tree (e.g. an agent's `usagi mcp` server),
+/// its data stores still belong to the *workspace* — issues live at
+/// `<workspace>/.usagi/issues/`, not in a throwaway copy under the session that
+/// `usagi clean` later deletes. So we strip everything from the
+/// `.usagi/sessions` segment onward and return the workspace root. A path that
+/// is not inside a session tree is returned unchanged.
+pub fn workspace_root(start: &Path) -> PathBuf {
+    let mut prefix = PathBuf::new();
+    let mut components = start.components().peekable();
+    while let Some(component) = components.next() {
+        if component.as_os_str() == OsStr::new(".usagi")
+            && components
+                .peek()
+                .is_some_and(|next| next.as_os_str() == OsStr::new("sessions"))
+        {
+            return prefix;
+        }
+        prefix.push(component);
+    }
+    start.to_path_buf()
 }
 
 #[cfg(test)]
@@ -326,6 +335,59 @@ mod tests {
         let state = WorkspaceStore::new(root.path()).load().unwrap().unwrap();
         assert_eq!(state.sessions.len(), 1);
         assert_eq!(state.sessions[0].worktrees.len(), 3);
+    }
+
+    /// Add a linked worktree of `repo` at `dest` on a throwaway branch; its
+    /// `.git` is a file pointer, marking it as an existing worktree to skip.
+    fn add_linked_worktree(repo: &Path, dest: &Path, branch: &str) {
+        assert!(git_cmd(repo)
+            .args([
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                branch,
+                dest.to_str().unwrap()
+            ])
+            .status()
+            .unwrap()
+            .success());
+        assert!(dest.join(".git").is_file());
+    }
+
+    #[test]
+    fn create_skips_existing_linked_worktrees() {
+        let root = tempfile::tempdir().unwrap();
+        // A real repo at the root is mirrored, but a linked worktree sitting
+        // alongside it (e.g. a `.workspace` or `.claude/worktrees/*`) is left
+        // untouched: not branched, not copied into the session.
+        init_repo(&root.path().join("app"));
+        add_linked_worktree(
+            &root.path().join("app"),
+            &root.path().join(".workspace"),
+            "wt",
+        );
+
+        let created = create(root.path(), "wip").unwrap();
+
+        let base = root.path().join(".usagi/sessions/wip");
+        assert_eq!(created.worktrees, vec![base.join("app")]);
+        assert!(!base.join(".workspace").exists());
+    }
+
+    #[test]
+    fn source_repos_skips_linked_worktrees() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(&root.path().join("app"));
+        add_linked_worktree(
+            &root.path().join("app"),
+            &root.path().join(".workspace"),
+            "wt",
+        );
+
+        // Only the real repository is a source repo; the linked worktree is not.
+        let repos = tree::source_repos(root.path());
+        assert_eq!(repos, vec![root.path().join("app")]);
     }
 
     #[test]
@@ -456,7 +518,7 @@ mod tests {
         assert!(err.to_string().contains("failed to create"));
     }
 
-    // --- list / workspace_root_for -----------------------------------------
+    // --- list --------------------------------------------------------------
 
     #[test]
     fn list_returns_recorded_sessions_in_order() {
@@ -474,27 +536,6 @@ mod tests {
             .map(|s| s.name)
             .collect();
         assert_eq!(names, vec!["first", "second"]);
-    }
-
-    #[test]
-    fn workspace_root_for_recovers_the_root_from_a_session_path() {
-        // A path inside a single-repo session tree resolves to the workspace.
-        let root = Path::new("/home/me/proj");
-        let inside = root.join(".usagi/sessions/feature-x");
-        assert_eq!(workspace_root_for(&inside), root);
-        // A deeper path (multi-repo worktree under the session) resolves too.
-        let deeper = root.join(".usagi/sessions/feature-x/app-a/src");
-        assert_eq!(workspace_root_for(&deeper), root);
-    }
-
-    #[test]
-    fn workspace_root_for_returns_the_path_itself_outside_a_session() {
-        // No `.usagi/sessions` segment: the path is its own workspace root.
-        let plain = Path::new("/home/me/proj");
-        assert_eq!(workspace_root_for(plain), plain);
-        // A `.usagi` without a following `sessions` segment is not a session tree.
-        let other = Path::new("/home/me/proj/.usagi/issues");
-        assert_eq!(workspace_root_for(other), other);
     }
 
     // --- remove ------------------------------------------------------------
@@ -721,5 +762,35 @@ mod tests {
         assert!(!a.root.exists());
         assert!(!b.root.exists());
         assert!(sessions_of(root.path()).is_empty());
+    }
+
+    #[test]
+    fn workspace_root_strips_a_session_subtree() {
+        // A cwd inside a session resolves back to the workspace root.
+        assert_eq!(
+            workspace_root(Path::new("/repo/.usagi/sessions/mcp")),
+            PathBuf::from("/repo")
+        );
+        // ...including a subdirectory deeper within the session.
+        assert_eq!(
+            workspace_root(Path::new("/repo/.usagi/sessions/mcp/crate/src")),
+            PathBuf::from("/repo")
+        );
+        // A doubly nested copy stops at the first session segment.
+        assert_eq!(
+            workspace_root(Path::new("/repo/.usagi/sessions/mcp/.usagi/issues")),
+            PathBuf::from("/repo")
+        );
+    }
+
+    #[test]
+    fn workspace_root_leaves_a_plain_path_unchanged() {
+        // Not inside a session tree: returned as-is.
+        assert_eq!(workspace_root(Path::new("/repo")), PathBuf::from("/repo"));
+        // A bare `.usagi` without a `sessions` child is not a session tree.
+        assert_eq!(
+            workspace_root(Path::new("/repo/.usagi/issues")),
+            PathBuf::from("/repo/.usagi/issues")
+        );
     }
 }

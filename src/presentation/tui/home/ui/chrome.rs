@@ -5,6 +5,8 @@
 
 use console::style;
 
+use crate::domain::version::Version;
+
 use super::super::command::{CommandHint, Hint};
 use super::super::state::{HomeState, Mode, RemoveModal, TextModal, WorktreeList};
 use super::panes::log_line;
@@ -25,6 +27,54 @@ pub(super) fn title_bar(width: usize, list: &WorktreeList) -> String {
         if count == 1 { "" } else { "s" }
     );
     widgets::title_line(width, &label)
+}
+
+/// The top-right "update available" notice: the usagi mascot beside a short
+/// note that a release newer than the running build (`latest`) has been
+/// published. Shown only while the background update check reports one.
+///
+/// Each returned line pairs a mascot row with its message and is right-padded to
+/// a common block width and styled yellow-bold, so the block right-aligns
+/// cleanly when [`overlay_top_right`](super::overlay_top_right) anchors it to the
+/// top rows.
+pub(super) fn update_banner(latest: &Version) -> Vec<String> {
+    let art = widgets::rabbit_art();
+    let art_w = art
+        .iter()
+        .map(|line| console::measure_text_width(line))
+        .max()
+        .unwrap_or(0);
+    // One message per mascot row; the last row carries only the mascot's feet.
+    let messages = [
+        "最新版があります".to_string(),
+        format!("v{latest}"),
+        String::new(),
+    ];
+    let rows: Vec<String> = art
+        .iter()
+        .zip(messages.iter())
+        .map(|(line, message)| {
+            let cell = pad_to_width((*line).to_string(), art_w);
+            if message.is_empty() {
+                cell
+            } else {
+                format!("{cell}  {message}")
+            }
+        })
+        .collect();
+    let block_w = rows
+        .iter()
+        .map(|row| console::measure_text_width(row))
+        .max()
+        .unwrap_or(0);
+    rows.into_iter()
+        .map(|row| {
+            style(pad_to_width(row, block_w))
+                .yellow()
+                .bold()
+                .to_string()
+        })
+        .collect()
 }
 
 /// The engagement-ladder indicator drawn just under the title bar: the four

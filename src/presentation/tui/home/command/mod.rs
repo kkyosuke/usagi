@@ -20,6 +20,7 @@ mod registry;
 pub use registry::CommandRegistry;
 
 use super::state::LogLine;
+use crate::domain::issue::Issue;
 
 /// A side effect a command asks the screen / event loop to perform, beyond
 /// appending its produced log lines.
@@ -164,6 +165,8 @@ pub struct CommandContext<'a> {
     pub commands: &'a [CommandInfo],
     /// The workspace's worktrees, in display order, for `space`.
     pub worktrees: &'a [WorktreeRef],
+    /// The workspace's task issues, in number order, for `issue`.
+    pub issues: &'a [Issue],
 }
 
 /// A command available in the workspace screen's command mode.

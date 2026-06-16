@@ -64,21 +64,23 @@ pub struct PtySession {
 /// user can scroll the pane back over a command's earlier output.
 const SCROLLBACK_LINES: usize = 10_000;
 
-/// Configure `cmd` to run `command` in `shell` and then drop into an
-/// interactive shell, so the launch line is passed as an argument (never echoed)
-/// rather than typed into the shell's stdin. See [`PtySession::spawn`].
+/// Configure `cmd` to run `command` in `shell` and then exit, so the launch
+/// line is passed as an argument (never echoed) rather than typed into the
+/// shell's stdin. The shell exits when `command` does, so leaving the agent
+/// drops the pane back to 在席 (Focus) instead of a bare shell prompt. See
+/// [`PtySession::spawn`].
 #[cfg(not(windows))]
-fn configure_initial_command(cmd: &mut CommandBuilder, shell: &str, command: &str) {
+fn configure_initial_command(cmd: &mut CommandBuilder, _shell: &str, command: &str) {
     cmd.arg("-i");
     cmd.arg("-c");
-    // `command` is already shell-quoted; chain a fresh interactive shell after
-    // it so the user lands at a prompt when the agent exits.
-    cmd.arg(format!("{command}; exec \"{shell}\" -i"));
+    // `command` is already shell-quoted; run it and let the `-c` shell exit when
+    // it finishes (no trailing `exec`), so the agent exiting closes the pane.
+    cmd.arg(command);
 }
 
-/// Windows fallback: `cmd.exe` / PowerShell take `/c` and have no `exec`, so the
-/// command runs and the shell then exits — close enough for the rare Windows
-/// case, and still without echoing the launch line.
+/// Windows fallback: `cmd.exe` / PowerShell take `/c` and run the command, then
+/// the shell exits — the same end behaviour as the Unix path, still without
+/// echoing the launch line.
 #[cfg(windows)]
 fn configure_initial_command(cmd: &mut CommandBuilder, _shell: &str, command: &str) {
     cmd.arg("/c");
@@ -95,9 +97,9 @@ impl PtySession {
     /// into the shell's stdin: a typed command is echoed back by the shell's
     /// line editor, which would splash the long `:agent` launch line (with its
     /// `--append-system-prompt`) across the pane before the agent draws over it.
-    /// Passed as an argument it is never echoed. The shell then execs a fresh
-    /// interactive shell so the user is left at a prompt once the command exits,
-    /// exactly as if they had run it themselves.
+    /// Passed as an argument it is never echoed. The shell exits once the
+    /// command does, so leaving the agent returns to 在席 (Focus) rather than
+    /// dropping the user at a bare shell prompt.
     pub fn spawn(dir: &Path, rows: u16, cols: u16, command: Option<&str>) -> Result<Self> {
         let pty_system = native_pty_system();
         let pair = pty_system

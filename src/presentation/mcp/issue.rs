@@ -44,6 +44,9 @@ impl McpServer {
                 priority: args.priority,
                 labels: args.labels,
                 dependson: args.dependson,
+                related: args.related,
+                parent: args.parent,
+                milestone: args.milestone,
                 body: args.body,
             },
         )
@@ -124,6 +127,12 @@ struct CreateArgs {
     #[serde(default)]
     dependson: Vec<u32>,
     #[serde(default)]
+    related: Vec<u32>,
+    #[serde(default)]
+    parent: Option<u32>,
+    #[serde(default)]
+    milestone: Option<String>,
+    #[serde(default)]
     body: String,
 }
 
@@ -141,6 +150,10 @@ struct ListArgs {
     #[serde(default)]
     label: Option<String>,
     #[serde(default)]
+    parent: Option<u32>,
+    #[serde(default)]
+    milestone: Option<String>,
+    #[serde(default)]
     ready: bool,
 }
 
@@ -150,6 +163,8 @@ impl ListArgs {
             status: self.status,
             priority: self.priority,
             label: self.label,
+            parent: self.parent,
+            milestone: self.milestone,
             ready_only: self.ready,
         }
     }
@@ -165,6 +180,10 @@ struct SearchArgs {
     #[serde(default)]
     label: Option<String>,
     #[serde(default)]
+    parent: Option<u32>,
+    #[serde(default)]
+    milestone: Option<String>,
+    #[serde(default)]
     ready: bool,
 }
 
@@ -174,6 +193,8 @@ impl SearchArgs {
             status: self.status,
             priority: self.priority,
             label: self.label.clone(),
+            parent: self.parent,
+            milestone: self.milestone.clone(),
             ready_only: self.ready,
         }
     }
@@ -193,6 +214,14 @@ struct UpdateArgs {
     #[serde(default)]
     dependson: Option<Vec<u32>>,
     #[serde(default)]
+    related: Option<Vec<u32>>,
+    // Tri-state: absent leaves the field unchanged, an explicit JSON `null`
+    // clears it, and a value sets it.
+    #[serde(default, deserialize_with = "double_option")]
+    parent: Option<Option<u32>>,
+    #[serde(default, deserialize_with = "double_option")]
+    milestone: Option<Option<String>>,
+    #[serde(default)]
     body: Option<String>,
 }
 
@@ -204,9 +233,23 @@ impl UpdateArgs {
             priority: self.priority,
             labels: self.labels,
             dependson: self.dependson,
+            related: self.related,
+            parent: self.parent,
+            milestone: self.milestone,
             body: self.body,
         }
     }
+}
+
+/// Deserialize an optional field while preserving the distinction between an
+/// absent key (`None`) and an explicit `null` (`Some(None)`). Used to let
+/// `issue_update` clear `parent`/`milestone` by passing JSON `null`.
+fn double_option<'de, T, D>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    T: Deserialize<'de>,
+    D: serde::Deserializer<'de>,
+{
+    Ok(Some(Option::deserialize(deserializer)?))
 }
 
 /// Deserialize tool arguments, mapping any error to a tool-facing message.
@@ -224,6 +267,9 @@ fn issue_to_json(issue: &Issue) -> Value {
         "priority": issue.priority,
         "labels": issue.labels,
         "dependson": issue.dependson,
+        "related": issue.related,
+        "parent": issue.parent,
+        "milestone": issue.milestone,
         "created_at": issue.created_at.to_rfc3339(),
         "updated_at": issue.updated_at.to_rfc3339(),
         "body": issue.body,
@@ -242,6 +288,9 @@ fn listed_to_json(items: &[ListedIssue]) -> Value {
                     "priority": l.summary.priority,
                     "labels": l.summary.labels,
                     "dependson": l.summary.dependson,
+                    "related": l.summary.related,
+                    "parent": l.summary.parent,
+                    "milestone": l.summary.milestone,
                     "file": l.summary.file,
                     "created_at": l.summary.created_at.to_rfc3339(),
                     "updated_at": l.summary.updated_at.to_rfc3339(),
@@ -263,6 +312,13 @@ fn issue_tool_schemas() -> Value {
     let priority = json!({ "type": "string", "enum": ["high", "medium", "low"] });
     let labels = json!({ "type": "array", "items": { "type": "string" } });
     let deps = json!({ "type": "array", "items": { "type": "integer" } });
+    let related = json!({
+        "type": "array",
+        "items": { "type": "integer" },
+        "description": "Related (non-blocking) issue numbers"
+    });
+    let parent = json!({ "type": "integer", "description": "Parent issue number" });
+    let milestone = json!({ "type": "string", "description": "Milestone name" });
 
     json!([
         {
@@ -275,6 +331,9 @@ fn issue_tool_schemas() -> Value {
                     "priority": priority,
                     "labels": labels,
                     "dependson": deps,
+                    "related": related,
+                    "parent": parent,
+                    "milestone": milestone,
                     "body": { "type": "string", "description": "Markdown body" }
                 },
                 "required": ["title"]
@@ -299,6 +358,8 @@ fn issue_tool_schemas() -> Value {
                     "status": status,
                     "priority": priority,
                     "label": { "type": "string" },
+                    "parent": { "type": "integer", "description": "Keep only children of this issue" },
+                    "milestone": { "type": "string", "description": "Keep only issues in this milestone" },
                     "ready": { "type": "boolean", "description": "Only issues ready to start" }
                 }
             }
@@ -313,6 +374,8 @@ fn issue_tool_schemas() -> Value {
                     "status": status,
                     "priority": priority,
                     "label": { "type": "string" },
+                    "parent": { "type": "integer", "description": "Keep only children of this issue" },
+                    "milestone": { "type": "string", "description": "Keep only issues in this milestone" },
                     "ready": { "type": "boolean" }
                 },
                 "required": ["query"]
@@ -330,6 +393,9 @@ fn issue_tool_schemas() -> Value {
                     "priority": priority,
                     "labels": labels,
                     "dependson": deps,
+                    "related": related,
+                    "parent": { "type": ["integer", "null"], "description": "Parent issue number; null clears it" },
+                    "milestone": { "type": ["string", "null"], "description": "Milestone name; null clears it" },
                     "body": { "type": "string" }
                 },
                 "required": ["number"]
@@ -523,6 +589,75 @@ mod tests {
         assert_eq!(tool_json(&deleted), json!({"number":1,"deleted":true}));
         let again = call(&server, "issue_delete", json!({"number":1}));
         assert_eq!(tool_json(&again)["deleted"], false);
+    }
+
+    #[test]
+    fn create_stores_relations_and_update_clears_them_with_null() {
+        let tmp = tempfile::tempdir().unwrap();
+        let server = McpServer::new(tmp.path());
+
+        let created = tool_json(&call(
+            &server,
+            "issue_create",
+            json!({"title":"child","related":[3],"parent":2,"milestone":"v1"}),
+        ));
+        assert_eq!(created["related"], json!([3]));
+        assert_eq!(created["parent"], 2);
+        assert_eq!(created["milestone"], "v1");
+
+        // An explicit null clears parent/milestone; an absent field is untouched.
+        let cleared = tool_json(&call(
+            &server,
+            "issue_update",
+            json!({"number":1,"parent":null,"milestone":null}),
+        ));
+        assert_eq!(cleared["parent"], Value::Null);
+        assert_eq!(cleared["milestone"], Value::Null);
+        // related was not mentioned, so it is left as-is.
+        assert_eq!(cleared["related"], json!([3]));
+
+        // Setting a value replaces it.
+        let set = tool_json(&call(
+            &server,
+            "issue_update",
+            json!({"number":1,"parent":5,"related":[9]}),
+        ));
+        assert_eq!(set["parent"], 5);
+        assert_eq!(set["related"], json!([9]));
+    }
+
+    #[test]
+    fn list_and_search_filter_by_parent_and_milestone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let server = McpServer::new(tmp.path());
+        call(&server, "issue_create", json!({"title":"epic"}));
+        call(
+            &server,
+            "issue_create",
+            json!({"title":"child a","parent":1,"milestone":"v1","body":"shared"}),
+        );
+        call(
+            &server,
+            "issue_create",
+            json!({"title":"child b","parent":1,"milestone":"v2","body":"shared"}),
+        );
+
+        let by_parent = tool_json(&call(&server, "issue_list", json!({"parent":1})));
+        assert_eq!(by_parent.as_array().unwrap().len(), 2);
+
+        let by_milestone = tool_json(&call(&server, "issue_list", json!({"milestone":"v1"})));
+        let arr = by_milestone.as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["number"], 2);
+
+        let searched = tool_json(&call(
+            &server,
+            "issue_search",
+            json!({"query":"shared","milestone":"v2"}),
+        ));
+        let arr = searched.as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["number"], 3);
     }
 
     #[test]
