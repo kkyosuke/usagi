@@ -20,7 +20,9 @@ use crate::presentation::tui::widgets;
 use crate::domain::settings::SessionActionUi;
 
 use super::command::{CommandHint, CommandInfo, Hint};
-use super::state::{HomeState, LineKind, LogLine, Mode, RemoveModal, WorktreeList, ROOT_NAME};
+use super::state::{
+    HomeState, LineKind, LogLine, Mode, RemoveModal, TextModal, WorktreeList, ROOT_NAME,
+};
 use super::terminal_view::TerminalView;
 
 /// Shown below the root row when the workspace has no recorded worktrees.
@@ -48,9 +50,10 @@ const LOCAL_ICON: char = '\u{e725}'; // nf-dev-git_branch — lives only locally
 const PUSHED_ICON: char = '\u{f0ee}'; // nf-fa-cloud_upload — pushed to the remote
 const SYNCED_ICON: char = '\u{f00c}'; // nf-fa-check — up to date, nothing un-merged
 
-/// Width of the active-session marker cell on line 1: the `*` marker (or a
-/// blank) plus the space that separates it from the branch name. It sits
-/// between the branch name and the right-edge status field.
+/// Width of the spacing cell between the branch name and the right-edge status
+/// field on line 1. It once held the `*` active marker; the active session is now
+/// marked by the green `▎` bar in the far-left gutter, so this is blank spacing
+/// that keeps the status field aligned.
 const ACTIVE_COL: usize = 2;
 
 /// The vertical bar (with surrounding spaces) dividing the two panes.
@@ -233,10 +236,18 @@ impl AgentState {
     }
 }
 
-/// The `>` cursor cell for the selected row, or a blank cell otherwise.
-fn cursor_cell(selected: bool) -> String {
-    if selected {
+/// The far-left gutter cell shared by both of a row's lines. In 切替 (Switch) the
+/// keyboard is on the list, so the selected row shows a red `>` cursor. The
+/// **active** session — the one subsequent commands operate on — is marked by a
+/// green `▎` accent bar that runs down both of its lines (this replaces the old
+/// `*` marker, whose meaning and mid-row position read poorly). Outside Switch
+/// there is no cursor, so the gutter only ever carries the active bar; when the
+/// cursor and the active row coincide in Switch, the cursor takes the column.
+fn gutter_cell(selected: bool, active: bool, in_switch: bool) -> String {
+    if in_switch && selected {
         style(">").red().bold().to_string()
+    } else if active {
+        style("▎").green().bold().to_string()
     } else {
         " ".to_string()
     }
@@ -253,35 +264,28 @@ fn name_cell(text: &str, width: usize, emphasised: bool) -> String {
     }
 }
 
-/// Builds a row's second (detail) line: indented to sit under the branch name,
-/// then the already-styled, already-clipped `detail`.
-fn detail_line(detail: String) -> String {
-    let indent = " ".repeat(NAME_PREFIX);
-    format!("{indent}{detail}")
+/// Builds a row's second (detail) line: the row's `gutter` cell at the far-left
+/// column (so the active accent bar runs down both lines), padded to sit under
+/// the branch name, then the already-styled, already-clipped `detail`.
+fn detail_line(gutter: &str, detail: String) -> String {
+    let indent = " ".repeat(NAME_PREFIX - 1);
+    format!("{gutter}{indent}{detail}")
 }
 
-/// The line-1 active-session marker cell: a `*` for the active worktree (the one
-/// subsequent commands operate on), or a blank. Kept on the identity line — not
-/// the detail line — so it never crowds the agent's `▶`/`◆` state icon.
-fn active_cell(active: bool) -> String {
-    if active {
-        style("*").green().bold().to_string()
-    } else {
-        " ".to_string()
-    }
-}
-
-/// Builds a worktree's two lines. Line 1 carries a `>` cursor for the selected
-/// entry, a `●`/`○` kind icon (primary or ordinary worktree), the branch name, a
-/// `*` marker for the active worktree, and the git `status` at the right edge.
-/// Line 2 is indented under the name and, when an agent is in use, carries its
-/// icon + label (`▶ running` / `◆ waiting`).
+/// Builds a worktree's two lines. The far-left gutter carries a `>` cursor for
+/// the selected entry in 切替 (Switch) or a green `▎` accent bar down the active
+/// worktree's two lines; line 1 then has a `●`/`○` kind icon (primary or ordinary
+/// worktree), the branch name, and the git `status` at the right edge. Line 2 is
+/// indented under the name and, when an agent is in use, carries its icon + label
+/// (`▶ running` / `◆ waiting`).
+#[allow(clippy::too_many_arguments)]
 fn worktree_row(
     worktree: &WorktreeState,
     name_width: usize,
     detail_width: usize,
     selected: bool,
     active: bool,
+    in_switch: bool,
     live: bool,
     waiting: bool,
 ) -> (String, String) {
@@ -296,43 +300,44 @@ fn worktree_row(
         active || selected,
     );
     let status = status_cell(Some(worktree.status));
-    let line1 = format!(
-        "{} {kind} {branch} {} {status}",
-        cursor_cell(selected),
-        active_cell(active)
-    );
+    let gutter = gutter_cell(selected, active, in_switch);
+    // Three columns sit between the name and the right-edge status (the old
+    // active-marker cell, now blank — the active bar lives in the gutter).
+    let line1 = format!("{gutter} {kind} {branch}   {status}");
 
     // Line 2 spells out the agent state with its icon, or is blank when idle.
+    // Only the active bar runs down to it — the `>` cursor stays a single point
+    // on line 1, so the detail-line gutter ignores the cursor.
     let detail = AgentState::from_flags(live, waiting)
         .detail(detail_width)
         .unwrap_or_default();
-    let line2 = detail_line(detail);
+    let line2 = detail_line(&gutter_cell(false, active, in_switch), detail);
     (line1, line2)
 }
 
 /// Builds the root's two lines: the workspace itself, belonging to no session.
-/// Line 1 carries the cursor cell, a `⌂` kind icon, the [`ROOT_NAME`] label, a
-/// `*` marker when active, and a blank status field (the root has no git
-/// status). Line 2 carries a `workspace root` detail.
+/// The far-left gutter carries the `>` cursor (in 切替 (Switch)) or the green `▎`
+/// active bar; line 1 then has a `⌂` kind icon, the [`ROOT_NAME`] label, and a
+/// blank status field (the root has no git status). Line 2 carries a
+/// `workspace root` detail.
 fn root_row(
     name_width: usize,
     detail_width: usize,
     selected: bool,
     active: bool,
+    in_switch: bool,
 ) -> (String, String) {
     let kind = style("⌂").magenta().to_string();
     let name = name_cell(ROOT_NAME, name_width, active || selected);
     let status = status_cell(None);
-    let line1 = format!(
-        "{} {kind} {name} {} {status}",
-        cursor_cell(selected),
-        active_cell(active)
-    );
+    let gutter = gutter_cell(selected, active, in_switch);
+    let line1 = format!("{gutter} {kind} {name}   {status}");
 
+    // Only the active bar reaches line 2; the cursor stays a point on line 1.
     let detail = style(clip_to_width(ROOT_DETAIL, detail_width))
         .dim()
         .to_string();
-    let line2 = detail_line(detail);
+    let line2 = detail_line(&gutter_cell(false, active, in_switch), detail);
     (line1, line2)
 }
 
@@ -350,18 +355,19 @@ fn dim_row(line: &str) -> String {
 /// message when none are recorded), trimmed to the available `rows`. `live`
 /// holds the worktree paths with a running agent (`▶ running`) and `waiting` the
 /// ones whose agent awaits input (`◆ waiting`, taking precedence over running).
-/// When `dim_unselected` is set (in 切替), every row except the cursor's is
-/// faded so the highlighted session reads first.
+/// When `in_switch` is set (in 切替), the keyboard is on the list: the selected
+/// row shows a `>` cursor and every other row is faded so the highlighted session
+/// reads first.
 fn left_pane(
     list: &WorktreeList,
     live: &HashSet<PathBuf>,
     waiting: &HashSet<PathBuf>,
     left_w: usize,
     rows: usize,
-    dim_unselected: bool,
+    in_switch: bool,
 ) -> Vec<String> {
-    // Line 1: prefix + name + the active-marker cell + a space + the right-edge
-    // status field.
+    // Line 1: prefix + name + the (now-blank) active-marker cell + a space + the
+    // right-edge status field.
     let name_width = left_w.saturating_sub(NAME_PREFIX + ACTIVE_COL + 1 + STATUS_COL);
     // Line 2: indented under the branch name, then the detail text.
     let detail_width = left_w.saturating_sub(NAME_PREFIX);
@@ -370,8 +376,9 @@ fn left_pane(
         detail_width,
         list.root_selected(),
         list.root_active(),
+        in_switch,
     );
-    if dim_unselected && !list.root_selected() {
+    if in_switch && !list.root_selected() {
         root_top = dim_row(&root_top);
         root_detail = dim_row(&root_detail);
     }
@@ -403,10 +410,11 @@ fn left_pane(
                 detail_width,
                 selected,
                 row == list.active_index(),
+                in_switch,
                 live.contains(&w.path),
                 waiting.contains(&w.path),
             );
-            if dim_unselected && !selected {
+            if in_switch && !selected {
                 top = dim_row(&top);
                 detail = dim_row(&detail);
             }
@@ -591,9 +599,20 @@ fn switch_preview(state: &HomeState, width: usize, rows: usize) -> Vec<String> {
     let mut lines = vec![header, String::new()];
 
     if live {
-        // Selecting re-attaches the running shell / agent.
-        lines.push(style("● live terminal").green().to_string());
-        lines.push(style("Enter / l で再アタッチ").dim().to_string());
+        // Selecting re-attaches the running shell / agent: preview its actual
+        // screen (the live snapshot taken before painting) so the choice shows
+        // what re-attaching reveals. Fall back to a label until the first
+        // snapshot is available.
+        match state.terminal_view() {
+            Some(view) => {
+                let body = rows.saturating_sub(lines.len());
+                lines.extend(terminal_pane(view, width, body));
+            }
+            None => {
+                lines.push(style("● live terminal").green().to_string());
+                lines.push(style("Enter / l で再アタッチ").dim().to_string());
+            }
+        }
     } else {
         // Selecting opens 在席 on this session: preview its action menu.
         lines.push(style("Run a command:").dim().to_string());
@@ -920,6 +939,40 @@ fn quit_confirm_frame(raw_height: usize, raw_width: usize, live: usize) -> Vec<S
     widgets::render_modal(raw_height, raw_width, "Quit usagi?", INNER, &body)
 }
 
+/// Body lines the text modal shows at once; a longer dump scrolls, with a count
+/// of the hidden lines above and below. Shared with the event loop's scroll
+/// clamp and paging step.
+pub const TEXT_MODAL_VISIBLE: usize = 16;
+
+/// Builds the centred text modal: a scrollable window over a text-dumping
+/// command's output (`man` / `history` / `session list`), coloured by line kind,
+/// with `↑`/`↓` more-counts and the dismiss hint below.
+fn text_modal_frame(raw_height: usize, raw_width: usize, modal: &TextModal) -> Vec<String> {
+    const INNER: usize = 60;
+
+    let total = modal.lines.len();
+    let start = modal.scroll.min(total.saturating_sub(TEXT_MODAL_VISIBLE));
+    let end = (start + TEXT_MODAL_VISIBLE).min(total);
+
+    let mut body = Vec::new();
+    if start > 0 {
+        body.push(style(format!("  ↑ {start} more")).dim().to_string());
+    }
+    for line in &modal.lines[start..end] {
+        body.push(log_line(line, INNER));
+    }
+    if end < total {
+        body.push(style(format!("  ↓ {} more", total - end)).dim().to_string());
+    }
+    body.push(String::new());
+    body.push(
+        style("↑↓ scroll   Esc / Enter / q: close")
+            .dim()
+            .to_string(),
+    );
+    widgets::render_modal(raw_height, raw_width, &modal.title, INNER, &body)
+}
+
 /// How many rows the 統括 (Overview) results band spends below the input on the
 /// command log tail. The newest output stays visible while typing. Kept small
 /// so the bordered input box and the band together leave the session list its
@@ -935,6 +988,10 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
     // The session-removal modal, when open, overlays the whole screen.
     if let Some(modal) = state.remove_modal() {
         return remove_modal_frame(raw_height, raw_width, modal);
+    }
+    // The text modal (a text-dumping command's output) overlays the screen too.
+    if let Some(modal) = state.text_modal() {
+        return text_modal_frame(raw_height, raw_width, modal);
     }
 
     let (height, width) = widgets::normalize_size(raw_height, raw_width);
@@ -967,7 +1024,8 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
         state.waiting_paths(),
         left_w,
         body_rows,
-        // In 切替 the keyboard is on the list: fade the rows the cursor is not on.
+        // In 切替 the keyboard is on the list: show the `>` cursor and fade the
+        // rows it is not on.
         state.mode() == Mode::Switch,
     );
     // While naming a new session in 切替, append the inline create row(s) to the
@@ -1015,11 +1073,11 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
     }
 
     lines.extend(input_lines);
-    // The 統括 results band: the command log tail, drawn below the input. Always
-    // exactly `results` rows tall (blank-padded) so the footer stays at the
-    // bottom regardless of how much output there is.
+    // The 統括 results band: only the latest command's response, drawn below the
+    // input. Always exactly `results` rows tall (blank-padded) so the footer stays
+    // at the bottom regardless of how much output there is.
     if results > 0 {
-        let tail = log_tail(state.log(), width, results);
+        let tail = log_tail(state.response_lines(), width, results);
         for row in 0..results {
             let line = tail.get(row).cloned().unwrap_or_default();
             lines.push(pad_to_width(line, width));
@@ -1057,6 +1115,41 @@ mod tests {
 
     fn stripped(lines: &[String]) -> String {
         console::strip_ansi_codes(&lines.join("\n")).into_owned()
+    }
+
+    #[test]
+    fn text_modal_frame_windows_a_long_dump_with_more_counts() {
+        let lines: Vec<LogLine> = (0..30)
+            .map(|i| LogLine::output(format!("entry {i}")))
+            .collect();
+        let modal = TextModal {
+            title: "Help".to_string(),
+            lines,
+            scroll: 5,
+        };
+        let frame = stripped(&text_modal_frame(40, 120, &modal));
+        // The title and the hidden-line counts above and below the window show.
+        assert!(frame.contains("Help"));
+        assert!(frame.contains("↑ 5 more"));
+        // 30 total - (scroll 5 + 16 visible) = 9 hidden below.
+        assert!(frame.contains("↓ 9 more"));
+        // A windowed line is visible; ones outside the window are not.
+        assert!(frame.contains("entry 5"));
+        assert!(!frame.contains("entry 0"));
+        assert!(frame.contains("Esc / Enter / q: close"));
+    }
+
+    #[test]
+    fn text_modal_frame_shows_a_short_dump_without_scroll_counts() {
+        let modal = TextModal {
+            title: "History".to_string(),
+            lines: vec![LogLine::output("  1  man"), LogLine::output("  2  history")],
+            scroll: 0,
+        };
+        let frame = stripped(&text_modal_frame(40, 120, &modal));
+        assert!(frame.contains("History"));
+        assert!(frame.contains("man"));
+        assert!(!frame.contains("more"));
     }
 
     #[test]
@@ -1133,12 +1226,15 @@ mod tests {
 
     #[test]
     fn worktree_row_marks_selected_primary_and_detached() {
+        // The `>` cursor only appears in 切替 (Switch): the selected row carries it
+        // when `in_switch` is set.
         let (top, _) = worktree_row(
             &worktree(Some("main"), true, BranchStatus::Pushed),
             10,
             10,
             true,
             false,
+            true,
             false,
             false,
         );
@@ -1146,12 +1242,26 @@ mod tests {
         assert!(top.contains('●'));
         assert!(top.contains("main"));
 
+        // The same selected row outside Switch shows no cursor.
+        let (top_no_switch, _) = worktree_row(
+            &worktree(Some("main"), true, BranchStatus::Pushed),
+            10,
+            10,
+            true,
+            false,
+            false,
+            false,
+            false,
+        );
+        assert!(!top_no_switch.contains('>'));
+
         let (other_top, _) = worktree_row(
             &worktree(Some("feature"), false, BranchStatus::Local),
             10,
             10,
             false,
             false,
+            true,
             false,
             false,
         );
@@ -1167,12 +1277,13 @@ mod tests {
             false,
             false,
             false,
+            false,
         );
         assert!(detached_top.contains("(detached)"));
     }
 
     #[test]
-    fn worktree_row_marks_the_active_worktree_on_the_identity_line() {
+    fn worktree_row_marks_the_active_worktree_with_a_gutter_bar_on_both_lines() {
         let (active_top, active_detail) = worktree_row(
             &worktree(Some("feature"), false, BranchStatus::Local),
             10,
@@ -1180,12 +1291,16 @@ mod tests {
             false,
             true,
             false,
+            true,
             false,
         );
-        // The `*` marker sits on line 1, clear of the agent-state detail line.
-        assert!(active_top.contains('*'));
-        assert!(!active_detail.contains('*'));
-        let (idle_top, _) = worktree_row(
+        // The green `▎` accent bar runs down both lines of the active row (the
+        // detail line carries it too, to the left of the agent state).
+        assert!(active_top.contains('▎'));
+        assert!(active_detail.contains('▎'));
+        // The old `*` marker is gone.
+        assert!(!active_top.contains('*'));
+        let (idle_top, idle_detail) = worktree_row(
             &worktree(Some("feature"), false, BranchStatus::Local),
             10,
             10,
@@ -1193,8 +1308,10 @@ mod tests {
             false,
             false,
             false,
+            false,
         );
-        assert!(!idle_top.contains('*'));
+        assert!(!idle_top.contains('▎'));
+        assert!(!idle_detail.contains('▎'));
     }
 
     #[test]
@@ -1203,6 +1320,7 @@ mod tests {
             &worktree(Some("feature"), false, BranchStatus::Local),
             10,
             12,
+            false,
             false,
             false,
             true,
@@ -1217,6 +1335,7 @@ mod tests {
             12,
             false,
             false,
+            false,
             true,
             true,
         );
@@ -1228,6 +1347,7 @@ mod tests {
             &worktree(Some("feature"), false, BranchStatus::Local),
             10,
             12,
+            false,
             false,
             false,
             false,
@@ -1268,26 +1388,33 @@ mod tests {
             false,
             false,
             false,
+            false,
         );
         assert!(top.contains('…'));
     }
 
     #[test]
     fn root_row_marks_selected_and_active() {
-        let (top, detail) = root_row(10, 20, true, false);
+        // The `>` cursor shows on the selected root only in 切替 (Switch).
+        let (top, detail) = root_row(10, 20, true, false, true);
         assert!(top.contains('>'));
         assert!(top.contains('⌂'));
         assert!(top.contains(ROOT_NAME));
         assert!(detail.contains("workspace root"));
+        // The same selected root outside Switch shows no cursor.
+        let (top_no_switch, _) = root_row(10, 20, true, false, false);
+        assert!(!top_no_switch.contains('>'));
 
-        // The active marker now lives on the identity line, not the detail line.
-        let (active_top, active_detail) = root_row(10, 20, false, true);
-        assert!(active_top.contains('*'));
-        assert!(!active_detail.contains('*'));
+        // The active root carries the green `▎` bar down both lines, not a `*`.
+        let (active_top, active_detail) = root_row(10, 20, false, true, false);
+        assert!(active_top.contains('▎'));
+        assert!(active_detail.contains('▎'));
+        assert!(!active_top.contains('*'));
 
-        let (idle_top, _) = root_row(10, 20, false, false);
+        let (idle_top, idle_detail) = root_row(10, 20, false, false, false);
         assert!(!idle_top.contains('>'));
-        assert!(!idle_top.contains('*'));
+        assert!(!idle_top.contains('▎'));
+        assert!(!idle_detail.contains('▎'));
         assert!(idle_top.contains(ROOT_NAME));
     }
 
@@ -1354,19 +1481,19 @@ mod tests {
     }
 
     #[test]
-    fn left_pane_marks_the_active_worktree_on_its_identity_line() {
+    fn left_pane_marks_the_active_worktree_with_a_gutter_bar() {
         let mut list = list_with(vec![
             worktree(Some("main"), true, BranchStatus::Pushed),
             worktree(Some("feature"), false, BranchStatus::Local),
         ]);
         list.activate_by_name("feature");
         let lines = left_pane(&list, &HashSet::new(), &HashSet::new(), 30, 6, false);
-        // The root identity line is not marked; the active "feature" row carries
-        // the `*` on its identity line (line 1), not its detail line (line 2).
-        assert!(!lines[0].contains('*'));
+        // The root is not active; the active "feature" row carries the green `▎`
+        // accent bar down both of its lines (identity + detail).
+        assert!(!lines[0].contains('▎'));
         assert!(lines[4].contains("feature"));
-        assert!(lines[4].contains('*'));
-        assert!(!lines[5].contains('*'));
+        assert!(lines[4].contains('▎'));
+        assert!(lines[5].contains('▎'));
     }
 
     #[test]
@@ -1449,8 +1576,30 @@ mod tests {
         // Header carries the git status and the running agent state.
         assert!(preview.contains("local"));
         assert!(preview.contains("running"));
-        // A live session previews the live-terminal re-attach, not the menu.
+        // A live session with no snapshot yet falls back to the re-attach label,
+        // not the action menu.
         assert!(preview.contains("live terminal"));
+        assert!(!preview.contains("Run a command"));
+    }
+
+    #[test]
+    fn switch_preview_shows_a_live_session_as_its_actual_screen() {
+        let mut running = worktree(Some("feat"), false, BranchStatus::Local);
+        running.path = PathBuf::from("/repo/run");
+        let mut state = HomeState::new("usagi", vec![running], None);
+        state.set_live([PathBuf::from("/repo/run")].into());
+        // The event loop snapshots the highlighted live session before painting.
+        state.set_terminal_view(TerminalView::from_rows(
+            vec!["$ echo hi".to_string(), "hi".to_string()],
+            None,
+        ));
+        state.enter_switch(super::super::state::ReturnMode::Overview);
+        state.switch_move_down();
+        let preview = stripped(&switch_preview(&state, 40, 12));
+        // The real terminal screen is shown, not the placeholder label.
+        assert!(preview.contains("$ echo hi"));
+        assert!(preview.contains("hi"));
+        assert!(!preview.contains("live terminal"));
         assert!(!preview.contains("Run a command"));
     }
 

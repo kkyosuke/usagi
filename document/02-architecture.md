@@ -11,6 +11,7 @@
 - [各層の責務](#各層の責務)
 - [モジュール構成（`src/`）](#モジュール構成src)
 - [依存ルール](#依存ルール)
+- [TUI 内コマンドのレジストリ](#tui-内コマンドのレジストリ)
 - [技術スタック](#技術スタック)
 
 ## 4 層構成と依存方向
@@ -23,21 +24,16 @@ presentation ──> usecase ──> domain
       └──────────────┴──> infrastructure
 ```
 
-| 層 | 責務 |
-|---|---|
-| `domain/` | 外部依存のない純粋なエンティティ |
-| `usecase/` | ビジネスロジック |
-| `infrastructure/` | Git 操作・永続化などの外部連携 |
-| `presentation/` | CLI ルーティング・TUI 描画・TUI 内コマンド |
-
 ## 各層の責務
 
-| 層 | 責務 | 代表的な型・モジュール |
-|---|---|---|
-| `domain/` | 外部依存のない純粋なエンティティ | `Workspace`, `Settings` / `Theme` / `AgentCli` / `LocalSettings`, `WorkspaceState` / `WorktreeState` / `BranchStatus`, `Repository`（URL パース・名前導出）, `HistoryEntry`, `Issue` / `IssueSummary` / `IssueStatus` / `IssuePriority`（frontmatter 読み書き） |
-| `usecase/` | ビジネスロジック（初期化・登録・状態同期・設定更新・セッション作成・依存チェック・issue 管理・ローカル LLM 導入） | `project`, `workspace`, `workspace_state`, `settings`（実効設定の解決を含む）, `session`（worktree 構築）, `doctor`, `issue`（CRUD・検索・依存 readiness 判定）, `local_llm`（`ollama`・モデルの有無判定とインストール） |
-| `infrastructure/` | Git 操作、各 JSON ファイルの永続化、シェル起動などの外部連携 | `git`（git CLI の読み取り専用検査 + `add_worktree`）, `storage`（グローバル `~/.usagi/`）, `workspace_store`（`<repo>/.usagi/` の `state.json` / `settings.json`）, `history_store`（`history.json`）, `terminal`（起動するシェルの解決）, `pty`（疑似ターミナルセッション・ベル計測）, `session_monitor`（入力待ち判定の純粋ロジック）, `issue_store`（`<repo>/.usagi/issues/` の markdown + `index.json`） |
-| `presentation/` | CLI ルーティング、TUI 描画、TUI 内コマンド、MCP サーバ | `cli/`（`init` / `hop` / `status` / `doctor` / `issue` / `mcp` / `llm_mcp`）, `tui/`（各画面 + `app/` 画面遷移オーケストレーター）, `mcp/`（JSON-RPC 2.0 フレーミングを共有する MCP サーバ群: `mcp::issue` = issue 操作、`mcp::llm` = ローカル LLM 委譲） |
+各層の代表的な型・モジュールは下の[モジュール構成](#モジュール構成src)を参照してください。
+
+| 層 | 責務 |
+|---|---|
+| `domain/` | 外部依存のない純粋なエンティティ（`Workspace` / `Settings` / `WorkspaceState` / `Issue` など） |
+| `usecase/` | ビジネスロジック（初期化・状態同期・設定解決・セッション作成・依存チェック・issue 管理・ローカル LLM 導入） |
+| `infrastructure/` | Git 操作・各 JSON ファイルの永続化・シェル起動などの外部連携 |
+| `presentation/` | CLI ルーティング・TUI 描画・TUI 内コマンド・MCP サーバ |
 
 ## モジュール構成（`src/`）
 
@@ -76,15 +72,16 @@ src/
 │   └── issue_store.rs          # <repo>/.usagi/issues/ の markdown + index.json（IssueStore）
 │
 └── presentation/               # CLI ルーティング・TUI・MCP
-    ├── cli/                    # サブコマンド（init / hop / status / doctor / issue / mcp / llm_mcp）
+    ├── cli/                    # サブコマンド（init / hop / status / config / doctor / issue / mcp / llm_mcp）
     ├── mcp/                    # MCP サーバ（JSON-RPC 2.0 フレーミングを共有）
     │   ├── mod.rs              # 共有プロトコル（dispatch_line / レスポンス整形 / McpService）
     │   ├── issue.rs            # issue 操作ツール（McpServer）
     │   └── llm.rs              # ローカル LLM 委譲ツール（LlmMcpServer / LlmBackend）
-    └── tui/                    # ratatui ベースの TUI
+    └── tui/                    # 自前レンダリングの TUI（console + crossterm、ratatui は不使用）
         ├── app/                # TUI オーケストレーター（画面グラフの遷移を管理 / event）
         ├── screen.rs           # 端末制御（代替スクリーン・RAII ガード）・差分描画（FramePainter）
         ├── term_reader.rs      # キー入力・マウスホイール読み取り（ホイールは解析して読み捨て）
+        ├── echo.rs             # 端末エコー/モード制御ヘルパ
         ├── welcome/            # 起動画面（menu / state / ui / event）
         ├── open/               # プロジェクト選択画面（state / ui / event）
         ├── new/                # 新規プロジェクト画面（state / ui / event）
@@ -108,12 +105,35 @@ src/
 - 各 TUI 画面は `state.rs`（状態）・`ui.rs`（描画）・`event.rs`（イベントループ）に分離し、
   ホーム画面はさらにコマンド解析/補完を `command.rs` に分離する。
 
+## TUI 内コマンドのレジストリ
+
+ホーム画面の TUI 内コマンド（`session` / `terminal` / `agent` / `config` など）は `home/command.rs` の
+`Command` トレイトとして表現し、`CommandRegistry` に登録します。ディスパッチ・補完・`man` 一覧はすべて
+このレジストリ経由で行い、コマンドを `match` でハードコードしません。
+
+- 各コマンドは `description` に加えて書式（`usage`）と例（`examples`）を宣言でき、`man <command>` が自動表示する。
+- コマンドは `Effect`（`OpenTerminal` / `OpenAgent` / `OpenConfig` / `Activate` / `OpenRemoveModal` など）を返し、
+  event loop（`home/event.rs`）が右ペインの切り替え・モーダル表示・画面遷移へ振り分ける。
+- 新しいコマンドは `Command` を実装して `register` するだけで補完・`man`・ディスパッチに乗る。
+- コマンドのスコープ（`CommandScope::Workspace` / `Session` / `Both`）で、どの入力面に出るかを制御する。
+
+各コマンドの構文・役割は [3.2 TUI 内コマンド](03-commands/02-tui.md)、画面側の挙動は
+[design/05-home.md](design/05-home.md) を参照してください。
+
 ## 技術スタック
 
-- **言語**: Rust (edition 2021)
-- **CLI**: clap
-- **TUI**: ratatui + crossterm
-- **疑似ターミナル**: portable-pty + vt100
-- **Git 操作**: git2 / システムの `git` コマンド（読み取り専用検査）
-- **非同期処理**: tokio
-- **シリアライズ**: serde / serde_json（`serde_yaml` は不採用）
+本プロジェクトで実際に使用しているクレートと用途。**ここが技術スタックの正本**で、他のドキュメントはここを参照する。
+
+| 分類 | 採用 | 用途・補足 |
+|---|---|---|
+| 言語 | Rust (edition 2021) | 同期実装（非同期ランタイムは未使用） |
+| CLI | `clap` | サブコマンド・引数解析 |
+| TUI | `console` + `crossterm` + 自前の差分描画（`FramePainter`） | `console::Term` で端末制御・キー入力、`crossterm` でマウス/キーイベント解析・raw mode、描画は `screen.rs` の差分レンダラ（**ratatui は不使用**） |
+| 疑似ターミナル | `portable-pty` + `vt100` | 埋め込みターミナルの起動と画面状態の解釈 |
+| Git 操作 | システムの `git` コマンド | 読み取り専用検査 + worktree 追加（**git2 は不使用**） |
+| AI 連携 | Agent CLI（`claude` / `gemini` など）+ `ollama` サブプロセス | エージェント起動・ローカル LLM 委譲（専用クレートは持たず外部プロセスを起動） |
+| 通知 | `notify-rust` | 入力待ち時のデスクトップ通知 |
+| 並列処理 | `rayon` | issue 一覧読み込みなどの並列化 |
+| シリアライズ | `serde` / `serde_json` | JSON 永続化（`serde_yaml` は不採用） |
+| 日時 | `chrono` | タイムスタンプ |
+| 補助 | `anyhow` / `dirs` / `shell-words` / `libc` | エラー処理・データディレクトリ解決・コマンド分割・端末制御 |
