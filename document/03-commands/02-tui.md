@@ -25,8 +25,8 @@
 
 | コマンド | 説明 |
 |---|---|
-| `man` / `help` | `man` でコマンド一覧、`man <command>` で個別の書式（Usage）と例（Examples）を表示 |
-| `history` | 入力したコマンドの履歴を番号付きで表示（過去セッション分も含む） |
+| `man` / `help` | `man` でコマンド一覧、`man <command>` で個別の書式（Usage）と例（Examples）をスクロール可能なテキストモーダルで表示 |
+| `history` | 入力したコマンドの履歴を番号付きでテキストモーダルに表示（過去セッション分も含む） |
 | `clear` | 出力ログを消去 |
 | `quit` / `exit` | アプリを終了 |
 | `session` | セッション（branch + worktree）の作成・一覧・切替・削除（Workspace スコープ） |
@@ -44,7 +44,7 @@
 | サブコマンド | 動作 |
 |---|---|
 | `session create <name>` | `.usagi/sessions/<name>/` 配下に再帰的に worktree を構築してセッションを作成。名前を省くと[切替](../design/05-home.md#切替switch)の左ペイン内インライン入力で作成 |
-| `session list` | セッション一覧（件数 + 各セッション名 + worktree 数）を表示 |
+| `session list` | セッション一覧（件数 + 各セッション名 + worktree 数）をテキストモーダルに表示 |
 | `session switch <name>` | アクティブセッションを切り替えて**在席**へ。`switch root` でルート行へ。引数なしで[切替](../design/05-home.md#切替switch)モードを開く |
 | `session remove <name> [--force]` | セッションの worktree・ブランチ・コピーを削除。未コミット変更があれば警告し `--force` で破棄。名前を省くと一覧モーダルを開き、`Space` で選択して `Enter` で一括削除 |
 
