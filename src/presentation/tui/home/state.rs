@@ -1477,11 +1477,8 @@ mod tests {
         let modal = state.text_modal().expect("man opens a text modal");
         assert_eq!(modal.title, "Help");
         assert!(modal.lines.iter().any(|l| l.text.contains("Available")));
-        // The band shows none of the modal's output.
-        assert!(!state
-            .response_lines()
-            .iter()
-            .any(|l| l.text.contains("Available")));
+        // The band shows none of the modal's output (its response is empty).
+        assert!(state.response_lines().is_empty());
         assert_eq!(state.input(), "");
     }
 
