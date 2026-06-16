@@ -45,7 +45,8 @@ pub enum Outcome {
 /// - **統括 (Overview)** — the default. The bottom command line operates the
 ///   whole workspace (`session` / `config` / `doctor` / `man` / …); results are
 ///   appended to the log, rendered below the input. The right pane is blank.
-///   `Esc` is inert here (it does not back out to the project list).
+///   `Esc` is inert here (it does not back out to the project list); `Ctrl-O`
+///   opens Switch.
 /// - **切替 (Switch)** — pick a session in the left pane (entered from Overview
 ///   via `session switch`, or from Focus / Attached via `Ctrl-O`). `↑`/`↓`
 ///   move, `Enter` focuses (attaching when the session is live), `c` creates one
@@ -102,10 +103,17 @@ pub fn event_loop(
         // (running) agent, before painting.
         state.set_waiting(monitor.waiting());
         state.set_live(monitor.live());
-        // The right pane is blank in 統括 / 切替 and the action surface in 在席,
-        // so the terminal preview is only ever drawn while 没入 (which `open_pane`
-        // drives directly). Drop any stale snapshot every frame here.
+        // Drop any stale snapshot every frame, then refresh it for the modes that
+        // draw the embedded terminal: 没入 (driven directly by `open_pane`) and
+        // 切替, where the right pane previews the highlighted session's live
+        // terminal so the user sees the actual screen re-attaching reveals.
         state.clear_terminal_view();
+        if state.mode() == Mode::Switch {
+            let dir = selected_dir(&state, workspace_root);
+            if let Some(view) = preview(&dir) {
+                state.set_terminal_view(view);
+            }
+        }
         let (height, width) = term.size();
         let frame = ui::render_frame(height as usize, width as usize, &state);
         painter.paint(term, frame)?;
@@ -164,6 +172,30 @@ pub fn event_loop(
                     }
                 }
                 Key::Escape => state.cancel_remove_modal(),
+                _ => {}
+            }
+            continue;
+        }
+
+        // The text modal (a text-dumping command's output, e.g. `man`), when open,
+        // captures every key: the arrows / `j`/`k` and PageUp/PageDown scroll it,
+        // and `Esc` / `Enter` / `q` dismiss it.
+        if state.text_modal().is_some() {
+            let page = ui::TEXT_MODAL_VISIBLE;
+            match key {
+                Key::ArrowUp | Key::Char('k') => state.text_modal_scroll_up(),
+                Key::ArrowDown | Key::Char('j') => state.text_modal_scroll_down(page),
+                Key::PageUp => {
+                    for _ in 0..page {
+                        state.text_modal_scroll_up();
+                    }
+                }
+                Key::PageDown => {
+                    for _ in 0..page {
+                        state.text_modal_scroll_down(page);
+                    }
+                }
+                Key::Escape | Key::Enter | Key::Char('q') => state.close_text_modal(),
                 _ => {}
             }
             continue;
@@ -320,7 +352,9 @@ fn overview_key(
                     }
                     painter.reset();
                 }
-                Effect::None | Effect::Clear => {}
+                // `ShowText` already opened its modal inside `submit`; nothing
+                // more for the event loop to do.
+                Effect::None | Effect::Clear | Effect::ShowText(_) => {}
             }
         }
         Key::Tab => state.complete(),
@@ -329,9 +363,11 @@ fn overview_key(
         Key::ArrowDown => state.recall_next(),
         // `Esc` is inert at the top level: the home screen is not left by backing
         // out (that would drop into the project list); the only way out is
-        // `Ctrl-C`, handled centrally in the event loop. `Ctrl-O` is likewise
-        // inert here (Overview is already the outermost engagement level).
-        Key::Escape | Key::Char(CTRL_O) => {}
+        // `Ctrl-C`, handled centrally in the event loop.
+        Key::Escape => {}
+        // `Ctrl-O` opens 切替 (Switch) to pick a session in the left pane,
+        // returning here on cancel.
+        Key::Char(CTRL_O) => state.enter_switch(ReturnMode::Overview),
         Key::Char(c) => state.push_char(c),
         _ => {}
     }
@@ -985,9 +1021,33 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_o_in_overview_is_inert() {
-        // Ctrl-O and Esc are both inert at the top level; the fallback Ctrl-C quits.
-        let keys = vec![Ok(Key::Char(CTRL_O)), Ok(Key::Escape)];
+    fn ctrl_o_in_overview_opens_switch() {
+        // Ctrl-O zooms into 切替 (Switch) with Overview as the origin; `h` backs
+        // out to Overview, where Esc is inert and the fallback Ctrl-C quits.
+        let keys = vec![
+            Ok(Key::Char(CTRL_O)), // Overview -> Switch
+            Ok(Key::Char('h')),    // Switch -> Overview (origin)
+            Ok(Key::Escape),       // Esc inert in Overview; fallback Ctrl-C quits
+        ];
+        assert!(matches!(run(keys, sample_state()).unwrap(), Outcome::Quit));
+    }
+
+    #[test]
+    fn text_modal_scrolls_and_dismisses() {
+        // `man` opens a scrollable text modal; the arrows / j/k and PageUp/PageDown
+        // scroll it, and Esc dismisses it (back to Overview, where the fallback
+        // Ctrl-C quits).
+        let mut keys = typed("man");
+        keys.push(Ok(Key::Enter)); // run `man` -> opens the text modal
+        keys.push(Ok(Key::ArrowDown)); // scroll down a line
+        keys.push(Ok(Key::Char('j')));
+        keys.push(Ok(Key::ArrowUp)); // scroll up a line
+        keys.push(Ok(Key::Char('k')));
+        keys.push(Ok(Key::PageDown)); // page down
+        keys.push(Ok(Key::PageUp)); // page up
+        keys.push(Ok(Key::Char('z'))); // ignored inside the modal
+        keys.push(Ok(Key::Escape)); // dismiss -> Overview
+        keys.push(Ok(Key::Escape)); // Esc inert in Overview; fallback Ctrl-C quits
         assert!(matches!(run(keys, sample_state()).unwrap(), Outcome::Quit));
     }
 
@@ -996,11 +1056,12 @@ mod tests {
         let mut keys = typed("ma");
         keys.push(Ok(Key::Backspace));
         keys.push(Ok(Key::Tab)); // "m" -> "man"
-        keys.push(Ok(Key::Enter)); // run
-        keys.push(Ok(Key::ArrowUp)); // recall
+        keys.push(Ok(Key::Enter)); // run -> `man` opens its text modal
+        keys.push(Ok(Key::Escape)); // dismiss the modal -> Overview
+        keys.push(Ok(Key::ArrowUp)); // recall the previous command
         keys.push(Ok(Key::ArrowDown)); // back to empty
         keys.push(Ok(Key::Home)); // ignored
-        keys.push(Ok(Key::Escape)); // back
+        keys.push(Ok(Key::Escape)); // Esc inert in Overview; fallback Ctrl-C quits
         assert!(matches!(run(keys, sample_state()).unwrap(), Outcome::Quit));
     }
 
@@ -1462,6 +1523,22 @@ mod tests {
         keys.push(Ok(Key::Char(CTRL_O))); // -> Overview
         keys.push(Ok(Key::Escape)); // Esc inert in Overview; fallback Ctrl-C quits
         assert!(matches!(run(keys, sample_state()).unwrap(), Outcome::Quit));
+    }
+
+    #[test]
+    fn switch_snapshots_the_highlighted_live_session_for_the_preview() {
+        // In 切替 the render loop snapshots the highlighted session's live
+        // terminal so the right pane previews the actual screen. Under the live
+        // harness `preview` returns a snapshot, exercising that path.
+        let mut keys = typed("session switch");
+        keys.push(Ok(Key::Enter)); // -> Switch
+        keys.push(Ok(Key::ArrowDown)); // move onto a live session row
+        keys.push(Ok(Key::Char(CTRL_O))); // -> Overview
+        keys.push(Ok(Key::Escape)); // Esc inert in Overview; fallback Ctrl-C quits
+        assert!(matches!(
+            run_live(keys, sample_state()).unwrap(),
+            Outcome::Quit
+        ));
     }
 
     #[test]
