@@ -230,6 +230,37 @@ impl TerminalPool {
             .expect("the session was just inserted or already present"))
     }
 
+    /// Kill and forget every live shell whose worktree lies at or under `root`.
+    ///
+    /// Called when a session is removed: deleting its worktree directory does not
+    /// stop the shell (and any agent CLI) still running there, so without this the
+    /// exited-looking-but-alive shell lingers in the pool keyed by its path. A
+    /// session later recreated at the same path would then re-attach to that stale
+    /// shell — inheriting the previous run's agent and scrollback — instead of
+    /// spawning fresh. Dropping each [`PtySession`] kills its shell (via `Drop`),
+    /// and the watched / monitor / phase state for the path is cleared too.
+    pub fn remove_under(&mut self, root: &Path) {
+        let removed: Vec<PathBuf> = self
+            .sessions
+            .keys()
+            .filter(|path| path.as_path() == root || path.starts_with(root))
+            .cloned()
+            .collect();
+        if removed.is_empty() {
+            return;
+        }
+        for path in &removed {
+            // Dropping the PtySession kills the shell it owns.
+            self.sessions.remove(path);
+        }
+        let mut shared = self.lock();
+        for path in &removed {
+            shared.sessions.remove(path);
+            shared.monitor.forget(path);
+            agent_state_store::clear(path);
+        }
+    }
+
     /// Snapshot the live terminal for the session rooted at `dir`, resized to the
     /// current pane geometry, for the sidebar's read-only preview. Returns `None`
     /// when no live session is rooted there, so the right pane falls back to the
