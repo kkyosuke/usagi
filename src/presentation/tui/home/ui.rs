@@ -767,12 +767,35 @@ fn remove_modal_frame(raw_height: usize, raw_width: usize, modal: &RemoveModal) 
     widgets::render_modal(raw_height, raw_width, "Remove sessions", INNER, &body)
 }
 
+/// Builds the centred quit-confirmation modal, shown when the user presses
+/// `Ctrl-C` while a session is still live: it names how many sessions are still
+/// running and asks whether to close anyway.
+fn quit_confirm_frame(raw_height: usize, raw_width: usize, live: usize) -> Vec<String> {
+    const INNER: usize = 40;
+    let body = vec![
+        style(format!("{live} session(s) still running."))
+            .dim()
+            .to_string(),
+        String::new(),
+        style("Close anyway? Running agents will be stopped.").to_string(),
+        String::new(),
+        style("y / Enter: close   n / Esc: cancel")
+            .dim()
+            .to_string(),
+    ];
+    widgets::render_modal(raw_height, raw_width, "Quit usagi?", INNER, &body)
+}
+
 /// How many rows the 統括 (Overview) results band spends below the input on the
 /// command log tail. The newest output stays visible while typing.
 const RESULTS_BAND: usize = 6;
 
 /// Builds the full home-screen frame for a raw terminal size.
 pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> Vec<String> {
+    // The quit-confirmation modal, when open, overlays everything else.
+    if state.quit_confirm() {
+        return quit_confirm_frame(raw_height, raw_width, state.live_count());
+    }
     // The session-removal modal, when open, overlays the whole screen.
     if let Some(modal) = state.remove_modal() {
         return remove_modal_frame(raw_height, raw_width, modal);
@@ -1578,6 +1601,21 @@ mod tests {
         assert!(joined.contains("Enter: remove"));
         // The mode chrome is not drawn underneath.
         assert!(!joined.contains("overview"));
+    }
+
+    #[test]
+    fn render_frame_overlays_the_quit_confirmation_modal() {
+        let mut state = state_with_sessions(&["alpha", "beta"]);
+        let live: std::collections::HashSet<std::path::PathBuf> =
+            ["/ws/alpha", "/ws/beta"].iter().map(Into::into).collect();
+        state.set_live(live);
+        state.open_quit_confirm();
+        let frame = render_frame(24, 80, &state);
+        let joined = console::strip_ansi_codes(&frame.join("\n")).into_owned();
+        assert!(joined.contains("Quit usagi?"));
+        assert!(joined.contains("2 session(s) still running"));
+        assert!(joined.contains("Close anyway?"));
+        assert!(joined.contains("y / Enter: close"));
     }
 
     #[test]

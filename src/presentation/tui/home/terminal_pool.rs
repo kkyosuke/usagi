@@ -79,6 +79,26 @@ impl MonitorHandle {
         }
     }
 
+    /// A handle reporting the given paths as live (running) sessions, for tests
+    /// that exercise the quit-confirmation flow without spawning a real shell.
+    #[cfg(test)]
+    pub fn with_live(paths: impl IntoIterator<Item = PathBuf>) -> Self {
+        let mut shared = Shared::default();
+        for path in paths {
+            shared.sessions.insert(
+                path,
+                Watched {
+                    bell: Arc::new(AtomicU64::new(0)),
+                    alive: Arc::new(AtomicBool::new(true)),
+                    label: String::new(),
+                },
+            );
+        }
+        Self {
+            shared: Arc::new(Mutex::new(shared)),
+        }
+    }
+
     /// A snapshot of the worktree paths currently waiting for the user.
     pub fn waiting(&self) -> HashSet<PathBuf> {
         self.lock().monitor.waiting().clone()

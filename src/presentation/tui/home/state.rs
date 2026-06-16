@@ -457,6 +457,10 @@ pub struct HomeState {
     /// the terminal monitor each redraw and rendered with a "running" icon,
     /// unless the path is also waiting (which takes precedence).
     live: HashSet<PathBuf>,
+    /// Whether the quit-confirmation modal is open. It is raised when the user
+    /// presses `Ctrl-C` while a session is still live, so an accidental close
+    /// does not drop a running agent/shell; confirming it quits the app.
+    quit_confirm: bool,
 }
 
 impl HomeState {
@@ -491,6 +495,7 @@ impl HomeState {
             terminal_view: None,
             waiting: HashSet::new(),
             live: HashSet::new(),
+            quit_confirm: false,
         }
     }
 
@@ -670,6 +675,33 @@ impl HomeState {
     /// sidebar renderer.
     pub fn live_paths(&self) -> &HashSet<PathBuf> {
         &self.live
+    }
+
+    /// How many sessions currently have a live (running) embedded shell/agent.
+    /// Shown in the quit-confirmation modal so the user sees what is at stake.
+    pub fn live_count(&self) -> usize {
+        self.live.len()
+    }
+
+    /// Whether any session has a live (running) embedded shell/agent — the
+    /// condition that makes `Ctrl-C` ask for confirmation before quitting.
+    pub fn has_live_sessions(&self) -> bool {
+        !self.live.is_empty()
+    }
+
+    /// Whether the quit-confirmation modal is open.
+    pub fn quit_confirm(&self) -> bool {
+        self.quit_confirm
+    }
+
+    /// Open the quit-confirmation modal (a live session is still running).
+    pub fn open_quit_confirm(&mut self) {
+        self.quit_confirm = true;
+    }
+
+    /// Dismiss the quit-confirmation modal without quitting.
+    pub fn cancel_quit_confirm(&mut self) {
+        self.quit_confirm = false;
     }
 
     /// Focus the session at `row` (0 is the root row, `i` maps to worktree
@@ -2002,5 +2034,28 @@ mod tests {
         assert_eq!(state.live_paths().len(), 1);
         state.set_live(HashSet::new());
         assert!(!state.is_live(Path::new("/repo/feature")));
+    }
+
+    #[test]
+    fn has_live_sessions_and_live_count_follow_the_live_set() {
+        let mut state = state();
+        assert!(!state.has_live_sessions());
+        assert_eq!(state.live_count(), 0);
+        let mut live = HashSet::new();
+        live.insert(PathBuf::from("/repo/feature"));
+        live.insert(PathBuf::from("/repo/main"));
+        state.set_live(live);
+        assert!(state.has_live_sessions());
+        assert_eq!(state.live_count(), 2);
+    }
+
+    #[test]
+    fn quit_confirm_opens_and_cancels() {
+        let mut state = state();
+        assert!(!state.quit_confirm());
+        state.open_quit_confirm();
+        assert!(state.quit_confirm());
+        state.cancel_quit_confirm();
+        assert!(!state.quit_confirm());
     }
 }
