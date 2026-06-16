@@ -13,6 +13,7 @@
 - [依存ルール](#依存ルール)
 - [TUI 内コマンドのレジストリ](#tui-内コマンドのレジストリ)
 - [技術スタック](#技術スタック)
+- [テスト構成](#テスト構成)
 
 ## 4 層構成と依存方向
 
@@ -44,12 +45,14 @@ src/
 ├── test_support.rs             # テスト用ヘルパ
 │
 ├── domain/                     # 純粋なエンティティ（外部依存なし）
+│   ├── agent_phase.rs          # Agent のライフサイクル phase（Running / Waiting / Ended）
 │   ├── repository.rs           # Git URL パース・ディレクトリ名導出
-│   ├── settings.rs             # Settings / Theme / AgentCli / LocalLlm、LocalSettings（with_local で上書き解決）・agent 起動コマンド生成
+│   ├── settings.rs             # Settings / Theme / AgentCli / LocalLlm、LocalSettings（with_local で上書き解決）・agent 起動コマンド生成（フック注入を含む）
 │   ├── workspace.rs            # グローバル登録エントリ Workspace
 │   ├── workspace_state.rs      # WorkspaceState / WorktreeState / BranchStatus
 │   ├── history.rs              # コマンド履歴の 1 件 HistoryEntry
-│   └── issue.rs                # Issue / IssueSummary / IssueStatus / IssuePriority（frontmatter 読み書き）
+│   ├── issue.rs                # Issue / IssueSummary / IssueStatus / IssuePriority（frontmatter 読み書き）
+│   └── version.rs              # セマンティックバージョン Version（パース・比較）
 │
 ├── usecase/                    # ビジネスロジック
 │   ├── project.rs              # クローン・既存登録 + 状態同期
@@ -62,9 +65,11 @@ src/
 │   │   └── reconcile.rs       # state.json と .usagi/sessions/ の照合・孤児ディレクトリの強制削除
 │   ├── doctor.rs               # 依存ツールの導入状況チェック（ローカル LLM の健全性・--fix 導入を含む）
 │   ├── issue.rs                # issue の CRUD・検索・依存 readiness 判定
-│   └── local_llm.rs            # ollama・モデルの有無判定とインストール（ensure）
+│   ├── local_llm.rs            # ollama・モデルの有無判定とインストール（ensure）
+│   └── update_check.rs         # リモートのタグから最新リリースを判定（純粋・fetch は注入）
 │
 ├── infrastructure/             # 外部連携（Git・永続化・シェル）
+│   ├── error_log.rs            # 実行時エラーの日次ログ（~/.usagi/logs/・30 日保持・ErrorLog）
 │   ├── git.rs                  # git CLI 経由の読み取り専用検査 + worktree 追加（add_worktree）
 │   ├── json_file.rs            # JSON ファイルの共通 read / 原子的 write（temp + rename）
 │   ├── storage.rs              # グローバル ~/.usagi/ の load/save（Storage）
@@ -72,11 +77,13 @@ src/
 │   ├── history_store.rs        # <repo>/.usagi/history.json の load/append（HistoryStore）
 │   ├── terminal.rs             # 起動するシェルの解決（$SHELL / フォールバック）
 │   ├── pty.rs                  # 疑似ターミナルセッション（portable-pty + vt100、ベル回数の計測）
-│   ├── session_monitor.rs      # 入力待ち判定の純粋ロジック（ベル基準値・待ち集合・アタッチ）
+│   ├── release.rs              # git ls-remote --tags でリリースタグを取得（薄い IO ラッパ）
+│   ├── session_monitor.rs      # 入力待ち判定の純粋ロジック（phase 優先・ベル基準値・待ち集合・アタッチ）
+│   ├── agent_state_store.rs    # worktree 別の Agent phase の記録/読み出し（~/.usagi/agent-state/）
 │   └── issue_store.rs          # <repo>/.usagi/issues/ の markdown + index.json（IssueStore）
 │
 └── presentation/               # CLI ルーティング・TUI・MCP
-    ├── cli/                    # サブコマンド（init / hop / status / config / doctor / issue / mcp / llm_mcp）
+    ├── cli/                    # サブコマンド（init / hop / status / config / doctor / issue / mcp / llm_mcp / agent_phase（隠し・フック用））
     ├── mcp/                    # MCP サーバ（JSON-RPC 2.0 フレーミングを共有）
     │   ├── mod.rs              # 共有プロトコル（dispatch_line / レスポンス整形 / McpService）
     │   ├── issue.rs            # issue 操作ツール（McpServer）
@@ -90,7 +97,7 @@ src/
         ├── open/               # プロジェクト選択画面（state / ui / event）
         ├── new/                # 新規プロジェクト画面（state / ui / event）
         ├── config/             # 設定画面（state / ui / event）
-        ├── home/               # ホーム画面（state（mod=HomeState / list・mode・log・modal に分割） / ui（mod=render_frame・panes・chrome に分割） / event（mod=loop・handlers に分割） / command（mod=語彙・builtins・registry に分割） / terminal_view / terminal_pane / terminal_pool（常駐＋ベル監視・通知））
+        ├── home/               # ホーム画面（state（mod=HomeState / list・mode・log・modal に分割） / ui（mod=render_frame・panes・chrome に分割） / event（mod=loop・handlers に分割） / command（mod=語彙・builtins・registry に分割） / terminal_view / terminal_pane / terminal_pool（常駐＋phase/ベル監視・通知））
         └── widgets/            # 共通 widget（mod / picker / dir_picker）
 ```
 
@@ -141,3 +148,21 @@ src/
 | シリアライズ | `serde` / `serde_json` | JSON 永続化（`serde_yaml` は不採用） |
 | 日時 | `chrono` | タイムスタンプ |
 | 補助 | `anyhow` / `dirs` / `shell-words` / `libc` | エラー処理・データディレクトリ解決・コマンド分割・端末制御 |
+
+## テスト構成
+
+テストは 3 つの粒度で配置する。すべて `cargo test` で実行され、CI でカバレッジ 100% を要求する（[6. 開発規約](06-conventions.md#品質チェックコミットpush-前に必須)）。
+
+| 粒度 | 置き場所 | 何を検証するか |
+|---|---|---|
+| ユニット | 各モジュールの `#[cfg(test)] mod tests` | 純粋ロジック・状態遷移・`ui::render_frame` の描画結果 |
+| 画面イベント | 各 TUI 画面の `event.rs` 内 | スクリプト化した `KeyReader` を流し、画面単体のイベントループの分岐を網羅 |
+| E2E（PTY） | `tests/tui_e2e.rs` | 実バイナリを疑似ターミナルで起動し、実キー入力で画面グラフを駆動 |
+
+- **`KeyReader` 注入**: TUI の各画面（`welcome` / `open` / `new` / `config` / `home`）と
+  オーケストレーター（`app/`）は、入力源（`screen.rs` の `KeyReader`）と画面起動（closure）を引数で受け取る。
+  これによりリアル端末なしでイベントループを駆動でき、テストはスクリプト化した入力やスタブを差し込む。
+- **E2E（PTY）テスト**: `tests/tui_e2e.rs` は `portable-pty` で `usagi` バイナリを疑似ターミナル上に起動し、
+  キーバイトを書き込み、出力を `vt100` でパースして画面内容を assert する。`$USAGI_HOME`（[storage](data/README.md)）を
+  一時ディレクトリへ向けて隔離するため、開発者の `~/.usagi` を読み書きしない。git・シェル・ネットワークを必要としない
+  画面遷移（welcome → config → 戻る → quit）のみを対象とする。

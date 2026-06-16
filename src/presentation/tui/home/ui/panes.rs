@@ -11,8 +11,9 @@ use super::super::command::{CommandInfo, Hint};
 use super::super::state::{HomeState, LineKind, LogLine, Mode, WorktreeList, ROOT_NAME};
 use super::super::terminal_view::TerminalView;
 use super::{
-    clip_to_width, ACTIVE_COL, CARET, DETACHED, EMPTY_MESSAGE, HINT_INDENT, HINT_MAX, LOCAL_ICON,
-    NAME_PREFIX, PUSHED_ICON, ROOT_DETAIL, STATUS_COL, SYNCED_ICON, TERMINAL_STARTING,
+    clip_to_width, ACTIVE_COL, CARET, DETACHED, DIRTY_ICON, EMPTY_MESSAGE, HINT_INDENT, HINT_MAX,
+    LOCAL_ICON, NAME_PREFIX, NEW_ICON, PUSHED_ICON, ROOT_DETAIL, STATUS_COL, SYNCED_ICON,
+    TERMINAL_STARTING,
 };
 use crate::domain::settings::SessionActionUi;
 use crate::domain::workspace_state::{BranchStatus, WorktreeState};
@@ -20,9 +21,11 @@ use crate::domain::workspace_state::{BranchStatus, WorktreeState};
 /// The Nerd Font git glyph for a branch lifecycle status.
 fn status_icon(status: BranchStatus) -> char {
     match status {
+        BranchStatus::New => NEW_ICON,
+        BranchStatus::Dirty => DIRTY_ICON,
         BranchStatus::Local => LOCAL_ICON,
         BranchStatus::Pushed => PUSHED_ICON,
-        BranchStatus::UpToDate => SYNCED_ICON,
+        BranchStatus::Synced => SYNCED_ICON,
     }
 }
 
@@ -32,9 +35,11 @@ fn status_icon(status: BranchStatus) -> char {
 pub(super) fn status_label(status: BranchStatus) -> String {
     let text = format!("{} {}", status_icon(status), status.as_str());
     match status {
+        BranchStatus::New => style(text).blue().to_string(),
+        BranchStatus::Dirty => style(text).magenta().to_string(),
         BranchStatus::Local => style(text).yellow().to_string(),
         BranchStatus::Pushed => style(text).green().to_string(),
-        BranchStatus::UpToDate => style(text).cyan().to_string(),
+        BranchStatus::Synced => style(text).cyan().to_string(),
     }
 }
 

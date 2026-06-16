@@ -13,6 +13,10 @@ pub mod terminal_pane;
 pub mod terminal_pool;
 pub mod terminal_view;
 pub mod ui;
+pub mod update;
+
+#[cfg(test)]
+mod e2e_tests;
 
 use std::path::Path;
 
@@ -50,10 +54,17 @@ fn reload_sessions(root: &Path) -> Option<Vec<SessionRecord>> {
 /// workspace's `history.json` (best-effort). Assumes the alternate screen is
 /// already active (it is owned by the orchestrator).
 pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
-    let (sessions, notice) = match WorkspaceStore::new(&workspace.path).load() {
-        Ok(Some(state)) => (state.sessions, None),
-        Ok(None) => (Vec::new(), None),
-        Err(e) => (Vec::new(), Some(format!("Failed to load sessions: {e}"))),
+    // Sync from git on entry so the worktree statuses are current the moment the
+    // screen opens (a branch may have been committed / pushed / merged since the
+    // last visit). A non-git root or a sync failure falls back to the saved
+    // sessions, mirroring `reload_sessions`.
+    let (sessions, notice) = match crate::usecase::workspace_state::sync(&workspace.path) {
+        Ok(state) => (state.sessions, None),
+        Err(_) => match WorkspaceStore::new(&workspace.path).load() {
+            Ok(Some(state)) => (state.sessions, None),
+            Ok(None) => (Vec::new(), None),
+            Err(e) => (Vec::new(), Some(format!("Failed to load sessions: {e}"))),
+        },
     };
     let mut state = HomeState::new(workspace.name.clone(), Vec::new(), notice);
     state.restore_sessions(sessions);
@@ -177,6 +188,26 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
     let pool = std::cell::RefCell::new(terminal_pool::TerminalPool::new(notifications_enabled));
     let monitor = pool.borrow().monitor();
 
+    // Check the project's git remote for a newer release than this build, on a
+    // background thread so a slow or unreachable network never delays the screen.
+    // The result is written to the handle the event loop reads each redraw; when
+    // a newer version is published it surfaces the top-right "update available"
+    // notice. Any failure (offline, git missing, already up to date) simply
+    // leaves the handle empty and the notice hidden.
+    let update = update::UpdateHandle::new();
+    {
+        let handle = update.clone();
+        std::thread::spawn(move || {
+            if let Some(status) =
+                crate::usecase::update_check::check(env!("CARGO_PKG_VERSION"), || {
+                    crate::infrastructure::release::fetch_tags(env!("CARGO_PKG_REPOSITORY"))
+                })
+            {
+                handle.set(status);
+            }
+        });
+    }
+
     // Opening a terminal embeds a live shell in the right pane: the pane stays
     // inside the workspace screen (sidebar still visible) and runs the shell
     // until the user detaches, switches sessions, or it exits. `:agent` is the
@@ -185,6 +216,7 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
     // switch loop are handled by the event loop around this call. The attached
     // session is declared to the monitor (so it is never flagged as waiting) and
     // cleared again on detach / close.
+    let terminal_root = workspace.path.clone();
     let mut open_terminal = |home: &mut HomeState, dir: &Path, agent: bool| -> Result<PaneExit> {
         let initial = agent.then_some(agent_command.as_str());
         let label = home
@@ -207,6 +239,13 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
         // Leaving the pane (Ctrl-O → 切替, the shell closing, or an error) means
         // nothing is attached any more; the shell itself stays alive in the pool.
         handle.set_attached(None);
+        // The user may have committed / pushed / merged while in the pane, so
+        // re-sync the worktree statuses now that they have left it — keeping the
+        // cursor where it is. Best-effort: a sync failure just leaves the
+        // last-known statuses in place.
+        if let Some(sessions) = reload_sessions(&terminal_root) {
+            home.refresh_sessions(sessions);
+        }
         result
     };
 
@@ -237,6 +276,7 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
         state,
         &workspace.path,
         &monitor,
+        &update,
         &mut persist,
         &mut create_session,
         &mut remove_session,
