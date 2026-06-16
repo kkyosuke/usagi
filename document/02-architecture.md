@@ -45,8 +45,9 @@ src/
 ├── test_support.rs             # テスト用ヘルパ
 │
 ├── domain/                     # 純粋なエンティティ（外部依存なし）
+│   ├── agent_phase.rs          # Agent のライフサイクル phase（Running / Waiting / Ended）
 │   ├── repository.rs           # Git URL パース・ディレクトリ名導出
-│   ├── settings.rs             # Settings / Theme / AgentCli / LocalLlm、LocalSettings（with_local で上書き解決）・agent 起動コマンド生成
+│   ├── settings.rs             # Settings / Theme / AgentCli / LocalLlm、LocalSettings（with_local で上書き解決）・agent 起動コマンド生成（フック注入を含む）
 │   ├── workspace.rs            # グローバル登録エントリ Workspace
 │   ├── workspace_state.rs      # WorkspaceState / WorktreeState / BranchStatus
 │   ├── history.rs              # コマンド履歴の 1 件 HistoryEntry
@@ -76,11 +77,12 @@ src/
 │   ├── terminal.rs             # 起動するシェルの解決（$SHELL / フォールバック）
 │   ├── pty.rs                  # 疑似ターミナルセッション（portable-pty + vt100、ベル回数の計測）
 │   ├── release.rs              # git ls-remote --tags でリリースタグを取得（薄い IO ラッパ）
-│   ├── session_monitor.rs      # 入力待ち判定の純粋ロジック（ベル基準値・待ち集合・アタッチ）
+│   ├── session_monitor.rs      # 入力待ち判定の純粋ロジック（phase 優先・ベル基準値・待ち集合・アタッチ）
+│   ├── agent_state_store.rs    # worktree 別の Agent phase の記録/読み出し（~/.usagi/agent-state/）
 │   └── issue_store.rs          # <repo>/.usagi/issues/ の markdown + index.json（IssueStore）
 │
 └── presentation/               # CLI ルーティング・TUI・MCP
-    ├── cli/                    # サブコマンド（init / hop / status / config / doctor / issue / mcp / llm_mcp）
+    ├── cli/                    # サブコマンド（init / hop / status / config / doctor / issue / mcp / llm_mcp / agent_phase（隠し・フック用））
     ├── mcp/                    # MCP サーバ（JSON-RPC 2.0 フレーミングを共有）
     │   ├── mod.rs              # 共有プロトコル（dispatch_line / レスポンス整形 / McpService）
     │   ├── issue.rs            # issue 操作ツール（McpServer）
@@ -94,7 +96,7 @@ src/
         ├── open/               # プロジェクト選択画面（state / ui / event）
         ├── new/                # 新規プロジェクト画面（state / ui / event）
         ├── config/             # 設定画面（state / ui / event）
-        ├── home/               # ホーム画面（state（mod=HomeState / list・mode・log・modal に分割） / ui（mod=render_frame・panes・chrome に分割） / event（mod=loop・handlers に分割） / command（mod=語彙・builtins・registry に分割） / terminal_view / terminal_pane / terminal_pool（常駐＋ベル監視・通知））
+        ├── home/               # ホーム画面（state（mod=HomeState / list・mode・log・modal に分割） / ui（mod=render_frame・panes・chrome に分割） / event（mod=loop・handlers に分割） / command（mod=語彙・builtins・registry に分割） / terminal_view / terminal_pane / terminal_pool（常駐＋phase/ベル監視・通知））
         └── widgets/            # 共通 widget（mod / picker / dir_picker）
 ```
 
