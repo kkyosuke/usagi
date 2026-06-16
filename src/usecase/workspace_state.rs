@@ -127,7 +127,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         init_repo(dir.path());
         // A real worktree on a feature branch stands in for a session worktree.
-        let wt_path = dir.path().join(".usagi/worktree/wip");
+        let wt_path = dir.path().join(".usagi/sessions/wip");
         git(dir.path())
             .args([
                 "worktree",

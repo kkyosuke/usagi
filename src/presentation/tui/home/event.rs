@@ -954,7 +954,7 @@ mod tests {
             .iter()
             .map(|n| SessionRecord {
                 name: n.to_string(),
-                root: PathBuf::from(format!("/ws/.usagi/worktree/{n}")),
+                root: PathBuf::from(format!("/ws/.usagi/sessions/{n}")),
                 worktrees: vec![worktree(Some(n), &format!("/ws/{n}"))],
                 created_at: Utc::now(),
             })

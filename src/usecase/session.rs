@@ -1,9 +1,9 @@
-//! Create a session: a parallel working tree under `.usagi/worktree/<name>/`.
+//! Create a session: a parallel working tree under `.usagi/sessions/<name>/`.
 //!
 //! The workspace root need not itself be a git repository. The root is walked
 //! recursively: every git repository found gets a fresh `git worktree` (on a new
 //! branch named after the session) at its mirrored location under
-//! `.usagi/worktree/<name>/`, while non-git files and directories are copied
+//! `.usagi/sessions/<name>/`, while non-git files and directories are copied
 //! there. This supports a single repository, or a tree containing several — e.g.
 //!
 //! ```text
@@ -35,7 +35,7 @@ const SKIP: &[&str] = &[".git", ".usagi"];
 pub struct CreatedSession {
     /// The session name (also the new branch name in every repository).
     pub name: String,
-    /// Root of the session tree: `<workspace>/.usagi/worktree/<name>`.
+    /// Root of the session tree: `<workspace>/.usagi/sessions/<name>`.
     pub root: PathBuf,
     /// The mirrored path of every repository that received a new worktree.
     pub worktrees: Vec<PathBuf>,
@@ -55,7 +55,7 @@ pub fn create(workspace_root: &Path, name: &str) -> Result<CreatedSession> {
         bail!("session name must not contain path separators");
     }
 
-    let dest_root = workspace_root.join(".usagi").join("worktree").join(name);
+    let dest_root = workspace_root.join(".usagi").join("sessions").join(name);
     if dest_root.exists() {
         bail!("session \"{name}\" already exists");
     }
@@ -65,7 +65,7 @@ pub fn create(workspace_root: &Path, name: &str) -> Result<CreatedSession> {
         // The whole workspace is one repository: a single worktree at the root.
         let parent = dest_root
             .parent()
-            .expect("dest_root always has a .usagi/worktree parent");
+            .expect("dest_root always has a .usagi/sessions parent");
         fs::create_dir_all(parent).context(format!("failed to create {}", parent.display()))?;
         let base = base_ref(workspace_root);
         git::add_worktree(workspace_root, &dest_root, name, base.as_deref())?;
@@ -294,7 +294,7 @@ mod tests {
 
         let created = create(root.path(), "feature-x").unwrap();
 
-        let wt = root.path().join(".usagi/worktree/feature-x");
+        let wt = root.path().join(".usagi/sessions/feature-x");
         assert_eq!(created.root, wt);
         assert_eq!(created.worktrees, vec![wt.clone()]);
         // The new worktree is on the session branch and carries the repo files.
@@ -322,7 +322,7 @@ mod tests {
 
         let created = create(root.path(), "wip").unwrap();
 
-        let base = root.path().join(".usagi/worktree/wip");
+        let base = root.path().join(".usagi/sessions/wip");
         // Every repository became a worktree on the session branch.
         for repo in ["app-a", "app-b", "be/be1"] {
             let wt = base.join(repo);

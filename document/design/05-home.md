@@ -567,7 +567,7 @@ event loop が記録済みセッションのチェックリストを画面中央
 ## 読み込みと今後の予定
 
 - worktree 状態の読み込みに失敗した場合は、空一覧の状態でエラー内容を統括の結果帯に表示します。
-- `session` はセッション作成（`.usagi/worktree/<name>/` への再帰的な worktree 構築・コピー）、
+- `session` はセッション作成（`.usagi/sessions/<name>/` への再帰的な worktree 構築・コピー）、
   [切替](#切替switch)のインライン名入力、`session list`（state.json の `sessions` 一覧）、`session switch`（アクティブ
   セッションの切り替え＆在席へ）、`session remove`（worktree・ブランチ・コピーの削除、未コミット変更があれば
   警告し `--force` で破棄。名前を省略すると一覧モーダルを開き、Space で選択/解除して Enter で複数を

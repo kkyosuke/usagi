@@ -80,7 +80,7 @@ pub fn register_existing(storage: &Storage, path: &Path, name: &str) -> Result<W
 ///
 /// Task issues are meant to be committed and shared with the team; the
 /// machine-local state (`state.json`, `settings.json`, `history.json`,
-/// `worktree/`) and the derived issue index stay ignored. Keeping the rules
+/// `sessions/`) and the derived issue index stay ignored. Keeping the rules
 /// inside `.usagi/` leaves the repository-root `.gitignore` untouched.
 const USAGI_GITIGNORE: &str = "/*\n!/.gitignore\n!/issues/\n/issues/index.json\n";
 

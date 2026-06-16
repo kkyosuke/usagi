@@ -80,7 +80,7 @@ pub struct WorktreeState {
     pub updated_at: DateTime<Utc>,
 }
 
-/// A session created under `.usagi/worktree/<name>/`: a parallel working tree
+/// A session created under `.usagi/sessions/<name>/`: a parallel working tree
 /// spanning every repository found under the workspace root (each as a git
 /// worktree on the session branch) plus any copied non-git files.
 ///
@@ -91,7 +91,7 @@ pub struct WorktreeState {
 pub struct SessionRecord {
     /// Session name (also the branch name created in every repository).
     pub name: String,
-    /// Root of the session tree: `<workspace>/.usagi/worktree/<name>`.
+    /// Root of the session tree: `<workspace>/.usagi/sessions/<name>`.
     pub root: PathBuf,
     /// One entry per repository that received a worktree, with its git status.
     pub worktrees: Vec<WorktreeState>,
@@ -106,7 +106,7 @@ pub struct SessionRecord {
 /// worktree's status is classified against *its own* repository's default.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WorkspaceState {
-    /// Sessions created under `.usagi/worktree/`, across all repositories in the
+    /// Sessions created under `.usagi/sessions/`, across all repositories in the
     /// workspace tree. Empty (and omitted from older files) when none exist.
     #[serde(default)]
     pub sessions: Vec<SessionRecord>,
@@ -171,7 +171,7 @@ mod tests {
     fn sample_worktree() -> WorktreeState {
         WorktreeState {
             branch: Some("feature-x".to_string()),
-            path: PathBuf::from("/repo/.usagi/worktree/feature-x/app-a"),
+            path: PathBuf::from("/repo/.usagi/sessions/feature-x/app-a"),
             head: "abc1234".to_string(),
             primary: false,
             upstream: Some("origin/feature-x".to_string()),
@@ -192,7 +192,7 @@ mod tests {
         let mut state = WorkspaceState::new();
         state.sessions.push(SessionRecord {
             name: "feature-x".to_string(),
-            root: PathBuf::from("/repo/.usagi/worktree/feature-x"),
+            root: PathBuf::from("/repo/.usagi/sessions/feature-x"),
             worktrees: vec![sample_worktree()],
             created_at: Utc::now(),
         });
