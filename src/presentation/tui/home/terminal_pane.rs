@@ -305,25 +305,25 @@ fn is_press(key: KeyEvent) -> bool {
 }
 
 /// Whether this key is the reserved `Ctrl-O` leader (zoom out one engagement
-/// level). Terminals report `Ctrl-O` inconsistently, and every form must be
-/// caught — otherwise [`encode_key`] forwards the raw `0x0F` (SI) byte to the
-/// agent, whose input renders the unprintable control char as a `?`-like
-/// placeholder (like a masked password) instead of zooming out:
+/// level). `Ctrl-O` reaches us in two forms and both must be caught —
+/// otherwise [`encode_key`] forwards the raw `0x0F` (SI) byte to the agent,
+/// whose input renders the unprintable control char as a `?`-like placeholder
+/// (like a masked password) instead of zooming out:
 ///
-/// - `Ctrl`+`o` — the common case (lowercase letter + `CONTROL`).
-/// - `Ctrl`+`O` — with `Shift`/`Caps Lock`, or terminals that uppercase the
-///   letter of a `Ctrl`+letter chord.
-/// - the bare `0x0F` control char — some terminals/keyboard protocols deliver
-///   `Ctrl-O` as the raw SI codepoint with no `CONTROL` modifier (this is how
-///   `console` reports it on the other home-screen surfaces).
+/// - `'o'` + `CONTROL` — crossterm's usual decoding of `Ctrl-O`.
+/// - the bare `0x0F` (SI) codepoint — some terminals/keyboard protocols
+///   deliver `Ctrl-O` as the raw control char with no `CONTROL` modifier
+///   (this is how `console` reports it on the other home-screen surfaces).
+///
+/// `Ctrl+Shift+O` is deliberately *not* a leader: it flows through to the
+/// agent unchanged.
 fn is_leader(key: &KeyEvent) -> bool {
     // The raw SI control char only ever comes from `Ctrl-O`, so accept it
     // regardless of the reported modifiers.
     if key.code == KeyCode::Char('\u{0f}') {
         return true;
     }
-    key.modifiers.contains(KeyModifiers::CONTROL)
-        && matches!(key.code, KeyCode::Char('o') | KeyCode::Char('O'))
+    key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('o')
 }
 
 /// Bracketed-paste start / end markers (DECSET 2004). A program that requested
@@ -395,22 +395,26 @@ mod tests {
     }
 
     #[test]
-    fn is_leader_matches_every_form_of_ctrl_o() {
-        // The common case: `Ctrl-O` arrives as lowercase `'o'` + `CONTROL`.
+    fn is_leader_matches_both_forms_of_ctrl_o() {
+        // crossterm's usual decoding: lowercase `'o'` + `CONTROL`.
         assert!(is_leader(&key(KeyCode::Char('o'), KeyModifiers::CONTROL)));
-        // With `Shift`/`Caps Lock` (or terminals that uppercase `Ctrl`+letter)
-        // it arrives as `'O'` — still the leader, must not reach the agent.
-        assert!(is_leader(&key(KeyCode::Char('O'), KeyModifiers::CONTROL)));
-        assert!(is_leader(&key(
-            KeyCode::Char('O'),
-            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
-        )));
-        // Some terminals deliver the bare `0x0F` (SI) codepoint, with no
-        // `CONTROL` modifier reported — still the leader.
+        // Some terminals deliver the bare `0x0F` (SI) codepoint instead, with
+        // no `CONTROL` modifier reported — still the leader, so it must not
+        // reach the agent (where it would render as `?`).
         assert!(is_leader(&key(KeyCode::Char('\u{0f}'), KeyModifiers::NONE)));
         assert!(is_leader(&key(
             KeyCode::Char('\u{0f}'),
-            KeyModifiers::CONTROL
+            KeyModifiers::CONTROL,
+        )));
+    }
+
+    #[test]
+    fn is_leader_leaves_ctrl_shift_o_alone() {
+        // `Ctrl+Shift+O` is not the leader: it flows to the agent unchanged.
+        assert!(!is_leader(&key(KeyCode::Char('O'), KeyModifiers::CONTROL)));
+        assert!(!is_leader(&key(
+            KeyCode::Char('O'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
         )));
     }
 
@@ -419,15 +423,5 @@ mod tests {
         // No `Ctrl` modifier, or a different letter, is not the leader.
         assert!(!is_leader(&key(KeyCode::Char('o'), KeyModifiers::NONE)));
         assert!(!is_leader(&key(KeyCode::Char('a'), KeyModifiers::CONTROL)));
-    }
-
-    #[test]
-    fn uppercase_ctrl_o_would_encode_to_si_without_the_leader_guard() {
-        // Regression guard: when `is_leader` misses uppercase `'O'`, `encode_key`
-        // turns it into the bare `0x0F` (SI) byte the agent shows as `?`.
-        assert_eq!(
-            encode_key(&key(KeyCode::Char('O'), KeyModifiers::CONTROL)),
-            vec![0x0f],
-        );
     }
 }
