@@ -58,6 +58,13 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
     let mut state = HomeState::new(workspace.name.clone(), Vec::new(), notice);
     state.restore_sessions(sessions);
 
+    // Load the workspace's task issues so the `issue` command can list / graph /
+    // show them. A read failure is non-fatal: the command just shows none.
+    if let Ok(issues) = crate::infrastructure::issue_store::IssueStore::new(&workspace.path).scan()
+    {
+        state.set_issues(issues);
+    }
+
     // Which right-pane action surface 在席 (Focus) presents — a pickable menu or
     // a typed prompt — from the effective settings (project-local over the global
     // default). Any failure to read settings falls back to the default (Menu).

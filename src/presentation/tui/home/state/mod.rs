@@ -15,6 +15,7 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
+use crate::domain::issue::Issue;
 use crate::domain::settings::SessionActionUi;
 use crate::domain::workspace_state::{SessionRecord, WorktreeState};
 
@@ -117,6 +118,9 @@ pub struct HomeState {
     /// 統括 (Overview) results band renders only `log[response_start..]`, so it
     /// shows the response to the latest command and nothing earlier.
     response_start: usize,
+    /// The workspace's task issues, loaded from disk by `mod.rs` and read by the
+    /// `issue` command. Empty until injected.
+    issues: Vec<Issue>,
 }
 
 impl HomeState {
@@ -154,6 +158,7 @@ impl HomeState {
             quit_confirm: false,
             text_modal: None,
             response_start: 0,
+            issues: Vec::new(),
         }
     }
 
@@ -166,6 +171,12 @@ impl HomeState {
     /// Which right-pane action surface 在席 (Focus) presents.
     pub fn session_action_ui(&self) -> SessionActionUi {
         self.session_action_ui
+    }
+
+    /// Inject the workspace's task issues (loaded from disk by `mod.rs`), read by
+    /// the `issue` command for its list / graph / show views.
+    pub fn set_issues(&mut self, issues: Vec<Issue>) {
+        self.issues = issues;
     }
 
     /// Seed the command history with entries restored from disk (oldest first),
@@ -628,9 +639,9 @@ impl HomeState {
                 recorded: None,
             };
         }
-        let result = self
-            .registry
-            .dispatch(&entry, &self.history, &self.list.refs());
+        let result =
+            self.registry
+                .dispatch_with(&entry, &self.history, &self.list.refs(), &self.issues);
         self.history.push(entry.clone());
         // A text-dumping utility (`man` / `history`) run from the prompt shows its
         // output in a modal, like in 統括; everything else appends to the log.
@@ -717,9 +728,9 @@ impl HomeState {
         // begins (the command echo), so everything earlier drops out of view.
         self.response_start = self.log.len();
         self.log.push(LogLine::command(entry.clone()));
-        let result = self
-            .registry
-            .dispatch(&entry, &self.history, &self.list.refs());
+        let result =
+            self.registry
+                .dispatch_with(&entry, &self.history, &self.list.refs(), &self.issues);
         self.history.push(entry.clone());
 
         match result.effect {

@@ -1,9 +1,40 @@
 use super::registry::common_prefix;
 use super::*;
+use crate::domain::issue::{Issue, IssuePriority, IssueStatus};
 use crate::presentation::tui::home::state::LineKind;
+use chrono::{TimeZone, Utc};
 
 fn registry() -> CommandRegistry {
     CommandRegistry::with_builtins()
+}
+
+/// Build a minimal issue for the `issue` command tests.
+fn issue(number: u32, title: &str, status: IssueStatus, dependson: Vec<u32>) -> Issue {
+    let ts = Utc.with_ymd_and_hms(2026, 6, 14, 0, 0, 0).unwrap();
+    Issue {
+        number,
+        title: title.to_string(),
+        status,
+        priority: IssuePriority::Medium,
+        labels: vec![],
+        dependson,
+        related: vec![],
+        parent: None,
+        milestone: None,
+        created_at: ts,
+        updated_at: ts,
+        body: format!("Body for {title}."),
+    }
+}
+
+/// Join a result's lines into one string for substring assertions.
+fn joined(result: &CommandResult) -> String {
+    result
+        .lines
+        .iter()
+        .map(|l| l.text.clone())
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 #[test]
@@ -542,6 +573,91 @@ fn complete_respects_the_current_scope() {
     let workspace = registry().complete("a", CommandScope::Workspace);
     assert_eq!(workspace.input, "a");
     assert!(workspace.candidates.is_empty());
+}
+
+#[test]
+fn issue_is_a_workspace_command() {
+    let registry = registry();
+    let info = registry.infos().into_iter().find(|i| i.name == "issue");
+    assert_eq!(info.unwrap().scope, CommandScope::Workspace);
+}
+
+#[test]
+fn issue_list_shows_readiness_and_progress_in_a_modal() {
+    let issues = vec![
+        issue(1, "base", IssueStatus::Done, vec![]),
+        issue(2, "next", IssueStatus::Todo, vec![1]),
+        issue(3, "blocked", IssueStatus::Todo, vec![2]),
+    ];
+    let result = registry().dispatch_with("issue", &[], &[], &issues);
+    assert_eq!(result.effect, Effect::ShowText("Issues"));
+    let text = joined(&result);
+    assert!(text.contains("#1"));
+    assert!(text.contains("done"));
+    // #2's dependency (#1) is done, so it is ready; #3 is blocked by #2.
+    assert!(text.contains("ready"));
+    assert!(text.contains("blocked by 2"));
+    // Progress footer: 1 of 3 done.
+    assert!(text.contains("3 issues · 1 done (33%)"));
+}
+
+#[test]
+fn issue_list_alias_and_empty_report() {
+    // `ls` is an alias for the default list view.
+    let issues = vec![issue(1, "only", IssueStatus::Todo, vec![])];
+    assert_eq!(
+        registry()
+            .dispatch_with("issue ls", &[], &[], &issues)
+            .effect,
+        Effect::ShowText("Issues"),
+    );
+    // With no issues the command logs a single line (no modal).
+    let empty = registry().dispatch_with("issue list", &[], &[], &[]);
+    assert_eq!(empty.effect, Effect::None);
+    assert!(empty.lines[0].text.contains("No issues yet"));
+}
+
+#[test]
+fn issue_graph_renders_the_dependency_tree() {
+    let issues = vec![
+        issue(1, "root", IssueStatus::Todo, vec![]),
+        issue(2, "child", IssueStatus::Todo, vec![1]),
+    ];
+    let result = registry().dispatch_with("issue tree", &[], &[], &issues);
+    assert_eq!(result.effect, Effect::ShowText("Issue graph"));
+    let text = joined(&result);
+    assert!(text.contains("#1 root"));
+    assert!(text.contains("└─ #2 child"));
+
+    // Empty graph degrades to a single log line.
+    let empty = registry().dispatch_with("issue graph", &[], &[], &[]);
+    assert_eq!(empty.effect, Effect::None);
+    assert!(empty.lines[0].text.contains("No issues yet"));
+}
+
+#[test]
+fn issue_show_renders_one_issue_or_reports_missing() {
+    let issues = vec![issue(7, "visible", IssueStatus::Todo, vec![])];
+    let shown = registry().dispatch_with("issue show 7", &[], &[], &issues);
+    assert_eq!(shown.effect, Effect::ShowText("Issue"));
+    let text = joined(&shown);
+    assert!(text.contains("title: visible"));
+    assert!(text.contains("Body for visible."));
+
+    // A missing number is an error line.
+    let missing = registry().dispatch_with("issue show 9", &[], &[], &issues);
+    assert_eq!(missing.effect, Effect::None);
+    assert!(missing.lines[0].text.contains("no issue #9"));
+
+    // A non-numeric argument reports usage.
+    let bad = registry().dispatch_with("issue show xyz", &[], &[], &issues);
+    assert!(bad.lines[0].text.contains("usage: issue show"));
+}
+
+#[test]
+fn issue_with_an_unknown_subcommand_reports_usage() {
+    let result = registry().dispatch_with("issue frobnicate", &[], &[], &[]);
+    assert!(result.lines[0].text.contains("usage: issue"));
 }
 
 #[test]

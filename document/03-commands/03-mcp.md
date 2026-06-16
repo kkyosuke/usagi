@@ -83,14 +83,16 @@ presentation に閉じています（[2. アーキテクチャ](../02-architectu
 
 | tool | 必須引数 | 任意引数 | 返り値 |
 |---|---|---|---|
-| `issue_create` | `title` | `priority` / `labels` / `dependson` / `body` | 作成された issue |
+| `issue_create` | `title` | `priority` / `labels` / `dependson` / `related` / `parent` / `milestone` / `body` | 作成された issue |
 | `issue_get` | `number` | — | issue（存在しなければ `null`） |
-| `issue_list` | — | `status` / `priority` / `label` / `ready` | issue 配列（各要素に `ready` と `unmet_deps` を付与） |
-| `issue_search` | `query` | `status` / `priority` / `label` / `ready` | 一致した issue 配列（`list` と同形式） |
-| `issue_update` | `number` | `title` / `status` / `priority` / `labels` / `dependson` / `body` | 更新後の issue |
+| `issue_list` | — | `status` / `priority` / `label` / `parent` / `milestone` / `ready` | issue 配列（各要素に `ready` と `unmet_deps` を付与） |
+| `issue_search` | `query` | `status` / `priority` / `label` / `parent` / `milestone` / `ready` | 一致した issue 配列（`list` と同形式） |
+| `issue_update` | `number` | `title` / `status` / `priority` / `labels` / `dependson` / `related` / `parent` / `milestone` / `body` | 更新後の issue |
 | `issue_delete` | `number` | — | `{ "number": N, "deleted": bool }` |
 
 - `status` は `todo` / `in-progress` / `done`、`priority` は `high` / `medium` / `low`。
+- `dependson` はブロックする先行条件、`related` はブロックしない関連、`parent` は所属（Epic ⊃ サブタスク）、`milestone` は束ね。`issue_list` / `issue_search` は `parent` / `milestone` でも絞り込めます。
+- `issue_update` の `parent` / `milestone` は三状態です: 省略すると変更なし、**`null` を明示すると解除**、値を渡すと設定します。
 - `issue_list` / `issue_search` は CLI と同じく **`dependson` がすべて `done` の issue を `ready: true`**
   とし、未達の依存番号を `unmet_deps` に入れて返します（着手可能なタスクの判別用）。
 - `ready: true`（引数）を渡すと着手可能な issue だけに絞り込みます。

@@ -39,6 +39,9 @@ status: todo
 priority: medium
 labels: [cli, infra]
 dependson: [2, 3]
+related: [5]
+parent: 4
+milestone: v1
 created_at: 2026-06-14T00:00:00+00:00
 updated_at: 2026-06-14T00:00:00+00:00
 ---
@@ -55,9 +58,13 @@ updated_at: 2026-06-14T00:00:00+00:00
 | `status` | enum | `todo` / `in-progress` / `done` |
 | `priority` | enum | `high` / `medium` / `low`（既定 `medium`） |
 | `labels` | array&lt;string&gt; | 任意のラベル |
-| `dependson` | array&lt;u32&gt; | 先に `done` になっている必要がある issue 番号 |
+| `dependson` | array&lt;u32&gt; | 先に `done` になっている必要がある issue 番号（ブロックする先行条件） |
+| `related` | array&lt;u32&gt; | 関連する issue 番号（ブロックしない緩いリンク） |
+| `parent` | u32? | 親 issue 番号（Epic ⊃ サブタスクの階層）。`dependson`（先行条件）とは別概念 |
+| `milestone` | string? | 束ねるマイルストーン名 |
 | `created_at` / `updated_at` | RFC3339(UTC) | 作成・更新日時 |
 
+- `parent` / `milestone` は値があるときだけ frontmatter に出力します（未設定の issue には行自体が現れません）。`labels` / `dependson` / `related` は空でも `[]` を書きます。
 - frontmatter は `serde_yaml` 不採用の方針に合わせ、既知フィールドを対象にした軽量パーサで読み書きします。未知のキーは無視するので、フォーマットを後方互換に拡張できます。
 - 書き込みはアトミック（一時ファイル + `rename`）。タイトル変更でスラッグが変わった場合は、同じ番号の旧ファイルを削除して 1 issue = 1 ファイルを保ちます。
 
@@ -76,6 +83,9 @@ updated_at: 2026-06-14T00:00:00+00:00
       "priority": "medium",
       "labels": ["cli"],
       "dependson": [2, 3],
+      "related": [5],
+      "parent": 4,
+      "milestone": "v1",
       "file": "001-add-doctor-command.md",
       "created_at": "2026-06-14T00:00:00+00:00",
       "updated_at": "2026-06-14T00:00:00+00:00"
@@ -92,4 +102,4 @@ updated_at: 2026-06-14T00:00:00+00:00
 |---|---|---|
 | domain | `domain/issue.rs` | `Issue` / `IssueSummary` / `IssueStatus` / `IssuePriority`、frontmatter の読み書き |
 | infrastructure | `infrastructure/issue_store.rs` | `.usagi/issues/` の走査・読み書き、`index.json` の生成・再構築・採番 |
-| usecase | `usecase/issue.rs` | `create` / `get` / `list` / `search` / `update` / `delete` と ready 判定 |
+| usecase | `usecase/issue.rs` | `create` / `get` / `list` / `search` / `update` / `delete` と ready 判定、進捗集計（`IssueStats`）・グルーピング（`group`）・依存ツリー（`dependency_tree`） |
