@@ -90,7 +90,7 @@ src/
         ├── open/               # プロジェクト選択画面（state / ui / event）
         ├── new/                # 新規プロジェクト画面（state / ui / event）
         ├── config/             # 設定画面（state / ui / event）
-        ├── home/               # ホーム画面（state / ui（mod=render_frame・panes・chrome に分割） / event / command レジストリ / terminal_view / terminal_pane / terminal_pool（常駐＋ベル監視・通知））
+        ├── home/               # ホーム画面（state（mod=HomeState / list・mode・log・modal に分割） / ui（mod=render_frame・panes・chrome に分割） / event / command レジストリ / terminal_view / terminal_pane / terminal_pool（常駐＋ベル監視・通知））
         └── widgets/            # 共通 widget（mod / picker / dir_picker）
 ```
 

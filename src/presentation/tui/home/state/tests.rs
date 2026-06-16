@@ -1,0 +1,993 @@
+use super::*;
+use crate::domain::workspace_state::BranchStatus;
+use chrono::Utc;
+use std::path::PathBuf;
+
+fn worktree(branch: &str) -> WorktreeState {
+    WorktreeState {
+        branch: Some(branch.to_string()),
+        path: PathBuf::from(format!("/repo/{branch}")),
+        head: "abc1234".to_string(),
+        primary: false,
+        upstream: None,
+        status: BranchStatus::Local,
+        updated_at: Utc::now(),
+    }
+}
+
+fn sample() -> WorktreeList {
+    WorktreeList::new(
+        "usagi",
+        vec![worktree("main"), worktree("feature"), worktree("fix")],
+    )
+}
+
+#[test]
+fn new_list_starts_on_the_root_row() {
+    let list = sample();
+    assert_eq!(list.workspace_name(), "usagi");
+    // The cursor starts on the root row, which belongs to no session.
+    assert_eq!(list.selected_index(), 0);
+    assert!(list.root_selected());
+    assert!(list.selected().is_none());
+    assert_eq!(list.worktrees().len(), 3);
+    assert!(!list.is_empty());
+}
+
+#[test]
+fn empty_list_still_has_the_root_row() {
+    let list = WorktreeList::new("usagi", Vec::new());
+    assert!(list.is_empty());
+    assert!(list.root_selected());
+    // The root row has no worktree behind it.
+    assert!(list.selected().is_none());
+}
+
+#[test]
+fn move_down_advances_past_the_root_row_and_wraps() {
+    let mut list = sample(); // root, main, feature, fix
+    list.move_down();
+    assert_eq!(list.selected_index(), 1);
+    assert_eq!(list.selected().unwrap().branch.as_deref(), Some("main"));
+    list.move_down();
+    list.move_down();
+    assert_eq!(list.selected_index(), 3);
+    assert_eq!(list.selected().unwrap().branch.as_deref(), Some("fix"));
+    // Wraps from the last worktree back to the root row.
+    list.move_down();
+    assert_eq!(list.selected_index(), 0);
+    assert!(list.root_selected());
+}
+
+#[test]
+fn move_up_wraps_from_the_root_row_to_the_bottom() {
+    let mut list = sample(); // root, main, feature, fix
+    list.move_up();
+    assert_eq!(list.selected_index(), 3);
+    assert_eq!(list.selected().unwrap().branch.as_deref(), Some("fix"));
+    list.move_up();
+    assert_eq!(list.selected_index(), 2);
+    assert_eq!(list.selected().unwrap().branch.as_deref(), Some("feature"));
+}
+
+#[test]
+fn movement_wraps_around_the_lone_root_row_when_empty() {
+    let mut list = WorktreeList::new("usagi", Vec::new());
+    // Only the root row exists, so movement keeps the cursor on it.
+    list.move_up();
+    assert_eq!(list.selected_index(), 0);
+    list.move_down();
+    assert_eq!(list.selected_index(), 0);
+}
+
+#[test]
+fn the_root_row_is_active_by_default() {
+    let list = sample();
+    assert_eq!(list.active_index(), 0);
+    assert!(list.root_active());
+    assert!(list.active().is_none());
+}
+
+#[test]
+fn activate_selected_follows_the_cursor() {
+    let mut list = sample(); // root, main, feature, fix
+    list.move_down();
+    list.move_down(); // cursor on "feature"
+    assert_eq!(list.activate_selected(), "feature");
+    assert_eq!(list.active_index(), 2);
+    assert!(!list.root_active());
+    // The cursor and the active row are independent afterwards.
+    list.move_down(); // cursor on "fix"
+    assert_eq!(list.active_index(), 2);
+    assert_eq!(list.selected_index(), 3);
+}
+
+#[test]
+fn activate_selected_can_return_to_the_root_row() {
+    let mut list = sample();
+    list.move_down(); // cursor on "main"
+    list.activate_selected();
+    assert!(!list.root_active());
+    // Moving back to the root row and activating it returns to "root".
+    list.move_up(); // cursor on the root row
+    assert_eq!(list.activate_selected(), ROOT_NAME);
+    assert!(list.root_active());
+}
+
+#[test]
+fn activate_selected_on_an_empty_list_picks_the_root_row() {
+    let mut list = WorktreeList::new("usagi", Vec::new());
+    assert_eq!(list.activate_selected(), ROOT_NAME);
+    assert!(list.root_active());
+    assert!(list.active().is_none());
+}
+
+#[test]
+fn activate_by_name_matches_worktrees_the_root_or_reports_missing() {
+    let mut list = sample(); // root, main, feature, fix
+    assert!(list.activate_by_name("fix"));
+    assert_eq!(list.active_index(), 3);
+    // The root row is reachable by name too.
+    assert!(list.activate_by_name(ROOT_NAME));
+    assert_eq!(list.active_index(), 0);
+    assert!(list.root_active());
+    assert!(!list.activate_by_name("nope"));
+    // A failed lookup leaves the active row unchanged.
+    assert_eq!(list.active_index(), 0);
+}
+
+#[test]
+fn select_by_name_moves_the_cursor_and_active_row_to_the_match() {
+    let mut list = sample(); // root, main, feature, fix
+    assert!(list.select_by_name("feature"));
+    // Both the cursor and the active row land on the matched worktree.
+    assert_eq!(list.selected_index(), 2);
+    assert_eq!(list.active_index(), 2);
+    assert_eq!(list.selected().unwrap().branch.as_deref(), Some("feature"));
+    // An unknown name leaves both cursors unchanged.
+    assert!(!list.select_by_name("nope"));
+    assert_eq!(list.selected_index(), 2);
+    assert_eq!(list.active_index(), 2);
+}
+
+#[test]
+fn refs_expose_the_root_row_then_worktrees_with_the_active_flag() {
+    let mut list = sample();
+    list.activate_by_name("feature");
+    let refs = list.refs();
+    assert_eq!(refs.len(), 4);
+    assert_eq!(refs[0].name, ROOT_NAME);
+    assert!(!refs[0].active);
+    assert_eq!(refs[1].name, "main");
+    assert!(!refs[1].active);
+    assert_eq!(refs[2].name, "feature");
+    assert!(refs[2].active);
+}
+
+#[test]
+fn refs_mark_the_root_row_active_by_default() {
+    let refs = sample().refs();
+    assert_eq!(refs[0].name, ROOT_NAME);
+    assert!(refs[0].active);
+}
+
+#[test]
+fn worktree_name_falls_back_to_detached() {
+    let mut detached = worktree("main");
+    detached.branch = None;
+    assert_eq!(worktree_name(&detached), "(detached)");
+}
+
+// --- HomeState ---------------------------------------------------------
+
+fn state() -> HomeState {
+    HomeState::new("usagi", vec![worktree("main"), worktree("feature")], None)
+}
+
+#[test]
+fn new_state_starts_in_overview_with_a_hint() {
+    let state = state();
+    assert_eq!(state.mode(), Mode::Overview);
+    assert_eq!(state.input(), "");
+    assert_eq!(state.list().worktrees().len(), 2);
+    // The seed log carries the usage hint.
+    assert_eq!(state.log().len(), 1);
+    assert!(state.log()[0].text.contains("man"));
+    // The default action surface is the menu.
+    assert_eq!(state.session_action_ui(), SessionActionUi::Menu);
+    // The Overview line is always workspace-scoped.
+    assert_eq!(state.command_scope(), CommandScope::Workspace);
+}
+
+#[test]
+fn a_notice_is_seeded_as_an_error_line() {
+    let state = HomeState::new("usagi", Vec::new(), Some("load failed".to_string()));
+    assert_eq!(state.log().len(), 2);
+    assert_eq!(state.log()[1].kind, LineKind::Error);
+    assert_eq!(state.log()[1].text, "load failed");
+}
+
+#[test]
+fn set_session_action_ui_overrides_the_default() {
+    let mut state = state();
+    state.set_session_action_ui(SessionActionUi::Prompt);
+    assert_eq!(state.session_action_ui(), SessionActionUi::Prompt);
+}
+
+#[test]
+fn backspace_removes_the_last_character() {
+    let mut state = state();
+    state.push_char('m');
+    state.push_char('a');
+    state.backspace();
+    assert_eq!(state.input(), "m");
+    state.backspace();
+    state.backspace(); // popping past empty is harmless
+    assert_eq!(state.input(), "");
+}
+
+#[test]
+fn tab_completes_a_unique_command() {
+    let mut state = state();
+    state.push_char('d');
+    state.push_char('o');
+    state.push_char('c');
+    state.complete();
+    assert_eq!(state.input(), "doctor");
+    // A unique completion adds nothing to the log.
+    assert_eq!(state.log().len(), 1);
+}
+
+#[test]
+fn tab_lists_candidates_when_ambiguous() {
+    let mut state = state();
+    // Empty input matches every workspace command, so Tab lists them.
+    state.complete();
+    assert_eq!(state.input(), "");
+    let last = state.log().last().unwrap();
+    assert!(last.text.contains("session"));
+    assert!(last.text.contains("man"));
+}
+
+#[test]
+fn submitting_an_empty_line_is_a_noop() {
+    let mut state = state();
+    let before = state.log().len();
+    let submission = state.submit();
+    assert_eq!(submission.effect, Effect::None);
+    assert!(submission.recorded.is_none());
+    assert_eq!(state.log().len(), before);
+}
+
+#[test]
+fn submitting_a_command_echoes_and_runs_it() {
+    let mut state = state();
+    for c in "man".chars() {
+        state.push_char(c);
+    }
+    let submission = state.submit();
+    // `man` is a text-dumping command: it echoes, then opens a text modal
+    // (its output does not land in the band's log).
+    assert_eq!(submission.effect, Effect::ShowText("Help"));
+    assert_eq!(submission.recorded.as_deref(), Some("man"));
+    let echoed = state.log().iter().find(|l| l.kind == LineKind::Command);
+    assert_eq!(echoed.unwrap().text, "man");
+    let modal = state.text_modal().expect("man opens a text modal");
+    assert_eq!(modal.title, "Help");
+    assert!(modal.lines.iter().any(|l| l.text.contains("Available")));
+    // The band shows none of the modal's output (its response is empty).
+    assert!(state.response_lines().is_empty());
+    assert_eq!(state.input(), "");
+}
+
+#[test]
+fn session_switch_with_no_name_yields_the_enter_switch_effect() {
+    // The screen leaves the mode transition to the event loop; submit only
+    // surfaces the effect and logs no resolution line.
+    let mut state = state();
+    for c in "session switch".chars() {
+        state.push_char(c);
+    }
+    let before = state.log().len();
+    let submission = state.submit();
+    assert_eq!(submission.effect, Effect::EnterSwitch);
+    // Only the echoed command line was appended.
+    assert_eq!(state.log().len(), before + 1);
+}
+
+#[test]
+fn session_switch_with_a_name_yields_the_activate_effect() {
+    let mut state = state();
+    for c in "session switch feature".chars() {
+        state.push_char(c);
+    }
+    let submission = state.submit();
+    assert_eq!(submission.effect, Effect::Activate("feature".to_string()));
+    // The list is not resolved here (the event loop does it).
+    assert_eq!(state.list().active_index(), 0);
+}
+
+#[test]
+fn clear_command_empties_the_log() {
+    let mut state = state();
+    for c in "clear".chars() {
+        state.push_char(c);
+    }
+    assert_eq!(state.submit().effect, Effect::Clear);
+    assert!(state.log().is_empty());
+}
+
+#[test]
+fn quit_command_returns_the_quit_effect() {
+    let mut state = state();
+    for c in "quit".chars() {
+        state.push_char(c);
+    }
+    assert_eq!(state.submit().effect, Effect::Quit);
+}
+
+#[test]
+fn submitted_commands_are_recorded_in_history() {
+    let mut state = state();
+    for c in "man".chars() {
+        state.push_char(c);
+    }
+    state.submit();
+    for c in "doctor".chars() {
+        state.push_char(c);
+    }
+    state.submit();
+    assert_eq!(state.history, vec!["man", "doctor"]);
+}
+
+#[test]
+fn restored_history_feeds_recall_and_new_commands_append_to_it() {
+    let mut state = state();
+    state.restore_history(vec!["session".to_string(), "space".to_string()]);
+    state.recall_prev();
+    assert_eq!(state.input(), "space");
+    state.recall_prev();
+    assert_eq!(state.input(), "session");
+    state.input = "man".to_string();
+    state.submit();
+    assert_eq!(state.history, vec!["session", "space", "man"]);
+}
+
+#[test]
+fn history_recall_walks_backwards_and_forwards() {
+    let mut state = state();
+    for entry in ["man", "doctor"] {
+        for c in entry.chars() {
+            state.push_char(c);
+        }
+        state.submit();
+    }
+    state.recall_prev();
+    assert_eq!(state.input(), "doctor");
+    state.recall_prev();
+    assert_eq!(state.input(), "man");
+    state.recall_prev();
+    assert_eq!(state.input(), "man");
+    state.recall_next();
+    assert_eq!(state.input(), "doctor");
+    state.recall_next();
+    assert_eq!(state.input(), "");
+}
+
+#[test]
+fn recall_prev_is_a_noop_without_history() {
+    let mut state = state();
+    state.recall_prev();
+    assert_eq!(state.input(), "");
+}
+
+#[test]
+fn recall_next_without_active_recall_is_a_noop() {
+    let mut state = state();
+    for c in "man".chars() {
+        state.push_char(c);
+    }
+    state.submit();
+    state.recall_next();
+    assert_eq!(state.input(), "");
+}
+
+#[test]
+fn typing_or_completing_cancels_an_active_recall() {
+    let mut state = state();
+    for c in "man".chars() {
+        state.push_char(c);
+    }
+    state.submit();
+    state.recall_prev();
+    assert_eq!(state.input(), "man");
+    state.push_char('!');
+    state.recall_next();
+    assert_eq!(state.input(), "man!");
+}
+
+// --- 切替 (Switch) -----------------------------------------------------
+
+#[test]
+fn enter_switch_remembers_its_return_mode_and_moves_the_cursor() {
+    let mut state = state(); // root, main, feature
+    state.enter_switch(ReturnMode::Overview);
+    assert_eq!(state.mode(), Mode::Switch);
+    assert_eq!(state.switch_return(), ReturnMode::Overview);
+    state.switch_move_down();
+    assert_eq!(state.list().selected_index(), 1);
+    state.switch_move_up();
+    assert_eq!(state.list().selected_index(), 0);
+    // Up from the root wraps to the bottom (the last worktree row, 2).
+    state.switch_move_up();
+    assert_eq!(state.list().selected_index(), 2);
+}
+
+#[test]
+fn switch_return_carries_each_origin() {
+    let mut state = state();
+    state.enter_switch(ReturnMode::Focus);
+    assert_eq!(state.switch_return(), ReturnMode::Focus);
+    state.enter_switch(ReturnMode::Attached);
+    assert_eq!(state.switch_return(), ReturnMode::Attached);
+}
+
+#[test]
+fn switch_inline_create_edits_then_confirms_a_fresh_name() {
+    let mut state = state();
+    state.enter_switch(ReturnMode::Overview);
+    assert!(!state.is_creating());
+    state.switch_begin_create();
+    assert!(state.is_creating());
+    assert_eq!(state.create_input(), Some(""));
+    for c in "  wip  ".chars() {
+        state.create_push_char(c);
+    }
+    state.create_backspace(); // drop a trailing space
+                              // A fresh, trimmed name is accepted and the input closes.
+    assert_eq!(state.switch_confirm_create().as_deref(), Some("wip"));
+    assert!(!state.is_creating());
+}
+
+#[test]
+fn switch_inline_create_rejects_empty_and_duplicate_names() {
+    let mut state = state(); // has a "feature" worktree
+    state.enter_switch(ReturnMode::Overview);
+    state.switch_begin_create();
+    // Whitespace only is empty after trimming.
+    state.create_push_char(' ');
+    assert!(state.switch_confirm_create().is_none());
+    assert!(state.create_error().unwrap().contains("must not be empty"));
+    // Typing clears the error, then a duplicate name is rejected.
+    for c in "feature".chars() {
+        state.create_push_char(c);
+    }
+    assert!(state.create_error().is_none());
+    assert!(state.switch_confirm_create().is_none());
+    assert!(state.create_error().unwrap().contains("feature"));
+    assert!(state.is_creating());
+}
+
+#[test]
+fn switch_inline_create_can_be_cancelled() {
+    let mut state = state();
+    state.enter_switch(ReturnMode::Overview);
+    state.switch_begin_create();
+    state.create_push_char('x');
+    state.create_cancel();
+    assert!(!state.is_creating());
+}
+
+#[test]
+fn create_editing_is_a_noop_when_not_creating() {
+    let mut state = state();
+    // Nothing open: editing keys are harmless and confirm returns None.
+    state.create_push_char('a');
+    state.create_backspace();
+    assert!(!state.is_creating());
+    assert!(state.create_input().is_none());
+    assert!(state.create_error().is_none());
+    assert!(state.switch_confirm_create().is_none());
+}
+
+// --- 在席 (Focus) ------------------------------------------------------
+
+#[test]
+fn enter_focus_activates_a_row_and_resets_the_surface() {
+    let mut state = state(); // root, main, feature
+    state.enter_focus(2); // feature
+    assert_eq!(state.mode(), Mode::Focus);
+    assert_eq!(state.list().active_index(), 2);
+    assert_eq!(state.list().selected_index(), 2);
+    assert_eq!(state.focused_session_name(), "feature");
+    assert_eq!(state.focus_menu_cursor(), 0);
+    assert_eq!(state.focus_prompt(), "");
+}
+
+#[test]
+fn enter_focus_on_the_root_row_names_root() {
+    let mut state = state();
+    state.enter_focus(0);
+    assert!(state.list().root_active());
+    assert_eq!(state.focused_session_name(), ROOT_NAME);
+}
+
+#[test]
+fn leave_focus_returns_to_overview() {
+    let mut state = state();
+    state.enter_focus(1);
+    state.leave_focus();
+    assert_eq!(state.mode(), Mode::Overview);
+}
+
+#[test]
+fn focus_menu_lists_the_session_commands_in_order() {
+    let state = state();
+    let names: Vec<&str> = state.focus_menu_commands().iter().map(|i| i.name).collect();
+    assert_eq!(names, vec!["terminal", "agent", "ai"]);
+}
+
+#[test]
+fn focus_menu_cursor_moves_and_wraps_and_selects() {
+    let mut state = state();
+    state.enter_focus(1);
+    // terminal (0, highlighted by default), agent (1), ai (2).
+    assert_eq!(state.focus_selected_command().name, "terminal");
+    state.focus_menu_move_down();
+    assert_eq!(state.focus_selected_command().name, "agent");
+    state.focus_menu_move_down();
+    state.focus_menu_move_down(); // wraps to the top
+    assert_eq!(state.focus_menu_cursor(), 0);
+    // Up from the top wraps to the bottom.
+    state.focus_menu_move_up();
+    assert_eq!(state.focus_selected_command().name, "ai");
+}
+
+#[test]
+fn focus_prompt_edits_completes_and_hints_in_session_scope() {
+    let mut state = state();
+    state.enter_focus(1);
+    for c in "ter".chars() {
+        state.focus_prompt_push_char(c);
+    }
+    state.focus_prompt_backspace(); // "te"
+                                    // "te" uniquely completes to "terminal" (a session command).
+    let completion = state.focus_prompt_complete();
+    assert_eq!(state.focus_prompt(), "terminal");
+    assert!(completion.candidates.is_empty());
+    // The hint is computed in the session scope: arguments show usage.
+    state.focus_prompt_push_char(' ');
+    assert!(matches!(state.focus_prompt_hint(), Hint::Usage { .. }));
+}
+
+#[test]
+fn focus_prompt_submit_runs_a_session_command() {
+    let mut state = state();
+    state.enter_focus(1);
+    for c in "terminal".chars() {
+        state.focus_prompt_push_char(c);
+    }
+    let submission = state.focus_prompt_submit();
+    assert_eq!(submission.effect, Effect::OpenTerminal);
+    assert_eq!(submission.recorded.as_deref(), Some("terminal"));
+    // The prompt is cleared and the command recorded in history.
+    assert_eq!(state.focus_prompt(), "");
+    assert_eq!(state.history, vec!["terminal"]);
+}
+
+#[test]
+fn focus_prompt_runs_a_text_command_into_a_modal() {
+    // A text-dumping utility (`man`) typed in the 在席 prompt opens the text
+    // modal too, rather than appending to the log.
+    let mut state = state();
+    state.enter_focus(1);
+    for c in "man".chars() {
+        state.focus_prompt_push_char(c);
+    }
+    let submission = state.focus_prompt_submit();
+    assert_eq!(submission.effect, Effect::ShowText("Help"));
+    let modal = state.text_modal().expect("man opens a modal");
+    assert!(modal.lines.iter().any(|l| l.text.contains("Available")));
+}
+
+#[test]
+fn text_modal_opens_scrolls_and_closes() {
+    let mut state = state();
+    let lines: Vec<LogLine> = (0..30)
+        .map(|i| LogLine::output(format!("line {i}")))
+        .collect();
+    state.open_text_modal("Help", lines);
+    assert_eq!(state.text_modal().unwrap().scroll, 0);
+    // Scrolling up at the top is a no-op.
+    state.text_modal_scroll_up();
+    assert_eq!(state.text_modal().unwrap().scroll, 0);
+    // Scrolling down advances, clamped so the last `visible` lines stay shown.
+    state.text_modal_scroll_down(10);
+    assert_eq!(state.text_modal().unwrap().scroll, 1);
+    for _ in 0..100 {
+        state.text_modal_scroll_down(10);
+    }
+    assert_eq!(state.text_modal().unwrap().scroll, 30 - 10);
+    state.text_modal_scroll_up();
+    assert_eq!(state.text_modal().unwrap().scroll, 30 - 10 - 1);
+    state.close_text_modal();
+    assert!(state.text_modal().is_none());
+    // Scroll calls are no-ops once closed.
+    state.text_modal_scroll_down(10);
+    state.text_modal_scroll_up();
+    assert!(state.text_modal().is_none());
+}
+
+#[test]
+fn focus_prompt_submit_on_empty_input_is_a_noop() {
+    let mut state = state();
+    state.enter_focus(1);
+    let submission = state.focus_prompt_submit();
+    assert_eq!(submission.effect, Effect::None);
+    assert!(submission.recorded.is_none());
+    assert!(state.history.is_empty());
+}
+
+#[test]
+fn focus_prompt_runs_the_coming_soon_ai_command() {
+    let mut state = state();
+    state.enter_focus(1);
+    for c in "ai hi".chars() {
+        state.focus_prompt_push_char(c);
+    }
+    let submission = state.focus_prompt_submit();
+    assert_eq!(submission.effect, Effect::None);
+    assert!(state.log().last().unwrap().text.contains("coming soon"));
+}
+
+// --- 没入 (Attached) ---------------------------------------------------
+
+#[test]
+fn attached_holds_a_terminal_view_and_leaving_drops_it() {
+    let mut state = state();
+    state.enter_focus(1);
+    state.show_attached();
+    assert_eq!(state.mode(), Mode::Attached);
+    state.set_terminal_view(TerminalView::from_rows(
+        vec!["$ ".to_string()],
+        Some((0, 2)),
+    ));
+    assert_eq!(state.terminal_view().unwrap().rows(), ["$ "]);
+    // Leaving 没入 returns to 在席 and drops the snapshot.
+    state.leave_attached();
+    assert_eq!(state.mode(), Mode::Focus);
+    assert!(state.terminal_view().is_none());
+}
+
+#[test]
+fn clear_terminal_view_drops_the_snapshot_without_changing_the_mode() {
+    let mut state = state();
+    state.enter_focus(1);
+    state.show_attached();
+    state.set_terminal_view(TerminalView::from_rows(vec!["x".to_string()], None));
+    state.clear_terminal_view();
+    assert!(state.terminal_view().is_none());
+    // The mode is untouched (the per-frame cleanup must not leave 没入).
+    assert_eq!(state.mode(), Mode::Attached);
+}
+
+#[test]
+fn enter_overview_clears_transient_state() {
+    let mut state = state();
+    state.enter_switch(ReturnMode::Overview);
+    state.switch_begin_create();
+    state.enter_focus(1);
+    state.focus_prompt_push_char('x');
+    state.focus_menu_move_down();
+    state.enter_overview();
+    assert_eq!(state.mode(), Mode::Overview);
+    assert!(!state.is_creating());
+    assert_eq!(state.focus_prompt(), "");
+    assert_eq!(state.focus_menu_cursor(), 0);
+    assert_eq!(state.input(), "");
+}
+
+#[test]
+fn focus_session_jumps_to_a_row_and_clamps_to_the_list() {
+    let mut state = state(); // root (0), main (1), feature (2)
+    state.focus_session(2);
+    assert_eq!(state.list().selected_index(), 2);
+    state.focus_session(0);
+    assert!(state.list().root_selected());
+    state.focus_session(99);
+    assert_eq!(state.list().selected_index(), 2);
+}
+
+fn session_record(name: &str, worktrees: usize) -> SessionRecord {
+    SessionRecord {
+        name: name.to_string(),
+        root: std::path::PathBuf::from(format!("/repo/.usagi/sessions/{name}")),
+        worktrees: (0..worktrees).map(|_| worktree(name)).collect(),
+        created_at: Utc::now(),
+    }
+}
+
+#[test]
+fn apply_session_outcome_logs_and_rebuilds_the_pane_from_sessions() {
+    let mut state = state();
+    state.apply_session_outcome(SessionOutcome {
+        line: LogLine::output("Created session \"x\""),
+        sessions: Some(vec![session_record("main", 1), session_record("x", 1)]),
+        select: Some("x".to_string()),
+    });
+    assert!(state.log().last().unwrap().text.contains("Created session"));
+    assert_eq!(state.sessions().len(), 2);
+    assert_eq!(state.list().worktrees().len(), 2);
+    assert_eq!(state.list().workspace_name(), "usagi");
+    assert!(state
+        .list()
+        .worktrees()
+        .iter()
+        .any(|w| w.branch.as_deref() == Some("x")));
+    assert_eq!(state.list().selected_index(), 2);
+    assert_eq!(state.list().active_index(), 2);
+
+    // A failure outcome only logs; the pane is unchanged.
+    state.apply_session_outcome(SessionOutcome {
+        line: LogLine::error("session failed"),
+        sessions: None,
+        select: None,
+    });
+    assert_eq!(state.log().last().unwrap().kind, LineKind::Error);
+    assert_eq!(state.list().worktrees().len(), 2);
+    assert_eq!(state.sessions().len(), 2);
+}
+
+#[test]
+fn multi_repo_session_collapses_to_one_row_with_an_aggregated_status() {
+    // A session spanning three repositories: two synced, one still local.
+    let mut merged_a = worktree("feature");
+    merged_a.path = PathBuf::from("/repo/.usagi/sessions/feature/app-a");
+    merged_a.primary = true;
+    merged_a.status = BranchStatus::UpToDate;
+    merged_a.upstream = Some("origin/feature".to_string());
+    let mut merged_b = worktree("feature");
+    merged_b.path = PathBuf::from("/repo/.usagi/sessions/feature/app-b");
+    merged_b.status = BranchStatus::UpToDate;
+    let mut local_c = worktree("feature");
+    local_c.path = PathBuf::from("/repo/.usagi/sessions/feature/app-c");
+    local_c.status = BranchStatus::Local;
+
+    let mut state = state();
+    state.restore_sessions(vec![SessionRecord {
+        name: "feature".to_string(),
+        root: PathBuf::from("/repo/.usagi/sessions/feature"),
+        worktrees: vec![merged_a, merged_b, local_c],
+        created_at: Utc::now(),
+    }]);
+
+    // The three repositories collapse into a single row.
+    assert_eq!(state.list().worktrees().len(), 1);
+    let row = &state.list().worktrees()[0];
+    assert_eq!(row.branch.as_deref(), Some("feature"));
+    // Keyed on the session tree root (not any single repository's worktree).
+    assert_eq!(row.path, PathBuf::from("/repo/.usagi/sessions/feature"));
+    // Least-progressed wins: one local repo keeps the whole session `local`.
+    assert_eq!(row.status, BranchStatus::Local);
+    // Primary is set because one repository's worktree is primary.
+    assert!(row.primary);
+    // Representative detail comes from the first repository.
+    assert_eq!(row.upstream.as_deref(), Some("origin/feature"));
+}
+
+#[test]
+fn a_session_with_no_worktrees_still_yields_a_row() {
+    let mut state = state();
+    state.restore_sessions(vec![SessionRecord {
+        name: "empty".to_string(),
+        root: PathBuf::from("/repo/.usagi/sessions/empty"),
+        worktrees: Vec::new(),
+        created_at: Utc::now(),
+    }]);
+    assert_eq!(state.list().worktrees().len(), 1);
+    let row = &state.list().worktrees()[0];
+    assert_eq!(row.branch.as_deref(), Some("empty"));
+    // No repositories: a conservative `local`, no primary, no upstream, and
+    // an empty representative head.
+    assert_eq!(row.status, BranchStatus::Local);
+    assert!(!row.primary);
+    assert!(row.upstream.is_none());
+    assert!(row.head.is_empty());
+}
+
+#[test]
+fn open_remove_modal_lists_the_session_names() {
+    let mut state = state();
+    state.restore_sessions(vec![session_record("alpha", 1), session_record("beta", 1)]);
+    assert!(state.remove_modal().is_none());
+    state.open_remove_modal(false);
+    let modal = state.remove_modal().unwrap();
+    assert_eq!(modal.names(), ["alpha", "beta"]);
+    assert_eq!(modal.cursor(), 0);
+    assert_eq!(modal.selected_count(), 0);
+    assert!(!modal.is_empty());
+    assert!(!modal.is_selected(0));
+}
+
+#[test]
+fn remove_modal_cursor_wraps_in_both_directions() {
+    let mut state = state();
+    state.restore_sessions(vec![
+        session_record("a", 1),
+        session_record("b", 1),
+        session_record("c", 1),
+    ]);
+    state.open_remove_modal(false);
+    state.remove_modal_move_down();
+    assert_eq!(state.remove_modal().unwrap().cursor(), 1);
+    state.remove_modal_move_up();
+    state.remove_modal_move_up();
+    assert_eq!(state.remove_modal().unwrap().cursor(), 2);
+    state.remove_modal_move_down();
+    assert_eq!(state.remove_modal().unwrap().cursor(), 0);
+}
+
+#[test]
+fn remove_modal_toggle_checks_and_unchecks_the_cursor_row() {
+    let mut state = state();
+    state.restore_sessions(vec![session_record("a", 1), session_record("b", 1)]);
+    state.open_remove_modal(false);
+    state.remove_modal_toggle();
+    state.remove_modal_move_down();
+    state.remove_modal_toggle();
+    let modal = state.remove_modal().unwrap();
+    assert!(modal.is_selected(0));
+    assert!(modal.is_selected(1));
+    assert_eq!(modal.selected_count(), 2);
+    state.remove_modal_toggle();
+    assert!(!state.remove_modal().unwrap().is_selected(1));
+}
+
+#[test]
+fn remove_modal_navigation_is_a_noop_when_empty_or_closed() {
+    let mut state = state();
+    state.open_remove_modal(false);
+    assert!(state.remove_modal().unwrap().is_empty());
+    state.remove_modal_move_up();
+    state.remove_modal_move_down();
+    state.remove_modal_toggle();
+    assert_eq!(state.remove_modal().unwrap().cursor(), 0);
+    assert_eq!(state.remove_modal().unwrap().selected_count(), 0);
+
+    state.cancel_remove_modal();
+    state.remove_modal_move_up();
+    state.remove_modal_move_down();
+    state.remove_modal_toggle();
+    assert!(state.remove_modal().is_none());
+    assert!(state.submit_remove_modal().is_none());
+}
+
+#[test]
+fn submit_remove_modal_returns_checked_names_in_order_and_closes() {
+    let mut state = state();
+    state.restore_sessions(vec![
+        session_record("a", 1),
+        session_record("b", 1),
+        session_record("c", 1),
+    ]);
+    state.open_remove_modal(true);
+    state.remove_modal_move_down();
+    state.remove_modal_move_down();
+    state.remove_modal_toggle(); // "c"
+    state.remove_modal_move_up();
+    state.remove_modal_move_up();
+    state.remove_modal_toggle(); // "a"
+    let (names, force) = state.submit_remove_modal().unwrap();
+    assert_eq!(names, vec!["a".to_string(), "c".to_string()]);
+    assert!(force);
+    assert!(state.remove_modal().is_none());
+}
+
+#[test]
+fn submit_remove_modal_with_nothing_checked_keeps_it_open() {
+    let mut state = state();
+    state.restore_sessions(vec![session_record("a", 1)]);
+    state.open_remove_modal(false);
+    assert!(state.submit_remove_modal().is_none());
+    assert!(state.remove_modal().is_some());
+}
+
+#[test]
+fn log_sessions_lists_recorded_sessions_in_a_modal() {
+    let mut state = state();
+    state.restore_sessions(vec![session_record("alpha", 2), session_record("beta", 1)]);
+    state.log_sessions();
+    // With sessions, `session list` opens a scrollable text modal.
+    let modal = state.text_modal().expect("session list opens a modal");
+    assert_eq!(modal.title, "Sessions");
+    let text = modal
+        .lines
+        .iter()
+        .map(|l| l.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(text.contains("2 session(s)"));
+    assert!(text.contains("alpha"));
+    assert!(text.contains("beta"));
+}
+
+#[test]
+fn log_sessions_reports_when_empty() {
+    let mut state = state();
+    state.log_sessions();
+    assert!(state.log().last().unwrap().text.contains("No sessions yet"));
+}
+
+#[test]
+fn log_output_and_error_append_lines() {
+    let mut state = state();
+    state.log_output("did a thing");
+    state.log_error("it broke");
+    let last_two: Vec<_> = state.log().iter().rev().take(2).collect();
+    assert_eq!(last_two[0].kind, LineKind::Error);
+    assert_eq!(last_two[0].text, "it broke");
+    assert_eq!(last_two[1].kind, LineKind::Output);
+    assert_eq!(last_two[1].text, "did a thing");
+}
+
+#[test]
+fn hint_no_live_session_logs_a_notice_pointing_at_the_launch_commands() {
+    let mut state = state();
+    state.hint_no_live_session();
+    let last = state.log().last().unwrap();
+    assert_eq!(last.kind, LineKind::Notice);
+    assert!(last.text.contains(":agent"));
+    assert!(last.text.contains(":terminal"));
+}
+
+#[test]
+fn waiting_paths_track_sessions_awaiting_input() {
+    let mut state = state();
+    assert!(!state.is_waiting(Path::new("/repo/feature")));
+    assert!(state.waiting_paths().is_empty());
+    let mut waiting = HashSet::new();
+    waiting.insert(PathBuf::from("/repo/feature"));
+    state.set_waiting(waiting);
+    assert!(state.is_waiting(Path::new("/repo/feature")));
+    assert!(!state.is_waiting(Path::new("/repo/main")));
+    state.set_waiting(HashSet::new());
+    assert!(!state.is_waiting(Path::new("/repo/feature")));
+}
+
+#[test]
+fn live_paths_track_sessions_with_a_running_agent() {
+    let mut state = state();
+    assert!(!state.is_live(Path::new("/repo/feature")));
+    assert!(state.live_paths().is_empty());
+    let mut live = HashSet::new();
+    live.insert(PathBuf::from("/repo/feature"));
+    state.set_live(live);
+    assert!(state.is_live(Path::new("/repo/feature")));
+    assert!(!state.is_live(Path::new("/repo/main")));
+    assert_eq!(state.live_paths().len(), 1);
+    state.set_live(HashSet::new());
+    assert!(!state.is_live(Path::new("/repo/feature")));
+}
+
+#[test]
+fn has_live_sessions_and_live_count_follow_the_live_set() {
+    let mut state = state();
+    assert!(!state.has_live_sessions());
+    assert_eq!(state.live_count(), 0);
+    let mut live = HashSet::new();
+    live.insert(PathBuf::from("/repo/feature"));
+    live.insert(PathBuf::from("/repo/main"));
+    state.set_live(live);
+    assert!(state.has_live_sessions());
+    assert_eq!(state.live_count(), 2);
+}
+
+#[test]
+fn quit_confirm_opens_and_cancels() {
+    let mut state = state();
+    assert!(!state.quit_confirm());
+    state.open_quit_confirm();
+    assert!(state.quit_confirm());
+    state.cancel_quit_confirm();
+    assert!(!state.quit_confirm());
+}
