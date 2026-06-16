@@ -28,6 +28,8 @@ curl -fsSL https://raw.githubusercontent.com/KKyosuke/usagi/main/scripts/install
 export PATH="$PATH:$HOME/.usagi/bin"
 ```
 
+同じコマンドを再実行すると、常に最新リリースを取得して既存のバイナリを置き換えます（アップデート）。インストール後はバージョンの変化に応じて「新規インストール / アップデート / 再インストール」を判別したメッセージが表示されます。
+
 プラットフォームを指定してアーカイブから直接インストールすることもできます:
 
 #### macOS (Apple Silicon)
