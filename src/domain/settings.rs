@@ -2,6 +2,8 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use crate::domain::agent::AgentWiring;
+
 /// UI color theme.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -289,21 +291,20 @@ impl Settings {
         self
     }
 
-    /// The command line that launches the configured agent CLI with usagi's MCP
-    /// servers wired in: always the issue server, plus the local LLM server when
-    /// [`LocalLlm::enabled`] is set (so the agent can offload work to it).
+    /// usagi's wiring policy for a launched agent: the resolved usagi binary path
+    /// the agent invokes back through (MCP servers and lifecycle hooks) and the
+    /// local-LLM model to offload light work to, when [`LocalLlm::enabled`] is set.
+    /// An [`Agent`](crate::domain::agent::Agent) adapter renders this into its
+    /// CLI's own invocation.
     ///
-    /// `usagi_bin` is the command the launched agent uses to invoke usagi back
-    /// (MCP servers and lifecycle hooks) — the absolute path of the running
-    /// binary (`std::env::current_exe()`), so the wiring resolves even when usagi
-    /// is run from a build and not installed on `$PATH`. See
-    /// [`AgentCli::launch_command`].
-    pub fn agent_launch_command(&self, usagi_bin: &str) -> String {
-        let model = self
-            .local_llm
-            .enabled
-            .then_some(self.local_llm.model.as_str());
-        self.agent_cli.launch_command(model, usagi_bin)
+    /// `usagi_bin` is the absolute path of the running binary
+    /// (`std::env::current_exe()`), so the wiring resolves even when usagi is run
+    /// from a build and not installed on `$PATH`. See [`AgentCli::launch_command`].
+    pub fn agent_wiring(&self, usagi_bin: &str) -> AgentWiring {
+        AgentWiring {
+            usagi_bin: usagi_bin.to_string(),
+            local_llm_model: self.local_llm.enabled.then(|| self.local_llm.model.clone()),
+        }
     }
 }
 
@@ -545,19 +546,18 @@ mod tests {
     }
 
     #[test]
-    fn agent_launch_command_wires_the_local_llm_only_when_enabled() {
-        // Disabled (the default): no local LLM server, no delegation prompt.
+    fn agent_wiring_carries_the_binary_and_the_local_llm_model_only_when_enabled() {
+        // Disabled (the default): the binary path is carried, the model is None.
         let mut settings = Settings::default();
-        let off = settings.agent_launch_command("usagi");
-        assert!(!off.contains("usagi-llm"));
-        assert!(!off.contains("local_llm_ask"));
+        let off = settings.agent_wiring("/opt/usagi/bin/usagi");
+        assert_eq!(off.usagi_bin, "/opt/usagi/bin/usagi");
+        assert_eq!(off.local_llm_model, None);
 
-        // Enabled: the configured model is served and the prompt is added.
+        // Enabled: the configured model rides along for the adapter to wire in.
         settings.local_llm.enabled = true;
         settings.local_llm.model = "qwen2.5-coder:3b".to_string();
-        let on = settings.agent_launch_command("usagi");
-        assert!(on.contains("\"--model\",\"qwen2.5-coder:3b\""));
-        assert!(on.contains("local_llm_ask"));
+        let on = settings.agent_wiring("usagi");
+        assert_eq!(on.local_llm_model.as_deref(), Some("qwen2.5-coder:3b"));
     }
 
     #[test]

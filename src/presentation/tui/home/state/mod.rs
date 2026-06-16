@@ -15,6 +15,7 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
+use crate::domain::agent_usage::AggregateUsage;
 use crate::domain::issue::Issue;
 use crate::domain::settings::SessionActionUi;
 use crate::domain::version::Version;
@@ -123,6 +124,10 @@ pub struct HomeState {
     /// 統括 (Overview) results band renders only `log[response_start..]`, so it
     /// shows the response to the latest command and nothing earlier.
     response_start: usize,
+    /// The combined context-window usage across the live agent sessions, refreshed
+    /// from the terminal monitor before each redraw and drawn as a gauge at the
+    /// bottom of the sidebar. `None` when no live session reports usage.
+    usage: Option<AggregateUsage>,
     /// The workspace's task issues, loaded from disk by `mod.rs` and read by the
     /// `issue` command. Empty until injected.
     issues: Vec<Issue>,
@@ -166,6 +171,7 @@ impl HomeState {
             quit_confirm: false,
             text_modal: None,
             response_start: 0,
+            usage: None,
             issues: Vec::new(),
             update: None,
         }
@@ -454,6 +460,18 @@ impl HomeState {
     /// Shown in the quit-confirmation modal so the user sees what is at stake.
     pub fn live_count(&self) -> usize {
         self.live.len()
+    }
+
+    /// Replace the combined context-window usage across the live sessions,
+    /// refreshed from the terminal monitor before each redraw.
+    pub fn set_usage(&mut self, usage: Option<AggregateUsage>) {
+        self.usage = usage;
+    }
+
+    /// The combined context-window usage across the live sessions, or `None` when
+    /// none is reporting — drawn as the sidebar's aggregate usage gauge.
+    pub fn usage(&self) -> Option<AggregateUsage> {
+        self.usage
     }
 
     /// Whether any session has a live (running) embedded shell/agent — the

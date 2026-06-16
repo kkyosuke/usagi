@@ -128,25 +128,50 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
     let mut existing_branches =
         move || crate::usecase::session::existing_branch_names(&branches_root);
 
-    // Whether to surface desktop notifications when a background session starts
-    // waiting for input, from the effective settings (project-local over the
-    // global default). Any failure to read settings defaults to enabled, like
-    // `hop`'s welcome notification.
-    let notifications_enabled = crate::infrastructure::storage::Storage::open_default()
+    // The effective settings for this workspace (project-local overrides on top
+    // of the global default), read once. Any failure falls back to the defaults.
+    let settings = crate::infrastructure::storage::Storage::open_default()
         .and_then(|storage| crate::usecase::settings::effective(&storage, &workspace.path))
-        .map(|settings| settings.notifications_enabled)
-        .unwrap_or(true);
+        .unwrap_or_default();
+
+    // The wired-in MCP servers and lifecycle hooks invoke usagi back, so they are
+    // pointed at this process's own executable path rather than the bare name
+    // `usagi`: that way they resolve even when usagi is run straight from a build
+    // (`cargo run`) and is not installed on `$PATH`. If the path can't be
+    // determined we fall back to the bare name.
+    let usagi_bin = std::env::current_exe()
+        .ok()
+        .and_then(|path| path.into_os_string().into_string().ok())
+        .unwrap_or_else(|| "usagi".to_string());
+
+    // The agent adapter `:agent` drives, picked from the configured CLI. It is the
+    // single source of both the launch command and the per-session usage the
+    // pool's watcher polls for the sidebar gauge, so it is shared with the pool.
+    let agent = crate::infrastructure::agent::agent_for(settings.agent_cli);
+
+    // The command line `:agent` sends to the shell: the agent renders usagi's
+    // wiring policy (MCP servers + system prompt + lifecycle hooks) into its own
+    // invocation.
+    let agent_command = agent.launch_command(&settings.agent_wiring(&usagi_bin));
+
+    // Whether to surface desktop notifications when a background session starts
+    // waiting for input or finishes. Opt-out: on unless the user disabled it.
+    let notifications_enabled = settings.notifications_enabled;
 
     // The live shells embedded in the right pane, one per worktree, kept alive
     // across session switches and for as long as this screen is open. Dropped on
     // return, which kills any shell still running. The pool also watches every
-    // shell's bell and flags / notifies the ones waiting for input.
+    // shell's bell/phase, flags / notifies the ones waiting or finished, and polls
+    // the agent for each session's context-window usage.
     //
     // Wrapped in a `RefCell` so the pane driver (`open_terminal`), the sidebar
     // preview (`preview`), and `remove_session` (which evicts a removed session's
     // shell) can all reach it: their borrows never overlap in time (the event
     // loop calls one at a time).
-    let pool = std::cell::RefCell::new(terminal_pool::TerminalPool::new(notifications_enabled));
+    let pool = std::cell::RefCell::new(terminal_pool::TerminalPool::new(
+        notifications_enabled,
+        agent,
+    ));
     let monitor = pool.borrow().monitor();
 
     // Removing a session deletes its worktrees/branches and forgets it. A
@@ -191,29 +216,6 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
             select: None,
         },
     };
-
-    // The agent CLI launched by `:agent`, resolved from the effective settings
-    // (project-local overrides on top of the global default, which is Claude).
-    // The launch command wires in usagi's issue MCP server (where the agent CLI
-    // supports it) so the agent can manage issues from the start, plus the local
-    // LLM server when it is enabled. Any failure to read settings falls back to
-    // the default agent.
-    //
-    // The wired-in MCP servers and lifecycle hooks invoke usagi back, so they are
-    // pointed at this process's own executable path rather than the bare name
-    // `usagi`: that way they resolve even when usagi is run straight from a build
-    // (`cargo run`) and is not installed on `$PATH`. If the path can't be
-    // determined we fall back to the bare name.
-    let usagi_bin = std::env::current_exe()
-        .ok()
-        .and_then(|path| path.into_os_string().into_string().ok())
-        .unwrap_or_else(|| "usagi".to_string());
-    let agent_command = crate::infrastructure::storage::Storage::open_default()
-        .and_then(|storage| crate::usecase::settings::effective(&storage, &workspace.path))
-        .map(|settings| settings.agent_launch_command(&usagi_bin))
-        .unwrap_or_else(|_| {
-            crate::domain::settings::Settings::default().agent_launch_command(&usagi_bin)
-        });
 
     // Check the project's git remote for a newer release than this build, on a
     // background thread so a slow or unreachable network never delays the screen.

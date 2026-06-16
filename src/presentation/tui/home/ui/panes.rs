@@ -15,6 +15,7 @@ use super::{
     LOCAL_ICON, NAME_PREFIX, NEW_ICON, PUSHED_ICON, ROOT_DETAIL, STATUS_COL, SYNCED_ICON,
     TERMINAL_STARTING,
 };
+use crate::domain::agent_usage::AggregateUsage;
 use crate::domain::settings::SessionActionUi;
 use crate::domain::workspace_state::{BranchStatus, WorktreeState};
 
@@ -305,6 +306,47 @@ pub(super) fn left_pane(
             lines.push(detail);
         }
     }
+    lines.truncate(rows);
+    lines
+}
+
+/// The gauge line: a filled/empty bar of how full the combined context window
+/// is, followed by the headroom left ("残り N%"). Coloured by the remaining
+/// headroom — green while there is plenty, yellow as it tightens, red when it is
+/// nearly gone — and clipped to `width`. The bar width adapts to the label so it
+/// always fits the (narrow) left pane.
+fn usage_gauge_line(usage: AggregateUsage, width: usize) -> String {
+    let remaining = usage.remaining_percent();
+    let label = format!("残り{remaining}%");
+    let indent = " ".repeat(NAME_PREFIX);
+    let avail = width.saturating_sub(NAME_PREFIX);
+    let label_w = console::measure_text_width(&label);
+    // One column separates the bar from the label.
+    let bar_w = avail.saturating_sub(label_w + 1);
+    let filled = ((usage.used_ratio() * bar_w as f64).round() as usize).min(bar_w);
+    let bar = format!("{}{}", "▰".repeat(filled), "▱".repeat(bar_w - filled));
+    let clipped = clip_to_width(&format!("{indent}{bar} {label}"), width);
+    let styled = if remaining > 50 {
+        style(clipped).green()
+    } else if remaining > 20 {
+        style(clipped).yellow()
+    } else {
+        style(clipped).red()
+    };
+    styled.to_string()
+}
+
+/// The aggregate agent-usage gauge drawn at the bottom of the left pane: a dim
+/// divider (matching the empty-list separator) above the [`usage_gauge_line`].
+/// `rows` is the reserved height (normally the divider plus the gauge line);
+/// extra lines are trimmed so it never overruns its band.
+pub(super) fn usage_gauge(usage: AggregateUsage, width: usize, rows: usize) -> Vec<String> {
+    let indent = " ".repeat(NAME_PREFIX);
+    let inner_w = width.saturating_sub(NAME_PREFIX);
+    let divider = style(format!("{indent}{}", "─".repeat(inner_w)))
+        .dim()
+        .to_string();
+    let mut lines = vec![divider, usage_gauge_line(usage, width)];
     lines.truncate(rows);
     lines
 }
