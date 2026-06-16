@@ -40,15 +40,22 @@ pub enum SessionActionUi {
     Prompt,
 }
 
-/// JSON wiring usagi's own issue MCP server (`<usagi_bin> mcp`, served over
-/// stdio) into an agent CLI, so the agent can create and query issues from the
-/// start. `usagi_bin` is the command the agent uses to invoke usagi — the
-/// absolute path of the running binary (see [`AgentCli::launch_command`]), so it
-/// resolves whether usagi is installed on `$PATH` or run straight from a build
-/// (`cargo run`, where the binary is `target/debug/usagi`, not on `$PATH`).
-fn issue_mcp_config(usagi_bin: &str) -> String {
+/// The always-present usagi MCP servers wired into an agent CLI, as the inner
+/// body of the `"mcpServers"` object (no enclosing braces): the issue server
+/// (`<usagi_bin> mcp`) so the agent can create and query issues, and the session
+/// server (`<usagi_bin> session-mcp`) so it can create sessions and delegate
+/// prompts to them.
+///
+/// `usagi_bin` is the command the agent uses to invoke usagi — the absolute path
+/// of the running binary (see [`AgentCli::launch_command`]), so it resolves
+/// whether usagi is installed on `$PATH` or run straight from a build
+/// (`cargo run`, where the binary is `target/debug/usagi`, not on `$PATH`). The
+/// path is JSON-escaped via [`json_escape`].
+fn usagi_mcp_servers(usagi_bin: &str) -> String {
     let bin = json_escape(usagi_bin);
-    format!(r#"{{"mcpServers":{{"usagi":{{"command":"{bin}","args":["mcp"]}}}}}}"#)
+    format!(
+        r#""usagi":{{"command":"{bin}","args":["mcp"]}},"usagi-session":{{"command":"{bin}","args":["session-mcp"]}}"#
+    )
 }
 
 /// JSON wiring Claude Code's lifecycle hooks back into usagi, so the agent
@@ -56,7 +63,7 @@ fn issue_mcp_config(usagi_bin: &str) -> String {
 /// terminal bell. Each hook runs `<usagi_bin> agent-phase <phase>`, which records
 /// the phase for the worktree the agent runs in (the hook delivers its `cwd` on
 /// stdin); the home screen's session watcher reads it back to mark the session.
-/// `usagi_bin` is the resolved usagi binary path (see [`issue_mcp_config`]).
+/// `usagi_bin` is the resolved usagi binary path (see [`usagi_mcp_servers`]).
 ///
 /// The events: a submitted prompt starts a turn (`running`); the turn ending or
 /// pausing for input (`Stop` / `Notification`) means it `waits`; a resumed or
@@ -188,9 +195,9 @@ impl AgentCli {
     }
 }
 
-/// The `--mcp-config` JSON for Claude Code: always the issue server, plus the
-/// local LLM server (`<usagi_bin> llm-mcp --model <model>`) when a model is
-/// given. `usagi_bin` is the resolved usagi binary path (see
+/// The `--mcp-config` JSON for Claude Code: always the usagi issue and session
+/// servers, plus the local LLM server (`<usagi_bin> llm-mcp --model <model>`)
+/// when a model is given. `usagi_bin` is the resolved usagi binary path (see
 /// [`AgentCli::launch_command`]).
 ///
 /// Built by string formatting rather than `serde_json` so `domain` stays free
@@ -198,15 +205,17 @@ impl AgentCli {
 /// ([`LOCAL_LLM_MODELS`]) with no characters that need JSON escaping, and the
 /// binary path is JSON-escaped via [`json_escape`].
 fn mcp_config_json(local_llm_model: Option<&str>, usagi_bin: &str) -> String {
-    match local_llm_model {
-        None => issue_mcp_config(usagi_bin),
+    let servers = usagi_mcp_servers(usagi_bin);
+    let servers = match local_llm_model {
+        None => servers,
         Some(model) => {
             let bin = json_escape(usagi_bin);
             format!(
-                r#"{{"mcpServers":{{"usagi":{{"command":"{bin}","args":["mcp"]}},"usagi-llm":{{"command":"{bin}","args":["llm-mcp","--model","{model}"]}}}}}}"#
+                r#"{servers},"usagi-llm":{{"command":"{bin}","args":["llm-mcp","--model","{model}"]}}"#
             )
         }
-    }
+    };
+    format!(r#"{{"mcpServers":{{{servers}}}}}"#)
 }
 
 /// Which ref a new session worktree is branched from.
@@ -443,17 +452,17 @@ mod tests {
     }
 
     #[test]
-    fn claude_launch_command_wires_in_the_issue_mcp_server() {
-        // With the local LLM off (`None`), only the issue server is wired in and
-        // the system prompt is just the worktree note. The bare name `usagi`
+    fn claude_launch_command_wires_in_the_usagi_mcp_servers() {
+        // With the local LLM off (`None`), the issue and session servers are wired
+        // in and the system prompt is just the worktree note. The bare name `usagi`
         // stands in for the resolved binary path the caller passes.
         let launch = AgentCli::Claude.launch_command(None, "usagi");
-        // The program is still `claude`, now with the issue MCP server passed
+        // The program is still `claude`, now with usagi's MCP servers passed
         // inline via `--mcp-config` and a session-scoped instruction passed via
         // `--append-system-prompt` (both single-quoted so the shell keeps them).
         assert_eq!(
             launch,
-            "claude --mcp-config '{\"mcpServers\":{\"usagi\":{\"command\":\"usagi\",\"args\":[\"mcp\"]}}}' \
+            "claude --mcp-config '{\"mcpServers\":{\"usagi\":{\"command\":\"usagi\",\"args\":[\"mcp\"]},\"usagi-session\":{\"command\":\"usagi\",\"args\":[\"session-mcp\"]}}}' \
              --append-system-prompt 'あなたは usagi が管理するセッション専用の worktree 内で起動されています。このディレクトリは既に独立した作業環境のため、新たに git worktree を作成する必要はありません。ここで直接作業を進めてください。' \
              --settings '{\"hooks\":{\"UserPromptSubmit\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase running\"}]}],\"Stop\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase waiting\"}]}],\"Notification\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase waiting\"}]}],\"SessionStart\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase waiting\"}]}],\"SessionEnd\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase ended\"}]}]}}'"
         );

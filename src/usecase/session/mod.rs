@@ -119,6 +119,19 @@ fn record(workspace_root: &Path, name: &str, root: &Path, worktrees: &[PathBuf])
     store.save(&state)
 }
 
+/// List the sessions recorded for `workspace_root`, in creation order.
+///
+/// Returns an empty list when no state has been written yet (a workspace with
+/// no sessions). This reads `state.json` only — it does not reconcile the
+/// on-disk tree, so it is a cheap query callers can run freely.
+pub fn list(workspace_root: &Path) -> Result<Vec<SessionRecord>> {
+    let store = WorkspaceStore::new(workspace_root);
+    Ok(store
+        .load()?
+        .map(|state| state.sessions)
+        .unwrap_or_default())
+}
+
 /// The result of attempting to remove a session.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemovalOutcome {
@@ -503,6 +516,26 @@ mod tests {
 
         let err = create(root.path(), "x").unwrap_err();
         assert!(err.to_string().contains("failed to create"));
+    }
+
+    // --- list --------------------------------------------------------------
+
+    #[test]
+    fn list_returns_recorded_sessions_in_order() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        // No state yet: an empty list, not an error.
+        assert!(list(root.path()).unwrap().is_empty());
+
+        create(root.path(), "first").unwrap();
+        create(root.path(), "second").unwrap();
+
+        let names: Vec<String> = list(root.path())
+            .unwrap()
+            .into_iter()
+            .map(|s| s.name)
+            .collect();
+        assert_eq!(names, vec!["first", "second"]);
     }
 
     // --- remove ------------------------------------------------------------
