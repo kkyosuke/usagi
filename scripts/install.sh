@@ -100,18 +100,24 @@ chmod +x "$BIN_DIR/$BINARY_NAME"
 # 新しくインストールされたバージョン
 NEW_VERSION="$(read_version "$BIN_DIR/$BINARY_NAME")"
 
-echo ""
+# インストール結果のメッセージを決める
 if [ -z "$OLD_VERSION" ]; then
     # 既存インストールなし → 新規
-    echo "usagi v${NEW_VERSION} をインストールしたよ！ぴょん🐰"
+    MESSAGE="usagi v${NEW_VERSION} をインストールしたよ！ぴょん"
 elif [ "$OLD_VERSION" = "$NEW_VERSION" ]; then
     # 同じバージョン → 再インストール
-    echo "usagi v${NEW_VERSION} は既に最新だよ！再インストールしたぴょん🐰"
+    MESSAGE="usagi v${NEW_VERSION} は既に最新だよ！再インストールしたぴょん"
 else
     # バージョンが変わった → アップデート
-    echo "usagi を v${OLD_VERSION} から v${NEW_VERSION} にアップデートしたよ！ぴょん🐰"
+    MESSAGE="usagi を v${OLD_VERSION} から v${NEW_VERSION} にアップデートしたよ！ぴょん"
 fi
-echo "  -> $BIN_DIR/$BINARY_NAME"
+
+cat <<EOF
+
+   (\\(\\
+   ( -.-)   $MESSAGE
+   o_(")(")  -> $BIN_DIR/$BINARY_NAME
+EOF
 
 # PATH 案内（まだ PATH に入っていない場合のみ）
 case ":$PATH:" in
