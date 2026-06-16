@@ -127,9 +127,7 @@ impl HomeState {
         worktrees: Vec<WorktreeState>,
         notice: Option<String>,
     ) -> Self {
-        let mut log = vec![LogLine::output(
-            "Type \":\" to enter a command, then \"man\" for help.",
-        )];
+        let mut log = vec![LogLine::output("Type \"man\" for help.")];
         if let Some(notice) = notice {
             log.push(LogLine::error(notice));
         }
