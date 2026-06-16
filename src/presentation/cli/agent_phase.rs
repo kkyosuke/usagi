@@ -19,6 +19,8 @@ use crate::infrastructure::agent_state_store;
 /// The phase a hook reports, as accepted on the command line.
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum Phase {
+    /// The session just started or resumed and is idle (the `SessionStart` hook).
+    Ready,
     /// A turn started (the `UserPromptSubmit` hook).
     Running,
     /// A turn ended or paused for input (the `Stop` / `Notification` hooks).
@@ -30,6 +32,7 @@ pub enum Phase {
 impl From<Phase> for AgentPhase {
     fn from(phase: Phase) -> Self {
         match phase {
+            Phase::Ready => AgentPhase::Ready,
             Phase::Running => AgentPhase::Running,
             Phase::Waiting => AgentPhase::Waiting,
             Phase::Ended => AgentPhase::Ended,

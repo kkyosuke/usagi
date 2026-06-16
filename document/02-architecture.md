@@ -45,7 +45,7 @@ src/
 ├── test_support.rs             # テスト用ヘルパ
 │
 ├── domain/                     # 純粋なエンティティ（外部依存なし）
-│   ├── agent_phase.rs          # Agent のライフサイクル phase（Running / Waiting / Ended）
+│   ├── agent_phase.rs          # Agent のライフサイクル phase（Ready / Running / Waiting / Ended）
 │   ├── repository.rs           # Git URL パース・ディレクトリ名導出
 │   ├── settings.rs             # Settings / Theme / AgentCli / LocalLlm、LocalSettings（with_local で上書き解決）・起動ポリシー agent_wiring と AgentCli::launch_command（MCP・フック注入）
 │   ├── agent.rs                # Agent port（usagi が agent に求める IF：launch_command / usage）・AgentWiring

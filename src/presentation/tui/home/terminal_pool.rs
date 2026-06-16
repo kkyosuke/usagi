@@ -111,6 +111,11 @@ impl MonitorHandle {
         }
     }
 
+    /// A snapshot of the worktree paths whose agent is actively working a turn.
+    pub fn running(&self) -> HashSet<PathBuf> {
+        self.lock().monitor.running().clone()
+    }
+
     /// A snapshot of the worktree paths currently waiting for the user.
     pub fn waiting(&self) -> HashSet<PathBuf> {
         self.lock().monitor.waiting().clone()

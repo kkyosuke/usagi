@@ -61,24 +61,26 @@ fn usagi_mcp_servers(usagi_bin: &str) -> String {
 }
 
 /// JSON wiring Claude Code's lifecycle hooks back into usagi, so the agent
-/// reports its own running / waiting state instead of usagi guessing from the
-/// terminal bell. Each hook runs `<usagi_bin> agent-phase <phase>`, which records
-/// the phase for the worktree the agent runs in (the hook delivers its `cwd` on
-/// stdin); the home screen's session watcher reads it back to mark the session.
-/// `usagi_bin` is the resolved usagi binary path (see [`usagi_mcp_servers`]).
+/// reports its own ready / running / waiting state instead of usagi guessing from
+/// the terminal bell. Each hook runs `<usagi_bin> agent-phase <phase>`, which
+/// records the phase for the worktree the agent runs in (the hook delivers its
+/// `cwd` on stdin); the home screen's session watcher reads it back to mark the
+/// session. `usagi_bin` is the resolved usagi binary path (see
+/// [`usagi_mcp_servers`]).
 ///
-/// The events: a submitted prompt starts a turn (`running`); the turn ending or
-/// pausing for input (`Stop` / `Notification`) means it `waits`; a resumed or
-/// freshly started session also begins by waiting for input; the session ending
-/// drops back to the bare shell (`ended`). Passed via `--settings`, which
-/// *merges* with the user's own settings rather than replacing them. Built by
-/// string formatting (not `serde_json`) to keep `domain` dependency-free; the
-/// binary path is JSON-escaped so a Windows path stays valid JSON, and contains
-/// only double quotes so it survives the single-quoted shell argument.
+/// The events: a freshly started or resumed session is idle (`SessionStart` →
+/// `ready`); a submitted prompt starts a turn (`UserPromptSubmit` → `running`);
+/// the turn ending or pausing for input (`Stop` / `Notification`) means it
+/// `waits`; the session ending drops back to the bare shell (`SessionEnd` →
+/// `ended`). Passed via `--settings`, which *merges* with the user's own settings
+/// rather than replacing them. Built by string formatting (not `serde_json`) to
+/// keep `domain` dependency-free; the binary path is JSON-escaped so a Windows
+/// path stays valid JSON, and contains only double quotes so it survives the
+/// single-quoted shell argument.
 fn claude_hooks_settings(usagi_bin: &str) -> String {
     let bin = json_escape(usagi_bin);
     format!(
-        r#"{{"hooks":{{"UserPromptSubmit":[{{"hooks":[{{"type":"command","command":"{bin} agent-phase running"}}]}}],"Stop":[{{"hooks":[{{"type":"command","command":"{bin} agent-phase waiting"}}]}}],"Notification":[{{"hooks":[{{"type":"command","command":"{bin} agent-phase waiting"}}]}}],"SessionStart":[{{"hooks":[{{"type":"command","command":"{bin} agent-phase waiting"}}]}}],"SessionEnd":[{{"hooks":[{{"type":"command","command":"{bin} agent-phase ended"}}]}}]}}}}"#
+        r#"{{"hooks":{{"UserPromptSubmit":[{{"hooks":[{{"type":"command","command":"{bin} agent-phase running"}}]}}],"Stop":[{{"hooks":[{{"type":"command","command":"{bin} agent-phase waiting"}}]}}],"Notification":[{{"hooks":[{{"type":"command","command":"{bin} agent-phase waiting"}}]}}],"SessionStart":[{{"hooks":[{{"type":"command","command":"{bin} agent-phase ready"}}]}}],"SessionEnd":[{{"hooks":[{{"type":"command","command":"{bin} agent-phase ended"}}]}}]}}}}"#
     )
 }
 
@@ -465,7 +467,7 @@ mod tests {
             launch,
             "claude --mcp-config '{\"mcpServers\":{\"usagi\":{\"command\":\"usagi\",\"args\":[\"mcp\"]},\"usagi-session\":{\"command\":\"usagi\",\"args\":[\"session-mcp\"]}}}' \
              --append-system-prompt 'あなたは usagi が管理するセッション専用の worktree 内で起動されています。このディレクトリは既に独立した作業環境のため、新たに git worktree を作成する必要はありません。ここで直接作業を進めてください。' \
-             --settings '{\"hooks\":{\"UserPromptSubmit\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase running\"}]}],\"Stop\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase waiting\"}]}],\"Notification\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase waiting\"}]}],\"SessionStart\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase waiting\"}]}],\"SessionEnd\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase ended\"}]}]}}'"
+             --settings '{\"hooks\":{\"UserPromptSubmit\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase running\"}]}],\"Stop\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase waiting\"}]}],\"Notification\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase waiting\"}]}],\"SessionStart\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase ready\"}]}],\"SessionEnd\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase ended\"}]}]}}'"
         );
     }
 
@@ -490,6 +492,7 @@ mod tests {
         for model in [None, Some("qwen2.5-coder:7b")] {
             let launch = AgentCli::Claude.launch_command(model, "usagi");
             assert!(launch.contains("--settings '{\"hooks\":"));
+            assert!(launch.contains("usagi agent-phase ready"));
             assert!(launch.contains("usagi agent-phase running"));
             assert!(launch.contains("usagi agent-phase waiting"));
             assert!(launch.contains("usagi agent-phase ended"));
@@ -510,6 +513,7 @@ mod tests {
             r#""usagi-llm":{"command":"/opt/usagi/bin/usagi","args":["llm-mcp","--model","qwen2.5-coder:7b"]}"#
         ));
         // Every lifecycle hook invokes that same binary.
+        assert!(launch.contains("/opt/usagi/bin/usagi agent-phase ready"));
         assert!(launch.contains("/opt/usagi/bin/usagi agent-phase running"));
         assert!(launch.contains("/opt/usagi/bin/usagi agent-phase waiting"));
         assert!(launch.contains("/opt/usagi/bin/usagi agent-phase ended"));

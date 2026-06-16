@@ -75,6 +75,7 @@ fn walking_the_engagement_ladder_renders_each_rung() {
     // `feat` has a live agent running in it (the monitor reports this in the
     // real screen); the ladder is most interesting against a live session.
     state.set_live([PathBuf::from(FEAT_PATH)].into());
+    state.set_running([PathBuf::from(FEAT_PATH)].into());
 
     // --- 統括 (Overview) ---------------------------------------------------
     // The landing screen: the workspace title, both sessions in the left pane
