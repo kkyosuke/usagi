@@ -121,7 +121,8 @@ impl MonitorHandle {
         self.lock().monitor.waiting().clone()
     }
 
-    /// A snapshot of the worktree paths whose agent has finished (exited).
+    /// A snapshot of the worktree paths whose agent has finished (a turn
+    /// completed or it exited).
     pub fn done(&self) -> HashSet<PathBuf> {
         self.lock().monitor.done().clone()
     }

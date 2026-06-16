@@ -70,17 +70,18 @@ fn usagi_mcp_servers(usagi_bin: &str) -> String {
 ///
 /// The events: a freshly started or resumed session is idle (`SessionStart` →
 /// `ready`); a submitted prompt starts a turn (`UserPromptSubmit` → `running`);
-/// the turn ending or pausing for input (`Stop` / `Notification`) means it
-/// `waits`; the session ending drops back to the bare shell (`SessionEnd` →
-/// `ended`). Passed via `--settings`, which *merges* with the user's own settings
-/// rather than replacing them. Built by string formatting (not `serde_json`) to
-/// keep `domain` dependency-free; the binary path is JSON-escaped so a Windows
-/// path stays valid JSON, and contains only double quotes so it survives the
-/// single-quoted shell argument.
+/// finishing a turn means the agent is done (`Stop` → `ended`); pausing mid-turn
+/// for the user's input or permission means it waits (`Notification` →
+/// `waiting`); the session ending is also done (`SessionEnd` → `ended`). Passed
+/// via `--settings`, which *merges* with the user's own settings rather than
+/// replacing them. Built by string formatting (not `serde_json`) to keep `domain`
+/// dependency-free; the binary path is JSON-escaped so a Windows path stays valid
+/// JSON, and contains only double quotes so it survives the single-quoted shell
+/// argument.
 fn claude_hooks_settings(usagi_bin: &str) -> String {
     let bin = json_escape(usagi_bin);
     format!(
-        r#"{{"hooks":{{"UserPromptSubmit":[{{"hooks":[{{"type":"command","command":"{bin} agent-phase running"}}]}}],"Stop":[{{"hooks":[{{"type":"command","command":"{bin} agent-phase waiting"}}]}}],"Notification":[{{"hooks":[{{"type":"command","command":"{bin} agent-phase waiting"}}]}}],"SessionStart":[{{"hooks":[{{"type":"command","command":"{bin} agent-phase ready"}}]}}],"SessionEnd":[{{"hooks":[{{"type":"command","command":"{bin} agent-phase ended"}}]}}]}}}}"#
+        r#"{{"hooks":{{"UserPromptSubmit":[{{"hooks":[{{"type":"command","command":"{bin} agent-phase running"}}]}}],"Stop":[{{"hooks":[{{"type":"command","command":"{bin} agent-phase ended"}}]}}],"Notification":[{{"hooks":[{{"type":"command","command":"{bin} agent-phase waiting"}}]}}],"SessionStart":[{{"hooks":[{{"type":"command","command":"{bin} agent-phase ready"}}]}}],"SessionEnd":[{{"hooks":[{{"type":"command","command":"{bin} agent-phase ended"}}]}}]}}}}"#
     )
 }
 
@@ -467,7 +468,7 @@ mod tests {
             launch,
             "claude --mcp-config '{\"mcpServers\":{\"usagi\":{\"command\":\"usagi\",\"args\":[\"mcp\"]},\"usagi-session\":{\"command\":\"usagi\",\"args\":[\"session-mcp\"]}}}' \
              --append-system-prompt 'あなたは usagi が管理するセッション専用の worktree 内で起動されています。このディレクトリは既に独立した作業環境のため、新たに git worktree を作成する必要はありません。ここで直接作業を進めてください。' \
-             --settings '{\"hooks\":{\"UserPromptSubmit\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase running\"}]}],\"Stop\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase waiting\"}]}],\"Notification\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase waiting\"}]}],\"SessionStart\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase ready\"}]}],\"SessionEnd\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase ended\"}]}]}}'"
+             --settings '{\"hooks\":{\"UserPromptSubmit\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase running\"}]}],\"Stop\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase ended\"}]}],\"Notification\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase waiting\"}]}],\"SessionStart\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase ready\"}]}],\"SessionEnd\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase ended\"}]}]}}'"
         );
     }
 

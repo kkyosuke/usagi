@@ -7,8 +7,8 @@
 //!    [`crate::domain::settings::AgentCli::launch_command`]); the watcher reads
 //!    the recorded phase and passes it in. `Ready` means it just started or
 //!    resumed and is idle; `Running` means it is working a turn; `Waiting` means
-//!    it finished a turn (or paused for input); `Ended` means the agent process
-//!    exited (the task is done).
+//!    it paused mid-turn for the user's input or permission; `Ended` means it
+//!    finished a turn or the agent process exited (the task is done).
 //! 2. **The terminal bell** (fallback). When no phase is reported — an agent
 //!    without hooks (e.g. Gemini), or before its first hook fires — usagi falls
 //!    back to the audible-bell heuristic: interactive agents ring the bell when
@@ -63,9 +63,9 @@ pub struct Notice {
 /// The kind of transition a [`Notice`] reports.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NoticeKind {
-    /// The agent finished a turn (or paused for input) and now awaits the user.
+    /// The agent paused mid-turn and now awaits the user's input or permission.
     Waiting,
-    /// The agent process exited: the session's work is done.
+    /// The agent finished — a turn completed or the process exited.
     Done,
 }
 
@@ -79,8 +79,8 @@ pub struct SessionMonitor {
     running: HashSet<PathBuf>,
     /// Sessions whose agent is waiting for the user (finished a turn / paused).
     waiting: HashSet<PathBuf>,
-    /// Sessions whose agent has exited (the task is done); the bare shell it ran
-    /// in may still be alive.
+    /// Sessions whose agent has finished — a turn completed or it exited (the
+    /// task is done); the bare shell it ran in may still be alive.
     done: HashSet<PathBuf>,
     /// The session the user is attached to, if any. Its bells are seen live (so
     /// the bell heuristic is skipped for it) and it never fires a notification.
@@ -137,12 +137,12 @@ impl SessionMonitor {
         self.waiting.contains(path)
     }
 
-    /// The sessions whose agent has finished (exited).
+    /// The sessions whose agent has finished (a turn completed or it exited).
     pub fn done(&self) -> &HashSet<PathBuf> {
         &self.done
     }
 
-    /// Whether `path`'s agent has finished (exited).
+    /// Whether `path`'s agent has finished (a turn completed or it exited).
     pub fn is_done(&self, path: &Path) -> bool {
         self.done.contains(path)
     }
@@ -158,8 +158,9 @@ impl SessionMonitor {
     ///
     /// - A reported phase is authoritative. `Ready` clears running, waiting and
     ///   done (the session is idle, awaiting input — no notice); `Running` marks
-    ///   it running and clears waiting and done; `Waiting` marks it waiting
-    ///   (notifying once, unless it was already waiting); `Ended` marks it done
+    ///   it running and clears waiting and done; `Waiting` marks it waiting — it
+    ///   paused for input/permission — (notifying once, unless it was already
+    ///   waiting); `Ended` marks it done — a turn completed or it exited —
     ///   (notifying once, unless already done).
     /// - With no phase, the bell heuristic decides: a first sighting only records
     ///   a baseline (so bells rung before monitoring began never fire), and a
@@ -189,9 +190,9 @@ impl SessionMonitor {
                     self.running.insert(path.clone());
                     self.baselines.insert(path.clone(), count);
                 }
-                // The agent finished a turn (or paused for input): it waits. Fire
-                // a one-shot only on a genuine transition, and never for the
-                // attached session (the user is looking right at it).
+                // The agent paused mid-turn for the user's input or permission:
+                // it waits. Fire a one-shot only on a genuine transition, and
+                // never for the attached session (the user is looking right at it).
                 Some(AgentPhase::Waiting) => {
                     self.running.remove(path);
                     self.done.remove(path);
@@ -204,7 +205,8 @@ impl SessionMonitor {
                         });
                     }
                 }
-                // The agent exited: the task is done. Same one-shot rule.
+                // The agent finished — a turn completed or it exited: the task is
+                // done. Same one-shot rule.
                 Some(AgentPhase::Ended) => {
                     self.running.remove(path);
                     self.waiting.remove(path);
@@ -395,8 +397,8 @@ mod tests {
     #[test]
     fn a_waiting_phase_marks_the_session_and_fires_once() {
         let mut monitor = SessionMonitor::new();
-        // The agent reports it is working, then that it stopped: that stop is a
-        // genuine transition into waiting and fires exactly once.
+        // The agent reports it is working, then that it paused for input: that
+        // pause is a genuine transition into waiting and fires exactly once.
         monitor.observe(&[phased("/a", 0, AgentPhase::Running)]);
         let newly = monitor.observe(&[phased("/a", 0, AgentPhase::Waiting)]);
         assert_eq!(newly, vec![waiting("/a")]);

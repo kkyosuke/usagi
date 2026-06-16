@@ -13,9 +13,9 @@ use serde::{Deserialize, Serialize};
 ///
 /// The phases follow the agent's turn lifecycle: a freshly started (or resumed)
 /// session is [`Ready`](Self::Ready); submitting a prompt makes it
-/// [`Running`](Self::Running); the turn ending (or pausing for input) makes it
-/// [`Waiting`](Self::Waiting); the process exiting makes it
-/// [`Ended`](Self::Ended).
+/// [`Running`](Self::Running); pausing mid-turn for the user's input or
+/// permission makes it [`Waiting`](Self::Waiting); finishing a turn or the
+/// process exiting makes it [`Ended`](Self::Ended).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentPhase {
@@ -25,11 +25,11 @@ pub enum AgentPhase {
     /// The agent is actively working a turn: a prompt was submitted and it is
     /// generating a response or running tools.
     Running,
-    /// The agent has finished its turn (or paused for permission) and is waiting
-    /// for the user's input.
+    /// The agent paused mid-turn and is waiting for the user's input or
+    /// permission (it asked something or needs a tool approved).
     Waiting,
-    /// The agent process has exited; the bare shell it launched in may still be
-    /// alive.
+    /// The agent finished: it completed a turn (`Stop`) or its process exited
+    /// (`SessionEnd`). The bare shell it launched in may still be alive.
     Ended,
 }
 

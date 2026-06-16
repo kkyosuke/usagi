@@ -23,9 +23,11 @@ pub enum Phase {
     Ready,
     /// A turn started (the `UserPromptSubmit` hook).
     Running,
-    /// A turn ended or paused for input (the `Stop` / `Notification` hooks).
+    /// The agent paused mid-turn for the user's input or permission (the
+    /// `Notification` hook).
     Waiting,
-    /// The agent exited (the `SessionEnd` hook).
+    /// The agent finished — a turn ended (`Stop`) or the process exited
+    /// (`SessionEnd`).
     Ended,
 }
 
