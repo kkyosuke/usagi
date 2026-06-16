@@ -1,11 +1,11 @@
-use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde::{Deserialize, Serialize};
 
 use crate::domain::settings::Settings;
 use crate::domain::workspace::Workspace;
+use crate::infrastructure::json_file;
 
 /// Environment variable that overrides the default data directory.
 pub const DATA_DIR_ENV: &str = "USAGI_HOME";
@@ -70,13 +70,14 @@ impl Storage {
 
     /// Load all workspaces; returns an empty list if the file does not exist.
     pub fn load_workspaces(&self) -> Result<Vec<Workspace>> {
-        let file: Option<WorkspacesFile> = self.read_json(WORKSPACES_FILE)?;
+        let file: Option<WorkspacesFile> = json_file::read(&self.dir.join(WORKSPACES_FILE))?;
         Ok(file.map(|f| f.workspaces).unwrap_or_default())
     }
 
     pub fn save_workspaces(&self, workspaces: &[Workspace]) -> Result<()> {
-        self.write_json(
-            WORKSPACES_FILE,
+        json_file::write_atomic(
+            &self.dir,
+            &self.dir.join(WORKSPACES_FILE),
             &WorkspacesFile {
                 version: FILE_FORMAT_VERSION,
                 workspaces: workspaces.to_vec(),
@@ -86,43 +87,19 @@ impl Storage {
 
     /// Load settings; returns defaults if the file does not exist.
     pub fn load_settings(&self) -> Result<Settings> {
-        let file: Option<SettingsFile> = self.read_json(SETTINGS_FILE)?;
+        let file: Option<SettingsFile> = json_file::read(&self.settings_path())?;
         Ok(file.map(|f| f.settings).unwrap_or_default())
     }
 
     pub fn save_settings(&self, settings: &Settings) -> Result<()> {
-        self.write_json(
-            SETTINGS_FILE,
+        json_file::write_atomic(
+            &self.dir,
+            &self.settings_path(),
             &SettingsFile {
                 version: FILE_FORMAT_VERSION,
                 settings: settings.clone(),
             },
         )
-    }
-
-    fn read_json<T: DeserializeOwned>(&self, file_name: &str) -> Result<Option<T>> {
-        let path = self.dir.join(file_name);
-        let text = match fs::read_to_string(&path) {
-            Ok(text) => text,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => return Err(e).context(format!("failed to read {}", path.display())),
-        };
-        let value =
-            serde_json::from_str(&text).context(format!("failed to parse {}", path.display()))?;
-        Ok(Some(value))
-    }
-
-    fn write_json<T: Serialize>(&self, file_name: &str, value: &T) -> Result<()> {
-        fs::create_dir_all(&self.dir)
-            .context(format!("failed to create {}", self.dir.display()))?;
-        let path = self.dir.join(file_name);
-        let mut text = serde_json::to_string_pretty(value)?;
-        text.push('\n');
-        // Write to a temp file then rename so a crash never leaves a half-written file.
-        let tmp = path.with_extension("json.tmp");
-        fs::write(&tmp, text).context(format!("failed to write {}", tmp.display()))?;
-        fs::rename(&tmp, &path).context(format!("failed to replace {}", path.display()))?;
-        Ok(())
     }
 }
 
@@ -130,6 +107,7 @@ impl Storage {
 mod tests {
     use super::*;
     use crate::domain::settings::Theme;
+    use std::fs;
 
     fn temp_storage() -> (tempfile::TempDir, Storage) {
         let dir = tempfile::tempdir().expect("failed to create temp dir");

@@ -63,6 +63,7 @@ src/
 │
 ├── infrastructure/             # 外部連携（Git・永続化・シェル）
 │   ├── git.rs                  # git CLI 経由の読み取り専用検査 + worktree 追加（add_worktree）
+│   ├── json_file.rs            # JSON ファイルの共通 read / 原子的 write（temp + rename）
 │   ├── storage.rs              # グローバル ~/.usagi/ の load/save（Storage）
 │   ├── workspace_store.rs      # <repo>/.usagi/ の state.json / settings.json（WorkspaceStore）
 │   ├── history_store.rs        # <repo>/.usagi/history.json の load/append（HistoryStore）

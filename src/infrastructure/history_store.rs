@@ -5,13 +5,13 @@
 //! same repository. Writes go through a temp file + rename so a crash never
 //! leaves a half-written `history.json` behind.
 
-use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 use crate::domain::history::HistoryEntry;
+use crate::infrastructure::json_file;
 
 /// Directory created inside the repository to hold usagi's per-repo data.
 const STATE_DIR_NAME: &str = ".usagi";
@@ -51,15 +51,8 @@ impl HistoryStore {
     /// Load the recorded history, oldest first. Returns an empty vector if the
     /// file has never been written.
     pub fn load(&self) -> Result<Vec<HistoryEntry>> {
-        let path = self.history_path();
-        let text = match fs::read_to_string(&path) {
-            Ok(text) => text,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(e) => return Err(e).context(format!("failed to read {}", path.display())),
-        };
-        let file: HistoryFile =
-            serde_json::from_str(&text).context(format!("failed to parse {}", path.display()))?;
-        Ok(file.entries)
+        let file: Option<HistoryFile> = json_file::read(&self.history_path())?;
+        Ok(file.map(|f| f.entries).unwrap_or_default())
     }
 
     /// Append a single executed `command` to the history, stamped with the
@@ -73,27 +66,21 @@ impl HistoryStore {
 
     /// Persist `entries` to `<repo>/.usagi/history.json`.
     fn save(&self, entries: &[HistoryEntry]) -> Result<()> {
-        fs::create_dir_all(&self.dir)
-            .context(format!("failed to create {}", self.dir.display()))?;
-
-        let file = HistoryFile {
-            version: FILE_FORMAT_VERSION,
-            entries: entries.to_vec(),
-        };
-        let mut text = serde_json::to_string_pretty(&file)?;
-        text.push('\n');
-
-        let path = self.history_path();
-        let tmp = path.with_extension("json.tmp");
-        fs::write(&tmp, text).context(format!("failed to write {}", tmp.display()))?;
-        fs::rename(&tmp, &path).context(format!("failed to replace {}", path.display()))?;
-        Ok(())
+        json_file::write_atomic(
+            &self.dir,
+            &self.history_path(),
+            &HistoryFile {
+                version: FILE_FORMAT_VERSION,
+                entries: entries.to_vec(),
+            },
+        )
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     #[test]
     fn load_returns_empty_when_missing() {
