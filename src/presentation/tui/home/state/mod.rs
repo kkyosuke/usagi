@@ -16,7 +16,9 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use crate::domain::agent_usage::AggregateUsage;
+use crate::domain::issue::Issue;
 use crate::domain::settings::SessionActionUi;
+use crate::domain::version::Version;
 use crate::domain::workspace_state::{SessionRecord, WorktreeState};
 
 use super::command::{CommandInfo, CommandRegistry, CommandScope, Completion, Effect, Hint};
@@ -105,8 +107,12 @@ pub struct HomeState {
     /// Worktree paths with a live (running) embedded session — an agent/shell is
     /// in use, whether attached or left running in the background. Refreshed from
     /// the terminal monitor each redraw and rendered with a "running" icon,
-    /// unless the path is also waiting (which takes precedence).
+    /// unless the path is also waiting or done (which take precedence).
     live: HashSet<PathBuf>,
+    /// Worktree paths whose agent has finished (its process exited), shown with a
+    /// "idle" badge. Refreshed from the terminal monitor each redraw; takes
+    /// precedence over waiting and running.
+    done: HashSet<PathBuf>,
     /// Whether the quit-confirmation modal is open. It is raised when the user
     /// presses `Ctrl-C` while a session is still live, so an accidental close
     /// does not drop a running agent/shell; confirming it quits the app.
@@ -122,6 +128,13 @@ pub struct HomeState {
     /// from the terminal monitor before each redraw and drawn as a gauge at the
     /// bottom of the sidebar. `None` when no live session reports usage.
     usage: Option<AggregateUsage>,
+    /// The workspace's task issues, loaded from disk by `mod.rs` and read by the
+    /// `issue` command. Empty until injected.
+    issues: Vec<Issue>,
+    /// The latest released version, set once the background update check finds a
+    /// release newer than this build. While `None` (the check is pending, or the
+    /// build is up to date) the top-right "update available" notice is hidden.
+    update: Option<Version>,
 }
 
 impl HomeState {
@@ -154,10 +167,13 @@ impl HomeState {
             terminal_view: None,
             waiting: HashSet::new(),
             live: HashSet::new(),
+            done: HashSet::new(),
             quit_confirm: false,
             text_modal: None,
             response_start: 0,
             usage: None,
+            issues: Vec::new(),
+            update: None,
         }
     }
 
@@ -172,6 +188,12 @@ impl HomeState {
         self.session_action_ui
     }
 
+    /// Inject the workspace's task issues (loaded from disk by `mod.rs`), read by
+    /// the `issue` command for its list / graph / show views.
+    pub fn set_issues(&mut self, issues: Vec<Issue>) {
+        self.issues = issues;
+    }
+
     /// Seed the command history with entries restored from disk (oldest first),
     /// so `history` and `↑`/`↓` recall reflect commands run in past sessions.
     pub fn restore_history(&mut self, entries: Vec<String>) {
@@ -183,6 +205,25 @@ impl HomeState {
     pub fn restore_sessions(&mut self, sessions: Vec<SessionRecord>) {
         self.sessions = sessions;
         self.rebuild_list();
+    }
+
+    /// Swap in a freshly re-synced set of sessions while keeping the cursor and
+    /// the active row on the same session names (when they still exist).
+    ///
+    /// Used after the user works in an embedded terminal / agent — where they may
+    /// commit, push, or merge — so the worktree status reflects what they just
+    /// did, without yanking the cursor back to the root row the way
+    /// [`restore_sessions`](Self::restore_sessions) (which resets it) would.
+    pub fn refresh_sessions(&mut self, sessions: Vec<SessionRecord>) {
+        let selected = self.list.selected_name().to_string();
+        let active = self.list.active_name().to_string();
+        self.sessions = sessions;
+        self.rebuild_list();
+        // Restore the cursor (`select_by_name` moves both cursor and active onto
+        // the row; it is a no-op for the root row / a vanished session, leaving
+        // the rebuilt default on the root), then correct the active row.
+        self.list.select_by_name(&selected);
+        self.list.activate_by_name(&active);
     }
 
     /// Rebuild the worktree pane from the current sessions: one row per session
@@ -383,6 +424,36 @@ impl HomeState {
     /// sidebar renderer.
     pub fn live_paths(&self) -> &HashSet<PathBuf> {
         &self.live
+    }
+
+    /// Replace the set of worktree paths whose agent has finished, refreshed from
+    /// the terminal monitor before each redraw.
+    pub fn set_done(&mut self, done: HashSet<PathBuf>) {
+        self.done = done;
+    }
+
+    /// Whether the worktree at `path` has a background session whose agent has
+    /// finished (exited).
+    pub fn is_done(&self, path: &Path) -> bool {
+        self.done.contains(path)
+    }
+
+    /// The set of worktree paths whose agent has finished, for the sidebar
+    /// renderer.
+    pub fn done_paths(&self) -> &HashSet<PathBuf> {
+        &self.done
+    }
+
+    /// Record the latest released version found by the background update check,
+    /// or clear it with `None`. Set before each redraw from the update handle.
+    pub fn set_update(&mut self, latest: Option<Version>) {
+        self.update = latest;
+    }
+
+    /// The latest released version, when it is newer than this build — the
+    /// top-right "update available" notice is shown only while this is `Some`.
+    pub fn update(&self) -> Option<Version> {
+        self.update
     }
 
     /// How many sessions currently have a live (running) embedded shell/agent.
@@ -644,9 +715,9 @@ impl HomeState {
                 recorded: None,
             };
         }
-        let result = self
-            .registry
-            .dispatch(&entry, &self.history, &self.list.refs());
+        let result =
+            self.registry
+                .dispatch_with(&entry, &self.history, &self.list.refs(), &self.issues);
         self.history.push(entry.clone());
         // A text-dumping utility (`man` / `history`) run from the prompt shows its
         // output in a modal, like in 統括; everything else appends to the log.
@@ -733,9 +804,9 @@ impl HomeState {
         // begins (the command echo), so everything earlier drops out of view.
         self.response_start = self.log.len();
         self.log.push(LogLine::command(entry.clone()));
-        let result = self
-            .registry
-            .dispatch(&entry, &self.history, &self.list.refs());
+        let result =
+            self.registry
+                .dispatch_with(&entry, &self.history, &self.list.refs(), &self.issues);
         self.history.push(entry.clone());
 
         match result.effect {

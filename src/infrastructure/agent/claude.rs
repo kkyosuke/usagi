@@ -1,14 +1,16 @@
 //! Claude Code adapter.
 //!
 //! Builds Claude's launch command (delegating to the pure
-//! [`super::claude_launch_command`]) and reads its context-window usage from the
+//! [`AgentCli::launch_command`], which wires in usagi's MCP servers, system
+//! prompt, and lifecycle hooks) and reads its context-window usage from the
 //! transcript Claude Code appends under `~/.claude/projects/<encoded-cwd>/<id>.jsonl`.
 //! Usage results are cached by the transcript's mtime so the home screen's 200ms
 //! watcher does not re-read (and re-parse) an unchanged file every tick.
 //!
-//! The launch rendering and transcript parsing are pure and tested in the parent
-//! module; only the filesystem I/O here (locating and reading the transcript) is
-//! excluded from coverage (see `scripts/coverage.sh`).
+//! The launch rendering and transcript parsing are pure and tested elsewhere
+//! (the domain settings and the parent module); only the filesystem I/O here
+//! (locating and reading the transcript) is excluded from coverage (see
+//! `scripts/coverage.sh`).
 
 use std::collections::HashMap;
 use std::fs;
@@ -18,8 +20,9 @@ use std::time::SystemTime;
 
 use crate::domain::agent::{Agent, AgentWiring};
 use crate::domain::agent_usage::AgentUsage;
+use crate::domain::settings::AgentCli;
 
-use super::{claude_launch_command, encode_project_dir, parse_claude_transcript};
+use super::{encode_project_dir, parse_claude_transcript};
 
 /// The Claude Code adapter, with an mtime cache keyed by the transcript path so
 /// an unchanged file is parsed at most once.
@@ -48,7 +51,7 @@ impl Agent for ClaudeAgent {
     }
 
     fn launch_command(&self, wiring: &AgentWiring) -> String {
-        claude_launch_command(wiring)
+        AgentCli::Claude.launch_command(wiring.local_llm_model.as_deref(), &wiring.usagi_bin)
     }
 
     fn usage(&self, worktree: &Path) -> Option<AgentUsage> {

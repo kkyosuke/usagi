@@ -26,7 +26,7 @@ pub const ROOT_NAME: &str = "root";
 ///
 /// - the session name as its branch label,
 /// - a status [aggregated](BranchStatus::aggregate) across the repositories (the
-///   least-progressed, so `merged` means every repository's branch has landed),
+///   least-progressed, so `synced` means every repository's branch has landed),
 /// - `primary` set when any repository's worktree is the primary checkout,
 /// - the first repository's `head` / `upstream` as representative detail.
 ///
@@ -149,8 +149,14 @@ impl WorktreeList {
 
     /// The display name of the active row: its branch, or [`ROOT_NAME`] for the
     /// root row.
-    fn active_name(&self) -> &str {
+    pub fn active_name(&self) -> &str {
         self.active().map(worktree_name).unwrap_or(ROOT_NAME)
+    }
+
+    /// The display name of the row under the cursor: its branch, or [`ROOT_NAME`]
+    /// for the root row.
+    pub fn selected_name(&self) -> &str {
+        self.selected().map(worktree_name).unwrap_or(ROOT_NAME)
     }
 
     /// Make the row named `name` active, returning whether one matched. The

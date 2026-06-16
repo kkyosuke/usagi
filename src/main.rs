@@ -13,6 +13,13 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Record a running agent's lifecycle phase (invoked by agent hooks)
+    #[command(hide = true)]
+    AgentPhase {
+        /// The phase the agent's hook is reporting
+        #[arg(value_enum)]
+        phase: usagi::presentation::cli::agent_phase::Phase,
+    },
     /// Show usagi's configuration (or edit it with --edit)
     Config {
         /// Open the configuration file in $EDITOR and validate it on save
@@ -46,6 +53,9 @@ enum Commands {
     },
     /// Run the issue MCP server over stdio (for AI agents)
     Mcp,
+    /// Run the session orchestration MCP server over stdio (for AI agents to
+    /// create sessions and delegate prompts to them)
+    SessionMcp,
     /// Sync the current repository's worktree state to .usagi/state.json
     Status,
 }
@@ -53,7 +63,8 @@ enum Commands {
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
-    match cli.command {
+    let result = match cli.command {
+        Commands::AgentPhase { phase } => usagi::presentation::cli::agent_phase::run(phase),
         Commands::Config { edit } => usagi::presentation::cli::config::run(edit),
         Commands::Doctor { fix } => usagi::presentation::cli::doctor::run(fix),
         Commands::Hop => usagi::presentation::cli::hop::run(),
@@ -61,6 +72,26 @@ fn main() -> anyhow::Result<()> {
         Commands::Issue { command } => usagi::presentation::cli::issue::run(command),
         Commands::LlmMcp { model } => usagi::presentation::cli::llm_mcp::run(model),
         Commands::Mcp => usagi::presentation::cli::mcp::run(),
+        Commands::SessionMcp => usagi::presentation::cli::session_mcp::run(),
         Commands::Status => usagi::presentation::cli::status::run(),
+    };
+
+    if let Err(error) = &result {
+        log_error(error);
     }
+    result
+}
+
+/// Best-effort: append `error` to today's log file and prune files older than
+/// the retention window. Any failure here is swallowed so logging never masks
+/// the original error on its way to stderr.
+fn log_error(error: &anyhow::Error) {
+    use usagi::infrastructure::error_log::{ErrorLog, RETENTION_DAYS};
+
+    let Ok(log) = ErrorLog::open_default() else {
+        return;
+    };
+    let now = chrono::Local::now();
+    let _ = log.prune(now.date_naive(), RETENTION_DAYS);
+    let _ = log.append(now, &format!("{error:#}"));
 }

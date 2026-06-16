@@ -282,6 +282,35 @@ fn submitting_a_command_echoes_and_runs_it() {
 }
 
 #[test]
+fn issue_command_reads_injected_issues() {
+    use crate::domain::issue::{Issue, IssuePriority, IssueStatus};
+    let mut state = state();
+    let ts = Utc::now();
+    state.set_issues(vec![Issue {
+        number: 1,
+        title: "task".to_string(),
+        status: IssueStatus::Todo,
+        priority: IssuePriority::Medium,
+        labels: vec![],
+        dependson: vec![],
+        related: vec![],
+        parent: None,
+        milestone: None,
+        created_at: ts,
+        updated_at: ts,
+        body: String::new(),
+    }]);
+    for c in "issue".chars() {
+        state.push_char(c);
+    }
+    let submission = state.submit();
+    // The injected issue is surfaced through the `issue` command's modal.
+    assert_eq!(submission.effect, Effect::ShowText("Issues"));
+    let modal = state.text_modal().expect("issue opens a text modal");
+    assert!(modal.lines.iter().any(|l| l.text.contains("task")));
+}
+
+#[test]
 fn session_switch_with_no_name_yields_the_enter_switch_effect() {
     // The screen leaves the mode transition to the event loop; submit only
     // surfaces the effect and logs no resolution line.
@@ -745,11 +774,11 @@ fn multi_repo_session_collapses_to_one_row_with_an_aggregated_status() {
     let mut merged_a = worktree("feature");
     merged_a.path = PathBuf::from("/repo/.usagi/sessions/feature/app-a");
     merged_a.primary = true;
-    merged_a.status = BranchStatus::UpToDate;
+    merged_a.status = BranchStatus::Synced;
     merged_a.upstream = Some("origin/feature".to_string());
     let mut merged_b = worktree("feature");
     merged_b.path = PathBuf::from("/repo/.usagi/sessions/feature/app-b");
-    merged_b.status = BranchStatus::UpToDate;
+    merged_b.status = BranchStatus::Synced;
     let mut local_c = worktree("feature");
     local_c.path = PathBuf::from("/repo/.usagi/sessions/feature/app-c");
     local_c.status = BranchStatus::Local;
@@ -788,12 +817,40 @@ fn a_session_with_no_worktrees_still_yields_a_row() {
     assert_eq!(state.list().worktrees().len(), 1);
     let row = &state.list().worktrees()[0];
     assert_eq!(row.branch.as_deref(), Some("empty"));
-    // No repositories: a conservative `local`, no primary, no upstream, and
-    // an empty representative head.
-    assert_eq!(row.status, BranchStatus::Local);
+    // No repositories: the empty aggregate is `new` (least-progressed), no
+    // primary, no upstream, and an empty representative head.
+    assert_eq!(row.status, BranchStatus::New);
     assert!(!row.primary);
     assert!(row.upstream.is_none());
     assert!(row.head.is_empty());
+}
+
+#[test]
+fn refresh_sessions_updates_statuses_and_keeps_the_cursor_in_place() {
+    let mut state = state();
+    // Create alpha + beta and land the cursor / active row on beta.
+    state.apply_session_outcome(SessionOutcome {
+        line: LogLine::output("created"),
+        sessions: Some(vec![session_record("alpha", 1), session_record("beta", 1)]),
+        select: Some("beta".to_string()),
+    });
+    assert_eq!(state.list().selected_index(), 2); // root, alpha, beta
+    assert_eq!(state.list().active_name(), "beta");
+
+    // Re-sync: beta's branch is now synced (it was local). The cursor and the
+    // active row must stay on beta, and its row must show the new status.
+    let mut beta = session_record("beta", 1);
+    beta.worktrees[0].status = BranchStatus::Synced;
+    state.refresh_sessions(vec![session_record("alpha", 1), beta]);
+    assert_eq!(state.list().selected_name(), "beta");
+    assert_eq!(state.list().active_name(), "beta");
+    assert_eq!(state.list().worktrees()[1].status, BranchStatus::Synced);
+
+    // A refresh that drops the selected session falls back to the root row
+    // (no panic, no stale cursor).
+    state.refresh_sessions(vec![session_record("alpha", 1)]);
+    assert_eq!(state.list().selected_name(), ROOT_NAME);
+    assert_eq!(state.list().active_name(), ROOT_NAME);
 }
 
 #[test]
@@ -968,6 +1025,33 @@ fn live_paths_track_sessions_with_a_running_agent() {
     assert_eq!(state.live_paths().len(), 1);
     state.set_live(HashSet::new());
     assert!(!state.is_live(Path::new("/repo/feature")));
+}
+
+#[test]
+fn done_paths_track_finished_sessions() {
+    let mut state = state();
+    assert!(!state.is_done(Path::new("/repo/feature")));
+    assert!(state.done_paths().is_empty());
+    let mut done = HashSet::new();
+    done.insert(PathBuf::from("/repo/feature"));
+    state.set_done(done);
+    assert!(state.is_done(Path::new("/repo/feature")));
+    assert!(!state.is_done(Path::new("/repo/main")));
+    assert_eq!(state.done_paths().len(), 1);
+    state.set_done(HashSet::new());
+    assert!(!state.is_done(Path::new("/repo/feature")));
+}
+
+#[test]
+fn update_holds_the_latest_release_once_set() {
+    use crate::domain::version::Version;
+    let mut state = state();
+    assert!(state.update().is_none());
+    let latest = Version::parse("0.2.0");
+    state.set_update(latest);
+    assert_eq!(state.update(), latest);
+    state.set_update(None);
+    assert!(state.update().is_none());
 }
 
 #[test]

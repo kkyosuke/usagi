@@ -16,7 +16,7 @@ use std::sync::Arc;
 pub use claude::ClaudeAgent;
 pub use gemini::GeminiAgent;
 
-use crate::domain::agent::{Agent, AgentWiring};
+use crate::domain::agent::Agent;
 use crate::domain::agent_usage::{context_window_for, AgentUsage};
 use crate::domain::settings::AgentCli;
 
@@ -27,40 +27,6 @@ pub fn agent_for(cli: AgentCli) -> Arc<dyn Agent> {
         AgentCli::Claude => Arc::new(ClaudeAgent::new()),
         AgentCli::Gemini => Arc::new(GeminiAgent::new()),
     }
-}
-
-/// Render usagi's [`AgentWiring`] into Claude Code's launch command.
-///
-/// Claude accepts the MCP servers inline via `--mcp-config` and the
-/// session-scoped instruction via `--append-system-prompt`; both are
-/// single-quoted so the shell passes them through verbatim (no value contains a
-/// single quote). The MCP config is built by string formatting — the values come
-/// from usagi's own fixed wiring and the local-LLM model allowlist, so nothing
-/// needs JSON escaping.
-pub(crate) fn claude_launch_command(wiring: &AgentWiring) -> String {
-    let servers = wiring
-        .mcp_servers
-        .iter()
-        .map(|server| {
-            let args = server
-                .args
-                .iter()
-                .map(|arg| format!("\"{arg}\""))
-                .collect::<Vec<_>>()
-                .join(",");
-            format!(
-                "\"{}\":{{\"command\":\"{}\",\"args\":[{}]}}",
-                server.name, server.command, args
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(",");
-    let mcp_config = format!("{{\"mcpServers\":{{{servers}}}}}");
-    format!(
-        "claude --mcp-config '{mcp_config}' \
-         --append-system-prompt '{}'",
-        wiring.system_prompt
-    )
 }
 
 /// Parse the latest context-window usage from a Claude Code transcript.
@@ -127,48 +93,33 @@ mod tests {
     use std::path::PathBuf;
 
     #[test]
-    fn claude_launch_command_matches_the_expected_invocation() {
-        // The default wiring (issue server only) renders the exact command line
-        // `:agent` sends to the shell.
-        let wiring = Settings::default().agent_wiring();
-        assert_eq!(
-            claude_launch_command(&wiring),
-            "claude --mcp-config '{\"mcpServers\":{\"usagi\":{\"command\":\"usagi\",\"args\":[\"mcp\"]}}}' \
-             --append-system-prompt 'あなたは usagi が管理するセッション専用の worktree 内で起動されています。このディレクトリは既に独立した作業環境のため、新たに git worktree を作成する必要はありません。ここで直接作業を進めてください。'"
-        );
-    }
-
-    #[test]
-    fn claude_launch_command_appends_the_local_llm_server_when_wired() {
-        let mut settings = Settings::default();
-        settings.local_llm.enabled = true;
-        settings.local_llm.model = "qwen2.5-coder:7b".to_string();
-        let launch = claude_launch_command(&settings.agent_wiring());
-        assert!(launch.contains("\"usagi\":{\"command\":\"usagi\",\"args\":[\"mcp\"]}"));
-        assert!(launch.contains(
-            "\"usagi-llm\":{\"command\":\"usagi\",\"args\":[\"llm-mcp\",\"--model\",\"qwen2.5-coder:7b\"]}"
-        ));
-        assert!(launch.contains("local_llm_ask"));
-    }
-
-    #[test]
-    fn agent_for_gemini_reports_no_usage_yet() {
-        // Gemini has no transcript usagi reads, so its adapter returns None for
-        // any worktree — the dispatch still hands back a working agent.
-        let agent = agent_for(AgentCli::Gemini);
-        assert_eq!(agent.program(), "gemini");
-        assert_eq!(agent.usage(&PathBuf::from("/anywhere")), None);
-    }
-
-    #[test]
-    fn agent_for_claude_returns_an_agent() {
-        // A worktree with no transcript reads as None rather than panicking.
+    fn agent_for_claude_renders_the_launch_command_and_reads_usage() {
+        // The Claude adapter delegates launch rendering to the domain builder
+        // (MCP servers + system prompt + lifecycle hooks) and reads usage from the
+        // transcript (None here — no transcript for this path).
         let agent = agent_for(AgentCli::Claude);
         assert_eq!(agent.program(), "claude");
+        let launch = agent.launch_command(&Settings::default().agent_wiring("usagi"));
+        assert!(launch.starts_with("claude --mcp-config '{\"mcpServers\":"));
+        assert!(launch.contains("--append-system-prompt"));
+        assert!(launch.contains("--settings '{\"hooks\":"));
         assert_eq!(
             agent.usage(&PathBuf::from("/nonexistent/usagi/worktree/path")),
             None
         );
+    }
+
+    #[test]
+    fn agent_for_gemini_launches_plain_and_reports_no_usage_yet() {
+        // Gemini has no transcript usagi reads, so its adapter returns None for
+        // any worktree — the dispatch still hands back a working agent.
+        let agent = agent_for(AgentCli::Gemini);
+        assert_eq!(agent.program(), "gemini");
+        assert_eq!(
+            agent.launch_command(&Settings::default().agent_wiring("usagi")),
+            "gemini"
+        );
+        assert_eq!(agent.usage(&PathBuf::from("/anywhere")), None);
     }
 
     #[test]

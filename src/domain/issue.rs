@@ -112,6 +112,14 @@ pub struct Issue {
     pub labels: Vec<String>,
     /// Numbers of issues that must be `done` before this one can start.
     pub dependson: Vec<u32>,
+    /// Numbers of issues related to this one without blocking it (a soft,
+    /// non-blocking cross-reference, unlike `dependson`).
+    pub related: Vec<u32>,
+    /// Number of the parent issue this one belongs to (an epic ⊃ sub-task
+    /// hierarchy), if any. Distinct from `dependson`, which is a precondition.
+    pub parent: Option<u32>,
+    /// Milestone this issue is grouped under, if any.
+    pub milestone: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     /// Markdown body below the frontmatter.
@@ -130,6 +138,12 @@ pub struct IssueSummary {
     pub labels: Vec<String>,
     #[serde(default)]
     pub dependson: Vec<u32>,
+    #[serde(default)]
+    pub related: Vec<u32>,
+    #[serde(default)]
+    pub parent: Option<u32>,
+    #[serde(default)]
+    pub milestone: Option<String>,
     /// File name (relative to the issues directory) backing this issue.
     pub file: String,
     pub created_at: DateTime<Utc>,
@@ -186,6 +200,9 @@ impl Issue {
             priority: self.priority,
             labels: self.labels.clone(),
             dependson: self.dependson.clone(),
+            related: self.related.clone(),
+            parent: self.parent,
+            milestone: self.milestone.clone(),
             file: self.file_name(),
             created_at: self.created_at,
             updated_at: self.updated_at,
@@ -193,40 +210,33 @@ impl Issue {
     }
 
     /// Render this issue to its on-disk markdown representation.
+    ///
+    /// Required fields are always emitted; the optional `parent` and `milestone`
+    /// lines are written only when set, so issues that don't use them stay clean.
     pub fn to_markdown(&self) -> String {
-        let labels = format!("[{}]", self.labels.join(", "));
-        let dependson = format!(
-            "[{}]",
-            self.dependson
-                .iter()
-                .map(|n| n.to_string())
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
-        let body = self.body.trim_end_matches('\n');
-        format!(
-            "---\n\
-             number: {number}\n\
-             title: {title}\n\
-             status: {status}\n\
-             priority: {priority}\n\
-             labels: {labels}\n\
-             dependson: {dependson}\n\
-             created_at: {created_at}\n\
-             updated_at: {updated_at}\n\
-             ---\n\
-             \n\
-             {body}\n",
-            number = self.number,
-            title = self.title,
-            status = self.status.as_str(),
-            priority = self.priority.as_str(),
-            labels = labels,
-            dependson = dependson,
-            created_at = self.created_at.to_rfc3339(),
-            updated_at = self.updated_at.to_rfc3339(),
-            body = body,
-        )
+        let mut out = String::from("---\n");
+        out.push_str(&format!("number: {}\n", self.number));
+        out.push_str(&format!("title: {}\n", self.title));
+        out.push_str(&format!("status: {}\n", self.status.as_str()));
+        out.push_str(&format!("priority: {}\n", self.priority.as_str()));
+        out.push_str(&format!("labels: {}\n", format_string_list(&self.labels)));
+        out.push_str(&format!(
+            "dependson: {}\n",
+            format_number_list(&self.dependson)
+        ));
+        out.push_str(&format!("related: {}\n", format_number_list(&self.related)));
+        if let Some(parent) = self.parent {
+            out.push_str(&format!("parent: {parent}\n"));
+        }
+        if let Some(milestone) = &self.milestone {
+            out.push_str(&format!("milestone: {milestone}\n"));
+        }
+        out.push_str(&format!("created_at: {}\n", self.created_at.to_rfc3339()));
+        out.push_str(&format!("updated_at: {}\n", self.updated_at.to_rfc3339()));
+        out.push_str("---\n\n");
+        out.push_str(self.body.trim_end_matches('\n'));
+        out.push('\n');
+        out
     }
 
     /// Parse an issue from its on-disk markdown representation.
@@ -244,6 +254,9 @@ impl Issue {
         let mut priority = IssuePriority::default();
         let mut labels: Vec<String> = Vec::new();
         let mut dependson: Vec<u32> = Vec::new();
+        let mut related: Vec<u32> = Vec::new();
+        let mut parent: Option<u32> = None;
+        let mut milestone: Option<String> = None;
         let mut created_at: Option<DateTime<Utc>> = None;
         let mut updated_at: Option<DateTime<Utc>> = None;
 
@@ -268,6 +281,24 @@ impl Issue {
                 "priority" => priority = value.parse()?,
                 "labels" => labels = parse_string_list(value),
                 "dependson" => dependson = parse_number_list(value)?,
+                "related" => related = parse_number_list(value)?,
+                "parent" => {
+                    parent =
+                        if value.is_empty() {
+                            None
+                        } else {
+                            Some(value.parse().map_err(|_| {
+                                ParseIssueError(format!("invalid parent: {value:?}"))
+                            })?)
+                        }
+                }
+                "milestone" => {
+                    milestone = if value.is_empty() {
+                        None
+                    } else {
+                        Some(value.to_string())
+                    }
+                }
                 "created_at" => created_at = Some(parse_timestamp(value)?),
                 "updated_at" => updated_at = Some(parse_timestamp(value)?),
                 // Unknown keys are ignored so the format can grow without
@@ -283,6 +314,9 @@ impl Issue {
             priority,
             labels,
             dependson,
+            related,
+            parent,
+            milestone,
             created_at: created_at
                 .ok_or_else(|| ParseIssueError("missing 'created_at'".to_string()))?,
             updated_at: updated_at
@@ -314,6 +348,23 @@ fn split_frontmatter(rest: &str) -> Result<(&str, &str), ParseIssueError> {
     Err(ParseIssueError(
         "missing frontmatter closing '---'".to_string(),
     ))
+}
+
+/// Render strings as a `[a, b, c]` frontmatter list.
+fn format_string_list(items: &[String]) -> String {
+    format!("[{}]", items.join(", "))
+}
+
+/// Render numbers as a `[1, 2, 3]` frontmatter list.
+fn format_number_list(items: &[u32]) -> String {
+    format!(
+        "[{}]",
+        items
+            .iter()
+            .map(|n| n.to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
 }
 
 /// Parse `[a, b, c]` (or a bare comma list) into trimmed, non-empty strings.
@@ -362,6 +413,9 @@ mod tests {
             priority: IssuePriority::High,
             labels: vec!["cli".to_string(), "infra".to_string()],
             dependson: vec![1, 2],
+            related: vec![3],
+            parent: Some(4),
+            milestone: Some("v1".to_string()),
             created_at: ts,
             updated_at: ts,
             body: "## Summary\n\nDo the thing.".to_string(),
@@ -430,6 +484,9 @@ mod tests {
         assert_eq!(summary.priority, IssuePriority::High);
         assert_eq!(summary.labels, vec!["cli", "infra"]);
         assert_eq!(summary.dependson, vec![1, 2]);
+        assert_eq!(summary.related, vec![3]);
+        assert_eq!(summary.parent, Some(4));
+        assert_eq!(summary.milestone, Some("v1".to_string()));
         assert_eq!(summary.file, "007-add-doctor-command.md");
     }
 
@@ -449,6 +506,9 @@ mod tests {
         assert!(text.contains("status: in-progress\n"));
         assert!(text.contains("labels: [cli, infra]\n"));
         assert!(text.contains("dependson: [1, 2]\n"));
+        assert!(text.contains("related: [3]\n"));
+        assert!(text.contains("parent: 4\n"));
+        assert!(text.contains("milestone: v1\n"));
         assert!(text.ends_with("## Summary\n\nDo the thing.\n"));
     }
 
@@ -457,10 +517,44 @@ mod tests {
         let mut issue = sample();
         issue.labels.clear();
         issue.dependson.clear();
+        issue.related.clear();
         let text = issue.to_markdown();
         assert!(text.contains("labels: []\n"));
         assert!(text.contains("dependson: []\n"));
+        assert!(text.contains("related: []\n"));
         assert_eq!(Issue::from_markdown(&text).unwrap(), issue);
+    }
+
+    #[test]
+    fn absent_parent_and_milestone_are_omitted_and_round_trip() {
+        let mut issue = sample();
+        issue.parent = None;
+        issue.milestone = None;
+        let text = issue.to_markdown();
+        assert!(!text.contains("parent:"));
+        assert!(!text.contains("milestone:"));
+        assert_eq!(Issue::from_markdown(&text).unwrap(), issue);
+    }
+
+    #[test]
+    fn blank_parent_and_milestone_values_parse_as_none() {
+        let text = "---\nnumber: 1\ntitle: T\nstatus: todo\npriority: medium\n\
+             parent: \nmilestone: \ncreated_at: 2026-06-14T00:00:00Z\n\
+             updated_at: 2026-06-14T00:00:00Z\n---\n";
+        let issue = Issue::from_markdown(text).unwrap();
+        assert_eq!(issue.parent, None);
+        assert_eq!(issue.milestone, None);
+    }
+
+    #[test]
+    fn parse_rejects_a_non_numeric_parent() {
+        let text = "---\nnumber: 1\ntitle: T\nstatus: todo\npriority: medium\n\
+             parent: nope\ncreated_at: 2026-06-14T00:00:00Z\n\
+             updated_at: 2026-06-14T00:00:00Z\n---\n";
+        assert!(Issue::from_markdown(text)
+            .unwrap_err()
+            .to_string()
+            .contains("invalid parent"));
     }
 
     #[test]

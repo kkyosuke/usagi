@@ -45,14 +45,16 @@ src/
 ├── test_support.rs             # テスト用ヘルパ
 │
 ├── domain/                     # 純粋なエンティティ（外部依存なし）
+│   ├── agent_phase.rs          # Agent のライフサイクル phase（Running / Waiting / Ended）
 │   ├── repository.rs           # Git URL パース・ディレクトリ名導出
-│   ├── settings.rs             # Settings / Theme / AgentCli / LocalLlm、LocalSettings（with_local で上書き解決）・agent 起動ポリシー（agent_wiring）
-│   ├── agent.rs                # Agent port（usagi が agent に求める IF）・AgentWiring / McpServer
+│   ├── settings.rs             # Settings / Theme / AgentCli / LocalLlm、LocalSettings（with_local で上書き解決）・起動ポリシー agent_wiring と AgentCli::launch_command（MCP・フック注入）
+│   ├── agent.rs                # Agent port（usagi が agent に求める IF：launch_command / usage）・AgentWiring
 │   ├── workspace.rs            # グローバル登録エントリ Workspace
 │   ├── workspace_state.rs      # WorkspaceState / WorktreeState / BranchStatus
 │   ├── agent_usage.rs          # AgentUsage / AggregateUsage・モデル別コンテキストウィンドウ上限
 │   ├── history.rs              # コマンド履歴の 1 件 HistoryEntry
-│   └── issue.rs                # Issue / IssueSummary / IssueStatus / IssuePriority（frontmatter 読み書き）
+│   ├── issue.rs                # Issue / IssueSummary / IssueStatus / IssuePriority（frontmatter 読み書き）
+│   └── version.rs              # セマンティックバージョン Version（パース・比較）
 │
 ├── usecase/                    # ビジネスロジック
 │   ├── project.rs              # クローン・既存登録 + 状態同期
@@ -65,9 +67,11 @@ src/
 │   │   └── reconcile.rs       # state.json と .usagi/sessions/ の照合・孤児ディレクトリの強制削除
 │   ├── doctor.rs               # 依存ツールの導入状況チェック（ローカル LLM の健全性・--fix 導入を含む）
 │   ├── issue.rs                # issue の CRUD・検索・依存 readiness 判定
-│   └── local_llm.rs            # ollama・モデルの有無判定とインストール（ensure）
+│   ├── local_llm.rs            # ollama・モデルの有無判定とインストール（ensure）
+│   └── update_check.rs         # リモートのタグから最新リリースを判定（純粋・fetch は注入）
 │
 ├── infrastructure/             # 外部連携（Git・永続化・シェル）
+│   ├── error_log.rs            # 実行時エラーの日次ログ（~/.usagi/logs/・30 日保持・ErrorLog）
 │   ├── git.rs                  # git CLI 経由の読み取り専用検査 + worktree 追加（add_worktree）
 │   ├── json_file.rs            # JSON ファイルの共通 read / 原子的 write（temp + rename）
 │   ├── storage.rs              # グローバル ~/.usagi/ の load/save（Storage）
@@ -75,16 +79,19 @@ src/
 │   ├── history_store.rs        # <repo>/.usagi/history.json の load/append（HistoryStore）
 │   ├── terminal.rs             # 起動するシェルの解決（$SHELL / フォールバック）
 │   ├── pty.rs                  # 疑似ターミナルセッション（portable-pty + vt100、ベル回数の計測）
-│   ├── session_monitor.rs      # 入力待ち判定の純粋ロジック（ベル基準値・待ち集合・アタッチ）
-│   ├── agent/                  # Agent port のアダプタ（Claude=起動コマンド+transcript / Gemini スタブ）・agent_for
+│   ├── release.rs              # git ls-remote --tags でリリースタグを取得（薄い IO ラッパ）
+│   ├── session_monitor.rs      # 入力待ち判定の純粋ロジック（phase 優先・ベル基準値・待ち集合・アタッチ）
+│   ├── agent_state_store.rs    # worktree 別の Agent phase の記録/読み出し（~/.usagi/agent-state/）
+│   ├── agent/                  # Agent port のアダプタ（Claude=launch 委譲+transcript / Gemini スタブ）・agent_for
 │   └── issue_store.rs          # <repo>/.usagi/issues/ の markdown + index.json（IssueStore）
 │
 └── presentation/               # CLI ルーティング・TUI・MCP
-    ├── cli/                    # サブコマンド（init / hop / status / config / doctor / issue / mcp / llm_mcp）
+    ├── cli/                    # サブコマンド（init / hop / status / config / doctor / issue / mcp / llm_mcp / session_mcp / agent_phase（隠し・フック用））
     ├── mcp/                    # MCP サーバ（JSON-RPC 2.0 フレーミングを共有）
     │   ├── mod.rs              # 共有プロトコル（dispatch_line / レスポンス整形 / McpService）
     │   ├── issue.rs            # issue 操作ツール（McpServer）
-    │   └── llm.rs              # ローカル LLM 委譲ツール（LlmMcpServer / LlmBackend）
+    │   ├── llm.rs              # ローカル LLM 委譲ツール（LlmMcpServer / LlmBackend）
+    │   └── session.rs          # セッション操作ツール（SessionMcpServer / AgentBackend）
     └── tui/                    # 自前レンダリングの TUI（console + crossterm、ratatui は不使用）
         ├── app/                # TUI オーケストレーター（画面グラフの遷移を管理 / event）
         ├── screen.rs           # 端末制御（代替スクリーン・RAII ガード）・差分描画（FramePainter）
@@ -94,7 +101,7 @@ src/
         ├── open/               # プロジェクト選択画面（state / ui / event）
         ├── new/                # 新規プロジェクト画面（state / ui / event）
         ├── config/             # 設定画面（state / ui / event）
-        ├── home/               # ホーム画面（state（mod=HomeState / list・mode・log・modal に分割） / ui（mod=render_frame・panes・chrome に分割） / event（mod=loop・handlers に分割） / command（mod=語彙・builtins・registry に分割） / terminal_view / terminal_pane / terminal_pool（常駐＋ベル監視・通知））
+        ├── home/               # ホーム画面（state（mod=HomeState / list・mode・log・modal に分割） / ui（mod=render_frame・panes・chrome に分割） / event（mod=loop・handlers に分割） / command（mod=語彙・builtins・registry に分割） / terminal_view / terminal_pane / terminal_pool（常駐＋phase/ベル監視・通知））
         └── widgets/            # 共通 widget（mod / picker / dir_picker）
 ```
 

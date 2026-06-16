@@ -52,6 +52,13 @@ pub fn rabbit_lines(width: usize) -> Vec<String> {
         .collect()
 }
 
+/// The raw (unstyled) lines of the usagi mascot, for callers that place the art
+/// themselves rather than centring it (e.g. the home screen's top-right update
+/// notice).
+pub fn rabbit_art() -> [&'static str; 3] {
+    RABBIT
+}
+
 /// A centred, green-bold screen title.
 pub fn title_line(width: usize, title: &str) -> String {
     style(centered(width, title)).green().bold().to_string()

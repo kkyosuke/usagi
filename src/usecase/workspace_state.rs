@@ -45,7 +45,8 @@ pub fn inspect_worktree(path: &Path) -> WorktreeState {
     let (branch, head) = git::worktree_head(path).unwrap_or((None, String::new()));
     let default = git::default_branch(path);
     let upstream = branch.as_deref().and_then(|b| git::upstream_of(path, b));
-    let status = classify(path, branch.as_deref(), &default, upstream.is_some());
+    let dirty = git::has_uncommitted_changes(path);
+    let status = classify(path, branch.as_deref(), &default, upstream.is_some(), dirty);
     WorktreeState {
         branch,
         path: path.to_path_buf(),
@@ -57,18 +58,47 @@ pub fn inspect_worktree(path: &Path) -> WorktreeState {
     }
 }
 
-/// Derive a branch's lifecycle status.
+/// Derive a branch's lifecycle status from its working tree, its commits
+/// relative to the default branch, and whether it has an upstream.
 ///
-/// `synced` (up to date) takes priority over `pushed`, which takes priority over
-/// `local`. A branch is `synced` when it has **no commits of its own** beyond the
-/// default branch — every commit it carries is already on the integration branch
-/// (it is an ancestor), so there is nothing un-merged. A branch equal to the
-/// default branch is never compared against itself, so it is only ever `local`
-/// or `pushed`.
-fn classify(repo: &Path, branch: Option<&str>, default: &str, has_upstream: bool) -> BranchStatus {
-    if let Some(branch) = branch {
-        if branch != default && git::is_merged(repo, branch, default) {
-            return BranchStatus::UpToDate;
+/// The order of checks:
+///
+/// 1. **dirty** — an uncommitted change in the working tree wins regardless of
+///    commit topology: there is work here that has not been committed.
+/// 2. Otherwise, by commits *ahead of* the default branch (commits of its own):
+///    - **ahead > 0** → `pushed` if it has an upstream, else `local`.
+///    - **ahead == 0** → `synced` if the default has moved past it (behind > 0),
+///      else `new` (even with the default: freshly cut, no work yet).
+///
+/// A branch equal to the default branch (or a detached HEAD) is never compared
+/// against itself, so its ahead/behind counts are not consulted; it falls
+/// through to `local` / `pushed` by its upstream state. The default is resolved
+/// against the remote (`origin/<default>`) first inside [`git::ahead_behind`],
+/// so the status reflects what has landed on the remote integration branch even
+/// before a local fetch.
+fn classify(
+    repo: &Path,
+    branch: Option<&str>,
+    default: &str,
+    has_upstream: bool,
+    dirty: bool,
+) -> BranchStatus {
+    if dirty {
+        return BranchStatus::Dirty;
+    }
+    // Only a real branch other than the default is measured against the default;
+    // the default branch and a detached HEAD skip the ahead/behind read.
+    let counts = match branch {
+        Some(branch) if branch != default => git::ahead_behind(repo, branch, default),
+        _ => None,
+    };
+    if let Some((ahead, behind)) = counts {
+        if ahead == 0 {
+            return if behind > 0 {
+                BranchStatus::Synced
+            } else {
+                BranchStatus::New
+            };
         }
     }
     if has_upstream {
@@ -104,7 +134,8 @@ mod tests {
 
         let wt = inspect_worktree(dir.path());
         assert_eq!(wt.branch.as_deref(), Some("main"));
-        // The worktree is on the repo's own default branch → not "merged".
+        // The worktree is on the repo's own default branch (clean, no upstream)
+        // → local; the default is never measured against itself.
         assert_eq!(wt.status, BranchStatus::Local);
         assert_eq!(wt.upstream, None);
         assert_eq!(wt.head.len(), 7);
@@ -171,26 +202,64 @@ mod tests {
     }
 
     #[test]
-    fn classify_reports_synced_for_an_ancestor_branch() {
+    fn classify_reports_new_for_a_freshly_cut_branch() {
         let dir = tempfile::tempdir().unwrap();
         init_repo(dir.path());
-        // A branch with no commits of its own is an ancestor of main, so it has
-        // nothing un-merged → synced (up to date).
+        // A branch cut from main with no commits of its own, and main has not
+        // moved past it: even with the default → new (nothing done yet), NOT
+        // synced. This is the freshly created session case.
         git(dir.path())
             .args(["branch", "feature"])
             .status()
             .unwrap();
         assert_eq!(
-            classify(dir.path(), Some("feature"), "main", false),
-            BranchStatus::UpToDate
+            classify(dir.path(), Some("feature"), "main", false, false),
+            BranchStatus::New
         );
     }
 
     #[test]
-    fn classify_reports_pushed_for_unmerged_tracked_branch() {
+    fn classify_reports_synced_when_the_default_moved_past_the_branch() {
         let dir = tempfile::tempdir().unwrap();
         init_repo(dir.path());
-        // A branch with a commit ahead of main is not merged.
+        // feature is cut from main, then main gains a commit feature does not
+        // have: feature is behind with nothing of its own ahead → synced.
+        git(dir.path())
+            .args(["branch", "feature"])
+            .status()
+            .unwrap();
+        std::fs::write(dir.path().join("on-main"), "y").unwrap();
+        git(dir.path()).args(["add", "."]).status().unwrap();
+        git(dir.path())
+            .args(["commit", "-q", "-m", "main moves on"])
+            .status()
+            .unwrap();
+        assert_eq!(
+            classify(dir.path(), Some("feature"), "main", false, false),
+            BranchStatus::Synced
+        );
+    }
+
+    #[test]
+    fn classify_reports_dirty_when_the_tree_has_uncommitted_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        init_repo(dir.path());
+        git(dir.path())
+            .args(["branch", "feature"])
+            .status()
+            .unwrap();
+        // Dirty wins over every commit-topology state, even a pushed upstream.
+        assert_eq!(
+            classify(dir.path(), Some("feature"), "main", true, true),
+            BranchStatus::Dirty
+        );
+    }
+
+    #[test]
+    fn classify_reports_local_and_pushed_for_a_branch_with_its_own_commits() {
+        let dir = tempfile::tempdir().unwrap();
+        init_repo(dir.path());
+        // A branch with a commit ahead of main has un-merged work of its own.
         git(dir.path())
             .args(["checkout", "-q", "-b", "feature"])
             .status()
@@ -202,9 +271,13 @@ mod tests {
             .status()
             .unwrap();
 
-        // has_upstream = true, not merged → pushed.
+        // No upstream → local; with an upstream → pushed.
         assert_eq!(
-            classify(dir.path(), Some("feature"), "main", true),
+            classify(dir.path(), Some("feature"), "main", false, false),
+            BranchStatus::Local
+        );
+        assert_eq!(
+            classify(dir.path(), Some("feature"), "main", true, false),
             BranchStatus::Pushed
         );
     }
@@ -213,14 +286,16 @@ mod tests {
     fn classify_handles_detached_head_and_the_default_branch() {
         let dir = tempfile::tempdir().unwrap();
         init_repo(dir.path());
-        // Detached HEAD (branch = None): never merged, only local/pushed.
+        // Detached HEAD (branch = None): ahead/behind is not consulted, so it is
+        // only ever local/pushed by upstream state.
         assert_eq!(
-            classify(dir.path(), None, "main", false),
+            classify(dir.path(), None, "main", false, false),
             BranchStatus::Local
         );
-        // The default branch is never classified as merged against itself.
+        // The default branch is never measured against itself, so it cannot read
+        // new/synced — only local/pushed.
         assert_eq!(
-            classify(dir.path(), Some("main"), "main", false),
+            classify(dir.path(), Some("main"), "main", false, false),
             BranchStatus::Local
         );
     }

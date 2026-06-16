@@ -10,54 +10,74 @@ use std::path::PathBuf;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-/// Lifecycle status of a branch relative to its remote and the default branch.
+/// Lifecycle status of a branch relative to its working tree, its remote, and
+/// the default branch.
+///
+/// The states form a progression — `New` → (`Dirty`) → `Local` → `Pushed` →
+/// `Synced` — but a branch does not march through them in order: it is
+/// re-derived from git on every refresh, so editing files reads `Dirty`,
+/// committing reads `Local`, pushing reads `Pushed`, and a branch the default
+/// has moved past reads `Synced`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BranchStatus {
-    /// The branch only exists locally; it has no upstream tracking branch.
+    /// Freshly cut and untouched: a clean working tree with no commits of its
+    /// own and the default branch has not moved past it (even with the default).
+    /// This is the state a session branch starts in, before any work.
+    New,
+    /// The working tree has uncommitted changes (modified, staged, or untracked
+    /// files) — work in progress that has not been committed yet.
+    Dirty,
+    /// Clean tree with commits of its own that have not been pushed (no upstream
+    /// tracking branch).
     Local,
-    /// The branch is tracked by an upstream (it has been pushed).
+    /// Clean tree with commits of its own and an upstream tracking branch (the
+    /// branch has been pushed but is not yet merged).
     Pushed,
-    /// The branch has no commits of its own beyond the default branch — every
-    /// commit it carries is already on the integration branch, so there is
-    /// nothing un-merged. Reads as `synced` (up to date). A freshly created
-    /// session branch and a fully merged one are indistinguishable in git
-    /// (both are ancestors of the default branch with zero commits ahead), so
-    /// they share this state. The `merged` alias keeps older `state.json`
-    /// (which spelled this `"merged"`) loading.
-    #[serde(alias = "merged")]
-    UpToDate,
+    /// The default branch has moved past this branch (it is behind with no
+    /// commits of its own ahead): everything the branch carried is now on the
+    /// integration branch, so it reads as `synced` — merged / up to date. Older
+    /// `state.json` spelled this `"merged"` then `"up_to_date"`; both aliases
+    /// keep that data loading (it is now written as `"synced"`).
+    #[serde(alias = "merged", alias = "up_to_date")]
+    Synced,
 }
 
 impl BranchStatus {
     pub fn as_str(&self) -> &'static str {
         match self {
+            BranchStatus::New => "new",
+            BranchStatus::Dirty => "dirty",
             BranchStatus::Local => "local",
             BranchStatus::Pushed => "pushed",
-            BranchStatus::UpToDate => "synced",
+            BranchStatus::Synced => "synced",
         }
     }
 
-    /// Rank by lifecycle progress: `Local` < `Pushed` < `UpToDate`.
+    /// Rank by lifecycle progress: `New` < `Dirty` < `Local` < `Pushed` <
+    /// `Synced`. Used to aggregate a session's repositories into its
+    /// least-progressed status.
     fn rank(self) -> u8 {
         match self {
-            BranchStatus::Local => 0,
-            BranchStatus::Pushed => 1,
-            BranchStatus::UpToDate => 2,
+            BranchStatus::New => 0,
+            BranchStatus::Dirty => 1,
+            BranchStatus::Local => 2,
+            BranchStatus::Pushed => 3,
+            BranchStatus::Synced => 4,
         }
     }
 
     /// Aggregate the per-repository statuses of one session's branch into a
     /// single status: the *least-progressed* of them. So a session reads as
     /// `synced` only when every repository's branch is up to date, and `pushed`
-    /// only when none is still local — a conservative summary where `synced`
-    /// always means "no un-merged work anywhere". An empty iterator yields
-    /// `Local`.
+    /// only when none is still local/dirty/new — a conservative summary where
+    /// `synced` always means "no un-merged work anywhere". An empty iterator
+    /// yields `New`.
     pub fn aggregate(statuses: impl IntoIterator<Item = BranchStatus>) -> BranchStatus {
         statuses
             .into_iter()
             .min_by_key(|s| s.rank())
-            .unwrap_or(BranchStatus::Local)
+            .unwrap_or(BranchStatus::New)
     }
 }
 
@@ -144,9 +164,11 @@ mod tests {
     #[test]
     fn branch_status_as_str_and_display_match() {
         for (status, text) in [
+            (BranchStatus::New, "new"),
+            (BranchStatus::Dirty, "dirty"),
             (BranchStatus::Local, "local"),
             (BranchStatus::Pushed, "pushed"),
-            (BranchStatus::UpToDate, "synced"),
+            (BranchStatus::Synced, "synced"),
         ] {
             assert_eq!(status.as_str(), text);
             assert_eq!(format!("{status}"), text);
@@ -157,26 +179,45 @@ mod tests {
     fn aggregate_reports_the_least_progressed_status() {
         use BranchStatus::*;
         // Uniform sets keep their status.
-        assert_eq!(BranchStatus::aggregate([UpToDate, UpToDate]), UpToDate);
+        assert_eq!(BranchStatus::aggregate([Synced, Synced]), Synced);
         assert_eq!(BranchStatus::aggregate([Pushed, Pushed]), Pushed);
         // Mixed sets fall to the least-progressed member, regardless of order.
-        assert_eq!(BranchStatus::aggregate([UpToDate, Local]), Local);
-        assert_eq!(BranchStatus::aggregate([Pushed, UpToDate]), Pushed);
-        assert_eq!(BranchStatus::aggregate([UpToDate, Pushed, Local]), Local);
-        // A single repository reports its own status; an empty set is `Local`.
-        assert_eq!(BranchStatus::aggregate([UpToDate]), UpToDate);
-        assert_eq!(BranchStatus::aggregate([]), Local);
+        assert_eq!(BranchStatus::aggregate([Synced, Local]), Local);
+        assert_eq!(BranchStatus::aggregate([Pushed, Synced]), Pushed);
+        assert_eq!(BranchStatus::aggregate([Synced, Pushed, Local]), Local);
+        // Dirty and New outrank a committed branch as "least progressed".
+        assert_eq!(BranchStatus::aggregate([Pushed, Dirty]), Dirty);
+        assert_eq!(BranchStatus::aggregate([Synced, New]), New);
+        assert_eq!(BranchStatus::aggregate([Dirty, New]), New);
+        // A single repository reports its own status; an empty set is `New`.
+        assert_eq!(BranchStatus::aggregate([Synced]), Synced);
+        assert_eq!(BranchStatus::aggregate([]), New);
     }
 
     #[test]
-    fn branch_status_serializes_to_snake_case_and_reads_the_merged_alias() {
-        let json = serde_json::to_string(&BranchStatus::UpToDate).unwrap();
-        assert_eq!(json, "\"up_to_date\"");
+    fn branch_status_serializes_to_snake_case_and_reads_legacy_aliases() {
+        let json = serde_json::to_string(&BranchStatus::Synced).unwrap();
+        assert_eq!(json, "\"synced\"");
         let parsed: BranchStatus = serde_json::from_str("\"pushed\"").unwrap();
         assert_eq!(parsed, BranchStatus::Pushed);
-        // Older state.json spelled this status "merged"; the alias keeps it loading.
-        let legacy: BranchStatus = serde_json::from_str("\"merged\"").unwrap();
-        assert_eq!(legacy, BranchStatus::UpToDate);
+        assert_eq!(
+            serde_json::from_str::<BranchStatus>("\"new\"").unwrap(),
+            BranchStatus::New
+        );
+        assert_eq!(
+            serde_json::from_str::<BranchStatus>("\"dirty\"").unwrap(),
+            BranchStatus::Dirty
+        );
+        // Older state.json spelled the synced status "merged", then "up_to_date";
+        // both aliases keep that data loading.
+        assert_eq!(
+            serde_json::from_str::<BranchStatus>("\"merged\"").unwrap(),
+            BranchStatus::Synced
+        );
+        assert_eq!(
+            serde_json::from_str::<BranchStatus>("\"up_to_date\"").unwrap(),
+            BranchStatus::Synced
+        );
     }
 
     fn sample_worktree() -> WorktreeState {

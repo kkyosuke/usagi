@@ -132,26 +132,33 @@ worktree を束ねます。各 worktree は git ステータス付き（下記 `
 
 ## `status`: ブランチのライフサイクル状態
 
-`local` → `pushed` → `up_to_date`（synced）の 3 状態で、ブランチがリモート・既定ブランチに対してどの段階にあるかを表します。
+`new` → `dirty` → `local` → `pushed` → `synced` の 5 状態で、ブランチが「作業ツリー・リモート・既定ブランチ」に対してどの段階にあるかを表します。ブランチがこの順に一直線に進むわけではなく、**更新のたびに git から再判定**されます（編集すれば `dirty`、コミットすれば `local`、push すれば `pushed`）。
 
 | 値（JSON） | 表示 | 意味 |
 |---|---|---|
-| `local` | `local` | ローカルにのみ存在。上流追跡ブランチが無い（未 push） |
-| `pushed` | `pushed` | 上流追跡ブランチがある（push 済み） |
-| `up_to_date` | `synced` | **独自コミットが 0**（既定ブランチの ancestor）。未マージの変更が無く最新に追従済み＝ up to date |
+| `new` | `new` | 切ったばかりで未着手。作業ツリーがクリーンで独自コミットが 0、かつ既定ブランチも先行していない（既定と同じ位置）。セッション作成直後の状態 |
+| `dirty` | `dirty` | 作業ツリーに未コミットの変更（変更・ステージ済み・未追跡）がある＝コミット前の作業中 |
+| `local` | `local` | クリーンで、push されていない独自コミットがある（上流追跡ブランチ無し） |
+| `pushed` | `pushed` | クリーンで、独自コミットがあり上流追跡ブランチもある（push 済み・未マージ） |
+| `synced` | `synced` | 既定ブランチがこのブランチを追い越した（独自コミット 0 で behind > 0）。ブランチが持っていた変更は既定ブランチに取り込まれている＝マージ済み／最新追従済み |
 
-> **後方互換**: 旧 `state.json` はこの状態を `"merged"` と綴っていました。`BranchStatus` に `#[serde(alias = "merged")]` を付けているため、旧データの `"merged"` も `up_to_date` として読み込めます（書き出しは常に `"up_to_date"`）。
+> **`new` と `synced` を分けた理由**: 旧実装は「独自コミット 0（既定ブランチの ancestor）」を一律 `synced` としていたため、**切っただけの新規ブランチ**も `synced` と表示され「ずっと synced で意味がわからない」状態でした。新規（既定と同位置 = behind 0）と、既定が追い越したマージ済み（behind > 0）を **ahead/behind のコミット数**で区別し、前者を `new`、後者だけを `synced` とします。
 
-> **なぜ「merged」ではなく「up to date / synced」なのか**: 判定は「ブランチ先端が既定ブランチの ancestor か（＝独自コミットが 0 か）」だけを見ます。**新規に切っただけでまだコミットしていないブランチ**も、**完全にマージ済みのブランチ**も、git 上はどちらも「独自コミット 0・ancestor」で区別できません。そのため「マージ済み」と断定せず、「未マージの変更が無い＝最新に追従済み（up to date）」という事実だけを表す `synced` にしています。
+> **後方互換**: 旧 `state.json` はこの状態を `"merged"`→`"up_to_date"` と綴っていました。`BranchStatus` に `#[serde(alias = "merged", alias = "up_to_date")]` を付けているため旧データも `synced` として読み込めます（書き出しは常に `"synced"`）。
 
 ### 判定ロジック（`usecase/workspace_state.rs` の `classify`）
 
-優先度は **up_to_date（synced） > pushed > local**。
+判定の順序:
 
-1. **up_to_date（synced）**: そのブランチの先端が、**その worktree のリポジトリの**既定ブランチの ancestor（`git merge-base --is-ancestor`）であれば、独自コミットが 0 ＝未マージの変更が無いとみなす。リモートの既定ブランチ（`origin/<default>`）を優先的に基準にするため、ローカル fetch 前でも「リモート main に対して追従済みか」を反映できる。
-   - ただし既定ブランチと同名のブランチは、自分自身に対する判定から除外する（`local` / `pushed` のみ）。
-2. **pushed**: 上流追跡ブランチ（`<branch>@{upstream}`）があれば push 済み。
-3. **local**: 上記いずれにも当てはまらない。
+1. **dirty**: 作業ツリーに未コミット変更があれば、コミット状況によらず最優先で `dirty`。
+2. それ以外は、**既定ブランチに対する ahead（独自コミット数）** で分岐する。ahead/behind は `infrastructure/git.rs` の `ahead_behind` が `git rev-list --left-right --count` で求め、基準の既定ブランチはリモート（`origin/<default>`）を優先するため、ローカル fetch 前でも「リモート main に取り込まれたか」を反映できる。
+   - **ahead > 0**: 上流追跡ブランチがあれば `pushed`、無ければ `local`。
+   - **ahead == 0**: 既定ブランチが先行していれば（behind > 0）`synced`、そうでなければ（既定と同位置）`new`。
+3. 既定ブランチと同名のブランチ・detached HEAD は自分自身に対して比較しないため ahead/behind を参照せず、上流の有無で `local` / `pushed` のみになる。
+
+### 集約（複数リポジトリ → セッション 1 行）
+
+セッションは複数リポジトリの worktree を束ねるため、ホーム画面では各リポジトリの status を **最も進んでいないもの**に集約して 1 行に表示します（`BranchStatus::aggregate`）。進捗順は `new < dirty < local < pushed < synced`。したがってセッションが `synced` と読めるのは **全リポジトリのブランチが synced** のときだけです。詳細は [design/05-home.md](../design/05-home.md) を参照。
 
 ## 同期と参照
 
@@ -159,11 +166,22 @@ worktree を束ねます。各 worktree は git ステータス付き（下記 `
 
 | 関数 | 役割 |
 |---|---|
-| `inspect_worktree(path)` | 1 つの worktree の git ステータスから `WorktreeState` を組み立てる（既定ブランチはその worktree のリポジトリから解決） |
+| `inspect_worktree(path)` | 1 つの worktree の git ステータス（ブランチ・HEAD・上流・未コミット変更・ahead/behind）から `WorktreeState` を組み立てる（既定ブランチはその worktree のリポジトリから解決） |
 | `sync(cwd)` | 保存済み state を読み込み、各セッション worktree のステータスを再計算して `<repo>/.usagi/state.json` に保存して返す（セッションが無ければ空の state を保存） |
 | `load(cwd)` | 保存済みの状態を読み込む（無ければ `None`） |
 
-CLI からは `usagi status` で `sync` が走り、最新状態を保存しつつセッションごとに一覧表示します。
+### 更新タイミング
+
+status は再計算した時点のスナップショットで、`sync` が走るたびに最新化されます。再計算の契機は次のとおり:
+
+| 契機 | 動作 |
+|---|---|
+| `usagi status`（CLI） | `sync` を実行して最新化し、セッションごとに一覧表示する |
+| ホーム画面の起動時 | 画面を開いた瞬間に `sync` して最新の status を表示する |
+| 埋め込み terminal / agent を閉じた・切り替えた直後 | ペインでコミット・push・マージした可能性があるため再 `sync` し、カーソル位置を保ったまま status を更新する |
+| セッションの作成・削除時 | 作成・削除に伴い `sync`（`reload_sessions`）して一覧と status を更新する |
+
+> git 呼び出しはユーザー操作の区切り（画面遷移・ペイン離脱・コマンド実行）でのみ行い、常時ポーリングはしない。
 
 セッションの作成・削除時（`usecase/session` の `reconcile`）には、`.usagi/sessions/` 配下のディレクトリと `state.json` の記録を照合し、**記録のない孤児ディレクトリを未コミット変更の有無にかかわらず強制削除**してディスクと state の同期を保ちます。記録済みセッション本体の削除には引き続き `--force` のガードが効きます。詳細は [4. オーケストレーション](../04-orchestration.md) を参照。
 

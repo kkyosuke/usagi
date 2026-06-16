@@ -11,8 +11,9 @@ use super::super::command::{CommandInfo, Hint};
 use super::super::state::{HomeState, LineKind, LogLine, Mode, WorktreeList, ROOT_NAME};
 use super::super::terminal_view::TerminalView;
 use super::{
-    clip_to_width, ACTIVE_COL, CARET, DETACHED, EMPTY_MESSAGE, HINT_INDENT, HINT_MAX, LOCAL_ICON,
-    NAME_PREFIX, PUSHED_ICON, ROOT_DETAIL, STATUS_COL, SYNCED_ICON, TERMINAL_STARTING,
+    clip_to_width, ACTIVE_COL, CARET, DETACHED, DIRTY_ICON, EMPTY_MESSAGE, HINT_INDENT, HINT_MAX,
+    LOCAL_ICON, NAME_PREFIX, NEW_ICON, PUSHED_ICON, ROOT_DETAIL, STATUS_COL, SYNCED_ICON,
+    TERMINAL_STARTING,
 };
 use crate::domain::agent_usage::AggregateUsage;
 use crate::domain::settings::SessionActionUi;
@@ -21,9 +22,11 @@ use crate::domain::workspace_state::{BranchStatus, WorktreeState};
 /// The Nerd Font git glyph for a branch lifecycle status.
 fn status_icon(status: BranchStatus) -> char {
     match status {
+        BranchStatus::New => NEW_ICON,
+        BranchStatus::Dirty => DIRTY_ICON,
         BranchStatus::Local => LOCAL_ICON,
         BranchStatus::Pushed => PUSHED_ICON,
-        BranchStatus::UpToDate => SYNCED_ICON,
+        BranchStatus::Synced => SYNCED_ICON,
     }
 }
 
@@ -33,9 +36,11 @@ fn status_icon(status: BranchStatus) -> char {
 pub(super) fn status_label(status: BranchStatus) -> String {
     let text = format!("{} {}", status_icon(status), status.as_str());
     match status {
+        BranchStatus::New => style(text).blue().to_string(),
+        BranchStatus::Dirty => style(text).magenta().to_string(),
         BranchStatus::Local => style(text).yellow().to_string(),
         BranchStatus::Pushed => style(text).green().to_string(),
-        BranchStatus::UpToDate => style(text).cyan().to_string(),
+        BranchStatus::Synced => style(text).cyan().to_string(),
     }
 }
 
@@ -53,23 +58,29 @@ pub(super) fn status_cell(status: Option<BranchStatus>) -> String {
     }
 }
 
-/// The running/waiting state of a session's embedded agent, shown by an icon on
-/// the row's first line and spelled out on its detail line.
+/// The state of a session's embedded agent, shown by an icon on the row's first
+/// line and spelled out on its detail line.
 #[derive(Clone, Copy)]
 enum AgentState {
     /// No live embedded session.
     Idle,
     /// A live session whose agent is running (not awaiting input).
     Running,
-    /// A live session whose agent rang the bell and awaits input.
+    /// A live session whose agent finished a turn and awaits input.
     Waiting,
+    /// A session whose agent has finished (its process exited) and is now idle;
+    /// the bare shell it ran in may still be alive. Displayed as `⏸ idle`.
+    Done,
 }
 
 impl AgentState {
-    /// Pick the state from the live / waiting flags. Waiting takes precedence: a
-    /// session awaiting input is necessarily live.
-    fn from_flags(live: bool, waiting: bool) -> Self {
-        if waiting {
+    /// Pick the state from the live / waiting / done flags, in precedence order:
+    /// done (the agent exited) wins over waiting, which wins over a plain live
+    /// session — a session awaiting input or finished is necessarily live.
+    fn from_flags(live: bool, waiting: bool, done: bool) -> Self {
+        if done {
+            AgentState::Done
+        } else if waiting {
             AgentState::Waiting
         } else if live {
             AgentState::Running
@@ -79,8 +90,8 @@ impl AgentState {
     }
 
     /// The detail-line content: an icon together with its label — `▶ running`
-    /// (green) or `◆ waiting` (yellow) — clipped to `width`, or `None` while idle
-    /// (the row has no agent in use).
+    /// (green), `◆ waiting` (yellow), or `⏸ idle` (cyan) — clipped to `width`, or
+    /// `None` while idle (the row has no agent in use).
     fn detail(self, width: usize) -> Option<String> {
         match self {
             AgentState::Idle => None,
@@ -93,6 +104,12 @@ impl AgentState {
             AgentState::Waiting => Some(
                 style(clip_to_width("◆ waiting", width))
                     .yellow()
+                    .bold()
+                    .to_string(),
+            ),
+            AgentState::Done => Some(
+                style(clip_to_width("⏸ idle", width))
+                    .cyan()
                     .bold()
                     .to_string(),
             ),
@@ -141,7 +158,7 @@ fn detail_line(gutter: &str, detail: String) -> String {
 /// worktree's two lines; line 1 then has a `●`/`○` kind icon (primary or ordinary
 /// worktree), the branch name, and the git `status` at the right edge. Line 2 is
 /// indented under the name and, when an agent is in use, carries its icon + label
-/// (`▶ running` / `◆ waiting`).
+/// (`▶ running` / `◆ waiting` / `⏸ idle`).
 #[allow(clippy::too_many_arguments)]
 pub(super) fn worktree_row(
     worktree: &WorktreeState,
@@ -152,6 +169,7 @@ pub(super) fn worktree_row(
     in_switch: bool,
     live: bool,
     waiting: bool,
+    done: bool,
 ) -> (String, String) {
     let kind = if worktree.primary {
         style("●").magenta().to_string()
@@ -172,7 +190,7 @@ pub(super) fn worktree_row(
     // Line 2 spells out the agent state with its icon, or is blank when idle.
     // Only the active bar runs down to it — the `>` cursor stays a single point
     // on line 1, so the detail-line gutter ignores the cursor.
-    let detail = AgentState::from_flags(live, waiting)
+    let detail = AgentState::from_flags(live, waiting, done)
         .detail(detail_width)
         .unwrap_or_default();
     let line2 = detail_line(&gutter_cell(false, active, in_switch), detail);
@@ -226,6 +244,7 @@ pub(super) fn left_pane(
     list: &WorktreeList,
     live: &HashSet<PathBuf>,
     waiting: &HashSet<PathBuf>,
+    done: &HashSet<PathBuf>,
     left_w: usize,
     rows: usize,
     in_switch: bool,
@@ -277,6 +296,7 @@ pub(super) fn left_pane(
                 in_switch,
                 live.contains(&w.path),
                 waiting.contains(&w.path),
+                done.contains(&w.path),
             );
             if in_switch && !selected {
                 top = dim_row(&top);
@@ -475,14 +495,15 @@ pub(super) fn switch_preview(state: &HomeState, width: usize, rows: usize) -> Ve
     // Identify the highlighted row. `selected()` is `Some` for a real session
     // row and `None` on the root row (which carries no git status / tracked
     // path), so the match doubles as the root/session split.
-    let (name, live, waiting, status) = match state.list().selected() {
+    let (name, live, waiting, done, status) = match state.list().selected() {
         Some(w) => (
             w.branch.as_deref().unwrap_or(DETACHED).to_string(),
             state.is_live(&w.path),
             state.is_waiting(&w.path),
+            state.is_done(&w.path),
             Some(w.status),
         ),
-        None => (ROOT_NAME.to_string(), false, false, None),
+        None => (ROOT_NAME.to_string(), false, false, false, None),
     };
 
     // Header: the name, then either the git status + agent state (a session) or
@@ -491,7 +512,7 @@ pub(super) fn switch_preview(state: &HomeState, width: usize, rows: usize) -> Ve
     match status {
         Some(status) => {
             header.push_str(&format!("   {}", status_label(status)));
-            if let Some(agent) = AgentState::from_flags(live, waiting).detail(width) {
+            if let Some(agent) = AgentState::from_flags(live, waiting, done).detail(width) {
                 header.push_str(&format!("   {agent}"));
             }
         }

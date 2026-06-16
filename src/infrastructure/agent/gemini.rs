@@ -11,6 +11,7 @@ use std::path::Path;
 
 use crate::domain::agent::{Agent, AgentWiring};
 use crate::domain::agent_usage::AgentUsage;
+use crate::domain::settings::AgentCli;
 
 /// The Gemini CLI adapter.
 #[derive(Default)]
@@ -28,10 +29,10 @@ impl Agent for GeminiAgent {
         "gemini"
     }
 
-    fn launch_command(&self, _wiring: &AgentWiring) -> String {
+    fn launch_command(&self, wiring: &AgentWiring) -> String {
         // Gemini has no inline MCP flag — its servers come from settings.json — so
-        // it launches plain.
-        "gemini".to_string()
+        // it launches plain (the domain builder returns the bare command).
+        AgentCli::Gemini.launch_command(wiring.local_llm_model.as_deref(), &wiring.usagi_bin)
     }
 
     fn usage(&self, _worktree: &Path) -> Option<AgentUsage> {
@@ -49,14 +50,17 @@ mod tests {
     fn gemini_launches_plain_and_reports_no_usage() {
         let agent = GeminiAgent::new();
         assert_eq!(agent.program(), "gemini");
-        // The wiring is ignored — plain `gemini` either way.
+        // The wiring is ignored — plain `gemini` whether or not the local LLM is on.
         assert_eq!(
-            agent.launch_command(&Settings::default().agent_wiring()),
+            agent.launch_command(&Settings::default().agent_wiring("usagi")),
             "gemini"
         );
         let mut settings = Settings::default();
         settings.local_llm.enabled = true;
-        assert_eq!(agent.launch_command(&settings.agent_wiring()), "gemini");
+        assert_eq!(
+            agent.launch_command(&settings.agent_wiring("usagi")),
+            "gemini"
+        );
         assert_eq!(agent.usage(&PathBuf::from("/anywhere")), None);
     }
 }

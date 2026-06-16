@@ -131,9 +131,11 @@ fn title_bar_singular_and_plural() {
 #[test]
 fn status_label_pairs_a_git_icon_with_each_word() {
     for (status, icon, word) in [
+        (BranchStatus::New, NEW_ICON, "new"),
+        (BranchStatus::Dirty, DIRTY_ICON, "dirty"),
         (BranchStatus::Local, LOCAL_ICON, "local"),
         (BranchStatus::Pushed, PUSHED_ICON, "pushed"),
-        (BranchStatus::UpToDate, SYNCED_ICON, "synced"),
+        (BranchStatus::Synced, SYNCED_ICON, "synced"),
     ] {
         let plain = console::strip_ansi_codes(&status_label(status)).into_owned();
         assert!(plain.contains(icon), "{plain:?} missing its icon");
@@ -156,6 +158,7 @@ fn worktree_row_marks_selected_primary_and_detached() {
         true,
         false,
         false,
+        false,
     );
     assert!(top.contains('>'));
     assert!(top.contains('●'));
@@ -167,6 +170,7 @@ fn worktree_row_marks_selected_primary_and_detached() {
         10,
         10,
         true,
+        false,
         false,
         false,
         false,
@@ -183,6 +187,7 @@ fn worktree_row_marks_selected_primary_and_detached() {
         true,
         false,
         false,
+        false,
     );
     assert!(!other_top.contains('>'));
     assert!(other_top.contains('○'));
@@ -192,6 +197,7 @@ fn worktree_row_marks_selected_primary_and_detached() {
         &worktree(None, false, BranchStatus::Local),
         10,
         10,
+        false,
         false,
         false,
         false,
@@ -212,6 +218,7 @@ fn worktree_row_marks_the_active_worktree_with_a_gutter_bar_on_both_lines() {
         false,
         true,
         false,
+        false,
     );
     // The green `▎` accent bar runs down both lines of the active row (the
     // detail line carries it too, to the left of the agent state).
@@ -223,6 +230,7 @@ fn worktree_row_marks_the_active_worktree_with_a_gutter_bar_on_both_lines() {
         &worktree(Some("feature"), false, BranchStatus::Local),
         10,
         10,
+        false,
         false,
         false,
         false,
@@ -244,6 +252,7 @@ fn worktree_row_shows_a_running_agent_and_one_waiting_for_input() {
         false,
         true,
         false,
+        false,
     );
     assert!(running_detail.contains('▶'));
     assert!(running_detail.contains("running"));
@@ -257,15 +266,33 @@ fn worktree_row_shows_a_running_agent_and_one_waiting_for_input() {
         false,
         true,
         true,
+        false,
     );
     assert!(waiting_detail.contains('◆'));
     assert!(!waiting_detail.contains('▶'));
     assert!(waiting_detail.contains("waiting"));
 
+    // A finished agent shows the idle badge, taking precedence over running.
+    let (_, done_detail) = worktree_row(
+        &worktree(Some("feature"), false, BranchStatus::Local),
+        10,
+        12,
+        false,
+        false,
+        false,
+        true,
+        false,
+        true,
+    );
+    assert!(done_detail.contains('⏸'));
+    assert!(done_detail.contains("idle"));
+    assert!(!done_detail.contains('▶'));
+
     let (idle_top, idle_detail) = worktree_row(
         &worktree(Some("feature"), false, BranchStatus::Local),
         10,
         12,
+        false,
         false,
         false,
         false,
@@ -307,6 +334,7 @@ fn worktree_row_truncates_a_long_branch() {
         false,
         false,
         false,
+        false,
     );
     assert!(top.contains('…'));
 }
@@ -342,6 +370,7 @@ fn left_pane_renders_the_root_entry_then_the_empty_message() {
         &list_with(Vec::new()),
         &HashSet::new(),
         &HashSet::new(),
+        &HashSet::new(),
         80,
         6,
         false,
@@ -362,7 +391,15 @@ fn left_pane_renders_the_root_entry_then_one_entry_per_worktree() {
         worktree(Some("main"), true, BranchStatus::Pushed),
         worktree(Some("feature"), false, BranchStatus::Local),
     ]);
-    let lines = left_pane(&list, &HashSet::new(), &HashSet::new(), 30, 6, false);
+    let lines = left_pane(
+        &list,
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashSet::new(),
+        30,
+        6,
+        false,
+    );
     assert_eq!(lines.len(), 6);
     assert!(lines[0].contains(ROOT_NAME));
     assert!(lines[2].contains("main"));
@@ -373,13 +410,21 @@ fn left_pane_renders_the_root_entry_then_one_entry_per_worktree() {
 fn left_pane_marks_a_running_agent_and_one_waiting_for_input() {
     let list = list_with(vec![worktree(Some("feature"), false, BranchStatus::Local)]);
     let path: HashSet<PathBuf> = [PathBuf::from("/repo/wt")].into_iter().collect();
-    let running = left_pane(&list, &path, &HashSet::new(), 30, 6, false);
+    let running = left_pane(&list, &path, &HashSet::new(), &HashSet::new(), 30, 6, false);
     assert!(running[3].contains('▶'));
     assert!(running[3].contains("running"));
-    let waiting = left_pane(&list, &path, &path, 30, 6, false);
+    let waiting = left_pane(&list, &path, &path, &HashSet::new(), 30, 6, false);
     assert!(waiting[3].contains('◆'));
     assert!(!waiting[3].contains('▶'));
-    let idle = left_pane(&list, &HashSet::new(), &HashSet::new(), 30, 6, false);
+    let idle = left_pane(
+        &list,
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashSet::new(),
+        30,
+        6,
+        false,
+    );
     assert!(!idle[3].contains('▶'));
     assert!(!idle[3].contains('◆'));
     assert!(idle[2].contains("local"));
@@ -392,7 +437,15 @@ fn left_pane_is_trimmed_to_available_rows() {
         worktree(Some("b"), false, BranchStatus::Local),
         worktree(Some("c"), false, BranchStatus::Local),
     ]);
-    let lines = left_pane(&list, &HashSet::new(), &HashSet::new(), 30, 3, false);
+    let lines = left_pane(
+        &list,
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashSet::new(),
+        30,
+        3,
+        false,
+    );
     assert_eq!(lines.len(), 3);
     assert!(lines[0].contains(ROOT_NAME));
     assert!(lines[2].contains('a'));
@@ -405,7 +458,15 @@ fn left_pane_marks_the_active_worktree_with_a_gutter_bar() {
         worktree(Some("feature"), false, BranchStatus::Local),
     ]);
     list.activate_by_name("feature");
-    let lines = left_pane(&list, &HashSet::new(), &HashSet::new(), 30, 6, false);
+    let lines = left_pane(
+        &list,
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashSet::new(),
+        30,
+        6,
+        false,
+    );
     // The root is not active; the active "feature" row carries the green `▎`
     // accent bar down both of its lines (identity + detail).
     assert!(!lines[0].contains('▎'));
@@ -433,7 +494,15 @@ fn left_pane_fades_every_row_but_the_cursor_when_asked() {
     ]);
     // Cursor is on the root row (index 0). Dimming on fades the non-cursor
     // session rows; every row keeps its text.
-    let dimmed = left_pane(&list, &HashSet::new(), &HashSet::new(), 30, 6, true);
+    let dimmed = left_pane(
+        &list,
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashSet::new(),
+        30,
+        6,
+        true,
+    );
     assert_eq!(dimmed.len(), 6);
     assert!(console::strip_ansi_codes(&dimmed[0]).contains(ROOT_NAME));
     assert!(console::strip_ansi_codes(&dimmed[2]).contains("main"));
@@ -758,6 +827,69 @@ fn overview_input_falls_back_to_a_single_line_on_a_short_terminal() {
     let joined = console::strip_ansi_codes(&lines.join("\n")).into_owned();
     assert!(!joined.contains('┌'));
     assert!(joined.contains('❯'));
+}
+
+// --- update-available notice -------------------------------------------
+
+#[test]
+fn update_banner_pairs_the_mascot_with_the_latest_version() {
+    let latest = crate::domain::version::Version::parse("0.2.0").unwrap();
+    let banner = update_banner(&latest);
+    assert_eq!(banner.len(), 3);
+    let plain = stripped(&banner);
+    assert!(plain.contains("最新版があります"));
+    assert!(plain.contains("v0.2.0"));
+    // The usagi mascot rides alongside the notice.
+    assert!(plain.contains("(='-')"));
+}
+
+#[test]
+fn render_frame_shows_the_update_notice_when_a_newer_release_exists() {
+    let mut state = state_with(Vec::new());
+    state.set_update(crate::domain::version::Version::parse("9.9.9"));
+    let joined = stripped(&render_frame(24, 100, &state));
+    assert!(joined.contains("最新版があります"));
+    assert!(joined.contains("v9.9.9"));
+}
+
+#[test]
+fn render_frame_hides_the_update_notice_by_default() {
+    let state = state_with(Vec::new());
+    let joined = stripped(&render_frame(24, 100, &state));
+    assert!(!joined.contains("最新版があります"));
+}
+
+#[test]
+fn update_notice_is_skipped_when_the_terminal_is_too_narrow() {
+    // The banner block is wider than this terminal, so it is dropped rather than
+    // wrapping or clobbering the chrome.
+    let mut state = state_with(Vec::new());
+    state.set_update(crate::domain::version::Version::parse("9.9.9"));
+    let joined = stripped(&render_frame(24, 20, &state));
+    assert!(!joined.contains("最新版があります"));
+}
+
+#[test]
+fn overlay_top_right_skips_a_row_whose_content_reaches_the_banner_column() {
+    // The first line already fills the width, so the banner cannot be placed on
+    // it; a later, empty line still receives its segment.
+    let mut lines = vec!["X".repeat(100), String::new()];
+    let banner = vec!["AB".to_string(), "CD".to_string()];
+    overlay_top_right(&mut lines, 0, 100, &banner);
+    // Row 0 is untouched (no room); row 1 gets its right-anchored segment.
+    assert_eq!(console::measure_text_width(&lines[0]), 100);
+    assert!(lines[1].ends_with("CD"));
+}
+
+#[test]
+fn overlay_top_right_stops_when_the_banner_runs_past_the_last_row() {
+    // The banner has more rows than remain from `top`, so placement stops at the
+    // end of `lines` instead of panicking.
+    let mut lines = vec![String::new()];
+    let banner = vec!["AB".to_string(), "CD".to_string(), "EF".to_string()];
+    overlay_top_right(&mut lines, 0, 100, &banner);
+    assert!(lines[0].ends_with("AB"));
+    assert_eq!(lines.len(), 1);
 }
 
 // --- Switch inline create ----------------------------------------------
