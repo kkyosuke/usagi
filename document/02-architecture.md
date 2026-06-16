@@ -90,7 +90,7 @@ src/
         ├── open/               # プロジェクト選択画面（state / ui / event）
         ├── new/                # 新規プロジェクト画面（state / ui / event）
         ├── config/             # 設定画面（state / ui / event）
-        ├── home/               # ホーム画面（state / ui（mod=render_frame・panes・chrome に分割） / event / command レジストリ / terminal_view / terminal_pane / terminal_pool（常駐＋ベル監視・通知））
+        ├── home/               # ホーム画面（state / ui（mod=render_frame・panes・chrome に分割） / event / command（mod=語彙・builtins・registry に分割） / terminal_view / terminal_pane / terminal_pool（常駐＋ベル監視・通知））
         └── widgets/            # 共通 widget（mod / picker / dir_picker）
 ```
 
@@ -107,11 +107,11 @@ src/
 - 依存方向を逆流させない（例: `domain` から `infrastructure` を参照しない）。
 - `presentation/` と `usecase/` は `infrastructure/` を利用してよいが、`infrastructure/` は上位層を知らない。
 - 各 TUI 画面は `state.rs`（状態）・`ui.rs`（描画）・`event.rs`（イベントループ）に分離し、
-  ホーム画面はさらにコマンド解析/補完を `command.rs` に分離する。
+  ホーム画面はさらにコマンド解析/補完を `command/` に分離する。
 
 ## TUI 内コマンドのレジストリ
 
-ホーム画面の TUI 内コマンド（`session` / `terminal` / `agent` / `config` など）は `home/command.rs` の
+ホーム画面の TUI 内コマンド（`session` / `terminal` / `agent` / `config` など）は `home/command/` の
 `Command` トレイトとして表現し、`CommandRegistry` に登録します。ディスパッチ・補完・`man` 一覧はすべて
 このレジストリ経由で行い、コマンドを `match` でハードコードしません。
 
