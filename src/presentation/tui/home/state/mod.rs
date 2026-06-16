@@ -106,17 +106,18 @@ pub struct HomeState {
     /// (which take precedence).
     running: HashSet<PathBuf>,
     /// Worktree paths whose background session is waiting for the user (its
-    /// agent finished a turn or rang the bell). Refreshed from the terminal
-    /// monitor each redraw and rendered as a marker in the sidebar.
+    /// agent paused mid-turn for input/permission, or rang the bell). Refreshed
+    /// from the terminal monitor each redraw and rendered as a marker in the
+    /// sidebar.
     waiting: HashSet<PathBuf>,
     /// Worktree paths with a live embedded session — an agent/shell is in use,
     /// whether attached or left running in the background. Refreshed from the
     /// terminal monitor each redraw; a live path that is not running, waiting, or
     /// done renders as "ready" (idle, awaiting the first prompt).
     live: HashSet<PathBuf>,
-    /// Worktree paths whose agent has finished (its process exited), shown with a
-    /// "done" badge. Refreshed from the terminal monitor each redraw; takes
-    /// precedence over running and waiting.
+    /// Worktree paths whose agent has finished — a turn completed or the process
+    /// exited — shown with a "done" badge. Refreshed from the terminal monitor
+    /// each redraw; takes precedence over running and waiting.
     done: HashSet<PathBuf>,
     /// Whether the quit-confirmation modal is open. It is raised when the user
     /// presses `Ctrl-C` while a session is still live, so an accidental close
@@ -457,7 +458,7 @@ impl HomeState {
     }
 
     /// Whether the worktree at `path` has a background session whose agent has
-    /// finished (exited).
+    /// finished (a turn completed or it exited).
     pub fn is_done(&self, path: &Path) -> bool {
         self.done.contains(path)
     }

@@ -69,11 +69,11 @@ enum AgentState {
     Ready,
     /// A live session whose agent is working a turn. Displayed as `▶ running`.
     Running,
-    /// A live session whose agent finished a turn (or paused) and awaits input.
-    /// Displayed as `◆ waiting`.
+    /// A live session whose agent paused mid-turn and awaits the user's input or
+    /// permission. Displayed as `◆ waiting`.
     Waiting,
-    /// A session whose agent has finished (its process exited); the bare shell it
-    /// ran in may still be alive. Displayed as `✓ done`.
+    /// A session whose agent has finished — a turn completed or its process
+    /// exited; the bare shell it ran in may still be alive. Displayed as `✓ done`.
     Done,
 }
 
