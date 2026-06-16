@@ -130,9 +130,11 @@ fn title_bar_singular_and_plural() {
 #[test]
 fn status_label_pairs_a_git_icon_with_each_word() {
     for (status, icon, word) in [
+        (BranchStatus::New, NEW_ICON, "new"),
+        (BranchStatus::Dirty, DIRTY_ICON, "dirty"),
         (BranchStatus::Local, LOCAL_ICON, "local"),
         (BranchStatus::Pushed, PUSHED_ICON, "pushed"),
-        (BranchStatus::UpToDate, SYNCED_ICON, "synced"),
+        (BranchStatus::Synced, SYNCED_ICON, "synced"),
     ] {
         let plain = console::strip_ansi_codes(&status_label(status)).into_owned();
         assert!(plain.contains(icon), "{plain:?} missing its icon");

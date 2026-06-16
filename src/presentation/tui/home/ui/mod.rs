@@ -41,14 +41,17 @@ const DETACHED: &str = "(detached)";
 const NAME_PREFIX: usize = 4;
 
 /// Right-edge field width for the git `status` label on line 1: a status icon,
-/// a space, and the widest status word (`merged` / `pushed`, 6 columns).
+/// a space, and the widest status word (`synced` / `pushed` / `dirty`, 6
+/// columns).
 const STATUS_COL: usize = 8;
 
 /// Nerd Font (git) glyphs paired with each branch lifecycle status, for an
 /// at-a-glance read of the right-edge status field. They need a patched "Nerd
 /// Font" terminal font to render; without one the terminal shows a fallback box,
 /// but the colour-coded word beside the icon still carries the meaning.
-const LOCAL_ICON: char = '\u{e725}'; // nf-dev-git_branch — lives only locally
+const NEW_ICON: char = '\u{f067}'; // nf-fa-plus — freshly cut, no work yet
+const DIRTY_ICON: char = '\u{f040}'; // nf-fa-pencil — uncommitted changes
+const LOCAL_ICON: char = '\u{e725}'; // nf-dev-git_branch — committed, lives only locally
 const PUSHED_ICON: char = '\u{f0ee}'; // nf-fa-cloud_upload — pushed to the remote
 const SYNCED_ICON: char = '\u{f00c}'; // nf-fa-check — up to date, nothing un-merged
 
