@@ -569,6 +569,55 @@ fn search_matches_title_and_body_case_insensitively() {
 }
 
 #[test]
+fn search_handles_non_ascii_text() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path();
+    create(
+        repo,
+        NewIssue {
+            body: "ログイン画面のバグ".to_string(),
+            ..new_issue("認証エラー")
+        },
+    )
+    .unwrap();
+    create(repo, new_issue("無関係")).unwrap();
+
+    // A multi-byte (Japanese) query matches both title and body.
+    assert_eq!(
+        search(repo, "認証", &IssueFilter::default()).unwrap().len(),
+        1
+    );
+    assert_eq!(
+        search(repo, "ログイン", &IssueFilter::default())
+            .unwrap()
+            .len(),
+        1
+    );
+    // A multi-byte needle does not match across character boundaries, so an
+    // unrelated query finds nothing rather than a false positive.
+    assert!(search(repo, "認画", &IssueFilter::default())
+        .unwrap()
+        .is_empty());
+
+    // Case folding works for non-ASCII letters (Greek), unlike ASCII-only
+    // folding which left the upper/lower forms unmatched.
+    create(
+        repo,
+        NewIssue {
+            body: "ΔΕΛΤΑ".to_string(),
+            ..new_issue("three")
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        search(repo, "δελτα", &IssueFilter::default())
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[test]
 fn search_respects_filters_and_readiness() {
     let tmp = tempfile::tempdir().unwrap();
     let repo = tmp.path();
