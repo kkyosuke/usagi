@@ -248,7 +248,7 @@ fn worktree_row_marks_the_active_worktree_with_a_gutter_bar_on_both_lines() {
 
 #[test]
 fn worktree_row_shows_the_agent_state_through_its_lifecycle() {
-    // A live session that has not begun a turn yet is idle: `◌ ready`.
+    // A live session that has not begun a turn yet is idle: `☾ ready`.
     let (_, ready_detail) = worktree_row(
         &worktree(Some("feature"), false, BranchStatus::Local),
         10,
@@ -261,7 +261,7 @@ fn worktree_row_shows_the_agent_state_through_its_lifecycle() {
         false,
         false,
     );
-    assert!(ready_detail.contains('◌'));
+    assert!(ready_detail.contains('☾'));
     assert!(ready_detail.contains("ready"));
 
     // Working a turn: `▶ running`.
@@ -329,7 +329,7 @@ fn worktree_row_shows_the_agent_state_through_its_lifecycle() {
     );
     assert!(!absent_detail.contains('▶'));
     assert!(!absent_detail.contains('◆'));
-    assert!(!absent_detail.contains('◌'));
+    assert!(!absent_detail.contains('☾'));
     assert!(absent_top.contains("local"));
 }
 
@@ -443,9 +443,9 @@ fn left_pane_marks_the_agent_state_through_its_lifecycle() {
     let list = list_with(vec![worktree(Some("feature"), false, BranchStatus::Local)]);
     let path: HashSet<PathBuf> = [PathBuf::from("/repo/wt")].into_iter().collect();
     let empty = HashSet::new();
-    // Live but no turn yet: `◌ ready`.
+    // Live but no turn yet: `☾ ready`.
     let ready = left_pane(&list, &path, &empty, &empty, &empty, 30, 6, false);
-    assert!(ready[3].contains('◌'));
+    assert!(ready[3].contains('☾'));
     assert!(ready[3].contains("ready"));
     // Working a turn: `▶ running`.
     let running = left_pane(&list, &path, &path, &empty, &empty, 30, 6, false);
@@ -459,7 +459,7 @@ fn left_pane_marks_the_agent_state_through_its_lifecycle() {
     let absent = left_pane(&list, &empty, &empty, &empty, &empty, 30, 6, false);
     assert!(!absent[3].contains('▶'));
     assert!(!absent[3].contains('◆'));
-    assert!(!absent[3].contains('◌'));
+    assert!(!absent[3].contains('☾'));
     assert!(absent[2].contains("local"));
 }
 
