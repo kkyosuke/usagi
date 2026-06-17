@@ -23,7 +23,7 @@ use chrome::{
     footer_line, hint_lines, input_line, mode_ladder, overview_input_box, quit_confirm_frame,
     remove_modal_frame, switch_create_rows, text_modal_frame, title_bar, update_banner,
 };
-use panes::{left_pane, log_tail, right_pane_contents, usage_gauge};
+use panes::{left_pane, log_tail, right_pane_contents};
 
 use super::state::{HomeState, Mode};
 
@@ -72,16 +72,6 @@ const CARET: &str = "▏";
 /// Narrowest and widest the left (worktree) pane is allowed to be.
 const LEFT_MIN: usize = 16;
 const LEFT_MAX: usize = 40;
-
-/// Rows reserved at the bottom of the left pane for the aggregate agent-usage
-/// gauge when at least one live session reports usage: a dim divider and the
-/// gauge line. Sits below the session list and above the input line, in the left
-/// column only, so the right pane (including the embedded terminal) is untouched.
-const USAGE_BAND: usize = 2;
-
-/// Smallest body height at which the usage gauge is shown; below it every body
-/// row is needed for the session list, so the gauge is dropped.
-const USAGE_MIN_BODY: usize = 6;
 
 /// Shown in the right pane between attaching the terminal and its first screen
 /// snapshot arriving.
@@ -260,16 +250,6 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
     // body.
     let body_rows = height.saturating_sub(3 + input_h + results).max(1);
 
-    // Reserve the bottom of the left column for the aggregate usage gauge when a
-    // live session reports usage and the body is tall enough to spare the rows.
-    // The right pane keeps the full body height, so the embedded terminal's
-    // geometry is unaffected.
-    let usage_lines = match state.usage() {
-        Some(usage) if body_rows > USAGE_MIN_BODY => usage_gauge(usage, left_w, USAGE_BAND),
-        _ => Vec::new(),
-    };
-    let list_rows = body_rows - usage_lines.len();
-
     let mut left = left_pane(
         state.list(),
         state.live_paths(),
@@ -277,7 +257,7 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
         state.waiting_paths(),
         state.done_paths(),
         left_w,
-        list_rows,
+        body_rows,
         // In 切替 the keyboard is on the list: fade the rows the cursor is not on.
         state.mode() == Mode::Switch,
     );
@@ -291,7 +271,7 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
         ) {
             left.push(row);
         }
-        left.truncate(list_rows);
+        left.truncate(body_rows);
     }
     let right = right_pane_contents(state, right_w, body_rows);
 
@@ -300,16 +280,7 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
     lines.push(mode_ladder(width, state.mode()));
     let body_start = lines.len();
     for row in 0..body_rows {
-        // The session list fills the top `list_rows`; the usage gauge (when
-        // present) fills the rows below it.
-        let left_text = if row < list_rows {
-            left.get(row).cloned().unwrap_or_default()
-        } else {
-            usage_lines
-                .get(row - list_rows)
-                .cloned()
-                .unwrap_or_default()
-        };
+        let left_text = left.get(row).cloned().unwrap_or_default();
         let left_cell = pad_to_width(left_text, left_w);
         let right_cell = right.get(row).cloned().unwrap_or_default();
         lines.push(format!("{left_cell}{SEP}{right_cell}"));
@@ -321,17 +292,15 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
     // rows it covers never change as the match list grows or shrinks while
     // typing. The band is cleared first (so no stale body text shows through),
     // then the hints are bottom-anchored just above the input.
-    // The band covers only the session-list area, never the reserved usage-gauge
-    // rows below it, so the gauge stays visible while command hints are shown.
     let hints = hint_lines(state, width);
     if !hints.is_empty() {
-        let band = HINT_BAND.min(list_rows.saturating_sub(1));
-        let band_start = body_start + list_rows - band;
+        let band = HINT_BAND.min(body_rows.saturating_sub(1));
+        let band_start = body_start + body_rows - band;
         for line in lines.iter_mut().skip(band_start).take(band) {
             *line = pad_to_width(String::new(), width);
         }
         let shown = hints.len().min(band);
-        let hint_top = body_start + list_rows - shown;
+        let hint_top = body_start + body_rows - shown;
         for (i, hint) in hints.into_iter().take(shown).enumerate() {
             lines[hint_top + i] = pad_to_width(hint, width);
         }

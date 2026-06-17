@@ -144,9 +144,8 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
         .and_then(|path| path.into_os_string().into_string().ok())
         .unwrap_or_else(|| "usagi".to_string());
 
-    // The agent adapter `:agent` drives, picked from the configured CLI. It is the
-    // single source of both the launch command and the per-session usage the
-    // pool's watcher polls for the sidebar gauge, so it is shared with the pool.
+    // The agent adapter `:agent` drives, picked from the configured CLI — the
+    // single source of the launch command it builds below.
     let agent = crate::infrastructure::agent::agent_for(settings.agent_cli);
 
     // The command line `:agent` sends to the shell: the agent renders usagi's
@@ -161,17 +160,13 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
     // The live shells embedded in the right pane, one per worktree, kept alive
     // across session switches and for as long as this screen is open. Dropped on
     // return, which kills any shell still running. The pool also watches every
-    // shell's bell/phase, flags / notifies the ones waiting or finished, and polls
-    // the agent for each session's context-window usage.
+    // shell's bell/phase and flags / notifies the ones waiting or finished.
     //
     // Wrapped in a `RefCell` so the pane driver (`open_terminal`), the sidebar
     // preview (`preview`), and `remove_session` (which evicts a removed session's
     // shell) can all reach it: their borrows never overlap in time (the event
     // loop calls one at a time).
-    let pool = std::cell::RefCell::new(terminal_pool::TerminalPool::new(
-        notifications_enabled,
-        agent,
-    ));
+    let pool = std::cell::RefCell::new(terminal_pool::TerminalPool::new(notifications_enabled));
     let monitor = pool.borrow().monitor();
 
     // Removing a session deletes its worktrees/branches and forgets it. A
