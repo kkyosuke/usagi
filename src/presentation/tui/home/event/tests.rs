@@ -363,6 +363,55 @@ fn overview_edits_completes_and_recalls_then_runs() {
 }
 
 #[test]
+fn overview_caret_keys_edit_within_the_line() {
+    // Build "history" by typing out of order and moving the caret with the
+    // editing keys, exercising ←/→/End/Del; the recorded command proves the
+    // edits landed where the caret was.
+    let mut keys = typed("hstory"); // missing the 'i'
+    for _ in 0..5 {
+        keys.push(Ok(Key::ArrowLeft)); // caret to just after 'h'
+    }
+    keys.extend(typed("i")); // "history"
+    keys.push(Ok(Key::End)); // jump to the end
+    keys.extend(typed("X")); // "historyX"
+    keys.push(Ok(Key::ArrowLeft)); // caret before the 'X'
+    keys.push(Ok(Key::Del)); // delete it -> "history"
+    keys.push(Ok(Key::ArrowRight)); // already at the end -> clamped no-op
+    keys.push(Ok(Key::Enter)); // run `history` -> opens its text modal
+    keys.push(Ok(Key::Escape)); // dismiss the modal
+    keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
+
+    let term = Term::stdout();
+    let mut reader = ScriptedReader::new(keys);
+    let monitor = MonitorHandle::detached();
+    let mut recorded = Vec::new();
+    let mut persist = |c: &str| recorded.push(c.to_string());
+    let mut create: fn(&str) -> SessionOutcome = noop_create;
+    let mut remove: fn(&str, bool) -> SessionOutcome = noop_remove;
+    let mut open: fn(&mut HomeState, &Path, bool) -> Result<PaneExit> = noop_open;
+    let mut config: fn(&Term) -> Result<Option<SessionActionUi>> = noop_config;
+    let mut preview: fn(&Path) -> Option<TerminalView> = noop_preview;
+    let outcome = event_loop(
+        &term,
+        &mut reader,
+        sample_state(),
+        Path::new("/ws"),
+        &monitor,
+        &UpdateHandle::new(),
+        &mut persist,
+        &mut create,
+        &mut remove,
+        &mut (no_branches as fn() -> Vec<String>),
+        &mut open,
+        &mut config,
+        &mut preview,
+    )
+    .unwrap();
+    assert!(matches!(outcome, Outcome::Quit));
+    assert_eq!(recorded, vec!["history"]);
+}
+
+#[test]
 fn quit_command_exits_the_app() {
     let mut keys = typed("quit");
     keys.push(Ok(Key::Enter));
