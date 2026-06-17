@@ -89,7 +89,7 @@ src/
     ├── cli/                    # サブコマンド（init / hop / status / config / doctor / issue / mcp / llm_mcp / session_mcp / agent_phase（隠し・フック用））
     ├── mcp/                    # MCP サーバ（JSON-RPC 2.0 フレーミングを共有）
     │   ├── mod.rs              # 共有プロトコル（dispatch_line / レスポンス整形 / McpService）
-    │   ├── issue.rs            # issue 操作ツール（McpServer）
+    │   ├── issue/             # issue 操作ツール（mod=McpServer・args / json=シリアライズ・スキーマ）
     │   ├── llm.rs              # ローカル LLM 委譲ツール（LlmMcpServer / LlmBackend）
     │   └── session.rs          # セッション操作ツール（SessionMcpServer / AgentBackend）
     └── tui/                    # 自前レンダリングの TUI（console + crossterm、ratatui は不使用）
