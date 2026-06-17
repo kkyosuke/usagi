@@ -14,9 +14,13 @@
 //! so a hash collision (or a stale file from another machine syncing the data
 //! dir) is detected and ignored rather than misattributed.
 
+use std::cell::RefCell;
 use std::collections::hash_map::DefaultHasher;
+use std::collections::HashMap;
+use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -82,10 +86,88 @@ pub fn write(worktree: &Path, phase: AgentPhase) -> Result<()> {
 
 /// Read the recorded phase for the session rooted at `worktree`, or `None` when
 /// none has been recorded (or the file belongs to a different worktree).
+///
+/// Canonicalizes `worktree` once (the previous implementation did so twice). For
+/// the home screen's per-tick polling prefer [`PhaseReader`], which additionally
+/// caches by the file's mtime so an unchanged file is not re-read or re-parsed.
 pub fn read(worktree: &Path) -> Option<AgentPhase> {
-    let path = path_for(worktree).ok()?;
-    let file: PhaseFile = json_file::read(&path).ok()??;
-    (file.worktree == key(worktree)).then_some(file.phase)
+    let key = key(worktree);
+    let path = dir().ok()?.join(file_name(&key));
+    read_phase_file(&path, &key)
+}
+
+/// Read and validate the phase file at `path`, where `key` is the canonical
+/// worktree it must belong to. `None` when the file is absent/unreadable or was
+/// recorded for a different worktree (a hashed-name collision or stale file).
+fn read_phase_file(path: &Path, key: &Path) -> Option<AgentPhase> {
+    let file: PhaseFile = json_file::read(path).ok()??;
+    (file.worktree.as_path() == key).then_some(file.phase)
+}
+
+/// A stateful reader of phase files with an mtime cache, for the home screen's
+/// session watcher which polls every session every tick (see
+/// [`crate::presentation::tui::home::terminal_pool`]).
+///
+/// Each call stats the file for its mtime and returns the cached parse while the
+/// file is unchanged, so an idle session costs one `stat` per tick instead of a
+/// full read + JSON parse. The resolved file path (and the worktree's canonical
+/// form) is cached too, so the worktree is canonicalized only the first time it
+/// is seen rather than on every tick.
+#[derive(Default)]
+pub struct PhaseReader {
+    cache: RefCell<HashMap<PathBuf, Cached>>,
+}
+
+/// A cached phase-file read: where the file is, the worktree it must belong to,
+/// the mtime it was last read at (`None` when the file was absent), and the
+/// phase that yielded.
+struct Cached {
+    path: PathBuf,
+    key: PathBuf,
+    mtime: Option<SystemTime>,
+    phase: Option<AgentPhase>,
+}
+
+impl PhaseReader {
+    /// A reader with an empty cache.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The recorded phase for `worktree`, served from the cache while the phase
+    /// file's mtime is unchanged since the last read.
+    pub fn read(&self, worktree: &Path) -> Option<AgentPhase> {
+        let mut cache = self.cache.borrow_mut();
+        // Resolve (canonicalizing) the file path the first time a worktree is
+        // seen; reuse it on later ticks so the hot loop avoids the syscall.
+        let (path, key) = match cache.get(worktree) {
+            Some(cached) => (cached.path.clone(), cached.key.clone()),
+            None => {
+                let key = key(worktree);
+                let path = dir().ok()?.join(file_name(&key));
+                (path, key)
+            }
+        };
+        let mtime = fs::metadata(&path)
+            .ok()
+            .and_then(|meta| meta.modified().ok());
+        if let Some(cached) = cache.get(worktree) {
+            if cached.mtime == mtime {
+                return cached.phase;
+            }
+        }
+        let phase = read_phase_file(&path, &key);
+        cache.insert(
+            worktree.to_path_buf(),
+            Cached {
+                path,
+                key,
+                mtime,
+                phase,
+            },
+        );
+        phase
+    }
 }
 
 /// Forget any recorded phase for `worktree` (best-effort), so a session freshly
@@ -122,6 +204,45 @@ mod tests {
         std::env::set_var(storage::DATA_DIR_ENV, dir.path());
         body(dir.path());
         std::env::remove_var(storage::DATA_DIR_ENV);
+    }
+
+    #[test]
+    fn phase_reader_serves_and_refreshes_across_an_mtime_change() {
+        with_data_dir(|_| {
+            let wt = tempfile::tempdir().unwrap();
+            let reader = PhaseReader::new();
+
+            // Absent file: reads as None and caches that absence.
+            assert_eq!(reader.read(wt.path()), None);
+
+            // Recording a phase creates the file, so its mtime now differs from
+            // the cached "absent" state and the reader re-reads the new value.
+            write(wt.path(), AgentPhase::Running).unwrap();
+            assert_eq!(reader.read(wt.path()), Some(AgentPhase::Running));
+
+            // A second read with the file unchanged is served from the cache.
+            assert_eq!(reader.read(wt.path()), Some(AgentPhase::Running));
+        });
+    }
+
+    #[test]
+    fn phase_reader_ignores_a_file_recorded_for_another_worktree() {
+        with_data_dir(|_| {
+            let wt = tempfile::tempdir().unwrap();
+            let other = tempfile::tempdir().unwrap();
+            let dir = dir().unwrap();
+            let path = dir.join(file_name(&key(wt.path())));
+            json_file::write_atomic(
+                &dir,
+                &path,
+                &PhaseFile {
+                    worktree: key(other.path()),
+                    phase: AgentPhase::Waiting,
+                },
+            )
+            .unwrap();
+            assert_eq!(PhaseReader::new().read(wt.path()), None);
+        });
     }
 
     #[test]

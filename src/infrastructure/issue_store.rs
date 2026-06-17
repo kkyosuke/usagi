@@ -94,13 +94,32 @@ impl IssueStore {
     }
 
     /// The highest issue number currently stored, or 0 if there are none.
+    ///
+    /// Reads the metadata summaries (the `index.json` cache, rebuilt only when
+    /// missing) rather than parsing every markdown body, since only the numbers
+    /// are needed here.
     pub fn max_number(&self) -> Result<u32> {
-        Ok(self.scan()?.iter().map(|i| i.number).max().unwrap_or(0))
+        Ok(self
+            .summaries()?
+            .iter()
+            .map(|s| s.number)
+            .max()
+            .unwrap_or(0))
     }
 
     /// Read a single issue by number, or `None` if it does not exist.
+    ///
+    /// Parses only the file(s) backing `number` instead of scanning and parsing
+    /// the whole directory.
     pub fn read(&self, number: u32) -> Result<Option<Issue>> {
-        Ok(self.scan()?.into_iter().find(|i| i.number == number))
+        let Some(path) = self.files_for(number)?.into_iter().next() else {
+            return Ok(None);
+        };
+        let text =
+            fs::read_to_string(&path).context(format!("failed to read {}", path.display()))?;
+        let issue = Issue::from_markdown(&text)
+            .with_context(|| format!("failed to parse {}", path.display()))?;
+        Ok(Some(issue))
     }
 
     /// Write `issue` to disk and refresh the index.
@@ -389,6 +408,32 @@ mod tests {
 
         assert!(store
             .summaries()
+            .unwrap_err()
+            .to_string()
+            .contains("failed to read"));
+    }
+
+    #[test]
+    fn read_propagates_parse_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = IssueStore::new(tmp.path());
+        fs::create_dir_all(store.dir()).unwrap();
+        fs::write(store.dir().join("003-broken.md"), "not an issue").unwrap();
+
+        let err = store.read(3).unwrap_err();
+        assert!(err.to_string().contains("failed to parse"));
+    }
+
+    #[test]
+    fn read_errors_when_the_backing_file_is_unreadable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = IssueStore::new(tmp.path());
+        fs::create_dir_all(store.dir()).unwrap();
+        // A directory where the issue file should be makes reading it fail.
+        fs::create_dir(store.dir().join("003-broken.md")).unwrap();
+
+        assert!(store
+            .read(3)
             .unwrap_err()
             .to_string()
             .contains("failed to read"));

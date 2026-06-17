@@ -155,25 +155,18 @@ pub fn list(repo_root: &Path, filter: &IssueFilter) -> Result<Vec<ListedIssue>> 
 pub fn search(repo_root: &Path, query: &str, filter: &IssueFilter) -> Result<Vec<ListedIssue>> {
     let issues = IssueStore::new(repo_root).scan()?;
     let done = done_numbers(issues.iter().map(|i| (i.number, i.status)));
-    let needle = query.to_ascii_lowercase();
-    let needle_bytes = needle.as_bytes();
+    // Case-fold with Unicode-aware `to_lowercase` and match on `str::contains`,
+    // so the fold works for non-ASCII text (the UI is Japanese) and a multi-byte
+    // needle can never match across a character boundary — both of which the
+    // previous ASCII byte-window matching got wrong.
+    let needle = query.to_lowercase();
     let matched: Vec<IssueSummary> = issues
         .into_iter()
         .filter(|i| {
-            if needle_bytes.is_empty() {
+            if needle.is_empty() {
                 return true;
             }
-            let title_match = i
-                .title
-                .as_bytes()
-                .windows(needle_bytes.len())
-                .any(|w| w.eq_ignore_ascii_case(needle_bytes));
-            let body_match = i
-                .body
-                .as_bytes()
-                .windows(needle_bytes.len())
-                .any(|w| w.eq_ignore_ascii_case(needle_bytes));
-            title_match || body_match
+            i.title.to_lowercase().contains(&needle) || i.body.to_lowercase().contains(&needle)
         })
         .map(|i| i.summary())
         .collect();

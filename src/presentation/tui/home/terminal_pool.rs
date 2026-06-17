@@ -308,6 +308,9 @@ fn spawn_watcher(
     stop: Arc<AtomicBool>,
     notifications_enabled: bool,
 ) -> JoinHandle<()> {
+    // One reader for the watcher's lifetime so its mtime cache survives across
+    // ticks: an unchanged phase file then costs a single `stat`, not a re-read.
+    let phase_reader = agent_state_store::PhaseReader::new();
     std::thread::spawn(move || loop {
         if stop.load(Ordering::SeqCst) {
             break;
@@ -345,7 +348,7 @@ fn spawn_watcher(
                     (
                         path.clone(),
                         w.bell.load(Ordering::SeqCst),
-                        agent_state_store::read(path),
+                        phase_reader.read(path),
                     )
                 })
                 .collect();
