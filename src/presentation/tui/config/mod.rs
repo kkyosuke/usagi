@@ -66,12 +66,16 @@ pub fn run_in(term: &Term, repo_root: Option<PathBuf>) -> Result<Outcome> {
 
     // Probe whether the local LLM runtime and selected model are already
     // present, so the Local LLM row opens as an "Install" action or an on/off
-    // toggle accordingly.
-    let runner = SystemRunner;
-    let model = config.local_llm_model().to_string();
-    config.set_local_llm_installed(
-        local_llm::ollama_installed(&runner) && local_llm::model_present(&runner, &model),
-    );
+    // toggle accordingly. Only the global scope renders that row
+    // (`LocalField::ALL` has no Local LLM field), so skip the two `ollama`
+    // subprocess probes when editing a workspace's local overrides.
+    if repo_root.is_none() {
+        let runner = SystemRunner;
+        let model = config.local_llm_model().to_string();
+        config.set_local_llm_installed(
+            local_llm::ollama_installed(&runner) && local_llm::model_present(&runner, &model),
+        );
+    }
 
     let mut reader = TermKeyReader::new(term.clone());
     // The scope decides what is written: a project context saves only the

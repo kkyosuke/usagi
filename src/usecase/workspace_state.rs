@@ -22,10 +22,15 @@ pub fn sync(cwd: &Path) -> Result<WorkspaceState> {
     let store = WorkspaceStore::new(&root);
     let mut state = store.load()?.unwrap_or_default();
 
+    // Each `inspect_worktree` shells out to git several times; refresh the
+    // worktrees in parallel so a multi-session / multi-repo workspace is not
+    // bottlenecked on a long sequence of git subprocesses.
+    use rayon::prelude::*;
     for session in &mut state.sessions {
-        for wt in &mut session.worktrees {
-            *wt = inspect_worktree(&wt.path);
-        }
+        session
+            .worktrees
+            .par_iter_mut()
+            .for_each(|wt| *wt = inspect_worktree(&wt.path));
     }
     state.updated_at = Utc::now();
     store.save(&state)?;
