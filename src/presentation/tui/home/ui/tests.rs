@@ -643,6 +643,27 @@ fn switch_preview_shows_an_idle_session_as_its_action_menu() {
 }
 
 #[test]
+fn switch_preview_shows_an_idle_session_as_its_prompt_when_prompt_ui() {
+    // With the Prompt action UI, the idle-session preview must mirror the prompt
+    // surface (`❯`) — not the command menu — so the 切替 preview matches what
+    // focusing the session actually reveals (regression: it previewed the menu
+    // regardless of the setting).
+    let idle = worktree(Some("feat"), false, BranchStatus::Pushed);
+    let mut state = HomeState::new("usagi", vec![idle], None);
+    state.set_session_action_ui(SessionActionUi::Prompt);
+    state.enter_switch(super::super::state::ReturnMode::Overview);
+    state.switch_move_down();
+    let preview = stripped(&switch_preview(&state, 40, 12));
+    assert!(preview.contains("pushed"));
+    assert!(preview.contains('❯'), "the prompt surface is previewed");
+    assert!(
+        !preview.contains("Run a command"),
+        "the command menu must not be shown in prompt mode"
+    );
+    assert!(!preview.contains("live terminal"));
+}
+
+#[test]
 fn right_pane_shows_the_focus_menu_or_prompt() {
     let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
     state.enter_focus(1);

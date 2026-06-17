@@ -238,6 +238,49 @@ fn typed(s: &str) -> Vec<io::Result<Key>> {
     s.chars().map(|c| Ok(Key::Char(c))).collect()
 }
 
+/// 切替 (Switch) reached from the 在席 prompt surface via `Ctrl-O`, then a
+/// different session focused: the session changes as expected. Guards the
+/// prompt-mode path of `focus_key`'s `Ctrl-O` handling (the menu path is covered
+/// by [`focus_ctrl_o_opens_switch_then_esc_re_focuses`]).
+#[test]
+fn prompt_focus_ctrl_o_opens_switch_and_can_change_session() {
+    let opened = RefCell::new(0);
+    let mut open = |_h: &mut HomeState, _d: &Path, _a: bool| {
+        *opened.borrow_mut() += 1;
+        Ok(PaneExit::Closed)
+    };
+    let mut create: fn(&str) -> SessionOutcome = noop_create;
+    // Only `feat` has a live terminal, so focusing the idle root stays in 在席
+    // (no auto-attach) until Ctrl-O reaches Switch and `feat` is selected.
+    let mut preview = |p: &Path| {
+        if p.to_string_lossy().contains("feat") {
+            Some(TerminalView::from_rows(vec!["live".to_string()], None))
+        } else {
+            None
+        }
+    };
+    let mut keys = typed("session switch root");
+    keys.push(Ok(Key::Enter)); // Focus root (idle -> 在席 prompt, no attach)
+    keys.push(Ok(Key::Char(CTRL_O))); // 在席 -> 切替
+    keys.push(Ok(Key::ArrowDown)); // root -> main
+    keys.push(Ok(Key::ArrowDown)); // main -> feat
+    keys.push(Ok(Key::Enter)); // focus feat (live) -> attach
+    run_full(
+        keys,
+        prompt_state(),
+        &mut open,
+        &mut create,
+        &mut preview,
+        &mut noop_config,
+    )
+    .unwrap();
+    assert_eq!(
+        *opened.borrow(),
+        1,
+        "Ctrl-O from the prompt surface must reach Switch so focusing the live feat attaches"
+    );
+}
+
 fn state_with_sessions(names: &[&str]) -> HomeState {
     let mut state = sample_state();
     let sessions = names
