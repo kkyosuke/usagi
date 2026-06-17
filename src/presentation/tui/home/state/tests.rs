@@ -435,6 +435,91 @@ fn typing_or_completing_cancels_an_active_recall() {
     assert_eq!(state.input(), "man!");
 }
 
+// --- caret editing -----------------------------------------------------
+
+#[test]
+fn arrows_move_the_caret_and_insert_mid_line() {
+    let mut state = state();
+    for c in "mn".chars() {
+        state.push_char(c);
+    }
+    // Caret sits past the end after typing.
+    assert_eq!(state.cursor(), 2);
+    state.cursor_left();
+    assert_eq!(state.cursor(), 1);
+    // Insert between the two characters.
+    state.push_char('a');
+    assert_eq!(state.input(), "man");
+    assert_eq!(state.cursor(), 2);
+    // Right then past the end is clamped.
+    state.cursor_right();
+    state.cursor_right();
+    assert_eq!(state.cursor(), 3);
+    // Left at the start is clamped to 0.
+    state.cursor_home();
+    state.cursor_left();
+    assert_eq!(state.cursor(), 0);
+    state.cursor_end();
+    assert_eq!(state.cursor(), 3);
+}
+
+#[test]
+fn backspace_and_delete_act_around_the_caret() {
+    let mut state = state();
+    for c in "man".chars() {
+        state.push_char(c);
+    }
+    state.cursor_home();
+    // Backspace at the start is a no-op.
+    state.backspace();
+    assert_eq!(state.input(), "man");
+    // Delete-forward removes the character at the caret.
+    state.delete_forward();
+    assert_eq!(state.input(), "an");
+    assert_eq!(state.cursor(), 0);
+    // Delete-forward at the end is a no-op.
+    state.cursor_end();
+    state.delete_forward();
+    assert_eq!(state.input(), "an");
+    // Backspace removes the character before the caret.
+    state.backspace();
+    assert_eq!(state.input(), "a");
+    assert_eq!(state.cursor(), 1);
+}
+
+#[test]
+fn caret_moves_by_whole_multibyte_characters() {
+    let mut state = state();
+    for c in "あい".chars() {
+        state.push_char(c);
+    }
+    // Each Japanese character is three bytes; the caret tracks byte offsets but
+    // moves a whole character at a time.
+    assert_eq!(state.cursor(), 6);
+    state.cursor_left();
+    assert_eq!(state.cursor(), 3);
+    state.push_char('x');
+    assert_eq!(state.input(), "あxい");
+    state.backspace();
+    assert_eq!(state.input(), "あい");
+    assert_eq!(state.cursor(), 3);
+    state.delete_forward();
+    assert_eq!(state.input(), "あ");
+}
+
+#[test]
+fn recall_and_submit_place_the_caret_at_the_end() {
+    let mut state = state();
+    state.restore_history(vec!["session".to_string()]);
+    state.recall_prev();
+    assert_eq!(state.cursor(), state.input().len());
+    state.recall_next();
+    assert_eq!(state.cursor(), 0);
+    state.push_char('m');
+    state.submit();
+    assert_eq!(state.cursor(), 0);
+}
+
 // --- 切替 (Switch) -----------------------------------------------------
 
 #[test]

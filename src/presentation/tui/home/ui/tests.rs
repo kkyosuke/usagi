@@ -831,6 +831,20 @@ fn input_line_renders_prompt_in_overview() {
 }
 
 #[test]
+fn input_line_draws_the_caret_at_the_cursor() {
+    let mut state = state_with(Vec::new());
+    for c in "man".chars() {
+        state.push_char(c);
+    }
+    state.cursor_left();
+    let line = input_line(&state);
+    // The caret sits between "ma" and "n", with text on both sides.
+    let caret = line.find(CARET).expect("caret present");
+    let n = line.rfind('n').expect("trailing char present");
+    assert!(caret < n, "caret should precede the last character");
+}
+
+#[test]
 fn input_line_differs_by_mode() {
     let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
     state.enter_switch(super::super::state::ReturnMode::Overview);
