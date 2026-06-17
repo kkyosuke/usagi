@@ -9,6 +9,7 @@
 
 | # | ドキュメント | 内容 |
 |---|---|---|
+| 0 | [00-tutorial.md](00-tutorial.md) | はじめての usagi（インストール 〜 Agent でセッションを並行起動するまでの導入ガイド） |
 | 1 | [01-overview.md](01-overview.md) | プロジェクト概要・解決する課題・全体構造 |
 | 2 | [02-architecture.md](02-architecture.md) | クリーンアーキテクチャ 4 層・依存ルール・`src/` のモジュール構成 |
 | 3 | [03-commands/](03-commands/README.md) | CLI コマンド・TUI 内コマンド・MCP サーバのリファレンス |
