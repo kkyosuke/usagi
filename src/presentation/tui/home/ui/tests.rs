@@ -429,13 +429,15 @@ fn left_pane_renders_the_root_entry_then_one_entry_per_worktree() {
         &HashSet::new(),
         &HashSet::new(),
         30,
-        6,
+        7,
         false,
     );
-    assert_eq!(lines.len(), 6);
+    // Root (2 lines), a divider, then 2 lines per worktree.
+    assert_eq!(lines.len(), 7);
     assert!(lines[0].contains(ROOT_NAME));
-    assert!(lines[2].contains("main"));
-    assert!(lines[4].contains("feature"));
+    assert!(lines[2].contains('─'));
+    assert!(lines[3].contains("main"));
+    assert!(lines[5].contains("feature"));
 }
 
 #[test]
@@ -443,24 +445,25 @@ fn left_pane_marks_the_agent_state_through_its_lifecycle() {
     let list = list_with(vec![worktree(Some("feature"), false, BranchStatus::Local)]);
     let path: HashSet<PathBuf> = [PathBuf::from("/repo/wt")].into_iter().collect();
     let empty = HashSet::new();
+    // Rows: 0/1 root, 2 divider, 3 worktree identity, 4 worktree detail.
     // Live but no turn yet: `☾ ready`.
     let ready = left_pane(&list, &path, &empty, &empty, &empty, 30, 6, false);
-    assert!(ready[3].contains('☾'));
-    assert!(ready[3].contains("ready"));
+    assert!(ready[4].contains('☾'));
+    assert!(ready[4].contains("ready"));
     // Working a turn: `▶ running`.
     let running = left_pane(&list, &path, &path, &empty, &empty, 30, 6, false);
-    assert!(running[3].contains('▶'));
-    assert!(running[3].contains("running"));
+    assert!(running[4].contains('▶'));
+    assert!(running[4].contains("running"));
     // Awaiting input wins over running: `◆ waiting`.
     let waiting = left_pane(&list, &path, &path, &path, &empty, 30, 6, false);
-    assert!(waiting[3].contains('◆'));
-    assert!(!waiting[3].contains('▶'));
+    assert!(waiting[4].contains('◆'));
+    assert!(!waiting[4].contains('▶'));
     // No live session: no agent detail at all.
     let absent = left_pane(&list, &empty, &empty, &empty, &empty, 30, 6, false);
-    assert!(!absent[3].contains('▶'));
-    assert!(!absent[3].contains('◆'));
-    assert!(!absent[3].contains('☾'));
-    assert!(absent[2].contains("local"));
+    assert!(!absent[4].contains('▶'));
+    assert!(!absent[4].contains('◆'));
+    assert!(!absent[4].contains('☾'));
+    assert!(absent[3].contains("local"));
 }
 
 #[test]
@@ -477,12 +480,14 @@ fn left_pane_is_trimmed_to_available_rows() {
         &HashSet::new(),
         &HashSet::new(),
         30,
-        3,
+        4,
         false,
     );
-    assert_eq!(lines.len(), 3);
+    // 3 worktrees would be 2 (root) + 1 (divider) + 6 lines; trimmed to 4.
+    assert_eq!(lines.len(), 4);
     assert!(lines[0].contains(ROOT_NAME));
-    assert!(lines[2].contains('a'));
+    assert!(lines[2].contains('─'));
+    assert!(lines[3].contains('a'));
 }
 
 #[test]
@@ -499,15 +504,15 @@ fn left_pane_marks_the_active_worktree_with_a_gutter_bar() {
         &HashSet::new(),
         &HashSet::new(),
         30,
-        6,
+        7,
         false,
     );
     // The root is not active; the active "feature" row carries the green `▎`
     // accent bar down both of its lines (identity + detail).
     assert!(!lines[0].contains('▎'));
-    assert!(lines[4].contains("feature"));
-    assert!(lines[4].contains('▎'));
+    assert!(lines[5].contains("feature"));
     assert!(lines[5].contains('▎'));
+    assert!(lines[6].contains('▎'));
 }
 
 #[test]
@@ -541,8 +546,8 @@ fn left_pane_fades_every_row_but_the_cursor_when_asked() {
     );
     assert_eq!(dimmed.len(), 6);
     assert!(console::strip_ansi_codes(&dimmed[0]).contains(ROOT_NAME));
-    assert!(console::strip_ansi_codes(&dimmed[2]).contains("main"));
-    assert!(console::strip_ansi_codes(&dimmed[4]).contains("feature"));
+    assert!(console::strip_ansi_codes(&dimmed[3]).contains("main"));
+    assert!(console::strip_ansi_codes(&dimmed[5]).contains("feature"));
 }
 
 #[test]
@@ -1244,7 +1249,9 @@ fn render_frame_surfaces_running_and_waiting_agent_icons() {
     state.set_live([PathBuf::from("/repo/run"), PathBuf::from("/repo/wait")].into());
     state.set_running([PathBuf::from("/repo/run")].into());
     state.set_waiting([PathBuf::from("/repo/wait")].into());
-    let frame = render_frame(24, 80, &state);
+    // Height accommodates root (2 lines) + divider + 2 sessions (2 lines each)
+    // without the lowest detail row slipping behind the bottom hint band.
+    let frame = render_frame(25, 80, &state);
     let joined = console::strip_ansi_codes(&frame.join("\n")).into_owned();
     assert!(joined.contains('▶'));
     assert!(joined.contains("running"));
