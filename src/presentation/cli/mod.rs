@@ -6,5 +6,6 @@ pub mod init;
 pub mod issue;
 pub mod llm_mcp;
 pub mod mcp;
+pub mod memory;
 pub mod session_mcp;
 pub mod status;

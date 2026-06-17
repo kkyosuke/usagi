@@ -1,13 +1,13 @@
 ---
 number: 36
 title: メモリ機能（.usagi/memory/ への永続化と CLI / MCP 公開）
-status: todo
+status: done
 priority: medium
 labels: [core, cli, mcp]
 dependson: [23]
 related: [25]
 created_at: 2026-06-17T13:16:32.000000+00:00
-updated_at: 2026-06-17T13:16:32.000000+00:00
+updated_at: 2026-06-17T13:40:00.000000+00:00
 ---
 
 # メモリ機能（AI エージェントの永続知識ストア）

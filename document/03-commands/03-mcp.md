@@ -2,9 +2,11 @@
 
 > [コマンドリファレンス](README.md) ｜ ← 前へ [3.2 TUI 内コマンド](02-tui.md) ｜ 次へ → [3.4 ローカル LLM MCP サーバ](04-llm-mcp.md)
 
-`usagi mcp` は、`usagi issue`（[01-cli.md](01-cli.md#usagi-issue)）と同じタスク issue 操作を
-**MCP（Model Context Protocol）サーバ**として AI エージェントに公開するコマンドです。エージェント
-（Claude Code など）が tool 呼び出しでタスクを起票・参照・更新できます。
+`usagi mcp` は、`usagi issue`（[01-cli.md](01-cli.md#usagi-issue)）と同じタスク issue 操作に加えて、
+`usagi memory`（[01-cli.md](01-cli.md#usagi-memory)）と同じメモリ操作を **MCP（Model Context Protocol）
+サーバ**として AI エージェントに公開するコマンドです。エージェント（Claude Code など）が tool 呼び出しで
+タスクを起票・参照・更新し、さらにセッションをまたいで覚えておく知識を保存・想起できます。1 つの
+`usagi mcp` プロセスが issue と memory の両方の tool を提供します。
 
 ## 目次
 
@@ -20,10 +22,12 @@
 
 - **トランスポート**: stdio（標準入出力）上の **JSON-RPC 2.0**。1 メッセージ = 1 行の JSON。
 - **対象リポジトリ**: `usagi mcp` を起動したカレントディレクトリから解決した **workspace root** の
-  `.usagi/issues/`。カレントディレクトリがセッションツリー（`<workspace>/.usagi/sessions/<name>/`）の
-  中にある場合は、その内側のコピーではなく workspace root を対象にします（[起動と登録](#起動と登録)）。
-- **ロジックの共有**: 各 tool は CLI と同じ [`usecase/issue`](../02-architecture.md#各層の責務) を呼ぶ薄い
-  アダプタ。CLI と MCP で挙動（採番・依存 readiness 判定など）は完全に一致します。
+  `.usagi/issues/` と `.usagi/memory/`。カレントディレクトリがセッションツリー
+  （`<workspace>/.usagi/sessions/<name>/`）の中にある場合は、その内側のコピーではなく workspace root を
+  対象にします（[起動と登録](#起動と登録)）。
+- **ロジックの共有**: 各 tool は CLI と同じ [`usecase/issue`](../02-architecture.md#各層の責務) /
+  `usecase/memory` を呼ぶ薄いアダプタ。CLI と MCP で挙動（採番・依存 readiness 判定・メモリの upsert など）は
+  完全に一致します。
 
 ## 起動と登録
 
@@ -64,28 +68,30 @@ AIエージェント ⇄ (stdio JSON-RPC)
 presentation/cli/mcp.rs   … stdin ループ（薄い I/O ラッパ。カバレッジ対象外）
         │  handle_line(line) ごとに委譲
         ▼
-presentation/mcp/issue.rs … McpServer：tool 実装（JSON-RPC フレーミングは mcp/mod.rs と共有・100% テスト）
+presentation/mcp/issue/  … McpServer：issue tool 実装。memory tool をマージして公開
+presentation/mcp/memory.rs … memory tool 実装（issue サーバが呼ぶ）
         │  各 tool が呼ぶ
         ▼
-usecase/issue             … create / get / list / search / update / delete・readiness 判定
+usecase/issue, usecase/memory … create/get/list/search/update/delete ほか
         │
         ▼
-infrastructure/issue_store … <repo>/.usagi/issues/ の markdown + index.json
+infrastructure/{issue_store, memory_store} … <repo>/.usagi/{issues,memory}/ の markdown + index.json
 ```
 
 | モジュール | 役割 |
 |---|---|
 | `presentation/cli/mcp.rs` | `usagi mcp` のエントリ。カレントディレクトリから workspace root を解決（`usecase/session::workspace_root`）して `McpServer` を構築し、stdin を 1 行ずつ読み `McpServer::handle_line` の戻り値を stdout へ書く。ブロッキング I/O のみで、`hop` 同様カバレッジ計測の対象外。 |
 | `presentation/mcp/mod.rs` | JSON-RPC 2.0 の共有フレーミング（`dispatch_line` / レスポンス整形 / `McpService` トレイト）。issue・llm・session の各サーバが共有。 |
-| `presentation/mcp/issue.rs` | `McpServer`。`McpService` を実装し issue tool を提供（`handle_line` は `mod.rs` の `dispatch_line` に委譲）。副作用は usecase 経由のファイル操作のみ。ユニットテストで網羅。 |
-| `usecase/issue` ほか | tool が呼ぶビジネスロジック。MCP 固有の知識は持たない。 |
+| `presentation/mcp/issue/` | `usagi` サーバの `McpServer`。`McpService` を実装し issue tool を提供。`tool_schemas` / `call_tool` で `presentation/mcp/memory.rs` の memory tool をマージして 1 サーバで両方を公開する。 |
+| `presentation/mcp/memory.rs` | memory tool の実装（スキーマ・引数パース・`usecase/memory` への委譲）。issue サーバから呼ばれる。 |
+| `usecase/issue`・`usecase/memory` ほか | tool が呼ぶビジネスロジック。MCP 固有の知識は持たない。 |
 
 依存方向はクリーンアーキテクチャに従い `presentation → usecase → infrastructure`。MCP 層は
 presentation に閉じています（[2. アーキテクチャ](../02-architecture.md) 参照）。
 
 ## 対応 tool 一覧
 
-`tools/list` で以下の 6 tool を公開します。結果はいずれも JSON テキストで返ります。
+`tools/list` で以下の 12 tool（issue 6 + memory 6）を公開します。結果はいずれも JSON テキストで返ります。
 
 | tool | 必須引数 | 任意引数 | 返り値 |
 |---|---|---|---|
@@ -95,8 +101,15 @@ presentation に閉じています（[2. アーキテクチャ](../02-architectu
 | `issue_search` | `query` | `status` / `priority` / `label` / `parent` / `milestone` / `ready` | 一致した issue 配列（`list` と同形式） |
 | `issue_update` | `number` | `title` / `status` / `priority` / `labels` / `dependson` / `related` / `parent` / `milestone` / `body` | 更新後の issue |
 | `issue_delete` | `number` | — | `{ "number": N, "deleted": bool }` |
+| `memory_save` | `name` / `title` | `type` / `related` / `body` | 保存されたメモリ（同名なら upsert） |
+| `memory_get` | `name` | — | メモリ（存在しなければ `null`） |
+| `memory_list` | — | `type` | メモリ配列（`updated_at` の新しい順） |
+| `memory_search` | `query` | `type` | 一致したメモリ配列（`list` と同形式） |
+| `memory_update` | `name` | `title` / `type` / `related` / `body` | 更新後のメモリ |
+| `memory_delete` | `name` | — | `{ "name": "…", "deleted": bool }` |
 
-- `status` は `todo` / `in-progress` / `done`、`priority` は `high` / `medium` / `low`。
+- `status` は `todo` / `in-progress` / `done`、`priority` は `high` / `medium` / `low`、`type`（memory）は `user` / `feedback` / `project` / `reference`。
+- `memory_save` は **`name` が既存なら上書き**（in-place 更新、`created_at` は保持）。`name` は与えた文字列をスラッグ化して識別子にします。
 - `dependson` はブロックする先行条件、`related` はブロックしない関連、`parent` は所属（Epic ⊃ サブタスク）、`milestone` は束ね。`issue_list` / `issue_search` は `parent` / `milestone` でも絞り込めます。
 - `issue_update` の `parent` / `milestone` は三状態です: 省略すると変更なし、**`null` を明示すると解除**、値を渡すと設定します。
 - `issue_list` / `issue_search` は CLI と同じく **`dependson` がすべて `done` の issue を `ready: true`**
@@ -169,5 +182,5 @@ presentation に閉じています（[2. アーキテクチャ](../02-architectu
   100%」という方針に合わせ、protocol 分岐を純粋関数（`handle_line`）に閉じ込めてユニットテストで
   網羅し、テスト不能な stdin ループだけをカバレッジ対象外にしています。
 - **protocolVersion**: `2024-11-05` を返します。
-- **状態を持たない**: サーバはセッション状態を保持せず、各 tool 呼び出しが `.usagi/issues/` を直接
-  読み書きします。CLI と MCP を混在して使っても整合します。
+- **状態を持たない**: サーバはセッション状態を保持せず、各 tool 呼び出しが `.usagi/issues/` /
+  `.usagi/memory/` を直接読み書きします。CLI と MCP を混在して使っても整合します。

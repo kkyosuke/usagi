@@ -6,6 +6,7 @@ pub mod git;
 pub mod history_store;
 pub mod issue_store;
 pub mod json_file;
+pub mod memory_store;
 pub mod pty;
 pub mod release;
 pub mod session_monitor;
