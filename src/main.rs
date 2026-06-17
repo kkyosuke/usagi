@@ -41,20 +41,32 @@ enum Commands {
         git: Option<String>,
     },
     /// Manage task issues stored in .usagi/issues/
+    ///
+    /// Hidden from the CLI: issues are operated by AI agents via the MCP server.
+    #[command(hide = true)]
     Issue {
         #[command(subcommand)]
         command: usagi::presentation::cli::issue::IssueCommand,
     },
     /// Run the local LLM MCP server over stdio (for AI agents to offload work)
+    ///
+    /// Hidden from the CLI: launched by AI agents, not invoked by hand.
+    #[command(hide = true)]
     LlmMcp {
         /// The Ollama model completions run against
         #[arg(long, value_name = "MODEL", default_value = usagi::domain::settings::DEFAULT_LOCAL_LLM_MODEL)]
         model: String,
     },
     /// Run the issue MCP server over stdio (for AI agents)
+    ///
+    /// Hidden from the CLI: launched by AI agents, not invoked by hand.
+    #[command(hide = true)]
     Mcp,
     /// Run the session orchestration MCP server over stdio (for AI agents to
     /// create sessions and delegate prompts to them)
+    ///
+    /// Hidden from the CLI: launched by AI agents, not invoked by hand.
+    #[command(hide = true)]
     SessionMcp,
     /// Sync the current repository's worktree state to .usagi/state.json
     Status,

@@ -4,6 +4,8 @@
 
 シェルから `usagi <cmd>` で実行する CLI コマンドの一覧です。
 
+`issue` / `mcp` / `llm-mcp` / `session-mcp` は **AI エージェントが MCP 経由で扱うためのコマンド**で、`usagi --help` の一覧には表示しません（実行自体は可能）。人手で叩くものではないため、ヘルプを汚さないよう隠しています。
+
 ## 目次
 
 - [CLI コマンド一覧](#cli-コマンド一覧)
@@ -24,10 +26,10 @@
 | `usagi config --edit` | グローバル設定ファイルを `$EDITOR` で開いて編集し、保存時に形式（JSON / 必須 `version` / 型）を検証する。不正な場合は直前の内容に巻き戻す |
 | `usagi doctor` | `git` / `bash` の導入状況、デスクトップ通知の可否、設定ストレージの健全性を確認する（ローカル LLM 有効時は `ollama`・モデルも） |
 | `usagi doctor --fix` | 不足ツールを OS のパッケージマネージャ（brew / apt-get / dnf / pacman）で導入を試行し、修復不可なら手動手順を提示する。ローカル LLM が有効なら `ollama`・サーバ起動・モデルも導入する |
-| `usagi issue <create\|list\|graph\|show\|update\|search\|delete>` | カレントリポジトリのタスク issue（`.usagi/issues/`）を操作する（[data/02-workspace.md](../data/02-workspace.md#issues-タスク-issue)） |
-| `usagi mcp` | issue 操作を MCP（Model Context Protocol）サーバとして stdio で公開し、AI エージェントから使えるようにする |
-| `usagi llm-mcp [--model <MODEL>]` | ローカル LLM（Ollama）を MCP サーバとして公開し、クラウド Agent が軽量タスクを委譲できるようにする（トークン節約） |
-| `usagi session-mcp` | セッション操作（作成・一覧・別セッションへのプロンプト委譲）を MCP サーバとして stdio で公開し、AI エージェントがセッションをオーケストレーションできるようにする |
+| `usagi issue <create\|list\|graph\|show\|update\|search\|delete>` | （ヘルプ非表示・エージェント向け）カレントリポジトリのタスク issue（`.usagi/issues/`）を操作する（[data/02-workspace.md](../data/02-workspace.md#issues-タスク-issue)） |
+| `usagi mcp` | （ヘルプ非表示・エージェント向け）issue 操作を MCP（Model Context Protocol）サーバとして stdio で公開し、AI エージェントから使えるようにする |
+| `usagi llm-mcp [--model <MODEL>]` | （ヘルプ非表示・エージェント向け）ローカル LLM（Ollama）を MCP サーバとして公開し、クラウド Agent が軽量タスクを委譲できるようにする（トークン節約） |
+| `usagi session-mcp` | （ヘルプ非表示・エージェント向け）セッション操作（作成・一覧・別セッションへのプロンプト委譲）を MCP サーバとして stdio で公開し、AI エージェントがセッションをオーケストレーションできるようにする |
 
 ### `usagi init`
 
