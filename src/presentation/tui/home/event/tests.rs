@@ -499,6 +499,141 @@ fn session_remove_with_a_name_and_force_routes_to_remove() {
     assert_eq!(removed, vec![("old".to_string(), true)]);
 }
 
+#[test]
+fn close_typed_in_overview_targets_the_active_session() {
+    // `close` is a session command, but the Overview line still dispatches it:
+    // it force-removes the active session (the root by default). The root is not
+    // removable, so `remove` reports no change and the screen stays put.
+    let mut keys = typed("close");
+    keys.push(Ok(Key::Enter)); // run `close` from the Overview line
+    keys.push(Ok(Key::Escape)); // Esc inert in Overview; fallback Ctrl-C quits
+    let term = Term::stdout();
+    let mut reader = ScriptedReader::new(keys);
+    let monitor = MonitorHandle::detached();
+    let mut persist: fn(&str) = noop_persist;
+    let mut create: fn(&str) -> SessionOutcome = noop_create;
+    let mut removed = Vec::new();
+    let mut remove = |name: &str, force: bool| {
+        removed.push((name.to_string(), force));
+        // The root cannot be removed: report no change (no refreshed list).
+        noop_remove(name, force)
+    };
+    let mut open: fn(&mut HomeState, &Path, bool) -> Result<PaneExit> = noop_open;
+    let mut config: fn(&Term) -> Result<bool> = noop_config;
+    let mut preview: fn(&Path) -> Option<TerminalView> = noop_preview;
+    let outcome = event_loop(
+        &term,
+        &mut reader,
+        sample_state(),
+        Path::new("/ws"),
+        &monitor,
+        &UpdateHandle::new(),
+        &mut persist,
+        &mut create,
+        &mut remove,
+        &mut (no_branches as fn() -> Vec<String>),
+        &mut open,
+        &mut config,
+        &mut preview,
+    )
+    .unwrap();
+    assert!(matches!(outcome, Outcome::Quit));
+    assert_eq!(removed, vec![("root".to_string(), true)]);
+}
+
+#[test]
+fn focus_close_command_force_removes_the_focused_session() {
+    // 在席 the `feat` session, then run `close` from the prompt: it removes the
+    // focused session forcefully (like `session remove feat --force`).
+    let mut keys = typed("session switch feat");
+    keys.push(Ok(Key::Enter)); // -> Focus (feat)
+    keys.extend(typed("close"));
+    keys.push(Ok(Key::Enter)); // run `close`
+    keys.push(Ok(Key::Escape)); // Esc inert in Overview; fallback Ctrl-C quits
+    let term = Term::stdout();
+    let mut reader = ScriptedReader::new(keys);
+    let monitor = MonitorHandle::detached();
+    let mut persist: fn(&str) = noop_persist;
+    let mut create: fn(&str) -> SessionOutcome = noop_create;
+    let mut removed = Vec::new();
+    let mut remove = |name: &str, force: bool| {
+        removed.push((name.to_string(), force));
+        // Report a refreshed list so the screen leaves 在席 for 統括.
+        SessionOutcome {
+            line: LogLine::output("removed"),
+            sessions: Some(Vec::new()),
+            select: None,
+        }
+    };
+    let mut open: fn(&mut HomeState, &Path, bool) -> Result<PaneExit> = noop_open;
+    let mut config: fn(&Term) -> Result<bool> = noop_config;
+    let mut preview: fn(&Path) -> Option<TerminalView> = noop_preview;
+    let outcome = event_loop(
+        &term,
+        &mut reader,
+        prompt_state(),
+        Path::new("/ws"),
+        &monitor,
+        &UpdateHandle::new(),
+        &mut persist,
+        &mut create,
+        &mut remove,
+        &mut (no_branches as fn() -> Vec<String>),
+        &mut open,
+        &mut config,
+        &mut preview,
+    )
+    .unwrap();
+    assert!(matches!(outcome, Outcome::Quit));
+    assert_eq!(removed, vec![("feat".to_string(), true)]);
+}
+
+#[test]
+fn focus_menu_close_force_removes_the_focused_session() {
+    // The 在席 menu lists `close` last; ArrowUp from the top wraps to it. Enter
+    // removes the focused session forcefully.
+    let mut keys = typed("session switch feat");
+    keys.push(Ok(Key::Enter)); // -> Focus (feat), menu UI
+    keys.push(Ok(Key::ArrowUp)); // terminal -> wrap to `close`
+    keys.push(Ok(Key::Enter)); // run `close`
+    keys.push(Ok(Key::Escape)); // Esc inert in Overview; fallback Ctrl-C quits
+    let term = Term::stdout();
+    let mut reader = ScriptedReader::new(keys);
+    let monitor = MonitorHandle::detached();
+    let mut persist: fn(&str) = noop_persist;
+    let mut create: fn(&str) -> SessionOutcome = noop_create;
+    let mut removed = Vec::new();
+    let mut remove = |name: &str, force: bool| {
+        removed.push((name.to_string(), force));
+        SessionOutcome {
+            line: LogLine::output("removed"),
+            sessions: Some(Vec::new()),
+            select: None,
+        }
+    };
+    let mut open: fn(&mut HomeState, &Path, bool) -> Result<PaneExit> = noop_open;
+    let mut config: fn(&Term) -> Result<bool> = noop_config;
+    let mut preview: fn(&Path) -> Option<TerminalView> = noop_preview;
+    let outcome = event_loop(
+        &term,
+        &mut reader,
+        sample_state(),
+        Path::new("/ws"),
+        &monitor,
+        &UpdateHandle::new(),
+        &mut persist,
+        &mut create,
+        &mut remove,
+        &mut (no_branches as fn() -> Vec<String>),
+        &mut open,
+        &mut config,
+        &mut preview,
+    )
+    .unwrap();
+    assert!(matches!(outcome, Outcome::Quit));
+    assert_eq!(removed, vec![("feat".to_string(), true)]);
+}
+
 // --- session-removal modal --------------------------------------------
 
 #[test]
@@ -985,14 +1120,16 @@ fn focus_menu_shortcut_keys_launch_terminal_and_agent() {
 
 #[test]
 fn focus_menu_can_run_the_coming_soon_ai_command() {
-    // The menu lists terminal (0, default), agent (1), ai (2). ArrowUp from
-    // the top wraps to "ai"; Enter on it just logs (no attach).
+    // The menu lists terminal (0, default), agent (1), ai (2), close (3).
+    // ArrowUp from the top wraps to "close"; one more lands on "ai"; Enter on
+    // it just logs (no attach).
     let mut keys = typed("session switch feat");
     keys.push(Ok(Key::Enter)); // Focus
     keys.push(Ok(Key::Home)); // ignored in the menu
     keys.push(Ok(Key::ArrowDown)); // terminal -> agent
     keys.push(Ok(Key::ArrowUp)); // back to terminal
-    keys.push(Ok(Key::ArrowUp)); // wrap to "ai"
+    keys.push(Ok(Key::ArrowUp)); // wrap to "close"
+    keys.push(Ok(Key::ArrowUp)); // up to "ai"
     keys.push(Ok(Key::Enter)); // run ai (coming soon)
     keys.push(Ok(Key::Escape)); // -> Overview
     keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits

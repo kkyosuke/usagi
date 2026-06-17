@@ -578,23 +578,24 @@ fn leave_focus_returns_to_overview() {
 fn focus_menu_lists_the_session_commands_in_order() {
     let state = state();
     let names: Vec<&str> = state.focus_menu_commands().iter().map(|i| i.name).collect();
-    assert_eq!(names, vec!["terminal", "agent", "ai"]);
+    assert_eq!(names, vec!["terminal", "agent", "ai", "close"]);
 }
 
 #[test]
 fn focus_menu_cursor_moves_and_wraps_and_selects() {
     let mut state = state();
     state.enter_focus(1);
-    // terminal (0, highlighted by default), agent (1), ai (2).
+    // terminal (0, highlighted by default), agent (1), ai (2), close (3).
     assert_eq!(state.focus_selected_command().name, "terminal");
     state.focus_menu_move_down();
     assert_eq!(state.focus_selected_command().name, "agent");
     state.focus_menu_move_down();
+    state.focus_menu_move_down();
     state.focus_menu_move_down(); // wraps to the top
     assert_eq!(state.focus_menu_cursor(), 0);
-    // Up from the top wraps to the bottom.
+    // Up from the top wraps to the bottom (`close`).
     state.focus_menu_move_up();
-    assert_eq!(state.focus_selected_command().name, "ai");
+    assert_eq!(state.focus_selected_command().name, "close");
 }
 
 #[test]

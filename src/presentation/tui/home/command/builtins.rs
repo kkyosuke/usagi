@@ -323,6 +323,35 @@ impl Command for AgentCommand {
     }
 }
 
+/// `close`: remove the focused session forcefully and return to 統括 (Overview).
+/// It is the 在席 equivalent of `session remove <name> --force` — the worktrees
+/// and branches are deleted and any uncommitted changes discarded, so the
+/// session is gone for good. The removal is a side effect ([`Effect::CloseSession`])
+/// performed by the event loop, which owns the worktree list and the
+/// session-removal callback.
+pub(super) struct CloseCommand;
+
+impl Command for CloseCommand {
+    fn name(&self) -> &'static str {
+        "close"
+    }
+
+    fn description(&self) -> &'static str {
+        "Close the focused session (remove it, discarding any changes)"
+    }
+
+    fn scope(&self) -> CommandScope {
+        CommandScope::Session
+    }
+
+    fn run(&self, _args: &str, _ctx: &CommandContext) -> CommandResult {
+        CommandResult {
+            lines: Vec::new(),
+            effect: Effect::CloseSession,
+        }
+    }
+}
+
 /// `issue`: browse the workspace's task issues in a read-only modal — a list
 /// with progress, the dependency tree, or one issue's full text. Mutating
 /// issues stays the agent's job (via the MCP server), so this command only

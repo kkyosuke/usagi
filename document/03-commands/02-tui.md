@@ -14,7 +14,7 @@
 | 入力面 | スコープ | 出るコマンド |
 |---|---|---|
 | 統括（Overview）の下部コマンドライン | Workspace（全体） | `session` / `issue` / `config` |
-| 在席（Focus）の右ペイン | Session（個別） | `terminal` / `agent` |
+| 在席（Focus）の右ペイン | Session（個別） | `terminal` / `agent` / `close` |
 | 両方 | 共通 | `man` / `history` / `clear` / `quit` |
 
 入力欄の直上には入力中の内容に応じた候補・ヒント（コマンド一覧の絞り込み、または引数入力中の `usage` / `examples`）が
@@ -33,6 +33,7 @@
 | `issue` | タスク issue を一覧・依存ツリー・1 件表示で閲覧（Workspace スコープ） |
 | `terminal` | 選択中セッションの worktree でシェルを右ペインに埋め込み起動（Session スコープ） |
 | `agent` | `terminal` ＋ Agent CLI（既定 `claude`）を起動（Session スコープ） |
+| `close` | 在席中のセッションを強制削除して統括へ戻る（`session remove <名前> --force` と同じ。Session スコープ） |
 | `config` | 現在のワークスペースのローカル設定を編集する Config 画面を開く（Workspace スコープ） |
 
 > `man` / `help`、`quit` / `exit` はそれぞれ別名（同じ動作）です。
@@ -87,6 +88,14 @@ Agent CLI ごとの組み込み方法（Claude は `--mcp-config` / `--append-sy
 
 入力待ちの検知・`◆ waiting` マーカー・デスクトップ通知の挙動は
 [design/05-home.md](../design/05-home.md#使用中-agent-の表示入力待ちの検知と通知) を参照してください。
+
+## close
+
+**在席の右ペイン**から実行します。在席中のセッションを強制削除します。`session remove <名前> --force`
+と同じ挙動で、そのセッションの worktree・ブランチ・コピーを削除し、未コミット変更があっても破棄します。
+削除が成功するとセッションは消えるので**統括**へ戻ります（ルート行の在席など削除できない対象ではエラーを
+ログに出して在席に留まります）。削除そのものはバックグラウンドのコールバックが行い、孤児ディレクトリの掃除など
+ライフサイクルの概念は [4. オーケストレーション](../04-orchestration.md) を参照してください。
 
 ## config
 

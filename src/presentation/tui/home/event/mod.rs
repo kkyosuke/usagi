@@ -257,6 +257,7 @@ pub fn event_loop(
                 &mut painter,
                 workspace_root,
                 key,
+                remove_session,
                 open_terminal,
                 preview,
             ),
