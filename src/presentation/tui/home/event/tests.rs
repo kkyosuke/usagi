@@ -78,8 +78,8 @@ fn noop_open(_: &mut HomeState, _: &Path, _: bool) -> Result<PaneExit> {
     Ok(PaneExit::Closed)
 }
 
-fn noop_config(_: &Term) -> Result<bool> {
-    Ok(false)
+fn noop_config(_: &Term) -> Result<Option<SessionActionUi>> {
+    Ok(Some(SessionActionUi::Menu))
 }
 
 fn noop_preview(_: &Path) -> Option<TerminalView> {
@@ -133,7 +133,7 @@ fn run_full(
     open_terminal: &mut dyn FnMut(&mut HomeState, &Path, bool) -> Result<PaneExit>,
     create_session: &mut dyn FnMut(&str) -> SessionOutcome,
     preview: &mut dyn FnMut(&Path) -> Option<TerminalView>,
-    open_config: &mut dyn FnMut(&Term) -> Result<bool>,
+    open_config: &mut dyn FnMut(&Term) -> Result<Option<SessionActionUi>>,
 ) -> Result<Outcome> {
     let term = Term::stdout();
     let mut reader = ScriptedReader::new(keys);
@@ -173,7 +173,7 @@ fn run_with_live_monitor(
     let mut create: fn(&str) -> SessionOutcome = noop_create;
     let mut remove_session: fn(&str, bool) -> SessionOutcome = noop_remove;
     let mut open: fn(&mut HomeState, &Path, bool) -> Result<PaneExit> = noop_open;
-    let mut config: fn(&Term) -> Result<bool> = noop_config;
+    let mut config: fn(&Term) -> Result<Option<SessionActionUi>> = noop_config;
     let mut preview: fn(&Path) -> Option<TerminalView> = noop_preview;
     let mut branches: fn() -> Vec<String> = no_branches;
     event_loop(
@@ -213,7 +213,7 @@ fn a_populated_update_handle_is_read_before_painting() {
     let mut create: fn(&str) -> SessionOutcome = noop_create;
     let mut remove: fn(&str, bool) -> SessionOutcome = noop_remove;
     let mut open: fn(&mut HomeState, &Path, bool) -> Result<PaneExit> = noop_open;
-    let mut config: fn(&Term) -> Result<bool> = noop_config;
+    let mut config: fn(&Term) -> Result<Option<SessionActionUi>> = noop_config;
     let mut preview: fn(&Path) -> Option<TerminalView> = noop_preview;
     let outcome = event_loop(
         &term,
@@ -236,6 +236,49 @@ fn a_populated_update_handle_is_read_before_painting() {
 
 fn typed(s: &str) -> Vec<io::Result<Key>> {
     s.chars().map(|c| Ok(Key::Char(c))).collect()
+}
+
+/// 切替 (Switch) reached from the 在席 prompt surface via `Ctrl-O`, then a
+/// different session focused: the session changes as expected. Guards the
+/// prompt-mode path of `focus_key`'s `Ctrl-O` handling (the menu path is covered
+/// by [`focus_ctrl_o_opens_switch_then_esc_re_focuses`]).
+#[test]
+fn prompt_focus_ctrl_o_opens_switch_and_can_change_session() {
+    let opened = RefCell::new(0);
+    let mut open = |_h: &mut HomeState, _d: &Path, _a: bool| {
+        *opened.borrow_mut() += 1;
+        Ok(PaneExit::Closed)
+    };
+    let mut create: fn(&str) -> SessionOutcome = noop_create;
+    // Only `feat` has a live terminal, so focusing the idle root stays in 在席
+    // (no auto-attach) until Ctrl-O reaches Switch and `feat` is selected.
+    let mut preview = |p: &Path| {
+        if p.to_string_lossy().contains("feat") {
+            Some(TerminalView::from_rows(vec!["live".to_string()], None))
+        } else {
+            None
+        }
+    };
+    let mut keys = typed("session switch root");
+    keys.push(Ok(Key::Enter)); // Focus root (idle -> 在席 prompt, no attach)
+    keys.push(Ok(Key::Char(CTRL_O))); // 在席 -> 切替
+    keys.push(Ok(Key::ArrowDown)); // root -> main
+    keys.push(Ok(Key::ArrowDown)); // main -> feat
+    keys.push(Ok(Key::Enter)); // focus feat (live) -> attach
+    run_full(
+        keys,
+        prompt_state(),
+        &mut open,
+        &mut create,
+        &mut preview,
+        &mut noop_config,
+    )
+    .unwrap();
+    assert_eq!(
+        *opened.borrow(),
+        1,
+        "Ctrl-O from the prompt surface must reach Switch so focusing the live feat attaches"
+    );
 }
 
 fn state_with_sessions(names: &[&str]) -> HomeState {
@@ -339,7 +382,7 @@ fn submitted_commands_are_handed_to_persist() {
     let mut create: fn(&str) -> SessionOutcome = noop_create;
     let mut remove: fn(&str, bool) -> SessionOutcome = noop_remove;
     let mut open: fn(&mut HomeState, &Path, bool) -> Result<PaneExit> = noop_open;
-    let mut config: fn(&Term) -> Result<bool> = noop_config;
+    let mut config: fn(&Term) -> Result<Option<SessionActionUi>> = noop_config;
     let mut preview: fn(&Path) -> Option<TerminalView> = noop_preview;
     let outcome = event_loop(
         &term,
@@ -477,7 +520,7 @@ fn session_remove_with_a_name_and_force_routes_to_remove() {
         noop_remove(name, force)
     };
     let mut open: fn(&mut HomeState, &Path, bool) -> Result<PaneExit> = noop_open;
-    let mut config: fn(&Term) -> Result<bool> = noop_config;
+    let mut config: fn(&Term) -> Result<Option<SessionActionUi>> = noop_config;
     let mut preview: fn(&Path) -> Option<TerminalView> = noop_preview;
     let outcome = event_loop(
         &term,
@@ -525,7 +568,7 @@ fn session_remove_without_a_name_opens_the_modal_and_bulk_removes() {
         noop_remove(name, force)
     };
     let mut open: fn(&mut HomeState, &Path, bool) -> Result<PaneExit> = noop_open;
-    let mut config: fn(&Term) -> Result<bool> = noop_config;
+    let mut config: fn(&Term) -> Result<Option<SessionActionUi>> = noop_config;
     let mut preview: fn(&Path) -> Option<TerminalView> = noop_preview;
     let outcome = event_loop(
         &term,
@@ -649,11 +692,11 @@ fn config_keys() -> Vec<io::Result<Key>> {
 
 #[test]
 fn config_opens_the_settings_screen_and_can_quit() {
-    // Returns false -> resume, then back.
+    // Returns Some -> resume, then back.
     let opened = RefCell::new(false);
     let mut config = |_: &Term| {
         *opened.borrow_mut() = true;
-        Ok(false)
+        Ok(Some(SessionActionUi::Menu))
     };
     let mut open: fn(&mut HomeState, &Path, bool) -> Result<PaneExit> = noop_open;
     let mut create: fn(&str) -> SessionOutcome = noop_create;
@@ -672,8 +715,8 @@ fn config_opens_the_settings_screen_and_can_quit() {
     ));
     assert!(opened.into_inner());
 
-    // Returns true -> quit.
-    let mut config_quit = |_: &Term| Ok(true);
+    // Returns None -> quit.
+    let mut config_quit = |_: &Term| Ok(None);
     assert!(matches!(
         run_full(
             config_keys(),
@@ -686,6 +729,36 @@ fn config_opens_the_settings_screen_and_can_quit() {
         .unwrap(),
         Outcome::Quit
     ));
+}
+
+#[test]
+fn returning_from_config_refreshes_the_session_action_ui() {
+    // The config screen flipped the 在席 (Focus) surface from the default Menu to
+    // Prompt; on returning to home the state must adopt it, so Focus renders the
+    // new surface without reopening the screen. The `terminal` command run right
+    // after attaches a pane, letting us observe the live state's setting.
+    let mut config = |_: &Term| Ok(Some(SessionActionUi::Prompt));
+    let seen = RefCell::new(None);
+    let mut open = |state: &mut HomeState, _: &Path, _: bool| {
+        *seen.borrow_mut() = Some(state.session_action_ui());
+        Ok(PaneExit::Closed)
+    };
+    let mut create: fn(&str) -> SessionOutcome = noop_create;
+    let mut preview: fn(&Path) -> Option<TerminalView> = noop_preview;
+    let mut keys = typed("config");
+    keys.push(Ok(Key::Enter));
+    keys.extend(typed("terminal"));
+    keys.push(Ok(Key::Enter));
+    run_full(
+        keys,
+        sample_state(), // starts as Menu (the default)
+        &mut open,
+        &mut create,
+        &mut preview,
+        &mut config,
+    )
+    .unwrap();
+    assert_eq!(seen.into_inner(), Some(SessionActionUi::Prompt));
 }
 
 #[test]
