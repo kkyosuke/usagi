@@ -18,7 +18,7 @@ use crate::domain::settings::SessionActionUi;
 use super::super::command::Effect;
 use super::super::state::{HomeState, PaneExit, ReturnMode, SessionOutcome};
 use super::super::terminal_view::TerminalView;
-use super::{selected_dir, Flow, CTRL_O};
+use super::{paint_now, selected_dir, Flow, CTRL_O};
 
 /// Handle one key in 統括 (Overview): edit / complete / recall the workspace
 /// command line and run it on `Enter`, dispatching the resulting [`Effect`].
@@ -64,7 +64,10 @@ pub(super) fn overview_key(
                 // `session create <name>` creates directly; the screen rebuilds
                 // its list and selects the new session.
                 Effect::CreateSession(name) => {
+                    state.step_loading("作成中…");
+                    let _ = paint_now(term, painter, state);
                     let outcome = create_session(&name);
+                    state.finish_loading();
                     state.apply_session_outcome(outcome);
                 }
                 // `session create` with no name moves to 切替 and opens the inline
@@ -217,7 +220,10 @@ pub(super) fn switch_key(
         match key {
             Key::Enter => {
                 if let Some(name) = state.switch_confirm_create() {
+                    state.step_loading("作成中…");
+                    let _ = paint_now(term, painter, state);
                     let outcome = create_session(&name);
+                    state.finish_loading();
                     state.apply_session_outcome(outcome);
                     // The freshly created session is selected; focus it.
                     let row = state.list().selected_index();
@@ -572,6 +578,16 @@ fn open_pane(
         ("Terminal", "terminal")
     };
     let dir = selected_dir(state, workspace_root);
+    // Spawning the PTY (and launching the agent CLI inside it) blocks for a beat;
+    // flash the loading rabbit in the top-right so the wait reads as deliberate,
+    // until the pane itself paints over the screen.
+    state.step_loading(if agent {
+        "エージェント起動中…"
+    } else {
+        "ターミナル起動中…"
+    });
+    let _ = paint_now(term, painter, state);
+    state.finish_loading();
     state.show_attached();
     let outcome = open_terminal(state, &dir, agent);
     // The pane toggled `crossterm`'s raw mode around itself; re-assert the
