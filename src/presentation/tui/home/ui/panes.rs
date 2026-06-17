@@ -64,7 +64,7 @@ enum AgentState {
     /// No live embedded session: the row carries no agent detail.
     Absent,
     /// A live session whose agent has started but not begun a turn yet — idle,
-    /// awaiting the first prompt. Displayed as `◌ ready`.
+    /// awaiting the first prompt. Displayed as `☾ ready`.
     Ready,
     /// A live session whose agent is working a turn. Displayed as `▶ running`.
     Running,
@@ -95,13 +95,13 @@ impl AgentState {
         }
     }
 
-    /// The detail-line content: an icon together with its label — `◌ ready`
+    /// The detail-line content: an icon together with its label — `☾ ready`
     /// (dim), `▶ running` (green), `◆ waiting` (yellow), or `✓ done` (cyan) —
     /// clipped to `width`, or `None` when absent (the row has no agent in use).
     fn detail(self, width: usize) -> Option<String> {
         match self {
             AgentState::Absent => None,
-            AgentState::Ready => Some(style(clip_to_width("◌ ready", width)).dim().to_string()),
+            AgentState::Ready => Some(style(clip_to_width("☾ ready", width)).dim().to_string()),
             AgentState::Running => Some(
                 style(clip_to_width("▶ running", width))
                     .green()
@@ -165,7 +165,7 @@ fn detail_line(gutter: &str, detail: String) -> String {
 /// worktree's two lines; line 1 then has a `●`/`○` kind icon (primary or ordinary
 /// worktree), the branch name, and the git `status` at the right edge. Line 2 is
 /// indented under the name and, when an agent is in use, carries its icon + label
-/// (`◌ ready` / `▶ running` / `◆ waiting` / `✓ done`).
+/// (`☾ ready` / `▶ running` / `◆ waiting` / `✓ done`).
 #[allow(clippy::too_many_arguments)]
 pub(super) fn worktree_row(
     worktree: &WorktreeState,
@@ -244,7 +244,7 @@ pub(super) fn dim_row(line: &str) -> String {
 /// detail line) — the root entry first, then one per worktree (or the empty
 /// message when none are recorded), trimmed to the available `rows`. `live` holds
 /// the worktree paths with an embedded session (a live-but-idle one shows
-/// `◌ ready`), `running` the ones working a turn (`▶ running`), `waiting` the
+/// `☾ ready`), `running` the ones working a turn (`▶ running`), `waiting` the
 /// ones whose agent awaits input (`◆ waiting`), and `done` the finished ones
 /// (`✓ done`); precedence is done > waiting > running > ready. When `in_switch`
 /// is set (in 切替), the keyboard is on the list: the selected row shows a `>`
