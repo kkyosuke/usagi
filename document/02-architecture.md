@@ -48,10 +48,9 @@ src/
 │   ├── agent_phase.rs          # Agent のライフサイクル phase（Ready / Running / Waiting / Ended）
 │   ├── repository.rs           # Git URL パース・ディレクトリ名導出
 │   ├── settings.rs             # Settings / Theme / AgentCli / LocalLlm、LocalSettings（with_local で上書き解決）・起動ポリシー agent_wiring と AgentCli::launch_command（MCP・フック注入）
-│   ├── agent.rs                # Agent port（usagi が agent に求める IF：launch_command / usage）・AgentWiring
+│   ├── agent.rs                # Agent port（usagi が agent に求める IF：launch_command）・AgentWiring
 │   ├── workspace.rs            # グローバル登録エントリ Workspace
 │   ├── workspace_state.rs      # WorkspaceState / WorktreeState / BranchStatus
-│   ├── agent_usage.rs          # AgentUsage / AggregateUsage・モデル別コンテキストウィンドウ上限
 │   ├── history.rs              # コマンド履歴の 1 件 HistoryEntry
 │   ├── issue/                  # Issue / IssueSummary / IssueStatus / IssuePriority（mod=型 / markdown=frontmatter 読み書き）
 │   └── version.rs              # セマンティックバージョン Version（パース・比較）
@@ -82,7 +81,7 @@ src/
 │   ├── release.rs              # git ls-remote --tags でリリースタグを取得（薄い IO ラッパ）
 │   ├── session_monitor.rs      # 入力待ち判定の純粋ロジック（phase 優先・ベル基準値・待ち集合・アタッチ）
 │   ├── agent_state_store.rs    # worktree 別の Agent phase の記録/読み出し（~/.usagi/agent-state/）
-│   ├── agent/                  # Agent port のアダプタ（Claude=launch 委譲+transcript / Gemini スタブ）・agent_for
+│   ├── agent/                  # Agent port のアダプタ（Claude / Gemini の launch 委譲）・agent_for
 │   └── issue_store.rs          # <repo>/.usagi/issues/ の markdown + index.json（IssueStore）
 │
 └── presentation/               # CLI ルーティング・TUI・MCP

@@ -38,10 +38,6 @@ use std::time::Duration;
 use anyhow::Result;
 use console::Term;
 
-use crate::domain::agent::Agent;
-use crate::domain::agent_usage::AggregateUsage;
-use crate::domain::settings::AgentCli;
-use crate::infrastructure::agent::agent_for;
 use crate::infrastructure::pty::PtySession;
 use crate::infrastructure::session_monitor::SessionMonitor;
 use crate::infrastructure::{agent_state_store, session_monitor};
@@ -68,10 +64,6 @@ struct Watched {
 struct Shared {
     monitor: SessionMonitor,
     sessions: HashMap<PathBuf, Watched>,
-    /// The latest combined context-window usage across the live sessions, set by
-    /// the watcher and read by the render loops for the sidebar gauge. `None`
-    /// until a live session reports usage.
-    usage: Option<AggregateUsage>,
 }
 
 /// A cloneable read/notify handle onto the shared waiting state, given to the
@@ -148,13 +140,6 @@ impl MonitorHandle {
         self.lock().monitor.set_attached(path);
     }
 
-    /// The latest combined context-window usage across the live sessions, or
-    /// `None` when no live session has reported usage. The render loops read this
-    /// each frame to draw the sidebar's aggregate usage gauge.
-    pub fn usage(&self) -> Option<AggregateUsage> {
-        self.lock().usage
-    }
-
     fn lock(&self) -> std::sync::MutexGuard<'_, Shared> {
         self.shared.lock().expect("terminal monitor mutex poisoned")
     }
@@ -175,16 +160,14 @@ pub struct TerminalPool {
 impl TerminalPool {
     /// An empty pool with its watcher thread running. `notifications_enabled`
     /// gates the desktop notification fired when a detached session starts
-    /// waiting for input. `agent` is the adapter the watcher polls for each live
-    /// session's context-window usage (the sidebar gauge).
-    pub fn new(notifications_enabled: bool, agent: Arc<dyn Agent>) -> Self {
+    /// waiting for input.
+    pub fn new(notifications_enabled: bool) -> Self {
         let shared = Arc::new(Mutex::new(Shared::default()));
         let stop = Arc::new(AtomicBool::new(false));
         let watcher = spawn_watcher(
             Arc::clone(&shared),
             Arc::clone(&stop),
             notifications_enabled,
-            agent,
         );
         Self {
             sessions: HashMap::new(),
@@ -317,15 +300,13 @@ impl Drop for TerminalPool {
 }
 
 /// Spawn the watcher thread: every [`POLL_INTERVAL`] it prunes exited sessions,
-/// feeds the live bell counts and recorded phases to the [`SessionMonitor`],
-/// reads each live session's context-window usage through `agent` into a combined
-/// gauge, and fires a one-shot notification for each background session that has
-/// just begun waiting for input or whose agent has just finished.
+/// feeds the live bell counts and recorded phases to the [`SessionMonitor`], and
+/// fires a one-shot notification for each background session that has just begun
+/// waiting for input or whose agent has just finished.
 fn spawn_watcher(
     shared: Arc<Mutex<Shared>>,
     stop: Arc<AtomicBool>,
     notifications_enabled: bool,
-    agent: Arc<dyn Agent>,
 ) -> JoinHandle<()> {
     std::thread::spawn(move || loop {
         if stop.load(Ordering::SeqCst) {
@@ -333,11 +314,9 @@ fn spawn_watcher(
         }
         std::thread::sleep(POLL_INTERVAL);
 
-        // Snapshot the bookkeeping under the lock: prune dead sessions, observe
-        // the phases/bells, and collect the live paths to read usage from. Usage
-        // is read *after* releasing the lock so the per-tick transcript reads
-        // never block the render loops.
-        let (notices, live_paths): (Vec<(String, session_monitor::NoticeKind)>, Vec<PathBuf>) = {
+        // Snapshot the bookkeeping under the lock: prune dead sessions and observe
+        // the phases/bells.
+        let notices: Vec<(String, session_monitor::NoticeKind)> = {
             let mut shared = match shared.lock() {
                 Ok(shared) => shared,
                 Err(_) => break,
@@ -370,8 +349,7 @@ fn spawn_watcher(
                     )
                 })
                 .collect();
-            let live_paths = shared.sessions.keys().cloned().collect();
-            let notices = shared
+            shared
                 .monitor
                 .observe(&readings)
                 .into_iter()
@@ -381,15 +359,8 @@ fn spawn_watcher(
                         .get(&notice.path)
                         .map(|w| (w.label.clone(), notice.kind))
                 })
-                .collect();
-            (notices, live_paths)
+                .collect()
         };
-
-        // Read usage off-lock (file I/O), then store the combined gauge.
-        let usage = AggregateUsage::from_sessions(live_paths.iter().filter_map(|p| agent.usage(p)));
-        if let Ok(mut shared) = shared.lock() {
-            shared.usage = usage;
-        }
 
         if notifications_enabled {
             for (label, kind) in notices {
@@ -420,6 +391,6 @@ fn notify(label: &str, kind: session_monitor::NoticeKind) {
 
 impl Default for TerminalPool {
     fn default() -> Self {
-        Self::new(true, agent_for(AgentCli::default()))
+        Self::new(true)
     }
 }
