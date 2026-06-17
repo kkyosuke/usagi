@@ -65,17 +65,11 @@ enum Commands {
         #[arg(long, value_name = "MODEL", default_value = usagi::domain::settings::DEFAULT_LOCAL_LLM_MODEL)]
         model: String,
     },
-    /// Run the issue MCP server over stdio (for AI agents)
+    /// Run the usagi MCP server over stdio (issue / memory / session tools for AI agents)
     ///
     /// Hidden from the CLI: launched by AI agents, not invoked by hand.
     #[command(hide = true)]
     Mcp,
-    /// Run the session orchestration MCP server over stdio (for AI agents to
-    /// create sessions and delegate prompts to them)
-    ///
-    /// Hidden from the CLI: launched by AI agents, not invoked by hand.
-    #[command(hide = true)]
-    SessionMcp,
     /// Sync the current repository's worktree state to .usagi/state.json
     Status,
 }
@@ -93,7 +87,6 @@ fn main() -> anyhow::Result<()> {
         Commands::Memory { command } => usagi::presentation::cli::memory::run(command),
         Commands::LlmMcp { model } => usagi::presentation::cli::llm_mcp::run(model),
         Commands::Mcp => usagi::presentation::cli::mcp::run(),
-        Commands::SessionMcp => usagi::presentation::cli::session_mcp::run(),
         Commands::Status => usagi::presentation::cli::status::run(),
     };
 

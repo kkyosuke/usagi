@@ -4,7 +4,7 @@
 
 シェルから `usagi <cmd>` で実行する CLI コマンドの一覧です。
 
-`issue` / `memory` / `mcp` / `llm-mcp` / `session-mcp` は **AI エージェントが MCP 経由で扱うためのコマンド**で、`usagi --help` の一覧には表示しません（実行自体は可能）。人手で叩くものではないため、ヘルプを汚さないよう隠しています。
+`issue` / `memory` / `mcp` / `llm-mcp` は **AI エージェントが MCP 経由で扱うためのコマンド**で、`usagi --help` の一覧には表示しません（実行自体は可能）。人手で叩くものではないため、ヘルプを汚さないよう隠しています。
 
 ## 目次
 
@@ -13,7 +13,6 @@
   - [`usagi memory`](#usagi-memory)
   - [`usagi mcp`](#usagi-mcp)
   - [`usagi llm-mcp`](#usagi-llm-mcp)
-  - [`usagi session-mcp`](#usagi-session-mcp)
 
 ## CLI コマンド一覧
 
@@ -29,9 +28,8 @@
 | `usagi doctor --fix` | 不足ツールを OS のパッケージマネージャ（brew / apt-get / dnf / pacman）で導入を試行し、修復不可なら手動手順を提示する。ローカル LLM が有効なら `ollama`・サーバ起動・モデルも導入する |
 | `usagi issue <create\|list\|graph\|show\|update\|search\|delete>` | （ヘルプ非表示・エージェント向け）カレントリポジトリのタスク issue（`.usagi/issues/`）を操作する（[data/02-workspace.md](../data/02-workspace.md#issues-タスク-issue)） |
 | `usagi memory <save\|list\|show\|update\|search\|delete>` | （ヘルプ非表示・エージェント向け）カレントリポジトリのエージェントのメモリ（`.usagi/memory/`）を操作する（[data/04-memory.md](../data/04-memory.md)） |
-| `usagi mcp` | （ヘルプ非表示・エージェント向け）issue とメモリの操作を MCP（Model Context Protocol）サーバとして stdio で公開し、AI エージェントから使えるようにする |
+| `usagi mcp` | （ヘルプ非表示・エージェント向け）issue・メモリ・セッションの操作を MCP（Model Context Protocol）サーバとして stdio で公開し、AI エージェントから使えるようにする |
 | `usagi llm-mcp [--model <MODEL>]` | （ヘルプ非表示・エージェント向け）ローカル LLM（Ollama）を MCP サーバとして公開し、クラウド Agent が軽量タスクを委譲できるようにする（トークン節約） |
-| `usagi session-mcp` | （ヘルプ非表示・エージェント向け）セッション操作（作成・一覧・別セッションへのプロンプト委譲）を MCP サーバとして stdio で公開し、AI エージェントがセッションをオーケストレーションできるようにする |
 
 ### `usagi init`
 
@@ -136,12 +134,8 @@ user         tabs                     ユーザーはタブを好む
 
 ### `usagi mcp`
 
-`usagi issue` / `usagi memory` と同じ issue・メモリ操作を、**MCP（Model Context Protocol）サーバ**として AI エージェント（Claude Code など）に stdio 経由で公開します。アーキテクチャ・対応 tool・JSON-RPC プロトコルの詳細は専用の章 [3.3 MCP サーバ](03-mcp.md) を参照してください。
+`usagi issue` / `usagi memory` と同じ issue・メモリ操作に加え、セッション操作（`session_create` / `session_list` / `session_prompt`）を、**MCP（Model Context Protocol）サーバ**として AI エージェント（Claude Code など）に stdio 経由で公開します。issue・memory・session の tool を 1 つの `usagi` サーバが提供します。アーキテクチャ・対応 tool・`session_prompt` の挙動・JSON-RPC プロトコルの詳細は専用の章 [3.3 MCP サーバ](03-mcp.md) を参照してください。
 
 ### `usagi llm-mcp`
 
 ローカル LLM（Ollama）を **MCP サーバ**として公開し、クラウド Agent が要約・命名・定型文生成などの軽量タスクを `local_llm_ask` ツールで委譲できるようにします。`--model` で委譲先モデルを指定します（既定は `qwen2.5-coder:7b`）。設定での有効化・資材のインストール・対応 tool の詳細は専用の章 [3.4 ローカル LLM MCP サーバ](04-llm-mcp.md) を参照してください。
-
-### `usagi session-mcp`
-
-usagi のセッション操作を **MCP サーバ**として公開し、AI エージェントが `session_create`（作成）・`session_list`（一覧）・`session_prompt`（別セッションのエージェントへプロンプトを委譲）でセッションをオーケストレーションできるようにします。対応 tool・`session_prompt` の挙動・アーキテクチャの詳細は専用の章 [3.5 セッション MCP サーバ](05-session-mcp.md) を参照してください。

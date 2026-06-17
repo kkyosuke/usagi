@@ -26,6 +26,11 @@ use super::McpService;
 use crate::domain::workspace_state::SessionRecord;
 use crate::usecase::session;
 
+/// Names of the session tools this server exposes. The unified `usagi` server
+/// ([`super::usagi`]) uses this to route `tools/call` for these names to the
+/// embedded session server.
+pub const TOOL_NAMES: [&str; 3] = ["session_create", "session_list", "session_prompt"];
+
 /// Sends a prompt to the agent rooted at a session's worktree. Abstracted so the
 /// server's protocol handling can be tested with a fake backend that never
 /// shells out to a real agent.
