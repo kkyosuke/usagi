@@ -75,14 +75,15 @@ pub fn register_existing(storage: &Storage, path: &Path, name: &str) -> Result<W
 
 /// The self-contained `.gitignore` usagi writes inside each repository's
 /// `.usagi/` directory. Patterns are relative to `.usagi/`: ignore everything,
-/// but keep this `.gitignore` and the shared `issues/` directory tracked, while
-/// still excluding the rebuildable `issues/index.json` cache.
+/// but keep this `.gitignore` and the shared `issues/` and `memory/` directories
+/// tracked, while still excluding their rebuildable `index.json` caches.
 ///
-/// Task issues are meant to be committed and shared with the team; the
-/// machine-local state (`state.json`, `settings.json`, `history.json`,
-/// `sessions/`) and the derived issue index stay ignored. Keeping the rules
-/// inside `.usagi/` leaves the repository-root `.gitignore` untouched.
-const USAGI_GITIGNORE: &str = "/*\n!/.gitignore\n!/issues/\n/issues/index.json\n";
+/// Task issues and agent memories are meant to be committed and shared with the
+/// team; the machine-local state (`state.json`, `settings.json`, `history.json`,
+/// `sessions/`) and the derived indexes stay ignored. Keeping the rules inside
+/// `.usagi/` leaves the repository-root `.gitignore` untouched.
+const USAGI_GITIGNORE: &str =
+    "/*\n!/.gitignore\n!/issues/\n/issues/index.json\n!/memory/\n/memory/index.json\n";
 
 /// Whether `line` is one of the entries earlier usagi versions appended to the
 /// repository-root `.gitignore` (including the legacy bare `.usagi/` form). Such

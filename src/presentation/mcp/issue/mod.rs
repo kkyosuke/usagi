@@ -1,9 +1,13 @@
-//! MCP server exposing a repository's task issues as tools.
+//! The `usagi` MCP server, exposing a repository's task issues and durable
+//! memories as tools.
 //!
-//! Every tool delegates to [`crate::usecase::issue`], so the MCP surface stays a
-//! thin protocol adapter over the same business logic the CLI uses. The
-//! JSON-RPC framing is shared with the other server and lives in the parent
-//! [`super`] module; this file only supplies the issue tools.
+//! Every tool delegates to [`crate::usecase::issue`] or [`crate::usecase::memory`],
+//! so the MCP surface stays a thin protocol adapter over the same business logic
+//! the CLI uses. The issue tools live in this file; the memory tools are supplied
+//! by [`super::memory`] and merged in by [`McpServer::tool_schemas`] and
+//! [`McpServer::call_tool`], so a single `usagi mcp` process serves both. The
+//! JSON-RPC framing is shared with the other servers and lives in the parent
+//! [`super`] module.
 
 use std::path::{Path, PathBuf};
 
@@ -99,7 +103,22 @@ impl McpService for McpServer {
     }
 
     fn tool_schemas(&self) -> Value {
-        issue_tool_schemas()
+        // Advertise the issue tools followed by the memory tools, so one `usagi`
+        // server exposes both for a repository. Both helpers return JSON arrays
+        // by construction.
+        let mut tools = issue_tool_schemas();
+        let memory = super::memory::tool_schemas();
+        tools
+            .as_array_mut()
+            .expect("issue tool schemas are a JSON array")
+            .extend(
+                memory
+                    .as_array()
+                    .expect("memory tool schemas are a JSON array")
+                    .iter()
+                    .cloned(),
+            );
+        tools
     }
 
     fn call_tool(&self, name: &str, arguments: Value) -> Result<String, String> {
@@ -110,6 +129,10 @@ impl McpService for McpServer {
             "issue_search" => self.tool_search(arguments),
             "issue_update" => self.tool_update(arguments),
             "issue_delete" => self.tool_delete(arguments),
+            // Memory tools share this server and operate on the same repository.
+            memory if super::memory::tool_names().contains(&memory) => {
+                super::memory::call_tool(&self.repo, memory, arguments)
+            }
             other => Err(format!("unknown tool: {other}")),
         }
     }
