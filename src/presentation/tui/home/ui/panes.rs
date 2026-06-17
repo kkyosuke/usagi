@@ -277,16 +277,17 @@ pub(super) fn left_pane(
         root_detail = dim_row(&root_detail);
     }
     let mut lines = vec![root_top, root_detail];
+    // A divider separating the workspace root from the sessions below — indented
+    // to start under the `root` label (past the cursor and kind-icon cells).
+    let indent = " ".repeat(NAME_PREFIX);
+    let inner_w = left_w.saturating_sub(NAME_PREFIX);
+    lines.push(
+        style(format!("{indent}{}", "─".repeat(inner_w)))
+            .dim()
+            .to_string(),
+    );
     if list.is_empty() {
-        // A divider under the root, then the empty message — both indented to
-        // start under the `root` label (past the cursor and kind-icon cells).
-        let indent = " ".repeat(NAME_PREFIX);
-        let inner_w = left_w.saturating_sub(NAME_PREFIX);
-        lines.push(
-            style(format!("{indent}{}", "─".repeat(inner_w)))
-                .dim()
-                .to_string(),
-        );
+        // No sessions yet — show the empty message under the divider.
         lines.push(
             style(format!("{indent}{}", clip_to_width(EMPTY_MESSAGE, inner_w)))
                 .dim()
