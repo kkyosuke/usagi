@@ -53,7 +53,7 @@ src/
 │   ├── workspace_state.rs      # WorkspaceState / WorktreeState / BranchStatus
 │   ├── agent_usage.rs          # AgentUsage / AggregateUsage・モデル別コンテキストウィンドウ上限
 │   ├── history.rs              # コマンド履歴の 1 件 HistoryEntry
-│   ├── issue.rs                # Issue / IssueSummary / IssueStatus / IssuePriority（frontmatter 読み書き）
+│   ├── issue/                  # Issue / IssueSummary / IssueStatus / IssuePriority（mod=型 / markdown=frontmatter 読み書き）
 │   └── version.rs              # セマンティックバージョン Version（パース・比較）
 │
 ├── usecase/                    # ビジネスロジック
