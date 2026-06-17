@@ -69,6 +69,9 @@ pub struct HomeState {
     list: WorktreeList,
     mode: Mode,
     input: String,
+    /// Caret position in `input`, as a byte offset on a `char` boundary. Drives
+    /// in-line editing (←/→/Home/End/Del) and where the caret renders.
+    cursor: usize,
     history: Vec<String>,
     /// Index into `history` while recalling past commands; `None` when editing
     /// a fresh line.
@@ -154,6 +157,7 @@ impl HomeState {
             list: WorktreeList::new(workspace_name, worktrees),
             mode: Mode::Overview,
             input: String::new(),
+            cursor: 0,
             history: Vec::new(),
             recall: None,
             log,
@@ -348,6 +352,12 @@ impl HomeState {
 
     pub fn input(&self) -> &str {
         &self.input
+    }
+
+    /// The caret position in [`input`](Self::input) as a byte offset, so the
+    /// renderer can split the line and draw the caret where editing happens.
+    pub fn cursor(&self) -> usize {
+        self.cursor
     }
 
     /// The advisory input hint for the current command input (matching commands,
@@ -747,22 +757,76 @@ impl HomeState {
         }
     }
 
-    /// Append a typed character to the input (Overview line).
+    /// Insert a typed character at the caret (Overview line), advancing it.
     pub fn push_char(&mut self, c: char) {
-        self.input.push(c);
+        self.input.insert(self.cursor, c);
+        self.cursor += c.len_utf8();
         self.recall = None;
     }
 
-    /// Delete the last character of the input (command mode).
+    /// Delete the character before the caret (command mode), moving it back.
     pub fn backspace(&mut self) {
-        self.input.pop();
+        if self.cursor == 0 {
+            return;
+        }
+        let prev = self.prev_boundary();
+        self.input.replace_range(prev..self.cursor, "");
+        self.cursor = prev;
         self.recall = None;
+    }
+
+    /// Delete the character at the caret (the `Del`/forward-delete key), leaving
+    /// the caret in place.
+    pub fn delete_forward(&mut self) {
+        if self.cursor >= self.input.len() {
+            return;
+        }
+        let next = self.next_boundary();
+        self.input.replace_range(self.cursor..next, "");
+        self.recall = None;
+    }
+
+    /// Move the caret one character left.
+    pub fn cursor_left(&mut self) {
+        self.cursor = self.prev_boundary();
+    }
+
+    /// Move the caret one character right.
+    pub fn cursor_right(&mut self) {
+        self.cursor = self.next_boundary();
+    }
+
+    /// Move the caret to the start of the line.
+    pub fn cursor_home(&mut self) {
+        self.cursor = 0;
+    }
+
+    /// Move the caret to the end of the line.
+    pub fn cursor_end(&mut self) {
+        self.cursor = self.input.len();
+    }
+
+    /// Byte offset of the `char` boundary just before the caret (or `0`).
+    fn prev_boundary(&self) -> usize {
+        self.input[..self.cursor]
+            .char_indices()
+            .next_back()
+            .map_or(0, |(i, _)| i)
+    }
+
+    /// Byte offset of the `char` boundary just after the caret (or the end).
+    fn next_boundary(&self) -> usize {
+        self.input[self.cursor..]
+            .chars()
+            .next()
+            .map_or(self.cursor, |c| self.cursor + c.len_utf8())
     }
 
     /// Tab-complete the command word, listing candidates when ambiguous.
     pub fn complete(&mut self) {
         let completion = self.registry.complete(&self.input, self.command_scope());
         self.input = completion.input;
+        self.cursor = self.input.len();
         if !completion.candidates.is_empty() {
             self.log
                 .push(LogLine::output(completion.candidates.join("  ")));
@@ -782,6 +846,7 @@ impl HomeState {
         };
         self.recall = Some(index);
         self.input = self.history[index].clone();
+        self.cursor = self.input.len();
     }
 
     /// Recall the next (newer) command, returning to an empty line past the end.
@@ -797,6 +862,7 @@ impl HomeState {
             self.recall = None;
             self.input.clear();
         }
+        self.cursor = self.input.len();
     }
 
     /// Run the current input as a command: echo it, dispatch it, record it in
@@ -807,6 +873,7 @@ impl HomeState {
     pub fn submit(&mut self) -> Submission {
         let entry = self.input.trim().to_string();
         self.input.clear();
+        self.cursor = 0;
         self.recall = None;
         if entry.is_empty() {
             return Submission {

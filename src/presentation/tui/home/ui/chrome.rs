@@ -184,11 +184,7 @@ pub(super) fn hint_lines(state: &HomeState, width: usize) -> Vec<String> {
 /// live-terminal status in 没入 (Attached).
 pub(super) fn input_line(state: &HomeState) -> String {
     match state.mode() {
-        Mode::Overview => {
-            let prompt = style("❯").red().bold();
-            let text = style(state.input()).cyan();
-            format!(" {prompt} {text}{CARET}")
-        }
+        Mode::Overview => format!(" {}", overview_input_content(state)),
         Mode::Switch => style(" Pick a session — ↑↓ move, Enter focus, c new".to_string())
             .dim()
             .to_string(),
@@ -207,12 +203,22 @@ pub(super) fn input_line(state: &HomeState) -> String {
 /// the hints above it and the results band below. Spans the full `width` (three
 /// rows: top border, the `❯ <input>▏` line, bottom border).
 pub(super) fn overview_input_box(state: &HomeState, width: usize) -> Vec<String> {
-    let prompt = style("❯").red().bold();
-    let text = style(state.input()).cyan();
-    let content = format!("{prompt} {text}{CARET}");
+    let content = overview_input_content(state);
     // `boxed` adds the two borders and one space of padding on each side, so the
     // inner content area is the width less those four columns.
     widgets::boxed("", width.saturating_sub(4), &[content])
+}
+
+/// The Overview command line as `❯ <text>` with the caret drawn at the editing
+/// position (the byte offset from [`HomeState::cursor`]), so ←/→/Home/End move a
+/// visible caret through the text instead of always sitting at the end.
+fn overview_input_content(state: &HomeState) -> String {
+    let prompt = style("❯").red().bold();
+    let input = state.input();
+    let (before, after) = input.split_at(state.cursor());
+    let before = style(before).cyan();
+    let after = style(after).cyan();
+    format!("{prompt} {before}{CARET}{after}")
 }
 
 /// The footer help line, aware of the current mode. It leads with a mode tag so

@@ -121,8 +121,15 @@ pub(super) fn overview_key(
         }
         Key::Tab => state.complete(),
         Key::Backspace => state.backspace(),
+        Key::Del => state.delete_forward(),
         Key::ArrowUp => state.recall_prev(),
         Key::ArrowDown => state.recall_next(),
+        // ←/→/Home/End move the caret within the line so editing works like a
+        // normal terminal prompt, not just append/delete at the end.
+        Key::ArrowLeft => state.cursor_left(),
+        Key::ArrowRight => state.cursor_right(),
+        Key::Home => state.cursor_home(),
+        Key::End => state.cursor_end(),
         // `Esc` is inert at the top level: the home screen is not left by backing
         // out (that would drop into the project list); the only way out is
         // `Ctrl-C`, handled centrally in the event loop.
