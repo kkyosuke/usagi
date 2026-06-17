@@ -1,13 +1,13 @@
 ---
 number: 36
 title: perf: inspect_worktree の git プロセス起動を削減する
-status: todo
+status: done
 priority: high
 labels: [perf, core]
 dependson: []
 related: []
 created_at: 2026-06-17T22:50:04.342428+00:00
-updated_at: 2026-06-17T22:50:04.342428+00:00
+updated_at: 2026-06-17T23:25:19.708660+00:00
 ---
 
 ## 背景

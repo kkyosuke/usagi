@@ -17,11 +17,12 @@ mod worktree;
 
 pub use branch::{
     ahead_behind, branch_namespace_conflict, default_branch, delete_branch, list_branches,
-    local_branches, resolve_base_ref, upstream_of,
+    local_branches, resolve_base_ref,
 };
 pub use repo::{clone, has_uncommitted_changes, is_repository, short_hash};
 pub use worktree::{
-    add_worktree, list_worktrees, primary_worktree, remove_worktree, worktree_head, WorktreeInfo,
+    add_worktree, list_worktrees, primary_worktree, remove_worktree, worktree_status, WorktreeInfo,
+    WorktreeStatus,
 };
 
 /// A `git -C <repo>` command with repo-scoping env vars stripped, for tests.

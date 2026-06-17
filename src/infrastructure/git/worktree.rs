@@ -43,15 +43,71 @@ pub fn add_worktree(repo: &Path, dest: &Path, branch: &str, base: Option<&str>) 
     Ok(())
 }
 
-/// The checked-out branch (`None` if detached) and full HEAD commit at the
-/// worktree `path`, or `None` if it is not a git worktree.
-pub fn worktree_head(path: &Path) -> Option<(Option<String>, String)> {
-    let head = git_capture(path, &["rev-parse", "HEAD"]).ok().flatten()?;
-    let branch = git_capture(path, &["rev-parse", "--abbrev-ref", "HEAD"])
+/// The branch, HEAD, upstream, and dirtiness of a worktree, read together in a
+/// single `git status` invocation (see [`worktree_status`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct WorktreeStatus {
+    /// Full HEAD commit hash; empty for an unborn branch (no commits yet).
+    pub head: String,
+    /// Checked-out branch short name (e.g. `main`), or `None` for a detached
+    /// HEAD.
+    pub branch: Option<String>,
+    /// Upstream tracking branch (e.g. `origin/feature`), or `None` when the
+    /// branch tracks nothing.
+    pub upstream: Option<String>,
+    /// `true` when the working tree has uncommitted changes — modified, staged,
+    /// or untracked files (anything `git status` reports as an entry).
+    pub dirty: bool,
+}
+
+/// Read the branch, HEAD, upstream, and dirtiness of the worktree at `path` in
+/// **one** `git status --porcelain=v2 --branch` call, or `None` if it is not a
+/// git worktree.
+///
+/// A workspace refresh inspects every session worktree, so collapsing what used
+/// to be four separate `git` invocations (`rev-parse HEAD`, `rev-parse
+/// --abbrev-ref HEAD`, the upstream lookup, and `status --porcelain`) into a
+/// single process is the dominant saving on a multi-session workspace.
+///
+/// The porcelain v2 header lines carry everything needed:
+///
+/// - `# branch.oid <sha>` — the HEAD commit (`(initial)` on an unborn branch).
+/// - `# branch.head <name>` — the branch (`(detached)` for a detached HEAD).
+/// - `# branch.upstream <ref>` — present only when the branch tracks an upstream.
+///
+/// Any non-header, non-empty line is a changed/untracked entry, so its presence
+/// marks the tree dirty (matching `git status --porcelain`, which also counts
+/// untracked files).
+pub fn worktree_status(path: &Path) -> Option<WorktreeStatus> {
+    let output = git_capture(path, &["status", "--porcelain=v2", "--branch"])
         .ok()
-        .flatten()
-        .filter(|b| b != "HEAD");
-    Some((branch, head))
+        .flatten()?;
+
+    let mut status = WorktreeStatus {
+        head: String::new(),
+        branch: None,
+        upstream: None,
+        dirty: false,
+    };
+    for line in output.lines() {
+        if let Some(oid) = line.strip_prefix("# branch.oid ") {
+            // "(initial)" marks an unborn branch with no commits yet.
+            if oid != "(initial)" {
+                status.head = oid.to_string();
+            }
+        } else if let Some(head) = line.strip_prefix("# branch.head ") {
+            // "(detached)" marks a detached HEAD: no branch.
+            if head != "(detached)" {
+                status.branch = Some(head.to_string());
+            }
+        } else if let Some(upstream) = line.strip_prefix("# branch.upstream ") {
+            status.upstream = Some(upstream.to_string());
+        } else if !line.starts_with('#') && !line.is_empty() {
+            // A changed, unmerged, or untracked entry: the tree is dirty.
+            status.dirty = true;
+        }
+    }
+    Some(status)
 }
 
 /// Remove the worktree at `worktree` from `repo`. With `force`, discard
