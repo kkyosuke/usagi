@@ -44,17 +44,35 @@ fn ping_returns_empty_result() {
 }
 
 #[test]
-fn tools_list_returns_all_six_tools() {
+fn tools_list_returns_issue_and_memory_tools() {
     let server = McpServer::new(tempfile::tempdir().unwrap().path());
     let res = reply(
         &server,
         json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}),
     );
     let tools = res["result"]["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 6);
+    // Six issue tools followed by six memory tools.
+    assert_eq!(tools.len(), 12);
     let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
     assert!(names.contains(&"issue_create"));
     assert!(names.contains(&"issue_delete"));
+    assert!(names.contains(&"memory_save"));
+    assert!(names.contains(&"memory_delete"));
+}
+
+#[test]
+fn memory_tools_are_served_by_the_same_server() {
+    let server = McpServer::new(tempfile::tempdir().unwrap().path());
+    let saved = call(
+        &server,
+        "memory_save",
+        json!({ "name": "a-fact", "title": "A fact", "type": "project" }),
+    );
+    assert_eq!(saved["isError"], false);
+    assert_eq!(tool_json(&saved)["name"], "a-fact");
+
+    let got = call(&server, "memory_get", json!({ "name": "a-fact" }));
+    assert_eq!(tool_json(&got)["title"], "A fact");
 }
 
 #[test]

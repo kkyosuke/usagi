@@ -48,6 +48,14 @@ enum Commands {
         #[command(subcommand)]
         command: usagi::presentation::cli::issue::IssueCommand,
     },
+    /// Manage durable agent memories stored in .usagi/memory/
+    ///
+    /// Hidden from the CLI: memories are operated by AI agents via the MCP server.
+    #[command(hide = true)]
+    Memory {
+        #[command(subcommand)]
+        command: usagi::presentation::cli::memory::MemoryCommand,
+    },
     /// Run the local LLM MCP server over stdio (for AI agents to offload work)
     ///
     /// Hidden from the CLI: launched by AI agents, not invoked by hand.
@@ -82,6 +90,7 @@ fn main() -> anyhow::Result<()> {
         Commands::Hop => usagi::presentation::cli::hop::run(),
         Commands::Init { git } => usagi::presentation::cli::init::run(git),
         Commands::Issue { command } => usagi::presentation::cli::issue::run(command),
+        Commands::Memory { command } => usagi::presentation::cli::memory::run(command),
         Commands::LlmMcp { model } => usagi::presentation::cli::llm_mcp::run(model),
         Commands::Mcp => usagi::presentation::cli::mcp::run(),
         Commands::SessionMcp => usagi::presentation::cli::session_mcp::run(),

@@ -23,6 +23,7 @@ use std::path::Path;
 use anyhow::Result;
 use console::Term;
 
+use crate::domain::settings::SessionActionUi;
 use crate::domain::workspace::Workspace;
 use crate::domain::workspace_state::SessionRecord;
 use crate::infrastructure::history_store::HistoryStore;
@@ -78,12 +79,9 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
 
     // Which right-pane action surface 在席 (Focus) presents — a pickable menu or
     // a typed prompt — from the effective settings (project-local over the global
-    // default). Any failure to read settings falls back to the default (Menu).
-    let session_action_ui = crate::infrastructure::storage::Storage::open_default()
-        .and_then(|storage| crate::usecase::settings::effective(&storage, &workspace.path))
-        .map(|settings| settings.session_action_ui)
-        .unwrap_or_default();
-    state.set_session_action_ui(session_action_ui);
+    // default). Re-read again whenever the config screen closes (see
+    // `open_config`) so a change takes effect without reopening this screen.
+    state.set_session_action_ui(effective_session_action_ui(&workspace.path));
 
     // Restore past commands so `history` and `↑`/`↓` recall span sessions.
     // A read failure is non-fatal: just start with an empty history.
@@ -287,10 +285,14 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
     // reported back as `true` so the event loop propagates the quit; `Back`
     // returns `false`.
     let config_root = workspace.path.clone();
-    let mut open_config = |t: &Term| -> Result<bool> {
+    let mut open_config = |t: &Term| -> Result<Option<SessionActionUi>> {
         match crate::presentation::tui::config::run_in(t, Some(config_root.clone()))? {
-            crate::presentation::tui::config::Outcome::Back => Ok(false),
-            crate::presentation::tui::config::Outcome::Quit => Ok(true),
+            // Back to home: re-read the (possibly changed) Session Action UI so the
+            // 在席 surface reflects the edit without reopening the home screen.
+            crate::presentation::tui::config::Outcome::Back => {
+                Ok(Some(effective_session_action_ui(&config_root)))
+            }
+            crate::presentation::tui::config::Outcome::Quit => Ok(None),
         }
     };
 
@@ -309,4 +311,16 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
         &mut open_config,
         &mut preview,
     )
+}
+
+/// The effective Session Action UI (在席 mode's right-pane surface) for the
+/// workspace at `root` — the project-local override on top of the global
+/// default. Read at startup and again whenever the config screen closes, so an
+/// edited setting takes effect without reopening the home screen. Any failure to
+/// read settings falls back to the default (`Menu`).
+fn effective_session_action_ui(root: &Path) -> SessionActionUi {
+    crate::infrastructure::storage::Storage::open_default()
+        .and_then(|storage| crate::usecase::settings::effective(&storage, root))
+        .map(|settings| settings.session_action_ui)
+        .unwrap_or_default()
 }

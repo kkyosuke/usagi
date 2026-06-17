@@ -3,6 +3,7 @@ pub mod agent;
 pub mod agent_phase;
 pub mod history;
 pub mod issue;
+pub mod memory;
 pub mod repository;
 pub mod settings;
 pub mod version;

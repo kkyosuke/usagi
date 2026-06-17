@@ -135,5 +135,8 @@ CLI からも設定を確認・編集できます（[3. コマンドリファレ
 | `session_action_ui` | ホーム画面の[在席](design/05-home.md#在席focus)で右ペインに出すアクション UI（`menu` / `prompt`）の選択 |
 | `local_llm.enabled` / `local_llm.model` | 有効時、`agent` 起動コマンドに `usagi-llm` MCP サーバを追加し、軽量タスクをローカル LLM に委譲する（[3.4 ローカル LLM MCP サーバ](03-commands/04-llm-mcp.md)） |
 
+> ホーム画面の `config` で `session_action_ui` を変更すると、設定画面を閉じてホームに戻った時点で
+> 実効設定を読み直し、[在席](design/05-home.md#在席focus)の右ペインに反映します（ホーム画面を開き直す必要はありません）。
+
 > 設定の永続化は `usecase/settings.rs`（`load` / `save` / 各 `set_*`）と
 > `infrastructure/storage.rs`（`Storage`）に実装されています。

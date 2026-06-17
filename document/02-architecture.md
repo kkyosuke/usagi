@@ -53,6 +53,7 @@ src/
 │   ├── workspace_state.rs      # WorkspaceState / WorktreeState / BranchStatus
 │   ├── history.rs              # コマンド履歴の 1 件 HistoryEntry
 │   ├── issue/                  # Issue / IssueSummary / IssueStatus / IssuePriority（mod=型 / markdown=frontmatter 読み書き）
+│   ├── memory/                 # Memory / MemorySummary / MemoryType（mod=型・slug / markdown=frontmatter 読み書き）
 │   └── version.rs              # セマンティックバージョン Version（パース・比較）
 │
 ├── usecase/                    # ビジネスロジック
@@ -66,6 +67,7 @@ src/
 │   │   └── reconcile.rs       # state.json と .usagi/sessions/ の照合・孤児ディレクトリの強制削除
 │   ├── doctor/                 # 依存ツールの導入状況チェック（mod=診断 / runner=CommandRunner / fix=--fix 導入）
 │   ├── issue/                  # issue の CRUD・検索・readiness（mod=型/CRUD/annotate / stats=集計・grouping / tree=依存ツリー）
+│   ├── memory/                 # メモリの upsert/CRUD・検索・種別フィルタ（mod=型/save/get/list/search/update/delete）
 │   ├── local_llm.rs            # ollama・モデルの有無判定とインストール（ensure）
 │   └── update_check.rs         # リモートのタグから最新リリースを判定（純粋・fetch は注入）
 │
@@ -82,13 +84,15 @@ src/
 │   ├── session_monitor.rs      # 入力待ち判定の純粋ロジック（phase 優先・ベル基準値・待ち集合・アタッチ）
 │   ├── agent_state_store.rs    # worktree 別の Agent phase の記録/読み出し（~/.usagi/agent-state/）
 │   ├── agent/                  # Agent port のアダプタ（Claude / Gemini の launch 委譲）・agent_for
-│   └── issue_store.rs          # <repo>/.usagi/issues/ の markdown + index.json（IssueStore）
+│   ├── issue_store.rs          # <repo>/.usagi/issues/ の markdown + index.json（IssueStore）
+│   └── memory_store.rs         # <repo>/.usagi/memory/ の markdown + MEMORY.md + index.json（MemoryStore）
 │
 └── presentation/               # CLI ルーティング・TUI・MCP
-    ├── cli/                    # サブコマンド（init / hop / status / config / doctor / issue / mcp / llm_mcp / session_mcp / agent_phase（隠し・フック用））
+    ├── cli/                    # サブコマンド（init / hop / status / config / doctor / issue / memory / mcp / llm_mcp / session_mcp / agent_phase（隠し・フック用））
     ├── mcp/                    # MCP サーバ（JSON-RPC 2.0 フレーミングを共有）
     │   ├── mod.rs              # 共有プロトコル（dispatch_line / レスポンス整形 / McpService）
-    │   ├── issue/             # issue 操作ツール（mod=McpServer・args / json=シリアライズ・スキーマ）
+    │   ├── issue/             # issue 操作ツール（mod=McpServer・args / json=シリアライズ・スキーマ）。memory ツールもマージして公開
+    │   ├── memory.rs           # メモリ操作ツール（スキーマ・引数・usecase/memory への委譲。issue サーバが呼ぶ）
     │   ├── llm.rs              # ローカル LLM 委譲ツール（LlmMcpServer / LlmBackend）
     │   └── session.rs          # セッション操作ツール（SessionMcpServer / AgentBackend）
     └── tui/                    # 自前レンダリングの TUI（console + crossterm、ratatui は不使用）

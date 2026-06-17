@@ -45,9 +45,24 @@ impl From<Phase> for AgentPhase {
 /// Entry point for `usagi agent-phase <phase>`. Reads the hook payload from
 /// stdin to learn which worktree fired, then records `phase` for it. Falls back
 /// to the process's current directory when stdin carries no usable `cwd`.
+///
+/// One exception keeps a busy session from being shown idle: the `SessionStart`
+/// hook normally records `ready`, but `SessionStart` also fires after the
+/// context is compacted (`source: "compact"`), which auto-compaction can do
+/// **mid-turn** — the agent keeps working afterwards with no fresh
+/// `UserPromptSubmit` to put it back to `running`. Recording `ready` then would
+/// strand the session showing ready (`☾`) while it works, until its next `Stop`.
+/// So a compaction-sourced `ready` records nothing, preserving whatever phase the
+/// session was already in (running stays running; an idle session stays idle).
 pub fn run(phase: Phase) -> Result<()> {
     let mut raw = String::new();
     let _ = std::io::stdin().read_to_string(&mut raw);
+    if matches!(phase, Phase::Ready)
+        && agent_state_store::session_start_source_from_hook_json(&raw).as_deref()
+            == Some("compact")
+    {
+        return Ok(());
+    }
     let worktree = match agent_state_store::worktree_from_hook_json(&raw) {
         Some(worktree) => worktree,
         None => std::env::current_dir()?,
