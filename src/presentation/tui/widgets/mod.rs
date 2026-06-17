@@ -59,6 +59,49 @@ pub fn rabbit_art() -> [&'static str; 3] {
     RABBIT
 }
 
+/// Braille spinner frames cycled beside the loading rabbit, one per tick.
+const LOADING_SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+/// The hopping rabbit's poses as `(ears, body)`. The face shifts a column on the
+/// "hop" poses for a little side-to-side bounce, and blinks (`-ㅅ-`) on the
+/// third, so cycling the poses reads as a rabbit hopping in place.
+const LOADING_POSES: [(&str, &str); 4] = [
+    ("  ∩∩", " (･ㅅ･)づ"),
+    ("  ∩∩", "(･ㅅ･)づ"),
+    ("  ∩∩", " (-ㅅ-)づ"),
+    ("  ∩∩", "(･ㅅ･)づ"),
+];
+
+/// A two-line "loading" rabbit for the home screen's top-right corner: a hopping
+/// usagi with a braille spinner and a short `label` (e.g. `削除中… 2/5`). `frame`
+/// is a monotonically advancing tick — the pose and spinner are picked from it,
+/// so painting successive frames animates the rabbit.
+///
+/// Both rows are padded to a common block width and styled magenta-bold (the
+/// mascot's colour), so the block right-aligns cleanly when
+/// [`overlay_top_right`](super::super::tui::home::ui) anchors it to the top rows
+/// — exactly like the [`update_banner`](super::super::tui::home::ui) notice it
+/// shares that corner with.
+pub fn loading_rabbit(frame: usize, label: &str) -> Vec<String> {
+    let (ears, body) = LOADING_POSES[frame % LOADING_POSES.len()];
+    let spinner = LOADING_SPINNER[frame % LOADING_SPINNER.len()];
+    let rows = [ears.to_string(), format!("{body}{spinner} {label}")];
+    let block_w = rows
+        .iter()
+        .map(|row| console::measure_text_width(row))
+        .max()
+        .unwrap_or(0);
+    rows.into_iter()
+        .map(|row| {
+            let pad = block_w.saturating_sub(console::measure_text_width(&row));
+            style(format!("{row}{}", " ".repeat(pad)))
+                .magenta()
+                .bold()
+                .to_string()
+        })
+        .collect()
+}
+
 /// A centred, green-bold screen title.
 pub fn title_line(width: usize, title: &str) -> String {
     style(centered(width, title)).green().bold().to_string()
@@ -194,6 +237,36 @@ mod tests {
     #[test]
     fn title_line_contains_the_title() {
         assert!(title_line(80, "USAGI").contains("USAGI"));
+    }
+
+    #[test]
+    fn loading_rabbit_carries_the_label_and_a_spinner_frame() {
+        let lines = loading_rabbit(2, "削除中… 2/5");
+        assert_eq!(lines.len(), 2);
+        let plain = console::strip_ansi_codes(&lines.join("\n")).into_owned();
+        // The label rides the body row, and the blink pose shows on this frame.
+        assert!(plain.contains("削除中… 2/5"));
+        assert!(plain.contains("(-ㅅ-)"));
+        // The braille spinner for frame 2 is present.
+        assert!(plain.contains('⠹'));
+    }
+
+    #[test]
+    fn loading_rabbit_rows_share_one_block_width() {
+        // Both rows pad to the widest, so the block right-aligns as a rectangle
+        // when anchored to the top-right corner.
+        let lines = loading_rabbit(0, "読み込み中…");
+        let w0 = console::measure_text_width(&lines[0]);
+        let w1 = console::measure_text_width(&lines[1]);
+        assert_eq!(w0, w1);
+    }
+
+    #[test]
+    fn loading_rabbit_animates_across_frames() {
+        // Advancing the frame cycles the spinner glyph, so successive paints move.
+        let a = console::strip_ansi_codes(&loading_rabbit(0, "x").join("\n")).into_owned();
+        let b = console::strip_ansi_codes(&loading_rabbit(1, "x").join("\n")).into_owned();
+        assert_ne!(a, b);
     }
 
     #[test]

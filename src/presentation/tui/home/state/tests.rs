@@ -200,6 +200,30 @@ fn new_state_starts_in_overview_with_a_hint() {
 }
 
 #[test]
+fn loading_indicator_starts_clear_steps_and_finishes() {
+    let mut state = state();
+    // No action in flight by default.
+    assert!(state.loading().is_none());
+
+    // The first step begins the indicator at frame 0 with its label.
+    state.step_loading("作成中…");
+    let loading = state.loading().expect("loading begins on the first step");
+    assert_eq!(loading.label(), "作成中…");
+    assert_eq!(loading.frame(), 0);
+
+    // Each further step advances the animation frame and updates the label,
+    // mirroring how a bulk removal steps once per session.
+    state.step_loading("削除中… 2/3");
+    let loading = state.loading().unwrap();
+    assert_eq!(loading.label(), "削除中… 2/3");
+    assert_eq!(loading.frame(), 1);
+
+    // Finishing clears it, returning the corner to its resting state.
+    state.finish_loading();
+    assert!(state.loading().is_none());
+}
+
+#[test]
 fn a_notice_is_seeded_as_an_error_line() {
     let state = HomeState::new("usagi", Vec::new(), Some("load failed".to_string()));
     assert_eq!(state.log().len(), 2);

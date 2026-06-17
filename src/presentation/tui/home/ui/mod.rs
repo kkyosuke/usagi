@@ -319,12 +319,21 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
     }
     lines.push(footer_line(width, state));
 
-    // Overlay the top-right "update available" notice once the background check
-    // has found a newer release than this build. It is anchored to the top of the
-    // right pane (the rows just below the title bar and mode ladder), where the
-    // default Overview screen is blank — so the mascot reads cleanly in the
+    // Overlay the top-right corner. While a blocking action runs the loading
+    // rabbit takes the corner (so the user sees something is happening); once it
+    // finishes, the "update available" notice shows there instead, when the
+    // background check has found a newer release than this build. Both anchor to
+    // the top of the right pane (the rows below the title bar and mode ladder),
+    // where the default Overview screen is blank — so they read cleanly in the
     // top-right corner of the content.
-    if let Some(latest) = state.update() {
+    if let Some(loading) = state.loading() {
+        overlay_top_right(
+            &mut lines,
+            body_start,
+            width,
+            &widgets::loading_rabbit(loading.frame(), loading.label()),
+        );
+    } else if let Some(latest) = state.update() {
         overlay_top_right(&mut lines, body_start, width, &update_banner(&latest));
     }
 

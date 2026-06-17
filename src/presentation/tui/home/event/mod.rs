@@ -185,10 +185,18 @@ pub fn event_loop(
                 Key::Char(' ') => state.remove_modal_toggle(),
                 Key::Enter => {
                     if let Some((names, force)) = state.submit_remove_modal() {
-                        for name in names {
-                            let outcome = remove_session(&name, force);
+                        // Bulk removal blocks the loop (each session is git /
+                        // filesystem work), so show the loading rabbit in the
+                        // top-right and step it per session — repainting before
+                        // each removal so it hops along with the progress count.
+                        let total = names.len();
+                        for (i, name) in names.iter().enumerate() {
+                            state.step_loading(format!("削除中… {}/{total}", i + 1));
+                            let _ = paint_now(term, &mut painter, &state);
+                            let outcome = remove_session(name, force);
                             state.apply_session_outcome(outcome);
                         }
+                        state.finish_loading();
                     }
                 }
                 Key::Escape => state.cancel_remove_modal(),
@@ -278,6 +286,18 @@ enum Flow {
     Continue,
     /// Quit the application.
     Quit,
+}
+
+/// Paint the current frame immediately, outside the loop's top-of-iteration
+/// paint. Used to flush a transient [`HomeState`] state — the loading rabbit —
+/// to the screen just before a blocking action runs, since the action would
+/// otherwise hold the loop until it returned without ever drawing the indicator.
+/// Errors are the caller's to ignore: a missed transient frame must not abort
+/// the action it was announcing.
+pub(super) fn paint_now(term: &Term, painter: &mut FramePainter, state: &HomeState) -> Result<()> {
+    let (height, width) = term.size();
+    let frame = ui::render_frame(height as usize, width as usize, state);
+    painter.paint(term, frame)
 }
 
 /// The directory the pane should root at for the focused list row: the selected

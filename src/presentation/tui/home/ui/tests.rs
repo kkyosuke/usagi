@@ -928,6 +928,38 @@ fn update_notice_is_skipped_when_the_terminal_is_too_narrow() {
 }
 
 #[test]
+fn render_frame_shows_the_loading_rabbit_while_an_action_runs() {
+    let mut state = state_with(Vec::new());
+    state.step_loading("削除中… 1/2");
+    let joined = stripped(&render_frame(24, 100, &state));
+    assert!(joined.contains("削除中… 1/2"));
+    // The hopping rabbit's face rides the corner.
+    assert!(joined.contains("(･ㅅ･)"));
+}
+
+#[test]
+fn loading_rabbit_takes_the_corner_over_the_update_notice() {
+    // With both a pending update and a running action, the loading rabbit wins
+    // the top-right corner so the in-flight work is what the user sees.
+    let mut state = state_with(Vec::new());
+    state.set_update(crate::domain::version::Version::parse("9.9.9"));
+    state.step_loading("作成中…");
+    let joined = stripped(&render_frame(24, 100, &state));
+    assert!(joined.contains("作成中…"));
+    assert!(!joined.contains("最新版があります"));
+}
+
+#[test]
+fn loading_rabbit_is_skipped_when_the_terminal_is_too_narrow() {
+    // Like the update notice, the block is dropped rather than clobbering the
+    // chrome when it cannot fit the width.
+    let mut state = state_with(Vec::new());
+    state.step_loading("作成中…");
+    let joined = stripped(&render_frame(24, 10, &state));
+    assert!(!joined.contains("作成中…"));
+}
+
+#[test]
 fn overlay_top_right_skips_a_row_whose_content_reaches_the_banner_column() {
     // The first line already fills the width, so the banner cannot be placed on
     // it; a later, empty line still receives its segment.

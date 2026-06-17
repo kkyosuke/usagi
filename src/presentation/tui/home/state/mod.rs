@@ -61,6 +61,29 @@ pub struct SessionOutcome {
     pub select: Option<String>,
 }
 
+/// A transient "working…" indicator shown in the top-right corner while a
+/// blocking action runs (creating or bulk-removing sessions, launching a
+/// terminal / agent). It carries the `label` to show beside the loading rabbit
+/// and a `frame` tick that advances on each step, so painting it repeatedly
+/// animates the rabbit. Read by the renderer through [`HomeState::loading`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoadingIndicator {
+    label: String,
+    frame: usize,
+}
+
+impl LoadingIndicator {
+    /// The message shown beside the rabbit (e.g. `作成中…`).
+    pub fn label(&self) -> &str {
+        &self.label
+    }
+
+    /// The animation tick, advanced on each step of the running action.
+    pub fn frame(&self) -> usize {
+        self.frame
+    }
+}
+
 /// The full state of the home screen.
 ///
 /// Not `Clone`/`Debug`: it owns a [`CommandRegistry`] of trait objects, which
@@ -136,6 +159,10 @@ pub struct HomeState {
     /// release newer than this build. While `None` (the check is pending, or the
     /// build is up to date) the top-right "update available" notice is hidden.
     update: Option<Version>,
+    /// The transient "working…" indicator, set while a blocking action runs
+    /// (session create / bulk remove / terminal launch). While `Some` the
+    /// top-right corner shows the loading rabbit instead of the update notice.
+    loading: Option<LoadingIndicator>,
 }
 
 impl HomeState {
@@ -175,6 +202,7 @@ impl HomeState {
             response_start: 0,
             issues: Vec::new(),
             update: None,
+            loading: None,
         }
     }
 
@@ -473,6 +501,33 @@ impl HomeState {
     /// top-right "update available" notice is shown only while this is `Some`.
     pub fn update(&self) -> Option<Version> {
         self.update
+    }
+
+    /// Begin or advance the transient "working…" indicator with `label`, ticking
+    /// its animation frame. Call it before each step of a blocking action (and
+    /// repaint) so the top-right loading rabbit appears and hops; a multi-step
+    /// action (e.g. a bulk removal) steps once per item so the rabbit animates as
+    /// it progresses.
+    pub fn step_loading(&mut self, label: impl Into<String>) {
+        let frame = self.loading.as_ref().map_or(0, |l| l.frame + 1);
+        self.loading = Some(LoadingIndicator {
+            label: label.into(),
+            frame,
+        });
+    }
+
+    /// Clear the "working…" indicator once the blocking action has finished, so
+    /// the top-right corner returns to its resting state (the update notice, or
+    /// nothing).
+    pub fn finish_loading(&mut self) {
+        self.loading = None;
+    }
+
+    /// The transient "working…" indicator, when an action is in flight — the
+    /// top-right loading rabbit is shown (taking the corner over the update
+    /// notice) only while this is `Some`.
+    pub fn loading(&self) -> Option<&LoadingIndicator> {
+        self.loading.as_ref()
     }
 
     /// How many sessions currently have a live (running) embedded shell/agent.
