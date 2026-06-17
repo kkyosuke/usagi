@@ -271,6 +271,16 @@ fn session_remove_without_a_name_opens_the_removal_modal() {
 }
 
 #[test]
+fn close_requests_the_close_session_effect() {
+    // `close` is a session-scope command; it carries no arguments and asks the
+    // event loop to remove the focused session (the equivalent of
+    // `session remove <name> --force`).
+    let result = registry().dispatch("close", &[], &[]);
+    assert!(result.lines.is_empty());
+    assert_eq!(result.effect, Effect::CloseSession);
+}
+
+#[test]
 fn coming_soon_commands_are_recognised() {
     let registry = registry();
     for name in ["ai", "doctor"] {
@@ -474,6 +484,7 @@ fn suggest_splits_the_command_surface_by_scope() {
     assert!(has(&session, "terminal"));
     assert!(has(&session, "agent"));
     assert!(has(&session, "ai"));
+    assert!(has(&session, "close"));
     assert!(has(&session, "man")); // a shared utility
     assert!(!has(&session, "session"));
     assert!(!has(&session, "config"));
@@ -544,13 +555,13 @@ fn command_scope_visibility_is_same_scope_or_both() {
 fn commands_in_scope_lists_a_scopes_own_commands_in_order() {
     // The 在席 menu lists exactly the Session-scope commands, in registry
     // order, excluding the shared utilities. `terminal` comes first (and is
-    // highlighted by default); the coming-soon `ai` placeholder comes last.
+    // highlighted by default); the destructive `close` comes last.
     let session: Vec<&str> = registry()
         .commands_in_scope(CommandScope::Session)
         .iter()
         .map(|i| i.name)
         .collect();
-    assert_eq!(session, vec!["terminal", "agent", "ai"]);
+    assert_eq!(session, vec!["terminal", "agent", "ai", "close"]);
     // Workspace scope lists its own commands and none of the session ones.
     let workspace: Vec<&str> = registry()
         .commands_in_scope(CommandScope::Workspace)

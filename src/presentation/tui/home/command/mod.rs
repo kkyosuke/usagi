@@ -59,6 +59,13 @@ pub enum Effect {
     /// `agent`). This is `terminal` with the agent CLI launched inside it; the
     /// directory and agent command are resolved by the event loop / wiring.
     OpenAgent,
+    /// Close (remove) the focused session forcefully (the user ran `close` in
+    /// 在席). It is the session equivalent of `session remove <name> --force`:
+    /// the worktrees/branches are deleted and any uncommitted changes discarded,
+    /// then 在席 is left for 統括 (Overview). The focused session's name is
+    /// resolved by the event loop, which owns the worktree list and the removal
+    /// callback.
+    CloseSession,
     /// Open the configuration screen (the user ran `config`) to edit the global
     /// settings and this workspace's local overrides. The screen is run by the
     /// event loop, which returns to the workspace screen when it is dismissed.

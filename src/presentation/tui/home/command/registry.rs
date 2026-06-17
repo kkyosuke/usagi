@@ -3,8 +3,8 @@
 //! new commands can be added with [`CommandRegistry::register`].
 
 use super::builtins::{
-    AgentCommand, ClearCommand, ComingSoonCommand, ConfigCommand, HistoryCommand, IssueCommand,
-    ManCommand, QuitCommand, SessionCommand, TerminalCommand,
+    AgentCommand, ClearCommand, CloseCommand, ComingSoonCommand, ConfigCommand, HistoryCommand,
+    IssueCommand, ManCommand, QuitCommand, SessionCommand, TerminalCommand,
 };
 use super::{
     Command, CommandContext, CommandHint, CommandInfo, CommandResult, CommandScope, Completion,
@@ -39,6 +39,9 @@ impl CommandRegistry {
                     examples: &["ai fix the failing test"],
                     scope: CommandScope::Session,
                 }),
+                // `close` is the destructive session action, listed last in the
+                // 在席 menu so it sits below the launch commands.
+                Box::new(CloseCommand),
                 Box::new(ConfigCommand),
                 Box::new(IssueCommand),
                 Box::new(HistoryCommand),
