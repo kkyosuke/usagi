@@ -35,6 +35,16 @@ pub fn reconcile(workspace_root: &Path) -> Result<Vec<PathBuf>> {
         .unwrap_or_default();
 
     let repos = tree::source_repos(workspace_root);
+    // List each repository's worktrees once up front rather than per stray:
+    // pruning a stray only removes the worktree on that stray's unique branch
+    // (the directory name), so a single listing stays valid across strays.
+    let repo_worktrees: Vec<(PathBuf, Vec<git::WorktreeInfo>)> = repos
+        .into_iter()
+        .map(|repo| {
+            let worktrees = git::list_worktrees(&repo)?;
+            Ok((repo, worktrees))
+        })
+        .collect::<Result<_>>()?;
     let mut removed = Vec::new();
 
     for entry in fs::read_dir(&sessions_base).into_iter().flatten().flatten() {
@@ -47,7 +57,7 @@ pub fn reconcile(workspace_root: &Path) -> Result<Vec<PathBuf>> {
         if recorded.contains(name.as_ref()) {
             continue;
         }
-        prune_stray(&stray, &name, &repos)?;
+        prune_stray(&stray, &name, &repo_worktrees)?;
         removed.push(stray);
     }
 
@@ -59,9 +69,16 @@ pub fn reconcile(workspace_root: &Path) -> Result<Vec<PathBuf>> {
 /// drop the now-orphaned branch, then delete whatever files remain. Git steps
 /// are best-effort (a stray may be partly torn down already); only deleting the
 /// directory itself is allowed to fail the call.
-fn prune_stray(stray: &Path, branch: &str, repos: &[PathBuf]) -> Result<()> {
-    for repo in repos {
-        for wt in git::list_worktrees(repo)? {
+///
+/// `repo_worktrees` is each source repository paired with its worktrees, listed
+/// once by the caller and shared across strays.
+fn prune_stray(
+    stray: &Path,
+    branch: &str,
+    repo_worktrees: &[(PathBuf, Vec<git::WorktreeInfo>)],
+) -> Result<()> {
+    for (repo, worktrees) in repo_worktrees {
+        for wt in worktrees {
             if wt.branch.as_deref() == Some(branch) {
                 // Untracked and possibly dirty: force the worktree out.
                 let _ = git::remove_worktree(repo, &wt.path, true);
