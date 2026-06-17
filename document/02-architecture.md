@@ -72,7 +72,7 @@ src/
 │
 ├── infrastructure/             # 外部連携（Git・永続化・シェル）
 │   ├── error_log.rs            # 実行時エラーの日次ログ（~/.usagi/logs/・30 日保持・ErrorLog）
-│   ├── git.rs                  # git CLI 経由の読み取り専用検査 + worktree 追加（add_worktree）
+│   ├── git/                    # git CLI 経由の読み取り専用検査 + worktree 追加（command/repo/worktree/branch に分割）
 │   ├── json_file.rs            # JSON ファイルの共通 read / 原子的 write（temp + rename）
 │   ├── storage.rs              # グローバル ~/.usagi/ の load/save（Storage）
 │   ├── workspace_store.rs      # <repo>/.usagi/ の state.json / settings.json（WorkspaceStore）
