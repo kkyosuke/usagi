@@ -203,7 +203,7 @@ fn event_loop_attaches_a_live_session_end_to_end() {
         sessions: None,
         select: None,
     };
-    let mut config = |_: &Term| Ok(false);
+    let mut config = |_: &Term| Ok(Some(crate::domain::settings::SessionActionUi::Menu));
 
     let outcome = event_loop(
         &term,
