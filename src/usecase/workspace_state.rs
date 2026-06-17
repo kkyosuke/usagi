@@ -22,15 +22,22 @@ pub fn sync(cwd: &Path) -> Result<WorkspaceState> {
     let store = WorkspaceStore::new(&root);
     let mut state = store.load()?.unwrap_or_default();
 
-    // Each `inspect_worktree` shells out to git several times; refresh the
-    // worktrees in parallel so a multi-session / multi-repo workspace is not
-    // bottlenecked on a long sequence of git subprocesses.
+    // The default branch is a per-repository property shared by every worktree
+    // of that repository, so resolve it once here rather than re-deriving it
+    // (another `git` process) inside every `inspect_worktree`. A git-repository
+    // workspace gives each session a single worktree on this repository, so its
+    // default applies to them all.
+    let default = git::default_branch(&root);
+
+    // Each `inspect_worktree` still shells out to git; refresh the worktrees in
+    // parallel so a multi-session workspace is not bottlenecked on a long
+    // sequence of git subprocesses.
     use rayon::prelude::*;
     for session in &mut state.sessions {
         session
             .worktrees
             .par_iter_mut()
-            .for_each(|wt| *wt = inspect_worktree(&wt.path));
+            .for_each(|wt| *wt = inspect_worktree(&wt.path, &default));
     }
     state.updated_at = Utc::now();
     store.save(&state)?;
@@ -43,22 +50,35 @@ pub fn load(cwd: &Path) -> Result<Option<WorkspaceState>> {
     WorkspaceStore::new(root).load()
 }
 
-/// Build the [`WorktreeState`] of a single worktree at `path`. Its branch is
-/// classified against **its own repository's** default branch (resolved from the
-/// worktree), since a workspace may span repositories with differing defaults.
-pub fn inspect_worktree(path: &Path) -> WorktreeState {
-    let (branch, head) = git::worktree_head(path).unwrap_or((None, String::new()));
-    let default = git::default_branch(path);
-    let upstream = branch.as_deref().and_then(|b| git::upstream_of(path, b));
-    let dirty = git::has_uncommitted_changes(path);
-    let status = classify(path, branch.as_deref(), &default, upstream.is_some(), dirty);
+/// Build the [`WorktreeState`] of a single worktree at `path`, classifying its
+/// branch against `default` — the default branch of the worktree's repository,
+/// resolved once by the caller (a workspace may span repositories with differing
+/// defaults, so the caller passes the one that applies here).
+///
+/// The branch, HEAD, upstream, and dirtiness are read in a single git call
+/// ([`git::worktree_status`]); a `None` (not a git worktree) yields an empty,
+/// branch-less state.
+pub fn inspect_worktree(path: &Path, default: &str) -> WorktreeState {
+    let status = git::worktree_status(path).unwrap_or(git::WorktreeStatus {
+        head: String::new(),
+        branch: None,
+        upstream: None,
+        dirty: false,
+    });
+    let classification = classify(
+        path,
+        status.branch.as_deref(),
+        default,
+        status.upstream.is_some(),
+        status.dirty,
+    );
     WorktreeState {
-        branch,
+        branch: status.branch,
         path: path.to_path_buf(),
-        head: git::short_hash(&head),
+        head: git::short_hash(&status.head),
         primary: false,
-        upstream,
-        status,
+        upstream: status.upstream,
+        status: classification,
         updated_at: Utc::now(),
     }
 }
@@ -137,7 +157,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         init_repo(dir.path());
 
-        let wt = inspect_worktree(dir.path());
+        let wt = inspect_worktree(dir.path(), "main");
         assert_eq!(wt.branch.as_deref(), Some("main"));
         // The worktree is on the repo's own default branch (clean, no upstream)
         // → local; the default is never measured against itself.

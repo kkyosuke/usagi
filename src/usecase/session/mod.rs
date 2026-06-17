@@ -137,9 +137,12 @@ fn record(workspace_root: &Path, name: &str, root: &Path, worktrees: &[PathBuf])
     let store = WorkspaceStore::new(workspace_root);
     let mut state = store.load()?.unwrap_or_default();
 
+    // A session's worktrees may live in different source repositories (a
+    // multi-repo workspace), so each is classified against its own repository's
+    // default branch.
     let worktree_states = worktrees
         .iter()
-        .map(|path| workspace_state::inspect_worktree(path))
+        .map(|path| workspace_state::inspect_worktree(path, &git::default_branch(path)))
         .collect();
 
     let now = Utc::now();

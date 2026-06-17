@@ -133,16 +133,6 @@ fn default_branch_falls_back_to_main_when_detached() {
 }
 
 #[test]
-fn upstream_is_some_when_tracking_and_none_otherwise() {
-    let (_tmp, work) = repo_with_remote();
-    assert_eq!(upstream_of(&work, "main").as_deref(), Some("origin/main"));
-
-    let local = tempfile::tempdir().unwrap();
-    init_repo(local.path());
-    assert_eq!(upstream_of(local.path(), "main"), None);
-}
-
-#[test]
 fn ahead_behind_counts_against_local_and_remote() {
     let (_tmp, work) = repo_with_remote();
     // origin/main exists, so the remote ref is used as the target. main is
@@ -245,18 +235,36 @@ fn add_worktree_creates_a_new_branch_checkout() {
 }
 
 #[test]
-fn worktree_head_reports_branch_and_commit() {
+fn worktree_status_reads_branch_head_upstream_and_dirtiness() {
+    // A tracked branch on a clean tree: branch, full HEAD, upstream, not dirty.
+    let (_tmp, work) = repo_with_remote();
+    let status = worktree_status(&work).unwrap();
+    assert_eq!(status.branch.as_deref(), Some("main"));
+    assert_eq!(status.head.len(), 40);
+    assert_eq!(status.upstream.as_deref(), Some("origin/main"));
+    assert!(!status.dirty);
+
+    // An untracked file marks the tree dirty.
+    std::fs::write(work.join("new"), "y").unwrap();
+    assert!(worktree_status(&work).unwrap().dirty);
+}
+
+#[test]
+fn worktree_status_reports_no_branch_or_upstream_when_absent() {
+    // A local repo with no remote: a branch but no upstream.
     let dir = tempfile::tempdir().unwrap();
     init_repo(dir.path());
-    let (branch, head) = worktree_head(dir.path()).unwrap();
-    assert_eq!(branch.as_deref(), Some("main"));
-    assert_eq!(head.len(), 40);
-    // Detached HEAD reports no branch.
+    let status = worktree_status(dir.path()).unwrap();
+    assert_eq!(status.branch.as_deref(), Some("main"));
+    assert_eq!(status.upstream, None);
+
+    // A detached HEAD reports no branch.
     run(dir.path(), &["checkout", "-q", "--detach"]);
-    assert_eq!(worktree_head(dir.path()).unwrap().0, None);
+    assert_eq!(worktree_status(dir.path()).unwrap().branch, None);
+
     // A non-repo path yields nothing.
     let plain = tempfile::tempdir().unwrap();
-    assert!(worktree_head(plain.path()).is_none());
+    assert!(worktree_status(plain.path()).is_none());
 }
 
 #[test]

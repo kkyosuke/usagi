@@ -139,22 +139,6 @@ fn current_branch(repo: &Path) -> Option<String> {
     (branch != "HEAD").then_some(branch)
 }
 
-/// Return the upstream tracking branch of `branch` (e.g. `origin/feature`).
-pub fn upstream_of(repo: &Path, branch: &str) -> Option<String> {
-    git_capture(
-        repo,
-        &[
-            "rev-parse",
-            "--abbrev-ref",
-            "--symbolic-full-name",
-            &format!("{branch}@{{upstream}}"),
-        ],
-    )
-    .ok()
-    .flatten()
-    .filter(|s| !s.is_empty())
-}
-
 /// Count how many commits `branch` is **ahead of** and **behind** its
 /// integration target, as `(ahead, behind)`.
 ///
@@ -169,12 +153,17 @@ pub fn upstream_of(repo: &Path, branch: &str) -> Option<String> {
 /// the counts cannot be computed (e.g. an unrelated history or a ref that does
 /// not resolve).
 pub fn ahead_behind(repo: &Path, branch: &str, into: &str) -> Option<(usize, usize)> {
-    let target = if rev_exists(repo, &format!("origin/{into}")) {
-        format!("origin/{into}")
-    } else {
-        into.to_string()
-    };
+    // Prefer the remote integration branch; fall back to the local one when no
+    // remote ref exists. Attempting the remote range directly (and falling back
+    // on failure) avoids a separate `rev-parse --verify` existence check — one
+    // `git` process instead of two in the common, remote-tracked case.
+    count_ahead_behind(repo, &format!("origin/{into}"), branch)
+        .or_else(|| count_ahead_behind(repo, into, branch))
+}
 
+/// Count `(ahead, behind)` of `branch` relative to `target`, or `None` when the
+/// range cannot be resolved (e.g. `target` does not exist).
+fn count_ahead_behind(repo: &Path, target: &str, branch: &str) -> Option<(usize, usize)> {
     // `--left-right --count A...B` prints "<left>\t<right>": commits reachable
     // from the target but not the branch (behind), then from the branch but not
     // the target (ahead).
