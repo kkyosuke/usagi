@@ -66,7 +66,7 @@ src/
 │   │   ├── tree.rs            # ルート再帰走査・worktree 構築・非 git コピー・リポジトリ探索
 │   │   └── reconcile.rs       # state.json と .usagi/sessions/ の照合・孤児ディレクトリの強制削除
 │   ├── doctor/                 # 依存ツールの導入状況チェック（mod=診断 / runner=CommandRunner / fix=--fix 導入）
-│   ├── issue.rs                # issue の CRUD・検索・依存 readiness 判定
+│   ├── issue/                  # issue の CRUD・検索・readiness（mod=型/CRUD/annotate / stats=集計・grouping / tree=依存ツリー）
 │   ├── local_llm.rs            # ollama・モデルの有無判定とインストール（ensure）
 │   └── update_check.rs         # リモートのタグから最新リリースを判定（純粋・fetch は注入）
 │
