@@ -12,6 +12,7 @@ use anyhow::Result;
 use console::Key;
 use console::Term;
 
+use crate::domain::settings::SessionActionUi;
 use crate::presentation::tui::screen::{FramePainter, KeyReader};
 
 use super::state::{HomeState, Mode, PaneExit, SessionOutcome};
@@ -87,8 +88,10 @@ pub enum Outcome {
 /// (`Ctrl-O` → 切替). The PTY I/O, rendering, and shell pool live in that
 /// injected callback.
 ///
-/// `open_config` opens the settings screen, returning `true` when the user quit
-/// the application from it (so the loop propagates [`Outcome::Quit`]).
+/// `open_config` opens the settings screen, returning `None` when the user quit
+/// the application from it (so the loop propagates [`Outcome::Quit`]), or
+/// `Some(ui)` with the re-read [`SessionActionUi`] when it returns to home — so a
+/// changed Focus surface takes effect without reopening the home screen.
 ///
 /// `preview` snapshots the live terminal of the session rooted at a path, or
 /// `None` when it has no running shell/agent — used to decide whether focusing /
@@ -106,7 +109,7 @@ pub fn event_loop(
     remove_session: &mut dyn FnMut(&str, bool) -> SessionOutcome,
     existing_branches: &mut dyn FnMut() -> Vec<String>,
     open_terminal: &mut dyn FnMut(&mut HomeState, &Path, bool) -> Result<PaneExit>,
-    open_config: &mut dyn FnMut(&Term) -> Result<bool>,
+    open_config: &mut dyn FnMut(&Term) -> Result<Option<SessionActionUi>>,
     preview: &mut dyn FnMut(&Path) -> Option<TerminalView>,
 ) -> Result<Outcome> {
     let mut painter = FramePainter::new();

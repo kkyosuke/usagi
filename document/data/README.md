@@ -10,11 +10,13 @@
 | 1 | usagi 全体（グローバル） | [01-global.md](01-global.md) | `~/.usagi/`（`$USAGI_HOME` で上書き可） | 登録済みワークスペースの一覧、アプリ設定、エラーログ |
 | 2 | workspace 毎（リポジトリ単位） | [02-workspace.md](02-workspace.md) | `<repo>/.usagi/` の `state.json` / `settings.json` / `history.json` | そのリポジトリの worktree / ブランチの状態、プロジェクト固有の設定上書き、コマンド実行履歴 |
 | — | タスク issue（②の git 共有部分） | [03-issues.md](03-issues.md) | `<repo>/.usagi/issues/` | git で共有するタスク issue（frontmatter 付き markdown + `index.json`） |
+| — | エージェントのメモリ（②の git 共有部分） | [04-memory.md](04-memory.md) | `<repo>/.usagi/memory/` | git で共有するメモリ（frontmatter 付き markdown + 目次 `MEMORY.md` + `index.json`） |
 
 ①は「どのリポジトリを usagi で管理しているか」というマシン横断のインデックス、②は「その
 リポジトリの中で各 worktree が今どういう状態か」というリポジトリ内のスナップショットです。②のうち
-**タスク issue だけは git で共有**するため、保存フォーマットを [03-issues.md](03-issues.md) に分けています。
-役割が重ならないよう、保存場所もファイルも分離しています。
+**タスク issue とエージェントのメモリは git で共有**するため、保存フォーマットをそれぞれ
+[03-issues.md](03-issues.md) / [04-memory.md](04-memory.md) に分けています。役割が重ならないよう、
+保存場所もファイルも分離しています。
 
 ## 共通の方針
 

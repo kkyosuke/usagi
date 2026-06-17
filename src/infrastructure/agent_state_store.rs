@@ -190,6 +190,26 @@ pub fn worktree_from_hook_json(raw: &str) -> Option<PathBuf> {
     serde_json::from_str::<HookInput>(raw).ok()?.cwd
 }
 
+/// Extract the `source` of a Claude Code `SessionStart` hook from its JSON
+/// payload: `"startup"`, `"resume"`, `"clear"`, or `"compact"`. Returns `None`
+/// when the payload is not JSON or carries no `source` (every non-`SessionStart`
+/// hook).
+///
+/// usagi cares about `"compact"`: `SessionStart` fires not only when a session
+/// begins but also after the context is compacted, which auto-compaction can do
+/// **mid-turn** — the agent keeps working afterwards without a fresh
+/// `UserPromptSubmit`. Treating that as the usual `SessionStart` → ready would
+/// reset a still-working session to idle until its next `Stop`, leaving it stuck
+/// showing ready while it works (see [`crate::presentation::cli::agent_phase`]).
+pub fn session_start_source_from_hook_json(raw: &str) -> Option<String> {
+    /// The single field usagi reads from a `SessionStart` payload.
+    #[derive(Deserialize)]
+    struct HookInput {
+        source: Option<String>,
+    }
+    serde_json::from_str::<HookInput>(raw).ok()?.source
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -338,5 +358,30 @@ mod tests {
         assert_eq!(worktree_from_hook_json(r#"{"session_id":"x"}"#), None);
         // Not JSON at all.
         assert_eq!(worktree_from_hook_json("not json"), None);
+    }
+
+    #[test]
+    fn session_start_source_reads_the_source_field() {
+        // A SessionStart payload carries the source that started/resumed it.
+        let json = r#"{"cwd":"/repo/wt","hook_event_name":"SessionStart","source":"compact"}"#;
+        assert_eq!(
+            session_start_source_from_hook_json(json),
+            Some("compact".to_string())
+        );
+        assert_eq!(
+            session_start_source_from_hook_json(r#"{"source":"startup"}"#),
+            Some("startup".to_string())
+        );
+    }
+
+    #[test]
+    fn session_start_source_is_none_without_a_source_or_on_garbage() {
+        // Hooks other than SessionStart carry no source.
+        assert_eq!(
+            session_start_source_from_hook_json(r#"{"cwd":"/repo/wt","hook_event_name":"Stop"}"#),
+            None
+        );
+        // Not JSON at all.
+        assert_eq!(session_start_source_from_hook_json("not json"), None);
     }
 }

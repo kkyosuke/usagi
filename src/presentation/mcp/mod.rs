@@ -3,7 +3,9 @@
 //! usagi speaks MCP over stdio so AI agents (Claude Code etc.) can drive it with
 //! the same operations a human uses on the CLI. Three servers live here:
 //!
-//! - [`issue`] exposes a repository's task issues as tools.
+//! - [`issue`] exposes a repository's task issues — and, merged into the same
+//!   server, its [`memory`] tools — so one `usagi mcp` process gives an agent
+//!   both task issues and durable memories for a repository.
 //! - [`llm`] exposes a locally-running model as a single delegation tool.
 //! - [`session`] exposes session orchestration (create / list / prompt) as tools.
 //!
@@ -16,6 +18,7 @@
 
 pub mod issue;
 pub mod llm;
+pub mod memory;
 pub mod session;
 
 use serde_json::{json, Value};

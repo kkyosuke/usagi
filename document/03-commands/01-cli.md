@@ -4,10 +4,13 @@
 
 シェルから `usagi <cmd>` で実行する CLI コマンドの一覧です。
 
+`issue` / `memory` / `mcp` / `llm-mcp` / `session-mcp` は **AI エージェントが MCP 経由で扱うためのコマンド**で、`usagi --help` の一覧には表示しません（実行自体は可能）。人手で叩くものではないため、ヘルプを汚さないよう隠しています。
+
 ## 目次
 
 - [CLI コマンド一覧](#cli-コマンド一覧)
   - [`usagi issue`](#usagi-issue)
+  - [`usagi memory`](#usagi-memory)
   - [`usagi mcp`](#usagi-mcp)
   - [`usagi llm-mcp`](#usagi-llm-mcp)
   - [`usagi session-mcp`](#usagi-session-mcp)
@@ -24,10 +27,11 @@
 | `usagi config --edit` | グローバル設定ファイルを `$EDITOR` で開いて編集し、保存時に形式（JSON / 必須 `version` / 型）を検証する。不正な場合は直前の内容に巻き戻す |
 | `usagi doctor` | `git` / `bash` の導入状況、デスクトップ通知の可否、設定ストレージの健全性を確認する（ローカル LLM 有効時は `ollama`・モデルも） |
 | `usagi doctor --fix` | 不足ツールを OS のパッケージマネージャ（brew / apt-get / dnf / pacman）で導入を試行し、修復不可なら手動手順を提示する。ローカル LLM が有効なら `ollama`・サーバ起動・モデルも導入する |
-| `usagi issue <create\|list\|graph\|show\|update\|search\|delete>` | カレントリポジトリのタスク issue（`.usagi/issues/`）を操作する（[data/02-workspace.md](../data/02-workspace.md#issues-タスク-issue)） |
-| `usagi mcp` | issue 操作を MCP（Model Context Protocol）サーバとして stdio で公開し、AI エージェントから使えるようにする |
-| `usagi llm-mcp [--model <MODEL>]` | ローカル LLM（Ollama）を MCP サーバとして公開し、クラウド Agent が軽量タスクを委譲できるようにする（トークン節約） |
-| `usagi session-mcp` | セッション操作（作成・一覧・別セッションへのプロンプト委譲）を MCP サーバとして stdio で公開し、AI エージェントがセッションをオーケストレーションできるようにする |
+| `usagi issue <create\|list\|graph\|show\|update\|search\|delete>` | （ヘルプ非表示・エージェント向け）カレントリポジトリのタスク issue（`.usagi/issues/`）を操作する（[data/02-workspace.md](../data/02-workspace.md#issues-タスク-issue)） |
+| `usagi memory <save\|list\|show\|update\|search\|delete>` | （ヘルプ非表示・エージェント向け）カレントリポジトリのエージェントのメモリ（`.usagi/memory/`）を操作する（[data/04-memory.md](../data/04-memory.md)） |
+| `usagi mcp` | （ヘルプ非表示・エージェント向け）issue とメモリの操作を MCP（Model Context Protocol）サーバとして stdio で公開し、AI エージェントから使えるようにする |
+| `usagi llm-mcp [--model <MODEL>]` | （ヘルプ非表示・エージェント向け）ローカル LLM（Ollama）を MCP サーバとして公開し、クラウド Agent が軽量タスクを委譲できるようにする（トークン節約） |
+| `usagi session-mcp` | （ヘルプ非表示・エージェント向け）セッション操作（作成・一覧・別セッションへのプロンプト委譲）を MCP サーバとして stdio で公開し、AI エージェントがセッションをオーケストレーションできるようにする |
 
 ### `usagi init`
 
@@ -104,9 +108,35 @@ $ usagi issue graph
 3 issues · 1 done (33%) · 1 ready  [######--------------]
 ```
 
+### `usagi memory`
+
+カレントリポジトリの AI エージェントのメモリ（`<repo>/.usagi/memory/`、[data/04-memory.md](../data/04-memory.md)）を操作します。issue がタスクを管理するのに対し、メモリはユーザーの好み・作業指針・プロジェクト固有の前提・外部リソースへのポインタといった、コードや git からは読み取れない事実を蓄積します。
+
+| サブコマンド | 説明 |
+|---|---|
+| `save --name <名> --title <T> [--type <t>] [--related <名>…] [--body <md>]` | メモリを保存。**同名なら上書き**（in-place 更新）するので重複しない |
+| `list [--type <t>]` | 一覧表示（`updated_at` の新しい順、`--type` でフィルタ） |
+| `show <名>` | 1 件の frontmatter + 本文を表示 |
+| `update <名> [--title …] [--type …] [--related <名>…] [--body …]` | 指定したフィールドだけを更新 |
+| `search <クエリ> [--type <t>]` | 名前・タイトル・本文を大文字小文字を無視して全文検索（ASCII 以外も含む Unicode 単位で照合） |
+| `delete <名> --yes` | メモリを削除（`--yes` 必須） |
+
+- `--type` は `user` / `feedback` / `project` / `reference`（既定 `project`）。
+- `--name` / `<名>` は与えた文字列をスラッグ化して識別子にします（例: `"User Prefers Tabs"` → `user-prefers-tabs`）。
+- `save` / `list` / `show` / `update` / `search` は `--json` で機械可読な JSON を出力します（`delete` は対象外）。
+- メモリを保存・更新・削除すると、目次 `MEMORY.md` と派生キャッシュ `index.json` が再生成されます。
+
+```
+$ usagi memory save --name "tabs" --title "ユーザーはタブを好む" --type user
+saved tabs (user)
+
+$ usagi memory list
+user         tabs                     ユーザーはタブを好む
+```
+
 ### `usagi mcp`
 
-`usagi issue` と同じ issue 操作を、**MCP（Model Context Protocol）サーバ**として AI エージェント（Claude Code など）に stdio 経由で公開します。アーキテクチャ・対応 tool・JSON-RPC プロトコルの詳細は専用の章 [3.3 MCP サーバ](03-mcp.md) を参照してください。
+`usagi issue` / `usagi memory` と同じ issue・メモリ操作を、**MCP（Model Context Protocol）サーバ**として AI エージェント（Claude Code など）に stdio 経由で公開します。アーキテクチャ・対応 tool・JSON-RPC プロトコルの詳細は専用の章 [3.3 MCP サーバ](03-mcp.md) を参照してください。
 
 ### `usagi llm-mcp`
 

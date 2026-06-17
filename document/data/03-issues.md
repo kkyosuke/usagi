@@ -1,6 +1,6 @@
 # 3. タスク issue（`issues/`）
 
-> [データ永続化トップ](README.md) ｜ ← 前へ [2. workspace 毎（リポジトリ単位）](02-workspace.md)
+> [データ永続化トップ](README.md) ｜ ← 前へ [2. workspace 毎（リポジトリ単位）](02-workspace.md) ｜ 次へ → [4. メモリ（`memory/`）](04-memory.md)
 
 プロジェクトのタスクを管理する issue の保存フォーマットです。`<repo>/.usagi/` の他のファイルと異なり
 **git で共有**され、チームで同じタスク一覧を見られます。`infrastructure/issue_store.rs` の `IssueStore` が

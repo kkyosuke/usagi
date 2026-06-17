@@ -509,10 +509,20 @@ pub(super) fn switch_preview(state: &HomeState, width: usize, rows: usize) -> Ve
             }
         }
     } else {
-        // Selecting opens 在席 on this session: preview its action menu.
-        lines.push(style("Run a command:").dim().to_string());
-        for (i, info) in state.focus_menu_commands().iter().enumerate() {
-            lines.push(focus_menu_row(info, i == 0, width));
+        // Selecting opens 在席 on this session: preview its action surface, which
+        // mirrors the configured Session Action UI — a command menu or a prompt —
+        // so the preview matches what focusing actually reveals.
+        match state.session_action_ui() {
+            SessionActionUi::Menu => {
+                lines.push(style("Run a command:").dim().to_string());
+                for (i, info) in state.focus_menu_commands().iter().enumerate() {
+                    lines.push(focus_menu_row(info, i == 0, width));
+                }
+            }
+            SessionActionUi::Prompt => {
+                let prompt = style("❯").red().bold();
+                lines.push(clip_to_width(&format!("{prompt} {CARET}"), width));
+            }
         }
         lines.push(String::new());
         lines.push(style("Enter / l で開く").dim().to_string());
