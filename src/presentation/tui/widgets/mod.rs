@@ -62,14 +62,16 @@ pub fn rabbit_art() -> [&'static str; 3] {
 /// Braille spinner frames cycled beside the loading rabbit, one per tick.
 const LOADING_SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
-/// The hopping rabbit's poses as `(ears, body)`. The face shifts a column on the
-/// "hop" poses for a little side-to-side bounce, and blinks (`-ㅅ-`) on the
-/// third, so cycling the poses reads as a rabbit hopping in place.
+/// The hopping rabbit's poses as `(ears, body)`. The ears sit centred over the
+/// head (the `∩∩` lands on the `ㅅ`), and each "hop" pose shifts the ears *and*
+/// the body together by one column so they bounce as a unit without the ears
+/// drifting off the head. The blink (`-ㅅ-`) lands on the third pose, so cycling
+/// the poses reads as a rabbit hopping in place.
 const LOADING_POSES: [(&str, &str); 4] = [
-    ("  ∩∩", " (･ㅅ･)づ"),
     ("  ∩∩", "(･ㅅ･)づ"),
-    ("  ∩∩", " (-ㅅ-)づ"),
-    ("  ∩∩", "(･ㅅ･)づ"),
+    ("   ∩∩", " (･ㅅ･)づ"),
+    ("  ∩∩", "(-ㅅ-)づ"),
+    ("   ∩∩", " (･ㅅ･)づ"),
 ];
 
 /// A two-line "loading" rabbit for the home screen's top-right corner: a hopping
@@ -267,6 +269,26 @@ mod tests {
         let a = console::strip_ansi_codes(&loading_rabbit(0, "x").join("\n")).into_owned();
         let b = console::strip_ansi_codes(&loading_rabbit(1, "x").join("\n")).into_owned();
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn loading_rabbit_keeps_the_ears_over_the_head_through_the_hop() {
+        // The display column of the first ear must line up with the head centre
+        // (`ㅅ`) on both the resting (frame 0) and hopped (frame 1) poses, so the
+        // ears never drift off the head as the rabbit bounces.
+        fn col_of(line: &str, target: char) -> usize {
+            let plain = console::strip_ansi_codes(line).into_owned();
+            let byte = plain.find(target).expect("glyph present");
+            console::measure_text_width(&plain[..byte])
+        }
+        for frame in [0usize, 1] {
+            let lines = loading_rabbit(frame, "x");
+            assert_eq!(
+                col_of(&lines[0], '∩'),
+                col_of(&lines[1], 'ㅅ'),
+                "ears must sit over the head on frame {frame}",
+            );
+        }
     }
 
     #[test]
