@@ -8,12 +8,17 @@
 //!   if the cell sits on an `http(s)` URL, lifts the link out as text. It stitches
 //!   a URL that wrapped across rows back into one string (via
 //!   [`vt100::Screen::row_wrapped`]).
+//! - [`link_cells`] runs the same detection over the *whole* grid, returning every
+//!   cell that sits on a URL so the renderer can mark links (underline + colour)
+//!   as visibly clickable.
 //! - [`open_command`] gives the platform argv that hands a URL to the default
 //!   browser (`open` / `xdg-open` / `cmd /c start`).
 //!
 //! The terminal I/O — translating a mouse report into a [`Cell`] and spawning the
 //! browser command — lives in the (coverage-excluded) terminal pane; everything
 //! here is pure and unit-tested against a parser driven with bytes.
+
+use std::collections::HashSet;
 
 use super::terminal_selection::Cell;
 
@@ -73,32 +78,82 @@ fn url_in_chars(chars: &[char], idx: usize) -> Option<String> {
     if idx >= chars.len() || chars[idx].is_whitespace() {
         return None;
     }
-    // The maximal whitespace-free run around the click — a URL never contains a
-    // space, so the link is somewhere inside this run.
-    let mut run_start = idx;
-    while run_start > 0 && !chars[run_start - 1].is_whitespace() {
-        run_start -= 1;
+    // The click must land on the URL itself, not on the text before its scheme or
+    // the trailing punctuation trimmed off its tail.
+    let span = url_spans(chars).into_iter().find(|s| s.contains(&idx))?;
+    Some(chars[span].iter().collect())
+}
+
+/// Every `http(s)` URL in the flattened line `chars`, as half-open char-index
+/// ranges. Each maximal whitespace-free run holds at most one link: the earliest
+/// scheme in the run starts it (dropping a leading `(` or stray prefix) and it
+/// runs to the end of the run with trailing prose punctuation trimmed
+/// (see [`trim_trailing`]). A run whose only scheme has no host is skipped.
+fn url_spans(chars: &[char]) -> Vec<std::ops::Range<usize>> {
+    let mut spans = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i].is_whitespace() {
+            i += 1;
+            continue;
+        }
+        // A URL never contains a space, so the link is somewhere inside this run.
+        let run_start = i;
+        let mut run_end = run_start;
+        while run_end < chars.len() && !chars[run_end].is_whitespace() {
+            run_end += 1;
+        }
+        if let Some(scheme_off) =
+            (run_start..run_end).find(|&j| SCHEMES.iter().any(|s| starts_with_at(chars, j, s)))
+        {
+            let raw: String = chars[scheme_off..run_end].iter().collect();
+            let url = trim_trailing(&raw);
+            // A bare scheme with no host is not a link.
+            if !SCHEMES.contains(&url) {
+                spans.push(scheme_off..scheme_off + url.chars().count());
+            }
+        }
+        i = run_end;
     }
-    let mut run_end = idx + 1;
-    while run_end < chars.len() && !chars[run_end].is_whitespace() {
-        run_end += 1;
+    spans
+}
+
+/// Every grid cell that sits on an `http(s)` URL, so the renderer can style links
+/// (underline + colour) to mark them clickable. This is [`url_at`]'s detection
+/// run over the whole screen at once: each logical line (a run of rows stitched
+/// by [`vt100::Screen::row_wrapped`]) is flattened the same way, its URL spans are
+/// found, and each covered index maps back to its `(row, col)` cell.
+pub fn link_cells(screen: &vt100::Screen) -> HashSet<Cell> {
+    let (rows, cols) = screen.size();
+    let mut cells = HashSet::new();
+    if cols == 0 {
+        return cells;
     }
-    // The earliest scheme in the run starts the link (so a leading `(` or stray
-    // prefix before `https://` is dropped).
-    let scheme_off =
-        (run_start..run_end).find(|&i| SCHEMES.iter().any(|s| starts_with_at(chars, i, s)))?;
-    let raw: String = chars[scheme_off..run_end].iter().collect();
-    let url = trim_trailing(&raw);
-    // A bare scheme with no host is not a link.
-    if SCHEMES.contains(&url) {
-        return None;
+    let width = cols as usize;
+    let mut start = 0;
+    while start < rows {
+        // Extend to the last row of this logical line (each row but the last
+        // wraps onto the next), so a wrapped URL is detected as one run.
+        let mut end = start;
+        while end + 1 < rows && screen.row_wrapped(end) {
+            end += 1;
+        }
+        let mut chars: Vec<char> = Vec::with_capacity((end - start + 1) as usize * width);
+        for row in start..=end {
+            for col in 0..cols {
+                chars.push(cell_char(screen.cell(row, col)));
+            }
+        }
+        for span in url_spans(&chars) {
+            for idx in span {
+                let row = start + (idx / width) as u16;
+                let col = (idx % width) as u16;
+                cells.insert(Cell::new(row, col));
+            }
+        }
+        start = end + 1;
     }
-    // The click must land on the URL itself, not on text before the scheme.
-    let url_end = scheme_off + url.chars().count();
-    if idx < scheme_off || idx >= url_end {
-        return None;
-    }
-    Some(url.to_string())
+    cells
 }
 
 /// Whether `chars[at..]` begins with `needle`.
@@ -307,6 +362,68 @@ mod tests {
             url_at(screen, Cell::new(0, 8)).as_deref(),
             Some("https://x.io"),
         );
+    }
+
+    /// The set of `(row, col)` pairs `link_cells` marks for `screen`.
+    fn link_pairs(screen: &vt100::Screen) -> std::collections::HashSet<(u16, u16)> {
+        link_cells(screen)
+            .into_iter()
+            .map(|c| (c.row, c.col))
+            .collect()
+    }
+
+    #[test]
+    fn link_cells_marks_exactly_the_url_run() {
+        let parser = parsed(1, 40, b"see https://example.com/x now");
+        let cells = link_pairs(parser.screen());
+        // "https://example.com/x" is 21 chars starting at col 4 (after "see "),
+        // so cols 4..=24 are link cells; the surrounding words and trailing
+        // blanks carry none.
+        let expected: std::collections::HashSet<(u16, u16)> = (4..=24).map(|c| (0, c)).collect();
+        assert_eq!(cells, expected);
+    }
+
+    #[test]
+    fn link_cells_finds_no_link_in_plain_text() {
+        let parser = parsed(1, 20, b"just some words");
+        assert!(link_cells(parser.screen()).is_empty());
+    }
+
+    #[test]
+    fn link_cells_spans_a_wrapped_url_across_rows() {
+        // The URL fills row 0 and continues on row 1 (row 0 is marked wrapped),
+        // so cells on both rows are marked up to the URL's end.
+        let parser = parsed(2, 16, b"https://example.com/page");
+        let screen = parser.screen();
+        assert!(screen.row_wrapped(0));
+        let cells = link_pairs(screen);
+        // Row 0 is filled (16 cells); row 1 holds the 8-char tail.
+        for col in 0..16 {
+            assert!(cells.contains(&(0, col)), "row 0 col {col}");
+        }
+        for col in 0..8 {
+            assert!(cells.contains(&(1, col)), "row 1 col {col}");
+        }
+        assert!(!cells.contains(&(1, 8)));
+    }
+
+    #[test]
+    fn link_cells_trims_trailing_punctuation_and_skips_the_prefix() {
+        // "(https://example.com)" — the wrapping parens are not part of the link.
+        let parser = parsed(1, 30, b"(https://example.com).");
+        let cells = link_pairs(parser.screen());
+        assert!(!cells.contains(&(0, 0))); // leading "("
+        assert!(cells.contains(&(0, 1))); // "h" of https
+        assert!(cells.contains(&(0, 19))); // "m" of .com
+        assert!(!cells.contains(&(0, 20))); // trailing ")"
+        assert!(!cells.contains(&(0, 21))); // trailing "."
+    }
+
+    #[test]
+    fn link_cells_handles_a_zero_width_screen() {
+        // A degenerate 0-column screen yields no link cells (and does not panic).
+        let parser = parsed(1, 0, b"");
+        assert!(link_cells(parser.screen()).is_empty());
     }
 
     #[test]

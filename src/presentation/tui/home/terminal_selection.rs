@@ -16,7 +16,7 @@
 
 /// A cell position in the visible terminal grid, both 0-based: `row` from the
 /// top, `col` from the left.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Cell {
     pub row: u16,
     pub col: u16,
