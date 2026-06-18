@@ -12,6 +12,7 @@ pub mod state;
 pub mod terminal_pane;
 pub mod terminal_pool;
 pub mod terminal_selection;
+pub mod terminal_tabs;
 pub mod terminal_view;
 pub mod ui;
 pub mod update;
@@ -235,13 +236,19 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
     // inside the workspace screen (sidebar still visible) and runs the shell
     // until the user detaches, switches sessions, or it exits. `:agent` is the
     // same, with the agent CLI sent to the shell on its first spawn. The pool
-    // owns the shell so a detach leaves it running; the right-pane mode and the
-    // switch loop are handled by the event loop around this call. The attached
-    // session is declared to the monitor (so it is never flagged as waiting) and
-    // cleared again on detach / close.
+    // owns the shells so a detach leaves them running; the right-pane mode and
+    // the switch loop are handled by the event loop around this call.
+    //
+    // A session can hold several panes (an agent alongside terminals): this loop
+    // drives the active pane, and a tab-strip step (`Ctrl-O ]` / `t` / `w` …)
+    // updates the pool's active pane / adds / closes one and re-drives the new
+    // active pane, leaving the others alive. It returns only when the user
+    // detaches (`Ctrl-O Ctrl-O` → 切替) or every pane has closed (→ 在席). The
+    // attached session is declared to the monitor (so it is never flagged as
+    // waiting) and cleared again on the way out.
     let terminal_root = workspace.path.clone();
     let mut open_terminal = |home: &mut HomeState, dir: &Path, agent: bool| -> Result<PaneExit> {
-        let initial = agent.then_some(agent_command.as_str());
+        let initial = Some(agent_command.as_str());
         let label = home
             .list()
             .worktrees()
@@ -256,12 +263,45 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
             });
         let mut pool = pool.borrow_mut();
         let handle = pool.monitor();
-        let pty = pool.attach_or_spawn(term, dir, initial, &label)?;
+        // Ready the active pane (spawning the first one when the session is new),
+        // then drive it; tab steps loop back here on the now-active pane.
+        pool.enter(term, dir, agent, initial, &label)?;
         handle.set_attached(Some(dir.to_path_buf()));
-        let result = terminal_pane::run(term, home, pty, &handle);
-        // Leaving the pane (Ctrl-O → 切替, the shell closing, or an error) means
-        // nothing is attached any more; the shell itself stays alive in the pool.
+        let result = (|| -> Result<PaneExit> {
+            loop {
+                // Publish the tab strip for this session before driving the pane,
+                // so it reflects any add / close / switch from the last step.
+                let (labels, active_tab) = pool.tabs(dir);
+                home.set_terminal_tabs(labels, active_tab);
+                let pty = match pool.active_pty(dir) {
+                    Some(pty) => pty,
+                    // No live pane (every one exited): drop back to 在席.
+                    None => return Ok(PaneExit::Closed),
+                };
+                match terminal_pane::run(term, home, pty, &handle)? {
+                    // `Ctrl-O Ctrl-O`: zoom out, leaving every pane alive.
+                    terminal_pane::PaneStep::Detach => return Ok(PaneExit::ToSwitch),
+                    // The active pane's shell exited, or the user closed it: drop
+                    // it; keep driving when a pane remains, else fall to 在席.
+                    terminal_pane::PaneStep::Closed | terminal_pane::PaneStep::ClosePane => {
+                        if !pool.close_active(dir, &label) {
+                            return Ok(PaneExit::Closed);
+                        }
+                    }
+                    // Move the active tab, then re-drive the new active pane.
+                    terminal_pane::PaneStep::Switch(nav) => pool.nav(dir, nav),
+                    // Add a pane (agent / terminal) and drive it.
+                    terminal_pane::PaneStep::NewPane(kind) => {
+                        pool.add_pane(term, dir, kind, initial, &label)?;
+                    }
+                }
+            }
+        })();
+        // Leaving the pane (Ctrl-O → 切替, every pane closing, or an error) means
+        // nothing is attached any more; the shells themselves stay alive in the
+        // pool.
         handle.set_attached(None);
+        home.clear_terminal_tabs();
         // The user may have committed / pushed / merged while in the pane, so
         // re-sync the worktree statuses now that they have left it — keeping the
         // cursor where it is. Best-effort: a sync failure just leaves the

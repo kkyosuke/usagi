@@ -9,6 +9,7 @@ use console::style;
 
 use super::super::command::{CommandInfo, Hint};
 use super::super::state::{HomeState, LineKind, LogLine, Mode, WorktreeList, ROOT_NAME};
+use super::super::terminal_tabs::TabStrip;
 use super::super::terminal_view::TerminalView;
 use super::{
     clip_to_width, ACTIVE_COL, CARET, DETACHED, DIRTY_ICON, EMPTY_MESSAGE, HINT_INDENT, HINT_MAX,
@@ -350,6 +351,28 @@ pub(super) fn log_tail(log: &[LogLine], width: usize, rows: usize) -> Vec<String
         .collect()
 }
 
+/// Builds the tab strip drawn above the embedded terminal in 没入: one `[label]`
+/// chip per pane, the active one reversed (and bold) so it reads as the visible
+/// tab, the rest dimmed. Clipped to the pane width. A single-pane session still
+/// gets the strip, so the terminal below it never shifts as panes come and go.
+pub(super) fn tab_strip_line(strip: &TabStrip, right_w: usize) -> String {
+    let chips = strip
+        .labels
+        .iter()
+        .enumerate()
+        .map(|(i, label)| {
+            let chip = format!(" {label} ");
+            if i == strip.active {
+                style(chip).reverse().bold().to_string()
+            } else {
+                style(chip).dim().to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    clip_to_width(&chips, right_w)
+}
+
 /// Builds the right pane from an embedded terminal snapshot: each grid row,
 /// clipped to the pane width, up to `rows` rows.
 pub(super) fn terminal_pane(view: &TerminalView, right_w: usize, rows: usize) -> Vec<String> {
@@ -545,11 +568,24 @@ pub(super) fn right_pane_contents(state: &HomeState, right_w: usize, rows: usize
             SessionActionUi::Menu => focus_menu(state, right_w),
             SessionActionUi::Prompt => focus_prompt(state, right_w),
         },
-        Mode::Attached => match state.terminal_view() {
-            Some(view) => terminal_pane(view, right_w, rows),
-            None => vec![style(clip_to_width(TERMINAL_STARTING, right_w))
-                .dim()
-                .to_string()],
-        },
+        Mode::Attached => {
+            // The tab strip (when the pane driver has published one) takes the top
+            // row; the embedded terminal fills the rest. A starting hint stands in
+            // until the first screen snapshot arrives.
+            let mut lines = Vec::with_capacity(rows);
+            if let Some(strip) = state.terminal_tabs() {
+                lines.push(tab_strip_line(strip, right_w));
+            }
+            let body = rows.saturating_sub(lines.len());
+            match state.terminal_view() {
+                Some(view) => lines.extend(terminal_pane(view, right_w, body)),
+                None => lines.push(
+                    style(clip_to_width(TERMINAL_STARTING, right_w))
+                        .dim()
+                        .to_string(),
+                ),
+            }
+            lines
+        }
     }
 }

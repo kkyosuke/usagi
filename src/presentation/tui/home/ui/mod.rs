@@ -240,6 +240,26 @@ pub fn terminal_geometry(raw_height: usize, raw_width: usize) -> TerminalGeometr
     }
 }
 
+/// Rows the tab strip reserves at the top of the right pane in 没入 (Attached).
+/// The strip lists the session's panes (`[agent] [terminal] …`) and is always
+/// present once attached — even for a single pane — so the embedded terminal's
+/// geometry does not jump as panes are added or closed.
+pub const TAB_BAR_ROWS: usize = 1;
+
+/// The embedded terminal's geometry while 没入 (Attached): the right pane minus
+/// the tab strip ([`TAB_BAR_ROWS`]) reserved above it, with the origin pushed
+/// down by the same so the cursor tracks the shell below the strip. The pane and
+/// the pool both size / place the live terminal through this, while the
+/// tab-less previews in 切替 use [`terminal_geometry`].
+pub fn attached_geometry(raw_height: usize, raw_width: usize) -> TerminalGeometry {
+    let geo = terminal_geometry(raw_height, raw_width);
+    TerminalGeometry {
+        rows: (geo.rows as usize).saturating_sub(TAB_BAR_ROWS).max(1) as u16,
+        origin_row: geo.origin_row + TAB_BAR_ROWS as u16,
+        ..geo
+    }
+}
+
 /// Builds the full home-screen frame for a raw terminal size.
 pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> Vec<String> {
     // The quit-confirmation modal, when open, overlays everything else.

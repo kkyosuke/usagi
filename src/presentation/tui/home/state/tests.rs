@@ -836,6 +836,35 @@ fn clear_terminal_view_drops_the_snapshot_without_changing_the_mode() {
 }
 
 #[test]
+fn tab_strip_is_published_and_cleared_with_the_pane() {
+    let mut state = state();
+    state.enter_focus(1);
+    state.show_attached();
+    state.set_terminal_tabs(vec!["agent".to_string(), "terminal".to_string()], 1);
+    let strip = state.terminal_tabs().expect("the strip is published");
+    assert_eq!(strip.labels, ["agent", "terminal"]);
+    assert_eq!(strip.active, 1);
+    // The per-frame view cleanup also drops the strip.
+    state.set_terminal_view(TerminalView::from_rows(vec!["x".to_string()], None));
+    state.clear_terminal_view();
+    assert!(state.terminal_tabs().is_none());
+    // Re-publish it, then leaving 没入 drops it too.
+    state.set_terminal_tabs(vec!["agent".to_string()], 0);
+    state.clear_terminal_tabs();
+    assert!(state.terminal_tabs().is_none());
+}
+
+#[test]
+fn leaving_attached_drops_the_tab_strip() {
+    let mut state = state();
+    state.enter_focus(1);
+    state.show_attached();
+    state.set_terminal_tabs(vec!["agent".to_string()], 0);
+    state.leave_attached();
+    assert!(state.terminal_tabs().is_none());
+}
+
+#[test]
 fn enter_overview_clears_transient_state() {
     let mut state = state();
     state.enter_switch(ReturnMode::Overview);
