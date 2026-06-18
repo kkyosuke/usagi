@@ -316,6 +316,7 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
     if state.is_creating() {
         for row in switch_create_rows(
             state.create_input().unwrap_or_default(),
+            state.create_cursor().unwrap_or(0),
             state.create_error(),
             left_w,
         ) {

@@ -441,8 +441,14 @@ pub(super) fn focus_prompt(state: &HomeState, width: usize) -> Vec<String> {
         String::new(),
     ];
     let prompt = style("❯").red().bold();
-    let text = style(state.focus_prompt()).cyan();
-    lines.push(clip_to_width(&format!("{prompt} {text}{CARET}"), width));
+    // Split at the caret so ←/→/Home/End move a visible caret through the prompt.
+    let (before, after) = state.focus_prompt().split_at(state.focus_prompt_cursor());
+    let before = style(before).cyan();
+    let after = style(after).cyan();
+    lines.push(clip_to_width(
+        &format!("{prompt} {before}{CARET}{after}"),
+        width,
+    ));
     lines.push(String::new());
     lines.extend(focus_hint_lines(state.focus_prompt_hint(), width));
     lines
@@ -499,7 +505,21 @@ pub(super) fn switch_preview(state: &HomeState, width: usize, rows: usize) -> Ve
             state.is_done(&w.path),
             Some(w.status),
         ),
-        None => (ROOT_NAME.to_string(), false, false, false, false, None),
+        None => {
+            // The root row carries no worktree, but its embedded session is
+            // keyed by the workspace root path, so match it against the same
+            // live / running / waiting / done sets — otherwise a running root
+            // agent never previews live here (it only re-appears once selected).
+            let root = state.root_path();
+            (
+                ROOT_NAME.to_string(),
+                state.is_live(root),
+                state.is_running(root),
+                state.is_waiting(root),
+                state.is_done(root),
+                None,
+            )
+        }
     };
 
     // Header: the name, then either the git status + agent state (a session) or

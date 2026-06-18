@@ -342,6 +342,86 @@ fn add_worktree_branches_from_the_given_base() {
 }
 
 #[test]
+fn init_submodules_is_a_no_op_without_a_gitmodules() {
+    // A repository with no submodules has no `.gitmodules`: the call succeeds
+    // without spawning git.
+    let dir = tempfile::tempdir().unwrap();
+    init_repo(dir.path());
+    init_submodules(dir.path()).unwrap();
+}
+
+#[test]
+fn init_submodules_checks_out_an_uninitialized_submodule() {
+    let tmp = tempfile::tempdir().unwrap();
+
+    // A standalone repo (committing the file `f`) serves as the submodule source.
+    let sub_src = tmp.path().join("sub-src");
+    std::fs::create_dir_all(&sub_src).unwrap();
+    init_repo(&sub_src);
+
+    // The superproject embeds `sub-src` as a submodule at `sub`. Local-path
+    // submodules are blocked by default since git 2.38; `-c` propagates the
+    // allowance to the child `git clone` (via GIT_CONFIG_PARAMETERS), which a
+    // repo-local config setting would not reach.
+    let sup = tmp.path().join("super");
+    std::fs::create_dir_all(&sup).unwrap();
+    init_repo(&sup);
+    run(
+        &sup,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            sub_src.to_str().unwrap(),
+            "sub",
+        ],
+    );
+    run(&sup, &["commit", "-qm", "add submodule"]);
+
+    // Deinit drops the working-tree checkout but keeps `.git/modules/sub`, so the
+    // update re-checks-out from the existing module dir without cloning — the
+    // same shape as a real https submodule that is already fetched, but offline.
+    run(&sup, &["submodule", "deinit", "-f", "sub"]);
+    assert!(sup.join(".gitmodules").is_file());
+    assert!(!sup.join("sub").join("f").is_file());
+
+    // init_submodules checks the submodule back out.
+    init_submodules(&sup).unwrap();
+    assert!(sup.join("sub").join("f").is_file());
+}
+
+#[test]
+fn init_submodules_surfaces_a_failure() {
+    let dir = tempfile::tempdir().unwrap();
+    init_repo(dir.path());
+    run(dir.path(), &["config", "protocol.file.allow", "always"]);
+
+    // A `.gitmodules` plus a gitlink pointing at a path that cannot be cloned
+    // makes `git submodule update --init` fail.
+    std::fs::write(
+        dir.path().join(".gitmodules"),
+        "[submodule \"sub\"]\n\tpath = sub\n\turl = ./missing\n",
+    )
+    .unwrap();
+    let sha = git_capture(dir.path(), &["rev-parse", "HEAD"])
+        .unwrap()
+        .unwrap();
+    run(
+        dir.path(),
+        &[
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            &format!("160000,{sha},sub"),
+        ],
+    );
+
+    let err = init_submodules(dir.path()).unwrap_err();
+    assert!(err.to_string().contains("git submodule update failed"));
+}
+
+#[test]
 fn resolve_base_ref_prefers_remote_then_falls_back_to_local() {
     let (_tmp, work) = repo_with_remote();
     // With a remote, Remote resolves to origin/<default>...

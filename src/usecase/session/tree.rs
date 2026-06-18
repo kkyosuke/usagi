@@ -86,6 +86,7 @@ pub(super) fn build_dir(
             if is_repo_root(&from) {
                 let base = base_ref(&from);
                 git::add_worktree(&from, &to, branch, base.as_deref())?;
+                git::init_submodules(&to)?;
                 worktrees.push(to);
             } else {
                 fs::create_dir_all(&to).context(format!("failed to create {}", to.display()))?;

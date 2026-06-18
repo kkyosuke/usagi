@@ -665,6 +665,45 @@ fn switch_preview_shows_a_live_session_as_its_actual_screen() {
 }
 
 #[test]
+fn switch_preview_shows_the_root_live_session_as_its_screen() {
+    // Regression: the root row (`⌂ root`) hard-coded `live = false`, so a running
+    // root agent previewed its action menu in 切替 instead of its live screen —
+    // it only re-appeared once selected. With the workspace root recorded, the
+    // root row is matched against the live set like any worktree, so its running
+    // agent previews live.
+    let mut state = HomeState::new("usagi", Vec::new(), None);
+    state.set_root_path(PathBuf::from("/repo"));
+    state.set_live([PathBuf::from("/repo")].into());
+    // The event loop snapshots the highlighted live session (the root here)
+    // before painting.
+    state.set_terminal_view(TerminalView::from_rows(
+        vec!["$ claude".to_string(), "How can I help?".to_string()],
+        None,
+    ));
+    state.enter_switch(super::super::state::ReturnMode::Overview);
+    // The cursor starts on the root row, so no navigation is needed.
+    let preview = stripped(&switch_preview(&state, 40, 12));
+    assert!(preview.contains("root"));
+    // The live root agent's actual screen is shown, not the action menu.
+    assert!(preview.contains("$ claude"));
+    assert!(preview.contains("How can I help?"));
+    assert!(!preview.contains("Run a command"));
+}
+
+#[test]
+fn switch_preview_shows_an_idle_root_as_its_action_menu() {
+    // The mirror of the regression above: a root with no live embedded session
+    // still previews the action menu it would open, even with the root path set.
+    let mut state = HomeState::new("usagi", Vec::new(), None);
+    state.set_root_path(PathBuf::from("/repo"));
+    state.enter_switch(super::super::state::ReturnMode::Overview);
+    let preview = stripped(&switch_preview(&state, 40, 12));
+    assert!(preview.contains("workspace root"));
+    assert!(preview.contains("Run a command"));
+    assert!(!preview.contains("live terminal"));
+}
+
+#[test]
 fn switch_preview_shows_an_idle_session_as_its_action_menu() {
     let idle = worktree(Some("feat"), false, BranchStatus::Pushed);
     let mut state = HomeState::new("usagi", vec![idle], None);
@@ -1087,13 +1126,19 @@ fn overlay_top_right_stops_when_the_banner_runs_past_the_last_row() {
 
 #[test]
 fn switch_create_rows_show_the_input_and_an_error() {
-    let rows = switch_create_rows("wip", None, 30);
+    // Caret at the end of the name: the whole name precedes it.
+    let rows = switch_create_rows("wip", 3, None, 30);
     assert_eq!(rows.len(), 1);
     let plain = console::strip_ansi_codes(&rows[0]).into_owned();
     assert!(plain.contains("+ new: wip"));
     assert!(plain.contains(CARET));
 
-    let with_error = switch_create_rows("feature", Some("\"feature\" already exists."), 40);
+    // Caret in the middle: it splits the name (`wi▏p`).
+    let mid = switch_create_rows("wip", 2, None, 30);
+    let plain_mid = console::strip_ansi_codes(&mid[0]).into_owned();
+    assert!(plain_mid.contains(&format!("wi{CARET}p")));
+
+    let with_error = switch_create_rows("feature", 7, Some("\"feature\" already exists."), 40);
     assert_eq!(with_error.len(), 2);
     assert!(console::strip_ansi_codes(&with_error[1]).contains("already exists"));
 }

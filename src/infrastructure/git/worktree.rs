@@ -43,6 +43,34 @@ pub fn add_worktree(repo: &Path, dest: &Path, branch: &str, base: Option<&str>) 
     Ok(())
 }
 
+/// Initialize and check out the git submodules of the worktree at `worktree`.
+///
+/// Runs `git -C <worktree> submodule update --init --recursive` — the same
+/// operation `git clone --recursive` performs — so a freshly created session
+/// worktree in a repository with submodules has them checked out and ready to
+/// work in. A repository without submodules has no tracked `.gitmodules`, so the
+/// work is skipped entirely and no git process is spawned. Output is captured
+/// (not inherited) so it never disturbs an active TUI; on failure the captured
+/// stderr is surfaced. Repo-scoping env vars are stripped for the same reason as
+/// [`add_worktree`].
+pub fn init_submodules(worktree: &Path) -> Result<()> {
+    // No `.gitmodules` means no submodules: skip the subprocess entirely.
+    if !worktree.join(".gitmodules").exists() {
+        return Ok(());
+    }
+    let output = git_command(worktree)
+        .args(["submodule", "update", "--init", "--recursive"])
+        .output()
+        .context("failed to run `git submodule update --init --recursive`")?;
+    if !output.status.success() {
+        bail!(
+            "git submodule update failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
 /// The branch, HEAD, upstream, and dirtiness of a worktree, read together in a
 /// single `git status` invocation (see [`worktree_status`]).
 #[derive(Debug, Clone, PartialEq)]

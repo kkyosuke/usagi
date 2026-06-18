@@ -7,7 +7,7 @@ use console::Term;
 use crate::presentation::tui::screen::{FramePainter, KeyReader};
 use crate::presentation::tui::widgets::dir_picker::{self, Choice, DirSource};
 
-use super::state::{FormState, NewProject};
+use super::state::{Field, FormState, NewProject};
 use super::ui;
 
 /// What the user chose to do on the New Project screen.
@@ -68,15 +68,26 @@ pub fn event_loop(
                 state.focus_prev();
                 notice = None;
             }
-            // Left/Right switch the creation mode from anywhere, so the user
-            // never has to focus the selector first; with only two modes either
-            // arrow simply toggles.
-            Key::ArrowLeft | Key::ArrowRight => {
+            // On the mode selector, ←/→ switch the creation mode; on a text field
+            // they move the caret instead, so a field can be edited mid-string.
+            Key::ArrowLeft if state.focus() == Field::Mode => {
                 state.toggle_mode();
                 notice = None;
             }
+            Key::ArrowRight if state.focus() == Field::Mode => {
+                state.toggle_mode();
+                notice = None;
+            }
+            Key::ArrowLeft => state.cursor_left(),
+            Key::ArrowRight => state.cursor_right(),
+            Key::Home => state.cursor_home(),
+            Key::End => state.cursor_end(),
             Key::Backspace => {
                 state.backspace();
+                notice = None;
+            }
+            Key::Del => {
+                state.delete_forward();
                 notice = None;
             }
             // Space on a directory field opens the browser instead of typing a
@@ -227,19 +238,40 @@ mod tests {
     fn navigation_and_editing_keys_are_handled() {
         let term = Term::stdout();
         let mut reader = ScriptedReader::new(vec![
-            Ok(Key::Tab),       // focus_next
-            Ok(Key::ArrowDown), // focus_next
-            Ok(Key::BackTab),   // focus_prev
-            Ok(Key::ArrowUp),   // focus_prev
-            Ok(Key::Char('x')), // insert
-            Ok(Key::Backspace), // delete
-            Ok(Key::Home),      // ignored (the `_` arm)
-            Ok(Key::Escape),    // back
+            Ok(Key::Tab),        // focus_next (Mode -> Url)
+            Ok(Key::ArrowDown),  // focus_next (Url -> Location)
+            Ok(Key::BackTab),    // focus_prev (Location -> Url)
+            Ok(Key::ArrowUp),    // focus_prev (Url -> Mode)
+            Ok(Key::Tab),        // Mode -> Url, now on a text field
+            Ok(Key::Char('a')),  // insert
+            Ok(Key::Char('b')),  // insert -> "ab"
+            Ok(Key::Home),       // caret to the start
+            Ok(Key::ArrowRight), // caret between 'a' and 'b' (cursor_right)
+            Ok(Key::ArrowLeft),  // caret before 'a' (cursor_left)
+            Ok(Key::Del),        // forward-delete 'a' -> "b"
+            Ok(Key::End),        // caret to the end
+            Ok(Key::Backspace),  // delete -> ""
+            Ok(Key::Insert),     // unhandled: exercises the `_` arm
+            Ok(Key::Escape),     // back
         ]);
         assert!(matches!(
             event_loop(&term, &mut reader, "/base", &FakeDirs).unwrap(),
             Outcome::Back
         ));
+    }
+
+    #[test]
+    fn arrows_on_the_mode_selector_toggle_the_mode() {
+        let term = Term::stdout();
+        // On the Mode selector (the default focus) ←/→ switch the creation mode;
+        // ArrowRight then ArrowLeft toggles to Existing and back to Clone.
+        let mut keys = vec![Ok(Key::ArrowRight), Ok(Key::ArrowLeft), Ok(Key::Tab)];
+        keys.extend(type_keys("https://github.com/owner/repo.git"));
+        keys.push(Ok(Key::Enter));
+        let mut reader = ScriptedReader::new(keys);
+        // Back in Clone mode, the URL submits as a clone.
+        let outcome = event_loop(&term, &mut reader, "/base", &FakeDirs).unwrap();
+        assert!(matches!(&outcome, Outcome::Submitted(NewProject::Clone(_))));
     }
 
     #[test]

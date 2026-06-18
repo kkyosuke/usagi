@@ -23,6 +23,7 @@ use crate::domain::workspace_state::{SessionRecord, WorktreeState};
 use super::command::{CommandInfo, CommandRegistry, CommandScope, Completion, Effect, Hint};
 use super::terminal_tabs::TabStrip;
 use super::terminal_view::TerminalView;
+use crate::presentation::tui::widgets::text_input::TextInput;
 
 mod list;
 mod log;
@@ -92,10 +93,9 @@ impl LoadingIndicator {
 pub struct HomeState {
     list: WorktreeList,
     mode: Mode,
-    input: String,
-    /// Caret position in `input`, as a byte offset on a `char` boundary. Drives
-    /// in-line editing (←/→/Home/End/Del) and where the caret renders.
-    cursor: usize,
+    /// The command line buffer with its caret — drives in-line editing
+    /// (←/→/Home/End/Del) and where the caret renders.
+    input: TextInput,
     history: Vec<String>,
     /// Index into `history` while recalling past commands; `None` when editing
     /// a fresh line.
@@ -116,7 +116,7 @@ pub struct HomeState {
     /// The 在席 (Focus) menu cursor: which Session-scope command is highlighted.
     focus_menu_cursor: usize,
     /// The 在席 (Focus) prompt buffer (the session-scoped command line).
-    focus_prompt: String,
+    focus_prompt: TextInput,
     /// The session-removal modal, when open (the user ran `session remove`
     /// without a name). While set it captures all keys.
     remove_modal: Option<RemoveModal>,
@@ -171,6 +171,12 @@ pub struct HomeState {
     /// (session create / bulk remove / terminal launch). While `Some` the
     /// top-right corner shows the loading rabbit instead of the update notice.
     loading: Option<LoadingIndicator>,
+    /// The workspace root path — the directory the root row (`⌂ root`) operates
+    /// in. The list's worktrees carry their own paths, but the root row has
+    /// none, so this is stored separately to recognise the root's live embedded
+    /// session (keyed by this path in `live` / `running` / …). Injected by
+    /// `mod.rs`; empty until set (tests that never preview the root leave it so).
+    root_path: PathBuf,
 }
 
 impl HomeState {
@@ -188,8 +194,7 @@ impl HomeState {
         Self {
             list: WorktreeList::new(workspace_name, worktrees),
             mode: Mode::Overview,
-            input: String::new(),
-            cursor: 0,
+            input: TextInput::new(),
             history: Vec::new(),
             recall: None,
             log,
@@ -198,7 +203,7 @@ impl HomeState {
             switch_return: ReturnMode::Overview,
             create: None,
             focus_menu_cursor: 0,
-            focus_prompt: String::new(),
+            focus_prompt: TextInput::new(),
             remove_modal: None,
             sessions: Vec::new(),
             terminal_view: None,
@@ -213,7 +218,23 @@ impl HomeState {
             issues: Vec::new(),
             update: None,
             loading: None,
+            root_path: PathBuf::new(),
         }
+    }
+
+    /// Record the workspace root path so the root row (`⌂ root`) can be matched
+    /// against the live / running / waiting / done path sets — its embedded
+    /// session is keyed by this path, exactly as a worktree row is keyed by its
+    /// own. Injected by `mod.rs` at construction.
+    pub fn set_root_path(&mut self, root: impl Into<PathBuf>) {
+        self.root_path = root.into();
+    }
+
+    /// The workspace root path the root row operates in (see [`set_root_path`]).
+    ///
+    /// [`set_root_path`]: Self::set_root_path
+    pub fn root_path(&self) -> &Path {
+        &self.root_path
     }
 
     /// Set which right-pane action surface 在席 (Focus) presents (injected from
@@ -385,20 +406,21 @@ impl HomeState {
     }
 
     pub fn input(&self) -> &str {
-        &self.input
+        self.input.value()
     }
 
     /// The caret position in [`input`](Self::input) as a byte offset, so the
     /// renderer can split the line and draw the caret where editing happens.
     pub fn cursor(&self) -> usize {
-        self.cursor
+        self.input.cursor()
     }
 
     /// The advisory input hint for the current command input (matching commands,
     /// or the usage of the command being given arguments). Computed on demand
     /// for rendering; see [`CommandRegistry::suggest`].
     pub fn hint(&self) -> Hint {
-        self.registry.suggest(&self.input, self.command_scope())
+        self.registry
+            .suggest(self.input.value(), self.command_scope())
     }
 
     pub fn log(&self) -> &[LogLine] {
@@ -658,7 +680,13 @@ impl HomeState {
 
     /// The inline create input's name typed so far, if open.
     pub fn create_input(&self) -> Option<&str> {
-        self.create.as_ref().map(|c| c.input.as_str())
+        self.create.as_ref().map(|c| c.input.value())
+    }
+
+    /// The caret position in the inline create name, if open — so the renderer
+    /// can draw the caret where editing happens.
+    pub fn create_cursor(&self) -> Option<usize> {
+        self.create.as_ref().map(|c| c.input.cursor())
     }
 
     /// The inline create input's current validation error, if any.
@@ -666,21 +694,60 @@ impl HomeState {
         self.create.as_ref().and_then(|c| c.error.as_deref())
     }
 
-    /// Append a character to the inline create name (no-op when not creating),
-    /// re-validating live so the error reflects the new name.
+    /// Insert a character at the caret of the inline create name (no-op when not
+    /// creating), re-validating live so the error reflects the new name.
     pub fn create_push_char(&mut self, c: char) {
         if let Some(create) = self.create.as_mut() {
-            create.input.push(c);
-            create.error = validate_session_name(&create.input, &create.taken);
+            create.input.insert(c);
+            create.error = validate_session_name(create.input.value(), &create.taken);
         }
     }
 
-    /// Delete the last character of the inline create name (no-op when not
-    /// creating), re-validating live.
+    /// Delete the character before the caret of the inline create name (no-op
+    /// when not creating), re-validating live.
     pub fn create_backspace(&mut self) {
         if let Some(create) = self.create.as_mut() {
-            create.input.pop();
-            create.error = validate_session_name(&create.input, &create.taken);
+            create.input.backspace();
+            create.error = validate_session_name(create.input.value(), &create.taken);
+        }
+    }
+
+    /// Delete the character at the caret of the inline create name (the `Del`
+    /// key; no-op when not creating), re-validating live.
+    pub fn create_delete_forward(&mut self) {
+        if let Some(create) = self.create.as_mut() {
+            create.input.delete_forward();
+            create.error = validate_session_name(create.input.value(), &create.taken);
+        }
+    }
+
+    /// Move the inline create caret one character left (no-op when not creating).
+    pub fn create_cursor_left(&mut self) {
+        if let Some(create) = self.create.as_mut() {
+            create.input.move_left();
+        }
+    }
+
+    /// Move the inline create caret one character right (no-op when not creating).
+    pub fn create_cursor_right(&mut self) {
+        if let Some(create) = self.create.as_mut() {
+            create.input.move_right();
+        }
+    }
+
+    /// Move the inline create caret to the start of the name (no-op when not
+    /// creating).
+    pub fn create_cursor_home(&mut self) {
+        if let Some(create) = self.create.as_mut() {
+            create.input.move_home();
+        }
+    }
+
+    /// Move the inline create caret to the end of the name (no-op when not
+    /// creating).
+    pub fn create_cursor_end(&mut self) {
+        if let Some(create) = self.create.as_mut() {
+            create.input.move_end();
         }
     }
 
@@ -697,14 +764,14 @@ impl HomeState {
     /// creating.
     pub fn switch_confirm_create(&mut self) -> Option<String> {
         let create = self.create.as_mut()?;
-        let name = create.input.trim().to_string();
+        let name = create.input.value().trim().to_string();
         // Enter on an empty name is the one case live validation stays quiet
         // about (it does not nag while nothing is typed), so guard it here.
         if name.is_empty() {
             create.error = Some("Name must not be empty.".to_string());
             return None;
         }
-        if let Some(error) = validate_session_name(&create.input, &create.taken) {
+        if let Some(error) = validate_session_name(create.input.value(), &create.taken) {
             create.error = Some(error);
             return None;
         }
@@ -778,17 +845,48 @@ impl HomeState {
 
     /// The 在席 prompt buffer (the session-scoped command line).
     pub fn focus_prompt(&self) -> &str {
-        &self.focus_prompt
+        self.focus_prompt.value()
     }
 
-    /// Append a character to the 在席 prompt.
+    /// The caret position in the 在席 prompt, so the renderer can draw the caret
+    /// where editing happens.
+    pub fn focus_prompt_cursor(&self) -> usize {
+        self.focus_prompt.cursor()
+    }
+
+    /// Insert a character at the caret of the 在席 prompt.
     pub fn focus_prompt_push_char(&mut self, c: char) {
-        self.focus_prompt.push(c);
+        self.focus_prompt.insert(c);
     }
 
-    /// Delete the last character of the 在席 prompt.
+    /// Delete the character before the caret of the 在席 prompt.
     pub fn focus_prompt_backspace(&mut self) {
-        self.focus_prompt.pop();
+        self.focus_prompt.backspace();
+    }
+
+    /// Delete the character at the caret of the 在席 prompt (the `Del` key).
+    pub fn focus_prompt_delete_forward(&mut self) {
+        self.focus_prompt.delete_forward();
+    }
+
+    /// Move the 在席 prompt caret one character left.
+    pub fn focus_prompt_cursor_left(&mut self) {
+        self.focus_prompt.move_left();
+    }
+
+    /// Move the 在席 prompt caret one character right.
+    pub fn focus_prompt_cursor_right(&mut self) {
+        self.focus_prompt.move_right();
+    }
+
+    /// Move the 在席 prompt caret to the start of the line.
+    pub fn focus_prompt_cursor_home(&mut self) {
+        self.focus_prompt.move_home();
+    }
+
+    /// Move the 在席 prompt caret to the end of the line.
+    pub fn focus_prompt_cursor_end(&mut self) {
+        self.focus_prompt.move_end();
     }
 
     /// Tab-complete the 在席 prompt's command word against the Session-scope
@@ -797,15 +895,15 @@ impl HomeState {
     pub fn focus_prompt_complete(&mut self) -> Completion {
         let completion = self
             .registry
-            .complete(&self.focus_prompt, CommandScope::Session);
-        self.focus_prompt = completion.input.clone();
+            .complete(self.focus_prompt.value(), CommandScope::Session);
+        self.focus_prompt.set_value(completion.input.clone());
         completion
     }
 
     /// The advisory hint for the 在席 prompt, computed in the Session scope.
     pub fn focus_prompt_hint(&self) -> Hint {
         self.registry
-            .suggest(&self.focus_prompt, CommandScope::Session)
+            .suggest(self.focus_prompt.value(), CommandScope::Session)
     }
 
     /// Run the 在席 prompt as a Session-scope command: dispatch it, append its
@@ -813,7 +911,7 @@ impl HomeState {
     /// [`Submission`] (so the event loop can act on `OpenTerminal` / `OpenAgent`).
     /// Empty input is a no-op.
     pub fn focus_prompt_submit(&mut self) -> Submission {
-        let entry = self.focus_prompt.trim().to_string();
+        let entry = self.focus_prompt.value().trim().to_string();
         self.focus_prompt.clear();
         if entry.is_empty() {
             return Submission {
@@ -840,74 +938,49 @@ impl HomeState {
 
     /// Insert a typed character at the caret (Overview line), advancing it.
     pub fn push_char(&mut self, c: char) {
-        self.input.insert(self.cursor, c);
-        self.cursor += c.len_utf8();
+        self.input.insert(c);
         self.recall = None;
     }
 
     /// Delete the character before the caret (command mode), moving it back.
     pub fn backspace(&mut self) {
-        if self.cursor == 0 {
-            return;
-        }
-        let prev = self.prev_boundary();
-        self.input.replace_range(prev..self.cursor, "");
-        self.cursor = prev;
+        self.input.backspace();
         self.recall = None;
     }
 
     /// Delete the character at the caret (the `Del`/forward-delete key), leaving
     /// the caret in place.
     pub fn delete_forward(&mut self) {
-        if self.cursor >= self.input.len() {
-            return;
-        }
-        let next = self.next_boundary();
-        self.input.replace_range(self.cursor..next, "");
+        self.input.delete_forward();
         self.recall = None;
     }
 
     /// Move the caret one character left.
     pub fn cursor_left(&mut self) {
-        self.cursor = self.prev_boundary();
+        self.input.move_left();
     }
 
     /// Move the caret one character right.
     pub fn cursor_right(&mut self) {
-        self.cursor = self.next_boundary();
+        self.input.move_right();
     }
 
     /// Move the caret to the start of the line.
     pub fn cursor_home(&mut self) {
-        self.cursor = 0;
+        self.input.move_home();
     }
 
     /// Move the caret to the end of the line.
     pub fn cursor_end(&mut self) {
-        self.cursor = self.input.len();
-    }
-
-    /// Byte offset of the `char` boundary just before the caret (or `0`).
-    fn prev_boundary(&self) -> usize {
-        self.input[..self.cursor]
-            .char_indices()
-            .next_back()
-            .map_or(0, |(i, _)| i)
-    }
-
-    /// Byte offset of the `char` boundary just after the caret (or the end).
-    fn next_boundary(&self) -> usize {
-        self.input[self.cursor..]
-            .chars()
-            .next()
-            .map_or(self.cursor, |c| self.cursor + c.len_utf8())
+        self.input.move_end();
     }
 
     /// Tab-complete the command word, listing candidates when ambiguous.
     pub fn complete(&mut self) {
-        let completion = self.registry.complete(&self.input, self.command_scope());
-        self.input = completion.input;
-        self.cursor = self.input.len();
+        let completion = self
+            .registry
+            .complete(self.input.value(), self.command_scope());
+        self.input.set_value(completion.input);
         if !completion.candidates.is_empty() {
             self.log
                 .push(LogLine::output(completion.candidates.join("  ")));
@@ -926,8 +999,7 @@ impl HomeState {
             Some(i) => i - 1,
         };
         self.recall = Some(index);
-        self.input = self.history[index].clone();
-        self.cursor = self.input.len();
+        self.input.set_value(self.history[index].clone());
     }
 
     /// Recall the next (newer) command, returning to an empty line past the end.
@@ -938,12 +1010,11 @@ impl HomeState {
         };
         if index + 1 < self.history.len() {
             self.recall = Some(index + 1);
-            self.input = self.history[index + 1].clone();
+            self.input.set_value(self.history[index + 1].clone());
         } else {
             self.recall = None;
             self.input.clear();
         }
-        self.cursor = self.input.len();
     }
 
     /// Run the current input as a command: echo it, dispatch it, record it in
@@ -952,9 +1023,8 @@ impl HomeState {
     /// `Quit`) and the recorded command (so it can be persisted). Empty input is
     /// a no-op.
     pub fn submit(&mut self) -> Submission {
-        let entry = self.input.trim().to_string();
+        let entry = self.input.value().trim().to_string();
         self.input.clear();
-        self.cursor = 0;
         self.recall = None;
         if entry.is_empty() {
             return Submission {
