@@ -12,19 +12,19 @@ impl FormState {
     }
 
     fn validate_clone(&self) -> Result<CloneSpec, String> {
-        let url = RepoUrl::parse(&self.url).map_err(|e| e.to_string())?;
-        let directory = self.directory.trim();
+        let url = RepoUrl::parse(self.url.value()).map_err(|e| e.to_string())?;
+        let directory = self.directory.value().trim();
         let directory = if directory.is_empty() {
             url.directory_name()
         } else {
             directory.to_string()
         };
-        let location = self.location.trim();
+        let location = self.location.value().trim();
         if location.is_empty() {
             return Err("choose where to create the project".to_string());
         }
         let location = PathBuf::from(location);
-        let branch = match self.branch.trim() {
+        let branch = match self.branch.value().trim() {
             "" => None,
             b => Some(b.to_string()),
         };
@@ -37,11 +37,11 @@ impl FormState {
     }
 
     fn validate_existing(&self) -> Result<ExistingSpec, String> {
-        let path = self.path.trim();
+        let path = self.path.value().trim();
         if path.is_empty() {
             return Err("choose an existing directory".to_string());
         }
-        let name = match self.name.trim() {
+        let name = match self.name.value().trim() {
             "" => suggest_name(path),
             n => n.to_string(),
         };

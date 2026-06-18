@@ -230,8 +230,14 @@ pub(super) fn switch_key(
                     state.enter_focus(row);
                 }
             }
-            Key::Backspace => state.create_backspace(),
             Key::Escape => state.create_cancel(),
+            Key::Backspace => state.create_backspace(),
+            Key::Del => state.create_delete_forward(),
+            // ←/→/Home/End move the caret so the name can be edited mid-string.
+            Key::ArrowLeft => state.create_cursor_left(),
+            Key::ArrowRight => state.create_cursor_right(),
+            Key::Home => state.create_cursor_home(),
+            Key::End => state.create_cursor_end(),
             Key::Char(c) => state.create_push_char(c),
             _ => {}
         }
@@ -500,6 +506,12 @@ fn focus_prompt_key(
             let _ = state.focus_prompt_complete();
         }
         Key::Backspace => state.focus_prompt_backspace(),
+        Key::Del => state.focus_prompt_delete_forward(),
+        // ←/→/Home/End move the caret so the prompt can be edited mid-string.
+        Key::ArrowLeft => state.focus_prompt_cursor_left(),
+        Key::ArrowRight => state.focus_prompt_cursor_right(),
+        Key::Home => state.focus_prompt_cursor_home(),
+        Key::End => state.focus_prompt_cursor_end(),
         Key::Char(c) => state.focus_prompt_push_char(c),
         _ => {}
     }

@@ -369,15 +369,30 @@ fn install_modal_collects_a_masked_password_and_focuses_the_model_row() {
     config.open_install_modal();
     let modal = config.install_modal().expect("modal opened");
     assert_eq!(modal.password(), "");
-    assert_eq!(modal.masked(), "");
+    // Empty: the masked string is just the caret.
+    assert_eq!(modal.masked("|"), "|");
 
-    // Typing builds the password; it renders only as bullets.
+    // Typing builds the password; it renders only as bullets, with the caret at
+    // the end while typing.
     config.install_modal_push('p');
     config.install_modal_push('w');
     config.install_modal_backspace();
     config.install_modal_push('z');
     assert_eq!(config.install_modal_password().as_deref(), Some("pz"));
-    assert_eq!(config.install_modal().unwrap().masked(), "••");
+    assert_eq!(config.install_modal().unwrap().masked("|"), "••|");
+
+    // The caret can move into the middle and edit there: Home then Del removes
+    // the first character, so "pz" becomes "z".
+    config.install_modal_cursor_home();
+    config.install_modal_delete_forward();
+    assert_eq!(config.install_modal_password().as_deref(), Some("z"));
+    // The caret now sits before the remaining bullet.
+    assert_eq!(config.install_modal().unwrap().masked("|"), "|•");
+    // End parks it after the bullet again; ←/→ step over the single character.
+    config.install_modal_cursor_end();
+    config.install_modal_cursor_left();
+    config.install_modal_cursor_right();
+    assert_eq!(config.install_modal().unwrap().masked("|"), "•|");
 
     // Finishing the install closes the modal, marks it installed, and drops
     // the cursor onto the model row so a model can be chosen.
@@ -389,6 +404,11 @@ fn install_modal_collects_a_masked_password_and_focuses_the_model_row() {
     // Edits to a closed modal are no-ops (and yield no password).
     config.install_modal_push('x');
     config.install_modal_backspace();
+    config.install_modal_delete_forward();
+    config.install_modal_cursor_left();
+    config.install_modal_cursor_right();
+    config.install_modal_cursor_home();
+    config.install_modal_cursor_end();
     assert!(config.install_modal_password().is_none());
 }
 

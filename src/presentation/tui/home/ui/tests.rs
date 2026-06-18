@@ -1037,13 +1037,19 @@ fn overlay_top_right_stops_when_the_banner_runs_past_the_last_row() {
 
 #[test]
 fn switch_create_rows_show_the_input_and_an_error() {
-    let rows = switch_create_rows("wip", None, 30);
+    // Caret at the end of the name: the whole name precedes it.
+    let rows = switch_create_rows("wip", 3, None, 30);
     assert_eq!(rows.len(), 1);
     let plain = console::strip_ansi_codes(&rows[0]).into_owned();
     assert!(plain.contains("+ new: wip"));
     assert!(plain.contains(CARET));
 
-    let with_error = switch_create_rows("feature", Some("\"feature\" already exists."), 40);
+    // Caret in the middle: it splits the name (`wi▏p`).
+    let mid = switch_create_rows("wip", 2, None, 30);
+    let plain_mid = console::strip_ansi_codes(&mid[0]).into_owned();
+    assert!(plain_mid.contains(&format!("wi{CARET}p")));
+
+    let with_error = switch_create_rows("feature", 7, Some("\"feature\" already exists."), 40);
     assert_eq!(with_error.len(), 2);
     assert!(console::strip_ansi_codes(&with_error[1]).contains("already exists"));
 }

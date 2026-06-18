@@ -69,6 +69,76 @@ fn editing_the_location_field() {
 }
 
 #[test]
+fn caret_moves_and_edits_a_field_mid_string() {
+    let mut state = FormState::new();
+    focus_to(&mut state, Field::Branch);
+    type_str(&mut state, "main");
+    assert_eq!(state.focus_cursor(), 4);
+    // Home, insert at the front, then delete-forward and backspace mid-string.
+    state.cursor_home();
+    assert_eq!(state.focus_cursor(), 0);
+    state.insert_char('x'); // "xmain", caret after 'x'
+    assert_eq!(state.branch(), "xmain");
+    state.delete_forward(); // removes 'm' → "xain"
+    assert_eq!(state.branch(), "xain");
+    state.cursor_right(); // between 'a' and 'i'
+    state.backspace(); // removes 'a' → "xin"
+    assert_eq!(state.branch(), "xin");
+    state.cursor_end();
+    assert_eq!(state.focus_cursor(), 3);
+}
+
+#[test]
+fn focus_cursor_reports_the_caret_of_each_text_field() {
+    let mut state = FormState::new();
+    // Clone-mode Directory field.
+    focus_to(&mut state, Field::Directory);
+    type_str(&mut state, "abc");
+    assert_eq!(state.focus_cursor(), 3);
+    state.cursor_left();
+    assert_eq!(state.focus_cursor(), 2);
+    // Existing-mode Name field.
+    state.toggle_mode();
+    focus_to(&mut state, Field::Name);
+    type_str(&mut state, "z");
+    assert_eq!(state.focus_cursor(), 1);
+}
+
+#[test]
+fn caret_editing_is_a_noop_on_the_mode_selector() {
+    let mut state = FormState::new();
+    assert_eq!(state.focus(), Field::Mode);
+    // The mode selector is not a text input: every editing/caret key is inert.
+    state.insert_char('x');
+    state.backspace();
+    state.delete_forward();
+    state.cursor_left();
+    state.cursor_right();
+    state.cursor_home();
+    state.cursor_end();
+    assert_eq!(state.focus_cursor(), 0);
+    assert_eq!(state.focus(), Field::Mode);
+}
+
+#[test]
+fn deleting_forward_into_an_empty_directory_restores_auto_derivation() {
+    let mut state = FormState::new();
+    focus_to(&mut state, Field::Url);
+    type_str(&mut state, "https://github.com/owner/repo");
+    focus_to(&mut state, Field::Directory);
+    // Forward-delete the whole derived name from the front; emptying it re-enables
+    // derivation, so a later URL edit refills it.
+    state.cursor_home();
+    for _ in 0.."repo".len() {
+        state.delete_forward();
+    }
+    assert_eq!(state.directory(), "");
+    focus_to(&mut state, Field::Url);
+    type_str(&mut state, "-y");
+    assert_eq!(state.directory(), "repo-y");
+}
+
+#[test]
 fn focus_cycles_through_clone_fields_including_mode() {
     let mut state = FormState::new();
     assert_eq!(state.focus(), Field::Mode);

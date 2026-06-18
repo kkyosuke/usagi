@@ -4,6 +4,7 @@
 use std::collections::HashSet;
 
 use super::LogLine;
+use crate::presentation::tui::widgets::text_input::TextInput;
 
 /// The inline session-name input shown in the left pane while creating a session
 /// from 切替 (Switch): the name being typed, the existing branch names it is
@@ -13,7 +14,7 @@ use super::LogLine;
 /// `create_input` / `create_error` accessors.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(super) struct CreateInput {
-    pub(super) input: String,
+    pub(super) input: TextInput,
     /// Branch names already taken across the workspace's repositories, captured
     /// when the input opened; the typed name must not duplicate or nest under
     /// any of them.

@@ -418,8 +418,14 @@ pub(super) fn focus_prompt(state: &HomeState, width: usize) -> Vec<String> {
         String::new(),
     ];
     let prompt = style("❯").red().bold();
-    let text = style(state.focus_prompt()).cyan();
-    lines.push(clip_to_width(&format!("{prompt} {text}{CARET}"), width));
+    // Split at the caret so ←/→/Home/End move a visible caret through the prompt.
+    let (before, after) = state.focus_prompt().split_at(state.focus_prompt_cursor());
+    let before = style(before).cyan();
+    let after = style(after).cyan();
+    lines.push(clip_to_width(
+        &format!("{prompt} {before}{CARET}{after}"),
+        width,
+    ));
     lines.push(String::new());
     lines.extend(focus_hint_lines(state.focus_prompt_hint(), width));
     lines

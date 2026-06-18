@@ -1137,10 +1137,15 @@ fn switch_inline_create_makes_and_focuses_the_new_session() {
     let mut keys = typed("session switch");
     keys.push(Ok(Key::Enter)); // -> Switch
     keys.push(Ok(Key::Char('c'))); // begin create
-    keys.extend(typed("wip"));
+    keys.push(Ok(Key::Insert)); // unhandled inside create: the `_` arm
+    keys.extend(typed("Xwip")); // a stray leading 'X' to edit out
+    keys.push(Ok(Key::Home)); // caret to the start
+    keys.push(Ok(Key::Del)); // forward-delete the 'X' -> "wip"
+    keys.push(Ok(Key::End)); // caret to the end
+    keys.push(Ok(Key::ArrowLeft)); // caret before 'p'
+    keys.push(Ok(Key::ArrowRight)); // caret after 'p' (end)
     keys.push(Ok(Key::Backspace)); // "wi"
     keys.push(Ok(Key::Char('p'))); // "wip"
-    keys.push(Ok(Key::Home)); // ignored inside create
     keys.push(Ok(Key::Enter)); // confirm -> Focus
     keys.push(Ok(Key::Escape)); // Focus -> Overview
     keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
@@ -1320,6 +1325,14 @@ fn focus_prompt_edits_completes_and_runs_terminal() {
     let mut keys = typed("session switch feat");
     keys.push(Ok(Key::Enter)); // Focus feat (prompt UI)
     keys.extend(typed("ter"));
+    keys.push(Ok(Key::Insert)); // unhandled in the prompt: the `_` arm
+    keys.push(Ok(Key::Home)); // caret to the start
+    keys.push(Ok(Key::End)); // caret to the end
+    keys.push(Ok(Key::ArrowLeft)); // caret before 'r'
+    keys.push(Ok(Key::Del)); // forward-delete 'r' -> "te"
+    keys.push(Ok(Key::Char('r'))); // "ter" again, caret at end
+    keys.push(Ok(Key::ArrowLeft)); // before 'r'
+    keys.push(Ok(Key::ArrowRight)); // after 'r' (end)
     keys.push(Ok(Key::Backspace)); // "te"
     keys.push(Ok(Key::Tab)); // -> "terminal"
     keys.push(Ok(Key::Enter)); // run terminal (attach)

@@ -1,13 +1,13 @@
 ---
 number: 42
 title: Session 作成等の入力フィールドでカーソル移動できるようにする
-status: todo
+status: done
 priority: high
 labels: []
 dependson: []
 related: []
 created_at: 2026-06-18T12:50:03.425194+00:00
-updated_at: 2026-06-18T12:50:03.425194+00:00
+updated_at: 2026-06-19T00:00:00.000000+00:00
 ---
 
 # 入力フィールドのカーソル移動対応
