@@ -40,7 +40,7 @@ use crate::infrastructure::pty::PtySession;
 use crate::presentation::tui::screen::diff_frame;
 
 use super::state::{HomeState, PaneExit};
-use super::terminal_pool::MonitorHandle;
+use super::terminal_pool::{MonitorHandle, MonitorSnapshot};
 use super::terminal_view::TerminalView;
 use super::ui;
 
@@ -49,10 +49,13 @@ use super::ui;
 /// the pane stays responsive instead of trailing a fixed redraw timer.
 const POLL_SLICE: Duration = Duration::from_millis(4);
 
-/// The longest the loop sits idle before redrawing anyway. Output and key
-/// presses wake it far sooner; this is only a safety net so a terminal resize
-/// is eventually noticed even while nothing else is happening.
-const IDLE_REDRAW: Duration = Duration::from_millis(100);
+/// The longest the loop sits idle before *re-evaluating* — re-reading the
+/// terminal size and the sidebar badges to decide whether anything changed.
+/// Output and key presses wake it far sooner; this only bounds how stale a
+/// background resize or badge change can get while nothing else happens. It no
+/// longer forces a repaint (the loop repaints only on a real change), so it is
+/// paced to the watcher's own poll interval rather than a tight redraw timer.
+const IDLE_REEVAL: Duration = Duration::from_millis(200);
 
 /// How many lines one wheel notch scrolls the embedded terminal's history.
 const WHEEL_LINES: i32 = 3;
@@ -83,9 +86,16 @@ pub fn run(
     result
 }
 
-/// The render/input loop: snapshot the shell screen, draw whatever changed,
-/// then wait for a keystroke or fresh output and go again. Returns the
+/// The render/input loop: when something actually changed — fresh shell output,
+/// a resize, a scroll, or a sidebar badge — snapshot the shell screen and draw
+/// the rows that differ; otherwise wait without repainting. Returns the
 /// [`PaneExit`] reason when the shell exits or the user detaches / switches.
+///
+/// The earlier loop snapshotted and repainted the whole pane on a fixed 100 ms
+/// timer even when nothing had moved, re-reading the entire grid (and contending
+/// for the parser lock) ten times a second while idle. Tracking what was last
+/// applied / drawn lets each pass do only the work a real change demands, so a
+/// quiescent terminal costs almost nothing.
 fn drive(
     term: &Term,
     state: &mut HomeState,
@@ -98,30 +108,63 @@ fn drive(
     // the live screen. The wheel and `Shift`+`PageUp`/`PageDown` move it, typing
     // snaps it back, and `set_scrollback` clamps it to the buffered output.
     let mut scrollback: usize = 0;
+    // What we last told the PTY and last drew, so a pass that finds them
+    // unchanged skips the resize ioctl, the grid snapshot, and the repaint. The
+    // sentinels (a `None` geometry / scrollback, a first-pass flag) force the
+    // opening pass to draw.
+    let mut last_geo: Option<ui::TerminalGeometry> = None;
+    let mut applied_scrollback: Option<usize> = None;
+    let mut last_badges: Option<MonitorSnapshot> = None;
+    let mut drawn_gen = pty.generation();
+    let mut first = true;
     loop {
         let (height, width) = term.size();
         let geo = ui::terminal_geometry(height as usize, width as usize);
-        pty.resize(geo.rows, geo.cols);
-        // Apply the scroll position and re-read what the parser actually allows,
-        // so an over-scroll past the oldest line settles at the top.
-        scrollback = pty.set_scrollback(scrollback);
 
-        // Note the output seen before snapshotting, so the wait below redraws
-        // again if more arrives between here and then.
-        let drawn_gen = pty.generation();
-        let view = TerminalView::from_screen(pty.parser().screen());
-        // The cursor belongs to the live screen, so hide it while the user is
-        // viewing scrolled-back history.
-        let cursor = if scrollback == 0 { view.cursor() } else { None };
-        state.set_terminal_view(view);
-        // Refresh the sidebar's running, waiting, live-agent, and finished
-        // markers so sessions (including this one) show their current state in
-        // the next repaint.
-        state.set_running(monitor.running());
-        state.set_waiting(monitor.waiting());
-        state.set_live(monitor.live());
-        state.set_done(monitor.done());
-        render(term, state, cursor, geo, &mut prev)?;
+        let mut dirty = first;
+        // Inform the PTY of a new size only when it actually changed; the old
+        // loop took the parser lock (and issued a TIOCSWINSZ ioctl) every pass.
+        if last_geo != Some(geo) {
+            pty.resize(geo.rows, geo.cols);
+            last_geo = Some(geo);
+            dirty = true;
+        }
+        // Re-apply the scroll position only when the requested offset changed,
+        // re-reading what the parser allows so an over-scroll past the oldest
+        // line settles at the top.
+        if applied_scrollback != Some(scrollback) {
+            scrollback = pty.set_scrollback(scrollback);
+            applied_scrollback = Some(scrollback);
+            dirty = true;
+        }
+        // Fresh shell output (or the shell exiting) bumps the generation.
+        let gen = pty.generation();
+        if gen != drawn_gen {
+            dirty = true;
+        }
+        // The sidebar's running / waiting / live-agent / finished markers, read
+        // together under a single lock; repaint when they move so sessions
+        // (including this one) keep their current state.
+        let badges = monitor.snapshot();
+        if last_badges.as_ref() != Some(&badges) {
+            dirty = true;
+        }
+
+        if dirty {
+            drawn_gen = gen;
+            let view = TerminalView::from_screen(pty.parser().screen());
+            // The cursor belongs to the live screen, so hide it while the user is
+            // viewing scrolled-back history.
+            let cursor = if scrollback == 0 { view.cursor() } else { None };
+            state.set_terminal_view(view);
+            state.set_running(badges.running.clone());
+            state.set_waiting(badges.waiting.clone());
+            state.set_live(badges.live.clone());
+            state.set_done(badges.done.clone());
+            render(term, state, cursor, geo, &mut prev)?;
+            last_badges = Some(badges);
+            first = false;
+        }
 
         // The shell closed (e.g. the user typed `exit`): leave the pane.
         if !pty.is_alive() {
@@ -129,10 +172,12 @@ fn drive(
         }
 
         match wait(pty, drawn_gen)? {
-            // New output (or the idle timer): loop and redraw it.
+            // New output, or the idle re-evaluation tick (a possible resize /
+            // badge change): loop and let the checks above decide whether to
+            // repaint — an unchanged tick redraws nothing.
             Wake::Output => {}
             // Input is queued: forward every pending key (or scroll the
-            // history), then redraw.
+            // history), then loop and repaint.
             Wake::Input => {
                 if let Some(exit) = pump_input(term, state, pty, geo, &mut scrollback, &mut prev)? {
                     return Ok(exit);
@@ -143,14 +188,16 @@ fn drive(
 }
 
 /// Why a [`wait`] ended: input is queued, or the shell produced output (or the
-/// idle timer elapsed) and the pane should redraw.
+/// idle re-evaluation tick elapsed) and the loop should re-check for changes.
 enum Wake {
     Input,
     Output,
 }
 
 /// Block until a key (or other input event) is queued, the shell's output moves
-/// past `drawn_gen`, or the idle timer elapses — whichever comes first.
+/// past `drawn_gen`, or the idle re-evaluation tick elapses — whichever comes
+/// first. The tick only returns control to the loop so it can notice a resize or
+/// a badge change; the loop repaints only when something actually moved.
 fn wait(pty: &PtySession, drawn_gen: u64) -> Result<Wake> {
     let start = Instant::now();
     loop {
@@ -161,7 +208,7 @@ fn wait(pty: &PtySession, drawn_gen: u64) -> Result<Wake> {
         if event::poll(POLL_SLICE)? {
             return Ok(Wake::Input);
         }
-        if start.elapsed() >= IDLE_REDRAW {
+        if start.elapsed() >= IDLE_REEVAL {
             return Ok(Wake::Output);
         }
     }

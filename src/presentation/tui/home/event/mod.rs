@@ -115,11 +115,13 @@ pub fn event_loop(
     let mut painter = FramePainter::new();
     loop {
         // Mark each background session's agent state — running, waiting for
-        // input, live (ready), and finished — before painting.
-        state.set_running(monitor.running());
-        state.set_waiting(monitor.waiting());
-        state.set_live(monitor.live());
-        state.set_done(monitor.done());
+        // input, live (ready), and finished — before painting, reading every
+        // badge set together under a single lock.
+        let badges = monitor.snapshot();
+        state.set_running(badges.running);
+        state.set_waiting(badges.waiting);
+        state.set_live(badges.live);
+        state.set_done(badges.done);
         // Surface the top-right "update available" notice once the background
         // release check has found a newer version than this build.
         state.set_update(update.status().map(|status| status.latest));
