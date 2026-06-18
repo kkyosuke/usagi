@@ -634,14 +634,19 @@ fn close_typed_in_overview_targets_the_active_session() {
 }
 
 #[test]
-fn focus_close_command_force_removes_the_focused_session() {
+fn focus_close_command_force_removes_the_focused_session_then_enters_switch() {
     // 在席 the `feat` session, then run `close` from the prompt: it removes the
-    // focused session forcefully (like `session remove feat --force`).
+    // focused session forcefully (like `session remove feat --force`). Because the
+    // focused session is now gone, the screen drops into 切替 (Switch) to pick the
+    // next one. We prove the landing mode by pressing `c` — a Switch-only action
+    // that opens the inline create input and consults the branch-name callback;
+    // in 統括 the same key would just type a character and never call it.
     let mut keys = typed("session switch feat");
     keys.push(Ok(Key::Enter)); // -> Focus (feat)
     keys.extend(typed("close"));
-    keys.push(Ok(Key::Enter)); // run `close`
-    keys.push(Ok(Key::Escape)); // Esc inert in Overview; fallback Ctrl-C quits
+    keys.push(Ok(Key::Enter)); // run `close` -> session removed -> 切替 (Switch)
+    keys.push(Ok(Key::Char('c'))); // Switch-only: begin inline create
+    keys.push(Ok(Key::Escape)); // cancel create; reader then runs out -> quit
     let term = Term::stdout();
     let mut reader = ScriptedReader::new(keys);
     let monitor = MonitorHandle::detached();
@@ -650,7 +655,7 @@ fn focus_close_command_force_removes_the_focused_session() {
     let mut removed = Vec::new();
     let mut remove = |name: &str, force: bool| {
         removed.push((name.to_string(), force));
-        // Report a refreshed list so the screen leaves 在席 for 統括.
+        // Report a refreshed list so the screen leaves 在席 for 切替.
         SessionOutcome {
             line: LogLine::output("removed"),
             sessions: Some(Vec::new()),
@@ -660,6 +665,11 @@ fn focus_close_command_force_removes_the_focused_session() {
     let mut open: fn(&mut HomeState, &Path, bool) -> Result<PaneExit> = noop_open;
     let mut config: fn(&Term) -> Result<Option<SessionActionUi>> = noop_config;
     let mut preview: fn(&Path) -> Option<TerminalView> = noop_preview;
+    let mut branches_called = 0;
+    let mut branches = || {
+        branches_called += 1;
+        Vec::new()
+    };
     let outcome = event_loop(
         &term,
         &mut reader,
@@ -670,7 +680,7 @@ fn focus_close_command_force_removes_the_focused_session() {
         &mut persist,
         &mut create,
         &mut remove,
-        &mut (no_branches as fn() -> Vec<String>),
+        &mut branches,
         &mut open,
         &mut config,
         &mut preview,
@@ -678,17 +688,24 @@ fn focus_close_command_force_removes_the_focused_session() {
     .unwrap();
     assert!(matches!(outcome, Outcome::Quit));
     assert_eq!(removed, vec![("feat".to_string(), true)]);
+    assert_eq!(
+        branches_called, 1,
+        "`c` after close began inline create, so the screen is in 切替 (Switch)"
+    );
 }
 
 #[test]
-fn focus_menu_close_force_removes_the_focused_session() {
+fn focus_menu_close_force_removes_the_focused_session_then_enters_switch() {
     // The 在席 menu lists `close` last; ArrowUp from the top wraps to it. Enter
-    // removes the focused session forcefully.
+    // removes the focused session forcefully, then drops into 切替 (Switch) — the
+    // `c` keypress that follows opens the inline create input (a Switch-only
+    // action), proving the landing mode.
     let mut keys = typed("session switch feat");
     keys.push(Ok(Key::Enter)); // -> Focus (feat), menu UI
     keys.push(Ok(Key::ArrowUp)); // terminal -> wrap to `close`
-    keys.push(Ok(Key::Enter)); // run `close`
-    keys.push(Ok(Key::Escape)); // Esc inert in Overview; fallback Ctrl-C quits
+    keys.push(Ok(Key::Enter)); // run `close` -> session removed -> 切替 (Switch)
+    keys.push(Ok(Key::Char('c'))); // Switch-only: begin inline create
+    keys.push(Ok(Key::Escape)); // cancel create; reader then runs out -> quit
     let term = Term::stdout();
     let mut reader = ScriptedReader::new(keys);
     let monitor = MonitorHandle::detached();
@@ -706,6 +723,11 @@ fn focus_menu_close_force_removes_the_focused_session() {
     let mut open: fn(&mut HomeState, &Path, bool) -> Result<PaneExit> = noop_open;
     let mut config: fn(&Term) -> Result<Option<SessionActionUi>> = noop_config;
     let mut preview: fn(&Path) -> Option<TerminalView> = noop_preview;
+    let mut branches_called = 0;
+    let mut branches = || {
+        branches_called += 1;
+        Vec::new()
+    };
     let outcome = event_loop(
         &term,
         &mut reader,
@@ -716,7 +738,7 @@ fn focus_menu_close_force_removes_the_focused_session() {
         &mut persist,
         &mut create,
         &mut remove,
-        &mut (no_branches as fn() -> Vec<String>),
+        &mut branches,
         &mut open,
         &mut config,
         &mut preview,
@@ -724,6 +746,10 @@ fn focus_menu_close_force_removes_the_focused_session() {
     .unwrap();
     assert!(matches!(outcome, Outcome::Quit));
     assert_eq!(removed, vec![("feat".to_string(), true)]);
+    assert_eq!(
+        branches_called, 1,
+        "`c` after close began inline create, so the screen is in 切替 (Switch)"
+    );
 }
 
 // --- session-removal modal --------------------------------------------

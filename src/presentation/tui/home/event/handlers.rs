@@ -376,8 +376,9 @@ pub(super) fn focus_key(
 /// Close the focused session forcefully — the `close` command's effect. Removes
 /// the session like `session remove <name> --force` (discarding any uncommitted
 /// changes) via the `remove_session` callback; on success the session is gone,
-/// so leave 在席 for 統括 (Overview). A failed removal (e.g. the root row, or a
-/// git error) only logs and stays in 在席.
+/// so leave 在席 for 切替 (Switch) to pick the next session (`Esc` backs out to
+/// 統括). A failed removal (e.g. the root row, or a git error) only logs and
+/// stays in 在席.
 fn close_focused_session(
     state: &mut HomeState,
     remove_session: &mut dyn FnMut(&str, bool) -> SessionOutcome,
@@ -389,7 +390,7 @@ fn close_focused_session(
     let removed = outcome.sessions.is_some();
     state.apply_session_outcome(outcome);
     if removed {
-        state.leave_focus();
+        state.enter_switch(ReturnMode::Overview);
     }
 }
 
