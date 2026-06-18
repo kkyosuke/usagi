@@ -95,6 +95,7 @@ pub fn create(workspace_root: &Path, name: &str) -> Result<CreatedSession> {
         fs::create_dir_all(parent).context(format!("failed to create {}", parent.display()))?;
         let base = tree::base_ref(workspace_root);
         git::add_worktree(workspace_root, &dest_root, name, base.as_deref())?;
+        git::init_submodules(&dest_root)?;
         worktrees.push(dest_root.clone());
     } else {
         fs::create_dir_all(&dest_root)

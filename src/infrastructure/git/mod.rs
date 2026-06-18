@@ -21,8 +21,8 @@ pub use branch::{
 };
 pub use repo::{clone, has_uncommitted_changes, is_repository, short_hash};
 pub use worktree::{
-    add_worktree, list_worktrees, primary_worktree, remove_worktree, worktree_status, WorktreeInfo,
-    WorktreeStatus,
+    add_worktree, init_submodules, list_worktrees, primary_worktree, remove_worktree,
+    worktree_status, WorktreeInfo, WorktreeStatus,
 };
 
 /// A `git -C <repo>` command with repo-scoping env vars stripped, for tests.
