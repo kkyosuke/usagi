@@ -331,19 +331,52 @@ fn pump_input(
     Ok(None)
 }
 
-/// Copy `selection`'s text to the user's clipboard via an OSC 52 escape written
-/// to `term` (see [`clipboard`]). A click without a drag selects nothing, so
-/// there is nothing to copy.
+/// Copy `selection`'s text to the user's clipboard by two routes (see
+/// [`clipboard`]): the local system clipboard tool (`pbcopy` etc.), which is the
+/// only one that works on terminals ignoring OSC 52 such as Apple Terminal.app,
+/// and an OSC 52 escape written to `term`, which reaches the user's machine over
+/// SSH. A click without a drag selects nothing, so there is nothing to copy.
 fn copy_selection(term: &Term, pty: &PtySession, selection: Option<&Selection>) -> Result<()> {
     let Some(sel) = selection.filter(|s| !s.is_empty()) else {
         return Ok(());
     };
     let text = sel.extract_text(pty.parser().screen());
+    copy_to_system_clipboard(&text);
     let seq = clipboard::osc52_copy(&text);
     if !seq.is_empty() {
         term.write_str(&seq)?;
     }
     Ok(())
+}
+
+/// Pipe `text` to the first platform clipboard command that runs (see
+/// [`clipboard::system_copy_commands`]). Best-effort: a missing tool or a write
+/// failure is ignored, since the OSC 52 escape still covers terminals that
+/// honour it. stdin is closed (by dropping it) before `wait` so the tool sees
+/// EOF and flushes.
+fn copy_to_system_clipboard(text: &str) {
+    use std::io::Write as _;
+    use std::process::{Command, Stdio};
+    for argv in clipboard::system_copy_commands() {
+        let Some((cmd, rest)) = argv.split_first() else {
+            continue;
+        };
+        let Ok(mut child) = Command::new(cmd)
+            .args(rest)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+        else {
+            continue;
+        };
+        if let Some(mut stdin) = child.stdin.take() {
+            let _ = stdin.write_all(text.as_bytes());
+        }
+        if child.wait().map(|s| s.success()).unwrap_or(false) {
+            return;
+        }
+    }
 }
 
 /// Translate an absolute mouse position (0-based screen `col`/`row`) to a cell

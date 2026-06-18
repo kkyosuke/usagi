@@ -2,29 +2,69 @@
 //!
 //! The embedded terminal pane lets the user drag-select text (see
 //! [`home::terminal_selection`](crate::presentation::tui::home::terminal_selection));
-//! on release the selection is copied here. Rather than link a native clipboard
-//! library, we emit an **OSC 52** escape sequence — `ESC ] 52 ; c ; <base64> BEL`
-//! — which the terminal emulator interprets to set its clipboard. That works the
-//! same locally and over SSH (the bytes travel down the same channel the TUI is
-//! already drawing through), needs no extra dependency, and matches how the rest
-//! of the TUI already speaks to the terminal in raw escapes.
+//! on release (or `Ctrl-C`) the selection is copied here, by two complementary
+//! routes:
 //!
-//! The trade-off is that the terminal must honour OSC 52 (iTerm2, kitty,
-//! WezTerm, and `tmux`/`screen` with clipboard passthrough do; Apple Terminal.app
-//! does not — but it also ignores mouse reporting, so drag-selection never starts
-//! there anyway, and the user falls back to the terminal's own `Shift`+drag).
+//! - **The local system clipboard**, by piping the text to the platform's
+//!   clipboard tool ([`system_copy_commands`] → `pbcopy` / `wl-copy` / `xclip` /
+//!   `clip`). This is what makes copy work on terminals that ignore OSC 52 —
+//!   notably **Apple Terminal.app**, where it is the only route that copies.
+//! - **An OSC 52 escape sequence** ([`osc52_copy`] → `ESC ] 52 ; c ; <base64> ST`),
+//!   which a supporting terminal interprets to set *its* clipboard. This is what
+//!   reaches the user's machine over SSH, where the local tool would only write
+//!   the remote's clipboard. It needs no dependency and rides the channel the TUI
+//!   already draws through.
 //!
-//! Both pieces are pure string transforms, so they are unit-tested here; the
-//! actual write to the terminal happens in the (coverage-excluded) terminal pane.
+//! The escape is terminated with **ST** (`ESC \`) rather than BEL: a terminal
+//! that doesn't implement OSC 52 (again, Terminal.app) silently discards an
+//! ST-terminated string, whereas a trailing BEL rings the bell.
+//!
+//! The string transforms (the OSC sequence, the Base64, the command table) are
+//! pure and unit-tested here; the terminal write and the process spawn happen in
+//! the (coverage-excluded) terminal pane.
 
 /// Build the OSC 52 escape sequence that asks the terminal to copy `text` to the
 /// system clipboard (the `c` selection). Empty text yields an empty string, so
 /// the caller can skip writing anything when there is nothing to copy.
+///
+/// The sequence ends with **ST** (`ESC \`), not BEL: terminals that don't
+/// support OSC 52 (e.g. Apple Terminal.app) discard an ST-terminated string
+/// quietly, while a BEL terminator makes them beep.
 pub fn osc52_copy(text: &str) -> String {
     if text.is_empty() {
         return String::new();
     }
-    format!("\x1b]52;c;{}\x07", base64_encode(text.as_bytes()))
+    format!("\x1b]52;c;{}\x1b\\", base64_encode(text.as_bytes()))
+}
+
+/// The candidate clipboard-write commands for the current platform, in
+/// preference order; each is an argv whose **stdin** receives the text to copy.
+/// The caller tries them in turn and stops at the first that runs. This is the
+/// local-clipboard route used alongside [`osc52_copy`], and the only one that
+/// copies on terminals that ignore OSC 52. An empty slice means the platform is
+/// unrecognised and only the OSC 52 route is available.
+pub fn system_copy_commands() -> &'static [&'static [&'static str]] {
+    #[cfg(target_os = "macos")]
+    {
+        &[&["pbcopy"]]
+    }
+    #[cfg(target_os = "windows")]
+    {
+        &[&["clip"]]
+    }
+    // Linux / BSD: Wayland first, then the two common X11 tools.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        &[
+            &["wl-copy"],
+            &["xclip", "-selection", "clipboard"],
+            &["xsel", "--clipboard", "--input"],
+        ]
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows", unix)))]
+    {
+        &[]
+    }
 }
 
 /// The standard Base64 alphabet (RFC 4648), indexed by 6-bit value.
@@ -91,13 +131,28 @@ mod tests {
     }
 
     #[test]
-    fn osc52_wraps_the_base64_payload_in_the_escape() {
-        assert_eq!(osc52_copy("foo"), "\x1b]52;c;Zm9v\x07");
+    fn osc52_wraps_the_base64_payload_and_ends_with_st() {
+        // The payload is Base64, and the sequence is terminated by ST (`ESC \`)
+        // so terminals without OSC 52 stay quiet instead of beeping.
+        assert_eq!(osc52_copy("foo"), "\x1b]52;c;Zm9v\x1b\\");
     }
 
     #[test]
     fn osc52_of_empty_text_is_empty() {
         // Nothing selected: emit nothing rather than an escape with no payload.
         assert_eq!(osc52_copy(""), "");
+    }
+
+    #[test]
+    fn system_copy_commands_name_a_runnable_tool_for_this_platform() {
+        // Every platform we build for offers at least one command, and each is
+        // a non-empty argv (a binary, then its flags) the caller can spawn.
+        let cmds = system_copy_commands();
+        assert!(!cmds.is_empty());
+        for argv in cmds {
+            assert!(!argv.is_empty());
+        }
+        #[cfg(target_os = "macos")]
+        assert_eq!(cmds, [["pbcopy"]]);
     }
 }
