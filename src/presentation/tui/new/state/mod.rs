@@ -12,6 +12,7 @@
 use std::path::PathBuf;
 
 use crate::domain::repository::RepoUrl;
+use crate::presentation::tui::widgets::text_input::TextInput;
 
 /// Which kind of project the form is creating.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -101,16 +102,16 @@ pub struct FormState {
     focus_index: usize,
 
     // Clone-mode inputs.
-    url: String,
-    location: String,
-    directory: String,
-    branch: String,
+    url: TextInput,
+    location: TextInput,
+    directory: TextInput,
+    branch: TextInput,
     /// Once the user edits the directory by hand we stop auto-deriving it.
     directory_dirty: bool,
 
     // Existing-mode inputs.
-    path: String,
-    name: String,
+    path: TextInput,
+    name: TextInput,
     /// Once the user edits the name by hand we stop auto-deriving it.
     name_dirty: bool,
 }
@@ -125,36 +126,66 @@ impl FormState {
     }
 
     pub fn url(&self) -> &str {
-        &self.url
+        self.url.value()
     }
 
     pub fn location(&self) -> &str {
-        &self.location
+        self.location.value()
     }
 
     pub fn directory(&self) -> &str {
-        &self.directory
+        self.directory.value()
     }
 
     pub fn branch(&self) -> &str {
-        &self.branch
+        self.branch.value()
     }
 
     pub fn path(&self) -> &str {
-        &self.path
+        self.path.value()
     }
 
     pub fn name(&self) -> &str {
-        &self.name
+        self.name.value()
     }
 
     pub fn focus(&self) -> Field {
         self.mode.fields()[self.focus_index]
     }
 
+    /// The caret position (byte offset) within the focused field, so the renderer
+    /// can draw the caret where editing happens. The mode selector is not a text
+    /// input, so it reports `0`.
+    pub fn focus_cursor(&self) -> usize {
+        match self.focus() {
+            Field::Mode => 0,
+            Field::Url => self.url.cursor(),
+            Field::Location => self.location.cursor(),
+            Field::Directory => self.directory.cursor(),
+            Field::Branch => self.branch.cursor(),
+            Field::Path => self.path.cursor(),
+            Field::Name => self.name.cursor(),
+        }
+    }
+
+    /// The [`TextInput`] for `field`, or `None` for the mode selector. Editing
+    /// and caret-movement methods route through this so they share one
+    /// implementation.
+    fn field_mut(&mut self, field: Field) -> Option<&mut TextInput> {
+        match field {
+            Field::Mode => None,
+            Field::Url => Some(&mut self.url),
+            Field::Location => Some(&mut self.location),
+            Field::Directory => Some(&mut self.directory),
+            Field::Branch => Some(&mut self.branch),
+            Field::Path => Some(&mut self.path),
+            Field::Name => Some(&mut self.name),
+        }
+    }
+
     /// Pre-fill the location field (the default place to create the project).
     pub fn set_location(&mut self, value: &str) {
-        self.location = value.to_string();
+        self.location.set_value(value);
     }
 
     /// Whether the focused field holds a directory path that can be picked from
@@ -167,8 +198,8 @@ impl FormState {
     /// starting point. Empty for any non-directory field.
     pub fn directory_field_value(&self) -> &str {
         match self.focus() {
-            Field::Location => &self.location,
-            Field::Path => &self.path,
+            Field::Location => self.location.value(),
+            Field::Path => self.path.value(),
             _ => "",
         }
     }
@@ -178,9 +209,9 @@ impl FormState {
     /// focused field is not a directory.
     pub fn set_directory_field(&mut self, value: &str) {
         match self.focus() {
-            Field::Location => self.location = value.to_string(),
+            Field::Location => self.location.set_value(value),
             Field::Path => {
-                self.path = value.to_string();
+                self.path.set_value(value);
                 self.sync_name();
             }
             _ => {}
@@ -194,67 +225,77 @@ impl FormState {
         self.focus_index = 0;
     }
 
-    /// Append a character to the focused field. No-op when the mode selector is
-    /// focused (it is not a text input).
+    /// Insert a character at the caret of the focused field. No-op when the mode
+    /// selector is focused (it is not a text input).
     pub fn insert_char(&mut self, c: char) {
-        match self.focus() {
-            Field::Mode => {}
-            Field::Url => {
-                self.url.push(c);
-                self.sync_directory();
-            }
-            Field::Location => self.location.push(c),
-            Field::Directory => {
-                self.directory.push(c);
-                self.directory_dirty = true;
-            }
-            Field::Branch => self.branch.push(c),
-            Field::Path => {
-                self.path.push(c);
-                self.sync_name();
-            }
-            Field::Name => {
-                self.name.push(c);
-                self.name_dirty = true;
-            }
+        let field = self.focus();
+        if let Some(input) = self.field_mut(field) {
+            input.insert(c);
+        }
+        self.after_edit(field);
+    }
+
+    /// Delete the character before the caret of the focused field.
+    pub fn backspace(&mut self) {
+        let field = self.focus();
+        if let Some(input) = self.field_mut(field) {
+            input.backspace();
+        }
+        self.after_edit(field);
+    }
+
+    /// Delete the character at the caret of the focused field (the `Del` key).
+    pub fn delete_forward(&mut self) {
+        let field = self.focus();
+        if let Some(input) = self.field_mut(field) {
+            input.delete_forward();
+        }
+        self.after_edit(field);
+    }
+
+    /// Move the caret one character left within the focused field.
+    pub fn cursor_left(&mut self) {
+        let field = self.focus();
+        if let Some(input) = self.field_mut(field) {
+            input.move_left();
         }
     }
 
-    /// Delete the last character of the focused field.
-    pub fn backspace(&mut self) {
-        match self.focus() {
-            Field::Mode => {}
-            Field::Url => {
-                self.url.pop();
-                self.sync_directory();
-            }
-            Field::Location => {
-                self.location.pop();
-            }
-            Field::Directory => {
-                self.directory.pop();
-                // Emptying the field re-enables auto-derivation so a later URL
-                // edit refills it — matching how editors restore the suggestion.
-                // We don't refill immediately, so the user can clear it and type
-                // a custom name without the suggestion fighting their input.
-                if self.directory.is_empty() {
-                    self.directory_dirty = false;
-                }
-            }
-            Field::Branch => {
-                self.branch.pop();
-            }
-            Field::Path => {
-                self.path.pop();
-                self.sync_name();
-            }
-            Field::Name => {
-                self.name.pop();
-                // Mirror the directory field: clearing it restores auto-derivation.
-                if self.name.is_empty() {
-                    self.name_dirty = false;
-                }
-            }
+    /// Move the caret one character right within the focused field.
+    pub fn cursor_right(&mut self) {
+        let field = self.focus();
+        if let Some(input) = self.field_mut(field) {
+            input.move_right();
+        }
+    }
+
+    /// Move the caret to the start of the focused field.
+    pub fn cursor_home(&mut self) {
+        let field = self.focus();
+        if let Some(input) = self.field_mut(field) {
+            input.move_home();
+        }
+    }
+
+    /// Move the caret to the end of the focused field.
+    pub fn cursor_end(&mut self) {
+        let field = self.focus();
+        if let Some(input) = self.field_mut(field) {
+            input.move_end();
+        }
+    }
+
+    /// Re-run a field's auto-derivation after its text changed. The URL re-derives
+    /// the directory; the path re-derives the name; the directory and name track
+    /// whether they have been hand-edited (non-empty ⇒ dirty), so emptying either
+    /// restores auto-derivation — matching how editors restore the suggestion.
+    fn after_edit(&mut self, field: Field) {
+        match field {
+            Field::Url => self.sync_directory(),
+            Field::Directory => self.directory_dirty = !self.directory.is_empty(),
+            Field::Path => self.sync_name(),
+            Field::Name => self.name_dirty = !self.name.is_empty(),
+            _ => {}
         }
     }
 
@@ -273,8 +314,9 @@ impl FormState {
         if self.directory_dirty {
             return;
         }
-        self.directory =
-            crate::domain::repository::suggest_directory(&self.url).unwrap_or_default();
+        let derived =
+            crate::domain::repository::suggest_directory(self.url.value()).unwrap_or_default();
+        self.directory.set_value(derived);
     }
 
     /// Re-derive the workspace name from the path unless the user has edited it.
@@ -282,7 +324,8 @@ impl FormState {
         if self.name_dirty {
             return;
         }
-        self.name = suggest_name(&self.path);
+        let derived = suggest_name(self.path.value());
+        self.name.set_value(derived);
     }
 }
 

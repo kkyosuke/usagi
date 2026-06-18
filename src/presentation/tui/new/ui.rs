@@ -26,8 +26,15 @@ fn header_lines(width: usize) -> Vec<String> {
 }
 
 /// Builds one input row: a `>` cursor for the focused field, the value (or a
-/// dim placeholder when empty), and a caret on the focused field.
-fn input_line(block_pad: &str, value: &str, placeholder: &str, focused: bool) -> String {
+/// dim placeholder when empty), and a caret drawn at `cursor` (a byte offset into
+/// `value`) on the focused field so ←/→/Home/End move a visible caret.
+fn input_line(
+    block_pad: &str,
+    value: &str,
+    cursor: usize,
+    placeholder: &str,
+    focused: bool,
+) -> String {
     let marker = if focused {
         style(">").red().bold().to_string()
     } else {
@@ -42,7 +49,13 @@ fn input_line(block_pad: &str, value: &str, placeholder: &str, focused: bool) ->
             style(placeholder).dim().italic().to_string()
         }
     } else if focused {
-        format!("{}{CARET}", style(value).cyan().bold())
+        // Split at the caret so it can sit mid-value, not only at the end.
+        let (before, after) = value.split_at(cursor.min(value.len()));
+        format!(
+            "{}{CARET}{}",
+            style(before).cyan().bold(),
+            style(after).cyan().bold(),
+        )
     } else {
         style(value).cyan().to_string()
     };
@@ -81,12 +94,13 @@ fn field_lines(
     block_pad: &str,
     label: &str,
     value: &str,
+    cursor: usize,
     placeholder: &str,
     focused: bool,
 ) -> Vec<String> {
     vec![
         format!("{block_pad}{}", style(label).dim()),
-        input_line(block_pad, value, placeholder, focused),
+        input_line(block_pad, value, cursor, placeholder, focused),
     ]
 }
 
@@ -115,10 +129,12 @@ fn footer_lines(width: usize) -> Vec<String> {
 /// Builds the Clone-mode fields (URL, Location, Directory, Branch), each
 /// separated by a blank line.
 fn clone_fields(block_pad: &str, state: &FormState) -> Vec<String> {
+    let caret = state.focus_cursor();
     let mut lines = field_lines(
         block_pad,
         "Repository URL",
         state.url(),
+        caret,
         "https://github.com/owner/repo.git",
         state.focus() == Field::Url,
     );
@@ -127,6 +143,7 @@ fn clone_fields(block_pad: &str, state: &FormState) -> Vec<String> {
         block_pad,
         "Location  (Space to browse)",
         state.location(),
+        caret,
         "where to create the project",
         state.focus() == Field::Location,
     ));
@@ -135,6 +152,7 @@ fn clone_fields(block_pad: &str, state: &FormState) -> Vec<String> {
         block_pad,
         "Directory",
         state.directory(),
+        caret,
         "derived from the URL",
         state.focus() == Field::Directory,
     ));
@@ -143,6 +161,7 @@ fn clone_fields(block_pad: &str, state: &FormState) -> Vec<String> {
         block_pad,
         "Branch (optional)",
         state.branch(),
+        caret,
         "repository default",
         state.focus() == Field::Branch,
     ));
@@ -151,10 +170,12 @@ fn clone_fields(block_pad: &str, state: &FormState) -> Vec<String> {
 
 /// Builds the Existing-mode fields (Directory path, Name).
 fn existing_fields(block_pad: &str, state: &FormState) -> Vec<String> {
+    let caret = state.focus_cursor();
     let mut lines = field_lines(
         block_pad,
         "Directory  (Space to browse)",
         state.path(),
+        caret,
         "/path/to/an/existing/project",
         state.focus() == Field::Path,
     );
@@ -163,6 +184,7 @@ fn existing_fields(block_pad: &str, state: &FormState) -> Vec<String> {
         block_pad,
         "Name",
         state.name(),
+        caret,
         "derived from the directory",
         state.focus() == Field::Name,
     ));
@@ -261,7 +283,7 @@ mod tests {
 
     #[test]
     fn input_line_focused_and_empty_shows_only_caret() {
-        let line = input_line("", "", "placeholder", true);
+        let line = input_line("", "", 0, "placeholder", true);
         assert!(line.contains(CARET));
         assert!(line.contains('>'));
         assert!(!line.contains("placeholder"));
@@ -269,21 +291,30 @@ mod tests {
 
     #[test]
     fn input_line_focused_and_filled_shows_value_and_caret() {
-        let line = input_line("", "repo", "placeholder", true);
+        let line = input_line("", "repo", 4, "placeholder", true);
         assert!(line.contains("repo"));
         assert!(line.contains(CARET));
     }
 
     #[test]
+    fn input_line_focused_draws_the_caret_at_the_cursor() {
+        // A caret in the middle splits the value (`re▏po`), so editing mid-string
+        // is visible.
+        let line = input_line("", "repo", 2, "placeholder", true);
+        let plain = console::strip_ansi_codes(&line).into_owned();
+        assert!(plain.contains(&format!("re{CARET}po")));
+    }
+
+    #[test]
     fn input_line_unfocused_and_empty_shows_placeholder() {
-        let line = input_line("", "", "placeholder", false);
+        let line = input_line("", "", 0, "placeholder", false);
         assert!(line.contains("placeholder"));
         assert!(!line.contains(CARET));
     }
 
     #[test]
     fn input_line_unfocused_and_filled_shows_value() {
-        let line = input_line("", "repo", "placeholder", false);
+        let line = input_line("", "repo", 0, "placeholder", false);
         assert!(line.contains("repo"));
         assert!(!line.contains("placeholder"));
         assert!(!line.contains(CARET));
@@ -291,7 +322,7 @@ mod tests {
 
     #[test]
     fn field_lines_render_label_and_input() {
-        let lines = field_lines("", "Directory", "repo", "ph", false);
+        let lines = field_lines("", "Directory", "repo", 4, "ph", false);
         assert_eq!(lines.len(), 2);
         assert!(lines[0].contains("Directory"));
         assert!(lines[1].contains("repo"));

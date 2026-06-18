@@ -401,7 +401,7 @@ fn restored_history_feeds_recall_and_new_commands_append_to_it() {
     assert_eq!(state.input(), "space");
     state.recall_prev();
     assert_eq!(state.input(), "session");
-    state.input = "man".to_string();
+    state.input.set_value("man");
     state.submit();
     assert_eq!(state.history, vec!["session", "space", "man"]);
 }
@@ -647,10 +647,42 @@ fn create_editing_is_a_noop_when_not_creating() {
     // Nothing open: editing keys are harmless and confirm returns None.
     state.create_push_char('a');
     state.create_backspace();
+    state.create_delete_forward();
+    state.create_cursor_left();
+    state.create_cursor_right();
+    state.create_cursor_home();
+    state.create_cursor_end();
     assert!(!state.is_creating());
     assert!(state.create_input().is_none());
+    assert!(state.create_cursor().is_none());
     assert!(state.create_error().is_none());
     assert!(state.switch_confirm_create().is_none());
+}
+
+#[test]
+fn create_caret_moves_and_edits_mid_name() {
+    let mut state = state();
+    state.enter_switch(ReturnMode::Overview);
+    state.switch_begin_create(Vec::new());
+    for c in "wip".chars() {
+        state.create_push_char(c);
+    }
+    assert_eq!(state.create_cursor(), Some(3));
+    // Home, then insert at the front.
+    state.create_cursor_home();
+    assert_eq!(state.create_cursor(), Some(0));
+    state.create_push_char('x');
+    assert_eq!(state.create_input(), Some("xwip"));
+    assert_eq!(state.create_cursor(), Some(1));
+    // Del removes the character at the caret; Backspace the one before.
+    state.create_delete_forward(); // removes 'w' → "xip"
+    assert_eq!(state.create_input(), Some("xip"));
+    state.create_cursor_right(); // between 'i' and 'p'
+    state.create_backspace(); // removes 'i' → "xp"
+    assert_eq!(state.create_input(), Some("xp"));
+    // End parks the caret past the last character.
+    state.create_cursor_end();
+    assert_eq!(state.create_cursor(), Some(2));
 }
 
 // --- 在席 (Focus) ------------------------------------------------------
@@ -722,6 +754,28 @@ fn focus_prompt_edits_completes_and_hints_in_session_scope() {
     // The hint is computed in the session scope: arguments show usage.
     state.focus_prompt_push_char(' ');
     assert!(matches!(state.focus_prompt_hint(), Hint::Usage { .. }));
+}
+
+#[test]
+fn focus_prompt_caret_moves_and_edits_mid_line() {
+    let mut state = state();
+    state.enter_focus(1);
+    for c in "abc".chars() {
+        state.focus_prompt_push_char(c);
+    }
+    assert_eq!(state.focus_prompt_cursor(), 3);
+    state.focus_prompt_cursor_home();
+    assert_eq!(state.focus_prompt_cursor(), 0);
+    state.focus_prompt_delete_forward(); // removes 'a' → "bc"
+    assert_eq!(state.focus_prompt(), "bc");
+    state.focus_prompt_cursor_right(); // between 'b' and 'c'
+    state.focus_prompt_push_char('x'); // "bxc"
+    assert_eq!(state.focus_prompt(), "bxc");
+    state.focus_prompt_cursor_left();
+    state.focus_prompt_backspace(); // removes 'b' → "xc"
+    assert_eq!(state.focus_prompt(), "xc");
+    state.focus_prompt_cursor_end();
+    assert_eq!(state.focus_prompt_cursor(), 2);
 }
 
 #[test]
