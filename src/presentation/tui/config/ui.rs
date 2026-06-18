@@ -10,8 +10,11 @@ const SAVE_LABEL: &str = "[ Save ]";
 /// Fixed width of the settings block; the whole block is centred in the terminal.
 const BLOCK_WIDTH: usize = 52;
 
-/// Inner width of the local-LLM install / progress modal box.
-const MODAL_INNER_WIDTH: usize = 40;
+/// Inner width of the local-LLM install / progress modal box. Wide enough for
+/// the longest body line ("ローカル LLM (ollama) をインストールします" = 42
+/// columns) so it fits without truncation; `render_modal` still clamps this to
+/// the terminal and clips any line that overruns it on a narrow screen.
+const MODAL_INNER_WIDTH: usize = 42;
 
 /// Caret glyph drawn at the editing position in the sudo-password field.
 const CARET: &str = "▏";
