@@ -9,6 +9,7 @@
 pub mod command;
 pub mod event;
 pub mod state;
+pub mod terminal_link;
 pub mod terminal_pane;
 pub mod terminal_pool;
 pub mod terminal_selection;
