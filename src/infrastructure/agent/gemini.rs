@@ -40,6 +40,10 @@ impl Agent for GeminiAgent {
         // Gemini has no resume notion usagi drives, so it always launches fresh.
         false
     }
+
+    fn forget_session(&self, _dir: &Path) {
+        // usagi keeps no Gemini conversation store, so there is nothing to clear.
+    }
 }
 
 #[cfg(test)]
@@ -69,5 +73,7 @@ mod tests {
             "gemini"
         );
         assert!(!agent.has_resumable_session(std::path::Path::new("/any/worktree")));
+        // Forgetting a session is a no-op for Gemini (no conversation store).
+        agent.forget_session(std::path::Path::new("/any/worktree"));
     }
 }
