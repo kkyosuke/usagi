@@ -1,7 +1,7 @@
 ---
-number: 39
+number: 52
 title: ターミナル画面でテキストをコピーできるようにする
-status: todo
+status: done
 priority: high
 labels: []
 dependson: []

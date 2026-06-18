@@ -1,7 +1,7 @@
 ---
-number: 37
+number: 50
 title: Session の git submodule 対応
-status: todo
+status: done
 priority: high
 labels: []
 dependson: []

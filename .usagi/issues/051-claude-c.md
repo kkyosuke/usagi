@@ -1,7 +1,7 @@
 ---
-number: 38
+number: 51
 title: claude -c 相当の前回セッション再開（継続実行）に対応する
-status: todo
+status: done
 priority: high
 labels: []
 dependson: []
