@@ -95,16 +95,16 @@ impl IssueStore {
 
     /// The highest issue number currently stored, or 0 if there are none.
     ///
-    /// Reads the metadata summaries (the `index.json` cache, rebuilt only when
-    /// missing) rather than parsing every markdown body, since only the numbers
-    /// are needed here.
+    /// Reads the markdown files directly (the source of truth) instead of the
+    /// `index.json` cache. Numbering is correctness-critical: a new issue is
+    /// assigned `max_number + 1`, and [`write`](Self::write) deletes any file
+    /// already backing that number. The cache can lag behind the files whenever
+    /// issues are added, removed, or restored outside usagi (e.g. via `git pull`
+    /// or a branch switch), so trusting it here could hand out a number that an
+    /// existing file already uses — silently destroying that file. Parsing the
+    /// files on this rare path is the safe trade-off.
     pub fn max_number(&self) -> Result<u32> {
-        Ok(self
-            .summaries()?
-            .iter()
-            .map(|s| s.number)
-            .max()
-            .unwrap_or(0))
+        Ok(self.scan()?.iter().map(|i| i.number).max().unwrap_or(0))
     }
 
     /// Read a single issue by number, or `None` if it does not exist.
@@ -437,6 +437,51 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("failed to read"));
+    }
+
+    #[test]
+    fn max_number_reflects_files_added_outside_usagi() {
+        // A stale index must not make `max_number` undercount. Regression test:
+        // a markdown file added straight to disk (e.g. pulled from git) was
+        // invisible to `max_number`, so `create` reused its number and `write`
+        // deleted the existing file.
+        let tmp = tempfile::tempdir().unwrap();
+        let store = IssueStore::new(tmp.path());
+        // Seed the store so index.json exists listing only issue #1.
+        store.write(&issue(1, "One")).unwrap();
+        // Issue #2 appears on disk without going through the store, leaving the
+        // index stale (it still lists only #1).
+        fs::write(
+            store.dir().join("002-two.md"),
+            issue(2, "Two").to_markdown(),
+        )
+        .unwrap();
+
+        // The number must come from the files, not the stale cache.
+        assert_eq!(store.max_number().unwrap(), 2);
+    }
+
+    #[test]
+    fn creating_the_next_issue_does_not_clobber_a_file_missing_from_the_index() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = IssueStore::new(tmp.path());
+        store.write(&issue(1, "One")).unwrap();
+        // An existing issue #2 the stale index doesn't know about.
+        fs::write(
+            store.dir().join("002-two.md"),
+            issue(2, "Two").to_markdown(),
+        )
+        .unwrap();
+
+        // Emulate `create`: the next number is max + 1, then the issue is
+        // written.
+        let next = store.max_number().unwrap() + 1;
+        store.write(&issue(next, "Three")).unwrap();
+
+        // #2 survives and all three issues are present.
+        assert_eq!(next, 3);
+        assert!(store.dir().join("002-two.md").exists());
+        assert_eq!(store.scan().unwrap().len(), 3);
     }
 
     #[test]
