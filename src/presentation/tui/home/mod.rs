@@ -69,6 +69,10 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
         },
     };
     let mut state = HomeState::new(workspace.name.clone(), Vec::new(), notice);
+    // The root row (`⌂ root`) operates in the workspace root; record its path so
+    // the 切替 preview can recognise the root's live embedded session (keyed by
+    // this path) and show its terminal, mirroring how worktree rows are matched.
+    state.set_root_path(workspace.path.clone());
     state.restore_sessions(sessions);
 
     // Load the workspace's task issues so the `issue` command can list / graph /

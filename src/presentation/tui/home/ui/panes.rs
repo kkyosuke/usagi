@@ -482,7 +482,21 @@ pub(super) fn switch_preview(state: &HomeState, width: usize, rows: usize) -> Ve
             state.is_done(&w.path),
             Some(w.status),
         ),
-        None => (ROOT_NAME.to_string(), false, false, false, false, None),
+        None => {
+            // The root row carries no worktree, but its embedded session is
+            // keyed by the workspace root path, so match it against the same
+            // live / running / waiting / done sets — otherwise a running root
+            // agent never previews live here (it only re-appears once selected).
+            let root = state.root_path();
+            (
+                ROOT_NAME.to_string(),
+                state.is_live(root),
+                state.is_running(root),
+                state.is_waiting(root),
+                state.is_done(root),
+                None,
+            )
+        }
     };
 
     // Header: the name, then either the git status + agent state (a session) or
