@@ -144,13 +144,12 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
         .unwrap_or_else(|| "usagi".to_string());
 
     // The agent adapter `:agent` drives, picked from the configured CLI — the
-    // single source of the launch command it builds below.
+    // single source of the launch command built per worktree below.
     let agent = crate::infrastructure::agent::agent_for(settings.agent_cli);
 
-    // The command line `:agent` sends to the shell: the agent renders usagi's
-    // wiring policy (MCP servers + system prompt + lifecycle hooks) into its own
-    // invocation.
-    let agent_command = agent.launch_command(&settings.agent_wiring(&usagi_bin));
+    // usagi's wiring policy (resolved usagi binary + local LLM model) the agent
+    // renders into its own invocation; built once and reused for every launch.
+    let agent_wiring = settings.agent_wiring(&usagi_bin);
 
     // Whether to surface desktop notifications when a background session starts
     // waiting for input or finishes. Opt-out: on unless the user disabled it.
@@ -240,37 +239,46 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
     // session is declared to the monitor (so it is never flagged as waiting) and
     // cleared again on detach / close.
     let terminal_root = workspace.path.clone();
-    let mut open_terminal = |home: &mut HomeState, dir: &Path, agent: bool| -> Result<PaneExit> {
-        let initial = agent.then_some(agent_command.as_str());
-        let label = home
-            .list()
-            .worktrees()
-            .iter()
-            .find(|w| w.path.as_path() == dir)
-            .map(state::worktree_name)
-            .map(str::to_string)
-            .unwrap_or_else(|| {
-                dir.file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| dir.display().to_string())
+    let mut open_terminal =
+        |home: &mut HomeState, dir: &Path, run_agent: bool| -> Result<PaneExit> {
+            // Build the agent command for this worktree on demand: when it already
+            // has a Claude conversation, launch with `--continue` so `:agent` resumes
+            // where it left off; otherwise it starts fresh. The launch command is only
+            // sent on a fresh spawn (re-attaching to a live shell reuses it as-is).
+            let agent_command = run_agent.then(|| {
+                let resume = agent.has_resumable_session(dir);
+                agent.launch_command(&agent_wiring, resume)
             });
-        let mut pool = pool.borrow_mut();
-        let handle = pool.monitor();
-        let pty = pool.attach_or_spawn(term, dir, initial, &label)?;
-        handle.set_attached(Some(dir.to_path_buf()));
-        let result = terminal_pane::run(term, home, pty, &handle);
-        // Leaving the pane (Ctrl-O → 切替, the shell closing, or an error) means
-        // nothing is attached any more; the shell itself stays alive in the pool.
-        handle.set_attached(None);
-        // The user may have committed / pushed / merged while in the pane, so
-        // re-sync the worktree statuses now that they have left it — keeping the
-        // cursor where it is. Best-effort: a sync failure just leaves the
-        // last-known statuses in place.
-        if let Some(sessions) = reload_sessions(&terminal_root) {
-            home.refresh_sessions(sessions);
-        }
-        result
-    };
+            let initial = agent_command.as_deref();
+            let label = home
+                .list()
+                .worktrees()
+                .iter()
+                .find(|w| w.path.as_path() == dir)
+                .map(state::worktree_name)
+                .map(str::to_string)
+                .unwrap_or_else(|| {
+                    dir.file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| dir.display().to_string())
+                });
+            let mut pool = pool.borrow_mut();
+            let handle = pool.monitor();
+            let pty = pool.attach_or_spawn(term, dir, initial, &label)?;
+            handle.set_attached(Some(dir.to_path_buf()));
+            let result = terminal_pane::run(term, home, pty, &handle);
+            // Leaving the pane (Ctrl-O → 切替, the shell closing, or an error) means
+            // nothing is attached any more; the shell itself stays alive in the pool.
+            handle.set_attached(None);
+            // The user may have committed / pushed / merged while in the pane, so
+            // re-sync the worktree statuses now that they have left it — keeping the
+            // cursor where it is. Best-effort: a sync failure just leaves the
+            // last-known statuses in place.
+            if let Some(sessions) = reload_sessions(&terminal_root) {
+                home.refresh_sessions(sessions);
+            }
+            result
+        };
 
     // Snapshot the selected session's live terminal for the sidebar's right-pane
     // preview (the tab-like view), or `None` when it has no running shell/agent.

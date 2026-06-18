@@ -86,6 +86,11 @@ issue が 1 件も無いときは「No issues yet.」を 1 行だけログに出
 Agent CLI ごとの組み込み方法（Claude は `--mcp-config` / `--append-system-prompt`、Gemini は現状素のまま）は
 [3.4 ローカル LLM MCP サーバ](04-llm-mcp.md#起動と登録)を参照してください。
 
+対象 worktree に前回の Claude 会話が残っている場合は、`claude --continue` を付けて**前回セッションの続きから**起動します
+（中断・離席後も文脈を引き継いで再開できます）。過去の会話が無ければ通常起動になります。判定は worktree ごとに行い、
+`--continue` は埋め込みシェルを**新規に起動するときだけ**付与されます（裏で動き続けるシェルへ再アタッチする場合は再起動しないため対象外）。
+Gemini には継続フラグが無いため常に通常起動です。
+
 入力待ちの検知・`◆ waiting` マーカー・デスクトップ通知の挙動は
 [design/05-home.md](../design/05-home.md#使用中-agent-の表示入力待ちの検知と通知) を参照してください。
 
