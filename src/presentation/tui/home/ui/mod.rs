@@ -17,6 +17,8 @@
 mod chrome;
 mod panes;
 
+use unicode_width::UnicodeWidthChar;
+
 use crate::presentation::tui::widgets;
 
 use chrome::{
@@ -118,6 +120,13 @@ const RESULTS_BAND: usize = 4;
 
 /// Shortens `text` to at most `max` display columns, appending an ellipsis when
 /// it has to cut (the head of the text is the most informative part).
+///
+/// A single forward pass accumulates display width and copies characters until
+/// the next visible one would overflow — O(n), not the O(n²) of re-measuring a
+/// growing clone each step. ANSI escape sequences (the SGR colours an embedded
+/// terminal row or a styled log line carries) have zero display width and are
+/// copied verbatim, matching [`console::measure_text_width`], so the clipped
+/// text keeps its colours and never counts an escape against the budget.
 fn clip_to_width(text: &str, max: usize) -> String {
     if console::measure_text_width(text) <= max {
         return text.to_string();
@@ -125,19 +134,40 @@ fn clip_to_width(text: &str, max: usize) -> String {
     if max == 0 {
         return String::new();
     }
-    let mut out = String::new();
-    for ch in text.chars() {
-        let mut candidate = out.clone();
-        candidate.push(ch);
-        // Reserve one column for the ellipsis.
-        if console::measure_text_width(&candidate) > max - 1 {
+    // Reserve one column for the ellipsis.
+    let budget = max - 1;
+    let mut out = String::with_capacity(text.len());
+    let mut width = 0usize;
+    let mut chars = text.chars();
+    while let Some(ch) = chars.next() {
+        if ch == ESC {
+            // Copy the whole escape sequence (zero display width) so the colour
+            // it selects survives the clip. The rows and styled log lines clipped
+            // here carry CSI/SGR sequences — `ESC [ … final` — so copy the `[`
+            // introducer and parameter bytes through to (and including) the final
+            // byte (`0x40..=0x7e`, excluding the `[` introducer itself).
+            out.push(ch);
+            for c in chars.by_ref() {
+                out.push(c);
+                if ('\u{40}'..='\u{7e}').contains(&c) && c != '[' {
+                    break;
+                }
+            }
+            continue;
+        }
+        let w = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if width + w > budget {
             break;
         }
-        out = candidate;
+        width += w;
+        out.push(ch);
     }
     out.push('…');
     out
 }
+
+/// The escape (ESC, `0x1b`) that introduces an ANSI control sequence.
+const ESC: char = '\u{1b}';
 
 /// Right-pads `content` with spaces to fill `width` display columns. Content
 /// already at least that wide is returned unchanged.

@@ -74,6 +74,23 @@ pub struct MonitorHandle {
     shared: Arc<Mutex<Shared>>,
 }
 
+/// Every session-badge set the sidebar draws, read together under one lock by
+/// [`MonitorHandle::snapshot`]. Comparing two snapshots tells a render loop
+/// whether the badges changed since its last paint, so an idle pane can skip the
+/// repaint entirely.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MonitorSnapshot {
+    /// Worktree paths whose agent is actively working a turn.
+    pub running: HashSet<PathBuf>,
+    /// Worktree paths currently waiting for the user.
+    pub waiting: HashSet<PathBuf>,
+    /// Worktree paths whose agent has finished (a turn completed or it exited).
+    pub done: HashSet<PathBuf>,
+    /// Worktree paths with a live embedded session — a shell, and any agent CLI
+    /// inside it, still alive whether attached or left running in the background.
+    pub live: HashSet<PathBuf>,
+}
+
 impl MonitorHandle {
     /// A handle backed by empty state and no watcher — for screens (and tests)
     /// that render without any live sessions.
@@ -103,34 +120,26 @@ impl MonitorHandle {
         }
     }
 
-    /// A snapshot of the worktree paths whose agent is actively working a turn.
-    pub fn running(&self) -> HashSet<PathBuf> {
-        self.lock().monitor.running().clone()
-    }
-
-    /// A snapshot of the worktree paths currently waiting for the user.
-    pub fn waiting(&self) -> HashSet<PathBuf> {
-        self.lock().monitor.waiting().clone()
-    }
-
-    /// A snapshot of the worktree paths whose agent has finished (a turn
-    /// completed or it exited).
-    pub fn done(&self) -> HashSet<PathBuf> {
-        self.lock().monitor.done().clone()
-    }
-
-    /// A snapshot of the worktree paths with a live (running) embedded session:
-    /// a shell — and any agent CLI inside it — is still alive, whether attached
-    /// or left running in the background. The render loops read this to mark
-    /// sessions that have an agent in use.
-    pub fn live(&self) -> HashSet<PathBuf> {
+    /// Read every session-badge set the sidebar needs for one repaint under a
+    /// single lock, instead of locking once per set. The render loops took four
+    /// separate locks (`running`/`waiting`/`done`/`live`) each frame, contending
+    /// with the watcher thread that holds the same mutex; one lock per repaint
+    /// removes that. The returned [`MonitorSnapshot`] is comparable, so a caller
+    /// can also skip repainting when the badges have not changed.
+    pub fn snapshot(&self) -> MonitorSnapshot {
         let shared = self.lock();
-        shared
+        let live = shared
             .sessions
             .iter()
             .filter(|(_, w)| w.alive.load(Ordering::SeqCst))
             .map(|(path, _)| path.clone())
-            .collect()
+            .collect();
+        MonitorSnapshot {
+            running: shared.monitor.running().clone(),
+            waiting: shared.monitor.waiting().clone(),
+            done: shared.monitor.done().clone(),
+            live,
+        }
     }
 
     /// Declare the foreground (attached) session, or clear it with `None`. The

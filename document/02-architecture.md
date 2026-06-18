@@ -155,7 +155,7 @@ src/
 | 並列処理 | `rayon` | issue 一覧読み込みなどの並列化 |
 | シリアライズ | `serde` / `serde_json` | JSON 永続化（`serde_yaml` は不採用） |
 | 日時 | `chrono` | タイムスタンプ |
-| 補助 | `anyhow` / `dirs` / `shell-words` / `libc` | エラー処理・データディレクトリ解決・コマンド分割・端末制御 |
+| 補助 | `anyhow` / `dirs` / `shell-words` / `libc` / `unicode-width` | エラー処理・データディレクトリ解決・コマンド分割・端末制御・表示幅計算（行クリップ） |
 
 ## テスト構成
 

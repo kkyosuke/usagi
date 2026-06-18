@@ -88,6 +88,38 @@ fn clip_to_width_with_zero_budget_is_empty() {
 }
 
 #[test]
+fn clip_to_width_counts_wide_glyphs_as_two_columns() {
+    // Each full-width character is two display columns, so a 5-column budget fits
+    // two of them plus the ellipsis (2 + 2 + 1).
+    let clipped = clip_to_width("あいうえお", 5);
+    assert_eq!(console::measure_text_width(&clipped), 5);
+    assert_eq!(clipped, "あい…");
+}
+
+#[test]
+fn clip_to_width_keeps_ansi_escapes_without_counting_them() {
+    // A red-coloured "hello" (literal SGR escapes, since `console::style` emits
+    // none without a TTY) carries sequences of zero display width: the clip
+    // measures only the visible text and copies the escapes verbatim, so the
+    // result keeps the colour, stays exactly the budget wide, and keeps "he" —
+    // the escapes never eat into the three-column budget.
+    let styled = "\x1b[31mhello\x1b[0m";
+    let clipped = clip_to_width(styled, 3);
+    assert_eq!(console::measure_text_width(&clipped), 3);
+    assert!(clipped.starts_with("\x1b[31m"));
+    assert!(clipped.contains("he"));
+    assert!(clipped.ends_with('…'));
+}
+
+#[test]
+fn clip_to_width_leaves_styled_text_within_budget_untouched() {
+    // Escapes do not count toward the width, so a short styled string fits the
+    // budget and is returned whole (the early `measure_text_width` path).
+    let styled = "\x1b[32mok\x1b[0m";
+    assert_eq!(clip_to_width(styled, 5), styled);
+}
+
+#[test]
 fn pad_to_width_fills_short_content() {
     assert_eq!(pad_to_width("ab".to_string(), 5), "ab   ");
 }
