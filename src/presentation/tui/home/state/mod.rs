@@ -166,6 +166,12 @@ pub struct HomeState {
     /// (session create / bulk remove / terminal launch). While `Some` the
     /// top-right corner shows the loading rabbit instead of the update notice.
     loading: Option<LoadingIndicator>,
+    /// The workspace root path — the directory the root row (`⌂ root`) operates
+    /// in. The list's worktrees carry their own paths, but the root row has
+    /// none, so this is stored separately to recognise the root's live embedded
+    /// session (keyed by this path in `live` / `running` / …). Injected by
+    /// `mod.rs`; empty until set (tests that never preview the root leave it so).
+    root_path: PathBuf,
 }
 
 impl HomeState {
@@ -207,7 +213,23 @@ impl HomeState {
             issues: Vec::new(),
             update: None,
             loading: None,
+            root_path: PathBuf::new(),
         }
+    }
+
+    /// Record the workspace root path so the root row (`⌂ root`) can be matched
+    /// against the live / running / waiting / done path sets — its embedded
+    /// session is keyed by this path, exactly as a worktree row is keyed by its
+    /// own. Injected by `mod.rs` at construction.
+    pub fn set_root_path(&mut self, root: impl Into<PathBuf>) {
+        self.root_path = root.into();
+    }
+
+    /// The workspace root path the root row operates in (see [`set_root_path`]).
+    ///
+    /// [`set_root_path`]: Self::set_root_path
+    pub fn root_path(&self) -> &Path {
+        &self.root_path
     }
 
     /// Set which right-pane action surface 在席 (Focus) presents (injected from

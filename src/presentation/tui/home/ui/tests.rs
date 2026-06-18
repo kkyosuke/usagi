@@ -665,6 +665,45 @@ fn switch_preview_shows_a_live_session_as_its_actual_screen() {
 }
 
 #[test]
+fn switch_preview_shows_the_root_live_session_as_its_screen() {
+    // Regression: the root row (`⌂ root`) hard-coded `live = false`, so a running
+    // root agent previewed its action menu in 切替 instead of its live screen —
+    // it only re-appeared once selected. With the workspace root recorded, the
+    // root row is matched against the live set like any worktree, so its running
+    // agent previews live.
+    let mut state = HomeState::new("usagi", Vec::new(), None);
+    state.set_root_path(PathBuf::from("/repo"));
+    state.set_live([PathBuf::from("/repo")].into());
+    // The event loop snapshots the highlighted live session (the root here)
+    // before painting.
+    state.set_terminal_view(TerminalView::from_rows(
+        vec!["$ claude".to_string(), "How can I help?".to_string()],
+        None,
+    ));
+    state.enter_switch(super::super::state::ReturnMode::Overview);
+    // The cursor starts on the root row, so no navigation is needed.
+    let preview = stripped(&switch_preview(&state, 40, 12));
+    assert!(preview.contains("root"));
+    // The live root agent's actual screen is shown, not the action menu.
+    assert!(preview.contains("$ claude"));
+    assert!(preview.contains("How can I help?"));
+    assert!(!preview.contains("Run a command"));
+}
+
+#[test]
+fn switch_preview_shows_an_idle_root_as_its_action_menu() {
+    // The mirror of the regression above: a root with no live embedded session
+    // still previews the action menu it would open, even with the root path set.
+    let mut state = HomeState::new("usagi", Vec::new(), None);
+    state.set_root_path(PathBuf::from("/repo"));
+    state.enter_switch(super::super::state::ReturnMode::Overview);
+    let preview = stripped(&switch_preview(&state, 40, 12));
+    assert!(preview.contains("workspace root"));
+    assert!(preview.contains("Run a command"));
+    assert!(!preview.contains("live terminal"));
+}
+
+#[test]
 fn switch_preview_shows_an_idle_session_as_its_action_menu() {
     let idle = worktree(Some("feat"), false, BranchStatus::Pushed);
     let mut state = HomeState::new("usagi", vec![idle], None);
