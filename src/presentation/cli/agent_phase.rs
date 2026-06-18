@@ -47,25 +47,28 @@ impl From<Phase> for AgentPhase {
 /// to the process's current directory when stdin carries no usable `cwd`.
 ///
 /// One exception keeps a busy session from being shown idle: the `SessionStart`
-/// hook normally records `ready`, but `SessionStart` also fires after the
-/// context is compacted (`source: "compact"`), which auto-compaction can do
-/// **mid-turn** — the agent keeps working afterwards with no fresh
-/// `UserPromptSubmit` to put it back to `running`. Recording `ready` then would
-/// strand the session showing ready (`☾`) while it works, until its next `Stop`.
-/// So a compaction-sourced `ready` records nothing, preserving whatever phase the
-/// session was already in (running stays running; an idle session stays idle).
+/// hook normally records `ready`, but `SessionStart` also fires **mid-turn**
+/// after a context compaction — the agent keeps working afterwards with no fresh
+/// `UserPromptSubmit` to put it back to `running`, so recording `ready` then
+/// would strand the session showing ready (`☾`) while it works, until its next
+/// `Stop`. [`agent_state_store::ready_overwrite_allowed`] decides whether this
+/// `ready` is a genuine idle start (recorded) or a mid-turn restart (skipped,
+/// preserving whatever phase the session was already in) — keyed off both the
+/// hook `source` and the phase currently recorded for the worktree.
 pub fn run(phase: Phase) -> Result<()> {
     let mut raw = String::new();
     let _ = std::io::stdin().read_to_string(&mut raw);
-    if matches!(phase, Phase::Ready)
-        && agent_state_store::session_start_source_from_hook_json(&raw).as_deref()
-            == Some("compact")
-    {
-        return Ok(());
-    }
     let worktree = match agent_state_store::worktree_from_hook_json(&raw) {
         Some(worktree) => worktree,
         None => std::env::current_dir()?,
     };
+    if matches!(phase, Phase::Ready)
+        && !agent_state_store::ready_overwrite_allowed(
+            agent_state_store::read(&worktree),
+            agent_state_store::session_start_source_from_hook_json(&raw).as_deref(),
+        )
+    {
+        return Ok(());
+    }
     agent_state_store::write(&worktree, phase.into())
 }
