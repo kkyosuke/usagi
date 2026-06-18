@@ -169,6 +169,7 @@ fn detail_line(gutter: &str, detail: String) -> String {
 #[allow(clippy::too_many_arguments)]
 pub(super) fn worktree_row(
     worktree: &WorktreeState,
+    label: &str,
     name_width: usize,
     detail_width: usize,
     selected: bool,
@@ -184,11 +185,14 @@ pub(super) fn worktree_row(
     } else {
         style("○").dim().to_string()
     };
-    let branch = name_cell(
-        worktree.branch.as_deref().unwrap_or(DETACHED),
-        name_width,
-        active || selected,
-    );
+    // The session's sidebar label (its custom display name, or the branch when
+    // unset); a detached worktree with no label falls back to the placeholder.
+    let name = if label.is_empty() {
+        worktree.branch.as_deref().unwrap_or(DETACHED)
+    } else {
+        label
+    };
+    let branch = name_cell(name, name_width, active || selected);
     let status = status_cell(Some(worktree.status));
     let gutter = gutter_cell(selected, active, in_switch);
     // Three columns sit between the name and the right-edge status (the old
@@ -301,6 +305,7 @@ pub(super) fn left_pane(
             let selected = row == list.selected_index();
             let (mut top, mut detail) = worktree_row(
                 w,
+                list.display_label(i),
                 name_width,
                 detail_width,
                 selected,

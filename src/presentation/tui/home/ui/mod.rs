@@ -23,7 +23,8 @@ use crate::presentation::tui::widgets;
 
 use chrome::{
     footer_line, hint_lines, input_line, mode_ladder, overview_input_box, quit_confirm_frame,
-    remove_modal_frame, switch_create_rows, text_modal_frame, title_bar, update_banner,
+    remove_modal_frame, switch_create_rows, switch_rename_rows, text_modal_frame, title_bar,
+    update_banner,
 };
 use panes::{left_pane, log_tail, right_pane_contents};
 
@@ -298,6 +299,18 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
             state.create_input().unwrap_or_default(),
             state.create_cursor().unwrap_or(0),
             state.create_error(),
+            left_w,
+        ) {
+            left.push(row);
+        }
+        left.truncate(body_rows);
+    }
+    // While renaming a session's sidebar label in 切替, append the inline rename
+    // row to the left pane (trimmed back if it would overflow).
+    if state.is_renaming() {
+        for row in switch_rename_rows(
+            state.rename_target().unwrap_or_default(),
+            state.rename_input().unwrap_or_default(),
             left_w,
         ) {
             left.push(row);

@@ -117,14 +117,29 @@ pub struct WorktreeState {
 /// its sessions — even when the root itself is not a git repository.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionRecord {
-    /// Session name (also the branch name created in every repository).
+    /// Session name (also the branch name created in every repository). This is
+    /// the session's identity: commands (`session switch`, removal) target it,
+    /// so it never changes once created.
     pub name: String,
+    /// An optional sidebar label that overrides [`name`](Self::name) in the home
+    /// screen's session list, without touching the branch / identity. `None`
+    /// (the default, and omitted from the file) shows the `name` as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
     /// Root of the session tree: `<workspace>/.usagi/sessions/<name>`.
     pub root: PathBuf,
     /// One entry per repository that received a worktree, with its git status.
     pub worktrees: Vec<WorktreeState>,
     /// When the session was created.
     pub created_at: DateTime<Utc>,
+}
+
+impl SessionRecord {
+    /// The label shown in the sidebar: the custom [`display_name`](Self::display_name)
+    /// when set, otherwise the session [`name`](Self::name).
+    pub fn display_label(&self) -> &str {
+        self.display_name.as_deref().unwrap_or(&self.name)
+    }
 }
 
 /// State of a workspace: the sessions created under it.
@@ -244,6 +259,7 @@ mod tests {
         let mut state = WorkspaceState::new();
         state.sessions.push(SessionRecord {
             name: "feature-x".to_string(),
+            display_name: None,
             root: PathBuf::from("/repo/.usagi/sessions/feature-x"),
             worktrees: vec![sample_worktree()],
             created_at: Utc::now(),
@@ -252,6 +268,48 @@ mod tests {
         let json = serde_json::to_string_pretty(&state).unwrap();
         let parsed: WorkspaceState = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, state);
+    }
+
+    #[test]
+    fn display_label_falls_back_to_name_then_prefers_display_name() {
+        let mut session = SessionRecord {
+            name: "feature-x".to_string(),
+            display_name: None,
+            root: PathBuf::from("/repo/.usagi/sessions/feature-x"),
+            worktrees: vec![sample_worktree()],
+            created_at: Utc::now(),
+        };
+        // No override → the session name is the label.
+        assert_eq!(session.display_label(), "feature-x");
+        session.display_name = Some("My Feature".to_string());
+        assert_eq!(session.display_label(), "My Feature");
+    }
+
+    #[test]
+    fn display_name_is_omitted_from_json_when_absent_and_round_trips_when_set() {
+        let mut state = WorkspaceState::new();
+        state.sessions.push(SessionRecord {
+            name: "feature-x".to_string(),
+            display_name: Some("Nice name".to_string()),
+            root: PathBuf::from("/repo/.usagi/sessions/feature-x"),
+            worktrees: vec![sample_worktree()],
+            created_at: Utc::now(),
+        });
+        let json = serde_json::to_string(&state).unwrap();
+        assert!(json.contains("\"display_name\":\"Nice name\""));
+        assert_eq!(
+            serde_json::from_str::<WorkspaceState>(&json).unwrap(),
+            state
+        );
+
+        // Cleared again → the key is dropped, and an older file without it parses.
+        state.sessions[0].display_name = None;
+        let json = serde_json::to_string(&state).unwrap();
+        assert!(!json.contains("display_name"));
+        assert_eq!(
+            serde_json::from_str::<WorkspaceState>(&json).unwrap(),
+            state
+        );
     }
 
     #[test]

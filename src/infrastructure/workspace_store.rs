@@ -111,6 +111,7 @@ mod tests {
         let mut state = WorkspaceState::new();
         state.sessions.push(SessionRecord {
             name: "feature".to_string(),
+            display_name: Some("My Feature".to_string()),
             root: PathBuf::from("/repo/.usagi/sessions/feature"),
             worktrees: vec![WorktreeState {
                 branch: Some("feature".to_string()),
