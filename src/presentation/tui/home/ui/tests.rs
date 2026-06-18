@@ -182,6 +182,7 @@ fn worktree_row_marks_selected_primary_and_detached() {
     // when `in_switch` is set.
     let (top, _) = worktree_row(
         &worktree(Some("main"), true, BranchStatus::Pushed),
+        "",
         10,
         10,
         true,
@@ -199,6 +200,7 @@ fn worktree_row_marks_selected_primary_and_detached() {
     // The same selected row outside Switch shows no cursor.
     let (top_no_switch, _) = worktree_row(
         &worktree(Some("main"), true, BranchStatus::Pushed),
+        "",
         10,
         10,
         true,
@@ -213,6 +215,7 @@ fn worktree_row_marks_selected_primary_and_detached() {
 
     let (other_top, _) = worktree_row(
         &worktree(Some("feature"), false, BranchStatus::Local),
+        "",
         10,
         10,
         false,
@@ -229,6 +232,7 @@ fn worktree_row_marks_selected_primary_and_detached() {
 
     let (detached_top, _) = worktree_row(
         &worktree(None, false, BranchStatus::Local),
+        "",
         10,
         10,
         false,
@@ -246,6 +250,7 @@ fn worktree_row_marks_selected_primary_and_detached() {
 fn worktree_row_marks_the_active_worktree_with_a_gutter_bar_on_both_lines() {
     let (active_top, active_detail) = worktree_row(
         &worktree(Some("feature"), false, BranchStatus::Local),
+        "",
         10,
         10,
         false,
@@ -264,6 +269,7 @@ fn worktree_row_marks_the_active_worktree_with_a_gutter_bar_on_both_lines() {
     assert!(!active_top.contains('*'));
     let (idle_top, idle_detail) = worktree_row(
         &worktree(Some("feature"), false, BranchStatus::Local),
+        "",
         10,
         10,
         false,
@@ -283,6 +289,7 @@ fn worktree_row_shows_the_agent_state_through_its_lifecycle() {
     // A live session that has not begun a turn yet is idle: `☾ ready`.
     let (_, ready_detail) = worktree_row(
         &worktree(Some("feature"), false, BranchStatus::Local),
+        "",
         10,
         12,
         false,
@@ -299,6 +306,7 @@ fn worktree_row_shows_the_agent_state_through_its_lifecycle() {
     // Working a turn: `▶ running`.
     let (_, running_detail) = worktree_row(
         &worktree(Some("feature"), false, BranchStatus::Local),
+        "",
         10,
         12,
         false,
@@ -315,6 +323,7 @@ fn worktree_row_shows_the_agent_state_through_its_lifecycle() {
     // Awaiting input wins over running: `◆ waiting`.
     let (_, waiting_detail) = worktree_row(
         &worktree(Some("feature"), false, BranchStatus::Local),
+        "",
         10,
         12,
         false,
@@ -332,6 +341,7 @@ fn worktree_row_shows_the_agent_state_through_its_lifecycle() {
     // A finished agent shows `✓ done`, taking precedence over running.
     let (_, done_detail) = worktree_row(
         &worktree(Some("feature"), false, BranchStatus::Local),
+        "",
         10,
         12,
         false,
@@ -349,6 +359,7 @@ fn worktree_row_shows_the_agent_state_through_its_lifecycle() {
     // No live session: the detail line carries no agent state.
     let (absent_top, absent_detail) = worktree_row(
         &worktree(Some("feature"), false, BranchStatus::Local),
+        "",
         10,
         12,
         false,
@@ -388,6 +399,7 @@ fn worktree_row_truncates_a_long_branch() {
             false,
             BranchStatus::Local,
         ),
+        "",
         8,
         8,
         false,
@@ -399,6 +411,25 @@ fn worktree_row_truncates_a_long_branch() {
         false,
     );
     assert!(top.contains('…'));
+}
+
+#[test]
+fn worktree_row_shows_the_label_override_instead_of_the_branch() {
+    let (top, _) = worktree_row(
+        &worktree(Some("feat-login"), false, BranchStatus::Local),
+        "Login flow",
+        20,
+        20,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+    );
+    assert!(top.contains("Login flow"));
+    assert!(!top.contains("feat-login"));
 }
 
 #[test]
@@ -1157,6 +1188,30 @@ fn render_frame_shows_the_inline_create_row_in_switch() {
     assert!(joined.contains("switch"));
 }
 
+#[test]
+fn switch_rename_rows_show_the_target_and_typed_label() {
+    let rows = switch_rename_rows("main", "My main", 40);
+    assert_eq!(rows.len(), 1);
+    let plain = console::strip_ansi_codes(&rows[0]).into_owned();
+    assert!(plain.contains("rename main: My main"));
+    assert!(plain.contains(CARET));
+}
+
+#[test]
+fn render_frame_shows_the_inline_rename_row_in_switch() {
+    let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
+    state.enter_switch(super::super::state::ReturnMode::Overview);
+    state.switch_move_down(); // cursor onto "main"
+    assert!(state.switch_begin_rename());
+    for c in " 2".chars() {
+        state.rename_push_char(c);
+    }
+    let frame = render_frame(24, 80, &state);
+    let joined = console::strip_ansi_codes(&frame.join("\n")).into_owned();
+    // Prefilled with the branch name, then edited to "main 2".
+    assert!(joined.contains("rename main: main 2"));
+}
+
 // --- command hints (Overview) ------------------------------------------
 
 fn typing(typed: &str) -> HomeState {
@@ -1268,6 +1323,7 @@ fn state_with_sessions(names: &[&str]) -> HomeState {
         .iter()
         .map(|n| SessionRecord {
             name: n.to_string(),
+            display_name: None,
             root: PathBuf::from(format!("/ws/{n}")),
             worktrees: Vec::new(),
             created_at: Utc::now(),

@@ -204,6 +204,7 @@ mod tests {
         let mut state = WorkspaceState::new();
         state.sessions.push(SessionRecord {
             name: "wip".to_string(),
+            display_name: None,
             root: wt_path.clone(),
             worktrees: vec![WorktreeState {
                 branch: None,

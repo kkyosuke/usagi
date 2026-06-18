@@ -22,6 +22,18 @@ pub(super) struct CreateInput {
     pub(super) error: Option<String>,
 }
 
+/// The inline display-name input shown in the left pane while renaming a session
+/// from 切替 (Switch): the session whose sidebar label is being edited
+/// (`target`, its branch name / identity, which never changes) and the label
+/// being typed (`input`, pre-filled with the current label). An empty input — or
+/// one equal to `target` — clears the override on confirm. Read through
+/// [`HomeState`]'s `rename_input` / `rename_target` accessors.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(super) struct RenameInput {
+    pub(super) target: String,
+    pub(super) input: String,
+}
+
 /// An open scrollable text modal: the read-only output of a text-dumping command
 /// (`man` / `history` / `session list`). `scroll` is the index of the first
 /// visible body line, advanced by the arrow / page keys and clamped on render.

@@ -133,6 +133,29 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
     let mut existing_branches =
         move || crate::usecase::session::existing_branch_names(&branches_root);
 
+    // Renaming a session's sidebar label persists the new display name to
+    // state.json and re-reads the sessions so the pane reflects it. The branch /
+    // identity is untouched, so the renamed session keeps its row: `select` holds
+    // its name to keep the cursor on it after the list rebuilds.
+    let rename_root = workspace.path.clone();
+    let mut rename_display =
+        |name: &str, label: &str| match crate::usecase::session::set_display_name(
+            &rename_root,
+            name,
+            label,
+        ) {
+            Ok(shown) => SessionOutcome {
+                line: LogLine::output(format!("Renamed \"{name}\" to \"{shown}\" 🏷")),
+                sessions: reload_sessions(&rename_root),
+                select: Some(name.to_string()),
+            },
+            Err(e) => SessionOutcome {
+                line: LogLine::error(format!("rename failed: {e}")),
+                sessions: None,
+                select: None,
+            },
+        };
+
     // The effective settings for this workspace (project-local overrides on top
     // of the global default), read once. Any failure falls back to the defaults.
     let settings = crate::infrastructure::storage::Storage::open_default()
@@ -359,6 +382,7 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
         &update,
         &mut persist,
         &mut create_session,
+        &mut rename_display,
         &mut remove_session,
         &mut existing_branches,
         &mut open_terminal,

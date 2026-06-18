@@ -63,19 +63,47 @@ pub(super) fn session_row(session: &SessionRecord) -> WorktreeState {
 pub struct WorktreeList {
     workspace_name: String,
     worktrees: Vec<WorktreeState>,
+    /// Sidebar label overrides, aligned 1:1 with `worktrees`: `labels[i]` is the
+    /// custom display name for `worktrees[i]`, or `None` to show its branch. The
+    /// override is cosmetic only — every name-based lookup keys on the branch (the
+    /// session identity), never on the label.
+    labels: Vec<Option<String>>,
     selected_index: usize,
     active_index: usize,
 }
 
 impl WorktreeList {
     /// Builds a list for the named workspace, with both the cursor and the
-    /// active row on the root (no session selected yet).
+    /// active row on the root (no session selected yet) and no label overrides.
     pub fn new(workspace_name: impl Into<String>, worktrees: Vec<WorktreeState>) -> Self {
+        let labels = vec![None; worktrees.len()];
+        Self::with_labels(workspace_name, worktrees, labels)
+    }
+
+    /// Builds a list with a sidebar label override per worktree (`labels[i]`
+    /// applies to `worktrees[i]`; a shorter/longer `labels` is padded/ignored to
+    /// match), with both cursors on the root row.
+    pub fn with_labels(
+        workspace_name: impl Into<String>,
+        worktrees: Vec<WorktreeState>,
+        mut labels: Vec<Option<String>>,
+    ) -> Self {
+        labels.resize(worktrees.len(), None);
         Self {
             workspace_name: workspace_name.into(),
             worktrees,
+            labels,
             selected_index: 0,
             active_index: 0,
+        }
+    }
+
+    /// The sidebar label for the worktree at `index`: its override when set,
+    /// otherwise its branch name (the same string [`worktree_name`] returns).
+    pub fn display_label(&self, index: usize) -> &str {
+        match self.labels.get(index).and_then(Option::as_deref) {
+            Some(label) => label,
+            None => self.worktrees.get(index).map(worktree_name).unwrap_or(""),
         }
     }
 
