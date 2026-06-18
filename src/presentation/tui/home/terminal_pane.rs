@@ -40,12 +40,35 @@ use crate::infrastructure::pty::PtySession;
 use crate::presentation::tui::clipboard;
 use crate::presentation::tui::screen::diff_frame;
 
-use super::state::{HomeState, PaneExit};
+use super::state::HomeState;
 use super::terminal_link;
 use super::terminal_pool::{MonitorHandle, MonitorSnapshot};
 use super::terminal_selection::{Cell, Selection};
+use super::terminal_tabs::{PaneKind, TabNav};
 use super::terminal_view::TerminalView;
 use super::ui;
+
+/// Why the embedded terminal loop handed control back, so the pool-driven loop
+/// in [`super::run`](super) can act on it: detach, the shell closing, or a
+/// tab-strip operation (switch / new / close) that the pool applies before
+/// re-driving the now-active pane.
+///
+/// `Ctrl-O` is the leader: the loop reads the *next* key to decide. `Ctrl-O
+/// Ctrl-O` (or `Ctrl-O o`) detaches to 切替 — the old single-`Ctrl-O` zoom-out;
+/// the navigation keys operate the tabs instead (see [`leader_command`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PaneStep {
+    /// `Ctrl-O Ctrl-O`: zoom out one level, leaving every pane alive in the pool.
+    Detach,
+    /// The active pane's shell exited on its own (e.g. `exit`).
+    Closed,
+    /// `Ctrl-O ]` / `[` / digit: move the active tab within the session.
+    Switch(TabNav),
+    /// `Ctrl-O t` / `a`: add a terminal / agent pane and make it active.
+    NewPane(PaneKind),
+    /// `Ctrl-O w`: close the active pane (its shell is killed).
+    ClosePane,
+}
 
 /// How finely the loop samples for fresh shell output while it waits for a
 /// keystroke. Output, and the echo of typed keys, appear within this slice — so
@@ -75,7 +98,7 @@ pub fn run(
     state: &mut HomeState,
     pty: &mut PtySession,
     monitor: &MonitorHandle,
-) -> Result<PaneExit> {
+) -> Result<PaneStep> {
     enable_raw_mode().context("failed to enter raw mode for the embedded terminal")?;
     // Capture pastes as a single `Event::Paste` so a multi-line paste reaches the
     // shell as one block instead of a key stream whose embedded Enters each
@@ -104,7 +127,7 @@ fn drive(
     state: &mut HomeState,
     pty: &mut PtySession,
     monitor: &MonitorHandle,
-) -> Result<PaneExit> {
+) -> Result<PaneStep> {
     // The frame drawn last pass, so we only repaint the rows that changed.
     let mut prev: Vec<String> = Vec::new();
     // How many lines the pane is scrolled back into the shell's history; `0` is
@@ -127,7 +150,9 @@ fn drive(
     let mut first = true;
     loop {
         let (height, width) = term.size();
-        let geo = ui::terminal_geometry(height as usize, width as usize);
+        // The embedded terminal sits below the tab strip, so it uses the
+        // tab-reserved geometry (matching what `render` lays out below).
+        let geo = ui::attached_geometry(height as usize, width as usize);
 
         let mut dirty = first;
         // Inform the PTY of a new size only when it actually changed; the old
@@ -183,7 +208,7 @@ fn drive(
 
         // The shell closed (e.g. the user typed `exit`): leave the pane.
         if !pty.is_alive() {
-            return Ok(PaneExit::Closed);
+            return Ok(PaneStep::Closed);
         }
 
         match wait(pty, drawn_gen)? {
@@ -194,7 +219,7 @@ fn drive(
             // Input is queued: forward every pending key (or scroll the
             // history), then loop and repaint.
             Wake::Input => {
-                if let Some(exit) = pump_input(
+                if let Some(step) = pump_input(
                     term,
                     state,
                     pty,
@@ -203,7 +228,7 @@ fn drive(
                     &mut selection,
                     &mut prev,
                 )? {
-                    return Ok(exit);
+                    return Ok(step);
                 }
             }
         }
@@ -242,9 +267,10 @@ fn wait(pty: &PtySession, drawn_gen: u64) -> Result<Wake> {
 /// left-button drag builds a text `selection` instead, and releasing it copies
 /// the selected text to the clipboard (see [`copy_selection`]); a left click with
 /// no drag opens a link under the pointer in the default browser (see
-/// [`open_clicked_url`]). `Ctrl-O` leaves
-/// the pane for 切替 (Switch), returning [`PaneExit::ToSwitch`]. Other events are
-/// ignored so the next redraw picks up any new size.
+/// [`open_clicked_url`]). `Ctrl-O` is the leader: the *next* key chooses a
+/// [`PaneStep`] (detach / tab switch / new / close), or cancels (`Esc` / an unbound
+/// key) and stays in the pane (see [`leader_command`]). Other events are ignored so
+/// the next redraw picks up any new size.
 fn pump_input(
     term: &Term,
     _state: &mut HomeState,
@@ -253,7 +279,7 @@ fn pump_input(
     scrollback: &mut usize,
     selection: &mut Option<Selection>,
     _prev: &mut Vec<String>,
-) -> Result<Option<PaneExit>> {
+) -> Result<Option<PaneStep>> {
     while event::poll(Duration::ZERO)? {
         match event::read()? {
             Event::Key(key) => {
@@ -268,8 +294,15 @@ fn pump_input(
                     continue;
                 }
                 if is_leader(&key) {
-                    // `Ctrl-O` zooms out one level: leave the pane for 切替.
-                    return Ok(Some(PaneExit::ToSwitch));
+                    // `Ctrl-O` is the leader: read the next key and act on it. A
+                    // bound key returns its step; `Esc` / an unbound key cancels
+                    // and stays in the pane. Typing snaps back to the live screen.
+                    *scrollback = 0;
+                    *selection = None;
+                    if let Some(step) = leader_command(&next_leader_key()?) {
+                        return Ok(Some(step));
+                    }
+                    continue;
                 }
                 // With text selected, `Ctrl-C` copies it (and clears the
                 // selection) instead of sending SIGINT — the way terminals treat
@@ -542,6 +575,43 @@ fn is_leader(key: &KeyEvent) -> bool {
     key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('o')
 }
 
+/// Block until the next real key press, ignoring releases and non-key events
+/// (mouse, resize, paste) — used to read the key that follows the `Ctrl-O`
+/// leader. Like a tmux prefix, the chord waits for its second key.
+fn next_leader_key() -> Result<KeyEvent> {
+    loop {
+        if let Event::Key(key) = event::read()? {
+            if is_press(key) {
+                return Ok(key);
+            }
+        }
+    }
+}
+
+/// Map the key following the `Ctrl-O` leader to a [`PaneStep`], or `None` to
+/// cancel (stay in the pane). `Ctrl-O Ctrl-O` and `Ctrl-O o` detach (the former
+/// single-`Ctrl-O` zoom-out); `]` / `Tab` and `[` / `BackTab` move tabs; digits
+/// `1`–`9` jump to that tab; `t` / `a` add a terminal / agent pane; `w` closes
+/// the active pane; `Esc` and anything unbound cancel.
+fn leader_command(key: &KeyEvent) -> Option<PaneStep> {
+    if is_leader(key) || matches!(key.code, KeyCode::Char('o') | KeyCode::Char('O')) {
+        return Some(PaneStep::Detach);
+    }
+    match key.code {
+        KeyCode::Char(']') | KeyCode::Tab => Some(PaneStep::Switch(TabNav::Next)),
+        KeyCode::Char('[') | KeyCode::BackTab => Some(PaneStep::Switch(TabNav::Prev)),
+        KeyCode::Char('t') | KeyCode::Char('T') => Some(PaneStep::NewPane(PaneKind::Terminal)),
+        KeyCode::Char('a') | KeyCode::Char('A') => Some(PaneStep::NewPane(PaneKind::Agent)),
+        KeyCode::Char('w') | KeyCode::Char('W') => Some(PaneStep::ClosePane),
+        KeyCode::Char(c @ '1'..='9') => {
+            let index = (c as u8 - b'1') as usize;
+            Some(PaneStep::Switch(TabNav::To(index)))
+        }
+        // Esc, or anything unbound: cancel and stay in the pane.
+        _ => None,
+    }
+}
+
 /// Whether this key is the copy shortcut (`Ctrl-C`). It only copies when a
 /// selection is active; otherwise the caller forwards it to the shell as the
 /// usual interrupt. `Ctrl+Shift+C` is left to the shell unchanged.
@@ -646,6 +716,79 @@ mod tests {
         // No `Ctrl` modifier, or a different letter, is not the leader.
         assert!(!is_leader(&key(KeyCode::Char('o'), KeyModifiers::NONE)));
         assert!(!is_leader(&key(KeyCode::Char('a'), KeyModifiers::CONTROL)));
+    }
+
+    #[test]
+    fn leader_double_ctrl_o_and_bare_o_detach() {
+        // `Ctrl-O Ctrl-O` (both forms) and `Ctrl-O o` zoom out — the old
+        // single-`Ctrl-O` behaviour, now the doubled chord.
+        assert_eq!(
+            leader_command(&key(KeyCode::Char('o'), KeyModifiers::CONTROL)),
+            Some(PaneStep::Detach)
+        );
+        assert_eq!(
+            leader_command(&key(KeyCode::Char('\u{0f}'), KeyModifiers::NONE)),
+            Some(PaneStep::Detach)
+        );
+        assert_eq!(
+            leader_command(&key(KeyCode::Char('o'), KeyModifiers::NONE)),
+            Some(PaneStep::Detach)
+        );
+    }
+
+    #[test]
+    fn leader_navigates_and_manages_tabs() {
+        assert_eq!(
+            leader_command(&key(KeyCode::Char(']'), KeyModifiers::NONE)),
+            Some(PaneStep::Switch(TabNav::Next))
+        );
+        assert_eq!(
+            leader_command(&key(KeyCode::Tab, KeyModifiers::NONE)),
+            Some(PaneStep::Switch(TabNav::Next))
+        );
+        assert_eq!(
+            leader_command(&key(KeyCode::Char('['), KeyModifiers::NONE)),
+            Some(PaneStep::Switch(TabNav::Prev))
+        );
+        assert_eq!(
+            leader_command(&key(KeyCode::BackTab, KeyModifiers::NONE)),
+            Some(PaneStep::Switch(TabNav::Prev))
+        );
+        // Digits jump to a 0-based tab index.
+        assert_eq!(
+            leader_command(&key(KeyCode::Char('1'), KeyModifiers::NONE)),
+            Some(PaneStep::Switch(TabNav::To(0)))
+        );
+        assert_eq!(
+            leader_command(&key(KeyCode::Char('3'), KeyModifiers::NONE)),
+            Some(PaneStep::Switch(TabNav::To(2)))
+        );
+        assert_eq!(
+            leader_command(&key(KeyCode::Char('t'), KeyModifiers::NONE)),
+            Some(PaneStep::NewPane(PaneKind::Terminal))
+        );
+        assert_eq!(
+            leader_command(&key(KeyCode::Char('a'), KeyModifiers::NONE)),
+            Some(PaneStep::NewPane(PaneKind::Agent))
+        );
+        assert_eq!(
+            leader_command(&key(KeyCode::Char('w'), KeyModifiers::NONE)),
+            Some(PaneStep::ClosePane)
+        );
+    }
+
+    #[test]
+    fn leader_cancels_on_esc_and_unbound_keys() {
+        // `Esc`, `0`, and an unrelated letter cancel (stay in the pane).
+        assert_eq!(leader_command(&key(KeyCode::Esc, KeyModifiers::NONE)), None);
+        assert_eq!(
+            leader_command(&key(KeyCode::Char('0'), KeyModifiers::NONE)),
+            None
+        );
+        assert_eq!(
+            leader_command(&key(KeyCode::Char('z'), KeyModifiers::NONE)),
+            None
+        );
     }
 
     #[test]

@@ -839,6 +839,37 @@ fn right_pane_shows_the_terminal_when_attached() {
 }
 
 #[test]
+fn right_pane_shows_the_tab_strip_above_the_terminal_when_attached() {
+    let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
+    state.enter_focus(1);
+    state.show_attached();
+    state.set_terminal_tabs(vec!["agent".to_string(), "terminal".to_string()], 1);
+    state.set_terminal_view(TerminalView::from_rows(vec!["$ echo hi".to_string()], None));
+    let rows = right_pane_contents(&state, 40, 5);
+    // The strip takes the top row, listing both panes; the terminal follows.
+    let strip = console::strip_ansi_codes(&rows[0]).into_owned();
+    assert!(strip.contains("agent") && strip.contains("terminal"));
+    assert!(rows[1].contains("$ echo hi"));
+}
+
+#[test]
+fn tab_strip_lists_each_pane_and_clips_to_width() {
+    use super::super::terminal_tabs::TabStrip;
+    // Both the active (index 0) and the idle chip are rendered; styling is
+    // stripped in the (non-TTY) test environment, so assert on the content.
+    let strip = TabStrip {
+        labels: vec!["agent".to_string(), "terminal".to_string()],
+        active: 0,
+    };
+    let line = console::strip_ansi_codes(&tab_strip_line(&strip, 60)).into_owned();
+    assert!(line.contains("agent") && line.contains("terminal"));
+
+    // A narrow pane clips the strip to its width (with an ellipsis).
+    let narrow = tab_strip_line(&strip, 8);
+    assert!(console::measure_text_width(&narrow) <= 8);
+}
+
+#[test]
 fn focus_menu_row_marks_the_cursor() {
     let info = CommandInfo {
         name: "terminal",
@@ -880,6 +911,25 @@ fn terminal_geometry_matches_the_rendered_layout() {
 #[test]
 fn terminal_geometry_stays_positive_in_a_tiny_terminal() {
     let geo = terminal_geometry(1, 1);
+    assert!(geo.rows >= 1);
+    assert!(geo.cols >= 1);
+}
+
+#[test]
+fn attached_geometry_reserves_the_tab_strip_row() {
+    let full = terminal_geometry(24, 80);
+    let attached = attached_geometry(24, 80);
+    // The tab strip takes one row off the top: fewer rows, origin pushed down,
+    // same width and left edge.
+    assert_eq!(attached.rows as usize, full.rows as usize - TAB_BAR_ROWS);
+    assert_eq!(attached.origin_row, full.origin_row + TAB_BAR_ROWS as u16);
+    assert_eq!(attached.cols, full.cols);
+    assert_eq!(attached.origin_col, full.origin_col);
+}
+
+#[test]
+fn attached_geometry_stays_positive_in_a_tiny_terminal() {
+    let geo = attached_geometry(1, 1);
     assert!(geo.rows >= 1);
     assert!(geo.cols >= 1);
 }

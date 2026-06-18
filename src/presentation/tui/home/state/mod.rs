@@ -21,6 +21,7 @@ use crate::domain::version::Version;
 use crate::domain::workspace_state::{SessionRecord, WorktreeState};
 
 use super::command::{CommandInfo, CommandRegistry, CommandScope, Completion, Effect, Hint};
+use super::terminal_tabs::TabStrip;
 use super::terminal_view::TerminalView;
 use crate::presentation::tui::widgets::text_input::TextInput;
 
@@ -128,6 +129,10 @@ pub struct HomeState {
     /// The latest snapshot of the embedded terminal's screen, set while a session
     /// is 没入 (Attached) and rendered in the right pane.
     terminal_view: Option<TerminalView>,
+    /// The tab strip shown above the embedded terminal while 没入 (Attached): the
+    /// session's panes and which one is active. Set alongside the snapshot by the
+    /// pane driver; `None` outside 没入 (and cleared each frame, like the view).
+    terminal_tabs: Option<TabStrip>,
     /// Worktree paths whose agent is actively working a turn (reported the
     /// `running` phase). Refreshed from the terminal monitor each redraw and
     /// rendered with a "running" icon, unless the path is also waiting or done
@@ -206,6 +211,7 @@ impl HomeState {
             remove_modal: None,
             sessions: Vec::new(),
             terminal_view: None,
+            terminal_tabs: None,
             running: HashSet::new(),
             waiting: HashSet::new(),
             live: HashSet::new(),
@@ -450,6 +456,24 @@ impl HomeState {
     pub fn leave_attached(&mut self) {
         self.mode = Mode::Focus;
         self.terminal_view = None;
+        self.terminal_tabs = None;
+    }
+
+    /// Publish the tab strip shown above the embedded terminal in 没入: the
+    /// session's pane `labels` and which one is `active`. Set by the pane driver
+    /// before each repaint, alongside [`set_terminal_view`](Self::set_terminal_view).
+    pub fn set_terminal_tabs(&mut self, labels: Vec<String>, active: usize) {
+        self.terminal_tabs = Some(TabStrip { labels, active });
+    }
+
+    /// The tab strip shown above the embedded terminal, when 没入 (Attached).
+    pub fn terminal_tabs(&self) -> Option<&TabStrip> {
+        self.terminal_tabs.as_ref()
+    }
+
+    /// Drop the tab strip (the pane driver left 没入).
+    pub fn clear_terminal_tabs(&mut self) {
+        self.terminal_tabs = None;
     }
 
     /// Store the latest embedded-terminal screen snapshot, shown in the right
@@ -458,10 +482,12 @@ impl HomeState {
         self.terminal_view = Some(view);
     }
 
-    /// Drop the embedded-terminal snapshot without changing the mode. Used
-    /// between frames so a stale snapshot never lingers in the right pane.
+    /// Drop the embedded-terminal snapshot (and its tab strip) without changing
+    /// the mode. Used between frames so a stale snapshot never lingers in the
+    /// right pane.
     pub fn clear_terminal_view(&mut self) {
         self.terminal_view = None;
+        self.terminal_tabs = None;
     }
 
     /// Replace the set of worktree paths whose agent is actively working a turn,
