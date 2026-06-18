@@ -41,6 +41,7 @@ use crate::presentation::tui::clipboard;
 use crate::presentation::tui::screen::diff_frame;
 
 use super::state::{HomeState, PaneExit};
+use super::terminal_link;
 use super::terminal_pool::{MonitorHandle, MonitorSnapshot};
 use super::terminal_selection::{Cell, Selection};
 use super::terminal_view::TerminalView;
@@ -239,7 +240,9 @@ fn wait(pty: &PtySession, drawn_gen: u64) -> Result<Wake> {
 /// Forward every queued key press to the shell, or — for the wheel and
 /// `Shift`+`PageUp`/`PageDown` — scroll the pane's history via `scrollback`. A
 /// left-button drag builds a text `selection` instead, and releasing it copies
-/// the selected text to the clipboard (see [`copy_selection`]). `Ctrl-O` leaves
+/// the selected text to the clipboard (see [`copy_selection`]); a left click with
+/// no drag opens a link under the pointer in the default browser (see
+/// [`open_clicked_url`]). `Ctrl-O` leaves
 /// the pane for 切替 (Switch), returning [`PaneExit::ToSwitch`]. Other events are
 /// ignored so the next redraw picks up any new size.
 fn pump_input(
@@ -310,9 +313,14 @@ fn pump_input(
                         sel.extend(cell);
                     }
                 }
-                // Releasing copies whatever was selected to the clipboard.
+                // Releasing after a drag copies the selection; a plain click
+                // (no drag) on a link opens it in the default browser instead.
                 MouseEventKind::Up(MouseButton::Left) => {
-                    copy_selection(term, pty, selection.as_ref())?;
+                    if open_clicked_url(pty, geo, mouse.column, mouse.row, selection.as_ref()) {
+                        *selection = None;
+                    } else {
+                        copy_selection(term, pty, selection.as_ref())?;
+                    }
                 }
                 // The wheel scrolls the history when it is over the terminal
                 // pane; the view shifts, so any selection is dropped.
@@ -377,6 +385,50 @@ fn copy_to_system_clipboard(text: &str) {
             return;
         }
     }
+}
+
+/// On a plain click (a press/release with no intervening drag, so `selection` is
+/// still a single empty cell) that lands on a link, open it in the default
+/// browser and report `true`; otherwise report `false` so the caller copies any
+/// real drag selection. The release coordinates locate the clicked cell, which
+/// must match the empty selection's anchor — distinguishing a click from a drag.
+fn open_clicked_url(
+    pty: &PtySession,
+    geo: ui::TerminalGeometry,
+    col: u16,
+    row: u16,
+    selection: Option<&Selection>,
+) -> bool {
+    // A drag built a non-empty selection: this is a copy, not a click.
+    if !selection.is_some_and(Selection::is_empty) {
+        return false;
+    }
+    let Some(cell) = pane_cell(col, row, geo) else {
+        return false;
+    };
+    if let Some(url) = terminal_link::url_at(pty.parser().screen(), cell) {
+        open_url(&url);
+        return true;
+    }
+    false
+}
+
+/// Hand `url` to the platform's default browser (see
+/// [`terminal_link::open_command`]). Best-effort and detached: stdio is closed
+/// and a missing opener or spawn failure is ignored, since failing to launch a
+/// browser must not disturb the embedded shell.
+fn open_url(url: &str) {
+    use std::process::{Command, Stdio};
+    let argv = terminal_link::open_command(url);
+    let Some((cmd, rest)) = argv.split_first() else {
+        return;
+    };
+    let _ = Command::new(cmd)
+        .args(rest)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn();
 }
 
 /// Translate an absolute mouse position (0-based screen `col`/`row`) to a cell
