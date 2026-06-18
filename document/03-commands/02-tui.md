@@ -73,7 +73,7 @@ issue が 1 件も無いときは「No issues yet.」を 1 行だけログに出
 
 没入中は **`Ctrl-O` だけが予約キー**で、`Esc` を含む他キーはすべてシェルへ流れます。`Ctrl-O` で[切替](../design/05-home.md#切替switch)へ
 ズームアウトして別セッションへ（もう一度押すと統括まで）。シェルは画面を開いている間プールに常駐し、行き来しても終了しません。
-没入中のキー操作・スクロール・端末ごとの差異は [design/05-home.md](../design/05-home.md#没入のキー操作attached--terminal--agent-実行中) を参照してください。
+没入中のキー操作・スクロール・マウスでのテキスト選択とコピー・端末ごとの差異は [design/05-home.md](../design/05-home.md#没入のキー操作attached--terminal--agent-実行中) を参照してください。
 
 ## agent
 

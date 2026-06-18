@@ -11,6 +11,7 @@ pub mod event;
 pub mod state;
 pub mod terminal_pane;
 pub mod terminal_pool;
+pub mod terminal_selection;
 pub mod terminal_view;
 pub mod ui;
 pub mod update;

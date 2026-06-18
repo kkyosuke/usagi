@@ -1,5 +1,6 @@
 // Terminal UI screens shared by interactive commands live here.
 pub mod app;
+pub mod clipboard;
 pub mod config;
 pub mod echo;
 pub mod home;

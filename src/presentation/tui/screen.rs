@@ -60,8 +60,8 @@ pub trait KeyReader {
 const ENTER_ALT_SCREEN: &str = "\x1b[?1049h";
 /// Leave the alternate screen, restoring the prior contents.
 const LEAVE_ALT_SCREEN: &str = "\x1b[?1049l";
-/// Enable mouse reporting: normal tracking (DECSET 1000) plus SGR extended
-/// coordinates (DECSET 1006).
+/// Enable mouse reporting: normal tracking (DECSET 1000), button-event /
+/// drag tracking (DECSET 1002), and SGR extended coordinates (DECSET 1006).
 ///
 /// What keeps the pre-launch scrollback hidden is the **alternate screen**
 /// ([`ENTER_ALT_SCREEN`]) — that scrollback lives in the primary buffer, which
@@ -74,6 +74,11 @@ const LEAVE_ALT_SCREEN: &str = "\x1b[?1049l";
 ///   rather than acting on the wheel itself, which `term_reader` decodes: a wheel
 ///   turn becomes a [`ScrollEvent`] (swallowed by the management screens, acted on
 ///   by the embedded pane), everything else is dropped.
+/// - button-event tracking (DECSET 1002) additionally reports motion while a
+///   button is held, so the embedded terminal pane can follow a drag and select
+///   text (see `home::terminal_selection`). The management screens see these
+///   motion reports too, but `term_reader` drops every non-wheel report, so they
+///   are harmless there.
 ///
 /// We deliberately do *not* enable alternate scroll (DECSET 1007). Alternate
 /// scroll makes the wheel masquerade as cursor-key presses, and those are
@@ -84,10 +89,10 @@ const LEAVE_ALT_SCREEN: &str = "\x1b[?1049l";
 /// ignores mouse reporting (Apple Terminal.app) the wheel does nothing in the
 /// embedded pane either; there the pane scrolls via `Shift`+`↑`/`↓` (and
 /// `Shift`+`PageUp`/`PageDown` where the terminal does not bind them itself).
-const ENABLE_MOUSE: &str = "\x1b[?1000h\x1b[?1006h";
+const ENABLE_MOUSE: &str = "\x1b[?1000h\x1b[?1002h\x1b[?1006h";
 /// Disable mouse reporting, restoring the terminal's normal wheel / selection
 /// behaviour once the TUI exits. Reset in the reverse order of [`ENABLE_MOUSE`].
-const DISABLE_MOUSE: &str = "\x1b[?1006l\x1b[?1000l";
+const DISABLE_MOUSE: &str = "\x1b[?1006l\x1b[?1002l\x1b[?1000l";
 
 /// RAII guard that activates the terminal alternate screen and restores it on drop.
 pub struct AlternateScreenGuard {
