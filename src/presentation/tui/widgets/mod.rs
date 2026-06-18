@@ -11,9 +11,65 @@ pub mod picker;
 pub mod text_input;
 
 use console::style;
+use unicode_width::UnicodeWidthChar;
 
 /// The usagi mascot artwork (raw, unstyled lines).
 const RABBIT: [&str; 3] = ["  (\\(\\ ", " (='-') ", " o(_(\")(\")"];
+
+/// The escape (ESC, `0x1b`) that introduces an ANSI control sequence.
+const ESC: char = '\u{1b}';
+
+/// Shortens `text` to at most `max` display columns, appending an ellipsis when
+/// it has to cut (the head of the text is the most informative part).
+///
+/// A single forward pass accumulates display width and copies characters until
+/// the next visible one would overflow — O(n), not the O(n²) of re-measuring a
+/// growing clone each step. ANSI escape sequences (the SGR colours a styled line
+/// carries) have zero display width and are copied verbatim, matching
+/// [`console::measure_text_width`], so the clipped text keeps its colours and
+/// never counts an escape against the budget.
+///
+/// The shared truncation primitive: panes clip rows to their column, and
+/// [`render_modal`] clips modal content to the box so nothing ever overruns its
+/// bounds.
+pub fn clip_to_width(text: &str, max: usize) -> String {
+    if console::measure_text_width(text) <= max {
+        return text.to_string();
+    }
+    if max == 0 {
+        return String::new();
+    }
+    // Reserve one column for the ellipsis.
+    let budget = max - 1;
+    let mut out = String::with_capacity(text.len());
+    let mut width = 0usize;
+    let mut chars = text.chars();
+    while let Some(ch) = chars.next() {
+        if ch == ESC {
+            // Copy the whole escape sequence (zero display width) so the colour
+            // it selects survives the clip. The styled lines clipped here carry
+            // CSI/SGR sequences — `ESC [ … final` — so copy the `[` introducer
+            // and parameter bytes through to (and including) the final byte
+            // (`0x40..=0x7e`, excluding the `[` introducer itself).
+            out.push(ch);
+            for c in chars.by_ref() {
+                out.push(c);
+                if ('\u{40}'..='\u{7e}').contains(&c) && c != '[' {
+                    break;
+                }
+            }
+            continue;
+        }
+        let w = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if width + w > budget {
+            break;
+        }
+        width += w;
+        out.push(ch);
+    }
+    out.push('…');
+    out
+}
 
 /// Left padding that horizontally centres content of `content_width` columns
 /// within a terminal `term_width` columns wide. Saturates to 0 when the content
@@ -156,7 +212,9 @@ pub fn boxed(title: &str, inner_width: usize, lines: &[String]) -> Vec<String> {
     let label = if title.is_empty() {
         String::new()
     } else {
-        format!("─ {title} ")
+        // Clip the title (with its `─ ` / ` ` framing) to the span so a long
+        // title never pushes the top border past the box edge.
+        clip_to_width(&format!("─ {title} "), span)
     };
     let label_width = console::measure_text_width(&label);
     let top = format!("┌{label}{}┐", "─".repeat(span.saturating_sub(label_width)));
@@ -165,7 +223,10 @@ pub fn boxed(title: &str, inner_width: usize, lines: &[String]) -> Vec<String> {
     let mut out = Vec::with_capacity(lines.len() + 2);
     out.push(top);
     for line in lines {
-        let pad = inner_width.saturating_sub(console::measure_text_width(line));
+        // Clip first so a line wider than the box can never push the right
+        // border out; then pad short lines so every row is exactly `inner_width`.
+        let line = clip_to_width(line, inner_width);
+        let pad = inner_width.saturating_sub(console::measure_text_width(&line));
         out.push(format!("│ {line}{} │", " ".repeat(pad)));
     }
     out.push(bottom);
@@ -185,6 +246,10 @@ pub fn render_modal(
     body: &[String],
 ) -> Vec<String> {
     let (height, width) = normalize_size(raw_height, raw_width);
+    // The box needs `inner_width + 4` columns (two borders + a space of padding
+    // on each side). Clamp the inner width so the box never overruns a narrow
+    // terminal; `boxed` then clips each line and the title to fit.
+    let inner_width = inner_width.min(width.saturating_sub(4));
     let box_lines = boxed(title, inner_width, body);
     // The box is `inner_width` plus the two spaces of padding and two borders.
     let pad = " ".repeat(centered_padding(width, inner_width + 4));
@@ -366,5 +431,51 @@ mod tests {
         assert!(box_row.starts_with(' '));
         // Blank rows above the box (vertically centred).
         assert!(frame[0].is_empty());
+    }
+
+    #[test]
+    fn boxed_clips_a_line_wider_than_the_inner_width() {
+        // A body line longer than the box must be truncated (with an ellipsis),
+        // never pushing the right border out — every row stays the same width.
+        let lines = boxed("T", 6, &["short".to_string(), "way too long".to_string()]);
+        let widths: Vec<usize> = lines
+            .iter()
+            .map(|l| console::measure_text_width(l))
+            .collect();
+        assert!(widths.iter().all(|&w| w == widths[0]));
+        assert!(lines[2].contains('…'));
+    }
+
+    #[test]
+    fn boxed_clips_a_title_wider_than_the_box() {
+        // A long title is truncated so the top border never overruns the box.
+        let lines = boxed("An extremely long modal title", 4, &["x".to_string()]);
+        assert_eq!(
+            console::measure_text_width(&lines[0]),
+            console::measure_text_width(lines.last().unwrap()),
+        );
+        assert!(lines[0].ends_with('┐'));
+    }
+
+    #[test]
+    fn render_modal_never_overflows_a_narrow_terminal() {
+        // The requested inner width (40) is far wider than the terminal (20);
+        // the box must be clamped and every row must fit within the width.
+        let width = 20;
+        let frame = render_modal(
+            24,
+            width,
+            "Local LLM",
+            40,
+            &["ローカル LLM をインストールします".to_string()],
+        );
+        for line in &frame {
+            assert!(
+                console::measure_text_width(line) <= width,
+                "row overflows {width} cols: {line:?}",
+            );
+        }
+        // The box is still drawn (a border row is present).
+        assert!(frame.iter().any(|l| l.contains('┌')));
     }
 }
