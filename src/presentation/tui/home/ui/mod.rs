@@ -23,7 +23,8 @@ use crate::presentation::tui::widgets;
 
 use chrome::{
     footer_line, hint_lines, input_line, mode_ladder, overview_input_box, quit_confirm_frame,
-    remove_modal_frame, switch_create_rows, text_modal_frame, title_bar, update_banner,
+    remove_modal_frame, switch_create_rows, switch_rename_rows, text_modal_frame, title_bar,
+    update_banner,
 };
 use panes::{left_pane, log_tail, right_pane_contents};
 
@@ -240,6 +241,26 @@ pub fn terminal_geometry(raw_height: usize, raw_width: usize) -> TerminalGeometr
     }
 }
 
+/// Rows the tab strip reserves at the top of the right pane in 没入 (Attached).
+/// The strip lists the session's panes (`[agent] [terminal] …`) and is always
+/// present once attached — even for a single pane — so the embedded terminal's
+/// geometry does not jump as panes are added or closed.
+pub const TAB_BAR_ROWS: usize = 1;
+
+/// The embedded terminal's geometry while 没入 (Attached): the right pane minus
+/// the tab strip ([`TAB_BAR_ROWS`]) reserved above it, with the origin pushed
+/// down by the same so the cursor tracks the shell below the strip. The pane and
+/// the pool both size / place the live terminal through this, while the
+/// tab-less previews in 切替 use [`terminal_geometry`].
+pub fn attached_geometry(raw_height: usize, raw_width: usize) -> TerminalGeometry {
+    let geo = terminal_geometry(raw_height, raw_width);
+    TerminalGeometry {
+        rows: (geo.rows as usize).saturating_sub(TAB_BAR_ROWS).max(1) as u16,
+        origin_row: geo.origin_row + TAB_BAR_ROWS as u16,
+        ..geo
+    }
+}
+
 /// Builds the full home-screen frame for a raw terminal size.
 pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> Vec<String> {
     // The quit-confirmation modal, when open, overlays everything else.
@@ -296,7 +317,20 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
     if state.is_creating() {
         for row in switch_create_rows(
             state.create_input().unwrap_or_default(),
+            state.create_cursor().unwrap_or(0),
             state.create_error(),
+            left_w,
+        ) {
+            left.push(row);
+        }
+        left.truncate(body_rows);
+    }
+    // While renaming a session's sidebar label in 切替, append the inline rename
+    // row to the left pane (trimmed back if it would overflow).
+    if state.is_renaming() {
+        for row in switch_rename_rows(
+            state.rename_target().unwrap_or_default(),
+            state.rename_input().unwrap_or_default(),
             left_w,
         ) {
             left.push(row);

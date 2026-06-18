@@ -181,7 +181,18 @@ impl AgentCli {
     /// resolved by the caller via `std::env::current_exe()`. Passing the resolved
     /// path rather than the bare name `usagi` makes the wiring work even when
     /// usagi is run straight from a build (`cargo run`) and is not on `$PATH`.
-    pub fn launch_command(self, local_llm_model: Option<&str>, usagi_bin: &str) -> String {
+    ///
+    /// When `resume` is set, Claude is launched with `--continue` so it picks up
+    /// the worktree's previous conversation instead of starting fresh — usagi
+    /// only sets it when such a conversation exists (see
+    /// [`Agent::has_resumable_session`](crate::domain::agent::Agent::has_resumable_session)).
+    /// Gemini has no resume flag, so it ignores `resume` and launches plain.
+    pub fn launch_command(
+        self,
+        local_llm_model: Option<&str>,
+        usagi_bin: &str,
+        resume: bool,
+    ) -> String {
         match self {
             AgentCli::Claude => {
                 let mcp_config = mcp_config_json(local_llm_model, usagi_bin);
@@ -190,8 +201,12 @@ impl AgentCli {
                     None => SESSION_WORKTREE_PROMPT.to_string(),
                 };
                 let hooks = claude_hooks_settings(usagi_bin);
+                // `--continue` resumes the most recent conversation in the
+                // worktree; placed right after the program name so it reads like
+                // a plain `claude -c` with usagi's wiring appended.
+                let resume_flag = if resume { "--continue " } else { "" };
                 format!(
-                    "claude --mcp-config '{mcp_config}' \
+                    "claude {resume_flag}--mcp-config '{mcp_config}' \
                      --append-system-prompt '{system_prompt}' \
                      --settings '{hooks}'"
                 )
@@ -461,7 +476,7 @@ mod tests {
         // With the local LLM off (`None`), the unified usagi server is wired in
         // and the system prompt is just the worktree note. The bare name `usagi`
         // stands in for the resolved binary path the caller passes.
-        let launch = AgentCli::Claude.launch_command(None, "usagi");
+        let launch = AgentCli::Claude.launch_command(None, "usagi", false);
         // The program is still `claude`, now with usagi's MCP server passed
         // inline via `--mcp-config` and a session-scoped instruction passed via
         // `--append-system-prompt` (both single-quoted so the shell keeps them).
@@ -474,10 +489,23 @@ mod tests {
     }
 
     #[test]
+    fn claude_launch_command_adds_continue_only_when_resuming() {
+        // Resuming inserts `--continue` right after the program name so Claude
+        // picks up the worktree's previous conversation; the rest of the wiring
+        // is unchanged.
+        let resumed = AgentCli::Claude.launch_command(None, "usagi", true);
+        assert!(resumed.starts_with("claude --continue --mcp-config '"));
+        // Without resuming the flag is absent and the command starts plainly.
+        let fresh = AgentCli::Claude.launch_command(None, "usagi", false);
+        assert!(fresh.starts_with("claude --mcp-config '"));
+        assert!(!fresh.contains("--continue"));
+    }
+
+    #[test]
     fn claude_launch_command_wires_in_the_local_llm_server_when_enabled() {
         // With a model given, the local LLM server joins the issue server in the
         // MCP config and the delegation prompt is appended after the worktree note.
-        let launch = AgentCli::Claude.launch_command(Some("qwen2.5-coder:7b"), "usagi");
+        let launch = AgentCli::Claude.launch_command(Some("qwen2.5-coder:7b"), "usagi", false);
         assert!(launch.contains(
             "\"usagi-llm\":{\"command\":\"usagi\",\"args\":[\"llm-mcp\",\"--model\",\"qwen2.5-coder:7b\"]}"
         ));
@@ -492,7 +520,7 @@ mod tests {
         // The phase-reporting hooks ride along via --settings whether or not the
         // local LLM is enabled, so usagi always learns the agent's state.
         for model in [None, Some("qwen2.5-coder:7b")] {
-            let launch = AgentCli::Claude.launch_command(model, "usagi");
+            let launch = AgentCli::Claude.launch_command(model, "usagi", false);
             assert!(launch.contains("--settings '{\"hooks\":"));
             assert!(launch.contains("usagi agent-phase ready"));
             assert!(launch.contains("usagi agent-phase running"));
@@ -511,8 +539,11 @@ mod tests {
         // `current_exe()`); both the MCP servers and every lifecycle hook must
         // invoke that exact path, not the bare name `usagi`, so the wiring works
         // when usagi is run from a build that is not on `$PATH`.
-        let launch =
-            AgentCli::Claude.launch_command(Some("qwen2.5-coder:7b"), "/opt/usagi/bin/usagi");
+        let launch = AgentCli::Claude.launch_command(
+            Some("qwen2.5-coder:7b"),
+            "/opt/usagi/bin/usagi",
+            false,
+        );
         // MCP servers point at the resolved binary.
         assert!(launch.contains(r#""usagi":{"command":"/opt/usagi/bin/usagi","args":["mcp"]}"#));
         assert!(launch.contains(
@@ -531,7 +562,7 @@ mod tests {
     fn launch_command_json_escapes_a_windows_binary_path() {
         // A Windows path carries backslashes; they must be doubled so the
         // `--mcp-config` / `--settings` JSON stays valid.
-        let launch = AgentCli::Claude.launch_command(None, r"C:\usagi\usagi.exe");
+        let launch = AgentCli::Claude.launch_command(None, r"C:\usagi\usagi.exe", false);
         assert!(launch.contains(r#""command":"C:\\usagi\\usagi.exe","args":["mcp"]"#));
         assert!(launch.contains(r"C:\\usagi\\usagi.exe agent-phase running"));
     }
@@ -548,9 +579,17 @@ mod tests {
     fn gemini_launch_command_stays_plain_regardless_of_local_llm() {
         // Gemini has no inline MCP flag, so it launches as the bare command even
         // when the local LLM is enabled.
-        assert_eq!(AgentCli::Gemini.launch_command(None, "usagi"), "gemini");
         assert_eq!(
-            AgentCli::Gemini.launch_command(Some("qwen2.5-coder:7b"), "usagi"),
+            AgentCli::Gemini.launch_command(None, "usagi", false),
+            "gemini"
+        );
+        assert_eq!(
+            AgentCli::Gemini.launch_command(Some("qwen2.5-coder:7b"), "usagi", false),
+            "gemini"
+        );
+        // The resume flag has no Gemini equivalent, so it stays plain.
+        assert_eq!(
+            AgentCli::Gemini.launch_command(None, "usagi", true),
             "gemini"
         );
     }

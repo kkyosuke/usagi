@@ -182,6 +182,7 @@ fn worktree_row_marks_selected_primary_and_detached() {
     // when `in_switch` is set.
     let (top, _) = worktree_row(
         &worktree(Some("main"), true, BranchStatus::Pushed),
+        "",
         10,
         10,
         true,
@@ -199,6 +200,7 @@ fn worktree_row_marks_selected_primary_and_detached() {
     // The same selected row outside Switch shows no cursor.
     let (top_no_switch, _) = worktree_row(
         &worktree(Some("main"), true, BranchStatus::Pushed),
+        "",
         10,
         10,
         true,
@@ -213,6 +215,7 @@ fn worktree_row_marks_selected_primary_and_detached() {
 
     let (other_top, _) = worktree_row(
         &worktree(Some("feature"), false, BranchStatus::Local),
+        "",
         10,
         10,
         false,
@@ -229,6 +232,7 @@ fn worktree_row_marks_selected_primary_and_detached() {
 
     let (detached_top, _) = worktree_row(
         &worktree(None, false, BranchStatus::Local),
+        "",
         10,
         10,
         false,
@@ -246,6 +250,7 @@ fn worktree_row_marks_selected_primary_and_detached() {
 fn worktree_row_marks_the_active_worktree_with_a_gutter_bar_on_both_lines() {
     let (active_top, active_detail) = worktree_row(
         &worktree(Some("feature"), false, BranchStatus::Local),
+        "",
         10,
         10,
         false,
@@ -264,6 +269,7 @@ fn worktree_row_marks_the_active_worktree_with_a_gutter_bar_on_both_lines() {
     assert!(!active_top.contains('*'));
     let (idle_top, idle_detail) = worktree_row(
         &worktree(Some("feature"), false, BranchStatus::Local),
+        "",
         10,
         10,
         false,
@@ -283,6 +289,7 @@ fn worktree_row_shows_the_agent_state_through_its_lifecycle() {
     // A live session that has not begun a turn yet is idle: `☾ ready`.
     let (_, ready_detail) = worktree_row(
         &worktree(Some("feature"), false, BranchStatus::Local),
+        "",
         10,
         12,
         false,
@@ -299,6 +306,7 @@ fn worktree_row_shows_the_agent_state_through_its_lifecycle() {
     // Working a turn: `▶ running`.
     let (_, running_detail) = worktree_row(
         &worktree(Some("feature"), false, BranchStatus::Local),
+        "",
         10,
         12,
         false,
@@ -315,6 +323,7 @@ fn worktree_row_shows_the_agent_state_through_its_lifecycle() {
     // Awaiting input wins over running: `◆ waiting`.
     let (_, waiting_detail) = worktree_row(
         &worktree(Some("feature"), false, BranchStatus::Local),
+        "",
         10,
         12,
         false,
@@ -332,6 +341,7 @@ fn worktree_row_shows_the_agent_state_through_its_lifecycle() {
     // A finished agent shows `✓ done`, taking precedence over running.
     let (_, done_detail) = worktree_row(
         &worktree(Some("feature"), false, BranchStatus::Local),
+        "",
         10,
         12,
         false,
@@ -349,6 +359,7 @@ fn worktree_row_shows_the_agent_state_through_its_lifecycle() {
     // No live session: the detail line carries no agent state.
     let (absent_top, absent_detail) = worktree_row(
         &worktree(Some("feature"), false, BranchStatus::Local),
+        "",
         10,
         12,
         false,
@@ -388,6 +399,7 @@ fn worktree_row_truncates_a_long_branch() {
             false,
             BranchStatus::Local,
         ),
+        "",
         8,
         8,
         false,
@@ -399,6 +411,25 @@ fn worktree_row_truncates_a_long_branch() {
         false,
     );
     assert!(top.contains('…'));
+}
+
+#[test]
+fn worktree_row_shows_the_label_override_instead_of_the_branch() {
+    let (top, _) = worktree_row(
+        &worktree(Some("feat-login"), false, BranchStatus::Local),
+        "Login flow",
+        20,
+        20,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+    );
+    assert!(top.contains("Login flow"));
+    assert!(!top.contains("feat-login"));
 }
 
 #[test]
@@ -665,6 +696,45 @@ fn switch_preview_shows_a_live_session_as_its_actual_screen() {
 }
 
 #[test]
+fn switch_preview_shows_the_root_live_session_as_its_screen() {
+    // Regression: the root row (`⌂ root`) hard-coded `live = false`, so a running
+    // root agent previewed its action menu in 切替 instead of its live screen —
+    // it only re-appeared once selected. With the workspace root recorded, the
+    // root row is matched against the live set like any worktree, so its running
+    // agent previews live.
+    let mut state = HomeState::new("usagi", Vec::new(), None);
+    state.set_root_path(PathBuf::from("/repo"));
+    state.set_live([PathBuf::from("/repo")].into());
+    // The event loop snapshots the highlighted live session (the root here)
+    // before painting.
+    state.set_terminal_view(TerminalView::from_rows(
+        vec!["$ claude".to_string(), "How can I help?".to_string()],
+        None,
+    ));
+    state.enter_switch(super::super::state::ReturnMode::Overview);
+    // The cursor starts on the root row, so no navigation is needed.
+    let preview = stripped(&switch_preview(&state, 40, 12));
+    assert!(preview.contains("root"));
+    // The live root agent's actual screen is shown, not the action menu.
+    assert!(preview.contains("$ claude"));
+    assert!(preview.contains("How can I help?"));
+    assert!(!preview.contains("Run a command"));
+}
+
+#[test]
+fn switch_preview_shows_an_idle_root_as_its_action_menu() {
+    // The mirror of the regression above: a root with no live embedded session
+    // still previews the action menu it would open, even with the root path set.
+    let mut state = HomeState::new("usagi", Vec::new(), None);
+    state.set_root_path(PathBuf::from("/repo"));
+    state.enter_switch(super::super::state::ReturnMode::Overview);
+    let preview = stripped(&switch_preview(&state, 40, 12));
+    assert!(preview.contains("workspace root"));
+    assert!(preview.contains("Run a command"));
+    assert!(!preview.contains("live terminal"));
+}
+
+#[test]
 fn switch_preview_shows_an_idle_session_as_its_action_menu() {
     let idle = worktree(Some("feat"), false, BranchStatus::Pushed);
     let mut state = HomeState::new("usagi", vec![idle], None);
@@ -769,6 +839,37 @@ fn right_pane_shows_the_terminal_when_attached() {
 }
 
 #[test]
+fn right_pane_shows_the_tab_strip_above_the_terminal_when_attached() {
+    let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
+    state.enter_focus(1);
+    state.show_attached();
+    state.set_terminal_tabs(vec!["agent".to_string(), "terminal".to_string()], 1);
+    state.set_terminal_view(TerminalView::from_rows(vec!["$ echo hi".to_string()], None));
+    let rows = right_pane_contents(&state, 40, 5);
+    // The strip takes the top row, listing both panes; the terminal follows.
+    let strip = console::strip_ansi_codes(&rows[0]).into_owned();
+    assert!(strip.contains("agent") && strip.contains("terminal"));
+    assert!(rows[1].contains("$ echo hi"));
+}
+
+#[test]
+fn tab_strip_lists_each_pane_and_clips_to_width() {
+    use super::super::terminal_tabs::TabStrip;
+    // Both the active (index 0) and the idle chip are rendered; styling is
+    // stripped in the (non-TTY) test environment, so assert on the content.
+    let strip = TabStrip {
+        labels: vec!["agent".to_string(), "terminal".to_string()],
+        active: 0,
+    };
+    let line = console::strip_ansi_codes(&tab_strip_line(&strip, 60)).into_owned();
+    assert!(line.contains("agent") && line.contains("terminal"));
+
+    // A narrow pane clips the strip to its width (with an ellipsis).
+    let narrow = tab_strip_line(&strip, 8);
+    assert!(console::measure_text_width(&narrow) <= 8);
+}
+
+#[test]
 fn focus_menu_row_marks_the_cursor() {
     let info = CommandInfo {
         name: "terminal",
@@ -810,6 +911,25 @@ fn terminal_geometry_matches_the_rendered_layout() {
 #[test]
 fn terminal_geometry_stays_positive_in_a_tiny_terminal() {
     let geo = terminal_geometry(1, 1);
+    assert!(geo.rows >= 1);
+    assert!(geo.cols >= 1);
+}
+
+#[test]
+fn attached_geometry_reserves_the_tab_strip_row() {
+    let full = terminal_geometry(24, 80);
+    let attached = attached_geometry(24, 80);
+    // The tab strip takes one row off the top: fewer rows, origin pushed down,
+    // same width and left edge.
+    assert_eq!(attached.rows as usize, full.rows as usize - TAB_BAR_ROWS);
+    assert_eq!(attached.origin_row, full.origin_row + TAB_BAR_ROWS as u16);
+    assert_eq!(attached.cols, full.cols);
+    assert_eq!(attached.origin_col, full.origin_col);
+}
+
+#[test]
+fn attached_geometry_stays_positive_in_a_tiny_terminal() {
+    let geo = attached_geometry(1, 1);
     assert!(geo.rows >= 1);
     assert!(geo.cols >= 1);
 }
@@ -1037,13 +1157,19 @@ fn overlay_top_right_stops_when_the_banner_runs_past_the_last_row() {
 
 #[test]
 fn switch_create_rows_show_the_input_and_an_error() {
-    let rows = switch_create_rows("wip", None, 30);
+    // Caret at the end of the name: the whole name precedes it.
+    let rows = switch_create_rows("wip", 3, None, 30);
     assert_eq!(rows.len(), 1);
     let plain = console::strip_ansi_codes(&rows[0]).into_owned();
     assert!(plain.contains("+ new: wip"));
     assert!(plain.contains(CARET));
 
-    let with_error = switch_create_rows("feature", Some("\"feature\" already exists."), 40);
+    // Caret in the middle: it splits the name (`wi▏p`).
+    let mid = switch_create_rows("wip", 2, None, 30);
+    let plain_mid = console::strip_ansi_codes(&mid[0]).into_owned();
+    assert!(plain_mid.contains(&format!("wi{CARET}p")));
+
+    let with_error = switch_create_rows("feature", 7, Some("\"feature\" already exists."), 40);
     assert_eq!(with_error.len(), 2);
     assert!(console::strip_ansi_codes(&with_error[1]).contains("already exists"));
 }
@@ -1060,6 +1186,30 @@ fn render_frame_shows_the_inline_create_row_in_switch() {
     let joined = console::strip_ansi_codes(&frame.join("\n")).into_owned();
     assert!(joined.contains("+ new: wip"));
     assert!(joined.contains("switch"));
+}
+
+#[test]
+fn switch_rename_rows_show_the_target_and_typed_label() {
+    let rows = switch_rename_rows("main", "My main", 40);
+    assert_eq!(rows.len(), 1);
+    let plain = console::strip_ansi_codes(&rows[0]).into_owned();
+    assert!(plain.contains("rename main: My main"));
+    assert!(plain.contains(CARET));
+}
+
+#[test]
+fn render_frame_shows_the_inline_rename_row_in_switch() {
+    let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
+    state.enter_switch(super::super::state::ReturnMode::Overview);
+    state.switch_move_down(); // cursor onto "main"
+    assert!(state.switch_begin_rename());
+    for c in " 2".chars() {
+        state.rename_push_char(c);
+    }
+    let frame = render_frame(24, 80, &state);
+    let joined = console::strip_ansi_codes(&frame.join("\n")).into_owned();
+    // Prefilled with the branch name, then edited to "main 2".
+    assert!(joined.contains("rename main: main 2"));
 }
 
 // --- command hints (Overview) ------------------------------------------
@@ -1173,6 +1323,7 @@ fn state_with_sessions(names: &[&str]) -> HomeState {
         .iter()
         .map(|n| SessionRecord {
             name: n.to_string(),
+            display_name: None,
             root: PathBuf::from(format!("/ws/{n}")),
             worktrees: Vec::new(),
             created_at: Utc::now(),

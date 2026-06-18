@@ -13,6 +13,7 @@
 use crate::domain::settings::{
     AgentCli, BranchSource, LocalSettings, SessionActionUi, Settings, Theme, LOCAL_LLM_MODELS,
 };
+use crate::presentation::tui::widgets::text_input::TextInput;
 
 /// The themes in the order they cycle through.
 const THEMES: [Theme; 3] = [Theme::Light, Theme::Dark, Theme::System];
@@ -132,19 +133,23 @@ pub struct RowView {
 /// password entry and confirmation flow are unit-testable.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct InstallModal {
-    password: String,
+    password: TextInput,
 }
 
 impl InstallModal {
     /// The sudo password typed so far.
     pub fn password(&self) -> &str {
-        &self.password
+        self.password.value()
     }
 
-    /// The password rendered as bullets, one per character, so it is never
-    /// shown in the clear.
-    pub fn masked(&self) -> String {
-        "•".repeat(self.password.chars().count())
+    /// The password rendered as bullets, one per character, with `caret` drawn at
+    /// the editing position, so it is never shown in the clear yet ←/→/Home/End
+    /// move a visible caret. Each character maps to one bullet, so the caret lands
+    /// between the right bullets even for multi-byte input.
+    pub fn masked(&self, caret: &str) -> String {
+        let before = self.password.before().chars().count();
+        let after = self.password.after().chars().count();
+        format!("{}{caret}{}", "•".repeat(before), "•".repeat(after))
     }
 }
 
@@ -282,25 +287,62 @@ impl Config {
         self.install_modal = None;
     }
 
-    /// Append a typed character to the modal's password. A no-op when no modal
-    /// is open.
+    /// Insert a typed character at the caret of the modal's password. A no-op
+    /// when no modal is open.
     pub fn install_modal_push(&mut self, c: char) {
         if let Some(modal) = &mut self.install_modal {
-            modal.password.push(c);
+            modal.password.insert(c);
         }
     }
 
-    /// Delete the last character of the modal's password (Backspace).
+    /// Delete the character before the caret of the modal's password (Backspace).
     pub fn install_modal_backspace(&mut self) {
         if let Some(modal) = &mut self.install_modal {
-            modal.password.pop();
+            modal.password.backspace();
+        }
+    }
+
+    /// Delete the character at the caret of the modal's password (the `Del` key).
+    pub fn install_modal_delete_forward(&mut self) {
+        if let Some(modal) = &mut self.install_modal {
+            modal.password.delete_forward();
+        }
+    }
+
+    /// Move the password caret one character left.
+    pub fn install_modal_cursor_left(&mut self) {
+        if let Some(modal) = &mut self.install_modal {
+            modal.password.move_left();
+        }
+    }
+
+    /// Move the password caret one character right.
+    pub fn install_modal_cursor_right(&mut self) {
+        if let Some(modal) = &mut self.install_modal {
+            modal.password.move_right();
+        }
+    }
+
+    /// Move the password caret to the start of the line.
+    pub fn install_modal_cursor_home(&mut self) {
+        if let Some(modal) = &mut self.install_modal {
+            modal.password.move_home();
+        }
+    }
+
+    /// Move the password caret to the end of the line.
+    pub fn install_modal_cursor_end(&mut self) {
+        if let Some(modal) = &mut self.install_modal {
+            modal.password.move_end();
         }
     }
 
     /// The sudo password entered in the modal, ready to hand to the installer.
     /// `None` when no modal is open.
     pub fn install_modal_password(&self) -> Option<String> {
-        self.install_modal.as_ref().map(|m| m.password.clone())
+        self.install_modal
+            .as_ref()
+            .map(|m| m.password.value().to_string())
     }
 
     /// Mark the local LLM as installed and turn it on, so the row becomes an

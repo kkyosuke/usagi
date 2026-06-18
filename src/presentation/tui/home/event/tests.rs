@@ -24,6 +24,14 @@ fn noop_remove(_: &str, _: bool) -> SessionOutcome {
     }
 }
 
+fn noop_rename(_: &str, _: &str) -> SessionOutcome {
+    SessionOutcome {
+        line: LogLine::output("renamed"),
+        sessions: None,
+        select: None,
+    }
+}
+
 /// A key source that replays a scripted sequence of results.
 struct ScriptedReader {
     keys: VecDeque<io::Result<Key>>,
@@ -150,6 +158,7 @@ fn run_full(
         &UpdateHandle::new(),
         &mut persist,
         create_session,
+        &mut (noop_rename as fn(&str, &str) -> SessionOutcome),
         &mut remove_session,
         &mut branches,
         open_terminal,
@@ -185,6 +194,7 @@ fn run_with_live_monitor(
         &UpdateHandle::new(),
         persist,
         &mut create,
+        &mut (noop_rename as fn(&str, &str) -> SessionOutcome),
         &mut remove_session,
         &mut branches,
         &mut open,
@@ -224,6 +234,7 @@ fn a_populated_update_handle_is_read_before_painting() {
         &update,
         &mut persist,
         &mut create,
+        &mut (noop_rename as fn(&str, &str) -> SessionOutcome),
         &mut remove,
         &mut (no_branches as fn() -> Vec<String>),
         &mut open,
@@ -287,6 +298,7 @@ fn state_with_sessions(names: &[&str]) -> HomeState {
         .iter()
         .map(|n| SessionRecord {
             name: n.to_string(),
+            display_name: None,
             root: PathBuf::from(format!("/ws/.usagi/sessions/{n}")),
             worktrees: vec![worktree(Some(n), &format!("/ws/{n}"))],
             created_at: Utc::now(),
@@ -400,6 +412,7 @@ fn overview_caret_keys_edit_within_the_line() {
         &UpdateHandle::new(),
         &mut persist,
         &mut create,
+        &mut (noop_rename as fn(&str, &str) -> SessionOutcome),
         &mut remove,
         &mut (no_branches as fn() -> Vec<String>),
         &mut open,
@@ -442,6 +455,7 @@ fn submitted_commands_are_handed_to_persist() {
         &UpdateHandle::new(),
         &mut persist,
         &mut create,
+        &mut (noop_rename as fn(&str, &str) -> SessionOutcome),
         &mut remove,
         &mut (no_branches as fn() -> Vec<String>),
         &mut open,
@@ -580,6 +594,7 @@ fn session_remove_with_a_name_and_force_routes_to_remove() {
         &UpdateHandle::new(),
         &mut persist,
         &mut create,
+        &mut (noop_rename as fn(&str, &str) -> SessionOutcome),
         &mut remove,
         &mut (no_branches as fn() -> Vec<String>),
         &mut open,
@@ -622,6 +637,7 @@ fn close_typed_in_overview_targets_the_active_session() {
         &UpdateHandle::new(),
         &mut persist,
         &mut create,
+        &mut (noop_rename as fn(&str, &str) -> SessionOutcome),
         &mut remove,
         &mut (no_branches as fn() -> Vec<String>),
         &mut open,
@@ -679,6 +695,7 @@ fn focus_close_command_force_removes_the_focused_session_then_enters_switch() {
         &UpdateHandle::new(),
         &mut persist,
         &mut create,
+        &mut (noop_rename as fn(&str, &str) -> SessionOutcome),
         &mut remove,
         &mut branches,
         &mut open,
@@ -737,6 +754,7 @@ fn focus_menu_close_force_removes_the_focused_session_then_enters_switch() {
         &UpdateHandle::new(),
         &mut persist,
         &mut create,
+        &mut (noop_rename as fn(&str, &str) -> SessionOutcome),
         &mut remove,
         &mut branches,
         &mut open,
@@ -789,6 +807,7 @@ fn session_remove_without_a_name_opens_the_modal_and_bulk_removes() {
         &UpdateHandle::new(),
         &mut persist,
         &mut create,
+        &mut (noop_rename as fn(&str, &str) -> SessionOutcome),
         &mut remove,
         &mut (no_branches as fn() -> Vec<String>),
         &mut open,
@@ -1137,10 +1156,15 @@ fn switch_inline_create_makes_and_focuses_the_new_session() {
     let mut keys = typed("session switch");
     keys.push(Ok(Key::Enter)); // -> Switch
     keys.push(Ok(Key::Char('c'))); // begin create
-    keys.extend(typed("wip"));
+    keys.push(Ok(Key::Insert)); // unhandled inside create: the `_` arm
+    keys.extend(typed("Xwip")); // a stray leading 'X' to edit out
+    keys.push(Ok(Key::Home)); // caret to the start
+    keys.push(Ok(Key::Del)); // forward-delete the 'X' -> "wip"
+    keys.push(Ok(Key::End)); // caret to the end
+    keys.push(Ok(Key::ArrowLeft)); // caret before 'p'
+    keys.push(Ok(Key::ArrowRight)); // caret after 'p' (end)
     keys.push(Ok(Key::Backspace)); // "wi"
     keys.push(Ok(Key::Char('p'))); // "wip"
-    keys.push(Ok(Key::Home)); // ignored inside create
     keys.push(Ok(Key::Enter)); // confirm -> Focus
     keys.push(Ok(Key::Escape)); // Focus -> Overview
     keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
@@ -1195,6 +1219,92 @@ fn switch_create_invalid_name_keeps_the_input_open() {
     keys.push(Ok(Key::Enter)); // empty -> error, stays open
     keys.push(Ok(Key::CtrlC));
     assert!(matches!(run(keys, sample_state()).unwrap(), Outcome::Quit));
+}
+
+/// Drive `event_loop` with a recording rename callback, returning the (target,
+/// label) pairs it received and the final outcome.
+fn run_recording_rename(keys: Vec<io::Result<Key>>) -> (Vec<(String, String)>, Outcome) {
+    let term = Term::stdout();
+    let mut reader = ScriptedReader::new(keys);
+    let monitor = MonitorHandle::detached();
+    let renamed = RefCell::new(Vec::new());
+    let mut persist: fn(&str) = noop_persist;
+    let mut create: fn(&str) -> SessionOutcome = noop_create;
+    let mut rename = |name: &str, label: &str| {
+        renamed
+            .borrow_mut()
+            .push((name.to_string(), label.to_string()));
+        noop_rename(name, label)
+    };
+    let mut remove: fn(&str, bool) -> SessionOutcome = noop_remove;
+    let mut open: fn(&mut HomeState, &Path, bool) -> Result<PaneExit> = noop_open;
+    let mut config: fn(&Term) -> Result<Option<SessionActionUi>> = noop_config;
+    let mut preview: fn(&Path) -> Option<TerminalView> = noop_preview;
+    let outcome = event_loop(
+        &term,
+        &mut reader,
+        sample_state(),
+        Path::new("/ws"),
+        &monitor,
+        &UpdateHandle::new(),
+        &mut persist,
+        &mut create,
+        &mut rename,
+        &mut remove,
+        &mut (no_branches as fn() -> Vec<String>),
+        &mut open,
+        &mut config,
+        &mut preview,
+    )
+    .unwrap();
+    (renamed.into_inner(), outcome)
+}
+
+#[test]
+fn switch_inline_rename_edits_then_confirms_the_label() {
+    // Switch -> cursor onto "main" -> `r` (prefills "main") -> clear -> type
+    // "Top" -> Enter persists via the rename callback.
+    let mut keys = typed("session switch");
+    keys.push(Ok(Key::Enter)); // -> Switch
+    keys.push(Ok(Key::ArrowDown)); // cursor "main"
+    keys.push(Ok(Key::Char('r'))); // begin rename (prefilled "main")
+    keys.push(Ok(Key::ArrowUp)); // a non-edit key is ignored while renaming
+    for _ in 0..4 {
+        keys.push(Ok(Key::Backspace)); // clear the prefill
+    }
+    keys.extend(typed("Top"));
+    keys.push(Ok(Key::Enter)); // confirm -> rename callback
+    keys.push(Ok(Key::CtrlC)); // quit
+    let (renamed, outcome) = run_recording_rename(keys);
+    assert!(matches!(outcome, Outcome::Quit));
+    assert_eq!(renamed, vec![("main".to_string(), "Top".to_string())]);
+}
+
+#[test]
+fn switch_inline_rename_can_be_cancelled_with_no_persist() {
+    // `r` opens the input, Esc closes it without calling the rename callback.
+    let mut keys = typed("session switch");
+    keys.push(Ok(Key::Enter));
+    keys.push(Ok(Key::ArrowDown)); // cursor "main"
+    keys.push(Ok(Key::Char('r'))); // begin rename
+    keys.push(Ok(Key::Char('x'))); // type something
+    keys.push(Ok(Key::Escape)); // cancel (stay in Switch)
+    keys.push(Ok(Key::CtrlC));
+    let (renamed, outcome) = run_recording_rename(keys);
+    assert!(matches!(outcome, Outcome::Quit));
+    assert!(renamed.is_empty());
+}
+
+#[test]
+fn switch_rename_on_the_root_row_is_a_noop() {
+    // `r` on the root row (no session) opens nothing; the run just quits.
+    let mut keys = typed("session switch");
+    keys.push(Ok(Key::Enter)); // -> Switch (cursor on root)
+    keys.push(Ok(Key::Char('r'))); // no-op on root
+    keys.push(Ok(Key::CtrlC));
+    let (renamed, outcome) = run_recording_rename(keys);
+    assert!(matches!(outcome, Outcome::Quit));
+    assert!(renamed.is_empty());
 }
 
 // --- 在席 (Focus) menu surface -----------------------------------------
@@ -1320,6 +1430,14 @@ fn focus_prompt_edits_completes_and_runs_terminal() {
     let mut keys = typed("session switch feat");
     keys.push(Ok(Key::Enter)); // Focus feat (prompt UI)
     keys.extend(typed("ter"));
+    keys.push(Ok(Key::Insert)); // unhandled in the prompt: the `_` arm
+    keys.push(Ok(Key::Home)); // caret to the start
+    keys.push(Ok(Key::End)); // caret to the end
+    keys.push(Ok(Key::ArrowLeft)); // caret before 'r'
+    keys.push(Ok(Key::Del)); // forward-delete 'r' -> "te"
+    keys.push(Ok(Key::Char('r'))); // "ter" again, caret at end
+    keys.push(Ok(Key::ArrowLeft)); // before 'r'
+    keys.push(Ok(Key::ArrowRight)); // after 'r' (end)
     keys.push(Ok(Key::Backspace)); // "te"
     keys.push(Ok(Key::Tab)); // -> "terminal"
     keys.push(Ok(Key::Enter)); // run terminal (attach)

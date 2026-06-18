@@ -206,6 +206,11 @@ fn event_loop_attaches_a_live_session_end_to_end() {
         select: None,
     };
     let mut config = |_: &Term| Ok(Some(crate::domain::settings::SessionActionUi::Menu));
+    let mut rename = |_: &str, _: &str| SessionOutcome {
+        line: LogLine::output("renamed"),
+        sessions: None,
+        select: None,
+    };
 
     let outcome = event_loop(
         &term,
@@ -216,6 +221,7 @@ fn event_loop_attaches_a_live_session_end_to_end() {
         &update,
         &mut persist,
         &mut create,
+        &mut rename,
         &mut remove,
         &mut (Vec::new as fn() -> Vec<String>),
         &mut open_terminal,

@@ -4,6 +4,8 @@
 //! it launches as the bare command for now. The adapter exists so the launch path
 //! works for Gemini sessions today, with no change to the call sites.
 
+use std::path::Path;
+
 use crate::domain::agent::{Agent, AgentWiring};
 use crate::domain::settings::AgentCli;
 
@@ -23,10 +25,20 @@ impl Agent for GeminiAgent {
         "gemini"
     }
 
-    fn launch_command(&self, wiring: &AgentWiring) -> String {
+    fn launch_command(&self, wiring: &AgentWiring, resume: bool) -> String {
         // Gemini has no inline MCP flag — its servers come from settings.json — so
-        // it launches plain (the domain builder returns the bare command).
-        AgentCli::Gemini.launch_command(wiring.local_llm_model.as_deref(), &wiring.usagi_bin)
+        // it launches plain (the domain builder returns the bare command). It also
+        // has no resume flag, so `resume` is ignored.
+        AgentCli::Gemini.launch_command(
+            wiring.local_llm_model.as_deref(),
+            &wiring.usagi_bin,
+            resume,
+        )
+    }
+
+    fn has_resumable_session(&self, _dir: &Path) -> bool {
+        // Gemini has no resume notion usagi drives, so it always launches fresh.
+        false
     }
 }
 
@@ -41,14 +53,21 @@ mod tests {
         assert_eq!(agent.program(), "gemini");
         // The wiring is ignored — plain `gemini` whether or not the local LLM is on.
         assert_eq!(
-            agent.launch_command(&Settings::default().agent_wiring("usagi")),
+            agent.launch_command(&Settings::default().agent_wiring("usagi"), false),
             "gemini"
         );
         let mut settings = Settings::default();
         settings.local_llm.enabled = true;
         assert_eq!(
-            agent.launch_command(&settings.agent_wiring("usagi")),
+            agent.launch_command(&settings.agent_wiring("usagi"), false),
             "gemini"
         );
+        // Gemini has no resume flag, so requesting one still launches plain — and
+        // it never reports a resumable session.
+        assert_eq!(
+            agent.launch_command(&Settings::default().agent_wiring("usagi"), true),
+            "gemini"
+        );
+        assert!(!agent.has_resumable_session(std::path::Path::new("/any/worktree")));
     }
 }

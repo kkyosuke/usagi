@@ -67,6 +67,7 @@ mod tests {
             updated_at: ts,
             sessions: vec![SessionRecord {
                 name: "login".to_string(),
+                display_name: None,
                 root: PathBuf::from("/repo/.usagi/sessions/login"),
                 created_at: ts,
                 worktrees: vec![

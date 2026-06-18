@@ -95,6 +95,7 @@ pub fn create(workspace_root: &Path, name: &str) -> Result<CreatedSession> {
         fs::create_dir_all(parent).context(format!("failed to create {}", parent.display()))?;
         let base = tree::base_ref(workspace_root);
         git::add_worktree(workspace_root, &dest_root, name, base.as_deref())?;
+        git::init_submodules(&dest_root)?;
         worktrees.push(dest_root.clone());
     } else {
         fs::create_dir_all(&dest_root)
@@ -148,12 +149,41 @@ fn record(workspace_root: &Path, name: &str, root: &Path, worktrees: &[PathBuf])
     let now = Utc::now();
     state.sessions.push(SessionRecord {
         name: name.to_string(),
+        display_name: None,
         root: root.to_path_buf(),
         worktrees: worktree_states,
         created_at: now,
     });
     state.updated_at = now;
     store.save(&state)
+}
+
+/// Set (or clear) a session's sidebar display name in `state.json`, leaving its
+/// branch / identity untouched.
+///
+/// `display` is trimmed; an empty string — or one equal to the session name —
+/// clears the override (the sidebar falls back to the session name). Returns the
+/// label now shown for the session. Fails when no session named `name` exists.
+pub fn set_display_name(workspace_root: &Path, name: &str, display: &str) -> Result<String> {
+    let store = WorkspaceStore::new(workspace_root);
+    let mut state = store
+        .load()?
+        .ok_or_else(|| anyhow!("no sessions recorded for this workspace"))?;
+    let session = state
+        .sessions
+        .iter_mut()
+        .find(|s| s.name == name)
+        .ok_or_else(|| anyhow!("no such session: \"{name}\""))?;
+    let trimmed = display.trim();
+    session.display_name = if trimmed.is_empty() || trimmed == session.name {
+        None
+    } else {
+        Some(trimmed.to_string())
+    };
+    let label = session.display_label().to_string();
+    state.updated_at = Utc::now();
+    store.save(&state)?;
+    Ok(label)
 }
 
 /// List the sessions recorded for `workspace_root`, in creation order.
@@ -625,6 +655,64 @@ mod tests {
             .map(|s| s.name)
             .collect();
         assert_eq!(names, vec!["first", "second"]);
+    }
+
+    // --- set_display_name --------------------------------------------------
+
+    fn display_name_of(root: &Path, name: &str) -> Option<String> {
+        list(root)
+            .unwrap()
+            .into_iter()
+            .find(|s| s.name == name)
+            .and_then(|s| s.display_name)
+    }
+
+    #[test]
+    fn set_display_name_sets_clears_and_leaves_other_sessions_alone() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        create(root.path(), "feature").unwrap();
+        create(root.path(), "other").unwrap();
+
+        // Set an override → it is stored and returned as the shown label.
+        let shown = set_display_name(root.path(), "feature", "Nice name").unwrap();
+        assert_eq!(shown, "Nice name");
+        assert_eq!(
+            display_name_of(root.path(), "feature").as_deref(),
+            Some("Nice name")
+        );
+        // The branch / identity is untouched and other sessions keep their state.
+        assert_eq!(display_name_of(root.path(), "other"), None);
+
+        // A surrounding-whitespace label is trimmed before storing.
+        set_display_name(root.path(), "feature", "  Spaced  ").unwrap();
+        assert_eq!(
+            display_name_of(root.path(), "feature").as_deref(),
+            Some("Spaced")
+        );
+
+        // An empty label clears the override (falls back to the session name).
+        let shown = set_display_name(root.path(), "feature", "   ").unwrap();
+        assert_eq!(shown, "feature");
+        assert_eq!(display_name_of(root.path(), "feature"), None);
+
+        // A label equal to the session name is treated as "no override".
+        set_display_name(root.path(), "feature", "feature").unwrap();
+        assert_eq!(display_name_of(root.path(), "feature"), None);
+    }
+
+    #[test]
+    fn set_display_name_errors_without_state_or_session() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        // No state.json yet.
+        let err = set_display_name(root.path(), "x", "label").unwrap_err();
+        assert!(err.to_string().contains("no sessions recorded"));
+
+        // State exists but the named session does not.
+        create(root.path(), "present").unwrap();
+        let err = set_display_name(root.path(), "absent", "label").unwrap_err();
+        assert!(err.to_string().contains("no such session"));
     }
 
     // --- remove ------------------------------------------------------------

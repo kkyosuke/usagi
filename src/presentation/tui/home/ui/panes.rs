@@ -9,6 +9,7 @@ use console::style;
 
 use super::super::command::{CommandInfo, Hint};
 use super::super::state::{HomeState, LineKind, LogLine, Mode, WorktreeList, ROOT_NAME};
+use super::super::terminal_tabs::TabStrip;
 use super::super::terminal_view::TerminalView;
 use super::{
     clip_to_width, ACTIVE_COL, CARET, DETACHED, DIRTY_ICON, EMPTY_MESSAGE, HINT_INDENT, HINT_MAX,
@@ -169,6 +170,7 @@ fn detail_line(gutter: &str, detail: String) -> String {
 #[allow(clippy::too_many_arguments)]
 pub(super) fn worktree_row(
     worktree: &WorktreeState,
+    label: &str,
     name_width: usize,
     detail_width: usize,
     selected: bool,
@@ -184,11 +186,14 @@ pub(super) fn worktree_row(
     } else {
         style("○").dim().to_string()
     };
-    let branch = name_cell(
-        worktree.branch.as_deref().unwrap_or(DETACHED),
-        name_width,
-        active || selected,
-    );
+    // The session's sidebar label (its custom display name, or the branch when
+    // unset); a detached worktree with no label falls back to the placeholder.
+    let name = if label.is_empty() {
+        worktree.branch.as_deref().unwrap_or(DETACHED)
+    } else {
+        label
+    };
+    let branch = name_cell(name, name_width, active || selected);
     let status = status_cell(Some(worktree.status));
     let gutter = gutter_cell(selected, active, in_switch);
     // Three columns sit between the name and the right-edge status (the old
@@ -301,6 +306,7 @@ pub(super) fn left_pane(
             let selected = row == list.selected_index();
             let (mut top, mut detail) = worktree_row(
                 w,
+                list.display_label(i),
                 name_width,
                 detail_width,
                 selected,
@@ -348,6 +354,28 @@ pub(super) fn log_tail(log: &[LogLine], width: usize, rows: usize) -> Vec<String
         .take(rows)
         .map(|l| log_line(l, width))
         .collect()
+}
+
+/// Builds the tab strip drawn above the embedded terminal in 没入: one `[label]`
+/// chip per pane, the active one reversed (and bold) so it reads as the visible
+/// tab, the rest dimmed. Clipped to the pane width. A single-pane session still
+/// gets the strip, so the terminal below it never shifts as panes come and go.
+pub(super) fn tab_strip_line(strip: &TabStrip, right_w: usize) -> String {
+    let chips = strip
+        .labels
+        .iter()
+        .enumerate()
+        .map(|(i, label)| {
+            let chip = format!(" {label} ");
+            if i == strip.active {
+                style(chip).reverse().bold().to_string()
+            } else {
+                style(chip).dim().to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    clip_to_width(&chips, right_w)
 }
 
 /// Builds the right pane from an embedded terminal snapshot: each grid row,
@@ -418,8 +446,14 @@ pub(super) fn focus_prompt(state: &HomeState, width: usize) -> Vec<String> {
         String::new(),
     ];
     let prompt = style("❯").red().bold();
-    let text = style(state.focus_prompt()).cyan();
-    lines.push(clip_to_width(&format!("{prompt} {text}{CARET}"), width));
+    // Split at the caret so ←/→/Home/End move a visible caret through the prompt.
+    let (before, after) = state.focus_prompt().split_at(state.focus_prompt_cursor());
+    let before = style(before).cyan();
+    let after = style(after).cyan();
+    lines.push(clip_to_width(
+        &format!("{prompt} {before}{CARET}{after}"),
+        width,
+    ));
     lines.push(String::new());
     lines.extend(focus_hint_lines(state.focus_prompt_hint(), width));
     lines
@@ -476,7 +510,21 @@ pub(super) fn switch_preview(state: &HomeState, width: usize, rows: usize) -> Ve
             state.is_done(&w.path),
             Some(w.status),
         ),
-        None => (ROOT_NAME.to_string(), false, false, false, false, None),
+        None => {
+            // The root row carries no worktree, but its embedded session is
+            // keyed by the workspace root path, so match it against the same
+            // live / running / waiting / done sets — otherwise a running root
+            // agent never previews live here (it only re-appears once selected).
+            let root = state.root_path();
+            (
+                ROOT_NAME.to_string(),
+                state.is_live(root),
+                state.is_running(root),
+                state.is_waiting(root),
+                state.is_done(root),
+                None,
+            )
+        }
     };
 
     // Header: the name, then either the git status + agent state (a session) or
@@ -545,11 +593,24 @@ pub(super) fn right_pane_contents(state: &HomeState, right_w: usize, rows: usize
             SessionActionUi::Menu => focus_menu(state, right_w),
             SessionActionUi::Prompt => focus_prompt(state, right_w),
         },
-        Mode::Attached => match state.terminal_view() {
-            Some(view) => terminal_pane(view, right_w, rows),
-            None => vec![style(clip_to_width(TERMINAL_STARTING, right_w))
-                .dim()
-                .to_string()],
-        },
+        Mode::Attached => {
+            // The tab strip (when the pane driver has published one) takes the top
+            // row; the embedded terminal fills the rest. A starting hint stands in
+            // until the first screen snapshot arrives.
+            let mut lines = Vec::with_capacity(rows);
+            if let Some(strip) = state.terminal_tabs() {
+                lines.push(tab_strip_line(strip, right_w));
+            }
+            let body = rows.saturating_sub(lines.len());
+            match state.terminal_view() {
+                Some(view) => lines.extend(terminal_pane(view, right_w, body)),
+                None => lines.push(
+                    style(clip_to_width(TERMINAL_STARTING, right_w))
+                        .dim()
+                        .to_string(),
+                ),
+            }
+            lines
+        }
     }
 }

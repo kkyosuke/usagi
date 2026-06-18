@@ -211,6 +211,7 @@ pub(super) fn switch_key(
     workspace_root: &Path,
     key: Key,
     create_session: &mut dyn FnMut(&str) -> SessionOutcome,
+    rename_display: &mut dyn FnMut(&str, &str) -> SessionOutcome,
     existing_branches: &mut dyn FnMut() -> Vec<String>,
     open_terminal: &mut dyn FnMut(&mut HomeState, &Path, bool) -> Result<PaneExit>,
     preview: &mut dyn FnMut(&Path) -> Option<TerminalView>,
@@ -230,9 +231,32 @@ pub(super) fn switch_key(
                     state.enter_focus(row);
                 }
             }
-            Key::Backspace => state.create_backspace(),
             Key::Escape => state.create_cancel(),
+            Key::Backspace => state.create_backspace(),
+            Key::Del => state.create_delete_forward(),
+            // ←/→/Home/End move the caret so the name can be edited mid-string.
+            Key::ArrowLeft => state.create_cursor_left(),
+            Key::ArrowRight => state.create_cursor_right(),
+            Key::Home => state.create_cursor_home(),
+            Key::End => state.create_cursor_end(),
             Key::Char(c) => state.create_push_char(c),
+            _ => {}
+        }
+        return Flow::Continue;
+    }
+
+    // While the inline rename input is open it captures every key, like create.
+    if state.is_renaming() {
+        match key {
+            Key::Enter => {
+                if let Some((target, label)) = state.switch_confirm_rename() {
+                    let outcome = rename_display(&target, &label);
+                    state.apply_session_outcome(outcome);
+                }
+            }
+            Key::Backspace => state.rename_backspace(),
+            Key::Escape => state.rename_cancel(),
+            Key::Char(c) => state.rename_push_char(c),
             _ => {}
         }
         return Flow::Continue;
@@ -262,6 +286,11 @@ pub(super) fn switch_key(
         }
         // `c` begins inline session creation.
         Key::Char('c') => state.switch_begin_create(existing_branches()),
+        // `r` begins inline rename of the selected session's sidebar label
+        // (a no-op on the root row, which is not a session).
+        Key::Char('r') => {
+            state.switch_begin_rename();
+        }
         // Esc / h backs out to where Switch was opened from.
         Key::Escape | Key::Char('h') => leave_switch(
             term,
@@ -500,6 +529,12 @@ fn focus_prompt_key(
             let _ = state.focus_prompt_complete();
         }
         Key::Backspace => state.focus_prompt_backspace(),
+        Key::Del => state.focus_prompt_delete_forward(),
+        // ←/→/Home/End move the caret so the prompt can be edited mid-string.
+        Key::ArrowLeft => state.focus_prompt_cursor_left(),
+        Key::ArrowRight => state.focus_prompt_cursor_right(),
+        Key::Home => state.focus_prompt_cursor_home(),
+        Key::End => state.focus_prompt_cursor_end(),
         Key::Char(c) => state.focus_prompt_push_char(c),
         _ => {}
     }

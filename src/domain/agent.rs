@@ -13,6 +13,8 @@
 //! handed. How that policy is rendered into a CLI's invocation lives in the
 //! adapters (the infrastructure layer).
 
+use std::path::Path;
+
 /// What usagi requires of the agent CLI it drives, as one interface.
 ///
 /// Implemented once per CLI in `infrastructure::agent`. `Send + Sync` so the
@@ -24,7 +26,19 @@ pub trait Agent: Send + Sync {
     /// The full command line `:agent` sends to the shell, wiring usagi's MCP
     /// servers, system prompt, and (where supported) lifecycle hooks in per the
     /// given [`AgentWiring`].
-    fn launch_command(&self, wiring: &AgentWiring) -> String;
+    ///
+    /// When `resume` is set the CLI is asked to continue its previous
+    /// conversation in the worktree (Claude's `--continue`), so reopening a
+    /// session picks up where it left off; CLIs without a resume notion ignore
+    /// it. The caller decides whether to resume from
+    /// [`has_resumable_session`](Self::has_resumable_session).
+    fn launch_command(&self, wiring: &AgentWiring, resume: bool) -> String;
+
+    /// Whether a prior conversation this CLI could resume exists for the
+    /// worktree at `dir` — checked so `:agent` only passes the resume flag when
+    /// continuing would actually succeed, falling back to a fresh launch
+    /// otherwise. A CLI without resumable history always returns `false`.
+    fn has_resumable_session(&self, dir: &Path) -> bool;
 }
 
 /// usagi's wiring policy handed to an [`Agent`] adapter when it builds the launch

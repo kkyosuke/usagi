@@ -78,6 +78,13 @@ pub fn event_loop(
                     painter.reset();
                 }
                 Key::Backspace => config.install_modal_backspace(),
+                Key::Del => config.install_modal_delete_forward(),
+                // ←/→/Home/End move the caret so the password can be edited
+                // mid-string, not only at the end.
+                Key::ArrowLeft => config.install_modal_cursor_left(),
+                Key::ArrowRight => config.install_modal_cursor_right(),
+                Key::Home => config.install_modal_cursor_home(),
+                Key::End => config.install_modal_cursor_end(),
                 Key::Char(c) => config.install_modal_push(c),
                 Key::Escape => config.close_install_modal(),
                 Key::CtrlC => return Ok(Outcome::Quit),
@@ -550,11 +557,18 @@ mod tests {
     fn space_opens_the_install_modal_and_confirms_with_the_typed_password() {
         let mut keys = keys_to_local_llm();
         keys.extend([
-            Ok(Key::Char(' ')), // open the install modal
-            Ok(Key::Char('p')), // type the sudo password
-            Ok(Key::Char('w')),
-            Ok(Key::ArrowUp), // ignored inside the modal
-            Ok(Key::Enter),   // confirm -> install
+            Ok(Key::Char(' ')),  // open the install modal
+            Ok(Key::Char('p')),  // type the sudo password
+            Ok(Key::Char('X')),  // a stray character to edit out
+            Ok(Key::Char('w')),  // "pXw"
+            Ok(Key::Home),       // caret to the start
+            Ok(Key::ArrowRight), // caret after 'p'
+            Ok(Key::Del),        // forward-delete 'X' -> "pw"
+            Ok(Key::End),        // caret to the end
+            Ok(Key::ArrowLeft),  // caret before 'w'
+            Ok(Key::ArrowRight), // caret after 'w' (end)
+            Ok(Key::ArrowUp),    // ignored inside the modal
+            Ok(Key::Enter),      // confirm -> install
             Ok(Key::Escape),
         ]);
         let (outcome, installed) = run_with_install(keys, sample_config(), ok_install);
