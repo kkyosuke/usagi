@@ -211,6 +211,7 @@ pub(super) fn switch_key(
     workspace_root: &Path,
     key: Key,
     create_session: &mut dyn FnMut(&str) -> SessionOutcome,
+    rename_display: &mut dyn FnMut(&str, &str) -> SessionOutcome,
     existing_branches: &mut dyn FnMut() -> Vec<String>,
     open_terminal: &mut dyn FnMut(&mut HomeState, &Path, bool) -> Result<PaneExit>,
     preview: &mut dyn FnMut(&Path) -> Option<TerminalView>,
@@ -244,6 +245,23 @@ pub(super) fn switch_key(
         return Flow::Continue;
     }
 
+    // While the inline rename input is open it captures every key, like create.
+    if state.is_renaming() {
+        match key {
+            Key::Enter => {
+                if let Some((target, label)) = state.switch_confirm_rename() {
+                    let outcome = rename_display(&target, &label);
+                    state.apply_session_outcome(outcome);
+                }
+            }
+            Key::Backspace => state.rename_backspace(),
+            Key::Escape => state.rename_cancel(),
+            Key::Char(c) => state.rename_push_char(c),
+            _ => {}
+        }
+        return Flow::Continue;
+    }
+
     match key {
         Key::ArrowUp | Key::Char('k') => state.switch_move_up(),
         Key::ArrowDown | Key::Char('j') => state.switch_move_down(),
@@ -268,6 +286,11 @@ pub(super) fn switch_key(
         }
         // `c` begins inline session creation.
         Key::Char('c') => state.switch_begin_create(existing_branches()),
+        // `r` begins inline rename of the selected session's sidebar label
+        // (a no-op on the root row, which is not a session).
+        Key::Char('r') => {
+            state.switch_begin_rename();
+        }
         // Esc / h backs out to where Switch was opened from.
         Key::Escape | Key::Char('h') => leave_switch(
             term,

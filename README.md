@@ -78,7 +78,7 @@ cargo run -- hop  # TUI を起動
 | モード | 役割 | 主な操作 |
 |---|---|---|
 | **統括**（Overview） | 既定。ワークスペース全体を操作 | 下部コマンドラインで `session` / `config` を実行 |
-| **切替**（Switch） | セッションの選択・新規作成 | 左ペインで `↑↓` 選択・`Enter` 確定・`c` で新規作成 |
+| **切替**（Switch） | セッションの選択・新規作成 | 左ペインで `↑↓` 選択・`Enter` 確定・`c` で新規作成・`r` で表示名変更 |
 | **在席**（Focus） | 選択中セッションのコマンド | 右ペインで `terminal` / `agent` を起動 |
 | **没入**（Attached） | 埋め込みシェル / Agent | ライブ端末を直接操作（`Ctrl-O` だけが予約キー）。マウス左ドラッグでテキストを選択し、離すとコピー。リンクを左クリックすると既定のブラウザで開く |
 
@@ -86,7 +86,7 @@ cargo run -- hop  # TUI を起動
 
 ```text
 session create feature-x   # .usagi/sessions/feature-x/ にセッション（worktree）を作成（短縮形 c / new）
-session switch             # 切替モードに入りセッションを選ぶ（一覧から ↑↓・Enter。c で新規作成）
+session switch             # 切替モードに入りセッションを選ぶ（一覧から ↑↓・Enter。c で新規作成・r で表示名変更）
 agent                      # 選んだセッションで Agent CLI（既定 claude）を埋め込み起動 → 没入
 ```
 

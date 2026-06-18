@@ -44,6 +44,22 @@ fn empty_list_still_has_the_root_row() {
 }
 
 #[test]
+fn display_label_uses_the_override_then_falls_back_to_the_branch() {
+    // A labels vec shorter than the worktrees is padded with `None`; a longer
+    // one is truncated to match.
+    let list = WorktreeList::with_labels(
+        "usagi",
+        vec![worktree("main"), worktree("feature"), worktree("fix")],
+        vec![Some("Main".to_string()), None],
+    );
+    assert_eq!(list.display_label(0), "Main"); // override
+    assert_eq!(list.display_label(1), "feature"); // explicit None → branch
+    assert_eq!(list.display_label(2), "fix"); // padded None → branch
+                                              // An out-of-range index has neither a label nor a worktree.
+    assert_eq!(list.display_label(9), "");
+}
+
+#[test]
 fn move_down_advances_past_the_root_row_and_wraps() {
     let mut list = sample(); // root, main, feature, fix
     list.move_down();
@@ -685,6 +701,91 @@ fn create_caret_moves_and_edits_mid_name() {
     assert_eq!(state.create_cursor(), Some(2));
 }
 
+// --- 切替 (Switch) inline rename ---------------------------------------
+
+#[test]
+fn switch_inline_rename_prefills_edits_then_confirms_a_label() {
+    let mut state = state(); // sessions: main, feature
+    state.enter_switch(ReturnMode::Overview);
+    state.switch_move_down(); // cursor onto "main"
+    assert!(state.switch_begin_rename());
+    assert!(state.is_renaming());
+    assert_eq!(state.rename_target(), Some("main"));
+    // The input is pre-filled with the current label (the session name).
+    assert_eq!(state.rename_input(), Some("main"));
+    // Edit it to a custom label.
+    for _ in 0..4 {
+        state.rename_backspace();
+    }
+    for c in "  My main  ".chars() {
+        state.rename_push_char(c);
+    }
+    // Confirm returns the target and the trimmed label, and closes the input.
+    assert_eq!(
+        state.switch_confirm_rename(),
+        Some(("main".to_string(), "My main".to_string()))
+    );
+    assert!(!state.is_renaming());
+}
+
+#[test]
+fn switch_begin_rename_is_a_noop_on_the_root_row_and_when_already_open() {
+    let mut state = state();
+    state.enter_switch(ReturnMode::Overview);
+    // Cursor on the root row: there is no session to rename.
+    assert!(state.list().root_selected());
+    assert!(!state.switch_begin_rename());
+    assert!(!state.is_renaming());
+
+    // On a session it opens, and a second begin while open is a no-op.
+    state.switch_move_down();
+    assert!(state.switch_begin_rename());
+    assert!(!state.switch_begin_rename());
+
+    // It also refuses to open while a create input is up.
+    state.rename_cancel();
+    state.switch_begin_create(Vec::new());
+    assert!(!state.switch_begin_rename());
+}
+
+#[test]
+fn rename_editing_is_a_noop_when_not_renaming() {
+    let mut state = state();
+    state.rename_push_char('a');
+    state.rename_backspace();
+    assert!(!state.is_renaming());
+    assert!(state.rename_input().is_none());
+    assert!(state.rename_target().is_none());
+    assert!(state.switch_confirm_rename().is_none());
+}
+
+#[test]
+fn rename_can_be_cancelled() {
+    let mut state = state();
+    state.enter_switch(ReturnMode::Overview);
+    state.switch_move_down();
+    state.switch_begin_rename();
+    state.rename_push_char('x');
+    state.rename_cancel();
+    assert!(!state.is_renaming());
+}
+
+#[test]
+fn restore_sessions_carries_the_display_name_onto_the_pane_label() {
+    let mut state = state();
+    let mut record = session_record("feature", 1);
+    record.display_name = Some("Login flow".to_string());
+    state.restore_sessions(vec![session_record("main", 1), record]);
+    // Row 0 is the root; worktree index 0 = "main" (no override), 1 = "feature".
+    assert_eq!(state.list().display_label(0), "main");
+    assert_eq!(state.list().display_label(1), "Login flow");
+    // The branch / identity is unchanged, so commands still key on it.
+    assert_eq!(
+        state.list().worktrees()[1].branch.as_deref(),
+        Some("feature")
+    );
+}
+
 // --- 在席 (Focus) ------------------------------------------------------
 
 #[test]
@@ -919,6 +1020,7 @@ fn focus_session_jumps_to_a_row_and_clamps_to_the_list() {
 fn session_record(name: &str, worktrees: usize) -> SessionRecord {
     SessionRecord {
         name: name.to_string(),
+        display_name: None,
         root: std::path::PathBuf::from(format!("/repo/.usagi/sessions/{name}")),
         worktrees: (0..worktrees).map(|_| worktree(name)).collect(),
         created_at: Utc::now(),
@@ -974,6 +1076,7 @@ fn multi_repo_session_collapses_to_one_row_with_an_aggregated_status() {
     let mut state = state();
     state.restore_sessions(vec![SessionRecord {
         name: "feature".to_string(),
+        display_name: None,
         root: PathBuf::from("/repo/.usagi/sessions/feature"),
         worktrees: vec![merged_a, merged_b, local_c],
         created_at: Utc::now(),
@@ -998,6 +1101,7 @@ fn a_session_with_no_worktrees_still_yields_a_row() {
     let mut state = state();
     state.restore_sessions(vec![SessionRecord {
         name: "empty".to_string(),
+        display_name: None,
         root: PathBuf::from("/repo/.usagi/sessions/empty"),
         worktrees: Vec::new(),
         created_at: Utc::now(),

@@ -185,9 +185,11 @@ pub(super) fn hint_lines(state: &HomeState, width: usize) -> Vec<String> {
 pub(super) fn input_line(state: &HomeState) -> String {
     match state.mode() {
         Mode::Overview => format!(" {}", overview_input_content(state)),
-        Mode::Switch => style(" Pick a session — ↑↓ move, Enter focus, c new".to_string())
-            .dim()
-            .to_string(),
+        Mode::Switch => {
+            style(" Pick a session — ↑↓ move, Enter focus, c new, r rename".to_string())
+                .dim()
+                .to_string()
+        }
         Mode::Focus => style(format!(
             " Operating session: {}",
             state.focused_session_name()
@@ -230,7 +232,8 @@ pub(super) fn footer_line(width: usize, state: &HomeState) -> String {
                 .to_string()
         }
         Mode::Switch => {
-            "[switch]  ↑↓ move / Enter focus / c new / Esc back / Ctrl-O overview".to_string()
+            "[switch]  ↑↓ move / Enter focus / c new / r rename / Esc back / Ctrl-O overview"
+                .to_string()
         }
         Mode::Focus => {
             format!(
@@ -262,6 +265,14 @@ pub(super) fn switch_create_rows(
         rows.push(style(clip_to_width(err, left_w)).red().to_string());
     }
     rows
+}
+
+/// Builds the inline rename row appended to the left pane in 切替 (Switch) while
+/// editing a session's sidebar label: `rename <target>: <input>▏`, clipped to the
+/// pane width. The label is cosmetic, so there is no validation row.
+pub(super) fn switch_rename_rows(target: &str, input: &str, left_w: usize) -> Vec<String> {
+    let label = clip_to_width(&format!("rename {target}: {input}{CARET}"), left_w);
+    vec![style(label).cyan().bold().to_string()]
 }
 
 /// Builds one removal-modal row: a `>` cursor for the highlighted entry, a

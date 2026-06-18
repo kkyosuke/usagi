@@ -35,7 +35,7 @@ pub use modal::{RemoveModal, TextModal};
 pub use mode::{Mode, PaneExit, ReturnMode};
 
 use list::session_row;
-use modal::CreateInput;
+use modal::{CreateInput, RenameInput};
 
 /// The outcome of submitting the command line: the side effect to act on, plus
 /// the command that was recorded in history (so the event loop can persist it).
@@ -112,6 +112,9 @@ pub struct HomeState {
     /// The inline session-name input, when creating a session from 切替. While
     /// set it captures the Switch mode's keys.
     create: Option<CreateInput>,
+    /// The inline display-name input, when renaming a session's sidebar label
+    /// from 切替. While set it captures the Switch mode's keys, like `create`.
+    rename: Option<RenameInput>,
     /// The 在席 (Focus) menu cursor: which Session-scope command is highlighted.
     focus_menu_cursor: usize,
     /// The 在席 (Focus) prompt buffer (the session-scoped command line).
@@ -197,6 +200,7 @@ impl HomeState {
             session_action_ui: SessionActionUi::default(),
             switch_return: ReturnMode::Overview,
             create: None,
+            rename: None,
             focus_menu_cursor: 0,
             focus_prompt: TextInput::new(),
             remove_modal: None,
@@ -286,7 +290,14 @@ impl HomeState {
     fn rebuild_list(&mut self) {
         let name = self.list.workspace_name().to_string();
         let rows = self.sessions.iter().map(session_row).collect();
-        self.list = WorktreeList::new(name, rows);
+        // Carry each session's sidebar label override onto its row so the pane
+        // shows the custom display name while commands still key on the branch.
+        let labels = self
+            .sessions
+            .iter()
+            .map(|s| s.display_name.clone())
+            .collect();
+        self.list = WorktreeList::with_labels(name, rows, labels);
     }
 
     pub fn sessions(&self) -> &[SessionRecord] {
@@ -751,6 +762,74 @@ impl HomeState {
         }
         self.create = None;
         Some(name)
+    }
+
+    /// Begin inline rename of the selected session's sidebar label in 切替: open
+    /// an input pre-filled with its current label that captures the mode's keys
+    /// until confirmed (Enter) or cancelled (Esc). A no-op on the root row (which
+    /// is not a session and has no label to change) and when an input is already
+    /// open. Returns whether the input opened.
+    pub fn switch_begin_rename(&mut self) -> bool {
+        if self.create.is_some() || self.rename.is_some() {
+            return false;
+        }
+        let Some(worktree) = self.list.selected() else {
+            return false;
+        };
+        let target = worktree_name(worktree).to_string();
+        // Pre-fill with the label currently shown so the user edits rather than
+        // retypes; an unset override pre-fills with the session name.
+        let input = self
+            .list
+            .display_label(self.list.selected_index() - 1)
+            .to_string();
+        self.rename = Some(RenameInput { target, input });
+        true
+    }
+
+    /// Whether an inline rename input is open in 切替.
+    pub fn is_renaming(&self) -> bool {
+        self.rename.is_some()
+    }
+
+    /// The label typed so far in the inline rename input, if open.
+    pub fn rename_input(&self) -> Option<&str> {
+        self.rename.as_ref().map(|r| r.input.as_str())
+    }
+
+    /// The name of the session being renamed (its branch / identity), if open.
+    pub fn rename_target(&self) -> Option<&str> {
+        self.rename.as_ref().map(|r| r.target.as_str())
+    }
+
+    /// Append a character to the inline rename label (no-op when not renaming).
+    pub fn rename_push_char(&mut self, c: char) {
+        if let Some(rename) = self.rename.as_mut() {
+            rename.input.push(c);
+        }
+    }
+
+    /// Delete the last character of the inline rename label (no-op when not
+    /// renaming).
+    pub fn rename_backspace(&mut self) {
+        if let Some(rename) = self.rename.as_mut() {
+            rename.input.pop();
+        }
+    }
+
+    /// Cancel inline renaming, staying in 切替.
+    pub fn rename_cancel(&mut self) {
+        self.rename = None;
+    }
+
+    /// Accept the inline rename: close the input and return the target session
+    /// name together with the typed label (trimmed), for the event loop to
+    /// persist. The label is returned as typed — an empty one means "clear the
+    /// override", which the usecase resolves. A no-op (returning `None`) when not
+    /// renaming.
+    pub fn switch_confirm_rename(&mut self) -> Option<(String, String)> {
+        let rename = self.rename.take()?;
+        Some((rename.target, rename.input.trim().to_string()))
     }
 
     // --- 在席 (Focus) ------------------------------------------------------
