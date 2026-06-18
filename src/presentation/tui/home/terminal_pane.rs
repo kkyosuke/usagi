@@ -268,6 +268,16 @@ fn pump_input(
                     // `Ctrl-O` zooms out one level: leave the pane for 切替.
                     return Ok(Some(PaneExit::ToSwitch));
                 }
+                // With text selected, `Ctrl-C` copies it (and clears the
+                // selection) instead of sending SIGINT — the way terminals treat
+                // copy while a selection is active. With nothing selected it
+                // falls through to `encode_key` below and reaches the shell as
+                // the usual interrupt.
+                if is_copy(&key) && selection.as_ref().is_some_and(|s| !s.is_empty()) {
+                    copy_selection(term, pty, selection.as_ref())?;
+                    *selection = None;
+                    continue;
+                }
                 let bytes = encode_key(&key);
                 if !bytes.is_empty() {
                     // Typing returns to the live screen and ends any selection,
@@ -447,6 +457,13 @@ fn is_leader(key: &KeyEvent) -> bool {
     key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('o')
 }
 
+/// Whether this key is the copy shortcut (`Ctrl-C`). It only copies when a
+/// selection is active; otherwise the caller forwards it to the shell as the
+/// usual interrupt. `Ctrl+Shift+C` is left to the shell unchanged.
+fn is_copy(key: &KeyEvent) -> bool {
+    key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char('c')
+}
+
 /// Bracketed-paste start / end markers (DECSET 2004). A program that requested
 /// the mode treats everything between them as one paste.
 const PASTE_START: &[u8] = b"\x1b[200~";
@@ -544,5 +561,19 @@ mod tests {
         // No `Ctrl` modifier, or a different letter, is not the leader.
         assert!(!is_leader(&key(KeyCode::Char('o'), KeyModifiers::NONE)));
         assert!(!is_leader(&key(KeyCode::Char('a'), KeyModifiers::CONTROL)));
+    }
+
+    #[test]
+    fn is_copy_matches_only_plain_ctrl_c() {
+        // `Ctrl-C` is the copy shortcut (only meaningful with a selection).
+        assert!(is_copy(&key(KeyCode::Char('c'), KeyModifiers::CONTROL)));
+        // A bare `c`, a different letter, or `Ctrl+Shift+C` is not the shortcut
+        // and flows to the shell unchanged.
+        assert!(!is_copy(&key(KeyCode::Char('c'), KeyModifiers::NONE)));
+        assert!(!is_copy(&key(KeyCode::Char('d'), KeyModifiers::CONTROL)));
+        assert!(!is_copy(&key(
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        )));
     }
 }
