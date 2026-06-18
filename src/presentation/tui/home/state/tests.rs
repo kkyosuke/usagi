@@ -200,6 +200,30 @@ fn new_state_starts_in_overview_with_a_hint() {
 }
 
 #[test]
+fn loading_indicator_starts_clear_steps_and_finishes() {
+    let mut state = state();
+    // No action in flight by default.
+    assert!(state.loading().is_none());
+
+    // The first step begins the indicator at frame 0 with its label.
+    state.step_loading("作成中…");
+    let loading = state.loading().expect("loading begins on the first step");
+    assert_eq!(loading.label(), "作成中…");
+    assert_eq!(loading.frame(), 0);
+
+    // Each further step advances the animation frame and updates the label,
+    // mirroring how a bulk removal steps once per session.
+    state.step_loading("削除中… 2/3");
+    let loading = state.loading().unwrap();
+    assert_eq!(loading.label(), "削除中… 2/3");
+    assert_eq!(loading.frame(), 1);
+
+    // Finishing clears it, returning the corner to its resting state.
+    state.finish_loading();
+    assert!(state.loading().is_none());
+}
+
+#[test]
 fn a_notice_is_seeded_as_an_error_line() {
     let state = HomeState::new("usagi", Vec::new(), Some("load failed".to_string()));
     assert_eq!(state.log().len(), 2);
@@ -278,6 +302,35 @@ fn submitting_a_command_echoes_and_runs_it() {
     // The band shows none of the modal's output (its response is empty).
     assert!(state.response_lines().is_empty());
     assert_eq!(state.input(), "");
+}
+
+#[test]
+fn issue_command_reads_injected_issues() {
+    use crate::domain::issue::{Issue, IssuePriority, IssueStatus};
+    let mut state = state();
+    let ts = Utc::now();
+    state.set_issues(vec![Issue {
+        number: 1,
+        title: "task".to_string(),
+        status: IssueStatus::Todo,
+        priority: IssuePriority::Medium,
+        labels: vec![],
+        dependson: vec![],
+        related: vec![],
+        parent: None,
+        milestone: None,
+        created_at: ts,
+        updated_at: ts,
+        body: String::new(),
+    }]);
+    for c in "issue".chars() {
+        state.push_char(c);
+    }
+    let submission = state.submit();
+    // The injected issue is surfaced through the `issue` command's modal.
+    assert_eq!(submission.effect, Effect::ShowText("Issues"));
+    let modal = state.text_modal().expect("issue opens a text modal");
+    assert!(modal.lines.iter().any(|l| l.text.contains("task")));
 }
 
 #[test]
@@ -406,6 +459,91 @@ fn typing_or_completing_cancels_an_active_recall() {
     assert_eq!(state.input(), "man!");
 }
 
+// --- caret editing -----------------------------------------------------
+
+#[test]
+fn arrows_move_the_caret_and_insert_mid_line() {
+    let mut state = state();
+    for c in "mn".chars() {
+        state.push_char(c);
+    }
+    // Caret sits past the end after typing.
+    assert_eq!(state.cursor(), 2);
+    state.cursor_left();
+    assert_eq!(state.cursor(), 1);
+    // Insert between the two characters.
+    state.push_char('a');
+    assert_eq!(state.input(), "man");
+    assert_eq!(state.cursor(), 2);
+    // Right then past the end is clamped.
+    state.cursor_right();
+    state.cursor_right();
+    assert_eq!(state.cursor(), 3);
+    // Left at the start is clamped to 0.
+    state.cursor_home();
+    state.cursor_left();
+    assert_eq!(state.cursor(), 0);
+    state.cursor_end();
+    assert_eq!(state.cursor(), 3);
+}
+
+#[test]
+fn backspace_and_delete_act_around_the_caret() {
+    let mut state = state();
+    for c in "man".chars() {
+        state.push_char(c);
+    }
+    state.cursor_home();
+    // Backspace at the start is a no-op.
+    state.backspace();
+    assert_eq!(state.input(), "man");
+    // Delete-forward removes the character at the caret.
+    state.delete_forward();
+    assert_eq!(state.input(), "an");
+    assert_eq!(state.cursor(), 0);
+    // Delete-forward at the end is a no-op.
+    state.cursor_end();
+    state.delete_forward();
+    assert_eq!(state.input(), "an");
+    // Backspace removes the character before the caret.
+    state.backspace();
+    assert_eq!(state.input(), "a");
+    assert_eq!(state.cursor(), 1);
+}
+
+#[test]
+fn caret_moves_by_whole_multibyte_characters() {
+    let mut state = state();
+    for c in "あい".chars() {
+        state.push_char(c);
+    }
+    // Each Japanese character is three bytes; the caret tracks byte offsets but
+    // moves a whole character at a time.
+    assert_eq!(state.cursor(), 6);
+    state.cursor_left();
+    assert_eq!(state.cursor(), 3);
+    state.push_char('x');
+    assert_eq!(state.input(), "あxい");
+    state.backspace();
+    assert_eq!(state.input(), "あい");
+    assert_eq!(state.cursor(), 3);
+    state.delete_forward();
+    assert_eq!(state.input(), "あ");
+}
+
+#[test]
+fn recall_and_submit_place_the_caret_at_the_end() {
+    let mut state = state();
+    state.restore_history(vec!["session".to_string()]);
+    state.recall_prev();
+    assert_eq!(state.cursor(), state.input().len());
+    state.recall_next();
+    assert_eq!(state.cursor(), 0);
+    state.push_char('m');
+    state.submit();
+    assert_eq!(state.cursor(), 0);
+}
+
 // --- 切替 (Switch) -----------------------------------------------------
 
 #[test]
@@ -437,7 +575,7 @@ fn switch_inline_create_edits_then_confirms_a_fresh_name() {
     let mut state = state();
     state.enter_switch(ReturnMode::Overview);
     assert!(!state.is_creating());
-    state.switch_begin_create();
+    state.switch_begin_create(Vec::new());
     assert!(state.is_creating());
     assert_eq!(state.create_input(), Some(""));
     for c in "  wip  ".chars() {
@@ -451,28 +589,53 @@ fn switch_inline_create_edits_then_confirms_a_fresh_name() {
 
 #[test]
 fn switch_inline_create_rejects_empty_and_duplicate_names() {
-    let mut state = state(); // has a "feature" worktree
+    let mut state = state();
     state.enter_switch(ReturnMode::Overview);
-    state.switch_begin_create();
-    // Whitespace only is empty after trimming.
+    // "feature" is an existing branch, so it is in the taken set.
+    state.switch_begin_create(vec!["feature".to_string()]);
+    // Whitespace only is empty after trimming: no live error (it does not nag),
+    // but Enter rejects it.
     state.create_push_char(' ');
+    assert!(state.create_error().is_none());
     assert!(state.switch_confirm_create().is_none());
     assert!(state.create_error().unwrap().contains("must not be empty"));
-    // Typing clears the error, then a duplicate name is rejected.
+    // Typing a duplicate name flags it live, before Enter, and Enter rejects it.
     for c in "feature".chars() {
         state.create_push_char(c);
     }
-    assert!(state.create_error().is_none());
+    assert!(state.create_error().unwrap().contains("feature"));
     assert!(state.switch_confirm_create().is_none());
     assert!(state.create_error().unwrap().contains("feature"));
     assert!(state.is_creating());
 }
 
 #[test]
+fn switch_inline_create_flags_a_branch_namespace_clash_live() {
+    let mut state = state();
+    state.enter_switch(ReturnMode::Overview);
+    // Branches nested under `test/` make a plain `test` session impossible.
+    state.switch_begin_create(vec!["test/home-ui-e2e".to_string()]);
+    for c in "test".chars() {
+        state.create_push_char(c);
+    }
+    // The clash is shown live and blocks confirmation.
+    let err = state.create_error().unwrap();
+    assert!(err.contains("conflicts with branch"), "{err}");
+    assert!(err.contains("test/home-ui-e2e"), "{err}");
+    assert!(state.switch_confirm_create().is_none());
+    // Backspacing to "tes" (no longer a clash) clears the error.
+    state.create_backspace();
+    assert!(state.create_error().is_none());
+    // Typing a path separator is itself rejected (not a legal session name).
+    state.create_push_char('/');
+    assert!(state.create_error().unwrap().contains("cannot be used"));
+}
+
+#[test]
 fn switch_inline_create_can_be_cancelled() {
     let mut state = state();
     state.enter_switch(ReturnMode::Overview);
-    state.switch_begin_create();
+    state.switch_begin_create(Vec::new());
     state.create_push_char('x');
     state.create_cancel();
     assert!(!state.is_creating());
@@ -524,23 +687,24 @@ fn leave_focus_returns_to_overview() {
 fn focus_menu_lists_the_session_commands_in_order() {
     let state = state();
     let names: Vec<&str> = state.focus_menu_commands().iter().map(|i| i.name).collect();
-    assert_eq!(names, vec!["terminal", "agent", "ai"]);
+    assert_eq!(names, vec!["terminal", "agent", "ai", "close"]);
 }
 
 #[test]
 fn focus_menu_cursor_moves_and_wraps_and_selects() {
     let mut state = state();
     state.enter_focus(1);
-    // terminal (0, highlighted by default), agent (1), ai (2).
+    // terminal (0, highlighted by default), agent (1), ai (2), close (3).
     assert_eq!(state.focus_selected_command().name, "terminal");
     state.focus_menu_move_down();
     assert_eq!(state.focus_selected_command().name, "agent");
     state.focus_menu_move_down();
+    state.focus_menu_move_down();
     state.focus_menu_move_down(); // wraps to the top
     assert_eq!(state.focus_menu_cursor(), 0);
-    // Up from the top wraps to the bottom.
+    // Up from the top wraps to the bottom (`close`).
     state.focus_menu_move_up();
-    assert_eq!(state.focus_selected_command().name, "ai");
+    assert_eq!(state.focus_selected_command().name, "close");
 }
 
 #[test]
@@ -675,7 +839,7 @@ fn clear_terminal_view_drops_the_snapshot_without_changing_the_mode() {
 fn enter_overview_clears_transient_state() {
     let mut state = state();
     state.enter_switch(ReturnMode::Overview);
-    state.switch_begin_create();
+    state.switch_begin_create(Vec::new());
     state.enter_focus(1);
     state.focus_prompt_push_char('x');
     state.focus_menu_move_down();
@@ -995,6 +1159,33 @@ fn live_paths_track_sessions_with_a_running_agent() {
     assert_eq!(state.live_paths().len(), 1);
     state.set_live(HashSet::new());
     assert!(!state.is_live(Path::new("/repo/feature")));
+}
+
+#[test]
+fn done_paths_track_finished_sessions() {
+    let mut state = state();
+    assert!(!state.is_done(Path::new("/repo/feature")));
+    assert!(state.done_paths().is_empty());
+    let mut done = HashSet::new();
+    done.insert(PathBuf::from("/repo/feature"));
+    state.set_done(done);
+    assert!(state.is_done(Path::new("/repo/feature")));
+    assert!(!state.is_done(Path::new("/repo/main")));
+    assert_eq!(state.done_paths().len(), 1);
+    state.set_done(HashSet::new());
+    assert!(!state.is_done(Path::new("/repo/feature")));
+}
+
+#[test]
+fn update_holds_the_latest_release_once_set() {
+    use crate::domain::version::Version;
+    let mut state = state();
+    assert!(state.update().is_none());
+    let latest = Version::parse("0.2.0");
+    state.set_update(latest);
+    assert_eq!(state.update(), latest);
+    state.set_update(None);
+    assert!(state.update().is_none());
 }
 
 #[test]

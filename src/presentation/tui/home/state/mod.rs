@@ -15,7 +15,9 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
+use crate::domain::issue::Issue;
 use crate::domain::settings::SessionActionUi;
+use crate::domain::version::Version;
 use crate::domain::workspace_state::{SessionRecord, WorktreeState};
 
 use super::command::{CommandInfo, CommandRegistry, CommandScope, Completion, Effect, Hint};
@@ -59,6 +61,29 @@ pub struct SessionOutcome {
     pub select: Option<String>,
 }
 
+/// A transient "working…" indicator shown in the top-right corner while a
+/// blocking action runs (creating or bulk-removing sessions, launching a
+/// terminal / agent). It carries the `label` to show beside the loading rabbit
+/// and a `frame` tick that advances on each step, so painting it repeatedly
+/// animates the rabbit. Read by the renderer through [`HomeState::loading`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoadingIndicator {
+    label: String,
+    frame: usize,
+}
+
+impl LoadingIndicator {
+    /// The message shown beside the rabbit (e.g. `作成中…`).
+    pub fn label(&self) -> &str {
+        &self.label
+    }
+
+    /// The animation tick, advanced on each step of the running action.
+    pub fn frame(&self) -> usize {
+        self.frame
+    }
+}
+
 /// The full state of the home screen.
 ///
 /// Not `Clone`/`Debug`: it owns a [`CommandRegistry`] of trait objects, which
@@ -67,6 +92,9 @@ pub struct HomeState {
     list: WorktreeList,
     mode: Mode,
     input: String,
+    /// Caret position in `input`, as a byte offset on a `char` boundary. Drives
+    /// in-line editing (←/→/Home/End/Del) and where the caret renders.
+    cursor: usize,
     history: Vec<String>,
     /// Index into `history` while recalling past commands; `None` when editing
     /// a fresh line.
@@ -97,15 +125,25 @@ pub struct HomeState {
     /// The latest snapshot of the embedded terminal's screen, set while a session
     /// is 没入 (Attached) and rendered in the right pane.
     terminal_view: Option<TerminalView>,
+    /// Worktree paths whose agent is actively working a turn (reported the
+    /// `running` phase). Refreshed from the terminal monitor each redraw and
+    /// rendered with a "running" icon, unless the path is also waiting or done
+    /// (which take precedence).
+    running: HashSet<PathBuf>,
     /// Worktree paths whose background session is waiting for the user (its
-    /// agent rang the bell). Refreshed from the terminal monitor each redraw and
-    /// rendered as a marker in the sidebar.
+    /// agent paused mid-turn for input/permission, or rang the bell). Refreshed
+    /// from the terminal monitor each redraw and rendered as a marker in the
+    /// sidebar.
     waiting: HashSet<PathBuf>,
-    /// Worktree paths with a live (running) embedded session — an agent/shell is
-    /// in use, whether attached or left running in the background. Refreshed from
-    /// the terminal monitor each redraw and rendered with a "running" icon,
-    /// unless the path is also waiting (which takes precedence).
+    /// Worktree paths with a live embedded session — an agent/shell is in use,
+    /// whether attached or left running in the background. Refreshed from the
+    /// terminal monitor each redraw; a live path that is not running, waiting, or
+    /// done renders as "ready" (idle, awaiting the first prompt).
     live: HashSet<PathBuf>,
+    /// Worktree paths whose agent has finished — a turn completed or the process
+    /// exited — shown with a "done" badge. Refreshed from the terminal monitor
+    /// each redraw; takes precedence over running and waiting.
+    done: HashSet<PathBuf>,
     /// Whether the quit-confirmation modal is open. It is raised when the user
     /// presses `Ctrl-C` while a session is still live, so an accidental close
     /// does not drop a running agent/shell; confirming it quits the app.
@@ -117,6 +155,17 @@ pub struct HomeState {
     /// 統括 (Overview) results band renders only `log[response_start..]`, so it
     /// shows the response to the latest command and nothing earlier.
     response_start: usize,
+    /// The workspace's task issues, loaded from disk by `mod.rs` and read by the
+    /// `issue` command. Empty until injected.
+    issues: Vec<Issue>,
+    /// The latest released version, set once the background update check finds a
+    /// release newer than this build. While `None` (the check is pending, or the
+    /// build is up to date) the top-right "update available" notice is hidden.
+    update: Option<Version>,
+    /// The transient "working…" indicator, set while a blocking action runs
+    /// (session create / bulk remove / terminal launch). While `Some` the
+    /// top-right corner shows the loading rabbit instead of the update notice.
+    loading: Option<LoadingIndicator>,
 }
 
 impl HomeState {
@@ -135,6 +184,7 @@ impl HomeState {
             list: WorktreeList::new(workspace_name, worktrees),
             mode: Mode::Overview,
             input: String::new(),
+            cursor: 0,
             history: Vec::new(),
             recall: None,
             log,
@@ -147,11 +197,16 @@ impl HomeState {
             remove_modal: None,
             sessions: Vec::new(),
             terminal_view: None,
+            running: HashSet::new(),
             waiting: HashSet::new(),
             live: HashSet::new(),
+            done: HashSet::new(),
             quit_confirm: false,
             text_modal: None,
             response_start: 0,
+            issues: Vec::new(),
+            update: None,
+            loading: None,
         }
     }
 
@@ -164,6 +219,12 @@ impl HomeState {
     /// Which right-pane action surface 在席 (Focus) presents.
     pub fn session_action_ui(&self) -> SessionActionUi {
         self.session_action_ui
+    }
+
+    /// Inject the workspace's task issues (loaded from disk by `mod.rs`), read by
+    /// the `issue` command for its list / graph / show views.
+    pub fn set_issues(&mut self, issues: Vec<Issue>) {
+        self.issues = issues;
     }
 
     /// Seed the command history with entries restored from disk (oldest first),
@@ -321,6 +382,12 @@ impl HomeState {
         &self.input
     }
 
+    /// The caret position in [`input`](Self::input) as a byte offset, so the
+    /// renderer can split the line and draw the caret where editing happens.
+    pub fn cursor(&self) -> usize {
+        self.cursor
+    }
+
     /// The advisory input hint for the current command input (matching commands,
     /// or the usage of the command being given arguments). Computed on demand
     /// for rendering; see [`CommandRegistry::suggest`].
@@ -364,6 +431,24 @@ impl HomeState {
         self.terminal_view = None;
     }
 
+    /// Replace the set of worktree paths whose agent is actively working a turn,
+    /// refreshed from the terminal monitor before each redraw.
+    pub fn set_running(&mut self, running: HashSet<PathBuf>) {
+        self.running = running;
+    }
+
+    /// Whether the worktree at `path` has a background session actively working a
+    /// turn.
+    pub fn is_running(&self, path: &Path) -> bool {
+        self.running.contains(path)
+    }
+
+    /// The set of worktree paths whose agent is actively working a turn, for the
+    /// sidebar renderer.
+    pub fn running_paths(&self) -> &HashSet<PathBuf> {
+        &self.running
+    }
+
     /// Replace the set of worktree paths whose background session is waiting for
     /// the user, refreshed from the terminal monitor before each redraw.
     pub fn set_waiting(&mut self, waiting: HashSet<PathBuf>) {
@@ -396,6 +481,63 @@ impl HomeState {
     /// sidebar renderer.
     pub fn live_paths(&self) -> &HashSet<PathBuf> {
         &self.live
+    }
+
+    /// Replace the set of worktree paths whose agent has finished, refreshed from
+    /// the terminal monitor before each redraw.
+    pub fn set_done(&mut self, done: HashSet<PathBuf>) {
+        self.done = done;
+    }
+
+    /// Whether the worktree at `path` has a background session whose agent has
+    /// finished (a turn completed or it exited).
+    pub fn is_done(&self, path: &Path) -> bool {
+        self.done.contains(path)
+    }
+
+    /// The set of worktree paths whose agent has finished, for the sidebar
+    /// renderer.
+    pub fn done_paths(&self) -> &HashSet<PathBuf> {
+        &self.done
+    }
+
+    /// Record the latest released version found by the background update check,
+    /// or clear it with `None`. Set before each redraw from the update handle.
+    pub fn set_update(&mut self, latest: Option<Version>) {
+        self.update = latest;
+    }
+
+    /// The latest released version, when it is newer than this build — the
+    /// top-right "update available" notice is shown only while this is `Some`.
+    pub fn update(&self) -> Option<Version> {
+        self.update
+    }
+
+    /// Begin or advance the transient "working…" indicator with `label`, ticking
+    /// its animation frame. Call it before each step of a blocking action (and
+    /// repaint) so the top-right loading rabbit appears and hops; a multi-step
+    /// action (e.g. a bulk removal) steps once per item so the rabbit animates as
+    /// it progresses.
+    pub fn step_loading(&mut self, label: impl Into<String>) {
+        let frame = self.loading.as_ref().map_or(0, |l| l.frame + 1);
+        self.loading = Some(LoadingIndicator {
+            label: label.into(),
+            frame,
+        });
+    }
+
+    /// Clear the "working…" indicator once the blocking action has finished, so
+    /// the top-right corner returns to its resting state (the update notice, or
+    /// nothing).
+    pub fn finish_loading(&mut self) {
+        self.loading = None;
+    }
+
+    /// The transient "working…" indicator, when an action is in flight — the
+    /// top-right loading rabbit is shown (taking the corner over the update
+    /// notice) only while this is `Some`.
+    pub fn loading(&self) -> Option<&LoadingIndicator> {
+        self.loading.as_ref()
     }
 
     /// How many sessions currently have a live (running) embedded shell/agent.
@@ -470,8 +612,17 @@ impl HomeState {
 
     /// Begin inline session creation in 切替: open an empty name input that
     /// captures the mode's keys until confirmed (Enter) or cancelled (Esc).
-    pub fn switch_begin_create(&mut self) {
-        self.create = Some(CreateInput::default());
+    ///
+    /// `taken` is the set of branch names that already exist across the
+    /// workspace's repositories (from
+    /// [`crate::usecase::session::existing_branch_names`]); the typed name is
+    /// validated against it live so a duplicate or branch-namespace clash is
+    /// flagged before Enter.
+    pub fn switch_begin_create(&mut self, taken: Vec<String>) {
+        self.create = Some(CreateInput {
+            taken,
+            ..Default::default()
+        });
     }
 
     /// Whether an inline create input is open in 切替.
@@ -489,20 +640,21 @@ impl HomeState {
         self.create.as_ref().and_then(|c| c.error.as_deref())
     }
 
-    /// Append a character to the inline create name (no-op when not creating).
+    /// Append a character to the inline create name (no-op when not creating),
+    /// re-validating live so the error reflects the new name.
     pub fn create_push_char(&mut self, c: char) {
         if let Some(create) = self.create.as_mut() {
             create.input.push(c);
-            create.error = None;
+            create.error = validate_session_name(&create.input, &create.taken);
         }
     }
 
     /// Delete the last character of the inline create name (no-op when not
-    /// creating).
+    /// creating), re-validating live.
     pub fn create_backspace(&mut self) {
         if let Some(create) = self.create.as_mut() {
             create.input.pop();
-            create.error = None;
+            create.error = validate_session_name(&create.input, &create.taken);
         }
     }
 
@@ -513,23 +665,21 @@ impl HomeState {
 
     /// Validate and accept the inline create name. On success the input closes
     /// and the trimmed name is returned (for the event loop to create the
-    /// session); on an empty or duplicate name the input stays open with an
-    /// inline error and `None` is returned. A no-op (returning `None`) when not
+    /// session); on an invalid name (empty, a path separator, a duplicate, or a
+    /// branch-namespace clash) the input stays open with the same inline error
+    /// shown live and `None` is returned. A no-op (returning `None`) when not
     /// creating.
     pub fn switch_confirm_create(&mut self) -> Option<String> {
         let create = self.create.as_mut()?;
         let name = create.input.trim().to_string();
+        // Enter on an empty name is the one case live validation stays quiet
+        // about (it does not nag while nothing is typed), so guard it here.
         if name.is_empty() {
             create.error = Some("Name must not be empty.".to_string());
             return None;
         }
-        if self
-            .list
-            .worktrees()
-            .iter()
-            .any(|w| w.branch.as_deref() == Some(name.as_str()))
-        {
-            create.error = Some(format!("\"{name}\" already exists."));
+        if let Some(error) = validate_session_name(&create.input, &create.taken) {
+            create.error = Some(error);
             return None;
         }
         self.create = None;
@@ -645,9 +795,9 @@ impl HomeState {
                 recorded: None,
             };
         }
-        let result = self
-            .registry
-            .dispatch(&entry, &self.history, &self.list.refs());
+        let result =
+            self.registry
+                .dispatch_with(&entry, &self.history, &self.list.refs(), &self.issues);
         self.history.push(entry.clone());
         // A text-dumping utility (`man` / `history`) run from the prompt shows its
         // output in a modal, like in 統括; everything else appends to the log.
@@ -662,22 +812,76 @@ impl HomeState {
         }
     }
 
-    /// Append a typed character to the input (Overview line).
+    /// Insert a typed character at the caret (Overview line), advancing it.
     pub fn push_char(&mut self, c: char) {
-        self.input.push(c);
+        self.input.insert(self.cursor, c);
+        self.cursor += c.len_utf8();
         self.recall = None;
     }
 
-    /// Delete the last character of the input (command mode).
+    /// Delete the character before the caret (command mode), moving it back.
     pub fn backspace(&mut self) {
-        self.input.pop();
+        if self.cursor == 0 {
+            return;
+        }
+        let prev = self.prev_boundary();
+        self.input.replace_range(prev..self.cursor, "");
+        self.cursor = prev;
         self.recall = None;
+    }
+
+    /// Delete the character at the caret (the `Del`/forward-delete key), leaving
+    /// the caret in place.
+    pub fn delete_forward(&mut self) {
+        if self.cursor >= self.input.len() {
+            return;
+        }
+        let next = self.next_boundary();
+        self.input.replace_range(self.cursor..next, "");
+        self.recall = None;
+    }
+
+    /// Move the caret one character left.
+    pub fn cursor_left(&mut self) {
+        self.cursor = self.prev_boundary();
+    }
+
+    /// Move the caret one character right.
+    pub fn cursor_right(&mut self) {
+        self.cursor = self.next_boundary();
+    }
+
+    /// Move the caret to the start of the line.
+    pub fn cursor_home(&mut self) {
+        self.cursor = 0;
+    }
+
+    /// Move the caret to the end of the line.
+    pub fn cursor_end(&mut self) {
+        self.cursor = self.input.len();
+    }
+
+    /// Byte offset of the `char` boundary just before the caret (or `0`).
+    fn prev_boundary(&self) -> usize {
+        self.input[..self.cursor]
+            .char_indices()
+            .next_back()
+            .map_or(0, |(i, _)| i)
+    }
+
+    /// Byte offset of the `char` boundary just after the caret (or the end).
+    fn next_boundary(&self) -> usize {
+        self.input[self.cursor..]
+            .chars()
+            .next()
+            .map_or(self.cursor, |c| self.cursor + c.len_utf8())
     }
 
     /// Tab-complete the command word, listing candidates when ambiguous.
     pub fn complete(&mut self) {
         let completion = self.registry.complete(&self.input, self.command_scope());
         self.input = completion.input;
+        self.cursor = self.input.len();
         if !completion.candidates.is_empty() {
             self.log
                 .push(LogLine::output(completion.candidates.join("  ")));
@@ -697,6 +901,7 @@ impl HomeState {
         };
         self.recall = Some(index);
         self.input = self.history[index].clone();
+        self.cursor = self.input.len();
     }
 
     /// Recall the next (newer) command, returning to an empty line past the end.
@@ -712,6 +917,7 @@ impl HomeState {
             self.recall = None;
             self.input.clear();
         }
+        self.cursor = self.input.len();
     }
 
     /// Run the current input as a command: echo it, dispatch it, record it in
@@ -722,6 +928,7 @@ impl HomeState {
     pub fn submit(&mut self) -> Submission {
         let entry = self.input.trim().to_string();
         self.input.clear();
+        self.cursor = 0;
         self.recall = None;
         if entry.is_empty() {
             return Submission {
@@ -734,9 +941,9 @@ impl HomeState {
         // begins (the command echo), so everything earlier drops out of view.
         self.response_start = self.log.len();
         self.log.push(LogLine::command(entry.clone()));
-        let result = self
-            .registry
-            .dispatch(&entry, &self.history, &self.list.refs());
+        let result =
+            self.registry
+                .dispatch_with(&entry, &self.history, &self.list.refs(), &self.issues);
         self.history.push(entry.clone());
 
         match result.effect {
@@ -852,6 +1059,38 @@ impl HomeState {
         self.remove_modal = None;
         Some((names, force))
     }
+}
+
+/// Validate a typed session name against the branch names already taken, used
+/// for the live inline-create feedback. Returns the reason the name cannot be
+/// used, or `None` when it is usable.
+///
+/// An empty (or all-whitespace) name returns `None` — the input does not nag
+/// while nothing has been typed; the empty case is rejected only on Enter (see
+/// [`HomeState::switch_confirm_create`]). The checks mirror what
+/// [`crate::usecase::session::create`] enforces, so the inline message matches
+/// the eventual outcome:
+///
+/// - a path separator (`/`, `\`, `.`, `..`) — not a legal session name;
+/// - an exact duplicate of an existing branch;
+/// - a clash with an existing branch nested under `<name>/` (git cannot create
+///   the `<name>` branch alongside `<name>/…`).
+fn validate_session_name(name: &str, taken: &[String]) -> Option<String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return None;
+    }
+    if name.contains('/') || name.contains('\\') || name == "." || name == ".." {
+        return Some("\"/\" cannot be used in a name.".to_string());
+    }
+    if taken.iter().any(|b| b == name) {
+        return Some(format!("\"{name}\" already exists."));
+    }
+    let prefix = format!("{name}/");
+    if let Some(conflict) = taken.iter().find(|b| b.starts_with(&prefix)) {
+        return Some(format!("\"{name}\" conflicts with branch \"{conflict}\"."));
+    }
+    None
 }
 
 #[cfg(test)]

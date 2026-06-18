@@ -90,9 +90,11 @@ session switch             # 切替モードに入りセッションを選ぶ（
 agent                      # 選んだセッションで Agent CLI（既定 claude）を埋め込み起動 → 没入
 ```
 
-`agent` は選択中セッションの worktree でシェルを右ペインに埋め込み、設定中の Agent CLI（既定 `claude`、Config・ローカル設定で変更可）を起動します。このとき usagi の issue MCP サーバ（後述）を組み込むため、エージェントは起動直後から `issue_*` tool でタスクを操作できます（Claude は `--mcp-config` で注入。Gemini は `settings.json` 経由のため現状は組み込みません）。素のシェルだけ欲しいときは `terminal` を使います。
+`agent` は選択中セッションの worktree でシェルを右ペインに埋め込み、設定中の Agent CLI（既定 `claude`、Config・ローカル設定で変更可）を起動します。このとき usagi の MCP サーバ（後述）を組み込むため、エージェントは起動直後から `issue_*` tool でタスクを、`memory_*` tool でメモリを操作できます（Claude は `--mcp-config` で注入。Gemini は `settings.json` 経由のため現状は組み込みません）。素のシェルだけ欲しいときは `terminal` を使います。
 
-各セッションのシェルは画面を開いている間プールに常駐するので、`Ctrl-O` で切替へズームアウトして別セッションへ移っても、裏で `claude` は動き続けます。左ペインは各セッションを 2 行で表示し、**稼働中は `▶ running`（緑）／入力待ちは `◆ waiting`（黄色）** でひと目で状態がわかります。アタッチしていないセッションが入力待ちになるとデスクトップ通知（`🐰 <ブランチ名> が入力待ちです`）も出るため、複数セッションを並行で走らせ、入力が必要になったものだけに対応できます（通知は `notifications_enabled` が ON のとき。検知はターミナルベルに依存します）。
+各セッションのシェルは画面を開いている間プールに常駐するので、`Ctrl-O` で切替へズームアウトして別セッションへ移っても、裏で `claude` は動き続けます。左ペインは各セッションを 2 行で表示し、**稼働中は `▶ running`（緑）／入力待ちは `◆ waiting`（黄色）／アイドルは `⏸ idle`（シアン）** でひと目で状態がわかります。アタッチしていないセッションが入力待ちになるとデスクトップ通知（`🐰 <ブランチ名> が入力待ちです`）も出るため、複数セッションを並行で走らせ、入力が必要になったものだけに対応できます（通知は `notifications_enabled` が ON のとき。状態は `claude` のライフサイクルフックで判定し、フックを持たない Agent ではターミナルベルで推定します。詳細は [document/04-orchestration.md#Agent フックによる状態報告](document/04-orchestration.md#agent-フックによる状態報告)）。
+
+ホーム画面を開くと、実行中ビルドより新しいリリースが公開されていれば右上にうさぎのアスキーアートと「最新版があります v\<X.Y.Z\>」を表示します（GitHub のリリースタグをバックグラウンドで確認。差分が無い・オフライン時は何も出ません）。
 
 画面・モード・キー操作の詳細は [document/design/05-home.md](document/design/05-home.md)、コマンドの仕様は [document/03-commands/02-tui.md](document/03-commands/02-tui.md) を参照してください。
 
@@ -109,9 +111,21 @@ cargo run -- issue update 2 --status done
 
 `list` / `search` は依存（`--depends-on`）がすべて `done` になった「着手可能」な issue を `ready` と表示し、ブロック中のものには未達の依存番号を併記します。詳細は [document/03-commands/01-cli.md](document/03-commands/01-cli.md#usagi-issue)。
 
+### メモリを蓄積する
+
+セッションをまたいで覚えておきたい知識は `usagi memory` で管理できます（`<repo>/.usagi/memory/` に frontmatter 付き markdown で保存。issue と同じく git で共有されます）。issue がタスクを管理するのに対し、メモリはユーザーの好み・作業指針・プロジェクト固有の前提・外部リソースへのポインタといった、コードや git からは読み取れない事実を蓄積します:
+
+```bash
+cargo run -- memory save --name tabs --title "ユーザーはタブを好む" --type user
+cargo run -- memory list                 # updated_at の新しい順
+cargo run -- memory search "デプロイ"     # 名前・タイトル・本文を全文検索
+```
+
+同じ名前への保存は上書き（in-place 更新）になり重複しません。保存・更新すると目次 `MEMORY.md` が再生成されます。詳細は [document/03-commands/01-cli.md](document/03-commands/01-cli.md#usagi-memory)。
+
 ### AI エージェントから使う（MCP）
 
-`usagi mcp` で同じ issue 操作を MCP（Model Context Protocol）サーバとして公開できます。Claude Code などに登録すると、エージェントが `issue_create` / `issue_list` / `issue_update` などの tool でタスクを起票・参照できます。
+`usagi mcp` で同じ issue・メモリ操作を MCP（Model Context Protocol）サーバとして公開できます。Claude Code などに登録すると、1 つのサーバでエージェントが `issue_create` / `issue_list` / `issue_update` などの tool でタスクを、`memory_save` / `memory_list` / `memory_search` などの tool でメモリを操作できます。
 
 ```json
 {

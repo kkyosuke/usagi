@@ -35,13 +35,37 @@ impl KeyReader for TermKeyReader {
         // parse each report here: a wheel turn becomes a [`ScrollEvent`] (the
         // screens that scroll a pane in place act on it), and every other report
         // is swallowed so it never leaks into the key stream.
-        next_input(|| self.term.read_key_raw())
+        next_input(|| self.next_key())
     }
 
     fn read_key(&mut self) -> io::Result<Key> {
         // The screens that do not scroll a pane just want the next key, so drop
         // any wheel turns along the way.
         key_from_inputs(|| self.read_input())
+    }
+}
+
+impl TermKeyReader {
+    /// Read the next key, dropping the spurious `Key::CtrlC` that a terminal
+    /// resize produces.
+    ///
+    /// `read_key_raw` blocks in a `select`/`poll` that any delivered signal
+    /// interrupts (EINTR). The embedded terminal pane installs crossterm's
+    /// `SIGWINCH` handler, so every terminal resize now interrupts this read —
+    /// and `console` maps that EINTR to `Key::CtrlC`. Left untouched it would
+    /// read as a real `Ctrl-C` and close the app on every resize. When the
+    /// terminal size changed across the read the `CtrlC` is a resize artefact,
+    /// so keep reading instead of surfacing it; the loop then repaints at the
+    /// new size on the next real key.
+    fn next_key(&self) -> io::Result<Key> {
+        loop {
+            let before = self.term.size();
+            let key = self.term.read_key_raw()?;
+            if matches!(key, Key::CtrlC) && self.term.size() != before {
+                continue;
+            }
+            return Ok(key);
+        }
     }
 }
 

@@ -52,7 +52,10 @@ impl TerminalView {
         let (rows, cols) = screen.size();
         let mut out = Vec::with_capacity(rows as usize);
         for row in 0..rows {
-            let mut line = String::new();
+            // At least one byte per column; escapes grow it from there. Sizing up
+            // front avoids the reallocations a default-empty `String` would make
+            // while filling a full-width row.
+            let mut line = String::with_capacity(cols as usize);
             // The style currently selected on `line`; we only emit a new escape
             // when a cell's style differs, and start from the terminal default.
             let mut active = CellStyle::default();
@@ -70,7 +73,7 @@ impl TerminalView {
                     style.inverse = !style.inverse;
                 }
                 if style != active {
-                    line.push_str(&style.sgr());
+                    style.write_sgr(&mut line);
                     active = style;
                 }
                 match cell {
@@ -146,28 +149,30 @@ impl CellStyle {
         }
     }
 
-    /// The SGR escape selecting this style. It always begins by resetting, so
-    /// the sequence fully describes the style regardless of what preceded it.
-    fn sgr(&self) -> String {
-        let mut params = String::from("0");
+    /// Write the SGR escape selecting this style directly into `out`. It always
+    /// begins by resetting (`\x1b[0`), so the sequence fully describes the style
+    /// regardless of what preceded it. Writing in place avoids the two temporary
+    /// `String`s a `format!`-based builder would allocate per style change.
+    fn write_sgr(&self, out: &mut String) {
+        out.push_str("\x1b[0");
         if self.bold {
-            params.push_str(";1");
+            out.push_str(";1");
         }
         if self.dim {
-            params.push_str(";2");
+            out.push_str(";2");
         }
         if self.italic {
-            params.push_str(";3");
+            out.push_str(";3");
         }
         if self.underline {
-            params.push_str(";4");
+            out.push_str(";4");
         }
         if self.inverse {
-            params.push_str(";7");
+            out.push_str(";7");
         }
-        push_color(&mut params, self.fg, false);
-        push_color(&mut params, self.bg, true);
-        format!("\x1b[{params}m")
+        push_color(out, self.fg, false);
+        push_color(out, self.bg, true);
+        out.push('m');
     }
 }
 

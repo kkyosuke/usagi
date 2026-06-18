@@ -26,14 +26,18 @@
 ├── state.json      # worktree / ブランチの状態スナップショット
 ├── settings.json   # プロジェクト固有の設定上書き（ローカル設定）
 ├── history.json    # ワークスペース画面で実行したコマンドの履歴
-└── issues/         # タスク issue（git で共有する。後述）
-    ├── 001-*.md    # 1 issue = 1 ファイル（frontmatter 付き markdown）
+├── issues/         # タスク issue（git で共有する。後述）
+│   ├── 001-*.md    # 1 issue = 1 ファイル（frontmatter 付き markdown）
+│   └── index.json  # 一覧・検索を速くする派生キャッシュ（git 管理外）
+└── memory/         # AI エージェントのメモリ（git で共有する。後述）
+    ├── <slug>.md   # 1 メモリ = 1 ファイル（frontmatter 付き markdown）
+    ├── MEMORY.md   # 目次（1 メモリ = 1 行。git で共有する）
     └── index.json  # 一覧・検索を速くする派生キャッシュ（git 管理外）
 ```
 
 - どの worktree からコマンドを実行しても、`git worktree list` の先頭（＝プライマリ worktree）を基準に保存先を解決します（`infrastructure/git.rs` の `primary_worktree`）。これによりリポジトリ内で 1 つの `.usagi/` に集約されます。
 - `.usagi/` の大半（`state.json` / `settings.json` / `history.json` / `sessions/`）は **マシンローカルな状態・設定** で、後述の `.gitignore` により **コミットされません**。
-- 例外は **`.usagi/issues/`**。タスク issue はチームで共有したいので git 管理対象とします。派生キャッシュの `index.json` だけは再生成可能なので除外したままにします。
+- 例外は **`.usagi/issues/`** と **`.usagi/memory/`**。タスク issue とエージェントのメモリはチームで共有したいので git 管理対象とします。それぞれの派生キャッシュ `index.json` だけは再生成可能なので除外したままにします（メモリの目次 `MEMORY.md` は共有対象）。
 - git 管理の制御は **リポジトリルートの `.gitignore` には書かず、`.usagi/.gitignore` に自己完結させます**（`usagi::usecase::project::ignore_usagi_dir`）。リポジトリルートを汚さず、`.usagi/` 配下だけで完結するのが利点です。`usagi init` 時に次の内容（`.usagi/` 配下からの相対パターン）を書き込み、旧バージョンがルート `.gitignore` に追記していた `.usagi/` 系エントリがあれば除去します。
 
   ```gitignore
@@ -42,6 +46,8 @@
   !/.gitignore
   !/issues/
   /issues/index.json
+  !/memory/
+  /memory/index.json
   ```
 
 ### セッションの worktree 配置
@@ -166,8 +172,8 @@ worktree を束ねます。各 worktree は git ステータス付き（下記 `
 
 | 関数 | 役割 |
 |---|---|
-| `inspect_worktree(path)` | 1 つの worktree の git ステータス（ブランチ・HEAD・上流・未コミット変更・ahead/behind）から `WorktreeState` を組み立てる（既定ブランチはその worktree のリポジトリから解決） |
-| `sync(cwd)` | 保存済み state を読み込み、各セッション worktree のステータスを再計算して `<repo>/.usagi/state.json` に保存して返す（セッションが無ければ空の state を保存） |
+| `inspect_worktree(path, default)` | 1 つの worktree の git ステータス（ブランチ・HEAD・上流・未コミット変更・ahead/behind）から `WorktreeState` を組み立てる。ブランチ・HEAD・上流・未コミット変更は `git status --porcelain=v2 --branch` 1 回でまとめて取得する。分類の基準となる既定ブランチ `default` は呼び出し側が渡す |
+| `sync(cwd)` | 保存済み state を読み込み、各セッション worktree のステータスを再計算して `<repo>/.usagi/state.json` に保存して返す（セッションが無ければ空の state を保存）。既定ブランチはリポジトリ単位の属性なので worktree ごとに引き直さず、`sync` で 1 回だけ解決して各 `inspect_worktree` に渡す |
 | `load(cwd)` | 保存済みの状態を読み込む（無ければ `None`） |
 
 ### 更新タイミング
@@ -262,4 +268,10 @@ session "login"  (/Users/me/git/usagi/.usagi/sessions/login)
 
 `.usagi/issues/` のタスク issue は、`.usagi/` の他のファイルと異なり **git で共有**されます。保存フォーマット
 （issue ファイルの frontmatter・`index.json`・依存解決）は独立した [3. タスク issue（`issues/`）](03-issues.md) に
+まとめています。
+
+## `memory/`: エージェントのメモリ
+
+`.usagi/memory/` の AI エージェントのメモリも、issue と同じく **git で共有**されます。保存フォーマット
+（メモリファイルの frontmatter・目次 `MEMORY.md`・`index.json`）は独立した [4. メモリ（`memory/`）](04-memory.md) に
 まとめています。

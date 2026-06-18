@@ -20,6 +20,7 @@ mod registry;
 pub use registry::CommandRegistry;
 
 use super::state::LogLine;
+use crate::domain::issue::Issue;
 
 /// A side effect a command asks the screen / event loop to perform, beyond
 /// appending its produced log lines.
@@ -58,6 +59,13 @@ pub enum Effect {
     /// `agent`). This is `terminal` with the agent CLI launched inside it; the
     /// directory and agent command are resolved by the event loop / wiring.
     OpenAgent,
+    /// Close (remove) the focused session forcefully (the user ran `close` in
+    /// 在席). It is the session equivalent of `session remove <name> --force`:
+    /// the worktrees/branches are deleted and any uncommitted changes discarded,
+    /// then 在席 is left for 統括 (Overview). The focused session's name is
+    /// resolved by the event loop, which owns the worktree list and the removal
+    /// callback.
+    CloseSession,
     /// Open the configuration screen (the user ran `config`) to edit the global
     /// settings and this workspace's local overrides. The screen is run by the
     /// event loop, which returns to the workspace screen when it is dismissed.
@@ -164,6 +172,8 @@ pub struct CommandContext<'a> {
     pub commands: &'a [CommandInfo],
     /// The workspace's worktrees, in display order, for `space`.
     pub worktrees: &'a [WorktreeRef],
+    /// The workspace's task issues, in number order, for `issue`.
+    pub issues: &'a [Issue],
 }
 
 /// A command available in the workspace screen's command mode.

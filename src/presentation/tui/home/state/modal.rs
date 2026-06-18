@@ -6,12 +6,18 @@ use std::collections::HashSet;
 use super::LogLine;
 
 /// The inline session-name input shown in the left pane while creating a session
-/// from 切替 (Switch): the name being typed plus an optional inline validation
-/// error (e.g. an empty or duplicate name). Read through [`HomeState`]'s
+/// from 切替 (Switch): the name being typed, the existing branch names it is
+/// validated against, and an optional inline validation error (e.g. an empty,
+/// duplicate, or branch-namespace-clashing name). The name is re-validated on
+/// every keystroke so the error appears live. Read through [`HomeState`]'s
 /// `create_input` / `create_error` accessors.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(super) struct CreateInput {
     pub(super) input: String,
+    /// Branch names already taken across the workspace's repositories, captured
+    /// when the input opened; the typed name must not duplicate or nest under
+    /// any of them.
+    pub(super) taken: Vec<String>,
     pub(super) error: Option<String>,
 }
 

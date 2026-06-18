@@ -88,6 +88,38 @@ fn clip_to_width_with_zero_budget_is_empty() {
 }
 
 #[test]
+fn clip_to_width_counts_wide_glyphs_as_two_columns() {
+    // Each full-width character is two display columns, so a 5-column budget fits
+    // two of them plus the ellipsis (2 + 2 + 1).
+    let clipped = clip_to_width("あいうえお", 5);
+    assert_eq!(console::measure_text_width(&clipped), 5);
+    assert_eq!(clipped, "あい…");
+}
+
+#[test]
+fn clip_to_width_keeps_ansi_escapes_without_counting_them() {
+    // A red-coloured "hello" (literal SGR escapes, since `console::style` emits
+    // none without a TTY) carries sequences of zero display width: the clip
+    // measures only the visible text and copies the escapes verbatim, so the
+    // result keeps the colour, stays exactly the budget wide, and keeps "he" —
+    // the escapes never eat into the three-column budget.
+    let styled = "\x1b[31mhello\x1b[0m";
+    let clipped = clip_to_width(styled, 3);
+    assert_eq!(console::measure_text_width(&clipped), 3);
+    assert!(clipped.starts_with("\x1b[31m"));
+    assert!(clipped.contains("he"));
+    assert!(clipped.ends_with('…'));
+}
+
+#[test]
+fn clip_to_width_leaves_styled_text_within_budget_untouched() {
+    // Escapes do not count toward the width, so a short styled string fits the
+    // budget and is returned whole (the early `measure_text_width` path).
+    let styled = "\x1b[32mok\x1b[0m";
+    assert_eq!(clip_to_width(styled, 5), styled);
+}
+
+#[test]
 fn pad_to_width_fills_short_content() {
     assert_eq!(pad_to_width("ab".to_string(), 5), "ab   ");
 }
@@ -157,6 +189,8 @@ fn worktree_row_marks_selected_primary_and_detached() {
         true,
         false,
         false,
+        false,
+        false,
     );
     assert!(top.contains('>'));
     assert!(top.contains('●'));
@@ -168,6 +202,8 @@ fn worktree_row_marks_selected_primary_and_detached() {
         10,
         10,
         true,
+        false,
+        false,
         false,
         false,
         false,
@@ -184,6 +220,8 @@ fn worktree_row_marks_selected_primary_and_detached() {
         true,
         false,
         false,
+        false,
+        false,
     );
     assert!(!other_top.contains('>'));
     assert!(other_top.contains('○'));
@@ -193,6 +231,8 @@ fn worktree_row_marks_selected_primary_and_detached() {
         &worktree(None, false, BranchStatus::Local),
         10,
         10,
+        false,
+        false,
         false,
         false,
         false,
@@ -213,6 +253,8 @@ fn worktree_row_marks_the_active_worktree_with_a_gutter_bar_on_both_lines() {
         false,
         true,
         false,
+        false,
+        false,
     );
     // The green `▎` accent bar runs down both lines of the active row (the
     // detail line carries it too, to the left of the agent state).
@@ -229,14 +271,17 @@ fn worktree_row_marks_the_active_worktree_with_a_gutter_bar_on_both_lines() {
         false,
         false,
         false,
+        false,
+        false,
     );
     assert!(!idle_top.contains('▎'));
     assert!(!idle_detail.contains('▎'));
 }
 
 #[test]
-fn worktree_row_shows_a_running_agent_and_one_waiting_for_input() {
-    let (_, running_detail) = worktree_row(
+fn worktree_row_shows_the_agent_state_through_its_lifecycle() {
+    // A live session that has not begun a turn yet is idle: `☾ ready`.
+    let (_, ready_detail) = worktree_row(
         &worktree(Some("feature"), false, BranchStatus::Local),
         10,
         12,
@@ -245,10 +290,29 @@ fn worktree_row_shows_a_running_agent_and_one_waiting_for_input() {
         false,
         true,
         false,
+        false,
+        false,
+    );
+    assert!(ready_detail.contains('☾'));
+    assert!(ready_detail.contains("ready"));
+
+    // Working a turn: `▶ running`.
+    let (_, running_detail) = worktree_row(
+        &worktree(Some("feature"), false, BranchStatus::Local),
+        10,
+        12,
+        false,
+        false,
+        false,
+        true,
+        true,
+        false,
+        false,
     );
     assert!(running_detail.contains('▶'));
     assert!(running_detail.contains("running"));
 
+    // Awaiting input wins over running: `◆ waiting`.
     let (_, waiting_detail) = worktree_row(
         &worktree(Some("feature"), false, BranchStatus::Local),
         10,
@@ -258,12 +322,32 @@ fn worktree_row_shows_a_running_agent_and_one_waiting_for_input() {
         false,
         true,
         true,
+        true,
+        false,
     );
     assert!(waiting_detail.contains('◆'));
     assert!(!waiting_detail.contains('▶'));
     assert!(waiting_detail.contains("waiting"));
 
-    let (idle_top, idle_detail) = worktree_row(
+    // A finished agent shows `✓ done`, taking precedence over running.
+    let (_, done_detail) = worktree_row(
+        &worktree(Some("feature"), false, BranchStatus::Local),
+        10,
+        12,
+        false,
+        false,
+        false,
+        true,
+        true,
+        false,
+        true,
+    );
+    assert!(done_detail.contains('✓'));
+    assert!(done_detail.contains("done"));
+    assert!(!done_detail.contains('▶'));
+
+    // No live session: the detail line carries no agent state.
+    let (absent_top, absent_detail) = worktree_row(
         &worktree(Some("feature"), false, BranchStatus::Local),
         10,
         12,
@@ -272,10 +356,13 @@ fn worktree_row_shows_a_running_agent_and_one_waiting_for_input() {
         false,
         false,
         false,
+        false,
+        false,
     );
-    assert!(!idle_detail.contains('▶'));
-    assert!(!idle_detail.contains('◆'));
-    assert!(idle_top.contains("local"));
+    assert!(!absent_detail.contains('▶'));
+    assert!(!absent_detail.contains('◆'));
+    assert!(!absent_detail.contains('☾'));
+    assert!(absent_top.contains("local"));
 }
 
 #[test]
@@ -303,6 +390,8 @@ fn worktree_row_truncates_a_long_branch() {
         ),
         8,
         8,
+        false,
+        false,
         false,
         false,
         false,
@@ -343,6 +432,8 @@ fn left_pane_renders_the_root_entry_then_the_empty_message() {
         &list_with(Vec::new()),
         &HashSet::new(),
         &HashSet::new(),
+        &HashSet::new(),
+        &HashSet::new(),
         80,
         6,
         false,
@@ -363,27 +454,48 @@ fn left_pane_renders_the_root_entry_then_one_entry_per_worktree() {
         worktree(Some("main"), true, BranchStatus::Pushed),
         worktree(Some("feature"), false, BranchStatus::Local),
     ]);
-    let lines = left_pane(&list, &HashSet::new(), &HashSet::new(), 30, 6, false);
-    assert_eq!(lines.len(), 6);
+    let lines = left_pane(
+        &list,
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashSet::new(),
+        30,
+        7,
+        false,
+    );
+    // Root (2 lines), a divider, then 2 lines per worktree.
+    assert_eq!(lines.len(), 7);
     assert!(lines[0].contains(ROOT_NAME));
-    assert!(lines[2].contains("main"));
-    assert!(lines[4].contains("feature"));
+    assert!(lines[2].contains('─'));
+    assert!(lines[3].contains("main"));
+    assert!(lines[5].contains("feature"));
 }
 
 #[test]
-fn left_pane_marks_a_running_agent_and_one_waiting_for_input() {
+fn left_pane_marks_the_agent_state_through_its_lifecycle() {
     let list = list_with(vec![worktree(Some("feature"), false, BranchStatus::Local)]);
     let path: HashSet<PathBuf> = [PathBuf::from("/repo/wt")].into_iter().collect();
-    let running = left_pane(&list, &path, &HashSet::new(), 30, 6, false);
-    assert!(running[3].contains('▶'));
-    assert!(running[3].contains("running"));
-    let waiting = left_pane(&list, &path, &path, 30, 6, false);
-    assert!(waiting[3].contains('◆'));
-    assert!(!waiting[3].contains('▶'));
-    let idle = left_pane(&list, &HashSet::new(), &HashSet::new(), 30, 6, false);
-    assert!(!idle[3].contains('▶'));
-    assert!(!idle[3].contains('◆'));
-    assert!(idle[2].contains("local"));
+    let empty = HashSet::new();
+    // Rows: 0/1 root, 2 divider, 3 worktree identity, 4 worktree detail.
+    // Live but no turn yet: `☾ ready`.
+    let ready = left_pane(&list, &path, &empty, &empty, &empty, 30, 6, false);
+    assert!(ready[4].contains('☾'));
+    assert!(ready[4].contains("ready"));
+    // Working a turn: `▶ running`.
+    let running = left_pane(&list, &path, &path, &empty, &empty, 30, 6, false);
+    assert!(running[4].contains('▶'));
+    assert!(running[4].contains("running"));
+    // Awaiting input wins over running: `◆ waiting`.
+    let waiting = left_pane(&list, &path, &path, &path, &empty, 30, 6, false);
+    assert!(waiting[4].contains('◆'));
+    assert!(!waiting[4].contains('▶'));
+    // No live session: no agent detail at all.
+    let absent = left_pane(&list, &empty, &empty, &empty, &empty, 30, 6, false);
+    assert!(!absent[4].contains('▶'));
+    assert!(!absent[4].contains('◆'));
+    assert!(!absent[4].contains('☾'));
+    assert!(absent[3].contains("local"));
 }
 
 #[test]
@@ -393,10 +505,21 @@ fn left_pane_is_trimmed_to_available_rows() {
         worktree(Some("b"), false, BranchStatus::Local),
         worktree(Some("c"), false, BranchStatus::Local),
     ]);
-    let lines = left_pane(&list, &HashSet::new(), &HashSet::new(), 30, 3, false);
-    assert_eq!(lines.len(), 3);
+    let lines = left_pane(
+        &list,
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashSet::new(),
+        30,
+        4,
+        false,
+    );
+    // 3 worktrees would be 2 (root) + 1 (divider) + 6 lines; trimmed to 4.
+    assert_eq!(lines.len(), 4);
     assert!(lines[0].contains(ROOT_NAME));
-    assert!(lines[2].contains('a'));
+    assert!(lines[2].contains('─'));
+    assert!(lines[3].contains('a'));
 }
 
 #[test]
@@ -406,13 +529,22 @@ fn left_pane_marks_the_active_worktree_with_a_gutter_bar() {
         worktree(Some("feature"), false, BranchStatus::Local),
     ]);
     list.activate_by_name("feature");
-    let lines = left_pane(&list, &HashSet::new(), &HashSet::new(), 30, 6, false);
+    let lines = left_pane(
+        &list,
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashSet::new(),
+        30,
+        7,
+        false,
+    );
     // The root is not active; the active "feature" row carries the green `▎`
     // accent bar down both of its lines (identity + detail).
     assert!(!lines[0].contains('▎'));
-    assert!(lines[4].contains("feature"));
-    assert!(lines[4].contains('▎'));
+    assert!(lines[5].contains("feature"));
     assert!(lines[5].contains('▎'));
+    assert!(lines[6].contains('▎'));
 }
 
 #[test]
@@ -434,11 +566,20 @@ fn left_pane_fades_every_row_but_the_cursor_when_asked() {
     ]);
     // Cursor is on the root row (index 0). Dimming on fades the non-cursor
     // session rows; every row keeps its text.
-    let dimmed = left_pane(&list, &HashSet::new(), &HashSet::new(), 30, 6, true);
+    let dimmed = left_pane(
+        &list,
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashSet::new(),
+        30,
+        6,
+        true,
+    );
     assert_eq!(dimmed.len(), 6);
     assert!(console::strip_ansi_codes(&dimmed[0]).contains(ROOT_NAME));
-    assert!(console::strip_ansi_codes(&dimmed[2]).contains("main"));
-    assert!(console::strip_ansi_codes(&dimmed[4]).contains("feature"));
+    assert!(console::strip_ansi_codes(&dimmed[3]).contains("main"));
+    assert!(console::strip_ansi_codes(&dimmed[5]).contains("feature"));
 }
 
 #[test]
@@ -492,9 +633,10 @@ fn switch_preview_shows_a_live_session_as_a_reattach() {
     state.switch_move_down();
     let preview = stripped(&switch_preview(&state, 40, 12));
     assert!(preview.contains("feat"));
-    // Header carries the git status and the running agent state.
+    // Header carries the git status and the agent state. The session is live but
+    // has reported no turn, so it shows as `ready` (idle, awaiting input).
     assert!(preview.contains("local"));
-    assert!(preview.contains("running"));
+    assert!(preview.contains("ready"));
     // A live session with no snapshot yet falls back to the re-attach label,
     // not the action menu.
     assert!(preview.contains("live terminal"));
@@ -534,6 +676,27 @@ fn switch_preview_shows_an_idle_session_as_its_action_menu() {
     assert!(preview.contains("Run a command"));
     assert!(preview.contains("terminal"));
     assert!(preview.contains("agent"));
+    assert!(!preview.contains("live terminal"));
+}
+
+#[test]
+fn switch_preview_shows_an_idle_session_as_its_prompt_when_prompt_ui() {
+    // With the Prompt action UI, the idle-session preview must mirror the prompt
+    // surface (`❯`) — not the command menu — so the 切替 preview matches what
+    // focusing the session actually reveals (regression: it previewed the menu
+    // regardless of the setting).
+    let idle = worktree(Some("feat"), false, BranchStatus::Pushed);
+    let mut state = HomeState::new("usagi", vec![idle], None);
+    state.set_session_action_ui(SessionActionUi::Prompt);
+    state.enter_switch(super::super::state::ReturnMode::Overview);
+    state.switch_move_down();
+    let preview = stripped(&switch_preview(&state, 40, 12));
+    assert!(preview.contains("pushed"));
+    assert!(preview.contains('❯'), "the prompt surface is previewed");
+    assert!(
+        !preview.contains("Run a command"),
+        "the command menu must not be shown in prompt mode"
+    );
     assert!(!preview.contains("live terminal"));
 }
 
@@ -705,6 +868,20 @@ fn input_line_renders_prompt_in_overview() {
 }
 
 #[test]
+fn input_line_draws_the_caret_at_the_cursor() {
+    let mut state = state_with(Vec::new());
+    for c in "man".chars() {
+        state.push_char(c);
+    }
+    state.cursor_left();
+    let line = input_line(&state);
+    // The caret sits between "ma" and "n", with text on both sides.
+    let caret = line.find(CARET).expect("caret present");
+    let n = line.rfind('n').expect("trailing char present");
+    assert!(caret < n, "caret should precede the last character");
+}
+
+#[test]
 fn input_line_differs_by_mode() {
     let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
     state.enter_switch(super::super::state::ReturnMode::Overview);
@@ -761,6 +938,101 @@ fn overview_input_falls_back_to_a_single_line_on_a_short_terminal() {
     assert!(joined.contains('❯'));
 }
 
+// --- update-available notice -------------------------------------------
+
+#[test]
+fn update_banner_pairs_the_mascot_with_the_latest_version() {
+    let latest = crate::domain::version::Version::parse("0.2.0").unwrap();
+    let banner = update_banner(&latest);
+    assert_eq!(banner.len(), 3);
+    let plain = stripped(&banner);
+    assert!(plain.contains("最新版があります"));
+    assert!(plain.contains("v0.2.0"));
+    // The usagi mascot rides alongside the notice.
+    assert!(plain.contains("(='-')"));
+}
+
+#[test]
+fn render_frame_shows_the_update_notice_when_a_newer_release_exists() {
+    let mut state = state_with(Vec::new());
+    state.set_update(crate::domain::version::Version::parse("9.9.9"));
+    let joined = stripped(&render_frame(24, 100, &state));
+    assert!(joined.contains("最新版があります"));
+    assert!(joined.contains("v9.9.9"));
+}
+
+#[test]
+fn render_frame_hides_the_update_notice_by_default() {
+    let state = state_with(Vec::new());
+    let joined = stripped(&render_frame(24, 100, &state));
+    assert!(!joined.contains("最新版があります"));
+}
+
+#[test]
+fn update_notice_is_skipped_when_the_terminal_is_too_narrow() {
+    // The banner block is wider than this terminal, so it is dropped rather than
+    // wrapping or clobbering the chrome.
+    let mut state = state_with(Vec::new());
+    state.set_update(crate::domain::version::Version::parse("9.9.9"));
+    let joined = stripped(&render_frame(24, 20, &state));
+    assert!(!joined.contains("最新版があります"));
+}
+
+#[test]
+fn render_frame_shows_the_loading_rabbit_while_an_action_runs() {
+    let mut state = state_with(Vec::new());
+    state.step_loading("削除中… 1/2");
+    let joined = stripped(&render_frame(24, 100, &state));
+    assert!(joined.contains("削除中… 1/2"));
+    // The hopping rabbit's face rides the corner.
+    assert!(joined.contains("(･ㅅ･)"));
+}
+
+#[test]
+fn loading_rabbit_takes_the_corner_over_the_update_notice() {
+    // With both a pending update and a running action, the loading rabbit wins
+    // the top-right corner so the in-flight work is what the user sees.
+    let mut state = state_with(Vec::new());
+    state.set_update(crate::domain::version::Version::parse("9.9.9"));
+    state.step_loading("作成中…");
+    let joined = stripped(&render_frame(24, 100, &state));
+    assert!(joined.contains("作成中…"));
+    assert!(!joined.contains("最新版があります"));
+}
+
+#[test]
+fn loading_rabbit_is_skipped_when_the_terminal_is_too_narrow() {
+    // Like the update notice, the block is dropped rather than clobbering the
+    // chrome when it cannot fit the width.
+    let mut state = state_with(Vec::new());
+    state.step_loading("作成中…");
+    let joined = stripped(&render_frame(24, 10, &state));
+    assert!(!joined.contains("作成中…"));
+}
+
+#[test]
+fn overlay_top_right_skips_a_row_whose_content_reaches_the_banner_column() {
+    // The first line already fills the width, so the banner cannot be placed on
+    // it; a later, empty line still receives its segment.
+    let mut lines = vec!["X".repeat(100), String::new()];
+    let banner = vec!["AB".to_string(), "CD".to_string()];
+    overlay_top_right(&mut lines, 0, 100, &banner);
+    // Row 0 is untouched (no room); row 1 gets its right-anchored segment.
+    assert_eq!(console::measure_text_width(&lines[0]), 100);
+    assert!(lines[1].ends_with("CD"));
+}
+
+#[test]
+fn overlay_top_right_stops_when_the_banner_runs_past_the_last_row() {
+    // The banner has more rows than remain from `top`, so placement stops at the
+    // end of `lines` instead of panicking.
+    let mut lines = vec![String::new()];
+    let banner = vec!["AB".to_string(), "CD".to_string(), "EF".to_string()];
+    overlay_top_right(&mut lines, 0, 100, &banner);
+    assert!(lines[0].ends_with("AB"));
+    assert_eq!(lines.len(), 1);
+}
+
 // --- Switch inline create ----------------------------------------------
 
 #[test]
@@ -780,7 +1052,7 @@ fn switch_create_rows_show_the_input_and_an_error() {
 fn render_frame_shows_the_inline_create_row_in_switch() {
     let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
     state.enter_switch(super::super::state::ReturnMode::Overview);
-    state.switch_begin_create();
+    state.switch_begin_create(Vec::new());
     for c in "wip".chars() {
         state.create_push_char(c);
     }
@@ -1053,8 +1325,11 @@ fn render_frame_surfaces_running_and_waiting_agent_icons() {
     waiting.path = PathBuf::from("/repo/wait");
     let mut state = HomeState::new("usagi", vec![running, waiting], None);
     state.set_live([PathBuf::from("/repo/run"), PathBuf::from("/repo/wait")].into());
+    state.set_running([PathBuf::from("/repo/run")].into());
     state.set_waiting([PathBuf::from("/repo/wait")].into());
-    let frame = render_frame(24, 80, &state);
+    // Height accommodates root (2 lines) + divider + 2 sessions (2 lines each)
+    // without the lowest detail row slipping behind the bottom hint band.
+    let frame = render_frame(25, 80, &state);
     let joined = console::strip_ansi_codes(&frame.join("\n")).into_owned();
     assert!(joined.contains('▶'));
     assert!(joined.contains("running"));

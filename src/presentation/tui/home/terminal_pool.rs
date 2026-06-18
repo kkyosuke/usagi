@@ -10,13 +10,16 @@
 //! where it was left.
 //!
 //! Because those shells keep running in the background, the pool also watches
-//! them: a background thread polls every session's bell count through a
-//! [`SessionMonitor`]. Interactive agents ring the terminal bell when they
-//! finish a turn and want input, so when a detached session rings it, the
-//! watcher fires a one-shot desktop notification and flags the session as
-//! waiting. The flag is exposed through a [`MonitorHandle`] the render loops read
-//! to mark the session in the sidebar (`◆`). The session the user is attached to
-//! is excluded — its bells are seen live.
+//! them: a background thread polls every session through a [`SessionMonitor`].
+//! For each it reads two signals — the phase the agent's lifecycle hooks
+//! recorded (via [`agent_state_store`]) and the shell's bell count — and lets
+//! the monitor decide (the phase wins; the bell is the fallback for agents
+//! without hooks). When a **background** session starts waiting (`◆`) or its
+//! agent finishes (`✓`), the watcher fires a one-shot desktop notification. The
+//! per-session state is exposed through a [`MonitorHandle`] the render loops read
+//! to mark the session in the sidebar. The attached session is shown with the
+//! same state as anywhere else (it is seen live) — being attached only suppresses
+//! its notification, not its badge.
 //!
 //! This is pure I/O and process ownership (it spawns shells, holds their
 //! handles, runs a watcher thread, and shows desktop notifications), so — like
@@ -37,6 +40,7 @@ use console::Term;
 
 use crate::infrastructure::pty::PtySession;
 use crate::infrastructure::session_monitor::SessionMonitor;
+use crate::infrastructure::{agent_state_store, session_monitor};
 
 use super::terminal_view::TerminalView;
 use super::ui;
@@ -70,6 +74,23 @@ pub struct MonitorHandle {
     shared: Arc<Mutex<Shared>>,
 }
 
+/// Every session-badge set the sidebar draws, read together under one lock by
+/// [`MonitorHandle::snapshot`]. Comparing two snapshots tells a render loop
+/// whether the badges changed since its last paint, so an idle pane can skip the
+/// repaint entirely.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MonitorSnapshot {
+    /// Worktree paths whose agent is actively working a turn.
+    pub running: HashSet<PathBuf>,
+    /// Worktree paths currently waiting for the user.
+    pub waiting: HashSet<PathBuf>,
+    /// Worktree paths whose agent has finished (a turn completed or it exited).
+    pub done: HashSet<PathBuf>,
+    /// Worktree paths with a live embedded session — a shell, and any agent CLI
+    /// inside it, still alive whether attached or left running in the background.
+    pub live: HashSet<PathBuf>,
+}
+
 impl MonitorHandle {
     /// A handle backed by empty state and no watcher — for screens (and tests)
     /// that render without any live sessions.
@@ -99,27 +120,31 @@ impl MonitorHandle {
         }
     }
 
-    /// A snapshot of the worktree paths currently waiting for the user.
-    pub fn waiting(&self) -> HashSet<PathBuf> {
-        self.lock().monitor.waiting().clone()
-    }
-
-    /// A snapshot of the worktree paths with a live (running) embedded session:
-    /// a shell — and any agent CLI inside it — is still alive, whether attached
-    /// or left running in the background. The render loops read this to mark
-    /// sessions that have an agent in use.
-    pub fn live(&self) -> HashSet<PathBuf> {
+    /// Read every session-badge set the sidebar needs for one repaint under a
+    /// single lock, instead of locking once per set. The render loops took four
+    /// separate locks (`running`/`waiting`/`done`/`live`) each frame, contending
+    /// with the watcher thread that holds the same mutex; one lock per repaint
+    /// removes that. The returned [`MonitorSnapshot`] is comparable, so a caller
+    /// can also skip repainting when the badges have not changed.
+    pub fn snapshot(&self) -> MonitorSnapshot {
         let shared = self.lock();
-        shared
+        let live = shared
             .sessions
             .iter()
             .filter(|(_, w)| w.alive.load(Ordering::SeqCst))
             .map(|(path, _)| path.clone())
-            .collect()
+            .collect();
+        MonitorSnapshot {
+            running: shared.monitor.running().clone(),
+            waiting: shared.monitor.waiting().clone(),
+            done: shared.monitor.done().clone(),
+            live,
+        }
     }
 
     /// Declare the foreground (attached) session, or clear it with `None`. The
-    /// attached session is never reported as waiting.
+    /// attached session is shown with its true state like any other; being
+    /// attached only suppresses its desktop notification and the bell heuristic.
     pub fn set_attached(&self, path: Option<PathBuf>) {
         self.lock().monitor.set_attached(path);
     }
@@ -195,6 +220,10 @@ impl TerminalPool {
             let pty = PtySession::spawn(dir, geo.rows, geo.cols, initial)?;
             // Register (or refresh) the watched handles for this path; a fresh
             // spawn over an exited one resets its bell baseline.
+            // Forget any phase recorded by a previous agent at this worktree so
+            // the fresh session does not inherit a stale running / waiting state
+            // before its own hooks fire.
+            agent_state_store::clear(dir);
             {
                 let mut shared = self.lock();
                 shared.monitor.forget(dir);
@@ -214,6 +243,37 @@ impl TerminalPool {
             .sessions
             .get_mut(&key)
             .expect("the session was just inserted or already present"))
+    }
+
+    /// Kill and forget every live shell whose worktree lies at or under `root`.
+    ///
+    /// Called when a session is removed: deleting its worktree directory does not
+    /// stop the shell (and any agent CLI) still running there, so without this the
+    /// exited-looking-but-alive shell lingers in the pool keyed by its path. A
+    /// session later recreated at the same path would then re-attach to that stale
+    /// shell — inheriting the previous run's agent and scrollback — instead of
+    /// spawning fresh. Dropping each [`PtySession`] kills its shell (via `Drop`),
+    /// and the watched / monitor / phase state for the path is cleared too.
+    pub fn remove_under(&mut self, root: &Path) {
+        let removed: Vec<PathBuf> = self
+            .sessions
+            .keys()
+            .filter(|path| path.as_path() == root || path.starts_with(root))
+            .cloned()
+            .collect();
+        if removed.is_empty() {
+            return;
+        }
+        for path in &removed {
+            // Dropping the PtySession kills the shell it owns.
+            self.sessions.remove(path);
+        }
+        let mut shared = self.lock();
+        for path in &removed {
+            shared.sessions.remove(path);
+            shared.monitor.forget(path);
+            agent_state_store::clear(path);
+        }
     }
 
     /// Snapshot the live terminal for the session rooted at `dir`, resized to the
@@ -249,20 +309,26 @@ impl Drop for TerminalPool {
 }
 
 /// Spawn the watcher thread: every [`POLL_INTERVAL`] it prunes exited sessions,
-/// feeds the live bell counts to the [`SessionMonitor`], and fires a one-shot
-/// notification for each session that has just begun waiting for input.
+/// feeds the live bell counts and recorded phases to the [`SessionMonitor`], and
+/// fires a one-shot notification for each background session that has just begun
+/// waiting for input or whose agent has just finished.
 fn spawn_watcher(
     shared: Arc<Mutex<Shared>>,
     stop: Arc<AtomicBool>,
     notifications_enabled: bool,
 ) -> JoinHandle<()> {
+    // One reader for the watcher's lifetime so its mtime cache survives across
+    // ticks: an unchanged phase file then costs a single `stat`, not a re-read.
+    let phase_reader = agent_state_store::PhaseReader::new();
     std::thread::spawn(move || loop {
         if stop.load(Ordering::SeqCst) {
             break;
         }
         std::thread::sleep(POLL_INTERVAL);
 
-        let labels: Vec<String> = {
+        // Snapshot the bookkeeping under the lock: prune dead sessions and observe
+        // the phases/bells.
+        let notices: Vec<(String, session_monitor::NoticeKind)> = {
             let mut shared = match shared.lock() {
                 Ok(shared) => shared,
                 Err(_) => break,
@@ -278,39 +344,60 @@ fn spawn_watcher(
             for path in dead {
                 shared.sessions.remove(&path);
                 shared.monitor.forget(&path);
+                agent_state_store::clear(&path);
             }
 
-            let readings: Vec<(PathBuf, u64)> = shared
+            // Each session's reading pairs its bell count with the phase its
+            // agent's hooks last recorded (if any); the monitor prefers the phase
+            // and falls back to the bell.
+            let readings: Vec<session_monitor::Reading> = shared
                 .sessions
                 .iter()
-                .map(|(path, w)| (path.clone(), w.bell.load(Ordering::SeqCst)))
+                .map(|(path, w)| {
+                    (
+                        path.clone(),
+                        w.bell.load(Ordering::SeqCst),
+                        phase_reader.read(path),
+                    )
+                })
                 .collect();
-            let newly = shared.monitor.observe(&readings);
-            newly
-                .iter()
-                .filter_map(|path| shared.sessions.get(path).map(|w| w.label.clone()))
+            shared
+                .monitor
+                .observe(&readings)
+                .into_iter()
+                .filter_map(|notice| {
+                    shared
+                        .sessions
+                        .get(&notice.path)
+                        .map(|w| (w.label.clone(), notice.kind))
+                })
                 .collect()
         };
 
         if notifications_enabled {
-            for label in labels {
-                notify_waiting(&label);
+            for (label, kind) in notices {
+                notify(&label, kind);
             }
         }
     })
 }
 
-/// Show a desktop notification that a background session is waiting for input.
+/// Show a desktop notification that a background session changed state: it began
+/// waiting for input, or its agent finished.
 ///
 /// Best-effort: failures (e.g. a headless environment without a notification
 /// daemon) are ignored so they never disturb the watcher loop.
 ///
 /// The body leads with a small ASCII-art rabbit rather than an emoji so it
 /// renders consistently across notification daemons that lack emoji glyphs.
-fn notify_waiting(label: &str) {
+fn notify(label: &str, kind: session_monitor::NoticeKind) {
+    let message = match kind {
+        session_monitor::NoticeKind::Waiting => format!("{label} が入力待ちです"),
+        session_monitor::NoticeKind::Done => format!("{label} が完了しました"),
+    };
     let _ = notify_rust::Notification::new()
         .summary("usagi")
-        .body(&format!("(\\_/)\n(='.'=)\n{label} が入力待ちです"))
+        .body(&format!("(\\_/)\n(='.'=)\n{message}"))
         .show();
 }
 

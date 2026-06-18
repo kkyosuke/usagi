@@ -1,3 +1,4 @@
+pub mod agent_phase;
 pub mod config;
 pub mod doctor;
 pub mod hop;
@@ -5,4 +6,5 @@ pub mod init;
 pub mod issue;
 pub mod llm_mcp;
 pub mod mcp;
+pub mod memory;
 pub mod status;

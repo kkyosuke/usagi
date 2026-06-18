@@ -1,6 +1,6 @@
 [package]
 name = "usagi"
-version = "0.0.1"
+version = "0.0.3"
 edition = "2021"
 repository = "https://github.com/KKyosuke/usagi"
 license = "MIT"
@@ -19,6 +19,7 @@ vt100 = "0.16.2"
 crossterm = "0.29.0"
 shell-words = "1.1.1"
 rayon = "1.12.0"
+unicode-width = "0.2"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

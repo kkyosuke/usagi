@@ -1,22 +1,80 @@
-//! `usagi mcp`: run the issue MCP server over stdio.
+//! `usagi mcp`: run the unified `usagi` MCP server over stdio.
 //!
 //! This is a thin transport wrapper that reads newline-delimited JSON-RPC
 //! messages from stdin and writes replies to stdout, delegating all protocol
-//! and tool logic to [`crate::presentation::mcp::issue::McpServer`] (which is unit
-//! tested). The blocking stdin loop itself is not unit tested — like `hop`'s
-//! TUI entry point it is excluded from coverage.
+//! and tool logic to [`crate::presentation::mcp::usagi::UsagiMcpServer`] (which
+//! composes the unit-tested issue/memory and session servers). The blocking
+//! stdin loop and the production [`AgentBackend`] that shells out to the agent
+//! CLI are not unit tested — like `hop`'s TUI entry point they are excluded from
+//! coverage.
 
 use std::env;
 use std::io::{self, BufRead, Write};
+use std::path::Path;
+use std::process::{Command, Stdio};
 
 use anyhow::Result;
 
-use crate::presentation::mcp::issue::McpServer;
+use crate::domain::settings::AgentCli;
+use crate::infrastructure::storage::Storage;
+use crate::presentation::mcp::session::AgentBackend;
+use crate::presentation::mcp::usagi::UsagiMcpServer;
+use crate::usecase::{session, settings};
 
-/// Entry point for `usagi mcp`: serve issue tools for the current repository
-/// over stdio until the client closes the input stream.
+/// The production [`AgentBackend`]: each `session_prompt` runs the configured
+/// agent CLI in headless print mode (`<agent> -p <prompt>`) inside the session's
+/// worktree, returning the captured stdout. No MCP servers are wired into this
+/// child, so a delegated session cannot recursively spawn further sessions.
+struct CliAgentBackend {
+    cli: AgentCli,
+}
+
+impl AgentBackend for CliAgentBackend {
+    fn prompt(&self, worktree: &Path, prompt: &str) -> Result<String, String> {
+        let program = self.cli.command();
+        let output = Command::new(program)
+            .arg("-p")
+            .arg(prompt)
+            .current_dir(worktree)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .map_err(|e| format!("failed to start {program}: {e}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "{program} exited with {}: {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    }
+}
+
+/// Entry point for `usagi mcp`: serve the unified `usagi` tools (issue, memory,
+/// and session) for the current repository over stdio until the client closes
+/// the input stream.
+///
+/// The server is launched from the agent's working directory, which may sit
+/// inside a session tree (`<workspace>/.usagi/sessions/<name>/`). Issues,
+/// memories, and sessions all belong to the workspace, so we resolve back to its
+/// root rather than writing into a throwaway session copy (see
+/// [`session::workspace_root`]).
 pub fn run() -> Result<()> {
-    let server = McpServer::new(env::current_dir()?);
+    let workspace_root = session::workspace_root(&env::current_dir()?);
+
+    // The agent CLI used to fulfil `session_prompt`, resolved from the effective
+    // settings (project-local over the global default, which is Claude). Any
+    // failure to read settings falls back to the default agent.
+    let cli = Storage::open_default()
+        .and_then(|storage| settings::effective(&storage, &workspace_root))
+        .map(|settings| settings.agent_cli)
+        .unwrap_or_default();
+
+    let backend = Box::new(CliAgentBackend { cli });
+    let server = UsagiMcpServer::new(workspace_root, backend);
+
     let stdin = io::stdin();
     let stdout = io::stdout();
     let mut out = stdout.lock();

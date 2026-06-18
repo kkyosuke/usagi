@@ -34,7 +34,7 @@
 | テーマ | `theme` | enum | `system` | `light` / `dark` / `system`（OS 追従）の UI カラーテーマ |
 | 既定ワークスペース | `default_workspace` | string? | `null` | 既定で開くワークスペース名。未設定なら `null` |
 | クローン先ベース | `workspace_root` | string? | `null`（→ `~/git`） | 新規プロジェクトのクローン先ベースディレクトリ。未設定時は `~/git` にフォールバック |
-| デスクトップ通知 | `notifications_enabled` | bool | `true` | バックグラウンドの `agent` が入力待ちになった時などのデスクトップ通知の ON/OFF |
+| デスクトップ通知 | `notifications_enabled` | bool | `true` | バックグラウンドの `agent` が入力待ち・完了になった時のデスクトップ通知の ON/OFF |
 | Agent CLI | `agent_cli` | enum | `claude` | 起動する AI エージェント CLI（`claude` / `gemini`） |
 | セッションアクション UI | `session_action_ui` | enum | `menu` | ホーム画面の[在席](design/05-home.md#在席focus)で右ペインに出すアクション UI のスタイル。`menu`（選べるリスト）/ `prompt`（セッションスコープのコマンドライン） |
 | ローカル LLM 有効化 | `local_llm.enabled` | bool | `false` | 有効にすると `agent` 起動時に [ローカル LLM MCP サーバ](03-commands/04-llm-mcp.md)（`usagi-llm`）を wire し、軽量タスクをローカル LLM に委譲できる |
@@ -77,8 +77,7 @@
   クローン先（`workspace_root`）のようにプロジェクト単位で変える意味の薄い項目は対象外です。
 - **実効設定 = グローバル設定にローカルの上書きを適用した結果**。解決は `domain/settings.rs` の
   `Settings::with_local`、ユースケースは `usecase/settings.rs` の `effective(storage, repo_root)` が担います。
-- 読み書きロジック・永続化（[issue 021](../issues/021-local-settings.md)）に加え、編集 UI も実装済み
-  （[issue 022](../issues/022-local-settings-ui.md)）。ホーム画面のコマンドモードで `config` を実行すると
+- 読み書きロジック・永続化に加え、編集 UI も実装済みです。ホーム画面のコマンドモードで `config` を実行すると
   設定画面が**ワークスペーススコープ**で開き、「Agent CLI」「Notifications」「Default Branch」「Branch Source」
   の 4 項目を編集できます。Agent CLI と Notifications は **「グローバルに従う / ローカルで上書き」**、Default
   Branch は **`auto`（検出済み既定）／ リポジトリの各ブランチ**、Branch Source は **`local` / `remote`** を
@@ -111,7 +110,7 @@
 
 ### CLI
 
-CLI からも設定を確認・編集できます（[issue 015](../issues/015-config-edit.md)、[3. コマンドリファレンス](03-commands/README.md)）。
+CLI からも設定を確認・編集できます（[3. コマンドリファレンス](03-commands/README.md)）。
 
 - `usagi config` — 現在のグローバル設定を `key  value` 形式で一覧表示。
 - `usagi config --edit` — 設定ファイルを `$EDITOR`（→ `$VISUAL` → OS 既定）で開いて編集。保存後に
@@ -131,10 +130,13 @@ CLI からも設定を確認・編集できます（[issue 015](../issues/015-co
 | `theme` | TUI 全体の配色 |
 | `default_workspace` | 起動時に既定で開くワークスペースの選択 |
 | `workspace_root` | 新規プロジェクト画面（Clone）の Location 既定値（[design/03-new.md](design/03-new.md)） |
-| `notifications_enabled` | バックグラウンドの `agent` が入力待ちになった時などのデスクトップ通知の表示可否 |
+| `notifications_enabled` | バックグラウンドの `agent` が入力待ち・完了になった時のデスクトップ通知の表示可否 |
 | `agent_cli` | `agent` コマンドが起動する AI エージェント CLI の選択（[4. オーケストレーション](04-orchestration.md)） |
 | `session_action_ui` | ホーム画面の[在席](design/05-home.md#在席focus)で右ペインに出すアクション UI（`menu` / `prompt`）の選択 |
 | `local_llm.enabled` / `local_llm.model` | 有効時、`agent` 起動コマンドに `usagi-llm` MCP サーバを追加し、軽量タスクをローカル LLM に委譲する（[3.4 ローカル LLM MCP サーバ](03-commands/04-llm-mcp.md)） |
+
+> ホーム画面の `config` で `session_action_ui` を変更すると、設定画面を閉じてホームに戻った時点で
+> 実効設定を読み直し、[在席](design/05-home.md#在席focus)の右ペインに反映します（ホーム画面を開き直す必要はありません）。
 
 > 設定の永続化は `usecase/settings.rs`（`load` / `save` / 各 `set_*`）と
 > `infrastructure/storage.rs`（`Storage`）に実装されています。

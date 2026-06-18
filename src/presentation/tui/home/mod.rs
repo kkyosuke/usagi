@@ -14,12 +14,17 @@ pub mod terminal_pool;
 pub mod terminal_selection;
 pub mod terminal_view;
 pub mod ui;
+pub mod update;
+
+#[cfg(test)]
+mod e2e_tests;
 
 use std::path::Path;
 
 use anyhow::Result;
 use console::Term;
 
+use crate::domain::settings::SessionActionUi;
 use crate::domain::workspace::Workspace;
 use crate::domain::workspace_state::SessionRecord;
 use crate::infrastructure::history_store::HistoryStore;
@@ -66,14 +71,18 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
     let mut state = HomeState::new(workspace.name.clone(), Vec::new(), notice);
     state.restore_sessions(sessions);
 
+    // Load the workspace's task issues so the `issue` command can list / graph /
+    // show them. A read failure is non-fatal: the command just shows none.
+    if let Ok(issues) = crate::infrastructure::issue_store::IssueStore::new(&workspace.path).scan()
+    {
+        state.set_issues(issues);
+    }
+
     // Which right-pane action surface 在席 (Focus) presents — a pickable menu or
     // a typed prompt — from the effective settings (project-local over the global
-    // default). Any failure to read settings falls back to the default (Menu).
-    let session_action_ui = crate::infrastructure::storage::Storage::open_default()
-        .and_then(|storage| crate::usecase::settings::effective(&storage, &workspace.path))
-        .map(|settings| settings.session_action_ui)
-        .unwrap_or_default();
-    state.set_session_action_ui(session_action_ui);
+    // default). Re-read again whenever the config screen closes (see
+    // `open_config`) so a change takes effect without reopening this screen.
+    state.set_session_action_ui(effective_session_action_ui(&workspace.path));
 
     // Restore past commands so `history` and `↑`/`↓` recall span sessions.
     // A read failure is non-fatal: just start with an empty history.
@@ -111,6 +120,54 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
         },
     };
 
+    // The branch names already taken across the workspace, read fresh each time
+    // the inline create input opens so the typed name can be validated live
+    // against duplicates and branch-namespace clashes.
+    let branches_root = workspace.path.clone();
+    let mut existing_branches =
+        move || crate::usecase::session::existing_branch_names(&branches_root);
+
+    // The effective settings for this workspace (project-local overrides on top
+    // of the global default), read once. Any failure falls back to the defaults.
+    let settings = crate::infrastructure::storage::Storage::open_default()
+        .and_then(|storage| crate::usecase::settings::effective(&storage, &workspace.path))
+        .unwrap_or_default();
+
+    // The wired-in MCP servers and lifecycle hooks invoke usagi back, so they are
+    // pointed at this process's own executable path rather than the bare name
+    // `usagi`: that way they resolve even when usagi is run straight from a build
+    // (`cargo run`) and is not installed on `$PATH`. If the path can't be
+    // determined we fall back to the bare name.
+    let usagi_bin = std::env::current_exe()
+        .ok()
+        .and_then(|path| path.into_os_string().into_string().ok())
+        .unwrap_or_else(|| "usagi".to_string());
+
+    // The agent adapter `:agent` drives, picked from the configured CLI — the
+    // single source of the launch command it builds below.
+    let agent = crate::infrastructure::agent::agent_for(settings.agent_cli);
+
+    // The command line `:agent` sends to the shell: the agent renders usagi's
+    // wiring policy (MCP servers + system prompt + lifecycle hooks) into its own
+    // invocation.
+    let agent_command = agent.launch_command(&settings.agent_wiring(&usagi_bin));
+
+    // Whether to surface desktop notifications when a background session starts
+    // waiting for input or finishes. Opt-out: on unless the user disabled it.
+    let notifications_enabled = settings.notifications_enabled;
+
+    // The live shells embedded in the right pane, one per worktree, kept alive
+    // across session switches and for as long as this screen is open. Dropped on
+    // return, which kills any shell still running. The pool also watches every
+    // shell's bell/phase and flags / notifies the ones waiting or finished.
+    //
+    // Wrapped in a `RefCell` so the pane driver (`open_terminal`), the sidebar
+    // preview (`preview`), and `remove_session` (which evicts a removed session's
+    // shell) can all reach it: their borrows never overlap in time (the event
+    // loop calls one at a time).
+    let pool = std::cell::RefCell::new(terminal_pool::TerminalPool::new(notifications_enabled));
+    let monitor = pool.borrow().monitor();
+
     // Removing a session deletes its worktrees/branches and forgets it. A
     // session with uncommitted changes is left untouched unless `--force`.
     let remove_root = workspace.path.clone();
@@ -119,11 +176,18 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
         name,
         force,
     ) {
-        Ok(outcome) if outcome.removed => SessionOutcome {
-            line: LogLine::output(format!("Removed session \"{name}\" 🧹")),
-            sessions: reload_sessions(&remove_root),
-            select: None,
-        },
+        Ok(outcome) if outcome.removed => {
+            // Kill any shell still running under the removed session so a session
+            // later recreated at the same path starts fresh instead of
+            // re-attaching to this run's agent and its history.
+            let session_root = remove_root.join(".usagi").join("sessions").join(name);
+            pool.borrow_mut().remove_under(&session_root);
+            SessionOutcome {
+                line: LogLine::output(format!("Removed session \"{name}\" 🧹")),
+                sessions: reload_sessions(&remove_root),
+                select: None,
+            }
+        }
         Ok(outcome) => {
             let paths = outcome
                 .dirty
@@ -147,36 +211,25 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
         },
     };
 
-    // The agent CLI launched by `:agent`, resolved from the effective settings
-    // (project-local overrides on top of the global default, which is Claude).
-    // The launch command wires in usagi's issue MCP server (where the agent CLI
-    // supports it) so the agent can manage issues from the start, plus the local
-    // LLM server when it is enabled. Any failure to read settings falls back to
-    // the default agent.
-    let agent_command = crate::infrastructure::storage::Storage::open_default()
-        .and_then(|storage| crate::usecase::settings::effective(&storage, &workspace.path))
-        .map(|settings| settings.agent_launch_command())
-        .unwrap_or_else(|_| crate::domain::settings::Settings::default().agent_launch_command());
-
-    // Whether to surface desktop notifications when a background session starts
-    // waiting for input, from the effective settings (project-local over the
-    // global default). Any failure to read settings defaults to enabled, like
-    // `hop`'s welcome notification.
-    let notifications_enabled = crate::infrastructure::storage::Storage::open_default()
-        .and_then(|storage| crate::usecase::settings::effective(&storage, &workspace.path))
-        .map(|settings| settings.notifications_enabled)
-        .unwrap_or(true);
-
-    // The live shells embedded in the right pane, one per worktree, kept alive
-    // across session switches and for as long as this screen is open. Dropped on
-    // return, which kills any shell still running. The pool also watches every
-    // shell's bell and flags / notifies the ones waiting for input.
-    //
-    // Wrapped in a `RefCell` so both the pane driver (`open_terminal`) and the
-    // sidebar preview (`preview`) can reach it: their borrows never overlap in
-    // time (the event loop calls one or the other, never both at once).
-    let pool = std::cell::RefCell::new(terminal_pool::TerminalPool::new(notifications_enabled));
-    let monitor = pool.borrow().monitor();
+    // Check the project's git remote for a newer release than this build, on a
+    // background thread so a slow or unreachable network never delays the screen.
+    // The result is written to the handle the event loop reads each redraw; when
+    // a newer version is published it surfaces the top-right "update available"
+    // notice. Any failure (offline, git missing, already up to date) simply
+    // leaves the handle empty and the notice hidden.
+    let update = update::UpdateHandle::new();
+    {
+        let handle = update.clone();
+        std::thread::spawn(move || {
+            if let Some(status) =
+                crate::usecase::update_check::check(env!("CARGO_PKG_VERSION"), || {
+                    crate::infrastructure::release::fetch_tags(env!("CARGO_PKG_REPOSITORY"))
+                })
+            {
+                handle.set(status);
+            }
+        });
+    }
 
     // Opening a terminal embeds a live shell in the right pane: the pane stays
     // inside the workspace screen (sidebar still visible) and runs the shell
@@ -233,10 +286,14 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
     // reported back as `true` so the event loop propagates the quit; `Back`
     // returns `false`.
     let config_root = workspace.path.clone();
-    let mut open_config = |t: &Term| -> Result<bool> {
+    let mut open_config = |t: &Term| -> Result<Option<SessionActionUi>> {
         match crate::presentation::tui::config::run_in(t, Some(config_root.clone()))? {
-            crate::presentation::tui::config::Outcome::Back => Ok(false),
-            crate::presentation::tui::config::Outcome::Quit => Ok(true),
+            // Back to home: re-read the (possibly changed) Session Action UI so the
+            // 在席 surface reflects the edit without reopening the home screen.
+            crate::presentation::tui::config::Outcome::Back => {
+                Ok(Some(effective_session_action_ui(&config_root)))
+            }
+            crate::presentation::tui::config::Outcome::Quit => Ok(None),
         }
     };
 
@@ -246,11 +303,25 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
         state,
         &workspace.path,
         &monitor,
+        &update,
         &mut persist,
         &mut create_session,
         &mut remove_session,
+        &mut existing_branches,
         &mut open_terminal,
         &mut open_config,
         &mut preview,
     )
+}
+
+/// The effective Session Action UI (在席 mode's right-pane surface) for the
+/// workspace at `root` — the project-local override on top of the global
+/// default. Read at startup and again whenever the config screen closes, so an
+/// edited setting takes effect without reopening the home screen. Any failure to
+/// read settings falls back to the default (`Menu`).
+fn effective_session_action_ui(root: &Path) -> SessionActionUi {
+    crate::infrastructure::storage::Storage::open_default()
+        .and_then(|storage| crate::usecase::settings::effective(&storage, root))
+        .map(|settings| settings.session_action_ui)
+        .unwrap_or_default()
 }

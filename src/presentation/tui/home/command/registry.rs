@@ -3,13 +3,14 @@
 //! new commands can be added with [`CommandRegistry::register`].
 
 use super::builtins::{
-    AgentCommand, ClearCommand, ComingSoonCommand, ConfigCommand, HistoryCommand, ManCommand,
-    QuitCommand, SessionCommand, TerminalCommand,
+    AgentCommand, ClearCommand, CloseCommand, ComingSoonCommand, ConfigCommand, HistoryCommand,
+    IssueCommand, ManCommand, QuitCommand, SessionCommand, TerminalCommand,
 };
 use super::{
     Command, CommandContext, CommandHint, CommandInfo, CommandResult, CommandScope, Completion,
     Hint, LogLine, WorktreeRef,
 };
+use crate::domain::issue::Issue;
 
 /// The set of commands available in command mode, dispatched and completed by
 /// name. Built with [`CommandRegistry::with_builtins`]; new commands can be
@@ -38,7 +39,11 @@ impl CommandRegistry {
                     examples: &["ai fix the failing test"],
                     scope: CommandScope::Session,
                 }),
+                // `close` is the destructive session action, listed last in the
+                // 在席 menu so it sits below the launch commands.
+                Box::new(CloseCommand),
                 Box::new(ConfigCommand),
+                Box::new(IssueCommand),
                 Box::new(HistoryCommand),
                 Box::new(ComingSoonCommand {
                     name: "doctor",
@@ -102,6 +107,19 @@ impl CommandRegistry {
         history: &[String],
         worktrees: &[WorktreeRef],
     ) -> CommandResult {
+        self.dispatch_with(input, history, worktrees, &[])
+    }
+
+    /// Like [`dispatch`](Self::dispatch) but also supplies the workspace's task
+    /// `issues`, which the `issue` command reads. Kept separate so the many
+    /// issue-agnostic call sites can stay on the shorter `dispatch`.
+    pub fn dispatch_with(
+        &self,
+        input: &str,
+        history: &[String],
+        worktrees: &[WorktreeRef],
+        issues: &[Issue],
+    ) -> CommandResult {
         let trimmed = input.trim();
         let mut parts = trimmed.splitn(2, char::is_whitespace);
         let name = parts.next().unwrap_or("");
@@ -116,6 +134,7 @@ impl CommandRegistry {
             history,
             commands: &infos,
             worktrees,
+            issues,
         };
 
         match self.find(name) {

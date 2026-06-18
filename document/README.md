@@ -9,6 +9,7 @@
 
 | # | ドキュメント | 内容 |
 |---|---|---|
+| 0 | [00-tutorial.md](00-tutorial.md) | はじめての usagi（インストール 〜 Agent でセッションを並行起動するまでの導入ガイド） |
 | 1 | [01-overview.md](01-overview.md) | プロジェクト概要・解決する課題・全体構造 |
 | 2 | [02-architecture.md](02-architecture.md) | クリーンアーキテクチャ 4 層・依存ルール・`src/` のモジュール構成 |
 | 3 | [03-commands/](03-commands/README.md) | CLI コマンド・TUI 内コマンド・MCP サーバのリファレンス |
@@ -35,9 +36,9 @@
 | 1 | [data/01-global.md](data/01-global.md) | usagi 全体（`~/.usagi/` の `workspaces.json` / `settings.json`） |
 | 2 | [data/02-workspace.md](data/02-workspace.md) | workspace 毎（`<repo>/.usagi/` の `state.json` / `settings.json` / `history.json`） |
 | 3 | [data/03-issues.md](data/03-issues.md) | タスク issue（`<repo>/.usagi/issues/` の markdown + `index.json`） |
+| 4 | [data/04-memory.md](data/04-memory.md) | エージェントのメモリ（`<repo>/.usagi/memory/` の markdown + `MEMORY.md` + `index.json`） |
 
 ## 関連
 
 - [../README.md](../README.md) — リポジトリの README（インストール・使い方）
-- [../issues/README.md](../issues/README.md) — 開発タスク（issue）一覧
 - [../.agents/workflow.md](../.agents/workflow.md) — AI エージェント向けの開発ワークフロー

@@ -40,34 +40,34 @@
 設定全体を 1 つのブロック（幅 52）として端末中央に寄せ、ブロック内は左揃えで描画します。
 
 ```text
-┌────────────────────────────────────────────────────┐
-│                       (\(\                           │  ┐ うさぎ AA（マゼンタ・太字）
-│                      (='-')                          │  │
+┌───────────────────────────────────────────────────────┐
+│                       (\(\                            │  ┐ うさぎ AA（マゼンタ・太字）
+│                      (='-')                           │  │
 │                      o(_(")(")                        │  ┘
-│                       Config                         │  ← タイトル（緑・太字）
-│            Adjust your global preferences            │  ← サブタイトル（淡色）
-│                                                      │
-│          Theme              < System >               │  ┐ 設定一覧（全項目 `< 値 >`）
-│          Default Workspace  < (none) >               │  │  値は常に山かっこで囲み列を揃える
+│                       Config                          │  ← タイトル（緑・太字）
+│            Adjust your global preferences             │  ← サブタイトル（淡色）
+│                                                       │
+│          Theme              < System >                │  ┐ 設定一覧（全項目 `< 値 >`）
+│          Default Workspace  < (none) >                │  │  値は常に山かっこで囲み列を揃える
 │      >   Notifications      < On >                    │  │  選択行：左端の赤 ">" + 値が明色
-│        ● Agent CLI          < Gemini >               │  │  変更済み：ラベル左に黄色 ● + 値も黄色
-│          Session Action UI  < Menu >                 │  │  在席の右ペイン UI（Menu / Prompt）
-│          Local LLM            Install                │  │  未導入は `Install`（緑・山かっこなし）、導入後は `< On >`/`< Off >`
-│          Local LLM Model    < qwen2.5-coder:7b >     │  ┘  ←→ でモデルを選ぶ
-│                                                      │
-│                           [ Save ]                   │  ← Save ボタン（変更時のみ緑で有効）
-│                                                      │
-│        Saved 🐰                                      │  ← 通知行（任意・黄色）
-│                                                      │
-│    ↑↓: move · ←→: change · Enter: save · Esc: back   │  ← フッター（淡色）
-└────────────────────────────────────────────────────┘
+│        ● Agent CLI          < Gemini >                │  │  変更済み：ラベル左に黄色 ● + 値も黄色
+│          Session Action UI  < Menu >                  │  │  在席の右ペイン UI（Menu / Prompt）
+│          Local LLM            Install                 │  │  未導入は `Install`（緑・山かっこなし）、導入後は `< On >`/`< Off >`
+│          Local LLM Model    < qwen2.5-coder:7b >      │  ┘  ←→ でモデルを選ぶ
+│                                                       │
+│                           [ Save ]                    │  ← Save ボタン（変更時のみ緑で有効）
+│                                                       │
+│        Saved 🐰                                       │  ← 通知行（任意・黄色）
+│                                                       │
+│    ↑↓: move · ←→: change · Enter: save · Esc: back    │  ← フッター（淡色）
+└───────────────────────────────────────────────────────┘
 ```
 
 | 項目 | 値 | 循環する選択肢 |
 |---|---|---|
 | Theme | UI のカラーテーマ | `Light` → `Dark` → `System`（OS 追従）の順に循環 |
 | Default Workspace | 既定で開くワークスペース | `(none)` ＋ 登録済みワークスペース名を順に循環。未登録時は変更不可（ヒントを表示） |
-| Notifications | デスクトップ通知（`agent` の入力待ちなど）の ON/OFF | `On` ⇄ `Off` をトグル |
+| Notifications | デスクトップ通知（`agent` の入力待ち・完了）の ON/OFF | `On` ⇄ `Off` をトグル |
 | Agent CLI | usagi が起動する AI エージェント CLI | `Claude` → `Gemini` の順に循環 |
 | Session Action UI | 在席（Focus）の右ペインのアクション UI スタイル | `Menu`（選べるリスト）⇄ `Prompt`（コマンドライン）をトグル（[05-home.md](05-home.md#在席のアクション-uimenu--prompt)） |
 | Local LLM | ローカル LLM 委譲の有効化 | 未導入時は値が `Install`（アクション）で、`Space` / `Enter` でインストールモーダルを開く。導入後は `On` ⇄ `Off` をトグル |
@@ -99,22 +99,22 @@
 ここには表示されず、対象は次の 4 項目だけです。
 
 ```text
-┌────────────────────────────────────────────────────┐
-│                       (\(\                           │  ┐ うさぎ AA
-│                      (='-')                          │  │
+┌───────────────────────────────────────────────────────┐
+│                       (\(\                            │  ┐ うさぎ AA
+│                      (='-')                           │  │
 │                      o(_(")(")                        │  ┘
-│                   Workspace Config                   │  ← タイトル（緑・太字）
-│            Adjust this workspace's settings          │  ← サブタイトル（淡色）
-│                                                      │
+│                   Workspace Config                    │  ← タイトル（緑・太字）
+│            Adjust this workspace's settings           │  ← サブタイトル（淡色）
+│                                                       │
 │      >   Agent CLI       < Global (Claude) >          │  ┐ ローカル設定一覧（4 項目）
 │        ● Notifications   < Override: Off >            │  │  選択行：左端の赤 ">"
 │          Default Branch  < develop >                  │  │  変更済み：ラベル左に黄色 ●
 │          Branch Source   < Remote >                   │  ┘
-│                                                      │
-│                           [ Save ]                   │  ← Save ボタン
-│                                                      │
-│    ↑↓: move · ←→: change · Enter: save · Esc: back   │  ← フッター
-└────────────────────────────────────────────────────┘
+│                                                       │
+│                           [ Save ]                    │  ← Save ボタン
+│                                                       │
+│    ↑↓: move · ←→: change · Enter: save · Esc: back    │  ← フッター
+└───────────────────────────────────────────────────────┘
 ```
 
 | 項目 | 値 | 循環する選択肢 |

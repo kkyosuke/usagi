@@ -13,6 +13,13 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Record a running agent's lifecycle phase (invoked by agent hooks)
+    #[command(hide = true)]
+    AgentPhase {
+        /// The phase the agent's hook is reporting
+        #[arg(value_enum)]
+        phase: usagi::presentation::cli::agent_phase::Phase,
+    },
     /// Show usagi's configuration (or edit it with --edit)
     Config {
         /// Open the configuration file in $EDITOR and validate it on save
@@ -34,17 +41,34 @@ enum Commands {
         git: Option<String>,
     },
     /// Manage task issues stored in .usagi/issues/
+    ///
+    /// Hidden from the CLI: issues are operated by AI agents via the MCP server.
+    #[command(hide = true)]
     Issue {
         #[command(subcommand)]
         command: usagi::presentation::cli::issue::IssueCommand,
     },
+    /// Manage durable agent memories stored in .usagi/memory/
+    ///
+    /// Hidden from the CLI: memories are operated by AI agents via the MCP server.
+    #[command(hide = true)]
+    Memory {
+        #[command(subcommand)]
+        command: usagi::presentation::cli::memory::MemoryCommand,
+    },
     /// Run the local LLM MCP server over stdio (for AI agents to offload work)
+    ///
+    /// Hidden from the CLI: launched by AI agents, not invoked by hand.
+    #[command(hide = true)]
     LlmMcp {
         /// The Ollama model completions run against
         #[arg(long, value_name = "MODEL", default_value = usagi::domain::settings::DEFAULT_LOCAL_LLM_MODEL)]
         model: String,
     },
-    /// Run the issue MCP server over stdio (for AI agents)
+    /// Run the usagi MCP server over stdio (issue / memory / session tools for AI agents)
+    ///
+    /// Hidden from the CLI: launched by AI agents, not invoked by hand.
+    #[command(hide = true)]
     Mcp,
     /// Sync the current repository's worktree state to .usagi/state.json
     Status,
@@ -53,14 +77,35 @@ enum Commands {
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
-    match cli.command {
+    let result = match cli.command {
+        Commands::AgentPhase { phase } => usagi::presentation::cli::agent_phase::run(phase),
         Commands::Config { edit } => usagi::presentation::cli::config::run(edit),
         Commands::Doctor { fix } => usagi::presentation::cli::doctor::run(fix),
         Commands::Hop => usagi::presentation::cli::hop::run(),
         Commands::Init { git } => usagi::presentation::cli::init::run(git),
         Commands::Issue { command } => usagi::presentation::cli::issue::run(command),
+        Commands::Memory { command } => usagi::presentation::cli::memory::run(command),
         Commands::LlmMcp { model } => usagi::presentation::cli::llm_mcp::run(model),
         Commands::Mcp => usagi::presentation::cli::mcp::run(),
         Commands::Status => usagi::presentation::cli::status::run(),
+    };
+
+    if let Err(error) = &result {
+        log_error(error);
     }
+    result
+}
+
+/// Best-effort: append `error` to today's log file and prune files older than
+/// the retention window. Any failure here is swallowed so logging never masks
+/// the original error on its way to stderr.
+fn log_error(error: &anyhow::Error) {
+    use usagi::infrastructure::error_log::{ErrorLog, RETENTION_DAYS};
+
+    let Ok(log) = ErrorLog::open_default() else {
+        return;
+    };
+    let now = chrono::Local::now();
+    let _ = log.prune(now.date_naive(), RETENTION_DAYS);
+    let _ = log.append(now, &format!("{error:#}"));
 }

@@ -24,6 +24,7 @@ mod tree;
 
 pub use reconcile::reconcile;
 
+use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -70,6 +71,21 @@ pub fn create(workspace_root: &Path, name: &str) -> Result<CreatedSession> {
         bail!("session \"{name}\" already exists");
     }
 
+    // A session creates a branch named after it in every source repository.
+    // If a repo already has branches nested under `<name>/` (e.g. `test/foo`),
+    // git cannot create the `<name>` branch and fails partway with a cryptic
+    // `cannot lock ref` error. Refuse up front with a clear, actionable message
+    // before touching any repository.
+    for repo in tree::source_repos(workspace_root) {
+        if let Some(conflict) = git::branch_namespace_conflict(&repo, name) {
+            bail!(
+                "session \"{name}\" conflicts with the existing branch \"{conflict}\": \
+                 a branch named \"{name}\" cannot be created alongside branches under \
+                 \"{name}/\". Choose a different session name."
+            );
+        }
+    }
+
     let mut worktrees = Vec::new();
     if tree::is_repo_root(workspace_root) {
         // The whole workspace is one repository: a single worktree at the root.
@@ -95,6 +111,25 @@ pub fn create(workspace_root: &Path, name: &str) -> Result<CreatedSession> {
     })
 }
 
+/// The local branch names that already exist across every source repository a
+/// session under `workspace_root` would span, de-duplicated and sorted.
+///
+/// A new session cuts a `<name>` branch in each of these repos, so this is the
+/// set its name must avoid — both as an exact duplicate and as a namespace
+/// clash (a branch under `<name>/`). The TUI reads it once when the inline
+/// create input opens to validate the typed name live (see
+/// [`git::branch_namespace_conflict`]). Best-effort: a non-git or unreadable
+/// repo simply contributes no names.
+pub fn existing_branch_names(workspace_root: &Path) -> Vec<String> {
+    use std::collections::BTreeSet;
+    tree::source_repos(workspace_root)
+        .iter()
+        .flat_map(|repo| git::local_branches(repo))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
 /// Append the session to `<workspace>/.usagi/state.json`, creating the state
 /// when none exists yet. This is what lets a multi-repo, non-git root still
 /// track its sessions. Each worktree's git status is captured at record time.
@@ -102,9 +137,12 @@ fn record(workspace_root: &Path, name: &str, root: &Path, worktrees: &[PathBuf])
     let store = WorkspaceStore::new(workspace_root);
     let mut state = store.load()?.unwrap_or_default();
 
+    // A session's worktrees may live in different source repositories (a
+    // multi-repo workspace), so each is classified against its own repository's
+    // default branch.
     let worktree_states = worktrees
         .iter()
-        .map(|path| workspace_state::inspect_worktree(path))
+        .map(|path| workspace_state::inspect_worktree(path, &git::default_branch(path)))
         .collect();
 
     let now = Utc::now();
@@ -116,6 +154,19 @@ fn record(workspace_root: &Path, name: &str, root: &Path, worktrees: &[PathBuf])
     });
     state.updated_at = now;
     store.save(&state)
+}
+
+/// List the sessions recorded for `workspace_root`, in creation order.
+///
+/// Returns an empty list when no state has been written yet (a workspace with
+/// no sessions). This reads `state.json` only — it does not reconcile the
+/// on-disk tree, so it is a cheap query callers can run freely.
+pub fn list(workspace_root: &Path) -> Result<Vec<SessionRecord>> {
+    let store = WorkspaceStore::new(workspace_root);
+    Ok(store
+        .load()?
+        .map(|state| state.sessions)
+        .unwrap_or_default())
 }
 
 /// The result of attempting to remove a session.
@@ -188,6 +239,32 @@ pub fn remove(workspace_root: &Path, name: &str, force: bool) -> Result<RemovalO
         removed: true,
         dirty: Vec::new(),
     })
+}
+
+/// Resolve the workspace root from a working directory that may sit inside a
+/// session tree.
+///
+/// A session is mirrored at `<workspace>/.usagi/sessions/<name>/...`. When a
+/// process runs from within such a tree (e.g. an agent's `usagi mcp` server),
+/// its data stores still belong to the *workspace* — issues live at
+/// `<workspace>/.usagi/issues/`, not in a throwaway copy under the session that
+/// `usagi clean` later deletes. So we strip everything from the
+/// `.usagi/sessions` segment onward and return the workspace root. A path that
+/// is not inside a session tree is returned unchanged.
+pub fn workspace_root(start: &Path) -> PathBuf {
+    let mut prefix = PathBuf::new();
+    let mut components = start.components().peekable();
+    while let Some(component) = components.next() {
+        if component.as_os_str() == OsStr::new(".usagi")
+            && components
+                .peek()
+                .is_some_and(|next| next.as_os_str() == OsStr::new("sessions"))
+        {
+            return prefix;
+        }
+        prefix.push(component);
+    }
+    start.to_path_buf()
 }
 
 #[cfg(test)]
@@ -390,6 +467,58 @@ mod tests {
     }
 
     #[test]
+    fn existing_branch_names_unions_local_branches_across_repos() {
+        // A multi-repo workspace: each repo's local branches are unioned, sorted
+        // and de-duplicated; remote-tracking refs are excluded.
+        let root = tempfile::tempdir().unwrap();
+        init_repo(&root.path().join("app-a"));
+        init_repo(&root.path().join("be/be1"));
+        let run = |dir: &Path, args: &[&str]| {
+            assert!(git_cmd(dir).args(args).status().unwrap().success());
+        };
+        run(&root.path().join("app-a"), &["branch", "test/x"]);
+        run(&root.path().join("be/be1"), &["branch", "feature"]);
+
+        let names = existing_branch_names(root.path());
+        // Both repos start on `main` (deduped) plus each one's extra branch.
+        assert_eq!(
+            names,
+            vec![
+                "feature".to_string(),
+                "main".to_string(),
+                "test/x".to_string()
+            ]
+        );
+
+        // A non-git, empty root contributes nothing.
+        let empty = tempfile::tempdir().unwrap();
+        assert!(existing_branch_names(empty.path()).is_empty());
+    }
+
+    #[test]
+    fn rejects_a_name_that_clashes_with_a_branch_namespace() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        // Pre-create branches under `test/`, mirroring a repo that already has
+        // `test/home-ui-e2e` etc. A plain `test` branch then cannot be created.
+        for branch in ["test/home-ui-e2e", "test/tui-e2e-pty"] {
+            assert!(git_cmd(root.path())
+                .args(["branch", branch])
+                .status()
+                .unwrap()
+                .success());
+        }
+
+        let err = create(root.path(), "test").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("conflicts with the existing branch"), "{msg}");
+        assert!(msg.contains("test/home-ui-e2e"), "{msg}");
+        // Nothing was created on the failed attempt.
+        assert!(!root.path().join(".usagi/sessions/test").exists());
+        assert!(sessions_of(root.path()).is_empty());
+    }
+
+    #[test]
     fn branches_from_remote_by_default_and_from_local_when_configured() {
         use crate::domain::settings::{BranchSource, LocalSettings};
 
@@ -476,6 +605,26 @@ mod tests {
 
         let err = create(root.path(), "x").unwrap_err();
         assert!(err.to_string().contains("failed to create"));
+    }
+
+    // --- list --------------------------------------------------------------
+
+    #[test]
+    fn list_returns_recorded_sessions_in_order() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        // No state yet: an empty list, not an error.
+        assert!(list(root.path()).unwrap().is_empty());
+
+        create(root.path(), "first").unwrap();
+        create(root.path(), "second").unwrap();
+
+        let names: Vec<String> = list(root.path())
+            .unwrap()
+            .into_iter()
+            .map(|s| s.name)
+            .collect();
+        assert_eq!(names, vec!["first", "second"]);
     }
 
     // --- remove ------------------------------------------------------------
@@ -702,5 +851,35 @@ mod tests {
         assert!(!a.root.exists());
         assert!(!b.root.exists());
         assert!(sessions_of(root.path()).is_empty());
+    }
+
+    #[test]
+    fn workspace_root_strips_a_session_subtree() {
+        // A cwd inside a session resolves back to the workspace root.
+        assert_eq!(
+            workspace_root(Path::new("/repo/.usagi/sessions/mcp")),
+            PathBuf::from("/repo")
+        );
+        // ...including a subdirectory deeper within the session.
+        assert_eq!(
+            workspace_root(Path::new("/repo/.usagi/sessions/mcp/crate/src")),
+            PathBuf::from("/repo")
+        );
+        // A doubly nested copy stops at the first session segment.
+        assert_eq!(
+            workspace_root(Path::new("/repo/.usagi/sessions/mcp/.usagi/issues")),
+            PathBuf::from("/repo")
+        );
+    }
+
+    #[test]
+    fn workspace_root_leaves_a_plain_path_unchanged() {
+        // Not inside a session tree: returned as-is.
+        assert_eq!(workspace_root(Path::new("/repo")), PathBuf::from("/repo"));
+        // A bare `.usagi` without a `sessions` child is not a session tree.
+        assert_eq!(
+            workspace_root(Path::new("/repo/.usagi/issues")),
+            PathBuf::from("/repo/.usagi/issues")
+        );
     }
 }

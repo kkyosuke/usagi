@@ -17,11 +17,13 @@
 mod chrome;
 mod panes;
 
+use unicode_width::UnicodeWidthChar;
+
 use crate::presentation::tui::widgets;
 
 use chrome::{
     footer_line, hint_lines, input_line, mode_ladder, overview_input_box, quit_confirm_frame,
-    remove_modal_frame, switch_create_rows, text_modal_frame, title_bar,
+    remove_modal_frame, switch_create_rows, text_modal_frame, title_bar, update_banner,
 };
 use panes::{left_pane, log_tail, right_pane_contents};
 
@@ -118,6 +120,13 @@ const RESULTS_BAND: usize = 4;
 
 /// Shortens `text` to at most `max` display columns, appending an ellipsis when
 /// it has to cut (the head of the text is the most informative part).
+///
+/// A single forward pass accumulates display width and copies characters until
+/// the next visible one would overflow — O(n), not the O(n²) of re-measuring a
+/// growing clone each step. ANSI escape sequences (the SGR colours an embedded
+/// terminal row or a styled log line carries) have zero display width and are
+/// copied verbatim, matching [`console::measure_text_width`], so the clipped
+/// text keeps its colours and never counts an escape against the budget.
 fn clip_to_width(text: &str, max: usize) -> String {
     if console::measure_text_width(text) <= max {
         return text.to_string();
@@ -125,19 +134,40 @@ fn clip_to_width(text: &str, max: usize) -> String {
     if max == 0 {
         return String::new();
     }
-    let mut out = String::new();
-    for ch in text.chars() {
-        let mut candidate = out.clone();
-        candidate.push(ch);
-        // Reserve one column for the ellipsis.
-        if console::measure_text_width(&candidate) > max - 1 {
+    // Reserve one column for the ellipsis.
+    let budget = max - 1;
+    let mut out = String::with_capacity(text.len());
+    let mut width = 0usize;
+    let mut chars = text.chars();
+    while let Some(ch) = chars.next() {
+        if ch == ESC {
+            // Copy the whole escape sequence (zero display width) so the colour
+            // it selects survives the clip. The rows and styled log lines clipped
+            // here carry CSI/SGR sequences — `ESC [ … final` — so copy the `[`
+            // introducer and parameter bytes through to (and including) the final
+            // byte (`0x40..=0x7e`, excluding the `[` introducer itself).
+            out.push(ch);
+            for c in chars.by_ref() {
+                out.push(c);
+                if ('\u{40}'..='\u{7e}').contains(&c) && c != '[' {
+                    break;
+                }
+            }
+            continue;
+        }
+        let w = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if width + w > budget {
             break;
         }
-        out = candidate;
+        width += w;
+        out.push(ch);
     }
     out.push('…');
     out
 }
+
+/// The escape (ESC, `0x1b`) that introduces an ANSI control sequence.
+const ESC: char = '\u{1b}';
 
 /// Right-pads `content` with spaces to fill `width` display columns. Content
 /// already at least that wide is returned unchanged.
@@ -249,17 +279,20 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
     // optional results band at the bottom. Everything between is the two-pane
     // body.
     let body_rows = height.saturating_sub(3 + input_h + results).max(1);
+
     let mut left = left_pane(
         state.list(),
         state.live_paths(),
+        state.running_paths(),
         state.waiting_paths(),
+        state.done_paths(),
         left_w,
         body_rows,
         // In 切替 the keyboard is on the list: fade the rows the cursor is not on.
         state.mode() == Mode::Switch,
     );
     // While naming a new session in 切替, append the inline create row(s) to the
-    // left pane (trimmed back to the body if it would overflow).
+    // left pane (trimmed back to the session-list area if it would overflow).
     if state.is_creating() {
         for row in switch_create_rows(
             state.create_input().unwrap_or_default(),
@@ -277,7 +310,8 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
     lines.push(mode_ladder(width, state.mode()));
     let body_start = lines.len();
     for row in 0..body_rows {
-        let left_cell = pad_to_width(left.get(row).cloned().unwrap_or_default(), left_w);
+        let left_text = left.get(row).cloned().unwrap_or_default();
+        let left_cell = pad_to_width(left_text, left_w);
         let right_cell = right.get(row).cloned().unwrap_or_default();
         lines.push(format!("{left_cell}{SEP}{right_cell}"));
     }
@@ -314,7 +348,53 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
         }
     }
     lines.push(footer_line(width, state));
+
+    // Overlay the top-right corner. While a blocking action runs the loading
+    // rabbit takes the corner (so the user sees something is happening); once it
+    // finishes, the "update available" notice shows there instead, when the
+    // background check has found a newer release than this build. Both anchor to
+    // the top of the right pane (the rows below the title bar and mode ladder),
+    // where the default Overview screen is blank — so they read cleanly in the
+    // top-right corner of the content.
+    if let Some(loading) = state.loading() {
+        overlay_top_right(
+            &mut lines,
+            body_start,
+            width,
+            &widgets::loading_rabbit(loading.frame(), loading.label()),
+        );
+    } else if let Some(latest) = state.update() {
+        overlay_top_right(&mut lines, body_start, width, &update_banner(&latest));
+    }
+
     lines
+}
+
+/// Right-anchors each line of `banner` onto the `lines` starting at row `top`,
+/// appending it after the existing content. A row is only overlaid when its
+/// current content does not reach the banner's left column, so busy rows (a
+/// session card, a live terminal) are never clobbered; the banner is skipped
+/// entirely when it cannot fit the width.
+fn overlay_top_right(lines: &mut [String], top: usize, width: usize, banner: &[String]) {
+    let block_w = banner
+        .iter()
+        .map(|line| console::measure_text_width(line))
+        .max()
+        .unwrap_or(0);
+    if block_w == 0 || block_w >= width {
+        return;
+    }
+    let target_left = width - block_w;
+    for (offset, segment) in banner.iter().enumerate() {
+        let Some(base) = lines.get_mut(top + offset) else {
+            break;
+        };
+        let base_w = console::measure_text_width(base);
+        if base_w <= target_left {
+            base.push_str(&" ".repeat(target_left - base_w));
+            base.push_str(segment);
+        }
+    }
 }
 
 #[cfg(test)]

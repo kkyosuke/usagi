@@ -3,6 +3,8 @@
 //! registered in display order by [`super::CommandRegistry::with_builtins`].
 
 use super::{Command, CommandContext, CommandInfo, CommandResult, CommandScope, Effect, LogLine};
+use crate::domain::issue::IssueStatus;
+use crate::usecase::issue::{annotate_all, dependency_tree, IssueStats, ListedIssue};
 
 /// `man` / `help`: lists every command, or describes one.
 pub(super) struct ManCommand;
@@ -319,6 +321,178 @@ impl Command for AgentCommand {
             effect: Effect::OpenAgent,
         }
     }
+}
+
+/// `close`: remove the focused session forcefully and return to 統括 (Overview).
+/// It is the 在席 equivalent of `session remove <name> --force` — the worktrees
+/// and branches are deleted and any uncommitted changes discarded, so the
+/// session is gone for good. The removal is a side effect ([`Effect::CloseSession`])
+/// performed by the event loop, which owns the worktree list and the
+/// session-removal callback.
+pub(super) struct CloseCommand;
+
+impl Command for CloseCommand {
+    fn name(&self) -> &'static str {
+        "close"
+    }
+
+    fn description(&self) -> &'static str {
+        "Close the focused session (remove it, discarding any changes)"
+    }
+
+    fn scope(&self) -> CommandScope {
+        CommandScope::Session
+    }
+
+    fn run(&self, _args: &str, _ctx: &CommandContext) -> CommandResult {
+        CommandResult {
+            lines: Vec::new(),
+            effect: Effect::CloseSession,
+        }
+    }
+}
+
+/// `issue`: browse the workspace's task issues in a read-only modal — a list
+/// with progress, the dependency tree, or one issue's full text. Mutating
+/// issues stays the agent's job (via the MCP server), so this command only
+/// reads what is already loaded into the context.
+///
+/// - `issue` / `issue list` (alias `ls`) — every issue with its readiness, plus
+///   a progress summary.
+/// - `issue graph` (alias `tree`) — the dependency forest.
+/// - `issue show <number>` (alias `view`) — one issue's frontmatter and body.
+pub(super) struct IssueCommand;
+
+impl Command for IssueCommand {
+    fn name(&self) -> &'static str {
+        "issue"
+    }
+
+    fn description(&self) -> &'static str {
+        "Browse task issues (list, graph, show)"
+    }
+
+    fn usage(&self) -> &'static str {
+        "issue [list|graph|show <number>]  (aliases: list=ls, graph=tree, show=view)"
+    }
+
+    fn examples(&self) -> &'static [&'static str] {
+        &["issue", "issue graph", "issue show 3"]
+    }
+
+    fn scope(&self) -> CommandScope {
+        CommandScope::Workspace
+    }
+
+    fn run(&self, args: &str, ctx: &CommandContext) -> CommandResult {
+        let mut parts = args.splitn(2, char::is_whitespace);
+        let sub = parts.next().unwrap_or("");
+        let rest = parts.next().unwrap_or("").trim();
+
+        let sub = match sub {
+            "" | "list" | "ls" => "list",
+            "graph" | "tree" => "graph",
+            "show" | "view" => "show",
+            other => other,
+        };
+
+        match sub {
+            "list" => issue_list(ctx),
+            "graph" => issue_graph(ctx),
+            "show" => issue_show(ctx, rest),
+            _ => CommandResult::line(LogLine::error(format!("usage: {}", self.usage()))),
+        }
+    }
+}
+
+/// `issue list`: every issue with its readiness marker and a progress footer.
+fn issue_list(ctx: &CommandContext) -> CommandResult {
+    let listed = annotate_all(ctx.issues);
+    if listed.is_empty() {
+        return CommandResult::line(LogLine::output("No issues yet."));
+    }
+    let mut lines: Vec<LogLine> = listed.iter().map(issue_line).collect();
+    lines.push(LogLine::output(String::new()));
+    lines.push(LogLine::output(stats_line(&IssueStats::from_listed(
+        &listed,
+    ))));
+    CommandResult::modal("Issues", lines)
+}
+
+/// `issue graph`: the dependency forest with a progress footer.
+fn issue_graph(ctx: &CommandContext) -> CommandResult {
+    let listed = annotate_all(ctx.issues);
+    if listed.is_empty() {
+        return CommandResult::line(LogLine::output("No issues yet."));
+    }
+    let mut lines: Vec<LogLine> = dependency_tree(&listed)
+        .into_iter()
+        .map(LogLine::output)
+        .collect();
+    lines.push(LogLine::output(String::new()));
+    lines.push(LogLine::output(stats_line(&IssueStats::from_listed(
+        &listed,
+    ))));
+    CommandResult::modal("Issue graph", lines)
+}
+
+/// `issue show <number>`: one issue's full markdown (frontmatter + body).
+fn issue_show(ctx: &CommandContext, rest: &str) -> CommandResult {
+    let Ok(number) = rest.parse::<u32>() else {
+        return CommandResult::line(LogLine::error("usage: issue show <number>"));
+    };
+    match ctx.issues.iter().find(|i| i.number == number) {
+        Some(issue) => {
+            let lines = issue
+                .to_markdown()
+                .lines()
+                .map(|l| LogLine::output(l.to_string()))
+                .collect();
+            CommandResult::modal("Issue", lines)
+        }
+        None => CommandResult::line(LogLine::error(format!("no issue #{number}"))),
+    }
+}
+
+/// One aligned `#N status priority marker title` line for a listed issue.
+fn issue_line(listed: &ListedIssue) -> LogLine {
+    let marker = if listed.summary.status == IssueStatus::Done {
+        "done"
+    } else if listed.is_ready() {
+        "ready"
+    } else {
+        "blocked"
+    };
+    let mut text = format!(
+        "#{:<3} {:<12} {:<6} {:<8} {}",
+        listed.summary.number,
+        listed.summary.status.as_str(),
+        listed.summary.priority.as_str(),
+        marker,
+        listed.summary.title,
+    );
+    if !listed.unmet_deps.is_empty() {
+        let deps = listed
+            .unmet_deps
+            .iter()
+            .map(u32::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        text.push_str(&format!("  (blocked by {deps})"));
+    }
+    LogLine::output(text)
+}
+
+/// A one-line progress summary shown under issue listings and the graph.
+fn stats_line(stats: &IssueStats) -> String {
+    format!(
+        "{} issues · {} done ({}%) · {} ready  {}",
+        stats.total,
+        stats.done,
+        stats.completion_percent(),
+        stats.ready,
+        stats.progress_bar(20),
+    )
 }
 
 /// `config`: open the configuration screen to edit **this workspace's** local

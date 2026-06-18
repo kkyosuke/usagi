@@ -12,12 +12,14 @@ use anyhow::Result;
 use console::Key;
 use console::Term;
 
+use crate::domain::settings::SessionActionUi;
 use crate::presentation::tui::screen::{FramePainter, KeyReader};
 
 use super::state::{HomeState, Mode, PaneExit, SessionOutcome};
 use super::terminal_pool::MonitorHandle;
 use super::terminal_view::TerminalView;
 use super::ui;
+use super::update::UpdateHandle;
 
 mod handlers;
 
@@ -86,8 +88,10 @@ pub enum Outcome {
 /// (`Ctrl-O` → 切替). The PTY I/O, rendering, and shell pool live in that
 /// injected callback.
 ///
-/// `open_config` opens the settings screen, returning `true` when the user quit
-/// the application from it (so the loop propagates [`Outcome::Quit`]).
+/// `open_config` opens the settings screen, returning `None` when the user quit
+/// the application from it (so the loop propagates [`Outcome::Quit`]), or
+/// `Some(ui)` with the re-read [`SessionActionUi`] when it returns to home — so a
+/// changed Focus surface takes effect without reopening the home screen.
 ///
 /// `preview` snapshots the live terminal of the session rooted at a path, or
 /// `None` when it has no running shell/agent — used to decide whether focusing /
@@ -99,19 +103,28 @@ pub fn event_loop(
     mut state: HomeState,
     workspace_root: &Path,
     monitor: &MonitorHandle,
+    update: &UpdateHandle,
     persist: &mut dyn FnMut(&str),
     create_session: &mut dyn FnMut(&str) -> SessionOutcome,
     remove_session: &mut dyn FnMut(&str, bool) -> SessionOutcome,
+    existing_branches: &mut dyn FnMut() -> Vec<String>,
     open_terminal: &mut dyn FnMut(&mut HomeState, &Path, bool) -> Result<PaneExit>,
-    open_config: &mut dyn FnMut(&Term) -> Result<bool>,
+    open_config: &mut dyn FnMut(&Term) -> Result<Option<SessionActionUi>>,
     preview: &mut dyn FnMut(&Path) -> Option<TerminalView>,
 ) -> Result<Outcome> {
     let mut painter = FramePainter::new();
     loop {
-        // Mark any background sessions waiting for input, and which have a live
-        // (running) agent, before painting.
-        state.set_waiting(monitor.waiting());
-        state.set_live(monitor.live());
+        // Mark each background session's agent state — running, waiting for
+        // input, live (ready), and finished — before painting, reading every
+        // badge set together under a single lock.
+        let badges = monitor.snapshot();
+        state.set_running(badges.running);
+        state.set_waiting(badges.waiting);
+        state.set_live(badges.live);
+        state.set_done(badges.done);
+        // Surface the top-right "update available" notice once the background
+        // release check has found a newer version than this build.
+        state.set_update(update.status().map(|status| status.latest));
         // Drop any stale snapshot every frame, then refresh it for the modes that
         // draw the embedded terminal: 没入 (driven directly by `open_pane`) and
         // 切替, where the right pane previews the highlighted session's live
@@ -174,10 +187,18 @@ pub fn event_loop(
                 Key::Char(' ') => state.remove_modal_toggle(),
                 Key::Enter => {
                     if let Some((names, force)) = state.submit_remove_modal() {
-                        for name in names {
-                            let outcome = remove_session(&name, force);
+                        // Bulk removal blocks the loop (each session is git /
+                        // filesystem work), so show the loading rabbit in the
+                        // top-right and step it per session — repainting before
+                        // each removal so it hops along with the progress count.
+                        let total = names.len();
+                        for (i, name) in names.iter().enumerate() {
+                            state.step_loading(format!("削除中… {}/{total}", i + 1));
+                            let _ = paint_now(term, &mut painter, &state);
+                            let outcome = remove_session(name, force);
                             state.apply_session_outcome(outcome);
                         }
+                        state.finish_loading();
                     }
                 }
                 Key::Escape => state.cancel_remove_modal(),
@@ -221,6 +242,7 @@ pub fn event_loop(
                 persist,
                 create_session,
                 remove_session,
+                existing_branches,
                 open_terminal,
                 open_config,
                 preview,
@@ -233,6 +255,7 @@ pub fn event_loop(
                 workspace_root,
                 key,
                 create_session,
+                existing_branches,
                 open_terminal,
                 preview,
             ),
@@ -247,6 +270,7 @@ pub fn event_loop(
                 &mut painter,
                 workspace_root,
                 key,
+                remove_session,
                 open_terminal,
                 preview,
             ),
@@ -264,6 +288,18 @@ enum Flow {
     Continue,
     /// Quit the application.
     Quit,
+}
+
+/// Paint the current frame immediately, outside the loop's top-of-iteration
+/// paint. Used to flush a transient [`HomeState`] state — the loading rabbit —
+/// to the screen just before a blocking action runs, since the action would
+/// otherwise hold the loop until it returned without ever drawing the indicator.
+/// Errors are the caller's to ignore: a missed transient frame must not abort
+/// the action it was announcing.
+pub(super) fn paint_now(term: &Term, painter: &mut FramePainter, state: &HomeState) -> Result<()> {
+    let (height, width) = term.size();
+    let frame = ui::render_frame(height as usize, width as usize, state);
+    painter.paint(term, frame)
 }
 
 /// The directory the pane should root at for the focused list row: the selected
