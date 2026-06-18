@@ -48,7 +48,7 @@
 | `session create <name>` | `.usagi/sessions/<name>/` 配下に再帰的に worktree を構築してセッションを作成。名前を省くと[切替](../design/05-home.md#切替switch)の左ペイン内インライン入力で作成 |
 | `session list` | セッション一覧（件数 + 各セッション名 + worktree 数）をテキストモーダルに表示 |
 | `session switch <name>` | アクティブセッションを切り替えて**在席**へ。`switch root` でルート行へ。引数なしで[切替](../design/05-home.md#切替switch)モードを開く |
-| `session remove <name> [--force]` | セッションの worktree・ブランチ・コピーを削除。未コミット変更があれば警告し `--force` で破棄。名前を省くと一覧モーダルを開き、`Space` で選択して `Enter` で一括削除 |
+| `session remove <name> [--force]` | セッションの worktree・ブランチ・コピーに加え、その worktree の会話履歴（Claude の transcript）と Agent phase も削除。未コミット変更があれば警告し `--force` で破棄。名前を省くと一覧モーダルを開き、`Space` で選択して `Enter` で一括削除 |
 
 セッション作成・削除時の孤児ディレクトリの掃除など、ライフサイクルの概念は
 [4. オーケストレーション](../04-orchestration.md)を参照してください。

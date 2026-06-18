@@ -42,6 +42,12 @@ impl Agent for ClaudeAgent {
     fn has_resumable_session(&self, dir: &Path) -> bool {
         claude_projects_root().is_some_and(|root| has_resumable_session_in(&root, dir))
     }
+
+    fn forget_session(&self, dir: &Path) {
+        if let Some(root) = claude_projects_root() {
+            forget_session_in(&root, dir);
+        }
+    }
 }
 
 /// Where Claude Code stores each project's conversation transcripts:
@@ -77,6 +83,14 @@ fn has_resumable_session_in(projects_root: &Path, dir: &Path) -> bool {
     entries
         .flatten()
         .any(|entry| entry.path().extension().is_some_and(|ext| ext == "jsonl"))
+}
+
+/// Delete Claude Code's transcript directory for the worktree at `dir` under
+/// `projects_root` (best-effort). A missing directory — nothing ever run there —
+/// is a no-op, so removing a session that never launched Claude is harmless.
+fn forget_session_in(projects_root: &Path, dir: &Path) {
+    let project_dir = projects_root.join(claude_project_dir_name(dir));
+    let _ = std::fs::remove_dir_all(project_dir);
 }
 
 #[cfg(test)]
@@ -127,5 +141,31 @@ mod tests {
         // never run an agent has no transcript, so it is not resumable.
         let agent = ClaudeAgent::new();
         assert!(!agent.has_resumable_session(Path::new("/nonexistent/usagi/worktree")));
+    }
+
+    #[test]
+    fn forget_session_in_deletes_the_whole_transcript_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let worktree = Path::new("/some/worktree");
+        let project_dir = root.path().join(claude_project_dir_name(worktree));
+        fs::create_dir_all(&project_dir).unwrap();
+        fs::write(project_dir.join("session.jsonl"), "{}").unwrap();
+        assert!(has_resumable_session_in(root.path(), worktree));
+
+        // Forgetting drops the transcripts, so nothing is resumable afterwards.
+        forget_session_in(root.path(), worktree);
+        assert!(!project_dir.exists());
+        assert!(!has_resumable_session_in(root.path(), worktree));
+
+        // Forgetting again, with the directory already gone, is a harmless no-op.
+        forget_session_in(root.path(), worktree);
+    }
+
+    #[test]
+    fn forget_session_resolves_against_the_real_home() {
+        // Exercises the home-directory wrapper end to end: forgetting a worktree
+        // that never ran an agent is a no-op (its transcript dir does not exist).
+        let agent = ClaudeAgent::new();
+        agent.forget_session(Path::new("/nonexistent/usagi/worktree"));
     }
 }

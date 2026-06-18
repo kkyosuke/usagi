@@ -39,6 +39,14 @@ pub trait Agent: Send + Sync {
     /// continuing would actually succeed, falling back to a fresh launch
     /// otherwise. A CLI without resumable history always returns `false`.
     fn has_resumable_session(&self, dir: &Path) -> bool;
+
+    /// Discard any persisted conversation this CLI keeps for the worktree at
+    /// `dir`, so removing a session also clears its chat history there and a
+    /// session recreated at the same path later starts fresh instead of resuming
+    /// the old conversation. The mirror of
+    /// [`has_resumable_session`](Self::has_resumable_session): what that finds,
+    /// this clears. Best-effort — a CLI with no stored history does nothing.
+    fn forget_session(&self, dir: &Path);
 }
 
 /// usagi's wiring policy handed to an [`Agent`] adapter when it builds the launch
