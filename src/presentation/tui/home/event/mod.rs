@@ -125,6 +125,10 @@ pub enum Outcome {
 /// tabs from 切替 — the loop reads the strip each frame to draw it, and `←`/`→`
 /// move the active tab so re-attaching reveals it.
 ///
+/// `close_tab` closes the highlighted session's active tab (pane) from 切替 — `x`
+/// kills its shell, and the next frame re-reads the session's tabs (or its 在席
+/// action menu once the last pane is gone).
+///
 /// `open_config` opens the settings screen, returning `None` when the user quit
 /// the application from it (so the loop propagates [`Outcome::Quit`]), or
 /// `Some(ui)` with the re-read [`SessionActionUi`] when it returns to home — so a
@@ -150,6 +154,7 @@ pub fn event_loop(
     open_config: &mut dyn FnMut(&Term) -> Result<Option<ConfigReload>>,
     preview: &mut dyn FnMut(&Path) -> Option<TerminalView>,
     tab_op: &mut TabOp<'_>,
+    close_tab: &mut dyn FnMut(&mut HomeState, &Path),
 ) -> Result<Outcome> {
     let mut painter = FramePainter::new();
     loop {
@@ -304,6 +309,7 @@ pub fn event_loop(
                 open_terminal,
                 preview,
                 tab_op,
+                close_tab,
             ),
             // 没入 (Attached) is driven inside `open_pane`, which always leaves it
             // (for 切替 or 在席) before returning — so the loop only ever observes

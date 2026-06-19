@@ -111,6 +111,10 @@ fn noop_tab_op(_: &Path, _: Option<TabNav>) -> (Vec<String>, usize) {
     (Vec::new(), 0)
 }
 
+/// A `close_tab` callback that does nothing, for the tests that never close a
+/// tab from 切替.
+fn noop_close(_: &mut HomeState, _: &Path) {}
+
 fn live_preview(_: &Path) -> Option<TerminalView> {
     Some(TerminalView::from_rows(vec!["live".to_string()], None))
 }
@@ -182,6 +186,7 @@ fn run_full(
         open_config,
         preview,
         &mut (noop_tab_op as fn(&Path, Option<TabNav>) -> (Vec<String>, usize)),
+        &mut (noop_close as fn(&mut HomeState, &Path)),
     )
 }
 
@@ -219,6 +224,7 @@ fn run_with_live_monitor(
         &mut config,
         &mut preview,
         &mut (noop_tab_op as fn(&Path, Option<TabNav>) -> (Vec<String>, usize)),
+        &mut (noop_close as fn(&mut HomeState, &Path)),
     )
 }
 
@@ -260,6 +266,7 @@ fn a_populated_update_handle_is_read_before_painting() {
         &mut config,
         &mut preview,
         &mut (noop_tab_op as fn(&Path, Option<TabNav>) -> (Vec<String>, usize)),
+        &mut (noop_close as fn(&mut HomeState, &Path)),
     )
     .unwrap();
     assert!(matches!(outcome, Outcome::Quit));
@@ -439,6 +446,7 @@ fn overview_caret_keys_edit_within_the_line() {
         &mut config,
         &mut preview,
         &mut (noop_tab_op as fn(&Path, Option<TabNav>) -> (Vec<String>, usize)),
+        &mut (noop_close as fn(&mut HomeState, &Path)),
     )
     .unwrap();
     assert!(matches!(outcome, Outcome::Quit));
@@ -483,6 +491,7 @@ fn submitted_commands_are_handed_to_persist() {
         &mut config,
         &mut preview,
         &mut (noop_tab_op as fn(&Path, Option<TabNav>) -> (Vec<String>, usize)),
+        &mut (noop_close as fn(&mut HomeState, &Path)),
     )
     .unwrap();
     assert!(matches!(outcome, Outcome::Quit));
@@ -623,6 +632,7 @@ fn session_remove_with_a_name_and_force_routes_to_remove() {
         &mut config,
         &mut preview,
         &mut (noop_tab_op as fn(&Path, Option<TabNav>) -> (Vec<String>, usize)),
+        &mut (noop_close as fn(&mut HomeState, &Path)),
     )
     .unwrap();
     assert!(matches!(outcome, Outcome::Quit));
@@ -667,6 +677,7 @@ fn close_typed_in_overview_targets_the_active_session() {
         &mut config,
         &mut preview,
         &mut (noop_tab_op as fn(&Path, Option<TabNav>) -> (Vec<String>, usize)),
+        &mut (noop_close as fn(&mut HomeState, &Path)),
     )
     .unwrap();
     assert!(matches!(outcome, Outcome::Quit));
@@ -726,6 +737,7 @@ fn focus_close_command_force_removes_the_focused_session_then_enters_switch() {
         &mut config,
         &mut preview,
         &mut (noop_tab_op as fn(&Path, Option<TabNav>) -> (Vec<String>, usize)),
+        &mut (noop_close as fn(&mut HomeState, &Path)),
     )
     .unwrap();
     assert!(matches!(outcome, Outcome::Quit));
@@ -786,6 +798,7 @@ fn focus_menu_close_force_removes_the_focused_session_then_enters_switch() {
         &mut config,
         &mut preview,
         &mut (noop_tab_op as fn(&Path, Option<TabNav>) -> (Vec<String>, usize)),
+        &mut (noop_close as fn(&mut HomeState, &Path)),
     )
     .unwrap();
     assert!(matches!(outcome, Outcome::Quit));
@@ -840,6 +853,7 @@ fn session_remove_without_a_name_opens_the_modal_and_bulk_removes() {
         &mut config,
         &mut preview,
         &mut (noop_tab_op as fn(&Path, Option<TabNav>) -> (Vec<String>, usize)),
+        &mut (noop_close as fn(&mut HomeState, &Path)),
     )
     .unwrap();
     assert!(matches!(outcome, Outcome::Quit));
@@ -1271,6 +1285,7 @@ fn switch_arrows_move_the_active_tab_via_tab_op() {
         &mut config,
         &mut preview,
         &mut tab_op,
+        &mut (noop_close as fn(&mut HomeState, &Path)),
     )
     .unwrap();
     assert!(matches!(outcome, Outcome::Quit));
@@ -1285,6 +1300,52 @@ fn switch_arrows_move_the_active_tab_via_tab_op() {
             TabNav::Prev,
         ]
     );
+}
+
+#[test]
+fn switch_x_closes_the_highlighted_sessions_active_tab() {
+    // `x` in 切替 drives `close_tab` with the highlighted session's path, closing
+    // its active tab (pane) without leaving the picker.
+    let term = Term::stdout();
+    let closed = RefCell::new(Vec::new());
+    let mut close_tab = |_h: &mut HomeState, dir: &Path| {
+        closed.borrow_mut().push(dir.to_path_buf());
+    };
+    let mut keys = typed("session switch");
+    keys.push(Ok(Key::Enter)); // -> Switch (cursor on the root row)
+    keys.push(Ok(Key::ArrowDown)); // -> the first session (main, /r/main)
+    keys.push(Ok(Key::Char('x'))); // close its active tab
+    keys.push(Ok(Key::CtrlC)); // quit
+    let mut reader = ScriptedReader::new(keys);
+    let monitor = MonitorHandle::detached();
+    let mut persist: fn(&str) = noop_persist;
+    let mut create: fn(&str) -> SessionOutcome = noop_create;
+    let mut remove: fn(&str, bool) -> SessionOutcome = noop_remove;
+    let mut open: fn(&mut HomeState, &Path, bool, bool) -> Result<PaneExit> = noop_open;
+    let mut config: fn(&Term) -> Result<Option<ConfigReload>> = noop_config;
+    let mut preview: fn(&Path) -> Option<TerminalView> = noop_preview;
+    let mut branches: fn() -> Vec<String> = no_branches;
+    let outcome = event_loop(
+        &term,
+        &mut reader,
+        sample_state(),
+        Path::new("/ws"),
+        &monitor,
+        &UpdateHandle::new(),
+        &mut persist,
+        &mut create,
+        &mut (noop_rename as fn(&str, &str) -> SessionOutcome),
+        &mut remove,
+        &mut branches,
+        &mut open,
+        &mut config,
+        &mut preview,
+        &mut (noop_tab_op as fn(&Path, Option<TabNav>) -> (Vec<String>, usize)),
+        &mut close_tab,
+    )
+    .unwrap();
+    assert!(matches!(outcome, Outcome::Quit));
+    assert_eq!(*closed.borrow(), vec![PathBuf::from("/r/main")]);
 }
 
 #[test]
@@ -1392,6 +1453,7 @@ fn run_recording_rename(keys: Vec<io::Result<Key>>) -> (Vec<(String, String)>, O
         &mut config,
         &mut preview,
         &mut (noop_tab_op as fn(&Path, Option<TabNav>) -> (Vec<String>, usize)),
+        &mut (noop_close as fn(&mut HomeState, &Path)),
     )
     .unwrap();
     (renamed.into_inner(), outcome)
@@ -1589,6 +1651,7 @@ fn focus_ctrl_n_and_ctrl_p_move_the_active_tab_via_tab_op() {
         &mut config,
         &mut preview,
         &mut tab_op,
+        &mut (noop_close as fn(&mut HomeState, &Path)),
     )
     .unwrap();
     assert!(matches!(outcome, Outcome::Quit));
