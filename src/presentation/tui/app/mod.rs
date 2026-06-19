@@ -15,7 +15,7 @@ use console::Term;
 use crate::domain::workspace::Workspace;
 use crate::infrastructure::storage::Storage;
 use crate::presentation::tui::new::state::NewProject;
-use crate::presentation::tui::{config, home, new, open, welcome};
+use crate::presentation::tui::{config, home, new, open, splash, welcome};
 use crate::usecase::project;
 
 /// Entry point for the interactive TUI. Wires the real terminal, storage, and
@@ -29,6 +29,7 @@ pub fn run() -> Result<()> {
         .to_string_lossy()
         .into_owned();
 
+    let mut run_splash = |t: &Term| splash::run(t);
     let mut run_welcome = |t: &Term, notice: Option<String>| welcome::run(t, notice);
     let mut run_open = |t: &Term| open::run(t);
     let mut run_new = |t: &Term| new::run(t, &default_location);
@@ -51,6 +52,7 @@ pub fn run() -> Result<()> {
 
     event::event_loop(
         &term,
+        &mut run_splash,
         &mut run_welcome,
         &mut run_open,
         &mut run_new,

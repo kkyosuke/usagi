@@ -13,6 +13,9 @@ use crate::presentation::tui::new::state::NewProject;
 use crate::presentation::tui::screen::AlternateScreenGuard;
 use crate::presentation::tui::{config, home, new, open, welcome};
 
+/// Plays the startup splash once, before the screen graph opens.
+pub type RunSplash<'a> = dyn FnMut(&Term) -> Result<()> + 'a;
+
 /// Runs the welcome menu and returns the chosen action.
 ///
 /// Taking the screens as parameters lets the orchestration loop be tested
@@ -40,13 +43,15 @@ pub type RunConfig<'a> = dyn FnMut(&Term) -> Result<config::Outcome> + 'a;
 /// Drives the screen graph until the user quits. Activates the alternate screen
 /// on entry and restores it on exit (suppressing the farewell on error).
 ///
-/// The welcome menu dispatches to each sub-screen; a sub-screen returning
-/// `Quit` ends the session, `Back` returns to the menu. Submitting the New form
-/// creates the project and opens its home screen; a creation failure is carried
-/// back to the menu as a notice so the user can correct it and retry.
+/// On entry it plays the startup splash once; the welcome menu then dispatches
+/// to each sub-screen; a sub-screen returning `Quit` ends the session, `Back`
+/// returns to the menu. Submitting the New form creates the project and opens
+/// its home screen; a creation failure is carried back to the menu as a notice
+/// so the user can correct it and retry.
 #[allow(clippy::too_many_arguments)]
 pub fn event_loop(
     term: &Term,
+    run_splash: &mut RunSplash,
     run_welcome: &mut RunWelcome,
     run_open: &mut RunOpen,
     run_new: &mut RunNew,
@@ -55,6 +60,9 @@ pub fn event_loop(
     run_config: &mut RunConfig,
 ) -> Result<()> {
     let mut guard = AlternateScreenGuard::new(term.clone())?;
+    if let Err(e) = run_splash(term) {
+        return dismiss_and_fail(&mut guard, e);
+    }
     let mut notice: Option<String> = None;
 
     loop {
@@ -105,6 +113,15 @@ mod tests {
     use super::*;
     use crate::domain::repository::RepoUrl;
     use crate::presentation::tui::new::state::{CloneSpec, ExistingSpec};
+
+    // Splash stubs: the splash plays once on entry. The no-op stands in for the
+    // real (terminal-driven) splash so the loop can be tested headlessly.
+    fn splash_noop(_t: &Term) -> Result<()> {
+        Ok(())
+    }
+    fn splash_err(_t: &Term) -> Result<()> {
+        Err(anyhow::anyhow!("splash blew up"))
+    }
 
     // Welcome-menu stubs: each returns a fixed action so the orchestration loop
     // can be driven deterministically.
@@ -221,6 +238,7 @@ mod tests {
         let t = term();
         assert!(event_loop(
             &t,
+            &mut splash_noop,
             &mut welcome_quit,
             &mut open_back,
             &mut new_back,
@@ -236,6 +254,7 @@ mod tests {
         let t = term();
         let err = event_loop(
             &t,
+            &mut splash_noop,
             &mut welcome_err,
             &mut open_back,
             &mut new_back,
@@ -254,6 +273,7 @@ mod tests {
             ScriptedWelcome::new(vec![welcome::Outcome::OpenProjects, welcome::Outcome::Quit]);
         assert!(event_loop(
             &t,
+            &mut splash_noop,
             &mut |tt, n| welcome.next(tt, n),
             &mut open_back,
             &mut new_back,
@@ -269,6 +289,7 @@ mod tests {
         let t = term();
         assert!(event_loop(
             &t,
+            &mut splash_noop,
             &mut welcome_open,
             &mut open_quit,
             &mut new_back,
@@ -284,6 +305,7 @@ mod tests {
         let t = term();
         let err = event_loop(
             &t,
+            &mut splash_noop,
             &mut welcome_open,
             &mut open_err,
             &mut new_back,
@@ -302,6 +324,7 @@ mod tests {
             ScriptedWelcome::new(vec![welcome::Outcome::NewProject, welcome::Outcome::Quit]);
         assert!(event_loop(
             &t,
+            &mut splash_noop,
             &mut |tt, n| welcome.next(tt, n),
             &mut open_back,
             &mut new_back,
@@ -317,6 +340,7 @@ mod tests {
         let t = term();
         assert!(event_loop(
             &t,
+            &mut splash_noop,
             &mut welcome_new,
             &mut open_back,
             &mut new_quit,
@@ -332,6 +356,7 @@ mod tests {
         let t = term();
         let err = event_loop(
             &t,
+            &mut splash_noop,
             &mut welcome_new,
             &mut open_back,
             &mut new_err,
@@ -350,6 +375,7 @@ mod tests {
             ScriptedWelcome::new(vec![welcome::Outcome::NewProject, welcome::Outcome::Quit]);
         assert!(event_loop(
             &t,
+            &mut splash_noop,
             &mut |tt, n| welcome.next(tt, n),
             &mut open_back,
             &mut new_submitted,
@@ -367,6 +393,7 @@ mod tests {
             ScriptedWelcome::new(vec![welcome::Outcome::NewProject, welcome::Outcome::Quit]);
         assert!(event_loop(
             &t,
+            &mut splash_noop,
             &mut |tt, n| welcome.next(tt, n),
             &mut open_back,
             &mut new_submitted_existing,
@@ -382,6 +409,7 @@ mod tests {
         let t = term();
         assert!(event_loop(
             &t,
+            &mut splash_noop,
             &mut welcome_new,
             &mut open_back,
             &mut new_submitted,
@@ -397,6 +425,7 @@ mod tests {
         let t = term();
         let err = event_loop(
             &t,
+            &mut splash_noop,
             &mut welcome_new,
             &mut open_back,
             &mut new_submitted,
@@ -417,6 +446,7 @@ mod tests {
             ScriptedWelcome::new(vec![welcome::Outcome::NewProject, welcome::Outcome::Quit]);
         assert!(event_loop(
             &t,
+            &mut splash_noop,
             &mut |tt, n| welcome.next(tt, n),
             &mut open_back,
             &mut new_submitted,
@@ -434,6 +464,7 @@ mod tests {
             ScriptedWelcome::new(vec![welcome::Outcome::Configure, welcome::Outcome::Quit]);
         assert!(event_loop(
             &t,
+            &mut splash_noop,
             &mut |tt, n| welcome.next(tt, n),
             &mut open_back,
             &mut new_back,
@@ -449,6 +480,7 @@ mod tests {
         let t = term();
         assert!(event_loop(
             &t,
+            &mut splash_noop,
             &mut welcome_config,
             &mut open_back,
             &mut new_back,
@@ -464,6 +496,7 @@ mod tests {
         let t = term();
         let err = event_loop(
             &t,
+            &mut splash_noop,
             &mut welcome_config,
             &mut open_back,
             &mut new_back,
@@ -473,5 +506,25 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("config screen blew up"));
+    }
+
+    #[test]
+    fn splash_error_is_propagated() {
+        // A splash that fails surfaces its error (with the farewell suppressed)
+        // before the welcome menu is ever reached, so the welcome stub that would
+        // panic on use is never called.
+        let t = term();
+        let err = event_loop(
+            &t,
+            &mut splash_err,
+            &mut welcome_err,
+            &mut open_back,
+            &mut new_back,
+            &mut create_ok,
+            &mut home_back,
+            &mut config_back,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("splash blew up"));
     }
 }

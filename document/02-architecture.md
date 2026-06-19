@@ -101,6 +101,7 @@ src/
         ├── screen.rs           # 端末制御（代替スクリーン・RAII ガード）・差分描画（FramePainter）
         ├── term_reader.rs      # キー入力・マウスホイール読み取り（ホイールは解析して読み捨て）
         ├── echo.rs             # 端末エコー/モード制御ヘルパ
+        ├── splash/             # 起動スプラッシュ（走るうさぎの装飾アニメ・ui / event）
         ├── welcome/            # 起動画面（menu / state / ui / event）
         ├── open/               # プロジェクト選択画面（state / ui / event）
         ├── new/                # 新規プロジェクト画面（state（mod=FormState・型 / validate=検証） / ui / event）
@@ -109,8 +110,8 @@ src/
         └── widgets/            # 共通 widget（mod / picker / dir_picker / text_input=キャレット編集付き 1 行入力）
 ```
 
-> `tui/app/` は各画面（welcome / open / new / config / home）を純粋に保ったまま、ユーザーの選択に応じて
-> 画面を開き、Back / Quit / エラーを振り分ける **画面遷移のオーケストレーター**です。個々の画面は
+> `tui/app/` は各画面（splash / welcome / open / new / config / home）を純粋に保ったまま、ユーザーの選択に応じて
+> 画面を開き、Back / Quit / エラーを振り分ける **画面遷移のオーケストレーター**です（起動時はまず splash を一度再生します）。個々の画面は
 > 「描画して、ユーザーが何を選んだかを報告する」だけに徹し、その意味づけ（次にどの画面を開くか）は
 > `app/` が担います。画面遷移図は [design/README.md](design/README.md) を参照してください。
 

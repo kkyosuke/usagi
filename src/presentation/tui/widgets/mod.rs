@@ -229,6 +229,55 @@ pub fn done_rabbit(ok: bool, message: &str) -> Vec<String> {
         .collect()
 }
 
+/// The running usagi's two content rows — `(ears, body)` — by travel direction.
+/// The nose (`>` / `<`) leads the run, so the rabbit always faces the way it
+/// moves; the head's `ㅅ` is width-2 like every other usagi face, and the ears
+/// sit centred over it (the leftward art shifts both a column so the nose has
+/// room, keeping the ears above the head). [`running_rabbit`] draws these as a
+/// three-row block that bobs up and down so a rabbit translated across the
+/// screen reads as bounding.
+const RUNNER_RIGHT: [&str; 2] = ["  ∩∩", "(･ㅅ･)>"];
+const RUNNER_LEFT: [&str; 2] = ["   ∩∩", "<(･ㅅ･)"];
+
+/// The display width of the running usagi sprite, so a caller can bound the
+/// rabbit's horizontal travel against the terminal width (the rightmost column
+/// it may start at is `width - running_rabbit_width()`).
+pub fn running_rabbit_width() -> usize {
+    RUNNER_RIGHT
+        .iter()
+        .chain(RUNNER_LEFT.iter())
+        .map(|row| console::measure_text_width(row))
+        .max()
+        .unwrap_or(0)
+}
+
+/// A three-row running usagi at horizontal offset `col`, facing right
+/// (`face_right`) or left, drawn mid-hop (`airborne`) or grounded. The two
+/// content rows ride the top two rows of the block when airborne and the bottom
+/// two when grounded, so toggling `airborne` between frames makes the rabbit
+/// bound; advancing `col` carries it across the screen. Styled magenta-bold like
+/// the mascot. Used by the startup [`splash`](super::super::tui::splash) screen,
+/// which owns the motion (the bounce between the screen edges and the per-frame
+/// hop) and calls this purely to draw a frame.
+pub fn running_rabbit(col: usize, face_right: bool, airborne: bool) -> Vec<String> {
+    let [ears, body] = if face_right {
+        RUNNER_RIGHT
+    } else {
+        RUNNER_LEFT
+    };
+    let pad = " ".repeat(col);
+    let ears = format!("{pad}{ears}");
+    let body = format!("{pad}{body}");
+    let rows = if airborne {
+        [ears, body, String::new()]
+    } else {
+        [String::new(), ears, body]
+    };
+    rows.into_iter()
+        .map(|row| style(row).magenta().bold().to_string())
+        .collect()
+}
+
 /// Right-anchors each line of `banner` onto the `lines` starting at row `top`,
 /// appending it after the existing content. A row is only overlaid when its
 /// current content does not reach the banner's left column, so busy rows (a
@@ -565,6 +614,74 @@ mod tests {
             console::measure_text_width(&lines[0]),
             console::measure_text_width(&lines[1]),
         );
+    }
+
+    #[test]
+    fn running_rabbit_faces_its_direction_of_travel() {
+        // The nose leads the run: `>` when heading right, `<` when heading left.
+        let right =
+            console::strip_ansi_codes(&running_rabbit(0, true, true).join("\n")).into_owned();
+        assert!(right.contains("(･ㅅ･)>"));
+        let left =
+            console::strip_ansi_codes(&running_rabbit(0, false, true).join("\n")).into_owned();
+        assert!(left.contains("<(･ㅅ･)"));
+    }
+
+    #[test]
+    fn running_rabbit_is_three_rows_and_carries_the_offset() {
+        // Always a three-row block; a larger `col` indents the art further so it
+        // travels rightward across the screen.
+        let near = running_rabbit(2, true, true);
+        let far = running_rabbit(20, true, true);
+        assert_eq!(near.len(), 3);
+        assert_eq!(far.len(), 3);
+        let lead = |line: &str| {
+            console::strip_ansi_codes(line)
+                .chars()
+                .take_while(|c| *c == ' ')
+                .count()
+        };
+        assert!(lead(&far[0]) > lead(&near[0]));
+    }
+
+    #[test]
+    fn running_rabbit_bobs_between_the_top_and_bottom_rows() {
+        // Airborne: the art rides the top two rows, leaving the last blank.
+        // Grounded: it drops to the bottom two rows, leaving the first blank. So
+        // toggling `airborne` between frames bounces the rabbit.
+        let air = running_rabbit(0, true, true);
+        assert!(console::strip_ansi_codes(&air[0]).contains('∩'));
+        assert!(console::strip_ansi_codes(&air[2]).trim().is_empty());
+
+        let ground = running_rabbit(0, true, false);
+        assert!(console::strip_ansi_codes(&ground[0]).trim().is_empty());
+        assert!(console::strip_ansi_codes(&ground[2]).contains('ㅅ'));
+    }
+
+    #[test]
+    fn running_rabbit_keeps_the_ears_over_the_head_in_both_directions() {
+        // The first ear must sit over the head centre (`ㅅ`) regardless of which
+        // way the rabbit faces, so the ears never drift off the head.
+        fn col_of(line: &str, target: char) -> usize {
+            let plain = console::strip_ansi_codes(line).into_owned();
+            let byte = plain.find(target).expect("glyph present");
+            console::measure_text_width(&plain[..byte])
+        }
+        for face_right in [true, false] {
+            let rows = running_rabbit(3, face_right, true);
+            assert_eq!(
+                col_of(&rows[0], '∩'),
+                col_of(&rows[1], 'ㅅ'),
+                "ears must sit over the head (face_right={face_right})",
+            );
+        }
+    }
+
+    #[test]
+    fn running_rabbit_width_spans_the_widest_sprite_row() {
+        // The bound a caller uses for the rabbit's travel matches the actual art:
+        // the widest content row (`(･ㅅ･)>` / `<(･ㅅ･)`, seven columns).
+        assert_eq!(running_rabbit_width(), 7);
     }
 
     #[test]
