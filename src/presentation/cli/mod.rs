@@ -7,4 +7,5 @@ pub mod issue;
 pub mod llm_mcp;
 pub mod mcp;
 pub mod memory;
+pub mod run;
 pub mod status;

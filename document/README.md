@@ -22,6 +22,7 @@
 | # | ドキュメント | 画面 |
 |---|---|---|
 | — | [design/README.md](design/README.md) | 画面一覧・画面遷移図・共通設計メモ |
+| 0 | [design/00-splash.md](design/00-splash.md) | 起動スプラッシュ（Splash） |
 | 1 | [design/01-welcome.md](design/01-welcome.md) | 起動画面（Welcome） |
 | 2 | [design/02-open.md](design/02-open.md) | プロジェクト選択画面（Open） |
 | 3 | [design/03-new.md](design/03-new.md) | 新規プロジェクト画面（New） |
