@@ -9,6 +9,7 @@ use crate::domain::version::Version;
 
 use super::super::command::{CommandHint, Hint};
 use super::super::state::{HomeState, Mode, RemoveModal, TextModal, WorktreeList};
+use super::super::tasks::{TaskMark, TaskRow};
 use super::panes::log_line;
 use super::{
     clip_to_width, pad_to_width, HINT_INDENT, HINT_MAX, HINT_NAME_COL, REMOVE_MODAL_VISIBLE,
@@ -74,6 +75,55 @@ pub(super) fn update_banner(latest: &Version) -> Vec<String> {
                 .bold()
                 .to_string()
         })
+        .collect()
+}
+
+/// How many task rows the panel shows before collapsing the rest into a
+/// `… and N more` line, so a burst of background work cannot overrun the corner.
+const TASK_PANEL_MAX: usize = 6;
+
+/// The top-right background-task panel: a dim `tasks` header over one row per
+/// in-flight (or just-finished) session create / remove, stacked oldest-first.
+/// A running row leads with a spinning braille glyph (cyan), a finished one with
+/// `✓` (green) or `✗` (red). Returns no lines when nothing is running, so the
+/// corner falls back to the update notice.
+///
+/// Each line is right-padded to a common block width so the block right-aligns
+/// cleanly when [`overlay_top_right`](super::overlay_top_right) anchors it to the
+/// top rows, like the [`update_banner`] notice it shares the corner with.
+pub(super) fn task_panel(rows: &[TaskRow]) -> Vec<String> {
+    if rows.is_empty() {
+        return Vec::new();
+    }
+    let shown = rows.len().min(TASK_PANEL_MAX);
+    // Build (visible text, style) pairs first so the block width is measured on
+    // the text alone, before the zero-width colour escapes are applied.
+    let mut entries: Vec<(String, Style)> = vec![("tasks".to_string(), Style::new().dim())];
+    for row in rows.iter().take(shown) {
+        let (icon, line_style) = match row.mark {
+            TaskMark::Running(frame) => (
+                widgets::spinner_char(frame).to_string(),
+                Style::new().cyan().bold(),
+            ),
+            TaskMark::Done(true) => ("✓".to_string(), Style::new().green().bold()),
+            TaskMark::Done(false) => ("✗".to_string(), Style::new().red().bold()),
+        };
+        entries.push((format!("{icon} {}", row.label), line_style));
+    }
+    if rows.len() > shown {
+        entries.push((
+            format!("… and {} more", rows.len() - shown),
+            Style::new().dim(),
+        ));
+    }
+    let block_w = entries
+        .iter()
+        .map(|(text, _)| console::measure_text_width(text))
+        .max()
+        .unwrap_or(0);
+    entries
+        .into_iter()
+        .map(|(text, line_style)| line_style.apply_to(pad_to_width(text, block_w)).to_string())
         .collect()
 }
 

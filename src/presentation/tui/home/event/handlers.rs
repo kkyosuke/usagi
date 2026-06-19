@@ -16,7 +16,7 @@ use crate::presentation::tui::screen::{self, FramePainter, KeyReader};
 use crate::domain::settings::SessionActionUi;
 
 use super::super::command::Effect;
-use super::super::state::{HomeState, PaneExit, ReturnMode, SessionOutcome};
+use super::super::state::{HomeState, PaneExit, ReturnMode, SessionOutcome, ROOT_NAME};
 use super::super::terminal_tabs::TabNav;
 use super::super::terminal_view::TerminalView;
 use super::{paint_now, selected_dir, ConfigReload, Flow, CTRL_N, CTRL_O, CTRL_P};
@@ -32,8 +32,8 @@ pub(super) fn overview_key(
     workspace_root: &Path,
     key: Key,
     persist: &mut dyn FnMut(&str),
-    create_session: &mut dyn FnMut(&str) -> SessionOutcome,
-    remove_session: &mut dyn FnMut(&str, bool) -> SessionOutcome,
+    dispatch_create: &mut dyn FnMut(&str),
+    dispatch_remove: &mut dyn FnMut(&str, bool),
     existing_branches: &mut dyn FnMut() -> Vec<String>,
     open_terminal: &mut dyn FnMut(&mut HomeState, &Path, bool, bool) -> Result<PaneExit>,
     open_config: &mut dyn FnMut(&Term) -> Result<Option<ConfigReload>>,
@@ -62,15 +62,10 @@ pub(super) fn overview_key(
                     open_terminal,
                     preview,
                 ),
-                // `session create <name>` creates directly; the screen rebuilds
-                // its list and selects the new session.
-                Effect::CreateSession(name) => {
-                    state.step_loading("作成中…");
-                    let _ = paint_now(term, painter, state);
-                    let outcome = create_session(&name);
-                    state.finish_loading();
-                    state.apply_session_outcome(outcome);
-                }
+                // `session create <name>` dispatches the git work to a background
+                // worker and returns at once; the new session appears in the list
+                // when the task finishes (tracked in the top-right task panel).
+                Effect::CreateSession(name) => dispatch_create(&name),
                 // `session create` with no name moves to 切替 and opens the inline
                 // name input there (creation lives in Switch now).
                 Effect::OpenSessionModal => {
@@ -78,10 +73,9 @@ pub(super) fn overview_key(
                     state.switch_begin_create(existing_branches());
                 }
                 Effect::ListSessions => state.log_sessions(),
-                Effect::RemoveSession { name, force } => {
-                    let outcome = remove_session(&name, force);
-                    state.apply_session_outcome(outcome);
-                }
+                // `session remove <name>` dispatches the removal to a background
+                // worker; the session leaves the list when the task finishes.
+                Effect::RemoveSession { name, force } => dispatch_remove(&name, force),
                 Effect::OpenRemoveModal { force } => state.open_remove_modal(force),
                 // `terminal` / `agent` are session commands, but the Overview line
                 // still dispatches them if typed: focus the active session (the
@@ -121,7 +115,7 @@ pub(super) fn overview_key(
                 // dispatches it if typed, closing the focused session. On the root
                 // row (the default) it is refused, since the root is the workspace
                 // itself and not a session.
-                Effect::CloseSession => close_focused_session(state, remove_session),
+                Effect::CloseSession => close_focused_session(state, dispatch_remove),
                 // `ShowText` already opened its modal inside `submit`; nothing
                 // more for the event loop to do.
                 Effect::None | Effect::Clear | Effect::ShowText(_) => {}
@@ -216,7 +210,7 @@ pub(super) fn switch_key(
     painter: &mut FramePainter,
     workspace_root: &Path,
     key: Key,
-    create_session: &mut dyn FnMut(&str) -> SessionOutcome,
+    dispatch_create: &mut dyn FnMut(&str),
     rename_display: &mut dyn FnMut(&str, &str) -> SessionOutcome,
     existing_branches: &mut dyn FnMut() -> Vec<String>,
     open_terminal: &mut dyn FnMut(&mut HomeState, &Path, bool, bool) -> Result<PaneExit>,
@@ -229,14 +223,10 @@ pub(super) fn switch_key(
         match key {
             Key::Enter => {
                 if let Some(name) = state.switch_confirm_create() {
-                    state.step_loading("作成中…");
-                    let _ = paint_now(term, painter, state);
-                    let outcome = create_session(&name);
-                    state.finish_loading();
-                    state.apply_session_outcome(outcome);
-                    // The freshly created session is selected; focus it.
-                    let row = state.list().selected_index();
-                    state.enter_focus(row);
+                    // Dispatch the git work to a background worker and stay in
+                    // 切替 so the user keeps navigating; the new session appears in
+                    // the list when the task finishes (tracked in the task panel).
+                    dispatch_create(&name);
                 }
             }
             Key::Escape => state.create_cancel(),
@@ -400,7 +390,7 @@ pub(super) fn focus_key(
     painter: &mut FramePainter,
     workspace_root: &Path,
     key: Key,
-    remove_session: &mut dyn FnMut(&str, bool) -> SessionOutcome,
+    dispatch_remove: &mut dyn FnMut(&str, bool),
     open_terminal: &mut dyn FnMut(&mut HomeState, &Path, bool, bool) -> Result<PaneExit>,
     preview: &mut dyn FnMut(&Path) -> Option<TerminalView>,
     tab_op: &mut super::TabOp<'_>,
@@ -439,7 +429,7 @@ pub(super) fn focus_key(
             painter,
             workspace_root,
             key,
-            remove_session,
+            dispatch_remove,
             open_terminal,
             preview,
         ),
@@ -450,7 +440,7 @@ pub(super) fn focus_key(
             painter,
             workspace_root,
             key,
-            remove_session,
+            dispatch_remove,
             open_terminal,
             preview,
         ),
@@ -458,18 +448,14 @@ pub(super) fn focus_key(
     Flow::Continue
 }
 
-/// Close the focused session forcefully — the `close` command's effect. Removes
-/// the session like `session remove <name> --force` (discarding any uncommitted
-/// changes) via the `remove_session` callback; on success the session is gone,
-/// so leave 在席 for 切替 (Switch) to pick the next session (`Esc` backs out to
-/// 統括). The root row is the workspace itself, not a session, so it is refused
-/// outright; any other failed removal (e.g. a git error) only logs and stays in
-/// 在席.
-fn close_focused_session(
-    state: &mut HomeState,
-    remove_session: &mut dyn FnMut(&str, bool) -> SessionOutcome,
-) {
-    use super::super::state::ROOT_NAME;
+/// Close the focused session forcefully — the `close` command's effect.
+/// Dispatches a background removal like `session remove <name> --force`
+/// (discarding any uncommitted changes) and, since the user asked to close this
+/// session, leaves 在席 for 切替 (Switch) at once so they can pick the next one
+/// (`Esc` backs out to 統括); the removal's result is logged and the list
+/// refreshed when the background task finishes. The root row is the workspace
+/// itself, not a session, so closing it is refused outright and stays in 在席.
+fn close_focused_session(state: &mut HomeState, dispatch_remove: &mut dyn FnMut(&str, bool)) {
     let name = state.focused_session_name();
     // The root row is the workspace itself, not a session, so it cannot be
     // closed. The 在席 menu hides `close` here, but the prompt could still be
@@ -478,14 +464,8 @@ fn close_focused_session(
         state.log_error("the root row is the workspace and cannot be closed");
         return;
     }
-    let outcome = remove_session(&name, true);
-    // The callback returns a refreshed list only when it actually removed the
-    // session; on an error it leaves the list untouched.
-    let removed = outcome.sessions.is_some();
-    state.apply_session_outcome(outcome);
-    if removed {
-        state.enter_switch(ReturnMode::Overview);
-    }
+    dispatch_remove(&name, true);
+    state.enter_switch(ReturnMode::Overview);
 }
 
 /// 在席 menu surface: `↑`/`↓` move the cursor, `Enter` runs the highlighted
@@ -499,7 +479,7 @@ fn focus_menu_key(
     painter: &mut FramePainter,
     workspace_root: &Path,
     key: Key,
-    remove_session: &mut dyn FnMut(&str, bool) -> SessionOutcome,
+    dispatch_remove: &mut dyn FnMut(&str, bool),
     open_terminal: &mut dyn FnMut(&mut HomeState, &Path, bool, bool) -> Result<PaneExit>,
     preview: &mut dyn FnMut(&Path) -> Option<TerminalView>,
 ) {
@@ -515,7 +495,7 @@ fn focus_menu_key(
                 painter,
                 workspace_root,
                 name,
-                remove_session,
+                dispatch_remove,
                 open_terminal,
                 preview,
             );
@@ -527,7 +507,7 @@ fn focus_menu_key(
             painter,
             workspace_root,
             "terminal",
-            remove_session,
+            dispatch_remove,
             open_terminal,
             preview,
         ),
@@ -538,7 +518,7 @@ fn focus_menu_key(
             painter,
             workspace_root,
             "agent",
-            remove_session,
+            dispatch_remove,
             open_terminal,
             preview,
         ),
@@ -556,7 +536,7 @@ fn focus_prompt_key(
     painter: &mut FramePainter,
     workspace_root: &Path,
     key: Key,
-    remove_session: &mut dyn FnMut(&str, bool) -> SessionOutcome,
+    dispatch_remove: &mut dyn FnMut(&str, bool),
     open_terminal: &mut dyn FnMut(&mut HomeState, &Path, bool, bool) -> Result<PaneExit>,
     preview: &mut dyn FnMut(&Path) -> Option<TerminalView>,
 ) {
@@ -581,7 +561,7 @@ fn focus_prompt_key(
                         true,
                     );
                 }
-                Effect::CloseSession => close_focused_session(state, remove_session),
+                Effect::CloseSession => close_focused_session(state, dispatch_remove),
                 _ => {}
             }
         }
@@ -611,7 +591,7 @@ fn run_focus_command(
     painter: &mut FramePainter,
     workspace_root: &Path,
     name: &str,
-    remove_session: &mut dyn FnMut(&str, bool) -> SessionOutcome,
+    dispatch_remove: &mut dyn FnMut(&str, bool),
     open_terminal: &mut dyn FnMut(&mut HomeState, &Path, bool, bool) -> Result<PaneExit>,
     preview: &mut dyn FnMut(&Path) -> Option<TerminalView>,
 ) {
@@ -639,7 +619,7 @@ fn run_focus_command(
             true,
         ),
         // `close` removes the focused session forcefully and leaves 在席.
-        "close" => close_focused_session(state, remove_session),
+        "close" => close_focused_session(state, dispatch_remove),
         // `ai` (and any future coming-soon command) just logs its line.
         _ => state.log_output(format!("\"{name}\" is coming soon 🐰")),
     }

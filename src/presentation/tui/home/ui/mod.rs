@@ -22,8 +22,8 @@ use crate::presentation::tui::widgets::clip_to_width;
 
 use chrome::{
     footer_line, hint_lines, input_line, mode_ladder, overview_input_box, quit_confirm_frame,
-    remove_modal_frame, switch_create_rows, switch_rename_rows, text_modal_frame, title_bar,
-    update_banner,
+    remove_modal_frame, switch_create_rows, switch_rename_rows, task_panel, text_modal_frame,
+    title_bar, update_banner,
 };
 use panes::{left_pane, log_tail, right_pane_contents};
 
@@ -329,13 +329,14 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
     }
     lines.push(footer_line(width, state));
 
-    // Overlay the top-right corner. While a blocking action runs the loading
-    // rabbit takes the corner (so the user sees something is happening); once it
-    // finishes, the "update available" notice shows there instead, when the
-    // background check has found a newer release than this build. Both anchor to
-    // the top of the right pane (the rows below the title bar and mode ladder),
-    // where the default Overview screen is blank — so they read cleanly in the
-    // top-right corner of the content.
+    // Overlay the top-right corner, in priority order: a momentary blocking
+    // action (terminal / agent launch) shows the loading rabbit; otherwise any
+    // in-flight background session work (create / remove) stacks as the task
+    // panel; otherwise the "update available" notice shows when the background
+    // check has found a newer release than this build. All anchor to the top of
+    // the right pane (the rows below the title bar and mode ladder), where the
+    // default Overview screen is blank — so they read cleanly in the top-right
+    // corner of the content.
     if let Some(loading) = state.loading() {
         widgets::overlay_top_right(
             &mut lines,
@@ -343,6 +344,10 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
             width,
             &widgets::loading_rabbit(loading.frame(), loading.label()),
         );
+    } else if !state.tasks().is_empty() {
+        // Background session work (create / remove) running off the event-loop
+        // thread, stacked in the corner so it never freezes the screen.
+        widgets::overlay_top_right(&mut lines, body_start, width, &task_panel(state.tasks()));
     } else if let Some(latest) = state.update() {
         widgets::overlay_top_right(&mut lines, body_start, width, &update_banner(&latest));
     }

@@ -20,7 +20,7 @@ use console::{Key, Term};
 use crate::domain::workspace_state::{BranchStatus, WorktreeState};
 use crate::presentation::tui::screen::KeyReader;
 
-use super::event::{event_loop, ConfigReload, Outcome};
+use super::event::{event_loop_compat, ConfigReload, Outcome};
 use super::state::{HomeState, LogLine, PaneExit, ReturnMode, SessionOutcome};
 use super::terminal_pool::MonitorHandle;
 use super::terminal_tabs::TabNav;
@@ -222,7 +222,7 @@ fn event_loop_attaches_a_live_session_end_to_end() {
         |_dir: &Path, _nav: Option<TabNav>| -> (Vec<String>, usize) { (Vec::new(), 0) };
     let mut close_tab = |_h: &mut HomeState, _dir: &Path| {};
 
-    let outcome = event_loop(
+    let outcome = event_loop_compat(
         &term,
         &mut reader,
         workspace(),

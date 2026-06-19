@@ -119,6 +119,13 @@ pub fn rabbit_art() -> [&'static str; 3] {
 /// Braille spinner frames cycled beside the loading rabbit, one per tick.
 const LOADING_SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
+/// The braille spinner glyph for `frame`, wrapping the [`LOADING_SPINNER`]
+/// cycle. Shared so callers that animate their own rows (the background-task
+/// panel) spin in step with the loading rabbit without owning the frame table.
+pub fn spinner_char(frame: usize) -> &'static str {
+    LOADING_SPINNER[frame % LOADING_SPINNER.len()]
+}
+
 /// The hopping rabbit's poses as `(ears, body)`. The ears sit centred over the
 /// head (the `∩∩` lands on the `ㅅ`), and each "hop" pose shifts the ears *and*
 /// the body together by one column so they bounce as a unit without the ears
@@ -506,6 +513,14 @@ mod tests {
     #[test]
     fn title_line_contains_the_title() {
         assert!(title_line(80, "USAGI").contains("USAGI"));
+    }
+
+    #[test]
+    fn spinner_char_wraps_the_braille_cycle() {
+        assert_eq!(spinner_char(0), "⠋");
+        // The frame index wraps around the ten-glyph cycle.
+        assert_eq!(spinner_char(10), spinner_char(0));
+        assert_eq!(spinner_char(11), spinner_char(1));
     }
 
     #[test]
