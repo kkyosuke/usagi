@@ -30,7 +30,7 @@
 | `clear` | 出力ログを消去 |
 | `quit` / `exit` | アプリを終了 |
 | `session` | セッション（branch + worktree）の作成・一覧・切替・削除（Workspace スコープ） |
-| `issue` | タスク issue を一覧・依存ツリー・1 件表示で閲覧（Workspace スコープ） |
+| `issue` | タスク issue を一覧・依存ツリー・ガント・1 件表示で閲覧（Workspace スコープ） |
 | `terminal` | 選択中セッションの worktree でシェルを右ペインに埋め込み起動（Session スコープ） |
 | `agent` | `terminal` ＋ Agent CLI（既定 `claude`）を起動（Session スコープ） |
 | `close` | 在席中のセッションを強制削除して切替へ移る（`session remove <名前> --force` と同じ。Session スコープ） |
@@ -61,6 +61,7 @@
 |---|---|
 | `issue` / `issue list`（別名 `ls`） | 全 issue を ready/blocked/done 付きで一覧し、末尾に進捗サマリ（件数・完了率・ready 数・バー）を表示 |
 | `issue graph`（別名 `tree`） | `dependson` の依存ツリーを進捗サマリ付きで表示 |
+| `issue gantt`（別名 `chart`） | 各 issue の `created_at`→`updated_at` を実日付軸のガントチャートで表示。バーの字形でステータス（`█` done / `▒` in-progress / `░` todo）を、各行末の `←依存`（`!` は未完了）で依存関係を表す |
 | `issue show <番号>`（別名 `view`） | 1 件の frontmatter + 本文を表示 |
 
 issue が 1 件も無いときは「No issues yet.」を 1 行だけログに出します。

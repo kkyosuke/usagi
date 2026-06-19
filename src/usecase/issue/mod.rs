@@ -14,9 +14,11 @@ use chrono::Utc;
 use crate::domain::issue::{Issue, IssuePriority, IssueStatus, IssueSummary};
 use crate::infrastructure::issue_store::IssueStore;
 
+mod gantt;
 mod stats;
 mod tree;
 
+pub use gantt::gantt;
 pub use stats::{group, GroupBy, IssueStats};
 pub use tree::dependency_tree;
 

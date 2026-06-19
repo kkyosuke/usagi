@@ -4,7 +4,11 @@
 
 use super::{Command, CommandContext, CommandInfo, CommandResult, CommandScope, Effect, LogLine};
 use crate::domain::issue::IssueStatus;
-use crate::usecase::issue::{annotate_all, dependency_tree, IssueStats, ListedIssue};
+use crate::usecase::issue::{annotate_all, dependency_tree, gantt, IssueStats, ListedIssue};
+
+/// Line-width budget for the `issue gantt` chart, matching the text modal's
+/// inner width so bars fill the box without being clipped.
+const GANTT_WIDTH: usize = 60;
 
 /// `man` / `help`: lists every command, or describes one.
 pub(super) struct ManCommand;
@@ -360,6 +364,8 @@ impl Command for CloseCommand {
 /// - `issue` / `issue list` (alias `ls`) — every issue with its readiness, plus
 ///   a progress summary.
 /// - `issue graph` (alias `tree`) — the dependency forest.
+/// - `issue gantt` (alias `chart`) — a date-axis Gantt chart of every issue's
+///   `created_at`→`updated_at` span, annotated with dependencies.
 /// - `issue show <number>` (alias `view`) — one issue's frontmatter and body.
 pub(super) struct IssueCommand;
 
@@ -369,15 +375,15 @@ impl Command for IssueCommand {
     }
 
     fn description(&self) -> &'static str {
-        "Browse task issues (list, graph, show)"
+        "Browse task issues (list, graph, gantt, show)"
     }
 
     fn usage(&self) -> &'static str {
-        "issue [list|graph|show <number>]  (aliases: list=ls, graph=tree, show=view)"
+        "issue [list|graph|gantt|show <number>]  (aliases: list=ls, graph=tree, gantt=chart, show=view)"
     }
 
     fn examples(&self) -> &'static [&'static str] {
-        &["issue", "issue graph", "issue show 3"]
+        &["issue", "issue graph", "issue gantt", "issue show 3"]
     }
 
     fn scope(&self) -> CommandScope {
@@ -392,6 +398,7 @@ impl Command for IssueCommand {
         let sub = match sub {
             "" | "list" | "ls" => "list",
             "graph" | "tree" => "graph",
+            "gantt" | "chart" => "gantt",
             "show" | "view" => "show",
             other => other,
         };
@@ -399,6 +406,7 @@ impl Command for IssueCommand {
         match sub {
             "list" => issue_list(ctx),
             "graph" => issue_graph(ctx),
+            "gantt" => issue_gantt(ctx),
             "show" => issue_show(ctx, rest),
             _ => CommandResult::line(LogLine::error(format!("usage: {}", self.usage()))),
         }
@@ -434,6 +442,23 @@ fn issue_graph(ctx: &CommandContext) -> CommandResult {
         &listed,
     ))));
     CommandResult::modal("Issue graph", lines)
+}
+
+/// `issue gantt`: a date-axis Gantt chart with a progress footer.
+fn issue_gantt(ctx: &CommandContext) -> CommandResult {
+    let listed = annotate_all(ctx.issues);
+    if listed.is_empty() {
+        return CommandResult::line(LogLine::output("No issues yet."));
+    }
+    let mut lines: Vec<LogLine> = gantt(&listed, GANTT_WIDTH)
+        .into_iter()
+        .map(LogLine::output)
+        .collect();
+    lines.push(LogLine::output(String::new()));
+    lines.push(LogLine::output(stats_line(&IssueStats::from_listed(
+        &listed,
+    ))));
+    CommandResult::modal("Issue gantt", lines)
 }
 
 /// `issue show <number>`: one issue's full markdown (frontmatter + body).
