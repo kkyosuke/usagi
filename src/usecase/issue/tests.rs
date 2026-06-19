@@ -196,6 +196,49 @@ fn create_assigns_increasing_numbers_and_defaults_to_todo() {
 }
 
 #[test]
+fn mutations_mirror_into_each_session_worktree() {
+    use std::fs;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    // A session worktree that already checks out an issue store.
+    let session = root.join(".usagi/sessions/foo/.usagi/issues");
+    fs::create_dir_all(&session).unwrap();
+
+    let md_names = |dir: &std::path::Path| -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .filter(|n| n.ends_with(".md"))
+            .collect();
+        names.sort();
+        names
+    };
+
+    // Create: the new issue is mirrored into the session.
+    let issue = create(root, new_issue("Shared task")).unwrap();
+    assert_eq!(md_names(&session), vec![issue.file_name()]);
+
+    // Update: a title change renames the file; the session mirrors the rename
+    // (the old name is gone, the new one present) rather than keeping both.
+    let renamed = update(
+        root,
+        issue.number,
+        IssueChanges {
+            title: Some("Renamed task".to_string()),
+            ..Default::default()
+        },
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(md_names(&session), vec![renamed.file_name()]);
+
+    // Delete: the issue is removed from the session too.
+    assert!(delete(root, issue.number).unwrap());
+    assert!(md_names(&session).is_empty());
+}
+
+#[test]
 fn update_applies_only_set_fields_and_touches_updated_at() {
     let tmp = tempfile::tempdir().unwrap();
     let repo = tmp.path();

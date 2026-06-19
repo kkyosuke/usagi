@@ -14,6 +14,7 @@ use chrono::Utc;
 use crate::domain::issue::{Issue, IssuePriority, IssueStatus, IssueSummary};
 use crate::infrastructure::issue_store::IssueStore;
 
+mod mirror;
 mod stats;
 mod tree;
 
@@ -132,6 +133,9 @@ pub fn create(repo_root: &Path, new: NewIssue) -> Result<Issue> {
         body: new.body,
     };
     store.write(&issue)?;
+    // Keep every session's worktree copy of the store in step (best-effort; the
+    // workspace write above is authoritative). See [`mirror`].
+    let _ = mirror::to_sessions(repo_root);
     Ok(issue)
 }
 
@@ -212,12 +216,17 @@ pub fn update(repo_root: &Path, number: u32, changes: IssueChanges) -> Result<Op
     }
     issue.updated_at = Utc::now();
     store.write(&issue)?;
+    let _ = mirror::to_sessions(repo_root);
     Ok(Some(issue))
 }
 
 /// Delete the issue with `number`, returning whether it existed.
 pub fn delete(repo_root: &Path, number: u32) -> Result<bool> {
-    IssueStore::new(repo_root).remove(number)
+    let removed = IssueStore::new(repo_root).remove(number)?;
+    if removed {
+        let _ = mirror::to_sessions(repo_root);
+    }
+    Ok(removed)
 }
 
 /// Annotate an in-memory set of issues with dependency readiness, without
