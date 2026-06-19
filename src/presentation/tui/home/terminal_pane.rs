@@ -77,6 +77,15 @@ const IDLE_REEVAL: Duration = Duration::from_millis(200);
 /// How many lines one wheel notch scrolls the embedded terminal's history.
 const WHEEL_LINES: i32 = 3;
 
+/// Report mouse motion with no button held (DECSET 1003), so the pane can light
+/// up the link under the pointer on hover. The global mouse modes (1000/1002/1006,
+/// see [`super::super::screen`]) only report clicks and drags; this is enabled
+/// while the pane is up and disabled on the way out so the management screens are
+/// not flooded with motion reports they would only discard.
+const ENABLE_MOTION: &str = "\x1b[?1003h";
+/// Stop reporting button-less mouse motion ([`ENABLE_MOTION`]).
+const DISABLE_MOTION: &str = "\x1b[?1003l";
+
 /// Run the embedded terminal in the right pane, driving the pooled shell `pty`
 /// until the user detaches / switches (`Ctrl-O`) or the shell exits. The PTY is
 /// owned by the caller's [`TerminalPool`] so it survives a detach; here we own
@@ -95,8 +104,14 @@ pub fn run(
     // shell as one block instead of a key stream whose embedded Enters each
     // submit a line to the agent (see `pump_input`).
     let _ = execute!(std::io::stdout(), EnableBracketedPaste);
+    // Turn on button-less motion reporting so links light up on hover; restored
+    // on the way out (see [`ENABLE_MOTION`]).
+    let _ = term.write_str(ENABLE_MOTION);
+    let _ = term.flush();
     let _ = term.clear_screen();
     let result = drive(term, state, pty, monitor);
+    let _ = term.write_str(DISABLE_MOTION);
+    let _ = term.flush();
     let _ = execute!(std::io::stdout(), DisableBracketedPaste);
     let _ = disable_raw_mode();
     let _ = term.show_cursor();
@@ -129,6 +144,9 @@ fn drive(
     // pane. A drag builds it, releasing copies it, and typing or scrolling
     // clears it.
     let mut selection: Option<Selection> = None;
+    // The cell the pointer last moved over, so the link under it (if any) lights
+    // up; `None` while the pointer is outside the pane.
+    let mut hover: Option<Cell> = None;
     // What we last told the PTY and last drew, so a pass that finds them
     // unchanged skips the resize ioctl, the grid snapshot, and the repaint. The
     // sentinels (a `None` geometry / scrollback / selection, a first-pass flag)
@@ -137,6 +155,7 @@ fn drive(
     let mut applied_scrollback: Option<usize> = None;
     let mut last_badges: Option<MonitorSnapshot> = None;
     let mut last_selection: Option<Selection> = None;
+    let mut last_hover: Option<Cell> = None;
     let mut drawn_gen = pty.generation();
     let mut first = true;
     loop {
@@ -171,6 +190,11 @@ fn drive(
         if last_selection != selection {
             dirty = true;
         }
+        // The pointer moved onto / off a different cell: repaint so the hovered
+        // link's highlight follows it.
+        if last_hover != hover {
+            dirty = true;
+        }
         // The sidebar's running / waiting / live-agent / finished markers, read
         // together under a single lock; repaint when they move so sessions
         // (including this one) keep their current state.
@@ -181,8 +205,11 @@ fn drive(
 
         if dirty {
             drawn_gen = gen;
-            let view =
-                TerminalView::from_screen_with_selection(pty.parser().screen(), selection.as_ref());
+            let view = TerminalView::from_screen_with_selection(
+                pty.parser().screen(),
+                selection.as_ref(),
+                hover,
+            );
             // The cursor belongs to the live screen, so hide it while the user is
             // viewing scrolled-back history.
             let cursor = if scrollback == 0 { view.cursor() } else { None };
@@ -194,6 +221,7 @@ fn drive(
             render(term, state, cursor, geo, &mut prev)?;
             last_badges = Some(badges);
             last_selection = selection;
+            last_hover = hover;
             first = false;
         }
 
@@ -210,15 +238,9 @@ fn drive(
             // Input is queued: forward every pending key (or scroll the
             // history), then loop and repaint.
             Wake::Input => {
-                if let Some(step) = pump_input(
-                    term,
-                    state,
-                    pty,
-                    geo,
-                    &mut scrollback,
-                    &mut selection,
-                    &mut prev,
-                )? {
+                if let Some(step) =
+                    pump_input(term, pty, geo, &mut scrollback, &mut selection, &mut hover)?
+                {
                     return Ok(step);
                 }
             }
@@ -258,17 +280,17 @@ fn wait(pty: &PtySession, drawn_gen: u64) -> Result<Wake> {
 /// left-button drag builds a text `selection` instead, and releasing it copies
 /// the selected text to the clipboard (see [`copy_selection`]); a left click with
 /// no drag opens a link under the pointer in the default browser (see
-/// [`open_clicked_url`]). `Ctrl-O` detaches to 切替 ([`PaneStep::Detach`]),
+/// [`open_clicked_url`]). Button-less motion updates `hover` so the link under
+/// the pointer lights up. `Ctrl-O` detaches to 切替 ([`PaneStep::Detach`]),
 /// leaving every pane alive in the pool. Other events are ignored so the next
 /// redraw picks up any new size.
 fn pump_input(
     term: &Term,
-    _state: &mut HomeState,
     pty: &mut PtySession,
     geo: ui::TerminalGeometry,
     scrollback: &mut usize,
     selection: &mut Option<Selection>,
-    _prev: &mut Vec<String>,
+    hover: &mut Option<Cell>,
 ) -> Result<Option<PaneStep>> {
     while event::poll(Duration::ZERO)? {
         match event::read()? {
@@ -342,6 +364,12 @@ fn pump_input(
                     } else {
                         copy_selection(term, pty, selection.as_ref())?;
                     }
+                }
+                // Button-less motion: track the cell under the pointer so the link
+                // there (if any) lights up. `pane_cell` yields `None` past the
+                // pane edges, clearing the highlight as the pointer leaves.
+                MouseEventKind::Moved => {
+                    *hover = pane_cell(mouse.column, mouse.row, geo);
                 }
                 // The wheel scrolls the history when it is over the terminal
                 // pane; the view shifts, so any selection is dropped.
