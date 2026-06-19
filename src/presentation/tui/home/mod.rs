@@ -123,6 +123,15 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
     // the event loop.
     let op_lock = std::sync::Arc::new(std::sync::Mutex::new(()));
 
+    // Join handles for the spawned session workers. The event loop waits on these
+    // when it exits (below) so an in-flight create / remove finishes its git work
+    // instead of the process killing the thread mid-`worktree add` / `remove` and
+    // leaving a half-written worktree or `state.json`. Single-threaded: only the
+    // event loop, through the dispatch closures one at a time, ever touches it,
+    // so a plain `Rc<RefCell<_>>` suffices (like `pool` below).
+    let workers: std::rc::Rc<std::cell::RefCell<Vec<std::thread::JoinHandle<()>>>> =
+        std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+
     // Creating a session does the git / filesystem work on a background thread so
     // the screen never freezes: it registers a task row, runs the work under the
     // op-lock, and stores the result for the event loop to drain (logging it and
@@ -130,17 +139,19 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
     let create_tasks = tasks.clone();
     let create_root = workspace.path.clone();
     let create_lock = op_lock.clone();
+    let create_workers = workers.clone();
     let mut dispatch_create = move |name: &str| {
         let id = create_tasks.begin(tasks::TaskKind::CreateSession, name);
         let handle = create_tasks.clone();
         let root = create_root.clone();
         let name = name.to_string();
         let lock = create_lock.clone();
-        std::thread::spawn(move || {
+        let worker = std::thread::spawn(move || {
             let _guard = lock_session_ops(&lock);
             let (ok, completion) = run_create(&root, &name);
             handle.complete(id, ok, completion);
         });
+        create_workers.borrow_mut().push(worker);
     };
 
     // The branch names already taken across the workspace, read fresh each time
@@ -234,6 +245,7 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
     let remove_root = workspace.path.clone();
     let remove_lock = op_lock.clone();
     let remove_agent = agent.clone();
+    let remove_workers = workers.clone();
     let mut dispatch_remove = move |name: &str, force: bool| {
         let id = remove_tasks.begin(tasks::TaskKind::RemoveSession, name);
         let handle = remove_tasks.clone();
@@ -241,11 +253,12 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
         let name = name.to_string();
         let lock = remove_lock.clone();
         let agent = remove_agent.clone();
-        std::thread::spawn(move || {
+        let worker = std::thread::spawn(move || {
             let _guard = lock_session_ops(&lock);
             let (ok, completion) = run_remove(&root, &name, force, agent.as_ref());
             handle.complete(id, ok, completion);
         });
+        remove_workers.borrow_mut().push(worker);
     };
 
     // Evict a removed session's still-running shell from the pool so a session
@@ -463,7 +476,7 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
         }
     };
 
-    event::event_loop(
+    let outcome = event::event_loop(
         term,
         &mut reader,
         state,
@@ -482,7 +495,20 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
         &mut preview,
         &mut tab_op,
         &mut close_tab,
-    )
+    );
+
+    // The loop has exited (quit / back), so wait for any background create /
+    // remove still running before returning — otherwise the process could tear
+    // down the worker mid-`worktree add` / `remove` and leave a half-written
+    // worktree or `state.json`. Workers that already finished join instantly;
+    // at most this waits out the git work in flight (serialised by the op-lock).
+    // Their completions go undrained, which is fine: nothing renders after exit
+    // and the pool (its shells) is about to be dropped anyway.
+    for worker in workers.borrow_mut().drain(..) {
+        let _ = worker.join();
+    }
+
+    outcome
 }
 
 /// Create a session on a worker thread: run the git / filesystem work and build
