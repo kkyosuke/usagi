@@ -17,6 +17,17 @@ pub trait CommandRunner {
     /// exited successfully. Its output is shown to the user.
     fn run(&self, program: &str, args: &[&str]) -> std::io::Result<bool>;
 
+    /// Like [`run`](Self::run) but with stdout/stderr suppressed. Used when the
+    /// caller drives its own progress UI — the TUI's background install paints a
+    /// loading rabbit, and the command's raw output (e.g. `ollama pull`'s
+    /// `pulling manifest …`) would otherwise corrupt the screen. The default
+    /// delegates to [`run`](Self::run) (a test fake cannot observe the suppressed
+    /// streams anyway, so the recorded command is identical); the real runner
+    /// overrides it to null both streams.
+    fn run_quiet(&self, program: &str, args: &[&str]) -> std::io::Result<bool> {
+        self.run(program, args)
+    }
+
     /// Run `program args...`, feeding `input` to its standard input, returning
     /// whether it exited successfully. Used to hand a command a secret it must
     /// not appear on the process's argument list — notably the sudo password
@@ -26,6 +37,20 @@ pub trait CommandRunner {
     fn run_with_input(&self, program: &str, args: &[&str], input: &str) -> std::io::Result<bool> {
         let _ = input;
         self.run(program, args)
+    }
+
+    /// Like [`run_with_input`](Self::run_with_input) but with stdout/stderr
+    /// suppressed, for the same reason as [`run_quiet`](Self::run_quiet) — the
+    /// TUI install pipes the sudo password to `sudo -S` while painting its own
+    /// progress. The default delegates to [`run_with_input`](Self::run_with_input);
+    /// the real runner overrides it to null both streams (still piping `input`).
+    fn run_with_input_quiet(
+        &self,
+        program: &str,
+        args: &[&str],
+        input: &str,
+    ) -> std::io::Result<bool> {
+        self.run_with_input(program, args, input)
     }
 
     /// Run `program args...` quietly (stdout/stderr suppressed), returning
@@ -57,23 +82,30 @@ impl CommandRunner for SystemRunner {
             .map(|status| status.success())
     }
 
-    fn run_with_input(&self, program: &str, args: &[&str], input: &str) -> std::io::Result<bool> {
-        use std::io::Write as _;
-        // Pipe the input (e.g. the sudo password) on stdin so it never reaches
-        // the argument list; stdout/stderr stay inherited so progress shows.
-        let mut child = std::process::Command::new(program)
+    fn run_quiet(&self, program: &str, args: &[&str]) -> std::io::Result<bool> {
+        // Same as `run`, but with stdout/stderr discarded so the command's
+        // progress cannot paint over a TUI that is drawing its own indicator.
+        std::process::Command::new(program)
             .args(args)
-            .stdin(std::process::Stdio::piped())
-            .spawn()?;
-        if let Some(mut stdin) = child.stdin.take() {
-            // A trailing newline so the reading program (sudo) treats it as a
-            // complete line. Dropping the handle afterwards closes the pipe, so
-            // a reader waiting on EOF (e.g. `cat`) does not block `wait`. A write
-            // failure (the child already exited) is ignored: `wait` then reports
-            // the command's own non-zero exit.
-            let _ = writeln!(stdin, "{input}");
-        }
-        child.wait().map(|status| status.success())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|status| status.success())
+    }
+
+    fn run_with_input(&self, program: &str, args: &[&str], input: &str) -> std::io::Result<bool> {
+        // Output stays inherited so progress shows; the secret is piped on stdin.
+        self.run_with_input_inner(program, args, input, false)
+    }
+
+    fn run_with_input_quiet(
+        &self,
+        program: &str,
+        args: &[&str],
+        input: &str,
+    ) -> std::io::Result<bool> {
+        // As `run_with_input`, but with stdout/stderr discarded for the TUI path.
+        self.run_with_input_inner(program, args, input, true)
     }
 
     fn check(&self, program: &str, args: &[&str]) -> bool {
@@ -96,5 +128,83 @@ impl CommandRunner for SystemRunner {
             .stderr(std::process::Stdio::null())
             .spawn()
             .map(|_| ())
+    }
+}
+
+impl SystemRunner {
+    /// Shared body of [`run_with_input`](CommandRunner::run_with_input) and its
+    /// quiet variant: pipe `input` on stdin, optionally discarding stdout/stderr.
+    fn run_with_input_inner(
+        &self,
+        program: &str,
+        args: &[&str],
+        input: &str,
+        quiet: bool,
+    ) -> std::io::Result<bool> {
+        use std::io::Write as _;
+        let mut command = std::process::Command::new(program);
+        command.args(args).stdin(std::process::Stdio::piped());
+        if quiet {
+            command
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
+        }
+        let mut child = command.spawn()?;
+        if let Some(mut stdin) = child.stdin.take() {
+            // A trailing newline so the reading program (sudo) treats it as a
+            // complete line. Dropping the handle afterwards closes the pipe, so
+            // a reader waiting on EOF (e.g. `cat`) does not block `wait`. A write
+            // failure (the child already exited) is ignored: `wait` then reports
+            // the command's own non-zero exit.
+            let _ = writeln!(stdin, "{input}");
+        }
+        child.wait().map(|status| status.success())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::RefCell;
+
+    /// A runner that implements only the required methods, so the trait's
+    /// default `run_with_input` / `run_quiet` / `run_with_input_quiet` (each
+    /// delegating to a louder counterpart) are exercised here rather than left
+    /// to the production overrides that shell out.
+    #[derive(Default)]
+    struct DefaultFake {
+        calls: RefCell<Vec<String>>,
+    }
+
+    impl CommandRunner for DefaultFake {
+        fn available(&self, _program: &str) -> bool {
+            true
+        }
+        fn run(&self, program: &str, args: &[&str]) -> std::io::Result<bool> {
+            self.calls
+                .borrow_mut()
+                .push(format!("{program} {}", args.join(" ")));
+            Ok(true)
+        }
+        fn check(&self, _program: &str, _args: &[&str]) -> bool {
+            true
+        }
+        fn spawn(&self, _program: &str, _args: &[&str]) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn quiet_and_input_variants_default_to_run() {
+        let fake = DefaultFake::default();
+        assert!(fake.run_quiet("a", &["1"]).unwrap());
+        assert!(fake.run_with_input("b", &["2"], "secret").unwrap());
+        assert!(fake.run_with_input_quiet("c", &["3"], "secret").unwrap());
+        // Every default ultimately routes through `run`, ignoring the input.
+        assert_eq!(*fake.calls.borrow(), vec!["a 1", "b 2", "c 3"]);
+        // The fake's other required methods round out its trait surface.
+        assert!(fake.available("x"));
+        assert!(fake.check("x", &[]));
+        assert!(fake.spawn("x", &[]).is_ok());
     }
 }

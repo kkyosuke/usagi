@@ -276,9 +276,25 @@ pub struct Config {
     /// The open model-selection modal, when the user is picking which model to
     /// use. While set it captures all keys.
     model_modal: Option<ModelModal>,
+    /// The provisioning launched in the background and not yet reflected into the
+    /// screen, if any. The install runs off-thread (see the global install task),
+    /// so when it finishes this records what to apply: the runtime became present,
+    /// or a specific model was pulled.
+    pending_install: Option<PendingInstall>,
     /// Which settings the screen edits.
     scope: Scope,
     selected_index: usize,
+}
+
+/// What a launched background install will change once it finishes — tracked so
+/// the screen can reflect the right state when the global install task reports
+/// completion.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PendingInstall {
+    /// The `ollama` runtime is being installed.
+    Runtime,
+    /// `model` is being pulled.
+    Model(String),
 }
 
 impl Config {
@@ -299,6 +315,7 @@ impl Config {
             installed_models: Vec::new(),
             install_modal: None,
             model_modal: None,
+            pending_install: None,
             scope: Scope::Global,
             selected_index: 0,
         }
@@ -325,6 +342,7 @@ impl Config {
             installed_models: Vec::new(),
             install_modal: None,
             model_modal: None,
+            pending_install: None,
             scope: Scope::Local,
             selected_index: 0,
         }
@@ -446,6 +464,18 @@ impl Config {
             self.installed_models.push(model.to_string());
         }
         self.select_model(model);
+    }
+
+    /// Record what the just-launched background install will change, so its
+    /// completion can be reflected into the screen later.
+    pub fn set_pending_install(&mut self, pending: PendingInstall) {
+        self.pending_install = Some(pending);
+    }
+
+    /// Take the pending background install, if any, clearing it so the
+    /// completion is reflected exactly once.
+    pub fn take_pending_install(&mut self) -> Option<PendingInstall> {
+        self.pending_install.take()
     }
 
     /// The open install modal, if any. While present the event loop routes every

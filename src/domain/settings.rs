@@ -70,16 +70,19 @@ fn usagi_mcp_servers(usagi_bin: &str) -> String {
 /// `ready`); a submitted prompt starts a turn (`UserPromptSubmit` → `running`);
 /// finishing a turn means the agent is done (`Stop` → `ended`); pausing mid-turn
 /// for the user's input or permission means it waits (`Notification` →
-/// `waiting`); the session ending is also done (`SessionEnd` → `ended`). Passed
-/// via `--settings`, which *merges* with the user's own settings rather than
-/// replacing them. Built by string formatting (not `serde_json`) to keep `domain`
-/// dependency-free; the binary path is JSON-escaped so a Windows path stays valid
-/// JSON, and contains only double quotes so it survives the single-quoted shell
-/// argument.
+/// `waiting`). A tool-permission prompt is also a wait, but `Notification` only
+/// fires for it when the user is away; the dedicated `PermissionRequest` →
+/// `waiting` hook catches it reliably (it fires right as the prompt appears, even
+/// while the session is focused). The session ending is also done (`SessionEnd` →
+/// `ended`). Passed via `--settings`, which *merges* with the user's own settings
+/// rather than replacing them. Built by string formatting (not `serde_json`) to
+/// keep `domain` dependency-free; the binary path is JSON-escaped so a Windows
+/// path stays valid JSON, and contains only double quotes so it survives the
+/// single-quoted shell argument.
 fn claude_hooks_settings(usagi_bin: &str) -> String {
     let bin = json_escape(usagi_bin);
     format!(
-        r#"{{"hooks":{{"UserPromptSubmit":[{{"hooks":[{{"type":"command","command":"{bin} agent-phase running"}}]}}],"Stop":[{{"hooks":[{{"type":"command","command":"{bin} agent-phase ended"}}]}}],"Notification":[{{"hooks":[{{"type":"command","command":"{bin} agent-phase waiting"}}]}}],"SessionStart":[{{"hooks":[{{"type":"command","command":"{bin} agent-phase ready"}}]}}],"SessionEnd":[{{"hooks":[{{"type":"command","command":"{bin} agent-phase ended"}}]}}]}}}}"#
+        r#"{{"hooks":{{"UserPromptSubmit":[{{"hooks":[{{"type":"command","command":"{bin} agent-phase running"}}]}}],"Stop":[{{"hooks":[{{"type":"command","command":"{bin} agent-phase ended"}}]}}],"Notification":[{{"hooks":[{{"type":"command","command":"{bin} agent-phase waiting"}}]}}],"PermissionRequest":[{{"hooks":[{{"type":"command","command":"{bin} agent-phase waiting"}}]}}],"SessionStart":[{{"hooks":[{{"type":"command","command":"{bin} agent-phase ready"}}]}}],"SessionEnd":[{{"hooks":[{{"type":"command","command":"{bin} agent-phase ended"}}]}}]}}}}"#
     )
 }
 
@@ -481,7 +484,7 @@ mod tests {
             launch,
             "claude --mcp-config '{\"mcpServers\":{\"usagi\":{\"command\":\"usagi\",\"args\":[\"mcp\"]}}}' \
              --append-system-prompt 'あなたは usagi が管理するセッション専用の worktree 内で起動されています。このディレクトリは既に独立した作業環境のため、新たに git worktree を作成する必要はありません。ここで直接作業を進めてください。' \
-             --settings '{\"hooks\":{\"UserPromptSubmit\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase running\"}]}],\"Stop\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase ended\"}]}],\"Notification\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase waiting\"}]}],\"SessionStart\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase ready\"}]}],\"SessionEnd\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase ended\"}]}]}}'"
+             --settings '{\"hooks\":{\"UserPromptSubmit\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase running\"}]}],\"Stop\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase ended\"}]}],\"Notification\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase waiting\"}]}],\"PermissionRequest\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase waiting\"}]}],\"SessionStart\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase ready\"}]}],\"SessionEnd\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase ended\"}]}]}}'"
         );
     }
 
@@ -523,6 +526,10 @@ mod tests {
             assert!(launch.contains("usagi agent-phase running"));
             assert!(launch.contains("usagi agent-phase waiting"));
             assert!(launch.contains("usagi agent-phase ended"));
+            // A tool-permission prompt waits too, caught reliably (even while
+            // focused) by the dedicated PermissionRequest hook, not just the
+            // away-only Notification.
+            assert!(launch.contains("\"PermissionRequest\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase waiting\"}]}]"));
         }
     }
 

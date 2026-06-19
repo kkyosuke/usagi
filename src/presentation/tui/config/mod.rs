@@ -17,7 +17,7 @@ use console::Term;
 use crate::domain::settings::{LocalSettings, Settings, LOCAL_LLM_MODELS};
 use crate::infrastructure::git;
 use crate::infrastructure::storage::Storage;
-use crate::presentation::tui::screen::FramePainter;
+use crate::presentation::tui::install_task;
 use crate::presentation::tui::term_reader::TermKeyReader;
 use crate::usecase::doctor::SystemRunner;
 use crate::usecase::{local_llm, settings, workspace};
@@ -64,13 +64,11 @@ pub fn run_in(term: &Term, repo_root: Option<PathBuf>) -> Result<Outcome> {
         ),
     };
 
-    // Probe whether the `ollama` runtime is installed and which offered models
-    // are already pulled, so the Local LLM row opens as an "Install" action or
-    // an on/off toggle, and the model picker shows the right install markers.
-    // Only the global scope renders those rows (`LocalField::ALL` has no Local
-    // LLM field), so skip the `ollama` subprocess probes when editing a
-    // workspace's local overrides; the per-model probe also only runs once the
-    // runtime is present (each is an `ollama show`).
+    // Probe whether the local LLM runtime and selected model are already
+    // present, so the Local LLM row opens as an "Install" action or an on/off
+    // toggle accordingly. Only the global scope renders that row
+    // (`LocalField::ALL` has no Local LLM field), so skip the two `ollama`
+    // subprocess probes when editing a workspace's local overrides.
     if repo_root.is_none() {
         let runner = SystemRunner;
         if local_llm::ollama_installed(&runner) {
@@ -101,13 +99,14 @@ pub fn run_in(term: &Term, repo_root: Option<PathBuf>) -> Result<Outcome> {
         }
         Ok(())
     };
-    // Installing the `ollama` runtime and pulling a model both run on a
-    // background thread so the screen can animate a spinner while they proceed.
-    // The runtime install takes the sudo password from the modal to
-    // pre-authenticate its privileged steps; `ollama pull` is unprivileged.
-    let mut install_runtime =
-        |password: &str| -> Result<()> { run_install_with_spinner(term, password) };
-    let mut pull_model = |model: &str| -> Result<()> { run_pull_with_spinner(term, model) };
+    // Provisioning runs on a background thread and returns immediately, so the
+    // user can keep using usagi (and leave this screen) while it proceeds; the
+    // global install task surfaces a loading rabbit on every screen until it
+    // finishes. The Local LLM row installs just the `ollama` runtime (the sudo
+    // password from the modal pre-authenticates its privileged steps); the model
+    // picker pulls a chosen-but-unpulled model (unprivileged).
+    let mut install_runtime = |password: &str| -> Result<()> { start_install_runtime(password) };
+    let mut pull_model = |model: &str| -> Result<()> { start_pull_model(model) };
     event::event_loop(
         term,
         &mut reader,
@@ -119,65 +118,54 @@ pub fn run_in(term: &Term, repo_root: Option<PathBuf>) -> Result<Outcome> {
     )
 }
 
-/// Installs the `ollama` runtime on a background thread, animating the install
-/// spinner on the main thread until it finishes. The sudo password is forwarded
-/// to [`local_llm::ensure_runtime`] so the installer can elevate unattended.
-fn run_install_with_spinner(term: &Term, password: &str) -> Result<()> {
+/// Starts installing the `ollama` runtime on a background thread, recording its
+/// progress in the global [`install_task`] so every screen can show the loading
+/// rabbit and the completion message. Returns as soon as the worker is launched;
+/// the sudo password is forwarded to [`local_llm::ensure_runtime`] so the
+/// installer can elevate unattended, and it runs `quiet` so its raw output never
+/// paints over the TUI. Errors if an install is already in flight.
+fn start_install_runtime(password: &str) -> Result<()> {
+    let handle = install_task::handle();
+    if !handle.begin("ollama") {
+        return Err(anyhow::anyhow!("インストールは既に実行中です"));
+    }
     let password_owned = password.to_string();
-    run_with_spinner(term, "ollama", move || {
-        local_llm::ensure_runtime(std::env::consts::OS, &SystemRunner, Some(&password_owned))
-            .map(|_| ())
-            .map_err(|e| anyhow::anyhow!(install_error_message(&e)))
-    })
-}
-
-/// Pulls `model` into the installed runtime on a background thread, animating
-/// the spinner until the pull finishes. Backs the model picker's "install on
-/// select" path; no sudo is needed for [`local_llm::ensure_model`].
-fn run_pull_with_spinner(term: &Term, model: &str) -> Result<()> {
-    let model_owned = model.to_string();
-    run_with_spinner(term, model, move || {
-        local_llm::ensure_model(&SystemRunner, &model_owned)
-            .map(|_| ())
-            .map_err(|e| anyhow::anyhow!(install_error_message(&e)))
-    })
-}
-
-/// Runs `work` on a background thread, animating the install spinner labelled
-/// with `subject` on the main thread until it finishes. Shared by the runtime
-/// install and the model pull so both show the same progress modal.
-fn run_with_spinner(
-    term: &Term,
-    subject: &str,
-    work: impl FnOnce() -> Result<()> + Send + 'static,
-) -> Result<()> {
-    use std::sync::mpsc;
-    use std::time::Duration;
-
-    let (tx, rx) = mpsc::channel();
-    let worker = std::thread::spawn(move || {
-        // The receiver is only dropped once we have the result, so this send
-        // cannot fail in practice; ignore the error if it somehow does.
-        let _ = tx.send(work());
+    std::thread::spawn(move || {
+        let result = local_llm::ensure_runtime(
+            std::env::consts::OS,
+            &SystemRunner,
+            Some(&password_owned),
+            true,
+        );
+        let (ok, message) = match result {
+            Ok(_) => (true, "ollama を導入しました 🐰".to_string()),
+            Err(e) => (false, install_error_message(&e)),
+        };
+        handle.finish(ok, message);
     });
+    Ok(())
+}
 
-    let mut painter = FramePainter::new();
-    let mut tick = 0usize;
-    let result = loop {
-        let (height, width) = term.size();
-        let frame = ui::installing_frame(height as usize, width as usize, subject, tick);
-        let _ = painter.paint(term, frame);
-        // Poll for completion on a short cadence so the spinner keeps moving.
-        match rx.recv_timeout(Duration::from_millis(120)) {
-            Ok(result) => break result,
-            Err(mpsc::RecvTimeoutError::Timeout) => tick = tick.wrapping_add(1),
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                break Err(anyhow::anyhow!("install worker stopped unexpectedly"))
-            }
-        }
-    };
-    let _ = worker.join();
-    result
+/// Starts pulling `model` into the installed runtime on a background thread,
+/// recording progress in the global [`install_task`] like
+/// [`start_install_runtime`]. `ollama pull` needs no sudo; it runs `quiet` so
+/// its `pulling manifest …` output never paints over the TUI. Errors if an
+/// install is already in flight.
+fn start_pull_model(model: &str) -> Result<()> {
+    let handle = install_task::handle();
+    if !handle.begin(model) {
+        return Err(anyhow::anyhow!("インストールは既に実行中です"));
+    }
+    let model_owned = model.to_string();
+    std::thread::spawn(move || {
+        let result = local_llm::ensure_model(&SystemRunner, &model_owned, true);
+        let (ok, message) = match result {
+            Ok(_) => (true, format!("{model_owned} を導入しました 🐰")),
+            Err(e) => (false, install_error_message(&e)),
+        };
+        handle.finish(ok, message);
+    });
+    Ok(())
 }
 
 /// A short human message for a local LLM provisioning failure.

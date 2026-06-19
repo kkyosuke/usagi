@@ -18,7 +18,8 @@
 //! conversion directly testable: a test drives a [`vt100::Parser`] with bytes
 //! and asserts the resulting rows and cursor.
 
-use super::terminal_selection::Selection;
+use super::terminal_link;
+use super::terminal_selection::{Cell, Selection};
 
 /// An owned snapshot of an embedded terminal's visible screen.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -45,11 +46,16 @@ impl TerminalView {
     /// Cells within `selection` are drawn inverted (their `inverse` attribute is
     /// flipped), so a mouse drag over the pane shows what it has picked out — see
     /// [`terminal_selection`](super::terminal_selection).
+    ///
+    /// Cells that sit on an `http(s)` URL (see [`terminal_link::link_cells`]) are
+    /// drawn underlined in a light blue, marking them as clickable the way a
+    /// browser or an OSC 8 terminal does.
     pub fn from_screen_with_selection(
         screen: &vt100::Screen,
         selection: Option<&Selection>,
     ) -> Self {
         let (rows, cols) = screen.size();
+        let links = terminal_link::link_cells(screen);
         let mut out = Vec::with_capacity(rows as usize);
         for row in 0..rows {
             // At least one byte per column; escapes grow it from there. Sizing up
@@ -67,6 +73,13 @@ impl TerminalView {
                     continue;
                 }
                 let mut style = cell.map(CellStyle::of).unwrap_or_default();
+                // A cell on a URL is underlined and recoloured light blue, so the
+                // link reads as clickable. Applied before the selection flip so a
+                // drag still inverts (and stays visible) over a link.
+                if links.contains(&Cell::new(row, col)) {
+                    style.underline = true;
+                    style.fg = LINK_COLOR;
+                }
                 // A selected cell is inverted so the drag is visible; flipping
                 // (rather than forcing) keeps already-inverse text readable.
                 if selection.is_some_and(|s| s.contains(row, col)) {
@@ -117,6 +130,11 @@ impl TerminalView {
 
 /// The ANSI escape that clears all colours and attributes back to default.
 const SGR_RESET: &str = "\x1b[0m";
+
+/// The colour a link is drawn in — a light blue ("水色") which, together with an
+/// underline, marks a URL as clickable. A 24-bit RGB value so it reads the same
+/// regardless of the user's terminal palette.
+const LINK_COLOR: vt100::Color = vt100::Color::Rgb(102, 178, 255);
 
 /// The drawable style of one screen cell: its colours and text attributes,
 /// distilled from a [`vt100::Cell`] into something comparable and renderable.
@@ -243,6 +261,34 @@ mod tests {
         // Column 0 (selected) drops the inverse, so it renders plain (no escape);
         // column 1 keeps inverse (SGR 7), and the row resets at its end.
         assert_eq!(row, "A\x1b[0;7mB\x1b[0m");
+    }
+
+    #[test]
+    fn from_screen_underlines_and_recolours_a_link() {
+        // The URL cells are drawn underlined (SGR 4) in the light-blue link
+        // colour (RGB 102;178;255); the surrounding text stays plain.
+        let parser = parsed(1, 30, b"x https://example.com y");
+        let view = TerminalView::from_screen(parser.screen());
+        let row = &view.rows()[0];
+        assert!(row.contains("\x1b[0;4;38;2;102;178;255mhttps://example.com"));
+        // The leading "x " has no escape before it, and the link resets before
+        // the trailing " y" so the colour never bleeds onto it.
+        assert!(row.starts_with("x \x1b[0;4;38;2;102;178;255m"));
+        assert!(row.contains("\x1b[0m y"));
+    }
+
+    #[test]
+    fn from_screen_inverts_a_selected_link_on_top_of_its_style() {
+        // A drag over a link keeps the underline + link colour and adds the
+        // inverse (7) so the selection is still visible over it.
+        let parser = parsed(1, 20, b"https://x.io");
+        let mut sel = Selection::new(Cell::new(0, 0));
+        sel.extend(Cell::new(0, 0));
+        let view = TerminalView::from_screen_with_selection(parser.screen(), Some(&sel));
+        let row = &view.rows()[0];
+        // Column 0 ("h") is both a link cell and selected: underline + inverse +
+        // link colour.
+        assert!(row.starts_with("\x1b[0;4;7;38;2;102;178;255mh"));
     }
 
     #[test]

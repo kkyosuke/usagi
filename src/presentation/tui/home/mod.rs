@@ -208,6 +208,7 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
         &remove_root,
         name,
         force,
+        agent.as_ref(),
     ) {
         Ok(outcome) if outcome.removed => {
             // Kill any shell still running under the removed session so a session

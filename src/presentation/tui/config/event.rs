@@ -3,9 +3,10 @@ use console::Key;
 use console::Term;
 
 use crate::domain::settings::{LocalSettings, Settings};
-use crate::presentation::tui::screen::{FramePainter, KeyReader};
+use crate::presentation::tui::install_task::{self, InstallView};
+use crate::presentation::tui::screen::{animated_read, FramePainter, KeyReader};
 
-use super::state::Config;
+use super::state::{Config, PendingInstall};
 use super::ui;
 
 /// What the user chose to do on the configuration screen.
@@ -24,17 +25,19 @@ pub enum Outcome {
 /// disk: production wires it to the settings use case, tests pass a stub.
 pub type Save<'a> = dyn FnMut(&Settings, Option<&LocalSettings>) -> Result<()> + 'a;
 
-/// Provisions the `ollama` runtime, taking the sudo password entered in the
-/// install modal so the install can elevate non-interactively. Injected like
-/// [`Save`] so the event loop is testable without shelling out: production wires
-/// it to the `local_llm` use case (which runs the install on a background thread
-/// behind a spinner), tests pass a stub.
+/// Starts provisioning the `ollama` runtime in the background, taking the sudo
+/// password entered in the install modal so the install can elevate
+/// non-interactively. Returns as soon as the work is *launched* — the install
+/// then runs on its own thread while the user keeps using usagi, its progress
+/// surfaced everywhere by the global install overlay. Injected like [`Save`] so
+/// the event loop is testable without shelling out: production wires it to
+/// [`install_task`], tests pass a stub.
 pub type InstallRuntime<'a> = dyn FnMut(&str) -> Result<()> + 'a;
 
-/// Pulls a model into the installed runtime (the model-picker's "install on
-/// select" path). Injected like [`InstallRuntime`]; `ollama pull` is
-/// unprivileged, so it takes only the model name. Production runs it on a
-/// background thread behind the same spinner.
+/// Starts pulling a model into the installed runtime in the background (the
+/// model picker's "install on select" path). Like [`InstallRuntime`] it returns
+/// as soon as the pull is launched; `ollama pull` is unprivileged, so it takes
+/// only the model name.
 pub type PullModel<'a> = dyn FnMut(&str) -> Result<()> + 'a;
 
 /// Runs the configuration screen against the given terminal and key source
@@ -45,13 +48,10 @@ pub type PullModel<'a> = dyn FnMut(&str) -> Result<()> + 'a;
 /// row is flagged as changed but nothing touches disk. The edits are written
 /// only when the user moves to the Save button and presses Enter; a persistence
 /// failure is shown as a notice so the user is not left wondering whether the
-/// change took. The local LLM rows are the exception: while the runtime is
-/// missing the Local LLM row is an "Install" action — Space or Enter opens a
-/// modal that collects the sudo password, and confirming runs `install_runtime`
-/// (provisioning is an action, not a saved setting); the cursor then drops onto
-/// the model row. Once installed, the model row opens a picker (Space/Enter)
-/// listing the offered models with their install state; choosing an installed
-/// one adopts it, choosing an uninstalled one runs `pull_model` first.
+/// change took. The Local LLM row is the exception: while the runtime/model is
+/// missing it is an "Install" action — Space or Enter opens a modal that
+/// collects the sudo password, and confirming runs `install` (provisioning is
+/// an action, not a saved setting). The cursor then drops onto the model row.
 pub fn event_loop(
     term: &Term,
     reader: &mut dyn KeyReader,
@@ -65,11 +65,19 @@ pub fn event_loop(
     let mut painter = FramePainter::new();
 
     loop {
+        // When the background install finishes, flip the Local LLM row to its
+        // installed state and surface the outcome — picked up on the next loop
+        // pass (every key press), while the overlay shows it live in the corner.
+        // A completion message takes precedence over any standing notice.
+        notice = reflect_install(&mut config, install_task::snapshot().as_ref()).or(notice);
+
         let (height, width) = term.size();
         let frame = ui::render_frame(height as usize, width as usize, &config, notice.as_deref());
         painter.paint(term, frame)?;
 
-        let key = match reader.read_key() {
+        // While an install runs the read wakes periodically to animate the
+        // overlay; otherwise it blocks as usual.
+        let key = match animated_read(reader, term, &mut painter, &install_task::handle()) {
             Ok(key) => key,
             // An interrupted read (e.g. a delivered signal) means quit.
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => return Ok(Outcome::Quit),
@@ -83,9 +91,6 @@ pub fn event_loop(
             match key {
                 Key::Enter => {
                     notice = run_install(&mut config, install_runtime);
-                    // The install painted its own spinner frames over ours, so
-                    // forget the remembered frame and repaint the screen fully.
-                    painter.reset();
                 }
                 Key::Backspace => config.install_modal_backspace(),
                 Key::Del => config.install_modal_delete_forward(),
@@ -104,16 +109,14 @@ pub fn event_loop(
         }
 
         // The model picker likewise captures every key: ↑/↓ move the cursor,
-        // Enter adopts the highlighted model (pulling it first if it is not yet
-        // present), and Esc cancels.
+        // Enter adopts the highlighted model (starting a background pull first
+        // when it is not yet present), and Esc cancels.
         if config.model_modal().is_some() {
             match key {
                 Key::ArrowUp | Key::Char('k') => config.model_modal_up(),
                 Key::ArrowDown | Key::Char('j') => config.model_modal_down(),
                 Key::Enter => {
                     notice = run_model_select(&mut config, pull_model);
-                    // A pull paints its own spinner frames; repaint fully.
-                    painter.reset();
                 }
                 Key::Escape => config.close_model_modal(),
                 Key::CtrlC => return Ok(Outcome::Quit),
@@ -194,28 +197,28 @@ fn change_field(config: &mut Config, forward: bool) -> Option<String> {
     }
 }
 
-/// Runs the runtime install with the sudo password from the modal, closes the
-/// modal, and returns the notice to show. On success the Local LLM row flips
-/// from "Install" to an on/off toggle (now on) and the cursor drops onto the
-/// model row so a model can be chosen.
+/// Starts the background runtime install with the sudo password from the modal,
+/// closes the modal, and returns the notice to show. The install runs off-thread,
+/// so this only reports that it *began* and records [`PendingInstall::Runtime`];
+/// the Local LLM row flips to its installed state later, when the install
+/// completes (see [`reflect_install`]).
 fn run_install(config: &mut Config, install_runtime: &mut InstallRuntime) -> Option<String> {
     let password = config.install_modal_password().unwrap_or_default();
     let result = install_runtime(&password);
     config.close_install_modal();
     Some(match result {
         Ok(()) => {
-            config.mark_ollama_installed();
-            config.focus_model_row();
-            "Installed ollama 🐰".to_string()
+            config.set_pending_install(PendingInstall::Runtime);
+            "ランタイムのインストールを開始しました 🐰".to_string()
         }
         Err(e) => format!("Install failed: {e}"),
     })
 }
 
-/// Adopts the model highlighted in the picker, closes the modal, and returns
-/// the notice to show. An already-installed model is adopted directly; an
-/// uninstalled one is pulled first via `pull_model` (a failed pull leaves the
-/// model unchanged and is surfaced as a notice).
+/// Adopts the model highlighted in the picker and closes the modal. An
+/// already-installed model is adopted directly; an uninstalled one starts a
+/// background pull and records [`PendingInstall::Model`] so its completion is
+/// reflected (and the model adopted) when the pull finishes.
 fn run_model_select(config: &mut Config, pull_model: &mut PullModel) -> Option<String> {
     let model = config.model_modal_selection()?.to_string();
     if config.model_modal_selection_installed() {
@@ -227,11 +230,41 @@ fn run_model_select(config: &mut Config, pull_model: &mut PullModel) -> Option<S
     config.close_model_modal();
     Some(match result {
         Ok(()) => {
-            config.mark_model_installed(&model);
-            format!("Installed {model} 🐰")
+            config.set_pending_install(PendingInstall::Model(model.clone()));
+            format!("{model} のインストールを開始しました 🐰")
         }
         Err(e) => format!("Install failed: {e}"),
     })
+}
+
+/// Reflects a finished background install into the screen: when the install has
+/// completed successfully, flip the Local LLM row to its installed toggle and
+/// surface the completion message. Only the global scope carries that row (a
+/// workspace's local overrides do not), and the install may finish while the
+/// cursor is anywhere — so this guards on the scope and the not-yet-installed
+/// flag rather than on the focused row, and leaves the cursor where it is. A
+/// still-running install, a failure (whose message the overlay shows), or an
+/// already-reflected success returns `None`, so it is idempotent across the loop
+/// passes that call it.
+fn reflect_install(config: &mut Config, view: Option<&InstallView>) -> Option<String> {
+    if let Some(InstallView::Done { ok: true, message }) = view {
+        if config.local().is_none() {
+            if let Some(pending) = config.take_pending_install() {
+                match pending {
+                    // The runtime is now present: flip the Local LLM row to its
+                    // on/off toggle and drop the cursor onto the model row.
+                    PendingInstall::Runtime => {
+                        config.mark_ollama_installed();
+                        config.focus_model_row();
+                    }
+                    // The model was pulled: record it installed and adopt it.
+                    PendingInstall::Model(model) => config.mark_model_installed(&model),
+                }
+                return Some(message.clone());
+            }
+        }
+    }
+    None
 }
 
 /// Persists the edits when there are any, returning the notice to show: a
@@ -279,14 +312,21 @@ mod tests {
         Config::new(Settings::default(), vec!["alpha".to_string()])
     }
 
+    /// A config with the `ollama` runtime already installed, so the Local LLM
+    /// row is an on/off toggle and the model row opens the picker.
+    fn installed_config() -> Config {
+        let mut config = sample_config();
+        config.set_ollama_installed(true);
+        config
+    }
+
     /// A persistence stub that accepts every change (and is itself exercised by
     /// [`saving_succeeds_with_a_noop_save`]).
     fn noop_save(_: &Settings, _: Option<&LocalSettings>) -> Result<()> {
         Ok(())
     }
 
-    /// A runtime-install stub that succeeds without doing anything (its body is
-    /// exercised by the install tests below).
+    /// A runtime-install stub that succeeds without doing anything.
     fn ok_install(_: &str) -> Result<()> {
         Ok(())
     }
@@ -390,8 +430,6 @@ mod tests {
 
     #[test]
     fn the_save_button_persists_once_and_clears_the_dirty_state() {
-        // Edit the theme, save it, then press Save again with nothing pending:
-        // the second press finds no changes and does not persist again.
         let keys = vec![
             Ok(Key::ArrowRight), // System -> Light
             Ok(Key::ArrowUp),    // onto the Save button
@@ -414,7 +452,6 @@ mod tests {
 
     #[test]
     fn arrows_on_the_save_button_do_nothing() {
-        // ←/→ have no value to cycle on the Save button, so they are no-ops.
         let keys = vec![
             Ok(Key::ArrowUp), // onto the Save button
             Ok(Key::ArrowRight),
@@ -428,7 +465,6 @@ mod tests {
 
     #[test]
     fn cycling_default_workspace_persists_when_saved() {
-        // Move down to Default Workspace, cycle onto "alpha", then save.
         let keys = vec![
             Ok(Key::ArrowDown),  // Default Workspace
             Ok(Key::ArrowRight), // -> alpha
@@ -459,8 +495,6 @@ mod tests {
 
     #[test]
     fn a_save_failure_is_shown_as_a_notice_and_recovers() {
-        // The save fails to persist; the loop keeps running so the user can try
-        // again or leave.
         let term = Term::stdout();
         let mut reader = ScriptedReader::new(vec![
             Ok(Key::ArrowRight), // edit the theme so there is something to save
@@ -486,7 +520,6 @@ mod tests {
 
     #[test]
     fn saving_succeeds_with_a_noop_save() {
-        // Editing then saving persists via `noop_save`, exercising that stub.
         let term = Term::stdout();
         let mut reader = ScriptedReader::new(vec![
             Ok(Key::ArrowRight),
@@ -512,7 +545,6 @@ mod tests {
 
     #[test]
     fn initial_notice_is_displayed() {
-        // A load-error notice passed in is rendered on the first frame.
         let term = Term::stdout();
         let mut reader = ScriptedReader::new(vec![Ok(Key::Escape)]);
         let mut save: fn(&Settings, Option<&LocalSettings>) -> Result<()> = noop_save;
@@ -533,9 +565,6 @@ mod tests {
 
     #[test]
     fn saving_a_local_override_passes_it_to_save() {
-        // Open in the local scope, set a local agent-CLI override, then save: the
-        // local settings reach the save callback. The local scope shows only the
-        // three override rows, with Agent CLI selected from the start.
         let term = Term::stdout();
         let config = Config::workspace(Settings::default(), LocalSettings::default(), Vec::new());
         let keys = vec![
@@ -601,7 +630,7 @@ mod tests {
         assert!(err.to_string().contains("Failed to read key"));
     }
 
-    // --- local LLM install action -----------------------------------------
+    // --- local LLM runtime install + model picker -------------------------
 
     /// Drives the loop with recording install/pull stubs, returning the outcome,
     /// the sudo passwords passed to the runtime installer, and the models passed
@@ -657,12 +686,11 @@ mod tests {
         ]
     }
 
-    /// A config with the runtime already installed, so the Local LLM row is an
-    /// on/off toggle and the model row opens the picker.
-    fn installed_config() -> Config {
-        let mut config = sample_config();
-        config.set_ollama_installed(true);
-        config
+    /// Press ArrowDown to land on the Local LLM Model row.
+    fn keys_to_model_row() -> Vec<io::Result<Key>> {
+        let mut keys = keys_to_local_llm();
+        keys.push(Ok(Key::ArrowDown)); // Local LLM Model
+        keys
     }
 
     #[test]
@@ -680,7 +708,7 @@ mod tests {
             Ok(Key::ArrowLeft),  // caret before 'w'
             Ok(Key::ArrowRight), // caret after 'w' (end)
             Ok(Key::ArrowUp),    // ignored inside the modal
-            Ok(Key::Enter),      // confirm -> install
+            Ok(Key::Enter),      // confirm -> start runtime install
             Ok(Key::Escape),
         ]);
         let (outcome, passwords, pulled) =
@@ -750,23 +778,13 @@ mod tests {
         let mut keys = keys_to_local_llm();
         keys.extend([
             Ok(Key::Char(' ')),
-            Ok(Key::Enter), // confirm -> install fails
+            Ok(Key::Enter), // confirm -> install start fails
             Ok(Key::Escape),
         ]);
         let (outcome, passwords, _) =
             run_with_install(keys, sample_config(), failing_install, ok_pull);
-        // The loop keeps running (the user can retry or leave).
         assert!(matches!(outcome, Outcome::Back));
         assert_eq!(passwords, vec![String::new()]);
-    }
-
-    // --- local LLM model picker -------------------------------------------
-
-    /// Press ArrowDown to land on the Local LLM Model row.
-    fn keys_to_model_row() -> Vec<io::Result<Key>> {
-        let mut keys = keys_to_local_llm();
-        keys.push(Ok(Key::ArrowDown)); // Local LLM Model
-        keys
     }
 
     #[test]
@@ -775,7 +793,7 @@ mod tests {
         keys.extend([
             Ok(Key::Enter),     // open the picker (model row focused)
             Ok(Key::ArrowDown), // onto "qwen2.5-coder:3b" (not pulled)
-            Ok(Key::Enter),     // confirm -> pull then adopt
+            Ok(Key::Enter),     // confirm -> start background pull
             Ok(Key::Escape),
         ]);
         let (outcome, passwords, pulled) =
@@ -834,7 +852,7 @@ mod tests {
         keys.extend([
             Ok(Key::Enter),     // open the picker
             Ok(Key::ArrowDown), // onto an unpulled model
-            Ok(Key::Enter),     // confirm -> pull fails
+            Ok(Key::Enter),     // confirm -> pull start fails
             Ok(Key::Escape),
         ]);
         let (outcome, _, pulled) =
@@ -846,23 +864,116 @@ mod tests {
     #[test]
     fn the_model_row_is_inert_before_the_runtime_is_installed() {
         // Without the runtime installed the model row neither cycles nor opens a
-        // picker, so Enter/Space/arrows pull nothing.
+        // picker, so Enter/Space pull nothing.
         let mut keys = keys_to_model_row();
-        keys.extend([
-            Ok(Key::Enter),
-            Ok(Key::Char(' ')),
-            Ok(Key::ArrowRight),
-            Ok(Key::Escape),
-        ]);
+        keys.extend([Ok(Key::Enter), Ok(Key::Char(' ')), Ok(Key::Escape)]);
         let (outcome, _, pulled) = run_with_install(keys, sample_config(), ok_install, ok_pull);
         assert!(matches!(outcome, Outcome::Back));
         assert!(pulled.is_empty());
     }
 
     #[test]
+    fn arrows_on_the_active_model_row_are_a_noop() {
+        // With the runtime installed the model row opens a picker, so ←/→ have
+        // nothing to cycle and surface no hint.
+        let mut keys = keys_to_model_row();
+        keys.extend([Ok(Key::ArrowRight), Ok(Key::ArrowLeft), Ok(Key::Escape)]);
+        let (outcome, _, pulled) = run_with_install(keys, installed_config(), ok_install, ok_pull);
+        assert!(matches!(outcome, Outcome::Back));
+        assert!(pulled.is_empty());
+    }
+
+    #[test]
+    fn run_model_select_is_a_noop_without_an_open_picker() {
+        // Defensive: with no picker open there is no selection, so it does
+        // nothing and pulls nothing.
+        let mut config = installed_config();
+        let mut pull: fn(&str) -> Result<()> = ok_pull;
+        assert_eq!(run_model_select(&mut config, &mut pull), None);
+    }
+
+    // --- reflecting a finished background install -------------------------
+
+    #[test]
+    fn reflect_install_flips_the_runtime_row_and_focuses_the_model_row() {
+        // A finished runtime install flips the Local LLM row to installed and
+        // drops the cursor onto the model row.
+        let mut config = sample_config();
+        config.set_pending_install(PendingInstall::Runtime);
+        assert!(!config.ollama_installed());
+        let view = InstallView::Done {
+            ok: true,
+            message: "ollama を導入しました 🐰".to_string(),
+        };
+        let note = reflect_install(&mut config, Some(&view));
+        assert_eq!(note.as_deref(), Some("ollama を導入しました 🐰"));
+        assert!(config.ollama_installed());
+        assert_eq!(
+            config.selected_field(),
+            Some(super::super::state::Field::LocalLlmModel)
+        );
+    }
+
+    #[test]
+    fn reflect_install_records_a_pulled_model() {
+        // A finished model pull records the model installed and adopts it.
+        let mut config = installed_config();
+        config.set_pending_install(PendingInstall::Model("qwen2.5-coder:3b".to_string()));
+        let view = InstallView::Done {
+            ok: true,
+            message: "qwen2.5-coder:3b を導入しました 🐰".to_string(),
+        };
+        let note = reflect_install(&mut config, Some(&view));
+        assert_eq!(note.as_deref(), Some("qwen2.5-coder:3b を導入しました 🐰"));
+        assert_eq!(config.local_llm_model(), "qwen2.5-coder:3b");
+    }
+
+    #[test]
+    fn reflect_install_is_idempotent_and_ignores_non_success() {
+        // With nothing pending a success view has nothing to apply.
+        let mut config = sample_config();
+        let done = InstallView::Done {
+            ok: true,
+            message: "x".to_string(),
+        };
+        assert_eq!(reflect_install(&mut config, Some(&done)), None);
+
+        // Running, failed, and absent views never apply (a failure is shown by
+        // the overlay instead), even with a pending install.
+        let mut fresh = sample_config();
+        fresh.set_pending_install(PendingInstall::Runtime);
+        let running = InstallView::Running {
+            label: "l".to_string(),
+            hop_frame: 0,
+            face_index: 0,
+        };
+        assert_eq!(reflect_install(&mut fresh, Some(&running)), None);
+        let failed = InstallView::Done {
+            ok: false,
+            message: "x".to_string(),
+        };
+        assert_eq!(reflect_install(&mut fresh, Some(&failed)), None);
+        assert_eq!(reflect_install(&mut fresh, None), None);
+        assert!(!fresh.ollama_installed());
+    }
+
+    #[test]
+    fn reflect_install_skips_the_workspace_scope() {
+        // A workspace-scoped config has no Local LLM row, so a completed install
+        // never applies there.
+        let mut workspace =
+            Config::workspace(Settings::default(), LocalSettings::default(), Vec::new());
+        let done = InstallView::Done {
+            ok: true,
+            message: "x".to_string(),
+        };
+        assert_eq!(reflect_install(&mut workspace, Some(&done)), None);
+    }
+
+    #[test]
     fn toggling_the_local_llm_after_install_persists_the_enabled_flag() {
-        // Pretend the runtime is already installed, so the row is an on/off
-        // toggle. Down onto it, → toggles On, then save persists enabled = true.
+        // The runtime is already installed, so the row is an on/off toggle.
+        // Down onto it, → toggles On, then save persists enabled = true.
         let config = installed_config();
         let keys = vec![
             Ok(Key::ArrowDown),  // Default Workspace

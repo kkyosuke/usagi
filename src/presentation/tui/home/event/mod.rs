@@ -13,7 +13,8 @@ use console::Key;
 use console::Term;
 
 use crate::domain::settings::SessionActionUi;
-use crate::presentation::tui::screen::{FramePainter, KeyReader};
+use crate::presentation::tui::install_task;
+use crate::presentation::tui::screen::{animated_read, FramePainter, KeyReader};
 
 use super::state::{HomeState, Mode, PaneExit, SessionOutcome};
 use super::terminal_pool::MonitorHandle;
@@ -178,7 +179,7 @@ pub fn event_loop(
         // (it is swallowed by the reader before it can reach the host terminal's
         // viewport and reveal the pre-launch scrollback). The embedded terminal
         // pane has its own history scroll, handled separately.
-        let key = match reader.read_key() {
+        let key = match animated_read(reader, term, &mut painter, &install_task::handle()) {
             Ok(key) => key,
             // An interrupted read (e.g. a delivered signal) means quit.
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => return Ok(Outcome::Quit),

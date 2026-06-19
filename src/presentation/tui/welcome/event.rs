@@ -3,7 +3,8 @@ use std::io;
 use anyhow::Result;
 use console::Term;
 
-use crate::presentation::tui::screen::{FramePainter, KeyReader};
+use crate::presentation::tui::install_task;
+use crate::presentation::tui::screen::{animated_read, FramePainter, KeyReader};
 
 use super::menu::{Action, Menu};
 use super::ui;
@@ -51,7 +52,7 @@ pub fn event_loop(
         );
         painter.paint(term, frame)?;
 
-        match reader.read_key() {
+        match animated_read(reader, term, &mut painter, &install_task::handle()) {
             Ok(key) => match menu.handle_key(key) {
                 Action::Continue => {}
                 Action::OpenOpen => return Ok(Outcome::OpenProjects),

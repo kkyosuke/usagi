@@ -4,6 +4,7 @@ pub mod clipboard;
 pub mod config;
 pub mod echo;
 pub mod home;
+pub mod install_task;
 pub mod new;
 pub mod open;
 pub mod screen;

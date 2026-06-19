@@ -10,11 +10,11 @@ const SAVE_LABEL: &str = "[ Save ]";
 /// Fixed width of the settings block; the whole block is centred in the terminal.
 const BLOCK_WIDTH: usize = 52;
 
-/// Inner width of the local-LLM install / progress modal box.
-const MODAL_INNER_WIDTH: usize = 40;
-
-/// The spinner frames cycled through while the install runs in the background.
-const SPINNER: [&str; 4] = ["⠋", "⠙", "⠹", "⠸"];
+/// Inner width of the local-LLM install / progress modal box. Wide enough for
+/// the longest body line ("ローカル LLM (ollama) をインストールします" = 42
+/// columns) so it fits without truncation; `render_modal` still clamps this to
+/// the terminal and clips any line that overruns it on a narrow screen.
+const MODAL_INNER_WIDTH: usize = 42;
 
 /// Builds the centred mascot, title, and subtitle block.
 ///
@@ -174,10 +174,10 @@ fn footer_lines(width: usize) -> Vec<String> {
 /// separately afterwards via the picker, so it is not mentioned here.
 fn install_modal_frame(raw_height: usize, raw_width: usize, modal: &InstallModal) -> Vec<String> {
     let body = vec![
-        "ローカル LLM ランタイム (ollama) をインストールします".to_string(),
+        "ローカル LLM ランタイムをインストール".to_string(),
         String::new(),
-        "ランタイム導入には sudo 権限が必要です".to_string(),
-        "（導入後にモデルを選んで取得します）".to_string(),
+        "導入には sudo 権限が必要です".to_string(),
+        "（モデルは導入後に選んで取得します）".to_string(),
         String::new(),
         format!("sudo パスワード: {}", modal.masked()),
         String::new(),
@@ -188,7 +188,7 @@ fn install_modal_frame(raw_height: usize, raw_width: usize, modal: &InstallModal
 
 /// Builds the model-selection modal: each offered model with an install marker
 /// (✓ pulled, ⬇ not yet), the cursor row highlighted. Picking an unpulled model
-/// pulls it; picking a pulled one adopts it.
+/// starts a background pull; picking a pulled one adopts it.
 fn model_modal_frame(raw_height: usize, raw_width: usize, modal: &ModelModal) -> Vec<String> {
     let mut body = vec!["使用するモデルを選択".to_string(), String::new()];
     for row in modal.rows() {
@@ -206,11 +206,7 @@ fn model_modal_frame(raw_height: usize, raw_width: usize, modal: &ModelModal) ->
         });
     }
     body.push(String::new());
-    body.push(
-        style("↑↓: 選択   Enter: 決定 (未導入は取得)   Esc: キャンセル")
-            .dim()
-            .to_string(),
-    );
+    body.push(style("↑↓ 選択  Enter 決定  Esc 取消").dim().to_string());
     widgets::render_modal(
         raw_height,
         raw_width,
@@ -218,24 +214,6 @@ fn model_modal_frame(raw_height: usize, raw_width: usize, modal: &ModelModal) ->
         MODAL_INNER_WIDTH,
         &body,
     )
-}
-
-/// Builds the install progress modal shown while provisioning runs in the
-/// background: a spinner (advanced by `tick`) plus the `subject` being installed
-/// (the runtime name, or a model being pulled).
-pub(super) fn installing_frame(
-    raw_height: usize,
-    raw_width: usize,
-    subject: &str,
-    tick: usize,
-) -> Vec<String> {
-    let spinner = SPINNER[tick % SPINNER.len()];
-    let body = vec![
-        format!("{spinner} インストール中…"),
-        String::new(),
-        subject.to_string(),
-    ];
-    widgets::render_modal(raw_height, raw_width, "Local LLM", MODAL_INNER_WIDTH, &body)
 }
 
 /// Builds the full configuration frame for a raw terminal size.
@@ -549,20 +527,5 @@ mod tests {
         assert!(joined.contains("未導入"));
         // The picker replaces the settings list.
         assert!(!joined.contains("Save"));
-    }
-
-    #[test]
-    fn installing_frame_shows_a_spinner_and_the_model() {
-        let first = installing_frame(24, 80, "qwen2.5-coder:7b", 0).join("\n");
-        assert!(first.contains("qwen2.5-coder:7b"));
-        assert!(first.contains("インストール中"));
-        assert!(first.contains(SPINNER[0]));
-        // Advancing the tick advances the spinner frame, and it wraps around.
-        assert!(installing_frame(24, 80, "m", 1)
-            .join("\n")
-            .contains(SPINNER[1]));
-        assert!(installing_frame(24, 80, "m", SPINNER.len())
-            .join("\n")
-            .contains(SPINNER[0]));
     }
 }

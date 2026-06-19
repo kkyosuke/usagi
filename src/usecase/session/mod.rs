@@ -31,9 +31,10 @@ use std::path::{Path, PathBuf};
 use anyhow::{anyhow, bail, Context, Result};
 use chrono::Utc;
 
+use crate::domain::agent::Agent;
 use crate::domain::workspace_state::SessionRecord;
-use crate::infrastructure::git;
 use crate::infrastructure::workspace_store::WorkspaceStore;
+use crate::infrastructure::{agent_state_store, git};
 use crate::usecase::workspace_state;
 
 /// The outcome of creating a session.
@@ -210,13 +211,24 @@ pub struct RemovalOutcome {
 }
 
 /// Remove session `name` under `workspace_root`: delete every repository's
-/// worktree and session branch, drop any copied files, and forget it in
-/// `state.json`.
+/// worktree and session branch, drop any copied files, clear each worktree's
+/// agent chat history and running-state, and forget it in `state.json`.
+///
+/// `agent` is the session's configured agent CLI: its persisted conversation for
+/// each worktree (e.g. Claude's transcript directory) is discarded so the chat
+/// history does not outlive the session, and a session recreated at the same
+/// path later starts fresh. usagi's own per-worktree agent phase
+/// ([`agent_state_store`]) is cleared too.
 ///
 /// Without `force`, a session whose worktrees have uncommitted changes is left
 /// untouched and the dirty worktrees are returned for the caller to warn about.
 /// With `force`, those changes are discarded.
-pub fn remove(workspace_root: &Path, name: &str, force: bool) -> Result<RemovalOutcome> {
+pub fn remove(
+    workspace_root: &Path,
+    name: &str,
+    force: bool,
+    agent: &dyn Agent,
+) -> Result<RemovalOutcome> {
     // Sync the on-disk tree with the recorded sessions: any session directory
     // `state.json` does not know about is force-removed regardless of
     // uncommitted changes (the recorded `name` itself keeps its dirty guard).
@@ -247,8 +259,15 @@ pub fn remove(workspace_root: &Path, name: &str, force: bool) -> Result<RemovalO
         });
     }
 
-    // Remove each repository's worktree and its now-orphaned session branch.
+    // Remove each repository's worktree and its now-orphaned session branch, and
+    // clear the chat history and running-state usagi keeps for that worktree so
+    // nothing outlives the session (a path reused later starts clean). The chat
+    // history / phase are cleared *before* the worktree directory is removed, so
+    // the canonicalized worktree path still resolves to the key the running agent
+    // recorded under.
     for wt in &session.worktrees {
+        agent.forget_session(&wt.path);
+        agent_state_store::clear(&wt.path);
         let source = git::primary_worktree(&wt.path)?;
         git::remove_worktree(&source, &wt.path, force)?;
         // The branch may already be gone (e.g. a partial earlier removal).
@@ -725,17 +744,24 @@ mod tests {
             .unwrap_or_default()
     }
 
+    /// A throwaway agent for the `remove` tests. Gemini keeps no conversation
+    /// store, so its `forget_session` is a no-op — removal touches no real files
+    /// outside the workspace.
+    fn noop_agent() -> std::sync::Arc<dyn crate::domain::agent::Agent> {
+        crate::infrastructure::agent::agent_for(crate::domain::settings::AgentCli::Gemini)
+    }
+
     #[test]
     fn remove_errors_without_state_or_session() {
         let root = tempfile::tempdir().unwrap();
         init_repo(root.path());
         // No state.json yet.
-        let err = remove(root.path(), "x", false).unwrap_err();
+        let err = remove(root.path(), "x", false, noop_agent().as_ref()).unwrap_err();
         assert!(err.to_string().contains("no sessions recorded"));
 
         // State exists but the named session does not.
         create(root.path(), "present").unwrap();
-        let err = remove(root.path(), "absent", false).unwrap_err();
+        let err = remove(root.path(), "absent", false, noop_agent().as_ref()).unwrap_err();
         assert!(err.to_string().contains("no such session"));
     }
 
@@ -746,7 +772,7 @@ mod tests {
         let created = create(root.path(), "feature").unwrap();
         assert!(created.root.exists());
 
-        let outcome = remove(root.path(), "feature", false).unwrap();
+        let outcome = remove(root.path(), "feature", false, noop_agent().as_ref()).unwrap();
         assert!(outcome.removed);
         assert!(outcome.dirty.is_empty());
         // The worktree directory and the state record are both gone.
@@ -769,7 +795,7 @@ mod tests {
         let created = create(root.path(), "wip").unwrap();
         assert!(created.root.join("README.md").exists());
 
-        let outcome = remove(root.path(), "wip", false).unwrap();
+        let outcome = remove(root.path(), "wip", false, noop_agent().as_ref()).unwrap();
         assert!(outcome.removed);
         // The whole session tree (worktrees + copied files) is gone.
         assert!(!created.root.exists());
@@ -785,17 +811,45 @@ mod tests {
         fs::write(created.root.join("scratch.txt"), "wip").unwrap();
 
         // Without force: blocked, nothing removed, the dirty worktree reported.
-        let outcome = remove(root.path(), "dirty", false).unwrap();
+        let outcome = remove(root.path(), "dirty", false, noop_agent().as_ref()).unwrap();
         assert!(!outcome.removed);
         assert_eq!(outcome.dirty, vec![created.root.clone()]);
         assert!(created.root.exists());
         assert_eq!(sessions_of(root.path()), vec!["dirty".to_string()]);
 
         // With force: removed despite the changes.
-        let outcome = remove(root.path(), "dirty", true).unwrap();
+        let outcome = remove(root.path(), "dirty", true, noop_agent().as_ref()).unwrap();
         assert!(outcome.removed);
         assert!(!created.root.exists());
         assert!(sessions_of(root.path()).is_empty());
+    }
+
+    #[test]
+    fn remove_clears_the_recorded_agent_phase() {
+        // Point the data dir at a throwaway home so the phase file is isolated.
+        let _guard = crate::test_support::process_env_guard();
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var(crate::infrastructure::storage::DATA_DIR_ENV, home.path());
+
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        let created = create(root.path(), "feature").unwrap();
+        // Record a phase for the session's worktree, as the running agent's hooks
+        // would, then confirm it landed.
+        crate::infrastructure::agent_state_store::write(
+            &created.root,
+            crate::domain::agent_phase::AgentPhase::Waiting,
+        )
+        .unwrap();
+        let state_dir = home.path().join("agent-state");
+        assert_eq!(fs::read_dir(&state_dir).unwrap().count(), 1);
+
+        // Removing the session clears the recorded phase along with it.
+        let outcome = remove(root.path(), "feature", false, noop_agent().as_ref()).unwrap();
+        assert!(outcome.removed);
+        assert_eq!(fs::read_dir(&state_dir).unwrap().count(), 0);
+
+        std::env::remove_var(crate::infrastructure::storage::DATA_DIR_ENV);
     }
 
     /// Forget session `name` in `state.json` while leaving its on-disk directory
@@ -933,7 +987,7 @@ mod tests {
         // "b" becomes a stray; removing "a" should sync it away as well.
         drop_record(root.path(), "b");
 
-        let outcome = remove(root.path(), "a", false).unwrap();
+        let outcome = remove(root.path(), "a", false, noop_agent().as_ref()).unwrap();
 
         assert!(outcome.removed);
         assert!(!a.root.exists());

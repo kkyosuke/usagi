@@ -1,4 +1,5 @@
 use std::io;
+use std::time::Duration;
 
 use console::{Key, Term};
 
@@ -42,6 +43,24 @@ impl KeyReader for TermKeyReader {
         // The screens that do not scroll a pane just want the next key, so drop
         // any wheel turns along the way.
         key_from_inputs(|| self.read_input())
+    }
+
+    fn read_key_timeout(&mut self, timeout: Duration) -> io::Result<Option<Key>> {
+        // `console` only offers a blocking read, so use crossterm's `poll` —
+        // which the embedded terminal pane already relies on — to wait at most
+        // `timeout` for input to be *ready* without consuming it. This adds no
+        // background thread (one would outlive its screen and steal the next
+        // screen's input, or fight the embedded pane for stdin), so reads stay
+        // strictly sequential. When input is ready we decode it with `console`
+        // exactly as a blocking read would; a wheel turn or other mouse report
+        // drains to a tick (`None`) so the caller just repaints and polls again.
+        if !crossterm::event::poll(timeout)? {
+            return Ok(None);
+        }
+        match self.read_input()? {
+            Input::Key(key) => Ok(Some(key)),
+            Input::Scroll(_) => Ok(None),
+        }
     }
 }
 

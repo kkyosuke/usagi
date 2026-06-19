@@ -1,5 +1,5 @@
 ---
-number: 39
+number: 53
 title: ターミナル画面でテキストをコピーできるようにする
 status: done
 priority: high
