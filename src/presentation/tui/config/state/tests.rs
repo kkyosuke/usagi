@@ -1,4 +1,3 @@
-use super::cycling::cycle_str;
 use super::*;
 
 fn config_with_workspaces(names: &[&str]) -> Config {
@@ -297,11 +296,14 @@ fn rows_render_global_field_values() {
     assert_eq!(rows[3].value, "Claude");
     assert_eq!(rows[4].label, "Session Action UI");
     assert_eq!(rows[4].value, "Menu");
-    // The local LLM is off and not yet installed: the row offers "Install".
+    // The runtime is not yet installed: the Local LLM row offers "Install" and
+    // the model row is inert (shown as "—") until the runtime is present.
     assert_eq!(rows[5].label, "Local LLM");
     assert_eq!(rows[5].value, "Install");
+    assert!(rows[5].action);
     assert_eq!(rows[6].label, "Local LLM Model");
-    assert_eq!(rows[6].value, "qwen2.5-coder:7b");
+    assert_eq!(rows[6].value, "—");
+    assert!(rows[6].disabled);
     assert!(rows.iter().all(|r| !r.changed));
 }
 
@@ -325,9 +327,9 @@ fn select_local_llm_model(config: &mut Config) {
 fn local_llm_row_shows_install_until_installed_then_a_toggle() {
     let mut config = config_with_workspaces(&[]);
     select_local_llm(&mut config);
-    // Not installed yet: the row is an install action that opens the modal,
-    // and the rows() flag marks it as an action button.
-    assert!(!config.local_llm_installed());
+    // The runtime is not installed yet: the row is an install action that opens
+    // the modal, and the rows() flag marks it as an action button.
+    assert!(!config.ollama_installed());
     assert_eq!(config.value_of(Field::LocalLlm), "Install");
     assert!(config.local_llm_needs_install());
     assert!(
@@ -340,9 +342,9 @@ fn local_llm_row_shows_install_until_installed_then_a_toggle() {
     // Cycling does nothing while uninstalled (activation opens the modal).
     assert!(!config.cycle_selected(true));
 
-    // Once installed it turns on and becomes an on/off toggle.
-    config.mark_local_llm_installed();
-    assert!(config.local_llm_installed());
+    // Once the runtime is installed it turns on and becomes an on/off toggle.
+    config.mark_ollama_installed();
+    assert!(config.ollama_installed());
     assert_eq!(config.value_of(Field::LocalLlm), "On");
     assert!(config.settings().local_llm.enabled);
     assert!(config.is_changed(Field::LocalLlm));
@@ -369,34 +371,38 @@ fn install_modal_collects_a_masked_password_and_focuses_the_model_row() {
     config.open_install_modal();
     let modal = config.install_modal().expect("modal opened");
     assert_eq!(modal.password(), "");
-    // Empty: the masked string is just the caret.
-    assert_eq!(modal.masked("|"), "|");
+    // Empty: the masked string is just the block caret — a single (reversed) cell.
+    // Strip styling so the assertion holds whether or not colours are enabled.
+    let masked = |config: &Config| {
+        console::strip_ansi_codes(&config.install_modal().unwrap().masked()).into_owned()
+    };
+    assert_eq!(console::strip_ansi_codes(&modal.masked()).into_owned(), " ");
 
-    // Typing builds the password; it renders only as bullets, with the caret at
-    // the end while typing.
+    // Typing builds the password; it renders only as bullets, with the block
+    // caret as a trailing cell while typing at the end.
     config.install_modal_push('p');
     config.install_modal_push('w');
     config.install_modal_backspace();
     config.install_modal_push('z');
     assert_eq!(config.install_modal_password().as_deref(), Some("pz"));
-    assert_eq!(config.install_modal().unwrap().masked("|"), "••|");
+    assert_eq!(masked(&config), "•• ");
 
     // The caret can move into the middle and edit there: Home then Del removes
     // the first character, so "pz" becomes "z".
     config.install_modal_cursor_home();
     config.install_modal_delete_forward();
     assert_eq!(config.install_modal_password().as_deref(), Some("z"));
-    // The caret now sits before the remaining bullet.
-    assert_eq!(config.install_modal().unwrap().masked("|"), "|•");
-    // End parks it after the bullet again; ←/→ step over the single character.
+    // The caret now sits on the remaining bullet (no trailing cell).
+    assert_eq!(masked(&config), "•");
+    // End parks it past the bullet again; ←/→ step over the single character.
     config.install_modal_cursor_end();
     config.install_modal_cursor_left();
     config.install_modal_cursor_right();
-    assert_eq!(config.install_modal().unwrap().masked("|"), "•|");
+    assert_eq!(masked(&config), "• ");
 
-    // Finishing the install closes the modal, marks it installed, and drops
-    // the cursor onto the model row so a model can be chosen.
-    config.mark_local_llm_installed();
+    // Finishing the install closes the modal, marks the runtime installed, and
+    // drops the cursor onto the model row so a model can be chosen.
+    config.mark_ollama_installed();
     config.focus_model_row();
     config.close_install_modal();
     assert!(config.install_modal().is_none());
@@ -413,35 +419,114 @@ fn install_modal_collects_a_masked_password_and_focuses_the_model_row() {
 }
 
 #[test]
-fn local_llm_model_row_cycles_and_requires_reinstall() {
+fn model_row_is_inert_until_the_runtime_is_installed() {
     let mut config = config_with_workspaces(&[]);
-    config.mark_local_llm_installed(); // pretend the default model is present
     select_local_llm_model(&mut config);
-    assert_eq!(config.local_llm_model(), "qwen2.5-coder:7b");
-    // The model row is a chooser, not an install action.
-    assert!(!config.local_llm_needs_install());
-    // Arrows cycle the model and reset the installed flag (the new model may
-    // not be pulled), so the Local LLM row reverts to "Install".
-    assert!(config.cycle_selected(true));
-    assert_eq!(config.local_llm_model(), "qwen2.5-coder:3b");
-    assert!(!config.local_llm_installed());
-    assert!(config.is_changed(Field::LocalLlmModel));
-    // Cycling backward wraps to the last model.
+    // Before the runtime is present the row is disabled: it neither opens the
+    // picker nor cycles a value.
+    assert!(!config.model_row_active());
+    config.open_model_modal();
+    assert!(config.model_modal().is_none());
+    assert!(!config.cycle_selected(true));
+
+    // Once the runtime is installed the row becomes active (it opens the picker).
+    config.mark_ollama_installed();
     select_local_llm_model(&mut config);
-    assert!(config.cycle_selected(false));
-    assert_eq!(config.local_llm_model(), "qwen2.5-coder:7b");
-    assert!(config.cycle_selected(false));
-    assert_eq!(config.local_llm_model(), "qwen2.5:7b");
+    assert!(config.model_row_active());
+    // It is an action row (opens the modal), never a value chooser.
+    assert!(!config.cycle_selected(true));
+    let model_row = &config.rows()[Field::ALL
+        .iter()
+        .position(|f| *f == Field::LocalLlmModel)
+        .unwrap()];
+    assert!(model_row.action);
+    assert!(!model_row.disabled);
 }
 
 #[test]
-fn cycle_str_starts_from_the_first_choice_for_an_unknown_value() {
-    // A model no longer offered behaves like index 0, so forward lands on
-    // the second choice.
+fn model_modal_lists_models_with_install_state_and_navigates() {
+    let mut config = config_with_workspaces(&[]);
+    config.mark_ollama_installed();
+    config.set_installed_models(vec!["qwen2.5-coder:7b".to_string()]);
+    select_local_llm_model(&mut config);
+    config.open_model_modal();
+    let modal = config.model_modal().expect("modal opened");
+
+    // The rows mirror the offered models; only the pulled one is marked
+    // installed, and the cursor starts on the model in use.
+    let rows = modal.rows();
+    assert_eq!(rows.len(), LOCAL_LLM_MODELS.len());
+    assert_eq!(rows[0].model, "qwen2.5-coder:7b");
+    assert!(rows[0].installed);
+    assert!(rows[0].selected);
+    assert!(rows[1..].iter().all(|r| !r.installed));
+
+    // ↓ moves onto an uninstalled model; the selection reports as such.
+    config.model_modal_down();
+    assert_eq!(config.model_modal_selection(), Some("qwen2.5-coder:3b"));
+    assert!(!config.model_modal_selection_installed());
+    // ↑ wraps back to the installed model.
+    config.model_modal_up();
+    assert_eq!(config.model_modal_selection(), Some("qwen2.5-coder:7b"));
+    assert!(config.model_modal_selection_installed());
+}
+
+#[test]
+fn selecting_an_installed_model_adopts_it() {
+    let mut config = config_with_workspaces(&[]);
+    config.mark_ollama_installed();
+    config.set_installed_models(vec![
+        "qwen2.5-coder:7b".to_string(),
+        "qwen2.5:7b".to_string(),
+    ]);
+    select_local_llm_model(&mut config);
+    config.open_model_modal();
+    // Walk down to the already-installed "qwen2.5:7b" (index 3) and adopt it.
+    config.model_modal_down();
+    config.model_modal_down();
+    config.model_modal_down();
+    assert_eq!(config.model_modal_selection(), Some("qwen2.5:7b"));
+    assert!(config.model_modal_selection_installed());
+    config.select_model("qwen2.5:7b");
+    config.close_model_modal();
+    assert!(config.model_modal().is_none());
+    assert_eq!(config.local_llm_model(), "qwen2.5:7b");
+    assert!(config.is_changed(Field::LocalLlmModel));
+}
+
+#[test]
+fn pulling_an_uninstalled_model_marks_it_installed_and_adopts_it() {
+    let mut config = config_with_workspaces(&[]);
+    config.mark_ollama_installed();
+    select_local_llm_model(&mut config);
+    config.open_model_modal();
+    config.model_modal_down(); // onto "qwen2.5-coder:3b" (not pulled)
+    assert!(!config.model_modal_selection_installed());
+
+    // Pulling records the model as installed and adopts it as the one in use.
+    config.mark_model_installed("qwen2.5-coder:3b");
+    config.close_model_modal();
+    assert_eq!(config.local_llm_model(), "qwen2.5-coder:3b");
+    // Reopening shows it now flagged as installed.
+    select_local_llm_model(&mut config);
+    config.open_model_modal();
+    let rows = config.model_modal().unwrap().rows();
+    assert!(rows[1].installed);
+    assert_eq!(config.value_of(Field::LocalLlmModel), "qwen2.5-coder:3b");
+}
+
+#[test]
+fn model_row_shows_an_undownloaded_marker_for_an_unpulled_model() {
+    let mut config = config_with_workspaces(&[]);
+    config.mark_ollama_installed();
+    // No models pulled yet: the model in use is shown with the 未導入 marker.
     assert_eq!(
-        cycle_str("ghost-model", &LOCAL_LLM_MODELS, true),
-        LOCAL_LLM_MODELS[1]
+        config.value_of(Field::LocalLlmModel),
+        "qwen2.5-coder:7b (未導入)"
     );
+    // Once pulled the marker drops.
+    config.set_installed_models(vec!["qwen2.5-coder:7b".to_string()]);
+    assert_eq!(config.value_of(Field::LocalLlmModel), "qwen2.5-coder:7b");
 }
 
 // --- local overrides ---------------------------------------------------

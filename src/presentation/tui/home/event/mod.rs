@@ -17,6 +17,7 @@ use crate::presentation::tui::screen::{FramePainter, KeyReader};
 
 use super::state::{HomeState, Mode, PaneExit, SessionOutcome};
 use super::terminal_pool::MonitorHandle;
+use super::terminal_tabs::TabNav;
 use super::terminal_view::TerminalView;
 use super::ui;
 use super::update::UpdateHandle;
@@ -30,6 +31,24 @@ use handlers::{focus_key, overview_key, switch_key};
 /// keys and passes the rest through as [`Key::Char`]. `Ctrl-O` zooms out one
 /// engagement level (没入 → 切替 → 統括) everywhere on the screen.
 const CTRL_O: char = '\u{000f}';
+
+/// The callback 切替 uses to read (`None`) or navigate (`Some(nav)`) the
+/// highlighted session's tabs, returning the strip's labels and active index.
+/// Backed by the [`TerminalPool`](super::terminal_pool::TerminalPool) the pane
+/// driver shares, so a tab moved here is the one re-attaching reveals.
+pub(super) type TabOp<'a> = dyn FnMut(&Path, Option<TabNav>) -> (Vec<String>, usize) + 'a;
+
+/// The settings-derived values re-read when the config screen closes, so an
+/// edit takes effect without reopening the home screen: the 在席 (Focus)
+/// right-pane surface and whether the `ai` command is offered.
+#[derive(Debug, Clone, Copy)]
+pub struct ConfigReload {
+    /// The effective Session Action UI (在席 mode's surface).
+    pub session_action_ui: SessionActionUi,
+    /// Whether the local LLM is usable (enabled and its model pulled), gating
+    /// the `ai` command in the 在席 menu.
+    pub ai_available: bool,
+}
 
 /// What the user chose to do on the home (workspace) screen.
 #[derive(Debug)]
@@ -59,18 +78,20 @@ pub enum Outcome {
 ///   `Esc` is inert here (it does not back out to the project list); `Ctrl-O`
 ///   opens Switch.
 /// - **切替 (Switch)** — pick a session in the left pane (entered from Overview
-///   via `session switch`, or from Focus / Attached via `Ctrl-O`). `↑`/`↓`
-///   move, `Enter` focuses (attaching when the session is live), `c` creates one
-///   inline, `Esc` / `h` backs out to where it was opened from, `Ctrl-O` zooms
-///   further out to Overview.
+///   via `session switch`, or from Focus / Attached via `Ctrl-O`). `↑`/`↓` (or
+///   `k`/`j`) move between sessions, `←`/`→` (or `h`/`l`) move between the
+///   highlighted session's tabs, `Enter` focuses (attaching when the session is
+///   live), `t` opens the action surface to add a pane, `c` creates a session
+///   inline, `Esc` backs out to where it was opened from, `Ctrl-O` zooms further
+///   out to Overview.
 /// - **在席 (Focus)** — a session is selected and operated in the right pane,
 ///   either as a menu of its runnable commands or a session-scoped prompt
 ///   (chosen by the [`SessionActionUi`] setting). Launching `terminal` / `agent`
-///   attaches the pane; `Esc` returns to Overview; `Ctrl-O` opens Switch.
+///   adds a pane and attaches it; `Esc` returns to Overview; `Ctrl-O` opens Switch.
 /// - **没入 (Attached)** — the embedded shell / agent is live in the right pane
 ///   and keys flow to it. `Ctrl-O` is the only reserved key (everything else,
-///   including `Esc`, goes to the shell): it zooms out to Switch. The shell
-///   exiting returns to Focus.
+///   including `Esc`, goes to the shell): it zooms out to Switch, where tabs are
+///   switched and panes added. The shell exiting returns to Focus.
 ///
 /// Each command the user runs is handed to `persist` so the caller can append
 /// it to the workspace's `history.json`; tests pass a no-op.
@@ -82,11 +103,17 @@ pub enum Outcome {
 /// free of that IO and directly testable.
 ///
 /// `open_terminal` embeds a live shell in the right pane (没入), rooted at the
-/// focused worktree — or at `workspace_root` for the root row. Its `bool` is
-/// `true` for `agent`, `false` for a plain `terminal`. It returns a [`PaneExit`]:
+/// focused worktree — or at `workspace_root` for the root row. Its first `bool`
+/// is `true` for `agent`, `false` for a plain `terminal`; its second (`new_pane`)
+/// is `true` to add a fresh pane (在席's `terminal` / `agent`) or `false` to
+/// re-attach the session's active pane. It returns a [`PaneExit`]:
 /// [`PaneExit::Closed`] (the shell exited → 在席) or [`PaneExit::ToSwitch`]
 /// (`Ctrl-O` → 切替). The PTY I/O, rendering, and shell pool live in that
 /// injected callback.
+///
+/// `tab_op` reads (and, given a [`TabNav`], navigates) the highlighted session's
+/// tabs from 切替 — the loop reads the strip each frame to draw it, and `←`/`→`
+/// move the active tab so re-attaching reveals it.
 ///
 /// `open_config` opens the settings screen, returning `None` when the user quit
 /// the application from it (so the loop propagates [`Outcome::Quit`]), or
@@ -109,9 +136,10 @@ pub fn event_loop(
     rename_display: &mut dyn FnMut(&str, &str) -> SessionOutcome,
     remove_session: &mut dyn FnMut(&str, bool) -> SessionOutcome,
     existing_branches: &mut dyn FnMut() -> Vec<String>,
-    open_terminal: &mut dyn FnMut(&mut HomeState, &Path, bool) -> Result<PaneExit>,
-    open_config: &mut dyn FnMut(&Term) -> Result<Option<SessionActionUi>>,
+    open_terminal: &mut dyn FnMut(&mut HomeState, &Path, bool, bool) -> Result<PaneExit>,
+    open_config: &mut dyn FnMut(&Term) -> Result<Option<ConfigReload>>,
     preview: &mut dyn FnMut(&Path) -> Option<TerminalView>,
+    tab_op: &mut TabOp<'_>,
 ) -> Result<Outcome> {
     let mut painter = FramePainter::new();
     loop {
@@ -126,15 +154,20 @@ pub fn event_loop(
         // Surface the top-right "update available" notice once the background
         // release check has found a newer version than this build.
         state.set_update(update.status().map(|status| status.latest));
-        // Drop any stale snapshot every frame, then refresh it for the modes that
-        // draw the embedded terminal: 没入 (driven directly by `open_pane`) and
-        // 切替, where the right pane previews the highlighted session's live
-        // terminal so the user sees the actual screen re-attaching reveals.
+        // Drop any stale snapshot / tab strip every frame, then refresh them for
+        // the modes that draw the embedded terminal: 没入 (driven directly by
+        // `open_pane`) and 切替, where the right pane previews the highlighted
+        // session's live terminal — with its tab strip above it, so `←`/`→` has
+        // something to act on — so the user sees the actual screen re-attaching
+        // reveals.
         state.clear_terminal_view();
+        state.clear_terminal_tabs();
         if state.mode() == Mode::Switch {
             let dir = selected_dir(&state, workspace_root);
             if let Some(view) = preview(&dir) {
                 state.set_terminal_view(view);
+                let (labels, active) = tab_op(&dir, None);
+                state.set_terminal_tabs(labels, active);
             }
         }
         let (height, width) = term.size();
@@ -260,6 +293,7 @@ pub fn event_loop(
                 existing_branches,
                 open_terminal,
                 preview,
+                tab_op,
             ),
             // 没入 (Attached) is driven inside `open_pane`, which always leaves it
             // (for 切替 or 在席) before returning — so the loop only ever observes

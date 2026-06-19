@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use anyhow::Result;
 use console::Term;
 
-use crate::domain::settings::{LocalSettings, Settings};
+use crate::domain::settings::{LocalSettings, Settings, LOCAL_LLM_MODELS};
 use crate::infrastructure::git;
 use crate::infrastructure::storage::Storage;
 use crate::presentation::tui::screen::FramePainter;
@@ -64,17 +64,25 @@ pub fn run_in(term: &Term, repo_root: Option<PathBuf>) -> Result<Outcome> {
         ),
     };
 
-    // Probe whether the local LLM runtime and selected model are already
-    // present, so the Local LLM row opens as an "Install" action or an on/off
-    // toggle accordingly. Only the global scope renders that row
-    // (`LocalField::ALL` has no Local LLM field), so skip the two `ollama`
-    // subprocess probes when editing a workspace's local overrides.
+    // Probe whether the `ollama` runtime is installed and which offered models
+    // are already pulled, so the Local LLM row opens as an "Install" action or
+    // an on/off toggle, and the model picker shows the right install markers.
+    // Only the global scope renders those rows (`LocalField::ALL` has no Local
+    // LLM field), so skip the `ollama` subprocess probes when editing a
+    // workspace's local overrides; the per-model probe also only runs once the
+    // runtime is present (each is an `ollama show`).
     if repo_root.is_none() {
         let runner = SystemRunner;
-        let model = config.local_llm_model().to_string();
-        config.set_local_llm_installed(
-            local_llm::ollama_installed(&runner) && local_llm::model_present(&runner, &model),
-        );
+        if local_llm::ollama_installed(&runner) {
+            config.set_ollama_installed(true);
+            config.set_installed_models(
+                LOCAL_LLM_MODELS
+                    .iter()
+                    .filter(|model| local_llm::model_present(&runner, model))
+                    .map(|model| model.to_string())
+                    .collect(),
+            );
+        }
     }
 
     let mut reader = TermKeyReader::new(term.clone());
@@ -93,46 +101,71 @@ pub fn run_in(term: &Term, repo_root: Option<PathBuf>) -> Result<Outcome> {
         }
         Ok(())
     };
-    // Installing the local LLM provisions the runtime + model on demand. The
-    // work runs on a background thread so the screen can animate a spinner
-    // while `ollama pull` (and the runtime install) proceed; the sudo password
-    // entered in the modal pre-authenticates the privileged steps.
-    let mut install = |model: &str, password: &str| -> Result<()> {
-        run_install_with_spinner(term, model, password)
-    };
-    event::event_loop(term, &mut reader, config, &mut save, &mut install, notice)
+    // Installing the `ollama` runtime and pulling a model both run on a
+    // background thread so the screen can animate a spinner while they proceed.
+    // The runtime install takes the sudo password from the modal to
+    // pre-authenticate its privileged steps; `ollama pull` is unprivileged.
+    let mut install_runtime =
+        |password: &str| -> Result<()> { run_install_with_spinner(term, password) };
+    let mut pull_model = |model: &str| -> Result<()> { run_pull_with_spinner(term, model) };
+    event::event_loop(
+        term,
+        &mut reader,
+        config,
+        &mut save,
+        &mut install_runtime,
+        &mut pull_model,
+        notice,
+    )
 }
 
-/// Provisions the local LLM on a background thread, animating the install
+/// Installs the `ollama` runtime on a background thread, animating the install
 /// spinner on the main thread until it finishes. The sudo password is forwarded
-/// to [`local_llm::ensure`] so the runtime installer can elevate unattended.
-fn run_install_with_spinner(term: &Term, model: &str, password: &str) -> Result<()> {
+/// to [`local_llm::ensure_runtime`] so the installer can elevate unattended.
+fn run_install_with_spinner(term: &Term, password: &str) -> Result<()> {
+    let password_owned = password.to_string();
+    run_with_spinner(term, "ollama", move || {
+        local_llm::ensure_runtime(std::env::consts::OS, &SystemRunner, Some(&password_owned))
+            .map(|_| ())
+            .map_err(|e| anyhow::anyhow!(install_error_message(&e)))
+    })
+}
+
+/// Pulls `model` into the installed runtime on a background thread, animating
+/// the spinner until the pull finishes. Backs the model picker's "install on
+/// select" path; no sudo is needed for [`local_llm::ensure_model`].
+fn run_pull_with_spinner(term: &Term, model: &str) -> Result<()> {
+    let model_owned = model.to_string();
+    run_with_spinner(term, model, move || {
+        local_llm::ensure_model(&SystemRunner, &model_owned)
+            .map(|_| ())
+            .map_err(|e| anyhow::anyhow!(install_error_message(&e)))
+    })
+}
+
+/// Runs `work` on a background thread, animating the install spinner labelled
+/// with `subject` on the main thread until it finishes. Shared by the runtime
+/// install and the model pull so both show the same progress modal.
+fn run_with_spinner(
+    term: &Term,
+    subject: &str,
+    work: impl FnOnce() -> Result<()> + Send + 'static,
+) -> Result<()> {
     use std::sync::mpsc;
     use std::time::Duration;
 
-    // The worker owns its copies so it can outlive this stack frame's borrows.
-    let model_owned = model.to_string();
-    let password_owned = password.to_string();
     let (tx, rx) = mpsc::channel();
     let worker = std::thread::spawn(move || {
-        let result = local_llm::ensure(
-            std::env::consts::OS,
-            &SystemRunner,
-            &model_owned,
-            Some(&password_owned),
-        )
-        .map(|_| ())
-        .map_err(|e| anyhow::anyhow!(install_error_message(&e)));
         // The receiver is only dropped once we have the result, so this send
         // cannot fail in practice; ignore the error if it somehow does.
-        let _ = tx.send(result);
+        let _ = tx.send(work());
     });
 
     let mut painter = FramePainter::new();
     let mut tick = 0usize;
     let result = loop {
         let (height, width) = term.size();
-        let frame = ui::installing_frame(height as usize, width as usize, model, tick);
+        let frame = ui::installing_frame(height as usize, width as usize, subject, tick);
         let _ = painter.paint(term, frame);
         // Poll for completion on a short cadence so the spinner keeps moving.
         match rx.recv_timeout(Duration::from_millis(120)) {

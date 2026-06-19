@@ -13,7 +13,8 @@
 use crate::domain::settings::{
     AgentCli, BranchSource, LocalSettings, SessionActionUi, Settings, Theme, LOCAL_LLM_MODELS,
 };
-use crate::presentation::tui::widgets::text_input::TextInput;
+use crate::presentation::tui::widgets::{self, text_input::TextInput};
+use console::Style;
 
 /// The themes in the order they cycle through.
 const THEMES: [Theme; 3] = [Theme::Light, Theme::Dark, Theme::System];
@@ -123,14 +124,18 @@ pub struct RowView {
     pub value: String,
     pub changed: bool,
     /// Whether this row is an action button (e.g. the Local LLM "Install"
-    /// prompt) rather than a left/right value chooser. Action rows render as a
-    /// plain label with no chevrons.
+    /// prompt, or the model row that opens the picker) rather than a left/right
+    /// value chooser. Action rows render as a plain label with no chevrons.
     pub action: bool,
+    /// Whether this row is inert — shown but not selectable for change (e.g. the
+    /// Local LLM Model row before the runtime is installed). Disabled rows
+    /// render dimmed and ignore activation.
+    pub disabled: bool,
 }
 
 /// The open local-LLM install modal: collects the sudo password before the
-/// runtime is provisioned in the background. Kept terminal-independent so the
-/// password entry and confirmation flow are unit-testable.
+/// `ollama` runtime is provisioned in the background. Kept terminal-independent
+/// so the password entry and confirmation flow are unit-testable.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct InstallModal {
     password: TextInput,
@@ -142,14 +147,87 @@ impl InstallModal {
         self.password.value()
     }
 
-    /// The password rendered as bullets, one per character, with `caret` drawn at
+    /// The password rendered as bullets, one per character, with a block caret at
     /// the editing position, so it is never shown in the clear yet ←/→/Home/End
-    /// move a visible caret. Each character maps to one bullet, so the caret lands
-    /// between the right bullets even for multi-byte input.
-    pub fn masked(&self, caret: &str) -> String {
-        let before = self.password.before().chars().count();
-        let after = self.password.after().chars().count();
-        format!("{}{caret}{}", "•".repeat(before), "•".repeat(after))
+    /// move a visible caret. Each character maps to one bullet, so the caret sits
+    /// on the right bullet even for multi-byte input.
+    pub fn masked(&self) -> String {
+        let before = "•".repeat(self.password.before().chars().count());
+        let after = "•".repeat(self.password.after().chars().count());
+        widgets::block_caret(&before, &after, &Style::new())
+    }
+}
+
+/// One model row in the [`ModelModal`]: the model name, whether it is already
+/// pulled, and whether the cursor is on it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelRow {
+    pub model: &'static str,
+    pub installed: bool,
+    pub selected: bool,
+}
+
+/// The open model-selection modal: a list of the offered models with their
+/// install state, navigated with ↑/↓ and confirmed with Enter. Picking an
+/// installed model just adopts it; picking an uninstalled one pulls it first.
+/// Kept terminal-independent so the navigation and selection are unit-testable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelModal {
+    /// Cursor index into [`LOCAL_LLM_MODELS`].
+    cursor: usize,
+    /// Whether each model in [`LOCAL_LLM_MODELS`] is pulled, parallel by index.
+    installed: Vec<bool>,
+}
+
+impl ModelModal {
+    /// Open the modal with the cursor on `current` (the model in use) and each
+    /// row flagged by whether it appears in `installed_models`.
+    fn new(current: &str, installed_models: &[String]) -> Self {
+        let installed = LOCAL_LLM_MODELS
+            .iter()
+            .map(|m| installed_models.iter().any(|i| i == m))
+            .collect();
+        let cursor = LOCAL_LLM_MODELS
+            .iter()
+            .position(|m| *m == current)
+            .unwrap_or(0);
+        Self { cursor, installed }
+    }
+
+    /// Move the cursor up one model, wrapping to the bottom.
+    pub fn move_up(&mut self) {
+        self.cursor = self
+            .cursor
+            .checked_sub(1)
+            .unwrap_or(LOCAL_LLM_MODELS.len() - 1);
+    }
+
+    /// Move the cursor down one model, wrapping to the top.
+    pub fn move_down(&mut self) {
+        self.cursor = (self.cursor + 1) % LOCAL_LLM_MODELS.len();
+    }
+
+    /// The model under the cursor.
+    pub fn selected_model(&self) -> &'static str {
+        LOCAL_LLM_MODELS[self.cursor]
+    }
+
+    /// Whether the model under the cursor is already pulled.
+    pub fn selected_installed(&self) -> bool {
+        self.installed[self.cursor]
+    }
+
+    /// The rows to render, top to bottom.
+    pub fn rows(&self) -> Vec<ModelRow> {
+        LOCAL_LLM_MODELS
+            .iter()
+            .enumerate()
+            .map(|(i, model)| ModelRow {
+                model,
+                installed: self.installed[i],
+                selected: i == self.cursor,
+            })
+            .collect()
     }
 }
 
@@ -184,13 +262,20 @@ pub struct Config {
     branches: Vec<String>,
     /// The project-local overrides being edited, present in the local scope.
     local: Option<LocalEdit>,
-    /// Whether the local LLM runtime and the selected model are present. Seeded
-    /// when the screen opens; drives whether the Local LLM row shows an
-    /// "Install" action or an on/off toggle.
-    local_llm_installed: bool,
-    /// The open install modal, when the user has triggered provisioning and is
-    /// entering the sudo password. While set it captures all keys.
+    /// Whether the `ollama` runtime is installed. Seeded when the screen opens;
+    /// drives whether the Local LLM row shows an "Install" action or an on/off
+    /// toggle, and whether the model row is selectable.
+    ollama_installed: bool,
+    /// The offered models already pulled (a subset of [`LOCAL_LLM_MODELS`]),
+    /// seeded when the screen opens. Drives the install markers in the model
+    /// picker and whether a chosen model needs pulling first.
+    installed_models: Vec<String>,
+    /// The open runtime-install modal, when the user has triggered provisioning
+    /// and is entering the sudo password. While set it captures all keys.
     install_modal: Option<InstallModal>,
+    /// The open model-selection modal, when the user is picking which model to
+    /// use. While set it captures all keys.
+    model_modal: Option<ModelModal>,
     /// Which settings the screen edits.
     scope: Scope,
     selected_index: usize,
@@ -210,8 +295,10 @@ impl Config {
             workspaces,
             branches: Vec::new(),
             local: None,
-            local_llm_installed: false,
+            ollama_installed: false,
+            installed_models: Vec::new(),
             install_modal: None,
+            model_modal: None,
             scope: Scope::Global,
             selected_index: 0,
         }
@@ -234,8 +321,10 @@ impl Config {
                 baseline: local.clone(),
                 settings: local,
             }),
-            local_llm_installed: false,
+            ollama_installed: false,
+            installed_models: Vec::new(),
             install_modal: None,
+            model_modal: None,
             scope: Scope::Local,
             selected_index: 0,
         }
@@ -245,15 +334,26 @@ impl Config {
         &self.settings
     }
 
-    /// Record whether the local LLM runtime and selected model are installed.
-    /// Called when the screen opens, after probing the system.
-    pub fn set_local_llm_installed(&mut self, installed: bool) {
-        self.local_llm_installed = installed;
+    /// Record whether the `ollama` runtime is installed. Called when the screen
+    /// opens, after probing the system.
+    pub fn set_ollama_installed(&mut self, installed: bool) {
+        self.ollama_installed = installed;
     }
 
-    /// Whether the local LLM runtime and selected model are present.
-    pub fn local_llm_installed(&self) -> bool {
-        self.local_llm_installed
+    /// Whether the `ollama` runtime is installed.
+    pub fn ollama_installed(&self) -> bool {
+        self.ollama_installed
+    }
+
+    /// Record which offered models are already pulled. Called when the screen
+    /// opens, after probing the system.
+    pub fn set_installed_models(&mut self, models: Vec<String>) {
+        self.installed_models = models;
+    }
+
+    /// Whether `model` has already been pulled.
+    fn model_installed(&self, model: &str) -> bool {
+        self.installed_models.iter().any(|m| m == model)
     }
 
     /// The currently selected local LLM model name.
@@ -263,17 +363,89 @@ impl Config {
 
     /// Whether the focused row is the Local LLM "Install" action — the row that,
     /// when activated (Space/Enter), opens the install modal instead of cycling
-    /// a value. True only while the runtime/model is not yet present.
+    /// a value. True only while the `ollama` runtime is not yet present.
     pub fn local_llm_needs_install(&self) -> bool {
-        matches!(self.selected_field(), Some(Field::LocalLlm)) && !self.local_llm_installed
+        matches!(self.selected_field(), Some(Field::LocalLlm)) && !self.ollama_installed
     }
 
-    /// Open the install modal, ready to collect the sudo password. A no-op
-    /// unless the focused row is the Local LLM install action.
+    /// Whether the focused row is the (active) Local LLM Model row — the row
+    /// that, when activated, opens the model picker. True only once the runtime
+    /// is installed; before that the model row is inert.
+    pub fn model_row_active(&self) -> bool {
+        matches!(self.selected_field(), Some(Field::LocalLlmModel)) && self.ollama_installed
+    }
+
+    /// Open the runtime-install modal, ready to collect the sudo password. A
+    /// no-op unless the focused row is the Local LLM install action.
     pub fn open_install_modal(&mut self) {
         if self.local_llm_needs_install() {
             self.install_modal = Some(InstallModal::default());
         }
+    }
+
+    /// Open the model-selection modal on the model in use, with each row flagged
+    /// by its install state. A no-op unless the focused row is the active model
+    /// row (i.e. the runtime is installed).
+    pub fn open_model_modal(&mut self) {
+        if self.model_row_active() {
+            self.model_modal = Some(ModelModal::new(
+                &self.settings.local_llm.model,
+                &self.installed_models,
+            ));
+        }
+    }
+
+    /// The open model modal, if any. While present the event loop routes every
+    /// key into it.
+    pub fn model_modal(&self) -> Option<&ModelModal> {
+        self.model_modal.as_ref()
+    }
+
+    /// Close the model modal (cancel, or after a selection is made).
+    pub fn close_model_modal(&mut self) {
+        self.model_modal = None;
+    }
+
+    /// Move the model modal's cursor up one row. A no-op when no modal is open.
+    pub fn model_modal_up(&mut self) {
+        if let Some(modal) = &mut self.model_modal {
+            modal.move_up();
+        }
+    }
+
+    /// Move the model modal's cursor down one row. A no-op when no modal is open.
+    pub fn model_modal_down(&mut self) {
+        if let Some(modal) = &mut self.model_modal {
+            modal.move_down();
+        }
+    }
+
+    /// The model under the model modal's cursor, or `None` when no modal is open.
+    pub fn model_modal_selection(&self) -> Option<&'static str> {
+        self.model_modal.as_ref().map(|m| m.selected_model())
+    }
+
+    /// Whether the model under the model modal's cursor is already pulled.
+    /// `false` when no modal is open.
+    pub fn model_modal_selection_installed(&self) -> bool {
+        self.model_modal
+            .as_ref()
+            .is_some_and(|m| m.selected_installed())
+    }
+
+    /// Adopt `model` as the one in use (an edit, saved with the rest). Used when
+    /// an already-installed model is picked from the modal.
+    pub fn select_model(&mut self, model: &str) {
+        self.settings.local_llm.model = model.to_string();
+    }
+
+    /// Record that `model` was just pulled and adopt it as the one in use. Used
+    /// when an uninstalled model is picked and pulled from the modal.
+    pub fn mark_model_installed(&mut self, model: &str) {
+        if !self.model_installed(model) {
+            self.installed_models.push(model.to_string());
+        }
+        self.select_model(model);
     }
 
     /// The open install modal, if any. While present the event loop routes every
@@ -345,10 +517,11 @@ impl Config {
             .map(|m| m.password.value().to_string())
     }
 
-    /// Mark the local LLM as installed and turn it on, so the row becomes an
-    /// on/off toggle (now "On") and the change is saved with the rest.
-    pub fn mark_local_llm_installed(&mut self) {
-        self.local_llm_installed = true;
+    /// Mark the `ollama` runtime as installed and turn the local LLM on, so the
+    /// Local LLM row becomes an on/off toggle (now "On"), the model row becomes
+    /// selectable, and the change is saved with the rest.
+    pub fn mark_ollama_installed(&mut self) {
+        self.ollama_installed = true;
         self.settings.local_llm.enabled = true;
     }
 
@@ -520,16 +693,27 @@ impl Config {
             Field::SessionActionUi => {
                 session_action_ui_label(self.settings.session_action_ui).to_string()
             }
-            // Before the runtime/model are present the row is an install action;
-            // once installed it becomes a plain on/off toggle.
+            // Before the runtime is present the row is an install action; once
+            // installed it becomes a plain on/off toggle.
             Field::LocalLlm => {
-                if self.local_llm_installed {
+                if self.ollama_installed {
                     on_off(self.settings.local_llm.enabled).to_string()
                 } else {
                     "Install".to_string()
                 }
             }
-            Field::LocalLlmModel => self.settings.local_llm.model.clone(),
+            // The model row is inert until the runtime is installed; afterwards
+            // it shows the model in use (with an install marker) and opens the
+            // picker when activated.
+            Field::LocalLlmModel => {
+                if !self.ollama_installed {
+                    "—".to_string()
+                } else if self.model_installed(&self.settings.local_llm.model) {
+                    self.settings.local_llm.model.clone()
+                } else {
+                    format!("{} (未導入)", self.settings.local_llm.model)
+                }
+            }
         }
     }
 
@@ -575,8 +759,15 @@ impl Config {
                     value: self.value_of(field),
                     changed: self.is_changed(field),
                     // The Local LLM row is an action button while the runtime is
-                    // not yet installed; everything else is a value chooser.
-                    action: field == Field::LocalLlm && !self.local_llm_installed,
+                    // not yet installed; the model row is an action (opening the
+                    // picker) once installed. Everything else is a value chooser.
+                    action: match field {
+                        Field::LocalLlm => !self.ollama_installed,
+                        Field::LocalLlmModel => self.ollama_installed,
+                        _ => false,
+                    },
+                    // The model row is inert until the runtime is installed.
+                    disabled: field == Field::LocalLlmModel && !self.ollama_installed,
                 })
                 .collect(),
             Scope::Local => LocalField::ALL
@@ -586,6 +777,7 @@ impl Config {
                     value: self.value_of_local(field),
                     changed: self.is_local_changed(field),
                     action: false,
+                    disabled: false,
                 })
                 .collect(),
         }

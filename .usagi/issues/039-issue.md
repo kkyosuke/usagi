@@ -1,13 +1,13 @@
 ---
 number: 39
 title: ターミナル画面でテキストをコピーできるようにする
-status: todo
+status: done
 priority: high
 labels: []
 dependson: []
 related: []
 created_at: 2026-06-18T12:50:18.266361+00:00
-updated_at: 2026-06-18T12:50:18.266361+00:00
+updated_at: 2026-06-18T23:11:30.576386+00:00
 ---
 
 # テキストのコピー対応

@@ -40,9 +40,11 @@
 | ローカル LLM 有効化 | `local_llm.enabled` | bool | `false` | 有効にすると `agent` 起動時に [ローカル LLM MCP サーバ](03-commands/04-llm-mcp.md)（`usagi-llm`）を wire し、軽量タスクをローカル LLM に委譲できる |
 | ローカル LLM モデル | `local_llm.model` | string | `qwen2.5-coder:7b` | 委譲先の Ollama モデル名（`qwen2.5-coder:7b` / `:3b` / `:1.5b` / `qwen2.5:7b`） |
 
-> ローカル LLM は **オプトイン**（既定 `false`）です。資材（`ollama`・モデル）は Config 画面の
-> Install アクション（`Space` / `Enter` でモーダルを開き sudo パスワードを入力 → バックグラウンド導入）、
-> または `usagi doctor --fix` で導入します。詳細は [3.4 ローカル LLM MCP サーバ](03-commands/04-llm-mcp.md)。
+> ローカル LLM は **オプトイン**（既定 `false`）です。資材は Config 画面で **2 段階**に導入します:
+> まず `Local LLM` 行の Install アクション（`Space` / `Enter` でモーダルを開き sudo パスワードを入力 →
+> `ollama` ランタイムをバックグラウンド導入）、次に `Local LLM Model` 行のモデル選択モーダル（一覧から選び、
+> 未導入のモデルはその場で `ollama pull`）。`usagi doctor --fix` はランタイムと既定モデルをまとめて導入します。
+> 詳細は [Config 画面のローカル LLM 導入](design/04-config.md) / [3.4 ローカル LLM MCP サーバ](03-commands/04-llm-mcp.md)。
 
 > すべての項目はフォーマットバージョン `version: 1` とともに `settings.json` に格納されます。
 > 完全な JSON 例は [data/01-global.md](data/01-global.md#settingsjson) を参照してください。

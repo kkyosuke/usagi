@@ -1,13 +1,13 @@
 ---
 number: 38
 title: claude -c 相当の前回セッション再開（継続実行）に対応する
-status: todo
+status: done
 priority: high
 labels: []
 dependson: []
 related: []
 created_at: 2026-06-18T12:50:13.044911+00:00
-updated_at: 2026-06-18T12:50:13.044911+00:00
+updated_at: 2026-06-18T23:11:28.883082+00:00
 ---
 
 # 前回セッションの継続実行（claude -c 相当）

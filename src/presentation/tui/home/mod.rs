@@ -26,7 +26,6 @@ use std::path::Path;
 use anyhow::Result;
 use console::Term;
 
-use crate::domain::settings::SessionActionUi;
 use crate::domain::workspace::Workspace;
 use crate::domain::workspace_state::SessionRecord;
 use crate::infrastructure::history_store::HistoryStore;
@@ -88,7 +87,7 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
     // a typed prompt — from the effective settings (project-local over the global
     // default). Re-read again whenever the config screen closes (see
     // `open_config`) so a change takes effect without reopening this screen.
-    state.set_session_action_ui(effective_session_action_ui(&workspace.path));
+    state.set_session_action_ui(effective_settings(&workspace.path).session_action_ui);
 
     // Restore past commands so `history` and `↑`/`↓` recall span sessions.
     // A read failure is non-fatal: just start with an empty history.
@@ -161,6 +160,12 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
     let settings = crate::infrastructure::storage::Storage::open_default()
         .and_then(|storage| crate::usecase::settings::effective(&storage, &workspace.path))
         .unwrap_or_default();
+
+    // Whether the 在席 (Focus) menu offers the `ai` command: only when the local
+    // LLM is enabled and its model is pulled, so it appears only when running it
+    // would actually work. Probed once here (an `ollama show`) and re-probed when
+    // the config screen closes (see `open_config`).
+    state.set_ai_available(local_llm_available(&settings));
 
     // The wired-in MCP servers and lifecycle hooks invoke usagi back, so they are
     // pointed at this process's own executable path rather than the bare name
@@ -267,15 +272,16 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
     // the switch loop are handled by the event loop around this call.
     //
     // A session can hold several panes (an agent alongside terminals): this loop
-    // drives the active pane, and a tab-strip step (`Ctrl-O ]` / `t` / `w` …)
-    // updates the pool's active pane / adds / closes one and re-drives the new
-    // active pane, leaving the others alive. It returns only when the user
-    // detaches (`Ctrl-O Ctrl-O` → 切替) or every pane has closed (→ 在席). The
-    // attached session is declared to the monitor (so it is never flagged as
-    // waiting) and cleared again on the way out.
+    // drives the active pane until the user detaches (`Ctrl-O` → 切替) or every
+    // pane has closed (→ 在席). Switching tabs and adding panes now happen in 切替,
+    // not here. `new_pane` distinguishes the two ways in: `false` re-attaches the
+    // session's active pane (spawning the first when it is fresh); `true` adds a
+    // new pane of the requested kind and drives it (the 在席 action surface's
+    // `terminal` / `agent`). The attached session is declared to the monitor (so
+    // it is never flagged as waiting) and cleared again on the way out.
     let terminal_root = workspace.path.clone();
     let mut open_terminal =
-        |home: &mut HomeState, dir: &Path, run_agent: bool| -> Result<PaneExit> {
+        |home: &mut HomeState, dir: &Path, run_agent: bool, new_pane: bool| -> Result<PaneExit> {
             // Build the agent command for this worktree on demand: when it already
             // has a Claude conversation, launch with `--continue` so `:agent` resumes
             // where it left off; otherwise it starts fresh. The pool only sends it on
@@ -299,9 +305,19 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
                 });
             let mut pool = pool.borrow_mut();
             let handle = pool.monitor();
-            // Ready the active pane (spawning the first one when the session is new),
-            // then drive it; tab steps loop back here on the now-active pane.
-            pool.enter(term, dir, run_agent, initial, &label)?;
+            // Ready the pane to drive: add a fresh one (在席's `terminal` / `agent`)
+            // or re-attach the session's active pane (spawning the first when the
+            // session is new).
+            if new_pane {
+                let kind = if run_agent {
+                    terminal_tabs::PaneKind::Agent
+                } else {
+                    terminal_tabs::PaneKind::Terminal
+                };
+                pool.add_pane(term, dir, kind, initial, &label)?;
+            } else {
+                pool.enter(term, dir, run_agent, initial, &label)?;
+            }
             handle.set_attached(Some(dir.to_path_buf()));
             let result = (|| -> Result<PaneExit> {
                 loop {
@@ -315,20 +331,14 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
                         None => return Ok(PaneExit::Closed),
                     };
                     match terminal_pane::run(term, home, pty, &handle)? {
-                        // `Ctrl-O Ctrl-O`: zoom out, leaving every pane alive.
+                        // `Ctrl-O`: zoom out to 切替, leaving every pane alive.
                         terminal_pane::PaneStep::Detach => return Ok(PaneExit::ToSwitch),
-                        // The active pane's shell exited, or the user closed it: drop
-                        // it; keep driving when a pane remains, else fall to 在席.
-                        terminal_pane::PaneStep::Closed | terminal_pane::PaneStep::ClosePane => {
+                        // The active pane's shell exited: drop it; keep driving when
+                        // a pane remains, else fall to 在席.
+                        terminal_pane::PaneStep::Closed => {
                             if !pool.close_active(dir, &label) {
                                 return Ok(PaneExit::Closed);
                             }
-                        }
-                        // Move the active tab, then re-drive the new active pane.
-                        terminal_pane::PaneStep::Switch(nav) => pool.nav(dir, nav),
-                        // Add a pane (agent / terminal) and drive it.
-                        terminal_pane::PaneStep::NewPane(kind) => {
-                            pool.add_pane(term, dir, kind, initial, &label)?;
                         }
                     }
                 }
@@ -355,6 +365,18 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
             pool.borrow_mut().snapshot(term, dir)
         };
 
+    // Read (and optionally navigate) a session's tabs from 切替: `←`/`→` pass a
+    // `TabNav` to move the active tab, and the loop reads the strip (`None`) each
+    // frame to draw it above the preview. Both go through the same pool the pane
+    // driver uses, so a tab moved here is the one re-attaching reveals.
+    let mut tab_op = |dir: &Path, nav: Option<terminal_tabs::TabNav>| -> (Vec<String>, usize) {
+        let mut pool = pool.borrow_mut();
+        if let Some(nav) = nav {
+            pool.nav(dir, nav);
+        }
+        pool.tabs(dir)
+    };
+
     // Opening `config` hands off to the settings screen in its workspace scope,
     // editing only this workspace's local overrides
     // (`<workspace>/.usagi/settings.json`); the global settings are changed from
@@ -362,12 +384,17 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
     // reported back as `true` so the event loop propagates the quit; `Back`
     // returns `false`.
     let config_root = workspace.path.clone();
-    let mut open_config = |t: &Term| -> Result<Option<SessionActionUi>> {
+    let mut open_config = |t: &Term| -> Result<Option<event::ConfigReload>> {
         match crate::presentation::tui::config::run_in(t, Some(config_root.clone()))? {
-            // Back to home: re-read the (possibly changed) Session Action UI so the
-            // 在席 surface reflects the edit without reopening the home screen.
+            // Back to home: re-read the (possibly changed) Session Action UI and
+            // local LLM availability so the 在席 surface and `ai` command reflect
+            // the edit without reopening the home screen.
             crate::presentation::tui::config::Outcome::Back => {
-                Ok(Some(effective_session_action_ui(&config_root)))
+                let settings = effective_settings(&config_root);
+                Ok(Some(event::ConfigReload {
+                    session_action_ui: settings.session_action_ui,
+                    ai_available: local_llm_available(&settings),
+                }))
             }
             crate::presentation::tui::config::Outcome::Quit => Ok(None),
         }
@@ -388,17 +415,28 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
         &mut open_terminal,
         &mut open_config,
         &mut preview,
+        &mut tab_op,
     )
 }
 
-/// The effective Session Action UI (在席 mode's right-pane surface) for the
-/// workspace at `root` — the project-local override on top of the global
-/// default. Read at startup and again whenever the config screen closes, so an
-/// edited setting takes effect without reopening the home screen. Any failure to
-/// read settings falls back to the default (`Menu`).
-fn effective_session_action_ui(root: &Path) -> SessionActionUi {
+/// The effective settings (project-local overrides on top of the global
+/// default) for the workspace at `root`. Read at startup and again whenever the
+/// config screen closes, so an edited setting takes effect without reopening the
+/// home screen. Any failure to read settings falls back to the defaults.
+fn effective_settings(root: &Path) -> crate::domain::settings::Settings {
     crate::infrastructure::storage::Storage::open_default()
         .and_then(|storage| crate::usecase::settings::effective(&storage, root))
-        .map(|settings| settings.session_action_ui)
         .unwrap_or_default()
+}
+
+/// Whether the local LLM is usable right now: enabled in settings and its model
+/// already pulled into the `ollama` runtime. Gates the `ai` command in the 在席
+/// (Focus) menu so it appears only when running it would actually work. The
+/// model probe is an `ollama show`, skipped entirely when the feature is off.
+fn local_llm_available(settings: &crate::domain::settings::Settings) -> bool {
+    settings.local_llm.enabled
+        && crate::usecase::local_llm::model_present(
+            &crate::usecase::doctor::SystemRunner,
+            &settings.local_llm.model,
+        )
 }

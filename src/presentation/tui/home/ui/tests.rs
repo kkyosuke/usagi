@@ -696,6 +696,25 @@ fn switch_preview_shows_a_live_session_as_its_actual_screen() {
 }
 
 #[test]
+fn switch_preview_shows_the_tab_strip_above_a_live_session() {
+    // In 切替 the highlighted live session's tabs render above the preview, so
+    // `←`/`→` has something to act on. The event loop publishes the strip from
+    // the pool before painting.
+    let mut running = worktree(Some("feat"), false, BranchStatus::Local);
+    running.path = PathBuf::from("/repo/run");
+    let mut state = HomeState::new("usagi", vec![running], None);
+    state.set_live([PathBuf::from("/repo/run")].into());
+    state.set_terminal_view(TerminalView::from_rows(vec!["$ echo hi".to_string()], None));
+    state.set_terminal_tabs(vec!["agent".to_string(), "terminal".to_string()], 1);
+    state.enter_switch(super::super::state::ReturnMode::Overview);
+    state.switch_move_down();
+    let preview = stripped(&switch_preview(&state, 40, 12));
+    // Both numbered chips appear, and the live screen follows below the strip.
+    assert!(preview.contains("1 agent") && preview.contains("2 terminal"));
+    assert!(preview.contains("$ echo hi"));
+}
+
+#[test]
 fn switch_preview_shows_the_root_live_session_as_its_screen() {
     // Regression: the root row (`⌂ root`) hard-coded `live = false`, so a running
     // root agent previewed its action menu in 切替 instead of its live screen —
@@ -846,27 +865,35 @@ fn right_pane_shows_the_tab_strip_above_the_terminal_when_attached() {
     state.set_terminal_tabs(vec!["agent".to_string(), "terminal".to_string()], 1);
     state.set_terminal_view(TerminalView::from_rows(vec!["$ echo hi".to_string()], None));
     let rows = right_pane_contents(&state, 40, 5);
-    // The strip takes the top row, listing both panes; the terminal follows.
-    let strip = console::strip_ansi_codes(&rows[0]).into_owned();
-    assert!(strip.contains("agent") && strip.contains("terminal"));
-    assert!(rows[1].contains("$ echo hi"));
+    // The strip takes the top two rows — chips then the active-tab underline —
+    // listing both panes; the terminal follows below them.
+    let chips = console::strip_ansi_codes(&rows[0]).into_owned();
+    assert!(chips.contains("agent") && chips.contains("terminal"));
+    assert!(rows[2].contains("$ echo hi"));
 }
 
 #[test]
-fn tab_strip_lists_each_pane_and_clips_to_width() {
+fn tab_strip_lists_each_pane_numbered_and_clips_to_width() {
     use super::super::terminal_tabs::TabStrip;
-    // Both the active (index 0) and the idle chip are rendered; styling is
+    // Two rows: numbered chips on top, the active-tab underline below. Styling is
     // stripped in the (non-TTY) test environment, so assert on the content.
     let strip = TabStrip {
         labels: vec!["agent".to_string(), "terminal".to_string()],
         active: 0,
     };
-    let line = console::strip_ansi_codes(&tab_strip_line(&strip, 60)).into_owned();
-    assert!(line.contains("agent") && line.contains("terminal"));
+    let lines = tab_strip_lines(&strip, 60);
+    assert_eq!(lines.len(), 2);
+    let chips = console::strip_ansi_codes(&lines[0]).into_owned();
+    // Each chip is 1-based numbered to match the ←/→ order.
+    assert!(chips.contains("1 agent") && chips.contains("2 terminal"));
+    // The underline row marks the active (first) chip and not beyond the chips.
+    assert!(console::strip_ansi_codes(&lines[1])
+        .into_owned()
+        .contains('▔'));
 
-    // A narrow pane clips the strip to its width (with an ellipsis).
-    let narrow = tab_strip_line(&strip, 8);
-    assert!(console::measure_text_width(&narrow) <= 8);
+    // A narrow pane clips both rows to its width (with an ellipsis on the chips).
+    let narrow = tab_strip_lines(&strip, 8);
+    assert!(narrow.iter().all(|l| console::measure_text_width(l) <= 8));
 }
 
 #[test]
@@ -919,7 +946,7 @@ fn terminal_geometry_stays_positive_in_a_tiny_terminal() {
 fn attached_geometry_reserves_the_tab_strip_row() {
     let full = terminal_geometry(24, 80);
     let attached = attached_geometry(24, 80);
-    // The tab strip takes one row off the top: fewer rows, origin pushed down,
+    // The tab strip takes two rows off the top: fewer rows, origin pushed down,
     // same width and left edge.
     assert_eq!(attached.rows as usize, full.rows as usize - TAB_BAR_ROWS);
     assert_eq!(attached.origin_row, full.origin_row + TAB_BAR_ROWS as u16);
@@ -984,21 +1011,21 @@ fn input_line_renders_prompt_in_overview() {
     state.push_char('m');
     let line = input_line(&state);
     assert!(line.contains('m'));
-    assert!(line.contains(CARET));
+    assert!(line.contains('❯'));
 }
 
 #[test]
-fn input_line_draws_the_caret_at_the_cursor() {
+fn input_line_draws_the_caret_without_shifting_the_text() {
     let mut state = state_with(Vec::new());
     for c in "man".chars() {
         state.push_char(c);
     }
     state.cursor_left();
-    let line = input_line(&state);
-    // The caret sits between "ma" and "n", with text on both sides.
-    let caret = line.find(CARET).expect("caret present");
-    let n = line.rfind('n').expect("trailing char present");
-    assert!(caret < n, "caret should precede the last character");
+    // The block caret recolours the character it sits on rather than inserting a
+    // glyph, so the text reads intact whatever the caret position. (Where the
+    // reverse-video cell lands is covered by `widgets::block_caret`'s own tests.)
+    let plain = console::strip_ansi_codes(&input_line(&state)).into_owned();
+    assert!(plain.contains("❯ man"));
 }
 
 #[test]
@@ -1157,17 +1184,18 @@ fn overlay_top_right_stops_when_the_banner_runs_past_the_last_row() {
 
 #[test]
 fn switch_create_rows_show_the_input_and_an_error() {
-    // Caret at the end of the name: the whole name precedes it.
+    // Caret at the end of the name: the whole name precedes it, and the block
+    // caret adds one trailing cell.
     let rows = switch_create_rows("wip", 3, None, 30);
     assert_eq!(rows.len(), 1);
     let plain = console::strip_ansi_codes(&rows[0]).into_owned();
     assert!(plain.contains("+ new: wip"));
-    assert!(plain.contains(CARET));
 
-    // Caret in the middle: it splits the name (`wi▏p`).
+    // Caret in the middle: the block caret sits on a character, so the name reads
+    // intact without an inserted glyph.
     let mid = switch_create_rows("wip", 2, None, 30);
     let plain_mid = console::strip_ansi_codes(&mid[0]).into_owned();
-    assert!(plain_mid.contains(&format!("wi{CARET}p")));
+    assert!(plain_mid.contains("+ new: wip"));
 
     let with_error = switch_create_rows("feature", 7, Some("\"feature\" already exists."), 40);
     assert_eq!(with_error.len(), 2);
@@ -1194,7 +1222,6 @@ fn switch_rename_rows_show_the_target_and_typed_label() {
     assert_eq!(rows.len(), 1);
     let plain = console::strip_ansi_codes(&rows[0]).into_owned();
     assert!(plain.contains("rename main: My main"));
-    assert!(plain.contains(CARET));
 }
 
 #[test]

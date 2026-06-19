@@ -3,7 +3,7 @@
 //! session-removal / quit-confirmation modals. All functions take plain data
 //! and return styled lines.
 
-use console::style;
+use console::{style, Style};
 
 use crate::domain::version::Version;
 
@@ -11,7 +11,7 @@ use super::super::command::{CommandHint, Hint};
 use super::super::state::{HomeState, Mode, RemoveModal, TextModal, WorktreeList};
 use super::panes::log_line;
 use super::{
-    clip_to_width, pad_to_width, CARET, HINT_INDENT, HINT_MAX, HINT_NAME_COL, REMOVE_MODAL_VISIBLE,
+    clip_to_width, pad_to_width, HINT_INDENT, HINT_MAX, HINT_NAME_COL, REMOVE_MODAL_VISIBLE,
     TEXT_MODAL_VISIBLE,
 };
 use crate::presentation::tui::widgets;
@@ -185,11 +185,11 @@ pub(super) fn hint_lines(state: &HomeState, width: usize) -> Vec<String> {
 pub(super) fn input_line(state: &HomeState) -> String {
     match state.mode() {
         Mode::Overview => format!(" {}", overview_input_content(state)),
-        Mode::Switch => {
-            style(" Pick a session — ↑↓ move, Enter focus, c new, r rename".to_string())
-                .dim()
-                .to_string()
-        }
+        Mode::Switch => style(
+            " Pick a session — ↑↓ session, ←→ tab, Enter focus, t new, c new, r rename".to_string(),
+        )
+        .dim()
+        .to_string(),
         Mode::Focus => style(format!(
             " Operating session: {}",
             state.focused_session_name()
@@ -203,7 +203,7 @@ pub(super) fn input_line(state: &HomeState) -> String {
 /// The 統括 (Overview) command input rendered as a bordered field — an
 /// HTML-input-like box — so it reads clearly as *where you type*, set apart from
 /// the hints above it and the results band below. Spans the full `width` (three
-/// rows: top border, the `❯ <input>▏` line, bottom border).
+/// rows: top border, the `❯ <input>` line, bottom border).
 pub(super) fn overview_input_box(state: &HomeState, width: usize) -> Vec<String> {
     let content = overview_input_content(state);
     // `boxed` adds the two borders and one space of padding on each side, so the
@@ -218,9 +218,8 @@ fn overview_input_content(state: &HomeState) -> String {
     let prompt = style("❯").red().bold();
     let input = state.input();
     let (before, after) = input.split_at(state.cursor());
-    let before = style(before).cyan();
-    let after = style(after).cyan();
-    format!("{prompt} {before}{CARET}{after}")
+    let value = widgets::block_caret(before, after, &Style::new().cyan());
+    format!("{prompt} {value}")
 }
 
 /// The footer help line, aware of the current mode. It leads with a mode tag so
@@ -232,7 +231,7 @@ pub(super) fn footer_line(width: usize, state: &HomeState) -> String {
                 .to_string()
         }
         Mode::Switch => {
-            "[switch]  ↑↓ move / Enter focus / c new / r rename / Esc back / Ctrl-O overview"
+            "[switch]  ↑↓ session / ←→ tab / Enter focus / t new / c new / r rename / Esc back / Ctrl-O overview"
                 .to_string()
         }
         Mode::Focus => {
@@ -249,18 +248,20 @@ pub(super) fn footer_line(width: usize, state: &HomeState) -> String {
 }
 
 /// Builds the inline create row appended to the left pane in 切替 (Switch) while
-/// naming a new session: `+ new: <before>▏<after>`, with the caret drawn at the
-/// editing position (`cursor`, a byte offset into `input`) and an inline error
-/// below it. The rows are clipped to the pane width.
+/// naming a new session: `+ new: <name>` with a block caret on the character
+/// being edited (`cursor`, a byte offset into `input`) and an inline error below
+/// it. The rows are clipped to the pane width.
 pub(super) fn switch_create_rows(
     input: &str,
     cursor: usize,
     error: Option<&str>,
     left_w: usize,
 ) -> Vec<String> {
+    let base = Style::new().green().bold();
     let (before, after) = input.split_at(cursor);
-    let label = clip_to_width(&format!("+ new: {before}{CARET}{after}"), left_w);
-    let mut rows = vec![style(label).green().bold().to_string()];
+    let value = widgets::block_caret(before, after, &base);
+    let label = clip_to_width(&format!("{}{value}", base.apply_to("+ new: ")), left_w);
+    let mut rows = vec![label];
     if let Some(err) = error {
         rows.push(style(clip_to_width(err, left_w)).red().to_string());
     }
@@ -268,11 +269,17 @@ pub(super) fn switch_create_rows(
 }
 
 /// Builds the inline rename row appended to the left pane in 切替 (Switch) while
-/// editing a session's sidebar label: `rename <target>: <input>▏`, clipped to the
-/// pane width. The label is cosmetic, so there is no validation row.
+/// editing a session's sidebar label: `rename <target>: <input>` with a block
+/// caret at the end, clipped to the pane width. The label is cosmetic, so there
+/// is no validation row.
 pub(super) fn switch_rename_rows(target: &str, input: &str, left_w: usize) -> Vec<String> {
-    let label = clip_to_width(&format!("rename {target}: {input}{CARET}"), left_w);
-    vec![style(label).cyan().bold().to_string()]
+    let base = Style::new().cyan().bold();
+    let value = widgets::block_caret(input, "", &base);
+    let label = clip_to_width(
+        &format!("{}{value}", base.apply_to(format!("rename {target}: "))),
+        left_w,
+    );
+    vec![label]
 }
 
 /// Builds one removal-modal row: a `>` cursor for the highlighted entry, a

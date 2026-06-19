@@ -10,7 +10,7 @@ pub mod dir_picker;
 pub mod picker;
 pub mod text_input;
 
-use console::style;
+use console::{style, Style};
 
 /// The usagi mascot artwork (raw, unstyled lines).
 const RABBIT: [&str; 3] = ["  (\\(\\ ", " (='-') ", " o(_(\")(\")"];
@@ -140,6 +140,32 @@ pub fn chooser(value: &str, focused: bool, changed: bool) -> String {
     };
 
     format!("{} {} {}", paint("<"), paint(value), paint(">"))
+}
+
+/// Renders the two halves of a [`text_input::TextInput`] — the text `before` the
+/// caret and the text `after` it — as one line carrying a **block caret**.
+///
+/// The character under the caret (the first of `after`) is drawn in reverse
+/// video so it reads as a solid block sitting *on* that character, the way a
+/// terminal or Claude's prompt shows its cursor. At the end of the line, where
+/// there is no character to highlight, a reversed space stands in. Because the
+/// block only recolours an existing cell instead of inserting a glyph, the text
+/// never shifts sideways as the caret moves through it.
+///
+/// `base` paints the line; the caret cell reuses that style reversed, so it
+/// inherits the field's colour. Styling follows the terminal's colour support
+/// (tests can force it with [`console::Style::force_styling`]).
+pub fn block_caret(before: &str, after: &str, base: &Style) -> String {
+    let (caret, rest) = match after.chars().next() {
+        Some(first) => after.split_at(first.len_utf8()),
+        None => (" ", ""),
+    };
+    format!(
+        "{}{}{}",
+        base.apply_to(before),
+        base.clone().reverse().apply_to(caret),
+        base.apply_to(rest),
+    )
 }
 
 /// Wraps `lines` in a single-bordered box `inner_width` columns wide, with
@@ -324,6 +350,43 @@ mod tests {
         // signals the unsaved edit, and it applies whether focused or not.
         assert!(chooser("Gemini", true, true).contains("Gemini"));
         assert!(chooser("Gemini", false, true).contains("Gemini"));
+    }
+
+    #[test]
+    fn block_caret_highlights_the_character_under_the_caret() {
+        // Force styling so the reverse-video codes are emitted whether or not the
+        // test's stdout is a terminal.
+        let base = Style::new().force_styling(true);
+        let line = block_caret("ab", "cd", &base);
+        // The caret recolours 'c' (the first char after it) without inserting a
+        // cell, so the visible text is still "abcd".
+        assert_eq!(&*console::strip_ansi_codes(&line), "abcd");
+        let reversed = base.clone().reverse().apply_to("c").to_string();
+        assert!(
+            line.contains(&reversed),
+            "the char under the caret is reversed"
+        );
+    }
+
+    #[test]
+    fn block_caret_at_the_end_reverses_a_trailing_space() {
+        let base = Style::new().force_styling(true);
+        let line = block_caret("ab", "", &base);
+        // With no character to sit on, the caret is a reversed space — the one
+        // cell the line grows by, marking where the next character lands.
+        assert_eq!(&*console::strip_ansi_codes(&line), "ab ");
+        let reversed = base.clone().reverse().apply_to(" ").to_string();
+        assert!(line.contains(&reversed));
+    }
+
+    #[test]
+    fn block_caret_sits_on_whole_multibyte_characters() {
+        // The caret lands on a whole multi-byte char, never splitting one.
+        let base = Style::new().force_styling(true);
+        let line = block_caret("あ", "いう", &base);
+        assert_eq!(&*console::strip_ansi_codes(&line), "あいう");
+        let reversed = base.clone().reverse().apply_to("い").to_string();
+        assert!(line.contains(&reversed));
     }
 
     #[test]

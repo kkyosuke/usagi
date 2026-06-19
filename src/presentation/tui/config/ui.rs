@@ -2,7 +2,7 @@ use console::style;
 
 use crate::presentation::tui::widgets;
 
-use super::state::{Config, Field, InstallModal, LocalField};
+use super::state::{Config, Field, InstallModal, LocalField, ModelModal};
 
 /// The label of the Save button row.
 const SAVE_LABEL: &str = "[ Save ]";
@@ -12,9 +12,6 @@ const BLOCK_WIDTH: usize = 52;
 
 /// Inner width of the local-LLM install / progress modal box.
 const MODAL_INNER_WIDTH: usize = 40;
-
-/// Caret glyph drawn at the editing position in the sudo-password field.
-const CARET: &str = "▏";
 
 /// The spinner frames cycled through while the install runs in the background.
 const SPINNER: [&str; 4] = ["⠋", "⠙", "⠹", "⠸"];
@@ -105,7 +102,11 @@ fn settings_lines(block_pad: &str, config: &Config) -> Vec<String> {
         .enumerate()
         .map(|(i, row)| {
             let selected = i == config.selected_index();
-            let value = if row.action {
+            let value = if row.disabled {
+                // Inert rows (e.g. the model row before the runtime is present)
+                // render as a dim plain label with no chevrons.
+                style(row.value.clone()).dim().to_string()
+            } else if row.action {
                 action_label(&row.value, selected)
             } else {
                 widgets::chooser(&row.value, selected, row.changed)
@@ -168,40 +169,71 @@ fn footer_lines(width: usize) -> Vec<String> {
     )]
 }
 
-/// Builds the local-LLM install confirmation modal: it explains the action,
-/// shows the chosen model, and masks the sudo password as it is typed.
-fn install_modal_frame(
-    raw_height: usize,
-    raw_width: usize,
-    model: &str,
-    modal: &InstallModal,
-) -> Vec<String> {
+/// Builds the `ollama` runtime install confirmation modal: it explains the
+/// action and masks the sudo password as it is typed. The model is chosen
+/// separately afterwards via the picker, so it is not mentioned here.
+fn install_modal_frame(raw_height: usize, raw_width: usize, modal: &InstallModal) -> Vec<String> {
     let body = vec![
-        "ローカル LLM (ollama) をインストールします".to_string(),
+        "ローカル LLM ランタイム (ollama) をインストールします".to_string(),
         String::new(),
-        format!("モデル: {model}"),
         "ランタイム導入には sudo 権限が必要です".to_string(),
+        "（導入後にモデルを選んで取得します）".to_string(),
         String::new(),
-        format!("sudo パスワード: {}", modal.masked(CARET)),
+        format!("sudo パスワード: {}", modal.masked()),
         String::new(),
         style("Enter: 開始   Esc: キャンセル").dim().to_string(),
     ];
     widgets::render_modal(raw_height, raw_width, "Local LLM", MODAL_INNER_WIDTH, &body)
 }
 
+/// Builds the model-selection modal: each offered model with an install marker
+/// (✓ pulled, ⬇ not yet), the cursor row highlighted. Picking an unpulled model
+/// pulls it; picking a pulled one adopts it.
+fn model_modal_frame(raw_height: usize, raw_width: usize, modal: &ModelModal) -> Vec<String> {
+    let mut body = vec!["使用するモデルを選択".to_string(), String::new()];
+    for row in modal.rows() {
+        let marker = if row.installed {
+            "✓ 導入済"
+        } else {
+            "⬇ 未導入"
+        };
+        let cursor = if row.selected { ">" } else { " " };
+        let line = format!("{cursor} {:<20} {marker}", row.model);
+        body.push(if row.selected {
+            style(line).cyan().bold().to_string()
+        } else {
+            style(line).dim().to_string()
+        });
+    }
+    body.push(String::new());
+    body.push(
+        style("↑↓: 選択   Enter: 決定 (未導入は取得)   Esc: キャンセル")
+            .dim()
+            .to_string(),
+    );
+    widgets::render_modal(
+        raw_height,
+        raw_width,
+        "Local LLM Model",
+        MODAL_INNER_WIDTH,
+        &body,
+    )
+}
+
 /// Builds the install progress modal shown while provisioning runs in the
-/// background: a spinner (advanced by `tick`) plus the model being installed.
+/// background: a spinner (advanced by `tick`) plus the `subject` being installed
+/// (the runtime name, or a model being pulled).
 pub(super) fn installing_frame(
     raw_height: usize,
     raw_width: usize,
-    model: &str,
+    subject: &str,
     tick: usize,
 ) -> Vec<String> {
     let spinner = SPINNER[tick % SPINNER.len()];
     let body = vec![
         format!("{spinner} インストール中…"),
         String::new(),
-        format!("モデル: {model}"),
+        subject.to_string(),
     ];
     widgets::render_modal(raw_height, raw_width, "Local LLM", MODAL_INNER_WIDTH, &body)
 }
@@ -213,9 +245,13 @@ pub fn render_frame(
     config: &Config,
     notice: Option<&str>,
 ) -> Vec<String> {
-    // When the install modal is open it overlays the whole screen.
+    // When a modal is open it overlays the whole screen: the runtime-install
+    // password prompt, or the model picker.
     if let Some(modal) = config.install_modal() {
-        return install_modal_frame(raw_height, raw_width, config.local_llm_model(), modal);
+        return install_modal_frame(raw_height, raw_width, modal);
+    }
+    if let Some(modal) = config.model_modal() {
+        return model_modal_frame(raw_height, raw_width, modal);
     }
 
     let (height, width) = widgets::normalize_size(raw_height, raw_width);
@@ -328,11 +364,16 @@ mod tests {
         assert!(lines[5].contains("Local LLM"));
         assert!(lines[5].contains("Install"));
         assert!(!lines[5].contains('<'));
+        // The model row (index 6) is inert until the runtime is installed: a
+        // plain "—" with no chevrons.
+        assert!(lines[6].contains("Local LLM Model"));
+        assert!(lines[6].contains('—'));
+        assert!(!lines[6].contains('<'));
         // Every other field is a chooser, so chevrons appear on those rows...
         assert!(lines
             .iter()
             .enumerate()
-            .filter(|(i, _)| *i != 5)
+            .filter(|(i, _)| *i != 5 && *i != 6)
             .all(|(_, l)| l.contains('<') && l.contains('>')));
         // ...but only the focused (first) row carries the cursor.
         assert!(has_cursor(&lines[0]));
@@ -476,6 +517,37 @@ mod tests {
         assert!(joined.contains("••"));
         assert!(!joined.contains("ab"));
         // The modal replaces the settings list (no Save button behind it).
+        assert!(!joined.contains("Save"));
+    }
+
+    /// A config with the runtime installed, focused on the model row, with the
+    /// model picker open and `installed` models flagged as pulled.
+    fn config_with_open_model_modal(installed: &[&str]) -> Config {
+        let mut config = sample_config();
+        config.set_ollama_installed(true);
+        config.set_installed_models(installed.iter().map(|m| m.to_string()).collect());
+        while config.selected_field() != Some(Field::LocalLlmModel) {
+            config.move_down();
+        }
+        config.open_model_modal();
+        config
+    }
+
+    #[test]
+    fn render_frame_overlays_the_model_picker_with_install_markers() {
+        // The default model is pulled; the others are not, so both the ✓ and ⬇
+        // markers (and the selected vs. dim row styles) are exercised.
+        let config = config_with_open_model_modal(&["qwen2.5-coder:7b"]);
+        let joined = render_frame(24, 80, &config, None).join("\n");
+        assert!(joined.contains("Local LLM Model"));
+        // Every offered model is listed.
+        for model in crate::domain::settings::LOCAL_LLM_MODELS {
+            assert!(joined.contains(model));
+        }
+        // Both install states render their marker.
+        assert!(joined.contains("導入済"));
+        assert!(joined.contains("未導入"));
+        // The picker replaces the settings list.
         assert!(!joined.contains("Save"));
     }
 

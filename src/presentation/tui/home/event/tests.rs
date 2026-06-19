@@ -1,4 +1,5 @@
 use super::super::state::LogLine;
+use super::super::terminal_tabs::TabNav;
 use super::*;
 use crate::domain::settings::SessionActionUi;
 use crate::domain::workspace_state::{BranchStatus, SessionRecord, WorktreeState};
@@ -7,6 +8,16 @@ use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::io;
 use std::path::PathBuf;
+
+/// A [`ConfigReload`] carrying `ui` and the local LLM left unavailable — the
+/// shape the config-close callback returns in tests that only care about the
+/// 在席 surface.
+fn reload(ui: SessionActionUi) -> ConfigReload {
+    ConfigReload {
+        session_action_ui: ui,
+        ai_available: false,
+    }
+}
 
 fn noop_create(_: &str) -> SessionOutcome {
     SessionOutcome {
@@ -82,16 +93,22 @@ fn prompt_state() -> HomeState {
 }
 
 /// A `open_terminal` callback reporting the shell closed (one pane iteration).
-fn noop_open(_: &mut HomeState, _: &Path, _: bool) -> Result<PaneExit> {
+fn noop_open(_: &mut HomeState, _: &Path, _: bool, _: bool) -> Result<PaneExit> {
     Ok(PaneExit::Closed)
 }
 
-fn noop_config(_: &Term) -> Result<Option<SessionActionUi>> {
-    Ok(Some(SessionActionUi::Menu))
+fn noop_config(_: &Term) -> Result<Option<ConfigReload>> {
+    Ok(Some(reload(SessionActionUi::Menu)))
 }
 
 fn noop_preview(_: &Path) -> Option<TerminalView> {
     None
+}
+
+/// A `tab_op` callback with no panes: navigation is a no-op and the strip is
+/// empty, for the tests that never exercise tabs.
+fn noop_tab_op(_: &Path, _: Option<TabNav>) -> (Vec<String>, usize) {
+    (Vec::new(), 0)
 }
 
 fn live_preview(_: &Path) -> Option<TerminalView> {
@@ -106,7 +123,7 @@ fn no_branches() -> Vec<String> {
 
 /// Run the loop with all-default callbacks (idle preview, no-op pane).
 fn run(keys: Vec<io::Result<Key>>, state: HomeState) -> Result<Outcome> {
-    let mut open: fn(&mut HomeState, &Path, bool) -> Result<PaneExit> = noop_open;
+    let mut open: fn(&mut HomeState, &Path, bool, bool) -> Result<PaneExit> = noop_open;
     let mut create: fn(&str) -> SessionOutcome = noop_create;
     let mut preview: fn(&Path) -> Option<TerminalView> = noop_preview;
     run_full(
@@ -121,7 +138,7 @@ fn run(keys: Vec<io::Result<Key>>, state: HomeState) -> Result<Outcome> {
 
 /// Run the loop with all-default callbacks but every session live.
 fn run_live(keys: Vec<io::Result<Key>>, state: HomeState) -> Result<Outcome> {
-    let mut open: fn(&mut HomeState, &Path, bool) -> Result<PaneExit> = noop_open;
+    let mut open: fn(&mut HomeState, &Path, bool, bool) -> Result<PaneExit> = noop_open;
     let mut create: fn(&str) -> SessionOutcome = noop_create;
     let mut preview: fn(&Path) -> Option<TerminalView> = live_preview;
     run_full(
@@ -138,10 +155,10 @@ fn run_live(keys: Vec<io::Result<Key>>, state: HomeState) -> Result<Outcome> {
 fn run_full(
     keys: Vec<io::Result<Key>>,
     state: HomeState,
-    open_terminal: &mut dyn FnMut(&mut HomeState, &Path, bool) -> Result<PaneExit>,
+    open_terminal: &mut dyn FnMut(&mut HomeState, &Path, bool, bool) -> Result<PaneExit>,
     create_session: &mut dyn FnMut(&str) -> SessionOutcome,
     preview: &mut dyn FnMut(&Path) -> Option<TerminalView>,
-    open_config: &mut dyn FnMut(&Term) -> Result<Option<SessionActionUi>>,
+    open_config: &mut dyn FnMut(&Term) -> Result<Option<ConfigReload>>,
 ) -> Result<Outcome> {
     let term = Term::stdout();
     let mut reader = ScriptedReader::new(keys);
@@ -164,6 +181,7 @@ fn run_full(
         open_terminal,
         open_config,
         preview,
+        &mut (noop_tab_op as fn(&Path, Option<TabNav>) -> (Vec<String>, usize)),
     )
 }
 
@@ -181,8 +199,8 @@ fn run_with_live_monitor(
     let monitor = MonitorHandle::with_live(vec![PathBuf::from("/r/main")]);
     let mut create: fn(&str) -> SessionOutcome = noop_create;
     let mut remove_session: fn(&str, bool) -> SessionOutcome = noop_remove;
-    let mut open: fn(&mut HomeState, &Path, bool) -> Result<PaneExit> = noop_open;
-    let mut config: fn(&Term) -> Result<Option<SessionActionUi>> = noop_config;
+    let mut open: fn(&mut HomeState, &Path, bool, bool) -> Result<PaneExit> = noop_open;
+    let mut config: fn(&Term) -> Result<Option<ConfigReload>> = noop_config;
     let mut preview: fn(&Path) -> Option<TerminalView> = noop_preview;
     let mut branches: fn() -> Vec<String> = no_branches;
     event_loop(
@@ -200,6 +218,7 @@ fn run_with_live_monitor(
         &mut open,
         &mut config,
         &mut preview,
+        &mut (noop_tab_op as fn(&Path, Option<TabNav>) -> (Vec<String>, usize)),
     )
 }
 
@@ -222,8 +241,8 @@ fn a_populated_update_handle_is_read_before_painting() {
     let mut persist: fn(&str) = noop_persist;
     let mut create: fn(&str) -> SessionOutcome = noop_create;
     let mut remove: fn(&str, bool) -> SessionOutcome = noop_remove;
-    let mut open: fn(&mut HomeState, &Path, bool) -> Result<PaneExit> = noop_open;
-    let mut config: fn(&Term) -> Result<Option<SessionActionUi>> = noop_config;
+    let mut open: fn(&mut HomeState, &Path, bool, bool) -> Result<PaneExit> = noop_open;
+    let mut config: fn(&Term) -> Result<Option<ConfigReload>> = noop_config;
     let mut preview: fn(&Path) -> Option<TerminalView> = noop_preview;
     let outcome = event_loop(
         &term,
@@ -240,6 +259,7 @@ fn a_populated_update_handle_is_read_before_painting() {
         &mut open,
         &mut config,
         &mut preview,
+        &mut (noop_tab_op as fn(&Path, Option<TabNav>) -> (Vec<String>, usize)),
     )
     .unwrap();
     assert!(matches!(outcome, Outcome::Quit));
@@ -256,7 +276,7 @@ fn typed(s: &str) -> Vec<io::Result<Key>> {
 #[test]
 fn prompt_focus_ctrl_o_opens_switch_and_can_change_session() {
     let opened = RefCell::new(0);
-    let mut open = |_h: &mut HomeState, _d: &Path, _a: bool| {
+    let mut open = |_h: &mut HomeState, _d: &Path, _a: bool, _n: bool| {
         *opened.borrow_mut() += 1;
         Ok(PaneExit::Closed)
     };
@@ -331,11 +351,11 @@ fn ctrl_c_in_overview_returns_quit() {
 
 #[test]
 fn ctrl_o_in_overview_opens_switch() {
-    // Ctrl-O zooms into 切替 (Switch) with Overview as the origin; `h` backs
-    // out to Overview, where Esc is inert and the fallback Ctrl-C quits.
+    // Ctrl-O zooms into 切替 (Switch) with Overview as the origin; `Esc` backs
+    // out to Overview, where Esc is then inert and the fallback Ctrl-C quits.
     let keys = vec![
         Ok(Key::Char(CTRL_O)), // Overview -> Switch
-        Ok(Key::Char('h')),    // Switch -> Overview (origin)
+        Ok(Key::Escape),       // Switch -> Overview (origin)
         Ok(Key::Escape),       // Esc inert in Overview; fallback Ctrl-C quits
     ];
     assert!(matches!(run(keys, sample_state()).unwrap(), Outcome::Quit));
@@ -400,8 +420,8 @@ fn overview_caret_keys_edit_within_the_line() {
     let mut persist = |c: &str| recorded.push(c.to_string());
     let mut create: fn(&str) -> SessionOutcome = noop_create;
     let mut remove: fn(&str, bool) -> SessionOutcome = noop_remove;
-    let mut open: fn(&mut HomeState, &Path, bool) -> Result<PaneExit> = noop_open;
-    let mut config: fn(&Term) -> Result<Option<SessionActionUi>> = noop_config;
+    let mut open: fn(&mut HomeState, &Path, bool, bool) -> Result<PaneExit> = noop_open;
+    let mut config: fn(&Term) -> Result<Option<ConfigReload>> = noop_config;
     let mut preview: fn(&Path) -> Option<TerminalView> = noop_preview;
     let outcome = event_loop(
         &term,
@@ -418,6 +438,7 @@ fn overview_caret_keys_edit_within_the_line() {
         &mut open,
         &mut config,
         &mut preview,
+        &mut (noop_tab_op as fn(&Path, Option<TabNav>) -> (Vec<String>, usize)),
     )
     .unwrap();
     assert!(matches!(outcome, Outcome::Quit));
@@ -443,8 +464,8 @@ fn submitted_commands_are_handed_to_persist() {
     let mut persist = |c: &str| recorded.push(c.to_string());
     let mut create: fn(&str) -> SessionOutcome = noop_create;
     let mut remove: fn(&str, bool) -> SessionOutcome = noop_remove;
-    let mut open: fn(&mut HomeState, &Path, bool) -> Result<PaneExit> = noop_open;
-    let mut config: fn(&Term) -> Result<Option<SessionActionUi>> = noop_config;
+    let mut open: fn(&mut HomeState, &Path, bool, bool) -> Result<PaneExit> = noop_open;
+    let mut config: fn(&Term) -> Result<Option<ConfigReload>> = noop_config;
     let mut preview: fn(&Path) -> Option<TerminalView> = noop_preview;
     let outcome = event_loop(
         &term,
@@ -461,6 +482,7 @@ fn submitted_commands_are_handed_to_persist() {
         &mut open,
         &mut config,
         &mut preview,
+        &mut (noop_tab_op as fn(&Path, Option<TabNav>) -> (Vec<String>, usize)),
     )
     .unwrap();
     assert!(matches!(outcome, Outcome::Quit));
@@ -472,7 +494,7 @@ fn overview_terminal_and_agent_attach_the_active_session() {
     // Typing `terminal` / `agent` in Overview still dispatches: it focuses the
     // active row (the root) and attaches the pane.
     let opened = RefCell::new(Vec::new());
-    let mut open = |_h: &mut HomeState, _d: &Path, a: bool| {
+    let mut open = |_h: &mut HomeState, _d: &Path, a: bool, _n: bool| {
         opened.borrow_mut().push(a);
         Ok(PaneExit::Closed)
     };
@@ -518,7 +540,7 @@ fn session_create_with_a_name_creates_immediately() {
         created.borrow_mut().push(name.to_string());
         noop_create(name)
     };
-    let mut open: fn(&mut HomeState, &Path, bool) -> Result<PaneExit> = noop_open;
+    let mut open: fn(&mut HomeState, &Path, bool, bool) -> Result<PaneExit> = noop_open;
     let mut preview: fn(&Path) -> Option<TerminalView> = noop_preview;
     assert!(matches!(
         run_full(
@@ -550,7 +572,7 @@ fn bare_session_create_moves_to_switch_and_opens_the_inline_input() {
         created.borrow_mut().push(name.to_string());
         noop_create(name)
     };
-    let mut open: fn(&mut HomeState, &Path, bool) -> Result<PaneExit> = noop_open;
+    let mut open: fn(&mut HomeState, &Path, bool, bool) -> Result<PaneExit> = noop_open;
     let mut preview: fn(&Path) -> Option<TerminalView> = noop_preview;
     assert!(matches!(
         run_full(
@@ -582,8 +604,8 @@ fn session_remove_with_a_name_and_force_routes_to_remove() {
         removed.push((name.to_string(), force));
         noop_remove(name, force)
     };
-    let mut open: fn(&mut HomeState, &Path, bool) -> Result<PaneExit> = noop_open;
-    let mut config: fn(&Term) -> Result<Option<SessionActionUi>> = noop_config;
+    let mut open: fn(&mut HomeState, &Path, bool, bool) -> Result<PaneExit> = noop_open;
+    let mut config: fn(&Term) -> Result<Option<ConfigReload>> = noop_config;
     let mut preview: fn(&Path) -> Option<TerminalView> = noop_preview;
     let outcome = event_loop(
         &term,
@@ -600,6 +622,7 @@ fn session_remove_with_a_name_and_force_routes_to_remove() {
         &mut open,
         &mut config,
         &mut preview,
+        &mut (noop_tab_op as fn(&Path, Option<TabNav>) -> (Vec<String>, usize)),
     )
     .unwrap();
     assert!(matches!(outcome, Outcome::Quit));
@@ -625,8 +648,8 @@ fn close_typed_in_overview_targets_the_active_session() {
         // The root cannot be removed: report no change (no refreshed list).
         noop_remove(name, force)
     };
-    let mut open: fn(&mut HomeState, &Path, bool) -> Result<PaneExit> = noop_open;
-    let mut config: fn(&Term) -> Result<Option<SessionActionUi>> = noop_config;
+    let mut open: fn(&mut HomeState, &Path, bool, bool) -> Result<PaneExit> = noop_open;
+    let mut config: fn(&Term) -> Result<Option<ConfigReload>> = noop_config;
     let mut preview: fn(&Path) -> Option<TerminalView> = noop_preview;
     let outcome = event_loop(
         &term,
@@ -643,6 +666,7 @@ fn close_typed_in_overview_targets_the_active_session() {
         &mut open,
         &mut config,
         &mut preview,
+        &mut (noop_tab_op as fn(&Path, Option<TabNav>) -> (Vec<String>, usize)),
     )
     .unwrap();
     assert!(matches!(outcome, Outcome::Quit));
@@ -678,8 +702,8 @@ fn focus_close_command_force_removes_the_focused_session_then_enters_switch() {
             select: None,
         }
     };
-    let mut open: fn(&mut HomeState, &Path, bool) -> Result<PaneExit> = noop_open;
-    let mut config: fn(&Term) -> Result<Option<SessionActionUi>> = noop_config;
+    let mut open: fn(&mut HomeState, &Path, bool, bool) -> Result<PaneExit> = noop_open;
+    let mut config: fn(&Term) -> Result<Option<ConfigReload>> = noop_config;
     let mut preview: fn(&Path) -> Option<TerminalView> = noop_preview;
     let mut branches_called = 0;
     let mut branches = || {
@@ -701,6 +725,7 @@ fn focus_close_command_force_removes_the_focused_session_then_enters_switch() {
         &mut open,
         &mut config,
         &mut preview,
+        &mut (noop_tab_op as fn(&Path, Option<TabNav>) -> (Vec<String>, usize)),
     )
     .unwrap();
     assert!(matches!(outcome, Outcome::Quit));
@@ -737,8 +762,8 @@ fn focus_menu_close_force_removes_the_focused_session_then_enters_switch() {
             select: None,
         }
     };
-    let mut open: fn(&mut HomeState, &Path, bool) -> Result<PaneExit> = noop_open;
-    let mut config: fn(&Term) -> Result<Option<SessionActionUi>> = noop_config;
+    let mut open: fn(&mut HomeState, &Path, bool, bool) -> Result<PaneExit> = noop_open;
+    let mut config: fn(&Term) -> Result<Option<ConfigReload>> = noop_config;
     let mut preview: fn(&Path) -> Option<TerminalView> = noop_preview;
     let mut branches_called = 0;
     let mut branches = || {
@@ -760,6 +785,7 @@ fn focus_menu_close_force_removes_the_focused_session_then_enters_switch() {
         &mut open,
         &mut config,
         &mut preview,
+        &mut (noop_tab_op as fn(&Path, Option<TabNav>) -> (Vec<String>, usize)),
     )
     .unwrap();
     assert!(matches!(outcome, Outcome::Quit));
@@ -795,8 +821,8 @@ fn session_remove_without_a_name_opens_the_modal_and_bulk_removes() {
         removed.push((name.to_string(), force));
         noop_remove(name, force)
     };
-    let mut open: fn(&mut HomeState, &Path, bool) -> Result<PaneExit> = noop_open;
-    let mut config: fn(&Term) -> Result<Option<SessionActionUi>> = noop_config;
+    let mut open: fn(&mut HomeState, &Path, bool, bool) -> Result<PaneExit> = noop_open;
+    let mut config: fn(&Term) -> Result<Option<ConfigReload>> = noop_config;
     let mut preview: fn(&Path) -> Option<TerminalView> = noop_preview;
     let outcome = event_loop(
         &term,
@@ -813,6 +839,7 @@ fn session_remove_without_a_name_opens_the_modal_and_bulk_removes() {
         &mut open,
         &mut config,
         &mut preview,
+        &mut (noop_tab_op as fn(&Path, Option<TabNav>) -> (Vec<String>, usize)),
     )
     .unwrap();
     assert!(matches!(outcome, Outcome::Quit));
@@ -925,9 +952,9 @@ fn config_opens_the_settings_screen_and_can_quit() {
     let opened = RefCell::new(false);
     let mut config = |_: &Term| {
         *opened.borrow_mut() = true;
-        Ok(Some(SessionActionUi::Menu))
+        Ok(Some(reload(SessionActionUi::Menu)))
     };
-    let mut open: fn(&mut HomeState, &Path, bool) -> Result<PaneExit> = noop_open;
+    let mut open: fn(&mut HomeState, &Path, bool, bool) -> Result<PaneExit> = noop_open;
     let mut create: fn(&str) -> SessionOutcome = noop_create;
     let mut preview: fn(&Path) -> Option<TerminalView> = noop_preview;
     assert!(matches!(
@@ -966,9 +993,9 @@ fn returning_from_config_refreshes_the_session_action_ui() {
     // Prompt; on returning to home the state must adopt it, so Focus renders the
     // new surface without reopening the screen. The `terminal` command run right
     // after attaches a pane, letting us observe the live state's setting.
-    let mut config = |_: &Term| Ok(Some(SessionActionUi::Prompt));
+    let mut config = |_: &Term| Ok(Some(reload(SessionActionUi::Prompt)));
     let seen = RefCell::new(None);
-    let mut open = |state: &mut HomeState, _: &Path, _: bool| {
+    let mut open = |state: &mut HomeState, _: &Path, _: bool, _: bool| {
         *seen.borrow_mut() = Some(state.session_action_ui());
         Ok(PaneExit::Closed)
     };
@@ -995,7 +1022,7 @@ fn config_failure_is_propagated() {
     let mut keys = typed("config");
     keys.push(Ok(Key::Enter));
     let mut config = |_: &Term| Err(anyhow::anyhow!("settings blew up"));
-    let mut open: fn(&mut HomeState, &Path, bool) -> Result<PaneExit> = noop_open;
+    let mut open: fn(&mut HomeState, &Path, bool, bool) -> Result<PaneExit> = noop_open;
     let mut create: fn(&str) -> SessionOutcome = noop_create;
     let mut preview: fn(&Path) -> Option<TerminalView> = noop_preview;
     let err = run_full(
@@ -1035,7 +1062,7 @@ fn session_switch_known_live_name_attaches_then_returns_to_focus() {
     // "root" resolves and is live, so it attaches; noop_open closes the pane,
     // returning to Focus, then Esc -> Overview (fallback Ctrl-C quits).
     let opened = RefCell::new(0);
-    let mut open = |_h: &mut HomeState, _d: &Path, _a: bool| {
+    let mut open = |_h: &mut HomeState, _d: &Path, _a: bool, _n: bool| {
         *opened.borrow_mut() += 1;
         Ok(PaneExit::Closed)
     };
@@ -1064,16 +1091,22 @@ fn session_switch_known_live_name_attaches_then_returns_to_focus() {
 
 #[test]
 fn switch_navigates_and_backs_out_to_overview() {
-    // `session switch` enters Switch; arrows / jk move; Esc returns to Overview
-    // (the origin); Esc is then inert, so the fallback Ctrl-C quits.
+    // `session switch` enters Switch; ↑/↓ (jk) move between sessions and ←/→ (hl)
+    // between the highlighted session's tabs (a no-op with no panes here); Esc
+    // returns to Overview (the origin); Esc is then inert, so the fallback Ctrl-C
+    // quits.
     let mut keys = typed("session switch");
     keys.push(Ok(Key::Enter)); // -> Switch (origin Overview)
     keys.push(Ok(Key::ArrowDown));
     keys.push(Ok(Key::ArrowUp));
     keys.push(Ok(Key::Char('j')));
     keys.push(Ok(Key::Char('k')));
+    keys.push(Ok(Key::ArrowLeft)); // tab prev (no panes -> no-op)
+    keys.push(Ok(Key::ArrowRight)); // tab next (no-op)
+    keys.push(Ok(Key::Char('h'))); // tab prev via vim key (no-op)
+    keys.push(Ok(Key::Char('l'))); // tab next via vim key (no-op)
     keys.push(Ok(Key::Home)); // ignored
-    keys.push(Ok(Key::Char('h'))); // back to Overview
+    keys.push(Ok(Key::Escape)); // back to Overview
     keys.push(Ok(Key::Escape)); // Esc inert in Overview; fallback Ctrl-C quits
     assert!(matches!(run(keys, sample_state()).unwrap(), Outcome::Quit));
 }
@@ -1123,17 +1156,21 @@ fn switch_enter_on_an_idle_session_just_focuses_it() {
 }
 
 #[test]
-fn switch_enter_on_a_live_session_attaches_via_l() {
+fn switch_enter_on_a_live_session_re_attaches_its_active_pane() {
+    // Enter on a live session re-attaches (no new pane), so `open_terminal` is
+    // called once with `new_pane == false`.
     let opened = RefCell::new(0);
-    let mut open = |_h: &mut HomeState, _d: &Path, _a: bool| {
+    let new_pane_seen = RefCell::new(None);
+    let mut open = |_h: &mut HomeState, _d: &Path, _a: bool, n: bool| {
         *opened.borrow_mut() += 1;
+        *new_pane_seen.borrow_mut() = Some(n);
         Ok(PaneExit::Closed)
     };
     let mut create: fn(&str) -> SessionOutcome = noop_create;
     let mut preview: fn(&Path) -> Option<TerminalView> = live_preview;
     let mut keys = typed("session switch");
     keys.push(Ok(Key::Enter)); // -> Switch
-    keys.push(Ok(Key::Char('l'))); // focus + attach (live)
+    keys.push(Ok(Key::Enter)); // focus + attach (live)
     keys.push(Ok(Key::Escape)); // Focus -> Overview
     keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
     assert!(matches!(
@@ -1149,6 +1186,96 @@ fn switch_enter_on_a_live_session_attaches_via_l() {
         Outcome::Quit
     ));
     assert_eq!(*opened.borrow(), 1);
+    assert_eq!(*new_pane_seen.borrow(), Some(false));
+}
+
+#[test]
+fn switch_t_opens_the_action_surface_and_adds_a_new_pane() {
+    // `t` in 切替 opens the selected session's action surface (在席) instead of
+    // attaching; running `terminal` there adds a *new* pane, so `open_terminal`
+    // is called with new_pane == true.
+    let opened = RefCell::new(0);
+    let new_pane_seen = RefCell::new(None);
+    let mut open = |_h: &mut HomeState, _d: &Path, _a: bool, n: bool| {
+        *opened.borrow_mut() += 1;
+        *new_pane_seen.borrow_mut() = Some(n);
+        Ok(PaneExit::Closed)
+    };
+    let mut create: fn(&str) -> SessionOutcome = noop_create;
+    let mut preview: fn(&Path) -> Option<TerminalView> = noop_preview;
+    let mut keys = typed("session switch");
+    keys.push(Ok(Key::Enter)); // -> Switch
+    keys.push(Ok(Key::Char('t'))); // -> 在席 action surface (Menu)
+    keys.push(Ok(Key::Char('t'))); // menu: run terminal -> adds a new pane
+    keys.push(Ok(Key::Escape)); // 在席 -> Overview
+    keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
+    assert!(matches!(
+        run_full(
+            keys,
+            sample_state(),
+            &mut open,
+            &mut create,
+            &mut preview,
+            &mut noop_config
+        )
+        .unwrap(),
+        Outcome::Quit
+    ));
+    assert_eq!(*opened.borrow(), 1);
+    assert_eq!(*new_pane_seen.borrow(), Some(true));
+}
+
+#[test]
+fn switch_arrows_move_the_active_tab_via_tab_op() {
+    // ←/→ (and the vim h/l) drive `tab_op` with a `TabNav`, moving the highlighted
+    // session's active tab without leaving 切替.
+    let term = Term::stdout();
+    let navs = RefCell::new(Vec::new());
+    let mut tab_op = |_d: &Path, nav: Option<TabNav>| -> (Vec<String>, usize) {
+        if let Some(n) = nav {
+            navs.borrow_mut().push(n);
+        }
+        (vec!["agent".to_string(), "terminal".to_string()], 0)
+    };
+    let mut keys = typed("session switch");
+    keys.push(Ok(Key::Enter)); // -> Switch
+    keys.push(Ok(Key::ArrowRight)); // tab next
+    keys.push(Ok(Key::ArrowLeft)); // tab prev
+    keys.push(Ok(Key::Char('l'))); // tab next (vim)
+    keys.push(Ok(Key::Char('h'))); // tab prev (vim)
+    keys.push(Ok(Key::CtrlC)); // quit
+    let mut reader = ScriptedReader::new(keys);
+    let monitor = MonitorHandle::detached();
+    let mut persist: fn(&str) = noop_persist;
+    let mut create: fn(&str) -> SessionOutcome = noop_create;
+    let mut remove: fn(&str, bool) -> SessionOutcome = noop_remove;
+    let mut open: fn(&mut HomeState, &Path, bool, bool) -> Result<PaneExit> = noop_open;
+    let mut config: fn(&Term) -> Result<Option<ConfigReload>> = noop_config;
+    let mut preview: fn(&Path) -> Option<TerminalView> = noop_preview;
+    let mut branches: fn() -> Vec<String> = no_branches;
+    let outcome = event_loop(
+        &term,
+        &mut reader,
+        sample_state(),
+        Path::new("/ws"),
+        &monitor,
+        &UpdateHandle::new(),
+        &mut persist,
+        &mut create,
+        &mut (noop_rename as fn(&str, &str) -> SessionOutcome),
+        &mut remove,
+        &mut branches,
+        &mut open,
+        &mut config,
+        &mut preview,
+        &mut tab_op,
+    )
+    .unwrap();
+    assert!(matches!(outcome, Outcome::Quit));
+    assert_eq!(
+        *navs.borrow(),
+        vec![TabNav::Next, TabNav::Prev, TabNav::Next, TabNav::Prev]
+    );
 }
 
 #[test]
@@ -1173,7 +1300,7 @@ fn switch_inline_create_makes_and_focuses_the_new_session() {
         created.borrow_mut().push(name.to_string());
         noop_create(name)
     };
-    let mut open: fn(&mut HomeState, &Path, bool) -> Result<PaneExit> = noop_open;
+    let mut open: fn(&mut HomeState, &Path, bool, bool) -> Result<PaneExit> = noop_open;
     let mut preview: fn(&Path) -> Option<TerminalView> = noop_preview;
     assert!(matches!(
         run_full(
@@ -1237,8 +1364,8 @@ fn run_recording_rename(keys: Vec<io::Result<Key>>) -> (Vec<(String, String)>, O
         noop_rename(name, label)
     };
     let mut remove: fn(&str, bool) -> SessionOutcome = noop_remove;
-    let mut open: fn(&mut HomeState, &Path, bool) -> Result<PaneExit> = noop_open;
-    let mut config: fn(&Term) -> Result<Option<SessionActionUi>> = noop_config;
+    let mut open: fn(&mut HomeState, &Path, bool, bool) -> Result<PaneExit> = noop_open;
+    let mut config: fn(&Term) -> Result<Option<ConfigReload>> = noop_config;
     let mut preview: fn(&Path) -> Option<TerminalView> = noop_preview;
     let outcome = event_loop(
         &term,
@@ -1255,6 +1382,7 @@ fn run_recording_rename(keys: Vec<io::Result<Key>>) -> (Vec<(String, String)>, O
         &mut open,
         &mut config,
         &mut preview,
+        &mut (noop_tab_op as fn(&Path, Option<TabNav>) -> (Vec<String>, usize)),
     )
     .unwrap();
     (renamed.into_inner(), outcome)
@@ -1315,7 +1443,7 @@ fn focus_menu_moves_and_runs_terminal_via_enter() {
     // "terminal" by default; move down to "agent" and back up to "terminal",
     // then Enter runs it (attaches).
     let opened = RefCell::new(Vec::new());
-    let mut open = |_h: &mut HomeState, d: &Path, a: bool| {
+    let mut open = |_h: &mut HomeState, d: &Path, a: bool, _n: bool| {
         opened.borrow_mut().push((d.to_path_buf(), a));
         Ok(PaneExit::Closed)
     };
@@ -1348,7 +1476,7 @@ fn focus_menu_moves_and_runs_terminal_via_enter() {
 #[test]
 fn focus_menu_shortcut_keys_launch_terminal_and_agent() {
     let opened = RefCell::new(Vec::new());
-    let mut open = |_h: &mut HomeState, _d: &Path, a: bool| {
+    let mut open = |_h: &mut HomeState, _d: &Path, a: bool, _n: bool| {
         opened.borrow_mut().push(a);
         Ok(PaneExit::Closed)
     };
@@ -1378,9 +1506,11 @@ fn focus_menu_shortcut_keys_launch_terminal_and_agent() {
 
 #[test]
 fn focus_menu_can_run_the_coming_soon_ai_command() {
-    // The menu lists terminal (0, default), agent (1), ai (2), close (3).
-    // ArrowUp from the top wraps to "close"; one more lands on "ai"; Enter on
-    // it just logs (no attach).
+    // With the local LLM available the menu lists terminal (0, default),
+    // agent (1), ai (2), close (3). ArrowUp from the top wraps to "close"; one
+    // more lands on "ai"; Enter on it just logs (no attach).
+    let mut state = sample_state();
+    state.set_ai_available(true);
     let mut keys = typed("session switch feat");
     keys.push(Ok(Key::Enter)); // Focus
     keys.push(Ok(Key::Home)); // ignored in the menu
@@ -1391,17 +1521,17 @@ fn focus_menu_can_run_the_coming_soon_ai_command() {
     keys.push(Ok(Key::Enter)); // run ai (coming soon)
     keys.push(Ok(Key::Escape)); // -> Overview
     keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
-    assert!(matches!(run(keys, sample_state()).unwrap(), Outcome::Quit));
+    assert!(matches!(run(keys, state).unwrap(), Outcome::Quit));
 }
 
 #[test]
 fn focus_ctrl_o_opens_switch_then_esc_re_focuses() {
-    // Focus -> Ctrl-O -> Switch(return=Focus); Esc/h re-enters Focus; Esc ->
+    // Focus -> Ctrl-O -> Switch(return=Focus); Esc re-enters Focus; Esc ->
     // Overview; Esc inert, fallback Ctrl-C quits.
     let mut keys = typed("session switch feat");
     keys.push(Ok(Key::Enter)); // Focus feat
     keys.push(Ok(Key::Char(CTRL_O))); // -> Switch(return Focus)
-    keys.push(Ok(Key::Char('h'))); // back -> Focus
+    keys.push(Ok(Key::Escape)); // back -> Focus
     keys.push(Ok(Key::Escape)); // Focus -> Overview
     keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
     assert!(matches!(run(keys, sample_state()).unwrap(), Outcome::Quit));
@@ -1420,7 +1550,7 @@ fn focus_ctrl_c_quits() {
 #[test]
 fn focus_prompt_edits_completes_and_runs_terminal() {
     let opened = RefCell::new(0);
-    let mut open = |_h: &mut HomeState, _d: &Path, a: bool| {
+    let mut open = |_h: &mut HomeState, _d: &Path, a: bool, _n: bool| {
         assert!(!a);
         *opened.borrow_mut() += 1;
         Ok(PaneExit::Closed)
@@ -1461,7 +1591,7 @@ fn focus_prompt_edits_completes_and_runs_terminal() {
 #[test]
 fn focus_prompt_runs_agent_and_coming_soon_and_ignores_empty() {
     let opened = RefCell::new(Vec::new());
-    let mut open = |_h: &mut HomeState, _d: &Path, a: bool| {
+    let mut open = |_h: &mut HomeState, _d: &Path, a: bool, _n: bool| {
         opened.borrow_mut().push(a);
         Ok(PaneExit::Closed)
     };
@@ -1498,7 +1628,7 @@ fn focus_prompt_runs_agent_and_coming_soon_and_ignores_empty() {
 fn ctrl_o_in_the_pane_zooms_out_to_switch() {
     // Attaching to a live session; the pane returns ToSwitch (Ctrl-O), so the
     // loop enters Switch with return=Attached. Then Ctrl-O -> Overview (fallback Ctrl-C quits).
-    let mut open = |_h: &mut HomeState, _d: &Path, _a: bool| Ok(PaneExit::ToSwitch);
+    let mut open = |_h: &mut HomeState, _d: &Path, _a: bool, _n: bool| Ok(PaneExit::ToSwitch);
     let mut create: fn(&str) -> SessionOutcome = noop_create;
     let mut preview: fn(&Path) -> Option<TerminalView> = live_preview;
     let mut keys = typed("session switch root");
@@ -1524,7 +1654,7 @@ fn pane_to_switch_then_esc_re_attaches() {
     // ToSwitch -> Switch(return=Attached). In Switch, Esc re-attaches. The pane
     // returns ToSwitch the first time and Closed the second so the run ends.
     let calls = RefCell::new(0);
-    let mut open = |_h: &mut HomeState, _d: &Path, _a: bool| {
+    let mut open = |_h: &mut HomeState, _d: &Path, _a: bool, _n: bool| {
         let mut n = calls.borrow_mut();
         *n += 1;
         if *n == 1 {
@@ -1561,7 +1691,7 @@ fn pane_to_switch_then_esc_onto_an_idle_session_lands_in_focus() {
     // session and pressing Esc lands in 在席 *without* spawning a second pane
     // — only a live session re-attaches, mirroring how Enter behaves.
     let calls = RefCell::new(0);
-    let mut open = |_h: &mut HomeState, _d: &Path, _a: bool| {
+    let mut open = |_h: &mut HomeState, _d: &Path, _a: bool, _n: bool| {
         *calls.borrow_mut() += 1;
         Ok(PaneExit::ToSwitch)
     };
@@ -1598,7 +1728,8 @@ fn pane_to_switch_then_esc_onto_an_idle_session_lands_in_focus() {
 
 #[test]
 fn pane_failure_is_reported_and_returns_to_focus() {
-    let mut open = |_h: &mut HomeState, _d: &Path, _a: bool| Err(anyhow::anyhow!("no shell"));
+    let mut open =
+        |_h: &mut HomeState, _d: &Path, _a: bool, _n: bool| Err(anyhow::anyhow!("no shell"));
     let mut create: fn(&str) -> SessionOutcome = noop_create;
     let mut preview: fn(&Path) -> Option<TerminalView> = live_preview;
     let mut keys = typed("session switch root");
