@@ -640,10 +640,11 @@ fn session_remove_with_a_name_and_force_routes_to_remove() {
 }
 
 #[test]
-fn close_typed_in_overview_targets_the_active_session() {
-    // `close` is a session command, but the Overview line still dispatches it:
-    // it force-removes the active session (the root by default). The root is not
-    // removable, so `remove` reports no change and the screen stays put.
+fn close_typed_in_overview_on_root_is_refused() {
+    // `close` is a session command, and the Overview line still dispatches it.
+    // The focused row is the root by default, which is the workspace itself and
+    // not a session, so `close` is refused outright: `remove` is never called and
+    // the screen stays put.
     let mut keys = typed("close");
     keys.push(Ok(Key::Enter)); // run `close` from the Overview line
     keys.push(Ok(Key::Escape)); // Esc inert in Overview; fallback Ctrl-C quits
@@ -655,7 +656,6 @@ fn close_typed_in_overview_targets_the_active_session() {
     let mut removed = Vec::new();
     let mut remove = |name: &str, force: bool| {
         removed.push((name.to_string(), force));
-        // The root cannot be removed: report no change (no refreshed list).
         noop_remove(name, force)
     };
     let mut open: fn(&mut HomeState, &Path, bool, bool) -> Result<PaneExit> = noop_open;
@@ -681,7 +681,10 @@ fn close_typed_in_overview_targets_the_active_session() {
     )
     .unwrap();
     assert!(matches!(outcome, Outcome::Quit));
-    assert_eq!(removed, vec![("root".to_string(), true)]);
+    assert!(
+        removed.is_empty(),
+        "close on the root row must not call remove"
+    );
 }
 
 #[test]

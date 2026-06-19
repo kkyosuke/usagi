@@ -6,15 +6,18 @@
 //! leaving the pane); this module borrows it and runs the render/input loop.
 //! Keystrokes are forwarded to the shell as raw bytes.
 //!
-//! The **reserved keys** are `Ctrl-O` and `Ctrl-N`/`Ctrl-P`: everything else,
-//! including `Esc`, flows to the shell. A single `Ctrl-O` zooms out one
-//! engagement level by returning [`PaneStep::Detach`] immediately, leaving the
-//! pane for 切替 (Switch) on the left pane while every pane stays alive in the
-//! pool — there the user moves between sessions (`↑`/`↓`), between this session's
-//! tabs (`←`/`→`), re-attaches (`Enter`), opens the action surface to add a pane
-//! (`t`), or zooms further out to 統括 (`Ctrl-O`). `Ctrl-N`/`Ctrl-P` switch to the
-//! next / previous tab in place ([`PaneStep::NextTab`] / [`PaneStep::PrevTab`])
-//! without leaving 没入. The shell exiting on its own reports [`PaneStep::Closed`].
+//! The **reserved keys** are `Ctrl-O`, `Ctrl-N`/`Ctrl-P`, `Ctrl-T`/`Ctrl-G`, and
+//! `Ctrl-W`: everything else, including `Esc`, flows to the shell. A single
+//! `Ctrl-O` zooms out one engagement level by returning [`PaneStep::Detach`]
+//! immediately, leaving the pane for 切替 (Switch) on the left pane while every
+//! pane stays alive in the pool — there the user moves between sessions
+//! (`↑`/`↓`), between this session's tabs (`←`/`→`), re-attaches (`Enter`), adds a
+//! pane (`t`), or zooms further out to 統括 (`Ctrl-O`). `Ctrl-N`/`Ctrl-P` switch to
+//! the next / previous tab in place ([`PaneStep::NextTab`] / [`PaneStep::PrevTab`]);
+//! `Ctrl-T`/`Ctrl-G` add a terminal / agent tab ([`PaneStep::NewTerminalTab`] /
+//! [`PaneStep::NewAgentTab`]) and `Ctrl-W` closes the active tab
+//! ([`PaneStep::CloseTab`]) — all without leaving 没入. The shell exiting on its
+//! own reports [`PaneStep::Closed`].
 //!
 //! `agent` reuses the same machinery: the pool sends the configured agent CLI to
 //! the shell on first spawn, so the pane lands the user straight in the agent.
@@ -51,10 +54,10 @@ use super::terminal_view::TerminalView;
 use super::ui;
 
 /// Why the embedded terminal loop handed control back, so the pool-driven loop
-/// in [`super::run`](super) can act on it: the user detached, switched tabs, or
-/// the shell closed. Pane management (add / close) lives in 切替 (Switch),
-/// reached by `Detach`; tab switching is handled in place via `NextTab` /
-/// `PrevTab` so the user can move between a session's panes without leaving 没入.
+/// in [`super::run`](super) can act on it: the user detached, switched tabs,
+/// added / closed a tab, or the shell closed. Tab switching and pane management
+/// (add / close) are all handled in place without leaving 没入 — the same actions
+/// are also reachable from 切替 (Switch) via `Detach`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PaneStep {
     /// `Ctrl-O`: zoom out one level (→ 切替), leaving every pane alive in the pool.
@@ -64,6 +67,13 @@ pub enum PaneStep {
     NextTab,
     /// `Ctrl-P`: switch to the previous tab without leaving 没入.
     PrevTab,
+    /// `Ctrl-T`: add a new terminal tab and make it active, without leaving 没入.
+    NewTerminalTab,
+    /// `Ctrl-G`: add a new agent tab and make it active, without leaving 没入.
+    NewAgentTab,
+    /// `Ctrl-W`: close the active tab without leaving 没入. The caller drops it,
+    /// then keeps driving the next pane or falls to 在席 when none remain.
+    CloseTab,
     /// The active pane's shell exited on its own (e.g. `exit`).
     Closed,
 }
@@ -290,8 +300,11 @@ fn wait(pty: &PtySession, drawn_gen: u64) -> Result<Wake> {
 /// [`open_clicked_url`]). Button-less motion updates `hover` so the link under
 /// the pointer lights up. `Ctrl-O` detaches to 切替 ([`PaneStep::Detach`]),
 /// leaving every pane alive in the pool; `Ctrl-N` / `Ctrl-P` switch to the next /
-/// previous tab in place ([`PaneStep::NextTab`] / [`PaneStep::PrevTab`]). Other
-/// events are ignored so the next redraw picks up any new size.
+/// previous tab in place ([`PaneStep::NextTab`] / [`PaneStep::PrevTab`]);
+/// `Ctrl-T` / `Ctrl-G` add a terminal / agent tab ([`PaneStep::NewTerminalTab`] /
+/// [`PaneStep::NewAgentTab`]) and `Ctrl-W` closes the active tab
+/// ([`PaneStep::CloseTab`]). Other events are ignored so the next redraw picks up
+/// any new size.
 fn pump_input(
     term: &Term,
     pty: &mut PtySession,
@@ -335,6 +348,25 @@ fn pump_input(
                     *scrollback = 0;
                     *selection = None;
                     return Ok(Some(PaneStep::PrevTab));
+                }
+                // `Ctrl-T` / `Ctrl-G` add a terminal / agent tab and `Ctrl-W`
+                // closes the active one — all in place, so the pool-driven loop
+                // applies the change and keeps driving without leaving 没入. (Like
+                // the tab chords above, this claims these from the shell/agent.)
+                if is_new_terminal_tab(&key) {
+                    *scrollback = 0;
+                    *selection = None;
+                    return Ok(Some(PaneStep::NewTerminalTab));
+                }
+                if is_new_agent_tab(&key) {
+                    *scrollback = 0;
+                    *selection = None;
+                    return Ok(Some(PaneStep::NewAgentTab));
+                }
+                if is_close_tab(&key) {
+                    *scrollback = 0;
+                    *selection = None;
+                    return Ok(Some(PaneStep::CloseTab));
                 }
                 // With text selected, `Ctrl-C` copies it (and clears the
                 // selection) instead of sending SIGINT — the way terminals treat
@@ -632,6 +664,33 @@ fn is_prev_tab(key: &KeyEvent) -> bool {
     key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('p')
 }
 
+/// Whether this key is `Ctrl-T` (add a terminal tab) — detected both as the raw
+/// `0x14` (DC4) control char and as `'t'` + `CONTROL`, mirroring [`is_next_tab`].
+fn is_new_terminal_tab(key: &KeyEvent) -> bool {
+    if key.code == KeyCode::Char('\u{14}') {
+        return true;
+    }
+    key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('t')
+}
+
+/// Whether this key is `Ctrl-G` (add an agent tab) — detected both as the raw
+/// `0x07` (BEL) control char and as `'g'` + `CONTROL`, mirroring [`is_next_tab`].
+fn is_new_agent_tab(key: &KeyEvent) -> bool {
+    if key.code == KeyCode::Char('\u{07}') {
+        return true;
+    }
+    key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('g')
+}
+
+/// Whether this key is `Ctrl-W` (close the active tab) — detected both as the raw
+/// `0x17` (ETB) control char and as `'w'` + `CONTROL`, mirroring [`is_next_tab`].
+fn is_close_tab(key: &KeyEvent) -> bool {
+    if key.code == KeyCode::Char('\u{17}') {
+        return true;
+    }
+    key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('w')
+}
+
 /// Whether this key is the copy shortcut (`Ctrl-C`). It only copies when a
 /// selection is active; otherwise the caller forwards it to the shell as the
 /// usual interrupt. `Ctrl+Shift+C` is left to the shell unchanged.
@@ -761,6 +820,51 @@ mod tests {
         )));
         assert!(!is_prev_tab(&key(
             KeyCode::Char('n'),
+            KeyModifiers::CONTROL
+        )));
+    }
+
+    #[test]
+    fn pane_chords_match_both_forms_and_reject_others() {
+        // Ctrl-T (add terminal) / Ctrl-G (add agent) / Ctrl-W (close): crossterm's
+        // letter + CONTROL, and the bare control char some terminals deliver
+        // instead (0x14 / 0x07 / 0x17).
+        assert!(is_new_terminal_tab(&key(
+            KeyCode::Char('t'),
+            KeyModifiers::CONTROL
+        )));
+        assert!(is_new_terminal_tab(&key(
+            KeyCode::Char('\u{14}'),
+            KeyModifiers::NONE
+        )));
+        assert!(is_new_agent_tab(&key(
+            KeyCode::Char('g'),
+            KeyModifiers::CONTROL
+        )));
+        assert!(is_new_agent_tab(&key(
+            KeyCode::Char('\u{07}'),
+            KeyModifiers::NONE
+        )));
+        assert!(is_close_tab(&key(
+            KeyCode::Char('w'),
+            KeyModifiers::CONTROL
+        )));
+        assert!(is_close_tab(&key(
+            KeyCode::Char('\u{17}'),
+            KeyModifiers::NONE
+        )));
+        // Plain letters and the wrong chord are rejected (they flow to the shell).
+        assert!(!is_new_terminal_tab(&key(
+            KeyCode::Char('t'),
+            KeyModifiers::NONE
+        )));
+        assert!(!is_new_agent_tab(&key(
+            KeyCode::Char('g'),
+            KeyModifiers::NONE
+        )));
+        assert!(!is_close_tab(&key(KeyCode::Char('w'), KeyModifiers::NONE)));
+        assert!(!is_close_tab(&key(
+            KeyCode::Char('t'),
             KeyModifiers::CONTROL
         )));
     }
