@@ -68,9 +68,6 @@ const SEP: &str = " │ ";
 /// Visible width of [`SEP`].
 const SEP_WIDTH: usize = 3;
 
-/// Block caret drawn at the end of the command input.
-const CARET: &str = "▏";
-
 /// Narrowest and widest the left (worktree) pane is allowed to be.
 const LEFT_MIN: usize = 16;
 const LEFT_MAX: usize = 40;

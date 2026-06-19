@@ -5,19 +5,20 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
 
-use console::style;
+use console::{style, Style};
 
 use super::super::command::{CommandInfo, Hint};
 use super::super::state::{HomeState, LineKind, LogLine, Mode, WorktreeList, ROOT_NAME};
 use super::super::terminal_tabs::TabStrip;
 use super::super::terminal_view::TerminalView;
 use super::{
-    clip_to_width, ACTIVE_COL, CARET, DETACHED, DIRTY_ICON, EMPTY_MESSAGE, HINT_INDENT, HINT_MAX,
+    clip_to_width, ACTIVE_COL, DETACHED, DIRTY_ICON, EMPTY_MESSAGE, HINT_INDENT, HINT_MAX,
     LOCAL_ICON, NAME_PREFIX, NEW_ICON, PUSHED_ICON, ROOT_DETAIL, STATUS_COL, SYNCED_ICON,
     TERMINAL_STARTING,
 };
 use crate::domain::settings::SessionActionUi;
 use crate::domain::workspace_state::{BranchStatus, WorktreeState};
+use crate::presentation::tui::widgets;
 
 /// The Nerd Font git glyph for a branch lifecycle status.
 fn status_icon(status: BranchStatus) -> char {
@@ -458,14 +459,10 @@ pub(super) fn focus_prompt(state: &HomeState, width: usize) -> Vec<String> {
         String::new(),
     ];
     let prompt = style("❯").red().bold();
-    // Split at the caret so ←/→/Home/End move a visible caret through the prompt.
+    // Split at the caret so ←/→/Home/End move a visible block caret through the prompt.
     let (before, after) = state.focus_prompt().split_at(state.focus_prompt_cursor());
-    let before = style(before).cyan();
-    let after = style(after).cyan();
-    lines.push(clip_to_width(
-        &format!("{prompt} {before}{CARET}{after}"),
-        width,
-    ));
+    let value = widgets::block_caret(before, after, &Style::new().cyan());
+    lines.push(clip_to_width(&format!("{prompt} {value}"), width));
     lines.push(String::new());
     lines.extend(focus_hint_lines(state.focus_prompt_hint(), width));
     lines
@@ -590,7 +587,8 @@ pub(super) fn switch_preview(state: &HomeState, width: usize, rows: usize) -> Ve
             }
             SessionActionUi::Prompt => {
                 let prompt = style("❯").red().bold();
-                lines.push(clip_to_width(&format!("{prompt} {CARET}"), width));
+                let value = widgets::block_caret("", "", &Style::new().cyan());
+                lines.push(clip_to_width(&format!("{prompt} {value}"), width));
             }
         }
         lines.push(String::new());

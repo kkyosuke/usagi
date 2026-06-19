@@ -13,7 +13,8 @@
 use crate::domain::settings::{
     AgentCli, BranchSource, LocalSettings, SessionActionUi, Settings, Theme, LOCAL_LLM_MODELS,
 };
-use crate::presentation::tui::widgets::text_input::TextInput;
+use crate::presentation::tui::widgets::{self, text_input::TextInput};
+use console::Style;
 
 /// The themes in the order they cycle through.
 const THEMES: [Theme; 3] = [Theme::Light, Theme::Dark, Theme::System];
@@ -142,14 +143,14 @@ impl InstallModal {
         self.password.value()
     }
 
-    /// The password rendered as bullets, one per character, with `caret` drawn at
+    /// The password rendered as bullets, one per character, with a block caret at
     /// the editing position, so it is never shown in the clear yet ←/→/Home/End
-    /// move a visible caret. Each character maps to one bullet, so the caret lands
-    /// between the right bullets even for multi-byte input.
-    pub fn masked(&self, caret: &str) -> String {
-        let before = self.password.before().chars().count();
-        let after = self.password.after().chars().count();
-        format!("{}{caret}{}", "•".repeat(before), "•".repeat(after))
+    /// move a visible caret. Each character maps to one bullet, so the caret sits
+    /// on the right bullet even for multi-byte input.
+    pub fn masked(&self) -> String {
+        let before = "•".repeat(self.password.before().chars().count());
+        let after = "•".repeat(self.password.after().chars().count());
+        widgets::block_caret(&before, &after, &Style::new())
     }
 }
 

@@ -1,4 +1,4 @@
-use console::style;
+use console::{style, Style};
 
 use crate::presentation::tui::widgets;
 
@@ -9,9 +9,6 @@ const SUBTITLE: &str = "Clone a repository or register an existing directory";
 
 /// Fixed width of the form block; the whole block is centred in the terminal.
 const BLOCK_WIDTH: usize = 52;
-
-/// Caret shown at the end of the focused input field.
-const CARET: &str = "▏";
 
 /// Builds the centred mascot, title, and subtitle block.
 ///
@@ -43,19 +40,15 @@ fn input_line(
 
     let body = if value.is_empty() {
         if focused {
-            // Focused but empty: show only the caret so typing is obvious.
-            CARET.to_string()
+            // Focused but empty: show only the block caret so typing is obvious.
+            widgets::block_caret("", "", &Style::new().cyan().bold())
         } else {
             style(placeholder).dim().italic().to_string()
         }
     } else if focused {
         // Split at the caret so it can sit mid-value, not only at the end.
         let (before, after) = value.split_at(cursor.min(value.len()));
-        format!(
-            "{}{CARET}{}",
-            style(before).cyan().bold(),
-            style(after).cyan().bold(),
-        )
+        widgets::block_caret(before, after, &Style::new().cyan().bold())
     } else {
         style(value).cyan().to_string()
     };
@@ -283,8 +276,8 @@ mod tests {
 
     #[test]
     fn input_line_focused_and_empty_shows_only_caret() {
+        // Focused but empty: a block caret (no placeholder), behind the `>` marker.
         let line = input_line("", "", 0, "placeholder", true);
-        assert!(line.contains(CARET));
         assert!(line.contains('>'));
         assert!(!line.contains("placeholder"));
     }
@@ -293,23 +286,23 @@ mod tests {
     fn input_line_focused_and_filled_shows_value_and_caret() {
         let line = input_line("", "repo", 4, "placeholder", true);
         assert!(line.contains("repo"));
-        assert!(line.contains(CARET));
+        assert!(line.contains('>'));
     }
 
     #[test]
-    fn input_line_focused_draws_the_caret_at_the_cursor() {
-        // A caret in the middle splits the value (`re▏po`), so editing mid-string
-        // is visible.
+    fn input_line_focused_draws_the_caret_without_shifting_the_text() {
+        // The block caret sits on a character rather than splitting the value, so
+        // the text reads intact wherever the caret is. (The reverse-video cell
+        // itself is covered by `widgets::block_caret`'s tests.)
         let line = input_line("", "repo", 2, "placeholder", true);
         let plain = console::strip_ansi_codes(&line).into_owned();
-        assert!(plain.contains(&format!("re{CARET}po")));
+        assert!(plain.contains("repo"));
     }
 
     #[test]
     fn input_line_unfocused_and_empty_shows_placeholder() {
         let line = input_line("", "", 0, "placeholder", false);
         assert!(line.contains("placeholder"));
-        assert!(!line.contains(CARET));
     }
 
     #[test]
@@ -317,7 +310,6 @@ mod tests {
         let line = input_line("", "repo", 0, "placeholder", false);
         assert!(line.contains("repo"));
         assert!(!line.contains("placeholder"));
-        assert!(!line.contains(CARET));
     }
 
     #[test]
