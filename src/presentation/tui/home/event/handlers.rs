@@ -17,6 +17,7 @@ use crate::domain::settings::SessionActionUi;
 
 use super::super::command::Effect;
 use super::super::state::{HomeState, PaneExit, ReturnMode, SessionOutcome};
+use super::super::terminal_tabs::TabNav;
 use super::super::terminal_view::TerminalView;
 use super::{paint_now, selected_dir, Flow, CTRL_O};
 
@@ -34,7 +35,7 @@ pub(super) fn overview_key(
     create_session: &mut dyn FnMut(&str) -> SessionOutcome,
     remove_session: &mut dyn FnMut(&str, bool) -> SessionOutcome,
     existing_branches: &mut dyn FnMut() -> Vec<String>,
-    open_terminal: &mut dyn FnMut(&mut HomeState, &Path, bool) -> Result<PaneExit>,
+    open_terminal: &mut dyn FnMut(&mut HomeState, &Path, bool, bool) -> Result<PaneExit>,
     open_config: &mut dyn FnMut(&Term) -> Result<Option<SessionActionUi>>,
     preview: &mut dyn FnMut(&Path) -> Option<TerminalView>,
 ) -> Result<Flow> {
@@ -97,6 +98,7 @@ pub(super) fn overview_key(
                         open_terminal,
                         preview,
                         effect == Effect::OpenAgent,
+                        true,
                     );
                 }
                 // Hand off to the settings screen; it owns the terminal until
@@ -158,7 +160,7 @@ fn activate_named(
     painter: &mut FramePainter,
     workspace_root: &Path,
     name: &str,
-    open_terminal: &mut dyn FnMut(&mut HomeState, &Path, bool) -> Result<PaneExit>,
+    open_terminal: &mut dyn FnMut(&mut HomeState, &Path, bool, bool) -> Result<PaneExit>,
     preview: &mut dyn FnMut(&Path) -> Option<TerminalView>,
 ) {
     match resolve_row(state, name) {
@@ -175,6 +177,7 @@ fn activate_named(
                     workspace_root,
                     open_terminal,
                     preview,
+                    false,
                     false,
                 );
             }
@@ -213,8 +216,9 @@ pub(super) fn switch_key(
     create_session: &mut dyn FnMut(&str) -> SessionOutcome,
     rename_display: &mut dyn FnMut(&str, &str) -> SessionOutcome,
     existing_branches: &mut dyn FnMut() -> Vec<String>,
-    open_terminal: &mut dyn FnMut(&mut HomeState, &Path, bool) -> Result<PaneExit>,
+    open_terminal: &mut dyn FnMut(&mut HomeState, &Path, bool, bool) -> Result<PaneExit>,
     preview: &mut dyn FnMut(&Path) -> Option<TerminalView>,
+    tab_op: &mut super::TabOp<'_>,
 ) -> Flow {
     // While the inline create input is open it captures every key.
     if state.is_creating() {
@@ -263,11 +267,23 @@ pub(super) fn switch_key(
     }
 
     match key {
+        // ↑/↓ (k/j) move between sessions.
         Key::ArrowUp | Key::Char('k') => state.switch_move_up(),
         Key::ArrowDown | Key::Char('j') => state.switch_move_down(),
-        // Enter / l focuses the selected session: attach when it is live, else
-        // just enter 在席.
-        Key::Enter | Key::Char('l') => {
+        // ←/→ (h/l) move between the highlighted session's tabs, so the preview
+        // (and what re-attaching reveals) lands on the chosen pane. A no-op on a
+        // session with no panes.
+        Key::ArrowLeft | Key::Char('h') => {
+            let dir = selected_dir(state, workspace_root);
+            tab_op(&dir, Some(TabNav::Prev));
+        }
+        Key::ArrowRight | Key::Char('l') => {
+            let dir = selected_dir(state, workspace_root);
+            tab_op(&dir, Some(TabNav::Next));
+        }
+        // Enter focuses the selected session: attach its active pane when live,
+        // else just enter 在席.
+        Key::Enter => {
             let row = state.list().selected_index();
             let dir = selected_dir(state, workspace_root);
             state.enter_focus(row);
@@ -281,8 +297,16 @@ pub(super) fn switch_key(
                     open_terminal,
                     preview,
                     false,
+                    false,
                 );
             }
+        }
+        // `t` opens the session's action surface (在席) — a menu or prompt, per the
+        // setting — to add a new pane (`terminal` / `agent`), without attaching the
+        // existing one first.
+        Key::Char('t') => {
+            let row = state.list().selected_index();
+            state.enter_focus(row);
         }
         // `c` begins inline session creation.
         Key::Char('c') => state.switch_begin_create(existing_branches()),
@@ -291,8 +315,8 @@ pub(super) fn switch_key(
         Key::Char('r') => {
             state.switch_begin_rename();
         }
-        // Esc / h backs out to where Switch was opened from.
-        Key::Escape | Key::Char('h') => leave_switch(
+        // Esc backs out to where Switch was opened from.
+        Key::Escape => leave_switch(
             term,
             reader,
             state,
@@ -320,7 +344,7 @@ fn leave_switch(
     state: &mut HomeState,
     painter: &mut FramePainter,
     workspace_root: &Path,
-    open_terminal: &mut dyn FnMut(&mut HomeState, &Path, bool) -> Result<PaneExit>,
+    open_terminal: &mut dyn FnMut(&mut HomeState, &Path, bool, bool) -> Result<PaneExit>,
     preview: &mut dyn FnMut(&Path) -> Option<TerminalView>,
 ) {
     match state.switch_return() {
@@ -346,6 +370,7 @@ fn leave_switch(
                     open_terminal,
                     preview,
                     false,
+                    false,
                 );
             }
         }
@@ -364,7 +389,7 @@ pub(super) fn focus_key(
     workspace_root: &Path,
     key: Key,
     remove_session: &mut dyn FnMut(&str, bool) -> SessionOutcome,
-    open_terminal: &mut dyn FnMut(&mut HomeState, &Path, bool) -> Result<PaneExit>,
+    open_terminal: &mut dyn FnMut(&mut HomeState, &Path, bool, bool) -> Result<PaneExit>,
     preview: &mut dyn FnMut(&Path) -> Option<TerminalView>,
 ) -> Flow {
     // `Esc` returns to 統括; `Ctrl-O` opens 切替 (return here on cancel). These
@@ -441,7 +466,7 @@ fn focus_menu_key(
     workspace_root: &Path,
     key: Key,
     remove_session: &mut dyn FnMut(&str, bool) -> SessionOutcome,
-    open_terminal: &mut dyn FnMut(&mut HomeState, &Path, bool) -> Result<PaneExit>,
+    open_terminal: &mut dyn FnMut(&mut HomeState, &Path, bool, bool) -> Result<PaneExit>,
     preview: &mut dyn FnMut(&Path) -> Option<TerminalView>,
 ) {
     match key {
@@ -498,7 +523,7 @@ fn focus_prompt_key(
     workspace_root: &Path,
     key: Key,
     remove_session: &mut dyn FnMut(&str, bool) -> SessionOutcome,
-    open_terminal: &mut dyn FnMut(&mut HomeState, &Path, bool) -> Result<PaneExit>,
+    open_terminal: &mut dyn FnMut(&mut HomeState, &Path, bool, bool) -> Result<PaneExit>,
     preview: &mut dyn FnMut(&Path) -> Option<TerminalView>,
 ) {
     match key {
@@ -519,6 +544,7 @@ fn focus_prompt_key(
                         open_terminal,
                         preview,
                         agent,
+                        true,
                     );
                 }
                 Effect::CloseSession => close_focused_session(state, remove_session),
@@ -552,7 +578,7 @@ fn run_focus_command(
     workspace_root: &Path,
     name: &str,
     remove_session: &mut dyn FnMut(&str, bool) -> SessionOutcome,
-    open_terminal: &mut dyn FnMut(&mut HomeState, &Path, bool) -> Result<PaneExit>,
+    open_terminal: &mut dyn FnMut(&mut HomeState, &Path, bool, bool) -> Result<PaneExit>,
     preview: &mut dyn FnMut(&Path) -> Option<TerminalView>,
 ) {
     match name {
@@ -565,6 +591,7 @@ fn run_focus_command(
             open_terminal,
             preview,
             false,
+            true,
         ),
         "agent" => open_pane(
             term,
@@ -574,6 +601,7 @@ fn run_focus_command(
             workspace_root,
             open_terminal,
             preview,
+            true,
             true,
         ),
         // `close` removes the focused session forcefully and leaves 在席.
@@ -588,8 +616,11 @@ fn run_focus_command(
 /// application should quit.
 ///
 /// `agent` governs the shell opened here (`agent` launches the AI agent CLI
-/// inside it; `terminal` opens a plain shell). The pane is driven by the impure
-/// `open_terminal` callback, which returns:
+/// inside it; `terminal` opens a plain shell). `new_pane` chooses whether to add
+/// a fresh pane (the 在席 action surface's `terminal` / `agent`, so a session can
+/// hold several) or re-attach the session's active pane (`Enter` on a live
+/// session in 切替). The pane is driven by the impure `open_terminal` callback,
+/// which returns:
 ///
 /// - [`PaneExit::Closed`] — the shell exited: return to 在席 (Focus).
 /// - [`PaneExit::ToSwitch`] — `Ctrl-O`: zoom out to 切替 (Switch), remembering to
@@ -604,9 +635,10 @@ fn open_pane(
     state: &mut HomeState,
     painter: &mut FramePainter,
     workspace_root: &Path,
-    open_terminal: &mut dyn FnMut(&mut HomeState, &Path, bool) -> Result<PaneExit>,
+    open_terminal: &mut dyn FnMut(&mut HomeState, &Path, bool, bool) -> Result<PaneExit>,
     _preview: &mut dyn FnMut(&Path) -> Option<TerminalView>,
     agent: bool,
+    new_pane: bool,
 ) {
     let (label, fail) = if agent {
         ("Agent", "agent")
@@ -625,7 +657,7 @@ fn open_pane(
     let _ = paint_now(term, painter, state);
     state.finish_loading();
     state.show_attached();
-    let outcome = open_terminal(state, &dir, agent);
+    let outcome = open_terminal(state, &dir, agent, new_pane);
     // The pane toggled `crossterm`'s raw mode around itself; re-assert the
     // wheel-capture modes so the wheel can't scroll the host terminal once we are
     // back on the workspace screen.

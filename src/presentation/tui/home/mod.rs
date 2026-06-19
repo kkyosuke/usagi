@@ -268,15 +268,16 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
     // the switch loop are handled by the event loop around this call.
     //
     // A session can hold several panes (an agent alongside terminals): this loop
-    // drives the active pane, and a tab-strip step (`Ctrl-O ]` / `t` / `w` …)
-    // updates the pool's active pane / adds / closes one and re-drives the new
-    // active pane, leaving the others alive. It returns only when the user
-    // detaches (`Ctrl-O Ctrl-O` → 切替) or every pane has closed (→ 在席). The
-    // attached session is declared to the monitor (so it is never flagged as
-    // waiting) and cleared again on the way out.
+    // drives the active pane until the user detaches (`Ctrl-O` → 切替) or every
+    // pane has closed (→ 在席). Switching tabs and adding panes now happen in 切替,
+    // not here. `new_pane` distinguishes the two ways in: `false` re-attaches the
+    // session's active pane (spawning the first when it is fresh); `true` adds a
+    // new pane of the requested kind and drives it (the 在席 action surface's
+    // `terminal` / `agent`). The attached session is declared to the monitor (so
+    // it is never flagged as waiting) and cleared again on the way out.
     let terminal_root = workspace.path.clone();
     let mut open_terminal =
-        |home: &mut HomeState, dir: &Path, run_agent: bool| -> Result<PaneExit> {
+        |home: &mut HomeState, dir: &Path, run_agent: bool, new_pane: bool| -> Result<PaneExit> {
             // Build the agent command for this worktree on demand: when it already
             // has a Claude conversation, launch with `--continue` so `:agent` resumes
             // where it left off; otherwise it starts fresh. The pool only sends it on
@@ -300,9 +301,19 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
                 });
             let mut pool = pool.borrow_mut();
             let handle = pool.monitor();
-            // Ready the active pane (spawning the first one when the session is new),
-            // then drive it; tab steps loop back here on the now-active pane.
-            pool.enter(term, dir, run_agent, initial, &label)?;
+            // Ready the pane to drive: add a fresh one (在席's `terminal` / `agent`)
+            // or re-attach the session's active pane (spawning the first when the
+            // session is new).
+            if new_pane {
+                let kind = if run_agent {
+                    terminal_tabs::PaneKind::Agent
+                } else {
+                    terminal_tabs::PaneKind::Terminal
+                };
+                pool.add_pane(term, dir, kind, initial, &label)?;
+            } else {
+                pool.enter(term, dir, run_agent, initial, &label)?;
+            }
             handle.set_attached(Some(dir.to_path_buf()));
             let result = (|| -> Result<PaneExit> {
                 loop {
@@ -316,20 +327,14 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
                         None => return Ok(PaneExit::Closed),
                     };
                     match terminal_pane::run(term, home, pty, &handle)? {
-                        // `Ctrl-O Ctrl-O`: zoom out, leaving every pane alive.
+                        // `Ctrl-O`: zoom out to 切替, leaving every pane alive.
                         terminal_pane::PaneStep::Detach => return Ok(PaneExit::ToSwitch),
-                        // The active pane's shell exited, or the user closed it: drop
-                        // it; keep driving when a pane remains, else fall to 在席.
-                        terminal_pane::PaneStep::Closed | terminal_pane::PaneStep::ClosePane => {
+                        // The active pane's shell exited: drop it; keep driving when
+                        // a pane remains, else fall to 在席.
+                        terminal_pane::PaneStep::Closed => {
                             if !pool.close_active(dir, &label) {
                                 return Ok(PaneExit::Closed);
                             }
-                        }
-                        // Move the active tab, then re-drive the new active pane.
-                        terminal_pane::PaneStep::Switch(nav) => pool.nav(dir, nav),
-                        // Add a pane (agent / terminal) and drive it.
-                        terminal_pane::PaneStep::NewPane(kind) => {
-                            pool.add_pane(term, dir, kind, initial, &label)?;
                         }
                     }
                 }
@@ -355,6 +360,18 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
         |dir: &Path| -> Option<crate::presentation::tui::home::terminal_view::TerminalView> {
             pool.borrow_mut().snapshot(term, dir)
         };
+
+    // Read (and optionally navigate) a session's tabs from 切替: `←`/`→` pass a
+    // `TabNav` to move the active tab, and the loop reads the strip (`None`) each
+    // frame to draw it above the preview. Both go through the same pool the pane
+    // driver uses, so a tab moved here is the one re-attaching reveals.
+    let mut tab_op = |dir: &Path, nav: Option<terminal_tabs::TabNav>| -> (Vec<String>, usize) {
+        let mut pool = pool.borrow_mut();
+        if let Some(nav) = nav {
+            pool.nav(dir, nav);
+        }
+        pool.tabs(dir)
+    };
 
     // Opening `config` hands off to the settings screen in its workspace scope,
     // editing only this workspace's local overrides
@@ -389,6 +406,7 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
         &mut open_terminal,
         &mut open_config,
         &mut preview,
+        &mut tab_op,
     )
 }
 

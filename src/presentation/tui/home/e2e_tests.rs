@@ -23,6 +23,7 @@ use crate::presentation::tui::screen::KeyReader;
 use super::event::{event_loop, Outcome};
 use super::state::{HomeState, LogLine, PaneExit, ReturnMode, SessionOutcome};
 use super::terminal_pool::MonitorHandle;
+use super::terminal_tabs::TabNav;
 use super::terminal_view::TerminalView;
 use super::ui::render_frame;
 use super::update::UpdateHandle;
@@ -180,15 +181,16 @@ fn event_loop_attaches_a_live_session_end_to_end() {
     // The attached frame the loop paints, captured the moment the pane opens —
     // that is when the screen is in 没入 with the embedded terminal showing.
     let captured = std::cell::RefCell::new(Vec::new());
-    let mut open_terminal = |home: &mut HomeState, _dir: &Path, _agent: bool| -> Result<PaneExit> {
-        home.set_terminal_view(TerminalView::from_rows(
-            vec!["$ claude".to_string(), "Working…".to_string()],
-            None,
-        ));
-        *captured.borrow_mut() = render_frame(ROWS, COLS, home);
-        // The real pane runs until the shell exits; report it closed at once.
-        Ok(PaneExit::Closed)
-    };
+    let mut open_terminal =
+        |home: &mut HomeState, _dir: &Path, _agent: bool, _new_pane: bool| -> Result<PaneExit> {
+            home.set_terminal_view(TerminalView::from_rows(
+                vec!["$ claude".to_string(), "Working…".to_string()],
+                None,
+            ));
+            *captured.borrow_mut() = render_frame(ROWS, COLS, home);
+            // The real pane runs until the shell exits; report it closed at once.
+            Ok(PaneExit::Closed)
+        };
     // A non-`None` preview is what tells the loop the session is live, so
     // pressing Enter on it attaches rather than just focusing.
     let mut preview = |_dir: &Path| -> Option<TerminalView> {
@@ -211,6 +213,8 @@ fn event_loop_attaches_a_live_session_end_to_end() {
         sessions: None,
         select: None,
     };
+    let mut tab_op =
+        |_dir: &Path, _nav: Option<TabNav>| -> (Vec<String>, usize) { (Vec::new(), 0) };
 
     let outcome = event_loop(
         &term,
@@ -227,6 +231,7 @@ fn event_loop_attaches_a_live_session_end_to_end() {
         &mut open_terminal,
         &mut config,
         &mut preview,
+        &mut tab_op,
     )
     .unwrap();
 
