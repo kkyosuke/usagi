@@ -1,6 +1,7 @@
 //! `usagi issue`: create, list, show, update, search and delete the task issues
-//! stored under the current repository's `.usagi/issues/` (see
-//! [`crate::usecase::issue`]).
+//! stored under the workspace's `.usagi/issues/` (see [`crate::usecase::issue`]).
+//! The store is resolved to the workspace root so every session shares one set
+//! of issues (see [`run`]).
 //!
 //! Listings mark which issues are *ready* — every issue they depend on is
 //! `done` — so it is easy to spot the tasks that can be picked up next. Pass
@@ -16,6 +17,7 @@ use crate::domain::issue::{IssuePriority, IssueStatus};
 use crate::usecase::issue::{
     self, dependency_tree, GroupBy, IssueChanges, IssueFilter, IssueStats, NewIssue,
 };
+use crate::usecase::session;
 
 #[derive(Subcommand)]
 pub enum IssueCommand {
@@ -142,10 +144,17 @@ pub enum IssueCommand {
     },
 }
 
-/// Entry point for `usagi issue`: run the subcommand against the current
-/// repository and print the result.
+/// Entry point for `usagi issue`: run the subcommand against the workspace's
+/// issue store and print the result.
+///
+/// The command may be invoked from inside a session worktree
+/// (`<workspace>/.usagi/sessions/<name>/...`). Issues belong to the *workspace*,
+/// not to a per-session copy, so we resolve the current directory back to the
+/// workspace root via [`session::workspace_root`] — the same root the MCP server
+/// and TUI use. This makes the issue store a single source of truth shared
+/// across every session: an update from one session is visible in all of them.
 pub fn run(command: IssueCommand) -> Result<()> {
-    let repo = env::current_dir()?;
+    let repo = session::workspace_root(&env::current_dir()?);
     for line in execute(&repo, command)? {
         println!("{line}");
     }

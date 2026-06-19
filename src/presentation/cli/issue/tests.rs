@@ -692,3 +692,42 @@ fn run_executes_against_the_current_directory() {
     env::set_current_dir(original).unwrap();
     assert!(result.is_ok());
 }
+
+#[test]
+fn run_resolves_issues_to_the_workspace_root_from_inside_a_session() {
+    // Issues are one shared store per workspace. Invoked from inside a session
+    // worktree (`.usagi/sessions/<name>/...`), `run` resolves back to the
+    // workspace root, so the issue lands in the workspace store — visible to
+    // every session — and not in a throwaway copy under the session.
+    let _guard = crate::test_support::process_env_guard();
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    create(root, "Created at root", vec![]);
+
+    let session_cwd = root.join(".usagi").join("sessions").join("foo");
+    std::fs::create_dir_all(&session_cwd).unwrap();
+    let original = env::current_dir().unwrap();
+    env::set_current_dir(&session_cwd).unwrap();
+    let result = run(IssueCommand::Create {
+        title: "Created from a session".to_string(),
+        priority: IssuePriority::Medium,
+        labels: vec![],
+        dependson: vec![],
+        related: vec![],
+        parent: None,
+        milestone: None,
+        body: String::new(),
+        json: false,
+    });
+    env::set_current_dir(original).unwrap();
+    assert!(result.is_ok());
+
+    // The issue created from the session is in the workspace store at the root,
+    // numbered after the first one...
+    assert_eq!(
+        issue::get(root, 2).unwrap().unwrap().title,
+        "Created from a session"
+    );
+    // ...and no per-session issue store was written under the session subtree.
+    assert!(!session_cwd.join(".usagi").join("issues").exists());
+}

@@ -26,6 +26,11 @@
 issue ファイル（`NNN-*.md`）は git 追跡対象、`index.json` は再生成可能なので `.usagi/.gitignore` で除外します
 （[02-workspace.md#保存場所](02-workspace.md#保存場所)）。
 
+`<repo>` は**ワークスペースルート**（`.usagi/sessions/` の親）です。CLI・MCP・TUI のいずれも、セッション内
+（`.usagi/sessions/<名>/…`）から実行された場合でもこのルートに解決してから読み書きするため、**全セッションが
+同じ 1 つの issue ストアを共有**します。セッションの worktree がチェックアウトする自前の `.usagi/issues/` コピーは
+usagi の issue 操作の対象にはなりません（更新は常にルートの 1 か所へ反映され、別セッションからも即座に見えます）。
+
 ## issue ファイル（`NNN-<slug>.md`）
 
 上部に **frontmatter**（行ベースのメタデータ）、その下に自由記述の markdown 本文を持ちます。ファイル名は
