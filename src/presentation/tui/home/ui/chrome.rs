@@ -186,7 +186,8 @@ pub(super) fn input_line(state: &HomeState) -> String {
     match state.mode() {
         Mode::Overview => format!(" {}", overview_input_content(state)),
         Mode::Switch => style(
-            " Pick a session — ↑↓ session, ←→ tab, Enter focus, t new, c new, r rename".to_string(),
+            " Pick a session — ↑↓ session, ←→ (Ctrl-N/P) tab, Enter focus, t new, c new, r rename"
+                .to_string(),
         )
         .dim()
         .to_string(),
@@ -231,17 +232,18 @@ pub(super) fn footer_line(width: usize, state: &HomeState) -> String {
                 .to_string()
         }
         Mode::Switch => {
-            "[switch]  ↑↓ session / ←→ tab / Enter focus / t new / c new / r rename / Esc back / Ctrl-O overview"
+            "[switch]  ↑↓ session / ←→ (Ctrl-N/P) tab / Enter focus / t new / c new / r rename / Esc back / Ctrl-O overview"
                 .to_string()
         }
         Mode::Focus => {
             format!(
-                "[session: {}]  Enter: run / Ctrl-O: switch / Esc: overview",
+                "[session: {}]  Enter: run / Ctrl-O: switch / Ctrl-N/P: tab / Esc: overview",
                 state.focused_session_name()
             )
         }
         Mode::Attached => {
-            "[attached]  Ctrl-O: switch session / Shift+↑↓/PgUp/PgDn: scroll".to_string()
+            "[attached]  Ctrl-O: switch session / Ctrl-N/P: tab / Shift+↑↓/PgUp/PgDn: scroll"
+                .to_string()
         }
     };
     widgets::dim_line(width, &help)

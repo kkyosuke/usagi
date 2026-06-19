@@ -281,83 +281,91 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
     // `terminal` / `agent`). The attached session is declared to the monitor (so
     // it is never flagged as waiting) and cleared again on the way out.
     let terminal_root = workspace.path.clone();
-    let mut open_terminal =
-        |home: &mut HomeState, dir: &Path, run_agent: bool, new_pane: bool| -> Result<PaneExit> {
-            // Build the agent command for this worktree on demand: when it already
-            // has a Claude conversation, launch with `--continue` so `:agent` resumes
-            // where it left off; otherwise it starts fresh. The pool only sends it on
-            // a fresh agent-pane spawn (re-attaching / terminal panes never use it).
-            // It is built unconditionally (not just for `run_agent`) so a later
-            // `Ctrl-O a` can spawn an agent pane too.
-            let resume = agent.has_resumable_session(dir);
-            let agent_command = agent.launch_command(&agent_wiring, resume);
-            let initial = Some(agent_command.as_str());
-            let label = home
-                .list()
-                .worktrees()
-                .iter()
-                .find(|w| w.path.as_path() == dir)
-                .map(state::worktree_name)
-                .map(str::to_string)
-                .unwrap_or_else(|| {
-                    dir.file_name()
-                        .map(|n| n.to_string_lossy().into_owned())
-                        .unwrap_or_else(|| dir.display().to_string())
-                });
-            let mut pool = pool.borrow_mut();
-            let handle = pool.monitor();
-            // Ready the pane to drive: add a fresh one (在席's `terminal` / `agent`)
-            // or re-attach the session's active pane (spawning the first when the
-            // session is new).
-            if new_pane {
-                let kind = if run_agent {
-                    terminal_tabs::PaneKind::Agent
-                } else {
-                    terminal_tabs::PaneKind::Terminal
-                };
-                pool.add_pane(term, dir, kind, initial, &label)?;
+    let mut open_terminal = |home: &mut HomeState,
+                             dir: &Path,
+                             run_agent: bool,
+                             new_pane: bool|
+     -> Result<PaneExit> {
+        // Build the agent command for this worktree on demand: when it already
+        // has a Claude conversation, launch with `--continue` so `:agent` resumes
+        // where it left off; otherwise it starts fresh. The pool only sends it on
+        // a fresh agent-pane spawn (re-attaching / terminal panes never use it).
+        // It is built unconditionally (not just for `run_agent`) so a later
+        // `Ctrl-O a` can spawn an agent pane too.
+        let resume = agent.has_resumable_session(dir);
+        let agent_command = agent.launch_command(&agent_wiring, resume);
+        let initial = Some(agent_command.as_str());
+        let label = home
+            .list()
+            .worktrees()
+            .iter()
+            .find(|w| w.path.as_path() == dir)
+            .map(state::worktree_name)
+            .map(str::to_string)
+            .unwrap_or_else(|| {
+                dir.file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| dir.display().to_string())
+            });
+        let mut pool = pool.borrow_mut();
+        let handle = pool.monitor();
+        // Ready the pane to drive: add a fresh one (在席's `terminal` / `agent`)
+        // or re-attach the session's active pane (spawning the first when the
+        // session is new).
+        if new_pane {
+            let kind = if run_agent {
+                terminal_tabs::PaneKind::Agent
             } else {
-                pool.enter(term, dir, run_agent, initial, &label)?;
-            }
-            handle.set_attached(Some(dir.to_path_buf()));
-            let result = (|| -> Result<PaneExit> {
-                loop {
-                    // Publish the tab strip for this session before driving the pane,
-                    // so it reflects any add / close / switch from the last step.
-                    let (labels, active_tab) = pool.tabs(dir);
-                    home.set_terminal_tabs(labels, active_tab);
-                    let pty = match pool.active_pty(dir) {
-                        Some(pty) => pty,
-                        // No live pane (every one exited): drop back to 在席.
-                        None => return Ok(PaneExit::Closed),
-                    };
-                    match terminal_pane::run(term, home, pty, &handle)? {
-                        // `Ctrl-O`: zoom out to 切替, leaving every pane alive.
-                        terminal_pane::PaneStep::Detach => return Ok(PaneExit::ToSwitch),
-                        // The active pane's shell exited: drop it; keep driving when
-                        // a pane remains, else fall to 在席.
-                        terminal_pane::PaneStep::Closed => {
-                            if !pool.close_active(dir, &label) {
-                                return Ok(PaneExit::Closed);
-                            }
+                terminal_tabs::PaneKind::Terminal
+            };
+            pool.add_pane(term, dir, kind, initial, &label)?;
+        } else {
+            pool.enter(term, dir, run_agent, initial, &label)?;
+        }
+        handle.set_attached(Some(dir.to_path_buf()));
+        let result = (|| -> Result<PaneExit> {
+            loop {
+                // Publish the tab strip for this session before driving the pane,
+                // so it reflects any add / close / switch from the last step.
+                let (labels, active_tab) = pool.tabs(dir);
+                home.set_terminal_tabs(labels, active_tab);
+                let pty = match pool.active_pty(dir) {
+                    Some(pty) => pty,
+                    // No live pane (every one exited): drop back to 在席.
+                    None => return Ok(PaneExit::Closed),
+                };
+                match terminal_pane::run(term, home, pty, &handle)? {
+                    // `Ctrl-O`: zoom out to 切替, leaving every pane alive.
+                    terminal_pane::PaneStep::Detach => return Ok(PaneExit::ToSwitch),
+                    // `Ctrl-N` / `Ctrl-P`: move the active tab and loop, so the
+                    // next iteration drives the newly active pane (and republishes
+                    // the tab strip above it) without leaving 没入.
+                    terminal_pane::PaneStep::NextTab => pool.nav(dir, terminal_tabs::TabNav::Next),
+                    terminal_pane::PaneStep::PrevTab => pool.nav(dir, terminal_tabs::TabNav::Prev),
+                    // The active pane's shell exited: drop it; keep driving when
+                    // a pane remains, else fall to 在席.
+                    terminal_pane::PaneStep::Closed => {
+                        if !pool.close_active(dir, &label) {
+                            return Ok(PaneExit::Closed);
                         }
                     }
                 }
-            })();
-            // Leaving the pane (Ctrl-O → 切替, every pane closing, or an error) means
-            // nothing is attached any more; the shells themselves stay alive in the
-            // pool.
-            handle.set_attached(None);
-            home.clear_terminal_tabs();
-            // The user may have committed / pushed / merged while in the pane, so
-            // re-sync the worktree statuses now that they have left it — keeping the
-            // cursor where it is. Best-effort: a sync failure just leaves the
-            // last-known statuses in place.
-            if let Some(sessions) = reload_sessions(&terminal_root) {
-                home.refresh_sessions(sessions);
             }
-            result
-        };
+        })();
+        // Leaving the pane (Ctrl-O → 切替, every pane closing, or an error) means
+        // nothing is attached any more; the shells themselves stay alive in the
+        // pool.
+        handle.set_attached(None);
+        home.clear_terminal_tabs();
+        // The user may have committed / pushed / merged while in the pane, so
+        // re-sync the worktree statuses now that they have left it — keeping the
+        // cursor where it is. Best-effort: a sync failure just leaves the
+        // last-known statuses in place.
+        if let Some(sessions) = reload_sessions(&terminal_root) {
+            home.refresh_sessions(sessions);
+        }
+        result
+    };
 
     // Snapshot the selected session's live terminal for the sidebar's right-pane
     // preview (the tab-like view), or `None` when it has no running shell/agent.
