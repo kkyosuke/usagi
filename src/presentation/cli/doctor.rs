@@ -38,8 +38,9 @@ fn fix_lines(
     let mut lines = render_fixes(&fix_missing(checks, os, runner));
     if local_llm.enabled {
         // The CLI runs on a real terminal, so the installer can prompt for
-        // sudo itself; no pre-supplied password (that is the TUI flow).
-        let result = local_llm::ensure(os, runner, &local_llm.model, None);
+        // sudo itself; no pre-supplied password (that is the TUI flow). Output
+        // stays loud (`quiet = false`) so the user watches install progress.
+        let result = local_llm::ensure(os, runner, &local_llm.model, None, false);
         lines.extend(render_local_llm_fix(&result));
     }
     lines

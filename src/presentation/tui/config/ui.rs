@@ -16,9 +16,6 @@ const BLOCK_WIDTH: usize = 52;
 /// the terminal and clips any line that overruns it on a narrow screen.
 const MODAL_INNER_WIDTH: usize = 42;
 
-/// The spinner frames cycled through while the install runs in the background.
-const SPINNER: [&str; 4] = ["⠋", "⠙", "⠹", "⠸"];
-
 /// Builds the centred mascot, title, and subtitle block.
 ///
 /// The title and subtitle reflect the screen's scope (global vs. workspace), so
@@ -185,23 +182,6 @@ fn install_modal_frame(
         format!("sudo パスワード: {}", modal.masked()),
         String::new(),
         style("Enter: 開始   Esc: キャンセル").dim().to_string(),
-    ];
-    widgets::render_modal(raw_height, raw_width, "Local LLM", MODAL_INNER_WIDTH, &body)
-}
-
-/// Builds the install progress modal shown while provisioning runs in the
-/// background: a spinner (advanced by `tick`) plus the model being installed.
-pub(super) fn installing_frame(
-    raw_height: usize,
-    raw_width: usize,
-    model: &str,
-    tick: usize,
-) -> Vec<String> {
-    let spinner = SPINNER[tick % SPINNER.len()];
-    let body = vec![
-        format!("{spinner} インストール中…"),
-        String::new(),
-        format!("モデル: {model}"),
     ];
     widgets::render_modal(raw_height, raw_width, "Local LLM", MODAL_INNER_WIDTH, &body)
 }
@@ -477,20 +457,5 @@ mod tests {
         assert!(!joined.contains("ab"));
         // The modal replaces the settings list (no Save button behind it).
         assert!(!joined.contains("Save"));
-    }
-
-    #[test]
-    fn installing_frame_shows_a_spinner_and_the_model() {
-        let first = installing_frame(24, 80, "qwen2.5-coder:7b", 0).join("\n");
-        assert!(first.contains("qwen2.5-coder:7b"));
-        assert!(first.contains("インストール中"));
-        assert!(first.contains(SPINNER[0]));
-        // Advancing the tick advances the spinner frame, and it wraps around.
-        assert!(installing_frame(24, 80, "m", 1)
-            .join("\n")
-            .contains(SPINNER[1]));
-        assert!(installing_frame(24, 80, "m", SPINNER.len())
-            .join("\n")
-            .contains(SPINNER[0]));
     }
 }

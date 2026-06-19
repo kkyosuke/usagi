@@ -3,7 +3,8 @@ use console::Key;
 use console::Term;
 
 use crate::domain::settings::{LocalSettings, Settings};
-use crate::presentation::tui::screen::{FramePainter, KeyReader};
+use crate::presentation::tui::install_task::{self, InstallView};
+use crate::presentation::tui::screen::{animated_read, FramePainter, KeyReader};
 
 use super::state::Config;
 use super::ui;
@@ -24,11 +25,13 @@ pub enum Outcome {
 /// disk: production wires it to the settings use case, tests pass a stub.
 pub type Save<'a> = dyn FnMut(&Settings, Option<&LocalSettings>) -> Result<()> + 'a;
 
-/// Provisions the local LLM for the given model, taking the sudo password
-/// entered in the install modal so the runtime install can elevate
-/// non-interactively. Injected like [`Save`] so the event loop is testable
-/// without shelling out: production wires it to the `local_llm` use case (which
-/// runs the install on a background thread behind a spinner), tests pass a stub.
+/// Starts provisioning the local LLM for the given model in the background,
+/// taking the sudo password entered in the install modal so the runtime install
+/// can elevate non-interactively. Returns as soon as the work is *launched* —
+/// the install then runs on its own thread while the user keeps using usagi, its
+/// progress surfaced everywhere by the global install overlay. Injected like
+/// [`Save`] so the event loop is testable without shelling out: production wires
+/// it to [`install_task`], tests pass a stub.
 pub type Install<'a> = dyn FnMut(&str, &str) -> Result<()> + 'a;
 
 /// Runs the configuration screen against the given terminal and key source
@@ -55,11 +58,19 @@ pub fn event_loop(
     let mut painter = FramePainter::new();
 
     loop {
+        // When the background install finishes, flip the Local LLM row to its
+        // installed state and surface the outcome — picked up on the next loop
+        // pass (every key press), while the overlay shows it live in the corner.
+        // A completion message takes precedence over any standing notice.
+        notice = reflect_install(&mut config, install_task::snapshot().as_ref()).or(notice);
+
         let (height, width) = term.size();
         let frame = ui::render_frame(height as usize, width as usize, &config, notice.as_deref());
         painter.paint(term, frame)?;
 
-        let key = match reader.read_key() {
+        // While an install runs the read wakes periodically to animate the
+        // overlay; otherwise it blocks as usual.
+        let key = match animated_read(reader, term, &mut painter, &install_task::handle()) {
             Ok(key) => key,
             // An interrupted read (e.g. a delivered signal) means quit.
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => return Ok(Outcome::Quit),
@@ -73,9 +84,6 @@ pub fn event_loop(
             match key {
                 Key::Enter => {
                     notice = run_install(&mut config, install);
-                    // The install painted its own spinner frames over ours, so
-                    // forget the remembered frame and repaint the screen fully.
-                    painter.reset();
                 }
                 Key::Backspace => config.install_modal_backspace(),
                 Key::Del => config.install_modal_delete_forward(),
@@ -159,23 +167,38 @@ fn change_field(config: &mut Config, forward: bool) -> Option<String> {
     }
 }
 
-/// Runs the install with the sudo password from the modal, closes the modal,
-/// and returns the notice to show. On success the Local LLM row flips from
-/// "Install" to an on/off toggle (now on) and the cursor drops onto the model
-/// row so a model can be chosen.
+/// Starts the background install with the sudo password from the modal, closes
+/// the modal, and returns the notice to show. The install now runs off-thread,
+/// so this only reports that it *began*; the Local LLM row flips to its
+/// installed state later, when the install completes (see [`reflect_install`]).
 fn run_install(config: &mut Config, install: &mut Install) -> Option<String> {
     let model = config.local_llm_model().to_string();
     let password = config.install_modal_password().unwrap_or_default();
     let result = install(&model, &password);
     config.close_install_modal();
     Some(match result {
-        Ok(()) => {
-            config.mark_local_llm_installed();
-            config.focus_model_row();
-            format!("Installed {model} 🐰")
-        }
+        Ok(()) => format!("{model} のインストールを開始しました 🐰"),
         Err(e) => format!("Install failed: {e}"),
     })
+}
+
+/// Reflects a finished background install into the screen: when the install has
+/// completed successfully, flip the Local LLM row to its installed toggle and
+/// surface the completion message. Only the global scope carries that row (a
+/// workspace's local overrides do not), and the install may finish while the
+/// cursor is anywhere — so this guards on the scope and the not-yet-installed
+/// flag rather than on the focused row, and leaves the cursor where it is. A
+/// still-running install, a failure (whose message the overlay shows), or an
+/// already-reflected success returns `None`, so it is idempotent across the loop
+/// passes that call it.
+fn reflect_install(config: &mut Config, view: Option<&InstallView>) -> Option<String> {
+    if let Some(InstallView::Done { ok: true, message }) = view {
+        if config.local().is_none() && !config.local_llm_installed() {
+            config.mark_local_llm_installed();
+            return Some(message.clone());
+        }
+    }
+    None
 }
 
 /// Persists the edits when there are any, returning the notice to show: a
@@ -651,6 +674,63 @@ mod tests {
             installed,
             vec![("qwen2.5-coder:7b".to_string(), String::new())]
         );
+    }
+
+    #[test]
+    fn reflect_install_flips_the_row_and_announces_on_success() {
+        // A completed install flips the global Local LLM row to installed and
+        // surfaces the completion message, wherever the cursor happens to be.
+        let mut config = sample_config();
+        assert!(!config.local_llm_installed());
+        let view = InstallView::Done {
+            ok: true,
+            message: "qwen2.5-coder:7b を導入しました 🐰".to_string(),
+        };
+        let note = reflect_install(&mut config, Some(&view));
+        assert_eq!(note.as_deref(), Some("qwen2.5-coder:7b を導入しました 🐰"));
+        assert!(config.local_llm_installed());
+    }
+
+    #[test]
+    fn reflect_install_is_idempotent_and_ignores_non_success() {
+        // Already installed: a success view has nothing left to flip.
+        let mut installed = sample_config();
+        installed.set_local_llm_installed(true);
+        let done = InstallView::Done {
+            ok: true,
+            message: "x".to_string(),
+        };
+        assert_eq!(reflect_install(&mut installed, Some(&done)), None);
+
+        // Running, failed, and absent views never flip the row (a failure is
+        // shown by the overlay instead, and leaves the row not installed).
+        let mut fresh = sample_config();
+        let running = InstallView::Running {
+            label: "l".to_string(),
+            hop_frame: 0,
+            face_index: 0,
+        };
+        assert_eq!(reflect_install(&mut fresh, Some(&running)), None);
+        let failed = InstallView::Done {
+            ok: false,
+            message: "x".to_string(),
+        };
+        assert_eq!(reflect_install(&mut fresh, Some(&failed)), None);
+        assert_eq!(reflect_install(&mut fresh, None), None);
+        assert!(!fresh.local_llm_installed());
+    }
+
+    #[test]
+    fn reflect_install_skips_the_workspace_scope() {
+        // A workspace-scoped config has no Local LLM row, so a completed install
+        // never flips anything there.
+        let mut workspace =
+            Config::workspace(Settings::default(), LocalSettings::default(), Vec::new());
+        let done = InstallView::Done {
+            ok: true,
+            message: "x".to_string(),
+        };
+        assert_eq!(reflect_install(&mut workspace, Some(&done)), None);
     }
 
     #[test]

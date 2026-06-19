@@ -115,6 +115,12 @@ pub enum SetupError {
 /// `None` (the `usagi doctor --fix` CLI) lets the installer prompt on the
 /// terminal as usual.
 ///
+/// `quiet` suppresses the subprocesses' stdout/stderr (the installer script and
+/// `ollama pull`). The TUI install runs `quiet` because it paints its own
+/// loading rabbit and the commands' raw output — notably `ollama pull`'s
+/// `pulling manifest …` — would corrupt the screen; the CLI runs loud so the
+/// user watches progress on the terminal.
+///
 /// Returns the ordered list of steps taken on success, or the first error that
 /// stopped provisioning. Idempotent — re-running when everything is already in
 /// place simply reports the "already present" steps.
@@ -123,22 +129,25 @@ pub fn ensure(
     runner: &dyn CommandRunner,
     model: &str,
     sudo: Option<&str>,
+    quiet: bool,
 ) -> Result<Vec<SetupStep>, SetupError> {
     // The runtime must be installed, then its server brought up, before the
     // model can be pulled — so these run left-to-right and `?` short-circuits
     // on the first failure.
-    let ollama = install_ollama(os, runner, sudo)?;
+    let ollama = install_ollama(os, runner, sudo, quiet)?;
     let server = ensure_server(runner, ServerWait::default())?;
-    let model = pull_model(runner, model)?;
+    let model = pull_model(runner, model, quiet)?;
     Ok(vec![ollama, server, model])
 }
 
 /// Install the `ollama` runtime if it is not already present, using the
-/// official installer. `sudo` pre-authenticates the privileged steps when set.
+/// official installer. `sudo` pre-authenticates the privileged steps when set;
+/// `quiet` suppresses the installer's output (see [`ensure`]).
 fn install_ollama(
     os: &str,
     runner: &dyn CommandRunner,
     sudo: Option<&str>,
+    quiet: bool,
 ) -> Result<SetupStep, SetupError> {
     if runner.available(OLLAMA) {
         return Ok(SetupStep::OllamaAlreadyPresent);
@@ -158,14 +167,21 @@ fn install_ollama(
     // installer's privileged steps run unattended. A failure here means the
     // password was wrong or sudo is unavailable, so stop before installing.
     if let Some(password) = sudo {
-        if !runner
-            .run_with_input("sudo", &["-S", "-v"], password)
-            .unwrap_or(false)
-        {
+        let validated = if quiet {
+            runner.run_with_input_quiet("sudo", &["-S", "-v"], password)
+        } else {
+            runner.run_with_input("sudo", &["-S", "-v"], password)
+        };
+        if !validated.unwrap_or(false) {
             return Err(install_failed());
         }
     }
-    match runner.run("sh", &["-c", INSTALL_SCRIPT]) {
+    let installed = if quiet {
+        runner.run_quiet("sh", &["-c", INSTALL_SCRIPT])
+    } else {
+        runner.run("sh", &["-c", INSTALL_SCRIPT])
+    };
+    match installed {
         Ok(true) => Ok(SetupStep::OllamaInstalled { manager: INSTALLER }),
         Ok(false) | Err(_) => Err(install_failed()),
     }
@@ -194,14 +210,24 @@ fn ensure_server(runner: &dyn CommandRunner, wait: ServerWait) -> Result<SetupSt
     Err(SetupError::ServerStartFailed)
 }
 
-/// Pull `model` if it is not already present.
-fn pull_model(runner: &dyn CommandRunner, model: &str) -> Result<SetupStep, SetupError> {
+/// Pull `model` if it is not already present. `quiet` suppresses the pull's
+/// output (see [`ensure`]).
+fn pull_model(
+    runner: &dyn CommandRunner,
+    model: &str,
+    quiet: bool,
+) -> Result<SetupStep, SetupError> {
     if model_present(runner, model) {
         return Ok(SetupStep::ModelAlreadyPresent {
             model: model.to_string(),
         });
     }
-    match runner.run(OLLAMA, &["pull", model]) {
+    let pulled = if quiet {
+        runner.run_quiet(OLLAMA, &["pull", model])
+    } else {
+        runner.run(OLLAMA, &["pull", model])
+    };
+    match pulled {
         Ok(true) => Ok(SetupStep::ModelPulled {
             model: model.to_string(),
         }),
@@ -246,6 +272,9 @@ mod tests {
         /// Result returned by the sudo pre-authentication (`run_with_input`).
         sudo: std::io::Result<bool>,
         ran: RefCell<Vec<String>>,
+        /// Commands run through the *quiet* variants (output-suppressed), so a
+        /// test can assert the TUI install path takes the silent route.
+        quiet_ran: RefCell<Vec<String>>,
         /// The input piped to the last `run_with_input` call (the password).
         piped: RefCell<Option<String>>,
         /// Number of `ollama ps` probes that report the server DOWN before it
@@ -265,6 +294,7 @@ mod tests {
                 run,
                 sudo: Ok(true),
                 ran: RefCell::new(Vec::new()),
+                quiet_ran: RefCell::new(Vec::new()),
                 piped: RefCell::new(None),
                 // By default the server is already up, so `ensure` tests focused
                 // on install/pull need not opt into the start path.
@@ -329,6 +359,25 @@ mod tests {
             }
         }
 
+        fn run_quiet(&self, program: &str, args: &[&str]) -> std::io::Result<bool> {
+            self.quiet_ran
+                .borrow_mut()
+                .push(format!("{program} {}", args.join(" ")));
+            self.run(program, args)
+        }
+
+        fn run_with_input_quiet(
+            &self,
+            program: &str,
+            args: &[&str],
+            input: &str,
+        ) -> std::io::Result<bool> {
+            self.quiet_ran
+                .borrow_mut()
+                .push(format!("{program} {}", args.join(" ")));
+            self.run_with_input(program, args, input)
+        }
+
         fn check(&self, _program: &str, args: &[&str]) -> bool {
             if args.first() == Some(&"ps") {
                 // Mimics `ollama ps`: DOWN for the first `server_down_for`
@@ -372,7 +421,7 @@ mod tests {
         // ollama installed, server already up, model already pulled.
         let runner =
             FakeRunner::new(vec!["ollama"], Ok(true)).with_present_models(vec!["qwen2.5-coder:7b"]);
-        let steps = ensure("macos", &runner, "qwen2.5-coder:7b", None).unwrap();
+        let steps = ensure("macos", &runner, "qwen2.5-coder:7b", None, false).unwrap();
         assert_eq!(
             steps,
             vec![
@@ -393,7 +442,7 @@ mod tests {
         // ollama absent, no sudo password (the CLI path): the official installer
         // runs directly; the server is down until started; the model is pulled.
         let runner = FakeRunner::new(vec![], Ok(true)).with_server_down_for(1);
-        let steps = ensure("linux", &runner, "qwen2.5:7b", None).unwrap();
+        let steps = ensure("linux", &runner, "qwen2.5:7b", None, false).unwrap();
         assert_eq!(
             steps,
             vec![
@@ -422,7 +471,7 @@ mod tests {
         // The TUI path hands over a password: sudo is validated first (reading
         // the password from stdin), then the installer and pull run.
         let runner = FakeRunner::new(vec![], Ok(true));
-        let steps = ensure("macos", &runner, "qwen2.5:7b", Some("hunter2")).unwrap();
+        let steps = ensure("macos", &runner, "qwen2.5:7b", Some("hunter2"), false).unwrap();
         assert_eq!(steps[0], SetupStep::OllamaInstalled { manager: INSTALLER });
         assert_eq!(
             *runner.ran.borrow(),
@@ -436,11 +485,31 @@ mod tests {
     }
 
     #[test]
+    fn ensure_quiet_routes_the_install_through_the_silent_runner() {
+        // The TUI install path passes `quiet = true`: the sudo pre-auth, the
+        // installer script, and the model pull all run through the
+        // output-suppressed variants so `ollama pull`'s progress cannot paint
+        // over the TUI. The probes (`ps`/`show`) are silent regardless.
+        let runner = FakeRunner::new(vec![], Ok(true));
+        ensure("macos", &runner, "qwen2.5:7b", Some("hunter2"), true).unwrap();
+        assert_eq!(
+            *runner.quiet_ran.borrow(),
+            vec![
+                "sudo -S -v".to_string(),
+                format!("sh -c {INSTALL_SCRIPT}"),
+                "ollama pull qwen2.5:7b".to_string(),
+            ]
+        );
+        // The password still reaches stdin on the quiet sudo pre-auth.
+        assert_eq!(runner.piped.borrow().as_deref(), Some("hunter2"));
+    }
+
+    #[test]
     fn ensure_reports_when_the_os_has_no_installer() {
         // The official installer supports only macOS and Linux.
         let runner = FakeRunner::new(vec![], Ok(true));
         assert_eq!(
-            ensure("windows", &runner, "qwen2.5:7b", None),
+            ensure("windows", &runner, "qwen2.5:7b", None, false),
             Err(SetupError::OllamaUnavailable {
                 manual: ollama_manual()
             })
@@ -454,7 +523,7 @@ mod tests {
         // A wrong password (sudo exits non-zero) aborts before the installer.
         let runner = FakeRunner::new(vec![], Ok(true)).with_sudo(Ok(false));
         assert_eq!(
-            ensure("linux", &runner, "qwen2.5:7b", Some("wrong")),
+            ensure("linux", &runner, "qwen2.5:7b", Some("wrong"), false),
             Err(SetupError::OllamaInstallFailed {
                 manager: INSTALLER,
                 manual: ollama_manual()
@@ -471,7 +540,7 @@ mod tests {
         let runner =
             FakeRunner::new(vec![], Ok(true)).with_sudo(Err(std::io::Error::other("no sudo")));
         assert_eq!(
-            ensure("linux", &runner, "qwen2.5:7b", Some("pw")),
+            ensure("linux", &runner, "qwen2.5:7b", Some("pw"), false),
             Err(SetupError::OllamaInstallFailed {
                 manager: INSTALLER,
                 manual: ollama_manual()
@@ -485,7 +554,7 @@ mod tests {
         // The installer script exits non-zero.
         let runner = FakeRunner::new(vec![], Ok(false));
         assert_eq!(
-            ensure("macos", &runner, "qwen2.5:7b", None),
+            ensure("macos", &runner, "qwen2.5:7b", None, false),
             Err(SetupError::OllamaInstallFailed {
                 manager: INSTALLER,
                 manual: ollama_manual()
@@ -498,7 +567,7 @@ mod tests {
         // ollama present, model missing, and the pull fails (spawn error here).
         let runner = FakeRunner::new(vec!["ollama"], Err(std::io::Error::other("boom")));
         assert_eq!(
-            ensure("macos", &runner, "qwen2.5:7b", None),
+            ensure("macos", &runner, "qwen2.5:7b", None, false),
             Err(SetupError::ModelPullFailed {
                 model: "qwen2.5:7b".to_string()
             })
