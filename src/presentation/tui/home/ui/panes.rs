@@ -356,26 +356,38 @@ pub(super) fn log_tail(log: &[LogLine], width: usize, rows: usize) -> Vec<String
         .collect()
 }
 
-/// Builds the tab strip drawn above the embedded terminal in 没入: one `[label]`
-/// chip per pane, the active one reversed (and bold) so it reads as the visible
-/// tab, the rest dimmed. Clipped to the pane width. A single-pane session still
-/// gets the strip, so the terminal below it never shifts as panes come and go.
-pub(super) fn tab_strip_line(strip: &TabStrip, right_w: usize) -> String {
-    let chips = strip
-        .labels
-        .iter()
-        .enumerate()
-        .map(|(i, label)| {
-            let chip = format!(" {label} ");
-            if i == strip.active {
-                style(chip).reverse().bold().to_string()
-            } else {
-                style(chip).dim().to_string()
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" ");
-    clip_to_width(&chips, right_w)
+/// Builds the two-row tab strip drawn above the embedded terminal in 没入 (and in
+/// the 切替 preview): the top row is one ` N label ` chip per pane — the active one
+/// reversed and bold so it reads as the visible tab, the rest dimmed — and the
+/// bottom row underlines the active chip with a cyan bar so the eye lands on it.
+/// Each chip is numbered (1-based) to match the `←`/`→` tab order. Both rows are
+/// clipped to the pane width; a single-pane session still gets the strip, so the
+/// terminal below it never shifts as panes come and go.
+pub(super) fn tab_strip_lines(strip: &TabStrip, right_w: usize) -> Vec<String> {
+    // Gap between chips on the top row (and under it on the marker row), so the
+    // chips read as separate tabs without a hard separator glyph.
+    const GAP: &str = "  ";
+    let mut chips = String::new();
+    let mut marker = String::new();
+    for (i, label) in strip.labels.iter().enumerate() {
+        if i > 0 {
+            chips.push_str(GAP);
+            marker.push_str(&" ".repeat(GAP.chars().count()));
+        }
+        let text = format!(" {} {label} ", i + 1);
+        let width = text.chars().count();
+        if i == strip.active {
+            chips.push_str(&style(&text).reverse().bold().to_string());
+            marker.push_str(&style("▔".repeat(width)).cyan().bold().to_string());
+        } else {
+            chips.push_str(&style(&text).dim().to_string());
+            marker.push_str(&" ".repeat(width));
+        }
+    }
+    vec![
+        clip_to_width(&chips, right_w),
+        clip_to_width(&marker, right_w),
+    ]
 }
 
 /// Builds the right pane from an embedded terminal snapshot: each grid row,
@@ -543,6 +555,14 @@ pub(super) fn switch_preview(state: &HomeState, width: usize, rows: usize) -> Ve
     let mut lines = vec![header, String::new()];
 
     if live {
+        // Show the session's tabs above the preview so `←`/`→` has something to
+        // act on: the strip names each pane and marks the active one, and the
+        // preview below mirrors that active pane.
+        if let Some(strip) = state.terminal_tabs() {
+            if !strip.labels.is_empty() {
+                lines.extend(tab_strip_lines(strip, width));
+            }
+        }
         // Selecting re-attaches the running shell / agent: preview its actual
         // screen (the live snapshot taken before painting) so the choice shows
         // what re-attaching reveals. Fall back to a label until the first
@@ -554,7 +574,7 @@ pub(super) fn switch_preview(state: &HomeState, width: usize, rows: usize) -> Ve
             }
             None => {
                 lines.push(style("● live terminal").green().to_string());
-                lines.push(style("Enter / l で再アタッチ").dim().to_string());
+                lines.push(style("Enter で再アタッチ").dim().to_string());
             }
         }
     } else {
@@ -574,7 +594,7 @@ pub(super) fn switch_preview(state: &HomeState, width: usize, rows: usize) -> Ve
             }
         }
         lines.push(String::new());
-        lines.push(style("Enter / l で開く").dim().to_string());
+        lines.push(style("Enter で開く").dim().to_string());
     }
 
     lines.truncate(rows);
@@ -595,11 +615,11 @@ pub(super) fn right_pane_contents(state: &HomeState, right_w: usize, rows: usize
         },
         Mode::Attached => {
             // The tab strip (when the pane driver has published one) takes the top
-            // row; the embedded terminal fills the rest. A starting hint stands in
-            // until the first screen snapshot arrives.
+            // two rows; the embedded terminal fills the rest. A starting hint stands
+            // in until the first screen snapshot arrives.
             let mut lines = Vec::with_capacity(rows);
             if let Some(strip) = state.terminal_tabs() {
-                lines.push(tab_strip_line(strip, right_w));
+                lines.extend(tab_strip_lines(strip, right_w));
             }
             let body = rows.saturating_sub(lines.len());
             match state.terminal_view() {
