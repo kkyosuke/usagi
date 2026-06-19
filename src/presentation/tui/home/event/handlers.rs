@@ -118,8 +118,9 @@ pub(super) fn overview_key(
                     }
                 },
                 // `close` is a session command; the Overview line still
-                // dispatches it if typed, closing the active session (the root by
-                // default, which is a no-op since the root is not removable).
+                // dispatches it if typed, closing the focused session. On the root
+                // row (the default) it is refused, since the root is the workspace
+                // itself and not a session.
                 Effect::CloseSession => close_focused_session(state, remove_session),
                 // `ShowText` already opened its modal inside `submit`; nothing
                 // more for the event loop to do.
@@ -461,13 +462,22 @@ pub(super) fn focus_key(
 /// the session like `session remove <name> --force` (discarding any uncommitted
 /// changes) via the `remove_session` callback; on success the session is gone,
 /// so leave 在席 for 切替 (Switch) to pick the next session (`Esc` backs out to
-/// 統括). A failed removal (e.g. the root row, or a git error) only logs and
-/// stays in 在席.
+/// 統括). The root row is the workspace itself, not a session, so it is refused
+/// outright; any other failed removal (e.g. a git error) only logs and stays in
+/// 在席.
 fn close_focused_session(
     state: &mut HomeState,
     remove_session: &mut dyn FnMut(&str, bool) -> SessionOutcome,
 ) {
+    use super::super::state::ROOT_NAME;
     let name = state.focused_session_name();
+    // The root row is the workspace itself, not a session, so it cannot be
+    // closed. The 在席 menu hides `close` here, but the prompt could still be
+    // typed, so refuse it explicitly and stay in 在席.
+    if name == ROOT_NAME {
+        state.log_error("the root row is the workspace and cannot be closed");
+        return;
+    }
     let outcome = remove_session(&name, true);
     // The callback returns a refreshed list only when it actually removed the
     // session; on an error it leaves the list untouched.
