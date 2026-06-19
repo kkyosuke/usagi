@@ -37,6 +37,7 @@
 - type: `feat|fix|docs|refactor|perf|test|build|ci|chore`
 - 例: `feat/add-doctor-command`
 - pre-commit フックで命名規則がチェックされる。
+- **例外**: usagi のセッション worktree（`.usagi/sessions/<name>/`）はブランチ名がセッション名（`<name>`）になる。セッション名は `/` を含められない（[04-orchestration.md](04-orchestration.md)）ため `<type>/<説明>` を満たせず、pre-commit フックはこの worktree 内のコミットを命名規則チェックの対象外にする。
 
 ## コミットメッセージ
 

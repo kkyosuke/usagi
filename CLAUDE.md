@@ -9,7 +9,8 @@
 
 ## 要点
 
-- **新規作業**: worktree 作成 → 開発 → ドキュメント更新 → PR 作成。
+- **新規作業**: 隔離環境を用意 → 開発 → ドキュメント更新 → PR 作成。
+  - usagi セッション内（`.usagi/sessions/<name>/`）で起動しているなら**すでに worktree 内なので新規作成しない**。`main` で直接作業するときだけ worktree を切る。
 - **追加修正**: 開発 → ドキュメント更新 → PR タイトル・概要の更新。
 - コミット・push 前に `cargo fmt` / `cargo clippy --all-targets -- -D warnings` / `cargo test` を通す。
 - ブランチ名・コミットメッセージは Conventional Commits 形式。
