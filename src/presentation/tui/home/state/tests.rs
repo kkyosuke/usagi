@@ -1081,6 +1081,18 @@ fn apply_session_outcome_logs_and_rebuilds_the_pane_from_sessions() {
     assert_eq!(state.list().selected_index(), 2);
     assert_eq!(state.list().active_index(), 2);
 
+    // A refreshed list with no `select` rebuilds the pane but leaves the cursor
+    // to fall back to the root row (the branch with `sessions: Some`, `select:
+    // None`).
+    state.apply_session_outcome(SessionOutcome {
+        line: LogLine::output("Removed session \"x\""),
+        sessions: Some(vec![session_record("main", 1)]),
+        select: None,
+    });
+    assert_eq!(state.sessions().len(), 1);
+    assert_eq!(state.list().worktrees().len(), 1);
+    assert_eq!(state.list().selected_index(), 0);
+
     // A failure outcome only logs; the pane is unchanged.
     state.apply_session_outcome(SessionOutcome {
         line: LogLine::error("session failed"),
@@ -1088,8 +1100,60 @@ fn apply_session_outcome_logs_and_rebuilds_the_pane_from_sessions() {
         select: None,
     });
     assert_eq!(state.log().last().unwrap().kind, LineKind::Error);
-    assert_eq!(state.list().worktrees().len(), 2);
-    assert_eq!(state.sessions().len(), 2);
+    assert_eq!(state.list().worktrees().len(), 1);
+    assert_eq!(state.sessions().len(), 1);
+}
+
+#[test]
+fn set_tasks_round_trips_the_panel_rows() {
+    use super::super::tasks::{TaskMark, TaskRow};
+    let mut state = state();
+    assert!(state.tasks().is_empty());
+    let rows = vec![
+        TaskRow {
+            label: "作成中… x".to_string(),
+            mark: TaskMark::Running(2),
+        },
+        TaskRow {
+            label: "削除完了 y".to_string(),
+            mark: TaskMark::Done(true),
+        },
+    ];
+    state.set_tasks(rows.clone());
+    assert_eq!(state.tasks(), rows.as_slice());
+}
+
+#[test]
+fn apply_task_completion_logs_and_refreshes_keeping_the_cursor() {
+    let mut state = state();
+    // Restore two sessions and move the cursor onto the second one.
+    state.restore_sessions(vec![
+        session_record("main", 1),
+        session_record("feature", 1),
+    ]);
+    state.switch_move_down();
+    state.switch_move_down();
+    let selected = state.list().selected_name().to_string();
+    assert_eq!(selected, "feature");
+
+    // A finished background create refreshes the list with a new session; the
+    // cursor stays on "feature" rather than snapping back to the root row.
+    state.apply_task_completion(
+        LogLine::output("Created session \"x\" 🐰"),
+        Some(vec![
+            session_record("main", 1),
+            session_record("feature", 1),
+            session_record("x", 1),
+        ]),
+    );
+    assert!(state.log().last().unwrap().text.contains("Created session"));
+    assert_eq!(state.sessions().len(), 3);
+    assert_eq!(state.list().selected_name(), "feature");
+
+    // A failure (no refreshed list) only logs; the pane is untouched.
+    state.apply_task_completion(LogLine::error("session remove failed"), None);
+    assert_eq!(state.log().last().unwrap().kind, LineKind::Error);
+    assert_eq!(state.sessions().len(), 3);
 }
 
 #[test]

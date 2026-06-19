@@ -9,6 +9,7 @@
 pub mod command;
 pub mod event;
 pub mod state;
+pub mod tasks;
 pub mod terminal_link;
 pub mod terminal_pane;
 pub mod terminal_pool;
@@ -103,26 +104,34 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
         let _ = history.append(command);
     };
 
-    // Creating a session does the git / filesystem work and reports back. The
-    // refreshed sessions (with each worktree's git status) are read back so the
-    // worktree pane and `session list` reflect the new session.
-    let root = workspace.path.clone();
-    let mut create_session = |name: &str| match crate::usecase::session::create(&root, name) {
-        Ok(created) => SessionOutcome {
-            line: LogLine::output(format!(
-                "Created session \"{}\" ({} worktree(s)) 🐰",
-                created.name,
-                created.worktrees.len()
-            )),
-            sessions: reload_sessions(&root),
-            // Select the freshly created session so it is active straight away.
-            select: Some(created.name),
-        },
-        Err(e) => SessionOutcome {
-            line: LogLine::error(format!("session failed: {e}")),
-            sessions: None,
-            select: None,
-        },
+    // The background session tasks (create / remove) the event loop dispatches
+    // and renders in the top-right task panel, shared with the worker threads.
+    let tasks = tasks::TaskHandle::new();
+    // Serialises the session-mutating git work across worker threads: both
+    // create and remove load-modify-save `state.json`, so concurrent runs would
+    // race. Each worker holds this for the duration of its git work, so a burst
+    // of dispatches runs one at a time (all shown in the panel) without freezing
+    // the event loop.
+    let op_lock = std::sync::Arc::new(std::sync::Mutex::new(()));
+
+    // Creating a session does the git / filesystem work on a background thread so
+    // the screen never freezes: it registers a task row, runs the work under the
+    // op-lock, and stores the result for the event loop to drain (logging it and
+    // refreshing the pane). Returns the moment the thread is spawned.
+    let create_tasks = tasks.clone();
+    let create_root = workspace.path.clone();
+    let create_lock = op_lock.clone();
+    let mut dispatch_create = move |name: &str| {
+        let id = create_tasks.begin(tasks::TaskKind::CreateSession, name);
+        let handle = create_tasks.clone();
+        let root = create_root.clone();
+        let name = name.to_string();
+        let lock = create_lock.clone();
+        std::thread::spawn(move || {
+            let _guard = lock.lock().expect("session op lock poisoned");
+            let (ok, completion) = run_create(&root, &name);
+            handle.complete(id, ok, completion);
+        });
     };
 
     // The branch names already taken across the workspace, read fresh each time
@@ -201,48 +210,36 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
     let pool = std::cell::RefCell::new(terminal_pool::TerminalPool::new(notifications_enabled));
     let monitor = pool.borrow().monitor();
 
-    // Removing a session deletes its worktrees/branches and forgets it. A
-    // session with uncommitted changes is left untouched unless `--force`.
+    // Removing a session deletes its worktrees/branches and forgets it, on a
+    // background thread like creation so the screen never freezes. A session with
+    // uncommitted changes is left untouched unless `--force`. The git work runs
+    // under the op-lock; the result (and, on success, the pool path whose shell
+    // to evict) is stored for the event loop to drain.
+    let remove_tasks = tasks.clone();
     let remove_root = workspace.path.clone();
-    let mut remove_session = |name: &str, force: bool| match crate::usecase::session::remove(
-        &remove_root,
-        name,
-        force,
-        agent.as_ref(),
-    ) {
-        Ok(outcome) if outcome.removed => {
-            // Kill any shell still running under the removed session so a session
-            // later recreated at the same path starts fresh instead of
-            // re-attaching to this run's agent and its history.
-            let session_root = remove_root.join(".usagi").join("sessions").join(name);
-            pool.borrow_mut().remove_under(&session_root);
-            SessionOutcome {
-                line: LogLine::output(format!("Removed session \"{name}\" 🧹")),
-                sessions: reload_sessions(&remove_root),
-                select: None,
-            }
-        }
-        Ok(outcome) => {
-            let paths = outcome
-                .dirty
-                .iter()
-                .map(|p| p.display().to_string())
-                .collect::<Vec<_>>()
-                .join(", ");
-            SessionOutcome {
-                line: LogLine::error(format!(
-                    "session \"{name}\" has uncommitted changes ({paths}). \
-                         Use \"session remove {name} --force\" to discard."
-                )),
-                sessions: None,
-                select: None,
-            }
-        }
-        Err(e) => SessionOutcome {
-            line: LogLine::error(format!("session remove failed: {e}")),
-            sessions: None,
-            select: None,
-        },
+    let remove_lock = op_lock.clone();
+    let remove_agent = agent.clone();
+    let mut dispatch_remove = move |name: &str, force: bool| {
+        let id = remove_tasks.begin(tasks::TaskKind::RemoveSession, name);
+        let handle = remove_tasks.clone();
+        let root = remove_root.clone();
+        let name = name.to_string();
+        let lock = remove_lock.clone();
+        let agent = remove_agent.clone();
+        std::thread::spawn(move || {
+            let _guard = lock.lock().expect("session op lock poisoned");
+            let (ok, completion) = run_remove(&root, &name, force, agent.as_ref());
+            handle.complete(id, ok, completion);
+        });
+    };
+
+    // Evict a removed session's still-running shell from the pool so a session
+    // later recreated at the same path starts fresh instead of re-attaching to
+    // this run's agent and its history. Run by the event loop when it drains a
+    // finished removal — on this thread, since the pool is not `Send` and so
+    // cannot be touched from the worker thread.
+    let mut evict_pool = |session_root: &Path| {
+        pool.borrow_mut().remove_under(session_root);
     };
 
     // Check the project's git remote for a newer release than this build, on a
@@ -436,10 +433,12 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
         &workspace.path,
         &monitor,
         &update,
+        &tasks,
         &mut persist,
-        &mut create_session,
+        &mut dispatch_create,
         &mut rename_display,
-        &mut remove_session,
+        &mut dispatch_remove,
+        &mut evict_pool,
         &mut existing_branches,
         &mut open_terminal,
         &mut open_config,
@@ -447,6 +446,85 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
         &mut tab_op,
         &mut close_tab,
     )
+}
+
+/// Create a session on a worker thread: run the git / filesystem work and build
+/// the [`Completion`](tasks::Completion) the event loop applies (the success or
+/// failure line, and the refreshed sessions read back with each worktree's git
+/// status). The `bool` is whether it succeeded, for the task row's mark.
+fn run_create(root: &Path, name: &str) -> (bool, tasks::Completion) {
+    match crate::usecase::session::create(root, name) {
+        Ok(created) => (
+            true,
+            tasks::Completion {
+                line: LogLine::output(format!(
+                    "Created session \"{}\" ({} worktree(s)) 🐰",
+                    created.name,
+                    created.worktrees.len()
+                )),
+                sessions: reload_sessions(root),
+                evict: None,
+            },
+        ),
+        Err(e) => (
+            false,
+            tasks::Completion {
+                line: LogLine::error(format!("session failed: {e}")),
+                sessions: None,
+                evict: None,
+            },
+        ),
+    }
+}
+
+/// Remove a session on a worker thread: run the git / filesystem work and build
+/// the [`Completion`](tasks::Completion) the event loop applies. A successful
+/// removal carries the refreshed sessions and the session root whose pooled
+/// shell to evict; a session with uncommitted changes (without `--force`) only
+/// logs how to discard them. The `bool` is whether it removed the session.
+fn run_remove(
+    root: &Path,
+    name: &str,
+    force: bool,
+    agent: &dyn crate::domain::agent::Agent,
+) -> (bool, tasks::Completion) {
+    match crate::usecase::session::remove(root, name, force, agent) {
+        Ok(outcome) if outcome.removed => (
+            true,
+            tasks::Completion {
+                line: LogLine::output(format!("Removed session \"{name}\" 🧹")),
+                sessions: reload_sessions(root),
+                evict: Some(root.join(".usagi").join("sessions").join(name)),
+            },
+        ),
+        Ok(outcome) => {
+            let paths = outcome
+                .dirty
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            (
+                false,
+                tasks::Completion {
+                    line: LogLine::error(format!(
+                        "session \"{name}\" has uncommitted changes ({paths}). \
+                         Use \"session remove {name} --force\" to discard."
+                    )),
+                    sessions: None,
+                    evict: None,
+                },
+            )
+        }
+        Err(e) => (
+            false,
+            tasks::Completion {
+                line: LogLine::error(format!("session remove failed: {e}")),
+                sessions: None,
+                evict: None,
+            },
+        ),
+    }
 }
 
 /// The effective settings (project-local overrides on top of the global

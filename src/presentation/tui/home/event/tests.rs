@@ -170,7 +170,7 @@ fn run_full(
     let mut persist: fn(&str) = noop_persist;
     let mut remove_session: fn(&str, bool) -> SessionOutcome = noop_remove;
     let mut branches: fn() -> Vec<String> = no_branches;
-    event_loop(
+    event_loop_compat(
         &term,
         &mut reader,
         state,
@@ -208,7 +208,7 @@ fn run_with_live_monitor(
     let mut config: fn(&Term) -> Result<Option<ConfigReload>> = noop_config;
     let mut preview: fn(&Path) -> Option<TerminalView> = noop_preview;
     let mut branches: fn() -> Vec<String> = no_branches;
-    event_loop(
+    event_loop_compat(
         &term,
         &mut reader,
         state,
@@ -250,7 +250,7 @@ fn a_populated_update_handle_is_read_before_painting() {
     let mut open: fn(&mut HomeState, &Path, bool, bool) -> Result<PaneExit> = noop_open;
     let mut config: fn(&Term) -> Result<Option<ConfigReload>> = noop_config;
     let mut preview: fn(&Path) -> Option<TerminalView> = noop_preview;
-    let outcome = event_loop(
+    let outcome = event_loop_compat(
         &term,
         &mut reader,
         sample_state(),
@@ -430,7 +430,7 @@ fn overview_caret_keys_edit_within_the_line() {
     let mut open: fn(&mut HomeState, &Path, bool, bool) -> Result<PaneExit> = noop_open;
     let mut config: fn(&Term) -> Result<Option<ConfigReload>> = noop_config;
     let mut preview: fn(&Path) -> Option<TerminalView> = noop_preview;
-    let outcome = event_loop(
+    let outcome = event_loop_compat(
         &term,
         &mut reader,
         sample_state(),
@@ -475,7 +475,7 @@ fn submitted_commands_are_handed_to_persist() {
     let mut open: fn(&mut HomeState, &Path, bool, bool) -> Result<PaneExit> = noop_open;
     let mut config: fn(&Term) -> Result<Option<ConfigReload>> = noop_config;
     let mut preview: fn(&Path) -> Option<TerminalView> = noop_preview;
-    let outcome = event_loop(
+    let outcome = event_loop_compat(
         &term,
         &mut reader,
         sample_state(),
@@ -616,7 +616,7 @@ fn session_remove_with_a_name_and_force_routes_to_remove() {
     let mut open: fn(&mut HomeState, &Path, bool, bool) -> Result<PaneExit> = noop_open;
     let mut config: fn(&Term) -> Result<Option<ConfigReload>> = noop_config;
     let mut preview: fn(&Path) -> Option<TerminalView> = noop_preview;
-    let outcome = event_loop(
+    let outcome = event_loop_compat(
         &term,
         &mut reader,
         sample_state(),
@@ -640,10 +640,10 @@ fn session_remove_with_a_name_and_force_routes_to_remove() {
 }
 
 #[test]
-fn close_typed_in_overview_targets_the_active_session() {
+fn close_typed_in_overview_is_a_no_op_on_the_root() {
     // `close` is a session command, but the Overview line still dispatches it:
-    // it force-removes the active session (the root by default). The root is not
-    // removable, so `remove` reports no change and the screen stays put.
+    // it targets the active session (the root by default). The root is not a
+    // session, so no removal is dispatched — it only logs — and the screen stays.
     let mut keys = typed("close");
     keys.push(Ok(Key::Enter)); // run `close` from the Overview line
     keys.push(Ok(Key::Escape)); // Esc inert in Overview; fallback Ctrl-C quits
@@ -655,13 +655,12 @@ fn close_typed_in_overview_targets_the_active_session() {
     let mut removed = Vec::new();
     let mut remove = |name: &str, force: bool| {
         removed.push((name.to_string(), force));
-        // The root cannot be removed: report no change (no refreshed list).
         noop_remove(name, force)
     };
     let mut open: fn(&mut HomeState, &Path, bool, bool) -> Result<PaneExit> = noop_open;
     let mut config: fn(&Term) -> Result<Option<ConfigReload>> = noop_config;
     let mut preview: fn(&Path) -> Option<TerminalView> = noop_preview;
-    let outcome = event_loop(
+    let outcome = event_loop_compat(
         &term,
         &mut reader,
         sample_state(),
@@ -681,7 +680,8 @@ fn close_typed_in_overview_targets_the_active_session() {
     )
     .unwrap();
     assert!(matches!(outcome, Outcome::Quit));
-    assert_eq!(removed, vec![("root".to_string(), true)]);
+    // The root row is not a session, so `close` dispatches no removal.
+    assert!(removed.is_empty());
 }
 
 #[test]
@@ -721,7 +721,7 @@ fn focus_close_command_force_removes_the_focused_session_then_enters_switch() {
         branches_called += 1;
         Vec::new()
     };
-    let outcome = event_loop(
+    let outcome = event_loop_compat(
         &term,
         &mut reader,
         prompt_state(),
@@ -782,7 +782,7 @@ fn focus_menu_close_force_removes_the_focused_session_then_enters_switch() {
         branches_called += 1;
         Vec::new()
     };
-    let outcome = event_loop(
+    let outcome = event_loop_compat(
         &term,
         &mut reader,
         sample_state(),
@@ -837,7 +837,7 @@ fn session_remove_without_a_name_opens_the_modal_and_bulk_removes() {
     let mut open: fn(&mut HomeState, &Path, bool, bool) -> Result<PaneExit> = noop_open;
     let mut config: fn(&Term) -> Result<Option<ConfigReload>> = noop_config;
     let mut preview: fn(&Path) -> Option<TerminalView> = noop_preview;
-    let outcome = event_loop(
+    let outcome = event_loop_compat(
         &term,
         &mut reader,
         state_with_sessions(&["alpha", "beta", "gamma"]),
@@ -1269,7 +1269,7 @@ fn switch_arrows_move_the_active_tab_via_tab_op() {
     let mut config: fn(&Term) -> Result<Option<ConfigReload>> = noop_config;
     let mut preview: fn(&Path) -> Option<TerminalView> = noop_preview;
     let mut branches: fn() -> Vec<String> = no_branches;
-    let outcome = event_loop(
+    let outcome = event_loop_compat(
         &term,
         &mut reader,
         sample_state(),
@@ -1325,7 +1325,7 @@ fn switch_x_closes_the_highlighted_sessions_active_tab() {
     let mut config: fn(&Term) -> Result<Option<ConfigReload>> = noop_config;
     let mut preview: fn(&Path) -> Option<TerminalView> = noop_preview;
     let mut branches: fn() -> Vec<String> = no_branches;
-    let outcome = event_loop(
+    let outcome = event_loop_compat(
         &term,
         &mut reader,
         sample_state(),
@@ -1437,7 +1437,7 @@ fn run_recording_rename(keys: Vec<io::Result<Key>>) -> (Vec<(String, String)>, O
     let mut open: fn(&mut HomeState, &Path, bool, bool) -> Result<PaneExit> = noop_open;
     let mut config: fn(&Term) -> Result<Option<ConfigReload>> = noop_config;
     let mut preview: fn(&Path) -> Option<TerminalView> = noop_preview;
-    let outcome = event_loop(
+    let outcome = event_loop_compat(
         &term,
         &mut reader,
         sample_state(),
@@ -1635,7 +1635,7 @@ fn focus_ctrl_n_and_ctrl_p_move_the_active_tab_via_tab_op() {
     let mut config: fn(&Term) -> Result<Option<ConfigReload>> = noop_config;
     let mut preview: fn(&Path) -> Option<TerminalView> = noop_preview;
     let mut branches: fn() -> Vec<String> = no_branches;
-    let outcome = event_loop(
+    let outcome = event_loop_compat(
         &term,
         &mut reader,
         sample_state(),
@@ -1886,6 +1886,143 @@ fn interrupted_read_returns_quit() {
 fn unexpected_read_error_is_propagated() {
     let err = run(vec![Err(io::Error::other("boom"))], sample_state()).unwrap_err();
     assert!(err.to_string().contains("Failed to read key"));
+}
+
+// --- background-task read & drain --------------------------------------
+
+/// A reader that scripts the timeout reads (and blocking reads) separately, so
+/// the loop's background-task animation path can be exercised directly.
+struct TimeoutScript {
+    timeouts: VecDeque<io::Result<Option<Key>>>,
+    blocking: VecDeque<io::Result<Key>>,
+}
+
+impl KeyReader for TimeoutScript {
+    fn read_key(&mut self) -> io::Result<Key> {
+        self.blocking.pop_front().unwrap_or(Ok(Key::CtrlC))
+    }
+    fn read_key_timeout(&mut self, _t: std::time::Duration) -> io::Result<Option<Key>> {
+        self.timeouts.pop_front().unwrap_or(Ok(Some(Key::CtrlC)))
+    }
+}
+
+/// Run the real loop (not the compat shim) with a pre-seeded task handle and a
+/// custom reader, so the background-task read and drain paths are exercised
+/// directly. Every session callback is a no-op except the injected
+/// `dispatch_remove` / `evict_pool`.
+fn run_with_tasks(
+    tasks: &TaskHandle,
+    reader: &mut dyn KeyReader,
+    dispatch_remove: &mut dyn FnMut(&str, bool),
+    evict_pool: &mut dyn FnMut(&Path),
+) -> Result<Outcome> {
+    let term = Term::stdout();
+    let monitor = MonitorHandle::detached();
+    let mut persist: fn(&str) = noop_persist;
+    let mut dispatch_create = |_: &str| {};
+    let mut open: fn(&mut HomeState, &Path, bool, bool) -> Result<PaneExit> = noop_open;
+    let mut config: fn(&Term) -> Result<Option<ConfigReload>> = noop_config;
+    let mut preview: fn(&Path) -> Option<TerminalView> = noop_preview;
+    event_loop(
+        &term,
+        reader,
+        sample_state(),
+        Path::new("/ws"),
+        &monitor,
+        &UpdateHandle::new(),
+        tasks,
+        &mut persist,
+        &mut dispatch_create,
+        &mut (noop_rename as fn(&str, &str) -> SessionOutcome),
+        dispatch_remove,
+        evict_pool,
+        &mut (no_branches as fn() -> Vec<String>),
+        &mut open,
+        &mut config,
+        &mut preview,
+        &mut (noop_tab_op as fn(&Path, Option<TabNav>) -> (Vec<String>, usize)),
+        &mut (noop_close as fn(&mut HomeState, &Path)),
+    )
+}
+
+#[test]
+fn a_tick_with_no_key_re_iterates_while_a_task_runs() {
+    // A running task keeps the loop animating: the read wakes on the timeout
+    // with no key (Ok(None)), the loop re-iterates and repaints, then the next
+    // timeout yields Ctrl-C and the idle screen quits.
+    let tasks = TaskHandle::new();
+    tasks.begin(super::super::tasks::TaskKind::CreateSession, "x");
+    let mut reader = TimeoutScript {
+        timeouts: VecDeque::from(vec![Ok(None), Ok(Some(Key::CtrlC))]),
+        blocking: VecDeque::new(),
+    };
+    let mut remove = |_: &str, _: bool| {};
+    let mut evict = |_: &Path| {};
+    assert!(matches!(
+        run_with_tasks(&tasks, &mut reader, &mut remove, &mut evict).unwrap(),
+        Outcome::Quit
+    ));
+}
+
+#[test]
+fn an_interrupted_timeout_read_returns_quit() {
+    // While a task animates, an interrupted timeout read means quit.
+    let tasks = TaskHandle::new();
+    tasks.begin(super::super::tasks::TaskKind::CreateSession, "x");
+    let mut reader = TimeoutScript {
+        timeouts: VecDeque::from(vec![Err(io::Error::new(
+            io::ErrorKind::Interrupted,
+            "interrupted",
+        ))]),
+        blocking: VecDeque::new(),
+    };
+    let mut remove = |_: &str, _: bool| {};
+    let mut evict = |_: &Path| {};
+    assert!(matches!(
+        run_with_tasks(&tasks, &mut reader, &mut remove, &mut evict).unwrap(),
+        Outcome::Quit
+    ));
+}
+
+#[test]
+fn an_unexpected_timeout_read_error_is_propagated() {
+    let tasks = TaskHandle::new();
+    tasks.begin(super::super::tasks::TaskKind::CreateSession, "x");
+    let mut reader = TimeoutScript {
+        timeouts: VecDeque::from(vec![Err(io::Error::other("boom"))]),
+        blocking: VecDeque::new(),
+    };
+    let mut remove = |_: &str, _: bool| {};
+    let mut evict = |_: &Path| {};
+    let err = run_with_tasks(&tasks, &mut reader, &mut remove, &mut evict).unwrap_err();
+    assert!(err.to_string().contains("Failed to read key"));
+}
+
+#[test]
+fn a_finished_removal_evicts_the_pooled_shell() {
+    // A completed removal carrying an evict path makes the loop evict that pool
+    // path on the next drain (on this thread, since the pool is not `Send`).
+    let tasks = TaskHandle::new();
+    let id = tasks.begin(super::super::tasks::TaskKind::RemoveSession, "feat");
+    let path = PathBuf::from("/ws/.usagi/sessions/feat");
+    tasks.complete(
+        id,
+        true,
+        super::super::tasks::Completion {
+            line: LogLine::output("Removed session \"feat\" 🧹"),
+            sessions: None,
+            evict: Some(path.clone()),
+        },
+    );
+    let mut reader = ScriptedReader::new(vec![Ok(Key::CtrlC)]);
+    let mut remove = |_: &str, _: bool| {};
+    let evicted = RefCell::new(Vec::new());
+    let mut evict = |p: &Path| evicted.borrow_mut().push(p.to_path_buf());
+    assert!(matches!(
+        run_with_tasks(&tasks, &mut reader, &mut remove, &mut evict).unwrap(),
+        Outcome::Quit
+    ));
+    assert_eq!(*evicted.borrow(), vec![path]);
 }
 
 #[test]

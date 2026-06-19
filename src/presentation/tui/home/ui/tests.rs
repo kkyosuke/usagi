@@ -1140,6 +1140,74 @@ fn render_frame_hides_the_update_notice_by_default() {
     assert!(!joined.contains("最新版があります"));
 }
 
+// --- background-task panel ---------------------------------------------
+
+#[test]
+fn task_panel_stacks_running_and_finished_rows_under_a_header() {
+    use super::super::tasks::{TaskMark, TaskRow};
+    let rows = vec![
+        TaskRow {
+            label: "作成中… main".to_string(),
+            mark: TaskMark::Running(0),
+        },
+        TaskRow {
+            label: "削除完了 feat".to_string(),
+            mark: TaskMark::Done(true),
+        },
+        TaskRow {
+            label: "作成失敗 dup".to_string(),
+            mark: TaskMark::Done(false),
+        },
+    ];
+    let panel = task_panel(&rows);
+    // A header line plus one line per task.
+    assert_eq!(panel.len(), 4);
+    let plain = stripped(&panel);
+    assert!(plain.contains("tasks"));
+    assert!(plain.contains("作成中… main"));
+    assert!(plain.contains("✓ 削除完了 feat"));
+    assert!(plain.contains("✗ 作成失敗 dup"));
+}
+
+#[test]
+fn task_panel_is_empty_without_rows() {
+    use super::super::tasks::TaskRow;
+    let none: Vec<TaskRow> = Vec::new();
+    assert!(task_panel(&none).is_empty());
+}
+
+#[test]
+fn task_panel_collapses_the_overflow_beyond_the_cap() {
+    use super::super::tasks::{TaskMark, TaskRow};
+    let rows: Vec<TaskRow> = (0..9)
+        .map(|i| TaskRow {
+            label: format!("作成中… s{i}"),
+            mark: TaskMark::Running(i),
+        })
+        .collect();
+    let plain = stripped(&task_panel(&rows));
+    // Six rows show, the remaining three collapse into a summary line.
+    assert!(plain.contains("作成中… s0"));
+    assert!(plain.contains("作成中… s5"));
+    assert!(!plain.contains("作成中… s6"));
+    assert!(plain.contains("… and 3 more"));
+}
+
+#[test]
+fn render_frame_shows_the_task_panel_over_the_update_notice() {
+    use super::super::tasks::{TaskMark, TaskRow};
+    let mut state = state_with(Vec::new());
+    // Even with an update available, in-flight tasks take the corner.
+    state.set_update(crate::domain::version::Version::parse("9.9.9"));
+    state.set_tasks(vec![TaskRow {
+        label: "作成中… main".to_string(),
+        mark: TaskMark::Running(0),
+    }]);
+    let joined = stripped(&render_frame(24, 100, &state));
+    assert!(joined.contains("作成中… main"));
+    assert!(!joined.contains("最新版があります"));
+}
+
 #[test]
 fn update_notice_is_skipped_when_the_terminal_is_too_narrow() {
     // The banner block is wider than this terminal, so it is dropped rather than

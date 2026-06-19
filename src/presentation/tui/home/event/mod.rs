@@ -7,6 +7,7 @@
 //! `open_pane`, which drives the embedded terminal — live in [`handlers`].
 
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use anyhow::Result;
 use console::Key;
@@ -14,9 +15,10 @@ use console::Term;
 
 use crate::domain::settings::SessionActionUi;
 use crate::presentation::tui::install_task;
-use crate::presentation::tui::screen::{animated_read, FramePainter, KeyReader};
+use crate::presentation::tui::screen::{FramePainter, KeyReader};
 
 use super::state::{HomeState, Mode, PaneExit, SessionOutcome};
+use super::tasks::TaskHandle;
 use super::terminal_pool::MonitorHandle;
 use super::terminal_tabs::TabNav;
 use super::terminal_view::TerminalView;
@@ -107,10 +109,17 @@ pub enum Outcome {
 /// it to the workspace's `history.json`; tests pass a no-op.
 ///
 /// Creating a session (the user typed a name inline in Switch) is delegated to
-/// `create_session`; removing one (`session remove <name>`) to `remove_session`
-/// (its `bool` is the `--force` flag). Both perform the git / filesystem work and
-/// return a [`SessionOutcome`] to apply to the screen, keeping the loop itself
-/// free of that IO and directly testable.
+/// `dispatch_create`; removing one (`session remove <name>`, the removal modal,
+/// or `close`) to `dispatch_remove` (its `bool` is the `--force` flag). Both run
+/// the git / filesystem work on a **background thread** and return at once, so
+/// the loop never freezes: each registers a row in `tasks`, and the loop drains
+/// the finished ones every frame ([`TaskHandle::drain_completed`]) to log the
+/// result and refresh the session list. A removal's completion also names the
+/// pool path whose live shell to evict, done here via `evict_pool` (the pool is
+/// not `Send`, so it cannot be touched from the worker thread).
+///
+/// `rename_display` stays synchronous — it only rewrites `state.json`, with no
+/// git work to block on — and returns a [`SessionOutcome`] applied inline.
 ///
 /// `open_terminal` embeds a live shell in the right pane (没入), rooted at the
 /// focused worktree — or at `workspace_root` for the root row. Its first `bool`
@@ -145,10 +154,12 @@ pub fn event_loop(
     workspace_root: &Path,
     monitor: &MonitorHandle,
     update: &UpdateHandle,
+    tasks: &TaskHandle,
     persist: &mut dyn FnMut(&str),
-    create_session: &mut dyn FnMut(&str) -> SessionOutcome,
+    dispatch_create: &mut dyn FnMut(&str),
     rename_display: &mut dyn FnMut(&str, &str) -> SessionOutcome,
-    remove_session: &mut dyn FnMut(&str, bool) -> SessionOutcome,
+    dispatch_remove: &mut dyn FnMut(&str, bool),
+    evict_pool: &mut dyn FnMut(&Path),
     existing_branches: &mut dyn FnMut() -> Vec<String>,
     open_terminal: &mut dyn FnMut(&mut HomeState, &Path, bool, bool) -> Result<PaneExit>,
     open_config: &mut dyn FnMut(&Term) -> Result<Option<ConfigReload>>,
@@ -169,6 +180,23 @@ pub fn event_loop(
         // Surface the top-right "update available" notice once the background
         // release check has found a newer version than this build.
         state.set_update(update.status().map(|status| status.latest));
+        // Apply any background session task (create / remove) that finished since
+        // the last frame: evict the removed session's pooled shell (on this
+        // thread — the pool is not `Send`), then log the result and refresh the
+        // session list without yanking the cursor. Then refresh the task panel
+        // rows so in-flight work shows in the top-right corner.
+        for completion in tasks.drain_completed() {
+            let super::tasks::Completion {
+                line,
+                sessions,
+                evict,
+            } = completion;
+            if let Some(path) = evict {
+                evict_pool(&path);
+            }
+            state.apply_task_completion(line, sessions);
+        }
+        state.set_tasks(tasks.view(Instant::now()));
         // Drop any stale snapshot / tab strip every frame, then refresh them for
         // the modes that draw the embedded terminal: 没入 (driven directly by
         // `open_pane`) and 切替, where the right pane previews the highlighted
@@ -193,11 +221,29 @@ pub fn event_loop(
         // (it is swallowed by the reader before it can reach the host terminal's
         // viewport and reveal the pre-launch scrollback). The embedded terminal
         // pane has its own history scroll, handled separately.
-        let key = match animated_read(reader, term, &mut painter, &install_task::handle()) {
-            Ok(key) => key,
-            // An interrupted read (e.g. a delivered signal) means quit.
-            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => return Ok(Outcome::Quit),
-            Err(e) => return Err(anyhow::Error::from(e).context("Failed to read key")),
+        //
+        // While a background install or a session task is in flight the read
+        // wakes every `ANIM_TICK` so the loop re-iterates — re-draining finished
+        // work and repainting, which advances the task panel's and install
+        // rabbit's time-based animation. With nothing in flight it blocks on the
+        // next key, so an idle screen costs nothing.
+        let now = Instant::now();
+        let animate = install_task::handle().is_active(now) || tasks.is_active(now);
+        let key = if animate {
+            match reader.read_key_timeout(install_task::ANIM_TICK) {
+                Ok(Some(key)) => key,
+                // A tick with no key: re-iterate to drain and repaint.
+                Ok(None) => continue,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => return Ok(Outcome::Quit),
+                Err(e) => return Err(anyhow::Error::from(e).context("Failed to read key")),
+            }
+        } else {
+            match reader.read_key() {
+                Ok(key) => key,
+                // An interrupted read (e.g. a delivered signal) means quit.
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => return Ok(Outcome::Quit),
+                Err(e) => return Err(anyhow::Error::from(e).context("Failed to read key")),
+            }
         };
 
         // The quit-confirmation modal, when open, captures every key: `y` /
@@ -236,18 +282,13 @@ pub fn event_loop(
                 Key::Char(' ') => state.remove_modal_toggle(),
                 Key::Enter => {
                     if let Some((names, force)) = state.submit_remove_modal() {
-                        // Bulk removal blocks the loop (each session is git /
-                        // filesystem work), so show the loading rabbit in the
-                        // top-right and step it per session — repainting before
-                        // each removal so it hops along with the progress count.
-                        let total = names.len();
-                        for (i, name) in names.iter().enumerate() {
-                            state.step_loading(format!("削除中… {}/{total}", i + 1));
-                            let _ = paint_now(term, &mut painter, &state);
-                            let outcome = remove_session(name, force);
-                            state.apply_session_outcome(outcome);
+                        // Each checked session is dispatched to a background
+                        // worker, so the loop never blocks on the git work; the
+                        // task panel stacks them and the loop drains each as it
+                        // finishes.
+                        for name in &names {
+                            dispatch_remove(name, force);
                         }
-                        state.finish_loading();
                     }
                 }
                 Key::Escape => state.cancel_remove_modal(),
@@ -289,8 +330,8 @@ pub fn event_loop(
                 workspace_root,
                 key,
                 persist,
-                create_session,
-                remove_session,
+                dispatch_create,
+                dispatch_remove,
                 existing_branches,
                 open_terminal,
                 open_config,
@@ -303,7 +344,7 @@ pub fn event_loop(
                 &mut painter,
                 workspace_root,
                 key,
-                create_session,
+                dispatch_create,
                 rename_display,
                 existing_branches,
                 open_terminal,
@@ -322,7 +363,7 @@ pub fn event_loop(
                 &mut painter,
                 workspace_root,
                 key,
-                remove_session,
+                dispatch_remove,
                 open_terminal,
                 preview,
                 tab_op,
@@ -364,6 +405,89 @@ fn selected_dir(state: &HomeState, workspace_root: &Path) -> PathBuf {
         .selected()
         .map(|w| w.path.clone())
         .unwrap_or_else(|| workspace_root.to_path_buf())
+}
+
+/// Test-only adapter that keeps the event-loop tests' synchronous shape —
+/// `create_session` / `remove_session` returning a [`SessionOutcome`] — against
+/// the loop's background-task model. Each dispatch runs the fake inline and
+/// queues its outcome on a fresh task handle, so the loop drains it on the next
+/// frame exactly as a finished worker thread would. Pool eviction is a no-op
+/// (the tests have no pool).
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn event_loop_compat(
+    term: &Term,
+    reader: &mut dyn KeyReader,
+    state: HomeState,
+    workspace_root: &Path,
+    monitor: &MonitorHandle,
+    update: &UpdateHandle,
+    persist: &mut dyn FnMut(&str),
+    create_session: &mut dyn FnMut(&str) -> SessionOutcome,
+    rename_display: &mut dyn FnMut(&str, &str) -> SessionOutcome,
+    remove_session: &mut dyn FnMut(&str, bool) -> SessionOutcome,
+    existing_branches: &mut dyn FnMut() -> Vec<String>,
+    open_terminal: &mut dyn FnMut(&mut HomeState, &Path, bool, bool) -> Result<PaneExit>,
+    open_config: &mut dyn FnMut(&Term) -> Result<Option<ConfigReload>>,
+    preview: &mut dyn FnMut(&Path) -> Option<TerminalView>,
+    tab_op: &mut TabOp<'_>,
+    close_tab: &mut dyn FnMut(&mut HomeState, &Path),
+) -> Result<Outcome> {
+    let tasks = TaskHandle::new();
+    let mut dispatch_create = |name: &str| {
+        let id = tasks.begin(super::tasks::TaskKind::CreateSession, name);
+        let outcome = create_session(name);
+        tasks.complete(
+            id,
+            true,
+            super::tasks::Completion {
+                line: outcome.line,
+                sessions: outcome.sessions,
+                evict: None,
+            },
+        );
+    };
+    let mut dispatch_remove = |name: &str, force: bool| {
+        let id = tasks.begin(super::tasks::TaskKind::RemoveSession, name);
+        let outcome = remove_session(name, force);
+        // Mirror a production removal, which carries the session root to evict, so
+        // the loop's eviction path is exercised; the tests' `evict_pool` is a
+        // no-op (they have no pool).
+        let evict = outcome
+            .sessions
+            .as_ref()
+            .map(|_| std::path::PathBuf::from(name));
+        tasks.complete(
+            id,
+            true,
+            super::tasks::Completion {
+                line: outcome.line,
+                sessions: outcome.sessions,
+                evict,
+            },
+        );
+    };
+    let mut evict_pool = |_: &Path| {};
+    event_loop(
+        term,
+        reader,
+        state,
+        workspace_root,
+        monitor,
+        update,
+        &tasks,
+        persist,
+        &mut dispatch_create,
+        rename_display,
+        &mut dispatch_remove,
+        &mut evict_pool,
+        existing_branches,
+        open_terminal,
+        open_config,
+        preview,
+        tab_op,
+        close_tab,
+    )
 }
 
 #[cfg(test)]

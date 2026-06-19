@@ -21,6 +21,7 @@ use crate::domain::version::Version;
 use crate::domain::workspace_state::{SessionRecord, WorktreeState};
 
 use super::command::{CommandInfo, CommandRegistry, CommandScope, Completion, Effect, Hint};
+use super::tasks::TaskRow;
 use super::terminal_tabs::TabStrip;
 use super::terminal_view::TerminalView;
 use crate::presentation::tui::widgets::text_input::TextInput;
@@ -179,6 +180,11 @@ pub struct HomeState {
     /// (session create / bulk remove / terminal launch). While `Some` the
     /// top-right corner shows the loading rabbit instead of the update notice.
     loading: Option<LoadingIndicator>,
+    /// The rows of the background-task panel (session create / remove running off
+    /// the event-loop thread), refreshed each frame from the shared task handle.
+    /// While non-empty the top-right corner stacks them instead of the update
+    /// notice, so the user sees in-flight work without the screen freezing.
+    tasks: Vec<TaskRow>,
     /// The workspace root path — the directory the root row (`⌂ root`) operates
     /// in. The list's worktrees carry their own paths, but the root row has
     /// none, so this is stored separately to recognise the root's live embedded
@@ -228,6 +234,7 @@ impl HomeState {
             issues: Vec::new(),
             update: None,
             loading: None,
+            tasks: Vec::new(),
             root_path: PathBuf::new(),
         }
     }
@@ -609,6 +616,30 @@ impl HomeState {
     /// notice) only while this is `Some`.
     pub fn loading(&self) -> Option<&LoadingIndicator> {
         self.loading.as_ref()
+    }
+
+    /// Swap in the current background-task rows (session create / remove running
+    /// off the event-loop thread), read from the shared task handle each frame.
+    /// While non-empty the top-right corner stacks them.
+    pub fn set_tasks(&mut self, tasks: Vec<TaskRow>) {
+        self.tasks = tasks;
+    }
+
+    /// The background-task panel rows to render in the top-right corner.
+    pub fn tasks(&self) -> &[TaskRow] {
+        &self.tasks
+    }
+
+    /// Apply a finished background task's outcome: append its result line to the
+    /// log and, when the action changed the sessions, swap in the refreshed list
+    /// **keeping the cursor and active row where they are** (via
+    /// [`refresh_sessions`](Self::refresh_sessions)) — a session created or
+    /// removed in the background must never yank the user's cursor mid-navigation.
+    pub fn apply_task_completion(&mut self, line: LogLine, sessions: Option<Vec<SessionRecord>>) {
+        self.log.push(line);
+        if let Some(sessions) = sessions {
+            self.refresh_sessions(sessions);
+        }
     }
 
     /// How many sessions currently have a live (running) embedded shell/agent.
