@@ -9,8 +9,10 @@
 //!   a URL that wrapped across rows back into one string (via
 //!   [`vt100::Screen::row_wrapped`]).
 //! - [`link_cells`] runs the same detection over the *whole* grid, returning every
-//!   cell that sits on a URL so the renderer can mark links (underline + colour)
-//!   as visibly clickable.
+//!   cell that sits on a URL so the renderer can underline links as visibly
+//!   clickable.
+//! - [`link_cells_at`] is the hover counterpart: it returns just the cells of the
+//!   one URL under the pointer, so the renderer can recolour the hovered link.
 //! - [`open_command`] gives the platform argv that hands a URL to the default
 //!   browser (`open` / `xdg-open` / `cmd /c start`).
 //!
@@ -31,6 +33,44 @@ const SCHEMES: [&str; 2] = ["https://", "http://"];
 /// the next row(s) is stitched back together, so a click anywhere along it opens
 /// the whole link.
 pub fn url_at(screen: &vt100::Screen, cell: Cell) -> Option<String> {
+    let (_, _, chars, idx) = logical_line(screen, cell)?;
+    url_in_chars(&chars, idx)
+}
+
+/// Every grid cell of the `http(s)` URL that the cell at `cell` sits on, or an
+/// empty set when `cell` is blank or not on a URL. This is the hover counterpart
+/// to [`link_cells`]: where that marks *every* link on screen (so each reads as
+/// underlined), this picks out just the one under the pointer, so the renderer
+/// can recolour it and give the hovered link a clickable affordance.
+pub fn link_cells_at(screen: &vt100::Screen, cell: Cell) -> HashSet<Cell> {
+    let mut cells = HashSet::new();
+    let Some((start, width, chars, idx)) = logical_line(screen, cell) else {
+        return cells;
+    };
+    if idx >= chars.len() || chars[idx].is_whitespace() {
+        return cells;
+    }
+    if let Some(span) = url_spans(&chars).into_iter().find(|s| s.contains(&idx)) {
+        for i in span {
+            let row = start + (i / width) as u16;
+            let col = (i % width) as u16;
+            cells.insert(Cell::new(row, col));
+        }
+    }
+    cells
+}
+
+/// Flatten the logical line (the run of rows wrap-joined by
+/// [`vt100::Screen::row_wrapped`]) containing `cell` to one char per column,
+/// row-major, returning the line's first row, the grid width, the flattened
+/// chars, and `cell`'s index into them — or `None` when `cell` is outside the
+/// grid. Shared by [`url_at`] (which reads the URL text) and [`link_cells_at`]
+/// (which maps a URL's char span back to its cells).
+///
+/// A wrapped row has no trailing padding, so the rows join with no gap and a
+/// column maps straight to an index. Wide-glyph continuation cells and blanks
+/// become spaces — never URL characters — which is all the detection needs.
+fn logical_line(screen: &vt100::Screen, cell: Cell) -> Option<(u16, usize, Vec<char>, usize)> {
     let (rows, cols) = screen.size();
     if cell.row >= rows || cell.col >= cols || cols == 0 {
         return None;
@@ -46,18 +86,15 @@ pub fn url_at(screen: &vt100::Screen, cell: Cell) -> Option<String> {
     while end + 1 < rows && screen.row_wrapped(end) {
         end += 1;
     }
-    // Flatten the logical line to one char per column, row-major, so a column
-    // maps straight to an index (a wrapped row has no trailing padding, so the
-    // rows join with no gap). Wide-glyph continuation cells and blanks become
-    // spaces — never URL characters — which is all the detection needs.
-    let mut chars: Vec<char> = Vec::with_capacity((end - start + 1) as usize * cols as usize);
+    let width = cols as usize;
+    let mut chars: Vec<char> = Vec::with_capacity((end - start + 1) as usize * width);
     for row in start..=end {
         for col in 0..cols {
             chars.push(cell_char(screen.cell(row, col)));
         }
     }
-    let idx = (cell.row - start) as usize * cols as usize + cell.col as usize;
-    url_in_chars(&chars, idx)
+    let idx = (cell.row - start) as usize * width + cell.col as usize;
+    Some((start, width, chars, idx))
 }
 
 /// The single representative character of a grid cell: its first glyph, or a
@@ -118,8 +155,8 @@ fn url_spans(chars: &[char]) -> Vec<std::ops::Range<usize>> {
     spans
 }
 
-/// Every grid cell that sits on an `http(s)` URL, so the renderer can style links
-/// (underline + colour) to mark them clickable. This is [`url_at`]'s detection
+/// Every grid cell that sits on an `http(s)` URL, so the renderer can underline
+/// links to mark them clickable. This is [`url_at`]'s detection
 /// run over the whole screen at once: each logical line (a run of rows stitched
 /// by [`vt100::Screen::row_wrapped`]) is flattened the same way, its URL spans are
 /// found, and each covered index maps back to its `(row, col)` cell.
@@ -417,6 +454,65 @@ mod tests {
         assert!(cells.contains(&(0, 19))); // "m" of .com
         assert!(!cells.contains(&(0, 20))); // trailing ")"
         assert!(!cells.contains(&(0, 21))); // trailing "."
+    }
+
+    #[test]
+    fn link_cells_at_returns_the_hovered_urls_cells() {
+        // Hovering anywhere on the URL yields exactly that URL's cells — the same
+        // run `link_cells` marks, but only for the link under the pointer.
+        let parser = parsed(1, 40, b"see https://example.com/x now");
+        let screen = parser.screen();
+        let expected: std::collections::HashSet<(u16, u16)> = (4..=24).map(|c| (0, c)).collect();
+        for col in 4..=24 {
+            let cells: std::collections::HashSet<(u16, u16)> =
+                link_cells_at(screen, Cell::new(0, col))
+                    .into_iter()
+                    .map(|c| (c.row, c.col))
+                    .collect();
+            assert_eq!(cells, expected, "hover col {col}");
+        }
+    }
+
+    #[test]
+    fn link_cells_at_picks_only_the_hovered_link_among_several() {
+        // Two URLs on one row: hovering the first highlights only the first.
+        let parser = parsed(1, 60, b"https://a.io and https://b.io");
+        let cells = link_pairs_at(parser.screen(), Cell::new(0, 0));
+        // "https://a.io" is 12 chars at cols 0..=11; the second URL is untouched.
+        let expected: std::collections::HashSet<(u16, u16)> = (0..=11).map(|c| (0, c)).collect();
+        assert_eq!(cells, expected);
+    }
+
+    #[test]
+    fn link_cells_at_spans_a_wrapped_url() {
+        // A URL wrapped across two rows: hovering the tail still yields every cell.
+        let parser = parsed(2, 16, b"https://example.com/page");
+        let cells = link_pairs_at(parser.screen(), Cell::new(1, 2));
+        for col in 0..16 {
+            assert!(cells.contains(&(0, col)), "row 0 col {col}");
+        }
+        for col in 0..8 {
+            assert!(cells.contains(&(1, col)), "row 1 col {col}");
+        }
+    }
+
+    #[test]
+    fn link_cells_at_returns_empty_off_a_link() {
+        let parser = parsed(1, 40, b"see https://example.com now");
+        let screen = parser.screen();
+        // A blank cell, the surrounding text, and a cell outside the grid: no link.
+        assert!(link_cells_at(screen, Cell::new(0, 0)).is_empty());
+        assert!(link_cells_at(screen, Cell::new(0, 3)).is_empty());
+        assert!(link_cells_at(screen, Cell::new(0, 39)).is_empty());
+        assert!(link_cells_at(screen, Cell::new(9, 0)).is_empty());
+    }
+
+    /// The set of `(row, col)` pairs `link_cells_at` marks for a hover at `cell`.
+    fn link_pairs_at(screen: &vt100::Screen, cell: Cell) -> std::collections::HashSet<(u16, u16)> {
+        link_cells_at(screen, cell)
+            .into_iter()
+            .map(|c| (c.row, c.col))
+            .collect()
     }
 
     #[test]
