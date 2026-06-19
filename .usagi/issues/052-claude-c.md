@@ -1,5 +1,5 @@
 ---
-number: 51
+number: 52
 title: claude -c 相当の前回セッション再開（継続実行）に対応する
 status: done
 priority: high
