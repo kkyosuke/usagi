@@ -33,9 +33,9 @@ pub struct TerminalView {
 impl TerminalView {
     /// Build a snapshot from a parsed terminal `screen`. See
     /// [`from_screen_with_selection`](Self::from_screen_with_selection); this is
-    /// the no-selection case.
+    /// the no-selection, no-hover case.
     pub fn from_screen(screen: &vt100::Screen) -> Self {
-        Self::from_screen_with_selection(screen, None)
+        Self::from_screen_with_selection(screen, None, None)
     }
 
     /// Build a snapshot from a parsed terminal `screen`: each grid row becomes a
@@ -48,14 +48,23 @@ impl TerminalView {
     /// [`terminal_selection`](super::terminal_selection).
     ///
     /// Cells that sit on an `http(s)` URL (see [`terminal_link::link_cells`]) are
-    /// drawn underlined in a light blue, marking them as clickable the way a
-    /// browser or an OSC 8 terminal does.
+    /// drawn underlined, marking them as clickable without disturbing their own
+    /// colours. The one link under the pointer — `hover`, the mouse's cell (see
+    /// [`terminal_link::link_cells_at`]) — is additionally recoloured a light
+    /// blue, so a link lights up as the pointer reaches it the way a browser's
+    /// does.
     pub fn from_screen_with_selection(
         screen: &vt100::Screen,
         selection: Option<&Selection>,
+        hover: Option<Cell>,
     ) -> Self {
         let (rows, cols) = screen.size();
         let links = terminal_link::link_cells(screen);
+        // Just the hovered link's cells (empty when the pointer is off any link),
+        // so only it is recoloured while every link stays underlined.
+        let hovered = hover
+            .map(|cell| terminal_link::link_cells_at(screen, cell))
+            .unwrap_or_default();
         let mut out = Vec::with_capacity(rows as usize);
         for row in 0..rows {
             // At least one byte per column; escapes grow it from there. Sizing up
@@ -73,12 +82,16 @@ impl TerminalView {
                     continue;
                 }
                 let mut style = cell.map(CellStyle::of).unwrap_or_default();
-                // A cell on a URL is underlined and recoloured light blue, so the
-                // link reads as clickable. Applied before the selection flip so a
-                // drag still inverts (and stays visible) over a link.
+                // A cell on a URL is underlined so the link reads as clickable
+                // while keeping its own colour; only the link under the pointer is
+                // recoloured light blue, lighting it up on hover. Applied before
+                // the selection flip so a drag still inverts (and stays visible)
+                // over a link.
                 if links.contains(&Cell::new(row, col)) {
                     style.underline = true;
-                    style.fg = LINK_COLOR;
+                    if hovered.contains(&Cell::new(row, col)) {
+                        style.fg = LINK_COLOR;
+                    }
                 }
                 // A selected cell is inverted so the drag is visible; flipping
                 // (rather than forcing) keeps already-inverse text readable.
@@ -131,9 +144,9 @@ impl TerminalView {
 /// The ANSI escape that clears all colours and attributes back to default.
 const SGR_RESET: &str = "\x1b[0m";
 
-/// The colour a link is drawn in — a light blue ("水色") which, together with an
-/// underline, marks a URL as clickable. A 24-bit RGB value so it reads the same
-/// regardless of the user's terminal palette.
+/// The colour the *hovered* link is drawn in — a light blue ("水色") which lights
+/// the underlined URL under the pointer up as clickable. A 24-bit RGB value so it
+/// reads the same regardless of the user's terminal palette.
 const LINK_COLOR: vt100::Color = vt100::Color::Rgb(102, 178, 255);
 
 /// The drawable style of one screen cell: its colours and text attributes,
@@ -241,7 +254,7 @@ mod tests {
         let parser = parsed(1, 4, b"abcd");
         let mut sel = Selection::new(Cell::new(0, 0));
         sel.extend(Cell::new(0, 1));
-        let view = TerminalView::from_screen_with_selection(parser.screen(), Some(&sel));
+        let view = TerminalView::from_screen_with_selection(parser.screen(), Some(&sel), None);
         let row = &view.rows()[0];
         // The selected run opens with an inverse escape and the cells after it
         // reset back to plain before the row ends.
@@ -256,7 +269,7 @@ mod tests {
         let parser = parsed(1, 2, b"\x1b[7mAB");
         let mut sel = Selection::new(Cell::new(0, 0));
         sel.extend(Cell::new(0, 0));
-        let view = TerminalView::from_screen_with_selection(parser.screen(), Some(&sel));
+        let view = TerminalView::from_screen_with_selection(parser.screen(), Some(&sel), None);
         let row = &view.rows()[0];
         // Column 0 (selected) drops the inverse, so it renders plain (no escape);
         // column 1 keeps inverse (SGR 7), and the row resets at its end.
@@ -264,30 +277,57 @@ mod tests {
     }
 
     #[test]
-    fn from_screen_underlines_and_recolours_a_link() {
-        // The URL cells are drawn underlined (SGR 4) in the light-blue link
-        // colour (RGB 102;178;255); the surrounding text stays plain.
+    fn from_screen_underlines_a_link_without_recolouring_it() {
+        // With no hover, the URL cells are only underlined (SGR 4) and keep their
+        // own colour — no light-blue override — so an idle screen stays readable.
         let parser = parsed(1, 30, b"x https://example.com y");
         let view = TerminalView::from_screen(parser.screen());
         let row = &view.rows()[0];
-        assert!(row.contains("\x1b[0;4;38;2;102;178;255mhttps://example.com"));
+        // Underlined, but with no foreground colour (no `38;2;...`).
+        assert!(row.contains("\x1b[0;4mhttps://example.com"));
+        assert!(!row.contains("38;2;102;178;255"));
         // The leading "x " has no escape before it, and the link resets before
-        // the trailing " y" so the colour never bleeds onto it.
-        assert!(row.starts_with("x \x1b[0;4;38;2;102;178;255m"));
+        // the trailing " y" so the underline never bleeds onto it.
+        assert!(row.starts_with("x \x1b[0;4m"));
         assert!(row.contains("\x1b[0m y"));
     }
 
     #[test]
-    fn from_screen_inverts_a_selected_link_on_top_of_its_style() {
-        // A drag over a link keeps the underline + link colour and adds the
-        // inverse (7) so the selection is still visible over it.
+    fn from_screen_recolours_only_the_hovered_link() {
+        // Hovering the link recolours it light blue (RGB 102;178;255) on top of
+        // the underline, lighting it up as clickable under the pointer.
+        let parser = parsed(1, 30, b"x https://example.com y");
+        let hover = Some(Cell::new(0, 5)); // somewhere on the URL
+        let view = TerminalView::from_screen_with_selection(parser.screen(), None, hover);
+        let row = &view.rows()[0];
+        assert!(row.contains("\x1b[0;4;38;2;102;178;255mhttps://example.com"));
+        assert!(row.contains("\x1b[0m y"));
+    }
+
+    #[test]
+    fn from_screen_leaves_an_unhovered_link_uncoloured() {
+        // Hovering off the link (on the trailing blank padding) underlines it but
+        // adds no colour.
+        let parser = parsed(1, 30, b"x https://example.com y");
+        let hover = Some(Cell::new(0, 29));
+        let view = TerminalView::from_screen_with_selection(parser.screen(), None, hover);
+        let row = &view.rows()[0];
+        assert!(row.contains("\x1b[0;4mhttps://example.com"));
+        assert!(!row.contains("38;2;102;178;255"));
+    }
+
+    #[test]
+    fn from_screen_inverts_a_selected_hovered_link_on_top_of_its_style() {
+        // A drag over the hovered link keeps the underline + link colour and adds
+        // the inverse (7) so the selection is still visible over it.
         let parser = parsed(1, 20, b"https://x.io");
         let mut sel = Selection::new(Cell::new(0, 0));
         sel.extend(Cell::new(0, 0));
-        let view = TerminalView::from_screen_with_selection(parser.screen(), Some(&sel));
+        let hover = Some(Cell::new(0, 0));
+        let view = TerminalView::from_screen_with_selection(parser.screen(), Some(&sel), hover);
         let row = &view.rows()[0];
-        // Column 0 ("h") is both a link cell and selected: underline + inverse +
-        // link colour.
+        // Column 0 ("h") is a link cell, hovered, and selected: underline +
+        // inverse + link colour.
         assert!(row.starts_with("\x1b[0;4;7;38;2;102;178;255mh"));
     }
 
@@ -296,7 +336,7 @@ mod tests {
         // Passing no selection is identical to `from_screen`.
         let parser = parsed(1, 4, b"abcd");
         let plain = TerminalView::from_screen(parser.screen());
-        let none = TerminalView::from_screen_with_selection(parser.screen(), None);
+        let none = TerminalView::from_screen_with_selection(parser.screen(), None, None);
         assert_eq!(plain, none);
     }
 
