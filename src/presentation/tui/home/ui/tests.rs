@@ -714,8 +714,52 @@ fn switch_preview_shows_the_tab_strip_beside_the_header_for_a_live_session() {
     // row; the live screen follows below.
     let top = console::strip_ansi_codes(&lines[0]).into_owned();
     assert!(top.contains("feat") && top.contains("ready"));
+    // A dim divider separates the identity from the tab chips.
+    assert!(top.contains('│'));
     assert!(top.contains("1 agent") && top.contains("2 terminal"));
     assert!(stripped(&lines).contains("$ echo hi"));
+}
+
+#[test]
+fn switch_preview_keeps_a_fixed_identity_width_so_tabs_do_not_jitter() {
+    // The header identity is a fixed width, so the divider and tabs land in the
+    // same column whichever session the cursor is on — the row does not shift as
+    // the cursor moves between sessions — and a long name is clipped, not spilled.
+    let mut short = worktree(Some("x"), false, BranchStatus::Local);
+    short.path = PathBuf::from("/repo/short");
+    let mut long = worktree(
+        Some("feature/really-long-branch-name-here"),
+        false,
+        BranchStatus::Synced,
+    );
+    long.path = PathBuf::from("/repo/long");
+    let mut state = HomeState::new("usagi", vec![short, long], None);
+    state.set_live([PathBuf::from("/repo/short"), PathBuf::from("/repo/long")].into());
+    state.set_terminal_tabs(vec!["agent".to_string(), "terminal".to_string()], 0);
+    state.set_terminal_view(TerminalView::from_rows(vec!["$ ".to_string()], None));
+    state.enter_switch(super::super::state::ReturnMode::Overview);
+
+    // The display column of the divider, used as the anchor for the tabs.
+    let divider_col = |lines: &[String]| {
+        let top = console::strip_ansi_codes(&lines[0]).into_owned();
+        let at = top.find('│').expect("the divider is drawn");
+        console::measure_text_width(&top[..at])
+    };
+
+    state.switch_move_down(); // cursor on the short-named session
+    let short_top = switch_preview(&state, 80, 12);
+    let short_col = divider_col(&short_top);
+
+    state.switch_move_down(); // cursor on the long-named session
+    let long_lines = switch_preview(&state, 80, 12);
+    let long_col = divider_col(&long_lines);
+
+    // The divider (and so the tabs beside it) sits in the same column for both.
+    assert_eq!(short_col, long_col);
+    // The long name is clipped with an ellipsis rather than pushing the divider.
+    assert!(console::strip_ansi_codes(&long_lines[0])
+        .into_owned()
+        .contains('…'));
 }
 
 #[test]
@@ -891,9 +935,9 @@ fn right_pane_shows_the_tab_strip_above_the_terminal_when_attached() {
     state.show_attached();
     state.set_terminal_tabs(vec!["agent".to_string(), "terminal".to_string()], 1);
     state.set_terminal_view(TerminalView::from_rows(vec!["$ echo hi".to_string()], None));
-    let rows = right_pane_contents(&state, 40, 5);
-    // The strip takes the top two rows — chips then the active-tab underline —
-    // listing both panes; the terminal follows below them.
+    let rows = right_pane_contents(&state, 80, 5);
+    // The strip takes the top two rows — the identity + chips, then the active-tab
+    // underline — listing both panes; the terminal follows below them.
     let chips = console::strip_ansi_codes(&rows[0]).into_owned();
     assert!(chips.contains("agent") && chips.contains("terminal"));
     assert!(rows[2].contains("$ echo hi"));
