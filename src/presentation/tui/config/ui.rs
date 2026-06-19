@@ -16,9 +16,6 @@ const BLOCK_WIDTH: usize = 52;
 /// the terminal and clips any line that overruns it on a narrow screen.
 const MODAL_INNER_WIDTH: usize = 42;
 
-/// Caret glyph drawn at the editing position in the sudo-password field.
-const CARET: &str = "▏";
-
 /// The spinner frames cycled through while the install runs in the background.
 const SPINNER: [&str; 4] = ["⠋", "⠙", "⠹", "⠸"];
 
@@ -185,7 +182,7 @@ fn install_modal_frame(
         format!("モデル: {model}"),
         "ランタイム導入には sudo 権限が必要です".to_string(),
         String::new(),
-        format!("sudo パスワード: {}", modal.masked(CARET)),
+        format!("sudo パスワード: {}", modal.masked()),
         String::new(),
         style("Enter: 開始   Esc: キャンセル").dim().to_string(),
     ];

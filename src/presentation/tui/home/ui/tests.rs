@@ -1011,21 +1011,21 @@ fn input_line_renders_prompt_in_overview() {
     state.push_char('m');
     let line = input_line(&state);
     assert!(line.contains('m'));
-    assert!(line.contains(CARET));
+    assert!(line.contains('❯'));
 }
 
 #[test]
-fn input_line_draws_the_caret_at_the_cursor() {
+fn input_line_draws_the_caret_without_shifting_the_text() {
     let mut state = state_with(Vec::new());
     for c in "man".chars() {
         state.push_char(c);
     }
     state.cursor_left();
-    let line = input_line(&state);
-    // The caret sits between "ma" and "n", with text on both sides.
-    let caret = line.find(CARET).expect("caret present");
-    let n = line.rfind('n').expect("trailing char present");
-    assert!(caret < n, "caret should precede the last character");
+    // The block caret recolours the character it sits on rather than inserting a
+    // glyph, so the text reads intact whatever the caret position. (Where the
+    // reverse-video cell lands is covered by `widgets::block_caret`'s own tests.)
+    let plain = console::strip_ansi_codes(&input_line(&state)).into_owned();
+    assert!(plain.contains("❯ man"));
 }
 
 #[test]
@@ -1184,17 +1184,18 @@ fn overlay_top_right_stops_when_the_banner_runs_past_the_last_row() {
 
 #[test]
 fn switch_create_rows_show_the_input_and_an_error() {
-    // Caret at the end of the name: the whole name precedes it.
+    // Caret at the end of the name: the whole name precedes it, and the block
+    // caret adds one trailing cell.
     let rows = switch_create_rows("wip", 3, None, 30);
     assert_eq!(rows.len(), 1);
     let plain = console::strip_ansi_codes(&rows[0]).into_owned();
     assert!(plain.contains("+ new: wip"));
-    assert!(plain.contains(CARET));
 
-    // Caret in the middle: it splits the name (`wi▏p`).
+    // Caret in the middle: the block caret sits on a character, so the name reads
+    // intact without an inserted glyph.
     let mid = switch_create_rows("wip", 2, None, 30);
     let plain_mid = console::strip_ansi_codes(&mid[0]).into_owned();
-    assert!(plain_mid.contains(&format!("wi{CARET}p")));
+    assert!(plain_mid.contains("+ new: wip"));
 
     let with_error = switch_create_rows("feature", 7, Some("\"feature\" already exists."), 40);
     assert_eq!(with_error.len(), 2);
@@ -1221,7 +1222,6 @@ fn switch_rename_rows_show_the_target_and_typed_label() {
     assert_eq!(rows.len(), 1);
     let plain = console::strip_ansi_codes(&rows[0]).into_owned();
     assert!(plain.contains("rename main: My main"));
-    assert!(plain.contains(CARET));
 }
 
 #[test]
