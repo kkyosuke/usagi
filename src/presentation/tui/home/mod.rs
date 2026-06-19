@@ -342,6 +342,28 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
                     // the tab strip above it) without leaving 没入.
                     terminal_pane::PaneStep::NextTab => pool.nav(dir, terminal_tabs::TabNav::Next),
                     terminal_pane::PaneStep::PrevTab => pool.nav(dir, terminal_tabs::TabNav::Prev),
+                    // `Ctrl-T` / `Ctrl-G`: add a terminal / agent tab and loop, so
+                    // the next iteration drives the freshly added (now active) pane
+                    // and republishes the tab strip — without leaving 没入.
+                    terminal_pane::PaneStep::NewTerminalTab => {
+                        pool.add_pane(
+                            term,
+                            dir,
+                            terminal_tabs::PaneKind::Terminal,
+                            initial,
+                            &label,
+                        )?;
+                    }
+                    terminal_pane::PaneStep::NewAgentTab => {
+                        pool.add_pane(term, dir, terminal_tabs::PaneKind::Agent, initial, &label)?;
+                    }
+                    // `Ctrl-W`: close the active tab. Same as a shell that exited —
+                    // keep driving when a pane remains, else fall to 在席.
+                    terminal_pane::PaneStep::CloseTab => {
+                        if !pool.close_active(dir, &label) {
+                            return Ok(PaneExit::Closed);
+                        }
+                    }
                     // The active pane's shell exited: drop it; keep driving when
                     // a pane remains, else fall to 在席.
                     terminal_pane::PaneStep::Closed => {
