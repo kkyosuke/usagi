@@ -51,6 +51,15 @@ fn reload_sessions(root: &Path) -> Option<Vec<SessionRecord>> {
         .map(|s| s.sessions)
 }
 
+/// Lock the session op-lock, recovering from a poisoned mutex. The guarded value
+/// is `()` — a worker that panicked while holding it left no invalid state behind
+/// — so recovering keeps session create / remove / rename working instead of
+/// bricking the feature: a poisoned lock would otherwise panic every later
+/// dispatch's worker thread, leaving its task row spinning forever.
+fn lock_session_ops(lock: &std::sync::Mutex<()>) -> std::sync::MutexGuard<'_, ()> {
+    lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 /// Runs the home screen for `workspace` on the given terminal until the user
 /// goes back or quits. Loads the workspace's worktree state and prior command
 /// history from disk and wires it, with the real terminal, to the testable
@@ -128,7 +137,7 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
         let name = name.to_string();
         let lock = create_lock.clone();
         std::thread::spawn(move || {
-            let _guard = lock.lock().expect("session op lock poisoned");
+            let _guard = lock_session_ops(&lock);
             let (ok, completion) = run_create(&root, &name);
             handle.complete(id, ok, completion);
         });
@@ -145,13 +154,18 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
     // state.json and re-reads the sessions so the pane reflects it. The branch /
     // identity is untouched, so the renamed session keeps its row: `select` holds
     // its name to keep the cursor on it after the list rebuilds.
+    //
+    // Unlike create / remove this stays synchronous (no git work to block on),
+    // but it still load-modify-saves `state.json`, so it takes the same op-lock
+    // to serialise against the background workers — otherwise a rename landing
+    // mid-`worktree add` would be clobbered by the worker's later write. The lock
+    // is only contended while a background op is genuinely in flight, so the
+    // momentary wait is bounded to exactly the window where serialising matters.
     let rename_root = workspace.path.clone();
-    let mut rename_display =
-        |name: &str, label: &str| match crate::usecase::session::set_display_name(
-            &rename_root,
-            name,
-            label,
-        ) {
+    let rename_lock = op_lock.clone();
+    let mut rename_display = |name: &str, label: &str| {
+        let _guard = lock_session_ops(&rename_lock);
+        match crate::usecase::session::set_display_name(&rename_root, name, label) {
             Ok(shown) => SessionOutcome {
                 line: LogLine::output(format!("Renamed \"{name}\" to \"{shown}\" 🏷")),
                 sessions: reload_sessions(&rename_root),
@@ -162,7 +176,8 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
                 sessions: None,
                 select: None,
             },
-        };
+        }
+    };
 
     // The effective settings for this workspace (project-local overrides on top
     // of the global default), read once. Any failure falls back to the defaults.
@@ -227,7 +242,7 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
         let lock = remove_lock.clone();
         let agent = remove_agent.clone();
         std::thread::spawn(move || {
-            let _guard = lock.lock().expect("session op lock poisoned");
+            let _guard = lock_session_ops(&lock);
             let (ok, completion) = run_remove(&root, &name, force, agent.as_ref());
             handle.complete(id, ok, completion);
         });
