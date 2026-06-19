@@ -112,8 +112,9 @@ pub(super) fn overview_key(
                     }
                 },
                 // `close` is a session command; the Overview line still
-                // dispatches it if typed, closing the active session (the root by
-                // default, which is a no-op since the root is not removable).
+                // dispatches it if typed, closing the focused session. On the root
+                // row (the default) it is refused, since the root is the workspace
+                // itself and not a session.
                 Effect::CloseSession => close_focused_session(state, dispatch_remove),
                 // `ShowText` already opened its modal inside `submit`; nothing
                 // more for the event loop to do.
@@ -452,12 +453,15 @@ pub(super) fn focus_key(
 /// (discarding any uncommitted changes) and, since the user asked to close this
 /// session, leaves 在席 for 切替 (Switch) at once so they can pick the next one
 /// (`Esc` backs out to 統括); the removal's result is logged and the list
-/// refreshed when the background task finishes. The root row is not a session,
-/// so closing it only logs and stays in 在席.
+/// refreshed when the background task finishes. The root row is the workspace
+/// itself, not a session, so closing it is refused outright and stays in 在席.
 fn close_focused_session(state: &mut HomeState, dispatch_remove: &mut dyn FnMut(&str, bool)) {
     let name = state.focused_session_name();
+    // The root row is the workspace itself, not a session, so it cannot be
+    // closed. The 在席 menu hides `close` here, but the prompt could still be
+    // typed, so refuse it explicitly and stay in 在席.
     if name == ROOT_NAME {
-        state.log_error("the root row is not a session to close");
+        state.log_error("the root row is the workspace and cannot be closed");
         return;
     }
     dispatch_remove(&name, true);

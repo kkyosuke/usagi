@@ -12,8 +12,8 @@ use super::super::state::{HomeState, LineKind, LogLine, Mode, WorktreeList, ROOT
 use super::super::terminal_tabs::TabStrip;
 use super::super::terminal_view::TerminalView;
 use super::{
-    clip_to_width, ACTIVE_COL, DETACHED, DIRTY_ICON, EMPTY_MESSAGE, HINT_INDENT, HINT_MAX,
-    LOCAL_ICON, NAME_PREFIX, NEW_ICON, PUSHED_ICON, ROOT_DETAIL, STATUS_COL, SYNCED_ICON,
+    clip_to_width, pad_to_width, ACTIVE_COL, DETACHED, DIRTY_ICON, EMPTY_MESSAGE, HINT_INDENT,
+    HINT_MAX, LOCAL_ICON, NAME_PREFIX, NEW_ICON, PUSHED_ICON, ROOT_DETAIL, STATUS_COL, SYNCED_ICON,
     TERMINAL_STARTING,
 };
 use crate::domain::settings::SessionActionUi;
@@ -357,14 +357,12 @@ pub(super) fn log_tail(log: &[LogLine], width: usize, rows: usize) -> Vec<String
         .collect()
 }
 
-/// Builds the two-row tab strip drawn above the embedded terminal in 没入 (and in
-/// the 切替 preview): the top row is one ` N label ` chip per pane — the active one
-/// reversed and bold so it reads as the visible tab, the rest dimmed — and the
-/// bottom row underlines the active chip with a cyan bar so the eye lands on it.
-/// Each chip is numbered (1-based) to match the `←`/`→` tab order. Both rows are
-/// clipped to the pane width; a single-pane session still gets the strip, so the
-/// terminal below it never shifts as panes come and go.
-pub(super) fn tab_strip_lines(strip: &TabStrip, right_w: usize) -> Vec<String> {
+/// Builds the tab strip's two raw (unclipped) rows: one ` N label ` chip per
+/// pane (the active one reversed and bold, the rest dimmed) and the underline
+/// marker beneath the active chip. Each chip is numbered (1-based) to match the
+/// `←`/`→` tab order. The rows are laid beside the preview header on a shared row
+/// by [`header_tab_rows`], which re-indents the marker to stay under the chips.
+fn tab_strip_parts(strip: &TabStrip) -> (String, String) {
     // Gap between chips on the top row (and under it on the marker row), so the
     // chips read as separate tabs without a hard separator glyph.
     const GAP: &str = "  ";
@@ -385,10 +383,106 @@ pub(super) fn tab_strip_lines(strip: &TabStrip, right_w: usize) -> Vec<String> {
             marker.push_str(&" ".repeat(width));
         }
     }
+    (chips, marker)
+}
+
+/// The divider drawn between the fixed-width header identity and the tab strip,
+/// so the session's identity (name / status / agent) reads as a distinct block
+/// from its tabs. It reuses the pane divider glyph ([`SEP`](super::SEP)), dimmed.
+const HEADER_TAB_DIVIDER: &str = " │ ";
+
+/// Lays the preview `header` (the fixed-width identity from [`preview_header`])
+/// and the pane tab strip on a single row: the identity, a dim divider, then the
+/// numbered chips, with the active-tab underline marker on the row below
+/// re-indented to sit under the chips. Because the identity is a constant width,
+/// the divider and the chips land in the same column whichever session is shown,
+/// so the row does not jitter as the 切替 cursor moves between sessions. With no
+/// `strip` (or an empty one) the identity stands alone on one row. Used by both
+/// the 切替 (Switch) preview and 没入 (Attached).
+pub(super) fn header_tab_rows(
+    header: String,
+    strip: Option<&TabStrip>,
+    width: usize,
+) -> Vec<String> {
+    let Some(strip) = strip.filter(|s| !s.labels.is_empty()) else {
+        return vec![clip_to_width(&header, width)];
+    };
+    let (chips, marker) = tab_strip_parts(strip);
+    let divider = style(HEADER_TAB_DIVIDER).dim().to_string();
+    // Push the marker right past the identity and the divider so it lands under
+    // the chips on the row above. The identity is a fixed width, so this indent
+    // is the same for every session.
+    let indent = console::measure_text_width(&header) + HEADER_TAB_DIVIDER.chars().count();
     vec![
-        clip_to_width(&chips, right_w),
-        clip_to_width(&marker, right_w),
+        clip_to_width(&format!("{header}{divider}{chips}"), width),
+        clip_to_width(&format!("{}{marker}", " ".repeat(indent)), width),
     ]
+}
+
+/// Column widths for the fixed-width header identity. The session name is clipped
+/// and every field is padded to a constant width, so the identity block is the
+/// same size for every session: a long name or status is clipped (with an
+/// ellipsis) instead of shoving the divider and tabs sideways, and the 切替
+/// preview does not jitter as the cursor moves between sessions.
+const HEADER_NAME_COL: usize = 16;
+const HEADER_AGENT_COL: usize = 9;
+/// The status + agent block that follows the name: the right-edge status field
+/// ([`STATUS_COL`]) and the agent label, with a two-space gap between them.
+const HEADER_DETAIL_COL: usize = STATUS_COL + 2 + HEADER_AGENT_COL;
+
+/// Builds the fixed-width right-pane header identity shown above a session's
+/// preview / terminal: the session `name` (cyan, bold, clipped to
+/// [`HEADER_NAME_COL`]), then either its git `status` label and `agent` state (a
+/// real session) or the workspace-root note (the root row, no status). Each field
+/// is padded to a constant width so the block is the same size for every session.
+/// Shared by 切替 (Switch) and 没入 (Attached) so both carry the same identity.
+fn preview_header(name: &str, status: Option<BranchStatus>, agent: Option<String>) -> String {
+    let name = pad_to_width(
+        style(clip_to_width(name, HEADER_NAME_COL))
+            .cyan()
+            .bold()
+            .to_string(),
+        HEADER_NAME_COL,
+    );
+    let detail = match status {
+        Some(status) => {
+            let status = pad_to_width(status_label(status), STATUS_COL);
+            let agent = pad_to_width(agent.unwrap_or_default(), HEADER_AGENT_COL);
+            format!("{status}  {agent}")
+        }
+        // The root row carries no git status / agent, only its note — clipped to
+        // the same detail width so the identity block stays a constant size.
+        None => pad_to_width(
+            style(clip_to_width(ROOT_DETAIL, HEADER_DETAIL_COL))
+                .dim()
+                .to_string(),
+            HEADER_DETAIL_COL,
+        ),
+    };
+    format!("{name}  {detail}")
+}
+
+/// The 没入 (Attached) header line for the active session: its name, git status,
+/// and agent state — or the workspace-root note when the root row is active. The
+/// active session is the one the embedded terminal below belongs to.
+fn attached_header(state: &HomeState) -> String {
+    match state.list().active() {
+        Some(w) => {
+            let agent = AgentState::from_flags(
+                state.is_live(&w.path),
+                state.is_running(&w.path),
+                state.is_waiting(&w.path),
+                state.is_done(&w.path),
+            )
+            .detail(HEADER_AGENT_COL);
+            preview_header(
+                w.branch.as_deref().unwrap_or(DETACHED),
+                Some(w.status),
+                agent,
+            )
+        }
+        None => preview_header(ROOT_NAME, None, None),
+    }
 }
 
 /// Builds the right pane from an embedded terminal snapshot: each grid row,
@@ -546,29 +640,18 @@ pub(super) fn switch_preview(state: &HomeState, width: usize, rows: usize) -> Ve
     };
 
     // Header: the name, then either the git status + agent state (a session) or
-    // the workspace-root note (the root row).
-    let mut header = style(clip_to_width(&name, width)).cyan().bold().to_string();
-    match status {
-        Some(status) => {
-            header.push_str(&format!("   {}", status_label(status)));
-            if let Some(agent) = AgentState::from_flags(live, running, waiting, done).detail(width)
-            {
-                header.push_str(&format!("   {agent}"));
-            }
-        }
-        None => header.push_str(&format!("   {}", style(ROOT_DETAIL).dim())),
-    }
-    let mut lines = vec![header, String::new()];
+    // the workspace-root note (the root row). A live session's tabs share the
+    // header's row (the `←`/`→` targets), so the identity and the tabs read
+    // together on one line; the preview below mirrors the active pane.
+    let agent = AgentState::from_flags(live, running, waiting, done).detail(HEADER_AGENT_COL);
+    let header = preview_header(&name, status, agent);
+    let mut lines = header_tab_rows(
+        header,
+        if live { state.terminal_tabs() } else { None },
+        width,
+    );
 
     if live {
-        // Show the session's tabs above the preview so `←`/`→` has something to
-        // act on: the strip names each pane and marks the active one, and the
-        // preview below mirrors that active pane.
-        if let Some(strip) = state.terminal_tabs() {
-            if !strip.labels.is_empty() {
-                lines.extend(tab_strip_lines(strip, width));
-            }
-        }
         // Selecting re-attaches the running shell / agent: preview its actual
         // screen (the live snapshot taken before painting) so the choice shows
         // what re-attaching reveals. Fall back to a label until the first
@@ -586,7 +669,9 @@ pub(super) fn switch_preview(state: &HomeState, width: usize, rows: usize) -> Ve
     } else {
         // Selecting opens 在席 on this session: preview its action surface, which
         // mirrors the configured Session Action UI — a command menu or a prompt —
-        // so the preview matches what focusing actually reveals.
+        // so the preview matches what focusing actually reveals. A blank row keeps
+        // the header clear of the surface below it.
+        lines.push(String::new());
         match state.session_action_ui() {
             SessionActionUi::Menu => {
                 lines.push(style("Run a command:").dim().to_string());
@@ -625,13 +710,17 @@ pub(super) fn right_pane_contents(state: &HomeState, right_w: usize, rows: usize
             SessionActionUi::Prompt => focus_prompt(state, right_w),
         },
         Mode::Attached => {
-            // The tab strip (when the pane driver has published one) takes the top
-            // two rows; the embedded terminal fills the rest. A starting hint stands
-            // in until the first screen snapshot arrives.
+            // The active session's identity shares the top row with its tab chips
+            // (the underline marker below them), so the header reads beside the
+            // tabs just as it does in 切替. This header + tab block always fills
+            // exactly `TAB_BAR_ROWS`, matching `attached_geometry`, so the embedded
+            // terminal below never shifts whether or not a strip is published. A
+            // starting hint stands in until the first screen snapshot arrives.
             let mut lines = Vec::with_capacity(rows);
-            if let Some(strip) = state.terminal_tabs() {
-                lines.extend(tab_strip_lines(strip, right_w));
-            }
+            let header = attached_header(state);
+            let mut head = header_tab_rows(header, state.terminal_tabs(), right_w);
+            head.resize(super::TAB_BAR_ROWS, String::new());
+            lines.extend(head);
             let body = rows.saturating_sub(lines.len());
             match state.terminal_view() {
                 Some(view) => lines.extend(terminal_pane(view, right_w, body)),

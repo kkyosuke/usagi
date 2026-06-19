@@ -70,6 +70,12 @@ enum Commands {
     /// Hidden from the CLI: launched by AI agents, not invoked by hand.
     #[command(hide = true)]
     Mcp,
+    /// Play a usagi animation (1=走る 2=増える 3,4=読み込み 5=マスコット)
+    Run {
+        /// Which animation to play (1–5)
+        #[arg(value_name = "N", default_value_t = 1)]
+        n: u8,
+    },
     /// Sync the current repository's worktree state to .usagi/state.json
     Status,
 }
@@ -87,6 +93,7 @@ fn main() -> anyhow::Result<()> {
         Commands::Memory { command } => usagi::presentation::cli::memory::run(command),
         Commands::LlmMcp { model } => usagi::presentation::cli::llm_mcp::run(model),
         Commands::Mcp => usagi::presentation::cli::mcp::run(),
+        Commands::Run { n } => usagi::presentation::cli::run::run(n),
         Commands::Status => usagi::presentation::cli::status::run(),
     };
 

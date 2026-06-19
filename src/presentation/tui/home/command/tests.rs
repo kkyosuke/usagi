@@ -647,6 +647,29 @@ fn issue_graph_renders_the_dependency_tree() {
 }
 
 #[test]
+fn issue_gantt_renders_a_dated_chart() {
+    let issues = vec![
+        issue(1, "root", IssueStatus::Done, vec![]),
+        issue(2, "child", IssueStatus::Todo, vec![1]),
+    ];
+    let result = registry().dispatch_with("issue chart", &[], &[], &issues);
+    assert_eq!(result.effect, Effect::ShowText("Issue gantt"));
+    let text = joined(&result);
+    // Header span line and per-issue rows with the dependency annotation.
+    assert!(text.contains("→"));
+    assert!(text.contains("#1"));
+    assert!(text.contains("#2"));
+    assert!(text.contains("←1"));
+    // Progress footer is shared with the other issue views.
+    assert!(text.contains("2 issues · 1 done"));
+
+    // Empty chart degrades to a single log line.
+    let empty = registry().dispatch_with("issue gantt", &[], &[], &[]);
+    assert_eq!(empty.effect, Effect::None);
+    assert!(empty.lines[0].text.contains("No issues yet"));
+}
+
+#[test]
 fn issue_show_renders_one_issue_or_reports_missing() {
     let issues = vec![issue(7, "visible", IssueStatus::Todo, vec![])];
     let shown = registry().dispatch_with("issue show 7", &[], &[], &issues);

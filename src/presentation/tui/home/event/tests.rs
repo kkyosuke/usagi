@@ -640,10 +640,11 @@ fn session_remove_with_a_name_and_force_routes_to_remove() {
 }
 
 #[test]
-fn close_typed_in_overview_is_a_no_op_on_the_root() {
-    // `close` is a session command, but the Overview line still dispatches it:
-    // it targets the active session (the root by default). The root is not a
-    // session, so no removal is dispatched — it only logs — and the screen stays.
+fn close_typed_in_overview_on_root_is_refused() {
+    // `close` is a session command, and the Overview line still dispatches it.
+    // The focused row is the root by default, which is the workspace itself and
+    // not a session, so `close` is refused outright: `remove` is never called and
+    // the screen stays put.
     let mut keys = typed("close");
     keys.push(Ok(Key::Enter)); // run `close` from the Overview line
     keys.push(Ok(Key::Escape)); // Esc inert in Overview; fallback Ctrl-C quits
@@ -680,8 +681,10 @@ fn close_typed_in_overview_is_a_no_op_on_the_root() {
     )
     .unwrap();
     assert!(matches!(outcome, Outcome::Quit));
-    // The root row is not a session, so `close` dispatches no removal.
-    assert!(removed.is_empty());
+    assert!(
+        removed.is_empty(),
+        "close on the root row must not call remove"
+    );
 }
 
 #[test]

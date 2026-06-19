@@ -236,6 +236,82 @@ pub fn done_rabbit(ok: bool, message: &str) -> Vec<String> {
         .collect()
 }
 
+/// The running usagi's two content rows — `(ears, body)` — by travel direction.
+/// Speed lines (`ﾐ`) trail *behind* the run — on the left when heading right, on
+/// the right when heading left — so the rabbit reads as dashing that way while
+/// the face keeps its single `ㅅ` nose. The head's `ㅅ` is width-2 like every
+/// other usagi face, and the ears sit centred over it (each direction pads the
+/// ears so they stay above the head). [`running_rabbit`] draws these as a
+/// three-row block that bobs up and down so a rabbit translated across the
+/// screen reads as bounding.
+const RUNNER_RIGHT: [&str; 2] = ["   ∩∩", "ﾐ(･ㅅ･)"];
+const RUNNER_LEFT: [&str; 2] = ["  ∩∩", "(･ㅅ･)ﾐ"];
+
+/// The display width of the running usagi sprite, so a caller can bound the
+/// rabbit's horizontal travel against the terminal width (the rightmost column
+/// it may start at is `width - running_rabbit_width()`).
+pub fn running_rabbit_width() -> usize {
+    RUNNER_RIGHT
+        .iter()
+        .chain(RUNNER_LEFT.iter())
+        .map(|row| console::measure_text_width(row))
+        .max()
+        .unwrap_or(0)
+}
+
+/// A three-row running usagi at horizontal offset `col`, facing right
+/// (`face_right`) or left, drawn mid-hop (`airborne`) or grounded. The two
+/// content rows ride the top two rows of the block when airborne and the bottom
+/// two when grounded, so toggling `airborne` between frames makes the rabbit
+/// bound; advancing `col` carries it across the screen. Styled magenta-bold like
+/// the mascot. Used by the startup [`splash`](super::super::tui::splash) screen,
+/// which owns the motion (the bounce between the screen edges and the per-frame
+/// hop) and calls this purely to draw a frame.
+pub fn running_rabbit(col: usize, face_right: bool, airborne: bool) -> Vec<String> {
+    let [ears, body] = if face_right {
+        RUNNER_RIGHT
+    } else {
+        RUNNER_LEFT
+    };
+    let pad = " ".repeat(col);
+    let ears = format!("{pad}{ears}");
+    let body = format!("{pad}{body}");
+    let rows = if airborne {
+        [ears, body, String::new()]
+    } else {
+        [String::new(), ears, body]
+    };
+    rows.into_iter()
+        .map(|row| style(row).magenta().bold().to_string())
+        .collect()
+}
+
+/// One usagi "segment" of the multiplying conga line, as `(ears, face, feet)`.
+/// Each row is exactly six display columns wide — using only width-1 glyphs (no
+/// zero-width sound marks) — so the three rows tile into an aligned block no
+/// matter how many rabbits line up.
+const MULTIPLY_EARS: &str = " n_n  ";
+const MULTIPLY_FACE: &str = "(｡･-･)";
+const MULTIPLY_FEET: &str = " └┘   ";
+
+/// A three-row line of `count` usagi standing shoulder to shoulder — the
+/// "multiplying" rabbits. Each rabbit is a fixed-width segment, so the rows tile
+/// into an aligned block; growing `count` between frames reads as the warren
+/// filling up. The block is centred for `width` and styled magenta-bold (the
+/// mascot's colour). A `count` of zero yields three blank rows.
+pub fn multiplying_rabbits(count: usize, width: usize) -> Vec<String> {
+    let rows = [
+        MULTIPLY_EARS.repeat(count),
+        MULTIPLY_FACE.repeat(count),
+        MULTIPLY_FEET.repeat(count),
+    ];
+    let block_w = console::measure_text_width(&rows[1]);
+    let pad = " ".repeat(centered_padding(width, block_w));
+    rows.into_iter()
+        .map(|row| style(format!("{pad}{row}")).magenta().bold().to_string())
+        .collect()
+}
+
 /// Right-anchors each line of `banner` onto the `lines` starting at row `top`,
 /// appending it after the existing content. A row is only overlaid when its
 /// current content does not reach the banner's left column, so busy rows (a
@@ -580,6 +656,109 @@ mod tests {
             console::measure_text_width(&lines[0]),
             console::measure_text_width(&lines[1]),
         );
+    }
+
+    #[test]
+    fn running_rabbit_faces_its_direction_of_travel() {
+        // Speed lines trail behind: on the left heading right, on the right
+        // heading left. The face keeps its single `ㅅ` nose either way.
+        let right =
+            console::strip_ansi_codes(&running_rabbit(0, true, true).join("\n")).into_owned();
+        assert!(right.contains("ﾐ(･ㅅ･)"));
+        let left =
+            console::strip_ansi_codes(&running_rabbit(0, false, true).join("\n")).into_owned();
+        assert!(left.contains("(･ㅅ･)ﾐ"));
+    }
+
+    #[test]
+    fn running_rabbit_is_three_rows_and_carries_the_offset() {
+        // Always a three-row block; a larger `col` indents the art further so it
+        // travels rightward across the screen.
+        let near = running_rabbit(2, true, true);
+        let far = running_rabbit(20, true, true);
+        assert_eq!(near.len(), 3);
+        assert_eq!(far.len(), 3);
+        let lead = |line: &str| {
+            console::strip_ansi_codes(line)
+                .chars()
+                .take_while(|c| *c == ' ')
+                .count()
+        };
+        assert!(lead(&far[0]) > lead(&near[0]));
+    }
+
+    #[test]
+    fn running_rabbit_bobs_between_the_top_and_bottom_rows() {
+        // Airborne: the art rides the top two rows, leaving the last blank.
+        // Grounded: it drops to the bottom two rows, leaving the first blank. So
+        // toggling `airborne` between frames bounces the rabbit.
+        let air = running_rabbit(0, true, true);
+        assert!(console::strip_ansi_codes(&air[0]).contains('∩'));
+        assert!(console::strip_ansi_codes(&air[2]).trim().is_empty());
+
+        let ground = running_rabbit(0, true, false);
+        assert!(console::strip_ansi_codes(&ground[0]).trim().is_empty());
+        assert!(console::strip_ansi_codes(&ground[2]).contains('ㅅ'));
+    }
+
+    #[test]
+    fn running_rabbit_keeps_the_ears_over_the_head_in_both_directions() {
+        // The first ear must sit over the head centre (`ㅅ`) regardless of which
+        // way the rabbit faces, so the ears never drift off the head.
+        fn col_of(line: &str, target: char) -> usize {
+            let plain = console::strip_ansi_codes(line).into_owned();
+            let byte = plain.find(target).expect("glyph present");
+            console::measure_text_width(&plain[..byte])
+        }
+        for face_right in [true, false] {
+            let rows = running_rabbit(3, face_right, true);
+            assert_eq!(
+                col_of(&rows[0], '∩'),
+                col_of(&rows[1], 'ㅅ'),
+                "ears must sit over the head (face_right={face_right})",
+            );
+        }
+    }
+
+    #[test]
+    fn running_rabbit_width_spans_the_widest_sprite_row() {
+        // The bound a caller uses for the rabbit's travel matches the actual art:
+        // the widest content row (`ﾐ(･ㅅ･)` / `(･ㅅ･)ﾐ`, seven columns).
+        assert_eq!(running_rabbit_width(), 7);
+    }
+
+    #[test]
+    fn multiplying_rabbits_lines_up_count_usagi() {
+        // The face appears once per rabbit, so the warren grows with `count`.
+        let plain = console::strip_ansi_codes(&multiplying_rabbits(3, 80).join("\n")).into_owned();
+        assert_eq!(plain.matches("(｡･-･)").count(), 3);
+    }
+
+    #[test]
+    fn multiplying_rabbits_rows_stay_aligned_as_a_block() {
+        // All three rows tile to the same width, so the ears/face/feet line up no
+        // matter how many rabbits stand together.
+        let lines = multiplying_rabbits(4, 80);
+        assert_eq!(lines.len(), 3);
+        let w0 = console::measure_text_width(&lines[0]);
+        assert!(lines.iter().all(|l| console::measure_text_width(l) == w0));
+    }
+
+    #[test]
+    fn multiplying_rabbits_grow_wider_with_the_count() {
+        // One more rabbit is one more fixed-width segment, so the block widens.
+        let two = console::measure_text_width(&multiplying_rabbits(2, 80)[1]);
+        let five = console::measure_text_width(&multiplying_rabbits(5, 80)[1]);
+        assert!(five > two);
+    }
+
+    #[test]
+    fn multiplying_rabbits_zero_count_is_blank() {
+        // No rabbits yet: three empty rows (the animation starts from nothing).
+        let lines = multiplying_rabbits(0, 80);
+        assert!(lines
+            .iter()
+            .all(|l| console::strip_ansi_codes(l).trim().is_empty()));
     }
 
     #[test]

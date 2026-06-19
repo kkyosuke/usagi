@@ -818,14 +818,31 @@ fn leave_focus_returns_to_overview() {
 
 #[test]
 fn focus_menu_hides_ai_until_the_local_llm_is_available() {
-    // By default the local LLM is unavailable, so the `ai` command is hidden.
+    // Focus a session row (not the root) so `close` is offered.
     let mut state = state();
+    state.enter_focus(1);
+    // By default the local LLM is unavailable, so the `ai` command is hidden.
     let names: Vec<&str> = state.focus_menu_commands().iter().map(|i| i.name).collect();
     assert_eq!(names, vec!["terminal", "agent", "close"]);
     // Once the local LLM is usable (enabled + model pulled), `ai` appears.
     state.set_ai_available(true);
     let names: Vec<&str> = state.focus_menu_commands().iter().map(|i| i.name).collect();
     assert_eq!(names, vec!["terminal", "agent", "ai", "close"]);
+}
+
+#[test]
+fn focus_menu_hides_close_on_the_root_row() {
+    // The root row is the workspace itself, not a session, so it cannot be
+    // closed and `close` is not offered there.
+    let mut state = state();
+    state.enter_focus(0);
+    assert!(state.list().root_active());
+    let names: Vec<&str> = state.focus_menu_commands().iter().map(|i| i.name).collect();
+    assert_eq!(names, vec!["terminal", "agent"]);
+    // A session row still offers `close`.
+    state.enter_focus(1);
+    let names: Vec<&str> = state.focus_menu_commands().iter().map(|i| i.name).collect();
+    assert_eq!(names, vec!["terminal", "agent", "close"]);
 }
 
 #[test]

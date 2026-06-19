@@ -14,17 +14,26 @@ AI エージェントが `usagi` で作業する際の標準手順。**新規作
 - 着手したら `status` を `in-progress`、完了したら `done` に更新する（`usagi issue update <番号> --status ...` または MCP `issue_update`）。
 - worktree 名・ブランチ名は対象 issue の内容に合わせると対応がわかりやすい。
 
-### 1. 開始時に worktree を作成する
+### 1. 隔離された作業環境を用意する
 
-タスクごとに git worktree を切って隔離環境で作業する。`main` を直接触らない。
+`main` を直接触らず、隔離された作業ツリーで進める。**ただし環境によって手順が異なる**。
 
-```bash
-git worktree add .claude/worktrees/<name> -b <type>/<説明>
-cd .claude/worktrees/<name>
-```
+- **usagi セッション内で起動している場合**（`usagi agent` / `terminal` が起動する worktree。
+  カレントが `.usagi/sessions/<name>/` 配下）: **すでに隔離された worktree 内にいるので、新しく
+  worktree を作成しない。そのまま作業を進める**。作業ブランチはセッション名（`<name>`）。
+  セッションと worktree の構築は [04-orchestration.md](../document/04-orchestration.md) が正本。
+- **リポジトリのルート（`main` のチェックアウト）で直接作業している場合**: 自分で worktree を切って隔離する。
 
-- ブランチ名は `<type>/<説明>` 形式（例: `feat/add-doctor-command`）。type は `feat|fix|docs|refactor|perf|test|build|ci|chore`。
-- worktree のディレクトリ名はタスク内容がわかる短い名前にする。
+  ```bash
+  git worktree add .claude/worktrees/<name> -b <type>/<説明>
+  cd .claude/worktrees/<name>
+  ```
+
+  - ブランチ名は `<type>/<説明>` 形式（例: `feat/add-doctor-command`）。type は `feat|fix|docs|refactor|perf|test|build|ci|chore`。
+  - worktree のディレクトリ名はタスク内容がわかる短い名前にする。
+
+> 迷ったら `git rev-parse --show-toplevel` で現在地を確認する。`.usagi/sessions/<name>` を指していれば
+> セッション内なので worktree は作らない。
 
 ### 2. 開発する
 
