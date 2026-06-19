@@ -902,12 +902,15 @@ impl HomeState {
     /// The Session-scope commands the 在席 menu lists, in registry order
     /// (`terminal`, `agent`, `ai`). The `ai` command is filtered out unless the
     /// local LLM is usable (enabled and its model pulled), so it only appears
-    /// when running it would actually work.
+    /// when running it would actually work. `close` is filtered out on the root
+    /// row, which belongs to no session and so cannot be closed.
     pub fn focus_menu_commands(&self) -> Vec<CommandInfo> {
+        let root = self.list.root_active();
         self.registry
             .commands_in_scope(CommandScope::Session)
             .into_iter()
             .filter(|info| info.name != "ai" || self.ai_available)
+            .filter(|info| info.name != "close" || !root)
             .collect()
     }
 
