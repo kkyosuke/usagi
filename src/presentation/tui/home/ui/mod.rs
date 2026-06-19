@@ -190,10 +190,11 @@ pub fn terminal_geometry(raw_height: usize, raw_width: usize) -> TerminalGeometr
 }
 
 /// Rows the tab strip reserves at the top of the right pane in 没入 (Attached).
-/// The strip lists the session's panes (`[agent] [terminal] …`) and is always
-/// present once attached — even for a single pane — so the embedded terminal's
-/// geometry does not jump as panes are added or closed.
-pub const TAB_BAR_ROWS: usize = 1;
+/// The strip lists the session's panes over two rows — a chip per pane plus an
+/// underline marking the active one — and is always present once attached, even
+/// for a single pane, so the embedded terminal's geometry does not jump as panes
+/// are added or closed.
+pub const TAB_BAR_ROWS: usize = 2;
 
 /// The embedded terminal's geometry while 没入 (Attached): the right pane minus
 /// the tab strip ([`TAB_BAR_ROWS`]) reserved above it, with the origin pushed
