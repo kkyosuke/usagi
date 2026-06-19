@@ -6,7 +6,8 @@
 コマンドです。1 つの `usagi mcp` プロセスが次の 3 系統の tool をまとめて提供し、エージェント
 （Claude Code など）は単一の `usagi` サーバを登録するだけで済みます。
 
-- **issue**: `usagi issue`（[01-cli.md](01-cli.md#usagi-issue)）と同じタスク issue 操作（起票・参照・更新）。
+- **issue**: `usagi issue`（[01-cli.md](01-cli.md#usagi-issue)）と同じタスク issue 操作（起票・参照・更新）に加え、
+  issue をエージェント向け実行プロンプトに整形する `issue_to_prompt`。
 - **memory**: `usagi memory`（[01-cli.md](01-cli.md#usagi-memory)）と同じメモリ操作（セッションをまたいで
   覚えておく知識の保存・想起）。
 - **session**: usagi のセッション（[4. オーケストレーション](../04-orchestration.md)）操作。セッションを
@@ -106,13 +107,14 @@ presentation に閉じています（[2. アーキテクチャ](../02-architectu
 
 ## 対応 tool 一覧
 
-`tools/list` で以下の 15 tool（issue 6 + memory 6 + session 3）を公開します。結果はいずれも JSON テキストで
+`tools/list` で以下の 16 tool（issue 7 + memory 6 + session 3）を公開します。結果はいずれも JSON テキストで
 返ります。
 
 | tool | 必須引数 | 任意引数 | 返り値 |
 |---|---|---|---|
 | `issue_create` | `title` | `priority` / `labels` / `dependson` / `related` / `parent` / `milestone` / `body` | 作成された issue |
 | `issue_get` | `number` | — | issue（存在しなければ `null`） |
+| `issue_to_prompt` | `number` | — | `{ "number": N, "title": "…", "prompt": "…" }`（issue が無ければ実行エラー） |
 | `issue_list` | — | `status` / `priority` / `label` / `parent` / `milestone` / `ready` | issue 配列（各要素に `ready` と `unmet_deps` を付与） |
 | `issue_search` | `query` | `status` / `priority` / `label` / `parent` / `milestone` / `ready` | 一致した issue 配列（`list` と同形式） |
 | `issue_update` | `number` | `title` / `status` / `priority` / `labels` / `dependson` / `related` / `parent` / `milestone` / `body` | 更新後の issue |
@@ -134,6 +136,10 @@ presentation に閉じています（[2. アーキテクチャ](../02-architectu
 - `issue_list` / `issue_search` は CLI と同じく **`dependson` がすべて `done` の issue を `ready: true`**
   とし、未達の依存番号を `unmet_deps` に入れて返します（着手可能なタスクの判別用）。
 - `ready: true`（引数）を渡すと着手可能な issue だけに絞り込みます。
+- `issue_to_prompt` は issue を **そのまま実行できるエージェント向けプロンプト**に整形して返します
+  （実装手順・status 更新の指示と issue 本文を含む）。`issue_to_prompt(number)` → `session_create(name)` →
+  `session_prompt(name, prompt)` と組み合わせると、コーディネータ役のエージェントが「issue を特定の
+  セッションのエージェントに実装させる」オーケストレーションを最小手数で組めます。
 - `session_create` は `name` をセッション名（=全リポジトリで作成する新規ブランチ名）として
   `<root>/.usagi/sessions/<name>/` に worktree を生成します。空・パス区切り文字を含む名前は拒否し、
   既存のセッション名は重複エラーになります（CLI と同じ検証）。`session_list` は `state.json` を読むだけの

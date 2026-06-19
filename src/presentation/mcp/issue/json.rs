@@ -96,6 +96,18 @@ pub(super) fn issue_tool_schemas() -> Value {
             }
         },
         {
+            "name": "issue_to_prompt",
+            "description": "Render an issue as a ready-to-run agent prompt (instructing the \
+                agent to implement it per the repo workflow). Feed the returned `prompt` to \
+                `session_prompt` to have a session's agent work the issue. Errors if the \
+                issue does not exist.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "number": { "type": "integer" } },
+                "required": ["number"]
+            }
+        },
+        {
             "name": "issue_list",
             "description": "List issues, each annotated with dependency readiness \
                 (ready = every dependency is done). Optional filters.",

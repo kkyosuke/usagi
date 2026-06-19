@@ -142,6 +142,70 @@ pub fn get(repo_root: &Path, number: u32) -> Result<Option<Issue>> {
     IssueStore::new(repo_root).read(number)
 }
 
+/// Render an issue as a self-contained prompt instructing an agent to implement
+/// it following the repository workflow. The text is fed verbatim to a session's
+/// agent (e.g. via the `session_prompt` MCP tool), which already runs inside the
+/// session worktree — so the prompt tells the agent not to create another one.
+pub fn to_prompt(issue: &Issue) -> String {
+    let number = issue.number;
+    let title = &issue.title;
+    let numbers = |xs: &[u32]| -> String {
+        if xs.is_empty() {
+            "なし".to_string()
+        } else {
+            xs.iter()
+                .map(|n| n.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        }
+    };
+    let labels = if issue.labels.is_empty() {
+        "なし".to_string()
+    } else {
+        issue.labels.join(", ")
+    };
+    let parent = issue.parent.map_or("なし".to_string(), |p| p.to_string());
+    let milestone = issue
+        .milestone
+        .clone()
+        .unwrap_or_else(|| "なし".to_string());
+    let body = if issue.body.trim().is_empty() {
+        "（本文なし）"
+    } else {
+        issue.body.trim()
+    };
+
+    format!(
+        "あなたはこのセッションの worktree 内で usagi の issue #{number}「{title}」を実装します。\n\
+         \n\
+         worktree は既に用意されているため、新しく作成する必要はありません。リポジトリの開発ワークフロー（`.agents/workflow.md`）と開発規約（`document/06-conventions.md`）に従ってください。\n\
+         \n\
+         ## 進め方\n\
+         \n\
+         1. 着手時に issue #{number} の status を `in-progress` に更新する（MCP ツール `issue_update`）。\n\
+         2. issue の内容を実装し、テストを追加・更新する（カバレッジ 100% を維持）。\n\
+         3. コミット前に `cargo fmt` / `cargo clippy --all-targets -- -D warnings` / `cargo test` を通す。\n\
+         4. 仕様・画面・データ構造の変更があれば `document/` 配下を更新する。\n\
+         5. 完了したら issue #{number} の status を `done` に更新する。\n\
+         \n\
+         ## issue #{number}: {title}\n\
+         \n\
+         - status: {status}\n\
+         - priority: {priority}\n\
+         - labels: {labels}\n\
+         - dependson: {dependson}\n\
+         - related: {related}\n\
+         - parent: {parent}\n\
+         - milestone: {milestone}\n\
+         \n\
+         {body}\n",
+        status = issue.status,
+        priority = issue.priority,
+        dependson = numbers(&issue.dependson),
+        related = numbers(&issue.related),
+    )
+}
+
 /// List issues matching `filter`, annotated with dependency readiness.
 pub fn list(repo_root: &Path, filter: &IssueFilter) -> Result<Vec<ListedIssue>> {
     let all = IssueStore::new(repo_root).summaries()?;
