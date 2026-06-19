@@ -20,7 +20,7 @@ use console::{Key, Term};
 use crate::domain::workspace_state::{BranchStatus, WorktreeState};
 use crate::presentation::tui::screen::KeyReader;
 
-use super::event::{event_loop, Outcome};
+use super::event::{event_loop, ConfigReload, Outcome};
 use super::state::{HomeState, LogLine, PaneExit, ReturnMode, SessionOutcome};
 use super::terminal_pool::MonitorHandle;
 use super::terminal_tabs::TabNav;
@@ -207,7 +207,12 @@ fn event_loop_attaches_a_live_session_end_to_end() {
         sessions: None,
         select: None,
     };
-    let mut config = |_: &Term| Ok(Some(crate::domain::settings::SessionActionUi::Menu));
+    let mut config = |_: &Term| {
+        Ok(Some(ConfigReload {
+            session_action_ui: crate::domain::settings::SessionActionUi::Menu,
+            ai_available: false,
+        }))
+    };
     let mut rename = |_: &str, _: &str| SessionOutcome {
         line: LogLine::output("renamed"),
         sessions: None,

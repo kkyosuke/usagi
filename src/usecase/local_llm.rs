@@ -140,6 +140,38 @@ pub fn ensure(
     Ok(vec![ollama, server, model])
 }
 
+/// Ensure just the `ollama` *runtime* is ready: install it if missing, then
+/// start its server. Unlike [`ensure`] this pulls no model — it backs the
+/// config screen's "Install" action, which provisions only the runtime so a
+/// model can be chosen and pulled separately afterwards. `sudo` carries the
+/// password used to pre-authenticate the privileged install steps, and `quiet`
+/// suppresses the installer's output (both see [`ensure`]).
+pub fn ensure_runtime(
+    os: &str,
+    runner: &dyn CommandRunner,
+    sudo: Option<&str>,
+    quiet: bool,
+) -> Result<Vec<SetupStep>, SetupError> {
+    let ollama = install_ollama(os, runner, sudo, quiet)?;
+    let server = ensure_server(runner, ServerWait::default())?;
+    Ok(vec![ollama, server])
+}
+
+/// Pull `model` into an already-installed runtime, bringing the server up first
+/// if it is not running. Backs the config screen's model picker when an
+/// uninstalled model is chosen; `ollama pull` is unprivileged, so no `sudo` is
+/// needed. `quiet` suppresses the pull's output (see [`ensure`]). Idempotent —
+/// a model already present reports as such without re-pulling.
+pub fn ensure_model(
+    runner: &dyn CommandRunner,
+    model: &str,
+    quiet: bool,
+) -> Result<Vec<SetupStep>, SetupError> {
+    let server = ensure_server(runner, ServerWait::default())?;
+    let model = pull_model(runner, model, quiet)?;
+    Ok(vec![server, model])
+}
+
 /// Install the `ollama` runtime if it is not already present, using the
 /// official installer. `sudo` pre-authenticates the privileged steps when set;
 /// `quiet` suppresses the installer's output (see [`ensure`]).
@@ -666,5 +698,117 @@ mod tests {
     #[test]
     fn server_start_failed_message_mentions_ollama_serve() {
         assert!(server_start_failed_message().contains("ollama serve"));
+    }
+
+    // --- runtime-only / model-only provisioning ----------------------------
+
+    #[test]
+    fn ensure_runtime_installs_ollama_and_starts_the_server_without_a_model() {
+        // ollama absent and the server down: the runtime is installed and the
+        // server started, but no model is pulled (unlike `ensure`).
+        let runner = FakeRunner::new(vec![], Ok(true)).with_server_down_for(1);
+        let steps = ensure_runtime("linux", &runner, None, false).unwrap();
+        assert_eq!(
+            steps,
+            vec![
+                SetupStep::OllamaInstalled { manager: INSTALLER },
+                SetupStep::ServerStarted,
+            ]
+        );
+        // The installer and server spawn ran; nothing was pulled.
+        assert_eq!(
+            *runner.ran.borrow(),
+            vec![format!("sh -c {INSTALL_SCRIPT}")]
+        );
+        assert_eq!(*runner.spawned.borrow(), vec!["ollama serve"]);
+    }
+
+    #[test]
+    fn ensure_runtime_is_a_no_op_when_already_installed_and_running() {
+        let runner = FakeRunner::new(vec!["ollama"], Ok(true));
+        assert_eq!(
+            ensure_runtime("macos", &runner, None, false),
+            Ok(vec![
+                SetupStep::OllamaAlreadyPresent,
+                SetupStep::ServerAlreadyRunning,
+            ])
+        );
+        assert!(runner.ran.borrow().is_empty());
+        assert!(runner.spawned.borrow().is_empty());
+    }
+
+    #[test]
+    fn ensure_runtime_reports_an_unsupported_os() {
+        let runner = FakeRunner::new(vec![], Ok(true));
+        assert_eq!(
+            ensure_runtime("windows", &runner, None, false),
+            Err(SetupError::OllamaUnavailable {
+                manual: ollama_manual()
+            })
+        );
+    }
+
+    #[test]
+    fn ensure_model_starts_the_server_and_pulls_the_model() {
+        // Runtime present, server down once, model not yet pulled: the server is
+        // started, then the model pulled. No runtime install runs.
+        let runner = FakeRunner::new(vec!["ollama"], Ok(true)).with_server_down_for(1);
+        let steps = ensure_model(&runner, "qwen2.5-coder:3b", false).unwrap();
+        assert_eq!(
+            steps,
+            vec![
+                SetupStep::ServerStarted,
+                SetupStep::ModelPulled {
+                    model: "qwen2.5-coder:3b".to_string()
+                }
+            ]
+        );
+        assert_eq!(
+            *runner.ran.borrow(),
+            vec!["ollama pull qwen2.5-coder:3b".to_string()]
+        );
+        assert_eq!(*runner.spawned.borrow(), vec!["ollama serve"]);
+    }
+
+    #[test]
+    fn ensure_model_is_a_no_op_when_the_model_is_already_present() {
+        let runner =
+            FakeRunner::new(vec!["ollama"], Ok(true)).with_present_models(vec!["qwen2.5-coder:7b"]);
+        assert_eq!(
+            ensure_model(&runner, "qwen2.5-coder:7b", false),
+            Ok(vec![
+                SetupStep::ServerAlreadyRunning,
+                SetupStep::ModelAlreadyPresent {
+                    model: "qwen2.5-coder:7b".to_string()
+                }
+            ])
+        );
+        // Nothing was pulled.
+        assert!(runner.ran.borrow().is_empty());
+    }
+
+    #[test]
+    fn ensure_model_reports_a_failed_pull() {
+        // Server up, model absent, and `ollama pull` fails.
+        let runner = FakeRunner::new(vec!["ollama"], Ok(false));
+        assert_eq!(
+            ensure_model(&runner, "qwen2.5:7b", false),
+            Err(SetupError::ModelPullFailed {
+                model: "qwen2.5:7b".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn ensure_model_propagates_a_server_start_failure() {
+        // The server is down and cannot be started, so the pull never runs.
+        let runner = FakeRunner::new(vec!["ollama"], Ok(true))
+            .with_server_down_for(usize::MAX)
+            .with_spawn_error();
+        assert_eq!(
+            ensure_model(&runner, "qwen2.5:7b", false),
+            Err(SetupError::ServerStartFailed)
+        );
+        assert!(runner.ran.borrow().is_empty());
     }
 }

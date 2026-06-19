@@ -39,6 +39,18 @@ const CTRL_O: char = '\u{000f}';
 /// driver shares, so a tab moved here is the one re-attaching reveals.
 pub(super) type TabOp<'a> = dyn FnMut(&Path, Option<TabNav>) -> (Vec<String>, usize) + 'a;
 
+/// The settings-derived values re-read when the config screen closes, so an
+/// edit takes effect without reopening the home screen: the 在席 (Focus)
+/// right-pane surface and whether the `ai` command is offered.
+#[derive(Debug, Clone, Copy)]
+pub struct ConfigReload {
+    /// The effective Session Action UI (在席 mode's surface).
+    pub session_action_ui: SessionActionUi,
+    /// Whether the local LLM is usable (enabled and its model pulled), gating
+    /// the `ai` command in the 在席 menu.
+    pub ai_available: bool,
+}
+
 /// What the user chose to do on the home (workspace) screen.
 #[derive(Debug)]
 pub enum Outcome {
@@ -126,7 +138,7 @@ pub fn event_loop(
     remove_session: &mut dyn FnMut(&str, bool) -> SessionOutcome,
     existing_branches: &mut dyn FnMut() -> Vec<String>,
     open_terminal: &mut dyn FnMut(&mut HomeState, &Path, bool, bool) -> Result<PaneExit>,
-    open_config: &mut dyn FnMut(&Term) -> Result<Option<SessionActionUi>>,
+    open_config: &mut dyn FnMut(&Term) -> Result<Option<ConfigReload>>,
     preview: &mut dyn FnMut(&Path) -> Option<TerminalView>,
     tab_op: &mut TabOp<'_>,
 ) -> Result<Outcome> {

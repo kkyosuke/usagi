@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use anyhow::Result;
 use console::Term;
 
-use crate::domain::settings::{LocalSettings, Settings};
+use crate::domain::settings::{LocalSettings, Settings, LOCAL_LLM_MODELS};
 use crate::infrastructure::git;
 use crate::infrastructure::storage::Storage;
 use crate::presentation::tui::install_task;
@@ -71,10 +71,16 @@ pub fn run_in(term: &Term, repo_root: Option<PathBuf>) -> Result<Outcome> {
     // subprocess probes when editing a workspace's local overrides.
     if repo_root.is_none() {
         let runner = SystemRunner;
-        let model = config.local_llm_model().to_string();
-        config.set_local_llm_installed(
-            local_llm::ollama_installed(&runner) && local_llm::model_present(&runner, &model),
-        );
+        if local_llm::ollama_installed(&runner) {
+            config.set_ollama_installed(true);
+            config.set_installed_models(
+                LOCAL_LLM_MODELS
+                    .iter()
+                    .filter(|model| local_llm::model_present(&runner, model))
+                    .map(|model| model.to_string())
+                    .collect(),
+            );
+        }
     }
 
     let mut reader = TermKeyReader::new(term.clone());
@@ -93,38 +99,66 @@ pub fn run_in(term: &Term, repo_root: Option<PathBuf>) -> Result<Outcome> {
         }
         Ok(())
     };
-    // Installing the local LLM provisions the runtime + model on demand. It runs
-    // on a background thread and returns immediately, so the user can keep using
-    // usagi (and leave this screen) while it proceeds; the global install task
-    // surfaces a loading rabbit on every screen until it finishes. The sudo
-    // password entered in the modal pre-authenticates the privileged steps.
-    let mut install =
-        |model: &str, password: &str| -> Result<()> { start_install(model, password) };
-    event::event_loop(term, &mut reader, config, &mut save, &mut install, notice)
+    // Provisioning runs on a background thread and returns immediately, so the
+    // user can keep using usagi (and leave this screen) while it proceeds; the
+    // global install task surfaces a loading rabbit on every screen until it
+    // finishes. The Local LLM row installs just the `ollama` runtime (the sudo
+    // password from the modal pre-authenticates its privileged steps); the model
+    // picker pulls a chosen-but-unpulled model (unprivileged).
+    let mut install_runtime = |password: &str| -> Result<()> { start_install_runtime(password) };
+    let mut pull_model = |model: &str| -> Result<()> { start_pull_model(model) };
+    event::event_loop(
+        term,
+        &mut reader,
+        config,
+        &mut save,
+        &mut install_runtime,
+        &mut pull_model,
+        notice,
+    )
 }
 
-/// Starts provisioning the local LLM on a background thread, recording its
+/// Starts installing the `ollama` runtime on a background thread, recording its
 /// progress in the global [`install_task`] so every screen can show the loading
 /// rabbit and the completion message. Returns as soon as the worker is launched;
-/// the sudo password is forwarded to [`local_llm::ensure`] so the runtime
-/// installer can elevate unattended, and the install runs `quiet` so its raw
-/// output never paints over the TUI. Errors if an install is already in flight.
-fn start_install(model: &str, password: &str) -> Result<()> {
+/// the sudo password is forwarded to [`local_llm::ensure_runtime`] so the
+/// installer can elevate unattended, and it runs `quiet` so its raw output never
+/// paints over the TUI. Errors if an install is already in flight.
+fn start_install_runtime(password: &str) -> Result<()> {
+    let handle = install_task::handle();
+    if !handle.begin("ollama") {
+        return Err(anyhow::anyhow!("インストールは既に実行中です"));
+    }
+    let password_owned = password.to_string();
+    std::thread::spawn(move || {
+        let result = local_llm::ensure_runtime(
+            std::env::consts::OS,
+            &SystemRunner,
+            Some(&password_owned),
+            true,
+        );
+        let (ok, message) = match result {
+            Ok(_) => (true, "ollama を導入しました 🐰".to_string()),
+            Err(e) => (false, install_error_message(&e)),
+        };
+        handle.finish(ok, message);
+    });
+    Ok(())
+}
+
+/// Starts pulling `model` into the installed runtime on a background thread,
+/// recording progress in the global [`install_task`] like
+/// [`start_install_runtime`]. `ollama pull` needs no sudo; it runs `quiet` so
+/// its `pulling manifest …` output never paints over the TUI. Errors if an
+/// install is already in flight.
+fn start_pull_model(model: &str) -> Result<()> {
     let handle = install_task::handle();
     if !handle.begin(model) {
         return Err(anyhow::anyhow!("インストールは既に実行中です"));
     }
-    // The worker owns its copies so it can outlive this stack frame's borrows.
     let model_owned = model.to_string();
-    let password_owned = password.to_string();
     std::thread::spawn(move || {
-        let result = local_llm::ensure(
-            std::env::consts::OS,
-            &SystemRunner,
-            &model_owned,
-            Some(&password_owned),
-            true,
-        );
+        let result = local_llm::ensure_model(&SystemRunner, &model_owned, true);
         let (ok, message) = match result {
             Ok(_) => (true, format!("{model_owned} を導入しました 🐰")),
             Err(e) => (false, install_error_message(&e)),

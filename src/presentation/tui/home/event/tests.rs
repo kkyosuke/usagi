@@ -9,6 +9,16 @@ use std::collections::VecDeque;
 use std::io;
 use std::path::PathBuf;
 
+/// A [`ConfigReload`] carrying `ui` and the local LLM left unavailable — the
+/// shape the config-close callback returns in tests that only care about the
+/// 在席 surface.
+fn reload(ui: SessionActionUi) -> ConfigReload {
+    ConfigReload {
+        session_action_ui: ui,
+        ai_available: false,
+    }
+}
+
 fn noop_create(_: &str) -> SessionOutcome {
     SessionOutcome {
         line: LogLine::output("created"),
@@ -87,8 +97,8 @@ fn noop_open(_: &mut HomeState, _: &Path, _: bool, _: bool) -> Result<PaneExit> 
     Ok(PaneExit::Closed)
 }
 
-fn noop_config(_: &Term) -> Result<Option<SessionActionUi>> {
-    Ok(Some(SessionActionUi::Menu))
+fn noop_config(_: &Term) -> Result<Option<ConfigReload>> {
+    Ok(Some(reload(SessionActionUi::Menu)))
 }
 
 fn noop_preview(_: &Path) -> Option<TerminalView> {
@@ -148,7 +158,7 @@ fn run_full(
     open_terminal: &mut dyn FnMut(&mut HomeState, &Path, bool, bool) -> Result<PaneExit>,
     create_session: &mut dyn FnMut(&str) -> SessionOutcome,
     preview: &mut dyn FnMut(&Path) -> Option<TerminalView>,
-    open_config: &mut dyn FnMut(&Term) -> Result<Option<SessionActionUi>>,
+    open_config: &mut dyn FnMut(&Term) -> Result<Option<ConfigReload>>,
 ) -> Result<Outcome> {
     let term = Term::stdout();
     let mut reader = ScriptedReader::new(keys);
@@ -190,7 +200,7 @@ fn run_with_live_monitor(
     let mut create: fn(&str) -> SessionOutcome = noop_create;
     let mut remove_session: fn(&str, bool) -> SessionOutcome = noop_remove;
     let mut open: fn(&mut HomeState, &Path, bool, bool) -> Result<PaneExit> = noop_open;
-    let mut config: fn(&Term) -> Result<Option<SessionActionUi>> = noop_config;
+    let mut config: fn(&Term) -> Result<Option<ConfigReload>> = noop_config;
     let mut preview: fn(&Path) -> Option<TerminalView> = noop_preview;
     let mut branches: fn() -> Vec<String> = no_branches;
     event_loop(
@@ -232,7 +242,7 @@ fn a_populated_update_handle_is_read_before_painting() {
     let mut create: fn(&str) -> SessionOutcome = noop_create;
     let mut remove: fn(&str, bool) -> SessionOutcome = noop_remove;
     let mut open: fn(&mut HomeState, &Path, bool, bool) -> Result<PaneExit> = noop_open;
-    let mut config: fn(&Term) -> Result<Option<SessionActionUi>> = noop_config;
+    let mut config: fn(&Term) -> Result<Option<ConfigReload>> = noop_config;
     let mut preview: fn(&Path) -> Option<TerminalView> = noop_preview;
     let outcome = event_loop(
         &term,
@@ -411,7 +421,7 @@ fn overview_caret_keys_edit_within_the_line() {
     let mut create: fn(&str) -> SessionOutcome = noop_create;
     let mut remove: fn(&str, bool) -> SessionOutcome = noop_remove;
     let mut open: fn(&mut HomeState, &Path, bool, bool) -> Result<PaneExit> = noop_open;
-    let mut config: fn(&Term) -> Result<Option<SessionActionUi>> = noop_config;
+    let mut config: fn(&Term) -> Result<Option<ConfigReload>> = noop_config;
     let mut preview: fn(&Path) -> Option<TerminalView> = noop_preview;
     let outcome = event_loop(
         &term,
@@ -455,7 +465,7 @@ fn submitted_commands_are_handed_to_persist() {
     let mut create: fn(&str) -> SessionOutcome = noop_create;
     let mut remove: fn(&str, bool) -> SessionOutcome = noop_remove;
     let mut open: fn(&mut HomeState, &Path, bool, bool) -> Result<PaneExit> = noop_open;
-    let mut config: fn(&Term) -> Result<Option<SessionActionUi>> = noop_config;
+    let mut config: fn(&Term) -> Result<Option<ConfigReload>> = noop_config;
     let mut preview: fn(&Path) -> Option<TerminalView> = noop_preview;
     let outcome = event_loop(
         &term,
@@ -595,7 +605,7 @@ fn session_remove_with_a_name_and_force_routes_to_remove() {
         noop_remove(name, force)
     };
     let mut open: fn(&mut HomeState, &Path, bool, bool) -> Result<PaneExit> = noop_open;
-    let mut config: fn(&Term) -> Result<Option<SessionActionUi>> = noop_config;
+    let mut config: fn(&Term) -> Result<Option<ConfigReload>> = noop_config;
     let mut preview: fn(&Path) -> Option<TerminalView> = noop_preview;
     let outcome = event_loop(
         &term,
@@ -639,7 +649,7 @@ fn close_typed_in_overview_targets_the_active_session() {
         noop_remove(name, force)
     };
     let mut open: fn(&mut HomeState, &Path, bool, bool) -> Result<PaneExit> = noop_open;
-    let mut config: fn(&Term) -> Result<Option<SessionActionUi>> = noop_config;
+    let mut config: fn(&Term) -> Result<Option<ConfigReload>> = noop_config;
     let mut preview: fn(&Path) -> Option<TerminalView> = noop_preview;
     let outcome = event_loop(
         &term,
@@ -693,7 +703,7 @@ fn focus_close_command_force_removes_the_focused_session_then_enters_switch() {
         }
     };
     let mut open: fn(&mut HomeState, &Path, bool, bool) -> Result<PaneExit> = noop_open;
-    let mut config: fn(&Term) -> Result<Option<SessionActionUi>> = noop_config;
+    let mut config: fn(&Term) -> Result<Option<ConfigReload>> = noop_config;
     let mut preview: fn(&Path) -> Option<TerminalView> = noop_preview;
     let mut branches_called = 0;
     let mut branches = || {
@@ -753,7 +763,7 @@ fn focus_menu_close_force_removes_the_focused_session_then_enters_switch() {
         }
     };
     let mut open: fn(&mut HomeState, &Path, bool, bool) -> Result<PaneExit> = noop_open;
-    let mut config: fn(&Term) -> Result<Option<SessionActionUi>> = noop_config;
+    let mut config: fn(&Term) -> Result<Option<ConfigReload>> = noop_config;
     let mut preview: fn(&Path) -> Option<TerminalView> = noop_preview;
     let mut branches_called = 0;
     let mut branches = || {
@@ -812,7 +822,7 @@ fn session_remove_without_a_name_opens_the_modal_and_bulk_removes() {
         noop_remove(name, force)
     };
     let mut open: fn(&mut HomeState, &Path, bool, bool) -> Result<PaneExit> = noop_open;
-    let mut config: fn(&Term) -> Result<Option<SessionActionUi>> = noop_config;
+    let mut config: fn(&Term) -> Result<Option<ConfigReload>> = noop_config;
     let mut preview: fn(&Path) -> Option<TerminalView> = noop_preview;
     let outcome = event_loop(
         &term,
@@ -942,7 +952,7 @@ fn config_opens_the_settings_screen_and_can_quit() {
     let opened = RefCell::new(false);
     let mut config = |_: &Term| {
         *opened.borrow_mut() = true;
-        Ok(Some(SessionActionUi::Menu))
+        Ok(Some(reload(SessionActionUi::Menu)))
     };
     let mut open: fn(&mut HomeState, &Path, bool, bool) -> Result<PaneExit> = noop_open;
     let mut create: fn(&str) -> SessionOutcome = noop_create;
@@ -983,7 +993,7 @@ fn returning_from_config_refreshes_the_session_action_ui() {
     // Prompt; on returning to home the state must adopt it, so Focus renders the
     // new surface without reopening the screen. The `terminal` command run right
     // after attaches a pane, letting us observe the live state's setting.
-    let mut config = |_: &Term| Ok(Some(SessionActionUi::Prompt));
+    let mut config = |_: &Term| Ok(Some(reload(SessionActionUi::Prompt)));
     let seen = RefCell::new(None);
     let mut open = |state: &mut HomeState, _: &Path, _: bool, _: bool| {
         *seen.borrow_mut() = Some(state.session_action_ui());
@@ -1240,7 +1250,7 @@ fn switch_arrows_move_the_active_tab_via_tab_op() {
     let mut create: fn(&str) -> SessionOutcome = noop_create;
     let mut remove: fn(&str, bool) -> SessionOutcome = noop_remove;
     let mut open: fn(&mut HomeState, &Path, bool, bool) -> Result<PaneExit> = noop_open;
-    let mut config: fn(&Term) -> Result<Option<SessionActionUi>> = noop_config;
+    let mut config: fn(&Term) -> Result<Option<ConfigReload>> = noop_config;
     let mut preview: fn(&Path) -> Option<TerminalView> = noop_preview;
     let mut branches: fn() -> Vec<String> = no_branches;
     let outcome = event_loop(
@@ -1355,7 +1365,7 @@ fn run_recording_rename(keys: Vec<io::Result<Key>>) -> (Vec<(String, String)>, O
     };
     let mut remove: fn(&str, bool) -> SessionOutcome = noop_remove;
     let mut open: fn(&mut HomeState, &Path, bool, bool) -> Result<PaneExit> = noop_open;
-    let mut config: fn(&Term) -> Result<Option<SessionActionUi>> = noop_config;
+    let mut config: fn(&Term) -> Result<Option<ConfigReload>> = noop_config;
     let mut preview: fn(&Path) -> Option<TerminalView> = noop_preview;
     let outcome = event_loop(
         &term,
@@ -1496,9 +1506,11 @@ fn focus_menu_shortcut_keys_launch_terminal_and_agent() {
 
 #[test]
 fn focus_menu_can_run_the_coming_soon_ai_command() {
-    // The menu lists terminal (0, default), agent (1), ai (2), close (3).
-    // ArrowUp from the top wraps to "close"; one more lands on "ai"; Enter on
-    // it just logs (no attach).
+    // With the local LLM available the menu lists terminal (0, default),
+    // agent (1), ai (2), close (3). ArrowUp from the top wraps to "close"; one
+    // more lands on "ai"; Enter on it just logs (no attach).
+    let mut state = sample_state();
+    state.set_ai_available(true);
     let mut keys = typed("session switch feat");
     keys.push(Ok(Key::Enter)); // Focus
     keys.push(Ok(Key::Home)); // ignored in the menu
@@ -1509,7 +1521,7 @@ fn focus_menu_can_run_the_coming_soon_ai_command() {
     keys.push(Ok(Key::Enter)); // run ai (coming soon)
     keys.push(Ok(Key::Escape)); // -> Overview
     keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
-    assert!(matches!(run(keys, sample_state()).unwrap(), Outcome::Quit));
+    assert!(matches!(run(keys, state).unwrap(), Outcome::Quit));
 }
 
 #[test]

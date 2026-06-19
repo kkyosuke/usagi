@@ -26,7 +26,6 @@ use std::path::Path;
 use anyhow::Result;
 use console::Term;
 
-use crate::domain::settings::SessionActionUi;
 use crate::domain::workspace::Workspace;
 use crate::domain::workspace_state::SessionRecord;
 use crate::infrastructure::history_store::HistoryStore;
@@ -88,7 +87,7 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
     // a typed prompt — from the effective settings (project-local over the global
     // default). Re-read again whenever the config screen closes (see
     // `open_config`) so a change takes effect without reopening this screen.
-    state.set_session_action_ui(effective_session_action_ui(&workspace.path));
+    state.set_session_action_ui(effective_settings(&workspace.path).session_action_ui);
 
     // Restore past commands so `history` and `↑`/`↓` recall span sessions.
     // A read failure is non-fatal: just start with an empty history.
@@ -161,6 +160,12 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
     let settings = crate::infrastructure::storage::Storage::open_default()
         .and_then(|storage| crate::usecase::settings::effective(&storage, &workspace.path))
         .unwrap_or_default();
+
+    // Whether the 在席 (Focus) menu offers the `ai` command: only when the local
+    // LLM is enabled and its model is pulled, so it appears only when running it
+    // would actually work. Probed once here (an `ollama show`) and re-probed when
+    // the config screen closes (see `open_config`).
+    state.set_ai_available(local_llm_available(&settings));
 
     // The wired-in MCP servers and lifecycle hooks invoke usagi back, so they are
     // pointed at this process's own executable path rather than the bare name
@@ -380,12 +385,17 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
     // reported back as `true` so the event loop propagates the quit; `Back`
     // returns `false`.
     let config_root = workspace.path.clone();
-    let mut open_config = |t: &Term| -> Result<Option<SessionActionUi>> {
+    let mut open_config = |t: &Term| -> Result<Option<event::ConfigReload>> {
         match crate::presentation::tui::config::run_in(t, Some(config_root.clone()))? {
-            // Back to home: re-read the (possibly changed) Session Action UI so the
-            // 在席 surface reflects the edit without reopening the home screen.
+            // Back to home: re-read the (possibly changed) Session Action UI and
+            // local LLM availability so the 在席 surface and `ai` command reflect
+            // the edit without reopening the home screen.
             crate::presentation::tui::config::Outcome::Back => {
-                Ok(Some(effective_session_action_ui(&config_root)))
+                let settings = effective_settings(&config_root);
+                Ok(Some(event::ConfigReload {
+                    session_action_ui: settings.session_action_ui,
+                    ai_available: local_llm_available(&settings),
+                }))
             }
             crate::presentation::tui::config::Outcome::Quit => Ok(None),
         }
@@ -410,14 +420,24 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
     )
 }
 
-/// The effective Session Action UI (在席 mode's right-pane surface) for the
-/// workspace at `root` — the project-local override on top of the global
-/// default. Read at startup and again whenever the config screen closes, so an
-/// edited setting takes effect without reopening the home screen. Any failure to
-/// read settings falls back to the default (`Menu`).
-fn effective_session_action_ui(root: &Path) -> SessionActionUi {
+/// The effective settings (project-local overrides on top of the global
+/// default) for the workspace at `root`. Read at startup and again whenever the
+/// config screen closes, so an edited setting takes effect without reopening the
+/// home screen. Any failure to read settings falls back to the defaults.
+fn effective_settings(root: &Path) -> crate::domain::settings::Settings {
     crate::infrastructure::storage::Storage::open_default()
         .and_then(|storage| crate::usecase::settings::effective(&storage, root))
-        .map(|settings| settings.session_action_ui)
         .unwrap_or_default()
+}
+
+/// Whether the local LLM is usable right now: enabled in settings and its model
+/// already pulled into the `ollama` runtime. Gates the `ai` command in the 在席
+/// (Focus) menu so it appears only when running it would actually work. The
+/// model probe is an `ollama show`, skipped entirely when the feature is off.
+fn local_llm_available(settings: &crate::domain::settings::Settings) -> bool {
+    settings.local_llm.enabled
+        && crate::usecase::local_llm::model_present(
+            &crate::usecase::doctor::SystemRunner,
+            &settings.local_llm.model,
+        )
 }

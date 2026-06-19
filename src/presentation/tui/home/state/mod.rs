@@ -107,6 +107,11 @@ pub struct HomeState {
     /// Which right-pane action surface 在席 (Focus) presents — a pickable menu
     /// or a typed prompt. Injected from the effective settings by `mod.rs`.
     session_action_ui: SessionActionUi,
+    /// Whether the `ai` command is offered in the 在席 (Focus) menu: true only
+    /// when the local LLM is enabled and its model is pulled. Injected from the
+    /// effective settings (and a runtime probe) by `mod.rs`; false by default so
+    /// the command stays hidden until the model is actually usable.
+    ai_available: bool,
     /// Where a 切替 (Switch) returns to on `Esc` / `h`; only meaningful in
     /// [`Mode::Switch`].
     switch_return: ReturnMode,
@@ -203,6 +208,7 @@ impl HomeState {
             log,
             registry: CommandRegistry::with_builtins(),
             session_action_ui: SessionActionUi::default(),
+            ai_available: false,
             switch_return: ReturnMode::Overview,
             create: None,
             rename: None,
@@ -250,6 +256,12 @@ impl HomeState {
     /// Which right-pane action surface 在席 (Focus) presents.
     pub fn session_action_ui(&self) -> SessionActionUi {
         self.session_action_ui
+    }
+
+    /// Set whether the `ai` command is offered in the 在席 (Focus) menu (injected
+    /// from the effective settings and a runtime probe by `mod.rs`).
+    pub fn set_ai_available(&mut self, available: bool) {
+        self.ai_available = available;
     }
 
     /// Inject the workspace's task issues (loaded from disk by `mod.rs`), read by
@@ -888,9 +900,15 @@ impl HomeState {
     }
 
     /// The Session-scope commands the 在席 menu lists, in registry order
-    /// (`terminal`, `agent`, `ai`).
+    /// (`terminal`, `agent`, `ai`). The `ai` command is filtered out unless the
+    /// local LLM is usable (enabled and its model pulled), so it only appears
+    /// when running it would actually work.
     pub fn focus_menu_commands(&self) -> Vec<CommandInfo> {
-        self.registry.commands_in_scope(CommandScope::Session)
+        self.registry
+            .commands_in_scope(CommandScope::Session)
+            .into_iter()
+            .filter(|info| info.name != "ai" || self.ai_available)
+            .collect()
     }
 
     /// The 在席 menu cursor (which Session-scope command is highlighted).

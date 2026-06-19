@@ -19,7 +19,7 @@ use super::super::command::Effect;
 use super::super::state::{HomeState, PaneExit, ReturnMode, SessionOutcome};
 use super::super::terminal_tabs::TabNav;
 use super::super::terminal_view::TerminalView;
-use super::{paint_now, selected_dir, Flow, CTRL_O};
+use super::{paint_now, selected_dir, ConfigReload, Flow, CTRL_O};
 
 /// Handle one key in 統括 (Overview): edit / complete / recall the workspace
 /// command line and run it on `Enter`, dispatching the resulting [`Effect`].
@@ -36,7 +36,7 @@ pub(super) fn overview_key(
     remove_session: &mut dyn FnMut(&str, bool) -> SessionOutcome,
     existing_branches: &mut dyn FnMut() -> Vec<String>,
     open_terminal: &mut dyn FnMut(&mut HomeState, &Path, bool, bool) -> Result<PaneExit>,
-    open_config: &mut dyn FnMut(&Term) -> Result<Option<SessionActionUi>>,
+    open_config: &mut dyn FnMut(&Term) -> Result<Option<ConfigReload>>,
     preview: &mut dyn FnMut(&Path) -> Option<TerminalView>,
 ) -> Result<Flow> {
     match key {
@@ -108,10 +108,12 @@ pub(super) fn overview_key(
                     // The user quit the app from the settings screen.
                     None => return Ok(Flow::Quit),
                     // Back to home: the config screen may have changed the Session
-                    // Action UI (在席 mode's surface), so apply the re-read setting
-                    // — otherwise Focus keeps rendering the old mode.
-                    Some(ui) => {
-                        state.set_session_action_ui(ui);
+                    // Action UI (在席 mode's surface) or the local LLM's
+                    // availability, so apply the re-read settings — otherwise
+                    // Focus keeps rendering the old mode / `ai` visibility.
+                    Some(reload) => {
+                        state.set_session_action_ui(reload.session_action_ui);
+                        state.set_ai_available(reload.ai_available);
                         painter.reset();
                     }
                 },

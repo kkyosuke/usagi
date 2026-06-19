@@ -817,8 +817,13 @@ fn leave_focus_returns_to_overview() {
 }
 
 #[test]
-fn focus_menu_lists_the_session_commands_in_order() {
-    let state = state();
+fn focus_menu_hides_ai_until_the_local_llm_is_available() {
+    // By default the local LLM is unavailable, so the `ai` command is hidden.
+    let mut state = state();
+    let names: Vec<&str> = state.focus_menu_commands().iter().map(|i| i.name).collect();
+    assert_eq!(names, vec!["terminal", "agent", "close"]);
+    // Once the local LLM is usable (enabled + model pulled), `ai` appears.
+    state.set_ai_available(true);
     let names: Vec<&str> = state.focus_menu_commands().iter().map(|i| i.name).collect();
     assert_eq!(names, vec!["terminal", "agent", "ai", "close"]);
 }
@@ -827,11 +832,11 @@ fn focus_menu_lists_the_session_commands_in_order() {
 fn focus_menu_cursor_moves_and_wraps_and_selects() {
     let mut state = state();
     state.enter_focus(1);
-    // terminal (0, highlighted by default), agent (1), ai (2), close (3).
+    // With `ai` hidden: terminal (0, highlighted by default), agent (1),
+    // close (2).
     assert_eq!(state.focus_selected_command().name, "terminal");
     state.focus_menu_move_down();
     assert_eq!(state.focus_selected_command().name, "agent");
-    state.focus_menu_move_down();
     state.focus_menu_move_down();
     state.focus_menu_move_down(); // wraps to the top
     assert_eq!(state.focus_menu_cursor(), 0);

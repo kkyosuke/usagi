@@ -51,21 +51,17 @@ impl Config {
                 // Only meaningful once installed: flip the on/off toggle. While
                 // not installed the row is an install action handled by the
                 // event layer, so there is nothing to cycle.
-                if self.local_llm_installed {
+                if self.ollama_installed() {
                     self.settings.local_llm.enabled = !self.settings.local_llm.enabled;
                     true
                 } else {
                     false
                 }
             }
-            Field::LocalLlmModel => {
-                self.settings.local_llm.model =
-                    cycle_str(&self.settings.local_llm.model, &LOCAL_LLM_MODELS, forward);
-                // A different model may not be pulled yet, so it must be
-                // (re)installed before use.
-                self.local_llm_installed = false;
-                true
-            }
+            // The model is no longer cycled with ←/→: it is chosen from the
+            // picker modal (which also pulls an uninstalled choice), so arrows
+            // are a no-op here and the event layer opens the modal instead.
+            Field::LocalLlmModel => false,
         }
     }
 
@@ -203,20 +199,6 @@ fn cycle_agent_cli(cli: AgentCli, forward: bool) -> AgentCli {
         (i + len - 1) % len
     };
     AGENT_CLIS[next]
-}
-
-/// The string one step after `current` in `choices` (or before, when `forward`
-/// is false), wrapping at the ends. An unknown `current` (e.g. a model no longer
-/// offered) starts from the first choice.
-pub(super) fn cycle_str(current: &str, choices: &[&str], forward: bool) -> String {
-    let i = choices.iter().position(|&c| c == current).unwrap_or(0);
-    let len = choices.len();
-    let next = if forward {
-        (i + 1) % len
-    } else {
-        (i + len - 1) % len
-    };
-    choices[next].to_string()
 }
 
 /// The value one step after `current` in `choices` (or before, when `forward` is
