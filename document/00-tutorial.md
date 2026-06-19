@@ -101,11 +101,12 @@ Run a command:
 **没入（Attached）**に入ります。起動時に usagi の issue MCP サーバ（`usagi mcp`）が組み込まれるので、
 エージェントは起動直後から `issue_*` tool でタスクを操作できます。
 
-- 没入中の**予約キーは `Ctrl-O` と `Ctrl-N`/`Ctrl-P`**で、ほかのキー（`Esc` 含む）はすべてシェルへ流れます。
-  `Ctrl-O` の単押しで**切替**へズームアウト、`Ctrl-N`/`Ctrl-P` で**没入のままタブ（ペイン）を前後へ切り替え**ます
-  （その分シェル / Agent 側の `Ctrl-N`/`Ctrl-P` は奪われます）。新規ペインの追加は切替の `t` で行います。
-- 素のシェルだけ欲しいときは `agent` の代わりに `terminal` を使います。Agent を動かしたまま `Ctrl-O` で切替へ抜けて
-  `t` で同じセッションに terminal を追加し、`Ctrl-N`/`Ctrl-P`（または切替の `←`/`→`）でタブを行き来できます。
+- 没入中の**予約キーは `Ctrl-O`・`Ctrl-N`/`Ctrl-P`・`Ctrl-T`/`Ctrl-G`・`Ctrl-W`**で、ほかのキー（`Esc` 含む）はすべて
+  シェルへ流れます。`Ctrl-O` の単押しで**切替**へズームアウト、`Ctrl-N`/`Ctrl-P` で**没入のままタブ（ペイン）を前後へ
+  切り替え**、`Ctrl-T`/`Ctrl-G` で**没入のまま terminal / agent タブを追加**、`Ctrl-W` で**アクティブタブを閉じ**ます
+  （その分シェル / Agent 側の同キーは奪われます）。タブの追加・閉じるは切替（`t`・`x`）でも行えます。
+- 素のシェルだけ欲しいときは `agent` の代わりに `terminal` を使います。Agent を動かしたまま `Ctrl-T` で同じセッションに
+  terminal タブを追加し（切替へ抜けて `t` でも可）、`Ctrl-N`/`Ctrl-P`（または切替の `←`/`→`）でタブを行き来できます。
 - `agent` / `terminal` の仕様は [03-commands/02-tui.md](03-commands/02-tui.md#agent)、MCP の組み込みは
   [03-commands/03-mcp.md](03-commands/03-mcp.md) を参照。
 

@@ -241,7 +241,10 @@ pub(super) fn footer_line(width: usize, state: &HomeState) -> String {
                 state.focused_session_name()
             )
         }
-        Mode::Attached => "[attached]  Ctrl-O: switch session / Ctrl-N/P: tab".to_string(),
+        Mode::Attached => {
+            "[attached]  Ctrl-O: switch / Ctrl-N/P: tab / Ctrl-T: terminal / Ctrl-G: agent / Ctrl-W: close"
+                .to_string()
+        }
     };
     widgets::dim_line(width, &help)
 }
