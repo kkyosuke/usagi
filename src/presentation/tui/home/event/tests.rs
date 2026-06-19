@@ -1227,8 +1227,8 @@ fn switch_t_opens_the_action_surface_and_adds_a_new_pane() {
 
 #[test]
 fn switch_arrows_move_the_active_tab_via_tab_op() {
-    // ←/→ (and the vim h/l) drive `tab_op` with a `TabNav`, moving the highlighted
-    // session's active tab without leaving 切替.
+    // ←/→ (and the vim h/l, and Ctrl-N/Ctrl-P) drive `tab_op` with a `TabNav`,
+    // moving the highlighted session's active tab without leaving 切替.
     let term = Term::stdout();
     let navs = RefCell::new(Vec::new());
     let mut tab_op = |_d: &Path, nav: Option<TabNav>| -> (Vec<String>, usize) {
@@ -1243,6 +1243,8 @@ fn switch_arrows_move_the_active_tab_via_tab_op() {
     keys.push(Ok(Key::ArrowLeft)); // tab prev
     keys.push(Ok(Key::Char('l'))); // tab next (vim)
     keys.push(Ok(Key::Char('h'))); // tab prev (vim)
+    keys.push(Ok(Key::Char(CTRL_N))); // tab next (Ctrl-N)
+    keys.push(Ok(Key::Char(CTRL_P))); // tab prev (Ctrl-P)
     keys.push(Ok(Key::CtrlC)); // quit
     let mut reader = ScriptedReader::new(keys);
     let monitor = MonitorHandle::detached();
@@ -1274,7 +1276,14 @@ fn switch_arrows_move_the_active_tab_via_tab_op() {
     assert!(matches!(outcome, Outcome::Quit));
     assert_eq!(
         *navs.borrow(),
-        vec![TabNav::Next, TabNav::Prev, TabNav::Next, TabNav::Prev]
+        vec![
+            TabNav::Next,
+            TabNav::Prev,
+            TabNav::Next,
+            TabNav::Prev,
+            TabNav::Next,
+            TabNav::Prev,
+        ]
     );
 }
 
@@ -1535,6 +1544,55 @@ fn focus_ctrl_o_opens_switch_then_esc_re_focuses() {
     keys.push(Ok(Key::Escape)); // Focus -> Overview
     keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
     assert!(matches!(run(keys, sample_state()).unwrap(), Outcome::Quit));
+}
+
+#[test]
+fn focus_ctrl_n_and_ctrl_p_move_the_active_tab_via_tab_op() {
+    // In 在席, Ctrl-N / Ctrl-P move the focused session's active tab through
+    // `tab_op` (so a later re-attach / `terminal` lands on the chosen pane),
+    // mirroring 切替 and 没入 — and they stay in Focus.
+    let term = Term::stdout();
+    let navs = RefCell::new(Vec::new());
+    let mut tab_op = |_d: &Path, nav: Option<TabNav>| -> (Vec<String>, usize) {
+        if let Some(n) = nav {
+            navs.borrow_mut().push(n);
+        }
+        (vec!["agent".to_string(), "terminal".to_string()], 0)
+    };
+    let mut keys = typed("session switch feat");
+    keys.push(Ok(Key::Enter)); // -> Focus feat
+    keys.push(Ok(Key::Char(CTRL_N))); // tab next
+    keys.push(Ok(Key::Char(CTRL_P))); // tab prev
+    keys.push(Ok(Key::CtrlC)); // quit
+    let mut reader = ScriptedReader::new(keys);
+    let monitor = MonitorHandle::detached();
+    let mut persist: fn(&str) = noop_persist;
+    let mut create: fn(&str) -> SessionOutcome = noop_create;
+    let mut remove: fn(&str, bool) -> SessionOutcome = noop_remove;
+    let mut open: fn(&mut HomeState, &Path, bool, bool) -> Result<PaneExit> = noop_open;
+    let mut config: fn(&Term) -> Result<Option<ConfigReload>> = noop_config;
+    let mut preview: fn(&Path) -> Option<TerminalView> = noop_preview;
+    let mut branches: fn() -> Vec<String> = no_branches;
+    let outcome = event_loop(
+        &term,
+        &mut reader,
+        sample_state(),
+        Path::new("/ws"),
+        &monitor,
+        &UpdateHandle::new(),
+        &mut persist,
+        &mut create,
+        &mut (noop_rename as fn(&str, &str) -> SessionOutcome),
+        &mut remove,
+        &mut branches,
+        &mut open,
+        &mut config,
+        &mut preview,
+        &mut tab_op,
+    )
+    .unwrap();
+    assert!(matches!(outcome, Outcome::Quit));
+    assert_eq!(*navs.borrow(), vec![TabNav::Next, TabNav::Prev]);
 }
 
 #[test]

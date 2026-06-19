@@ -6,13 +6,15 @@
 //! leaving the pane); this module borrows it and runs the render/input loop.
 //! Keystrokes are forwarded to the shell as raw bytes.
 //!
-//! `Ctrl-O` is the **only reserved key**: everything else, including `Esc`, flows
-//! to the shell. A single `Ctrl-O` zooms out one engagement level by returning
-//! [`PaneStep::Detach`] immediately, leaving the pane for 切替 (Switch) on the
-//! left pane while every pane stays alive in the pool — there the user moves
-//! between sessions (`↑`/`↓`), between this session's tabs (`←`/`→`), re-attaches
-//! (`Enter`), opens the action surface to add a pane (`t`), or zooms further out
-//! to 統括 (`Ctrl-O`). The shell exiting on its own reports [`PaneStep::Closed`].
+//! The **reserved keys** are `Ctrl-O` and `Ctrl-N`/`Ctrl-P`: everything else,
+//! including `Esc`, flows to the shell. A single `Ctrl-O` zooms out one
+//! engagement level by returning [`PaneStep::Detach`] immediately, leaving the
+//! pane for 切替 (Switch) on the left pane while every pane stays alive in the
+//! pool — there the user moves between sessions (`↑`/`↓`), between this session's
+//! tabs (`←`/`→`), re-attaches (`Enter`), opens the action surface to add a pane
+//! (`t`), or zooms further out to 統括 (`Ctrl-O`). `Ctrl-N`/`Ctrl-P` switch to the
+//! next / previous tab in place ([`PaneStep::NextTab`] / [`PaneStep::PrevTab`])
+//! without leaving 没入. The shell exiting on its own reports [`PaneStep::Closed`].
 //!
 //! `agent` reuses the same machinery: the pool sends the configured agent CLI to
 //! the shell on first spawn, so the pane lands the user straight in the agent.
@@ -49,14 +51,19 @@ use super::terminal_view::TerminalView;
 use super::ui;
 
 /// Why the embedded terminal loop handed control back, so the pool-driven loop
-/// in [`super::run`](super) can act on it: the user detached, or the shell
-/// closed. Tab switching and pane management no longer happen inside the pane —
-/// they moved to 切替 (Switch), reached by this `Detach` — so a single `Ctrl-O`
-/// is all the pane needs to recognise.
+/// in [`super::run`](super) can act on it: the user detached, switched tabs, or
+/// the shell closed. Pane management (add / close) lives in 切替 (Switch),
+/// reached by `Detach`; tab switching is handled in place via `NextTab` /
+/// `PrevTab` so the user can move between a session's panes without leaving 没入.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PaneStep {
     /// `Ctrl-O`: zoom out one level (→ 切替), leaving every pane alive in the pool.
     Detach,
+    /// `Ctrl-N`: switch to the next tab without leaving 没入. The caller advances
+    /// the pool's active pane and re-drives it.
+    NextTab,
+    /// `Ctrl-P`: switch to the previous tab without leaving 没入.
+    PrevTab,
     /// The active pane's shell exited on its own (e.g. `exit`).
     Closed,
 }
@@ -282,8 +289,9 @@ fn wait(pty: &PtySession, drawn_gen: u64) -> Result<Wake> {
 /// no drag opens a link under the pointer in the default browser (see
 /// [`open_clicked_url`]). Button-less motion updates `hover` so the link under
 /// the pointer lights up. `Ctrl-O` detaches to 切替 ([`PaneStep::Detach`]),
-/// leaving every pane alive in the pool. Other events are ignored so the next
-/// redraw picks up any new size.
+/// leaving every pane alive in the pool; `Ctrl-N` / `Ctrl-P` switch to the next /
+/// previous tab in place ([`PaneStep::NextTab`] / [`PaneStep::PrevTab`]). Other
+/// events are ignored so the next redraw picks up any new size.
 fn pump_input(
     term: &Term,
     pty: &mut PtySession,
@@ -307,12 +315,26 @@ fn pump_input(
                 }
                 if is_leader(&key) {
                     // `Ctrl-O` zooms out to 切替, leaving every pane alive in the
-                    // pool. Tab switching and pane management live there now, so a
-                    // single press is all the pane handles. Typing first snaps back
-                    // to the live screen.
+                    // pool. Pane management lives there now, so a single press is
+                    // all the pane handles. Typing first snaps back to the live
+                    // screen.
                     *scrollback = 0;
                     *selection = None;
                     return Ok(Some(PaneStep::Detach));
+                }
+                // `Ctrl-N` / `Ctrl-P` move between the session's tabs without
+                // leaving 没入: hand the step back so the pool-driven loop advances
+                // the active pane and re-drives it. (This claims the chords from the
+                // shell/agent — the trade for in-pane tab switching.)
+                if is_next_tab(&key) {
+                    *scrollback = 0;
+                    *selection = None;
+                    return Ok(Some(PaneStep::NextTab));
+                }
+                if is_prev_tab(&key) {
+                    *scrollback = 0;
+                    *selection = None;
+                    return Ok(Some(PaneStep::PrevTab));
                 }
                 // With text selected, `Ctrl-C` copies it (and clears the
                 // selection) instead of sending SIGINT — the way terminals treat
@@ -591,6 +613,25 @@ fn is_leader(key: &KeyEvent) -> bool {
     key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('o')
 }
 
+/// Whether this key is `Ctrl-N` (next tab) — detected both as the raw `0x0e` (SO)
+/// control char (some terminals deliver it with no `CONTROL` modifier) and as
+/// `'n'` + `CONTROL`, mirroring [`is_leader`].
+fn is_next_tab(key: &KeyEvent) -> bool {
+    if key.code == KeyCode::Char('\u{0e}') {
+        return true;
+    }
+    key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('n')
+}
+
+/// Whether this key is `Ctrl-P` (previous tab) — detected both as the raw `0x10`
+/// (DLE) control char and as `'p'` + `CONTROL`, mirroring [`is_leader`].
+fn is_prev_tab(key: &KeyEvent) -> bool {
+    if key.code == KeyCode::Char('\u{10}') {
+        return true;
+    }
+    key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('p')
+}
+
 /// Whether this key is the copy shortcut (`Ctrl-C`). It only copies when a
 /// selection is active; otherwise the caller forwards it to the shell as the
 /// usual interrupt. `Ctrl+Shift+C` is left to the shell unchanged.
@@ -695,6 +736,33 @@ mod tests {
         // No `Ctrl` modifier, or a different letter, is not the leader.
         assert!(!is_leader(&key(KeyCode::Char('o'), KeyModifiers::NONE)));
         assert!(!is_leader(&key(KeyCode::Char('a'), KeyModifiers::CONTROL)));
+    }
+
+    #[test]
+    fn tab_chords_match_both_forms_and_reject_others() {
+        // Ctrl-N (next) / Ctrl-P (prev): crossterm's `'n'`/`'p'` + CONTROL, and
+        // the bare control char some terminals deliver instead (0x0e / 0x10).
+        assert!(is_next_tab(&key(KeyCode::Char('n'), KeyModifiers::CONTROL)));
+        assert!(is_next_tab(&key(
+            KeyCode::Char('\u{0e}'),
+            KeyModifiers::NONE
+        )));
+        assert!(is_prev_tab(&key(KeyCode::Char('p'), KeyModifiers::CONTROL)));
+        assert!(is_prev_tab(&key(
+            KeyCode::Char('\u{10}'),
+            KeyModifiers::NONE
+        )));
+        // Plain letters, the wrong modifier, and the other chord are rejected.
+        assert!(!is_next_tab(&key(KeyCode::Char('n'), KeyModifiers::NONE)));
+        assert!(!is_prev_tab(&key(KeyCode::Char('p'), KeyModifiers::NONE)));
+        assert!(!is_next_tab(&key(
+            KeyCode::Char('p'),
+            KeyModifiers::CONTROL
+        )));
+        assert!(!is_prev_tab(&key(
+            KeyCode::Char('n'),
+            KeyModifiers::CONTROL
+        )));
     }
 
     #[test]

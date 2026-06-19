@@ -33,6 +33,13 @@ use handlers::{focus_key, overview_key, switch_key};
 /// engagement level (没入 → 切替 → 統括) everywhere on the screen.
 const CTRL_O: char = '\u{000f}';
 
+/// The bare control characters `console` reports for `Ctrl-N` (`0x0e`) and
+/// `Ctrl-P` (`0x10`) on the home screen — the same passthrough as [`CTRL_O`].
+/// They move between the focused session's tabs (`Ctrl-P` previous / `Ctrl-N`
+/// next) in 切替 / 在席, matching the chords 没入 uses for the same move.
+const CTRL_N: char = '\u{000e}';
+const CTRL_P: char = '\u{0010}';
+
 /// The callback 切替 uses to read (`None`) or navigate (`Some(nav)`) the
 /// highlighted session's tabs, returning the strip's labels and active index.
 /// Backed by the [`TerminalPool`](super::terminal_pool::TerminalPool) the pane
@@ -80,19 +87,21 @@ pub enum Outcome {
 ///   opens Switch.
 /// - **切替 (Switch)** — pick a session in the left pane (entered from Overview
 ///   via `session switch`, or from Focus / Attached via `Ctrl-O`). `↑`/`↓` (or
-///   `k`/`j`) move between sessions, `←`/`→` (or `h`/`l`) move between the
-///   highlighted session's tabs, `Enter` focuses (attaching when the session is
-///   live), `t` opens the action surface to add a pane, `c` creates a session
-///   inline, `Esc` backs out to where it was opened from, `Ctrl-O` zooms further
-///   out to Overview.
+///   `k`/`j`) move between sessions, `←`/`→` (or `h`/`l`, or `Ctrl-P`/`Ctrl-N`)
+///   move between the highlighted session's tabs, `Enter` focuses (attaching when
+///   the session is live), `t` opens the action surface to add a pane, `c`
+///   creates a session inline, `Esc` backs out to where it was opened from,
+///   `Ctrl-O` zooms further out to Overview.
 /// - **在席 (Focus)** — a session is selected and operated in the right pane,
 ///   either as a menu of its runnable commands or a session-scoped prompt
 ///   (chosen by the [`SessionActionUi`] setting). Launching `terminal` / `agent`
-///   adds a pane and attaches it; `Esc` returns to Overview; `Ctrl-O` opens Switch.
+///   adds a pane and attaches it; `Esc` returns to Overview; `Ctrl-O` opens
+///   Switch; `Ctrl-P`/`Ctrl-N` move the focused session's active tab.
 /// - **没入 (Attached)** — the embedded shell / agent is live in the right pane
-///   and keys flow to it. `Ctrl-O` is the only reserved key (everything else,
-///   including `Esc`, goes to the shell): it zooms out to Switch, where tabs are
-///   switched and panes added. The shell exiting returns to Focus.
+///   and keys flow to it. The reserved keys are `Ctrl-O` (zoom out to Switch,
+///   where panes are added) and `Ctrl-P`/`Ctrl-N` (switch to the previous / next
+///   tab in place, without detaching); everything else, including `Esc`, goes to
+///   the shell. The shell exiting returns to Focus.
 ///
 /// Each command the user runs is handed to `persist` so the caller can append
 /// it to the workspace's `history.json`; tests pass a no-op.
@@ -310,6 +319,7 @@ pub fn event_loop(
                 remove_session,
                 open_terminal,
                 preview,
+                tab_op,
             ),
         };
         match flow {

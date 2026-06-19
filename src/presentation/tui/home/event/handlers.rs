@@ -19,7 +19,7 @@ use super::super::command::Effect;
 use super::super::state::{HomeState, PaneExit, ReturnMode, SessionOutcome};
 use super::super::terminal_tabs::TabNav;
 use super::super::terminal_view::TerminalView;
-use super::{paint_now, selected_dir, ConfigReload, Flow, CTRL_O};
+use super::{paint_now, selected_dir, ConfigReload, Flow, CTRL_N, CTRL_O, CTRL_P};
 
 /// Handle one key in 統括 (Overview): edit / complete / recall the workspace
 /// command line and run it on `Enter`, dispatching the resulting [`Effect`].
@@ -272,14 +272,15 @@ pub(super) fn switch_key(
         // ↑/↓ (k/j) move between sessions.
         Key::ArrowUp | Key::Char('k') => state.switch_move_up(),
         Key::ArrowDown | Key::Char('j') => state.switch_move_down(),
-        // ←/→ (h/l) move between the highlighted session's tabs, so the preview
-        // (and what re-attaching reveals) lands on the chosen pane. A no-op on a
-        // session with no panes.
-        Key::ArrowLeft | Key::Char('h') => {
+        // ←/→ (h/l) and Ctrl-P/Ctrl-N move between the highlighted session's tabs,
+        // so the preview (and what re-attaching reveals) lands on the chosen pane.
+        // A no-op on a session with no panes. The Ctrl chords match what 没入 uses,
+        // so the same keys work whether a pane is attached or only previewed here.
+        Key::ArrowLeft | Key::Char('h') | Key::Char(CTRL_P) => {
             let dir = selected_dir(state, workspace_root);
             tab_op(&dir, Some(TabNav::Prev));
         }
-        Key::ArrowRight | Key::Char('l') => {
+        Key::ArrowRight | Key::Char('l') | Key::Char(CTRL_N) => {
             let dir = selected_dir(state, workspace_root);
             tab_op(&dir, Some(TabNav::Next));
         }
@@ -393,9 +394,12 @@ pub(super) fn focus_key(
     remove_session: &mut dyn FnMut(&str, bool) -> SessionOutcome,
     open_terminal: &mut dyn FnMut(&mut HomeState, &Path, bool, bool) -> Result<PaneExit>,
     preview: &mut dyn FnMut(&Path) -> Option<TerminalView>,
+    tab_op: &mut super::TabOp<'_>,
 ) -> Flow {
-    // `Esc` returns to 統括; `Ctrl-O` opens 切替 (return here on cancel). These
-    // bind the same in both action surfaces.
+    // `Esc` returns to 統括; `Ctrl-O` opens 切替 (return here on cancel); `Ctrl-P` /
+    // `Ctrl-N` move the focused session's active tab (so re-attaching, or the next
+    // `terminal` / `agent`, lands on the chosen pane). These bind the same in both
+    // action surfaces.
     match key {
         Key::Escape => {
             state.leave_focus();
@@ -403,6 +407,16 @@ pub(super) fn focus_key(
         }
         Key::Char(CTRL_O) => {
             state.enter_switch(ReturnMode::Focus);
+            return Flow::Continue;
+        }
+        Key::Char(CTRL_P) => {
+            let dir = selected_dir(state, workspace_root);
+            tab_op(&dir, Some(TabNav::Prev));
+            return Flow::Continue;
+        }
+        Key::Char(CTRL_N) => {
+            let dir = selected_dir(state, workspace_root);
+            tab_op(&dir, Some(TabNav::Next));
             return Flow::Continue;
         }
         _ => {}
