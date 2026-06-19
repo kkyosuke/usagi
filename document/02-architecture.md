@@ -102,6 +102,7 @@ src/
         ├── term_reader.rs      # キー入力・マウスホイール読み取り（ホイールは解析して読み捨て）
         ├── echo.rs             # 端末エコー/モード制御ヘルパ
         ├── splash/             # 起動スプラッシュ（走るうさぎの装飾アニメ・ui / event）
+        ├── gallery/            # うさぎアニメのギャラリー（usagi run <N>・ui / event）
         ├── welcome/            # 起動画面（menu / state / ui / event）
         ├── open/               # プロジェクト選択画面（state / ui / event）
         ├── new/                # 新規プロジェクト画面（state（mod=FormState・型 / validate=検証） / ui / event）

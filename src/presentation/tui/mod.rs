@@ -3,6 +3,7 @@ pub mod app;
 pub mod clipboard;
 pub mod config;
 pub mod echo;
+pub mod gallery;
 pub mod home;
 pub mod install_task;
 pub mod new;
