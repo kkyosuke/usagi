@@ -769,6 +769,25 @@ fn switch_preview_shows_an_idle_session_as_its_action_menu() {
 }
 
 #[test]
+fn switch_preview_pins_the_key_hint_to_the_bottom_row() {
+    // The 切替 right pane always ends with the key hint, so the keys that act on
+    // the highlighted session stay in view beside its preview — including the
+    // close-tab key.
+    let idle = worktree(Some("feat"), false, BranchStatus::Pushed);
+    let mut state = HomeState::new("usagi", vec![idle], None);
+    state.enter_switch(super::super::state::ReturnMode::Overview);
+    state.switch_move_down();
+    let preview = switch_preview(&state, 60, 12);
+    // The pane fills its rows, and the key hint is the bottom row.
+    assert_eq!(preview.len(), 12);
+    let last = console::strip_ansi_codes(preview.last().unwrap()).into_owned();
+    assert!(last.contains("Enter focus"));
+    assert!(last.contains("x close tab"));
+    // The action-menu preview above it is still shown.
+    assert!(stripped(&preview).contains("Run a command"));
+}
+
+#[test]
 fn switch_preview_shows_an_idle_session_as_its_prompt_when_prompt_ui() {
     // With the Prompt action UI, the idle-session preview must mirror the prompt
     // surface (`❯`) — not the command menu — so the 切替 preview matches what
@@ -1044,11 +1063,17 @@ fn footer_line_differs_by_mode() {
     let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
     assert!(footer_line(80, &state).contains("overview"));
     state.enter_switch(super::super::state::ReturnMode::Overview);
-    assert!(footer_line(80, &state).contains("switch"));
+    let switch = footer_line(120, &state);
+    assert!(switch.contains("switch"));
+    // The close-tab key is advertised in 切替.
+    assert!(switch.contains("x close tab"));
     state.enter_focus(1);
     assert!(footer_line(80, &state).contains("session: main"));
     state.show_attached();
-    assert!(footer_line(80, &state).contains("attached"));
+    // 没入 no longer advertises scroll keys in the footer.
+    let attached = footer_line(80, &state);
+    assert!(attached.contains("attached"));
+    assert!(!attached.contains("scroll"));
 }
 
 #[test]

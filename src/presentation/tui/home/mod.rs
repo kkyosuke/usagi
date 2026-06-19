@@ -386,6 +386,26 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
         pool.tabs(dir)
     };
 
+    // Close the highlighted session's active tab (pane) from 切替 (`x`): kill its
+    // shell through the same pool the pane driver uses, so the next frame's tab
+    // read reflects the removal. The session's display label re-registers its
+    // remaining panes with the monitor under the right name.
+    let mut close_tab = |home: &mut HomeState, dir: &Path| {
+        let label = home
+            .list()
+            .worktrees()
+            .iter()
+            .find(|w| w.path.as_path() == dir)
+            .map(state::worktree_name)
+            .map(str::to_string)
+            .unwrap_or_else(|| {
+                dir.file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| dir.display().to_string())
+            });
+        pool.borrow_mut().close_active(dir, &label);
+    };
+
     // Opening `config` hands off to the settings screen in its workspace scope,
     // editing only this workspace's local overrides
     // (`<workspace>/.usagi/settings.json`); the global settings are changed from
@@ -425,6 +445,7 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
         &mut open_config,
         &mut preview,
         &mut tab_op,
+        &mut close_tab,
     )
 }
 

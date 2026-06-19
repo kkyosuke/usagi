@@ -220,6 +220,7 @@ fn event_loop_attaches_a_live_session_end_to_end() {
     };
     let mut tab_op =
         |_dir: &Path, _nav: Option<TabNav>| -> (Vec<String>, usize) { (Vec::new(), 0) };
+    let mut close_tab = |_h: &mut HomeState, _dir: &Path| {};
 
     let outcome = event_loop(
         &term,
@@ -237,6 +238,7 @@ fn event_loop_attaches_a_live_session_end_to_end() {
         &mut config,
         &mut preview,
         &mut tab_op,
+        &mut close_tab,
     )
     .unwrap();
 

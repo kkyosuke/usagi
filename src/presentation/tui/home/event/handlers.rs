@@ -221,6 +221,7 @@ pub(super) fn switch_key(
     open_terminal: &mut dyn FnMut(&mut HomeState, &Path, bool, bool) -> Result<PaneExit>,
     preview: &mut dyn FnMut(&Path) -> Option<TerminalView>,
     tab_op: &mut super::TabOp<'_>,
+    close_tab: &mut dyn FnMut(&mut HomeState, &Path),
 ) -> Flow {
     // While the inline create input is open it captures every key.
     if state.is_creating() {
@@ -310,6 +311,13 @@ pub(super) fn switch_key(
         Key::Char('t') => {
             let row = state.list().selected_index();
             state.enter_focus(row);
+        }
+        // `x` closes the highlighted session's active tab (pane), killing its
+        // shell. The next frame re-reads the session's tabs — landing on the next
+        // pane, or previewing its 在席 action menu once the last pane is gone.
+        Key::Char('x') => {
+            let dir = selected_dir(state, workspace_root);
+            close_tab(state, &dir);
         }
         // `c` begins inline session creation.
         Key::Char('c') => state.switch_begin_create(existing_branches()),
