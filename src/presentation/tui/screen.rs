@@ -1,10 +1,12 @@
 use std::fmt::Write as _;
 use std::io;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use console::{Key, Term};
 
 use crate::presentation::tui::echo::EchoGuard;
+use crate::presentation::tui::install_task::{self, InstallHandle};
 
 /// A mouse-wheel scroll, decoded from a terminal mouse report.
 ///
@@ -53,6 +55,43 @@ pub trait KeyReader {
     /// drops the scrolls, since no screen scrolls the TUI in place.
     fn read_input(&mut self) -> io::Result<Input> {
         Ok(Input::Key(self.read_key()?))
+    }
+
+    /// The next key, or `None` if `timeout` elapses with nothing pressed. Lets a
+    /// screen wake periodically to repaint a time-based overlay (the background
+    /// install rabbit) while still waiting on the user. The default blocks like
+    /// [`read_key`](Self::read_key) and always returns a key — all the screens'
+    /// test stubs inherit this, so their behaviour is unchanged; only the real
+    /// terminal reader overrides it to honour the timeout.
+    fn read_key_timeout(&mut self, _timeout: Duration) -> io::Result<Option<Key>> {
+        Ok(Some(self.read_key()?))
+    }
+}
+
+/// Read the next key, keeping the background-install overlay animating while it
+/// waits. While `handle` reports an active install, the read wakes every
+/// [`install_task::ANIM_TICK`] to repaint the overlay — advancing its hop and
+/// expression on the clock, independent of any progress — instead of blocking;
+/// once a key arrives (or no install is in flight) it returns. Read errors
+/// propagate unchanged, so each screen's existing error handling still applies.
+pub fn animated_read(
+    reader: &mut dyn KeyReader,
+    term: &Term,
+    painter: &mut FramePainter,
+    handle: &InstallHandle,
+) -> io::Result<Key> {
+    loop {
+        if !handle.is_active(Instant::now()) {
+            return reader.read_key();
+        }
+        match reader.read_key_timeout(install_task::ANIM_TICK)? {
+            Some(key) => return Ok(key),
+            // A tick with no key: repaint so the overlay's time-based animation
+            // moves, then keep waiting.
+            None => {
+                let _ = painter.tick(term);
+            }
+        }
     }
 }
 
@@ -159,8 +198,18 @@ impl Drop for AlternateScreenGuard {
 /// next paint, moves to and rewrites only the rows whose text differs. The first
 /// paint — and any paint after [`reset`](FramePainter::reset) — clears the
 /// screen first, so leftover content from another screen can't show through.
+///
+/// Before diffing, the painter overlays the global background-install rabbit
+/// (when one is in flight) onto the screen's frame, so every screen surfaces the
+/// install without rendering it itself. It keeps the screen's `base` frame
+/// separate from the `prev` overlaid frame so [`tick`](Self::tick) can re-apply
+/// the (time-based) overlay between key presses and animate it.
 #[derive(Default)]
 pub struct FramePainter {
+    /// The last frame a screen handed to [`paint`](Self::paint), before the
+    /// install overlay is applied.
+    base: Vec<String>,
+    /// The last frame actually drawn (base + overlay), for diffing.
     prev: Vec<String>,
 }
 
@@ -177,9 +226,29 @@ impl FramePainter {
         self.prev.clear();
     }
 
-    /// Draw `frame`, rewriting only the rows that changed since the previous
-    /// paint, then remember it for the next diff.
+    /// Draw `frame` (overlaying any in-flight install), rewriting only the rows
+    /// that changed since the previous paint, then remember it for the next diff.
     pub fn paint(&mut self, term: &Term, frame: Vec<String>) -> Result<()> {
+        self.base = frame;
+        self.flush(term)
+    }
+
+    /// Re-apply the install overlay to the last painted frame and repaint. Called
+    /// while waiting on a key so the overlay's time-based animation keeps moving
+    /// even when nothing else on screen changed.
+    pub fn tick(&mut self, term: &Term) -> Result<()> {
+        self.flush(term)
+    }
+
+    /// Overlay the global install (if any) onto the base frame and diff-paint it.
+    fn flush(&mut self, term: &Term) -> Result<()> {
+        let (_, width) = term.size();
+        let mut frame = self.base.clone();
+        install_task::overlay(
+            &mut frame,
+            width as usize,
+            install_task::snapshot().as_ref(),
+        );
         term.write_str(&diff_frame(&self.prev, &frame))?;
         term.flush()?;
         self.prev = frame;
@@ -288,6 +357,79 @@ mod tests {
         // Row 3 is gone from the new frame, so it is cleared but not rewritten.
         assert!(out.contains("\x1b[3;1H\x1b[2K"));
         assert!(!out.contains("\x1b[3;1H\x1b[2Kc"));
+    }
+
+    /// A reader scripting both blocking reads and timeout reads, so the two
+    /// paths of [`animated_read`] can be exercised independently.
+    struct TickReader {
+        timeouts: std::collections::VecDeque<io::Result<Option<Key>>>,
+        blocking: std::collections::VecDeque<io::Result<Key>>,
+    }
+
+    impl KeyReader for TickReader {
+        fn read_key(&mut self) -> io::Result<Key> {
+            self.blocking.pop_front().unwrap_or(Ok(Key::Escape))
+        }
+        fn read_key_timeout(&mut self, _timeout: Duration) -> io::Result<Option<Key>> {
+            self.timeouts.pop_front().unwrap_or(Ok(Some(Key::Escape)))
+        }
+    }
+
+    #[test]
+    fn default_read_key_timeout_blocks_and_returns_a_key() {
+        // The trait default ignores the timeout and yields the next key, so the
+        // screens' blocking stubs keep their behaviour.
+        let mut reader = OneKey(Key::Char('z'));
+        assert_eq!(
+            reader.read_key_timeout(Duration::ZERO).unwrap(),
+            Some(Key::Char('z'))
+        );
+    }
+
+    #[test]
+    fn animated_read_blocks_when_no_install_is_active() {
+        // With an idle install the read is a plain blocking read.
+        let term = Term::stdout();
+        let mut painter = FramePainter::new();
+        let handle = InstallHandle::new();
+        let mut reader = TickReader {
+            timeouts: Default::default(),
+            blocking: std::collections::VecDeque::from(vec![Ok(Key::Char('a'))]),
+        };
+        let key = animated_read(&mut reader, &term, &mut painter, &handle).unwrap();
+        assert_eq!(key, Key::Char('a'));
+    }
+
+    #[test]
+    fn animated_read_polls_and_repaints_while_an_install_runs() {
+        // An active install switches to timeout reads: a tick with no key
+        // repaints the overlay (advancing its animation), then the next key
+        // returns.
+        let term = Term::stdout();
+        let mut painter = FramePainter::new();
+        painter.paint(&term, lines(&["base"])).unwrap();
+        let handle = InstallHandle::new();
+        handle.begin_at("m", Instant::now());
+        let mut reader = TickReader {
+            timeouts: std::collections::VecDeque::from(vec![Ok(None), Ok(Some(Key::Enter))]),
+            blocking: Default::default(),
+        };
+        let key = animated_read(&mut reader, &term, &mut painter, &handle).unwrap();
+        assert_eq!(key, Key::Enter);
+    }
+
+    #[test]
+    fn animated_read_propagates_a_timeout_read_error() {
+        let term = Term::stdout();
+        let mut painter = FramePainter::new();
+        let handle = InstallHandle::new();
+        handle.begin_at("m", Instant::now());
+        let mut reader = TickReader {
+            timeouts: std::collections::VecDeque::from(vec![Err(io::Error::other("boom"))]),
+            blocking: Default::default(),
+        };
+        let err = animated_read(&mut reader, &term, &mut painter, &handle).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::Other);
     }
 
     #[test]

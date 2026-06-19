@@ -42,7 +42,9 @@
 
 > ローカル LLM は **オプトイン**（既定 `false`）です。資材（`ollama`・モデル）は Config 画面の
 > Install アクション（`Space` / `Enter` でモーダルを開き sudo パスワードを入力 → バックグラウンド導入）、
-> または `usagi doctor --fix` で導入します。詳細は [3.4 ローカル LLM MCP サーバ](03-commands/04-llm-mcp.md)。
+> または `usagi doctor --fix` で導入します。Config からの導入は**バックグラウンドで進み、導入中も usagi の
+> 他機能を操作できます**（進行は全画面共通の[ローディングうさぎ](design/04-config.md#インストール中のローディングうさぎ)
+> で表示）。詳細は [3.4 ローカル LLM MCP サーバ](03-commands/04-llm-mcp.md)。
 
 > すべての項目はフォーマットバージョン `version: 1` とともに `settings.json` に格納されます。
 > 完全な JSON 例は [data/01-global.md](data/01-global.md#settingsjson) を参照してください。

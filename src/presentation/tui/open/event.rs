@@ -4,7 +4,8 @@ use console::Term;
 
 use crate::domain::workspace::Workspace;
 use crate::presentation::tui::home;
-use crate::presentation::tui::screen::{FramePainter, KeyReader};
+use crate::presentation::tui::install_task;
+use crate::presentation::tui::screen::{animated_read, FramePainter, KeyReader};
 
 use super::state::ProjectList;
 use super::ui;
@@ -46,7 +47,7 @@ pub fn event_loop(
         let frame = ui::render_frame(height as usize, width as usize, &list, notice.as_deref());
         painter.paint(term, frame)?;
 
-        let key = match reader.read_key() {
+        let key = match animated_read(reader, term, &mut painter, &install_task::handle()) {
             Ok(key) => key,
             // An interrupted read (e.g. a delivered signal) means quit.
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => return Ok(Outcome::Quit),

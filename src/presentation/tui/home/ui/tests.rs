@@ -1130,29 +1130,6 @@ fn loading_rabbit_is_skipped_when_the_terminal_is_too_narrow() {
     assert!(!joined.contains("作成中…"));
 }
 
-#[test]
-fn overlay_top_right_skips_a_row_whose_content_reaches_the_banner_column() {
-    // The first line already fills the width, so the banner cannot be placed on
-    // it; a later, empty line still receives its segment.
-    let mut lines = vec!["X".repeat(100), String::new()];
-    let banner = vec!["AB".to_string(), "CD".to_string()];
-    overlay_top_right(&mut lines, 0, 100, &banner);
-    // Row 0 is untouched (no room); row 1 gets its right-anchored segment.
-    assert_eq!(console::measure_text_width(&lines[0]), 100);
-    assert!(lines[1].ends_with("CD"));
-}
-
-#[test]
-fn overlay_top_right_stops_when_the_banner_runs_past_the_last_row() {
-    // The banner has more rows than remain from `top`, so placement stops at the
-    // end of `lines` instead of panicking.
-    let mut lines = vec![String::new()];
-    let banner = vec!["AB".to_string(), "CD".to_string(), "EF".to_string()];
-    overlay_top_right(&mut lines, 0, 100, &banner);
-    assert!(lines[0].ends_with("AB"));
-    assert_eq!(lines.len(), 1);
-}
-
 // --- Switch inline create ----------------------------------------------
 
 #[test]

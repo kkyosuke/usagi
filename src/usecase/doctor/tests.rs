@@ -313,11 +313,23 @@ fn system_runner_detects_and_executes_real_commands() {
     assert!(runner.run("git", &["--version"]).unwrap());
     assert!(runner.run("definitely-not-a-real-binary-xyz", &[]).is_err());
 
+    // The quiet variant behaves the same on the exit code, only suppressing the
+    // command's output (which a TUI install relies on to keep the screen clean).
+    assert!(runner.run_quiet("git", &["--version"]).unwrap());
+    assert!(runner
+        .run_quiet("definitely-not-a-real-binary-xyz", &[])
+        .is_err());
+
     // Feeding input on stdin: `cat` consumes it and exits cleanly, while a
-    // missing binary still errors out before anything is piped.
+    // missing binary still errors out before anything is piped. The quiet
+    // variant pipes the input the same way, with output discarded.
     assert!(runner.run_with_input("cat", &[], "secret").unwrap());
     assert!(runner
         .run_with_input("definitely-not-a-real-binary-xyz", &[], "secret")
+        .is_err());
+    assert!(runner.run_with_input_quiet("cat", &[], "secret").unwrap());
+    assert!(runner
+        .run_with_input_quiet("definitely-not-a-real-binary-xyz", &[], "secret")
         .is_err());
 
     // A quiet probe returns true for a clean exit and false otherwise
