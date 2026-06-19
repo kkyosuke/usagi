@@ -696,10 +696,11 @@ fn switch_preview_shows_a_live_session_as_its_actual_screen() {
 }
 
 #[test]
-fn switch_preview_shows_the_tab_strip_above_a_live_session() {
-    // In 切替 the highlighted live session's tabs render above the preview, so
-    // `←`/`→` has something to act on. The event loop publishes the strip from
-    // the pool before painting.
+fn switch_preview_shows_the_tab_strip_beside_the_header_for_a_live_session() {
+    // In 切替 the highlighted live session's tabs render on the header's own row,
+    // so the identity and the `←`/`→` targets read together; the live screen
+    // follows below. The event loop publishes the strip from the pool before
+    // painting.
     let mut running = worktree(Some("feat"), false, BranchStatus::Local);
     running.path = PathBuf::from("/repo/run");
     let mut state = HomeState::new("usagi", vec![running], None);
@@ -708,10 +709,13 @@ fn switch_preview_shows_the_tab_strip_above_a_live_session() {
     state.set_terminal_tabs(vec!["agent".to_string(), "terminal".to_string()], 1);
     state.enter_switch(super::super::state::ReturnMode::Overview);
     state.switch_move_down();
-    let preview = stripped(&switch_preview(&state, 40, 12));
-    // Both numbered chips appear, and the live screen follows below the strip.
-    assert!(preview.contains("1 agent") && preview.contains("2 terminal"));
-    assert!(preview.contains("$ echo hi"));
+    let lines = switch_preview(&state, 80, 12);
+    // The header (name + status + agent) and both numbered chips share the top
+    // row; the live screen follows below.
+    let top = console::strip_ansi_codes(&lines[0]).into_owned();
+    assert!(top.contains("feat") && top.contains("ready"));
+    assert!(top.contains("1 agent") && top.contains("2 terminal"));
+    assert!(stripped(&lines).contains("$ echo hi"));
 }
 
 #[test]
@@ -867,13 +871,17 @@ fn right_pane_shows_the_terminal_when_attached() {
     let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
     state.enter_focus(1);
     state.show_attached();
-    // No snapshot yet: a starting hint.
+    // The active session's header tops the pane, filling the reserved tab-strip
+    // rows; the terminal (or its starting hint) follows below.
     let starting = right_pane_contents(&state, 40, 5);
-    assert!(starting[0].contains("Starting terminal"));
-    // Once a snapshot arrives, its rows are shown.
+    assert!(console::strip_ansi_codes(&starting[0])
+        .into_owned()
+        .contains("main"));
+    assert!(starting[super::TAB_BAR_ROWS].contains("Starting terminal"));
+    // Once a snapshot arrives, its rows are shown below the header.
     state.set_terminal_view(TerminalView::from_rows(vec!["$ echo hi".to_string()], None));
     let running = right_pane_contents(&state, 40, 5);
-    assert!(running[0].contains("$ echo hi"));
+    assert!(running[super::TAB_BAR_ROWS].contains("$ echo hi"));
 }
 
 #[test]
@@ -892,27 +900,74 @@ fn right_pane_shows_the_tab_strip_above_the_terminal_when_attached() {
 }
 
 #[test]
-fn tab_strip_lists_each_pane_numbered_and_clips_to_width() {
+fn attached_header_shows_the_active_session_identity_beside_the_tabs() {
+    // 没入 carries the same identity line as 切替: the active session's name, git
+    // status, and agent state on the top row, sharing it with the tab chips.
+    let mut running = worktree(Some("feat"), false, BranchStatus::Local);
+    running.path = PathBuf::from("/repo/run");
+    let mut state = HomeState::new("usagi", vec![running], None);
+    state.set_live([PathBuf::from("/repo/run")].into());
+    state.set_running([PathBuf::from("/repo/run")].into());
+    state.enter_focus(1);
+    state.show_attached();
+    state.set_terminal_tabs(vec!["agent".to_string(), "terminal".to_string()], 0);
+    state.set_terminal_view(TerminalView::from_rows(vec!["$ echo hi".to_string()], None));
+    let rows = right_pane_contents(&state, 80, 8);
+    let header = console::strip_ansi_codes(&rows[0]).into_owned();
+    // Name + status + agent state, then the numbered chips, all on the top row.
+    assert!(header.contains("feat") && header.contains("local") && header.contains("running"));
+    assert!(header.contains("1 agent") && header.contains("2 terminal"));
+    // The terminal follows below the reserved tab-strip rows.
+    assert!(rows[super::TAB_BAR_ROWS].contains("$ echo hi"));
+}
+
+#[test]
+fn attached_header_shows_the_root_note_when_the_root_is_active() {
+    // With the workspace root active, the 没入 header mirrors the 切替 root row:
+    // the root name and its `workspace root` note (no git status / agent).
+    let mut state = HomeState::new("usagi", Vec::new(), None);
+    state.set_root_path(PathBuf::from("/repo"));
+    state.enter_focus(0);
+    state.show_attached();
+    let header = console::strip_ansi_codes(&right_pane_contents(&state, 60, 6)[0]).into_owned();
+    assert!(header.contains(ROOT_NAME));
+    assert!(header.contains("workspace root"));
+}
+
+#[test]
+fn header_tab_rows_number_each_pane_beside_the_header_and_clip_to_width() {
     use super::super::terminal_tabs::TabStrip;
-    // Two rows: numbered chips on top, the active-tab underline below. Styling is
-    // stripped in the (non-TTY) test environment, so assert on the content.
+    // Styling is stripped in the (non-TTY) test environment, so assert on content.
     let strip = TabStrip {
         labels: vec!["agent".to_string(), "terminal".to_string()],
         active: 0,
     };
-    let lines = tab_strip_lines(&strip, 60);
-    assert_eq!(lines.len(), 2);
-    let chips = console::strip_ansi_codes(&lines[0]).into_owned();
+    // Header + chips on the top row; the active-tab underline on the row below.
+    let rows = header_tab_rows("feat".to_string(), Some(&strip), 80);
+    assert_eq!(rows.len(), 2);
+    let chips = console::strip_ansi_codes(&rows[0]).into_owned();
+    assert!(chips.contains("feat"));
     // Each chip is 1-based numbered to match the ←/→ order.
     assert!(chips.contains("1 agent") && chips.contains("2 terminal"));
-    // The underline row marks the active (first) chip.
-    assert!(console::strip_ansi_codes(&lines[1])
+    // The marker row underlines the active (first) chip.
+    assert!(console::strip_ansi_codes(&rows[1])
         .into_owned()
         .contains('▔'));
 
-    // A narrow pane clips both rows to its width (with an ellipsis on the chips).
-    let narrow = tab_strip_lines(&strip, 8);
+    // A narrow pane clips both rows to its width.
+    let narrow = header_tab_rows("feat".to_string(), Some(&strip), 8);
     assert!(narrow.iter().all(|l| console::measure_text_width(l) <= 8));
+
+    // No strip — or an empty one — leaves the header alone on a single row.
+    assert_eq!(header_tab_rows("feat".to_string(), None, 40).len(), 1);
+    let empty = TabStrip {
+        labels: Vec::new(),
+        active: 0,
+    };
+    assert_eq!(
+        header_tab_rows("feat".to_string(), Some(&empty), 40).len(),
+        1
+    );
 }
 
 #[test]
