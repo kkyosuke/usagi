@@ -388,6 +388,101 @@ fn text_modal_scrolls_and_dismisses() {
 }
 
 #[test]
+fn preview_command_opens_scrolls_and_closes_the_markdown_pane() {
+    // `preview README` reads the file under the workspace root and opens the
+    // right-pane Markdown preview; the arrows / j/k and PageUp/PageDown scroll it,
+    // and `q` dismisses it (back to Overview, where the fallback Ctrl-C quits).
+    let dir = tempfile::tempdir().unwrap();
+    let body = (0..40)
+        .map(|i| format!("line {i}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    std::fs::write(dir.path().join("README.md"), format!("# Title\n\n{body}")).unwrap();
+
+    let mut keys = typed("preview README");
+    keys.push(Ok(Key::Enter)); // run `preview` -> opens the preview pane
+    keys.push(Ok(Key::ArrowDown)); // scroll down a line
+    keys.push(Ok(Key::Char('j')));
+    keys.push(Ok(Key::PageDown)); // page down
+    keys.push(Ok(Key::ArrowUp)); // scroll up a line
+    keys.push(Ok(Key::Char('k')));
+    keys.push(Ok(Key::PageUp)); // page up
+    keys.push(Ok(Key::Tab)); // ignored inside the preview
+    keys.push(Ok(Key::Char('q'))); // dismiss -> Overview
+    keys.push(Ok(Key::CtrlC)); // fallback Ctrl-C quits
+
+    let term = Term::stdout();
+    let mut reader = ScriptedReader::new(keys);
+    let monitor = MonitorHandle::detached();
+    let mut persist: fn(&str) = noop_persist;
+    let mut create: fn(&str) -> SessionOutcome = noop_create;
+    let mut remove: fn(&str, bool) -> SessionOutcome = noop_remove;
+    let mut open: fn(&mut HomeState, &Path, bool, bool) -> Result<PaneExit> = noop_open;
+    let mut config: fn(&Term) -> Result<Option<ConfigReload>> = noop_config;
+    let mut preview: fn(&Path) -> Option<TerminalView> = noop_preview;
+    let outcome = event_loop_compat(
+        &term,
+        &mut reader,
+        sample_state(),
+        dir.path(),
+        &monitor,
+        &UpdateHandle::new(),
+        &mut persist,
+        &mut create,
+        &mut (noop_rename as fn(&str, &str) -> SessionOutcome),
+        &mut remove,
+        &mut (no_branches as fn() -> Vec<String>),
+        &mut open,
+        &mut config,
+        &mut preview,
+        &mut (noop_tab_op as fn(&Path, Option<TabNav>) -> (Vec<String>, usize)),
+        &mut (noop_close as fn(&mut HomeState, &Path)),
+    )
+    .unwrap();
+    assert!(matches!(outcome, Outcome::Quit));
+}
+
+#[test]
+fn preview_command_logs_a_failure_for_a_missing_file() {
+    // A `preview` of a non-existent file opens no pane (the read fails); the loop
+    // stays in Overview and the fallback Ctrl-C quits.
+    let dir = tempfile::tempdir().unwrap();
+    let mut keys = typed("preview nope");
+    keys.push(Ok(Key::Enter)); // read fails -> error logged, no preview
+    keys.push(Ok(Key::CtrlC)); // still in Overview -> quit
+
+    let term = Term::stdout();
+    let mut reader = ScriptedReader::new(keys);
+    let monitor = MonitorHandle::detached();
+    let mut persist: fn(&str) = noop_persist;
+    let mut create: fn(&str) -> SessionOutcome = noop_create;
+    let mut remove: fn(&str, bool) -> SessionOutcome = noop_remove;
+    let mut open: fn(&mut HomeState, &Path, bool, bool) -> Result<PaneExit> = noop_open;
+    let mut config: fn(&Term) -> Result<Option<ConfigReload>> = noop_config;
+    let mut preview: fn(&Path) -> Option<TerminalView> = noop_preview;
+    let outcome = event_loop_compat(
+        &term,
+        &mut reader,
+        sample_state(),
+        dir.path(),
+        &monitor,
+        &UpdateHandle::new(),
+        &mut persist,
+        &mut create,
+        &mut (noop_rename as fn(&str, &str) -> SessionOutcome),
+        &mut remove,
+        &mut (no_branches as fn() -> Vec<String>),
+        &mut open,
+        &mut config,
+        &mut preview,
+        &mut (noop_tab_op as fn(&Path, Option<TabNav>) -> (Vec<String>, usize)),
+        &mut (noop_close as fn(&mut HomeState, &Path)),
+    )
+    .unwrap();
+    assert!(matches!(outcome, Outcome::Quit));
+}
+
+#[test]
 fn overview_edits_completes_and_recalls_then_runs() {
     let mut keys = typed("ma");
     keys.push(Ok(Key::Backspace));

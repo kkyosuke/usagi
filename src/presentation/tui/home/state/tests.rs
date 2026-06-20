@@ -969,6 +969,71 @@ fn text_modal_opens_scrolls_and_closes() {
 }
 
 #[test]
+fn open_preview_result_renders_a_loaded_markdown_file() {
+    let mut state = state();
+    let log_before = state.log.len();
+    state.open_preview_result(Ok((
+        "README.md".to_string(),
+        "# Title\n\nbody text".to_string(),
+    )));
+    let preview = state
+        .preview()
+        .expect("a successful load opens the preview");
+    assert_eq!(preview.title, "README.md");
+    assert_eq!(preview.scroll, 0);
+    // Rendered: heading, blank line, paragraph.
+    assert_eq!(preview.lines.len(), 3);
+    assert_eq!(
+        preview.lines[0].style,
+        crate::presentation::tui::markdown::LineStyle::Heading(1)
+    );
+    // Opening the preview appends nothing to the log.
+    assert_eq!(state.log.len(), log_before);
+}
+
+#[test]
+fn open_preview_result_logs_a_failed_load() {
+    let mut state = state();
+    state.open_preview_result(Err(anyhow::anyhow!("no Markdown file found")));
+    assert!(state.preview().is_none(), "a failed load opens no preview");
+    let logged = state
+        .response_lines()
+        .iter()
+        .any(|l| l.kind == LineKind::Error && l.text.contains("preview failed"));
+    assert!(logged, "the failure is logged as an error");
+}
+
+#[test]
+fn preview_scrolls_within_the_pane_and_closes() {
+    let mut state = state();
+    // 30 short lines so the preview is taller than any test pane.
+    let body = (0..30)
+        .map(|i| format!("line {i}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    state.open_preview_result(Ok(("doc.md".to_string(), body)));
+    assert_eq!(state.preview().unwrap().scroll, 0);
+    // Scrolling up at the top is a no-op.
+    state.preview_scroll_up();
+    assert_eq!(state.preview().unwrap().scroll, 0);
+    // Scrolling down advances, clamped so the last `visible` lines stay shown.
+    state.preview_scroll_down(10);
+    assert_eq!(state.preview().unwrap().scroll, 1);
+    for _ in 0..100 {
+        state.preview_scroll_down(10);
+    }
+    assert_eq!(state.preview().unwrap().scroll, 30 - 10);
+    state.preview_scroll_up();
+    assert_eq!(state.preview().unwrap().scroll, 30 - 10 - 1);
+    state.close_preview();
+    assert!(state.preview().is_none());
+    // Scroll calls are no-ops once closed.
+    state.preview_scroll_down(10);
+    state.preview_scroll_up();
+    assert!(state.preview().is_none());
+}
+
+#[test]
 fn focus_prompt_submit_on_empty_input_is_a_noop() {
     let mut state = state();
     state.enter_focus(1);

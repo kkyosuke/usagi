@@ -96,6 +96,17 @@ pub(super) fn overview_key(
                 // row (the default) it is refused, since the root is the workspace
                 // itself and not a session.
                 Effect::CloseSession => close_focused_session(state, wiring),
+                // `preview <path|name>` opens the right-pane Markdown preview:
+                // resolve and read the file under the workspace root (the impure
+                // step), then render and show it (or log a failure). Reading lives
+                // in the infrastructure layer; rendering and storing the result is
+                // pure state, so both outcomes are testable.
+                Effect::OpenPreview(target) => {
+                    state.open_preview_result(crate::infrastructure::markdown_file::read_under(
+                        wiring.workspace_root,
+                        &target,
+                    ))
+                }
                 // `ShowText` already opened its modal inside `submit`; nothing
                 // more for the event loop to do.
                 Effect::None | Effect::Clear | Effect::ShowText(_) => {}

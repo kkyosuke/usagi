@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use console::{style, Style};
 
 use super::super::command::{CommandInfo, Hint};
-use super::super::state::{HomeState, LineKind, LogLine, Mode, WorktreeList, ROOT_NAME};
+use super::super::state::{HomeState, LineKind, LogLine, Mode, Preview, WorktreeList, ROOT_NAME};
 use super::super::terminal_tabs::TabStrip;
 use super::super::terminal_view::TerminalView;
 use super::{
@@ -18,6 +18,7 @@ use super::{
 };
 use crate::domain::settings::SessionActionUi;
 use crate::domain::workspace_state::{BranchStatus, WorktreeState};
+use crate::presentation::tui::markdown::{LineStyle, MarkdownLine, Span, SpanStyle};
 use crate::presentation::tui::widgets;
 
 /// The Nerd Font git glyph for a branch lifecycle status.
@@ -702,6 +703,11 @@ pub(super) fn switch_preview(state: &HomeState, width: usize, rows: usize) -> Ve
 /// surface — a menu or a prompt, per [`SessionActionUi`] — in 在席; and the live
 /// embedded terminal in 没入 (a starting hint until the first snapshot arrives).
 pub(super) fn right_pane_contents(state: &HomeState, right_w: usize, rows: usize) -> Vec<String> {
+    // The Markdown preview, when open, takes over the right pane regardless of
+    // mode (it is opened from 統括 and captures the keyboard while shown).
+    if let Some(preview) = state.preview() {
+        return preview_pane(preview, right_w, rows);
+    }
     match state.mode() {
         Mode::Overview => Vec::new(),
         Mode::Switch => switch_preview(state, right_w, rows),
@@ -733,4 +739,90 @@ pub(super) fn right_pane_contents(state: &HomeState, right_w: usize, rows: usize
             lines
         }
     }
+}
+
+/// Render the right-pane Markdown preview: a one-row header (the file path, plus
+/// a `start-end/total` position once it scrolls) over a window of rendered
+/// Markdown lines. The window is clamped so the last line stays in view, matching
+/// the event loop's scroll clamp, and each row is clipped to the pane width — so
+/// the preview never overruns the pane or shifts the layout (no CLS).
+pub(super) fn preview_pane(preview: &Preview, width: usize, rows: usize) -> Vec<String> {
+    let total = preview.lines.len();
+    let body_h = rows.saturating_sub(1);
+    let max_start = total.saturating_sub(body_h);
+    let start = preview.scroll.min(max_start);
+    let end = (start + body_h).min(total);
+
+    let header = if total > body_h {
+        format!("📄 {}  ({}-{}/{})", preview.title, start + 1, end, total)
+    } else {
+        format!("📄 {}", preview.title)
+    };
+
+    let mut lines = Vec::with_capacity(rows);
+    lines.push(style(clip_to_width(&header, width)).bold().to_string());
+    // A one-row pane (or none) shows just the header.
+    if rows <= 1 {
+        lines.truncate(rows);
+        return lines;
+    }
+    for i in 0..body_h {
+        match preview.lines.get(start + i) {
+            Some(line) => lines.push(markdown_row(line, width)),
+            None => lines.push(String::new()),
+        }
+    }
+    lines
+}
+
+/// Render one [`MarkdownLine`] to a styled, width-clipped row: its prefix marker
+/// coloured by block kind, then its inline spans styled by emphasis.
+fn markdown_row(line: &MarkdownLine, width: usize) -> String {
+    let mut out = String::new();
+    // Only list items (`• ` / `1. `) and quotes (`│ `) carry a prefix: colour the
+    // quote bar dim and the list markers cyan.
+    if !line.prefix.is_empty() {
+        let prefix = if matches!(line.style, LineStyle::Quote) {
+            style(&line.prefix).dim().to_string()
+        } else {
+            style(&line.prefix).cyan().to_string()
+        };
+        out.push_str(&prefix);
+    }
+    for span in &line.spans {
+        out.push_str(&styled_span(span, line.style));
+    }
+    clip_to_width(&out, width)
+}
+
+/// Style one inline [`Span`] for terminal display. A heading colours its whole
+/// content by level; a code-block line and a quote line take a uniform style;
+/// every other line styles each span by its own inline emphasis.
+fn styled_span(span: &Span, line_style: LineStyle) -> String {
+    let text = span.text.clone();
+    match line_style {
+        LineStyle::Heading(level) => heading_style(&text, level),
+        LineStyle::Code => style(text).green().to_string(),
+        LineStyle::Quote => style(text).dim().italic().to_string(),
+        _ => match span.style {
+            SpanStyle::Plain => text,
+            SpanStyle::Strong => style(text).bold().to_string(),
+            SpanStyle::Emphasis => style(text).italic().to_string(),
+            SpanStyle::Code => style(text).green().to_string(),
+            SpanStyle::Link => style(text).blue().underlined().to_string(),
+        },
+    }
+}
+
+/// The bold, level-coloured styling of a heading's text: magenta (h1), cyan (h2),
+/// yellow (h3), and plain bold for deeper levels.
+fn heading_style(text: &str, level: u8) -> String {
+    let base = style(text.to_string()).bold();
+    match level {
+        1 => base.magenta(),
+        2 => base.cyan(),
+        3 => base.yellow(),
+        _ => base,
+    }
+    .to_string()
 }

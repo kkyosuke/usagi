@@ -1795,3 +1795,96 @@ fn render_frame_focus_menu_keeps_its_height() {
     assert!(joined.contains("terminal"));
     assert!(joined.contains("session: main"));
 }
+
+/// A `HomeState` with `content` opened in the right-pane Markdown preview.
+fn state_previewing(title: &str, content: &str) -> HomeState {
+    let mut state = state_with(Vec::new());
+    state.open_preview_result(Ok((title.to_string(), content.to_string())));
+    state
+}
+
+#[test]
+fn preview_pane_renders_a_header_and_every_markdown_block() {
+    // One source exercising each block kind and inline style, so the renderer's
+    // styling arms are all walked.
+    let source = "# H1\n## H2\n### H3\n#### H4\n- bullet\n1. numbered\n> quote\n\
+                  **b** _i_ `c` [L](u)\n```\nfn x() {}\n```";
+    let state = state_previewing("README.md", source);
+    let rows = preview_pane(state.preview().unwrap(), 60, 14);
+    let plain = stripped(&rows);
+    // The header names the file.
+    assert!(plain.contains("README.md"));
+    // Headings keep their text; list and quote markers render.
+    assert!(plain.contains("H1"));
+    assert!(plain.contains("H4"));
+    assert!(plain.contains("• bullet"));
+    assert!(plain.contains("1. numbered"));
+    assert!(plain.contains("│ quote"));
+    // Inline spans keep their visible text; the code-block body is verbatim.
+    assert!(plain.contains("b i c L"));
+    assert!(plain.contains("fn x() {}"));
+}
+
+#[test]
+fn preview_pane_windows_a_long_file_and_shows_its_position() {
+    let body = (0..50)
+        .map(|i| format!("line {i}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut state = state_previewing("doc.md", &body);
+    state.preview_scroll_down(5);
+    let preview = state.preview().unwrap();
+    // A 6-row pane shows 1 header + 5 body lines.
+    let rows = preview_pane(preview, 40, 6);
+    assert_eq!(rows.len(), 6);
+    let plain = stripped(&rows);
+    // The header reports the visible window over the total once it scrolls.
+    assert!(plain.contains("doc.md"));
+    assert!(plain.contains("/50)"));
+    // Scrolled by one: the first content row is "line 1", and "line 0" is hidden.
+    assert!(plain.contains("line 1"));
+    assert!(!rows
+        .iter()
+        .any(|r| stripped(std::slice::from_ref(r)) == "line 0"));
+}
+
+#[test]
+fn preview_pane_with_one_row_shows_only_the_header() {
+    let state = state_previewing("doc.md", "# H\nbody");
+    let rows = preview_pane(state.preview().unwrap(), 40, 1);
+    assert_eq!(rows.len(), 1);
+    assert!(stripped(&rows).contains("doc.md"));
+}
+
+#[test]
+fn render_frame_shows_the_preview_in_the_right_pane_with_its_own_footer() {
+    let state = state_previewing("README.md", "# Welcome\n\nintro paragraph");
+    let frame = render_frame(24, 80, &state);
+    assert_eq!(frame.len(), 24);
+    let joined = stripped(&frame);
+    // The preview content shows in the right pane…
+    assert!(joined.contains("README.md"));
+    assert!(joined.contains("Welcome"));
+    // …and the footer advertises the preview controls (hints are suppressed).
+    assert!(joined.contains("[preview]"));
+    assert!(joined.contains("scroll"));
+}
+
+#[test]
+fn preview_visible_is_the_body_height_less_the_header() {
+    let state = state_previewing("doc.md", "body");
+    // 24 rows: title + ladder + input box (3) + footer leave the body; the
+    // preview reserves one row for its header, so the visible count is positive
+    // and smaller than the full height.
+    let visible = preview_visible(24, 80, &state);
+    assert!(visible >= 1);
+    assert!(visible < 24);
+
+    // 統括 (Overview) reserves a 3-row input box and a results band; a focused
+    // session uses a single input line and no band, so its body — and thus the
+    // preview's visible height — is taller for the same terminal size.
+    let mut focused = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
+    focused.enter_focus(1);
+    let focused_visible = preview_visible(24, 80, &focused);
+    assert!(focused_visible > visible);
+}

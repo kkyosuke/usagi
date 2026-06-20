@@ -284,6 +284,14 @@ fn overview_input_content(state: &HomeState) -> String {
 /// The footer help line, aware of the current mode. It leads with a mode tag so
 /// it is always clear which engagement level the keys act on.
 pub(super) fn footer_line(width: usize, state: &HomeState) -> String {
+    // The preview captures the keyboard, so its controls take over the footer
+    // regardless of the underlying mode.
+    if state.preview().is_some() {
+        return widgets::dim_line(
+            width,
+            "[preview]  ↑↓ scroll / PgUp/PgDn page / Esc / q: close",
+        );
+    }
     let help = match state.mode() {
         Mode::Overview => {
             "[overview]  Tab: complete / ↑↓: history / Enter: run / \"session switch\": pick session"

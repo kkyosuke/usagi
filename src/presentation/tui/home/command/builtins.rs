@@ -520,6 +520,56 @@ fn stats_line(stats: &IssueStats) -> String {
     )
 }
 
+/// `preview`: render a Markdown file in the right pane (the third right-pane
+/// state, alongside the command history/output and the live terminal). A path or
+/// a bare name is accepted: `preview README` resolves to `README.md`. Reading the
+/// file is the event loop's job, so this command only validates the argument and
+/// returns [`Effect::OpenPreview`] carrying the target.
+///
+/// `preview diff` (the planned session-vs-main diff view) is not built yet; it is
+/// recognised so the surface is discoverable, but only reports that for now.
+pub(super) struct PreviewCommand;
+
+impl Command for PreviewCommand {
+    fn name(&self) -> &'static str {
+        "preview"
+    }
+
+    fn description(&self) -> &'static str {
+        "Preview a Markdown file in the right pane"
+    }
+
+    fn usage(&self) -> &'static str {
+        "preview <path|name>"
+    }
+
+    fn examples(&self) -> &'static [&'static str] {
+        &["preview README", "preview document/design/05-home.md"]
+    }
+
+    fn scope(&self) -> CommandScope {
+        CommandScope::Workspace
+    }
+
+    fn run(&self, args: &str, _ctx: &CommandContext) -> CommandResult {
+        let target = args.trim();
+        if target.is_empty() {
+            return CommandResult::line(LogLine::error(format!("usage: {}", self.usage())));
+        }
+        // The diff view is tracked separately and not implemented yet; recognise
+        // it so the command reads coherently rather than trying to open `diff.md`.
+        if target == "diff" {
+            return CommandResult::line(LogLine::output(
+                "Diff preview is coming soon 🐰 (for now, preview a Markdown file)",
+            ));
+        }
+        CommandResult {
+            lines: Vec::new(),
+            effect: Effect::OpenPreview(target.to_string()),
+        }
+    }
+}
+
 /// `config`: open the configuration screen to edit **this workspace's** local
 /// overrides (the global settings are edited from the CLI or welcome menu).
 /// Opening the screen is a side effect ([`Effect::OpenConfig`]) performed by the

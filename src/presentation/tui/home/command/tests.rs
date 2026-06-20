@@ -695,6 +695,47 @@ fn issue_with_an_unknown_subcommand_reports_usage() {
 }
 
 #[test]
+fn preview_with_a_target_requests_opening_the_markdown_pane() {
+    let result = registry().dispatch("preview README", &[], &[]);
+    assert!(result.lines.is_empty());
+    assert_eq!(result.effect, Effect::OpenPreview("README".to_string()));
+}
+
+#[test]
+fn preview_trims_its_target() {
+    let result = registry().dispatch("preview   docs/x.md  ", &[], &[]);
+    assert_eq!(result.effect, Effect::OpenPreview("docs/x.md".to_string()));
+}
+
+#[test]
+fn preview_without_an_argument_reports_its_usage() {
+    let result = registry().dispatch("preview", &[], &[]);
+    assert_eq!(result.effect, Effect::None);
+    assert_eq!(result.lines.len(), 1);
+    assert_eq!(result.lines[0].kind, LineKind::Error);
+    assert!(joined(&result).contains("usage: preview"));
+}
+
+#[test]
+fn preview_diff_reports_that_it_is_not_built_yet() {
+    let result = registry().dispatch("preview diff", &[], &[]);
+    // `diff` is recognised so the surface reads coherently, but opens nothing.
+    assert_eq!(result.effect, Effect::None);
+    assert_eq!(result.lines[0].kind, LineKind::Output);
+    assert!(joined(&result).contains("Diff preview"));
+}
+
+#[test]
+fn preview_is_a_workspace_command() {
+    let info = registry()
+        .infos()
+        .into_iter()
+        .find(|i| i.name == "preview")
+        .expect("preview is registered");
+    assert_eq!(info.scope, CommandScope::Workspace);
+}
+
+#[test]
 fn man_groups_commands_by_scope() {
     let joined = registry()
         .dispatch("man", &[], &[])

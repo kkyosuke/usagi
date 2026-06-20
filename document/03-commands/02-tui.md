@@ -13,7 +13,7 @@
 
 | 入力面 | スコープ | 出るコマンド |
 |---|---|---|
-| 統括（Overview）の下部コマンドライン | Workspace（全体） | `session` / `issue` / `config` |
+| 統括（Overview）の下部コマンドライン | Workspace（全体） | `session` / `issue` / `preview` / `config` |
 | 在席（Focus）の右ペイン | Session（個別） | `terminal` / `agent` / `close` |
 | 両方 | 共通 | `man` / `history` / `clear` / `quit` |
 
@@ -31,6 +31,7 @@
 | `quit` / `exit` | アプリを終了 |
 | `session` | セッション（branch + worktree）の作成・一覧・切替・削除（Workspace スコープ） |
 | `issue` | タスク issue を一覧・依存ツリー・ガント・1 件表示で閲覧（Workspace スコープ） |
+| `preview` | Markdown ファイルを右ペインに整形表示（Workspace スコープ） |
 | `terminal` | 選択中セッションの worktree でシェルを右ペインに埋め込み起動（Session スコープ） |
 | `agent` | `terminal` ＋ Agent CLI（既定 `claude`）を起動（Session スコープ） |
 | `close` | 在席中のセッションを強制削除して切替へ移る（`session remove <名前> --force` と同じ。Session スコープ） |
@@ -65,6 +66,24 @@
 | `issue show <番号>`（別名 `view`） | 1 件の frontmatter + 本文を表示 |
 
 issue が 1 件も無いときは「No issues yet.」を 1 行だけログに出します。
+
+## preview
+
+ワークスペース内の **Markdown ファイル**を右ペインに整形表示します。**統括の下部コマンドライン**で実行し、
+右ペインがプレビュー表示状態（履歴/出力・ライブターミナルに次ぐ第 3 の状態）に切り替わります。表示中はキー入力を
+プレビューが捕捉し、`↑↓`（`j`/`k`）・`PgUp`/`PgDn` でペイン内をスクロール、`Esc` / `Enter` / `q` で閉じて元の右ペインに戻ります。
+スクロール方針・表示状態の詳細は [design/05-home.md](../design/05-home.md#右ペインのプレビューmarkdown) を参照してください。
+
+| 引数 | 動作 |
+|---|---|
+| `preview <path>` | ワークスペースルートからの相対パスの Markdown ファイルを表示（例: `preview document/design/05-home.md`） |
+| `preview <name>` | 拡張子を省くと `<name>.md` / `<name>.markdown` を順に探して表示（例: `preview README`） |
+| `preview diff` | セッションと main の差分プレビュー（未実装。今は案内のみ） |
+
+- 対象はワークスペース内に限られます（絶対パスや `..` で外へ出る指定は拒否）。見つからない・読めないときはエラーをログに出します。
+- 整形できる記法は見出し（`#`〜`######`）・箇条書き（`-`/`*`/`+`）・番号付きリスト（`1.`/`1)`）・引用（`>`）・
+  フェンス済みコードブロック（``` ``` ``` / `~~~`）と、インラインの `**強調**`/`__強調__`・`*斜体*`/`_斜体_`・
+  `` `コード` ``・`[リンク文字](URL)`（URL は表示せず文字だけ）です。装飾は `console` の色・装飾で表現します。
 
 ## terminal
 
