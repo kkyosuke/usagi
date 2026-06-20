@@ -3,47 +3,36 @@
 //! `switch_key` / `focus_key` — by mode; those delegate to the helpers here
 //! (`activate_named`, `leave_switch`, the focus-surface handlers, …) and to
 //! `open_pane`, which drives the embedded terminal (没入). All are pure aside
-//! from the injected callbacks.
-
-use std::path::Path;
+//! from the injected callbacks, which they reach through the shared [`Wiring`]
+//! bundle.
 
 use anyhow::Result;
 use console::Key;
 use console::Term;
 
-use crate::presentation::tui::screen::{self, FramePainter, KeyReader};
+use crate::presentation::tui::screen::{self, FramePainter};
 
 use crate::domain::settings::SessionActionUi;
 
 use super::super::command::Effect;
-use super::super::state::{HomeState, PaneExit, ReturnMode, SessionOutcome, ROOT_NAME};
+use super::super::state::{HomeState, PaneExit, ReturnMode, ROOT_NAME};
 use super::super::terminal_tabs::TabNav;
-use super::super::terminal_view::TerminalView;
-use super::{paint_now, selected_dir, ConfigReload, Flow, CTRL_N, CTRL_O, CTRL_P};
+use super::{paint_now, selected_dir, Flow, Wiring, CTRL_N, CTRL_O, CTRL_P};
 
 /// Handle one key in 統括 (Overview): edit / complete / recall the workspace
 /// command line and run it on `Enter`, dispatching the resulting [`Effect`].
-#[allow(clippy::too_many_arguments)]
 pub(super) fn overview_key(
     term: &Term,
-    reader: &mut dyn KeyReader,
     state: &mut HomeState,
     painter: &mut FramePainter,
-    workspace_root: &Path,
     key: Key,
-    persist: &mut dyn FnMut(&str),
-    dispatch_create: &mut dyn FnMut(&str),
-    dispatch_remove: &mut dyn FnMut(&str, bool),
-    existing_branches: &mut dyn FnMut() -> Vec<String>,
-    open_terminal: &mut dyn FnMut(&mut HomeState, &Path, bool, bool) -> Result<PaneExit>,
-    open_config: &mut dyn FnMut(&Term) -> Result<Option<ConfigReload>>,
-    preview: &mut dyn FnMut(&Path) -> Option<TerminalView>,
+    wiring: &mut Wiring,
 ) -> Result<Flow> {
     match key {
         Key::Enter => {
             let submission = state.submit();
             if let Some(command) = submission.recorded.as_deref() {
-                persist(command);
+                (wiring.persist)(command);
             }
             match submission.effect {
                 Effect::Quit => return Ok(Flow::Quit),
@@ -52,53 +41,35 @@ pub(super) fn overview_key(
                 Effect::EnterSwitch => state.enter_switch(ReturnMode::Overview),
                 // `session switch <name>` focuses that session: if it resolves,
                 // enter 在席 (attaching when it is live); otherwise log an error.
-                Effect::Activate(name) => activate_named(
-                    term,
-                    reader,
-                    state,
-                    painter,
-                    workspace_root,
-                    &name,
-                    open_terminal,
-                    preview,
-                ),
+                Effect::Activate(name) => activate_named(term, state, painter, &name, wiring),
                 // `session create <name>` dispatches the git work to a background
                 // worker and returns at once; the new session appears in the list
                 // when the task finishes (tracked in the top-right task panel).
-                Effect::CreateSession(name) => dispatch_create(&name),
+                Effect::CreateSession(name) => (wiring.dispatch_create)(&name),
                 // `session create` with no name moves to 切替 and opens the inline
                 // name input there (creation lives in Switch now).
                 Effect::OpenSessionModal => {
                     state.enter_switch(ReturnMode::Overview);
-                    state.switch_begin_create(existing_branches());
+                    let branches = (wiring.existing_branches)();
+                    state.switch_begin_create(branches);
                 }
                 Effect::ListSessions => state.log_sessions(),
                 // `session remove <name>` dispatches the removal to a background
                 // worker; the session leaves the list when the task finishes.
-                Effect::RemoveSession { name, force } => dispatch_remove(&name, force),
+                Effect::RemoveSession { name, force } => (wiring.dispatch_remove)(&name, force),
                 Effect::OpenRemoveModal { force } => state.open_remove_modal(force),
                 // `terminal` / `agent` are session commands, but the Overview line
                 // still dispatches them if typed: focus the active session (the
-                // root by default) and attach its pane.
+                // root by default) and attach a fresh pane.
                 effect @ (Effect::OpenTerminal | Effect::OpenAgent) => {
                     let row = state.list().active_index();
                     state.enter_focus(row);
-                    open_pane(
-                        term,
-                        reader,
-                        state,
-                        painter,
-                        workspace_root,
-                        open_terminal,
-                        preview,
-                        effect == Effect::OpenAgent,
-                        true,
-                    );
+                    launch_pane(term, state, painter, wiring, effect == Effect::OpenAgent);
                 }
                 // Hand off to the settings screen; it owns the terminal until
                 // dismissed. Quitting there quits the app; otherwise we resume,
                 // forcing a full repaint over the screen it drew.
-                Effect::OpenConfig => match open_config(term)? {
+                Effect::OpenConfig => match (wiring.open_config)(term)? {
                     // The user quit the app from the settings screen.
                     None => return Ok(Flow::Quit),
                     // Back to home: the config screen may have changed the Session
@@ -115,7 +86,7 @@ pub(super) fn overview_key(
                 // dispatches it if typed, closing the focused session. On the root
                 // row (the default) it is refused, since the root is the workspace
                 // itself and not a session.
-                Effect::CloseSession => close_focused_session(state, dispatch_remove),
+                Effect::CloseSession => close_focused_session(state, wiring),
                 // `ShowText` already opened its modal inside `submit`; nothing
                 // more for the event loop to do.
                 Effect::None | Effect::Clear | Effect::ShowText(_) => {}
@@ -149,39 +120,16 @@ pub(super) fn overview_key(
 /// in the worktree list, enter 在席 (Focus) on its row and, when the session is
 /// live, attach the pane (没入); an unknown name logs an error and stays in
 /// Overview.
-#[allow(clippy::too_many_arguments)]
 fn activate_named(
     term: &Term,
-    reader: &mut dyn KeyReader,
     state: &mut HomeState,
     painter: &mut FramePainter,
-    workspace_root: &Path,
     name: &str,
-    open_terminal: &mut dyn FnMut(&mut HomeState, &Path, bool, bool) -> Result<PaneExit>,
-    preview: &mut dyn FnMut(&Path) -> Option<TerminalView>,
+    wiring: &mut Wiring,
 ) {
     match resolve_row(state, name) {
-        Some(row) => {
-            state.enter_focus(row);
-            // Attach straight away when the focused session is already live.
-            let dir = selected_dir(state, workspace_root);
-            if preview(&dir).is_some() {
-                open_pane(
-                    term,
-                    reader,
-                    state,
-                    painter,
-                    workspace_root,
-                    open_terminal,
-                    preview,
-                    false,
-                    false,
-                );
-            }
-        }
-        None => {
-            state.log_error(format!("no session named \"{name}\""));
-        }
+        Some(row) => focus_and_attach(term, state, painter, wiring, row),
+        None => state.log_error(format!("no session named \"{name}\"")),
     }
 }
 
@@ -202,21 +150,12 @@ fn resolve_row(state: &HomeState, name: &str) -> Option<usize> {
 
 /// Handle one key in 切替 (Switch): move the left-pane cursor, focus / attach a
 /// session, drive the inline create input, or back out one level.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn switch_key(
     term: &Term,
-    reader: &mut dyn KeyReader,
     state: &mut HomeState,
     painter: &mut FramePainter,
-    workspace_root: &Path,
     key: Key,
-    dispatch_create: &mut dyn FnMut(&str),
-    rename_display: &mut dyn FnMut(&str, &str) -> SessionOutcome,
-    existing_branches: &mut dyn FnMut() -> Vec<String>,
-    open_terminal: &mut dyn FnMut(&mut HomeState, &Path, bool, bool) -> Result<PaneExit>,
-    preview: &mut dyn FnMut(&Path) -> Option<TerminalView>,
-    tab_op: &mut super::TabOp<'_>,
-    close_tab: &mut dyn FnMut(&mut HomeState, &Path),
+    wiring: &mut Wiring,
 ) -> Flow {
     // While the inline create input is open it captures every key.
     if state.is_creating() {
@@ -226,7 +165,7 @@ pub(super) fn switch_key(
                     // Dispatch the git work to a background worker and stay in
                     // 切替 so the user keeps navigating; the new session appears in
                     // the list when the task finishes (tracked in the task panel).
-                    dispatch_create(&name);
+                    (wiring.dispatch_create)(&name);
                 }
             }
             Key::Escape => state.create_cancel(),
@@ -248,7 +187,7 @@ pub(super) fn switch_key(
         match key {
             Key::Enter => {
                 if let Some((target, label)) = state.switch_confirm_rename() {
-                    let outcome = rename_display(&target, &label);
+                    let outcome = (wiring.rename_display)(&target, &label);
                     state.apply_session_outcome(outcome);
                 }
             }
@@ -269,32 +208,18 @@ pub(super) fn switch_key(
         // A no-op on a session with no panes. The Ctrl chords match what 没入 uses,
         // so the same keys work whether a pane is attached or only previewed here.
         Key::ArrowLeft | Key::Char('h') | Key::Char(CTRL_P) => {
-            let dir = selected_dir(state, workspace_root);
-            tab_op(&dir, Some(TabNav::Prev));
+            let dir = selected_dir(state, wiring.workspace_root);
+            (wiring.tab_op)(&dir, Some(TabNav::Prev));
         }
         Key::ArrowRight | Key::Char('l') | Key::Char(CTRL_N) => {
-            let dir = selected_dir(state, workspace_root);
-            tab_op(&dir, Some(TabNav::Next));
+            let dir = selected_dir(state, wiring.workspace_root);
+            (wiring.tab_op)(&dir, Some(TabNav::Next));
         }
         // Enter focuses the selected session: attach its active pane when live,
         // else just enter 在席.
         Key::Enter => {
             let row = state.list().selected_index();
-            let dir = selected_dir(state, workspace_root);
-            state.enter_focus(row);
-            if preview(&dir).is_some() {
-                open_pane(
-                    term,
-                    reader,
-                    state,
-                    painter,
-                    workspace_root,
-                    open_terminal,
-                    preview,
-                    false,
-                    false,
-                );
-            }
+            focus_and_attach(term, state, painter, wiring, row);
         }
         // `t` opens the session's action surface (在席) — a menu or prompt, per the
         // setting — to add a new pane (`terminal` / `agent`), without attaching the
@@ -307,26 +232,21 @@ pub(super) fn switch_key(
         // shell. The next frame re-reads the session's tabs — landing on the next
         // pane, or previewing its 在席 action menu once the last pane is gone.
         Key::Char('x') => {
-            let dir = selected_dir(state, workspace_root);
-            close_tab(state, &dir);
+            let dir = selected_dir(state, wiring.workspace_root);
+            (wiring.close_tab)(state, &dir);
         }
         // `c` begins inline session creation.
-        Key::Char('c') => state.switch_begin_create(existing_branches()),
+        Key::Char('c') => {
+            let branches = (wiring.existing_branches)();
+            state.switch_begin_create(branches);
+        }
         // `r` begins inline rename of the selected session's sidebar label
         // (a no-op on the root row, which is not a session).
         Key::Char('r') => {
             state.switch_begin_rename();
         }
         // Esc backs out to where Switch was opened from.
-        Key::Escape => leave_switch(
-            term,
-            reader,
-            state,
-            painter,
-            workspace_root,
-            open_terminal,
-            preview,
-        ),
+        Key::Escape => leave_switch(term, state, painter, wiring),
         // Ctrl-O zooms one level further out, to 統括.
         Key::Char(CTRL_O) => state.enter_overview(),
         _ => {}
@@ -339,15 +259,11 @@ pub(super) fn switch_key(
 /// session's pane when that session is still live, mirroring how `Enter` only
 /// attaches a live session (so backing out onto an idle row lands in 在席 rather
 /// than spawning a surprise shell).
-#[allow(clippy::too_many_arguments)]
 fn leave_switch(
     term: &Term,
-    reader: &mut dyn KeyReader,
     state: &mut HomeState,
     painter: &mut FramePainter,
-    workspace_root: &Path,
-    open_terminal: &mut dyn FnMut(&mut HomeState, &Path, bool, bool) -> Result<PaneExit>,
-    preview: &mut dyn FnMut(&Path) -> Option<TerminalView>,
+    wiring: &mut Wiring,
 ) {
     match state.switch_return() {
         ReturnMode::Overview => state.enter_overview(),
@@ -357,43 +273,42 @@ fn leave_switch(
         }
         ReturnMode::Attached => {
             let row = state.list().selected_index();
-            let dir = selected_dir(state, workspace_root);
-            state.enter_focus(row);
             // Re-attach only when the focused session is live (it always is when
             // the cursor never left the just-detached session); an idle row stays
             // in 在席.
-            if preview(&dir).is_some() {
-                open_pane(
-                    term,
-                    reader,
-                    state,
-                    painter,
-                    workspace_root,
-                    open_terminal,
-                    preview,
-                    false,
-                    false,
-                );
-            }
+            focus_and_attach(term, state, painter, wiring, row);
         }
+    }
+}
+
+/// Focus the list row `row` and, when its session is already live, attach its
+/// active pane (没入); an idle row just lands in 在席. Shared by the three entries
+/// that focus an existing session — `session switch <name>`, `Enter` in 切替, and
+/// backing out of 切替 onto a just-detached session — so the "enter focus → attach
+/// if live" decision lives in one place.
+fn focus_and_attach(
+    term: &Term,
+    state: &mut HomeState,
+    painter: &mut FramePainter,
+    wiring: &mut Wiring,
+    row: usize,
+) {
+    state.enter_focus(row);
+    let dir = selected_dir(state, wiring.workspace_root);
+    if (wiring.preview)(&dir).is_some() {
+        open_pane(term, state, painter, wiring, false, false);
     }
 }
 
 /// Handle one key in 在席 (Focus): drive the right-pane action surface (a menu
 /// of the session's commands or a session-scoped prompt), launching `terminal` /
 /// `agent` into 没入, or back out to 統括 / 切替.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn focus_key(
     term: &Term,
-    reader: &mut dyn KeyReader,
     state: &mut HomeState,
     painter: &mut FramePainter,
-    workspace_root: &Path,
     key: Key,
-    dispatch_remove: &mut dyn FnMut(&str, bool),
-    open_terminal: &mut dyn FnMut(&mut HomeState, &Path, bool, bool) -> Result<PaneExit>,
-    preview: &mut dyn FnMut(&Path) -> Option<TerminalView>,
-    tab_op: &mut super::TabOp<'_>,
+    wiring: &mut Wiring,
 ) -> Flow {
     // `Esc` returns to 統括; `Ctrl-O` opens 切替 (return here on cancel); `Ctrl-P` /
     // `Ctrl-N` move the focused session's active tab (so re-attaching, or the next
@@ -409,41 +324,21 @@ pub(super) fn focus_key(
             return Flow::Continue;
         }
         Key::Char(CTRL_P) => {
-            let dir = selected_dir(state, workspace_root);
-            tab_op(&dir, Some(TabNav::Prev));
+            let dir = selected_dir(state, wiring.workspace_root);
+            (wiring.tab_op)(&dir, Some(TabNav::Prev));
             return Flow::Continue;
         }
         Key::Char(CTRL_N) => {
-            let dir = selected_dir(state, workspace_root);
-            tab_op(&dir, Some(TabNav::Next));
+            let dir = selected_dir(state, wiring.workspace_root);
+            (wiring.tab_op)(&dir, Some(TabNav::Next));
             return Flow::Continue;
         }
         _ => {}
     }
 
     match state.session_action_ui() {
-        SessionActionUi::Menu => focus_menu_key(
-            term,
-            reader,
-            state,
-            painter,
-            workspace_root,
-            key,
-            dispatch_remove,
-            open_terminal,
-            preview,
-        ),
-        SessionActionUi::Prompt => focus_prompt_key(
-            term,
-            reader,
-            state,
-            painter,
-            workspace_root,
-            key,
-            dispatch_remove,
-            open_terminal,
-            preview,
-        ),
+        SessionActionUi::Menu => focus_menu_key(term, state, painter, key, wiring),
+        SessionActionUi::Prompt => focus_prompt_key(term, state, painter, key, wiring),
     }
     Flow::Continue
 }
@@ -455,7 +350,7 @@ pub(super) fn focus_key(
 /// (`Esc` backs out to 統括); the removal's result is logged and the list
 /// refreshed when the background task finishes. The root row is the workspace
 /// itself, not a session, so closing it is refused outright and stays in 在席.
-fn close_focused_session(state: &mut HomeState, dispatch_remove: &mut dyn FnMut(&str, bool)) {
+fn close_focused_session(state: &mut HomeState, wiring: &mut Wiring) {
     let name = state.focused_session_name();
     // The root row is the workspace itself, not a session, so it cannot be
     // closed. The 在席 menu hides `close` here, but the prompt could still be
@@ -464,81 +359,41 @@ fn close_focused_session(state: &mut HomeState, dispatch_remove: &mut dyn FnMut(
         state.log_error("the root row is the workspace and cannot be closed");
         return;
     }
-    dispatch_remove(&name, true);
+    (wiring.dispatch_remove)(&name, true);
     state.enter_switch(ReturnMode::Overview);
 }
 
 /// 在席 menu surface: `↑`/`↓` move the cursor, `Enter` runs the highlighted
 /// command, and `t` / `a` are shortcuts for `terminal` / `agent`. `ai` runs its
 /// coming-soon line.
-#[allow(clippy::too_many_arguments)]
 fn focus_menu_key(
     term: &Term,
-    reader: &mut dyn KeyReader,
     state: &mut HomeState,
     painter: &mut FramePainter,
-    workspace_root: &Path,
     key: Key,
-    dispatch_remove: &mut dyn FnMut(&str, bool),
-    open_terminal: &mut dyn FnMut(&mut HomeState, &Path, bool, bool) -> Result<PaneExit>,
-    preview: &mut dyn FnMut(&Path) -> Option<TerminalView>,
+    wiring: &mut Wiring,
 ) {
     match key {
         Key::ArrowUp | Key::Char('k') => state.focus_menu_move_up(),
         Key::ArrowDown | Key::Char('j') => state.focus_menu_move_down(),
         Key::Enter => {
             let name = state.focus_selected_command().name;
-            run_focus_command(
-                term,
-                reader,
-                state,
-                painter,
-                workspace_root,
-                name,
-                dispatch_remove,
-                open_terminal,
-                preview,
-            );
+            run_focus_command(term, state, painter, name, wiring);
         }
-        Key::Char('t') => run_focus_command(
-            term,
-            reader,
-            state,
-            painter,
-            workspace_root,
-            "terminal",
-            dispatch_remove,
-            open_terminal,
-            preview,
-        ),
-        Key::Char('a') => run_focus_command(
-            term,
-            reader,
-            state,
-            painter,
-            workspace_root,
-            "agent",
-            dispatch_remove,
-            open_terminal,
-            preview,
-        ),
+        Key::Char('t') => run_focus_command(term, state, painter, "terminal", wiring),
+        Key::Char('a') => run_focus_command(term, state, painter, "agent", wiring),
         _ => {}
     }
 }
 
 /// 在席 prompt surface: edit / complete the session-scoped command line and run
 /// it on `Enter`, attaching the pane on `terminal` / `agent`.
-#[allow(clippy::too_many_arguments)]
 fn focus_prompt_key(
     term: &Term,
-    reader: &mut dyn KeyReader,
     state: &mut HomeState,
     painter: &mut FramePainter,
-    workspace_root: &Path,
     key: Key,
-    dispatch_remove: &mut dyn FnMut(&str, bool),
-    open_terminal: &mut dyn FnMut(&mut HomeState, &Path, bool, bool) -> Result<PaneExit>,
-    preview: &mut dyn FnMut(&Path) -> Option<TerminalView>,
+    wiring: &mut Wiring,
 ) {
     match key {
         Key::Enter => {
@@ -548,20 +403,9 @@ fn focus_prompt_key(
             let effect = state.focus_prompt_submit().effect;
             match effect {
                 Effect::OpenTerminal | Effect::OpenAgent => {
-                    let agent = effect == Effect::OpenAgent;
-                    open_pane(
-                        term,
-                        reader,
-                        state,
-                        painter,
-                        workspace_root,
-                        open_terminal,
-                        preview,
-                        agent,
-                        true,
-                    );
+                    launch_pane(term, state, painter, wiring, effect == Effect::OpenAgent);
                 }
-                Effect::CloseSession => close_focused_session(state, dispatch_remove),
+                Effect::CloseSession => close_focused_session(state, wiring),
                 _ => {}
             }
         }
@@ -583,51 +427,40 @@ fn focus_prompt_key(
 /// Run a named session command (`terminal` / `agent` / `ai`) from the 在席 menu:
 /// the two launch commands attach the pane (没入); `ai` logs its coming-soon
 /// line.
-#[allow(clippy::too_many_arguments)]
 fn run_focus_command(
     term: &Term,
-    reader: &mut dyn KeyReader,
     state: &mut HomeState,
     painter: &mut FramePainter,
-    workspace_root: &Path,
     name: &str,
-    dispatch_remove: &mut dyn FnMut(&str, bool),
-    open_terminal: &mut dyn FnMut(&mut HomeState, &Path, bool, bool) -> Result<PaneExit>,
-    preview: &mut dyn FnMut(&Path) -> Option<TerminalView>,
+    wiring: &mut Wiring,
 ) {
     match name {
-        "terminal" => open_pane(
-            term,
-            reader,
-            state,
-            painter,
-            workspace_root,
-            open_terminal,
-            preview,
-            false,
-            true,
-        ),
-        "agent" => open_pane(
-            term,
-            reader,
-            state,
-            painter,
-            workspace_root,
-            open_terminal,
-            preview,
-            true,
-            true,
-        ),
+        "terminal" => launch_pane(term, state, painter, wiring, false),
+        "agent" => launch_pane(term, state, painter, wiring, true),
         // `close` removes the focused session forcefully and leaves 在席.
-        "close" => close_focused_session(state, dispatch_remove),
+        "close" => close_focused_session(state, wiring),
         // `ai` (and any future coming-soon command) just logs its line.
         _ => state.log_output(format!("\"{name}\" is coming soon 🐰")),
     }
 }
 
+/// Add a fresh `terminal` / `agent` pane to the focused session and drive it
+/// (没入). `agent` launches the AI agent CLI inside the pane; otherwise a plain
+/// shell. Shared by the three surfaces that launch a pane on command — Overview's
+/// typed `terminal` / `agent`, the 在席 menu, and the 在席 prompt — each of which
+/// has already focused the target row.
+fn launch_pane(
+    term: &Term,
+    state: &mut HomeState,
+    painter: &mut FramePainter,
+    wiring: &mut Wiring,
+    agent: bool,
+) {
+    open_pane(term, state, painter, wiring, agent, true);
+}
+
 /// Open the embedded terminal pane (没入) for the focused session and run it
-/// until the user leaves it, then act on the [`PaneExit`] and report whether the
-/// application should quit.
+/// until the user leaves it, then act on the [`PaneExit`].
 ///
 /// `agent` governs the shell opened here (`agent` launches the AI agent CLI
 /// inside it; `terminal` opens a plain shell). `new_pane` chooses whether to add
@@ -639,18 +472,11 @@ fn run_focus_command(
 /// - [`PaneExit::Closed`] — the shell exited: return to 在席 (Focus).
 /// - [`PaneExit::ToSwitch`] — `Ctrl-O`: zoom out to 切替 (Switch), remembering to
 ///   re-attach (`ReturnMode::Attached`) if the user backs out.
-#[allow(clippy::too_many_arguments)]
 fn open_pane(
     term: &Term,
-    // `reader` / `preview` are threaded through so the helper's signature matches
-    // the others; the pane owns its own input, and re-attaching is decided by the
-    // caller, so neither is read here.
-    _reader: &mut dyn KeyReader,
     state: &mut HomeState,
     painter: &mut FramePainter,
-    workspace_root: &Path,
-    open_terminal: &mut dyn FnMut(&mut HomeState, &Path, bool, bool) -> Result<PaneExit>,
-    _preview: &mut dyn FnMut(&Path) -> Option<TerminalView>,
+    wiring: &mut Wiring,
     agent: bool,
     new_pane: bool,
 ) {
@@ -659,7 +485,7 @@ fn open_pane(
     } else {
         ("Terminal", "terminal")
     };
-    let dir = selected_dir(state, workspace_root);
+    let dir = selected_dir(state, wiring.workspace_root);
     // Spawning the PTY (and launching the agent CLI inside it) blocks for a beat;
     // flash the loading rabbit in the top-right so the wait reads as deliberate,
     // until the pane itself paints over the screen.
@@ -671,7 +497,7 @@ fn open_pane(
     let _ = paint_now(term, painter, state);
     state.finish_loading();
     state.show_attached();
-    let outcome = open_terminal(state, &dir, agent, new_pane);
+    let outcome = (wiring.open_terminal)(state, &dir, agent, new_pane);
     // The pane toggled `crossterm`'s raw mode around itself; re-assert the
     // wheel-capture modes so the wheel can't scroll the host terminal once we are
     // back on the workspace screen.
