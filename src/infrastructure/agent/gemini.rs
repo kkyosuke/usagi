@@ -7,7 +7,6 @@
 use std::path::Path;
 
 use crate::domain::agent::{Agent, AgentWiring};
-use crate::domain::settings::AgentCli;
 
 /// The Gemini CLI adapter.
 #[derive(Default)]
@@ -25,15 +24,11 @@ impl Agent for GeminiAgent {
         "gemini"
     }
 
-    fn launch_command(&self, wiring: &AgentWiring, resume: bool) -> String {
+    fn launch_command(&self, _wiring: &AgentWiring, _resume: bool) -> String {
         // Gemini has no inline MCP flag — its servers come from settings.json — so
-        // it launches plain (the domain builder returns the bare command). It also
-        // has no resume flag, so `resume` is ignored.
-        AgentCli::Gemini.launch_command(
-            wiring.local_llm_model.as_deref(),
-            &wiring.usagi_bin,
-            resume,
-        )
+        // it launches as the bare command, ignoring the wiring. It also has no
+        // resume flag, so `resume` is ignored too.
+        "gemini".to_string()
     }
 
     fn has_resumable_session(&self, _dir: &Path) -> bool {
