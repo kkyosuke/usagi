@@ -5,7 +5,8 @@
 //! worktree, derives each [`BranchStatus`], and writes the result to
 //! `<repo>/.usagi/state.json`.
 
-use std::path::Path;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use chrono::Utc;
@@ -22,26 +23,60 @@ pub fn sync(cwd: &Path) -> Result<WorkspaceState> {
     let store = WorkspaceStore::new(&root);
     let mut state = store.load()?.unwrap_or_default();
 
-    // The default branch is a per-repository property shared by every worktree
-    // of that repository, so resolve it once here rather than re-deriving it
-    // (another `git` process) inside every `inspect_worktree`. A git-repository
-    // workspace gives each session a single worktree on this repository, so its
-    // default applies to them all.
-    let default = git::default_branch(&root);
-
-    // Each `inspect_worktree` still shells out to git; refresh the worktrees in
-    // parallel so a multi-session workspace is not bottlenecked on a long
-    // sequence of git subprocesses.
-    use rayon::prelude::*;
+    // Inspect every session's worktrees through the shared helper, which
+    // resolves each repository's default branch once and refreshes the
+    // worktrees in parallel. Flattening across sessions lets a workspace whose
+    // sessions share a repository resolve that repository's default a single
+    // time. The result is scattered back in the same order it was collected.
+    let paths: Vec<PathBuf> = state
+        .sessions
+        .iter()
+        .flat_map(|s| s.worktrees.iter().map(|wt| wt.path.clone()))
+        .collect();
+    let mut refreshed = inspect_worktrees(&paths).into_iter();
     for session in &mut state.sessions {
-        session
-            .worktrees
-            .par_iter_mut()
-            .for_each(|wt| *wt = inspect_worktree(&wt.path, &default));
+        for wt in &mut session.worktrees {
+            *wt = refreshed
+                .next()
+                .expect("inspect_worktrees yields one state per input path");
+        }
     }
     state.updated_at = Utc::now();
     store.save(&state)?;
     Ok(state)
+}
+
+/// Inspect a list of worktree paths into [`WorktreeState`]s, resolving each
+/// worktree's repository default branch at most once.
+///
+/// The default branch is a per-repository property shared by every worktree of
+/// that repository, so it is resolved once per repository (keyed by the
+/// worktree's primary worktree) and reused — rather than shelling out for it
+/// inside every [`inspect_worktree`]. The worktrees are then inspected in
+/// parallel so a multi-repo, multi-session workspace is not bottlenecked on a
+/// long sequence of git subprocesses. Used by both [`sync`] and session
+/// recording so the two never drift into separate implementations.
+pub fn inspect_worktrees(paths: &[PathBuf]) -> Vec<WorktreeState> {
+    use rayon::prelude::*;
+
+    // Map each worktree to its repository in parallel, then resolve each
+    // distinct repository's default branch once.
+    let repos: Vec<PathBuf> = paths
+        .par_iter()
+        .map(|path| git::primary_worktree(path).unwrap_or_else(|_| path.clone()))
+        .collect();
+    let mut defaults: HashMap<&Path, String> = HashMap::new();
+    for repo in &repos {
+        defaults
+            .entry(repo.as_path())
+            .or_insert_with(|| git::default_branch(repo));
+    }
+
+    paths
+        .par_iter()
+        .zip(repos.par_iter())
+        .map(|(path, repo)| inspect_worktree(path, &defaults[repo.as_path()]))
+        .collect()
 }
 
 /// Load the persisted state for the repository containing `cwd`, if any.
@@ -165,6 +200,40 @@ mod tests {
         assert_eq!(wt.upstream, None);
         assert_eq!(wt.head.len(), 7);
         assert!(!wt.primary);
+    }
+
+    #[test]
+    fn inspect_worktrees_inspects_each_path_and_tolerates_non_git_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        init_repo(dir.path());
+        // A real linked worktree on a feature branch alongside the repo itself.
+        let wt_path = dir.path().join(".usagi/sessions/wip");
+        git(dir.path())
+            .args([
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "wip",
+                wt_path.to_str().unwrap(),
+            ])
+            .status()
+            .unwrap();
+        // A path that is not a git worktree falls back to itself as the repo and
+        // yields a branch-less state rather than erroring.
+        let plain = tempfile::tempdir().unwrap();
+
+        let states = inspect_worktrees(&[
+            dir.path().to_path_buf(),
+            wt_path.clone(),
+            plain.path().to_path_buf(),
+        ]);
+
+        assert_eq!(states.len(), 3);
+        assert_eq!(states[0].branch.as_deref(), Some("main"));
+        assert_eq!(states[1].branch.as_deref(), Some("wip"));
+        assert_eq!(states[2].branch, None);
+        assert!(states[2].head.is_empty());
     }
 
     #[test]

@@ -1992,35 +1992,42 @@ impl KeyReader for TimeoutScript {
 fn run_with_tasks(
     tasks: &TaskHandle,
     reader: &mut dyn KeyReader,
-    dispatch_remove: &mut dyn FnMut(&str, bool),
-    evict_pool: &mut dyn FnMut(&Path),
+    mut dispatch_remove: impl FnMut(&str, bool),
+    mut evict_pool: impl FnMut(&Path),
 ) -> Result<Outcome> {
     let term = Term::stdout();
     let monitor = MonitorHandle::detached();
     let mut persist: fn(&str) = noop_persist;
     let mut dispatch_create = |_: &str| {};
+    let mut rename: fn(&str, &str) -> SessionOutcome = noop_rename;
+    let mut branches: fn() -> Vec<String> = no_branches;
     let mut open: fn(&mut HomeState, &Path, bool, bool) -> Result<PaneExit> = noop_open;
     let mut config: fn(&Term) -> Result<Option<ConfigReload>> = noop_config;
     let mut preview: fn(&Path) -> Option<TerminalView> = noop_preview;
+    let mut tab_op: fn(&Path, Option<TabNav>) -> (Vec<String>, usize) = noop_tab_op;
+    let mut close: fn(&mut HomeState, &Path) = noop_close;
+    let mut wiring = Wiring {
+        workspace_root: Path::new("/ws"),
+        persist: &mut persist,
+        dispatch_create: &mut dispatch_create,
+        rename_display: &mut rename,
+        dispatch_remove: &mut dispatch_remove,
+        evict_pool: &mut evict_pool,
+        existing_branches: &mut branches,
+        open_terminal: &mut open,
+        open_config: &mut config,
+        preview: &mut preview,
+        tab_op: &mut tab_op,
+        close_tab: &mut close,
+    };
     event_loop(
         &term,
         reader,
         sample_state(),
-        Path::new("/ws"),
         &monitor,
         &UpdateHandle::new(),
         tasks,
-        &mut persist,
-        &mut dispatch_create,
-        &mut (noop_rename as fn(&str, &str) -> SessionOutcome),
-        dispatch_remove,
-        evict_pool,
-        &mut (no_branches as fn() -> Vec<String>),
-        &mut open,
-        &mut config,
-        &mut preview,
-        &mut (noop_tab_op as fn(&Path, Option<TabNav>) -> (Vec<String>, usize)),
-        &mut (noop_close as fn(&mut HomeState, &Path)),
+        &mut wiring,
     )
 }
 

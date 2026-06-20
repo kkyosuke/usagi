@@ -44,7 +44,7 @@
 | infrastructure | `infrastructure/git.rs` | git CLI 経由の読み取り専用検査 |
 | usecase | `usecase/workspace.rs` | グローバル登録の add/list/remove/touch |
 | usecase | `usecase/settings.rs` | グローバル設定の load/更新、ローカル設定の load/save と実効設定の解決（`effective`） |
-| usecase | `usecase/workspace_state.rs` | セッション worktree のステータス再計算（`inspect_worktree` / `sync` / `load`） |
+| usecase | `usecase/workspace_state.rs` | セッション worktree のステータス再計算（`inspect_worktree` / `inspect_worktrees` / `sync` / `load`） |
 | usecase | `usecase/session` | セッション作成・削除（再帰 worktree + コピー）と `state.json` の `SessionRecord` 追記／除去 |
 
 ---

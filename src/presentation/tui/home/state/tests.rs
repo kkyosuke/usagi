@@ -1,3 +1,4 @@
+use super::super::terminal_pool::MonitorSnapshot;
 use super::*;
 use crate::domain::workspace_state::BranchStatus;
 use chrono::Utc;
@@ -1001,19 +1002,19 @@ fn attached_holds_a_terminal_view_and_leaving_drops_it() {
 }
 
 #[test]
-fn clear_terminal_view_drops_the_snapshot_without_changing_the_mode() {
+fn clear_terminal_surface_drops_the_snapshot_without_changing_the_mode() {
     let mut state = state();
     state.enter_focus(1);
     state.show_attached();
     state.set_terminal_view(TerminalView::from_rows(vec!["x".to_string()], None));
-    state.clear_terminal_view();
+    state.clear_terminal_surface();
     assert!(state.terminal_view().is_none());
     // The mode is untouched (the per-frame cleanup must not leave 没入).
     assert_eq!(state.mode(), Mode::Attached);
 }
 
 #[test]
-fn tab_strip_is_published_and_cleared_with_the_pane() {
+fn tab_strip_is_published_and_cleared_with_the_view() {
     let mut state = state();
     state.enter_focus(1);
     state.show_attached();
@@ -1021,13 +1022,11 @@ fn tab_strip_is_published_and_cleared_with_the_pane() {
     let strip = state.terminal_tabs().expect("the strip is published");
     assert_eq!(strip.labels, ["agent", "terminal"]);
     assert_eq!(strip.active, 1);
-    // The per-frame view cleanup also drops the strip.
+    // The surface clears as a unit: a published view and tab strip drop together,
+    // so there is no path that leaves a stale snapshot beside a dropped strip.
     state.set_terminal_view(TerminalView::from_rows(vec!["x".to_string()], None));
-    state.clear_terminal_view();
-    assert!(state.terminal_tabs().is_none());
-    // Re-publish it, then leaving 没入 drops it too.
-    state.set_terminal_tabs(vec!["agent".to_string()], 0);
-    state.clear_terminal_tabs();
+    state.clear_terminal_surface();
+    assert!(state.terminal_view().is_none());
     assert!(state.terminal_tabs().is_none());
 }
 
@@ -1406,47 +1405,42 @@ fn hint_no_live_session_logs_a_notice_pointing_at_the_launch_commands() {
 }
 
 #[test]
-fn waiting_paths_track_sessions_awaiting_input() {
+fn apply_badges_replaces_every_set_at_once() {
     let mut state = state();
-    assert!(!state.is_waiting(Path::new("/repo/feature")));
+    // Every set starts empty.
+    assert!(!state.is_running(Path::new("/repo/run")));
+    assert!(state.running_paths().is_empty());
     assert!(state.waiting_paths().is_empty());
-    let mut waiting = HashSet::new();
-    waiting.insert(PathBuf::from("/repo/feature"));
-    state.set_waiting(waiting);
-    assert!(state.is_waiting(Path::new("/repo/feature")));
-    assert!(!state.is_waiting(Path::new("/repo/main")));
-    state.set_waiting(HashSet::new());
-    assert!(!state.is_waiting(Path::new("/repo/feature")));
-}
-
-#[test]
-fn live_paths_track_sessions_with_a_running_agent() {
-    let mut state = state();
-    assert!(!state.is_live(Path::new("/repo/feature")));
     assert!(state.live_paths().is_empty());
-    let mut live = HashSet::new();
-    live.insert(PathBuf::from("/repo/feature"));
-    state.set_live(live);
-    assert!(state.is_live(Path::new("/repo/feature")));
-    assert!(!state.is_live(Path::new("/repo/main")));
-    assert_eq!(state.live_paths().len(), 1);
-    state.set_live(HashSet::new());
-    assert!(!state.is_live(Path::new("/repo/feature")));
-}
-
-#[test]
-fn done_paths_track_finished_sessions() {
-    let mut state = state();
-    assert!(!state.is_done(Path::new("/repo/feature")));
     assert!(state.done_paths().is_empty());
-    let mut done = HashSet::new();
-    done.insert(PathBuf::from("/repo/feature"));
-    state.set_done(done);
-    assert!(state.is_done(Path::new("/repo/feature")));
-    assert!(!state.is_done(Path::new("/repo/main")));
+
+    // One reading populates all four sets together (running / waiting / live /
+    // done), so the getters read a single consistent snapshot.
+    state.apply_badges(MonitorSnapshot {
+        running: [PathBuf::from("/repo/run")].into(),
+        waiting: [PathBuf::from("/repo/wait")].into(),
+        live: [PathBuf::from("/repo/run"), PathBuf::from("/repo/wait")].into(),
+        done: [PathBuf::from("/repo/done")].into(),
+    });
+    assert!(state.is_running(Path::new("/repo/run")));
+    assert!(!state.is_running(Path::new("/repo/wait")));
+    assert_eq!(state.running_paths().len(), 1);
+    assert!(state.is_waiting(Path::new("/repo/wait")));
+    assert_eq!(state.waiting_paths().len(), 1);
+    assert!(state.is_live(Path::new("/repo/run")));
+    assert!(state.is_live(Path::new("/repo/wait")));
+    assert_eq!(state.live_paths().len(), 2);
+    assert!(state.is_done(Path::new("/repo/done")));
     assert_eq!(state.done_paths().len(), 1);
-    state.set_done(HashSet::new());
-    assert!(!state.is_done(Path::new("/repo/feature")));
+
+    // A fresh reading replaces the lot — a now-empty set clears, it does not
+    // merge with the previous frame.
+    state.apply_badges(MonitorSnapshot::default());
+    assert!(!state.is_running(Path::new("/repo/run")));
+    assert!(state.running_paths().is_empty());
+    assert!(state.waiting_paths().is_empty());
+    assert!(state.live_paths().is_empty());
+    assert!(state.done_paths().is_empty());
 }
 
 #[test]
@@ -1466,10 +1460,10 @@ fn has_live_sessions_and_live_count_follow_the_live_set() {
     let mut state = state();
     assert!(!state.has_live_sessions());
     assert_eq!(state.live_count(), 0);
-    let mut live = HashSet::new();
-    live.insert(PathBuf::from("/repo/feature"));
-    live.insert(PathBuf::from("/repo/main"));
-    state.set_live(live);
+    state.apply_badges(MonitorSnapshot {
+        live: [PathBuf::from("/repo/feature"), PathBuf::from("/repo/main")].into(),
+        ..Default::default()
+    });
     assert!(state.has_live_sessions());
     assert_eq!(state.live_count(), 2);
 }

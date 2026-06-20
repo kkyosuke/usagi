@@ -372,12 +372,22 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
     // default Overview screen is blank — so they read cleanly in the top-right
     // corner of the content.
     if let Some(loading) = state.loading() {
+        // The transient launch indicator is deliberate and short-lived, so it
+        // takes the corner even over a live pane.
         widgets::overlay_top_right(
             &mut lines,
             body_start,
             width,
             &widgets::loading_rabbit(loading.frame(), loading.label()),
         );
+    } else if state.terminal_view().is_some() {
+        // A live embedded terminal occupies the right pane (没入's attached shell
+        // or 切替's live preview). Its rows are clipped, not padded, so the
+        // top-right notices — which `overlay_top_right` only keeps off rows that
+        // already reach the banner column — would draw over the shell's output
+        // there, and the constantly-repainting task spinner would keep clobbering
+        // it. Suppress them so the live pane is never overdrawn; the task panel
+        // and update notice surface again the moment the pane is left.
     } else if !state.tasks().is_empty() {
         // Background session work (create / remove) running off the event-loop
         // thread, stacked in the corner so it never freezes the screen.

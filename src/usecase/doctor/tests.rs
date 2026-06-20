@@ -10,12 +10,12 @@ fn health_labels_cover_every_variant() {
 
 #[test]
 fn tool_check_reports_installed_and_missing_tools() {
-    let git = tool_check("git");
+    let git = tool_check("git", &SystemRunner);
     assert_eq!(git.name, "git");
     assert_eq!(git.health, Health::Ok);
     assert!(git.detail.is_none());
 
-    let missing = tool_check("definitely-not-a-real-binary-xyz");
+    let missing = tool_check("definitely-not-a-real-binary-xyz", &SystemRunner);
     assert_eq!(missing.health, Health::Missing);
     assert!(missing.detail.unwrap().contains("PATH"));
 }
