@@ -4,6 +4,7 @@ use super::*;
 
 use super::super::command::{CommandHint, CommandInfo};
 use super::super::state::{LogLine, TextModal, WorktreeList, ROOT_NAME};
+use super::super::terminal_pool::MonitorSnapshot;
 use super::super::terminal_view::TerminalView;
 use crate::domain::settings::SessionActionUi;
 use crate::domain::workspace_state::{BranchStatus, WorktreeState};
@@ -658,7 +659,10 @@ fn switch_preview_shows_a_live_session_as_a_reattach() {
     let mut running = worktree(Some("feat"), false, BranchStatus::Local);
     running.path = PathBuf::from("/repo/run");
     let mut state = HomeState::new("usagi", vec![running], None);
-    state.set_live([PathBuf::from("/repo/run")].into());
+    state.apply_badges(MonitorSnapshot {
+        live: [PathBuf::from("/repo/run")].into(),
+        ..Default::default()
+    });
     state.enter_switch(super::super::state::ReturnMode::Overview);
     // Move the cursor off the root onto the session row.
     state.switch_move_down();
@@ -679,7 +683,10 @@ fn switch_preview_shows_a_live_session_as_its_actual_screen() {
     let mut running = worktree(Some("feat"), false, BranchStatus::Local);
     running.path = PathBuf::from("/repo/run");
     let mut state = HomeState::new("usagi", vec![running], None);
-    state.set_live([PathBuf::from("/repo/run")].into());
+    state.apply_badges(MonitorSnapshot {
+        live: [PathBuf::from("/repo/run")].into(),
+        ..Default::default()
+    });
     // The event loop snapshots the highlighted live session before painting.
     state.set_terminal_view(TerminalView::from_rows(
         vec!["$ echo hi".to_string(), "hi".to_string()],
@@ -704,7 +711,10 @@ fn switch_preview_shows_the_tab_strip_beside_the_header_for_a_live_session() {
     let mut running = worktree(Some("feat"), false, BranchStatus::Local);
     running.path = PathBuf::from("/repo/run");
     let mut state = HomeState::new("usagi", vec![running], None);
-    state.set_live([PathBuf::from("/repo/run")].into());
+    state.apply_badges(MonitorSnapshot {
+        live: [PathBuf::from("/repo/run")].into(),
+        ..Default::default()
+    });
     state.set_terminal_view(TerminalView::from_rows(vec!["$ echo hi".to_string()], None));
     state.set_terminal_tabs(vec!["agent".to_string(), "terminal".to_string()], 1);
     state.enter_switch(super::super::state::ReturnMode::Overview);
@@ -734,7 +744,10 @@ fn switch_preview_keeps_a_fixed_identity_width_so_tabs_do_not_jitter() {
     );
     long.path = PathBuf::from("/repo/long");
     let mut state = HomeState::new("usagi", vec![short, long], None);
-    state.set_live([PathBuf::from("/repo/short"), PathBuf::from("/repo/long")].into());
+    state.apply_badges(MonitorSnapshot {
+        live: [PathBuf::from("/repo/short"), PathBuf::from("/repo/long")].into(),
+        ..Default::default()
+    });
     state.set_terminal_tabs(vec!["agent".to_string(), "terminal".to_string()], 0);
     state.set_terminal_view(TerminalView::from_rows(vec!["$ ".to_string()], None));
     state.enter_switch(super::super::state::ReturnMode::Overview);
@@ -771,7 +784,10 @@ fn switch_preview_shows_the_root_live_session_as_its_screen() {
     // agent previews live.
     let mut state = HomeState::new("usagi", Vec::new(), None);
     state.set_root_path(PathBuf::from("/repo"));
-    state.set_live([PathBuf::from("/repo")].into());
+    state.apply_badges(MonitorSnapshot {
+        live: [PathBuf::from("/repo")].into(),
+        ..Default::default()
+    });
     // The event loop snapshots the highlighted live session (the root here)
     // before painting.
     state.set_terminal_view(TerminalView::from_rows(
@@ -950,8 +966,11 @@ fn attached_header_shows_the_active_session_identity_beside_the_tabs() {
     let mut running = worktree(Some("feat"), false, BranchStatus::Local);
     running.path = PathBuf::from("/repo/run");
     let mut state = HomeState::new("usagi", vec![running], None);
-    state.set_live([PathBuf::from("/repo/run")].into());
-    state.set_running([PathBuf::from("/repo/run")].into());
+    state.apply_badges(MonitorSnapshot {
+        live: [PathBuf::from("/repo/run")].into(),
+        running: [PathBuf::from("/repo/run")].into(),
+        ..Default::default()
+    });
     state.enter_focus(1);
     state.show_attached();
     state.set_terminal_tabs(vec!["agent".to_string(), "terminal".to_string()], 0);
@@ -1574,7 +1593,10 @@ fn render_frame_overlays_the_quit_confirmation_modal() {
     let mut state = state_with_sessions(&["alpha", "beta"]);
     let live: std::collections::HashSet<std::path::PathBuf> =
         ["/ws/alpha", "/ws/beta"].iter().map(Into::into).collect();
-    state.set_live(live);
+    state.apply_badges(MonitorSnapshot {
+        live,
+        ..Default::default()
+    });
     state.open_quit_confirm();
     let frame = render_frame(24, 80, &state);
     let joined = console::strip_ansi_codes(&frame.join("\n")).into_owned();
@@ -1671,9 +1693,12 @@ fn render_frame_surfaces_running_and_waiting_agent_icons() {
     let mut waiting = worktree(Some("fix"), false, BranchStatus::Pushed);
     waiting.path = PathBuf::from("/repo/wait");
     let mut state = HomeState::new("usagi", vec![running, waiting], None);
-    state.set_live([PathBuf::from("/repo/run"), PathBuf::from("/repo/wait")].into());
-    state.set_running([PathBuf::from("/repo/run")].into());
-    state.set_waiting([PathBuf::from("/repo/wait")].into());
+    state.apply_badges(MonitorSnapshot {
+        live: [PathBuf::from("/repo/run"), PathBuf::from("/repo/wait")].into(),
+        running: [PathBuf::from("/repo/run")].into(),
+        waiting: [PathBuf::from("/repo/wait")].into(),
+        ..Default::default()
+    });
     // Height accommodates root (2 lines) + divider + 2 sessions (2 lines each)
     // without the lowest detail row slipping behind the bottom hint band.
     let frame = render_frame(25, 80, &state);
