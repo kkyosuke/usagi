@@ -22,7 +22,7 @@ use crate::presentation::tui::screen::KeyReader;
 
 use super::event::{event_loop_compat, ConfigReload, Outcome};
 use super::state::{HomeState, LogLine, PaneExit, ReturnMode, SessionOutcome};
-use super::terminal_pool::MonitorHandle;
+use super::terminal_pool::{MonitorHandle, MonitorSnapshot};
 use super::terminal_tabs::TabNav;
 use super::terminal_view::TerminalView;
 use super::ui::render_frame;
@@ -77,8 +77,11 @@ fn walking_the_engagement_ladder_renders_each_rung() {
     let mut state = workspace();
     // `feat` has a live agent running in it (the monitor reports this in the
     // real screen); the ladder is most interesting against a live session.
-    state.set_live([PathBuf::from(FEAT_PATH)].into());
-    state.set_running([PathBuf::from(FEAT_PATH)].into());
+    state.apply_badges(MonitorSnapshot {
+        live: [PathBuf::from(FEAT_PATH)].into(),
+        running: [PathBuf::from(FEAT_PATH)].into(),
+        ..Default::default()
+    });
 
     // --- 統括 (Overview) ---------------------------------------------------
     // The landing screen: the workspace title, both sessions in the left pane
@@ -112,7 +115,7 @@ fn walking_the_engagement_ladder_renders_each_rung() {
     // --- 在席 (Focus): operate the session ---------------------------------
     // Focusing the session opens its action surface in the right pane — the
     // menu of runnable commands (`terminal` / `agent`).
-    state.clear_terminal_view();
+    state.clear_terminal_surface();
     state.enter_focus(state.list().selected_index());
     let focus = plain(&render_frame(ROWS, COLS, &state));
     assert!(

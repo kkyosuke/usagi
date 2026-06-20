@@ -231,10 +231,7 @@ fn drive(
             // viewing scrolled-back history.
             let cursor = if scrollback == 0 { view.cursor() } else { None };
             state.set_terminal_view(view);
-            state.set_running(badges.running.clone());
-            state.set_waiting(badges.waiting.clone());
-            state.set_live(badges.live.clone());
-            state.set_done(badges.done.clone());
+            state.apply_badges(badges.clone());
             render(term, state, cursor, geo, &mut prev)?;
             last_badges = Some(badges);
             last_selection = selection;

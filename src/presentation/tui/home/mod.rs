@@ -401,9 +401,12 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
         })();
         // Leaving the pane (Ctrl-O → 切替, every pane closing, or an error) means
         // nothing is attached any more; the shells themselves stay alive in the
-        // pool.
+        // pool. Clear the whole surface (snapshot + tab strip) here, where the
+        // pane yields control, rather than relying on the event loop's next frame
+        // to mop up the stale screen snapshot — so the cleanup holds no matter
+        // when control changes hands.
         handle.set_attached(None);
-        home.clear_terminal_tabs();
+        home.clear_terminal_surface();
         // The user may have committed / pushed / merged while in the pane, so
         // re-sync the worktree statuses now that they have left it — keeping the
         // cursor where it is. Best-effort: a sync failure just leaves the

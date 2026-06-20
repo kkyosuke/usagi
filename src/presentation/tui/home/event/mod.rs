@@ -170,13 +170,10 @@ pub fn event_loop(
     let mut painter = FramePainter::new();
     loop {
         // Mark each background session's agent state — running, waiting for
-        // input, live (ready), and finished — before painting, reading every
-        // badge set together under a single lock.
-        let badges = monitor.snapshot();
-        state.set_running(badges.running);
-        state.set_waiting(badges.waiting);
-        state.set_live(badges.live);
-        state.set_done(badges.done);
+        // input, live (ready), and finished — before painting, applying every
+        // badge set together (read under a single lock) so the frame never mixes
+        // one set's fresh reading with another's stale one.
+        state.apply_badges(monitor.snapshot());
         // Surface the top-right "update available" notice once the background
         // release check has found a newer version than this build.
         state.set_update(update.status().map(|status| status.latest));
@@ -197,14 +194,13 @@ pub fn event_loop(
             state.apply_task_completion(line, sessions);
         }
         state.set_tasks(tasks.view(Instant::now()));
-        // Drop any stale snapshot / tab strip every frame, then refresh them for
-        // the modes that draw the embedded terminal: 没入 (driven directly by
-        // `open_pane`) and 切替, where the right pane previews the highlighted
-        // session's live terminal — with its tab strip above it, so `←`/`→` has
-        // something to act on — so the user sees the actual screen re-attaching
-        // reveals.
-        state.clear_terminal_view();
-        state.clear_terminal_tabs();
+        // Drop any stale surface every frame, then refresh it for the modes that
+        // draw the embedded terminal: 没入 (driven directly by `open_pane`, which
+        // clears its own surface on the way out) and 切替, where the right pane
+        // previews the highlighted session's live terminal — with its tab strip
+        // above it, so `←`/`→` has something to act on — so the user sees the
+        // actual screen re-attaching reveals.
+        state.clear_terminal_surface();
         if state.mode() == Mode::Switch {
             let dir = selected_dir(&state, workspace_root);
             if let Some(view) = preview(&dir) {
