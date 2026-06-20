@@ -23,7 +23,7 @@ use crate::presentation::tui::widgets::clip_to_width;
 
 use chrome::{
     footer_line, hint_lines, input_line, mode_ladder, overview_input_box, quit_confirm_frame,
-    remove_modal_frame, switch_create_rows, switch_rename_rows, task_panel, text_modal_frame,
+    remove_modal_frame, switch_create_rows, switch_rename_rows, task_status_line, text_modal_frame,
     title_bar, update_banner,
 };
 use panes::{left_pane, log_tail, right_pane_contents};
@@ -357,12 +357,11 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
 
     // Overlay the top-right corner, in priority order: a momentary blocking
     // action (terminal / agent launch) shows the loading rabbit; otherwise any
-    // in-flight background session work (create / remove) stacks as the task
-    // panel; otherwise the "update available" notice shows when the background
-    // check has found a newer release than this build. All anchor to the top of
-    // the right pane (the rows below the title bar and mode ladder), where the
-    // default Overview screen is blank — so they read cleanly in the top-right
-    // corner of the content.
+    // in-flight background session work (create / remove) shows the task status
+    // line; otherwise the "update available" notice shows when the background
+    // check has found a newer release than this build. The loading rabbit and
+    // update notice anchor to the top of the right pane (the rows below the title
+    // bar and mode ladder), where the default Overview screen is blank.
     if let Some(loading) = state.loading() {
         // The transient launch indicator is deliberate and short-lived, so it
         // takes the corner even over a live pane.
@@ -372,18 +371,20 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
             width,
             &widgets::loading_rabbit(loading.frame(), loading.label()),
         );
-    } else if state.terminal_view().is_some() {
-        // A live embedded terminal occupies the right pane (没入's attached shell
-        // or 切替's live preview). Its rows are clipped, not padded, so the
-        // top-right notices — which `overlay_top_right` only keeps off rows that
-        // already reach the banner column — would draw over the shell's output
-        // there, and the constantly-repainting task spinner would keep clobbering
-        // it. Suppress them so the live pane is never overdrawn; the task panel
-        // and update notice surface again the moment the pane is left.
     } else if !state.tasks().is_empty() {
         // Background session work (create / remove) running off the event-loop
-        // thread, stacked in the corner so it never freezes the screen.
-        widgets::overlay_top_right(&mut lines, body_start, width, &task_panel(state.tasks()));
+        // thread. It rides the header's title-bar row (row 0), whose centred
+        // title leaves the right columns blank — so it never collides with the
+        // right pane (preview / menu / live terminal) the way the old body-row
+        // panel did, and needs no live-terminal suppression.
+        widgets::overlay_top_right(&mut lines, 0, width, &task_status_line(state.tasks()));
+    } else if state.terminal_view().is_some() {
+        // A live embedded terminal occupies the right pane (没入's attached shell
+        // or 切替's live preview). Its rows are clipped, not padded, so the update
+        // notice — which `overlay_top_right` only keeps off rows that already
+        // reach the banner column — would draw over the shell's output there.
+        // Suppress it so the live pane is never overdrawn; it surfaces again the
+        // moment the pane is left.
     } else if let Some(latest) = state.update() {
         widgets::overlay_top_right(&mut lines, body_start, width, &update_banner(&latest));
     }

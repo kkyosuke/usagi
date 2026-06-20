@@ -78,61 +78,72 @@ pub(super) fn update_banner(latest: &Version) -> Vec<String> {
         .collect()
 }
 
-/// How many task rows the panel shows before collapsing the rest into a
-/// `… and N more` line, so a burst of background work cannot overrun the corner.
-const TASK_PANEL_MAX: usize = 6;
+/// Display width of the task-status label field (a representative task's label).
+/// A long session name is clipped to this, a short one padded out, so the status
+/// line is the same width every frame and never shifts as the label changes
+/// (`作成中…` → `作成完了`) or the spinner ticks. Kept compact so the whole line
+/// fits the blank right gap beside the centred title on a normal terminal.
+const TASK_LABEL_W: usize = 12;
 
-/// The task panel's fixed inner content width (columns inside the box, before the
-/// border and padding). Holding it constant — clipping longer rows, padding
-/// shorter ones — keeps the box exactly the same size every frame, so the
-/// right-anchored panel never shifts as a label changes (`作成中…` → `作成完了`)
-/// or the spinner ticks. The box itself is this plus the border and padding.
-const TASK_PANEL_INNER: usize = 26;
+/// Columns of the progress bar (inside its brackets).
+const TASK_BAR_W: usize = 8;
 
-/// The top-right background-task panel: a `tasks`-titled box with one row per
-/// in-flight (or just-finished) session create / remove, stacked oldest-first.
-/// A running row leads with a spinning braille glyph (cyan), a finished one with
-/// `✓` (green) or `✗` (red). Returns no lines when nothing is running, so the
-/// corner falls back to the update notice.
+/// Display width of the `done/total` count field, left-padded so the line stays
+/// right-flush. Wide enough for two-digit batches (`12/12`).
+const TASK_COUNT_W: usize = 5;
+
+/// The top-right background-task status line: a single fixed-width row showing
+/// the in-flight (or just-finished) session create / remove work as a mark, a
+/// representative label, a batch-progress bar, and a `done/total` count. The mark
+/// leads with a spinning braille glyph (cyan) while anything runs, or `✓` (green)
+/// / `✗` (red) once everything has settled. Returns no lines when nothing is
+/// tracked, so the corner falls back to the update notice.
 ///
-/// The box is drawn at a [fixed inner width](TASK_PANEL_INNER) so it occupies the
-/// same columns every frame; [`overlay_top_right`](super::overlay_top_right) then
-/// anchors that stable block to the top-right corner, the way the
-/// [`update_banner`] notice it shares the corner with does — and because the
-/// width never changes, a row whose text updates never makes the panel jump.
-pub(super) fn task_panel(rows: &[TaskRow]) -> Vec<String> {
+/// Anchored to the **header row** (the centred title bar, whose right columns are
+/// blank) by [`overlay_top_right`](super::overlay_top_right) rather than over the
+/// body, so it never collides with the right pane's preview / menu / live
+/// terminal. The bar is a real ratio — the share of the tracked tasks that have
+/// finished — not a per-task percentage git cannot report. Every field is a fixed
+/// width so the assembled line never changes size frame to frame.
+pub(super) fn task_status_line(rows: &[TaskRow]) -> Vec<String> {
     if rows.is_empty() {
         return Vec::new();
     }
-    let shown = rows.len().min(TASK_PANEL_MAX);
-    let mut entries: Vec<String> = Vec::with_capacity(shown + 1);
-    for row in rows.iter().take(shown) {
-        let (icon, line_style) = match row.mark {
-            TaskMark::Running(frame) => (
-                widgets::spinner_char(frame).to_string(),
-                Style::new().cyan().bold(),
-            ),
-            TaskMark::Done(true) => ("✓".to_string(), Style::new().green().bold()),
-            TaskMark::Done(false) => ("✗".to_string(), Style::new().red().bold()),
-        };
-        // Clip the (styled) row to the fixed inner width before boxing, so a long
-        // session name can never widen the box and shift the panel.
-        let text = clip_to_width(&format!("{icon} {}", row.label), TASK_PANEL_INNER);
-        entries.push(line_style.apply_to(text).to_string());
-    }
-    if rows.len() > shown {
-        entries.push(
-            style(clip_to_width(
-                &format!("… and {} more", rows.len() - shown),
-                TASK_PANEL_INNER,
-            ))
-            .dim()
-            .to_string(),
-        );
-    }
-    // A fixed-width box: `boxed` pads every row out to the inner width, so the
-    // block is identical in size frame to frame regardless of the row contents.
-    widgets::boxed("tasks", TASK_PANEL_INNER, &entries)
+    // The representative row: the first still-running task, else the last
+    // finished one (so once a batch completes the line settles on its outcome).
+    let lead = rows
+        .iter()
+        .find(|row| matches!(row.mark, TaskMark::Running(_)))
+        .or_else(|| rows.last())
+        .expect("rows is non-empty");
+    let (icon, icon_style) = match lead.mark {
+        TaskMark::Running(frame) => (
+            widgets::spinner_char(frame).to_string(),
+            Style::new().cyan().bold(),
+        ),
+        TaskMark::Done(true) => ("✓".to_string(), Style::new().green().bold()),
+        TaskMark::Done(false) => ("✗".to_string(), Style::new().red().bold()),
+    };
+    let label = pad_to_width(clip_to_width(&lead.label, TASK_LABEL_W), TASK_LABEL_W);
+    let done = rows
+        .iter()
+        .filter(|row| matches!(row.mark, TaskMark::Done(_)))
+        .count();
+    let total = rows.len();
+    let bar = widgets::progress_bar(done, total, TASK_BAR_W);
+    // Left-pad the count to a fixed field so the line stays right-flush.
+    let count = format!("{done}/{total}");
+    let count = format!(
+        "{}{count}",
+        " ".repeat(TASK_COUNT_W.saturating_sub(count.len()))
+    );
+    let line = format!(
+        "{} {label} {} {}",
+        icon_style.apply_to(&icon),
+        style(bar).dim(),
+        style(count).dim(),
+    );
+    vec![line]
 }
 
 /// The engagement-ladder indicator drawn just under the title bar: the four
