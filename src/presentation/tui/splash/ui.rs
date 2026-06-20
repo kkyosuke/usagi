@@ -15,24 +15,35 @@ const GROW: usize = 2;
 const MAX_RABBITS: usize = 8;
 
 /// How many usagi are shown at `frame`: the warren starts at one and a new rabbit
-/// joins every [`GROW`] frames, capped at [`MAX_RABBITS`]. The line is anchored
-/// to the left edge by
-/// [`multiplying_rabbits`](widgets::multiplying_rabbits), so each arrival extends
-/// it rightward without nudging the rabbits already on screen.
+/// joins every [`GROW`] frames, capped at [`MAX_RABBITS`]. Each arrival extends
+/// the line rightward (see [`multiplying_rabbits`](widgets::multiplying_rabbits))
+/// without nudging the rabbits already on screen.
 fn rabbit_count(frame: usize) -> usize {
     (1 + frame / GROW).min(MAX_RABBITS)
 }
 
 /// Builds the splash frame for `frame` at a raw terminal size: the "multiplying"
-/// usagi (the `usagi run 2` animation) filling the warren from the left edge,
-/// above the centred `USAGI` title, the whole block centred vertically. The count
-/// is derived from `frame`, so painting successive frames grows the warren. The
-/// rabbit rows are a fixed three lines and the first usagi holds the left edge, so
-/// nothing shifts vertically or horizontally as the warren grows.
+/// usagi (the `usagi run 2` animation) filling the warren above the centred
+/// `USAGI` title, the whole block centred both vertically and horizontally. The
+/// count is derived from `frame`, so painting successive frames grows the warren.
+///
+/// The warren is centred on the width of the **full** warren ([`MAX_RABBITS`]),
+/// so the block's left edge is a fixed column: the animation sits in the middle of
+/// the screen, yet a newly added rabbit only extends the line rightward and never
+/// shifts the rabbits already shown. The rabbit rows are a fixed three lines, so
+/// nothing moves vertically either as the warren grows.
 pub fn render_frame(raw_height: usize, raw_width: usize, frame: usize) -> Vec<String> {
     let (height, width) = widgets::normalize_size(raw_height, raw_width);
 
-    let mut body = widgets::multiplying_rabbits(rabbit_count(frame));
+    // Centre on the full warren so the left edge is fixed (no horizontal jump as
+    // rabbits are added), then place the growing warren at that fixed offset.
+    let full_warren_width =
+        console::measure_text_width(&widgets::multiplying_rabbits(MAX_RABBITS)[1]);
+    let pad = " ".repeat(widgets::centered_padding(width, full_warren_width));
+    let mut body: Vec<String> = widgets::multiplying_rabbits(rabbit_count(frame))
+        .into_iter()
+        .map(|row| format!("{pad}{row}"))
+        .collect();
     body.push(String::new());
     body.push(widgets::title_line(width, TITLE));
 
@@ -82,18 +93,28 @@ mod tests {
     }
 
     #[test]
-    fn render_frame_keeps_the_first_usagi_at_the_left_edge() {
-        // The warren is anchored left: the face row begins flush at column zero on
-        // both an early and a later frame, so growth never shifts it sideways.
-        for frame in [0usize, GROW * 3] {
+    fn render_frame_centers_the_warren_without_shifting_it_as_it_grows() {
+        // The warren is centred on the full warren's width, so its left edge is a
+        // fixed column: the first usagi's face starts at the same column on an early
+        // and a later frame (no horizontal jump as rabbits are added), and that
+        // column is offset from the edge (centred, not flush left).
+        let face_col = |frame| {
             let painted = render_frame(24, 80, frame);
             let face_row = painted
                 .iter()
                 .map(|l| console::strip_ansi_codes(l).into_owned())
                 .find(|l| l.contains("(｡･-･)"))
                 .expect("a face row is painted");
-            assert!(face_row.starts_with("(｡･-･)"), "frame {frame}: flush left");
-        }
+            let byte = face_row.find("(｡･-･)").unwrap();
+            console::measure_text_width(&face_row[..byte])
+        };
+        let early = face_col(0);
+        let later = face_col(GROW * 3);
+        assert_eq!(early, later, "the warren's left edge stays put as it grows");
+        assert!(
+            early > 0,
+            "the warren is centred, not flush to the left edge"
+        );
     }
 
     #[test]
