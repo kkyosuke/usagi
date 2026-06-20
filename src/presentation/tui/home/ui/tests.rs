@@ -1347,6 +1347,52 @@ fn render_frame_shows_the_task_panel_over_the_update_notice() {
 }
 
 #[test]
+fn render_frame_suppresses_the_task_panel_over_a_live_terminal() {
+    use super::super::tasks::{TaskMark, TaskRow};
+    // A live embedded terminal owns the right pane (没入's attached shell, or
+    // 切替's live preview). Its clipped rows would be overdrawn by the constantly
+    // repainting task panel, so the panel is withheld while the pane is live.
+    let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Pushed)]);
+    state.enter_focus(1);
+    state.show_attached();
+    state.set_terminal_view(TerminalView::from_rows(vec!["$ echo hi".to_string()], None));
+    state.set_tasks(vec![TaskRow {
+        label: "作成中… main".to_string(),
+        mark: TaskMark::Running(0),
+    }]);
+    let joined = stripped(&render_frame(24, 100, &state));
+    // The shell output is intact and the panel does not clobber it.
+    assert!(joined.contains("$ echo hi"));
+    assert!(!joined.contains("作成中… main"));
+}
+
+#[test]
+fn render_frame_suppresses_the_update_notice_over_a_live_terminal() {
+    // The same protection applies to the update notice.
+    let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Pushed)]);
+    state.enter_focus(1);
+    state.show_attached();
+    state.set_terminal_view(TerminalView::from_rows(vec!["$ echo hi".to_string()], None));
+    state.set_update(crate::domain::version::Version::parse("9.9.9"));
+    let joined = stripped(&render_frame(24, 100, &state));
+    assert!(!joined.contains("最新版があります"));
+}
+
+#[test]
+fn render_frame_keeps_the_loading_rabbit_over_a_live_terminal() {
+    // The transient launch indicator is deliberate, so it still takes the corner
+    // even while a live preview is on screen (it is painted during the blocking
+    // terminal / agent spawn, before the new pane draws over the screen).
+    let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Pushed)]);
+    state.enter_focus(1);
+    state.show_attached();
+    state.set_terminal_view(TerminalView::from_rows(vec!["$ ".to_string()], None));
+    state.step_loading("ターミナル起動中…");
+    let joined = stripped(&render_frame(24, 100, &state));
+    assert!(joined.contains("ターミナル起動中…"));
+}
+
+#[test]
 fn update_notice_is_skipped_when_the_terminal_is_too_narrow() {
     // The banner block is wider than this terminal, so it is dropped rather than
     // wrapping or clobbering the chrome.
