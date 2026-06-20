@@ -47,7 +47,7 @@ src/
 ├── domain/                     # 純粋なエンティティ（外部依存なし）
 │   ├── agent_phase.rs          # Agent のライフサイクル phase（Ready / Running / Waiting / Ended）
 │   ├── repository.rs           # Git URL パース・ディレクトリ名導出
-│   ├── settings.rs             # Settings / Theme / AgentCli / LocalLlm、LocalSettings（with_local で上書き解決）・起動ポリシー agent_wiring と AgentCli::launch_command（MCP・フック注入）
+│   ├── settings.rs             # Settings / Theme / AgentCli / LocalLlm、LocalSettings（with_local で上書き解決）・起動ポリシー agent_wiring（純データ。起動コマンド生成は infrastructure/agent のアダプタが担う）
 │   ├── agent.rs                # Agent port（usagi が agent に求める IF：launch_command）・AgentWiring
 │   ├── workspace.rs            # グローバル登録エントリ Workspace
 │   ├── workspace_state.rs      # WorkspaceState / WorktreeState / BranchStatus
@@ -83,7 +83,7 @@ src/
 │   ├── release.rs              # git ls-remote --tags でリリースタグを取得（薄い IO ラッパ）
 │   ├── session_monitor.rs      # 入力待ち判定の純粋ロジック（phase 優先・ベル基準値・待ち集合・アタッチ）
 │   ├── agent_state_store.rs    # worktree 別の Agent phase の記録/読み出し（~/.usagi/agent-state/）
-│   ├── agent/                  # Agent port のアダプタ（Claude / Gemini の launch 委譲）・agent_for
+│   ├── agent/                  # Agent port のアダプタ（Claude は MCP・システムプロンプト・フックを serde_json で組み立てて launch コマンド生成 / Gemini は素起動）・agent_for
 │   ├── issue_store.rs          # <repo>/.usagi/issues/ の markdown + index.json（IssueStore）
 │   └── memory_store.rs         # <repo>/.usagi/memory/ の markdown + MEMORY.md + index.json（MemoryStore）
 │
