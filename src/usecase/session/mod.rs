@@ -268,7 +268,15 @@ pub fn remove(
     for wt in &session.worktrees {
         agent.forget_session(&wt.path);
         agent_state_store::clear(&wt.path);
-        let source = git::primary_worktree(&wt.path)?;
+        // A session whose worktree was never fully built — or was already torn
+        // down out of band — leaves a record pointing at a path that is no
+        // longer a registered git worktree. `primary_worktree` resolves the
+        // source repo by running git *inside* `wt.path`, so a missing directory
+        // makes it fail; there is nothing to remove from git in that case, so
+        // skip the git cleanup and still drop the record from state below.
+        let Ok(source) = git::primary_worktree(&wt.path) else {
+            continue;
+        };
         git::remove_worktree(&source, &wt.path, force)?;
         // The branch may already be gone (e.g. a partial earlier removal).
         let _ = git::delete_branch(&source, name);
@@ -850,6 +858,46 @@ mod tests {
         assert_eq!(fs::read_dir(&state_dir).unwrap().count(), 0);
 
         std::env::remove_var(crate::infrastructure::storage::DATA_DIR_ENV);
+    }
+
+    #[test]
+    fn remove_drops_a_ghost_session_whose_worktree_was_never_built() {
+        use crate::domain::workspace_state::{BranchStatus, SessionRecord, WorktreeState};
+
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        // Record a session whose worktree creation was interrupted: the path
+        // under `.usagi/sessions/` never materialised on disk and no branch was
+        // ever created, so it is not a registered git worktree. This is the
+        // "ghost session" left behind by a partial `session create`.
+        let store = WorkspaceStore::new(root.path());
+        let ghost_root = root.path().join(".usagi/sessions/ghost");
+        let mut state = store.load().unwrap().unwrap_or_default();
+        state.sessions.push(SessionRecord {
+            name: "ghost".to_string(),
+            display_name: None,
+            root: ghost_root.clone(),
+            worktrees: vec![WorktreeState {
+                branch: None,
+                path: ghost_root.clone(),
+                head: String::new(),
+                primary: false,
+                upstream: None,
+                status: BranchStatus::Local,
+                updated_at: Utc::now(),
+            }],
+            created_at: Utc::now(),
+        });
+        store.save(&state).unwrap();
+        assert_eq!(sessions_of(root.path()), vec!["ghost".to_string()]);
+
+        // Removal used to abort on the missing worktree (`git -C <gone> worktree
+        // list` fails), stranding the record forever. It now succeeds and drops
+        // the record.
+        let outcome = remove(root.path(), "ghost", false, noop_agent().as_ref()).unwrap();
+        assert!(outcome.removed);
+        assert!(outcome.dirty.is_empty());
+        assert!(sessions_of(root.path()).is_empty());
     }
 
     /// Forget session `name` in `state.json` while leaving its on-disk directory

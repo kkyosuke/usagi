@@ -300,6 +300,19 @@ fn remove_worktree_deletes_a_clean_one_and_needs_force_when_dirty() {
 }
 
 #[test]
+fn remove_worktree_is_a_noop_for_an_unregistered_path() {
+    let dir = tempfile::tempdir().unwrap();
+    init_repo(dir.path());
+    // A path git has never registered as a worktree is already in the desired
+    // end state, so removal succeeds rather than erroring — both for a path that
+    // exists in the tree and one that does not.
+    let stray = dir.path().join("stray");
+    std::fs::create_dir_all(&stray).unwrap();
+    remove_worktree(dir.path(), &stray, true).unwrap();
+    remove_worktree(dir.path(), &dir.path().join("ghost"), true).unwrap();
+}
+
+#[test]
 fn delete_branch_removes_a_branch_and_errors_when_missing() {
     let dir = tempfile::tempdir().unwrap();
     init_repo(dir.path());
