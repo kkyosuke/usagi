@@ -17,10 +17,12 @@ use crate::infrastructure::issue_store::IssueStore;
 mod gantt;
 mod stats;
 mod tree;
+mod view;
 
 pub use gantt::gantt;
 pub use stats::{group, GroupBy, IssueStats};
 pub use tree::dependency_tree;
+pub use view::{IssueView, ListedIssueView};
 
 /// Fields needed to open a new issue. The number and timestamps are assigned by
 /// [`create`].

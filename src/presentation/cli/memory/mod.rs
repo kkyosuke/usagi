@@ -13,7 +13,7 @@ use anyhow::Result;
 use clap::Subcommand;
 
 use crate::domain::memory::MemoryType;
-use crate::usecase::memory::{self, MemoryChanges, MemoryFilter, NewMemory};
+use crate::usecase::memory::{self, MemoryChanges, MemoryFilter, MemoryView, NewMemory};
 
 #[derive(Subcommand)]
 pub enum MemoryCommand {
@@ -114,7 +114,7 @@ fn execute(repo: &Path, command: MemoryCommand) -> Result<Vec<String>> {
                 },
             )?;
             Ok(if json {
-                json_lines(&memory_json(&saved))?
+                json_lines(&MemoryView::from(&saved))?
             } else {
                 vec![format!("saved {} ({})", saved.name, saved.kind)]
             })
@@ -123,7 +123,7 @@ fn execute(repo: &Path, command: MemoryCommand) -> Result<Vec<String>> {
             render_listing(memory::list(repo, &MemoryFilter { kind })?, json)
         }
         MemoryCommand::Show { name, json } => match memory::get(repo, &name)? {
-            Some(m) if json => json_lines(&memory_json(&m)),
+            Some(m) if json => json_lines(&MemoryView::from(&m)),
             Some(m) => Ok(m.to_markdown().lines().map(str::to_string).collect()),
             None => Ok(vec![format!("no memory '{name}'")]),
         },
@@ -142,7 +142,7 @@ fn execute(repo: &Path, command: MemoryCommand) -> Result<Vec<String>> {
                 body,
             };
             match memory::update(repo, &name, changes)? {
-                Some(updated) if json => json_lines(&memory_json(&updated)),
+                Some(updated) if json => json_lines(&MemoryView::from(&updated)),
                 Some(updated) => Ok(vec![format!("updated {}", updated.name)]),
                 None => Ok(vec![format!("no memory '{name}'")]),
             }
@@ -164,7 +164,7 @@ fn execute(repo: &Path, command: MemoryCommand) -> Result<Vec<String>> {
 }
 
 mod render;
-use render::{json_lines, memory_json, render_listing};
+use render::{json_lines, render_listing};
 
 #[cfg(test)]
 mod tests;

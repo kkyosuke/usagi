@@ -19,7 +19,7 @@ pub use branch::{
     ahead_behind, branch_namespace_conflict, default_branch, delete_branch, list_branches,
     local_branches, resolve_base_ref,
 };
-pub use repo::{clone, has_uncommitted_changes, is_repository, short_hash};
+pub use repo::{clone, is_repository, short_hash};
 pub use worktree::{
     add_worktree, init_submodules, list_worktrees, primary_worktree, remove_worktree,
     worktree_status, WorktreeInfo, WorktreeStatus,

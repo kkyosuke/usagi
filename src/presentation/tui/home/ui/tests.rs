@@ -4,6 +4,7 @@ use super::*;
 
 use super::super::command::{CommandHint, CommandInfo};
 use super::super::state::{LogLine, TextModal, WorktreeList, ROOT_NAME};
+use super::super::terminal_pool::MonitorSnapshot;
 use super::super::terminal_view::TerminalView;
 use crate::domain::settings::SessionActionUi;
 use crate::domain::workspace_state::{BranchStatus, WorktreeState};
@@ -658,7 +659,10 @@ fn switch_preview_shows_a_live_session_as_a_reattach() {
     let mut running = worktree(Some("feat"), false, BranchStatus::Local);
     running.path = PathBuf::from("/repo/run");
     let mut state = HomeState::new("usagi", vec![running], None);
-    state.set_live([PathBuf::from("/repo/run")].into());
+    state.apply_badges(MonitorSnapshot {
+        live: [PathBuf::from("/repo/run")].into(),
+        ..Default::default()
+    });
     state.enter_switch(super::super::state::ReturnMode::Overview);
     // Move the cursor off the root onto the session row.
     state.switch_move_down();
@@ -679,7 +683,10 @@ fn switch_preview_shows_a_live_session_as_its_actual_screen() {
     let mut running = worktree(Some("feat"), false, BranchStatus::Local);
     running.path = PathBuf::from("/repo/run");
     let mut state = HomeState::new("usagi", vec![running], None);
-    state.set_live([PathBuf::from("/repo/run")].into());
+    state.apply_badges(MonitorSnapshot {
+        live: [PathBuf::from("/repo/run")].into(),
+        ..Default::default()
+    });
     // The event loop snapshots the highlighted live session before painting.
     state.set_terminal_view(TerminalView::from_rows(
         vec!["$ echo hi".to_string(), "hi".to_string()],
@@ -704,7 +711,10 @@ fn switch_preview_shows_the_tab_strip_beside_the_header_for_a_live_session() {
     let mut running = worktree(Some("feat"), false, BranchStatus::Local);
     running.path = PathBuf::from("/repo/run");
     let mut state = HomeState::new("usagi", vec![running], None);
-    state.set_live([PathBuf::from("/repo/run")].into());
+    state.apply_badges(MonitorSnapshot {
+        live: [PathBuf::from("/repo/run")].into(),
+        ..Default::default()
+    });
     state.set_terminal_view(TerminalView::from_rows(vec!["$ echo hi".to_string()], None));
     state.set_terminal_tabs(vec!["agent".to_string(), "terminal".to_string()], 1);
     state.enter_switch(super::super::state::ReturnMode::Overview);
@@ -734,7 +744,10 @@ fn switch_preview_keeps_a_fixed_identity_width_so_tabs_do_not_jitter() {
     );
     long.path = PathBuf::from("/repo/long");
     let mut state = HomeState::new("usagi", vec![short, long], None);
-    state.set_live([PathBuf::from("/repo/short"), PathBuf::from("/repo/long")].into());
+    state.apply_badges(MonitorSnapshot {
+        live: [PathBuf::from("/repo/short"), PathBuf::from("/repo/long")].into(),
+        ..Default::default()
+    });
     state.set_terminal_tabs(vec!["agent".to_string(), "terminal".to_string()], 0);
     state.set_terminal_view(TerminalView::from_rows(vec!["$ ".to_string()], None));
     state.enter_switch(super::super::state::ReturnMode::Overview);
@@ -771,7 +784,10 @@ fn switch_preview_shows_the_root_live_session_as_its_screen() {
     // agent previews live.
     let mut state = HomeState::new("usagi", Vec::new(), None);
     state.set_root_path(PathBuf::from("/repo"));
-    state.set_live([PathBuf::from("/repo")].into());
+    state.apply_badges(MonitorSnapshot {
+        live: [PathBuf::from("/repo")].into(),
+        ..Default::default()
+    });
     // The event loop snapshots the highlighted live session (the root here)
     // before painting.
     state.set_terminal_view(TerminalView::from_rows(
@@ -871,7 +887,7 @@ fn right_pane_shows_the_focus_menu_or_prompt() {
     state.set_session_action_ui(SessionActionUi::Prompt);
     state.enter_focus(1);
     for c in "ter".chars() {
-        state.focus_prompt_push_char(c);
+        state.focus_prompt_mut().insert(c);
     }
     let prompt = stripped(&right_pane_contents(&state, 40, 12));
     assert!(prompt.contains("session: main"));
@@ -886,7 +902,7 @@ fn focus_prompt_shows_usage_for_arguments() {
     state.set_session_action_ui(SessionActionUi::Prompt);
     state.enter_focus(1);
     for c in "terminal ".chars() {
-        state.focus_prompt_push_char(c);
+        state.focus_prompt_mut().insert(c);
     }
     let prompt = stripped(&right_pane_contents(&state, 60, 12));
     assert!(prompt.contains("usage"));
@@ -900,7 +916,7 @@ fn focus_prompt_has_no_hint_for_an_unknown_command_word() {
     state.set_session_action_ui(SessionActionUi::Prompt);
     state.enter_focus(1);
     for c in "zzz".chars() {
-        state.focus_prompt_push_char(c);
+        state.focus_prompt_mut().insert(c);
     }
     // The header, blank, and prompt lines are present, but no hint rows follow.
     let rows = right_pane_contents(&state, 60, 12);
@@ -950,8 +966,11 @@ fn attached_header_shows_the_active_session_identity_beside_the_tabs() {
     let mut running = worktree(Some("feat"), false, BranchStatus::Local);
     running.path = PathBuf::from("/repo/run");
     let mut state = HomeState::new("usagi", vec![running], None);
-    state.set_live([PathBuf::from("/repo/run")].into());
-    state.set_running([PathBuf::from("/repo/run")].into());
+    state.apply_badges(MonitorSnapshot {
+        live: [PathBuf::from("/repo/run")].into(),
+        running: [PathBuf::from("/repo/run")].into(),
+        ..Default::default()
+    });
     state.enter_focus(1);
     state.show_attached();
     state.set_terminal_tabs(vec!["agent".to_string(), "terminal".to_string()], 0);
@@ -1328,6 +1347,52 @@ fn render_frame_shows_the_task_panel_over_the_update_notice() {
 }
 
 #[test]
+fn render_frame_suppresses_the_task_panel_over_a_live_terminal() {
+    use super::super::tasks::{TaskMark, TaskRow};
+    // A live embedded terminal owns the right pane (没入's attached shell, or
+    // 切替's live preview). Its clipped rows would be overdrawn by the constantly
+    // repainting task panel, so the panel is withheld while the pane is live.
+    let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Pushed)]);
+    state.enter_focus(1);
+    state.show_attached();
+    state.set_terminal_view(TerminalView::from_rows(vec!["$ echo hi".to_string()], None));
+    state.set_tasks(vec![TaskRow {
+        label: "作成中… main".to_string(),
+        mark: TaskMark::Running(0),
+    }]);
+    let joined = stripped(&render_frame(24, 100, &state));
+    // The shell output is intact and the panel does not clobber it.
+    assert!(joined.contains("$ echo hi"));
+    assert!(!joined.contains("作成中… main"));
+}
+
+#[test]
+fn render_frame_suppresses_the_update_notice_over_a_live_terminal() {
+    // The same protection applies to the update notice.
+    let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Pushed)]);
+    state.enter_focus(1);
+    state.show_attached();
+    state.set_terminal_view(TerminalView::from_rows(vec!["$ echo hi".to_string()], None));
+    state.set_update(crate::domain::version::Version::parse("9.9.9"));
+    let joined = stripped(&render_frame(24, 100, &state));
+    assert!(!joined.contains("最新版があります"));
+}
+
+#[test]
+fn render_frame_keeps_the_loading_rabbit_over_a_live_terminal() {
+    // The transient launch indicator is deliberate, so it still takes the corner
+    // even while a live preview is on screen (it is painted during the blocking
+    // terminal / agent spawn, before the new pane draws over the screen).
+    let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Pushed)]);
+    state.enter_focus(1);
+    state.show_attached();
+    state.set_terminal_view(TerminalView::from_rows(vec!["$ ".to_string()], None));
+    state.step_loading("ターミナル起動中…");
+    let joined = stripped(&render_frame(24, 100, &state));
+    assert!(joined.contains("ターミナル起動中…"));
+}
+
+#[test]
 fn update_notice_is_skipped_when_the_terminal_is_too_narrow() {
     // The banner block is wider than this terminal, so it is dropped rather than
     // wrapping or clobbering the chrome.
@@ -1397,7 +1462,7 @@ fn render_frame_shows_the_inline_create_row_in_switch() {
     state.enter_switch(super::super::state::ReturnMode::Overview);
     state.switch_begin_create(Vec::new());
     for c in "wip".chars() {
-        state.create_push_char(c);
+        state.create_mut().unwrap().push_char(c);
     }
     let frame = render_frame(24, 80, &state);
     let joined = console::strip_ansi_codes(&frame.join("\n")).into_owned();
@@ -1420,7 +1485,7 @@ fn render_frame_shows_the_inline_rename_row_in_switch() {
     state.switch_move_down(); // cursor onto "main"
     assert!(state.switch_begin_rename());
     for c in " 2".chars() {
-        state.rename_push_char(c);
+        state.rename_mut().unwrap().push_char(c);
     }
     let frame = render_frame(24, 80, &state);
     let joined = console::strip_ansi_codes(&frame.join("\n")).into_owned();
@@ -1575,7 +1640,7 @@ fn remove_modal_row_clips_a_long_name() {
 fn render_frame_overlays_the_removal_modal_with_a_checklist() {
     let mut state = state_with_sessions(&["alpha", "beta"]);
     state.open_remove_modal(false);
-    state.remove_modal_toggle();
+    state.remove_modal_mut().unwrap().toggle();
     let frame = render_frame(24, 80, &state);
     let joined = console::strip_ansi_codes(&frame.join("\n")).into_owned();
     assert!(joined.contains("Remove sessions"));
@@ -1594,7 +1659,10 @@ fn render_frame_overlays_the_quit_confirmation_modal() {
     let mut state = state_with_sessions(&["alpha", "beta"]);
     let live: std::collections::HashSet<std::path::PathBuf> =
         ["/ws/alpha", "/ws/beta"].iter().map(Into::into).collect();
-    state.set_live(live);
+    state.apply_badges(MonitorSnapshot {
+        live,
+        ..Default::default()
+    });
     state.open_quit_confirm();
     let frame = render_frame(24, 80, &state);
     let joined = console::strip_ansi_codes(&frame.join("\n")).into_owned();
@@ -1629,7 +1697,7 @@ fn remove_modal_frame_scrolls_to_keep_the_cursor_visible() {
     let mut state = state_with_sessions(&refs);
     state.open_remove_modal(false);
     for _ in 0..9 {
-        state.remove_modal_move_down();
+        state.remove_modal_mut().unwrap().move_down();
     }
     let frame = render_frame(24, 80, &state);
     let joined = console::strip_ansi_codes(&frame.join("\n")).into_owned();
@@ -1691,9 +1759,12 @@ fn render_frame_surfaces_running_and_waiting_agent_icons() {
     let mut waiting = worktree(Some("fix"), false, BranchStatus::Pushed);
     waiting.path = PathBuf::from("/repo/wait");
     let mut state = HomeState::new("usagi", vec![running, waiting], None);
-    state.set_live([PathBuf::from("/repo/run"), PathBuf::from("/repo/wait")].into());
-    state.set_running([PathBuf::from("/repo/run")].into());
-    state.set_waiting([PathBuf::from("/repo/wait")].into());
+    state.apply_badges(MonitorSnapshot {
+        live: [PathBuf::from("/repo/run"), PathBuf::from("/repo/wait")].into(),
+        running: [PathBuf::from("/repo/run")].into(),
+        waiting: [PathBuf::from("/repo/wait")].into(),
+        ..Default::default()
+    });
     // Height accommodates root (2 lines) + divider + 2 sessions (2 lines each)
     // without the lowest detail row slipping behind the bottom hint band.
     let frame = render_frame(25, 80, &state);

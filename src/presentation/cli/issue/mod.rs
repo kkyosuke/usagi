@@ -14,7 +14,7 @@ use clap::Subcommand;
 
 use crate::domain::issue::{IssuePriority, IssueStatus};
 use crate::usecase::issue::{
-    self, dependency_tree, GroupBy, IssueChanges, IssueFilter, IssueStats, NewIssue,
+    self, dependency_tree, GroupBy, IssueChanges, IssueFilter, IssueStats, IssueView, NewIssue,
 };
 
 #[derive(Subcommand)]
@@ -182,7 +182,7 @@ fn execute(repo: &Path, command: IssueCommand) -> Result<Vec<String>> {
                 },
             )?;
             Ok(if json {
-                json_lines(&issue_json(&created))?
+                json_lines(&IssueView::from(&created))?
             } else {
                 vec![format!("created #{}: {}", created.number, created.title)]
             })
@@ -242,7 +242,7 @@ fn execute(repo: &Path, command: IssueCommand) -> Result<Vec<String>> {
             render_listing(issue::search(repo, &query, &filter)?, json)
         }
         IssueCommand::Show { number, json } => match issue::get(repo, number)? {
-            Some(issue) if json => json_lines(&issue_json(&issue)),
+            Some(issue) if json => json_lines(&IssueView::from(&issue)),
             Some(issue) => Ok(issue.to_markdown().lines().map(str::to_string).collect()),
             None => Ok(vec![format!("no issue #{number}")]),
         },
@@ -273,7 +273,7 @@ fn execute(repo: &Path, command: IssueCommand) -> Result<Vec<String>> {
                 body,
             };
             match issue::update(repo, number, changes)? {
-                Some(updated) if json => json_lines(&issue_json(&updated)),
+                Some(updated) if json => json_lines(&IssueView::from(&updated)),
                 Some(updated) => Ok(vec![format!(
                     "updated #{}: {}",
                     updated.number, updated.title
@@ -307,7 +307,7 @@ fn optional_change<T>(value: Option<T>, clear: bool) -> Option<Option<T>> {
 }
 
 mod render;
-use render::{format_stats, issue_json, json_lines, render_grouped, render_listing};
+use render::{format_stats, json_lines, render_grouped, render_listing};
 
 #[cfg(test)]
 mod tests;

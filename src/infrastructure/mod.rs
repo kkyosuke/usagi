@@ -4,6 +4,7 @@ pub mod agent_prompt_store;
 pub mod agent_state_store;
 pub mod error_log;
 pub mod git;
+pub mod gitignore;
 pub mod history_store;
 pub mod issue_store;
 pub mod json_file;

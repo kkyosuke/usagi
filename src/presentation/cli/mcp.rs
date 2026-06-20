@@ -9,7 +9,7 @@
 //! coverage.
 
 use std::env;
-use std::io::{self, BufRead, Write};
+use std::io;
 use std::path::Path;
 
 use anyhow::Result;
@@ -58,17 +58,6 @@ pub fn run() -> Result<()> {
 
     let stdin = io::stdin();
     let stdout = io::stdout();
-    let mut out = stdout.lock();
-
-    for line in stdin.lock().lines() {
-        let line = line?;
-        if line.trim().is_empty() {
-            continue;
-        }
-        if let Some(response) = server.handle_line(&line) {
-            writeln!(out, "{response}")?;
-            out.flush()?;
-        }
-    }
+    crate::presentation::mcp::serve(&server, stdin.lock(), stdout.lock())?;
     Ok(())
 }

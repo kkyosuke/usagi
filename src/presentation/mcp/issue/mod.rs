@@ -11,13 +11,14 @@
 
 use std::path::{Path, PathBuf};
 
-use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use super::McpService;
+use super::{parse_args, to_pretty, McpService};
 use crate::domain::issue::{IssuePriority, IssueStatus};
-use crate::usecase::issue::{self, IssueChanges, IssueFilter, NewIssue};
+use crate::usecase::issue::{
+    self, IssueChanges, IssueFilter, IssueView, ListedIssueView, NewIssue,
+};
 
 /// A JSON-RPC server exposing issue tools for one repository.
 pub struct McpServer {
@@ -55,13 +56,13 @@ impl McpServer {
             },
         )
         .map_err(|e| e.to_string())?;
-        Ok(to_pretty(&issue_to_json(&created)))
+        Ok(to_pretty(&IssueView::from(&created)))
     }
 
     fn tool_get(&self, arguments: Value) -> Result<String, String> {
         let args: NumberArgs = parse_args(arguments)?;
         match issue::get(&self.repo, args.number).map_err(|e| e.to_string())? {
-            Some(issue) => Ok(to_pretty(&issue_to_json(&issue))),
+            Some(issue) => Ok(to_pretty(&IssueView::from(&issue))),
             None => Ok(to_pretty(&Value::Null)),
         }
     }
@@ -81,21 +82,21 @@ impl McpServer {
     fn tool_list(&self, arguments: Value) -> Result<String, String> {
         let args: ListArgs = parse_args(arguments)?;
         let items = issue::list(&self.repo, &args.filter()).map_err(|e| e.to_string())?;
-        Ok(to_pretty(&listed_to_json(&items)))
+        Ok(to_pretty(&listed_views(&items)))
     }
 
     fn tool_search(&self, arguments: Value) -> Result<String, String> {
         let args: SearchArgs = parse_args(arguments)?;
         let items =
             issue::search(&self.repo, &args.query, &args.filter()).map_err(|e| e.to_string())?;
-        Ok(to_pretty(&listed_to_json(&items)))
+        Ok(to_pretty(&listed_views(&items)))
     }
 
     fn tool_update(&self, arguments: Value) -> Result<String, String> {
         let args: UpdateArgs = parse_args(arguments)?;
         let number = args.number;
         match issue::update(&self.repo, number, args.changes()).map_err(|e| e.to_string())? {
-            Some(updated) => Ok(to_pretty(&issue_to_json(&updated))),
+            Some(updated) => Ok(to_pretty(&IssueView::from(&updated))),
             None => Err(format!("no issue #{number}")),
         }
     }
@@ -288,13 +289,14 @@ where
     Ok(Some(Option::deserialize(deserializer)?))
 }
 
-/// Deserialize tool arguments, mapping any error to a tool-facing message.
-fn parse_args<T: DeserializeOwned>(arguments: Value) -> Result<T, String> {
-    serde_json::from_value(arguments).map_err(|e| format!("invalid arguments: {e}"))
+/// Build the JSON-output views for a list of issues. The field set is the SSoT
+/// [`ListedIssueView`], shared with the CLI.
+fn listed_views(items: &[issue::ListedIssue]) -> Vec<ListedIssueView<'_>> {
+    items.iter().map(ListedIssueView::from).collect()
 }
 
 mod json;
-use json::{issue_to_json, issue_tool_schemas, listed_to_json, to_pretty};
+use json::issue_tool_schemas;
 
 #[cfg(test)]
 mod tests;

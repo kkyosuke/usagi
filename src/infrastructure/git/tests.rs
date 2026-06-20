@@ -268,19 +268,6 @@ fn worktree_status_reports_no_branch_or_upstream_when_absent() {
 }
 
 #[test]
-fn has_uncommitted_changes_detects_a_dirty_tree() {
-    let dir = tempfile::tempdir().unwrap();
-    init_repo(dir.path());
-    assert!(!has_uncommitted_changes(dir.path()));
-    // An untracked file makes the tree dirty.
-    std::fs::write(dir.path().join("new"), "y").unwrap();
-    assert!(has_uncommitted_changes(dir.path()));
-    // A non-repo path reports clean rather than erroring.
-    let plain = tempfile::tempdir().unwrap();
-    assert!(!has_uncommitted_changes(plain.path()));
-}
-
-#[test]
 fn remove_worktree_deletes_a_clean_one_and_needs_force_when_dirty() {
     let dir = tempfile::tempdir().unwrap();
     init_repo(dir.path());

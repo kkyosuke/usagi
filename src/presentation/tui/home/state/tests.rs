@@ -1,3 +1,4 @@
+use super::super::terminal_pool::MonitorSnapshot;
 use super::*;
 use crate::domain::workspace_state::BranchStatus;
 use chrono::Utc;
@@ -593,12 +594,15 @@ fn switch_inline_create_edits_then_confirms_a_fresh_name() {
     assert!(!state.is_creating());
     state.switch_begin_create(Vec::new());
     assert!(state.is_creating());
-    assert_eq!(state.create_input(), Some(""));
-    for c in "  wip  ".chars() {
-        state.create_push_char(c);
+    assert_eq!(state.create().unwrap().value(), "");
+    {
+        let input = state.create_mut().unwrap();
+        for c in "  wip  ".chars() {
+            input.push_char(c);
+        }
+        input.backspace(); // drop a trailing space
     }
-    state.create_backspace(); // drop a trailing space
-                              // A fresh, trimmed name is accepted and the input closes.
+    // A fresh, trimmed name is accepted and the input closes.
     assert_eq!(state.switch_confirm_create().as_deref(), Some("wip"));
     assert!(!state.is_creating());
 }
@@ -611,17 +615,22 @@ fn switch_inline_create_rejects_empty_and_duplicate_names() {
     state.switch_begin_create(vec!["feature".to_string()]);
     // Whitespace only is empty after trimming: no live error (it does not nag),
     // but Enter rejects it.
-    state.create_push_char(' ');
-    assert!(state.create_error().is_none());
+    state.create_mut().unwrap().push_char(' ');
+    assert!(state.create().unwrap().error().is_none());
     assert!(state.switch_confirm_create().is_none());
-    assert!(state.create_error().unwrap().contains("must not be empty"));
+    assert!(state
+        .create()
+        .unwrap()
+        .error()
+        .unwrap()
+        .contains("must not be empty"));
     // Typing a duplicate name flags it live, before Enter, and Enter rejects it.
     for c in "feature".chars() {
-        state.create_push_char(c);
+        state.create_mut().unwrap().push_char(c);
     }
-    assert!(state.create_error().unwrap().contains("feature"));
+    assert!(state.create().unwrap().error().unwrap().contains("feature"));
     assert!(state.switch_confirm_create().is_none());
-    assert!(state.create_error().unwrap().contains("feature"));
+    assert!(state.create().unwrap().error().unwrap().contains("feature"));
     assert!(state.is_creating());
 }
 
@@ -632,19 +641,24 @@ fn switch_inline_create_flags_a_branch_namespace_clash_live() {
     // Branches nested under `test/` make a plain `test` session impossible.
     state.switch_begin_create(vec!["test/home-ui-e2e".to_string()]);
     for c in "test".chars() {
-        state.create_push_char(c);
+        state.create_mut().unwrap().push_char(c);
     }
     // The clash is shown live and blocks confirmation.
-    let err = state.create_error().unwrap();
+    let err = state.create().unwrap().error().unwrap().to_string();
     assert!(err.contains("conflicts with branch"), "{err}");
     assert!(err.contains("test/home-ui-e2e"), "{err}");
     assert!(state.switch_confirm_create().is_none());
     // Backspacing to "tes" (no longer a clash) clears the error.
-    state.create_backspace();
-    assert!(state.create_error().is_none());
+    state.create_mut().unwrap().backspace();
+    assert!(state.create().unwrap().error().is_none());
     // Typing a path separator is itself rejected (not a legal session name).
-    state.create_push_char('/');
-    assert!(state.create_error().unwrap().contains("cannot be used"));
+    state.create_mut().unwrap().push_char('/');
+    assert!(state
+        .create()
+        .unwrap()
+        .error()
+        .unwrap()
+        .contains("cannot be used"));
 }
 
 #[test]
@@ -652,27 +666,21 @@ fn switch_inline_create_can_be_cancelled() {
     let mut state = state();
     state.enter_switch(ReturnMode::Overview);
     state.switch_begin_create(Vec::new());
-    state.create_push_char('x');
+    state.create_mut().unwrap().push_char('x');
     state.create_cancel();
     assert!(!state.is_creating());
 }
 
 #[test]
-fn create_editing_is_a_noop_when_not_creating() {
+fn create_accessors_are_none_when_not_creating() {
     let mut state = state();
-    // Nothing open: editing keys are harmless and confirm returns None.
-    state.create_push_char('a');
-    state.create_backspace();
-    state.create_delete_forward();
-    state.create_cursor_left();
-    state.create_cursor_right();
-    state.create_cursor_home();
-    state.create_cursor_end();
+    // Nothing open: the accessors are empty and the lifecycle calls are safe.
     assert!(!state.is_creating());
-    assert!(state.create_input().is_none());
-    assert!(state.create_cursor().is_none());
-    assert!(state.create_error().is_none());
+    assert!(state.create().is_none());
+    assert!(state.create_mut().is_none());
     assert!(state.switch_confirm_create().is_none());
+    state.create_cancel();
+    assert!(!state.is_creating());
 }
 
 #[test]
@@ -681,24 +689,24 @@ fn create_caret_moves_and_edits_mid_name() {
     state.enter_switch(ReturnMode::Overview);
     state.switch_begin_create(Vec::new());
     for c in "wip".chars() {
-        state.create_push_char(c);
+        state.create_mut().unwrap().push_char(c);
     }
-    assert_eq!(state.create_cursor(), Some(3));
+    assert_eq!(state.create().unwrap().cursor(), 3);
     // Home, then insert at the front.
-    state.create_cursor_home();
-    assert_eq!(state.create_cursor(), Some(0));
-    state.create_push_char('x');
-    assert_eq!(state.create_input(), Some("xwip"));
-    assert_eq!(state.create_cursor(), Some(1));
+    state.create_mut().unwrap().move_home();
+    assert_eq!(state.create().unwrap().cursor(), 0);
+    state.create_mut().unwrap().push_char('x');
+    assert_eq!(state.create().unwrap().value(), "xwip");
+    assert_eq!(state.create().unwrap().cursor(), 1);
     // Del removes the character at the caret; Backspace the one before.
-    state.create_delete_forward(); // removes 'w' → "xip"
-    assert_eq!(state.create_input(), Some("xip"));
-    state.create_cursor_right(); // between 'i' and 'p'
-    state.create_backspace(); // removes 'i' → "xp"
-    assert_eq!(state.create_input(), Some("xp"));
+    state.create_mut().unwrap().delete_forward(); // removes 'w' → "xip"
+    assert_eq!(state.create().unwrap().value(), "xip");
+    state.create_mut().unwrap().move_right(); // between 'i' and 'p'
+    state.create_mut().unwrap().backspace(); // removes 'i' → "xp"
+    assert_eq!(state.create().unwrap().value(), "xp");
     // End parks the caret past the last character.
-    state.create_cursor_end();
-    assert_eq!(state.create_cursor(), Some(2));
+    state.create_mut().unwrap().move_end();
+    assert_eq!(state.create().unwrap().cursor(), 2);
 }
 
 // --- 切替 (Switch) inline rename ---------------------------------------
@@ -710,15 +718,18 @@ fn switch_inline_rename_prefills_edits_then_confirms_a_label() {
     state.switch_move_down(); // cursor onto "main"
     assert!(state.switch_begin_rename());
     assert!(state.is_renaming());
-    assert_eq!(state.rename_target(), Some("main"));
+    assert_eq!(state.rename().unwrap().target(), "main");
     // The input is pre-filled with the current label (the session name).
-    assert_eq!(state.rename_input(), Some("main"));
+    assert_eq!(state.rename().unwrap().value(), "main");
     // Edit it to a custom label.
-    for _ in 0..4 {
-        state.rename_backspace();
-    }
-    for c in "  My main  ".chars() {
-        state.rename_push_char(c);
+    {
+        let input = state.rename_mut().unwrap();
+        for _ in 0..4 {
+            input.backspace();
+        }
+        for c in "  My main  ".chars() {
+            input.push_char(c);
+        }
     }
     // Confirm returns the target and the trimmed label, and closes the input.
     assert_eq!(
@@ -749,13 +760,11 @@ fn switch_begin_rename_is_a_noop_on_the_root_row_and_when_already_open() {
 }
 
 #[test]
-fn rename_editing_is_a_noop_when_not_renaming() {
+fn rename_accessors_are_none_when_not_renaming() {
     let mut state = state();
-    state.rename_push_char('a');
-    state.rename_backspace();
     assert!(!state.is_renaming());
-    assert!(state.rename_input().is_none());
-    assert!(state.rename_target().is_none());
+    assert!(state.rename().is_none());
+    assert!(state.rename_mut().is_none());
     assert!(state.switch_confirm_rename().is_none());
 }
 
@@ -765,7 +774,7 @@ fn rename_can_be_cancelled() {
     state.enter_switch(ReturnMode::Overview);
     state.switch_move_down();
     state.switch_begin_rename();
-    state.rename_push_char('x');
+    state.rename_mut().unwrap().push_char('x');
     state.rename_cancel();
     assert!(!state.is_renaming());
 }
@@ -867,15 +876,15 @@ fn focus_prompt_edits_completes_and_hints_in_session_scope() {
     let mut state = state();
     state.enter_focus(1);
     for c in "ter".chars() {
-        state.focus_prompt_push_char(c);
+        state.focus_prompt_mut().insert(c);
     }
-    state.focus_prompt_backspace(); // "te"
-                                    // "te" uniquely completes to "terminal" (a session command).
+    state.focus_prompt_mut().backspace(); // "te"
+                                          // "te" uniquely completes to "terminal" (a session command).
     let completion = state.focus_prompt_complete();
     assert_eq!(state.focus_prompt(), "terminal");
     assert!(completion.candidates.is_empty());
     // The hint is computed in the session scope: arguments show usage.
-    state.focus_prompt_push_char(' ');
+    state.focus_prompt_mut().insert(' ');
     assert!(matches!(state.focus_prompt_hint(), Hint::Usage { .. }));
 }
 
@@ -884,20 +893,20 @@ fn focus_prompt_caret_moves_and_edits_mid_line() {
     let mut state = state();
     state.enter_focus(1);
     for c in "abc".chars() {
-        state.focus_prompt_push_char(c);
+        state.focus_prompt_mut().insert(c);
     }
     assert_eq!(state.focus_prompt_cursor(), 3);
-    state.focus_prompt_cursor_home();
+    state.focus_prompt_mut().move_home();
     assert_eq!(state.focus_prompt_cursor(), 0);
-    state.focus_prompt_delete_forward(); // removes 'a' → "bc"
+    state.focus_prompt_mut().delete_forward(); // removes 'a' → "bc"
     assert_eq!(state.focus_prompt(), "bc");
-    state.focus_prompt_cursor_right(); // between 'b' and 'c'
-    state.focus_prompt_push_char('x'); // "bxc"
+    state.focus_prompt_mut().move_right(); // between 'b' and 'c'
+    state.focus_prompt_mut().insert('x'); // "bxc"
     assert_eq!(state.focus_prompt(), "bxc");
-    state.focus_prompt_cursor_left();
-    state.focus_prompt_backspace(); // removes 'b' → "xc"
+    state.focus_prompt_mut().move_left();
+    state.focus_prompt_mut().backspace(); // removes 'b' → "xc"
     assert_eq!(state.focus_prompt(), "xc");
-    state.focus_prompt_cursor_end();
+    state.focus_prompt_mut().move_end();
     assert_eq!(state.focus_prompt_cursor(), 2);
 }
 
@@ -906,7 +915,7 @@ fn focus_prompt_submit_runs_a_session_command() {
     let mut state = state();
     state.enter_focus(1);
     for c in "terminal".chars() {
-        state.focus_prompt_push_char(c);
+        state.focus_prompt_mut().insert(c);
     }
     let submission = state.focus_prompt_submit();
     assert_eq!(submission.effect, Effect::OpenTerminal);
@@ -923,7 +932,7 @@ fn focus_prompt_runs_a_text_command_into_a_modal() {
     let mut state = state();
     state.enter_focus(1);
     for c in "man".chars() {
-        state.focus_prompt_push_char(c);
+        state.focus_prompt_mut().insert(c);
     }
     let submission = state.focus_prompt_submit();
     assert_eq!(submission.effect, Effect::ShowText("Help"));
@@ -974,7 +983,7 @@ fn focus_prompt_runs_the_coming_soon_ai_command() {
     let mut state = state();
     state.enter_focus(1);
     for c in "ai hi".chars() {
-        state.focus_prompt_push_char(c);
+        state.focus_prompt_mut().insert(c);
     }
     let submission = state.focus_prompt_submit();
     assert_eq!(submission.effect, Effect::None);
@@ -1001,19 +1010,19 @@ fn attached_holds_a_terminal_view_and_leaving_drops_it() {
 }
 
 #[test]
-fn clear_terminal_view_drops_the_snapshot_without_changing_the_mode() {
+fn clear_terminal_surface_drops_the_snapshot_without_changing_the_mode() {
     let mut state = state();
     state.enter_focus(1);
     state.show_attached();
     state.set_terminal_view(TerminalView::from_rows(vec!["x".to_string()], None));
-    state.clear_terminal_view();
+    state.clear_terminal_surface();
     assert!(state.terminal_view().is_none());
     // The mode is untouched (the per-frame cleanup must not leave 没入).
     assert_eq!(state.mode(), Mode::Attached);
 }
 
 #[test]
-fn tab_strip_is_published_and_cleared_with_the_pane() {
+fn tab_strip_is_published_and_cleared_with_the_view() {
     let mut state = state();
     state.enter_focus(1);
     state.show_attached();
@@ -1021,13 +1030,11 @@ fn tab_strip_is_published_and_cleared_with_the_pane() {
     let strip = state.terminal_tabs().expect("the strip is published");
     assert_eq!(strip.labels, ["agent", "terminal"]);
     assert_eq!(strip.active, 1);
-    // The per-frame view cleanup also drops the strip.
+    // The surface clears as a unit: a published view and tab strip drop together,
+    // so there is no path that leaves a stale snapshot beside a dropped strip.
     state.set_terminal_view(TerminalView::from_rows(vec!["x".to_string()], None));
-    state.clear_terminal_view();
-    assert!(state.terminal_tabs().is_none());
-    // Re-publish it, then leaving 没入 drops it too.
-    state.set_terminal_tabs(vec!["agent".to_string()], 0);
-    state.clear_terminal_tabs();
+    state.clear_terminal_surface();
+    assert!(state.terminal_view().is_none());
     assert!(state.terminal_tabs().is_none());
 }
 
@@ -1047,7 +1054,7 @@ fn enter_overview_clears_transient_state() {
     state.enter_switch(ReturnMode::Overview);
     state.switch_begin_create(Vec::new());
     state.enter_focus(1);
-    state.focus_prompt_push_char('x');
+    state.focus_prompt_mut().insert('x');
     state.focus_menu_move_down();
     state.enter_overview();
     assert_eq!(state.mode(), Mode::Overview);
@@ -1283,12 +1290,12 @@ fn remove_modal_cursor_wraps_in_both_directions() {
         session_record("c", 1),
     ]);
     state.open_remove_modal(false);
-    state.remove_modal_move_down();
+    state.remove_modal_mut().unwrap().move_down();
     assert_eq!(state.remove_modal().unwrap().cursor(), 1);
-    state.remove_modal_move_up();
-    state.remove_modal_move_up();
+    state.remove_modal_mut().unwrap().move_up();
+    state.remove_modal_mut().unwrap().move_up();
     assert_eq!(state.remove_modal().unwrap().cursor(), 2);
-    state.remove_modal_move_down();
+    state.remove_modal_mut().unwrap().move_down();
     assert_eq!(state.remove_modal().unwrap().cursor(), 0);
 }
 
@@ -1297,14 +1304,14 @@ fn remove_modal_toggle_checks_and_unchecks_the_cursor_row() {
     let mut state = state();
     state.restore_sessions(vec![session_record("a", 1), session_record("b", 1)]);
     state.open_remove_modal(false);
-    state.remove_modal_toggle();
-    state.remove_modal_move_down();
-    state.remove_modal_toggle();
+    state.remove_modal_mut().unwrap().toggle();
+    state.remove_modal_mut().unwrap().move_down();
+    state.remove_modal_mut().unwrap().toggle();
     let modal = state.remove_modal().unwrap();
     assert!(modal.is_selected(0));
     assert!(modal.is_selected(1));
     assert_eq!(modal.selected_count(), 2);
-    state.remove_modal_toggle();
+    state.remove_modal_mut().unwrap().toggle();
     assert!(!state.remove_modal().unwrap().is_selected(1));
 }
 
@@ -1313,17 +1320,17 @@ fn remove_modal_navigation_is_a_noop_when_empty_or_closed() {
     let mut state = state();
     state.open_remove_modal(false);
     assert!(state.remove_modal().unwrap().is_empty());
-    state.remove_modal_move_up();
-    state.remove_modal_move_down();
-    state.remove_modal_toggle();
+    // Open but empty: the modal's own navigation is a no-op.
+    state.remove_modal_mut().unwrap().move_up();
+    state.remove_modal_mut().unwrap().move_down();
+    state.remove_modal_mut().unwrap().toggle();
     assert_eq!(state.remove_modal().unwrap().cursor(), 0);
     assert_eq!(state.remove_modal().unwrap().selected_count(), 0);
 
+    // Closed: there is no modal to navigate, and confirm returns None.
     state.cancel_remove_modal();
-    state.remove_modal_move_up();
-    state.remove_modal_move_down();
-    state.remove_modal_toggle();
     assert!(state.remove_modal().is_none());
+    assert!(state.remove_modal_mut().is_none());
     assert!(state.submit_remove_modal().is_none());
 }
 
@@ -1336,12 +1343,12 @@ fn submit_remove_modal_returns_checked_names_in_order_and_closes() {
         session_record("c", 1),
     ]);
     state.open_remove_modal(true);
-    state.remove_modal_move_down();
-    state.remove_modal_move_down();
-    state.remove_modal_toggle(); // "c"
-    state.remove_modal_move_up();
-    state.remove_modal_move_up();
-    state.remove_modal_toggle(); // "a"
+    state.remove_modal_mut().unwrap().move_down();
+    state.remove_modal_mut().unwrap().move_down();
+    state.remove_modal_mut().unwrap().toggle(); // "c"
+    state.remove_modal_mut().unwrap().move_up();
+    state.remove_modal_mut().unwrap().move_up();
+    state.remove_modal_mut().unwrap().toggle(); // "a"
     let (names, force) = state.submit_remove_modal().unwrap();
     assert_eq!(names, vec!["a".to_string(), "c".to_string()]);
     assert!(force);
@@ -1358,32 +1365,6 @@ fn submit_remove_modal_with_nothing_checked_keeps_it_open() {
 }
 
 #[test]
-fn log_sessions_lists_recorded_sessions_in_a_modal() {
-    let mut state = state();
-    state.restore_sessions(vec![session_record("alpha", 2), session_record("beta", 1)]);
-    state.log_sessions();
-    // With sessions, `session list` opens a scrollable text modal.
-    let modal = state.text_modal().expect("session list opens a modal");
-    assert_eq!(modal.title, "Sessions");
-    let text = modal
-        .lines
-        .iter()
-        .map(|l| l.text.as_str())
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert!(text.contains("2 session(s)"));
-    assert!(text.contains("alpha"));
-    assert!(text.contains("beta"));
-}
-
-#[test]
-fn log_sessions_reports_when_empty() {
-    let mut state = state();
-    state.log_sessions();
-    assert!(state.log().last().unwrap().text.contains("No sessions yet"));
-}
-
-#[test]
 fn log_output_and_error_append_lines() {
     let mut state = state();
     state.log_output("did a thing");
@@ -1396,57 +1377,42 @@ fn log_output_and_error_append_lines() {
 }
 
 #[test]
-fn hint_no_live_session_logs_a_notice_pointing_at_the_launch_commands() {
+fn apply_badges_replaces_every_set_at_once() {
     let mut state = state();
-    state.hint_no_live_session();
-    let last = state.log().last().unwrap();
-    assert_eq!(last.kind, LineKind::Notice);
-    assert!(last.text.contains(":agent"));
-    assert!(last.text.contains(":terminal"));
-}
-
-#[test]
-fn waiting_paths_track_sessions_awaiting_input() {
-    let mut state = state();
-    assert!(!state.is_waiting(Path::new("/repo/feature")));
+    // Every set starts empty.
+    assert!(!state.is_running(Path::new("/repo/run")));
+    assert!(state.running_paths().is_empty());
     assert!(state.waiting_paths().is_empty());
-    let mut waiting = HashSet::new();
-    waiting.insert(PathBuf::from("/repo/feature"));
-    state.set_waiting(waiting);
-    assert!(state.is_waiting(Path::new("/repo/feature")));
-    assert!(!state.is_waiting(Path::new("/repo/main")));
-    state.set_waiting(HashSet::new());
-    assert!(!state.is_waiting(Path::new("/repo/feature")));
-}
-
-#[test]
-fn live_paths_track_sessions_with_a_running_agent() {
-    let mut state = state();
-    assert!(!state.is_live(Path::new("/repo/feature")));
     assert!(state.live_paths().is_empty());
-    let mut live = HashSet::new();
-    live.insert(PathBuf::from("/repo/feature"));
-    state.set_live(live);
-    assert!(state.is_live(Path::new("/repo/feature")));
-    assert!(!state.is_live(Path::new("/repo/main")));
-    assert_eq!(state.live_paths().len(), 1);
-    state.set_live(HashSet::new());
-    assert!(!state.is_live(Path::new("/repo/feature")));
-}
-
-#[test]
-fn done_paths_track_finished_sessions() {
-    let mut state = state();
-    assert!(!state.is_done(Path::new("/repo/feature")));
     assert!(state.done_paths().is_empty());
-    let mut done = HashSet::new();
-    done.insert(PathBuf::from("/repo/feature"));
-    state.set_done(done);
-    assert!(state.is_done(Path::new("/repo/feature")));
-    assert!(!state.is_done(Path::new("/repo/main")));
+
+    // One reading populates all four sets together (running / waiting / live /
+    // done), so the getters read a single consistent snapshot.
+    state.apply_badges(MonitorSnapshot {
+        running: [PathBuf::from("/repo/run")].into(),
+        waiting: [PathBuf::from("/repo/wait")].into(),
+        live: [PathBuf::from("/repo/run"), PathBuf::from("/repo/wait")].into(),
+        done: [PathBuf::from("/repo/done")].into(),
+    });
+    assert!(state.is_running(Path::new("/repo/run")));
+    assert!(!state.is_running(Path::new("/repo/wait")));
+    assert_eq!(state.running_paths().len(), 1);
+    assert!(state.is_waiting(Path::new("/repo/wait")));
+    assert_eq!(state.waiting_paths().len(), 1);
+    assert!(state.is_live(Path::new("/repo/run")));
+    assert!(state.is_live(Path::new("/repo/wait")));
+    assert_eq!(state.live_paths().len(), 2);
+    assert!(state.is_done(Path::new("/repo/done")));
     assert_eq!(state.done_paths().len(), 1);
-    state.set_done(HashSet::new());
-    assert!(!state.is_done(Path::new("/repo/feature")));
+
+    // A fresh reading replaces the lot — a now-empty set clears, it does not
+    // merge with the previous frame.
+    state.apply_badges(MonitorSnapshot::default());
+    assert!(!state.is_running(Path::new("/repo/run")));
+    assert!(state.running_paths().is_empty());
+    assert!(state.waiting_paths().is_empty());
+    assert!(state.live_paths().is_empty());
+    assert!(state.done_paths().is_empty());
 }
 
 #[test]
@@ -1466,10 +1432,10 @@ fn has_live_sessions_and_live_count_follow_the_live_set() {
     let mut state = state();
     assert!(!state.has_live_sessions());
     assert_eq!(state.live_count(), 0);
-    let mut live = HashSet::new();
-    live.insert(PathBuf::from("/repo/feature"));
-    live.insert(PathBuf::from("/repo/main"));
-    state.set_live(live);
+    state.apply_badges(MonitorSnapshot {
+        live: [PathBuf::from("/repo/feature"), PathBuf::from("/repo/main")].into(),
+        ..Default::default()
+    });
     assert!(state.has_live_sessions());
     assert_eq!(state.live_count(), 2);
 }

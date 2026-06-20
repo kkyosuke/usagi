@@ -15,6 +15,7 @@
 //! modals) lives in [`chrome`].
 
 mod chrome;
+pub mod content;
 mod panes;
 
 use crate::presentation::tui::widgets;
@@ -260,25 +261,16 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
     );
     // While naming a new session in 切替, append the inline create row(s) to the
     // left pane (trimmed back to the session-list area if it would overflow).
-    if state.is_creating() {
-        for row in switch_create_rows(
-            state.create_input().unwrap_or_default(),
-            state.create_cursor().unwrap_or(0),
-            state.create_error(),
-            left_w,
-        ) {
+    if let Some(create) = state.create() {
+        for row in switch_create_rows(create.value(), create.cursor(), create.error(), left_w) {
             left.push(row);
         }
         left.truncate(body_rows);
     }
     // While renaming a session's sidebar label in 切替, append the inline rename
     // row to the left pane (trimmed back if it would overflow).
-    if state.is_renaming() {
-        for row in switch_rename_rows(
-            state.rename_target().unwrap_or_default(),
-            state.rename_input().unwrap_or_default(),
-            left_w,
-        ) {
+    if let Some(rename) = state.rename() {
+        for row in switch_rename_rows(rename.target(), rename.value(), left_w) {
             left.push(row);
         }
         left.truncate(body_rows);
@@ -338,12 +330,22 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
     // default Overview screen is blank — so they read cleanly in the top-right
     // corner of the content.
     if let Some(loading) = state.loading() {
+        // The transient launch indicator is deliberate and short-lived, so it
+        // takes the corner even over a live pane.
         widgets::overlay_top_right(
             &mut lines,
             body_start,
             width,
             &widgets::loading_rabbit(loading.frame(), loading.label()),
         );
+    } else if state.terminal_view().is_some() {
+        // A live embedded terminal occupies the right pane (没入's attached shell
+        // or 切替's live preview). Its rows are clipped, not padded, so the
+        // top-right notices — which `overlay_top_right` only keeps off rows that
+        // already reach the banner column — would draw over the shell's output
+        // there, and the constantly-repainting task spinner would keep clobbering
+        // it. Suppress them so the live pane is never overdrawn; the task panel
+        // and update notice surface again the moment the pane is left.
     } else if !state.tasks().is_empty() {
         // Background session work (create / remove) running off the event-loop
         // thread, stacked in the corner so it never freezes the screen.
