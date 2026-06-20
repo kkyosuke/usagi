@@ -57,7 +57,8 @@ src/
 │   └── version.rs              # セマンティックバージョン Version（パース・比較）
 │
 ├── usecase/                    # ビジネスロジック
-│   ├── project.rs              # クローン・既存登録 + 状態同期
+│   ├── agent_phase.rs          # Agent phase の遷移ポリシー（SessionStart→ready を記録してよいかの判断）
+│   ├── project.rs              # クローン・既存登録 + 状態同期（.gitignore の行編集は infrastructure/gitignore に委譲）
 │   ├── workspace.rs            # グローバル登録の add/list/remove/touch
 │   ├── workspace_state.rs      # リポジトリ状態の inspect/sync/load
 │   ├── settings.rs             # グローバル設定の load/更新、ローカル設定と実効設定の解決（effective）
@@ -74,6 +75,7 @@ src/
 ├── infrastructure/             # 外部連携（Git・永続化・シェル）
 │   ├── error_log.rs            # 実行時エラーの日次ログ（~/.usagi/logs/・30 日保持・ErrorLog）
 │   ├── git/                    # git CLI 経由の読み取り専用検査 + worktree 追加（command/repo/worktree/branch に分割）
+│   ├── gitignore.rs            # .usagi/.gitignore の書き込みと旧 root .gitignore 行の除去（バイト/行操作）
 │   ├── json_file.rs            # JSON ファイルの共通 read / 原子的 write（temp + rename）
 │   ├── storage.rs              # グローバル ~/.usagi/ の load/save（Storage）
 │   ├── workspace_store.rs      # <repo>/.usagi/ の state.json / settings.json（WorkspaceStore）
@@ -82,7 +84,7 @@ src/
 │   ├── pty.rs                  # 疑似ターミナルセッション（portable-pty + vt100、ベル回数の計測）
 │   ├── release.rs              # git ls-remote --tags でリリースタグを取得（薄い IO ラッパ）
 │   ├── session_monitor.rs      # 入力待ち判定の純粋ロジック（phase 優先・ベル基準値・待ち集合・アタッチ）
-│   ├── agent_state_store.rs    # worktree 別の Agent phase の記録/読み出し（~/.usagi/agent-state/）
+│   ├── agent_state_store.rs    # worktree 別の Agent phase の記録/読み出し・フック JSON のパース（~/.usagi/agent-state/。遷移ポリシーは usecase/agent_phase）
 │   ├── agent/                  # Agent port のアダプタ（Claude は MCP・システムプロンプト・フックを serde_json で組み立てて launch コマンド生成 / Gemini は素起動）・agent_for
 │   ├── issue_store.rs          # <repo>/.usagi/issues/ の markdown + index.json（IssueStore）
 │   └── memory_store.rs         # <repo>/.usagi/memory/ の markdown + MEMORY.md + index.json（MemoryStore）

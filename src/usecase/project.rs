@@ -12,8 +12,8 @@ use anyhow::{bail, Context, Result};
 
 use crate::domain::repository::RepoUrl;
 use crate::domain::workspace::Workspace;
-use crate::infrastructure::git;
 use crate::infrastructure::storage::Storage;
+use crate::infrastructure::{git, gitignore};
 use crate::usecase::{workspace, workspace_state};
 
 /// Directory used under the home directory when no `workspace_root` is set.
@@ -73,96 +73,22 @@ pub fn register_existing(storage: &Storage, path: &Path, name: &str) -> Result<W
     Ok(workspace)
 }
 
-/// The self-contained `.gitignore` usagi writes inside each repository's
-/// `.usagi/` directory. Patterns are relative to `.usagi/`: ignore everything,
-/// but keep this `.gitignore` and the shared `issues/` and `memory/` directories
-/// tracked, while still excluding their rebuildable `index.json` caches.
-///
-/// Task issues and agent memories are meant to be committed and shared with the
-/// team; the machine-local state (`state.json`, `settings.json`, `history.json`,
-/// `sessions/`) and the derived indexes stay ignored. Keeping the rules inside
-/// `.usagi/` leaves the repository-root `.gitignore` untouched.
-const USAGI_GITIGNORE: &str =
-    "/*\n!/.gitignore\n!/issues/\n/issues/index.json\n!/memory/\n/memory/index.json\n";
-
-/// Whether `line` is one of the entries earlier usagi versions appended to the
-/// repository-root `.gitignore` (including the legacy bare `.usagi/` form). Such
-/// lines are stripped on migration: a root `.usagi/` entry hides the directory
-/// entirely, which would defeat the `.usagi/.gitignore` written below.
-fn is_legacy_root_ignore_line(line: &str) -> bool {
-    matches!(
-        line.trim(),
-        ".usagi"
-            | ".usagi/"
-            | ".usagi/*"
-            | "!.usagi/issues"
-            | "!.usagi/issues/"
-            | ".usagi/issues/index.json"
-    )
-}
-
 /// Ensure `.usagi/` governs its own ignore rules so usagi's per-project metadata
 /// stays out of git while the shared `issues/` directory remains tracked.
 ///
 /// Writes `<repo>/.usagi/.gitignore` and removes any usagi entries a previous
-/// version left in the repository-root `.gitignore` (see
-/// [`is_legacy_root_ignore_line`]).
+/// version left in the repository-root `.gitignore`. The byte-level editing
+/// lives in [`crate::infrastructure::gitignore`].
 fn ignore_usagi_dir(repo: &Path) -> Result<()> {
-    write_usagi_gitignore(repo)?;
-    strip_legacy_root_entries(repo)
-}
-
-/// Write [`USAGI_GITIGNORE`] to `<repo>/.usagi/.gitignore`, creating the
-/// directory when absent. Idempotent: if the file already holds the current
-/// content it is left untouched.
-fn write_usagi_gitignore(repo: &Path) -> Result<()> {
-    let dir = repo.join(".usagi");
-    fs::create_dir_all(&dir).context(format!("failed to create {}", dir.display()))?;
-
-    let gitignore = dir.join(".gitignore");
-    if fs::read_to_string(&gitignore).is_ok_and(|c| c == USAGI_GITIGNORE) {
-        return Ok(());
-    }
-    fs::write(&gitignore, USAGI_GITIGNORE)
-        .context(format!("failed to write {}", gitignore.display()))
-}
-
-/// Remove usagi-managed lines from the repository-root `.gitignore`, preserving
-/// all other content. Does nothing when the file is absent or carries no such
-/// lines, so it never creates a root `.gitignore` of its own.
-fn strip_legacy_root_entries(repo: &Path) -> Result<()> {
-    let gitignore = repo.join(".gitignore");
-
-    let existing = match fs::read_to_string(&gitignore) {
-        Ok(text) => text,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(e).context(format!("failed to read {}", gitignore.display())),
-    };
-    if !existing.lines().any(is_legacy_root_ignore_line) {
-        return Ok(());
-    }
-
-    let mut kept: Vec<&str> = existing
-        .lines()
-        .filter(|l| !is_legacy_root_ignore_line(l))
-        .collect();
-    // Trim trailing blank lines left behind so the file ends cleanly.
-    while kept.last().is_some_and(|l| l.trim().is_empty()) {
-        kept.pop();
-    }
-
-    let mut out = String::new();
-    for line in kept {
-        out.push_str(line);
-        out.push('\n');
-    }
-    fs::write(&gitignore, out).context(format!("failed to write {}", gitignore.display()))
+    gitignore::write_usagi_gitignore(repo)?;
+    gitignore::strip_legacy_root_entries(repo)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::infrastructure::git::test_command;
+    use crate::infrastructure::gitignore::USAGI_GITIGNORE;
 
     /// Create a throwaway source repository with one commit on `main`.
     fn init_source(dir: &Path) {
@@ -376,15 +302,5 @@ mod tests {
         // propagates out of ignore_usagi_dir.
         std::fs::write(repo.join(".usagi"), "x").unwrap();
         assert!(ignore_usagi_dir(repo).is_err());
-    }
-
-    #[test]
-    fn write_usagi_gitignore_reports_a_write_error() {
-        let tmp = tempfile::tempdir().unwrap();
-        let repo = tmp.path();
-        // A directory occupying .usagi/.gitignore makes the read return a
-        // non-matching error and the subsequent write fail.
-        std::fs::create_dir_all(repo.join(".usagi/.gitignore")).unwrap();
-        assert!(write_usagi_gitignore(repo).is_err());
     }
 }
