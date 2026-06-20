@@ -1259,13 +1259,33 @@ fn task_panel_stacks_running_and_finished_rows_under_a_header() {
         },
     ];
     let panel = task_panel(&rows);
-    // A header line plus one line per task.
-    assert_eq!(panel.len(), 4);
+    // A bordered box: the top border (carrying the `tasks` title), one row per
+    // task, and the bottom border.
+    assert_eq!(panel.len(), 5);
+    assert!(panel[0].contains('┌') && panel[0].contains('┐'));
+    assert!(panel.last().unwrap().contains('└'));
     let plain = stripped(&panel);
     assert!(plain.contains("tasks"));
     assert!(plain.contains("作成中… main"));
     assert!(plain.contains("✓ 削除完了 feat"));
     assert!(plain.contains("✗ 作成失敗 dup"));
+}
+
+#[test]
+fn task_panel_holds_one_fixed_width_however_the_rows_change() {
+    use super::super::tasks::{TaskMark, TaskRow};
+    // A short running label and a longer finished one must produce the same box
+    // width, so the right-anchored panel never shifts as a row's text changes.
+    let short = task_panel(&[TaskRow {
+        label: "作成中… a".to_string(),
+        mark: TaskMark::Running(0),
+    }]);
+    let long = task_panel(&[TaskRow {
+        label: "作成完了 a-very-long-session-name".to_string(),
+        mark: TaskMark::Done(true),
+    }]);
+    let width = |panel: &[String]| console::measure_text_width(&panel[0]);
+    assert_eq!(width(&short), width(&long));
 }
 
 #[test]
