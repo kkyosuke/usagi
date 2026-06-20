@@ -140,12 +140,9 @@ fn record(workspace_root: &Path, name: &str, root: &Path, worktrees: &[PathBuf])
     let mut state = store.load()?.unwrap_or_default();
 
     // A session's worktrees may live in different source repositories (a
-    // multi-repo workspace), so each is classified against its own repository's
-    // default branch.
-    let worktree_states = worktrees
-        .iter()
-        .map(|path| workspace_state::inspect_worktree(path, &git::default_branch(path)))
-        .collect();
+    // multi-repo workspace); the shared helper classifies each against its own
+    // repository's default branch, resolved once per repository.
+    let worktree_states = workspace_state::inspect_worktrees(worktrees);
 
     let now = Utc::now();
     state.sessions.push(SessionRecord {
@@ -245,11 +242,13 @@ pub fn remove(
         .ok_or_else(|| anyhow!("no such session: \"{name}\""))?;
     let session = state.sessions[index].clone();
 
-    // Refuse to discard uncommitted work unless forced.
+    // Refuse to discard uncommitted work unless forced. Dirtiness goes through
+    // the same single `worktree_status` call the rest of the codebase uses; a
+    // path that is not (or no longer) a git worktree reports clean.
     let dirty: Vec<PathBuf> = session
         .worktrees
         .iter()
-        .filter(|wt| git::has_uncommitted_changes(&wt.path))
+        .filter(|wt| git::worktree_status(&wt.path).is_some_and(|s| s.dirty))
         .map(|wt| wt.path.clone())
         .collect();
     if !dirty.is_empty() && !force {
@@ -259,34 +258,23 @@ pub fn remove(
         });
     }
 
-    // Remove each repository's worktree and its now-orphaned session branch, and
-    // clear the chat history and running-state usagi keeps for that worktree so
-    // nothing outlives the session (a path reused later starts clean). The chat
-    // history / phase are cleared *before* the worktree directory is removed, so
-    // the canonicalized worktree path still resolves to the key the running agent
-    // recorded under.
+    // Clear the chat history and running-state usagi keeps for each worktree so
+    // nothing outlives the session (a path reused later starts clean). This runs
+    // *before* the worktree directories are removed, so the canonicalized
+    // worktree path still resolves to the key the running agent recorded under.
     for wt in &session.worktrees {
         agent.forget_session(&wt.path);
         agent_state_store::clear(&wt.path);
-        // A session whose worktree was never fully built — or was already torn
-        // down out of band — leaves a record pointing at a path that is no
-        // longer a registered git worktree. `primary_worktree` resolves the
-        // source repo by running git *inside* `wt.path`, so a missing directory
-        // makes it fail; there is nothing to remove from git in that case, so
-        // skip the git cleanup and still drop the record from state below.
-        let Ok(source) = git::primary_worktree(&wt.path) else {
-            continue;
-        };
-        git::remove_worktree(&source, &wt.path, force)?;
-        // The branch may already be gone (e.g. a partial earlier removal).
-        let _ = git::delete_branch(&source, name);
     }
 
-    // Drop any copied files and now-empty directories left in the tree.
-    if session.root.exists() {
-        fs::remove_dir_all(&session.root)
-            .context(format!("failed to remove {}", session.root.display()))?;
-    }
+    // Physically destroy the session: unregister each repository's worktree on
+    // the session branch, drop the branch, and delete the session tree. This is
+    // the same primitive `reconcile` uses to prune strays — located via
+    // `list_worktrees` rather than the recorded paths, which also tolerates a
+    // ghost session whose worktree was never built (nothing matches the branch,
+    // so git is left untouched and only the record is dropped below).
+    let repo_worktrees = reconcile::list_repo_worktrees(workspace_root)?;
+    reconcile::discard_session(&session.root, name, &repo_worktrees, force)?;
 
     state.sessions.remove(index);
     state.updated_at = Utc::now();
