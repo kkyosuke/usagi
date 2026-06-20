@@ -712,3 +712,28 @@ fn man_groups_commands_by_scope() {
         assert!(joined.contains(info.name));
     }
 }
+
+#[test]
+fn preview_with_a_target_requests_opening_the_markdown_pane() {
+    let result = registry().dispatch("preview README", &[], &[]);
+    assert!(result.lines.is_empty());
+    assert_eq!(result.effect, Effect::OpenPreview("README".to_string()));
+}
+
+#[test]
+fn preview_without_an_argument_reports_its_usage() {
+    let result = registry().dispatch("preview", &[], &[]);
+    assert_eq!(result.effect, Effect::None);
+    assert_eq!(result.lines.len(), 1);
+    assert_eq!(result.lines[0].kind, LineKind::Error);
+    assert!(joined(&result).contains("usage: preview"));
+}
+
+#[test]
+fn preview_diff_reports_that_it_is_not_built_yet() {
+    let result = registry().dispatch("preview diff", &[], &[]);
+    // `diff` is recognised so the surface reads coherently, but opens nothing.
+    assert_eq!(result.effect, Effect::None);
+    assert_eq!(result.lines[0].kind, LineKind::Output);
+    assert!(joined(&result).contains("Diff preview"));
+}

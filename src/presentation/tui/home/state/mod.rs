@@ -36,7 +36,7 @@ mod mode;
 
 pub use list::{worktree_name, WorktreeList, ROOT_NAME};
 pub use log::{LineKind, LogLine};
-pub use modal::{CreateInput, RemoveModal, RenameInput, TextModal};
+pub use modal::{CreateInput, Preview, RemoveModal, RenameInput, TextModal};
 pub use mode::{Mode, PaneExit, ReturnMode};
 
 use list::session_row;
@@ -176,6 +176,11 @@ pub struct HomeState {
     /// The open text modal (a text-dumping command's output, e.g. `man`), when
     /// set. While open it captures the keys (scroll / dismiss).
     text_modal: Option<TextModal>,
+    /// The open right-pane Markdown preview (the `preview` command), when set.
+    /// Unlike the centred text modal it takes over only the right pane, leaving
+    /// the session list and command line in place; while open it captures the
+    /// keys (scroll / dismiss).
+    preview: Option<Preview>,
     /// Index into `log` where the most recent command's response begins. The
     /// 統括 (Overview) results band renders only `log[response_start..]`, so it
     /// shows the response to the latest command and nothing earlier.
@@ -237,6 +242,7 @@ impl HomeState {
             badges: MonitorSnapshot::default(),
             quit_confirm: false,
             text_modal: None,
+            preview: None,
             response_start: 0,
             issues: Vec::new(),
             update: None,
@@ -369,6 +375,50 @@ impl HomeState {
         if let Some(modal) = self.text_modal.as_mut() {
             let max = modal.lines.len().saturating_sub(visible);
             modal.scroll = (modal.scroll + 1).min(max);
+        }
+    }
+
+    /// Open the right-pane Markdown preview from a load attempt: on success, show
+    /// the rendered file (titled by its workspace-relative path); on failure, log
+    /// the error and open nothing. The impure file read is the caller's (the
+    /// event loop reads it through [`crate::infrastructure::markdown_file`]); this
+    /// only renders the text and stores the result, so both outcomes are testable.
+    pub fn open_preview_result(&mut self, loaded: anyhow::Result<(String, String)>) {
+        match loaded {
+            Ok((title, content)) => {
+                self.preview = Some(Preview {
+                    title,
+                    lines: crate::presentation::tui::markdown::render(&content),
+                    scroll: 0,
+                });
+            }
+            Err(e) => self.log_error(format!("preview failed: {e}")),
+        }
+    }
+
+    /// The open right-pane preview, if any.
+    pub fn preview(&self) -> Option<&Preview> {
+        self.preview.as_ref()
+    }
+
+    /// Close the right-pane preview (the user dismissed it).
+    pub fn close_preview(&mut self) {
+        self.preview = None;
+    }
+
+    /// Scroll the preview up one line (no-op when closed or at the top).
+    pub fn preview_scroll_up(&mut self) {
+        if let Some(preview) = self.preview.as_mut() {
+            preview.scroll = preview.scroll.saturating_sub(1);
+        }
+    }
+
+    /// Scroll the preview down one line, clamped so the last line stays in view
+    /// (no-op when closed). `visible` is the pane body height the view can show.
+    pub fn preview_scroll_down(&mut self, visible: usize) {
+        if let Some(preview) = self.preview.as_mut() {
+            let max = preview.lines.len().saturating_sub(visible);
+            preview.scroll = (preview.scroll + 1).min(max);
         }
     }
 

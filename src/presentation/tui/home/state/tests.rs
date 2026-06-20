@@ -1449,3 +1449,63 @@ fn quit_confirm_opens_and_cancels() {
     state.cancel_quit_confirm();
     assert!(!state.quit_confirm());
 }
+
+#[test]
+fn open_preview_result_renders_a_loaded_file_and_titles_it() {
+    let mut state = state();
+    assert!(state.preview().is_none());
+    state.open_preview_result(Ok(("README.md".to_string(), "# Hi\nbody".to_string())));
+    let preview = state.preview().expect("preview is open");
+    assert_eq!(preview.title, "README.md");
+    // The contents were rendered to Markdown lines (heading + body).
+    assert_eq!(preview.lines.len(), 2);
+    assert_eq!(preview.lines[0].plain_text(), "Hi");
+    assert_eq!(preview.scroll, 0);
+}
+
+#[test]
+fn open_preview_result_logs_a_failed_load_and_opens_nothing() {
+    let mut state = state();
+    state.open_preview_result(Err(anyhow::anyhow!("no such file")));
+    assert!(state.preview().is_none());
+    let last = state.log().last().unwrap();
+    assert_eq!(last.kind, LineKind::Error);
+    assert!(last.text.contains("preview failed"));
+    assert!(last.text.contains("no such file"));
+}
+
+#[test]
+fn preview_scrolls_within_bounds_and_closes() {
+    let mut state = state();
+    let body = (0..10)
+        .map(|i| format!("line {i}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    state.open_preview_result(Ok(("doc.md".to_string(), body)));
+
+    // Up at the top is a no-op (saturating).
+    state.preview_scroll_up();
+    assert_eq!(state.preview().unwrap().scroll, 0);
+
+    // Down advances, but clamps so the last line stays in view (10 lines, a
+    // 4-row window -> max scroll 6).
+    for _ in 0..20 {
+        state.preview_scroll_down(4);
+    }
+    assert_eq!(state.preview().unwrap().scroll, 6);
+
+    state.preview_scroll_up();
+    assert_eq!(state.preview().unwrap().scroll, 5);
+
+    state.close_preview();
+    assert!(state.preview().is_none());
+}
+
+#[test]
+fn preview_scrolling_is_a_no_op_when_no_preview_is_open() {
+    let mut state = state();
+    // With nothing open, the scroll helpers do nothing and open nothing.
+    state.preview_scroll_up();
+    state.preview_scroll_down(5);
+    assert!(state.preview().is_none());
+}

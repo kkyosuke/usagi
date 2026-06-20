@@ -74,6 +74,10 @@ pub enum Effect {
     /// band), for commands whose output is text to read — `man` / `history`. The
     /// string is the modal title.
     ShowText(&'static str),
+    /// Open the right-pane Markdown preview of the named file (the user ran
+    /// `preview <path|name>`). The string is the requested target; the event loop
+    /// resolves and reads it (under the workspace root) and renders it.
+    OpenPreview(String),
 }
 
 /// The result of running a command: lines to append plus a side effect.

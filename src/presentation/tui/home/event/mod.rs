@@ -328,6 +328,30 @@ pub(super) fn event_loop(
             continue;
         }
 
+        // The right-pane Markdown preview, when open, captures every key: the
+        // arrows / `j`/`k` and PageUp/PageDown scroll within the pane, and `Esc` /
+        // `Enter` / `q` dismiss it (returning the right pane to the default).
+        if state.preview().is_some() {
+            let page = ui::preview_visible(height as usize, width as usize, &state);
+            match key {
+                Key::ArrowUp | Key::Char('k') => state.preview_scroll_up(),
+                Key::ArrowDown | Key::Char('j') => state.preview_scroll_down(page),
+                Key::PageUp => {
+                    for _ in 0..page {
+                        state.preview_scroll_up();
+                    }
+                }
+                Key::PageDown => {
+                    for _ in 0..page {
+                        state.preview_scroll_down(page);
+                    }
+                }
+                Key::Escape | Key::Enter | Key::Char('q') => state.close_preview(),
+                _ => {}
+            }
+            continue;
+        }
+
         let flow = match state.mode() {
             Mode::Overview => overview_key(term, &mut state, &mut painter, key, wiring)?,
             Mode::Switch => switch_key(term, &mut state, &mut painter, key, wiring),

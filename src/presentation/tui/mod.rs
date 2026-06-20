@@ -6,6 +6,7 @@ pub mod echo;
 pub mod gallery;
 pub mod home;
 pub mod install_task;
+pub mod markdown;
 pub mod new;
 pub mod open;
 pub mod screen;
