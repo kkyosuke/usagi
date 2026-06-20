@@ -297,18 +297,19 @@ const MULTIPLY_FEET: &str = " └┘   ";
 /// A three-row line of `count` usagi standing shoulder to shoulder — the
 /// "multiplying" rabbits. Each rabbit is a fixed-width segment, so the rows tile
 /// into an aligned block; growing `count` between frames reads as the warren
-/// filling up. The block is centred for `width` and styled magenta-bold (the
-/// mascot's colour). A `count` of zero yields three blank rows.
-pub fn multiplying_rabbits(count: usize, width: usize) -> Vec<String> {
+/// filling up. The block is **anchored to the left edge**: the first rabbit
+/// always holds column zero and each new one extends the line rightward, so the
+/// rabbits already on screen never shift sideways as the warren grows (no layout
+/// jump). Styled magenta-bold (the mascot's colour). A `count` of zero yields
+/// three blank rows.
+pub fn multiplying_rabbits(count: usize) -> Vec<String> {
     let rows = [
         MULTIPLY_EARS.repeat(count),
         MULTIPLY_FACE.repeat(count),
         MULTIPLY_FEET.repeat(count),
     ];
-    let block_w = console::measure_text_width(&rows[1]);
-    let pad = " ".repeat(centered_padding(width, block_w));
     rows.into_iter()
-        .map(|row| style(format!("{pad}{row}")).magenta().bold().to_string())
+        .map(|row| style(row).magenta().bold().to_string())
         .collect()
 }
 
@@ -730,7 +731,7 @@ mod tests {
     #[test]
     fn multiplying_rabbits_lines_up_count_usagi() {
         // The face appears once per rabbit, so the warren grows with `count`.
-        let plain = console::strip_ansi_codes(&multiplying_rabbits(3, 80).join("\n")).into_owned();
+        let plain = console::strip_ansi_codes(&multiplying_rabbits(3).join("\n")).into_owned();
         assert_eq!(plain.matches("(｡･-･)").count(), 3);
     }
 
@@ -738,7 +739,7 @@ mod tests {
     fn multiplying_rabbits_rows_stay_aligned_as_a_block() {
         // All three rows tile to the same width, so the ears/face/feet line up no
         // matter how many rabbits stand together.
-        let lines = multiplying_rabbits(4, 80);
+        let lines = multiplying_rabbits(4);
         assert_eq!(lines.len(), 3);
         let w0 = console::measure_text_width(&lines[0]);
         assert!(lines.iter().all(|l| console::measure_text_width(l) == w0));
@@ -747,18 +748,33 @@ mod tests {
     #[test]
     fn multiplying_rabbits_grow_wider_with_the_count() {
         // One more rabbit is one more fixed-width segment, so the block widens.
-        let two = console::measure_text_width(&multiplying_rabbits(2, 80)[1]);
-        let five = console::measure_text_width(&multiplying_rabbits(5, 80)[1]);
+        let two = console::measure_text_width(&multiplying_rabbits(2)[1]);
+        let five = console::measure_text_width(&multiplying_rabbits(5)[1]);
         assert!(five > two);
     }
 
     #[test]
     fn multiplying_rabbits_zero_count_is_blank() {
         // No rabbits yet: three empty rows (the animation starts from nothing).
-        let lines = multiplying_rabbits(0, 80);
+        let lines = multiplying_rabbits(0);
         assert!(lines
             .iter()
             .all(|l| console::strip_ansi_codes(l).trim().is_empty()));
+    }
+
+    #[test]
+    fn multiplying_rabbits_anchor_left_so_growth_never_shifts_them() {
+        // The block is anchored to the left edge and a growing warren only appends
+        // to the right: each row of the larger count starts with the row of the
+        // smaller count, so the rabbits already on screen never jump sideways (no
+        // layout shift). The first rabbit's face is flush left (column zero).
+        let one = console::strip_ansi_codes(&multiplying_rabbits(1).join("\n")).into_owned();
+        let three = console::strip_ansi_codes(&multiplying_rabbits(3).join("\n")).into_owned();
+        for (small, big) in one.lines().zip(three.lines()) {
+            assert!(big.starts_with(small), "growth must extend rightward only");
+        }
+        // The face row leads with the first rabbit's face, no centring padding.
+        assert!(three.lines().nth(1).unwrap().starts_with("(｡･-･)"));
     }
 
     #[test]
