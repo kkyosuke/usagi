@@ -195,6 +195,20 @@ pub struct TerminalPool {
     shared: Arc<Mutex<Shared>>,
     stop: Arc<AtomicBool>,
     watcher: Option<JoinHandle<()>>,
+    /// The last 切替 preview built by [`snapshot`](TerminalPool::snapshot), so a
+    /// frame whose previewed session, geometry, and output are all unchanged
+    /// returns the cached view without re-resizing or re-snapshotting the grid.
+    preview_cache: Option<PreviewCache>,
+}
+
+/// The previewed session and the inputs the last [`TerminalView`] was built
+/// from, so [`snapshot`](TerminalPool::snapshot) can skip the `resize` ioctl when
+/// the geometry is unchanged and the `from_screen` rebuild when the output is.
+struct PreviewCache {
+    dir: PathBuf,
+    geo: ui::TerminalGeometry,
+    generation: u64,
+    view: TerminalView,
 }
 
 impl TerminalPool {
@@ -214,6 +228,7 @@ impl TerminalPool {
             shared,
             stop,
             watcher: Some(watcher),
+            preview_cache: None,
         }
     }
 
@@ -479,8 +494,34 @@ impl TerminalPool {
         let (height, width) = term.size();
         // The preview has no tab strip, so it uses the full-pane geometry.
         let geo = ui::terminal_geometry(height as usize, width as usize);
-        session.resize(geo.rows, geo.cols);
-        Some(TerminalView::from_screen(session.parser().screen()))
+        let generation = session.generation();
+        // The previewed session, the pane geometry, and the shell's output are all
+        // unchanged since the last frame: reuse the snapshot without touching the
+        // parser lock at all. The 没入 `drive` loop differs the same way; this
+        // brings the read-only preview in line with it.
+        if let Some(cache) = &self.preview_cache {
+            if cache.dir == dir && cache.geo == geo && cache.generation == generation {
+                return Some(cache.view.clone());
+            }
+        }
+        // Reflow the backgrounded session to the visible pane only when the
+        // previewed session or the geometry actually changed — a TIOCSWINSZ ioctl
+        // and parser lock the old loop paid on every frame regardless.
+        let stale_geo = self
+            .preview_cache
+            .as_ref()
+            .is_none_or(|cache| cache.dir != dir || cache.geo != geo);
+        if stale_geo {
+            session.resize(geo.rows, geo.cols);
+        }
+        let view = TerminalView::from_screen(session.parser().screen());
+        self.preview_cache = Some(PreviewCache {
+            dir: dir.to_path_buf(),
+            geo,
+            generation,
+            view: view.clone(),
+        });
+        Some(view)
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Shared> {

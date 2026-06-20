@@ -91,6 +91,15 @@ const POLL_SLICE: Duration = Duration::from_millis(4);
 /// paced to the watcher's own poll interval rather than a tight redraw timer.
 const IDLE_REEVAL: Duration = Duration::from_millis(200);
 
+/// The shortest gap between two repaints driven purely by fresh shell output.
+/// The reader thread bumps the generation once per 8 KiB chunk — roughly every
+/// 4 ms while an agent streams — and each repaint locks the parser and
+/// re-stringifies the whole grid. Coalescing output-only frames to at most one
+/// per ~60 fps keeps a flood of output from pinning the CPU on redraws the eye
+/// cannot see, while interactive changes (input echo, resize, scroll, selection,
+/// hover, badges) still repaint immediately so the pane stays responsive.
+const MIN_FRAME: Duration = Duration::from_millis(16);
+
 /// How many lines one wheel notch scrolls the embedded terminal's history.
 const WHEEL_LINES: i32 = 3;
 
@@ -174,6 +183,14 @@ fn drive(
     let mut last_selection: Option<Selection> = None;
     let mut last_hover: Option<Cell> = None;
     let mut drawn_gen = pty.generation();
+    // When the last repaint landed, so a flood of output-only frames coalesces to
+    // at most one per [`MIN_FRAME`]; `None` until the first paint, which never
+    // throttles.
+    let mut last_paint: Option<Instant> = None;
+    // The screen's URL cells cached against the generation they were detected at,
+    // so hover-only / throttled frames skip the O(all cells) re-scan and reuse
+    // them until the shell's output actually changes (see [`terminal_link`]).
+    let mut links_cache: Option<(u64, std::collections::HashSet<Cell>)> = None;
     let mut first = true;
     loop {
         let (height, width) = term.size();
@@ -181,13 +198,16 @@ fn drive(
         // tab-reserved geometry (matching what `render` lays out below).
         let geo = ui::attached_geometry(height as usize, width as usize);
 
-        let mut dirty = first;
+        // Interactive changes (input echo, resize, scroll, selection, hover,
+        // badges) always repaint at once to stay responsive; fresh shell output
+        // is tracked separately so a flood of it can be coalesced below.
+        let mut interactive = first;
         // Inform the PTY of a new size only when it actually changed; the old
         // loop took the parser lock (and issued a TIOCSWINSZ ioctl) every pass.
         if last_geo != Some(geo) {
             pty.resize(geo.rows, geo.cols);
             last_geo = Some(geo);
-            dirty = true;
+            interactive = true;
         }
         // Re-apply the scroll position only when the requested offset changed,
         // re-reading what the parser allows so an over-scroll past the oldest
@@ -195,38 +215,51 @@ fn drive(
         if applied_scrollback != Some(scrollback) {
             scrollback = pty.set_scrollback(scrollback);
             applied_scrollback = Some(scrollback);
-            dirty = true;
+            interactive = true;
         }
         // Fresh shell output (or the shell exiting) bumps the generation.
         let gen = pty.generation();
-        if gen != drawn_gen {
-            dirty = true;
-        }
+        let output_changed = gen != drawn_gen;
         // A change to the mouse selection — a new drag position, or clearing it —
         // must repaint so the inverted highlight tracks the pointer.
         if last_selection != selection {
-            dirty = true;
+            interactive = true;
         }
         // The pointer moved onto / off a different cell: repaint so the hovered
         // link's highlight follows it.
         if last_hover != hover {
-            dirty = true;
+            interactive = true;
         }
         // The sidebar's running / waiting / live-agent / finished markers, read
         // together under a single lock; repaint when they move so sessions
         // (including this one) keep their current state.
         let badges = monitor.snapshot();
         if last_badges.as_ref() != Some(&badges) {
-            dirty = true;
+            interactive = true;
         }
 
-        if dirty {
+        // Coalesce pure-output frames: an output-only change repaints only once
+        // [`MIN_FRAME`] has elapsed since the last paint, so a stream of 8 KiB
+        // chunks cannot drive a full-grid redraw faster than the screen refreshes.
+        // Anything interactive bypasses the throttle.
+        let now = Instant::now();
+        let throttled = output_changed
+            && !interactive
+            && last_paint.is_some_and(|t| now.duration_since(t) < MIN_FRAME);
+
+        if interactive || (output_changed && !throttled) {
             drawn_gen = gen;
-            let view = TerminalView::from_screen_with_selection(
-                pty.parser().screen(),
-                selection.as_ref(),
-                hover,
-            );
+            // Hold the parser lock just long enough to detect links (only when the
+            // content changed) and snapshot the grid into an owned view.
+            let view = {
+                let parser = pty.parser();
+                let screen = parser.screen();
+                if links_cache.as_ref().map(|(g, _)| *g) != Some(gen) {
+                    links_cache = Some((gen, terminal_link::link_cells(screen)));
+                }
+                let links = &links_cache.as_ref().expect("links cache set above").1;
+                TerminalView::from_screen_with_links(screen, selection.as_ref(), hover, links)
+            };
             // The cursor belongs to the live screen, so hide it while the user is
             // viewing scrolled-back history.
             let cursor = if scrollback == 0 { view.cursor() } else { None };
@@ -236,6 +269,7 @@ fn drive(
             last_badges = Some(badges);
             last_selection = selection;
             last_hover = hover;
+            last_paint = Some(now);
             first = false;
         }
 
@@ -244,7 +278,14 @@ fn drive(
             return Ok(PaneStep::Closed);
         }
 
-        match wait(pty, drawn_gen)? {
+        // When throttled, ask `wait` to wake by the end of the current frame so
+        // the deferred output lands as soon as the interval lets it.
+        let redraw_deadline = if throttled {
+            last_paint.map(|t| t + MIN_FRAME)
+        } else {
+            None
+        };
+        match wait(pty, drawn_gen, redraw_deadline)? {
             // New output, or the idle re-evaluation tick (a possible resize /
             // badge change): loop and let the checks above decide whether to
             // repaint — an unchanged tick redraws nothing.
@@ -273,17 +314,27 @@ enum Wake {
 /// past `drawn_gen`, or the idle re-evaluation tick elapses — whichever comes
 /// first. The tick only returns control to the loop so it can notice a resize or
 /// a badge change; the loop repaints only when something actually moved.
-fn wait(pty: &PtySession, drawn_gen: u64) -> Result<Wake> {
+///
+/// When the caller throttled an output-only frame it passes a `redraw_deadline`:
+/// pending output is then held back (while still answering input at once) until
+/// the deadline passes, so coalesced output lands exactly at the frame boundary
+/// rather than immediately re-waking the loop into a busy spin.
+fn wait(pty: &PtySession, drawn_gen: u64, redraw_deadline: Option<Instant>) -> Result<Wake> {
     let start = Instant::now();
     loop {
-        // Fresh output (or the shell exiting, which also bumps the counter).
-        if pty.generation() != drawn_gen {
+        // Fresh output (or the shell exiting, which also bumps the counter) wakes
+        // the loop — but a throttled frame waits out its deadline first.
+        if pty.generation() != drawn_gen
+            && redraw_deadline.is_none_or(|deadline| Instant::now() >= deadline)
+        {
             return Ok(Wake::Output);
         }
         if event::poll(POLL_SLICE)? {
             return Ok(Wake::Input);
         }
-        if start.elapsed() >= IDLE_REEVAL {
+        // The idle tick only bounds how stale a resize / badge change can get; a
+        // throttled wait is already bounded by its (much shorter) deadline above.
+        if redraw_deadline.is_none() && start.elapsed() >= IDLE_REEVAL {
             return Ok(Wake::Output);
         }
     }

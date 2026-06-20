@@ -53,13 +53,31 @@ impl TerminalView {
     /// [`terminal_link::link_cells_at`]) — is additionally recoloured a light
     /// blue, so a link lights up as the pointer reaches it the way a browser's
     /// does.
+    ///
+    /// This detects the URL cells from `screen` on every call; the hot render
+    /// loop instead caches them across frames and uses
+    /// [`from_screen_with_links`](Self::from_screen_with_links).
     pub fn from_screen_with_selection(
         screen: &vt100::Screen,
         selection: Option<&Selection>,
         hover: Option<Cell>,
     ) -> Self {
-        let (rows, cols) = screen.size();
         let links = terminal_link::link_cells(screen);
+        Self::from_screen_with_links(screen, selection, hover, &links)
+    }
+
+    /// Like [`from_screen_with_selection`](Self::from_screen_with_selection),
+    /// but with the screen's URL cells (`links`) supplied by the caller. The
+    /// render loop computes [`terminal_link::link_cells`] only when the screen's
+    /// generation changes and reuses the result on hover-only / throttled frames,
+    /// so a frame that merely moved the pointer skips the O(all cells) re-scan.
+    pub fn from_screen_with_links(
+        screen: &vt100::Screen,
+        selection: Option<&Selection>,
+        hover: Option<Cell>,
+        links: &std::collections::HashSet<Cell>,
+    ) -> Self {
+        let (rows, cols) = screen.size();
         // Just the hovered link's cells (empty when the pointer is off any link),
         // so only it is recoloured while every link stays underlined.
         let hovered = hover
@@ -329,6 +347,20 @@ mod tests {
         // Column 0 ("h") is a link cell, hovered, and selected: underline +
         // inverse + link colour.
         assert!(row.starts_with("\x1b[0;4;7;38;2;102;178;255mh"));
+    }
+
+    #[test]
+    fn from_screen_with_links_matches_self_detecting_path() {
+        // Supplying the precomputed link cells (as the cached render loop does)
+        // yields exactly what `from_screen_with_selection` produces by detecting
+        // them itself, so the cache cannot drift from the on-the-fly path.
+        let parser = parsed(1, 30, b"x https://example.com y");
+        let screen = parser.screen();
+        let hover = Some(Cell::new(0, 5));
+        let links = terminal_link::link_cells(screen);
+        let cached = TerminalView::from_screen_with_links(screen, None, hover, &links);
+        let detected = TerminalView::from_screen_with_selection(screen, None, hover);
+        assert_eq!(cached, detected);
     }
 
     #[test]
