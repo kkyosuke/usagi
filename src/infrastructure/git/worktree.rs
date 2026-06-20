@@ -151,10 +151,15 @@ pub fn remove_worktree(repo: &Path, worktree: &Path, force: bool) -> Result<()> 
         .output()
         .context("failed to run `git worktree remove`")?;
     if !output.status.success() {
-        bail!(
-            "git worktree remove failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        // A path git does not recognise as a worktree is already in the desired
+        // end state: a session whose worktree was never built, or a repeated
+        // removal after a partial earlier one. Treat it as a no-op so callers
+        // can finish cleaning up the rest of the session instead of aborting.
+        if stderr.contains("is not a working tree") {
+            return Ok(());
+        }
+        bail!("git worktree remove failed: {}", stderr.trim());
     }
     Ok(())
 }
