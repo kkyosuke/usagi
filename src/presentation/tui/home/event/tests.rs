@@ -540,6 +540,19 @@ fn session_list_logs_the_sessions() {
 }
 
 #[test]
+fn session_list_with_sessions_opens_a_modal() {
+    // With sessions recorded, `session list` opens the scrollable Sessions modal
+    // (the empty-state path is a one-liner); Esc then dismisses it.
+    let mut keys = typed("session list");
+    keys.push(Ok(Key::Enter));
+    keys.push(Ok(Key::Escape));
+    assert!(matches!(
+        run(keys, state_with_sessions(&["alpha", "beta"])).unwrap(),
+        Outcome::Quit
+    ));
+}
+
+#[test]
 fn session_create_with_a_name_creates_immediately() {
     let mut keys = typed("session create newx");
     keys.push(Ok(Key::Enter));

@@ -17,6 +17,7 @@ use crate::domain::settings::SessionActionUi;
 use super::super::command::Effect;
 use super::super::state::{HomeState, PaneExit, ReturnMode, ROOT_NAME};
 use super::super::terminal_tabs::TabNav;
+use super::super::ui;
 use super::{paint_now, selected_dir, Flow, Wiring, CTRL_N, CTRL_O, CTRL_P};
 
 /// Handle one key in 統括 (Overview): edit / complete / recall the workspace
@@ -53,7 +54,15 @@ pub(super) fn overview_key(
                     let branches = (wiring.existing_branches)();
                     state.switch_begin_create(branches);
                 }
-                Effect::ListSessions => state.log_sessions(),
+                // `session list`: the state holds the sessions but not their
+                // wording — the ui layer formats them into the empty-state line
+                // or the scrollable modal, which we then apply.
+                Effect::ListSessions => match ui::content::session_list(state.sessions()) {
+                    ui::content::SessionList::Empty(line) => state.log_output(line),
+                    ui::content::SessionList::Modal(title, lines) => {
+                        state.open_text_modal(title, lines)
+                    }
+                },
                 // `session remove <name>` dispatches the removal to a background
                 // worker; the session leaves the list when the task finishes.
                 Effect::RemoveSession { name, force } => (wiring.dispatch_remove)(&name, force),
@@ -157,7 +166,9 @@ pub(super) fn switch_key(
     key: Key,
     wiring: &mut Wiring,
 ) -> Flow {
-    // While the inline create input is open it captures every key.
+    // While the inline create input is open it captures every key: Enter / Esc
+    // close it (lifecycle on the screen state), everything else edits the input
+    // through its own methods.
     if state.is_creating() {
         match key {
             Key::Enter => {
@@ -169,15 +180,24 @@ pub(super) fn switch_key(
                 }
             }
             Key::Escape => state.create_cancel(),
-            Key::Backspace => state.create_backspace(),
-            Key::Del => state.create_delete_forward(),
-            // ←/→/Home/End move the caret so the name can be edited mid-string.
-            Key::ArrowLeft => state.create_cursor_left(),
-            Key::ArrowRight => state.create_cursor_right(),
-            Key::Home => state.create_cursor_home(),
-            Key::End => state.create_cursor_end(),
-            Key::Char(c) => state.create_push_char(c),
-            _ => {}
+            // Editing keys route to the input's own methods; the guard above
+            // guarantees it is open.
+            _ => {
+                let create = state
+                    .create_mut()
+                    .expect("create input open while creating");
+                match key {
+                    Key::Backspace => create.backspace(),
+                    Key::Del => create.delete_forward(),
+                    // ←/→/Home/End move the caret mid-string.
+                    Key::ArrowLeft => create.move_left(),
+                    Key::ArrowRight => create.move_right(),
+                    Key::Home => create.move_home(),
+                    Key::End => create.move_end(),
+                    Key::Char(c) => create.push_char(c),
+                    _ => {}
+                }
+            }
         }
         return Flow::Continue;
     }
@@ -191,10 +211,17 @@ pub(super) fn switch_key(
                     state.apply_session_outcome(outcome);
                 }
             }
-            Key::Backspace => state.rename_backspace(),
             Key::Escape => state.rename_cancel(),
-            Key::Char(c) => state.rename_push_char(c),
-            _ => {}
+            _ => {
+                let rename = state
+                    .rename_mut()
+                    .expect("rename input open while renaming");
+                match key {
+                    Key::Backspace => rename.backspace(),
+                    Key::Char(c) => rename.push_char(c),
+                    _ => {}
+                }
+            }
         }
         return Flow::Continue;
     }
@@ -412,14 +439,19 @@ fn focus_prompt_key(
         Key::Tab => {
             let _ = state.focus_prompt_complete();
         }
-        Key::Backspace => state.focus_prompt_backspace(),
-        Key::Del => state.focus_prompt_delete_forward(),
+        // Editing keys route straight to the prompt's own TextInput methods.
+        Key::Backspace => {
+            state.focus_prompt_mut().backspace();
+        }
+        Key::Del => {
+            state.focus_prompt_mut().delete_forward();
+        }
         // ←/→/Home/End move the caret so the prompt can be edited mid-string.
-        Key::ArrowLeft => state.focus_prompt_cursor_left(),
-        Key::ArrowRight => state.focus_prompt_cursor_right(),
-        Key::Home => state.focus_prompt_cursor_home(),
-        Key::End => state.focus_prompt_cursor_end(),
-        Key::Char(c) => state.focus_prompt_push_char(c),
+        Key::ArrowLeft => state.focus_prompt_mut().move_left(),
+        Key::ArrowRight => state.focus_prompt_mut().move_right(),
+        Key::Home => state.focus_prompt_mut().move_home(),
+        Key::End => state.focus_prompt_mut().move_end(),
+        Key::Char(c) => state.focus_prompt_mut().insert(c),
         _ => {}
     }
 }

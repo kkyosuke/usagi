@@ -20,7 +20,9 @@ use crate::domain::settings::SessionActionUi;
 use crate::domain::version::Version;
 use crate::domain::workspace_state::{SessionRecord, WorktreeState};
 
-use super::command::{CommandInfo, CommandRegistry, CommandScope, Completion, Effect, Hint};
+use super::command::{
+    CommandInfo, CommandRegistry, CommandResult, CommandScope, Completion, Effect, Hint,
+};
 use super::tasks::TaskRow;
 use super::terminal_pool::MonitorSnapshot;
 use super::terminal_tabs::TabStrip;
@@ -34,11 +36,11 @@ mod mode;
 
 pub use list::{worktree_name, WorktreeList, ROOT_NAME};
 pub use log::{LineKind, LogLine};
-pub use modal::{RemoveModal, TextModal};
+pub use modal::{CreateInput, RemoveModal, RenameInput, TextModal};
 pub use mode::{Mode, PaneExit, ReturnMode};
 
 use list::session_row;
-use modal::{CreateInput, RenameInput};
+use modal::FocusMenu;
 
 /// The outcome of submitting the command line: the side effect to act on, plus
 /// the command that was recorded in history (so the event loop can persist it).
@@ -148,7 +150,7 @@ pub struct HomeState {
     /// from 切替. While set it captures the Switch mode's keys, like `create`.
     rename: Option<RenameInput>,
     /// The 在席 (Focus) menu cursor: which Session-scope command is highlighted.
-    focus_menu_cursor: usize,
+    focus_menu: FocusMenu,
     /// The 在席 (Focus) prompt buffer (the session-scoped command line).
     focus_prompt: TextInput,
     /// The session-removal modal, when open (the user ran `session remove`
@@ -227,7 +229,7 @@ impl HomeState {
             switch_return: ReturnMode::Overview,
             create: None,
             rename: None,
-            focus_menu_cursor: 0,
+            focus_menu: FocusMenu::default(),
             focus_prompt: TextInput::new(),
             remove_modal: None,
             sessions: Vec::new(),
@@ -334,30 +336,6 @@ impl HomeState {
         &self.sessions
     }
 
-    /// Show the recorded sessions (the `session list` command). With sessions it
-    /// opens a scrollable text modal; with none it reports the empty state in the
-    /// results band (a one-liner needs no modal).
-    pub fn log_sessions(&mut self) {
-        if self.sessions.is_empty() {
-            self.log.push(LogLine::output(
-                "No sessions yet. Run \"session create <name>\" to create one.",
-            ));
-            return;
-        }
-        let mut lines = vec![LogLine::output(format!(
-            "{} session(s):",
-            self.sessions.len()
-        ))];
-        for session in &self.sessions {
-            lines.push(LogLine::output(format!(
-                "  {}  ({} worktree(s))",
-                session.name,
-                session.worktrees.len()
-            )));
-        }
-        self.open_text_modal("Sessions", lines);
-    }
-
     /// Open a scrollable text modal showing `lines` under `title` (used by the
     /// text-dumping commands). Replaces any modal already open.
     pub fn open_text_modal(&mut self, title: impl Into<String>, lines: Vec<LogLine>) {
@@ -410,17 +388,6 @@ impl HomeState {
     /// Append an error line to the log.
     pub fn log_error(&mut self, text: impl Into<String>) {
         self.log.push(LogLine::error(text));
-    }
-
-    /// Append a hint that the session under the cursor has no live shell/agent,
-    /// so navigating to (or selecting) it only moved the cursor — pointing at
-    /// the commands that actually start one. Selecting an idle session never
-    /// spawns a shell on its own; starting one is always explicit and launches
-    /// the agent (with its MCP wiring) by default.
-    pub fn hint_no_live_session(&mut self) {
-        self.log.push(LogLine::notice(
-            "No live session here — run \":agent\" to start one (\":terminal\" for a plain shell).",
-        ));
     }
 
     pub fn list(&self) -> &WorktreeList {
@@ -670,7 +637,7 @@ impl HomeState {
         self.mode = Mode::Overview;
         self.create = None;
         self.focus_prompt.clear();
-        self.focus_menu_cursor = 0;
+        self.focus_menu.reset();
         self.input.clear();
         self.recall = None;
     }
@@ -709,10 +676,7 @@ impl HomeState {
     /// validated against it live so a duplicate or branch-namespace clash is
     /// flagged before Enter.
     pub fn switch_begin_create(&mut self, taken: Vec<String>) {
-        self.create = Some(CreateInput {
-            taken,
-            ..Default::default()
-        });
+        self.create = Some(CreateInput::new(taken));
     }
 
     /// Whether an inline create input is open in 切替.
@@ -720,77 +684,16 @@ impl HomeState {
         self.create.is_some()
     }
 
-    /// The inline create input's name typed so far, if open.
-    pub fn create_input(&self) -> Option<&str> {
-        self.create.as_ref().map(|c| c.input.value())
+    /// The inline create input, when open — its typed name, caret, and live
+    /// validation error are read through it ([`CreateInput`]).
+    pub fn create(&self) -> Option<&CreateInput> {
+        self.create.as_ref()
     }
 
-    /// The caret position in the inline create name, if open — so the renderer
-    /// can draw the caret where editing happens.
-    pub fn create_cursor(&self) -> Option<usize> {
-        self.create.as_ref().map(|c| c.input.cursor())
-    }
-
-    /// The inline create input's current validation error, if any.
-    pub fn create_error(&self) -> Option<&str> {
-        self.create.as_ref().and_then(|c| c.error.as_deref())
-    }
-
-    /// Insert a character at the caret of the inline create name (no-op when not
-    /// creating), re-validating live so the error reflects the new name.
-    pub fn create_push_char(&mut self, c: char) {
-        if let Some(create) = self.create.as_mut() {
-            create.input.insert(c);
-            create.error = validate_session_name(create.input.value(), &create.taken);
-        }
-    }
-
-    /// Delete the character before the caret of the inline create name (no-op
-    /// when not creating), re-validating live.
-    pub fn create_backspace(&mut self) {
-        if let Some(create) = self.create.as_mut() {
-            create.input.backspace();
-            create.error = validate_session_name(create.input.value(), &create.taken);
-        }
-    }
-
-    /// Delete the character at the caret of the inline create name (the `Del`
-    /// key; no-op when not creating), re-validating live.
-    pub fn create_delete_forward(&mut self) {
-        if let Some(create) = self.create.as_mut() {
-            create.input.delete_forward();
-            create.error = validate_session_name(create.input.value(), &create.taken);
-        }
-    }
-
-    /// Move the inline create caret one character left (no-op when not creating).
-    pub fn create_cursor_left(&mut self) {
-        if let Some(create) = self.create.as_mut() {
-            create.input.move_left();
-        }
-    }
-
-    /// Move the inline create caret one character right (no-op when not creating).
-    pub fn create_cursor_right(&mut self) {
-        if let Some(create) = self.create.as_mut() {
-            create.input.move_right();
-        }
-    }
-
-    /// Move the inline create caret to the start of the name (no-op when not
-    /// creating).
-    pub fn create_cursor_home(&mut self) {
-        if let Some(create) = self.create.as_mut() {
-            create.input.move_home();
-        }
-    }
-
-    /// Move the inline create caret to the end of the name (no-op when not
-    /// creating).
-    pub fn create_cursor_end(&mut self) {
-        if let Some(create) = self.create.as_mut() {
-            create.input.move_end();
-        }
+    /// The inline create input for editing, when open: the event loop routes the
+    /// 切替 keys to its own methods ([`CreateInput::push_char`] etc.).
+    pub fn create_mut(&mut self) -> Option<&mut CreateInput> {
+        self.create.as_mut()
     }
 
     /// Cancel inline creation, staying in 切替.
@@ -800,23 +703,11 @@ impl HomeState {
 
     /// Validate and accept the inline create name. On success the input closes
     /// and the trimmed name is returned (for the event loop to create the
-    /// session); on an invalid name (empty, a path separator, a duplicate, or a
-    /// branch-namespace clash) the input stays open with the same inline error
-    /// shown live and `None` is returned. A no-op (returning `None`) when not
-    /// creating.
+    /// session); on an invalid name the input stays open with the inline error
+    /// shown live and `None` is returned (see [`CreateInput::confirm`]). A no-op
+    /// (returning `None`) when not creating.
     pub fn switch_confirm_create(&mut self) -> Option<String> {
-        let create = self.create.as_mut()?;
-        let name = create.input.value().trim().to_string();
-        // Enter on an empty name is the one case live validation stays quiet
-        // about (it does not nag while nothing is typed), so guard it here.
-        if name.is_empty() {
-            create.error = Some("Name must not be empty.".to_string());
-            return None;
-        }
-        if let Some(error) = validate_session_name(create.input.value(), &create.taken) {
-            create.error = Some(error);
-            return None;
-        }
+        let name = self.create.as_mut()?.confirm()?;
         self.create = None;
         Some(name)
     }
@@ -836,11 +727,11 @@ impl HomeState {
         let target = worktree_name(worktree).to_string();
         // Pre-fill with the label currently shown so the user edits rather than
         // retypes; an unset override pre-fills with the session name.
-        let input = self
+        let label = self
             .list
             .display_label(self.list.selected_index() - 1)
             .to_string();
-        self.rename = Some(RenameInput { target, input });
+        self.rename = Some(RenameInput::new(target, label));
         true
     }
 
@@ -849,29 +740,16 @@ impl HomeState {
         self.rename.is_some()
     }
 
-    /// The label typed so far in the inline rename input, if open.
-    pub fn rename_input(&self) -> Option<&str> {
-        self.rename.as_ref().map(|r| r.input.as_str())
+    /// The inline rename input, when open — its target session and typed label
+    /// are read through it ([`RenameInput`]).
+    pub fn rename(&self) -> Option<&RenameInput> {
+        self.rename.as_ref()
     }
 
-    /// The name of the session being renamed (its branch / identity), if open.
-    pub fn rename_target(&self) -> Option<&str> {
-        self.rename.as_ref().map(|r| r.target.as_str())
-    }
-
-    /// Append a character to the inline rename label (no-op when not renaming).
-    pub fn rename_push_char(&mut self, c: char) {
-        if let Some(rename) = self.rename.as_mut() {
-            rename.input.push(c);
-        }
-    }
-
-    /// Delete the last character of the inline rename label (no-op when not
-    /// renaming).
-    pub fn rename_backspace(&mut self) {
-        if let Some(rename) = self.rename.as_mut() {
-            rename.input.pop();
-        }
+    /// The inline rename input for editing, when open: the event loop routes the
+    /// 切替 keys to its own methods ([`RenameInput::push_char`] etc.).
+    pub fn rename_mut(&mut self) -> Option<&mut RenameInput> {
+        self.rename.as_mut()
     }
 
     /// Cancel inline renaming, staying in 切替.
@@ -881,12 +759,10 @@ impl HomeState {
 
     /// Accept the inline rename: close the input and return the target session
     /// name together with the typed label (trimmed), for the event loop to
-    /// persist. The label is returned as typed — an empty one means "clear the
-    /// override", which the usecase resolves. A no-op (returning `None`) when not
-    /// renaming.
+    /// persist (see [`RenameInput::confirm`]). A no-op (returning `None`) when
+    /// not renaming.
     pub fn switch_confirm_rename(&mut self) -> Option<(String, String)> {
-        let rename = self.rename.take()?;
-        Some((rename.target, rename.input.trim().to_string()))
+        Some(self.rename.take()?.confirm())
     }
 
     // --- 在席 (Focus) ------------------------------------------------------
@@ -899,7 +775,7 @@ impl HomeState {
         self.list.activate_selected();
         self.mode = Mode::Focus;
         self.create = None;
-        self.focus_menu_cursor = 0;
+        self.focus_menu.reset();
         self.focus_prompt.clear();
     }
 
@@ -935,31 +811,26 @@ impl HomeState {
 
     /// The 在席 menu cursor (which Session-scope command is highlighted).
     pub fn focus_menu_cursor(&self) -> usize {
-        self.focus_menu_cursor
+        self.focus_menu.cursor()
     }
 
-    /// Move the 在席 menu cursor up one row, wrapping. The Session-scope command
-    /// list is always non-empty, so `count` is clamped to at least 1 to stay
-    /// underflow-safe.
+    /// Move the 在席 menu cursor up one row, wrapping (delegated to [`FocusMenu`],
+    /// which keeps it underflow-safe against the current command count).
     pub fn focus_menu_move_up(&mut self) {
-        let count = self.focus_menu_commands().len().max(1);
-        self.focus_menu_cursor = self.focus_menu_cursor.checked_sub(1).unwrap_or(count - 1);
+        let count = self.focus_menu_commands().len();
+        self.focus_menu.move_up(count);
     }
 
-    /// Move the 在席 menu cursor down one row, wrapping. See [`focus_menu_move_up`]
-    /// for the non-empty invariant.
-    ///
-    /// [`focus_menu_move_up`]: Self::focus_menu_move_up
+    /// Move the 在席 menu cursor down one row, wrapping (delegated to [`FocusMenu`]).
     pub fn focus_menu_move_down(&mut self) {
-        let count = self.focus_menu_commands().len().max(1);
-        self.focus_menu_cursor = (self.focus_menu_cursor + 1) % count;
+        let count = self.focus_menu_commands().len();
+        self.focus_menu.move_down(count);
     }
 
     /// The 在席 command under the menu cursor, clamped to the available commands.
     pub fn focus_selected_command(&self) -> CommandInfo {
         let commands = self.focus_menu_commands();
-        let index = self.focus_menu_cursor.min(commands.len().saturating_sub(1));
-        commands[index]
+        commands[self.focus_menu.selected(commands.len())]
     }
 
     /// The 在席 prompt buffer (the session-scoped command line).
@@ -973,39 +844,11 @@ impl HomeState {
         self.focus_prompt.cursor()
     }
 
-    /// Insert a character at the caret of the 在席 prompt.
-    pub fn focus_prompt_push_char(&mut self, c: char) {
-        self.focus_prompt.insert(c);
-    }
-
-    /// Delete the character before the caret of the 在席 prompt.
-    pub fn focus_prompt_backspace(&mut self) {
-        self.focus_prompt.backspace();
-    }
-
-    /// Delete the character at the caret of the 在席 prompt (the `Del` key).
-    pub fn focus_prompt_delete_forward(&mut self) {
-        self.focus_prompt.delete_forward();
-    }
-
-    /// Move the 在席 prompt caret one character left.
-    pub fn focus_prompt_cursor_left(&mut self) {
-        self.focus_prompt.move_left();
-    }
-
-    /// Move the 在席 prompt caret one character right.
-    pub fn focus_prompt_cursor_right(&mut self) {
-        self.focus_prompt.move_right();
-    }
-
-    /// Move the 在席 prompt caret to the start of the line.
-    pub fn focus_prompt_cursor_home(&mut self) {
-        self.focus_prompt.move_home();
-    }
-
-    /// Move the 在席 prompt caret to the end of the line.
-    pub fn focus_prompt_cursor_end(&mut self) {
-        self.focus_prompt.move_end();
+    /// The 在席 prompt's editable buffer: the event loop routes its keys straight
+    /// to the [`TextInput`]'s own editing methods (`insert` / `backspace` /
+    /// `move_left` …), so the prompt has no per-key forwarders of its own.
+    pub fn focus_prompt_mut(&mut self) -> &mut TextInput {
+        &mut self.focus_prompt
     }
 
     /// Tab-complete the 在席 prompt's command word against the Session-scope
@@ -1038,19 +881,15 @@ impl HomeState {
                 recorded: None,
             };
         }
-        let result =
-            self.registry
-                .dispatch_with(&entry, &self.history, &self.list.refs(), &self.issues);
-        self.history.push(entry.clone());
-        // A text-dumping utility (`man` / `history`) run from the prompt shows its
-        // output in a modal, like in 統括; everything else appends to the log.
-        if let Effect::ShowText(title) = result.effect {
-            self.open_text_modal(title, result.lines);
-        } else {
-            self.log.extend(result.lines);
-        }
+        // Mark where this response begins (before any lines it appends), exactly
+        // as the 統括 line does, so a later switch to Overview shows only this
+        // command's response — the prompt has no echo line, so the response
+        // starts at the current log end.
+        self.response_start = self.log.len();
+        let result = self.dispatch_and_record(&entry);
+        let effect = self.record_response(result);
         Submission {
-            effect: result.effect,
+            effect,
             recorded: Some(entry),
         }
     }
@@ -1156,32 +995,51 @@ impl HomeState {
         // begins (the command echo), so everything earlier drops out of view.
         self.response_start = self.log.len();
         self.log.push(LogLine::command(entry.clone()));
+        let result = self.dispatch_and_record(&entry);
+        let effect = self.record_response(result);
+        Submission {
+            effect,
+            recorded: Some(entry),
+        }
+    }
+
+    /// Dispatch `entry` as a command and record it in command history, returning
+    /// the raw result. The shared core of [`submit`](Self::submit) (統括 line) and
+    /// [`focus_prompt_submit`](Self::focus_prompt_submit) (在席 prompt) so both
+    /// record history identically; folding the result into the log is
+    /// [`record_response`](Self::record_response).
+    fn dispatch_and_record(&mut self, entry: &str) -> CommandResult {
         let result =
             self.registry
-                .dispatch_with(&entry, &self.history, &self.list.refs(), &self.issues);
-        self.history.push(entry.clone());
+                .dispatch_with(entry, &self.history, &self.list.refs(), &self.issues);
+        self.history.push(entry.to_string());
+        result
+    }
 
+    /// Fold a command `result` into the log and advance the results-band start,
+    /// returning the side effect for the caller to act on. Shared by both command
+    /// surfaces so they reflect a result identically:
+    ///
+    /// - `Clear` empties the log (and resets the band);
+    /// - `EnterSwitch` / `Activate` append nothing (the event loop owns those
+    ///   mode transitions);
+    /// - a text dump (`man` / `history`) opens a scrollable modal and leaves the
+    ///   band empty;
+    /// - everything else appends its lines to the log.
+    fn record_response(&mut self, result: CommandResult) -> Effect {
         match result.effect {
             Effect::Clear => {
                 self.log.clear();
                 self.response_start = 0;
             }
-            // `session switch` (→ 切替) and `session switch <name>` (→ 在席) are
-            // resolved by the event loop, which owns the mode transitions (and, for
-            // a live session, the pane). They append no lines here.
             Effect::EnterSwitch | Effect::Activate(_) => {}
-            // Text-dumping commands (`man` / `history`) show their output in a
-            // scrollable modal, not the band; leave the band empty for them.
             Effect::ShowText(title) => {
                 self.open_text_modal(title, result.lines);
                 self.response_start = self.log.len();
             }
             _ => self.log.extend(result.lines),
         }
-        Submission {
-            effect: result.effect,
-            recorded: Some(entry),
-        }
+        result.effect
     }
 
     /// Apply the result of a session-creation attempt: log its line and, when
@@ -1197,55 +1055,23 @@ impl HomeState {
         }
     }
 
-    /// The open session-removal modal, if any.
+    /// The open session-removal modal, if any — its names, cursor, and checked
+    /// rows are read and navigated through it ([`RemoveModal`]).
     pub fn remove_modal(&self) -> Option<&RemoveModal> {
         self.remove_modal.as_ref()
+    }
+
+    /// The open session-removal modal for navigation, if any: the event loop
+    /// routes its keys to the modal's own methods ([`RemoveModal::move_up`] etc.).
+    pub fn remove_modal_mut(&mut self) -> Option<&mut RemoveModal> {
+        self.remove_modal.as_mut()
     }
 
     /// Open the session-removal modal, seeded with the current session names and
     /// nothing selected. `force` is carried from `session remove --force`.
     pub fn open_remove_modal(&mut self, force: bool) {
-        self.remove_modal = Some(RemoveModal {
-            names: self.sessions.iter().map(|s| s.name.clone()).collect(),
-            cursor: 0,
-            selected: HashSet::new(),
-            force,
-        });
-    }
-
-    /// Move the removal cursor up one row, wrapping to the bottom. No-op when
-    /// the modal is closed or has no sessions.
-    pub fn remove_modal_move_up(&mut self) {
-        if let Some(modal) = self.remove_modal.as_mut() {
-            if modal.names.is_empty() {
-                return;
-            }
-            modal.cursor = modal.cursor.checked_sub(1).unwrap_or(modal.names.len() - 1);
-        }
-    }
-
-    /// Move the removal cursor down one row, wrapping to the top. No-op when the
-    /// modal is closed or has no sessions.
-    pub fn remove_modal_move_down(&mut self) {
-        if let Some(modal) = self.remove_modal.as_mut() {
-            if modal.names.is_empty() {
-                return;
-            }
-            modal.cursor = (modal.cursor + 1) % modal.names.len();
-        }
-    }
-
-    /// Toggle the checked state of the session under the cursor. No-op when the
-    /// modal is closed or has no sessions.
-    pub fn remove_modal_toggle(&mut self) {
-        if let Some(modal) = self.remove_modal.as_mut() {
-            if modal.names.is_empty() {
-                return;
-            }
-            if !modal.selected.insert(modal.cursor) {
-                modal.selected.remove(&modal.cursor);
-            }
-        }
+        let names = self.sessions.iter().map(|s| s.name.clone()).collect();
+        self.remove_modal = Some(RemoveModal::new(names, force));
     }
 
     /// Close the removal modal, discarding any selection.
@@ -1255,57 +1081,13 @@ impl HomeState {
 
     /// Confirm the removal modal: close it and return the checked session names
     /// (in display order) together with the `--force` flag, for the event loop
-    /// to remove each. Returns `None` when nothing is checked, leaving the modal
-    /// open so the user can pick something or cancel. A no-op (returning `None`)
-    /// when the modal is closed.
+    /// to remove each (see [`RemoveModal::confirm`]). Returns `None` when nothing
+    /// is checked, leaving the modal open; also `None` when it is closed.
     pub fn submit_remove_modal(&mut self) -> Option<(Vec<String>, bool)> {
-        let modal = self.remove_modal.as_ref()?;
-        if modal.selected.is_empty() {
-            return None;
-        }
-        let names = modal
-            .names
-            .iter()
-            .enumerate()
-            .filter(|(i, _)| modal.selected.contains(i))
-            .map(|(_, name)| name.clone())
-            .collect();
-        let force = modal.force;
+        let result = self.remove_modal.as_ref()?.confirm()?;
         self.remove_modal = None;
-        Some((names, force))
+        Some(result)
     }
-}
-
-/// Validate a typed session name against the branch names already taken, used
-/// for the live inline-create feedback. Returns the reason the name cannot be
-/// used, or `None` when it is usable.
-///
-/// An empty (or all-whitespace) name returns `None` — the input does not nag
-/// while nothing has been typed; the empty case is rejected only on Enter (see
-/// [`HomeState::switch_confirm_create`]). The checks mirror what
-/// [`crate::usecase::session::create`] enforces, so the inline message matches
-/// the eventual outcome:
-///
-/// - a path separator (`/`, `\`, `.`, `..`) — not a legal session name;
-/// - an exact duplicate of an existing branch;
-/// - a clash with an existing branch nested under `<name>/` (git cannot create
-///   the `<name>` branch alongside `<name>/…`).
-fn validate_session_name(name: &str, taken: &[String]) -> Option<String> {
-    let name = name.trim();
-    if name.is_empty() {
-        return None;
-    }
-    if name.contains('/') || name.contains('\\') || name == "." || name == ".." {
-        return Some("\"/\" cannot be used in a name.".to_string());
-    }
-    if taken.iter().any(|b| b == name) {
-        return Some(format!("\"{name}\" already exists."));
-    }
-    let prefix = format!("{name}/");
-    if let Some(conflict) = taken.iter().find(|b| b.starts_with(&prefix)) {
-        return Some(format!("\"{name}\" conflicts with branch \"{conflict}\"."));
-    }
-    None
 }
 
 #[cfg(test)]
