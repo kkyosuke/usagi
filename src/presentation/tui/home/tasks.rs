@@ -30,6 +30,13 @@ use super::state::LogLine;
 /// as live motion while the git work proceeds.
 const SPIN_TICK: Duration = Duration::from_millis(110);
 
+/// The shortest time a task's spinner shows before its row may flip to a result.
+/// A session create / remove often finishes in well under a second, so without
+/// this floor the spinner would barely move before snapping to a static result —
+/// reading as a frozen animation. Holding the spinner for at least one near-full
+/// braille cycle makes even an instant task read as live work that then settles.
+const MIN_SPIN: Duration = Duration::from_millis(700);
+
 /// How long a finished task's row lingers in the panel after it completes before
 /// [`view`](TaskHandle::view) drops it. Long enough to read the result, short
 /// enough that the panel keeps pace with frequent session operations.
@@ -94,9 +101,14 @@ pub struct TaskRow {
 enum Phase {
     /// Running, started at `started` (the spinner frame is derived from it).
     Running { started: Instant },
-    /// Finished at `finished`; `ok` styles the mark, and the row lingers until
-    /// [`DISMISS`] elapses.
-    Done { ok: bool, finished: Instant },
+    /// Finished at `finished`; `ok` styles the mark. `started` is kept so the
+    /// spinner can be held for [`MIN_SPIN`] before the row flips to the mark, and
+    /// the row lingers until [`DISMISS`] after `finished`.
+    Done {
+        ok: bool,
+        started: Instant,
+        finished: Instant,
+    },
 }
 
 /// One tracked task.
@@ -108,16 +120,14 @@ struct Task {
 
 impl Task {
     /// The panel row for this task at `now` (the spinner frame for a running
-    /// task is derived from how long it has run).
+    /// task is derived from how long it has run). A finished task keeps spinning
+    /// until it has shown its spinner for [`MIN_SPIN`], so an instant task still
+    /// reads as live work before its result settles in.
     fn row(&self, now: Instant) -> TaskRow {
         match self.phase {
-            Phase::Running { started } => {
-                let frame = (now.saturating_duration_since(started).as_millis()
-                    / SPIN_TICK.as_millis()) as usize;
-                TaskRow {
-                    label: format!("{}中… {}", self.kind.verb(), self.target),
-                    mark: TaskMark::Running(frame),
-                }
+            Phase::Running { started } => self.running_row(started, now),
+            Phase::Done { started, .. } if now.saturating_duration_since(started) < MIN_SPIN => {
+                self.running_row(started, now)
             }
             Phase::Done { ok, .. } => {
                 let suffix = if ok { "完了" } else { "失敗" };
@@ -126,6 +136,17 @@ impl Task {
                     mark: TaskMark::Done(ok),
                 }
             }
+        }
+    }
+
+    /// The spinning row for a task that began at `started`, shown both while it
+    /// runs and during the [`MIN_SPIN`] hold after a fast finish.
+    fn running_row(&self, started: Instant, now: Instant) -> TaskRow {
+        let frame =
+            (now.saturating_duration_since(started).as_millis() / SPIN_TICK.as_millis()) as usize;
+        TaskRow {
+            label: format!("{}中… {}", self.kind.verb(), self.target),
+            mark: TaskMark::Running(frame),
         }
     }
 
@@ -201,7 +222,14 @@ impl TaskHandle {
     pub fn complete_at(&self, id: u64, ok: bool, completion: Completion, at: Instant) {
         let mut board = self.lock();
         if let Some((_, task)) = board.tasks.iter_mut().find(|(i, _)| *i == id) {
-            task.phase = Phase::Done { ok, finished: at };
+            let started = match task.phase {
+                Phase::Running { started } | Phase::Done { started, .. } => started,
+            };
+            task.phase = Phase::Done {
+                ok,
+                started,
+                finished: at,
+            };
         }
         board.completed.push(completion);
     }
@@ -286,9 +314,9 @@ mod tests {
         let t0 = Instant::now();
         let id = handle.begin_at(TaskKind::RemoveSession, "feat/x", t0);
         handle.complete_at(id, true, completion(), t0);
-        // The row flips to a success mark…
+        // Once the spinner has shown for MIN_SPIN the row flips to a success mark…
         assert_eq!(
-            handle.view(t0),
+            handle.view(t0 + MIN_SPIN),
             vec![TaskRow {
                 label: "削除完了 feat/x".to_string(),
                 mark: TaskMark::Done(true),
@@ -308,10 +336,39 @@ mod tests {
         let id = handle.begin_at(TaskKind::CreateSession, "dup", t0);
         handle.complete_at(id, false, completion(), t0);
         assert_eq!(
-            handle.view(t0),
+            handle.view(t0 + MIN_SPIN),
             vec![TaskRow {
                 label: "作成失敗 dup".to_string(),
                 mark: TaskMark::Done(false),
+            }]
+        );
+    }
+
+    #[test]
+    fn an_instant_finish_still_spins_for_min_spin_before_settling() {
+        // A task that finishes almost immediately keeps showing its spinner until
+        // MIN_SPIN has elapsed, so the row reads as live work rather than a result
+        // that flashes in with no motion.
+        let handle = TaskHandle::new();
+        let t0 = Instant::now();
+        let id = handle.begin_at(TaskKind::CreateSession, "fast", t0);
+        handle.complete_at(id, true, completion(), t0);
+        // Right after finishing, the row is still the spinner (frame advancing).
+        assert_eq!(
+            handle.view(t0 + Duration::from_millis(330)),
+            vec![TaskRow {
+                label: "作成中… fast".to_string(),
+                mark: TaskMark::Running(3),
+            }]
+        );
+        // It stays active through the hold so the screen keeps animating.
+        assert!(handle.is_active(t0 + Duration::from_millis(330)));
+        // Only once MIN_SPIN has passed does it settle to the result mark.
+        assert_eq!(
+            handle.view(t0 + MIN_SPIN),
+            vec![TaskRow {
+                label: "作成完了 fast".to_string(),
+                mark: TaskMark::Done(true),
             }]
         );
     }
