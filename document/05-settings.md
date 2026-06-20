@@ -126,6 +126,7 @@ CLI からも設定を確認・編集できます（[3. コマンドリファレ
 | 環境変数 | 役割 |
 |---|---|
 | `USAGI_HOME` | グローバルデータディレクトリ（`workspaces.json` / `settings.json` の置き場）を上書きする。未設定なら `~/.usagi` |
+| `USAGI_AGENT_TIMEOUT_SECS` | MCP の [`session_prompt`](03-commands/03-mcp.md#session_prompt-の挙動) がエージェント CLI の完了を待つ上限秒数。未設定・不正値なら既定の 600 秒。`0` で無制限（従来どおり待ち続ける） |
 
 ## 設定が効く場面
 
