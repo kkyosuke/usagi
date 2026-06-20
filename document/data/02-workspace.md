@@ -176,7 +176,8 @@ worktree を束ねます。各 worktree は git ステータス付き（下記 `
 | 関数 | 役割 |
 |---|---|
 | `inspect_worktree(path, default)` | 1 つの worktree の git ステータス（ブランチ・HEAD・上流・未コミット変更・ahead/behind）から `WorktreeState` を組み立てる。ブランチ・HEAD・上流・未コミット変更は `git status --porcelain=v2 --branch` 1 回でまとめて取得する。分類の基準となる既定ブランチ `default` は呼び出し側が渡す |
-| `sync(cwd)` | 保存済み state を読み込み、各セッション worktree のステータスを再計算して `<repo>/.usagi/state.json` に保存して返す（セッションが無ければ空の state を保存）。既定ブランチはリポジトリ単位の属性なので worktree ごとに引き直さず、`sync` で 1 回だけ解決して各 `inspect_worktree` に渡す |
+| `inspect_worktrees(paths)` | worktree パスのリストを検査して `Vec<WorktreeState>` を返す共通ヘルパ。既定ブランチはリポジトリ単位の属性なので、各 worktree の属するリポジトリごとに 1 回だけ解決して使い回し、検査自体は並列に行う。セッション記録（`usecase/session` の `record`）と `sync` の両方がこれを使うので、両者が別実装に分かれない |
+| `sync(cwd)` | 保存済み state を読み込み、各セッション worktree のステータスを再計算して `<repo>/.usagi/state.json` に保存して返す（セッションが無ければ空の state を保存）。全セッションの worktree をまとめて `inspect_worktrees` に渡し、既定ブランチをリポジトリ単位で 1 回だけ解決する |
 | `load(cwd)` | 保存済みの状態を読み込む（無ければ `None`） |
 
 ### 更新タイミング
