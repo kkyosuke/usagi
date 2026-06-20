@@ -888,7 +888,7 @@ fn right_pane_shows_the_focus_menu_or_prompt() {
     state.set_session_action_ui(SessionActionUi::Prompt);
     state.enter_focus(1);
     for c in "ter".chars() {
-        state.focus_prompt_push_char(c);
+        state.focus_prompt_mut().insert(c);
     }
     let prompt = stripped(&right_pane_contents(&state, 40, 12));
     assert!(prompt.contains("session: main"));
@@ -903,7 +903,7 @@ fn focus_prompt_shows_usage_for_arguments() {
     state.set_session_action_ui(SessionActionUi::Prompt);
     state.enter_focus(1);
     for c in "terminal ".chars() {
-        state.focus_prompt_push_char(c);
+        state.focus_prompt_mut().insert(c);
     }
     let prompt = stripped(&right_pane_contents(&state, 60, 12));
     assert!(prompt.contains("usage"));
@@ -917,7 +917,7 @@ fn focus_prompt_has_no_hint_for_an_unknown_command_word() {
     state.set_session_action_ui(SessionActionUi::Prompt);
     state.enter_focus(1);
     for c in "zzz".chars() {
-        state.focus_prompt_push_char(c);
+        state.focus_prompt_mut().insert(c);
     }
     // The header, blank, and prompt lines are present, but no hint rows follow.
     let rows = right_pane_contents(&state, 60, 12);
@@ -1463,7 +1463,7 @@ fn render_frame_shows_the_inline_create_row_in_switch() {
     state.enter_switch(super::super::state::ReturnMode::Overview);
     state.switch_begin_create(Vec::new());
     for c in "wip".chars() {
-        state.create_push_char(c);
+        state.create_mut().unwrap().push_char(c);
     }
     let frame = render_frame(24, 80, &state);
     let joined = console::strip_ansi_codes(&frame.join("\n")).into_owned();
@@ -1486,7 +1486,7 @@ fn render_frame_shows_the_inline_rename_row_in_switch() {
     state.switch_move_down(); // cursor onto "main"
     assert!(state.switch_begin_rename());
     for c in " 2".chars() {
-        state.rename_push_char(c);
+        state.rename_mut().unwrap().push_char(c);
     }
     let frame = render_frame(24, 80, &state);
     let joined = console::strip_ansi_codes(&frame.join("\n")).into_owned();
@@ -1641,7 +1641,7 @@ fn remove_modal_row_clips_a_long_name() {
 fn render_frame_overlays_the_removal_modal_with_a_checklist() {
     let mut state = state_with_sessions(&["alpha", "beta"]);
     state.open_remove_modal(false);
-    state.remove_modal_toggle();
+    state.remove_modal_mut().unwrap().toggle();
     let frame = render_frame(24, 80, &state);
     let joined = console::strip_ansi_codes(&frame.join("\n")).into_owned();
     assert!(joined.contains("Remove sessions"));
@@ -1698,7 +1698,7 @@ fn remove_modal_frame_scrolls_to_keep_the_cursor_visible() {
     let mut state = state_with_sessions(&refs);
     state.open_remove_modal(false);
     for _ in 0..9 {
-        state.remove_modal_move_down();
+        state.remove_modal_mut().unwrap().move_down();
     }
     let frame = render_frame(24, 80, &state);
     let joined = console::strip_ansi_codes(&frame.join("\n")).into_owned();
