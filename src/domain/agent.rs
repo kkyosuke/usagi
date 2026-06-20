@@ -32,7 +32,19 @@ pub trait Agent: Send + Sync {
     /// session picks up where it left off; CLIs without a resume notion ignore
     /// it. The caller decides whether to resume from
     /// [`has_resumable_session`](Self::has_resumable_session).
-    fn launch_command(&self, wiring: &AgentWiring, resume: bool) -> String;
+    ///
+    /// `initial_prompt` is an opening message to hand the agent on launch (e.g. a
+    /// prompt queued for the session via MCP `session_prompt`, delivered through
+    /// [`agent_prompt_store`](crate::infrastructure::agent_prompt_store)). When
+    /// `Some`, the agent starts in its interactive mode already working on that
+    /// prompt; when `None` it starts idle. A CLI that cannot take an opening
+    /// prompt ignores it and launches plain.
+    fn launch_command(
+        &self,
+        wiring: &AgentWiring,
+        resume: bool,
+        initial_prompt: Option<&str>,
+    ) -> String;
 
     /// Whether a prior conversation this CLI could resume exists for the
     /// worktree at `dir` — checked so `:agent` only passes the resume flag when

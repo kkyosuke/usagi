@@ -318,8 +318,6 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
         // It is built unconditionally (not just for `run_agent`) so a later
         // `Ctrl-O a` can spawn an agent pane too.
         let resume = agent.has_resumable_session(dir);
-        let agent_command = agent.launch_command(&agent_wiring, resume);
-        let initial = Some(agent_command.as_str());
         let label = home
             .list()
             .worktrees()
@@ -334,6 +332,27 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
             });
         let mut pool = pool.borrow_mut();
         let handle = pool.monitor();
+        // Deliver a prompt queued for this session (via MCP `session_prompt`) only
+        // when this attach will *freshly spawn* its agent pane — `add_pane` always
+        // spawns; `enter` spawns only when no pane is live yet. Taking it makes the
+        // prompt one-shot; if no fresh agent spawn happens it stays queued for the
+        // next launch. The agent then opens already working on that prompt.
+        let fresh_agent_spawn = run_agent && (new_pane || !pool.has_live_pane(dir));
+        let queued_prompt = if fresh_agent_spawn {
+            crate::infrastructure::agent_prompt_store::take(dir)
+        } else {
+            None
+        };
+        // The command for this fresh spawn carries the queued prompt; the command
+        // reused for later `Ctrl-O a` agent tabs never re-sends that one-shot
+        // prompt, so only the first launch receives it.
+        let spawn_command = agent.launch_command(&agent_wiring, resume, queued_prompt.as_deref());
+        let plain_command = match queued_prompt {
+            Some(_) => agent.launch_command(&agent_wiring, resume, None),
+            None => spawn_command.clone(),
+        };
+        let initial = Some(spawn_command.as_str());
+        let later_initial = Some(plain_command.as_str());
         // Ready the pane to drive: add a fresh one (在席's `terminal` / `agent`)
         // or re-attach the session's active pane (spawning the first when the
         // session is new).
@@ -375,12 +394,18 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
                             term,
                             dir,
                             terminal_tabs::PaneKind::Terminal,
-                            initial,
+                            later_initial,
                             &label,
                         )?;
                     }
                     terminal_pane::PaneStep::NewAgentTab => {
-                        pool.add_pane(term, dir, terminal_tabs::PaneKind::Agent, initial, &label)?;
+                        pool.add_pane(
+                            term,
+                            dir,
+                            terminal_tabs::PaneKind::Agent,
+                            later_initial,
+                            &label,
+                        )?;
                     }
                     // `Ctrl-W`: close the active tab. Same as a shell that exited —
                     // keep driving when a pane remains, else fall to 在席.

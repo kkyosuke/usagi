@@ -89,12 +89,12 @@ usecase/issue, usecase/memory, usecase/session … create/get/list/search/update
         │
         ▼
 infrastructure/{issue_store, memory_store} … <repo>/.usagi/{issues,memory}/ の markdown + index.json
-（テスト時）FakeBackend / （本番）CliAgentBackend → `<agent> -p <prompt>`
+（テスト時）FakeBackend / （本番）CliAgentBackend → agent-prompts/ へキュー（TUI が起動時に消費）
 ```
 
 | モジュール | 役割 |
 |---|---|
-| `presentation/cli/mcp.rs` | `usagi mcp` のエントリ。カレントディレクトリから workspace root を解決（`usecase/session::workspace_root`）して `UsagiMcpServer` を構築し、stdin を 1 行ずつ読み `handle_line` の戻り値を stdout へ書く。`session_prompt` 用の本番 `AgentBackend`（エージェント CLI へのシェルアウト）もここに置く。ブロッキング I/O のみで、`hop` 同様カバレッジ計測の対象外。 |
+| `presentation/cli/mcp.rs` | `usagi mcp` のエントリ。カレントディレクトリから workspace root を解決（`usecase/session::workspace_root`）して `UsagiMcpServer` を構築し、stdin を 1 行ずつ読み `handle_line` の戻り値を stdout へ書く。`session_prompt` 用の本番 `AgentBackend`（プロンプトを `agent-prompts/` へキュー）もここに置く。ブロッキング I/O のみで、`hop` 同様カバレッジ計測の対象外。 |
 | `presentation/mcp/mod.rs` | JSON-RPC 2.0 の共有フレーミング（`dispatch_line` / レスポンス整形 / `McpService` トレイト）。各サーバが共有。 |
 | `presentation/mcp/usagi.rs` | `usagi` サーバの `UsagiMcpServer`。issue/memory サーバと session サーバを合成し、`tool_schemas` / `call_tool` で両者の tool をマージ・振り分けて 1 サーバで公開する。ユニットテストで網羅。 |
 | `presentation/mcp/issue/` | issue tool を提供する `McpServer`。`tool_schemas` / `call_tool` で `presentation/mcp/memory.rs` の memory tool をマージする。 |
@@ -127,7 +127,7 @@ presentation に閉じています（[2. アーキテクチャ](../02-architectu
 | `memory_delete` | `name` | — | `{ "name": "…", "deleted": bool }` |
 | `session_create` | `name` | — | 作成されたセッション（`name` / `root` / `worktrees`） |
 | `session_list` | — | — | セッション配列（各要素に `name` / `root` / `created_at` / `worktrees`） |
-| `session_prompt` | `name` / `prompt` | — | 対象セッションのエージェントの応答テキスト |
+| `session_prompt` | `name` / `prompt` | — | プロンプトを対象セッションにキューした旨の確認メッセージ（[挙動](#session_prompt-の挙動)） |
 
 - `status` は `todo` / `in-progress` / `done`、`priority` は `high` / `medium` / `low`、`type`（memory）は `user` / `feedback` / `project` / `reference`。
 - `memory_save` は **`name` が既存なら上書き**（in-place 更新、`created_at` は保持）。`name` は与えた文字列をスラッグ化して識別子にします。
@@ -151,16 +151,20 @@ presentation に閉じています（[2. アーキテクチャ](../02-architectu
 
 ## `session_prompt` の挙動
 
-`session_prompt` は、対象セッションの **worktree をカレントディレクトリにして、設定された
-エージェント CLI をヘッドレス（print）モードで起動**し（`<agent> -p <prompt>`）、その標準出力を
-応答として返します。
+`session_prompt` は、対象セッションの worktree に**プロンプトをキュー（queue）するだけ**で、その場では
+エージェントを起動しません。`usagi mcp` は動作中の TUI に手を伸ばしてペインを操作できない別プロセスのため、
+プロンプトを worktree 別の一時ファイル（[`agent-prompts/`](../data/01-global.md#agent-prompts)）へ保存し、
+**ホーム画面がそのセッションのエージェントペインを次にフレッシュ起動するとき**に取り出して、エージェントの
+**最初のメッセージ**として渡します。これにより委譲したプロンプトは、デタッチで走るのではなく、
+セッションの**右ペイン**で対話的に実行されます。
 
-- 起動するエージェント CLI は[設定](../05-settings.md)の `agent_cli`（プロジェクトローカル → グローバルの
-  順に解決、既定は Claude）に従います。
-- ヘッドレス起動した子プロセスには**いかなる MCP サーバも wire しません**。委譲先のセッションが
-  さらにセッションを再帰生成することはありません。
-- 作業はセッションのブランチ（worktree）上で隔離されます。TUI で同じセッションに対話的エージェントを
-  開いている場合でも、`session_prompt` はファイルシステム（worktree）を共有する**別プロセス**として動きます。
+- キューしたプロンプトは、[在席](../design/05-home.md#在席focus)から `agent` を実行して**エージェントペインを
+  新規 spawn する**ときに 1 回だけ消費されます（再アタッチや、後から `Ctrl-O a` で開く 2 枚目のエージェント
+  タブには再送されません）。フレッシュ起動が起きるまではキューに残ります。
+- プロンプトの引き渡し方はエージェント CLI 依存です。Claude は起動時の位置引数（`claude … '<prompt>'`）として
+  受け取り、対話モードのままそのプロンプトに着手します。Gemini はこの経路を持たないため素起動します。
+- 作業はセッションのブランチ（worktree）上で隔離されます。同じ worktree を共有するため、キューしたプロンプトは
+  その worktree のエージェントに届きます。
 
 ## JSON-RPC プロトコル
 
@@ -228,7 +232,7 @@ presentation に閉じています（[2. アーキテクチャ](../02-architectu
 - **protocolVersion**: `2024-11-05` を返します。
 - **状態を持たない**: サーバは内部状態を保持せず、各 tool 呼び出しが `.usagi/issues/` / `.usagi/memory/` /
   `state.json` を直接読み書きします。CLI・TUI と MCP を混在して使っても整合します。
-- **1 サーバに合成**: issue/memory（リポジトリの純粋な読み書き）と session（`session_prompt` で実エージェント
-  を起動する `AgentBackend` を要する）は依存関係が異なるため、それぞれ独立にユニットテストされた別サーバの
+- **1 サーバに合成**: issue/memory（リポジトリの純粋な読み書き）と session（`session_prompt` でプロンプトを
+  キューする `AgentBackend` を要する）は依存関係が異なるため、それぞれ独立にユニットテストされた別サーバの
   まま `usagi.rs` で合成し、tool のマージと振り分けだけをこの層が担います。これにより登録は `usagi` 1 つで
   済みつつ、各サーバの責務とテストは分離されます。
