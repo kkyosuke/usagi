@@ -143,9 +143,13 @@ pub fn get(repo_root: &Path, number: u32) -> Result<Option<Issue>> {
 }
 
 /// Render an issue as a self-contained prompt instructing an agent to implement
-/// it following the repository workflow. The text is fed verbatim to a session's
-/// agent (e.g. via the `session_prompt` MCP tool), which already runs inside the
-/// session worktree — so the prompt tells the agent not to create another one.
+/// it following the repository's own workflow. The text is fed verbatim to a
+/// session's agent (e.g. via the `session_prompt` MCP tool), which already runs
+/// inside the session worktree — so the prompt tells the agent not to create
+/// another one. The wording stays repository-agnostic (no language- or
+/// usagi-specific paths or commands) so it works for any project usagi manages;
+/// the only usagi-specific instructions are the `issue_update` status changes,
+/// which operate on usagi's own issue store.
 pub fn to_prompt(issue: &Issue) -> String {
     let number = issue.number;
     let title = &issue.title;
@@ -178,14 +182,14 @@ pub fn to_prompt(issue: &Issue) -> String {
     format!(
         "あなたはこのセッションの worktree 内で usagi の issue #{number}「{title}」を実装します。\n\
          \n\
-         worktree は既に用意されているため、新しく作成する必要はありません。リポジトリの開発ワークフロー（`.agents/workflow.md`）と開発規約（`document/06-conventions.md`）に従ってください。\n\
+         worktree は既に用意されているため、新しく作成する必要はありません。リポジトリに開発ワークフローや規約のドキュメント（例: `CLAUDE.md` / `.agents/` / `CONTRIBUTING.md` など）があれば、それに従ってください。\n\
          \n\
          ## 進め方\n\
          \n\
          1. 着手時に issue #{number} の status を `in-progress` に更新する（MCP ツール `issue_update`）。\n\
-         2. issue の内容を実装し、テストを追加・更新する（カバレッジ 100% を維持）。\n\
-         3. コミット前に `cargo fmt` / `cargo clippy --all-targets -- -D warnings` / `cargo test` を通す。\n\
-         4. 仕様・画面・データ構造の変更があれば `document/` 配下を更新する。\n\
+         2. issue の内容を実装し、必要に応じてテストを追加・更新する。\n\
+         3. コミット前に、リポジトリの規約に沿ったフォーマット・Lint・テストを実行して通す。\n\
+         4. 仕様やドキュメントに影響する変更があれば、対応するドキュメントも更新する。\n\
          5. 完了したら issue #{number} の status を `done` に更新する。\n\
          \n\
          ## issue #{number}: {title}\n\

@@ -320,6 +320,7 @@ fn usecase_errors_surface_for_every_tool() {
     for (name, args) in [
         ("issue_create", json!({"title":"x"})),
         ("issue_get", json!({"number":1})),
+        ("issue_to_prompt", json!({"number":1})),
         ("issue_list", json!({})),
         ("issue_search", json!({"query":"x"})),
         ("issue_update", json!({"number":1,"status":"done"})),

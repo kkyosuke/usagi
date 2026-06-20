@@ -196,6 +196,11 @@ fn to_prompt_includes_metadata_and_body() {
     assert!(prompt.contains("- milestone: v1"));
     // The body is trimmed of surrounding whitespace.
     assert!(prompt.contains("\nDiagnose the environment.\n"));
+    // The prompt stays repository-agnostic: it instructs the agent to follow
+    // the repo's own conventions rather than hardcoding usagi/Rust specifics.
+    assert!(prompt.contains("リポジトリの規約"));
+    assert!(!prompt.contains("cargo"));
+    assert!(!prompt.contains(".agents/workflow.md"));
 }
 
 #[test]

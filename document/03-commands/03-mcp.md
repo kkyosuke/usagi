@@ -114,7 +114,7 @@ presentation に閉じています（[2. アーキテクチャ](../02-architectu
 |---|---|---|---|
 | `issue_create` | `title` | `priority` / `labels` / `dependson` / `related` / `parent` / `milestone` / `body` | 作成された issue |
 | `issue_get` | `number` | — | issue（存在しなければ `null`） |
-| `issue_to_prompt` | `number` | — | `{ "number": N, "title": "…", "prompt": "…" }`（issue が無ければ実行エラー） |
+| `issue_to_prompt` | `number` | — | `{ "number": N, "prompt": "…", "title": "…" }`（issue が無ければ実行エラー） |
 | `issue_list` | — | `status` / `priority` / `label` / `parent` / `milestone` / `ready` | issue 配列（各要素に `ready` と `unmet_deps` を付与） |
 | `issue_search` | `query` | `status` / `priority` / `label` / `parent` / `milestone` / `ready` | 一致した issue 配列（`list` と同形式） |
 | `issue_update` | `number` | `title` / `status` / `priority` / `labels` / `dependson` / `related` / `parent` / `milestone` / `body` | 更新後の issue |
@@ -137,7 +137,9 @@ presentation に閉じています（[2. アーキテクチャ](../02-architectu
   とし、未達の依存番号を `unmet_deps` に入れて返します（着手可能なタスクの判別用）。
 - `ready: true`（引数）を渡すと着手可能な issue だけに絞り込みます。
 - `issue_to_prompt` は issue を **そのまま実行できるエージェント向けプロンプト**に整形して返します
-  （実装手順・status 更新の指示と issue 本文を含む）。`issue_to_prompt(number)` → `session_create(name)` →
+  （実装手順・status 更新の指示と issue 本文を含む）。プロンプトはリポジトリ非依存の文言で、特定言語の
+  コマンドや usagi 固有のパスは埋め込みません（リポジトリ側の規約ドキュメントに従わせます）。
+  `issue_to_prompt(number)` → `session_create(name)` →
   `session_prompt(name, prompt)` と組み合わせると、コーディネータ役のエージェントが「issue を特定の
   セッションのエージェントに実装させる」オーケストレーションを最小手数で組めます。
 - `session_create` は `name` をセッション名（=全リポジトリで作成する新規ブランチ名）として
