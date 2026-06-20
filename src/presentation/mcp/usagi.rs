@@ -159,9 +159,10 @@ mod tests {
         );
         let tools = res["result"]["tools"].as_array().unwrap();
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
-        // 6 issue + 6 memory + 3 session.
-        assert_eq!(names.len(), 15);
+        // 7 issue + 6 memory + 3 session.
+        assert_eq!(names.len(), 16);
         assert!(names.contains(&"issue_create"));
+        assert!(names.contains(&"issue_to_prompt"));
         assert!(names.contains(&"memory_save"));
         assert!(names.contains(&"session_create"));
         assert!(names.contains(&"session_list"));
