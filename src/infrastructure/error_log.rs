@@ -44,6 +44,28 @@ impl ErrorLog {
         &self.dir
     }
 
+    /// Best-effort: append `message` to today's log file under the default data
+    /// directory and prune files older than [`RETENTION_DAYS`]. Every failure —
+    /// including not finding the data directory — is swallowed, so logging never
+    /// masks the error it is recording.
+    ///
+    /// This is the entry point for code paths that cannot surface a `Result` to
+    /// `main`: long-running TUI work (session create / remove, agent / terminal
+    /// launch) shows its failure on screen but would otherwise never reach a log
+    /// file. Routing those through here keeps every failure inspectable in
+    /// `<data dir>/logs/` after the fact.
+    pub fn record(message: &str) {
+        // `if let` (not `let … else { return }`) so the data-dir-not-found case
+        // is just "skip the block" rather than its own statement: there is no
+        // way to make `open_default` fail under test, and an unreachable early
+        // return would leave a line uncovered.
+        if let Ok(log) = Self::open_default() {
+            let now = Local::now();
+            let _ = log.prune(now.date_naive(), RETENTION_DAYS);
+            let _ = log.append(now, message);
+        }
+    }
+
     fn file_for(&self, date: NaiveDate) -> PathBuf {
         self.dir.join(format!(
             "{FILE_PREFIX}{}{FILE_SUFFIX}",
@@ -217,6 +239,26 @@ mod tests {
         assert_eq!(parse_date("error-not-a-date.log"), None);
         assert_eq!(parse_date("error-2026-06-16.txt"), None);
         assert_eq!(parse_date("workspaces.json"), None);
+    }
+
+    #[test]
+    fn record_writes_an_entry_under_the_data_directory() {
+        let _guard = crate::test_support::process_env_guard();
+        let home = tempfile::tempdir().expect("failed to create temp dir");
+        std::env::set_var(crate::infrastructure::storage::DATA_DIR_ENV, home.path());
+
+        ErrorLog::record("session create \"c\" failed: boom");
+
+        let logs = home.path().join("logs");
+        let entry = fs::read_dir(&logs)
+            .expect("logs dir exists")
+            .next()
+            .expect("a log file was written")
+            .expect("readable entry");
+        let contents = fs::read_to_string(entry.path()).unwrap();
+        assert!(contents.contains("session create \"c\" failed: boom"));
+
+        std::env::remove_var(crate::infrastructure::storage::DATA_DIR_ENV);
     }
 
     #[test]
