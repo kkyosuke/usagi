@@ -88,9 +88,10 @@ const REQUIRED_TOOLS: &[&str] = &["git", "bash"];
 /// settings — they are irrelevant (and `ollama` need not be installed) when the
 /// feature is off, which is the default.
 pub fn diagnose(storage: &Storage) -> Vec<Check> {
+    let runner = SystemRunner;
     let mut checks: Vec<Check> = REQUIRED_TOOLS
         .iter()
-        .map(|&name| tool_check(name))
+        .map(|&name| tool_check(name, &runner))
         .collect();
     checks.push(notification_check());
     checks.push(config_check(storage));
@@ -98,7 +99,7 @@ pub fn diagnose(storage: &Storage) -> Vec<Check> {
         checks.extend(local_llm_checks(
             settings.local_llm.enabled,
             &settings.local_llm.model,
-            &SystemRunner,
+            &runner,
         ));
     }
     checks
@@ -130,23 +131,14 @@ fn local_llm_checks(enabled: bool, model: &str, runner: &dyn CommandRunner) -> V
     vec![ollama, model_check]
 }
 
-/// Check that an external tool is installed and runnable.
-fn tool_check(name: &'static str) -> Check {
-    if which(name) {
+/// Check that an external tool is installed and runnable, probing through the
+/// [`CommandRunner`] abstraction so the check is testable without shelling out.
+fn tool_check(name: &'static str, runner: &dyn CommandRunner) -> Check {
+    if runner.available(name) {
         Check::ok(name)
     } else {
         Check::missing(name, format!("`{name}` was not found on your PATH"))
     }
-}
-
-fn which(name: &str) -> bool {
-    std::process::Command::new(name)
-        .arg("--version")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
 }
 
 /// Check whether desktop notifications (used by `usagi hop`) can be delivered.
