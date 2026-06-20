@@ -277,9 +277,23 @@ pub fn event_loop(
         // Enter removes every checked session (Esc cancels).
         if state.remove_modal().is_some() {
             match key {
-                Key::ArrowUp | Key::Char('k') => state.remove_modal_move_up(),
-                Key::ArrowDown | Key::Char('j') => state.remove_modal_move_down(),
-                Key::Char(' ') => state.remove_modal_toggle(),
+                // Cursor moves and checkbox toggles route to the modal's own
+                // methods; Enter / Esc are lifecycle on the screen state.
+                Key::ArrowUp | Key::Char('k') => {
+                    if let Some(modal) = state.remove_modal_mut() {
+                        modal.move_up();
+                    }
+                }
+                Key::ArrowDown | Key::Char('j') => {
+                    if let Some(modal) = state.remove_modal_mut() {
+                        modal.move_down();
+                    }
+                }
+                Key::Char(' ') => {
+                    if let Some(modal) = state.remove_modal_mut() {
+                        modal.toggle();
+                    }
+                }
                 Key::Enter => {
                     if let Some((names, force)) = state.submit_remove_modal() {
                         // Each checked session is dispatched to a background
