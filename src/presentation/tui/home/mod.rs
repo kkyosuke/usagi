@@ -476,25 +476,28 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
         }
     };
 
+    let mut wiring = event::Wiring {
+        workspace_root: &workspace.path,
+        persist: &mut persist,
+        dispatch_create: &mut dispatch_create,
+        rename_display: &mut rename_display,
+        dispatch_remove: &mut dispatch_remove,
+        evict_pool: &mut evict_pool,
+        existing_branches: &mut existing_branches,
+        open_terminal: &mut open_terminal,
+        open_config: &mut open_config,
+        preview: &mut preview,
+        tab_op: &mut tab_op,
+        close_tab: &mut close_tab,
+    };
     let outcome = event::event_loop(
         term,
         &mut reader,
         state,
-        &workspace.path,
         &monitor,
         &update,
         &tasks,
-        &mut persist,
-        &mut dispatch_create,
-        &mut rename_display,
-        &mut dispatch_remove,
-        &mut evict_pool,
-        &mut existing_branches,
-        &mut open_terminal,
-        &mut open_config,
-        &mut preview,
-        &mut tab_op,
-        &mut close_tab,
+        &mut wiring,
     );
 
     // The loop has exited (quit / back), so wait for any background create /

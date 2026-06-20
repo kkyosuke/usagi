@@ -623,72 +623,60 @@ fn is_press(key: KeyEvent) -> bool {
     matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat)
 }
 
+/// Whether `key` is the Ctrl chord for `letter`, accepting both forms crossterm
+/// may report — so a chord binds the same regardless of how the terminal /
+/// keyboard protocol delivers it:
+///
+/// - `letter` + `CONTROL` — crossterm's usual decoding of `Ctrl-<letter>`.
+/// - the bare control codepoint `raw` — some terminals/keyboard protocols
+///   deliver the chord as the raw control char with no `CONTROL` modifier (this
+///   is how `console` reports it on the other home-screen surfaces). The raw
+///   control char only ever comes from that chord, so it is accepted regardless
+///   of the reported modifiers — otherwise [`encode_key`] would forward the raw
+///   byte to the agent, which renders the unprintable control char as a
+///   `?`-like placeholder instead of acting on the chord.
+///
+/// `Ctrl+Shift+<letter>` is deliberately *not* matched: its `Char` is the
+/// uppercase letter, so it flows through to the agent unchanged.
+fn chord(key: &KeyEvent, raw: char, letter: char) -> bool {
+    key.code == KeyCode::Char(raw)
+        || (key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char(letter))
+}
+
 /// Whether this key is the reserved `Ctrl-O` leader (zoom out one engagement
-/// level). `Ctrl-O` reaches us in two forms and both must be caught —
-/// otherwise [`encode_key`] forwards the raw `0x0F` (SI) byte to the agent,
-/// whose input renders the unprintable control char as a `?`-like placeholder
-/// (like a masked password) instead of zooming out:
-///
-/// - `'o'` + `CONTROL` — crossterm's usual decoding of `Ctrl-O`.
-/// - the bare `0x0F` (SI) codepoint — some terminals/keyboard protocols
-///   deliver `Ctrl-O` as the raw control char with no `CONTROL` modifier
-///   (this is how `console` reports it on the other home-screen surfaces).
-///
-/// `Ctrl+Shift+O` is deliberately *not* a leader: it flows through to the
-/// agent unchanged.
+/// level), as the raw `0x0f` (SI) char or `'o'` + `CONTROL`.
 fn is_leader(key: &KeyEvent) -> bool {
-    // The raw SI control char only ever comes from `Ctrl-O`, so accept it
-    // regardless of the reported modifiers.
-    if key.code == KeyCode::Char('\u{0f}') {
-        return true;
-    }
-    key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('o')
+    chord(key, '\u{0f}', 'o')
 }
 
-/// Whether this key is `Ctrl-N` (next tab) — detected both as the raw `0x0e` (SO)
-/// control char (some terminals deliver it with no `CONTROL` modifier) and as
-/// `'n'` + `CONTROL`, mirroring [`is_leader`].
+/// Whether this key is `Ctrl-N` (next tab), as the raw `0x0e` (SO) char or
+/// `'n'` + `CONTROL`.
 fn is_next_tab(key: &KeyEvent) -> bool {
-    if key.code == KeyCode::Char('\u{0e}') {
-        return true;
-    }
-    key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('n')
+    chord(key, '\u{0e}', 'n')
 }
 
-/// Whether this key is `Ctrl-P` (previous tab) — detected both as the raw `0x10`
-/// (DLE) control char and as `'p'` + `CONTROL`, mirroring [`is_leader`].
+/// Whether this key is `Ctrl-P` (previous tab), as the raw `0x10` (DLE) char or
+/// `'p'` + `CONTROL`.
 fn is_prev_tab(key: &KeyEvent) -> bool {
-    if key.code == KeyCode::Char('\u{10}') {
-        return true;
-    }
-    key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('p')
+    chord(key, '\u{10}', 'p')
 }
 
-/// Whether this key is `Ctrl-T` (add a terminal tab) — detected both as the raw
-/// `0x14` (DC4) control char and as `'t'` + `CONTROL`, mirroring [`is_next_tab`].
+/// Whether this key is `Ctrl-T` (add a terminal tab), as the raw `0x14` (DC4)
+/// char or `'t'` + `CONTROL`.
 fn is_new_terminal_tab(key: &KeyEvent) -> bool {
-    if key.code == KeyCode::Char('\u{14}') {
-        return true;
-    }
-    key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('t')
+    chord(key, '\u{14}', 't')
 }
 
-/// Whether this key is `Ctrl-G` (add an agent tab) — detected both as the raw
-/// `0x07` (BEL) control char and as `'g'` + `CONTROL`, mirroring [`is_next_tab`].
+/// Whether this key is `Ctrl-G` (add an agent tab), as the raw `0x07` (BEL) char
+/// or `'g'` + `CONTROL`.
 fn is_new_agent_tab(key: &KeyEvent) -> bool {
-    if key.code == KeyCode::Char('\u{07}') {
-        return true;
-    }
-    key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('g')
+    chord(key, '\u{07}', 'g')
 }
 
-/// Whether this key is `Ctrl-W` (close the active tab) — detected both as the raw
-/// `0x17` (ETB) control char and as `'w'` + `CONTROL`, mirroring [`is_next_tab`].
+/// Whether this key is `Ctrl-W` (close the active tab), as the raw `0x17` (ETB)
+/// char or `'w'` + `CONTROL`.
 fn is_close_tab(key: &KeyEvent) -> bool {
-    if key.code == KeyCode::Char('\u{17}') {
-        return true;
-    }
-    key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('w')
+    chord(key, '\u{17}', 'w')
 }
 
 /// Whether this key is the copy shortcut (`Ctrl-C`). It only copies when a
