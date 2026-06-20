@@ -85,7 +85,7 @@ fn body(variation: Variation, frame: usize, width: usize) -> Vec<String> {
         }
         Variation::Multiplying => {
             let count = 1 + (frame / MULTIPLY_GROW) % MULTIPLY_MAX;
-            widgets::multiplying_rabbits(count, width)
+            widgets::multiplying_rabbits(count)
         }
         Variation::LoadingHop => {
             center_horizontally(widgets::loading_rabbit(frame, "読み込み中…"), width)

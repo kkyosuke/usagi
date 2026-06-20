@@ -41,19 +41,6 @@ pub fn clone(url: &str, dest: &Path, branch: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-/// Return `true` if the worktree at `path` has uncommitted changes — modified,
-/// staged, or untracked files (anything `git status --porcelain` reports).
-///
-/// A git failure (e.g. not a worktree) is treated as "no changes" so it never
-/// blocks a removal on its own.
-pub fn has_uncommitted_changes(path: &Path) -> bool {
-    git_capture(path, &["status", "--porcelain"])
-        .ok()
-        .flatten()
-        .map(|out| !out.is_empty())
-        .unwrap_or(false)
-}
-
 /// Return `true` if `path` is inside a git working tree.
 ///
 /// Used to decide whether an existing directory registered as a workspace can

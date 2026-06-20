@@ -1,44 +1,49 @@
 use crate::presentation::tui::widgets;
 
-/// Frames the splash plays: one full round trip of the running rabbit (out to
-/// one edge and back). At [`ANIM_TICK`](crate::presentation::tui::install_task::ANIM_TICK)
-/// per frame this lasts a couple of seconds before the welcome menu takes over.
-pub const FRAMES: usize = 24;
+/// Frames the splash plays: the warren grows from one usagi to a full
+/// [`MAX_RABBITS`], then the welcome menu takes over. At
+/// [`ANIM_TICK`](crate::presentation::tui::install_task::ANIM_TICK) per frame
+/// this is a brief flash before the menu — shorter than the old edge-to-edge run.
+pub const FRAMES: usize = 16;
 
 const TITLE: &str = "USAGI";
 
-/// The rabbit's horizontal offset and facing for `frame` of `total`, bouncing
-/// across a `span`-column track: it runs from the left edge to the right
-/// (`face_right`) over the first half of the splash, then back to the left over
-/// the second half. A zero-width track keeps it resting at the left, facing
-/// right.
-fn position(frame: usize, total: usize, span: usize) -> (usize, bool) {
-    if span == 0 || total < 2 {
-        return (0, true);
-    }
-    let half = total / 2;
-    if frame < half {
-        // Outbound: 0 → span, facing right.
-        (span * frame / half, true)
-    } else {
-        // Return leg: span → 0, facing left.
-        let back = (frame - half).min(total - half);
-        (span - span * back / (total - half), false)
-    }
+/// Frames between each new usagi joining the warren as the splash plays.
+const GROW: usize = 2;
+
+/// The warren the splash fills to before the welcome menu takes over.
+const MAX_RABBITS: usize = 8;
+
+/// How many usagi are shown at `frame`: the warren starts at one and a new rabbit
+/// joins every [`GROW`] frames, capped at [`MAX_RABBITS`]. Each arrival extends
+/// the line rightward (see [`multiplying_rabbits`](widgets::multiplying_rabbits))
+/// without nudging the rabbits already on screen.
+fn rabbit_count(frame: usize) -> usize {
+    (1 + frame / GROW).min(MAX_RABBITS)
 }
 
-/// Builds the splash frame for `frame` at a raw terminal size: the running usagi
-/// bobbing across the screen above the centred `USAGI` title, the whole block
-/// centred vertically. The motion (the edge-to-edge bounce and the per-frame
-/// hop) is derived from `frame`, so painting successive frames animates the run.
+/// Builds the splash frame for `frame` at a raw terminal size: the "multiplying"
+/// usagi (the `usagi run 2` animation) filling the warren above the centred
+/// `USAGI` title, the whole block centred both vertically and horizontally. The
+/// count is derived from `frame`, so painting successive frames grows the warren.
+///
+/// The warren is centred on the width of the **full** warren ([`MAX_RABBITS`]),
+/// so the block's left edge is a fixed column: the animation sits in the middle of
+/// the screen, yet a newly added rabbit only extends the line rightward and never
+/// shifts the rabbits already shown. The rabbit rows are a fixed three lines, so
+/// nothing moves vertically either as the warren grows.
 pub fn render_frame(raw_height: usize, raw_width: usize, frame: usize) -> Vec<String> {
     let (height, width) = widgets::normalize_size(raw_height, raw_width);
-    let span = width.saturating_sub(widgets::running_rabbit_width());
-    let (col, face_right) = position(frame, FRAMES, span);
-    // Hop every frame so the rabbit bounds as it travels.
-    let airborne = frame.is_multiple_of(2);
 
-    let mut body = widgets::running_rabbit(col, face_right, airborne);
+    // Centre on the full warren so the left edge is fixed (no horizontal jump as
+    // rabbits are added), then place the growing warren at that fixed offset.
+    let full_warren_width =
+        console::measure_text_width(&widgets::multiplying_rabbits(MAX_RABBITS)[1]);
+    let pad = " ".repeat(widgets::centered_padding(width, full_warren_width));
+    let mut body: Vec<String> = widgets::multiplying_rabbits(rabbit_count(frame))
+        .into_iter()
+        .map(|row| format!("{pad}{row}"))
+        .collect();
     body.push(String::new());
     body.push(widgets::title_line(width, TITLE));
 
@@ -59,24 +64,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn position_runs_out_to_the_right_then_back_left() {
-        let span = 60;
-        // Starts at the left, facing right.
-        assert_eq!(position(0, FRAMES, span), (0, true));
-        // Reaches the right edge at the halfway frame and flips to face left.
-        let (col, face_right) = position(FRAMES / 2, FRAMES, span);
-        assert_eq!(col, span);
-        assert!(!face_right);
-        // Heads back toward the left over the return leg.
-        let (later, _) = position(FRAMES - 1, FRAMES, span);
-        assert!(later < span);
-    }
-
-    #[test]
-    fn position_rests_at_the_left_when_there_is_no_room_to_run() {
-        // A zero-width track (terminal no wider than the sprite) keeps the rabbit
-        // put rather than dividing by zero.
-        assert_eq!(position(5, FRAMES, 0), (0, true));
+    fn rabbit_count_grows_from_one_and_caps() {
+        // The warren starts at a single usagi, grows a rabbit every `GROW` frames,
+        // and never exceeds the cap.
+        assert_eq!(rabbit_count(0), 1);
+        assert!(rabbit_count(GROW) > rabbit_count(0));
+        assert_eq!(rabbit_count(usize::MAX / 2), MAX_RABBITS);
+        assert_eq!(rabbit_count(FRAMES - 1), MAX_RABBITS);
     }
 
     #[test]
@@ -85,16 +79,42 @@ mod tests {
         assert_eq!(frame.len(), 24);
         let joined = console::strip_ansi_codes(&frame.join("\n")).into_owned();
         assert!(joined.contains(TITLE));
-        // The running rabbit's face is on screen.
-        assert!(joined.contains('ㅅ'));
+        // A multiplying usagi's face is on screen.
+        assert!(joined.contains("(｡･-･)"));
     }
 
     #[test]
     fn render_frame_animates_across_frames() {
-        // Different frames place the rabbit differently, so successive paints move.
-        let a = console::strip_ansi_codes(&render_frame(24, 80, 1).join("\n")).into_owned();
-        let b = console::strip_ansi_codes(&render_frame(24, 80, 2).join("\n")).into_owned();
+        // Later frames hold more usagi, so successive paints differ.
+        let a = console::strip_ansi_codes(&render_frame(24, 80, 0).join("\n")).into_owned();
+        let b = console::strip_ansi_codes(&render_frame(24, 80, GROW).join("\n")).into_owned();
         assert_ne!(a, b);
+        assert!(b.matches("(｡･-･)").count() > a.matches("(｡･-･)").count());
+    }
+
+    #[test]
+    fn render_frame_centers_the_warren_without_shifting_it_as_it_grows() {
+        // The warren is centred on the full warren's width, so its left edge is a
+        // fixed column: the first usagi's face starts at the same column on an early
+        // and a later frame (no horizontal jump as rabbits are added), and that
+        // column is offset from the edge (centred, not flush left).
+        let face_col = |frame| {
+            let painted = render_frame(24, 80, frame);
+            let face_row = painted
+                .iter()
+                .map(|l| console::strip_ansi_codes(l).into_owned())
+                .find(|l| l.contains("(｡･-･)"))
+                .expect("a face row is painted");
+            let byte = face_row.find("(｡･-･)").unwrap();
+            console::measure_text_width(&face_row[..byte])
+        };
+        let early = face_col(0);
+        let later = face_col(GROW * 3);
+        assert_eq!(early, later, "the warren's left edge stays put as it grows");
+        assert!(
+            early > 0,
+            "the warren is centred, not flush to the left edge"
+        );
     }
 
     #[test]

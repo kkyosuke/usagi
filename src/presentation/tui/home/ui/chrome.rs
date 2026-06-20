@@ -82,23 +82,30 @@ pub(super) fn update_banner(latest: &Version) -> Vec<String> {
 /// `… and N more` line, so a burst of background work cannot overrun the corner.
 const TASK_PANEL_MAX: usize = 6;
 
-/// The top-right background-task panel: a dim `tasks` header over one row per
+/// The task panel's fixed inner content width (columns inside the box, before the
+/// border and padding). Holding it constant — clipping longer rows, padding
+/// shorter ones — keeps the box exactly the same size every frame, so the
+/// right-anchored panel never shifts as a label changes (`作成中…` → `作成完了`)
+/// or the spinner ticks. The box itself is this plus the border and padding.
+const TASK_PANEL_INNER: usize = 26;
+
+/// The top-right background-task panel: a `tasks`-titled box with one row per
 /// in-flight (or just-finished) session create / remove, stacked oldest-first.
 /// A running row leads with a spinning braille glyph (cyan), a finished one with
 /// `✓` (green) or `✗` (red). Returns no lines when nothing is running, so the
 /// corner falls back to the update notice.
 ///
-/// Each line is right-padded to a common block width so the block right-aligns
-/// cleanly when [`overlay_top_right`](super::overlay_top_right) anchors it to the
-/// top rows, like the [`update_banner`] notice it shares the corner with.
+/// The box is drawn at a [fixed inner width](TASK_PANEL_INNER) so it occupies the
+/// same columns every frame; [`overlay_top_right`](super::overlay_top_right) then
+/// anchors that stable block to the top-right corner, the way the
+/// [`update_banner`] notice it shares the corner with does — and because the
+/// width never changes, a row whose text updates never makes the panel jump.
 pub(super) fn task_panel(rows: &[TaskRow]) -> Vec<String> {
     if rows.is_empty() {
         return Vec::new();
     }
     let shown = rows.len().min(TASK_PANEL_MAX);
-    // Build (visible text, style) pairs first so the block width is measured on
-    // the text alone, before the zero-width colour escapes are applied.
-    let mut entries: Vec<(String, Style)> = vec![("tasks".to_string(), Style::new().dim())];
+    let mut entries: Vec<String> = Vec::with_capacity(shown + 1);
     for row in rows.iter().take(shown) {
         let (icon, line_style) = match row.mark {
             TaskMark::Running(frame) => (
@@ -108,23 +115,24 @@ pub(super) fn task_panel(rows: &[TaskRow]) -> Vec<String> {
             TaskMark::Done(true) => ("✓".to_string(), Style::new().green().bold()),
             TaskMark::Done(false) => ("✗".to_string(), Style::new().red().bold()),
         };
-        entries.push((format!("{icon} {}", row.label), line_style));
+        // Clip the (styled) row to the fixed inner width before boxing, so a long
+        // session name can never widen the box and shift the panel.
+        let text = clip_to_width(&format!("{icon} {}", row.label), TASK_PANEL_INNER);
+        entries.push(line_style.apply_to(text).to_string());
     }
     if rows.len() > shown {
-        entries.push((
-            format!("… and {} more", rows.len() - shown),
-            Style::new().dim(),
-        ));
+        entries.push(
+            style(clip_to_width(
+                &format!("… and {} more", rows.len() - shown),
+                TASK_PANEL_INNER,
+            ))
+            .dim()
+            .to_string(),
+        );
     }
-    let block_w = entries
-        .iter()
-        .map(|(text, _)| console::measure_text_width(text))
-        .max()
-        .unwrap_or(0);
-    entries
-        .into_iter()
-        .map(|(text, line_style)| line_style.apply_to(pad_to_width(text, block_w)).to_string())
-        .collect()
+    // A fixed-width box: `boxed` pads every row out to the inner width, so the
+    // block is identical in size frame to frame regardless of the row contents.
+    widgets::boxed("tasks", TASK_PANEL_INNER, &entries)
 }
 
 /// The engagement-ladder indicator drawn just under the title bar: the four

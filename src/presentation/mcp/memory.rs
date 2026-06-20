@@ -10,12 +10,14 @@
 
 use std::path::Path;
 
-use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::domain::memory::{Memory, MemorySummary, MemoryType};
-use crate::usecase::memory::{self, MemoryChanges, MemoryFilter, NewMemory};
+use super::{parse_args, to_pretty};
+use crate::domain::memory::MemoryType;
+use crate::usecase::memory::{
+    self, MemoryChanges, MemoryFilter, MemorySummaryView, MemoryView, NewMemory,
+};
 
 /// The tool names this module serves.
 pub fn tool_names() -> &'static [&'static str] {
@@ -55,13 +57,13 @@ fn tool_save(repo: &Path, arguments: Value) -> Result<String, String> {
         },
     )
     .map_err(|e| e.to_string())?;
-    Ok(to_pretty(&memory_to_json(&saved)))
+    Ok(to_pretty(&MemoryView::from(&saved)))
 }
 
 fn tool_get(repo: &Path, arguments: Value) -> Result<String, String> {
     let args: NameArgs = parse_args(arguments)?;
     match memory::get(repo, &args.name).map_err(|e| e.to_string())? {
-        Some(m) => Ok(to_pretty(&memory_to_json(&m))),
+        Some(m) => Ok(to_pretty(&MemoryView::from(&m))),
         None => Ok(to_pretty(&Value::Null)),
     }
 }
@@ -69,20 +71,20 @@ fn tool_get(repo: &Path, arguments: Value) -> Result<String, String> {
 fn tool_list(repo: &Path, arguments: Value) -> Result<String, String> {
     let args: FilterArgs = parse_args(arguments)?;
     let items = memory::list(repo, &args.filter()).map_err(|e| e.to_string())?;
-    Ok(to_pretty(&summaries_to_json(&items)))
+    Ok(to_pretty(&summary_views(&items)))
 }
 
 fn tool_search(repo: &Path, arguments: Value) -> Result<String, String> {
     let args: SearchArgs = parse_args(arguments)?;
     let items = memory::search(repo, &args.query, &args.filter()).map_err(|e| e.to_string())?;
-    Ok(to_pretty(&summaries_to_json(&items)))
+    Ok(to_pretty(&summary_views(&items)))
 }
 
 fn tool_update(repo: &Path, arguments: Value) -> Result<String, String> {
     let args: UpdateArgs = parse_args(arguments)?;
     let name = args.name.clone();
     match memory::update(repo, &name, args.changes()).map_err(|e| e.to_string())? {
-        Some(updated) => Ok(to_pretty(&memory_to_json(&updated))),
+        Some(updated) => Ok(to_pretty(&MemoryView::from(&updated))),
         None => Err(format!("no memory '{name}'")),
     }
 }
@@ -161,46 +163,12 @@ impl UpdateArgs {
     }
 }
 
-/// Deserialize tool arguments, mapping any error to a tool-facing message.
-fn parse_args<T: DeserializeOwned>(arguments: Value) -> Result<T, String> {
-    serde_json::from_value(arguments).map_err(|e| format!("invalid arguments: {e}"))
-}
-
 // --- JSON serialisation ----------------------------------------------------
 
-fn memory_to_json(memory: &Memory) -> Value {
-    json!({
-        "name": memory.name,
-        "title": memory.title,
-        "type": memory.kind,
-        "related": memory.related,
-        "created_at": memory.created_at.to_rfc3339(),
-        "updated_at": memory.updated_at.to_rfc3339(),
-        "body": memory.body,
-    })
-}
-
-fn summaries_to_json(items: &[MemorySummary]) -> Value {
-    Value::Array(
-        items
-            .iter()
-            .map(|s| {
-                json!({
-                    "name": s.name,
-                    "title": s.title,
-                    "type": s.kind,
-                    "related": s.related,
-                    "file": s.file,
-                    "created_at": s.created_at.to_rfc3339(),
-                    "updated_at": s.updated_at.to_rfc3339(),
-                })
-            })
-            .collect(),
-    )
-}
-
-fn to_pretty(value: &Value) -> String {
-    serde_json::to_string_pretty(value).unwrap_or_default()
+/// Build the JSON-output views for a list of memory summaries. The field set is
+/// the SSoT [`MemorySummaryView`], shared with the CLI.
+fn summary_views(items: &[crate::domain::memory::MemorySummary]) -> Vec<MemorySummaryView<'_>> {
+    items.iter().map(MemorySummaryView::from).collect()
 }
 
 /// JSON Schemas for the memory tools advertised via `tools/list`.

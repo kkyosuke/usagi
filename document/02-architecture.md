@@ -47,7 +47,7 @@ src/
 ├── domain/                     # 純粋なエンティティ（外部依存なし）
 │   ├── agent_phase.rs          # Agent のライフサイクル phase（Ready / Running / Waiting / Ended）
 │   ├── repository.rs           # Git URL パース・ディレクトリ名導出
-│   ├── settings.rs             # Settings / Theme / AgentCli / LocalLlm、LocalSettings（with_local で上書き解決）・起動ポリシー agent_wiring と AgentCli::launch_command（MCP・フック注入）
+│   ├── settings.rs             # Settings / Theme / AgentCli / LocalLlm、LocalSettings（with_local で上書き解決）・起動ポリシー agent_wiring（純データ。起動コマンド生成は infrastructure/agent のアダプタが担う）
 │   ├── agent.rs                # Agent port（usagi が agent に求める IF：launch_command）・AgentWiring
 │   ├── workspace.rs            # グローバル登録エントリ Workspace
 │   ├── workspace_state.rs      # WorkspaceState / WorktreeState / BranchStatus
@@ -57,7 +57,8 @@ src/
 │   └── version.rs              # セマンティックバージョン Version（パース・比較）
 │
 ├── usecase/                    # ビジネスロジック
-│   ├── project.rs              # クローン・既存登録 + 状態同期
+│   ├── agent_phase.rs          # Agent phase の遷移ポリシー（SessionStart→ready を記録してよいかの判断）
+│   ├── project.rs              # クローン・既存登録 + 状態同期（.gitignore の行編集は infrastructure/gitignore に委譲）
 │   ├── workspace.rs            # グローバル登録の add/list/remove/touch
 │   ├── workspace_state.rs      # リポジトリ状態の inspect/sync/load
 │   ├── settings.rs             # グローバル設定の load/更新、ローカル設定と実効設定の解決（effective）
@@ -66,14 +67,15 @@ src/
 │   │   ├── tree.rs            # ルート再帰走査・worktree 構築・非 git コピー・リポジトリ探索
 │   │   └── reconcile.rs       # state.json と .usagi/sessions/ の照合・孤児ディレクトリの強制削除
 │   ├── doctor/                 # 依存ツールの導入状況チェック（mod=診断 / runner=CommandRunner / fix=--fix 導入）
-│   ├── issue/                  # issue の CRUD・検索・readiness（mod=型/CRUD/annotate / stats=集計・grouping / tree=依存ツリー）
-│   ├── memory/                 # メモリの upsert/CRUD・検索・種別フィルタ（mod=型/save/get/list/search/update/delete）
+│   ├── issue/                  # issue の CRUD・検索・readiness（mod=型/CRUD/annotate / stats=集計・grouping / tree=依存ツリー / view=JSON 出力の SSoT（CLI・MCP 共用））
+│   ├── memory/                 # メモリの upsert/CRUD・検索・種別フィルタ（mod=型/save/get/list/search/update/delete / view=JSON 出力の SSoT（CLI・MCP 共用））
 │   ├── local_llm.rs            # ollama・モデルの有無判定とインストール（ensure）
 │   └── update_check.rs         # リモートのタグから最新リリースを判定（純粋・fetch は注入）
 │
 ├── infrastructure/             # 外部連携（Git・永続化・シェル）
 │   ├── error_log.rs            # 実行時エラーの日次ログ（~/.usagi/logs/・30 日保持・ErrorLog）
 │   ├── git/                    # git CLI 経由の読み取り専用検査 + worktree 追加（command/repo/worktree/branch に分割）
+│   ├── gitignore.rs            # .usagi/.gitignore の書き込みと旧 root .gitignore 行の除去（バイト/行操作）
 │   ├── json_file.rs            # JSON ファイルの共通 read / 原子的 write（temp + rename）
 │   ├── storage.rs              # グローバル ~/.usagi/ の load/save（Storage）
 │   ├── workspace_store.rs      # <repo>/.usagi/ の state.json / settings.json（WorkspaceStore）
@@ -82,17 +84,17 @@ src/
 │   ├── pty.rs                  # 疑似ターミナルセッション（portable-pty + vt100、ベル回数の計測）
 │   ├── release.rs              # git ls-remote --tags でリリースタグを取得（薄い IO ラッパ）
 │   ├── session_monitor.rs      # 入力待ち判定の純粋ロジック（phase 優先・ベル基準値・待ち集合・アタッチ）
-│   ├── agent_state_store.rs    # worktree 別の Agent phase の記録/読み出し（~/.usagi/agent-state/）
-│   ├── agent/                  # Agent port のアダプタ（Claude / Gemini の launch 委譲）・agent_for
+│   ├── agent_state_store.rs    # worktree 別の Agent phase の記録/読み出し・フック JSON のパース（~/.usagi/agent-state/。遷移ポリシーは usecase/agent_phase）
+│   ├── agent/                  # Agent port のアダプタ（Claude は MCP・システムプロンプト・フックを serde_json で組み立てて launch コマンド生成 / Gemini は素起動）・agent_for
 │   ├── issue_store.rs          # <repo>/.usagi/issues/ の markdown + index.json（IssueStore）
 │   └── memory_store.rs         # <repo>/.usagi/memory/ の markdown + MEMORY.md + index.json（MemoryStore）
 │
 └── presentation/               # CLI ルーティング・TUI・MCP
     ├── cli/                    # サブコマンド（init / hop / status / config / doctor / issue / memory / mcp / llm_mcp / agent_phase（隠し・フック用））
     ├── mcp/                    # MCP サーバ（JSON-RPC 2.0 フレーミングを共有）
-    │   ├── mod.rs              # 共有プロトコル（dispatch_line / レスポンス整形 / McpService）
+    │   ├── mod.rs              # 共有プロトコル（dispatch_line / stdio serve ループ / レスポンス整形 / parse_args・to_pretty / McpService）
     │   ├── usagi.rs            # 統合 usagi サーバ（UsagiMcpServer）。issue/memory サーバと session サーバを合成し公開
-    │   ├── issue/             # issue 操作ツール（mod=McpServer・args / json=シリアライズ・スキーマ）。memory ツールもマージして公開
+    │   ├── issue/             # issue 操作ツール（mod=McpServer・args / json=入力スキーマ）。JSON 出力は usecase/issue/view が正本。memory ツールもマージして公開
     │   ├── memory.rs           # メモリ操作ツール（スキーマ・引数・usecase/memory への委譲。issue サーバが呼ぶ）
     │   ├── llm.rs              # ローカル LLM 委譲ツール（LlmMcpServer / LlmBackend）
     │   └── session.rs          # セッション操作ツール（SessionMcpServer / AgentBackend）
@@ -101,13 +103,13 @@ src/
         ├── screen.rs           # 端末制御（代替スクリーン・RAII ガード）・差分描画（FramePainter）
         ├── term_reader.rs      # キー入力・マウスホイール読み取り（ホイールは解析して読み捨て）
         ├── echo.rs             # 端末エコー/モード制御ヘルパ
-        ├── splash/             # 起動スプラッシュ（走るうさぎの装飾アニメ・ui / event）
+        ├── splash/             # 起動スプラッシュ（増えるうさぎの装飾アニメ・ui / event）
         ├── gallery/            # うさぎアニメのギャラリー（usagi run <N>・ui / event）
         ├── welcome/            # 起動画面（menu / state / ui / event）
         ├── open/               # プロジェクト選択画面（state / ui / event）
         ├── new/                # 新規プロジェクト画面（state（mod=FormState・型 / validate=検証） / ui / event）
         ├── config/             # 設定画面（state（mod=Config・型定義 / cycling=値巡回ロジック） / ui / event）
-        ├── home/               # ホーム画面（state（mod=HomeState / list・mode・log・modal に分割） / ui（mod=render_frame・panes・chrome に分割） / event（mod=loop・handlers に分割） / command（mod=語彙・builtins・registry に分割） / terminal_view / terminal_pane / terminal_pool（常駐＋phase/ベル監視・通知））
+        ├── home/               # ホーム画面（state（mod=HomeState / list・mode・log・modal（サブモード型: create/rename 入力・remove モーダル・focus メニュー）に分割） / ui（mod=render_frame・panes・chrome・content=コマンド出力整形 に分割） / event（mod=loop・handlers に分割） / command（mod=語彙・builtins・registry に分割） / terminal_view / terminal_pane / terminal_pool（常駐＋phase/ベル監視・通知））
         └── widgets/            # 共通 widget（mod / picker / dir_picker / text_input=キャレット編集付き 1 行入力）
 ```
 

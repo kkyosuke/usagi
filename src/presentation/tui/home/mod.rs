@@ -401,9 +401,12 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
         })();
         // Leaving the pane (Ctrl-O → 切替, every pane closing, or an error) means
         // nothing is attached any more; the shells themselves stay alive in the
-        // pool.
+        // pool. Clear the whole surface (snapshot + tab strip) here, where the
+        // pane yields control, rather than relying on the event loop's next frame
+        // to mop up the stale screen snapshot — so the cleanup holds no matter
+        // when control changes hands.
         handle.set_attached(None);
-        home.clear_terminal_tabs();
+        home.clear_terminal_surface();
         // The user may have committed / pushed / merged while in the pane, so
         // re-sync the worktree statuses now that they have left it — keeping the
         // cursor where it is. Best-effort: a sync failure just leaves the
@@ -476,25 +479,28 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
         }
     };
 
+    let mut wiring = event::Wiring {
+        workspace_root: &workspace.path,
+        persist: &mut persist,
+        dispatch_create: &mut dispatch_create,
+        rename_display: &mut rename_display,
+        dispatch_remove: &mut dispatch_remove,
+        evict_pool: &mut evict_pool,
+        existing_branches: &mut existing_branches,
+        open_terminal: &mut open_terminal,
+        open_config: &mut open_config,
+        preview: &mut preview,
+        tab_op: &mut tab_op,
+        close_tab: &mut close_tab,
+    };
     let outcome = event::event_loop(
         term,
         &mut reader,
         state,
-        &workspace.path,
         &monitor,
         &update,
         &tasks,
-        &mut persist,
-        &mut dispatch_create,
-        &mut rename_display,
-        &mut dispatch_remove,
-        &mut evict_pool,
-        &mut existing_branches,
-        &mut open_terminal,
-        &mut open_config,
-        &mut preview,
-        &mut tab_op,
-        &mut close_tab,
+        &mut wiring,
     );
 
     // The loop has exited (quit / back), so wait for any background create /

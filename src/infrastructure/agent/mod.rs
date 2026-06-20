@@ -2,9 +2,10 @@
 //! that CLI's own invocation.
 //!
 //! [`agent_for`] is the single place that maps the configured [`AgentCli`] to its
-//! adapter, so adding a new agent is one adapter module plus one arm here. The
-//! pure piece — the Claude launch-command rendering — is tested in the domain
-//! settings builder it delegates to.
+//! adapter, so adding a new agent is one adapter module plus one arm here. Each
+//! adapter renders its own launch command from the domain's
+//! [`AgentWiring`](crate::domain::agent::AgentWiring) policy and is tested in its
+//! own module.
 
 mod claude;
 mod gemini;
