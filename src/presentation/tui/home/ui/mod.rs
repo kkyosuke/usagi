@@ -207,6 +207,33 @@ pub fn attached_geometry(raw_height: usize, raw_width: usize) -> TerminalGeometr
     }
 }
 
+/// The number of two-pane body rows for a normalized terminal `height` and the
+/// screen's current mode — the rows between the title/ladder chrome above and the
+/// input/results/footer chrome below. Kept in step with [`render_frame`]'s own
+/// layout (the 統括 input box is 3 rows, every other mode's input is 1) so the
+/// preview's scroll clamp agrees with what is actually drawn.
+fn body_rows_for(height: usize, state: &HomeState) -> usize {
+    let input_h = if state.mode() == Mode::Overview && height >= INPUT_BOX_MIN_HEIGHT {
+        3
+    } else {
+        1
+    };
+    let results = if state.mode() == Mode::Overview {
+        RESULTS_BAND.min(height.saturating_sub(4 + input_h))
+    } else {
+        0
+    };
+    height.saturating_sub(3 + input_h + results).max(1)
+}
+
+/// How many Markdown lines the right-pane preview shows at once for a raw terminal
+/// size: the body rows less the preview's one-row header. Used by the event loop
+/// to clamp and page the preview's scroll so the last line stays in view.
+pub fn preview_visible(raw_height: usize, raw_width: usize, state: &HomeState) -> usize {
+    let (height, _width) = widgets::normalize_size(raw_height, raw_width);
+    body_rows_for(height, state).saturating_sub(1).max(1)
+}
+
 /// Builds the full home-screen frame for a raw terminal size.
 pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> Vec<String> {
     // The quit-confirmation modal, when open, overlays everything else.
@@ -302,7 +329,14 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
     // rows it covers never change as the match list grows or shrinks while
     // typing. The band is cleared first (so no stale body text shows through),
     // then the hints are bottom-anchored just above the input.
-    let hints = hint_lines(state, width);
+    // While the preview owns the right pane it also owns the keyboard, so the
+    // command hints (which describe what typing would do) are suppressed — they
+    // would otherwise overlay the bottom of the preview with stale guidance.
+    let hints = if state.preview().is_some() {
+        Vec::new()
+    } else {
+        hint_lines(state, width)
+    };
     if !hints.is_empty() {
         let band = HINT_BAND.min(body_rows.saturating_sub(1));
         let band_start = body_start + body_rows - band;

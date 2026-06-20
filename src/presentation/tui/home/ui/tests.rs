@@ -3,10 +3,11 @@ use super::panes::*;
 use super::*;
 
 use super::super::command::{CommandHint, CommandInfo};
-use super::super::state::{LogLine, TextModal, WorktreeList, ROOT_NAME};
+use super::super::state::{LogLine, Preview, TextModal, WorktreeList, ROOT_NAME};
 use super::super::terminal_view::TerminalView;
 use crate::domain::settings::SessionActionUi;
 use crate::domain::workspace_state::{BranchStatus, WorktreeState};
+use crate::presentation::tui::markdown::{LineStyle, MarkdownLine, Span, SpanStyle};
 use chrono::Utc;
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -1723,4 +1724,143 @@ fn render_frame_focus_menu_keeps_its_height() {
     // The right pane carries the action menu; no results band in Focus.
     assert!(joined.contains("terminal"));
     assert!(joined.contains("session: main"));
+}
+
+/// A `MarkdownLine`-bearing preview opened from `content`, titled `title`.
+fn preview_state(title: &str, content: &str) -> HomeState {
+    let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
+    state.open_preview_result(Ok((title.to_string(), content.to_string())));
+    state
+}
+
+#[test]
+fn preview_pane_renders_every_markdown_block_and_inline_style() {
+    // One sample exercising every block kind and inline span the renderer emits,
+    // so each style arm of `preview_pane` is drawn.
+    let content = "\
+# Title Heading
+A line with **bold**, *italic*, `code`, and [a link](http://example.com).
+- bullet item
+1. ordered item
+> quoted line
+```
+fn fenced() {}
+```";
+    let state = preview_state("README.md", content);
+    let pane = preview_pane(state.preview().unwrap(), 60, 14);
+    let out = stripped(&pane);
+
+    // The header carries the file's path.
+    assert!(out.contains("README.md"));
+    // Block kinds: heading, bullet (• marker), ordered (1.), quote bar, code.
+    assert!(out.contains("Title Heading"));
+    assert!(out.contains("• bullet item"));
+    assert!(out.contains("1. ordered item"));
+    assert!(out.contains("│ quoted line"));
+    assert!(out.contains("fn fenced()"));
+    // Inline spans keep their text (styling stripped): bold, italic, code, link.
+    assert!(out.contains("bold"));
+    assert!(out.contains("italic"));
+    assert!(out.contains("a link"));
+    // The pane fills the full requested height.
+    assert_eq!(pane.len(), 14);
+}
+
+#[test]
+fn preview_pane_scrolls_to_the_offset_and_clips_a_long_title() {
+    let content = (0..30)
+        .map(|i| format!("line {i}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut state = preview_state("a/very/long/path/that/exceeds/the/pane/readme.md", &content);
+    for _ in 0..5 {
+        state.preview_scroll_down(8);
+    }
+    let out = stripped(&preview_pane(state.preview().unwrap(), 40, 12));
+    // Scrolled five lines down: the top lines are gone, line 5 is in view.
+    assert!(out.contains("line 5"));
+    assert!(!out.contains("line 0"));
+    // The over-long title is truncated with an ellipsis to fit beside the hint.
+    assert!(out.contains('…'));
+}
+
+#[test]
+fn right_pane_shows_the_preview_over_every_mode() {
+    // The preview captures the right pane regardless of mode; opened here while in
+    // Overview (where the right pane is otherwise blank).
+    let state = preview_state("notes.md", "# Notes\nhello");
+    let out = stripped(&right_pane_contents(&state, 50, 12));
+    assert!(out.contains("notes.md"));
+    assert!(out.contains("Notes"));
+    assert!(out.contains("hello"));
+}
+
+#[test]
+fn preview_pane_shows_a_position_counter_once_the_content_overflows() {
+    // More lines than the body can hold: the header gains a `start-end/total`
+    // position so the reader knows there is more above / below.
+    let content = (0..50)
+        .map(|i| format!("line {i}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let state = preview_state("big.md", &content);
+    let out = stripped(&preview_pane(state.preview().unwrap(), 60, 8));
+    // 8 rows -> 7 body lines, so 1-7/50 with the file still at the top.
+    assert!(out.contains("(1-7/50)"));
+}
+
+#[test]
+fn preview_pane_in_a_one_row_pane_shows_only_the_header() {
+    let state = preview_state("solo.md", "# Heading\nbody");
+    let pane = preview_pane(state.preview().unwrap(), 40, 1);
+    assert_eq!(pane.len(), 1);
+    assert!(stripped(&pane).contains("solo.md"));
+}
+
+#[test]
+fn preview_pane_colours_headings_by_level() {
+    // h1–h3 take distinct colours and deeper levels fall back to plain bold; this
+    // walks every arm of the heading styling.
+    let state = preview_state("h.md", "# One\n## Two\n### Three\n#### Four");
+    let out = stripped(&preview_pane(state.preview().unwrap(), 40, 8));
+    for heading in ["One", "Two", "Three", "Four"] {
+        assert!(out.contains(heading));
+    }
+}
+
+#[test]
+fn preview_pane_keeps_a_prefix_unstyled_for_a_non_list_non_quote_line() {
+    // A line that carries a prefix but is neither a list item nor a quote keeps the
+    // prefix verbatim (the defensive arm of the prefix styling).
+    let preview = Preview {
+        title: "x.md".to_string(),
+        lines: vec![MarkdownLine {
+            style: LineStyle::Text,
+            prefix: ">> ".to_string(),
+            spans: vec![Span {
+                text: "hello".to_string(),
+                style: SpanStyle::Plain,
+            }],
+        }],
+        scroll: 0,
+    };
+    let out = stripped(&preview_pane(&preview, 40, 4));
+    assert!(out.contains(">> hello"));
+}
+
+#[test]
+fn preview_visible_tracks_the_body_height_in_every_mode() {
+    // In Overview the input box is three rows; in another mode it is one and there
+    // is no results band — so the visible window differs, and both arms of
+    // `body_rows_for` are walked.
+    let overview = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
+    let overview_visible = preview_visible(24, 80, &overview);
+
+    let mut focus = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
+    focus.enter_focus(1);
+    let focus_visible = preview_visible(24, 80, &focus);
+
+    // Both are positive, and Focus (no input box / results band) shows more rows.
+    assert!(overview_visible >= 1);
+    assert!(focus_visible > overview_visible);
 }

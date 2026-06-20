@@ -4,7 +4,7 @@
 
 use super::builtins::{
     AgentCommand, ClearCommand, CloseCommand, ComingSoonCommand, ConfigCommand, HistoryCommand,
-    IssueCommand, ManCommand, QuitCommand, SessionCommand, TerminalCommand,
+    IssueCommand, ManCommand, PreviewCommand, QuitCommand, SessionCommand, TerminalCommand,
 };
 use super::{
     Command, CommandContext, CommandHint, CommandInfo, CommandResult, CommandScope, Completion,
@@ -44,6 +44,7 @@ impl CommandRegistry {
                 Box::new(CloseCommand),
                 Box::new(ConfigCommand),
                 Box::new(IssueCommand),
+                Box::new(PreviewCommand),
                 Box::new(HistoryCommand),
                 Box::new(ComingSoonCommand {
                     name: "doctor",

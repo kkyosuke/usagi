@@ -140,6 +140,39 @@ fn run(keys: Vec<io::Result<Key>>, state: HomeState) -> Result<Outcome> {
     )
 }
 
+/// Run the loop with all-default callbacks but a real `workspace_root`, so the
+/// `preview` command's file read resolves against an on-disk directory.
+fn run_at(keys: Vec<io::Result<Key>>, state: HomeState, root: &Path) -> Result<Outcome> {
+    let term = Term::stdout();
+    let mut reader = ScriptedReader::new(keys);
+    let monitor = MonitorHandle::detached();
+    let mut persist: fn(&str) = noop_persist;
+    let mut create: fn(&str) -> SessionOutcome = noop_create;
+    let mut remove: fn(&str, bool) -> SessionOutcome = noop_remove;
+    let mut open: fn(&mut HomeState, &Path, bool, bool) -> Result<PaneExit> = noop_open;
+    let mut config: fn(&Term) -> Result<Option<ConfigReload>> = noop_config;
+    let mut preview: fn(&Path) -> Option<TerminalView> = noop_preview;
+    let mut branches: fn() -> Vec<String> = no_branches;
+    event_loop_compat(
+        &term,
+        &mut reader,
+        state,
+        root,
+        &monitor,
+        &UpdateHandle::new(),
+        &mut persist,
+        &mut create,
+        &mut (noop_rename as fn(&str, &str) -> SessionOutcome),
+        &mut remove,
+        &mut branches,
+        &mut open,
+        &mut config,
+        &mut preview,
+        &mut (noop_tab_op as fn(&Path, Option<TabNav>) -> (Vec<String>, usize)),
+        &mut (noop_close as fn(&mut HomeState, &Path)),
+    )
+}
+
 /// Run the loop with all-default callbacks but every session live.
 fn run_live(keys: Vec<io::Result<Key>>, state: HomeState) -> Result<Outcome> {
     let mut open: fn(&mut HomeState, &Path, bool, bool) -> Result<PaneExit> = noop_open;
@@ -385,6 +418,49 @@ fn text_modal_scrolls_and_dismisses() {
     keys.push(Ok(Key::Escape)); // dismiss -> Overview
     keys.push(Ok(Key::Escape)); // Esc inert in Overview; fallback Ctrl-C quits
     assert!(matches!(run(keys, sample_state()).unwrap(), Outcome::Quit));
+}
+
+#[test]
+fn preview_command_opens_reads_scrolls_and_dismisses_the_markdown_pane() {
+    // `preview <file>` resolves and reads the file under the workspace root, opens
+    // the right-pane preview, and then the arrows / j/k and PageUp/PageDown scroll
+    // it while Esc dismisses it (back to Overview, where Ctrl-C quits).
+    let dir = tempfile::tempdir().unwrap();
+    let body = (0..40)
+        .map(|i| format!("line {i}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    std::fs::write(dir.path().join("README.md"), format!("# Title\n{body}")).unwrap();
+
+    let mut keys = typed("preview README");
+    keys.push(Ok(Key::Enter)); // run `preview` -> reads the file, opens the pane
+    keys.push(Ok(Key::ArrowDown)); // scroll down a line
+    keys.push(Ok(Key::Char('j')));
+    keys.push(Ok(Key::ArrowUp)); // scroll up a line
+    keys.push(Ok(Key::Char('k')));
+    keys.push(Ok(Key::PageDown)); // page down
+    keys.push(Ok(Key::PageUp)); // page up
+    keys.push(Ok(Key::Char('z'))); // ignored inside the preview
+    keys.push(Ok(Key::Escape)); // dismiss -> Overview
+    keys.push(Ok(Key::Escape)); // Esc inert in Overview; fallback Ctrl-C quits
+    assert!(matches!(
+        run_at(keys, sample_state(), dir.path()).unwrap(),
+        Outcome::Quit
+    ));
+}
+
+#[test]
+fn preview_command_logs_a_failure_for_a_missing_file() {
+    // A `preview` of a file that does not exist opens nothing and logs the error;
+    // the screen keeps running and quits on the trailing Ctrl-C.
+    let dir = tempfile::tempdir().unwrap();
+    let mut keys = typed("preview missing");
+    keys.push(Ok(Key::Enter)); // run `preview` -> read fails, nothing opens
+    keys.push(Ok(Key::Escape)); // Esc inert in Overview (no preview captured it)
+    assert!(matches!(
+        run_at(keys, sample_state(), dir.path()).unwrap(),
+        Outcome::Quit
+    ));
 }
 
 #[test]

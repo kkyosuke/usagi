@@ -1,13 +1,13 @@
 ---
 number: 33
 title: 右ペイン統合プレビュー（diff / Markdown / ファイル）
-status: todo
+status: in-progress
 priority: medium
 labels: [tui]
 dependson: [2, 3, 12]
 related: []
 created_at: 2026-06-16T23:06:55.748061+00:00
-updated_at: 2026-06-16T23:06:55.748061+00:00
+updated_at: 2026-06-20T09:04:19.461484+00:00
 ---
 
 # 右ペイン統合プレビュー（diff / Markdown / ファイル）

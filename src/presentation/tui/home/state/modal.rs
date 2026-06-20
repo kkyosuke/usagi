@@ -4,6 +4,7 @@
 use std::collections::HashSet;
 
 use super::LogLine;
+use crate::presentation::tui::markdown::MarkdownLine;
 use crate::presentation::tui::widgets::text_input::TextInput;
 
 /// The inline session-name input shown in the left pane while creating a session
@@ -41,6 +42,21 @@ pub(super) struct RenameInput {
 pub struct TextModal {
     pub title: String,
     pub lines: Vec<LogLine>,
+    pub scroll: usize,
+}
+
+/// The right-pane Markdown preview, opened by the `preview` command. It takes
+/// over the right pane (the third right-pane state alongside the command
+/// history/output and the live terminal) and shows a rendered Markdown file:
+/// `title` is the file's workspace-relative path, `lines` its rendered Markdown,
+/// and `scroll` the index of the first visible content line. Because the preview
+/// can be taller than the pane, it scrolls within the pane (the TUI itself never
+/// scrolls); the scroll is advanced by the arrow / page keys and clamped on
+/// render. While open it captures the keys (scroll / dismiss).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Preview {
+    pub title: String,
+    pub lines: Vec<MarkdownLine>,
     pub scroll: usize,
 }
 
