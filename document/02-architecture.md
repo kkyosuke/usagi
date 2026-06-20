@@ -66,8 +66,8 @@ src/
 │   │   ├── tree.rs            # ルート再帰走査・worktree 構築・非 git コピー・リポジトリ探索
 │   │   └── reconcile.rs       # state.json と .usagi/sessions/ の照合・孤児ディレクトリの強制削除
 │   ├── doctor/                 # 依存ツールの導入状況チェック（mod=診断 / runner=CommandRunner / fix=--fix 導入）
-│   ├── issue/                  # issue の CRUD・検索・readiness（mod=型/CRUD/annotate / stats=集計・grouping / tree=依存ツリー）
-│   ├── memory/                 # メモリの upsert/CRUD・検索・種別フィルタ（mod=型/save/get/list/search/update/delete）
+│   ├── issue/                  # issue の CRUD・検索・readiness（mod=型/CRUD/annotate / stats=集計・grouping / tree=依存ツリー / view=JSON 出力の SSoT（CLI・MCP 共用））
+│   ├── memory/                 # メモリの upsert/CRUD・検索・種別フィルタ（mod=型/save/get/list/search/update/delete / view=JSON 出力の SSoT（CLI・MCP 共用））
 │   ├── local_llm.rs            # ollama・モデルの有無判定とインストール（ensure）
 │   └── update_check.rs         # リモートのタグから最新リリースを判定（純粋・fetch は注入）
 │
@@ -90,9 +90,9 @@ src/
 └── presentation/               # CLI ルーティング・TUI・MCP
     ├── cli/                    # サブコマンド（init / hop / status / config / doctor / issue / memory / mcp / llm_mcp / agent_phase（隠し・フック用））
     ├── mcp/                    # MCP サーバ（JSON-RPC 2.0 フレーミングを共有）
-    │   ├── mod.rs              # 共有プロトコル（dispatch_line / レスポンス整形 / McpService）
+    │   ├── mod.rs              # 共有プロトコル（dispatch_line / stdio serve ループ / レスポンス整形 / parse_args・to_pretty / McpService）
     │   ├── usagi.rs            # 統合 usagi サーバ（UsagiMcpServer）。issue/memory サーバと session サーバを合成し公開
-    │   ├── issue/             # issue 操作ツール（mod=McpServer・args / json=シリアライズ・スキーマ）。memory ツールもマージして公開
+    │   ├── issue/             # issue 操作ツール（mod=McpServer・args / json=入力スキーマ）。JSON 出力は usecase/issue/view が正本。memory ツールもマージして公開
     │   ├── memory.rs           # メモリ操作ツール（スキーマ・引数・usecase/memory への委譲。issue サーバが呼ぶ）
     │   ├── llm.rs              # ローカル LLM 委譲ツール（LlmMcpServer / LlmBackend）
     │   └── session.rs          # セッション操作ツール（SessionMcpServer / AgentBackend）

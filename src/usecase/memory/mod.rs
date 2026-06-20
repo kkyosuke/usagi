@@ -14,6 +14,10 @@ use chrono::Utc;
 use crate::domain::memory::{slugify, Memory, MemorySummary, MemoryType};
 use crate::infrastructure::memory_store::MemoryStore;
 
+mod view;
+
+pub use view::{MemorySummaryView, MemoryView};
+
 /// Fields needed to save a memory. The name is normalised to a slug and the
 /// timestamps are assigned by [`save`].
 pub struct NewMemory {
