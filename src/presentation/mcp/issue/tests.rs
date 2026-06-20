@@ -51,13 +51,36 @@ fn tools_list_returns_issue_and_memory_tools() {
         json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}),
     );
     let tools = res["result"]["tools"].as_array().unwrap();
-    // Six issue tools followed by six memory tools.
-    assert_eq!(tools.len(), 12);
+    // Seven issue tools followed by six memory tools.
+    assert_eq!(tools.len(), 13);
     let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
     assert!(names.contains(&"issue_create"));
+    assert!(names.contains(&"issue_to_prompt"));
     assert!(names.contains(&"issue_delete"));
     assert!(names.contains(&"memory_save"));
     assert!(names.contains(&"memory_delete"));
+}
+
+#[test]
+fn issue_to_prompt_renders_prompt_and_errors_when_missing() {
+    let server = McpServer::new(tempfile::tempdir().unwrap().path());
+    call(
+        &server,
+        "issue_create",
+        json!({ "title": "Add doctor", "body": "Diagnose the env." }),
+    );
+
+    let result = call(&server, "issue_to_prompt", json!({ "number": 1 }));
+    assert_eq!(result["isError"], false);
+    let payload = tool_json(&result);
+    assert_eq!(payload["number"], 1);
+    assert_eq!(payload["title"], "Add doctor");
+    let prompt = payload["prompt"].as_str().unwrap();
+    assert!(prompt.contains("issue #1"));
+    assert!(prompt.contains("Diagnose the env."));
+
+    let missing = call(&server, "issue_to_prompt", json!({ "number": 99 }));
+    assert_eq!(missing["isError"], true);
 }
 
 #[test]
@@ -297,6 +320,7 @@ fn usecase_errors_surface_for_every_tool() {
     for (name, args) in [
         ("issue_create", json!({"title":"x"})),
         ("issue_get", json!({"number":1})),
+        ("issue_to_prompt", json!({"number":1})),
         ("issue_list", json!({})),
         ("issue_search", json!({"query":"x"})),
         ("issue_update", json!({"number":1,"status":"done"})),

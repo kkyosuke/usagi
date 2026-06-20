@@ -167,6 +167,69 @@ fn dependency_tree_marks_repeats_and_handles_cycles_and_missing() {
     assert!(lines.iter().any(|l| l.contains("#99 (missing)")));
 }
 
+#[test]
+fn to_prompt_includes_metadata_and_body() {
+    let ts = Utc.with_ymd_and_hms(2026, 6, 14, 0, 0, 0).unwrap();
+    let issue = Issue {
+        number: 7,
+        title: "Add doctor".to_string(),
+        status: IssueStatus::Todo,
+        priority: IssuePriority::High,
+        labels: vec!["cli".to_string(), "ux".to_string()],
+        dependson: vec![3, 4],
+        related: vec![5],
+        parent: Some(2),
+        milestone: Some("v1".to_string()),
+        created_at: ts,
+        updated_at: ts,
+        body: "  Diagnose the environment.  ".to_string(),
+    };
+
+    let prompt = to_prompt(&issue);
+    assert!(prompt.contains("issue #7「Add doctor」"));
+    assert!(prompt.contains("- status: todo"));
+    assert!(prompt.contains("- priority: high"));
+    assert!(prompt.contains("- labels: cli, ux"));
+    assert!(prompt.contains("- dependson: 3, 4"));
+    assert!(prompt.contains("- related: 5"));
+    assert!(prompt.contains("- parent: 2"));
+    assert!(prompt.contains("- milestone: v1"));
+    // The body is trimmed of surrounding whitespace.
+    assert!(prompt.contains("\nDiagnose the environment.\n"));
+    // The prompt stays repository-agnostic: it instructs the agent to follow
+    // the repo's own conventions rather than hardcoding usagi/Rust specifics.
+    assert!(prompt.contains("リポジトリの規約"));
+    assert!(!prompt.contains("cargo"));
+    assert!(!prompt.contains(".agents/workflow.md"));
+}
+
+#[test]
+fn to_prompt_renders_placeholders_for_empty_fields() {
+    let ts = Utc.with_ymd_and_hms(2026, 6, 14, 0, 0, 0).unwrap();
+    let issue = Issue {
+        number: 1,
+        title: "Bare".to_string(),
+        status: IssueStatus::InProgress,
+        priority: IssuePriority::Medium,
+        labels: vec![],
+        dependson: vec![],
+        related: vec![],
+        parent: None,
+        milestone: None,
+        created_at: ts,
+        updated_at: ts,
+        body: "   ".to_string(),
+    };
+
+    let prompt = to_prompt(&issue);
+    assert!(prompt.contains("- labels: なし"));
+    assert!(prompt.contains("- dependson: なし"));
+    assert!(prompt.contains("- related: なし"));
+    assert!(prompt.contains("- parent: なし"));
+    assert!(prompt.contains("- milestone: なし"));
+    assert!(prompt.contains("（本文なし）"));
+}
+
 fn new_issue(title: &str) -> NewIssue {
     NewIssue {
         title: title.to_string(),

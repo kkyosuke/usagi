@@ -66,6 +66,18 @@ impl McpServer {
         }
     }
 
+    fn tool_to_prompt(&self, arguments: Value) -> Result<String, String> {
+        let args: NumberArgs = parse_args(arguments)?;
+        match issue::get(&self.repo, args.number).map_err(|e| e.to_string())? {
+            Some(issue) => Ok(to_pretty(&json!({
+                "number": issue.number,
+                "title": issue.title,
+                "prompt": issue::to_prompt(&issue),
+            }))),
+            None => Err(format!("no issue #{}", args.number)),
+        }
+    }
+
     fn tool_list(&self, arguments: Value) -> Result<String, String> {
         let args: ListArgs = parse_args(arguments)?;
         let items = issue::list(&self.repo, &args.filter()).map_err(|e| e.to_string())?;
@@ -125,6 +137,7 @@ impl McpService for McpServer {
         match name {
             "issue_create" => self.tool_create(arguments),
             "issue_get" => self.tool_get(arguments),
+            "issue_to_prompt" => self.tool_to_prompt(arguments),
             "issue_list" => self.tool_list(arguments),
             "issue_search" => self.tool_search(arguments),
             "issue_update" => self.tool_update(arguments),
