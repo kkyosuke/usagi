@@ -126,6 +126,36 @@ pub fn spinner_char(frame: usize) -> &'static str {
     LOADING_SPINNER[frame % LOADING_SPINNER.len()]
 }
 
+/// A fixed-width `[===>   ]` progress bar `width` columns wide (inside the
+/// brackets), filled to the `done / total` fraction rounded to the nearest
+/// column. Unlike a per-task spinner this is a **real** ratio — the share of a
+/// batch of background tasks that has finished — so the bar grows as each one
+/// completes. An empty bar (`done == 0`) is all blanks, a complete one
+/// (`done >= total`) all `=`, and a partial one marks its leading edge with `>`.
+/// Returns the empty string when there is nothing to scale against (`total == 0`
+/// or `width == 0`); the caller styles the result.
+pub fn progress_bar(done: usize, total: usize, width: usize) -> String {
+    if total == 0 || width == 0 {
+        return String::new();
+    }
+    let done = done.min(total);
+    // Round the filled fraction onto the bar's columns.
+    let filled = (done * width + total / 2) / total;
+    if filled == 0 {
+        return format!("[{}]", " ".repeat(width));
+    }
+    if filled >= width {
+        return format!("[{}]", "=".repeat(width));
+    }
+    // Partial: `=` up to the leading edge, a `>` head, then blanks — the three
+    // spans always sum to `width`.
+    format!(
+        "[{}>{}]",
+        "=".repeat(filled - 1),
+        " ".repeat(width - filled)
+    )
+}
+
 /// The hopping rabbit's poses as `(ears, body)`. The ears sit centred over the
 /// head (the `∩∩` lands on the `ㅅ`), and each "hop" pose shifts the ears *and*
 /// the body together by one column so they bounce as a unit without the ears
@@ -522,6 +552,35 @@ mod tests {
         // The frame index wraps around the ten-glyph cycle.
         assert_eq!(spinner_char(10), spinner_char(0));
         assert_eq!(spinner_char(11), spinner_char(1));
+    }
+
+    #[test]
+    fn progress_bar_is_empty_with_nothing_to_scale_against() {
+        assert_eq!(progress_bar(0, 0, 8), "");
+        assert_eq!(progress_bar(1, 3, 0), "");
+    }
+
+    #[test]
+    fn progress_bar_fills_none_some_and_all() {
+        // No work done: an empty track.
+        assert_eq!(progress_bar(0, 3, 8), "[        ]");
+        // Everything done: a full track, no `>` head.
+        assert_eq!(progress_bar(3, 3, 8), "[========]");
+        // Past the total clamps to full rather than overflowing.
+        assert_eq!(progress_bar(9, 3, 8), "[========]");
+    }
+
+    #[test]
+    fn progress_bar_marks_a_partial_edge_with_a_head() {
+        // 1/3 of 8 rounds to ~3 columns: two `=` then the `>` head, blanks after.
+        assert_eq!(progress_bar(1, 3, 8), "[==>     ]");
+        // 2/3 of 8 rounds to ~5 columns.
+        assert_eq!(progress_bar(2, 3, 8), "[====>   ]");
+        // Every partial bar is exactly `width` columns inside the brackets.
+        for done in 1..4 {
+            let bar = progress_bar(done, 4, 10);
+            assert_eq!(console::measure_text_width(&bar), 12);
+        }
     }
 
     #[test]

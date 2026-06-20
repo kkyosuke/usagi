@@ -10,9 +10,12 @@
 //!
 //! It mirrors [`update`](super::update) / [`install_task`](super::super::install_task):
 //! a cloneable `Arc<Mutex<_>>` handle, a **time-derived** spinner (a running
-//! task's animation advances on the clock, with no progress signal to imply a
-//! percentage that does not exist), and a short dismissal window after a task
-//! finishes so its result lingers before the row clears itself.
+//! task's animation advances on the clock — git reports no per-task percentage,
+//! so none is implied), and a short dismissal window after a task finishes so its
+//! result lingers before the row clears itself. The renderer (`task_status_line`
+//! in `super::ui`) does show a progress bar, but it scales on a **real** ratio —
+//! how many of the tracked tasks have finished ([`TaskMark::Done`]) out of the
+//! total — not a fabricated per-task percentage.
 //!
 //! The state transitions and the time-derived view are pure and tested here; the
 //! thread spawn that drives a real task lives in the (coverage-excluded) home

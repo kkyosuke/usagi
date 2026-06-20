@@ -1262,15 +1262,66 @@ fn render_frame_hides_the_update_notice_by_default() {
 // --- background-task panel ---------------------------------------------
 
 #[test]
-fn task_panel_stacks_running_and_finished_rows_under_a_header() {
+fn task_status_line_shows_the_running_lead_its_bar_and_count() {
     use super::super::tasks::{TaskMark, TaskRow};
+    // A batch with one task still running and two finished: the line leads with
+    // the running task (its spinner), counts two of three done, and draws a
+    // partial bar.
     let rows = vec![
+        TaskRow {
+            label: "削除完了 feat".to_string(),
+            mark: TaskMark::Done(true),
+        },
         TaskRow {
             label: "作成中… main".to_string(),
             mark: TaskMark::Running(0),
         },
         TaskRow {
-            label: "削除完了 feat".to_string(),
+            label: "作成失敗 dup".to_string(),
+            mark: TaskMark::Done(false),
+        },
+    ];
+    let line = task_status_line(&rows);
+    assert_eq!(line.len(), 1);
+    let plain = stripped(&line);
+    // The first still-running task is the representative label.
+    assert!(plain.contains("作成中… main"));
+    // Two of the three tasks have finished.
+    assert!(plain.contains("2/3"));
+    // A partial bar: started but not full.
+    assert!(plain.contains('[') && plain.contains('>') && plain.contains(']'));
+}
+
+#[test]
+fn task_status_line_settles_on_the_last_result_once_all_finish() {
+    use super::super::tasks::{TaskMark, TaskRow};
+    // With nothing running the line falls back to the last finished task and
+    // fills the bar to 2/2.
+    let rows = vec![
+        TaskRow {
+            label: "作成完了 a".to_string(),
+            mark: TaskMark::Done(true),
+        },
+        TaskRow {
+            label: "削除完了 b".to_string(),
+            mark: TaskMark::Done(true),
+        },
+    ];
+    let plain = stripped(&task_status_line(&rows));
+    assert!(plain.contains("削除完了 b"));
+    assert!(plain.contains("2/2"));
+    // A full bar carries no `>` head.
+    assert!(plain.contains("[========]"));
+}
+
+#[test]
+fn task_status_line_leads_with_a_failure_when_the_last_task_failed() {
+    use super::super::tasks::{TaskMark, TaskRow};
+    // Nothing running and the most recent task failed: the line settles on that
+    // failure (the `✗` mark) rather than an earlier success.
+    let rows = vec![
+        TaskRow {
+            label: "作成完了 a".to_string(),
             mark: TaskMark::Done(true),
         },
         TaskRow {
@@ -1278,62 +1329,38 @@ fn task_panel_stacks_running_and_finished_rows_under_a_header() {
             mark: TaskMark::Done(false),
         },
     ];
-    let panel = task_panel(&rows);
-    // A bordered box: the top border (carrying the `tasks` title), one row per
-    // task, and the bottom border.
-    assert_eq!(panel.len(), 5);
-    assert!(panel[0].contains('┌') && panel[0].contains('┐'));
-    assert!(panel.last().unwrap().contains('└'));
-    let plain = stripped(&panel);
-    assert!(plain.contains("tasks"));
-    assert!(plain.contains("作成中… main"));
-    assert!(plain.contains("✓ 削除完了 feat"));
-    assert!(plain.contains("✗ 作成失敗 dup"));
+    let plain = stripped(&task_status_line(&rows));
+    assert!(plain.contains("作成失敗 dup"));
+    assert!(plain.contains('✗'));
+    assert!(plain.contains("2/2"));
 }
 
 #[test]
-fn task_panel_holds_one_fixed_width_however_the_rows_change() {
+fn task_status_line_holds_one_fixed_width_however_the_label_changes() {
     use super::super::tasks::{TaskMark, TaskRow};
-    // A short running label and a longer finished one must produce the same box
-    // width, so the right-anchored panel never shifts as a row's text changes.
-    let short = task_panel(&[TaskRow {
+    // A short running label and a longer finished one must produce the same line
+    // width, so the right-anchored line never shifts as a row's text changes.
+    let short = task_status_line(&[TaskRow {
         label: "作成中… a".to_string(),
         mark: TaskMark::Running(0),
     }]);
-    let long = task_panel(&[TaskRow {
+    let long = task_status_line(&[TaskRow {
         label: "作成完了 a-very-long-session-name".to_string(),
         mark: TaskMark::Done(true),
     }]);
-    let width = |panel: &[String]| console::measure_text_width(&panel[0]);
+    let width = |line: &[String]| console::measure_text_width(&line[0]);
     assert_eq!(width(&short), width(&long));
 }
 
 #[test]
-fn task_panel_is_empty_without_rows() {
+fn task_status_line_is_empty_without_rows() {
     use super::super::tasks::TaskRow;
     let none: Vec<TaskRow> = Vec::new();
-    assert!(task_panel(&none).is_empty());
+    assert!(task_status_line(&none).is_empty());
 }
 
 #[test]
-fn task_panel_collapses_the_overflow_beyond_the_cap() {
-    use super::super::tasks::{TaskMark, TaskRow};
-    let rows: Vec<TaskRow> = (0..9)
-        .map(|i| TaskRow {
-            label: format!("作成中… s{i}"),
-            mark: TaskMark::Running(i),
-        })
-        .collect();
-    let plain = stripped(&task_panel(&rows));
-    // Six rows show, the remaining three collapse into a summary line.
-    assert!(plain.contains("作成中… s0"));
-    assert!(plain.contains("作成中… s5"));
-    assert!(!plain.contains("作成中… s6"));
-    assert!(plain.contains("… and 3 more"));
-}
-
-#[test]
-fn render_frame_shows_the_task_panel_over_the_update_notice() {
+fn render_frame_shows_the_task_status_over_the_update_notice() {
     use super::super::tasks::{TaskMark, TaskRow};
     let mut state = state_with(Vec::new());
     // Even with an update available, in-flight tasks take the corner.
@@ -1348,11 +1375,11 @@ fn render_frame_shows_the_task_panel_over_the_update_notice() {
 }
 
 #[test]
-fn render_frame_suppresses_the_task_panel_over_a_live_terminal() {
+fn render_frame_shows_the_task_status_on_the_header_over_a_live_terminal() {
     use super::super::tasks::{TaskMark, TaskRow};
     // A live embedded terminal owns the right pane (没入's attached shell, or
-    // 切替's live preview). Its clipped rows would be overdrawn by the constantly
-    // repainting task panel, so the panel is withheld while the pane is live.
+    // 切替's live preview). The task status now rides the header's title-bar row,
+    // outside the pane, so it shows without clobbering the shell output below.
     let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Pushed)]);
     state.enter_focus(1);
     state.show_attached();
@@ -1361,10 +1388,13 @@ fn render_frame_suppresses_the_task_panel_over_a_live_terminal() {
         label: "作成中… main".to_string(),
         mark: TaskMark::Running(0),
     }]);
-    let joined = stripped(&render_frame(24, 100, &state));
-    // The shell output is intact and the panel does not clobber it.
+    let frame = render_frame(24, 100, &state);
+    let joined = stripped(&frame);
+    // The status shows on the header row and the shell output stays intact.
+    assert!(joined.contains("作成中… main"));
     assert!(joined.contains("$ echo hi"));
-    assert!(!joined.contains("作成中… main"));
+    // The status rides row 0 (the title bar), not the body where the shell is.
+    assert!(stripped(&[frame[0].clone()]).contains("作成中… main"));
 }
 
 #[test]
