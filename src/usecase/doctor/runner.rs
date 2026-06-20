@@ -1,8 +1,6 @@
 //! The command runner abstraction used by `doctor --fix`: a trait plus the
 //! production implementation that shells out to real processes.
 
-use super::which;
-
 /// Runs external commands on behalf of `doctor --fix`.
 ///
 /// Abstracted behind a trait so the remediation logic can be tested without
@@ -64,6 +62,19 @@ pub trait CommandRunner {
     /// up a long-running daemon — the Ollama server — that other commands
     /// depend on. Its output is discarded.
     fn spawn(&self, program: &str, args: &[&str]) -> std::io::Result<()>;
+}
+
+/// Whether `name` is installed and runnable, probed by invoking it with
+/// `--version` and discarding its output. The basis of
+/// [`SystemRunner::available`].
+fn which(name: &str) -> bool {
+    std::process::Command::new(name)
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
 }
 
 /// The production [`CommandRunner`], backed by [`std::process::Command`].

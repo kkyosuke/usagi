@@ -18,11 +18,10 @@
 
 use std::path::{Path, PathBuf};
 
-use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use super::McpService;
+use super::{parse_args, to_pretty, McpService};
 use crate::domain::workspace_state::SessionRecord;
 use crate::usecase::session;
 
@@ -126,11 +125,6 @@ struct PromptArgs {
     prompt: String,
 }
 
-/// Deserialize tool arguments, mapping any error to a tool-facing message.
-fn parse_args<T: DeserializeOwned>(arguments: Value) -> Result<T, String> {
-    serde_json::from_value(arguments).map_err(|e| format!("invalid arguments: {e}"))
-}
-
 // --- JSON helpers ----------------------------------------------------------
 
 fn sessions_to_json(sessions: &[SessionRecord]) -> Value {
@@ -153,10 +147,6 @@ fn sessions_to_json(sessions: &[SessionRecord]) -> Value {
             })
             .collect(),
     )
-}
-
-fn to_pretty(value: &Value) -> String {
-    serde_json::to_string_pretty(value).unwrap_or_default()
 }
 
 /// JSON Schemas for the session tools advertised via `tools/list`.

@@ -1,57 +1,11 @@
-//! JSON serialisation of issues and the tool input schemas for the issue MCP
-//! server.
+//! The tool input schemas for the issue MCP server.
+//!
+//! The JSON *output* shape for issues is the single source of truth in
+//! [`crate::usecase::issue`] ([`IssueView`](crate::usecase::issue::IssueView) /
+//! [`ListedIssueView`](crate::usecase::issue::ListedIssueView)), consumed here
+//! and by the CLI alike.
 
 use serde_json::{json, Value};
-
-use crate::domain::issue::Issue;
-use crate::usecase::issue::ListedIssue;
-
-pub(super) fn issue_to_json(issue: &Issue) -> Value {
-    json!({
-        "number": issue.number,
-        "title": issue.title,
-        "status": issue.status,
-        "priority": issue.priority,
-        "labels": issue.labels,
-        "dependson": issue.dependson,
-        "related": issue.related,
-        "parent": issue.parent,
-        "milestone": issue.milestone,
-        "created_at": issue.created_at.to_rfc3339(),
-        "updated_at": issue.updated_at.to_rfc3339(),
-        "body": issue.body,
-    })
-}
-
-pub(super) fn listed_to_json(items: &[ListedIssue]) -> Value {
-    Value::Array(
-        items
-            .iter()
-            .map(|l| {
-                json!({
-                    "number": l.summary.number,
-                    "title": l.summary.title,
-                    "status": l.summary.status,
-                    "priority": l.summary.priority,
-                    "labels": l.summary.labels,
-                    "dependson": l.summary.dependson,
-                    "related": l.summary.related,
-                    "parent": l.summary.parent,
-                    "milestone": l.summary.milestone,
-                    "file": l.summary.file,
-                    "created_at": l.summary.created_at.to_rfc3339(),
-                    "updated_at": l.summary.updated_at.to_rfc3339(),
-                    "ready": l.is_ready(),
-                    "unmet_deps": l.unmet_deps,
-                })
-            })
-            .collect(),
-    )
-}
-
-pub(super) fn to_pretty(value: &Value) -> String {
-    serde_json::to_string_pretty(value).unwrap_or_default()
-}
 
 /// JSON Schemas for the issue tools advertised via `tools/list`.
 pub(super) fn issue_tool_schemas() -> Value {

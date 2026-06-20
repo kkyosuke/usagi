@@ -24,6 +24,7 @@ use super::command::{
     CommandInfo, CommandRegistry, CommandResult, CommandScope, Completion, Effect, Hint,
 };
 use super::tasks::TaskRow;
+use super::terminal_pool::MonitorSnapshot;
 use super::terminal_tabs::TabStrip;
 use super::terminal_view::TerminalView;
 use crate::presentation::tui::widgets::text_input::TextInput;
@@ -89,6 +90,30 @@ impl LoadingIndicator {
     }
 }
 
+/// The embedded-terminal surface shown in the home screen's right pane: the
+/// screen `view` snapshot and the `tabs` strip above it.
+///
+/// The two are bundled into one owned value so the surface is published and
+/// cleared **as a unit**. There is no "clear the tab strip but keep the screen
+/// snapshot" path any more — the asymmetry that let a stale view linger after the
+/// pane yielded control (it cleared its tabs but left the view for the event
+/// loop's next frame to mop up). Exactly one party drives the surface at a time:
+/// the event loop while previewing a session in 切替 (Switch), and the
+/// embedded-terminal driver while a session is 没入 (Attached). Each clears it via
+/// [`HomeState::clear_terminal_surface`] when it yields, so a snapshot never
+/// outlives the mode that produced it regardless of *when* control changes hands.
+#[derive(Default)]
+struct TerminalSurface {
+    /// The latest snapshot of the embedded terminal's screen, set while a session
+    /// is 没入 (Attached) or previewed in 切替 (Switch) and rendered in the right
+    /// pane.
+    view: Option<TerminalView>,
+    /// The tab strip shown above the embedded terminal: the session's panes and
+    /// which one is active. Published alongside the snapshot by whichever party
+    /// owns the surface; `None` outside 没入 / a 切替 preview.
+    tabs: Option<TabStrip>,
+}
+
 /// The full state of the home screen.
 ///
 /// Not `Clone`/`Debug`: it owns a [`CommandRegistry`] of trait objects, which
@@ -134,32 +159,16 @@ pub struct HomeState {
     /// Sessions recorded for this workspace (from `state.json`), shown by
     /// `session list` and kept current as sessions are created.
     sessions: Vec<SessionRecord>,
-    /// The latest snapshot of the embedded terminal's screen, set while a session
-    /// is 没入 (Attached) and rendered in the right pane.
-    terminal_view: Option<TerminalView>,
-    /// The tab strip shown above the embedded terminal while 没入 (Attached): the
-    /// session's panes and which one is active. Set alongside the snapshot by the
-    /// pane driver; `None` outside 没入 (and cleared each frame, like the view).
-    terminal_tabs: Option<TabStrip>,
-    /// Worktree paths whose agent is actively working a turn (reported the
-    /// `running` phase). Refreshed from the terminal monitor each redraw and
-    /// rendered with a "running" icon, unless the path is also waiting or done
-    /// (which take precedence).
-    running: HashSet<PathBuf>,
-    /// Worktree paths whose background session is waiting for the user (its
-    /// agent paused mid-turn for input/permission, or rang the bell). Refreshed
-    /// from the terminal monitor each redraw and rendered as a marker in the
-    /// sidebar.
-    waiting: HashSet<PathBuf>,
-    /// Worktree paths with a live embedded session — an agent/shell is in use,
-    /// whether attached or left running in the background. Refreshed from the
-    /// terminal monitor each redraw; a live path that is not running, waiting, or
-    /// done renders as "ready" (idle, awaiting the first prompt).
-    live: HashSet<PathBuf>,
-    /// Worktree paths whose agent has finished — a turn completed or the process
-    /// exited — shown with a "done" badge. Refreshed from the terminal monitor
-    /// each redraw; takes precedence over running and waiting.
-    done: HashSet<PathBuf>,
+    /// The embedded-terminal surface drawn in the right pane (screen snapshot +
+    /// tab strip), published and cleared as a unit. See [`TerminalSurface`].
+    terminal: TerminalSurface,
+    /// The session activity badge sets read together from the terminal monitor
+    /// before each redraw: the worktree paths whose agent is running / waiting /
+    /// live / done. Stored as one [`MonitorSnapshot`] and replaced wholesale by
+    /// [`apply_badges`](Self::apply_badges), so a frame never mixes one set's
+    /// fresh reading with another's stale one. Rendering precedence among them
+    /// (done > waiting > running, atop live) lives in the sidebar renderer.
+    badges: MonitorSnapshot,
     /// Whether the quit-confirmation modal is open. It is raised when the user
     /// presses `Ctrl-C` while a session is still live, so an accidental close
     /// does not drop a running agent/shell; confirming it quits the app.
@@ -224,12 +233,8 @@ impl HomeState {
             focus_prompt: TextInput::new(),
             remove_modal: None,
             sessions: Vec::new(),
-            terminal_view: None,
-            terminal_tabs: None,
-            running: HashSet::new(),
-            waiting: HashSet::new(),
-            live: HashSet::new(),
-            done: HashSet::new(),
+            terminal: TerminalSurface::default(),
+            badges: MonitorSnapshot::default(),
             quit_confirm: false,
             text_modal: None,
             response_start: 0,
@@ -424,9 +429,10 @@ impl HomeState {
         &self.log
     }
 
-    /// The current embedded-terminal snapshot, when a session is 没入 (Attached).
+    /// The current embedded-terminal snapshot, when a session is 没入 (Attached)
+    /// or previewed in 切替 (Switch).
     pub fn terminal_view(&self) -> Option<&TerminalView> {
-        self.terminal_view.as_ref()
+        self.terminal.view.as_ref()
     }
 
     /// Enter 没入 (Attached): an embedded terminal / agent is going live in the
@@ -438,112 +444,94 @@ impl HomeState {
     }
 
     /// Leave 没入 for 在席 (Focus): the embedded session was closed or detached,
-    /// so drop the snapshot and return to the focused session's action surface.
+    /// so drop the surface and return to the focused session's action surface.
     pub fn leave_attached(&mut self) {
         self.mode = Mode::Focus;
-        self.terminal_view = None;
-        self.terminal_tabs = None;
+        self.clear_terminal_surface();
     }
 
-    /// Publish the tab strip shown above the embedded terminal in 没入: the
-    /// session's pane `labels` and which one is `active`. Set by the pane driver
-    /// before each repaint, alongside [`set_terminal_view`](Self::set_terminal_view).
+    /// Publish the tab strip shown above the embedded terminal: the session's
+    /// pane `labels` and which one is `active`. Published alongside
+    /// [`set_terminal_view`](Self::set_terminal_view) by whichever party owns the
+    /// surface (the pane driver in 没入, the event loop's 切替 preview).
     pub fn set_terminal_tabs(&mut self, labels: Vec<String>, active: usize) {
-        self.terminal_tabs = Some(TabStrip { labels, active });
+        self.terminal.tabs = Some(TabStrip { labels, active });
     }
 
-    /// The tab strip shown above the embedded terminal, when 没入 (Attached).
+    /// The tab strip shown above the embedded terminal, when the surface is live.
     pub fn terminal_tabs(&self) -> Option<&TabStrip> {
-        self.terminal_tabs.as_ref()
-    }
-
-    /// Drop the tab strip (the pane driver left 没入).
-    pub fn clear_terminal_tabs(&mut self) {
-        self.terminal_tabs = None;
+        self.terminal.tabs.as_ref()
     }
 
     /// Store the latest embedded-terminal screen snapshot, shown in the right
-    /// pane while the session is 没入 (Attached).
+    /// pane while the session is 没入 (Attached) or previewed in 切替 (Switch).
     pub fn set_terminal_view(&mut self, view: TerminalView) {
-        self.terminal_view = Some(view);
+        self.terminal.view = Some(view);
     }
 
-    /// Drop the embedded-terminal snapshot (and its tab strip) without changing
-    /// the mode. Used between frames so a stale snapshot never lingers in the
-    /// right pane.
-    pub fn clear_terminal_view(&mut self) {
-        self.terminal_view = None;
-        self.terminal_tabs = None;
+    /// Drop the embedded-terminal surface — both the screen snapshot and the tab
+    /// strip — without changing the mode. Whichever party owns the surface calls
+    /// this when it yields control (the event loop between frames, the pane driver
+    /// when it leaves 没入), so a stale snapshot never lingers in the right pane.
+    /// Clearing the two together is the whole point of bundling them: there is no
+    /// path that drops one and forgets the other.
+    pub fn clear_terminal_surface(&mut self) {
+        self.terminal = TerminalSurface::default();
     }
 
-    /// Replace the set of worktree paths whose agent is actively working a turn,
-    /// refreshed from the terminal monitor before each redraw.
-    pub fn set_running(&mut self, running: HashSet<PathBuf>) {
-        self.running = running;
+    /// Replace every session activity badge set at once with a fresh reading from
+    /// the terminal monitor (running / waiting / live / done). Called before each
+    /// redraw by whichever party is driving the screen — the event loop between
+    /// frames, the pane driver while a session is 没入. Replacing them as a unit
+    /// keeps the four sets consistent with one another (all from the same lock).
+    pub fn apply_badges(&mut self, badges: MonitorSnapshot) {
+        self.badges = badges;
     }
 
     /// Whether the worktree at `path` has a background session actively working a
     /// turn.
     pub fn is_running(&self, path: &Path) -> bool {
-        self.running.contains(path)
+        self.badges.running.contains(path)
     }
 
     /// The set of worktree paths whose agent is actively working a turn, for the
     /// sidebar renderer.
     pub fn running_paths(&self) -> &HashSet<PathBuf> {
-        &self.running
-    }
-
-    /// Replace the set of worktree paths whose background session is waiting for
-    /// the user, refreshed from the terminal monitor before each redraw.
-    pub fn set_waiting(&mut self, waiting: HashSet<PathBuf>) {
-        self.waiting = waiting;
+        &self.badges.running
     }
 
     /// Whether the worktree at `path` has a background session waiting for input.
     pub fn is_waiting(&self, path: &Path) -> bool {
-        self.waiting.contains(path)
+        self.badges.waiting.contains(path)
     }
 
     /// The set of worktree paths whose background session is waiting for input,
     /// for the sidebar renderer.
     pub fn waiting_paths(&self) -> &HashSet<PathBuf> {
-        &self.waiting
-    }
-
-    /// Replace the set of worktree paths with a live (running) embedded session,
-    /// refreshed from the terminal monitor before each redraw.
-    pub fn set_live(&mut self, live: HashSet<PathBuf>) {
-        self.live = live;
+        &self.badges.waiting
     }
 
     /// Whether the worktree at `path` has a live (running) embedded session.
     pub fn is_live(&self, path: &Path) -> bool {
-        self.live.contains(path)
+        self.badges.live.contains(path)
     }
 
     /// The set of worktree paths with a live (running) embedded session, for the
     /// sidebar renderer.
     pub fn live_paths(&self) -> &HashSet<PathBuf> {
-        &self.live
-    }
-
-    /// Replace the set of worktree paths whose agent has finished, refreshed from
-    /// the terminal monitor before each redraw.
-    pub fn set_done(&mut self, done: HashSet<PathBuf>) {
-        self.done = done;
+        &self.badges.live
     }
 
     /// Whether the worktree at `path` has a background session whose agent has
     /// finished (a turn completed or it exited).
     pub fn is_done(&self, path: &Path) -> bool {
-        self.done.contains(path)
+        self.badges.done.contains(path)
     }
 
     /// The set of worktree paths whose agent has finished, for the sidebar
     /// renderer.
     pub fn done_paths(&self) -> &HashSet<PathBuf> {
-        &self.done
+        &self.badges.done
     }
 
     /// Record the latest released version found by the background update check,
@@ -612,13 +600,13 @@ impl HomeState {
     /// How many sessions currently have a live (running) embedded shell/agent.
     /// Shown in the quit-confirmation modal so the user sees what is at stake.
     pub fn live_count(&self) -> usize {
-        self.live.len()
+        self.badges.live.len()
     }
 
     /// Whether any session has a live (running) embedded shell/agent — the
     /// condition that makes `Ctrl-C` ask for confirmation before quitting.
     pub fn has_live_sessions(&self) -> bool {
-        !self.live.is_empty()
+        !self.badges.live.is_empty()
     }
 
     /// Whether the quit-confirmation modal is open.

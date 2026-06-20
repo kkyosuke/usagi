@@ -42,74 +42,6 @@ pub enum SessionActionUi {
     Prompt,
 }
 
-/// The always-present usagi MCP server wired into an agent CLI, as the inner
-/// body of the `"mcpServers"` object (no enclosing braces): the unified `usagi`
-/// server (`<usagi_bin> mcp`) so the agent can create and query issues, save and
-/// recall memories, and create sessions and delegate prompts to them — all from
-/// one server.
-///
-/// `usagi_bin` is the command the agent uses to invoke usagi — the absolute path
-/// of the running binary (see [`AgentCli::launch_command`]), so it resolves
-/// whether usagi is installed on `$PATH` or run straight from a build
-/// (`cargo run`, where the binary is `target/debug/usagi`, not on `$PATH`). The
-/// path is JSON-escaped via [`json_escape`].
-fn usagi_mcp_servers(usagi_bin: &str) -> String {
-    let bin = json_escape(usagi_bin);
-    format!(r#""usagi":{{"command":"{bin}","args":["mcp"]}}"#)
-}
-
-/// JSON wiring Claude Code's lifecycle hooks back into usagi, so the agent
-/// reports its own ready / running / waiting state instead of usagi guessing from
-/// the terminal bell. Each hook runs `<usagi_bin> agent-phase <phase>`, which
-/// records the phase for the worktree the agent runs in (the hook delivers its
-/// `cwd` on stdin); the home screen's session watcher reads it back to mark the
-/// session. `usagi_bin` is the resolved usagi binary path (see
-/// [`usagi_mcp_servers`]).
-///
-/// The events: a freshly started or resumed session is idle (`SessionStart` →
-/// `ready`); a submitted prompt starts a turn (`UserPromptSubmit` → `running`);
-/// finishing a turn means the agent is done (`Stop` → `ended`); pausing mid-turn
-/// for the user's input or permission means it waits (`Notification` →
-/// `waiting`). A tool-permission prompt is also a wait, but `Notification` only
-/// fires for it when the user is away; the dedicated `PermissionRequest` →
-/// `waiting` hook catches it reliably (it fires right as the prompt appears, even
-/// while the session is focused). The session ending is also done (`SessionEnd` →
-/// `ended`). Passed via `--settings`, which *merges* with the user's own settings
-/// rather than replacing them. Built by string formatting (not `serde_json`) to
-/// keep `domain` dependency-free; the binary path is JSON-escaped so a Windows
-/// path stays valid JSON, and contains only double quotes so it survives the
-/// single-quoted shell argument.
-fn claude_hooks_settings(usagi_bin: &str) -> String {
-    let bin = json_escape(usagi_bin);
-    format!(
-        r#"{{"hooks":{{"UserPromptSubmit":[{{"hooks":[{{"type":"command","command":"{bin} agent-phase running"}}]}}],"Stop":[{{"hooks":[{{"type":"command","command":"{bin} agent-phase ended"}}]}}],"Notification":[{{"hooks":[{{"type":"command","command":"{bin} agent-phase waiting"}}]}}],"PermissionRequest":[{{"hooks":[{{"type":"command","command":"{bin} agent-phase waiting"}}]}}],"SessionStart":[{{"hooks":[{{"type":"command","command":"{bin} agent-phase ready"}}]}}],"SessionEnd":[{{"hooks":[{{"type":"command","command":"{bin} agent-phase ended"}}]}}]}}}}"#
-    )
-}
-
-/// Escape a string for embedding as a JSON string value: double the backslashes
-/// and escape the double quotes. Keeps the formatted MCP / hooks JSON valid when
-/// the usagi binary path contains backslashes (a Windows path like
-/// `C:\…\usagi.exe`) or quotes, without pulling `serde_json` into `domain`.
-fn json_escape(s: &str) -> String {
-    s.replace('\\', "\\\\").replace('"', "\\\"")
-}
-
-/// System-prompt addendum injected into agents launched from a usagi session.
-///
-/// Every agent `:agent` starts already lives inside the session's dedicated
-/// worktree, so the usual "create a worktree first" workflow step is redundant
-/// here. We tell the agent up front to skip it and work in place. Kept free of
-/// single quotes so it survives the single-quoted shell argument verbatim.
-const SESSION_WORKTREE_PROMPT: &str = "あなたは usagi が管理するセッション専用の worktree 内で起動されています。このディレクトリは既に独立した作業環境のため、新たに git worktree を作成する必要はありません。ここで直接作業を進めてください。";
-
-/// System-prompt addendum added when a local LLM MCP server is wired in.
-///
-/// It nudges the cloud agent to offload light, low-stakes work (summaries,
-/// naming, boilerplate, simple transforms) to the `local_llm_ask` tool so the
-/// cloud model's tokens are spent on the work that actually needs it. Kept free
-/// of single quotes so it survives the single-quoted shell argument verbatim.
-const LOCAL_LLM_PROMPT: &str = "トークン節約のため、要約・命名・定型文の生成・単純な変換といった軽量で重要度の低いタスクは、MCP ツール local_llm_ask（ローカル LLM）に委譲してください。判断が必要な作業や重要な実装はあなた自身が行ってください。";
-
 /// The local LLM models usagi can delegate work to, in the order the config
 /// screen cycles through them. All are Qwen variants pullable with
 /// `ollama pull <model>`; the coder variants are tuned for code/technical
@@ -154,89 +86,17 @@ impl Default for LocalLlm {
 impl AgentCli {
     /// The shell command (program name) usagi launches for this agent — the
     /// word the `agent` command runs inside the embedded terminal.
+    ///
+    /// How the full launch command line is built (MCP servers, system prompt,
+    /// lifecycle hooks) is the agent adapter's job, not the domain's — see the
+    /// [`Agent`](crate::domain::agent::Agent) port and its
+    /// `infrastructure::agent` implementations.
     pub fn command(self) -> &'static str {
         match self {
             AgentCli::Claude => "claude",
             AgentCli::Gemini => "gemini",
         }
     }
-
-    /// The full command line `:agent` sends to the embedded shell, with usagi's
-    /// issue MCP server wired in so the agent can manage issues immediately —
-    /// plus the local LLM MCP server when `local_llm_model` is `Some` (i.e. the
-    /// local LLM is enabled), so the agent can offload light work to it.
-    ///
-    /// Claude Code accepts the servers inline via `--mcp-config`, a
-    /// session-scoped instruction via `--append-system-prompt`, and lifecycle
-    /// hooks via `--settings` (see [`claude_hooks_settings`], so the agent reports
-    /// its own running / waiting state); all three arguments are single-quoted so
-    /// the shell passes them through verbatim (no value contains a single quote).
-    /// The system prompt tells the agent it is already inside a usagi worktree,
-    /// so it skips creating one, and — when the local LLM is on — to delegate
-    /// light tasks to it. Gemini has no inline flags — its MCP servers come from
-    /// `settings.json` — so it launches plain for now.
-    ///
-    /// `usagi_bin` is the command the agent uses to invoke usagi back (for the
-    /// MCP servers and lifecycle hooks): the absolute path of the running binary,
-    /// resolved by the caller via `std::env::current_exe()`. Passing the resolved
-    /// path rather than the bare name `usagi` makes the wiring work even when
-    /// usagi is run straight from a build (`cargo run`) and is not on `$PATH`.
-    ///
-    /// When `resume` is set, Claude is launched with `--continue` so it picks up
-    /// the worktree's previous conversation instead of starting fresh — usagi
-    /// only sets it when such a conversation exists (see
-    /// [`Agent::has_resumable_session`](crate::domain::agent::Agent::has_resumable_session)).
-    /// Gemini has no resume flag, so it ignores `resume` and launches plain.
-    pub fn launch_command(
-        self,
-        local_llm_model: Option<&str>,
-        usagi_bin: &str,
-        resume: bool,
-    ) -> String {
-        match self {
-            AgentCli::Claude => {
-                let mcp_config = mcp_config_json(local_llm_model, usagi_bin);
-                let system_prompt = match local_llm_model {
-                    Some(_) => format!("{SESSION_WORKTREE_PROMPT}{LOCAL_LLM_PROMPT}"),
-                    None => SESSION_WORKTREE_PROMPT.to_string(),
-                };
-                let hooks = claude_hooks_settings(usagi_bin);
-                // `--continue` resumes the most recent conversation in the
-                // worktree; placed right after the program name so it reads like
-                // a plain `claude -c` with usagi's wiring appended.
-                let resume_flag = if resume { "--continue " } else { "" };
-                format!(
-                    "claude {resume_flag}--mcp-config '{mcp_config}' \
-                     --append-system-prompt '{system_prompt}' \
-                     --settings '{hooks}'"
-                )
-            }
-            AgentCli::Gemini => "gemini".to_string(),
-        }
-    }
-}
-
-/// The `--mcp-config` JSON for Claude Code: always the unified usagi server,
-/// plus the local LLM server (`<usagi_bin> llm-mcp --model <model>`) when a model
-/// is given. `usagi_bin` is the resolved usagi binary path (see
-/// [`AgentCli::launch_command`]).
-///
-/// Built by string formatting rather than `serde_json` so `domain` stays free
-/// of that dependency; the model name comes from a fixed allowlist
-/// ([`LOCAL_LLM_MODELS`]) with no characters that need JSON escaping, and the
-/// binary path is JSON-escaped via [`json_escape`].
-fn mcp_config_json(local_llm_model: Option<&str>, usagi_bin: &str) -> String {
-    let servers = usagi_mcp_servers(usagi_bin);
-    let servers = match local_llm_model {
-        None => servers,
-        Some(model) => {
-            let bin = json_escape(usagi_bin);
-            format!(
-                r#"{servers},"usagi-llm":{{"command":"{bin}","args":["llm-mcp","--model","{model}"]}}"#
-            )
-        }
-    };
-    format!(r#"{{"mcpServers":{{{servers}}}}}"#)
 }
 
 /// Which ref a new session worktree is branched from.
@@ -318,7 +178,9 @@ impl Settings {
     ///
     /// `usagi_bin` is the absolute path of the running binary
     /// (`std::env::current_exe()`), so the wiring resolves even when usagi is run
-    /// from a build and not installed on `$PATH`. See [`AgentCli::launch_command`].
+    /// from a build and not installed on `$PATH`. How an adapter renders this is
+    /// the [`Agent`](crate::domain::agent::Agent) port's
+    /// [`launch_command`](crate::domain::agent::Agent::launch_command).
     pub fn agent_wiring(&self, usagi_bin: &str) -> AgentWiring {
         AgentWiring {
             usagi_bin: usagi_bin.to_string(),
@@ -466,132 +328,9 @@ mod tests {
     }
 
     #[test]
-    fn agent_cli_maps_to_its_launch_command() {
+    fn agent_cli_maps_to_its_program_command() {
         assert_eq!(AgentCli::Claude.command(), "claude");
         assert_eq!(AgentCli::Gemini.command(), "gemini");
-    }
-
-    #[test]
-    fn claude_launch_command_wires_in_the_usagi_mcp_servers() {
-        // With the local LLM off (`None`), the unified usagi server is wired in
-        // and the system prompt is just the worktree note. The bare name `usagi`
-        // stands in for the resolved binary path the caller passes.
-        let launch = AgentCli::Claude.launch_command(None, "usagi", false);
-        // The program is still `claude`, now with usagi's MCP server passed
-        // inline via `--mcp-config` and a session-scoped instruction passed via
-        // `--append-system-prompt` (both single-quoted so the shell keeps them).
-        assert_eq!(
-            launch,
-            "claude --mcp-config '{\"mcpServers\":{\"usagi\":{\"command\":\"usagi\",\"args\":[\"mcp\"]}}}' \
-             --append-system-prompt 'あなたは usagi が管理するセッション専用の worktree 内で起動されています。このディレクトリは既に独立した作業環境のため、新たに git worktree を作成する必要はありません。ここで直接作業を進めてください。' \
-             --settings '{\"hooks\":{\"UserPromptSubmit\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase running\"}]}],\"Stop\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase ended\"}]}],\"Notification\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase waiting\"}]}],\"PermissionRequest\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase waiting\"}]}],\"SessionStart\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase ready\"}]}],\"SessionEnd\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase ended\"}]}]}}'"
-        );
-    }
-
-    #[test]
-    fn claude_launch_command_adds_continue_only_when_resuming() {
-        // Resuming inserts `--continue` right after the program name so Claude
-        // picks up the worktree's previous conversation; the rest of the wiring
-        // is unchanged.
-        let resumed = AgentCli::Claude.launch_command(None, "usagi", true);
-        assert!(resumed.starts_with("claude --continue --mcp-config '"));
-        // Without resuming the flag is absent and the command starts plainly.
-        let fresh = AgentCli::Claude.launch_command(None, "usagi", false);
-        assert!(fresh.starts_with("claude --mcp-config '"));
-        assert!(!fresh.contains("--continue"));
-    }
-
-    #[test]
-    fn claude_launch_command_wires_in_the_local_llm_server_when_enabled() {
-        // With a model given, the local LLM server joins the issue server in the
-        // MCP config and the delegation prompt is appended after the worktree note.
-        let launch = AgentCli::Claude.launch_command(Some("qwen2.5-coder:7b"), "usagi", false);
-        assert!(launch.contains(
-            "\"usagi-llm\":{\"command\":\"usagi\",\"args\":[\"llm-mcp\",\"--model\",\"qwen2.5-coder:7b\"]}"
-        ));
-        // The issue server is still present alongside it.
-        assert!(launch.contains("\"usagi\":{\"command\":\"usagi\",\"args\":[\"mcp\"]}"));
-        // The delegation instruction is appended to the worktree note.
-        assert!(launch.contains("local_llm_ask"));
-    }
-
-    #[test]
-    fn claude_launch_command_wires_in_lifecycle_hooks() {
-        // The phase-reporting hooks ride along via --settings whether or not the
-        // local LLM is enabled, so usagi always learns the agent's state.
-        for model in [None, Some("qwen2.5-coder:7b")] {
-            let launch = AgentCli::Claude.launch_command(model, "usagi", false);
-            assert!(launch.contains("--settings '{\"hooks\":"));
-            assert!(launch.contains("usagi agent-phase ready"));
-            assert!(launch.contains("usagi agent-phase running"));
-            assert!(launch.contains("usagi agent-phase waiting"));
-            assert!(launch.contains("usagi agent-phase ended"));
-            // A tool-permission prompt waits too, caught reliably (even while
-            // focused) by the dedicated PermissionRequest hook, not just the
-            // away-only Notification.
-            assert!(launch.contains("\"PermissionRequest\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase waiting\"}]}]"));
-        }
-    }
-
-    #[test]
-    fn launch_command_embeds_the_given_binary_path_in_hooks_and_mcp() {
-        // The caller passes the resolved usagi binary path (e.g. from
-        // `current_exe()`); both the MCP servers and every lifecycle hook must
-        // invoke that exact path, not the bare name `usagi`, so the wiring works
-        // when usagi is run from a build that is not on `$PATH`.
-        let launch = AgentCli::Claude.launch_command(
-            Some("qwen2.5-coder:7b"),
-            "/opt/usagi/bin/usagi",
-            false,
-        );
-        // MCP servers point at the resolved binary.
-        assert!(launch.contains(r#""usagi":{"command":"/opt/usagi/bin/usagi","args":["mcp"]}"#));
-        assert!(launch.contains(
-            r#""usagi-llm":{"command":"/opt/usagi/bin/usagi","args":["llm-mcp","--model","qwen2.5-coder:7b"]}"#
-        ));
-        // Every lifecycle hook invokes that same binary.
-        assert!(launch.contains("/opt/usagi/bin/usagi agent-phase ready"));
-        assert!(launch.contains("/opt/usagi/bin/usagi agent-phase running"));
-        assert!(launch.contains("/opt/usagi/bin/usagi agent-phase waiting"));
-        assert!(launch.contains("/opt/usagi/bin/usagi agent-phase ended"));
-        // The bare name no longer appears as a standalone command.
-        assert!(!launch.contains(r#""command":"usagi""#));
-    }
-
-    #[test]
-    fn launch_command_json_escapes_a_windows_binary_path() {
-        // A Windows path carries backslashes; they must be doubled so the
-        // `--mcp-config` / `--settings` JSON stays valid.
-        let launch = AgentCli::Claude.launch_command(None, r"C:\usagi\usagi.exe", false);
-        assert!(launch.contains(r#""command":"C:\\usagi\\usagi.exe","args":["mcp"]"#));
-        assert!(launch.contains(r"C:\\usagi\\usagi.exe agent-phase running"));
-    }
-
-    #[test]
-    fn json_escape_doubles_backslashes_and_escapes_quotes() {
-        assert_eq!(json_escape(r"C:\bin\usagi.exe"), r"C:\\bin\\usagi.exe");
-        assert_eq!(json_escape(r#"a"b"#), r#"a\"b"#);
-        // A plain path is returned unchanged.
-        assert_eq!(json_escape("/usr/local/bin/usagi"), "/usr/local/bin/usagi");
-    }
-
-    #[test]
-    fn gemini_launch_command_stays_plain_regardless_of_local_llm() {
-        // Gemini has no inline MCP flag, so it launches as the bare command even
-        // when the local LLM is enabled.
-        assert_eq!(
-            AgentCli::Gemini.launch_command(None, "usagi", false),
-            "gemini"
-        );
-        assert_eq!(
-            AgentCli::Gemini.launch_command(Some("qwen2.5-coder:7b"), "usagi", false),
-            "gemini"
-        );
-        // The resume flag has no Gemini equivalent, so it stays plain.
-        assert_eq!(
-            AgentCli::Gemini.launch_command(None, "usagi", true),
-            "gemini"
-        );
     }
 
     #[test]

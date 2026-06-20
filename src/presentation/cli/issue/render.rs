@@ -4,14 +4,14 @@
 use anyhow::Result;
 use serde::Serialize;
 
-use crate::domain::issue::{Issue, IssuePriority, IssueStatus, IssueSummary};
-use crate::usecase::issue::{group, GroupBy, IssueStats, ListedIssue};
+use crate::domain::issue::IssueStatus;
+use crate::usecase::issue::{group, GroupBy, IssueStats, ListedIssue, ListedIssueView};
 
 /// Render a listing (from `list` or `search`) either as JSON or as aligned
 /// human-readable lines.
 pub(super) fn render_listing(items: Vec<ListedIssue>, json: bool) -> Result<Vec<String>> {
     if json {
-        let views: Vec<ListItemJson> = items.iter().map(ListItemJson::from).collect();
+        let views: Vec<ListedIssueView> = items.iter().map(ListedIssueView::from).collect();
         return json_lines(&views);
     }
     Ok(render_list(&items))
@@ -98,57 +98,4 @@ fn join_numbers(numbers: &[u32]) -> String {
 pub(super) fn json_lines<T: Serialize>(value: &T) -> Result<Vec<String>> {
     let text = serde_json::to_string_pretty(value)?;
     Ok(text.lines().map(str::to_string).collect())
-}
-
-/// JSON view of a full issue (including the body).
-#[derive(Serialize)]
-pub(super) struct IssueJson<'a> {
-    number: u32,
-    title: &'a str,
-    status: IssueStatus,
-    priority: IssuePriority,
-    labels: &'a [String],
-    dependson: &'a [u32],
-    related: &'a [u32],
-    parent: Option<u32>,
-    milestone: Option<&'a str>,
-    created_at: String,
-    updated_at: String,
-    body: &'a str,
-}
-
-pub(super) fn issue_json(issue: &Issue) -> IssueJson<'_> {
-    IssueJson {
-        number: issue.number,
-        title: &issue.title,
-        status: issue.status,
-        priority: issue.priority,
-        labels: &issue.labels,
-        dependson: &issue.dependson,
-        related: &issue.related,
-        parent: issue.parent,
-        milestone: issue.milestone.as_deref(),
-        created_at: issue.created_at.to_rfc3339(),
-        updated_at: issue.updated_at.to_rfc3339(),
-        body: &issue.body,
-    }
-}
-
-/// JSON view of a listed issue: its metadata plus dependency readiness.
-#[derive(Serialize)]
-struct ListItemJson<'a> {
-    #[serde(flatten)]
-    summary: &'a IssueSummary,
-    ready: bool,
-    unmet_deps: &'a [u32],
-}
-
-impl<'a> From<&'a ListedIssue> for ListItemJson<'a> {
-    fn from(listed: &'a ListedIssue) -> Self {
-        ListItemJson {
-            summary: &listed.summary,
-            ready: listed.is_ready(),
-            unmet_deps: &listed.unmet_deps,
-        }
-    }
 }

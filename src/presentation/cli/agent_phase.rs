@@ -15,6 +15,7 @@ use clap::ValueEnum;
 
 use crate::domain::agent_phase::AgentPhase;
 use crate::infrastructure::agent_state_store;
+use crate::usecase::agent_phase as agent_phase_policy;
 
 /// The phase a hook reports, as accepted on the command line.
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -51,7 +52,7 @@ impl From<Phase> for AgentPhase {
 /// after a context compaction — the agent keeps working afterwards with no fresh
 /// `UserPromptSubmit` to put it back to `running`, so recording `ready` then
 /// would strand the session showing ready (`☾`) while it works, until its next
-/// `Stop`. [`agent_state_store::ready_overwrite_allowed`] decides whether this
+/// `Stop`. [`agent_phase_policy::ready_overwrite_allowed`] decides whether this
 /// `ready` is a genuine idle start (recorded) or a mid-turn restart (skipped,
 /// preserving whatever phase the session was already in) — keyed off both the
 /// hook `source` and the phase currently recorded for the worktree.
@@ -63,7 +64,7 @@ pub fn run(phase: Phase) -> Result<()> {
         None => std::env::current_dir()?,
     };
     if matches!(phase, Phase::Ready)
-        && !agent_state_store::ready_overwrite_allowed(
+        && !agent_phase_policy::ready_overwrite_allowed(
             agent_state_store::read(&worktree),
             agent_state_store::session_start_source_from_hook_json(&raw).as_deref(),
         )

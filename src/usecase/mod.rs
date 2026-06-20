@@ -1,3 +1,4 @@
+pub mod agent_phase;
 pub mod doctor;
 pub mod issue;
 pub mod local_llm;

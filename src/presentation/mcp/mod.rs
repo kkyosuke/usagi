@@ -25,10 +25,49 @@ pub mod memory;
 pub mod session;
 pub mod usagi;
 
+use std::io::{BufRead, Write};
+
+use serde::de::DeserializeOwned;
+use serde::Serialize;
 use serde_json::{json, Value};
 
 /// MCP protocol version these servers implement.
 pub const PROTOCOL_VERSION: &str = "2024-11-05";
+
+/// Deserialize tool arguments into `T`, mapping any error to a tool-facing
+/// message. Shared by every MCP server's tool handlers.
+pub(crate) fn parse_args<T: DeserializeOwned>(arguments: Value) -> Result<T, String> {
+    serde_json::from_value(arguments).map_err(|e| format!("invalid arguments: {e}"))
+}
+
+/// Pretty-print a serialisable tool result as JSON, falling back to an empty
+/// string on the (practically unreachable) serialisation error. Shared by every
+/// MCP server's tool handlers.
+pub(crate) fn to_pretty<T: Serialize + ?Sized>(value: &T) -> String {
+    serde_json::to_string_pretty(value).unwrap_or_default()
+}
+
+/// Run the MCP read/write loop for `service` over the given streams: read
+/// newline-delimited JSON-RPC requests, skip blank lines, and write each reply
+/// back, flushing per line. Generic over its streams so it is driven by stdio in
+/// production and by in-memory buffers in tests.
+pub fn serve(
+    service: &dyn McpService,
+    input: impl BufRead,
+    mut output: impl Write,
+) -> std::io::Result<()> {
+    for line in input.lines() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        if let Some(response) = dispatch_line(service, &line) {
+            writeln!(output, "{response}")?;
+            output.flush()?;
+        }
+    }
+    Ok(())
+}
 
 /// The per-server behaviour an MCP server must supply. The JSON-RPC framing is
 /// handled once by [`dispatch_line`]; implementors only describe their identity
@@ -126,4 +165,85 @@ fn initialize_result(name: &str) -> Value {
         "capabilities": { "tools": {} },
         "serverInfo": { "name": name, "version": env!("CARGO_PKG_VERSION") },
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A minimal service: every tool call echoes its name back, so the loop's
+    /// framing can be exercised without any real business logic.
+    struct EchoService;
+
+    impl McpService for EchoService {
+        fn server_name(&self) -> &str {
+            "echo"
+        }
+
+        fn tool_schemas(&self) -> Value {
+            json!([])
+        }
+
+        fn call_tool(&self, name: &str, _arguments: Value) -> Result<String, String> {
+            Ok(format!("called {name}"))
+        }
+    }
+
+    #[test]
+    fn serve_replies_to_requests_but_not_to_blank_lines_or_notifications() {
+        // A blank line is skipped, and a notification (a message with a method
+        // but no id) is acted on without a reply, so only the `ping` request
+        // produces a single line of output.
+        let input = concat!(
+            " \n",
+            "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n",
+            "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}\n",
+            " \n",
+        );
+        let mut output = Vec::new();
+
+        serve(&EchoService, input.as_bytes(), &mut output).unwrap();
+
+        let response = String::from_utf8(output).unwrap();
+        assert!(response.contains("\"id\":1"));
+        assert!(response.contains("\"result\":{}"));
+        assert_eq!(response.lines().count(), 1);
+    }
+
+    #[test]
+    fn serve_advertises_the_service_identity_and_tools() {
+        let input = concat!(
+            "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\"}\n",
+            "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}\n",
+        );
+        let mut output = Vec::new();
+
+        serve(&EchoService, input.as_bytes(), &mut output).unwrap();
+
+        let response = String::from_utf8(output).unwrap();
+        assert!(response.contains("\"name\":\"echo\""));
+        assert!(response.contains("\"tools\":[]"));
+    }
+
+    #[test]
+    fn serve_exits_cleanly_on_eof() {
+        let mut output = Vec::new();
+
+        let result = serve(&EchoService, "".as_bytes(), &mut output);
+
+        assert!(result.is_ok());
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn serve_processes_tool_calls_via_the_service() {
+        let request = r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"do_thing","arguments":{}}}"#;
+        let input = format!("{request}\n");
+        let mut output = Vec::new();
+
+        serve(&EchoService, input.as_bytes(), &mut output).unwrap();
+
+        let response = String::from_utf8(output).unwrap();
+        assert!(response.contains("called do_thing"));
+    }
 }
