@@ -41,6 +41,7 @@
 | infrastructure | `infrastructure/workspace_store.rs` | リポジトリ `<repo>/.usagi/` の `state.json` / `settings.json` の load/save（`WorkspaceStore`） |
 | infrastructure | `infrastructure/history_store.rs` | リポジトリ `<repo>/.usagi/history.json` の load/append（`HistoryStore`） |
 | infrastructure | `infrastructure/agent_state_store.rs` | グローバル `~/.usagi/agent-state/` の Agent phase の read/write/clear |
+| infrastructure | `infrastructure/agent_prompt_store.rs` | グローバル `~/.usagi/agent-prompts/` の session_prompt キュー（set/take） |
 | infrastructure | `infrastructure/git.rs` | git CLI 経由の読み取り専用検査 |
 | usecase | `usecase/workspace.rs` | グローバル登録の add/list/remove/touch |
 | usecase | `usecase/settings.rs` | グローバル設定の load/更新、ローカル設定の load/save と実効設定の解決（`effective`） |

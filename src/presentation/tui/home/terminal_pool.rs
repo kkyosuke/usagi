@@ -333,6 +333,17 @@ impl TerminalPool {
         remains
     }
 
+    /// Whether `dir` already has a live pane — so re-entering the session would
+    /// re-attach an existing pane rather than freshly spawn one. The home screen
+    /// reads this to decide when a fresh agent spawn will happen, and so when a
+    /// prompt queued for the session should be consumed (mirrors the `alive`
+    /// check in [`enter`](Self::enter)).
+    pub fn has_live_pane(&self, dir: &Path) -> bool {
+        self.sessions
+            .get(dir)
+            .is_some_and(|sp| sp.panes.iter().any(|p| p.pty.is_alive()))
+    }
+
     /// Borrow `dir`'s active pane's shell, or `None` when the session has no
     /// panes — the pane the terminal loop drives.
     pub fn active_pty(&mut self, dir: &Path) -> Option<&mut PtySession> {

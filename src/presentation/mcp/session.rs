@@ -9,12 +9,12 @@
 //!
 //! Session creation and listing delegate to [`crate::usecase::session`], so the
 //! MCP surface stays a thin protocol adapter over the same logic the CLI and
-//! TUI use. Sending a prompt to a session's agent is abstracted behind
-//! [`AgentBackend`] so the dispatch logic is fully unit-tested without launching
-//! a real agent; the production backend (which shells out to the configured
-//! agent CLI) lives in the thin stdio entry point
-//! (`presentation/cli/session_mcp.rs`). The JSON-RPC framing is shared with the
-//! other servers and lives in the parent [`super`] module.
+//! TUI use. Handing a prompt to a session's agent is abstracted behind
+//! [`AgentBackend`] so the dispatch logic is fully unit-tested without touching
+//! the filesystem; the production backend (which queues the prompt for the
+//! session's worktree) lives in the thin stdio entry point
+//! (`presentation/cli/mcp.rs`). The JSON-RPC framing is shared with the other
+//! servers and lives in the parent [`super`] module.
 
 use std::path::{Path, PathBuf};
 
@@ -30,13 +30,14 @@ use crate::usecase::session;
 /// embedded session server.
 pub const TOOL_NAMES: [&str; 3] = ["session_create", "session_list", "session_prompt"];
 
-/// Sends a prompt to the agent rooted at a session's worktree. Abstracted so the
+/// Hands a prompt to the agent rooted at a session's worktree. Abstracted so the
 /// server's protocol handling can be tested with a fake backend that never
-/// shells out to a real agent.
+/// touches the filesystem or a real agent.
 pub trait AgentBackend {
-    /// Run `prompt` against a fresh agent invocation rooted at `worktree`,
-    /// returning its final output text (`Ok`) or an error message to surface to
-    /// the agent (`Err`).
+    /// Deliver `prompt` to the agent rooted at `worktree` — the production
+    /// backend queues it for the session's next fresh agent launch — returning a
+    /// confirmation message (`Ok`) or an error message to surface to the agent
+    /// (`Err`).
     fn prompt(&self, worktree: &Path, prompt: &str) -> Result<String, String>;
 }
 
@@ -176,10 +177,12 @@ fn session_tool_schemas() -> Value {
         },
         {
             "name": "session_prompt",
-            "description": "Send a prompt to the agent of a specific session and \
-                return its response. The agent runs in that session's worktree, so \
-                its work is isolated on the session branch. Use this to delegate a \
-                task to a parallel session.",
+            "description": "Queue a prompt for the agent of a specific session. \
+                The prompt is delivered as the agent's opening message the next \
+                time that session's agent pane is freshly launched from the usagi \
+                home screen; it does not run the agent or return its response here. \
+                Work stays isolated on the session's worktree branch. Use this to \
+                delegate a task to a parallel session.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

@@ -37,12 +37,12 @@ mod tests {
         // (MCP servers + system prompt + lifecycle hooks).
         let agent = agent_for(AgentCli::Claude);
         assert_eq!(agent.program(), "claude");
-        let launch = agent.launch_command(&Settings::default().agent_wiring("usagi"), false);
+        let launch = agent.launch_command(&Settings::default().agent_wiring("usagi"), false, None);
         assert!(launch.starts_with("claude --mcp-config '{\"mcpServers\":"));
         assert!(launch.contains("--append-system-prompt"));
         assert!(launch.contains("--settings '{\"hooks\":"));
         // Resuming routes through to Claude's `--continue` flag.
-        let resumed = agent.launch_command(&Settings::default().agent_wiring("usagi"), true);
+        let resumed = agent.launch_command(&Settings::default().agent_wiring("usagi"), true, None);
         assert!(resumed.starts_with("claude --continue --mcp-config '"));
     }
 
@@ -51,7 +51,7 @@ mod tests {
         let agent = agent_for(AgentCli::Gemini);
         assert_eq!(agent.program(), "gemini");
         assert_eq!(
-            agent.launch_command(&Settings::default().agent_wiring("usagi"), false),
+            agent.launch_command(&Settings::default().agent_wiring("usagi"), false, None),
             "gemini"
         );
     }

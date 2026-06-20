@@ -164,6 +164,15 @@ fn claude_hooks_settings(usagi_bin: &str) -> String {
     serde_json::to_string(&settings).expect("hook settings serialize to JSON")
 }
 
+/// Wrap `text` as a single shell argument in single quotes, safe to drop into a
+/// `sh -c` command line. A single quote cannot appear inside a single-quoted
+/// string, so each one is rendered as `'\''` (close the quote, an escaped quote,
+/// reopen) — the standard POSIX idiom. Everything else (newlines, `$`, spaces …)
+/// is literal inside single quotes, so the agent receives the prompt verbatim.
+fn shell_single_quote(text: &str) -> String {
+    format!("'{}'", text.replace('\'', r"'\''"))
+}
+
 /// The Claude Code adapter.
 #[derive(Default)]
 pub struct ClaudeAgent;
@@ -180,7 +189,12 @@ impl Agent for ClaudeAgent {
         "claude"
     }
 
-    fn launch_command(&self, wiring: &AgentWiring, resume: bool) -> String {
+    fn launch_command(
+        &self,
+        wiring: &AgentWiring,
+        resume: bool,
+        initial_prompt: Option<&str>,
+    ) -> String {
         let local_llm_model = wiring.local_llm_model.as_deref();
         let mcp_config = mcp_config_json(local_llm_model, &wiring.usagi_bin);
         // The system prompt tells the agent it is already inside a usagi worktree,
@@ -191,15 +205,24 @@ impl Agent for ClaudeAgent {
             None => SESSION_WORKTREE_PROMPT.to_string(),
         };
         let hooks = claude_hooks_settings(&wiring.usagi_bin);
-        // All three arguments are single-quoted so the shell passes them through
-        // verbatim (no value contains a single quote). `--continue` resumes the
-        // most recent conversation in the worktree; placed right after the program
-        // name so it reads like a plain `claude -c` with usagi's wiring appended.
+        // The wiring arguments are single-quoted so the shell passes them through
+        // verbatim (none of these values contains a single quote). `--continue`
+        // resumes the most recent conversation in the worktree; placed right after
+        // the program name so it reads like a plain `claude -c` with usagi's wiring
+        // appended.
         let resume_flag = if resume { "--continue " } else { "" };
+        // A queued prompt rides along as Claude's positional query, so the agent
+        // opens interactively already working on it. Unlike the wiring above it is
+        // arbitrary user text, so it is escaped for the single-quoted shell context
+        // (see [`shell_single_quote`]). Placed last so it is the trailing argument.
+        let prompt_arg = match initial_prompt {
+            Some(prompt) => format!(" {}", shell_single_quote(prompt)),
+            None => String::new(),
+        };
         format!(
             "claude {resume_flag}--mcp-config '{mcp_config}' \
              --append-system-prompt '{system_prompt}' \
-             --settings '{hooks}'"
+             --settings '{hooks}'{prompt_arg}"
         )
     }
 
@@ -276,7 +299,7 @@ mod tests {
     fn launch_command_wires_in_the_usagi_mcp_servers() {
         // With the local LLM off (`None`), the unified usagi server is wired in
         // and the system prompt is just the worktree note.
-        let launch = ClaudeAgent::new().launch_command(&wiring("usagi", None), false);
+        let launch = ClaudeAgent::new().launch_command(&wiring("usagi", None), false, None);
         // The program is `claude`, with usagi's MCP server passed inline via
         // `--mcp-config` and a session-scoped instruction passed via
         // `--append-system-prompt` (both single-quoted so the shell keeps them).
@@ -293,20 +316,73 @@ mod tests {
         // Resuming inserts `--continue` right after the program name so Claude
         // picks up the worktree's previous conversation; the rest of the wiring
         // is unchanged.
-        let resumed = ClaudeAgent::new().launch_command(&wiring("usagi", None), true);
+        let resumed = ClaudeAgent::new().launch_command(&wiring("usagi", None), true, None);
         assert!(resumed.starts_with("claude --continue --mcp-config '"));
         // Without resuming the flag is absent and the command starts plainly.
-        let fresh = ClaudeAgent::new().launch_command(&wiring("usagi", None), false);
+        let fresh = ClaudeAgent::new().launch_command(&wiring("usagi", None), false, None);
         assert!(fresh.starts_with("claude --mcp-config '"));
         assert!(!fresh.contains("--continue"));
+    }
+
+    #[test]
+    fn launch_command_appends_an_initial_prompt_as_the_trailing_query() {
+        // A queued prompt rides along as Claude's positional query so the agent
+        // opens already working on it. It is the trailing, single-quoted argument;
+        // the wiring before it is unchanged.
+        let launch =
+            ClaudeAgent::new().launch_command(&wiring("usagi", None), false, Some("fix issue #50"));
+        assert!(launch.ends_with(" 'fix issue #50'"));
+        // The wiring is still present and the program still starts plainly.
+        assert!(launch.starts_with("claude --mcp-config '"));
+        assert!(launch.contains("--append-system-prompt '"));
+        // With no prompt the trailing query is absent: the command is exactly the
+        // prompt-carrying one with its ` '…'` suffix stripped.
+        let plain = ClaudeAgent::new().launch_command(&wiring("usagi", None), false, None);
+        assert!(!plain.contains("fix issue #50"));
+        assert_eq!(launch, format!("{plain} 'fix issue #50'"));
+    }
+
+    #[test]
+    fn launch_command_escapes_single_quotes_in_an_initial_prompt() {
+        // Arbitrary user prompt text may contain single quotes, which would
+        // otherwise break out of the shell argument. Each is rendered as the POSIX
+        // `'\''` idiom so the agent receives the prompt verbatim.
+        let launch = ClaudeAgent::new().launch_command(
+            &wiring("usagi", None),
+            false,
+            Some("don't break 'this'"),
+        );
+        assert!(launch.ends_with(r" 'don'\''t break '\''this'\'''"));
+    }
+
+    #[test]
+    fn launch_command_carries_a_prompt_alongside_continue() {
+        // Resuming and an opening prompt compose: `--continue` stays right after
+        // the program name and the prompt is still the trailing query.
+        let launch =
+            ClaudeAgent::new().launch_command(&wiring("usagi", None), true, Some("keep going"));
+        assert!(launch.starts_with("claude --continue --mcp-config '"));
+        assert!(launch.ends_with(" 'keep going'"));
+    }
+
+    #[test]
+    fn shell_single_quote_wraps_and_escapes() {
+        assert_eq!(shell_single_quote("plain"), "'plain'");
+        // An embedded single quote closes, escapes, and reopens the quoting.
+        assert_eq!(shell_single_quote("a'b"), r"'a'\''b'");
+        // Other shell metacharacters are literal inside single quotes.
+        assert_eq!(shell_single_quote("$x `y` \"z\""), "'$x `y` \"z\"'");
     }
 
     #[test]
     fn launch_command_wires_in_the_local_llm_server_when_enabled() {
         // With a model given, the local LLM server joins the issue server in the
         // MCP config and the delegation prompt is appended after the worktree note.
-        let launch =
-            ClaudeAgent::new().launch_command(&wiring("usagi", Some("qwen2.5-coder:7b")), false);
+        let launch = ClaudeAgent::new().launch_command(
+            &wiring("usagi", Some("qwen2.5-coder:7b")),
+            false,
+            None,
+        );
         assert!(launch.contains(
             "\"usagi-llm\":{\"command\":\"usagi\",\"args\":[\"llm-mcp\",\"--model\",\"qwen2.5-coder:7b\"]}"
         ));
@@ -321,7 +397,7 @@ mod tests {
         // The phase-reporting hooks ride along via --settings whether or not the
         // local LLM is enabled, so usagi always learns the agent's state.
         for model in [None, Some("qwen2.5-coder:7b")] {
-            let launch = ClaudeAgent::new().launch_command(&wiring("usagi", model), false);
+            let launch = ClaudeAgent::new().launch_command(&wiring("usagi", model), false, None);
             assert!(launch.contains("--settings '{\"hooks\":"));
             assert!(launch.contains("usagi agent-phase ready"));
             assert!(launch.contains("usagi agent-phase running"));
@@ -343,6 +419,7 @@ mod tests {
         let launch = ClaudeAgent::new().launch_command(
             &wiring("/opt/usagi/bin/usagi", Some("qwen2.5-coder:7b")),
             false,
+            None,
         );
         // MCP servers point at the resolved binary.
         assert!(launch.contains(r#""usagi":{"command":"/opt/usagi/bin/usagi","args":["mcp"]}"#));
@@ -362,7 +439,8 @@ mod tests {
     fn launch_command_json_escapes_a_windows_binary_path() {
         // A Windows path carries backslashes; serde_json doubles them so the
         // `--mcp-config` / `--settings` JSON stays valid.
-        let launch = ClaudeAgent::new().launch_command(&wiring(r"C:\usagi\usagi.exe", None), false);
+        let launch =
+            ClaudeAgent::new().launch_command(&wiring(r"C:\usagi\usagi.exe", None), false, None);
         assert!(launch.contains(r#""command":"C:\\usagi\\usagi.exe","args":["mcp"]"#));
         assert!(launch.contains(r"C:\\usagi\\usagi.exe agent-phase running"));
     }

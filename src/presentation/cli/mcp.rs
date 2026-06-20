@@ -11,44 +11,33 @@
 use std::env;
 use std::io;
 use std::path::Path;
-use std::process::{Command, Stdio};
 
 use anyhow::Result;
 
-use crate::domain::settings::AgentCli;
-use crate::infrastructure::storage::Storage;
+use crate::infrastructure::agent_prompt_store;
 use crate::presentation::mcp::session::AgentBackend;
 use crate::presentation::mcp::usagi::UsagiMcpServer;
-use crate::usecase::{session, settings};
+use crate::usecase::session;
 
-/// The production [`AgentBackend`]: each `session_prompt` runs the configured
-/// agent CLI in headless print mode (`<agent> -p <prompt>`) inside the session's
-/// worktree, returning the captured stdout. No MCP servers are wired into this
-/// child, so a delegated session cannot recursively spawn further sessions.
-struct CliAgentBackend {
-    cli: AgentCli,
-}
+/// The production [`AgentBackend`]: `session_prompt` *queues* the prompt for the
+/// target session's worktree rather than running an agent itself. The `usagi mcp`
+/// process cannot reach into a running TUI to drive a pane, so it leaves the
+/// prompt in [`agent_prompt_store`] and the home screen delivers it the next time
+/// it freshly launches that session's agent pane — the agent then opens in the
+/// session's right-hand pane already working on the prompt (see
+/// [`crate::presentation::tui::home`]). This keeps a delegated prompt visible and
+/// interactive in the session it belongs to, instead of running detached.
+struct CliAgentBackend;
 
 impl AgentBackend for CliAgentBackend {
     fn prompt(&self, worktree: &Path, prompt: &str) -> Result<String, String> {
-        let program = self.cli.command();
-        let output = Command::new(program)
-            .arg("-p")
-            .arg(prompt)
-            .current_dir(worktree)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-            .map_err(|e| format!("failed to start {program}: {e}"))?;
-        if !output.status.success() {
-            return Err(format!(
-                "{program} exited with {}: {}",
-                output.status,
-                String::from_utf8_lossy(&output.stderr).trim()
-            ));
-        }
-        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+        agent_prompt_store::set(worktree, prompt).map_err(|e| e.to_string())?;
+        Ok(
+            "Queued the prompt for this session's agent. It is delivered as the agent's \
+            opening message the next time the session's agent pane is launched from the \
+            usagi home screen (focus the session, then run `agent`)."
+                .to_string(),
+        )
     }
 }
 
@@ -64,15 +53,7 @@ impl AgentBackend for CliAgentBackend {
 pub fn run() -> Result<()> {
     let workspace_root = session::workspace_root(&env::current_dir()?);
 
-    // The agent CLI used to fulfil `session_prompt`, resolved from the effective
-    // settings (project-local over the global default, which is Claude). Any
-    // failure to read settings falls back to the default agent.
-    let cli = Storage::open_default()
-        .and_then(|storage| settings::effective(&storage, &workspace_root))
-        .map(|settings| settings.agent_cli)
-        .unwrap_or_default();
-
-    let backend = Box::new(CliAgentBackend { cli });
+    let backend = Box::new(CliAgentBackend);
     let server = UsagiMcpServer::new(workspace_root, backend);
 
     let stdin = io::stdin();
