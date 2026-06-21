@@ -1,3 +1,4 @@
+use super::super::oneshot::OneShot;
 use super::super::state::LogLine;
 use super::super::terminal_tabs::TabNav;
 use super::*;
@@ -160,6 +161,7 @@ fn run_at(keys: Vec<io::Result<Key>>, state: HomeState, root: &Path) -> Result<O
         root,
         &monitor,
         &UpdateHandle::new(),
+        &OneShot::<bool>::new(),
         &mut persist,
         &mut create,
         &mut (noop_rename as fn(&str, &str) -> SessionOutcome),
@@ -210,6 +212,7 @@ fn run_full(
         Path::new("/ws"),
         &monitor,
         &UpdateHandle::new(),
+        &OneShot::<bool>::new(),
         &mut persist,
         create_session,
         &mut (noop_rename as fn(&str, &str) -> SessionOutcome),
@@ -248,6 +251,7 @@ fn run_with_live_monitor(
         Path::new("/ws"),
         &monitor,
         &UpdateHandle::new(),
+        &OneShot::<bool>::new(),
         persist,
         &mut create,
         &mut (noop_rename as fn(&str, &str) -> SessionOutcome),
@@ -290,6 +294,7 @@ fn a_populated_update_handle_is_read_before_painting() {
         Path::new("/ws"),
         &monitor,
         &update,
+        &OneShot::<bool>::new(),
         &mut persist,
         &mut create,
         &mut (noop_rename as fn(&str, &str) -> SessionOutcome),
@@ -419,6 +424,63 @@ fn a_background_refresh_updates_the_session_list_exactly_once() {
     assert!(state.sessions().is_empty());
     assert!(!apply_pending_refresh(&mut state, &refresh));
     assert!(state.sessions().is_empty());
+}
+
+// --- background startup results (the local-LLM probe one-shot) ---------
+
+/// Run the loop with a preset local-LLM probe one-shot, all other callbacks
+/// no-op, quitting on the scripted keys — so the loop's drain of the probe is
+/// exercised. (The entry git-sync feeds the same `SessionsRefreshHandle` the
+/// pane-exit sync uses; its apply path is covered by
+/// `a_background_refresh_updates_the_session_list_exactly_once`.)
+fn run_with_ai_probe(
+    keys: Vec<io::Result<Key>>,
+    state: HomeState,
+    ai_available: &OneShot<bool>,
+) -> Result<Outcome> {
+    let term = Term::stdout();
+    let mut reader = ScriptedReader::new(keys);
+    let monitor = MonitorHandle::detached();
+    let mut persist: fn(&str) = noop_persist;
+    let mut create: fn(&str) -> SessionOutcome = noop_create;
+    let mut remove: fn(&str, bool) -> SessionOutcome = noop_remove;
+    let mut open: fn(&mut HomeState, &Path, bool, bool) -> Result<PaneExit> = noop_open;
+    let mut config: fn(&Term) -> Result<Option<ConfigReload>> = noop_config;
+    let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = noop_preview;
+    let mut branches: fn() -> Vec<String> = no_branches;
+    event_loop_compat(
+        &term,
+        &mut reader,
+        state,
+        Path::new("/ws"),
+        &monitor,
+        &UpdateHandle::new(),
+        ai_available,
+        &mut persist,
+        &mut create,
+        &mut (noop_rename as fn(&str, &str) -> SessionOutcome),
+        &mut remove,
+        &mut branches,
+        &mut open,
+        &mut config,
+        &mut preview,
+        &mut (noop_tab_op as fn(&Path, Option<TabNav>) -> (Vec<String>, usize)),
+        &mut (noop_close as fn(&mut HomeState, &Path)),
+    )
+}
+
+#[test]
+fn the_background_llm_probe_result_is_drained_then_the_loop_quits() {
+    // The local-LLM probe confirms availability through the one-shot; the first
+    // frame drains it (flipping the `ai` command on via `set_ai_available`), then
+    // Ctrl-C with nothing live quits.
+    let ai = OneShot::<bool>::new();
+    ai.set(true);
+    assert!(matches!(
+        run_with_ai_probe(vec![Ok(Key::CtrlC)], sample_state(), &ai).unwrap(),
+        Outcome::Quit
+    ));
+    assert!(ai.take().is_none());
 }
 
 // --- 統括 (Overview) ---------------------------------------------------
@@ -579,6 +641,7 @@ fn overview_caret_keys_edit_within_the_line() {
         Path::new("/ws"),
         &monitor,
         &UpdateHandle::new(),
+        &OneShot::<bool>::new(),
         &mut persist,
         &mut create,
         &mut (noop_rename as fn(&str, &str) -> SessionOutcome),
@@ -624,6 +687,7 @@ fn submitted_commands_are_handed_to_persist() {
         Path::new("/ws"),
         &monitor,
         &UpdateHandle::new(),
+        &OneShot::<bool>::new(),
         &mut persist,
         &mut create,
         &mut (noop_rename as fn(&str, &str) -> SessionOutcome),
@@ -778,6 +842,7 @@ fn session_remove_with_a_name_and_force_routes_to_remove() {
         Path::new("/ws"),
         &monitor,
         &UpdateHandle::new(),
+        &OneShot::<bool>::new(),
         &mut persist,
         &mut create,
         &mut (noop_rename as fn(&str, &str) -> SessionOutcome),
@@ -823,6 +888,7 @@ fn close_typed_in_overview_on_root_is_refused() {
         Path::new("/ws"),
         &monitor,
         &UpdateHandle::new(),
+        &OneShot::<bool>::new(),
         &mut persist,
         &mut create,
         &mut (noop_rename as fn(&str, &str) -> SessionOutcome),
@@ -886,6 +952,7 @@ fn focus_close_command_force_removes_the_focused_session_then_enters_switch() {
         Path::new("/ws"),
         &monitor,
         &UpdateHandle::new(),
+        &OneShot::<bool>::new(),
         &mut persist,
         &mut create,
         &mut (noop_rename as fn(&str, &str) -> SessionOutcome),
@@ -947,6 +1014,7 @@ fn focus_menu_close_force_removes_the_focused_session_then_enters_switch() {
         Path::new("/ws"),
         &monitor,
         &UpdateHandle::new(),
+        &OneShot::<bool>::new(),
         &mut persist,
         &mut create,
         &mut (noop_rename as fn(&str, &str) -> SessionOutcome),
@@ -1002,6 +1070,7 @@ fn session_remove_without_a_name_opens_the_modal_and_bulk_removes() {
         Path::new("/ws"),
         &monitor,
         &UpdateHandle::new(),
+        &OneShot::<bool>::new(),
         &mut persist,
         &mut create,
         &mut (noop_rename as fn(&str, &str) -> SessionOutcome),
@@ -1434,6 +1503,7 @@ fn switch_arrows_move_the_active_tab_via_tab_op() {
         Path::new("/ws"),
         &monitor,
         &UpdateHandle::new(),
+        &OneShot::<bool>::new(),
         &mut persist,
         &mut create,
         &mut (noop_rename as fn(&str, &str) -> SessionOutcome),
@@ -1490,6 +1560,7 @@ fn switch_x_closes_the_highlighted_sessions_active_tab() {
         Path::new("/ws"),
         &monitor,
         &UpdateHandle::new(),
+        &OneShot::<bool>::new(),
         &mut persist,
         &mut create,
         &mut (noop_rename as fn(&str, &str) -> SessionOutcome),
@@ -1602,6 +1673,7 @@ fn run_recording_rename(keys: Vec<io::Result<Key>>) -> (Vec<(String, String)>, O
         Path::new("/ws"),
         &monitor,
         &UpdateHandle::new(),
+        &OneShot::<bool>::new(),
         &mut persist,
         &mut create,
         &mut rename,
@@ -1800,6 +1872,7 @@ fn focus_ctrl_n_and_ctrl_p_move_the_active_tab_via_tab_op() {
         Path::new("/ws"),
         &monitor,
         &UpdateHandle::new(),
+        &OneShot::<bool>::new(),
         &mut persist,
         &mut create,
         &mut (noop_rename as fn(&str, &str) -> SessionOutcome),
@@ -2106,6 +2179,7 @@ fn run_with_tasks(
         &monitor,
         &UpdateHandle::new(),
         &SessionsRefreshHandle::new(),
+        &OneShot::<bool>::new(),
         tasks,
         &mut wiring,
     )
@@ -2204,6 +2278,7 @@ fn run_with_live_session(reader: &mut dyn KeyReader) -> Result<Outcome> {
         &monitor,
         &UpdateHandle::new(),
         &SessionsRefreshHandle::new(),
+        &OneShot::<bool>::new(),
         &tasks,
         &mut wiring,
     )
