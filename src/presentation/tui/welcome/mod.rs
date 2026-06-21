@@ -15,6 +15,17 @@ use crate::presentation::tui::term_reader::TermKeyReader;
 
 pub use event::Outcome;
 
+/// The row the mascot's first line sits on in the welcome layout, for a
+/// `height`-row terminal (already normalised by the caller).
+///
+/// The startup splash plays before this screen and shows the same mascot and
+/// title; it aligns to this row so neither jumps when the welcome menu and
+/// footer appear (no layout shift). Built from the screen's own fixed [`menu`]
+/// so the two screens stay in step.
+pub fn mascot_top_padding(height: usize) -> usize {
+    ui::body_top_padding(height, menu::Menu::new().items(), None)
+}
+
 /// Runs the welcome menu on the given terminal until the user picks an action.
 /// Wires the real terminal key source to the testable event loop in [`event`].
 /// Assumes the alternate screen is already active (it is owned by the

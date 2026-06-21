@@ -1,4 +1,4 @@
-use crate::presentation::tui::widgets;
+use crate::presentation::tui::{welcome, widgets};
 
 /// Frames the splash plays before the welcome menu takes over. The usagi mascot
 /// holds for the whole run; the `USAGI` title stays hidden for [`TITLE_DELAY`]
@@ -28,32 +28,30 @@ fn title_fade_step(frame: usize) -> usize {
 }
 
 /// Builds the splash frame for `frame` at a raw terminal size: the welcome
-/// screen's usagi mascot above the centred `USAGI` title, the whole block centred
-/// both vertically and horizontally — the same mascot and title the welcome menu
-/// shows, so the splash hands off to it without a jump.
+/// screen's usagi mascot above the centred `USAGI` title — the same mascot and
+/// title the welcome menu shows.
 ///
-/// The mascot is identical on every frame; only the title animates. It is hidden
-/// for the first [`TITLE_DELAY`] frames and then fades in (see
-/// [`title_fade_step`]), so the title appears a beat after the mascot and
-/// brightens into place. The title's row is always reserved (a blank line while
-/// it is hidden), so nothing shifts as it appears.
+/// The mascot and title are placed at the **welcome screen's rows**
+/// ([`welcome::mascot_top_padding`]) rather than centred on their own, so when
+/// the welcome menu and footer take over below them the mascot and title do not
+/// jump (no layout shift). The mascot is identical on every frame; only the
+/// title animates — it is hidden for the first [`TITLE_DELAY`] frames and then
+/// fades in (see [`title_fade_step`]). The title's row is always reserved (a
+/// blank line while it is hidden), so nothing shifts as it appears either.
 pub fn render_frame(raw_height: usize, raw_width: usize, frame: usize) -> Vec<String> {
     let (height, width) = widgets::normalize_size(raw_height, raw_width);
 
-    let mut body = widgets::rabbit_lines(width);
-    body.push(String::new());
-    body.push(widgets::faded_title_line(
+    let mut lines = Vec::with_capacity(height);
+    for _ in 0..welcome::mascot_top_padding(height) {
+        lines.push(String::new());
+    }
+    lines.extend(widgets::rabbit_lines(width));
+    lines.push(String::new());
+    lines.push(widgets::faded_title_line(
         width,
         TITLE,
         title_fade_step(frame),
     ));
-
-    let mut lines = Vec::with_capacity(height);
-    let top_padding = height.saturating_sub(body.len()) / 2;
-    for _ in 0..top_padding {
-        lines.push(String::new());
-    }
-    lines.extend(body);
     while lines.len() < height {
         lines.push(String::new());
     }
@@ -123,6 +121,23 @@ mod tests {
         let top_padding = frame.iter().take_while(|l| l.is_empty()).count();
         assert!(top_padding > 0);
         assert!(frame.iter().any(|l| l.contains(TITLE)));
+    }
+
+    #[test]
+    fn render_frame_places_the_mascot_and_title_at_the_welcome_rows() {
+        // The mascot and title sit at exactly the rows the welcome screen places
+        // them, so neither jumps when the welcome menu takes over (no layout
+        // shift). The splash leads with the welcome top padding, then the three
+        // mascot rows, a blank, and the title.
+        let height = 40;
+        let frame = render_frame(height, 80, FRAMES - 1);
+        let top = welcome::mascot_top_padding(height);
+        // Every row above the mascot is blank...
+        assert!(frame[..top].iter().all(|l| l.is_empty()));
+        // ...the mascot's first row (the ears) lands exactly on the welcome row...
+        assert!(console::strip_ansi_codes(&frame[top]).contains("(\\(\\"));
+        // ...and the title follows the three mascot rows and a blank spacer.
+        assert!(console::strip_ansi_codes(&frame[top + 4]).contains(TITLE));
     }
 
     #[test]
