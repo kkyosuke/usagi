@@ -132,10 +132,30 @@ pub(super) fn discard_session(
                 }
             }
         }
-        let _ = git::delete_branch(repo, branch);
     }
+
+    // Delete the session tree *before* pruning and dropping the branch below.
+    // This ordering is what keeps the name reusable: a worktree whose directory
+    // vanished out-of-band (a crash, a manual `rm`, an external cleanup) — or one
+    // a forced/locked `worktree remove` above failed to unregister — leaves a
+    // registration that still holds the session branch checked out, which makes
+    // `git branch -D` refuse. Removing the directory first turns that into a
+    // prunable registration, so the prune clears it and the branch is no longer
+    // checked out anywhere; only then can it actually be deleted.
     if root.exists() {
         fs::remove_dir_all(root).context(format!("failed to remove {}", root.display()))?;
+    }
+
+    for (repo, _) in repo_worktrees {
+        // Clear any dangling registration the teardown left at the session path,
+        // then drop the now-orphaned session branch. Both are best-effort: a
+        // session that was never fully built has no registration and no branch.
+        // Leaving the branch behind is precisely what blocks a later `create` of
+        // the same name (`git worktree add -b <name>` fails on the existing
+        // branch) with no record left to `remove` — the "name permanently
+        // unusable" failure this guards against.
+        let _ = git::prune_worktrees(repo);
+        let _ = git::delete_branch(repo, branch);
     }
     Ok(())
 }
