@@ -82,18 +82,38 @@ struct HookEntry {
 /// to mark the session.
 ///
 /// The events: a freshly started or resumed session is idle (`SessionStart` →
-/// `ready`); a submitted prompt starts a turn (`UserPromptSubmit` → `running`);
-/// finishing a turn means the agent is done (`Stop` → `ended`); pausing mid-turn
+/// `ready`); a submitted prompt starts a turn (`UserPromptSubmit` → `running`).
+/// Once a turn is underway every tool call is a sign the agent is actively
+/// working, so a tool about to run or having just run is also `running`
+/// (`PreToolUse` / `PostToolUse` → `running`). This is what un-sticks a session
+/// after a wait: when the user answers a question or grants a permission, the
+/// agent resumes with no fresh `UserPromptSubmit`, but its next tool call fires
+/// `PreToolUse`/`PostToolUse` and pulls the session back out of `waiting` into
+/// `running`. These hooks only fire mid-turn, so they never invent a false
+/// `running` for an idle session.
+///
+/// Finishing a turn means the agent is done (`Stop` → `ended`); pausing mid-turn
 /// for the user's input or permission means it waits (`Notification` →
 /// `waiting`). A tool-permission prompt is also a wait, but `Notification` only
 /// fires for it when the user is away; the dedicated `PermissionRequest` →
 /// `waiting` hook catches it reliably (it fires right as the prompt appears, even
 /// while the session is focused). The session ending is also done (`SessionEnd` →
 /// `ended`).
+///
+/// Hooks deliberately left unwired: `SubagentStop` (a finished subagent does not
+/// end the main turn — the main agent keeps working, and its own `PostToolUse`
+/// for the `Task` tool already holds it `running`); `PreCompact` / `PostCompact`
+/// (compaction is handled by the `SessionStart` guard in
+/// [`crate::usecase::agent_phase`], and a post-compaction tool call re-asserts
+/// `running` anyway).
 #[derive(Serialize)]
 struct Hooks {
     #[serde(rename = "UserPromptSubmit")]
     user_prompt_submit: Vec<HookEntry>,
+    #[serde(rename = "PreToolUse")]
+    pre_tool_use: Vec<HookEntry>,
+    #[serde(rename = "PostToolUse")]
+    post_tool_use: Vec<HookEntry>,
     #[serde(rename = "Stop")]
     stop: Vec<HookEntry>,
     #[serde(rename = "Notification")]
@@ -154,6 +174,8 @@ fn claude_hooks_settings(usagi_bin: &str) -> String {
     let settings = HookSettings {
         hooks: Hooks {
             user_prompt_submit: phase("running"),
+            pre_tool_use: phase("running"),
+            post_tool_use: phase("running"),
             stop: phase("ended"),
             notification: phase("waiting"),
             permission_request: phase("waiting"),
@@ -307,7 +329,7 @@ mod tests {
             launch,
             "claude --mcp-config '{\"mcpServers\":{\"usagi\":{\"command\":\"usagi\",\"args\":[\"mcp\"]}}}' \
              --append-system-prompt 'あなたは usagi が管理するセッション専用の worktree 内で起動されています。このディレクトリは既に独立した作業環境のため、新たに git worktree を作成する必要はありません。ここで直接作業を進めてください。' \
-             --settings '{\"hooks\":{\"UserPromptSubmit\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase running\"}]}],\"Stop\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase ended\"}]}],\"Notification\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase waiting\"}]}],\"PermissionRequest\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase waiting\"}]}],\"SessionStart\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase ready\"}]}],\"SessionEnd\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase ended\"}]}]}}'"
+             --settings '{\"hooks\":{\"UserPromptSubmit\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase running\"}]}],\"PreToolUse\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase running\"}]}],\"PostToolUse\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase running\"}]}],\"Stop\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase ended\"}]}],\"Notification\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase waiting\"}]}],\"PermissionRequest\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase waiting\"}]}],\"SessionStart\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase ready\"}]}],\"SessionEnd\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase ended\"}]}]}}'"
         );
     }
 
@@ -407,6 +429,11 @@ mod tests {
             // focused) by the dedicated PermissionRequest hook, not just the
             // away-only Notification.
             assert!(launch.contains("\"PermissionRequest\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase waiting\"}]}]"));
+            // Every tool call mid-turn re-asserts `running`, so a session resumes
+            // out of `waiting` once the user answers a prompt or grants a
+            // permission (no fresh UserPromptSubmit fires then).
+            assert!(launch.contains("\"PreToolUse\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase running\"}]}]"));
+            assert!(launch.contains("\"PostToolUse\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase running\"}]}]"));
         }
     }
 
