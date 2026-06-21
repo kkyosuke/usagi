@@ -42,6 +42,35 @@ pub enum SessionActionUi {
     Prompt,
 }
 
+/// How the home screen's left **session sidebar** is sized: spelled out at its
+/// full width, or collapsed to a compact rail.
+///
+/// `Full` lists each session with its name, git status, and agent state. `Rail`
+/// collapses the list to a narrow vertical strip — a gutter bar marking the
+/// active session, a 1-based index, and the agent-state icon — giving the right
+/// pane (notably the embedded terminal) more width while still showing which
+/// session is active. `Ctrl-B` toggles between them at runtime; this setting is
+/// only the state the screen opens in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Sidebar {
+    /// The full-width session list (the default).
+    #[default]
+    Full,
+    /// The collapsed rail: a gutter bar, index, and agent-state icon per session.
+    Rail,
+}
+
+impl Sidebar {
+    /// The sidebar's state after a toggle (`Ctrl-B`): full ⇄ rail.
+    pub fn toggled(self) -> Self {
+        match self {
+            Sidebar::Full => Sidebar::Rail,
+            Sidebar::Rail => Sidebar::Full,
+        }
+    }
+}
+
 /// The local LLM models usagi can delegate work to, in the order the config
 /// screen cycles through them. All are Qwen variants pullable with
 /// `ollama pull <model>`; the coder variants are tuned for code/technical
@@ -132,6 +161,9 @@ pub struct Settings {
     /// How the home screen's 在席 (Focus) mode presents a session's runnable
     /// commands in the right pane.
     pub session_action_ui: SessionActionUi,
+    /// Which state the home screen's left session sidebar opens in (`Ctrl-B`
+    /// toggles it at runtime).
+    pub sidebar: Sidebar,
     /// The optional local LLM the agent can offload light work to.
     pub local_llm: LocalLlm,
 }
@@ -146,6 +178,7 @@ impl Default for Settings {
             notifications_enabled: true,
             agent_cli: AgentCli::default(),
             session_action_ui: SessionActionUi::default(),
+            sidebar: Sidebar::default(),
             local_llm: LocalLlm::default(),
         }
     }
@@ -390,6 +423,26 @@ mod tests {
             .default_branch(),
             Some("develop")
         );
+    }
+
+    #[test]
+    fn sidebar_defaults_to_full_and_serializes_in_snake_case() {
+        // The screen opens with the full-width sidebar unless configured otherwise.
+        assert_eq!(Sidebar::default(), Sidebar::Full);
+        assert_eq!(Settings::default().sidebar, Sidebar::Full);
+        // Round-trips through the snake_case JSON the rest of the settings use.
+        assert_eq!(serde_json::to_string(&Sidebar::Full).unwrap(), "\"full\"");
+        assert_eq!(serde_json::to_string(&Sidebar::Rail).unwrap(), "\"rail\"");
+        assert_eq!(
+            serde_json::from_str::<Sidebar>("\"rail\"").unwrap(),
+            Sidebar::Rail
+        );
+    }
+
+    #[test]
+    fn sidebar_toggles_between_full_and_rail() {
+        assert_eq!(Sidebar::Full.toggled(), Sidebar::Rail);
+        assert_eq!(Sidebar::Rail.toggled(), Sidebar::Full);
     }
 
     #[test]

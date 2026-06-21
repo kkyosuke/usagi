@@ -29,6 +29,7 @@ use chrome::{
 use panes::{left_pane, log_tail, right_pane_contents};
 
 use super::state::{HomeState, Mode};
+use crate::domain::settings::Sidebar;
 
 /// Shown below the root row when the workspace has no recorded worktrees.
 const EMPTY_MESSAGE: &str = "no sessions";
@@ -69,9 +70,19 @@ const SEP: &str = " │ ";
 /// Visible width of [`SEP`].
 const SEP_WIDTH: usize = 3;
 
-/// Narrowest and widest the left (worktree) pane is allowed to be.
+/// Narrowest and widest the left (worktree) pane is allowed to be when the
+/// sidebar is shown at its full width ([`Sidebar::Full`]).
 const LEFT_MIN: usize = 16;
 const LEFT_MAX: usize = 40;
+
+/// Width of the collapsed sidebar rail ([`Sidebar::Rail`]): a gutter column for
+/// the active bar plus a 2×2 glyph grid — kind + git status on row 1, agent state
+/// on row 2 (under the git status). Narrow enough to hand most of the width to the
+/// right pane while still showing which session is active, its git state, and what
+/// its agent is doing. Each entry spans **two rows**, exactly like the full
+/// sidebar, so toggling the sidebar never shifts a session to a different row —
+/// only the width changes.
+const RAIL_WIDTH: usize = 5;
 
 /// Shown in the right pane between attaching the terminal and its first screen
 /// snapshot arriving.
@@ -130,10 +141,14 @@ fn pad_to_width(content: String, width: usize) -> String {
 }
 
 /// Splits the terminal `width` into the left pane width and the right pane
-/// width, leaving room for the divider. The left pane is clamped to a readable
-/// band and never overruns the terminal.
-fn layout(width: usize) -> (usize, usize) {
-    let left = (width / 3).clamp(LEFT_MIN, LEFT_MAX);
+/// width, leaving room for the divider. A full sidebar is clamped to a readable
+/// band; a collapsed one is the fixed-width [`RAIL_WIDTH`] rail. Either way the
+/// left pane never overruns the terminal.
+fn layout(width: usize, sidebar: Sidebar) -> (usize, usize) {
+    let left = match sidebar {
+        Sidebar::Full => (width / 3).clamp(LEFT_MIN, LEFT_MAX),
+        Sidebar::Rail => RAIL_WIDTH,
+    };
     let left = left.min(width.saturating_sub(SEP_WIDTH));
     let right = width.saturating_sub(left + SEP_WIDTH);
     (left, right)
@@ -174,9 +189,13 @@ impl TerminalGeometry {
 /// Computes the [`TerminalGeometry`] for a raw terminal size, matching the
 /// layout [`render_frame`] draws (title + blank above the body, the left pane
 /// and divider to its left). `rows` and `cols` are at least 1.
-pub fn terminal_geometry(raw_height: usize, raw_width: usize) -> TerminalGeometry {
+pub fn terminal_geometry(
+    raw_height: usize,
+    raw_width: usize,
+    sidebar: Sidebar,
+) -> TerminalGeometry {
     let (height, width) = widgets::normalize_size(raw_height, raw_width);
-    let (left_w, right_w) = layout(width);
+    let (left_w, right_w) = layout(width, sidebar);
     let pane_rows = height.saturating_sub(4).max(1);
     TerminalGeometry {
         rows: pane_rows.max(1) as u16,
@@ -199,8 +218,12 @@ pub const TAB_BAR_ROWS: usize = 2;
 /// down by the same so the cursor tracks the shell below the strip. The pane and
 /// the pool both size / place the live terminal through this, while the
 /// tab-less previews in 切替 use [`terminal_geometry`].
-pub fn attached_geometry(raw_height: usize, raw_width: usize) -> TerminalGeometry {
-    let geo = terminal_geometry(raw_height, raw_width);
+pub fn attached_geometry(
+    raw_height: usize,
+    raw_width: usize,
+    sidebar: Sidebar,
+) -> TerminalGeometry {
+    let geo = terminal_geometry(raw_height, raw_width, sidebar);
     TerminalGeometry {
         rows: (geo.rows as usize).saturating_sub(TAB_BAR_ROWS).max(1) as u16,
         origin_row: geo.origin_row + TAB_BAR_ROWS as u16,
@@ -251,7 +274,18 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
     }
 
     let (height, width) = widgets::normalize_size(raw_height, raw_width);
-    let (left_w, right_w) = layout(width);
+    // 切替 (Switch) is the session picker: the left pane is the selection UI and
+    // the inline create / rename inputs need room, so it always renders the full
+    // sidebar even when the user has collapsed it elsewhere. Every other mode
+    // honours the toggle. The pool sizes the 没入 terminal and the 切替 preview
+    // against this same rule (full while picking, the live state once attached),
+    // so the embedded terminal always fills the pane it is drawn into.
+    let sidebar = if state.mode() == Mode::Switch {
+        Sidebar::Full
+    } else {
+        state.sidebar()
+    };
+    let (left_w, right_w) = layout(width, sidebar);
 
     // The 統括 input is a bordered box (3 rows) when there is height for it;
     // every other mode — and a short terminal — uses a single status line.
@@ -285,6 +319,7 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
         body_rows,
         // In 切替 the keyboard is on the list: fade the rows the cursor is not on.
         state.mode() == Mode::Switch,
+        sidebar,
     );
     // While naming a new session in 切替, append the inline create row(s) to the
     // left pane (trimmed back to the session-list area if it would overflow).

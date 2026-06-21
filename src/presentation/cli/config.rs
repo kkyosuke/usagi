@@ -137,6 +137,7 @@ fn render_settings(settings: &Settings) -> Vec<String> {
             "session_action_ui      {}",
             session_action_ui_label(settings.session_action_ui)
         ),
+        format!("sidebar                {}", sidebar_label(settings.sidebar)),
         format!("local_llm_enabled      {}", settings.local_llm.enabled),
         format!("local_llm_model        {}", settings.local_llm.model),
     ]
@@ -165,6 +166,15 @@ fn session_action_ui_label(ui: crate::domain::settings::SessionActionUi) -> &'st
     match ui {
         SessionActionUi::Menu => "menu",
         SessionActionUi::Prompt => "prompt",
+    }
+}
+
+/// The on-disk label for a [`Sidebar`].
+fn sidebar_label(sidebar: crate::domain::settings::Sidebar) -> &'static str {
+    use crate::domain::settings::Sidebar;
+    match sidebar {
+        Sidebar::Full => "full",
+        Sidebar::Rail => "rail",
     }
 }
 
@@ -202,6 +212,7 @@ mod tests {
             notifications_enabled: false,
             agent_cli: AgentCli::Gemini,
             session_action_ui: crate::domain::settings::SessionActionUi::Prompt,
+            sidebar: crate::domain::settings::Sidebar::Rail,
             local_llm: crate::domain::settings::LocalLlm {
                 enabled: true,
                 model: "qwen2.5-coder:3b".to_string(),
@@ -214,8 +225,9 @@ mod tests {
         assert!(lines[3].contains("false"));
         assert!(lines[4].contains("gemini"));
         assert!(lines[5].contains("prompt"));
-        assert!(lines[6].contains("true"));
-        assert!(lines[7].contains("qwen2.5-coder:3b"));
+        assert!(lines[6].contains("rail"));
+        assert!(lines[7].contains("true"));
+        assert!(lines[8].contains("qwen2.5-coder:3b"));
     }
 
     #[test]
@@ -232,6 +244,14 @@ mod tests {
         assert_eq!(theme_label(Theme::System), "system");
         assert_eq!(agent_label(AgentCli::Claude), "claude");
         assert_eq!(agent_label(AgentCli::Gemini), "gemini");
+        assert_eq!(
+            sidebar_label(crate::domain::settings::Sidebar::Full),
+            "full"
+        );
+        assert_eq!(
+            sidebar_label(crate::domain::settings::Sidebar::Rail),
+            "rail"
+        );
     }
 
     #[test]

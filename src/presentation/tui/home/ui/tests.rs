@@ -6,7 +6,7 @@ use super::super::command::{CommandHint, CommandInfo};
 use super::super::state::{LogLine, Preview, TextModal, WorktreeList, ROOT_NAME};
 use super::super::terminal_pool::MonitorSnapshot;
 use super::super::terminal_view::TerminalView;
-use crate::domain::settings::SessionActionUi;
+use crate::domain::settings::{SessionActionUi, Sidebar};
 use crate::domain::workspace_state::{BranchStatus, WorktreeState};
 use crate::presentation::tui::markdown::{LineStyle, MarkdownLine, Span, SpanStyle};
 use chrono::Utc;
@@ -133,16 +133,28 @@ fn pad_to_width_leaves_full_content_alone() {
 
 #[test]
 fn layout_splits_a_standard_width() {
-    let (left, right) = layout(80);
+    let (left, right) = layout(80, Sidebar::Full);
     assert_eq!(left, 26);
     assert_eq!(right, 80 - 26 - SEP_WIDTH);
 }
 
 #[test]
 fn layout_does_not_overrun_a_narrow_terminal() {
-    let (left, right) = layout(4);
+    let (left, right) = layout(4, Sidebar::Full);
     assert!(left <= 4);
     assert_eq!(right, 0);
+}
+
+#[test]
+fn layout_collapses_to_the_rail_width() {
+    // A collapsed sidebar is the fixed-width rail, handing the rest to the right
+    // pane regardless of how wide the full sidebar would have been.
+    let (left, right) = layout(80, Sidebar::Rail);
+    assert_eq!(left, RAIL_WIDTH);
+    assert_eq!(right, 80 - RAIL_WIDTH - SEP_WIDTH);
+    // The rail's right pane is wider than the full sidebar's would be.
+    let (_, full_right) = layout(80, Sidebar::Full);
+    assert!(right > full_right);
 }
 
 #[test]
@@ -159,6 +171,25 @@ fn title_bar_singular_and_plural() {
         ]),
     );
     assert!(three.contains("3 sessions"));
+}
+
+#[test]
+fn title_bar_shows_the_active_session_name() {
+    // With nothing activated the root row is active, so the workspace itself is
+    // named — keeping the active entry identifiable even when the sidebar is the
+    // collapsed rail (which shows no names).
+    let mut list = list_with(vec![worktree(
+        Some("feat-login"),
+        true,
+        BranchStatus::Local,
+    )]);
+    let root = console::strip_ansi_codes(&title_bar(80, &list)).into_owned();
+    assert!(root.contains(&format!("▸ {ROOT_NAME}")));
+    // Activating a session names it in the title.
+    list.move_down();
+    list.activate_selected();
+    let active = console::strip_ansi_codes(&title_bar(80, &list)).into_owned();
+    assert!(active.contains("▸ feat-login"));
 }
 
 #[test]
@@ -470,6 +501,7 @@ fn left_pane_renders_the_root_entry_then_the_empty_message() {
         80,
         6,
         false,
+        Sidebar::Full,
     );
     assert_eq!(lines.len(), 4);
     assert!(lines[0].contains(ROOT_NAME));
@@ -496,6 +528,7 @@ fn left_pane_renders_the_root_entry_then_one_entry_per_worktree() {
         30,
         7,
         false,
+        Sidebar::Full,
     );
     // Root (2 lines), a divider, then 2 lines per worktree.
     assert_eq!(lines.len(), 7);
@@ -512,19 +545,59 @@ fn left_pane_marks_the_agent_state_through_its_lifecycle() {
     let empty = HashSet::new();
     // Rows: 0/1 root, 2 divider, 3 worktree identity, 4 worktree detail.
     // Live but no turn yet: `☾ ready`.
-    let ready = left_pane(&list, &path, &empty, &empty, &empty, 30, 6, false);
+    let ready = left_pane(
+        &list,
+        &path,
+        &empty,
+        &empty,
+        &empty,
+        30,
+        6,
+        false,
+        Sidebar::Full,
+    );
     assert!(ready[4].contains('☾'));
     assert!(ready[4].contains("ready"));
     // Working a turn: `▶ running`.
-    let running = left_pane(&list, &path, &path, &empty, &empty, 30, 6, false);
+    let running = left_pane(
+        &list,
+        &path,
+        &path,
+        &empty,
+        &empty,
+        30,
+        6,
+        false,
+        Sidebar::Full,
+    );
     assert!(running[4].contains('▶'));
     assert!(running[4].contains("running"));
     // Awaiting input wins over running: `◆ waiting`.
-    let waiting = left_pane(&list, &path, &path, &path, &empty, 30, 6, false);
+    let waiting = left_pane(
+        &list,
+        &path,
+        &path,
+        &path,
+        &empty,
+        30,
+        6,
+        false,
+        Sidebar::Full,
+    );
     assert!(waiting[4].contains('◆'));
     assert!(!waiting[4].contains('▶'));
     // No live session: no agent detail at all.
-    let absent = left_pane(&list, &empty, &empty, &empty, &empty, 30, 6, false);
+    let absent = left_pane(
+        &list,
+        &empty,
+        &empty,
+        &empty,
+        &empty,
+        30,
+        6,
+        false,
+        Sidebar::Full,
+    );
     assert!(!absent[4].contains('▶'));
     assert!(!absent[4].contains('◆'));
     assert!(!absent[4].contains('☾'));
@@ -547,6 +620,7 @@ fn left_pane_is_trimmed_to_available_rows() {
         30,
         4,
         false,
+        Sidebar::Full,
     );
     // 3 worktrees would be 2 (root) + 1 (divider) + 6 lines; trimmed to 4.
     assert_eq!(lines.len(), 4);
@@ -571,6 +645,7 @@ fn left_pane_marks_the_active_worktree_with_a_gutter_bar() {
         30,
         7,
         false,
+        Sidebar::Full,
     );
     // The root is not active; the active "feature" row carries the green `▎`
     // accent bar down both of its lines (identity + detail).
@@ -578,6 +653,176 @@ fn left_pane_marks_the_active_worktree_with_a_gutter_bar() {
     assert!(lines[5].contains("feature"));
     assert!(lines[5].contains('▎'));
     assert!(lines[6].contains('▎'));
+}
+
+#[test]
+fn rail_collapses_each_entry_to_two_rows_without_names_or_numbers() {
+    let list = list_with(vec![
+        worktree(Some("main"), true, BranchStatus::Pushed),
+        worktree(Some("feature"), false, BranchStatus::Local),
+    ]);
+    let empty = HashSet::new();
+    let lines = left_pane(
+        &list,
+        &empty,
+        &empty,
+        &empty,
+        &empty,
+        RAIL_WIDTH,
+        8,
+        false,
+        Sidebar::Rail,
+    );
+    // Root (2 rows), a divider, then 2 rows per worktree — the same shape as the
+    // full sidebar, so toggling never shifts an entry to a different row.
+    assert_eq!(lines.len(), 7);
+    let plain: Vec<String> = lines
+        .iter()
+        .map(|l| console::strip_ansi_codes(l).into_owned())
+        .collect();
+    // No names and no numbers on the rail.
+    assert!(!plain.iter().any(|l| l.contains("feature")));
+    assert!(!plain.iter().any(|l| l.chars().any(|c| c.is_ascii_digit())));
+    // Root glyph on row 1, divider, then each worktree's kind dot + git-status
+    // glyph share row 1 (the 2×2 grid's top half).
+    assert!(plain[0].contains('⌂'));
+    assert!(plain[2].contains('─'));
+    assert!(plain[3].contains('●')); // primary main
+    assert!(plain[3].contains(PUSHED_ICON)); // main's git status
+    assert!(plain[5].contains('○')); // ordinary feature
+    assert!(plain[5].contains(LOCAL_ICON)); // feature's git status
+                                            // A space separates the gutter from the glyph, and every row fills the rail.
+    assert!(plain[3].starts_with("  ●") || plain[3].starts_with(" ●"));
+    assert!(lines
+        .iter()
+        .all(|l| console::measure_text_width(l) == RAIL_WIDTH));
+}
+
+#[test]
+fn rail_keeps_the_same_row_count_as_the_full_sidebar() {
+    // The anti-CLS guarantee: for the same list, the rail and the full sidebar
+    // produce the same number of rows, so Ctrl-B only changes the width — no
+    // session jumps to a different row.
+    let mk = |sidebar| {
+        let list = list_with(vec![
+            worktree(Some("main"), true, BranchStatus::Pushed),
+            worktree(Some("feature"), false, BranchStatus::Local),
+        ]);
+        let empty = HashSet::new();
+        left_pane(
+            &list, &empty, &empty, &empty, &empty, 30, 20, false, sidebar,
+        )
+        .len()
+    };
+    assert_eq!(mk(Sidebar::Full), mk(Sidebar::Rail));
+    // And the empty workspace stays aligned too.
+    let empty_mk = |sidebar| {
+        let empty = HashSet::new();
+        left_pane(
+            &list_with(Vec::new()),
+            &empty,
+            &empty,
+            &empty,
+            &empty,
+            30,
+            20,
+            false,
+            sidebar,
+        )
+        .len()
+    };
+    assert_eq!(empty_mk(Sidebar::Full), empty_mk(Sidebar::Rail));
+}
+
+#[test]
+fn rail_shows_the_active_bar_down_both_rows_and_the_agent_glyph_on_row_two() {
+    let mut list = list_with(vec![
+        worktree(Some("main"), true, BranchStatus::Pushed),
+        worktree(Some("feature"), false, BranchStatus::Local),
+    ]);
+    list.activate_by_name("feature");
+    let path: HashSet<PathBuf> = [PathBuf::from("/repo/wt")].into_iter().collect();
+    let empty = HashSet::new();
+    // "feature" is active and running: the green `▎` bar runs down both of its
+    // rows, the kind dot is on row 1, and the running glyph on row 2.
+    let lines = left_pane(
+        &list,
+        &path,
+        &path,
+        &empty,
+        &empty,
+        RAIL_WIDTH,
+        8,
+        false,
+        Sidebar::Rail,
+    );
+    let top = console::strip_ansi_codes(&lines[5]).into_owned();
+    let detail = console::strip_ansi_codes(&lines[6]).into_owned();
+    assert!(top.contains('▎'));
+    assert!(top.contains('○')); // kind dot on row 1
+    assert!(detail.contains('▎'));
+    assert!(detail.contains('▶')); // agent state on row 2
+                                   // The root row (not active) carries no bar.
+    assert!(!console::strip_ansi_codes(&lines[0]).contains('▎'));
+}
+
+#[test]
+fn rail_shows_each_agent_state_glyph_on_the_detail_row() {
+    let list = list_with(vec![worktree(Some("feature"), false, BranchStatus::Local)]);
+    let p: HashSet<PathBuf> = [PathBuf::from("/repo/wt")].into_iter().collect();
+    let e = HashSet::new();
+    let glyph = |live: &HashSet<PathBuf>,
+                 running: &HashSet<PathBuf>,
+                 waiting: &HashSet<PathBuf>,
+                 done: &HashSet<PathBuf>| {
+        let lines = left_pane(
+            &list,
+            live,
+            running,
+            waiting,
+            done,
+            RAIL_WIDTH,
+            8,
+            false,
+            Sidebar::Rail,
+        );
+        // Rows: 0/1 root, 2 divider, 3 worktree kind, 4 worktree agent state.
+        console::strip_ansi_codes(&lines[4]).into_owned()
+    };
+    // The rail's detail glyph follows the same lifecycle as the full sidebar's
+    // agent label: ready ☾, running ▶, waiting ◆, done ✓.
+    assert!(glyph(&p, &e, &e, &e).contains('☾'));
+    assert!(glyph(&p, &p, &e, &e).contains('▶'));
+    assert!(glyph(&p, &p, &p, &e).contains('◆'));
+    assert!(glyph(&p, &p, &p, &p).contains('✓'));
+}
+
+#[test]
+fn rail_sidebar_marks_the_switch_cursor() {
+    let mut list = list_with(vec![worktree(Some("feature"), false, BranchStatus::Local)]);
+    let empty = HashSet::new();
+    let rail = |list: &WorktreeList| {
+        left_pane(
+            list,
+            &empty,
+            &empty,
+            &empty,
+            &empty,
+            RAIL_WIDTH,
+            8,
+            true,
+            Sidebar::Rail,
+        )
+    };
+    // In 切替 the cursor row shows the `>` marker; here the cursor is on the root.
+    let on_root = rail(&list);
+    assert!(console::strip_ansi_codes(&on_root[0]).contains('>'));
+    // Moving the cursor onto the worktree marks its row 1 and fades the root entry
+    // (the cursor leaves it), so the highlighted session still reads first.
+    list.move_down();
+    let on_session = rail(&list);
+    assert!(!console::strip_ansi_codes(&on_session[0]).contains('>'));
+    assert!(console::strip_ansi_codes(&on_session[3]).contains('>'));
 }
 
 #[test]
@@ -608,6 +853,7 @@ fn left_pane_fades_every_row_but_the_cursor_when_asked() {
         30,
         6,
         true,
+        Sidebar::Full,
     );
     assert_eq!(dimmed.len(), 6);
     assert!(console::strip_ansi_codes(&dimmed[0]).contains(ROOT_NAME));
@@ -1065,8 +1311,8 @@ fn terminal_pane_clips_rows_to_the_pane_width() {
 
 #[test]
 fn terminal_geometry_matches_the_rendered_layout() {
-    let geo = terminal_geometry(24, 80);
-    let (left, _) = layout(80);
+    let geo = terminal_geometry(24, 80, Sidebar::Full);
+    let (left, _) = layout(80, Sidebar::Full);
     assert_eq!(geo.origin_col as usize, left + SEP_WIDTH);
     assert_eq!(geo.origin_row, 2);
     assert_eq!(geo.rows, 20);
@@ -1075,15 +1321,15 @@ fn terminal_geometry_matches_the_rendered_layout() {
 
 #[test]
 fn terminal_geometry_stays_positive_in_a_tiny_terminal() {
-    let geo = terminal_geometry(1, 1);
+    let geo = terminal_geometry(1, 1, Sidebar::Full);
     assert!(geo.rows >= 1);
     assert!(geo.cols >= 1);
 }
 
 #[test]
 fn attached_geometry_reserves_the_tab_strip_row() {
-    let full = terminal_geometry(24, 80);
-    let attached = attached_geometry(24, 80);
+    let full = terminal_geometry(24, 80, Sidebar::Full);
+    let attached = attached_geometry(24, 80, Sidebar::Full);
     // The tab strip takes two rows off the top: fewer rows, origin pushed down,
     // same width and left edge.
     assert_eq!(attached.rows as usize, full.rows as usize - TAB_BAR_ROWS);
@@ -1094,14 +1340,28 @@ fn attached_geometry_reserves_the_tab_strip_row() {
 
 #[test]
 fn attached_geometry_stays_positive_in_a_tiny_terminal() {
-    let geo = attached_geometry(1, 1);
+    let geo = attached_geometry(1, 1, Sidebar::Full);
     assert!(geo.rows >= 1);
     assert!(geo.cols >= 1);
 }
 
 #[test]
+fn collapsing_the_sidebar_widens_the_terminal_geometry() {
+    // The embedded terminal tracks the sidebar: collapsing to the rail moves its
+    // origin left and widens it, so the live shell fills the reclaimed columns.
+    let full = attached_geometry(24, 80, Sidebar::Full);
+    let rail = attached_geometry(24, 80, Sidebar::Rail);
+    assert!(rail.cols > full.cols);
+    assert!(rail.origin_col < full.origin_col);
+    assert_eq!(rail.origin_col as usize, RAIL_WIDTH + SEP_WIDTH);
+    // The vertical layout (rows / origin / tab strip) is unaffected.
+    assert_eq!(rail.rows, full.rows);
+    assert_eq!(rail.origin_row, full.origin_row);
+}
+
+#[test]
 fn cursor_screen_pos_places_the_cursor_one_past_the_origin() {
-    let geo = terminal_geometry(24, 80);
+    let geo = terminal_geometry(24, 80, Sidebar::Full);
     // A cursor at the pane's top-left maps to the 1-based cell just inside it.
     let (x, y) = geo.cursor_screen_pos(0, 0);
     assert_eq!(x, geo.origin_col + 1);
@@ -1114,7 +1374,7 @@ fn cursor_screen_pos_places_the_cursor_one_past_the_origin() {
 
 #[test]
 fn cursor_screen_pos_clamps_a_deferred_wrap_onto_the_last_cell() {
-    let geo = terminal_geometry(24, 80);
+    let geo = terminal_geometry(24, 80, Sidebar::Full);
     // vt100 parks the cursor one column/row past the grid on a deferred wrap;
     // the placed cursor must stay on the last cell instead of spilling past the
     // pane (which would jump the real cursor to the screen edge).
@@ -1193,6 +1453,21 @@ fn footer_line_differs_by_mode() {
     let attached = footer_line(80, &state);
     assert!(attached.contains("attached"));
     assert!(!attached.contains("scroll"));
+}
+
+#[test]
+fn render_frame_collapses_to_the_rail_but_keeps_switch_full() {
+    let mut state = state_with(vec![worktree(Some("feature"), false, BranchStatus::Local)]);
+    state.set_sidebar(Sidebar::Rail);
+    // Overview honours the rail: the session name is not spelled out on the left,
+    // but the active entry still rides in the title bar (`▸`).
+    let overview = stripped(&render_frame(24, 80, &state));
+    assert!(overview.contains('▸'));
+    assert!(!overview.contains("feature"));
+    // 切替 forces the full sidebar so the picker keeps names, even with rail set.
+    state.enter_switch(super::super::state::ReturnMode::Overview);
+    let switch = stripped(&render_frame(24, 80, &state));
+    assert!(switch.contains("feature"));
 }
 
 #[test]

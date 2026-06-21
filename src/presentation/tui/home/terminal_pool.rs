@@ -38,6 +38,7 @@ use std::time::Duration;
 use anyhow::Result;
 use console::Term;
 
+use crate::domain::settings::Sidebar;
 use crate::infrastructure::pty::PtySession;
 use crate::infrastructure::session_monitor::SessionMonitor;
 use crate::infrastructure::{agent_state_store, session_monitor};
@@ -407,7 +408,10 @@ impl TerminalPool {
         agent_command: Option<&str>,
     ) -> Result<Pane> {
         let (height, width) = term.size();
-        let geo = ui::attached_geometry(height as usize, width as usize);
+        // Sized to the full-sidebar pane: the 没入 `drive` loop resizes the pane to
+        // the live sidebar state on attach, so a session collapsed to the rail
+        // still fits the moment it is driven.
+        let geo = ui::attached_geometry(height as usize, width as usize, Sidebar::Full);
         let initial = match kind {
             PaneKind::Agent => agent_command,
             PaneKind::Terminal => None,
@@ -500,8 +504,10 @@ impl TerminalPool {
             return None;
         }
         let (height, width) = term.size();
-        // The preview has no tab strip, so it uses the full-pane geometry.
-        let geo = ui::terminal_geometry(height as usize, width as usize);
+        // The preview has no tab strip, so it uses the full-pane geometry. The
+        // 切替 preview is always drawn with the full sidebar (the picker keeps the
+        // session names), so the snapshot is sized to match.
+        let geo = ui::terminal_geometry(height as usize, width as usize, Sidebar::Full);
         let generation = session.generation();
         // The previewed session, the pane geometry, and the shell's output are all
         // unchanged since the last frame: reuse the snapshot without touching the

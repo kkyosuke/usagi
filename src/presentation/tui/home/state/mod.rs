@@ -16,7 +16,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use crate::domain::issue::Issue;
-use crate::domain::settings::SessionActionUi;
+use crate::domain::settings::{SessionActionUi, Sidebar};
 use crate::domain::version::Version;
 use crate::domain::workspace_state::{SessionRecord, WorktreeState};
 
@@ -135,6 +135,11 @@ pub struct HomeState {
     /// Which right-pane action surface 在席 (Focus) presents — a pickable menu
     /// or a typed prompt. Injected from the effective settings by `mod.rs`.
     session_action_ui: SessionActionUi,
+    /// How the left session sidebar is sized — its full-width list or the
+    /// collapsed rail. `Ctrl-B` toggles it; the initial value is injected from
+    /// the effective settings by `mod.rs`. Independent of [`mode`](Self::mode),
+    /// so zooming between modes never resets it.
+    sidebar: Sidebar,
     /// Whether the `ai` command is offered in the 在席 (Focus) menu: true only
     /// when the local LLM is enabled and its model is pulled. Injected from the
     /// effective settings (and a runtime probe) by `mod.rs`; false by default so
@@ -241,6 +246,7 @@ impl HomeState {
             log,
             registry: CommandRegistry::with_builtins(),
             session_action_ui: SessionActionUi::default(),
+            sidebar: Sidebar::default(),
             ai_available: false,
             switch_return: ReturnMode::Overview,
             create: None,
@@ -297,6 +303,24 @@ impl HomeState {
     /// Which right-pane action surface 在席 (Focus) presents.
     pub fn session_action_ui(&self) -> SessionActionUi {
         self.session_action_ui
+    }
+
+    /// Set the sidebar's initial state (injected from the effective settings by
+    /// `mod.rs` at construction).
+    pub fn set_sidebar(&mut self, sidebar: Sidebar) {
+        self.sidebar = sidebar;
+    }
+
+    /// How the left session sidebar is currently sized (full width or the
+    /// collapsed rail).
+    pub fn sidebar(&self) -> Sidebar {
+        self.sidebar
+    }
+
+    /// Toggle the left session sidebar between its full width and the collapsed
+    /// rail — the `Ctrl-B` action.
+    pub fn toggle_sidebar(&mut self) {
+        self.sidebar = self.sidebar.toggled();
     }
 
     /// Set whether the `ai` command is offered in the 在席 (Focus) menu (injected

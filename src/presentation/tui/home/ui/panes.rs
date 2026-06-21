@@ -13,10 +13,10 @@ use super::super::terminal_tabs::TabStrip;
 use super::super::terminal_view::TerminalView;
 use super::{
     clip_to_width, pad_to_width, ACTIVE_COL, DETACHED, DIRTY_ICON, EMPTY_MESSAGE, HINT_INDENT,
-    HINT_MAX, LOCAL_ICON, NAME_PREFIX, NEW_ICON, PUSHED_ICON, ROOT_DETAIL, STATUS_COL, SYNCED_ICON,
-    TERMINAL_STARTING,
+    HINT_MAX, LOCAL_ICON, NAME_PREFIX, NEW_ICON, PUSHED_ICON, RAIL_WIDTH, ROOT_DETAIL, STATUS_COL,
+    SYNCED_ICON, TERMINAL_STARTING,
 };
-use crate::domain::settings::SessionActionUi;
+use crate::domain::settings::{SessionActionUi, Sidebar};
 use crate::domain::workspace_state::{BranchStatus, WorktreeState};
 use crate::presentation::tui::markdown::{LineStyle, MarkdownLine, Span, SpanStyle};
 use crate::presentation::tui::widgets;
@@ -32,18 +32,33 @@ fn status_icon(status: BranchStatus) -> char {
     }
 }
 
+/// The colour each branch lifecycle status is drawn in, shared by the full
+/// sidebar's `<icon> <word>` label and the rail's single status glyph so they
+/// never drift apart.
+fn status_style(status: BranchStatus) -> Style {
+    match status {
+        BranchStatus::New => Style::new().blue(),
+        BranchStatus::Dirty => Style::new().magenta(),
+        BranchStatus::Local => Style::new().yellow(),
+        BranchStatus::Pushed => Style::new().green(),
+        BranchStatus::Synced => Style::new().cyan(),
+    }
+}
+
 /// The colour-coded `<icon> <word>` label for a branch's lifecycle status. The
 /// icon gives an at-a-glance read; the word keeps it legible without a Nerd
 /// Font and disambiguates the colour.
 pub(super) fn status_label(status: BranchStatus) -> String {
     let text = format!("{} {}", status_icon(status), status.as_str());
-    match status {
-        BranchStatus::New => style(text).blue().to_string(),
-        BranchStatus::Dirty => style(text).magenta().to_string(),
-        BranchStatus::Local => style(text).yellow().to_string(),
-        BranchStatus::Pushed => style(text).green().to_string(),
-        BranchStatus::Synced => style(text).cyan().to_string(),
-    }
+    status_style(status).apply_to(text).to_string()
+}
+
+/// The single colour-coded git-status glyph shown on the collapsed rail (the icon
+/// from [`status_label`] without the word), in the same colour.
+fn rail_status_glyph(status: BranchStatus) -> String {
+    status_style(status)
+        .apply_to(status_icon(status))
+        .to_string()
 }
 
 /// The line-1 right-edge status field: the colour-coded `<icon> <word>` label
@@ -123,6 +138,20 @@ impl AgentState {
                     .bold()
                     .to_string(),
             ),
+        }
+    }
+
+    /// The single, colour-matched glyph for the collapsed rail — the same icon
+    /// the [`detail`](Self::detail) label leads with (`☾`/`▶`/`◆`/`✓`), or `None`
+    /// when no agent is in use (the rail then falls back to the worktree's kind
+    /// dot, so the row is never blank).
+    fn rail_icon(self) -> Option<String> {
+        match self {
+            AgentState::Absent => None,
+            AgentState::Ready => Some(style("☾").dim().to_string()),
+            AgentState::Running => Some(style("▶").green().bold().to_string()),
+            AgentState::Waiting => Some(style("◆").yellow().bold().to_string()),
+            AgentState::Done => Some(style("✓").cyan().bold().to_string()),
         }
     }
 }
@@ -238,6 +267,120 @@ pub(super) fn root_row(
     (line1, line2)
 }
 
+/// The worktree's kind dot — primary (`●`, magenta) or ordinary (`○`, dim).
+fn kind_dot(worktree: &WorktreeState) -> String {
+    if worktree.primary {
+        style("●").magenta().to_string()
+    } else {
+        style("○").dim().to_string()
+    }
+}
+
+/// Builds one collapsed-rail **entry** as the same two lines a full-sidebar entry
+/// spans, so toggling the sidebar never moves a session to a different row (no
+/// layout shift) — only the width changes. The glyphs form a 2×2 grid beside the
+/// gutter:
+///
+/// ```text
+/// ▎ <kind> <git>     row 1: identity dot (⌂/●/○) + git-status glyph
+/// ▎       <agent>    row 2: agent-state glyph (▶/◆/☾/✓), under the git column
+/// ```
+///
+/// `git` is blank on the root (no git status); `agent` is blank when no agent is
+/// in use. The active `▎` bar runs down both rows; the 切替 `>` cursor stays a
+/// point on row 1, matching the full sidebar.
+fn rail_entry(
+    selected: bool,
+    active: bool,
+    in_switch: bool,
+    kind: &str,
+    git: Option<&str>,
+    agent: Option<&str>,
+) -> (String, String) {
+    let gutter = gutter_cell(selected, active, in_switch);
+    let bar = gutter_cell(false, active, in_switch);
+    // Columns: gutter @0, kind @2, git/agent @4 — so the agent glyph sits under
+    // the git glyph and the column under the kind dot stays blank.
+    let top = pad_to_width(
+        format!("{gutter} {kind} {}", git.unwrap_or(" ")),
+        RAIL_WIDTH,
+    );
+    let detail = pad_to_width(format!("{bar}   {}", agent.unwrap_or(" ")), RAIL_WIDTH);
+    (top, detail)
+}
+
+/// Builds the collapsed-rail sidebar ([`Sidebar::Rail`]): the root entry first, a
+/// divider, then one entry per worktree — each the same two rows as the full
+/// sidebar (kind glyph on row 1, agent state on row 2), so the rail and the full
+/// list share the exact same row layout and toggling between them only changes
+/// the width. The active session keeps its green `▎` gutter bar (down both rows)
+/// and, in 切替, the `>` cursor and the dimming of the other entries, so the rail
+/// still shows which session is selected, its git state, and what its agent is
+/// doing without spelling out their names.
+#[allow(clippy::too_many_arguments)]
+fn rail_pane(
+    list: &WorktreeList,
+    live: &HashSet<PathBuf>,
+    running: &HashSet<PathBuf>,
+    waiting: &HashSet<PathBuf>,
+    done: &HashSet<PathBuf>,
+    rows: usize,
+    in_switch: bool,
+) -> Vec<String> {
+    let root_glyph = style("⌂").magenta().to_string();
+    let (mut root_top, mut root_detail) = rail_entry(
+        list.root_selected(),
+        list.root_active(),
+        in_switch,
+        &root_glyph,
+        None,
+        None,
+    );
+    if in_switch && !list.root_selected() {
+        root_top = dim_row(&root_top);
+        root_detail = dim_row(&root_detail);
+    }
+    let mut lines = vec![root_top, root_detail];
+    lines.push(style("─".repeat(RAIL_WIDTH)).dim().to_string());
+    for (i, w) in list.worktrees().iter().enumerate() {
+        // The root occupies the first entry, so worktree `i` sits at selectable
+        // row i + 1.
+        let row = i + 1;
+        let selected = row == list.selected_index();
+        let active = row == list.active_index();
+        let kind = kind_dot(w);
+        let git = rail_status_glyph(w.status);
+        let agent = AgentState::from_flags(
+            live.contains(&w.path),
+            running.contains(&w.path),
+            waiting.contains(&w.path),
+            done.contains(&w.path),
+        )
+        .rail_icon();
+        let (mut top, mut detail) = rail_entry(
+            selected,
+            active,
+            in_switch,
+            &kind,
+            Some(&git),
+            agent.as_deref(),
+        );
+        if in_switch && !selected {
+            top = dim_row(&top);
+            detail = dim_row(&detail);
+        }
+        lines.push(top);
+        lines.push(detail);
+    }
+    if list.is_empty() {
+        // Mirror the full sidebar's single empty-message row so the row count
+        // matches and toggling never shifts the layout.
+        lines.push(pad_to_width(String::new(), RAIL_WIDTH));
+    }
+    lines.truncate(rows);
+    lines
+}
+
 /// Re-renders an already-styled row uniformly dimmed: strips its colours and
 /// wraps the plain text in `dim`. Used to fade the rows the cursor is *not* on
 /// in 切替 (Switch), so the highlighted session stands out without a box.
@@ -256,6 +399,9 @@ pub(super) fn dim_row(line: &str) -> String {
 /// (`✓ done`); precedence is done > waiting > running > ready. When `in_switch`
 /// is set (in 切替), the keyboard is on the list: the selected row shows a `>`
 /// cursor and every other row is faded so the highlighted session reads first.
+///
+/// When `sidebar` is [`Sidebar::Rail`] the list collapses to the compact rail
+/// ([`rail_pane`]) instead, and `left_w` is the rail width.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn left_pane(
     list: &WorktreeList,
@@ -266,7 +412,11 @@ pub(super) fn left_pane(
     left_w: usize,
     rows: usize,
     in_switch: bool,
+    sidebar: Sidebar,
 ) -> Vec<String> {
+    if sidebar == Sidebar::Rail {
+        return rail_pane(list, live, running, waiting, done, rows, in_switch);
+    }
     // Line 1: prefix + name + the (now-blank) active-marker cell + a space + the
     // right-edge status field.
     let name_width = left_w.saturating_sub(NAME_PREFIX + ACTIVE_COL + 1 + STATUS_COL);

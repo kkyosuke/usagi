@@ -279,6 +279,21 @@ fn set_session_action_ui_overrides_the_default() {
 }
 
 #[test]
+fn sidebar_defaults_to_full_and_toggles() {
+    let mut state = state();
+    // Opens full unless the injected setting says otherwise.
+    assert_eq!(state.sidebar(), Sidebar::Full);
+    // `Ctrl-B`'s effect: full ⇄ rail, independent of any mode change.
+    state.toggle_sidebar();
+    assert_eq!(state.sidebar(), Sidebar::Rail);
+    state.toggle_sidebar();
+    assert_eq!(state.sidebar(), Sidebar::Full);
+    // The injected initial state overrides the default.
+    state.set_sidebar(Sidebar::Rail);
+    assert_eq!(state.sidebar(), Sidebar::Rail);
+}
+
+#[test]
 fn backspace_removes_the_last_character() {
     let mut state = state();
     state.push_char('m');
