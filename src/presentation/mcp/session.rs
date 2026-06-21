@@ -69,8 +69,18 @@ impl SessionMcpServer {
 
     fn tool_create(&self, arguments: Value) -> Result<String, String> {
         let args: CreateArgs = parse_args(arguments)?;
-        let created =
-            session::create(&self.workspace_root, &args.name).map_err(|e| e.to_string())?;
+        // The MCP server runs headless, so a creation failure would otherwise
+        // only travel back to the calling agent and never reach a log file.
+        // Record the full chain — matching the TUI's `session create "<name>"
+        // failed: ...` wording — before surfacing the short message to the
+        // client, so failures stay inspectable in `<data dir>/logs/`.
+        let created = session::create(&self.workspace_root, &args.name).map_err(|e| {
+            crate::infrastructure::error_log::ErrorLog::record(&format!(
+                "mcp session_create \"{}\" failed: {e:#}",
+                args.name
+            ));
+            e.to_string()
+        })?;
         Ok(to_pretty(&json!({
             "name": created.name,
             "root": created.root,
@@ -346,7 +356,13 @@ mod tests {
     }
 
     #[test]
-    fn create_duplicate_is_a_tool_error() {
+    fn create_duplicate_is_a_tool_error_and_is_logged() {
+        // Point the data dir at a temp home so the failure's ErrorLog entry is
+        // captured here instead of polluting the real `~/.usagi/logs/`.
+        let _guard = crate::test_support::process_env_guard();
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var(crate::infrastructure::storage::DATA_DIR_ENV, home.path());
+
         let root = tempfile::tempdir().unwrap();
         init_repo(root.path());
         let server = server_at(root.path(), FakeBackend::ok("x"));
@@ -358,6 +374,19 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("already exists"));
+
+        // The duplicate failure was also recorded to the error log, in the same
+        // wording as the TUI's session-create entries.
+        let logs = home.path().join("logs");
+        let entry = fs::read_dir(&logs)
+            .expect("logs dir exists")
+            .next()
+            .expect("a log file was written")
+            .expect("readable entry");
+        let contents = fs::read_to_string(entry.path()).unwrap();
+        assert!(contents.contains("mcp session_create \"dup\" failed:"));
+
+        std::env::remove_var(crate::infrastructure::storage::DATA_DIR_ENV);
     }
 
     #[test]
