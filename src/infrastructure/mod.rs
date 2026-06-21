@@ -11,6 +11,7 @@ pub mod json_file;
 pub mod markdown_file;
 pub mod memory_store;
 pub mod pty;
+pub mod pty_exit;
 pub mod release;
 pub mod session_monitor;
 pub mod storage;
