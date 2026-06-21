@@ -1,13 +1,13 @@
 ---
 number: 72
 title: feat(mcp): MCP 経由のセッション作成失敗もエラーログに記録する
-status: todo
+status: in-progress
 priority: medium
 labels: [feat, mcp, error-log]
 dependson: []
 related: [71]
 created_at: 2026-06-21T00:00:02.000000+00:00
-updated_at: 2026-06-21T00:00:02.000000+00:00
+updated_at: 2026-06-21T12:00:00.000000+00:00
 ---
 
 ## 背景
