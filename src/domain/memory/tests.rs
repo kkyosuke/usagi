@@ -163,3 +163,18 @@ fn parse_error_displays_its_message() {
     let err = ParseMemoryError("boom".to_string());
     assert_eq!(err.to_string(), "boom");
 }
+
+#[test]
+fn to_markdown_neutralises_newlines_so_values_cannot_inject_frontmatter() {
+    let mut memory = sample();
+    // A title that, written verbatim, would forge a `type` frontmatter line.
+    memory.title = "メモ\ntype: reference".to_string();
+
+    let md = memory.to_markdown();
+    assert!(md.contains("title: メモ type: reference"));
+
+    // Reloads cleanly and the forged `type` never took effect.
+    let parsed = Memory::from_markdown(&md).unwrap();
+    assert_eq!(parsed.kind, memory.kind); // not overwritten to `reference`
+    assert_eq!(parsed.title, "メモ type: reference");
+}
