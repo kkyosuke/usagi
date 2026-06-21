@@ -102,9 +102,21 @@ pub(super) fn discard_session(
     repo_worktrees: &[(PathBuf, Vec<git::WorktreeInfo>)],
     force: bool,
 ) -> Result<()> {
+    // git reports worktree paths canonicalized (e.g. `/private/var/…` on macOS),
+    // so compare against the session root in canonical form too; fall back to the
+    // raw path when a directory no longer exists to be resolved.
+    let canon = |p: &Path| fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let root_canon = canon(root);
     for (repo, worktrees) in repo_worktrees {
         for wt in worktrees {
-            if wt.branch.as_deref() == Some(branch) {
+            // A worktree belongs to this session when it is on the session branch
+            // *or* when it physically lives under the session root. The latter
+            // catches a worktree left on an unexpected branch (e.g. one created
+            // directly with `git worktree add -b other` at the session path): the
+            // branch-only match used to skip it, so the directory was deleted but
+            // its git registration stayed behind, dangling at the session path and
+            // blocking any later session of the same name from being created.
+            if wt.branch.as_deref() == Some(branch) || canon(&wt.path).starts_with(&root_canon) {
                 let removed = git::remove_worktree(repo, &wt.path, force);
                 // Forced teardown discards a dirty worktree by design, so any
                 // failure there is best-effort. Without `force`, git refuses a
