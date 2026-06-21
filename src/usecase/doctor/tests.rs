@@ -294,6 +294,38 @@ fn fix_missing_only_acts_on_missing_checks() {
 }
 
 #[test]
+fn fix_missing_skips_local_llm_checks() {
+    // The `ollama` and model checks have a dedicated remedy (`local_llm::ensure`,
+    // run separately by the CLI). They are not real package names, so routing
+    // them through the package manager would spuriously fail; `fix_missing` must
+    // skip them and only act on externally-installable tools.
+    let checks = vec![
+        missing("git"),
+        missing(OLLAMA_CHECK),
+        missing(LOCAL_LLM_MODEL_CHECK),
+    ];
+    // `brew` is available and every run succeeds; if the LLM checks leaked
+    // through, we'd see install outcomes for them too.
+    let runner = FakeRunner::new(vec!["brew"], Ok(true));
+    let outcomes = fix_missing(&checks, "macos", &runner);
+    assert_eq!(
+        outcomes,
+        vec![FixOutcome::Installed {
+            tool: "git".to_string(),
+            manager: "brew",
+        }]
+    );
+}
+
+#[test]
+fn is_local_llm_check_matches_only_the_llm_checks() {
+    assert!(is_local_llm_check(OLLAMA_CHECK));
+    assert!(is_local_llm_check(LOCAL_LLM_MODEL_CHECK));
+    assert!(!is_local_llm_check("git"));
+    assert!(!is_local_llm_check("bash"));
+}
+
+#[test]
 fn manual_hint_links_known_tools_and_falls_back_otherwise() {
     assert!(manual_hint("git").contains("git-scm.com"));
     assert!(manual_hint("bash").contains("gnu.org"));
