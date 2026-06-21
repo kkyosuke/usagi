@@ -207,6 +207,17 @@ pub struct HomeState {
     /// session (keyed by this path in `live` / `running` / …). Injected by
     /// `mod.rs`; empty until set (tests that never preview the root leave it so).
     root_path: PathBuf,
+    /// The single sink that persists operation-failure error lines to the daily
+    /// log file. [`log_error`](Self::log_error) and the failure lines applied from
+    /// background tasks / session outcomes flow through it, so an on-screen
+    /// operation failure (preview / settings / session action) also lands in
+    /// `<data dir>/logs/`. Defaults to a no-op so tests (and any uninjected path)
+    /// record nothing; `mod.rs` injects the real
+    /// [`FileLogger`](crate::infrastructure::error_log::FileLogger) for the running
+    /// screen. Input / usage mistakes (unknown command, `usage: …`) are *not*
+    /// routed here — they stay command-log notices, so the file log keeps only
+    /// real failures rather than the noise of mistyped commands.
+    logger: Box<dyn crate::infrastructure::error_log::Logger>,
 }
 
 impl HomeState {
@@ -249,7 +260,17 @@ impl HomeState {
             loading: None,
             tasks: Vec::new(),
             root_path: PathBuf::new(),
+            logger: Box::new(crate::infrastructure::error_log::NoopLogger),
         }
+    }
+
+    /// Inject the error sink that persists operation failures to the daily log
+    /// file (`mod.rs` passes the real
+    /// [`FileLogger`](crate::infrastructure::error_log::FileLogger) at startup).
+    /// Without this the screen records nothing — the no-op default — which is what
+    /// tests rely on.
+    pub fn set_logger(&mut self, logger: Box<dyn crate::infrastructure::error_log::Logger>) {
+        self.logger = logger;
     }
 
     /// Record the workspace root path so the root row (`⌂ root`) can be matched
@@ -435,9 +456,30 @@ impl HomeState {
         self.log.push(LogLine::output(text));
     }
 
-    /// Append an error line to the log.
+    /// Append an error line to the log **and** persist it through the injected
+    /// logger — the home screen's single sink for operation failures (preview /
+    /// settings save / session actions). The same text shown on screen is written
+    /// to the daily log file, so the failure stays inspectable after the screen
+    /// closes. Input / usage mistakes (unknown command, `usage: …`) deliberately
+    /// do *not* come through here: they are command-result notices appended via
+    /// [`record_response`](Self::record_response), so they never reach the file.
     pub fn log_error(&mut self, text: impl Into<String>) {
+        let text = text.into();
+        self.logger.record(&text);
         self.log.push(LogLine::error(text));
+    }
+
+    /// Push `line` to the log, persisting it through the logger when it is an
+    /// error. This is the recording path for failures built off the event-loop
+    /// thread and applied later: a background task's completion (session create /
+    /// remove) and a synchronous session outcome (rename), which construct their
+    /// own [`LogLine`] rather than calling [`log_error`](Self::log_error).
+    /// Success / output lines are shown only, never recorded.
+    fn push_logged_line(&mut self, line: LogLine) {
+        if line.kind == LineKind::Error {
+            self.logger.record(&line.text);
+        }
+        self.log.push(line);
     }
 
     pub fn list(&self) -> &WorktreeList {
@@ -641,7 +683,7 @@ impl HomeState {
     /// [`refresh_sessions`](Self::refresh_sessions)) — a session created or
     /// removed in the background must never yank the user's cursor mid-navigation.
     pub fn apply_task_completion(&mut self, line: LogLine, sessions: Option<Vec<SessionRecord>>) {
-        self.log.push(line);
+        self.push_logged_line(line);
         if let Some(sessions) = sessions {
             self.refresh_sessions(sessions);
         }
@@ -1095,7 +1137,7 @@ impl HomeState {
     /// Apply the result of a session-creation attempt: log its line and, when
     /// creation refreshed the worktree list, swap it in.
     pub fn apply_session_outcome(&mut self, outcome: SessionOutcome) {
-        self.log.push(outcome.line);
+        self.push_logged_line(outcome.line);
         if let Some(sessions) = outcome.sessions {
             self.sessions = sessions;
             self.rebuild_list();

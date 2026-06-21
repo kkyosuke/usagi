@@ -201,6 +201,29 @@ fn state() -> HomeState {
     HomeState::new("usagi", vec![worktree("main"), worktree("feature")], None)
 }
 
+/// A [`Logger`](crate::infrastructure::error_log::Logger) that captures every
+/// recorded message, so a test can assert which on-screen errors are persisted.
+/// The shared `Rc<RefCell<…>>` lets the test read what the injected sink received.
+#[derive(Clone, Default)]
+struct SpyLogger {
+    recorded: std::rc::Rc<std::cell::RefCell<Vec<String>>>,
+}
+
+impl crate::infrastructure::error_log::Logger for SpyLogger {
+    fn record(&self, message: &str) {
+        self.recorded.borrow_mut().push(message.to_string());
+    }
+}
+
+/// A [`HomeState`] wired to a [`SpyLogger`], returning both so the test can drive
+/// the screen and inspect what was recorded.
+fn state_with_spy() -> (HomeState, SpyLogger) {
+    let spy = SpyLogger::default();
+    let mut state = state();
+    state.set_logger(Box::new(spy.clone()));
+    (state, spy)
+}
+
 #[test]
 fn new_state_starts_in_overview_with_a_hint() {
     let state = state();
@@ -1374,6 +1397,61 @@ fn log_output_and_error_append_lines() {
     assert_eq!(last_two[0].text, "it broke");
     assert_eq!(last_two[1].kind, LineKind::Output);
     assert_eq!(last_two[1].text, "did a thing");
+}
+
+#[test]
+fn log_error_persists_through_the_injected_logger() {
+    let (mut state, spy) = state_with_spy();
+    // An operation failure is both shown on screen and recorded to the sink.
+    state.log_error("preview failed: no such file");
+    assert_eq!(state.log().last().unwrap().kind, LineKind::Error);
+    assert_eq!(
+        spy.recorded.borrow().as_slice(),
+        ["preview failed: no such file"]
+    );
+    // An ordinary output line is shown only, never recorded.
+    state.log_output("did a thing");
+    assert_eq!(spy.recorded.borrow().len(), 1);
+}
+
+#[test]
+fn input_mistakes_are_shown_but_not_recorded() {
+    // Unknown-command / usage errors come back as command-result error lines via
+    // `submit` (not `log_error`), so they reach the screen as red notices but are
+    // never written to the daily log — the file keeps only real failures.
+    let (mut state, spy) = state_with_spy();
+    state.push_char('n');
+    state.push_char('o');
+    state.push_char('p');
+    state.push_char('e');
+    state.submit();
+    assert_eq!(state.log().last().unwrap().kind, LineKind::Error);
+    assert!(spy.recorded.borrow().is_empty());
+}
+
+#[test]
+fn applied_failure_lines_are_recorded_success_lines_are_not() {
+    let (mut state, spy) = state_with_spy();
+    // A background task / session outcome that succeeded only logs its line.
+    state.apply_task_completion(LogLine::output("Created session \"x\" 🐰"), None);
+    state.apply_session_outcome(SessionOutcome {
+        line: LogLine::output("Renamed \"x\""),
+        sessions: None,
+        select: None,
+    });
+    assert!(spy.recorded.borrow().is_empty());
+
+    // A failure line from either path is persisted through the sink.
+    state.apply_task_completion(LogLine::error("session remove failed: boom"), None);
+    state.apply_session_outcome(SessionOutcome {
+        line: LogLine::error("rename failed: locked"),
+        sessions: None,
+        select: None,
+    });
+    assert_eq!(
+        spy.recorded.borrow().as_slice(),
+        ["session remove failed: boom", "rename failed: locked"]
+    );
 }
 
 #[test]
