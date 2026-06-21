@@ -1,13 +1,20 @@
 //! Shared helpers for the files usagi persists under its data directories.
 //!
 //! Every store treats a missing file as "no data yet" and writes through a temp
-//! file + rename so a crash never leaves a half-written file behind. JSON stores
-//! (`storage`, `workspace_store`, `history_store`) use [`read`] / [`write_atomic`];
-//! the markdown stores (`issue_store`, `memory_store`) use [`write_text_atomic`]
-//! for their hand-rolled text. All share one per-writer-unique temp-name scheme
-//! so two processes writing the same path never clobber each other.
+//! file + rename so a crash never leaves a half-written file behind. The temp
+//! file's contents are flushed with `sync_all` (fsync) before the rename, so its
+//! data survives a power loss / hard crash rather than only a process crash;
+//! after the rename the parent directory is fsynced best-effort so the rename
+//! itself is durable where the platform supports it (directory fsync is a no-op
+//! or errors on some platforms such as Windows and is intentionally ignored).
+//! JSON stores (`storage`, `workspace_store`, `history_store`) use [`read`] /
+//! [`write_atomic`]; the markdown stores (`issue_store`, `memory_store`) use
+//! [`write_text_atomic`] for their hand-rolled text. All share one
+//! per-writer-unique temp-name scheme so two processes writing the same path
+//! never clobber each other.
 
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -36,6 +43,44 @@ fn unique_tmp_path(path: &Path) -> PathBuf {
     PathBuf::from(tmp)
 }
 
+/// Write `bytes` to a unique temp file, fsync its contents, rename it onto
+/// `path`, then best-effort fsync the parent directory so the rename is durable.
+///
+/// fsyncing the temp file before the rename guarantees the file's contents have
+/// reached disk, so a power loss after the rename cannot expose a zero-length or
+/// half-written file. The directory fsync makes the rename itself durable where
+/// supported; it is best-effort because directory fsync is a no-op or errors on
+/// some platforms (e.g. Windows), and such an error must not fail the write.
+fn write_synced_then_rename(path: &Path, bytes: &[u8]) -> Result<()> {
+    let tmp = unique_tmp_path(path);
+    {
+        let mut file =
+            fs::File::create(&tmp).context(format!("failed to create {}", tmp.display()))?;
+        file.write_all(bytes)
+            .context(format!("failed to write {}", tmp.display()))?;
+        file.sync_all()
+            .context(format!("failed to flush {}", tmp.display()))?;
+    }
+    fs::rename(&tmp, path).context(format!("failed to replace {}", path.display()))?;
+    fsync_parent_dir(path);
+    Ok(())
+}
+
+/// Best-effort fsync of `path`'s parent directory so a preceding rename's
+/// directory entry is durable.
+///
+/// Directory fsync is what makes a rename survive power loss, but it is a no-op
+/// or returns an error on some platforms (e.g. Windows) and may fail if the
+/// parent cannot be opened. Such failures must not fail an otherwise-successful
+/// write, so every error here is intentionally swallowed.
+fn fsync_parent_dir(path: &Path) {
+    let Some(parent) = path.parent() else { return };
+    let Ok(dir) = fs::File::open(parent) else {
+        return;
+    };
+    let _ = dir.sync_all();
+}
+
 /// Read and deserialize the JSON file at `path`, returning `None` if it does
 /// not exist.
 pub fn read<T: DeserializeOwned>(path: &Path) -> Result<Option<T>> {
@@ -55,10 +100,7 @@ pub fn write_atomic<T: Serialize>(dir: &Path, path: &Path, value: &T) -> Result<
     fs::create_dir_all(dir).context(format!("failed to create {}", dir.display()))?;
     let mut text = serde_json::to_string_pretty(value)?;
     text.push('\n');
-    let tmp = unique_tmp_path(path);
-    fs::write(&tmp, text).context(format!("failed to write {}", tmp.display()))?;
-    fs::rename(&tmp, path).context(format!("failed to replace {}", path.display()))?;
-    Ok(())
+    write_synced_then_rename(path, text.as_bytes())
 }
 
 /// Write `text` to `path` atomically (per-writer-unique temp file + rename) so
@@ -67,10 +109,7 @@ pub fn write_atomic<T: Serialize>(dir: &Path, path: &Path, value: &T) -> Result<
 /// `text` is written verbatim and the parent directory is assumed to exist
 /// already — the markdown stores create it when they set up their data dir.
 pub fn write_text_atomic(path: &Path, text: &str) -> Result<()> {
-    let tmp = unique_tmp_path(path);
-    fs::write(&tmp, text).context(format!("failed to write {}", tmp.display()))?;
-    fs::rename(&tmp, path).context(format!("failed to replace {}", path.display()))?;
-    Ok(())
+    write_synced_then_rename(path, text.as_bytes())
 }
 
 #[cfg(test)]
@@ -93,6 +132,65 @@ mod tests {
             .filter(|name| name.to_string_lossy().contains(".tmp."))
             .collect();
         assert!(leftover.is_empty(), "temp files left behind: {leftover:?}");
+    }
+
+    #[test]
+    fn write_atomic_round_trips_json_and_leaves_no_temp() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index.json");
+        let value = vec!["a".to_string(), "b".to_string()];
+        write_atomic(dir.path(), &path, &value).unwrap();
+
+        let read_back: Option<Vec<String>> = read(&path).unwrap();
+        assert_eq!(read_back, Some(value.clone()));
+        // Pretty JSON plus a trailing newline reaches disk after the fsync.
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(text.ends_with("\n"));
+
+        // A second write replaces in place and leaves no temp behind.
+        let value2 = vec!["c".to_string()];
+        write_atomic(dir.path(), &path, &value2).unwrap();
+        let read_back2: Option<Vec<String>> = read(&path).unwrap();
+        assert_eq!(read_back2, Some(value2));
+        let leftover: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .filter(|name| name.to_string_lossy().contains(".tmp."))
+            .collect();
+        assert!(leftover.is_empty(), "temp files left behind: {leftover:?}");
+    }
+
+    #[test]
+    fn write_atomic_creates_missing_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let nested = dir.path().join("nested").join("data");
+        let path = nested.join("index.json");
+        write_atomic(&nested, &path, &"value".to_string()).unwrap();
+        let read_back: Option<String> = read(&path).unwrap();
+        assert_eq!(read_back, Some("value".to_string()));
+    }
+
+    #[test]
+    fn fsync_parent_dir_succeeds_for_a_real_directory() {
+        // The directory exists and opens, so the best-effort sync runs without
+        // panicking and the function returns normally.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("note.md");
+        fs::write(&path, "x").unwrap();
+        fsync_parent_dir(&path);
+    }
+
+    #[test]
+    fn fsync_parent_dir_swallows_an_unopenable_parent() {
+        // `Path::new("bare.md").parent()` is `Some("")`, and opening "" fails;
+        // the error is swallowed rather than propagated, so this must not panic.
+        fsync_parent_dir(Path::new("bare.md"));
+    }
+
+    #[test]
+    fn fsync_parent_dir_is_a_noop_without_a_parent() {
+        // `Path::new("").parent()` is `None`, exercising the early return.
+        fsync_parent_dir(Path::new(""));
     }
 
     #[test]
