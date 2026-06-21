@@ -21,6 +21,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::domain::memory::{Memory, MemorySummary};
+use crate::infrastructure::json_file;
 
 const STATE_DIR_NAME: &str = ".usagi";
 const MEMORY_DIR_NAME: &str = "memory";
@@ -122,7 +123,7 @@ impl MemoryStore {
             .context(format!("failed to create {}", self.dir.display()))?;
 
         let target = self.dir.join(memory.file_name());
-        write_atomically(&target, &memory.to_markdown())?;
+        json_file::write_text_atomic(&target, &memory.to_markdown())?;
         self.rebuild_derived()?;
         Ok(())
     }
@@ -181,8 +182,8 @@ impl MemoryStore {
             memories: summaries.clone(),
         };
         let text = serde_json::to_string_pretty(&index)?;
-        write_atomically(&self.index_path(), &format!("{text}\n"))?;
-        write_atomically(&self.toc_path(), &render_toc(&summaries))?;
+        json_file::write_text_atomic(&self.index_path(), &format!("{text}\n"))?;
+        json_file::write_text_atomic(&self.toc_path(), &render_toc(&summaries))?;
         Ok(summaries)
     }
 }
@@ -214,15 +215,6 @@ fn render_toc(summaries: &[MemorySummary]) -> String {
 fn is_memory_file(path: &Path) -> bool {
     path.extension().and_then(|e| e.to_str()) == Some("md")
         && path.file_name().and_then(|n| n.to_str()) != Some(TOC_FILE)
-}
-
-/// Write `text` to `path` via a temp file + rename so a crash never leaves a
-/// half-written file.
-fn write_atomically(path: &Path, text: &str) -> Result<()> {
-    let tmp = path.with_extension("tmp");
-    fs::write(&tmp, text).context(format!("failed to write {}", tmp.display()))?;
-    fs::rename(&tmp, path).context(format!("failed to replace {}", path.display()))?;
-    Ok(())
 }
 
 #[cfg(test)]

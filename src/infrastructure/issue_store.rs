@@ -17,6 +17,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::domain::issue::{Issue, IssueSummary};
+use crate::infrastructure::json_file;
 
 const STATE_DIR_NAME: &str = ".usagi";
 const ISSUES_DIR_NAME: &str = "issues";
@@ -138,7 +139,7 @@ impl IssueStore {
             }
         }
 
-        write_atomically(&target, &issue.to_markdown())?;
+        json_file::write_text_atomic(&target, &issue.to_markdown())?;
         self.rebuild_index()?;
         Ok(())
     }
@@ -196,7 +197,7 @@ impl IssueStore {
             issues: summaries.clone(),
         };
         let text = serde_json::to_string_pretty(&index)?;
-        write_atomically(&self.index_path(), &format!("{text}\n"))?;
+        json_file::write_text_atomic(&self.index_path(), &format!("{text}\n"))?;
         Ok(summaries)
     }
 
@@ -218,15 +219,6 @@ impl IssueStore {
 /// Whether `path` is an issue markdown file (a `*.md` that is not the index).
 fn is_issue_file(path: &Path) -> bool {
     path.extension().and_then(|e| e.to_str()) == Some("md")
-}
-
-/// Write `text` to `path` via a temp file + rename so a crash never leaves a
-/// half-written file.
-fn write_atomically(path: &Path, text: &str) -> Result<()> {
-    let tmp = path.with_extension("tmp");
-    fs::write(&tmp, text).context(format!("failed to write {}", tmp.display()))?;
-    fs::rename(&tmp, path).context(format!("failed to replace {}", path.display()))?;
-    Ok(())
 }
 
 #[cfg(test)]
