@@ -12,7 +12,7 @@ impl Issue {
     pub fn to_markdown(&self) -> String {
         let mut out = String::from("---\n");
         out.push_str(&format!("number: {}\n", self.number));
-        out.push_str(&format!("title: {}\n", self.title));
+        out.push_str(&format!("title: {}\n", inline(&self.title)));
         out.push_str(&format!("status: {}\n", self.status.as_str()));
         out.push_str(&format!("priority: {}\n", self.priority.as_str()));
         out.push_str(&format!("labels: {}\n", format_string_list(&self.labels)));
@@ -25,7 +25,7 @@ impl Issue {
             out.push_str(&format!("parent: {parent}\n"));
         }
         if let Some(milestone) = &self.milestone {
-            out.push_str(&format!("milestone: {milestone}\n"));
+            out.push_str(&format!("milestone: {}\n", inline(milestone)));
         }
         out.push_str(&format!("created_at: {}\n", self.created_at.to_rfc3339()));
         out.push_str(&format!("updated_at: {}\n", self.updated_at.to_rfc3339()));
@@ -148,7 +148,21 @@ fn split_frontmatter(rest: &str) -> Result<(&str, &str), ParseIssueError> {
 
 /// Render strings as a `[a, b, c]` frontmatter list.
 fn format_string_list(items: &[String]) -> String {
+    let items: Vec<String> = items.iter().map(|s| inline(s)).collect();
     format!("[{}]", items.join(", "))
+}
+
+/// Neutralise line breaks in a value bound for a single frontmatter line.
+///
+/// Frontmatter is line-based (`key: value`), so a newline in a value would split
+/// it into a second line that the parser re-reads as a forged metadata field on
+/// the next load (e.g. a title `"Fix\nstatus: done"` would inject a `status`).
+/// User-supplied text (titles, labels, milestones via MCP `issue_create` and the
+/// TUI) reaches these fields unvalidated, so the only characters that can break
+/// the format — `\n` and `\r` — are replaced with a space here, at the
+/// serialisation boundary.
+fn inline(value: &str) -> String {
+    value.replace(['\n', '\r'], " ")
 }
 
 /// Render numbers as a `[1, 2, 3]` frontmatter list.

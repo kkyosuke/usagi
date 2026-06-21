@@ -8,8 +8,8 @@ impl Memory {
     /// Render this memory to its on-disk markdown representation.
     pub fn to_markdown(&self) -> String {
         let mut out = String::from("---\n");
-        out.push_str(&format!("name: {}\n", self.name));
-        out.push_str(&format!("title: {}\n", self.title));
+        out.push_str(&format!("name: {}\n", inline(&self.name)));
+        out.push_str(&format!("title: {}\n", inline(&self.title)));
         out.push_str(&format!("type: {}\n", self.kind.as_str()));
         out.push_str(&format!("related: {}\n", format_string_list(&self.related)));
         out.push_str(&format!("created_at: {}\n", self.created_at.to_rfc3339()));
@@ -96,7 +96,20 @@ fn split_frontmatter(rest: &str) -> Result<(&str, &str), ParseMemoryError> {
 
 /// Render strings as a `[a, b, c]` frontmatter list.
 fn format_string_list(items: &[String]) -> String {
+    let items: Vec<String> = items.iter().map(|s| inline(s)).collect();
     format!("[{}]", items.join(", "))
+}
+
+/// Neutralise line breaks in a value bound for a single frontmatter line.
+///
+/// Frontmatter is line-based (`key: value`), so a newline in a value would split
+/// it into a second line that the parser re-reads as a forged metadata field on
+/// the next load. User-supplied text (the memory title via MCP `memory_save` and
+/// the TUI) reaches these fields unvalidated, so the only characters that can
+/// break the format — `\n` and `\r` — are replaced with a space here, at the
+/// serialisation boundary.
+fn inline(value: &str) -> String {
+    value.replace(['\n', '\r'], " ")
 }
 
 /// Parse `[a, b, c]` (or a bare comma list) into trimmed, non-empty strings.

@@ -292,3 +292,25 @@ fn summary_serializes_to_json() {
     let back: IssueSummary = serde_json::from_str(&json).unwrap();
     assert_eq!(back, summary);
 }
+
+#[test]
+fn to_markdown_neutralises_newlines_so_values_cannot_inject_frontmatter() {
+    let mut issue = sample();
+    // Newline-bearing values that, written verbatim, would each forge a second
+    // frontmatter line (a status / parent override and a split label).
+    issue.title = "Fix\nstatus: done".to_string();
+    issue.milestone = Some("v1\nparent: 9".to_string());
+    issue.labels = vec!["a\nb".to_string()];
+
+    let md = issue.to_markdown();
+    assert!(md.contains("title: Fix status: done"));
+    assert!(md.contains("milestone: v1 parent: 9"));
+
+    // Reloads cleanly and the forged fields never took effect.
+    let parsed = Issue::from_markdown(&md).unwrap();
+    assert_eq!(parsed.status, issue.status); // not overwritten to `done`
+    assert_eq!(parsed.parent, issue.parent); // not overwritten to 9
+    assert_eq!(parsed.title, "Fix status: done");
+    assert_eq!(parsed.milestone.as_deref(), Some("v1 parent: 9"));
+    assert_eq!(parsed.labels, vec!["a b".to_string()]);
+}
