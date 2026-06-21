@@ -696,7 +696,7 @@ fn switch_inline_create_flags_a_branch_namespace_clash_live() {
         .unwrap()
         .error()
         .unwrap()
-        .contains("cannot be used"));
+        .contains("path separators"));
 }
 
 #[test]

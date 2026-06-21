@@ -13,6 +13,7 @@ use chrono::Utc;
 
 use crate::domain::memory::{slugify, Memory, MemorySummary, MemoryType};
 use crate::infrastructure::memory_store::MemoryStore;
+use crate::usecase::search;
 
 mod view;
 
@@ -109,17 +110,10 @@ pub fn list(repo_root: &Path, filter: &MemoryFilter) -> Result<Vec<MemorySummary
 /// apply `filter`. Results are newest first.
 pub fn search(repo_root: &Path, query: &str, filter: &MemoryFilter) -> Result<Vec<MemorySummary>> {
     let memories = MemoryStore::new(repo_root).scan()?;
-    // Case-fold with Unicode-aware `to_lowercase` so the fold works for the
-    // Japanese text the UI carries.
-    let needle = query.to_lowercase();
+    let needle = search::fold_query(query);
     let mut summaries: Vec<MemorySummary> = memories
         .into_iter()
-        .filter(|m| {
-            needle.is_empty()
-                || m.name.to_lowercase().contains(&needle)
-                || m.title.to_lowercase().contains(&needle)
-                || m.body.to_lowercase().contains(&needle)
-        })
+        .filter(|m| search::matches_folded(&needle, &[&m.name, &m.title, &m.body]))
         .map(|m| m.summary())
         .filter(|s| filter.matches(s))
         .collect();

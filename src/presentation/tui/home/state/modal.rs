@@ -13,6 +13,31 @@ use super::LogLine;
 use crate::presentation::tui::markdown::MarkdownLine;
 use crate::presentation::tui::widgets::text_input::TextInput;
 
+/// The home screen's transient overlays — the sub-states that capture the
+/// keyboard while open and are drawn on top of the normal panes. Grouping them
+/// keeps [`HomeState`](super::HomeState) from carrying each as a separate flat
+/// field: the screen owns one [`Overlays`] and routes to whichever is active.
+///
+/// At most one is meaningfully open at a time; each is `None`/`false` when not
+/// shown. The open/close/scroll logic stays on the individual types (and on the
+/// screen's thin accessor methods that read these); this struct is just the
+/// cohesive home for the fields.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(super) struct Overlays {
+    /// The inline session-name input open while creating a session from 切替.
+    pub create: Option<CreateInput>,
+    /// The inline display-name input open while renaming a session from 切替.
+    pub rename: Option<RenameInput>,
+    /// The session-removal checklist modal, when open.
+    pub remove: Option<RemoveModal>,
+    /// The scrollable text modal (a text-dumping command's output), when open.
+    pub text: Option<TextModal>,
+    /// The right-pane Markdown preview, when open.
+    pub preview: Option<Preview>,
+    /// Whether the quit-confirmation modal is open.
+    pub quit_confirm: bool,
+}
+
 /// The inline session-name input shown in the left pane while creating a session
 /// from 切替 (Switch): the name being typed, the existing branch names it is
 /// validated against, and an optional inline validation error (e.g. an empty,
@@ -324,11 +349,12 @@ impl FocusMenu {
 ///
 /// An empty (or all-whitespace) name returns `None` — the input does not nag
 /// while nothing has been typed; the empty case is rejected only on Enter (see
-/// [`CreateInput::confirm`]). The checks mirror what
-/// [`crate::usecase::session::create`] enforces, so the inline message matches
-/// the eventual outcome:
+/// [`CreateInput::confirm`]). The name-format rules (path separators, a leading
+/// `-`) are delegated to [`crate::usecase::session::name_format_error`] so the
+/// inline message is exactly the one `create` would raise; the duplicate /
+/// namespace checks here work against the pre-fetched branch list rather than
+/// touching git:
 ///
-/// - a path separator (`/`, `\`, `.`, `..`) — not a legal session name;
 /// - an exact duplicate of an existing branch;
 /// - a clash with an existing branch nested under `<name>/` (git cannot create
 ///   the `<name>` branch alongside `<name>/…`).
@@ -337,8 +363,8 @@ fn validate_session_name(name: &str, taken: &[String]) -> Option<String> {
     if name.is_empty() {
         return None;
     }
-    if name.contains('/') || name.contains('\\') || name == "." || name == ".." {
-        return Some("\"/\" cannot be used in a name.".to_string());
+    if let Some(error) = crate::usecase::session::name_format_error(name) {
+        return Some(error);
     }
     if taken.iter().any(|b| b == name) {
         return Some(format!("\"{name}\" already exists."));
@@ -359,16 +385,21 @@ mod tests {
         // An empty / whitespace name is quiet (the input does not nag).
         assert_eq!(validate_session_name("", &[]), None);
         assert_eq!(validate_session_name("   ", &[]), None);
-        // Path separators are illegal.
+        // Path separators are illegal (message delegated to the usecase).
         assert!(validate_session_name("a/b", &[])
             .unwrap()
-            .contains("cannot be used"));
+            .contains("path separators"));
         assert!(validate_session_name("a\\b", &[])
             .unwrap()
-            .contains("cannot be used"));
+            .contains("path separators"));
         assert!(validate_session_name(".", &[])
             .unwrap()
-            .contains("cannot be used"));
+            .contains("path separators"));
+        // A leading "-" is illegal too (git would read it as an option). This is
+        // the rule the old hand-rolled validator was missing.
+        assert!(validate_session_name("-x", &[])
+            .unwrap()
+            .contains("must not start with"));
         // An exact duplicate is reported.
         let taken = vec!["feature".to_string()];
         assert!(validate_session_name("feature", &taken)
