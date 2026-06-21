@@ -182,3 +182,45 @@ fn changes_is_empty_detects_no_op() {
     }
     .is_empty());
 }
+
+#[test]
+fn concurrent_saves_of_distinct_names_all_survive() {
+    // Two threads save different memories against the same store concurrently.
+    // Each save reads (for the upsert) then writes and rebuilds the derived
+    // files by scanning the whole directory. Without the cross-process lock a
+    // stale rebuild could drop one memory from index.json / MEMORY.md or lose a
+    // write; with the lock both memories survive and the TOC lists both.
+    use std::sync::{Arc, Barrier};
+    use std::thread;
+
+    for _ in 0..16 {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().to_path_buf();
+        let start = Arc::new(Barrier::new(2));
+
+        let handles: Vec<_> = ["alpha", "beta"]
+            .into_iter()
+            .map(|name| {
+                let repo = repo.clone();
+                let start = Arc::clone(&start);
+                thread::spawn(move || {
+                    start.wait();
+                    save(&repo, new(name, name, MemoryType::Project)).unwrap();
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        // Both backing files survive...
+        let store = MemoryStore::new(&repo);
+        assert_eq!(store.scan().unwrap().len(), 2, "both memories must survive");
+        assert!(get(&repo, "alpha").unwrap().is_some());
+        assert!(get(&repo, "beta").unwrap().is_some());
+        // ...and the derived TOC reflects both (the rebuild did not settle stale).
+        let toc = std::fs::read_to_string(store.toc_path()).unwrap();
+        assert!(toc.contains("(alpha.md)"), "TOC must list alpha: {toc}");
+        assert!(toc.contains("(beta.md)"), "TOC must list beta: {toc}");
+    }
+}

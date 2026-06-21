@@ -13,14 +13,14 @@ use anyhow::{Context, Result};
 /// The self-contained `.gitignore` usagi writes inside each repository's
 /// `.usagi/` directory. Patterns are relative to `.usagi/`: ignore everything,
 /// but keep this `.gitignore` and the shared `issues/` and `memory/` directories
-/// tracked, while still excluding their rebuildable `index.json` caches.
+/// tracked, while still excluding their rebuildable `index.json` caches and the
+/// per-store `.lock` files used for cross-process write locking.
 ///
 /// Task issues and agent memories are meant to be committed and shared with the
 /// team; the machine-local state (`state.json`, `settings.json`, `history.json`,
-/// `sessions/`) and the derived indexes stay ignored. Keeping the rules inside
-/// `.usagi/` leaves the repository-root `.gitignore` untouched.
-pub const USAGI_GITIGNORE: &str =
-    "/*\n!/.gitignore\n!/issues/\n/issues/index.json\n!/memory/\n/memory/index.json\n";
+/// `sessions/`), the derived indexes, and the lock files stay ignored. Keeping
+/// the rules inside `.usagi/` leaves the repository-root `.gitignore` untouched.
+pub const USAGI_GITIGNORE: &str = "/*\n!/.gitignore\n!/issues/\n/issues/index.json\n/issues/.lock\n!/memory/\n/memory/index.json\n/memory/.lock\n";
 
 /// Write [`USAGI_GITIGNORE`] to `<repo>/.usagi/.gitignore`, creating the
 /// directory when absent. Idempotent: if the file already holds the current
