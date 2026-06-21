@@ -10,6 +10,7 @@ use anyhow::{Context, Result};
 
 use super::tree;
 use crate::infrastructure::git;
+use crate::infrastructure::repo_paths::STATE_DIR;
 use crate::infrastructure::workspace_store::WorkspaceStore;
 
 /// Reconcile the on-disk session tree under `.usagi/sessions/` with the sessions
@@ -23,7 +24,7 @@ use crate::infrastructure::workspace_store::WorkspaceStore;
 /// so the tree never drifts from the recorded state. Returns the stray
 /// directories that were removed.
 pub fn reconcile(workspace_root: &Path) -> Result<Vec<PathBuf>> {
-    let sessions_base = workspace_root.join(".usagi").join("sessions");
+    let sessions_base = workspace_root.join(STATE_DIR).join("sessions");
     if !sessions_base.is_dir() {
         return Ok(Vec::new());
     }

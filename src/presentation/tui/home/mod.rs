@@ -31,8 +31,6 @@ use console::Term;
 
 use crate::domain::workspace::Workspace;
 use crate::domain::workspace_state::SessionRecord;
-use crate::infrastructure::history_store::HistoryStore;
-use crate::infrastructure::workspace_store::WorkspaceStore;
 use crate::presentation::tui::term_reader::TermKeyReader;
 
 pub use event::Outcome;
@@ -41,16 +39,13 @@ use state::{HomeState, LogLine, PaneExit, SessionOutcome};
 
 /// Refresh the workspace's session state from git (best-effort) and return the
 /// sessions to show. `sync` rewrites each session worktree's status; for a
-/// non-git root it fails harmlessly, so we fall back to the saved sessions.
+/// non-git root it fails harmlessly, so we fall back to the saved sessions
+/// (via the usecase, which owns the store access).
 fn reload_sessions(root: &Path) -> Option<Vec<SessionRecord>> {
     if let Ok(state) = crate::usecase::workspace_state::sync(root) {
         return Some(state.sessions);
     }
-    WorkspaceStore::new(root)
-        .load()
-        .ok()
-        .flatten()
-        .map(|s| s.sessions)
+    crate::usecase::workspace_state::recorded_sessions(root)
 }
 
 /// Lock the session op-lock, recovering from a poisoned mutex. The guarded value
@@ -99,13 +94,11 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
     // the recorded sessions here, then re-sync the worktree statuses from git on a
     // background thread (spawned below) and swap in the refreshed sessions in place
     // when they land. Syncing synchronously here would block the first paint on git
-    // for as long as the workspace has worktrees to inspect. A non-git root or a
-    // sync failure just leaves these saved statuses, mirroring `reload_sessions`.
-    let (sessions, notice) = match WorkspaceStore::new(&workspace.path).load() {
-        Ok(Some(state)) => (state.sessions, None),
-        Ok(None) => (Vec::new(), None),
-        Err(e) => (Vec::new(), Some(format!("Failed to load sessions: {e}"))),
-    };
+    // for as long as the workspace has worktrees to inspect. The usecase owns the
+    // store access and surfaces a load error as a notice; a non-git root or a read
+    // failure just leaves these saved statuses, mirroring `reload_sessions`.
+    let (sessions, notice) =
+        crate::usecase::workspace_state::recorded_sessions_for_display(&workspace.path);
     let mut state = HomeState::new(workspace.name.clone(), Vec::new(), notice);
     // The root row (`⌂ root`) operates in the workspace root; record its path so
     // the 切替 preview can recognise the root's live embedded session (keyed by
@@ -141,16 +134,16 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
 
     // Restore past commands so `history` and `↑`/`↓` recall span sessions.
     // A read failure is non-fatal: just start with an empty history.
-    let history = HistoryStore::new(&workspace.path);
-    if let Ok(entries) = history.load() {
+    if let Ok(entries) = crate::usecase::history::load(&workspace.path) {
         state.restore_history(entries.into_iter().map(|e| e.command).collect());
     }
 
     let mut reader = TermKeyReader::new(term.clone());
     // Persisting a command is best-effort; a write failure must not break the
     // screen, so the error is intentionally dropped (cf. `hop`'s notification).
-    let mut persist = |command: &str| {
-        let _ = history.append(command);
+    let history_root = workspace.path.clone();
+    let mut persist = move |command: &str| {
+        let _ = crate::usecase::history::append(&history_root, command);
     };
 
     // The background session tasks (create / remove) the event loop dispatches
@@ -684,7 +677,11 @@ fn run_remove(
             tasks::Completion {
                 line: LogLine::output(format!("Removed session \"{name}\" 🧹")),
                 sessions: reload_sessions(root),
-                evict: Some(root.join(".usagi").join("sessions").join(name)),
+                evict: Some(
+                    root.join(crate::infrastructure::repo_paths::STATE_DIR)
+                        .join("sessions")
+                        .join(name),
+                ),
             },
         ),
         Ok(outcome) => {

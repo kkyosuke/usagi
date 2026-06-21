@@ -13,6 +13,7 @@ pub mod memory_store;
 pub mod pty;
 pub mod pty_exit;
 pub mod release;
+pub mod repo_paths;
 pub mod session_monitor;
 pub mod storage;
 pub mod store_lock;

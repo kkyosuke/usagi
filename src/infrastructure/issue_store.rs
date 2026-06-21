@@ -18,11 +18,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::domain::issue::{Issue, IssueSummary};
 use crate::infrastructure::json_file;
+use crate::infrastructure::repo_paths::STATE_DIR;
 use crate::infrastructure::store_lock::StoreLock;
 
-const STATE_DIR_NAME: &str = ".usagi";
 const ISSUES_DIR_NAME: &str = "issues";
-const INDEX_FILE: &str = "index.json";
+/// Filename of the derived metadata cache. Kept out of git by the rules in
+/// [`crate::infrastructure::gitignore`], which a test there cross-checks against
+/// this constant.
+pub(crate) const INDEX_FILE: &str = "index.json";
 const FILE_FORMAT_VERSION: u32 = 1;
 
 /// On-disk shape of `index.json`.
@@ -41,10 +44,7 @@ impl IssueStore {
     /// Open the issue store for the repository at `repo_root`.
     pub fn new(repo_root: impl AsRef<Path>) -> Self {
         Self {
-            dir: repo_root
-                .as_ref()
-                .join(STATE_DIR_NAME)
-                .join(ISSUES_DIR_NAME),
+            dir: repo_root.as_ref().join(STATE_DIR).join(ISSUES_DIR_NAME),
         }
     }
 

@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use chrono::Utc;
 
-use crate::domain::workspace_state::{BranchStatus, WorkspaceState, WorktreeState};
+use crate::domain::workspace_state::{BranchStatus, SessionRecord, WorkspaceState, WorktreeState};
 use crate::infrastructure::git;
 use crate::infrastructure::workspace_store::WorkspaceStore;
 
@@ -86,6 +86,38 @@ pub fn inspect_worktrees(paths: &[PathBuf]) -> Vec<WorktreeState> {
 pub fn load(cwd: &Path) -> Result<Option<WorkspaceState>> {
     let root = git::primary_worktree(cwd)?;
     WorkspaceStore::new(root).load()
+}
+
+/// The sessions recorded in `<root>/.usagi/state.json` for the home screen's
+/// immediate, git-free first paint, plus a notice when the state could not be
+/// read.
+///
+/// The screen opens from this recorded state without touching git — syncing
+/// every worktree's status on entry would block the first paint — and re-syncs
+/// in the background afterwards (see the caller and [`sync`]). Read by the raw
+/// `root` (a non-git multi-repo root has no `primary_worktree`), so no git is
+/// touched here. This keeps the "recorded sessions, else empty-with-notice"
+/// load policy in the usecase rather than the presentation layer.
+pub fn recorded_sessions_for_display(root: &Path) -> (Vec<SessionRecord>, Option<String>) {
+    match WorkspaceStore::new(root).load() {
+        Ok(Some(state)) => (state.sessions, None),
+        Ok(None) => (Vec::new(), None),
+        Err(e) => (Vec::new(), Some(format!("Failed to load sessions: {e}"))),
+    }
+}
+
+/// The sessions recorded straight in `<root>/.usagi/state.json` (read by `root`,
+/// no git refresh), or `None` when none are saved or the file cannot be read.
+///
+/// Used for the home screen's post-terminal refresh, where `None` means "leave
+/// the list as it is" — distinct from [`recorded_sessions_for_display`], which
+/// surfaces a load error as a notice on first entry.
+pub fn recorded_sessions(root: &Path) -> Option<Vec<SessionRecord>> {
+    WorkspaceStore::new(root)
+        .load()
+        .ok()
+        .flatten()
+        .map(|s| s.sessions)
 }
 
 /// Build the [`WorktreeState`] of a single worktree at `path`, classifying its
@@ -297,6 +329,73 @@ mod tests {
         let wt = &synced.sessions[0].worktrees[0];
         assert_eq!(wt.branch.as_deref(), Some("wip"));
         assert!(!wt.head.is_empty());
+    }
+
+    /// A `SessionRecord` with no worktrees, enough to seed `state.json`.
+    fn session(name: &str) -> SessionRecord {
+        SessionRecord {
+            name: name.to_string(),
+            display_name: None,
+            root: PathBuf::from(name),
+            worktrees: Vec::new(),
+            created_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn recorded_sessions_reads_saved_state_and_is_none_when_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        // No state.json yet → None.
+        assert!(recorded_sessions(dir.path()).is_none());
+
+        // Saved state (no git needed) → its sessions, read by the raw root.
+        let store = WorkspaceStore::new(dir.path());
+        let mut state = WorkspaceState::new();
+        state.sessions.push(session("wip"));
+        store.save(&state).unwrap();
+        let got = recorded_sessions(dir.path()).unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].name, "wip");
+    }
+
+    #[test]
+    fn recorded_sessions_is_none_when_state_is_unreadable() {
+        let dir = tempfile::tempdir().unwrap();
+        // A directory where state.json should be makes the load error → None.
+        std::fs::create_dir_all(dir.path().join(".usagi/state.json")).unwrap();
+        assert!(recorded_sessions(dir.path()).is_none());
+    }
+
+    #[test]
+    fn recorded_sessions_for_display_returns_saved_sessions_without_git() {
+        let dir = tempfile::tempdir().unwrap();
+        // Saved state on a non-git root is returned verbatim (no sync, no notice).
+        let store = WorkspaceStore::new(dir.path());
+        let mut state = WorkspaceState::new();
+        state.sessions.push(session("wip"));
+        store.save(&state).unwrap();
+
+        let (sessions, notice) = recorded_sessions_for_display(dir.path());
+        assert_eq!(sessions.len(), 1);
+        assert!(notice.is_none());
+    }
+
+    #[test]
+    fn recorded_sessions_for_display_is_empty_without_saved_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let (sessions, notice) = recorded_sessions_for_display(dir.path());
+        assert!(sessions.is_empty());
+        assert!(notice.is_none());
+    }
+
+    #[test]
+    fn recorded_sessions_for_display_reports_a_notice_when_state_is_unreadable() {
+        let dir = tempfile::tempdir().unwrap();
+        // A directory where state.json should be makes the load error → a notice.
+        std::fs::create_dir_all(dir.path().join(".usagi/state.json")).unwrap();
+        let (sessions, notice) = recorded_sessions_for_display(dir.path());
+        assert!(sessions.is_empty());
+        assert!(notice.unwrap().contains("Failed to load sessions"));
     }
 
     #[test]
