@@ -1181,6 +1181,32 @@ mod tests {
     }
 
     #[test]
+    fn remove_deletes_the_branch_when_the_worktree_dir_vanished_out_of_band() {
+        // A recorded session whose worktree directory was deleted out-of-band (a
+        // crash, a manual `rm`, an external cleanup) leaves git with a dangling
+        // worktree registration that still holds the session branch checked out.
+        // Removing the session must still drop that branch — otherwise the branch
+        // (and its registration) outlive the session, and a later `create` of the
+        // same name fails forever on "branch already exists" with no record left
+        // to `remove`. This is the "name permanently unusable" failure.
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        let created = create(root.path(), "stuck").unwrap();
+        // Delete just the directory, leaving the branch + registration behind.
+        fs::remove_dir_all(&created.root).unwrap();
+        assert!(branch_exists(root.path(), "stuck"));
+
+        let outcome = remove(root.path(), "stuck", false, noop_agent().as_ref()).unwrap();
+        assert!(outcome.removed);
+        // The orphaned branch is gone, so the name is reusable...
+        assert!(!branch_exists(root.path(), "stuck"));
+        assert!(sessions_of(root.path()).is_empty());
+        // ...and re-creating the session of the same name succeeds.
+        let recreated = create(root.path(), "stuck").unwrap();
+        assert_eq!(head_branch(&recreated.root), "stuck");
+    }
+
+    #[test]
     fn remove_also_prunes_other_strays() {
         let root = tempfile::tempdir().unwrap();
         init_repo(root.path());
