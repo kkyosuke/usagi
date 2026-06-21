@@ -773,10 +773,10 @@ event loop が記録済みセッションのチェックリストを画面中央
 
 ## 履歴の永続化
 
-実行したコマンドは `<repo>/.usagi/history.json` に 1 件ずつ追記され（`infrastructure/history_store.rs` の
+実行したコマンドは `<repo>/.usagi/history.jsonl` に 1 件ずつ追記され（`infrastructure/history_store.rs` の
 `HistoryStore`）、次回の画面起動時に読み込まれて `history` コマンドと `↑`/`↓` 遡りに反映されます。
 書き込みはベストエフォートで、失敗しても画面操作は止めません。詳細は
-[../data/02-workspace.md](../data/02-workspace.md#historyjson) を参照。
+[../data/02-workspace.md](../data/02-workspace.md#historyjsonl) を参照。
 
 ## 読み込み失敗時の挙動
 

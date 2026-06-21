@@ -79,7 +79,7 @@ src/
 │   ├── json_file.rs            # JSON ファイルの共通 read / 原子的 write（temp + rename）
 │   ├── storage.rs              # グローバル ~/.usagi/ の load/save（Storage）
 │   ├── workspace_store.rs      # <repo>/.usagi/ の state.json / settings.json（WorkspaceStore）
-│   ├── history_store.rs        # <repo>/.usagi/history.json の load/append（HistoryStore）
+│   ├── history_store.rs        # <repo>/.usagi/history.jsonl の load/append（HistoryStore）
 │   ├── terminal.rs             # 起動するシェルの解決（$SHELL / フォールバック）
 │   ├── pty.rs                  # 疑似ターミナルセッション（portable-pty + vt100、ベル回数の計測・異常終了のログ記録）
 │   ├── pty_exit.rs             # シェル/エージェントの終了ステータスをエラーログ文へ変換する純粋ロジック（pty.rs のテスト可能な相棒）
