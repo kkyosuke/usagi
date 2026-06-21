@@ -310,6 +310,23 @@ fn delete_branch_removes_a_branch_and_errors_when_missing() {
 }
 
 #[test]
+fn delete_branch_targets_a_leading_dash_name_as_a_branch() {
+    // The session usecase rejects leading-`-` names, but `delete_branch` is
+    // hardened with a `--` separator so a name like `-x` is treated as the
+    // branch operand rather than a `git branch` option (e.g. `-x` / `-D`). The
+    // ref is created via plumbing (`update-ref`) since `git branch` itself would
+    // mis-parse the leading dash. Without the `--` the delete would fail with an
+    // "unknown option" error instead of removing the branch.
+    let dir = tempfile::tempdir().unwrap();
+    init_repo(dir.path());
+    run(dir.path(), &["update-ref", "refs/heads/-x", "HEAD"]);
+    assert!(local_branches(dir.path()).iter().any(|b| b == "-x"));
+
+    delete_branch(dir.path(), "-x").unwrap();
+    assert!(!local_branches(dir.path()).iter().any(|b| b == "-x"));
+}
+
+#[test]
 fn add_worktree_fails_for_an_existing_branch() {
     let dir = tempfile::tempdir().unwrap();
     init_repo(dir.path());

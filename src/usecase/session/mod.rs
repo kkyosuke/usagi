@@ -61,6 +61,13 @@ pub fn create(workspace_root: &Path, name: &str) -> Result<CreatedSession> {
     if name.contains('/') || name.contains('\\') || name == "." || name == ".." {
         bail!("session name must not contain path separators");
     }
+    // A session name becomes a git branch name, interpolated as an operand into
+    // `git branch -D <name>` / `git worktree add -b <name>`. A leading `-` would
+    // be parsed by git as an option (e.g. `-D`, `--foo`) rather than a branch,
+    // so reject it up front.
+    if name.starts_with('-') {
+        bail!("session name must not start with \"-\"");
+    }
 
     // Sync the on-disk tree with the recorded sessions first: a leftover
     // directory `state.json` does not know about is force-removed, so a stale
@@ -387,6 +394,21 @@ mod tests {
         for bad in ["a/b", "a\\b", ".", ".."] {
             let err = create(dir.path(), bad).unwrap_err();
             assert!(err.to_string().contains("must not contain path separators"));
+        }
+    }
+
+    #[test]
+    fn rejects_a_name_starting_with_a_dash() {
+        // A leading-`-` name would be interpolated into git commands as a branch
+        // operand and parsed as an option (`git branch -D -D`), so it is refused
+        // up front before any repository is touched.
+        let dir = tempfile::tempdir().unwrap();
+        for bad in ["-D", "--foo", "-"] {
+            let err = create(dir.path(), bad).unwrap_err();
+            assert!(
+                err.to_string().contains("must not start with"),
+                "{bad}: {err}"
+            );
         }
     }
 
