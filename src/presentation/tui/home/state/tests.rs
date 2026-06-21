@@ -1479,14 +1479,21 @@ fn apply_badges_replaces_every_set_at_once() {
     assert!(state.live_paths().is_empty());
     assert!(state.done_paths().is_empty());
 
+    // The accessor a render loop compares against starts at the empty snapshot.
+    assert_eq!(state.badges(), &MonitorSnapshot::default());
+
     // One reading populates all four sets together (running / waiting / live /
     // done), so the getters read a single consistent snapshot.
-    state.apply_badges(MonitorSnapshot {
+    let snapshot = MonitorSnapshot {
         running: [PathBuf::from("/repo/run")].into(),
         waiting: [PathBuf::from("/repo/wait")].into(),
         live: [PathBuf::from("/repo/run"), PathBuf::from("/repo/wait")].into(),
         done: [PathBuf::from("/repo/done")].into(),
-    });
+    };
+    state.apply_badges(snapshot.clone());
+    // `badges` echoes the whole applied snapshot, so a loop can detect a change
+    // since its last paint by comparing against it.
+    assert_eq!(state.badges(), &snapshot);
     assert!(state.is_running(Path::new("/repo/run")));
     assert!(!state.is_running(Path::new("/repo/wait")));
     assert_eq!(state.running_paths().len(), 1);

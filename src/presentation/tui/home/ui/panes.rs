@@ -387,9 +387,11 @@ fn rail_pane(
 /// wraps the plain text in `dim`. Used to fade the rows the cursor is *not* on
 /// in 切替 (Switch), so the highlighted session stands out without a box.
 pub(super) fn dim_row(line: &str) -> String {
-    style(console::strip_ansi_codes(line).into_owned())
-        .dim()
-        .to_string()
+    // `strip_ansi_codes` borrows the input when it carries no escapes (the common
+    // case for a plain session row), so styling the `Cow` directly avoids the
+    // extra owned copy `into_owned` would force before the single styled string is
+    // built.
+    style(console::strip_ansi_codes(line)).dim().to_string()
 }
 
 /// Builds the left pane: each entry spans two lines (an identity line and a
@@ -1020,13 +1022,13 @@ fn markdown_row(line: &MarkdownLine, width: usize) -> String {
 /// content by level; a code-block line and a quote line take a uniform style;
 /// every other line styles each span by its own inline emphasis.
 fn styled_span(span: &Span, line_style: LineStyle) -> String {
-    let text = span.text.clone();
+    let text = span.text.as_str();
     match line_style {
-        LineStyle::Heading(level) => heading_style(&text, level),
+        LineStyle::Heading(level) => heading_style(text, level),
         LineStyle::Code => style(text).green().to_string(),
         LineStyle::Quote => style(text).dim().italic().to_string(),
         _ => match span.style {
-            SpanStyle::Plain => text,
+            SpanStyle::Plain => text.to_string(),
             SpanStyle::Strong => style(text).bold().to_string(),
             SpanStyle::Emphasis => style(text).italic().to_string(),
             SpanStyle::Code => style(text).green().to_string(),
@@ -1038,7 +1040,7 @@ fn styled_span(span: &Span, line_style: LineStyle) -> String {
 /// The bold, level-coloured styling of a heading's text: magenta (h1), cyan (h2),
 /// yellow (h3), and plain bold for deeper levels.
 fn heading_style(text: &str, level: u8) -> String {
-    let base = style(text.to_string()).bold();
+    let base = style(text).bold();
     match level {
         1 => base.magenta(),
         2 => base.cyan(),
