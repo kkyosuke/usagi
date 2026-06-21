@@ -58,15 +58,8 @@ pub fn create(workspace_root: &Path, name: &str) -> Result<CreatedSession> {
     if name.is_empty() {
         bail!("session name must not be empty");
     }
-    if name.contains('/') || name.contains('\\') || name == "." || name == ".." {
-        bail!("session name must not contain path separators");
-    }
-    // A session name becomes a git branch name, interpolated as an operand into
-    // `git branch -D <name>` / `git worktree add -b <name>`. A leading `-` would
-    // be parsed by git as an option (e.g. `-D`, `--foo`) rather than a branch,
-    // so reject it up front.
-    if name.starts_with('-') {
-        bail!("session name must not start with \"-\"");
+    if let Some(error) = name_format_error(name) {
+        bail!("{error}");
     }
 
     // Sync the on-disk tree with the recorded sessions first: a leftover
@@ -125,6 +118,32 @@ pub fn create(workspace_root: &Path, name: &str) -> Result<CreatedSession> {
         root: dest_root,
         worktrees,
     })
+}
+
+/// The reason a session name breaks a structural rule, or `None` when its format
+/// is acceptable. This is the single source of truth for what makes a name
+/// legal, shared by [`create`] (which also rejects an empty name and checks for
+/// existing sessions / branch clashes that need disk and git access) and the
+/// TUI's live inline-create validation, so the two never drift.
+///
+/// A session name becomes a git branch name and a directory under
+/// `.usagi/sessions/`, so it must not contain a path separator (`/`, `\`, `.`,
+/// `..`) and must not start with `-` — a leading `-` would be parsed by git as an
+/// option (e.g. `-D`) where the name is interpolated into `git branch -D <name>`
+/// / `git worktree add -b <name>`.
+///
+/// An empty name has no bad characters and so passes here; callers decide whether
+/// emptiness itself is an error ([`create`] rejects it; the TUI stays quiet while
+/// nothing is typed).
+pub fn name_format_error(name: &str) -> Option<String> {
+    let name = name.trim();
+    if name.contains('/') || name.contains('\\') || name == "." || name == ".." {
+        return Some("session name must not contain path separators".to_string());
+    }
+    if name.starts_with('-') {
+        return Some("session name must not start with \"-\"".to_string());
+    }
+    None
 }
 
 /// The local branch names that already exist across every source repository a

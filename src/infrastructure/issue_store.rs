@@ -227,8 +227,10 @@ impl IssueStore {
             version: FILE_FORMAT_VERSION,
             issues: summaries.clone(),
         };
-        let text = serde_json::to_string_pretty(&index)?;
-        json_file::write_text_atomic(&self.index_path(), &format!("{text}\n"))?;
+        // The canonical "pretty JSON + trailing newline, written atomically" path
+        // lives in `json_file::write_atomic`; reuse it rather than re-implementing
+        // the serialise-and-write here.
+        json_file::write_atomic(&self.dir, &self.index_path(), &index)?;
         Ok(summaries)
     }
 

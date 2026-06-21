@@ -167,11 +167,17 @@ pub enum Outcome {
 /// loop's logic is exercised without a real terminal or shell pool.
 /// Apply a session list a background pane-exit sync produced, if one has landed,
 /// refreshing the worktree statuses without yanking the cursor; a slot with no
-/// sync yet leaves the state untouched. Split out of [`event_loop`] so the apply
-/// is exercised directly rather than only through a full loop run.
-fn apply_pending_refresh(state: &mut HomeState, refresh: &SessionsRefreshHandle) {
-    if let Some(sessions) = refresh.take() {
-        state.refresh_sessions(sessions);
+/// sync yet leaves the state untouched. Returns whether a list was applied, so
+/// the loop forces a repaint (the new git statuses are not part of the badge
+/// snapshot the skip-paint check compares). Split out of [`event_loop`] so the
+/// apply is exercised directly rather than only through a full loop run.
+fn apply_pending_refresh(state: &mut HomeState, refresh: &SessionsRefreshHandle) -> bool {
+    match refresh.take() {
+        Some(sessions) => {
+            state.refresh_sessions(sessions);
+            true
+        }
+        None => false,
     }
 }
 
@@ -188,26 +194,39 @@ pub(super) fn event_loop(
 ) -> Result<Outcome> {
     let workspace_root = wiring.workspace_root;
     let mut painter = FramePainter::new();
+    // What the last paint reflected, so an idle 統括 (Overview) tick whose badges
+    // and update notice are unchanged can skip rebuilding and repainting the whole
+    // frame. `force_paint` keeps the first frame — and the frame after any key —
+    // always repainting.
+    let mut last_badges = None;
+    let mut last_update = None;
+    let mut force_paint = true;
     loop {
         // Mark each background session's agent state — running, waiting for
         // input, live (ready), and finished — before painting, applying every
         // badge set together (read under a single lock) so the frame never mixes
         // one set's fresh reading with another's stale one.
-        state.apply_badges(monitor.snapshot());
+        let badges = monitor.snapshot();
+        state.apply_badges(badges.clone());
         // Surface the top-right "update available" notice once the background
         // release check has found a newer version than this build.
-        state.set_update(update.status().map(|status| status.latest));
+        let latest_update = update.status().map(|status| status.latest);
+        state.set_update(latest_update);
         // Apply a session list a background pane-exit sync produced, if one has
         // landed — refreshing the worktree statuses without yanking the cursor.
         // Done before the task drain below so a session create / remove that
-        // finished on the same frame still has the last word on the list.
-        apply_pending_refresh(&mut state, refresh);
+        // finished on the same frame still has the last word on the list. A landed
+        // refresh changes the sidebar git statuses (which the badge snapshot does
+        // not capture), so it forces a repaint below.
+        let refreshed = apply_pending_refresh(&mut state, refresh);
         // Apply any background session task (create / remove) that finished since
         // the last frame: evict the removed session's pooled shell (on this
         // thread — the pool is not `Send`), then log the result and refresh the
         // session list without yanking the cursor. Then refresh the task panel
         // rows so in-flight work shows in the top-right corner.
+        let mut completed_any = false;
         for completion in tasks.drain_completed() {
+            completed_any = true;
             let super::tasks::Completion {
                 line,
                 sessions,
@@ -240,9 +259,33 @@ pub(super) fn event_loop(
                 state.set_terminal_tabs(labels, active);
             }
         }
+        // The task panel and the install rabbit animate on the clock, so a frame
+        // showing either must repaint even when nothing else moved.
+        let now = Instant::now();
+        let panel_animating = install_task::handle().is_active(now) || tasks.is_active(now);
+        // In 統括 (Overview) the right pane is blank, so an idle frame's only moving
+        // parts are the sidebar badges, the update notice, and those time-animated
+        // panels. When none changed since the last paint — and no key was just
+        // pressed (`force_paint`) and no background task just finished — skip
+        // rebuilding and repainting the whole frame. Every other mode (a live 切替
+        // preview, 在席, 没入) repaints as before, so a live pane is never frozen
+        // stale. The cheap per-frame state updates above still run, so the next
+        // paint (when something does change) is correct.
+        let skip_paint = state.mode() == Mode::Overview
+            && !force_paint
+            && !completed_any
+            && !refreshed
+            && !panel_animating
+            && last_badges.as_ref() == Some(&badges)
+            && last_update == latest_update;
         let (height, width) = term.size();
-        let frame = ui::render_frame(height as usize, width as usize, &state);
-        painter.paint(term, frame)?;
+        if !skip_paint {
+            let frame = ui::render_frame(height as usize, width as usize, &state);
+            painter.paint(term, frame)?;
+        }
+        last_badges = Some(badges);
+        last_update = latest_update;
+        force_paint = false;
 
         // The TUI itself never scrolls, so a wheel turn is read and dropped here
         // (it is swallowed by the reader before it can reach the host terminal's
@@ -252,15 +295,13 @@ pub(super) fn event_loop(
         // While a background install or a session task is in flight — or any
         // session is live — the read wakes every `ANIM_TICK` so the loop
         // re-iterates: re-draining finished work, re-reading the monitor badges
-        // and update notice, and repainting (which also advances the task panel's
-        // and install rabbit's time-based animation). This is what keeps a live
-        // background agent's badge moving to waiting (◆) / finished (✓) without
-        // the user typing. With nothing in flight and no live session it blocks on
-        // the next key, so a truly idle screen costs nothing.
-        let now = Instant::now();
-        let animate = install_task::handle().is_active(now)
-            || tasks.is_active(now)
-            || state.has_live_sessions();
+        // and update notice, and (when something changed) repainting — which also
+        // advances the task panel's and install rabbit's time-based animation.
+        // This is what keeps a live background agent's badge moving to waiting (◆)
+        // / finished (✓) without the user typing. With nothing in flight and no
+        // live session it blocks on the next key, so a truly idle screen costs
+        // nothing.
+        let animate = panel_animating || state.has_live_sessions();
         let key = if animate {
             match reader.read_key_timeout(install_task::ANIM_TICK) {
                 Ok(Some(key)) => key,
@@ -277,6 +318,9 @@ pub(super) fn event_loop(
                 Err(e) => return Err(anyhow::Error::from(e).context("Failed to read key")),
             }
         };
+        // A key was pressed: whatever it does to the state, repaint on the next
+        // iteration (the skip above only applies to idle ticks that read no key).
+        force_paint = true;
 
         // The quit-confirmation modal, when open, captures every key: `y` /
         // `Enter` (or a second `Ctrl-C`) confirms the close, `n` / `Esc` cancels.

@@ -1,6 +1,14 @@
 //! On-disk markdown (frontmatter) serialisation and parsing for [`Memory`].
+//!
+//! The frontmatter *format* (the `---` block, list escaping, timestamps, line
+//! neutralisation) lives once in [`crate::domain::frontmatter`]; this module owns
+//! only the memory's field set.
 
 use chrono::{DateTime, Utc};
+
+use crate::domain::frontmatter::{
+    format_string_list, inline, parse_string_list, parse_timestamp, split_frontmatter,
+};
 
 use super::{Memory, MemoryType, ParseMemoryError};
 
@@ -80,145 +88,4 @@ impl Memory {
                 .to_string(),
         })
     }
-}
-
-/// Split the text following the opening `---` into the frontmatter block and the
-/// body that follows the closing `---` (a line consisting solely of `---`).
-fn split_frontmatter(rest: &str) -> Result<(&str, &str), ParseMemoryError> {
-    let mut offset = 0;
-    for line in rest.split_inclusive('\n') {
-        if line.trim_end_matches('\n').trim_end_matches('\r') == "---" {
-            let frontmatter = &rest[..offset];
-            let body = &rest[offset + line.len()..];
-            return Ok((frontmatter, body));
-        }
-        offset += line.len();
-    }
-    Err(ParseMemoryError(
-        "missing frontmatter closing '---'".to_string(),
-    ))
-}
-
-/// Render strings as a `[a, b, c]` frontmatter list.
-///
-/// Each item is escaped (see [`escape_list_item`]) so the list round-trips
-/// losslessly even when an item contains the delimiter (`,`), the list brackets
-/// (`[` / `]`), a backslash, or boundary spaces. Items with none of those render
-/// verbatim, keeping the common case readable (`[editor-config]`).
-fn format_string_list(items: &[String]) -> String {
-    let items: Vec<String> = items.iter().map(|s| escape_list_item(&inline(s))).collect();
-    format!("[{}]", items.join(", "))
-}
-
-/// Backslash-escape the characters that are structural in a `[a, b, c]` list so
-/// an item can carry them verbatim: `\` (the escape introducer), `,` (the item
-/// delimiter), and `[` / `]` (the list brackets).
-///
-/// Leading and trailing spaces are encoded as `\s` so they survive the reader's
-/// `trim()` (which exists only to drop the cosmetic space the `", "` join
-/// inserts between items). Interior spaces stay literal, keeping common values
-/// readable.
-fn escape_list_item(item: &str) -> String {
-    let after_leading = item.trim_start_matches(' ');
-    let core = after_leading.trim_end_matches(' ');
-    let leading = item.len() - after_leading.len();
-    let trailing = after_leading.len() - core.len();
-
-    let mut out = String::with_capacity(item.len());
-    out.push_str(&"\\s".repeat(leading));
-    for ch in core.chars() {
-        if matches!(ch, '\\' | ',' | '[' | ']') {
-            out.push('\\');
-        }
-        out.push(ch);
-    }
-    out.push_str(&"\\s".repeat(trailing));
-    out
-}
-
-/// Split a list body on its unescaped `,` delimiters, leaving escape sequences
-/// intact for [`unescape_list_item`] to decode. A `\` consumes the next
-/// character (whatever its byte width), so an escaped `\,` is not a delimiter; a
-/// trailing `\` with no following character is kept so input never drops data.
-fn split_escaped_list(inner: &str) -> Vec<&str> {
-    let mut parts = Vec::new();
-    let mut start = 0;
-    let mut chars = inner.char_indices();
-    while let Some((idx, ch)) = chars.next() {
-        match ch {
-            '\\' => {
-                chars.next(); // skip whatever the backslash escapes
-            }
-            ',' => {
-                parts.push(&inner[start..idx]);
-                start = idx + 1; // ',' is one byte
-            }
-            _ => {}
-        }
-    }
-    parts.push(&inner[start..]);
-    parts
-}
-
-/// Decode the escape sequences produced by [`escape_list_item`]: `\\`, `\,`,
-/// `\[`, `\]` become their literal character and `\s` becomes a space. A
-/// backslash before any other character (or at end of input) is kept verbatim,
-/// so unescaping a string with no escapes is a no-op (backward compatible with
-/// simple lists written by older versions or by hand).
-fn unescape_list_item(item: &str) -> String {
-    let mut out = String::with_capacity(item.len());
-    let mut chars = item.chars().peekable();
-    while let Some(ch) = chars.next() {
-        if ch == '\\' {
-            match chars.peek() {
-                Some('\\' | ',' | '[' | ']') => out.push(chars.next().unwrap()),
-                Some('s') => {
-                    chars.next();
-                    out.push(' ');
-                }
-                _ => out.push('\\'),
-            }
-        } else {
-            out.push(ch);
-        }
-    }
-    out
-}
-
-/// Neutralise line breaks in a value bound for a single frontmatter line.
-///
-/// Frontmatter is line-based (`key: value`), so a newline in a value would split
-/// it into a second line that the parser re-reads as a forged metadata field on
-/// the next load. User-supplied text (the memory title via MCP `memory_save` and
-/// the TUI) reaches these fields unvalidated, so the only characters that can
-/// break the format — `\n` and `\r` — are replaced with a space here, at the
-/// serialisation boundary.
-fn inline(value: &str) -> String {
-    value.replace(['\n', '\r'], " ")
-}
-
-/// Parse `[a, b, c]` (or a bare comma list) into non-empty strings.
-///
-/// Splitting respects the escaping applied by [`escape_list_item`]: a `\,` is a
-/// literal comma inside an item rather than a delimiter, `\s` decodes to a
-/// boundary space, and `\\` / `\[` / `\]` decode to their literal characters.
-/// Each split part is trimmed (to drop the cosmetic `", "` join space) before
-/// being unescaped, so simple lists like `[editor-config]` parse as before.
-fn parse_string_list(value: &str) -> Vec<String> {
-    let inner = value
-        .strip_prefix('[')
-        .and_then(|v| v.strip_suffix(']'))
-        .unwrap_or(value);
-    split_escaped_list(inner)
-        .into_iter()
-        .map(|s| unescape_list_item(s.trim()))
-        .filter(|s| !s.is_empty())
-        .collect()
-}
-
-/// Parse an RFC3339 timestamp into UTC.
-fn parse_timestamp(value: &str) -> Result<DateTime<Utc>, ParseMemoryError> {
-    DateTime::parse_from_rfc3339(value)
-        .map(|dt| dt.with_timezone(&Utc))
-        .map_err(|_| ParseMemoryError(format!("invalid timestamp: {value:?}")))
 }

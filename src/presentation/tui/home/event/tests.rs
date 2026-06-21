@@ -373,12 +373,14 @@ fn a_background_refresh_updates_the_session_list_exactly_once() {
     // The pane-exit sync thread publishes a freshly-synced list to the handle;
     // the loop's `apply_pending_refresh` adopts it on a later frame. With nothing
     // pending the state is untouched; once a list lands it is applied and then
-    // taken, so a second poll does not re-apply a stale snapshot.
+    // taken, so a second poll does not re-apply a stale snapshot. The return tells
+    // the loop whether to force a repaint (a landed list changes the git statuses).
     let mut state = state_with_sessions(&["main", "feat"]);
     let refresh = SessionsRefreshHandle::new();
 
-    // No sync has landed yet: the list is left exactly as it was.
-    apply_pending_refresh(&mut state, &refresh);
+    // No sync has landed yet: the list is left exactly as it was, and the loop is
+    // told nothing changed.
+    assert!(!apply_pending_refresh(&mut state, &refresh));
     assert_eq!(
         state
             .sessions()
@@ -401,7 +403,7 @@ fn a_background_refresh_updates_the_session_list_exactly_once() {
             })
             .collect(),
     );
-    apply_pending_refresh(&mut state, &refresh);
+    assert!(apply_pending_refresh(&mut state, &refresh));
     assert_eq!(
         state
             .sessions()
@@ -413,9 +415,9 @@ fn a_background_refresh_updates_the_session_list_exactly_once() {
 
     // The slot is now empty, so a further poll re-applies nothing.
     refresh.set(Vec::new());
-    apply_pending_refresh(&mut state, &refresh);
+    assert!(apply_pending_refresh(&mut state, &refresh));
     assert!(state.sessions().is_empty());
-    apply_pending_refresh(&mut state, &refresh);
+    assert!(!apply_pending_refresh(&mut state, &refresh));
     assert!(state.sessions().is_empty());
 }
 
