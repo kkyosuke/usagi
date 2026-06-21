@@ -379,6 +379,35 @@ pub fn title_line(width: usize, title: &str) -> String {
     style(centered(width, title)).green().bold().to_string()
 }
 
+/// xterm-256 green shades from dim to bright — the brightness ramp the splash
+/// fades the title up through before it settles on the welcome screen's
+/// green-bold title.
+const TITLE_FADE: [u8; 4] = [22, 28, 34, 40];
+
+/// The number of fade steps [`faded_title_line`] accepts: one per [`TITLE_FADE`]
+/// shade plus the final green-bold step that matches [`title_line`].
+pub const TITLE_FADE_STEPS: usize = TITLE_FADE.len() + 1;
+
+/// A centred title faded to `step` of [`TITLE_FADE_STEPS`].
+///
+/// `step` 0 is a blank line (the title not shown yet), so a screen can reserve
+/// the title's row before it appears without the layout shifting. Intermediate
+/// steps ramp the green from dim to bright through [`TITLE_FADE`], and the final
+/// step (and anything past it) is the canonical green-bold [`title_line`] — so
+/// the splash can fade the title in and hand off to the welcome screen with no
+/// visible jump.
+pub fn faded_title_line(width: usize, title: &str, step: usize) -> String {
+    if step == 0 {
+        return String::new();
+    }
+    if step >= TITLE_FADE_STEPS {
+        return title_line(width, title);
+    }
+    style(centered(width, title))
+        .color256(TITLE_FADE[step - 1])
+        .to_string()
+}
+
 /// A centred, dimmed line — used for subtitles and footers.
 pub fn dim_line(width: usize, text: &str) -> String {
     style(centered(width, text)).dim().to_string()
@@ -544,6 +573,37 @@ mod tests {
     #[test]
     fn title_line_contains_the_title() {
         assert!(title_line(80, "USAGI").contains("USAGI"));
+    }
+
+    #[test]
+    fn faded_title_line_is_blank_at_step_zero() {
+        // Step 0 reserves the title's row without showing it, so a screen can
+        // fade the title in later without the surrounding layout shifting.
+        assert_eq!(faded_title_line(80, "USAGI", 0), "");
+    }
+
+    #[test]
+    fn faded_title_line_shows_the_title_once_it_starts_fading() {
+        // Every step past the delay carries the title text (the colour is what
+        // ramps), and the same centring as the final title.
+        for step in 1..=TITLE_FADE_STEPS {
+            let line = faded_title_line(80, "USAGI", step);
+            assert!(console::strip_ansi_codes(&line).contains("USAGI"));
+        }
+    }
+
+    #[test]
+    fn faded_title_line_settles_on_the_canonical_title() {
+        // The final step (and anything past it) is exactly the green-bold
+        // title_line, so the splash hands off to the welcome screen with no jump.
+        assert_eq!(
+            faded_title_line(80, "USAGI", TITLE_FADE_STEPS),
+            title_line(80, "USAGI"),
+        );
+        assert_eq!(
+            faded_title_line(80, "USAGI", TITLE_FADE_STEPS + 9),
+            title_line(80, "USAGI"),
+        );
     }
 
     #[test]
