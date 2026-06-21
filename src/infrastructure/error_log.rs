@@ -124,6 +124,42 @@ impl ErrorLog {
     }
 }
 
+/// A sink for runtime error messages that should outlive the screen that
+/// produced them. It is the seam that lets presentation route an on-screen
+/// failure to the daily log file **without depending on a concrete logger** — the
+/// home screen's single error sink ([`crate::presentation::tui::home`]'s
+/// `HomeState::log_error`) holds a `Box<dyn Logger>` and writes through it, so the
+/// same message that appears in the command log also lands in `<data dir>/logs/`.
+///
+/// Recording is best-effort by contract: an implementation must never panic or
+/// propagate a failure, so logging can never mask the error it is recording.
+pub trait Logger {
+    /// Persist `message` (best-effort; swallow any failure).
+    fn record(&self, message: &str);
+}
+
+/// The production [`Logger`]: appends `message` to the daily error log under the
+/// data directory via [`ErrorLog::record`].
+#[derive(Debug, Clone, Copy, Default)]
+pub struct FileLogger;
+
+impl Logger for FileLogger {
+    fn record(&self, message: &str) {
+        ErrorLog::record(message);
+    }
+}
+
+/// A [`Logger`] that discards every message — the default a [`HomeState`] is built
+/// with, so tests (and any path that never injects a real logger) persist nothing.
+///
+/// [`HomeState`]: crate::presentation::tui::home
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NoopLogger;
+
+impl Logger for NoopLogger {
+    fn record(&self, _message: &str) {}
+}
+
 /// Parse the date out of an `error-YYYY-MM-DD.log` file name, ignoring any
 /// other file the directory may contain.
 fn parse_date(name: &str) -> Option<NaiveDate> {
@@ -257,6 +293,40 @@ mod tests {
             .expect("readable entry");
         let contents = fs::read_to_string(entry.path()).unwrap();
         assert!(contents.contains("session create \"c\" failed: boom"));
+
+        std::env::remove_var(crate::infrastructure::storage::DATA_DIR_ENV);
+    }
+
+    #[test]
+    fn file_logger_appends_through_the_default_data_directory() {
+        let _guard = crate::test_support::process_env_guard();
+        let home = tempfile::tempdir().expect("failed to create temp dir");
+        std::env::set_var(crate::infrastructure::storage::DATA_DIR_ENV, home.path());
+
+        FileLogger.record("preview failed: boom");
+
+        let logs = home.path().join("logs");
+        let entry = fs::read_dir(&logs)
+            .expect("logs dir exists")
+            .next()
+            .expect("a log file was written")
+            .expect("readable entry");
+        let contents = fs::read_to_string(entry.path()).unwrap();
+        assert!(contents.contains("preview failed: boom"));
+
+        std::env::remove_var(crate::infrastructure::storage::DATA_DIR_ENV);
+    }
+
+    #[test]
+    fn noop_logger_discards_everything() {
+        let _guard = crate::test_support::process_env_guard();
+        let home = tempfile::tempdir().expect("failed to create temp dir");
+        std::env::set_var(crate::infrastructure::storage::DATA_DIR_ENV, home.path());
+
+        NoopLogger.record("nothing should be written");
+
+        // No file is created: the no-op sink never touches the logs directory.
+        assert!(!home.path().join("logs").exists());
 
         std::env::remove_var(crate::infrastructure::storage::DATA_DIR_ENV);
     }
