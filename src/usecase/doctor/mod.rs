@@ -82,6 +82,23 @@ impl Check {
 /// External command-line tools usagi shells out to.
 const REQUIRED_TOOLS: &[&str] = &["git", "bash"];
 
+/// Name of the `ollama` runtime check.
+pub(super) const OLLAMA_CHECK: &str = "ollama";
+/// Name of the local LLM model presence check.
+pub(super) const LOCAL_LLM_MODEL_CHECK: &str = "local-llm model";
+
+/// Diagnostic checks whose remedy is the dedicated [`local_llm::ensure`] flow
+/// (driven from the CLI right after the generic fix pass), not the generic
+/// package-manager install path. `doctor --fix` must skip these so it never
+/// shells out `brew install "local-llm model"` and the like.
+const LOCAL_LLM_CHECKS: &[&str] = &[OLLAMA_CHECK, LOCAL_LLM_MODEL_CHECK];
+
+/// Whether `name` is a local-LLM check handled by [`local_llm::ensure`] rather
+/// than the generic package-manager remediation.
+pub(super) fn is_local_llm_check(name: &str) -> bool {
+    LOCAL_LLM_CHECKS.contains(&name)
+}
+
 /// Run every diagnostic and return the checks in display order.
 ///
 /// The local LLM checks are appended only when it is enabled in the saved
@@ -113,18 +130,18 @@ fn local_llm_checks(enabled: bool, model: &str, runner: &dyn CommandRunner) -> V
         return Vec::new();
     }
     let ollama = if local_llm::ollama_installed(runner) {
-        Check::ok("ollama")
+        Check::ok(OLLAMA_CHECK)
     } else {
         Check::missing(
-            "ollama",
+            OLLAMA_CHECK,
             "`ollama` runtime not installed; run `usagi doctor --fix`",
         )
     };
     let model_check = if local_llm::model_present(runner, model) {
-        Check::ok_with("local-llm model", model.to_string())
+        Check::ok_with(LOCAL_LLM_MODEL_CHECK, model.to_string())
     } else {
         Check::missing(
-            "local-llm model",
+            LOCAL_LLM_MODEL_CHECK,
             format!("model `{model}` not pulled; run `usagi doctor --fix`"),
         )
     };

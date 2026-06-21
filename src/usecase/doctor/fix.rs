@@ -83,10 +83,16 @@ pub enum FixOutcome {
 
 /// Attempt to fix every missing tool in `checks`, returning one outcome per
 /// `Missing` check in check order. `Ok`/`Warn` checks are skipped.
+///
+/// Local-LLM checks (see [`is_local_llm_check`]) are also skipped: their names
+/// (e.g. `"local-llm model"`) are not real package names, and they have a
+/// dedicated remedy in [`local_llm::ensure`] that the CLI runs separately.
+/// Routing them through the generic package manager would spuriously fail
+/// (`brew install "local-llm model"`) or double-install `ollama`.
 pub fn fix_missing(checks: &[Check], os: &str, runner: &dyn CommandRunner) -> Vec<FixOutcome> {
     checks
         .iter()
-        .filter(|check| check.health == Health::Missing)
+        .filter(|check| check.health == Health::Missing && !is_local_llm_check(check.name))
         .map(|check| fix_one(check.name, os, runner))
         .collect()
 }
