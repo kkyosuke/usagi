@@ -7,7 +7,7 @@ use anyhow::{bail, Context, Result};
 
 use crate::domain::settings::BranchSource;
 
-use super::command::{git_capture, git_command, ref_names, remotes, rev_exists};
+use super::command::{full_ref_names, git_capture, git_command, ref_names, rev_exists};
 
 /// Force-delete `branch` in `repo` (`git branch -D`). Used when discarding a
 /// session, so the branch is removed regardless of merge status.
@@ -105,20 +105,29 @@ pub fn local_branches(repo: &Path) -> Vec<String> {
 pub fn list_branches(repo: &Path) -> Vec<String> {
     use std::collections::BTreeSet;
 
-    // Local branches: `lstrip=2` drops `refs/heads/`, leaving the bare name.
-    let mut names: BTreeSet<String> = ref_names(repo, "refs/heads", 2).into_iter().collect();
+    // One `for-each-ref` over both ref namespaces, with each kind stripped to its
+    // bare branch name in Rust, replaces the previous `git remote` + per-remote
+    // `for-each-ref` fan-out: a single git process regardless of remote count.
+    full_ref_names(repo, &["refs/heads", "refs/remotes"])
+        .iter()
+        .filter_map(|refname| branch_short_name(refname))
+        .collect::<BTreeSet<String>>()
+        .into_iter()
+        .collect()
+}
 
-    // Remote-tracking branches: `lstrip=3` drops `refs/remotes/<remote>/`, so a
-    // branch name keeps any embedded slashes. The `HEAD` pseudo-ref is skipped.
-    for remote in remotes(repo) {
-        for name in ref_names(repo, &format!("refs/remotes/{remote}"), 3) {
-            if name != "HEAD" {
-                names.insert(name);
-            }
-        }
+/// The bare branch name a candidate ref contributes to [`list_branches`], or
+/// `None` for a ref that names no branch.
+///
+/// A local `refs/heads/<name>` keeps any embedded slashes; a remote-tracking
+/// `refs/remotes/<remote>/<name>` drops the `<remote>` component (again keeping
+/// slashes in `<name>`), and the `<remote>/HEAD` pseudo-ref is skipped.
+fn branch_short_name(refname: &str) -> Option<String> {
+    if let Some(name) = refname.strip_prefix("refs/heads/") {
+        return (!name.is_empty()).then(|| name.to_string());
     }
-
-    names.into_iter().collect()
+    let (_remote, name) = refname.strip_prefix("refs/remotes/")?.split_once('/')?;
+    (name != "HEAD" && !name.is_empty()).then(|| name.to_string())
 }
 
 /// The branch the remote's `HEAD` points at (e.g. `main`), if a remote exists.
