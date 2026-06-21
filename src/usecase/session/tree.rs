@@ -113,18 +113,24 @@ pub(super) fn source_repos(workspace_root: &Path) -> Vec<PathBuf> {
 }
 
 /// Append every repository root reachable under `dir` to `repos`, recursing into
-/// plain directories and skipping [`SKIP`] entries and existing linked worktrees
-/// ([`is_linked_worktree`]). Best-effort: unreadable directories and entries are
-/// silently skipped.
+/// plain directories and skipping [`SKIP`] entries, symlinks, and existing
+/// linked worktrees ([`is_linked_worktree`]). Best-effort: unreadable
+/// directories and entries are silently skipped.
 fn collect_repos(dir: &Path, repos: &mut Vec<PathBuf>) {
     for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
         if SKIP.iter().any(|s| OsStr::new(s) == entry.file_name()) {
             continue;
         }
-        let path = entry.path();
-        if !path.is_dir() {
+        // Use the entry's own type, which does *not* follow symlinks, rather than
+        // `path.is_dir()`, which does: a directory symlink pointing back at an
+        // ancestor would otherwise make this recurse forever (stack overflow,
+        // hanging `session create` / `reconcile`). `build_dir` likewise skips
+        // symlinks (it copies them as plain files), so both walks agree that a
+        // symlink is never a source repository.
+        if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
             continue;
         }
+        let path = entry.path();
         // An existing linked worktree is not a source repository.
         if is_linked_worktree(&path) {
             continue;
@@ -134,5 +140,36 @@ fn collect_repos(dir: &Path, repos: &mut Vec<PathBuf>) {
         } else {
             collect_repos(&path, repos);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A directory symlink that points back at an ancestor must not be followed:
+    /// `source_repos` skips it (so it never recurses forever) and still finds the
+    /// real repositories beside it.
+    #[cfg(unix)]
+    #[test]
+    fn source_repos_skips_directory_symlinks_and_does_not_recurse_into_cycles() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+
+        // A real repository (a directory holding a `.git` directory) to discover.
+        let repo = root.join("repo");
+        fs::create_dir_all(repo.join(".git")).unwrap();
+
+        // A plain subdirectory the walk recurses into, holding a directory symlink
+        // that points back at the workspace root — a cycle the old `path.is_dir()`
+        // check would have followed until the stack overflowed.
+        let sub = root.join("sub");
+        fs::create_dir_all(&sub).unwrap();
+        symlink(root, sub.join("loop")).unwrap();
+
+        // Terminates (no infinite recursion) and finds only the real repo.
+        assert_eq!(source_repos(root), vec![repo]);
     }
 }
