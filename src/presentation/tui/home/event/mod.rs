@@ -13,7 +13,7 @@ use anyhow::Result;
 use console::Key;
 use console::Term;
 
-use crate::domain::settings::SessionActionUi;
+use crate::domain::settings::{SessionActionUi, Sidebar};
 use crate::presentation::tui::install_task;
 use crate::presentation::tui::screen::{FramePainter, KeyReader};
 
@@ -101,8 +101,11 @@ pub(super) struct Wiring<'a> {
     /// (`None` when the user quit the app from it).
     pub open_config: &'a mut dyn FnMut(&Term) -> Result<Option<ConfigReload>>,
     /// Snapshot a session's live terminal for the 切替 preview, or `None` when it
-    /// has no running shell — also the live/idle test the focus handlers use.
-    pub preview: &'a mut dyn FnMut(&Path) -> Option<TerminalView>,
+    /// has no running shell — also the live/idle test the focus handlers use. The
+    /// snapshot is sized to the given sidebar state (the preview widens when the
+    /// rail is collapsed); the liveness test passes the current state and ignores
+    /// the geometry.
+    pub preview: &'a mut dyn FnMut(&Path, Sidebar) -> Option<TerminalView>,
     /// Read (`None`) or navigate (`Some(nav)`) the highlighted session's tabs
     /// from 切替.
     pub tab_op: &'a mut TabOp<'a>,
@@ -205,9 +208,15 @@ pub(super) fn event_loop(
         // above it, so `←`/`→` has something to act on — so the user sees the
         // actual screen re-attaching reveals.
         state.clear_terminal_surface();
-        if state.mode() == Mode::Switch {
+        // Collapsed to the rail, 切替's create / rename input takes over the right
+        // pane (no room inline in the 5-column list), so there is no preview to
+        // draw then; otherwise preview the highlighted session, sized to the
+        // current sidebar state so the snapshot fills the pane it is drawn into.
+        let input_in_right_pane = state.sidebar() == Sidebar::Rail
+            && (state.create().is_some() || state.rename().is_some());
+        if state.mode() == Mode::Switch && !input_in_right_pane {
             let dir = selected_dir(&state, workspace_root);
-            if let Some(view) = (wiring.preview)(&dir) {
+            if let Some(view) = (wiring.preview)(&dir, state.sidebar()) {
                 state.set_terminal_view(view);
                 let (labels, active) = (wiring.tab_op)(&dir, None);
                 state.set_terminal_tabs(labels, active);
@@ -447,7 +456,7 @@ pub(crate) fn event_loop_compat(
     mut existing_branches: impl FnMut() -> Vec<String>,
     mut open_terminal: impl FnMut(&mut HomeState, &Path, bool, bool) -> Result<PaneExit>,
     mut open_config: impl FnMut(&Term) -> Result<Option<ConfigReload>>,
-    mut preview: impl FnMut(&Path) -> Option<TerminalView>,
+    mut preview: impl FnMut(&Path, Sidebar) -> Option<TerminalView>,
     mut tab_op: impl FnMut(&Path, Option<TabNav>) -> (Vec<String>, usize),
     mut close_tab: impl FnMut(&mut HomeState, &Path),
 ) -> Result<Outcome> {

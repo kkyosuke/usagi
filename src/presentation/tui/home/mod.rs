@@ -490,10 +490,11 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
 
     // Snapshot the selected session's live terminal for the sidebar's right-pane
     // preview (the tab-like view), or `None` when it has no running shell/agent.
-    let mut preview =
-        |dir: &Path| -> Option<crate::presentation::tui::home::terminal_view::TerminalView> {
-            pool.borrow_mut().snapshot(term, dir)
-        };
+    let mut preview = |dir: &Path,
+                       sidebar: crate::domain::settings::Sidebar|
+     -> Option<crate::presentation::tui::home::terminal_view::TerminalView> {
+        pool.borrow_mut().snapshot(term, dir, sidebar)
+    };
 
     // Read (and optionally navigate) a session's tabs from 切替: `←`/`→` pass a
     // `TabNav` to move the active tab, and the loop reads the strip (`None`) each
