@@ -373,11 +373,17 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
         );
     } else if !state.tasks().is_empty() {
         // Background session work (create / remove) running off the event-loop
-        // thread. It rides the header's title-bar row (row 0), whose centred
-        // title leaves the right columns blank — so it never collides with the
-        // right pane (preview / menu / live terminal) the way the old body-row
-        // panel did, and needs no live-terminal suppression.
-        widgets::overlay_top_right(&mut lines, 0, width, &task_status_line(state.tasks()));
+        // thread. It rides the two header rows (row 0 the title bar, row 1 the
+        // mode ladder), whose centred content leaves the right columns blank —
+        // so it never collides with the right pane (preview / menu / live
+        // terminal) the way the old body-row panel did, and needs no
+        // live-terminal suppression. Two rows give the label more width.
+        widgets::overlay_top_right(
+            &mut lines,
+            0,
+            width,
+            &task_status_line(state.tasks(), width),
+        );
     } else if state.terminal_view().is_some() {
         // A live embedded terminal occupies the right pane (没入's attached shell
         // or 切替's live preview). Its rows are clipped, not padded, so the update

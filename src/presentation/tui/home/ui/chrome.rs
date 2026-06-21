@@ -78,34 +78,39 @@ pub(super) fn update_banner(latest: &Version) -> Vec<String> {
         .collect()
 }
 
-/// Display width of the task-status label field (a representative task's label).
-/// A long session name is clipped to this, a short one padded out, so the status
-/// line is the same width every frame and never shifts as the label changes
-/// (`作成中…` → `作成完了`) or the spinner ticks. Kept compact so the whole line
-/// fits the blank right gap beside the centred title on a normal terminal.
-const TASK_LABEL_W: usize = 12;
+/// Minimum / maximum display width of the task-status label field. The field
+/// scales with the terminal (a quarter of its width) and is clamped to this
+/// range, so a roomy window shows more of a long session name while a narrow
+/// one stays compact. A long name is clipped to the chosen width, a short one
+/// padded out — and since the width depends only on the (per-frame constant)
+/// terminal size, never the label text, the block stays the same size every
+/// frame and never shifts as the label changes (`作成中…` → `作成完了`) or the
+/// spinner ticks.
+const TASK_LABEL_MIN_W: usize = 16;
+const TASK_LABEL_MAX_W: usize = 32;
 
-/// Columns of the progress bar (inside its brackets).
-const TASK_BAR_W: usize = 8;
-
-/// Display width of the `done/total` count field, left-padded so the line stays
-/// right-flush. Wide enough for two-digit batches (`12/12`).
+/// Display width of the `done/total` count field, left-padded so the progress
+/// row stays right-flush. Wide enough for two-digit batches (`12/12`).
 const TASK_COUNT_W: usize = 5;
 
-/// The top-right background-task status line: a single fixed-width row showing
-/// the in-flight (or just-finished) session create / remove work as a mark, a
-/// representative label, a batch-progress bar, and a `done/total` count. The mark
-/// leads with a spinning braille glyph (cyan) while anything runs, or `✓` (green)
-/// / `✗` (red) once everything has settled. Returns no lines when nothing is
-/// tracked, so the corner falls back to the update notice.
+/// The top-right background-task status block: two fixed-width rows showing the
+/// in-flight (or just-finished) session create / remove work. The first row is a
+/// mark plus a representative label; the second, indented under the label, is a
+/// batch-progress bar plus a `done/total` count. The mark leads with a spinning
+/// braille glyph (cyan) while anything runs, or `✓` (green) / `✗` (red) once
+/// everything has settled. Returns no lines when nothing is tracked, so the
+/// corner falls back to the update notice.
 ///
-/// Anchored to the **header row** (the centred title bar, whose right columns are
-/// blank) by [`overlay_top_right`](super::overlay_top_right) rather than over the
-/// body, so it never collides with the right pane's preview / menu / live
-/// terminal. The bar is a real ratio — the share of the tracked tasks that have
-/// finished — not a per-task percentage git cannot report. Every field is a fixed
-/// width so the assembled line never changes size frame to frame.
-pub(super) fn task_status_line(rows: &[TaskRow]) -> Vec<String> {
+/// Anchored to the **two header rows** (the centred title bar and mode ladder,
+/// whose right columns are blank) by [`overlay_top_right`](super::overlay_top_right)
+/// rather than over the body, so it never collides with the right pane's preview
+/// / menu / live terminal. Splitting onto two rows lets the label field use more
+/// of the terminal's width than a single corner line could. The bar is a real
+/// ratio — the share of the tracked tasks that have finished — not a per-task
+/// percentage git cannot report. Both rows are the same width (the icon column
+/// plus the label field) so the block right-aligns cleanly and never changes
+/// size frame to frame.
+pub(super) fn task_status_line(rows: &[TaskRow], width: usize) -> Vec<String> {
     if rows.is_empty() {
         return Vec::new();
     }
@@ -124,26 +129,32 @@ pub(super) fn task_status_line(rows: &[TaskRow]) -> Vec<String> {
         TaskMark::Done(true) => ("✓".to_string(), Style::new().green().bold()),
         TaskMark::Done(false) => ("✗".to_string(), Style::new().red().bold()),
     };
-    let label = pad_to_width(clip_to_width(&lead.label, TASK_LABEL_W), TASK_LABEL_W);
+    // Scale the label field with the terminal, clamped so the block still tucks
+    // into the blank gap beside the centred title / mode ladder. Constant for
+    // the whole frame, so the right-anchored block never shifts.
+    let label_w = (width / 4).clamp(TASK_LABEL_MIN_W, TASK_LABEL_MAX_W);
+    let label = pad_to_width(clip_to_width(&lead.label, label_w), label_w);
     let done = rows
         .iter()
         .filter(|row| matches!(row.mark, TaskMark::Done(_)))
         .count();
     let total = rows.len();
-    let bar = widgets::progress_bar(done, total, TASK_BAR_W);
-    // Left-pad the count to a fixed field so the line stays right-flush.
+    // The progress row spans the label field exactly: the bracketed bar
+    // (`inner` + 2 brackets), a space, then the right-flush count sum to
+    // `label_w`, so the second row lines up under the first and shares its width.
+    let bar_inner = label_w.saturating_sub(2 + 1 + TASK_COUNT_W);
+    let bar = widgets::progress_bar(done, total, bar_inner);
+    // Left-pad the count to a fixed field so the row stays right-flush.
     let count = format!("{done}/{total}");
     let count = format!(
         "{}{count}",
         " ".repeat(TASK_COUNT_W.saturating_sub(count.len()))
     );
-    let line = format!(
-        "{} {label} {} {}",
-        icon_style.apply_to(&icon),
-        style(bar).dim(),
-        style(count).dim(),
-    );
-    vec![line]
+    // Row 1: mark + label. Row 2: two-space indent (under the label, past the
+    // `icon + space` column) + bar + count.
+    let line1 = format!("{} {label}", icon_style.apply_to(&icon));
+    let line2 = format!("  {} {}", style(bar).dim(), style(count).dim());
+    vec![line1, line2]
 }
 
 /// The engagement-ladder indicator drawn just under the title bar: the four

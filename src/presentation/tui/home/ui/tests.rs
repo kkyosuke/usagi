@@ -1281,11 +1281,12 @@ fn task_status_line_shows_the_running_lead_its_bar_and_count() {
             mark: TaskMark::Done(false),
         },
     ];
-    let line = task_status_line(&rows);
-    assert_eq!(line.len(), 1);
+    let line = task_status_line(&rows, 100);
+    // Two rows: the label on the first, the bar and count on the second.
+    assert_eq!(line.len(), 2);
+    // The first still-running task is the representative label, on row 1.
+    assert!(stripped(&[line[0].clone()]).contains("作成中… main"));
     let plain = stripped(&line);
-    // The first still-running task is the representative label.
-    assert!(plain.contains("作成中… main"));
     // Two of the three tasks have finished.
     assert!(plain.contains("2/3"));
     // A partial bar: started but not full.
@@ -1307,11 +1308,11 @@ fn task_status_line_settles_on_the_last_result_once_all_finish() {
             mark: TaskMark::Done(true),
         },
     ];
-    let plain = stripped(&task_status_line(&rows));
+    let plain = stripped(&task_status_line(&rows, 100));
     assert!(plain.contains("削除完了 b"));
     assert!(plain.contains("2/2"));
-    // A full bar carries no `>` head.
-    assert!(plain.contains("[========]"));
+    // A full bar carries no `>` head: at width 100 the bar field is 17 wide.
+    assert!(plain.contains(&format!("[{}]", "=".repeat(17))));
 }
 
 #[test]
@@ -1329,7 +1330,7 @@ fn task_status_line_leads_with_a_failure_when_the_last_task_failed() {
             mark: TaskMark::Done(false),
         },
     ];
-    let plain = stripped(&task_status_line(&rows));
+    let plain = stripped(&task_status_line(&rows, 100));
     assert!(plain.contains("作成失敗 dup"));
     assert!(plain.contains('✗'));
     assert!(plain.contains("2/2"));
@@ -1338,25 +1339,35 @@ fn task_status_line_leads_with_a_failure_when_the_last_task_failed() {
 #[test]
 fn task_status_line_holds_one_fixed_width_however_the_label_changes() {
     use super::super::tasks::{TaskMark, TaskRow};
-    // A short running label and a longer finished one must produce the same line
-    // width, so the right-anchored line never shifts as a row's text changes.
-    let short = task_status_line(&[TaskRow {
-        label: "作成中… a".to_string(),
-        mark: TaskMark::Running(0),
-    }]);
-    let long = task_status_line(&[TaskRow {
-        label: "作成完了 a-very-long-session-name".to_string(),
-        mark: TaskMark::Done(true),
-    }]);
-    let width = |line: &[String]| console::measure_text_width(&line[0]);
-    assert_eq!(width(&short), width(&long));
+    // A short running label and a longer finished one must produce the same
+    // block width, so the right-anchored block never shifts as a row's text
+    // changes. Both rows of the block also share a single width.
+    let short = task_status_line(
+        &[TaskRow {
+            label: "作成中… a".to_string(),
+            mark: TaskMark::Running(0),
+        }],
+        100,
+    );
+    let long = task_status_line(
+        &[TaskRow {
+            label: "作成完了 a-very-long-session-name".to_string(),
+            mark: TaskMark::Done(true),
+        }],
+        100,
+    );
+    let row_w = |line: &[String], row: usize| console::measure_text_width(&line[row]);
+    assert_eq!(row_w(&short, 0), row_w(&long, 0));
+    assert_eq!(row_w(&short, 1), row_w(&long, 1));
+    // Both rows of a block are the same width, so it right-aligns as a column.
+    assert_eq!(row_w(&long, 0), row_w(&long, 1));
 }
 
 #[test]
 fn task_status_line_is_empty_without_rows() {
     use super::super::tasks::TaskRow;
     let none: Vec<TaskRow> = Vec::new();
-    assert!(task_status_line(&none).is_empty());
+    assert!(task_status_line(&none, 100).is_empty());
 }
 
 #[test]
