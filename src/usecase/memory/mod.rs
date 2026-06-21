@@ -131,6 +131,10 @@ pub fn search(repo_root: &Path, query: &str, filter: &MemoryFilter) -> Result<Ve
 /// `None` if no such memory exists.
 pub fn update(repo_root: &Path, name: &str, changes: MemoryChanges) -> Result<Option<Memory>> {
     let store = MemoryStore::new(repo_root);
+    // Hold the lock across the read and the write so a concurrent `update` or
+    // `save` of the same memory cannot interleave between the two and clobber
+    // this change (a lost update). Mirrors `save` above.
+    let lock = store.lock()?;
     let Some(mut memory) = store.read(&slugify(name))? else {
         return Ok(None);
     };
@@ -147,7 +151,7 @@ pub fn update(repo_root: &Path, name: &str, changes: MemoryChanges) -> Result<Op
         memory.body = body;
     }
     memory.updated_at = Utc::now();
-    store.write(&memory)?;
+    store.write_locked(&lock, &memory)?;
     Ok(Some(memory))
 }
 

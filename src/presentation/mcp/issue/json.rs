@@ -89,7 +89,7 @@ pub(super) fn issue_tool_schemas() -> Value {
                     "label": { "type": "string" },
                     "parent": { "type": "integer", "description": "Keep only children of this issue" },
                     "milestone": { "type": "string", "description": "Keep only issues in this milestone" },
-                    "ready": { "type": "boolean" }
+                    "ready": { "type": "boolean", "description": "Only issues ready to start" }
                 },
                 "required": ["query"]
             }

@@ -145,6 +145,7 @@ fn sessions_to_json(sessions: &[SessionRecord]) -> Value {
             .map(|s| {
                 json!({
                     "name": s.name,
+                    "display_name": s.display_name,
                     "root": s.root,
                     "created_at": s.created_at.to_rfc3339(),
                     "worktrees": s.worktrees.iter().map(|wt| json!({
@@ -352,7 +353,23 @@ mod tests {
         let arr = listed.as_array().unwrap();
         assert_eq!(arr.len(), 1);
         assert_eq!(arr[0]["name"], "feature-x");
+        // No sidebar override set yet, so display_name is present but null.
+        assert_eq!(arr[0]["display_name"], Value::Null);
         assert_eq!(arr[0]["worktrees"][0]["branch"], "feature-x");
+    }
+
+    #[test]
+    fn list_includes_a_sessions_display_name() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        let server = server_at(root.path(), FakeBackend::ok("x"));
+        call(&server, "session_create", json!({"name":"feature-x"}));
+
+        // A sidebar display name set through the usecase appears in the listing.
+        session::set_display_name(root.path(), "feature-x", "Nice Name").unwrap();
+
+        let listed = tool_json(&call(&server, "session_list", json!({})));
+        assert_eq!(listed[0]["display_name"], "Nice Name");
     }
 
     #[test]

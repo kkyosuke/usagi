@@ -23,6 +23,7 @@
 ```
 <repo>/.usagi/
 ├── .gitignore      # .usagi/ 配下の git 管理を制御（usagi が生成・後述）
+├── .lock           # state.json 更新を直列化するプロセス間ロック（git 管理外）
 ├── state.json      # worktree / ブランチの状態スナップショット
 ├── settings.json   # プロジェクト固有の設定上書き（ローカル設定）
 ├── history.jsonl    # ワークスペース画面で実行したコマンドの履歴
@@ -36,7 +37,7 @@
 ```
 
 - どの worktree からコマンドを実行しても、`git worktree list` の先頭（＝プライマリ worktree）を基準に保存先を解決します（`infrastructure/git.rs` の `primary_worktree`）。これによりリポジトリ内で 1 つの `.usagi/` に集約されます。
-- `.usagi/` の大半（`state.json` / `settings.json` / `history.jsonl` / `sessions/`）は **マシンローカルな状態・設定** で、後述の `.gitignore` により **コミットされません**。
+- `.usagi/` の大半（`state.json` / `settings.json` / `history.jsonl` / `sessions/`）は **マシンローカルな状態・設定** で、後述の `.gitignore` により **コミットされません**。`state.json` 更新を直列化するプロセス間ロック `.usagi/.lock` も同様で、トップレベルの `/*` で除外されます（`issues/` / `memory/` は git 管理対象に戻すため、それぞれの `.lock` を個別に再除外する点が異なります）。
 - 例外は **`.usagi/issues/`** と **`.usagi/memory/`**。タスク issue とエージェントのメモリはチームで共有したいので git 管理対象とします。それぞれの派生キャッシュ `index.json` と、プロセス間書き込みロック用の `.lock` ファイルは再生成可能・ローカル専用なので除外したままにします（メモリの目次 `MEMORY.md` は共有対象）。
 - git 管理の制御は **リポジトリルートの `.gitignore` には書かず、`.usagi/.gitignore` に自己完結させます**（`usagi::usecase::project::ignore_usagi_dir`）。リポジトリルートを汚さず、`.usagi/` 配下だけで完結するのが利点です。`usagi init` 時に次の内容（`.usagi/` 配下からの相対パターン）を書き込み、旧バージョンがルート `.gitignore` に追記していた `.usagi/` 系エントリがあれば除去します。
 
@@ -126,6 +127,8 @@ worktree を束ねます。各 worktree は git ステータス付き（下記 `
 表示名の変更（`usecase/session::set_display_name`、ホーム画面の[切替モードの `r`](../design/05-home.md#各モードの説明)）は `display_name` だけを書き換えます。
 再同期（`usecase/workspace_state::sync`）は各セッション worktree の git ステータスを
 読み直して更新します。
+
+これらの更新（作成・削除・表示名変更・再同期）はいずれも `state.json` の read-modify-write（読み込み→編集→保存）です。個々の保存は一時ファイル＋rename でアトミックですが、その**一連**を `.usagi/.lock` に対するプロセス間排他ロックで直列化します。TUI と各セッションの `usagi mcp` サーバなど同一ワークスペースを共有する複数プロセスが同時に書いても、後勝ちで一方の更新を取りこぼす（lost update）ことがありません。
 
 ### worktree ごと（`WorktreeState`）
 

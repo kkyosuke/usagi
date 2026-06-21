@@ -20,9 +20,16 @@ pub fn clone(url: &str, dest: &Path, branch: Option<&str>) -> Result<()> {
     }
     command.arg("clone");
     if let Some(branch) = branch {
-        command.args(["--branch", branch]);
+        // `--branch=<value>` (not `--branch <value>`) so a branch name that
+        // begins with `-` is taken as the option's value rather than parsed as a
+        // further option.
+        command.arg(format!("--branch={branch}"));
     }
-    command.arg(url).arg(dest);
+    // `--` ends option parsing: a `url` or `dest` beginning with `-` (e.g.
+    // `--upload-pack=...`) is then treated as a positional operand rather than a
+    // git option — the standard git-clone argument-injection guard, matching the
+    // other git wrappers in this module.
+    command.arg("--").arg(url).arg(dest);
     // Anchor the command to the destination's parent so it never depends on the
     // process's inherited working directory (which a concurrent test — or a
     // caller running from a since-removed directory — may have invalidated).

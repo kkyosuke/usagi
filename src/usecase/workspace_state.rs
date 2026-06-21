@@ -21,6 +21,9 @@ use crate::infrastructure::workspace_store::WorkspaceStore;
 pub fn sync(cwd: &Path) -> Result<WorkspaceState> {
     let root = git::primary_worktree(cwd)?;
     let store = WorkspaceStore::new(&root);
+    // Hold the lock across the load → refresh → save so this status refresh and a
+    // concurrent session create/remove/rename cannot clobber each other.
+    let _lock = store.lock()?;
     let mut state = store.load()?.unwrap_or_default();
 
     // Inspect every session's worktrees through the shared helper, which

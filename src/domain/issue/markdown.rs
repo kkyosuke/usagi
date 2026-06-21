@@ -282,13 +282,14 @@ fn parse_string_list(value: &str) -> Vec<String> {
         .collect()
 }
 
-/// Parse `[1, 2, 3]` into issue numbers.
+/// Parse `[1, 2, 3]` into issue numbers. Used for both `dependson` and
+/// `related`, so the error stays field-agnostic rather than naming one field.
 fn parse_number_list(value: &str) -> Result<Vec<u32>, ParseIssueError> {
     parse_string_list(value)
         .iter()
         .map(|s| {
             s.parse()
-                .map_err(|_| ParseIssueError(format!("invalid dependson entry: {s:?}")))
+                .map_err(|_| ParseIssueError(format!("invalid issue number: {s:?}")))
         })
         .collect()
 }
