@@ -1,5 +1,6 @@
 pub mod agent_phase;
 pub mod doctor;
+pub mod history;
 pub mod issue;
 pub mod local_llm;
 pub mod memory;

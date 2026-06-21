@@ -18,9 +18,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 
 use crate::domain::history::HistoryEntry;
+use crate::infrastructure::repo_paths::STATE_DIR;
 
-/// Directory created inside the repository to hold usagi's per-repo data.
-const STATE_DIR_NAME: &str = ".usagi";
 const HISTORY_FILE: &str = "history.jsonl";
 
 /// File-based persistence for a repository's command history, rooted at its
@@ -33,7 +32,7 @@ impl HistoryStore {
     /// Open the store for the repository whose primary worktree is `repo_root`.
     pub fn new(repo_root: impl AsRef<Path>) -> Self {
         Self {
-            dir: repo_root.as_ref().join(STATE_DIR_NAME),
+            dir: repo_root.as_ref().join(STATE_DIR),
         }
     }
 

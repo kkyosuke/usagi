@@ -13,10 +13,9 @@ use serde::{Deserialize, Serialize};
 use crate::domain::settings::LocalSettings;
 use crate::domain::workspace_state::WorkspaceState;
 use crate::infrastructure::json_file;
+use crate::infrastructure::repo_paths::STATE_DIR;
 use crate::infrastructure::store_lock::StoreLock;
 
-/// Directory created inside the repository to hold usagi's per-repo data.
-const STATE_DIR_NAME: &str = ".usagi";
 const STATE_FILE: &str = "state.json";
 const SETTINGS_FILE: &str = "settings.json";
 
@@ -47,7 +46,7 @@ impl WorkspaceStore {
     /// Open the store for the repository whose primary worktree is `repo_root`.
     pub fn new(repo_root: impl AsRef<Path>) -> Self {
         Self {
-            dir: repo_root.as_ref().join(STATE_DIR_NAME),
+            dir: repo_root.as_ref().join(STATE_DIR),
         }
     }
 

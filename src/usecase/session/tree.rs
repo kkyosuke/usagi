@@ -13,11 +13,12 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 
 use crate::infrastructure::git;
+use crate::infrastructure::repo_paths::STATE_DIR;
 use crate::usecase::settings;
 
 /// Names never descended into or copied while building a session: usagi's own
 /// data directory (which holds the session tree itself) and any `.git`.
-const SKIP: &[&str] = &[".git", ".usagi"];
+const SKIP: &[&str] = &[".git", STATE_DIR];
 
 /// A directory is a repository root when it directly contains a `.git` entry —
 /// a directory for a normal clone, or a file for a linked worktree.

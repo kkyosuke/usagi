@@ -61,7 +61,8 @@ src/
 │   ├── agent_phase.rs          # Agent phase の遷移ポリシー（SessionStart→ready を記録してよいかの判断）
 │   ├── project.rs              # クローン・既存登録 + 状態同期（.gitignore の行編集は infrastructure/gitignore に委譲）
 │   ├── workspace.rs            # グローバル登録の add/list/remove/touch
-│   ├── workspace_state.rs      # リポジトリ状態の inspect/sync/load
+│   ├── workspace_state.rs      # リポジトリ状態の inspect/sync/load・表示用セッション取得（sessions_for_display=sync→記録フォールバック / recorded_sessions）
+│   ├── history.rs              # コマンド履歴の load/append（TUI 用の窓口。store への直接アクセスを usecase に集約）
 │   ├── settings.rs             # グローバル設定の load/更新、ローカル設定と実効設定の解決（effective）
 │   ├── search.rs               # 全文検索のマッチ規則の正本（Unicode-aware case-fold + contains。issue/memory 検索が共用）
 │   ├── session/               # セッションのライフサイクル
@@ -79,6 +80,7 @@ src/
 │   ├── git/                    # git CLI 経由の読み取り専用検査 + worktree 追加（command/repo/worktree/branch に分割）
 │   ├── gitignore.rs            # .usagi/.gitignore の書き込みと旧 root .gitignore 行の除去（バイト/行操作）
 │   ├── json_file.rs            # JSON ファイルの共通 read / 原子的 write（temp + rename）
+│   ├── repo_paths.rs           # リポジトリ内 usagi メタデータの配置（STATE_DIR=".usagi"）の正本。各ストア・session・gitignore が参照
 │   ├── storage.rs              # グローバル ~/.usagi/ の load/save（Storage）
 │   ├── workspace_store.rs      # <repo>/.usagi/ の state.json / settings.json（WorkspaceStore）
 │   ├── history_store.rs        # <repo>/.usagi/history.jsonl の load/append（HistoryStore）

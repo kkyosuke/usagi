@@ -10,6 +10,8 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 
+use crate::infrastructure::repo_paths::STATE_DIR;
+
 /// The self-contained `.gitignore` usagi writes inside each repository's
 /// `.usagi/` directory. Patterns are relative to `.usagi/`: ignore everything,
 /// but keep this `.gitignore` and the shared `issues/` and `memory/` directories
@@ -20,13 +22,21 @@ use anyhow::{Context, Result};
 /// team; the machine-local state (`state.json`, `settings.json`, `history.json`,
 /// `sessions/`), the derived indexes, and the lock files stay ignored. Keeping
 /// the rules inside `.usagi/` leaves the repository-root `.gitignore` untouched.
+///
+/// The `index.json` / `.lock` filenames are spelled out here for readability;
+/// `gitignore_covers_the_derived_and_lock_files` asserts they stay in step with
+/// the constants that actually name those files
+/// ([`issue_store::INDEX_FILE`](crate::infrastructure::issue_store) /
+/// [`memory_store::INDEX_FILE`](crate::infrastructure::memory_store) /
+/// [`store_lock::LOCK_FILE_NAME`](crate::infrastructure::store_lock)), so renaming
+/// one without the other fails the test rather than leaking a file into git.
 pub const USAGI_GITIGNORE: &str = "/*\n!/.gitignore\n!/issues/\n/issues/index.json\n/issues/.lock\n!/memory/\n/memory/index.json\n/memory/.lock\n";
 
 /// Write [`USAGI_GITIGNORE`] to `<repo>/.usagi/.gitignore`, creating the
 /// directory when absent. Idempotent: if the file already holds the current
 /// content it is left untouched.
 pub fn write_usagi_gitignore(repo: &Path) -> Result<()> {
-    let dir = repo.join(".usagi");
+    let dir = repo.join(STATE_DIR);
     fs::create_dir_all(&dir).context(format!("failed to create {}", dir.display()))?;
 
     let gitignore = dir.join(".gitignore");
@@ -88,6 +98,18 @@ fn is_legacy_root_ignore_line(line: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::infrastructure::{issue_store, memory_store, store_lock};
+
+    #[test]
+    fn gitignore_covers_the_derived_and_lock_files() {
+        // The ignore rules hardcode the derived-cache and lock filenames; if a
+        // store renames its index or lock file, these constants change but the
+        // literal string above would not — leaking the file into git. Assert the
+        // string still mentions each actual filename so that drift is caught here.
+        assert!(USAGI_GITIGNORE.contains(issue_store::INDEX_FILE));
+        assert!(USAGI_GITIGNORE.contains(memory_store::INDEX_FILE));
+        assert!(USAGI_GITIGNORE.contains(store_lock::LOCK_FILE_NAME));
+    }
 
     #[test]
     fn write_usagi_gitignore_is_self_contained_and_idempotent() {
