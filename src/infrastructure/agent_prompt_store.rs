@@ -12,7 +12,9 @@
 //! worktree directory: its canonical form hashed to a stable, filesystem-safe
 //! name under `<data-dir>/agent-prompts/`. Each file also stores the worktree it
 //! belongs to, so a hash collision (or a stale file from another machine syncing
-//! the data dir) is detected and ignored rather than misattributed.
+//! the data dir) is detected and read as absent rather than misattributed —
+//! and crucially left on disk for its rightful owner, never deleted on a take
+//! by the wrong worktree.
 
 use std::collections::hash_map::DefaultHasher;
 use std::fs;
@@ -83,11 +85,25 @@ pub fn set(worktree: &Path, prompt: &str) -> Result<()> {
 pub fn take(worktree: &Path) -> Option<String> {
     let key = key(worktree);
     let path = dir().ok()?.join(file_name(&key));
-    let file: PromptFile = json_file::read(&path).ok()??;
-    // Remove regardless of ownership: a file at our name we will not return is
-    // stale (a collision or a synced leftover), so clearing it is correct too.
-    let _ = fs::remove_file(&path);
-    (file.worktree.as_path() == key).then_some(file.prompt)
+    match json_file::read::<PromptFile>(&path) {
+        // Ours: hand back the prompt and remove the file (one-shot delivery).
+        Ok(Some(file)) if file.worktree.as_path() == key => {
+            let _ = fs::remove_file(&path);
+            Some(file.prompt)
+        }
+        // A parseable file stamped with a different worktree: a hash collision
+        // or a leftover synced from another machine. It belongs to that
+        // worktree, so leave it untouched for its rightful owner to take.
+        Ok(Some(_)) => None,
+        // Either nothing is queued, or the file is corrupt/unparseable. A
+        // corrupt file can never be delivered to anyone, so clear it; a missing
+        // file is a no-op to remove.
+        Ok(None) => None,
+        Err(_) => {
+            let _ = fs::remove_file(&path);
+            None
+        }
+    }
 }
 
 #[cfg(test)]
@@ -141,7 +157,7 @@ mod tests {
     }
 
     #[test]
-    fn a_file_queued_for_another_worktree_reads_as_absent_and_is_cleared() {
+    fn a_file_queued_for_another_worktree_reads_as_absent_and_is_preserved() {
         with_data_dir(|_| {
             let wt = tempfile::tempdir().unwrap();
             let other = tempfile::tempdir().unwrap();
@@ -158,7 +174,26 @@ mod tests {
                 },
             )
             .unwrap();
-            // It is not returned for wt, and the stale file is cleared.
+            // It is not returned for wt, but the file is left intact: it belongs
+            // to `other`, which must still be able to take its own prompt.
+            assert_eq!(take(wt.path()), None);
+            assert!(path.exists());
+            let still: PromptFile = json_file::read(&path).unwrap().unwrap();
+            assert_eq!(still.worktree, key(other.path()));
+            assert_eq!(still.prompt, "not ours");
+        });
+    }
+
+    #[test]
+    fn a_corrupt_file_reads_as_absent_and_is_cleared() {
+        with_data_dir(|_| {
+            let wt = tempfile::tempdir().unwrap();
+            // Write garbage at wt's hashed name so it cannot be parsed.
+            let dir = dir().unwrap();
+            fs::create_dir_all(&dir).unwrap();
+            let path = dir.join(file_name(&key(wt.path())));
+            fs::write(&path, "not json at all").unwrap();
+            // It reads as absent, and the unparseable file is cleared.
             assert_eq!(take(wt.path()), None);
             assert!(!path.exists());
         });
