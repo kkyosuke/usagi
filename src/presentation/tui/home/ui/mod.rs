@@ -345,11 +345,18 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
     lines.push(title_bar(width, state.list()));
     lines.push(mode_ladder(width, state.mode()));
     let body_start = lines.len();
-    for row in 0..body_rows {
-        let left_text = left.get(row).cloned().unwrap_or_default();
-        let left_cell = pad_to_width(left_text, left_w);
-        let right_cell = right.get(row).cloned().unwrap_or_default();
-        lines.push(format!("{left_cell}{SEP}{right_cell}"));
+    // `left` / `right` are not read past this loop, so consume them by value: each
+    // row's owned cell text moves straight into the composed line instead of being
+    // cloned out of the borrowed vecs. The line reuses the padded left cell's
+    // allocation (pushing the separator and right cell onto it) rather than letting
+    // `format!` allocate a fresh string per body row.
+    let mut left_rows = left.into_iter();
+    let mut right_rows = right.into_iter();
+    for _ in 0..body_rows {
+        let mut line = pad_to_width(left_rows.next().unwrap_or_default(), left_w);
+        line.push_str(SEP);
+        line.push_str(&right_rows.next().unwrap_or_default());
+        lines.push(line);
     }
 
     // Overlay the 統括 command hints onto a fixed-height band at the bottom of the
