@@ -1,58 +1,57 @@
-use crate::presentation::tui::widgets;
+use crate::presentation::tui::{welcome, widgets};
 
-/// Frames the splash plays: the warren grows from one usagi to a full
-/// [`MAX_RABBITS`], then the welcome menu takes over. At
-/// [`ANIM_TICK`](crate::presentation::tui::install_task::ANIM_TICK) per frame
-/// this is a brief flash before the menu — shorter than the old edge-to-edge run.
-pub const FRAMES: usize = 16;
+/// Frames the splash plays before the welcome menu takes over. The usagi mascot
+/// holds for the whole run; the `USAGI` title stays hidden for [`TITLE_DELAY`]
+/// frames, then fades in over [`TITLE_FADE_STEPS`](widgets::TITLE_FADE_STEPS)
+/// brightness steps and holds at full green-bold for [`TITLE_HOLD`] more frames.
+/// At [`ANIM_TICK`](crate::presentation::tui::install_task::ANIM_TICK) per frame
+/// this is a brief flash before the menu.
+pub const FRAMES: usize = TITLE_DELAY + widgets::TITLE_FADE_STEPS + TITLE_HOLD;
 
 const TITLE: &str = "USAGI";
 
-/// Frames between each new usagi joining the warren as the splash plays.
-const GROW: usize = 2;
+/// Frames the mascot shows alone before the title begins to fade in.
+const TITLE_DELAY: usize = 5;
 
-/// The warren the splash fills to before the welcome menu takes over.
-const MAX_RABBITS: usize = 8;
+/// Frames the fully faded-in title holds before the welcome menu takes over.
+const TITLE_HOLD: usize = 4;
 
-/// How many usagi are shown at `frame`: the warren starts at one and a new rabbit
-/// joins every [`GROW`] frames, capped at [`MAX_RABBITS`]. Each arrival extends
-/// the line rightward (see [`multiplying_rabbits`](widgets::multiplying_rabbits))
-/// without nudging the rabbits already on screen.
-fn rabbit_count(frame: usize) -> usize {
-    (1 + frame / GROW).min(MAX_RABBITS)
+/// The title's fade step at `frame`: blank ([`step 0`](widgets::faded_title_line))
+/// through the [`TITLE_DELAY`] frames the mascot shows alone, then one step per
+/// frame up to the full green-bold title, which it holds at thereafter.
+fn title_fade_step(frame: usize) -> usize {
+    if frame < TITLE_DELAY {
+        0
+    } else {
+        (frame - TITLE_DELAY + 1).min(widgets::TITLE_FADE_STEPS)
+    }
 }
 
-/// Builds the splash frame for `frame` at a raw terminal size: the "multiplying"
-/// usagi (the `usagi run 2` animation) filling the warren above the centred
-/// `USAGI` title, the whole block centred both vertically and horizontally. The
-/// count is derived from `frame`, so painting successive frames grows the warren.
+/// Builds the splash frame for `frame` at a raw terminal size: the welcome
+/// screen's usagi mascot above the centred `USAGI` title — the same mascot and
+/// title the welcome menu shows.
 ///
-/// The warren is centred on the width of the **full** warren ([`MAX_RABBITS`]),
-/// so the block's left edge is a fixed column: the animation sits in the middle of
-/// the screen, yet a newly added rabbit only extends the line rightward and never
-/// shifts the rabbits already shown. The rabbit rows are a fixed three lines, so
-/// nothing moves vertically either as the warren grows.
+/// The mascot and title are placed at the **welcome screen's rows**
+/// ([`welcome::mascot_top_padding`]) rather than centred on their own, so when
+/// the welcome menu and footer take over below them the mascot and title do not
+/// jump (no layout shift). The mascot is identical on every frame; only the
+/// title animates — it is hidden for the first [`TITLE_DELAY`] frames and then
+/// fades in (see [`title_fade_step`]). The title's row is always reserved (a
+/// blank line while it is hidden), so nothing shifts as it appears either.
 pub fn render_frame(raw_height: usize, raw_width: usize, frame: usize) -> Vec<String> {
     let (height, width) = widgets::normalize_size(raw_height, raw_width);
 
-    // Centre on the full warren so the left edge is fixed (no horizontal jump as
-    // rabbits are added), then place the growing warren at that fixed offset.
-    let full_warren_width =
-        console::measure_text_width(&widgets::multiplying_rabbits(MAX_RABBITS)[1]);
-    let pad = " ".repeat(widgets::centered_padding(width, full_warren_width));
-    let mut body: Vec<String> = widgets::multiplying_rabbits(rabbit_count(frame))
-        .into_iter()
-        .map(|row| format!("{pad}{row}"))
-        .collect();
-    body.push(String::new());
-    body.push(widgets::title_line(width, TITLE));
-
     let mut lines = Vec::with_capacity(height);
-    let top_padding = height.saturating_sub(body.len()) / 2;
-    for _ in 0..top_padding {
+    for _ in 0..welcome::mascot_top_padding(height) {
         lines.push(String::new());
     }
-    lines.extend(body);
+    lines.extend(widgets::rabbit_lines(width));
+    lines.push(String::new());
+    lines.push(widgets::faded_title_line(
+        width,
+        TITLE,
+        title_fade_step(frame),
+    ));
     while lines.len() < height {
         lines.push(String::new());
     }
@@ -64,67 +63,81 @@ mod tests {
     use super::*;
 
     #[test]
-    fn rabbit_count_grows_from_one_and_caps() {
-        // The warren starts at a single usagi, grows a rabbit every `GROW` frames,
-        // and never exceeds the cap.
-        assert_eq!(rabbit_count(0), 1);
-        assert!(rabbit_count(GROW) > rabbit_count(0));
-        assert_eq!(rabbit_count(usize::MAX / 2), MAX_RABBITS);
-        assert_eq!(rabbit_count(FRAMES - 1), MAX_RABBITS);
+    fn title_fade_step_holds_blank_then_fades_in_and_settles() {
+        // The title is hidden (step 0) for the whole delay, then advances one step
+        // per frame, and never exceeds the full-brightness final step.
+        assert_eq!(title_fade_step(0), 0);
+        assert_eq!(title_fade_step(TITLE_DELAY - 1), 0);
+        // The first frame past the delay shows the first (dim) fade step.
+        assert_eq!(title_fade_step(TITLE_DELAY), 1);
+        assert_eq!(title_fade_step(TITLE_DELAY + 1), 2);
+        // By the last frame the title is held at full brightness.
+        assert_eq!(title_fade_step(FRAMES - 1), widgets::TITLE_FADE_STEPS);
     }
 
     #[test]
-    fn render_frame_fills_the_terminal_and_shows_the_title() {
+    fn render_frame_shows_the_mascot_and_hides_the_title_during_the_delay() {
         let frame = render_frame(24, 80, 0);
         assert_eq!(frame.len(), 24);
         let joined = console::strip_ansi_codes(&frame.join("\n")).into_owned();
+        // The welcome screen's mascot face is on screen from the first frame...
+        assert!(joined.contains("(='-')"));
+        // ...but the title has not begun to fade in yet.
+        assert!(!joined.contains(TITLE));
+    }
+
+    #[test]
+    fn render_frame_fades_the_title_in_after_the_mascot() {
+        // Once the delay passes the title appears alongside the unchanging mascot.
+        let frame = render_frame(24, 80, TITLE_DELAY);
+        let joined = console::strip_ansi_codes(&frame.join("\n")).into_owned();
+        assert!(joined.contains("(='-')"));
         assert!(joined.contains(TITLE));
-        // A multiplying usagi's face is on screen.
-        assert!(joined.contains("(｡･-･)"));
     }
 
     #[test]
-    fn render_frame_animates_across_frames() {
-        // Later frames hold more usagi, so successive paints differ.
-        let a = console::strip_ansi_codes(&render_frame(24, 80, 0).join("\n")).into_owned();
-        let b = console::strip_ansi_codes(&render_frame(24, 80, GROW).join("\n")).into_owned();
-        assert_ne!(a, b);
-        assert!(b.matches("(｡･-･)").count() > a.matches("(｡･-･)").count());
-    }
-
-    #[test]
-    fn render_frame_centers_the_warren_without_shifting_it_as_it_grows() {
-        // The warren is centred on the full warren's width, so its left edge is a
-        // fixed column: the first usagi's face starts at the same column on an early
-        // and a later frame (no horizontal jump as rabbits are added), and that
-        // column is offset from the edge (centred, not flush left).
-        let face_col = |frame| {
-            let painted = render_frame(24, 80, frame);
-            let face_row = painted
+    fn render_frame_keeps_the_mascot_fixed_while_the_title_animates() {
+        // Only the title row changes between frames; the mascot rows are identical
+        // before and after the title fades in, so nothing jumps.
+        let before = render_frame(24, 80, 0);
+        let after = render_frame(24, 80, FRAMES - 1);
+        let mascot = |frame: &[String]| {
+            frame
                 .iter()
                 .map(|l| console::strip_ansi_codes(l).into_owned())
-                .find(|l| l.contains("(｡･-･)"))
-                .expect("a face row is painted");
-            let byte = face_row.find("(｡･-･)").unwrap();
-            console::measure_text_width(&face_row[..byte])
+                .filter(|l| l.contains("(='-')") || l.contains("(\\(\\"))
+                .collect::<Vec<_>>()
         };
-        let early = face_col(0);
-        let later = face_col(GROW * 3);
-        assert_eq!(early, later, "the warren's left edge stays put as it grows");
-        assert!(
-            early > 0,
-            "the warren is centred, not flush to the left edge"
-        );
+        assert_eq!(mascot(&before), mascot(&after));
+        // The two frames still differ overall — the title faded in.
+        assert_ne!(before, after);
     }
 
     #[test]
     fn render_frame_centers_the_body_vertically() {
-        let frame = render_frame(40, 80, 0);
+        let frame = render_frame(40, 80, FRAMES - 1);
         assert_eq!(frame.len(), 40);
         // Leading blank rows centre the body; the title is somewhere in the middle.
         let top_padding = frame.iter().take_while(|l| l.is_empty()).count();
         assert!(top_padding > 0);
         assert!(frame.iter().any(|l| l.contains(TITLE)));
+    }
+
+    #[test]
+    fn render_frame_places_the_mascot_and_title_at_the_welcome_rows() {
+        // The mascot and title sit at exactly the rows the welcome screen places
+        // them, so neither jumps when the welcome menu takes over (no layout
+        // shift). The splash leads with the welcome top padding, then the three
+        // mascot rows, a blank, and the title.
+        let height = 40;
+        let frame = render_frame(height, 80, FRAMES - 1);
+        let top = welcome::mascot_top_padding(height);
+        // Every row above the mascot is blank...
+        assert!(frame[..top].iter().all(|l| l.is_empty()));
+        // ...the mascot's first row (the ears) lands exactly on the welcome row...
+        assert!(console::strip_ansi_codes(&frame[top]).contains("(\\(\\"));
+        // ...and the title follows the three mascot rows and a blank spacer.
+        assert!(console::strip_ansi_codes(&frame[top + 4]).contains(TITLE));
     }
 
     #[test]

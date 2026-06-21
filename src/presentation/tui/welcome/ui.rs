@@ -80,6 +80,22 @@ fn footer_lines(width: usize) -> Vec<String> {
     vec![widgets::dim_line(width, &footer)]
 }
 
+/// The number of blank rows above the mascot that vertically centre the welcome
+/// body over its pinned footer — i.e. the row the mascot's first line sits on.
+///
+/// [`render_frame`] uses it to place its own body, and the startup splash — which
+/// shows the same mascot and title before the menu takes over — reuses it so the
+/// mascot and title sit at exactly the rows the welcome screen places them, and
+/// never jump when the menu and footer appear (no layout shift). Every section's
+/// row count is independent of the width, so the throwaway width passed to the
+/// builders here does not affect the result.
+pub fn body_top_padding(height: usize, items: &[MenuItem], notice: Option<&str>) -> usize {
+    let body =
+        header_lines(0).len() + menu_lines(0, items, 0).len() + notice_lines(0, notice).len();
+    let footer = footer_lines(0).len();
+    height.saturating_sub(body + footer) / 2
+}
+
 /// Builds the full welcome-screen frame for a raw terminal size.
 pub fn render_frame(
     raw_height: usize,
@@ -99,8 +115,9 @@ pub fn render_frame(
 
     let mut lines = Vec::with_capacity(height);
 
-    // Centre the body in the space above the footer.
-    let top_padding = height.saturating_sub(body.len() + footer.len()) / 2;
+    // Centre the body in the space above the footer (shared with the splash so
+    // the mascot and title line up across the two screens).
+    let top_padding = body_top_padding(height, items, notice);
     for _ in 0..top_padding {
         lines.push(String::new());
     }
@@ -210,6 +227,29 @@ mod tests {
         assert!(top_padding > 0);
         assert!(!frame[top_padding].is_empty());
         assert!(frame.iter().any(|l| l.contains("USAGI")));
+    }
+
+    #[test]
+    fn body_top_padding_is_the_rendered_mascot_row() {
+        // The shared placement helper reports exactly the row render_frame puts
+        // the mascot on, so the splash can align to it without a layout shift.
+        let items = sample_items();
+        let height = 40;
+        let pad = body_top_padding(height, &items, None);
+        let frame = render_frame(height, 80, &items, 0, None);
+        assert!(frame[..pad].iter().all(|l| l.is_empty()));
+        assert!(console::strip_ansi_codes(&frame[pad]).contains("(\\(\\"));
+    }
+
+    #[test]
+    fn body_top_padding_is_unaffected_by_the_notice() {
+        // The notice slot is always one row whether or not a notice shows, so the
+        // mascot's row — and thus the splash's alignment — never depends on it.
+        let items = sample_items();
+        assert_eq!(
+            body_top_padding(40, &items, None),
+            body_top_padding(40, &items, Some("Saved 🐰")),
+        );
     }
 
     #[test]
