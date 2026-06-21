@@ -164,8 +164,16 @@ impl MonitorHandle {
         self.lock().monitor.set_attached(path);
     }
 
+    /// Recovers the guard rather than panicking if the lock was poisoned: this
+    /// runs on the render path (`snapshot` / `set_attached`), and any thread that
+    /// panicked while holding `Shared` would poison the mutex, so an `expect` here
+    /// would escalate it into a crash of the whole TUI — leaving the terminal in
+    /// raw mode. A possibly-stale badge snapshot beats taking the UI down. Mirrors
+    /// the watcher thread's poison handling and [`PtySession::parser`].
     fn lock(&self) -> std::sync::MutexGuard<'_, Shared> {
-        self.shared.lock().expect("terminal monitor mutex poisoned")
+        self.shared
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 }
 
@@ -524,8 +532,16 @@ impl TerminalPool {
         Some(view)
     }
 
+    /// Recovers the guard rather than panicking if the lock was poisoned: the
+    /// render loop reaches this through `snapshot` / `spawn_pane` / `refresh_watched`,
+    /// and any thread that panicked while holding `Shared` would poison the mutex,
+    /// so an `expect` here would escalate it into a crash of the whole TUI —
+    /// leaving the terminal in raw mode. A possibly-stale view beats taking the UI
+    /// down. Mirrors the watcher thread's poison handling and [`PtySession::parser`].
     fn lock(&self) -> std::sync::MutexGuard<'_, Shared> {
-        self.shared.lock().expect("terminal monitor mutex poisoned")
+        self.shared
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 }
 
