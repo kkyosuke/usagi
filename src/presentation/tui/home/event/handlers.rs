@@ -415,8 +415,9 @@ fn focus_menu_key(
         Key::ArrowUp | Key::Char('k') => state.focus_menu_move_up(),
         Key::ArrowDown | Key::Char('j') => state.focus_menu_move_down(),
         Key::Enter => {
-            let name = state.focus_selected_command().name;
-            run_focus_command(term, state, painter, name, wiring);
+            if let Some(command) = state.focus_selected_command() {
+                run_focus_command(term, state, painter, command.name, wiring);
+            }
         }
         Key::Char('t') => run_focus_command(term, state, painter, "terminal", wiring),
         Key::Char('a') => run_focus_command(term, state, painter, "agent", wiring),

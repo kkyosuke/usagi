@@ -883,15 +883,15 @@ fn focus_menu_cursor_moves_and_wraps_and_selects() {
     state.enter_focus(1);
     // With `ai` hidden: terminal (0, highlighted by default), agent (1),
     // close (2).
-    assert_eq!(state.focus_selected_command().name, "terminal");
+    assert_eq!(state.focus_selected_command().unwrap().name, "terminal");
     state.focus_menu_move_down();
-    assert_eq!(state.focus_selected_command().name, "agent");
+    assert_eq!(state.focus_selected_command().unwrap().name, "agent");
     state.focus_menu_move_down();
     state.focus_menu_move_down(); // wraps to the top
     assert_eq!(state.focus_menu_cursor(), 0);
     // Up from the top wraps to the bottom (`close`).
     state.focus_menu_move_up();
-    assert_eq!(state.focus_selected_command().name, "close");
+    assert_eq!(state.focus_selected_command().unwrap().name, "close");
 }
 
 #[test]
