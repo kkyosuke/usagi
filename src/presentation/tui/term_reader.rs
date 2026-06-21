@@ -54,6 +54,21 @@ impl KeyReader for TermKeyReader {
         // strictly sequential. When input is ready we decode it with `console`
         // exactly as a blocking read would; a wheel turn or other mouse report
         // drains to a tick (`None`) so the caller just repaints and polls again.
+        //
+        // The poll **must** run in raw mode. Between its per-key raw reads
+        // `console` leaves the terminal in cooked (canonical) mode (the alternate
+        // screen guard only clears `ECHO`; see [`super::echo`]). A canonical-mode
+        // tty is reported readable only once the line discipline has a full,
+        // newline-terminated line — so a lone arrow key / `j` / `k` never looks
+        // "ready", and this poll would tick to `None` forever without ever seeing
+        // it. That stranded every non-`Enter` key whenever the loop animates
+        // (i.e. whenever a session is live — exactly the state `Ctrl-O` out of an
+        // attached pane lands in: 切替 with the just-detached session still
+        // running). Entering raw mode for the poll *and* the decode makes each
+        // keypress deliverable at once, mirroring the per-read raw mode `console`
+        // already uses on the blocking path; the guard restores cooked mode on the
+        // way out so the rest of the loop is unchanged.
+        let _raw = RawModeGuard::enter()?;
         if !crossterm::event::poll(timeout)? {
             return Ok(None);
         }
@@ -61,6 +76,24 @@ impl KeyReader for TermKeyReader {
             Input::Key(key) => Ok(Some(key)),
             Input::Scroll(_) => Ok(None),
         }
+    }
+}
+
+/// Enables crossterm raw mode for as long as it is held, restoring the prior
+/// (cooked) mode on drop. Used to bracket the timeout poll so the line discipline
+/// delivers each keypress immediately instead of buffering it until a newline.
+struct RawModeGuard;
+
+impl RawModeGuard {
+    fn enter() -> io::Result<Self> {
+        crossterm::terminal::enable_raw_mode()?;
+        Ok(Self)
+    }
+}
+
+impl Drop for RawModeGuard {
+    fn drop(&mut self) {
+        let _ = crossterm::terminal::disable_raw_mode();
     }
 }
 
