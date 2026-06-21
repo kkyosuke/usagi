@@ -215,13 +215,18 @@ pub(super) fn event_loop(
         // viewport and reveal the pre-launch scrollback). The embedded terminal
         // pane has its own history scroll, handled separately.
         //
-        // While a background install or a session task is in flight the read
-        // wakes every `ANIM_TICK` so the loop re-iterates — re-draining finished
-        // work and repainting, which advances the task panel's and install
-        // rabbit's time-based animation. With nothing in flight it blocks on the
-        // next key, so an idle screen costs nothing.
+        // While a background install or a session task is in flight — or any
+        // session is live — the read wakes every `ANIM_TICK` so the loop
+        // re-iterates: re-draining finished work, re-reading the monitor badges
+        // and update notice, and repainting (which also advances the task panel's
+        // and install rabbit's time-based animation). This is what keeps a live
+        // background agent's badge moving to waiting (◆) / finished (✓) without
+        // the user typing. With nothing in flight and no live session it blocks on
+        // the next key, so a truly idle screen costs nothing.
         let now = Instant::now();
-        let animate = install_task::handle().is_active(now) || tasks.is_active(now);
+        let animate = install_task::handle().is_active(now)
+            || tasks.is_active(now)
+            || state.has_live_sessions();
         let key = if animate {
             match reader.read_key_timeout(install_task::ANIM_TICK) {
                 Ok(Some(key)) => key,
