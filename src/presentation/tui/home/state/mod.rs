@@ -919,10 +919,18 @@ impl HomeState {
         self.focus_menu.move_down(count);
     }
 
-    /// The 在席 command under the menu cursor, clamped to the available commands.
-    pub fn focus_selected_command(&self) -> CommandInfo {
+    /// The 在席 command under the menu cursor, clamped to the available commands,
+    /// or `None` when no Session-scope command is available.
+    ///
+    /// `FocusMenu::selected` clamps to `len - 1`, which is `0` for an empty list
+    /// — so indexing directly would panic if the registry ever yielded no
+    /// Session-scope commands. Returning `Option` keeps the caller a no-op in
+    /// that case instead of crashing (and unwinding) the TUI.
+    pub fn focus_selected_command(&self) -> Option<CommandInfo> {
         let commands = self.focus_menu_commands();
-        commands[self.focus_menu.selected(commands.len())]
+        commands
+            .get(self.focus_menu.selected(commands.len()))
+            .copied()
     }
 
     /// The 在席 prompt buffer (the session-scoped command line).
