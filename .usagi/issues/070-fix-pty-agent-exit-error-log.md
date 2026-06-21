@@ -1,13 +1,13 @@
 ---
 number: 70
 title: fix(pty): エージェント/シェルの異常終了（非ゼロ exit）をエラーログに記録する
-status: todo
+status: done
 priority: high
 labels: [fix, infrastructure, error-log]
 dependson: []
 related: [71]
 created_at: 2026-06-21T00:00:00.000000+00:00
-updated_at: 2026-06-21T00:00:00.000000+00:00
+updated_at: 2026-06-21T03:23:20.664099+00:00
 ---
 
 ## 背景

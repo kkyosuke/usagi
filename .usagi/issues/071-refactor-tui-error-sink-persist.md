@@ -1,13 +1,13 @@
 ---
 number: 71
 title: refactor(tui): TUI のエラー記録を単一シンクへ集約しファイルにも永続化する
-status: todo
+status: done
 priority: medium
 labels: [refactor, tui, error-log]
 dependson: []
 related: [70, 72, 73]
 created_at: 2026-06-21T00:00:01.000000+00:00
-updated_at: 2026-06-21T00:00:01.000000+00:00
+updated_at: 2026-06-21T03:23:20.664099+00:00
 ---
 
 ## 背景
