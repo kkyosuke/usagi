@@ -2097,6 +2097,70 @@ fn an_unexpected_timeout_read_error_is_propagated() {
     assert!(err.to_string().contains("Failed to read key"));
 }
 
+/// Run the real loop with one live session and no install / task in flight, so
+/// the loop animates purely because a session is live. Drives the given reader,
+/// proving the loop wakes on the timeout tick (to reflect a background agent's
+/// badge) instead of blocking on the next key.
+fn run_with_live_session(reader: &mut dyn KeyReader) -> Result<Outcome> {
+    let term = Term::stdout();
+    let monitor = MonitorHandle::with_live(vec![PathBuf::from("/r/main")]);
+    let tasks = TaskHandle::new();
+    let mut persist: fn(&str) = noop_persist;
+    let mut dispatch_create = |_: &str| {};
+    let mut rename: fn(&str, &str) -> SessionOutcome = noop_rename;
+    let mut dispatch_remove = |_: &str, _: bool| {};
+    let mut evict = |_: &Path| {};
+    let mut branches: fn() -> Vec<String> = no_branches;
+    let mut open: fn(&mut HomeState, &Path, bool, bool) -> Result<PaneExit> = noop_open;
+    let mut config: fn(&Term) -> Result<Option<ConfigReload>> = noop_config;
+    let mut preview: fn(&Path) -> Option<TerminalView> = noop_preview;
+    let mut tab_op: fn(&Path, Option<TabNav>) -> (Vec<String>, usize) = noop_tab_op;
+    let mut close: fn(&mut HomeState, &Path) = noop_close;
+    let mut wiring = Wiring {
+        workspace_root: Path::new("/ws"),
+        persist: &mut persist,
+        dispatch_create: &mut dispatch_create,
+        rename_display: &mut rename,
+        dispatch_remove: &mut dispatch_remove,
+        evict_pool: &mut evict,
+        existing_branches: &mut branches,
+        open_terminal: &mut open,
+        open_config: &mut config,
+        preview: &mut preview,
+        tab_op: &mut tab_op,
+        close_tab: &mut close,
+    };
+    event_loop(
+        &term,
+        reader,
+        sample_state(),
+        &monitor,
+        &UpdateHandle::new(),
+        &tasks,
+        &mut wiring,
+    )
+}
+
+#[test]
+fn a_live_session_wakes_the_loop_without_a_key() {
+    // Regression for #66: with no install or task running but a session live, the
+    // loop must still wake on the timeout tick so a background agent's badge
+    // (waiting ◆ / finished ✓) and the update notice are reflected without the
+    // user pressing a key. The first tick yields no key (Ok(None)) and the loop
+    // re-iterates; the live session makes the next Ctrl-C raise the quit-confirm
+    // modal, and a second confirms. The blocking queue holds an error: were the
+    // loop to block on `read_key` (the bug), it would surface here instead of
+    // quitting cleanly through the timeout path.
+    let mut reader = TimeoutScript {
+        timeouts: VecDeque::from(vec![Ok(None), Ok(Some(Key::CtrlC)), Ok(Some(Key::CtrlC))]),
+        blocking: VecDeque::from(vec![Err(io::Error::other("loop blocked on a key"))]),
+    };
+    assert!(matches!(
+        run_with_live_session(&mut reader).unwrap(),
+        Outcome::Quit
+    ));
+}
+
 #[test]
 fn a_finished_removal_evicts_the_pooled_shell() {
     // A completed removal carrying an evict path makes the loop evict that pool
