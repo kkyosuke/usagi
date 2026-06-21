@@ -18,14 +18,21 @@
 //! conversion directly testable: a test drives a [`vt100::Parser`] with bytes
 //! and asserts the resulting rows and cursor.
 
+use std::sync::Arc;
+
 use super::terminal_link;
 use super::terminal_selection::{Cell, Selection};
 
 /// An owned snapshot of an embedded terminal's visible screen.
+///
+/// The 切替 preview re-snapshots the same backgrounded session every frame and
+/// caches the result; the rows are wrapped in an [`Arc`] so that cache (and any
+/// other) `clone` is a refcount bump rather than a deep copy of the whole grid's
+/// text — the view is immutable once built, so sharing it is safe.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TerminalView {
     /// One string per grid row, each laid out to the screen's column width.
-    rows: Vec<String>,
+    rows: Arc<Vec<String>>,
     /// The cursor's `(row, col)` position, or `None` when it is hidden.
     cursor: Option<(u16, u16)>,
 }
@@ -138,12 +145,15 @@ impl TerminalView {
         } else {
             Some(screen.cursor_position())
         };
-        Self { rows: out, cursor }
+        Self {
+            rows: Arc::new(out),
+            cursor,
+        }
     }
 
     /// The screen's rows, top to bottom.
     pub fn rows(&self) -> &[String] {
-        &self.rows
+        self.rows.as_slice()
     }
 
     /// The cursor's `(row, col)` position, or `None` when hidden.
@@ -155,7 +165,10 @@ impl TerminalView {
     /// that render a [`TerminalView`].
     #[cfg(test)]
     pub fn from_rows(rows: Vec<String>, cursor: Option<(u16, u16)>) -> Self {
-        Self { rows, cursor }
+        Self {
+            rows: Arc::new(rows),
+            cursor,
+        }
     }
 }
 

@@ -50,7 +50,7 @@ use crate::presentation::tui::screen::diff_frame;
 
 use super::state::HomeState;
 use super::terminal_link;
-use super::terminal_pool::{MonitorHandle, MonitorSnapshot};
+use super::terminal_pool::MonitorHandle;
 use super::terminal_selection::{Cell, Selection};
 use super::terminal_view::TerminalView;
 use super::ui;
@@ -181,7 +181,6 @@ fn drive(
     // force the opening pass to draw.
     let mut last_geo: Option<ui::TerminalGeometry> = None;
     let mut applied_scrollback: Option<usize> = None;
-    let mut last_badges: Option<MonitorSnapshot> = None;
     let mut last_selection: Option<Selection> = None;
     let mut last_hover: Option<Cell> = None;
     let mut drawn_gen = pty.generation();
@@ -238,7 +237,7 @@ fn drive(
         // together under a single lock; repaint when they move so sessions
         // (including this one) keep their current state.
         let badges = monitor.snapshot();
-        if last_badges.as_ref() != Some(&badges) {
+        if state.badges() != &badges {
             interactive = true;
         }
 
@@ -268,9 +267,8 @@ fn drive(
             // viewing scrolled-back history.
             let cursor = if scrollback == 0 { view.cursor() } else { None };
             state.set_terminal_view(view);
-            state.apply_badges(badges.clone());
+            state.apply_badges(badges);
             render(term, state, cursor, geo, &mut prev)?;
-            last_badges = Some(badges);
             last_selection = selection;
             last_hover = hover;
             last_paint = Some(now);

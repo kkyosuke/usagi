@@ -201,7 +201,6 @@ pub(super) fn event_loop(
     // and update notice are unchanged can skip rebuilding and repainting the whole
     // frame. `force_paint` keeps the first frame — and the frame after any key —
     // always repainting.
-    let mut last_badges = None;
     let mut last_update = None;
     let mut force_paint = true;
     loop {
@@ -210,7 +209,11 @@ pub(super) fn event_loop(
         // badge set together (read under a single lock) so the frame never mixes
         // one set's fresh reading with another's stale one.
         let badges = monitor.snapshot();
-        state.apply_badges(badges.clone());
+        // Whether the sidebar badges moved since the last paint, decided before
+        // storing them so the snapshot can be applied by move rather than cloned
+        // (the loop no longer keeps its own copy alongside the one in `state`).
+        let badges_changed = state.badges() != &badges;
+        state.apply_badges(badges);
         // Surface the top-right "update available" notice once the background
         // release check has found a newer version than this build.
         let latest_update = update.status().map(|status| status.latest);
@@ -287,14 +290,13 @@ pub(super) fn event_loop(
             && !completed_any
             && !refreshed
             && !panel_animating
-            && last_badges.as_ref() == Some(&badges)
+            && !badges_changed
             && last_update == latest_update;
         let (height, width) = term.size();
         if !skip_paint {
             let frame = ui::render_frame(height as usize, width as usize, &state);
             painter.paint(term, frame)?;
         }
-        last_badges = Some(badges);
         last_update = latest_update;
         force_paint = false;
 

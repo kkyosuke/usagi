@@ -584,6 +584,14 @@ impl HomeState {
         self.badges = badges;
     }
 
+    /// The badge sets the last [`apply_badges`](Self::apply_badges) stored, so a
+    /// render loop can compare a freshly read snapshot against what it last drew
+    /// and skip the repaint when nothing moved — without keeping (and cloning into)
+    /// its own copy each frame.
+    pub fn badges(&self) -> &MonitorSnapshot {
+        &self.badges
+    }
+
     /// Whether the worktree at `path` has a background session actively working a
     /// turn.
     pub fn is_running(&self, path: &Path) -> bool {
