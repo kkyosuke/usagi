@@ -279,6 +279,11 @@ pub fn search(repo_root: &Path, query: &str, filter: &IssueFilter) -> Result<Vec
 /// `None` if no such issue exists.
 pub fn update(repo_root: &Path, number: u32, changes: IssueChanges) -> Result<Option<Issue>> {
     let store = IssueStore::new(repo_root);
+    // Hold the lock across the read and the write so a concurrent `update` (or a
+    // `create` that rewrites the index) cannot interleave between the two and
+    // clobber this change — the lost update the store lock exists to prevent.
+    // Mirrors `create` above.
+    let lock = store.lock()?;
     let Some(mut issue) = store.read(number)? else {
         return Ok(None);
     };
@@ -310,7 +315,7 @@ pub fn update(repo_root: &Path, number: u32, changes: IssueChanges) -> Result<Op
         issue.body = body;
     }
     issue.updated_at = Utc::now();
-    store.write(&issue)?;
+    store.write_locked(&lock, &issue)?;
     Ok(Some(issue))
 }
 

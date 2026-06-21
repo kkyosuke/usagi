@@ -151,6 +151,9 @@ pub fn existing_branch_names(workspace_root: &Path) -> Vec<String> {
 /// track its sessions. Each worktree's git status is captured at record time.
 fn record(workspace_root: &Path, name: &str, root: &Path, worktrees: &[PathBuf]) -> Result<()> {
     let store = WorkspaceStore::new(workspace_root);
+    // Serialise the load → append → save against any other process mutating this
+    // workspace's `state.json`, so a concurrent writer cannot drop this session.
+    let _lock = store.lock()?;
     let mut state = store.load()?.unwrap_or_default();
 
     // A session's worktrees may live in different source repositories (a
@@ -178,6 +181,9 @@ fn record(workspace_root: &Path, name: &str, root: &Path, worktrees: &[PathBuf])
 /// label now shown for the session. Fails when no session named `name` exists.
 pub fn set_display_name(workspace_root: &Path, name: &str, display: &str) -> Result<String> {
     let store = WorkspaceStore::new(workspace_root);
+    // Hold the lock across the load → edit → save so a concurrent writer cannot
+    // overwrite this rename (or have it overwrite their change).
+    let _lock = store.lock()?;
     let mut state = store
         .load()?
         .ok_or_else(|| anyhow!("no sessions recorded for this workspace"))?;
@@ -246,6 +252,9 @@ pub fn remove(
     reconcile(workspace_root)?;
 
     let store = WorkspaceStore::new(workspace_root);
+    // Hold the lock across the load → drop-the-record → save so a concurrent
+    // writer cannot resurrect the removed session or lose an unrelated change.
+    let _lock = store.lock()?;
     let mut state = store
         .load()?
         .ok_or_else(|| anyhow!("no sessions recorded for this workspace"))?;
