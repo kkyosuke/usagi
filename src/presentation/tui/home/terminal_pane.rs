@@ -762,22 +762,28 @@ fn is_copy(key: &KeyEvent) -> bool {
 
 /// Bracketed-paste start / end markers (DECSET 2004). A program that requested
 /// the mode treats everything between them as one paste.
-const PASTE_START: &[u8] = b"\x1b[200~";
-const PASTE_END: &[u8] = b"\x1b[201~";
+const PASTE_START: &str = "\x1b[200~";
+const PASTE_END: &str = "\x1b[201~";
 
 /// Encode a paste for the shell. When the running program asked for bracketed
 /// paste (`bracketed`), wrap the text in the start/end markers so it lands as a
 /// single block — the agent inserts the multi-line text rather than submitting
 /// on each newline. Otherwise forward the raw bytes (the program never opted in,
 /// so there is nothing to wrap).
+///
+/// In the bracketed case any [`PASTE_END`] marker the pasted text itself contains
+/// is stripped first: leaving it in would let pasted content close the paste
+/// early and have its tail run as live keystrokes (paste injection), so — like
+/// real terminals — we neutralise the embedded terminator.
 fn encode_paste(text: &str, bracketed: bool) -> Vec<u8> {
     if !bracketed {
         return text.as_bytes().to_vec();
     }
-    let mut bytes = Vec::with_capacity(PASTE_START.len() + text.len() + PASTE_END.len());
-    bytes.extend_from_slice(PASTE_START);
-    bytes.extend_from_slice(text.as_bytes());
-    bytes.extend_from_slice(PASTE_END);
+    let body = text.replace(PASTE_END, "");
+    let mut bytes = Vec::with_capacity(PASTE_START.len() + body.len() + PASTE_END.len());
+    bytes.extend_from_slice(PASTE_START.as_bytes());
+    bytes.extend_from_slice(body.as_bytes());
+    bytes.extend_from_slice(PASTE_END.as_bytes());
     bytes
 }
 
@@ -943,5 +949,38 @@ mod tests {
             KeyCode::Char('c'),
             KeyModifiers::CONTROL | KeyModifiers::SHIFT,
         )));
+    }
+
+    #[test]
+    fn encode_paste_passes_raw_bytes_when_not_bracketed() {
+        // No bracketed-paste mode: forward the text unwrapped, verbatim.
+        assert_eq!(encode_paste("ls -la\n", false), b"ls -la\n".to_vec());
+    }
+
+    #[test]
+    fn encode_paste_wraps_in_bracketed_markers() {
+        assert_eq!(
+            encode_paste("hi", true),
+            [PASTE_START, "hi", PASTE_END].concat().into_bytes(),
+        );
+    }
+
+    #[test]
+    fn encode_paste_strips_an_embedded_end_marker() {
+        // Paste-injection guard: an end marker inside the pasted text would
+        // otherwise close the paste early and run its tail as live keystrokes.
+        let malicious = format!("safe{PASTE_END}rm -rf ~\n");
+        let encoded = encode_paste(&malicious, true);
+        let expected = [PASTE_START, "saferm -rf ~\n", PASTE_END]
+            .concat()
+            .into_bytes();
+        assert_eq!(encoded, expected);
+        // The terminator appears exactly once — only the wrapper's own trailer.
+        let needle = PASTE_END.as_bytes();
+        let hits = encoded
+            .windows(needle.len())
+            .filter(|w| *w == needle)
+            .count();
+        assert_eq!(hits, 1);
     }
 }

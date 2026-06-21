@@ -77,6 +77,19 @@ fn markdown_round_trips() {
 }
 
 #[test]
+fn name_and_title_preserve_boundary_spaces_on_round_trip() {
+    // Regression: free-text scalars used to be `.trim()`-ed on parse, dropping a
+    // value's own leading/trailing spaces on reload. Only the single `key: `
+    // delimiter space is stripped now.
+    let mut m = sample();
+    m.name = "  spaced name  ".to_string();
+    m.title = "  spaced title  ".to_string();
+    let parsed = Memory::from_markdown(&m.to_markdown()).unwrap();
+    assert_eq!(parsed.name, "  spaced name  ");
+    assert_eq!(parsed.title, "  spaced title  ");
+}
+
+#[test]
 fn from_markdown_accepts_crlf_and_empty_related() {
     let text = "---\r\nname: n\r\ntitle: t\r\ntype: project\r\nrelated: []\r\n\
         created_at: 2026-06-17T00:00:00Z\r\nupdated_at: 2026-06-17T00:00:00Z\r\n---\r\n\r\nbody\r\n";

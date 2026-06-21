@@ -43,10 +43,15 @@ impl Memory {
             let (key, value) = line
                 .split_once(':')
                 .ok_or_else(|| ParseMemoryError(format!("invalid frontmatter line: {line:?}")))?;
+            // Free-text scalars (`name`, `title`) are written verbatim after a
+            // single `key: ` delimiter space, so strip only that one space for
+            // them; trimming would drop the user's own leading/trailing spaces and
+            // break the round-trip. Enum / list / timestamp fields stay trimmed.
+            let text_value = value.strip_prefix(' ').unwrap_or(value);
             let value = value.trim();
             match key.trim() {
-                "name" => name = Some(value.to_string()),
-                "title" => title = Some(value.to_string()),
+                "name" => name = Some(text_value.to_string()),
+                "title" => title = Some(text_value.to_string()),
                 "type" => kind = value.parse()?,
                 "related" => related = parse_string_list(value),
                 "created_at" => created_at = Some(parse_timestamp(value)?),

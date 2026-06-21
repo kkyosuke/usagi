@@ -63,6 +63,12 @@ impl Issue {
             let (key, value) = line
                 .split_once(':')
                 .ok_or_else(|| ParseIssueError(format!("invalid frontmatter line: {line:?}")))?;
+            // Numeric / enum / list / timestamp fields are trimmed, but free-text
+            // scalars (`title`, `milestone`) are written verbatim after a single
+            // `key: ` delimiter space, so strip only that one space for them —
+            // full trimming would drop the user's own leading/trailing spaces and
+            // break the round-trip the list escaping is otherwise careful to keep.
+            let text_value = value.strip_prefix(' ').unwrap_or(value);
             let value = value.trim();
             match key.trim() {
                 "number" => {
@@ -72,7 +78,7 @@ impl Issue {
                             .map_err(|_| ParseIssueError(format!("invalid number: {value:?}")))?,
                     )
                 }
-                "title" => title = Some(value.to_string()),
+                "title" => title = Some(text_value.to_string()),
                 "status" => status = value.parse()?,
                 "priority" => priority = value.parse()?,
                 "labels" => labels = parse_string_list(value),
@@ -92,7 +98,7 @@ impl Issue {
                     milestone = if value.is_empty() {
                         None
                     } else {
-                        Some(value.to_string())
+                        Some(text_value.to_string())
                     }
                 }
                 "created_at" => created_at = Some(parse_timestamp(value)?),

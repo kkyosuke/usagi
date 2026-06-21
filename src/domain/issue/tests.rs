@@ -311,6 +311,20 @@ fn labels_with_special_characters_round_trip_losslessly() {
 }
 
 #[test]
+fn title_and_milestone_preserve_boundary_spaces_on_round_trip() {
+    // Regression: free-text scalars used to be `.trim()`-ed on parse, so a title
+    // or milestone with leading/trailing spaces silently lost them on reload —
+    // unlike the list fields, which escape boundary spaces. Only the single
+    // `key: ` delimiter space is stripped now.
+    let mut issue = sample();
+    issue.title = "  spaced title  ".to_string();
+    issue.milestone = Some("  v2  ".to_string());
+    let parsed = Issue::from_markdown(&issue.to_markdown()).unwrap();
+    assert_eq!(parsed.title, "  spaced title  ");
+    assert_eq!(parsed.milestone, Some("  v2  ".to_string()));
+}
+
+#[test]
 fn label_with_a_comma_is_one_value_not_two() {
     // Regression: `a, b` used to split into `["a", "b"]` on reload.
     let mut issue = sample();
