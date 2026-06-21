@@ -85,6 +85,13 @@ pub fn create(workspace_root: &Path, name: &str) -> Result<CreatedSession> {
     // `cannot lock ref` error. Refuse up front with a clear, actionable message
     // before touching any repository.
     for repo in tree::source_repos(workspace_root) {
+        // Clear any dangling worktree registration whose directory was deleted
+        // out-of-band (a crash, a manual `rm`, or a teardown that left a worktree
+        // on an unexpected branch registered). Without this, `git worktree add`
+        // at the reused session path fails with "missing but already registered
+        // worktree" and the session can never be recreated. Best-effort: a prune
+        // failure must not block creation, so it is logged-and-ignored.
+        let _ = git::prune_worktrees(&repo);
         if let Some(conflict) = git::branch_namespace_conflict(&repo, name) {
             bail!(
                 "session \"{name}\" conflicts with the existing branch \"{conflict}\": \
@@ -1082,6 +1089,66 @@ mod tests {
         assert!(recreated.root.exists());
         assert_eq!(head_branch(&recreated.root), "dup");
         assert_eq!(sessions_of(root.path()), vec!["dup".to_string()]);
+    }
+
+    #[test]
+    fn create_recovers_from_a_dangling_worktree_registration() {
+        // A worktree was registered at the session path on some *other* branch,
+        // then its directory was deleted out-of-band (a crash or a manual `rm`),
+        // leaving git with a dangling "prunable" registration there. Recreating a
+        // session of that name used to fail forever with "missing but already
+        // registered worktree"; create now prunes the stale registration first.
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        let session_path = root.path().join(".usagi/sessions/review");
+        fs::create_dir_all(session_path.parent().unwrap()).unwrap();
+        // Register a worktree at the eventual session path on an unrelated branch,
+        // then remove the directory — only the dangling registration remains.
+        assert!(git_cmd(root.path())
+            .args(["worktree", "add", "-q", "-b", "fix/review-findings"])
+            .arg(&session_path)
+            .status()
+            .unwrap()
+            .success());
+        fs::remove_dir_all(&session_path).unwrap();
+
+        let created = create(root.path(), "review").unwrap();
+
+        assert!(created.root.exists());
+        assert_eq!(head_branch(&created.root), "review");
+        assert_eq!(sessions_of(root.path()), vec!["review".to_string()]);
+    }
+
+    #[test]
+    fn discard_session_unregisters_a_worktree_on_an_unexpected_branch() {
+        // A worktree sitting at the session path but on a branch other than the
+        // session name must still be unregistered when the session is torn down —
+        // matching on the branch alone left the registration behind, orphaned, the
+        // moment the directory was deleted (the bug above's root cause).
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        let session_root = root.path().join(".usagi/sessions/odd");
+        fs::create_dir_all(session_root.parent().unwrap()).unwrap();
+        assert!(git_cmd(root.path())
+            .args(["worktree", "add", "-q", "-b", "other"])
+            .arg(&session_root)
+            .status()
+            .unwrap()
+            .success());
+
+        let repo_worktrees = reconcile::list_repo_worktrees(root.path()).unwrap();
+        reconcile::discard_session(&session_root, "odd", &repo_worktrees, true).unwrap();
+
+        // The directory is gone *and* git keeps no dangling registration for it,
+        // so a later session named "odd" can reuse the path.
+        assert!(!session_root.exists());
+        let canon = |p: &Path| fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+        let target = canon(&session_root);
+        let orphaned = git::list_worktrees(root.path())
+            .unwrap()
+            .iter()
+            .any(|wt| canon(&wt.path) == target);
+        assert!(!orphaned, "worktree registration was orphaned");
     }
 
     #[test]

@@ -47,6 +47,32 @@ pub fn add_worktree(repo: &Path, dest: &Path, branch: &str, base: Option<&str>) 
     Ok(())
 }
 
+/// Prune worktree registrations whose working directory no longer exists.
+///
+/// Runs `git -C <repo> worktree prune`. When a session directory under
+/// `.usagi/sessions/` is deleted out-of-band — a crash, a manual `rm`, or a
+/// teardown that removed the directory but not the registration (e.g. a worktree
+/// left on an unexpected branch) — git keeps a dangling "prunable" registration
+/// at that path. A later `git worktree add` at the same path then fails with
+/// `'<path>' is a missing but already registered worktree`. Pruning first clears
+/// those stale registrations so a fresh session can reuse the path. Output is
+/// captured (not inherited) so it never disturbs an active TUI; on failure the
+/// captured stderr is surfaced. Repo-scoping env vars are stripped for the same
+/// reason as [`add_worktree`].
+pub fn prune_worktrees(repo: &Path) -> Result<()> {
+    let output = git_command(repo)
+        .args(["worktree", "prune"])
+        .output()
+        .context("failed to run `git worktree prune`")?;
+    if !output.status.success() {
+        bail!(
+            "git worktree prune failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
 /// Initialize and check out the git submodules of the worktree at `worktree`.
 ///
 /// Runs `git -C <worktree> submodule update --init --recursive` — the same
