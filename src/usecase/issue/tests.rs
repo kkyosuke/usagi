@@ -259,6 +259,42 @@ fn create_assigns_increasing_numbers_and_defaults_to_todo() {
 }
 
 #[test]
+fn create_numbers_issues_across_the_whole_workspace() {
+    // A workspace root with two session worktrees mirrored under
+    // `.usagi/sessions/`. Issues live in each worktree's own store, but
+    // numbering is shared so two branches never reuse a number and collide on
+    // merge.
+    let tmp = tempfile::tempdir().unwrap();
+    let workspace = tmp.path();
+    let session_a = workspace.join(".usagi").join("sessions").join("a");
+    let session_b = workspace.join(".usagi").join("sessions").join("b");
+
+    // A loose file under the sessions dir must be skipped by the scan.
+    std::fs::create_dir_all(workspace.join(".usagi").join("sessions")).unwrap();
+    std::fs::write(
+        workspace.join(".usagi").join("sessions").join("note.txt"),
+        "x",
+    )
+    .unwrap();
+
+    let w1 = create(workspace, new_issue("workspace one")).unwrap();
+    let a2 = create(&session_a, new_issue("session a")).unwrap();
+    let b3 = create(&session_b, new_issue("session b")).unwrap();
+    let w4 = create(workspace, new_issue("workspace two")).unwrap();
+
+    // Numbers increase across every worktree and are never reused.
+    assert_eq!((w1.number, a2.number, b3.number, w4.number), (1, 2, 3, 4));
+
+    // Each issue is stored only in the worktree it was created in.
+    assert!(get(&session_a, 2).unwrap().is_some());
+    assert!(get(workspace, 2).unwrap().is_none());
+    assert!(get(&session_b, 3).unwrap().is_some());
+    assert!(get(workspace, 3).unwrap().is_none());
+    assert_eq!(get(workspace, 1).unwrap().unwrap().title, "workspace one");
+    assert_eq!(get(workspace, 4).unwrap().unwrap().title, "workspace two");
+}
+
+#[test]
 fn update_applies_only_set_fields_and_touches_updated_at() {
     let tmp = tempfile::tempdir().unwrap();
     let repo = tmp.path();

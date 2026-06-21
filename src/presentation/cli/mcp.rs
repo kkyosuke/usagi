@@ -46,15 +46,22 @@ impl AgentBackend for CliAgentBackend {
 /// the input stream.
 ///
 /// The server is launched from the agent's working directory, which may sit
-/// inside a session tree (`<workspace>/.usagi/sessions/<name>/`). Issues,
-/// memories, and sessions all belong to the workspace, so we resolve back to its
-/// root rather than writing into a throwaway session copy (see
-/// [`session::workspace_root`]).
+/// inside a session tree (`<workspace>/.usagi/sessions/<name>/`). The two tool
+/// families resolve their root differently:
+///
+/// - **Issues and memories** operate on the *current worktree* (`current_dir`),
+///   so a session agent's edits land on its own branch and reach `main` through
+///   the session's PR instead of dirtying the workspace checkout. Issue
+///   numbering still scans every worktree to stay collision-free (see
+///   [`crate::usecase::issue`]).
+/// - **Session orchestration** operates on the whole *workspace*, so we resolve
+///   back to its root (see [`session::workspace_root`]).
 pub fn run() -> Result<()> {
-    let workspace_root = session::workspace_root(&env::current_dir()?);
+    let worktree = env::current_dir()?;
+    let workspace_root = session::workspace_root(&worktree);
 
     let backend = Box::new(CliAgentBackend);
-    let server = UsagiMcpServer::new(workspace_root, backend);
+    let server = UsagiMcpServer::new(worktree, workspace_root, backend);
 
     let stdin = io::stdin();
     let stdout = io::stdout();
