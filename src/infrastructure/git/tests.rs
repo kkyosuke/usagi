@@ -300,6 +300,37 @@ fn remove_worktree_is_a_noop_for_an_unregistered_path() {
 }
 
 #[test]
+fn prune_worktrees_clears_a_dangling_registration() {
+    let dir = tempfile::tempdir().unwrap();
+    init_repo(dir.path());
+    let wt = dir.path().join("wt");
+    add_worktree(dir.path(), &wt, "feature", None).unwrap();
+    // Delete the directory out-of-band: git keeps a dangling "prunable"
+    // registration until pruned.
+    std::fs::remove_dir_all(&wt).unwrap();
+
+    prune_worktrees(dir.path()).unwrap();
+
+    // The registration is gone, so the path can be reused by `add_worktree`.
+    // Every path compared here exists, so canonicalization cannot fail.
+    let canon = |p: &Path| std::fs::canonicalize(p).unwrap();
+    let target = canon(dir.path()).join("wt");
+    assert!(!list_worktrees(dir.path())
+        .unwrap()
+        .iter()
+        .any(|w| canon(&w.path) == target));
+}
+
+#[test]
+fn prune_worktrees_surfaces_a_failure() {
+    // Outside any git repository, `git worktree prune` fails; the captured
+    // stderr is surfaced rather than silently ignored.
+    let dir = tempfile::tempdir().unwrap();
+    let err = prune_worktrees(dir.path()).unwrap_err();
+    assert!(err.to_string().contains("git worktree prune failed"));
+}
+
+#[test]
 fn delete_branch_removes_a_branch_and_errors_when_missing() {
     let dir = tempfile::tempdir().unwrap();
     init_repo(dir.path());
