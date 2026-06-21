@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use crate::domain::settings::LocalSettings;
 use crate::domain::workspace_state::WorkspaceState;
 use crate::infrastructure::json_file;
+use crate::infrastructure::store_lock::StoreLock;
 
 /// Directory created inside the repository to hold usagi's per-repo data.
 const STATE_DIR_NAME: &str = ".usagi";
@@ -60,6 +61,20 @@ impl WorkspaceStore {
 
     pub fn settings_path(&self) -> PathBuf {
         self.dir.join(SETTINGS_FILE)
+    }
+
+    /// Acquire this store's cross-process write lock, blocking until it is free.
+    ///
+    /// `state.json` is read-modify-write — a mutation loads it, edits the session
+    /// list, then saves the whole file — and several usagi processes can share
+    /// one workspace (the TUI plus a session's `usagi mcp` server). Hold this
+    /// guard across the entire load+save so a concurrent writer cannot read the
+    /// same snapshot and overwrite the first writer's change (a lost update). The
+    /// individual [`save`](Self::save) is already atomic; the lock serialises the
+    /// *sequence*. The per-store `.lock` lives in `.usagi/` and is kept out of git
+    /// by usagi's `.gitignore` (see [`crate::infrastructure::gitignore`]).
+    pub fn lock(&self) -> Result<StoreLock> {
+        StoreLock::acquire(&self.dir)
     }
 
     /// Load the saved state, or `None` if it has never been written.
@@ -228,6 +243,30 @@ mod tests {
         fs::create_dir_all(store.dir()).unwrap();
         fs::write(store.state_path(), "{ not json").unwrap();
         assert!(store.load().is_err());
+    }
+
+    #[test]
+    fn lock_is_a_dotfile_in_the_usagi_dir_and_does_not_block_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = WorkspaceStore::new(dir.path());
+
+        // Holding the lock places a `.lock` dotfile inside `.usagi/` (kept out of
+        // git by usagi's `.gitignore`) and still lets the holder save and load.
+        let lock = store.lock().unwrap();
+        assert!(store.dir().join(".lock").is_file());
+        let state = sample_state();
+        store.save(&state).unwrap();
+        assert_eq!(store.load().unwrap(), Some(state));
+        drop(lock);
+    }
+
+    #[test]
+    fn lock_errors_when_the_dir_path_is_a_file() {
+        let dir = tempfile::tempdir().unwrap();
+        // A file where `.usagi/` should be makes acquiring the lock fail.
+        let blocker = dir.path().join("repo");
+        fs::write(&blocker, "not a directory").unwrap();
+        assert!(WorkspaceStore::new(&blocker).lock().is_err());
     }
 
     #[test]

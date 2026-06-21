@@ -14,7 +14,8 @@ use clap::Subcommand;
 
 use crate::domain::issue::{IssuePriority, IssueStatus};
 use crate::usecase::issue::{
-    self, dependency_tree, GroupBy, IssueChanges, IssueFilter, IssueStats, IssueView, NewIssue,
+    self, dependency_tree, stats_line, GroupBy, IssueChanges, IssueFilter, IssueStats, IssueView,
+    NewIssue,
 };
 
 #[derive(Subcommand)]
@@ -218,7 +219,7 @@ fn execute(repo: &Path, command: IssueCommand) -> Result<Vec<String>> {
             }
             let mut lines = dependency_tree(&items);
             lines.push(String::new());
-            lines.push(format_stats(&IssueStats::from_listed(&items)));
+            lines.push(stats_line(&IssueStats::from_listed(&items)));
             Ok(lines)
         }
         IssueCommand::Search {
@@ -307,7 +308,7 @@ fn optional_change<T>(value: Option<T>, clear: bool) -> Option<Option<T>> {
 }
 
 mod render;
-use render::{format_stats, json_lines, render_grouped, render_listing};
+use render::{json_lines, render_grouped, render_listing};
 
 #[cfg(test)]
 mod tests;

@@ -211,6 +211,12 @@ pub struct FramePainter {
     base: Vec<String>,
     /// The last frame actually drawn (base + overlay), for diffing.
     prev: Vec<String>,
+    /// A reusable scratch frame the overlay is composed into each flush, then
+    /// swapped with `prev`. Holding it across flushes lets the per-paint compose
+    /// reuse its row allocations (via `clone_from`) instead of allocating a fresh
+    /// frame every time, so a steady stream of repaints does no heap work for the
+    /// frame buffer itself.
+    scratch: Vec<String>,
 }
 
 impl FramePainter {
@@ -243,15 +249,20 @@ impl FramePainter {
     /// Overlay the global install (if any) onto the base frame and diff-paint it.
     fn flush(&mut self, term: &Term) -> Result<()> {
         let (_, width) = term.size();
-        let mut frame = self.base.clone();
+        // Compose into the reused scratch buffer rather than a fresh clone: copy
+        // the base into it (reusing its rows' allocations) and overlay any install
+        // on top. `prev` is still untouched, so it remains the correct diff base.
+        self.scratch.clone_from(&self.base);
         install_task::overlay(
-            &mut frame,
+            &mut self.scratch,
             width as usize,
             install_task::snapshot().as_ref(),
         );
-        term.write_str(&diff_frame(&self.prev, &frame))?;
+        term.write_str(&diff_frame(&self.prev, &self.scratch))?;
         term.flush()?;
-        self.prev = frame;
+        // The scratch is now the painted frame: make it `prev` for the next diff
+        // and reclaim the old `prev` as the next scratch, so neither is reallocated.
+        std::mem::swap(&mut self.prev, &mut self.scratch);
         Ok(())
     }
 }

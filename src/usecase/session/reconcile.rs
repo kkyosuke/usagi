@@ -84,9 +84,8 @@ pub(super) fn list_repo_worktrees(
 }
 
 /// Physically destroy one session whose directory is `root` and whose branch is
-/// `branch`: unregister any worktree on that branch *or under that root* from each
-/// source repository, drop the now-orphaned branch, then delete whatever files
-/// remain under `root`.
+/// `branch`: unregister any worktree on that branch from each source repository,
+/// drop the now-orphaned branch, then delete whatever files remain under `root`.
 /// With `force`, a dirty worktree is discarded and the git steps are
 /// best-effort (a session may be partly torn down already, or never fully
 /// built). Without `force`, a worktree git refuses to remove (dirty or locked)
@@ -112,11 +111,11 @@ pub(super) fn discard_session(
         for wt in worktrees {
             // A worktree belongs to this session when it is on the session branch
             // *or* when it physically lives under the session root. The latter
-            // catches a worktree left on an unexpected branch (e.g. one switched
-            // to a feature branch inside the session): the branch-only match used
-            // to skip it, so the directory was deleted but its git registration
-            // stayed behind, dangling at the session path and blocking any later
-            // session of the same name from being created.
+            // catches a worktree left on an unexpected branch (e.g. one created
+            // directly with `git worktree add -b other` at the session path): the
+            // branch-only match used to skip it, so the directory was deleted but
+            // its git registration stayed behind, dangling at the session path and
+            // blocking any later session of the same name from being created.
             if wt.branch.as_deref() == Some(branch) || canon(&wt.path).starts_with(&root_canon) {
                 let removed = git::remove_worktree(repo, &wt.path, force);
                 // Forced teardown discards a dirty worktree by design, so any

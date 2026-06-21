@@ -233,7 +233,16 @@ fn parse_rejects_bad_scalar_values() {
     assert!(Issue::from_markdown(bad_dep)
         .unwrap_err()
         .to_string()
-        .contains("invalid dependson"));
+        .contains("invalid issue number"));
+
+    // A bad `related` entry reports the same field-agnostic error (it used to be
+    // mislabelled "dependson" because both fields share the same parser).
+    let bad_related = "---\nnumber: 1\ntitle: T\nstatus: todo\npriority: medium\n\
+             related: [y]\ncreated_at: 2026-06-14T00:00:00Z\nupdated_at: 2026-06-14T00:00:00Z\n---\n";
+    assert!(Issue::from_markdown(bad_related)
+        .unwrap_err()
+        .to_string()
+        .contains("invalid issue number"));
 
     // Unparseable timestamp.
     let bad_date = "---\nnumber: 1\ntitle: T\nstatus: todo\npriority: medium\n\

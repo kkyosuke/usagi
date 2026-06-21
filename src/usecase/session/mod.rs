@@ -58,15 +58,8 @@ pub fn create(workspace_root: &Path, name: &str) -> Result<CreatedSession> {
     if name.is_empty() {
         bail!("session name must not be empty");
     }
-    if name.contains('/') || name.contains('\\') || name == "." || name == ".." {
-        bail!("session name must not contain path separators");
-    }
-    // A session name becomes a git branch name, interpolated as an operand into
-    // `git branch -D <name>` / `git worktree add -b <name>`. A leading `-` would
-    // be parsed by git as an option (e.g. `-D`, `--foo`) rather than a branch,
-    // so reject it up front.
-    if name.starts_with('-') {
-        bail!("session name must not start with \"-\"");
+    if let Some(error) = name_format_error(name) {
+        bail!("{error}");
     }
 
     // Sync the on-disk tree with the recorded sessions first: a leftover
@@ -127,6 +120,32 @@ pub fn create(workspace_root: &Path, name: &str) -> Result<CreatedSession> {
     })
 }
 
+/// The reason a session name breaks a structural rule, or `None` when its format
+/// is acceptable. This is the single source of truth for what makes a name
+/// legal, shared by [`create`] (which also rejects an empty name and checks for
+/// existing sessions / branch clashes that need disk and git access) and the
+/// TUI's live inline-create validation, so the two never drift.
+///
+/// A session name becomes a git branch name and a directory under
+/// `.usagi/sessions/`, so it must not contain a path separator (`/`, `\`, `.`,
+/// `..`) and must not start with `-` — a leading `-` would be parsed by git as an
+/// option (e.g. `-D`) where the name is interpolated into `git branch -D <name>`
+/// / `git worktree add -b <name>`.
+///
+/// An empty name has no bad characters and so passes here; callers decide whether
+/// emptiness itself is an error ([`create`] rejects it; the TUI stays quiet while
+/// nothing is typed).
+pub fn name_format_error(name: &str) -> Option<String> {
+    let name = name.trim();
+    if name.contains('/') || name.contains('\\') || name == "." || name == ".." {
+        return Some("session name must not contain path separators".to_string());
+    }
+    if name.starts_with('-') {
+        return Some("session name must not start with \"-\"".to_string());
+    }
+    None
+}
+
 /// The local branch names that already exist across every source repository a
 /// session under `workspace_root` would span, de-duplicated and sorted.
 ///
@@ -151,6 +170,9 @@ pub fn existing_branch_names(workspace_root: &Path) -> Vec<String> {
 /// track its sessions. Each worktree's git status is captured at record time.
 fn record(workspace_root: &Path, name: &str, root: &Path, worktrees: &[PathBuf]) -> Result<()> {
     let store = WorkspaceStore::new(workspace_root);
+    // Serialise the load → append → save against any other process mutating this
+    // workspace's `state.json`, so a concurrent writer cannot drop this session.
+    let _lock = store.lock()?;
     let mut state = store.load()?.unwrap_or_default();
 
     // A session's worktrees may live in different source repositories (a
@@ -178,6 +200,9 @@ fn record(workspace_root: &Path, name: &str, root: &Path, worktrees: &[PathBuf])
 /// label now shown for the session. Fails when no session named `name` exists.
 pub fn set_display_name(workspace_root: &Path, name: &str, display: &str) -> Result<String> {
     let store = WorkspaceStore::new(workspace_root);
+    // Hold the lock across the load → edit → save so a concurrent writer cannot
+    // overwrite this rename (or have it overwrite their change).
+    let _lock = store.lock()?;
     let mut state = store
         .load()?
         .ok_or_else(|| anyhow!("no sessions recorded for this workspace"))?;
@@ -246,6 +271,9 @@ pub fn remove(
     reconcile(workspace_root)?;
 
     let store = WorkspaceStore::new(workspace_root);
+    // Hold the lock across the load → drop-the-record → save so a concurrent
+    // writer cannot resurrect the removed session or lose an unrelated change.
+    let _lock = store.lock()?;
     let mut state = store
         .load()?
         .ok_or_else(|| anyhow!("no sessions recorded for this workspace"))?;
@@ -1124,8 +1152,7 @@ mod tests {
         // A worktree sitting at the session path but on a branch other than the
         // session name must still be unregistered when the session is torn down —
         // matching on the branch alone left the registration behind, orphaned, the
-        // moment the directory was deleted (the root cause of a name that could
-        // never be recreated).
+        // moment the directory was deleted (the bug above's root cause).
         let root = tempfile::tempdir().unwrap();
         init_repo(root.path());
         let session_root = root.path().join(".usagi/sessions/odd");
@@ -1141,14 +1168,10 @@ mod tests {
         reconcile::discard_session(&session_root, "odd", &repo_worktrees, true).unwrap();
 
         // The directory is gone *and* git keeps no dangling registration for it,
-        // so a later session named "odd" can reuse the path. The session dir is
-        // deleted by now, so resolve the target via its parent (which still
-        // exists) — git reports worktree paths canonicalized, and resolving a
-        // missing path directly would not.
+        // so a later session named "odd" can reuse the path.
         assert!(!session_root.exists());
-        // Every path compared here exists, so canonicalization cannot fail.
-        let canon = |p: &Path| fs::canonicalize(p).unwrap();
-        let target = canon(session_root.parent().unwrap()).join("odd");
+        let canon = |p: &Path| fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+        let target = canon(&session_root);
         let orphaned = git::list_worktrees(root.path())
             .unwrap()
             .iter()

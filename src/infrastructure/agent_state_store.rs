@@ -10,15 +10,15 @@
 //! The writer (a hook process) and the reader (the watcher) never share memory,
 //! so they agree on a file path purely from the worktree directory: the path's
 //! canonical form hashed to a stable, filesystem-safe name under
-//! `<data-dir>/agent-state/`. Each file also stores the worktree it belongs to,
-//! so a hash collision (or a stale file from another machine syncing the data
-//! dir) is detected and ignored rather than misattributed.
+//! `<data-dir>/agent-state/` (the addressing is shared with the prompt store in
+//! [`crate::infrastructure::worktree_keyed_store`]). Each file also stores the
+//! worktree it belongs to, so a hash collision (or a stale file from another
+//! machine syncing the data dir) is detected and ignored rather than
+//! misattributed.
 
 use std::cell::RefCell;
-use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::fs;
-use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -26,7 +26,8 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 use crate::domain::agent_phase::AgentPhase;
-use crate::infrastructure::{json_file, storage};
+use crate::infrastructure::json_file;
+use crate::infrastructure::worktree_keyed_store::{dir, file_name, key, path_for};
 
 /// Subdirectory of the data dir the phase files live under.
 const STATE_SUBDIR: &str = "agent-state";
@@ -41,38 +42,10 @@ struct PhaseFile {
     phase: AgentPhase,
 }
 
-/// The directory phase files live under: `<data-dir>/agent-state/`.
-fn dir() -> Result<PathBuf> {
-    Ok(storage::data_dir()?.join(STATE_SUBDIR))
-}
-
-/// The file name a worktree's phase is stored under: a stable hash of its
-/// canonical path rendered as hex, so the writer and reader agree on it without
-/// listing the directory. Pure given `canonical`.
-fn file_name(canonical: &Path) -> String {
-    let mut hasher = DefaultHasher::new();
-    canonical.hash(&mut hasher);
-    format!("{:016x}", hasher.finish())
-}
-
-/// The key a worktree is stored under: its canonical path, falling back to the
-/// path as given when it cannot be resolved (e.g. it no longer exists), so the
-/// writer and reader still derive the same name.
-fn key(worktree: &Path) -> PathBuf {
-    worktree
-        .canonicalize()
-        .unwrap_or_else(|_| worktree.to_path_buf())
-}
-
-/// The full path of `worktree`'s phase file.
-fn path_for(worktree: &Path) -> Result<PathBuf> {
-    Ok(dir()?.join(file_name(&key(worktree))))
-}
-
 /// Record the agent `phase` for the session rooted at `worktree`.
 pub fn write(worktree: &Path, phase: AgentPhase) -> Result<()> {
     let key = key(worktree);
-    let dir = dir()?;
+    let dir = dir(STATE_SUBDIR)?;
     let path = dir.join(file_name(&key));
     json_file::write_atomic(
         &dir,
@@ -92,7 +65,7 @@ pub fn write(worktree: &Path, phase: AgentPhase) -> Result<()> {
 /// caches by the file's mtime so an unchanged file is not re-read or re-parsed.
 pub fn read(worktree: &Path) -> Option<AgentPhase> {
     let key = key(worktree);
-    let path = dir().ok()?.join(file_name(&key));
+    let path = dir(STATE_SUBDIR).ok()?.join(file_name(&key));
     read_phase_file(&path, &key)
 }
 
@@ -144,7 +117,7 @@ impl PhaseReader {
             Some(cached) => (cached.path.clone(), cached.key.clone()),
             None => {
                 let key = key(worktree);
-                let path = dir().ok()?.join(file_name(&key));
+                let path = dir(STATE_SUBDIR).ok()?.join(file_name(&key));
                 (path, key)
             }
         };
@@ -173,7 +146,7 @@ impl PhaseReader {
 /// Forget any recorded phase for `worktree` (best-effort), so a session freshly
 /// spawned there does not inherit a previous run's phase.
 pub fn clear(worktree: &Path) {
-    if let Ok(path) = path_for(worktree) {
+    if let Ok(path) = path_for(STATE_SUBDIR, worktree) {
         let _ = std::fs::remove_file(path);
     }
 }
@@ -213,6 +186,7 @@ pub fn session_start_source_from_hook_json(raw: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::infrastructure::storage;
 
     /// Point `$USAGI_HOME` at a throwaway directory for the duration of a test,
     /// serialized against other env-mutating tests, and run `body` with it. The
@@ -250,7 +224,7 @@ mod tests {
         with_data_dir(|_| {
             let wt = tempfile::tempdir().unwrap();
             let other = tempfile::tempdir().unwrap();
-            let dir = dir().unwrap();
+            let dir = dir(STATE_SUBDIR).unwrap();
             let path = dir.join(file_name(&key(wt.path())));
             json_file::write_atomic(
                 &dir,
@@ -309,7 +283,7 @@ mod tests {
             let other = tempfile::tempdir().unwrap();
             // Forge a file at wt's hashed name but stamped with a different
             // worktree, as a hash collision or a synced stale file would be.
-            let dir = dir().unwrap();
+            let dir = dir(STATE_SUBDIR).unwrap();
             let path = dir.join(file_name(&key(wt.path())));
             json_file::write_atomic(
                 &dir,
@@ -322,25 +296,6 @@ mod tests {
             .unwrap();
             assert_eq!(read(wt.path()), None);
         });
-    }
-
-    #[test]
-    fn file_name_is_stable_and_hex() {
-        let dir = tempfile::tempdir().unwrap();
-        let canonical = key(dir.path());
-        let name = file_name(&canonical);
-        assert_eq!(name.len(), 16);
-        assert!(name.chars().all(|c| c.is_ascii_hexdigit()));
-        // Same input → same name; the writer and reader rely on this.
-        assert_eq!(name, file_name(&canonical));
-    }
-
-    #[test]
-    fn key_falls_back_to_the_given_path_when_unresolvable() {
-        // A path that does not exist cannot be canonicalized, so it is returned
-        // verbatim — the writer and reader still derive a matching name.
-        let missing = Path::new("/usagi/does/not/exist");
-        assert_eq!(key(missing), missing.to_path_buf());
     }
 
     #[test]

@@ -162,28 +162,18 @@ impl fmt::Display for ParseIssueError {
 
 impl std::error::Error for ParseIssueError {}
 
+impl From<crate::domain::frontmatter::ParseFrontmatterError> for ParseIssueError {
+    fn from(e: crate::domain::frontmatter::ParseFrontmatterError) -> Self {
+        ParseIssueError(e.0)
+    }
+}
+
 impl Issue {
     /// A filename-safe slug derived from the title: lowercase, with every run of
     /// non-alphanumeric characters collapsed to a single hyphen. Falls back to
     /// `"issue"` when the title has no usable characters.
     pub fn slug(&self) -> String {
-        let mut slug = String::new();
-        let mut prev_dash = false;
-        for ch in self.title.chars() {
-            if ch.is_ascii_alphanumeric() {
-                slug.push(ch.to_ascii_lowercase());
-                prev_dash = false;
-            } else if !prev_dash {
-                slug.push('-');
-                prev_dash = true;
-            }
-        }
-        let trimmed = slug.trim_matches('-');
-        if trimmed.is_empty() {
-            "issue".to_string()
-        } else {
-            trimmed.to_string()
-        }
+        crate::domain::frontmatter::slugify(&self.title, "issue")
     }
 
     /// The file name backing this issue, e.g. `001-add-doctor.md`.

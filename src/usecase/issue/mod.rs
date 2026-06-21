@@ -13,14 +13,17 @@ use chrono::Utc;
 
 use crate::domain::issue::{Issue, IssuePriority, IssueStatus, IssueSummary};
 use crate::infrastructure::issue_store::IssueStore;
+use crate::usecase::search;
 use crate::usecase::session;
 
 mod gantt;
+mod render;
 mod stats;
 mod tree;
 mod view;
 
 pub use gantt::gantt;
+pub use render::{list_line, readiness_marker, stats_line};
 pub use stats::{group, GroupBy, IssueStats};
 pub use tree::dependency_tree;
 pub use view::{IssueView, ListedIssueView};
@@ -254,19 +257,10 @@ pub fn list(repo_root: &Path, filter: &IssueFilter) -> Result<Vec<ListedIssue>> 
 pub fn search(repo_root: &Path, query: &str, filter: &IssueFilter) -> Result<Vec<ListedIssue>> {
     let issues = IssueStore::new(repo_root).scan()?;
     let done = done_numbers(issues.iter().map(|i| (i.number, i.status)));
-    // Case-fold with Unicode-aware `to_lowercase` and match on `str::contains`,
-    // so the fold works for non-ASCII text (the UI is Japanese) and a multi-byte
-    // needle can never match across a character boundary — both of which the
-    // previous ASCII byte-window matching got wrong.
-    let needle = query.to_lowercase();
+    let needle = search::fold_query(query);
     let matched: Vec<IssueSummary> = issues
         .into_iter()
-        .filter(|i| {
-            if needle.is_empty() {
-                return true;
-            }
-            i.title.to_lowercase().contains(&needle) || i.body.to_lowercase().contains(&needle)
-        })
+        .filter(|i| search::matches_folded(&needle, &[&i.title, &i.body]))
         .map(|i| i.summary())
         .collect();
     Ok(annotate(matched, &done)
@@ -279,6 +273,11 @@ pub fn search(repo_root: &Path, query: &str, filter: &IssueFilter) -> Result<Vec
 /// `None` if no such issue exists.
 pub fn update(repo_root: &Path, number: u32, changes: IssueChanges) -> Result<Option<Issue>> {
     let store = IssueStore::new(repo_root);
+    // Hold the lock across the read and the write so a concurrent `update` (or a
+    // `create` that rewrites the index) cannot interleave between the two and
+    // clobber this change — the lost update the store lock exists to prevent.
+    // Mirrors `create` above.
+    let lock = store.lock()?;
     let Some(mut issue) = store.read(number)? else {
         return Ok(None);
     };
@@ -310,7 +309,7 @@ pub fn update(repo_root: &Path, number: u32, changes: IssueChanges) -> Result<Op
         issue.body = body;
     }
     issue.updated_at = Utc::now();
-    store.write(&issue)?;
+    store.write_locked(&lock, &issue)?;
     Ok(Some(issue))
 }
 

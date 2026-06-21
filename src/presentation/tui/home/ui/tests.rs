@@ -1494,7 +1494,7 @@ fn switch_create_on_the_rail_renders_the_input_in_the_right_pane() {
     // A live validation error replaces the dim hint below the box in place.
     state.create_mut().unwrap().push_char('/');
     let invalid = stripped(&render_frame(24, 80, &state));
-    assert!(invalid.contains("cannot be used"));
+    assert!(invalid.contains("path separators"));
 }
 
 #[test]

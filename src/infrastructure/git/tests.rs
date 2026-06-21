@@ -303,29 +303,37 @@ fn remove_worktree_is_a_noop_for_an_unregistered_path() {
 fn prune_worktrees_clears_a_dangling_registration() {
     let dir = tempfile::tempdir().unwrap();
     init_repo(dir.path());
+    // Register a worktree, then delete its directory out-of-band: git keeps a
+    // dangling "prunable" registration that would block reusing the path.
     let wt = dir.path().join("wt");
-    add_worktree(dir.path(), &wt, "feature", None).unwrap();
-    // Delete the directory out-of-band: git keeps a dangling "prunable"
-    // registration until pruned.
+    run(dir.path(), &["worktree", "add", "-q", wt.to_str().unwrap()]);
+    let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    // Resolve the canonical path *before* deleting the directory — git reports
+    // worktree paths canonicalized, and canonicalize fails once the dir is gone.
+    let target = canon(&wt);
     std::fs::remove_dir_all(&wt).unwrap();
+    let registered = |repo: &Path| {
+        list_worktrees(repo)
+            .unwrap()
+            .iter()
+            .any(|w| canon(&w.path) == target)
+    };
+    assert!(
+        registered(dir.path()),
+        "registration should linger before prune"
+    );
 
     prune_worktrees(dir.path()).unwrap();
 
-    // The registration is gone, so the path can be reused by `add_worktree`.
-    // Every path compared here exists, so canonicalization cannot fail.
-    let canon = |p: &Path| std::fs::canonicalize(p).unwrap();
-    let target = canon(dir.path()).join("wt");
-    assert!(!list_worktrees(dir.path())
-        .unwrap()
-        .iter()
-        .any(|w| canon(&w.path) == target));
+    // The stale registration is gone, so the path can be re-added.
+    assert!(!registered(dir.path()));
+    run(dir.path(), &["worktree", "add", "-q", wt.to_str().unwrap()]);
 }
 
 #[test]
-fn prune_worktrees_surfaces_a_failure() {
-    // Outside any git repository, `git worktree prune` fails; the captured
-    // stderr is surfaced rather than silently ignored.
+fn prune_worktrees_errors_outside_a_repository() {
     let dir = tempfile::tempdir().unwrap();
+    // No git repo here, so `git worktree prune` fails and the error is surfaced.
     let err = prune_worktrees(dir.path()).unwrap_err();
     assert!(err.to_string().contains("git worktree prune failed"));
 }
