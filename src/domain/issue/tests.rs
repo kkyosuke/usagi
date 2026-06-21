@@ -294,6 +294,69 @@ fn summary_serializes_to_json() {
 }
 
 #[test]
+fn labels_with_special_characters_round_trip_losslessly() {
+    let mut issue = sample();
+    // Each label exercises a structural character of the `[a, b, c]` encoding:
+    // a comma (delimiter), brackets, a backslash, and boundary spaces.
+    issue.labels = vec![
+        "a, b".to_string(),
+        "[bracketed]".to_string(),
+        "back\\slash".to_string(),
+        "  spaced  ".to_string(),
+        "plain".to_string(),
+    ];
+    let text = issue.to_markdown();
+    let parsed = Issue::from_markdown(&text).unwrap();
+    assert_eq!(parsed.labels, issue.labels);
+}
+
+#[test]
+fn label_with_a_comma_is_one_value_not_two() {
+    // Regression: `a, b` used to split into `["a", "b"]` on reload.
+    let mut issue = sample();
+    issue.labels = vec!["a, b".to_string()];
+    let parsed = Issue::from_markdown(&issue.to_markdown()).unwrap();
+    assert_eq!(parsed.labels, vec!["a, b".to_string()]);
+}
+
+#[test]
+fn simple_labels_render_unescaped_and_still_parse() {
+    // Plain values carry no escapes, so the on-disk shape stays readable and
+    // hand-written / legacy files keep parsing.
+    let mut issue = sample();
+    issue.labels = vec!["cli".to_string(), "infra".to_string()];
+    let text = issue.to_markdown();
+    assert!(text.contains("labels: [cli, infra]\n"));
+    assert_eq!(
+        Issue::from_markdown(&text).unwrap().labels,
+        vec!["cli".to_string(), "infra".to_string()]
+    );
+}
+
+#[test]
+fn empty_label_list_round_trips() {
+    let mut issue = sample();
+    issue.labels.clear();
+    let text = issue.to_markdown();
+    assert!(text.contains("labels: []\n"));
+    assert!(Issue::from_markdown(&text).unwrap().labels.is_empty());
+}
+
+#[test]
+fn parse_keeps_a_stray_backslash_and_decodes_an_escaped_comma() {
+    // Hand-authored frontmatter: `c:\path` carries a backslash before a
+    // non-escapable char (kept verbatim), and `a\, b` is one comma-bearing item.
+    let text = "---\nnumber: 1\ntitle: T\nstatus: todo\npriority: medium\n\
+             labels: [c:\\path, a\\, b]\ncreated_at: 2026-06-14T00:00:00Z\n\
+             updated_at: 2026-06-14T00:00:00Z\n---\n";
+    let issue = Issue::from_markdown(text).unwrap();
+    assert_eq!(
+        issue.labels,
+        vec!["c:\\path".to_string(), "a, b".to_string()]
+    );
+}
+
+#[test]
 fn to_markdown_neutralises_newlines_so_values_cannot_inject_frontmatter() {
     let mut issue = sample();
     // Newline-bearing values that, written verbatim, would each forge a second

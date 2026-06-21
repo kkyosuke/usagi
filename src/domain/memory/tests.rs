@@ -165,6 +165,65 @@ fn parse_error_displays_its_message() {
 }
 
 #[test]
+fn related_with_special_characters_round_trips_losslessly() {
+    let mut memory = sample();
+    // Each entry exercises a structural character of the `[a, b, c]` encoding.
+    memory.related = vec![
+        "a, b".to_string(),
+        "[bracketed]".to_string(),
+        "back\\slash".to_string(),
+        "  spaced  ".to_string(),
+        "plain".to_string(),
+    ];
+    let text = memory.to_markdown();
+    let parsed = Memory::from_markdown(&text).unwrap();
+    assert_eq!(parsed.related, memory.related);
+}
+
+#[test]
+fn related_with_a_comma_is_one_value_not_two() {
+    // Regression: `a, b` used to split into `["a", "b"]` on reload.
+    let mut memory = sample();
+    memory.related = vec!["a, b".to_string()];
+    let parsed = Memory::from_markdown(&memory.to_markdown()).unwrap();
+    assert_eq!(parsed.related, vec!["a, b".to_string()]);
+}
+
+#[test]
+fn simple_related_renders_unescaped_and_still_parses() {
+    // Plain values carry no escapes, so the on-disk shape stays readable and
+    // hand-written / legacy files keep parsing.
+    let mut memory = sample();
+    memory.related = vec!["editor-config".to_string(), "tabs".to_string()];
+    let text = memory.to_markdown();
+    assert!(text.contains("related: [editor-config, tabs]\n"));
+    assert_eq!(
+        Memory::from_markdown(&text).unwrap().related,
+        vec!["editor-config".to_string(), "tabs".to_string()]
+    );
+}
+
+#[test]
+fn empty_related_list_round_trips() {
+    let mut memory = sample();
+    memory.related.clear();
+    let text = memory.to_markdown();
+    assert!(text.contains("related: []\n"));
+    assert!(Memory::from_markdown(&text).unwrap().related.is_empty());
+}
+
+#[test]
+fn parse_keeps_a_stray_backslash_and_decodes_an_escaped_comma() {
+    // Hand-authored frontmatter: `c:\path` carries a backslash before a
+    // non-escapable char (kept verbatim), and `a\, b` is one comma-bearing item.
+    let text = "---\nname: n\ntitle: t\ntype: project\n\
+        related: [c:\\path, a\\, b]\ncreated_at: 2026-06-17T00:00:00Z\n\
+        updated_at: 2026-06-17T00:00:00Z\n---\n\nbody\n";
+    let m = Memory::from_markdown(text).unwrap();
+    assert_eq!(m.related, vec!["c:\\path".to_string(), "a, b".to_string()]);
+}
+
+#[test]
 fn to_markdown_neutralises_newlines_so_values_cannot_inject_frontmatter() {
     let mut memory = sample();
     // A title that, written verbatim, would forge a `type` frontmatter line.
