@@ -1,13 +1,13 @@
 ---
 number: 65
 title: perf(tui): エージェント高頻度出力時の再描画コアレス・リンク全走査キャッシュ・Switch プレビュー差分化
-status: todo
+status: done
 priority: high
 labels: [perf, tui, review]
 dependson: []
 related: [62]
 created_at: 2026-06-20T12:04:09.247121+00:00
-updated_at: 2026-06-20T12:04:09.247121+00:00
+updated_at: 2026-06-20T22:07:23.704348+00:00
 ---
 
 ## 背景
@@ -37,3 +37,16 @@ updated_at: 2026-06-20T12:04:09.247121+00:00
 
 - エージェント大量出力中の CPU 使用が低下すること。描画結果は従来どおり（既存 ui / e2e テスト維持）。
 - `cargo fmt` / `cargo clippy --all-targets -- -D warnings` / `cargo test`（カバレッジ 100% 維持）。
+
+## 対応結果
+
+PR #234 で対応（観測される描画結果は不変、変化がない限り重い処理を行わない方針）。
+
+1. **再描画コアレス**（`terminal_pane.rs` `drive` / `wait`）: dirty を対話起因（入力エコー・resize・スクロール・選択・hover・badge）と出力起因（generation 変化）に分離。出力起因のみのフレームを最小フレーム間隔 `MIN_FRAME=16ms`（≒60fps）でコアレスし、対話起因は即時描画で応答性を維持。`wait` に `redraw_deadline` を渡し、保留出力をデッドラインまで持ち越して busy-loop を回避（入力は常に即時）。
+2. **リンク全走査のキャッシュ**（`terminal_view.rs` + `drive`）: `TerminalView::from_screen_with_links` を新設し precomputed links を受け取れるようにした（既存 `from_screen_with_selection` は `link_cells` を呼んで委譲、既存経路・テスト・snapshot は無改変）。`drive` 側で links を generation でキャッシュし、画面内容が変わらない限り再検出しない。ホバーのみのフレームは再走査しない。表現は `HashSet<Cell>` のまま（ビットマップ化は見送り、主因はキャッシュ）。
+3. **Switch プレビュー差分化**（`terminal_pool.rs` `snapshot`）: `preview_cache`（dir / geo / generation / view）を追加。3 つすべて一致ならキャッシュした view を返却（パーサーロックも取らない）。dir/geo 変化時のみ `resize`、generation 変化時のみ `from_screen`。没入 `drive` の `last_geo` 差分化と同等に揃えた。
+
+### 検証
+- `cargo fmt` / `cargo clippy --all-targets -- -D warnings` / `cargo test`（1376 passed）。
+- カバレッジ lines / functions ともに 100%（`terminal_pane.rs` / `terminal_pool.rs` は端末 I/O のためカバレッジ除外、`terminal_view.rs` の新メソッドに単体テスト追加）。
+- ドキュメント更新は不要と判断（観測挙動を変えない内部最適化のため）。
