@@ -29,6 +29,11 @@ issue がタスク（やること）を管理するのに対し、メモリは**
 メモリファイル（`<slug>.md`）と目次 `MEMORY.md` は git 追跡対象、`index.json` は再生成可能なので
 `.usagi/.gitignore` で除外します（[02-workspace.md#保存場所](02-workspace.md#保存場所)）。
 
+`<repo>` は **操作したカレントの worktree のルート**です。issue と同じく、セッション worktree
+（`.usagi/sessions/<name>/`。[04-orchestration.md](../04-orchestration.md)）内で保存したメモリは
+そのセッション自身の `.usagi/memory/` に書かれ、セッションのブランチに乗って PR 経由で `main` に流れます
+（ワークスペースのチェックアウトを未コミットで汚しません）。
+
 ## メモリファイル（`<slug>.md`）
 
 上部に **frontmatter**（行ベースのメタデータ）、その下に自由記述の markdown 本文を持ちます。ファイル名は

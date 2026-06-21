@@ -291,11 +291,17 @@ pub fn remove(
 ///
 /// A session is mirrored at `<workspace>/.usagi/sessions/<name>/...`. When a
 /// process runs from within such a tree (e.g. an agent's `usagi mcp` server),
-/// its data stores still belong to the *workspace* — issues live at
-/// `<workspace>/.usagi/issues/`, not in a throwaway copy under the session that
-/// `usagi clean` later deletes. So we strip everything from the
-/// `.usagi/sessions` segment onward and return the workspace root. A path that
-/// is not inside a session tree is returned unchanged.
+/// session orchestration still operates on the whole *workspace* — the session
+/// registry and every sibling worktree live under `<workspace>/.usagi/`, not in
+/// the throwaway copy under the current session that `usagi clean` later
+/// deletes. So we strip everything from the `.usagi/sessions` segment onward and
+/// return the workspace root. A path that is not inside a session tree is
+/// returned unchanged.
+///
+/// Issues and memories, by contrast, are resolved against the *current* worktree
+/// (see [`crate::presentation::cli::mcp`]) so a session's edits land on its own
+/// branch and reach `main` through its PR. Issue numbering still consults every
+/// worktree via [`session_roots`] to stay collision-free across the workspace.
 pub fn workspace_root(start: &Path) -> PathBuf {
     let mut prefix = PathBuf::new();
     let mut components = start.components().peekable();
@@ -310,6 +316,24 @@ pub fn workspace_root(start: &Path) -> PathBuf {
         prefix.push(component);
     }
     start.to_path_buf()
+}
+
+/// Every existing session worktree root under `<workspace_root>/.usagi/sessions/`.
+///
+/// Each entry is `<workspace_root>/.usagi/sessions/<name>`. Returns an empty vec
+/// when the sessions directory does not exist. Used by issue numbering to scan
+/// every session's own issue store for the workspace-wide maximum, so two
+/// sessions never mint the same number.
+pub fn session_roots(workspace_root: &Path) -> Vec<PathBuf> {
+    let dir = workspace_root.join(".usagi").join("sessions");
+    let Ok(entries) = fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir())
+        .collect()
 }
 
 #[cfg(test)]

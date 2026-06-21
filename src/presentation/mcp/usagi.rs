@@ -33,12 +33,15 @@ pub struct UsagiMcpServer {
 }
 
 impl UsagiMcpServer {
-    /// Build a server for the workspace at `workspace_root`, delegating
-    /// `session_prompt` to `backend`. Issues and memories are resolved against
-    /// the same root.
-    pub fn new(workspace_root: PathBuf, backend: Box<dyn AgentBackend>) -> Self {
+    /// Build a server delegating `session_prompt` to `backend`.
+    ///
+    /// Issues and memories resolve against `worktree` (the current working tree,
+    /// so a session agent's edits stay on its own branch), while session
+    /// orchestration resolves against `workspace_root` (the whole workspace).
+    /// When the process runs from the workspace root the two paths coincide.
+    pub fn new(worktree: PathBuf, workspace_root: PathBuf, backend: Box<dyn AgentBackend>) -> Self {
         Self {
-            issue: IssueServer::new(&workspace_root),
+            issue: IssueServer::new(&worktree),
             session: SessionMcpServer::new(workspace_root, backend),
         }
     }
@@ -107,7 +110,11 @@ mod tests {
     }
 
     fn server_at(root: &Path) -> UsagiMcpServer {
-        UsagiMcpServer::new(root.to_path_buf(), Box::new(StubBackend))
+        UsagiMcpServer::new(
+            root.to_path_buf(),
+            root.to_path_buf(),
+            Box::new(StubBackend),
+        )
     }
 
     /// Initialise a throwaway git repo with one commit on `main`.
@@ -183,6 +190,40 @@ mod tests {
         let result = call(&server_at(tmp.path()), "memory_list", json!({}));
         assert_eq!(result["isError"], false);
         assert_eq!(result["content"][0]["text"], "[]");
+    }
+
+    #[test]
+    fn issue_and_memory_operate_on_the_worktree_not_the_workspace_root() {
+        // When the agent runs inside a session, issues and memories must be
+        // written to its own worktree (so they ride its branch to `main`),
+        // while session orchestration still targets the workspace root.
+        let workspace = tempfile::tempdir().unwrap();
+        let worktree = workspace
+            .path()
+            .join(".usagi")
+            .join("sessions")
+            .join("work");
+        fs::create_dir_all(&worktree).unwrap();
+        let server = UsagiMcpServer::new(
+            worktree.clone(),
+            workspace.path().to_path_buf(),
+            Box::new(StubBackend),
+        );
+
+        let created = call(&server, "issue_create", json!({"title": "in session"}));
+        assert_eq!(created["isError"], false);
+        let saved = call(
+            &server,
+            "memory_save",
+            json!({"name": "note", "title": "note", "body": "remember", "type": "project"}),
+        );
+        assert_eq!(saved["isError"], false);
+
+        // Both stores live under the worktree, never the workspace root.
+        assert!(worktree.join(".usagi/issues").read_dir().unwrap().count() > 0);
+        assert!(workspace.path().join(".usagi/issues").read_dir().is_err());
+        assert!(worktree.join(".usagi/memory").exists());
+        assert!(!workspace.path().join(".usagi/memory").exists());
     }
 
     #[test]

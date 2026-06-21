@@ -11,6 +11,7 @@
 
 - [保存場所](#保存場所)
 - [issue ファイル（`NNN-<slug>.md`）](#issue-ファイルnnn-slugmd)
+- [採番（ワークスペース横断）](#採番ワークスペース横断)
 - [`index.json`（派生キャッシュ）](#indexjson派生キャッシュ)
 - [依存関係の解決（着手可能な issue）](#依存関係の解決着手可能な-issue)
 
@@ -25,6 +26,13 @@
 
 issue ファイル（`NNN-*.md`）は git 追跡対象、`index.json` は再生成可能なので `.usagi/.gitignore` で除外します
 （[02-workspace.md#保存場所](02-workspace.md#保存場所)）。
+
+`<repo>` は **操作したカレントの worktree のルート**です。セッション worktree
+（`.usagi/sessions/<name>/`。[04-orchestration.md](../04-orchestration.md)）内で操作した issue は、
+ワークスペースルートではなく**そのセッション自身の `.usagi/issues/` に書かれ**、セッションのブランチに乗って
+PR 経由で `main` に流れます。これによりセッションの issue 変更がワークスペースのチェックアウトを未コミットで
+汚しません（同じ仕組みは memory も同様）。採番だけは worktree をまたいで一意にする必要があるため、後述のとおり
+ワークスペース全体を横断して決めます。
 
 ## issue ファイル（`NNN-<slug>.md`）
 
@@ -53,7 +61,7 @@ updated_at: 2026-06-14T00:00:00+00:00
 
 | フィールド | 型 | 意味 |
 |---|---|---|
-| `number` | u32 | 採番された一意な番号（ファイル名の接頭辞と一致）。新規作成時に「既存の最大値 + 1」で振る |
+| `number` | u32 | 採番された一意な番号（ファイル名の接頭辞と一致）。新規作成時に「ワークスペース全体（ルート + 全セッション worktree）の最大値 + 1」で振る（[採番](#採番ワークスペース横断)） |
 | `title` | string | タイトル |
 | `status` | enum | `todo` / `in-progress` / `done` |
 | `priority` | enum | `high` / `medium` / `low`（既定 `medium`） |
@@ -67,6 +75,25 @@ updated_at: 2026-06-14T00:00:00+00:00
 - `parent` / `milestone` は値があるときだけ frontmatter に出力します（未設定の issue には行自体が現れません）。`labels` / `dependson` / `related` は空でも `[]` を書きます。
 - frontmatter は `serde_yaml` 不採用の方針に合わせ、既知フィールドを対象にした軽量パーサで読み書きします。未知のキーは無視するので、フォーマットを後方互換に拡張できます。
 - 書き込みはアトミック（一時ファイル + `rename`）。タイトル変更でスラッグが変わった場合は、同じ番号の旧ファイルを削除して 1 issue = 1 ファイルを保ちます。
+
+## 採番（ワークスペース横断）
+
+新規 issue の `number` は、**ワークスペース内のすべての issue ストアを横断した最大値 + 1** で決めます。
+対象は次の 2 種類です。
+
+```
+<workspace>/.usagi/issues/                      # ルート（main のチェックアウト）
+<workspace>/.usagi/sessions/<name>/.usagi/issues/  # 各セッション worktree
+```
+
+issue がセッション worktree ごとに書かれる（[保存場所](#保存場所)）ため、自ストアだけを見て採番すると、
+同じ起点から分岐した 2 つのセッションが同じ番号を振り直し、ブランチをマージしたときに衝突します。これを避けるため
+採番時にすべての worktree のストアを走査します。
+
+これは**ロックではなくベストエフォート**です。**ほぼ同時**に複数セッションが新規作成すると同じ番号を取りうり
+（その場合は通常のマージコンフリクトとして解決する）、少しでもずれて作成されれば衝突しません。横断スキャンの
+組み立ては `usecase/issue.rs`、各ストアの最大値取得は `infrastructure/issue_store.rs`、worktree の列挙は
+`usecase/session.rs` が担います。
 
 ## `index.json`（派生キャッシュ）
 
@@ -101,5 +128,5 @@ updated_at: 2026-06-14T00:00:00+00:00
 | 層 | モジュール | 役割 |
 |---|---|---|
 | domain | `domain/issue.rs` | `Issue` / `IssueSummary` / `IssueStatus` / `IssuePriority`、frontmatter の読み書き |
-| infrastructure | `infrastructure/issue_store.rs` | `.usagi/issues/` の走査・読み書き、`index.json` の生成・再構築・採番 |
-| usecase | `usecase/issue.rs` | `create` / `get` / `list` / `search` / `update` / `delete` と ready 判定、進捗集計（`IssueStats`）・グルーピング（`group`）・依存ツリー（`dependency_tree`） |
+| infrastructure | `infrastructure/issue_store.rs` | 単一の `.usagi/issues/` の走査・読み書き、`index.json` の生成・再構築、そのストアの最大番号取得 |
+| usecase | `usecase/issue.rs` | `create` / `get` / `list` / `search` / `update` / `delete` と ready 判定、ワークスペース横断の採番（`usecase/session.rs` の worktree 列挙を利用）、進捗集計（`IssueStats`）・グルーピング（`group`）・依存ツリー（`dependency_tree`） |
