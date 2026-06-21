@@ -183,17 +183,21 @@ pub fn get(repo_root: &Path, number: u32) -> Result<Option<Issue>> {
 /// the only usagi-specific instructions are the `issue_update` status changes,
 /// which operate on usagi's own issue store.
 pub fn to_prompt(issue: &Issue) -> String {
+    use std::fmt::Write as _;
     let number = issue.number;
     let title = &issue.title;
     let numbers = |xs: &[u32]| -> String {
         if xs.is_empty() {
-            "なし".to_string()
-        } else {
-            xs.iter()
-                .map(|n| n.to_string())
-                .collect::<Vec<_>>()
-                .join(", ")
+            return "なし".to_string();
         }
+        let mut out = String::new();
+        for (i, n) in xs.iter().enumerate() {
+            if i > 0 {
+                out.push_str(", ");
+            }
+            let _ = write!(out, "{n}");
+        }
+        out
     };
     let labels = if issue.labels.is_empty() {
         "なし".to_string()

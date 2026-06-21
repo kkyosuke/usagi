@@ -135,7 +135,9 @@ fn pad_to_width(content: String, width: usize) -> String {
         content
     } else {
         let mut content = content;
-        content.push_str(&" ".repeat(width - visible));
+        // Grow the existing buffer in place rather than allocating a separate
+        // `" ".repeat(..)` string only to copy it straight back out.
+        content.extend(std::iter::repeat_n(' ', width - visible));
         content
     }
 }

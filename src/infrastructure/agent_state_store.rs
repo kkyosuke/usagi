@@ -77,6 +77,14 @@ fn read_phase_file(path: &Path, key: &Path) -> Option<AgentPhase> {
     (file.worktree.as_path() == key).then_some(file.phase)
 }
 
+/// The file's last-modified time, or `None` when it is absent or unstattable —
+/// the change signal [`PhaseReader`] compares to decide whether to re-read.
+fn current_mtime(path: &Path) -> Option<SystemTime> {
+    fs::metadata(path)
+        .ok()
+        .and_then(|meta| meta.modified().ok())
+}
+
 /// A stateful reader of phase files with an mtime cache, for the home screen's
 /// session watcher which polls every session every tick (see
 /// [`crate::presentation::tui::home::terminal_pool`]).
@@ -111,24 +119,22 @@ impl PhaseReader {
     /// file's mtime is unchanged since the last read.
     pub fn read(&self, worktree: &Path) -> Option<AgentPhase> {
         let mut cache = self.cache.borrow_mut();
-        // Resolve (canonicalizing) the file path the first time a worktree is
-        // seen; reuse it on later ticks so the hot loop avoids the syscall.
-        let (path, key) = match cache.get(worktree) {
-            Some(cached) => (cached.path.clone(), cached.key.clone()),
-            None => {
-                let key = key(worktree);
-                let path = dir(STATE_SUBDIR).ok()?.join(file_name(&key));
-                (path, key)
+        // A worktree already cached reuses its resolved path/key — avoiding both
+        // the canonicalising syscall and a clone of the two — and is served
+        // straight back while the phase file's mtime is unchanged; only a changed
+        // mtime re-reads the file and refreshes the entry in place.
+        if let Some(cached) = cache.get_mut(worktree) {
+            let mtime = current_mtime(&cached.path);
+            if cached.mtime != mtime {
+                cached.phase = read_phase_file(&cached.path, &cached.key);
+                cached.mtime = mtime;
             }
-        };
-        let mtime = fs::metadata(&path)
-            .ok()
-            .and_then(|meta| meta.modified().ok());
-        if let Some(cached) = cache.get(worktree) {
-            if cached.mtime == mtime {
-                return cached.phase;
-            }
+            return cached.phase;
         }
+        // First sighting: resolve the file path once, read it, and cache the lot.
+        let key = key(worktree);
+        let path = dir(STATE_SUBDIR).ok()?.join(file_name(&key));
+        let mtime = current_mtime(&path);
         let phase = read_phase_file(&path, &key);
         cache.insert(
             worktree.to_path_buf(),
