@@ -390,6 +390,19 @@ fn ctrl_c_in_overview_returns_quit() {
 }
 
 #[test]
+fn ctrl_b_toggles_the_sidebar_and_keeps_the_screen_running() {
+    // Ctrl-B is a view-only sidebar toggle handled before the per-mode dispatch:
+    // the loop collapses / expands the sidebar and keeps running, so the
+    // following Ctrl-C still quits. Two presses exercise both directions.
+    let keys = vec![
+        Ok(Key::Char(CTRL_B)), // Full -> Rail
+        Ok(Key::Char(CTRL_B)), // Rail -> Full
+        Ok(Key::CtrlC),        // still running -> quit
+    ];
+    assert!(matches!(run(keys, sample_state()).unwrap(), Outcome::Quit));
+}
+
+#[test]
 fn ctrl_o_in_overview_opens_switch() {
     // Ctrl-O zooms into 切替 (Switch) with Overview as the origin; `Esc` backs
     // out to Overview, where Esc is then inert and the fallback Ctrl-C quits.

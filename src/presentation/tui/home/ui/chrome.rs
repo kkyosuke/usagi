@@ -22,9 +22,13 @@ use crate::presentation::tui::widgets;
 /// session, not per repository) — so it matches what the user sees.
 pub(super) fn title_bar(width: usize, list: &WorktreeList) -> String {
     let count = list.session_count();
+    // The active session's name rides in the title so it is identifiable even
+    // when the sidebar is collapsed to the rail (which shows no names). `▸` marks
+    // it; the root row reads as the workspace itself.
     let label = format!(
-        "{} · {count} session{}",
+        "{} · ▸ {} · {count} session{}",
         list.workspace_name(),
+        list.active_name(),
         if count == 1 { "" } else { "s" }
     );
     widgets::title_line(width, &label)

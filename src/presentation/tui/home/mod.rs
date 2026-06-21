@@ -129,6 +129,9 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
     // default). Re-read again whenever the config screen closes (see
     // `open_config`) so a change takes effect without reopening this screen.
     state.set_session_action_ui(effective_settings(&workspace.path).session_action_ui);
+    // The state the left session sidebar opens in (full width or the collapsed
+    // rail); `Ctrl-B` toggles it from there.
+    state.set_sidebar(effective_settings(&workspace.path).sidebar);
 
     // Restore past commands so `history` and `↑`/`↓` recall span sessions.
     // A read failure is non-fatal: just start with an empty history.

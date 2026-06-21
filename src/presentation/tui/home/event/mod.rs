@@ -42,6 +42,13 @@ const CTRL_O: char = '\u{000f}';
 const CTRL_N: char = '\u{000e}';
 const CTRL_P: char = '\u{0010}';
 
+/// The bare control character `console` reports for `Ctrl-B` (`0x02`) on the home
+/// screen — the same passthrough as [`CTRL_O`]. It toggles the left session
+/// sidebar between its full width and the collapsed rail from any non-modal mode.
+/// 没入 (Attached) is driven inside the embedded-terminal loop, so its `Ctrl-B` is
+/// intercepted there instead (see [`super::terminal_pane`]).
+const CTRL_B: char = '\u{0002}';
+
 /// The callback 切替 uses to read (`None`) or navigate (`Some(nav)`) the
 /// highlighted session's tabs, returning the strip's labels and active index.
 /// Backed by the [`TerminalPool`](super::terminal_pool::TerminalPool) the pane
@@ -354,6 +361,16 @@ pub(super) fn event_loop(
                 Key::Escape | Key::Enter | Key::Char('q') => state.close_preview(),
                 _ => {}
             }
+            continue;
+        }
+
+        // `Ctrl-B` collapses / expands the left session sidebar from anywhere on
+        // the (non-modal) screen. It is a pure view toggle, so it is handled here
+        // before the per-mode dispatch rather than threaded through each handler.
+        // 没入's keys never reach this loop (the pane driver owns them), so its
+        // Ctrl-B is handled inside `terminal_pane` instead.
+        if let Key::Char(CTRL_B) = key {
+            state.toggle_sidebar();
             continue;
         }
 

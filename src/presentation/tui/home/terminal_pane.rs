@@ -6,8 +6,10 @@
 //! leaving the pane); this module borrows it and runs the render/input loop.
 //! Keystrokes are forwarded to the shell as raw bytes.
 //!
-//! The **reserved keys** are `Ctrl-O`, `Ctrl-N`/`Ctrl-P`, `Ctrl-T`/`Ctrl-G`, and
-//! `Ctrl-W`: everything else, including `Esc`, flows to the shell. A single
+//! The **reserved keys** are `Ctrl-O`, `Ctrl-N`/`Ctrl-P`, `Ctrl-T`/`Ctrl-G`,
+//! `Ctrl-W`, and `Ctrl-B`: everything else, including `Esc`, flows to the shell.
+//! `Ctrl-B` collapses / expands the left sidebar in place (it never leaves 没入).
+//! A single
 //! `Ctrl-O` zooms out one engagement level by returning [`PaneStep::Detach`]
 //! immediately, leaving the pane for 切替 (Switch) on the left pane while every
 //! pane stays alive in the pool — there the user moves between sessions
@@ -195,8 +197,10 @@ fn drive(
     loop {
         let (height, width) = term.size();
         // The embedded terminal sits below the tab strip, so it uses the
-        // tab-reserved geometry (matching what `render` lays out below).
-        let geo = ui::attached_geometry(height as usize, width as usize);
+        // tab-reserved geometry (matching what `render` lays out below). It also
+        // tracks the sidebar state, so collapsing the sidebar (`Ctrl-B`) widens
+        // the live terminal on the very next pass.
+        let geo = ui::attached_geometry(height as usize, width as usize, state.sidebar());
 
         // Interactive changes (input echo, resize, scroll, selection, hover,
         // badges) always repaint at once to stay responsive; fresh shell output
@@ -293,9 +297,15 @@ fn drive(
             // Input is queued: forward every pending key (or scroll the
             // history), then loop and repaint.
             Wake::Input => {
-                if let Some(step) =
-                    pump_input(term, pty, geo, &mut scrollback, &mut selection, &mut hover)?
-                {
+                if let Some(step) = pump_input(
+                    term,
+                    state,
+                    pty,
+                    geo,
+                    &mut scrollback,
+                    &mut selection,
+                    &mut hover,
+                )? {
                     return Ok(step);
                 }
             }
@@ -353,8 +363,10 @@ fn wait(pty: &PtySession, drawn_gen: u64, redraw_deadline: Option<Instant>) -> R
 /// [`PaneStep::NewAgentTab`]) and `Ctrl-W` closes the active tab
 /// ([`PaneStep::CloseTab`]). Other events are ignored so the next redraw picks up
 /// any new size.
+#[allow(clippy::too_many_arguments)]
 fn pump_input(
     term: &Term,
+    state: &mut HomeState,
     pty: &mut PtySession,
     geo: ui::TerminalGeometry,
     scrollback: &mut usize,
@@ -415,6 +427,14 @@ fn pump_input(
                     *scrollback = 0;
                     *selection = None;
                     return Ok(Some(PaneStep::CloseTab));
+                }
+                // `Ctrl-B` collapses / expands the left sidebar in place, without
+                // leaving 没入: toggle the state and let the next loop pass re-lay
+                // out the frame and resize the PTY to the new pane width. (Like the
+                // tab chords, this claims `Ctrl-B` from the shell/agent.)
+                if is_toggle_sidebar(&key) {
+                    state.toggle_sidebar();
+                    continue;
                 }
                 // With text selected, `Ctrl-C` copies it (and clears the
                 // selection) instead of sending SIGINT — the way terminals treat
@@ -725,6 +745,12 @@ fn is_new_agent_tab(key: &KeyEvent) -> bool {
 /// char or `'w'` + `CONTROL`.
 fn is_close_tab(key: &KeyEvent) -> bool {
     chord(key, '\u{17}', 'w')
+}
+
+/// Whether this key is `Ctrl-B` (toggle the left sidebar), as the raw `0x02`
+/// (STX) char or `'b'` + `CONTROL`.
+fn is_toggle_sidebar(key: &KeyEvent) -> bool {
+    chord(key, '\u{02}', 'b')
 }
 
 /// Whether this key is the copy shortcut (`Ctrl-C`). It only copies when a
