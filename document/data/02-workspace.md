@@ -13,7 +13,7 @@
 - [同期と参照](#同期と参照)
 - [git 検査の方針](#git-検査の方針infrastructuregitrs)
 - [`settings.json`: プロジェクト固有の設定上書き（ローカル設定）](#settingsjson-プロジェクト固有の設定上書きローカル設定)
-- [`history.json`](#historyjson)
+- [`history.jsonl`](#historyjsonl)
 - [`issues/`: タスク issue](#issues-タスク-issue)
 
 ## 保存場所
@@ -25,7 +25,7 @@
 ├── .gitignore      # .usagi/ 配下の git 管理を制御（usagi が生成・後述）
 ├── state.json      # worktree / ブランチの状態スナップショット
 ├── settings.json   # プロジェクト固有の設定上書き（ローカル設定）
-├── history.json    # ワークスペース画面で実行したコマンドの履歴
+├── history.jsonl    # ワークスペース画面で実行したコマンドの履歴
 ├── issues/         # タスク issue（git で共有する。後述）
 │   ├── 001-*.md    # 1 issue = 1 ファイル（frontmatter 付き markdown）
 │   └── index.json  # 一覧・検索を速くする派生キャッシュ（git 管理外）
@@ -36,7 +36,7 @@
 ```
 
 - どの worktree からコマンドを実行しても、`git worktree list` の先頭（＝プライマリ worktree）を基準に保存先を解決します（`infrastructure/git.rs` の `primary_worktree`）。これによりリポジトリ内で 1 つの `.usagi/` に集約されます。
-- `.usagi/` の大半（`state.json` / `settings.json` / `history.json` / `sessions/`）は **マシンローカルな状態・設定** で、後述の `.gitignore` により **コミットされません**。
+- `.usagi/` の大半（`state.json` / `settings.json` / `history.jsonl` / `sessions/`）は **マシンローカルな状態・設定** で、後述の `.gitignore` により **コミットされません**。
 - 例外は **`.usagi/issues/`** と **`.usagi/memory/`**。タスク issue とエージェントのメモリはチームで共有したいので git 管理対象とします。それぞれの派生キャッシュ `index.json` だけは再生成可能なので除外したままにします（メモリの目次 `MEMORY.md` は共有対象）。
 - git 管理の制御は **リポジトリルートの `.gitignore` には書かず、`.usagi/.gitignore` に自己完結させます**（`usagi::usecase::project::ignore_usagi_dir`）。リポジトリルートを汚さず、`.usagi/` 配下だけで完結するのが利点です。`usagi init` 時に次の内容（`.usagi/` 配下からの相対パターン）を書き込み、旧バージョンがルート `.gitignore` に追記していた `.usagi/` 系エントリがあれば除去します。
 
@@ -243,28 +243,25 @@ session "login"  (/Users/me/git/usagi/.usagi/sessions/login)
 対応するユースケース（`usecase/settings.rs`）: `load_local` / `save_local` / `effective` /
 `set_local_agent_cli` / `set_local_notifications_enabled`。
 
-## `history.json`
+## `history.jsonl`
 
 ワークスペース画面（`usagi hop` 後の操作画面）のコマンドモードで実行したコマンドの履歴です。実行のたびに 1 件ずつ追記され、次回以降の画面起動時に読み込まれて `history` コマンドや `↑`/`↓` での履歴遡りに使われます。
 
-```jsonc
-{
-  "version": 1,
-  "entries": [
-    { "command": "man",    "executed_at": "2026-06-14T01:02:03.456789Z" },
-    { "command": "doctor", "executed_at": "2026-06-14T01:02:30.123456Z" }
-  ]
-}
+**追記専用の JSONL**（1 行 = 1 件の `HistoryEntry`）です。古い順に並びます。
+
+```jsonl
+{"command":"man","executed_at":"2026-06-14T01:02:03.456789Z"}
+{"command":"doctor","executed_at":"2026-06-14T01:02:30.123456Z"}
 ```
 
 | フィールド | 型 | 意味 |
 |---|---|---|
-| `entries` | array | 実行されたコマンドの並び（古い順） |
-| `entries[].command` | string | 入力されたコマンド行（トリム済み） |
-| `entries[].executed_at` | RFC3339(UTC) | コマンドを実行した日時 |
+| `command` | string | 入力されたコマンド行（トリム済み） |
+| `executed_at` | RFC3339(UTC) | コマンドを実行した日時 |
 
-- 保存先は `state.json` と同じ `.usagi/` ディレクトリ（`<repo>/.usagi/history.json`）。
-- `HistoryStore::append` は「読み込み → 1 件追加 → アトミック書き込み」を行う。読み込み時にファイルが無ければ空の履歴として扱う。
+- 保存先は `state.json` と同じ `.usagi/` ディレクトリ（`<repo>/.usagi/history.jsonl`）。
+- `HistoryStore::append` は **1 行を `O_APPEND` で追記する**。全件を読み直して書き戻す read-modify-write をしないため、2 つの書き手（複数の TUI ペインや TUI とコマンド実行）が同時に追記しても互いのエントリを取りこぼさない。読み込み時にファイルが無ければ空の履歴として扱う。
+- 読み込みは 1 行ずつパースする。空行は読み飛ばし、改行で終端されていない末尾行は「追記中の書きかけ」とみなして捨てる（破損として失敗させない）。改行で終端された不正な行は本物の破損としてエラーになる。
 - ワークスペース画面での永続化は **ベストエフォート**。書き込みに失敗しても画面の操作は止めない（履歴が残らないだけ）。
 - 対応するドメイン型は `domain/history.rs` の `HistoryEntry`。表示側の挙動は [../design/05-home.md](../design/05-home.md#履歴の永続化) を参照。
 

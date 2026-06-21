@@ -35,7 +35,7 @@
 |---|---|---|
 | — | [data/README.md](data/README.md) | 2 層の概要・共通方針・関連モジュール |
 | 1 | [data/01-global.md](data/01-global.md) | usagi 全体（`~/.usagi/` の `workspaces.json` / `settings.json`） |
-| 2 | [data/02-workspace.md](data/02-workspace.md) | workspace 毎（`<repo>/.usagi/` の `state.json` / `settings.json` / `history.json`） |
+| 2 | [data/02-workspace.md](data/02-workspace.md) | workspace 毎（`<repo>/.usagi/` の `state.json` / `settings.json` / `history.jsonl`） |
 | 3 | [data/03-issues.md](data/03-issues.md) | タスク issue（`<repo>/.usagi/issues/` の markdown + `index.json`） |
 | 4 | [data/04-memory.md](data/04-memory.md) | エージェントのメモリ（`<repo>/.usagi/memory/` の markdown + `MEMORY.md` + `index.json`） |
 
