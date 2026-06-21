@@ -197,8 +197,17 @@ impl PtySession {
     }
 
     /// Lock the screen-grid parser to read the current contents (for rendering).
+    ///
+    /// Recovers the guard rather than panicking if the lock was poisoned: this
+    /// runs on the render path, and the reader thread holds the same lock around
+    /// `parser.process` (which parses untrusted shell output), so a panic there
+    /// would poison the mutex and an `expect` here would escalate it into a crash
+    /// of the whole TUI — leaving the terminal in raw mode. A possibly-stale
+    /// screen grid beats taking the UI down.
     pub fn parser(&self) -> MutexGuard<'_, vt100::Parser<BellCounter>> {
-        self.parser.lock().expect("pty parser mutex poisoned")
+        self.parser
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     /// Whether the running program has asked for bracketed paste mode
