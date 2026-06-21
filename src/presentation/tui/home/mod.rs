@@ -353,21 +353,26 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
         };
         let initial = Some(spawn_command.as_str());
         let later_initial = Some(plain_command.as_str());
-        // Ready the pane to drive: add a fresh one (在席's `terminal` / `agent`)
-        // or re-attach the session's active pane (spawning the first when the
-        // session is new).
-        if new_pane {
-            let kind = if run_agent {
-                terminal_tabs::PaneKind::Agent
-            } else {
-                terminal_tabs::PaneKind::Terminal
-            };
-            pool.add_pane(term, dir, kind, initial, &label)?;
-        } else {
-            pool.enter(term, dir, run_agent, initial, &label)?;
-        }
-        handle.set_attached(Some(dir.to_path_buf()));
+        // Capture every failure of this launch — the initial spawn (`add_pane`
+        // / `enter`) and anything during the pane loop — in one `result`, so a
+        // launch that never gets a live pane is cleaned up and logged just like a
+        // mid-session failure instead of returning early past the cleanup and the
+        // error log below.
         let result = (|| -> Result<PaneExit> {
+            // Ready the pane to drive: add a fresh one (在席's `terminal` /
+            // `agent`) or re-attach the session's active pane (spawning the first
+            // when the session is new).
+            if new_pane {
+                let kind = if run_agent {
+                    terminal_tabs::PaneKind::Agent
+                } else {
+                    terminal_tabs::PaneKind::Terminal
+                };
+                pool.add_pane(term, dir, kind, initial, &label)?;
+            } else {
+                pool.enter(term, dir, run_agent, initial, &label)?;
+            }
+            handle.set_attached(Some(dir.to_path_buf()));
             loop {
                 // Publish the tab strip for this session before driving the pane,
                 // so it reflects any add / close / switch from the last step.
@@ -438,6 +443,16 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
         // last-known statuses in place.
         if let Some(sessions) = reload_sessions(&terminal_root) {
             home.refresh_sessions(sessions);
+        }
+        // The event loop shows a launch / pane failure on screen; also persist it
+        // (with its full cause chain) so a session that failed to start stays
+        // inspectable in the error log after the fact.
+        if let Err(e) = &result {
+            crate::infrastructure::error_log::ErrorLog::record(&format!(
+                "{} session in {} failed: {e:#}",
+                if run_agent { "agent" } else { "terminal" },
+                dir.display()
+            ));
         }
         result
     };
@@ -560,14 +575,19 @@ fn run_create(root: &Path, name: &str) -> (bool, tasks::Completion) {
                 evict: None,
             },
         ),
-        Err(e) => (
-            false,
-            tasks::Completion {
-                line: LogLine::error(format!("session failed: {e}")),
-                sessions: None,
-                evict: None,
-            },
-        ),
+        Err(e) => {
+            crate::infrastructure::error_log::ErrorLog::record(&format!(
+                "session create \"{name}\" failed: {e:#}"
+            ));
+            (
+                false,
+                tasks::Completion {
+                    line: LogLine::error(format!("session failed: {e}")),
+                    sessions: None,
+                    evict: None,
+                },
+            )
+        }
     }
 }
 
@@ -610,14 +630,19 @@ fn run_remove(
                 },
             )
         }
-        Err(e) => (
-            false,
-            tasks::Completion {
-                line: LogLine::error(format!("session remove failed: {e}")),
-                sessions: None,
-                evict: None,
-            },
-        ),
+        Err(e) => {
+            crate::infrastructure::error_log::ErrorLog::record(&format!(
+                "session remove \"{name}\" failed: {e:#}"
+            ));
+            (
+                false,
+                tasks::Completion {
+                    line: LogLine::error(format!("session remove failed: {e}")),
+                    sessions: None,
+                    evict: None,
+                },
+            )
+        }
     }
 }
 
