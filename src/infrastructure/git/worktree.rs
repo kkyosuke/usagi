@@ -26,8 +26,12 @@ pub struct WorktreeInfo {
 /// Repo-scoping env vars are stripped so an inherited `GIT_DIR` cannot redirect
 /// the operation to another repository.
 pub fn add_worktree(repo: &Path, dest: &Path, branch: &str, base: Option<&str>) -> Result<()> {
+    // `branch` is consumed as the value of `-b`, but `--` before the positional
+    // operands keeps a leading-`-` path or base from being parsed as an option.
     let mut command = git_command(repo);
-    command.args(["worktree", "add", "-b", branch]).arg(dest);
+    command
+        .args(["worktree", "add", "-b", branch, "--"])
+        .arg(dest);
     if let Some(base) = base {
         command.arg(base);
     }

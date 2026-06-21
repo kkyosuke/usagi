@@ -12,8 +12,10 @@ use super::command::{git_capture, git_command, ref_names, remotes, rev_exists};
 /// Force-delete `branch` in `repo` (`git branch -D`). Used when discarding a
 /// session, so the branch is removed regardless of merge status.
 pub fn delete_branch(repo: &Path, branch: &str) -> Result<()> {
+    // `--` separates options from the branch operand so a name beginning with
+    // `-` can never be parsed as a `git branch` option.
     let output = git_command(repo)
-        .args(["branch", "-D", branch])
+        .args(["branch", "-D", "--", branch])
         .output()
         .context("failed to run `git branch -D`")?;
     if !output.status.success() {
