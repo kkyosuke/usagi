@@ -572,7 +572,19 @@ fn spawn_watcher(
         let notices: Vec<(String, session_monitor::NoticeKind)> = {
             let mut shared = match shared.lock() {
                 Ok(shared) => shared,
-                Err(_) => break,
+                // The shared state's mutex is poisoned: a thread panicked while
+                // holding it, so the bookkeeping can no longer be trusted and the
+                // watcher must stop. Record why before breaking — otherwise every
+                // session's bell / phase badge silently freezes with no trace.
+                // (Best-effort, like every other failure in this thread; the
+                // decision here is trivial enough — poison ⇒ fatal — to inline
+                // rather than route through a tested layer.)
+                Err(_) => {
+                    crate::infrastructure::error_log::ErrorLog::record(
+                        "terminal pool watcher stopped: shared state mutex poisoned",
+                    );
+                    break;
+                }
             };
 
             // Prune sessions whose every pane has exited so they stop being

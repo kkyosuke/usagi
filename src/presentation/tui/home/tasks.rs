@@ -27,6 +27,8 @@ use std::time::{Duration, Instant};
 
 use crate::domain::workspace_state::SessionRecord;
 
+#[cfg(test)]
+use super::state::LineKind;
 use super::state::LogLine;
 
 /// How often a running task's braille spinner advances. Fast, so the row reads
@@ -63,6 +65,16 @@ impl TaskKind {
             TaskKind::RemoveSession => "削除",
         }
     }
+
+    /// The English operation name written to the persisted error log, matching
+    /// the wording `run_create` / `run_remove` use for their own failure lines
+    /// (`session create` / `session remove`).
+    fn op_label(self) -> &'static str {
+        match self {
+            TaskKind::CreateSession => "session create",
+            TaskKind::RemoveSession => "session remove",
+        }
+    }
 }
 
 /// What a worker hands back when its task finishes, for the event loop to apply
@@ -80,6 +92,50 @@ pub struct Completion {
     /// successful removal so a session later recreated at the same path starts
     /// fresh. `None` for creations and failures.
     pub evict: Option<PathBuf>,
+}
+
+/// Decode the message a worker thread panicked with, from the payload
+/// [`catch_unwind`](std::panic::catch_unwind) returns. Rust panics carry either a
+/// `&str` (`panic!("…")`) or a `String` (`panic!("{x}")`); anything else is
+/// reported as an opaque payload so the log entry still says *something*.
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "unknown panic payload".to_string()
+    }
+}
+
+/// What to do with a session worker that panicked: the line to persist to the
+/// error log, and the failed [`Completion`] for its task row.
+///
+/// A panicked worker never reaches [`complete`](TaskHandle::complete), so without
+/// this its row would spin forever and the panic — the very thing that poisons
+/// the op-lock — would vanish with the dead thread. The home module catches the
+/// unwind and routes the payload here; keeping the decoding and wording in this
+/// (tested) module rather than the coverage-excluded home screen is why this is a
+/// free function taking the payload.
+pub fn panic_outcome(
+    kind: TaskKind,
+    target: &str,
+    payload: Box<dyn std::any::Any + Send>,
+) -> (String, Completion) {
+    let message = panic_message(payload.as_ref());
+    let log_line = format!(
+        "{} \"{target}\" worker panicked: {message}",
+        kind.op_label()
+    );
+    let completion = Completion {
+        line: LogLine::error(format!(
+            "{}が異常終了しました（{target}）: {message}",
+            kind.verb()
+        )),
+        sessions: None,
+        evict: None,
+    };
+    (log_line, completion)
 }
 
 /// The mark drawn at the head of a task row: a spinner while it runs, or a
@@ -423,5 +479,51 @@ mod tests {
         handle.complete(id, true, completion());
         assert!(handle.is_active(Instant::now()));
         assert_eq!(handle.drain_completed().len(), 1);
+    }
+
+    #[test]
+    fn panic_outcome_records_a_str_payload_and_marks_the_row_failed() {
+        // `panic!("…")` hands `catch_unwind` a `&str` payload.
+        let payload: Box<dyn std::any::Any + Send> = Box::new("boom");
+        let (log_line, completion) = panic_outcome(TaskKind::CreateSession, "alpha", payload);
+
+        // The persisted line names the operation, target, and panic message.
+        assert_eq!(log_line, "session create \"alpha\" worker panicked: boom");
+        // The row settles as a failure instead of spinning forever.
+        assert_eq!(completion.line.kind, LineKind::Error);
+        assert_eq!(
+            completion.line.text,
+            "作成が異常終了しました（alpha）: boom"
+        );
+        assert!(completion.sessions.is_none());
+        assert!(completion.evict.is_none());
+    }
+
+    #[test]
+    fn panic_outcome_records_a_string_payload_for_a_removal() {
+        // A formatted panic (`panic!("{x}")`) hands back an owned `String`.
+        let payload: Box<dyn std::any::Any + Send> = Box::new(String::from("disk gone"));
+        let (log_line, completion) = panic_outcome(TaskKind::RemoveSession, "beta", payload);
+
+        assert_eq!(
+            log_line,
+            "session remove \"beta\" worker panicked: disk gone"
+        );
+        assert_eq!(
+            completion.line.text,
+            "削除が異常終了しました（beta）: disk gone"
+        );
+    }
+
+    #[test]
+    fn panic_outcome_falls_back_for_an_opaque_payload() {
+        // A non-string payload (e.g. `std::panic::panic_any(42)`) still logs.
+        let payload: Box<dyn std::any::Any + Send> = Box::new(42_i32);
+        let (log_line, _) = panic_outcome(TaskKind::CreateSession, "gamma", payload);
+
+        assert_eq!(
+            log_line,
+            "session create \"gamma\" worker panicked: unknown panic payload"
+        );
     }
 }

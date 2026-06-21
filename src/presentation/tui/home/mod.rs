@@ -60,6 +60,32 @@ fn lock_session_ops(lock: &std::sync::Mutex<()>) -> std::sync::MutexGuard<'_, ()
     lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+/// Run a session worker's body under [`catch_unwind`](std::panic::catch_unwind)
+/// so a panic inside the git / filesystem work no longer vanishes with the dead
+/// thread. A panicked worker would otherwise never call
+/// [`complete`](tasks::TaskHandle::complete) — leaving its task row spinning
+/// forever — and the panic that poisoned the op-lock (recovered blindly by
+/// [`lock_session_ops`]) would leave no trace. On a panic this records the
+/// payload to the error log and settles the row as failed. The message / row
+/// wording is built in [`tasks::panic_outcome`], where it is tested; the spawn
+/// and the unwind boundary stay here in the coverage-excluded home module.
+fn complete_or_record_panic(
+    handle: &tasks::TaskHandle,
+    id: u64,
+    kind: tasks::TaskKind,
+    target: &str,
+    work: impl FnOnce() -> (bool, tasks::Completion),
+) {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(work)) {
+        Ok((ok, completion)) => handle.complete(id, ok, completion),
+        Err(payload) => {
+            let (log_line, completion) = tasks::panic_outcome(kind, target, payload);
+            crate::infrastructure::error_log::ErrorLog::record(&log_line);
+            handle.complete(id, false, completion);
+        }
+    }
+}
+
 /// Runs the home screen for `workspace` on the given terminal until the user
 /// goes back or quits. Loads the workspace's worktree state and prior command
 /// history from disk and wires it, with the real terminal, to the testable
@@ -147,9 +173,10 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
         let name = name.to_string();
         let lock = create_lock.clone();
         let worker = std::thread::spawn(move || {
-            let _guard = lock_session_ops(&lock);
-            let (ok, completion) = run_create(&root, &name);
-            handle.complete(id, ok, completion);
+            complete_or_record_panic(&handle, id, tasks::TaskKind::CreateSession, &name, || {
+                let _guard = lock_session_ops(&lock);
+                run_create(&root, &name)
+            });
         });
         create_workers.borrow_mut().push(worker);
     };
@@ -254,9 +281,10 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
         let lock = remove_lock.clone();
         let agent = remove_agent.clone();
         let worker = std::thread::spawn(move || {
-            let _guard = lock_session_ops(&lock);
-            let (ok, completion) = run_remove(&root, &name, force, agent.as_ref());
-            handle.complete(id, ok, completion);
+            complete_or_record_panic(&handle, id, tasks::TaskKind::RemoveSession, &name, || {
+                let _guard = lock_session_ops(&lock);
+                run_remove(&root, &name, force, agent.as_ref())
+            });
         });
         remove_workers.borrow_mut().push(worker);
     };
