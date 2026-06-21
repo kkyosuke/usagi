@@ -6,13 +6,17 @@
 //! screen grid; the presentation layer snapshots that grid each frame and draws
 //! it into the right pane (see `presentation::tui::home::terminal_pane`).
 //!
+//! When the shell exits on its own, [`Drop`] reaps it and — if it ended
+//! abnormally (non-zero or by signal) — records the exit to the error log, so a
+//! crashed agent CLI no longer looks exactly like the user typing `exit`.
+//!
 //! This module is pure I/O and threading, so it is excluded from coverage (cf.
 //! `term_reader.rs`); the pure pieces it feeds — the shell choice
-//! ([`terminal`]) and the grid-to-lines rendering (`home::terminal_view`) — are
-//! tested on their own.
+//! ([`terminal`]), the grid-to-lines rendering (`home::terminal_view`), and the
+//! exit-status-to-log-line decision ([`pty_exit`]) — are tested on their own.
 
 use std::io::{Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::JoinHandle;
@@ -20,7 +24,8 @@ use std::thread::JoinHandle;
 use anyhow::{Context, Result};
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 
-use crate::infrastructure::terminal;
+use crate::infrastructure::error_log::ErrorLog;
+use crate::infrastructure::{pty_exit, terminal};
 
 /// Counts the audible bells (`^G`) the shell emits, recorded into a shared
 /// counter as the parser processes output.
@@ -57,6 +62,11 @@ pub struct PtySession {
     /// with the render loop.
     bell: Arc<AtomicU64>,
     child: Box<dyn Child + Send + Sync>,
+    /// The worktree this shell runs in and whether it was launched into an agent
+    /// CLI — both only for the line [`Drop`] records when the shell exits
+    /// abnormally on its own (see [`pty_exit::exit_log_message`]).
+    worktree: PathBuf,
+    is_agent: bool,
     reader_thread: Option<JoinHandle<()>>,
 }
 
@@ -178,6 +188,10 @@ impl PtySession {
             generation,
             bell,
             child,
+            // A launch command means this pane runs an agent CLI; its absence a
+            // plain terminal. Recorded for the exit log line built in Drop.
+            worktree: dir.to_path_buf(),
+            is_agent: command.is_some(),
             reader_thread: Some(reader_thread),
         })
     }
@@ -264,9 +278,28 @@ impl PtySession {
 
 impl Drop for PtySession {
     fn drop(&mut self) {
-        // Terminate the shell and let the reader thread finish on EOF.
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        if self.is_alive() {
+            // The shell is still running, so dropping the session is a deliberate
+            // teardown (the user closed the pane or left the screen): terminate
+            // it and reap. `Child::kill` escalates SIGHUP → SIGKILL, guaranteeing
+            // the reader thread then sees EOF. A deliberate close is not a
+            // failure, so nothing is logged.
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        } else {
+            // The shell exited on its own (the reader hit EOF): reap it and, if it
+            // ended abnormally, record it — an agent CLI crashing or exiting
+            // non-zero is otherwise indistinguishable from the user typing `exit`.
+            // We own the child and reap exactly once here, so there is no
+            // pid-reuse window from signalling an already-reaped process.
+            if let Ok(status) = self.child.wait() {
+                if let Some(message) =
+                    pty_exit::exit_log_message(&self.worktree, self.is_agent, &status)
+                {
+                    ErrorLog::record(&message);
+                }
+            }
+        }
         if let Some(thread) = self.reader_thread.take() {
             let _ = thread.join();
         }
