@@ -493,7 +493,7 @@ impl TerminalPool {
     /// when no live session is rooted there, so the right pane falls back to the
     /// command log. Resizing here keeps a backgrounded session's screen reflowed
     /// to the visible pane, exactly as attaching to it would.
-    pub fn snapshot(&mut self, term: &Term, dir: &Path) -> Option<TerminalView> {
+    pub fn snapshot(&mut self, term: &Term, dir: &Path, sidebar: Sidebar) -> Option<TerminalView> {
         let sp = self.sessions.get_mut(dir)?;
         if sp.panes.is_empty() {
             return None;
@@ -504,10 +504,10 @@ impl TerminalPool {
             return None;
         }
         let (height, width) = term.size();
-        // The preview has no tab strip, so it uses the full-pane geometry. The
-        // 切替 preview is always drawn with the full sidebar (the picker keeps the
-        // session names), so the snapshot is sized to match.
-        let geo = ui::terminal_geometry(height as usize, width as usize, Sidebar::Full);
+        // The preview has no tab strip, so it uses the full-pane geometry. 切替
+        // honours the `Ctrl-B` sidebar toggle, so the snapshot is sized to the
+        // current sidebar state — collapsing the rail widens the preview to match.
+        let geo = ui::terminal_geometry(height as usize, width as usize, sidebar);
         let generation = session.generation();
         // The previewed session, the pane geometry, and the shell's output are all
         // unchanged since the last frame: reuse the snapshot without touching the

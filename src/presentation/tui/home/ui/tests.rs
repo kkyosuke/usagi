@@ -1456,7 +1456,7 @@ fn footer_line_differs_by_mode() {
 }
 
 #[test]
-fn render_frame_collapses_to_the_rail_but_keeps_switch_full() {
+fn render_frame_honours_the_rail_in_switch_too() {
     let mut state = state_with(vec![worktree(Some("feature"), false, BranchStatus::Local)]);
     state.set_sidebar(Sidebar::Rail);
     // Overview honours the rail: the session name is not spelled out on the left,
@@ -1464,10 +1464,65 @@ fn render_frame_collapses_to_the_rail_but_keeps_switch_full() {
     let overview = stripped(&render_frame(24, 80, &state));
     assert!(overview.contains('▸'));
     assert!(!overview.contains("feature"));
-    // 切替 forces the full sidebar so the picker keeps names, even with rail set.
+    // 切替 now honours the `Ctrl-B` toggle too: collapsed to the rail the picker
+    // keeps working (the cursor lives on the rail) but the list no longer spells
+    // out names, so the cursored root previews `workspace root` with no `feature`.
     state.enter_switch(super::super::state::ReturnMode::Overview);
-    let switch = stripped(&render_frame(24, 80, &state));
-    assert!(switch.contains("feature"));
+    let rail_switch = stripped(&render_frame(24, 80, &state));
+    assert!(!rail_switch.contains("feature"));
+    // Expanding the sidebar (Ctrl-B) brings the names back inline in the picker.
+    state.toggle_sidebar();
+    let full_switch = stripped(&render_frame(24, 80, &state));
+    assert!(full_switch.contains("feature"));
+}
+
+#[test]
+fn switch_create_on_the_rail_renders_the_input_in_the_right_pane() {
+    let mut state = state_with(vec![worktree(Some("feature"), false, BranchStatus::Local)]);
+    state.set_sidebar(Sidebar::Rail);
+    state.enter_switch(super::super::state::ReturnMode::Overview);
+    // The rail is too narrow for the inline `+ new: …` row, so opening the create
+    // input moves it into the (wide) right pane with its own header and key hint.
+    state.switch_begin_create(Vec::new());
+    state.create_mut().unwrap().push_char('x');
+    let frame = stripped(&render_frame(24, 80, &state));
+    assert!(frame.contains("+ new session"));
+    assert!(frame.contains('x'));
+    assert!(frame.contains("Enter 作成"));
+    // The left-pane inline form (`+ new:`) is not used while collapsed.
+    assert!(!frame.contains("+ new:"));
+    // A live validation error replaces the dim hint below the box in place.
+    state.create_mut().unwrap().push_char('/');
+    let invalid = stripped(&render_frame(24, 80, &state));
+    assert!(invalid.contains("cannot be used"));
+}
+
+#[test]
+fn switch_rename_on_the_rail_renders_the_input_in_the_right_pane() {
+    let mut state = state_with(vec![worktree(Some("feature"), false, BranchStatus::Local)]);
+    state.set_sidebar(Sidebar::Rail);
+    state.enter_switch(super::super::state::ReturnMode::Overview);
+    // Move the cursor off the root onto the session, then rename it: collapsed to
+    // the rail the input takes over the right pane just like create does.
+    state.switch_move_down();
+    assert!(state.switch_begin_rename());
+    state.rename_mut().unwrap().push_char('z');
+    let frame = stripped(&render_frame(24, 80, &state));
+    assert!(frame.contains("rename feature"));
+    assert!(frame.contains('z'));
+    assert!(frame.contains("Enter 確定"));
+}
+
+#[test]
+fn switch_create_with_the_full_sidebar_stays_inline_on_the_left() {
+    let mut state = state_with(vec![worktree(Some("feature"), false, BranchStatus::Local)]);
+    state.set_sidebar(Sidebar::Full);
+    state.enter_switch(super::super::state::ReturnMode::Overview);
+    state.switch_begin_create(Vec::new());
+    let frame = stripped(&render_frame(24, 80, &state));
+    // Full width keeps the original inline left-pane form, not the right-pane box.
+    assert!(frame.contains("+ new:"));
+    assert!(!frame.contains("+ new session"));
 }
 
 #[test]

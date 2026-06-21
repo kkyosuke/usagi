@@ -274,17 +274,14 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
     }
 
     let (height, width) = widgets::normalize_size(raw_height, raw_width);
-    // 切替 (Switch) is the session picker: the left pane is the selection UI and
-    // the inline create / rename inputs need room, so it always renders the full
-    // sidebar even when the user has collapsed it elsewhere. Every other mode
-    // honours the toggle. The pool sizes the 没入 terminal and the 切替 preview
-    // against this same rule (full while picking, the live state once attached),
-    // so the embedded terminal always fills the pane it is drawn into.
-    let sidebar = if state.mode() == Mode::Switch {
-        Sidebar::Full
-    } else {
-        state.sidebar()
-    };
+    // The left sidebar honours the `Ctrl-B` toggle in every mode — 切替 (Switch)
+    // included, so the picker works collapsed to the rail (the cursor `>` and the
+    // dimming still render there). 切替's inline create / rename name input needs
+    // room: at full width it rides the left pane inline (below), but collapsed to
+    // the rail there is none, so it moves to the right pane instead (see
+    // [`right_pane_contents`]). The pool sizes the 切替 preview to this same state,
+    // so the previewed terminal always fills the pane it is drawn into.
+    let sidebar = state.sidebar();
     let (left_w, right_w) = layout(width, sidebar);
 
     // The 統括 input is a bordered box (3 rows) when there is height for it;
@@ -321,21 +318,26 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
         state.mode() == Mode::Switch,
         sidebar,
     );
-    // While naming a new session in 切替, append the inline create row(s) to the
-    // left pane (trimmed back to the session-list area if it would overflow).
-    if let Some(create) = state.create() {
-        for row in switch_create_rows(create.value(), create.cursor(), create.error(), left_w) {
-            left.push(row);
+    // 切替's inline create / rename input rides the left pane — but only at full
+    // width. Collapsed to the rail (5 columns) there is no room for the name, so
+    // the input renders in the right pane instead (see [`right_pane_contents`]).
+    if sidebar == Sidebar::Full {
+        // While naming a new session in 切替, append the inline create row(s) to
+        // the left pane (trimmed back to the session-list area if it overflows).
+        if let Some(create) = state.create() {
+            for row in switch_create_rows(create.value(), create.cursor(), create.error(), left_w) {
+                left.push(row);
+            }
+            left.truncate(body_rows);
         }
-        left.truncate(body_rows);
-    }
-    // While renaming a session's sidebar label in 切替, append the inline rename
-    // row to the left pane (trimmed back if it would overflow).
-    if let Some(rename) = state.rename() {
-        for row in switch_rename_rows(rename.target(), rename.value(), left_w) {
-            left.push(row);
+        // While renaming a session's sidebar label in 切替, append the inline
+        // rename row to the left pane (trimmed back if it would overflow).
+        if let Some(rename) = state.rename() {
+            for row in switch_rename_rows(rename.target(), rename.value(), left_w) {
+                left.push(row);
+            }
+            left.truncate(body_rows);
         }
-        left.truncate(body_rows);
     }
     let right = right_pane_contents(state, right_w, body_rows);
 

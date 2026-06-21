@@ -196,9 +196,10 @@ fn event_loop_attaches_a_live_session_end_to_end() {
         };
     // A non-`None` preview is what tells the loop the session is live, so
     // pressing Enter on it attaches rather than just focusing.
-    let mut preview = |_dir: &Path| -> Option<TerminalView> {
-        Some(TerminalView::from_rows(vec!["live".to_string()], None))
-    };
+    let mut preview =
+        |_dir: &Path, _sidebar: crate::domain::settings::Sidebar| -> Option<TerminalView> {
+            Some(TerminalView::from_rows(vec!["live".to_string()], None))
+        };
     let mut persist = |_: &str| {};
     let mut create = |_: &str| SessionOutcome {
         line: LogLine::output("created"),

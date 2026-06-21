@@ -333,7 +333,9 @@ fn focus_and_attach(
 ) {
     state.enter_focus(row);
     let dir = selected_dir(state, wiring.workspace_root);
-    if (wiring.preview)(&dir).is_some() {
+    // A liveness test only — the snapshot geometry is irrelevant here, so it is
+    // sized to the current sidebar state and the result is just tested for `Some`.
+    if (wiring.preview)(&dir, state.sidebar()).is_some() {
         open_pane(term, state, painter, wiring, false, false);
     }
 }

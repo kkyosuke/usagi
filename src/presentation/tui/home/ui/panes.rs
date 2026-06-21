@@ -8,7 +8,9 @@ use std::path::PathBuf;
 use console::{style, Style};
 
 use super::super::command::{CommandInfo, Hint};
-use super::super::state::{HomeState, LineKind, LogLine, Mode, Preview, WorktreeList, ROOT_NAME};
+use super::super::state::{
+    CreateInput, HomeState, LineKind, LogLine, Mode, Preview, RenameInput, WorktreeList, ROOT_NAME,
+};
 use super::super::terminal_tabs::TabStrip;
 use super::super::terminal_view::TerminalView;
 use super::{
@@ -751,6 +753,63 @@ fn focus_hint_lines(hint: Hint, width: usize) -> Vec<String> {
 /// preview (the full set, including `c new` / `r rename`, is in the footer).
 const SWITCH_KEYS: &str = "↑↓ session  ←→ tab  Enter focus  t new  x close tab  Esc back";
 
+/// Pad `lines` to fill the right pane and pin `hint` to its bottom row, matching
+/// how [`switch_preview`] reserves the last row for its key hint. Shared by the
+/// rail's create / rename right-pane inputs so they sit at the same height.
+fn switch_input_pane(mut lines: Vec<String>, hint: &str, width: usize, rows: usize) -> Vec<String> {
+    let body_rows = rows.saturating_sub(1);
+    lines.truncate(body_rows);
+    lines.resize(body_rows, String::new());
+    lines.push(style(clip_to_width(hint, width)).dim().to_string());
+    lines
+}
+
+/// The 切替 (Switch) name input rendered in the **right pane** while creating a
+/// session with the sidebar collapsed to the rail: a header, the typed name in a
+/// bordered box with a block caret, the live validation error (or a hint) below
+/// it, and the key hint pinned to the bottom row. At full width the input rides
+/// the left pane inline instead (see [`super::switch_create_rows`]).
+fn switch_create_pane(create: &CreateInput, width: usize, rows: usize) -> Vec<String> {
+    // The box draws two borders and a space of padding on each side, so its
+    // content area is the pane width less those four columns.
+    let inner = width.saturating_sub(4).max(1);
+    let (before, after) = create.value().split_at(create.cursor());
+    let value = widgets::block_caret(before, after, &Style::new().cyan());
+    let mut lines = vec![style("+ new session").green().bold().to_string()];
+    lines.extend(widgets::boxed("", inner, &[value]));
+    // Keep the row count stable whether or not the name is currently invalid: an
+    // error replaces the dim hint in place rather than adding a row.
+    match create.error() {
+        Some(err) => lines.push(style(clip_to_width(err, width)).red().to_string()),
+        None => lines.push(
+            style("空文字・重複・\"/\" は作成できません")
+                .dim()
+                .to_string(),
+        ),
+    }
+    switch_input_pane(lines, "Enter 作成 / Esc 取消", width, rows)
+}
+
+/// The 切替 (Switch) display-name input rendered in the **right pane** while
+/// renaming a session with the sidebar collapsed to the rail: a header naming the
+/// session, the typed label in a bordered box with a block caret, a hint, and the
+/// key hint pinned to the bottom row. At full width it rides the left pane inline
+/// instead (see [`super::switch_rename_rows`]).
+fn switch_rename_pane(rename: &RenameInput, width: usize, rows: usize) -> Vec<String> {
+    let inner = width.saturating_sub(4).max(1);
+    let value = widgets::block_caret(rename.value(), "", &Style::new().cyan());
+    let mut lines = vec![clip_to_width(
+        &style(format!("rename {}", rename.target()))
+            .cyan()
+            .bold()
+            .to_string(),
+        width,
+    )];
+    lines.extend(widgets::boxed("", inner, &[value]));
+    lines.push(style("空にすると既定の表示名に戻す").dim().to_string());
+    switch_input_pane(lines, "Enter 確定 / Esc 取消", width, rows)
+}
+
 /// The 切替 (Switch) right pane: a **preview of the screen that selecting the
 /// session under the cursor will open**, so the choice is informed by what comes
 /// next. A live session (an embedded shell / agent already running) previews the
@@ -860,7 +919,21 @@ pub(super) fn right_pane_contents(state: &HomeState, right_w: usize, rows: usize
     }
     match state.mode() {
         Mode::Overview => Vec::new(),
-        Mode::Switch => switch_preview(state, right_w, rows),
+        Mode::Switch => {
+            // Collapsed to the rail, 切替's name input has no room inline in the
+            // (5-column) list, so it takes over the wide right pane; at full width
+            // it rides the left pane inline and the right pane keeps previewing the
+            // highlighted session.
+            if state.sidebar() == Sidebar::Rail {
+                if let Some(create) = state.create() {
+                    return switch_create_pane(create, right_w, rows);
+                }
+                if let Some(rename) = state.rename() {
+                    return switch_rename_pane(rename, right_w, rows);
+                }
+            }
+            switch_preview(state, right_w, rows)
+        }
         Mode::Focus => match state.session_action_ui() {
             SessionActionUi::Menu => focus_menu(state, right_w),
             SessionActionUi::Prompt => focus_prompt(state, right_w),
