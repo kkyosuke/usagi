@@ -274,17 +274,44 @@ impl PtySession {
     pub fn generation(&self) -> u64 {
         self.generation.load(Ordering::SeqCst)
     }
+
+    /// Terminate the shell **and everything it spawned** on a deliberate
+    /// teardown.
+    ///
+    /// `Child::kill` here is `std::process::Child::kill` (via portable-pty),
+    /// which sends a single `SIGKILL` to the shell pid alone — it does *not*
+    /// signal the process group. An agent CLI the shell launched would then be
+    /// reparented to init and keep running, holding the worktree open *and*
+    /// keeping the PTY slave fd open — which would stop the reader thread from
+    /// ever seeing EOF and deadlock the `wait`/`join` in [`Drop`].
+    ///
+    /// portable-pty makes the shell a session leader (`setsid`), so its pid is
+    /// also its process-group id; signalling that group (via `killpg`) reaches
+    /// the agent and any other descendant. We still call `child.kill` afterward
+    /// as the Windows fallback (no process groups there) and as a harmless
+    /// no-op once the group is already gone.
+    fn terminate(&mut self) {
+        #[cfg(unix)]
+        if let Some(pid) = self.child.process_id() {
+            // SAFETY: `killpg` with a valid signal has no memory effects; a
+            // stale or unknown group just yields `ESRCH`, which we ignore.
+            unsafe {
+                libc::killpg(pid as libc::pid_t, libc::SIGKILL);
+            }
+        }
+        let _ = self.child.kill();
+    }
 }
 
 impl Drop for PtySession {
     fn drop(&mut self) {
         if self.is_alive() {
             // The shell is still running, so dropping the session is a deliberate
-            // teardown (the user closed the pane or left the screen): terminate
-            // it and reap. `Child::kill` escalates SIGHUP → SIGKILL, guaranteeing
-            // the reader thread then sees EOF. A deliberate close is not a
-            // failure, so nothing is logged.
-            let _ = self.child.kill();
+            // teardown (the user closed the pane or left the screen): kill the
+            // whole process group (shell + any agent it spawned) so the reader
+            // thread then sees EOF and the join below cannot hang. A deliberate
+            // close is not a failure, so nothing is logged.
+            self.terminate();
             let _ = self.child.wait();
         } else {
             // The shell exited on its own (the reader hit EOF): reap it and, if it
