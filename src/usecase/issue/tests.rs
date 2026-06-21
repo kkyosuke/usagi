@@ -763,3 +763,48 @@ fn search_respects_filters_and_readiness() {
     assert_eq!(ready.len(), 1);
     assert_eq!(ready[0].summary.number, 1);
 }
+
+#[test]
+fn concurrent_creates_keep_distinct_numbers_with_no_lost_write() {
+    // Two threads create issues against the same store at the same time. Before
+    // the cross-process lock, both could read the same `max_number`, pick the
+    // same number, and the second writer's stale-sibling cleanup would delete
+    // the first writer's freshly created file — a lost write. With the lock the
+    // allocate→write sequence is serialised, so the two creates must land on
+    // DISTINCT numbers and BOTH files survive.
+    use std::sync::{Arc, Barrier};
+    use std::thread;
+
+    // Many rounds so a missing lock would almost certainly trip at least once.
+    for _ in 0..16 {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().to_path_buf();
+        let start = Arc::new(Barrier::new(2));
+
+        let handles: Vec<_> = ["A", "B"]
+            .into_iter()
+            .map(|title| {
+                let repo = repo.clone();
+                let start = Arc::clone(&start);
+                thread::spawn(move || {
+                    start.wait();
+                    create(&repo, new_issue(title)).unwrap()
+                })
+            })
+            .collect();
+
+        let mut numbers: Vec<u32> = handles
+            .into_iter()
+            .map(|h| h.join().unwrap().number)
+            .collect();
+        numbers.sort_unstable();
+
+        // Distinct numbers were handed out (no reuse)...
+        assert_eq!(numbers, vec![1, 2], "creates must get distinct numbers");
+        // ...and both issues are backed by a file on disk (no lost write).
+        let store = IssueStore::new(&repo);
+        assert_eq!(store.scan().unwrap().len(), 2, "both issues must survive");
+        assert!(store.read(1).unwrap().is_some());
+        assert!(store.read(2).unwrap().is_some());
+    }
+}

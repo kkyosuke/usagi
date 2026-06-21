@@ -121,6 +121,12 @@ impl ListedIssue {
 /// stored issue.
 pub fn create(repo_root: &Path, new: NewIssue) -> Result<Issue> {
     let store = IssueStore::new(repo_root);
+    // Hold this store's lock across number allocation AND the write so a
+    // concurrent `create` in another process cannot observe the same
+    // `max_number` and reuse the number — which would make its write delete the
+    // file this one just created. The lock is dropped when `write_locked`
+    // returns.
+    let lock = store.lock()?;
     let now = Utc::now();
     let issue = Issue {
         number: next_number(repo_root)?,
@@ -136,7 +142,7 @@ pub fn create(repo_root: &Path, new: NewIssue) -> Result<Issue> {
         updated_at: now,
         body: new.body,
     };
-    store.write(&issue)?;
+    store.write_locked(&lock, &issue)?;
     Ok(issue)
 }
 

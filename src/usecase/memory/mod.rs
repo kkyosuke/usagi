@@ -63,6 +63,10 @@ impl MemoryFilter {
 pub fn save(repo_root: &Path, new: NewMemory) -> Result<Memory> {
     let store = MemoryStore::new(repo_root);
     let name = slugify(&new.name);
+    // Hold the lock across the read (to learn whether the memory exists and
+    // preserve its `created_at`) and the write, so a concurrent `save` of the
+    // same name cannot interleave between the two and clobber the result.
+    let lock = store.lock()?;
     let now = Utc::now();
     let memory = match store.read(&name)? {
         Some(existing) => Memory {
@@ -84,7 +88,7 @@ pub fn save(repo_root: &Path, new: NewMemory) -> Result<Memory> {
             body: new.body,
         },
     };
-    store.write(&memory)?;
+    store.write_locked(&lock, &memory)?;
     Ok(memory)
 }
 

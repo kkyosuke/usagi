@@ -37,7 +37,7 @@
 
 - どの worktree からコマンドを実行しても、`git worktree list` の先頭（＝プライマリ worktree）を基準に保存先を解決します（`infrastructure/git.rs` の `primary_worktree`）。これによりリポジトリ内で 1 つの `.usagi/` に集約されます。
 - `.usagi/` の大半（`state.json` / `settings.json` / `history.jsonl` / `sessions/`）は **マシンローカルな状態・設定** で、後述の `.gitignore` により **コミットされません**。
-- 例外は **`.usagi/issues/`** と **`.usagi/memory/`**。タスク issue とエージェントのメモリはチームで共有したいので git 管理対象とします。それぞれの派生キャッシュ `index.json` だけは再生成可能なので除外したままにします（メモリの目次 `MEMORY.md` は共有対象）。
+- 例外は **`.usagi/issues/`** と **`.usagi/memory/`**。タスク issue とエージェントのメモリはチームで共有したいので git 管理対象とします。それぞれの派生キャッシュ `index.json` と、プロセス間書き込みロック用の `.lock` ファイルは再生成可能・ローカル専用なので除外したままにします（メモリの目次 `MEMORY.md` は共有対象）。
 - git 管理の制御は **リポジトリルートの `.gitignore` には書かず、`.usagi/.gitignore` に自己完結させます**（`usagi::usecase::project::ignore_usagi_dir`）。リポジトリルートを汚さず、`.usagi/` 配下だけで完結するのが利点です。`usagi init` 時に次の内容（`.usagi/` 配下からの相対パターン）を書き込み、旧バージョンがルート `.gitignore` に追記していた `.usagi/` 系エントリがあれば除去します。
 
   ```gitignore
@@ -46,8 +46,10 @@
   !/.gitignore
   !/issues/
   /issues/index.json
+  /issues/.lock
   !/memory/
   /memory/index.json
+  /memory/.lock
   ```
 
 ### セッションの worktree 配置

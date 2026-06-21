@@ -22,6 +22,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::domain::memory::{Memory, MemorySummary};
 use crate::infrastructure::json_file;
+use crate::infrastructure::store_lock::StoreLock;
 
 const STATE_DIR_NAME: &str = ".usagi";
 const MEMORY_DIR_NAME: &str = "memory";
@@ -62,6 +63,18 @@ impl MemoryStore {
 
     pub fn toc_path(&self) -> PathBuf {
         self.dir.join(TOC_FILE)
+    }
+
+    /// Acquire this store's cross-process write lock, blocking until it is free.
+    ///
+    /// Hold the returned guard across a whole read-modify-write that must be
+    /// atomic with respect to other processes — e.g. the upsert in
+    /// [`crate::usecase::memory::save`], which reads the existing memory (to
+    /// preserve its `created_at`) and then writes. The [`write`](Self::write) /
+    /// [`remove`](Self::remove) entry points take the lock themselves; pass the
+    /// guard to [`write_locked`](Self::write_locked) when you already hold it.
+    pub fn lock(&self) -> Result<StoreLock> {
+        StoreLock::acquire(&self.dir)
     }
 
     /// Read and parse every memory markdown file, sorted by name.
@@ -117,8 +130,19 @@ impl MemoryStore {
         Ok(Some(memory))
     }
 
-    /// Write `memory` to disk and refresh the derived files.
+    /// Write `memory` to disk and refresh the derived files, taking the store
+    /// lock for the duration so concurrent writers serialise (the derived
+    /// `index.json` / `MEMORY.md` are rebuilt by scanning the whole directory, so
+    /// concurrent writes could otherwise commit a stale rebuild).
     pub fn write(&self, memory: &Memory) -> Result<()> {
+        let lock = self.lock()?;
+        self.write_locked(&lock, memory)
+    }
+
+    /// Like [`write`](Self::write) but assumes the caller already holds this
+    /// store's [`lock`](Self::lock). Use this to keep the upsert read and the
+    /// write inside one lock acquisition (see [`crate::usecase::memory::save`]).
+    pub fn write_locked(&self, _lock: &StoreLock, memory: &Memory) -> Result<()> {
         fs::create_dir_all(&self.dir)
             .context(format!("failed to create {}", self.dir.display()))?;
 
@@ -129,8 +153,9 @@ impl MemoryStore {
     }
 
     /// Remove the memory with `name`, returning whether anything was deleted, then
-    /// refresh the derived files.
+    /// refresh the derived files. Takes the store lock for the duration.
     pub fn remove(&self, name: &str) -> Result<bool> {
+        let _lock = self.lock()?;
         let path = self.dir.join(format!("{name}.md"));
         match fs::remove_file(&path) {
             Ok(()) => {}
@@ -452,6 +477,18 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("failed to remove"));
+    }
+
+    #[test]
+    fn the_lock_file_is_not_picked_up_as_a_memory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = MemoryStore::new(tmp.path());
+        store.write(&memory("one", "One")).unwrap();
+        // Acquiring the lock creates the `.lock` file inside the store dir; it
+        // must never be parsed as a memory or counted by scans.
+        let _guard = store.lock().unwrap();
+        assert!(store.dir().join(".lock").is_file());
+        assert_eq!(store.scan().unwrap().len(), 1);
     }
 
     #[test]

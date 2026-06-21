@@ -15,5 +15,6 @@ pub mod pty_exit;
 pub mod release;
 pub mod session_monitor;
 pub mod storage;
+pub mod store_lock;
 pub mod terminal;
 pub mod workspace_store;

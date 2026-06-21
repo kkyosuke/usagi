@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::domain::issue::{Issue, IssueSummary};
 use crate::infrastructure::json_file;
+use crate::infrastructure::store_lock::StoreLock;
 
 const STATE_DIR_NAME: &str = ".usagi";
 const ISSUES_DIR_NAME: &str = "issues";
@@ -53,6 +54,19 @@ impl IssueStore {
 
     pub fn index_path(&self) -> PathBuf {
         self.dir.join(INDEX_FILE)
+    }
+
+    /// Acquire this store's cross-process write lock, blocking until it is free.
+    ///
+    /// Hold the returned guard across a whole read-modify-write that must be
+    /// atomic with respect to other processes — most importantly allocating the
+    /// next issue number and writing it: the lock guarantees a concurrent
+    /// `create` cannot read the same `max_number` and reuse the number. The
+    /// [`write`](Self::write) / [`remove`](Self::remove) entry points take the
+    /// lock themselves; pass the guard to [`write_locked`](Self::write_locked)
+    /// when you already hold it to extend the critical section.
+    pub fn lock(&self) -> Result<StoreLock> {
+        StoreLock::acquire(&self.dir)
     }
 
     /// Read and parse every issue markdown file, sorted by number.
@@ -123,30 +137,47 @@ impl IssueStore {
         Ok(Some(issue))
     }
 
-    /// Write `issue` to disk and refresh the index.
+    /// Write `issue` to disk and refresh the index, taking the store lock for the
+    /// duration so concurrent writers serialise.
     ///
     /// If a file for the same number already exists under a different name
     /// (because the title — and therefore the slug — changed), the stale file is
     /// removed so each issue is backed by exactly one file.
     pub fn write(&self, issue: &Issue) -> Result<()> {
+        let lock = self.lock()?;
+        self.write_locked(&lock, issue)
+    }
+
+    /// Like [`write`](Self::write) but assumes the caller already holds this
+    /// store's [`lock`](Self::lock). Use this to keep number allocation and the
+    /// write inside one lock acquisition (see [`crate::usecase::issue::create`]).
+    ///
+    /// Write order is deliberate: the new target file is written **first**, then
+    /// any stale-named sibling for the same number is removed. A crash between
+    /// the two therefore leaves the new file present (at worst a transient
+    /// duplicate, which the next rebuild/scan reconciles) rather than an issue
+    /// with no backing file.
+    pub fn write_locked(&self, _lock: &StoreLock, issue: &Issue) -> Result<()> {
         fs::create_dir_all(&self.dir)
             .context(format!("failed to create {}", self.dir.display()))?;
 
         let target = self.dir.join(issue.file_name());
+        json_file::write_text_atomic(&target, &issue.to_markdown())?;
+
         for stale in self.files_for(issue.number)? {
             if stale != target {
                 fs::remove_file(&stale).context(format!("failed to remove {}", stale.display()))?;
             }
         }
 
-        json_file::write_text_atomic(&target, &issue.to_markdown())?;
         self.rebuild_index()?;
         Ok(())
     }
 
     /// Remove the issue with `number`, returning whether anything was deleted,
-    /// then refresh the index.
+    /// then refresh the index. Takes the store lock for the duration.
     pub fn remove(&self, number: u32) -> Result<bool> {
+        let _lock = self.lock()?;
         let files = self.files_for(number)?;
         if files.is_empty() {
             return Ok(false);
@@ -474,6 +505,44 @@ mod tests {
         assert_eq!(next, 3);
         assert!(store.dir().join("002-two.md").exists());
         assert_eq!(store.scan().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn write_renames_in_place_leaving_one_valid_file_and_a_fresh_index() {
+        // After a slug change `write` writes the NEW file first, THEN removes the
+        // stale sibling (so a crash between the two leaves the new file, not a
+        // file-less issue). The end state is exactly one valid backing file and
+        // an index that reflects it.
+        let tmp = tempfile::tempdir().unwrap();
+        let store = IssueStore::new(tmp.path());
+        store.write(&issue(1, "Old title")).unwrap();
+
+        let mut renamed = issue(1, "New title");
+        renamed.body = "changed".to_string();
+        store.write(&renamed).unwrap();
+
+        // Exactly one file backs the issue and the stale name is gone.
+        assert!(!store.dir().join("001-old-title.md").exists());
+        assert!(store.dir().join("001-new-title.md").is_file());
+        assert_eq!(store.files_for(1).unwrap().len(), 1);
+        // The surviving file parses back to the new content.
+        assert_eq!(store.read(1).unwrap().unwrap().title, "New title");
+        // The index reflects the new title (the rebuild ran inside the lock).
+        let index = fs::read_to_string(store.index_path()).unwrap();
+        assert!(index.contains("\"title\": \"New title\""));
+        assert!(!index.contains("Old title"));
+    }
+
+    #[test]
+    fn the_lock_file_is_not_picked_up_as_an_issue() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = IssueStore::new(tmp.path());
+        store.write(&issue(1, "One")).unwrap();
+        // Acquiring the lock creates the `.lock` file inside the store dir; it
+        // must never be parsed as an issue or counted by scans.
+        let _guard = store.lock().unwrap();
+        assert!(store.dir().join(".lock").is_file());
+        assert_eq!(store.scan().unwrap().len(), 1);
     }
 
     #[test]
