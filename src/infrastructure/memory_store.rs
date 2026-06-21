@@ -206,8 +206,10 @@ impl MemoryStore {
             version: FILE_FORMAT_VERSION,
             memories: summaries.clone(),
         };
-        let text = serde_json::to_string_pretty(&index)?;
-        json_file::write_text_atomic(&self.index_path(), &format!("{text}\n"))?;
+        // The canonical "pretty JSON + trailing newline, written atomically" path
+        // lives in `json_file::write_atomic`; reuse it for the index. `MEMORY.md`
+        // is hand-rolled markdown, so it stays on `write_text_atomic`.
+        json_file::write_atomic(&self.dir, &self.index_path(), &index)?;
         json_file::write_text_atomic(&self.toc_path(), &render_toc(&summaries))?;
         Ok(summaries)
     }

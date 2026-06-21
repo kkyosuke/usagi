@@ -4,8 +4,9 @@
 use anyhow::Result;
 use serde::Serialize;
 
-use crate::domain::issue::IssueStatus;
-use crate::usecase::issue::{group, GroupBy, IssueStats, ListedIssue, ListedIssueView};
+use crate::usecase::issue::{
+    group, list_line, stats_line, GroupBy, IssueStats, ListedIssue, ListedIssueView,
+};
 
 /// Render a listing (from `list` or `search`) either as JSON or as aligned
 /// human-readable lines.
@@ -30,68 +31,22 @@ pub(super) fn render_grouped(items: Vec<ListedIssue>, axis: GroupBy) -> Vec<Stri
         out.extend(render_list(&group_items));
         out.push(format!(
             "   {}",
-            format_stats(&IssueStats::from_listed(&group_items))
+            stats_line(&IssueStats::from_listed(&group_items))
         ));
         out.push(String::new());
     }
-    out.push(format_stats(&overall));
+    out.push(stats_line(&overall));
     out
 }
 
-/// A one-line progress summary: totals, completion, and readiness.
-pub(super) fn format_stats(stats: &IssueStats) -> String {
-    format!(
-        "{} issues · {} done ({}%) · {} ready  {}",
-        stats.total,
-        stats.done,
-        stats.completion_percent(),
-        stats.ready,
-        stats.progress_bar(20),
-    )
-}
-
-/// Format a listing as aligned, one-line-per-issue text.
+/// Format a listing as aligned, one-line-per-issue text. The per-line layout and
+/// progress footer live in [`crate::usecase::issue`] so the CLI and the TUI
+/// `issue` command render identically.
 pub(super) fn render_list(items: &[ListedIssue]) -> Vec<String> {
     if items.is_empty() {
         return vec!["No issues found.".to_string()];
     }
-    items
-        .iter()
-        .map(|l| {
-            let marker = readiness(l);
-            let mut line = format!(
-                "#{:<3} {:<12} {:<6} {:<8} {}",
-                l.summary.number,
-                l.summary.status.as_str(),
-                l.summary.priority.as_str(),
-                marker,
-                l.summary.title,
-            );
-            if !l.unmet_deps.is_empty() {
-                line.push_str(&format!("  (blocked by {})", join_numbers(&l.unmet_deps)));
-            }
-            line
-        })
-        .collect()
-}
-
-/// The readiness marker shown for a listed issue.
-fn readiness(listed: &ListedIssue) -> &'static str {
-    if listed.summary.status == IssueStatus::Done {
-        "done"
-    } else if listed.is_ready() {
-        "ready"
-    } else {
-        "blocked"
-    }
-}
-
-fn join_numbers(numbers: &[u32]) -> String {
-    numbers
-        .iter()
-        .map(u32::to_string)
-        .collect::<Vec<_>>()
-        .join(", ")
+    items.iter().map(list_line).collect()
 }
 
 /// Serialize `value` to pretty JSON and return it split into lines.

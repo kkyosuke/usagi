@@ -3,8 +3,9 @@
 //! registered in display order by [`super::CommandRegistry::with_builtins`].
 
 use super::{Command, CommandContext, CommandInfo, CommandResult, CommandScope, Effect, LogLine};
-use crate::domain::issue::IssueStatus;
-use crate::usecase::issue::{annotate_all, dependency_tree, gantt, IssueStats, ListedIssue};
+use crate::usecase::issue::{
+    annotate_all, dependency_tree, gantt, list_line, stats_line, IssueStats, ListedIssue,
+};
 
 /// Line-width budget for the `issue gantt` chart, matching the text modal's
 /// inner width so bars fill the box without being clipped.
@@ -479,45 +480,11 @@ fn issue_show(ctx: &CommandContext, rest: &str) -> CommandResult {
     }
 }
 
-/// One aligned `#N status priority marker title` line for a listed issue.
+/// One aligned `#N status priority marker title` line for a listed issue. The
+/// layout lives in [`crate::usecase::issue::list_line`] so this command renders
+/// identically to `usagi issue list`.
 fn issue_line(listed: &ListedIssue) -> LogLine {
-    let marker = if listed.summary.status == IssueStatus::Done {
-        "done"
-    } else if listed.is_ready() {
-        "ready"
-    } else {
-        "blocked"
-    };
-    let mut text = format!(
-        "#{:<3} {:<12} {:<6} {:<8} {}",
-        listed.summary.number,
-        listed.summary.status.as_str(),
-        listed.summary.priority.as_str(),
-        marker,
-        listed.summary.title,
-    );
-    if !listed.unmet_deps.is_empty() {
-        let deps = listed
-            .unmet_deps
-            .iter()
-            .map(u32::to_string)
-            .collect::<Vec<_>>()
-            .join(", ");
-        text.push_str(&format!("  (blocked by {deps})"));
-    }
-    LogLine::output(text)
-}
-
-/// A one-line progress summary shown under issue listings and the graph.
-fn stats_line(stats: &IssueStats) -> String {
-    format!(
-        "{} issues · {} done ({}%) · {} ready  {}",
-        stats.total,
-        stats.done,
-        stats.completion_percent(),
-        stats.ready,
-        stats.progress_bar(20),
-    )
+    LogLine::output(list_line(listed))
 }
 
 /// `preview`: render a Markdown file in the right pane (the third right-pane

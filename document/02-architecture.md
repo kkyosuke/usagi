@@ -52,8 +52,9 @@ src/
 │   ├── workspace.rs            # グローバル登録エントリ Workspace
 │   ├── workspace_state.rs      # WorkspaceState / WorktreeState / BranchStatus
 │   ├── history.rs              # コマンド履歴の 1 件 HistoryEntry
-│   ├── issue/                  # Issue / IssueSummary / IssueStatus / IssuePriority（mod=型 / markdown=frontmatter 読み書き）
-│   ├── memory/                 # Memory / MemorySummary / MemoryType（mod=型・slug / markdown=frontmatter 読み書き）
+│   ├── frontmatter.rs          # frontmatter 形式の正本（slug 化・--- 分割・リスト escape・timestamp・改行無害化。issue/memory 共用）
+│   ├── issue/                  # Issue / IssueSummary / IssueStatus / IssuePriority（mod=型 / markdown=frontmatter 読み書き（共通処理は frontmatter に委譲））
+│   ├── memory/                 # Memory / MemorySummary / MemoryType（mod=型・slug / markdown=frontmatter 読み書き（共通処理は frontmatter に委譲））
 │   └── version.rs              # セマンティックバージョン Version（パース・比較）
 │
 ├── usecase/                    # ビジネスロジック
@@ -62,12 +63,13 @@ src/
 │   ├── workspace.rs            # グローバル登録の add/list/remove/touch
 │   ├── workspace_state.rs      # リポジトリ状態の inspect/sync/load
 │   ├── settings.rs             # グローバル設定の load/更新、ローカル設定と実効設定の解決（effective）
+│   ├── search.rs               # 全文検索のマッチ規則の正本（Unicode-aware case-fold + contains。issue/memory 検索が共用）
 │   ├── session/               # セッションのライフサイクル
 │   │   ├── mod.rs             # create / remove と state.json への記録（SessionRecord）
 │   │   ├── tree.rs            # ルート再帰走査・worktree 構築・非 git コピー・リポジトリ探索
 │   │   └── reconcile.rs       # state.json と .usagi/sessions/ の照合・孤児ディレクトリの強制削除
 │   ├── doctor/                 # 依存ツールの導入状況チェック（mod=診断 / runner=CommandRunner / fix=--fix 導入）
-│   ├── issue/                  # issue の CRUD・検索・readiness（mod=型/CRUD/annotate / stats=集計・grouping / tree=依存ツリー / view=JSON 出力の SSoT（CLI・MCP 共用））
+│   ├── issue/                  # issue の CRUD・検索・readiness（mod=型/CRUD/annotate / stats=集計・grouping / tree=依存ツリー / gantt=ガント / render=一覧行・統計行のテキスト整形の SSoT（CLI・TUI 共用） / view=JSON 出力の SSoT（CLI・MCP 共用））
 │   ├── memory/                 # メモリの upsert/CRUD・検索・種別フィルタ（mod=型/save/get/list/search/update/delete / view=JSON 出力の SSoT（CLI・MCP 共用））
 │   ├── local_llm.rs            # ollama・モデルの有無判定とインストール（ensure）
 │   └── update_check.rs         # リモートのタグから最新リリースを判定（純粋・fetch は注入）
@@ -85,6 +87,7 @@ src/
 │   ├── pty_exit.rs             # シェル/エージェントの終了ステータスをエラーログ文へ変換する純粋ロジック（pty.rs のテスト可能な相棒）
 │   ├── release.rs              # git ls-remote --tags でリリースタグを取得（薄い IO ラッパ）
 │   ├── session_monitor.rs      # 入力待ち判定の純粋ロジック（phase 優先・ベル基準値・待ち集合・アタッチ）
+│   ├── worktree_keyed_store.rs # worktree → ファイル名（canonical path のハッシュ）導出の正本。agent_state_store / agent_prompt_store が共用
 │   ├── agent_state_store.rs    # worktree 別の Agent phase の記録/読み出し・フック JSON のパース（~/.usagi/agent-state/。遷移ポリシーは usecase/agent_phase）
 │   ├── agent_prompt_store.rs   # worktree 別に session_prompt のプロンプトをキュー/取り出し（~/.usagi/agent-prompts/）
 │   ├── agent/                  # Agent port のアダプタ（Claude は MCP・システムプロンプト・フックを serde_json で組み立てて launch コマンド生成 / Gemini は素起動）・agent_for
@@ -111,7 +114,7 @@ src/
         ├── open/               # プロジェクト選択画面（state / ui / event）
         ├── new/                # 新規プロジェクト画面（state（mod=FormState・型 / validate=検証） / ui / event）
         ├── config/             # 設定画面（state（mod=Config・型定義 / cycling=値巡回ロジック） / ui / event）
-        ├── home/               # ホーム画面（state（mod=HomeState / list・mode・log・modal（サブモード型: create/rename 入力・remove モーダル・focus メニュー）に分割） / ui（mod=render_frame・panes・chrome・content=コマンド出力整形 に分割） / event（mod=loop・handlers に分割） / command（mod=語彙・builtins・registry に分割） / terminal_view / terminal_pane / terminal_pool（常駐＋phase/ベル監視・通知））
+        ├── home/               # ホーム画面（state（mod=HomeState / list・mode・log・modal（サブモード型: create/rename 入力・remove モーダル・focus メニュー、および HomeState が持つ Overlays 集約）に分割） / ui（mod=render_frame・panes・chrome・content=コマンド出力整形 に分割） / event（mod=loop・handlers に分割） / command（mod=語彙・builtins・registry に分割） / terminal_view / terminal_pane / terminal_pool（常駐＋phase/ベル監視・通知））
         └── widgets/            # 共通 widget（mod / picker / dir_picker / text_input=キャレット編集付き 1 行入力）
 ```
 
