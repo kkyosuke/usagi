@@ -8,6 +8,7 @@
 
 pub mod command;
 pub mod event;
+pub mod oneshot;
 pub mod sessions_refresh;
 pub mod state;
 pub mod tasks;
@@ -94,17 +95,16 @@ fn complete_or_record_panic(
 /// workspace's `history.json` (best-effort). Assumes the alternate screen is
 /// already active (it is owned by the orchestrator).
 pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
-    // Sync from git on entry so the worktree statuses are current the moment the
-    // screen opens (a branch may have been committed / pushed / merged since the
-    // last visit). A non-git root or a sync failure falls back to the saved
-    // sessions, mirroring `reload_sessions`.
-    let (sessions, notice) = match crate::usecase::workspace_state::sync(&workspace.path) {
-        Ok(state) => (state.sessions, None),
-        Err(_) => match WorkspaceStore::new(&workspace.path).load() {
-            Ok(Some(state)) => (state.sessions, None),
-            Ok(None) => (Vec::new(), None),
-            Err(e) => (Vec::new(), Some(format!("Failed to load sessions: {e}"))),
-        },
+    // Open the screen immediately from the saved `state.json` (no git): load just
+    // the recorded sessions here, then re-sync the worktree statuses from git on a
+    // background thread (spawned below) and swap in the refreshed sessions in place
+    // when they land. Syncing synchronously here would block the first paint on git
+    // for as long as the workspace has worktrees to inspect. A non-git root or a
+    // sync failure just leaves these saved statuses, mirroring `reload_sessions`.
+    let (sessions, notice) = match WorkspaceStore::new(&workspace.path).load() {
+        Ok(Some(state)) => (state.sessions, None),
+        Ok(None) => (Vec::new(), None),
+        Err(e) => (Vec::new(), Some(format!("Failed to load sessions: {e}"))),
     };
     let mut state = HomeState::new(workspace.name.clone(), Vec::new(), notice);
     // The root row (`⌂ root`) operates in the workspace root; record its path so
@@ -125,14 +125,19 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
         state.set_issues(issues);
     }
 
-    // Which right-pane action surface 在席 (Focus) presents — a pickable menu or
-    // a typed prompt — from the effective settings (project-local over the global
-    // default). Re-read again whenever the config screen closes (see
-    // `open_config`) so a change takes effect without reopening this screen.
-    state.set_session_action_ui(effective_settings(&workspace.path).session_action_ui);
-    // The state the left session sidebar opens in (full width or the collapsed
-    // rail); `Ctrl-B` toggles it from there.
-    state.set_sidebar(effective_settings(&workspace.path).sidebar);
+    // The effective settings for this workspace (project-local overrides on top of
+    // the global default), read once here and reused for every setting the screen
+    // derives — the 在席 action surface, the sidebar's initial state, the local-LLM
+    // probe, the agent CLI / wiring, and notifications — instead of re-reading
+    // `settings.json` for each (it was previously read three times at startup).
+    // Re-read again whenever the config screen closes (see `open_config`) so a
+    // change takes effect without reopening this screen.
+    let settings = effective_settings(&workspace.path);
+    // Which right-pane action surface 在席 (Focus) presents — a pickable menu or a
+    // typed prompt — and the state the left sidebar opens in (full width or the
+    // collapsed rail; `Ctrl-B` toggles it from there).
+    state.set_session_action_ui(settings.session_action_ui);
+    state.set_sidebar(settings.sidebar);
 
     // Restore past commands so `history` and `↑`/`↓` recall span sessions.
     // A read failure is non-fatal: just start with an empty history.
@@ -226,17 +231,21 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
         }
     };
 
-    // The effective settings for this workspace (project-local overrides on top
-    // of the global default), read once. Any failure falls back to the defaults.
-    let settings = crate::infrastructure::storage::Storage::open_default()
-        .and_then(|storage| crate::usecase::settings::effective(&storage, &workspace.path))
-        .unwrap_or_default();
-
     // Whether the 在席 (Focus) menu offers the `ai` command: only when the local
     // LLM is enabled and its model is pulled, so it appears only when running it
-    // would actually work. Probed once here (an `ollama show`) and re-probed when
-    // the config screen closes (see `open_config`).
-    state.set_ai_available(local_llm_available(&settings));
+    // would actually work. The probe is an `ollama show`, which can block on a
+    // cold / wedged `ollama` server, so it runs on a background thread rather than
+    // delaying the first paint: the menu omits `ai` until the probe lands, and the
+    // event loop flips it on when it does. Re-probed when the config screen closes
+    // (see `open_config`).
+    let ai_available = oneshot::OneShot::new();
+    {
+        let handle = ai_available.clone();
+        let settings = settings.clone();
+        std::thread::spawn(move || {
+            handle.set(local_llm_available(&settings));
+        });
+    }
 
     // The wired-in MCP servers and lifecycle hooks invoke usagi back, so they are
     // pointed at this process's own executable path rather than the bare name
@@ -334,6 +343,22 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
     // writes the refreshed list here; the event loop applies it on a later frame
     // instead of the detach freezing until git returns.
     let sessions_refresh = sessions_refresh::SessionsRefreshHandle::new();
+    // Re-sync the same statuses once on entry, through the same handle: the screen
+    // opened immediately from the saved `state.json` (above) without waiting on
+    // git, so kick the status sync onto a background thread and let the event loop
+    // swap in the refreshed list when it lands. `workspace_state::sync` serialises
+    // its own `state.json` write through the store's cross-process lock, so it is
+    // safe to run alongside the background session create / remove workers. A
+    // non-git root or a sync failure leaves the saved statuses in place.
+    {
+        let handle = sessions_refresh.clone();
+        let root = workspace.path.clone();
+        std::thread::spawn(move || {
+            if let Ok(state) = crate::usecase::workspace_state::sync(&root) {
+                handle.set(state.sessions);
+            }
+        });
+    }
 
     // Opening a terminal embeds a live shell in the right pane: the pane stays
     // inside the workspace screen (sidebar still visible) and runs the shell
@@ -591,6 +616,7 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
         &monitor,
         &update,
         &sessions_refresh,
+        &ai_available,
         &tasks,
         &mut wiring,
     );

@@ -21,6 +21,7 @@ use crate::domain::workspace_state::{BranchStatus, WorktreeState};
 use crate::presentation::tui::screen::KeyReader;
 
 use super::event::{event_loop_compat, ConfigReload, Outcome};
+use super::oneshot::OneShot;
 use super::state::{HomeState, LogLine, PaneExit, ReturnMode, SessionOutcome};
 use super::terminal_pool::{MonitorHandle, MonitorSnapshot};
 use super::terminal_tabs::TabNav;
@@ -233,6 +234,7 @@ fn event_loop_attaches_a_live_session_end_to_end() {
         Path::new("/repo"),
         &monitor,
         &update,
+        &OneShot::<bool>::new(),
         &mut persist,
         &mut create,
         &mut rename,

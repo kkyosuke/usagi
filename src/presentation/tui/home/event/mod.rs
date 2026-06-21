@@ -17,6 +17,7 @@ use crate::domain::settings::{SessionActionUi, Sidebar};
 use crate::presentation::tui::install_task;
 use crate::presentation::tui::screen::{FramePainter, KeyReader};
 
+use super::oneshot::OneShot;
 use super::sessions_refresh::SessionsRefreshHandle;
 use super::state::{HomeState, Mode, PaneExit, SessionOutcome};
 use super::tasks::TaskHandle;
@@ -165,12 +166,13 @@ pub enum Outcome {
 /// settings screen — are bundled into [`Wiring`]; see its fields for each hook's
 /// contract. Tests build a `Wiring` of fakes (via [`event_loop_compat`]) so the
 /// loop's logic is exercised without a real terminal or shell pool.
-/// Apply a session list a background pane-exit sync produced, if one has landed,
-/// refreshing the worktree statuses without yanking the cursor; a slot with no
-/// sync yet leaves the state untouched. Returns whether a list was applied, so
-/// the loop forces a repaint (the new git statuses are not part of the badge
-/// snapshot the skip-paint check compares). Split out of [`event_loop`] so the
-/// apply is exercised directly rather than only through a full loop run.
+/// Apply a session list a background sync produced (a pane-exit detach, or the
+/// entry re-sync), if one has landed, refreshing the worktree statuses without
+/// yanking the cursor; a slot with no sync yet leaves the state untouched.
+/// Returns whether a list was applied, so the loop forces a repaint (the new git
+/// statuses are not part of the badge snapshot the skip-paint check compares).
+/// Split out of [`event_loop`] so the apply is exercised directly rather than
+/// only through a full loop run.
 fn apply_pending_refresh(state: &mut HomeState, refresh: &SessionsRefreshHandle) -> bool {
     match refresh.take() {
         Some(sessions) => {
@@ -189,6 +191,7 @@ pub(super) fn event_loop(
     monitor: &MonitorHandle,
     update: &UpdateHandle,
     refresh: &SessionsRefreshHandle,
+    ai_available: &OneShot<bool>,
     tasks: &TaskHandle,
     wiring: &mut Wiring,
 ) -> Result<Outcome> {
@@ -212,13 +215,21 @@ pub(super) fn event_loop(
         // release check has found a newer version than this build.
         let latest_update = update.status().map(|status| status.latest);
         state.set_update(latest_update);
-        // Apply a session list a background pane-exit sync produced, if one has
-        // landed — refreshing the worktree statuses without yanking the cursor.
-        // Done before the task drain below so a session create / remove that
-        // finished on the same frame still has the last word on the list. A landed
-        // refresh changes the sidebar git statuses (which the badge snapshot does
-        // not capture), so it forces a repaint below.
+        // Apply a session list a background sync produced — a pane-exit detach, or
+        // the one-shot entry re-sync — if one has landed, refreshing the worktree
+        // statuses without yanking the cursor. Done before the task drain below so
+        // a session create / remove that finished on the same frame still has the
+        // last word on the list. A landed refresh changes the sidebar git statuses
+        // (which the badge snapshot does not capture), so `refreshed` forces a
+        // repaint below.
         let refreshed = apply_pending_refresh(&mut state, refresh);
+        // Flip the `ai` command on once the background local-LLM probe confirms it
+        // is usable (drained once); until then the 在席 menu simply omits it. Force a
+        // repaint so the change is reflected without waiting for the next keypress.
+        if let Some(available) = ai_available.take() {
+            state.set_ai_available(available);
+            force_paint = true;
+        }
         // Apply any background session task (create / remove) that finished since
         // the last frame: evict the removed session's pooled shell (on this
         // thread — the pool is not `Send`), then log the result and refresh the
@@ -511,6 +522,7 @@ pub(crate) fn event_loop_compat(
     workspace_root: &Path,
     monitor: &MonitorHandle,
     update: &UpdateHandle,
+    ai_available: &OneShot<bool>,
     mut persist: impl FnMut(&str),
     mut create_session: impl FnMut(&str) -> SessionOutcome,
     mut rename_display: impl FnMut(&str, &str) -> SessionOutcome,
@@ -582,6 +594,7 @@ pub(crate) fn event_loop_compat(
         monitor,
         update,
         &refresh,
+        ai_available,
         &tasks,
         &mut wiring,
     )
