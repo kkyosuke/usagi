@@ -368,6 +368,57 @@ fn state_with_sessions(names: &[&str]) -> HomeState {
     state
 }
 
+#[test]
+fn a_background_refresh_updates_the_session_list_exactly_once() {
+    // The pane-exit sync thread publishes a freshly-synced list to the handle;
+    // the loop's `apply_pending_refresh` adopts it on a later frame. With nothing
+    // pending the state is untouched; once a list lands it is applied and then
+    // taken, so a second poll does not re-apply a stale snapshot.
+    let mut state = state_with_sessions(&["main", "feat"]);
+    let refresh = SessionsRefreshHandle::new();
+
+    // No sync has landed yet: the list is left exactly as it was.
+    apply_pending_refresh(&mut state, &refresh);
+    assert_eq!(
+        state
+            .sessions()
+            .iter()
+            .map(|s| s.name.clone())
+            .collect::<Vec<_>>(),
+        vec!["main".to_string(), "feat".to_string()]
+    );
+
+    // A background sync reports that `feat` is gone and `next` was added.
+    refresh.set(
+        ["main", "next"]
+            .iter()
+            .map(|n| SessionRecord {
+                name: n.to_string(),
+                display_name: None,
+                root: PathBuf::from(format!("/ws/.usagi/sessions/{n}")),
+                worktrees: vec![worktree(Some(n), &format!("/ws/{n}"))],
+                created_at: Utc::now(),
+            })
+            .collect(),
+    );
+    apply_pending_refresh(&mut state, &refresh);
+    assert_eq!(
+        state
+            .sessions()
+            .iter()
+            .map(|s| s.name.clone())
+            .collect::<Vec<_>>(),
+        vec!["main".to_string(), "next".to_string()]
+    );
+
+    // The slot is now empty, so a further poll re-applies nothing.
+    refresh.set(Vec::new());
+    apply_pending_refresh(&mut state, &refresh);
+    assert!(state.sessions().is_empty());
+    apply_pending_refresh(&mut state, &refresh);
+    assert!(state.sessions().is_empty());
+}
+
 // --- 統括 (Overview) ---------------------------------------------------
 
 #[test]
@@ -2052,6 +2103,7 @@ fn run_with_tasks(
         sample_state(),
         &monitor,
         &UpdateHandle::new(),
+        &SessionsRefreshHandle::new(),
         tasks,
         &mut wiring,
     )
@@ -2149,6 +2201,7 @@ fn run_with_live_session(reader: &mut dyn KeyReader) -> Result<Outcome> {
         sample_state(),
         &monitor,
         &UpdateHandle::new(),
+        &SessionsRefreshHandle::new(),
         &tasks,
         &mut wiring,
     )

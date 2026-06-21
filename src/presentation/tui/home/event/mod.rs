@@ -17,6 +17,7 @@ use crate::domain::settings::{SessionActionUi, Sidebar};
 use crate::presentation::tui::install_task;
 use crate::presentation::tui::screen::{FramePainter, KeyReader};
 
+use super::sessions_refresh::SessionsRefreshHandle;
 use super::state::{HomeState, Mode, PaneExit, SessionOutcome};
 use super::tasks::TaskHandle;
 use super::terminal_pool::MonitorHandle;
@@ -164,12 +165,24 @@ pub enum Outcome {
 /// settings screen — are bundled into [`Wiring`]; see its fields for each hook's
 /// contract. Tests build a `Wiring` of fakes (via [`event_loop_compat`]) so the
 /// loop's logic is exercised without a real terminal or shell pool.
+/// Apply a session list a background pane-exit sync produced, if one has landed,
+/// refreshing the worktree statuses without yanking the cursor; a slot with no
+/// sync yet leaves the state untouched. Split out of [`event_loop`] so the apply
+/// is exercised directly rather than only through a full loop run.
+fn apply_pending_refresh(state: &mut HomeState, refresh: &SessionsRefreshHandle) {
+    if let Some(sessions) = refresh.take() {
+        state.refresh_sessions(sessions);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(super) fn event_loop(
     term: &Term,
     reader: &mut dyn KeyReader,
     mut state: HomeState,
     monitor: &MonitorHandle,
     update: &UpdateHandle,
+    refresh: &SessionsRefreshHandle,
     tasks: &TaskHandle,
     wiring: &mut Wiring,
 ) -> Result<Outcome> {
@@ -184,6 +197,11 @@ pub(super) fn event_loop(
         // Surface the top-right "update available" notice once the background
         // release check has found a newer version than this build.
         state.set_update(update.status().map(|status| status.latest));
+        // Apply a session list a background pane-exit sync produced, if one has
+        // landed — refreshing the worktree statuses without yanking the cursor.
+        // Done before the task drain below so a session create / remove that
+        // finished on the same frame still has the last word on the list.
+        apply_pending_refresh(&mut state, refresh);
         // Apply any background session task (create / remove) that finished since
         // the last frame: evict the removed session's pooled shell (on this
         // thread — the pool is not `Send`), then log the result and refresh the
@@ -495,6 +513,10 @@ pub(crate) fn event_loop_compat(
         );
     };
     let mut evict_pool = |_: &Path| {};
+    // The fakes have no equivalent of the production pane-exit sync thread that
+    // fills this, so it stays empty here; the apply path is covered directly in
+    // `a_background_refresh_updates_the_session_list`.
+    let refresh = SessionsRefreshHandle::new();
     let mut wiring = Wiring {
         workspace_root,
         persist: &mut persist,
@@ -509,7 +531,16 @@ pub(crate) fn event_loop_compat(
         tab_op: &mut tab_op,
         close_tab: &mut close_tab,
     };
-    event_loop(term, reader, state, monitor, update, &tasks, &mut wiring)
+    event_loop(
+        term,
+        reader,
+        state,
+        monitor,
+        update,
+        &refresh,
+        &tasks,
+        &mut wiring,
+    )
 }
 
 #[cfg(test)]
