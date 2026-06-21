@@ -86,9 +86,11 @@ pub(super) fn list_repo_worktrees(
 /// Physically destroy one session whose directory is `root` and whose branch is
 /// `branch`: unregister any worktree on that branch from each source repository,
 /// drop the now-orphaned branch, then delete whatever files remain under `root`.
-/// With `force`, a dirty worktree is discarded; without it git refuses one. Git
-/// steps are best-effort (a session may be partly torn down already, or never
-/// fully built); only deleting the directory itself is allowed to fail the call.
+/// With `force`, a dirty worktree is discarded and the git steps are
+/// best-effort (a session may be partly torn down already, or never fully
+/// built). Without `force`, a worktree git refuses to remove (dirty or locked)
+/// aborts the call *before* the directory is deleted, so uncommitted work is
+/// never silently discarded; only `delete_branch` stays best-effort either way.
 ///
 /// Shared by [`reconcile`] (pruning strays, always forced) and
 /// [`remove`](super::remove) so the teardown procedure lives in one place.
@@ -103,7 +105,18 @@ pub(super) fn discard_session(
     for (repo, worktrees) in repo_worktrees {
         for wt in worktrees {
             if wt.branch.as_deref() == Some(branch) {
-                let _ = git::remove_worktree(repo, &wt.path, force);
+                let removed = git::remove_worktree(repo, &wt.path, force);
+                // Forced teardown discards a dirty worktree by design, so any
+                // failure there is best-effort. Without `force`, git refuses a
+                // worktree that turned dirty (or is locked) after the caller's
+                // clean check — propagate that so we abort *before* deleting the
+                // directory below, rather than silently destroying uncommitted
+                // work and leaving a dangling worktree registration. An
+                // unregistered / never-built path reports `Ok`, so this still
+                // tolerates a partly torn-down session.
+                if !force {
+                    removed?;
+                }
             }
         }
         let _ = git::delete_branch(repo, branch);

@@ -867,6 +867,30 @@ mod tests {
     }
 
     #[test]
+    fn discard_session_without_force_aborts_on_a_dirty_worktree_and_keeps_it() {
+        // `remove`'s own clean check intercepts the common dirty case, so exercise
+        // `discard_session` directly to cover the race / locked-worktree path:
+        // without `force`, a worktree git refuses to remove must abort *before*
+        // the session directory is deleted, so uncommitted work is never lost.
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        let created = create(root.path(), "wip").unwrap();
+        fs::write(created.root.join("scratch.txt"), "uncommitted").unwrap();
+
+        let repo_worktrees = reconcile::list_repo_worktrees(root.path()).unwrap();
+
+        let err =
+            reconcile::discard_session(&created.root, "wip", &repo_worktrees, false).unwrap_err();
+        assert!(err.to_string().contains("git worktree remove failed"));
+        assert!(created.root.exists());
+        assert!(created.root.join("scratch.txt").exists());
+
+        // Forced teardown discards the dirty worktree as before.
+        reconcile::discard_session(&created.root, "wip", &repo_worktrees, true).unwrap();
+        assert!(!created.root.exists());
+    }
+
+    #[test]
     fn remove_clears_the_recorded_agent_phase() {
         // Point the data dir at a throwaway home so the phase file is isolated.
         let _guard = crate::test_support::process_env_guard();
