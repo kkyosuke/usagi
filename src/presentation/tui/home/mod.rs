@@ -8,6 +8,7 @@
 
 pub mod command;
 pub mod event;
+pub mod sessions_refresh;
 pub mod state;
 pub mod tasks;
 pub mod terminal_link;
@@ -326,6 +327,14 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
         });
     }
 
+    // Leaving an embedded pane re-syncs the worktree statuses from git (a commit
+    // / push / merge may have happened inside it). That sync is slow — a `git
+    // status` per worktree, plus the cross-process state lock — exactly when
+    // several sessions are running agents, so it runs on a background thread and
+    // writes the refreshed list here; the event loop applies it on a later frame
+    // instead of the detach freezing until git returns.
+    let sessions_refresh = sessions_refresh::SessionsRefreshHandle::new();
+
     // Opening a terminal embeds a live shell in the right pane: the pane stays
     // inside the workspace screen (sidebar still visible) and runs the shell
     // until the user detaches, switches sessions, or it exits. `:agent` is the
@@ -474,12 +483,22 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
         handle.set_attached(None);
         home.clear_terminal_surface();
         // The user may have committed / pushed / merged while in the pane, so
-        // re-sync the worktree statuses now that they have left it — keeping the
-        // cursor where it is. Best-effort: a sync failure just leaves the
-        // last-known statuses in place.
-        if let Some(sessions) = reload_sessions(&terminal_root) {
-            home.refresh_sessions(sessions);
-        }
+        // re-sync the worktree statuses now that they have left it. The sync
+        // shells out to `git status` for every worktree and waits on the
+        // cross-process state lock, which is slow precisely when several sessions
+        // are running agents — so run it off the loop thread instead of freezing
+        // the detach here. The refreshed list is published to `sessions_refresh`
+        // for the event loop to apply on a later frame (keeping the cursor where
+        // it is); until then the just-left statuses stay on screen. The worker is
+        // tracked so a sync in flight at quit finishes its `state.json` write.
+        // Best-effort: a sync failure simply leaves the last-known statuses.
+        let refresh_handle = sessions_refresh.clone();
+        let refresh_root = terminal_root.clone();
+        workers.borrow_mut().push(std::thread::spawn(move || {
+            if let Some(sessions) = reload_sessions(&refresh_root) {
+                refresh_handle.set(sessions);
+            }
+        }));
         // A launch / pane failure is surfaced and persisted by the event loop's
         // single error sink: `open_pane` logs the failure through
         // `HomeState::log_error`, which both shows it and writes it to the daily
@@ -571,6 +590,7 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
         state,
         &monitor,
         &update,
+        &sessions_refresh,
         &tasks,
         &mut wiring,
     );
