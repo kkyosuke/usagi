@@ -73,7 +73,7 @@ src/
 │   └── update_check.rs         # リモートのタグから最新リリースを判定（純粋・fetch は注入）
 │
 ├── infrastructure/             # 外部連携（Git・永続化・シェル）
-│   ├── error_log.rs            # 実行時エラーの日次ログ（~/.usagi/logs/・30 日保持・ErrorLog）
+│   ├── error_log.rs            # 実行時エラーの日次ログ（~/.usagi/logs/・30 日保持・ErrorLog）と TUI 用エラーシンク（Logger トレイト・FileLogger / NoopLogger）
 │   ├── git/                    # git CLI 経由の読み取り専用検査 + worktree 追加（command/repo/worktree/branch に分割）
 │   ├── gitignore.rs            # .usagi/.gitignore の書き込みと旧 root .gitignore 行の除去（バイト/行操作）
 │   ├── json_file.rs            # JSON ファイルの共通 read / 原子的 write（temp + rename）

@@ -1,4 +1,5 @@
 use std::io;
+use std::os::unix::io::{AsRawFd, RawFd};
 use std::time::Duration;
 
 use console::{Key, Term};
@@ -46,35 +47,129 @@ impl KeyReader for TermKeyReader {
     }
 
     fn read_key_timeout(&mut self, timeout: Duration) -> io::Result<Option<Key>> {
-        // `console` only offers a blocking read, so use crossterm's `poll` —
-        // which the embedded terminal pane already relies on — to wait at most
-        // `timeout` for input to be *ready* without consuming it. This adds no
+        // `console` only offers a blocking read, so we wait at most `timeout` for
+        // input to be *ready* and then decode it with `console` exactly as a
+        // blocking read would; a wheel turn or other mouse report drains to a tick
+        // (`None`) so the caller just repaints and polls again. This adds no
         // background thread (one would outlive its screen and steal the next
         // screen's input, or fight the embedded pane for stdin), so reads stay
-        // strictly sequential. When input is ready we decode it with `console`
-        // exactly as a blocking read would; a wheel turn or other mouse report
-        // drains to a tick (`None`) so the caller just repaints and polls again.
+        // strictly sequential.
         //
-        // The poll **must** run in raw mode. Between its per-key raw reads
+        // The readiness wait **must not consume** the bytes it is waiting on:
+        // `console`'s decode below reads the tty fd directly, so anything read out
+        // from under it never reaches the key stream. An earlier version polled
+        // with `crossterm::event::poll`, which reads tty bytes into crossterm's
+        // *own* internal parse buffer to detect an event — bytes `console` then
+        // never saw. Each keypress in the animate path was swallowed by crossterm
+        // and only surfaced when the *next* press happened to wake a blocking
+        // `console` read, a one-key lag that froze the task spinner, delayed
+        // applying finished work, and made `c` need two presses in 切替. We instead
+        // poll the fd directly ([`input_ready`]) — readiness only, never a read —
+        // so every key is decoded by `console` on the first press.
+        //
+        // The wait **must** run in raw mode. Between its per-key raw reads
         // `console` leaves the terminal in cooked (canonical) mode (the alternate
         // screen guard only clears `ECHO`; see [`super::echo`]). A canonical-mode
         // tty is reported readable only once the line discipline has a full,
         // newline-terminated line — so a lone arrow key / `j` / `k` never looks
-        // "ready", and this poll would tick to `None` forever without ever seeing
-        // it. That stranded every non-`Enter` key whenever the loop animates
-        // (i.e. whenever a session is live — exactly the state `Ctrl-O` out of an
+        // "ready", and this would tick to `None` forever without ever seeing it.
+        // That stranded every non-`Enter` key whenever the loop animates (i.e.
+        // whenever a session is live — exactly the state `Ctrl-O` out of an
         // attached pane lands in: 切替 with the just-detached session still
-        // running). Entering raw mode for the poll *and* the decode makes each
+        // running). Entering raw mode for the wait *and* the decode makes each
         // keypress deliverable at once, mirroring the per-read raw mode `console`
         // already uses on the blocking path; the guard restores cooked mode on the
         // way out so the rest of the loop is unchanged.
         let _raw = RawModeGuard::enter()?;
-        if !crossterm::event::poll(timeout)? {
+        if !input_ready(timeout)? {
             return Ok(None);
         }
         match self.read_input()? {
             Input::Key(key) => Ok(Some(key)),
             Input::Scroll(_) => Ok(None),
+        }
+    }
+}
+
+/// Whether the terminal input has a byte ready within `timeout`, **without
+/// consuming it** — so the `console` decode that follows reads those same bytes.
+///
+/// Mirrors `console`'s own readiness check ([`unbuffered`-then-`select`/`poll`]):
+/// the fd is stdin when it is a tty, else `/dev/tty`; on a macOS tty it is
+/// `select`ed (a macOS tty cannot be `poll`ed), and `poll`ed everywhere else.
+fn input_ready(timeout: Duration) -> io::Result<bool> {
+    let millis = i32::try_from(timeout.as_millis()).unwrap_or(i32::MAX);
+    let stdin = io::stdin();
+    if unsafe { libc::isatty(stdin.as_raw_fd()) == 1 } {
+        return wait_readable(stdin.as_raw_fd(), millis);
+    }
+    // stdin is redirected: `console` reads keys from `/dev/tty`, so wait on that.
+    let tty = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/tty")?;
+    wait_readable(tty.as_raw_fd(), millis)
+}
+
+/// Wait up to `timeout_ms` for `fd` to be readable, using `select` on a macOS
+/// tty (which cannot be `poll`ed there) and `poll` otherwise. Reports readiness
+/// only; it never reads, so the bytes stay queued for the decoding read.
+fn wait_readable(fd: RawFd, timeout_ms: i32) -> io::Result<bool> {
+    #[cfg(target_os = "macos")]
+    {
+        if unsafe { libc::isatty(fd) == 1 } {
+            return select_readable(fd, timeout_ms);
+        }
+    }
+    poll_readable(fd, timeout_ms)
+}
+
+/// `poll(2)` `fd` for `POLLIN` up to `timeout_ms` (negative blocks). Readiness
+/// only — no bytes are read.
+fn poll_readable(fd: RawFd, timeout_ms: i32) -> io::Result<bool> {
+    let mut pollfd = libc::pollfd {
+        fd,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    let ret = unsafe { libc::poll(&mut pollfd as *mut _, 1, timeout_ms) };
+    if ret < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(pollfd.revents & libc::POLLIN != 0)
+    }
+}
+
+/// `select(2)` `fd` for readability up to `timeout_ms` (negative blocks). Used in
+/// place of `poll` on a macOS tty, where `poll` does not report tty readiness.
+#[cfg(target_os = "macos")]
+fn select_readable(fd: RawFd, timeout_ms: i32) -> io::Result<bool> {
+    use std::mem;
+    unsafe {
+        let mut read_fd_set: libc::fd_set = mem::zeroed();
+        let mut timeout_val;
+        let timeout = if timeout_ms < 0 {
+            std::ptr::null_mut()
+        } else {
+            timeout_val = libc::timeval {
+                tv_sec: (timeout_ms / 1000) as _,
+                tv_usec: ((timeout_ms % 1000) * 1000) as _,
+            };
+            &mut timeout_val
+        };
+        libc::FD_ZERO(&mut read_fd_set);
+        libc::FD_SET(fd, &mut read_fd_set);
+        let ret = libc::select(
+            fd + 1,
+            &mut read_fd_set,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            timeout,
+        );
+        if ret < 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(libc::FD_ISSET(fd, &read_fd_set))
         }
     }
 }

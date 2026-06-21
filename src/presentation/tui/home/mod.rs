@@ -110,6 +110,11 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
     // the 切替 preview can recognise the root's live embedded session (keyed by
     // this path) and show its terminal, mirroring how worktree rows are matched.
     state.set_root_path(workspace.path.clone());
+    // Persist on-screen operation failures to the daily error log: the screen's
+    // single error sink (`HomeState::log_error` and the failure lines applied from
+    // background tasks / session outcomes) writes through this. Tests leave the
+    // no-op default and record nothing.
+    state.set_logger(Box::new(crate::infrastructure::error_log::FileLogger));
     state.restore_sessions(sessions);
 
     // Load the workspace's task issues so the `issue` command can list / graph /
@@ -472,16 +477,11 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
         if let Some(sessions) = reload_sessions(&terminal_root) {
             home.refresh_sessions(sessions);
         }
-        // The event loop shows a launch / pane failure on screen; also persist it
-        // (with its full cause chain) so a session that failed to start stays
-        // inspectable in the error log after the fact.
-        if let Err(e) = &result {
-            crate::infrastructure::error_log::ErrorLog::record(&format!(
-                "{} session in {} failed: {e:#}",
-                if run_agent { "agent" } else { "terminal" },
-                dir.display()
-            ));
-        }
+        // A launch / pane failure is surfaced and persisted by the event loop's
+        // single error sink: `open_pane` logs the failure through
+        // `HomeState::log_error`, which both shows it and writes it to the daily
+        // log file. No separate `ErrorLog::record` here, so the failure is recorded
+        // exactly once, by the same path as every other on-screen operation error.
         result
     };
 
@@ -603,19 +603,17 @@ fn run_create(root: &Path, name: &str) -> (bool, tasks::Completion) {
                 evict: None,
             },
         ),
-        Err(e) => {
-            crate::infrastructure::error_log::ErrorLog::record(&format!(
-                "session create \"{name}\" failed: {e:#}"
-            ));
-            (
-                false,
-                tasks::Completion {
-                    line: LogLine::error(format!("session failed: {e}")),
-                    sessions: None,
-                    evict: None,
-                },
-            )
-        }
+        // The failure line is recorded to the daily log when the event loop applies
+        // this completion (`apply_task_completion` routes error lines through the
+        // screen's logger), so there is no separate `ErrorLog::record` here.
+        Err(e) => (
+            false,
+            tasks::Completion {
+                line: LogLine::error(format!("session failed: {e}")),
+                sessions: None,
+                evict: None,
+            },
+        ),
     }
 }
 
@@ -658,19 +656,17 @@ fn run_remove(
                 },
             )
         }
-        Err(e) => {
-            crate::infrastructure::error_log::ErrorLog::record(&format!(
-                "session remove \"{name}\" failed: {e:#}"
-            ));
-            (
-                false,
-                tasks::Completion {
-                    line: LogLine::error(format!("session remove failed: {e}")),
-                    sessions: None,
-                    evict: None,
-                },
-            )
-        }
+        // As with `run_create`, the failure line is persisted when the event loop
+        // applies this completion through the screen's logger — no direct
+        // `ErrorLog::record` here.
+        Err(e) => (
+            false,
+            tasks::Completion {
+                line: LogLine::error(format!("session remove failed: {e}")),
+                sessions: None,
+                evict: None,
+            },
+        ),
     }
 }
 
