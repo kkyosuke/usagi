@@ -110,16 +110,24 @@ impl IssueStore {
 
     /// The highest issue number currently stored, or 0 if there are none.
     ///
-    /// Reads the markdown files directly (the source of truth) instead of the
-    /// `index.json` cache. Numbering is correctness-critical: a new issue is
-    /// assigned `max_number + 1`, and [`write`](Self::write) deletes any file
-    /// already backing that number. The cache can lag behind the files whenever
-    /// issues are added, removed, or restored outside usagi (e.g. via `git pull`
-    /// or a branch switch), so trusting it here could hand out a number that an
-    /// existing file already uses — silently destroying that file. Parsing the
-    /// files on this rare path is the safe trade-off.
+    /// Derives the number from each file's name (`NNN-slug.md`) — the files are
+    /// the source of truth — instead of the `index.json` cache. Numbering is
+    /// correctness-critical: a new issue is assigned `max_number + 1`, and
+    /// [`write`](Self::write) deletes any file already backing that number. The
+    /// cache can lag behind the files whenever issues are added, removed, or
+    /// restored outside usagi (e.g. via `git pull` or a branch switch), so
+    /// trusting it here could hand out a number that an existing file already
+    /// uses — silently destroying that file. The name carries the same number
+    /// [`write`] and [`read`](Self::read) key the file by, so reading it is as
+    /// authoritative as parsing the body while skipping the read-and-parse of
+    /// every issue's full markdown that a content scan would cost.
     pub fn max_number(&self) -> Result<u32> {
-        Ok(self.scan()?.iter().map(|i| i.number).max().unwrap_or(0))
+        Ok(self
+            .issue_files()?
+            .iter()
+            .filter_map(|path| number_from_filename(path))
+            .max()
+            .unwrap_or(0))
     }
 
     /// Read a single issue by number, or `None` if it does not exist.
@@ -252,6 +260,18 @@ impl IssueStore {
 /// Whether `path` is an issue markdown file (a `*.md` that is not the index).
 fn is_issue_file(path: &Path) -> bool {
     path.extension().and_then(|e| e.to_str()) == Some("md")
+}
+
+/// The issue number encoded in an issue file's name (`NNN-slug.md`), or `None`
+/// when the name has no numeric prefix. This is the number
+/// [`IssueStore::write`] names the file by (and [`IssueStore::files_for`] keys
+/// it by), so it is an authoritative, parse-free source for
+/// [`IssueStore::max_number`].
+fn number_from_filename(path: &Path) -> Option<u32> {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| name.split_once('-'))
+        .and_then(|(number, _)| number.parse().ok())
 }
 
 #[cfg(test)]

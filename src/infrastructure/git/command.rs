@@ -70,10 +70,15 @@ pub(super) fn ref_names(repo: &Path, refspec: &str, lstrip: u32) -> Vec<String> 
         .unwrap_or_default()
 }
 
-/// The configured remote names of `repo` (e.g. `["origin"]`), or empty when
-/// there are none.
-pub(super) fn remotes(repo: &Path) -> Vec<String> {
-    git_capture(repo, &["remote"])
+/// The full ref names (e.g. `refs/heads/main`, `refs/remotes/origin/main`)
+/// matching any of `refspecs`, fetched in a single `git for-each-ref`. Unlike
+/// [`ref_names`] the names are returned in full (no `lstrip`) so a caller mixing
+/// ref namespaces can strip each kind itself; empty when `repo` is not a git
+/// repository or nothing matches.
+pub(super) fn full_ref_names(repo: &Path, refspecs: &[&str]) -> Vec<String> {
+    let mut args = vec!["for-each-ref", "--format=%(refname)"];
+    args.extend_from_slice(refspecs);
+    git_capture(repo, &args)
         .ok()
         .flatten()
         .map(|out| {
