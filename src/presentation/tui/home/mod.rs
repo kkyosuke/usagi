@@ -454,18 +454,13 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
                     // the tab strip above it) without leaving 没入.
                     terminal_pane::PaneStep::NextTab => pool.nav(dir, terminal_tabs::TabNav::Next),
                     terminal_pane::PaneStep::PrevTab => pool.nav(dir, terminal_tabs::TabNav::Prev),
-                    // `Ctrl-T` / `Ctrl-G`: add a terminal / agent tab and loop, so
-                    // the next iteration drives the freshly added (now active) pane
-                    // and republishes the tab strip — without leaving 没入.
-                    terminal_pane::PaneStep::NewTerminalTab => {
-                        pool.add_pane(
-                            term,
-                            dir,
-                            terminal_tabs::PaneKind::Terminal,
-                            later_initial,
-                            &label,
-                        )?;
-                    }
+                    // `Ctrl-T`: zoom out to 在席 (Focus) so the user picks the next
+                    // action from the session's menu, leaving every pane alive in
+                    // the pool (like `Ctrl-O`, but one level shallower).
+                    terminal_pane::PaneStep::ToFocus => return Ok(PaneExit::ToFocus),
+                    // `Ctrl-G`: add an agent tab and loop, so the next iteration
+                    // drives the freshly added (now active) pane and republishes
+                    // the tab strip — without leaving 没入.
                     terminal_pane::PaneStep::NewAgentTab => {
                         pool.add_pane(
                             term,
