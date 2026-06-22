@@ -1178,6 +1178,59 @@ fn confirm_modal_cancel_keeps_the_screen_running() {
     assert_eq!(recorded, vec!["man"]);
 }
 
+// --- interrupted reads (EINTR) must not quit ---------------------------
+
+#[test]
+fn an_interrupted_blocking_read_is_retried_not_treated_as_quit() {
+    // With no live session the loop blocks in `read_key`. A delivered signal
+    // (`EINTR`) interrupting that read must not quit: before the fix the loop
+    // returned `Outcome::Quit`, which dropped the user out of the alternate
+    // screen and exposed the pre-launch scrollback. It now re-reads, so the
+    // typed command still runs before the trailing Ctrl-C quits.
+    let created = RefCell::new(Vec::<String>::new());
+    let mut create = |name: &str| {
+        created.borrow_mut().push(name.to_string());
+        noop_create(name)
+    };
+    let mut open: fn(&mut HomeState, &Path, bool, bool) -> Result<PaneExit> = noop_open;
+    let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = noop_preview;
+    let mut keys: Vec<io::Result<Key>> = vec![Err(io::Error::from(io::ErrorKind::Interrupted))];
+    keys.extend(typed("session create foo"));
+    keys.push(Ok(Key::Enter));
+    keys.push(Ok(Key::CtrlC));
+    let outcome = run_full(
+        keys,
+        sample_state(),
+        &mut open,
+        &mut create,
+        &mut preview,
+        &mut noop_config,
+    )
+    .unwrap();
+    assert!(matches!(outcome, Outcome::Quit));
+    assert_eq!(*created.borrow(), vec!["foo".to_string()]);
+}
+
+#[test]
+fn an_interrupted_animate_read_is_retried_not_treated_as_quit() {
+    // While a session is live the loop waits in `read_key_timeout` (the animate
+    // path) — the exact case the user hit: exit an agent, then `Ctrl-O` while
+    // waiting, and a signal interrupting the wait quit the app. The interrupted
+    // read is now swallowed, the typed command still runs, and only the
+    // confirmed Ctrl-C quits.
+    let mut keys: Vec<io::Result<Key>> = vec![Err(io::Error::from(io::ErrorKind::Interrupted))];
+    keys.extend(typed("man"));
+    keys.push(Ok(Key::Enter)); // runs `man` -> persisted
+    keys.push(Ok(Key::CtrlC)); // raise the quit modal (a session is live)
+    keys.push(Ok(Key::Enter)); // confirm -> quit
+    let mut recorded = Vec::new();
+    let mut persist = |c: &str| recorded.push(c.to_string());
+    let outcome = run_with_live_monitor(keys, sample_state(), &mut persist).unwrap();
+    assert!(matches!(outcome, Outcome::Quit));
+    // `man` ran after the interrupted read, proving it was not treated as quit.
+    assert_eq!(recorded, vec!["man"]);
+}
+
 // --- config hand-off ---------------------------------------------------
 
 fn config_keys() -> Vec<io::Result<Key>> {

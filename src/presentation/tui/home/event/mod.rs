@@ -320,14 +320,23 @@ pub(super) fn event_loop(
                 Ok(Some(key)) => key,
                 // A tick with no key: re-iterate to drain and repaint.
                 Ok(None) => continue,
-                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => return Ok(Outcome::Quit),
+                // A delivered signal (crossterm installs a SIGWINCH handler that
+                // persists after the embedded pane; an exiting agent also raises
+                // SIGCHLD) interrupts the blocking read with `EINTR`. That is not a
+                // request to quit — a real Ctrl-C arrives as `Key::CtrlC`, handled
+                // below — so swallow it and re-iterate, exactly like an idle tick.
+                // Quitting here dropped the user out of the alternate screen and
+                // revealed the pre-launch scrollback whenever a signal landed
+                // mid-read (e.g. exiting an agent, then `Ctrl-O` while waiting).
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
                 Err(e) => return Err(anyhow::Error::from(e).context("Failed to read key")),
             }
         } else {
             match reader.read_key() {
                 Ok(key) => key,
-                // An interrupted read (e.g. a delivered signal) means quit.
-                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => return Ok(Outcome::Quit),
+                // An interrupted read (a delivered signal) is not a quit: re-read.
+                // See the animate branch above for the full rationale.
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
                 Err(e) => return Err(anyhow::Error::from(e).context("Failed to read key")),
             }
         };
