@@ -56,4 +56,8 @@ pub enum PaneExit {
     /// over it. Closing the editor (save or cancel) re-attaches the session's
     /// pane, so the user drops straight back into the live terminal.
     OpenNote,
+    /// The user pressed `Ctrl-T`: zoom out to 在席 (Focus) — the session's action
+    /// menu — leaving every pane alive in the pool. Unlike [`Self::Closed`] no
+    /// pane is closed; the panes stay live just as [`Self::ToSwitch`] keeps them.
+    ToFocus,
 }

@@ -16,9 +16,10 @@
 //! (`↑`/`↓`), between this session's tabs (`←`/`→`), re-attaches (`Enter`), adds a
 //! pane (`t`), or zooms further out to 統括 (`Ctrl-O`). `Ctrl-N`/`Ctrl-P` switch to
 //! the next / previous tab in place ([`PaneStep::NextTab`] / [`PaneStep::PrevTab`]);
-//! `Ctrl-T`/`Ctrl-G` add a terminal / agent tab ([`PaneStep::NewTerminalTab`] /
-//! [`PaneStep::NewAgentTab`]) and `Ctrl-W` closes the active tab
-//! ([`PaneStep::CloseTab`]) — all without leaving 没入. The shell exiting on its
+//! `Ctrl-T` zooms out to 在席 (Focus) — the session's action menu — by returning
+//! [`PaneStep::ToFocus`] (every pane stays alive in the pool); `Ctrl-G` adds an
+//! agent tab ([`PaneStep::NewAgentTab`]) and `Ctrl-W` closes the active tab
+//! ([`PaneStep::CloseTab`]) without leaving 没入. The shell exiting on its
 //! own reports [`PaneStep::Closed`].
 //!
 //! `agent` reuses the same machinery: the pool sends the configured agent CLI to
@@ -56,10 +57,10 @@ use super::terminal_view::TerminalView;
 use super::ui;
 
 /// Why the embedded terminal loop handed control back, so the pool-driven loop
-/// in [`super::run`](super) can act on it: the user detached, switched tabs,
-/// added / closed a tab, or the shell closed. Tab switching and pane management
-/// (add / close) are all handled in place without leaving 没入 — the same actions
-/// are also reachable from 切替 (Switch) via `Detach`.
+/// in [`super::run`](super) can act on it: the user zoomed out (to 切替 or 在席),
+/// switched tabs, added / closed a tab, or the shell closed. Tab switching and
+/// agent-tab / close management are handled in place without leaving 没入 — the
+/// same actions are also reachable from 切替 (Switch) via `Detach`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PaneStep {
     /// `Ctrl-O`: zoom out one level (→ 切替), leaving every pane alive in the pool.
@@ -72,8 +73,9 @@ pub enum PaneStep {
     NextTab,
     /// `Ctrl-P`: switch to the previous tab without leaving 没入.
     PrevTab,
-    /// `Ctrl-T`: add a new terminal tab and make it active, without leaving 没入.
-    NewTerminalTab,
+    /// `Ctrl-T`: zoom out to 在席 (Focus) — the session's action menu — leaving
+    /// every pane alive in the pool. Adding a terminal is then a menu choice.
+    ToFocus,
     /// `Ctrl-G`: add a new agent tab and make it active, without leaving 没入.
     NewAgentTab,
     /// `Ctrl-W`: close the active tab without leaving 没入. The caller drops it,
@@ -360,9 +362,9 @@ fn wait(pty: &PtySession, drawn_gen: u64, redraw_deadline: Option<Instant>) -> R
 /// the pointer lights up. `Ctrl-O` detaches to 切替 ([`PaneStep::Detach`]),
 /// leaving every pane alive in the pool; `Ctrl-N` / `Ctrl-P` switch to the next /
 /// previous tab in place ([`PaneStep::NextTab`] / [`PaneStep::PrevTab`]);
-/// `Ctrl-T` / `Ctrl-G` add a terminal / agent tab ([`PaneStep::NewTerminalTab`] /
-/// [`PaneStep::NewAgentTab`]) and `Ctrl-W` closes the active tab
-/// ([`PaneStep::CloseTab`]). Other events are ignored so the next redraw picks up
+/// `Ctrl-T` zooms out to 在席 (Focus) ([`PaneStep::ToFocus`]), leaving every pane
+/// alive; `Ctrl-G` adds an agent tab ([`PaneStep::NewAgentTab`]) and `Ctrl-W`
+/// closes the active tab ([`PaneStep::CloseTab`]). Other events are ignored so the next redraw picks up
 /// any new size.
 #[allow(clippy::too_many_arguments)]
 fn pump_input(
@@ -418,15 +420,19 @@ fn pump_input(
                     *selection = None;
                     return Ok(Some(PaneStep::PrevTab));
                 }
-                // `Ctrl-T` / `Ctrl-G` add a terminal / agent tab and `Ctrl-W`
-                // closes the active one — all in place, so the pool-driven loop
-                // applies the change and keeps driving without leaving 没入. (Like
-                // the tab chords above, this claims these from the shell/agent.)
-                if is_new_terminal_tab(&key) {
+                // `Ctrl-T` zooms out to 在席 (Focus) so the user picks the next
+                // action (terminal / agent / …) from the session's menu, leaving
+                // every pane alive in the pool — like `Ctrl-O` but landing one
+                // level shallower. (This claims `Ctrl-T` from the shell/agent.)
+                if is_to_focus(&key) {
                     *scrollback = 0;
                     *selection = None;
-                    return Ok(Some(PaneStep::NewTerminalTab));
+                    return Ok(Some(PaneStep::ToFocus));
                 }
+                // `Ctrl-G` adds an agent tab and `Ctrl-W` closes the active one —
+                // both in place, so the pool-driven loop applies the change and
+                // keeps driving without leaving 没入. (Like the tab chords above,
+                // this claims these from the shell/agent.)
                 if is_new_agent_tab(&key) {
                     *scrollback = 0;
                     *selection = None;
@@ -744,9 +750,9 @@ fn is_prev_tab(key: &KeyEvent) -> bool {
     chord(key, '\u{10}', 'p')
 }
 
-/// Whether this key is `Ctrl-T` (add a terminal tab), as the raw `0x14` (DC4)
-/// char or `'t'` + `CONTROL`.
-fn is_new_terminal_tab(key: &KeyEvent) -> bool {
+/// Whether this key is `Ctrl-T` (zoom out to 在席 / Focus), as the raw `0x14`
+/// (DC4) char or `'t'` + `CONTROL`.
+fn is_to_focus(key: &KeyEvent) -> bool {
     chord(key, '\u{14}', 't')
 }
 
@@ -909,14 +915,11 @@ mod tests {
 
     #[test]
     fn pane_chords_match_both_forms_and_reject_others() {
-        // Ctrl-T (add terminal) / Ctrl-G (add agent) / Ctrl-W (close): crossterm's
-        // letter + CONTROL, and the bare control char some terminals deliver
-        // instead (0x14 / 0x07 / 0x17).
-        assert!(is_new_terminal_tab(&key(
-            KeyCode::Char('t'),
-            KeyModifiers::CONTROL
-        )));
-        assert!(is_new_terminal_tab(&key(
+        // Ctrl-T (zoom out to 在席) / Ctrl-G (add agent) / Ctrl-W (close):
+        // crossterm's letter + CONTROL, and the bare control char some terminals
+        // deliver instead (0x14 / 0x07 / 0x17).
+        assert!(is_to_focus(&key(KeyCode::Char('t'), KeyModifiers::CONTROL)));
+        assert!(is_to_focus(&key(
             KeyCode::Char('\u{14}'),
             KeyModifiers::NONE
         )));
@@ -937,10 +940,7 @@ mod tests {
             KeyModifiers::NONE
         )));
         // Plain letters and the wrong chord are rejected (they flow to the shell).
-        assert!(!is_new_terminal_tab(&key(
-            KeyCode::Char('t'),
-            KeyModifiers::NONE
-        )));
+        assert!(!is_to_focus(&key(KeyCode::Char('t'), KeyModifiers::NONE)));
         assert!(!is_new_agent_tab(&key(
             KeyCode::Char('g'),
             KeyModifiers::NONE

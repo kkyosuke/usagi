@@ -595,6 +595,8 @@ fn launch_pane(
 /// - [`PaneExit::Closed`] — the shell exited: return to 在席 (Focus).
 /// - [`PaneExit::ToSwitch`] — `Ctrl-O`: zoom out to 切替 (Switch), remembering to
 ///   re-attach (`ReturnMode::Attached`) if the user backs out.
+/// - [`PaneExit::ToFocus`] — `Ctrl-T`: zoom out to 在席 (Focus), the session's
+///   action menu, leaving every pane alive in the pool.
 fn open_pane(
     term: &Term,
     state: &mut HomeState,
@@ -644,6 +646,12 @@ fn open_pane(
                 let row = state.list().active_index();
                 focus_and_attach(term, state, painter, wiring, row);
             }
+        }
+        Ok(PaneExit::ToFocus) => {
+            // `Ctrl-T` zooms out one level to 在席: the session's action surface,
+            // where the user picks the next action (terminal / agent / …). Every
+            // pane stays alive in the pool, so re-launching re-attaches them.
+            state.leave_attached();
         }
         Ok(PaneExit::Closed) => {
             // The shell exited: drop back to 在席 on the same session.

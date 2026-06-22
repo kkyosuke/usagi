@@ -117,6 +117,49 @@ pub fn rabbit_art() -> [&'static str; 3] {
     RABBIT
 }
 
+/// The mascot waving goodbye, drawn inside the farewell box: the usagi from
+/// [`RABBIT`] with a raised paw (`ﾉ`) and its parting words alongside.
+const FAREWELL_ART: [&str; 3] = ["  (\\(\\", " ( ^ω^)ﾉ  またね、ぴょん！", " o(_(\")(\")"];
+/// Spaces padding the art from the box's side borders.
+const FAREWELL_PAD: usize = 2;
+
+/// The rounded box bidding the user farewell — shown both when usagi tears down
+/// the alternate screen on exit and when the `quit`/`exit` command runs, so the
+/// two share one look.
+///
+/// The box is sized to the widest art row ([`console::measure_text_width`],
+/// matching how the rest of the TUI counts columns) and every row is padded to
+/// that width, so the right edge lines up despite the art's mix of half- and
+/// full-width characters. The frame is dim and the rabbit cyan — a soft pairing
+/// that echoes the TUI's accent palette without shouting. The embedded ANSI
+/// survives both the raw exit write and the log pane's pass-through rendering of
+/// `Output` lines.
+pub fn farewell_lines() -> Vec<String> {
+    let content = FAREWELL_ART
+        .iter()
+        .map(|l| console::measure_text_width(l))
+        .max()
+        .unwrap_or(0);
+    let inner = content + FAREWELL_PAD * 2;
+    let rule = "─".repeat(inner);
+    let frame = Style::new().dim();
+    let rabbit = Style::new().cyan();
+
+    let mut lines = Vec::with_capacity(FAREWELL_ART.len() + 2);
+    lines.push(frame.apply_to(format!("╭{rule}╮")).to_string());
+    for art in FAREWELL_ART {
+        let right = inner - FAREWELL_PAD - console::measure_text_width(art);
+        lines.push(format!(
+            "{}{}{}",
+            frame.apply_to(format!("│{}", " ".repeat(FAREWELL_PAD))),
+            rabbit.apply_to(art),
+            frame.apply_to(format!("{}│", " ".repeat(right))),
+        ));
+    }
+    lines.push(frame.apply_to(format!("╰{rule}╯")).to_string());
+    lines
+}
+
 /// Braille spinner frames cycled beside the loading rabbit, one per tick.
 const LOADING_SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
@@ -592,6 +635,31 @@ mod tests {
         // The mascot face appears, and the block is indented (centred).
         assert!(lines.iter().any(|l| l.contains("(='-')")));
         assert!(lines[0].starts_with(' '));
+    }
+
+    #[test]
+    fn farewell_lines_are_an_aligned_box_around_the_rabbit() {
+        let lines = farewell_lines();
+        // A top and bottom rule frame every art row.
+        assert_eq!(lines.len(), FAREWELL_ART.len() + 2);
+        // The parting words sit inside the box.
+        assert!(lines.iter().any(|l| l.contains("またね、ぴょん！")));
+        // Strip the ANSI colours to inspect the box's shape.
+        let plain: Vec<String> = lines
+            .iter()
+            .map(|l| console::strip_ansi_codes(l).into_owned())
+            .collect();
+        // Top and bottom are rounded corners; every row between has side borders.
+        assert!(plain[0].starts_with('╭') && plain[0].ends_with('╮'));
+        assert!(plain.last().unwrap().starts_with('╰') && plain.last().unwrap().ends_with('╯'));
+        assert!(plain[1..plain.len() - 1]
+            .iter()
+            .all(|l| l.starts_with('│') && l.ends_with('│')));
+        // Every row is the same display width, so the right edge lines up.
+        let width = console::measure_text_width(&plain[0]);
+        assert!(plain
+            .iter()
+            .all(|l| console::measure_text_width(l) == width));
     }
 
     #[test]

@@ -2158,6 +2158,38 @@ fn pane_to_switch_then_esc_onto_an_idle_session_lands_in_focus() {
 }
 
 #[test]
+fn ctrl_t_in_the_pane_zooms_out_to_focus() {
+    // Attaching to a live session; the pane returns ToFocus (Ctrl-T), so the loop
+    // leaves 没入 for 在席 (Focus) — the session's action menu — leaving the pane
+    // alive. From Focus, Esc -> Overview (then Esc is inert; fallback Ctrl-C quits).
+    // The pane opens exactly once: ToFocus does not spawn or re-attach a pane.
+    let calls = RefCell::new(0);
+    let mut open = |_h: &mut HomeState, _d: &Path, _a: bool, _n: bool| {
+        *calls.borrow_mut() += 1;
+        Ok(PaneExit::ToFocus)
+    };
+    let mut create: fn(&str) -> SessionOutcome = noop_create;
+    let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = live_preview;
+    let mut keys = typed("session switch root");
+    keys.push(Ok(Key::Enter)); // Focus root -> attach -> ToFocus -> Focus
+    keys.push(Ok(Key::Escape)); // Focus -> Overview
+    keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
+    assert!(matches!(
+        run_full(
+            keys,
+            sample_state(),
+            &mut open,
+            &mut create,
+            &mut preview,
+            &mut noop_config
+        )
+        .unwrap(),
+        Outcome::Quit
+    ));
+    assert_eq!(*calls.borrow(), 1);
+}
+
+#[test]
 fn pane_failure_is_reported_and_returns_to_focus() {
     let mut open =
         |_h: &mut HomeState, _d: &Path, _a: bool, _n: bool| Err(anyhow::anyhow!("no shell"));

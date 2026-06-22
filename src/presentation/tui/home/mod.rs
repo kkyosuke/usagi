@@ -421,12 +421,18 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
             });
         let mut pool = pool.borrow_mut();
         let handle = pool.monitor();
+        // A session holds at most one agent: a request to add an agent pane
+        // (在席's `agent`, or `Ctrl-G` routed through `new_pane`) when one already
+        // exists reuses it — activating its tab below — rather than spawning a
+        // second. This also keeps the queued prompt unconsumed (no fresh spawn).
+        let reuse_agent = run_agent && new_pane && pool.has_agent_pane(dir);
         // Deliver a prompt queued for this session (via MCP `session_prompt`) only
         // when this attach will *freshly spawn* its agent pane — `add_pane` always
-        // spawns; `enter` spawns only when no pane is live yet. Taking it makes the
-        // prompt one-shot; if no fresh agent spawn happens it stays queued for the
-        // next launch. The agent then opens already working on that prompt.
-        let fresh_agent_spawn = run_agent && (new_pane || !pool.has_live_pane(dir));
+        // spawns; `enter` spawns only when no pane is live yet; reusing an existing
+        // agent never spawns. Taking it makes the prompt one-shot; if no fresh agent
+        // spawn happens it stays queued for the next launch. The agent then opens
+        // already working on that prompt.
+        let fresh_agent_spawn = run_agent && !reuse_agent && (new_pane || !pool.has_live_pane(dir));
         let queued_prompt = if fresh_agent_spawn {
             crate::infrastructure::agent_prompt_store::take(dir)
         } else {
@@ -448,10 +454,13 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
         // mid-session failure instead of returning early past the cleanup and the
         // error log below.
         let result = (|| -> Result<PaneExit> {
-            // Ready the pane to drive: add a fresh one (在席's `terminal` /
-            // `agent`) or re-attach the session's active pane (spawning the first
-            // when the session is new).
-            if new_pane {
+            // Ready the pane to drive: reuse the lone agent when a second was
+            // requested, add a fresh pane (在席's `terminal` / `agent`), or
+            // re-attach the session's active pane (spawning the first when the
+            // session is new).
+            if reuse_agent {
+                pool.activate_agent(dir);
+            } else if new_pane {
                 let kind = if run_agent {
                     terminal_tabs::PaneKind::Agent
                 } else {
@@ -483,26 +492,24 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
                     // the tab strip above it) without leaving 没入.
                     terminal_pane::PaneStep::NextTab => pool.nav(dir, terminal_tabs::TabNav::Next),
                     terminal_pane::PaneStep::PrevTab => pool.nav(dir, terminal_tabs::TabNav::Prev),
-                    // `Ctrl-T` / `Ctrl-G`: add a terminal / agent tab and loop, so
-                    // the next iteration drives the freshly added (now active) pane
-                    // and republishes the tab strip — without leaving 没入.
-                    terminal_pane::PaneStep::NewTerminalTab => {
-                        pool.add_pane(
-                            term,
-                            dir,
-                            terminal_tabs::PaneKind::Terminal,
-                            later_initial,
-                            &label,
-                        )?;
-                    }
+                    // `Ctrl-T`: zoom out to 在席 (Focus) so the user picks the next
+                    // action from the session's menu, leaving every pane alive in
+                    // the pool (like `Ctrl-O`, but one level shallower).
+                    terminal_pane::PaneStep::ToFocus => return Ok(PaneExit::ToFocus),
+                    // `Ctrl-G`: a session holds at most one agent — jump to the
+                    // existing agent tab when present, else add one (then loop, so
+                    // the next iteration drives it and republishes the tab strip
+                    // without leaving 没入).
                     terminal_pane::PaneStep::NewAgentTab => {
-                        pool.add_pane(
-                            term,
-                            dir,
-                            terminal_tabs::PaneKind::Agent,
-                            later_initial,
-                            &label,
-                        )?;
+                        if !pool.activate_agent(dir) {
+                            pool.add_pane(
+                                term,
+                                dir,
+                                terminal_tabs::PaneKind::Agent,
+                                later_initial,
+                                &label,
+                            )?;
+                        }
                     }
                     // `Ctrl-W`: close the active tab. Same as a shell that exited —
                     // keep driving when a pane remains, else fall to 在席.
