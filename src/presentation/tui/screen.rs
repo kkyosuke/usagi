@@ -203,7 +203,9 @@ impl Drop for AlternateScreenGuard {
         let _ = self.term.write_str(LEAVE_ALT_SCREEN);
         let _ = self.term.show_cursor();
         if self.farewell {
-            let _ = self.term.write_line("USAGI run away ( ^-^)ノ");
+            for line in widgets::farewell_lines() {
+                let _ = self.term.write_line(&line);
+            }
         }
     }
 }
