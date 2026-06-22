@@ -1,11 +1,72 @@
-# usagi
+<div align="center">
+
+<pre>
+   (\(\
+  (='-')      ╻ ╻ ┏━┓ ┏━┓ ┏━╸ ╻
+  o(_(")(")   ┃ ┃ ┗━┓ ┣━┫ ┃╺┓ ┃
+              ┗━┛ ┗━┛ ╹ ╹ ┗━┛ ╹
+</pre>
+
+# usagi 🐰
+
+**AI Agent のワークフローを管理する TUI / CLI ツール**
+
+複数の AI エージェントを worktree ごとに走らせ、セッション・タスク・メモリを 1 画面で束ねる。
+
+<br>
 
 [![Test](https://github.com/KKyosuke/usagi/actions/workflows/test.yml/badge.svg)](https://github.com/KKyosuke/usagi/actions/workflows/test.yml)
+[![Coverage](https://github.com/KKyosuke/usagi/actions/workflows/coverage.yml/badge.svg)](https://github.com/KKyosuke/usagi/actions/workflows/coverage.yml)
 [![Release](https://github.com/KKyosuke/usagi/actions/workflows/release.yml/badge.svg)](https://github.com/KKyosuke/usagi/actions/workflows/release.yml)
+<br>
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Rust](https://img.shields.io/badge/Rust-2021-orange.svg?logo=rust)](https://www.rust-lang.org/)
+[![Rust](https://img.shields.io/badge/Rust-2021-orange.svg?logo=rust&logoColor=white)](https://www.rust-lang.org/)
+[![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-blue.svg)](#installation)
 
-AI Agent のワークフローを管理する TUI/CLI ツール。[usagi.ai](https://github.com/KKyosuke/usagi.ai) の設計を引き継いだ再構築プロジェクトです。
+</div>
+
+> [usagi.ai](https://github.com/KKyosuke/usagi.ai) の設計を引き継いだ再構築プロジェクトです。
+
+## 起動画面
+
+`usagi hop` を実行すると、うさぎのマスコットと `USAGI` タイトルがフェードインするスプラッシュから始まり、ワークスペースを開くとホーム画面へ遷移します。
+
+<table>
+<tr>
+<td>
+
+**スプラッシュ → ウェルカム**
+
+```text
+            (\(\
+           (='-')
+           o(_(")(")
+
+            U S A G I
+```
+
+</td>
+<td>
+
+**ホーム画面（統括モード）**
+
+```text
+        usagi · ▸ root · 4 sessions
+   Overview › Switch › Focus › Attached
+ ▎ ⌂   root              │
+ ▎     workspace root    │
+       ──────────────    │
+   ●   main       pushed │   (右ペインは
+     ▶ running           │    モードで変化)
+   ○   feat/login  local │
+     ◆ waiting           │
+```
+
+</td>
+</tr>
+</table>
+
+左ペインは各セッションを 2 行で表示し、稼働中は **`▶ running`（緑）**／入力待ちは **`◆ waiting`（黄）**／アイドルは **`⏸ idle`（シアン）** でひと目で状態がわかります。`Ctrl-O` で一段ズームアウト、`Esc` で一段戻り、`Ctrl+C` で終了します。画面・モード・キー操作の詳細は [document/design/05-home.md](document/design/05-home.md) を参照してください。
 
 ## Prerequisites
 
