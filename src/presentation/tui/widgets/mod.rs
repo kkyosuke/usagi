@@ -440,6 +440,25 @@ pub fn chooser(value: &str, focused: bool, changed: bool) -> String {
     format!("{} {} {}", paint("<"), paint(value), paint(">"))
 }
 
+/// An invisible marker [`block_caret`] embeds at the caret's column so the frame
+/// painter can park the **real** terminal cursor there.
+///
+/// The block caret is only a recoloured cell — the hardware cursor stays hidden
+/// and wherever the last write left it. An OS IME draws its in-progress
+/// (preedit) text at the hardware cursor, so without parking it the composing
+/// Japanese (or any IME) text surfaces at the bottom of the screen instead of in
+/// the input field — and exactly where varies by terminal. The painter strips
+/// this marker from every row before drawing and moves the cursor to the column
+/// it marked (see [`FramePainter`](super::super::screen::FramePainter)).
+///
+/// It is a zero-width CSI sequence ([`console::measure_text_width`] and
+/// [`clip_to_width`] both treat it as a no-op escape, so embedding it never
+/// shifts the surrounding layout while the frame is assembled) that no styling
+/// ever emits, so the painter can locate it unambiguously. The painter strips it
+/// before writing; should one ever leak, `CSI 0 n` is an inert device-status
+/// form a terminal ignores.
+pub(crate) const CARET_MARK: &str = "\u{1b}[0n";
+
 /// Renders the two halves of a [`text_input::TextInput`] — the text `before` the
 /// caret and the text `after` it — as one line carrying a **block caret**.
 ///
@@ -450,6 +469,10 @@ pub fn chooser(value: &str, focused: bool, changed: bool) -> String {
 /// block only recolours an existing cell instead of inserting a glyph, the text
 /// never shifts sideways as the caret moves through it.
 ///
+/// A zero-width [`CARET_MARK`] is embedded at the caret's column so the frame
+/// painter can park the real terminal cursor there (the block caret alone leaves
+/// the hardware cursor — and thus an IME's preedit text — misplaced).
+///
 /// `base` paints the line; the caret cell reuses that style reversed, so it
 /// inherits the field's colour. Styling follows the terminal's colour support
 /// (tests can force it with [`console::Style::force_styling`]).
@@ -459,7 +482,7 @@ pub fn block_caret(before: &str, after: &str, base: &Style) -> String {
         None => (" ", ""),
     };
     format!(
-        "{}{}{}",
+        "{}{CARET_MARK}{}{}",
         base.apply_to(before),
         base.clone().reverse().apply_to(caret),
         base.apply_to(rest),
@@ -960,6 +983,27 @@ mod tests {
         // signals the unsaved edit, and it applies whether focused or not.
         assert!(chooser("Gemini", true, true).contains("Gemini"));
         assert!(chooser("Gemini", false, true).contains("Gemini"));
+    }
+
+    #[test]
+    fn caret_mark_is_zero_width_and_survives_clipping() {
+        // The marker must not shift layout while embedded in a frame: both the
+        // width measurement that pads modal/box rows and the truncation primitive
+        // treat it as a no-op escape.
+        assert_eq!(console::measure_text_width(CARET_MARK), 0);
+        let clipped = clip_to_width(&format!("ab{CARET_MARK}cd"), 10);
+        assert_eq!(console::strip_ansi_codes(&clipped), "abcd");
+        assert!(clipped.contains(CARET_MARK));
+    }
+
+    #[test]
+    fn block_caret_embeds_the_caret_marker_for_cursor_parking() {
+        // The painter locates the real cursor by this marker, placed at the caret
+        // column; it carries no display width, so the visible text is unchanged.
+        let base = Style::new().force_styling(true);
+        let line = block_caret("あ", "い", &base);
+        assert!(line.contains(CARET_MARK));
+        assert_eq!(&*console::strip_ansi_codes(&line), "あい");
     }
 
     #[test]

@@ -7,6 +7,7 @@ use console::{Key, Term};
 
 use crate::presentation::tui::echo::EchoGuard;
 use crate::presentation::tui::install_task::{self, InstallHandle};
+use crate::presentation::tui::widgets;
 
 /// A mouse-wheel scroll, decoded from a terminal mouse report.
 ///
@@ -277,13 +278,47 @@ impl FramePainter {
             width as usize,
             install_task::snapshot().as_ref(),
         );
-        term.write_str(&diff_frame(&self.prev, &self.scratch))?;
+        // A text-input screen marks its caret column with a zero-width sentinel
+        // ([`widgets::CARET_MARK`]); pull it out (and strip it from every row)
+        // before diffing so the marker never reaches the terminal and the
+        // diff/`prev` stay clean.
+        let caret = take_caret(&mut self.scratch);
+        let mut out = diff_frame(&self.prev, &self.scratch);
+        // Park the real cursor over the caret (showing it) so an OS IME draws its
+        // preedit text in the input field rather than wherever the cursor was left
+        // — otherwise composing Japanese surfaces at the bottom of the screen. With
+        // no input field the cursor stays hidden, as `diff_frame` left it.
+        if let Some((row, col)) = caret {
+            let _ = write!(out, "\x1b[{};{}H\x1b[?25h", row + 1, col + 1);
+        }
+        term.write_str(&out)?;
         term.flush()?;
         // The scratch is now the painted frame: make it `prev` for the next diff
         // and reclaim the old `prev` as the next scratch, so neither is reallocated.
         std::mem::swap(&mut self.prev, &mut self.scratch);
         Ok(())
     }
+}
+
+/// Finds the caret marker ([`widgets::CARET_MARK`]) a text-input screen embedded
+/// in its frame, returning the `(row, col)` of the caret's display column and
+/// stripping the marker from every row so it never reaches the terminal.
+///
+/// The column is the display width of the row's content up to the marker, so a
+/// caret sitting after full-width (CJK) text parks at the right place. Only the
+/// first marker positions the cursor; any others are still stripped defensively.
+fn take_caret(frame: &mut [String]) -> Option<(usize, usize)> {
+    let mut caret = None;
+    for (row, line) in frame.iter_mut().enumerate() {
+        let Some(idx) = line.find(widgets::CARET_MARK) else {
+            continue;
+        };
+        if caret.is_none() {
+            caret = Some((row, console::measure_text_width(&line[..idx])));
+        }
+        *line = line.replace(widgets::CARET_MARK, "");
+    }
+    caret
 }
 
 /// Builds the escape sequence that turns the `prev` frame into `frame` on
@@ -372,6 +407,34 @@ mod tests {
 
     fn lines(texts: &[&str]) -> Vec<String> {
         texts.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn take_caret_finds_the_marked_column_by_display_width_and_strips_it() {
+        // The caret column is the *display* width before the marker, so a caret
+        // after full-width (CJK) text parks at the right place; the marker is
+        // removed so it never reaches the terminal.
+        let mut frame = lines(&["", &format!("❯ あい{}う", widgets::CARET_MARK)]);
+        // "❯ あい" is 1 + 1 + 2 + 2 = 6 display columns.
+        assert_eq!(take_caret(&mut frame), Some((1, 6)));
+        assert_eq!(frame[1], "❯ あいう");
+    }
+
+    #[test]
+    fn take_caret_is_none_and_a_no_op_without_a_marker() {
+        let mut frame = lines(&["plain", "rows"]);
+        assert_eq!(take_caret(&mut frame), None);
+        assert_eq!(frame, lines(&["plain", "rows"]));
+    }
+
+    #[test]
+    fn take_caret_strips_every_marker_but_parks_on_the_first() {
+        // Only the first marker positions the cursor, but any stray markers are
+        // still scrubbed so none leak to the terminal.
+        let m = widgets::CARET_MARK;
+        let mut frame = lines(&[&format!("a{m}"), &format!("bb{m}")]);
+        assert_eq!(take_caret(&mut frame), Some((0, 1)));
+        assert_eq!(frame, lines(&["a", "bb"]));
     }
 
     #[test]
