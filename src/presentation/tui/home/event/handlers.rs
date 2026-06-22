@@ -544,7 +544,8 @@ fn open_pane(
     state.finish_loading();
     state.show_attached();
     let outcome = (wiring.open_terminal)(state, &dir, agent, new_pane);
-    // The pane toggled `crossterm`'s raw mode around itself; re-assert the
+    // The pane toggled `crossterm`'s raw mode around itself and ran a full-screen
+    // child that may have reset the terminal; re-assert the alternate screen and
     // wheel-capture modes so the wheel can't scroll the host terminal once we are
     // back on the workspace screen.
     let _ = screen::write_input_modes(term);

@@ -51,7 +51,7 @@ pub(super) fn update_banner(latest: &Version) -> Vec<String> {
         .unwrap_or(0);
     // One message per mascot row; the last row carries only the mascot's feet.
     let messages = [
-        "最新版があります".to_string(),
+        "アップデートしたぴょん！".to_string(),
         format!("v{latest}"),
         String::new(),
     ];
@@ -79,6 +79,8 @@ pub(super) fn update_banner(latest: &Version) -> Vec<String> {
                 .bold()
                 .to_string()
         })
+        // 一番下に空行を 1 行足して、下のコンテンツとの間に余白を作る。
+        .chain(std::iter::once(String::new()))
         .collect()
 }
 
@@ -269,12 +271,7 @@ pub(super) fn hint_lines(state: &HomeState, width: usize) -> Vec<String> {
 pub(super) fn input_line(state: &HomeState) -> String {
     match state.mode() {
         Mode::Overview => format!(" {}", overview_input_content(state)),
-        Mode::Switch => style(
-            " Pick a session — ↑↓ session, ←→ (Ctrl-N/P) tab, Enter focus, t new, x close tab, c new, r rename"
-                .to_string(),
-        )
-        .dim()
-        .to_string(),
+        Mode::Switch => style(" Pick a session".to_string()).dim().to_string(),
         Mode::Focus => style(format!(
             " Operating session: {}",
             state.focused_session_name()
@@ -324,7 +321,7 @@ pub(super) fn footer_line(width: usize, state: &HomeState) -> String {
                 .to_string()
         }
         Mode::Switch => {
-            "[switch]  ↑↓ session / ←→ (Ctrl-N/P) tab / Enter focus / t new / x close tab / c new / r rename / Esc back / Ctrl-O overview"
+            "[switch]  ↑↓ session / ←→ tab / Enter focus / t new / x close tab / c new / r rename / Esc back"
                 .to_string()
         }
         Mode::Focus => {

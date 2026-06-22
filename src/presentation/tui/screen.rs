@@ -7,6 +7,7 @@ use console::{Key, Term};
 
 use crate::presentation::tui::echo::EchoGuard;
 use crate::presentation::tui::install_task::{self, InstallHandle};
+use crate::presentation::tui::widgets;
 
 /// A mouse-wheel scroll, decoded from a terminal mouse report.
 ///
@@ -144,24 +145,43 @@ pub struct AlternateScreenGuard {
     _echo: EchoGuard,
 }
 
-/// Write the wheel-capture input mode — mouse reporting ([`ENABLE_MOUSE`]) — so
+/// The escape sequences [`write_input_modes`] writes, as one string: the
+/// **alternate screen** ([`ENTER_ALT_SCREEN`]) first, then mouse reporting
+/// ([`ENABLE_MOUSE`]). Pulled out as a pure function so the exact bytes can be
+/// asserted in a unit test — the `Term` write itself goes to a real terminal and
+/// is not capturable.
+fn input_mode_sequence() -> String {
+    format!("{ENTER_ALT_SCREEN}{ENABLE_MOUSE}")
+}
+
+/// Write the input modes that keep the TUI unscrollable — the **alternate
+/// screen** ([`ENTER_ALT_SCREEN`]) and mouse reporting ([`ENABLE_MOUSE`]) — so
 /// the wheel is reported to us (and swallowed) rather than scrolling the host
 /// terminal's own viewport and revealing the pre-launch scrollback behind the
 /// TUI.
 ///
-/// Set once when the alternate screen is entered, and re-asserted after the
+/// Written when the alternate screen is entered, and re-asserted after the
 /// embedded terminal pane hands control back: that pane toggles `crossterm`'s
-/// raw mode around itself, so re-asserting here keeps the capture intact no
-/// matter what the pane (or the shell it ran) left behind.
+/// raw mode around itself and runs a full-screen child (an agent CLI resets the
+/// terminal on its way out), so re-asserting **both** modes here keeps them
+/// intact no matter what the pane (or the shell it ran) left behind.
+///
+/// Re-asserting the alternate screen — not only mouse capture — is what fixes a
+/// whole-TUI scroll: the alternate screen is the *only* thing hiding the
+/// scrollback on terminals that ignore mouse reporting (Apple Terminal.app), and
+/// it would otherwise be entered just once at startup. A single stray leave
+/// (`?1049l`) anywhere would then be unrecoverable and leave the whole TUI
+/// scrollable. The caller repaints in full afterwards
+/// ([`FramePainter::reset`]), so re-entering the alternate screen is harmless
+/// even when it was already active.
 pub(crate) fn write_input_modes(term: &Term) -> Result<()> {
-    term.write_str(ENABLE_MOUSE)?;
+    term.write_str(&input_mode_sequence())?;
     Ok(())
 }
 
 impl AlternateScreenGuard {
     pub fn new(term: Term) -> Result<Self> {
         let echo = EchoGuard::new();
-        term.write_str(ENTER_ALT_SCREEN)?;
         write_input_modes(&term)?;
         term.hide_cursor()?;
         Ok(Self {
@@ -258,13 +278,47 @@ impl FramePainter {
             width as usize,
             install_task::snapshot().as_ref(),
         );
-        term.write_str(&diff_frame(&self.prev, &self.scratch))?;
+        // A text-input screen marks its caret column with a zero-width sentinel
+        // ([`widgets::CARET_MARK`]); pull it out (and strip it from every row)
+        // before diffing so the marker never reaches the terminal and the
+        // diff/`prev` stay clean.
+        let caret = take_caret(&mut self.scratch);
+        let mut out = diff_frame(&self.prev, &self.scratch);
+        // Park the real cursor over the caret (showing it) so an OS IME draws its
+        // preedit text in the input field rather than wherever the cursor was left
+        // — otherwise composing Japanese surfaces at the bottom of the screen. With
+        // no input field the cursor stays hidden, as `diff_frame` left it.
+        if let Some((row, col)) = caret {
+            let _ = write!(out, "\x1b[{};{}H\x1b[?25h", row + 1, col + 1);
+        }
+        term.write_str(&out)?;
         term.flush()?;
         // The scratch is now the painted frame: make it `prev` for the next diff
         // and reclaim the old `prev` as the next scratch, so neither is reallocated.
         std::mem::swap(&mut self.prev, &mut self.scratch);
         Ok(())
     }
+}
+
+/// Finds the caret marker ([`widgets::CARET_MARK`]) a text-input screen embedded
+/// in its frame, returning the `(row, col)` of the caret's display column and
+/// stripping the marker from every row so it never reaches the terminal.
+///
+/// The column is the display width of the row's content up to the marker, so a
+/// caret sitting after full-width (CJK) text parks at the right place. Only the
+/// first marker positions the cursor; any others are still stripped defensively.
+fn take_caret(frame: &mut [String]) -> Option<(usize, usize)> {
+    let mut caret = None;
+    for (row, line) in frame.iter_mut().enumerate() {
+        let Some(idx) = line.find(widgets::CARET_MARK) else {
+            continue;
+        };
+        if caret.is_none() {
+            caret = Some((row, console::measure_text_width(&line[..idx])));
+        }
+        *line = line.replace(widgets::CARET_MARK, "");
+    }
+    caret
 }
 
 /// Builds the escape sequence that turns the `prev` frame into `frame` on
@@ -322,6 +376,21 @@ mod tests {
     }
 
     #[test]
+    fn input_modes_reassert_both_the_alternate_screen_and_mouse_capture() {
+        // Re-asserting the input modes must re-enter the alternate screen — the
+        // sole defence against a whole-TUI scroll on terminals that ignore mouse
+        // reporting — and not only mouse capture; otherwise a stray leave is
+        // unrecoverable and the scrollback gets exposed (#50). The alternate
+        // screen comes first so the mouse modes apply within it.
+        let seq = input_mode_sequence();
+        let alt = seq
+            .find(ENTER_ALT_SCREEN)
+            .expect("re-enters the alt screen");
+        let mouse = seq.find(ENABLE_MOUSE).expect("re-enables mouse capture");
+        assert!(alt < mouse);
+    }
+
+    #[test]
     fn guard_writes_farewell_when_not_dismissed() {
         let guard = AlternateScreenGuard::new(Term::stdout()).unwrap();
         // Dropping without dismissing takes the farewell branch.
@@ -338,6 +407,34 @@ mod tests {
 
     fn lines(texts: &[&str]) -> Vec<String> {
         texts.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn take_caret_finds_the_marked_column_by_display_width_and_strips_it() {
+        // The caret column is the *display* width before the marker, so a caret
+        // after full-width (CJK) text parks at the right place; the marker is
+        // removed so it never reaches the terminal.
+        let mut frame = lines(&["", &format!("❯ あい{}う", widgets::CARET_MARK)]);
+        // "❯ あい" is 1 + 1 + 2 + 2 = 6 display columns.
+        assert_eq!(take_caret(&mut frame), Some((1, 6)));
+        assert_eq!(frame[1], "❯ あいう");
+    }
+
+    #[test]
+    fn take_caret_is_none_and_a_no_op_without_a_marker() {
+        let mut frame = lines(&["plain", "rows"]);
+        assert_eq!(take_caret(&mut frame), None);
+        assert_eq!(frame, lines(&["plain", "rows"]));
+    }
+
+    #[test]
+    fn take_caret_strips_every_marker_but_parks_on_the_first() {
+        // Only the first marker positions the cursor, but any stray markers are
+        // still scrubbed so none leak to the terminal.
+        let m = widgets::CARET_MARK;
+        let mut frame = lines(&[&format!("a{m}"), &format!("bb{m}")]);
+        assert_eq!(take_caret(&mut frame), Some((0, 1)));
+        assert_eq!(frame, lines(&["a", "bb"]));
     }
 
     #[test]

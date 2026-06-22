@@ -1080,21 +1080,21 @@ fn switch_preview_shows_an_idle_session_as_its_action_menu() {
 }
 
 #[test]
-fn switch_preview_pins_the_key_hint_to_the_bottom_row() {
-    // The 切替 right pane always ends with the key hint, so the keys that act on
-    // the highlighted session stay in view beside its preview — including the
-    // close-tab key.
+fn switch_preview_fills_the_pane_without_a_pinned_key_hint() {
+    // The 切替 right pane no longer pins a key hint to its bottom row — the keys
+    // live in the footer, so the preview uses the pane's full height and does not
+    // duplicate the footer's key list.
     let idle = worktree(Some("feat"), false, BranchStatus::Pushed);
     let mut state = HomeState::new("usagi", vec![idle], None);
     state.enter_switch(super::super::state::ReturnMode::Overview);
     state.switch_move_down();
     let preview = switch_preview(&state, 60, 12);
-    // The pane fills its rows, and the key hint is the bottom row.
+    // The pane fills its rows, and the bottom row is no longer a key hint.
     assert_eq!(preview.len(), 12);
     let last = console::strip_ansi_codes(preview.last().unwrap()).into_owned();
-    assert!(last.contains("Enter focus"));
-    assert!(last.contains("x close tab"));
-    // The action-menu preview above it is still shown.
+    assert!(!last.contains("Enter focus"));
+    assert!(!last.contains("x close tab"));
+    // The action-menu preview is still shown.
     assert!(stripped(&preview).contains("Run a command"));
 }
 
@@ -1565,9 +1565,11 @@ fn overview_input_falls_back_to_a_single_line_on_a_short_terminal() {
 fn update_banner_pairs_the_mascot_with_the_latest_version() {
     let latest = crate::domain::version::Version::parse("0.2.0").unwrap();
     let banner = update_banner(&latest);
-    assert_eq!(banner.len(), 3);
+    // 3 行のマスコット ＋ 一番下の空行で計 4 行。
+    assert_eq!(banner.len(), 4);
+    assert_eq!(banner.last().map(String::as_str), Some(""));
     let plain = stripped(&banner);
-    assert!(plain.contains("最新版があります"));
+    assert!(plain.contains("アップデートしたぴょん！"));
     assert!(plain.contains("v0.2.0"));
     // The usagi mascot rides alongside the notice.
     assert!(plain.contains("(='-')"));
@@ -1578,7 +1580,7 @@ fn render_frame_shows_the_update_notice_when_a_newer_release_exists() {
     let mut state = state_with(Vec::new());
     state.set_update(crate::domain::version::Version::parse("9.9.9"));
     let joined = stripped(&render_frame(24, 100, &state));
-    assert!(joined.contains("最新版があります"));
+    assert!(joined.contains("アップデートしたぴょん！"));
     assert!(joined.contains("v9.9.9"));
 }
 
@@ -1586,7 +1588,7 @@ fn render_frame_shows_the_update_notice_when_a_newer_release_exists() {
 fn render_frame_hides_the_update_notice_by_default() {
     let state = state_with(Vec::new());
     let joined = stripped(&render_frame(24, 100, &state));
-    assert!(!joined.contains("最新版があります"));
+    assert!(!joined.contains("アップデートしたぴょん！"));
 }
 
 // --- background-task panel ---------------------------------------------
@@ -1712,7 +1714,7 @@ fn render_frame_shows_the_task_status_over_the_update_notice() {
     }]);
     let joined = stripped(&render_frame(24, 100, &state));
     assert!(joined.contains("作成中… main"));
-    assert!(!joined.contains("最新版があります"));
+    assert!(!joined.contains("アップデートしたぴょん！"));
 }
 
 #[test]
@@ -1747,7 +1749,7 @@ fn render_frame_suppresses_the_update_notice_over_a_live_terminal() {
     state.set_terminal_view(TerminalView::from_rows(vec!["$ echo hi".to_string()], None));
     state.set_update(crate::domain::version::Version::parse("9.9.9"));
     let joined = stripped(&render_frame(24, 100, &state));
-    assert!(!joined.contains("最新版があります"));
+    assert!(!joined.contains("アップデートしたぴょん！"));
 }
 
 #[test]
@@ -1771,7 +1773,7 @@ fn update_notice_is_skipped_when_the_terminal_is_too_narrow() {
     let mut state = state_with(Vec::new());
     state.set_update(crate::domain::version::Version::parse("9.9.9"));
     let joined = stripped(&render_frame(24, 20, &state));
-    assert!(!joined.contains("最新版があります"));
+    assert!(!joined.contains("アップデートしたぴょん！"));
 }
 
 #[test]
@@ -1793,7 +1795,7 @@ fn loading_rabbit_takes_the_corner_over_the_update_notice() {
     state.step_loading("作成中…");
     let joined = stripped(&render_frame(24, 100, &state));
     assert!(joined.contains("作成中…"));
-    assert!(!joined.contains("最新版があります"));
+    assert!(!joined.contains("アップデートしたぴょん！"));
 }
 
 #[test]
