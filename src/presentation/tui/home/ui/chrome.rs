@@ -271,12 +271,7 @@ pub(super) fn hint_lines(state: &HomeState, width: usize) -> Vec<String> {
 pub(super) fn input_line(state: &HomeState) -> String {
     match state.mode() {
         Mode::Overview => format!(" {}", overview_input_content(state)),
-        Mode::Switch => style(
-            " Pick a session — ↑↓ session, ←→ (Ctrl-N/P) tab, Enter focus, t new, x close tab, c new, r rename"
-                .to_string(),
-        )
-        .dim()
-        .to_string(),
+        Mode::Switch => style(" Pick a session".to_string()).dim().to_string(),
         Mode::Focus => style(format!(
             " Operating session: {}",
             state.focused_session_name()
@@ -326,7 +321,7 @@ pub(super) fn footer_line(width: usize, state: &HomeState) -> String {
                 .to_string()
         }
         Mode::Switch => {
-            "[switch]  ↑↓ session / ←→ (Ctrl-N/P) tab / Enter focus / t new / x close tab / c new / r rename / Esc back / Ctrl-O overview"
+            "[switch]  ↑↓ session / ←→ tab / Enter focus / t new / x close tab / c new / r rename / Esc back"
                 .to_string()
         }
         Mode::Focus => {

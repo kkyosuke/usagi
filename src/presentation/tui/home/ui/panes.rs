@@ -750,14 +750,9 @@ fn focus_hint_lines(hint: Hint, width: usize) -> Vec<String> {
     }
 }
 
-/// The key hint pinned to the bottom row of the 切替 (Switch) right pane, so the
-/// keys that act on the highlighted session are always in view beside its
-/// preview (the full set, including `c new` / `r rename`, is in the footer).
-const SWITCH_KEYS: &str = "↑↓ session  ←→ tab  Enter focus  t new  x close tab  Esc back";
-
-/// Pad `lines` to fill the right pane and pin `hint` to its bottom row, matching
-/// how [`switch_preview`] reserves the last row for its key hint. Shared by the
-/// rail's create / rename right-pane inputs so they sit at the same height.
+/// Pad `lines` to fill the right pane and pin `hint` to its bottom row. Shared by
+/// the rail's create / rename right-pane inputs, whose `Enter` / `Esc` hint stays
+/// in view beneath the input.
 fn switch_input_pane(mut lines: Vec<String>, hint: &str, width: usize, rows: usize) -> Vec<String> {
     let body_rows = rows.saturating_sub(1);
     lines.truncate(body_rows);
@@ -816,12 +811,10 @@ fn switch_rename_pane(rename: &RenameInput, width: usize, rows: usize) -> Vec<St
 /// session under the cursor will open**, so the choice is informed by what comes
 /// next. A live session (an embedded shell / agent already running) previews the
 /// live-terminal re-attach; a session with no live shell previews its 在席 action
-/// menu. The header line carries the session's status and agent state, and the
-/// bottom row always shows the [`SWITCH_KEYS`] hint.
+/// menu. The header line carries the session's status and agent state. The key
+/// hints live in the footer, so the preview uses the pane's full height.
 pub(super) fn switch_preview(state: &HomeState, width: usize, rows: usize) -> Vec<String> {
-    // The bottom row is reserved for the key hint, so the preview body builds
-    // into the rows above it.
-    let body_rows = rows.saturating_sub(1);
+    let body_rows = rows;
     // Identify the highlighted row. `selected()` is `Some` for a real session
     // row and `None` on the root row (which carries no git status / tracked
     // path), so the match doubles as the root/session split.
@@ -901,11 +894,9 @@ pub(super) fn switch_preview(state: &HomeState, width: usize, rows: usize) -> Ve
         lines.push(style("Enter で開く").dim().to_string());
     }
 
-    // Trim the body to its budget, then pad up so the key hint sits on the
-    // bottom row of the pane, always in view beside the preview.
+    // Trim the body to its budget and pad up so the pane is always full-height.
     lines.truncate(body_rows);
     lines.resize(body_rows, String::new());
-    lines.push(style(clip_to_width(SWITCH_KEYS, width)).dim().to_string());
     lines
 }
 
