@@ -144,24 +144,43 @@ pub struct AlternateScreenGuard {
     _echo: EchoGuard,
 }
 
-/// Write the wheel-capture input mode — mouse reporting ([`ENABLE_MOUSE`]) — so
+/// The escape sequences [`write_input_modes`] writes, as one string: the
+/// **alternate screen** ([`ENTER_ALT_SCREEN`]) first, then mouse reporting
+/// ([`ENABLE_MOUSE`]). Pulled out as a pure function so the exact bytes can be
+/// asserted in a unit test — the `Term` write itself goes to a real terminal and
+/// is not capturable.
+fn input_mode_sequence() -> String {
+    format!("{ENTER_ALT_SCREEN}{ENABLE_MOUSE}")
+}
+
+/// Write the input modes that keep the TUI unscrollable — the **alternate
+/// screen** ([`ENTER_ALT_SCREEN`]) and mouse reporting ([`ENABLE_MOUSE`]) — so
 /// the wheel is reported to us (and swallowed) rather than scrolling the host
 /// terminal's own viewport and revealing the pre-launch scrollback behind the
 /// TUI.
 ///
-/// Set once when the alternate screen is entered, and re-asserted after the
+/// Written when the alternate screen is entered, and re-asserted after the
 /// embedded terminal pane hands control back: that pane toggles `crossterm`'s
-/// raw mode around itself, so re-asserting here keeps the capture intact no
-/// matter what the pane (or the shell it ran) left behind.
+/// raw mode around itself and runs a full-screen child (an agent CLI resets the
+/// terminal on its way out), so re-asserting **both** modes here keeps them
+/// intact no matter what the pane (or the shell it ran) left behind.
+///
+/// Re-asserting the alternate screen — not only mouse capture — is what fixes a
+/// whole-TUI scroll: the alternate screen is the *only* thing hiding the
+/// scrollback on terminals that ignore mouse reporting (Apple Terminal.app), and
+/// it would otherwise be entered just once at startup. A single stray leave
+/// (`?1049l`) anywhere would then be unrecoverable and leave the whole TUI
+/// scrollable. The caller repaints in full afterwards
+/// ([`FramePainter::reset`]), so re-entering the alternate screen is harmless
+/// even when it was already active.
 pub(crate) fn write_input_modes(term: &Term) -> Result<()> {
-    term.write_str(ENABLE_MOUSE)?;
+    term.write_str(&input_mode_sequence())?;
     Ok(())
 }
 
 impl AlternateScreenGuard {
     pub fn new(term: Term) -> Result<Self> {
         let echo = EchoGuard::new();
-        term.write_str(ENTER_ALT_SCREEN)?;
         write_input_modes(&term)?;
         term.hide_cursor()?;
         Ok(Self {
@@ -319,6 +338,21 @@ mod tests {
         // The default implementation reports each read as a key, never a scroll.
         let mut reader = OneKey(Key::Char('a'));
         assert_eq!(reader.read_input().unwrap(), Input::Key(Key::Char('a')));
+    }
+
+    #[test]
+    fn input_modes_reassert_both_the_alternate_screen_and_mouse_capture() {
+        // Re-asserting the input modes must re-enter the alternate screen — the
+        // sole defence against a whole-TUI scroll on terminals that ignore mouse
+        // reporting — and not only mouse capture; otherwise a stray leave is
+        // unrecoverable and the scrollback gets exposed (#50). The alternate
+        // screen comes first so the mouse modes apply within it.
+        let seq = input_mode_sequence();
+        let alt = seq
+            .find(ENTER_ALT_SCREEN)
+            .expect("re-enters the alt screen");
+        let mouse = seq.find(ENABLE_MOUSE).expect("re-enables mouse capture");
+        assert!(alt < mouse);
     }
 
     #[test]
