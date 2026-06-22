@@ -300,6 +300,54 @@ fn remove_worktree_is_a_noop_for_an_unregistered_path() {
 }
 
 #[test]
+fn remove_worktree_forces_through_a_clean_worktree_containing_submodules() {
+    let tmp = tempfile::tempdir().unwrap();
+
+    // A standalone repo serves as the submodule source.
+    let sub_src = tmp.path().join("sub-src");
+    std::fs::create_dir_all(&sub_src).unwrap();
+    init_repo(&sub_src);
+
+    // Superproject embedding `sub-src` at `sub`. `-c protocol.file.allow` lifts
+    // the git 2.38 block on local-path submodules for the child clone.
+    let sup = tmp.path().join("super");
+    std::fs::create_dir_all(&sup).unwrap();
+    init_repo(&sup);
+    run(
+        &sup,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            sub_src.to_str().unwrap(),
+            "sub",
+        ],
+    );
+    run(&sup, &["commit", "-qm", "add submodule"]);
+
+    // A worktree with the submodule checked out: git refuses to remove it
+    // without `--force` purely because it contains a submodule, even though it
+    // is clean. The non-forced call must still succeed by retrying forced.
+    let wt = tmp.path().join("wt");
+    add_worktree(&sup, &wt, "feat-x", None).unwrap();
+    run(
+        &wt,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "update",
+            "--init",
+        ],
+    );
+    assert!(wt.join("sub").join("f").is_file());
+
+    remove_worktree(&sup, &wt, false).unwrap();
+    assert!(!wt.exists());
+}
+
+#[test]
 fn prune_worktrees_clears_a_dangling_registration() {
     let dir = tempfile::tempdir().unwrap();
     init_repo(dir.path());

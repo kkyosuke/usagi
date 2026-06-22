@@ -171,6 +171,44 @@ pub fn worktree_status(path: &Path) -> Option<WorktreeStatus> {
 /// Remove the worktree at `worktree` from `repo`. With `force`, discard
 /// uncommitted changes; without it, git refuses a dirty worktree.
 pub fn remove_worktree(repo: &Path, worktree: &Path, force: bool) -> Result<()> {
+    let stderr = match run_worktree_remove(repo, worktree, force)? {
+        Ok(()) => return Ok(()),
+        Err(stderr) => stderr,
+    };
+
+    // A path git does not recognise as a worktree is already in the desired
+    // end state: a session whose worktree was never built, or a repeated
+    // removal after a partial earlier one. Treat it as a no-op so callers
+    // can finish cleaning up the rest of the session instead of aborting.
+    if stderr.contains("is not a working tree") {
+        return Ok(());
+    }
+
+    // git flatly refuses to remove a worktree that contains submodules unless
+    // `--force` is given — *regardless of whether it is clean* (`fatal: working
+    // trees containing submodules cannot be moved or removed`). That refusal is
+    // structural, not a dirtiness guard, so when it is the only obstacle we
+    // retry forced. Uncommitted work stays protected because the caller already
+    // vetted dirtiness via `worktree_status` (whose `git status` counts a
+    // modified submodule as dirty) before deciding not to force.
+    if !force && stderr.contains("containing submodules") {
+        return match run_worktree_remove(repo, worktree, true)? {
+            Ok(()) => Ok(()),
+            Err(stderr) => bail!("git worktree remove failed: {}", stderr.trim()),
+        };
+    }
+
+    bail!("git worktree remove failed: {}", stderr.trim());
+}
+
+/// Run a single `git worktree remove [--force] <worktree>`, returning `Ok(())`
+/// on success or the captured stderr on failure so the caller can decide
+/// whether the failure is recoverable.
+fn run_worktree_remove(
+    repo: &Path,
+    worktree: &Path,
+    force: bool,
+) -> Result<std::result::Result<(), String>> {
     let mut command = git_command(repo);
     command.args(["worktree", "remove"]);
     if force {
@@ -180,18 +218,11 @@ pub fn remove_worktree(repo: &Path, worktree: &Path, force: bool) -> Result<()> 
         .arg(worktree)
         .output()
         .context("failed to run `git worktree remove`")?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        // A path git does not recognise as a worktree is already in the desired
-        // end state: a session whose worktree was never built, or a repeated
-        // removal after a partial earlier one. Treat it as a no-op so callers
-        // can finish cleaning up the rest of the session instead of aborting.
-        if stderr.contains("is not a working tree") {
-            return Ok(());
-        }
-        bail!("git worktree remove failed: {}", stderr.trim());
+    if output.status.success() {
+        Ok(Ok(()))
+    } else {
+        Ok(Err(String::from_utf8_lossy(&output.stderr).into_owned()))
     }
-    Ok(())
 }
 
 /// Resolve the absolute path of the repository's primary (main) worktree.
