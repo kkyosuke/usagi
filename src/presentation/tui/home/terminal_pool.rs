@@ -368,6 +368,36 @@ impl TerminalPool {
             .is_some_and(|sp| sp.panes.iter().any(|p| p.pty.is_alive()))
     }
 
+    /// Whether `dir` already holds an agent pane. A session keeps at most one
+    /// agent, so a request to add a second (在席's `agent`, or `Ctrl-G`) reads
+    /// this to jump to the existing tab instead of spawning another (see
+    /// [`activate_agent`](Self::activate_agent)).
+    pub fn has_agent_pane(&self, dir: &Path) -> bool {
+        self.sessions
+            .get(dir)
+            .is_some_and(|sp| sp.panes.iter().any(|p| matches!(p.kind, PaneKind::Agent)))
+    }
+
+    /// Make `dir`'s agent pane the active tab, returning whether one was found.
+    /// Lets a request to add an agent reuse the existing one — a session holds
+    /// at most one agent — by activating its tab rather than spawning a second.
+    pub fn activate_agent(&mut self, dir: &Path) -> bool {
+        match self.sessions.get_mut(dir) {
+            Some(sp) => match sp
+                .panes
+                .iter()
+                .position(|p| matches!(p.kind, PaneKind::Agent))
+            {
+                Some(idx) => {
+                    sp.active = idx;
+                    true
+                }
+                None => false,
+            },
+            None => false,
+        }
+    }
+
     /// Borrow `dir`'s active pane's shell, or `None` when the session has no
     /// panes — the pane the terminal loop drives.
     pub fn active_pty(&mut self, dir: &Path) -> Option<&mut PtySession> {
