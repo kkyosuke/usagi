@@ -153,6 +153,10 @@ presentation に閉じています（[2. アーキテクチャ](../02-architectu
   `<root>/.usagi/sessions/<name>/` に worktree を生成します。空・パス区切り文字を含む名前は拒否し、
   既存のセッション名は重複エラーになります（CLI と同じ検証）。`session_list` は `state.json` を読むだけの
   軽量クエリで、on-disk の reconcile は行いません。
+- `session_create` は worktree を生成するだけで、動作中の TUI の[在席](../design/05-home.md#在席focus)には
+  入りません（`usagi mcp` は TUI を操作できない別プロセスのため）。TUI から作成したときは作成完了後にその
+  セッションへ自動で在席しますが、MCP 経由の作成はホーム画面の一覧にバックグラウンドで反映されるだけで
+  カーソルは動きません。
 
 入力スキーマ（JSON Schema）は `tools/list` のレスポンスに各 tool の `inputSchema` として含まれます。
 

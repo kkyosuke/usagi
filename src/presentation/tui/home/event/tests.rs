@@ -835,6 +835,67 @@ fn bare_session_create_moves_to_switch_and_opens_the_inline_input() {
 }
 
 #[test]
+fn a_finished_create_drops_into_focus_on_the_new_session() {
+    // Creating a session from 統括 dispatches the git work to a worker; when it
+    // finishes the loop drops straight into 在席 (Focus) on the new session, so the
+    // user operates it without navigating over. We prove the landing by running the
+    // 在席 menu's `terminal` (the `t` key, Focus-only) and observing it opens a pane
+    // rooted at the new session's worktree — only possible if Focus is on `newx`.
+    let mut keys = typed("session create newx");
+    keys.push(Ok(Key::Enter)); // dispatch create; completion drains next frame -> Focus(newx)
+    keys.push(Ok(Key::Char('t'))); // 在席 menu: run `terminal` on the focused session
+                                   // reader runs out -> Ctrl-C quits
+    let opened = RefCell::new(Vec::new());
+    let mut open = |_: &mut HomeState, dir: &Path, _: bool, _: bool| {
+        opened.borrow_mut().push(dir.to_path_buf());
+        Ok(PaneExit::Closed)
+    };
+    let mut create = |name: &str| SessionOutcome {
+        line: LogLine::output("created"),
+        // The refreshed list the worker reads back: the new session is present, so
+        // the loop can match it by name and focus its row.
+        sessions: Some(vec![
+            SessionRecord {
+                name: "main".to_string(),
+                display_name: None,
+                note: None,
+                root: PathBuf::from("/ws/.usagi/sessions/main"),
+                worktrees: vec![worktree(Some("main"), "/r/main")],
+                created_at: Utc::now(),
+            },
+            SessionRecord {
+                name: name.to_string(),
+                display_name: None,
+                note: None,
+                root: PathBuf::from("/ws/.usagi/sessions/newx"),
+                worktrees: vec![worktree(Some(name), "/r/newx")],
+                created_at: Utc::now(),
+            },
+        ]),
+        select: None,
+    };
+    let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = noop_preview;
+    assert!(matches!(
+        run_full(
+            keys,
+            sample_state(),
+            &mut open,
+            &mut create,
+            &mut preview,
+            &mut noop_config
+        )
+        .unwrap(),
+        Outcome::Quit
+    ));
+    // The pane roots at the new session's row (its session root), proving 在席
+    // landed on `newx`.
+    assert_eq!(
+        opened.borrow().as_slice(),
+        &[PathBuf::from("/ws/.usagi/sessions/newx")]
+    );
+}
+
+#[test]
 fn session_remove_with_a_name_and_force_routes_to_remove() {
     let mut keys = typed("session remove old --force");
     keys.push(Ok(Key::Enter));
@@ -2433,6 +2494,7 @@ fn a_finished_removal_evicts_the_pooled_shell() {
             line: LogLine::output("Removed session \"feat\" 🧹"),
             sessions: None,
             evict: Some(path.clone()),
+            focus: None,
         },
     );
     let mut reader = ScriptedReader::new(vec![Ok(Key::CtrlC)]);

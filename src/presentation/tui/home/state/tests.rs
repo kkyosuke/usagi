@@ -848,6 +848,27 @@ fn enter_focus_activates_a_row_and_resets_the_surface() {
 }
 
 #[test]
+fn enter_focus_named_focuses_the_matching_session() {
+    let mut state = state(); // root, main, feature
+    assert!(state.enter_focus_named("feature"));
+    assert_eq!(state.mode(), Mode::Focus);
+    assert_eq!(state.list().active_index(), 2);
+    assert_eq!(state.list().selected_index(), 2);
+    assert_eq!(state.focused_session_name(), "feature");
+    assert_eq!(state.focus_menu_cursor(), 0);
+    assert_eq!(state.focus_prompt(), "");
+}
+
+#[test]
+fn enter_focus_named_is_a_no_op_for_an_unknown_session() {
+    let mut state = state();
+    // An unmatched name leaves the mode and cursor untouched (still 統括, root row).
+    assert!(!state.enter_focus_named("nope"));
+    assert_eq!(state.mode(), Mode::Overview);
+    assert!(state.list().root_active());
+}
+
+#[test]
 fn enter_focus_on_the_root_row_names_root() {
     let mut state = state();
     state.enter_focus(0);

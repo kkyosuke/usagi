@@ -254,11 +254,20 @@ pub(super) fn event_loop(
                 line,
                 sessions,
                 evict,
+                focus,
             } = completion;
             if let Some(path) = evict {
                 (wiring.evict_pool)(&path);
             }
             state.apply_task_completion(line, sessions);
+            // A finished create asks to drop into 在席 (Focus) on its new session.
+            // Done after the refresh above so the new branch is in the list to
+            // match. Unlike that refresh — which deliberately keeps the cursor put
+            // for background changes — this is the user's own create landing, so
+            // moving the cursor onto it is the intended result.
+            if let Some(name) = focus {
+                state.enter_focus_named(&name);
+            }
         }
         state.set_tasks(tasks.view(Instant::now()));
         // Drop any stale surface every frame, then refresh it for the modes that
@@ -569,6 +578,10 @@ pub(crate) fn event_loop_compat(
     let mut dispatch_create = |name: &str| {
         let id = tasks.begin(super::tasks::TaskKind::CreateSession, name);
         let outcome = create_session(name);
+        // Mirror a production create, which carries the new branch to focus, so the
+        // loop's auto-focus path is exercised; a fake whose `create_session` reports
+        // no new sessions just won't match it.
+        let focus = outcome.sessions.as_ref().map(|_| name.to_string());
         tasks.complete(
             id,
             true,
@@ -576,6 +589,7 @@ pub(crate) fn event_loop_compat(
                 line: outcome.line,
                 sessions: outcome.sessions,
                 evict: None,
+                focus,
             },
         );
     };
@@ -596,6 +610,7 @@ pub(crate) fn event_loop_compat(
                 line: outcome.line,
                 sessions: outcome.sessions,
                 evict,
+                focus: None,
             },
         );
     };
