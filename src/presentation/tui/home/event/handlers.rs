@@ -18,7 +18,7 @@ use super::super::command::Effect;
 use super::super::state::{HomeState, PaneExit, ReturnMode, ROOT_NAME};
 use super::super::terminal_tabs::TabNav;
 use super::super::ui;
-use super::{paint_now, selected_dir, Flow, Wiring, CTRL_N, CTRL_O, CTRL_P};
+use super::{paint_now, selected_dir, Flow, Wiring, CTRL_N, CTRL_O, CTRL_P, CTRL_S};
 
 /// Handle one key in 統括 (Overview): edit / complete / recall the workspace
 /// command line and run it on `Enter`, dispatching the resulting [`Effect`].
@@ -283,6 +283,10 @@ pub(super) fn switch_key(
         Key::Char('r') => {
             state.switch_begin_rename();
         }
+        // `n` opens the selected session's note editor (a no-op on the root row).
+        Key::Char('n') => {
+            state.switch_begin_note();
+        }
         // Esc backs out to where Switch was opened from.
         Key::Escape => leave_switch(term, state, painter, wiring),
         // Ctrl-O zooms one level further out, to 統括.
@@ -317,6 +321,79 @@ fn leave_switch(
             focus_and_attach(term, state, painter, wiring, row);
         }
     }
+}
+
+/// Handle one key in the session-note editor overlay (opened with `n` in 切替 or
+/// `Ctrl-E` in 没入). It captures every key: `Ctrl-S` saves the note (persisted
+/// through the wiring), `Esc` cancels, `Enter` inserts a newline, and the usual
+/// editing keys edit the multi-line buffer. Closing it — saved or cancelled —
+/// re-attaches the session's pane when it was opened from 没入.
+pub(super) fn note_editor_key(
+    term: &Term,
+    state: &mut HomeState,
+    painter: &mut FramePainter,
+    key: Key,
+    wiring: &mut Wiring,
+) {
+    // This handler is only entered while the note editor is open (the event loop
+    // guards on `note_editor().is_some()`), so the accessors below always resolve.
+    match key {
+        // `Ctrl-S` saves: persist the note (clearing it when empty) and close,
+        // re-attaching the pane when the editor was opened from 没入.
+        Key::Char(CTRL_S) => {
+            let (target, text, reattach) = state
+                .confirm_note_editor()
+                .expect("note editor open while editing");
+            let outcome = (wiring.set_note)(&target, &text);
+            state.apply_session_outcome(outcome);
+            if reattach {
+                reattach_focused(term, state, painter, wiring);
+            }
+        }
+        // `Esc` closes without saving, re-attaching the pane if it was 没入.
+        Key::Escape => {
+            let reattach = state.note_editor_reattaches();
+            state.note_editor_cancel();
+            if reattach {
+                reattach_focused(term, state, painter, wiring);
+            }
+        }
+        // Every other key edits the multi-line buffer in place: Enter splits the
+        // line, the editing keys delete / move the caret, and a printable
+        // character is inserted at the caret.
+        key => {
+            let area = state
+                .note_editor_mut()
+                .expect("note editor open while editing")
+                .area_mut();
+            match key {
+                Key::Enter => area.newline(),
+                Key::Backspace => area.backspace(),
+                Key::Del => area.delete_forward(),
+                Key::ArrowLeft => area.move_left(),
+                Key::ArrowRight => area.move_right(),
+                Key::ArrowUp => area.move_up(),
+                Key::ArrowDown => area.move_down(),
+                Key::Home => area.move_home(),
+                Key::End => area.move_end(),
+                Key::Char(c) if !c.is_control() => area.insert(c),
+                _ => {}
+            }
+        }
+    }
+}
+
+/// Re-attach the selected session's pane after the note editor closes (没入's
+/// `Ctrl-E` flow): focus its row and attach it when live, mirroring how `Enter`
+/// in 切替 only attaches a live session.
+fn reattach_focused(
+    term: &Term,
+    state: &mut HomeState,
+    painter: &mut FramePainter,
+    wiring: &mut Wiring,
+) {
+    let row = state.list().selected_index();
+    focus_and_attach(term, state, painter, wiring, row);
 }
 
 /// Focus the list row `row` and, when its session is already live, attach its
@@ -559,6 +636,16 @@ fn open_pane(
             // `Ctrl-O` zooms out: pick a session in the left pane, re-attaching
             // this one if the user backs out.
             state.enter_switch(ReturnMode::Attached);
+        }
+        Ok(PaneExit::OpenNote) => {
+            // `Ctrl-E` opens the focused session's note editor over the (now
+            // detached) pane; closing it re-attaches. The root row is the
+            // workspace, not a session, so it has no note — fall back to
+            // re-attaching straight away.
+            if !state.open_focused_note() {
+                let row = state.list().active_index();
+                focus_and_attach(term, state, painter, wiring, row);
+            }
         }
         Ok(PaneExit::ToFocus) => {
             // `Ctrl-T` zooms out one level to 在席: the session's action surface,

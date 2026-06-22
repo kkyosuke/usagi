@@ -65,6 +65,9 @@ use super::ui;
 pub enum PaneStep {
     /// `Ctrl-O`: zoom out one level (→ 切替), leaving every pane alive in the pool.
     Detach,
+    /// `Ctrl-E`: leave the pane to open the session-note editor over it. The
+    /// caller re-attaches the pane once the editor closes.
+    OpenNote,
     /// `Ctrl-N`: switch to the next tab without leaving 没入. The caller advances
     /// the pool's active pane and re-drives it.
     NextTab,
@@ -394,6 +397,14 @@ fn pump_input(
                     *scrollback = 0;
                     *selection = None;
                     return Ok(Some(PaneStep::Detach));
+                }
+                // `Ctrl-E` opens the session-note editor over the pane; the caller
+                // re-attaches once it closes. (Like the tab chords, this claims
+                // `Ctrl-E` from the shell/agent.)
+                if is_open_note(&key) {
+                    *scrollback = 0;
+                    *selection = None;
+                    return Ok(Some(PaneStep::OpenNote));
                 }
                 // `Ctrl-N` / `Ctrl-P` move between the session's tabs without
                 // leaving 没入: hand the step back so the pool-driven loop advances
@@ -727,6 +738,12 @@ fn is_next_tab(key: &KeyEvent) -> bool {
     chord(key, '\u{0e}', 'n')
 }
 
+/// Whether this key is `Ctrl-E` (open the note editor), as the raw `0x05` (ENQ)
+/// char or `'e'` + `CONTROL`.
+fn is_open_note(key: &KeyEvent) -> bool {
+    chord(key, '\u{05}', 'e')
+}
+
 /// Whether this key is `Ctrl-P` (previous tab), as the raw `0x10` (DLE) char or
 /// `'p'` + `CONTROL`.
 fn is_prev_tab(key: &KeyEvent) -> bool {
@@ -932,6 +949,29 @@ mod tests {
         assert!(!is_close_tab(&key(
             KeyCode::Char('t'),
             KeyModifiers::CONTROL
+        )));
+    }
+
+    #[test]
+    fn is_open_note_matches_both_forms_of_ctrl_e() {
+        // crossterm's usual decoding, and the bare 0x05 (ENQ) some terminals send.
+        assert!(is_open_note(&key(
+            KeyCode::Char('e'),
+            KeyModifiers::CONTROL
+        )));
+        assert!(is_open_note(&key(
+            KeyCode::Char('\u{05}'),
+            KeyModifiers::NONE
+        )));
+        // A plain letter, the wrong chord, or Ctrl+Shift+E flows to the shell.
+        assert!(!is_open_note(&key(KeyCode::Char('e'), KeyModifiers::NONE)));
+        assert!(!is_open_note(&key(
+            KeyCode::Char('o'),
+            KeyModifiers::CONTROL
+        )));
+        assert!(!is_open_note(&key(
+            KeyCode::Char('E'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
         )));
     }
 

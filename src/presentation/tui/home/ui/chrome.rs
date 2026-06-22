@@ -8,7 +8,7 @@ use console::{style, Style};
 use crate::domain::version::Version;
 
 use super::super::command::{CommandHint, Hint};
-use super::super::state::{HomeState, Mode, RemoveModal, TextModal, WorktreeList};
+use super::super::state::{HomeState, Mode, NoteEditor, RemoveModal, TextModal, WorktreeList};
 use super::super::tasks::{TaskMark, TaskRow};
 use super::panes::log_line;
 use super::{
@@ -321,7 +321,7 @@ pub(super) fn footer_line(width: usize, state: &HomeState) -> String {
                 .to_string()
         }
         Mode::Switch => {
-            "[switch]  ↑↓ session / ←→ tab / Enter focus / t new / x close tab / c new / r rename / Esc back"
+            "[switch]  ↑↓ session / ←→ tab / Enter focus / c new / r rename / n note / x close tab / Esc back"
                 .to_string()
         }
         Mode::Focus => {
@@ -331,7 +331,7 @@ pub(super) fn footer_line(width: usize, state: &HomeState) -> String {
             )
         }
         Mode::Attached => {
-            "[attached]  Ctrl-O: switch / Ctrl-T: focus / Ctrl-N/P: tab / Ctrl-G: agent / Ctrl-W: close"
+            "[attached]  Ctrl-O: switch / Ctrl-T: focus / Ctrl-N/P: tab / Ctrl-G: agent / Ctrl-E: note / Ctrl-W: close"
                 .to_string()
         }
     };
@@ -502,4 +502,44 @@ pub(super) fn text_modal_frame(
             .to_string(),
     );
     widgets::render_modal(raw_height, raw_width, &modal.title, INNER, &body)
+}
+
+/// Builds the centred session-note editor modal: the session name in the title,
+/// the multi-line note buffer with a block caret on the line being edited, and
+/// the key hints below. The note text is left-aligned and clipped to the box;
+/// the cursor line is split at the caret so the block caret lands where editing
+/// happens (mirroring the command line / inline inputs).
+pub(super) fn note_editor_frame(
+    raw_height: usize,
+    raw_width: usize,
+    editor: &NoteEditor,
+) -> Vec<String> {
+    const INNER: usize = 60;
+
+    let area = editor.area();
+    let (caret_row, caret_col) = area.cursor();
+    let base = Style::new();
+    let mut body: Vec<String> = area
+        .lines()
+        .iter()
+        .enumerate()
+        .map(|(i, line)| {
+            if i == caret_row {
+                // Split the cursor line at the caret and draw a block caret
+                // between the two halves, exactly like the command input.
+                let (before, after) = line.split_at(caret_col);
+                widgets::block_caret(before, after, &base)
+            } else {
+                clip_to_width(line, INNER)
+            }
+        })
+        .collect();
+    body.push(String::new());
+    body.push(
+        style("Ctrl-S: save   Esc: cancel   Enter: newline")
+            .dim()
+            .to_string(),
+    );
+    let title = format!("note: {}", editor.target());
+    widgets::render_modal(raw_height, raw_width, &title, INNER, &body)
 }

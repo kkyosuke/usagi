@@ -126,6 +126,12 @@ pub struct SessionRecord {
     /// (the default, and omitted from the file) shows the `name` as before.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
+    /// A free-form, multi-line note attached to the session — scratch space for
+    /// what it is for, what is left to do, links, and so on. Display / UX only:
+    /// it never affects the session's identity or its branches. `None` (the
+    /// default, and omitted from the file) means no note has been written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
     /// Root of the session tree: `<workspace>/.usagi/sessions/<name>`.
     pub root: PathBuf,
     /// One entry per repository that received a worktree, with its git status.
@@ -139,6 +145,11 @@ impl SessionRecord {
     /// when set, otherwise the session [`name`](Self::name).
     pub fn display_label(&self) -> &str {
         self.display_name.as_deref().unwrap_or(&self.name)
+    }
+
+    /// The session's note, or `None` when none has been written.
+    pub fn note(&self) -> Option<&str> {
+        self.note.as_deref()
     }
 }
 
@@ -260,6 +271,7 @@ mod tests {
         state.sessions.push(SessionRecord {
             name: "feature-x".to_string(),
             display_name: None,
+            note: None,
             root: PathBuf::from("/repo/.usagi/sessions/feature-x"),
             worktrees: vec![sample_worktree()],
             created_at: Utc::now(),
@@ -275,6 +287,7 @@ mod tests {
         let mut session = SessionRecord {
             name: "feature-x".to_string(),
             display_name: None,
+            note: None,
             root: PathBuf::from("/repo/.usagi/sessions/feature-x"),
             worktrees: vec![sample_worktree()],
             created_at: Utc::now(),
@@ -291,6 +304,7 @@ mod tests {
         state.sessions.push(SessionRecord {
             name: "feature-x".to_string(),
             display_name: Some("Nice name".to_string()),
+            note: None,
             root: PathBuf::from("/repo/.usagi/sessions/feature-x"),
             worktrees: vec![sample_worktree()],
             created_at: Utc::now(),
@@ -310,6 +324,38 @@ mod tests {
             serde_json::from_str::<WorkspaceState>(&json).unwrap(),
             state
         );
+    }
+
+    #[test]
+    fn note_is_omitted_when_absent_round_trips_when_set_and_reads_legacy_files() {
+        let mut state = WorkspaceState::new();
+        state.sessions.push(SessionRecord {
+            name: "feature-x".to_string(),
+            display_name: None,
+            note: None,
+            root: PathBuf::from("/repo/.usagi/sessions/feature-x"),
+            worktrees: vec![sample_worktree()],
+            created_at: Utc::now(),
+        });
+        // No note → the accessor is `None` and the key is dropped from the file.
+        assert_eq!(state.sessions[0].note(), None);
+        let json = serde_json::to_string(&state).unwrap();
+        assert!(!json.contains("note"));
+
+        // A multi-line note is stored, exposed, and round-trips through JSON.
+        state.sessions[0].note = Some("line 1\nline 2".to_string());
+        assert_eq!(state.sessions[0].note(), Some("line 1\nline 2"));
+        let json = serde_json::to_string(&state).unwrap();
+        assert!(json.contains("\"note\":\"line 1\\nline 2\""));
+        assert_eq!(
+            serde_json::from_str::<WorkspaceState>(&json).unwrap(),
+            state
+        );
+
+        // An older file without a `note` key still parses (defaults to `None`).
+        let legacy = r#"{"sessions":[{"name":"x","root":"/r","worktrees":[],"created_at":"2026-06-13T05:01:18.659149Z"}],"updated_at":"2026-06-13T05:01:18.659149Z"}"#;
+        let parsed: WorkspaceState = serde_json::from_str(legacy).unwrap();
+        assert_eq!(parsed.sessions[0].note(), None);
     }
 
     #[test]

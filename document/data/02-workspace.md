@@ -80,6 +80,7 @@
     {
       "name": "login",
       "display_name": "ログイン機能",
+      "note": "バリデーションを実装中\n・API は未着手",
       "root": "/Users/me/git/usagi/.usagi/sessions/login",
       "worktrees": [
         {
@@ -119,12 +120,13 @@ worktree を束ねます。各 worktree は git ステータス付き（下記 `
 |---|---|---|
 | `name` | string | セッション名（各リポジトリで作成したブランチ名でもある）。セッションの識別子で、作成後は変わらない |
 | `display_name` | string? | サイドメニューでの表示名（任意）。設定時は一覧の `name` の代わりに表示する**見た目だけ**の上書きで、ブランチ名・識別子は変えない。未設定（既定）なら省略され、`name` を表示する |
+| `note` | string? | セッションに紐づく自由記述の**複数行メモ**（任意）。用途・残タスク・リンクなどの覚え書きで、**見た目だけ**の付加情報。ブランチ名・識別子には影響しない。未設定（既定）なら省略される |
 | `root` | path | セッションツリーのルート（`<workspace>/.usagi/sessions/<name>`） |
 | `worktrees` | array&lt;WorktreeState&gt; | worktree を作成した各リポジトリの状態（下記） |
 | `created_at` | RFC3339(UTC) | セッションの作成日時 |
 
 セッション作成（`usecase/session`）はこの `SessionRecord` を `state.json` に追記します。
-表示名の変更（`usecase/session::set_display_name`、ホーム画面の[切替モードの `r`](../design/05-home.md#各モードの説明)）は `display_name` だけを書き換えます。
+表示名の変更（`usecase/session::set_display_name`、ホーム画面の[切替モードの `r`](../design/05-home.md#各モードの説明)）は `display_name` だけを、メモの編集（`usecase/session::set_note`、ホーム画面の[切替モードの `n` / 没入の `Ctrl-E`](../design/05-home.md#セッションメモの編集)）は `note` だけを書き換えます。`state.json` はマシンローカル（git 管理外）なので、メモはこの環境にだけ保存され、ブランチや PR では共有されません。
 再同期（`usecase/workspace_state::sync`）は各セッション worktree の git ステータスを
 読み直して更新します。
 

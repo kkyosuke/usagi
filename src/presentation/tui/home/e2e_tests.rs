@@ -223,6 +223,11 @@ fn event_loop_attaches_a_live_session_end_to_end() {
         sessions: None,
         select: None,
     };
+    let mut set_note = |_: &str, _: &str| SessionOutcome {
+        line: LogLine::output("note saved"),
+        sessions: None,
+        select: None,
+    };
     let mut tab_op =
         |_dir: &Path, _nav: Option<TabNav>| -> (Vec<String>, usize) { (Vec::new(), 0) };
     let mut close_tab = |_h: &mut HomeState, _dir: &Path| {};
@@ -238,6 +243,7 @@ fn event_loop_attaches_a_live_session_end_to_end() {
         &mut persist,
         &mut create,
         &mut rename,
+        &mut set_note,
         &mut remove,
         &mut (Vec::new as fn() -> Vec<String>),
         &mut open_terminal,

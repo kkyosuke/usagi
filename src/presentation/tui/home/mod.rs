@@ -224,6 +224,32 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
         }
     };
 
+    // Saving a session's note persists it to state.json and re-reads the sessions
+    // so the editor's next open reflects it. Like `rename_display` this stays
+    // synchronous (no git work) but still load-modify-saves `state.json`, so it
+    // takes the same op-lock to serialise against the background create / remove
+    // workers. `select` keeps the cursor on the edited session after the rebuild.
+    let note_root = workspace.path.clone();
+    let note_lock = op_lock.clone();
+    let mut set_note = |name: &str, note: &str| {
+        let _guard = lock_session_ops(&note_lock);
+        match crate::usecase::session::set_note(&note_root, name, note) {
+            Ok(stored) => SessionOutcome {
+                line: LogLine::output(match stored {
+                    Some(_) => format!("Saved note for \"{name}\" 📝"),
+                    None => format!("Cleared note for \"{name}\" 📝"),
+                }),
+                sessions: reload_sessions(&note_root),
+                select: Some(name.to_string()),
+            },
+            Err(e) => SessionOutcome {
+                line: LogLine::error(format!("note failed: {e}")),
+                sessions: None,
+                select: None,
+            },
+        }
+    };
+
     // Whether the 在席 (Focus) menu offers the `ai` command: only when the local
     // LLM is enabled and its model is pulled, so it appears only when running it
     // would actually work. The probe is an `ollama show`, which can block on a
@@ -458,6 +484,9 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
                 match terminal_pane::run(term, home, pty, &handle)? {
                     // `Ctrl-O`: zoom out to 切替, leaving every pane alive.
                     terminal_pane::PaneStep::Detach => return Ok(PaneExit::ToSwitch),
+                    // `Ctrl-E`: leave the pane to open the note editor over it;
+                    // the event loop re-attaches when the editor closes.
+                    terminal_pane::PaneStep::OpenNote => return Ok(PaneExit::OpenNote),
                     // `Ctrl-N` / `Ctrl-P`: move the active tab and loop, so the
                     // next iteration drives the newly active pane (and republishes
                     // the tab strip above it) without leaving 没入.
@@ -600,6 +629,7 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
         persist: &mut persist,
         dispatch_create: &mut dispatch_create,
         rename_display: &mut rename_display,
+        set_note: &mut set_note,
         dispatch_remove: &mut dispatch_remove,
         evict_pool: &mut evict_pool,
         existing_branches: &mut existing_branches,

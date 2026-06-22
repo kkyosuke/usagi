@@ -1117,6 +1117,7 @@ fn session_record(name: &str, worktrees: usize) -> SessionRecord {
     SessionRecord {
         name: name.to_string(),
         display_name: None,
+        note: None,
         root: std::path::PathBuf::from(format!("/repo/.usagi/sessions/{name}")),
         worktrees: (0..worktrees).map(|_| worktree(name)).collect(),
         created_at: Utc::now(),
@@ -1237,6 +1238,7 @@ fn multi_repo_session_collapses_to_one_row_with_an_aggregated_status() {
     state.restore_sessions(vec![SessionRecord {
         name: "feature".to_string(),
         display_name: None,
+        note: None,
         root: PathBuf::from("/repo/.usagi/sessions/feature"),
         worktrees: vec![merged_a, merged_b, local_c],
         created_at: Utc::now(),
@@ -1262,6 +1264,7 @@ fn a_session_with_no_worktrees_still_yields_a_row() {
     state.restore_sessions(vec![SessionRecord {
         name: "empty".to_string(),
         display_name: None,
+        note: None,
         root: PathBuf::from("/repo/.usagi/sessions/empty"),
         worktrees: Vec::new(),
         created_at: Utc::now(),
@@ -1608,4 +1611,95 @@ fn preview_scrolling_is_a_no_op_when_no_preview_is_open() {
     state.preview_scroll_up();
     state.preview_scroll_down(5);
     assert!(state.preview().is_none());
+}
+
+// --- session note editor -----------------------------------------------
+
+/// A state with two sessions recorded, the cursor moved onto the first one
+/// (`alpha`), so the note-editor helpers act on a real session row.
+fn state_on_alpha() -> HomeState {
+    let mut state = state();
+    let mut alpha = session_record("alpha", 1);
+    alpha.note = Some("existing".to_string());
+    state.restore_sessions(vec![alpha, session_record("beta", 1)]);
+    state.switch_move_down(); // root -> alpha
+    state
+}
+
+#[test]
+fn switch_begin_note_opens_the_editor_prefilled_with_the_sessions_note() {
+    let mut state = state_on_alpha();
+    assert!(state.switch_begin_note());
+    let editor = state.note_editor().expect("editor open");
+    assert_eq!(editor.target(), "alpha");
+    // Pre-filled with the recorded note, caret parked at its end.
+    assert_eq!(editor.area().text(), "existing");
+    assert!(!editor.reattach());
+    assert!(!state.note_editor_reattaches());
+
+    // A second begin is a no-op while one is already open.
+    assert!(!state.switch_begin_note());
+}
+
+#[test]
+fn switch_begin_note_is_a_noop_on_the_root_row() {
+    // The cursor starts on the root row, which is the workspace, not a session.
+    let mut state = state();
+    state.restore_sessions(vec![session_record("alpha", 1)]);
+    assert!(!state.switch_begin_note());
+    assert!(state.note_editor().is_none());
+}
+
+#[test]
+fn open_focused_note_targets_the_active_session_and_reattaches() {
+    let mut state = state_on_alpha();
+    state.enter_focus(state.list().selected_index()); // 在席 on alpha
+    assert!(state.open_focused_note());
+    let editor = state.note_editor().expect("editor open");
+    assert_eq!(editor.target(), "alpha");
+    assert!(editor.reattach());
+    assert!(state.note_editor_reattaches());
+    // Already open: a second open is refused.
+    assert!(!state.open_focused_note());
+}
+
+#[test]
+fn open_focused_note_is_a_noop_on_the_root_row() {
+    // The root row is focused by default; it has no note to edit.
+    let mut state = state();
+    state.restore_sessions(vec![session_record("alpha", 1)]);
+    state.enter_focus(0);
+    assert!(!state.open_focused_note());
+    assert!(state.note_editor().is_none());
+}
+
+#[test]
+fn note_editor_edits_confirm_and_cancel() {
+    let mut state = state_on_alpha();
+    // A session with no note opens an empty editor.
+    let mut beta = session_record("beta", 1);
+    beta.note = None;
+    state.restore_sessions(vec![session_record("alpha", 1), beta]);
+    state.switch_move_down();
+    state.switch_move_down(); // alpha -> beta
+    assert!(state.switch_begin_note());
+    let area = state.note_editor_mut().unwrap().area_mut();
+    assert!(area.is_empty());
+    area.insert('h');
+    area.insert('i');
+    // Confirm returns the target, the typed text, and reattach=false (切替).
+    let (target, text, reattach) = state.confirm_note_editor().unwrap();
+    assert_eq!(target, "beta");
+    assert_eq!(text, "hi");
+    assert!(!reattach);
+    assert!(state.note_editor().is_none());
+    // Confirm / cancel with nothing open are no-ops.
+    assert!(state.confirm_note_editor().is_none());
+
+    // Cancel discards an open editor.
+    state.switch_begin_note();
+    assert!(state.note_editor().is_some());
+    state.note_editor_cancel();
+    assert!(state.note_editor().is_none());
+    assert!(!state.note_editor_reattaches());
 }
