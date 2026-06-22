@@ -92,6 +92,12 @@ pub struct Completion {
     /// successful removal so a session later recreated at the same path starts
     /// fresh. `None` for creations and failures.
     pub evict: Option<PathBuf>,
+    /// The branch of a freshly created session to drop into 在席 (Focus) once the
+    /// refreshed list lands — set only on a successful TUI-initiated create, so
+    /// the user starts operating the new session without navigating to it. `None`
+    /// for removals and failures (and, by construction, for MCP-driven creates,
+    /// which never build a [`Completion`]).
+    pub focus: Option<String>,
 }
 
 /// Decode the message a worker thread panicked with, from the payload
@@ -134,6 +140,7 @@ pub fn panic_outcome(
         )),
         sessions: None,
         evict: None,
+        focus: None,
     };
     (log_line, completion)
 }
@@ -330,6 +337,7 @@ mod tests {
             line: LogLine::output("done"),
             sessions: None,
             evict: None,
+            focus: None,
         }
     }
 
@@ -497,6 +505,7 @@ mod tests {
         );
         assert!(completion.sessions.is_none());
         assert!(completion.evict.is_none());
+        assert!(completion.focus.is_none());
     }
 
     #[test]

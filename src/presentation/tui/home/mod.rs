@@ -681,6 +681,10 @@ fn run_create(root: &Path, name: &str) -> (bool, tasks::Completion) {
                 )),
                 sessions: reload_sessions(root),
                 evict: None,
+                // Drop straight into 在席 (Focus) on the new session once the event
+                // loop applies this — the user just asked for it, so operate it
+                // without making them navigate over. (MCP creates never reach here.)
+                focus: Some(created.name.clone()),
             },
         ),
         // The failure line is recorded to the daily log when the event loop applies
@@ -692,6 +696,7 @@ fn run_create(root: &Path, name: &str) -> (bool, tasks::Completion) {
                 line: LogLine::error(format!("session failed: {e}")),
                 sessions: None,
                 evict: None,
+                focus: None,
             },
         ),
     }
@@ -719,6 +724,7 @@ fn run_remove(
                         .join("sessions")
                         .join(name),
                 ),
+                focus: None,
             },
         ),
         Ok(outcome) => {
@@ -737,6 +743,7 @@ fn run_remove(
                     )),
                     sessions: None,
                     evict: None,
+                    focus: None,
                 },
             )
         }
@@ -749,6 +756,7 @@ fn run_remove(
                 line: LogLine::error(format!("session remove failed: {e}")),
                 sessions: None,
                 evict: None,
+                focus: None,
             },
         ),
     }

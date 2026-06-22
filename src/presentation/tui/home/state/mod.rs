@@ -967,6 +967,22 @@ impl HomeState {
         self.focus_prompt.clear();
     }
 
+    /// Enter 在席 (Focus) on the session named `name`, returning whether one
+    /// matched. Like [`enter_focus`](Self::enter_focus) but addressing the session
+    /// by branch rather than row, so a freshly created session can be focused
+    /// against the just-refreshed list without computing its row. A no-op
+    /// (returning `false`, leaving the mode untouched) when no session matches.
+    pub fn enter_focus_named(&mut self, name: &str) -> bool {
+        if !self.list.select_by_name(name) {
+            return false;
+        }
+        self.mode = Mode::Focus;
+        self.overlays.create = None;
+        self.focus_menu.reset();
+        self.focus_prompt.clear();
+        true
+    }
+
     /// The display name of the focused (active) session: its branch, or
     /// [`ROOT_NAME`] for the root row.
     pub fn focused_session_name(&self) -> String {
