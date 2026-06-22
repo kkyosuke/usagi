@@ -11,6 +11,7 @@ use std::collections::HashSet;
 
 use super::LogLine;
 use crate::presentation::tui::markdown::MarkdownLine;
+use crate::presentation::tui::widgets::text_area::TextArea;
 use crate::presentation::tui::widgets::text_input::TextInput;
 
 /// The home screen's transient overlays — the sub-states that capture the
@@ -34,6 +35,8 @@ pub(super) struct Overlays {
     pub text: Option<TextModal>,
     /// The right-pane Markdown preview, when open.
     pub preview: Option<Preview>,
+    /// The session-note editor modal, when open.
+    pub note: Option<NoteEditor>,
     /// Whether the quit-confirmation modal is open.
     pub quit_confirm: bool,
 }
@@ -185,6 +188,63 @@ impl RenameInput {
     /// the usecase resolves.
     pub(super) fn confirm(self) -> (String, String) {
         (self.target, self.input.trim().to_string())
+    }
+}
+
+/// The session-note editor modal, opened with `n` in 切替 (Switch) or `Ctrl-E`
+/// in 没入 (Attached). It holds the session whose note is being edited
+/// (`target`, its branch name / identity), the multi-line text buffer
+/// (pre-filled with the existing note), and `reattach` — whether closing it
+/// should re-attach the session's pane (set when opened from 没入, so the user
+/// drops straight back into the live terminal). The buffer's editing and caret
+/// movement live on [`TextArea`]; the modal just bundles it with its target.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NoteEditor {
+    target: String,
+    area: TextArea,
+    reattach: bool,
+}
+
+impl NoteEditor {
+    /// Open the editor for session `target`, pre-filled with `initial` (its
+    /// current note). `reattach` records whether to re-attach the session on
+    /// close (true when opened from 没入).
+    pub(super) fn new(target: impl Into<String>, initial: &str, reattach: bool) -> Self {
+        Self {
+            target: target.into(),
+            area: TextArea::from_text(initial),
+            reattach,
+        }
+    }
+
+    /// The session whose note is being edited (its branch / identity).
+    pub fn target(&self) -> &str {
+        &self.target
+    }
+
+    /// The text buffer, for rendering its lines and caret.
+    pub fn area(&self) -> &TextArea {
+        &self.area
+    }
+
+    /// Whether closing the editor should re-attach the session's pane (it was
+    /// opened from 没入).
+    pub fn reattach(&self) -> bool {
+        self.reattach
+    }
+
+    /// The editable buffer: the event loop routes its keys straight to the
+    /// [`TextArea`]'s own editing methods (`insert` / `newline` / `backspace` /
+    /// `move_*` …), so the modal has no per-key forwarders of its own.
+    pub fn area_mut(&mut self) -> &mut TextArea {
+        &mut self.area
+    }
+
+    /// Accept the note, consuming the editor: the target session, the typed text,
+    /// and whether to re-attach. The text is persisted (and trimmed) by the
+    /// usecase; an empty buffer clears the note.
+    pub(super) fn confirm(self) -> (String, String, bool) {
+        (self.target, self.area.text(), self.reattach)
     }
 }
 

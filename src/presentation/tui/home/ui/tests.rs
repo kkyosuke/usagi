@@ -7,7 +7,7 @@ use super::super::state::{LogLine, Preview, TextModal, WorktreeList, ROOT_NAME};
 use super::super::terminal_pool::MonitorSnapshot;
 use super::super::terminal_view::TerminalView;
 use crate::domain::settings::{SessionActionUi, Sidebar};
-use crate::domain::workspace_state::{BranchStatus, WorktreeState};
+use crate::domain::workspace_state::{BranchStatus, SessionRecord, WorktreeState};
 use crate::presentation::tui::markdown::{LineStyle, MarkdownLine, Span, SpanStyle};
 use chrono::Utc;
 use std::collections::HashSet;
@@ -1979,6 +1979,7 @@ fn state_with_sessions(names: &[&str]) -> HomeState {
         .map(|n| SessionRecord {
             name: n.to_string(),
             display_name: None,
+            note: None,
             root: PathBuf::from(format!("/ws/{n}")),
             worktrees: Vec::new(),
             created_at: Utc::now(),
@@ -2307,4 +2308,28 @@ fn preview_visible_tracks_the_body_height_in_every_mode() {
     // Both are positive, and Focus (no input box / results band) shows more rows.
     assert!(overview_visible >= 1);
     assert!(focus_visible > overview_visible);
+}
+
+#[test]
+fn render_frame_draws_the_note_editor_overlay() {
+    // With the note editor open, the frame is the centred modal: the session
+    // name in the title, the multi-line note body, and the key hints.
+    let mut state = state_with(vec![worktree(Some("main"), false, BranchStatus::Local)]);
+    let session = SessionRecord {
+        name: "alpha".to_string(),
+        display_name: None,
+        note: Some("first line\nsecond".to_string()),
+        root: PathBuf::from("/repo/.usagi/sessions/alpha"),
+        worktrees: vec![worktree(Some("alpha"), false, BranchStatus::Local)],
+        created_at: Utc::now(),
+    };
+    state.restore_sessions(vec![session]);
+    state.switch_move_down(); // root -> alpha
+    assert!(state.switch_begin_note());
+
+    let frame = stripped(&render_frame(24, 80, &state));
+    assert!(frame.contains("note: alpha"), "the title names the session");
+    assert!(frame.contains("first line"));
+    assert!(frame.contains("second"));
+    assert!(frame.contains("Ctrl-S: save"));
 }

@@ -52,4 +52,8 @@ pub enum PaneExit {
     /// left pane. Re-selecting the same session re-attaches; `Ctrl-O` again zooms
     /// out to 統括 (Overview).
     ToSwitch,
+    /// The user pressed `Ctrl-E`: leave the pane to open the session-note editor
+    /// over it. Closing the editor (save or cancel) re-attaches the session's
+    /// pane, so the user drops straight back into the live terminal.
+    OpenNote,
 }

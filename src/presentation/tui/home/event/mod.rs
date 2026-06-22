@@ -29,7 +29,7 @@ use super::update::UpdateHandle;
 
 mod handlers;
 
-use handlers::{focus_key, overview_key, switch_key};
+use handlers::{focus_key, note_editor_key, overview_key, switch_key};
 
 /// The byte `console` reports for `Ctrl-O` on the home screen: a bare control
 /// character (`0x0f`), since `console` only special-cases a handful of control
@@ -50,6 +50,13 @@ const CTRL_P: char = '\u{0010}';
 /// 没入 (Attached) is driven inside the embedded-terminal loop, so its `Ctrl-B` is
 /// intercepted there instead (see [`super::terminal_pane`]).
 const CTRL_B: char = '\u{0002}';
+
+/// The bare control character `console` reports for `Ctrl-S` (`0x13`) on the home
+/// screen — the same passthrough as [`CTRL_O`]. It saves the session-note editor
+/// (`Enter` inserts a newline there, so saving needs its own chord). 没入's
+/// `Ctrl-E` (which opens the editor) is intercepted inside the embedded-terminal
+/// loop instead (see [`super::terminal_pane`]).
+const CTRL_S: char = '\u{0013}';
 
 /// The callback 切替 uses to read (`None`) or navigate (`Some(nav)`) the
 /// highlighted session's tabs, returning the strip's labels and active index.
@@ -88,6 +95,8 @@ pub(super) struct Wiring<'a> {
     pub dispatch_create: &'a mut dyn FnMut(&str),
     /// Rename a session's sidebar label, returning the outcome to apply inline.
     pub rename_display: &'a mut dyn FnMut(&str, &str) -> SessionOutcome,
+    /// Save (or clear) a session's note, returning the outcome to apply inline.
+    pub set_note: &'a mut dyn FnMut(&str, &str) -> SessionOutcome,
     /// Dispatch `session remove <name>` to a background worker (`bool` = force).
     pub dispatch_remove: &'a mut dyn FnMut(&str, bool),
     /// Evict a removed session's pooled shell, run on the loop thread (the pool
@@ -457,6 +466,16 @@ pub(super) fn event_loop(
             continue;
         }
 
+        // The session-note editor, when open, captures every key: `Ctrl-S` saves,
+        // `Esc` cancels, `Enter` inserts a newline, and the editing keys edit the
+        // multi-line buffer. It is driven through a handler (not inline like the
+        // pure modals above) because closing it from 没入 re-attaches the pane,
+        // which needs the terminal / wiring.
+        if state.note_editor().is_some() {
+            note_editor_key(term, &mut state, &mut painter, key, wiring);
+            continue;
+        }
+
         // `Ctrl-B` collapses / expands the left session sidebar from anywhere on
         // the (non-modal) screen. It is a pure view toggle, so it is handled here
         // before the per-mode dispatch rather than threaded through each handler.
@@ -537,6 +556,7 @@ pub(crate) fn event_loop_compat(
     mut persist: impl FnMut(&str),
     mut create_session: impl FnMut(&str) -> SessionOutcome,
     mut rename_display: impl FnMut(&str, &str) -> SessionOutcome,
+    mut set_note: impl FnMut(&str, &str) -> SessionOutcome,
     mut remove_session: impl FnMut(&str, bool) -> SessionOutcome,
     mut existing_branches: impl FnMut() -> Vec<String>,
     mut open_terminal: impl FnMut(&mut HomeState, &Path, bool, bool) -> Result<PaneExit>,
@@ -589,6 +609,7 @@ pub(crate) fn event_loop_compat(
         persist: &mut persist,
         dispatch_create: &mut dispatch_create,
         rename_display: &mut rename_display,
+        set_note: &mut set_note,
         dispatch_remove: &mut dispatch_remove,
         evict_pool: &mut evict_pool,
         existing_branches: &mut existing_branches,

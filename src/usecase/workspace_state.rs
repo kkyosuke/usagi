@@ -309,6 +309,7 @@ mod tests {
         state.sessions.push(SessionRecord {
             name: "wip".to_string(),
             display_name: None,
+            note: None,
             root: wt_path.clone(),
             worktrees: vec![WorktreeState {
                 branch: None,
@@ -336,6 +337,7 @@ mod tests {
         SessionRecord {
             name: name.to_string(),
             display_name: None,
+            note: None,
             root: PathBuf::from(name),
             worktrees: Vec::new(),
             created_at: Utc::now(),

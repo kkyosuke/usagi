@@ -36,7 +36,7 @@ mod mode;
 
 pub use list::{worktree_name, WorktreeList, ROOT_NAME};
 pub use log::{LineKind, LogLine};
-pub use modal::{CreateInput, Preview, RemoveModal, RenameInput, TextModal};
+pub use modal::{CreateInput, NoteEditor, Preview, RemoveModal, RenameInput, TextModal};
 pub use mode::{Mode, PaneExit, ReturnMode};
 
 use list::session_row;
@@ -867,6 +867,90 @@ impl HomeState {
     /// not renaming.
     pub fn switch_confirm_rename(&mut self) -> Option<(String, String)> {
         Some(self.overlays.rename.take()?.confirm())
+    }
+
+    // --- session note editor ----------------------------------------------
+
+    /// The note recorded for the session named `name`, if any. Looked up in the
+    /// recorded sessions (the sidebar list carries only the worktree rows), so
+    /// the editor opens pre-filled with what is on disk.
+    fn session_note(&self, name: &str) -> Option<&str> {
+        self.sessions
+            .iter()
+            .find(|s| s.name == name)
+            .and_then(|s| s.note())
+    }
+
+    /// Open the note editor for `target`, pre-filled with its current note.
+    /// `reattach` records whether closing it should re-attach the session's pane
+    /// (没入's `Ctrl-E`); `false` for 切替's `n`.
+    fn open_note_for(&mut self, target: String, reattach: bool) {
+        let initial = self.session_note(&target).unwrap_or_default().to_string();
+        self.overlays.note = Some(NoteEditor::new(target, &initial, reattach));
+    }
+
+    /// Begin editing the selected session's note in 切替 (Switch): open the note
+    /// editor pre-filled with its current note. A no-op on the root row (which is
+    /// the workspace, not a session) and when an editor is already open. Returns
+    /// whether the editor opened.
+    pub fn switch_begin_note(&mut self) -> bool {
+        if self.overlays.note.is_some() {
+            return false;
+        }
+        let Some(worktree) = self.list.selected() else {
+            return false;
+        };
+        let target = worktree_name(worktree).to_string();
+        self.open_note_for(target, false);
+        true
+    }
+
+    /// Open the note editor for the focused (active) session, re-attaching its
+    /// pane on close — 没入's `Ctrl-E`. A no-op on the root row. Returns whether
+    /// the editor opened.
+    pub fn open_focused_note(&mut self) -> bool {
+        if self.overlays.note.is_some() {
+            return false;
+        }
+        let name = self.focused_session_name();
+        if name == ROOT_NAME {
+            return false;
+        }
+        self.open_note_for(name, true);
+        true
+    }
+
+    /// The open note editor, when any — its target, text buffer, and caret are
+    /// read through it ([`NoteEditor`]).
+    pub fn note_editor(&self) -> Option<&NoteEditor> {
+        self.overlays.note.as_ref()
+    }
+
+    /// The open note editor for editing, when any: the event loop routes its keys
+    /// to the buffer's own methods (via [`NoteEditor::area_mut`]).
+    pub fn note_editor_mut(&mut self) -> Option<&mut NoteEditor> {
+        self.overlays.note.as_mut()
+    }
+
+    /// Whether closing the open note editor should re-attach the session's pane
+    /// (it was opened from 没入). `false` when no editor is open.
+    pub fn note_editor_reattaches(&self) -> bool {
+        self.overlays
+            .note
+            .as_ref()
+            .is_some_and(NoteEditor::reattach)
+    }
+
+    /// Cancel the note editor, discarding the edits.
+    pub fn note_editor_cancel(&mut self) {
+        self.overlays.note = None;
+    }
+
+    /// Accept the note edit: close the editor and return the target session, the
+    /// typed text, and whether to re-attach, for the event loop to persist (see
+    /// [`NoteEditor::confirm`]). A no-op (returning `None`) when not editing.
+    pub fn confirm_note_editor(&mut self) -> Option<(String, String, bool)> {
+        Some(self.overlays.note.take()?.confirm())
     }
 
     // --- 在席 (Focus) ------------------------------------------------------

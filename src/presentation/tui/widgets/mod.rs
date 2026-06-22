@@ -8,6 +8,7 @@
 
 pub mod dir_picker;
 pub mod picker;
+pub mod text_area;
 pub mod text_input;
 
 use console::{style, Style};

@@ -185,6 +185,7 @@ fn record(workspace_root: &Path, name: &str, root: &Path, worktrees: &[PathBuf])
     state.sessions.push(SessionRecord {
         name: name.to_string(),
         display_name: None,
+        note: None,
         root: root.to_path_buf(),
         worktrees: worktree_states,
         created_at: now,
@@ -222,6 +223,38 @@ pub fn set_display_name(workspace_root: &Path, name: &str, display: &str) -> Res
     state.updated_at = Utc::now();
     store.save(&state)?;
     Ok(label)
+}
+
+/// Set (or clear) a session's free-form note in `state.json`, leaving its branch
+/// / identity untouched.
+///
+/// The note is stored as written (multi-line text is kept verbatim) save for
+/// trailing whitespace / blank lines, which are trimmed; a note that trims to
+/// empty clears it, so the session has no note again. Returns the note now
+/// stored (`None` when cleared). Fails when no session named `name` exists.
+pub fn set_note(workspace_root: &Path, name: &str, note: &str) -> Result<Option<String>> {
+    let store = WorkspaceStore::new(workspace_root);
+    // Hold the lock across the load → edit → save so a concurrent writer cannot
+    // overwrite this note (or have it overwrite their change).
+    let _lock = store.lock()?;
+    let mut state = store
+        .load()?
+        .ok_or_else(|| anyhow!("no sessions recorded for this workspace"))?;
+    let session = state
+        .sessions
+        .iter_mut()
+        .find(|s| s.name == name)
+        .ok_or_else(|| anyhow!("no such session: \"{name}\""))?;
+    let trimmed = note.trim_end();
+    session.note = if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    };
+    let stored = session.note.clone();
+    state.updated_at = Utc::now();
+    store.save(&state)?;
+    Ok(stored)
 }
 
 /// List the sessions recorded for `workspace_root`, in creation order.
@@ -798,6 +831,55 @@ mod tests {
         assert_eq!(display_name_of(root.path(), "feature"), None);
     }
 
+    fn note_of(root: &Path, name: &str) -> Option<String> {
+        list(root)
+            .unwrap()
+            .into_iter()
+            .find(|s| s.name == name)
+            .and_then(|s| s.note)
+    }
+
+    #[test]
+    fn set_note_sets_trims_clears_and_leaves_other_sessions_alone() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        create(root.path(), "feature").unwrap();
+        create(root.path(), "other").unwrap();
+
+        // A multi-line note is stored verbatim and returned.
+        let stored = set_note(root.path(), "feature", "line 1\nline 2").unwrap();
+        assert_eq!(stored.as_deref(), Some("line 1\nline 2"));
+        assert_eq!(
+            note_of(root.path(), "feature").as_deref(),
+            Some("line 1\nline 2")
+        );
+        // The other session is untouched.
+        assert_eq!(note_of(root.path(), "other"), None);
+
+        // Trailing whitespace / blank lines are trimmed off the end.
+        let stored = set_note(root.path(), "feature", "kept\n\n   \n").unwrap();
+        assert_eq!(stored.as_deref(), Some("kept"));
+
+        // A note that trims to empty clears it.
+        let stored = set_note(root.path(), "feature", "   \n  ").unwrap();
+        assert_eq!(stored, None);
+        assert_eq!(note_of(root.path(), "feature"), None);
+    }
+
+    #[test]
+    fn set_note_errors_without_state_or_session() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        // No state.json yet.
+        let err = set_note(root.path(), "x", "hi").unwrap_err();
+        assert!(err.to_string().contains("no sessions recorded"));
+
+        // State exists but the named session does not.
+        create(root.path(), "present").unwrap();
+        let err = set_note(root.path(), "absent", "hi").unwrap_err();
+        assert!(err.to_string().contains("no such session"));
+    }
+
     #[test]
     fn set_display_name_errors_without_state_or_session() {
         let root = tempfile::tempdir().unwrap();
@@ -970,6 +1052,7 @@ mod tests {
         state.sessions.push(SessionRecord {
             name: "ghost".to_string(),
             display_name: None,
+            note: None,
             root: ghost_root.clone(),
             worktrees: vec![WorktreeState {
                 branch: None,

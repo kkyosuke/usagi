@@ -62,6 +62,7 @@ mod tests {
         vec![SessionRecord {
             name: name.to_string(),
             display_name: None,
+            note: None,
             root: std::path::PathBuf::from(format!("/repo/.usagi/sessions/{name}")),
             worktrees: Vec::new(),
             created_at: chrono::Utc::now(),

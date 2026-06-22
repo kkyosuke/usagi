@@ -44,6 +44,14 @@ fn noop_rename(_: &str, _: &str) -> SessionOutcome {
     }
 }
 
+fn noop_set_note(_: &str, _: &str) -> SessionOutcome {
+    SessionOutcome {
+        line: LogLine::output("note saved"),
+        sessions: None,
+        select: None,
+    }
+}
+
 /// A key source that replays a scripted sequence of results.
 struct ScriptedReader {
     keys: VecDeque<io::Result<Key>>,
@@ -165,6 +173,7 @@ fn run_at(keys: Vec<io::Result<Key>>, state: HomeState, root: &Path) -> Result<O
         &mut persist,
         &mut create,
         &mut (noop_rename as fn(&str, &str) -> SessionOutcome),
+        &mut (noop_set_note as fn(&str, &str) -> SessionOutcome),
         &mut remove,
         &mut branches,
         &mut open,
@@ -216,6 +225,7 @@ fn run_full(
         &mut persist,
         create_session,
         &mut (noop_rename as fn(&str, &str) -> SessionOutcome),
+        &mut (noop_set_note as fn(&str, &str) -> SessionOutcome),
         &mut remove_session,
         &mut branches,
         open_terminal,
@@ -255,6 +265,7 @@ fn run_with_live_monitor(
         persist,
         &mut create,
         &mut (noop_rename as fn(&str, &str) -> SessionOutcome),
+        &mut (noop_set_note as fn(&str, &str) -> SessionOutcome),
         &mut remove_session,
         &mut branches,
         &mut open,
@@ -298,6 +309,7 @@ fn a_populated_update_handle_is_read_before_painting() {
         &mut persist,
         &mut create,
         &mut (noop_rename as fn(&str, &str) -> SessionOutcome),
+        &mut (noop_set_note as fn(&str, &str) -> SessionOutcome),
         &mut remove,
         &mut (no_branches as fn() -> Vec<String>),
         &mut open,
@@ -364,6 +376,7 @@ fn state_with_sessions(names: &[&str]) -> HomeState {
         .map(|n| SessionRecord {
             name: n.to_string(),
             display_name: None,
+            note: None,
             root: PathBuf::from(format!("/ws/.usagi/sessions/{n}")),
             worktrees: vec![worktree(Some(n), &format!("/ws/{n}"))],
             created_at: Utc::now(),
@@ -402,6 +415,7 @@ fn a_background_refresh_updates_the_session_list_exactly_once() {
             .map(|n| SessionRecord {
                 name: n.to_string(),
                 display_name: None,
+                note: None,
                 root: PathBuf::from(format!("/ws/.usagi/sessions/{n}")),
                 worktrees: vec![worktree(Some(n), &format!("/ws/{n}"))],
                 created_at: Utc::now(),
@@ -459,6 +473,7 @@ fn run_with_ai_probe(
         &mut persist,
         &mut create,
         &mut (noop_rename as fn(&str, &str) -> SessionOutcome),
+        &mut (noop_set_note as fn(&str, &str) -> SessionOutcome),
         &mut remove,
         &mut branches,
         &mut open,
@@ -645,6 +660,7 @@ fn overview_caret_keys_edit_within_the_line() {
         &mut persist,
         &mut create,
         &mut (noop_rename as fn(&str, &str) -> SessionOutcome),
+        &mut (noop_set_note as fn(&str, &str) -> SessionOutcome),
         &mut remove,
         &mut (no_branches as fn() -> Vec<String>),
         &mut open,
@@ -691,6 +707,7 @@ fn submitted_commands_are_handed_to_persist() {
         &mut persist,
         &mut create,
         &mut (noop_rename as fn(&str, &str) -> SessionOutcome),
+        &mut (noop_set_note as fn(&str, &str) -> SessionOutcome),
         &mut remove,
         &mut (no_branches as fn() -> Vec<String>),
         &mut open,
@@ -846,6 +863,7 @@ fn session_remove_with_a_name_and_force_routes_to_remove() {
         &mut persist,
         &mut create,
         &mut (noop_rename as fn(&str, &str) -> SessionOutcome),
+        &mut (noop_set_note as fn(&str, &str) -> SessionOutcome),
         &mut remove,
         &mut (no_branches as fn() -> Vec<String>),
         &mut open,
@@ -892,6 +910,7 @@ fn close_typed_in_overview_on_root_is_refused() {
         &mut persist,
         &mut create,
         &mut (noop_rename as fn(&str, &str) -> SessionOutcome),
+        &mut (noop_set_note as fn(&str, &str) -> SessionOutcome),
         &mut remove,
         &mut (no_branches as fn() -> Vec<String>),
         &mut open,
@@ -956,6 +975,7 @@ fn focus_close_command_force_removes_the_focused_session_then_enters_switch() {
         &mut persist,
         &mut create,
         &mut (noop_rename as fn(&str, &str) -> SessionOutcome),
+        &mut (noop_set_note as fn(&str, &str) -> SessionOutcome),
         &mut remove,
         &mut branches,
         &mut open,
@@ -1018,6 +1038,7 @@ fn focus_menu_close_force_removes_the_focused_session_then_enters_switch() {
         &mut persist,
         &mut create,
         &mut (noop_rename as fn(&str, &str) -> SessionOutcome),
+        &mut (noop_set_note as fn(&str, &str) -> SessionOutcome),
         &mut remove,
         &mut branches,
         &mut open,
@@ -1074,6 +1095,7 @@ fn session_remove_without_a_name_opens_the_modal_and_bulk_removes() {
         &mut persist,
         &mut create,
         &mut (noop_rename as fn(&str, &str) -> SessionOutcome),
+        &mut (noop_set_note as fn(&str, &str) -> SessionOutcome),
         &mut remove,
         &mut (no_branches as fn() -> Vec<String>),
         &mut open,
@@ -1560,6 +1582,7 @@ fn switch_arrows_move_the_active_tab_via_tab_op() {
         &mut persist,
         &mut create,
         &mut (noop_rename as fn(&str, &str) -> SessionOutcome),
+        &mut (noop_set_note as fn(&str, &str) -> SessionOutcome),
         &mut remove,
         &mut branches,
         &mut open,
@@ -1617,6 +1640,7 @@ fn switch_x_closes_the_highlighted_sessions_active_tab() {
         &mut persist,
         &mut create,
         &mut (noop_rename as fn(&str, &str) -> SessionOutcome),
+        &mut (noop_set_note as fn(&str, &str) -> SessionOutcome),
         &mut remove,
         &mut branches,
         &mut open,
@@ -1730,6 +1754,7 @@ fn run_recording_rename(keys: Vec<io::Result<Key>>) -> (Vec<(String, String)>, O
         &mut persist,
         &mut create,
         &mut rename,
+        &mut (noop_set_note as fn(&str, &str) -> SessionOutcome),
         &mut remove,
         &mut (no_branches as fn() -> Vec<String>),
         &mut open,
@@ -1929,6 +1954,7 @@ fn focus_ctrl_n_and_ctrl_p_move_the_active_tab_via_tab_op() {
         &mut persist,
         &mut create,
         &mut (noop_rename as fn(&str, &str) -> SessionOutcome),
+        &mut (noop_set_note as fn(&str, &str) -> SessionOutcome),
         &mut remove,
         &mut branches,
         &mut open,
@@ -2211,11 +2237,13 @@ fn run_with_tasks(
     let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = noop_preview;
     let mut tab_op: fn(&Path, Option<TabNav>) -> (Vec<String>, usize) = noop_tab_op;
     let mut close: fn(&mut HomeState, &Path) = noop_close;
+    let mut set_note_fake: fn(&str, &str) -> SessionOutcome = noop_set_note;
     let mut wiring = Wiring {
         workspace_root: Path::new("/ws"),
         persist: &mut persist,
         dispatch_create: &mut dispatch_create,
         rename_display: &mut rename,
+        set_note: &mut set_note_fake,
         dispatch_remove: &mut dispatch_remove,
         evict_pool: &mut evict_pool,
         existing_branches: &mut branches,
@@ -2310,11 +2338,13 @@ fn run_with_live_session(reader: &mut dyn KeyReader) -> Result<Outcome> {
     let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = noop_preview;
     let mut tab_op: fn(&Path, Option<TabNav>) -> (Vec<String>, usize) = noop_tab_op;
     let mut close: fn(&mut HomeState, &Path) = noop_close;
+    let mut set_note_fake: fn(&str, &str) -> SessionOutcome = noop_set_note;
     let mut wiring = Wiring {
         workspace_root: Path::new("/ws"),
         persist: &mut persist,
         dispatch_create: &mut dispatch_create,
         rename_display: &mut rename,
+        set_note: &mut set_note_fake,
         dispatch_remove: &mut dispatch_remove,
         evict_pool: &mut evict,
         existing_branches: &mut branches,
@@ -2409,4 +2439,271 @@ fn default_callbacks_run_through_the_harness() {
     keys.push(Ok(Key::Enter));
     keys.push(Ok(Key::Escape));
     assert!(matches!(run(keys, sample_state()).unwrap(), Outcome::Quit));
+}
+
+// --- session note editor ----------------------------------------------
+
+/// Run the loop recording every `set_note` call, with a custom `open_terminal`
+/// and `preview` so the 没入 (Attached) note flow can be exercised.
+#[allow(clippy::too_many_arguments)]
+fn run_notes(
+    keys: Vec<io::Result<Key>>,
+    state: HomeState,
+    open: &mut dyn FnMut(&mut HomeState, &Path, bool, bool) -> Result<PaneExit>,
+    preview: &mut dyn FnMut(&Path, Sidebar) -> Option<TerminalView>,
+    set_note: &mut dyn FnMut(&str, &str) -> SessionOutcome,
+) -> Result<Outcome> {
+    let term = Term::stdout();
+    let mut reader = ScriptedReader::new(keys);
+    let monitor = MonitorHandle::detached();
+    let mut persist: fn(&str) = noop_persist;
+    let mut create: fn(&str) -> SessionOutcome = noop_create;
+    let mut remove: fn(&str, bool) -> SessionOutcome = noop_remove;
+    let mut config: fn(&Term) -> Result<Option<ConfigReload>> = noop_config;
+    let mut branches: fn() -> Vec<String> = no_branches;
+    event_loop_compat(
+        &term,
+        &mut reader,
+        state,
+        Path::new("/ws"),
+        &monitor,
+        &UpdateHandle::new(),
+        &OneShot::<bool>::new(),
+        &mut persist,
+        &mut create,
+        &mut (noop_rename as fn(&str, &str) -> SessionOutcome),
+        set_note,
+        &mut remove,
+        &mut branches,
+        open,
+        &mut config,
+        preview,
+        &mut (noop_tab_op as fn(&Path, Option<TabNav>) -> (Vec<String>, usize)),
+        &mut (noop_close as fn(&mut HomeState, &Path)),
+    )
+}
+
+#[test]
+fn switch_n_opens_the_note_editor_edits_the_buffer_and_saves() {
+    // 切替, `n` on a session opens the editor; the editing keys build a
+    // multi-line note, and Ctrl-S persists it through `set_note`.
+    let recorded = RefCell::new(Vec::<(String, String)>::new());
+    let mut set_note = |name: &str, text: &str| {
+        recorded
+            .borrow_mut()
+            .push((name.to_string(), text.to_string()));
+        noop_set_note(name, text)
+    };
+    let mut open: fn(&mut HomeState, &Path, bool, bool) -> Result<PaneExit> = noop_open;
+    let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = noop_preview;
+
+    let mut keys = vec![
+        Ok(Key::Char(CTRL_O)),     // Overview -> Switch (cursor on root)
+        Ok(Key::Char('n')),        // `n` on the root row: a no-op (not a session)
+        Ok(Key::ArrowDown),        // root -> alpha
+        Ok(Key::Char('n')),        // open the note editor for alpha
+        Ok(Key::Tab),              // ignored inside the editor
+        Ok(Key::Char('\u{0001}')), // a control char (Ctrl-A): ignored
+    ];
+    keys.extend(typed("abc"));
+    keys.push(Ok(Key::ArrowLeft));
+    keys.push(Ok(Key::ArrowRight));
+    keys.push(Ok(Key::Home));
+    keys.push(Ok(Key::End));
+    keys.push(Ok(Key::Backspace)); // "abc" -> "ab"
+    keys.push(Ok(Key::Del)); // at end of buffer: no-op
+    keys.push(Ok(Key::Enter)); // "ab" -> "ab\n"
+    keys.push(Ok(Key::Char('z'))); // "ab\nz"
+    keys.push(Ok(Key::ArrowUp));
+    keys.push(Ok(Key::ArrowDown));
+    keys.push(Ok(Key::Char(CTRL_S))); // save
+    keys.push(Ok(Key::Escape)); // Switch -> Overview
+    keys.push(Ok(Key::CtrlC)); // quit
+
+    let outcome = run_notes(
+        keys,
+        state_with_sessions(&["alpha", "beta"]),
+        &mut open,
+        &mut preview,
+        &mut set_note,
+    )
+    .unwrap();
+    assert!(matches!(outcome, Outcome::Quit));
+    assert_eq!(
+        *recorded.borrow(),
+        vec![("alpha".to_string(), "ab\nz".to_string())]
+    );
+}
+
+#[test]
+fn switch_n_note_editor_cancel_discards_the_edit() {
+    // Esc closes the editor without persisting anything.
+    let recorded = RefCell::new(Vec::<(String, String)>::new());
+    let mut set_note = |name: &str, text: &str| {
+        recorded
+            .borrow_mut()
+            .push((name.to_string(), text.to_string()));
+        noop_set_note(name, text)
+    };
+    let mut open: fn(&mut HomeState, &Path, bool, bool) -> Result<PaneExit> = noop_open;
+    let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = noop_preview;
+
+    let mut keys = vec![
+        Ok(Key::Char(CTRL_O)), // Overview -> Switch
+        Ok(Key::ArrowDown),    // root -> alpha
+        Ok(Key::Char('n')),    // open the editor
+    ];
+    keys.extend(typed("draft"));
+    keys.push(Ok(Key::Escape)); // cancel the editor (no save)
+    keys.push(Ok(Key::Escape)); // Switch -> Overview
+    keys.push(Ok(Key::CtrlC));
+
+    let outcome = run_notes(
+        keys,
+        state_with_sessions(&["alpha"]),
+        &mut open,
+        &mut preview,
+        &mut set_note,
+    )
+    .unwrap();
+    assert!(matches!(outcome, Outcome::Quit));
+    assert!(recorded.borrow().is_empty(), "cancel must not save");
+}
+
+#[test]
+fn attached_ctrl_e_opens_the_note_editor_then_re_attaches_on_save() {
+    // Attaching a live session, then `Ctrl-E` (reported as PaneExit::OpenNote)
+    // opens the note editor over the pane; saving persists the note and
+    // re-attaches (open_terminal is driven a second time).
+    let opened = RefCell::new(0);
+    let mut open = |_h: &mut HomeState, _d: &Path, _a: bool, _n: bool| {
+        let mut n = opened.borrow_mut();
+        *n += 1;
+        // First attach yields to the note editor; the re-attach then closes.
+        if *n == 1 {
+            Ok(PaneExit::OpenNote)
+        } else {
+            Ok(PaneExit::Closed)
+        }
+    };
+    let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = live_preview;
+    let recorded = RefCell::new(Vec::<(String, String)>::new());
+    let mut set_note = |name: &str, text: &str| {
+        recorded
+            .borrow_mut()
+            .push((name.to_string(), text.to_string()));
+        noop_set_note(name, text)
+    };
+
+    let mut keys = typed("session switch alpha");
+    keys.push(Ok(Key::Enter)); // focus + attach alpha -> open_terminal #1 -> OpenNote
+    keys.extend(typed("hi")); // edit the note in the editor
+    keys.push(Ok(Key::Char(CTRL_S))); // save -> re-attach -> open_terminal #2 -> Closed -> Focus
+    keys.push(Ok(Key::Escape)); // Focus -> Overview
+    keys.push(Ok(Key::CtrlC));
+
+    let outcome = run_notes(
+        keys,
+        state_with_sessions(&["alpha"]),
+        &mut open,
+        &mut preview,
+        &mut set_note,
+    )
+    .unwrap();
+    assert!(matches!(outcome, Outcome::Quit));
+    assert_eq!(
+        *opened.borrow(),
+        2,
+        "the pane is re-attached after the editor"
+    );
+    assert_eq!(
+        *recorded.borrow(),
+        vec![("alpha".to_string(), "hi".to_string())]
+    );
+}
+
+#[test]
+fn attached_ctrl_e_re_attaches_on_cancel_without_saving() {
+    let opened = RefCell::new(0);
+    let mut open = |_h: &mut HomeState, _d: &Path, _a: bool, _n: bool| {
+        let mut n = opened.borrow_mut();
+        *n += 1;
+        if *n == 1 {
+            Ok(PaneExit::OpenNote)
+        } else {
+            Ok(PaneExit::Closed)
+        }
+    };
+    let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = live_preview;
+    let recorded = RefCell::new(Vec::<(String, String)>::new());
+    let mut set_note = |name: &str, text: &str| {
+        recorded
+            .borrow_mut()
+            .push((name.to_string(), text.to_string()));
+        noop_set_note(name, text)
+    };
+
+    let mut keys = typed("session switch alpha");
+    keys.push(Ok(Key::Enter)); // attach -> OpenNote
+    keys.extend(typed("scratch"));
+    keys.push(Ok(Key::Escape)); // cancel -> re-attach -> Closed -> Focus
+    keys.push(Ok(Key::Escape)); // Focus -> Overview
+    keys.push(Ok(Key::CtrlC));
+
+    let outcome = run_notes(
+        keys,
+        state_with_sessions(&["alpha"]),
+        &mut open,
+        &mut preview,
+        &mut set_note,
+    )
+    .unwrap();
+    assert!(matches!(outcome, Outcome::Quit));
+    assert_eq!(*opened.borrow(), 2, "cancel still re-attaches the pane");
+    assert!(recorded.borrow().is_empty(), "cancel must not save");
+}
+
+#[test]
+fn attached_ctrl_e_on_the_root_row_re_attaches_without_opening_an_editor() {
+    // The root row is the workspace, not a session: Ctrl-E there opens no editor
+    // and simply re-attaches the pane.
+    let opened = RefCell::new(0);
+    let mut open = |_h: &mut HomeState, _d: &Path, _a: bool, _n: bool| {
+        let mut n = opened.borrow_mut();
+        *n += 1;
+        if *n == 1 {
+            Ok(PaneExit::OpenNote)
+        } else {
+            Ok(PaneExit::Closed)
+        }
+    };
+    let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = live_preview;
+    let recorded = RefCell::new(Vec::<(String, String)>::new());
+    let mut set_note = |name: &str, text: &str| {
+        recorded
+            .borrow_mut()
+            .push((name.to_string(), text.to_string()));
+        noop_set_note(name, text)
+    };
+
+    let mut keys = typed("session switch root");
+    keys.push(Ok(Key::Enter)); // focus + attach root -> OpenNote
+    keys.push(Ok(Key::Escape)); // (re-attached, now Focus) -> Overview
+    keys.push(Ok(Key::CtrlC));
+
+    let outcome = run_notes(
+        keys,
+        state_with_sessions(&["alpha"]),
+        &mut open,
+        &mut preview,
+        &mut set_note,
+    )
+    .unwrap();
+    assert!(matches!(outcome, Outcome::Quit));
+    assert_eq!(
+        *opened.borrow(),
+        2,
+        "the root pane is re-attached straight away"
+    );
+    assert!(recorded.borrow().is_empty());
 }
