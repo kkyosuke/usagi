@@ -188,14 +188,13 @@ pub fn remove_worktree(repo: &Path, worktree: &Path, force: bool) -> Result<()> 
     // `--force` is given — *regardless of whether it is clean* (`fatal: working
     // trees containing submodules cannot be moved or removed`). That refusal is
     // structural, not a dirtiness guard, so when it is the only obstacle we
-    // retry forced. Uncommitted work stays protected because the caller already
-    // vetted dirtiness via `worktree_status` (whose `git status` counts a
-    // modified submodule as dirty) before deciding not to force.
+    // retry forced (a forced call no longer matches this branch, so the retry
+    // resolves through the success return or the `bail!` below). Uncommitted
+    // work stays protected because the caller already vetted dirtiness via
+    // `worktree_status` (whose `git status` counts a modified submodule as
+    // dirty) before deciding not to force.
     if !force && stderr.contains("containing submodules") {
-        return match run_worktree_remove(repo, worktree, true)? {
-            Ok(()) => Ok(()),
-            Err(stderr) => bail!("git worktree remove failed: {}", stderr.trim()),
-        };
+        return remove_worktree(repo, worktree, true);
     }
 
     bail!("git worktree remove failed: {}", stderr.trim());
