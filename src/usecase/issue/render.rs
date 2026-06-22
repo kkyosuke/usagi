@@ -56,11 +56,15 @@ pub fn stats_line(stats: &IssueStats) -> String {
 }
 
 fn join_numbers(numbers: &[u32]) -> String {
-    numbers
-        .iter()
-        .map(u32::to_string)
-        .collect::<Vec<_>>()
-        .join(", ")
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    for (i, n) in numbers.iter().enumerate() {
+        if i > 0 {
+            out.push_str(", ");
+        }
+        let _ = write!(out, "{n}");
+    }
+    out
 }
 
 #[cfg(test)]
