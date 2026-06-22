@@ -51,7 +51,7 @@ pub(super) fn update_banner(latest: &Version) -> Vec<String> {
         .unwrap_or(0);
     // One message per mascot row; the last row carries only the mascot's feet.
     let messages = [
-        "最新版があります".to_string(),
+        "アップデートしたぴょん！".to_string(),
         format!("v{latest}"),
         String::new(),
     ];
@@ -79,6 +79,8 @@ pub(super) fn update_banner(latest: &Version) -> Vec<String> {
                 .bold()
                 .to_string()
         })
+        // 一番下に空行を 1 行足して、下のコンテンツとの間に余白を作る。
+        .chain(std::iter::once(String::new()))
         .collect()
 }
 
