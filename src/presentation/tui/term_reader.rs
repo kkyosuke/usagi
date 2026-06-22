@@ -134,7 +134,15 @@ fn poll_readable(fd: RawFd, timeout_ms: i32) -> io::Result<bool> {
     };
     let ret = unsafe { libc::poll(&mut pollfd as *mut _, 1, timeout_ms) };
     if ret < 0 {
-        Err(io::Error::last_os_error())
+        let err = io::Error::last_os_error();
+        // A delivered signal (e.g. crossterm's SIGWINCH handler) interrupts
+        // `poll` with `EINTR`. Report "not ready" rather than surfacing the
+        // error: the caller then ticks and re-waits, instead of mistaking the
+        // interruption for a fatal read failure that quits the whole TUI.
+        if err.kind() == io::ErrorKind::Interrupted {
+            return Ok(false);
+        }
+        Err(err)
     } else {
         Ok(pollfd.revents & libc::POLLIN != 0)
     }
@@ -167,7 +175,14 @@ fn select_readable(fd: RawFd, timeout_ms: i32) -> io::Result<bool> {
             timeout,
         );
         if ret < 0 {
-            Err(io::Error::last_os_error())
+            let err = io::Error::last_os_error();
+            // `EINTR` (a delivered signal, e.g. SIGWINCH) is not a read failure:
+            // report "not ready" so the caller ticks and re-waits. See
+            // [`poll_readable`].
+            if err.kind() == io::ErrorKind::Interrupted {
+                return Ok(false);
+            }
+            Err(err)
         } else {
             Ok(libc::FD_ISSET(fd, &read_fd_set))
         }
