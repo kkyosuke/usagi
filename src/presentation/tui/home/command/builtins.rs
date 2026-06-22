@@ -3,6 +3,7 @@
 //! registered in display order by [`super::CommandRegistry::with_builtins`].
 
 use super::{Command, CommandContext, CommandInfo, CommandResult, CommandScope, Effect, LogLine};
+use crate::presentation::tui::widgets;
 use crate::usecase::issue::{
     annotate_all, dependency_tree, gantt, list_line, stats_line, IssueStats, ListedIssue,
 };
@@ -147,7 +148,10 @@ impl Command for QuitCommand {
 
     fn run(&self, _args: &str, _ctx: &CommandContext) -> CommandResult {
         CommandResult {
-            lines: vec![LogLine::output("USAGI run away ( ^-^)ノ")],
+            lines: widgets::farewell_lines()
+                .into_iter()
+                .map(LogLine::output)
+                .collect(),
             effect: Effect::Quit,
         }
     }
