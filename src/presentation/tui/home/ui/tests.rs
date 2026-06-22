@@ -1080,21 +1080,21 @@ fn switch_preview_shows_an_idle_session_as_its_action_menu() {
 }
 
 #[test]
-fn switch_preview_pins_the_key_hint_to_the_bottom_row() {
-    // The 切替 right pane always ends with the key hint, so the keys that act on
-    // the highlighted session stay in view beside its preview — including the
-    // close-tab key.
+fn switch_preview_fills_the_pane_without_a_pinned_key_hint() {
+    // The 切替 right pane no longer pins a key hint to its bottom row — the keys
+    // live in the footer, so the preview uses the pane's full height and does not
+    // duplicate the footer's key list.
     let idle = worktree(Some("feat"), false, BranchStatus::Pushed);
     let mut state = HomeState::new("usagi", vec![idle], None);
     state.enter_switch(super::super::state::ReturnMode::Overview);
     state.switch_move_down();
     let preview = switch_preview(&state, 60, 12);
-    // The pane fills its rows, and the key hint is the bottom row.
+    // The pane fills its rows, and the bottom row is no longer a key hint.
     assert_eq!(preview.len(), 12);
     let last = console::strip_ansi_codes(preview.last().unwrap()).into_owned();
-    assert!(last.contains("Enter focus"));
-    assert!(last.contains("x close tab"));
-    // The action-menu preview above it is still shown.
+    assert!(!last.contains("Enter focus"));
+    assert!(!last.contains("x close tab"));
+    // The action-menu preview is still shown.
     assert!(stripped(&preview).contains("Run a command"));
 }
 
