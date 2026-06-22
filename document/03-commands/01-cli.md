@@ -20,7 +20,7 @@
 |---|---|
 | `usagi init` | カレントディレクトリをプロジェクトとして登録する（`.usagi/` を初期化し、グローバルレジストリ `workspaces.json` に追加） |
 | `usagi init --git <URL>` | カレントディレクトリ配下に `<リポジトリ名>/` を作成して clone し、プロジェクトとして登録する |
-| `usagi hop` | メインの TUI を起動する。起動画面 → プロジェクト選択 → ホーム画面へ遷移（[design/](../design/README.md)） |
+| `usagi` / `usagi hop` | メインの TUI を起動する。起動画面 → プロジェクト選択 → ホーム画面へ遷移（[design/](../design/README.md)）。サブコマンドを省略した `usagi` は `usagi hop` と同じ |
 | `usagi run [N]` | うさぎアニメを全画面で再生して見るギャラリー。`N`（1–5）で種類を選ぶ（既定 1）。なにかキーで終了 |
 | `usagi status` | カレントリポジトリの worktree 状態を `.usagi/state.json` に同期し一覧表示する（[data/02-workspace.md](../data/02-workspace.md)） |
 | `usagi config` | 現在のグローバル設定（`settings.json`）を一覧表示する（[5. 設定](../05-settings.md)） |
@@ -44,6 +44,8 @@
 
 TUI を起動します。代替スクリーン上で起動画面を表示し、Open / New / Config / Quit を選べます。
 画面遷移とキー操作は [design/README.md](../design/README.md) を参照してください。
+
+サブコマンドを省略して `usagi` だけを実行した場合も `usagi hop` と同じく TUI を起動します。
 
 ### `usagi run`
 

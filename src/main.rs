@@ -7,8 +7,9 @@ use clap::{Parser, Subcommand};
     about = "TUI/CLI for managing AI agent workflows"
 )]
 struct Cli {
+    /// Defaults to `hop` (the welcome screen) when no subcommand is given.
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
 }
 
 #[derive(Subcommand)]
@@ -83,7 +84,10 @@ enum Commands {
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
-    let result = match cli.command {
+    // No subcommand behaves the same as `usagi hop`.
+    let command = cli.command.unwrap_or(Commands::Hop);
+
+    let result = match command {
         Commands::AgentPhase { phase } => usagi::presentation::cli::agent_phase::run(phase),
         Commands::Config { edit } => usagi::presentation::cli::config::run(edit),
         Commands::Doctor { fix } => usagi::presentation::cli::doctor::run(fix),
