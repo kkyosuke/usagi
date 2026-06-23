@@ -18,10 +18,35 @@ use crate::presentation::tui::new::state::NewProject;
 use crate::presentation::tui::{config, home, new, open, splash, welcome};
 use crate::usecase::project;
 
+/// Best-effort terminal reset on panic, installed once before the TUI starts.
+///
+/// The RAII guards (`AlternateScreenGuard` and the embedded pane's mode guard)
+/// already restore the terminal when a panic unwinds through them, so this is the
+/// last line of defense — it runs even if unwinding is disabled or a panic
+/// escapes a path no guard covers, so the user is never left in raw mode with a
+/// hidden cursor and live mouse reporting. It chains to the previous hook so the
+/// panic message still prints.
+fn install_panic_hook() {
+    use std::io::Write as _;
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = crossterm::terminal::disable_raw_mode();
+        // Leave the alternate screen; disable mouse click/drag/motion reporting
+        // and bracketed paste; show the cursor.
+        let mut out = std::io::stdout();
+        let _ = out.write_all(
+            b"\x1b[?1049l\x1b[?1006l\x1b[?1002l\x1b[?1000l\x1b[?1003l\x1b[?2004l\x1b[?25h",
+        );
+        let _ = out.flush();
+        previous(info);
+    }));
+}
+
 /// Entry point for the interactive TUI. Wires the real terminal, storage, and
 /// screens to the testable [`event::event_loop`], which owns the
 /// alternate-screen lifetime for the whole session.
 pub fn run() -> Result<()> {
+    install_panic_hook();
     let term = Term::stdout();
     let storage = Storage::open_default()?;
     // Pre-fill the New form's Location field with the configured base directory.
