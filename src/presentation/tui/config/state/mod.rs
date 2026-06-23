@@ -19,14 +19,6 @@ use console::Style;
 /// The themes in the order they cycle through.
 const THEMES: [Theme; 3] = [Theme::Light, Theme::Dark, Theme::System];
 
-/// The agent CLIs in the order they cycle through.
-pub(super) const AGENT_CLIS: [AgentCli; 4] = [
-    AgentCli::Claude,
-    AgentCli::Codex,
-    AgentCli::CodexFugu,
-    AgentCli::Gemini,
-];
-
 /// The 在席 (Focus) action UIs in the order they cycle through.
 pub(super) const SESSION_ACTION_UIS: [SessionActionUi; 2] =
     [SessionActionUi::Menu, SessionActionUi::Prompt];
@@ -267,6 +259,12 @@ pub struct Config {
     branches: Vec<String>,
     /// The project-local overrides being edited, present in the local scope.
     local: Option<LocalEdit>,
+    /// The agent CLIs offered in the Agent CLI selector — those installed on the
+    /// PATH, in [`AgentCli::ALL`] order. Seeded when the screen opens; until then
+    /// it defaults to every agent so nothing is hidden before the probe runs. The
+    /// selector additionally keeps the currently-configured value selectable even
+    /// when it is not installed (see [`Config::agent_cli_choices`]).
+    available_agent_clis: Vec<AgentCli>,
     /// Whether the `ollama` runtime is installed. Seeded when the screen opens;
     /// drives whether the Local LLM row shows an "Install" action or an on/off
     /// toggle, and whether the model row is selectable.
@@ -316,6 +314,7 @@ impl Config {
             workspaces,
             branches: Vec::new(),
             local: None,
+            available_agent_clis: AgentCli::ALL.to_vec(),
             ollama_installed: false,
             installed_models: Vec::new(),
             install_modal: None,
@@ -343,6 +342,7 @@ impl Config {
                 baseline: local.clone(),
                 settings: local,
             }),
+            available_agent_clis: AgentCli::ALL.to_vec(),
             ollama_installed: false,
             installed_models: Vec::new(),
             install_modal: None,
@@ -355,6 +355,25 @@ impl Config {
 
     pub fn settings(&self) -> &Settings {
         &self.settings
+    }
+
+    /// Record which agent CLIs are installed on the PATH, in [`AgentCli::ALL`]
+    /// order. Called when the screen opens, after probing the system, so the
+    /// Agent CLI selector only cycles through agents the user can actually launch.
+    pub fn set_available_agent_clis(&mut self, available: Vec<AgentCli>) {
+        self.available_agent_clis = available;
+    }
+
+    /// The concrete agent CLIs the Agent CLI selector cycles through: those
+    /// installed on the PATH, plus `keep` (the currently-set value) even when it
+    /// is not installed so an existing setting stays visible and selectable.
+    /// Always in [`AgentCli::ALL`] order. `keep` is the global value (always
+    /// `Some`) or the local override (`None` when following the global setting).
+    fn agent_cli_choices(&self, keep: Option<AgentCli>) -> Vec<AgentCli> {
+        AgentCli::ALL
+            .into_iter()
+            .filter(|cli| Some(*cli) == keep || self.available_agent_clis.contains(cli))
+            .collect()
     }
 
     /// Record whether the `ollama` runtime is installed. Called when the screen
@@ -724,7 +743,7 @@ impl Config {
                 .clone()
                 .unwrap_or_else(|| "(none)".to_string()),
             Field::Notifications => on_off(self.settings.notifications_enabled).to_string(),
-            Field::AgentCli => agent_cli_label(self.settings.agent_cli).to_string(),
+            Field::AgentCli => self.settings.agent_cli.display_name().to_string(),
             Field::SessionActionUi => {
                 session_action_ui_label(self.settings.session_action_ui).to_string()
             }
@@ -760,8 +779,8 @@ impl Config {
         };
         match field {
             LocalField::AgentCli => match local.settings.agent_cli {
-                None => format!("Global ({})", agent_cli_label(self.settings.agent_cli)),
-                Some(cli) => format!("Override: {}", agent_cli_label(cli)),
+                None => format!("Global ({})", self.settings.agent_cli.display_name()),
+                Some(cli) => format!("Override: {}", cli.display_name()),
             },
             LocalField::Notifications => match local.settings.notifications_enabled {
                 None => format!("Global ({})", on_off(self.settings.notifications_enabled)),
@@ -834,16 +853,6 @@ fn on_off(enabled: bool) -> &'static str {
         "On"
     } else {
         "Off"
-    }
-}
-
-/// The human-readable label for an agent CLI.
-fn agent_cli_label(cli: AgentCli) -> &'static str {
-    match cli {
-        AgentCli::Claude => "Claude",
-        AgentCli::Codex => "Codex",
-        AgentCli::CodexFugu => "sakana.ai",
-        AgentCli::Gemini => "Gemini",
     }
 }
 

@@ -5,6 +5,7 @@
 //! and file-based config/workspace storage, so `doctor` now also reports on
 //! those subsystems.
 
+use crate::domain::settings::AgentCli;
 use crate::infrastructure::storage::Storage;
 use crate::usecase::local_llm;
 
@@ -110,6 +111,7 @@ pub fn diagnose(storage: &Storage) -> Vec<Check> {
         .iter()
         .map(|&name| tool_check(name, &runner))
         .collect();
+    checks.extend(agent_checks(&runner));
     checks.push(notification_check());
     checks.push(config_check(storage));
     if let Ok(settings) = storage.load_settings() {
@@ -146,6 +148,33 @@ fn local_llm_checks(enabled: bool, model: &str, runner: &dyn CommandRunner) -> V
         )
     };
     vec![ollama, model_check]
+}
+
+/// One presence check per agent CLI usagi can drive, in [`AgentCli::ALL`] order.
+///
+/// The agents are optional — usagi only launches the one configured in settings —
+/// so a missing agent is a `warn`, not a `missing`: `doctor` still exits
+/// successfully and `--fix` leaves it alone (they are not generic
+/// package-manager installs). The check is named by the agent's display name
+/// (e.g. `sakana.ai`) and reports the launch command it probed.
+fn agent_checks(runner: &dyn CommandRunner) -> Vec<Check> {
+    AgentCli::ALL
+        .into_iter()
+        .map(|cli| agent_check(cli, runner))
+        .collect()
+}
+
+/// Whether a single agent CLI's launch command is installed on the PATH.
+fn agent_check(cli: AgentCli, runner: &dyn CommandRunner) -> Check {
+    let command = cli.command();
+    if runner.available(command) {
+        Check::ok_with(cli.display_name(), command)
+    } else {
+        Check::warn(
+            cli.display_name(),
+            format!("`{command}` not found on your PATH (optional)"),
+        )
+    }
 }
 
 /// Check that an external tool is installed and runnable, probing through the

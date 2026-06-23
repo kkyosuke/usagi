@@ -119,6 +119,15 @@ impl Default for LocalLlm {
 }
 
 impl AgentCli {
+    /// Every agent CLI variant, in the canonical order menus, the config-screen
+    /// selector, and the `usagi feature` table list them.
+    pub const ALL: [AgentCli; 4] = [
+        AgentCli::Claude,
+        AgentCli::Codex,
+        AgentCli::CodexFugu,
+        AgentCli::Gemini,
+    ];
+
     /// The shell command (program name) usagi launches for this agent — the
     /// word the `agent` command runs inside the embedded terminal.
     ///
@@ -132,6 +141,20 @@ impl AgentCli {
             AgentCli::Codex => "codex",
             AgentCli::CodexFugu => "codex-fugu",
             AgentCli::Gemini => "gemini",
+        }
+    }
+
+    /// The human-facing display name shown wherever the CLI is presented to the
+    /// user (the config-screen selector, the `usagi feature` table, `doctor`).
+    /// Distinct from [`command`](Self::command): the codex-fugu variant launches
+    /// `codex-fugu` but is presented as `sakana.ai`. The single source of truth
+    /// for these labels.
+    pub fn display_name(self) -> &'static str {
+        match self {
+            AgentCli::Claude => "Claude",
+            AgentCli::Codex => "Codex",
+            AgentCli::CodexFugu => "sakana.ai",
+            AgentCli::Gemini => "Gemini",
         }
     }
 }
@@ -394,6 +417,29 @@ mod tests {
         assert_eq!(AgentCli::Codex.command(), "codex");
         assert_eq!(AgentCli::CodexFugu.command(), "codex-fugu");
         assert_eq!(AgentCli::Gemini.command(), "gemini");
+    }
+
+    #[test]
+    fn agent_cli_all_and_display_names_cover_every_variant() {
+        // ALL lists each variant once, in canonical order.
+        assert_eq!(
+            AgentCli::ALL,
+            [
+                AgentCli::Claude,
+                AgentCli::Codex,
+                AgentCli::CodexFugu,
+                AgentCli::Gemini
+            ]
+        );
+        // Each has a non-empty display name; the codex-fugu variant shows as
+        // `sakana.ai` even though its launch command is `codex-fugu`.
+        for cli in AgentCli::ALL {
+            assert!(!cli.display_name().is_empty());
+        }
+        assert_eq!(AgentCli::Claude.display_name(), "Claude");
+        assert_eq!(AgentCli::Codex.display_name(), "Codex");
+        assert_eq!(AgentCli::CodexFugu.display_name(), "sakana.ai");
+        assert_eq!(AgentCli::Gemini.display_name(), "Gemini");
     }
 
     #[test]

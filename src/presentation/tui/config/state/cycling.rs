@@ -36,7 +36,10 @@ impl Config {
                 true
             }
             Field::AgentCli => {
-                self.settings.agent_cli = cycle_agent_cli(self.settings.agent_cli, forward);
+                // Only cycle through installed agents (the current value is always
+                // kept selectable), so an uninstalled CLI is never offered.
+                let choices = self.agent_cli_choices(Some(self.settings.agent_cli));
+                self.settings.agent_cli = cycle_enum(self.settings.agent_cli, &choices, forward);
                 true
             }
             Field::SessionActionUi => {
@@ -75,9 +78,13 @@ impl Config {
         match field {
             LocalField::DefaultBranch => self.cycle_default_branch(forward),
             LocalField::AgentCli => {
+                // The override cycles "follow global" then each installed agent;
+                // an already-set override is kept selectable even if uninstalled.
+                let keep = self.local.as_ref().and_then(|l| l.settings.agent_cli);
+                let choices = self.agent_cli_choices(keep);
                 let local = self.local_edit_mut();
                 local.settings.agent_cli =
-                    cycle_optional(local.settings.agent_cli, &AGENT_CLIS, forward);
+                    cycle_optional(local.settings.agent_cli, &choices, forward);
                 true
             }
             LocalField::Notifications => {
@@ -186,19 +193,6 @@ fn cycle_theme(theme: Theme, forward: bool) -> Theme {
         (i + len - 1) % len
     };
     THEMES[next]
-}
-
-/// The agent CLI one step after `cli` in cycle order (or before, when `forward`
-/// is false), wrapping at the ends.
-fn cycle_agent_cli(cli: AgentCli, forward: bool) -> AgentCli {
-    let i = AGENT_CLIS.iter().position(|&c| c == cli).unwrap_or(0);
-    let len = AGENT_CLIS.len();
-    let next = if forward {
-        (i + 1) % len
-    } else {
-        (i + len - 1) % len
-    };
-    AGENT_CLIS[next]
 }
 
 /// The value one step after `current` in `choices` (or before, when `forward` is
