@@ -33,6 +33,8 @@ enum Commands {
         #[arg(long)]
         fix: bool,
     },
+    /// Show which usagi features each agent CLI supports
+    Feature,
     /// Hop into the usagi welcome screen
     Hop,
     /// Register the current directory as a project (or clone one into it with --git)
@@ -91,6 +93,7 @@ fn main() -> anyhow::Result<()> {
         Commands::AgentPhase { phase } => usagi::presentation::cli::agent_phase::run(phase),
         Commands::Config { edit } => usagi::presentation::cli::config::run(edit),
         Commands::Doctor { fix } => usagi::presentation::cli::doctor::run(fix),
+        Commands::Feature => usagi::presentation::cli::feature::run(),
         Commands::Hop => usagi::presentation::cli::hop::run(),
         Commands::Init { git } => usagi::presentation::cli::init::run(git),
         Commands::Issue { command } => usagi::presentation::cli::issue::run(command),
