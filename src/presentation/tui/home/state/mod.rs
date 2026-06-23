@@ -921,17 +921,25 @@ impl HomeState {
         self.session_note(worktree_name(worktree))
     }
 
-    /// Whether the highlighted session's read-only note overlay is currently
-    /// shown in 切替 (Switch): the cursor is on a session that has a note, it has
-    /// not been dismissed with `Esc`, and no note *editor* is open (the editor
-    /// takes over the overlay). The right-pane renderer draws the note exactly
-    /// when this holds, and the event loop reads it to decide whether `Esc` first
-    /// hides the note or backs out of 切替.
+    /// The highlighted session's read-only note when its overlay is currently
+    /// shown in 切替 (Switch), else `None`: it shows when the cursor is on a
+    /// session that has a note, it has not been dismissed with `Esc`, and no note
+    /// *editor* is open (the editor takes over the overlay). The right-pane
+    /// renderer draws the note exactly when this is `Some` — so its absence is a
+    /// genuine path, not a dead branch behind a separate predicate.
+    pub fn visible_switch_note(&self) -> Option<&str> {
+        if self.mode != Mode::Switch || self.note_hidden || self.overlays.note.is_some() {
+            return None;
+        }
+        self.selected_session_note()
+    }
+
+    /// Whether the highlighted session's read-only note overlay is shown in 切替
+    /// (Switch) — see [`visible_switch_note`](Self::visible_switch_note). Read by
+    /// the event loop and the footer to decide whether `Esc` first hides the note
+    /// or backs out of 切替.
     pub fn switch_note_visible(&self) -> bool {
-        self.mode == Mode::Switch
-            && self.overlays.note.is_none()
-            && !self.note_hidden
-            && self.selected_session_note().is_some()
+        self.visible_switch_note().is_some()
     }
 
     /// Dismiss the highlighted session's read-only note overlay in 切替 (Switch)

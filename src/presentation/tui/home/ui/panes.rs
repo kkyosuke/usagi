@@ -990,18 +990,16 @@ fn note_overlay(state: &HomeState, width: usize, rows: usize) -> Option<Vec<Stri
             cap,
         ));
     }
-    if state.switch_note_visible() {
-        if let Some(note) = state.selected_session_note() {
-            let name = state
-                .list()
-                .selected()
-                .and_then(|w| w.branch.as_deref())
-                .unwrap_or(DETACHED)
-                .to_string();
-            let cap = SWITCH_NOTE_MAX_LINES.min(rows.saturating_sub(3)).max(1);
-            let note_lines: Vec<String> = note.lines().map(str::to_string).collect();
-            return Some(note_box(&name, &note_lines, None, box_w, cap));
-        }
+    if let Some(note) = state.visible_switch_note() {
+        let name = state
+            .list()
+            .selected()
+            .and_then(|w| w.branch.as_deref())
+            .unwrap_or(DETACHED)
+            .to_string();
+        let cap = SWITCH_NOTE_MAX_LINES.min(rows.saturating_sub(3)).max(1);
+        let note_lines: Vec<String> = note.lines().map(str::to_string).collect();
+        return Some(note_box(&name, &note_lines, None, box_w, cap));
     }
     None
 }
