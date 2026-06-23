@@ -2963,6 +2963,46 @@ fn switch_ctrl_e_opens_the_note_editor_like_n() {
 }
 
 #[test]
+fn switch_end_key_opens_the_note_editor_like_ctrl_e() {
+    // `console` decodes Ctrl-E as `Key::End`, so on a real terminal the chord
+    // arrives as `End`; in 切替 list navigation (no caret) it opens the note just
+    // like `Ctrl-E` / `n`.
+    let recorded = RefCell::new(Vec::<(String, String)>::new());
+    let mut set_note = |name: &str, text: &str| {
+        recorded
+            .borrow_mut()
+            .push((name.to_string(), text.to_string()));
+        noop_set_note(name, text)
+    };
+    let mut open: fn(&mut HomeState, &Path, bool, bool) -> Result<PaneExit> = noop_open;
+    let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = noop_preview;
+
+    let mut keys = vec![
+        Ok(Key::Char(CTRL_O)), // Overview -> Switch (cursor on root)
+        Ok(Key::ArrowDown),    // root -> alpha
+        Ok(Key::End),          // Ctrl-E as console delivers it: open the note
+    ];
+    keys.extend(typed("hi"));
+    keys.push(Ok(Key::Char(CTRL_S))); // save
+    keys.push(Ok(Key::Escape)); // Switch -> Overview
+    keys.push(Ok(Key::CtrlC)); // quit
+
+    let outcome = run_notes(
+        keys,
+        state_with_sessions(&["alpha", "beta"]),
+        &mut open,
+        &mut preview,
+        &mut set_note,
+    )
+    .unwrap();
+    assert!(matches!(outcome, Outcome::Quit));
+    assert_eq!(
+        *recorded.borrow(),
+        vec![("alpha".to_string(), "hi".to_string())]
+    );
+}
+
+#[test]
 fn switch_n_note_editor_cancel_discards_the_edit() {
     // Esc closes the editor without persisting anything.
     let recorded = RefCell::new(Vec::<(String, String)>::new());
@@ -3158,6 +3198,55 @@ fn focus_ctrl_e_opens_the_note_editor_and_saves_staying_in_focus() {
     let mut keys = typed("session switch alpha");
     keys.push(Ok(Key::Enter)); // focus alpha (idle -> 在席 menu)
     keys.push(Ok(Key::Char(CTRL_E))); // open the note editor (reattach = false)
+    keys.extend(typed("todo"));
+    keys.push(Ok(Key::Char(CTRL_S))); // save -> back to 在席
+    keys.push(Ok(Key::Char('t'))); // 在席 menu: launch terminal (proves we are in Focus)
+    keys.push(Ok(Key::Escape)); // Focus -> Overview
+    keys.push(Ok(Key::CtrlC));
+
+    let outcome = run_notes(
+        keys,
+        state_with_sessions(&["alpha"]),
+        &mut open,
+        &mut preview,
+        &mut set_note,
+    )
+    .unwrap();
+    assert!(matches!(outcome, Outcome::Quit));
+    assert_eq!(
+        *recorded.borrow(),
+        vec![("alpha".to_string(), "todo".to_string())]
+    );
+    assert_eq!(
+        *opened.borrow(),
+        1,
+        "`t` after save launched a terminal, so we stayed in 在席"
+    );
+}
+
+#[test]
+fn focus_end_key_opens_the_note_editor_on_the_menu_surface() {
+    // `console` decodes Ctrl-E as `Key::End`, so on a real terminal the chord
+    // arrives as `End`. On 在席's menu surface (the default — no caret) it opens
+    // the note just like the scripted `Ctrl-E`. (The typed prompt keeps `End` as
+    // end-of-line; that path is covered by `focus_prompt_edits_*`.)
+    let opened = RefCell::new(0);
+    let mut open = |_h: &mut HomeState, _d: &Path, _a: bool, _n: bool| {
+        *opened.borrow_mut() += 1;
+        Ok(PaneExit::Closed)
+    };
+    let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = noop_preview;
+    let recorded = RefCell::new(Vec::<(String, String)>::new());
+    let mut set_note = |name: &str, text: &str| {
+        recorded
+            .borrow_mut()
+            .push((name.to_string(), text.to_string()));
+        noop_set_note(name, text)
+    };
+
+    let mut keys = typed("session switch alpha");
+    keys.push(Ok(Key::Enter)); // focus alpha (idle -> 在席 menu)
+    keys.push(Ok(Key::End)); // Ctrl-E as console delivers it: open the note
     keys.extend(typed("todo"));
     keys.push(Ok(Key::Char(CTRL_S))); // save -> back to 在席
     keys.push(Ok(Key::Char('t'))); // 在席 menu: launch terminal (proves we are in Focus)

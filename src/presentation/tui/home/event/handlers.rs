@@ -284,8 +284,11 @@ pub(super) fn switch_key(
             state.switch_begin_rename();
         }
         // `n` (or `Ctrl-E`, matching 在席 / 没入) opens the selected session's note
-        // editor (a no-op on the root row).
-        Key::Char('n') | Key::Char(CTRL_E) => {
+        // editor (a no-op on the root row). `console` decodes Ctrl-E as `Key::End`
+        // (see 在席's `Ctrl-E`), so accept that too — here it is unambiguous, as
+        // 切替 list navigation has no caret to move (the inline create / rename
+        // inputs consume `End` earlier and return before this match).
+        Key::Char('n') | Key::Char(CTRL_E) | Key::End => {
             state.switch_begin_note();
         }
         // Esc first dismisses the highlighted session's read-only note overlay
@@ -457,7 +460,21 @@ pub(super) fn focus_key(
         // `Ctrl-E` edits the focused session's note (a no-op on the root row).
         // Closing it returns here to 在席 — there is no pane to re-attach, so
         // `reattach` is false (unlike 没入's `Ctrl-E`).
+        //
+        // `console` decodes Ctrl-E as `Key::End` (its readline-style end-of-line),
+        // never as the raw `\x05`, so on a real terminal the chord lands here as
+        // `End` — accept it too, or this never fires outside the scripted tests.
+        // The one surface where `End` must stay end-of-line is the typed prompt,
+        // where it moves the caret; the menu and a pane preview have no caret, so
+        // there `End` opens the note.
         Key::Char(CTRL_E) => {
+            state.open_focused_note(false);
+            return Flow::Continue;
+        }
+        Key::End
+            if !(state.focus_on_new_tab()
+                && state.session_action_ui() == SessionActionUi::Prompt) =>
+        {
             state.open_focused_note(false);
             return Flow::Continue;
         }
