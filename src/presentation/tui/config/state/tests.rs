@@ -105,10 +105,12 @@ fn agent_cli_field_cycles_through_each_cli() {
     config.move_down();
     config.move_down(); // select Agent CLI
     assert_eq!(config.selected_field(), Some(Field::AgentCli));
-    // Claude by default, cycling forward Claude -> Codex -> Gemini -> Claude.
+    // Claude by default, cycling forward Claude -> Codex -> sakana.ai -> Gemini -> Claude.
     assert_eq!(config.value_of(Field::AgentCli), "Claude");
     assert!(config.cycle_selected(true));
     assert_eq!(config.value_of(Field::AgentCli), "Codex");
+    assert!(config.cycle_selected(true));
+    assert_eq!(config.value_of(Field::AgentCli), "sakana.ai");
     assert!(config.cycle_selected(true));
     assert_eq!(config.value_of(Field::AgentCli), "Gemini");
     // Wraps back to Claude.
@@ -699,7 +701,7 @@ fn cycling_a_local_agent_cli_override_walks_global_then_each_value() {
     // The first local field is selected from the start.
     assert_eq!(config.selected_local_field(), Some(LocalField::AgentCli));
 
-    // None (follow global) -> Claude -> Codex -> Gemini -> None.
+    // None (follow global) -> Claude -> Codex -> CodexFugu -> Gemini -> None.
     assert!(config.cycle_selected(true));
     assert_eq!(config.local().unwrap().agent_cli, Some(AgentCli::Claude));
     assert!(config
@@ -707,6 +709,8 @@ fn cycling_a_local_agent_cli_override_walks_global_then_each_value() {
         .contains("Override"));
     assert!(config.cycle_selected(true));
     assert_eq!(config.local().unwrap().agent_cli, Some(AgentCli::Codex));
+    assert!(config.cycle_selected(true));
+    assert_eq!(config.local().unwrap().agent_cli, Some(AgentCli::CodexFugu));
     assert!(config.cycle_selected(true));
     assert_eq!(config.local().unwrap().agent_cli, Some(AgentCli::Gemini));
     assert!(config.cycle_selected(true));

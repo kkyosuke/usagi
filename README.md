@@ -151,7 +151,7 @@ session switch             # 切替モードに入りセッションを選ぶ（
 agent                      # 選んだセッションで Agent CLI（既定 claude）を埋め込み起動 → 没入
 ```
 
-`agent` は選択中セッションの worktree でシェルを右ペインに埋め込み、設定中の Agent CLI（既定 `claude`、Config・ローカル設定で変更可）を起動します。このとき usagi の MCP サーバ（後述）を組み込むため、エージェントは起動直後から `issue_*` tool でタスクを、`memory_*` tool でメモリを操作できます（Claude は `--mcp-config`、Codex は `-c` 設定上書きで注入。Gemini はインライン注入フラグが無いため MCP は組み込まず、`-r latest` での会話再開と `-i` での初期プロンプトのみ配線します）。素のシェルだけ欲しいときは `terminal` を使います。
+`agent` は選択中セッションの worktree でシェルを右ペインに埋め込み、設定中の Agent CLI（既定 `claude`、Config・ローカル設定で変更可）を起動します。このとき usagi の MCP サーバ（後述）を組み込むため、エージェントは起動直後から `issue_*` tool でタスクを、`memory_*` tool でメモリを操作できます（Claude は `--mcp-config`、Codex は `-c` 設定上書きで注入。Codex 互換の `codex-fugu` も同方式で組み込みます。Gemini はインライン注入フラグが無いため MCP は組み込まず、`-r latest` での会話再開と `-i` での初期プロンプトのみ配線します）。素のシェルだけ欲しいときは `terminal` を使います。
 
 各セッションのシェルは画面を開いている間プールに常駐するので、`Ctrl-O` で切替へズームアウトして別セッションへ移っても、裏で `claude` は動き続けます。左ペインは各セッションを 2 行で表示し、**稼働中は `▶ running`（緑）／入力待ちは `◆ waiting`（黄色）／アイドルは `⏸ idle`（シアン）** でひと目で状態がわかります。アタッチしていないセッションが入力待ちになるとデスクトップ通知（`🐰 <ブランチ名> が入力待ちです`）も出るため、複数セッションを並行で走らせ、入力が必要になったものだけに対応できます（通知は `notifications_enabled` が ON のとき。状態は `claude` / `codex` のライフサイクルフックで判定し、フックを持たない Agent ではターミナルベルで推定します。詳細は [document/04-orchestration.md#Agent フックによる状態報告](document/04-orchestration.md#agent-フックによる状態報告)）。
 

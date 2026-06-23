@@ -69,7 +69,7 @@
 | Theme | UI のカラーテーマ | `Light` → `Dark` → `System`（OS 追従）の順に循環 |
 | Default Workspace | 既定で開くワークスペース | `(none)` ＋ 登録済みワークスペース名を順に循環。未登録時は変更不可（ヒントを表示） |
 | Notifications | デスクトップ通知（`agent` の入力待ち・完了）の ON/OFF | `On` ⇄ `Off` をトグル |
-| Agent CLI | usagi が起動する AI エージェント CLI | `Claude` → `Codex` → `Gemini` の順に循環 |
+| Agent CLI | usagi が起動する AI エージェント CLI | `Claude` → `Codex` → `sakana.ai` → `Gemini` の順に循環（`sakana.ai` は Codex 互換 CLI `codex-fugu` を起動） |
 | Session Action UI | 在席（Focus）の右ペインのアクション UI スタイル | `Menu`（選べるリスト）⇄ `Prompt`（コマンドライン）をトグル（[05-home.md](05-home.md#在席のアクション-uimenu--prompt)） |
 | Local LLM | ローカル LLM 委譲の有効化（`ollama` ランタイムの導入と on/off） | 未導入時は値が `Install`（アクション）で、`Space` / `Enter` でランタイムのインストールモーダルを開く。導入後は `On` ⇄ `Off` をトグル |
 | Local LLM Model | 委譲先の Ollama モデル | ランタイム未導入のうちは操作不可（`—` を淡色表示）。導入後はアクション行になり、`Space` / `Enter` で**モデル選択モーダル**を開く。使用中モデルが未取得なら値に `(未導入)` を併記 |
@@ -129,7 +129,7 @@
 
 | 項目 | 値 | 循環する選択肢 |
 |---|---|---|
-| Agent CLI | このワークスペースの Agent CLI 上書き | `Global (実効値)` → `Override: Claude` → `Override: Codex` → `Override: Gemini` の順に循環 |
+| Agent CLI | このワークスペースの Agent CLI 上書き | `Global (実効値)` → `Override: Claude` → `Override: Codex` → `Override: sakana.ai` → `Override: Gemini` の順に循環 |
 | Notifications | このワークスペースの通知 ON/OFF 上書き | `Global (実効値)` → `Override: On` → `Override: Off` の順に循環 |
 | Default Branch | `session create` で worktree を切る基点ブランチ | `Default (auto)` → リポジトリの各ブランチ名 の順に循環（実在ブランチを検出） |
 | Branch Source | 上のブランチをローカル形／リモート形のどちらで使うか | `Local` ⇄ `Remote` をトグル（未設定時は `Default (Remote)` を表示） |

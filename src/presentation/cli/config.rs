@@ -157,6 +157,7 @@ fn agent_label(agent: AgentCli) -> &'static str {
     match agent {
         AgentCli::Claude => "claude",
         AgentCli::Codex => "codex",
+        AgentCli::CodexFugu => "codex_fugu",
         AgentCli::Gemini => "gemini",
     }
 }
@@ -245,6 +246,7 @@ mod tests {
         assert_eq!(theme_label(Theme::System), "system");
         assert_eq!(agent_label(AgentCli::Claude), "claude");
         assert_eq!(agent_label(AgentCli::Codex), "codex");
+        assert_eq!(agent_label(AgentCli::CodexFugu), "codex_fugu");
         assert_eq!(agent_label(AgentCli::Gemini), "gemini");
         assert_eq!(
             sidebar_label(crate::domain::settings::Sidebar::Full),
