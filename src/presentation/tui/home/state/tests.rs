@@ -885,6 +885,83 @@ fn leave_focus_returns_to_overview() {
 }
 
 #[test]
+fn entering_focus_selects_the_new_tab() {
+    // Entering 在席 fresh lands on the "+ new" action surface, not a pane preview.
+    let mut by_row = state();
+    by_row.enter_focus(1);
+    assert!(by_row.focus_on_new_tab());
+    let mut by_name = state();
+    assert!(by_name.enter_focus_named("feature"));
+    assert!(by_name.focus_on_new_tab());
+}
+
+#[test]
+fn an_idle_session_is_always_on_the_new_tab() {
+    // With no live panes published the "+ new" tab is the only one — navigation is
+    // inert (no pane index to make active) and the selector never leaves it.
+    let mut state = state();
+    state.enter_focus(1);
+    assert!(state.focus_on_new_tab());
+    assert_eq!(state.focus_tab_next(), None);
+    assert!(state.focus_on_new_tab());
+    assert_eq!(state.focus_tab_prev(), None);
+    assert!(state.focus_on_new_tab());
+}
+
+#[test]
+fn leaving_attached_lands_on_the_active_pane_tab() {
+    // `Ctrl-T` (leave_attached) drops back to 在席 on the session's active pane, so
+    // the pane just left previews — not the "+ new" tab.
+    let mut state = state();
+    state.enter_focus(1);
+    // `leave_attached` clears the surface; the event loop republishes the strip on
+    // the next frame, so set it afterwards to mirror that.
+    state.leave_attached();
+    state.set_terminal_tabs(vec!["agent".to_string(), "terminal".to_string()], 1);
+    assert_eq!(state.mode(), Mode::Focus);
+    assert!(!state.focus_on_new_tab());
+}
+
+#[test]
+fn focus_tab_next_walks_panes_then_the_new_tab() {
+    let mut state = state();
+    state.enter_focus(1);
+    state.leave_attached(); // off the "+ new" tab, on the active pane
+                            // Two live panes (active = 0), then the "+ new" tab after them.
+    state.set_terminal_tabs(vec!["agent".to_string(), "terminal".to_string()], 0);
+    assert!(!state.focus_on_new_tab());
+    // pane 0 -> pane 1.
+    assert_eq!(state.focus_tab_next(), Some(1));
+    state.set_terminal_tabs(vec!["agent".to_string(), "terminal".to_string()], 1);
+    assert!(!state.focus_on_new_tab());
+    // pane 1 (last) -> "+ new".
+    assert_eq!(state.focus_tab_next(), None);
+    assert!(state.focus_on_new_tab());
+    // "+ new" wraps back to pane 0.
+    assert_eq!(state.focus_tab_next(), Some(0));
+    assert!(!state.focus_on_new_tab());
+}
+
+#[test]
+fn focus_tab_prev_walks_the_new_tab_then_panes() {
+    let mut state = state();
+    state.enter_focus(1);
+    state.set_terminal_tabs(vec!["agent".to_string(), "terminal".to_string()], 0);
+    // On the "+ new" tab, prev wraps to the last pane.
+    assert!(state.focus_on_new_tab());
+    assert_eq!(state.focus_tab_prev(), Some(1));
+    state.set_terminal_tabs(vec!["agent".to_string(), "terminal".to_string()], 1);
+    assert!(!state.focus_on_new_tab());
+    // pane 1 -> pane 0.
+    assert_eq!(state.focus_tab_prev(), Some(0));
+    state.set_terminal_tabs(vec!["agent".to_string(), "terminal".to_string()], 0);
+    assert!(!state.focus_on_new_tab());
+    // pane 0 (first) -> "+ new".
+    assert_eq!(state.focus_tab_prev(), None);
+    assert!(state.focus_on_new_tab());
+}
+
+#[test]
 fn focus_menu_hides_ai_until_the_local_llm_is_available() {
     // Focus a session row (not the root) so `close` is offered.
     let mut state = state();

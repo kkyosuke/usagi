@@ -2048,23 +2048,88 @@ fn focus_ctrl_o_opens_switch_then_esc_re_focuses() {
 }
 
 #[test]
-fn focus_ctrl_n_and_ctrl_p_move_the_active_tab_via_tab_op() {
-    // In 在席, Ctrl-N / Ctrl-P move the focused session's active tab through
-    // `tab_op` (so a later re-attach / `terminal` lands on the chosen pane),
-    // mirroring 切替 and 没入 — and they stay in Focus.
+fn focus_ctrl_n_and_ctrl_p_walk_the_tab_strip_via_tab_op() {
+    // In 在席 with live panes, Ctrl-N / Ctrl-P walk the focused session's pane
+    // tabs by making the chosen pane active through `tab_op` (`To(index)`), so its
+    // preview shows and a re-attach lands on it — and they stay in Focus. The
+    // session is reached live (a pane open, then `Ctrl-T` zooms out to Focus
+    // keeping the panes alive), so the tab strip is published.
+    let term = Term::stdout();
+    let navs = RefCell::new(Vec::new());
+    // A stateful tab strip of two panes that applies each `To(index)` so the next
+    // frame's read reflects the move (the real pool behaves this way).
+    let active = RefCell::new(0usize);
+    let mut tab_op = |_d: &Path, nav: Option<TabNav>| -> (Vec<String>, usize) {
+        if let Some(n) = nav {
+            navs.borrow_mut().push(n);
+            if let TabNav::To(i) = n {
+                *active.borrow_mut() = i;
+            }
+        }
+        (
+            vec!["agent".to_string(), "terminal".to_string()],
+            *active.borrow(),
+        )
+    };
+    // Entering Focus on a live session attaches; `Ctrl-T` (ToFocus) zooms back out
+    // to Focus with the panes still alive, which is where the tab strip shows.
+    let mut open = |_h: &mut HomeState, _d: &Path, _a: bool, _n: bool| Ok(PaneExit::ToFocus);
+    let mut keys = typed("session switch feat");
+    keys.push(Ok(Key::Enter)); // attach feat; open returns ToFocus -> Focus (panes alive)
+    keys.push(Ok(Key::Char(CTRL_N))); // tab 0 (agent) -> tab 1 (terminal): To(1)
+    keys.push(Ok(Key::Char(CTRL_P))); // tab 1 -> tab 0: To(0)
+    keys.push(Ok(Key::CtrlC)); // quit
+    let mut reader = ScriptedReader::new(keys);
+    let monitor = MonitorHandle::detached();
+    let mut persist: fn(&str) = noop_persist;
+    let mut create: fn(&str) -> SessionOutcome = noop_create;
+    let mut remove: fn(&str, bool) -> SessionOutcome = noop_remove;
+    let mut config: fn(&Term) -> Result<Option<ConfigReload>> = noop_config;
+    // A live preview so the surface drive publishes the tab strip while in Focus.
+    let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = live_preview;
+    let mut branches: fn() -> Vec<String> = no_branches;
+    let outcome = event_loop_compat(
+        &term,
+        &mut reader,
+        sample_state(),
+        Path::new("/ws"),
+        &monitor,
+        &UpdateHandle::new(),
+        &OneShot::<bool>::new(),
+        &mut persist,
+        &mut create,
+        &mut (noop_rename as fn(&str, &str) -> SessionOutcome),
+        &mut (noop_set_note as fn(&str, &str) -> SessionOutcome),
+        &mut remove,
+        &mut branches,
+        &mut open,
+        &mut config,
+        &mut preview,
+        &mut tab_op,
+        &mut (noop_close as fn(&mut HomeState, &Path)),
+    )
+    .unwrap();
+    assert!(matches!(outcome, Outcome::Quit));
+    assert_eq!(*navs.borrow(), vec![TabNav::To(1), TabNav::To(0)]);
+}
+
+#[test]
+fn focus_tab_nav_is_inert_without_live_panes() {
+    // An idle focused session (no live panes, so only the "+ new" tab) has nothing
+    // to walk: Ctrl-N / Ctrl-P make no `tab_op` call and stay on the action surface.
     let term = Term::stdout();
     let navs = RefCell::new(Vec::new());
     let mut tab_op = |_d: &Path, nav: Option<TabNav>| -> (Vec<String>, usize) {
         if let Some(n) = nav {
             navs.borrow_mut().push(n);
         }
-        (vec!["agent".to_string(), "terminal".to_string()], 0)
+        (Vec::new(), 0)
     };
     let mut keys = typed("session switch feat");
-    keys.push(Ok(Key::Enter)); // -> Focus feat
-    keys.push(Ok(Key::Char(CTRL_N))); // tab next
-    keys.push(Ok(Key::Char(CTRL_P))); // tab prev
-    keys.push(Ok(Key::CtrlC)); // quit
+    keys.push(Ok(Key::Enter)); // -> Focus feat (idle: noop_preview is not live)
+    keys.push(Ok(Key::Char(CTRL_N)));
+    keys.push(Ok(Key::Char(CTRL_P)));
+    keys.push(Ok(Key::CtrlC));
     let mut reader = ScriptedReader::new(keys);
     let monitor = MonitorHandle::detached();
     let mut persist: fn(&str) = noop_persist;
@@ -2096,7 +2161,71 @@ fn focus_ctrl_n_and_ctrl_p_move_the_active_tab_via_tab_op() {
     )
     .unwrap();
     assert!(matches!(outcome, Outcome::Quit));
-    assert_eq!(*navs.borrow(), vec![TabNav::Next, TabNav::Prev]);
+    assert!(navs.borrow().is_empty());
+}
+
+#[test]
+fn focus_enter_on_a_pane_tab_reattaches_while_other_keys_are_inert() {
+    // In 在席 on a pane tab (reached by `Ctrl-T` from 没入), `Enter` re-attaches the
+    // selected pane (`open_terminal` with `new_pane = false`); a non-`Enter` key
+    // there is inert (the action surface only drives the "+ new" tab).
+    let term = Term::stdout();
+    let opens = RefCell::new(Vec::new());
+    let mut open = |_h: &mut HomeState, _d: &Path, agent: bool, new_pane: bool| {
+        let count = {
+            let mut o = opens.borrow_mut();
+            o.push((agent, new_pane));
+            o.len()
+        };
+        // The first attach (from focusing the live session) zooms out to Focus with
+        // the panes kept alive; the re-attach then drops straight back out.
+        if count == 1 {
+            Ok(PaneExit::ToFocus)
+        } else {
+            Ok(PaneExit::Closed)
+        }
+    };
+    let mut tab_op = |_d: &Path, _nav: Option<TabNav>| -> (Vec<String>, usize) {
+        (vec!["agent".to_string(), "terminal".to_string()], 0)
+    };
+    let mut keys = typed("session switch feat");
+    keys.push(Ok(Key::Enter)); // attach feat; open #1 -> ToFocus -> Focus (panes alive)
+    keys.push(Ok(Key::Char('j'))); // a pane tab is selected: inert, no open
+    keys.push(Ok(Key::Enter)); // re-attach the selected pane; open #2 (false, false)
+    keys.push(Ok(Key::CtrlC));
+    let mut reader = ScriptedReader::new(keys);
+    let monitor = MonitorHandle::detached();
+    let mut persist: fn(&str) = noop_persist;
+    let mut create: fn(&str) -> SessionOutcome = noop_create;
+    let mut remove: fn(&str, bool) -> SessionOutcome = noop_remove;
+    let mut config: fn(&Term) -> Result<Option<ConfigReload>> = noop_config;
+    let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = live_preview;
+    let mut branches: fn() -> Vec<String> = no_branches;
+    let outcome = event_loop_compat(
+        &term,
+        &mut reader,
+        sample_state(),
+        Path::new("/ws"),
+        &monitor,
+        &UpdateHandle::new(),
+        &OneShot::<bool>::new(),
+        &mut persist,
+        &mut create,
+        &mut (noop_rename as fn(&str, &str) -> SessionOutcome),
+        &mut (noop_set_note as fn(&str, &str) -> SessionOutcome),
+        &mut remove,
+        &mut branches,
+        &mut open,
+        &mut config,
+        &mut preview,
+        &mut tab_op,
+        &mut (noop_close as fn(&mut HomeState, &Path)),
+    )
+    .unwrap();
+    assert!(matches!(outcome, Outcome::Quit));
+    // Two attaches: the initial focus-and-attach, then the `Enter` re-attach — the
+    // `j` between them opened nothing. Both go in with `new_pane = false`.
+    assert_eq!(*opens.borrow(), vec![(false, false), (false, false)]);
 }
 
 #[test]

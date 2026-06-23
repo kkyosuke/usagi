@@ -158,6 +158,14 @@ pub struct HomeState {
     focus_menu: FocusMenu,
     /// The 在席 (Focus) prompt buffer (the session-scoped command line).
     focus_prompt: TextInput,
+    /// Whether 在席's tab selector sits on the trailing "+ new" tab (the action
+    /// surface that launches a pane) rather than an existing live pane. The
+    /// session's live panes (from the published [`TabStrip`]) form the leading
+    /// tabs and the "+ new" tab is appended after them; this flag picks between
+    /// "an existing pane is selected" (its preview shows) and "the + new tab is
+    /// selected" (the menu / prompt shows). It is forced on whenever the session
+    /// has no live panes, so an idle session always shows the action surface.
+    focus_new_tab: bool,
     /// Sessions recorded for this workspace (from `state.json`), shown by
     /// `session list` and kept current as sessions are created.
     sessions: Vec<SessionRecord>,
@@ -237,6 +245,7 @@ impl HomeState {
             overlays: Overlays::default(),
             focus_menu: FocusMenu::default(),
             focus_prompt: TextInput::new(),
+            focus_new_tab: true,
             sessions: Vec::new(),
             terminal: TerminalSurface::default(),
             badges: MonitorSnapshot::default(),
@@ -541,8 +550,14 @@ impl HomeState {
 
     /// Leave 没入 for 在席 (Focus): the embedded session was closed or detached,
     /// so drop the surface and return to the focused session's action surface.
+    /// The tab selector lands on the session's active pane (not the "+ new" tab),
+    /// so zooming out with `Ctrl-T` shows the pane just left — falling back to the
+    /// action surface only when no pane survives (see [`focus_on_new_tab`]).
+    ///
+    /// [`focus_on_new_tab`]: Self::focus_on_new_tab
     pub fn leave_attached(&mut self) {
         self.mode = Mode::Focus;
+        self.focus_new_tab = false;
         self.clear_terminal_surface();
     }
 
@@ -978,6 +993,7 @@ impl HomeState {
         self.overlays.create = None;
         self.focus_menu.reset();
         self.focus_prompt.clear();
+        self.focus_new_tab = true;
     }
 
     /// Enter 在席 (Focus) on the session named `name`, returning whether one
@@ -993,6 +1009,7 @@ impl HomeState {
         self.overlays.create = None;
         self.focus_menu.reset();
         self.focus_prompt.clear();
+        self.focus_new_tab = true;
         true
     }
 
@@ -1024,6 +1041,76 @@ impl HomeState {
             .filter(|info| info.name != "ai" || self.ai_available)
             .filter(|info| info.name != "close" || !root)
             .collect()
+    }
+
+    /// How many live panes the focused session publishes (the leading 在席 tabs),
+    /// from the surface's tab strip — `0` when none are live (an idle session).
+    fn focus_pane_count(&self) -> usize {
+        self.terminal.tabs.as_ref().map_or(0, |t| t.labels.len())
+    }
+
+    /// The active pane index the focused session's tab strip publishes (`0` when
+    /// no panes are live). The pane preview shows this pane, so the tab selector
+    /// rides it rather than tracking a duplicate index of its own.
+    fn focus_active_pane(&self) -> usize {
+        self.terminal.tabs.as_ref().map_or(0, |t| t.active)
+    }
+
+    /// Whether 在席's tab selector is on the trailing "+ new" tab — the action
+    /// surface (menu / prompt) that launches a pane — rather than an existing
+    /// live pane. Always true when the session has no live panes, since the
+    /// "+ new" tab is then the only one.
+    pub fn focus_on_new_tab(&self) -> bool {
+        self.focus_new_tab || self.focus_pane_count() == 0
+    }
+
+    /// Move 在席's tab selector to the next tab, wrapping through the live panes
+    /// and the trailing "+ new" tab (`[pane 0 … pane n-1, + new]`). Returns the
+    /// pane index to make active (for the caller to apply to the terminal pool) on
+    /// landing on a pane tab, or `None` when it lands on the "+ new" tab (or the
+    /// session has no panes, leaving the selector on "+ new").
+    pub fn focus_tab_next(&mut self) -> Option<usize> {
+        let panes = self.focus_pane_count();
+        if panes == 0 {
+            self.focus_new_tab = true;
+            return None;
+        }
+        if self.focus_on_new_tab() {
+            // "+ new" wraps to the first pane.
+            self.focus_new_tab = false;
+            Some(0)
+        } else if self.focus_active_pane() + 1 >= panes {
+            // The last pane steps onto the "+ new" tab.
+            self.focus_new_tab = true;
+            None
+        } else {
+            Some(self.focus_active_pane() + 1)
+        }
+    }
+
+    /// Move 在席's tab selector to the previous tab, wrapping through the live
+    /// panes and the trailing "+ new" tab (the mirror of [`focus_tab_next`]).
+    /// Returns the pane index to make active on landing on a pane tab, or `None`
+    /// when it lands on the "+ new" tab.
+    ///
+    /// [`focus_tab_next`]: Self::focus_tab_next
+    pub fn focus_tab_prev(&mut self) -> Option<usize> {
+        let panes = self.focus_pane_count();
+        if panes == 0 {
+            self.focus_new_tab = true;
+            return None;
+        }
+        if self.focus_on_new_tab() {
+            // "+ new" wraps back to the last pane.
+            self.focus_new_tab = false;
+            Some(panes - 1)
+        } else if self.focus_active_pane() == 0 {
+            // The first pane steps back onto the "+ new" tab.
+            self.focus_new_tab = true;
+            None
+        } else {
+            Some(self.focus_active_pane() - 1)
+        }
     }
 
     /// The 在席 menu cursor (which Session-scope command is highlighted).
