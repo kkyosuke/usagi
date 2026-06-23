@@ -1553,6 +1553,22 @@ fn footer_line_differs_by_mode() {
 }
 
 #[test]
+fn switch_footer_advertises_closing_the_note_while_it_shows() {
+    // While the highlighted session's note is showing, `Esc` first closes it, so
+    // the footer names that instead of the back-out it normally advertises.
+    let mut state = switch_state_with_note("todo");
+    assert!(
+        footer_line(120, &state).contains("Esc close note"),
+        "the footer offers closing the note"
+    );
+    // Dismissed, `Esc` backs out again — the footer reverts.
+    state.hide_switch_note();
+    let backed = footer_line(120, &state);
+    assert!(backed.contains("Esc back"));
+    assert!(!backed.contains("close note"));
+}
+
+#[test]
 fn render_frame_honours_the_rail_in_switch_too() {
     let mut state = state_with(vec![worktree(Some("feature"), false, BranchStatus::Local)]);
     state.set_sidebar(Sidebar::Rail);
@@ -2498,6 +2514,35 @@ fn right_pane_overlays_the_read_only_note_in_switch() {
 }
 
 #[test]
+fn read_only_note_overlay_hides_on_dismiss_and_returns_on_move() {
+    let mut state = switch_state_with_note("do X\ndo Y");
+    assert!(
+        state.switch_note_visible(),
+        "the note auto-shows on selection"
+    );
+
+    // Dismissing it (the first `Esc`) hides the overlay without leaving 切替.
+    state.hide_switch_note();
+    assert!(!state.switch_note_visible(), "the dismissed note is hidden");
+    let hidden = stripped(&right_pane_contents(&state, 40, 12));
+    assert!(
+        !hidden.contains("do X"),
+        "the dismissed note does not render"
+    );
+
+    // Moving the cursor (here back onto the same session via a wrap) re-shows it:
+    // the dismissal belonged to the row just left.
+    state.switch_move_up(); // -> root
+    state.switch_move_down(); // -> alpha
+    assert!(state.switch_note_visible(), "moving re-shows the note");
+    let shown = stripped(&right_pane_contents(&state, 40, 12));
+    assert!(
+        shown.contains("do X"),
+        "the note renders again after moving"
+    );
+}
+
+#[test]
 fn read_only_note_overlay_elides_a_long_note() {
     let note = (0..8)
         .map(|i| format!("todo {i}"))
@@ -2513,17 +2558,17 @@ fn read_only_note_overlay_elides_a_long_note() {
 }
 
 #[test]
-fn note_overlay_anchors_at_the_bottom_for_both_idle_and_live_previews() {
-    // The note overlay sits at the bottom of the right pane regardless of whether
-    // the preview underneath is an idle session's action menu or a live terminal,
-    // so its box bottom lands on the same row either way — moving the cursor never
+fn note_overlay_anchors_at_the_top_for_both_idle_and_live_previews() {
+    // The note overlay sits at the top of the right pane regardless of whether the
+    // preview underneath is an idle session's action menu or a live terminal, so
+    // its box top border lands on the same row either way — moving the cursor never
     // shifts where the note reads (no CLS).
     let idle = switch_state_with_note("todo");
     let idle_rows = right_pane_contents(&idle, 40, 12);
-    let idle_box_bottom = idle_rows
+    let idle_box_top = idle_rows
         .iter()
-        .rposition(|l| console::strip_ansi_codes(l).contains('└'))
-        .expect("the read-only box has a bottom border");
+        .position(|l| console::strip_ansi_codes(l).contains('┌'))
+        .expect("the read-only box has a top border");
 
     // Make the same session live (a running shell with a snapshot).
     let mut live = switch_state_with_note("todo");
@@ -2533,34 +2578,40 @@ fn note_overlay_anchors_at_the_bottom_for_both_idle_and_live_previews() {
     });
     live.set_terminal_view(TerminalView::from_rows(vec!["$ live".to_string()], None));
     let live_rows = right_pane_contents(&live, 40, 12);
-    let live_box_bottom = live_rows
+    let live_box_top = live_rows
         .iter()
-        .rposition(|l| console::strip_ansi_codes(l).contains('└'))
-        .expect("the read-only box has a bottom border");
+        .position(|l| console::strip_ansi_codes(l).contains('┌'))
+        .expect("the read-only box has a top border");
 
     assert_eq!(
-        idle_box_bottom, live_box_bottom,
-        "the box bottom lands on the same row for both previews"
+        idle_box_top, live_box_top,
+        "the box top lands on the same (top) row for both previews"
+    );
+    assert_eq!(
+        idle_box_top, 0,
+        "the box anchors at the very top of the pane"
     );
 }
 
 #[test]
-fn note_overlay_keeps_the_session_header_visible_when_the_preview_is_sparse() {
-    // A live session whose terminal only has a line or two is "sparse": a
-    // top-anchored note box would cover the session header and leave the rest of
-    // the pane blank, so nothing about the session showed. Anchoring at the bottom
-    // keeps the header (the session identity) readable above the note.
+fn note_overlay_keeps_the_session_header_visible_beside_the_box() {
+    // The note box is a top-right column: it overwrites only its own columns, so
+    // the session header on the top row keeps its leading columns to the box's
+    // left — the session identity stays readable right beside the note.
     let mut live = switch_state_with_note("next: ship it");
     live.apply_badges(MonitorSnapshot {
         live: [PathBuf::from("/repo/wt")].into(),
         ..Default::default()
     });
     live.set_terminal_view(TerminalView::from_rows(vec!["$".to_string()], None));
-    let rows = right_pane_contents(&live, 40, 12);
-    // The header (the session name) shows above the box, and the note shows.
+    let rows = right_pane_contents(&live, 60, 12);
+    // The box top border ends the top row; the session name shows on the row to
+    // its left (before the box's `┌`).
+    let top = console::strip_ansi_codes(&rows[0]);
+    let left_of_box = top.split('┌').next().unwrap_or("");
     assert!(
-        stripped(&[rows[0].clone()]).contains("alpha"),
-        "the session header stays visible at the top"
+        left_of_box.contains("alpha"),
+        "the session header stays visible to the left of the box: {top:?}"
     );
     let pane = stripped(&rows);
     assert!(pane.contains("note: alpha"), "the note box shows");

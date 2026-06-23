@@ -287,8 +287,16 @@ pub(super) fn switch_key(
         Key::Char('n') => {
             state.switch_begin_note();
         }
-        // Esc backs out to where Switch was opened from.
-        Key::Escape => leave_switch(term, state, painter, wiring),
+        // Esc first dismisses the highlighted session's read-only note overlay
+        // (it auto-shows on selection); with no note showing it backs out to
+        // where Switch was opened from.
+        Key::Escape => {
+            if state.switch_note_visible() {
+                state.hide_switch_note();
+            } else {
+                leave_switch(term, state, painter, wiring);
+            }
+        }
         // Ctrl-O zooms one level further out, to 統括.
         Key::Char(CTRL_O) => state.enter_overview(),
         _ => {}

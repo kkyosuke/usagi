@@ -329,8 +329,16 @@ pub(super) fn footer_line(width: usize, state: &HomeState) -> String {
                 .to_string()
         }
         Mode::Switch => {
-            "[switch]  ↑↓ session / ←→ tab / Enter focus / c new / r rename / n note / x close tab / Esc back"
-                .to_string()
+            // While the highlighted session's note is showing, `Esc` first hides
+            // it (a second `Esc` then backs out), so the footer names that.
+            let esc = if state.switch_note_visible() {
+                "Esc close note"
+            } else {
+                "Esc back"
+            };
+            format!(
+                "[switch]  ↑↓ session / ←→ tab / Enter focus / c new / r rename / n note / x close tab / {esc}"
+            )
         }
         Mode::Focus => {
             format!(

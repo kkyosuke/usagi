@@ -418,6 +418,79 @@ pub fn overlay_top_right(lines: &mut [String], top: usize, width: usize, banner:
     }
 }
 
+/// The SGR reset (`ESC [ 0 m`) appended to a row cut mid-style so the colour the
+/// cut left open does not bleed into whatever is butted up after it.
+const RESET: &str = "\u{1b}[0m";
+
+/// Copies the leading `max` display columns of `text`, ANSI escape sequences
+/// (zero display width) carried through verbatim so the kept colours survive the
+/// cut. Unlike [`clip_to_width`] it appends no ellipsis — the caller butts other
+/// content flush against the cut (a floating box's left edge), where a trailing
+/// `…` would be wrong. A double-width glyph that would straddle the boundary is
+/// dropped whole rather than split.
+fn truncate_to_width(text: &str, max: usize) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut width = 0usize;
+    let mut chars = text.chars();
+    while let Some(ch) = chars.next() {
+        if ch == ESC {
+            out.push(ch);
+            for c in chars.by_ref() {
+                out.push(c);
+                if ('\u{40}'..='\u{7e}').contains(&c) && c != '[' {
+                    break;
+                }
+            }
+            continue;
+        }
+        let w = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if width + w > max {
+            break;
+        }
+        width += w;
+        out.push(ch);
+    }
+    out
+}
+
+/// Right-anchors each line of `block` onto `lines` from row `top` down, the
+/// block's columns *replacing* whatever sits under them while the base content to
+/// its left stays visible: each base row is cut to the columns left of the block,
+/// padded out, then the block segment appended.
+///
+/// This is how the floating session-note box is composited over the right pane —
+/// it must always show, over a sparse preview or a live terminal alike, so unlike
+/// [`overlay_top_right`] (which yields to a row whose content already reaches the
+/// block) it overwrites the block's columns unconditionally. A block exactly
+/// `width` wide overlays the whole row (no base column survives); it is skipped
+/// only when it cannot fit (`block_w > width`) or `width` is zero.
+pub fn overlay_right(lines: &mut [String], top: usize, width: usize, block: &[String]) {
+    let block_w = block
+        .iter()
+        .map(|line| console::measure_text_width(line))
+        .max()
+        .unwrap_or(0);
+    if block_w == 0 || block_w > width {
+        return;
+    }
+    let target_left = width - block_w;
+    for (offset, segment) in block.iter().enumerate() {
+        let Some(base) = lines.get_mut(top + offset) else {
+            break;
+        };
+        let kept = truncate_to_width(base, target_left);
+        let kept_w = console::measure_text_width(&kept);
+        let mut row = kept;
+        if !row.is_empty() {
+            // Close any SGR the cut left open so the block keeps its own colours.
+            row.push_str(RESET);
+        }
+        row.push_str(&" ".repeat(target_left.saturating_sub(kept_w)));
+        row.push_str(segment);
+        *base = row;
+    }
+}
+
 /// A centred, green-bold screen title.
 pub fn title_line(width: usize, title: &str) -> String {
     style(centered(width, title)).green().bold().to_string()
@@ -1018,6 +1091,73 @@ mod tests {
         overlay_top_right(&mut lines, 0, 3, &["ABCDE".to_string()]);
         overlay_top_right(&mut lines, 0, 80, &[]);
         assert!(lines.iter().all(|l| l.is_empty()));
+    }
+
+    #[test]
+    fn overlay_right_keeps_left_content_and_replaces_the_right_columns() {
+        // The block is anchored to the right; the base row keeps the columns left
+        // of it (cut to fit), padded out so the block lands flush right.
+        let mut lines = vec!["session alpha is live and busy".to_string()];
+        overlay_right(&mut lines, 0, 30, &["[note]".to_string()]);
+        let row = console::strip_ansi_codes(&lines[0]);
+        assert_eq!(
+            console::measure_text_width(&row),
+            30,
+            "the row fills the width"
+        );
+        assert!(
+            row.starts_with("session alpha"),
+            "the left content survives"
+        );
+        assert!(row.ends_with("[note]"), "the block lands flush right");
+    }
+
+    #[test]
+    fn overlay_right_overwrites_the_full_row_for_a_block_as_wide_as_the_pane() {
+        // A block exactly the pane width leaves no left column: it replaces the row.
+        let mut lines = vec!["busy preview line".to_string()];
+        overlay_right(&mut lines, 0, 6, &["[note]".to_string()]);
+        assert_eq!(console::strip_ansi_codes(&lines[0]), "[note]");
+    }
+
+    #[test]
+    fn overlay_right_overlays_an_empty_base_row_without_a_stray_reset() {
+        // An empty base row pads straight to the block (no SGR to close), so the
+        // row is just spaces then the block.
+        let mut lines = vec![String::new()];
+        overlay_right(&mut lines, 0, 10, &["abc".to_string()]);
+        assert_eq!(lines[0], format!("{}abc", " ".repeat(7)));
+    }
+
+    #[test]
+    fn overlay_right_is_skipped_when_too_wide_or_empty_and_stops_past_the_last_row() {
+        // A block wider than the pane is dropped, an empty block is a no-op, and a
+        // block taller than what remains stops at the end instead of panicking.
+        let mut lines = vec!["keep".to_string(), String::new()];
+        overlay_right(&mut lines, 0, 3, &["ABCDE".to_string()]);
+        overlay_right(&mut lines, 0, 80, &[]);
+        assert_eq!(lines[0], "keep");
+        assert!(lines[1].is_empty());
+        overlay_right(&mut lines, 1, 80, &["A".to_string(), "B".to_string()]);
+        assert!(lines[1].ends_with('A'));
+        assert_eq!(lines.len(), 2);
+    }
+
+    #[test]
+    fn truncate_to_width_keeps_colours_and_drops_a_straddling_wide_glyph() {
+        // ANSI escapes are zero-width and carried through; a double-width glyph
+        // that would overflow the budget is dropped whole rather than split.
+        // (An explicit SGR sequence, since `console` suppresses colour off a TTY.)
+        let styled = "\u{1b}[31mab\u{1b}[0m";
+        let kept = truncate_to_width(styled, 2);
+        assert_eq!(console::strip_ansi_codes(&kept), "ab");
+        assert!(
+            kept.contains("\u{1b}[31m"),
+            "the colour escape is carried through"
+        );
+        // "あ" is two columns wide: it fits a budget of 2 but not of 1.
+        assert_eq!(truncate_to_width("あい", 2), "あ");
+        assert_eq!(truncate_to_width("あい", 1), "");
     }
 
     #[test]
