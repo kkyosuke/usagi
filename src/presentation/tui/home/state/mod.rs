@@ -881,6 +881,16 @@ impl HomeState {
             .and_then(|s| s.note())
     }
 
+    /// The note of the session highlighted in 切替 (the cursor row), or `None` on
+    /// the root row (which is the workspace, not a session) and for a session
+    /// with no note. Read by the right-pane renderer so the highlighted session's
+    /// note (its next-time TODO) shows the moment it is selected — without opening
+    /// the editor.
+    pub fn selected_session_note(&self) -> Option<&str> {
+        let worktree = self.list.selected()?;
+        self.session_note(worktree_name(worktree))
+    }
+
     /// Open the note editor for `target`, pre-filled with its current note.
     /// `reattach` records whether closing it should re-attach the session's pane
     /// (没入's `Ctrl-E`); `false` for 切替's `n`.

@@ -22,9 +22,9 @@ use crate::presentation::tui::widgets;
 use crate::presentation::tui::widgets::clip_to_width;
 
 use chrome::{
-    footer_line, hint_lines, input_line, mode_ladder, note_editor_frame, overview_input_box,
-    quit_confirm_frame, remove_modal_frame, switch_create_rows, switch_rename_rows,
-    task_status_line, text_modal_frame, title_bar, update_banner,
+    footer_line, hint_lines, input_line, mode_ladder, overview_input_box, quit_confirm_frame,
+    remove_modal_frame, switch_create_rows, switch_rename_rows, task_status_line, text_modal_frame,
+    title_bar, update_banner,
 };
 use panes::{left_pane, log_tail, right_pane_contents};
 
@@ -274,10 +274,10 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
     if let Some(modal) = state.text_modal() {
         return text_modal_frame(raw_height, raw_width, modal);
     }
-    // The session-note editor overlays the whole screen while open.
-    if let Some(editor) = state.note_editor() {
-        return note_editor_frame(raw_height, raw_width, editor);
-    }
+    // The session-note editor is *not* a full-screen overlay: it renders in the
+    // right pane (see [`panes::right_pane_contents`]) so the sidebar and chrome
+    // stay put and the screen never switches — matching the read-only note shown
+    // there while browsing.
 
     let (height, width) = widgets::normalize_size(raw_height, raw_width);
     // The left sidebar honours the `Ctrl-B` toggle in every mode — 切替 (Switch)

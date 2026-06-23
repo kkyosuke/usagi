@@ -9,7 +9,8 @@ use console::{style, Style};
 
 use super::super::command::{CommandInfo, Hint};
 use super::super::state::{
-    CreateInput, HomeState, LineKind, LogLine, Mode, Preview, RenameInput, WorktreeList, ROOT_NAME,
+    CreateInput, HomeState, LineKind, LogLine, Mode, NoteEditor, Preview, RenameInput,
+    WorktreeList, ROOT_NAME,
 };
 use super::super::terminal_tabs::TabStrip;
 use super::super::terminal_view::TerminalView;
@@ -813,6 +814,70 @@ fn switch_rename_pane(rename: &RenameInput, width: usize, rows: usize) -> Vec<St
 /// live-terminal re-attach; a session with no live shell previews its 在席 action
 /// menu. The header line carries the session's status and agent state. The key
 /// hints live in the footer, so the preview uses the pane's full height.
+/// The session-note editor rendered **in the right pane** (not a full-screen
+/// modal), so the sidebar and chrome stay put and the screen never switches —
+/// matching the read-only note shown there while browsing. A `note: <name>`
+/// header sits above the multi-line buffer; the cursor line is split at the caret
+/// and drawn with a block caret (like the command input). When the note is taller
+/// than the pane the view scrolls to keep the caret line in sight. Each row is
+/// clipped to the pane width, and the pane is padded to its full height.
+pub(super) fn note_editor_pane(editor: &NoteEditor, width: usize, rows: usize) -> Vec<String> {
+    let mut lines = Vec::with_capacity(rows);
+    lines.push(
+        style(clip_to_width(&format!("note: {}", editor.target()), width))
+            .cyan()
+            .bold()
+            .to_string(),
+    );
+
+    let area = editor.area();
+    let (caret_row, caret_col) = area.cursor();
+    let body_rows = rows.saturating_sub(lines.len()).max(1);
+    // Scroll so the caret line stays visible once the note outgrows the pane.
+    let start = caret_row.saturating_sub(body_rows.saturating_sub(1));
+    let base = Style::new();
+    for (i, line) in area.lines().iter().enumerate().skip(start).take(body_rows) {
+        if i == caret_row {
+            let (before, after) = line.split_at(caret_col);
+            lines.push(clip_to_width(
+                &widgets::block_caret(before, after, &base),
+                width,
+            ));
+        } else {
+            lines.push(clip_to_width(line, width));
+        }
+    }
+    lines.resize(rows, String::new());
+    lines
+}
+
+/// Most note lines the 切替 right-pane note block shows before it elides the
+/// rest with a `… (N more)` line, so a long note never crowds out the preview
+/// below it (the full text is in the editor, `n` / `Ctrl-E`).
+const SWITCH_NOTE_MAX_LINES: usize = 6;
+
+/// A bordered `note` block for the 切替 (Switch) right pane: the highlighted
+/// session's note — its next-time TODO — clipped to the pane width and capped to
+/// [`SWITCH_NOTE_MAX_LINES`] lines so it stays a glanceable header above the
+/// preview rather than taking the whole pane. Shown only when the session has a
+/// note; the full text (and editing) is the editor's job.
+fn switch_note_block(note: &str, width: usize) -> Vec<String> {
+    let inner = width.saturating_sub(4).max(1);
+    let all: Vec<&str> = note.lines().collect();
+    let shown = all.len().min(SWITCH_NOTE_MAX_LINES);
+    let mut body: Vec<String> = all[..shown]
+        .iter()
+        .map(|line| clip_to_width(line, inner))
+        .collect();
+    if all.len() > shown {
+        body.push(clip_to_width(
+            &format!("… ({} more)", all.len() - shown),
+            inner,
+        ));
+    }
+    widgets::boxed("note", inner, &body)
+}
+
 pub(super) fn switch_preview(state: &HomeState, width: usize, rows: usize) -> Vec<String> {
     let body_rows = rows;
     // Identify the highlighted row. `selected()` is `Some` for a real session
@@ -855,6 +920,14 @@ pub(super) fn switch_preview(state: &HomeState, width: usize, rows: usize) -> Ve
         if live { state.terminal_tabs() } else { None },
         width,
     );
+
+    // The highlighted session's note (its next-time TODO) sits just under the
+    // header, so returning to a session you left mid-way shows what's next the
+    // moment you select it — no need to open the editor. Capped in height so the
+    // preview below stays visible; absent when the session has no note.
+    if let Some(note) = state.selected_session_note() {
+        lines.extend(switch_note_block(note, width));
+    }
 
     if live {
         // Selecting re-attaches the running shell / agent: preview its actual
@@ -909,6 +982,12 @@ pub(super) fn right_pane_contents(state: &HomeState, right_w: usize, rows: usize
     // mode (it is opened from 統括 and captures the keyboard while shown).
     if let Some(preview) = state.preview() {
         return preview_pane(preview, right_w, rows);
+    }
+    // The session-note editor, when open, takes over the right pane too — edited
+    // in place so the screen never switches (opened with `n` in 切替 or `Ctrl-E`
+    // in 没入, captured by the event loop while shown).
+    if let Some(editor) = state.note_editor() {
+        return note_editor_pane(editor, right_w, rows);
     }
     match state.mode() {
         Mode::Overview => Vec::new(),

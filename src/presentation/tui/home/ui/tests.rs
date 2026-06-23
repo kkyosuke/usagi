@@ -2311,9 +2311,11 @@ fn preview_visible_tracks_the_body_height_in_every_mode() {
 }
 
 #[test]
-fn render_frame_draws_the_note_editor_overlay() {
-    // With the note editor open, the frame is the centred modal: the session
-    // name in the title, the multi-line note body, and the key hints.
+fn render_frame_edits_the_note_in_the_right_pane_not_a_full_screen_modal() {
+    // The note editor is edited *in place* in the right pane: the session name
+    // header, the note body, and the footer hints all show — and crucially the
+    // surrounding chrome (mode ladder) and the sidebar stay on screen, so the
+    // screen never switches to a full-screen modal.
     let mut state = state_with(vec![worktree(Some("main"), false, BranchStatus::Local)]);
     let session = SessionRecord {
         name: "alpha".to_string(),
@@ -2328,8 +2330,101 @@ fn render_frame_draws_the_note_editor_overlay() {
     assert!(state.switch_begin_note());
 
     let frame = stripped(&render_frame(24, 80, &state));
-    assert!(frame.contains("note: alpha"), "the title names the session");
+    // The right-pane editor: header + the multi-line note.
+    assert!(
+        frame.contains("note: alpha"),
+        "the header names the session"
+    );
     assert!(frame.contains("first line"));
     assert!(frame.contains("second"));
+    // The footer carries the editor's keys.
     assert!(frame.contains("Ctrl-S: save"));
+    // The chrome and sidebar are still drawn (not replaced by a modal): the mode
+    // ladder and the root row's `workspace root` line are present.
+    assert!(frame.contains("Switch"), "the mode ladder stays visible");
+    assert!(
+        frame.contains("workspace root"),
+        "the sidebar stays visible"
+    );
+}
+
+#[test]
+fn note_editor_pane_scrolls_to_keep_the_caret_line_visible() {
+    // A note taller than the pane scrolls so the caret line (the end, here) stays
+    // in view; the top lines scroll off.
+    let note = (0..10)
+        .map(|i| format!("L{i}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut state = state_with(vec![worktree(Some("main"), false, BranchStatus::Local)]);
+    state.restore_sessions(vec![SessionRecord {
+        name: "alpha".to_string(),
+        display_name: None,
+        note: Some(note),
+        root: PathBuf::from("/repo/.usagi/sessions/alpha"),
+        worktrees: vec![worktree(Some("alpha"), false, BranchStatus::Local)],
+        created_at: Utc::now(),
+    }]);
+    state.switch_move_down();
+    assert!(state.switch_begin_note()); // caret parks at the end (last line, "L9")
+
+    // A short pane (1 header row + 3 body rows): only the last lines fit.
+    let editor = state.note_editor().expect("editor open");
+    let pane = stripped(&note_editor_pane(editor, 40, 4));
+    assert!(pane.contains("note: alpha"));
+    assert!(pane.contains("L9"), "the caret line is kept visible");
+    assert!(pane.contains("L7"));
+    assert!(!pane.contains("L0"), "the top lines scroll off");
+}
+
+#[test]
+fn switch_preview_shows_the_selected_sessions_note_above_the_preview() {
+    let mut state = state_with(vec![worktree(Some("main"), false, BranchStatus::Local)]);
+    let session = SessionRecord {
+        name: "alpha".to_string(),
+        display_name: None,
+        note: Some("do X\ndo Y".to_string()),
+        root: PathBuf::from("/repo/.usagi/sessions/alpha"),
+        worktrees: vec![worktree(Some("alpha"), false, BranchStatus::Local)],
+        created_at: Utc::now(),
+    };
+    state.restore_sessions(vec![session]);
+    state.enter_switch(super::super::state::ReturnMode::Overview);
+
+    // On the root row there is no session note, so the block is absent.
+    let root = stripped(&switch_preview(&state, 40, 12));
+    assert!(!root.contains("do X"));
+
+    // Moving onto the session shows its note in a `note` block above the preview.
+    state.switch_move_down();
+    let preview = stripped(&switch_preview(&state, 40, 12));
+    assert!(preview.contains("note"), "the note block has a title");
+    assert!(preview.contains("do X"));
+    assert!(preview.contains("do Y"));
+}
+
+#[test]
+fn switch_preview_note_block_elides_a_long_note() {
+    let note = (0..8)
+        .map(|i| format!("todo {i}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut state = state_with(vec![worktree(Some("main"), false, BranchStatus::Local)]);
+    state.restore_sessions(vec![SessionRecord {
+        name: "alpha".to_string(),
+        display_name: None,
+        note: Some(note),
+        root: PathBuf::from("/repo/.usagi/sessions/alpha"),
+        worktrees: vec![worktree(Some("alpha"), false, BranchStatus::Local)],
+        created_at: Utc::now(),
+    }]);
+    state.enter_switch(super::super::state::ReturnMode::Overview);
+    state.switch_move_down();
+
+    let preview = stripped(&switch_preview(&state, 40, 16));
+    // The first lines show; the overflow is elided with a `… (N more)` line.
+    assert!(preview.contains("todo 0"));
+    assert!(preview.contains("todo 5"));
+    assert!(preview.contains("more)"));
+    assert!(!preview.contains("todo 7"));
 }
