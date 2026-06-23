@@ -188,6 +188,26 @@ impl Default for Settings {
 }
 
 impl Settings {
+    /// Coerce loaded settings into a trusted state, dropping values that did not
+    /// come from usagi's own UI.
+    ///
+    /// The config screen only ever stores a `local_llm.model` from the fixed
+    /// [`LOCAL_LLM_MODELS`] allowlist, but `settings.json` is a plain file a user
+    /// (or a synced dotfiles repo) can hand-edit. The model name is later
+    /// interpolated into the agent launch command, so an unexpected value — for
+    /// instance one containing a shell single quote — must not be trusted
+    /// verbatim. Any model outside the allowlist is reset to
+    /// [`DEFAULT_LOCAL_LLM_MODEL`]. This is defense-in-depth: the launch builder
+    /// also escapes its arguments, so neither layer alone is load-bearing.
+    pub fn sanitized(mut self) -> Self {
+        if !LOCAL_LLM_MODELS.contains(&self.local_llm.model.as_str()) {
+            self.local_llm.model = DEFAULT_LOCAL_LLM_MODEL.to_string();
+        }
+        self
+    }
+}
+
+impl Settings {
     /// Apply a project's [`LocalSettings`] over these global settings, returning
     /// the effective settings for that project.
     ///
@@ -393,6 +413,37 @@ mod tests {
         assert_eq!(DEFAULT_LOCAL_LLM_MODEL, LOCAL_LLM_MODELS[0]);
         // The default model is one of the offered choices.
         assert!(LOCAL_LLM_MODELS.contains(&DEFAULT_LOCAL_LLM_MODEL));
+    }
+
+    #[test]
+    fn sanitized_resets_an_unknown_local_llm_model() {
+        // A known model from the allowlist is preserved verbatim.
+        let known = Settings {
+            local_llm: LocalLlm {
+                enabled: true,
+                model: "qwen2.5-coder:3b".to_string(),
+            },
+            ..Default::default()
+        };
+        assert_eq!(
+            known.clone().sanitized().local_llm.model,
+            "qwen2.5-coder:3b"
+        );
+
+        // A model outside the allowlist — e.g. a hand-edited injection attempt —
+        // is reset to the default, while every other field is left untouched.
+        let tampered = Settings {
+            theme: Theme::Dark,
+            local_llm: LocalLlm {
+                enabled: true,
+                model: "evil';touch /tmp/pwned;'".to_string(),
+            },
+            ..Default::default()
+        };
+        let cleaned = tampered.sanitized();
+        assert_eq!(cleaned.local_llm.model, DEFAULT_LOCAL_LLM_MODEL);
+        assert!(cleaned.local_llm.enabled);
+        assert_eq!(cleaned.theme, Theme::Dark);
     }
 
     #[test]
