@@ -427,12 +427,18 @@ pub(super) fn focus_key(
     key: Key,
     wiring: &mut Wiring,
 ) -> Flow {
-    // `Esc` returns to 統括; `Ctrl-O` opens 切替 (return here on cancel); `Ctrl-P` /
-    // `Ctrl-N` move the tab selector across the session's live panes and the
-    // trailing "+ new" tab. These bind the same whichever tab is selected.
+    // `Esc` peels back one step: on the "+ new" launch surface opened over live
+    // panes (e.g. after `Ctrl-T` from 没入) it discards the surface and steps onto
+    // the pane's tab so that pane previews again; everywhere else (a pane tab, or
+    // an idle session with no pane behind "+ new") it leaves 在席 for 統括. `Ctrl-O`
+    // opens 切替 (return here on cancel); `Ctrl-P` / `Ctrl-N` move the tab selector
+    // across the session's live panes and the trailing "+ new" tab. These bind the
+    // same whichever tab is selected.
     match key {
         Key::Escape => {
-            state.leave_focus();
+            if !state.focus_discard_new_tab() {
+                state.leave_focus();
+            }
             return Flow::Continue;
         }
         Key::Char(CTRL_O) => {
