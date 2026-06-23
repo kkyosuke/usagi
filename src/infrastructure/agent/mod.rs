@@ -20,6 +20,35 @@ pub use gemini::GeminiAgent;
 use crate::domain::agent::Agent;
 use crate::domain::settings::AgentCli;
 
+/// System-prompt addendum injected into agents launched from a usagi session.
+///
+/// Every agent usagi starts already lives inside the session's dedicated
+/// worktree, so the usual "create a worktree first" workflow step is redundant
+/// here. We tell the agent up front to skip it and work in place. Kept free of
+/// single quotes so it survives a single-quoted shell argument verbatim. Shared
+/// by every adapter that can inject a system prompt (Claude via
+/// `--append-system-prompt`, Codex via `developer_instructions`).
+const SESSION_WORKTREE_PROMPT: &str = "あなたは usagi が管理するセッション専用の worktree 内で起動されています。このディレクトリは既に独立した作業環境のため、新たに git worktree を作成する必要はありません。ここで直接作業を進めてください。";
+
+/// System-prompt addendum added when a local LLM MCP server is wired in.
+///
+/// It nudges the cloud agent to offload light, low-stakes work (summaries,
+/// naming, boilerplate, simple transforms) to the `local_llm_ask` tool so the
+/// cloud model's tokens are spent on the work that actually needs it. Kept free
+/// of single quotes so it survives a single-quoted shell argument verbatim.
+const LOCAL_LLM_PROMPT: &str = "トークン節約のため、要約・命名・定型文の生成・単純な変換といった軽量で重要度の低いタスクは、MCP ツール local_llm_ask（ローカル LLM）に委譲してください。判断が必要な作業や重要な実装はあなた自身が行ってください。";
+
+/// The session system-prompt text handed to a launched agent: the worktree note,
+/// plus the local-LLM delegation nudge when a local model is wired in. The
+/// adapters render it into their CLI's own flag (Claude `--append-system-prompt`,
+/// Codex `developer_instructions`).
+pub(super) fn session_system_prompt(local_llm_model: Option<&str>) -> String {
+    match local_llm_model {
+        Some(_) => format!("{SESSION_WORKTREE_PROMPT}{LOCAL_LLM_PROMPT}"),
+        None => SESSION_WORKTREE_PROMPT.to_string(),
+    }
+}
+
 /// The agent adapter for the configured CLI, shared via `Arc`.
 pub fn agent_for(cli: AgentCli) -> Arc<dyn Agent> {
     match cli {

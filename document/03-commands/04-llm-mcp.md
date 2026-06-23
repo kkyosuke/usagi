@@ -88,7 +88,7 @@ usagi llm-mcp --model qwen2.5-coder:7b   # stdin から JSON-RPC を読み、std
 }
 ```
 
-あわせて、軽量タスクをローカル LLM に委譲するよう促す一文がシステムプロンプトに追記されます（システムプロンプトの追記に対応するのは Claude のみ）。
+あわせて、軽量タスクをローカル LLM に委譲するよう促す一文がシステムプロンプトに追記されます（Claude は `--append-system-prompt`、Codex は `developer_instructions` で追記。Gemini は対応しません）。
 
 Codex は `--mcp-config` を持たないため、同じ内容を `-c` 設定上書きで注入します（`mcp_servers.usagi` と、有効時の `mcp_servers.usagi-llm`）。
 

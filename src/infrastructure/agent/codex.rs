@@ -5,6 +5,9 @@
 //!
 //! - **MCP servers** — the unified `usagi` server, plus the `usagi-llm` server
 //!   when the local LLM is enabled (`mcp_servers.<name>.command` / `.args`).
+//! - **System prompt** — the session note (already in a worktree; delegate light
+//!   work to the local LLM when on) via `developer_instructions`, Codex's
+//!   additive instruction override.
 //! - **Lifecycle hooks** — Codex's hook events (`SessionStart`, `UserPromptSubmit`,
 //!   `PreToolUse`, `PostToolUse`, `PermissionRequest`, `Stop`) each run
 //!   `<usagi_bin> agent-phase <phase>`, so the agent reports its own
@@ -16,14 +19,22 @@
 //!   `--dangerously-bypass-hook-trust` so they run without an interactive trust
 //!   prompt (usagi vets the hook command — it only ever runs usagi itself).
 //!
-//! A queued opening prompt rides along as Codex's positional `[PROMPT]` argument
-//! so the session opens already working on it.
+//! When a worktree has a prior Codex conversation, the launch resumes it
+//! (`codex resume --last`, which Codex filters to the current directory) so
+//! reopening a session continues where it left off. usagi finds that prior
+//! conversation by scanning Codex's rollout transcripts (`~/.codex/sessions`),
+//! whose opening `session_meta` line records the `cwd` — the same mechanism backs
+//! forgetting a session's history on removal.
 //!
-//! Codex keeps its own session store that usagi does not mirror, so it reports no
-//! resumable session and keeps no conversation to forget; launches are always
-//! fresh.
+//! A queued opening prompt rides along as Codex's positional `[PROMPT]` argument
+//! so the session opens already working on it. Resuming and an opening prompt do
+//! not combine: `codex resume`'s positional prompt clashes with `--last`, so when
+//! a prompt is queued the launch starts a fresh session working on it rather than
+//! resuming.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+use serde::Deserialize;
 
 use crate::domain::agent::{Agent, AgentWiring};
 
@@ -60,10 +71,10 @@ fn shell_single_quote(text: &str) -> String {
 }
 
 /// Render `text` as a TOML basic string (double-quoted), escaping the backslash
-/// and double-quote that TOML treats specially. Used for the hook command, whose
-/// embedded usagi binary path may carry backslashes on Windows; the surrounding
-/// `-c` argument is single-quoted for the shell, so the double quotes here pass
-/// through untouched.
+/// and double-quote that TOML treats specially. Used for the hook command and the
+/// system-prompt instruction, whose values may carry those characters; the
+/// surrounding `-c` argument is single-quoted for the shell, so the double quotes
+/// here pass through untouched.
 fn toml_basic_string(text: &str) -> String {
     format!("\"{}\"", text.replace('\\', "\\\\").replace('"', "\\\""))
 }
@@ -105,6 +116,123 @@ fn hook_override(usagi_bin: &str, event: &str, phase: &str) -> String {
     )
 }
 
+/// The `-c` config overrides shared by every Codex launch (fresh or resumed): the
+/// usagi MCP server(s), the system-prompt instruction, and the lifecycle hooks.
+fn wiring_overrides(wiring: &AgentWiring) -> Vec<String> {
+    let bin = &wiring.usagi_bin;
+    let local_llm_model = wiring.local_llm_model.as_deref();
+    // The unified usagi MCP server is always wired in (issues, memories,
+    // sessions); the local-LLM server joins it when enabled.
+    let mut overrides = vec![
+        config_override("mcp_servers.usagi.command", bin),
+        config_override("mcp_servers.usagi.args", &toml_string_array(&["mcp"])),
+    ];
+    if let Some(model) = local_llm_model {
+        overrides.push(config_override("mcp_servers.usagi-llm.command", bin));
+        overrides.push(config_override(
+            "mcp_servers.usagi-llm.args",
+            &toml_string_array(&["llm-mcp", "--model", model]),
+        ));
+    }
+    // The system prompt rides along as Codex's additive `developer_instructions`.
+    let system_prompt = super::session_system_prompt(local_llm_model);
+    overrides.push(config_override(
+        "developer_instructions",
+        &toml_basic_string(&system_prompt),
+    ));
+    // Lifecycle hooks report the agent's phase back to usagi.
+    for (event, phase) in HOOK_PHASES {
+        overrides.push(hook_override(bin, event, phase));
+    }
+    overrides
+}
+
+/// Where Codex stores each session's rollout transcript:
+/// `~/.codex/sessions/<YYYY>/<MM>/<DD>/rollout-*.jsonl`. `None` when the home
+/// directory can't be determined, so usagi simply launches fresh rather than
+/// guessing.
+fn codex_sessions_root() -> Option<PathBuf> {
+    dirs::home_dir().map(|home| home.join(".codex").join("sessions"))
+}
+
+/// The working directory a Codex rollout transcript was recorded in, read from
+/// its opening `session_meta` line (`{"type":"session_meta","payload":{"cwd":…}}`).
+/// `None` when the file is unreadable, its first line is not that JSON, or it
+/// carries no `cwd`. Only the first line is read, so this stays cheap on large
+/// transcripts.
+fn rollout_cwd(file: &Path) -> Option<PathBuf> {
+    use std::io::BufRead;
+
+    #[derive(Deserialize)]
+    struct Meta {
+        payload: MetaPayload,
+    }
+    #[derive(Deserialize)]
+    struct MetaPayload {
+        cwd: Option<PathBuf>,
+    }
+
+    let opened = std::fs::File::open(file).ok()?;
+    let mut first = String::new();
+    std::io::BufReader::new(opened).read_line(&mut first).ok()?;
+    serde_json::from_str::<Meta>(&first).ok()?.payload.cwd
+}
+
+/// Collect every `*.jsonl` rollout transcript under `root`, descending the
+/// date-partitioned directory tree (`<YYYY>/<MM>/<DD>`). A missing or unreadable
+/// directory contributes nothing.
+fn collect_rollouts(dir: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_rollouts(&path, out);
+        } else if path.extension().is_some_and(|ext| ext == "jsonl") {
+            out.push(path);
+        }
+    }
+}
+
+/// Whether two paths name the same directory, comparing canonicalized forms (so a
+/// symlinked or `/tmp` ⇄ `/private/tmp` difference still matches) and falling back
+/// to a plain comparison when a path cannot be canonicalized (e.g. the recorded
+/// directory no longer exists).
+fn same_dir(a: &Path, b: &Path) -> bool {
+    a == b
+        || matches!(
+            (std::fs::canonicalize(a), std::fs::canonicalize(b)),
+            (Ok(x), Ok(y)) if x == y
+        )
+}
+
+/// Whether `root` holds a Codex rollout transcript recorded in the worktree at
+/// `dir` — i.e. a conversation `codex resume --last` could continue there. A
+/// missing root (no prior run) reads as "nothing to resume", so usagi falls back
+/// to a fresh launch.
+fn has_resumable_session_in(root: &Path, dir: &Path) -> bool {
+    let mut files = Vec::new();
+    collect_rollouts(root, &mut files);
+    files
+        .iter()
+        .any(|file| rollout_cwd(file).is_some_and(|cwd| same_dir(&cwd, dir)))
+}
+
+/// Delete every Codex rollout transcript under `root` recorded in the worktree at
+/// `dir` (best-effort), so a session recreated at the same path later starts
+/// fresh instead of resuming the old conversation. The mirror of
+/// [`has_resumable_session_in`]: what that finds, this clears.
+fn forget_session_in(root: &Path, dir: &Path) {
+    let mut files = Vec::new();
+    collect_rollouts(root, &mut files);
+    for file in files {
+        if rollout_cwd(&file).is_some_and(|cwd| same_dir(&cwd, dir)) {
+            let _ = std::fs::remove_file(&file);
+        }
+    }
+}
+
 /// The Codex CLI adapter.
 #[derive(Default)]
 pub struct CodexAgent;
@@ -124,53 +252,51 @@ impl Agent for CodexAgent {
     fn launch_command(
         &self,
         wiring: &AgentWiring,
-        _resume: bool,
+        resume: bool,
         initial_prompt: Option<&str>,
     ) -> String {
-        let bin = &wiring.usagi_bin;
-        // The hooks are non-managed command hooks, so Codex would otherwise prompt
-        // to trust each one; usagi vets them (they only run usagi itself), so the
-        // bypass flag lets them run unattended.
-        let mut parts = vec![
-            "codex".to_string(),
-            "--dangerously-bypass-hook-trust".to_string(),
-        ];
-        // The unified usagi MCP server is always wired in (issues, memories,
-        // sessions); the local-LLM server joins it when enabled.
-        parts.push(config_override("mcp_servers.usagi.command", bin));
-        parts.push(config_override(
-            "mcp_servers.usagi.args",
-            &toml_string_array(&["mcp"]),
-        ));
-        if let Some(model) = wiring.local_llm_model.as_deref() {
-            parts.push(config_override("mcp_servers.usagi-llm.command", bin));
-            parts.push(config_override(
-                "mcp_servers.usagi-llm.args",
-                &toml_string_array(&["llm-mcp", "--model", model]),
-            ));
-        }
-        // Lifecycle hooks report the agent's phase back to usagi.
-        for (event, phase) in HOOK_PHASES {
-            parts.push(hook_override(bin, event, phase));
-        }
-        // A queued prompt rides along as Codex's positional query, so the agent
-        // opens already working on it. It is arbitrary user text, so it is escaped
-        // for the single-quoted shell context. Placed last as the trailing
-        // argument. Codex has no usagi-driven resume, so `resume` is ignored.
-        if let Some(prompt) = initial_prompt {
-            parts.push(shell_single_quote(prompt));
+        let overrides = wiring_overrides(wiring);
+        // Resume only when there is no queued prompt to deliver: `codex resume`'s
+        // positional `[PROMPT]` clashes with `--last` (the lone positional binds
+        // to `[SESSION_ID]`), so a queued prompt instead starts a fresh session
+        // already working on it. The hooks are non-managed command hooks, so
+        // Codex would otherwise prompt to trust each one; usagi vets them (they
+        // only run usagi itself), so `--dangerously-bypass-hook-trust` lets them
+        // run unattended on both paths.
+        let resuming = resume && initial_prompt.is_none();
+        let mut parts = if resuming {
+            vec![
+                "codex".to_string(),
+                "resume".to_string(),
+                "--last".to_string(),
+                "--dangerously-bypass-hook-trust".to_string(),
+            ]
+        } else {
+            vec![
+                "codex".to_string(),
+                "--dangerously-bypass-hook-trust".to_string(),
+            ]
+        };
+        parts.extend(overrides);
+        // A queued prompt rides along as Codex's trailing positional query (only
+        // on the fresh path, where it is unambiguous). It is arbitrary user text,
+        // so it is escaped for the single-quoted shell context.
+        if !resuming {
+            if let Some(prompt) = initial_prompt {
+                parts.push(shell_single_quote(prompt));
+            }
         }
         parts.join(" ")
     }
 
-    fn has_resumable_session(&self, _dir: &Path) -> bool {
-        // Codex keeps its own session store that usagi does not mirror, so usagi
-        // never drives a resume — launches are always fresh.
-        false
+    fn has_resumable_session(&self, dir: &Path) -> bool {
+        codex_sessions_root().is_some_and(|root| has_resumable_session_in(&root, dir))
     }
 
-    fn forget_session(&self, _dir: &Path) {
-        // usagi keeps no Codex conversation store, so there is nothing to clear.
+    fn forget_session(&self, dir: &Path) {
+        if let Some(root) = codex_sessions_root() {
+            forget_session_in(&root, dir);
+        }
     }
 }
 
@@ -178,6 +304,7 @@ impl Agent for CodexAgent {
 mod tests {
     use super::*;
     use crate::domain::settings::Settings;
+    use std::fs;
 
     /// An [`AgentWiring`] for the tests: the bare name `usagi` stands in for the
     /// resolved binary path the caller passes, with the local LLM off unless a
@@ -187,6 +314,19 @@ mod tests {
             usagi_bin: usagi_bin.to_string(),
             local_llm_model: local_llm_model.map(str::to_string),
         }
+    }
+
+    /// Write a rollout transcript whose opening `session_meta` line records `cwd`,
+    /// under `root/<sub>/`, mirroring Codex's date-partitioned layout.
+    fn write_rollout(root: &Path, sub: &str, name: &str, cwd: &str) -> PathBuf {
+        let dir = root.join(sub);
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join(name);
+        let line = format!(
+            r#"{{"timestamp":"t","type":"session_meta","payload":{{"session_id":"x","cwd":"{cwd}","cli_version":"0.142.0"}}}}"#
+        );
+        fs::write(&file, format!("{line}\n{{\"type\":\"event_msg\"}}\n")).unwrap();
+        file
     }
 
     #[test]
@@ -214,6 +354,24 @@ mod tests {
         assert!(launch.contains(
             "-c 'mcp_servers.usagi-llm.args=[\"llm-mcp\",\"--model\",\"qwen2.5-coder:7b\"]'"
         ));
+    }
+
+    #[test]
+    fn launch_command_injects_the_system_prompt_via_developer_instructions() {
+        // The session note rides along as Codex's additive `developer_instructions`
+        // override (the worktree note alone with the local LLM off).
+        let launch = CodexAgent::new().launch_command(&wiring("usagi", None), false, None);
+        assert!(launch.contains(
+            "-c 'developer_instructions=\"あなたは usagi が管理するセッション専用の worktree 内で起動されています。このディレクトリは既に独立した作業環境のため、新たに git worktree を作成する必要はありません。ここで直接作業を進めてください。\"'"
+        ));
+        // With the local LLM on, the delegation nudge is appended to the note.
+        let with_llm = CodexAgent::new().launch_command(
+            &wiring("usagi", Some("qwen2.5-coder:7b")),
+            false,
+            None,
+        );
+        assert!(with_llm.contains("developer_instructions=\"あなたは usagi"));
+        assert!(with_llm.contains("local_llm_ask"));
     }
 
     #[test]
@@ -264,8 +422,6 @@ mod tests {
         // Every hook invokes that same binary.
         assert!(launch.contains("command=\"/opt/usagi/bin/usagi agent-phase ready\""));
         assert!(launch.contains("command=\"/opt/usagi/bin/usagi agent-phase ended\""));
-        // The bare name no longer appears as a standalone override value.
-        assert!(!launch.contains("command=usagi'"));
     }
 
     #[test]
@@ -310,15 +466,29 @@ mod tests {
     }
 
     #[test]
-    fn launch_command_ignores_resume() {
-        // Codex has no usagi-driven resume, so requesting one launches identically
-        // to a fresh start, and it never reports a resumable session.
-        let fresh = CodexAgent::new().launch_command(&wiring("usagi", None), false, None);
-        let resumed = CodexAgent::new().launch_command(&wiring("usagi", None), true, None);
-        assert_eq!(fresh, resumed);
-        assert!(!CodexAgent::new().has_resumable_session(Path::new("/any/worktree")));
-        // Forgetting a session is a no-op for Codex (no conversation store).
-        CodexAgent::new().forget_session(Path::new("/any/worktree"));
+    fn launch_command_resumes_the_previous_conversation() {
+        // With a resumable conversation and no queued prompt, the launch uses
+        // `codex resume --last` (Codex filters it to the worktree) and still
+        // carries the full wiring and the trust bypass.
+        let launch = CodexAgent::new().launch_command(&wiring("usagi", None), true, None);
+        assert!(launch.starts_with("codex resume --last --dangerously-bypass-hook-trust "));
+        assert!(launch.contains("-c 'mcp_servers.usagi.command=usagi'"));
+        assert!(launch.contains("usagi agent-phase ready"));
+        assert!(launch.contains("developer_instructions="));
+    }
+
+    #[test]
+    fn launch_command_starts_fresh_with_a_prompt_even_when_resumable() {
+        // Resuming and an opening prompt do not combine (the resume positional
+        // clashes with `--last`), so a queued prompt starts a fresh session
+        // working on it — identical to the non-resume launch with that prompt.
+        let resumed_with_prompt =
+            CodexAgent::new().launch_command(&wiring("usagi", None), true, Some("do the thing"));
+        let fresh_with_prompt =
+            CodexAgent::new().launch_command(&wiring("usagi", None), false, Some("do the thing"));
+        assert_eq!(resumed_with_prompt, fresh_with_prompt);
+        assert!(!resumed_with_prompt.contains("resume --last"));
+        assert!(resumed_with_prompt.ends_with(" 'do the thing'"));
     }
 
     #[test]
@@ -333,6 +503,88 @@ mod tests {
         assert_eq!(toml_basic_string("plain"), "\"plain\"");
         assert_eq!(toml_basic_string(r"a\b"), r#""a\\b""#);
         assert_eq!(toml_basic_string(r#"a"b"#), r#""a\"b""#);
+    }
+
+    #[test]
+    fn has_resumable_session_in_finds_a_transcript_for_the_worktree() {
+        let root = tempfile::tempdir().unwrap();
+        let worktree = root.path().join("wt");
+        fs::create_dir_all(&worktree).unwrap();
+
+        // No transcripts yet → nothing to resume.
+        assert!(!has_resumable_session_in(root.path(), &worktree));
+
+        // A transcript recorded in another directory does not match.
+        write_rollout(
+            root.path(),
+            "2026/06/23",
+            "rollout-other.jsonl",
+            "/some/other/dir",
+        );
+        assert!(!has_resumable_session_in(root.path(), &worktree));
+
+        // A transcript recorded in the worktree means there is a conversation to
+        // continue, even nested in the date-partitioned layout.
+        write_rollout(
+            root.path(),
+            "2026/06/23",
+            "rollout-wt.jsonl",
+            &worktree.to_string_lossy(),
+        );
+        assert!(has_resumable_session_in(root.path(), &worktree));
+    }
+
+    #[test]
+    fn has_resumable_session_ignores_files_without_a_session_meta_cwd() {
+        let root = tempfile::tempdir().unwrap();
+        let worktree = root.path().join("wt");
+        fs::create_dir_all(&worktree).unwrap();
+        let dir = root.path().join("2026/06/23");
+        fs::create_dir_all(&dir).unwrap();
+        // A non-jsonl file and a jsonl without a parseable session_meta cwd are
+        // both ignored.
+        fs::write(dir.join("notes.txt"), worktree.to_string_lossy().as_bytes()).unwrap();
+        fs::write(dir.join("rollout-bad.jsonl"), "not json\n").unwrap();
+        assert!(!has_resumable_session_in(root.path(), &worktree));
+    }
+
+    #[test]
+    fn forget_session_in_deletes_only_the_worktrees_transcripts() {
+        let root = tempfile::tempdir().unwrap();
+        let worktree = root.path().join("wt");
+        fs::create_dir_all(&worktree).unwrap();
+        let mine = write_rollout(
+            root.path(),
+            "2026/06/23",
+            "rollout-wt.jsonl",
+            &worktree.to_string_lossy(),
+        );
+        let other = write_rollout(
+            root.path(),
+            "2026/06/23",
+            "rollout-other.jsonl",
+            "/some/other/dir",
+        );
+
+        forget_session_in(root.path(), &worktree);
+
+        // The worktree's transcript is gone; another directory's is untouched.
+        assert!(!mine.exists());
+        assert!(other.exists());
+        assert!(!has_resumable_session_in(root.path(), &worktree));
+
+        // Forgetting again, with nothing left to match, is a harmless no-op.
+        forget_session_in(root.path(), &worktree);
+    }
+
+    #[test]
+    fn has_resumable_session_resolves_against_the_real_home() {
+        // Exercises the home-directory wrapper end to end: a worktree that has
+        // never run an agent has no transcript, so it is not resumable.
+        let agent = CodexAgent::new();
+        assert!(!agent.has_resumable_session(Path::new("/nonexistent/usagi/worktree")));
+        // Forgetting such a worktree is a no-op.
+        agent.forget_session(Path::new("/nonexistent/usagi/worktree"));
     }
 
     #[test]

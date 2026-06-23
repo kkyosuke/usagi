@@ -48,7 +48,7 @@
 | `session create <name>` | `.usagi/sessions/<name>/` 配下に再帰的に worktree を構築してセッションを作成。名前を省くと[切替](../design/05-home.md#切替switch)の左ペイン内インライン入力で作成 |
 | `session list` | セッション一覧（件数 + 各セッション名 + worktree 数）をテキストモーダルに表示 |
 | `session switch <name>` | アクティブセッションを切り替えて**在席**へ。`switch root` でルート行へ。引数なしで[切替](../design/05-home.md#切替switch)モードを開く |
-| `session remove <name> [--force]` | セッションの worktree・ブランチ・コピーに加え、その worktree の会話履歴（Claude の transcript）と Agent phase も削除。未コミット変更があれば警告し `--force` で破棄。名前を省くと一覧モーダルを開き、`Space` で選択して `Enter` で一括削除 |
+| `session remove <name> [--force]` | セッションの worktree・ブランチ・コピーに加え、その worktree の会話履歴（Claude の transcript / Codex の rollout）と Agent phase も削除。未コミット変更があれば警告し `--force` で破棄。名前を省くと一覧モーダルを開き、`Space` で選択して `Enter` で一括削除 |
 
 セッション作成・削除時の孤児ディレクトリの掃除など、ライフサイクルの概念は
 [4. オーケストレーション](../04-orchestration.md)を参照してください。
@@ -92,9 +92,10 @@ issue が 1 件も無いときは「No issues yet.」を 1 行だけログに出
 Agent CLI ごとの組み込み方法（Claude は `--mcp-config` / `--append-system-prompt`、Codex は `-c` 設定上書き（MCP＋ライフサイクルフック）、Gemini は現状素のまま）は
 [3.4 ローカル LLM MCP サーバ](04-llm-mcp.md#起動と登録)を参照してください。
 
-対象 worktree に前回の Claude 会話が残っている場合は、`claude --continue` を付けて**前回セッションの続きから**起動します
-（中断・離席後も文脈を引き継いで再開できます）。過去の会話が無ければ通常起動になります。判定は worktree ごとに行い、
-`--continue` は埋め込みシェルを**新規に起動するときだけ**付与されます（裏で動き続けるシェルへ再アタッチする場合は再起動しないため対象外）。
+対象 worktree に前回の会話が残っている場合は、**前回セッションの続きから**起動します（Claude は `claude --continue`、
+Codex は `codex resume --last`。中断・離席後も文脈を引き継いで再開できます）。過去の会話が無ければ通常起動になります。判定は worktree ごとに行い、
+再開フラグは埋め込みシェルを**新規に起動するときだけ**付与されます（裏で動き続けるシェルへ再アタッチする場合は再起動しないため対象外）。
+なお Codex は、キュー済みプロンプト（`session_prompt`）がある起動では再開せず、そのプロンプトで新規セッションを開始します。
 Gemini には継続フラグが無いため常に通常起動です。
 
 入力待ちの検知・`◆ waiting` マーカー・デスクトップ通知の挙動は
