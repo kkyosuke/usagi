@@ -1130,7 +1130,15 @@ pub(super) fn right_pane_contents(state: &HomeState, right_w: usize, rows: usize
                     return switch_rename_pane(rename, right_w, rows);
                 }
             }
+            // Fade the whole preview in 切替: the keyboard is on the session list
+            // to the left, so dimming the right pane signals it is not the focus —
+            // the highlighted session and its tabs are browsed there, not selected
+            // from here. The note box (when open) is composited bright on top below,
+            // so the deliberately-opened note still reads against the faded preview.
             switch_preview(state, right_w, rows)
+                .iter()
+                .map(|row| dim_row(row))
+                .collect()
         }
         Mode::Focus => focus_pane(state, right_w, rows),
         Mode::Attached => {
