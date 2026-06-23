@@ -20,7 +20,7 @@ use crate::infrastructure::storage::Storage;
 use crate::presentation::tui::install_task;
 use crate::presentation::tui::term_reader::TermKeyReader;
 use crate::usecase::doctor::SystemRunner;
-use crate::usecase::{local_llm, settings, workspace};
+use crate::usecase::{agent, local_llm, settings, workspace};
 
 pub use event::Outcome;
 
@@ -63,6 +63,11 @@ pub fn run_in(term: &Term, repo_root: Option<PathBuf>) -> Result<Outcome> {
             Some(format!("Failed to load settings: {e}")),
         ),
     };
+
+    // Probe which agent CLIs are installed so the Agent CLI selector only offers
+    // agents the user can actually launch. Both scopes render that selector (the
+    // global setting and the per-project override), so this runs unconditionally.
+    config.set_available_agent_clis(agent::available_clis(&SystemRunner));
 
     // Probe whether the local LLM runtime and selected model are already
     // present, so the Local LLM row opens as an "Install" action or an on/off
