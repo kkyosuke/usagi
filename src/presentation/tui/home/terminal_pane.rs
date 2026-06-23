@@ -132,23 +132,51 @@ pub fn run(
     pty: &mut PtySession,
     monitor: &MonitorHandle,
 ) -> Result<PaneStep> {
-    enable_raw_mode().context("failed to enter raw mode for the embedded terminal")?;
-    // Capture pastes as a single `Event::Paste` so a multi-line paste reaches the
-    // shell as one block instead of a key stream whose embedded Enters each
-    // submit a line to the agent (see `pump_input`).
-    let _ = execute!(std::io::stdout(), EnableBracketedPaste);
-    // Turn on button-less motion reporting so links light up on hover; restored
-    // on the way out (see [`ENABLE_MOTION`]).
-    let _ = term.write_str(ENABLE_MOTION);
-    let _ = term.flush();
+    // Raw mode, bracketed paste, and motion reporting are entered here and
+    // restored by the guard's `Drop` — including when `drive` panics and unwinds,
+    // not only on the normal return path. Restoring them on unwind matters: the
+    // alternate-screen guard one frame up resets the alt screen and click/drag
+    // mouse modes, but it does not own these, so without this guard a panic in the
+    // render/input loop would leave the user's shell in raw mode with bracketed
+    // paste and motion reporting still on.
+    let _modes = PaneModeGuard::enter(term)?;
     let _ = term.clear_screen();
-    let result = drive(term, state, pty, monitor);
-    let _ = term.write_str(DISABLE_MOTION);
-    let _ = term.flush();
-    let _ = execute!(std::io::stdout(), DisableBracketedPaste);
-    let _ = disable_raw_mode();
-    let _ = term.show_cursor();
-    result
+    drive(term, state, pty, monitor)
+}
+
+/// RAII guard owning the embedded pane's terminal modes (raw mode, bracketed
+/// paste, button-less mouse motion). [`run`] turns them on via [`enter`]; `Drop`
+/// turns them off and shows the cursor, so they are reset on a panic-driven
+/// unwind as well as a normal return.
+///
+/// [`enter`]: PaneModeGuard::enter
+struct PaneModeGuard<'t> {
+    term: &'t Term,
+}
+
+impl<'t> PaneModeGuard<'t> {
+    fn enter(term: &'t Term) -> Result<Self> {
+        enable_raw_mode().context("failed to enter raw mode for the embedded terminal")?;
+        // Capture pastes as a single `Event::Paste` so a multi-line paste reaches
+        // the shell as one block instead of a key stream whose embedded Enters
+        // each submit a line to the agent (see `pump_input`).
+        let _ = execute!(std::io::stdout(), EnableBracketedPaste);
+        // Turn on button-less motion reporting so links light up on hover.
+        let _ = term.write_str(ENABLE_MOTION);
+        let _ = term.flush();
+        Ok(Self { term })
+    }
+}
+
+impl Drop for PaneModeGuard<'_> {
+    fn drop(&mut self) {
+        // Restored in the reverse order they were enabled.
+        let _ = self.term.write_str(DISABLE_MOTION);
+        let _ = self.term.flush();
+        let _ = execute!(std::io::stdout(), DisableBracketedPaste);
+        let _ = disable_raw_mode();
+        let _ = self.term.show_cursor();
+    }
 }
 
 /// The render/input loop: when something actually changed — fresh shell output,

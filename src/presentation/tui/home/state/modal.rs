@@ -166,15 +166,16 @@ impl CreateInput {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RenameInput {
     target: String,
-    input: String,
+    input: TextInput,
 }
 
 impl RenameInput {
-    /// Open a rename input for session `target`, pre-filled with `label`.
+    /// Open a rename input for session `target`, pre-filled with `label` (caret
+    /// at the end).
     pub(super) fn new(target: impl Into<String>, label: impl Into<String>) -> Self {
         Self {
             target: target.into(),
-            input: label.into(),
+            input: TextInput::with_value(label),
         }
     }
 
@@ -185,24 +186,54 @@ impl RenameInput {
 
     /// The label typed so far.
     pub fn value(&self) -> &str {
-        &self.input
+        self.input.value()
     }
 
-    /// Append a character to the label.
+    /// The caret position (byte offset) in the typed label.
+    pub fn cursor(&self) -> usize {
+        self.input.cursor()
+    }
+
+    /// Insert a character at the caret.
     pub fn push_char(&mut self, c: char) {
-        self.input.push(c);
+        self.input.insert(c);
     }
 
-    /// Delete the last character of the label.
+    /// Delete the character before the caret.
     pub fn backspace(&mut self) {
-        self.input.pop();
+        self.input.backspace();
+    }
+
+    /// Delete the character at the caret (the `Del` key).
+    pub fn delete_forward(&mut self) {
+        self.input.delete_forward();
+    }
+
+    /// Move the caret one character left.
+    pub fn move_left(&mut self) {
+        self.input.move_left();
+    }
+
+    /// Move the caret one character right.
+    pub fn move_right(&mut self) {
+        self.input.move_right();
+    }
+
+    /// Move the caret to the start of the label.
+    pub fn move_home(&mut self) {
+        self.input.move_home();
+    }
+
+    /// Move the caret to the end of the label.
+    pub fn move_end(&mut self) {
+        self.input.move_end();
     }
 
     /// Accept the rename, consuming the input: the target session name and the
     /// typed label (trimmed). An empty label means "clear the override", which
     /// the usecase resolves.
     pub(super) fn confirm(self) -> (String, String) {
-        (self.target, self.input.trim().to_string())
+        (self.target, self.input.value().trim().to_string())
     }
 }
 

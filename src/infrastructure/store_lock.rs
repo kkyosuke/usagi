@@ -20,6 +20,7 @@
 
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use fs2::FileExt;
@@ -27,20 +28,40 @@ use fs2::FileExt;
 /// Name of the per-store lock file placed inside the store directory.
 pub const LOCK_FILE_NAME: &str = ".lock";
 
+/// How long [`StoreLock::acquire`] waits for the lock before giving up. A holder
+/// normally releases within milliseconds (one read-modify-write of a small
+/// directory), so this generously absorbs contention while still turning a stuck
+/// holder — a live process wedged mid-operation — into a reported error rather
+/// than an indefinitely frozen UI. (A *crashed* holder is not the concern: the
+/// OS drops an `flock` when the holding process dies.)
+const ACQUIRE_TIMEOUT: Duration = Duration::from_secs(10);
+/// How often [`StoreLock::acquire`] re-tries while waiting for the lock.
+const ACQUIRE_POLL: Duration = Duration::from_millis(20);
+
 /// An held exclusive advisory lock on a store directory. The lock is released
 /// when this guard is dropped.
 #[must_use = "the lock is released as soon as the guard is dropped"]
+#[derive(Debug)]
 pub struct StoreLock {
     file: File,
 }
 
 impl StoreLock {
-    /// Acquire the exclusive lock for the store rooted at `dir`, blocking until
-    /// it is available. Creates `dir` and the lock file if they do not exist.
+    /// Acquire the exclusive lock for the store rooted at `dir`, waiting up to
+    /// [`ACQUIRE_TIMEOUT`] for it. Creates `dir` and the lock file if they do not
+    /// exist; errors if the lock cannot be taken within the timeout.
     ///
     /// The returned guard must be held for the whole read-modify-write so other
     /// processes serialise behind it.
     pub fn acquire(dir: &Path) -> Result<Self> {
+        Self::acquire_with_timeout(dir, ACQUIRE_TIMEOUT)
+    }
+
+    /// [`acquire`](Self::acquire) with an explicit wait budget, so tests can use a
+    /// short one. Polls a non-blocking `try_lock` rather than blocking forever, so
+    /// a holder wedged mid-operation surfaces as an error the caller can report
+    /// instead of hanging the UI.
+    fn acquire_with_timeout(dir: &Path, timeout: Duration) -> Result<Self> {
         fs::create_dir_all(dir).context(format!("failed to create {}", dir.display()))?;
         let path = Self::path(dir);
         let file = File::options()
@@ -50,9 +71,25 @@ impl StoreLock {
             .truncate(false)
             .open(&path)
             .context(format!("failed to open {}", path.display()))?;
-        file.lock_exclusive()
-            .context(format!("failed to lock {}", path.display()))?;
-        Ok(Self { file })
+        let deadline = Instant::now() + timeout;
+        loop {
+            match file.try_lock_exclusive() {
+                Ok(()) => return Ok(Self { file }),
+                // Held by another process (or, rarely, a transient lock error):
+                // keep polling until the deadline, then surface it rather than
+                // wait forever.
+                Err(e) => {
+                    if Instant::now() >= deadline {
+                        return Err(anyhow::Error::new(e)).context(format!(
+                            "timed out waiting for the store lock {} (another usagi \
+                             process may be stuck holding it)",
+                            path.display()
+                        ));
+                    }
+                    std::thread::sleep(ACQUIRE_POLL);
+                }
+            }
+        }
     }
 
     /// Path of the lock file for the store rooted at `dir`.
@@ -125,6 +162,43 @@ mod tests {
         // Once released it proceeds.
         rx.recv_timeout(Duration::from_secs(5)).unwrap();
         handle.join().unwrap();
+    }
+
+    #[test]
+    fn acquire_times_out_when_the_lock_is_held() {
+        // While another holder has the lock, an acquire with a short budget gives
+        // up with an error instead of blocking forever (exercises the deadline-
+        // reached branch).
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("store");
+        let held = StoreLock::acquire(&dir).unwrap();
+
+        let err = StoreLock::acquire_with_timeout(&dir, Duration::from_millis(50)).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("timed out waiting for the store lock"));
+        drop(held);
+    }
+
+    #[test]
+    fn acquire_succeeds_after_a_holder_releases_mid_wait() {
+        // A holder releases shortly after a second acquire starts waiting, so the
+        // poll loop (the sleep-and-retry branch) eventually wins the lock rather
+        // than timing out.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("store");
+        fs::create_dir_all(&dir).unwrap();
+        let held = StoreLock::acquire(&dir).unwrap();
+
+        let dir2 = dir.clone();
+        let handle = thread::spawn(move || {
+            // Generous budget: the holder is dropped well within it.
+            StoreLock::acquire_with_timeout(&dir2, Duration::from_secs(5)).unwrap()
+        });
+        thread::sleep(Duration::from_millis(60));
+        drop(held);
+        let acquired = handle.join().unwrap();
+        drop(acquired);
     }
 
     #[test]

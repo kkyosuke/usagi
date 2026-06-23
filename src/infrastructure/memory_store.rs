@@ -15,7 +15,7 @@
 //! missing or unreadable.
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -38,6 +38,28 @@ const FILE_FORMAT_VERSION: u32 = 1;
 struct IndexFile {
     version: u32,
     memories: Vec<MemorySummary>,
+}
+
+/// The on-disk filename for a memory `name`, rejecting anything that is not a
+/// single safe path component so a name can never escape the memory directory.
+///
+/// Defense in depth: the usecase layer already slugifies names to
+/// ASCII-alphanumeric before they reach the store (see
+/// [`crate::usecase::memory`]), so a separator or `..` only arrives through a
+/// programming error — but [`MemoryStore`] is public, and `read`/`remove` would
+/// otherwise turn `../../etc/passwd` into a read or delete outside `.usagi/`.
+/// Mirrors the component check in [`crate::infrastructure::markdown_file`].
+fn memory_file_name(name: &str) -> Result<String> {
+    let mut components = Path::new(name).components();
+    let single_component =
+        matches!(components.next(), Some(Component::Normal(_))) && components.next().is_none();
+    if !single_component {
+        anyhow::bail!(
+            "refusing to use {name:?} as a memory name: it must be a single path \
+             component with no separators or `..`"
+        );
+    }
+    Ok(format!("{name}.md"))
 }
 
 /// File-based persistence rooted at a repository's `.usagi/memory/` directory.
@@ -119,7 +141,7 @@ impl MemoryStore {
 
     /// Read a single memory by name, or `None` if it does not exist.
     pub fn read(&self, name: &str) -> Result<Option<Memory>> {
-        let path = self.dir.join(format!("{name}.md"));
+        let path = self.dir.join(memory_file_name(name)?);
         let text = match fs::read_to_string(&path) {
             Ok(text) => text,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -156,7 +178,7 @@ impl MemoryStore {
     /// refresh the derived files. Takes the store lock for the duration.
     pub fn remove(&self, name: &str) -> Result<bool> {
         let _lock = self.lock()?;
-        let path = self.dir.join(format!("{name}.md"));
+        let path = self.dir.join(memory_file_name(name)?);
         match fs::remove_file(&path) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
@@ -303,6 +325,27 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let store = MemoryStore::new(tmp.path());
         assert!(store.read("nope").unwrap().is_none());
+    }
+
+    #[test]
+    fn read_and_remove_reject_a_path_traversing_name() {
+        // Defense in depth: even though callers slugify, the public store must
+        // not let a `..`-bearing or separator-bearing name escape the memory
+        // directory.
+        let tmp = tempfile::tempdir().unwrap();
+        let store = MemoryStore::new(tmp.path());
+        for bad in ["../../etc/passwd", "a/b", "..", "/etc/hosts"] {
+            assert!(
+                store.read(bad).is_err(),
+                "read should reject the traversing name {bad:?}"
+            );
+            assert!(
+                store.remove(bad).is_err(),
+                "remove should reject the traversing name {bad:?}"
+            );
+        }
+        // A plain single-component name is still accepted (here: simply absent).
+        assert!(store.read("ok-name").unwrap().is_none());
     }
 
     #[test]

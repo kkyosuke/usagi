@@ -200,24 +200,30 @@ impl Agent for ClaudeAgent {
         // light tasks to it.
         let system_prompt = super::session_system_prompt(local_llm_model);
         let hooks = claude_hooks_settings(&wiring.usagi_bin);
-        // The wiring arguments are single-quoted so the shell passes them through
-        // verbatim (none of these values contains a single quote). `--continue`
-        // resumes the most recent conversation in the worktree; placed right after
-        // the program name so it reads like a plain `claude -c` with usagi's wiring
-        // appended.
+        // Every wiring value is escaped for the single-quoted `sh -c` context via
+        // [`shell_single_quote`] rather than being wrapped in bare `'…'`. The JSON
+        // blobs and system prompt are normally quote-free, but a single quote can
+        // reach them through values they embed — a `usagi_bin` path containing an
+        // apostrophe (e.g. `/Users/o'brien/bin/usagi`), or a `local_llm.model` from
+        // a hand-edited `settings.json`. Bare quoting would let such a quote break
+        // out of the shell argument, so we always escape. `--continue` resumes the
+        // most recent conversation in the worktree; placed right after the program
+        // name so it reads like a plain `claude -c` with usagi's wiring appended.
         let resume_flag = if resume { "--continue " } else { "" };
         // A queued prompt rides along as Claude's positional query, so the agent
-        // opens interactively already working on it. Unlike the wiring above it is
-        // arbitrary user text, so it is escaped for the single-quoted shell context
-        // (see [`shell_single_quote`]). Placed last so it is the trailing argument.
+        // opens interactively already working on it. Placed last so it is the
+        // trailing argument.
         let prompt_arg = match initial_prompt {
             Some(prompt) => format!(" {}", shell_single_quote(prompt)),
             None => String::new(),
         };
+        let mcp_config = shell_single_quote(&mcp_config);
+        let system_prompt = shell_single_quote(&system_prompt);
+        let hooks = shell_single_quote(&hooks);
         format!(
-            "claude {resume_flag}--mcp-config '{mcp_config}' \
-             --append-system-prompt '{system_prompt}' \
-             --settings '{hooks}'{prompt_arg}"
+            "claude {resume_flag}--mcp-config {mcp_config} \
+             --append-system-prompt {system_prompt} \
+             --settings {hooks}{prompt_arg}"
         )
     }
 
@@ -434,6 +440,40 @@ mod tests {
             ClaudeAgent::new().launch_command(&wiring(r"C:\usagi\usagi.exe", None), false, None);
         assert!(launch.contains(r#""command":"C:\\usagi\\usagi.exe","args":["mcp"]"#));
         assert!(launch.contains(r"C:\\usagi\\usagi.exe agent-phase running"));
+    }
+
+    #[test]
+    fn launch_command_escapes_single_quotes_in_the_wiring() {
+        // A single quote can reach the wiring JSON through a binary path whose
+        // owning user has an apostrophe in their name (e.g. `/Users/o'brien/...`)
+        // or through a hand-edited `local_llm.model`. The whole `--mcp-config` /
+        // `--settings` / `--append-system-prompt` blobs must be escaped for the
+        // single-quoted shell context — a bare `'…'` wrap would let the quote
+        // break out and inject a command into the `sh -c` line.
+        let launch = ClaudeAgent::new().launch_command(
+            &wiring("/Users/o'brien/bin/usagi", Some("evil';touch /tmp/pwned;'")),
+            false,
+            None,
+        );
+        // Tokenizing the line the way `sh` would proves the quotes did not break
+        // out: a successful injection would split into extra tokens (e.g. a
+        // standalone `touch`/`/tmp/pwned`). Instead the malicious payload stays
+        // sealed inside the `--mcp-config` argument as inert JSON text.
+        let tokens = shell_words::split(&launch).expect("launch line is well-formed shell");
+        assert_eq!(tokens[0], "claude");
+        assert_eq!(tokens[1], "--mcp-config");
+        let mcp: serde_json::Value =
+            serde_json::from_str(&tokens[2]).expect("the --mcp-config token is intact JSON");
+        assert_eq!(
+            mcp["mcpServers"]["usagi-llm"]["args"][2],
+            "evil';touch /tmp/pwned;'"
+        );
+        assert_eq!(
+            mcp["mcpServers"]["usagi"]["command"],
+            "/Users/o'brien/bin/usagi"
+        );
+        // No token is the bare injected command — it never escaped the JSON.
+        assert!(!tokens.iter().any(|t| t == "touch" || t == "/tmp/pwned"));
     }
 
     #[test]

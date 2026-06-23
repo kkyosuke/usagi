@@ -1979,10 +1979,20 @@ fn render_frame_shows_the_inline_create_row_in_switch() {
 
 #[test]
 fn switch_rename_rows_show_the_target_and_typed_label() {
-    let rows = switch_rename_rows("main", "My main", 40);
+    // Caret at the end of the label.
+    let rows = switch_rename_rows("main", "My main", "My main".len(), 40);
     assert_eq!(rows.len(), 1);
     let plain = console::strip_ansi_codes(&rows[0]).into_owned();
     assert!(plain.contains("rename main: My main"));
+}
+
+#[test]
+fn switch_rename_rows_place_the_caret_mid_label() {
+    // With the caret in the middle of the label the block caret falls on the
+    // character at the cursor rather than past the end, matching the create row.
+    let rows = switch_rename_rows("main", "abc", 1, 40);
+    let plain = console::strip_ansi_codes(&rows[0]).into_owned();
+    assert!(plain.contains("rename main: abc"));
 }
 
 #[test]

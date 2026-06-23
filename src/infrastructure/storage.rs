@@ -86,9 +86,13 @@ impl Storage {
     }
 
     /// Load settings; returns defaults if the file does not exist.
+    ///
+    /// Loaded settings are sanitized (see [`Settings::sanitized`]) because the
+    /// file can be hand-edited: a `local_llm.model` outside the known allowlist
+    /// is dropped before it can reach the agent launch command.
     pub fn load_settings(&self) -> Result<Settings> {
         let file: Option<SettingsFile> = json_file::read(&self.settings_path())?;
-        Ok(file.map(|f| f.settings).unwrap_or_default())
+        Ok(file.map(|f| f.settings.sanitized()).unwrap_or_default())
     }
 
     pub fn save_settings(&self, settings: &Settings) -> Result<()> {
@@ -141,6 +145,27 @@ mod tests {
         storage.save_settings(&settings).unwrap();
 
         assert_eq!(storage.load_settings().unwrap(), settings);
+    }
+
+    #[test]
+    fn load_settings_sanitizes_a_hand_edited_local_llm_model() {
+        let (_dir, storage) = temp_storage();
+        fs::create_dir_all(storage.dir()).unwrap();
+        // A user (or synced dotfiles) hand-edits settings.json with a model name
+        // that never came from usagi's allowlist. On load it must be dropped so it
+        // cannot reach the agent launch command.
+        fs::write(
+            storage.settings_path(),
+            r#"{"version":1,"local_llm":{"enabled":true,"model":"x';touch /tmp/pwned;'"}}"#,
+        )
+        .unwrap();
+        let loaded = storage.load_settings().unwrap();
+        assert_eq!(
+            loaded.local_llm.model,
+            crate::domain::settings::DEFAULT_LOCAL_LLM_MODEL
+        );
+        // Other hand-edited fields still load (only the model is policed).
+        assert!(loaded.local_llm.enabled);
     }
 
     #[test]

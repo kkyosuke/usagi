@@ -818,6 +818,37 @@ fn rename_can_be_cancelled() {
 }
 
 #[test]
+fn rename_input_supports_caret_movement_and_forward_delete() {
+    // The rename input has the same mid-string editing affordances as create: the
+    // caret can move and a character can be deleted forward, not only at the end.
+    let mut state = state();
+    state.enter_switch(ReturnMode::Overview);
+    state.switch_move_down();
+    assert!(state.switch_begin_rename());
+    let rename = state.rename_mut().unwrap();
+    // The input opens pre-filled with the session's current label; clear it so
+    // the editing sequence starts from a known empty state.
+    rename.move_end();
+    while !rename.value().is_empty() {
+        rename.backspace();
+    }
+    rename.push_char('a');
+    rename.push_char('b');
+    rename.push_char('d'); // "abd", caret at end
+    rename.move_left(); // between 'b' and 'd'
+    rename.push_char('c'); // "abcd"
+    assert_eq!(rename.value(), "abcd");
+    assert_eq!(rename.cursor(), 3);
+    rename.move_home();
+    rename.delete_forward(); // drop 'a' -> "bcd"
+    assert_eq!(rename.value(), "bcd");
+    rename.move_end();
+    rename.backspace(); // drop 'd' -> "bc"
+    rename.move_right(); // already at end: a no-op
+    assert_eq!(rename.value(), "bc");
+}
+
+#[test]
 fn restore_sessions_carries_the_display_name_onto_the_pane_label() {
     let mut state = state();
     let mut record = session_record("feature", 1);

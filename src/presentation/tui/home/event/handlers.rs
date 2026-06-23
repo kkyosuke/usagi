@@ -223,12 +223,21 @@ pub(super) fn switch_key(
                 }
             }
             Key::Escape => state.rename_cancel(),
+            // Editing keys route to the input's own methods (the same set as the
+            // create input), so a typo can be fixed mid-label rather than only at
+            // the end. The guard above guarantees it is open.
             _ => {
                 let rename = state
                     .rename_mut()
                     .expect("rename input open while renaming");
                 match key {
                     Key::Backspace => rename.backspace(),
+                    Key::Del => rename.delete_forward(),
+                    // ←/→/Home/End move the caret mid-string.
+                    Key::ArrowLeft => rename.move_left(),
+                    Key::ArrowRight => rename.move_right(),
+                    Key::Home => rename.move_home(),
+                    Key::End => rename.move_end(),
                     Key::Char(c) => rename.push_char(c),
                     _ => {}
                 }

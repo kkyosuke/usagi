@@ -14,8 +14,6 @@
 //! checks it on read, so a hash collision (or a stale file synced from another
 //! machine) is detected and ignored rather than misattributed.
 
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
@@ -30,18 +28,41 @@ pub fn dir(subdir: &str) -> Result<PathBuf> {
 /// The file name a worktree's data is stored under: a stable hash of its
 /// canonical path rendered as hex, so the writer and reader agree on it without
 /// listing the directory. Pure given `canonical`.
+///
+/// The hash is **FNV-1a**, not the standard library's [`DefaultHasher`]: that
+/// hasher's algorithm and seed are an unspecified implementation detail that may
+/// change between Rust releases, which would silently orphan every existing
+/// phase/prompt file the moment usagi was rebuilt on a newer toolchain. FNV-1a is
+/// a fixed, specified construction, so the name a given path maps to is stable
+/// for the life of the on-disk format. The path is hashed via its lossy UTF-8
+/// form so the derivation is identical on every platform; on the rare path that
+/// is not valid UTF-8 a collision is still caught by each store stamping and
+/// re-checking the worktree it wrote (see the module docs).
+///
+/// [`DefaultHasher`]: std::collections::hash_map::DefaultHasher
 pub fn file_name(canonical: &Path) -> String {
-    let mut hasher = DefaultHasher::new();
-    canonical.hash(&mut hasher);
-    format!("{:016x}", hasher.finish())
+    // FNV-1a (64-bit): start from the offset basis, then for each byte XOR it in
+    // and multiply by the prime. <http://www.isthe.com/chongo/tech/comp/fnv/>
+    const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+    let mut hash = FNV_OFFSET_BASIS;
+    for byte in canonical.to_string_lossy().as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    format!("{hash:016x}")
 }
 
-/// The key a worktree is stored under: its canonical path, falling back to the
-/// path as given when it cannot be resolved (e.g. it no longer exists), so the
-/// writer and reader still derive the same name.
+/// The key a worktree is stored under: its canonical path. When the path cannot
+/// be resolved (e.g. it no longer exists) it falls back to the path made
+/// absolute against the current directory, and only then to the path as given —
+/// so a writer and reader that pass the same worktree, even as a relative path,
+/// still derive a matching name (a raw relative path and its absolute form would
+/// otherwise hash differently and the reader would miss the writer's file).
 pub fn key(worktree: &Path) -> PathBuf {
     worktree
         .canonicalize()
+        .or_else(|_| std::path::absolute(worktree))
         .unwrap_or_else(|_| worktree.to_path_buf())
 }
 
@@ -66,11 +87,33 @@ mod tests {
     }
 
     #[test]
-    fn key_falls_back_to_the_given_path_when_unresolvable() {
-        // A path that does not exist cannot be canonicalized, so it is returned
-        // verbatim — the writer and reader still derive a matching name.
+    fn file_name_hashes_a_known_path_to_a_fixed_value() {
+        // Locks the cross-version stability contract: FNV-1a of these exact
+        // strings must never change, or every existing on-disk file would be
+        // orphaned. If this fails, the hash construction was altered.
+        assert_eq!(file_name(Path::new("/tmp/x")), "6cc122ddf274426c");
+        assert_eq!(file_name(Path::new("/Users/a/proj")), "3b1b270bb17c20a0");
+    }
+
+    #[test]
+    fn key_falls_back_to_an_absolute_path_when_unresolvable() {
+        // An absolute path that does not exist cannot be canonicalized, so it is
+        // returned verbatim — the writer and reader still derive a matching name.
         let missing = Path::new("/usagi/does/not/exist");
         assert_eq!(key(missing), missing.to_path_buf());
+
+        // A *relative* unresolvable path is made absolute against the current
+        // directory rather than left relative, so a writer passing `./wt` and a
+        // reader passing the absolute form still agree on the file name.
+        let relative = Path::new("usagi-nonexistent-rel");
+        let keyed = key(relative);
+        assert!(keyed.is_absolute());
+        assert_eq!(keyed, std::env::current_dir().unwrap().join(relative));
+
+        // The empty path resolves through neither `canonicalize` nor
+        // `std::path::absolute`, so it falls through to the raw path verbatim
+        // (the final fallback). It never arises in practice but must not panic.
+        assert_eq!(key(Path::new("")), Path::new("").to_path_buf());
     }
 
     #[test]

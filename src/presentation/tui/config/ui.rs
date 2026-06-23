@@ -163,9 +163,13 @@ fn notice_lines(block_pad: &str, notice: Option<&str>) -> Vec<String> {
 ///
 /// Returns the footer text only; [`render_frame`] pins it to the bottom edge.
 fn footer_lines(width: usize) -> Vec<String> {
+    // `Space` is surfaced because it is the only key that opens the runtime
+    // install / model-picker modals — without it those actions are
+    // undiscoverable. `Enter` both saves (on the Save button) and confirms a
+    // field, so it is labelled generically rather than "save".
     vec![widgets::dim_line(
         width,
-        "↑↓: move · ←→: change · Enter: save · Esc: back",
+        "↑↓ move · ←→ change · Space select · Enter confirm · Esc back",
     )]
 }
 
@@ -266,6 +270,12 @@ pub fn render_frame(
     }
     lines.extend(footer);
 
+    // Clamp every row to the terminal width so a long value, notice, or footer on
+    // a narrow terminal is clipped (with an ellipsis) rather than wrapping and
+    // breaking the centred layout. Rows already built to width are unaffected.
+    for line in &mut lines {
+        *line = widgets::clip_to_width(line, width);
+    }
     lines
 }
 
@@ -387,7 +397,29 @@ mod tests {
     fn footer_lines_include_help_text() {
         let lines = footer_lines(80);
         assert!(lines.iter().any(|l| l.contains("Esc")));
-        assert!(lines.iter().any(|l| l.contains("save")));
+        // `Space` is surfaced so the install / model-picker modals are findable.
+        assert!(lines.iter().any(|l| l.contains("Space")));
+        assert!(lines.iter().any(|l| l.contains("Enter")));
+    }
+
+    #[test]
+    fn render_frame_clamps_rows_to_a_narrow_terminal() {
+        // A long notice on a narrow terminal must be clipped, not wrapped: every
+        // rendered line stays within the terminal width.
+        let config = sample_config();
+        let width = 30;
+        let frame = render_frame(
+            24,
+            width,
+            &config,
+            Some("とても長い通知メッセージ".repeat(5).as_str()),
+        );
+        for line in &frame {
+            assert!(
+                console::measure_text_width(line) <= width,
+                "line exceeds width {width}: {line:?}"
+            );
+        }
     }
 
     #[test]

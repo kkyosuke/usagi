@@ -47,21 +47,49 @@ pub(crate) fn to_pretty<T: Serialize + ?Sized>(value: &T) -> String {
     serde_json::to_string_pretty(value).unwrap_or_default()
 }
 
+/// Unwrap a tool-schema [`Value`] into its array of entries, used by composite
+/// servers to merge the schemas of the servers they wrap.
+///
+/// The schema builders return JSON arrays by construction, so this normally just
+/// takes the inner `Vec`. A non-array (a construction bug) degrades to no
+/// entries rather than panicking: `tools/list` is on the hot path and a panic
+/// there would abort the whole stdio server — taking every tool down — instead
+/// of merely advertising fewer tools.
+pub(crate) fn into_schema_array(value: Value) -> Vec<Value> {
+    match value {
+        Value::Array(items) => items,
+        _ => Vec::new(),
+    }
+}
+
 /// Run the MCP read/write loop for `service` over the given streams: read
 /// newline-delimited JSON-RPC requests, skip blank lines, and write each reply
 /// back, flushing per line. Generic over its streams so it is driven by stdio in
 /// production and by in-memory buffers in tests.
 pub fn serve(
     service: &dyn McpService,
-    input: impl BufRead,
+    mut input: impl BufRead,
     mut output: impl Write,
 ) -> std::io::Result<()> {
-    for line in input.lines() {
-        let line = line?;
+    // Read raw bytes and decode lossily rather than using `BufRead::lines`, which
+    // yields an `Err` on a line containing invalid UTF-8 — propagating that would
+    // let one malformed byte sequence from a misbehaving client terminate the
+    // whole server. A non-UTF-8 line instead becomes replacement characters that
+    // fail to parse as JSON, so [`dispatch_line`] returns a `-32700 parse error`
+    // and the loop keeps going. A genuine IO error (e.g. a broken pipe) still
+    // propagates and ends the loop.
+    let mut raw = Vec::new();
+    loop {
+        raw.clear();
+        if input.read_until(b'\n', &mut raw)? == 0 {
+            break; // EOF
+        }
+        let line = String::from_utf8_lossy(&raw);
+        let line = line.trim_end_matches(['\n', '\r']);
         if line.trim().is_empty() {
             continue;
         }
-        if let Some(response) = dispatch_line(service, &line) {
+        if let Some(response) = dispatch_line(service, line) {
             writeln!(output, "{response}")?;
             output.flush()?;
         }
@@ -132,10 +160,17 @@ fn dispatch_tool_call(service: &dyn McpService, params: Option<&Value>, id: Valu
     let Some(name) = params.and_then(|p| p.get("name")).and_then(Value::as_str) else {
         return error_response(id, -32602, "invalid params: missing tool name");
     };
-    let arguments = params
-        .and_then(|p| p.get("arguments"))
-        .cloned()
-        .unwrap_or_else(|| json!({}));
+    // Per MCP, `arguments` MUST be an object when present. Validate it at the
+    // framing layer so a client sending e.g. `"arguments": 42` gets a clear
+    // `-32602` rather than a serde type error leaking out of a tool handler. An
+    // absent or null `arguments` is treated as the empty object.
+    let arguments = match params.and_then(|p| p.get("arguments")) {
+        None | Some(Value::Null) => json!({}),
+        Some(value @ Value::Object(_)) => value.clone(),
+        Some(_) => {
+            return error_response(id, -32602, "invalid params: arguments must be an object")
+        }
+    };
 
     let result = match service.call_tool(name, arguments) {
         Ok(text) => json!({ "content": [{ "type": "text", "text": text }], "isError": false }),
@@ -238,6 +273,66 @@ mod tests {
     #[test]
     fn serve_processes_tool_calls_via_the_service() {
         let request = r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"do_thing","arguments":{}}}"#;
+        let input = format!("{request}\n");
+        let mut output = Vec::new();
+
+        serve(&EchoService, input.as_bytes(), &mut output).unwrap();
+
+        let response = String::from_utf8(output).unwrap();
+        assert!(response.contains("called do_thing"));
+    }
+
+    #[test]
+    fn serve_answers_a_non_utf8_line_with_a_parse_error_and_keeps_going() {
+        // A line of invalid UTF-8 must not terminate the server: it becomes a
+        // parse error, and a following valid request is still answered.
+        let mut input: Vec<u8> = Vec::new();
+        input.extend_from_slice(&[0xff, 0xfe, 0x00, b'\n']); // not valid UTF-8
+        input.extend_from_slice(b"{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"ping\"}\n");
+        let mut output = Vec::new();
+
+        serve(&EchoService, input.as_slice(), &mut output).unwrap();
+
+        let response = String::from_utf8(output).unwrap();
+        // Two replies: the parse error for the bad line, then the ping result.
+        assert!(response.contains("-32700"));
+        assert!(response.contains("\"id\":7"));
+        assert_eq!(response.lines().count(), 2);
+    }
+
+    #[test]
+    fn tool_call_with_non_object_arguments_is_an_invalid_params_error() {
+        // `arguments` present but not an object is rejected at the framing layer.
+        let request = r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"do_thing","arguments":42}}"#;
+        let input = format!("{request}\n");
+        let mut output = Vec::new();
+
+        serve(&EchoService, input.as_bytes(), &mut output).unwrap();
+
+        let response = String::from_utf8(output).unwrap();
+        assert!(response.contains("-32602"));
+        assert!(response.contains("arguments must be an object"));
+        // The tool was never reached.
+        assert!(!response.contains("called do_thing"));
+    }
+
+    #[test]
+    fn into_schema_array_takes_arrays_and_degrades_other_shapes_to_empty() {
+        // An array is unwrapped to its entries…
+        assert_eq!(
+            into_schema_array(json!([{"name": "a"}, {"name": "b"}])).len(),
+            2
+        );
+        // …and any non-array (a construction bug) degrades to no entries rather
+        // than panicking the `tools/list` path.
+        assert!(into_schema_array(json!({"not": "an array"})).is_empty());
+        assert!(into_schema_array(json!(null)).is_empty());
+    }
+
+    #[test]
+    fn tool_call_with_null_arguments_is_treated_as_empty() {
+        // An explicit null `arguments` is lenient — the same as omitting it.
+        let request = r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"do_thing","arguments":null}}"#;
         let input = format!("{request}\n");
         let mut output = Vec::new();
 

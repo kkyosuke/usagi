@@ -61,21 +61,11 @@ impl McpService for UsagiMcpServer {
 
     fn tool_schemas(&self) -> Value {
         // Advertise the issue/memory tools followed by the session tools, so a
-        // single `usagi` server exposes all of them. Both helpers return JSON
-        // arrays by construction.
-        let mut tools = self.issue.tool_schemas();
-        let session = self.session.tool_schemas();
-        tools
-            .as_array_mut()
-            .expect("issue tool schemas are a JSON array")
-            .extend(
-                session
-                    .as_array()
-                    .expect("session tool schemas are a JSON array")
-                    .iter()
-                    .cloned(),
-            );
-        tools
+        // single `usagi` server exposes all of them. `into_schema_array` keeps a
+        // malformed sub-schema from panicking `tools/list` (see its docs).
+        let mut tools = super::into_schema_array(self.issue.tool_schemas());
+        tools.extend(super::into_schema_array(self.session.tool_schemas()));
+        Value::Array(tools)
     }
 
     fn call_tool(&self, name: &str, arguments: Value) -> Result<String, String> {

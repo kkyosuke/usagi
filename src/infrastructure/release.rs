@@ -6,21 +6,66 @@
 //! pure parsing and "is a newer version available" decision live in
 //! [`crate::usecase::update_check`].
 
-use std::process::Command;
+use std::io::Read;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
+
+/// The longest the update check waits on the remote before giving up. An
+/// unreachable remote, a stalled proxy, or a credential prompt must not hang
+/// usagi: past this the git child is killed and the check reports "no update
+/// information".
+const FETCH_TIMEOUT: Duration = Duration::from_secs(10);
+/// How often the wait loop re-polls the git child.
+const FETCH_POLL: Duration = Duration::from_millis(50);
 
 /// Run `git ls-remote --tags --refs <repo_url>` and return its stdout.
 ///
 /// `--refs` filters out peeled tag entries (`^{}`). Returns `None` when git is
-/// missing, the remote could not be reached, or git exits non-zero — the caller
-/// treats any failure as "no update information", so a missing network never
-/// surfaces an error.
+/// missing, the remote could not be reached, git exits non-zero, or the fetch
+/// exceeds [`FETCH_TIMEOUT`] — the caller treats any failure as "no update
+/// information", so a missing or slow network never surfaces an error or hangs.
 pub fn fetch_tags(repo_url: &str) -> Option<String> {
-    let output = Command::new("git")
+    let mut child = Command::new("git")
         .args(["ls-remote", "--tags", "--refs", repo_url])
-        .output()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        // Never block on an interactive credential prompt in this headless check.
+        .env("GIT_TERMINAL_PROMPT", "0")
+        // Abort an HTTP transfer that stalls below 1 byte/s for the window, so a
+        // half-open connection is bounded even if the kill below races it.
+        .env("GIT_HTTP_LOW_SPEED_LIMIT", "1")
+        .env(
+            "GIT_HTTP_LOW_SPEED_TIME",
+            FETCH_TIMEOUT.as_secs().to_string(),
+        )
+        .spawn()
         .ok()?;
-    if !output.status.success() {
+
+    // Drain stdout on a thread so a large tag list cannot deadlock on a full pipe
+    // while the main thread bounds the wall-clock wait.
+    let mut stdout = child.stdout.take()?;
+    let reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = stdout.read_to_end(&mut buf);
+        buf
+    });
+
+    let deadline = Instant::now() + FETCH_TIMEOUT;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(FETCH_POLL),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
+        }
+    };
+
+    let bytes = reader.join().ok()?;
+    if !status?.success() {
         return None;
     }
-    Some(String::from_utf8_lossy(&output.stdout).into_owned())
+    Some(String::from_utf8_lossy(&bytes).into_owned())
 }

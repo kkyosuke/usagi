@@ -377,11 +377,18 @@ pub(super) fn switch_create_rows(
 
 /// Builds the inline rename row appended to the left pane in 切替 (Switch) while
 /// editing a session's sidebar label: `rename <target>: <input>` with a block
-/// caret at the end, clipped to the pane width. The label is cosmetic, so there
-/// is no validation row.
-pub(super) fn switch_rename_rows(target: &str, input: &str, left_w: usize) -> Vec<String> {
+/// caret on the character being edited (`cursor`, a byte offset into `input`),
+/// clipped to the pane width. The label is cosmetic, so there is no validation
+/// row.
+pub(super) fn switch_rename_rows(
+    target: &str,
+    input: &str,
+    cursor: usize,
+    left_w: usize,
+) -> Vec<String> {
     let base = Style::new().cyan().bold();
-    let value = widgets::block_caret(input, "", &base);
+    let (before, after) = input.split_at(cursor);
+    let value = widgets::block_caret(before, after, &base);
     let label = clip_to_width(
         &format!("{}{value}", base.apply_to(format!("rename {target}: "))),
         left_w,

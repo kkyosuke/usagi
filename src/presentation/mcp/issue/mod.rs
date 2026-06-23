@@ -117,21 +117,11 @@ impl McpService for McpServer {
 
     fn tool_schemas(&self) -> Value {
         // Advertise the issue tools followed by the memory tools, so one `usagi`
-        // server exposes both for a repository. Both helpers return JSON arrays
-        // by construction.
-        let mut tools = issue_tool_schemas();
-        let memory = super::memory::tool_schemas();
-        tools
-            .as_array_mut()
-            .expect("issue tool schemas are a JSON array")
-            .extend(
-                memory
-                    .as_array()
-                    .expect("memory tool schemas are a JSON array")
-                    .iter()
-                    .cloned(),
-            );
-        tools
+        // server exposes both for a repository. `into_schema_array` keeps a
+        // malformed sub-schema from panicking `tools/list` (see its docs).
+        let mut tools = super::into_schema_array(issue_tool_schemas());
+        tools.extend(super::into_schema_array(super::memory::tool_schemas()));
+        Value::Array(tools)
     }
 
     fn call_tool(&self, name: &str, arguments: Value) -> Result<String, String> {

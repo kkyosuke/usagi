@@ -24,7 +24,9 @@ impl Version {
     /// A leading `v` / `V` is ignored, as is any pre-release (`-…`) or build
     /// (`+…`) suffix. A missing minor or patch component defaults to `0` (so
     /// `1` parses as `1.0.0` and `1.2` as `1.2.0`). Returns `None` when a
-    /// present component is not a non-negative integer.
+    /// present component is not a non-negative integer, or when the core carries
+    /// a *fourth* component (e.g. `1.2.3.4`) — a malformed tag is rejected rather
+    /// than silently truncated to `1.2.3`.
     pub fn parse(s: &str) -> Option<Version> {
         let s = s.trim();
         let s = s.strip_prefix(['v', 'V']).unwrap_or(s);
@@ -34,6 +36,11 @@ impl Version {
         let major = parts.next()?.parse().ok()?;
         let minor = parts.next().map_or(Some(0), |p| p.parse().ok())?;
         let patch = parts.next().map_or(Some(0), |p| p.parse().ok())?;
+        // A present fourth component means this is not a `major.minor.patch`
+        // version; reject it instead of discarding the extra digits.
+        if parts.next().is_some() {
+            return None;
+        }
         Some(Version {
             major,
             minor,
@@ -84,6 +91,17 @@ mod tests {
         assert!(Version::parse("abc").is_none());
         assert!(Version::parse("1.x.0").is_none());
         assert!(Version::parse("1.2.z").is_none());
+    }
+
+    #[test]
+    fn rejects_a_fourth_component() {
+        // More than three numeric components is not a major.minor.patch version;
+        // it is rejected rather than truncated to 1.2.3.
+        assert!(Version::parse("1.2.3.4").is_none());
+        assert!(Version::parse("v1.2.3.0").is_none());
+        // A fourth component that is itself junk is rejected too (it never
+        // reaches the patch parse).
+        assert!(Version::parse("1.2.3.x").is_none());
     }
 
     #[test]

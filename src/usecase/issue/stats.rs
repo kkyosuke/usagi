@@ -130,6 +130,10 @@ fn group_key(item: &ListedIssue, axis: GroupBy) -> (String, String) {
             (format!("{rank}"), s.priority.to_string())
         }
         GroupBy::Milestone => match &s.milestone {
+            // Milestones are free-text, so they sort lexically (the `0` prefix
+            // only keeps every named milestone ahead of the `~` no-milestone
+            // bucket). Unlike `Parent` there is no numeric form to zero-pad, so
+            // `v10` sorts before `v2` — acceptable for arbitrary labels.
             Some(m) => (format!("0{m}"), m.clone()),
             None => ("~".to_string(), "(no milestone)".to_string()),
         },
