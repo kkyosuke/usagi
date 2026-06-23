@@ -56,6 +56,18 @@ impl ProjectList {
         }
         self.selected_index = (self.selected_index + 1) % self.workspaces.len();
     }
+
+    /// Move the selected workspace to the top of the list and keep the cursor on
+    /// it. Used after opening a project so the most recently opened one sorts
+    /// first, mirroring the persisted `updated_at` order. No-op when empty.
+    pub fn promote_selected(&mut self) {
+        if self.workspaces.is_empty() {
+            return;
+        }
+        let workspace = self.workspaces.remove(self.selected_index);
+        self.workspaces.insert(0, workspace);
+        self.selected_index = 0;
+    }
 }
 
 #[cfg(test)]
@@ -114,6 +126,27 @@ mod tests {
         list.move_up();
         assert_eq!(list.selected_index(), 0);
         list.move_down();
+        assert_eq!(list.selected_index(), 0);
+    }
+
+    #[test]
+    fn promote_selected_moves_the_selection_to_the_top() {
+        let mut list = sample();
+        list.move_down();
+        list.move_down(); // select "c"
+        list.promote_selected();
+        // "c" is now first and stays under the cursor; the others keep order.
+        let names: Vec<_> = list.workspaces().iter().map(|w| w.name.as_str()).collect();
+        assert_eq!(names, ["c", "a", "b"]);
+        assert_eq!(list.selected_index(), 0);
+        assert_eq!(list.selected().unwrap().name, "c");
+    }
+
+    #[test]
+    fn promote_selected_is_a_noop_on_an_empty_list() {
+        let mut list = ProjectList::new(Vec::new());
+        list.promote_selected();
+        assert!(list.is_empty());
         assert_eq!(list.selected_index(), 0);
     }
 }

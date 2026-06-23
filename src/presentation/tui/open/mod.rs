@@ -35,6 +35,12 @@ pub fn run(term: &Term) -> Result<Outcome> {
     };
     let mut reader = TermKeyReader::new(term.clone());
     event::event_loop(term, &mut reader, list, notice, &mut |t, ws| {
+        // Mark the workspace as just-used so it sorts to the top of the list on
+        // the next load. A failure to persist must not block opening, so the
+        // error is swallowed.
+        if let Ok(storage) = Storage::open_default() {
+            let _ = workspace::touch(&storage, &ws.name);
+        }
         home::run(t, ws)
     })
 }

@@ -64,11 +64,16 @@ pub fn event_loop(
                 notice = None;
             }
             Key::Enter => {
-                if let Some(workspace) = list.selected() {
-                    match open_home(term, workspace)? {
+                // Clone the selection so the immutable borrow is dropped before
+                // promoting it to the top of the list on return.
+                if let Some(workspace) = list.selected().cloned() {
+                    match open_home(term, &workspace)? {
                         // The home screen drew over the list; force a full
-                        // repaint of it on the next pass.
+                        // repaint of it on the next pass. The just-opened
+                        // project moves to the top so the list reflects
+                        // most-recently-opened order without a reload.
                         home::Outcome::Back => {
+                            list.promote_selected();
                             notice = None;
                             painter.reset();
                         }
