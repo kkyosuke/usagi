@@ -1771,6 +1771,8 @@ fn switch_begin_note_is_a_noop_on_the_root_row() {
     state.restore_sessions(vec![session_record("alpha", 1)]);
     assert!(!state.switch_begin_note());
     assert!(state.note_editor().is_none());
+    // The mutable accessor is likewise empty when no editor is open.
+    assert!(state.note_editor_mut().is_none());
 }
 
 #[test]
