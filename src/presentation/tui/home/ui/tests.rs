@@ -2333,3 +2333,55 @@ fn render_frame_draws_the_note_editor_overlay() {
     assert!(frame.contains("second"));
     assert!(frame.contains("Ctrl-S: save"));
 }
+
+#[test]
+fn switch_preview_shows_the_selected_sessions_note_above_the_preview() {
+    let mut state = state_with(vec![worktree(Some("main"), false, BranchStatus::Local)]);
+    let session = SessionRecord {
+        name: "alpha".to_string(),
+        display_name: None,
+        note: Some("do X\ndo Y".to_string()),
+        root: PathBuf::from("/repo/.usagi/sessions/alpha"),
+        worktrees: vec![worktree(Some("alpha"), false, BranchStatus::Local)],
+        created_at: Utc::now(),
+    };
+    state.restore_sessions(vec![session]);
+    state.enter_switch(super::super::state::ReturnMode::Overview);
+
+    // On the root row there is no session note, so the block is absent.
+    let root = stripped(&switch_preview(&state, 40, 12));
+    assert!(!root.contains("do X"));
+
+    // Moving onto the session shows its note in a `note` block above the preview.
+    state.switch_move_down();
+    let preview = stripped(&switch_preview(&state, 40, 12));
+    assert!(preview.contains("note"), "the note block has a title");
+    assert!(preview.contains("do X"));
+    assert!(preview.contains("do Y"));
+}
+
+#[test]
+fn switch_preview_note_block_elides_a_long_note() {
+    let note = (0..8)
+        .map(|i| format!("todo {i}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut state = state_with(vec![worktree(Some("main"), false, BranchStatus::Local)]);
+    state.restore_sessions(vec![SessionRecord {
+        name: "alpha".to_string(),
+        display_name: None,
+        note: Some(note),
+        root: PathBuf::from("/repo/.usagi/sessions/alpha"),
+        worktrees: vec![worktree(Some("alpha"), false, BranchStatus::Local)],
+        created_at: Utc::now(),
+    }]);
+    state.enter_switch(super::super::state::ReturnMode::Overview);
+    state.switch_move_down();
+
+    let preview = stripped(&switch_preview(&state, 40, 16));
+    // The first lines show; the overflow is elided with a `… (N more)` line.
+    assert!(preview.contains("todo 0"));
+    assert!(preview.contains("todo 5"));
+    assert!(preview.contains("more)"));
+    assert!(!preview.contains("todo 7"));
+}

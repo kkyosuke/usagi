@@ -1724,3 +1724,23 @@ fn note_editor_edits_confirm_and_cancel() {
     assert!(state.note_editor().is_none());
     assert!(!state.note_editor_reattaches());
 }
+
+#[test]
+fn selected_session_note_reads_the_cursor_rows_note() {
+    // `state_on_alpha` records alpha with the note "existing" and parks the
+    // cursor on it.
+    let state = state_on_alpha();
+    assert_eq!(state.selected_session_note(), Some("existing"));
+}
+
+#[test]
+fn selected_session_note_is_none_on_root_and_for_a_noteless_session() {
+    let mut state = state();
+    // `session_record` records no note.
+    state.restore_sessions(vec![session_record("alpha", 1)]);
+    // The cursor starts on the root row (not a session).
+    assert_eq!(state.selected_session_note(), None);
+    // Moving onto a session with no note still reports `None`.
+    state.switch_move_down();
+    assert_eq!(state.selected_session_note(), None);
+}

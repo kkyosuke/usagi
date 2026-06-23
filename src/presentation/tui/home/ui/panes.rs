@@ -813,6 +813,33 @@ fn switch_rename_pane(rename: &RenameInput, width: usize, rows: usize) -> Vec<St
 /// live-terminal re-attach; a session with no live shell previews its 在席 action
 /// menu. The header line carries the session's status and agent state. The key
 /// hints live in the footer, so the preview uses the pane's full height.
+/// Most note lines the 切替 right-pane note block shows before it elides the
+/// rest with a `… (N more)` line, so a long note never crowds out the preview
+/// below it (the full text is in the editor, `n` / `Ctrl-E`).
+const SWITCH_NOTE_MAX_LINES: usize = 6;
+
+/// A bordered `note` block for the 切替 (Switch) right pane: the highlighted
+/// session's note — its next-time TODO — clipped to the pane width and capped to
+/// [`SWITCH_NOTE_MAX_LINES`] lines so it stays a glanceable header above the
+/// preview rather than taking the whole pane. Shown only when the session has a
+/// note; the full text (and editing) is the editor's job.
+fn switch_note_block(note: &str, width: usize) -> Vec<String> {
+    let inner = width.saturating_sub(4).max(1);
+    let all: Vec<&str> = note.lines().collect();
+    let shown = all.len().min(SWITCH_NOTE_MAX_LINES);
+    let mut body: Vec<String> = all[..shown]
+        .iter()
+        .map(|line| clip_to_width(line, inner))
+        .collect();
+    if all.len() > shown {
+        body.push(clip_to_width(
+            &format!("… ({} more)", all.len() - shown),
+            inner,
+        ));
+    }
+    widgets::boxed("note", inner, &body)
+}
+
 pub(super) fn switch_preview(state: &HomeState, width: usize, rows: usize) -> Vec<String> {
     let body_rows = rows;
     // Identify the highlighted row. `selected()` is `Some` for a real session
@@ -855,6 +882,14 @@ pub(super) fn switch_preview(state: &HomeState, width: usize, rows: usize) -> Ve
         if live { state.terminal_tabs() } else { None },
         width,
     );
+
+    // The highlighted session's note (its next-time TODO) sits just under the
+    // header, so returning to a session you left mid-way shows what's next the
+    // moment you select it — no need to open the editor. Capped in height so the
+    // preview below stays visible; absent when the session has no note.
+    if let Some(note) = state.selected_session_note() {
+        lines.extend(switch_note_block(note, width));
+    }
 
     if live {
         // Selecting re-attaches the running shell / agent: preview its actual
