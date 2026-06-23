@@ -92,7 +92,7 @@ src/
 │   ├── worktree_keyed_store.rs # worktree → ファイル名（canonical path のハッシュ）導出の正本。agent_state_store / agent_prompt_store が共用
 │   ├── agent_state_store.rs    # worktree 別の Agent phase の記録/読み出し・フック JSON のパース（~/.usagi/agent-state/。遷移ポリシーは usecase/agent_phase）
 │   ├── agent_prompt_store.rs   # worktree 別に session_prompt のプロンプトをキュー/取り出し（~/.usagi/agent-prompts/）
-│   ├── agent/                  # Agent port のアダプタ（Claude は MCP・システムプロンプト・フックを serde_json で組み立てて launch コマンド生成 / Gemini は素起動）・agent_for
+│   ├── agent/                  # Agent port のアダプタ（Claude は MCP・システムプロンプト・フックを serde_json で組み立てて launch コマンド生成 / Codex は MCP・システムプロンプト(developer_instructions)・フックを -c 設定上書きで注入し resume/forget も対応 / Gemini は素起動）・session_system_prompt 共有・agent_for
 │   ├── issue_store.rs          # <repo>/.usagi/issues/ の markdown + index.json（IssueStore）
 │   └── memory_store.rs         # <repo>/.usagi/memory/ の markdown + MEMORY.md + index.json（MemoryStore）
 │
@@ -161,7 +161,7 @@ src/
 | TUI | `console` + `crossterm` + 自前の差分描画（`FramePainter`） | `console::Term` で端末制御・キー入力、`crossterm` でマウス/キーイベント解析・raw mode、描画は `screen.rs` の差分レンダラ（**ratatui は不使用**） |
 | 疑似ターミナル | `portable-pty` + `vt100` | 埋め込みターミナルの起動と画面状態の解釈 |
 | Git 操作 | システムの `git` コマンド | 読み取り専用検査 + worktree 追加（**git2 は不使用**） |
-| AI 連携 | Agent CLI（`claude` / `gemini` など）+ `ollama` サブプロセス | エージェント起動・ローカル LLM 委譲（専用クレートは持たず外部プロセスを起動） |
+| AI 連携 | Agent CLI（`claude` / `codex` / `gemini` など）+ `ollama` サブプロセス | エージェント起動・ローカル LLM 委譲（専用クレートは持たず外部プロセスを起動） |
 | 通知 | `notify-rust` | 入力待ち時のデスクトップ通知 |
 | 並列処理 | `rayon` | issue 一覧読み込みなどの並列化 |
 | シリアライズ | `serde` / `serde_json` | JSON 永続化（`serde_yaml` は不採用） |

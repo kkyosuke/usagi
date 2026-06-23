@@ -17,22 +17,6 @@ use serde::Serialize;
 
 use crate::domain::agent::{Agent, AgentWiring};
 
-/// System-prompt addendum injected into agents launched from a usagi session.
-///
-/// Every agent `:agent` starts already lives inside the session's dedicated
-/// worktree, so the usual "create a worktree first" workflow step is redundant
-/// here. We tell the agent up front to skip it and work in place. Kept free of
-/// single quotes so it survives the single-quoted shell argument verbatim.
-const SESSION_WORKTREE_PROMPT: &str = "あなたは usagi が管理するセッション専用の worktree 内で起動されています。このディレクトリは既に独立した作業環境のため、新たに git worktree を作成する必要はありません。ここで直接作業を進めてください。";
-
-/// System-prompt addendum added when a local LLM MCP server is wired in.
-///
-/// It nudges the cloud agent to offload light, low-stakes work (summaries,
-/// naming, boilerplate, simple transforms) to the `local_llm_ask` tool so the
-/// cloud model's tokens are spent on the work that actually needs it. Kept free
-/// of single quotes so it survives the single-quoted shell argument verbatim.
-const LOCAL_LLM_PROMPT: &str = "トークン節約のため、要約・命名・定型文の生成・単純な変換といった軽量で重要度の低いタスクは、MCP ツール local_llm_ask（ローカル LLM）に委譲してください。判断が必要な作業や重要な実装はあなた自身が行ってください。";
-
 /// One MCP server entry: the program to run and its arguments.
 #[derive(Serialize)]
 struct McpServer {
@@ -222,10 +206,7 @@ impl Agent for ClaudeAgent {
         // The system prompt tells the agent it is already inside a usagi worktree,
         // so it skips creating one, and — when the local LLM is on — to delegate
         // light tasks to it.
-        let system_prompt = match local_llm_model {
-            Some(_) => format!("{SESSION_WORKTREE_PROMPT}{LOCAL_LLM_PROMPT}"),
-            None => SESSION_WORKTREE_PROMPT.to_string(),
-        };
+        let system_prompt = super::session_system_prompt(local_llm_model);
         let hooks = claude_hooks_settings(&wiring.usagi_bin);
         // The wiring arguments are single-quoted so the shell passes them through
         // verbatim (none of these values contains a single quote). `--continue`
