@@ -2924,6 +2924,45 @@ fn switch_n_opens_the_note_editor_edits_the_buffer_and_saves() {
 }
 
 #[test]
+fn switch_ctrl_e_opens_the_note_editor_like_n() {
+    // 切替, `Ctrl-E` (matching 在席 / 没入) opens the highlighted session's note
+    // editor just like `n`; Ctrl-S persists it through `set_note`.
+    let recorded = RefCell::new(Vec::<(String, String)>::new());
+    let mut set_note = |name: &str, text: &str| {
+        recorded
+            .borrow_mut()
+            .push((name.to_string(), text.to_string()));
+        noop_set_note(name, text)
+    };
+    let mut open: fn(&mut HomeState, &Path, bool, bool) -> Result<PaneExit> = noop_open;
+    let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = noop_preview;
+
+    let mut keys = vec![
+        Ok(Key::Char(CTRL_O)), // Overview -> Switch (cursor on root)
+        Ok(Key::ArrowDown),    // root -> alpha
+        Ok(Key::Char(CTRL_E)), // open the note editor for alpha
+    ];
+    keys.extend(typed("hi"));
+    keys.push(Ok(Key::Char(CTRL_S))); // save
+    keys.push(Ok(Key::Escape)); // Switch -> Overview
+    keys.push(Ok(Key::CtrlC)); // quit
+
+    let outcome = run_notes(
+        keys,
+        state_with_sessions(&["alpha", "beta"]),
+        &mut open,
+        &mut preview,
+        &mut set_note,
+    )
+    .unwrap();
+    assert!(matches!(outcome, Outcome::Quit));
+    assert_eq!(
+        *recorded.borrow(),
+        vec![("alpha".to_string(), "hi".to_string())]
+    );
+}
+
+#[test]
 fn switch_n_note_editor_cancel_discards_the_edit() {
     // Esc closes the editor without persisting anything.
     let recorded = RefCell::new(Vec::<(String, String)>::new());
