@@ -1,5 +1,6 @@
 use super::fix::{detect_manager, fix_one, manual_hint};
 use super::*;
+use crate::domain::settings::AgentCli;
 
 #[test]
 fn health_labels_cover_every_variant() {
@@ -63,12 +64,49 @@ fn config_check_is_missing_when_settings_cannot_be_read() {
 }
 
 #[test]
-fn diagnose_covers_tools_notifications_and_config() {
+fn agent_check_reports_presence_as_ok_or_warn() {
+    // An installed agent is `ok` with its launch command as the detail; a missing
+    // one is `warn` (optional — doctor still exits 0), keyed by its display name.
+    let runner = FakeRunner::new(vec!["codex-fugu"], Ok(true));
+
+    let present = agent_check(AgentCli::CodexFugu, &runner);
+    assert_eq!(present.name, "sakana.ai");
+    assert_eq!(present.health, Health::Ok);
+    assert_eq!(present.detail.as_deref(), Some("codex-fugu"));
+
+    let absent = agent_check(AgentCli::Claude, &runner);
+    assert_eq!(absent.name, "Claude");
+    assert_eq!(absent.health, Health::Warn);
+    assert!(absent.detail.unwrap().contains("not found"));
+}
+
+#[test]
+fn agent_checks_cover_every_agent_in_canonical_order() {
+    let runner = FakeRunner::new(vec![], Ok(true));
+    let names: Vec<_> = agent_checks(&runner).into_iter().map(|c| c.name).collect();
+    assert_eq!(names, vec!["Claude", "Codex", "sakana.ai", "Gemini"]);
+}
+
+#[test]
+fn diagnose_covers_tools_agents_notifications_and_config() {
     let dir = tempfile::tempdir().expect("failed to create temp dir");
     let storage = Storage::new(dir.path().join("usagi"));
-    // The local LLM is off by default, so its checks are not appended.
+    // The local LLM is off by default, so its checks are not appended. The four
+    // agent presence checks sit between the required tools and notifications.
     let names: Vec<_> = diagnose(&storage).into_iter().map(|c| c.name).collect();
-    assert_eq!(names, vec!["git", "bash", "notifications", "config"]);
+    assert_eq!(
+        names,
+        vec![
+            "git",
+            "bash",
+            "Claude",
+            "Codex",
+            "sakana.ai",
+            "Gemini",
+            "notifications",
+            "config"
+        ]
+    );
 }
 
 #[test]
@@ -79,7 +117,19 @@ fn diagnose_skips_local_llm_when_settings_cannot_be_read() {
     // diagnose cannot know whether the local LLM is on and skips its checks.
     std::fs::create_dir_all(storage.dir().join("settings.json")).unwrap();
     let names: Vec<_> = diagnose(&storage).into_iter().map(|c| c.name).collect();
-    assert_eq!(names, vec!["git", "bash", "notifications", "config"]);
+    assert_eq!(
+        names,
+        vec![
+            "git",
+            "bash",
+            "Claude",
+            "Codex",
+            "sakana.ai",
+            "Gemini",
+            "notifications",
+            "config"
+        ]
+    );
 }
 
 #[test]

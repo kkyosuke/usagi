@@ -58,6 +58,7 @@ src/
 │   └── version.rs              # セマンティックバージョン Version（パース・比較）
 │
 ├── usecase/                    # ビジネスロジック
+│   ├── agent.rs                # PATH 上にインストール済みの Agent CLI を列挙（Config 画面の選択肢・doctor の有無チェックが共用）
 │   ├── agent_phase.rs          # Agent phase の遷移ポリシー（SessionStart→ready を記録してよいかの判断）
 │   ├── project.rs              # クローン・既存登録 + 状態同期（.gitignore の行編集は infrastructure/gitignore に委譲）
 │   ├── workspace.rs            # グローバル登録の add/list/remove/touch
@@ -69,7 +70,7 @@ src/
 │   │   ├── mod.rs             # create / remove と state.json への記録（SessionRecord）
 │   │   ├── tree.rs            # ルート再帰走査・worktree 構築・非 git コピー・リポジトリ探索
 │   │   └── reconcile.rs       # state.json と .usagi/sessions/ の照合・孤児ディレクトリの強制削除
-│   ├── doctor/                 # 依存ツールの導入状況チェック（mod=診断 / runner=CommandRunner / fix=--fix 導入）
+│   ├── doctor/                 # 依存ツール・Agent CLI の導入状況チェック（mod=診断 / runner=CommandRunner / fix=--fix 導入）
 │   ├── issue/                  # issue の CRUD・検索・readiness（mod=型/CRUD/annotate / stats=集計・grouping / tree=依存ツリー / gantt=ガント / render=一覧行・統計行のテキスト整形の SSoT（CLI・TUI 共用） / view=JSON 出力の SSoT（CLI・MCP 共用））
 │   ├── memory/                 # メモリの upsert/CRUD・検索・種別フィルタ（mod=型/save/get/list/search/update/delete / view=JSON 出力の SSoT（CLI・MCP 共用））
 │   ├── local_llm.rs            # ollama・モデルの有無判定とインストール（ensure）

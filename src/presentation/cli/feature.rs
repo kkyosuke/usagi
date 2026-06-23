@@ -7,13 +7,9 @@
 use crate::domain::agent_feature::{support, AgentFeature};
 use crate::domain::settings::AgentCli;
 
-/// The CLIs shown as columns, with their header labels, left to right.
-const COLUMNS: [(AgentCli, &str); 4] = [
-    (AgentCli::Claude, "Claude"),
-    (AgentCli::Codex, "Codex"),
-    (AgentCli::CodexFugu, "sakana.ai"),
-    (AgentCli::Gemini, "Gemini"),
-];
+/// The CLIs shown as columns, left to right: every [`AgentCli`] in canonical
+/// order, labelled by its display name (the domain's single source of truth).
+const COLUMNS: [AgentCli; 4] = AgentCli::ALL;
 
 /// Entry point for `usagi feature`: print the support matrix.
 pub fn run() -> anyhow::Result<()> {
@@ -34,7 +30,7 @@ fn render() -> Vec<String> {
     ];
 
     let header: Vec<&str> = std::iter::once("機能")
-        .chain(COLUMNS.iter().map(|(_, label)| *label))
+        .chain(COLUMNS.iter().map(|cli| cli.display_name()))
         .collect();
     lines.push(format!("| {} |", header.join(" | ")));
 
@@ -48,7 +44,7 @@ fn render() -> Vec<String> {
         cells.extend(
             COLUMNS
                 .iter()
-                .map(|(cli, _)| support(*cli, feature).glyph().to_string()),
+                .map(|cli| support(*cli, feature).glyph().to_string()),
         );
         lines.push(format!("| {} |", cells.join(" | ")));
     }
@@ -88,7 +84,8 @@ mod tests {
             .iter()
             .find(|line| line.starts_with("| 機能 |"))
             .unwrap();
-        for (_, label) in COLUMNS {
+        for cli in COLUMNS {
+            let label = cli.display_name();
             assert!(header.contains(label), "header missing column {label}");
         }
         // The alignment separator row follows the header.
