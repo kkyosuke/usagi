@@ -312,7 +312,7 @@ pub(super) fn footer_line(width: usize, state: &HomeState) -> String {
     if state.note_editor().is_some() {
         return widgets::dim_line(
             width,
-            "[note]  Ctrl-S: save / Esc: cancel / Enter: newline / ←→↑↓: move",
+            "[note]  Ctrl-S: save / Esc: cancel / Enter: newline / ←→↑↓: move / Shift+←→↑↓: select",
         );
     }
     // The preview captures the keyboard, so its controls take over the footer

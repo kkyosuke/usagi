@@ -293,6 +293,15 @@ fn mouse_seq_kind(key: &Key) -> Option<(MouseSeq, Vec<char>)> {
 fn next_input(mut read: impl FnMut() -> io::Result<Key>) -> io::Result<Input> {
     loop {
         let key = read()?;
+        // A modified cursor key (e.g. `Shift`+arrow) arrives as `CSI 1 ; <mod>
+        // <letter>`, which `console` only half-decodes — the `1 ;` head becomes an
+        // `UnknownEscSeq` and the `<mod><letter>` tail leaks as stray `Char`s.
+        // Reassemble the whole sequence into one key so the event loop sees a
+        // single press instead of those strays (the note editor maps the
+        // `Shift` ones to a selection; see `home::event::handlers`).
+        if is_modified_key_head(&key) {
+            return Ok(Input::Key(read_modified_key(&mut read)?));
+        }
         let scroll = match mouse_seq_kind(&key) {
             Some((MouseSeq::Sgr, head)) => read_sgr(head, &mut read)?,
             Some((MouseSeq::X10, head)) => read_x10(head, &mut read)?,
@@ -305,6 +314,34 @@ fn next_input(mut read: impl FnMut() -> io::Result<Key>) -> io::Result<Input> {
             return Ok(Input::Scroll(scroll));
         }
     }
+}
+
+/// Whether `key` is the head `console` emits for a modified cursor key: the
+/// `[ 1 ;` prefix of a `CSI 1 ; <mod> <letter>` sequence (the `<mod><letter>`
+/// tail is still unread). Shift / Ctrl / Alt + an arrow, `Home`, or `End` all
+/// take this form.
+fn is_modified_key_head(key: &Key) -> bool {
+    matches!(key, Key::UnknownEscSeq(seq) if seq.as_slice() == ['[', '1', ';'])
+}
+
+/// Reassemble a modified cursor key into one [`Key::UnknownEscSeq`] holding the
+/// whole `[ 1 ; <mod> <letter>` sequence, draining the `<mod><letter>` tail (the
+/// modifier digits, then the terminating letter) that `console` left unread. A
+/// non-`Char` interrupting the tail ends it early, so a stray key is never
+/// swallowed; the event loop ignores an incomplete sequence just like a complete
+/// one it does not recognise.
+fn read_modified_key(read: &mut impl FnMut() -> io::Result<Key>) -> io::Result<Key> {
+    let mut seq = vec!['[', '1', ';'];
+    // Drain the `<mod><letter>` tail: digits accumulate, and the first non-digit
+    // `Char` is the terminating letter. A non-`Char` ends the (incomplete) tail
+    // without being consumed as part of it.
+    while let Key::Char(c) = read()? {
+        seq.push(c);
+        if !c.is_ascii_digit() {
+            break;
+        }
+    }
+    Ok(Key::UnknownEscSeq(seq))
 }
 
 /// Drain an SGR report (the parameters plus the `M`/`m` terminator), starting
@@ -418,6 +455,52 @@ mod tests {
     #[test]
     fn plain_key_passes_through() {
         assert_eq!(drive(vec![Key::Char('j')]), Input::Key(Key::Char('j')));
+    }
+
+    /// The fragments `console` produces for a `CSI 1 ; <mod> <letter>` key: the
+    /// `[ 1 ;` head as an `UnknownEscSeq`, then the modifier digit(s) and the
+    /// terminating letter as stray `Char`s.
+    fn modified_key(modifier: &str, letter: char) -> Vec<Key> {
+        let mut keys = vec![Key::UnknownEscSeq(vec!['[', '1', ';'])];
+        keys.extend(modifier.chars().map(Key::Char));
+        keys.push(Key::Char(letter));
+        keys
+    }
+
+    #[test]
+    fn modified_cursor_key_is_reassembled_into_one_key() {
+        // Shift+Left (`CSI 1 ; 2 D`) comes back as a single `UnknownEscSeq`
+        // carrying the whole sequence, not the stray `2` / `D` console leaks.
+        let input = drive(modified_key("2", 'D'));
+        assert_eq!(
+            input,
+            Input::Key(Key::UnknownEscSeq(vec!['[', '1', ';', '2', 'D']))
+        );
+    }
+
+    #[test]
+    fn modified_key_with_a_multi_digit_modifier_is_reassembled() {
+        // Modifiers can be two digits (e.g. 16 = Ctrl+Alt+Shift): all are kept.
+        let input = drive(modified_key("16", 'F'));
+        assert_eq!(
+            input,
+            Input::Key(Key::UnknownEscSeq(vec!['[', '1', ';', '1', '6', 'F']))
+        );
+    }
+
+    #[test]
+    fn a_non_char_truncating_a_modified_key_ends_it_without_eating_the_next() {
+        // A non-`Char` mid-tail ends the sequence; it is not consumed as part of
+        // it, but the reassembled (incomplete) key is still returned first.
+        let keys = vec![
+            Key::UnknownEscSeq(vec!['[', '1', ';']),
+            Key::Char('2'),
+            Key::Enter, // interrupts before the letter
+        ];
+        assert_eq!(
+            drive(keys),
+            Input::Key(Key::UnknownEscSeq(vec!['[', '1', ';', '2']))
+        );
     }
 
     #[test]

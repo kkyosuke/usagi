@@ -24,6 +24,13 @@ pub struct TextArea {
     /// Caret byte offset within `lines[row]`, always on a `char` boundary in
     /// `0..=lines[row].len()`.
     col: usize,
+    /// The fixed end of an active selection — the `(row, col)` where it was
+    /// started (a `Shift`+motion). The caret is its moving end, so the selected
+    /// span runs between this anchor and the caret. `None` when nothing is
+    /// selected; collapsed to a single point (anchor == caret) it also counts as
+    /// no selection. A plain (unshifted) motion clears it; an edit replaces the
+    /// span first.
+    anchor: Option<(usize, usize)>,
 }
 
 impl Default for TextArea {
@@ -39,6 +46,7 @@ impl TextArea {
             lines: vec![String::new()],
             row: 0,
             col: 0,
+            anchor: None,
         }
     }
 
@@ -52,7 +60,12 @@ impl TextArea {
         };
         let row = lines.len() - 1;
         let col = lines[row].len();
-        Self { lines, row, col }
+        Self {
+            lines,
+            row,
+            col,
+            anchor: None,
+        }
     }
 
     /// The lines, for rendering.
@@ -67,6 +80,27 @@ impl TextArea {
         (self.row, self.col)
     }
 
+    /// The selected span as `(start, end)` `(row, col)` pairs in document order
+    /// (`start <= end`), or `None` when nothing is selected (no anchor, or the
+    /// anchor sits on the caret). The renderer reverses the cells inside it.
+    pub fn selection(&self) -> Option<((usize, usize), (usize, usize))> {
+        let anchor = self.anchor?;
+        let caret = (self.row, self.col);
+        if anchor == caret {
+            return None;
+        }
+        Some(if anchor <= caret {
+            (anchor, caret)
+        } else {
+            (caret, anchor)
+        })
+    }
+
+    /// Whether a non-empty selection is active.
+    pub fn has_selection(&self) -> bool {
+        self.selection().is_some()
+    }
+
     /// The whole text, lines re-joined with `\n`.
     pub fn text(&self) -> String {
         self.lines.join("\n")
@@ -78,24 +112,32 @@ impl TextArea {
     }
 
     /// Insert a character at the caret, advancing it past the inserted char.
+    /// Typing over a selection replaces it (the span is deleted first).
     pub fn insert(&mut self, c: char) {
+        self.delete_selection();
         self.lines[self.row].insert(self.col, c);
         self.col += c.len_utf8();
     }
 
     /// Split the current line at the caret, moving the tail onto a new line
-    /// below and placing the caret at its start (the `Enter` key).
+    /// below and placing the caret at its start (the `Enter` key). With a
+    /// selection active it replaces the span first.
     pub fn newline(&mut self) {
+        self.delete_selection();
         let tail = self.lines[self.row].split_off(self.col);
         self.lines.insert(self.row + 1, tail);
         self.row += 1;
         self.col = 0;
     }
 
-    /// Delete the character before the caret. At the start of a line (but not
-    /// the first), join it onto the end of the previous line, leaving the caret
-    /// at the join. A no-op at the very start of the buffer.
+    /// Delete the character before the caret. With a selection active it deletes
+    /// the whole span instead. At the start of a line (but not the first), join
+    /// it onto the end of the previous line, leaving the caret at the join. A
+    /// no-op at the very start of the buffer.
     pub fn backspace(&mut self) {
+        if self.delete_selection() {
+            return;
+        }
         if self.col > 0 {
             let prev = self.prev_boundary();
             self.lines[self.row].replace_range(prev..self.col, "");
@@ -108,10 +150,14 @@ impl TextArea {
         }
     }
 
-    /// Delete the character at the caret (the `Del`/forward-delete key). At the
-    /// end of a line (but not the last), pull the next line up onto it. A no-op
-    /// at the very end of the buffer.
+    /// Delete the character at the caret (the `Del`/forward-delete key). With a
+    /// selection active it deletes the whole span instead. At the end of a line
+    /// (but not the last), pull the next line up onto it. A no-op at the very end
+    /// of the buffer.
     pub fn delete_forward(&mut self) {
+        if self.delete_selection() {
+            return;
+        }
         if self.col < self.lines[self.row].len() {
             let next = self.next_boundary();
             self.lines[self.row].replace_range(self.col..next, "");
@@ -122,8 +168,121 @@ impl TextArea {
     }
 
     /// Move the caret one character left, wrapping to the end of the previous
-    /// line at the start of a line.
+    /// line at the start of a line. Clears any selection.
     pub fn move_left(&mut self) {
+        self.anchor = None;
+        self.step_left();
+    }
+
+    /// Move the caret one character right, wrapping to the start of the next
+    /// line at the end of a line. Clears any selection.
+    pub fn move_right(&mut self) {
+        self.anchor = None;
+        self.step_right();
+    }
+
+    /// Move the caret up one line, keeping the column where the shorter line
+    /// allows (clamped to a `char` boundary). A no-op on the first line. Clears
+    /// any selection.
+    pub fn move_up(&mut self) {
+        self.anchor = None;
+        self.step_up();
+    }
+
+    /// Move the caret down one line, keeping the column where the shorter line
+    /// allows (clamped to a `char` boundary). A no-op on the last line. Clears
+    /// any selection.
+    pub fn move_down(&mut self) {
+        self.anchor = None;
+        self.step_down();
+    }
+
+    /// Move the caret to the start of the current line. Clears any selection.
+    pub fn move_home(&mut self) {
+        self.anchor = None;
+        self.col = 0;
+    }
+
+    /// Move the caret to the end of the current line. Clears any selection.
+    pub fn move_end(&mut self) {
+        self.anchor = None;
+        self.col = self.lines[self.row].len();
+    }
+
+    /// Extend the selection one character left (`Shift`+`←`): drop the anchor at
+    /// the caret if none is set yet, then move the caret, leaving the span
+    /// between them selected.
+    pub fn select_left(&mut self) {
+        self.start_selection();
+        self.step_left();
+    }
+
+    /// Extend the selection one character right (`Shift`+`→`).
+    pub fn select_right(&mut self) {
+        self.start_selection();
+        self.step_right();
+    }
+
+    /// Extend the selection up one line (`Shift`+`↑`).
+    pub fn select_up(&mut self) {
+        self.start_selection();
+        self.step_up();
+    }
+
+    /// Extend the selection down one line (`Shift`+`↓`).
+    pub fn select_down(&mut self) {
+        self.start_selection();
+        self.step_down();
+    }
+
+    /// Extend the selection to the start of the current line (`Shift`+`Home`).
+    pub fn select_home(&mut self) {
+        self.start_selection();
+        self.col = 0;
+    }
+
+    /// Extend the selection to the end of the current line (`Shift`+`End`).
+    pub fn select_end(&mut self) {
+        self.start_selection();
+        self.col = self.lines[self.row].len();
+    }
+
+    /// Delete the selected span (if any), joining the remnants of its first and
+    /// last lines and parking the caret at the start of the span. Returns whether
+    /// anything was deleted, so the editing keys can fall through to their
+    /// single-character behaviour when nothing is selected.
+    pub fn delete_selection(&mut self) -> bool {
+        let Some(((sr, sc), (er, ec))) = self.selection() else {
+            return false;
+        };
+        if sr == er {
+            self.lines[sr].replace_range(sc..ec, "");
+        } else {
+            // Keep the head of the first line and the tail of the last, drop the
+            // lines between, and join the two remnants into one line.
+            let tail = self.lines[er][ec..].to_string();
+            self.lines[sr].truncate(sc);
+            self.lines[sr].push_str(&tail);
+            self.lines.drain(sr + 1..=er);
+        }
+        self.row = sr;
+        self.col = sc;
+        self.anchor = None;
+        true
+    }
+
+    /// Anchor a selection at the caret if one is not already open, so a run of
+    /// `Shift`+motion presses extends a single span from where it began.
+    fn start_selection(&mut self) {
+        if self.anchor.is_none() {
+            self.anchor = Some((self.row, self.col));
+        }
+    }
+
+    /// Move the caret one character left, wrapping to the end of the previous
+    /// line at the start of a line. The shared core of [`move_left`] /
+    /// [`select_left`], leaving any selection anchor untouched.
+    fn step_left(&mut self) {
         if self.col > 0 {
             self.col = self.prev_boundary();
         } else if self.row > 0 {
@@ -132,9 +291,9 @@ impl TextArea {
         }
     }
 
-    /// Move the caret one character right, wrapping to the start of the next
-    /// line at the end of a line.
-    pub fn move_right(&mut self) {
+    /// Move the caret one character right, wrapping to the start of the next line
+    /// at the end of a line.
+    fn step_right(&mut self) {
         if self.col < self.lines[self.row].len() {
             self.col = self.next_boundary();
         } else if self.row + 1 < self.lines.len() {
@@ -143,32 +302,20 @@ impl TextArea {
         }
     }
 
-    /// Move the caret up one line, keeping the column where the shorter line
-    /// allows (clamped to a `char` boundary). A no-op on the first line.
-    pub fn move_up(&mut self) {
+    /// Move the caret up one line, clamping the column to a `char` boundary.
+    fn step_up(&mut self) {
         if self.row > 0 {
             self.row -= 1;
             self.col = self.clamp_col();
         }
     }
 
-    /// Move the caret down one line, keeping the column where the shorter line
-    /// allows (clamped to a `char` boundary). A no-op on the last line.
-    pub fn move_down(&mut self) {
+    /// Move the caret down one line, clamping the column to a `char` boundary.
+    fn step_down(&mut self) {
         if self.row + 1 < self.lines.len() {
             self.row += 1;
             self.col = self.clamp_col();
         }
-    }
-
-    /// Move the caret to the start of the current line.
-    pub fn move_home(&mut self) {
-        self.col = 0;
-    }
-
-    /// Move the caret to the end of the current line.
-    pub fn move_end(&mut self) {
-        self.col = self.lines[self.row].len();
     }
 
     /// Clamp the caret column to the current line, snapped back to the nearest
@@ -337,6 +484,122 @@ mod tests {
         area.move_end();
         area.backspace(); // removes trailing い
         assert_eq!(area.lines()[0], "あん");
+    }
+
+    #[test]
+    fn a_fresh_area_has_no_selection() {
+        let area = TextArea::from_text("abc");
+        assert!(!area.has_selection());
+        assert_eq!(area.selection(), None);
+        // Deleting with nothing selected is a no-op that reports `false`.
+        let mut area = area;
+        assert!(!area.delete_selection());
+        assert_eq!(area.text(), "abc");
+    }
+
+    #[test]
+    fn shift_motion_extends_a_selection_the_caret_keeps_moving() {
+        let mut area = TextArea::from_text("abcd"); // caret at (0, 4)
+        area.select_left();
+        area.select_left();
+        // Anchor stays at the start (4); the caret moved to 2.
+        assert_eq!(area.cursor(), (0, 2));
+        assert_eq!(area.selection(), Some(((0, 2), (0, 4))));
+        assert!(area.has_selection());
+        // A second run direction does not reset the anchor.
+        area.select_left();
+        assert_eq!(area.selection(), Some(((0, 1), (0, 4))));
+    }
+
+    #[test]
+    fn selection_is_returned_in_document_order_even_when_the_caret_leads() {
+        let mut area = TextArea::from_text("abcd");
+        area.move_home(); // caret at (0, 0)
+        area.select_right();
+        area.select_right();
+        // Caret (2) is past the anchor (0): still reported start-before-end.
+        assert_eq!(area.selection(), Some(((0, 0), (0, 2))));
+    }
+
+    #[test]
+    fn a_plain_motion_clears_the_selection() {
+        let mut area = TextArea::from_text("abcd");
+        area.select_left();
+        assert!(area.has_selection());
+        area.move_left();
+        assert!(!area.has_selection());
+        // A collapsed anchor (motion back onto it) is also no selection.
+        let mut area = TextArea::from_text("abcd");
+        area.select_left();
+        area.select_right(); // caret back on the anchor
+        assert_eq!(area.selection(), None);
+    }
+
+    #[test]
+    fn typing_over_a_selection_replaces_it() {
+        let mut area = TextArea::from_text("abcd");
+        area.select_left();
+        area.select_left(); // "cd" selected
+        area.insert('X');
+        assert_eq!(area.text(), "abX");
+        assert_eq!(area.cursor(), (0, 3));
+        assert!(!area.has_selection());
+    }
+
+    #[test]
+    fn delete_and_backspace_remove_the_selection_whole() {
+        let mut area = TextArea::from_text("abcd");
+        area.select_left();
+        area.select_left();
+        area.backspace(); // deletes "cd", not one extra char
+        assert_eq!(area.text(), "ab");
+        assert_eq!(area.cursor(), (0, 2));
+
+        let mut area = TextArea::from_text("abcd");
+        area.move_home();
+        area.select_right();
+        area.select_right();
+        area.delete_forward(); // deletes "ab"
+        assert_eq!(area.text(), "cd");
+        assert_eq!(area.cursor(), (0, 0));
+    }
+
+    #[test]
+    fn a_selection_spanning_lines_is_deleted_and_the_remnants_join() {
+        let mut area = TextArea::from_text("abc\ndef\nghi");
+        // Caret at end of "ghi" (2, 3). Select up to the middle of line 0.
+        area.move_up(); // (1, 3) -> end of "def"
+        area.move_home();
+        area.move_right(); // (1, 1) — between d and e
+        area.select_up(); // anchor (1,1), caret onto line 0
+        area.select_home(); // caret (0, 0)
+                            // Span runs (0,0)..(1,1): deleting joins "" + "ef" then drops line 0's body.
+        assert!(area.delete_selection());
+        assert_eq!(area.text(), "ef\nghi");
+        assert_eq!(area.cursor(), (0, 0));
+    }
+
+    #[test]
+    fn shift_home_and_end_extend_to_the_line_edges() {
+        let mut area = TextArea::from_text("hello");
+        area.move_home();
+        area.select_end();
+        assert_eq!(area.selection(), Some(((0, 0), (0, 5))));
+        area.delete_selection();
+        assert_eq!(area.text(), "");
+
+        let mut area = TextArea::from_text("hello"); // caret at end
+        area.select_home();
+        assert_eq!(area.selection(), Some(((0, 0), (0, 5))));
+    }
+
+    #[test]
+    fn selection_steps_whole_multibyte_characters() {
+        let mut area = TextArea::from_text("あいう"); // caret at byte 9
+        area.select_left(); // selects "う" (3 bytes)
+        assert_eq!(area.selection(), Some(((0, 6), (0, 9))));
+        area.insert('ん'); // replaces "う"
+        assert_eq!(area.text(), "あいん");
     }
 
     #[test]

@@ -2923,6 +2923,66 @@ fn switch_n_opens_the_note_editor_edits_the_buffer_and_saves() {
     );
 }
 
+/// The fragments a terminal sends for `Shift`+`<letter>` cursor key, reassembled
+/// by `term_reader` into the single `UnknownEscSeq` the loop sees: `CSI 1 ; 2
+/// <letter>`. `letter` is the CSI final byte (`C` right, `D` left, `A` up, `B`
+/// down, `H` home, `F` end).
+fn shift_arrow(letter: char) -> io::Result<Key> {
+    Ok(Key::UnknownEscSeq(vec!['[', '1', ';', '2', letter]))
+}
+
+#[test]
+fn shift_arrows_select_text_and_delete_removes_the_selection() {
+    // In the note editor, `Shift`+a cursor key extends a selection and `Del`
+    // removes the whole span. Every selection direction is exercised, then the
+    // surviving text is saved through `set_note`.
+    let recorded = RefCell::new(Vec::<(String, String)>::new());
+    let mut set_note = |name: &str, text: &str| {
+        recorded
+            .borrow_mut()
+            .push((name.to_string(), text.to_string()));
+        noop_set_note(name, text)
+    };
+    let mut open: fn(&mut HomeState, &Path, bool, bool) -> Result<PaneExit> = noop_open;
+    let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = noop_preview;
+
+    let mut keys = vec![
+        Ok(Key::Char(CTRL_O)), // Overview -> Switch (cursor on root)
+        Ok(Key::ArrowDown),    // root -> alpha
+        Ok(Key::Char('n')),    // open the note editor for alpha
+    ];
+    keys.extend(typed("hello world"));
+    keys.push(Ok(Key::Home)); // caret to the line start (clears any selection)
+    keys.push(shift_arrow('B')); // Shift+Down: single line, an empty extend
+    keys.push(shift_arrow('A')); // Shift+Up: likewise
+    keys.push(shift_arrow('F')); // Shift+End: select the whole line
+    keys.push(shift_arrow('H')); // Shift+Home: collapse back to the start
+    keys.push(shift_arrow('C')); // Shift+Right x5: select "hello"
+    keys.push(shift_arrow('C'));
+    keys.push(shift_arrow('C'));
+    keys.push(shift_arrow('C'));
+    keys.push(shift_arrow('C'));
+    keys.push(shift_arrow('D')); // Shift+Left: shrink to "hell"
+    keys.push(Ok(Key::Del)); // delete the selection -> "o world"
+    keys.push(Ok(Key::Char(CTRL_S))); // save
+    keys.push(Ok(Key::Escape)); // Switch -> Overview
+    keys.push(Ok(Key::CtrlC)); // quit
+
+    let outcome = run_notes(
+        keys,
+        state_with_sessions(&["alpha", "beta"]),
+        &mut open,
+        &mut preview,
+        &mut set_note,
+    )
+    .unwrap();
+    assert!(matches!(outcome, Outcome::Quit));
+    assert_eq!(
+        *recorded.borrow(),
+        vec![("alpha".to_string(), "o world".to_string())]
+    );
+}
+
 #[test]
 fn switch_ctrl_e_opens_the_note_editor_like_n() {
     // 切替, `Ctrl-E` (matching 在席 / 没入) opens the highlighted session's note
