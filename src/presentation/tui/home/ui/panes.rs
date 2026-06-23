@@ -756,13 +756,15 @@ fn focus_pane(state: &HomeState, width: usize, rows: usize) -> Vec<String> {
         return lines;
     };
 
-    // Live panes: the session's panes as tabs, then a trailing "+ new" tab. The
-    // identity rides the strip's row (as in 没入), so the body below carries no
-    // header of its own.
+    // Live panes: the session's panes as tabs. The "+ new" tab is appended only
+    // while it is the selected tab — the launch surface the user is acting on —
+    // so stepping off it (e.g. `Esc` after `Ctrl-T`) drops the chip rather than
+    // leaving a stale "+ new" sitting on the strip. The identity rides the
+    // strip's row (as in 没入), so the body below carries no header of its own.
     let on_new = state.focus_on_new_tab();
     let mut labels = strip.labels.clone();
-    labels.push(FOCUS_NEW_TAB_LABEL.to_string());
     let active = if on_new {
+        labels.push(FOCUS_NEW_TAB_LABEL.to_string());
         labels.len() - 1
     } else {
         strip.active

@@ -1183,14 +1183,14 @@ fn focus_new_tab_with_panes_shows_the_prompt_surface() {
 fn focus_previews_the_selected_pane_when_a_pane_tab_is_chosen() {
     // Off the "+ new" tab (as after navigating onto a pane tab with `Ctrl-N`/`Ctrl-P`),
     // the selected pane's live snapshot previews below the strip instead of the
-    // action surface.
+    // action surface, and the "+ new" chip is gone — it shows only while selected.
     let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
     state.enter_focus(1);
     state.set_terminal_tabs(vec!["agent".to_string(), "terminal".to_string()], 1);
     state.focus_tab_prev(); // "+ new" -> the last (active) pane tab
     state.set_terminal_view(TerminalView::from_rows(vec!["$ echo hi".to_string()], None));
     let out = stripped(&right_pane_contents(&state, 100, 12));
-    assert!(out.contains("+ new")); // the strip still carries the "+ new" tab
+    assert!(!out.contains("+ new")); // stepping off "+ new" drops the chip
     assert!(out.contains("$ echo hi")); // the selected pane previews
     assert!(!out.contains("Run a command:")); // not the action surface
 }
