@@ -2446,13 +2446,17 @@ fn read_only_note_overlay_elides_a_long_note() {
 }
 
 #[test]
-fn note_overlay_anchors_at_the_top_for_both_idle_and_live_previews() {
-    // The note overlay sits at the top of the right pane (row 0) regardless of
-    // whether the preview underneath is an idle session's action menu or a live
-    // terminal — so moving the cursor never shifts where the note reads (no CLS).
+fn note_overlay_anchors_at_the_bottom_for_both_idle_and_live_previews() {
+    // The note overlay sits at the bottom of the right pane regardless of whether
+    // the preview underneath is an idle session's action menu or a live terminal,
+    // so its box bottom lands on the same row either way — moving the cursor never
+    // shifts where the note reads (no CLS).
     let idle = switch_state_with_note("todo");
     let idle_rows = right_pane_contents(&idle, 40, 12);
-    assert!(stripped(&[idle_rows[0].clone()]).contains("note: alpha"));
+    let idle_box_bottom = idle_rows
+        .iter()
+        .rposition(|l| console::strip_ansi_codes(l).contains('└'))
+        .expect("the read-only box has a bottom border");
 
     // Make the same session live (a running shell with a snapshot).
     let mut live = switch_state_with_note("todo");
@@ -2462,7 +2466,63 @@ fn note_overlay_anchors_at_the_top_for_both_idle_and_live_previews() {
     });
     live.set_terminal_view(TerminalView::from_rows(vec!["$ live".to_string()], None));
     let live_rows = right_pane_contents(&live, 40, 12);
-    assert!(stripped(&[live_rows[0].clone()]).contains("note: alpha"));
+    let live_box_bottom = live_rows
+        .iter()
+        .rposition(|l| console::strip_ansi_codes(l).contains('└'))
+        .expect("the read-only box has a bottom border");
+
+    assert_eq!(
+        idle_box_bottom, live_box_bottom,
+        "the box bottom lands on the same row for both previews"
+    );
+}
+
+#[test]
+fn note_overlay_keeps_the_session_header_visible_when_the_preview_is_sparse() {
+    // A live session whose terminal only has a line or two is "sparse": a
+    // top-anchored note box would cover the session header and leave the rest of
+    // the pane blank, so nothing about the session showed. Anchoring at the bottom
+    // keeps the header (the session identity) readable above the note.
+    let mut live = switch_state_with_note("next: ship it");
+    live.apply_badges(MonitorSnapshot {
+        live: [PathBuf::from("/repo/wt")].into(),
+        ..Default::default()
+    });
+    live.set_terminal_view(TerminalView::from_rows(vec!["$".to_string()], None));
+    let rows = right_pane_contents(&live, 40, 12);
+    // The header (the session name) shows above the box, and the note shows.
+    assert!(
+        stripped(&[rows[0].clone()]).contains("alpha"),
+        "the session header stays visible at the top"
+    );
+    let pane = stripped(&rows);
+    assert!(pane.contains("note: alpha"), "the note box shows");
+    assert!(pane.contains("next: ship it"), "the note body shows");
+}
+
+#[test]
+fn note_overlay_shows_fully_when_the_preview_is_sparse() {
+    // When the base pane produces fewer lines than the note box is tall (a
+    // session with little terminal / preview content), the box must still show
+    // in full — it must not be clipped to the short base height (which made the
+    // note vanish).
+    let note = (0..4)
+        .map(|i| format!("todo {i}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut state = switch_state_with_note(&note);
+    // A live session whose terminal snapshot is a single line — a very short base.
+    state.apply_badges(MonitorSnapshot {
+        live: [PathBuf::from("/repo/wt")].into(),
+        ..Default::default()
+    });
+    state.set_terminal_view(TerminalView::from_rows(vec!["$".to_string()], None));
+    let pane = stripped(&right_pane_contents(&state, 40, 16));
+    assert!(pane.contains("note: alpha"), "the box title shows");
+    // Every note line is visible, not just the top border.
+    for i in 0..4 {
+        assert!(pane.contains(&format!("todo {i}")), "todo {i} shows");
+    }
 }
 
 #[test]
