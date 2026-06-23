@@ -8,11 +8,13 @@
 //! own module.
 
 mod claude;
+mod codex;
 mod gemini;
 
 use std::sync::Arc;
 
 pub use claude::ClaudeAgent;
+pub use codex::CodexAgent;
 pub use gemini::GeminiAgent;
 
 use crate::domain::agent::Agent;
@@ -22,6 +24,7 @@ use crate::domain::settings::AgentCli;
 pub fn agent_for(cli: AgentCli) -> Arc<dyn Agent> {
     match cli {
         AgentCli::Claude => Arc::new(ClaudeAgent::new()),
+        AgentCli::Codex => Arc::new(CodexAgent::new()),
         AgentCli::Gemini => Arc::new(GeminiAgent::new()),
     }
 }
@@ -44,6 +47,19 @@ mod tests {
         // Resuming routes through to Claude's `--continue` flag.
         let resumed = agent.launch_command(&Settings::default().agent_wiring("usagi"), true, None);
         assert!(resumed.starts_with("claude --continue --mcp-config '"));
+    }
+
+    #[test]
+    fn agent_for_codex_wires_in_the_usagi_mcp_server_and_hooks() {
+        // The Codex adapter wires the unified usagi MCP server in via Codex's `-c`
+        // config overrides and reports its phase through Codex lifecycle hooks.
+        let agent = agent_for(AgentCli::Codex);
+        assert_eq!(agent.program(), "codex");
+        let launch = agent.launch_command(&Settings::default().agent_wiring("usagi"), false, None);
+        assert!(launch.starts_with("codex --dangerously-bypass-hook-trust "));
+        assert!(launch.contains("-c 'mcp_servers.usagi.command=usagi'"));
+        assert!(launch.contains("usagi agent-phase ready"));
+        assert!(launch.contains("usagi agent-phase ended"));
     }
 
     #[test]

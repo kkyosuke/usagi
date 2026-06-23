@@ -20,7 +20,7 @@ use console::Style;
 const THEMES: [Theme; 3] = [Theme::Light, Theme::Dark, Theme::System];
 
 /// The agent CLIs in the order they cycle through.
-pub(super) const AGENT_CLIS: [AgentCli; 2] = [AgentCli::Claude, AgentCli::Gemini];
+pub(super) const AGENT_CLIS: [AgentCli; 3] = [AgentCli::Claude, AgentCli::Codex, AgentCli::Gemini];
 
 /// The 在席 (Focus) action UIs in the order they cycle through.
 pub(super) const SESSION_ACTION_UIS: [SessionActionUi; 2] =
@@ -836,6 +836,7 @@ fn on_off(enabled: bool) -> &'static str {
 fn agent_cli_label(cli: AgentCli) -> &'static str {
     match cli {
         AgentCli::Claude => "Claude",
+        AgentCli::Codex => "Codex",
         AgentCli::Gemini => "Gemini",
     }
 }

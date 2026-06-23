@@ -89,7 +89,7 @@ issue が 1 件も無いときは「No issues yet.」を 1 行だけログに出
 
 起動時に usagi 自身の issue MCP サーバ（[`usagi mcp`](03-mcp.md)）を Agent CLI に組み込むため、エージェントは起動直後から
 `issue_*` tool でタスクを操作できます。さらにローカル LLM が有効なら [`usagi llm-mcp`](04-llm-mcp.md) も組み込みます。
-Agent CLI ごとの組み込み方法（Claude は `--mcp-config` / `--append-system-prompt`、Gemini は現状素のまま）は
+Agent CLI ごとの組み込み方法（Claude は `--mcp-config` / `--append-system-prompt`、Codex は `-c` 設定上書き（MCP＋ライフサイクルフック）、Gemini は現状素のまま）は
 [3.4 ローカル LLM MCP サーバ](04-llm-mcp.md#起動と登録)を参照してください。
 
 対象 worktree に前回の Claude 会話が残っている場合は、`claude --continue` を付けて**前回セッションの続きから**起動します

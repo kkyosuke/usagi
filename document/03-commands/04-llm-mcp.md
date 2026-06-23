@@ -88,7 +88,15 @@ usagi llm-mcp --model qwen2.5-coder:7b   # stdin から JSON-RPC を読み、std
 }
 ```
 
-あわせて、軽量タスクをローカル LLM に委譲するよう促す一文がシステムプロンプトに追記されます。
+あわせて、軽量タスクをローカル LLM に委譲するよう促す一文がシステムプロンプトに追記されます（システムプロンプトの追記に対応するのは Claude のみ）。
+
+Codex は `--mcp-config` を持たないため、同じ内容を `-c` 設定上書きで注入します（`mcp_servers.usagi` と、有効時の `mcp_servers.usagi-llm`）。
+
+```bash
+codex -c 'mcp_servers.usagi.command=usagi' -c 'mcp_servers.usagi.args=["mcp"]' \
+      -c 'mcp_servers.usagi-llm.command=usagi' \
+      -c 'mcp_servers.usagi-llm.args=["llm-mcp","--model","qwen2.5-coder:7b"]'
+```
 
 ## 対応 tool 一覧
 

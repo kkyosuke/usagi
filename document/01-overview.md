@@ -74,7 +74,7 @@ Rust (edition 2021) で実装。clap（CLI）/ console + crossterm（TUI）/ por
 |---|---|---|
 | Git | 必須 | クローン・worktree 管理・状態検査 |
 | Bash（macOS/Linux）/ cmd.exe（Windows） | 必須 | 埋め込みターミナルで起動するシェル |
-| Agent CLI（`claude` / `gemini` など） | 任意 | `agent` コマンドで起動する AI エージェント本体 |
+| Agent CLI（`claude` / `codex` / `gemini` など） | 任意 | `agent` コマンドで起動する AI エージェント本体 |
 | Ollama | 任意 | ローカル LLM 委譲を有効化したときの実行環境 |
 
 導入状況は `usagi doctor` で確認できます（git / bash の有無、デスクトップ通知の可否、設定ストレージの健全性、

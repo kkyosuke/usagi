@@ -22,6 +22,8 @@ pub enum AgentCli {
     /// Anthropic's Claude Code CLI.
     #[default]
     Claude,
+    /// OpenAI's Codex CLI.
+    Codex,
     /// Google's Gemini CLI.
     Gemini,
 }
@@ -123,6 +125,7 @@ impl AgentCli {
     pub fn command(self) -> &'static str {
         match self {
             AgentCli::Claude => "claude",
+            AgentCli::Codex => "codex",
             AgentCli::Gemini => "gemini",
         }
     }
@@ -363,6 +366,7 @@ mod tests {
     #[test]
     fn agent_cli_maps_to_its_program_command() {
         assert_eq!(AgentCli::Claude.command(), "claude");
+        assert_eq!(AgentCli::Codex.command(), "codex");
         assert_eq!(AgentCli::Gemini.command(), "gemini");
     }
 

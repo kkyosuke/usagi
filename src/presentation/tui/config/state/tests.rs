@@ -99,20 +99,22 @@ fn notifications_field_toggles_and_reports_its_value() {
 }
 
 #[test]
-fn agent_cli_field_cycles_between_claude_and_gemini() {
+fn agent_cli_field_cycles_through_each_cli() {
     let mut config = config_with_workspaces(&[]);
     config.move_down();
     config.move_down();
     config.move_down(); // select Agent CLI
     assert_eq!(config.selected_field(), Some(Field::AgentCli));
-    // Claude by default.
+    // Claude by default, cycling forward Claude -> Codex -> Gemini -> Claude.
     assert_eq!(config.value_of(Field::AgentCli), "Claude");
+    assert!(config.cycle_selected(true));
+    assert_eq!(config.value_of(Field::AgentCli), "Codex");
     assert!(config.cycle_selected(true));
     assert_eq!(config.value_of(Field::AgentCli), "Gemini");
     // Wraps back to Claude.
     assert!(config.cycle_selected(true));
     assert_eq!(config.value_of(Field::AgentCli), "Claude");
-    // And cycles backward too.
+    // And cycles backward too (wrapping to the last value).
     assert!(config.cycle_selected(false));
     assert_eq!(config.value_of(Field::AgentCli), "Gemini");
 }
@@ -697,12 +699,14 @@ fn cycling_a_local_agent_cli_override_walks_global_then_each_value() {
     // The first local field is selected from the start.
     assert_eq!(config.selected_local_field(), Some(LocalField::AgentCli));
 
-    // None (follow global) -> Claude -> Gemini -> None.
+    // None (follow global) -> Claude -> Codex -> Gemini -> None.
     assert!(config.cycle_selected(true));
     assert_eq!(config.local().unwrap().agent_cli, Some(AgentCli::Claude));
     assert!(config
         .value_of_local(LocalField::AgentCli)
         .contains("Override"));
+    assert!(config.cycle_selected(true));
+    assert_eq!(config.local().unwrap().agent_cli, Some(AgentCli::Codex));
     assert!(config.cycle_selected(true));
     assert_eq!(config.local().unwrap().agent_cli, Some(AgentCli::Gemini));
     assert!(config.cycle_selected(true));
