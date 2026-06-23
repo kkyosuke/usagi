@@ -109,6 +109,11 @@ mod tests {
         let keyed = key(relative);
         assert!(keyed.is_absolute());
         assert_eq!(keyed, std::env::current_dir().unwrap().join(relative));
+
+        // The empty path resolves through neither `canonicalize` nor
+        // `std::path::absolute`, so it falls through to the raw path verbatim
+        // (the final fallback). It never arises in practice but must not panic.
+        assert_eq!(key(Path::new("")), Path::new("").to_path_buf());
     }
 
     #[test]

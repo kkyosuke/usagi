@@ -49,6 +49,13 @@
 > `usagi doctor --fix` はランタイムと既定モデルをまとめて導入します。詳細は
 > [Config 画面のローカル LLM 導入](design/04-config.md) / [3.4 ローカル LLM MCP サーバ](03-commands/04-llm-mcp.md)。
 
+> **セキュリティ注記**:
+> - ランタイム導入は ollama 公式の `curl -fsSL https://ollama.com/install.sh | sh` を **sudo 権限で** 実行します。
+>   HTTPS で取得しますが、取得スクリプトの内容に対する usagi 側のチェックサム/署名検証はありません（上流の手順に準拠）。
+>   ollama.com / CDN / DNS が侵害された場合は任意コードが実行され得る点に留意してください。
+> - `local_llm.model` は上表の allowlist の値のみ有効です。`settings.json` を手編集して allowlist 外の値を入れた場合、
+>   ロード時に既定（`qwen2.5-coder:7b`）へ戻されます（model 名はエージェント起動コマンドに展開されるため）。
+
 > すべての項目はフォーマットバージョン `version: 1` とともに `settings.json` に格納されます。
 > 完全な JSON 例は [data/01-global.md](data/01-global.md#settingsjson) を参照してください。
 
