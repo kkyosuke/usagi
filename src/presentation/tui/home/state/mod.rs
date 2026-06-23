@@ -915,10 +915,13 @@ impl HomeState {
         true
     }
 
-    /// Open the note editor for the focused (active) session, re-attaching its
-    /// pane on close — 没入's `Ctrl-E`. A no-op on the root row. Returns whether
-    /// the editor opened.
-    pub fn open_focused_note(&mut self) -> bool {
+    /// Open the note editor for the focused (active) session — the `Ctrl-E` action
+    /// in 在席 (Focus) and 没入 (Attached). `reattach` records whether closing the
+    /// editor should re-attach the session's pane: `true` from 没入 (drop back into
+    /// the live terminal), `false` from 在席 (return to the action surface). A
+    /// no-op on the root row (the workspace, not a session) and when an editor is
+    /// already open. Returns whether the editor opened.
+    pub fn open_focused_note(&mut self, reattach: bool) -> bool {
         if self.overlays.note.is_some() {
             return false;
         }
@@ -926,7 +929,7 @@ impl HomeState {
         if name == ROOT_NAME {
             return false;
         }
-        self.open_note_for(name, true);
+        self.open_note_for(name, reattach);
         true
     }
 

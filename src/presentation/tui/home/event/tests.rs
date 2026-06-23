@@ -2801,3 +2801,52 @@ fn attached_ctrl_e_on_the_root_row_re_attaches_without_opening_an_editor() {
     );
     assert!(recorded.borrow().is_empty());
 }
+
+#[test]
+fn focus_ctrl_e_opens_the_note_editor_and_saves_staying_in_focus() {
+    // In 在席 (Focus), Ctrl-E opens the focused session's note editor; saving
+    // persists the note and returns to 在席 (no pane to re-attach). We prove the
+    // landing mode by pressing `t` afterwards — a 在席 menu shortcut that launches
+    // a terminal — so the pane callback runs only if we are still in Focus.
+    let opened = RefCell::new(0);
+    let mut open = |_h: &mut HomeState, _d: &Path, _a: bool, _n: bool| {
+        *opened.borrow_mut() += 1;
+        Ok(PaneExit::Closed)
+    };
+    let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = noop_preview;
+    let recorded = RefCell::new(Vec::<(String, String)>::new());
+    let mut set_note = |name: &str, text: &str| {
+        recorded
+            .borrow_mut()
+            .push((name.to_string(), text.to_string()));
+        noop_set_note(name, text)
+    };
+
+    let mut keys = typed("session switch alpha");
+    keys.push(Ok(Key::Enter)); // focus alpha (idle -> 在席 menu)
+    keys.push(Ok(Key::Char(CTRL_E))); // open the note editor (reattach = false)
+    keys.extend(typed("todo"));
+    keys.push(Ok(Key::Char(CTRL_S))); // save -> back to 在席
+    keys.push(Ok(Key::Char('t'))); // 在席 menu: launch terminal (proves we are in Focus)
+    keys.push(Ok(Key::Escape)); // Focus -> Overview
+    keys.push(Ok(Key::CtrlC));
+
+    let outcome = run_notes(
+        keys,
+        state_with_sessions(&["alpha"]),
+        &mut open,
+        &mut preview,
+        &mut set_note,
+    )
+    .unwrap();
+    assert!(matches!(outcome, Outcome::Quit));
+    assert_eq!(
+        *recorded.borrow(),
+        vec![("alpha".to_string(), "todo".to_string())]
+    );
+    assert_eq!(
+        *opened.borrow(),
+        1,
+        "`t` after save launched a terminal, so we stayed in 在席"
+    );
+}

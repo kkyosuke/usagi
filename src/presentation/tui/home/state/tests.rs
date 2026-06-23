@@ -1672,16 +1672,23 @@ fn switch_begin_note_is_a_noop_on_the_root_row() {
 }
 
 #[test]
-fn open_focused_note_targets_the_active_session_and_reattaches() {
+fn open_focused_note_targets_the_active_session_and_carries_reattach() {
     let mut state = state_on_alpha();
     state.enter_focus(state.list().selected_index()); // 在席 on alpha
-    assert!(state.open_focused_note());
+                                                      // 没入's `Ctrl-E` opens with reattach = true.
+    assert!(state.open_focused_note(true));
     let editor = state.note_editor().expect("editor open");
     assert_eq!(editor.target(), "alpha");
     assert!(editor.reattach());
     assert!(state.note_editor_reattaches());
     // Already open: a second open is refused.
-    assert!(!state.open_focused_note());
+    assert!(!state.open_focused_note(true));
+
+    // 在席's `Ctrl-E` opens with reattach = false (close returns to the action
+    // surface, no pane to re-attach).
+    state.note_editor_cancel();
+    assert!(state.open_focused_note(false));
+    assert!(!state.note_editor_reattaches());
 }
 
 #[test]
@@ -1690,7 +1697,7 @@ fn open_focused_note_is_a_noop_on_the_root_row() {
     let mut state = state();
     state.restore_sessions(vec![session_record("alpha", 1)]);
     state.enter_focus(0);
-    assert!(!state.open_focused_note());
+    assert!(!state.open_focused_note(false));
     assert!(state.note_editor().is_none());
 }
 
