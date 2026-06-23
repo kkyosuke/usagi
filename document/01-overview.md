@@ -77,7 +77,7 @@ Rust (edition 2021) で実装。clap（CLI）/ console + crossterm（TUI）/ por
 | Agent CLI（`claude` / `codex` / `gemini` など） | 任意 | `agent` コマンドで起動する AI エージェント本体 |
 | Ollama | 任意 | ローカル LLM 委譲を有効化したときの実行環境 |
 
-導入状況は `usagi doctor` で確認できます（git / bash の有無、デスクトップ通知の可否、設定ストレージの健全性、
+導入状況は `usagi doctor` で確認できます（git / bash と各 Agent CLI（Claude / Codex / sakana.ai / Gemini）の有無、デスクトップ通知の可否、設定ストレージの健全性、
 ローカル LLM 有効時は ollama とモデルの有無）。`usagi doctor --fix` は OS のパッケージマネージャ
 （brew / apt / dnf / pacman）経由での導入を試行し、自動修復できないものは手動手順を表示します。詳細は
 [3. コマンドリファレンス](03-commands/01-cli.md#usagi-doctor) を参照してください。
