@@ -1509,7 +1509,8 @@ fn note_editor_box_keeps_its_bottom_border_over_a_short_pane() {
     let rows = right_pane_contents(&state, 60, 12);
     let plain = stripped(&rows);
     // The box frames the note in full: a titled top border and a bottom border.
-    assert!(plain.contains("note: main"));
+    // The title is just `note` (the session is named in the pane header).
+    assert!(plain.contains("─ note"));
     assert!(
         rows.iter()
             .any(|r| console::strip_ansi_codes(r).trim_start().starts_with('└')),
@@ -2467,10 +2468,12 @@ fn render_frame_edits_the_note_in_the_right_pane_not_a_full_screen_modal() {
     assert!(state.switch_begin_note());
 
     let frame = stripped(&render_frame(24, 80, &state));
-    // The right-pane editor: header + the multi-line note.
+    // The right-pane editor: a `note` box (the session is named in the sidebar) +
+    // the multi-line note.
+    assert!(frame.contains("─ note"), "the box is titled `note`");
     assert!(
-        frame.contains("note: alpha"),
-        "the header names the session"
+        frame.contains("alpha"),
+        "the session is still named on screen"
     );
     assert!(frame.contains("first line"));
     assert!(frame.contains("second"));
@@ -2516,9 +2519,33 @@ fn note_overlay_editor_windows_around_the_caret() {
 
     // A short pane: only a window of the last lines fits in the editor box.
     let pane = stripped(&right_pane_contents(&state, 40, 8));
-    assert!(pane.contains("note: alpha"));
+    assert!(pane.contains("─ note"));
     assert!(pane.contains("L9"), "the caret line is kept visible");
     assert!(!pane.contains("L0"), "the top lines are windowed out");
+}
+
+#[test]
+fn note_editor_renders_a_multi_line_selection_without_corrupting_the_text() {
+    // A selection spanning two lines reverses the cells in the editor box. The
+    // highlight only recolours existing cells, so every line still reads intact —
+    // and lines outside the span (before it and after it) render unchanged.
+    let mut state = switch_state_with_note("one\ntwo\nthree\nfour");
+    assert!(state.switch_begin_note()); // caret parks at the end ("four")
+    let area = state.note_editor_mut().unwrap().area_mut();
+    // Anchor at the end of "three", then extend the selection up to the start of
+    // "two": the span is (line 1, col 0)..(line 2, col 5), caret on line 1.
+    area.move_up();
+    area.move_end();
+    area.select_up();
+    area.select_home();
+    assert!(area.has_selection());
+
+    let pane = stripped(&right_pane_contents(&state, 40, 20));
+    // The box title and every line of the note survive the highlight.
+    assert!(pane.contains("─ note"));
+    for word in ["one", "two", "three", "four"] {
+        assert!(pane.contains(word), "`{word}` still renders: {pane}");
+    }
 }
 
 #[test]
@@ -2526,7 +2553,7 @@ fn right_pane_overlays_the_read_only_note_in_switch() {
     let mut state = switch_state_with_note("do X\ndo Y");
     // The selected session's note shows in the right pane (overlaid on top).
     let pane = stripped(&right_pane_contents(&state, 40, 12));
-    assert!(pane.contains("note: alpha"), "the overlay is titled");
+    assert!(pane.contains("─ note"), "the overlay is titled");
     assert!(pane.contains("do X"));
     assert!(pane.contains("do Y"));
 
@@ -2637,7 +2664,7 @@ fn note_overlay_keeps_the_session_header_visible_beside_the_box() {
         "the session header stays visible to the left of the box: {top:?}"
     );
     let pane = stripped(&rows);
-    assert!(pane.contains("note: alpha"), "the note box shows");
+    assert!(pane.contains("─ note"), "the note box shows");
     assert!(pane.contains("next: ship it"), "the note body shows");
 }
 
@@ -2659,7 +2686,7 @@ fn note_overlay_shows_fully_when_the_preview_is_sparse() {
     });
     state.set_terminal_view(TerminalView::from_rows(vec!["$".to_string()], None));
     let pane = stripped(&right_pane_contents(&state, 40, 16));
-    assert!(pane.contains("note: alpha"), "the box title shows");
+    assert!(pane.contains("─ note"), "the box title shows");
     // Every note line is visible, not just the top border.
     for i in 0..4 {
         assert!(pane.contains(&format!("todo {i}")), "todo {i} shows");
@@ -2673,7 +2700,7 @@ fn note_editor_overlay_keeps_the_preview_visible_behind_it() {
     let mut state = switch_state_with_note("hi");
     assert!(state.switch_begin_note());
     let pane = stripped(&right_pane_contents(&state, 40, 16));
-    assert!(pane.contains("note: alpha"), "the editor box shows");
+    assert!(pane.contains("─ note"), "the editor box shows");
     // The idle session's action-menu preview still shows below the box.
     assert!(
         pane.contains("Enter で開く"),

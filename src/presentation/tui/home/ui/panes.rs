@@ -921,21 +921,22 @@ fn note_box_width(pane_w: usize) -> usize {
         .min(pane_w)
 }
 
-/// Build the floating `note: <name>` box overlaid on the right pane. With `caret`
-/// set it is the **editor** (a block caret on the cursor line, the view windowed
-/// around it); with `None` it is the **read-only** note (capped, the overflow
-/// elided with `… (N more)`). `max` caps the body so the box always leaves part of
-/// the right pane visible underneath. Returned rows are the bordered box.
+/// Build the floating `note` box overlaid on the right pane. With `caret` set it
+/// is the **editor** (a block caret on the cursor line, the view windowed around
+/// it, and the selected span — if any — reversed); with `None` it is the
+/// **read-only** note (capped, the overflow elided with `… (N more)`). `max` caps
+/// the body so the box always leaves part of the right pane visible underneath.
+/// Returned rows are the bordered box. The session is already named in the pane
+/// header, so the title is just `note` (no session name).
 fn note_box(
-    name: &str,
     lines: &[String],
     caret: Option<(usize, usize)>,
+    selection: Option<((usize, usize), (usize, usize))>,
     width: usize,
     max: usize,
 ) -> Vec<String> {
     let inner = width.saturating_sub(4).max(1);
     let max = max.max(1);
-    let title = format!("note: {name}");
     let body: Vec<String> = match caret {
         // Read-only: the first `max` lines, then a `… (N more)` line when longer.
         None => {
@@ -946,8 +947,10 @@ fn note_box(
             }
             body
         }
-        // Editing: a `max`-line window around the caret, with a block caret drawn
-        // on the cursor line so editing happens where it shows.
+        // Editing: a `max`-line window around the caret. The selected span is
+        // reversed; the caret is a block on the cursor line (drawn by
+        // `block_selection` at the selection's edge when a span is active, else by
+        // `block_caret`), so editing happens where it shows.
         Some((caret_row, caret_col)) => {
             let start = caret_row.saturating_sub(max.saturating_sub(1));
             let base = Style::new();
@@ -956,19 +959,49 @@ fn note_box(
                 .enumerate()
                 .skip(start)
                 .take(max)
-                .map(|(i, line)| {
-                    if i == caret_row {
-                        let (before, after) = line.split_at(caret_col);
-                        widgets::block_caret(before, after, &base)
-                    } else {
-                        line.clone()
-                    }
-                })
+                .map(
+                    |(i, line)| match selection_on_line(selection, i, line.len()) {
+                        Some((sel_start, sel_end, newline_selected)) => {
+                            let caret = (i == caret_row).then_some(caret_col);
+                            widgets::block_selection(
+                                line,
+                                sel_start,
+                                sel_end,
+                                caret,
+                                newline_selected,
+                                &base,
+                            )
+                        }
+                        None if i == caret_row => {
+                            let (before, after) = line.split_at(caret_col);
+                            widgets::block_caret(before, after, &base)
+                        }
+                        None => line.clone(),
+                    },
+                )
                 .collect()
         }
     };
     // `boxed` clips each line (and the block-caret one, ANSI included) to `inner`.
-    widgets::boxed(&title, inner, &body)
+    widgets::boxed("note", inner, &body)
+}
+
+/// The byte span `[start, end)` of `selection` that lies on line `row` (whose
+/// content is `len` bytes), plus whether the line break after it is selected too
+/// (the span continues onto a later line, so the renderer shows the newline as a
+/// reversed trailing cell). `None` when the line is outside the selection.
+fn selection_on_line(
+    selection: Option<((usize, usize), (usize, usize))>,
+    row: usize,
+    len: usize,
+) -> Option<(usize, usize, bool)> {
+    let ((sr, sc), (er, ec)) = selection?;
+    if row < sr || row > er {
+        return None;
+    }
+    let start = if row == sr { sc } else { 0 };
+    let end = if row == er { ec } else { len };
+    Some((start, end, row < er))
 }
 
 /// The floating note overlay for the right pane, or `None` when none applies. The
@@ -985,23 +1018,17 @@ fn note_overlay(state: &HomeState, width: usize, rows: usize) -> Option<Vec<Stri
     if let Some(editor) = state.note_editor() {
         let cap = EDIT_NOTE_MAX_LINES.min(rows.saturating_sub(3)).max(1);
         return Some(note_box(
-            editor.target(),
             editor.area().lines(),
             Some(editor.area().cursor()),
+            editor.area().selection(),
             box_w,
             cap,
         ));
     }
     if let Some(note) = state.visible_switch_note() {
-        let name = state
-            .list()
-            .selected()
-            .and_then(|w| w.branch.as_deref())
-            .unwrap_or(DETACHED)
-            .to_string();
         let cap = SWITCH_NOTE_MAX_LINES.min(rows.saturating_sub(3)).max(1);
         let note_lines: Vec<String> = note.lines().map(str::to_string).collect();
-        return Some(note_box(&name, &note_lines, None, box_w, cap));
+        return Some(note_box(&note_lines, None, None, box_w, cap));
     }
     None
 }

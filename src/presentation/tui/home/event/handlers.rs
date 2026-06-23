@@ -378,10 +378,26 @@ pub(super) fn note_editor_key(
                 .note_editor_mut()
                 .expect("note editor open while editing")
                 .area_mut();
+            // `Shift`+a cursor key extends the selection. `console` cannot decode
+            // these chords (it leaks the escape sequence's bytes as stray keys), so
+            // `term_reader` reassembles each into one `UnknownEscSeq`, which
+            // `shift_select` maps back to the motion here.
+            if let Some(motion) = shift_select(&key) {
+                match motion {
+                    Select::Left => area.select_left(),
+                    Select::Right => area.select_right(),
+                    Select::Up => area.select_up(),
+                    Select::Down => area.select_down(),
+                    Select::Home => area.select_home(),
+                    Select::End => area.select_end(),
+                }
+                return;
+            }
             match key {
                 Key::Enter => area.newline(),
                 Key::Backspace => area.backspace(),
                 Key::Del => area.delete_forward(),
+                // A plain (unshifted) motion collapses any selection and moves.
                 Key::ArrowLeft => area.move_left(),
                 Key::ArrowRight => area.move_right(),
                 Key::ArrowUp => area.move_up(),
@@ -393,6 +409,46 @@ pub(super) fn note_editor_key(
             }
         }
     }
+}
+
+/// A cursor motion that, held with `Shift`, extends the note selection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Select {
+    Left,
+    Right,
+    Up,
+    Down,
+    Home,
+    End,
+}
+
+/// Decode a reassembled modified-cursor-key sequence — `CSI 1 ; <mod> <letter>`,
+/// which [`super::super::super::term_reader`] gathers into one
+/// [`Key::UnknownEscSeq`] — into the selection motion it represents, but **only
+/// when `Shift` is among its modifiers** (the chord that extends the selection).
+/// Returns `None` for any other key, modifier, or malformed sequence, so a plain
+/// `Ctrl`/`Alt`+arrow (or an unrelated escape) falls through untouched.
+fn shift_select(key: &Key) -> Option<Select> {
+    let Key::UnknownEscSeq(seq) = key else {
+        return None;
+    };
+    // The sequence is `[ 1 ; <modifier digits> <letter>`.
+    let rest = seq.strip_prefix(&['[', '1', ';'])?;
+    let (letter, modifier) = rest.split_last()?;
+    let modifier: u32 = modifier.iter().collect::<String>().parse().ok()?;
+    // xterm encodes the modifier as `1 + bitmask`, with bit 0 = Shift; require it.
+    if modifier.checked_sub(1)? & 1 == 0 {
+        return None;
+    }
+    Some(match letter {
+        'A' => Select::Up,
+        'B' => Select::Down,
+        'C' => Select::Right,
+        'D' => Select::Left,
+        'H' => Select::Home,
+        'F' => Select::End,
+        _ => return None,
+    })
 }
 
 /// Re-attach the selected session's pane after the note editor closes (没入's
@@ -715,5 +771,54 @@ fn open_pane(
             state.leave_attached();
             state.log_error(format!("{fail} failed: {e}"));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{shift_select, Select};
+    use console::Key;
+
+    /// Build the reassembled key for `CSI 1 ; <modifier> <letter>`.
+    fn seq(modifier: &str, letter: char) -> Key {
+        let mut chars = vec!['[', '1', ';'];
+        chars.extend(modifier.chars());
+        chars.push(letter);
+        Key::UnknownEscSeq(chars)
+    }
+
+    #[test]
+    fn shift_modifier_maps_each_cursor_key_to_a_motion() {
+        assert_eq!(shift_select(&seq("2", 'A')), Some(Select::Up));
+        assert_eq!(shift_select(&seq("2", 'B')), Some(Select::Down));
+        assert_eq!(shift_select(&seq("2", 'C')), Some(Select::Right));
+        assert_eq!(shift_select(&seq("2", 'D')), Some(Select::Left));
+        assert_eq!(shift_select(&seq("2", 'H')), Some(Select::Home));
+        assert_eq!(shift_select(&seq("2", 'F')), Some(Select::End));
+        // Ctrl+Shift (modifier 6) still counts as Shift held.
+        assert_eq!(shift_select(&seq("6", 'D')), Some(Select::Left));
+    }
+
+    #[test]
+    fn a_modifier_without_shift_is_not_a_selection() {
+        // Ctrl alone (5) and Alt alone (3) leave the bit-0 Shift flag clear.
+        assert_eq!(shift_select(&seq("5", 'D')), None);
+        assert_eq!(shift_select(&seq("3", 'C')), None);
+        // Modifier 0 underflows the `1 +` encoding and is rejected, not panicked.
+        assert_eq!(shift_select(&seq("0", 'D')), None);
+    }
+
+    #[test]
+    fn malformed_or_unrelated_sequences_decode_to_none() {
+        // Not an escape sequence at all.
+        assert_eq!(shift_select(&Key::Char('x')), None);
+        // Wrong prefix (a different CSI head).
+        assert_eq!(shift_select(&Key::UnknownEscSeq(vec!['[', 'M'])), None);
+        // No tail after the `1 ;` head.
+        assert_eq!(shift_select(&Key::UnknownEscSeq(vec!['[', '1', ';'])), None);
+        // Non-numeric modifier.
+        assert_eq!(shift_select(&seq("x", 'D')), None);
+        // Shift held but the final byte is not a cursor key.
+        assert_eq!(shift_select(&seq("2", 'Z')), None);
     }
 }

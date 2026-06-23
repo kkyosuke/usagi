@@ -606,6 +606,49 @@ pub fn block_caret(before: &str, after: &str, base: &Style) -> String {
     )
 }
 
+/// Renders one editor line that a selection runs through: the bytes in
+/// `[start, end)` are drawn in **reverse video** (the selection highlight) and
+/// the rest in `base`. When the caret sits on this line, `caret` is its byte
+/// column — always `start` or `end`, the selection's moving edge — and a
+/// zero-width [`CARET_MARK`] is embedded there so the frame painter parks the
+/// real cursor on it, exactly as [`block_caret`] does. `newline_selected`
+/// appends a reversed space, showing that the line break after this line is
+/// itself inside the selection (so a multi-line span reads as one block).
+///
+/// `start` and `end` must be `char` boundaries within `line` (the caret columns
+/// always are). Like [`block_caret`], the recoloured cells never shift the text
+/// sideways, so the highlight tracks the selection without reflowing the line.
+pub fn block_selection(
+    line: &str,
+    start: usize,
+    end: usize,
+    caret: Option<usize>,
+    newline_selected: bool,
+    base: &Style,
+) -> String {
+    let before = &line[..start];
+    let mid = &line[start..end];
+    let after = &line[end..];
+    // The caret marks at most one edge: its column is `start` or `end`, so place
+    // a single [`CARET_MARK`] there (never both, even for an empty span).
+    let (mark_start, mark_end) = match caret {
+        Some(c) if c == start => (CARET_MARK, ""),
+        Some(c) if c == end => ("", CARET_MARK),
+        _ => ("", ""),
+    };
+    let trailing = if newline_selected {
+        base.clone().reverse().apply_to(" ").to_string()
+    } else {
+        String::new()
+    };
+    format!(
+        "{}{mark_start}{}{mark_end}{}{trailing}",
+        base.apply_to(before),
+        base.clone().reverse().apply_to(mid),
+        base.apply_to(after),
+    )
+}
+
 /// Wraps `lines` in a single-bordered box `inner_width` columns wide, with
 /// `title` embedded in the top border.
 ///
@@ -1250,6 +1293,43 @@ mod tests {
         assert_eq!(&*console::strip_ansi_codes(&line), "あいう");
         let reversed = base.clone().reverse().apply_to("い").to_string();
         assert!(line.contains(&reversed));
+    }
+
+    #[test]
+    fn block_selection_reverses_the_span_and_parks_the_caret_at_its_edge() {
+        let base = Style::new().force_styling(true);
+        // "ab[cd]" with the caret at the selection's right edge (end == 4).
+        let line = block_selection("abcd", 2, 4, Some(4), false, &base);
+        assert_eq!(&*console::strip_ansi_codes(&line), "abcd");
+        let reversed = base.clone().reverse().apply_to("cd").to_string();
+        assert!(line.contains(&reversed), "the span is reversed");
+        assert!(line.contains(CARET_MARK), "the caret edge is marked");
+        // No trailing cell when the line break is not part of the selection.
+        assert_eq!(console::measure_text_width(&line), 4);
+    }
+
+    #[test]
+    fn block_selection_marks_the_left_edge_and_shows_a_selected_newline() {
+        let base = Style::new().force_styling(true);
+        // Whole line selected with the caret at the left edge (start == 0) and the
+        // trailing line break included: a reversed space stands in for the newline.
+        let line = block_selection("ab", 0, 2, Some(0), true, &base);
+        assert_eq!(&*console::strip_ansi_codes(&line), "ab ");
+        assert!(line.contains(CARET_MARK));
+        let reversed_space = base.clone().reverse().apply_to(" ").to_string();
+        assert!(
+            line.contains(&reversed_space),
+            "the newline reads as selected"
+        );
+    }
+
+    #[test]
+    fn block_selection_without_the_caret_on_the_line_omits_the_marker() {
+        let base = Style::new().force_styling(true);
+        // A line fully inside a multi-line selection but not holding the caret.
+        let line = block_selection("mid", 0, 3, None, true, &base);
+        assert_eq!(&*console::strip_ansi_codes(&line), "mid ");
+        assert!(!line.contains(CARET_MARK));
     }
 
     #[test]
