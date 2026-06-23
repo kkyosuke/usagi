@@ -1181,12 +1181,13 @@ fn focus_new_tab_with_panes_shows_the_prompt_surface() {
 
 #[test]
 fn focus_previews_the_selected_pane_when_a_pane_tab_is_chosen() {
-    // Off the "+ new" tab (as after `Ctrl-T` from 没入), the selected pane's live
-    // snapshot previews below the strip instead of the action surface.
+    // Off the "+ new" tab (as after navigating onto a pane tab with `Ctrl-N`/`Ctrl-P`),
+    // the selected pane's live snapshot previews below the strip instead of the
+    // action surface.
     let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
     state.enter_focus(1);
-    state.leave_attached(); // land on the active pane tab, not "+ new"
     state.set_terminal_tabs(vec!["agent".to_string(), "terminal".to_string()], 1);
+    state.focus_tab_prev(); // "+ new" -> the last (active) pane tab
     state.set_terminal_view(TerminalView::from_rows(vec!["$ echo hi".to_string()], None));
     let out = stripped(&right_pane_contents(&state, 100, 12));
     assert!(out.contains("+ new")); // the strip still carries the "+ new" tab
@@ -1200,8 +1201,8 @@ fn focus_pane_tab_falls_back_to_a_hint_until_the_first_snapshot() {
     // stands in until one does.
     let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
     state.enter_focus(1);
-    state.leave_attached();
     state.set_terminal_tabs(vec!["agent".to_string()], 0);
+    state.focus_tab_next(); // "+ new" -> the sole pane tab
     let out = stripped(&right_pane_contents(&state, 60, 12));
     assert!(out.contains("live terminal"));
     assert!(out.contains("再アタッチ"));

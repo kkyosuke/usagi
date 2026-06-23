@@ -550,14 +550,15 @@ impl HomeState {
 
     /// Leave 没入 for 在席 (Focus): the embedded session was closed or detached,
     /// so drop the surface and return to the focused session's action surface.
-    /// The tab selector lands on the session's active pane (not the "+ new" tab),
-    /// so zooming out with `Ctrl-T` shows the pane just left — falling back to the
-    /// action surface only when no pane survives (see [`focus_on_new_tab`]).
+    /// The tab selector lands on the trailing "+ new" tab — the launch surface —
+    /// so zooming out with `Ctrl-T` opens the action menu over the live panes
+    /// (which still ride the strip), and `Esc` there steps back onto the pane it
+    /// was opened over (see [`focus_discard_new_tab`]).
     ///
-    /// [`focus_on_new_tab`]: Self::focus_on_new_tab
+    /// [`focus_discard_new_tab`]: Self::focus_discard_new_tab
     pub fn leave_attached(&mut self) {
         self.mode = Mode::Focus;
-        self.focus_new_tab = false;
+        self.focus_new_tab = true;
         self.clear_terminal_surface();
     }
 
@@ -1110,6 +1111,21 @@ impl HomeState {
             None
         } else {
             Some(self.focus_active_pane() - 1)
+        }
+    }
+
+    /// Discard 在席's "+ new" launch surface when it sits over live panes — the
+    /// state after zooming out with `Ctrl-T` (or navigating onto "+ new") — by
+    /// stepping the selector back onto the active pane's tab, so that pane
+    /// previews again. Returns whether it moved: `false` (a no-op) when "+ new"
+    /// is the only tab (an idle session, nothing to step back to), leaving the
+    /// caller to back out of 在席 instead.
+    pub fn focus_discard_new_tab(&mut self) -> bool {
+        if self.focus_on_new_tab() && self.focus_pane_count() > 0 {
+            self.focus_new_tab = false;
+            true
+        } else {
+            false
         }
     }
 

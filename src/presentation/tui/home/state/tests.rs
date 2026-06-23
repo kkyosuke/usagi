@@ -909,9 +909,9 @@ fn an_idle_session_is_always_on_the_new_tab() {
 }
 
 #[test]
-fn leaving_attached_lands_on_the_active_pane_tab() {
-    // `Ctrl-T` (leave_attached) drops back to 在席 on the session's active pane, so
-    // the pane just left previews — not the "+ new" tab.
+fn leaving_attached_lands_on_the_new_tab() {
+    // `Ctrl-T` (leave_attached) drops back to 在席 on the trailing "+ new" launch
+    // surface — the action menu over the (still-live) panes — not a pane preview.
     let mut state = state();
     state.enter_focus(1);
     // `leave_attached` clears the surface; the event loop republishes the strip on
@@ -919,16 +919,44 @@ fn leaving_attached_lands_on_the_active_pane_tab() {
     state.leave_attached();
     state.set_terminal_tabs(vec!["agent".to_string(), "terminal".to_string()], 1);
     assert_eq!(state.mode(), Mode::Focus);
+    assert!(state.focus_on_new_tab());
+}
+
+#[test]
+fn focus_discard_new_tab_steps_back_onto_the_active_pane() {
+    // On "+ new" over live panes (as after `Ctrl-T`), discarding steps onto the
+    // active pane's tab so it previews again, staying in 在席.
+    let mut state = state();
+    state.enter_focus(1);
+    state.leave_attached();
+    state.set_terminal_tabs(vec!["agent".to_string(), "terminal".to_string()], 1);
+    assert!(state.focus_on_new_tab());
+    assert!(state.focus_discard_new_tab());
     assert!(!state.focus_on_new_tab());
+    assert_eq!(state.mode(), Mode::Focus);
+}
+
+#[test]
+fn focus_discard_new_tab_is_inert_without_live_panes() {
+    // With no pane behind "+ new" (an idle session) there is nothing to step back
+    // to, so discarding is a no-op and the caller backs out of 在席 instead.
+    let mut state = state();
+    state.enter_focus(1);
+    assert!(state.focus_on_new_tab());
+    assert!(!state.focus_discard_new_tab());
+    assert!(state.focus_on_new_tab());
 }
 
 #[test]
 fn focus_tab_next_walks_panes_then_the_new_tab() {
     let mut state = state();
     state.enter_focus(1);
-    state.leave_attached(); // off the "+ new" tab, on the active pane
-                            // Two live panes (active = 0), then the "+ new" tab after them.
+    // Two live panes (active = 0), then the "+ new" tab after them; entry lands on
+    // "+ new".
     state.set_terminal_tabs(vec!["agent".to_string(), "terminal".to_string()], 0);
+    assert!(state.focus_on_new_tab());
+    // "+ new" wraps to pane 0.
+    assert_eq!(state.focus_tab_next(), Some(0));
     assert!(!state.focus_on_new_tab());
     // pane 0 -> pane 1.
     assert_eq!(state.focus_tab_next(), Some(1));
@@ -937,9 +965,6 @@ fn focus_tab_next_walks_panes_then_the_new_tab() {
     // pane 1 (last) -> "+ new".
     assert_eq!(state.focus_tab_next(), None);
     assert!(state.focus_on_new_tab());
-    // "+ new" wraps back to pane 0.
-    assert_eq!(state.focus_tab_next(), Some(0));
-    assert!(!state.focus_on_new_tab());
 }
 
 #[test]
