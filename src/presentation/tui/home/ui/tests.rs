@@ -2326,6 +2326,7 @@ fn render_frame_edits_the_note_in_the_right_pane_not_a_full_screen_modal() {
         created_at: Utc::now(),
     };
     state.restore_sessions(vec![session]);
+    state.enter_switch(super::super::state::ReturnMode::Overview);
     state.switch_move_down(); // root -> alpha
     assert!(state.switch_begin_note());
 
@@ -2348,83 +2349,103 @@ fn render_frame_edits_the_note_in_the_right_pane_not_a_full_screen_modal() {
     );
 }
 
+/// A 切替 state with one session named `alpha` carrying `note`, the cursor moved
+/// onto it. `state_with` seeds an unrelated `main` worktree so the root row is
+/// distinct.
+fn switch_state_with_note(note: &str) -> HomeState {
+    let mut state = state_with(vec![worktree(Some("main"), false, BranchStatus::Local)]);
+    state.restore_sessions(vec![SessionRecord {
+        name: "alpha".to_string(),
+        display_name: None,
+        note: Some(note.to_string()),
+        root: PathBuf::from("/repo/.usagi/sessions/alpha"),
+        worktrees: vec![worktree(Some("alpha"), false, BranchStatus::Local)],
+        created_at: Utc::now(),
+    }]);
+    state.enter_switch(super::super::state::ReturnMode::Overview);
+    state.switch_move_down(); // root -> alpha
+    state
+}
+
 #[test]
-fn note_editor_pane_scrolls_to_keep_the_caret_line_visible() {
-    // A note taller than the pane scrolls so the caret line (the end, here) stays
-    // in view; the top lines scroll off.
+fn note_overlay_editor_windows_around_the_caret() {
+    // While editing, the overlay box shows a window around the caret (the end,
+    // here), so a note taller than the box keeps the caret line in view.
     let note = (0..10)
         .map(|i| format!("L{i}"))
         .collect::<Vec<_>>()
         .join("\n");
-    let mut state = state_with(vec![worktree(Some("main"), false, BranchStatus::Local)]);
-    state.restore_sessions(vec![SessionRecord {
-        name: "alpha".to_string(),
-        display_name: None,
-        note: Some(note),
-        root: PathBuf::from("/repo/.usagi/sessions/alpha"),
-        worktrees: vec![worktree(Some("alpha"), false, BranchStatus::Local)],
-        created_at: Utc::now(),
-    }]);
-    state.switch_move_down();
+    let mut state = switch_state_with_note(&note);
     assert!(state.switch_begin_note()); // caret parks at the end (last line, "L9")
 
-    // A short pane (1 header row + 3 body rows): only the last lines fit.
-    let editor = state.note_editor().expect("editor open");
-    let pane = stripped(&note_editor_pane(editor, 40, 4));
+    // A short pane: only a window of the last lines fits in the editor box.
+    let pane = stripped(&right_pane_contents(&state, 40, 8));
     assert!(pane.contains("note: alpha"));
     assert!(pane.contains("L9"), "the caret line is kept visible");
-    assert!(pane.contains("L7"));
-    assert!(!pane.contains("L0"), "the top lines scroll off");
+    assert!(!pane.contains("L0"), "the top lines are windowed out");
 }
 
 #[test]
-fn switch_preview_shows_the_selected_sessions_note_above_the_preview() {
-    let mut state = state_with(vec![worktree(Some("main"), false, BranchStatus::Local)]);
-    let session = SessionRecord {
-        name: "alpha".to_string(),
-        display_name: None,
-        note: Some("do X\ndo Y".to_string()),
-        root: PathBuf::from("/repo/.usagi/sessions/alpha"),
-        worktrees: vec![worktree(Some("alpha"), false, BranchStatus::Local)],
-        created_at: Utc::now(),
-    };
-    state.restore_sessions(vec![session]);
-    state.enter_switch(super::super::state::ReturnMode::Overview);
+fn right_pane_overlays_the_read_only_note_in_switch() {
+    let mut state = switch_state_with_note("do X\ndo Y");
+    // The selected session's note shows in the right pane (overlaid on top).
+    let pane = stripped(&right_pane_contents(&state, 40, 12));
+    assert!(pane.contains("note: alpha"), "the overlay is titled");
+    assert!(pane.contains("do X"));
+    assert!(pane.contains("do Y"));
 
-    // On the root row there is no session note, so the block is absent.
-    let root = stripped(&switch_preview(&state, 40, 12));
+    // Back on the root row there is no session note, so no overlay shows.
+    state.switch_move_up();
+    let root = stripped(&right_pane_contents(&state, 40, 12));
     assert!(!root.contains("do X"));
-
-    // Moving onto the session shows its note in a `note` block above the preview.
-    state.switch_move_down();
-    let preview = stripped(&switch_preview(&state, 40, 12));
-    assert!(preview.contains("note"), "the note block has a title");
-    assert!(preview.contains("do X"));
-    assert!(preview.contains("do Y"));
 }
 
 #[test]
-fn switch_preview_note_block_elides_a_long_note() {
+fn read_only_note_overlay_elides_a_long_note() {
     let note = (0..8)
         .map(|i| format!("todo {i}"))
         .collect::<Vec<_>>()
         .join("\n");
-    let mut state = state_with(vec![worktree(Some("main"), false, BranchStatus::Local)]);
-    state.restore_sessions(vec![SessionRecord {
-        name: "alpha".to_string(),
-        display_name: None,
-        note: Some(note),
-        root: PathBuf::from("/repo/.usagi/sessions/alpha"),
-        worktrees: vec![worktree(Some("alpha"), false, BranchStatus::Local)],
-        created_at: Utc::now(),
-    }]);
-    state.enter_switch(super::super::state::ReturnMode::Overview);
-    state.switch_move_down();
-
-    let preview = stripped(&switch_preview(&state, 40, 16));
+    let state = switch_state_with_note(&note);
+    let pane = stripped(&right_pane_contents(&state, 40, 16));
     // The first lines show; the overflow is elided with a `… (N more)` line.
-    assert!(preview.contains("todo 0"));
-    assert!(preview.contains("todo 5"));
-    assert!(preview.contains("more)"));
-    assert!(!preview.contains("todo 7"));
+    assert!(pane.contains("todo 0"));
+    assert!(pane.contains("todo 5"));
+    assert!(pane.contains("more)"));
+    assert!(!pane.contains("todo 7"));
+}
+
+#[test]
+fn note_overlay_anchors_at_the_top_for_both_idle_and_live_previews() {
+    // The note overlay sits at the top of the right pane (row 0) regardless of
+    // whether the preview underneath is an idle session's action menu or a live
+    // terminal — so moving the cursor never shifts where the note reads (no CLS).
+    let idle = switch_state_with_note("todo");
+    let idle_rows = right_pane_contents(&idle, 40, 12);
+    assert!(stripped(&[idle_rows[0].clone()]).contains("note: alpha"));
+
+    // Make the same session live (a running shell with a snapshot).
+    let mut live = switch_state_with_note("todo");
+    live.apply_badges(MonitorSnapshot {
+        live: [PathBuf::from("/repo/wt")].into(),
+        ..Default::default()
+    });
+    live.set_terminal_view(TerminalView::from_rows(vec!["$ live".to_string()], None));
+    let live_rows = right_pane_contents(&live, 40, 12);
+    assert!(stripped(&[live_rows[0].clone()]).contains("note: alpha"));
+}
+
+#[test]
+fn note_editor_overlay_keeps_the_preview_visible_behind_it() {
+    // Editing is a floating box at the top, so the preview/terminal underneath
+    // stays visible below it (the screen never switches).
+    let mut state = switch_state_with_note("hi");
+    assert!(state.switch_begin_note());
+    let pane = stripped(&right_pane_contents(&state, 40, 16));
+    assert!(pane.contains("note: alpha"), "the editor box shows");
+    // The idle session's action-menu preview still shows below the box.
+    assert!(
+        pane.contains("Enter で開く"),
+        "the preview behind the box is still visible"
+    );
 }
