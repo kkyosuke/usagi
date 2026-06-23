@@ -122,6 +122,48 @@ fn agent_cli_field_cycles_through_each_cli() {
 }
 
 #[test]
+fn agent_cli_field_cycles_only_through_installed_agents() {
+    // Only Claude and sakana.ai (codex-fugu) are installed: the selector skips
+    // the uninstalled Codex and Gemini entirely.
+    let mut config = config_with_workspaces(&[]);
+    config.set_available_agent_clis(vec![AgentCli::Claude, AgentCli::CodexFugu]);
+    config.move_down();
+    config.move_down();
+    config.move_down(); // select Agent CLI
+    assert_eq!(config.value_of(Field::AgentCli), "Claude");
+    // Claude -> sakana.ai -> Claude (Codex and Gemini are not offered).
+    assert!(config.cycle_selected(true));
+    assert_eq!(config.value_of(Field::AgentCli), "sakana.ai");
+    assert!(config.cycle_selected(true));
+    assert_eq!(config.value_of(Field::AgentCli), "Claude");
+}
+
+#[test]
+fn agent_cli_field_keeps_the_saved_value_selectable_when_uninstalled() {
+    // The configured agent (Gemini) is not installed, but only Codex is. Merely
+    // opening the screen must not lose the saved value, so Gemini stays shown and
+    // is offered alongside the installed Codex.
+    let settings = Settings {
+        agent_cli: AgentCli::Gemini,
+        ..Settings::default()
+    };
+    let mut config = Config::new(settings, Vec::new());
+    config.set_available_agent_clis(vec![AgentCli::Codex]);
+    config.move_down();
+    config.move_down();
+    config.move_down(); // select Agent CLI
+                        // Untouched, the saved (uninstalled) value is still displayed.
+    assert_eq!(config.value_of(Field::AgentCli), "Gemini");
+    // Cycling moves to the installed Codex. Once the user deliberately leaves the
+    // uninstalled agent it is no longer offered, so it does not come back — only
+    // installed agents remain (here just Codex).
+    assert!(config.cycle_selected(true));
+    assert_eq!(config.value_of(Field::AgentCli), "Codex");
+    assert!(config.cycle_selected(true));
+    assert_eq!(config.value_of(Field::AgentCli), "Codex");
+}
+
+#[test]
 fn session_action_ui_field_cycles_between_menu_and_prompt() {
     let mut config = config_with_workspaces(&[]);
     // Navigate down until the Session Action UI row is selected.
@@ -718,6 +760,21 @@ fn cycling_a_local_agent_cli_override_walks_global_then_each_value() {
     // Backward from None wraps to the last value.
     assert!(config.cycle_selected(false));
     assert_eq!(config.local().unwrap().agent_cli, Some(AgentCli::Gemini));
+}
+
+#[test]
+fn cycling_a_local_agent_cli_override_offers_only_installed_agents() {
+    // With only Codex installed, the override cycles "follow global" then just
+    // Codex — the uninstalled agents are not offered as override targets.
+    let mut config = local_config();
+    config.set_available_agent_clis(vec![AgentCli::Codex]);
+    assert_eq!(config.selected_local_field(), Some(LocalField::AgentCli));
+
+    // None (follow global) -> Codex -> None.
+    assert!(config.cycle_selected(true));
+    assert_eq!(config.local().unwrap().agent_cli, Some(AgentCli::Codex));
+    assert!(config.cycle_selected(true));
+    assert_eq!(config.local().unwrap().agent_cli, None);
 }
 
 #[test]
