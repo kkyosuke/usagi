@@ -1401,6 +1401,36 @@ fn render_frame_draws_the_terminal_in_the_right_pane_when_attached() {
     assert!(joined.contains("attached"));
 }
 
+#[test]
+fn note_editor_box_keeps_its_bottom_border_over_a_short_pane() {
+    // The note editor floats over the attached session's pane. Even when the pane
+    // beneath is shorter than the box — e.g. no terminal snapshot has arrived, so
+    // it falls back to a one-line hint — the box must render its bottom border in
+    // full as the note grows with each newline, never clipping it off.
+    let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Pushed)]);
+    state.enter_focus(1);
+    state.show_attached();
+    // No snapshot set: the attached pane is the one-line starting hint.
+    // `true` = opened from 没入 (`Ctrl-E`), re-attaching on close.
+    assert!(state.open_focused_note(true));
+    // Type a few lines so the editor box is taller than that short fallback pane.
+    let area = state.note_editor_mut().unwrap().area_mut();
+    area.insert('a');
+    area.newline();
+    area.insert('b');
+    area.newline();
+    area.insert('c');
+    let rows = right_pane_contents(&state, 60, 12);
+    let plain = stripped(&rows);
+    // The box frames the note in full: a titled top border and a bottom border.
+    assert!(plain.contains("note: main"));
+    assert!(
+        rows.iter()
+            .any(|r| console::strip_ansi_codes(r).trim_start().starts_with('└')),
+        "the box's bottom border must render even over a short pane: {plain}",
+    );
+}
+
 // --- input / footer by mode --------------------------------------------
 
 #[test]
