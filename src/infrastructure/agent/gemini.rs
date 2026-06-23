@@ -21,34 +21,14 @@
 
 use std::path::{Path, PathBuf};
 
+use super::util::{same_dir, shell_single_quote};
 use crate::domain::agent::{Agent, AgentWiring};
-
-/// Wrap `text` as a single shell argument in single quotes, safe to drop into a
-/// `sh -c` command line. A single quote cannot appear inside a single-quoted
-/// string, so each one is rendered as `'\''` (close the quote, an escaped quote,
-/// reopen) — the standard POSIX idiom. Everything else is literal inside single
-/// quotes, so Gemini receives the argument verbatim.
-fn shell_single_quote(text: &str) -> String {
-    format!("'{}'", text.replace('\'', r"'\''"))
-}
 
 /// Where Gemini stores each project's chat history:
 /// `~/.gemini/tmp/<project>/`. `None` when the home directory can't be
 /// determined, so usagi simply launches fresh rather than guessing.
 fn gemini_projects_root() -> Option<PathBuf> {
     dirs::home_dir().map(|home| home.join(".gemini").join("tmp"))
-}
-
-/// Whether two paths name the same directory, comparing canonicalized forms (so a
-/// symlinked or `/tmp` ⇄ `/private/tmp` difference still matches) and falling back
-/// to a plain comparison when a path cannot be canonicalized (e.g. the recorded
-/// directory no longer exists).
-fn same_dir(a: &Path, b: &Path) -> bool {
-    a == b
-        || matches!(
-            (std::fs::canonicalize(a), std::fs::canonicalize(b)),
-            (Ok(x), Ok(y)) if x == y
-        )
 }
 
 /// The Gemini project directories under `root` whose `.project_root` marker names
@@ -248,37 +228,6 @@ mod tests {
             Some("don't stop"),
         );
         assert_eq!(launch, r"gemini -i 'don'\''t stop'");
-    }
-
-    #[test]
-    fn shell_single_quote_wraps_and_escapes() {
-        assert_eq!(shell_single_quote("plain"), "'plain'");
-        assert_eq!(shell_single_quote("a'b"), r"'a'\''b'");
-    }
-
-    #[test]
-    fn same_dir_compares_raw_then_canonical() {
-        // Identical paths match outright (the raw short-circuit).
-        assert!(same_dir(Path::new("/a/b"), Path::new("/a/b")));
-
-        let dir = tempfile::tempdir().unwrap();
-        let real = dir.path();
-        // Raw-different but canonically-equal paths match via canonicalization. A
-        // `sub/..` round-trip stays distinct as a `Path` (unlike a trailing `.`,
-        // which `Path` normalizes away) yet canonicalizes back to `real`.
-        fs::create_dir_all(real.join("sub")).unwrap();
-        let round_trip = real.join("sub").join("..");
-        assert_ne!(real, round_trip.as_path());
-        assert!(same_dir(real, &round_trip));
-
-        // Two distinct real directories do not match (both canonicalize, the guard
-        // is evaluated and fails).
-        let other = tempfile::tempdir().unwrap();
-        assert!(!same_dir(real, other.path()));
-
-        // A path that cannot be canonicalized (does not exist) and is raw-different
-        // also does not match.
-        assert!(!same_dir(real, Path::new("/nonexistent/xyz")));
     }
 
     #[test]

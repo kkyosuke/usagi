@@ -2,9 +2,9 @@
 //! `--json` serialisations.
 
 use anyhow::Result;
-use serde::Serialize;
 
 use crate::domain::memory::MemorySummary;
+use crate::presentation::cli::render::json_lines;
 use crate::usecase::memory::MemorySummaryView;
 
 /// Render a listing (from `list` or `search`) either as JSON or as aligned
@@ -26,10 +26,4 @@ fn render_list(items: &[MemorySummary]) -> Vec<String> {
         .iter()
         .map(|s| format!("{:<12} {:<24} {}", s.kind.as_str(), s.name, s.title))
         .collect()
-}
-
-/// Serialize `value` to pretty JSON and return it split into lines.
-pub(super) fn json_lines<T: Serialize>(value: &T) -> Result<Vec<String>> {
-    let text = serde_json::to_string_pretty(value)?;
-    Ok(text.lines().map(str::to_string).collect())
 }

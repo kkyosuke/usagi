@@ -54,6 +54,47 @@ impl BranchStatus {
         }
     }
 
+    /// Derive a branch's lifecycle status from facts already gathered about it:
+    ///
+    /// - `dirty` — its working tree has uncommitted changes.
+    /// - `counts` — its commits ahead of / behind the default branch, as
+    ///   `Some((ahead, behind))`; `None` for a branch not measured against the
+    ///   default (the default branch itself, a detached HEAD) or when the read
+    ///   failed.
+    /// - `has_upstream` — it has an upstream tracking branch.
+    ///
+    /// The order of checks:
+    ///
+    /// 1. **dirty** wins regardless of commit topology: there is work here that
+    ///    has not been committed.
+    /// 2. Otherwise, by commits *ahead of* the default branch:
+    ///    - **ahead > 0** → `Pushed` if it has an upstream, else `Local`.
+    ///    - **ahead == 0** → `Synced` if the default has moved past it
+    ///      (behind > 0), else `New` (freshly cut, no work yet).
+    ///
+    /// A branch with no `counts` (default / detached / unread) skips the
+    /// ahead/behind step and falls through to `Local` / `Pushed` by its upstream
+    /// state. The pure derivation lives here; the usecase gathers the git facts.
+    pub fn derive(dirty: bool, counts: Option<(usize, usize)>, has_upstream: bool) -> BranchStatus {
+        if dirty {
+            return BranchStatus::Dirty;
+        }
+        if let Some((ahead, behind)) = counts {
+            if ahead == 0 {
+                return if behind > 0 {
+                    BranchStatus::Synced
+                } else {
+                    BranchStatus::New
+                };
+            }
+        }
+        if has_upstream {
+            BranchStatus::Pushed
+        } else {
+            BranchStatus::Local
+        }
+    }
+
     /// Rank by lifecycle progress: `New` < `Dirty` < `Local` < `Pushed` <
     /// `Synced`. Used to aggregate a session's repositories into its
     /// least-progressed status.
@@ -199,6 +240,24 @@ mod tests {
             assert_eq!(status.as_str(), text);
             assert_eq!(format!("{status}"), text);
         }
+    }
+
+    #[test]
+    fn derive_classifies_from_dirty_counts_and_upstream() {
+        use BranchStatus::*;
+        // Dirty wins regardless of commit topology or upstream.
+        assert_eq!(BranchStatus::derive(true, Some((3, 0)), true), Dirty);
+        assert_eq!(BranchStatus::derive(true, None, false), Dirty);
+        // ahead == 0: behind the default → Synced; level with it → New.
+        assert_eq!(BranchStatus::derive(false, Some((0, 2)), true), Synced);
+        assert_eq!(BranchStatus::derive(false, Some((0, 0)), true), New);
+        // ahead > 0: Pushed with an upstream, else Local.
+        assert_eq!(BranchStatus::derive(false, Some((1, 0)), true), Pushed);
+        assert_eq!(BranchStatus::derive(false, Some((1, 0)), false), Local);
+        // No counts (default branch / detached / unread): falls through to the
+        // upstream state, skipping the ahead/behind step.
+        assert_eq!(BranchStatus::derive(false, None, true), Pushed);
+        assert_eq!(BranchStatus::derive(false, None, false), Local);
     }
 
     #[test]

@@ -164,7 +164,8 @@ fn execute(repo: &Path, command: MemoryCommand) -> Result<Vec<String>> {
 }
 
 mod render;
-use render::{json_lines, render_listing};
+use super::render::json_lines;
+use render::render_listing;
 
 #[cfg(test)]
 mod tests;

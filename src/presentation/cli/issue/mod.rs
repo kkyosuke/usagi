@@ -308,7 +308,8 @@ fn optional_change<T>(value: Option<T>, clear: bool) -> Option<Option<T>> {
 }
 
 mod render;
-use render::{json_lines, render_grouped, render_listing};
+use super::render::json_lines;
+use render::{render_grouped, render_listing};
 
 #[cfg(test)]
 mod tests;

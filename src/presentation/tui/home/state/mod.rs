@@ -1032,6 +1032,16 @@ impl HomeState {
     pub fn enter_focus(&mut self, row: usize) {
         self.list.focus_index(row);
         self.list.activate_selected();
+        self.enter_focus_surface();
+    }
+
+    /// Switch into 在席 (Focus) on the already-positioned session: enter the mode
+    /// and reset the right-pane action surface (close any inline create input,
+    /// reset the menu cursor and prompt, land on the "+ new" tab). The cursor must
+    /// already point at the target session; [`enter_focus`](Self::enter_focus) and
+    /// [`enter_focus_named`](Self::enter_focus_named) differ only in how they get
+    /// there.
+    fn enter_focus_surface(&mut self) {
         self.mode = Mode::Focus;
         self.overlays.create = None;
         self.focus_menu.reset();
@@ -1048,11 +1058,7 @@ impl HomeState {
         if !self.list.select_by_name(name) {
             return false;
         }
-        self.mode = Mode::Focus;
-        self.overlays.create = None;
-        self.focus_menu.reset();
-        self.focus_prompt.clear();
-        self.focus_new_tab = true;
+        self.enter_focus_surface();
         true
     }
 
