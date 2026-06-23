@@ -535,6 +535,65 @@ mod tests {
     }
 
     #[test]
+    fn has_resumable_session_in_is_false_for_a_missing_root() {
+        // A sessions root that does not exist (no agent ever run) reads as nothing
+        // to resume — the directory walk yields no files rather than erroring.
+        assert!(!has_resumable_session_in(
+            Path::new("/nonexistent/codex/sessions"),
+            Path::new("/some/worktree")
+        ));
+        // Forgetting against a missing root is likewise a harmless no-op.
+        forget_session_in(
+            Path::new("/nonexistent/codex/sessions"),
+            Path::new("/some/worktree"),
+        );
+    }
+
+    #[test]
+    fn same_dir_compares_raw_then_canonical() {
+        // Identical paths match outright (the raw short-circuit).
+        assert!(same_dir(Path::new("/a/b"), Path::new("/a/b")));
+
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path();
+        // Raw-different but canonically-equal paths match via canonicalization.
+        // A `sub/..` round-trip stays distinct as a `Path` (unlike a trailing `.`,
+        // which `Path` normalizes away) yet canonicalizes back to `real`.
+        fs::create_dir_all(real.join("sub")).unwrap();
+        let round_trip = real.join("sub").join("..");
+        assert_ne!(real, round_trip.as_path());
+        assert!(same_dir(real, &round_trip));
+
+        // Two distinct real directories canonicalize to different paths → no match
+        // (both canonicalize, the guard is evaluated and fails).
+        let other = tempfile::tempdir().unwrap();
+        assert!(!same_dir(real, other.path()));
+
+        // A path that cannot be canonicalized (does not exist) and is raw-different
+        // also does not match.
+        assert!(!same_dir(real, Path::new("/nonexistent/xyz")));
+    }
+
+    #[test]
+    fn has_resumable_session_matches_a_canonically_equal_cwd() {
+        // The recorded cwd may differ from the worktree path only by a resolvable
+        // component (e.g. a trailing `/.`); canonicalization still matches it.
+        let root = tempfile::tempdir().unwrap();
+        let worktree = root.path().join("wt");
+        fs::create_dir_all(worktree.join("sub")).unwrap();
+        // The recorded cwd is raw-different (a `sub/..` round-trip) but resolves to
+        // the worktree, so canonicalization in `same_dir` still matches it.
+        let recorded = worktree.join("sub").join("..");
+        write_rollout(
+            root.path(),
+            "2026/06/23",
+            "rollout-dotted.jsonl",
+            &recorded.to_string_lossy(),
+        );
+        assert!(has_resumable_session_in(root.path(), &worktree));
+    }
+
+    #[test]
     fn has_resumable_session_ignores_files_without_a_session_meta_cwd() {
         let root = tempfile::tempdir().unwrap();
         let worktree = root.path().join("wt");
