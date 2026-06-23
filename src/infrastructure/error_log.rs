@@ -9,11 +9,18 @@
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Local, NaiveDate};
 
 use crate::infrastructure::storage::data_dir;
+
+/// Whether this process has already pruned old log files. Pruning scans the
+/// whole `logs/` directory, so [`ErrorLog::record`] does it once per process
+/// rather than on every error — an error burst would otherwise re-scan the
+/// directory on each line.
+static PRUNED: AtomicBool = AtomicBool::new(false);
 
 /// Subdirectory of the data directory that holds the daily log files.
 const LOGS_DIR_NAME: &str = "logs";
@@ -45,9 +52,9 @@ impl ErrorLog {
     }
 
     /// Best-effort: append `message` to today's log file under the default data
-    /// directory and prune files older than [`RETENTION_DAYS`]. Every failure —
-    /// including not finding the data directory — is swallowed, so logging never
-    /// masks the error it is recording.
+    /// directory and, once per process, prune files older than [`RETENTION_DAYS`].
+    /// Every failure — including not finding the data directory — is swallowed, so
+    /// logging never masks the error it is recording.
     ///
     /// This is the entry point for code paths that cannot surface a `Result` to
     /// `main`: long-running TUI work (session create / remove, agent / terminal
@@ -61,7 +68,11 @@ impl ErrorLog {
         // return would leave a line uncovered.
         if let Ok(log) = Self::open_default() {
             let now = Local::now();
-            let _ = log.prune(now.date_naive(), RETENTION_DAYS);
+            // Prune just once per process (the first record wins the swap); later
+            // records in an error burst skip the directory scan.
+            if !PRUNED.swap(true, Ordering::Relaxed) {
+                let _ = log.prune(now.date_naive(), RETENTION_DAYS);
+            }
             let _ = log.append(now, message);
         }
     }
