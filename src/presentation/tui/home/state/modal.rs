@@ -14,31 +14,46 @@ use crate::presentation::tui::markdown::MarkdownLine;
 use crate::presentation::tui::widgets::text_area::TextArea;
 use crate::presentation::tui::widgets::text_input::TextInput;
 
-/// The home screen's transient overlays — the sub-states that capture the
-/// keyboard while open and are drawn on top of the normal panes. Grouping them
-/// keeps [`HomeState`](super::HomeState) from carrying each as a separate flat
-/// field: the screen owns one [`Overlays`] and routes to whichever is active.
+/// The home screen's transient overlay — the single sub-state that captures the
+/// keyboard while open and is drawn on top of the normal panes. At most one is
+/// open at a time, so they form one enum rather than a struct of independent
+/// `Option`s: the type makes "two overlays open at once" unrepresentable, and
+/// [`HomeState`](super::HomeState) routes to whichever variant is active.
 ///
-/// At most one is meaningfully open at a time; each is `None`/`false` when not
-/// shown. The open/close/scroll logic stays on the individual types (and on the
-/// screen's thin accessor methods that read these); this struct is just the
-/// cohesive home for the fields.
+/// The open/close/scroll logic stays on the individual payload types (and on the
+/// screen's thin accessor methods that read these). The quit-confirmation modal
+/// is *not* here: it can overlay any of these (a `Ctrl-C` raises it without
+/// dismissing what is already shown, and cancelling it returns to that), so the
+/// screen tracks it as a separate flag.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(super) struct Overlays {
+pub(super) enum Overlay {
+    /// No overlay open — the normal panes have the keyboard.
+    #[default]
+    None,
     /// The inline session-name input open while creating a session from 切替.
-    pub create: Option<CreateInput>,
+    Create(CreateInput),
     /// The inline display-name input open while renaming a session from 切替.
-    pub rename: Option<RenameInput>,
-    /// The session-removal checklist modal, when open.
-    pub remove: Option<RemoveModal>,
-    /// The scrollable text modal (a text-dumping command's output), when open.
-    pub text: Option<TextModal>,
-    /// The right-pane Markdown preview, when open.
-    pub preview: Option<Preview>,
-    /// The session-note editor modal, when open.
-    pub note: Option<NoteEditor>,
-    /// Whether the quit-confirmation modal is open.
-    pub quit_confirm: bool,
+    Rename(RenameInput),
+    /// The session-removal checklist modal.
+    Remove(RemoveModal),
+    /// The scrollable text modal (a text-dumping command's output).
+    Text(TextModal),
+    /// The right-pane Markdown preview.
+    Preview(Preview),
+    /// The session-note editor modal.
+    Note(NoteEditor),
+}
+
+impl Overlay {
+    /// Drop an open inline create input, leaving any other overlay untouched.
+    /// The mode transitions (entering 統括 / 切替 / 在席) call this to clear a
+    /// half-typed session name without disturbing an unrelated overlay — the
+    /// faithful translation of the old per-field `create = None`.
+    pub fn clear_create(&mut self) {
+        if matches!(self, Overlay::Create(_)) {
+            *self = Overlay::None;
+        }
+    }
 }
 
 /// The inline session-name input shown in the left pane while creating a session

@@ -40,7 +40,7 @@ pub use modal::{CreateInput, NoteEditor, Preview, RemoveModal, RenameInput, Text
 pub use mode::{Mode, PaneExit, ReturnMode};
 
 use list::session_row;
-use modal::{FocusMenu, Overlays};
+use modal::{FocusMenu, Overlay};
 
 /// The outcome of submitting the command line: the side effect to act on, plus
 /// the command that was recorded in history (so the event loop can persist it).
@@ -153,14 +153,21 @@ pub struct HomeState {
     /// `Esc` hides it (before a second `Esc` backs out of 切替), and moving the
     /// cursor to another row clears the flag so the next session's note shows.
     /// Only meaningful in [`Mode::Switch`]; the note *editor* is independent of
-    /// it (it captures the keyboard through [`Overlays`]).
+    /// it (it captures the keyboard through [`overlay`](Self::overlay)).
     note_hidden: bool,
-    /// The transient overlays that capture the keyboard while open (the 切替
+    /// The transient overlay that captures the keyboard while open (the 切替
     /// inline create/rename inputs, the text modal, the right-pane preview, the
-    /// session-removal checklist, the quit confirmation). Grouped into one
-    /// [`Overlays`] so the screen routes to whichever is active rather than
-    /// carrying each as a separate field.
-    overlays: Overlays,
+    /// session-removal checklist, the note editor). One [`Overlay`] rather than a
+    /// field per kind, so at most one can be open by construction and the screen
+    /// routes to whichever variant is active. The quit confirmation is tracked
+    /// separately in [`quit_confirm`](Self::quit_confirm) because it can overlay
+    /// any of these.
+    overlay: Overlay,
+    /// Whether the quit-confirmation modal is open. Separate from
+    /// [`overlay`](Self::overlay): a `Ctrl-C` raises it on top of whatever is
+    /// already shown, and cancelling it returns to that overlay rather than
+    /// closing it, so the two are independent.
+    quit_confirm: bool,
     /// The 在席 (Focus) menu cursor: which Session-scope command is highlighted.
     focus_menu: FocusMenu,
     /// The 在席 (Focus) prompt buffer (the session-scoped command line).
@@ -250,7 +257,8 @@ impl HomeState {
             ai_available: false,
             switch_return: ReturnMode::Overview,
             note_hidden: false,
-            overlays: Overlays::default(),
+            overlay: Overlay::default(),
+            quit_confirm: false,
             focus_menu: FocusMenu::default(),
             focus_prompt: TextInput::new(),
             focus_new_tab: true,
@@ -387,7 +395,7 @@ impl HomeState {
     /// Open a scrollable text modal showing `lines` under `title` (used by the
     /// text-dumping commands). Replaces any modal already open.
     pub fn open_text_modal(&mut self, title: impl Into<String>, lines: Vec<LogLine>) {
-        self.overlays.text = Some(TextModal {
+        self.overlay = Overlay::Text(TextModal {
             title: title.into(),
             lines,
             scroll: 0,
@@ -396,17 +404,21 @@ impl HomeState {
 
     /// The open text modal, if any.
     pub fn text_modal(&self) -> Option<&TextModal> {
-        self.overlays.text.as_ref()
+        match &self.overlay {
+            Overlay::Text(modal) => Some(modal),
+            _ => None,
+        }
     }
 
-    /// Close the text modal (the user dismissed it).
+    /// Close the text modal (the user dismissed it). Called only while the text
+    /// modal is the open overlay, so it clears the overlay outright.
     pub fn close_text_modal(&mut self) {
-        self.overlays.text = None;
+        self.overlay = Overlay::None;
     }
 
     /// Scroll the text modal up one line (no-op when closed or at the top).
     pub fn text_modal_scroll_up(&mut self) {
-        if let Some(modal) = self.overlays.text.as_mut() {
+        if let Overlay::Text(modal) = &mut self.overlay {
             modal.scroll = modal.scroll.saturating_sub(1);
         }
     }
@@ -414,7 +426,7 @@ impl HomeState {
     /// Scroll the text modal down one line, clamped so the last line stays in
     /// view (no-op when closed). `visible` is the body height the view can show.
     pub fn text_modal_scroll_down(&mut self, visible: usize) {
-        if let Some(modal) = self.overlays.text.as_mut() {
+        if let Overlay::Text(modal) = &mut self.overlay {
             let max = modal.lines.len().saturating_sub(visible);
             modal.scroll = (modal.scroll + 1).min(max);
         }
@@ -428,7 +440,7 @@ impl HomeState {
     pub fn open_preview_result(&mut self, loaded: anyhow::Result<(String, String)>) {
         match loaded {
             Ok((title, content)) => {
-                self.overlays.preview = Some(Preview {
+                self.overlay = Overlay::Preview(Preview {
                     title,
                     lines: crate::presentation::tui::markdown::render(&content),
                     scroll: 0,
@@ -440,17 +452,21 @@ impl HomeState {
 
     /// The open right-pane preview, if any.
     pub fn preview(&self) -> Option<&Preview> {
-        self.overlays.preview.as_ref()
+        match &self.overlay {
+            Overlay::Preview(preview) => Some(preview),
+            _ => None,
+        }
     }
 
-    /// Close the right-pane preview (the user dismissed it).
+    /// Close the right-pane preview (the user dismissed it). Called only while the
+    /// preview is the open overlay, so it clears the overlay outright.
     pub fn close_preview(&mut self) {
-        self.overlays.preview = None;
+        self.overlay = Overlay::None;
     }
 
     /// Scroll the preview up one line (no-op when closed or at the top).
     pub fn preview_scroll_up(&mut self) {
-        if let Some(preview) = self.overlays.preview.as_mut() {
+        if let Overlay::Preview(preview) = &mut self.overlay {
             preview.scroll = preview.scroll.saturating_sub(1);
         }
     }
@@ -458,7 +474,7 @@ impl HomeState {
     /// Scroll the preview down one line, clamped so the last line stays in view
     /// (no-op when closed). `visible` is the pane body height the view can show.
     pub fn preview_scroll_down(&mut self, visible: usize) {
-        if let Some(preview) = self.overlays.preview.as_mut() {
+        if let Overlay::Preview(preview) = &mut self.overlay {
             let max = preview.lines.len().saturating_sub(visible);
             preview.scroll = (preview.scroll + 1).min(max);
         }
@@ -739,17 +755,19 @@ impl HomeState {
 
     /// Whether the quit-confirmation modal is open.
     pub fn quit_confirm(&self) -> bool {
-        self.overlays.quit_confirm
+        self.quit_confirm
     }
 
-    /// Open the quit-confirmation modal (a live session is still running).
+    /// Open the quit-confirmation modal (a live session is still running). It
+    /// overlays whatever is already shown rather than replacing it.
     pub fn open_quit_confirm(&mut self) {
-        self.overlays.quit_confirm = true;
+        self.quit_confirm = true;
     }
 
-    /// Dismiss the quit-confirmation modal without quitting.
+    /// Dismiss the quit-confirmation modal without quitting, returning to
+    /// whatever overlay it was raised over.
     pub fn cancel_quit_confirm(&mut self) {
-        self.overlays.quit_confirm = false;
+        self.quit_confirm = false;
     }
 
     /// Focus the session at `row` (0 is the root row, `i` maps to worktree
@@ -763,7 +781,7 @@ impl HomeState {
     /// Return to 統括 (Overview), clearing the transient 切替 / 在席 state.
     pub fn enter_overview(&mut self) {
         self.mode = Mode::Overview;
-        self.overlays.create = None;
+        self.overlay.clear_create();
         self.focus_prompt.clear();
         self.focus_menu.reset();
         self.input.clear();
@@ -777,7 +795,7 @@ impl HomeState {
     pub fn enter_switch(&mut self, return_to: ReturnMode) {
         self.mode = Mode::Switch;
         self.switch_return = return_to;
-        self.overlays.create = None;
+        self.overlay.clear_create();
         // A fresh 切替 shows the highlighted session's note (any prior dismissal
         // belonged to the previous visit).
         self.note_hidden = false;
@@ -811,29 +829,35 @@ impl HomeState {
     /// validated against it live so a duplicate or branch-namespace clash is
     /// flagged before Enter.
     pub fn switch_begin_create(&mut self, taken: Vec<String>) {
-        self.overlays.create = Some(CreateInput::new(taken));
+        self.overlay = Overlay::Create(CreateInput::new(taken));
     }
 
     /// Whether an inline create input is open in 切替.
     pub fn is_creating(&self) -> bool {
-        self.overlays.create.is_some()
+        matches!(self.overlay, Overlay::Create(_))
     }
 
     /// The inline create input, when open — its typed name, caret, and live
     /// validation error are read through it ([`CreateInput`]).
     pub fn create(&self) -> Option<&CreateInput> {
-        self.overlays.create.as_ref()
+        match &self.overlay {
+            Overlay::Create(input) => Some(input),
+            _ => None,
+        }
     }
 
     /// The inline create input for editing, when open: the event loop routes the
     /// 切替 keys to its own methods ([`CreateInput::push_char`] etc.).
     pub fn create_mut(&mut self) -> Option<&mut CreateInput> {
-        self.overlays.create.as_mut()
+        match &mut self.overlay {
+            Overlay::Create(input) => Some(input),
+            _ => None,
+        }
     }
 
     /// Cancel inline creation, staying in 切替.
     pub fn create_cancel(&mut self) {
-        self.overlays.create = None;
+        self.overlay.clear_create();
     }
 
     /// Validate and accept the inline create name. On success the input closes
@@ -842,8 +866,13 @@ impl HomeState {
     /// shown live and `None` is returned (see [`CreateInput::confirm`]). A no-op
     /// (returning `None`) when not creating.
     pub fn switch_confirm_create(&mut self) -> Option<String> {
-        let name = self.overlays.create.as_mut()?.confirm()?;
-        self.overlays.create = None;
+        let Overlay::Create(input) = &mut self.overlay else {
+            return None;
+        };
+        // An invalid name keeps the input open (with its live error); only a
+        // valid one closes it.
+        let name = input.confirm()?;
+        self.overlay = Overlay::None;
         Some(name)
     }
 
@@ -853,7 +882,7 @@ impl HomeState {
     /// is not a session and has no label to change) and when an input is already
     /// open. Returns whether the input opened.
     pub fn switch_begin_rename(&mut self) -> bool {
-        if self.overlays.create.is_some() || self.overlays.rename.is_some() {
+        if matches!(self.overlay, Overlay::Create(_) | Overlay::Rename(_)) {
             return false;
         }
         let Some(worktree) = self.list.selected() else {
@@ -866,30 +895,37 @@ impl HomeState {
             .list
             .display_label(self.list.selected_index() - 1)
             .to_string();
-        self.overlays.rename = Some(RenameInput::new(target, label));
+        self.overlay = Overlay::Rename(RenameInput::new(target, label));
         true
     }
 
     /// Whether an inline rename input is open in 切替.
     pub fn is_renaming(&self) -> bool {
-        self.overlays.rename.is_some()
+        matches!(self.overlay, Overlay::Rename(_))
     }
 
     /// The inline rename input, when open — its target session and typed label
     /// are read through it ([`RenameInput`]).
     pub fn rename(&self) -> Option<&RenameInput> {
-        self.overlays.rename.as_ref()
+        match &self.overlay {
+            Overlay::Rename(input) => Some(input),
+            _ => None,
+        }
     }
 
     /// The inline rename input for editing, when open: the event loop routes the
     /// 切替 keys to its own methods ([`RenameInput::push_char`] etc.).
     pub fn rename_mut(&mut self) -> Option<&mut RenameInput> {
-        self.overlays.rename.as_mut()
+        match &mut self.overlay {
+            Overlay::Rename(input) => Some(input),
+            _ => None,
+        }
     }
 
-    /// Cancel inline renaming, staying in 切替.
+    /// Cancel inline renaming, staying in 切替. Called only while the rename input
+    /// is the open overlay, so it clears the overlay outright.
     pub fn rename_cancel(&mut self) {
-        self.overlays.rename = None;
+        self.overlay = Overlay::None;
     }
 
     /// Accept the inline rename: close the input and return the target session
@@ -897,7 +933,14 @@ impl HomeState {
     /// persist (see [`RenameInput::confirm`]). A no-op (returning `None`) when
     /// not renaming.
     pub fn switch_confirm_rename(&mut self) -> Option<(String, String)> {
-        Some(self.overlays.rename.take()?.confirm())
+        match std::mem::take(&mut self.overlay) {
+            Overlay::Rename(input) => Some(input.confirm()),
+            // Not renaming: leave whatever was open (if anything) untouched.
+            other => {
+                self.overlay = other;
+                None
+            }
+        }
     }
 
     // --- session note editor ----------------------------------------------
@@ -929,7 +972,8 @@ impl HomeState {
     /// renderer draws the note exactly when this is `Some` — so its absence is a
     /// genuine path, not a dead branch behind a separate predicate.
     pub fn visible_switch_note(&self) -> Option<&str> {
-        if self.mode != Mode::Switch || self.note_hidden || self.overlays.note.is_some() {
+        if self.mode != Mode::Switch || self.note_hidden || matches!(self.overlay, Overlay::Note(_))
+        {
             return None;
         }
         self.selected_session_note()
@@ -954,7 +998,7 @@ impl HomeState {
     /// (没入's `Ctrl-E`); `false` for 切替's `n`.
     fn open_note_for(&mut self, target: String, reattach: bool) {
         let initial = self.session_note(&target).unwrap_or_default().to_string();
-        self.overlays.note = Some(NoteEditor::new(target, &initial, reattach));
+        self.overlay = Overlay::Note(NoteEditor::new(target, &initial, reattach));
     }
 
     /// Begin editing the selected session's note in 切替 (Switch): open the note
@@ -962,7 +1006,7 @@ impl HomeState {
     /// the workspace, not a session) and when an editor is already open. Returns
     /// whether the editor opened.
     pub fn switch_begin_note(&mut self) -> bool {
-        if self.overlays.note.is_some() {
+        if matches!(self.overlay, Overlay::Note(_)) {
             return false;
         }
         let Some(worktree) = self.list.selected() else {
@@ -980,7 +1024,7 @@ impl HomeState {
     /// no-op on the root row (the workspace, not a session) and when an editor is
     /// already open. Returns whether the editor opened.
     pub fn open_focused_note(&mut self, reattach: bool) -> bool {
-        if self.overlays.note.is_some() {
+        if matches!(self.overlay, Overlay::Note(_)) {
             return false;
         }
         let name = self.focused_session_name();
@@ -994,34 +1038,45 @@ impl HomeState {
     /// The open note editor, when any — its target, text buffer, and caret are
     /// read through it ([`NoteEditor`]).
     pub fn note_editor(&self) -> Option<&NoteEditor> {
-        self.overlays.note.as_ref()
+        match &self.overlay {
+            Overlay::Note(editor) => Some(editor),
+            _ => None,
+        }
     }
 
     /// The open note editor for editing, when any: the event loop routes its keys
     /// to the buffer's own methods (via [`NoteEditor::area_mut`]).
     pub fn note_editor_mut(&mut self) -> Option<&mut NoteEditor> {
-        self.overlays.note.as_mut()
+        match &mut self.overlay {
+            Overlay::Note(editor) => Some(editor),
+            _ => None,
+        }
     }
 
     /// Whether closing the open note editor should re-attach the session's pane
     /// (it was opened from 没入). `false` when no editor is open.
     pub fn note_editor_reattaches(&self) -> bool {
-        self.overlays
-            .note
-            .as_ref()
-            .is_some_and(NoteEditor::reattach)
+        self.note_editor().is_some_and(NoteEditor::reattach)
     }
 
-    /// Cancel the note editor, discarding the edits.
+    /// Cancel the note editor, discarding the edits. Called only while the note
+    /// editor is the open overlay, so it clears the overlay outright.
     pub fn note_editor_cancel(&mut self) {
-        self.overlays.note = None;
+        self.overlay = Overlay::None;
     }
 
     /// Accept the note edit: close the editor and return the target session, the
     /// typed text, and whether to re-attach, for the event loop to persist (see
     /// [`NoteEditor::confirm`]). A no-op (returning `None`) when not editing.
     pub fn confirm_note_editor(&mut self) -> Option<(String, String, bool)> {
-        Some(self.overlays.note.take()?.confirm())
+        match std::mem::take(&mut self.overlay) {
+            Overlay::Note(editor) => Some(editor.confirm()),
+            // Not editing: leave whatever was open (if anything) untouched.
+            other => {
+                self.overlay = other;
+                None
+            }
+        }
     }
 
     // --- 在席 (Focus) ------------------------------------------------------
@@ -1043,7 +1098,7 @@ impl HomeState {
     /// there.
     fn enter_focus_surface(&mut self) {
         self.mode = Mode::Focus;
-        self.overlays.create = None;
+        self.overlay.clear_create();
         self.focus_menu.reset();
         self.focus_prompt.clear();
         self.focus_new_tab = true;
@@ -1434,25 +1489,32 @@ impl HomeState {
     /// The open session-removal modal, if any — its names, cursor, and checked
     /// rows are read and navigated through it ([`RemoveModal`]).
     pub fn remove_modal(&self) -> Option<&RemoveModal> {
-        self.overlays.remove.as_ref()
+        match &self.overlay {
+            Overlay::Remove(modal) => Some(modal),
+            _ => None,
+        }
     }
 
     /// The open session-removal modal for navigation, if any: the event loop
     /// routes its keys to the modal's own methods ([`RemoveModal::move_up`] etc.).
     pub fn remove_modal_mut(&mut self) -> Option<&mut RemoveModal> {
-        self.overlays.remove.as_mut()
+        match &mut self.overlay {
+            Overlay::Remove(modal) => Some(modal),
+            _ => None,
+        }
     }
 
     /// Open the session-removal modal, seeded with the current session names and
     /// nothing selected. `force` is carried from `session remove --force`.
     pub fn open_remove_modal(&mut self, force: bool) {
         let names = self.sessions.iter().map(|s| s.name.clone()).collect();
-        self.overlays.remove = Some(RemoveModal::new(names, force));
+        self.overlay = Overlay::Remove(RemoveModal::new(names, force));
     }
 
-    /// Close the removal modal, discarding any selection.
+    /// Close the removal modal, discarding any selection. Called only while the
+    /// removal modal is the open overlay, so it clears the overlay outright.
     pub fn cancel_remove_modal(&mut self) {
-        self.overlays.remove = None;
+        self.overlay = Overlay::None;
     }
 
     /// Confirm the removal modal: close it and return the checked session names
@@ -1460,8 +1522,12 @@ impl HomeState {
     /// to remove each (see [`RemoveModal::confirm`]). Returns `None` when nothing
     /// is checked, leaving the modal open; also `None` when it is closed.
     pub fn submit_remove_modal(&mut self) -> Option<(Vec<String>, bool)> {
-        let result = self.overlays.remove.as_ref()?.confirm()?;
-        self.overlays.remove = None;
+        let Overlay::Remove(modal) = &self.overlay else {
+            return None;
+        };
+        // Nothing checked keeps the modal open; only a non-empty selection closes it.
+        let result = modal.confirm()?;
+        self.overlay = Overlay::None;
         Some(result)
     }
 }
