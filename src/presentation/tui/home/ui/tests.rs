@@ -1381,8 +1381,10 @@ fn terminal_geometry_matches_the_rendered_layout() {
     let geo = terminal_geometry(24, 80, Sidebar::Full);
     let (left, _) = layout(80, Sidebar::Full);
     assert_eq!(geo.origin_col as usize, left + SEP_WIDTH);
-    assert_eq!(geo.origin_row, 2);
-    assert_eq!(geo.rows, 20);
+    // Three chrome rows above the body (title + mode ladder + blank separator).
+    assert_eq!(geo.origin_row, 3);
+    // 24 rows less the three above and two below (input + footer).
+    assert_eq!(geo.rows, 19);
     assert_eq!(geo.cols as usize, 80 - left - SEP_WIDTH);
 }
 
@@ -2218,7 +2220,10 @@ fn render_frame_combines_all_sections_at_full_height() {
     let frame = render_frame(24, 80, &state);
     assert_eq!(frame.len(), 24);
     assert!(frame[0].contains("usagi"));
-    assert!(frame[2].contains('│'));
+    // Row 1 is the mode ladder, row 2 the blank separator, so the two-pane body
+    // (with its `│` divider) starts at row 3.
+    assert!(frame[2].trim().is_empty());
+    assert!(frame[3].contains('│'));
     assert!(frame.last().unwrap().contains("overview"));
     let joined = frame.join("\n");
     assert!(joined.contains("main"));
@@ -2254,8 +2259,9 @@ fn render_frame_surfaces_running_and_waiting_agent_icons() {
         ..Default::default()
     });
     // Height accommodates root (2 lines) + divider + 2 sessions (2 lines each)
-    // without the lowest detail row slipping behind the bottom hint band.
-    let frame = render_frame(25, 80, &state);
+    // without the lowest detail row slipping behind the bottom hint band — plus
+    // the blank separator row below the mode ladder.
+    let frame = render_frame(26, 80, &state);
     let joined = console::strip_ansi_codes(&frame.join("\n")).into_owned();
     assert!(joined.contains('▶'));
     assert!(joined.contains("running"));

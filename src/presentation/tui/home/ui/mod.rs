@@ -1,8 +1,8 @@
 //! Rendering for the home (workspace) screen's mode-aware layout.
 //!
-//! Top to bottom: a title bar, the engagement-ladder mode indicator, a body
-//! split into the worktree list (left) and a mode-dependent right pane, the
-//! command input, and a footer. The right pane is blank in 統括 (Overview); a
+//! Top to bottom: a title bar, the engagement-ladder mode indicator, a blank
+//! separator row, a body split into the worktree list (left) and a
+//! mode-dependent right pane, the command input, and a footer. The right pane is blank in 統括 (Overview); a
 //! detail card for the highlighted session in 切替 (Switch); the session's action
 //! surface (a menu or a prompt) in 在席 (Focus); and the live embedded terminal in
 //! 没入 (Attached). In Overview the input is a bordered box and the command
@@ -189,8 +189,9 @@ impl TerminalGeometry {
 }
 
 /// Computes the [`TerminalGeometry`] for a raw terminal size, matching the
-/// layout [`render_frame`] draws (title + blank above the body, the left pane
-/// and divider to its left). `rows` and `cols` are at least 1.
+/// layout [`render_frame`] draws (title + mode ladder + a blank separator above
+/// the body, the left pane and divider to its left). `rows` and `cols` are at
+/// least 1.
 pub fn terminal_geometry(
     raw_height: usize,
     raw_width: usize,
@@ -198,13 +199,17 @@ pub fn terminal_geometry(
 ) -> TerminalGeometry {
     let (height, width) = widgets::normalize_size(raw_height, raw_width);
     let (left_w, right_w) = layout(width, sidebar);
-    let pane_rows = height.saturating_sub(4).max(1);
+    // Chrome above the body is three rows: the title bar, the mode ladder, and a
+    // blank separator. Below it sit the single-line input and the footer (two
+    // more rows in the modes that show a live terminal).
+    let pane_rows = height.saturating_sub(5).max(1);
     TerminalGeometry {
         rows: pane_rows.max(1) as u16,
         cols: right_w.max(1) as u16,
         origin_col: (left_w + SEP_WIDTH) as u16,
-        // The body starts below the title bar and its blank separator.
-        origin_row: 2,
+        // The body starts below the title bar, the mode ladder, and the blank
+        // separator row beneath them.
+        origin_row: 3,
     }
 }
 
@@ -234,9 +239,9 @@ pub fn attached_geometry(
 }
 
 /// The number of two-pane body rows for a normalized terminal `height` and the
-/// screen's current mode — the rows between the title/ladder chrome above and the
-/// input/results/footer chrome below. Kept in step with [`render_frame`]'s own
-/// layout (the 統括 input box is 3 rows, every other mode's input is 1) so the
+/// screen's current mode — the rows between the title/ladder/blank chrome above
+/// and the input/results/footer chrome below. Kept in step with [`render_frame`]'s
+/// own layout (the 統括 input box is 3 rows, every other mode's input is 1) so the
 /// preview's scroll clamp agrees with what is actually drawn.
 fn body_rows_for(height: usize, state: &HomeState) -> usize {
     let input_h = if state.mode() == Mode::Overview && height >= INPUT_BOX_MIN_HEIGHT {
@@ -245,11 +250,11 @@ fn body_rows_for(height: usize, state: &HomeState) -> usize {
         1
     };
     let results = if state.mode() == Mode::Overview {
-        RESULTS_BAND.min(height.saturating_sub(4 + input_h))
+        RESULTS_BAND.min(height.saturating_sub(5 + input_h))
     } else {
         0
     };
-    height.saturating_sub(3 + input_h + results).max(1)
+    height.saturating_sub(4 + input_h + results).max(1)
 }
 
 /// How many Markdown lines the right-pane preview shows at once for a raw terminal
@@ -302,15 +307,15 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
     // In 統括 the command log renders as a band below the input; it is sized so
     // the body keeps at least one row. Other modes use no results band.
     let results = if state.mode() == Mode::Overview {
-        RESULTS_BAND.min(height.saturating_sub(4 + input_h))
+        RESULTS_BAND.min(height.saturating_sub(5 + input_h))
     } else {
         0
     };
 
-    // Chrome: title + mode ladder on top, the input block + footer + the
-    // optional results band at the bottom. Everything between is the two-pane
-    // body.
-    let body_rows = height.saturating_sub(3 + input_h + results).max(1);
+    // Chrome: title + mode ladder + a blank separator on top, the input block +
+    // footer + the optional results band at the bottom. Everything between is the
+    // two-pane body.
+    let body_rows = height.saturating_sub(4 + input_h + results).max(1);
 
     let mut left = left_pane(
         state.list(),
@@ -350,6 +355,9 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
     let mut lines = Vec::with_capacity(height);
     lines.push(title_bar(width, state.list()));
     lines.push(mode_ladder(width, state.mode()));
+    // A blank separator row between the mode ladder and the body, so the
+    // engagement-ladder header reads as its own band set apart from the panes.
+    lines.push(pad_to_width(String::new(), width));
     let body_start = lines.len();
     // `left` / `right` are not read past this loop, so consume them by value: each
     // row's owned cell text moves straight into the composed line instead of being
