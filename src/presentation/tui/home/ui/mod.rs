@@ -344,7 +344,8 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
         // While renaming a session's sidebar label in 切替, append the inline
         // rename row to the left pane (trimmed back if it would overflow).
         if let Some(rename) = state.rename() {
-            for row in switch_rename_rows(rename.target(), rename.value(), left_w) {
+            for row in switch_rename_rows(rename.target(), rename.value(), rename.cursor(), left_w)
+            {
                 left.push(row);
             }
             left.truncate(body_rows);
