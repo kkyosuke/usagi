@@ -8,9 +8,10 @@ use crate::domain::agent_feature::{support, AgentFeature};
 use crate::domain::settings::AgentCli;
 
 /// The CLIs shown as columns, with their header labels, left to right.
-const COLUMNS: [(AgentCli, &str); 3] = [
+const COLUMNS: [(AgentCli, &str); 4] = [
     (AgentCli::Claude, "Claude"),
     (AgentCli::Codex, "Codex"),
+    (AgentCli::CodexFugu, "sakana.ai"),
     (AgentCli::Gemini, "Gemini"),
 ];
 

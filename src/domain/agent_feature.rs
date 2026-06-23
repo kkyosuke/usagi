@@ -79,15 +79,16 @@ impl Support {
 
 /// How `cli` supports `feature` through usagi — the support matrix itself.
 ///
-/// Claude and Codex receive every integration (Claude via its native flags,
-/// Codex via `-c` config overrides and Codex's hook system). Gemini has no
+/// Claude, Codex, and codex-fugu receive every integration (Claude via its native
+/// flags; Codex and the codex-fugu variant via `-c` config overrides and Codex's
+/// hook system). Gemini has no
 /// inline-injection flag and no usagi-drivable hook system, so its MCP servers,
 /// phase-reporting hooks, and system prompt cannot be wired; only the plain flags
 /// it does expose — an opening prompt (`-i`), resume (`-r latest`), and the chat
 /// store usagi can clear — are supported.
 pub fn support(cli: AgentCli, feature: AgentFeature) -> Support {
     match cli {
-        AgentCli::Claude | AgentCli::Codex => Support::Yes,
+        AgentCli::Claude | AgentCli::Codex | AgentCli::CodexFugu => Support::Yes,
         AgentCli::Gemini => match feature {
             AgentFeature::InitialPrompt | AgentFeature::Resume | AgentFeature::ForgetHistory => {
                 Support::Yes
@@ -125,6 +126,8 @@ mod tests {
         for feature in AgentFeature::ALL {
             assert_eq!(support(AgentCli::Claude, feature), Support::Yes);
             assert_eq!(support(AgentCli::Codex, feature), Support::Yes);
+            // codex-fugu reuses the Codex adapter, so it supports the same set.
+            assert_eq!(support(AgentCli::CodexFugu, feature), Support::Yes);
         }
     }
 

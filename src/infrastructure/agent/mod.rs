@@ -55,6 +55,7 @@ pub fn agent_for(cli: AgentCli) -> Arc<dyn Agent> {
     match cli {
         AgentCli::Claude => Arc::new(ClaudeAgent::new()),
         AgentCli::Codex => Arc::new(CodexAgent::new()),
+        AgentCli::CodexFugu => Arc::new(CodexAgent::fugu()),
         AgentCli::Gemini => Arc::new(GeminiAgent::new()),
     }
 }
@@ -87,6 +88,19 @@ mod tests {
         assert_eq!(agent.program(), "codex");
         let launch = agent.launch_command(&Settings::default().agent_wiring("usagi"), false, None);
         assert!(launch.starts_with("codex --dangerously-bypass-hook-trust "));
+        assert!(launch.contains("-c 'mcp_servers.usagi.command=usagi'"));
+        assert!(launch.contains("usagi agent-phase ready"));
+        assert!(launch.contains("usagi agent-phase ended"));
+    }
+
+    #[test]
+    fn agent_for_codex_fugu_wires_like_codex_under_the_codex_fugu_program() {
+        // codex-fugu reuses the Codex adapter, so it gets the same MCP wiring and
+        // lifecycle hooks — only the launched program name differs.
+        let agent = agent_for(AgentCli::CodexFugu);
+        assert_eq!(agent.program(), "codex-fugu");
+        let launch = agent.launch_command(&Settings::default().agent_wiring("usagi"), false, None);
+        assert!(launch.starts_with("codex-fugu --dangerously-bypass-hook-trust "));
         assert!(launch.contains("-c 'mcp_servers.usagi.command=usagi'"));
         assert!(launch.contains("usagi agent-phase ready"));
         assert!(launch.contains("usagi agent-phase ended"));

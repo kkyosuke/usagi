@@ -139,11 +139,12 @@ fn wiring_overrides(wiring: &AgentWiring) -> Vec<String> {
 }
 
 /// Where Codex stores each session's rollout transcript:
-/// `~/.codex/sessions/<YYYY>/<MM>/<DD>/rollout-*.jsonl`. `None` when the home
-/// directory can't be determined, so usagi simply launches fresh rather than
+/// `~/<home_subdir>/sessions/<YYYY>/<MM>/<DD>/rollout-*.jsonl` (`home_subdir` is
+/// `.codex` for Codex, `.codex-fugu` for the codex-fugu variant). `None` when the
+/// home directory can't be determined, so usagi simply launches fresh rather than
 /// guessing.
-fn codex_sessions_root() -> Option<PathBuf> {
-    dirs::home_dir().map(|home| home.join(".codex").join("sessions"))
+fn codex_sessions_root(home_subdir: &str) -> Option<PathBuf> {
+    dirs::home_dir().map(|home| home.join(home_subdir).join("sessions"))
 }
 
 /// The working directory a Codex rollout transcript was recorded in, read from
@@ -212,20 +213,47 @@ fn forget_session_in(root: &Path, dir: &Path) {
     }
 }
 
-/// The Codex CLI adapter.
-#[derive(Default)]
-pub struct CodexAgent;
+/// The Codex CLI adapter, shared by Codex and the codex-fugu variant.
+///
+/// Both speak the same invocation surface (the `-c` overrides, lifecycle hooks,
+/// and `resume --last` built above); they differ only in the program launched and
+/// the home subdirectory their rollout transcripts live under. The constructors
+/// fix those two values: [`new`](Self::new) for `codex` / `~/.codex`,
+/// [`fugu`](Self::fugu) for `codex-fugu` / `~/.codex-fugu`.
+pub struct CodexAgent {
+    /// The program name launched (`codex` or `codex-fugu`).
+    program: &'static str,
+    /// The home subdirectory holding rollout transcripts (`.codex` / `.codex-fugu`).
+    home_subdir: &'static str,
+}
 
 impl CodexAgent {
-    /// A Codex adapter.
+    /// The Codex adapter (`codex`, transcripts under `~/.codex`).
     pub fn new() -> Self {
-        Self
+        Self {
+            program: "codex",
+            home_subdir: ".codex",
+        }
+    }
+
+    /// The codex-fugu adapter (`codex-fugu`, transcripts under `~/.codex-fugu`).
+    pub fn fugu() -> Self {
+        Self {
+            program: "codex-fugu",
+            home_subdir: ".codex-fugu",
+        }
+    }
+}
+
+impl Default for CodexAgent {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
 impl Agent for CodexAgent {
     fn program(&self) -> &'static str {
-        "codex"
+        self.program
     }
 
     fn launch_command(
@@ -245,14 +273,14 @@ impl Agent for CodexAgent {
         let resuming = resume && initial_prompt.is_none();
         let mut parts = if resuming {
             vec![
-                "codex".to_string(),
+                self.program.to_string(),
                 "resume".to_string(),
                 "--last".to_string(),
                 "--dangerously-bypass-hook-trust".to_string(),
             ]
         } else {
             vec![
-                "codex".to_string(),
+                self.program.to_string(),
                 "--dangerously-bypass-hook-trust".to_string(),
             ]
         };
@@ -269,11 +297,12 @@ impl Agent for CodexAgent {
     }
 
     fn has_resumable_session(&self, dir: &Path) -> bool {
-        codex_sessions_root().is_some_and(|root| has_resumable_session_in(&root, dir))
+        codex_sessions_root(self.home_subdir)
+            .is_some_and(|root| has_resumable_session_in(&root, dir))
     }
 
     fn forget_session(&self, dir: &Path) {
-        if let Some(root) = codex_sessions_root() {
+        if let Some(root) = codex_sessions_root(self.home_subdir) {
             forget_session_in(&root, dir);
         }
     }
@@ -597,9 +626,57 @@ mod tests {
     fn default_agent_matches_new() {
         // The Settings-driven wiring path uses the default constructor; it behaves
         // the same as `new`.
-        let launch =
-            CodexAgent.launch_command(&Settings::default().agent_wiring("usagi"), false, None);
+        let launch = CodexAgent::default().launch_command(
+            &Settings::default().agent_wiring("usagi"),
+            false,
+            None,
+        );
         assert!(launch.starts_with("codex --dangerously-bypass-hook-trust "));
         assert!(launch.contains("-c 'mcp_servers.usagi.command=usagi'"));
+    }
+
+    #[test]
+    fn fugu_launches_the_codex_fugu_program_with_the_same_wiring() {
+        // The codex-fugu adapter is Codex with a different program name: the launch
+        // starts with `codex-fugu` but carries the identical `-c` wiring and hooks.
+        let agent = CodexAgent::fugu();
+        assert_eq!(agent.program(), "codex-fugu");
+        let launch = agent.launch_command(&wiring("usagi", None), false, None);
+        assert!(launch.starts_with("codex-fugu --dangerously-bypass-hook-trust "));
+        assert!(launch.contains("-c 'mcp_servers.usagi.command=usagi'"));
+        assert!(launch.contains("usagi agent-phase ready"));
+        // Resuming uses `codex-fugu resume --last`, mirroring Codex.
+        let resumed = agent.launch_command(&wiring("usagi", None), true, None);
+        assert!(resumed.starts_with("codex-fugu resume --last --dangerously-bypass-hook-trust "));
+    }
+
+    #[test]
+    fn fugu_resumes_from_its_own_sessions_root() {
+        // codex-fugu's rollout store is `~/.codex-fugu/sessions`, distinct from
+        // Codex's `~/.codex/sessions`. A transcript under one root resumes only the
+        // matching adapter.
+        let home = tempfile::tempdir().unwrap();
+        let worktree = home.path().join("wt");
+        fs::create_dir_all(&worktree).unwrap();
+        let fugu_root = home.path().join(".codex-fugu").join("sessions");
+        write_rollout(
+            &fugu_root,
+            "2026/06/24",
+            "rollout-wt.jsonl",
+            &worktree.to_string_lossy(),
+        );
+
+        // The fugu root sees the transcript; the codex root (empty) does not.
+        assert!(has_resumable_session_in(&fugu_root, &worktree));
+        let codex_root = home.path().join(".codex").join("sessions");
+        assert!(!has_resumable_session_in(&codex_root, &worktree));
+
+        // codex_sessions_root threads the subdirectory through to the right store.
+        assert!(codex_sessions_root(".codex-fugu")
+            .unwrap()
+            .ends_with(".codex-fugu/sessions"));
+        assert!(codex_sessions_root(".codex")
+            .unwrap()
+            .ends_with(".codex/sessions"));
     }
 }

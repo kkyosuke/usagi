@@ -24,6 +24,10 @@ pub enum AgentCli {
     Claude,
     /// OpenAI's Codex CLI.
     Codex,
+    /// A Codex-compatible CLI invoked as `codex-fugu` (same invocation surface as
+    /// Codex — `-c` overrides, lifecycle hooks, `resume --last` — with its own
+    /// rollout store under `~/.codex-fugu`).
+    CodexFugu,
     /// Google's Gemini CLI.
     Gemini,
 }
@@ -126,6 +130,7 @@ impl AgentCli {
         match self {
             AgentCli::Claude => "claude",
             AgentCli::Codex => "codex",
+            AgentCli::CodexFugu => "codex-fugu",
             AgentCli::Gemini => "gemini",
         }
     }
@@ -367,7 +372,23 @@ mod tests {
     fn agent_cli_maps_to_its_program_command() {
         assert_eq!(AgentCli::Claude.command(), "claude");
         assert_eq!(AgentCli::Codex.command(), "codex");
+        assert_eq!(AgentCli::CodexFugu.command(), "codex-fugu");
         assert_eq!(AgentCli::Gemini.command(), "gemini");
+    }
+
+    #[test]
+    fn agent_cli_serializes_in_snake_case() {
+        // The persisted (on-disk) form is snake_case, so `CodexFugu` is stored as
+        // `codex_fugu` even though the launched program is `codex-fugu`.
+        assert_eq!(
+            serde_json::to_string(&AgentCli::CodexFugu).unwrap(),
+            "\"codex_fugu\""
+        );
+        assert_eq!(
+            serde_json::from_str::<AgentCli>("\"codex_fugu\"").unwrap(),
+            AgentCli::CodexFugu
+        );
+        assert_eq!(AgentCli::CodexFugu.command(), "codex-fugu");
     }
 
     #[test]
