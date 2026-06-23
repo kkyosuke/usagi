@@ -23,6 +23,7 @@
 | `usagi` / `usagi hop` | メインの TUI を起動する。起動画面 → プロジェクト選択 → ホーム画面へ遷移（[design/](../design/README.md)）。サブコマンドを省略した `usagi` は `usagi hop` と同じ |
 | `usagi run [N]` | うさぎアニメを全画面で再生して見るギャラリー。`N`（1–5）で種類を選ぶ（既定 1）。なにかキーで終了 |
 | `usagi status` | カレントリポジトリの worktree 状態を `.usagi/state.json` に同期し一覧表示する（[data/02-workspace.md](../data/02-workspace.md)） |
+| `usagi feature` | 各 Agent CLI（Claude / Codex / Gemini）が usagi のどの機能に対応しているかの星取表を表示する（下記） |
 | `usagi config` | 現在のグローバル設定（`settings.json`）を一覧表示する（[5. 設定](../05-settings.md)） |
 | `usagi config --edit` | グローバル設定ファイルを `$EDITOR` で開いて編集し、保存時に形式（JSON / 必須 `version` / 型）を検証する。不正な場合は直前の内容に巻き戻す |
 | `usagi doctor` | `git` / `bash` の導入状況、デスクトップ通知の可否、設定ストレージの健全性を確認する（ローカル LLM 有効時は `ollama`・モデルも） |
@@ -68,6 +69,16 @@ TUI を起動します。代替スクリーン上で起動画面を表示し、O
 
 `git worktree list` などを読み取り専用で検査し、`<repo>/.usagi/state.json` を同期したうえで、
 各 worktree のブランチ・HEAD・`local` / `pushed` / `synced`（up to date）状態を一覧表示します。
+
+### `usagi feature`
+
+`agent` で起動する各 Agent CLI（Claude / Codex / Gemini）が、usagi のどの統合機能に対応しているかを
+星取表（Markdown テーブル）で表示します。行は機能（MCP / ローカル LLM 委譲 / 状態報告（フック）/ 初期プロンプト /
+system prompt 注入 / 会話の再開 / 会話履歴の破棄）、列は CLI で、`✅`（usagi が配線）/ `❌`（CLI 制約により非対応）で示します。
+
+- 対応状況の正本は `domain/agent_feature.rs`（CLI ごと・機能ごとの対応を一元管理）です。
+- Gemini は MCP・フック・system prompt のインライン注入経路を持たないため非対応で、状態はターミナルベルで推定します
+  （詳細は [4. オーケストレーション#agent-フックによる状態報告](../04-orchestration.md#agent-フックによる状態報告)）。
 
 ### `usagi config`
 

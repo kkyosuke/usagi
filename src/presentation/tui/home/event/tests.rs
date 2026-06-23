@@ -1464,6 +1464,76 @@ fn session_switch_known_live_name_attaches_then_returns_to_focus() {
     assert_eq!(*opened.borrow(), 1);
 }
 
+#[test]
+fn note_editor_opened_while_attached_refreshes_the_attached_terminal_surface() {
+    // `Ctrl-E` in 没入 floats the note editor over the attached session's pane and
+    // stays in Attached mode while it is open. The loop clears the terminal
+    // surface every frame, so it must re-publish the attached session's snapshot
+    // (and tab strip) for the modes that draw the embedded terminal — otherwise
+    // the live terminal vanishes behind the box and the short fallback pane clips
+    // the box's bottom border as the note grows. `tab_op` is only called from the
+    // surface-refresh path (the liveness probe ignores its result), so a call for
+    // the attached session's dir proves the surface was refreshed while editing.
+    let mut preview =
+        |_d: &Path, _s: Sidebar| Some(TerminalView::from_rows(vec!["$ echo hi".to_string()], None));
+    let tab_dirs = RefCell::new(Vec::<PathBuf>::new());
+    let mut tab_op = |d: &Path, _n: Option<TabNav>| {
+        tab_dirs.borrow_mut().push(d.to_path_buf());
+        (vec!["sh".to_string()], 0usize)
+    };
+    // First pane iteration leaves to open the note editor; the re-attach after
+    // saving then closes, so the loop does not bounce back into the editor.
+    let calls = RefCell::new(0u32);
+    let mut open = |_h: &mut HomeState, _d: &Path, _a: bool, _n: bool| {
+        let mut c = calls.borrow_mut();
+        *c += 1;
+        if *c == 1 {
+            Ok(PaneExit::OpenNote)
+        } else {
+            Ok(PaneExit::Closed)
+        }
+    };
+    let mut create: fn(&str) -> SessionOutcome = noop_create;
+    let mut config: fn(&Term) -> Result<Option<ConfigReload>> = noop_config;
+
+    let term = Term::stdout();
+    let mut keys = typed("session switch feat");
+    keys.push(Ok(Key::Enter)); // focus feat (live) -> attach -> OpenNote -> editor
+    keys.push(Ok(Key::Char(CTRL_S))); // save & close -> re-attach -> Closed -> Focus
+    keys.push(Ok(Key::Escape)); // Focus -> Overview; fallback Ctrl-C quits
+    let mut reader = ScriptedReader::new(keys);
+    let monitor = MonitorHandle::detached();
+    let mut persist: fn(&str) = noop_persist;
+    let mut remove: fn(&str, bool) -> SessionOutcome = noop_remove;
+    let mut branches: fn() -> Vec<String> = no_branches;
+    let outcome = event_loop_compat(
+        &term,
+        &mut reader,
+        sample_state(),
+        Path::new("/ws"),
+        &monitor,
+        &UpdateHandle::new(),
+        &OneShot::<bool>::new(),
+        &mut persist,
+        &mut create,
+        &mut (noop_rename as fn(&str, &str) -> SessionOutcome),
+        &mut (noop_set_note as fn(&str, &str) -> SessionOutcome),
+        &mut remove,
+        &mut branches,
+        &mut open,
+        &mut config,
+        &mut preview,
+        &mut tab_op,
+        &mut (noop_close as fn(&mut HomeState, &Path)),
+    )
+    .unwrap();
+    assert!(matches!(outcome, Outcome::Quit));
+    assert!(
+        tab_dirs.borrow().iter().any(|d| d == Path::new("/r/feat")),
+        "the attached session's surface must be re-published while the note editor floats over it",
+    );
+}
+
 // --- 切替 (Switch) -----------------------------------------------------
 
 #[test]

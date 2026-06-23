@@ -1,6 +1,7 @@
 pub mod agent_phase;
 pub mod config;
 pub mod doctor;
+pub mod feature;
 pub mod hop;
 pub mod init;
 pub mod issue;

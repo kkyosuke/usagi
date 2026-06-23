@@ -947,12 +947,24 @@ fn note_box(
     widgets::boxed(&title, inner, &body)
 }
 
+/// The row the note box starts on when composited over a `base_len`-row pane.
+/// The box is anchored to the **bottom** of the pane so the preview's top rows —
+/// the session header (its name / status / agent state), the part that tells you
+/// which session you are about to select — stay visible above it. This matters
+/// most when the preview is sparse (a just-started live terminal, a short pane):
+/// a top-anchored box would cover that header and leave only blank padding below,
+/// so the pane looked empty. A box taller than the pane falls back to row 0.
+fn note_overlay_top(base_len: usize, overlay_len: usize) -> usize {
+    base_len.saturating_sub(overlay_len)
+}
+
 /// The floating note overlay for the right pane, or `None` when none applies. The
 /// **editor** (when open, in any mode) wins; otherwise the highlighted session's
-/// **read-only** note shows while browsing in 切替. Both anchor at the **top** of
-/// the right pane — a fixed position regardless of what the preview underneath is
-/// (an idle session's action menu or a live terminal) — so moving the cursor
-/// never shifts the layout (no CLS) and the note always reads in the same place.
+/// **read-only** note shows while browsing in 切替. Both anchor at the **bottom**
+/// of the right pane (see [`note_overlay_top`]) — a fixed position regardless of
+/// what the preview underneath is (an idle session's action menu or a live
+/// terminal) — so moving the cursor never shifts the layout (no CLS), the note
+/// always reads in the same place, and the session header above it stays visible.
 /// `rows` caps the box height so the pane stays partly visible behind it.
 fn note_overlay(state: &HomeState, width: usize, rows: usize) -> Option<Vec<String>> {
     if let Some(editor) = state.note_editor() {
@@ -1132,13 +1144,22 @@ pub(super) fn right_pane_contents(state: &HomeState, right_w: usize, rows: usize
             lines
         }
     };
-    // Composite the floating note box over the top rows of the base pane (the
-    // rows beneath stay put, so the preview / terminal never shifts — no CLS).
+    // Composite the floating note box over the base pane (the rows it does not
+    // cover stay put, so the preview / terminal never shifts — no CLS).
     if let Some(overlay) = note_overlay(state, right_w, rows) {
+        // Grow the base to hold the whole box when the pane beneath is shorter
+        // than it (no live snapshot yet, or a partial one), so the box's bottom
+        // border always lands instead of being clipped as the note grows with
+        // each newline. Rows the box does not cover are left blank.
+        if overlay.len() > base.len() {
+            base.resize(overlay.len(), String::new());
+        }
+        // Anchor the box to the bottom of the (grown) pane so the preview's top
+        // rows — the session header that identifies what selecting opens — stay
+        // visible above it, even when the preview is sparse.
+        let top = note_overlay_top(base.len(), overlay.len());
         for (i, row) in overlay.into_iter().enumerate() {
-            if i < base.len() {
-                base[i] = row;
-            }
+            base[top + i] = row;
         }
     }
     base

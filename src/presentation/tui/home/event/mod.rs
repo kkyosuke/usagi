@@ -295,7 +295,14 @@ pub(super) fn event_loop(
         // (an idle session has no live snapshot, so the strip stays absent and the
         // action surface shows instead).
         let drives_surface = matches!(state.mode(), Mode::Switch | Mode::Focus);
-        if drives_surface && !input_in_right_pane {
+        // The note editor opened from 没入 (`Ctrl-E`) floats over the attached
+        // session's pane, which keeps drawing in Attached mode while the editor is
+        // open. The surface was just cleared, so refresh it here too — otherwise
+        // the live terminal would not show behind the floating box, and the empty
+        // fallback pane (a one-line starting hint) would be too short to hold the
+        // box, clipping its bottom border as the note grows with each newline.
+        let attached_note = state.mode() == Mode::Attached && state.note_editor().is_some();
+        if (drives_surface && !input_in_right_pane) || attached_note {
             let dir = selected_dir(&state, workspace_root);
             if let Some(view) = (wiring.preview)(&dir, state.sidebar()) {
                 state.set_terminal_view(view);
