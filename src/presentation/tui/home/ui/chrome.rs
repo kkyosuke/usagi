@@ -334,7 +334,7 @@ pub(super) fn footer_line(width: usize, state: &HomeState) -> String {
         }
         Mode::Focus => {
             format!(
-                "[session: {}]  Enter: run / Ctrl-O: switch / Ctrl-N/P: tab / Esc: overview",
+                "[session: {}]  Enter: run / Ctrl-O: switch / Ctrl-N/P: tab / Ctrl-E: note / Esc: overview",
                 state.focused_session_name()
             )
         }

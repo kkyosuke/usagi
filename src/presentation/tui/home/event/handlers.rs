@@ -18,7 +18,7 @@ use super::super::command::Effect;
 use super::super::state::{HomeState, PaneExit, ReturnMode, ROOT_NAME};
 use super::super::terminal_tabs::TabNav;
 use super::super::ui;
-use super::{paint_now, selected_dir, Flow, Wiring, CTRL_N, CTRL_O, CTRL_P, CTRL_S};
+use super::{paint_now, selected_dir, Flow, Wiring, CTRL_E, CTRL_N, CTRL_O, CTRL_P, CTRL_S};
 
 /// Handle one key in 統括 (Overview): edit / complete / recall the workspace
 /// command line and run it on `Enter`, dispatching the resulting [`Effect`].
@@ -440,6 +440,13 @@ pub(super) fn focus_key(
             state.enter_switch(ReturnMode::Focus);
             return Flow::Continue;
         }
+        // `Ctrl-E` edits the focused session's note (a no-op on the root row).
+        // Closing it returns here to 在席 — there is no pane to re-attach, so
+        // `reattach` is false (unlike 没入's `Ctrl-E`).
+        Key::Char(CTRL_E) => {
+            state.open_focused_note(false);
+            return Flow::Continue;
+        }
         Key::Char(CTRL_P) => {
             let dir = selected_dir(state, wiring.workspace_root);
             (wiring.tab_op)(&dir, Some(TabNav::Prev));
@@ -642,7 +649,7 @@ fn open_pane(
             // detached) pane; closing it re-attaches. The root row is the
             // workspace, not a session, so it has no note — fall back to
             // re-attaching straight away.
-            if !state.open_focused_note() {
+            if !state.open_focused_note(true) {
                 let row = state.list().active_index();
                 focus_and_attach(term, state, painter, wiring, row);
             }
