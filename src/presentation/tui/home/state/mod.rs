@@ -148,6 +148,13 @@ pub struct HomeState {
     /// Where a 切替 (Switch) returns to on `Esc` / `h`; only meaningful in
     /// [`Mode::Switch`].
     switch_return: ReturnMode,
+    /// Whether the highlighted session's read-only note overlay is dismissed in
+    /// 切替 (Switch). The note auto-shows the moment a session is highlighted;
+    /// `Esc` hides it (before a second `Esc` backs out of 切替), and moving the
+    /// cursor to another row clears the flag so the next session's note shows.
+    /// Only meaningful in [`Mode::Switch`]; the note *editor* is independent of
+    /// it (it captures the keyboard through [`Overlays`]).
+    note_hidden: bool,
     /// The transient overlays that capture the keyboard while open (the 切替
     /// inline create/rename inputs, the text modal, the right-pane preview, the
     /// session-removal checklist, the quit confirmation). Grouped into one
@@ -242,6 +249,7 @@ impl HomeState {
             sidebar: Sidebar::default(),
             ai_available: false,
             switch_return: ReturnMode::Overview,
+            note_hidden: false,
             overlays: Overlays::default(),
             focus_menu: FocusMenu::default(),
             focus_prompt: TextInput::new(),
@@ -769,6 +777,9 @@ impl HomeState {
         self.mode = Mode::Switch;
         self.switch_return = return_to;
         self.overlays.create = None;
+        // A fresh 切替 shows the highlighted session's note (any prior dismissal
+        // belonged to the previous visit).
+        self.note_hidden = false;
     }
 
     /// Where the current 切替 returns to on `Esc` / `h`.
@@ -779,11 +790,15 @@ impl HomeState {
     /// Move the Switch cursor up one row, wrapping (delegates to the list).
     pub fn switch_move_up(&mut self) {
         self.list.move_up();
+        // The cursor now sits on a different session, so re-show its note even if
+        // the previous row's note was dismissed.
+        self.note_hidden = false;
     }
 
     /// Move the Switch cursor down one row, wrapping (delegates to the list).
     pub fn switch_move_down(&mut self) {
         self.list.move_down();
+        self.note_hidden = false;
     }
 
     /// Begin inline session creation in 切替: open an empty name input that
@@ -904,6 +919,25 @@ impl HomeState {
     pub fn selected_session_note(&self) -> Option<&str> {
         let worktree = self.list.selected()?;
         self.session_note(worktree_name(worktree))
+    }
+
+    /// Whether the highlighted session's read-only note overlay is currently
+    /// shown in 切替 (Switch): the cursor is on a session that has a note, it has
+    /// not been dismissed with `Esc`, and no note *editor* is open (the editor
+    /// takes over the overlay). The right-pane renderer draws the note exactly
+    /// when this holds, and the event loop reads it to decide whether `Esc` first
+    /// hides the note or backs out of 切替.
+    pub fn switch_note_visible(&self) -> bool {
+        self.mode == Mode::Switch
+            && self.overlays.note.is_none()
+            && !self.note_hidden
+            && self.selected_session_note().is_some()
+    }
+
+    /// Dismiss the highlighted session's read-only note overlay in 切替 (Switch)
+    /// (the first `Esc`). Moving the cursor to another row re-shows it.
+    pub fn hide_switch_note(&mut self) {
+        self.note_hidden = true;
     }
 
     /// Open the note editor for `target`, pre-filled with its current note.

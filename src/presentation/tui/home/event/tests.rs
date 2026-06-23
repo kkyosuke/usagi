@@ -545,6 +545,31 @@ fn ctrl_o_in_overview_opens_switch() {
 }
 
 #[test]
+fn escape_in_switch_closes_the_note_before_backing_out() {
+    // With the highlighted session's read-only note showing, the first Esc closes
+    // the note and stays in 切替; a second Esc then backs out to Overview, where
+    // Esc is inert and the fallback Ctrl-C quits. So leaving takes two Escs, not
+    // one — the note's lifecycle is owned by Esc before the mode's is.
+    let mut state = sample_state();
+    state.restore_sessions(vec![SessionRecord {
+        name: "alpha".to_string(),
+        display_name: None,
+        note: Some("todo".to_string()),
+        root: PathBuf::from("/ws/.usagi/sessions/alpha"),
+        worktrees: vec![worktree(Some("alpha"), "/ws/alpha")],
+        created_at: Utc::now(),
+    }]);
+    let keys = vec![
+        Ok(Key::Char(CTRL_O)), // Overview -> Switch (cursor on the root row)
+        Ok(Key::ArrowDown),    // root -> alpha; its note auto-shows
+        Ok(Key::Escape),       // close the note (stays in Switch)
+        Ok(Key::Escape),       // Switch -> Overview
+        Ok(Key::Escape),       // inert in Overview; fallback Ctrl-C quits
+    ];
+    assert!(matches!(run(keys, state).unwrap(), Outcome::Quit));
+}
+
+#[test]
 fn text_modal_scrolls_and_dismisses() {
     // `man` opens a scrollable text modal; the arrows / j/k and PageUp/PageDown
     // scroll it, and Esc dismisses it (back to Overview, where the fallback

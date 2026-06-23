@@ -897,6 +897,28 @@ const SWITCH_NOTE_MAX_LINES: usize = 6;
 /// caret, so the box never hides the whole right pane while editing.
 const EDIT_NOTE_MAX_LINES: usize = 12;
 
+/// The narrowest the floating note box renders.
+const NOTE_BOX_MIN_WIDTH: usize = 28;
+/// The widest the floating note box renders — past this the box stops growing so
+/// it stays a top-right column rather than swallowing a wide right pane.
+const NOTE_BOX_MAX_WIDTH: usize = 48;
+/// Columns kept clear to the left of the box (so the preview underneath — the
+/// session header, the live terminal — stays readable beside it) when the pane
+/// is wide enough to spare them.
+const NOTE_PREVIEW_KEEP: usize = 12;
+
+/// Width of the floating note box for a right pane `pane_w` columns wide: capped
+/// to [`NOTE_BOX_MAX_WIDTH`] and kept a [`NOTE_PREVIEW_KEEP`]-column margin off
+/// the pane's left so it reads as a top-right column over the preview. On a pane
+/// too narrow to spare that margin it floors at [`NOTE_BOX_MIN_WIDTH`] (clamped
+/// to the pane), and on a pane narrower still it takes the whole row.
+fn note_box_width(pane_w: usize) -> usize {
+    pane_w
+        .saturating_sub(NOTE_PREVIEW_KEEP)
+        .clamp(NOTE_BOX_MIN_WIDTH, NOTE_BOX_MAX_WIDTH)
+        .min(pane_w)
+}
+
 /// Build the floating `note: <name>` box overlaid on the right pane. With `caret`
 /// set it is the **editor** (a block caret on the cursor line, the view windowed
 /// around it); with `None` it is the **read-only** note (capped, the overflow
@@ -947,37 +969,28 @@ fn note_box(
     widgets::boxed(&title, inner, &body)
 }
 
-/// The row the note box starts on when composited over a `base_len`-row pane.
-/// The box is anchored to the **bottom** of the pane so the preview's top rows —
-/// the session header (its name / status / agent state), the part that tells you
-/// which session you are about to select — stay visible above it. This matters
-/// most when the preview is sparse (a just-started live terminal, a short pane):
-/// a top-anchored box would cover that header and leave only blank padding below,
-/// so the pane looked empty. A box taller than the pane falls back to row 0.
-fn note_overlay_top(base_len: usize, overlay_len: usize) -> usize {
-    base_len.saturating_sub(overlay_len)
-}
-
 /// The floating note overlay for the right pane, or `None` when none applies. The
 /// **editor** (when open, in any mode) wins; otherwise the highlighted session's
-/// **read-only** note shows while browsing in 切替. Both anchor at the **bottom**
-/// of the right pane (see [`note_overlay_top`]) — a fixed position regardless of
-/// what the preview underneath is (an idle session's action menu or a live
-/// terminal) — so moving the cursor never shifts the layout (no CLS), the note
-/// always reads in the same place, and the session header above it stays visible.
-/// `rows` caps the box height so the pane stays partly visible behind it.
+/// **read-only** note shows while browsing in 切替 (until `Esc` dismisses it, see
+/// [`HomeState::switch_note_visible`]). The box is a narrow top-right column (see
+/// [`note_box_width`]) composited over the pane by [`right_pane_contents`], so
+/// the preview underneath — the session header, the live terminal — stays
+/// readable to its left and below it. `rows` caps the box height so the pane
+/// stays partly visible behind it; `width` is the full right-pane width (the box
+/// narrows itself within it).
 fn note_overlay(state: &HomeState, width: usize, rows: usize) -> Option<Vec<String>> {
+    let box_w = note_box_width(width);
     if let Some(editor) = state.note_editor() {
         let cap = EDIT_NOTE_MAX_LINES.min(rows.saturating_sub(3)).max(1);
         return Some(note_box(
             editor.target(),
             editor.area().lines(),
             Some(editor.area().cursor()),
-            width,
+            box_w,
             cap,
         ));
     }
-    if state.mode() == Mode::Switch {
+    if state.switch_note_visible() {
         if let Some(note) = state.selected_session_note() {
             let name = state
                 .list()
@@ -987,7 +1000,7 @@ fn note_overlay(state: &HomeState, width: usize, rows: usize) -> Option<Vec<Stri
                 .to_string();
             let cap = SWITCH_NOTE_MAX_LINES.min(rows.saturating_sub(3)).max(1);
             let note_lines: Vec<String> = note.lines().map(str::to_string).collect();
-            return Some(note_box(&name, &note_lines, None, width, cap));
+            return Some(note_box(&name, &note_lines, None, box_w, cap));
         }
     }
     None
@@ -1144,8 +1157,10 @@ pub(super) fn right_pane_contents(state: &HomeState, right_w: usize, rows: usize
             lines
         }
     };
-    // Composite the floating note box over the base pane (the rows it does not
-    // cover stay put, so the preview / terminal never shifts — no CLS).
+    // Composite the floating note box onto the top-right of the base pane: only
+    // the box's own columns are overwritten, so the preview / terminal to its
+    // left and below stays put (no CLS), and the session header on the top row
+    // keeps its leading columns beside the box.
     if let Some(overlay) = note_overlay(state, right_w, rows) {
         // Grow the base to hold the whole box when the pane beneath is shorter
         // than it (no live snapshot yet, or a partial one), so the box's bottom
@@ -1154,13 +1169,7 @@ pub(super) fn right_pane_contents(state: &HomeState, right_w: usize, rows: usize
         if overlay.len() > base.len() {
             base.resize(overlay.len(), String::new());
         }
-        // Anchor the box to the bottom of the (grown) pane so the preview's top
-        // rows — the session header that identifies what selecting opens — stay
-        // visible above it, even when the preview is sparse.
-        let top = note_overlay_top(base.len(), overlay.len());
-        for (i, row) in overlay.into_iter().enumerate() {
-            base[top + i] = row;
-        }
+        widgets::overlay_right(&mut base, 0, right_w, &overlay);
     }
     base
 }
