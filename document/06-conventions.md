@@ -133,7 +133,8 @@ cargo test                                 # テスト
 
 | ファイル | トリガー | 役割 |
 |---|---|---|
-| `.github/workflows/test.yml` | `main` への push / PR | `cargo fmt --check` / `clippy` / `build` / `test` |
+| `.github/workflows/test.yml` | `main` への push / PR | `cargo fmt --check` / `clippy` / `build` / `test`（`ubuntu-latest`） |
+| `.github/workflows/release-build-check.yml` | `Cargo.toml` / `Cargo.lock` を変更する PR | リリースと同じ 4 プラットフォーム（Linux / macOS amd64・arm64 / Windows）で `cargo build --release` し、version 変更（＝タグが変わる PR）でリリースビルドが成功することをマージ前に検証 |
 | `.github/workflows/coverage.yml` | PR | カバレッジ計測・PR コメント・100% 未満で失敗 |
 | `.github/workflows/markdown-link-check.yml` | `.md` 変更を含む push / PR | Markdown のリンク切れ（相対リンク・アンカー・外部 URL）を [lychee](https://github.com/lycheeverse/lychee) で検証 |
 | `.github/workflows/enforce-pr-base.yml` | PR | ベースブランチが `main` であることを強制 |

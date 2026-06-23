@@ -1,4 +1,5 @@
 use std::io;
+#[cfg(unix)]
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::time::Duration;
 
@@ -97,6 +98,7 @@ impl KeyReader for TermKeyReader {
 /// Mirrors `console`'s own readiness check ([`unbuffered`-then-`select`/`poll`]):
 /// the fd is stdin when it is a tty, else `/dev/tty`; on a macOS tty it is
 /// `select`ed (a macOS tty cannot be `poll`ed), and `poll`ed everywhere else.
+#[cfg(unix)]
 fn input_ready(timeout: Duration) -> io::Result<bool> {
     let millis = i32::try_from(timeout.as_millis()).unwrap_or(i32::MAX);
     let stdin = io::stdin();
@@ -111,9 +113,20 @@ fn input_ready(timeout: Duration) -> io::Result<bool> {
     wait_readable(tty.as_raw_fd(), millis)
 }
 
+/// Off Unix there is no raw fd to wait on without consuming bytes, so defer to
+/// crossterm's cross-platform readiness poll. The byte-stealing concern that
+/// rules `crossterm::event::poll` out on Unix does not apply here: `console`
+/// reads keys through the same crossterm/Windows console layer, not a separate
+/// tty fd.
+#[cfg(not(unix))]
+fn input_ready(timeout: Duration) -> io::Result<bool> {
+    crossterm::event::poll(timeout)
+}
+
 /// Wait up to `timeout_ms` for `fd` to be readable, using `select` on a macOS
 /// tty (which cannot be `poll`ed there) and `poll` otherwise. Reports readiness
 /// only; it never reads, so the bytes stay queued for the decoding read.
+#[cfg(unix)]
 fn wait_readable(fd: RawFd, timeout_ms: i32) -> io::Result<bool> {
     #[cfg(target_os = "macos")]
     {
@@ -126,6 +139,7 @@ fn wait_readable(fd: RawFd, timeout_ms: i32) -> io::Result<bool> {
 
 /// `poll(2)` `fd` for `POLLIN` up to `timeout_ms` (negative blocks). Readiness
 /// only — no bytes are read.
+#[cfg(unix)]
 fn poll_readable(fd: RawFd, timeout_ms: i32) -> io::Result<bool> {
     let mut pollfd = libc::pollfd {
         fd,
