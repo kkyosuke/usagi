@@ -2,8 +2,8 @@
 //! `--json` serialisations.
 
 use anyhow::Result;
-use serde::Serialize;
 
+use crate::presentation::cli::render::json_lines;
 use crate::usecase::issue::{
     group, list_line, stats_line, GroupBy, IssueStats, ListedIssue, ListedIssueView,
 };
@@ -47,10 +47,4 @@ pub(super) fn render_list(items: &[ListedIssue]) -> Vec<String> {
         return vec!["No issues found.".to_string()];
     }
     items.iter().map(list_line).collect()
-}
-
-/// Serialize `value` to pretty JSON and return it split into lines.
-pub(super) fn json_lines<T: Serialize>(value: &T) -> Result<Vec<String>> {
-    let text = serde_json::to_string_pretty(value)?;
-    Ok(text.lines().map(str::to_string).collect())
 }

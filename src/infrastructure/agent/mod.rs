@@ -10,6 +10,7 @@
 mod claude;
 mod codex;
 mod gemini;
+mod util;
 
 use std::sync::Arc;
 

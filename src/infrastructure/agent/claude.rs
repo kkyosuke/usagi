@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
+use super::util::shell_single_quote;
 use crate::domain::agent::{Agent, AgentWiring};
 
 /// One MCP server entry: the program to run and its arguments.
@@ -168,15 +169,6 @@ fn claude_hooks_settings(usagi_bin: &str) -> String {
         },
     };
     serde_json::to_string(&settings).expect("hook settings serialize to JSON")
-}
-
-/// Wrap `text` as a single shell argument in single quotes, safe to drop into a
-/// `sh -c` command line. A single quote cannot appear inside a single-quoted
-/// string, so each one is rendered as `'\''` (close the quote, an escaped quote,
-/// reopen) — the standard POSIX idiom. Everything else (newlines, `$`, spaces …)
-/// is literal inside single quotes, so the agent receives the prompt verbatim.
-fn shell_single_quote(text: &str) -> String {
-    format!("'{}'", text.replace('\'', r"'\''"))
 }
 
 /// The Claude Code adapter.
@@ -366,15 +358,6 @@ mod tests {
             ClaudeAgent::new().launch_command(&wiring("usagi", None), true, Some("keep going"));
         assert!(launch.starts_with("claude --continue --mcp-config '"));
         assert!(launch.ends_with(" 'keep going'"));
-    }
-
-    #[test]
-    fn shell_single_quote_wraps_and_escapes() {
-        assert_eq!(shell_single_quote("plain"), "'plain'");
-        // An embedded single quote closes, escapes, and reopens the quoting.
-        assert_eq!(shell_single_quote("a'b"), r"'a'\''b'");
-        // Other shell metacharacters are literal inside single quotes.
-        assert_eq!(shell_single_quote("$x `y` \"z\""), "'$x `y` \"z\"'");
     }
 
     #[test]

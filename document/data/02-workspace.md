@@ -162,7 +162,9 @@ worktree を束ねます。各 worktree は git ステータス付き（下記 `
 
 > **後方互換**: 旧 `state.json` はこの状態を `"merged"`→`"up_to_date"` と綴っていました。`BranchStatus` に `#[serde(alias = "merged", alias = "up_to_date")]` を付けているため旧データも `synced` として読み込めます（書き出しは常に `"synced"`）。
 
-### 判定ロジック（`usecase/workspace_state.rs` の `classify`）
+### 判定ロジック（`domain::workspace_state` の `BranchStatus::derive`）
+
+判定そのもの（dirty・ahead/behind・上流の有無から status を決める純粋なルール）は domain の `BranchStatus::derive` が持つ。git からの事実収集（`ahead_behind` 呼び出しと、既定ブランチ・detached HEAD を比較対象から外す判断）は `usecase/workspace_state.rs` の `classify` が行い、集めた事実を `derive` に渡す。
 
 判定の順序:
 

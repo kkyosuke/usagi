@@ -36,6 +36,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
+use super::util::{same_dir, shell_single_quote};
 use crate::domain::agent::{Agent, AgentWiring};
 
 /// Codex hook events wired back into usagi, paired with the phase each reports.
@@ -59,16 +60,6 @@ const HOOK_PHASES: [(&str, &str); 6] = [
     ("PermissionRequest", "waiting"),
     ("Stop", "ended"),
 ];
-
-/// Wrap `text` as a single shell argument in single quotes, safe to drop into a
-/// `sh -c` command line. A single quote cannot appear inside a single-quoted
-/// string, so each one is rendered as `'\''` (close the quote, an escaped quote,
-/// reopen) — the standard POSIX idiom. Everything else (newlines, `$`, spaces,
-/// the `[`, `]`, `"` of a TOML value …) is literal inside single quotes, so Codex
-/// receives the argument verbatim.
-fn shell_single_quote(text: &str) -> String {
-    format!("'{}'", text.replace('\'', r"'\''"))
-}
 
 /// Render `text` as a TOML basic string (double-quoted), escaping the backslash
 /// and double-quote that TOML treats specially. Used for the hook command and the
@@ -193,18 +184,6 @@ fn collect_rollouts(dir: &Path, out: &mut Vec<PathBuf>) {
             out.push(path);
         }
     }
-}
-
-/// Whether two paths name the same directory, comparing canonicalized forms (so a
-/// symlinked or `/tmp` ⇄ `/private/tmp` difference still matches) and falling back
-/// to a plain comparison when a path cannot be canonicalized (e.g. the recorded
-/// directory no longer exists).
-fn same_dir(a: &Path, b: &Path) -> bool {
-    a == b
-        || matches!(
-            (std::fs::canonicalize(a), std::fs::canonicalize(b)),
-            (Ok(x), Ok(y)) if x == y
-        )
 }
 
 /// Whether `root` holds a Codex rollout transcript recorded in the worktree at
@@ -492,13 +471,6 @@ mod tests {
     }
 
     #[test]
-    fn shell_single_quote_wraps_and_escapes() {
-        assert_eq!(shell_single_quote("plain"), "'plain'");
-        // An embedded single quote closes, escapes, and reopens the quoting.
-        assert_eq!(shell_single_quote("a'b"), r"'a'\''b'");
-    }
-
-    #[test]
     fn toml_basic_string_escapes_backslash_and_quote() {
         assert_eq!(toml_basic_string("plain"), "\"plain\"");
         assert_eq!(toml_basic_string(r"a\b"), r#""a\\b""#);
@@ -547,31 +519,6 @@ mod tests {
             Path::new("/nonexistent/codex/sessions"),
             Path::new("/some/worktree"),
         );
-    }
-
-    #[test]
-    fn same_dir_compares_raw_then_canonical() {
-        // Identical paths match outright (the raw short-circuit).
-        assert!(same_dir(Path::new("/a/b"), Path::new("/a/b")));
-
-        let dir = tempfile::tempdir().unwrap();
-        let real = dir.path();
-        // Raw-different but canonically-equal paths match via canonicalization.
-        // A `sub/..` round-trip stays distinct as a `Path` (unlike a trailing `.`,
-        // which `Path` normalizes away) yet canonicalizes back to `real`.
-        fs::create_dir_all(real.join("sub")).unwrap();
-        let round_trip = real.join("sub").join("..");
-        assert_ne!(real, round_trip.as_path());
-        assert!(same_dir(real, &round_trip));
-
-        // Two distinct real directories canonicalize to different paths → no match
-        // (both canonicalize, the guard is evaluated and fails).
-        let other = tempfile::tempdir().unwrap();
-        assert!(!same_dir(real, other.path()));
-
-        // A path that cannot be canonicalized (does not exist) and is raw-different
-        // also does not match.
-        assert!(!same_dir(real, Path::new("/nonexistent/xyz")));
     }
 
     #[test]

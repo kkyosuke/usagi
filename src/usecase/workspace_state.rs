@@ -153,24 +153,15 @@ pub fn inspect_worktree(path: &Path, default: &str) -> WorktreeState {
     }
 }
 
-/// Derive a branch's lifecycle status from its working tree, its commits
-/// relative to the default branch, and whether it has an upstream.
+/// Gather the git facts a branch's lifecycle status is derived from — its
+/// commits relative to the default branch — and hand them to
+/// [`BranchStatus::derive`], which holds the (pure) classification rules.
 ///
-/// The order of checks:
-///
-/// 1. **dirty** — an uncommitted change in the working tree wins regardless of
-///    commit topology: there is work here that has not been committed.
-/// 2. Otherwise, by commits *ahead of* the default branch (commits of its own):
-///    - **ahead > 0** → `pushed` if it has an upstream, else `local`.
-///    - **ahead == 0** → `synced` if the default has moved past it (behind > 0),
-///      else `new` (even with the default: freshly cut, no work yet).
-///
-/// A branch equal to the default branch (or a detached HEAD) is never compared
-/// against itself, so its ahead/behind counts are not consulted; it falls
-/// through to `local` / `pushed` by its upstream state. The default is resolved
-/// against the remote (`origin/<default>`) first inside [`git::ahead_behind`],
-/// so the status reflects what has landed on the remote integration branch even
-/// before a local fetch.
+/// Only a real branch other than the default is measured against the default;
+/// the default branch and a detached HEAD skip the ahead/behind read. The
+/// default is resolved against the remote (`origin/<default>`) first inside
+/// [`git::ahead_behind`], so the status reflects what has landed on the remote
+/// integration branch even before a local fetch.
 fn classify(
     repo: &Path,
     branch: Option<&str>,
@@ -178,29 +169,11 @@ fn classify(
     has_upstream: bool,
     dirty: bool,
 ) -> BranchStatus {
-    if dirty {
-        return BranchStatus::Dirty;
-    }
-    // Only a real branch other than the default is measured against the default;
-    // the default branch and a detached HEAD skip the ahead/behind read.
     let counts = match branch {
         Some(branch) if branch != default => git::ahead_behind(repo, branch, default),
         _ => None,
     };
-    if let Some((ahead, behind)) = counts {
-        if ahead == 0 {
-            return if behind > 0 {
-                BranchStatus::Synced
-            } else {
-                BranchStatus::New
-            };
-        }
-    }
-    if has_upstream {
-        BranchStatus::Pushed
-    } else {
-        BranchStatus::Local
-    }
+    BranchStatus::derive(dirty, counts, has_upstream)
 }
 
 #[cfg(test)]
