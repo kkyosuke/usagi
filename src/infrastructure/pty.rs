@@ -20,9 +20,10 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
+use portable_pty::{native_pty_system, Child, CommandBuilder, ExitStatus, MasterPty, PtySize};
 
 use crate::infrastructure::error_log::ErrorLog;
 use crate::infrastructure::{pty_exit, terminal};
@@ -161,6 +162,27 @@ impl PtySession {
             let alive = Arc::clone(&alive);
             let generation = Arc::clone(&generation);
             std::thread::spawn(move || {
+                // Mark the session dead and wake the render loop on *any* exit from
+                // this thread — clean EOF, a read error, or a panic in
+                // `parser.process` (which parses untrusted shell output). A drop
+                // guard does it so the panic path is covered too: were `alive` left
+                // `true` after a panic, `is_alive()` would report the session live
+                // forever and it would linger in the UI as a zombie that never
+                // closes (and `Drop`'s teardown would wait on a thread that is gone).
+                struct DeathBell {
+                    alive: Arc<AtomicBool>,
+                    generation: Arc<AtomicU64>,
+                }
+                impl Drop for DeathBell {
+                    fn drop(&mut self) {
+                        self.alive.store(false, Ordering::SeqCst);
+                        self.generation.fetch_add(1, Ordering::SeqCst);
+                    }
+                }
+                let _death = DeathBell {
+                    alive,
+                    generation: Arc::clone(&generation),
+                };
                 let mut buf = [0u8; 8192];
                 loop {
                     match reader.read(&mut buf) {
@@ -175,8 +197,6 @@ impl PtySession {
                         }
                     }
                 }
-                alive.store(false, Ordering::SeqCst);
-                generation.fetch_add(1, Ordering::SeqCst);
             })
         };
 
@@ -310,34 +330,72 @@ impl PtySession {
         }
         let _ = self.child.kill();
     }
+
+    /// Reap the child without blocking the caller indefinitely, returning its
+    /// exit status when it is collected within [`TEARDOWN_TIMEOUT`].
+    ///
+    /// In the normal case the child has already exited (or `killpg` just reaped
+    /// the whole group) and `try_wait` returns immediately. But if a descendant
+    /// escaped the process group — it re-`setsid`'d, or this is Windows where
+    /// there is no group kill — the child can linger, and a plain blocking
+    /// `wait()` here would freeze the UI thread that runs `Drop`. Polling with a
+    /// deadline bounds that worst case: an un-reaped child becomes a short-lived
+    /// zombie until the process exits, which is far better than a frozen UI.
+    fn reap_within_timeout(&mut self) -> Option<ExitStatus> {
+        let deadline = Instant::now() + TEARDOWN_TIMEOUT;
+        loop {
+            match self.child.try_wait() {
+                Ok(Some(status)) => return Some(status),
+                Ok(None) if Instant::now() < deadline => std::thread::sleep(TEARDOWN_POLL),
+                _ => return None,
+            }
+        }
+    }
 }
+
+/// The longest `Drop` waits on the child to be reaped, and (separately) on the
+/// reader thread to finish, before giving up rather than blocking the UI thread.
+const TEARDOWN_TIMEOUT: Duration = Duration::from_secs(2);
+/// How often [`PtySession::reap_within_timeout`] re-polls within that window.
+const TEARDOWN_POLL: Duration = Duration::from_millis(10);
 
 impl Drop for PtySession {
     fn drop(&mut self) {
-        if self.is_alive() {
+        let deliberate = self.is_alive();
+        if deliberate {
             // The shell is still running, so dropping the session is a deliberate
             // teardown (the user closed the pane or left the screen): kill the
             // whole process group (shell + any agent it spawned) so the reader
-            // thread then sees EOF and the join below cannot hang. A deliberate
-            // close is not a failure, so nothing is logged.
+            // thread then sees EOF. A deliberate close is not a failure, so the
+            // reaped status is discarded rather than logged.
             self.terminate();
-            let _ = self.child.wait();
-        } else {
+            let _ = self.reap_within_timeout();
+        } else if let Some(status) = self.reap_within_timeout() {
             // The shell exited on its own (the reader hit EOF): reap it and, if it
             // ended abnormally, record it — an agent CLI crashing or exiting
             // non-zero is otherwise indistinguishable from the user typing `exit`.
             // We own the child and reap exactly once here, so there is no
             // pid-reuse window from signalling an already-reaped process.
-            if let Ok(status) = self.child.wait() {
-                if let Some(message) =
-                    pty_exit::exit_log_message(&self.worktree, self.is_agent, &status)
-                {
-                    ErrorLog::record(&message);
-                }
+            if let Some(message) =
+                pty_exit::exit_log_message(&self.worktree, self.is_agent, &status)
+            {
+                ErrorLog::record(&message);
             }
         }
+        // Join the reader only once it has actually left (its drop guard clears
+        // `alive` on EOF/error/panic). Wait briefly for that, then join — it is
+        // instant once the thread has exited. If the thread is still blocked in
+        // `read` because an escaped descendant holds the slave fd open, detach it
+        // rather than hang the UI; it ends when EOF finally arrives or with the
+        // process.
         if let Some(thread) = self.reader_thread.take() {
-            let _ = thread.join();
+            let deadline = Instant::now() + TEARDOWN_TIMEOUT;
+            while self.is_alive() && Instant::now() < deadline {
+                std::thread::sleep(TEARDOWN_POLL);
+            }
+            if !self.is_alive() {
+                let _ = thread.join();
+            }
         }
     }
 }
