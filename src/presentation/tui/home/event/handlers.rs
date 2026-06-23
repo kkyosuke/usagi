@@ -283,8 +283,9 @@ pub(super) fn switch_key(
         Key::Char('r') => {
             state.switch_begin_rename();
         }
-        // `n` opens the selected session's note editor (a no-op on the root row).
-        Key::Char('n') => {
+        // `n` (or `Ctrl-E`, matching 在席 / 没入) opens the selected session's note
+        // editor (a no-op on the root row).
+        Key::Char('n') | Key::Char(CTRL_E) => {
             state.switch_begin_note();
         }
         // Esc first dismisses the highlighted session's read-only note overlay
