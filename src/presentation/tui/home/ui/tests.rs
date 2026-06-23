@@ -1080,6 +1080,23 @@ fn switch_preview_shows_an_idle_session_as_its_action_menu() {
 }
 
 #[test]
+fn switch_right_pane_fades_the_preview_but_keeps_its_text() {
+    // In 切替 the keyboard is on the session list, so the composited right pane
+    // fades the whole preview (each row dimmed) to signal it is not where
+    // selection happens. The fade only re-styles the rows, so the right pane
+    // shows exactly the preview's text. (Styling is off in non-TTY tests, so we
+    // assert the text survives rather than that a dim code was added — see
+    // `dim_row_strips_existing_colour_but_keeps_the_text`.)
+    let idle = worktree(Some("feat"), false, BranchStatus::Pushed);
+    let mut state = HomeState::new("usagi", vec![idle], None);
+    state.enter_switch(super::super::state::ReturnMode::Overview);
+    state.switch_move_down();
+    let preview = stripped(&switch_preview(&state, 40, 12));
+    let pane = stripped(&right_pane_contents(&state, 40, 12));
+    assert_eq!(pane, preview, "the faded right pane is the preview's text");
+}
+
+#[test]
 fn switch_preview_fills_the_pane_without_a_pinned_key_hint() {
     // The 切替 right pane no longer pins a key hint to its bottom row — the keys
     // live in the footer, so the preview uses the pane's full height and does not
