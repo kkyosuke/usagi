@@ -1925,15 +1925,21 @@ fn run_recording_rename(keys: Vec<io::Result<Key>>) -> (Vec<(String, String)>, O
 
 #[test]
 fn switch_inline_rename_edits_then_confirms_the_label() {
-    // Switch -> cursor onto "main" -> `r` (prefills "main") -> clear -> type
-    // "Top" -> Enter persists via the rename callback.
+    // Switch -> cursor onto "main" -> `r` (prefills "main") -> mid-string edit
+    // exercising the same caret keys as create (Home/End/←/→/Del/Backspace) ->
+    // type "Top" -> Enter persists via the rename callback.
     let mut keys = typed("session switch");
     keys.push(Ok(Key::Enter)); // -> Switch
     keys.push(Ok(Key::ArrowDown)); // cursor "main"
-    keys.push(Ok(Key::Char('r'))); // begin rename (prefilled "main")
+    keys.push(Ok(Key::Char('r'))); // begin rename (prefilled "main", caret at end)
     keys.push(Ok(Key::ArrowUp)); // a non-edit key is ignored while renaming
-    for _ in 0..4 {
-        keys.push(Ok(Key::Backspace)); // clear the prefill
+    keys.push(Ok(Key::Home)); // caret to the start
+    keys.push(Ok(Key::Del)); // forward-delete 'm' -> "ain"
+    keys.push(Ok(Key::End)); // caret to the end
+    keys.push(Ok(Key::ArrowLeft)); // caret before 'n'
+    keys.push(Ok(Key::ArrowRight)); // caret after 'n' (end)
+    for _ in 0..3 {
+        keys.push(Ok(Key::Backspace)); // clear "ain"
     }
     keys.extend(typed("Top"));
     keys.push(Ok(Key::Enter)); // confirm -> rename callback

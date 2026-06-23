@@ -68,12 +68,17 @@ impl ErrorLog {
         // return would leave a line uncovered.
         if let Ok(log) = Self::open_default() {
             let now = Local::now();
-            // Prune just once per process (the first record wins the swap); later
-            // records in an error burst skip the directory scan.
-            if !PRUNED.swap(true, Ordering::Relaxed) {
-                let _ = log.prune(now.date_naive(), RETENTION_DAYS);
-            }
+            log.prune_once(now.date_naive());
             let _ = log.append(now, message);
+        }
+    }
+
+    /// Prune old log files at most once per process. Pruning scans the whole
+    /// `logs/` directory, so an error burst would otherwise re-scan it on every
+    /// line; the first call wins the swap and prunes, later calls skip.
+    fn prune_once(&self, today: NaiveDate) {
+        if !PRUNED.swap(true, Ordering::Relaxed) {
+            let _ = self.prune(today, RETENTION_DAYS);
         }
     }
 
