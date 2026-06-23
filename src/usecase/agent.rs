@@ -61,4 +61,15 @@ mod tests {
         let runner = FakeRunner(vec!["claude", "codex", "codex-fugu", "gemini"]);
         assert_eq!(available_clis(&runner), AgentCli::ALL.to_vec());
     }
+
+    #[test]
+    fn fake_runner_non_probe_methods_are_inert() {
+        // `available_clis` only calls `available`; the fake's other `CommandRunner`
+        // methods exist solely to satisfy the trait. Exercise them so the double
+        // is fully covered (mirroring the doctor module's fake-runner tests).
+        let runner = FakeRunner(vec![]);
+        assert!(runner.run("x", &[]).unwrap());
+        assert!(runner.check("x", &[]));
+        assert!(runner.spawn("x", &[]).is_ok());
+    }
 }
