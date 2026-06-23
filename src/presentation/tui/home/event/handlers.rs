@@ -305,7 +305,7 @@ pub(super) fn switch_key(
     Flow::Continue
 }
 
-/// Back out of 切替 on `Esc` / `h`: return to the mode it was opened from. From
+/// Back out of 切替 on `Esc`: return to the mode it was opened from. From
 /// 統括 / 在席 this just restores the mode; from 没入 it re-attaches the focused
 /// session's pane when that session is still live, mirroring how `Enter` only
 /// attaches a live session (so backing out onto an idle row lands in 在席 rather
