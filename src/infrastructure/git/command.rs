@@ -25,10 +25,19 @@ pub(super) const REPO_SCOPING_ENV: &[&str] = &[
     "GIT_NAMESPACE",
 ];
 
-/// Build a `git -C <repo>` command with repo-scoping env vars stripped.
+/// Build a `git -C <repo>` command with repo-scoping env vars stripped and the
+/// locale forced to `C`.
+///
+/// `LC_ALL=C` pins git's human-readable messages to English. Some callers
+/// (notably [`super::worktree`]) branch on git's stderr text — e.g. treating
+/// "is not a working tree" as a no-op — and a localized git (`LC_ALL=ja_JP`,
+/// …) would otherwise emit translated messages those matches would miss. The
+/// machine-readable output we parse (`--porcelain`, `--format=…`) is already
+/// locale-independent, so this only stabilizes the prose.
 pub(super) fn git_command(repo: &Path) -> Command {
     let mut command = Command::new("git");
     command.arg("-C").arg(repo);
+    command.env("LC_ALL", "C");
     for var in REPO_SCOPING_ENV {
         command.env_remove(var);
     }
