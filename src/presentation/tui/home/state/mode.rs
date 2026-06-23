@@ -25,7 +25,7 @@ pub enum Mode {
     Attached,
 }
 
-/// Where a [`Mode::Switch`] should return to when cancelled (`Esc` / `h`) — the
+/// Where a [`Mode::Switch`] should return to when cancelled (`Esc`) — the
 /// mode it was opened from. `Ctrl-O` while in Switch always zooms out to
 /// Overview regardless of this.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

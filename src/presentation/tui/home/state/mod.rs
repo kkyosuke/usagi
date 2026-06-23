@@ -145,7 +145,7 @@ pub struct HomeState {
     /// effective settings (and a runtime probe) by `mod.rs`; false by default so
     /// the command stays hidden until the model is actually usable.
     ai_available: bool,
-    /// Where a 切替 (Switch) returns to on `Esc` / `h`; only meaningful in
+    /// Where a 切替 (Switch) returns to on `Esc`; only meaningful in
     /// [`Mode::Switch`].
     switch_return: ReturnMode,
     /// Whether the highlighted session's read-only note overlay is dismissed in
@@ -773,7 +773,7 @@ impl HomeState {
     // --- 切替 (Switch) -----------------------------------------------------
 
     /// Enter 切替 (Switch): move keyboard focus to the left pane to pick a
-    /// session, remembering where to return on `Esc` / `h`.
+    /// session, remembering where to return on `Esc`.
     pub fn enter_switch(&mut self, return_to: ReturnMode) {
         self.mode = Mode::Switch;
         self.switch_return = return_to;
@@ -783,7 +783,7 @@ impl HomeState {
         self.note_hidden = false;
     }
 
-    /// Where the current 切替 returns to on `Esc` / `h`.
+    /// Where the current 切替 returns to on `Esc`.
     pub fn switch_return(&self) -> ReturnMode {
         self.switch_return
     }
