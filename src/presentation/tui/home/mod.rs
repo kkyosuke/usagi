@@ -535,7 +535,13 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
         // to mop up the stale screen snapshot — so the cleanup holds no matter
         // when control changes hands.
         handle.set_attached(None);
-        home.clear_terminal_surface();
+        // Leaving only to edit the note (`Ctrl-E` → `PaneExit::OpenNote`) keeps
+        // the last screen snapshot: the note editor floats over the right pane,
+        // so the live terminal stays visible behind it, and the event loop
+        // re-attaches the moment the editor closes. Every other exit clears it.
+        if !matches!(result, Ok(PaneExit::OpenNote)) {
+            home.clear_terminal_surface();
+        }
         // The user may have committed / pushed / merged while in the pane, so
         // re-sync the worktree statuses now that they have left it. The sync
         // shells out to `git status` for every worktree and waits on the
