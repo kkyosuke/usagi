@@ -1056,10 +1056,15 @@ pub(super) fn right_pane_contents(state: &HomeState, right_w: usize, rows: usize
     // Composite the floating note box over the top rows of the base pane (the
     // rows beneath stay put, so the preview / terminal never shifts — no CLS).
     if let Some(overlay) = note_overlay(state, right_w, rows) {
+        // Grow the base to hold the whole box when the pane beneath is shorter
+        // than it (no live snapshot yet, or a partial one), so the box's bottom
+        // border always lands instead of being clipped as the note grows with
+        // each newline. Rows the box does not cover are left blank.
+        if overlay.len() > base.len() {
+            base.resize(overlay.len(), String::new());
+        }
         for (i, row) in overlay.into_iter().enumerate() {
-            if i < base.len() {
-                base[i] = row;
-            }
+            base[i] = row;
         }
     }
     base

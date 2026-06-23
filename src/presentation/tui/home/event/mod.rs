@@ -289,7 +289,14 @@ pub(super) fn event_loop(
         // current sidebar state so the snapshot fills the pane it is drawn into.
         let input_in_right_pane = state.sidebar() == Sidebar::Rail
             && (state.create().is_some() || state.rename().is_some());
-        if state.mode() == Mode::Switch && !input_in_right_pane {
+        // The note editor opened from 没入 (`Ctrl-E`) floats over the attached
+        // session's pane, which keeps drawing in Attached mode while the editor is
+        // open. The surface was just cleared, so refresh it here too — otherwise
+        // the live terminal would not show behind the floating box, and the empty
+        // fallback pane (a one-line starting hint) would be too short to hold the
+        // box, clipping its bottom border as the note grows with each newline.
+        let attached_note = state.mode() == Mode::Attached && state.note_editor().is_some();
+        if (state.mode() == Mode::Switch && !input_in_right_pane) || attached_note {
             let dir = selected_dir(&state, workspace_root);
             if let Some(view) = (wiring.preview)(&dir, state.sidebar()) {
                 state.set_terminal_view(view);
