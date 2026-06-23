@@ -32,8 +32,9 @@ use super::update::UpdateHandle;
 /// A full-size frame: the journey is meaningless at a cramped size, and the
 /// component tests already cover the narrow-terminal fallbacks.
 // Tall enough for root (2 lines) + the divider + two sessions (2 lines each)
-// to clear the bottom command-hint band in Overview.
-const ROWS: usize = 25;
+// to clear the bottom command-hint band in Overview, plus the blank separator
+// row below the mode ladder.
+const ROWS: usize = 26;
 const COLS: usize = 80;
 /// The byte `console` reports for `Ctrl-O`, the key that zooms out one rung of
 /// the ladder (mirrors `event::CTRL_O`).
