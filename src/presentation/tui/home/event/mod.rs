@@ -289,7 +289,13 @@ pub(super) fn event_loop(
         // current sidebar state so the snapshot fills the pane it is drawn into.
         let input_in_right_pane = state.sidebar() == Sidebar::Rail
             && (state.create().is_some() || state.rename().is_some());
-        if state.mode() == Mode::Switch && !input_in_right_pane {
+        // 切替 previews the highlighted session; 在席 previews the focused session's
+        // selected pane — both read the same live snapshot + tab strip, so the
+        // focused session's panes show as tabs and the chosen one previews live
+        // (an idle session has no live snapshot, so the strip stays absent and the
+        // action surface shows instead).
+        let drives_surface = matches!(state.mode(), Mode::Switch | Mode::Focus);
+        if drives_surface && !input_in_right_pane {
             let dir = selected_dir(&state, workspace_root);
             if let Some(view) = (wiring.preview)(&dir, state.sidebar()) {
                 state.set_terminal_view(view);

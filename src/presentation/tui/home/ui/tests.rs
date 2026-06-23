@@ -1144,6 +1144,70 @@ fn right_pane_shows_the_focus_menu_or_prompt() {
 }
 
 #[test]
+fn focus_shows_pane_tabs_with_a_trailing_new_tab_and_the_action_surface() {
+    // With live panes published, 在席 gains a tab strip — one chip per pane plus a
+    // trailing "+ new" tab. On the "+ new" tab (the default on entry) the action
+    // surface shows below, not a pane preview.
+    let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
+    state.enter_focus(1);
+    state.set_terminal_tabs(vec!["agent".to_string(), "terminal".to_string()], 0);
+    state.set_terminal_view(TerminalView::from_rows(vec!["$ echo hi".to_string()], None));
+    // A wide pane so the whole strip (identity + chips + "+ new") fits unclipped.
+    let out = stripped(&right_pane_contents(&state, 100, 12));
+    // The identity rides the strip row alongside the pane chips and the "+ new" tab.
+    assert!(out.contains("main"));
+    assert!(out.contains("agent"));
+    assert!(out.contains("+ new"));
+    // On the "+ new" tab the action surface shows; the pane preview does not.
+    assert!(out.contains("Run a command:"));
+    assert!(!out.contains("$ echo hi"));
+}
+
+#[test]
+fn focus_new_tab_with_panes_shows_the_prompt_surface() {
+    // The "+ new" tab honours the Prompt action UI just as the menu does — with
+    // live panes its command line shows below the strip (header-less).
+    let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
+    state.set_session_action_ui(SessionActionUi::Prompt);
+    state.enter_focus(1);
+    state.set_terminal_tabs(vec!["agent".to_string()], 0);
+    for c in "ter".chars() {
+        state.focus_prompt_mut().insert(c);
+    }
+    let out = stripped(&right_pane_contents(&state, 100, 12));
+    assert!(out.contains("+ new"));
+    assert!(out.contains("❯ ter"));
+}
+
+#[test]
+fn focus_previews_the_selected_pane_when_a_pane_tab_is_chosen() {
+    // Off the "+ new" tab (as after `Ctrl-T` from 没入), the selected pane's live
+    // snapshot previews below the strip instead of the action surface.
+    let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
+    state.enter_focus(1);
+    state.leave_attached(); // land on the active pane tab, not "+ new"
+    state.set_terminal_tabs(vec!["agent".to_string(), "terminal".to_string()], 1);
+    state.set_terminal_view(TerminalView::from_rows(vec!["$ echo hi".to_string()], None));
+    let out = stripped(&right_pane_contents(&state, 100, 12));
+    assert!(out.contains("+ new")); // the strip still carries the "+ new" tab
+    assert!(out.contains("$ echo hi")); // the selected pane previews
+    assert!(!out.contains("Run a command:")); // not the action surface
+}
+
+#[test]
+fn focus_pane_tab_falls_back_to_a_hint_until_the_first_snapshot() {
+    // A pane tab is selected but no snapshot has arrived yet: a live-terminal hint
+    // stands in until one does.
+    let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
+    state.enter_focus(1);
+    state.leave_attached();
+    state.set_terminal_tabs(vec!["agent".to_string()], 0);
+    let out = stripped(&right_pane_contents(&state, 60, 12));
+    assert!(out.contains("live terminal"));
+    assert!(out.contains("再アタッチ"));
+}
+
+#[test]
 fn focus_prompt_shows_usage_for_arguments() {
     let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
     state.set_session_action_ui(SessionActionUi::Prompt);
@@ -1167,10 +1231,12 @@ fn focus_prompt_has_no_hint_for_an_unknown_command_word() {
     }
     // The header, blank, and prompt lines are present, but no hint rows follow.
     let rows = right_pane_contents(&state, 60, 12);
-    assert!(stripped(&rows).contains("❯ zzz"));
-    // The prompt body has exactly the header, a blank, the prompt, and a blank
-    // separator — no hint rows after it.
-    assert_eq!(rows.len(), 4);
+    let text = stripped(&rows);
+    assert!(text.contains("❯ zzz"));
+    // An unknown word yields `Hint::None`, so neither a usage line nor example
+    // rows are drawn below the prompt.
+    assert!(!text.contains("usage"));
+    assert!(!text.contains("e.g."));
 }
 
 #[test]

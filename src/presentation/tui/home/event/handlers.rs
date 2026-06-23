@@ -428,9 +428,8 @@ pub(super) fn focus_key(
     wiring: &mut Wiring,
 ) -> Flow {
     // `Esc` returns to 統括; `Ctrl-O` opens 切替 (return here on cancel); `Ctrl-P` /
-    // `Ctrl-N` move the focused session's active tab (so re-attaching, or the next
-    // `terminal` / `agent`, lands on the chosen pane). These bind the same in both
-    // action surfaces.
+    // `Ctrl-N` move the tab selector across the session's live panes and the
+    // trailing "+ new" tab. These bind the same whichever tab is selected.
     match key {
         Key::Escape => {
             state.leave_focus();
@@ -447,22 +446,37 @@ pub(super) fn focus_key(
             state.open_focused_note(false);
             return Flow::Continue;
         }
+        // `Ctrl-P` / `Ctrl-N` walk the combined tab strip. Landing on a pane tab
+        // makes that pane active in the pool (so its preview shows, and re-attach
+        // lands on it); landing on the "+ new" tab is a pure state move with no
+        // pool tab to activate.
         Key::Char(CTRL_P) => {
-            let dir = selected_dir(state, wiring.workspace_root);
-            (wiring.tab_op)(&dir, Some(TabNav::Prev));
+            if let Some(index) = state.focus_tab_prev() {
+                let dir = selected_dir(state, wiring.workspace_root);
+                (wiring.tab_op)(&dir, Some(TabNav::To(index)));
+            }
             return Flow::Continue;
         }
         Key::Char(CTRL_N) => {
-            let dir = selected_dir(state, wiring.workspace_root);
-            (wiring.tab_op)(&dir, Some(TabNav::Next));
+            if let Some(index) = state.focus_tab_next() {
+                let dir = selected_dir(state, wiring.workspace_root);
+                (wiring.tab_op)(&dir, Some(TabNav::To(index)));
+            }
             return Flow::Continue;
         }
         _ => {}
     }
 
-    match state.session_action_ui() {
-        SessionActionUi::Menu => focus_menu_key(term, state, painter, key, wiring),
-        SessionActionUi::Prompt => focus_prompt_key(term, state, painter, key, wiring),
+    // The "+ new" tab drives the action surface (a menu / prompt that launches a
+    // pane); a pane tab is a preview, so its only action is `Enter` to re-attach
+    // the selected (now-active) pane — every other key is inert there.
+    if state.focus_on_new_tab() {
+        match state.session_action_ui() {
+            SessionActionUi::Menu => focus_menu_key(term, state, painter, key, wiring),
+            SessionActionUi::Prompt => focus_prompt_key(term, state, painter, key, wiring),
+        }
+    } else if key == Key::Enter {
+        open_pane(term, state, painter, wiring, false, false);
     }
     Flow::Continue
 }

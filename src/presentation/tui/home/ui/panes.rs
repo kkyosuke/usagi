@@ -617,10 +617,11 @@ fn preview_header(name: &str, status: Option<BranchStatus>, agent: Option<String
     format!("{name}  {detail}")
 }
 
-/// The 没入 (Attached) header line for the active session: its name, git status,
-/// and agent state — or the workspace-root note when the root row is active. The
-/// active session is the one the embedded terminal below belongs to.
-fn attached_header(state: &HomeState) -> String {
+/// The header line for the active (focused) session: its name, git status, and
+/// agent state — or the workspace-root note when the root row is active. Shared
+/// by 没入 (Attached), where it sits above the embedded terminal, and 在席
+/// (Focus), where it sits above the session's pane tabs.
+fn active_session_header(state: &HomeState) -> String {
     match state.list().active() {
         Some(w) => {
             let agent = AgentState::from_flags(
@@ -673,17 +674,21 @@ pub(super) fn focus_menu_row(info: &CommandInfo, selected: bool, width: usize) -
     clip_to_width(&format!("  {marker} {name}{desc}"), width)
 }
 
-/// Builds the 在席 (Focus) menu: a short header, one row per Session-scope
-/// command (`›` cursor on the highlighted one), and a key hint.
-pub(super) fn focus_menu(state: &HomeState, width: usize) -> Vec<String> {
-    let mut lines = vec![
-        style(format!("session: {}", state.focused_session_name()))
-            .cyan()
-            .bold()
-            .to_string(),
-        String::new(),
-        style("Run a command:").dim().to_string(),
-    ];
+/// The `session: <name>` header line shown above the 在席 (Focus) action surface
+/// when the session has no live panes (an idle session, no tab strip). With live
+/// panes the identity rides the tab strip ([`active_session_header`]) instead.
+fn focus_session_header(state: &HomeState) -> String {
+    style(format!("session: {}", state.focused_session_name()))
+        .cyan()
+        .bold()
+        .to_string()
+}
+
+/// The body of the 在席 (Focus) menu (no identity header): the `Run a command:`
+/// label, one row per Session-scope command (`›` cursor on the highlighted one),
+/// and a key hint. Shared by the idle-session [`focus_menu`] and the "+ new" tab.
+fn focus_menu_body(state: &HomeState, width: usize) -> Vec<String> {
+    let mut lines = vec![style("Run a command:").dim().to_string()];
     let cursor = state.focus_menu_cursor();
     for (i, info) in state.focus_menu_commands().iter().enumerate() {
         lines.push(focus_menu_row(info, i == cursor, width));
@@ -697,23 +702,100 @@ pub(super) fn focus_menu(state: &HomeState, width: usize) -> Vec<String> {
     lines
 }
 
-/// Builds the 在席 (Focus) prompt surface: a header, the session-scoped command
-/// line (`❯ <input>▏`), and the Session-scope hint below it.
-pub(super) fn focus_prompt(state: &HomeState, width: usize) -> Vec<String> {
-    let mut lines = vec![
-        style(format!("session: {}", state.focused_session_name()))
-            .cyan()
-            .bold()
-            .to_string(),
-        String::new(),
-    ];
+/// The body of the 在席 (Focus) prompt surface (no identity header): the
+/// session-scoped command line (`❯ <input>▏`) and the Session-scope hint below
+/// it. Shared by the idle-session [`focus_prompt`] and the "+ new" tab.
+fn focus_prompt_body(state: &HomeState, width: usize) -> Vec<String> {
     let prompt = style("❯").red().bold();
     // Split at the caret so ←/→/Home/End move a visible block caret through the prompt.
     let (before, after) = state.focus_prompt().split_at(state.focus_prompt_cursor());
     let value = widgets::block_caret(before, after, &Style::new().cyan());
-    lines.push(clip_to_width(&format!("{prompt} {value}"), width));
+    let mut lines = vec![clip_to_width(&format!("{prompt} {value}"), width)];
     lines.push(String::new());
     lines.extend(focus_hint_lines(state.focus_prompt_hint(), width));
+    lines
+}
+
+/// Builds the 在席 (Focus) menu: a short header, one row per Session-scope
+/// command (`›` cursor on the highlighted one), and a key hint.
+pub(super) fn focus_menu(state: &HomeState, width: usize) -> Vec<String> {
+    let mut lines = vec![focus_session_header(state), String::new()];
+    lines.extend(focus_menu_body(state, width));
+    lines
+}
+
+/// Builds the 在席 (Focus) prompt surface: a header, the session-scoped command
+/// line (`❯ <input>▏`), and the Session-scope hint below it.
+pub(super) fn focus_prompt(state: &HomeState, width: usize) -> Vec<String> {
+    let mut lines = vec![focus_session_header(state), String::new()];
+    lines.extend(focus_prompt_body(state, width));
+    lines
+}
+
+/// The label of 在席's trailing "+ new" tab — the action surface that launches a
+/// pane. ASCII so the underline marker in [`tab_strip_parts`] (which measures
+/// width in `chars`) lands exactly under it, as it does for the pane labels.
+const FOCUS_NEW_TAB_LABEL: &str = "+ new";
+
+/// Builds the 在席 (Focus) right pane. With no live panes it is the session's
+/// action surface alone — the menu or prompt with its own `session:` header,
+/// exactly as before. With live panes it gains a **tab strip**: one chip per live
+/// pane followed by a "+ new" chip, the session identity beside it (shared with
+/// 没入), and below it either the selected pane's live preview or — on the "+ new"
+/// tab — the action surface (header-less, the identity already rides the strip).
+fn focus_pane(state: &HomeState, width: usize, rows: usize) -> Vec<String> {
+    // No live panes: the action surface fills the pane, just as it did before
+    // tabs existed (its own `session:` header, no strip).
+    let Some(strip) = state.terminal_tabs().filter(|s| !s.labels.is_empty()) else {
+        let mut lines = match state.session_action_ui() {
+            SessionActionUi::Menu => focus_menu(state, width),
+            SessionActionUi::Prompt => focus_prompt(state, width),
+        };
+        lines.truncate(rows);
+        lines.resize(rows, String::new());
+        return lines;
+    };
+
+    // Live panes: the session's panes as tabs, then a trailing "+ new" tab. The
+    // identity rides the strip's row (as in 没入), so the body below carries no
+    // header of its own.
+    let on_new = state.focus_on_new_tab();
+    let mut labels = strip.labels.clone();
+    labels.push(FOCUS_NEW_TAB_LABEL.to_string());
+    let active = if on_new {
+        labels.len() - 1
+    } else {
+        strip.active
+    };
+    let combined = TabStrip { labels, active };
+    let header = active_session_header(state);
+    let mut lines = header_tab_rows(header, Some(&combined), width);
+
+    if on_new {
+        // The "+ new" tab: the action surface that launches the next pane.
+        lines.push(String::new());
+        match state.session_action_ui() {
+            SessionActionUi::Menu => lines.extend(focus_menu_body(state, width)),
+            SessionActionUi::Prompt => lines.extend(focus_prompt_body(state, width)),
+        }
+    } else {
+        // A pane tab: preview the pane's live screen (the snapshot taken before
+        // painting), so the selection shows what re-attaching reveals. Fall back
+        // to a label until the first snapshot is available.
+        match state.terminal_view() {
+            Some(view) => {
+                let body = rows.saturating_sub(lines.len());
+                lines.extend(terminal_pane(view, width, body));
+            }
+            None => {
+                lines.push(style("● live terminal").green().to_string());
+                lines.push(style("Enter で再アタッチ").dim().to_string());
+            }
+        }
+    }
+
+    lines.truncate(rows);
+    lines.resize(rows, String::new());
     lines
 }
 
@@ -1025,10 +1107,7 @@ pub(super) fn right_pane_contents(state: &HomeState, right_w: usize, rows: usize
             }
             switch_preview(state, right_w, rows)
         }
-        Mode::Focus => match state.session_action_ui() {
-            SessionActionUi::Menu => focus_menu(state, right_w),
-            SessionActionUi::Prompt => focus_prompt(state, right_w),
-        },
+        Mode::Focus => focus_pane(state, right_w, rows),
         Mode::Attached => {
             // The active session's identity shares the top row with its tab chips
             // (the underline marker below them), so the header reads beside the
@@ -1037,7 +1116,7 @@ pub(super) fn right_pane_contents(state: &HomeState, right_w: usize, rows: usize
             // terminal below never shifts whether or not a strip is published. A
             // starting hint stands in until the first screen snapshot arrives.
             let mut lines = Vec::with_capacity(rows);
-            let header = attached_header(state);
+            let header = active_session_header(state);
             let mut head = header_tab_rows(header, state.terminal_tabs(), right_w);
             head.resize(super::TAB_BAR_ROWS, String::new());
             lines.extend(head);
