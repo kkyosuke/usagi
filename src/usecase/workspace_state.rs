@@ -12,6 +12,7 @@ use anyhow::Result;
 use chrono::Utc;
 
 use crate::domain::workspace_state::{BranchStatus, SessionRecord, WorkspaceState, WorktreeState};
+use crate::infrastructure::error_log::ErrorLog;
 use crate::infrastructure::git;
 use crate::infrastructure::workspace_store::WorkspaceStore;
 
@@ -113,11 +114,20 @@ pub fn recorded_sessions_for_display(root: &Path) -> (Vec<SessionRecord>, Option
 /// the list as it is" — distinct from [`recorded_sessions_for_display`], which
 /// surfaces a load error as a notice on first entry.
 pub fn recorded_sessions(root: &Path) -> Option<Vec<SessionRecord>> {
-    WorkspaceStore::new(root)
-        .load()
-        .ok()
-        .flatten()
-        .map(|s| s.sessions)
+    match WorkspaceStore::new(root).load() {
+        Ok(state) => state.map(|s| s.sessions),
+        // Unlike `recorded_sessions_for_display`, this refresh path has no notice
+        // channel to surface a load failure on, so without recording it the error
+        // would vanish entirely. Route it to the daily log before falling back to
+        // "leave the list as it is".
+        Err(e) => {
+            ErrorLog::record(&format!(
+                "failed to load recorded sessions from {}: {e}",
+                root.display()
+            ));
+            None
+        }
+    }
 }
 
 /// Build the [`WorktreeState`] of a single worktree at `path`, classifying its
@@ -335,10 +345,28 @@ mod tests {
 
     #[test]
     fn recorded_sessions_is_none_when_state_is_unreadable() {
+        // The load failure is recorded to `<data dir>/logs/`, so pin the data
+        // directory to a temp home to keep the test hermetic.
+        let _guard = crate::test_support::process_env_guard();
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var(crate::infrastructure::storage::DATA_DIR_ENV, home.path());
+
         let dir = tempfile::tempdir().unwrap();
         // A directory where state.json should be makes the load error → None.
         std::fs::create_dir_all(dir.path().join(".usagi/state.json")).unwrap();
         assert!(recorded_sessions(dir.path()).is_none());
+
+        // The load failure is recorded rather than silently dropped.
+        let entry = std::fs::read_dir(home.path().join("logs"))
+            .expect("logs dir exists")
+            .next()
+            .expect("a log file was written")
+            .expect("readable entry");
+        assert!(std::fs::read_to_string(entry.path())
+            .unwrap()
+            .contains("failed to load recorded sessions"));
+
+        std::env::remove_var(crate::infrastructure::storage::DATA_DIR_ENV);
     }
 
     #[test]
