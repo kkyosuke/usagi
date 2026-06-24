@@ -1,0 +1,15 @@
+# Codex CLI のプロジェクト設定。
+#
+# auto モードで動かす: 承認プロンプトを出さずに自走させる。
+# - approval_policy = "never": 各アクションの承認を求めず実行する。
+# - sandbox_mode = "workspace-write": 書き込みはワークスペース内に限定する
+#   （リポジトリ外への書き込みは依然ブロックされる）。
+# usagi のセッションは隔離された worktree 内で起動するため、この設定で
+# 安全に自走できる。
+approval_policy = "never"
+sandbox_mode = "workspace-write"
+
+[sandbox_workspace_write]
+# fmt / clippy / test や cargo の依存取得など、ネットワークを要する
+# コマンドを auto モードのまま実行できるようにする。
+network_access = true
