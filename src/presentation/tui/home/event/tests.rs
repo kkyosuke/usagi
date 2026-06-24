@@ -2046,6 +2046,153 @@ fn focus_menu_shortcut_keys_launch_terminal_and_agent() {
 }
 
 #[test]
+fn focus_menu_agent_picker_launches_the_chosen_cli() {
+    use crate::domain::settings::AgentCli;
+    // The fake pane reads the recorded choice the way the real wiring does.
+    let opened = RefCell::new(Vec::new());
+    let mut open = |h: &mut HomeState, _d: &Path, a: bool, _n: bool| {
+        opened.borrow_mut().push((a, h.take_agent_choice()));
+        Ok(PaneExit::Closed)
+    };
+    let mut create: fn(&str) -> SessionOutcome = noop_create;
+    let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = noop_preview;
+    let mut state = sample_state();
+    state.set_default_agent(AgentCli::Claude);
+    state.set_installed_agents(vec![AgentCli::Claude, AgentCli::Codex]);
+    let mut keys = typed("session switch feat");
+    keys.push(Ok(Key::Enter)); // Focus feat
+    keys.push(Ok(Key::ArrowDown)); // terminal -> agent
+    keys.push(Ok(Key::ArrowRight)); // expand picker (default Claude highlighted)
+    keys.push(Ok(Key::ArrowDown)); // Claude -> Codex
+    keys.push(Ok(Key::Enter)); // launch Codex
+    keys.push(Ok(Key::Escape)); // -> Overview
+    keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
+    assert!(matches!(
+        run_full(
+            keys,
+            state,
+            &mut open,
+            &mut create,
+            &mut preview,
+            &mut noop_config
+        )
+        .unwrap(),
+        Outcome::Quit
+    ));
+    assert_eq!(*opened.borrow(), vec![(true, Some(AgentCli::Codex))]);
+}
+
+#[test]
+fn focus_menu_agent_picker_collapses_on_left_and_esc_without_launching() {
+    use crate::domain::settings::AgentCli;
+    let opened = RefCell::new(Vec::new());
+    let mut open = |_h: &mut HomeState, _d: &Path, a: bool, _n: bool| {
+        opened.borrow_mut().push(a);
+        Ok(PaneExit::Closed)
+    };
+    let mut create: fn(&str) -> SessionOutcome = noop_create;
+    let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = noop_preview;
+    let mut state = sample_state();
+    state.set_installed_agents(vec![AgentCli::Claude, AgentCli::Codex]);
+    let mut keys = typed("session switch feat");
+    keys.push(Ok(Key::Enter)); // Focus feat
+    keys.push(Ok(Key::ArrowDown)); // terminal -> agent
+    keys.push(Ok(Key::ArrowRight)); // expand
+    keys.push(Ok(Key::ArrowUp)); // move within the picker (wraps)
+    keys.push(Ok(Key::Char('k'))); // move within the picker (vim up)
+    keys.push(Ok(Key::Home)); // an unhandled picker key: inert
+    keys.push(Ok(Key::ArrowLeft)); // collapse (no launch)
+    keys.push(Ok(Key::ArrowRight)); // expand again
+    keys.push(Ok(Key::Escape)); // Esc collapses (no launch, stays in Focus)
+    keys.push(Ok(Key::Escape)); // -> Overview
+    keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
+    assert!(matches!(
+        run_full(
+            keys,
+            state,
+            &mut open,
+            &mut create,
+            &mut preview,
+            &mut noop_config
+        )
+        .unwrap(),
+        Outcome::Quit
+    ));
+    // The picker only ever expanded/collapsed; no pane was launched.
+    assert!(opened.borrow().is_empty());
+}
+
+#[test]
+fn typed_agent_name_launches_an_installed_cli_but_refuses_an_uninstalled_one() {
+    use crate::domain::settings::AgentCli;
+    let opened = RefCell::new(Vec::new());
+    let mut open = |h: &mut HomeState, _d: &Path, a: bool, _n: bool| {
+        opened.borrow_mut().push((a, h.take_agent_choice()));
+        Ok(PaneExit::Closed)
+    };
+    let mut create: fn(&str) -> SessionOutcome = noop_create;
+    let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = noop_preview;
+    let mut state = sample_state();
+    state.set_default_agent(AgentCli::Claude);
+    state.set_installed_agents(vec![AgentCli::Codex]);
+    // `agent gemini` (not installed, not the default) is refused — no launch. It
+    // still focuses the active row, so `Esc` returns to Overview to type again.
+    let mut keys = typed("agent gemini");
+    keys.push(Ok(Key::Enter));
+    keys.push(Ok(Key::Escape)); // refused -> Focus(root) -> back to Overview
+                                // `agent codex` (installed) launches Codex.
+    keys.extend(typed("agent codex"));
+    keys.push(Ok(Key::Enter));
+    keys.push(Ok(Key::Escape)); // -> Overview
+    keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
+    assert!(matches!(
+        run_full(
+            keys,
+            state,
+            &mut open,
+            &mut create,
+            &mut preview,
+            &mut noop_config
+        )
+        .unwrap(),
+        Outcome::Quit
+    ));
+    assert_eq!(*opened.borrow(), vec![(true, Some(AgentCli::Codex))]);
+}
+
+#[test]
+fn typed_agent_name_allows_the_default_cli_even_when_not_probed_as_installed() {
+    use crate::domain::settings::AgentCli;
+    let opened = RefCell::new(Vec::new());
+    let mut open = |h: &mut HomeState, _d: &Path, a: bool, _n: bool| {
+        opened.borrow_mut().push((a, h.take_agent_choice()));
+        Ok(PaneExit::Closed)
+    };
+    let mut create: fn(&str) -> SessionOutcome = noop_create;
+    let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = noop_preview;
+    let mut state = sample_state();
+    state.set_default_agent(AgentCli::Claude);
+    state.set_installed_agents(Vec::new()); // nothing probed as installed
+    let mut keys = typed("agent claude"); // the configured default by name
+    keys.push(Ok(Key::Enter));
+    keys.push(Ok(Key::Escape)); // -> Overview
+    keys.push(Ok(Key::Escape)); // quit
+    assert!(matches!(
+        run_full(
+            keys,
+            state,
+            &mut open,
+            &mut create,
+            &mut preview,
+            &mut noop_config
+        )
+        .unwrap(),
+        Outcome::Quit
+    ));
+    assert_eq!(*opened.borrow(), vec![(true, Some(AgentCli::Claude))]);
+}
+
+#[test]
 fn focus_menu_can_run_the_coming_soon_ai_command() {
     // With the local LLM available the menu lists terminal (0, default),
     // agent (1), ai (2), close (3). ArrowUp from the top wraps to "close"; one
@@ -2412,6 +2559,39 @@ fn focus_prompt_runs_agent_and_coming_soon_and_ignores_empty() {
         Outcome::Quit
     ));
     assert_eq!(*opened.borrow(), vec![true]);
+}
+
+#[test]
+fn focus_prompt_agent_with_a_name_launches_that_cli() {
+    use crate::domain::settings::AgentCli;
+    let opened = RefCell::new(Vec::new());
+    let mut open = |h: &mut HomeState, _d: &Path, a: bool, _n: bool| {
+        opened.borrow_mut().push((a, h.take_agent_choice()));
+        Ok(PaneExit::Closed)
+    };
+    let mut create: fn(&str) -> SessionOutcome = noop_create;
+    let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = noop_preview;
+    let mut state = prompt_state();
+    state.set_installed_agents(vec![AgentCli::Claude, AgentCli::CodexFugu]);
+    let mut keys = typed("session switch feat");
+    keys.push(Ok(Key::Enter)); // Focus (prompt)
+    keys.extend(typed("agent sakana.ai")); // pick the codex-fugu CLI by display name
+    keys.push(Ok(Key::Enter)); // attach that agent
+    keys.push(Ok(Key::Escape)); // -> Overview
+    keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
+    assert!(matches!(
+        run_full(
+            keys,
+            state,
+            &mut open,
+            &mut create,
+            &mut preview,
+            &mut noop_config
+        )
+        .unwrap(),
+        Outcome::Quit
+    ));
+    assert_eq!(*opened.borrow(), vec![(true, Some(AgentCli::CodexFugu))]);
 }
 
 // --- 没入 (Attached) exits ---------------------------------------------

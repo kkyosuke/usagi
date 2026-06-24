@@ -12,7 +12,7 @@ use console::Term;
 
 use crate::presentation::tui::screen::{self, FramePainter};
 
-use crate::domain::settings::SessionActionUi;
+use crate::domain::settings::{AgentCli, SessionActionUi};
 
 use super::super::command::Effect;
 use super::super::state::{HomeState, PaneExit, ReturnMode, ROOT_NAME};
@@ -70,10 +70,15 @@ pub(super) fn overview_key(
                 // `terminal` / `agent` are session commands, but the Overview line
                 // still dispatches them if typed: focus the active session (the
                 // root by default) and attach a fresh pane.
-                effect @ (Effect::OpenTerminal | Effect::OpenAgent) => {
+                Effect::OpenTerminal => {
                     let row = state.list().active_index();
                     state.enter_focus(row);
-                    launch_pane(term, state, painter, wiring, effect == Effect::OpenAgent);
+                    launch_pane(term, state, painter, wiring, false);
+                }
+                Effect::OpenAgent(cli) => {
+                    let row = state.list().active_index();
+                    state.enter_focus(row);
+                    launch_agent(term, state, painter, wiring, cli);
                 }
                 // Hand off to the settings screen; it owns the terminal until
                 // dismissed. Quitting there quits the app; otherwise we resume,
@@ -513,6 +518,11 @@ pub(super) fn focus_key(
     // same whichever tab is selected.
     match key {
         Key::Escape => {
+            // A first `Esc` collapses an open agent picker (案A) back to the menu;
+            // only when none is open does it peel back a step.
+            if state.focus_menu_collapse_agent() {
+                return Flow::Continue;
+            }
             if !state.focus_discard_new_tab() {
                 state.leave_focus();
             }
@@ -601,6 +611,11 @@ fn close_focused_session(state: &mut HomeState, wiring: &mut Wiring) {
 /// 在席 menu surface: `↑`/`↓` move the cursor, `Enter` runs the highlighted
 /// command, and `t` / `a` are shortcuts for `terminal` / `agent`. `ai` runs its
 /// coming-soon line.
+///
+/// On the `agent` row, `→` / `Tab` expands the agent picker (案A) when more than
+/// one CLI is installed; while it is expanded the keys drive the picker instead —
+/// `↑`/`↓` move within it, `Enter` launches the highlighted CLI, and `←` collapses
+/// it (as does `Esc`, handled one level up in [`focus_key`]).
 fn focus_menu_key(
     term: &Term,
     state: &mut HomeState,
@@ -608,9 +623,28 @@ fn focus_menu_key(
     key: Key,
     wiring: &mut Wiring,
 ) {
+    if state.focus_menu_expanded() {
+        match key {
+            Key::ArrowUp | Key::Char('k') => state.focus_menu_move_up(),
+            Key::ArrowDown | Key::Char('j') => state.focus_menu_move_down(),
+            Key::ArrowLeft => {
+                state.focus_menu_collapse_agent();
+            }
+            Key::Enter => {
+                if let Some(cli) = state.focus_menu_selected_agent() {
+                    state.focus_menu_collapse_agent();
+                    launch_agent(term, state, painter, wiring, Some(cli));
+                }
+            }
+            _ => {}
+        }
+        return;
+    }
     match key {
         Key::ArrowUp | Key::Char('k') => state.focus_menu_move_up(),
         Key::ArrowDown | Key::Char('j') => state.focus_menu_move_down(),
+        // On the `agent` row, open the picker to choose a non-default CLI.
+        Key::ArrowRight | Key::Tab => state.focus_menu_expand_agent(),
         Key::Enter => {
             if let Some(command) = state.focus_selected_command() {
                 run_focus_command(term, state, painter, command.name, wiring);
@@ -638,9 +672,8 @@ fn focus_prompt_key(
             // staying in Focus.
             let effect = state.focus_prompt_submit().effect;
             match effect {
-                Effect::OpenTerminal | Effect::OpenAgent => {
-                    launch_pane(term, state, painter, wiring, effect == Effect::OpenAgent);
-                }
+                Effect::OpenTerminal => launch_pane(term, state, painter, wiring, false),
+                Effect::OpenAgent(cli) => launch_agent(term, state, painter, wiring, cli),
                 Effect::CloseSession => close_focused_session(state, wiring),
                 _ => {}
             }
@@ -677,12 +710,36 @@ fn run_focus_command(
 ) {
     match name {
         "terminal" => launch_pane(term, state, painter, wiring, false),
-        "agent" => launch_pane(term, state, painter, wiring, true),
+        // The menu's `agent` row / `a` shortcut launch the configured default.
+        "agent" => launch_agent(term, state, painter, wiring, None),
         // `close` removes the focused session forcefully and leaves 在席.
         "close" => close_focused_session(state, wiring),
         // `ai` (and any future coming-soon command) just logs its line.
         _ => state.log_output(format!("\"{name}\" is coming soon 🐰")),
     }
+}
+
+/// Launch an agent pane, recording which CLI to spawn: `None` uses the
+/// workspace's configured default (the fast path, always allowed); `Some(cli)`
+/// overrides it for this session. A named CLI that is neither the configured
+/// default nor installed is refused with an error line instead of launching a
+/// shell that would just fail with "command not found". The choice is stashed on
+/// the state and consumed by the terminal-pool wiring on the fresh agent spawn.
+fn launch_agent(
+    term: &Term,
+    state: &mut HomeState,
+    painter: &mut FramePainter,
+    wiring: &mut Wiring,
+    cli: Option<AgentCli>,
+) {
+    if let Some(cli) = cli {
+        if cli != state.default_agent() && !state.installed_agents().contains(&cli) {
+            state.log_error(format!("{} is not installed", cli.display_name()));
+            return;
+        }
+    }
+    state.set_agent_choice(cli);
+    launch_pane(term, state, painter, wiring, true);
 }
 
 /// Add a fresh `terminal` / `agent` pane to the focused session and drive it

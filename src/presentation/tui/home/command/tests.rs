@@ -337,9 +337,28 @@ fn terminal_requests_opening_a_shell() {
 
 #[test]
 fn agent_requests_opening_the_agent() {
+    // No name: launch the configured agent (None payload).
     let result = registry().dispatch("agent", &[], &[]);
     assert!(result.lines.is_empty());
-    assert_eq!(result.effect, Effect::OpenAgent);
+    assert_eq!(result.effect, Effect::OpenAgent(None));
+}
+
+#[test]
+fn agent_with_a_name_overrides_which_cli_to_launch() {
+    use crate::domain::settings::AgentCli;
+    // A recognised name (command or display name) selects that CLI.
+    let result = registry().dispatch("agent codex", &[], &[]);
+    assert!(result.lines.is_empty());
+    assert_eq!(result.effect, Effect::OpenAgent(Some(AgentCli::Codex)));
+    let result = registry().dispatch("agent sakana.ai", &[], &[]);
+    assert_eq!(result.effect, Effect::OpenAgent(Some(AgentCli::CodexFugu)));
+}
+
+#[test]
+fn agent_with_an_unknown_name_is_rejected_without_launching() {
+    let result = registry().dispatch("agent emacs", &[], &[]);
+    assert_eq!(result.effect, Effect::None);
+    assert!(result.lines[0].text.contains("unknown agent \"emacs\""));
 }
 
 #[test]

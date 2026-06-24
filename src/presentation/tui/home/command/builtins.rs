@@ -305,10 +305,16 @@ impl Command for TerminalCommand {
     }
 }
 
-/// `agent`: open the configured AI agent in the selected worktree. This is a
-/// shortcut for running `terminal` and then launching the agent CLI inside it,
-/// so it produces the same [`Effect::OpenAgent`] side effect the event loop
-/// turns into an embedded terminal with the agent command sent on start.
+/// `agent [name]`: open an AI agent in the selected worktree. This is a shortcut
+/// for running `terminal` and then launching the agent CLI inside it, so it
+/// produces the [`Effect::OpenAgent`] side effect the event loop turns into an
+/// embedded terminal with the agent command sent on start.
+///
+/// With no argument it launches the workspace's configured agent (the common
+/// fast path); a name (`agent codex`, `agent sakana.ai`) overrides which CLI to
+/// launch for this session. An unrecognised name is rejected with an error line;
+/// whether a recognised CLI is actually installed is checked by the event loop
+/// when it launches (it holds the PATH probe), so this command only parses.
 pub(super) struct AgentCommand;
 
 impl Command for AgentCommand {
@@ -317,17 +323,40 @@ impl Command for AgentCommand {
     }
 
     fn description(&self) -> &'static str {
-        "Open the AI agent in the selected session (terminal + agent CLI)"
+        "Open an AI agent in the selected session (terminal + agent CLI)"
+    }
+
+    fn usage(&self) -> &'static str {
+        "agent [claude|codex|sakana.ai|gemini]"
+    }
+
+    fn examples(&self) -> &'static [&'static str] {
+        &["agent", "agent codex", "agent sakana.ai"]
     }
 
     fn scope(&self) -> CommandScope {
         CommandScope::Session
     }
 
-    fn run(&self, _args: &str, _ctx: &CommandContext) -> CommandResult {
-        CommandResult {
-            lines: Vec::new(),
-            effect: Effect::OpenAgent,
+    fn run(&self, args: &str, _ctx: &CommandContext) -> CommandResult {
+        let name = args.trim();
+        // No name: launch the configured agent (the fast path).
+        if name.is_empty() {
+            return CommandResult {
+                lines: Vec::new(),
+                effect: Effect::OpenAgent(None),
+            };
+        }
+        // A name overrides which CLI to launch; reject anything unrecognised.
+        match crate::domain::settings::AgentCli::from_name(name) {
+            Some(cli) => CommandResult {
+                lines: Vec::new(),
+                effect: Effect::OpenAgent(Some(cli)),
+            },
+            None => CommandResult::line(LogLine::error(format!(
+                "unknown agent \"{name}\" (try {})",
+                self.usage()
+            ))),
         }
     }
 }

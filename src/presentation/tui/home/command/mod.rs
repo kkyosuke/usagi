@@ -21,6 +21,7 @@ pub use registry::CommandRegistry;
 
 use super::state::LogLine;
 use crate::domain::issue::Issue;
+use crate::domain::settings::AgentCli;
 
 /// A side effect a command asks the screen / event loop to perform, beyond
 /// appending its produced log lines.
@@ -55,10 +56,12 @@ pub enum Effect {
     /// Open an interactive terminal in the selected worktree (the user ran
     /// `terminal`). The directory is resolved by the event loop.
     OpenTerminal,
-    /// Open the configured AI agent in the selected worktree (the user ran
-    /// `agent`). This is `terminal` with the agent CLI launched inside it; the
-    /// directory and agent command are resolved by the event loop / wiring.
-    OpenAgent,
+    /// Open an AI agent in the selected worktree (the user ran `agent`). This is
+    /// `terminal` with the agent CLI launched inside it; the directory and agent
+    /// command are resolved by the event loop / wiring. The payload selects which
+    /// CLI to launch: `None` uses the workspace's configured agent (the common
+    /// fast path), `Some(cli)` overrides it for this launch (`agent <name>`).
+    OpenAgent(Option<AgentCli>),
     /// Close (remove) the focused session forcefully (the user ran `close` in
     /// 在席). It is the session equivalent of `session remove <name> --force`:
     /// the worktrees/branches are deleted and any uncommitted changes discarded,
