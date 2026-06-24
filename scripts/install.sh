@@ -109,7 +109,7 @@ elif [ "$OLD_VERSION" = "$NEW_VERSION" ]; then
     MESSAGE="usagi v${NEW_VERSION} は既に最新だよ！再インストールしたぴょん"
 else
     # バージョンが変わった → アップデート
-    MESSAGE="usagi を v${OLD_VERSION} から v${NEW_VERSION} にアップデートしたよ！ぴょん"
+    MESSAGE="usagi を v${OLD_VERSION} から v${NEW_VERSION} にぴょんしたよ！"
 fi
 
 cat <<EOF
