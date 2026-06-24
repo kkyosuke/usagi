@@ -63,10 +63,20 @@ pub fn create(workspace_root: &Path, name: &str) -> Result<CreatedSession> {
         bail!("{error}");
     }
 
+    let store = WorkspaceStore::new(workspace_root);
+    // Hold the store lock across the entire create — reconcile → build the
+    // worktree → record — so a concurrent `create`/`remove` (which reconciles)
+    // cannot observe this half-built, not-yet-recorded worktree as a stray and
+    // force-remove it (destroying freshly built work and leaving a ghost
+    // record). The lock is released when `create` returns. The trade-off is
+    // that a long worktree build holds the lock for its duration; correctness
+    // wins over the rare lock-wait timeout.
+    let _lock = store.lock()?;
+
     // Sync the on-disk tree with the recorded sessions first: a leftover
     // directory `state.json` does not know about is force-removed, so a stale
     // directory of the same name never blocks a fresh session.
-    reconcile(workspace_root)?;
+    reconcile::reconcile_locked(workspace_root)?;
 
     let dest_root = workspace_root.join(STATE_DIR).join("sessions").join(name);
     if dest_root.exists() {
@@ -112,7 +122,7 @@ pub fn create(workspace_root: &Path, name: &str) -> Result<CreatedSession> {
         tree::build_dir(workspace_root, &dest_root, name, &mut worktrees)?;
     }
 
-    record(workspace_root, name, &dest_root, &worktrees)?;
+    record(&store, name, &dest_root, &worktrees)?;
 
     Ok(CreatedSession {
         name: name.to_string(),
@@ -169,11 +179,10 @@ pub fn existing_branch_names(workspace_root: &Path) -> Vec<String> {
 /// Append the session to `<workspace>/.usagi/state.json`, creating the state
 /// when none exists yet. This is what lets a multi-repo, non-git root still
 /// track its sessions. Each worktree's git status is captured at record time.
-fn record(workspace_root: &Path, name: &str, root: &Path, worktrees: &[PathBuf]) -> Result<()> {
-    let store = WorkspaceStore::new(workspace_root);
-    // Serialise the load → append → save against any other process mutating this
-    // workspace's `state.json`, so a concurrent writer cannot drop this session.
-    let _lock = store.lock()?;
+fn record(store: &WorkspaceStore, name: &str, root: &Path, worktrees: &[PathBuf]) -> Result<()> {
+    // The caller ([`create`]) holds the store lock across the whole operation,
+    // so the load → append → save here is already serialised against any other
+    // process mutating this workspace's `state.json`.
     let mut state = store.load()?.unwrap_or_default();
 
     // A session's worktrees may live in different source repositories (a
@@ -299,15 +308,18 @@ pub fn remove(
     force: bool,
     agent: &dyn Agent,
 ) -> Result<RemovalOutcome> {
+    let store = WorkspaceStore::new(workspace_root);
+    // Hold the lock across the whole operation — reconcile → drop-the-record →
+    // save — so a concurrent writer cannot resurrect the removed session or lose
+    // an unrelated change, and reconcile's load-and-destroy cannot race a
+    // concurrent create that is mid-build.
+    let _lock = store.lock()?;
+
     // Sync the on-disk tree with the recorded sessions: any session directory
     // `state.json` does not know about is force-removed regardless of
     // uncommitted changes (the recorded `name` itself keeps its dirty guard).
-    reconcile(workspace_root)?;
+    reconcile::reconcile_locked(workspace_root)?;
 
-    let store = WorkspaceStore::new(workspace_root);
-    // Hold the lock across the load → drop-the-record → save so a concurrent
-    // writer cannot resurrect the removed session or lose an unrelated change.
-    let _lock = store.lock()?;
     let mut state = store
         .load()?
         .ok_or_else(|| anyhow!("no sessions recorded for this workspace"))?;

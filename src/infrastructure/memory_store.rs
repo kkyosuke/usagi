@@ -169,7 +169,13 @@ impl MemoryStore {
         fs::create_dir_all(&self.dir)
             .context(format!("failed to create {}", self.dir.display()))?;
 
-        let target = self.dir.join(memory.file_name());
+        // Validate the name through the same single-component guard `read` and
+        // `remove` use, so all three entry points share one defense: the write
+        // path can no longer place a file outside `.usagi/memory/` either (e.g.
+        // a `../../` name reaching a public `MemoryStore` through a programming
+        // error). Equivalent to `memory.file_name()` for the slugified names the
+        // usecase layer produces today.
+        let target = self.dir.join(memory_file_name(&memory.name)?);
         json_file::write_text_atomic(&target, &memory.to_markdown())?;
         self.rebuild_derived()?;
         Ok(())
@@ -355,6 +361,12 @@ mod tests {
             assert!(
                 store.remove(bad).is_err(),
                 "remove should reject the traversing name {bad:?}"
+            );
+            // The write path applies the same guard, so a `Memory` whose `name`
+            // would escape the directory is refused before any file is written.
+            assert!(
+                store.write(&memory(bad, "evil")).is_err(),
+                "write should reject the traversing name {bad:?}"
             );
         }
         // A plain single-component name is still accepted (here: simply absent).

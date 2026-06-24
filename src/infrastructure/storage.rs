@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use crate::domain::settings::Settings;
 use crate::domain::workspace::Workspace;
 use crate::infrastructure::json_file;
+use crate::infrastructure::store_lock::StoreLock;
 
 /// Environment variable that overrides the default data directory.
 pub const DATA_DIR_ENV: &str = "USAGI_HOME";
@@ -61,6 +62,21 @@ impl Storage {
 
     pub fn dir(&self) -> &Path {
         &self.dir
+    }
+
+    /// Acquire this store's cross-process write lock, blocking until it is free.
+    ///
+    /// `workspaces.json` is read-modify-write — a mutation loads the list, edits
+    /// it, then saves the whole file — and several usagi processes share this one
+    /// global store (every TUI instance plus each session's `usagi mcp` server).
+    /// Hold this guard across the entire load+save so a concurrent writer cannot
+    /// read the same snapshot and overwrite the first writer's change (a lost
+    /// update, e.g. a dropped registration or a clobbered `touch`). The individual
+    /// [`save_workspaces`](Self::save_workspaces) is already atomic; the lock
+    /// serialises the *sequence*. The per-store `.lock` lives in the data dir and,
+    /// being a dotfile, is never parsed as data.
+    pub fn lock(&self) -> Result<StoreLock> {
+        StoreLock::acquire(&self.dir)
     }
 
     /// Path to the global `settings.json` file (it may not exist yet).
@@ -169,6 +185,29 @@ mod tests {
     }
 
     #[test]
+    fn load_settings_degrades_unknown_enum_values_instead_of_failing() {
+        let (_dir, storage) = temp_storage();
+        fs::create_dir_all(storage.dir()).unwrap();
+        // A settings.json written by a *newer* usagi (or hand-edited) carries an
+        // unknown `agent_cli` and `theme`. The whole file must still load: the
+        // unknown enums fall back to their defaults while the known fields below
+        // them are preserved.
+        fs::write(
+            storage.settings_path(),
+            r#"{"version":1,"theme":"midnight","agent_cli":"sakana","notifications_enabled":false}"#,
+        )
+        .unwrap();
+        let loaded = storage.load_settings().unwrap();
+        assert_eq!(loaded.theme, Theme::default());
+        assert_eq!(
+            loaded.agent_cli,
+            crate::domain::settings::AgentCli::default()
+        );
+        // A field after the unrecognised ones still loaded.
+        assert!(!loaded.notifications_enabled);
+    }
+
+    #[test]
     fn read_json_reports_a_parse_error() {
         let (_dir, storage) = temp_storage();
         fs::create_dir_all(storage.dir()).unwrap();
@@ -194,6 +233,30 @@ mod tests {
         fs::write(&blocker, "not a directory").unwrap();
         let storage = Storage::new(blocker.join("nested"));
         assert!(storage.save_settings(&Settings::default()).is_err());
+    }
+
+    #[test]
+    fn lock_is_a_dotfile_and_does_not_block_save() {
+        let (_dir, storage) = temp_storage();
+        // Holding the lock places a `.lock` dotfile in the data dir and still lets
+        // the holder load and save (the lock serialises across processes, not
+        // against the holder itself).
+        let lock = storage.lock().unwrap();
+        assert!(storage.dir().join(".lock").is_file());
+        let workspaces = vec![Workspace::new("alpha", "/tmp/alpha")];
+        storage.save_workspaces(&workspaces).unwrap();
+        assert_eq!(storage.load_workspaces().unwrap().len(), 1);
+        drop(lock);
+    }
+
+    #[test]
+    fn lock_errors_when_the_dir_path_is_a_file() {
+        let dir = tempfile::tempdir().expect("failed to create temp dir");
+        // A file where the data directory should be makes acquiring the lock fail.
+        let blocker = dir.path().join("blocker");
+        fs::write(&blocker, "not a directory").unwrap();
+        let storage = Storage::new(blocker.join("nested"));
+        assert!(storage.lock().is_err());
     }
 
     #[test]
