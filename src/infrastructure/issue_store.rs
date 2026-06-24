@@ -17,6 +17,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::domain::issue::{Issue, IssueSummary};
+use crate::infrastructure::error_log::ErrorLog;
 use crate::infrastructure::json_file;
 use crate::infrastructure::repo_paths::STATE_DIR;
 use crate::infrastructure::store_lock::StoreLock;
@@ -219,7 +220,19 @@ impl IssueStore {
                 return Err(e).context(format!("failed to read {}", self.index_path().display()))
             }
         };
-        Ok(serde_json::from_str(&text).ok())
+        match serde_json::from_str(&text) {
+            Ok(index) => Ok(Some(index)),
+            // A present-but-unparseable cache is recoverable — the caller rebuilds
+            // from the markdown files — but it still signals real data corruption.
+            // Record it so the silent self-heal leaves a trace in the daily log.
+            Err(e) => {
+                ErrorLog::record(&format!(
+                    "issue index {} is corrupt; rebuilding from markdown: {e}",
+                    self.index_path().display()
+                ));
+                Ok(None)
+            }
+        }
     }
 
     /// Rebuild `index.json` from the markdown files and return the summaries.
@@ -393,6 +406,12 @@ mod tests {
 
     #[test]
     fn summaries_rebuild_when_index_is_corrupt() {
+        // Recording the corruption writes to `<data dir>/logs/`, so pin the data
+        // directory to a temp home to keep the test hermetic.
+        let _guard = crate::test_support::process_env_guard();
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var(crate::infrastructure::storage::DATA_DIR_ENV, home.path());
+
         let tmp = tempfile::tempdir().unwrap();
         let store = IssueStore::new(tmp.path());
         store.write(&issue(1, "One")).unwrap();
@@ -403,6 +422,18 @@ mod tests {
         // The corrupt cache was replaced with a valid one.
         let text = fs::read_to_string(store.index_path()).unwrap();
         assert!(text.contains("\"version\": 1"));
+
+        // The recoverable corruption is still recorded in the daily log.
+        let entry = fs::read_dir(home.path().join("logs"))
+            .expect("logs dir exists")
+            .next()
+            .expect("a log file was written")
+            .expect("readable entry");
+        assert!(fs::read_to_string(entry.path())
+            .unwrap()
+            .contains("is corrupt"));
+
+        std::env::remove_var(crate::infrastructure::storage::DATA_DIR_ENV);
     }
 
     #[test]

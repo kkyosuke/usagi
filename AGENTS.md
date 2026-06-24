@@ -1,4 +1,4 @@
-# GEMINI.md
+# AGENTS.md
 
 `usagi` で作業する際は、`.agents/` 配下の手順書に従うこと。
 

@@ -1,7 +1,7 @@
 # .agents
 
-AI エージェント（Claude Code / Gemini CLI など）**固有の作業手順**をまとめたディレクトリ。
-ルートの `CLAUDE.md` / `GEMINI.md` からここを読み込む。
+AI エージェント（Claude Code / Codex / Gemini CLI など）**固有の作業手順**をまとめたディレクトリ。
+ルートの `CLAUDE.md` / `AGENTS.md` / `GEMINI.md` からここを読み込む（3 ファイルは各 CLI の入口で、内容は同一）。
 
 | ファイル | 内容 |
 |---|---|
