@@ -96,7 +96,13 @@ impl InstallHandle {
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, TaskState> {
-        self.shared.lock().expect("install handle mutex poisoned")
+        // Recover a poisoned lock rather than propagating the panic. This handle
+        // is read by every screen's animated overlay while the terminal is in raw
+        // / alternate-screen mode, so escalating a poison here would crash the UI
+        // with the terminal left broken. A stale `TaskState` reading is the worst
+        // outcome. Matches the never-crash-on-poison policy of the sibling handles
+        // (`UpdateHandle`, `SessionsRefreshHandle`, the terminal pool / monitor).
+        self.shared.lock().unwrap_or_else(|p| p.into_inner())
     }
 
     /// Mark an install for `model` as started at `at`. Returns `false` (a no-op)
@@ -314,6 +320,25 @@ mod tests {
         assert!(handle.is_active(Instant::now()));
         handle.finish(true, "ok".to_string());
         assert!(handle.is_active(Instant::now()));
+    }
+
+    #[test]
+    fn lock_recovers_from_a_poisoned_mutex_instead_of_crashing() {
+        // A thread that panics while holding the lock poisons the mutex. The
+        // handle must still hand back the last state (recovering the inner value)
+        // rather than propagating the poison and crashing the screen that draws
+        // the overlay from it.
+        let handle = InstallHandle::new();
+        let t0 = Instant::now();
+        handle.begin_at("m", t0);
+        let clone = handle.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = clone.shared.lock().unwrap();
+            panic!("poison the mutex");
+        })
+        .join();
+        // The slot is still readable and reports the install still running.
+        assert!(handle.is_active(t0));
     }
 
     #[test]

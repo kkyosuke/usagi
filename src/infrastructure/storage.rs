@@ -32,6 +32,11 @@ pub fn data_dir() -> Result<PathBuf> {
 /// On-disk shape of `workspaces.json`.
 #[derive(Serialize, Deserialize)]
 struct WorkspacesFile {
+    // `default` so a file missing `version` (hand-edited, corrupted, or written
+    // by a hypothetical format that dropped it) still loads, matching the
+    // forward-compatibility the rest of the on-disk types keep (`serde(default)`
+    // / `serde(alias)`, no `deny_unknown_fields`). A missing version reads as 0.
+    #[serde(default)]
     version: u32,
     workspaces: Vec<Workspace>,
 }
@@ -39,6 +44,7 @@ struct WorkspacesFile {
 /// On-disk shape of `settings.json`.
 #[derive(Serialize, Deserialize)]
 struct SettingsFile {
+    #[serde(default)]
     version: u32,
     #[serde(flatten)]
     settings: Settings,
@@ -182,6 +188,21 @@ mod tests {
         );
         // Other hand-edited fields still load (only the model is policed).
         assert!(loaded.local_llm.enabled);
+    }
+
+    #[test]
+    fn load_settings_when_version_is_missing() {
+        let (_dir, storage) = temp_storage();
+        fs::create_dir_all(storage.dir()).unwrap();
+        // A settings.json with no `version` key (hand-edited or from a format that
+        // dropped it) must still load rather than failing the whole file.
+        fs::write(
+            storage.settings_path(),
+            r#"{"notifications_enabled":false}"#,
+        )
+        .unwrap();
+        let loaded = storage.load_settings().unwrap();
+        assert!(!loaded.notifications_enabled);
     }
 
     #[test]

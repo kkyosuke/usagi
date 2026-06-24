@@ -24,6 +24,10 @@ const FILE_FORMAT_VERSION: u32 = 1;
 /// On-disk shape of `state.json`.
 #[derive(Debug, Serialize, Deserialize)]
 struct StateFile {
+    // `default` so a file missing `version` still loads, matching the
+    // forward-compatibility the rest of the on-disk types keep. See the note on
+    // `storage::WorkspacesFile::version`.
+    #[serde(default)]
     version: u32,
     #[serde(flatten)]
     state: WorkspaceState,
@@ -32,6 +36,7 @@ struct StateFile {
 /// On-disk shape of the per-repo `settings.json`.
 #[derive(Debug, Serialize, Deserialize)]
 struct LocalSettingsFile {
+    #[serde(default)]
     version: u32,
     #[serde(flatten)]
     settings: LocalSettings,
@@ -265,6 +270,22 @@ mod tests {
         fs::create_dir_all(store.dir()).unwrap();
         fs::write(store.state_path(), "{ not json").unwrap();
         assert!(store.load().is_err());
+    }
+
+    #[test]
+    fn load_when_version_is_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = WorkspaceStore::new(dir.path());
+        fs::create_dir_all(store.dir()).unwrap();
+        // A state.json with no `version` key must still load rather than failing
+        // the whole file, matching the forward-compatibility kept elsewhere.
+        fs::write(
+            store.state_path(),
+            r#"{"sessions":[],"updated_at":"2026-01-01T00:00:00Z"}"#,
+        )
+        .unwrap();
+        let state = store.load().unwrap().unwrap();
+        assert!(state.sessions.is_empty());
     }
 
     #[test]
