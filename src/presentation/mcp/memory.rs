@@ -75,8 +75,8 @@ fn tool_list(repo: &Path, arguments: Value) -> Result<String, String> {
 }
 
 fn tool_search(repo: &Path, arguments: Value) -> Result<String, String> {
-    let args: SearchArgs = parse_args(arguments)?;
-    let items = memory::search(repo, &args.query, &args.filter()).map_err(|e| e.to_string())?;
+    let SearchArgs { query, filter } = parse_args(arguments)?;
+    let items = memory::search(repo, &query, &filter.filter()).map_err(|e| e.to_string())?;
     Ok(to_pretty(&summary_views(&items)))
 }
 
@@ -129,14 +129,8 @@ impl FilterArgs {
 #[derive(Deserialize)]
 struct SearchArgs {
     query: String,
-    #[serde(default, rename = "type")]
-    kind: Option<MemoryType>,
-}
-
-impl SearchArgs {
-    fn filter(&self) -> MemoryFilter {
-        MemoryFilter { kind: self.kind }
-    }
+    #[serde(flatten)]
+    filter: FilterArgs,
 }
 
 #[derive(Deserialize)]
