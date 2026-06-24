@@ -1081,6 +1081,23 @@ fn focus_prompt_edits_completes_and_hints_in_session_scope() {
 }
 
 #[test]
+fn focus_prompt_completes_command_arguments_and_lists_candidates() {
+    let mut state = state();
+    state.enter_focus(1);
+    // `man ` completes its argument against the command names — ambiguous here,
+    // so the candidates are listed in the log (mirroring the Overview line).
+    for c in "man ".chars() {
+        state.focus_prompt_mut().insert(c);
+    }
+    let before = state.log().len();
+    let completion = state.focus_prompt_complete();
+    assert!(!completion.candidates.is_empty());
+    let listed = state.log().last().unwrap();
+    assert!(listed.text.contains("man"));
+    assert_eq!(state.log().len(), before + 1);
+}
+
+#[test]
 fn focus_prompt_caret_moves_and_edits_mid_line() {
     let mut state = state();
     state.enter_focus(1);
