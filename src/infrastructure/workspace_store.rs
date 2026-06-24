@@ -8,7 +8,6 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
-use serde::{Deserialize, Serialize};
 
 use crate::domain::settings::LocalSettings;
 use crate::domain::workspace_state::WorkspaceState;
@@ -18,24 +17,6 @@ use crate::infrastructure::store_lock::StoreLock;
 
 const STATE_FILE: &str = "state.json";
 const SETTINGS_FILE: &str = "settings.json";
-
-const FILE_FORMAT_VERSION: u32 = 1;
-
-/// On-disk shape of `state.json`.
-#[derive(Debug, Serialize, Deserialize)]
-struct StateFile {
-    version: u32,
-    #[serde(flatten)]
-    state: WorkspaceState,
-}
-
-/// On-disk shape of the per-repo `settings.json`.
-#[derive(Debug, Serialize, Deserialize)]
-struct LocalSettingsFile {
-    version: u32,
-    #[serde(flatten)]
-    settings: LocalSettings,
-}
 
 /// File-based persistence rooted at a repository's `.usagi/` directory.
 pub struct WorkspaceStore {
@@ -78,39 +59,24 @@ impl WorkspaceStore {
 
     /// Load the saved state, or `None` if it has never been written.
     pub fn load(&self) -> Result<Option<WorkspaceState>> {
-        let file: Option<StateFile> = json_file::read(&self.state_path())?;
-        Ok(file.map(|f| f.state))
+        json_file::read_versioned(&self.state_path())
     }
 
     /// Persist `state` to `<repo>/.usagi/state.json`.
     pub fn save(&self, state: &WorkspaceState) -> Result<()> {
-        json_file::write_atomic(
-            &self.dir,
-            &self.state_path(),
-            &StateFile {
-                version: FILE_FORMAT_VERSION,
-                state: state.clone(),
-            },
-        )
+        json_file::write_versioned(&self.dir, &self.state_path(), state)
     }
 
     /// Load the project-local settings, or defaults (all fields unset) if none
     /// have been written.
     pub fn load_settings(&self) -> Result<LocalSettings> {
-        let file: Option<LocalSettingsFile> = json_file::read(&self.settings_path())?;
-        Ok(file.map(|f| f.settings).unwrap_or_default())
+        let settings: Option<LocalSettings> = json_file::read_versioned(&self.settings_path())?;
+        Ok(settings.unwrap_or_default())
     }
 
     /// Persist the project-local `settings` to `<repo>/.usagi/settings.json`.
     pub fn save_settings(&self, settings: &LocalSettings) -> Result<()> {
-        json_file::write_atomic(
-            &self.dir,
-            &self.settings_path(),
-            &LocalSettingsFile {
-                version: FILE_FORMAT_VERSION,
-                settings: settings.clone(),
-            },
-        )
+        json_file::write_versioned(&self.dir, &self.settings_path(), settings)
     }
 }
 
