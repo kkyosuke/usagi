@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result};
-use serde::{de::DeserializeOwned, Serialize};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
 /// Bumped per atomic write so each write within this process gets a distinct
 /// temp file name; combined with the pid it is unique across processes too.
@@ -110,6 +110,57 @@ pub fn write_atomic<T: Serialize>(dir: &Path, path: &Path, value: &T) -> Result<
 /// already — the markdown stores create it when they set up their data dir.
 pub fn write_text_atomic(path: &Path, text: &str) -> Result<()> {
     write_synced_then_rename(path, text.as_bytes())
+}
+
+/// The on-disk format version stamped onto every versioned store file
+/// (`storage`'s `workspaces.json` / `settings.json`, `workspace_store`'s
+/// `state.json` / per-repo `settings.json`). Bumped only on an incompatible
+/// on-disk format change; the single source of truth for the envelope's
+/// `version` field so each store no longer carries its own copy.
+pub const FILE_FORMAT_VERSION: u32 = 1;
+
+/// The on-disk envelope shared by every versioned store file: a `version` plus
+/// the flattened payload (`{ "version": N, <payload…> }`). The write side
+/// borrows the payload (so callers never clone it into an owned wrapper); the
+/// read side accepts and ignores the `version`, which is reserved for future
+/// format migrations.
+#[derive(Serialize)]
+struct VersionedRef<'a, T: ?Sized> {
+    version: u32,
+    #[serde(flatten)]
+    inner: &'a T,
+}
+
+#[derive(Deserialize)]
+struct Versioned<T> {
+    // Accepted so the envelope round-trips; not read today, but reserved for a
+    // future format migration that needs to branch on it.
+    #[serde(default)]
+    #[allow(dead_code)]
+    version: u32,
+    #[serde(flatten)]
+    inner: T,
+}
+
+/// Read the payload from a versioned JSON file — the `{ "version": N, <payload…> }`
+/// envelope the stores write — returning `None` when the file does not exist.
+/// The envelope's `version` is accepted and ignored.
+pub fn read_versioned<T: DeserializeOwned>(path: &Path) -> Result<Option<T>> {
+    Ok(read::<Versioned<T>>(path)?.map(|v| v.inner))
+}
+
+/// Serialize `payload` and write it atomically to `path` as a versioned JSON
+/// file, stamping the current [`FILE_FORMAT_VERSION`]. The payload is serialized
+/// by reference, so the caller never clones it into an owned envelope struct.
+pub fn write_versioned<T: Serialize + ?Sized>(dir: &Path, path: &Path, payload: &T) -> Result<()> {
+    write_atomic(
+        dir,
+        path,
+        &VersionedRef {
+            version: FILE_FORMAT_VERSION,
+            inner: payload,
+        },
+    )
 }
 
 #[cfg(test)]

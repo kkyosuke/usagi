@@ -8,7 +8,7 @@ use super::builtins::{
 };
 use super::{
     Command, CommandContext, CommandHint, CommandInfo, CommandResult, CommandScope, Completion,
-    Hint, LogLine, WorktreeRef,
+    CompletionContext, Hint, LogLine, WorktreeRef,
 };
 use crate::domain::issue::Issue;
 
@@ -146,44 +146,51 @@ impl CommandRegistry {
         }
     }
 
-    /// Complete the command word in `input` against the registered command
-    /// names (aliases are not offered).
+    /// Complete the `input` in `scope`, matching the spelling under the caret.
     ///
-    /// Completion only applies to the first word: once the input contains
-    /// whitespace (i.e. arguments are being typed) the input is returned
-    /// unchanged. A unique match is filled in; an ambiguous one extends to the
-    /// longest common prefix and reports the candidates; no match leaves the
-    /// input untouched.
+    /// While the command word is being typed (no whitespace yet) it completes
+    /// against the in-scope command names (aliases are not offered). Once the
+    /// command word is settled and arguments are being typed, it delegates to
+    /// the resolved command's [`Command::complete_args`] to complete the current
+    /// option/subcommand token, leaving the command word and earlier arguments
+    /// untouched. Either way a unique match is filled in; an ambiguous one
+    /// extends to the longest common prefix and reports the candidates; no match
+    /// leaves the input untouched.
     pub fn complete(&self, input: &str, scope: CommandScope) -> Completion {
-        if input.contains(char::is_whitespace) {
+        let Some((word, args)) = input.split_once(char::is_whitespace) else {
+            // Still on the command word: complete against the in-scope names.
+            let matches: Vec<&str> = self
+                .commands
+                .iter()
+                .filter(|c| c.scope().visible_in(scope))
+                .map(|c| c.name())
+                .filter(|name| name.starts_with(input))
+                .collect();
+            // The whole input is the token being completed (nothing precedes it).
+            return complete_token(input, input, &matches);
+        };
+
+        // Arguments are being typed: complete the current token against the
+        // resolved command's argument vocabulary. An unknown or out-of-scope
+        // command offers nothing, so the input is returned unchanged.
+        let Some(command) = self.find(word).filter(|c| c.scope().visible_in(scope)) else {
             return Completion {
                 input: input.to_string(),
                 candidates: Vec::new(),
             };
-        }
-
-        let matches: Vec<&str> = self
-            .commands
+        };
+        let command_names: Vec<&str> = self.commands.iter().map(|c| c.name()).collect();
+        let ctx = CompletionContext {
+            command_names: &command_names,
+        };
+        let candidates = command.complete_args(args, &ctx);
+        let (_, partial) = arg_tokens(args);
+        let matches: Vec<&str> = candidates
             .iter()
-            .filter(|c| c.scope().visible_in(scope))
-            .map(|c| c.name())
-            .filter(|name| name.starts_with(input))
+            .map(String::as_str)
+            .filter(|c| c.starts_with(partial))
             .collect();
-
-        match matches.as_slice() {
-            [] => Completion {
-                input: input.to_string(),
-                candidates: Vec::new(),
-            },
-            [only] => Completion {
-                input: only.to_string(),
-                candidates: Vec::new(),
-            },
-            many => Completion {
-                input: common_prefix(many),
-                candidates: many.iter().map(|name| name.to_string()).collect(),
-            },
-        }
+        complete_token(input, partial, &matches)
     }
 
     /// Compute the advisory hint shown above the input as the user types.
@@ -232,6 +239,47 @@ impl CommandRegistry {
 impl Default for CommandRegistry {
     fn default() -> Self {
         Self::with_builtins()
+    }
+}
+
+/// Split a command's argument string into its already-complete tokens and the
+/// final, still-being-typed token. A trailing space means the user has finished
+/// the previous token and is starting a new one, so the partial token is empty
+/// and every typed token is complete; otherwise the last whitespace-separated
+/// token is the partial one. Used both to decide which option position is being
+/// completed (the complete tokens) and what its prefix is (the partial token).
+pub(super) fn arg_tokens(args: &str) -> (Vec<&str>, &str) {
+    if args.is_empty() || args.ends_with(char::is_whitespace) {
+        (args.split_whitespace().collect(), "")
+    } else {
+        let mut tokens: Vec<&str> = args.split_whitespace().collect();
+        let partial = tokens.pop().unwrap_or("");
+        (tokens, partial)
+    }
+}
+
+/// Complete the final `partial` token of `input` against the already
+/// prefix-matched `matches`, rewriting only that token: a unique match is filled
+/// in, an ambiguous one extends to the longest common prefix and reports the
+/// candidates, and no match leaves the input untouched. Everything before the
+/// partial token (the command word and earlier arguments, with their spacing) is
+/// preserved. `partial` must be a suffix of `input` (it is, being its final
+/// token), so trimming it off lands on a char boundary.
+fn complete_token(input: &str, partial: &str, matches: &[&str]) -> Completion {
+    let fixed = &input[..input.len() - partial.len()];
+    match matches {
+        [] => Completion {
+            input: input.to_string(),
+            candidates: Vec::new(),
+        },
+        [only] => Completion {
+            input: format!("{fixed}{only}"),
+            candidates: Vec::new(),
+        },
+        many => Completion {
+            input: format!("{fixed}{}", common_prefix(many)),
+            candidates: many.iter().map(|name| name.to_string()).collect(),
+        },
     }
 }
 

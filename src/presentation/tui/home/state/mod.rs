@@ -16,7 +16,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use crate::domain::issue::Issue;
-use crate::domain::settings::{SessionActionUi, Sidebar};
+use crate::domain::settings::{AgentCli, SessionActionUi, Sidebar};
 use crate::domain::version::Version;
 use crate::domain::workspace_state::{SessionRecord, WorktreeState};
 
@@ -145,6 +145,20 @@ pub struct HomeState {
     /// effective settings (and a runtime probe) by `mod.rs`; false by default so
     /// the command stays hidden until the model is actually usable.
     ai_available: bool,
+    /// The configured agent CLI launched by `agent` with no explicit choice (the
+    /// 在席 menu's `agent` row / `a` shortcut and a bare `agent` prompt). Injected
+    /// from the effective settings by `mod.rs`; its display name labels the menu's
+    /// `agent` row. Defaults to [`AgentCli::Claude`].
+    default_agent: AgentCli,
+    /// The agent CLIs installed on this machine (PATH-probed), in canonical order,
+    /// offered by the 在席 menu's agent picker. Injected by `mod.rs`; empty by
+    /// default (tests that do not set it never expand the picker).
+    installed_agents: Vec<AgentCli>,
+    /// The agent CLI the next agent launch should use, set by the 在席 menu picker
+    /// or the `agent <name>` prompt just before launching and consumed by the
+    /// terminal-pool wiring on a fresh agent spawn. `None` means "use
+    /// [`default_agent`](Self::default_agent)".
+    agent_choice: Option<AgentCli>,
     /// Where a 切替 (Switch) returns to on `Esc`; only meaningful in
     /// [`Mode::Switch`].
     switch_return: ReturnMode,
@@ -255,6 +269,9 @@ impl HomeState {
             session_action_ui: SessionActionUi::default(),
             sidebar: Sidebar::default(),
             ai_available: false,
+            default_agent: AgentCli::default(),
+            installed_agents: Vec::new(),
+            agent_choice: None,
             switch_return: ReturnMode::Overview,
             note_hidden: false,
             overlay: Overlay::default(),
@@ -332,6 +349,41 @@ impl HomeState {
     /// from the effective settings and a runtime probe by `mod.rs`).
     pub fn set_ai_available(&mut self, available: bool) {
         self.ai_available = available;
+    }
+
+    /// Inject the configured default agent CLI (its display name labels the 在席
+    /// menu's `agent` row, and a bare `agent` / the `a` shortcut launch it).
+    pub fn set_default_agent(&mut self, cli: AgentCli) {
+        self.default_agent = cli;
+    }
+
+    /// The configured default agent CLI.
+    pub fn default_agent(&self) -> AgentCli {
+        self.default_agent
+    }
+
+    /// Inject the installed agent CLIs (PATH-probed, canonical order) the 在席
+    /// menu's agent picker offers.
+    pub fn set_installed_agents(&mut self, agents: Vec<AgentCli>) {
+        self.installed_agents = agents;
+    }
+
+    /// The installed agent CLIs offered by the 在席 menu's agent picker.
+    pub fn installed_agents(&self) -> &[AgentCli] {
+        &self.installed_agents
+    }
+
+    /// Record which agent CLI the next agent launch should use (`None` = the
+    /// configured default). Set by the 在席 picker / `agent <name>` just before
+    /// launching; consumed by [`take_agent_choice`](Self::take_agent_choice).
+    pub fn set_agent_choice(&mut self, cli: Option<AgentCli>) {
+        self.agent_choice = cli;
+    }
+
+    /// Take the pending agent choice, leaving `None` behind. Returns the CLI the
+    /// next agent spawn should launch, or `None` to use the configured default.
+    pub fn take_agent_choice(&mut self) -> Option<AgentCli> {
+        self.agent_choice.take()
     }
 
     /// Inject the workspace's task issues (loaded from disk by `mod.rs`), read by
@@ -1237,17 +1289,81 @@ impl HomeState {
         self.focus_menu.cursor()
     }
 
+    /// Whether the 在席 menu's `agent` row is expanded into the agent picker.
+    pub fn focus_menu_expanded(&self) -> bool {
+        self.focus_menu.is_expanded()
+    }
+
+    /// The highlighted agent in the 在席 menu's agent picker, or `None` when the
+    /// picker is collapsed (or there are no installed agents to pick from).
+    pub fn focus_menu_agent_cursor(&self) -> Option<usize> {
+        self.focus_menu
+            .agent_cursor()
+            .filter(|_| !self.installed_agents.is_empty())
+    }
+
+    /// Whether the 在席 menu's `agent` row can expand into the picker: the cursor
+    /// is on `agent` and more than one CLI is installed (so there is a choice).
+    pub fn focus_menu_agent_can_expand(&self) -> bool {
+        self.installed_agents.len() > 1
+            && self
+                .focus_selected_command()
+                .is_some_and(|info| info.name == "agent")
+    }
+
+    /// Expand the 在席 menu's agent picker, highlighting the configured default
+    /// agent's position in the installed list (or the top when it is not
+    /// installed). No-op unless [`focus_menu_agent_can_expand`] holds.
+    ///
+    /// [`focus_menu_agent_can_expand`]: Self::focus_menu_agent_can_expand
+    pub fn focus_menu_expand_agent(&mut self) {
+        if !self.focus_menu_agent_can_expand() {
+            return;
+        }
+        let default_index = self
+            .installed_agents
+            .iter()
+            .position(|&cli| cli == self.default_agent)
+            .unwrap_or(0);
+        self.focus_menu.expand(default_index);
+    }
+
+    /// Collapse the 在席 menu's agent picker, returning whether it was expanded
+    /// (so the caller treats `←` / `Esc` as consumed only then).
+    pub fn focus_menu_collapse_agent(&mut self) -> bool {
+        self.focus_menu.collapse()
+    }
+
+    /// The agent CLI highlighted in the picker, or `None` when collapsed / there
+    /// are none installed. Used to launch the chosen CLI on `Enter`.
+    pub fn focus_menu_selected_agent(&self) -> Option<AgentCli> {
+        self.focus_menu.agent_cursor()?;
+        self.installed_agents
+            .get(self.focus_menu.agent_selected(self.installed_agents.len()))
+            .copied()
+    }
+
     /// Move the 在席 menu cursor up one row, wrapping (delegated to [`FocusMenu`],
-    /// which keeps it underflow-safe against the current command count).
+    /// which keeps it underflow-safe). Acts on the agent picker while expanded.
     pub fn focus_menu_move_up(&mut self) {
-        let count = self.focus_menu_commands().len();
+        let count = self.focus_menu_nav_count();
         self.focus_menu.move_up(count);
     }
 
     /// Move the 在席 menu cursor down one row, wrapping (delegated to [`FocusMenu`]).
     pub fn focus_menu_move_down(&mut self) {
-        let count = self.focus_menu_commands().len();
+        let count = self.focus_menu_nav_count();
         self.focus_menu.move_down(count);
+    }
+
+    /// The row count the menu cursor wraps against: the installed agents while the
+    /// picker is expanded, otherwise the Session-scope commands.
+    fn focus_menu_nav_count(&self) -> usize {
+        if self.focus_menu.is_expanded() {
+            self.installed_agents.len()
+        } else {
+            self.focus_menu_commands().len()
+        }
     }
 
     /// The 在席 command under the menu cursor, clamped to the available commands,
@@ -1290,6 +1406,10 @@ impl HomeState {
             .registry
             .complete(self.focus_prompt.value(), CommandScope::Session);
         self.focus_prompt.set_value(completion.input.clone());
+        if !completion.candidates.is_empty() {
+            self.log
+                .push(LogLine::output(completion.candidates.join("  ")));
+        }
         completion
     }
 

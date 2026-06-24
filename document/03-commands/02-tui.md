@@ -18,7 +18,7 @@
 | 両方 | 共通 | `man` / `history` / `clear` / `quit` |
 
 入力欄の直上には入力中の内容に応じた候補・ヒント（コマンド一覧の絞り込み、または引数入力中の `usage` / `examples`）が
-表示され、`Tab` で補完、`↑↓` で履歴を遡れます。フッターに現在のスコープ（`[workspace]` / `[session: <名前>]`）が出ます。
+表示され、`Tab` でキャレット位置の語（コマンド名／引数のサブコマンド・オプション）を補完、`↑↓` で履歴を遡れます。フッターに現在のスコープ（`[workspace]` / `[session: <名前>]`）が出ます。
 モード遷移・キー操作の詳細は [design/05-home.md](../design/05-home.md#コマンドスコープ) を参照してください。
 
 ## コマンド一覧
@@ -32,7 +32,7 @@
 | `session` | セッション（branch + worktree）の作成・一覧・切替・削除（Workspace スコープ） |
 | `issue` | タスク issue を一覧・依存ツリー・ガント・1 件表示で閲覧（Workspace スコープ） |
 | `terminal` | 選択中セッションの worktree でシェルを右ペインに埋め込み起動（Session スコープ） |
-| `agent` | `terminal` ＋ Agent CLI（既定 `claude`）を起動（Session スコープ） |
+| `agent [名前]` | `terminal` ＋ Agent CLI を起動（Session スコープ）。引数なしは設定中の既定 CLI を起動。名前（`claude` / `codex` / `sakana.ai` / `gemini`）を付けるとその CLI を起動する |
 | `close` | 在席中のセッションを強制削除して切替へ移る（`session remove <名前> --force` と同じ。Session スコープ） |
 | `config` | 現在のワークスペースのローカル設定を編集する Config 画面を開く（Workspace スコープ） |
 
@@ -81,9 +81,15 @@ issue が 1 件も無いときは「No issues yet.」を 1 行だけログに出
 
 ## agent
 
-`terminal` と同じ埋め込みシェルを開いたうえで、設定中の Agent CLI（既定 `claude`、ローカル設定で `gemini` などに変更可）を
-**シェルの引数として渡して**起動します（stdin にタイプしないので長い起動コマンド行がペインにエコーされません）。実質
-`terminal` → `claude` のショートカットで、ルート行選択時はワークスペースルートで起動します。Agent CLI を終了すると埋め込みシェルもそのまま終了し、素のシェルプロンプトに落ちずに[在席](../design/05-home.md#各モードの説明)へ戻ります。
+`terminal` と同じ埋め込みシェルを開いたうえで、Agent CLI を**シェルの引数として渡して**起動します（stdin にタイプしないので
+長い起動コマンド行がペインにエコーされません）。実質 `terminal` → `claude` のショートカットで、ルート行選択時はワークスペース
+ルートで起動します。Agent CLI を終了すると埋め込みシェルもそのまま終了し、素のシェルプロンプトに落ちずに[在席](../design/05-home.md#各モードの説明)へ戻ります。
+
+どの Agent CLI を起動するかは、引数で**そのセッションだけ**上書きできます。
+
+- 引数なし（在席 Menu の `agent` 行 / `a`、Prompt の `agent`）: 設定中の**既定 CLI**（ローカル設定で `gemini` などに変更可）を起動。
+- 名前付き（Prompt の `agent codex` / `agent sakana.ai`、または在席 Menu の[エージェントピッカー](../design/05-home.md#在席のアクション-uimenu--prompt)）: 指定した CLI を起動。名前は起動コマンド名（`claude` / `codex` / `codex-fugu` / `gemini`）と表示名（`sakana.ai`）を大文字小文字を問わず受け付ける。
+- 既定 CLI 以外でかつ**インストールされていない**（PATH に無い）名前を指定するとエラーになり起動しない。未知の名前も同様に拒否する。Menu のピッカーは**インストール済みの CLI だけ**を候補に出す。
 
 **1 セッションが持てる agent は 1 つだけ**です。すでに agent ペインがあるセッションで `agent`（在席の Menu/`a`・Prompt、または没入の `Ctrl-G`）を実行しても 2 つ目を起動せず、**既存の agent タブへ移動**します（terminal タブは何枚でも追加できます）。
 

@@ -16,8 +16,6 @@ const DATA_DIR_NAME: &str = ".usagi";
 const WORKSPACES_FILE: &str = "workspaces.json";
 const SETTINGS_FILE: &str = "settings.json";
 
-const FILE_FORMAT_VERSION: u32 = 1;
-
 /// Resolve the directory where usagi stores its data.
 ///
 /// `$USAGI_HOME` takes precedence; otherwise `~/.usagi` is used.
@@ -29,25 +27,18 @@ pub fn data_dir() -> Result<PathBuf> {
     Ok(home.join(DATA_DIR_NAME))
 }
 
-/// On-disk shape of `workspaces.json`.
-#[derive(Serialize, Deserialize)]
-struct WorkspacesFile {
-    // `default` so a file missing `version` (hand-edited, corrupted, or written
-    // by a hypothetical format that dropped it) still loads, matching the
-    // forward-compatibility the rest of the on-disk types keep (`serde(default)`
-    // / `serde(alias)`, no `deny_unknown_fields`). A missing version reads as 0.
-    #[serde(default)]
-    version: u32,
-    workspaces: Vec<Workspace>,
+/// The `workspaces.json` payload, borrowed for writes so the list need not be
+/// cloned into an owned wrapper just to stamp the version envelope.
+#[derive(Serialize)]
+struct WorkspacesRef<'a> {
+    workspaces: &'a [Workspace],
 }
 
-/// On-disk shape of `settings.json`.
-#[derive(Serialize, Deserialize)]
-struct SettingsFile {
-    #[serde(default)]
-    version: u32,
-    #[serde(flatten)]
-    settings: Settings,
+/// The `workspaces.json` payload as read back (the version envelope is stripped
+/// by [`json_file::read_versioned`]).
+#[derive(Deserialize)]
+struct WorkspacesOwned {
+    workspaces: Vec<Workspace>,
 }
 
 /// File-based persistence for workspaces and settings.
@@ -92,18 +83,16 @@ impl Storage {
 
     /// Load all workspaces; returns an empty list if the file does not exist.
     pub fn load_workspaces(&self) -> Result<Vec<Workspace>> {
-        let file: Option<WorkspacesFile> = json_file::read(&self.dir.join(WORKSPACES_FILE))?;
+        let file: Option<WorkspacesOwned> =
+            json_file::read_versioned(&self.dir.join(WORKSPACES_FILE))?;
         Ok(file.map(|f| f.workspaces).unwrap_or_default())
     }
 
     pub fn save_workspaces(&self, workspaces: &[Workspace]) -> Result<()> {
-        json_file::write_atomic(
+        json_file::write_versioned(
             &self.dir,
             &self.dir.join(WORKSPACES_FILE),
-            &WorkspacesFile {
-                version: FILE_FORMAT_VERSION,
-                workspaces: workspaces.to_vec(),
-            },
+            &WorkspacesRef { workspaces },
         )
     }
 
@@ -113,19 +102,12 @@ impl Storage {
     /// file can be hand-edited: a `local_llm.model` outside the known allowlist
     /// is dropped before it can reach the agent launch command.
     pub fn load_settings(&self) -> Result<Settings> {
-        let file: Option<SettingsFile> = json_file::read(&self.settings_path())?;
-        Ok(file.map(|f| f.settings.sanitized()).unwrap_or_default())
+        let settings: Option<Settings> = json_file::read_versioned(&self.settings_path())?;
+        Ok(settings.map(Settings::sanitized).unwrap_or_default())
     }
 
     pub fn save_settings(&self, settings: &Settings) -> Result<()> {
-        json_file::write_atomic(
-            &self.dir,
-            &self.settings_path(),
-            &SettingsFile {
-                version: FILE_FORMAT_VERSION,
-                settings: settings.clone(),
-            },
-        )
+        json_file::write_versioned(&self.dir, &self.settings_path(), settings)
     }
 }
 

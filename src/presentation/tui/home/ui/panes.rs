@@ -18,7 +18,7 @@ use super::{
     HINT_MAX, LOCAL_ICON, NAME_PREFIX, NEW_ICON, PUSHED_ICON, RAIL_WIDTH, ROOT_DETAIL, STATUS_COL,
     SYNCED_ICON, TERMINAL_STARTING,
 };
-use crate::domain::settings::{SessionActionUi, Sidebar};
+use crate::domain::settings::{AgentCli, SessionActionUi, Sidebar};
 use crate::domain::workspace_state::{BranchStatus, WorktreeState};
 use crate::presentation::tui::markdown::{LineStyle, MarkdownLine, Span, SpanStyle};
 use crate::presentation::tui::widgets;
@@ -663,15 +663,62 @@ fn menu_marker(selected: bool) -> String {
 /// Builds one 在席 (Focus) menu row: a `›` cursor for the highlighted command,
 /// its name, and its dimmed description, clipped to `width`.
 pub(super) fn focus_menu_row(info: &CommandInfo, selected: bool, width: usize) -> String {
+    menu_row(info.name, info.description, selected, width)
+}
+
+/// The shared layout for an action row: a `›` cursor when `selected`, a fixed-
+/// width cyan `name`, and a dimmed `desc`, clipped to `width`. Used by the plain
+/// command rows ([`focus_menu_row`]) and the `agent` row, which substitutes a
+/// "Launch <default>" description and an expand chevron.
+fn menu_row(name: &str, desc: &str, selected: bool, width: usize) -> String {
     let marker = menu_marker(selected);
     let name = if selected {
-        style(format!("{:<9}", info.name)).cyan().bold().to_string()
+        style(format!("{name:<9}")).cyan().bold().to_string()
     } else {
-        style(format!("{:<9}", info.name)).cyan().to_string()
+        style(format!("{name:<9}")).cyan().to_string()
     };
     let desc_budget = width.saturating_sub(HINT_INDENT + 9);
-    let desc = style(clip_to_width(info.description, desc_budget)).dim();
+    let desc = style(clip_to_width(desc, desc_budget)).dim();
     clip_to_width(&format!("  {marker} {name}{desc}"), width)
+}
+
+/// The 在席 menu's `agent` row: like a plain command row but its description
+/// names the agent a plain launch uses (the configured default) and carries an
+/// expand affordance — `▾` while the picker is open, `▸` when it can open (more
+/// than one CLI installed), nothing otherwise.
+fn focus_agent_command_row(state: &HomeState, selected: bool, width: usize) -> String {
+    let chevron = if state.focus_menu_expanded() {
+        "▾ "
+    } else if state.focus_menu_agent_can_expand() {
+        "▸ "
+    } else {
+        ""
+    };
+    let desc = format!("{chevron}Launch {}", state.default_agent().display_name());
+    menu_row("agent", &desc, selected, width)
+}
+
+/// One agent-picker sub-row, indented under the expanded `agent` row: a `›`
+/// cursor on the highlighted CLI, its display name, and a dimmed `(default)` tag
+/// on the configured agent.
+fn focus_agent_pick_row(cli: AgentCli, selected: bool, is_default: bool, width: usize) -> String {
+    let marker = menu_marker(selected);
+    let name = if selected {
+        style(format!("{:<10}", cli.display_name()))
+            .cyan()
+            .bold()
+            .to_string()
+    } else {
+        style(format!("{:<10}", cli.display_name()))
+            .cyan()
+            .to_string()
+    };
+    let tag = if is_default {
+        style("(default)").dim().to_string()
+    } else {
+        String::new()
+    };
+    clip_to_width(&format!("      {marker} {name}{tag}"), width)
 }
 
 /// The `session: <name>` header line shown above the 在席 (Focus) action surface
@@ -690,15 +737,40 @@ fn focus_session_header(state: &HomeState) -> String {
 fn focus_menu_body(state: &HomeState, width: usize) -> Vec<String> {
     let mut lines = vec![style("Run a command:").dim().to_string()];
     let cursor = state.focus_menu_cursor();
+    let expanded = state.focus_menu_expanded();
     for (i, info) in state.focus_menu_commands().iter().enumerate() {
-        lines.push(focus_menu_row(info, i == cursor, width));
+        let selected = i == cursor;
+        if info.name == "agent" {
+            // The `agent` row names the default CLI; when expanded, its installed
+            // alternatives follow as indented picker sub-rows (案A).
+            lines.push(focus_agent_command_row(state, selected, width));
+            if expanded {
+                let agent_cursor = state.focus_menu_agent_cursor();
+                let default = state.default_agent();
+                for (j, &cli) in state.installed_agents().iter().enumerate() {
+                    lines.push(focus_agent_pick_row(
+                        cli,
+                        Some(j) == agent_cursor,
+                        cli == default,
+                        width,
+                    ));
+                }
+            }
+        } else {
+            lines.push(focus_menu_row(info, selected, width));
+        }
     }
     lines.push(String::new());
-    lines.push(
-        style("↑↓ move   Enter run   t terminal   a agent")
-            .dim()
-            .to_string(),
-    );
+    // The hint follows the surface: picker keys while expanded, an extra
+    // "→ pick agent" affordance when the picker can open, else the base keys.
+    let hint = if expanded {
+        "↑↓ move   Enter launch   ← back"
+    } else if state.focus_menu_agent_can_expand() {
+        "↑↓ move   Enter run   → pick agent   t terminal   a agent"
+    } else {
+        "↑↓ move   Enter run   t terminal   a agent"
+    };
+    lines.push(style(hint).dim().to_string());
     lines
 }
 

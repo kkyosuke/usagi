@@ -2,7 +2,11 @@
 //! Each is a unit (or small) struct implementing [`Command`]; they are
 //! registered in display order by [`super::CommandRegistry::with_builtins`].
 
-use super::{Command, CommandContext, CommandInfo, CommandResult, CommandScope, Effect, LogLine};
+use super::registry::arg_tokens;
+use super::{
+    Command, CommandContext, CommandInfo, CommandResult, CommandScope, CompletionContext, Effect,
+    LogLine,
+};
 use crate::presentation::tui::widgets;
 use crate::usecase::issue::{
     annotate_all, dependency_tree, gantt, list_line, stats_line, IssueStats, ListedIssue,
@@ -63,6 +67,17 @@ impl Command for ManCommand {
         match ctx.commands.iter().find(|info| info.name == args) {
             Some(info) => CommandResult::modal("Help", describe(info)),
             None => CommandResult::line(LogLine::error(format!("no manual entry for \"{args}\""))),
+        }
+    }
+
+    fn complete_args(&self, args: &str, ctx: &CompletionContext) -> Vec<String> {
+        // `man [command]` takes a single command-name argument, so completion
+        // offers every command name while the first token is being typed.
+        let (head, _) = arg_tokens(args);
+        if head.is_empty() {
+            ctx.command_names.iter().map(|n| n.to_string()).collect()
+        } else {
+            Vec::new()
         }
     }
 }
@@ -206,12 +221,7 @@ impl Command for SessionCommand {
 
         // Normalize subcommand aliases to their canonical name so the rest of the
         // dispatch only deals with one spelling each.
-        let sub = match sub {
-            "create" | "c" | "new" => "create",
-            "list" | "ls" => "list",
-            "remove" | "rm" => "remove",
-            other => other,
-        };
+        let sub = session_subcommand(sub);
 
         let open = || CommandResult {
             lines: Vec::new(),
@@ -255,6 +265,33 @@ impl Command for SessionCommand {
             }
             _ => CommandResult::line(LogLine::error(format!("usage: {}", self.usage()))),
         }
+    }
+
+    fn complete_args(&self, args: &str, _ctx: &CompletionContext) -> Vec<String> {
+        let (head, _) = arg_tokens(args);
+        match head.first().map(|sub| session_subcommand(sub)) {
+            // Still on the subcommand word: offer the canonical subcommands.
+            None => ["create", "list", "switch", "remove"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+            // `session remove <name>` takes an optional --force flag.
+            Some("remove") => vec!["--force".to_string()],
+            // Other subcommands take a free-form name with nothing to complete.
+            _ => Vec::new(),
+        }
+    }
+}
+
+/// Normalize a `session` subcommand alias to its canonical spelling (`c`/`new`
+/// → `create`, `ls` → `list`, `rm` → `remove`), passing anything else through.
+/// Shared by dispatch and completion so both honour the same aliases.
+fn session_subcommand(sub: &str) -> &str {
+    match sub {
+        "create" | "c" | "new" => "create",
+        "list" | "ls" => "list",
+        "remove" | "rm" => "remove",
+        other => other,
     }
 }
 
@@ -305,10 +342,16 @@ impl Command for TerminalCommand {
     }
 }
 
-/// `agent`: open the configured AI agent in the selected worktree. This is a
-/// shortcut for running `terminal` and then launching the agent CLI inside it,
-/// so it produces the same [`Effect::OpenAgent`] side effect the event loop
-/// turns into an embedded terminal with the agent command sent on start.
+/// `agent [name]`: open an AI agent in the selected worktree. This is a shortcut
+/// for running `terminal` and then launching the agent CLI inside it, so it
+/// produces the [`Effect::OpenAgent`] side effect the event loop turns into an
+/// embedded terminal with the agent command sent on start.
+///
+/// With no argument it launches the workspace's configured agent (the common
+/// fast path); a name (`agent codex`, `agent sakana.ai`) overrides which CLI to
+/// launch for this session. An unrecognised name is rejected with an error line;
+/// whether a recognised CLI is actually installed is checked by the event loop
+/// when it launches (it holds the PATH probe), so this command only parses.
 pub(super) struct AgentCommand;
 
 impl Command for AgentCommand {
@@ -317,17 +360,40 @@ impl Command for AgentCommand {
     }
 
     fn description(&self) -> &'static str {
-        "Open the AI agent in the selected session (terminal + agent CLI)"
+        "Open an AI agent in the selected session (terminal + agent CLI)"
+    }
+
+    fn usage(&self) -> &'static str {
+        "agent [claude|codex|sakana.ai|gemini]"
+    }
+
+    fn examples(&self) -> &'static [&'static str] {
+        &["agent", "agent codex", "agent sakana.ai"]
     }
 
     fn scope(&self) -> CommandScope {
         CommandScope::Session
     }
 
-    fn run(&self, _args: &str, _ctx: &CommandContext) -> CommandResult {
-        CommandResult {
-            lines: Vec::new(),
-            effect: Effect::OpenAgent,
+    fn run(&self, args: &str, _ctx: &CommandContext) -> CommandResult {
+        let name = args.trim();
+        // No name: launch the configured agent (the fast path).
+        if name.is_empty() {
+            return CommandResult {
+                lines: Vec::new(),
+                effect: Effect::OpenAgent(None),
+            };
+        }
+        // A name overrides which CLI to launch; reject anything unrecognised.
+        match crate::domain::settings::AgentCli::from_name(name) {
+            Some(cli) => CommandResult {
+                lines: Vec::new(),
+                effect: Effect::OpenAgent(Some(cli)),
+            },
+            None => CommandResult::line(LogLine::error(format!(
+                "unknown agent \"{name}\" (try {})",
+                self.usage()
+            ))),
         }
     }
 }
@@ -414,6 +480,20 @@ impl Command for IssueCommand {
             "gantt" => issue_gantt(ctx),
             "show" => issue_show(ctx, rest),
             _ => CommandResult::line(LogLine::error(format!("usage: {}", self.usage()))),
+        }
+    }
+
+    fn complete_args(&self, args: &str, _ctx: &CompletionContext) -> Vec<String> {
+        // Only the subcommand word completes; `show <number>` takes a free-form
+        // issue number with nothing to offer.
+        let (head, _) = arg_tokens(args);
+        if head.is_empty() {
+            ["list", "graph", "gantt", "show"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect()
+        } else {
+            Vec::new()
         }
     }
 }

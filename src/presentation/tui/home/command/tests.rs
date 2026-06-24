@@ -337,9 +337,28 @@ fn terminal_requests_opening_a_shell() {
 
 #[test]
 fn agent_requests_opening_the_agent() {
+    // No name: launch the configured agent (None payload).
     let result = registry().dispatch("agent", &[], &[]);
     assert!(result.lines.is_empty());
-    assert_eq!(result.effect, Effect::OpenAgent);
+    assert_eq!(result.effect, Effect::OpenAgent(None));
+}
+
+#[test]
+fn agent_with_a_name_overrides_which_cli_to_launch() {
+    use crate::domain::settings::AgentCli;
+    // A recognised name (command or display name) selects that CLI.
+    let result = registry().dispatch("agent codex", &[], &[]);
+    assert!(result.lines.is_empty());
+    assert_eq!(result.effect, Effect::OpenAgent(Some(AgentCli::Codex)));
+    let result = registry().dispatch("agent sakana.ai", &[], &[]);
+    assert_eq!(result.effect, Effect::OpenAgent(Some(AgentCli::CodexFugu)));
+}
+
+#[test]
+fn agent_with_an_unknown_name_is_rejected_without_launching() {
+    let result = registry().dispatch("agent emacs", &[], &[]);
+    assert_eq!(result.effect, Effect::None);
+    assert!(result.lines[0].text.contains("unknown agent \"emacs\""));
 }
 
 #[test]
@@ -430,10 +449,94 @@ fn complete_with_no_match_leaves_input_untouched() {
 }
 
 #[test]
-fn complete_does_not_touch_input_with_arguments() {
+fn complete_fills_in_a_command_argument() {
+    // `man [command]` completes its argument against the command names: "ses"
+    // uniquely extends to "session", leaving the command word and spacing.
     let completion = registry().complete("man ses", CommandScope::Workspace);
-    assert_eq!(completion.input, "man ses");
+    assert_eq!(completion.input, "man session");
     assert!(completion.candidates.is_empty());
+}
+
+#[test]
+fn complete_lists_ambiguous_command_arguments() {
+    // "c" matches several command names, so `man c` extends to their common
+    // prefix and lists them rather than guessing.
+    let completion = registry().complete("man c", CommandScope::Workspace);
+    assert_eq!(completion.input, "man c");
+    assert!(completion.candidates.iter().any(|c| c == "config"));
+    assert!(completion.candidates.iter().any(|c| c == "clear"));
+}
+
+#[test]
+fn complete_offers_session_subcommands() {
+    // After the command word, `session ` offers its subcommands; a prefix
+    // narrows to a unique one and fills it in.
+    let all = registry().complete("session ", CommandScope::Workspace);
+    assert_eq!(all.input, "session ");
+    assert!(all.candidates.iter().any(|c| c == "create"));
+    assert!(all.candidates.iter().any(|c| c == "switch"));
+
+    let one = registry().complete("session cr", CommandScope::Workspace);
+    assert_eq!(one.input, "session create");
+    assert!(one.candidates.is_empty());
+}
+
+#[test]
+fn complete_offers_the_force_flag_after_session_remove() {
+    // `session remove` (and its `rm` alias) accept --force, offered once the
+    // subcommand is settled. Earlier arguments and spacing are preserved.
+    let completion = registry().complete("session remove feature-x --f", CommandScope::Workspace);
+    assert_eq!(completion.input, "session remove feature-x --force");
+    assert!(completion.candidates.is_empty());
+
+    let aliased = registry().complete("session rm --", CommandScope::Workspace);
+    assert_eq!(aliased.input, "session rm --force");
+}
+
+#[test]
+fn complete_offers_issue_subcommands() {
+    let completion = registry().complete("issue ga", CommandScope::Workspace);
+    assert_eq!(completion.input, "issue gantt");
+    assert!(completion.candidates.is_empty());
+}
+
+#[test]
+fn complete_offers_nothing_past_a_completable_position() {
+    // Beyond the subcommand word, `session switch`/`issue show` take a free-form
+    // name or number, and `man`'s lone argument is done — so a further token has
+    // no candidates and the input is left as typed.
+    for input in ["session switch fea", "issue show 3", "man session x"] {
+        let completion = registry().complete(input, CommandScope::Workspace);
+        assert_eq!(completion.input, input);
+        assert!(completion.candidates.is_empty());
+    }
+}
+
+#[test]
+fn complete_offers_nothing_for_argless_commands() {
+    // Commands without argument completion (the default) leave the input alone.
+    let completion = registry().complete("clear foo", CommandScope::Workspace);
+    assert_eq!(completion.input, "clear foo");
+    assert!(completion.candidates.is_empty());
+}
+
+#[test]
+fn complete_leaves_arguments_to_an_unknown_command_untouched() {
+    let completion = registry().complete("frob ba", CommandScope::Workspace);
+    assert_eq!(completion.input, "frob ba");
+    assert!(completion.candidates.is_empty());
+}
+
+#[test]
+fn complete_respects_scope_for_arguments() {
+    // `session` is a workspace command, so its arguments do not complete in the
+    // session scope (the 在席 prompt). `man`, a shared utility, still does.
+    let out_of_scope = registry().complete("session cr", CommandScope::Session);
+    assert_eq!(out_of_scope.input, "session cr");
+    assert!(out_of_scope.candidates.is_empty());
+
+    let utility = registry().complete("man ses", CommandScope::Session);
+    assert_eq!(utility.input, "man session");
 }
 
 #[test]

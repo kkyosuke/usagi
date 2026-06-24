@@ -80,15 +80,15 @@ impl McpServer {
     }
 
     fn tool_list(&self, arguments: Value) -> Result<String, String> {
-        let args: ListArgs = parse_args(arguments)?;
+        let args: FilterArgs = parse_args(arguments)?;
         let items = issue::list(&self.repo, &args.filter()).map_err(|e| e.to_string())?;
         Ok(to_pretty(&listed_views(&items)))
     }
 
     fn tool_search(&self, arguments: Value) -> Result<String, String> {
-        let args: SearchArgs = parse_args(arguments)?;
+        let SearchArgs { query, filter } = parse_args(arguments)?;
         let items =
-            issue::search(&self.repo, &args.query, &args.filter()).map_err(|e| e.to_string())?;
+            issue::search(&self.repo, &query, &filter.filter()).map_err(|e| e.to_string())?;
         Ok(to_pretty(&listed_views(&items)))
     }
 
@@ -168,8 +168,11 @@ struct NumberArgs {
     number: u32,
 }
 
+/// The shared issue filter accepted by both `issue_list` and (flattened into)
+/// `issue_search`, so the filter fields and their mapping to [`IssueFilter`] are
+/// defined once.
 #[derive(Deserialize)]
-struct ListArgs {
+struct FilterArgs {
     #[serde(default)]
     status: Option<IssueStatus>,
     #[serde(default)]
@@ -184,7 +187,7 @@ struct ListArgs {
     ready: bool,
 }
 
-impl ListArgs {
+impl FilterArgs {
     fn filter(self) -> IssueFilter {
         IssueFilter {
             status: self.status,
@@ -200,31 +203,8 @@ impl ListArgs {
 #[derive(Deserialize)]
 struct SearchArgs {
     query: String,
-    #[serde(default)]
-    status: Option<IssueStatus>,
-    #[serde(default)]
-    priority: Option<IssuePriority>,
-    #[serde(default)]
-    label: Option<String>,
-    #[serde(default)]
-    parent: Option<u32>,
-    #[serde(default)]
-    milestone: Option<String>,
-    #[serde(default)]
-    ready: bool,
-}
-
-impl SearchArgs {
-    fn filter(&self) -> IssueFilter {
-        IssueFilter {
-            status: self.status,
-            priority: self.priority,
-            label: self.label.clone(),
-            parent: self.parent,
-            milestone: self.milestone.clone(),
-            ready_only: self.ready,
-        }
-    }
+    #[serde(flatten)]
+    filter: FilterArgs,
 }
 
 #[derive(Deserialize)]

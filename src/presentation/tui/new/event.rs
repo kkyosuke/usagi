@@ -69,13 +69,12 @@ pub fn event_loop(
                 state.focus_prev();
                 notice = None;
             }
-            // On the mode selector, ←/→ switch the creation mode; on a text field
-            // they move the caret instead, so a field can be edited mid-string.
-            Key::ArrowLeft if state.focus() == Field::Mode => {
-                state.toggle_mode();
-                notice = None;
-            }
-            Key::ArrowRight if state.focus() == Field::Mode => {
+            // On the mode selector, ←/→ both flip between the two creation modes;
+            // on a text field they move the caret instead, so a field can be
+            // edited mid-string. A single arm handles both arrows: with only two
+            // modes either direction toggles, and folding them avoids the
+            // duplicate-but-distinct branches a third mode would silently break.
+            Key::ArrowLeft | Key::ArrowRight if state.focus() == Field::Mode => {
                 state.toggle_mode();
                 notice = None;
             }

@@ -21,6 +21,7 @@ pub use registry::CommandRegistry;
 
 use super::state::LogLine;
 use crate::domain::issue::Issue;
+use crate::domain::settings::AgentCli;
 
 /// A side effect a command asks the screen / event loop to perform, beyond
 /// appending its produced log lines.
@@ -55,10 +56,12 @@ pub enum Effect {
     /// Open an interactive terminal in the selected worktree (the user ran
     /// `terminal`). The directory is resolved by the event loop.
     OpenTerminal,
-    /// Open the configured AI agent in the selected worktree (the user ran
-    /// `agent`). This is `terminal` with the agent CLI launched inside it; the
-    /// directory and agent command are resolved by the event loop / wiring.
-    OpenAgent,
+    /// Open an AI agent in the selected worktree (the user ran `agent`). This is
+    /// `terminal` with the agent CLI launched inside it; the directory and agent
+    /// command are resolved by the event loop / wiring. The payload selects which
+    /// CLI to launch: `None` uses the workspace's configured agent (the common
+    /// fast path), `Some(cli)` overrides it for this launch (`agent <name>`).
+    OpenAgent(Option<AgentCli>),
     /// Close (remove) the focused session forcefully (the user ran `close` in
     /// 在席). It is the session equivalent of `session remove <name> --force`:
     /// the worktrees/branches are deleted and any uncommitted changes discarded,
@@ -168,6 +171,18 @@ pub struct WorktreeRef {
     pub active: bool,
 }
 
+/// What a command may read while computing argument completions (Tab in the
+/// middle of an argument string), built by the [`CommandRegistry`] for the
+/// current scope. Kept separate from [`CommandContext`] because completion runs
+/// on the bare input — before the workspace data a running command needs is
+/// threaded in — and only needs the command vocabulary.
+pub struct CompletionContext<'a> {
+    /// Every registered command's primary name, in display order — what `man`
+    /// completes its `[command]` argument against. Aliases are not offered, to
+    /// match command-word completion.
+    pub command_names: &'a [&'a str],
+}
+
 /// Everything a command may read while running, beyond its own argument string.
 pub struct CommandContext<'a> {
     /// Commands entered so far this session (oldest first), for `history`.
@@ -217,6 +232,20 @@ pub trait Command {
 
     /// Run the command with its (trimmed) argument string and the context.
     fn run(&self, args: &str, ctx: &CommandContext) -> CommandResult;
+
+    /// Tab-completion candidates for this command's arguments, given everything
+    /// typed after the command word (`args`).
+    ///
+    /// Returns the full set of tokens valid at the position of the *final*
+    /// (still-being-typed) token — subcommands, flags, or other option words.
+    /// The registry filters them by that token's prefix and fills in / lists
+    /// them exactly as it does for command words, so implementors only describe
+    /// their vocabulary, not the matching. Empty by default (no completable
+    /// arguments).
+    fn complete_args(&self, args: &str, ctx: &CompletionContext) -> Vec<String> {
+        let _ = (args, ctx);
+        Vec::new()
+    }
 }
 
 /// The result of a Tab completion: the (possibly extended) input, plus the

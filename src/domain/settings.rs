@@ -157,6 +157,18 @@ impl AgentCli {
             AgentCli::Gemini => "Gemini",
         }
     }
+
+    /// Resolve a user-typed agent name to its variant, accepting both the launch
+    /// [`command`](Self::command) (`claude` / `codex` / `codex-fugu` / `gemini`)
+    /// and the [`display_name`](Self::display_name) (`sakana.ai` for codex-fugu),
+    /// case-insensitively. Used by the 在席 prompt's `agent <name>` to pick which
+    /// CLI to launch. Returns `None` for an unrecognised name.
+    pub fn from_name(name: &str) -> Option<AgentCli> {
+        let name = name.trim().to_ascii_lowercase();
+        AgentCli::ALL
+            .into_iter()
+            .find(|cli| cli.command() == name || cli.display_name().to_ascii_lowercase() == name)
+    }
 }
 
 /// Which ref a new session worktree is branched from.
@@ -453,6 +465,23 @@ mod tests {
         assert_eq!(AgentCli::Codex.display_name(), "Codex");
         assert_eq!(AgentCli::CodexFugu.display_name(), "sakana.ai");
         assert_eq!(AgentCli::Gemini.display_name(), "Gemini");
+    }
+
+    #[test]
+    fn agent_cli_from_name_accepts_command_and_display_names_case_insensitively() {
+        // The launch command resolves each variant.
+        assert_eq!(AgentCli::from_name("claude"), Some(AgentCli::Claude));
+        assert_eq!(AgentCli::from_name("codex"), Some(AgentCli::Codex));
+        assert_eq!(AgentCli::from_name("codex-fugu"), Some(AgentCli::CodexFugu));
+        assert_eq!(AgentCli::from_name("gemini"), Some(AgentCli::Gemini));
+        // The display name resolves too — `sakana.ai` is codex-fugu's label.
+        assert_eq!(AgentCli::from_name("sakana.ai"), Some(AgentCli::CodexFugu));
+        // Case and surrounding whitespace are ignored.
+        assert_eq!(AgentCli::from_name("  Claude "), Some(AgentCli::Claude));
+        assert_eq!(AgentCli::from_name("SAKANA.AI"), Some(AgentCli::CodexFugu));
+        // An unrecognised name resolves to nothing.
+        assert_eq!(AgentCli::from_name("emacs"), None);
+        assert_eq!(AgentCli::from_name(""), None);
     }
 
     #[test]

@@ -23,6 +23,7 @@ use std::path::{Path, PathBuf};
 
 use super::util::{same_dir, shell_single_quote};
 use crate::domain::agent::{Agent, AgentWiring};
+use crate::domain::settings::AgentCli;
 
 /// Where Gemini stores each project's chat history:
 /// `~/.gemini/tmp/<project>/`. `None` when the home directory can't be
@@ -106,7 +107,9 @@ impl GeminiAgent {
 
 impl Agent for GeminiAgent {
     fn program(&self) -> &'static str {
-        "gemini"
+        // The program name lives once in the domain (`AgentCli::command`); the
+        // adapter reads it from there rather than re-spelling the literal.
+        AgentCli::Gemini.command()
     }
 
     fn launch_command(
