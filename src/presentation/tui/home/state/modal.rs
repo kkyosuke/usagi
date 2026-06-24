@@ -412,40 +412,88 @@ impl RemoveModal {
     }
 }
 
-/// The 在席 (Focus) menu cursor: which Session-scope command is highlighted. The
-/// Session-scope command list is always non-empty, so the navigation methods
-/// take the current `count` and keep the cursor underflow-safe and in range.
+/// The 在席 (Focus) menu cursor: which Session-scope command is highlighted, and
+/// — when the `agent` row is expanded into the agent picker — which installed
+/// agent is highlighted. The Session-scope command list is always non-empty, so
+/// the navigation methods take the current `count` and keep the cursor
+/// underflow-safe and in range.
+///
+/// The agent picker (案A) lets a session launch a CLI other than the configured
+/// default: pressing `→` / `Tab` on the `agent` row expands an inline sub-list of
+/// installed agents (only when more than one is installed, so there is a choice);
+/// `↑` / `↓` move within it and `Enter` launches the highlighted one. While
+/// expanded, `agent_cursor` is `Some(index)` and the move/`selected` methods act
+/// on the picker instead of the command list.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(super) struct FocusMenu {
     cursor: usize,
+    /// The agent picker's sub-cursor while the `agent` row is expanded, or `None`
+    /// when the menu is in its normal (collapsed) state.
+    agent_cursor: Option<usize>,
 }
 
 impl FocusMenu {
-    /// The highlighted row.
+    /// The highlighted command row.
     pub(super) fn cursor(self) -> usize {
         self.cursor
     }
 
-    /// Reset the cursor to the top (entering 在席 / leaving for 統括).
+    /// Whether the `agent` row is expanded into the agent picker.
+    pub(super) fn is_expanded(self) -> bool {
+        self.agent_cursor.is_some()
+    }
+
+    /// The agent picker's highlighted index while expanded, or `None` collapsed.
+    pub(super) fn agent_cursor(self) -> Option<usize> {
+        self.agent_cursor
+    }
+
+    /// Reset to the top, collapsed (entering 在席 / leaving for 統括).
     pub(super) fn reset(&mut self) {
         self.cursor = 0;
+        self.agent_cursor = None;
     }
 
-    /// Move the cursor up one row, wrapping. `count` is clamped to at least 1.
+    /// Expand the agent picker, highlighting `default_index` (the configured
+    /// agent's position in the installed list, clamped by the renderer).
+    pub(super) fn expand(&mut self, default_index: usize) {
+        self.agent_cursor = Some(default_index);
+    }
+
+    /// Collapse the agent picker back to the normal menu. Returns whether it was
+    /// expanded (so the caller can treat `←` / `Esc` as "consumed" only then).
+    pub(super) fn collapse(&mut self) -> bool {
+        self.agent_cursor.take().is_some()
+    }
+
+    /// Move up one row, wrapping. Acts on the agent picker while expanded,
+    /// otherwise the command list. `count` is clamped to at least 1.
     pub(super) fn move_up(&mut self, count: usize) {
         let count = count.max(1);
-        self.cursor = self.cursor.checked_sub(1).unwrap_or(count - 1);
+        match &mut self.agent_cursor {
+            Some(c) => *c = c.checked_sub(1).unwrap_or(count - 1),
+            None => self.cursor = self.cursor.checked_sub(1).unwrap_or(count - 1),
+        }
     }
 
-    /// Move the cursor down one row, wrapping. `count` is clamped to at least 1.
+    /// Move down one row, wrapping (the mirror of [`move_up`](Self::move_up)).
     pub(super) fn move_down(&mut self, count: usize) {
         let count = count.max(1);
-        self.cursor = (self.cursor + 1) % count;
+        match &mut self.agent_cursor {
+            Some(c) => *c = (*c + 1) % count,
+            None => self.cursor = (self.cursor + 1) % count,
+        }
     }
 
-    /// The selected row, clamped to the available `count`.
+    /// The selected command row, clamped to the available `count`.
     pub(super) fn selected(self, count: usize) -> usize {
         self.cursor.min(count.saturating_sub(1))
+    }
+
+    /// The selected agent-picker index, clamped to the available `count`. `0`
+    /// when collapsed (no picker open).
+    pub(super) fn agent_selected(self, count: usize) -> usize {
+        self.agent_cursor.unwrap_or(0).min(count.saturating_sub(1))
     }
 }
 
@@ -485,6 +533,63 @@ fn validate_session_name(name: &str, taken: &[String]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn focus_menu_moves_and_selects_the_command_cursor_when_collapsed() {
+        let mut menu = FocusMenu::default();
+        assert_eq!(menu.cursor(), 0);
+        assert!(!menu.is_expanded());
+        // Down wraps within the command count; up wraps back.
+        menu.move_down(3);
+        assert_eq!(menu.cursor(), 1);
+        menu.move_up(3);
+        assert_eq!(menu.cursor(), 0);
+        menu.move_up(3);
+        assert_eq!(menu.cursor(), 2);
+        // `selected` clamps to the available count.
+        assert_eq!(menu.selected(2), 1);
+        // A zero count is clamped to 1 so navigation never divides by zero.
+        let mut empty = FocusMenu::default();
+        empty.move_down(0);
+        assert_eq!(empty.cursor(), 0);
+    }
+
+    #[test]
+    fn focus_menu_expand_collapse_drives_the_agent_picker() {
+        let mut menu = FocusMenu::default();
+        // Expanding highlights the given default index and routes navigation to
+        // the picker, leaving the command cursor untouched.
+        menu.expand(2);
+        assert!(menu.is_expanded());
+        assert_eq!(menu.agent_cursor(), Some(2));
+        assert_eq!(menu.cursor(), 0);
+        // Moving now wraps within the agent count, not the command count.
+        menu.move_down(4);
+        assert_eq!(menu.agent_cursor(), Some(3));
+        menu.move_down(4);
+        assert_eq!(menu.agent_cursor(), Some(0));
+        menu.move_up(4);
+        assert_eq!(menu.agent_cursor(), Some(3));
+        assert_eq!(menu.agent_selected(4), 3);
+        // Collapsing reports it was open and clears the picker cursor.
+        assert!(menu.collapse());
+        assert!(!menu.is_expanded());
+        assert_eq!(menu.agent_cursor(), None);
+        // Collapsing again is a no-op that reports "was not open".
+        assert!(!menu.collapse());
+        // `agent_selected` is 0 when collapsed (no picker open).
+        assert_eq!(menu.agent_selected(4), 0);
+    }
+
+    #[test]
+    fn focus_menu_reset_clears_both_cursors() {
+        let mut menu = FocusMenu::default();
+        menu.move_down(3);
+        menu.expand(1);
+        menu.reset();
+        assert_eq!(menu.cursor(), 0);
+        assert!(!menu.is_expanded());
+    }
 
     #[test]
     fn validate_session_name_flags_empty_separators_duplicates_and_nesting() {

@@ -131,6 +131,13 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
     // collapsed rail; `Ctrl-B` toggles it from there).
     state.set_session_action_ui(settings.session_action_ui);
     state.set_sidebar(settings.sidebar);
+    // The configured default agent (its display name labels 在席's `agent` row and
+    // a bare `agent` launches it) and the agents installed on this machine (PATH-
+    // probed, canonical order), which 在席's agent picker offers as alternatives.
+    state.set_default_agent(settings.agent_cli);
+    state.set_installed_agents(crate::usecase::agent::available_clis(
+        &crate::usecase::doctor::SystemRunner,
+    ));
 
     // Restore past commands so `history` and `↑`/`↓` recall span sessions.
     // A read failure is non-fatal: just start with an empty history.
@@ -282,8 +289,13 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
         .unwrap_or_else(|| "usagi".to_string());
 
     // The agent adapter `:agent` drives, picked from the configured CLI — the
-    // single source of the launch command built per worktree below.
+    // single source of the launch command built per worktree below. Session
+    // removal cleans up after this default agent; a launch may instead use the CLI
+    // the user picked in 在席 (resolved per-launch in `open_terminal` below).
     let agent = crate::infrastructure::agent::agent_for(settings.agent_cli);
+    // The configured default CLI, the fallback when a launch carries no explicit
+    // agent choice (a bare `agent`, the menu's `a` shortcut / default row).
+    let default_cli = settings.agent_cli;
 
     // usagi's wiring policy (resolved usagi binary + local LLM model) the agent
     // renders into its own invocation; built once and reused for every launch.
@@ -405,6 +417,13 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
                              run_agent: bool,
                              new_pane: bool|
      -> Result<PaneExit> {
+        // Resolve which agent CLI this launch drives: the user's 在席 choice (menu
+        // picker / `agent <name>`), consumed here so it applies once, falling back
+        // to the configured default. `take` clears it whether or not a fresh agent
+        // spawn follows, so a stale choice never leaks into a later launch.
+        let agent = crate::infrastructure::agent::agent_for(
+            home.take_agent_choice().unwrap_or(default_cli),
+        );
         // Build the agent command for this worktree on demand: when it already
         // has a Claude conversation, launch with `--continue` so `:agent` resumes
         // where it left off; otherwise it starts fresh. The pool only sends it on

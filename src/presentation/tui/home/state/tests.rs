@@ -1064,6 +1064,81 @@ fn focus_menu_cursor_moves_and_wraps_and_selects() {
 }
 
 #[test]
+fn agent_choice_round_trips_and_is_consumed_once() {
+    use crate::domain::settings::AgentCli;
+    let mut state = state();
+    // Defaults: Claude is the configured agent, nothing installed, no choice.
+    assert_eq!(state.default_agent(), AgentCli::Claude);
+    assert!(state.installed_agents().is_empty());
+    assert_eq!(state.take_agent_choice(), None);
+    // Injected configuration is read back.
+    state.set_default_agent(AgentCli::Codex);
+    state.set_installed_agents(vec![AgentCli::Claude, AgentCli::Codex]);
+    assert_eq!(state.default_agent(), AgentCli::Codex);
+    assert_eq!(
+        state.installed_agents(),
+        [AgentCli::Claude, AgentCli::Codex]
+    );
+    // A recorded choice is returned once, then cleared.
+    state.set_agent_choice(Some(AgentCli::Claude));
+    assert_eq!(state.take_agent_choice(), Some(AgentCli::Claude));
+    assert_eq!(state.take_agent_choice(), None);
+}
+
+#[test]
+fn focus_menu_agent_picker_expands_only_with_a_choice_and_navigates_agents() {
+    use crate::domain::settings::AgentCli;
+    let mut state = state();
+    state.enter_focus(1);
+    // Move the cursor onto the `agent` row (terminal, agent, close).
+    state.focus_menu_move_down();
+    assert_eq!(state.focus_selected_command().unwrap().name, "agent");
+    // With fewer than two agents installed there is nothing to pick: no expand.
+    state.set_installed_agents(vec![AgentCli::Claude]);
+    assert!(!state.focus_menu_agent_can_expand());
+    state.focus_menu_expand_agent();
+    assert!(!state.focus_menu_expanded());
+    // Two installed agents: the row can expand, highlighting the default's index.
+    state.set_default_agent(AgentCli::Codex);
+    state.set_installed_agents(vec![AgentCli::Claude, AgentCli::Codex]);
+    assert!(state.focus_menu_agent_can_expand());
+    state.focus_menu_expand_agent();
+    assert!(state.focus_menu_expanded());
+    assert_eq!(state.focus_menu_agent_cursor(), Some(1)); // Codex is index 1
+    assert_eq!(state.focus_menu_selected_agent(), Some(AgentCli::Codex));
+    // Navigation now walks the agents, not the commands.
+    state.focus_menu_move_up();
+    assert_eq!(state.focus_menu_selected_agent(), Some(AgentCli::Claude));
+    // Collapsing restores the menu and reports it was open.
+    assert!(state.focus_menu_collapse_agent());
+    assert!(!state.focus_menu_expanded());
+    assert_eq!(state.focus_menu_selected_agent(), None);
+    assert!(!state.focus_menu_collapse_agent());
+}
+
+#[test]
+fn focus_menu_agent_picker_does_not_expand_off_the_agent_row() {
+    use crate::domain::settings::AgentCli;
+    let mut state = state();
+    state.enter_focus(1);
+    state.set_installed_agents(vec![AgentCli::Claude, AgentCli::Codex]);
+    // The cursor starts on `terminal`, so the picker cannot open there.
+    assert_eq!(state.focus_selected_command().unwrap().name, "terminal");
+    assert!(!state.focus_menu_agent_can_expand());
+    state.focus_menu_expand_agent();
+    assert!(!state.focus_menu_expanded());
+}
+
+#[test]
+fn focus_menu_agent_cursor_is_none_without_installed_agents() {
+    let mut state = state();
+    state.enter_focus(1);
+    // Even if the menu were somehow expanded, no installed agents means the
+    // picker reports no highlight (the renderer then draws no sub-rows).
+    assert_eq!(state.focus_menu_agent_cursor(), None);
+}
+
+#[test]
 fn focus_prompt_edits_completes_and_hints_in_session_scope() {
     let mut state = state();
     state.enter_focus(1);

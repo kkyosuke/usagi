@@ -1161,6 +1161,32 @@ fn right_pane_shows_the_focus_menu_or_prompt() {
 }
 
 #[test]
+fn focus_menu_agent_row_shows_the_default_and_expands_into_a_picker() {
+    use crate::domain::settings::AgentCli;
+    let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
+    state.enter_focus(1);
+    state.set_default_agent(AgentCli::Claude);
+    state.set_installed_agents(vec![AgentCli::Claude, AgentCli::Codex]);
+    // The agent row always names the default CLI a plain launch uses.
+    let base = stripped(&right_pane_contents(&state, 50, 16));
+    assert!(base.contains("Launch Claude"));
+    // The expand affordance (▸ / "→ pick agent") shows once the agent row is the
+    // highlighted one (terminal is highlighted on entry).
+    assert!(!base.contains("→ pick agent"));
+    state.focus_menu_move_down(); // terminal -> agent
+    let on_agent = stripped(&right_pane_contents(&state, 50, 16));
+    assert!(on_agent.contains('▸'));
+    assert!(on_agent.contains("→ pick agent"));
+    // Expanding lists every installed agent (default tagged) and swaps the hint.
+    state.focus_menu_expand_agent();
+    let expanded = stripped(&right_pane_contents(&state, 50, 16));
+    assert!(expanded.contains('▾'));
+    assert!(expanded.contains("Codex"));
+    assert!(expanded.contains("(default)"));
+    assert!(expanded.contains("Enter launch"));
+}
+
+#[test]
 fn focus_shows_pane_tabs_with_a_trailing_new_tab_and_the_action_surface() {
     // With live panes published, 在席 gains a tab strip — one chip per pane plus a
     // trailing "+ new" tab. On the "+ new" tab (the default on entry) the action
