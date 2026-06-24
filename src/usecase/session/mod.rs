@@ -203,13 +203,20 @@ fn record(store: &WorkspaceStore, name: &str, root: &Path, worktrees: &[PathBuf]
     store.save(&state)
 }
 
-/// Set (or clear) a session's sidebar display name in `state.json`, leaving its
-/// branch / identity untouched.
+/// Set (or clear) a session's sidebar display name override in `state.json`,
+/// leaving its branch / identity untouched.
 ///
 /// `display` is trimmed; an empty string — or one equal to the session name —
-/// clears the override (the sidebar falls back to the session name). Returns the
-/// label now shown for the session. Fails when no session named `name` exists.
-pub fn set_display_name(workspace_root: &Path, name: &str, display: &str) -> Result<String> {
+/// clears the override. Returns the override now stored: `Some(name)` when a
+/// distinct display name is set, or `None` when cleared (i.e. the session falls
+/// back to its branch name). Resolving that into the label actually shown is the
+/// presentation layer's job, so this usecase persists the raw value and does not
+/// decide the displayed string. Fails when no session named `name` exists.
+pub fn set_display_name(
+    workspace_root: &Path,
+    name: &str,
+    display: &str,
+) -> Result<Option<String>> {
     let store = WorkspaceStore::new(workspace_root);
     // Hold the lock across the load → edit → save so a concurrent writer cannot
     // overwrite this rename (or have it overwrite their change).
@@ -228,10 +235,10 @@ pub fn set_display_name(workspace_root: &Path, name: &str, display: &str) -> Res
     } else {
         Some(trimmed.to_string())
     };
-    let label = session.display_label().to_string();
+    let stored = session.display_name.clone();
     state.updated_at = Utc::now();
     store.save(&state)?;
-    Ok(label)
+    Ok(stored)
 }
 
 /// Set (or clear) a session's free-form note in `state.json`, leaving its branch
@@ -816,9 +823,9 @@ mod tests {
         create(root.path(), "feature").unwrap();
         create(root.path(), "other").unwrap();
 
-        // Set an override → it is stored and returned as the shown label.
-        let shown = set_display_name(root.path(), "feature", "Nice name").unwrap();
-        assert_eq!(shown, "Nice name");
+        // Set an override → it is stored and returned as the raw override value.
+        let stored = set_display_name(root.path(), "feature", "Nice name").unwrap();
+        assert_eq!(stored.as_deref(), Some("Nice name"));
         assert_eq!(
             display_name_of(root.path(), "feature").as_deref(),
             Some("Nice name")
@@ -833,9 +840,11 @@ mod tests {
             Some("Spaced")
         );
 
-        // An empty label clears the override (falls back to the session name).
-        let shown = set_display_name(root.path(), "feature", "   ").unwrap();
-        assert_eq!(shown, "feature");
+        // An empty label clears the override → the raw stored value is None (the
+        // sidebar falls back to the session name, but that resolution is the
+        // presentation layer's, not this usecase's).
+        let stored = set_display_name(root.path(), "feature", "   ").unwrap();
+        assert_eq!(stored, None);
         assert_eq!(display_name_of(root.path(), "feature"), None);
 
         // A label equal to the session name is treated as "no override".

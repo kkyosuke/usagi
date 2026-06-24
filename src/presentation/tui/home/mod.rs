@@ -211,8 +211,13 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
     let mut rename_display = |name: &str, label: &str| {
         let _guard = lock_session_ops(&rename_lock);
         match crate::usecase::session::set_display_name(&rename_root, name, label) {
-            Ok(shown) => SessionOutcome {
-                line: LogLine::output(format!("Renamed \"{name}\" to \"{shown}\" 🏷")),
+            // The usecase persists the raw override; the label shown falls back to
+            // the session name when the override was cleared (presentation's call).
+            Ok(stored) => SessionOutcome {
+                line: LogLine::output(format!(
+                    "Renamed \"{name}\" to \"{}\" 🏷",
+                    stored.as_deref().unwrap_or(name)
+                )),
                 sessions: reload_sessions(&rename_root),
                 select: Some(name.to_string()),
             },
