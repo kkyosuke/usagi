@@ -214,6 +214,21 @@ fn clone_fails_for_a_missing_source() {
 }
 
 #[test]
+fn clone_refuses_a_remote_helper_transport() {
+    // Defense in depth: even called directly (bypassing `RepoUrl`'s allow-list),
+    // `clone` sets `GIT_ALLOW_PROTOCOL` so git refuses the `ext` remote helper
+    // rather than running the embedded command. The marker file must not appear.
+    let tmp = tempfile::tempdir().unwrap();
+    let marker = tmp.path().join("pwned");
+    let dest = tmp.path().join("dest");
+    let payload = format!("ext::sh -c \"touch {}\"", marker.display());
+
+    let err = clone(&payload, &dest, None).unwrap_err();
+    assert!(err.to_string().contains("git clone failed"));
+    assert!(!marker.exists(), "the ext helper command must not have run");
+}
+
+#[test]
 fn short_hash_takes_first_seven_chars() {
     assert_eq!(short_hash("0123456789abcdef"), "0123456");
     assert_eq!(short_hash("abc"), "abc");

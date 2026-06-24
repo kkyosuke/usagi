@@ -18,6 +18,12 @@ pub fn clone(url: &str, dest: &Path, branch: Option<&str>) -> Result<()> {
     for var in REPO_SCOPING_ENV {
         command.env_remove(var);
     }
+    // Defense in depth behind `RepoUrl`'s transport allow-list: restrict the
+    // transports git itself will use so a remote helper (`ext::sh -c …` runs an
+    // arbitrary command) is refused even if some future caller reaches here
+    // without validating the URL. `file` is kept so local-path clones still
+    // work; the dangerous helpers (`ext`, `fd`, …) are not listed.
+    command.env("GIT_ALLOW_PROTOCOL", "https:http:ssh:git:file");
     command.arg("clone");
     if let Some(branch) = branch {
         // `--branch=<value>` (not `--branch <value>`) so a branch name that
