@@ -193,6 +193,29 @@ fn title_bar_shows_the_active_session_name() {
 }
 
 #[test]
+fn title_bar_keeps_the_centre_fixed_as_the_active_session_changes() {
+    // The active-session-name field is pinned to a width that depends only on
+    // the terminal size, so switching between a short and a long name leaves the
+    // centred title at the same column (the bar never shifts sideways).
+    let mut short = list_with(vec![worktree(Some("x"), true, BranchStatus::Local)]);
+    short.move_down();
+    short.activate_selected();
+    let mut long = list_with(vec![worktree(
+        Some("a-much-longer-session-name"),
+        true,
+        BranchStatus::Local,
+    )]);
+    long.move_down();
+    long.activate_selected();
+
+    let lead = |list: &_| {
+        let line = console::strip_ansi_codes(&title_bar(80, list)).into_owned();
+        line.len() - line.trim_start().len()
+    };
+    assert_eq!(lead(&short), lead(&long));
+}
+
+#[test]
 fn status_label_pairs_a_git_icon_with_each_word() {
     for (status, icon, word) in [
         (BranchStatus::New, NEW_ICON, "new"),
