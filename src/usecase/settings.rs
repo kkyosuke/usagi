@@ -16,36 +16,44 @@ pub fn save(storage: &Storage, settings: &Settings) -> Result<()> {
     storage.save_settings(settings)
 }
 
-/// Change the UI theme and persist it.
-pub fn set_theme(storage: &Storage, theme: Theme) -> Result<Settings> {
+/// Load the global settings, apply `edit`, persist the result, and return it.
+///
+/// The single load→edit→save→return shape every global setter shares, so each
+/// setter is one line naming the field it touches.
+fn update_settings(storage: &Storage, edit: impl FnOnce(&mut Settings)) -> Result<Settings> {
     let mut settings = storage.load_settings()?;
-    settings.theme = theme;
+    edit(&mut settings);
     storage.save_settings(&settings)?;
     Ok(settings)
+}
+
+/// Load the project-local overrides for `repo_root`, apply `edit`, persist the
+/// result, and return it — the local counterpart to [`update_settings`].
+fn update_local(repo_root: &Path, edit: impl FnOnce(&mut LocalSettings)) -> Result<LocalSettings> {
+    let mut local = load_local(repo_root)?;
+    edit(&mut local);
+    save_local(repo_root, &local)?;
+    Ok(local)
+}
+
+/// Change the UI theme and persist it.
+pub fn set_theme(storage: &Storage, theme: Theme) -> Result<Settings> {
+    update_settings(storage, |s| s.theme = theme)
 }
 
 /// Set or clear the default workspace and persist it.
 pub fn set_default_workspace(storage: &Storage, name: Option<String>) -> Result<Settings> {
-    let mut settings = storage.load_settings()?;
-    settings.default_workspace = name;
-    storage.save_settings(&settings)?;
-    Ok(settings)
+    update_settings(storage, |s| s.default_workspace = name)
 }
 
 /// Enable or disable desktop notifications and persist the choice.
 pub fn set_notifications_enabled(storage: &Storage, enabled: bool) -> Result<Settings> {
-    let mut settings = storage.load_settings()?;
-    settings.notifications_enabled = enabled;
-    storage.save_settings(&settings)?;
-    Ok(settings)
+    update_settings(storage, |s| s.notifications_enabled = enabled)
 }
 
 /// Change which agent CLI usagi drives and persist it.
 pub fn set_agent_cli(storage: &Storage, agent_cli: AgentCli) -> Result<Settings> {
-    let mut settings = storage.load_settings()?;
-    settings.agent_cli = agent_cli;
-    storage.save_settings(&settings)?;
-    Ok(settings)
+    update_settings(storage, |s| s.agent_cli = agent_cli)
 }
 
 /// Load the project-local setting overrides for the repository at `repo_root`
@@ -70,10 +78,7 @@ pub fn effective(storage: &Storage, repo_root: &Path) -> Result<Settings> {
 /// Override the agent CLI for a single project, or clear the override with
 /// `None`. Returns the updated local settings.
 pub fn set_local_agent_cli(repo_root: &Path, agent_cli: Option<AgentCli>) -> Result<LocalSettings> {
-    let mut local = load_local(repo_root)?;
-    local.agent_cli = agent_cli;
-    save_local(repo_root, &local)?;
-    Ok(local)
+    update_local(repo_root, |l| l.agent_cli = agent_cli)
 }
 
 /// Override desktop notifications for a single project, or clear the override
@@ -82,10 +87,7 @@ pub fn set_local_notifications_enabled(
     repo_root: &Path,
     enabled: Option<bool>,
 ) -> Result<LocalSettings> {
-    let mut local = load_local(repo_root)?;
-    local.notifications_enabled = enabled;
-    save_local(repo_root, &local)?;
-    Ok(local)
+    update_local(repo_root, |l| l.notifications_enabled = enabled)
 }
 
 #[cfg(test)]
