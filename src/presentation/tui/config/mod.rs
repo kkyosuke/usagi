@@ -6,6 +6,7 @@
 //! disabled until there is something to save.
 
 pub mod event;
+mod provisioning;
 pub mod state;
 pub mod ui;
 
@@ -17,7 +18,6 @@ use console::Term;
 use crate::domain::settings::{LocalSettings, Settings, LOCAL_LLM_MODELS};
 use crate::infrastructure::git;
 use crate::infrastructure::storage::Storage;
-use crate::presentation::tui::install_task;
 use crate::presentation::tui::term_reader::TermKeyReader;
 use crate::usecase::doctor::SystemRunner;
 use crate::usecase::{agent, local_llm, settings, workspace};
@@ -110,8 +110,9 @@ pub fn run_in(term: &Term, repo_root: Option<PathBuf>) -> Result<Outcome> {
     // finishes. The Local LLM row installs just the `ollama` runtime (the sudo
     // password from the modal pre-authenticates its privileged steps); the model
     // picker pulls a chosen-but-unpulled model (unprivileged).
-    let mut install_runtime = |password: &str| -> Result<()> { start_install_runtime(password) };
-    let mut pull_model = |model: &str| -> Result<()> { start_pull_model(model) };
+    let mut install_runtime =
+        |password: &str| -> Result<()> { provisioning::start_install_runtime(password) };
+    let mut pull_model = |model: &str| -> Result<()> { provisioning::start_pull_model(model) };
     event::event_loop(
         term,
         &mut reader,
@@ -121,68 +122,6 @@ pub fn run_in(term: &Term, repo_root: Option<PathBuf>) -> Result<Outcome> {
         &mut pull_model,
         notice,
     )
-}
-
-/// Starts installing the `ollama` runtime on a background thread, recording its
-/// progress in the global [`install_task`] so every screen can show the loading
-/// rabbit and the completion message. Returns as soon as the worker is launched;
-/// the sudo password is forwarded to [`local_llm::ensure_runtime`] so the
-/// installer can elevate unattended, and it runs `quiet` so its raw output never
-/// paints over the TUI. Errors if an install is already in flight.
-fn start_install_runtime(password: &str) -> Result<()> {
-    let handle = install_task::handle();
-    if !handle.begin("ollama") {
-        return Err(anyhow::anyhow!("インストールは既に実行中です"));
-    }
-    let password_owned = password.to_string();
-    std::thread::spawn(move || {
-        let result = local_llm::ensure_runtime(
-            std::env::consts::OS,
-            &SystemRunner,
-            Some(&password_owned),
-            true,
-        );
-        let (ok, message) = match result {
-            Ok(_) => (true, "ollama を導入しました 🐰".to_string()),
-            Err(e) => (false, install_error_message(&e)),
-        };
-        handle.finish(ok, message);
-    });
-    Ok(())
-}
-
-/// Starts pulling `model` into the installed runtime on a background thread,
-/// recording progress in the global [`install_task`] like
-/// [`start_install_runtime`]. `ollama pull` needs no sudo; it runs `quiet` so
-/// its `pulling manifest …` output never paints over the TUI. Errors if an
-/// install is already in flight.
-fn start_pull_model(model: &str) -> Result<()> {
-    let handle = install_task::handle();
-    if !handle.begin(model) {
-        return Err(anyhow::anyhow!("インストールは既に実行中です"));
-    }
-    let model_owned = model.to_string();
-    std::thread::spawn(move || {
-        let result = local_llm::ensure_model(&SystemRunner, &model_owned, true);
-        let (ok, message) = match result {
-            Ok(_) => (true, format!("{model_owned} を導入しました 🐰")),
-            Err(e) => (false, install_error_message(&e)),
-        };
-        handle.finish(ok, message);
-    });
-    Ok(())
-}
-
-/// A short human message for a local LLM provisioning failure.
-fn install_error_message(error: &local_llm::SetupError) -> String {
-    match error {
-        local_llm::SetupError::OllamaUnavailable { manual }
-        | local_llm::SetupError::OllamaInstallFailed { manual, .. } => manual.clone(),
-        local_llm::SetupError::ServerStartFailed => local_llm::server_start_failed_message(),
-        local_llm::SetupError::ModelPullFailed { model } => {
-            format!("could not pull `{model}`")
-        }
-    }
 }
 
 /// Loads the global settings, the registered workspace names the

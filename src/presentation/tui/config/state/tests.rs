@@ -1,4 +1,5 @@
 use super::*;
+use crate::domain::settings::LOCAL_LLM_MODELS;
 
 fn config_with_workspaces(names: &[&str]) -> Config {
     Config::new(

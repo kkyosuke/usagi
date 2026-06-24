@@ -11,10 +11,11 @@
 //! settings when left unset. Only one scope's fields are shown at a time.
 
 use crate::domain::settings::{
-    AgentCli, BranchSource, LocalSettings, SessionActionUi, Settings, Theme, LOCAL_LLM_MODELS,
+    AgentCli, BranchSource, LocalSettings, SessionActionUi, Settings, Theme,
 };
-use crate::presentation::tui::widgets::{self, text_input::TextInput};
-use console::Style;
+
+mod modal;
+pub use modal::{InstallModal, ModelModal, ModelRow};
 
 /// The themes in the order they cycle through.
 const THEMES: [Theme; 3] = [Theme::Light, Theme::Dark, Theme::System];
@@ -128,104 +129,6 @@ pub struct RowView {
     /// Local LLM Model row before the runtime is installed). Disabled rows
     /// render dimmed and ignore activation.
     pub disabled: bool,
-}
-
-/// The open local-LLM install modal: collects the sudo password before the
-/// `ollama` runtime is provisioned in the background. Kept terminal-independent
-/// so the password entry and confirmation flow are unit-testable.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct InstallModal {
-    password: TextInput,
-}
-
-impl InstallModal {
-    /// The sudo password typed so far.
-    pub fn password(&self) -> &str {
-        self.password.value()
-    }
-
-    /// The password rendered as bullets, one per character, with a block caret at
-    /// the editing position, so it is never shown in the clear yet ←/→/Home/End
-    /// move a visible caret. Each character maps to one bullet, so the caret sits
-    /// on the right bullet even for multi-byte input.
-    pub fn masked(&self) -> String {
-        let before = "•".repeat(self.password.before().chars().count());
-        let after = "•".repeat(self.password.after().chars().count());
-        widgets::block_caret(&before, &after, &Style::new())
-    }
-}
-
-/// One model row in the [`ModelModal`]: the model name, whether it is already
-/// pulled, and whether the cursor is on it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ModelRow {
-    pub model: &'static str,
-    pub installed: bool,
-    pub selected: bool,
-}
-
-/// The open model-selection modal: a list of the offered models with their
-/// install state, navigated with ↑/↓ and confirmed with Enter. Picking an
-/// installed model just adopts it; picking an uninstalled one pulls it first.
-/// Kept terminal-independent so the navigation and selection are unit-testable.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ModelModal {
-    /// Cursor index into [`LOCAL_LLM_MODELS`].
-    cursor: usize,
-    /// Whether each model in [`LOCAL_LLM_MODELS`] is pulled, parallel by index.
-    installed: Vec<bool>,
-}
-
-impl ModelModal {
-    /// Open the modal with the cursor on `current` (the model in use) and each
-    /// row flagged by whether it appears in `installed_models`.
-    fn new(current: &str, installed_models: &[String]) -> Self {
-        let installed = LOCAL_LLM_MODELS
-            .iter()
-            .map(|m| installed_models.iter().any(|i| i == m))
-            .collect();
-        let cursor = LOCAL_LLM_MODELS
-            .iter()
-            .position(|m| *m == current)
-            .unwrap_or(0);
-        Self { cursor, installed }
-    }
-
-    /// Move the cursor up one model, wrapping to the bottom.
-    pub fn move_up(&mut self) {
-        self.cursor = self
-            .cursor
-            .checked_sub(1)
-            .unwrap_or(LOCAL_LLM_MODELS.len() - 1);
-    }
-
-    /// Move the cursor down one model, wrapping to the top.
-    pub fn move_down(&mut self) {
-        self.cursor = (self.cursor + 1) % LOCAL_LLM_MODELS.len();
-    }
-
-    /// The model under the cursor.
-    pub fn selected_model(&self) -> &'static str {
-        LOCAL_LLM_MODELS[self.cursor]
-    }
-
-    /// Whether the model under the cursor is already pulled.
-    pub fn selected_installed(&self) -> bool {
-        self.installed[self.cursor]
-    }
-
-    /// The rows to render, top to bottom.
-    pub fn rows(&self) -> Vec<ModelRow> {
-        LOCAL_LLM_MODELS
-            .iter()
-            .enumerate()
-            .map(|(i, model)| ModelRow {
-                model,
-                installed: self.installed[i],
-                selected: i == self.cursor,
-            })
-            .collect()
-    }
 }
 
 /// A project's local overrides being edited, plus the last-saved baseline so
@@ -417,64 +320,6 @@ impl Config {
         matches!(self.selected_field(), Some(Field::LocalLlmModel)) && self.ollama_installed
     }
 
-    /// Open the runtime-install modal, ready to collect the sudo password. A
-    /// no-op unless the focused row is the Local LLM install action.
-    pub fn open_install_modal(&mut self) {
-        if self.local_llm_needs_install() {
-            self.install_modal = Some(InstallModal::default());
-        }
-    }
-
-    /// Open the model-selection modal on the model in use, with each row flagged
-    /// by its install state. A no-op unless the focused row is the active model
-    /// row (i.e. the runtime is installed).
-    pub fn open_model_modal(&mut self) {
-        if self.model_row_active() {
-            self.model_modal = Some(ModelModal::new(
-                &self.settings.local_llm.model,
-                &self.installed_models,
-            ));
-        }
-    }
-
-    /// The open model modal, if any. While present the event loop routes every
-    /// key into it.
-    pub fn model_modal(&self) -> Option<&ModelModal> {
-        self.model_modal.as_ref()
-    }
-
-    /// Close the model modal (cancel, or after a selection is made).
-    pub fn close_model_modal(&mut self) {
-        self.model_modal = None;
-    }
-
-    /// Move the model modal's cursor up one row. A no-op when no modal is open.
-    pub fn model_modal_up(&mut self) {
-        if let Some(modal) = &mut self.model_modal {
-            modal.move_up();
-        }
-    }
-
-    /// Move the model modal's cursor down one row. A no-op when no modal is open.
-    pub fn model_modal_down(&mut self) {
-        if let Some(modal) = &mut self.model_modal {
-            modal.move_down();
-        }
-    }
-
-    /// The model under the model modal's cursor, or `None` when no modal is open.
-    pub fn model_modal_selection(&self) -> Option<&'static str> {
-        self.model_modal.as_ref().map(|m| m.selected_model())
-    }
-
-    /// Whether the model under the model modal's cursor is already pulled.
-    /// `false` when no modal is open.
-    pub fn model_modal_selection_installed(&self) -> bool {
-        self.model_modal
-            .as_ref()
-            .is_some_and(|m| m.selected_installed())
-    }
-
     /// Adopt `model` as the one in use (an edit, saved with the rest). Used when
     /// an already-installed model is picked from the modal.
     pub fn select_model(&mut self, model: &str) {
@@ -500,75 +345,6 @@ impl Config {
     /// completion is reflected exactly once.
     pub fn take_pending_install(&mut self) -> Option<PendingInstall> {
         self.pending_install.take()
-    }
-
-    /// The open install modal, if any. While present the event loop routes every
-    /// key into it.
-    pub fn install_modal(&self) -> Option<&InstallModal> {
-        self.install_modal.as_ref()
-    }
-
-    /// Close the install modal (cancel, or after provisioning finishes).
-    pub fn close_install_modal(&mut self) {
-        self.install_modal = None;
-    }
-
-    /// Insert a typed character at the caret of the modal's password. A no-op
-    /// when no modal is open.
-    pub fn install_modal_push(&mut self, c: char) {
-        if let Some(modal) = &mut self.install_modal {
-            modal.password.insert(c);
-        }
-    }
-
-    /// Delete the character before the caret of the modal's password (Backspace).
-    pub fn install_modal_backspace(&mut self) {
-        if let Some(modal) = &mut self.install_modal {
-            modal.password.backspace();
-        }
-    }
-
-    /// Delete the character at the caret of the modal's password (the `Del` key).
-    pub fn install_modal_delete_forward(&mut self) {
-        if let Some(modal) = &mut self.install_modal {
-            modal.password.delete_forward();
-        }
-    }
-
-    /// Move the password caret one character left.
-    pub fn install_modal_cursor_left(&mut self) {
-        if let Some(modal) = &mut self.install_modal {
-            modal.password.move_left();
-        }
-    }
-
-    /// Move the password caret one character right.
-    pub fn install_modal_cursor_right(&mut self) {
-        if let Some(modal) = &mut self.install_modal {
-            modal.password.move_right();
-        }
-    }
-
-    /// Move the password caret to the start of the line.
-    pub fn install_modal_cursor_home(&mut self) {
-        if let Some(modal) = &mut self.install_modal {
-            modal.password.move_home();
-        }
-    }
-
-    /// Move the password caret to the end of the line.
-    pub fn install_modal_cursor_end(&mut self) {
-        if let Some(modal) = &mut self.install_modal {
-            modal.password.move_end();
-        }
-    }
-
-    /// The sudo password entered in the modal, ready to hand to the installer.
-    /// `None` when no modal is open.
-    pub fn install_modal_password(&self) -> Option<String> {
-        self.install_modal
-            .as_ref()
-            .map(|m| m.password.value().to_string())
     }
 
     /// Mark the `ollama` runtime as installed and turn the local LLM on, so the
