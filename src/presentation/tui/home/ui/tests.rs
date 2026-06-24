@@ -1702,7 +1702,7 @@ fn update_banner_pairs_the_mascot_with_the_latest_version() {
     assert_eq!(banner.len(), 4);
     assert_eq!(banner.last().map(String::as_str), Some(""));
     let plain = stripped(&banner);
-    assert!(plain.contains("アップデートしたぴょん！"));
+    assert!(plain.contains("アップデートがあるぴょん"));
     assert!(plain.contains("v0.2.0"));
     // The usagi mascot rides alongside the notice.
     assert!(plain.contains("(='-')"));
@@ -1713,7 +1713,7 @@ fn render_frame_shows_the_update_notice_when_a_newer_release_exists() {
     let mut state = state_with(Vec::new());
     state.set_update(crate::domain::version::Version::parse("9.9.9"));
     let joined = stripped(&render_frame(24, 100, &state));
-    assert!(joined.contains("アップデートしたぴょん！"));
+    assert!(joined.contains("アップデートがあるぴょん"));
     assert!(joined.contains("v9.9.9"));
 }
 
@@ -1721,7 +1721,7 @@ fn render_frame_shows_the_update_notice_when_a_newer_release_exists() {
 fn render_frame_hides_the_update_notice_by_default() {
     let state = state_with(Vec::new());
     let joined = stripped(&render_frame(24, 100, &state));
-    assert!(!joined.contains("アップデートしたぴょん！"));
+    assert!(!joined.contains("アップデートがあるぴょん"));
 }
 
 // --- background-task panel ---------------------------------------------
@@ -1847,7 +1847,7 @@ fn render_frame_shows_the_task_status_over_the_update_notice() {
     }]);
     let joined = stripped(&render_frame(24, 100, &state));
     assert!(joined.contains("作成中… main"));
-    assert!(!joined.contains("アップデートしたぴょん！"));
+    assert!(!joined.contains("アップデートがあるぴょん"));
 }
 
 #[test]
@@ -1882,7 +1882,7 @@ fn render_frame_suppresses_the_update_notice_over_a_live_terminal() {
     state.set_terminal_view(TerminalView::from_rows(vec!["$ echo hi".to_string()], None));
     state.set_update(crate::domain::version::Version::parse("9.9.9"));
     let joined = stripped(&render_frame(24, 100, &state));
-    assert!(!joined.contains("アップデートしたぴょん！"));
+    assert!(!joined.contains("アップデートがあるぴょん"));
 }
 
 #[test]
@@ -1906,7 +1906,7 @@ fn update_notice_is_skipped_when_the_terminal_is_too_narrow() {
     let mut state = state_with(Vec::new());
     state.set_update(crate::domain::version::Version::parse("9.9.9"));
     let joined = stripped(&render_frame(24, 20, &state));
-    assert!(!joined.contains("アップデートしたぴょん！"));
+    assert!(!joined.contains("アップデートがあるぴょん"));
 }
 
 #[test]
@@ -1928,7 +1928,7 @@ fn loading_rabbit_takes_the_corner_over_the_update_notice() {
     state.step_loading("作成中…");
     let joined = stripped(&render_frame(24, 100, &state));
     assert!(joined.contains("作成中…"));
-    assert!(!joined.contains("アップデートしたぴょん！"));
+    assert!(!joined.contains("アップデートがあるぴょん"));
 }
 
 #[test]

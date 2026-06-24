@@ -51,7 +51,7 @@ pub(super) fn update_banner(latest: &Version) -> Vec<String> {
         .unwrap_or(0);
     // One message per mascot row; the last row carries only the mascot's feet.
     let messages = [
-        "アップデートしたぴょん！".to_string(),
+        "アップデートがあるぴょん".to_string(),
         format!("v{latest}"),
         String::new(),
     ];
