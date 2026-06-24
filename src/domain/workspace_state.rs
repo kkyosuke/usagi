@@ -18,12 +18,14 @@ use serde::{Deserialize, Serialize};
 /// re-derived from git on every refresh, so editing files reads `Dirty`,
 /// committing reads `Local`, pushing reads `Pushed`, and a branch the default
 /// has moved past reads `Synced`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BranchStatus {
     /// Freshly cut and untouched: a clean working tree with no commits of its
     /// own and the default branch has not moved past it (even with the default).
-    /// This is the state a session branch starts in, before any work.
+    /// This is the state a session branch starts in, before any work. Also the
+    /// default an unreadable / unknown stored status degrades to.
+    #[default]
     New,
     /// The working tree has uncommitted changes (modified, staged, or untracked
     /// files) — work in progress that has not been committed yet.
@@ -143,7 +145,15 @@ pub struct WorktreeState {
     /// Upstream tracking branch (e.g. `origin/feature`), if any.
     #[serde(default)]
     pub upstream: Option<String>,
-    /// Lifecycle status of the checked-out branch.
+    /// Lifecycle status of the checked-out branch. An unrecognised stored value
+    /// (e.g. one written by a newer usagi) degrades to [`BranchStatus::New`]
+    /// rather than failing the whole `state.json` load — see
+    /// [`crate::domain::serde_fallback`]. It is re-derived from git on the next
+    /// refresh regardless.
+    #[serde(
+        default,
+        deserialize_with = "crate::domain::serde_fallback::or_default"
+    )]
     pub status: BranchStatus,
     /// When this worktree's state was last refreshed.
     pub updated_at: DateTime<Utc>,

@@ -178,6 +178,11 @@ pub enum BranchSource {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
+    // Enum fields degrade an unrecognised stored value to their default rather
+    // than failing the whole file (see [`crate::domain::serde_fallback`]), so a
+    // newer usagi's value — or a hand-edited typo — never blocks loading every
+    // other setting.
+    #[serde(deserialize_with = "crate::domain::serde_fallback::or_default")]
     pub theme: Theme,
     /// Name of the workspace to open by default, if any.
     pub default_workspace: Option<String>,
@@ -188,12 +193,15 @@ pub struct Settings {
     /// Whether desktop notifications are shown (e.g. on `hop`).
     pub notifications_enabled: bool,
     /// Which agent CLI usagi drives.
+    #[serde(deserialize_with = "crate::domain::serde_fallback::or_default")]
     pub agent_cli: AgentCli,
     /// How the home screen's 在席 (Focus) mode presents a session's runnable
     /// commands in the right pane.
+    #[serde(deserialize_with = "crate::domain::serde_fallback::or_default")]
     pub session_action_ui: SessionActionUi,
     /// Which state the home screen's left session sidebar opens in (`Ctrl-B`
     /// toggles it at runtime).
+    #[serde(deserialize_with = "crate::domain::serde_fallback::or_default")]
     pub sidebar: Sidebar,
     /// The optional local LLM the agent can offload light work to.
     pub local_llm: LocalLlm,
@@ -281,12 +289,17 @@ impl Settings {
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LocalSettings {
-    /// Override which agent CLI usagi drives for this project.
+    /// Override which agent CLI usagi drives for this project. An unrecognised
+    /// stored value degrades to `None` (defer to the global setting) rather than
+    /// failing the whole file — see [`crate::domain::serde_fallback`].
+    #[serde(deserialize_with = "crate::domain::serde_fallback::or_default")]
     pub agent_cli: Option<AgentCli>,
     /// Override whether desktop notifications are shown for this project.
     pub notifications_enabled: Option<bool>,
     /// Which ref new session worktrees branch from in this repository. `None`
-    /// defers to the default ([`BranchSource::Remote`]).
+    /// defers to the default ([`BranchSource::Remote`]). An unrecognised stored
+    /// value degrades to `None`.
+    #[serde(deserialize_with = "crate::domain::serde_fallback::or_default")]
     pub default_branch_source: Option<BranchSource>,
     /// The branch new session worktrees are cut from in this repository. `None`
     /// means "use the repository's detected default branch" (e.g. `main`); a

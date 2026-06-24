@@ -266,14 +266,22 @@ impl PtySession {
 
     /// Resize the PTY (and its screen grid) to `rows`×`cols`. Best-effort: a
     /// failure to inform the kernel is ignored, the grid is resized regardless.
+    ///
+    /// The kernel resize and the grid `set_size` happen under the parser lock as
+    /// one step. The reader thread parses PTY output while holding that same
+    /// lock, so informing the kernel *before* taking it would let reflowed output
+    /// (produced for the new size) be parsed into the still-old grid in the
+    /// window between the two calls, corrupting the display until the next
+    /// refresh. Holding the lock across both keeps the reader from observing a
+    /// size mismatch.
     pub fn resize(&mut self, rows: u16, cols: u16) {
-        let _ = self.master.resize(PtySize {
-            rows,
-            cols,
-            pixel_width: 0,
-            pixel_height: 0,
-        });
         if let Ok(mut parser) = self.parser.lock() {
+            let _ = self.master.resize(PtySize {
+                rows,
+                cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            });
             parser.screen_mut().set_size(rows, cols);
         }
     }

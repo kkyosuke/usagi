@@ -20,10 +20,26 @@ use crate::infrastructure::workspace_store::WorkspaceStore;
 /// unregistered, the session branch is dropped, and any copied files are
 /// deleted, regardless of uncommitted changes. Loose files are left untouched.
 ///
-/// Called at the start of [`create`](super::create) and [`remove`](super::remove)
-/// so the tree never drifts from the recorded state. Returns the stray
-/// directories that were removed.
+/// Returns the stray directories that were removed.
+///
+/// This is the public, self-locking entry point: it acquires the workspace
+/// store lock for the duration of the scan-and-prune so it never races a
+/// concurrent writer. [`create`](super::create) and [`remove`](super::remove)
+/// already hold that lock across their whole operation and call
+/// [`reconcile_locked`] directly instead, so the load-and-destroy here cannot
+/// delete a worktree another process has built but not yet recorded.
 pub fn reconcile(workspace_root: &Path) -> Result<Vec<PathBuf>> {
+    let store = WorkspaceStore::new(workspace_root);
+    let _lock = store.lock()?;
+    reconcile_locked(workspace_root)
+}
+
+/// Reconcile assuming the caller already holds the workspace store lock (see
+/// [`WorkspaceStore::lock`]). [`create`](super::create) and
+/// [`remove`](super::remove) hold the lock across reconcile → build/teardown →
+/// record so the whole sequence is serialised against other usagi processes;
+/// they call this directly to avoid re-acquiring the non-reentrant lock.
+pub(super) fn reconcile_locked(workspace_root: &Path) -> Result<Vec<PathBuf>> {
     let sessions_base = workspace_root.join(STATE_DIR).join("sessions");
     if !sessions_base.is_dir() {
         return Ok(Vec::new());

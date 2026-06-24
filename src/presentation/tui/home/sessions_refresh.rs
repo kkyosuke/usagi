@@ -48,9 +48,13 @@ impl SessionsRefreshHandle {
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Option<Vec<SessionRecord>>> {
-        self.shared
-            .lock()
-            .expect("sessions refresh handle mutex poisoned")
+        // Recover a poisoned lock rather than propagating the panic. This handle
+        // is read by the TUI event loop every frame while the terminal is in raw
+        // / alternate-screen mode; escalating a poison here would crash the UI
+        // with the terminal left in a broken state. The same never-crash-on-
+        // poison policy the terminal pool documents and relies on; the slot only
+        // guards a `replace` / `take`, so a stale reading is the worst outcome.
+        self.shared.lock().unwrap_or_else(|p| p.into_inner())
     }
 }
 
@@ -67,6 +71,24 @@ mod tests {
             worktrees: Vec::new(),
             created_at: chrono::Utc::now(),
         }]
+    }
+
+    #[test]
+    fn lock_recovers_from_a_poisoned_mutex_instead_of_crashing() {
+        // A thread that panics while holding the lock poisons the mutex. The
+        // handle must still hand back a usable guard (recovering the inner value)
+        // rather than propagating the poison and crashing the TUI event loop.
+        let handle = SessionsRefreshHandle::new();
+        handle.set(sessions("before"));
+        let clone = handle.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = clone.shared.lock().unwrap();
+            panic!("poison the mutex");
+        })
+        .join();
+        // The slot is still readable and holds the last value written.
+        let taken = handle.take();
+        assert_eq!(taken.as_ref().map(|s| s[0].name.as_str()), Some("before"));
     }
 
     #[test]

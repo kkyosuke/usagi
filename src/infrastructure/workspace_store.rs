@@ -237,6 +237,28 @@ mod tests {
     }
 
     #[test]
+    fn load_degrades_an_unknown_branch_status_instead_of_failing() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = WorkspaceStore::new(dir.path());
+        fs::create_dir_all(store.dir()).unwrap();
+        // A state.json written by a *newer* usagi carries a worktree status this
+        // build does not know. The whole session list must still load: the
+        // unknown status degrades to the default (`New`, re-derived from git on
+        // the next refresh) rather than failing every recorded session.
+        fs::write(
+            store.state_path(),
+            r#"{"version":1,"sessions":[{"name":"feature","root":"/repo/.usagi/sessions/feature",
+                "worktrees":[{"branch":"feature","path":"/repo/.usagi/sessions/feature",
+                "head":"deadbee","status":"teleported","updated_at":"2026-01-01T00:00:00Z"}],
+                "created_at":"2026-01-01T00:00:00Z"}],"updated_at":"2026-01-01T00:00:00Z"}"#,
+        )
+        .unwrap();
+        let state = store.load().unwrap().unwrap();
+        assert_eq!(state.sessions.len(), 1);
+        assert_eq!(state.sessions[0].worktrees[0].status, BranchStatus::New);
+    }
+
+    #[test]
     fn load_errors_on_corrupt_json() {
         let dir = tempfile::tempdir().unwrap();
         let store = WorkspaceStore::new(dir.path());

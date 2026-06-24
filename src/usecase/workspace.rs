@@ -7,6 +7,10 @@ use crate::infrastructure::storage::Storage;
 
 /// Register a new workspace. Fails if the name is already taken.
 pub fn add(storage: &Storage, name: &str, path: impl Into<PathBuf>) -> Result<Workspace> {
+    // Hold the cross-process lock across the whole read-modify-write so a
+    // concurrent writer cannot read the same list and clobber our registration
+    // (or both pass the duplicate-name guard for the same name).
+    let _lock = storage.lock()?;
     let mut workspaces = storage.load_workspaces()?;
     if workspaces.iter().any(|w| w.name == name) {
         bail!("workspace '{name}' already exists");
@@ -26,6 +30,7 @@ pub fn list(storage: &Storage) -> Result<Vec<Workspace>> {
 
 /// Remove a workspace by name. Fails if it does not exist.
 pub fn remove(storage: &Storage, name: &str) -> Result<()> {
+    let _lock = storage.lock()?;
     let mut workspaces = storage.load_workspaces()?;
     let before = workspaces.len();
     workspaces.retain(|w| w.name != name);
@@ -37,6 +42,7 @@ pub fn remove(storage: &Storage, name: &str) -> Result<()> {
 
 /// Update a workspace's last-used time to now.
 pub fn touch(storage: &Storage, name: &str) -> Result<Workspace> {
+    let _lock = storage.lock()?;
     let mut workspaces = storage.load_workspaces()?;
     let Some(workspace) = workspaces.iter_mut().find(|w| w.name == name) else {
         bail!("workspace '{name}' not found");

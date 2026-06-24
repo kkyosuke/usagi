@@ -31,7 +31,7 @@ presentation ──> usecase ──> domain
 
 | 層 | 責務 |
 |---|---|
-| `domain/` | 外部依存のない純粋なエンティティ（`Workspace` / `Settings` / `WorkspaceState` / `Issue` など） |
+| `domain/` | 他層に依存しない純粋なエンティティ（`Workspace` / `Settings` / `WorkspaceState` / `Issue` など）。永続化のための `serde` 派生と時刻の `chrono` のみ外部クレートとして許容する（[依存ルール](#依存ルール)参照） |
 | `usecase/` | ビジネスロジック（初期化・状態同期・設定解決・セッション作成・依存チェック・issue 管理・ローカル LLM 導入） |
 | `infrastructure/` | Git 操作・各 JSON ファイルの永続化・シェル起動などの外部連携 |
 | `presentation/` | CLI ルーティング・TUI 描画・TUI 内コマンド・MCP サーバ |
@@ -44,9 +44,11 @@ src/
 ├── lib.rs                      # クレートルート（層モジュールの公開）
 ├── test_support.rs             # テスト用ヘルパ
 │
-├── domain/                     # 純粋なエンティティ（外部依存なし）
+├── domain/                     # 純粋なエンティティ（他層非依存。永続化用の serde・時刻の chrono のみ許容）
 │   ├── agent_phase.rs          # Agent のライフサイクル phase（Ready / Running / Waiting / Ended）
+│   ├── agent_feature.rs        # Agent CLI ごとの機能サポート行列の SSoT（exhaustive match で新 CLI 追加を強制）
 │   ├── repository.rs           # Git URL パース・ディレクトリ名導出
+│   ├── serde_fallback.rs       # 未知の enum 値を default に縮退させる serde ヘルパ（or_default。1 フィールドの不正値で settings.json/state.json 全体の読み込みを失敗させない）
 │   ├── settings.rs             # Settings / Theme / AgentCli / LocalLlm、LocalSettings（with_local で上書き解決）・起動ポリシー agent_wiring（純データ。起動コマンド生成は infrastructure/agent のアダプタが担う）
 │   ├── agent.rs                # Agent port（usagi が agent に求める IF：launch_command）・AgentWiring
 │   ├── workspace.rs            # グローバル登録エントリ Workspace
@@ -98,7 +100,7 @@ src/
 │   └── memory_store.rs         # <repo>/.usagi/memory/ の markdown + MEMORY.md + index.json（MemoryStore）
 │
 └── presentation/               # CLI ルーティング・TUI・MCP
-    ├── cli/                    # サブコマンド（init / hop / status / config / doctor / issue / memory / mcp / llm_mcp / agent_phase（隠し・フック用））
+    ├── cli/                    # サブコマンド（init / hop / status / config / doctor / feature（Agent CLI の機能サポート表）/ issue / memory / mcp / llm_mcp / agent_phase（隠し・フック用））
     ├── mcp/                    # MCP サーバ（JSON-RPC 2.0 フレーミングを共有）
     │   ├── mod.rs              # 共有プロトコル（dispatch_line / stdio serve ループ / レスポンス整形 / parse_args・to_pretty / McpService）
     │   ├── usagi.rs            # 統合 usagi サーバ（UsagiMcpServer）。issue/memory サーバと session サーバを合成し公開
@@ -130,8 +132,8 @@ src/
 
 ## 依存ルール
 
-- `domain/` は他層・外部クレートに依存しない（純粋なエンティティのみ）。
-- 依存方向を逆流させない（例: `domain` から `infrastructure` を参照しない）。
+- `domain/` は**他層に依存しない**（`usecase` / `infrastructure` / `presentation` を参照しない）。外部クレートは、永続化フォーマットのための `serde`（`Serialize` / `Deserialize` 派生）と時刻表現の `chrono` に限って許容する。UI フレームワーク（`crossterm` / `console`）やプロセス起動・git・ファイル I/O などの副作用は持ち込まない。
+- 依存方向を逆流させない（例: `domain` から `infrastructure` を参照しない、`infrastructure` から `usecase` を参照しない）。
 - `presentation/` と `usecase/` は `infrastructure/` を利用してよいが、`infrastructure/` は上位層を知らない。
 - 各 TUI 画面は `state.rs`（状態）・`ui.rs`（描画）・`event.rs`（イベントループ）に分離し、
   ホーム画面はさらにコマンド解析/補完を `command/` に分離する。

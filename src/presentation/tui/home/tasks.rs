@@ -256,7 +256,13 @@ impl TaskHandle {
     }
 
     fn lock(&self) -> MutexGuard<'_, Board> {
-        self.shared.lock().expect("task handle mutex poisoned")
+        // Recover a poisoned lock rather than propagating the panic. This board
+        // is read by the TUI event loop while the terminal is in raw /
+        // alternate-screen mode; escalating a poison here would crash the UI with
+        // the terminal left broken. The same never-crash-on-poison policy the
+        // terminal pool documents — the lock only guards `Vec` pushes/finds and
+        // an integer bump, so a recovered guard is safe to keep using.
+        self.shared.lock().unwrap_or_else(|p| p.into_inner())
     }
 
     /// Register a task for `target` as begun (running) at `at`, returning its id
@@ -348,6 +354,27 @@ mod tests {
         assert!(!handle.is_active(now));
         assert!(handle.view(now).is_empty());
         assert!(handle.drain_completed().is_empty());
+    }
+
+    #[test]
+    fn lock_recovers_from_a_poisoned_mutex_instead_of_crashing() {
+        // A thread that panics while holding the board lock poisons the mutex.
+        // The handle must still hand back a usable guard rather than propagating
+        // the poison and crashing the TUI event loop that reads the board.
+        let handle = TaskHandle::new();
+        let id = handle.begin(TaskKind::CreateSession, "sess");
+        let clone = handle.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = clone.shared.lock().unwrap();
+            panic!("poison the mutex");
+        })
+        .join();
+        // The board is still usable: the previously-begun task is observable and
+        // can be completed without a crash.
+        let now = Instant::now();
+        assert!(handle.is_active(now));
+        handle.complete_at(id, true, completion(), now);
+        assert!(!handle.drain_completed().is_empty());
     }
 
     #[test]

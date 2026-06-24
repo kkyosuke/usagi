@@ -536,11 +536,15 @@ fn pump_input(
                 MouseEventKind::Moved => {
                     *hover = pane_cell(mouse.column, mouse.row, geo);
                 }
-                // The wheel scrolls the history when it is over the terminal
-                // pane; the view shifts, so any selection is dropped.
+                // The wheel scrolls the history only when the pointer is over the
+                // terminal pane; the view shifts, so any selection is dropped.
+                // Hit-test both axes through `pane_cell` (the same test the click
+                // and hover arms use) — a column-only check let the wheel scroll
+                // the pane while the pointer was above it (the tab row) or below
+                // its last line.
                 kind => {
                     if let Some(delta) = wheel_delta(kind) {
-                        if (mouse.column as usize) >= geo.origin_col as usize {
+                        if pane_cell(mouse.column, mouse.row, geo).is_some() {
                             *selection = None;
                             apply_scroll(scrollback, delta);
                         }
