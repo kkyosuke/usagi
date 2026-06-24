@@ -38,6 +38,7 @@ use serde::Deserialize;
 
 use super::util::{same_dir, shell_single_quote};
 use crate::domain::agent::{Agent, AgentWiring};
+use crate::domain::settings::AgentCli;
 
 /// Codex hook events wired back into usagi, paired with the phase each reports.
 ///
@@ -231,7 +232,8 @@ impl CodexAgent {
     /// The Codex adapter (`codex`, transcripts under `~/.codex`).
     pub fn new() -> Self {
         Self {
-            program: "codex",
+            // Program name sourced from the domain SSoT (`AgentCli::command`).
+            program: AgentCli::Codex.command(),
             home_subdir: ".codex",
         }
     }
@@ -239,7 +241,7 @@ impl CodexAgent {
     /// The codex-fugu adapter (`codex-fugu`, transcripts under `~/.codex-fugu`).
     pub fn fugu() -> Self {
         Self {
-            program: "codex-fugu",
+            program: AgentCli::CodexFugu.command(),
             home_subdir: ".codex-fugu",
         }
     }

@@ -17,6 +17,7 @@ use serde::Serialize;
 
 use super::util::shell_single_quote;
 use crate::domain::agent::{Agent, AgentWiring};
+use crate::domain::settings::AgentCli;
 
 /// One MCP server entry: the program to run and its arguments.
 #[derive(Serialize)]
@@ -184,7 +185,9 @@ impl ClaudeAgent {
 
 impl Agent for ClaudeAgent {
     fn program(&self) -> &'static str {
-        "claude"
+        // The program name lives once in the domain (`AgentCli::command`); the
+        // adapter reads it from there rather than re-spelling the literal.
+        AgentCli::Claude.command()
     }
 
     fn launch_command(
