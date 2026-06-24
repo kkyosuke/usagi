@@ -222,7 +222,7 @@ src/
 └── presentation/      # CLI/TUI インターフェース
 tests/                 # 統合テスト
 document/              # プロジェクトドキュメント（仕様・規約。開発者 + AI 向け）
-.agents/               # AI エージェント固有の作業手順（CLAUDE.md/GEMINI.md から参照）
+.agents/               # AI エージェント固有の作業手順（CLAUDE.md/AGENTS.md/GEMINI.md から参照）
 ```
 
 > `document/` は開発者・AI の双方が読むプロジェクト仕様と[開発規約](document/06-conventions.md)、`.agents/` は AI に守らせる作業手順（worktree 運用・PR の進め方など）を置きます。仕様の目次は [document/README.md](document/README.md) を参照してください。
