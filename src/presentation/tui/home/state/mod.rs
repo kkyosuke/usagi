@@ -1290,6 +1290,10 @@ impl HomeState {
             .registry
             .complete(self.focus_prompt.value(), CommandScope::Session);
         self.focus_prompt.set_value(completion.input.clone());
+        if !completion.candidates.is_empty() {
+            self.log
+                .push(LogLine::output(completion.candidates.join("  ")));
+        }
         completion
     }
 
