@@ -11,11 +11,10 @@ pub mod ui;
 use anyhow::Result;
 use console::Term;
 
-use crate::domain::workspace::Workspace;
 use crate::infrastructure::storage::Storage;
 use crate::presentation::tui::home;
 use crate::presentation::tui::term_reader::TermKeyReader;
-use crate::usecase::workspace;
+use crate::usecase::workspace::{self, WorkspaceOverview};
 
 pub use event::Outcome;
 
@@ -26,8 +25,8 @@ use state::ProjectList;
 /// the testable event loop in [`event`]. Assumes the alternate screen is
 /// already active.
 pub fn run(term: &Term) -> Result<Outcome> {
-    let (list, notice) = match load_workspaces() {
-        Ok(workspaces) => (ProjectList::new(workspaces), None),
+    let (list, notice) = match load_overviews() {
+        Ok(overviews) => (ProjectList::new(overviews), None),
         Err(e) => (
             ProjectList::new(Vec::new()),
             Some(format!("Failed to load projects: {e}")),
@@ -45,8 +44,9 @@ pub fn run(term: &Term) -> Result<Outcome> {
     })
 }
 
-/// Loads the registered workspaces, most recently used first.
-fn load_workspaces() -> Result<Vec<Workspace>> {
+/// Loads the registered workspaces (most recently used first) with their
+/// session and open-issue counts.
+fn load_overviews() -> Result<Vec<WorkspaceOverview>> {
     let storage = Storage::open_default()?;
-    workspace::list(&storage)
+    workspace::overviews(&storage)
 }

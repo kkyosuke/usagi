@@ -1,4 +1,5 @@
 pub mod agent_phase;
+pub mod clean;
 pub mod config;
 pub mod doctor;
 pub mod feature;

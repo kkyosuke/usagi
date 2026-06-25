@@ -21,6 +21,15 @@ enum Commands {
         #[arg(value_enum)]
         phase: usagi::presentation::cli::agent_phase::Phase,
     },
+    /// Clean up stale session worktrees by launching an AI agent in the background
+    Clean {
+        /// Report the worktrees the agent would remove without deleting anything
+        #[arg(long)]
+        dry_run: bool,
+        /// Override the configured agent CLI for this run (claude / codex / codex-fugu / gemini)
+        #[arg(long, value_name = "NAME")]
+        agent: Option<String>,
+    },
     /// Show usagi's configuration (or edit it with --edit)
     Config {
         /// Open the configuration file in $EDITOR and validate it on save
@@ -95,8 +104,10 @@ fn main() -> anyhow::Result<()> {
     // No subcommand behaves the same as `usagi hop`.
     let command = cli.command.unwrap_or(Commands::Hop);
 
+    let name = command_name(&command);
     let result = match command {
         Commands::AgentPhase { phase } => usagi::presentation::cli::agent_phase::run(phase),
+        Commands::Clean { dry_run, agent } => usagi::presentation::cli::clean::run(dry_run, agent),
         Commands::Config { edit } => usagi::presentation::cli::config::run(edit),
         Commands::Doctor { fix } => usagi::presentation::cli::doctor::run(fix),
         Commands::Feature => usagi::presentation::cli::feature::run(),
@@ -111,10 +122,43 @@ fn main() -> anyhow::Result<()> {
         Commands::Status => usagi::presentation::cli::status::run(),
     };
 
+    trace_command(name, result.is_ok());
     if let Err(error) = &result {
         log_error(error);
     }
     result
+}
+
+/// The stable name a subcommand is traced under (its `usagi <name>` word). The
+/// `mcp` / `llm-mcp` long-running servers are excluded: they run for a whole
+/// session and would only ever record one open-ended "still running" line.
+fn command_name(command: &Commands) -> Option<&'static str> {
+    match command {
+        Commands::AgentPhase { .. } => Some("agent-phase"),
+        Commands::Clean { .. } => Some("clean"),
+        Commands::Config { .. } => Some("config"),
+        Commands::Doctor { .. } => Some("doctor"),
+        Commands::Feature => Some("feature"),
+        Commands::Hop => Some("hop"),
+        Commands::Init { .. } => Some("init"),
+        Commands::Issue { .. } => Some("issue"),
+        Commands::Memory { .. } => Some("memory"),
+        Commands::Run { .. } => Some("run"),
+        Commands::Status => Some("status"),
+        Commands::LlmMcp { .. } | Commands::Mcp => None,
+    }
+}
+
+/// Best-effort: record the finished CLI command (and whether it succeeded) to the
+/// operation trace, when tracing is enabled. A no-op for the long-running servers
+/// and whenever tracing is off.
+fn trace_command(name: Option<&'static str>, ok: bool) {
+    use usagi::domain::trace::{TraceCategory, TraceEvent};
+    if let Some(name) = name {
+        usagi::infrastructure::trace_log::TraceLog::record(
+            TraceEvent::now(TraceCategory::Cli, name).with_detail(if ok { "ok" } else { "error" }),
+        );
+    }
 }
 
 /// Best-effort: append `error` (with its full cause chain) to today's log file
