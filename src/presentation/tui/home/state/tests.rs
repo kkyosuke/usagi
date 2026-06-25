@@ -1180,7 +1180,7 @@ fn focus_prompt_completes_command_arguments_and_lists_candidates() {
     let mut state = state();
     state.enter_focus(1);
     // `man ` completes its argument against the command names — ambiguous here,
-    // so the candidates are listed in the log (mirroring the Overview line).
+    // so the candidates are listed in the log (mirroring the palette line).
     for c in "man ".chars() {
         state.focus_prompt_mut().insert(c);
     }
