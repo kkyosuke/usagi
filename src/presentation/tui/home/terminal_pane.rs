@@ -16,7 +16,8 @@
 //! pane stays alive in the pool — there the user moves between sessions
 //! (`↑`/`↓`), between this session's tabs (`←`/`→`), re-attaches (`Enter`), adds a
 //! pane (`t`), or zooms further out to 統括 (`Ctrl-O`). `Ctrl-N`/`Ctrl-P` switch to
-//! the next / previous tab in place ([`PaneStep::NextTab`] / [`PaneStep::PrevTab`]);
+//! the next / previous tab in place ([`PaneStep::NextTab`] / [`PaneStep::PrevTab`]),
+//! and a left click on a tab chip jumps straight to it ([`PaneStep::ToTab`]);
 //! `Ctrl-T` zooms out to 在席 (Focus) — the session's action menu — by returning
 //! [`PaneStep::ToFocus`] (every pane stays alive in the pool); `Ctrl-G` adds an
 //! agent tab ([`PaneStep::NewAgentTab`]) and `Ctrl-W` closes the active tab
@@ -75,6 +76,10 @@ pub enum PaneStep {
     NextTab,
     /// `Ctrl-P`: switch to the previous tab without leaving 没入.
     PrevTab,
+    /// A left click on a tab chip: switch to that (0-based) tab without leaving
+    /// 没入. Like [`NextTab`](Self::NextTab) / [`PrevTab`](Self::PrevTab), the
+    /// caller makes it active and re-drives the pane.
+    ToTab(usize),
     /// `Ctrl-T`: zoom out to 在席 (Focus) — the session's action menu — leaving
     /// every pane alive in the pool. Adding a terminal is then a menu choice.
     ToFocus,
@@ -392,8 +397,10 @@ fn wait(pty: &PtySession, drawn_gen: u64, redraw_deadline: Option<Instant>) -> R
 /// left-button drag builds a text `selection` instead, and releasing it copies
 /// the selected text to the clipboard (see [`copy_selection`]); a left click with
 /// no drag opens a link under the pointer in the default browser (see
-/// [`open_clicked_url`]). Button-less motion updates `hover` so the link under
-/// the pointer lights up. `Ctrl-O` detaches to 切替 ([`PaneStep::Detach`]),
+/// [`open_clicked_url`]); a left click on a tab chip switches to that tab
+/// ([`PaneStep::ToTab`]; see [`ui::attached_tab_at`]). Button-less motion updates
+/// `hover` so the link under the pointer lights up. `Ctrl-O` detaches to 切替
+/// ([`PaneStep::Detach`]),
 /// leaving every pane alive in the pool; `Ctrl-N` / `Ctrl-P` switch to the next /
 /// previous tab in place ([`PaneStep::NextTab`] / [`PaneStep::PrevTab`]);
 /// `Ctrl-T` zooms out to 在席 (Focus) ([`PaneStep::ToFocus`]), leaving every pane
@@ -523,9 +530,15 @@ fn pump_input(
                 pty.write(&encode_paste(&text, pty.bracketed_paste()))?;
             }
             Event::Mouse(mouse) => match mouse.kind {
-                // A left press starts a fresh selection at the clicked cell;
-                // pressing outside the pane just clears any existing one.
+                // A left click on a tab chip switches to that tab in place, like
+                // `Ctrl-N` / `Ctrl-P`; otherwise it starts a fresh selection at
+                // the clicked cell (clearing any existing one when outside the pane).
                 MouseEventKind::Down(MouseButton::Left) => {
+                    if let Some(tab) = ui::attached_tab_at(state, mouse.column, mouse.row, geo) {
+                        *scrollback = 0;
+                        *selection = None;
+                        return Ok(Some(PaneStep::ToTab(tab)));
+                    }
                     *selection = pane_cell(mouse.column, mouse.row, geo).map(Selection::new);
                 }
                 // Dragging the left button stretches the selection's loose end.

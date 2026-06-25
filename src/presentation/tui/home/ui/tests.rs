@@ -1377,6 +1377,95 @@ fn attached_header_shows_the_root_note_when_the_root_is_active() {
     assert!(header.contains("workspace root"));
 }
 
+/// Attach a session with a two-tab strip (`agent` / `terminal`) whose active tab
+/// is `active`, plus the 没入 geometry for a 120×24 terminal — wide enough that the
+/// right pane shows both chips in full, the fixtures the `attached_tab_at` click
+/// tests share.
+fn attached_with_tabs(active: usize) -> (HomeState, TerminalGeometry) {
+    let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
+    state.enter_focus(1);
+    state.show_attached();
+    state.set_terminal_tabs(vec!["agent".to_string(), "terminal".to_string()], active);
+    (state, attached_geometry(24, 120, Sidebar::Full))
+}
+
+/// The 0-based screen column of the chip text `needle` (e.g. `"2 terminal"`), read
+/// from the rendered chips row so the click tests target where it is actually
+/// drawn rather than a hand-computed indent.
+fn chip_column(state: &HomeState, geo: TerminalGeometry, needle: &str) -> u16 {
+    let rows = right_pane_contents(state, geo.cols as usize, 8);
+    let chips = console::strip_ansi_codes(&rows[0]).into_owned();
+    let rel = chips.find(needle).expect("chip present in the strip row");
+    geo.origin_col + rel as u16
+}
+
+#[test]
+fn attached_tab_at_switches_to_a_clicked_inactive_tab() {
+    let (state, geo) = attached_with_tabs(0);
+    let col = chip_column(&state, geo, "2 terminal");
+    let chips_row = geo.origin_row - super::TAB_BAR_ROWS as u16;
+    // A click on the second chip (the inactive one) selects tab index 1.
+    assert_eq!(attached_tab_at(&state, col, chips_row, geo), Some(1));
+    // The underline marker row below the chips is part of the same target.
+    assert_eq!(
+        attached_tab_at(&state, col, geo.origin_row - 1, geo),
+        Some(1)
+    );
+}
+
+#[test]
+fn attached_tab_at_ignores_a_click_on_the_active_tab() {
+    let (state, geo) = attached_with_tabs(0);
+    let col = chip_column(&state, geo, "1 agent");
+    let chips_row = geo.origin_row - super::TAB_BAR_ROWS as u16;
+    // Clicking the already-active tab is a no-op, so selection handling keeps it.
+    assert_eq!(attached_tab_at(&state, col, chips_row, geo), None);
+}
+
+#[test]
+fn attached_tab_at_ignores_clicks_off_the_chips() {
+    let (state, geo) = attached_with_tabs(0);
+    let chips_row = geo.origin_row - super::TAB_BAR_ROWS as u16;
+    // The indent before the first chip (the pane's left edge) hits no tab.
+    assert_eq!(
+        attached_tab_at(&state, geo.origin_col, chips_row, geo),
+        None
+    );
+    // A column left of the pane is outside the strip entirely.
+    assert_eq!(attached_tab_at(&state, 0, chips_row, geo), None);
+    // A row below the strip is the terminal body, not a tab.
+    let col = chip_column(&state, geo, "2 terminal");
+    assert_eq!(attached_tab_at(&state, col, geo.origin_row, geo), None);
+}
+
+#[test]
+fn attached_tab_at_is_none_without_a_published_strip() {
+    // Attached but no tabs published yet: there is nothing to click.
+    let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
+    state.enter_focus(1);
+    state.show_attached();
+    let geo = attached_geometry(24, 80, Sidebar::Full);
+    let chips_row = geo.origin_row - super::TAB_BAR_ROWS as u16;
+    assert_eq!(
+        attached_tab_at(&state, geo.origin_col, chips_row, geo),
+        None
+    );
+}
+
+#[test]
+fn attached_tab_at_is_none_when_the_strip_has_no_room_above_the_body() {
+    let (state, _) = attached_with_tabs(0);
+    // A pathological geometry whose body starts above `TAB_BAR_ROWS`: there is no
+    // strip row, so any click misses it instead of underflowing.
+    let geo = TerminalGeometry {
+        rows: 10,
+        cols: 40,
+        origin_col: 20,
+        origin_row: 1,
+    };
+    assert_eq!(attached_tab_at(&state, 25, 0, geo), None);
+}
+
 #[test]
 fn header_tab_rows_number_each_pane_beside_the_header_and_clip_to_width() {
     use super::super::terminal_tabs::TabStrip;
