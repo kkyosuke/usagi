@@ -305,13 +305,18 @@ pub(super) fn event_loop(
         // fallback pane (a one-line starting hint) would be too short to hold the
         // box, clipping its bottom border as the note grows with each newline.
         let attached_note = state.mode() == Mode::Attached && state.note_editor().is_some();
-        if (drives_surface && !input_in_right_pane) || attached_note {
-            let dir = selected_dir(&state, workspace_root);
-            if let Some(view) = (wiring.preview)(&dir, state.sidebar()) {
-                state.set_terminal_view(view);
-                let (labels, active) = (wiring.tab_op)(&dir, None);
-                state.set_terminal_tabs(labels, active);
-            }
+        let drive_now = (drives_surface && !input_in_right_pane) || attached_note;
+        // Refresh the surface for the mode that draws it, when the highlighted /
+        // focused session has a live snapshot. Folded into one `if let` (rather
+        // than a guard `if` wrapping an inner `if let`) so the whole refresh is a
+        // single covered branch.
+        if let Some((dir, view)) = drive_now
+            .then(|| selected_dir(&state, workspace_root))
+            .and_then(|dir| (wiring.preview)(&dir, state.sidebar()).map(|view| (dir, view)))
+        {
+            state.set_terminal_view(view);
+            let (labels, active) = (wiring.tab_op)(&dir, None);
+            state.set_terminal_tabs(labels, active);
         }
         // The task panel and the install rabbit animate on the clock, so a frame
         // showing either must repaint even when nothing else moved.

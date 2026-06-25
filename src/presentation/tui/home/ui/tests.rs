@@ -1576,6 +1576,22 @@ fn command_palette_frame_shows_hints_and_the_latest_response() {
 }
 
 #[test]
+fn command_palette_frame_caps_a_long_response_with_a_more_line() {
+    let mut state = state_with(Vec::new());
+    state.open_command_palette();
+    // Seed more than the cap (10) response lines, so the band shows only the tail
+    // with an `↑ N more` summary above it.
+    for i in 0..20 {
+        state.log_output(format!("out {i}"));
+    }
+    let frame = stripped(&command_palette_frame(40, 80, &state));
+    assert!(frame.contains("more"), "the overflow is summarised");
+    // The newest lines stay in view; the oldest are elided.
+    assert!(frame.contains("out 19"));
+    assert!(!frame.contains("out 0\n"));
+}
+
+#[test]
 fn input_line_differs_by_mode() {
     let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
     assert!(input_line(&state).contains("Pick a session"));
