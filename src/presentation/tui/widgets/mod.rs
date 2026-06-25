@@ -243,6 +243,110 @@ pub fn overlay_right(lines: &mut [String], top: usize, width: usize, block: &[St
     }
 }
 
+/// Returns the substring of `text` that begins at display column `at`, the
+/// counterpart to [`truncate_to_width`] (which keeps the columns *before* it).
+///
+/// ANSI escape sequences (zero display width) before the split are collected and
+/// prepended, so the slice keeps whatever colour was active there rather than
+/// losing it with the dropped head; the slice is closed with a [`RESET`] so its
+/// colour does not bleed past. A double-width glyph straddling the boundary is
+/// dropped whole rather than split. The empty string is returned when nothing
+/// remains past `at`.
+///
+/// Used by [`overlay_centered`] to keep the base columns to the *right* of a
+/// floating box, the way `truncate_to_width` keeps those to its left.
+fn slice_from_width(text: &str, at: usize) -> String {
+    let mut width = 0usize;
+    let mut prefix = String::new();
+    let mut out = String::new();
+    let mut started = false;
+    let mut chars = text.chars();
+    while let Some(ch) = chars.next() {
+        if ch == ESC {
+            let mut seq = String::from(ch);
+            for c in chars.by_ref() {
+                seq.push(c);
+                if ('\u{40}'..='\u{7e}').contains(&c) && c != '[' {
+                    break;
+                }
+            }
+            // Escapes before the split set the slice's opening colour; those
+            // within it are carried through verbatim.
+            if started {
+                out.push_str(&seq);
+            } else {
+                prefix.push_str(&seq);
+            }
+            continue;
+        }
+        let w = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if !started {
+            if width >= at {
+                started = true;
+            } else if width + w > at {
+                // A wide glyph straddling the boundary is dropped whole; the
+                // slice resumes after it.
+                width += w;
+                started = true;
+                continue;
+            }
+        }
+        if started {
+            out.push(ch);
+        }
+        width += w;
+    }
+    if out.is_empty() {
+        String::new()
+    } else {
+        format!("{prefix}{out}{RESET}")
+    }
+}
+
+/// Composites the pre-[`boxed`] `block` centred over `base` — horizontally and
+/// vertically — so the surrounding frame stays visible *around* the floating box
+/// instead of a black backdrop. Each box row replaces only the columns it
+/// spans; the base content to its left and right survives, and rows the box does
+/// not cover are left untouched.
+///
+/// This is how the `:` command palette floats over the workspace: unlike
+/// [`render_modal`] (which centres the box over an otherwise blank frame), the
+/// panes behind it keep showing. `block`'s rows are assumed equal width (as
+/// [`boxed`] produces). The block is skipped when it cannot fit (`block_w >
+/// width`) or is empty.
+pub fn overlay_centered(base: &mut [String], width: usize, block: &[String]) {
+    let block_w = block
+        .iter()
+        .map(|line| console::measure_text_width(line))
+        .max()
+        .unwrap_or(0);
+    if block_w == 0 || block_w > width {
+        return;
+    }
+    let left = centered_padding(width, block_w);
+    let right_start = left + block_w;
+    // Centre vertically over the frame, the same maths [`render_modal`] uses.
+    let top = base.len().saturating_sub(block.len()) / 2;
+    for (offset, segment) in block.iter().enumerate() {
+        let Some(row) = base.get_mut(top + offset) else {
+            break;
+        };
+        let kept_left = truncate_to_width(row, left);
+        let kept_left_w = console::measure_text_width(&kept_left);
+        let kept_right = slice_from_width(row, right_start);
+
+        let mut composed = kept_left;
+        if kept_left_w > 0 {
+            // Close any SGR the left cut left open so the box keeps its colours.
+            composed.push_str(RESET);
+        }
+        composed.push_str(&" ".repeat(left.saturating_sub(kept_left_w)));
+        composed.push_str(segment);
+        composed.push_str(&kept_right);
+        *row = composed;
+    }
+}
+
 /// A centred, green-bold screen title.
 pub fn title_line(width: usize, title: &str) -> String {
     style(centered(width, title)).green().bold().to_string()
@@ -649,6 +753,92 @@ mod tests {
         overlay_right(&mut lines, 1, 80, &["A".to_string(), "B".to_string()]);
         assert!(lines[1].ends_with('A'));
         assert_eq!(lines.len(), 2);
+    }
+
+    #[test]
+    fn slice_from_width_keeps_the_tail_with_its_colour() {
+        // Plain slice: the columns before `at` are dropped, the rest kept.
+        assert_eq!(
+            console::strip_ansi_codes(&slice_from_width("abcdef", 2)).into_owned(),
+            "cdef",
+        );
+        // Nothing remains past the end → the empty string.
+        assert_eq!(slice_from_width("abc", 5), "");
+        // A double-width glyph straddling the split is dropped whole, not halved.
+        assert_eq!(
+            console::strip_ansi_codes(&slice_from_width("あい", 1)).into_owned(),
+            "い",
+        );
+        // The colour active before the split is reapplied so the tail keeps it.
+        let styled = "\u{1b}[31mabcd\u{1b}[0m";
+        let tail = slice_from_width(styled, 2);
+        assert_eq!(console::strip_ansi_codes(&tail).into_owned(), "cd");
+        assert!(
+            tail.contains("\u{1b}[31m"),
+            "the colour before the split is carried onto the tail",
+        );
+    }
+
+    #[test]
+    fn overlay_centered_floats_a_box_keeping_the_surrounding_content() {
+        // The box is centred over the base; on the rows it spans the base columns
+        // to its left and right survive, and the rows it does not span are left
+        // untouched.
+        let mut base = vec!["L".repeat(20); 5];
+        let block = vec!["┌──┐".to_string(), "│xy│".to_string(), "└──┘".to_string()];
+        // block_w = 4, left = (20-4)/2 = 8; top = (5-3)/2 = 1, so rows 1..4 carry
+        // the box and rows 0 and 4 are untouched.
+        overlay_centered(&mut base, 20, &block);
+        assert_eq!(
+            base[0],
+            "L".repeat(20),
+            "the row above the box is untouched"
+        );
+        assert_eq!(
+            base[4],
+            "L".repeat(20),
+            "the row below the box is untouched"
+        );
+        for row in &base[1..4] {
+            let plain = console::strip_ansi_codes(row);
+            assert_eq!(
+                console::measure_text_width(&plain),
+                20,
+                "the row stays full width: {plain}",
+            );
+            assert!(plain.starts_with("LLLLLLLL"), "left content survives");
+            assert!(plain.ends_with("LLLLLLLL"), "right content survives");
+        }
+        assert!(console::strip_ansi_codes(&base[2]).contains("│xy│"));
+    }
+
+    #[test]
+    fn overlay_centered_pads_an_empty_base_row_up_to_the_box() {
+        // A blank base row has no left content to keep, so it pads straight to the
+        // box's left edge (no stray SGR reset) — covering the empty-left branch.
+        let mut base = vec![String::new()];
+        overlay_centered(&mut base, 10, &["XX".to_string()]);
+        // block_w = 2, left = (10-2)/2 = 4: four spaces then the box segment.
+        assert_eq!(base[0], format!("{}XX", " ".repeat(4)));
+    }
+
+    #[test]
+    fn overlay_centered_is_skipped_when_too_wide_or_empty_and_stops_past_the_last_row() {
+        // A block wider than the width is dropped, an empty block is a no-op, and a
+        // block taller than what remains stops at the end instead of panicking.
+        let mut base = vec!["keep".to_string()];
+        overlay_centered(&mut base, 3, &["WIDE".to_string()]);
+        overlay_centered(&mut base, 80, &[]);
+        assert_eq!(base[0], "keep");
+        // Three box rows over a single base row: row 0 is overlaid, the rest stop
+        // at the end of the base.
+        overlay_centered(
+            &mut base,
+            80,
+            &["A".to_string(), "B".to_string(), "C".to_string()],
+        );
+        assert!(console::strip_ansi_codes(&base[0]).contains('A'));
+        assert_eq!(base.len(), 1);
     }
 
     #[test]

@@ -1642,11 +1642,11 @@ fn note_editor_box_keeps_its_bottom_border_over_a_short_pane() {
 // --- input / footer by mode --------------------------------------------
 
 #[test]
-fn command_palette_frame_renders_the_prompt() {
+fn command_palette_renders_the_prompt() {
     let mut state = state_with(Vec::new());
     state.open_command_palette();
     state.push_char('m');
-    let frame = stripped(&command_palette_frame(24, 80, &state));
+    let frame = stripped(&render_frame(40, 80, &state));
     assert!(frame.contains('m'));
     assert!(frame.contains('❯'));
     // The palette is titled and footers its keys.
@@ -1655,7 +1655,7 @@ fn command_palette_frame_renders_the_prompt() {
 }
 
 #[test]
-fn command_palette_frame_draws_the_caret_without_shifting_the_text() {
+fn command_palette_draws_the_caret_without_shifting_the_text() {
     let mut state = state_with(Vec::new());
     state.open_command_palette();
     for c in "man".chars() {
@@ -1665,16 +1665,16 @@ fn command_palette_frame_draws_the_caret_without_shifting_the_text() {
     // The block caret recolours the character it sits on rather than inserting a
     // glyph, so the text reads intact whatever the caret position. (Where the
     // reverse-video cell lands is covered by `widgets::block_caret`'s own tests.)
-    let plain = stripped(&command_palette_frame(24, 80, &state));
+    let plain = stripped(&render_frame(40, 80, &state));
     assert!(plain.contains("❯ man"));
 }
 
 #[test]
-fn command_palette_frame_shows_hints_and_the_latest_response() {
+fn command_palette_shows_hints_and_the_latest_response() {
     let mut state = state_with(Vec::new());
     state.open_command_palette();
     // A bare prompt lists the workspace commands as hints.
-    let listed = stripped(&command_palette_frame(24, 80, &state));
+    let listed = stripped(&render_frame(40, 80, &state));
     assert!(listed.contains("workspace commands"));
     // After running a command its response shows in the band.
     state.open_command_palette();
@@ -1682,25 +1682,88 @@ fn command_palette_frame_shows_hints_and_the_latest_response() {
         state.push_char(c);
     }
     let _ = state.submit();
-    let ran = stripped(&command_palette_frame(40, 80, &state));
+    let ran = stripped(&render_frame(40, 80, &state));
     // The seeded usage hint is part of the response band's tail.
     assert!(ran.contains("man"));
 }
 
 #[test]
-fn command_palette_frame_caps_a_long_response_with_a_more_line() {
+fn command_palette_caps_a_long_response_with_a_more_line() {
     let mut state = state_with(Vec::new());
     state.open_command_palette();
-    // Seed more than the cap (10) response lines, so the band shows only the tail
+    // Seed more than the cap response lines, so the band shows only the tail
     // with an `↑ N more` summary above it.
     for i in 0..20 {
         state.log_output(format!("out {i}"));
     }
-    let frame = stripped(&command_palette_frame(40, 80, &state));
+    let frame = stripped(&render_frame(40, 80, &state));
     assert!(frame.contains("more"), "the overflow is summarised");
     // The newest lines stay in view; the oldest are elided.
     assert!(frame.contains("out 19"));
     assert!(!frame.contains("out 0\n"));
+}
+
+#[test]
+fn command_palette_keeps_a_constant_height_and_position() {
+    // The box must not jump as its content changes — a fixed-height modal centred
+    // over a constant-height frame keeps the same rows whether it shows a bare
+    // hint list or a long response (no layout shift while typing / running).
+    let border_rows = |f: &[String]| -> (Option<usize>, Option<usize>) {
+        let top = f
+            .iter()
+            .position(|r| console::strip_ansi_codes(r).contains('┌'));
+        let bottom = f
+            .iter()
+            .position(|r| console::strip_ansi_codes(r).contains('└'));
+        (top, bottom)
+    };
+
+    let mut bare = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
+    bare.open_command_palette();
+    let empty = render_frame(40, 80, &bare);
+
+    let mut busy = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
+    busy.open_command_palette();
+    for i in 0..20 {
+        busy.log_output(format!("line {i}"));
+    }
+    let full = render_frame(40, 80, &busy);
+
+    let (top, bottom) = border_rows(&empty);
+    assert!(top.is_some(), "the box renders");
+    assert_eq!(top, border_rows(&full).0, "the top border never moves");
+    assert_eq!(
+        bottom,
+        border_rows(&full).1,
+        "the bottom border never moves",
+    );
+}
+
+#[test]
+fn command_palette_floats_over_the_visible_workspace() {
+    // Unlike a full-screen modal, the palette is composited over the live frame,
+    // so the workspace shows around it instead of a black backdrop.
+    let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
+    state.open_command_palette();
+    state.push_char('m');
+    let frame = render_frame(40, 80, &state);
+    let joined = stripped(&frame);
+    // The palette box and its prompt are drawn …
+    assert!(joined.contains('┌'));
+    assert!(joined.contains("❯ m"));
+    // … and the workspace chrome behind it stays visible (the mode ladder and the
+    // workspace title), which a black full-screen modal would have hidden.
+    assert!(joined.contains("Switch"), "the mode ladder shows behind");
+    assert!(joined.contains("usagi"), "the workspace title shows behind");
+    // A row above the box still carries workspace content (it is not blanked).
+    let top = frame
+        .iter()
+        .position(|r| console::strip_ansi_codes(r).contains('┌'))
+        .expect("the box renders");
+    assert!(
+        (0..top).any(|r| !console::strip_ansi_codes(&frame[r]).trim().is_empty()),
+        "the workspace shows above the floating box",
+    );
 }
 
 #[test]
