@@ -500,18 +500,6 @@ pub(super) fn log_line(line: &LogLine, width: usize) -> String {
     }
 }
 
-/// Builds a `rows`-tall window pinned to the tail of the log, so the newest
-/// lines are always shown (like a terminal). The TUI never scrolls, so the
-/// window is always at the bottom. Used for the Overview results band.
-pub(super) fn log_tail(log: &[LogLine], width: usize, rows: usize) -> Vec<String> {
-    let start = log.len().saturating_sub(rows);
-    log[start..]
-        .iter()
-        .take(rows)
-        .map(|l| log_line(l, width))
-        .collect()
-}
-
 /// Builds the tab strip's two raw (unclipped) rows: one ` N label ` chip per
 /// pane (the active one reversed and bold, the rest dimmed) and the underline
 /// marker beneath the active chip. Each chip is numbered (1-based) to match the
@@ -1200,13 +1188,14 @@ pub(super) fn switch_preview(state: &HomeState, width: usize, rows: usize) -> Ve
     lines
 }
 
-/// The right pane's contents, by mode. Blank in 統括 (the user is on the command
-/// line); a preview of the would-be session screen in 切替; the session's action
-/// surface — a menu or a prompt, per [`SessionActionUi`] — in 在席; and the live
-/// embedded terminal in 没入 (a starting hint until the first snapshot arrives).
+/// The right pane's contents, by mode. A preview of the would-be session screen
+/// in 切替 (the default); the session's action surface — a menu or a prompt, per
+/// [`SessionActionUi`] — in 在席; and the live embedded terminal in 没入 (a
+/// starting hint until the first snapshot arrives).
 pub(super) fn right_pane_contents(state: &HomeState, right_w: usize, rows: usize) -> Vec<String> {
     // The Markdown preview, when open, takes over the right pane regardless of
-    // mode (it is opened from 統括 and captures the keyboard while shown).
+    // mode (it is opened from the `:` palette and captures the keyboard while
+    // shown).
     if let Some(preview) = state.preview() {
         return preview_pane(preview, right_w, rows);
     }
@@ -1215,7 +1204,6 @@ pub(super) fn right_pane_contents(state: &HomeState, right_w: usize, rows: usize
     // below, so editing / reading the note never switches the screen — the
     // preview / terminal stays visible behind the floating box.
     let mut base = match state.mode() {
-        Mode::Overview => Vec::new(),
         Mode::Switch => {
             // Collapsed to the rail, 切替's name input has no room inline in the
             // (5-column) list, so it takes over the wide right pane; at full width

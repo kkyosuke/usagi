@@ -29,12 +29,12 @@ use super::update::UpdateHandle;
 
 mod handlers;
 
-use handlers::{focus_key, note_editor_key, overview_key, switch_key};
+use handlers::{focus_key, note_editor_key, palette_key, switch_key};
 
 /// The byte `console` reports for `Ctrl-O` on the home screen: a bare control
 /// character (`0x0f`), since `console` only special-cases a handful of control
 /// keys and passes the rest through as [`Key::Char`]. `Ctrl-O` zooms out one
-/// engagement level (没入 → 切替 → 統括) everywhere on the screen.
+/// engagement level (没入 → 切替) on the screen.
 const CTRL_O: char = '\u{000f}';
 
 /// The bare control characters `console` reports for `Ctrl-N` (`0x0e`) and
@@ -150,30 +150,33 @@ pub enum Outcome {
 /// live (an agent/shell is running) it first raises a quit-confirmation modal so
 /// an accidental press does not drop running work — confirming it quits.
 ///
-/// The screen is a four-step engagement ladder:
+/// The screen is a three-step engagement ladder, with the workspace command
+/// line summoned on top as a `:` palette:
 ///
-/// - **統括 (Overview)** — the default. The bottom command line operates the
-///   whole workspace (`session` / `config` / `doctor` / `man` / …); results are
-///   appended to the log, rendered below the input. The right pane is blank.
-///   `Esc` is inert here (it does not back out to the project list); `Ctrl-O`
-///   opens Switch.
-/// - **切替 (Switch)** — pick a session in the left pane (entered from Overview
-///   via `session switch`, or from Focus / Attached via `Ctrl-O`). `↑`/`↓` (or
-///   `k`/`j`) move between sessions, `←`/`→` (or `h`/`l`, or `Ctrl-P`/`Ctrl-N`)
-///   move between the highlighted session's tabs, `Enter` focuses (attaching when
-///   the session is live), `t` opens the action surface to add a pane, `c`
-///   creates a session inline, `Esc` backs out to where it was opened from,
-///   `Ctrl-O` zooms further out to Overview.
+/// - **切替 (Switch)** — the default: pick a session in the left pane. `↑`/`↓`
+///   (or `k`/`j`) move between sessions, `←`/`→` (or `h`/`l`, or `Ctrl-P`/
+///   `Ctrl-N`) move between the highlighted session's tabs, `Enter` focuses
+///   (attaching when the session is live), `t` opens the action surface to add a
+///   pane, `c` creates a session inline, `:` summons the command palette. `Esc`
+///   is inert at the base Switch (the home screen is not left by backing out).
+///   Switch is also re-entered from Focus / Attached via `Ctrl-O`, where `Esc`
+///   then backs out to where it was opened from.
 /// - **在席 (Focus)** — a session is selected and operated in the right pane,
 ///   either as a menu of its runnable commands or a session-scoped prompt
 ///   (chosen by the [`SessionActionUi`] setting). Launching `terminal` / `agent`
-///   adds a pane and attaches it; `Esc` returns to Overview; `Ctrl-O` opens
-///   Switch; `Ctrl-P`/`Ctrl-N` move the focused session's active tab.
+///   adds a pane and attaches it; `Esc` returns to Switch; `Ctrl-O` opens
+///   Switch; `:` summons the command palette; `Ctrl-P`/`Ctrl-N` move the focused
+///   session's active tab.
 /// - **没入 (Attached)** — the embedded shell / agent is live in the right pane
 ///   and keys flow to it. The reserved keys are `Ctrl-O` (zoom out to Switch,
 ///   where panes are added) and `Ctrl-P`/`Ctrl-N` (switch to the previous / next
 ///   tab in place, without detaching); everything else, including `Esc`, goes to
 ///   the shell. The shell exiting returns to Focus.
+///
+/// The **command palette** (`:`, from Switch or Focus) floats the workspace
+/// command line over the panes (`session` / `config` / `doctor` / `man` / …);
+/// results render in its own band, `Esc` closes it, and a command with a
+/// transitioning effect closes it as it acts.
 ///
 /// The workspace root and every side-effecting hook the loop drives — appending
 /// run commands to history, dispatching background session create / remove,
@@ -212,7 +215,7 @@ pub(super) fn event_loop(
 ) -> Result<Outcome> {
     let workspace_root = wiring.workspace_root;
     let mut painter = FramePainter::new();
-    // What the last paint reflected, so an idle 統括 (Overview) tick whose badges
+    // What the last paint reflected, so an idle 切替 (Switch) tick whose badges
     // and update notice are unchanged can skip rebuilding and repainting the whole
     // frame. `force_paint` keeps the first frame — and the frame after any key —
     // always repainting.
@@ -314,15 +317,19 @@ pub(super) fn event_loop(
         // showing either must repaint even when nothing else moved.
         let now = Instant::now();
         let panel_animating = install_task::handle().is_active(now) || tasks.is_active(now);
-        // In 統括 (Overview) the right pane is blank, so an idle frame's only moving
-        // parts are the sidebar badges, the update notice, and those time-animated
-        // panels. When none changed since the last paint — and no key was just
-        // pressed (`force_paint`) and no background task just finished — skip
-        // rebuilding and repainting the whole frame. Every other mode (a live 切替
-        // preview, 在席, 没入) repaints as before, so a live pane is never frozen
-        // stale. The cheap per-frame state updates above still run, so the next
-        // paint (when something does change) is correct.
-        let skip_paint = state.mode() == Mode::Overview
+        // In a quiet base 切替 (Switch) — no live preview in the right pane and no
+        // command palette open — an idle frame's only moving parts are the sidebar
+        // badges, the update notice, and those time-animated panels. When none
+        // changed since the last paint — and no key was just pressed
+        // (`force_paint`) and no background task just finished — skip rebuilding
+        // and repainting the whole frame. Anything with a live pane (a 切替 preview
+        // of a running session, 在席, 没入) or the palette open repaints as before,
+        // so a live pane is never frozen stale. The cheap per-frame state updates
+        // above still run, so the next paint (when something does change) is
+        // correct.
+        let skip_paint = state.mode() == Mode::Switch
+            && state.terminal_view().is_none()
+            && !state.command_palette_open()
             && !force_paint
             && !completed_any
             && !refreshed
@@ -504,6 +511,20 @@ pub(super) fn event_loop(
             continue;
         }
 
+        // The workspace command palette (`:`), when open, captures every key:
+        // editing / completion / recall and `Enter` to run a command, `Esc` to
+        // close. It sits below the pure overlays above (a `man` / `session list`
+        // text dump it runs layers its modal on top of the palette), and above the
+        // sidebar toggle and per-mode dispatch (so `:`-typed text never leaks to
+        // the session list / focus surface beneath it).
+        if state.command_palette_open() {
+            let flow = palette_key(term, &mut state, &mut painter, key, wiring)?;
+            if let Flow::Quit = flow {
+                return Ok(Outcome::Quit);
+            }
+            continue;
+        }
+
         // `Ctrl-B` collapses / expands the left session sidebar from anywhere on
         // the (non-modal) screen. It is a pure view toggle, so it is handled here
         // before the per-mode dispatch rather than threaded through each handler.
@@ -514,18 +535,20 @@ pub(super) fn event_loop(
             continue;
         }
 
-        let flow = match state.mode() {
-            Mode::Overview => overview_key(term, &mut state, &mut painter, key, wiring)?,
-            Mode::Switch => switch_key(term, &mut state, &mut painter, key, wiring),
+        // The per-mode handlers never quit (only the command palette's `Enter` and
+        // the quit-confirm modal do — both handled above), so their `Flow` is
+        // discarded rather than matched for a now-dead `Quit` arm.
+        match state.mode() {
+            Mode::Switch => {
+                switch_key(term, &mut state, &mut painter, key, wiring);
+            }
             // 没入 (Attached) is driven inside `open_pane`, which always leaves it
             // (for 切替 or 在席) before returning — so the loop only ever observes
             // 在席 here. It shares the 在席 handler to keep the match total without a
             // separate, unreachable arm.
-            Mode::Focus | Mode::Attached => focus_key(term, &mut state, &mut painter, key, wiring),
-        };
-        match flow {
-            Flow::Continue => {}
-            Flow::Quit => return Ok(Outcome::Quit),
+            Mode::Focus | Mode::Attached => {
+                focus_key(term, &mut state, &mut painter, key, wiring);
+            }
         }
     }
 }
