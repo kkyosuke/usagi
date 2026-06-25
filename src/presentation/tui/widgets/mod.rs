@@ -16,7 +16,7 @@ pub mod text_input;
 
 pub use rabbit::{
     done_rabbit, farewell_lines, loading_rabbit, loading_rabbit_timed, multiplying_rabbits,
-    rabbit_art, rabbit_lines, running_rabbit, running_rabbit_width,
+    rabbit_lines, running_rabbit, running_rabbit_width,
 };
 
 use console::{style, Style};

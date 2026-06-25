@@ -64,6 +64,14 @@ const CTRL_S: char = '\u{0013}';
 /// so its `Ctrl-E` is intercepted there instead (see [`super::terminal_pane`]).
 const CTRL_E: char = '\u{0005}';
 
+/// The bare control character `console` reports for `Ctrl-^` (`Ctrl-Shift-6`,
+/// `0x1e`) on the home screen — the same passthrough as [`CTRL_O`]. It jumps to
+/// the previously focused session (vim's `Ctrl-^` / tmux's `last-window`),
+/// attaching it when live, so two sessions can be toggled between without going
+/// through 切替. 没入 (Attached) is driven inside the embedded-terminal loop, so
+/// its `Ctrl-^` is intercepted there instead (see [`super::terminal_pane`]).
+const CTRL_CARET: char = '\u{001e}';
+
 /// The callback 切替 uses to read (`None`) or navigate (`Some(nav)`) the
 /// highlighted session's tabs, returning the strip's labels and active index.
 /// Backed by the [`TerminalPool`](super::terminal_pool::TerminalPool) the pane
@@ -392,6 +400,14 @@ pub(super) fn event_loop(
         // A key was pressed: whatever it does to the state, repaint on the next
         // iteration (the skip above only applies to idle ticks that read no key).
         force_paint = true;
+
+        // Record the key press (and the mode it landed in) to the operation trace,
+        // so a session's navigation can be analysed after the fact. A no-op unless
+        // tracing is enabled, so the idle hot loop stays free.
+        crate::infrastructure::trace_log::TraceLog::record(
+            crate::domain::trace::TraceEvent::now(crate::domain::trace::TraceCategory::Tui, "key")
+                .with_detail(format!("{:?} {:?}", state.mode(), key)),
+        );
 
         // The quit-confirmation modal, when open, captures every key: `y` /
         // `Enter` (or a second `Ctrl-C`) confirms the close, `n` / `Esc` cancels.

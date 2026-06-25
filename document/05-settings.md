@@ -134,6 +134,7 @@ CLI からも設定を確認・編集できます（[3. コマンドリファレ
 | 環境変数 | 役割 |
 |---|---|
 | `USAGI_HOME` | グローバルデータディレクトリ（`workspaces.json` / `settings.json` の置き場）を上書きする。未設定なら `~/.usagi` |
+| `USAGI_TRACE` | 操作トレース（`logs/trace-YYYY-MM-DD.jsonl`）の記録を有効化する。空でも `0` でもない値で ON、未設定なら OFF（[data/01-global.md#logs操作トレース](data/01-global.md#logs操作トレース)） |
 
 ## 設定が効く場面
 

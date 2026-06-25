@@ -59,6 +59,25 @@ pub trait Agent: Send + Sync {
     /// [`has_resumable_session`](Self::has_resumable_session): what that finds,
     /// this clears. Best-effort — a CLI with no stored history does nothing.
     fn forget_session(&self, dir: &Path);
+
+    /// The command line that runs this CLI **headlessly** (non-interactive,
+    /// one-shot) on `prompt`, wiring usagi's MCP servers in per `wiring` so the
+    /// agent can drive usagi while it works, then exits when done.
+    ///
+    /// Unlike [`launch_command`](Self::launch_command) this never opens an
+    /// interactive session: it is built for `usagi clean`, which spawns it
+    /// detached in the background to let the agent autonomously triage and remove
+    /// stale session worktrees with no human at the keyboard. Because nobody is
+    /// there to answer them, each adapter passes its CLI's permission-bypass flag
+    /// so the agent can act (delete worktrees, run git) without approval prompts.
+    ///
+    /// The result is a single `sh -c`-ready line, mirroring `launch_command`'s
+    /// contract: every interpolated value — the `prompt` and the `wiring` paths —
+    /// is escaped via [`super::util::shell_single_quote`](crate::infrastructure)
+    /// so an apostrophe in a path or prompt cannot break out of the shell
+    /// argument. Lifecycle hooks are deliberately omitted: a headless run reports
+    /// no interactive phase, so there is nothing for usagi to watch.
+    fn headless_command(&self, wiring: &AgentWiring, prompt: &str) -> String;
 }
 
 /// usagi's wiring policy handed to an [`Agent`] adapter when it builds the launch

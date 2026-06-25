@@ -28,6 +28,8 @@ use chrome::{
     title_bar, update_banner,
 };
 use panes::{left_pane, right_pane_contents};
+// The embedded terminal pane (没入) maps a click to the tab under it through this.
+pub(super) use panes::attached_tab_at;
 
 use super::state::{HomeState, Mode};
 use crate::domain::settings::Sidebar;
@@ -374,10 +376,12 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
             &task_status_line(state.tasks(), width),
         );
     } else if let Some(latest) = state.update() {
-        // The update notice rides the two header rows (the centred title bar and
-        // mode ladder, whose right columns are blank), like the task status block,
-        // so it never collides with the right pane's preview / menu / live
-        // terminal — which the 切替 default now occupies.
+        // The update notice rides the two header rows (the title bar and mode
+        // ladder, whose centred content leaves the right columns free), like the
+        // task status block, so it never collides with the right pane's preview /
+        // menu / live terminal — which the 切替 default now occupies. The compact
+        // two-line block (message + version) fits the gap the fixed-width title
+        // name leaves.
         widgets::overlay_top_right(&mut lines, 0, width, &update_banner(&latest));
     }
 

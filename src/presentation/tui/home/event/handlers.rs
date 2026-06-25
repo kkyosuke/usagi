@@ -18,7 +18,9 @@ use super::super::command::Effect;
 use super::super::state::{HomeState, PaneExit, ReturnMode, ROOT_NAME};
 use super::super::terminal_tabs::TabNav;
 use super::super::ui;
-use super::{paint_now, selected_dir, Flow, Wiring, CTRL_E, CTRL_N, CTRL_O, CTRL_P, CTRL_S};
+use super::{
+    paint_now, selected_dir, Flow, Wiring, CTRL_CARET, CTRL_E, CTRL_N, CTRL_O, CTRL_P, CTRL_S,
+};
 
 /// Handle one key in the workspace command palette overlay (`:`): edit /
 /// complete / recall the workspace command line and run it on `Enter`,
@@ -331,6 +333,8 @@ pub(super) fn switch_key(
                 leave_switch(term, state, painter, wiring);
             }
         }
+        // Ctrl-^ jumps straight back to the previously focused session.
+        Key::Char(CTRL_CARET) => jump_to_previous(term, state, painter, wiring),
         _ => {}
     }
     Flow::Continue
@@ -515,6 +519,23 @@ fn focus_and_attach(
     }
 }
 
+/// Jump to the previously focused session — the `Ctrl-^` action (vim's `Ctrl-^`
+/// / tmux's `last-window`). Focuses the row [`HomeState::previous_session_row`]
+/// resolves to, attaching it when live (so toggling between two running sessions
+/// drops straight back into the shell); a no-op when no other session has been
+/// focused yet or the previous one has since been removed. Focusing it records
+/// the session being left as the new previous, so a second `Ctrl-^` toggles back.
+fn jump_to_previous(
+    term: &Term,
+    state: &mut HomeState,
+    painter: &mut FramePainter,
+    wiring: &mut Wiring,
+) {
+    if let Some(row) = state.previous_session_row() {
+        focus_and_attach(term, state, painter, wiring, row);
+    }
+}
+
 /// Handle one key in 在席 (Focus): drive the right-pane action surface (a menu
 /// of the session's commands or a session-scoped prompt), launching `terminal` /
 /// `agent` into 没入, or back out to 切替.
@@ -553,6 +574,11 @@ pub(super) fn focus_key(
         // prompt is showing (in the prompt `:` would otherwise be typed).
         Key::Char(':') => {
             state.open_command_palette();
+            return Flow::Continue;
+        }
+        // `Ctrl-^` jumps straight back to the previously focused session.
+        Key::Char(CTRL_CARET) => {
+            jump_to_previous(term, state, painter, wiring);
             return Flow::Continue;
         }
         // `Ctrl-E` edits the focused session's note (a no-op on the root row).
@@ -795,6 +821,8 @@ fn launch_pane(
 ///   re-attach (`ReturnMode::Attached`) if the user backs out.
 /// - [`PaneExit::ToFocus`] — `Ctrl-T`: zoom out to 在席 (Focus), the session's
 ///   action menu, leaving every pane alive in the pool.
+/// - [`PaneExit::ToPreviousSession`] — `Ctrl-^`: jump to the previously focused
+///   session, re-attaching it when live (or 在席 when none was recorded).
 fn open_pane(
     term: &Term,
     state: &mut HomeState,
@@ -850,6 +878,17 @@ fn open_pane(
             // where the user picks the next action (terminal / agent / …). Every
             // pane stays alive in the pool, so re-launching re-attaches them.
             state.leave_attached();
+        }
+        Ok(PaneExit::ToPreviousSession) => {
+            // `Ctrl-^` jumps to the previously focused session, re-attaching it
+            // when live (like `Enter` in 切替, via `focus_and_attach`); focusing it
+            // records the session being left, so a second `Ctrl-^` toggles back.
+            // With no previous session recorded, fall back to 在席 on the current
+            // one (like `Ctrl-T`), so the pane never lingers in 没入 with no driver.
+            match state.previous_session_row() {
+                Some(row) => focus_and_attach(term, state, painter, wiring, row),
+                None => state.leave_attached(),
+            }
         }
         Ok(PaneExit::Closed) => {
             // The shell exited: drop back to 在席 on the same session.

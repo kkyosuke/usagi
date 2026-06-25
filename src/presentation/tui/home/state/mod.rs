@@ -424,6 +424,10 @@ impl HomeState {
     pub fn refresh_sessions(&mut self, sessions: Vec<SessionRecord>) {
         let selected = self.list.selected_name().to_string();
         let active = self.list.active_name().to_string();
+        // The fresh list drops the `Ctrl-^` jump target, so carry it across the
+        // rebuild by name (it is re-validated lazily, so a session that vanished
+        // in this sync simply yields no jump).
+        let previous = self.list.previous_active_name().map(str::to_string);
         self.sessions = sessions;
         self.rebuild_list();
         // Restore the cursor (`select_by_name` moves both cursor and active onto
@@ -431,6 +435,7 @@ impl HomeState {
         // the rebuilt default on the root), then correct the active row.
         self.list.select_by_name(&selected);
         self.list.activate_by_name(&active);
+        self.list.set_previous_active(previous);
     }
 
     /// Rebuild the worktree pane from the current sessions: one row per session
@@ -1188,6 +1193,15 @@ impl HomeState {
         }
         self.enter_focus_surface();
         true
+    }
+
+    /// The row the previously focused session now sits at — the target `Ctrl-^`
+    /// jumps to (vim's `Ctrl-^` / tmux's `last-window`) — or `None` when no other
+    /// session has been focused yet or the previous one has since been removed.
+    /// Delegates to the list, which records it whenever [`enter_focus`] moves the
+    /// active row to a different session.
+    pub fn previous_session_row(&self) -> Option<usize> {
+        self.list.previous_row()
     }
 
     /// The display name of the focused (active) session: its branch, or

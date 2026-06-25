@@ -505,18 +505,20 @@ pub(super) fn log_line(line: &LogLine, width: usize) -> String {
 /// marker beneath the active chip. Each chip is numbered (1-based) to match the
 /// `←`/`→` tab order. The rows are laid beside the preview header on a shared row
 /// by [`header_tab_rows`], which re-indents the marker to stay under the chips.
+///
+/// The chip text and the [`TAB_CHIP_GAP`] between chips are the single source of
+/// truth for the strip's layout: [`tab_chip_ranges`] reconstructs the on-screen
+/// column of each chip from the same recipe so a click can be mapped back to its
+/// tab (没入 switches tabs on a click; see [`attached_tab_at`]).
 fn tab_strip_parts(strip: &TabStrip) -> (String, String) {
-    // Gap between chips on the top row (and under it on the marker row), so the
-    // chips read as separate tabs without a hard separator glyph.
-    const GAP: &str = "  ";
     let mut chips = String::new();
     let mut marker = String::new();
     for (i, label) in strip.labels.iter().enumerate() {
         if i > 0 {
-            chips.push_str(GAP);
-            marker.push_str(&" ".repeat(GAP.chars().count()));
+            chips.push_str(&" ".repeat(TAB_CHIP_GAP));
+            marker.push_str(&" ".repeat(TAB_CHIP_GAP));
         }
-        let text = format!(" {} {label} ", i + 1);
+        let text = tab_chip_text(i, label);
         let width = text.chars().count();
         if i == strip.active {
             chips.push_str(&style(&text).reverse().bold().to_string());
@@ -555,11 +557,79 @@ pub(super) fn header_tab_rows(
     // Push the marker right past the identity and the divider so it lands under
     // the chips on the row above. The identity is a fixed width, so this indent
     // is the same for every session.
-    let indent = console::measure_text_width(&header) + HEADER_TAB_DIVIDER.chars().count();
+    let indent = tab_strip_indent(&header);
     vec![
         clip_to_width(&format!("{header}{divider}{chips}"), width),
         clip_to_width(&format!("{}{marker}", " ".repeat(indent)), width),
     ]
+}
+
+/// Gap, in columns, between two chips on the strip's top row (and under it on the
+/// marker row), so the chips read as separate tabs without a hard separator glyph.
+const TAB_CHIP_GAP: usize = 2;
+
+/// One chip's text: a leading space, the 1-based tab number, the pane `label`, and
+/// a trailing space — ` N label `. The single recipe both the renderer
+/// ([`tab_strip_parts`]) and the hit test ([`tab_chip_ranges`]) build from.
+fn tab_chip_text(index: usize, label: &str) -> String {
+    format!(" {} {label} ", index + 1)
+}
+
+/// The column the chips begin at, measured from the right pane's left edge: past
+/// the fixed-width identity `header` and the [`HEADER_TAB_DIVIDER`]. Matches the
+/// indent [`header_tab_rows`] lays the chips at, so [`tab_chip_ranges`] places
+/// them where they are actually drawn.
+fn tab_strip_indent(header: &str) -> usize {
+    console::measure_text_width(header) + HEADER_TAB_DIVIDER.chars().count()
+}
+
+/// The column range each tab chip occupies on the strip, measured from the right
+/// pane's left edge — the [`tab_strip_indent`], then one [`tab_chip_text`] chip
+/// per pane with a [`TAB_CHIP_GAP`] between. Reconstructs the layout
+/// [`tab_strip_parts`] / [`header_tab_rows`] draw so a click column can be mapped
+/// to the tab under it (see [`attached_tab_at`]).
+fn tab_chip_ranges(header: &str, strip: &TabStrip) -> Vec<std::ops::Range<usize>> {
+    let mut col = tab_strip_indent(header);
+    let mut ranges = Vec::with_capacity(strip.labels.len());
+    for (i, label) in strip.labels.iter().enumerate() {
+        if i > 0 {
+            col += TAB_CHIP_GAP;
+        }
+        let width = console::measure_text_width(&tab_chip_text(i, label));
+        ranges.push(col..col + width);
+        col += width;
+    }
+    ranges
+}
+
+/// The tab a left click at the 0-based screen (`col`, `row`) lands on while 没入
+/// (Attached), or `None` when the click is not on a switchable chip. The strip
+/// occupies the [`TAB_BAR_ROWS`](super::TAB_BAR_ROWS) rows at the top of the right
+/// pane — the embedded terminal `geo` is pushed down by exactly that — so a click
+/// on either of those rows, in a chip's column, hits its tab. Returns `None` for a
+/// click off the strip rows, off every chip (the indent, the gaps, past the last
+/// chip), or on the already-active tab, so the caller only switches on a real
+/// change. Mirrors what [`right_pane_contents`] draws for [`Mode::Attached`].
+pub(in crate::presentation::tui::home) fn attached_tab_at(
+    state: &HomeState,
+    col: u16,
+    row: u16,
+    geo: super::TerminalGeometry,
+) -> Option<usize> {
+    let strip = state.terminal_tabs()?;
+    // The strip's rows are the `TAB_BAR_ROWS` just above the terminal body.
+    let strip_top = geo.origin_row.checked_sub(super::TAB_BAR_ROWS as u16)?;
+    if row < strip_top || row >= geo.origin_row {
+        return None;
+    }
+    let rel_col = col.checked_sub(geo.origin_col)? as usize;
+    let header = active_session_header(state);
+    let target = tab_chip_ranges(&header, strip)
+        .into_iter()
+        .position(|range| range.contains(&rel_col))?;
+    // A click on the active tab is a no-op: leave it to the caller's selection
+    // handling rather than re-driving the same pane.
+    (target != strip.active).then_some(target)
 }
 
 /// Column widths for the fixed-width header identity. The session name is clipped

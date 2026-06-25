@@ -57,4 +57,9 @@ pub enum PaneExit {
     /// menu — leaving every pane alive in the pool. Unlike [`Self::Closed`] no
     /// pane is closed; the panes stay live just as [`Self::ToSwitch`] keeps them.
     ToFocus,
+    /// The user pressed `Ctrl-^`: leave the pane to jump straight to the
+    /// previously focused session (vim's `Ctrl-^` / tmux's `last-window`),
+    /// attaching it when live. With no previous session recorded the pane returns
+    /// to 在席 (Focus) on the current session instead.
+    ToPreviousSession,
 }

@@ -32,13 +32,6 @@ pub fn rabbit_lines(width: usize) -> Vec<String> {
         .collect()
 }
 
-/// The raw (unstyled) lines of the usagi mascot, for callers that place the art
-/// themselves rather than centring it (e.g. the home screen's top-right update
-/// notice).
-pub fn rabbit_art() -> [&'static str; 3] {
-    RABBIT
-}
-
 /// The mascot waving goodbye, drawn inside the farewell box: the usagi from
 /// [`RABBIT`] with a raised paw (`ﾉ`) and its parting words alongside.
 const FAREWELL_ART: [&str; 3] = ["  (\\(\\", " ( ^ω^)ﾉ  またね、ぴょん！", " o(_(\")(\")"];

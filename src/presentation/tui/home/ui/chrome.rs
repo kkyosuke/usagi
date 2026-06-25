@@ -17,6 +17,16 @@ use super::{
 };
 use crate::presentation::tui::widgets;
 
+/// Minimum / maximum display width of the active-session-name field in the
+/// title bar. The field scales with the terminal (a quarter of its width) and
+/// is clamped to this range, so a roomy window shows more of a long name while a
+/// narrow one stays compact. A long name is clipped to the chosen width, a short
+/// one padded out — and since the width depends only on the (per-frame constant)
+/// terminal size, never the name text, the label keeps the same width every
+/// frame, so the centred title never shifts as the active session changes.
+const TITLE_NAME_MIN_W: usize = 12;
+const TITLE_NAME_MAX_W: usize = 24;
+
 /// The centred title bar: workspace name and session count. The count covers
 /// every row in the left pane — the root row plus each session (one row per
 /// session, not per repository) — so it matches what the user sees.
@@ -25,48 +35,36 @@ pub(super) fn title_bar(width: usize, list: &WorktreeList) -> String {
     // The active session's name rides in the title so it is identifiable even
     // when the sidebar is collapsed to the rail (which shows no names). `▸` marks
     // it; the root row reads as the workspace itself.
+    //
+    // Pin the name to a fixed-width field (clipped if long, padded if short) so
+    // the whole label keeps a constant width and the centred bar stays put as
+    // the active session changes — a longer name no longer pushes it sideways.
+    let name_w = (width / 4).clamp(TITLE_NAME_MIN_W, TITLE_NAME_MAX_W);
+    let name = pad_to_width(clip_to_width(list.active_name(), name_w), name_w);
     let label = format!(
-        "{} · ▸ {} · {count} session{}",
+        "{} · ▸ {name} · {count} session{}",
         list.workspace_name(),
-        list.active_name(),
         if count == 1 { "" } else { "s" }
     );
     widgets::title_line(width, &label)
 }
 
-/// The top-right "update available" notice: the usagi mascot beside a short
-/// note that a release newer than the running build (`latest`) has been
-/// published. Shown only while the background update check reports one.
+/// The top-right "update available" notice: a short note that a release newer
+/// than the running build (`latest`) has been published. Shown only while the
+/// background update check reports one.
 ///
-/// Each returned line pairs a mascot row with its message and is right-padded to
-/// a common block width and styled yellow-bold, so the block right-aligns
-/// cleanly when [`overlay_top_right`](super::overlay_top_right) anchors it to the
-/// top rows.
+/// Both lines are right-padded to a common block width and styled yellow-bold so
+/// the block right-aligns cleanly when [`overlay_top_right`](super::overlay_top_right)
+/// anchors it to the header rows.
 pub(super) fn update_banner(latest: &Version) -> Vec<String> {
-    let art = widgets::rabbit_art();
-    let art_w = art
-        .iter()
-        .map(|line| console::measure_text_width(line))
-        .max()
-        .unwrap_or(0);
-    // One message per mascot row; the last row carries only the mascot's feet.
-    let messages = [
+    // The message on the first line, the new version on the second. No mascot
+    // art: the title bar pads the active session name to a fixed width and so
+    // reaches far enough right that only a compact block fits in the gap on the
+    // header rows where this is anchored.
+    let rows = [
         "アップデートがあるぴょん".to_string(),
         format!("v{latest}"),
-        String::new(),
     ];
-    let rows: Vec<String> = art
-        .iter()
-        .zip(messages.iter())
-        .map(|(line, message)| {
-            let cell = pad_to_width((*line).to_string(), art_w);
-            if message.is_empty() {
-                cell
-            } else {
-                format!("{cell}  {message}")
-            }
-        })
-        .collect();
     let block_w = rows
         .iter()
         .map(|row| console::measure_text_width(row))
@@ -79,8 +77,6 @@ pub(super) fn update_banner(latest: &Version) -> Vec<String> {
                 .bold()
                 .to_string()
         })
-        // 一番下に空行を 1 行足して、下のコンテンツとの間に余白を作る。
-        .chain(std::iter::once(String::new()))
         .collect()
 }
 
@@ -380,12 +376,12 @@ pub(super) fn footer_line(width: usize, state: &HomeState) -> String {
         }
         Mode::Focus => {
             format!(
-                "[session: {}]  Ctrl-N/P: tab / Enter: open/run / Ctrl-O: switch / Ctrl-E: note / : commands / Esc: switch",
+                "[session: {}]  Ctrl-N/P: tab / Enter: open/run / Ctrl-O: switch / Ctrl-^: last / Ctrl-E: note / : commands / Esc: switch",
                 state.focused_session_name()
             )
         }
         Mode::Attached => {
-            "[attached]  Ctrl-O: switch / Ctrl-T: focus / Ctrl-N/P: tab / Ctrl-G: agent / Ctrl-E: note / Ctrl-W: close"
+            "[attached]  Ctrl-O: switch / Ctrl-T: focus / Ctrl-^: last / Ctrl-N/P: tab / Ctrl-G: agent / Ctrl-E: note / Ctrl-W: close"
                 .to_string()
         }
     };

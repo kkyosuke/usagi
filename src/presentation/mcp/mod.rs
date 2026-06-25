@@ -172,7 +172,12 @@ fn dispatch_tool_call(service: &dyn McpService, params: Option<&Value>, id: Valu
         }
     };
 
-    let result = match service.call_tool(name, arguments) {
+    let outcome = service.call_tool(name, arguments);
+    crate::infrastructure::trace_log::TraceLog::record(
+        crate::domain::trace::TraceEvent::now(crate::domain::trace::TraceCategory::Mcp, name)
+            .with_detail(if outcome.is_ok() { "ok" } else { "error" }),
+    );
+    let result = match outcome {
         Ok(text) => json!({ "content": [{ "type": "text", "text": text }], "isError": false }),
         Err(text) => json!({ "content": [{ "type": "text", "text": text }], "isError": true }),
     };

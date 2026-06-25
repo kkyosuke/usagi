@@ -33,8 +33,19 @@ use super::terminal_selection::{Cell, Selection};
 pub struct TerminalView {
     /// One string per grid row, each laid out to the screen's column width.
     rows: Arc<Vec<String>>,
-    /// The cursor's `(row, col)` position, or `None` when it is hidden.
+    /// The program's cursor cell `(row, col)`, kept **even while the program
+    /// hides the hardware cursor**. Most full-screen agents (Claude Code et al.)
+    /// hide the hardware cursor and draw their own, yet still keep it positioned
+    /// at the input — and an OS IME draws its preedit at that position. The
+    /// embedded pane parks the real cursor here, so dropping the position when
+    /// hidden (as a `None` would) is what left composing Japanese floating at the
+    /// wrong place. `None` only when off-screen.
     cursor: Option<(u16, u16)>,
+    /// Whether the program shows the hardware cursor. The pane mirrors it when
+    /// parking the real cursor, so a program that manages its own cursor looks the
+    /// same embedded as standalone (positioned but hidden) while the IME still
+    /// follows the position.
+    cursor_visible: bool,
 }
 
 impl TerminalView {
@@ -140,14 +151,14 @@ impl TerminalView {
             }
             out.push(line);
         }
-        let cursor = if screen.hide_cursor() {
-            None
-        } else {
-            Some(screen.cursor_position())
-        };
+        // Keep the cursor position regardless of visibility: an OS IME draws its
+        // preedit at the real cursor, so the embedded pane must park it on the
+        // program's cursor cell even when the program hid the hardware cursor (and
+        // draws its own). Visibility is tracked separately and mirrored there.
         Self {
             rows: Arc::new(out),
-            cursor,
+            cursor: Some(screen.cursor_position()),
+            cursor_visible: !screen.hide_cursor(),
         }
     }
 
@@ -156,18 +167,27 @@ impl TerminalView {
         self.rows.as_slice()
     }
 
-    /// The cursor's `(row, col)` position, or `None` when hidden.
+    /// The program's cursor cell `(row, col)`, kept even while hidden (`None`
+    /// only when off-screen). The pane parks the real cursor here for the IME.
     pub fn cursor(&self) -> Option<(u16, u16)> {
         self.cursor
     }
 
+    /// Whether the program shows the hardware cursor, so the pane can mirror its
+    /// show/hide while still parking the real cursor on [`cursor`](Self::cursor).
+    pub fn cursor_visible(&self) -> bool {
+        self.cursor_visible
+    }
+
     /// Build a view directly from rows and a cursor, for tests of the screens
-    /// that render a [`TerminalView`].
+    /// that render a [`TerminalView`]. The cursor counts as visible exactly when
+    /// one is given, matching how a real program with a shown cursor snapshots.
     #[cfg(test)]
     pub fn from_rows(rows: Vec<String>, cursor: Option<(u16, u16)>) -> Self {
         Self {
             rows: Arc::new(rows),
             cursor,
+            cursor_visible: cursor.is_some(),
         }
     }
 }
@@ -397,18 +417,23 @@ mod tests {
 
     #[test]
     fn from_screen_reports_the_cursor_position() {
-        // After writing "hi" the cursor sits on row 0, column 2.
+        // After writing "hi" the cursor sits on row 0, column 2, and is visible.
         let parser = parsed(2, 6, b"hi");
         let view = TerminalView::from_screen(parser.screen());
         assert_eq!(view.cursor(), Some((0, 2)));
+        assert!(view.cursor_visible());
     }
 
     #[test]
-    fn from_screen_omits_a_hidden_cursor() {
-        // CSI ?25l hides the cursor.
-        let parser = parsed(1, 4, b"\x1b[?25l");
+    fn from_screen_keeps_a_hidden_cursors_position_but_marks_it_hidden() {
+        // CSI ?25l hides the hardware cursor, but the position is still tracked so
+        // the embedded pane can park the real cursor there for the IME — an agent
+        // hides its cursor yet keeps it positioned at the input. Visibility is
+        // reported separately so the pane mirrors the program's show/hide.
+        let parser = parsed(1, 4, b"hi\x1b[?25l");
         let view = TerminalView::from_screen(parser.screen());
-        assert_eq!(view.cursor(), None);
+        assert_eq!(view.cursor(), Some((0, 2)));
+        assert!(!view.cursor_visible());
     }
 
     #[test]
