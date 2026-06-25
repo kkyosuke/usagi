@@ -1086,6 +1086,26 @@ fn switch_preview_shows_an_idle_session_as_its_action_menu() {
 }
 
 #[test]
+fn switch_preview_action_menu_follows_the_cursor_not_the_active_row() {
+    // Regression: the 切替 preview's action menu was resolved for the *active*
+    // row, so highlighting an idle session while the root row stayed active
+    // previewed the root's menu — dropping `close` from a session that can be
+    // closed. The preview is the highlighted row's, so it must offer `close`.
+    let idle = worktree(Some("feat"), false, BranchStatus::Pushed);
+    let mut state = HomeState::new("usagi", vec![idle], None);
+    state.set_root_path(PathBuf::from("/repo"));
+    state.enter_switch(super::super::state::ReturnMode::Base);
+    // The root row is the active one (the default); move the cursor onto the
+    // session without activating it.
+    state.switch_move_down();
+    assert!(state.list().root_active());
+    assert!(!state.list().root_selected());
+    let preview = stripped(&switch_preview(&state, 40, 12));
+    assert!(preview.contains("Run a command"));
+    assert!(preview.contains("close"));
+}
+
+#[test]
 fn switch_right_pane_fades_the_preview_but_keeps_its_text() {
     // In 切替 the keyboard is on the session list, so the composited right pane
     // fades the whole preview (each row dimmed) to signal it is not where

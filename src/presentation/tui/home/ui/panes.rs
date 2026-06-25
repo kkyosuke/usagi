@@ -1238,7 +1238,7 @@ pub(super) fn switch_preview(state: &HomeState, width: usize, rows: usize) -> Ve
         match state.session_action_ui() {
             SessionActionUi::Menu => {
                 lines.push(style("Run a command:").dim().to_string());
-                for (i, info) in state.focus_menu_commands().iter().enumerate() {
+                for (i, info) in state.preview_menu_commands().iter().enumerate() {
                     lines.push(focus_menu_row(info, i == 0, width));
                 }
             }
