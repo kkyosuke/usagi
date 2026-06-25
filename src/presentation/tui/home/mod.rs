@@ -535,6 +535,10 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
                             )?;
                         }
                     }
+                    // `Ctrl-^`: leave the pane to jump to the previously focused
+                    // session; the event loop re-roots on it (attaching when live),
+                    // leaving every pane alive in the pool (like `Ctrl-O`).
+                    terminal_pane::PaneStep::PrevSession => return Ok(PaneExit::ToPreviousSession),
                     // `Ctrl-W`: close the active tab. Same as a shell that exited —
                     // keep driving when a pane remains, else fall to 在席.
                     terminal_pane::PaneStep::CloseTab => {

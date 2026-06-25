@@ -7,7 +7,8 @@
 //! Keystrokes are forwarded to the shell as raw bytes.
 //!
 //! The **reserved keys** are `Ctrl-O`, `Ctrl-N`/`Ctrl-P`, `Ctrl-T`/`Ctrl-G`,
-//! `Ctrl-W`, and `Ctrl-B`: everything else, including `Esc`, flows to the shell.
+//! `Ctrl-W`, `Ctrl-^`, and `Ctrl-B`: everything else, including `Esc`, flows to
+//! the shell.
 //! `Ctrl-B` collapses / expands the left sidebar in place (it never leaves 没入).
 //! A single
 //! `Ctrl-O` zooms out one engagement level by returning [`PaneStep::Detach`]
@@ -19,7 +20,8 @@
 //! `Ctrl-T` zooms out to 在席 (Focus) — the session's action menu — by returning
 //! [`PaneStep::ToFocus`] (every pane stays alive in the pool); `Ctrl-G` adds an
 //! agent tab ([`PaneStep::NewAgentTab`]) and `Ctrl-W` closes the active tab
-//! ([`PaneStep::CloseTab`]) without leaving 没入. The shell exiting on its
+//! ([`PaneStep::CloseTab`]) without leaving 没入. `Ctrl-^` jumps to the previously
+//! focused session ([`PaneStep::PrevSession`]). The shell exiting on its
 //! own reports [`PaneStep::Closed`].
 //!
 //! `agent` reuses the same machinery: the pool sends the configured agent CLI to
@@ -81,6 +83,10 @@ pub enum PaneStep {
     /// `Ctrl-W`: close the active tab without leaving 没入. The caller drops it,
     /// then keeps driving the next pane or falls to 在席 when none remain.
     CloseTab,
+    /// `Ctrl-^`: leave 没入 to jump to the previously focused session (vim's
+    /// `Ctrl-^` / tmux's `last-window`), attaching it when live. The caller
+    /// re-roots the pane on that session.
+    PrevSession,
     /// The active pane's shell exited on its own (e.g. `exit`).
     Closed,
 }
@@ -392,8 +398,9 @@ fn wait(pty: &PtySession, drawn_gen: u64, redraw_deadline: Option<Instant>) -> R
 /// previous tab in place ([`PaneStep::NextTab`] / [`PaneStep::PrevTab`]);
 /// `Ctrl-T` zooms out to 在席 (Focus) ([`PaneStep::ToFocus`]), leaving every pane
 /// alive; `Ctrl-G` adds an agent tab ([`PaneStep::NewAgentTab`]) and `Ctrl-W`
-/// closes the active tab ([`PaneStep::CloseTab`]). Other events are ignored so the next redraw picks up
-/// any new size.
+/// closes the active tab ([`PaneStep::CloseTab`]); `Ctrl-^` jumps to the
+/// previously focused session ([`PaneStep::PrevSession`]). Other events are
+/// ignored so the next redraw picks up any new size.
 #[allow(clippy::too_many_arguments)]
 fn pump_input(
     term: &Term,
@@ -470,6 +477,14 @@ fn pump_input(
                     *scrollback = 0;
                     *selection = None;
                     return Ok(Some(PaneStep::CloseTab));
+                }
+                // `Ctrl-^` leaves 没入 to jump to the previously focused session,
+                // re-rooting the pane there (attaching when live). (Like the tab
+                // chords, this claims `Ctrl-^` from the shell/agent.)
+                if is_prev_session(&key) {
+                    *scrollback = 0;
+                    *selection = None;
+                    return Ok(Some(PaneStep::PrevSession));
                 }
                 // `Ctrl-B` collapses / expands the left sidebar in place, without
                 // leaving 没入: toggle the state and let the next loop pass re-lay
@@ -806,6 +821,12 @@ fn is_toggle_sidebar(key: &KeyEvent) -> bool {
     chord(key, '\u{02}', 'b')
 }
 
+/// Whether this key is `Ctrl-^` (jump to the previously focused session), as the
+/// raw `0x1e` (RS) char or `'^'` + `CONTROL`.
+fn is_prev_session(key: &KeyEvent) -> bool {
+    chord(key, '\u{1e}', '^')
+}
+
 /// Whether this key is the copy shortcut (`Ctrl-C`). It only copies when a
 /// selection is active; otherwise the caller forwards it to the shell as the
 /// usual interrupt. `Ctrl+Shift+C` is left to the shell unchanged.
@@ -1004,6 +1025,28 @@ mod tests {
         assert!(!is_open_note(&key(
             KeyCode::Char('E'),
             KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        )));
+    }
+
+    #[test]
+    fn is_prev_session_matches_both_forms_of_ctrl_caret() {
+        // crossterm's usual decoding, and the bare 0x1e (RS) most terminals send.
+        assert!(is_prev_session(&key(
+            KeyCode::Char('^'),
+            KeyModifiers::CONTROL
+        )));
+        assert!(is_prev_session(&key(
+            KeyCode::Char('\u{1e}'),
+            KeyModifiers::NONE
+        )));
+        // A plain caret or the wrong chord flows to the shell.
+        assert!(!is_prev_session(&key(
+            KeyCode::Char('^'),
+            KeyModifiers::NONE
+        )));
+        assert!(!is_prev_session(&key(
+            KeyCode::Char('o'),
+            KeyModifiers::CONTROL
         )));
     }
 
