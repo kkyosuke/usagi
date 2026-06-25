@@ -21,6 +21,15 @@ enum Commands {
         #[arg(value_enum)]
         phase: usagi::presentation::cli::agent_phase::Phase,
     },
+    /// Clean up stale session worktrees by launching an AI agent in the background
+    Clean {
+        /// Report the worktrees the agent would remove without deleting anything
+        #[arg(long)]
+        dry_run: bool,
+        /// Override the configured agent CLI for this run (claude / codex / codex-fugu / gemini)
+        #[arg(long, value_name = "NAME")]
+        agent: Option<String>,
+    },
     /// Show usagi's configuration (or edit it with --edit)
     Config {
         /// Open the configuration file in $EDITOR and validate it on save
@@ -92,6 +101,7 @@ fn main() -> anyhow::Result<()> {
     let name = command_name(&command);
     let result = match command {
         Commands::AgentPhase { phase } => usagi::presentation::cli::agent_phase::run(phase),
+        Commands::Clean { dry_run, agent } => usagi::presentation::cli::clean::run(dry_run, agent),
         Commands::Config { edit } => usagi::presentation::cli::config::run(edit),
         Commands::Doctor { fix } => usagi::presentation::cli::doctor::run(fix),
         Commands::Feature => usagi::presentation::cli::feature::run(),
@@ -118,6 +128,7 @@ fn main() -> anyhow::Result<()> {
 fn command_name(command: &Commands) -> Option<&'static str> {
     match command {
         Commands::AgentPhase { .. } => Some("agent-phase"),
+        Commands::Clean { .. } => Some("clean"),
         Commands::Config { .. } => Some("config"),
         Commands::Doctor { .. } => Some("doctor"),
         Commands::Feature => Some("feature"),
