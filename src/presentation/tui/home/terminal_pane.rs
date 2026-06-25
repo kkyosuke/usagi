@@ -764,10 +764,17 @@ fn is_leader(key: &KeyEvent) -> bool {
     chord(key, '\u{0f}', 'o')
 }
 
-/// Whether this key is `Ctrl-N` (next tab), as the raw `0x0e` (SO) char or
-/// `'n'` + `CONTROL`.
+/// Whether this key is `Ctrl` + the arrow `code`. The home-screen surfaces move
+/// tabs with the bare arrows (via `console`, which can't see the modifier), so
+/// 没入 adds the `Ctrl` qualifier to keep plain arrows flowing to the shell.
+fn is_ctrl_arrow(key: &KeyEvent, code: KeyCode) -> bool {
+    key.modifiers.contains(KeyModifiers::CONTROL) && key.code == code
+}
+
+/// Whether this key moves to the next tab: `Ctrl-N` (the raw `0x0e` (SO) char or
+/// `'n'` + `CONTROL`) or `Ctrl-→`.
 fn is_next_tab(key: &KeyEvent) -> bool {
-    chord(key, '\u{0e}', 'n')
+    chord(key, '\u{0e}', 'n') || is_ctrl_arrow(key, KeyCode::Right)
 }
 
 /// Whether this key is `Ctrl-E` (open the note editor), as the raw `0x05` (ENQ)
@@ -776,10 +783,10 @@ fn is_open_note(key: &KeyEvent) -> bool {
     chord(key, '\u{05}', 'e')
 }
 
-/// Whether this key is `Ctrl-P` (previous tab), as the raw `0x10` (DLE) char or
-/// `'p'` + `CONTROL`.
+/// Whether this key moves to the previous tab: `Ctrl-P` (the raw `0x10` (DLE)
+/// char or `'p'` + `CONTROL`) or `Ctrl-←`.
 fn is_prev_tab(key: &KeyEvent) -> bool {
-    chord(key, '\u{10}', 'p')
+    chord(key, '\u{10}', 'p') || is_ctrl_arrow(key, KeyCode::Left)
 }
 
 /// Whether this key is `Ctrl-T` (zoom out to 在席 / Focus), as the raw `0x14`
@@ -932,6 +939,9 @@ mod tests {
             KeyCode::Char('\u{10}'),
             KeyModifiers::NONE
         )));
+        // Ctrl-→ (next) / Ctrl-← (prev) are accepted alongside the chords.
+        assert!(is_next_tab(&key(KeyCode::Right, KeyModifiers::CONTROL)));
+        assert!(is_prev_tab(&key(KeyCode::Left, KeyModifiers::CONTROL)));
         // Plain letters, the wrong modifier, and the other chord are rejected.
         assert!(!is_next_tab(&key(KeyCode::Char('n'), KeyModifiers::NONE)));
         assert!(!is_prev_tab(&key(KeyCode::Char('p'), KeyModifiers::NONE)));
@@ -943,6 +953,11 @@ mod tests {
             KeyCode::Char('n'),
             KeyModifiers::CONTROL
         )));
+        // Bare arrows (no Ctrl) stay with the shell, and the axes don't cross.
+        assert!(!is_next_tab(&key(KeyCode::Right, KeyModifiers::NONE)));
+        assert!(!is_prev_tab(&key(KeyCode::Left, KeyModifiers::NONE)));
+        assert!(!is_next_tab(&key(KeyCode::Left, KeyModifiers::CONTROL)));
+        assert!(!is_prev_tab(&key(KeyCode::Right, KeyModifiers::CONTROL)));
     }
 
     #[test]
