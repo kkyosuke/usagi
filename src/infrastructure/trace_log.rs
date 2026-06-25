@@ -15,7 +15,9 @@
 //! **Opt-in.** Tracing sits on hot paths (every key press, every MCP call), so it
 //! is off unless [`is_enabled`] returns true — the `USAGI_TRACE` environment
 //! variable is set to a non-empty value other than `0`. While disabled,
-//! [`TraceLog::record`] returns after a single env lookup and touches no disk.
+//! [`TraceLog::record`] returns after a single env lookup and touches no disk;
+//! a hot caller that would build an expensive event uses
+//! [`TraceLog::record_with`], which defers constructing it until past that gate.
 
 use std::ffi::OsStr;
 use std::fs;
@@ -92,13 +94,35 @@ impl TraceLog {
         if !is_enabled() {
             return;
         }
+        Self::emit(&event);
+    }
+
+    /// Like [`record`](Self::record), but the event is built by `build` only
+    /// *after* the [`is_enabled`] gate passes. On a hot path that constructs an
+    /// expensive event — the home screen traces every key press with a
+    /// `format!`ed `{mode} {key}` detail — this keeps the timestamp, the
+    /// allocation, and the `format!` from running at all while tracing is off (the
+    /// default), so the "costs nothing unless enabled" promise holds at the call
+    /// site rather than only inside this function. Cold callers whose event is
+    /// cheap to build unconditionally (the CLI / session / MCP paths) stay on
+    /// [`record`].
+    pub fn record_with(build: impl FnOnce() -> TraceEvent) {
+        if !is_enabled() {
+            return;
+        }
+        Self::emit(&build());
+    }
+
+    /// Append `event` to today's trace file and prune old files once per process.
+    /// Callers reach this only past the [`is_enabled`] gate.
+    fn emit(event: &TraceEvent) {
         // `if let` (not `let … else { return }`) so the data-dir-not-found case is
         // just "skip the block": there is no way to make `open_default` fail under
         // test, and an unreachable early return would leave a line uncovered.
         if let Ok(log) = Self::open_default() {
             let now = Local::now();
             log.prune_once(now.date_naive());
-            let _ = log.append(now, &event);
+            let _ = log.append(now, event);
         }
     }
 
@@ -337,6 +361,56 @@ mod tests {
         let contents = fs::read_to_string(entry).unwrap();
         assert!(contents.contains("issue_create"), "{contents}");
         assert!(contents.contains("\"mcp\""), "{contents}");
+
+        std::env::remove_var(TRACE_ENV);
+        std::env::remove_var(crate::infrastructure::storage::DATA_DIR_ENV);
+    }
+
+    /// The event the home screen's hot key-press path builds, extracted so both
+    /// `record_with` tests pass the *same* builder. The enabled test invokes it
+    /// (so its body is covered); the disabled test passes it but — proving the
+    /// point of `record_with` — never runs it, so it must not be an inline closure
+    /// whose body would then read as uncovered.
+    fn key_event() -> TraceEvent {
+        TraceEvent::now(TraceCategory::Tui, "key").with_detail("Switch Enter")
+    }
+
+    #[test]
+    fn record_with_is_a_noop_while_tracing_is_disabled() {
+        let _guard = crate::test_support::process_env_guard();
+        let home = tempfile::tempdir().expect("failed to create temp dir");
+        std::env::set_var(crate::infrastructure::storage::DATA_DIR_ENV, home.path());
+        std::env::remove_var(TRACE_ENV);
+
+        // Tracing off: `record_with` returns before invoking the builder, so the
+        // event is never constructed and nothing is written — the logs directory
+        // is not even created.
+        TraceLog::record_with(key_event);
+        assert!(!home.path().join("logs").exists());
+
+        std::env::remove_var(crate::infrastructure::storage::DATA_DIR_ENV);
+    }
+
+    #[test]
+    fn record_with_builds_and_writes_when_enabled() {
+        let _guard = crate::test_support::process_env_guard();
+        let home = tempfile::tempdir().expect("failed to create temp dir");
+        std::env::set_var(crate::infrastructure::storage::DATA_DIR_ENV, home.path());
+        std::env::set_var(TRACE_ENV, "1");
+
+        TraceLog::record_with(key_event);
+
+        let logs = home.path().join("logs");
+        let entry = fs::read_dir(&logs)
+            .expect("logs dir exists")
+            .find_map(|e| {
+                let path = e.expect("readable entry").path();
+                (path.extension().and_then(|x| x.to_str()) == Some("jsonl")).then_some(path)
+            })
+            .expect("a trace file was written");
+        let contents = fs::read_to_string(entry).unwrap();
+        assert!(contents.contains("Switch Enter"), "{contents}");
+        assert!(contents.contains("\"tui\""), "{contents}");
 
         std::env::remove_var(TRACE_ENV);
         std::env::remove_var(crate::infrastructure::storage::DATA_DIR_ENV);

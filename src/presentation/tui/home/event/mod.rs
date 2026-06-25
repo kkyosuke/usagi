@@ -402,12 +402,14 @@ pub(super) fn event_loop(
         force_paint = true;
 
         // Record the key press (and the mode it landed in) to the operation trace,
-        // so a session's navigation can be analysed after the fact. A no-op unless
-        // tracing is enabled, so the idle hot loop stays free.
-        crate::infrastructure::trace_log::TraceLog::record(
+        // so a session's navigation can be analysed after the fact. `record_with`
+        // builds the event — the timestamp, the allocation, and the `{mode} {key}`
+        // `format!` — only once tracing is enabled, so the hot key loop pays
+        // nothing for it while tracing is off (the default).
+        crate::infrastructure::trace_log::TraceLog::record_with(|| {
             crate::domain::trace::TraceEvent::now(crate::domain::trace::TraceCategory::Tui, "key")
-                .with_detail(format!("{:?} {:?}", state.mode(), key)),
-        );
+                .with_detail(format!("{:?} {:?}", state.mode(), key))
+        });
 
         // The quit-confirmation modal, when open, captures every key: `y` /
         // `Enter` (or a second `Ctrl-C`) confirms the close, `n` / `Esc` cancels.

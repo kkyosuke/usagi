@@ -277,6 +277,40 @@ fn run_with_live_monitor(
 }
 
 #[test]
+fn a_key_press_is_traced_when_tracing_is_enabled() {
+    // With tracing on, the loop builds and records the per-key trace event via
+    // the `record_with` closure — the construction that is otherwise skipped (and
+    // so left uncovered) while tracing is off in every other test. The data dir is
+    // pinned to a temp home and the env mutation serialised, as the trace_log
+    // tests do.
+    let _guard = crate::test_support::process_env_guard();
+    let home = tempfile::tempdir().unwrap();
+    std::env::set_var(crate::infrastructure::storage::DATA_DIR_ENV, home.path());
+    std::env::set_var(crate::infrastructure::trace_log::TRACE_ENV, "1");
+
+    // One inert key (Esc at the base Switch) routes through the trace, then
+    // Ctrl-C quits (no live session, so it exits at once).
+    let outcome = run(vec![Ok(Key::Escape), Ok(Key::CtrlC)], sample_state()).unwrap();
+    assert!(matches!(outcome, Outcome::Quit));
+
+    // The press landed in today's trace file as a `tui` event.
+    let traced = std::fs::read_dir(home.path().join("logs"))
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .any(|e| {
+            let path = e.path();
+            path.extension().and_then(|x| x.to_str()) == Some("jsonl")
+                && std::fs::read_to_string(&path)
+                    .map(|c| c.contains("\"tui\""))
+                    .unwrap_or(false)
+        });
+    assert!(traced, "the key press should be recorded to the trace log");
+
+    std::env::remove_var(crate::infrastructure::trace_log::TRACE_ENV);
+    std::env::remove_var(crate::infrastructure::storage::DATA_DIR_ENV);
+}
+
+#[test]
 fn a_populated_update_handle_is_read_before_painting() {
     // With the background check reporting a newer release, the loop reads the
     // handle each frame and renders the top-right notice. It still quits on the
