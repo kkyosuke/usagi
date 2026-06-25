@@ -124,6 +124,14 @@ pub fn create(workspace_root: &Path, name: &str) -> Result<CreatedSession> {
 
     record(&store, name, &dest_root, &worktrees)?;
 
+    crate::infrastructure::trace_log::TraceLog::record(
+        crate::domain::trace::TraceEvent::now(
+            crate::domain::trace::TraceCategory::Session,
+            "create",
+        )
+        .with_detail(name),
+    );
+
     Ok(CreatedSession {
         name: name.to_string(),
         root: dest_root,
@@ -374,6 +382,14 @@ pub fn remove(
     state.sessions.remove(index);
     state.updated_at = Utc::now();
     store.save(&state)?;
+
+    crate::infrastructure::trace_log::TraceLog::record(
+        crate::domain::trace::TraceEvent::now(
+            crate::domain::trace::TraceCategory::Session,
+            "remove",
+        )
+        .with_detail(name),
+    );
 
     Ok(RemovalOutcome {
         removed: true,
