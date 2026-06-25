@@ -4,6 +4,7 @@ pub mod config;
 pub mod doctor;
 pub mod feature;
 pub mod hop;
+pub mod icon;
 pub mod init;
 pub mod issue;
 pub mod llm_mcp;
