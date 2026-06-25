@@ -68,6 +68,16 @@ fn errors_when_not_a_repository() {
 }
 
 #[test]
+fn primary_of_an_empty_list_errors_instead_of_panicking() {
+    // `git worktree list` always yields the current worktree on a real repo, but
+    // a porcelain change or wrapper returning success with no `worktree` lines
+    // would yield an empty list. That must surface as an error, not panic the
+    // status-sync path.
+    let err = super::worktree::primary_of(Vec::new(), Path::new("/repo")).unwrap_err();
+    assert!(err.to_string().contains("/repo"));
+}
+
+#[test]
 fn lists_multiple_worktrees_including_a_detached_one() {
     let dir = tempfile::tempdir().unwrap();
     init_repo(dir.path());
@@ -201,6 +211,21 @@ fn clone_fails_for_a_missing_source() {
 
     let err = clone(missing.to_str().unwrap(), &dest, None).unwrap_err();
     assert!(err.to_string().contains("git clone failed"));
+}
+
+#[test]
+fn clone_refuses_a_remote_helper_transport() {
+    // Defense in depth: even called directly (bypassing `RepoUrl`'s allow-list),
+    // `clone` sets `GIT_ALLOW_PROTOCOL` so git refuses the `ext` remote helper
+    // rather than running the embedded command. The marker file must not appear.
+    let tmp = tempfile::tempdir().unwrap();
+    let marker = tmp.path().join("pwned");
+    let dest = tmp.path().join("dest");
+    let payload = format!("ext::sh -c \"touch {}\"", marker.display());
+
+    let err = clone(&payload, &dest, None).unwrap_err();
+    assert!(err.to_string().contains("git clone failed"));
+    assert!(!marker.exists(), "the ext helper command must not have run");
 }
 
 #[test]

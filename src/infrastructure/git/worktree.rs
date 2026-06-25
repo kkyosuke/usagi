@@ -229,12 +229,25 @@ fn run_worktree_remove(
 /// This is the directory under which `.usagi/` should live, regardless of which
 /// worktree the command was invoked from.
 pub fn primary_worktree(repo: &Path) -> Result<PathBuf> {
-    let worktrees = list_worktrees(repo)?;
-    Ok(worktrees
-        .into_iter()
-        .next()
-        .expect("a successful `git worktree list` always yields the current worktree")
-        .path)
+    primary_of(list_worktrees(repo)?, repo)
+}
+
+/// The primary (first) worktree's path, or an error when the list is empty.
+///
+/// `git worktree list` on a real repository always yields at least the current
+/// worktree, so this is expected to be infallible in practice. But a future
+/// porcelain format change, locale noise, or a wrapper that returns success with
+/// no `worktree` lines would make [`list_worktrees`] yield an empty list.
+/// Surfacing that as an error keeps it from panicking the process — this runs on
+/// the hot status-sync path (`workspace_state::sync` / `load`), where a panic
+/// would take the whole TUI down.
+pub(super) fn primary_of(worktrees: Vec<WorktreeInfo>, repo: &Path) -> Result<PathBuf> {
+    worktrees.into_iter().next().map(|w| w.path).ok_or_else(|| {
+        anyhow!(
+            "git worktree list returned no worktrees for {}",
+            repo.display()
+        )
+    })
 }
 
 /// List all worktrees of the repository, primary first.

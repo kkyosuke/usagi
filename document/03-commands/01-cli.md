@@ -39,7 +39,7 @@
 
 - `.usagi/` を初期化し、グローバルレジストリ `~/.usagi/workspaces.json` にエントリを追加。
 - `.usagi/.gitignore` を生成してローカル状態を無視する設定を自己完結で書き込む（ただし共有対象の `.usagi/issues/` は追跡。リポジトリルートの `.gitignore` は汚さない。詳細は [data/02-workspace.md](../data/02-workspace.md#保存場所)）。
-- `--git <URL>` 指定時は、カレントディレクトリ配下に `<リポジトリ名>/` を作って `git clone` してから登録。
+- `--git <URL>` 指定時は、カレントディレクトリ配下に `<リポジトリ名>/` を作って `git clone` してから登録。`<URL>` は `https` / `http` / `ssh` / `git` スキームと scp 形式（`git@host:owner/repo.git`）のみ許可し、コマンド実行につながる git リモートヘルパー（`ext::` など）や `file://` は拒否する。
 
 ### `usagi hop`
 

@@ -39,7 +39,14 @@ impl UpdateHandle {
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Option<UpdateStatus>> {
-        self.shared.lock().expect("update handle mutex poisoned")
+        // Recover a poisoned lock rather than propagating the panic. The home
+        // event loop reads this handle before every redraw while the terminal is
+        // in raw / alternate-screen mode, so escalating a poison here would crash
+        // the UI with the terminal left broken. The slot only guards a `replace` /
+        // read of an `Option`, so a stale reading is the worst outcome. This
+        // matches the never-crash-on-poison policy of the sibling handles
+        // (`SessionsRefreshHandle`, the terminal pool / monitor).
+        self.shared.lock().unwrap_or_else(|p| p.into_inner())
     }
 }
 
@@ -65,6 +72,22 @@ mod tests {
         let handle = UpdateHandle::new();
         let writer = handle.clone();
         writer.set(status());
+        assert_eq!(handle.status(), Some(status()));
+    }
+
+    #[test]
+    fn lock_recovers_from_a_poisoned_mutex_instead_of_crashing() {
+        // A thread that panics while holding the lock poisons the mutex. The
+        // handle must still hand back the last-written value rather than
+        // propagating the poison and crashing the TUI event loop that reads it.
+        let handle = UpdateHandle::new();
+        handle.set(status());
+        let clone = handle.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = clone.shared.lock().unwrap();
+            panic!("poison the mutex");
+        })
+        .join();
         assert_eq!(handle.status(), Some(status()));
     }
 }

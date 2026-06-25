@@ -234,6 +234,22 @@ mod tests {
     }
 
     #[test]
+    fn load_when_version_is_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = WorkspaceStore::new(dir.path());
+        fs::create_dir_all(store.dir()).unwrap();
+        // A state.json with no `version` key must still load rather than failing
+        // the whole file, matching the forward-compatibility kept elsewhere.
+        fs::write(
+            store.state_path(),
+            r#"{"sessions":[],"updated_at":"2026-01-01T00:00:00Z"}"#,
+        )
+        .unwrap();
+        let state = store.load().unwrap().unwrap();
+        assert!(state.sessions.is_empty());
+    }
+
+    #[test]
     fn lock_is_a_dotfile_in_the_usagi_dir_and_does_not_block_save() {
         let dir = tempfile::tempdir().unwrap();
         let store = WorkspaceStore::new(dir.path());

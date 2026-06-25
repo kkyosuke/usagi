@@ -173,6 +173,21 @@ mod tests {
     }
 
     #[test]
+    fn load_settings_when_version_is_missing() {
+        let (_dir, storage) = temp_storage();
+        fs::create_dir_all(storage.dir()).unwrap();
+        // A settings.json with no `version` key (hand-edited or from a format that
+        // dropped it) must still load rather than failing the whole file.
+        fs::write(
+            storage.settings_path(),
+            r#"{"notifications_enabled":false}"#,
+        )
+        .unwrap();
+        let loaded = storage.load_settings().unwrap();
+        assert!(!loaded.notifications_enabled);
+    }
+
+    #[test]
     fn load_settings_degrades_unknown_enum_values_instead_of_failing() {
         let (_dir, storage) = temp_storage();
         fs::create_dir_all(storage.dir()).unwrap();
