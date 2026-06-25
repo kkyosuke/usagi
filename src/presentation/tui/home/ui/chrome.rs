@@ -1,7 +1,7 @@
 //! The chrome around the body: the title bar and engagement-ladder indicator,
-//! the mode-aware command input and footer, the Overview command hints, and the
-//! session-removal / quit-confirmation modals. All functions take plain data
-//! and return styled lines.
+//! the mode-aware command input and footer, the `:` command palette overlay
+//! (with its command hints), and the session-removal / quit-confirmation
+//! modals. All functions take plain data and return styled lines.
 
 use console::{style, Style};
 
@@ -49,39 +49,19 @@ pub(super) fn title_bar(width: usize, list: &WorktreeList) -> String {
     widgets::title_line(width, &label)
 }
 
-/// The top-right "update available" notice: the usagi mascot beside a short
-/// note that a release newer than the running build (`latest`) has been
-/// published. Shown only while the background update check reports one.
+/// The top-right "update available" notice: a short note that a release newer
+/// than the running build (`latest`) has been published. Shown only while the
+/// background update check reports one.
 ///
-/// Each returned line pairs a mascot row with its message and is right-padded to
-/// a common block width and styled yellow-bold, so the block right-aligns
-/// cleanly when [`overlay_top_right`](super::overlay_top_right) anchors it to the
-/// top rows.
+/// Both lines are right-padded to a common block width and styled yellow-bold so
+/// the block right-aligns cleanly when [`overlay_top_right`](super::overlay_top_right)
+/// anchors it to the header rows.
 pub(super) fn update_banner(latest: &Version) -> Vec<String> {
-    let art = widgets::rabbit_art();
-    let art_w = art
-        .iter()
-        .map(|line| console::measure_text_width(line))
-        .max()
-        .unwrap_or(0);
-    // One message per mascot row; the last row carries only the mascot's feet.
-    let messages = [
-        "アップデートがあるぴょん".to_string(),
-        format!("v{latest}"),
-        String::new(),
-    ];
-    let rows: Vec<String> = art
-        .iter()
-        .zip(messages.iter())
-        .map(|(line, message)| {
-            let cell = pad_to_width((*line).to_string(), art_w);
-            if message.is_empty() {
-                cell
-            } else {
-                format!("{cell}  {message}")
-            }
-        })
-        .collect();
+    // The message on the first line, the new version on the second. No mascot
+    // art: the title bar pads the active session name to a fixed width and so
+    // reaches far enough right that only a compact block fits in the gap on the
+    // header rows where this is anchored.
+    let rows = ["アップデートがあるぴょん".to_string(), format!("v{latest}")];
     let block_w = rows
         .iter()
         .map(|row| console::measure_text_width(row))
@@ -94,8 +74,6 @@ pub(super) fn update_banner(latest: &Version) -> Vec<String> {
                 .bold()
                 .to_string()
         })
-        // 一番下に空行を 1 行足して、下のコンテンツとの間に余白を作る。
-        .chain(std::iter::once(String::new()))
         .collect()
 }
 
@@ -178,13 +156,12 @@ pub(super) fn task_status_line(rows: &[TaskRow], width: usize) -> Vec<String> {
     vec![line1, line2]
 }
 
-/// The engagement-ladder indicator drawn just under the title bar: the four
+/// The engagement-ladder indicator drawn just under the title bar: the three
 /// modes in order with the current one highlighted (cyan-bold) and the rest
 /// dimmed, so the screen always shows which step the keys act on. Centred for
 /// the terminal width.
 pub(super) fn mode_ladder(width: usize, current: Mode) -> String {
-    const STEPS: [(Mode, &str); 4] = [
-        (Mode::Overview, "Overview"),
+    const STEPS: [(Mode, &str); 3] = [
         (Mode::Switch, "Switch"),
         (Mode::Focus, "Focus"),
         (Mode::Attached, "Attached"),
@@ -229,11 +206,11 @@ pub(super) fn command_hint_row(
     format!("  {marker} {name_col}{desc}")
 }
 
-/// The advisory hint lines drawn just above the command input in 統括: the
-/// matching commands while the command word is typed, or the usage and examples
-/// once a known command is given arguments. Empty outside Overview.
+/// The advisory hint lines drawn in the command palette (`:`): the matching
+/// commands while the command word is typed, or the usage and examples once a
+/// known command is given arguments. Empty while the palette is closed.
 pub(super) fn hint_lines(state: &HomeState, width: usize) -> Vec<String> {
-    if state.mode() != Mode::Overview {
+    if !state.command_palette_open() {
         return Vec::new();
     }
     match state.hint() {
@@ -242,7 +219,7 @@ pub(super) fn hint_lines(state: &HomeState, width: usize) -> Vec<String> {
             // Only point a marker at a best match once something is typed; a
             // bare prompt shows the whole menu with nothing pre-selected.
             let highlight = !typed.is_empty();
-            // The Overview line is always workspace-scoped; a partial match just
+            // The palette line is always workspace-scoped; a partial match just
             // says "matches".
             let header = if highlight {
                 "matches".to_string()
@@ -280,12 +257,12 @@ pub(super) fn hint_lines(state: &HomeState, width: usize) -> Vec<String> {
     }
 }
 
-/// The command input line, by mode: the editable 統括 (Overview) command prompt,
-/// a left-pane hint in 切替 (Switch), the focused session in 在席 (Focus), and a
-/// live-terminal status in 没入 (Attached).
+/// The command input line, by mode: a left-pane hint in 切替 (Switch), the
+/// focused session in 在席 (Focus), and a live-terminal status in 没入
+/// (Attached). The workspace command line is the `:` palette overlay, not this
+/// resident line.
 pub(super) fn input_line(state: &HomeState) -> String {
     match state.mode() {
-        Mode::Overview => format!(" {}", overview_input_content(state)),
         Mode::Switch => style(" Pick a session".to_string()).dim().to_string(),
         Mode::Focus => style(format!(
             " Operating session: {}",
@@ -297,26 +274,61 @@ pub(super) fn input_line(state: &HomeState) -> String {
     }
 }
 
-/// The 統括 (Overview) command input rendered as a bordered field — an
-/// HTML-input-like box — so it reads clearly as *where you type*, set apart from
-/// the hints above it and the results band below. Spans the full `width` (three
-/// rows: top border, the `❯ <input>` line, bottom border).
-pub(super) fn overview_input_box(state: &HomeState, width: usize) -> Vec<String> {
-    let content = overview_input_content(state);
-    // `boxed` adds the two borders and one space of padding on each side, so the
-    // inner content area is the width less those four columns.
-    widgets::boxed("", width.saturating_sub(4), &[content])
-}
-
-/// The Overview command line as `❯ <text>` with the caret drawn at the editing
+/// The command palette line as `❯ <text>` with the caret drawn at the editing
 /// position (the byte offset from [`HomeState::cursor`]), so ←/→/Home/End move a
 /// visible caret through the text instead of always sitting at the end.
-fn overview_input_content(state: &HomeState) -> String {
+fn command_input_content(state: &HomeState) -> String {
     let prompt = style("❯").red().bold();
     let input = state.input();
     let (before, after) = input.split_at(state.cursor());
     let value = widgets::block_caret(before, after, &Style::new().cyan());
     format!("{prompt} {value}")
+}
+
+/// Builds the workspace command palette overlay (`:`) as a centred modal: the
+/// `❯ <input>` command line (with a block caret), the advisory command hints,
+/// the latest command's response (capped, with an `↑ N more` line when longer),
+/// and a key-hint footer. Floats over the panes while open; `Esc` closes it.
+pub(super) fn command_palette_frame(
+    raw_height: usize,
+    raw_width: usize,
+    state: &HomeState,
+) -> Vec<String> {
+    const INNER: usize = 60;
+
+    let mut body = vec![command_input_content(state)];
+
+    // The advisory hints (matching commands, or the usage of a known command):
+    // the same lines the palette draws above its input.
+    let hints = hint_lines(state, INNER);
+    if !hints.is_empty() {
+        body.push(String::new());
+        body.extend(hints);
+    }
+
+    // The latest command's response, capped so a long dump does not swallow the
+    // box; the overflow is summarised with an `↑ N more` line.
+    let response = state.response_lines();
+    if !response.is_empty() {
+        const RESPONSE_MAX: usize = 10;
+        body.push(String::new());
+        let total = response.len();
+        let start = total.saturating_sub(RESPONSE_MAX);
+        if start > 0 {
+            body.push(style(format!("  ↑ {start} more")).dim().to_string());
+        }
+        for line in &response[start..] {
+            body.push(log_line(line, INNER));
+        }
+    }
+
+    body.push(String::new());
+    body.push(
+        style("Enter: run   Tab: complete   ↑↓ history   Esc: close")
+            .dim()
+            .to_string(),
+    );
+    widgets::render_modal(raw_height, raw_width, "Command", INNER, &body)
 }
 
 /// The footer help line, aware of the current mode. It leads with a mode tag so
@@ -338,11 +350,15 @@ pub(super) fn footer_line(width: usize, state: &HomeState) -> String {
             "[preview]  ↑↓ scroll / PgUp/PgDn page / Esc / q: close",
         );
     }
+    // The command palette captures the keyboard while open, so its controls take
+    // over the footer regardless of the underlying mode.
+    if state.command_palette_open() {
+        return widgets::dim_line(
+            width,
+            "[command]  Tab: complete / ↑↓: history / Enter: run / Esc: close",
+        );
+    }
     let help = match state.mode() {
-        Mode::Overview => {
-            "[overview]  Tab: complete / ↑↓: history / Enter: run / \"session switch\": pick session"
-                .to_string()
-        }
         Mode::Switch => {
             // While the highlighted session's note is showing, `Esc` first hides
             // it (a second `Esc` then backs out), so the footer names that.
@@ -352,12 +368,12 @@ pub(super) fn footer_line(width: usize, state: &HomeState) -> String {
                 "Esc back"
             };
             format!(
-                "[switch]  ↑↓ session / ←→ tab / Enter focus / c new / r rename / n/Ctrl-E note / x close tab / {esc}"
+                "[switch]  ↑↓ session / ←→ tab / Enter focus / c new / r rename / n/Ctrl-E note / x close tab / : commands / {esc}"
             )
         }
         Mode::Focus => {
             format!(
-                "[session: {}]  Ctrl-N/P: tab / Enter: open/run / Ctrl-O: switch / Ctrl-^: last / Ctrl-E: note / Esc: overview",
+                "[session: {}]  Ctrl-N/P: tab / Enter: open/run / Ctrl-O: switch / Ctrl-^: last / Ctrl-E: note / : commands / Esc: switch",
                 state.focused_session_name()
             )
         }

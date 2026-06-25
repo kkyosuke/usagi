@@ -48,15 +48,15 @@
 </td>
 <td>
 
-**ホーム画面（統括モード）**
+**ホーム画面（切替モード）**
 
 ```text
         usagi · ▸ root · 4 sessions
-   Overview › Switch › Focus › Attached
+        Switch › Focus › Attached
  ▎ ⌂   root              │
  ▎     workspace root    │
        ──────────────    │
-   ●   main       pushed │   (右ペインは
+ > ●   main       pushed │   (右ペインは
      ▶ running           │    モードで変化)
    ○   feat/login  local │
      ◆ waiting           │
@@ -66,7 +66,7 @@
 </tr>
 </table>
 
-左ペインは各セッションを 2 行で表示し、稼働中は **`▶ running`（緑）**／入力待ちは **`◆ waiting`（黄）**／アイドルは **`⏸ idle`（シアン）** でひと目で状態がわかります。`Ctrl-O` で一段ズームアウト、`Esc` で一段戻り、`Ctrl+C` で終了します。画面・モード・キー操作の詳細は [document/design/05-home.md](document/design/05-home.md) を参照してください。
+左ペインは各セッションを 2 行で表示し、稼働中は **`▶ running`（緑）**／入力待ちは **`◆ waiting`（黄）**／アイドルは **`⏸ idle`（シアン）** でひと目で状態がわかります。`Ctrl-O` で切替へズームアウト、`Esc` で一段戻り、`:` でコマンドパレット、`Ctrl+C` で終了します。画面・モード・キー操作の詳細は [document/design/05-home.md](document/design/05-home.md) を参照してください。
 
 ## Prerequisites
 
@@ -134,20 +134,20 @@ cd <project>      # usagi init 済みのプロジェクト
 cargo run -- hop  # TUI を起動
 ```
 
-ホーム画面は「いまどの立場で操作しているか」を **4 つのモード**で切り替えます。`Ctrl-O` で一段ズームアウト、`Esc` で一段戻り、`Ctrl+C` で終了します。
+ホーム画面は「いまどの立場で操作しているか」を **3 つのモード**で切り替えます（起動直後の既定は**切替**）。`Ctrl-O` で切替へズームアウト、`Esc` で一段戻り、`Ctrl+C` で終了します。ワークスペース全体のコマンドは `:`（コロン）で開く**コマンドパレット**から実行します。
 
 | モード | 役割 | 主な操作 |
 |---|---|---|
-| **統括**（Overview） | 既定。ワークスペース全体を操作 | 下部コマンドラインで `session` / `config` を実行 |
-| **切替**（Switch） | セッションの選択・新規作成 | 左ペインで `↑↓` 選択・`←→`（または `Ctrl-N`/`Ctrl-P`）でタブ切替・`Enter` 確定・`c` で新規作成・`r` で表示名変更・`n` でメモ編集（選択中セッションのメモ＝次回 TODO は右ペインに表示） |
+| **切替**（Switch） | 既定。セッションの選択・新規作成 | 左ペインで `↑↓` 選択・`←→`（または `Ctrl-N`/`Ctrl-P`）でタブ切替・`Enter` 確定・`c` で新規作成・`r` で表示名変更・`n` でメモ編集（選択中セッションのメモ＝次回 TODO は右ペインに表示） |
 | **在席**（Focus） | 選択中セッションのコマンド | 右ペインで `terminal` / `agent` を起動・`Ctrl-N`/`Ctrl-P` でタブ切替・`Ctrl-E` でメモ編集 |
 | **没入**（Attached） | 埋め込みシェル / Agent | ライブ端末を直接操作（予約キーは `Ctrl-O`・`Ctrl-N`/`Ctrl-P`・`Ctrl-E`（メモ編集）。`Ctrl-N`/`Ctrl-P` で没入のままタブを前後に切替）。マウス左ドラッグでテキストを選択し、離すとコピー。リンクを左クリックすると既定のブラウザで開く |
+| コマンドパレット（**統括** / Overview） | ワークスペース全体のコマンド（常駐モードではない） | `:` で開き、`session` / `config` / `issue` などを実行。`Esc` で閉じて元のモードへ戻る |
 
 典型的な流れ:
 
 ```text
-session create feature-x   # .usagi/sessions/feature-x/ にセッション（worktree）を作成（短縮形 c / new）
-session switch             # 切替モードに入りセッションを選ぶ（一覧から ↑↓・Enter。c で新規作成・r で表示名変更・n でメモ編集）
+:                          # コマンドパレットを開く
+session create feature-x   # .usagi/sessions/feature-x/ にセッション（worktree）を作成（短縮形 c / new）→ 在席
 agent                      # 選んだセッションで Agent CLI（既定 claude）を埋め込み起動 → 没入
 ```
 

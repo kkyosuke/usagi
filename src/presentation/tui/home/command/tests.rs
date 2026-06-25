@@ -569,7 +569,7 @@ fn suggested_names(scope: CommandScope) -> Vec<String> {
 fn suggest_splits_the_command_surface_by_scope() {
     let has = |names: &[String], name: &str| names.iter().any(|n| n == name);
 
-    // The 統括 (Overview) line offers the workspace commands and the shared
+    // The `:` command palette offers the workspace commands and the shared
     // utilities, but never the session-specific ones.
     let workspace = suggested_names(CommandScope::Workspace);
     assert!(has(&workspace, "session"));

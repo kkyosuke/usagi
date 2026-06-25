@@ -15,7 +15,7 @@
 //! immediately, leaving the pane for 切替 (Switch) on the left pane while every
 //! pane stays alive in the pool — there the user moves between sessions
 //! (`↑`/`↓`), between this session's tabs (`←`/`→`), re-attaches (`Enter`), adds a
-//! pane (`t`), or zooms further out to 統括 (`Ctrl-O`). `Ctrl-N`/`Ctrl-P` switch to
+//! pane (`t`), or summons the `:` command palette. `Ctrl-N`/`Ctrl-P` switch to
 //! the next / previous tab in place ([`PaneStep::NextTab`] / [`PaneStep::PrevTab`]),
 //! and a left click on a tab chip jumps straight to it ([`PaneStep::ToTab`]);
 //! `Ctrl-T` zooms out to 在席 (Focus) — the session's action menu — by returning

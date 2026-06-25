@@ -2,17 +2,18 @@
 //!
 //! Top to bottom: a title bar, the engagement-ladder mode indicator, a blank
 //! separator row, a body split into the worktree list (left) and a
-//! mode-dependent right pane, the command input, and a footer. The right pane is blank in 統括 (Overview); a
-//! detail card for the highlighted session in 切替 (Switch); the session's action
-//! surface (a menu or a prompt) in 在席 (Focus); and the live embedded terminal in
-//! 没入 (Attached). In Overview the input is a bordered box and the command
-//! results render as a band below it. All functions take plain data and return
-//! styled lines, so the layout is rendered without any terminal IO.
+//! mode-dependent right pane, the command input, and a footer. The right pane is
+//! a preview of the highlighted session in 切替 (Switch); the session's action
+//! surface (a menu or a prompt) in 在席 (Focus); and the live embedded terminal
+//! in 没入 (Attached). The workspace command line is the `:` command palette
+//! overlay, drawn as a centred modal over the panes. All functions take plain
+//! data and return styled lines, so the layout is rendered without any terminal
+//! IO.
 //!
 //! This module owns the shared text/layout helpers and the top-level
 //! [`render_frame`] that stitches the screen together. The pane bodies live in
-//! [`panes`]; the surrounding chrome (title, ladder, input, footer, hints,
-//! modals) lives in [`chrome`].
+//! [`panes`]; the surrounding chrome (title, ladder, input, footer, the command
+//! palette, modals) lives in [`chrome`].
 
 mod chrome;
 pub mod content;
@@ -22,11 +23,11 @@ use crate::presentation::tui::widgets;
 use crate::presentation::tui::widgets::clip_to_width;
 
 use chrome::{
-    footer_line, hint_lines, input_line, mode_ladder, overview_input_box, quit_confirm_frame,
+    command_palette_frame, footer_line, input_line, mode_ladder, quit_confirm_frame,
     remove_modal_frame, switch_create_rows, switch_rename_rows, task_status_line, text_modal_frame,
     title_bar, update_banner,
 };
-use panes::{left_pane, log_tail, right_pane_contents};
+use panes::{left_pane, right_pane_contents};
 // The embedded terminal pane (没入) maps a click to the tab under it through this.
 pub(super) use panes::attached_tab_at;
 
@@ -95,24 +96,12 @@ const TERMINAL_STARTING: &str = "Starting terminal…";
 /// body on a normal terminal.
 const HINT_MAX: usize = 6;
 
-/// Fixed height of the command-hint band overlaid on the body in command mode.
-/// It is tall enough for the largest hint list — a header line, [`HINT_MAX`]
-/// rows, and a trailing "… and N more" — so the band's height never changes as
-/// the match list grows or shrinks while typing. Because the band always covers
-/// the same body rows, nothing beneath it jitters when the count changes.
-const HINT_BAND: usize = HINT_MAX + 2;
-
 /// Display width of the command-name column in the hints.
 const HINT_NAME_COL: usize = 12;
 
 /// Columns before the name column in a hint row: `"  "` indent + the marker
 /// cell + a space.
 const HINT_INDENT: usize = 4;
-
-/// Minimum frame height at which the 統括 input is drawn as a bordered box. Below
-/// it the chrome (the box is 3 rows) would crowd out the body, so a short
-/// terminal falls back to the single-line [`input_line`].
-const INPUT_BOX_MIN_HEIGHT: usize = 8;
 
 /// Most session rows the removal modal shows at once; a longer list scrolls to
 /// keep the cursor in view, with a count of the hidden rows above and below.
@@ -122,12 +111,6 @@ const REMOVE_MODAL_VISIBLE: usize = 8;
 /// of the hidden lines above and below. Shared with the event loop's scroll
 /// clamp and paging step.
 pub const TEXT_MODAL_VISIBLE: usize = 16;
-
-/// How many rows the 統括 (Overview) results band spends below the input on the
-/// command log tail. The newest output stays visible while typing. Kept small
-/// so the bordered input box and the band together leave the session list its
-/// full height.
-const RESULTS_BAND: usize = 4;
 
 /// Right-pads `content` with spaces to fill `width` display columns. Content
 /// already at least that wide is returned unchanged.
@@ -240,31 +223,21 @@ pub fn attached_geometry(
     }
 }
 
-/// The number of two-pane body rows for a normalized terminal `height` and the
-/// screen's current mode — the rows between the title/ladder/blank chrome above
-/// and the input/results/footer chrome below. Kept in step with [`render_frame`]'s
-/// own layout (the 統括 input box is 3 rows, every other mode's input is 1) so the
-/// preview's scroll clamp agrees with what is actually drawn.
-fn body_rows_for(height: usize, state: &HomeState) -> usize {
-    let input_h = if state.mode() == Mode::Overview && height >= INPUT_BOX_MIN_HEIGHT {
-        3
-    } else {
-        1
-    };
-    let results = if state.mode() == Mode::Overview {
-        RESULTS_BAND.min(height.saturating_sub(5 + input_h))
-    } else {
-        0
-    };
-    height.saturating_sub(4 + input_h + results).max(1)
+/// The number of two-pane body rows for a normalized terminal `height` — the
+/// rows between the title/ladder/blank chrome above (3 rows) and the input /
+/// footer chrome below (2 rows). Mode-independent now that every base mode uses
+/// the single-line [`input_line`] (the workspace command line is the `:` palette
+/// overlay), so the preview's scroll clamp agrees with what is actually drawn.
+fn body_rows_for(height: usize) -> usize {
+    height.saturating_sub(5).max(1)
 }
 
 /// How many Markdown lines the right-pane preview shows at once for a raw terminal
 /// size: the body rows less the preview's one-row header. Used by the event loop
 /// to clamp and page the preview's scroll so the last line stays in view.
-pub fn preview_visible(raw_height: usize, raw_width: usize, state: &HomeState) -> usize {
+pub fn preview_visible(raw_height: usize, raw_width: usize, _state: &HomeState) -> usize {
     let (height, _width) = widgets::normalize_size(raw_height, raw_width);
-    body_rows_for(height, state).saturating_sub(1).max(1)
+    body_rows_for(height).saturating_sub(1).max(1)
 }
 
 /// Builds the full home-screen frame for a raw terminal size.
@@ -280,6 +253,12 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
     // The text modal (a text-dumping command's output) overlays the screen too.
     if let Some(modal) = state.text_modal() {
         return text_modal_frame(raw_height, raw_width, modal);
+    }
+    // The workspace command palette (`:`) overlays the panes as a centred modal.
+    // It sits below the pure modals above (a `man` / `session list` it runs
+    // layers its text modal on top), so it is checked after them.
+    if state.command_palette_open() {
+        return command_palette_frame(raw_height, raw_width, state);
     }
     // The session-note editor is *not* a full-screen overlay: it renders in the
     // right pane (see [`panes::right_pane_contents`]) so the sidebar and chrome
@@ -297,27 +276,14 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
     let sidebar = state.sidebar();
     let (left_w, right_w) = layout(width, sidebar);
 
-    // The 統括 input is a bordered box (3 rows) when there is height for it;
-    // every other mode — and a short terminal — uses a single status line.
-    let input_lines = if state.mode() == Mode::Overview && height >= INPUT_BOX_MIN_HEIGHT {
-        overview_input_box(state, width)
-    } else {
-        vec![input_line(state)]
-    };
-    let input_h = input_lines.len();
+    // Every base mode uses a single-line status input (the workspace command line
+    // is the `:` palette overlay, drawn as a centred modal instead of a resident
+    // box). The footer and the input are one row each.
+    let input_lines = vec![input_line(state)];
 
-    // In 統括 the command log renders as a band below the input; it is sized so
-    // the body keeps at least one row. Other modes use no results band.
-    let results = if state.mode() == Mode::Overview {
-        RESULTS_BAND.min(height.saturating_sub(5 + input_h))
-    } else {
-        0
-    };
-
-    // Chrome: title + mode ladder + a blank separator on top, the input block +
-    // footer + the optional results band at the bottom. Everything between is the
-    // two-pane body.
-    let body_rows = height.saturating_sub(4 + input_h + results).max(1);
+    // Chrome: title + mode ladder + a blank separator on top, the input line +
+    // footer at the bottom. Everything between is the two-pane body.
+    let body_rows = body_rows_for(height);
 
     let mut left = left_pane(
         state.list(),
@@ -376,53 +342,17 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
         lines.push(line);
     }
 
-    // Overlay the 統括 command hints onto a fixed-height band at the bottom of the
-    // body, always leaving at least one body row uncovered. The band is a
-    // constant height regardless of how many hints currently match, so the body
-    // rows it covers never change as the match list grows or shrinks while
-    // typing. The band is cleared first (so no stale body text shows through),
-    // then the hints are bottom-anchored just above the input.
-    // While the preview owns the right pane it also owns the keyboard, so the
-    // command hints (which describe what typing would do) are suppressed — they
-    // would otherwise overlay the bottom of the preview with stale guidance.
-    let hints = if state.preview().is_some() {
-        Vec::new()
-    } else {
-        hint_lines(state, width)
-    };
-    if !hints.is_empty() {
-        let band = HINT_BAND.min(body_rows.saturating_sub(1));
-        let band_start = body_start + body_rows - band;
-        for line in lines.iter_mut().skip(band_start).take(band) {
-            *line = pad_to_width(String::new(), width);
-        }
-        let shown = hints.len().min(band);
-        let hint_top = body_start + body_rows - shown;
-        for (i, hint) in hints.into_iter().take(shown).enumerate() {
-            lines[hint_top + i] = pad_to_width(hint, width);
-        }
-    }
-
     lines.extend(input_lines);
-    // The 統括 results band: only the latest command's response, drawn below the
-    // input. Always exactly `results` rows tall (blank-padded) so the footer stays
-    // at the bottom regardless of how much output there is.
-    if results > 0 {
-        let tail = log_tail(state.response_lines(), width, results);
-        for row in 0..results {
-            let line = tail.get(row).cloned().unwrap_or_default();
-            lines.push(pad_to_width(line, width));
-        }
-    }
     lines.push(footer_line(width, state));
 
     // Overlay the top-right corner, in priority order: a momentary blocking
     // action (terminal / agent launch) shows the loading rabbit; otherwise any
     // in-flight background session work (create / remove) shows the task status
     // line; otherwise the "update available" notice shows when the background
-    // check has found a newer release than this build. The loading rabbit and
-    // update notice anchor to the top of the right pane (the rows below the title
-    // bar and mode ladder), where the default Overview screen is blank.
+    // check has found a newer release than this build. The loading rabbit anchors
+    // to the top of the right pane (the rows below the title bar and mode ladder);
+    // the update notice rides the header rows (like the task status block), since
+    // the 切替 preview now occupies the right pane and would otherwise collide.
     if let Some(loading) = state.loading() {
         // The transient launch indicator is deliberate and short-lived, so it
         // takes the corner even over a live pane.
@@ -445,15 +375,14 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
             width,
             &task_status_line(state.tasks(), width),
         );
-    } else if state.terminal_view().is_some() {
-        // A live embedded terminal occupies the right pane (没入's attached shell
-        // or 切替's live preview). Its rows are clipped, not padded, so the update
-        // notice — which `overlay_top_right` only keeps off rows that already
-        // reach the banner column — would draw over the shell's output there.
-        // Suppress it so the live pane is never overdrawn; it surfaces again the
-        // moment the pane is left.
     } else if let Some(latest) = state.update() {
-        widgets::overlay_top_right(&mut lines, body_start, width, &update_banner(&latest));
+        // The update notice rides the two header rows (the title bar and mode
+        // ladder, whose centred content leaves the right columns free), like the
+        // task status block, so it never collides with the right pane's preview /
+        // menu / live terminal — which the 切替 default now occupies. The compact
+        // two-line block (message + version) fits the gap the fixed-width title
+        // name leaves.
+        widgets::overlay_top_right(&mut lines, 0, width, &update_banner(&latest));
     }
 
     lines

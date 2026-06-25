@@ -260,9 +260,12 @@ fn state_with_spy() -> (HomeState, SpyLogger) {
 }
 
 #[test]
-fn new_state_starts_in_overview_with_a_hint() {
+fn new_state_starts_in_switch_with_a_hint() {
     let state = state();
-    assert_eq!(state.mode(), Mode::Overview);
+    // The default mode is the base 切替 (Switch); the command palette is closed.
+    assert_eq!(state.mode(), Mode::Switch);
+    assert!(!state.command_palette_open());
+    assert_eq!(state.switch_return(), ReturnMode::Base);
     assert_eq!(state.input(), "");
     assert_eq!(state.list().worktrees().len(), 2);
     // The seed log carries the usage hint.
@@ -270,8 +273,24 @@ fn new_state_starts_in_overview_with_a_hint() {
     assert!(state.log()[0].text.contains("man"));
     // The default action surface is the menu.
     assert_eq!(state.session_action_ui(), SessionActionUi::Menu);
-    // The Overview line is always workspace-scoped.
+    // The command palette line is always workspace-scoped.
     assert_eq!(state.command_scope(), CommandScope::Workspace);
+}
+
+#[test]
+fn command_palette_opens_and_closes_clearing_the_input() {
+    let mut state = state();
+    assert!(!state.command_palette_open());
+    // Typing then opening the palette starts it fresh (input cleared).
+    state.push_char('x');
+    state.open_command_palette();
+    assert!(state.command_palette_open());
+    assert_eq!(state.input(), "");
+    // Closing it clears the input again.
+    state.push_char('y');
+    state.close_command_palette();
+    assert!(!state.command_palette_open());
+    assert_eq!(state.input(), "");
 }
 
 #[test]
@@ -639,9 +658,9 @@ fn recall_and_submit_place_the_caret_at_the_end() {
 #[test]
 fn enter_switch_remembers_its_return_mode_and_moves_the_cursor() {
     let mut state = state(); // root, main, feature
-    state.enter_switch(ReturnMode::Overview);
+    state.enter_switch(ReturnMode::Base);
     assert_eq!(state.mode(), Mode::Switch);
-    assert_eq!(state.switch_return(), ReturnMode::Overview);
+    assert_eq!(state.switch_return(), ReturnMode::Base);
     state.switch_move_down();
     assert_eq!(state.list().selected_index(), 1);
     state.switch_move_up();
@@ -663,7 +682,7 @@ fn switch_return_carries_each_origin() {
 #[test]
 fn switch_inline_create_edits_then_confirms_a_fresh_name() {
     let mut state = state();
-    state.enter_switch(ReturnMode::Overview);
+    state.enter_switch(ReturnMode::Base);
     assert!(!state.is_creating());
     state.switch_begin_create(Vec::new());
     assert!(state.is_creating());
@@ -683,7 +702,7 @@ fn switch_inline_create_edits_then_confirms_a_fresh_name() {
 #[test]
 fn switch_inline_create_rejects_empty_and_duplicate_names() {
     let mut state = state();
-    state.enter_switch(ReturnMode::Overview);
+    state.enter_switch(ReturnMode::Base);
     // "feature" is an existing branch, so it is in the taken set.
     state.switch_begin_create(vec!["feature".to_string()]);
     // Whitespace only is empty after trimming: no live error (it does not nag),
@@ -710,7 +729,7 @@ fn switch_inline_create_rejects_empty_and_duplicate_names() {
 #[test]
 fn switch_inline_create_flags_a_branch_namespace_clash_live() {
     let mut state = state();
-    state.enter_switch(ReturnMode::Overview);
+    state.enter_switch(ReturnMode::Base);
     // Branches nested under `test/` make a plain `test` session impossible.
     state.switch_begin_create(vec!["test/home-ui-e2e".to_string()]);
     for c in "test".chars() {
@@ -737,7 +756,7 @@ fn switch_inline_create_flags_a_branch_namespace_clash_live() {
 #[test]
 fn switch_inline_create_can_be_cancelled() {
     let mut state = state();
-    state.enter_switch(ReturnMode::Overview);
+    state.enter_switch(ReturnMode::Base);
     state.switch_begin_create(Vec::new());
     state.create_mut().unwrap().push_char('x');
     state.create_cancel();
@@ -759,7 +778,7 @@ fn create_accessors_are_none_when_not_creating() {
 #[test]
 fn create_caret_moves_and_edits_mid_name() {
     let mut state = state();
-    state.enter_switch(ReturnMode::Overview);
+    state.enter_switch(ReturnMode::Base);
     state.switch_begin_create(Vec::new());
     for c in "wip".chars() {
         state.create_mut().unwrap().push_char(c);
@@ -787,7 +806,7 @@ fn create_caret_moves_and_edits_mid_name() {
 #[test]
 fn switch_inline_rename_prefills_edits_then_confirms_a_label() {
     let mut state = state(); // sessions: main, feature
-    state.enter_switch(ReturnMode::Overview);
+    state.enter_switch(ReturnMode::Base);
     state.switch_move_down(); // cursor onto "main"
     assert!(state.switch_begin_rename());
     assert!(state.is_renaming());
@@ -815,7 +834,7 @@ fn switch_inline_rename_prefills_edits_then_confirms_a_label() {
 #[test]
 fn switch_begin_rename_is_a_noop_on_the_root_row_and_when_already_open() {
     let mut state = state();
-    state.enter_switch(ReturnMode::Overview);
+    state.enter_switch(ReturnMode::Base);
     // Cursor on the root row: there is no session to rename.
     assert!(state.list().root_selected());
     assert!(!state.switch_begin_rename());
@@ -844,7 +863,7 @@ fn rename_accessors_are_none_when_not_renaming() {
 #[test]
 fn rename_can_be_cancelled() {
     let mut state = state();
-    state.enter_switch(ReturnMode::Overview);
+    state.enter_switch(ReturnMode::Base);
     state.switch_move_down();
     state.switch_begin_rename();
     state.rename_mut().unwrap().push_char('x');
@@ -857,7 +876,7 @@ fn rename_input_supports_caret_movement_and_forward_delete() {
     // The rename input has the same mid-string editing affordances as create: the
     // caret can move and a character can be deleted forward, not only at the end.
     let mut state = state();
-    state.enter_switch(ReturnMode::Overview);
+    state.enter_switch(ReturnMode::Base);
     state.switch_move_down();
     assert!(state.switch_begin_rename());
     let rename = state.rename_mut().unwrap();
@@ -960,9 +979,9 @@ fn enter_focus_named_focuses_the_matching_session() {
 #[test]
 fn enter_focus_named_is_a_no_op_for_an_unknown_session() {
     let mut state = state();
-    // An unmatched name leaves the mode and cursor untouched (still 統括, root row).
+    // An unmatched name leaves the mode and cursor untouched (still 切替, root row).
     assert!(!state.enter_focus_named("nope"));
-    assert_eq!(state.mode(), Mode::Overview);
+    assert_eq!(state.mode(), Mode::Switch);
     assert!(state.list().root_active());
 }
 
@@ -975,11 +994,12 @@ fn enter_focus_on_the_root_row_names_root() {
 }
 
 #[test]
-fn leave_focus_returns_to_overview() {
+fn leave_focus_returns_to_base_switch() {
     let mut state = state();
     state.enter_focus(1);
     state.leave_focus();
-    assert_eq!(state.mode(), Mode::Overview);
+    assert_eq!(state.mode(), Mode::Switch);
+    assert_eq!(state.switch_return(), ReturnMode::Base);
 }
 
 #[test]
@@ -1227,7 +1247,7 @@ fn focus_prompt_completes_command_arguments_and_lists_candidates() {
     let mut state = state();
     state.enter_focus(1);
     // `man ` completes its argument against the command names — ambiguous here,
-    // so the candidates are listed in the log (mirroring the Overview line).
+    // so the candidates are listed in the log (mirroring the palette line).
     for c in "man ".chars() {
         state.focus_prompt_mut().insert(c);
     }
@@ -1400,19 +1420,22 @@ fn leaving_attached_drops_the_tab_strip() {
 }
 
 #[test]
-fn enter_overview_clears_transient_state() {
+fn leave_focus_returns_to_base_switch_clearing_the_create_input() {
     let mut state = state();
-    state.enter_switch(ReturnMode::Overview);
+    state.enter_focus(1);
     state.switch_begin_create(Vec::new());
+    // Leaving 在席 returns to the base 切替 (via `enter_switch(Base)`), which clears
+    // the inline create input. Re-entering 在席 later resets the prompt / menu.
+    state.leave_focus();
+    assert_eq!(state.mode(), Mode::Switch);
+    assert_eq!(state.switch_return(), ReturnMode::Base);
+    assert!(!state.is_creating());
+    // Re-entering 在席 resets the focus surface (prompt cleared, cursor at top).
     state.enter_focus(1);
     state.focus_prompt_mut().insert('x');
-    state.focus_menu_move_down();
-    state.enter_overview();
-    assert_eq!(state.mode(), Mode::Overview);
-    assert!(!state.is_creating());
+    state.enter_focus(1);
     assert_eq!(state.focus_prompt(), "");
     assert_eq!(state.focus_menu_cursor(), 0);
-    assert_eq!(state.input(), "");
 }
 
 #[test]

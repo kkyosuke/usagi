@@ -2,36 +2,34 @@
 //! machinery returns: where a Switch returns to, and why an embedded pane exited.
 
 /// The home screen's mode — the "engagement ladder" the design is built around
-/// (統括 / 切替 / 在席 / 没入). Each step moves from overseeing the whole
-/// workspace toward operating deeper inside one session.
+/// (切替 / 在席 / 没入). Each step moves from overseeing the whole workspace
+/// toward operating deeper inside one session. The workspace-wide command line
+/// is no longer a resident mode but a command palette overlay summoned with `:`
+/// (see [`HomeState::open_command_palette`](super::HomeState::open_command_palette)).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
-    /// 統括 (Overview): the workspace-wide command line, the default. The user
-    /// types `session` / `config` / `doctor`; results render *below the input*
-    /// and the right pane stays blank.
-    Overview,
-    /// 切替 (Switch): the session picker. The left pane has the keyboard for
-    /// choosing a session (Enter), creating one inline (`c`), or backing out
-    /// (Esc). Entered from Overview via `session switch`, and from Focus /
-    /// Attached via `Ctrl-O`.
+    /// 切替 (Switch): the session picker and the default mode. The left pane has
+    /// the keyboard for choosing a session (Enter), creating one inline (`c`),
+    /// or summoning the command palette (`:`). Backing out (Esc) is inert at the
+    /// base Switch; entered from Focus / Attached via `Ctrl-O`.
     Switch,
     /// 在席 (Focus): a session is selected and operated in the *right pane* —
     /// either a menu of its runnable commands or a session-scoped prompt
     /// (chosen by [`crate::domain::settings::SessionActionUi`]).
     Focus,
     /// 没入 (Attached): an embedded terminal / agent is live in the right pane
-    /// and keys flow to it. `Ctrl-O` zooms out to Switch; `Ctrl-O` again to
-    /// Overview.
+    /// and keys flow to it. `Ctrl-O` zooms out to Switch.
     Attached,
 }
 
 /// Where a [`Mode::Switch`] should return to when cancelled (`Esc`) — the
-/// mode it was opened from. `Ctrl-O` while in Switch always zooms out to
-/// Overview regardless of this.
+/// mode it was opened from. `Ctrl-O` while in Switch always zooms out to the
+/// base Switch regardless of this.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReturnMode {
-    /// Opened from 統括 via `session switch`.
-    Overview,
+    /// The base Switch (the default): `Esc` is inert here, since the home screen
+    /// is not left by backing out.
+    Base,
     /// Opened from 在席 via `Ctrl-O`.
     Focus,
     /// Opened from 没入 via `Ctrl-O`; cancelling re-attaches the session.
@@ -49,8 +47,7 @@ pub enum PaneExit {
     /// the pane returns to 在席 (Focus).
     Closed,
     /// The user pressed `Ctrl-O`: leave the pane to the 切替 (Switch) mode on the
-    /// left pane. Re-selecting the same session re-attaches; `Ctrl-O` again zooms
-    /// out to 統括 (Overview).
+    /// left pane. Re-selecting the same session re-attaches.
     ToSwitch,
     /// The user pressed `Ctrl-E`: leave the pane to open the session-note editor
     /// over it. Closing the editor (save or cancel) re-attaches the session's
