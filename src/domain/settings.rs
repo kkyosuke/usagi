@@ -204,6 +204,10 @@ pub struct Settings {
     pub workspace_root: Option<PathBuf>,
     /// Whether desktop notifications are shown (e.g. on `hop`).
     pub notifications_enabled: bool,
+    /// Whether the home screen restores each session's open panes (agent /
+    /// terminal) on startup, re-spawning them in the background — an agent picks
+    /// its conversation back up where it left off. On unless the user disables it.
+    pub restore_panes_enabled: bool,
     /// Which agent CLI usagi drives.
     #[serde(deserialize_with = "crate::domain::serde_fallback::or_default")]
     pub agent_cli: AgentCli,
@@ -227,6 +231,8 @@ impl Default for Settings {
             workspace_root: None,
             // Notifications are opt-out: on unless the user disables them.
             notifications_enabled: true,
+            // Restoring open panes is opt-out: on unless the user disables it.
+            restore_panes_enabled: true,
             agent_cli: AgentCli::default(),
             session_action_ui: SessionActionUi::default(),
             sidebar: Sidebar::default(),
@@ -268,6 +274,9 @@ impl Settings {
         if let Some(notifications_enabled) = local.notifications_enabled {
             self.notifications_enabled = notifications_enabled;
         }
+        if let Some(restore_panes_enabled) = local.restore_panes_enabled {
+            self.restore_panes_enabled = restore_panes_enabled;
+        }
         if let Some(local_llm_enabled) = local.local_llm_enabled {
             self.local_llm.enabled = local_llm_enabled;
         }
@@ -308,6 +317,9 @@ pub struct LocalSettings {
     pub agent_cli: Option<AgentCli>,
     /// Override whether desktop notifications are shown for this project.
     pub notifications_enabled: Option<bool>,
+    /// Override whether this project's session panes are restored on startup.
+    /// `None` defers to the global setting.
+    pub restore_panes_enabled: Option<bool>,
     /// Which ref new session worktrees branch from in this repository. `None`
     /// defers to the default ([`BranchSource::Remote`]). An unrecognised stored
     /// value degrades to `None`.
@@ -329,6 +341,7 @@ impl LocalSettings {
     pub fn is_empty(&self) -> bool {
         self.agent_cli.is_none()
             && self.notifications_enabled.is_none()
+            && self.restore_panes_enabled.is_none()
             && self.default_branch_source.is_none()
             && self.default_branch.is_none()
             && self.local_llm_enabled.is_none()
@@ -398,6 +411,24 @@ mod tests {
     }
 
     #[test]
+    fn with_local_overrides_restore_panes_when_set() {
+        // The global default restores panes; a local override turns it off for
+        // just this project.
+        let global = Settings::default();
+        assert!(global.restore_panes_enabled);
+        let local = LocalSettings {
+            restore_panes_enabled: Some(false),
+            ..Default::default()
+        };
+
+        let effective = global.with_local(&local);
+
+        assert!(!effective.restore_panes_enabled);
+        // Unrelated fields keep their global value.
+        assert!(effective.notifications_enabled);
+    }
+
+    #[test]
     fn with_local_is_a_no_op_when_empty() {
         let global = Settings::default();
         assert_eq!(global.clone().with_local(&LocalSettings::default()), global);
@@ -425,6 +456,12 @@ mod tests {
         // ...as does a specific default branch.
         assert!(!LocalSettings {
             default_branch: Some("develop".to_string()),
+            ..Default::default()
+        }
+        .is_empty());
+        // As does the restore-panes toggle.
+        assert!(!LocalSettings {
+            restore_panes_enabled: Some(false),
             ..Default::default()
         }
         .is_empty());

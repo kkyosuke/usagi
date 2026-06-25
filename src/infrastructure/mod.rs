@@ -10,6 +10,7 @@ pub mod issue_store;
 pub mod json_file;
 pub mod markdown_file;
 pub mod memory_store;
+pub mod open_panes_store;
 pub mod pty;
 pub mod pty_exit;
 pub mod release;

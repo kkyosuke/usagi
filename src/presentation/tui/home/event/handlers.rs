@@ -823,6 +823,8 @@ fn launch_pane(
 ///   action menu, leaving every pane alive in the pool.
 /// - [`PaneExit::ToPreviousSession`] — `Ctrl-^`: jump to the previously focused
 ///   session, re-attaching it when live (or 在席 when none was recorded).
+/// - [`PaneExit::Quit`] — `Ctrl-Q`: leave the pane and raise the quit-confirmation
+///   modal on the home screen (every pane stays alive in the pool until confirmed).
 fn open_pane(
     term: &Term,
     state: &mut HomeState,
@@ -889,6 +891,14 @@ fn open_pane(
                 Some(row) => focus_and_attach(term, state, painter, wiring, row),
                 None => state.leave_attached(),
             }
+        }
+        Ok(PaneExit::Quit) => {
+            // `Ctrl-Q` in 没入: leave the pane (every shell / agent stays alive in
+            // the pool) and raise the quit-confirmation modal on the home screen.
+            // The event loop renders it on the next frame; confirming quits, which
+            // then drops the pool — so a live agent is never closed by one keystroke.
+            state.leave_attached();
+            state.open_quit_confirm();
         }
         Ok(PaneExit::Closed) => {
             // The shell exited: drop back to 在席 on the same session.

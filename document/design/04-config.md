@@ -53,6 +53,7 @@
 │          Theme              < System >                │  ┐ 設定一覧（全項目 `< 値 >`）
 │          Default Workspace  < (none) >                │  │  値は常に山かっこで囲み列を揃える
 │      >   Notifications      < On >                    │  │  選択行：左端の赤 ">" + 値が明色
+│          Restore Panes      < On >                    │  │  起動時にペインを復旧（agent は会話を再開）
 │        ● Agent CLI          < Gemini >                │  │  変更済み：ラベル左に黄色 ● + 値も黄色
 │          Session Action UI  < Menu >                  │  │  在席の右ペイン UI（Menu / Prompt）
 │          Local LLM            Install                 │  │  未導入は `Install`（緑・山かっこなし）、導入後は `< On >`/`< Off >`
@@ -71,6 +72,7 @@
 | Theme | UI のカラーテーマ | `Light` → `Dark` → `System`（OS 追従）の順に循環 |
 | Default Workspace | 既定で開くワークスペース | `(none)` ＋ 登録済みワークスペース名を順に循環。未登録時は変更不可（ヒントを表示） |
 | Notifications | デスクトップ通知（`agent` の入力待ち・完了）の ON/OFF | `On` ⇄ `Off` をトグル |
+| Restore Panes | 起動時に各セッションのペイン（agent / terminal）を復旧（agent は会話を再開） | `On` ⇄ `Off` をトグル（[04-orchestration.md#ペインの復旧](../04-orchestration.md#ペインの復旧)） |
 | Agent CLI | usagi が起動する AI エージェント CLI | **PATH に存在する（インストール済みの）agent だけ**を `Claude` → `Codex` → `sakana.ai` → `Gemini` の順に循環（`sakana.ai` は Codex 互換 CLI `codex-fugu` を起動）。未インストールの agent は選択肢に出さない。ただし現在保存されている値が未インストールでも、画面を開いただけで失わないよう選択肢に残す |
 | Session Action UI | 在席（Focus）の右ペインのアクション UI スタイル | `Menu`（選べるリスト）⇄ `Prompt`（コマンドライン）をトグル（[05-home.md](05-home.md#在席のアクション-uimenu--prompt)） |
 | Local LLM | ローカル LLM 委譲の有効化（`ollama` ランタイムの導入と on/off） | 未導入時は値が `Install`（アクション）で、`Space` / `Enter` でランタイムのインストールモーダルを開く。導入後は `On` ⇄ `Off` をトグル |
@@ -118,9 +120,10 @@
 │                   Workspace Config                    │  ← タイトル（緑・太字）
 │            Adjust this workspace's settings           │  ← サブタイトル（淡色）
 │                                                       │
-│      >   Agent CLI       < Global (Claude) >          │  ┐ ローカル設定一覧（4 項目）
+│      >   Agent CLI       < Global (Claude) >          │  ┐ ローカル設定一覧（5 項目）
 │        ● Notifications   < Override: Off >            │  │  選択行：左端の赤 ">"
-│          Default Branch  < develop >                  │  │  変更済み：ラベル左に黄色 ●
+│          Restore Panes   < Global (On) >              │  │  変更済み：ラベル左に黄色 ●
+│          Default Branch  < develop >                  │  │
 │          Branch Source   < Remote >                   │  ┘
 │                                                       │
 │                           [ Save ]                    │  ← Save ボタン
@@ -133,6 +136,7 @@
 |---|---|---|
 | Agent CLI | このワークスペースの Agent CLI 上書き | `Global (実効値)` → インストール済みの agent を `Override: Claude` → `Override: Codex` → `Override: sakana.ai` → `Override: Gemini` の順に循環（未インストールは出さない。既存の上書き値が未インストールでも選択肢に残す） |
 | Notifications | このワークスペースの通知 ON/OFF 上書き | `Global (実効値)` → `Override: On` → `Override: Off` の順に循環 |
+| Restore Panes | このワークスペースのペイン復旧 ON/OFF 上書き | `Global (実効値)` → `Override: On` → `Override: Off` の順に循環 |
 | Default Branch | `session create` で worktree を切る基点ブランチ | `Default (auto)` → リポジトリの各ブランチ名 の順に循環（実在ブランチを検出） |
 | Branch Source | 上のブランチをローカル形／リモート形のどちらで使うか | `Local` ⇄ `Remote` をトグル（未設定時は `Default (Remote)` を表示） |
 
@@ -185,7 +189,7 @@
 | `Space` | `Local LLM` の `Install` 行でインストールモーダルを、`Local LLM Model`（導入後）行でモデル選択モーダルを開く（他の行・スコープでは無効） |
 | `Enter` | Save ボタン上では編集内容を `settings.json` へ保存。`Local LLM`（未導入時）上ではインストールモーダルを、`Local LLM Model`（導入後）上ではモデル選択モーダルを開く。その他の設定項目上では `→` と同じく値を次へ切り替え |
 | `q` / `Esc` | 前の画面へ戻る（起動画面から開いた場合は起動画面、ホーム画面の `config` から開いた場合はホーム画面。未保存の編集は破棄） |
-| `Ctrl+C` | アプリを終了 |
+| `Ctrl+C` / `Ctrl+Q` | アプリを終了 |
 
 ### インストールモーダルのキー操作
 
@@ -201,7 +205,7 @@
 | `Home` / `End` | キャレットを行頭／行末へ移動 |
 | `Enter` | 入力した sudo パスワードでランタイム導入を**バックグラウンドで開始**し、モーダルを閉じて操作に戻る |
 | `Esc` | モーダルを閉じてキャンセル（導入しない） |
-| `Ctrl+C` | アプリを終了 |
+| `Ctrl+C` / `Ctrl+Q` | アプリを終了 |
 
 ### モデル選択モーダルのキー操作
 
@@ -213,7 +217,7 @@
 | `↓` / `j` | カーソルを 1 つ下のモデルへ移動（先頭へラップ） |
 | `Enter` | カーソル位置のモデルを採用。**未導入**なら `ollama pull`（バックグラウンド実行＋スピナー）で取得してから採用 |
 | `Esc` | モーダルを閉じてキャンセル（採用しない） |
-| `Ctrl+C` | アプリを終了 |
+| `Ctrl+C` / `Ctrl+Q` | アプリを終了 |
 
 > キー操作はグローバル／ワークスペースのどちらのスコープでも共通です。
 

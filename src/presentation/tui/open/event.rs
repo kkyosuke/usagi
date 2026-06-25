@@ -92,7 +92,8 @@ pub fn event_loop(
                 }
             }
             Key::Char('q') | Key::Escape => return Ok(Outcome::Back),
-            Key::CtrlC => return Ok(Outcome::Quit),
+            // `Ctrl-C` / `Ctrl-Q` (the bare `0x11`) quit the app from here too.
+            Key::CtrlC | Key::Char('\u{0011}') => return Ok(Outcome::Quit),
             _ => {}
         }
     }
@@ -173,6 +174,15 @@ mod tests {
     fn ctrl_c_returns_quit() {
         assert!(matches!(
             run(vec![Ok(Key::CtrlC)], sample_list()).unwrap(),
+            Outcome::Quit
+        ));
+    }
+
+    #[test]
+    fn ctrl_q_returns_quit() {
+        // `Ctrl-Q` is the global quit chord (the bare `0x11` `console` reports).
+        assert!(matches!(
+            run(vec![Ok(Key::Char('\u{0011}'))], sample_list()).unwrap(),
             Outcome::Quit
         ));
     }

@@ -24,7 +24,7 @@ pub mod update;
 #[cfg(test)]
 mod e2e_tests;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use console::Term;
@@ -343,6 +343,10 @@ pub fn run(term: &Term, workspace: &Workspace, preload: Preload) -> Result<Outco
     // agent choice (a bare `agent`, the menu's `a` shortcut / default row).
     let default_cli = settings.agent_cli;
 
+    // Whether each session's open panes are persisted (so they restore on the next
+    // startup). Copied out so the pane driver can read it without holding `settings`.
+    let restore_panes_enabled = settings.restore_panes_enabled;
+
     // usagi's wiring policy (resolved usagi binary + local LLM model) the agent
     // renders into its own invocation; built once and reused for every launch.
     let agent_wiring = settings.agent_wiring(&usagi_bin);
@@ -362,6 +366,15 @@ pub fn run(term: &Term, workspace: &Workspace, preload: Preload) -> Result<Outco
     // loop calls one at a time).
     let pool = std::cell::RefCell::new(terminal_pool::TerminalPool::new(notifications_enabled));
     let monitor = pool.borrow().monitor();
+
+    // Restore each session's panes from the last run, in the background (nothing is
+    // attached yet): an agent relaunches resuming its conversation, a terminal
+    // reopens a fresh shell. The watcher then tracks them so the sidebar badges
+    // move without the user attaching. Gated by the setting; a fresh workspace or a
+    // disabled setting simply starts with no panes.
+    if restore_panes_enabled {
+        restore_open_panes(term, &state, &pool, &agent_wiring, default_cli);
+    }
 
     // Removing a session deletes its worktrees/branches and forgets it, on a
     // background thread like creation so the screen never freezes. A session with
@@ -395,7 +408,12 @@ pub fn run(term: &Term, workspace: &Workspace, preload: Preload) -> Result<Outco
     // finished removal — on this thread, since the pool is not `Send` and so
     // cannot be touched from the worker thread.
     let mut evict_pool = |session_root: &Path| {
-        pool.borrow_mut().remove_under(session_root);
+        // Also drop the removed worktrees' persisted pane snapshots, so a session
+        // recreated at the same path starts fresh instead of restoring this run's
+        // panes on the next startup (mirrors why the pool entry is evicted).
+        for dir in pool.borrow_mut().remove_under(session_root) {
+            crate::infrastructure::open_panes_store::clear(&dir);
+        }
     };
 
     // Check the project's git remote for a newer release than this build, on a
@@ -467,9 +485,8 @@ pub fn run(term: &Term, workspace: &Workspace, preload: Preload) -> Result<Outco
         // picker / `agent <name>`), consumed here so it applies once, falling back
         // to the configured default. `take` clears it whether or not a fresh agent
         // spawn follows, so a stale choice never leaks into a later launch.
-        let agent = crate::infrastructure::agent::agent_for(
-            home.take_agent_choice().unwrap_or(default_cli),
-        );
+        let cli = home.take_agent_choice().unwrap_or(default_cli);
+        let agent = crate::infrastructure::agent::agent_for(cli);
         // Build the agent command for this worktree on demand: when it already
         // has a Claude conversation, launch with `--continue` so `:agent` resumes
         // where it left off; otherwise it starts fresh. The pool only sends it on
@@ -536,9 +553,9 @@ pub fn run(term: &Term, workspace: &Workspace, preload: Preload) -> Result<Outco
                 } else {
                     terminal_tabs::PaneKind::Terminal
                 };
-                pool.add_pane(term, dir, kind, initial, &label)?;
+                pool.add_pane(term, dir, kind, initial, cli, &label)?;
             } else {
-                pool.enter(term, dir, run_agent, initial, &label)?;
+                pool.enter(term, dir, run_agent, initial, cli, &label)?;
             }
             handle.set_attached(Some(dir.to_path_buf()));
             loop {
@@ -582,6 +599,7 @@ pub fn run(term: &Term, workspace: &Workspace, preload: Preload) -> Result<Outco
                                 dir,
                                 terminal_tabs::PaneKind::Agent,
                                 later_initial,
+                                cli,
                                 &label,
                             )?;
                         }
@@ -590,6 +608,9 @@ pub fn run(term: &Term, workspace: &Workspace, preload: Preload) -> Result<Outco
                     // session; the event loop re-roots on it (attaching when live),
                     // leaving every pane alive in the pool (like `Ctrl-O`).
                     terminal_pane::PaneStep::PrevSession => return Ok(PaneExit::ToPreviousSession),
+                    // `Ctrl-Q`: leave 没入 to quit usagi. Every pane stays alive in
+                    // the pool; the event loop raises the quit-confirmation modal.
+                    terminal_pane::PaneStep::Quit => return Ok(PaneExit::Quit),
                     // `Ctrl-W`: close the active tab. Same as a shell that exited —
                     // keep driving when a pane remains, else fall to 在席.
                     terminal_pane::PaneStep::CloseTab => {
@@ -614,6 +635,19 @@ pub fn run(term: &Term, workspace: &Workspace, preload: Preload) -> Result<Outco
         // to mop up the stale screen snapshot — so the cleanup holds no matter
         // when control changes hands.
         handle.set_attached(None);
+        // Persist this session's open panes (or clear when the last one closed) so
+        // the next startup restores them — an agent resumes its conversation, a
+        // terminal reopens a fresh shell. Done here, where the pane yields control
+        // and the pool reflects the current set, so the on-disk snapshot tracks
+        // every add / close. Best-effort: a write failure just means no restore.
+        if restore_panes_enabled {
+            match pool.snapshot_open_panes_for(dir) {
+                Some((active, panes)) => {
+                    let _ = crate::infrastructure::open_panes_store::save(dir, active, &panes);
+                }
+                None => crate::infrastructure::open_panes_store::clear(dir),
+            }
+        }
         // Leaving only to edit the note (`Ctrl-E` → `PaneExit::OpenNote`) keeps
         // the last screen snapshot: the note editor floats over the right pane,
         // so the live terminal stays visible behind it, and the event loop
@@ -748,6 +782,79 @@ pub fn run(term: &Term, workspace: &Workspace, preload: Preload) -> Result<Outco
     }
 
     outcome
+}
+
+/// Restore each session's persisted panes into the pool on startup, in the
+/// background (nothing is attached yet): a terminal pane reopens a fresh shell, an
+/// agent pane relaunches its CLI — resuming the conversation when one exists, so it
+/// picks up where it left off. Snapshots are read from
+/// [`open_panes_store`](crate::infrastructure::open_panes_store), keyed by worktree,
+/// for the workspace root (the ⌂ root row) and every session worktree.
+///
+/// Best-effort throughout: a missing snapshot skips the session and a failed spawn
+/// skips that one pane, so a partial restore never blocks the screen from opening.
+fn restore_open_panes(
+    term: &Term,
+    state: &HomeState,
+    pool: &std::cell::RefCell<terminal_pool::TerminalPool>,
+    agent_wiring: &crate::domain::agent::AgentWiring,
+    default_cli: crate::domain::settings::AgentCli,
+) {
+    use crate::infrastructure::open_panes_store::{self, StoredPaneKind};
+    use terminal_tabs::PaneKind;
+
+    // The dirs a snapshot may be keyed by — the workspace root and each session
+    // worktree — paired with the label shown in their waiting notification. Deduped
+    // so a path is never restored twice.
+    let mut dirs: Vec<(PathBuf, String)> = Vec::new();
+    let root = state.root_path().to_path_buf();
+    if !root.as_os_str().is_empty() {
+        dirs.push((root, "root".to_string()));
+    }
+    for wt in state.list().worktrees() {
+        if dirs.iter().any(|(d, _)| d == &wt.path) {
+            continue;
+        }
+        dirs.push((wt.path.clone(), state::worktree_name(wt).to_string()));
+    }
+
+    for (dir, label) in dirs {
+        let Some(snapshot) = open_panes_store::load(&dir) else {
+            continue;
+        };
+        for pane in &snapshot.panes {
+            let spawned = match pane.kind {
+                StoredPaneKind::Terminal => pool.borrow_mut().add_pane(
+                    term,
+                    &dir,
+                    PaneKind::Terminal,
+                    None,
+                    default_cli,
+                    &label,
+                ),
+                StoredPaneKind::Agent => {
+                    let cli = pane.cli.unwrap_or(default_cli);
+                    let agent = crate::infrastructure::agent::agent_for(cli);
+                    // Resume the conversation when one exists so the agent continues
+                    // where it left off rather than starting over.
+                    let resume = agent.has_resumable_session(&dir);
+                    let command = agent.launch_command(agent_wiring, resume, None);
+                    pool.borrow_mut().add_pane(
+                        term,
+                        &dir,
+                        PaneKind::Agent,
+                        Some(&command),
+                        cli,
+                        &label,
+                    )
+                }
+            };
+            // A failed spawn just skips that pane; the rest still restore.
+            let _ = spawned;
+        }
+        // Re-select the tab that was active when the snapshot was taken.
+        pool.borrow_mut().set_active(&dir, snapshot.active);
+    }
 }
 
 /// Create a session on a worker thread: run the git / filesystem work and build

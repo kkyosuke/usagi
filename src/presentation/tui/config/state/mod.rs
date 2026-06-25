@@ -32,6 +32,8 @@ pub enum Field {
     Theme,
     DefaultWorkspace,
     Notifications,
+    /// Whether each session's open panes are restored on startup.
+    RestorePanes,
     AgentCli,
     /// How 在席 (Focus) mode presents a session's runnable commands.
     SessionActionUi,
@@ -44,10 +46,11 @@ pub enum Field {
 
 impl Field {
     /// The fields shown on the screen, top to bottom.
-    pub const ALL: [Field; 7] = [
+    pub const ALL: [Field; 8] = [
         Field::Theme,
         Field::DefaultWorkspace,
         Field::Notifications,
+        Field::RestorePanes,
         Field::AgentCli,
         Field::SessionActionUi,
         Field::LocalLlm,
@@ -60,6 +63,7 @@ impl Field {
             Field::Theme => "Theme",
             Field::DefaultWorkspace => "Default Workspace",
             Field::Notifications => "Notifications",
+            Field::RestorePanes => "Restore Panes",
             Field::AgentCli => "Agent CLI",
             Field::SessionActionUi => "Session Action UI",
             Field::LocalLlm => "Local LLM",
@@ -74,6 +78,8 @@ impl Field {
 pub enum LocalField {
     AgentCli,
     Notifications,
+    /// Whether each session's open panes are restored on startup.
+    RestorePanes,
     /// Which branch new session worktrees are cut from (the detected default, or
     /// a specific branch).
     DefaultBranch,
@@ -83,9 +89,10 @@ pub enum LocalField {
 
 impl LocalField {
     /// The local override fields shown on the screen, top to bottom.
-    pub const ALL: [LocalField; 4] = [
+    pub const ALL: [LocalField; 5] = [
         LocalField::AgentCli,
         LocalField::Notifications,
+        LocalField::RestorePanes,
         LocalField::DefaultBranch,
         LocalField::BranchSource,
     ];
@@ -95,6 +102,7 @@ impl LocalField {
         match self {
             LocalField::AgentCli => "Agent CLI",
             LocalField::Notifications => "Notifications",
+            LocalField::RestorePanes => "Restore Panes",
             LocalField::DefaultBranch => "Default Branch",
             LocalField::BranchSource => "Branch Source",
         }
@@ -679,6 +687,9 @@ impl Config {
             Field::Notifications => {
                 self.settings.notifications_enabled != self.baseline.notifications_enabled
             }
+            Field::RestorePanes => {
+                self.settings.restore_panes_enabled != self.baseline.restore_panes_enabled
+            }
             Field::AgentCli => self.settings.agent_cli != self.baseline.agent_cli,
             Field::SessionActionUi => {
                 self.settings.session_action_ui != self.baseline.session_action_ui
@@ -697,6 +708,9 @@ impl Config {
             LocalField::AgentCli => local.settings.agent_cli != local.baseline.agent_cli,
             LocalField::Notifications => {
                 local.settings.notifications_enabled != local.baseline.notifications_enabled
+            }
+            LocalField::RestorePanes => {
+                local.settings.restore_panes_enabled != local.baseline.restore_panes_enabled
             }
             LocalField::DefaultBranch => {
                 local.settings.default_branch != local.baseline.default_branch
@@ -743,6 +757,7 @@ impl Config {
                 .clone()
                 .unwrap_or_else(|| "(none)".to_string()),
             Field::Notifications => on_off(self.settings.notifications_enabled).to_string(),
+            Field::RestorePanes => on_off(self.settings.restore_panes_enabled).to_string(),
             Field::AgentCli => self.settings.agent_cli.display_name().to_string(),
             Field::SessionActionUi => {
                 session_action_ui_label(self.settings.session_action_ui).to_string()
@@ -784,6 +799,10 @@ impl Config {
             },
             LocalField::Notifications => match local.settings.notifications_enabled {
                 None => format!("Global ({})", on_off(self.settings.notifications_enabled)),
+                Some(on) => format!("Override: {}", on_off(on)),
+            },
+            LocalField::RestorePanes => match local.settings.restore_panes_enabled {
+                None => format!("Global ({})", on_off(self.settings.restore_panes_enabled)),
                 Some(on) => format!("Override: {}", on_off(on)),
             },
             // The default branch has no global counterpart: an unset value uses

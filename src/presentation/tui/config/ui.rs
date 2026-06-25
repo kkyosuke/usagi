@@ -345,26 +345,28 @@ mod tests {
         assert!(lines[1].contains("alpha"));
         assert!(lines[2].contains("Notifications"));
         assert!(lines[2].contains("On"));
-        assert!(lines[3].contains("Agent CLI"));
+        assert!(lines[3].contains("Restore Panes"));
+        assert!(lines[3].contains("On"));
+        assert!(lines[4].contains("Agent CLI"));
         // Each field shows its single current value via the chooser.
-        assert!(lines[3].contains("Claude"));
-        assert!(lines[4].contains("Session Action UI"));
-        assert!(lines[4].contains("Menu"));
-        // The Local LLM row (index 5) is an action button: plain "Install",
+        assert!(lines[4].contains("Claude"));
+        assert!(lines[5].contains("Session Action UI"));
+        assert!(lines[5].contains("Menu"));
+        // The Local LLM row (index 6) is an action button: plain "Install",
         // with no chevrons.
-        assert!(lines[5].contains("Local LLM"));
-        assert!(lines[5].contains("Install"));
-        assert!(!lines[5].contains('<'));
-        // The model row (index 6) is inert until the runtime is installed: a
-        // plain "—" with no chevrons.
-        assert!(lines[6].contains("Local LLM Model"));
-        assert!(lines[6].contains('—'));
+        assert!(lines[6].contains("Local LLM"));
+        assert!(lines[6].contains("Install"));
         assert!(!lines[6].contains('<'));
+        // The model row (index 7) is inert until the runtime is installed: a
+        // plain "—" with no chevrons.
+        assert!(lines[7].contains("Local LLM Model"));
+        assert!(lines[7].contains('—'));
+        assert!(!lines[7].contains('<'));
         // Every other field is a chooser, so chevrons appear on those rows...
         assert!(lines
             .iter()
             .enumerate()
-            .filter(|(i, _)| *i != 5 && *i != 6)
+            .filter(|(i, _)| *i != 6 && *i != 7)
             .all(|(_, l)| l.contains('<') && l.contains('>')));
         // ...but only the focused (first) row carries the cursor.
         assert!(has_cursor(&lines[0]));

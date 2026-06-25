@@ -80,7 +80,9 @@ impl Menu {
                 Action::Continue
             }
             Key::Enter => self.activate(self.items[self.selected_index].key),
-            Key::Char('q') | Key::Escape | Key::CtrlC => Action::Quit,
+            // `Ctrl-Q` (the bare `0x11` `console` reports) is the global quit chord
+            // alongside `q` / `Esc` / `Ctrl-C`.
+            Key::Char('q') | Key::Escape | Key::CtrlC | Key::Char('\u{0011}') => Action::Quit,
             Key::Char(c) if self.items.iter().any(|item| item.key == c) => self.activate(c),
             _ => Action::Continue,
         }
@@ -250,7 +252,13 @@ mod tests {
 
     #[test]
     fn quit_keys_quit() {
-        for key in [Key::Char('q'), Key::Escape, Key::CtrlC] {
+        // `Ctrl-Q` (the bare `0x11`) joins `q` / `Esc` / `Ctrl-C` as a quit chord.
+        for key in [
+            Key::Char('q'),
+            Key::Escape,
+            Key::CtrlC,
+            Key::Char('\u{0011}'),
+        ] {
             assert_eq!(Menu::new().handle_key(key), Action::Quit);
         }
     }
