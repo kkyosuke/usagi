@@ -46,7 +46,7 @@ enum Commands {
     Feature,
     /// Hop into the usagi welcome screen
     Hop,
-    /// Print the square-pixel usagi marks (primary / flip / legibility)
+    /// Print the square-pixel usagi marks (flip / half)
     Icon {
         /// Which mark to show (defaults to all)
         #[arg(value_enum, default_value = "all")]
@@ -140,6 +140,7 @@ fn command_name(command: &Commands) -> Option<&'static str> {
         Commands::Doctor { .. } => Some("doctor"),
         Commands::Feature => Some("feature"),
         Commands::Hop => Some("hop"),
+        Commands::Icon { .. } => Some("icon"),
         Commands::Init { .. } => Some("init"),
         Commands::Issue { .. } => Some("issue"),
         Commands::Memory { .. } => Some("memory"),
