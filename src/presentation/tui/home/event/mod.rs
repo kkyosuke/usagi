@@ -381,6 +381,14 @@ pub(super) fn event_loop(
         // iteration (the skip above only applies to idle ticks that read no key).
         force_paint = true;
 
+        // Record the key press (and the mode it landed in) to the operation trace,
+        // so a session's navigation can be analysed after the fact. A no-op unless
+        // tracing is enabled, so the idle hot loop stays free.
+        crate::infrastructure::trace_log::TraceLog::record(
+            crate::domain::trace::TraceEvent::now(crate::domain::trace::TraceCategory::Tui, "key")
+                .with_detail(format!("{:?} {:?}", state.mode(), key)),
+        );
+
         // The quit-confirmation modal, when open, captures every key: `y` /
         // `Enter` (or a second `Ctrl-C`) confirms the close, `n` / `Esc` cancels.
         if state.quit_confirm() {

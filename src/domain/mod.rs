@@ -9,6 +9,7 @@ pub mod memory;
 pub mod repository;
 pub mod serde_fallback;
 pub mod settings;
+pub mod trace;
 pub mod version;
 pub mod workspace;
 pub mod workspace_state;
