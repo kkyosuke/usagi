@@ -37,6 +37,12 @@ enum Commands {
     Feature,
     /// Hop into the usagi welcome screen
     Hop,
+    /// Print the square-pixel usagi marks (primary / flip / legibility)
+    Icon {
+        /// Which mark to show (defaults to all)
+        #[arg(value_enum, default_value = "all")]
+        view: usagi::presentation::cli::icon::IconView,
+    },
     /// Register the current directory as a project (or clone one into it with --git)
     Init {
         /// Clone this repository URL into <repo-name>/ under the current directory
@@ -95,6 +101,7 @@ fn main() -> anyhow::Result<()> {
         Commands::Doctor { fix } => usagi::presentation::cli::doctor::run(fix),
         Commands::Feature => usagi::presentation::cli::feature::run(),
         Commands::Hop => usagi::presentation::cli::hop::run(),
+        Commands::Icon { view } => usagi::presentation::cli::icon::run(view),
         Commands::Init { git } => usagi::presentation::cli::init::run(git),
         Commands::Issue { command } => usagi::presentation::cli::issue::run(command),
         Commands::Memory { command } => usagi::presentation::cli::memory::run(command),
