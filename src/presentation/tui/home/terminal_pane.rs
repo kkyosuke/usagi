@@ -296,12 +296,15 @@ fn drive(
                 let links = &links_cache.as_ref().expect("links cache set above").1;
                 TerminalView::from_screen_with_links(screen, selection.as_ref(), hover, links)
             };
-            // The cursor belongs to the live screen, so hide it while the user is
-            // viewing scrolled-back history.
+            // The cursor belongs to the live screen, so don't park it while the
+            // user is viewing scrolled-back history. When live, park it on the
+            // program's cursor cell even if the program hid it (so the IME's
+            // preedit lands there) and mirror the program's show/hide.
             let cursor = if scrollback == 0 { view.cursor() } else { None };
+            let cursor_visible = view.cursor_visible();
             state.set_terminal_view(view);
             state.apply_badges(badges);
-            render(term, state, cursor, geo, &mut prev)?;
+            render(term, state, cursor, cursor_visible, geo, &mut prev)?;
             last_selection = selection;
             last_hover = hover;
             last_paint = Some(now);
@@ -709,6 +712,7 @@ fn render(
     term: &Term,
     state: &HomeState,
     cursor: Option<(u16, u16)>,
+    cursor_visible: bool,
     geo: ui::TerminalGeometry,
     prev: &mut Vec<String>,
 ) -> Result<()> {
@@ -716,14 +720,25 @@ fn render(
     let frame = ui::render_frame(height as usize, width as usize, state);
 
     // Repaint only the changed rows (see [`diff_frame`]); the cursor is hidden
-    // for the repaint and re-shown below over the shell's cell.
+    // for the repaint and re-positioned below over the shell's cell.
     let mut buf = diff_frame(prev, &frame);
 
     if let Some((row, col)) = cursor {
         // Translate the pane-relative cursor to a 1-based screen position
-        // (clamping a deferred-wrap column back onto the pane) and reveal it.
+        // (clamping a deferred-wrap column back onto the pane) and park the real
+        // cursor there, so an OS IME draws its preedit on the program's cursor.
+        // Mirror the program's show/hide: re-show it (the repaint hid it) when the
+        // program shows it, else leave it hidden but still positioned — exactly as
+        // when the program runs standalone, where the IME still follows a hidden
+        // cursor's position. `\x1b[?25l` is repeated harmlessly so the intent is
+        // explicit regardless of what the repaint emitted.
         let (x, y) = geo.cursor_screen_pos(row, col);
-        let _ = write!(buf, "\x1b[{y};{x}H\x1b[?25h");
+        let show = if cursor_visible {
+            "\x1b[?25h"
+        } else {
+            "\x1b[?25l"
+        };
+        let _ = write!(buf, "\x1b[{y};{x}H{show}");
     }
 
     term.write_str(&buf)?;
