@@ -44,7 +44,13 @@ pub fn event_loop(
 
     loop {
         let (height, width) = term.size();
-        let frame = ui::render_frame(height as usize, width as usize, &list, notice.as_deref());
+        let frame = ui::render_frame(
+            height as usize,
+            width as usize,
+            &list,
+            notice.as_deref(),
+            chrono::Utc::now(),
+        );
         painter.paint(term, frame)?;
 
         let key = match animated_read(reader, term, &mut painter, &install_task::handle()) {
@@ -125,9 +131,15 @@ mod tests {
     }
 
     fn sample_list() -> ProjectList {
+        use crate::usecase::workspace::WorkspaceOverview;
+        let overview = |name: &str, path: &str| WorkspaceOverview {
+            workspace: Workspace::new(name, path),
+            session_count: 0,
+            open_issue_count: 0,
+        };
         ProjectList::new(vec![
-            Workspace::new("alpha", "/p/alpha"),
-            Workspace::new("beta", "/p/beta"),
+            overview("alpha", "/p/alpha"),
+            overview("beta", "/p/beta"),
         ])
     }
 

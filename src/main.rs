@@ -98,6 +98,7 @@ fn main() -> anyhow::Result<()> {
     // No subcommand behaves the same as `usagi hop`.
     let command = cli.command.unwrap_or(Commands::Hop);
 
+    let name = command_name(&command);
     let result = match command {
         Commands::AgentPhase { phase } => usagi::presentation::cli::agent_phase::run(phase),
         Commands::Clean { dry_run, agent } => usagi::presentation::cli::clean::run(dry_run, agent),
@@ -114,10 +115,42 @@ fn main() -> anyhow::Result<()> {
         Commands::Status => usagi::presentation::cli::status::run(),
     };
 
+    trace_command(name, result.is_ok());
     if let Err(error) = &result {
         log_error(error);
     }
     result
+}
+
+/// The stable name a subcommand is traced under (its `usagi <name>` word). The
+/// `mcp` / `llm-mcp` long-running servers are excluded: they run for a whole
+/// session and would only ever record one open-ended "still running" line.
+fn command_name(command: &Commands) -> Option<&'static str> {
+    match command {
+        Commands::AgentPhase { .. } => Some("agent-phase"),
+        Commands::Config { .. } => Some("config"),
+        Commands::Doctor { .. } => Some("doctor"),
+        Commands::Feature => Some("feature"),
+        Commands::Hop => Some("hop"),
+        Commands::Init { .. } => Some("init"),
+        Commands::Issue { .. } => Some("issue"),
+        Commands::Memory { .. } => Some("memory"),
+        Commands::Run { .. } => Some("run"),
+        Commands::Status => Some("status"),
+        Commands::LlmMcp { .. } | Commands::Mcp => None,
+    }
+}
+
+/// Best-effort: record the finished CLI command (and whether it succeeded) to the
+/// operation trace, when tracing is enabled. A no-op for the long-running servers
+/// and whenever tracing is off.
+fn trace_command(name: Option<&'static str>, ok: bool) {
+    use usagi::domain::trace::{TraceCategory, TraceEvent};
+    if let Some(name) = name {
+        usagi::infrastructure::trace_log::TraceLog::record(
+            TraceEvent::now(TraceCategory::Cli, name).with_detail(if ok { "ok" } else { "error" }),
+        );
+    }
 }
 
 /// Best-effort: append `error` (with its full cause chain) to today's log file
