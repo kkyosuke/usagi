@@ -320,7 +320,15 @@ fn drive(
             let cursor_visible = view.cursor_visible();
             state.set_terminal_view(view);
             state.apply_badges(badges);
-            render(term, state, cursor, cursor_visible, geo, &mut prev)?;
+            render(
+                term,
+                state,
+                cursor,
+                cursor_visible,
+                geo,
+                (height, width),
+                &mut prev,
+            )?;
             last_selection = selection;
             last_hover = hover;
             last_paint = Some(now);
@@ -756,9 +764,14 @@ fn render(
     cursor: Option<(u16, u16)>,
     cursor_visible: bool,
     geo: ui::TerminalGeometry,
+    size: (u16, u16),
     prev: &mut Vec<String>,
 ) -> Result<()> {
-    let (height, width) = term.size();
+    // The terminal size is read once at the top of the `drive` loop and threaded
+    // in, not re-read here: it cannot change between two synchronous calls in the
+    // same loop pass, so a second `term.size()` (a TIOCGWINSZ ioctl) would be a
+    // redundant syscall on every painted frame.
+    let (height, width) = size;
     let frame = ui::render_frame(height as usize, width as usize, state);
 
     // Repaint only the changed rows (see [`diff_frame`]); the cursor is hidden
