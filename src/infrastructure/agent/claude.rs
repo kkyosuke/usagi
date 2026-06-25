@@ -230,6 +230,20 @@ impl Agent for ClaudeAgent {
         )
     }
 
+    fn headless_command(&self, wiring: &AgentWiring, prompt: &str) -> String {
+        // Claude's headless mode is `claude -p <prompt>` (print mode: run the
+        // prompt and exit). usagi's MCP servers are wired in exactly as in the
+        // interactive launch via `--mcp-config`, so the agent can drive usagi
+        // (session_list / session_remove …) while it works. No interactive person
+        // is present, so `--dangerously-skip-permissions` lets it act (delete
+        // worktrees, run git) without approval prompts. Lifecycle hooks are
+        // omitted: a headless run reports no phase to watch.
+        let mcp_config = mcp_config_json(wiring.local_llm_model.as_deref(), &wiring.usagi_bin);
+        let mcp_config = shell_single_quote(&mcp_config);
+        let prompt = shell_single_quote(prompt);
+        format!("claude -p {prompt} --dangerously-skip-permissions --mcp-config {mcp_config}")
+    }
+
     fn has_resumable_session(&self, dir: &Path) -> bool {
         claude_projects_root().is_some_and(|root| has_resumable_session_in(&root, dir))
     }
@@ -477,6 +491,55 @@ mod tests {
         );
         // No token is the bare injected command — it never escaped the JSON.
         assert!(!tokens.iter().any(|t| t == "touch" || t == "/tmp/pwned"));
+    }
+
+    #[test]
+    fn headless_command_runs_print_mode_with_the_usagi_mcp_server() {
+        // The headless command runs Claude in print mode (`-p <prompt>`) with the
+        // permission bypass and usagi's MCP server wired in via `--mcp-config`, so
+        // the background agent can drive usagi (session_list / session_remove …)
+        // unattended.
+        let launch = ClaudeAgent::new().headless_command(&wiring("usagi", None), "clean up");
+        assert_eq!(
+            launch,
+            "claude -p 'clean up' --dangerously-skip-permissions \
+             --mcp-config '{\"mcpServers\":{\"usagi\":{\"command\":\"usagi\",\"args\":[\"mcp\"]}}}'"
+        );
+    }
+
+    #[test]
+    fn headless_command_wires_in_the_local_llm_server_when_enabled() {
+        // With a model given, the local LLM server joins the usagi server in the
+        // headless MCP config too.
+        let launch = ClaudeAgent::new()
+            .headless_command(&wiring("usagi", Some("qwen2.5-coder:7b")), "clean up");
+        assert!(launch.contains(
+            "\"usagi-llm\":{\"command\":\"usagi\",\"args\":[\"llm-mcp\",\"--model\",\"qwen2.5-coder:7b\"]}"
+        ));
+        assert!(launch.contains("\"usagi\":{\"command\":\"usagi\",\"args\":[\"mcp\"]}"));
+    }
+
+    #[test]
+    fn headless_command_escapes_single_quotes_in_the_prompt_and_wiring() {
+        // The prompt is arbitrary text and the binary path can carry an apostrophe;
+        // both are escaped so neither can break out of the single-quoted shell
+        // argument and inject a command into the `sh -c` line.
+        let launch = ClaudeAgent::new().headless_command(
+            &wiring("/Users/o'brien/bin/usagi", None),
+            "don't delete 'main'",
+        );
+        let tokens = shell_words::split(&launch).expect("headless line is well-formed shell");
+        assert_eq!(tokens[0], "claude");
+        assert_eq!(tokens[1], "-p");
+        assert_eq!(tokens[2], "don't delete 'main'");
+        assert_eq!(tokens[3], "--dangerously-skip-permissions");
+        assert_eq!(tokens[4], "--mcp-config");
+        let mcp: serde_json::Value =
+            serde_json::from_str(&tokens[5]).expect("the --mcp-config token is intact JSON");
+        assert_eq!(
+            mcp["mcpServers"]["usagi"]["command"],
+            "/Users/o'brien/bin/usagi"
+        );
     }
 
     #[test]

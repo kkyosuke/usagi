@@ -27,6 +27,8 @@ use chrome::{
     title_bar, update_banner,
 };
 use panes::{left_pane, log_tail, right_pane_contents};
+// The embedded terminal pane (没入) maps a click to the tab under it through this.
+pub(super) use panes::attached_tab_at;
 
 use super::state::{HomeState, Mode};
 use crate::domain::settings::Sidebar;

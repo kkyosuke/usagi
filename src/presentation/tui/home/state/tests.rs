@@ -140,6 +140,41 @@ fn activate_selected_on_an_empty_list_picks_the_root_row() {
 }
 
 #[test]
+fn activate_selected_records_the_session_left_as_the_jump_back_target() {
+    let mut list = sample(); // root, main, feature, fix
+                             // Nothing recorded until the active row first moves off the root.
+    assert_eq!(list.previous_row(), None);
+    list.move_down(); // cursor on "main"
+    list.activate_selected(); // active main; left the root row behind
+    assert_eq!(list.previous_row(), Some(0)); // jump back to the root row
+    list.move_down(); // cursor on "feature"
+    list.activate_selected(); // active feature; left "main" behind
+    assert_eq!(list.previous_row(), Some(1)); // "main" is row 1
+                                              // Re-activating the same row is a no-op focus: it must not erase the target.
+    list.activate_selected();
+    assert_eq!(list.previous_row(), Some(1));
+}
+
+#[test]
+fn previous_row_is_none_once_the_recorded_session_no_longer_exists() {
+    // A list rebuilt without the recorded session (a removed worktree) carries the
+    // name forward but resolves it to no row.
+    let mut list = sample();
+    list.move_down();
+    list.move_down(); // cursor on "feature"
+    list.activate_selected(); // previous = root
+    list.move_down(); // cursor on "fix"
+    list.activate_selected(); // previous = "feature"
+    assert_eq!(list.previous_active_name(), Some("feature"));
+    assert_eq!(list.previous_row(), Some(2));
+    // Carry the name onto a list that no longer has "feature".
+    let mut rebuilt = WorktreeList::new("usagi", vec![worktree("main"), worktree("fix")]);
+    rebuilt.set_previous_active(list.previous_active_name().map(str::to_string));
+    assert_eq!(rebuilt.previous_active_name(), Some("feature"));
+    assert_eq!(rebuilt.previous_row(), None);
+}
+
+#[test]
 fn activate_by_name_matches_worktrees_the_root_or_reports_missing() {
     let mut list = sample(); // root, main, feature, fix
     assert!(list.activate_by_name("fix"));
@@ -876,6 +911,38 @@ fn enter_focus_activates_a_row_and_resets_the_surface() {
     assert_eq!(state.focused_session_name(), "feature");
     assert_eq!(state.focus_menu_cursor(), 0);
     assert_eq!(state.focus_prompt(), "");
+}
+
+#[test]
+fn previous_session_row_tracks_the_last_focused_session() {
+    let mut state = state(); // root, main, feature
+                             // Nothing to jump back to before a second session is focused.
+    assert_eq!(state.previous_session_row(), None);
+    state.enter_focus(1); // main; left the root behind
+    assert_eq!(state.previous_session_row(), Some(0));
+    state.enter_focus(2); // feature; left "main" behind
+    assert_eq!(state.previous_session_row(), Some(1)); // back to "main"
+}
+
+#[test]
+fn refresh_sessions_keeps_the_previous_session_jump_target() {
+    let mut state = state();
+    state.apply_session_outcome(SessionOutcome {
+        line: LogLine::output("created"),
+        sessions: Some(vec![session_record("alpha", 1), session_record("beta", 1)]),
+        select: Some("beta".to_string()),
+    });
+    state.enter_focus(1); // alpha
+    state.enter_focus(2); // beta; previous = alpha
+    assert_eq!(state.previous_session_row(), Some(1)); // alpha is row 1
+
+    // A re-sync that keeps alpha must keep the jump target pointing at it.
+    state.refresh_sessions(vec![session_record("alpha", 1), session_record("beta", 1)]);
+    assert_eq!(state.previous_session_row(), Some(1));
+
+    // A re-sync that drops alpha leaves no target to jump back to.
+    state.refresh_sessions(vec![session_record("beta", 1)]);
+    assert_eq!(state.previous_session_row(), None);
 }
 
 #[test]

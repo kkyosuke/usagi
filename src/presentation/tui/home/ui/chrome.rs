@@ -17,6 +17,16 @@ use super::{
 };
 use crate::presentation::tui::widgets;
 
+/// Minimum / maximum display width of the active-session-name field in the
+/// title bar. The field scales with the terminal (a quarter of its width) and
+/// is clamped to this range, so a roomy window shows more of a long name while a
+/// narrow one stays compact. A long name is clipped to the chosen width, a short
+/// one padded out — and since the width depends only on the (per-frame constant)
+/// terminal size, never the name text, the label keeps the same width every
+/// frame, so the centred title never shifts as the active session changes.
+const TITLE_NAME_MIN_W: usize = 12;
+const TITLE_NAME_MAX_W: usize = 24;
+
 /// The centred title bar: workspace name and session count. The count covers
 /// every row in the left pane — the root row plus each session (one row per
 /// session, not per repository) — so it matches what the user sees.
@@ -25,10 +35,15 @@ pub(super) fn title_bar(width: usize, list: &WorktreeList) -> String {
     // The active session's name rides in the title so it is identifiable even
     // when the sidebar is collapsed to the rail (which shows no names). `▸` marks
     // it; the root row reads as the workspace itself.
+    //
+    // Pin the name to a fixed-width field (clipped if long, padded if short) so
+    // the whole label keeps a constant width and the centred bar stays put as
+    // the active session changes — a longer name no longer pushes it sideways.
+    let name_w = (width / 4).clamp(TITLE_NAME_MIN_W, TITLE_NAME_MAX_W);
+    let name = pad_to_width(clip_to_width(list.active_name(), name_w), name_w);
     let label = format!(
-        "{} · ▸ {} · {count} session{}",
+        "{} · ▸ {name} · {count} session{}",
         list.workspace_name(),
-        list.active_name(),
         if count == 1 { "" } else { "s" }
     );
     widgets::title_line(width, &label)
@@ -342,12 +357,12 @@ pub(super) fn footer_line(width: usize, state: &HomeState) -> String {
         }
         Mode::Focus => {
             format!(
-                "[session: {}]  Ctrl-N/P: tab / Enter: open/run / Ctrl-O: switch / Ctrl-E: note / Esc: overview",
+                "[session: {}]  Ctrl-N/P: tab / Enter: open/run / Ctrl-O: switch / Ctrl-^: last / Ctrl-E: note / Esc: overview",
                 state.focused_session_name()
             )
         }
         Mode::Attached => {
-            "[attached]  Ctrl-O: switch / Ctrl-T: focus / Ctrl-N/P: tab / Ctrl-G: agent / Ctrl-E: note / Ctrl-W: close"
+            "[attached]  Ctrl-O: switch / Ctrl-T: focus / Ctrl-^: last / Ctrl-N/P: tab / Ctrl-G: agent / Ctrl-E: note / Ctrl-W: close"
                 .to_string()
         }
     };

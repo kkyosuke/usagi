@@ -1,9 +1,12 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Result};
 
+use crate::domain::issue::IssueStatus;
 use crate::domain::workspace::Workspace;
 use crate::infrastructure::storage::Storage;
+use crate::usecase::issue::{self, IssueFilter};
+use crate::usecase::session;
 
 /// Register a new workspace. Fails if the name is already taken.
 pub fn add(storage: &Storage, name: &str, path: impl Into<PathBuf>) -> Result<Workspace> {
@@ -26,6 +29,55 @@ pub fn list(storage: &Storage) -> Result<Vec<Workspace>> {
     let mut workspaces = storage.load_workspaces()?;
     workspaces.sort_by_key(|w| std::cmp::Reverse(w.updated_at));
     Ok(workspaces)
+}
+
+/// A registered workspace enriched with the at-a-glance figures the project
+/// selection screen shows beside it: how many sessions it has and how many of
+/// its issues are still open. The workspace's own `updated_at` carries the
+/// last-used time, so it is not duplicated here.
+#[derive(Debug, Clone)]
+pub struct WorkspaceOverview {
+    pub workspace: Workspace,
+    /// Sessions recorded under the workspace (`state.json`).
+    pub session_count: usize,
+    /// Issues not yet `done` in the workspace's issue store.
+    pub open_issue_count: usize,
+}
+
+/// List every registered workspace (most recently updated first) together with
+/// its session and open-issue counts.
+///
+/// Each count is read from the workspace's own on-disk tree; a workspace whose
+/// path is missing or unreadable simply reports zero rather than failing the
+/// whole listing, so one broken entry never blanks the screen.
+pub fn overviews(storage: &Storage) -> Result<Vec<WorkspaceOverview>> {
+    Ok(list(storage)?.into_iter().map(overview_for).collect())
+}
+
+/// Build one workspace's overview, counting its sessions and open issues.
+fn overview_for(workspace: Workspace) -> WorkspaceOverview {
+    let session_count = session::list(&workspace.path)
+        .map(|sessions| sessions.len())
+        .unwrap_or(0);
+    let open_issue_count = open_issue_count(&workspace.path);
+    WorkspaceOverview {
+        workspace,
+        session_count,
+        open_issue_count,
+    }
+}
+
+/// Count the issues under `path` that are not yet `done`. Returns zero when the
+/// workspace has no issue store (or it cannot be read).
+fn open_issue_count(path: &Path) -> usize {
+    issue::list(path, &IssueFilter::default())
+        .map(|issues| {
+            issues
+                .iter()
+                .filter(|i| i.summary.status != IssueStatus::Done)
+                .count()
+        })
+        .unwrap_or(0)
 }
 
 /// Remove a workspace by name. Fails if it does not exist.
@@ -142,5 +194,62 @@ mod tests {
         add(&storage, "alpha", "/tmp/alpha").unwrap();
 
         assert!(remove(&storage, "beta").is_err());
+    }
+
+    #[test]
+    fn overviews_count_open_issues_and_sessions() {
+        use crate::usecase::issue::{self, IssueChanges, NewIssue};
+
+        let (_dir, storage) = temp_storage();
+        // Point the workspace at a real directory so its issue/session stores
+        // can be read.
+        let repo = tempfile::tempdir().unwrap();
+        add(&storage, "alpha", repo.path()).unwrap();
+
+        // Three issues, one of them closed: two remain open.
+        for title in ["a", "b", "c"] {
+            issue::create(
+                repo.path(),
+                NewIssue {
+                    title: title.to_string(),
+                    priority: crate::domain::issue::IssuePriority::Medium,
+                    labels: vec![],
+                    dependson: vec![],
+                    related: vec![],
+                    parent: None,
+                    milestone: None,
+                    body: String::new(),
+                },
+            )
+            .unwrap();
+        }
+        issue::update(
+            repo.path(),
+            1,
+            IssueChanges {
+                status: Some(IssueStatus::Done),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let overviews = overviews(&storage).unwrap();
+        assert_eq!(overviews.len(), 1);
+        assert_eq!(overviews[0].workspace.name, "alpha");
+        // No sessions have been created under the fresh workspace.
+        assert_eq!(overviews[0].session_count, 0);
+        // Three created, one marked done.
+        assert_eq!(overviews[0].open_issue_count, 2);
+    }
+
+    #[test]
+    fn overviews_report_zero_for_a_missing_path() {
+        let (_dir, storage) = temp_storage();
+        add(&storage, "ghost", "/no/such/path").unwrap();
+
+        let overviews = overviews(&storage).unwrap();
+        assert_eq!(overviews.len(), 1);
+        assert_eq!(overviews[0].session_count, 0);
+        assert_eq!(overviews[0].open_issue_count, 0);
     }
 }
