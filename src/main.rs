@@ -128,6 +128,7 @@ fn main() -> anyhow::Result<()> {
 fn command_name(command: &Commands) -> Option<&'static str> {
     match command {
         Commands::AgentPhase { .. } => Some("agent-phase"),
+        Commands::Clean { .. } => Some("clean"),
         Commands::Config { .. } => Some("config"),
         Commands::Doctor { .. } => Some("doctor"),
         Commands::Feature => Some("feature"),
