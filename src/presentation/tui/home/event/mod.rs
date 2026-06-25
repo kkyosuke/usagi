@@ -72,6 +72,15 @@ const CTRL_E: char = '\u{0005}';
 /// its `Ctrl-^` is intercepted there instead (see [`super::terminal_pane`]).
 const CTRL_CARET: char = '\u{001e}';
 
+/// The bare control character `console` reports for `Ctrl-Q` (`0x11`) on the home
+/// screen — the same passthrough as [`CTRL_O`]. It is the dedicated quit chord:
+/// unlike `Ctrl-C` (which quits an idle screen outright and only confirms when a
+/// session is live), `Ctrl-Q` *always* raises the quit-confirmation modal first,
+/// so quitting is never a single keystroke. 没入 (Attached) is driven inside the
+/// embedded-terminal loop, so its `Ctrl-Q` is intercepted there instead (see
+/// [`super::terminal_pane`]) and surfaces as the same modal on the way out.
+const CTRL_Q: char = '\u{0011}';
+
 /// The callback 切替 uses to read (`None`) or navigate (`Some(nav)`) the
 /// highlighted session's tabs, returning the strip's labels and active index.
 /// Backed by the [`TerminalPool`](super::terminal_pool::TerminalPool) the pane
@@ -410,10 +419,11 @@ pub(super) fn event_loop(
         );
 
         // The quit-confirmation modal, when open, captures every key: `y` /
-        // `Enter` (or a second `Ctrl-C`) confirms the close, `n` / `Esc` cancels.
+        // `Enter` (or a second `Ctrl-C` / `Ctrl-Q`) confirms the close, `n` /
+        // `Esc` cancels.
         if state.quit_confirm() {
             match key {
-                Key::Char('y') | Key::Char('Y') | Key::Enter | Key::CtrlC => {
+                Key::Char('y') | Key::Char('Y') | Key::Enter | Key::CtrlC | Key::Char(CTRL_Q) => {
                     return Ok(Outcome::Quit)
                 }
                 Key::Char('n') | Key::Char('N') | Key::Escape => state.cancel_quit_confirm(),
@@ -432,6 +442,15 @@ pub(super) fn event_loop(
             } else {
                 return Ok(Outcome::Quit);
             }
+            continue;
+        }
+
+        // `Ctrl-Q` is the dedicated quit chord: unlike `Ctrl-C` it *always* raises
+        // the quit-confirmation modal first, idle or live, so the app never closes
+        // on a single keystroke. (没入's `Ctrl-Q` lands here too: the pane detaches
+        // and `open_pane` opens the same modal on the way out.)
+        if let Key::Char(CTRL_Q) = key {
+            state.open_quit_confirm();
             continue;
         }
 

@@ -2371,6 +2371,20 @@ fn render_frame_overlays_the_quit_confirmation_modal() {
 }
 
 #[test]
+fn render_frame_quit_confirmation_modal_with_nothing_live_asks_a_plain_quit() {
+    // Ctrl-Q raises the modal even with no live session; with `live == 0` it must
+    // ask a plain "quit?" rather than warn about agents that are not running.
+    let mut state = state_with_sessions(&["alpha"]);
+    state.open_quit_confirm();
+    let frame = render_frame(24, 80, &state);
+    let joined = console::strip_ansi_codes(&frame.join("\n")).into_owned();
+    assert!(joined.contains("Quit usagi?"));
+    assert!(joined.contains("No sessions are running."));
+    assert!(joined.contains("y / Enter: quit"));
+    assert!(!joined.contains("Close anyway?"));
+}
+
+#[test]
 fn render_frame_removal_modal_reports_when_there_are_no_sessions() {
     let mut state = HomeState::new("usagi", Vec::new(), None);
     state.open_remove_modal(false);

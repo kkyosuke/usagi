@@ -504,24 +504,35 @@ pub(super) fn remove_modal_frame(
     widgets::render_modal(raw_height, raw_width, "Remove sessions", INNER, &body)
 }
 
-/// Builds the centred quit-confirmation modal, shown when the user presses
-/// `Ctrl-C` while a session is still live: it names how many sessions are still
-/// running and asks whether to close anyway.
+/// Builds the centred quit-confirmation modal. `Ctrl-C` raises it only when a
+/// session is still live (naming how many are running and warning they will be
+/// stopped); `Ctrl-Q` always raises it, so with nothing live (`live == 0`) it
+/// asks a plain "quit?" instead of warning about agents that are not running.
 pub(super) fn quit_confirm_frame(raw_height: usize, raw_width: usize, live: usize) -> Vec<String> {
     // Wide enough for the longest body line ("Close anyway? Running agents
     // will be stopped." = 45 columns) so it does not overflow the box.
     const INNER: usize = 46;
-    let body = vec![
-        style(format!("{live} session(s) still running."))
-            .dim()
-            .to_string(),
-        String::new(),
-        style("Close anyway? Running agents will be stopped.").to_string(),
-        String::new(),
-        style("y / Enter: close   n / Esc: cancel")
-            .dim()
-            .to_string(),
-    ];
+    let body = if live == 0 {
+        vec![
+            style("No sessions are running.").dim().to_string(),
+            String::new(),
+            style("Quit usagi?").to_string(),
+            String::new(),
+            style("y / Enter: quit   n / Esc: cancel").dim().to_string(),
+        ]
+    } else {
+        vec![
+            style(format!("{live} session(s) still running."))
+                .dim()
+                .to_string(),
+            String::new(),
+            style("Close anyway? Running agents will be stopped.").to_string(),
+            String::new(),
+            style("y / Enter: close   n / Esc: cancel")
+                .dim()
+                .to_string(),
+        ]
+    };
     widgets::render_modal(raw_height, raw_width, "Quit usagi?", INNER, &body)
 }
 

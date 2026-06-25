@@ -7,8 +7,8 @@
 //! Keystrokes are forwarded to the shell as raw bytes.
 //!
 //! The **reserved keys** are `Ctrl-O`, `Ctrl-N`/`Ctrl-P`, `Ctrl-T`/`Ctrl-G`,
-//! `Ctrl-W`, `Ctrl-^`, and `Ctrl-B`: everything else, including `Esc`, flows to
-//! the shell.
+//! `Ctrl-W`, `Ctrl-^`, `Ctrl-B`, and `Ctrl-Q`: everything else, including `Esc`,
+//! flows to the shell.
 //! `Ctrl-B` collapses / expands the left sidebar in place (it never leaves 没入).
 //! A single
 //! `Ctrl-O` zooms out one engagement level by returning [`PaneStep::Detach`]
@@ -22,8 +22,9 @@
 //! [`PaneStep::ToFocus`] (every pane stays alive in the pool); `Ctrl-G` adds an
 //! agent tab ([`PaneStep::NewAgentTab`]) and `Ctrl-W` closes the active tab
 //! ([`PaneStep::CloseTab`]) without leaving 没入. `Ctrl-^` jumps to the previously
-//! focused session ([`PaneStep::PrevSession`]). The shell exiting on its
-//! own reports [`PaneStep::Closed`].
+//! focused session ([`PaneStep::PrevSession`]). `Ctrl-Q` leaves 没入 to quit usagi
+//! ([`PaneStep::Quit`]), raising the quit-confirmation modal on the home screen.
+//! The shell exiting on its own reports [`PaneStep::Closed`].
 //!
 //! `agent` reuses the same machinery: the pool sends the configured agent CLI to
 //! the shell on first spawn, so the pane lands the user straight in the agent.
@@ -92,6 +93,10 @@ pub enum PaneStep {
     /// `Ctrl-^` / tmux's `last-window`), attaching it when live. The caller
     /// re-roots the pane on that session.
     PrevSession,
+    /// `Ctrl-Q`: leave 没入 to quit usagi. Every pane stays alive in the pool; the
+    /// caller raises the quit-confirmation modal on the home screen rather than
+    /// closing outright, so the running agents are never dropped by accident.
+    Quit,
     /// The active pane's shell exited on its own (e.g. `exit`).
     Closed,
 }
@@ -496,6 +501,15 @@ fn pump_input(
                     *selection = None;
                     return Ok(Some(PaneStep::PrevSession));
                 }
+                // `Ctrl-Q` leaves 没入 to quit usagi: hand it back so the home loop
+                // raises the quit-confirmation modal (every pane stays alive in the
+                // pool meanwhile). (Like the tab chords, this claims `Ctrl-Q` from
+                // the shell/agent — the trade for a global quit key.)
+                if is_quit(&key) {
+                    *scrollback = 0;
+                    *selection = None;
+                    return Ok(Some(PaneStep::Quit));
+                }
                 // `Ctrl-B` collapses / expands the left sidebar in place, without
                 // leaving 没入: toggle the state and let the next loop pass re-lay
                 // out the frame and resize the PTY to the new pane width. (Like the
@@ -869,6 +883,14 @@ fn is_copy(key: &KeyEvent) -> bool {
     key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char('c')
 }
 
+/// Whether this key is `Ctrl-Q` (quit usagi), as the raw `0x11` (DC1) char or
+/// `'q'` + `CONTROL`. It is the dedicated global quit chord: 没入 claims it from
+/// the shell/agent so quitting works without first zooming out, and the home loop
+/// raises the quit-confirmation modal when the pane hands this back.
+fn is_quit(key: &KeyEvent) -> bool {
+    chord(key, '\u{11}', 'q')
+}
+
 /// Bracketed-paste start / end markers (DECSET 2004). A program that requested
 /// the mode treats everything between them as one paste.
 const PASTE_START: &str = "\x1b[200~";
@@ -1103,6 +1125,20 @@ mod tests {
         assert!(!is_copy(&key(KeyCode::Char('d'), KeyModifiers::CONTROL)));
         assert!(!is_copy(&key(
             KeyCode::Char('c'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        )));
+    }
+
+    #[test]
+    fn is_quit_matches_both_forms_of_ctrl_q() {
+        // crossterm's usual decoding, and the bare 0x11 (DC1) most terminals send.
+        assert!(is_quit(&key(KeyCode::Char('q'), KeyModifiers::CONTROL)));
+        assert!(is_quit(&key(KeyCode::Char('\u{11}'), KeyModifiers::NONE)));
+        // A bare `q`, the wrong chord, or `Ctrl+Shift+Q` flows to the shell.
+        assert!(!is_quit(&key(KeyCode::Char('q'), KeyModifiers::NONE)));
+        assert!(!is_quit(&key(KeyCode::Char('o'), KeyModifiers::CONTROL)));
+        assert!(!is_quit(&key(
+            KeyCode::Char('Q'),
             KeyModifiers::CONTROL | KeyModifiers::SHIFT,
         )));
     }

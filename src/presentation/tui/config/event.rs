@@ -89,6 +89,9 @@ pub fn event_loop(
         // install), and Esc cancels.
         if config.install_modal().is_some() {
             match key {
+                // `Ctrl-Q` (the bare `0x11`) quits even mid-entry, matched before the
+                // `Key::Char(c)` arm below that would otherwise capture it as input.
+                Key::Char('\u{0011}') => return Ok(Outcome::Quit),
                 Key::Enter => {
                     notice = run_install(&mut config, install_runtime);
                 }
@@ -119,7 +122,7 @@ pub fn event_loop(
                     notice = run_model_select(&mut config, pull_model);
                 }
                 Key::Escape => config.close_model_modal(),
-                Key::CtrlC => return Ok(Outcome::Quit),
+                Key::CtrlC | Key::Char('\u{0011}') => return Ok(Outcome::Quit),
                 _ => {}
             }
             continue;
@@ -166,7 +169,8 @@ pub fn event_loop(
                 }
             }
             Key::Char('q') | Key::Escape => return Ok(Outcome::Back),
-            Key::CtrlC => return Ok(Outcome::Quit),
+            // `Ctrl-C` / `Ctrl-Q` (the bare `0x11`) quit the app from config too.
+            Key::CtrlC | Key::Char('\u{0011}') => return Ok(Outcome::Quit),
             _ => {}
         }
     }
@@ -380,6 +384,13 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_q_returns_quit() {
+        // `Ctrl-Q` (the bare `0x11`) quits from the config screen too.
+        let (outcome, _) = run_recording(vec![Ok(Key::Char('\u{0011}'))], sample_config());
+        assert!(matches!(outcome, Outcome::Quit));
+    }
+
+    #[test]
     fn navigation_keys_move_the_cursor_then_back() {
         // Exercises every navigation arm (arrows + j/k aliases) and the
         // ignored-key arm, then leaves via Escape.
@@ -469,6 +480,7 @@ mod tests {
             Ok(Key::ArrowDown),  // Default Workspace
             Ok(Key::ArrowRight), // -> alpha
             Ok(Key::ArrowDown),  // Notifications
+            Ok(Key::ArrowDown),  // Restore Panes
             Ok(Key::ArrowDown),  // Agent CLI
             Ok(Key::ArrowDown),  // Session Action UI
             Ok(Key::ArrowDown),  // Local LLM
@@ -570,6 +582,7 @@ mod tests {
         let keys = vec![
             Ok(Key::ArrowRight), // Agent CLI override: Global -> Claude
             Ok(Key::ArrowDown),  // Notifications
+            Ok(Key::ArrowDown),  // Restore Panes
             Ok(Key::ArrowDown),  // Default Branch
             Ok(Key::ArrowDown),  // Branch Source
             Ok(Key::ArrowDown),  // Save button
@@ -680,6 +693,7 @@ mod tests {
         vec![
             Ok(Key::ArrowDown), // Default Workspace
             Ok(Key::ArrowDown), // Notifications
+            Ok(Key::ArrowDown), // Restore Panes
             Ok(Key::ArrowDown), // Agent CLI
             Ok(Key::ArrowDown), // Session Action UI
             Ok(Key::ArrowDown), // Local LLM
@@ -774,6 +788,17 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_q_in_the_install_modal_quits() {
+        // `Ctrl-Q` arrives as `Key::Char('\u{0011}')`; it must quit even mid-entry
+        // rather than being captured as a password character by the `Char(c)` arm.
+        let mut keys = keys_to_local_llm();
+        keys.extend([Ok(Key::Char(' ')), Ok(Key::Char('\u{0011}'))]);
+        let (outcome, passwords, _) = run_with_install(keys, sample_config(), ok_install, ok_pull);
+        assert!(matches!(outcome, Outcome::Quit));
+        assert!(passwords.is_empty());
+    }
+
+    #[test]
     fn a_failed_install_is_shown_as_a_notice_and_recovers() {
         let mut keys = keys_to_local_llm();
         keys.extend([
@@ -841,6 +866,16 @@ mod tests {
     fn ctrl_c_in_the_model_picker_quits() {
         let mut keys = keys_to_model_row();
         keys.extend([Ok(Key::Enter), Ok(Key::CtrlC)]);
+        let (outcome, _, pulled) = run_with_install(keys, installed_config(), ok_install, ok_pull);
+        assert!(matches!(outcome, Outcome::Quit));
+        assert!(pulled.is_empty());
+    }
+
+    #[test]
+    fn ctrl_q_in_the_model_picker_quits() {
+        // `Ctrl-Q` (the bare `0x11`) quits from the model picker too.
+        let mut keys = keys_to_model_row();
+        keys.extend([Ok(Key::Enter), Ok(Key::Char('\u{0011}'))]);
         let (outcome, _, pulled) = run_with_install(keys, installed_config(), ok_install, ok_pull);
         assert!(matches!(outcome, Outcome::Quit));
         assert!(pulled.is_empty());
@@ -978,6 +1013,7 @@ mod tests {
         let keys = vec![
             Ok(Key::ArrowDown),  // Default Workspace
             Ok(Key::ArrowDown),  // Notifications
+            Ok(Key::ArrowDown),  // Restore Panes
             Ok(Key::ArrowDown),  // Agent CLI
             Ok(Key::ArrowDown),  // Session Action UI
             Ok(Key::ArrowDown),  // Local LLM

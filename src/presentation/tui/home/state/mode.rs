@@ -62,4 +62,8 @@ pub enum PaneExit {
     /// attaching it when live. With no previous session recorded the pane returns
     /// to 在席 (Focus) on the current session instead.
     ToPreviousSession,
+    /// The user pressed `Ctrl-Q`: leave the pane to quit usagi. Every pane stays
+    /// alive in the pool; the caller raises the quit-confirmation modal rather
+    /// than closing outright, so a live agent is never dropped by accident.
+    Quit,
 }

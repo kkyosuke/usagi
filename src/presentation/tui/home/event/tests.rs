@@ -959,6 +959,54 @@ fn ctrl_caret_from_an_attached_pane_with_no_previous_falls_back_to_focus() {
 }
 
 #[test]
+fn ctrl_q_from_an_attached_pane_raises_the_confirm_modal_instead_of_quitting() {
+    // From 没入, `Ctrl-Q` surfaces as PaneExit::Quit: `open_pane` leaves the pane
+    // and opens the quit-confirmation modal rather than quitting outright. The
+    // first attach hands back Quit; cancelling the modal (`n`) and re-attaching
+    // proves the app kept running — `open` is called a second time. A bug that
+    // quit immediately (or merely detached, opening the note editor on `n`) would
+    // never reach that second attach.
+    let opened = RefCell::new(Vec::new());
+    let mut open = |_h: &mut HomeState, d: &Path, _a: bool, _n: bool| {
+        let count = {
+            let mut v = opened.borrow_mut();
+            v.push(d.to_path_buf());
+            v.len()
+        };
+        if count == 1 {
+            Ok(PaneExit::Quit)
+        } else {
+            Ok(PaneExit::Closed)
+        }
+    };
+    let mut create: fn(&str) -> SessionOutcome = noop_create;
+    let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = live_preview;
+    let mut keys = cmd("session switch main");
+    keys.push(Ok(Key::Enter)); // attach main -> Quit -> leave + modal
+    keys.push(Ok(Key::Char('n'))); // cancel the modal (keeps running)
+    keys.extend(cmd("session switch main"));
+    keys.push(Ok(Key::Enter)); // attach main again -> Closed -> Focus
+    keys.push(Ok(Key::Char(CTRL_Q))); // raise the modal again from Focus
+    keys.push(Ok(Key::Char('y'))); // confirm -> quit
+    assert!(matches!(
+        run_full(
+            keys,
+            sample_state(),
+            &mut open,
+            &mut create,
+            &mut preview,
+            &mut noop_config
+        )
+        .unwrap(),
+        Outcome::Quit
+    ));
+    assert_eq!(
+        *opened.borrow(),
+        vec![PathBuf::from("/r/main"), PathBuf::from("/r/main")]
+    );
+}
+
+#[test]
 fn session_list_logs_the_sessions() {
     let mut keys = cmd("session list");
     keys.push(Ok(Key::Enter));
@@ -1410,6 +1458,49 @@ fn ctrl_c_quits_outright_when_no_session_is_live() {
     // without asking — the gate only triggers when something is running.
     assert!(matches!(
         run(vec![Ok(Key::CtrlC)], sample_state()).unwrap(),
+        Outcome::Quit
+    ));
+}
+
+#[test]
+fn ctrl_q_at_the_base_switch_confirms_before_quitting() {
+    // Unlike Ctrl-C, Ctrl-Q always raises the quit-confirmation modal first —
+    // even with nothing live — so a lone Ctrl-Q does not quit; `y` then confirms.
+    assert!(matches!(
+        run(
+            vec![Ok(Key::Char(CTRL_Q)), Ok(Key::Char('y'))],
+            sample_state()
+        )
+        .unwrap(),
+        Outcome::Quit
+    ));
+}
+
+#[test]
+fn ctrl_q_modal_can_be_cancelled_then_re_raised_and_confirmed() {
+    // Ctrl-Q raises the modal on an idle screen; `n` cancels back to 切替 (proving
+    // it did not quit, since the loop reads on); a second Ctrl-Q raises it again
+    // and a third Ctrl-Q inside the modal confirms the close.
+    let keys = vec![
+        Ok(Key::Char(CTRL_Q)), // raise the modal (idle)
+        Ok(Key::Char('n')),    // cancel -> 切替
+        Ok(Key::Char(CTRL_Q)), // raise again
+        Ok(Key::Char(CTRL_Q)), // confirm via a second Ctrl-Q inside the modal
+    ];
+    assert!(matches!(run(keys, sample_state()).unwrap(), Outcome::Quit));
+}
+
+#[test]
+fn ctrl_q_with_a_live_session_confirms_before_quitting() {
+    // With a live session Ctrl-Q raises the same confirm modal; `y` confirms.
+    let mut persist: fn(&str) = noop_persist;
+    assert!(matches!(
+        run_with_live_monitor(
+            vec![Ok(Key::Char(CTRL_Q)), Ok(Key::Char('y'))],
+            sample_state(),
+            &mut persist,
+        )
+        .unwrap(),
         Outcome::Quit
     ));
 }

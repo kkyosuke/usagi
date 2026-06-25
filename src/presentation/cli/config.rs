@@ -132,6 +132,7 @@ fn render_settings(settings: &Settings) -> Vec<String> {
             workspace_root.as_deref().unwrap_or("(none)")
         ),
         format!("notifications_enabled  {}", settings.notifications_enabled),
+        format!("restore_panes_enabled  {}", settings.restore_panes_enabled),
         format!("agent_cli              {}", agent_label(settings.agent_cli)),
         format!(
             "session_action_ui      {}",
@@ -212,6 +213,7 @@ mod tests {
             default_workspace: Some("usagi".to_string()),
             workspace_root: Some("/home/me/git".into()),
             notifications_enabled: false,
+            restore_panes_enabled: false,
             agent_cli: AgentCli::Gemini,
             session_action_ui: crate::domain::settings::SessionActionUi::Prompt,
             sidebar: crate::domain::settings::Sidebar::Rail,
@@ -224,12 +226,13 @@ mod tests {
         assert!(lines[0].contains("dark"));
         assert!(lines[1].contains("usagi"));
         assert!(lines[2].contains("/home/me/git"));
-        assert!(lines[3].contains("false"));
-        assert!(lines[4].contains("gemini"));
-        assert!(lines[5].contains("prompt"));
-        assert!(lines[6].contains("rail"));
-        assert!(lines[7].contains("true"));
-        assert!(lines[8].contains("qwen2.5-coder:3b"));
+        assert!(lines[3].contains("false")); // notifications_enabled
+        assert!(lines[4].contains("false")); // restore_panes_enabled
+        assert!(lines[5].contains("gemini"));
+        assert!(lines[6].contains("prompt"));
+        assert!(lines[7].contains("rail"));
+        assert!(lines[8].contains("true"));
+        assert!(lines[9].contains("qwen2.5-coder:3b"));
     }
 
     #[test]
