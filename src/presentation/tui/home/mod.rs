@@ -516,6 +516,11 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
                     // the tab strip above it) without leaving 没入.
                     terminal_pane::PaneStep::NextTab => pool.nav(dir, terminal_tabs::TabNav::Next),
                     terminal_pane::PaneStep::PrevTab => pool.nav(dir, terminal_tabs::TabNav::Prev),
+                    // A click on a tab chip: jump straight to that pane and loop,
+                    // driving it (and republishing the strip) without leaving 没入.
+                    terminal_pane::PaneStep::ToTab(i) => {
+                        pool.nav(dir, terminal_tabs::TabNav::To(i))
+                    }
                     // `Ctrl-T`: zoom out to 在席 (Focus) so the user picks the next
                     // action from the session's menu, leaving every pane alive in
                     // the pool (like `Ctrl-O`, but one level shallower).
