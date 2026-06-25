@@ -15,12 +15,27 @@ use console::{style, Style};
 /// The usagi mascot artwork (raw, unstyled lines).
 const RABBIT: [&str; 3] = ["  (\\(\\ ", " (='-') ", " o(_(\")(\")"];
 
-/// The usagi mascot, centred for the terminal width and styled magenta-bold.
+/// The display width of the mascot — the widest of its [`RABBIT`] rows. The
+/// shared measure [`rabbit_lines`] centres by, and the open→home transition
+/// lifts the rabbit off from.
+pub fn rabbit_width() -> usize {
+    RABBIT.iter().map(|l| l.chars().count()).max().unwrap_or(0)
+}
+
+/// The number of rows the mascot art spans, so a caller can reserve (or blank)
+/// exactly the rows the rabbit occupies.
+pub fn rabbit_height() -> usize {
+    RABBIT.len()
+}
+
+/// The usagi mascot's lines indented to begin at column `col`, styled
+/// magenta-bold. The whole block shares the one indent so the art stays aligned.
 ///
-/// The whole block shares a single padding so the art stays aligned.
-pub fn rabbit_lines(width: usize) -> Vec<String> {
-    let rabbit_width = RABBIT.iter().map(|l| l.chars().count()).max().unwrap_or(0);
-    let padding = " ".repeat(super::centered_padding(width, rabbit_width));
+/// The shared placement primitive: [`rabbit_lines`] centres the art with it,
+/// while the open→home transition glides the same art across the screen by
+/// advancing `col` (and the row it is drawn at) frame by frame.
+pub fn rabbit_lines_at(col: usize) -> Vec<String> {
+    let padding = " ".repeat(col);
     RABBIT
         .iter()
         .map(|line| {
@@ -30,6 +45,11 @@ pub fn rabbit_lines(width: usize) -> Vec<String> {
                 .to_string()
         })
         .collect()
+}
+
+/// The usagi mascot, centred for the terminal width and styled magenta-bold.
+pub fn rabbit_lines(width: usize) -> Vec<String> {
+    rabbit_lines_at(super::centered_padding(width, rabbit_width()))
 }
 
 /// The mascot waving goodbye, drawn inside the farewell box: the usagi from
@@ -274,6 +294,33 @@ mod tests {
         // The mascot face appears, and the block is indented (centred).
         assert!(lines.iter().any(|l| l.contains("(='-')")));
         assert!(lines[0].starts_with(' '));
+    }
+
+    #[test]
+    fn rabbit_lines_at_indents_the_art_by_the_given_column() {
+        // The art begins at exactly `col`, so a caller can glide the mascot across
+        // the screen by advancing the column it draws at.
+        let lines = rabbit_lines_at(10);
+        for (raw, art) in lines.iter().zip(RABBIT) {
+            let plain = console::strip_ansi_codes(raw).into_owned();
+            // Each row is the column's indent followed by the raw art row.
+            assert_eq!(plain, format!("{}{art}", " ".repeat(10)));
+        }
+        // Centring is just placement at the centred column.
+        assert_eq!(
+            rabbit_lines(80),
+            rabbit_lines_at(super::super::centered_padding(80, rabbit_width())),
+        );
+    }
+
+    #[test]
+    fn rabbit_width_and_height_describe_the_art_block() {
+        // The widest row is the feet (`o(_(")(")`), and the art spans three rows.
+        assert_eq!(
+            rabbit_width(),
+            RABBIT.iter().map(|l| l.chars().count()).max().unwrap()
+        );
+        assert_eq!(rabbit_height(), 3);
     }
 
     #[test]

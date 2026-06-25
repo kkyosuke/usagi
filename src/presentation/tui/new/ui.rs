@@ -1,5 +1,6 @@
 use console::{style, Style};
 
+use crate::presentation::tui::welcome;
 use crate::presentation::tui::widgets;
 
 use super::state::{Field, FormState, Mode};
@@ -231,8 +232,10 @@ pub fn render_frame(
 
     let mut lines = Vec::with_capacity(height);
 
-    // Centre the body in the space above the footer.
-    let top_padding = height.saturating_sub(body.len() + footer.len()) / 2;
+    // Pin the mascot to the shared row (clamped so a tall form never overruns the
+    // footer) so it never jumps from the welcome / Open / Config screens.
+    let available = height.saturating_sub(body.len() + footer.len());
+    let top_padding = welcome::mascot_top_padding(height).min(available);
     for _ in 0..top_padding {
         lines.push(String::new());
     }
@@ -384,6 +387,20 @@ mod tests {
         let top_padding = frame.iter().take_while(|l| l.is_empty()).count();
         assert!(top_padding > 0);
         assert!(!frame[top_padding].is_empty());
+    }
+
+    #[test]
+    fn mascot_anchors_to_the_shared_welcome_row_so_it_never_jumps() {
+        // The mascot sits on exactly the row the welcome screen places it, so the
+        // rabbit does not shift (no CLS) when moving between the screens. The
+        // taller form needs the terminal room to hold the anchor — on a terminal
+        // too short to fit the body it rides up — so this checks the room it has.
+        let state = FormState::new();
+        for height in [40usize, 50, 60] {
+            let frame = render_frame(height, 80, &state, None);
+            let row = welcome::mascot_top_padding(height);
+            assert!(console::strip_ansi_codes(&frame[row]).contains("(\\(\\"));
+        }
     }
 
     #[test]

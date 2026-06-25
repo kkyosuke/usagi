@@ -83,22 +83,87 @@ fn complete_or_record_panic(
     }
 }
 
-/// Runs the home screen for `workspace` on the given terminal until the user
-/// goes back or quits. Loads the workspace's worktree state and prior command
-/// history from disk and wires it, with the real terminal, to the testable
-/// event loop in [`event`]. Each command the user runs is appended to the
-/// workspace's `history.json` (best-effort). Assumes the alternate screen is
-/// already active (it is owned by the orchestrator).
-pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
-    // Open the screen immediately from the saved `state.json` (no git): load just
-    // the recorded sessions here, then re-sync the worktree statuses from git on a
-    // background thread (spawned below) and swap in the refreshed sessions in place
-    // when they land. Syncing synchronously here would block the first paint on git
-    // for as long as the workspace has worktrees to inspect. The usecase owns the
-    // store access and surfaces a load error as a notice; a non-git root or a read
-    // failure just leaves these saved statuses, mirroring `reload_sessions`.
+/// The workspace data [`run`] needs at startup, loaded from disk and the `PATH`
+/// without a `Term`: the recorded sessions (and any load-error notice), task
+/// issues, effective settings, installed agent CLIs, and command history.
+///
+/// Building this is the slow part of opening a workspace (several disk reads plus
+/// a PATH probe for the agent CLIs). [`preload`] computes it with no terminal or
+/// thread state, so the caller can run it on a background thread *while the
+/// open→home mascot animation plays* and hand the result to [`run`] — the home
+/// screen then paints the instant it is shown instead of blocking the first frame
+/// on these reads.
+pub struct Preload {
+    sessions: Vec<SessionRecord>,
+    notice: Option<String>,
+    issues: Vec<crate::domain::issue::Issue>,
+    settings: crate::domain::settings::Settings,
+    installed_agents: Vec<crate::domain::settings::AgentCli>,
+    history: Vec<String>,
+}
+
+/// Loads the [`Preload`] for a workspace. Pure disk / PATH work with no `Term`,
+/// so it is safe to run on a background thread behind the open→home animation. A
+/// read failure for any part is non-fatal — that part falls back to empty (the
+/// session load surfaces its error as the screen's notice instead).
+pub fn preload(workspace: &Workspace) -> Preload {
+    // The recorded sessions come from `state.json` (no git): the screen opens from
+    // these immediately, then re-syncs the worktree statuses from git on a
+    // background thread (spawned in `run`) and swaps the refreshed sessions in when
+    // they land. Syncing here would block the first paint on git for as long as the
+    // workspace has worktrees to inspect. A load error surfaces as a notice; a
+    // non-git root or a read failure just leaves these saved statuses.
     let (sessions, notice) =
         crate::usecase::workspace_state::recorded_sessions_for_display(&workspace.path);
+    // Task issues back the `issue` command (list / graph / show); none on failure.
+    let issues = crate::infrastructure::issue_store::IssueStore::new(&workspace.path)
+        .scan()
+        .unwrap_or_default();
+    // The effective settings (project-local overrides on top of the global
+    // default), reused for every setting the screen derives — the 在席 action
+    // surface, the sidebar's initial state, the local-LLM probe, the agent CLI /
+    // wiring, and notifications. Re-read whenever the config screen closes (see
+    // `open_config`) so a change takes effect without reopening this screen.
+    let settings = effective_settings(&workspace.path);
+    // The agents installed on this machine (PATH-probed, canonical order), which
+    // 在席's agent picker offers as alternatives to the configured default.
+    let installed_agents =
+        crate::usecase::agent::available_clis(&crate::usecase::doctor::SystemRunner);
+    // Past commands so `history` and `↑`/`↓` recall span sessions; empty on failure.
+    let history = crate::usecase::history::load(&workspace.path)
+        .map(|entries| entries.into_iter().map(|e| e.command).collect())
+        .unwrap_or_default();
+    Preload {
+        sessions,
+        notice,
+        issues,
+        settings,
+        installed_agents,
+        history,
+    }
+}
+
+/// Runs the home screen for `workspace` on the given terminal until the user
+/// goes back or quits, wiring the already-loaded [`Preload`] and the real
+/// terminal to the testable event loop in [`event`]. The caller loads the
+/// `Preload` (see [`preload`]) — on the Open screen, off-thread behind the mascot
+/// animation — so this does no blocking IO before the first paint. Each command
+/// the user runs is appended to the workspace's `history.json` (best-effort).
+/// Assumes the alternate screen is already active (it is owned by the
+/// orchestrator).
+pub fn run(term: &Term, workspace: &Workspace, preload: Preload) -> Result<Outcome> {
+    // All the disk / PATH reads were done by `preload` (off-thread, behind the
+    // animation), so opening the screen here is just wiring that data into the
+    // state — no blocking IO before the first paint.
+    let Preload {
+        sessions,
+        notice,
+        issues,
+        settings,
+        installed_agents,
+        history,
+    } = preload;
+
     let mut state = HomeState::new(workspace.name.clone(), Vec::new(), notice);
     // The root row (`⌂ root`) operates in the workspace root; record its path so
     // the 切替 preview can recognise the root's live embedded session (keyed by
@@ -110,40 +175,21 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
     // no-op default and record nothing.
     state.set_logger(Box::new(crate::infrastructure::error_log::FileLogger));
     state.restore_sessions(sessions);
-
-    // Load the workspace's task issues so the `issue` command can list / graph /
-    // show them. A read failure is non-fatal: the command just shows none.
-    if let Ok(issues) = crate::infrastructure::issue_store::IssueStore::new(&workspace.path).scan()
-    {
-        state.set_issues(issues);
-    }
-
-    // The effective settings for this workspace (project-local overrides on top of
-    // the global default), read once here and reused for every setting the screen
-    // derives — the 在席 action surface, the sidebar's initial state, the local-LLM
-    // probe, the agent CLI / wiring, and notifications — instead of re-reading
-    // `settings.json` for each (it was previously read three times at startup).
-    // Re-read again whenever the config screen closes (see `open_config`) so a
-    // change takes effect without reopening this screen.
-    let settings = effective_settings(&workspace.path);
+    state.set_issues(issues);
     // Which right-pane action surface 在席 (Focus) presents — a pickable menu or a
     // typed prompt — and the state the left sidebar opens in (full width or the
     // collapsed rail; `Ctrl-B` toggles it from there).
     state.set_session_action_ui(settings.session_action_ui);
     state.set_sidebar(settings.sidebar);
     // The configured default agent (its display name labels 在席's `agent` row and
-    // a bare `agent` launches it) and the agents installed on this machine (PATH-
-    // probed, canonical order), which 在席's agent picker offers as alternatives.
+    // a bare `agent` launches it) and the agents installed on this machine.
     state.set_default_agent(settings.agent_cli);
-    state.set_installed_agents(crate::usecase::agent::available_clis(
-        &crate::usecase::doctor::SystemRunner,
-    ));
+    state.set_installed_agents(installed_agents);
+    // The screen opens in 切替 (Switch) — the base mode (see `HomeState::new`) —
+    // so selecting a project lands on the session list the mascot animation glides
+    // into; no explicit mode switch is needed here.
 
-    // Restore past commands so `history` and `↑`/`↓` recall span sessions.
-    // A read failure is non-fatal: just start with an empty history.
-    if let Ok(entries) = crate::usecase::history::load(&workspace.path) {
-        state.restore_history(entries.into_iter().map(|e| e.command).collect());
-    }
+    state.restore_history(history);
 
     let mut reader = TermKeyReader::new(term.clone());
     // Persisting a command is best-effort; a write failure must not break the
