@@ -138,6 +138,19 @@ impl Agent for GeminiAgent {
         parts.join(" ")
     }
 
+    fn headless_command(&self, _wiring: &AgentWiring, prompt: &str) -> String {
+        // Gemini's headless mode is `gemini -p <prompt>` (run the prompt
+        // non-interactively and exit). As with the interactive launch, the wiring
+        // (MCP servers / hooks) is not rendered — Gemini exposes no inline flag
+        // for it, so a headless Gemini run cannot drive usagi's MCP tools and
+        // works with git and the filesystem alone. No interactive person is
+        // present, so `--yolo` auto-approves every tool call (Gemini's bypass flag)
+        // to let it act without prompting. The prompt is arbitrary text, so it is
+        // escaped for the single-quoted shell context.
+        let prompt = shell_single_quote(prompt);
+        format!("gemini --yolo -p {prompt}")
+    }
+
     fn has_resumable_session(&self, dir: &Path) -> bool {
         gemini_projects_root().is_some_and(|root| has_resumable_session_in(&root, dir))
     }
@@ -231,6 +244,29 @@ mod tests {
             Some("don't stop"),
         );
         assert_eq!(launch, r"gemini -i 'don'\''t stop'");
+    }
+
+    #[test]
+    fn headless_command_runs_print_mode_with_auto_approval() {
+        // The headless command runs Gemini non-interactively (`-p <prompt>`) with
+        // `--yolo` auto-approving every tool call, so the background agent acts
+        // without prompting. The wiring is not rendered (Gemini has no inline flag
+        // for it), so the line carries no MCP config.
+        let launch = GeminiAgent::new()
+            .headless_command(&Settings::default().agent_wiring("usagi"), "clean up");
+        assert_eq!(launch, "gemini --yolo -p 'clean up'");
+        assert!(!launch.contains("mcp"));
+    }
+
+    #[test]
+    fn headless_command_escapes_single_quotes_in_the_prompt() {
+        // Arbitrary prompt text may contain single quotes; each is rendered as the
+        // POSIX `'\''` idiom so Gemini receives the prompt verbatim.
+        let launch = GeminiAgent::new().headless_command(
+            &Settings::default().agent_wiring("usagi"),
+            "don't delete 'main'",
+        );
+        assert_eq!(launch, r"gemini --yolo -p 'don'\''t delete '\''main'\'''");
     }
 
     #[test]

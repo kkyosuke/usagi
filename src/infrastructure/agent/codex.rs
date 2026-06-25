@@ -298,6 +298,35 @@ impl Agent for CodexAgent {
         parts.join(" ")
     }
 
+    fn headless_command(&self, wiring: &AgentWiring, prompt: &str) -> String {
+        // Codex's headless mode is `codex exec <prompt>` (run the prompt
+        // non-interactively and exit). The usagi MCP server is wired in via the
+        // same `-c mcp_servers.usagi.*` overrides as the interactive launch, so
+        // the agent can drive usagi (session_list / session_remove …) while it
+        // works. No interactive person is present, so the run bypasses approvals
+        // and the filesystem sandbox: `--dangerously-bypass-approvals-and-sandbox`
+        // is Codex's single flag for full non-interactive autonomy (it lets the
+        // agent delete worktrees and run git without prompting). The MCP wiring is
+        // reused but lifecycle hooks are dropped — a headless run reports no phase.
+        let bin = &wiring.usagi_bin;
+        let mut parts = vec![
+            self.program.to_string(),
+            "exec".to_string(),
+            "--dangerously-bypass-approvals-and-sandbox".to_string(),
+            config_override("mcp_servers.usagi.command", bin),
+            config_override("mcp_servers.usagi.args", &toml_string_array(&["mcp"])),
+        ];
+        if let Some(model) = wiring.local_llm_model.as_deref() {
+            parts.push(config_override("mcp_servers.usagi-llm.command", bin));
+            parts.push(config_override(
+                "mcp_servers.usagi-llm.args",
+                &toml_string_array(&["llm-mcp", "--model", model]),
+            ));
+        }
+        parts.push(shell_single_quote(prompt));
+        parts.join(" ")
+    }
+
     fn has_resumable_session(&self, dir: &Path) -> bool {
         codex_sessions_root(self.home_subdir)
             .is_some_and(|root| has_resumable_session_in(&root, dir))
@@ -499,6 +528,45 @@ mod tests {
         assert_eq!(resumed_with_prompt, fresh_with_prompt);
         assert!(!resumed_with_prompt.contains("resume --last"));
         assert!(resumed_with_prompt.ends_with(" 'do the thing'"));
+    }
+
+    #[test]
+    fn headless_command_runs_exec_with_the_usagi_mcp_server() {
+        // The headless command runs Codex non-interactively (`codex exec`) with
+        // the full-autonomy bypass and the usagi MCP server wired in via `-c`, so
+        // the background agent can drive usagi unattended. No interactive lifecycle
+        // hooks are rendered (a headless run reports no phase).
+        let launch = CodexAgent::new().headless_command(&wiring("usagi", None), "clean up");
+        assert!(launch.starts_with(
+            "codex exec --dangerously-bypass-approvals-and-sandbox -c 'mcp_servers.usagi.command=usagi'"
+        ));
+        assert!(launch.contains("-c 'mcp_servers.usagi.args=[\"mcp\"]'"));
+        assert!(launch.ends_with(" 'clean up'"));
+        // The local-LLM server is absent when no model is given, and no hooks ride along.
+        assert!(!launch.contains("usagi-llm"));
+        assert!(!launch.contains("hooks."));
+    }
+
+    #[test]
+    fn headless_command_wires_in_the_local_llm_server_when_enabled() {
+        // With a model given, the local LLM server joins the usagi server in the
+        // headless `-c` overrides too.
+        let launch = CodexAgent::new()
+            .headless_command(&wiring("usagi", Some("qwen2.5-coder:7b")), "clean up");
+        assert!(launch.contains("-c 'mcp_servers.usagi-llm.command=usagi'"));
+        assert!(launch.contains(
+            "-c 'mcp_servers.usagi-llm.args=[\"llm-mcp\",\"--model\",\"qwen2.5-coder:7b\"]'"
+        ));
+    }
+
+    #[test]
+    fn headless_command_uses_the_fugu_program_and_escapes_the_prompt() {
+        // codex-fugu reuses the adapter, so its headless command launches
+        // `codex-fugu exec`. The prompt is arbitrary text, escaped for the
+        // single-quoted shell context.
+        let launch = CodexAgent::fugu().headless_command(&wiring("usagi", None), "don't stop");
+        assert!(launch.starts_with("codex-fugu exec --dangerously-bypass-approvals-and-sandbox "));
+        assert!(launch.ends_with(r" 'don'\''t stop'"));
     }
 
     #[test]
