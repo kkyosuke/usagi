@@ -46,7 +46,7 @@ pub(super) enum Overlay {
 
 impl Overlay {
     /// Drop an open inline create input, leaving any other overlay untouched.
-    /// The mode transitions (entering 統括 / 切替 / 在席) call this to clear a
+    /// The mode transitions (entering 切替 / 在席) call this to clear a
     /// half-typed session name without disturbing an unrelated overlay — the
     /// faithful translation of the old per-field `create = None`.
     pub fn clear_create(&mut self) {
@@ -448,7 +448,7 @@ impl FocusMenu {
         self.agent_cursor
     }
 
-    /// Reset to the top, collapsed (entering 在席 / leaving for 統括).
+    /// Reset to the top, collapsed (entering 在席 / leaving for 切替).
     pub(super) fn reset(&mut self) {
         self.cursor = 0;
         self.agent_cursor = None;

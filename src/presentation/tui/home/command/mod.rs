@@ -65,7 +65,7 @@ pub enum Effect {
     /// Close (remove) the focused session forcefully (the user ran `close` in
     /// 在席). It is the session equivalent of `session remove <name> --force`:
     /// the worktrees/branches are deleted and any uncommitted changes discarded,
-    /// then 在席 is left for 統括 (Overview). The focused session's name is
+    /// then 在席 is left for the base 切替 (Switch). The focused session's name is
     /// resolved by the event loop, which owns the worktree list and the removal
     /// callback.
     CloseSession,
@@ -117,9 +117,9 @@ impl CommandResult {
 
 /// Which of the home screen's command scopes a command belongs to.
 ///
-/// The two surfaces are *physically separate* in the redesigned home screen
-/// (統括 / 切替 / 在席 / 没入, see `document/design/05-home.md`): the bottom
-/// command line in *統括 (Overview)* operates the whole workspace
+/// The two surfaces are *physically separate* in the home screen (切替 / 在席 /
+/// 没入 with the `:` command palette over them, see `document/design/05-home.md`):
+/// the `:` command palette operates the whole workspace
 /// ([`CommandScope::Workspace`]), while the *在席 (Focus)* right pane operates one
 /// session ([`CommandScope::Session`]). Because the two never share a line, the
 /// scopes do not nest — a command is offered only in its own scope (plus the
@@ -128,7 +128,7 @@ impl CommandResult {
 /// everywhere.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommandScope {
-    /// Operating the whole workspace, the *統括 (Overview)* line: `session`,
+    /// Operating the whole workspace, the `:` command palette: `session`,
     /// `config`, `doctor`.
     Workspace,
     /// Operating a single session, the *在席 (Focus)* right pane: `terminal`,

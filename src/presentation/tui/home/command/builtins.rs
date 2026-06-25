@@ -398,7 +398,7 @@ impl Command for AgentCommand {
     }
 }
 
-/// `close`: remove the focused session forcefully and return to 統括 (Overview).
+/// `close`: remove the focused session forcefully and return to 切替 (Switch).
 /// It is the 在席 equivalent of `session remove <name> --force` — the worktrees
 /// and branches are deleted and any uncommitted changes discarded, so the
 /// session is gone for good. The removal is a side effect ([`Effect::CloseSession`])

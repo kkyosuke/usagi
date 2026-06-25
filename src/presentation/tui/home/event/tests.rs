@@ -65,9 +65,9 @@ impl ScriptedReader {
 
 impl KeyReader for ScriptedReader {
     fn read_key(&mut self) -> io::Result<Key> {
-        // Default to Ctrl-C so a test can never spin forever: Esc no longer
-        // leaves Overview, so Ctrl-C (which quits when no session is live, as
-        // in these tests) is the terminator the loop falls back to.
+        // Default to Ctrl-C so a test can never spin forever: Esc is inert at the
+        // base 切替, so Ctrl-C (which quits when no session is live, as in these
+        // tests) is the terminator the loop falls back to.
         self.keys.pop_front().unwrap_or(Ok(Key::CtrlC))
     }
 }
@@ -326,6 +326,15 @@ fn typed(s: &str) -> Vec<io::Result<Key>> {
     s.chars().map(|c| Ok(Key::Char(c))).collect()
 }
 
+/// A scripted run of a workspace command from the (now default) 切替: a leading
+/// `:` opens the command palette, then `s` is typed into it. Without the `:` the
+/// characters would hit Switch navigation instead of the command line.
+fn cmd(s: &str) -> Vec<io::Result<Key>> {
+    let mut keys = vec![Ok(Key::Char(':'))];
+    keys.extend(typed(s));
+    keys
+}
+
 /// 切替 (Switch) reached from the 在席 prompt surface via `Ctrl-O`, then a
 /// different session focused: the session changes as expected. Guards the
 /// prompt-mode path of `focus_key`'s `Ctrl-O` handling (the menu path is covered
@@ -347,7 +356,7 @@ fn prompt_focus_ctrl_o_opens_switch_and_can_change_session() {
             None
         }
     };
-    let mut keys = typed("session switch root");
+    let mut keys = cmd("session switch root");
     keys.push(Ok(Key::Enter)); // Focus root (idle -> 在席 prompt, no attach)
     keys.push(Ok(Key::Char(CTRL_O))); // 在席 -> 切替
     keys.push(Ok(Key::ArrowDown)); // root -> main
@@ -574,7 +583,7 @@ fn text_modal_scrolls_and_dismisses() {
     // `man` opens a scrollable text modal; the arrows / j/k and PageUp/PageDown
     // scroll it, and Esc dismisses it (back to Overview, where the fallback
     // Ctrl-C quits).
-    let mut keys = typed("man");
+    let mut keys = cmd("man");
     keys.push(Ok(Key::Enter)); // run `man` -> opens the text modal
     keys.push(Ok(Key::ArrowDown)); // scroll down a line
     keys.push(Ok(Key::Char('j')));
@@ -600,7 +609,7 @@ fn preview_command_opens_reads_scrolls_and_dismisses_the_markdown_pane() {
         .join("\n");
     std::fs::write(dir.path().join("README.md"), format!("# Title\n{body}")).unwrap();
 
-    let mut keys = typed("preview README");
+    let mut keys = cmd("preview README");
     keys.push(Ok(Key::Enter)); // run `preview` -> reads the file, opens the pane
     keys.push(Ok(Key::ArrowDown)); // scroll down a line
     keys.push(Ok(Key::Char('j')));
@@ -622,7 +631,7 @@ fn preview_command_logs_a_failure_for_a_missing_file() {
     // A `preview` of a file that does not exist opens nothing and logs the error;
     // the screen keeps running and quits on the trailing Ctrl-C.
     let dir = tempfile::tempdir().unwrap();
-    let mut keys = typed("preview missing");
+    let mut keys = cmd("preview missing");
     keys.push(Ok(Key::Enter)); // run `preview` -> read fails, nothing opens
     keys.push(Ok(Key::Escape)); // Esc inert in Overview (no preview captured it)
     assert!(matches!(
@@ -633,7 +642,7 @@ fn preview_command_logs_a_failure_for_a_missing_file() {
 
 #[test]
 fn overview_edits_completes_and_recalls_then_runs() {
-    let mut keys = typed("ma");
+    let mut keys = cmd("ma");
     keys.push(Ok(Key::Backspace));
     keys.push(Ok(Key::Tab)); // "m" -> "man"
     keys.push(Ok(Key::Enter)); // run -> `man` opens its text modal
@@ -650,7 +659,7 @@ fn overview_caret_keys_edit_within_the_line() {
     // Build "history" by typing out of order and moving the caret with the
     // editing keys, exercising ←/→/End/Del; the recorded command proves the
     // edits landed where the caret was.
-    let mut keys = typed("hstory"); // missing the 'i'
+    let mut keys = cmd("hstory"); // missing the 'i'
     for _ in 0..5 {
         keys.push(Ok(Key::ArrowLeft)); // caret to just after 'h'
     }
@@ -701,14 +710,14 @@ fn overview_caret_keys_edit_within_the_line() {
 
 #[test]
 fn quit_command_exits_the_app() {
-    let mut keys = typed("quit");
+    let mut keys = cmd("quit");
     keys.push(Ok(Key::Enter));
     assert!(matches!(run(keys, sample_state()).unwrap(), Outcome::Quit));
 }
 
 #[test]
 fn submitted_commands_are_handed_to_persist() {
-    let mut keys = typed("man");
+    let mut keys = cmd("man");
     keys.push(Ok(Key::Enter));
     keys.push(Ok(Key::Escape));
     let term = Term::stdout();
@@ -747,9 +756,9 @@ fn submitted_commands_are_handed_to_persist() {
 }
 
 #[test]
-fn overview_terminal_and_agent_attach_the_active_session() {
-    // Typing `terminal` / `agent` in Overview still dispatches: it focuses the
-    // active row (the root) and attaches the pane.
+fn palette_terminal_and_agent_attach_the_active_session() {
+    // Typing `terminal` / `agent` in the `:` palette still dispatches: it closes
+    // the palette, focuses the active row (the root) and attaches the pane.
     let opened = RefCell::new(Vec::new());
     let mut open = |_h: &mut HomeState, _d: &Path, a: bool, _n: bool| {
         opened.borrow_mut().push(a);
@@ -757,13 +766,13 @@ fn overview_terminal_and_agent_attach_the_active_session() {
     };
     let mut create: fn(&str) -> SessionOutcome = noop_create;
     let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = noop_preview;
-    let mut keys = typed("terminal");
+    let mut keys = cmd("terminal");
     keys.push(Ok(Key::Enter)); // attach (root, plain shell) -> Closed -> Focus
-    keys.push(Ok(Key::Escape)); // Focus -> Overview
-    keys.extend(typed("agent"));
-    keys.push(Ok(Key::Enter)); // wait — we are back in Overview after Esc
-    keys.push(Ok(Key::Escape)); // Focus -> Overview
-    keys.push(Ok(Key::Escape)); // Esc inert in Overview; fallback Ctrl-C quits
+    keys.push(Ok(Key::Escape)); // Focus -> Switch
+    keys.extend(cmd("agent")); // open the palette again and type `agent`
+    keys.push(Ok(Key::Enter)); // attach (root, agent) -> Closed -> Focus
+    keys.push(Ok(Key::Escape)); // Focus -> Switch
+    keys.push(Ok(Key::Escape)); // Esc inert at the base Switch; fallback Ctrl-C quits
     assert!(matches!(
         run_full(
             keys,
@@ -781,7 +790,7 @@ fn overview_terminal_and_agent_attach_the_active_session() {
 
 #[test]
 fn session_list_logs_the_sessions() {
-    let mut keys = typed("session list");
+    let mut keys = cmd("session list");
     keys.push(Ok(Key::Enter));
     keys.push(Ok(Key::Escape));
     assert!(matches!(run(keys, sample_state()).unwrap(), Outcome::Quit));
@@ -791,7 +800,7 @@ fn session_list_logs_the_sessions() {
 fn session_list_with_sessions_opens_a_modal() {
     // With sessions recorded, `session list` opens the scrollable Sessions modal
     // (the empty-state path is a one-liner); Esc then dismisses it.
-    let mut keys = typed("session list");
+    let mut keys = cmd("session list");
     keys.push(Ok(Key::Enter));
     keys.push(Ok(Key::Escape));
     assert!(matches!(
@@ -802,7 +811,7 @@ fn session_list_with_sessions_opens_a_modal() {
 
 #[test]
 fn session_create_with_a_name_creates_immediately() {
-    let mut keys = typed("session create newx");
+    let mut keys = cmd("session create newx");
     keys.push(Ok(Key::Enter));
     keys.push(Ok(Key::Escape));
     let created = RefCell::new(Vec::new());
@@ -831,7 +840,7 @@ fn session_create_with_a_name_creates_immediately() {
 fn bare_session_create_moves_to_switch_and_opens_the_inline_input() {
     // `session create` (no name) enters 切替 and begins inline creation; the
     // name is typed and confirmed there, creating the session.
-    let mut keys = typed("session create");
+    let mut keys = cmd("session create");
     keys.push(Ok(Key::Enter)); // -> Switch + begin create
     keys.extend(typed("wip"));
     keys.push(Ok(Key::Enter)); // confirm create -> Focus
@@ -866,7 +875,7 @@ fn a_finished_create_drops_into_focus_on_the_new_session() {
     // user operates it without navigating over. We prove the landing by running the
     // 在席 menu's `terminal` (the `t` key, Focus-only) and observing it opens a pane
     // rooted at the new session's worktree — only possible if Focus is on `newx`.
-    let mut keys = typed("session create newx");
+    let mut keys = cmd("session create newx");
     keys.push(Ok(Key::Enter)); // dispatch create; completion drains next frame -> Focus(newx)
     keys.push(Ok(Key::Char('t'))); // 在席 menu: run `terminal` on the focused session
                                    // reader runs out -> Ctrl-C quits
@@ -922,7 +931,7 @@ fn a_finished_create_drops_into_focus_on_the_new_session() {
 
 #[test]
 fn session_remove_with_a_name_and_force_routes_to_remove() {
-    let mut keys = typed("session remove old --force");
+    let mut keys = cmd("session remove old --force");
     keys.push(Ok(Key::Enter));
     keys.push(Ok(Key::Escape));
     let term = Term::stdout();
@@ -969,7 +978,7 @@ fn close_typed_in_overview_on_root_is_refused() {
     // The focused row is the root by default, which is the workspace itself and
     // not a session, so `close` is refused outright: `remove` is never called and
     // the screen stays put.
-    let mut keys = typed("close");
+    let mut keys = cmd("close");
     keys.push(Ok(Key::Enter)); // run `close` from the Overview line
     keys.push(Ok(Key::Escape)); // Esc inert in Overview; fallback Ctrl-C quits
     let term = Term::stdout();
@@ -1021,7 +1030,7 @@ fn focus_close_command_force_removes_the_focused_session_then_enters_switch() {
     // next one. We prove the landing mode by pressing `c` — a Switch-only action
     // that opens the inline create input and consults the branch-name callback;
     // in 統括 the same key would just type a character and never call it.
-    let mut keys = typed("session switch feat");
+    let mut keys = cmd("session switch feat");
     keys.push(Ok(Key::Enter)); // -> Focus (feat)
     keys.extend(typed("close"));
     keys.push(Ok(Key::Enter)); // run `close` -> session removed -> 切替 (Switch)
@@ -1085,7 +1094,7 @@ fn focus_menu_close_force_removes_the_focused_session_then_enters_switch() {
     // removes the focused session forcefully, then drops into 切替 (Switch) — the
     // `c` keypress that follows opens the inline create input (a Switch-only
     // action), proving the landing mode.
-    let mut keys = typed("session switch feat");
+    let mut keys = cmd("session switch feat");
     keys.push(Ok(Key::Enter)); // -> Focus (feat), menu UI
     keys.push(Ok(Key::ArrowUp)); // terminal -> wrap to `close`
     keys.push(Ok(Key::Enter)); // run `close` -> session removed -> 切替 (Switch)
@@ -1146,7 +1155,7 @@ fn focus_menu_close_force_removes_the_focused_session_then_enters_switch() {
 
 #[test]
 fn session_remove_without_a_name_opens_the_modal_and_bulk_removes() {
-    let mut keys = typed("session remove");
+    let mut keys = cmd("session remove");
     keys.push(Ok(Key::Enter)); // open the modal
     keys.push(Ok(Key::Char(' '))); // check "alpha"
     keys.push(Ok(Key::ArrowDown));
@@ -1200,7 +1209,7 @@ fn session_remove_without_a_name_opens_the_modal_and_bulk_removes() {
 
 #[test]
 fn removal_modal_cancels_via_escape_and_keeps_open_on_empty_enter() {
-    let mut keys = typed("session remove");
+    let mut keys = cmd("session remove");
     keys.push(Ok(Key::Enter)); // open
     keys.push(Ok(Key::Enter)); // nothing checked -> stays open
     keys.push(Ok(Key::Char(' '))); // check alpha
@@ -1214,7 +1223,7 @@ fn removal_modal_cancels_via_escape_and_keeps_open_on_empty_enter() {
 
 #[test]
 fn ctrl_c_in_the_removal_modal_quits() {
-    let mut keys = typed("session remove");
+    let mut keys = cmd("session remove");
     keys.push(Ok(Key::Enter));
     keys.push(Ok(Key::CtrlC));
     assert!(matches!(
@@ -1264,15 +1273,17 @@ fn ctrl_c_with_a_live_session_quits_only_after_confirming() {
 #[test]
 fn confirm_modal_cancel_keeps_the_screen_running() {
     // Ctrl-C raises the modal (a session is live); an ignored key is a no-op
-    // in it; 'n' cancels back to Overview, where a command still runs (proving
+    // in it; 'n' cancels back to 切替, where a palette command still runs (proving
     // the first Ctrl-C did not quit). Esc also cancels; Enter finally confirms.
     let mut keys = vec![
         Ok(Key::CtrlC),     // raise the modal
         Ok(Key::Home),      // ignored inside the modal
-        Ok(Key::Char('n')), // cancel -> Overview
+        Ok(Key::Char('n')), // cancel -> 切替
     ];
-    keys.extend(typed("man"));
-    keys.push(Ok(Key::Enter)); // runs `man` -> persisted
+    keys.extend(cmd("man")); // open the palette and type `man`
+    keys.push(Ok(Key::Enter)); // runs `man` -> persisted (opens a text modal)
+    keys.push(Ok(Key::Escape)); // dismiss the text modal
+    keys.push(Ok(Key::Escape)); // close the palette
     keys.push(Ok(Key::CtrlC)); // raise again
     keys.push(Ok(Key::Escape)); // cancel via Esc
     keys.push(Ok(Key::CtrlC)); // raise again
@@ -1303,7 +1314,7 @@ fn an_interrupted_blocking_read_is_retried_not_treated_as_quit() {
     let mut open: fn(&mut HomeState, &Path, bool, bool) -> Result<PaneExit> = noop_open;
     let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = noop_preview;
     let mut keys: Vec<io::Result<Key>> = vec![Err(io::Error::from(io::ErrorKind::Interrupted))];
-    keys.extend(typed("session create foo"));
+    keys.extend(cmd("session create foo"));
     keys.push(Ok(Key::Enter));
     keys.push(Ok(Key::CtrlC));
     let outcome = run_full(
@@ -1327,8 +1338,9 @@ fn an_interrupted_animate_read_is_retried_not_treated_as_quit() {
     // read is now swallowed, the typed command still runs, and only the
     // confirmed Ctrl-C quits.
     let mut keys: Vec<io::Result<Key>> = vec![Err(io::Error::from(io::ErrorKind::Interrupted))];
-    keys.extend(typed("man"));
-    keys.push(Ok(Key::Enter)); // runs `man` -> persisted
+    keys.extend(cmd("man"));
+    keys.push(Ok(Key::Enter)); // runs `man` -> persisted (text modal over the palette)
+    keys.push(Ok(Key::Escape)); // dismiss the text modal
     keys.push(Ok(Key::CtrlC)); // raise the quit modal (a session is live)
     keys.push(Ok(Key::Enter)); // confirm -> quit
     let mut recorded = Vec::new();
@@ -1342,7 +1354,7 @@ fn an_interrupted_animate_read_is_retried_not_treated_as_quit() {
 // --- config hand-off ---------------------------------------------------
 
 fn config_keys() -> Vec<io::Result<Key>> {
-    let mut keys = typed("config");
+    let mut keys = cmd("config");
     keys.push(Ok(Key::Enter));
     keys.push(Ok(Key::Escape));
     keys
@@ -1403,9 +1415,9 @@ fn returning_from_config_refreshes_the_session_action_ui() {
     };
     let mut create: fn(&str) -> SessionOutcome = noop_create;
     let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = noop_preview;
-    let mut keys = typed("config");
+    let mut keys = cmd("config");
     keys.push(Ok(Key::Enter));
-    keys.extend(typed("terminal"));
+    keys.extend(cmd("terminal"));
     keys.push(Ok(Key::Enter));
     run_full(
         keys,
@@ -1421,7 +1433,7 @@ fn returning_from_config_refreshes_the_session_action_ui() {
 
 #[test]
 fn config_failure_is_propagated() {
-    let mut keys = typed("config");
+    let mut keys = cmd("config");
     keys.push(Ok(Key::Enter));
     let mut config = |_: &Term| Err(anyhow::anyhow!("settings blew up"));
     let mut open: fn(&mut HomeState, &Path, bool, bool) -> Result<PaneExit> = noop_open;
@@ -1443,7 +1455,7 @@ fn config_failure_is_propagated() {
 
 #[test]
 fn session_switch_unknown_name_logs_an_error_and_stays_in_overview() {
-    let mut keys = typed("session switch nope");
+    let mut keys = cmd("session switch nope");
     keys.push(Ok(Key::Enter));
     keys.push(Ok(Key::Escape)); // still in Overview; Esc inert, fallback Ctrl-C quits
     assert!(matches!(run(keys, sample_state()).unwrap(), Outcome::Quit));
@@ -1452,7 +1464,7 @@ fn session_switch_unknown_name_logs_an_error_and_stays_in_overview() {
 #[test]
 fn session_switch_known_idle_name_enters_focus() {
     // "feat" resolves but is idle (no live preview), so it just enters Focus.
-    let mut keys = typed("session switch feat");
+    let mut keys = cmd("session switch feat");
     keys.push(Ok(Key::Enter)); // -> Focus
     keys.push(Ok(Key::Escape)); // Focus -> Overview
     keys.push(Ok(Key::Escape)); // Esc inert in Overview; fallback Ctrl-C quits
@@ -1470,7 +1482,7 @@ fn session_switch_known_live_name_attaches_then_returns_to_focus() {
     };
     let mut create: fn(&str) -> SessionOutcome = noop_create;
     let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = live_preview;
-    let mut keys = typed("session switch root");
+    let mut keys = cmd("session switch root");
     keys.push(Ok(Key::Enter)); // -> Focus -> attach -> Closed -> Focus
     keys.push(Ok(Key::Escape)); // Focus -> Overview
     keys.push(Ok(Key::Escape)); // Esc inert in Overview; fallback Ctrl-C quits
@@ -1522,7 +1534,7 @@ fn note_editor_opened_while_attached_refreshes_the_attached_terminal_surface() {
     let mut config: fn(&Term) -> Result<Option<ConfigReload>> = noop_config;
 
     let term = Term::stdout();
-    let mut keys = typed("session switch feat");
+    let mut keys = cmd("session switch feat");
     keys.push(Ok(Key::Enter)); // focus feat (live) -> attach -> OpenNote -> editor
     keys.push(Ok(Key::Char(CTRL_S))); // save & close -> re-attach -> Closed -> Focus
     keys.push(Ok(Key::Escape)); // Focus -> Overview; fallback Ctrl-C quits
@@ -1567,7 +1579,7 @@ fn switch_navigates_and_backs_out_to_overview() {
     // between the highlighted session's tabs (a no-op with no panes here); Esc
     // returns to Overview (the origin); Esc is then inert, so the fallback Ctrl-C
     // quits.
-    let mut keys = typed("session switch");
+    let mut keys = cmd("session switch");
     keys.push(Ok(Key::Enter)); // -> Switch (origin Overview)
     keys.push(Ok(Key::ArrowDown));
     keys.push(Ok(Key::ArrowUp));
@@ -1585,7 +1597,7 @@ fn switch_navigates_and_backs_out_to_overview() {
 
 #[test]
 fn switch_ctrl_o_zooms_out_to_overview() {
-    let mut keys = typed("session switch");
+    let mut keys = cmd("session switch");
     keys.push(Ok(Key::Enter)); // -> Switch
     keys.push(Ok(Key::Char(CTRL_O))); // -> Overview
     keys.push(Ok(Key::Escape)); // Esc inert in Overview; fallback Ctrl-C quits
@@ -1597,7 +1609,7 @@ fn switch_snapshots_the_highlighted_live_session_for_the_preview() {
     // In 切替 the render loop snapshots the highlighted session's live
     // terminal so the right pane previews the actual screen. Under the live
     // harness `preview` returns a snapshot, exercising that path.
-    let mut keys = typed("session switch");
+    let mut keys = cmd("session switch");
     keys.push(Ok(Key::Enter)); // -> Switch
     keys.push(Ok(Key::ArrowDown)); // move onto a live session row
     keys.push(Ok(Key::Char(CTRL_O))); // -> Overview
@@ -1610,7 +1622,7 @@ fn switch_snapshots_the_highlighted_live_session_for_the_preview() {
 
 #[test]
 fn switch_ctrl_c_quits() {
-    let mut keys = typed("session switch");
+    let mut keys = cmd("session switch");
     keys.push(Ok(Key::Enter));
     keys.push(Ok(Key::CtrlC));
     assert!(matches!(run(keys, sample_state()).unwrap(), Outcome::Quit));
@@ -1618,7 +1630,7 @@ fn switch_ctrl_c_quits() {
 
 #[test]
 fn switch_enter_on_an_idle_session_just_focuses_it() {
-    let mut keys = typed("session switch");
+    let mut keys = cmd("session switch");
     keys.push(Ok(Key::Enter)); // -> Switch
     keys.push(Ok(Key::ArrowDown)); // cursor on "main"
     keys.push(Ok(Key::Enter)); // focus (idle -> no attach)
@@ -1640,7 +1652,7 @@ fn switch_enter_on_a_live_session_re_attaches_its_active_pane() {
     };
     let mut create: fn(&str) -> SessionOutcome = noop_create;
     let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = live_preview;
-    let mut keys = typed("session switch");
+    let mut keys = cmd("session switch");
     keys.push(Ok(Key::Enter)); // -> Switch
     keys.push(Ok(Key::Enter)); // focus + attach (live)
     keys.push(Ok(Key::Escape)); // Focus -> Overview
@@ -1675,7 +1687,7 @@ fn switch_t_opens_the_action_surface_and_adds_a_new_pane() {
     };
     let mut create: fn(&str) -> SessionOutcome = noop_create;
     let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = noop_preview;
-    let mut keys = typed("session switch");
+    let mut keys = cmd("session switch");
     keys.push(Ok(Key::Enter)); // -> Switch
     keys.push(Ok(Key::Char('t'))); // -> 在席 action surface (Menu)
     keys.push(Ok(Key::Char('t'))); // menu: run terminal -> adds a new pane
@@ -1709,7 +1721,7 @@ fn switch_arrows_move_the_active_tab_via_tab_op() {
         }
         (vec!["agent".to_string(), "terminal".to_string()], 0)
     };
-    let mut keys = typed("session switch");
+    let mut keys = cmd("session switch");
     keys.push(Ok(Key::Enter)); // -> Switch
     keys.push(Ok(Key::ArrowRight)); // tab next
     keys.push(Ok(Key::ArrowLeft)); // tab prev
@@ -1771,7 +1783,7 @@ fn switch_x_closes_the_highlighted_sessions_active_tab() {
     let mut close_tab = |_h: &mut HomeState, dir: &Path| {
         closed.borrow_mut().push(dir.to_path_buf());
     };
-    let mut keys = typed("session switch");
+    let mut keys = cmd("session switch");
     keys.push(Ok(Key::Enter)); // -> Switch (cursor on the root row)
     keys.push(Ok(Key::ArrowDown)); // -> the first session (main, /r/main)
     keys.push(Ok(Key::Char('x'))); // close its active tab
@@ -1812,7 +1824,7 @@ fn switch_x_closes_the_highlighted_sessions_active_tab() {
 
 #[test]
 fn switch_inline_create_makes_and_focuses_the_new_session() {
-    let mut keys = typed("session switch");
+    let mut keys = cmd("session switch");
     keys.push(Ok(Key::Enter)); // -> Switch
     keys.push(Ok(Key::Char('c'))); // begin create
     keys.push(Ok(Key::Insert)); // unhandled inside create: the `_` arm
@@ -1852,7 +1864,7 @@ fn switch_inline_create_makes_and_focuses_the_new_session() {
 #[test]
 fn switch_inline_create_can_be_cancelled_and_ctrl_c_quits() {
     // Cancel path: Esc closes the input, staying in Switch; then Ctrl-O -> Overview (fallback Ctrl-C quits).
-    let mut keys = typed("session switch");
+    let mut keys = cmd("session switch");
     keys.push(Ok(Key::Enter));
     keys.push(Ok(Key::Char('c'))); // begin create
     keys.push(Ok(Key::Char('x')));
@@ -1862,7 +1874,7 @@ fn switch_inline_create_can_be_cancelled_and_ctrl_c_quits() {
     assert!(matches!(run(keys, sample_state()).unwrap(), Outcome::Quit));
 
     // Ctrl-C inside the create input quits.
-    let mut keys = typed("session switch");
+    let mut keys = cmd("session switch");
     keys.push(Ok(Key::Enter));
     keys.push(Ok(Key::Char('c')));
     keys.push(Ok(Key::CtrlC));
@@ -1872,7 +1884,7 @@ fn switch_inline_create_can_be_cancelled_and_ctrl_c_quits() {
 #[test]
 fn switch_create_invalid_name_keeps_the_input_open() {
     // An empty confirm keeps the input open; then Ctrl-C ends the run.
-    let mut keys = typed("session switch");
+    let mut keys = cmd("session switch");
     keys.push(Ok(Key::Enter));
     keys.push(Ok(Key::Char('c')));
     keys.push(Ok(Key::Enter)); // empty -> error, stays open
@@ -1928,7 +1940,7 @@ fn switch_inline_rename_edits_then_confirms_the_label() {
     // Switch -> cursor onto "main" -> `r` (prefills "main") -> mid-string edit
     // exercising the same caret keys as create (Home/End/←/→/Del/Backspace) ->
     // type "Top" -> Enter persists via the rename callback.
-    let mut keys = typed("session switch");
+    let mut keys = cmd("session switch");
     keys.push(Ok(Key::Enter)); // -> Switch
     keys.push(Ok(Key::ArrowDown)); // cursor "main"
     keys.push(Ok(Key::Char('r'))); // begin rename (prefilled "main", caret at end)
@@ -1952,7 +1964,7 @@ fn switch_inline_rename_edits_then_confirms_the_label() {
 #[test]
 fn switch_inline_rename_can_be_cancelled_with_no_persist() {
     // `r` opens the input, Esc closes it without calling the rename callback.
-    let mut keys = typed("session switch");
+    let mut keys = cmd("session switch");
     keys.push(Ok(Key::Enter));
     keys.push(Ok(Key::ArrowDown)); // cursor "main"
     keys.push(Ok(Key::Char('r'))); // begin rename
@@ -1967,7 +1979,7 @@ fn switch_inline_rename_can_be_cancelled_with_no_persist() {
 #[test]
 fn switch_rename_on_the_root_row_is_a_noop() {
     // `r` on the root row (no session) opens nothing; the run just quits.
-    let mut keys = typed("session switch");
+    let mut keys = cmd("session switch");
     keys.push(Ok(Key::Enter)); // -> Switch (cursor on root)
     keys.push(Ok(Key::Char('r'))); // no-op on root
     keys.push(Ok(Key::CtrlC));
@@ -1990,7 +2002,7 @@ fn focus_menu_moves_and_runs_terminal_via_enter() {
     };
     let mut create: fn(&str) -> SessionOutcome = noop_create;
     let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = noop_preview;
-    let mut keys = typed("session switch");
+    let mut keys = cmd("session switch");
     keys.push(Ok(Key::Enter)); // Switch
     keys.push(Ok(Key::ArrowDown)); // cursor "main" (/r/main)
     keys.push(Ok(Key::Enter)); // focus main (idle)
@@ -2023,7 +2035,7 @@ fn focus_menu_shortcut_keys_launch_terminal_and_agent() {
     };
     let mut create: fn(&str) -> SessionOutcome = noop_create;
     let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = noop_preview;
-    let mut keys = typed("session switch feat");
+    let mut keys = cmd("session switch feat");
     keys.push(Ok(Key::Enter)); // Focus feat
     keys.push(Ok(Key::Char('t'))); // terminal
     keys.push(Ok(Key::Char('k'))); // a menu move (no-op effect here)
@@ -2059,7 +2071,7 @@ fn focus_menu_agent_picker_launches_the_chosen_cli() {
     let mut state = sample_state();
     state.set_default_agent(AgentCli::Claude);
     state.set_installed_agents(vec![AgentCli::Claude, AgentCli::Codex]);
-    let mut keys = typed("session switch feat");
+    let mut keys = cmd("session switch feat");
     keys.push(Ok(Key::Enter)); // Focus feat
     keys.push(Ok(Key::ArrowDown)); // terminal -> agent
     keys.push(Ok(Key::ArrowRight)); // expand picker (default Claude highlighted)
@@ -2094,7 +2106,7 @@ fn focus_menu_agent_picker_collapses_on_left_and_esc_without_launching() {
     let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = noop_preview;
     let mut state = sample_state();
     state.set_installed_agents(vec![AgentCli::Claude, AgentCli::Codex]);
-    let mut keys = typed("session switch feat");
+    let mut keys = cmd("session switch feat");
     keys.push(Ok(Key::Enter)); // Focus feat
     keys.push(Ok(Key::ArrowDown)); // terminal -> agent
     keys.push(Ok(Key::ArrowRight)); // expand
@@ -2136,14 +2148,15 @@ fn typed_agent_name_launches_an_installed_cli_but_refuses_an_uninstalled_one() {
     state.set_default_agent(AgentCli::Claude);
     state.set_installed_agents(vec![AgentCli::Codex]);
     // `agent gemini` (not installed, not the default) is refused — no launch. It
-    // still focuses the active row, so `Esc` returns to Overview to type again.
-    let mut keys = typed("agent gemini");
+    // still closes the palette and focuses the active row, so `Esc` returns to
+    // 切替 to type again.
+    let mut keys = cmd("agent gemini");
     keys.push(Ok(Key::Enter));
-    keys.push(Ok(Key::Escape)); // refused -> Focus(root) -> back to Overview
+    keys.push(Ok(Key::Escape)); // refused -> Focus(root) -> back to 切替
                                 // `agent codex` (installed) launches Codex.
-    keys.extend(typed("agent codex"));
+    keys.extend(cmd("agent codex"));
     keys.push(Ok(Key::Enter));
-    keys.push(Ok(Key::Escape)); // -> Overview
+    keys.push(Ok(Key::Escape)); // -> 切替
     keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
     assert!(matches!(
         run_full(
@@ -2173,7 +2186,7 @@ fn typed_agent_name_allows_the_default_cli_even_when_not_probed_as_installed() {
     let mut state = sample_state();
     state.set_default_agent(AgentCli::Claude);
     state.set_installed_agents(Vec::new()); // nothing probed as installed
-    let mut keys = typed("agent claude"); // the configured default by name
+    let mut keys = cmd("agent claude"); // the configured default by name
     keys.push(Ok(Key::Enter));
     keys.push(Ok(Key::Escape)); // -> Overview
     keys.push(Ok(Key::Escape)); // quit
@@ -2199,7 +2212,7 @@ fn focus_menu_can_run_the_coming_soon_ai_command() {
     // more lands on "ai"; Enter on it just logs (no attach).
     let mut state = sample_state();
     state.set_ai_available(true);
-    let mut keys = typed("session switch feat");
+    let mut keys = cmd("session switch feat");
     keys.push(Ok(Key::Enter)); // Focus
     keys.push(Ok(Key::Home)); // ignored in the menu
     keys.push(Ok(Key::ArrowDown)); // terminal -> agent
@@ -2216,7 +2229,7 @@ fn focus_menu_can_run_the_coming_soon_ai_command() {
 fn focus_ctrl_o_opens_switch_then_esc_re_focuses() {
     // Focus -> Ctrl-O -> Switch(return=Focus); Esc re-enters Focus; Esc ->
     // Overview; Esc inert, fallback Ctrl-C quits.
-    let mut keys = typed("session switch feat");
+    let mut keys = cmd("session switch feat");
     keys.push(Ok(Key::Enter)); // Focus feat
     keys.push(Ok(Key::Char(CTRL_O))); // -> Switch(return Focus)
     keys.push(Ok(Key::Escape)); // back -> Focus
@@ -2252,7 +2265,7 @@ fn focus_ctrl_n_and_ctrl_p_walk_the_tab_strip_via_tab_op() {
     // Entering Focus on a live session attaches; `Ctrl-T` (ToFocus) zooms back out
     // to Focus with the panes still alive, which is where the tab strip shows.
     let mut open = |_h: &mut HomeState, _d: &Path, _a: bool, _n: bool| Ok(PaneExit::ToFocus);
-    let mut keys = typed("session switch feat");
+    let mut keys = cmd("session switch feat");
     keys.push(Ok(Key::Enter)); // attach feat; open returns ToFocus -> Focus on "+ new"
     keys.push(Ok(Key::Char(CTRL_N))); // "+ new" wraps to pane 0: To(0)
     keys.push(Ok(Key::Char(CTRL_N))); // pane 0 -> pane 1: To(1)
@@ -2307,7 +2320,7 @@ fn focus_tab_nav_is_inert_without_live_panes() {
         }
         (Vec::new(), 0)
     };
-    let mut keys = typed("session switch feat");
+    let mut keys = cmd("session switch feat");
     keys.push(Ok(Key::Enter)); // -> Focus feat (idle: noop_preview is not live)
     keys.push(Ok(Key::Char(CTRL_N)));
     keys.push(Ok(Key::Char(CTRL_P)));
@@ -2371,7 +2384,7 @@ fn focus_enter_on_a_pane_tab_reattaches_while_other_keys_are_inert() {
     let mut tab_op = |_d: &Path, _nav: Option<TabNav>| -> (Vec<String>, usize) {
         (vec!["agent".to_string(), "terminal".to_string()], 0)
     };
-    let mut keys = typed("session switch feat");
+    let mut keys = cmd("session switch feat");
     keys.push(Ok(Key::Enter)); // attach feat; open #1 -> ToFocus -> Focus on "+ new"
     keys.push(Ok(Key::Char(CTRL_N))); // "+ new" -> pane 0: now a pane tab is selected
     keys.push(Ok(Key::Char('j'))); // on a pane tab: inert, no open
@@ -2436,7 +2449,7 @@ fn focus_esc_on_the_new_tab_over_panes_steps_back_onto_the_pane() {
     let mut tab_op = |_d: &Path, _nav: Option<TabNav>| -> (Vec<String>, usize) {
         (vec!["agent".to_string(), "terminal".to_string()], 0)
     };
-    let mut keys = typed("session switch feat");
+    let mut keys = cmd("session switch feat");
     keys.push(Ok(Key::Enter)); // attach feat; open #1 -> ToFocus -> Focus on "+ new"
     keys.push(Ok(Key::Escape)); // discard "+ new" -> step onto the active pane tab
     keys.push(Ok(Key::Enter)); // re-attach the pane; open #2 (false, false)
@@ -2478,7 +2491,7 @@ fn focus_esc_on_the_new_tab_over_panes_steps_back_onto_the_pane() {
 
 #[test]
 fn focus_ctrl_c_quits() {
-    let mut keys = typed("session switch feat");
+    let mut keys = cmd("session switch feat");
     keys.push(Ok(Key::Enter));
     keys.push(Ok(Key::CtrlC));
     assert!(matches!(run(keys, sample_state()).unwrap(), Outcome::Quit));
@@ -2496,7 +2509,7 @@ fn focus_prompt_edits_completes_and_runs_terminal() {
     };
     let mut create: fn(&str) -> SessionOutcome = noop_create;
     let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = noop_preview;
-    let mut keys = typed("session switch feat");
+    let mut keys = cmd("session switch feat");
     keys.push(Ok(Key::Enter)); // Focus feat (prompt UI)
     keys.extend(typed("ter"));
     keys.push(Ok(Key::Insert)); // unhandled in the prompt: the `_` arm
@@ -2536,7 +2549,7 @@ fn focus_prompt_runs_agent_and_coming_soon_and_ignores_empty() {
     };
     let mut create: fn(&str) -> SessionOutcome = noop_create;
     let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = noop_preview;
-    let mut keys = typed("session switch feat");
+    let mut keys = cmd("session switch feat");
     keys.push(Ok(Key::Enter)); // Focus (prompt)
     keys.push(Ok(Key::Home)); // ignored in the prompt
     keys.push(Ok(Key::Enter)); // empty prompt -> no-op
@@ -2573,7 +2586,7 @@ fn focus_prompt_agent_with_a_name_launches_that_cli() {
     let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = noop_preview;
     let mut state = prompt_state();
     state.set_installed_agents(vec![AgentCli::Claude, AgentCli::CodexFugu]);
-    let mut keys = typed("session switch feat");
+    let mut keys = cmd("session switch feat");
     keys.push(Ok(Key::Enter)); // Focus (prompt)
     keys.extend(typed("agent sakana.ai")); // pick the codex-fugu CLI by display name
     keys.push(Ok(Key::Enter)); // attach that agent
@@ -2603,7 +2616,7 @@ fn ctrl_o_in_the_pane_zooms_out_to_switch() {
     let mut open = |_h: &mut HomeState, _d: &Path, _a: bool, _n: bool| Ok(PaneExit::ToSwitch);
     let mut create: fn(&str) -> SessionOutcome = noop_create;
     let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = live_preview;
-    let mut keys = typed("session switch root");
+    let mut keys = cmd("session switch root");
     keys.push(Ok(Key::Enter)); // Focus root -> attach -> ToSwitch -> Switch
     keys.push(Ok(Key::Char(CTRL_O))); // Switch -> Overview
     keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
@@ -2637,7 +2650,7 @@ fn pane_to_switch_then_esc_re_attaches() {
     };
     let mut create: fn(&str) -> SessionOutcome = noop_create;
     let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = live_preview;
-    let mut keys = typed("session switch root");
+    let mut keys = cmd("session switch root");
     keys.push(Ok(Key::Enter)); // attach -> ToSwitch -> Switch(return Attached)
     keys.push(Ok(Key::Escape)); // Switch Esc -> re-attach -> Closed -> Focus
     keys.push(Ok(Key::Escape)); // Focus -> Overview
@@ -2676,7 +2689,7 @@ fn pane_to_switch_then_esc_onto_an_idle_session_lands_in_focus() {
             None
         }
     };
-    let mut keys = typed("session switch root");
+    let mut keys = cmd("session switch root");
     keys.push(Ok(Key::Enter)); // attach root -> ToSwitch -> Switch(return Attached)
     keys.push(Ok(Key::ArrowDown)); // cursor -> an idle worktree row
     keys.push(Ok(Key::Escape)); // Esc -> idle row stays in Focus (no re-attach)
@@ -2711,7 +2724,7 @@ fn ctrl_t_in_the_pane_zooms_out_to_focus() {
     };
     let mut create: fn(&str) -> SessionOutcome = noop_create;
     let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = live_preview;
-    let mut keys = typed("session switch root");
+    let mut keys = cmd("session switch root");
     keys.push(Ok(Key::Enter)); // Focus root -> attach -> ToFocus -> Focus
     keys.push(Ok(Key::Escape)); // Focus -> Overview
     keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
@@ -2736,7 +2749,7 @@ fn pane_failure_is_reported_and_returns_to_focus() {
         |_h: &mut HomeState, _d: &Path, _a: bool, _n: bool| Err(anyhow::anyhow!("no shell"));
     let mut create: fn(&str) -> SessionOutcome = noop_create;
     let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = live_preview;
-    let mut keys = typed("session switch root");
+    let mut keys = cmd("session switch root");
     keys.push(Ok(Key::Enter)); // attach -> Err -> Focus (logged)
     keys.push(Ok(Key::Escape)); // Focus -> Overview
     keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
@@ -2999,7 +3012,7 @@ fn default_callbacks_run_through_the_harness() {
     // Drive the shared no-op `open_terminal` (via the live harness, which
     // attaches) and `open_config` (via `config`) so both default callbacks
     // execute end to end.
-    let mut keys = typed("session switch root");
+    let mut keys = cmd("session switch root");
     keys.push(Ok(Key::Enter)); // live -> attach via noop_open -> Closed -> Focus
     keys.push(Ok(Key::Escape)); // Focus -> Overview
     keys.push(Ok(Key::Escape)); // Esc inert in Overview; fallback Ctrl-C quits
@@ -3009,7 +3022,7 @@ fn default_callbacks_run_through_the_harness() {
     ));
 
     // `config` through the default `noop_config` (returns false -> resume).
-    let mut keys = typed("config");
+    let mut keys = cmd("config");
     keys.push(Ok(Key::Enter));
     keys.push(Ok(Key::Escape));
     assert!(matches!(run(keys, sample_state()).unwrap(), Outcome::Quit));
@@ -3308,7 +3321,7 @@ fn attached_ctrl_e_opens_the_note_editor_then_re_attaches_on_save() {
         noop_set_note(name, text)
     };
 
-    let mut keys = typed("session switch alpha");
+    let mut keys = cmd("session switch alpha");
     keys.push(Ok(Key::Enter)); // focus + attach alpha -> open_terminal #1 -> OpenNote
     keys.extend(typed("hi")); // edit the note in the editor
     keys.push(Ok(Key::Char(CTRL_S))); // save -> re-attach -> open_terminal #2 -> Closed -> Focus
@@ -3356,7 +3369,7 @@ fn attached_ctrl_e_re_attaches_on_cancel_without_saving() {
         noop_set_note(name, text)
     };
 
-    let mut keys = typed("session switch alpha");
+    let mut keys = cmd("session switch alpha");
     keys.push(Ok(Key::Enter)); // attach -> OpenNote
     keys.extend(typed("scratch"));
     keys.push(Ok(Key::Escape)); // cancel -> re-attach -> Closed -> Focus
@@ -3399,7 +3412,7 @@ fn attached_ctrl_e_on_the_root_row_re_attaches_without_opening_an_editor() {
         noop_set_note(name, text)
     };
 
-    let mut keys = typed("session switch root");
+    let mut keys = cmd("session switch root");
     keys.push(Ok(Key::Enter)); // focus + attach root -> OpenNote
     keys.push(Ok(Key::Escape)); // (re-attached, now Focus) -> Overview
     keys.push(Ok(Key::CtrlC));
@@ -3441,7 +3454,7 @@ fn focus_ctrl_e_opens_the_note_editor_and_saves_staying_in_focus() {
         noop_set_note(name, text)
     };
 
-    let mut keys = typed("session switch alpha");
+    let mut keys = cmd("session switch alpha");
     keys.push(Ok(Key::Enter)); // focus alpha (idle -> 在席 menu)
     keys.push(Ok(Key::Char(CTRL_E))); // open the note editor (reattach = false)
     keys.extend(typed("todo"));
@@ -3490,7 +3503,7 @@ fn focus_end_key_opens_the_note_editor_on_the_menu_surface() {
         noop_set_note(name, text)
     };
 
-    let mut keys = typed("session switch alpha");
+    let mut keys = cmd("session switch alpha");
     keys.push(Ok(Key::Enter)); // focus alpha (idle -> 在席 menu)
     keys.push(Ok(Key::End)); // Ctrl-E as console delivers it: open the note
     keys.extend(typed("todo"));

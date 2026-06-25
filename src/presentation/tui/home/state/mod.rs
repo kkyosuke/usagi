@@ -1421,7 +1421,7 @@ impl HomeState {
 
     /// Tab-complete the 在席 prompt's command word against the Session-scope
     /// commands, returning the candidates when ambiguous (so the caller can log
-    /// them, mirroring the Overview line's `complete`).
+    /// them, mirroring the palette line's `complete`).
     pub fn focus_prompt_complete(&mut self) -> Completion {
         let completion = self
             .registry
@@ -1576,7 +1576,7 @@ impl HomeState {
     }
 
     /// Dispatch `entry` as a command and record it in command history, returning
-    /// the raw result. The shared core of [`submit`](Self::submit) (統括 line) and
+    /// the raw result. The shared core of [`submit`](Self::submit) (palette line) and
     /// [`focus_prompt_submit`](Self::focus_prompt_submit) (在席 prompt) so both
     /// record history identically; folding the result into the log is
     /// [`record_response`](Self::record_response).

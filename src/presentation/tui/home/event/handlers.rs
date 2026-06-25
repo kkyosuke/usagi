@@ -517,7 +517,7 @@ fn focus_and_attach(
 
 /// Handle one key in 在席 (Focus): drive the right-pane action surface (a menu
 /// of the session's commands or a session-scoped prompt), launching `terminal` /
-/// `agent` into 没入, or back out to 統括 / 切替.
+/// `agent` into 没入, or back out to 切替.
 pub(super) fn focus_key(
     term: &Term,
     state: &mut HomeState,
@@ -528,7 +528,7 @@ pub(super) fn focus_key(
     // `Esc` peels back one step: on the "+ new" launch surface opened over live
     // panes (e.g. after `Ctrl-T` from 没入) it discards the surface and steps onto
     // the pane's tab so that pane previews again; everywhere else (a pane tab, or
-    // an idle session with no pane behind "+ new") it leaves 在席 for 統括. `Ctrl-O`
+    // an idle session with no pane behind "+ new") it leaves 在席 for 切替. `Ctrl-O`
     // opens 切替 (return here on cancel); `Ctrl-P` / `Ctrl-N` move the tab selector
     // across the session's live panes and the trailing "+ new" tab. These bind the
     // same whichever tab is selected.
@@ -767,8 +767,8 @@ fn launch_agent(
 
 /// Add a fresh `terminal` / `agent` pane to the focused session and drive it
 /// (没入). `agent` launches the AI agent CLI inside the pane; otherwise a plain
-/// shell. Shared by the three surfaces that launch a pane on command — Overview's
-/// typed `terminal` / `agent`, the 在席 menu, and the 在席 prompt — each of which
+/// shell. Shared by the three surfaces that launch a pane on command — the `:`
+/// palette's typed `terminal` / `agent`, the 在席 menu, and the 在席 prompt — each of which
 /// has already focused the target row.
 fn launch_pane(
     term: &Term,
