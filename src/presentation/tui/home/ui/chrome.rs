@@ -285,42 +285,63 @@ fn command_input_content(state: &HomeState) -> String {
     format!("{prompt} {value}")
 }
 
-/// Builds the workspace command palette overlay (`:`) as a centred modal: the
-/// `❯ <input>` command line (with a block caret), the advisory command hints,
-/// the latest command's response (capped, with an `↑ N more` line when longer),
-/// and a key-hint footer. Floats over the panes while open; `Esc` closes it.
-pub(super) fn command_palette_frame(
-    raw_height: usize,
-    raw_width: usize,
-    state: &HomeState,
-) -> Vec<String> {
-    const INNER: usize = 60;
+/// Inner (content) width of the command palette box, before the borders and the
+/// space of padding [`widgets::boxed`] adds on each side.
+const PALETTE_INNER: usize = 60;
 
-    let mut body = vec![command_input_content(state)];
+/// Rows the palette reserves for the advisory hints, always filled to this height
+/// (padded with blanks): a header plus up to [`HINT_MAX`] matches plus an
+/// `… and N more` overflow line. Reserving a fixed block keeps the box the same
+/// height as the match count changes while typing, so it never jumps (no layout
+/// shift).
+const PALETTE_HINT_ROWS: usize = HINT_MAX + 2;
 
-    // The advisory hints (matching commands, or the usage of a known command):
-    // the same lines the palette draws above its input.
-    let hints = hint_lines(state, INNER);
-    if !hints.is_empty() {
-        body.push(String::new());
-        body.extend(hints);
-    }
+/// Rows the palette reserves for the latest command's response, always filled to
+/// this height (padded with blanks): an `↑ N more` overflow line plus up to
+/// [`PALETTE_RESPONSE_MAX`] of the newest output lines. Fixed, like the hint
+/// block, so running a command does not resize the box.
+const PALETTE_RESPONSE_ROWS: usize = 6;
+
+/// Most response lines the palette shows at once; older lines are elided behind
+/// an `↑ N more` summary so the (fixed-height) response block never overflows.
+const PALETTE_RESPONSE_MAX: usize = PALETTE_RESPONSE_ROWS - 1;
+
+/// Builds the body of the workspace command palette (`:`) at a **fixed height**:
+/// the `❯ <input>` command line (with a block caret), a fixed-height block of
+/// advisory command hints, a fixed-height block of the latest command's response
+/// (capped, with an `↑ N more` line when longer), and a key-hint footer. Every
+/// region is padded to a constant number of rows so the box keeps the same size
+/// as the user types and runs commands — it never grows or shrinks.
+fn command_palette_body(state: &HomeState, inner: usize) -> Vec<String> {
+    let mut body = Vec::with_capacity(PALETTE_HINT_ROWS + PALETTE_RESPONSE_ROWS + 5);
+    body.push(command_input_content(state));
+    body.push(String::new());
+
+    // The advisory hints (matching commands, or the usage of a known command),
+    // padded to a fixed height so a changing match count never resizes the box.
+    let mut hints = hint_lines(state, inner);
+    hints.truncate(PALETTE_HINT_ROWS);
+    pad_block(&mut body, hints, PALETTE_HINT_ROWS);
+
+    body.push(String::new());
 
     // The latest command's response, capped so a long dump does not swallow the
-    // box; the overflow is summarised with an `↑ N more` line.
+    // box (the overflow is summarised with an `↑ N more` line) and padded to a
+    // fixed height so running a command never resizes the box.
     let response = state.response_lines();
+    let mut rows = Vec::new();
     if !response.is_empty() {
-        const RESPONSE_MAX: usize = 10;
-        body.push(String::new());
         let total = response.len();
-        let start = total.saturating_sub(RESPONSE_MAX);
+        let start = total.saturating_sub(PALETTE_RESPONSE_MAX);
         if start > 0 {
-            body.push(style(format!("  ↑ {start} more")).dim().to_string());
+            rows.push(style(format!("  ↑ {start} more")).dim().to_string());
         }
         for line in &response[start..] {
-            body.push(log_line(line, INNER));
+            rows.push(log_line(line, inner));
         }
     }
+    rows.truncate(PALETTE_RESPONSE_ROWS);
+    pad_block(&mut body, rows, PALETTE_RESPONSE_ROWS);
 
     body.push(String::new());
     body.push(
@@ -328,7 +349,31 @@ pub(super) fn command_palette_frame(
             .dim()
             .to_string(),
     );
-    widgets::render_modal(raw_height, raw_width, "Command", INNER, &body)
+    body
+}
+
+/// Appends `rows` to `body`, then pads with blank lines up to `height` so the
+/// region always occupies a fixed number of rows. `rows` is expected to already
+/// be no longer than `height`.
+fn pad_block(body: &mut Vec<String>, rows: Vec<String>, height: usize) {
+    let filled = rows.len();
+    body.extend(rows);
+    for _ in filled..height {
+        body.push(String::new());
+    }
+}
+
+/// Builds the workspace command palette (`:`) as a bordered box, clamped to the
+/// terminal `width`. It is a fixed-height modal (see [`command_palette_body`])
+/// that [`render_frame`](super::render_frame) floats over the live workspace with
+/// [`widgets::overlay_centered`], so the panes stay visible around it; `Esc`
+/// closes it.
+pub(super) fn command_palette_box(width: usize, state: &HomeState) -> Vec<String> {
+    // Clamp the inner width so the box never overruns a narrow terminal; `boxed`
+    // then clips each line and the title to fit.
+    let inner = PALETTE_INNER.min(width.saturating_sub(4));
+    let body = command_palette_body(state, inner);
+    widgets::boxed("Command", inner, &body)
 }
 
 /// The footer help line, aware of the current mode. It leads with a mode tag so

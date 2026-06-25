@@ -23,7 +23,7 @@ use crate::presentation::tui::widgets;
 use crate::presentation::tui::widgets::clip_to_width;
 
 use chrome::{
-    command_palette_frame, footer_line, input_line, mode_ladder, quit_confirm_frame,
+    command_palette_box, footer_line, input_line, mode_ladder, quit_confirm_frame,
     remove_modal_frame, switch_create_rows, switch_rename_rows, task_status_line, text_modal_frame,
     title_bar, update_banner,
 };
@@ -254,13 +254,12 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
     if let Some(modal) = state.text_modal() {
         return text_modal_frame(raw_height, raw_width, modal);
     }
-    // The workspace command palette (`:`) overlays the panes as a centred modal.
-    // It sits below the pure modals above (a `man` / `session list` it runs
-    // layers its text modal on top), so it is checked after them.
-    if state.command_palette_open() {
-        return command_palette_frame(raw_height, raw_width, state);
-    }
-    // The session-note editor is *not* a full-screen overlay: it renders in the
+    // The workspace command palette (`:`) is *not* a full-screen overlay: it
+    // floats as a centred box over the live workspace frame (built below) so the
+    // panes stay visible around it, rather than a black backdrop. It is composited
+    // last, after the frame and its top-right notices are assembled.
+    //
+    // The session-note editor is *not* a full-screen overlay either: it renders in the
     // right pane (see [`panes::right_pane_contents`]) so the sidebar and chrome
     // stay put and the screen never switches — matching the read-only note shown
     // there while browsing.
@@ -383,6 +382,14 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
         // two-line block (message + version) fits the gap the fixed-width title
         // name leaves.
         widgets::overlay_top_right(&mut lines, 0, width, &update_banner(&latest));
+    }
+
+    // Float the `:` command palette as a centred box over the assembled frame, so
+    // the workspace shows around it instead of a black backdrop. A fixed-height
+    // box (see [`command_palette_box`]) centred over a constant-height frame keeps
+    // the same position and size as the user types and runs commands — no jump.
+    if state.command_palette_open() {
+        widgets::overlay_centered(&mut lines, width, &command_palette_box(width, state));
     }
 
     lines
