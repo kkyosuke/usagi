@@ -15,13 +15,15 @@ use crate::presentation::tui::term_reader::TermKeyReader;
 
 pub use event::Outcome;
 
-/// The row the mascot's first line sits on in the welcome layout, for a
-/// `height`-row terminal (already normalised by the caller).
+/// The row the mascot's first line sits on, for a `height`-row terminal (already
+/// normalised by the caller). **The single source of truth for the mascot's
+/// vertical position across every top-level screen.**
 ///
-/// The startup splash plays before this screen and shows the same mascot and
-/// title; it aligns to this row so neither jumps when the welcome menu and
-/// footer appear (no layout shift). Built from the screen's own fixed [`menu`]
-/// so the two screens stay in step.
+/// The welcome menu, the Open / New / Config screens, and the startup splash all
+/// anchor their mascot to this row, so the rabbit never jumps as the user moves
+/// between them (no layout shift). The welcome screen *defines* it — the value
+/// centres the welcome body over its footer — and the others align to it; built
+/// from the screen's own fixed [`menu`] so it depends only on `height`.
 pub fn mascot_top_padding(height: usize) -> usize {
     ui::body_top_padding(height, menu::Menu::new().items(), None)
 }

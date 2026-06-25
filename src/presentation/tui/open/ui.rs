@@ -1,6 +1,7 @@
 use chrono::{DateTime, Utc};
 use console::style;
 
+use crate::presentation::tui::welcome;
 use crate::presentation::tui::widgets;
 use crate::usecase::workspace::WorkspaceOverview;
 
@@ -178,6 +179,49 @@ fn footer_lines(width: usize) -> Vec<String> {
     )]
 }
 
+/// Builds the body block — mascot, title, list, and notice slot — that
+/// [`render_frame`] centres vertically above the footer. The mascot occupies its
+/// first [`widgets::rabbit_height`] rows. Extracted so [`mascot_top`] can measure
+/// where the mascot lands without rebuilding the whole frame.
+fn body_lines(
+    width: usize,
+    block_pad: &str,
+    list: &ProjectList,
+    notice: Option<&str>,
+    now: DateTime<Utc>,
+) -> Vec<String> {
+    let mut body = header_lines(width);
+    body.push(String::new());
+    body.extend(list_lines(width, block_pad, list, now));
+    body.extend(notice_lines(block_pad, notice));
+    body
+}
+
+/// The frame row the mascot's first line occupies — the shared
+/// [`welcome::mascot_top_padding`] anchor, so the rabbit sits at the same row as
+/// on the welcome / New / Config screens and never jumps between them. It is only
+/// pulled up from that row when the body would otherwise overrun the footer on a
+/// short terminal.
+///
+/// [`render_frame`] places the mascot here, and the open→home transition lifts
+/// the rabbit off exactly this row, so it glides out from its resting place.
+pub fn mascot_top(
+    raw_height: usize,
+    raw_width: usize,
+    list: &ProjectList,
+    notice: Option<&str>,
+    now: DateTime<Utc>,
+) -> usize {
+    let (height, width) = widgets::normalize_size(raw_height, raw_width);
+    let block_pad = " ".repeat(widgets::centered_padding(width, BLOCK_WIDTH));
+    let body = body_lines(width, &block_pad, list, notice, now);
+    let footer = footer_lines(width);
+    // Anchor to the shared mascot row, but never so low that the body overflows
+    // the footer on a short terminal.
+    let available = height.saturating_sub(body.len() + footer.len());
+    welcome::mascot_top_padding(height).min(available)
+}
+
 /// Builds the full project selection frame for a raw terminal size. `now` dates
 /// each project's "last used" figure relative to the current time.
 pub fn render_frame(
@@ -190,18 +234,15 @@ pub fn render_frame(
     let (height, width) = widgets::normalize_size(raw_height, raw_width);
     let block_pad = " ".repeat(widgets::centered_padding(width, BLOCK_WIDTH));
 
-    // The body (mascot, title, list and notice slot) is centred vertically; the
-    // footer is pinned to the bottom edge of the frame.
-    let mut body = header_lines(width);
-    body.push(String::new());
-    body.extend(list_lines(width, &block_pad, list, now));
-    body.extend(notice_lines(&block_pad, notice));
+    // The body (mascot, title, list and notice slot) hangs from the shared mascot
+    // row; the footer is pinned to the bottom edge of the frame.
+    let body = body_lines(width, &block_pad, list, notice, now);
     let footer = footer_lines(width);
 
     let mut lines = Vec::with_capacity(height);
 
-    // Centre the body in the space above the footer.
-    let top_padding = height.saturating_sub(body.len() + footer.len()) / 2;
+    // Pin the mascot to the shared row so it never jumps from the welcome screen.
+    let top_padding = mascot_top(raw_height, raw_width, list, notice, now);
     for _ in 0..top_padding {
         lines.push(String::new());
     }
@@ -349,6 +390,33 @@ mod tests {
         let top_padding = frame.iter().take_while(|l| l.is_empty()).count();
         assert!(top_padding > 0);
         assert!(!frame[top_padding].is_empty());
+    }
+
+    #[test]
+    fn mascot_top_points_at_the_rabbit_row_in_the_rendered_frame() {
+        // The reported row is exactly where `render_frame` draws the mascot's first
+        // line, so the transition lifts the rabbit off without a jump.
+        let list = list_with(&["alpha"]);
+        for height in [24usize, 40] {
+            let frame = render_frame(height, 80, &list, None, now());
+            let top = mascot_top(height, 80, &list, None, now());
+            // The mascot's first row (the ears) lands on the reported row...
+            assert!(console::strip_ansi_codes(&frame[top]).contains("(\\(\\"));
+            // ...and the row above it is blank (the centring padding).
+            assert!(frame[top - 1].is_empty());
+        }
+    }
+
+    #[test]
+    fn mascot_anchors_to_the_shared_welcome_row_so_it_never_jumps() {
+        // The mascot sits on exactly the row the welcome screen places it, so the
+        // rabbit does not shift (no CLS) when moving between the screens.
+        let list = list_with(&["alpha", "beta"]);
+        for height in [24usize, 40, 50] {
+            let frame = render_frame(height, 80, &list, None, now());
+            let row = welcome::mascot_top_padding(height);
+            assert!(console::strip_ansi_codes(&frame[row]).contains("(\\(\\"));
+        }
     }
 
     #[test]

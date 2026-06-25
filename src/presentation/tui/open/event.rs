@@ -73,6 +73,10 @@ pub fn event_loop(
                 // Clone the selection so the immutable borrow is dropped before
                 // promoting it to the top of the list on return.
                 if let Some(workspace) = list.selected().cloned() {
+                    // Opening the workspace is wired by the caller: it hides the
+                    // list, plays the mascot animation while loading the workspace
+                    // off-thread, then shows the home screen (切替). See
+                    // [`super::run`].
                     match open_home(term, &workspace)? {
                         // The home screen drew over the list; force a full
                         // repaint of it on the next pass. The just-opened
