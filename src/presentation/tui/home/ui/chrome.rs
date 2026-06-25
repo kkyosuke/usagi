@@ -61,10 +61,7 @@ pub(super) fn update_banner(latest: &Version) -> Vec<String> {
     // art: the title bar pads the active session name to a fixed width and so
     // reaches far enough right that only a compact block fits in the gap on the
     // header rows where this is anchored.
-    let rows = [
-        "アップデートがあるぴょん".to_string(),
-        format!("v{latest}"),
-    ];
+    let rows = ["アップデートがあるぴょん".to_string(), format!("v{latest}")];
     let block_w = rows
         .iter()
         .map(|row| console::measure_text_width(row))
