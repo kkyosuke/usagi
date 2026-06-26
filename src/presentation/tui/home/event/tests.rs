@@ -2426,6 +2426,76 @@ fn run_recording_reorder(
     (moves.into_inner(), outcome)
 }
 
+/// Run the loop against a monitor reporting `waiting` sessions, recording the
+/// directory the preview is asked for each frame (the cursor row's). Lets a test
+/// observe which session a row resolves to after the waiting-first sort reorders
+/// the pane.
+fn run_recording_previews(
+    keys: Vec<io::Result<Key>>,
+    state: HomeState,
+    waiting: Vec<PathBuf>,
+) -> Vec<PathBuf> {
+    let term = Term::stdout();
+    let mut reader = ScriptedReader::new(keys);
+    let monitor = MonitorHandle::with_waiting(waiting);
+    let previews = RefCell::new(Vec::new());
+    let mut persist: fn(&str) = noop_persist;
+    let mut create: fn(&str) -> SessionOutcome = noop_create;
+    let mut remove: fn(&str, bool) -> SessionOutcome = noop_remove;
+    let mut open: fn(&mut HomeState, &Path, bool, bool) -> Result<PaneExit> = noop_open;
+    let mut config: fn(&Term) -> Result<Option<ConfigReload>> = noop_config;
+    let mut preview = |dir: &Path, _: Sidebar| -> Option<TerminalView> {
+        previews.borrow_mut().push(dir.to_path_buf());
+        None
+    };
+    event_loop_compat(
+        &term,
+        &mut reader,
+        state,
+        Path::new("/ws"),
+        &monitor,
+        &UpdateHandle::new(),
+        &OneShot::<bool>::new(),
+        &mut persist,
+        &mut create,
+        &mut (noop_rename as fn(&str, &str) -> SessionOutcome),
+        &mut (noop_set_note as fn(&str, &str) -> SessionOutcome),
+        &mut remove,
+        &mut (no_branches as fn() -> Vec<String>),
+        &mut open,
+        &mut config,
+        &mut preview,
+        &mut (noop_tab_op as fn(&Path, Option<TabNav>) -> (Vec<String>, usize)),
+        &mut (noop_close as fn(&mut HomeState, &Path)),
+        &mut (noop_reorder as fn(&str, bool) -> SessionReorder),
+    )
+    .unwrap();
+    previews.into_inner()
+}
+
+#[test]
+fn switch_s_lifts_the_waiting_session_to_the_top_of_the_pane() {
+    // `feat` (the second session) is waiting for input. `s` turns on the
+    // waiting-first sort, lifting `feat` above `main`, so the first row the cursor
+    // steps onto — and previews — is now `feat` rather than `main`.
+    let state = state_with_sessions(&["main", "feat"]);
+    let keys = vec![
+        Ok(Key::Char('s')), // sort on: feat (waiting) rises to the top row
+        Ok(Key::ArrowDown), // root -> first row (now feat)
+        Ok(Key::CtrlC),
+    ];
+    let previews =
+        run_recording_previews(keys, state, vec![PathBuf::from("/ws/.usagi/sessions/feat")]);
+    assert!(
+        previews.iter().any(|d| d.ends_with(".usagi/sessions/feat")),
+        "the waiting session sits at the top, so the cursor's first stop previews it"
+    );
+    assert!(
+        !previews.iter().any(|d| d.ends_with(".usagi/sessions/main")),
+        "main has dropped below feat, so the cursor never reaches it"
+    );
+}
+
 #[test]
 fn switch_reorder_moves_the_selected_session_up_and_down() {
     // J moves the selected session down, K moves it up. With a Stationary
