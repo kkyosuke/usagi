@@ -1275,10 +1275,11 @@ fn close_typed_in_overview_on_root_is_refused() {
 }
 
 #[test]
-fn focus_close_command_force_removes_the_focused_session_then_enters_switch() {
+fn focus_close_command_removes_the_focused_session_then_enters_switch() {
     // 在席 the `feat` session, then run `close` from the prompt: it removes the
-    // focused session forcefully (like `session remove feat --force`). Because the
-    // focused session is now gone, the screen drops into 切替 (Switch) to pick the
+    // focused session like `session remove feat` (no `--force`, so a dirty
+    // worktree would be refused rather than discarded). Because the focused
+    // session is now gone, the screen drops into 切替 (Switch) to pick the
     // next one. We prove the landing mode by pressing `c` — a Switch-only action
     // that opens the inline create input and consults the branch-name callback;
     // in 統括 the same key would just type a character and never call it.
@@ -1333,7 +1334,8 @@ fn focus_close_command_force_removes_the_focused_session_then_enters_switch() {
     )
     .unwrap();
     assert!(matches!(outcome, Outcome::Quit));
-    assert_eq!(removed, vec![("feat".to_string(), true)]);
+    // Dispatched without force (`false`): a dirty session is refused, not discarded.
+    assert_eq!(removed, vec![("feat".to_string(), false)]);
     assert_eq!(
         branches_called, 1,
         "`c` after close began inline create, so the screen is in 切替 (Switch)"
@@ -1341,11 +1343,11 @@ fn focus_close_command_force_removes_the_focused_session_then_enters_switch() {
 }
 
 #[test]
-fn focus_menu_close_force_removes_the_focused_session_then_enters_switch() {
+fn focus_menu_close_removes_the_focused_session_then_enters_switch() {
     // The 在席 menu lists `close` last; ArrowUp from the top wraps to it. Enter
-    // removes the focused session forcefully, then drops into 切替 (Switch) — the
-    // `c` keypress that follows opens the inline create input (a Switch-only
-    // action), proving the landing mode.
+    // removes the focused session like `session remove feat` (no `--force`), then
+    // drops into 切替 (Switch) — the `c` keypress that follows opens the inline
+    // create input (a Switch-only action), proving the landing mode.
     let mut keys = cmd("session switch feat");
     keys.push(Ok(Key::Enter)); // -> Focus (feat), menu UI
     keys.push(Ok(Key::ArrowUp)); // terminal -> wrap to `close`
@@ -1396,7 +1398,8 @@ fn focus_menu_close_force_removes_the_focused_session_then_enters_switch() {
     )
     .unwrap();
     assert!(matches!(outcome, Outcome::Quit));
-    assert_eq!(removed, vec![("feat".to_string(), true)]);
+    // Dispatched without force (`false`): a dirty session is refused, not discarded.
+    assert_eq!(removed, vec![("feat".to_string(), false)]);
     assert_eq!(
         branches_called, 1,
         "`c` after close began inline create, so the screen is in 切替 (Switch)"

@@ -637,11 +637,17 @@ pub(super) fn focus_key(
     Flow::Continue
 }
 
-/// Close the focused session forcefully — the `close` command's effect.
-/// Dispatches a background removal like `session remove <name> --force`
-/// (discarding any uncommitted changes) and, since the user asked to close this
-/// session, leaves 在席 for the base 切替 (Switch) at once so they can pick the
-/// next one (`Esc` is inert there); the removal's result is logged and the list
+/// Close the focused session — the `close` command's effect. Dispatches a
+/// background removal like `session remove <name>` (no `--force`): a clean
+/// session is removed, but one with **uncommitted changes is refused** and the
+/// task logs how to discard them (`session remove <name> --force`), so a single
+/// `close` can never silently throw away unsaved work. This matches the CLI's
+/// `session remove` default and the quit-confirm modal's intent to protect
+/// running work, rather than the old unconditional `--force`.
+///
+/// Either way the user asked to leave this session, so 在席 yields to the base
+/// 切替 (Switch) at once to pick the next one (`Esc` is inert there); the
+/// removal's result — success or the dirty refusal — is logged and the list
 /// refreshed when the background task finishes. The root row is the workspace
 /// itself, not a session, so closing it is refused outright and stays in 在席.
 fn close_focused_session(state: &mut HomeState, wiring: &mut Wiring) {
@@ -653,7 +659,9 @@ fn close_focused_session(state: &mut HomeState, wiring: &mut Wiring) {
         state.log_error("the root row is the workspace and cannot be closed");
         return;
     }
-    (wiring.dispatch_remove)(&name, true);
+    // `false`: do not force. A dirty worktree is refused (the task logs the
+    // `--force` hint) instead of being discarded without confirmation.
+    (wiring.dispatch_remove)(&name, false);
     state.enter_switch(ReturnMode::Base);
 }
 
