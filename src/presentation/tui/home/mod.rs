@@ -419,7 +419,7 @@ pub fn run(term: &Term, workspace: &Workspace, preload: Preload) -> Result<Outco
     // Check the project's git remote for a newer release than this build, on a
     // background thread so a slow or unreachable network never delays the screen.
     // The result is written to the handle the event loop reads each redraw; when
-    // a newer version is published it surfaces the top-right "update available"
+    // a newer version is published the sidebar mascot speaks an "update available"
     // notice. Any failure (offline, git missing, already up to date) simply
     // leaves the handle empty and the notice hidden.
     let update = update::UpdateHandle::new();

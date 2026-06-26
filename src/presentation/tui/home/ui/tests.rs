@@ -1648,6 +1648,30 @@ fn render_frame_rests_the_mascot_in_the_bottom_left_with_a_mode_face() {
 }
 
 #[test]
+fn render_frame_keeps_a_blank_row_between_the_list_and_the_resting_mascot() {
+    // A short list leaves the mascot resting at the bottom with at least one blank
+    // sidebar row above its ears, so the art reads apart from the session list
+    // rather than as the next entry.
+    let state = state_with(vec![worktree(Some("main"), true, BranchStatus::Pushed)]);
+    let lines = render_frame(24, 80, &state);
+    // The ears row (the mascot's top row); its left sidebar cell carries the art.
+    let ears = lines
+        .iter()
+        .map(|l| console::strip_ansi_codes(l).into_owned())
+        .position(|l| l.split(" │ ").next().unwrap_or("").contains("(\\(\\"))
+        .expect("the resting mascot is drawn");
+    let left_cell_above = console::strip_ansi_codes(&lines[ears - 1])
+        .split(" │ ")
+        .next()
+        .unwrap_or("")
+        .to_string();
+    assert!(
+        left_cell_above.trim().is_empty(),
+        "a blank sidebar row separates the list from the mascot: {left_cell_above:?}"
+    );
+}
+
+#[test]
 fn render_frame_hides_the_mascot_when_the_session_list_fills_the_sidebar() {
     // A list long enough to reach the bottom rows takes precedence: the mascot
     // hides rather than overlapping the sessions.
@@ -2028,28 +2052,32 @@ fn command_palette_frame_is_a_bordered_box() {
 // --- update-available notice -------------------------------------------
 
 #[test]
-fn update_banner_shows_the_message_and_the_latest_version() {
-    let latest = crate::domain::version::Version::parse("0.2.0").unwrap();
-    let banner = update_banner(&latest);
-    // メッセージ行 ＋ バージョン行の 2 行。
-    assert_eq!(banner.len(), 2);
-    let plain = stripped(&banner);
-    assert!(plain.contains("アップデートがあるぴょん"));
-    assert!(plain.contains("v0.2.0"));
-}
-
-#[test]
-fn render_frame_shows_the_update_notice_when_a_newer_release_exists() {
+fn render_frame_speaks_the_update_notice_from_the_sidebar_rabbit() {
+    // A newer release makes the resting sidebar mascot speak the notice (the
+    // message and the new version) from a bubble above it — no top-right banner.
     let mut state = state_with(Vec::new());
     state.set_update(crate::domain::version::Version::parse("9.9.9"));
     let joined = stripped(&render_frame(24, 100, &state));
     assert!(joined.contains("アップデートがあるぴょん"));
     assert!(joined.contains("v9.9.9"));
+    // The bubble's tail points down to the mascot, so the news reads as spoken.
+    assert!(joined.contains('┬'));
 }
 
 #[test]
 fn render_frame_hides_the_update_notice_by_default() {
     let state = state_with(Vec::new());
+    let joined = stripped(&render_frame(24, 100, &state));
+    assert!(!joined.contains("アップデートがあるぴょん"));
+}
+
+#[test]
+fn render_frame_hides_the_update_notice_when_the_sidebar_is_collapsed() {
+    // The notice lives on the sidebar mascot, so collapsing the sidebar to the
+    // rail (which shows no mascot) hides it rather than relocating it.
+    let mut state = state_with(Vec::new());
+    state.set_update(crate::domain::version::Version::parse("9.9.9"));
+    state.set_sidebar(Sidebar::Rail);
     let joined = stripped(&render_frame(24, 100, &state));
     assert!(!joined.contains("アップデートがあるぴょん"));
 }
@@ -2166,10 +2194,11 @@ fn task_status_line_is_empty_without_rows() {
 }
 
 #[test]
-fn render_frame_shows_the_task_status_over_the_update_notice() {
+fn render_frame_shows_the_task_status_alongside_the_spoken_update() {
     use super::super::tasks::{TaskMark, TaskRow};
     let mut state = state_with(Vec::new());
-    // Even with an update available, in-flight tasks take the corner.
+    // The task status (top-right corner) and the update notice (sidebar mascot)
+    // now live in different places, so both show at once.
     state.set_update(crate::domain::version::Version::parse("9.9.9"));
     state.set_tasks(vec![TaskRow {
         label: "作成中… main".to_string(),
@@ -2177,7 +2206,7 @@ fn render_frame_shows_the_task_status_over_the_update_notice() {
     }]);
     let joined = stripped(&render_frame(24, 100, &state));
     assert!(joined.contains("作成中… main"));
-    assert!(!joined.contains("アップデートがあるぴょん"));
+    assert!(joined.contains("アップデートがあるぴょん"));
 }
 
 #[test]
@@ -2204,9 +2233,10 @@ fn render_frame_shows_the_task_status_on_the_header_over_a_live_terminal() {
 }
 
 #[test]
-fn render_frame_rides_the_update_notice_on_the_header_over_a_live_terminal() {
-    // The update notice now anchors to the header rows (like the task status),
-    // so it shows even over a live terminal without overdrawing the shell output.
+fn render_frame_speaks_the_update_from_the_sidebar_over_a_live_terminal() {
+    // The update notice lives on the sidebar mascot, so it shows in the left pane
+    // even while a live terminal fills the right pane — the shell output is never
+    // overdrawn, and the notice stays off the header rows.
     let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Pushed)]);
     state.enter_focus(1);
     state.show_attached();
@@ -2217,9 +2247,9 @@ fn render_frame_rides_the_update_notice_on_the_header_over_a_live_terminal() {
     assert!(joined.contains("アップデートがあるぴょん"));
     // The shell output stays intact in the body.
     assert!(joined.contains("$ echo hi"));
-    // The notice rides the header rows (rows 0-1), not the body where the shell is.
+    // The notice is spoken from the sidebar, not the header rows (rows 0-1).
     let header = stripped(&frame[0..2]);
-    assert!(header.contains("アップデートがあるぴょん"));
+    assert!(!header.contains("アップデートがあるぴょん"));
 }
 
 #[test]
@@ -2237,12 +2267,13 @@ fn render_frame_keeps_the_loading_rabbit_over_a_live_terminal() {
 }
 
 #[test]
-fn update_notice_is_skipped_when_the_terminal_is_too_narrow() {
-    // The banner block is wider than this terminal, so it is dropped rather than
-    // wrapping or clobbering the chrome.
+fn update_notice_is_skipped_when_the_sidebar_is_too_narrow_for_the_mascot() {
+    // The notice rides the sidebar mascot, which is dropped when the sidebar is
+    // too narrow to hold the art — so the notice goes with it rather than
+    // clobbering the cramped chrome.
     let mut state = state_with(Vec::new());
     state.set_update(crate::domain::version::Version::parse("9.9.9"));
-    let joined = stripped(&render_frame(24, 20, &state));
+    let joined = stripped(&render_frame(24, 11, &state));
     assert!(!joined.contains("アップデートがあるぴょん"));
 }
 
@@ -2257,15 +2288,15 @@ fn render_frame_shows_the_loading_rabbit_while_an_action_runs() {
 }
 
 #[test]
-fn loading_rabbit_takes_the_corner_over_the_update_notice() {
-    // With both a pending update and a running action, the loading rabbit wins
-    // the top-right corner so the in-flight work is what the user sees.
+fn loading_rabbit_takes_the_corner_while_the_sidebar_speaks_the_update() {
+    // The loading rabbit owns the top-right corner during a blocking action; the
+    // update notice lives on the sidebar mascot, so both show at once.
     let mut state = state_with(Vec::new());
     state.set_update(crate::domain::version::Version::parse("9.9.9"));
     state.step_loading("作成中…");
     let joined = stripped(&render_frame(24, 100, &state));
     assert!(joined.contains("作成中…"));
-    assert!(!joined.contains("アップデートがあるぴょん"));
+    assert!(joined.contains("アップデートがあるぴょん"));
 }
 
 #[test]
