@@ -1539,9 +1539,10 @@ impl HomeState {
 
     /// Tab-complete the command word, listing candidates when ambiguous.
     pub fn complete(&mut self) {
-        let completion = self
-            .registry
-            .complete(self.input.value(), self.command_scope());
+        let session_names: Vec<&str> = self.sessions.iter().map(|s| s.name.as_str()).collect();
+        let completion =
+            self.registry
+                .complete_with(self.input.value(), self.command_scope(), &session_names);
         self.input.set_value(completion.input);
         if !completion.candidates.is_empty() {
             self.log

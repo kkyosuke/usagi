@@ -181,6 +181,10 @@ pub struct CompletionContext<'a> {
     /// completes its `[command]` argument against. Aliases are not offered, to
     /// match command-word completion.
     pub command_names: &'a [&'a str],
+    /// The workspace's session names, in display order — what `session
+    /// switch`/`remove` complete their `<name>` argument against. Empty when the
+    /// caller has no session data to offer.
+    pub session_names: &'a [&'a str],
 }
 
 /// Everything a command may read while running, beyond its own argument string.
