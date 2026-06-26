@@ -25,7 +25,7 @@ use crate::presentation::tui::widgets::clip_to_width;
 use chrome::{
     command_palette_body, footer_line, input_line, mode_ladder, quit_confirm_frame,
     remove_modal_frame, switch_create_rows, switch_rename_rows, task_status_line, text_modal_body,
-    title_bar, update_banner, PALETTE_INNER, TEXT_MODAL_INNER,
+    title_bar, PALETTE_INNER, TEXT_MODAL_INNER,
 };
 use panes::{left_pane, right_pane_contents};
 // The embedded terminal pane (没入) maps a click to the tab under it through this.
@@ -336,11 +336,22 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
     // mode — browsing in 切替, attentive in 在席, heads-down in 没入 — so the
     // rabbit reflects what the user is doing. A blank row always sits between the
     // list and the rabbit so the art reads as its own thing rather than the next
-    // list entry. With a list (or an inline create / rename input) long enough to
-    // reach those rows, or a sidebar collapsed to the narrow rail / too narrow to
-    // hold the art, it politely hides rather than overlapping the list.
+    // list entry. When the background update check has found a newer release, the
+    // rabbit *speaks* the notice from a bubble above it (the message and the new
+    // version), so the news comes from the mascot rather than a top-right banner.
+    // With a list (or an inline create / rename input) long enough to reach those
+    // rows, or a sidebar collapsed to the narrow rail / too narrow to hold the
+    // art, it politely hides rather than overlapping the list.
     if sidebar == Sidebar::Full && left_w >= widgets::workspace_rabbit_width() {
-        let rabbit = widgets::workspace_rabbit(rabbit_mood(state.mode()));
+        let mood = rabbit_mood(state.mode());
+        let rabbit = match state.update() {
+            Some(latest) => widgets::workspace_rabbit_speaking(
+                mood,
+                &["アップデートがあるぴょん".to_string(), format!("v{latest}")],
+                left_w,
+            ),
+            None => widgets::workspace_rabbit(mood),
+        };
         // Reserve one blank row above the art on top of the rabbit's own rows.
         let reserved = rabbit.len() + 1;
         if body_rows >= reserved && left.len() <= body_rows - reserved {
@@ -377,11 +388,10 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
     // Overlay the top-right corner, in priority order: a momentary blocking
     // action (terminal / agent launch) shows the loading rabbit; otherwise any
     // in-flight background session work (create / remove) shows the task status
-    // line; otherwise the "update available" notice shows when the background
-    // check has found a newer release than this build. The loading rabbit anchors
-    // to the top of the right pane (the rows below the title bar and mode ladder);
-    // the update notice rides the header rows (like the task status block), since
-    // the 切替 preview now occupies the right pane and would otherwise collide.
+    // line. The loading rabbit anchors to the top of the right pane (the rows
+    // below the title bar and mode ladder); the task status rides the header rows.
+    // The "update available" notice is no longer a corner overlay — the sidebar
+    // mascot speaks it (above) instead.
     if let Some(loading) = state.loading() {
         // The transient launch indicator is deliberate and short-lived, so it
         // takes the corner even over a live pane.
@@ -404,14 +414,6 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
             width,
             &task_status_line(state.tasks(), width),
         );
-    } else if let Some(latest) = state.update() {
-        // The update notice rides the two header rows (the title bar and mode
-        // ladder, whose centred content leaves the right columns free), like the
-        // task status block, so it never collides with the right pane's preview /
-        // menu / live terminal — which the 切替 default now occupies. The compact
-        // two-line block (message + version) fits the gap the fixed-width title
-        // name leaves.
-        widgets::overlay_top_right(&mut lines, 0, width, &update_banner(&latest));
     }
 
     // Float the `:` command palette as a centred box over the assembled frame, so

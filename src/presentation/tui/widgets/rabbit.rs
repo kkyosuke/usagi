@@ -155,6 +155,97 @@ pub fn workspace_rabbit(mood: RabbitMood) -> Vec<String> {
         .collect()
 }
 
+/// Columns the speech bubble spends on chrome around its text: a rounded border
+/// and one space of padding on each side.
+const SPEECH_CHROME: usize = 4;
+
+/// The resting workspace mascot *speaking* `speech`: a yellow speech bubble
+/// carrying those lines sits above the [`workspace_rabbit`], with a tail pointing
+/// down to the usagi's head — so the rabbit reads as saying them. This is where
+/// the home screen surfaces the "update available" notice (the message and the
+/// new version), moved off the top-right corner so the news comes from the
+/// mascot.
+///
+/// `speech`'s lines are wrapped to fit `max_width` (the sidebar width), so a long
+/// message flows onto more bubble rows rather than overrunning the pane; the
+/// bubble is painted the update accent (yellow-bold) while the rabbit keeps its
+/// `mood` colour, separating the alert from the mascot. When `max_width` leaves
+/// no room for even a one-column bubble, or `speech` is empty, it falls back to
+/// the silent [`workspace_rabbit`]. Every row is padded to a common block width
+/// so the block tiles as a rectangle wherever it is placed.
+pub fn workspace_rabbit_speaking(
+    mood: RabbitMood,
+    speech: &[String],
+    max_width: usize,
+) -> Vec<String> {
+    let inner = max_width.saturating_sub(SPEECH_CHROME);
+    // Wrap every speech line to the bubble's inner width, flattening to the
+    // bubble's content rows.
+    let content: Vec<String> = speech
+        .iter()
+        .flat_map(|line| super::wrap_to_width(line, inner))
+        .collect();
+    if content.is_empty() {
+        // Too narrow for a bubble (or nothing to say): rest silently instead.
+        return workspace_rabbit(mood);
+    }
+    let content_w = content
+        .iter()
+        .map(|row| console::measure_text_width(row))
+        .max()
+        .unwrap_or(0);
+
+    // The bubble is the update accent (yellow-bold); the rabbit keeps its mood
+    // colour, so the alert and the mascot stay visually distinct.
+    let bubble = Style::new().yellow().bold();
+    // Columns between the corner glyphs: the content area plus a padding space on
+    // each side.
+    let span = content_w + 2;
+
+    let mut rows: Vec<String> = Vec::with_capacity(content.len() + 1 + RABBIT.len());
+    rows.push(
+        bubble
+            .apply_to(format!("╭{}╮", "─".repeat(span)))
+            .to_string(),
+    );
+    for line in &content {
+        let pad = content_w.saturating_sub(console::measure_text_width(line));
+        rows.push(
+            bubble
+                .apply_to(format!("│ {line}{} │", " ".repeat(pad)))
+                .to_string(),
+        );
+    }
+    // The bottom border carries the speech tail (`┬`) one column in, so it lands
+    // over the mascot's ears ([`RABBIT`] row 0 begins at column 2) and the bubble
+    // reads as coming from the usagi just below.
+    let mut bottom = String::from("╰");
+    for i in 0..span {
+        bottom.push(if i == 1 { '┬' } else { '─' });
+    }
+    bottom.push('╯');
+    rows.push(bubble.apply_to(bottom).to_string());
+
+    // The resting mascot below, in its mood colour — only the face row changes.
+    let (face, paint) = mood.face_and_style();
+    for art in [RABBIT[0], face, RABBIT[2]] {
+        rows.push(paint.apply_to(art).to_string());
+    }
+
+    // Pad every row to the widest so the block tiles as a rectangle.
+    let block_w = rows
+        .iter()
+        .map(|row| console::measure_text_width(row))
+        .max()
+        .unwrap_or(0);
+    rows.into_iter()
+        .map(|row| {
+            let pad = block_w.saturating_sub(console::measure_text_width(&row));
+            format!("{row}{}", " ".repeat(pad))
+        })
+        .collect()
+}
+
 /// The display width of the [`workspace_rabbit`] block, so a caller can check the
 /// sidebar is wide enough to hold it before placing it (and skip it otherwise,
 /// rather than overrunning a narrow pane).
@@ -468,6 +559,67 @@ mod tests {
             assert!(lines.iter().all(|l| console::measure_text_width(l) == w0));
             assert_eq!(w0, workspace_rabbit_width());
         }
+    }
+
+    #[test]
+    fn workspace_rabbit_speaking_puts_the_speech_in_a_bubble_above_the_mascot() {
+        let lines = workspace_rabbit_speaking(
+            RabbitMood::Browsing,
+            &["アップデートがあるぴょん".to_string(), "v0.2.0".to_string()],
+            40,
+        );
+        let plain: Vec<String> = lines
+            .iter()
+            .map(|l| console::strip_ansi_codes(l).into_owned())
+            .collect();
+        let joined = plain.join("\n");
+        // The bubble carries both speech lines, framed and tailed toward the rabbit.
+        assert!(joined.contains("アップデートがあるぴょん"));
+        assert!(joined.contains("v0.2.0"));
+        assert!(plain[0].starts_with('╭') && plain[0].contains('╮'));
+        assert!(
+            joined.contains('┬'),
+            "the bubble has a tail toward the rabbit"
+        );
+        // The mascot rests below the bubble: its ears and feet are the last rows.
+        assert!(plain[plain.len() - 3].contains("(\\(\\"));
+        assert!(plain.last().unwrap().contains("o(_(\")(\")"));
+    }
+
+    #[test]
+    fn workspace_rabbit_speaking_rows_share_one_block_width() {
+        // Every row pads to the widest, so the block tiles as a rectangle wherever
+        // it is dropped into the sidebar.
+        let lines = workspace_rabbit_speaking(
+            RabbitMood::Attentive,
+            &["アップデートがあるぴょん".to_string(), "v1.2.3".to_string()],
+            40,
+        );
+        let w0 = console::measure_text_width(&lines[0]);
+        assert!(lines.iter().all(|l| console::measure_text_width(l) == w0));
+    }
+
+    #[test]
+    fn workspace_rabbit_speaking_wraps_a_long_message_to_fit_a_narrow_sidebar() {
+        // A bubble narrower than the message wraps it onto more rows rather than
+        // overrunning, and never exceeds the sidebar width.
+        let max = 16;
+        let lines = workspace_rabbit_speaking(
+            RabbitMood::Working,
+            &["アップデートがあるぴょん".to_string(), "v0.2.0".to_string()],
+            max,
+        );
+        assert!(lines.iter().all(|l| console::measure_text_width(l) <= max));
+        // More rows than the un-wrapped block (top + 2 speech + bottom + 3 rabbit).
+        assert!(lines.len() > 6);
+    }
+
+    #[test]
+    fn workspace_rabbit_speaking_falls_back_to_the_silent_mascot_when_too_narrow() {
+        // No room for even a one-column bubble: it rests silently, exactly like
+        // `workspace_rabbit`, rather than drawing a broken frame.
+        let lines = workspace_rabbit_speaking(RabbitMood::Browsing, &["x".to_string()], 2);
+        assert_eq!(lines, workspace_rabbit(RabbitMood::Browsing));
     }
 
     #[test]

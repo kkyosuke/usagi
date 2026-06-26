@@ -224,11 +224,12 @@ pub struct HomeState {
     issues: Vec<Issue>,
     /// The latest released version, set once the background update check finds a
     /// release newer than this build. While `None` (the check is pending, or the
-    /// build is up to date) the top-right "update available" notice is hidden.
+    /// build is up to date) the sidebar mascot's "update available" notice is
+    /// hidden.
     update: Option<Version>,
     /// The transient "working…" indicator, set while a blocking action runs
     /// (session create / bulk remove / terminal launch). While `Some` the
-    /// top-right corner shows the loading rabbit instead of the update notice.
+    /// top-right corner shows the loading rabbit.
     loading: Option<LoadingIndicator>,
     /// The rows of the background-task panel (session create / remove running off
     /// the event-loop thread), refreshed each frame from the shared task handle.
@@ -751,7 +752,8 @@ impl HomeState {
     }
 
     /// The latest released version, when it is newer than this build — the
-    /// top-right "update available" notice is shown only while this is `Some`.
+    /// sidebar mascot speaks the "update available" notice only while this is
+    /// `Some`.
     pub fn update(&self) -> Option<Version> {
         self.update
     }
