@@ -105,6 +105,20 @@ pub enum SetupError {
     ModelPullFailed { model: String },
 }
 
+impl SetupError {
+    /// A short human message describing this provisioning failure, suitable for
+    /// surfacing in the UI. The install / model-pull flows show it when their
+    /// background worker finishes unsuccessfully.
+    pub fn user_message(&self) -> String {
+        match self {
+            SetupError::OllamaUnavailable { manual }
+            | SetupError::OllamaInstallFailed { manual, .. } => manual.clone(),
+            SetupError::ServerStartFailed => server_start_failed_message(),
+            SetupError::ModelPullFailed { model } => format!("could not pull `{model}`"),
+        }
+    }
+}
+
 /// Ensure the local LLM is ready to use for `model`: install `ollama` if it is
 /// missing, start its server if it is not already running, then pull the model
 /// if it is not already present.
@@ -698,6 +712,41 @@ mod tests {
     #[test]
     fn server_start_failed_message_mentions_ollama_serve() {
         assert!(server_start_failed_message().contains("ollama serve"));
+    }
+
+    #[test]
+    fn setup_error_user_message_relays_the_manual_install_guidance() {
+        let manual = "brew install ollama".to_string();
+        assert_eq!(
+            SetupError::OllamaUnavailable {
+                manual: manual.clone()
+            }
+            .user_message(),
+            manual
+        );
+        assert_eq!(
+            SetupError::OllamaInstallFailed {
+                manager: "brew",
+                manual: manual.clone(),
+            }
+            .user_message(),
+            manual
+        );
+    }
+
+    #[test]
+    fn setup_error_user_message_for_server_and_model_failures() {
+        assert_eq!(
+            SetupError::ServerStartFailed.user_message(),
+            server_start_failed_message()
+        );
+        assert_eq!(
+            SetupError::ModelPullFailed {
+                model: "llama3".to_string()
+            }
+            .user_message(),
+            "could not pull `llama3`"
+        );
     }
 
     // --- runtime-only / model-only provisioning ----------------------------
