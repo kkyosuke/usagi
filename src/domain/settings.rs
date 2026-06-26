@@ -158,16 +158,23 @@ impl AgentCli {
         }
     }
 
-    /// Resolve a user-typed agent name to its variant, accepting both the launch
-    /// [`command`](Self::command) (`claude` / `codex` / `codex-fugu` / `gemini`)
-    /// and the [`display_name`](Self::display_name) (`sakana.ai` for codex-fugu),
-    /// case-insensitively. Used by the 在席 prompt's `agent <name>` to pick which
-    /// CLI to launch. Returns `None` for an unrecognised name.
+    /// Resolve a user-typed agent name to its variant, accepting the launch
+    /// [`command`](Self::command) (`claude` / `codex` / `codex-fugu` / `gemini`),
+    /// the [`display_name`](Self::display_name) (`sakana.ai` for codex-fugu), and
+    /// the on-disk serde label (`codex_fugu`) that `usagi config` prints — all
+    /// case-insensitively. Used by the 在席 prompt's `agent <name>` and
+    /// `clean --agent`. Returns `None` for an unrecognised name.
+    ///
+    /// `-` and `_` are treated as the same separator so the serde label resolves:
+    /// `codex_fugu` (what `config` shows) and `codex-fugu` (the launch command)
+    /// differ only there, and a user copying the displayed name would otherwise
+    /// hit "unknown agent CLI".
     pub fn from_name(name: &str) -> Option<AgentCli> {
-        let name = name.trim().to_ascii_lowercase();
+        let normalize = |s: &str| s.trim().to_ascii_lowercase().replace('_', "-");
+        let name = normalize(name);
         AgentCli::ALL
             .into_iter()
-            .find(|cli| cli.command() == name || cli.display_name().to_ascii_lowercase() == name)
+            .find(|cli| normalize(cli.command()) == name || normalize(cli.display_name()) == name)
     }
 }
 
@@ -513,6 +520,14 @@ mod tests {
         assert_eq!(AgentCli::from_name("gemini"), Some(AgentCli::Gemini));
         // The display name resolves too — `sakana.ai` is codex-fugu's label.
         assert_eq!(AgentCli::from_name("sakana.ai"), Some(AgentCli::CodexFugu));
+        // The on-disk serde label (`codex_fugu`) that `usagi config` prints
+        // resolves as well — `-`/`_` are the same separator — so copying what
+        // `config` shows into `agent` / `clean --agent` works.
+        assert_eq!(AgentCli::from_name("codex_fugu"), Some(AgentCli::CodexFugu));
+        assert_eq!(
+            AgentCli::from_name(" Codex_Fugu "),
+            Some(AgentCli::CodexFugu)
+        );
         // Case and surrounding whitespace are ignored.
         assert_eq!(AgentCli::from_name("  Claude "), Some(AgentCli::Claude));
         assert_eq!(AgentCli::from_name("SAKANA.AI"), Some(AgentCli::CodexFugu));
