@@ -14,16 +14,16 @@
 #   - src/main\.rs            : バイナリの合成ルート（clap ディスパッチと実 IO の注入）。
 #   - infrastructure/pty\.rs  : 擬似端末・スレッドの実 IO。
 #   - infrastructure/release\.rs : `git ls-remote` のネットワーク IO とタイムアウト監視。
-#   - tui/term_reader\.rs     : 実端末からのキー入力（live TTY が必要）。
-#   - tui/app/mod\.rs / tui/home/mod\.rs / home/terminal_pane\.rs / home/terminal_pool\.rs
+#   - tui/io/term_reader\.rs  : 実端末からのキー入力（live TTY が必要）。
+#   - tui/app/mod\.rs / tui/home/mod\.rs / home/terminal/pane\.rs / home/terminal/pool\.rs
 #     / tui/open/mod\.rs / tui/config/mod\.rs / tui/config/provisioning\.rs
 #                             : 実端末・実 PTY・実スレッドを束ねるオーケストレータ。
-#       terminal_pane / terminal_pool の純ロジック（キー/マウスの入力変換は
-#       home/pane_input.rs、タブのインデックス・ラベル算術は home/terminal_tabs.rs）は
+#       terminal/pane / terminal/pool の純ロジック（キー/マウスの入力変換は
+#       home/pane_input.rs、タブのインデックス・ラベル算術は home/terminal/tabs.rs）は
 #       別モジュールへ切り出して計測対象に含めてあり、ここに残るのは実 IO の束ねだけ。
 # これら以外の薄いラッパ（hop/run/mcp/llm_mcp/agent_phase/clean、splash/gallery/
-# welcome/new、echo）は依存を注入してテスト可能にし、計測対象に含めている。
-export COVERAGE_IGNORE='(src/main\.rs|infrastructure/pty\.rs|infrastructure/release\.rs|tui/term_reader\.rs|tui/app/mod\.rs|tui/home/mod\.rs|tui/home/terminal_pane\.rs|tui/home/terminal_pool\.rs|tui/open/mod\.rs|tui/config/mod\.rs|tui/config/provisioning\.rs)'
+# welcome/new、io/echo）は依存を注入してテスト可能にし、計測対象に含めている。
+export COVERAGE_IGNORE='(src/main\.rs|infrastructure/pty\.rs|infrastructure/release\.rs|tui/io/term_reader\.rs|tui/app/mod\.rs|tui/home/mod\.rs|tui/home/terminal/pane\.rs|tui/home/terminal/pool\.rs|tui/open/mod\.rs|tui/config/mod\.rs|tui/config/provisioning\.rs)'
 # 100% を要求するカバレッジ指標。
 export COVERAGE_MIN=100
 
