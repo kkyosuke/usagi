@@ -35,7 +35,7 @@ use crate::presentation::tui::term_reader::TermKeyReader;
 
 pub use event::Outcome;
 
-use state::{HomeState, LogLine, PaneExit, SessionOutcome};
+use state::{HomeState, LogLine, PaneExit, ResumeLevel, SessionOutcome};
 
 /// Refresh the workspace's session state from git (best-effort) and return the
 /// sessions to show. `sync` rewrites each session worktree's status; for a
@@ -374,6 +374,20 @@ pub fn run(term: &Term, workspace: &Workspace, preload: Preload) -> Result<Outco
     // disabled setting simply starts with no panes.
     if restore_panes_enabled {
         restore_open_panes(term, &state, &pool, &agent_wiring, default_cli);
+        // Restore where the user was at the last quit — the cursor on a session
+        // (切替), focused (在席), or armed to auto-attach (没入). Done after the panes
+        // are back, so a 没入 target's pane is live for the event loop's first-pass
+        // attach. Best-effort: a missing snapshot or a since-removed session simply
+        // opens in the default 切替.
+        if let Some(focus) = crate::infrastructure::resume_focus_store::load(&workspace.path) {
+            use crate::infrastructure::resume_focus_store::StoredEngagement;
+            let level = match focus.engagement {
+                StoredEngagement::Switch => ResumeLevel::Switch,
+                StoredEngagement::Focus => ResumeLevel::Focus,
+                StoredEngagement::Attached => ResumeLevel::Attached,
+            };
+            state.restore_focus(&focus.session, level);
+        }
     }
 
     // Removing a session deletes its worktrees/branches and forgets it, on a
@@ -736,6 +750,25 @@ pub fn run(term: &Term, workspace: &Workspace, preload: Preload) -> Result<Outco
         }
     };
 
+    // Persist where the user is when they quit — the focused session and how
+    // deeply they were engaged with it — so the next launch restores it alongside
+    // the panes. Gated by the same setting as the pane restore (the two are one
+    // "restore my session state" feature). Best-effort: a write failure just means
+    // the next launch opens in the default 切替.
+    let resume_root = workspace.path.clone();
+    let mut save_resume = move |session: &str, level: ResumeLevel| {
+        if !restore_panes_enabled {
+            return;
+        }
+        use crate::infrastructure::resume_focus_store::StoredEngagement;
+        let engagement = match level {
+            ResumeLevel::Switch => StoredEngagement::Switch,
+            ResumeLevel::Focus => StoredEngagement::Focus,
+            ResumeLevel::Attached => StoredEngagement::Attached,
+        };
+        let _ = crate::infrastructure::resume_focus_store::save(&resume_root, session, engagement);
+    };
+
     let mut wiring = event::Wiring {
         workspace_root: &workspace.path,
         persist: &mut persist,
@@ -750,6 +783,7 @@ pub fn run(term: &Term, workspace: &Workspace, preload: Preload) -> Result<Outco
         preview: &mut preview,
         tab_op: &mut tab_op,
         close_tab: &mut close_tab,
+        save_resume: &mut save_resume,
     };
     let outcome = event::event_loop(
         term,

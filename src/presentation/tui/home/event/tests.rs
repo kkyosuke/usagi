@@ -277,6 +277,64 @@ fn run_with_live_monitor(
 }
 
 #[test]
+fn a_restored_attached_engagement_auto_attaches_on_the_first_pass() {
+    // `restore_focus` armed an Attached resume on a live session; the loop attaches
+    // it once on entry — before reading any key — so the user lands back in 没入.
+    let attached = RefCell::new(false);
+    let mut open = |_: &mut HomeState, _: &Path, _: bool, _: bool| -> Result<PaneExit> {
+        *attached.borrow_mut() = true;
+        Ok(PaneExit::Closed)
+    };
+    let mut create: fn(&str) -> SessionOutcome = noop_create;
+    let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = live_preview;
+    let mut state = sample_state();
+    state.restore_focus("feat", ResumeLevel::Attached);
+    // No scripted keys: the loop auto-attaches on entry, then the default Ctrl-C
+    // terminator quits (no live session under the detached monitor).
+    let outcome = run_full(
+        vec![],
+        state,
+        &mut open,
+        &mut create,
+        &mut preview,
+        &mut noop_config,
+    )
+    .unwrap();
+    assert!(matches!(outcome, Outcome::Quit));
+    assert!(
+        *attached.borrow(),
+        "the restored session should be attached on the first pass"
+    );
+}
+
+#[test]
+fn no_restored_engagement_leaves_the_first_pass_untouched() {
+    // With nothing armed (the usual launch) the entry attach is a no-op: the loop
+    // opens in 切替 and never drives a pane before the terminating Ctrl-C.
+    let attached = RefCell::new(false);
+    let mut open = |_: &mut HomeState, _: &Path, _: bool, _: bool| -> Result<PaneExit> {
+        *attached.borrow_mut() = true;
+        Ok(PaneExit::Closed)
+    };
+    let mut create: fn(&str) -> SessionOutcome = noop_create;
+    let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = live_preview;
+    let outcome = run_full(
+        vec![],
+        sample_state(),
+        &mut open,
+        &mut create,
+        &mut preview,
+        &mut noop_config,
+    )
+    .unwrap();
+    assert!(matches!(outcome, Outcome::Quit));
+    assert!(
+        !*attached.borrow(),
+        "nothing armed: no pane should be driven"
+    );
+}
+
+#[test]
 fn a_key_press_is_traced_when_tracing_is_enabled() {
     // With tracing on, the loop builds and records the per-key trace event via
     // the `record_with` closure — the construction that is otherwise skipped (and
@@ -3160,6 +3218,7 @@ fn run_with_tasks(
     let mut tab_op: fn(&Path, Option<TabNav>) -> (Vec<String>, usize) = noop_tab_op;
     let mut close: fn(&mut HomeState, &Path) = noop_close;
     let mut set_note_fake: fn(&str, &str) -> SessionOutcome = noop_set_note;
+    let mut save_resume = |_: &str, _: ResumeLevel| {};
     let mut wiring = Wiring {
         workspace_root: Path::new("/ws"),
         persist: &mut persist,
@@ -3174,6 +3233,7 @@ fn run_with_tasks(
         preview: &mut preview,
         tab_op: &mut tab_op,
         close_tab: &mut close,
+        save_resume: &mut save_resume,
     };
     event_loop(
         &term,
@@ -3261,6 +3321,7 @@ fn run_with_live_session(reader: &mut dyn KeyReader) -> Result<Outcome> {
     let mut tab_op: fn(&Path, Option<TabNav>) -> (Vec<String>, usize) = noop_tab_op;
     let mut close: fn(&mut HomeState, &Path) = noop_close;
     let mut set_note_fake: fn(&str, &str) -> SessionOutcome = noop_set_note;
+    let mut save_resume = |_: &str, _: ResumeLevel| {};
     let mut wiring = Wiring {
         workspace_root: Path::new("/ws"),
         persist: &mut persist,
@@ -3275,6 +3336,7 @@ fn run_with_live_session(reader: &mut dyn KeyReader) -> Result<Outcome> {
         preview: &mut preview,
         tab_op: &mut tab_op,
         close_tab: &mut close,
+        save_resume: &mut save_resume,
     };
     event_loop(
         &term,

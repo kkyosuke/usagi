@@ -19,7 +19,7 @@ use crate::presentation::tui::screen::{FramePainter, KeyReader};
 
 use super::oneshot::OneShot;
 use super::sessions_refresh::SessionsRefreshHandle;
-use super::state::{HomeState, Mode, PaneExit, SessionOutcome};
+use super::state::{HomeState, Mode, PaneExit, ResumeLevel, SessionOutcome};
 use super::tasks::TaskHandle;
 use super::terminal_pool::MonitorHandle;
 use super::terminal_tabs::TabNav;
@@ -145,6 +145,11 @@ pub(super) struct Wiring<'a> {
     pub tab_op: &'a mut TabOp<'a>,
     /// Close the highlighted session's active tab (pane) from 切替.
     pub close_tab: &'a mut dyn FnMut(&mut HomeState, &Path),
+    /// Persist the engagement to restore on the next launch — the focused
+    /// session's name and how deeply it was engaged — called when a quit is
+    /// confirmed. [`super::run`] writes it to the resume-focus store (gated by the
+    /// restore setting); tests pass a capture or a no-op.
+    pub save_resume: &'a mut dyn FnMut(&str, ResumeLevel),
 }
 
 /// What the user chose to do on the home (workspace) screen.
@@ -208,6 +213,17 @@ pub enum Outcome {
 /// statuses are not part of the badge snapshot the skip-paint check compares).
 /// Split out of [`event_loop`] so the apply is exercised directly rather than
 /// only through a full loop run.
+/// Persist the engagement to restore on the next launch, just before a confirmed
+/// quit: the focused (cursor) session's name and how deeply it was engaged
+/// ([`HomeState::resume_level`], which consumes any 没入 arm and otherwise reads
+/// the current mode). Routed through [`Wiring::save_resume`] so the disk write
+/// lives in [`super::run`] and tests observe it through a capture.
+fn save_resume_focus(state: &mut HomeState, wiring: &mut Wiring) {
+    let session = state.list().selected_name().to_string();
+    let level = state.resume_level();
+    (wiring.save_resume)(&session, level);
+}
+
 fn apply_pending_refresh(state: &mut HomeState, refresh: &SessionsRefreshHandle) -> bool {
     match refresh.take() {
         Some(sessions) => {
@@ -232,6 +248,12 @@ pub(super) fn event_loop(
 ) -> Result<Outcome> {
     let workspace_root = wiring.workspace_root;
     let mut painter = FramePainter::new();
+    // Re-attach a session restored into 没入 (Attached) from the last quit. The
+    // cursor was focused synchronously at startup ([`HomeState::restore_focus`]),
+    // but attaching needs this loop's terminal wiring, so it runs once here on the
+    // first pass — by now `restore_open_panes` has re-spawned the session's panes,
+    // so it is live to attach. A no-op when nothing was armed (the usual case).
+    handlers::resume_attach(term, &mut state, &mut painter, wiring);
     // What the last paint reflected, so an idle 切替 (Switch) tick whose badges
     // and update notice are unchanged can skip rebuilding and repainting the whole
     // frame. `force_paint` keeps the first frame — and the frame after any key —
@@ -426,7 +448,8 @@ pub(super) fn event_loop(
         if state.quit_confirm() {
             match key {
                 Key::Char('y') | Key::Char('Y') | Key::Enter | Key::CtrlC | Key::Char(CTRL_Q) => {
-                    return Ok(Outcome::Quit)
+                    save_resume_focus(&mut state, wiring);
+                    return Ok(Outcome::Quit);
                 }
                 Key::Char('n') | Key::Char('N') | Key::Escape => state.cancel_quit_confirm(),
                 _ => {}
@@ -442,6 +465,7 @@ pub(super) fn event_loop(
             if state.has_live_sessions() {
                 state.open_quit_confirm();
             } else {
+                save_resume_focus(&mut state, wiring);
                 return Ok(Outcome::Quit);
             }
             continue;
@@ -562,6 +586,7 @@ pub(super) fn event_loop(
         if state.command_palette_open() {
             let flow = palette_key(term, &mut state, &mut painter, key, wiring)?;
             if let Flow::Quit = flow {
+                save_resume_focus(&mut state, wiring);
                 return Ok(Outcome::Quit);
             }
             continue;
@@ -699,6 +724,10 @@ pub(crate) fn event_loop_compat(
         );
     };
     let mut evict_pool = |_: &Path| {};
+    // The resume-focus persistence is exercised through its own state unit tests
+    // ([`HomeState::resume_level`] / `restore_focus`); here it is a no-op, so a
+    // quit in these loop tests does not touch the store.
+    let mut save_resume = |_: &str, _: ResumeLevel| {};
     // The fakes have no equivalent of the production pane-exit sync thread that
     // fills this, so it stays empty here; the apply path is covered directly in
     // `a_background_refresh_updates_the_session_list`.
@@ -717,6 +746,7 @@ pub(crate) fn event_loop_compat(
         preview: &mut preview,
         tab_op: &mut tab_op,
         close_tab: &mut close_tab,
+        save_resume: &mut save_resume,
     };
     event_loop(
         term,

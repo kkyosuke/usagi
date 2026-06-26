@@ -22,6 +22,23 @@ pub enum Mode {
     Attached,
 }
 
+/// The engagement the home screen records on quit so the next launch can drop
+/// the user back where they left off (see
+/// [`HomeState::restore_focus`](super::HomeState::restore_focus)). It mirrors the
+/// reachable depths of [`Mode`] for the *recorded* session: 没入 (Attached) is
+/// captured here even though the live event loop never observes [`Mode::Attached`]
+/// directly (a quit from a pane drops to [`Mode::Focus`] before the modal opens),
+/// so it is remembered explicitly rather than read back off the mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResumeLevel {
+    /// The cursor was on the session in 切替 (Switch).
+    Switch,
+    /// The session was focused in 在席 (Focus).
+    Focus,
+    /// An embedded pane was live in 没入 (Attached).
+    Attached,
+}
+
 /// Where a [`Mode::Switch`] should return to when cancelled (`Esc`) — the
 /// mode it was opened from. `Ctrl-O` while in Switch always zooms out to the
 /// base Switch regardless of this.
