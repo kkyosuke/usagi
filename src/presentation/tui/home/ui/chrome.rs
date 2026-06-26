@@ -287,7 +287,7 @@ fn command_input_content(state: &HomeState) -> String {
 
 /// Inner (content) width of the command palette box, before the borders and the
 /// space of padding [`widgets::boxed`] adds on each side.
-const PALETTE_INNER: usize = 60;
+pub(super) const PALETTE_INNER: usize = 60;
 
 /// Rows the palette reserves for the advisory hints, always filled to this height
 /// (padded with blanks): a header plus up to [`HINT_MAX`] matches plus an
@@ -312,7 +312,7 @@ const PALETTE_RESPONSE_MAX: usize = PALETTE_RESPONSE_ROWS - 1;
 /// (capped, with an `↑ N more` line when longer), and a key-hint footer. Every
 /// region is padded to a constant number of rows so the box keeps the same size
 /// as the user types and runs commands — it never grows or shrinks.
-fn command_palette_body(state: &HomeState, inner: usize) -> Vec<String> {
+pub(super) fn command_palette_body(state: &HomeState, inner: usize) -> Vec<String> {
     let mut body = Vec::with_capacity(PALETTE_HINT_ROWS + PALETTE_RESPONSE_ROWS + 5);
     body.push(command_input_content(state));
     body.push(String::new());
@@ -361,19 +361,6 @@ fn pad_block(body: &mut Vec<String>, rows: Vec<String>, height: usize) {
     for _ in filled..height {
         body.push(String::new());
     }
-}
-
-/// Builds the workspace command palette (`:`) as a bordered box, clamped to the
-/// terminal `width`. It is a fixed-height modal (see [`command_palette_body`])
-/// that [`render_frame`](super::render_frame) floats over the live workspace with
-/// [`widgets::overlay_centered`], so the panes stay visible around it; `Esc`
-/// closes it.
-pub(super) fn command_palette_box(width: usize, state: &HomeState) -> Vec<String> {
-    // Clamp the inner width so the box never overruns a narrow terminal; `boxed`
-    // then clips each line and the title to fit.
-    let inner = PALETTE_INNER.min(width.saturating_sub(4));
-    let body = command_palette_body(state, inner);
-    widgets::boxed("Command", inner, &body)
 }
 
 /// The footer help line, aware of the current mode. It leads with a mode tag so
@@ -583,21 +570,17 @@ pub(super) fn quit_confirm_frame(raw_height: usize, raw_width: usize, live: usiz
 
 /// Inner (content) width of the text modal box, before the borders and the
 /// space of padding [`widgets::boxed`] adds on each side.
-const TEXT_MODAL_INNER: usize = 60;
+pub(super) const TEXT_MODAL_INNER: usize = 60;
 
-/// Builds the text modal as a bordered box: a scrollable window over a
-/// text-dumping command's output (`man` / `history` / `session list`), coloured
-/// by line kind, with `↑`/`↓` more-counts and the dismiss hint below.
+/// Builds the body of the text modal: a scrollable window over a text-dumping
+/// command's output (`man` / `history` / `session list`), coloured by line kind,
+/// with `↑`/`↓` more-counts and the dismiss hint below.
 ///
-/// Like the `:` command palette, this returns just the box (not a full-screen
-/// frame): [`render_frame`](super::render_frame) floats it over the live
-/// workspace with [`widgets::overlay_centered`] so the panes stay visible around
-/// it, rather than a black backdrop.
-pub(super) fn text_modal_box(raw_width: usize, modal: &TextModal) -> Vec<String> {
-    // Clamp the inner width so the box never overruns a narrow terminal; `boxed`
-    // then clips each line and the title to fit.
-    let inner = TEXT_MODAL_INNER.min(raw_width.saturating_sub(4));
-
+/// Like the `:` command palette, this is only the body (no border): `inner` is
+/// the box's content width, and [`render_frame`](super::render_frame) wraps it
+/// and floats it over the live workspace with [`widgets::overlay_modal`] so the
+/// panes stay visible around it, rather than a black backdrop.
+pub(super) fn text_modal_body(modal: &TextModal, inner: usize) -> Vec<String> {
     let total = modal.lines.len();
     let start = modal.scroll.min(total.saturating_sub(TEXT_MODAL_VISIBLE));
     let end = (start + TEXT_MODAL_VISIBLE).min(total);
@@ -618,5 +601,5 @@ pub(super) fn text_modal_box(raw_width: usize, modal: &TextModal) -> Vec<String>
             .dim()
             .to_string(),
     );
-    widgets::boxed(&modal.title, inner, &body)
+    body
 }

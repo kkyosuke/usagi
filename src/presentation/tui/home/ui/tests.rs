@@ -38,7 +38,7 @@ fn stripped(lines: &[String]) -> String {
 }
 
 #[test]
-fn text_modal_box_windows_a_long_dump_with_more_counts() {
+fn text_modal_body_windows_a_long_dump_with_more_counts() {
     let lines: Vec<LogLine> = (0..30)
         .map(|i| LogLine::output(format!("entry {i}")))
         .collect();
@@ -47,29 +47,27 @@ fn text_modal_box_windows_a_long_dump_with_more_counts() {
         lines,
         scroll: 5,
     };
-    let frame = stripped(&text_modal_box(120, &modal));
-    // The title and the hidden-line counts above and below the window show.
-    assert!(frame.contains("Help"));
-    assert!(frame.contains("↑ 5 more"));
+    let body = stripped(&text_modal_body(&modal, 60));
+    // The hidden-line counts above and below the window show.
+    assert!(body.contains("↑ 5 more"));
     // 30 total - (scroll 5 + 16 visible) = 9 hidden below.
-    assert!(frame.contains("↓ 9 more"));
+    assert!(body.contains("↓ 9 more"));
     // A windowed line is visible; ones outside the window are not.
-    assert!(frame.contains("entry 5"));
-    assert!(!frame.contains("entry 0"));
-    assert!(frame.contains("Esc / Enter / q: close"));
+    assert!(body.contains("entry 5"));
+    assert!(!body.contains("entry 0"));
+    assert!(body.contains("Esc / Enter / q: close"));
 }
 
 #[test]
-fn text_modal_box_shows_a_short_dump_without_scroll_counts() {
+fn text_modal_body_shows_a_short_dump_without_scroll_counts() {
     let modal = TextModal {
         title: "History".to_string(),
         lines: vec![LogLine::output("  1  man"), LogLine::output("  2  history")],
         scroll: 0,
     };
-    let frame = stripped(&text_modal_box(120, &modal));
-    assert!(frame.contains("History"));
-    assert!(frame.contains("man"));
-    assert!(!frame.contains("more"));
+    let body = stripped(&text_modal_body(&modal, 60));
+    assert!(body.contains("man"));
+    assert!(!body.contains("more"));
 }
 
 #[test]
