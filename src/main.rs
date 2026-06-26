@@ -212,6 +212,9 @@ enum Commands {
     },
     /// Show which usagi features each agent CLI supports
     Feature,
+    /// Deny an agent tool call that escapes its session worktree (invoked by a Claude PreToolUse hook)
+    #[command(hide = true)]
+    GuardWorkspace,
     /// Hop into the usagi welcome screen
     Hop,
     /// Print the square-pixel usagi marks (flip / half)
@@ -283,6 +286,11 @@ fn main() -> anyhow::Result<()> {
         Commands::Config { edit } => usagi::presentation::cli::config::run(edit),
         Commands::Doctor { fix } => usagi::presentation::cli::doctor::run(fix),
         Commands::Feature => usagi::presentation::cli::feature::run(),
+        Commands::GuardWorkspace => {
+            let stdin = std::io::stdin();
+            let stdout = std::io::stdout();
+            usagi::presentation::cli::guard_workspace::run(stdin.lock(), stdout.lock())
+        }
         Commands::Hop => usagi::presentation::cli::hop::run(usagi::presentation::tui::app::run),
         Commands::Icon { view } => usagi::presentation::cli::icon::run(view),
         Commands::Init { git } => usagi::presentation::cli::init::run(git),
@@ -330,6 +338,7 @@ fn command_name(command: &Commands) -> Option<&'static str> {
         Commands::Config { .. } => Some("config"),
         Commands::Doctor { .. } => Some("doctor"),
         Commands::Feature => Some("feature"),
+        Commands::GuardWorkspace => Some("guard-workspace"),
         Commands::Hop => Some("hop"),
         Commands::Icon { .. } => Some("icon"),
         Commands::Init { .. } => Some("init"),
