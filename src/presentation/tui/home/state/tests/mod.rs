@@ -12,6 +12,7 @@ fn worktree(branch: &str) -> WorktreeState {
         primary: false,
         upstream: None,
         status: BranchStatus::Local,
+        diff: None,
         updated_at: Utc::now(),
     }
 }

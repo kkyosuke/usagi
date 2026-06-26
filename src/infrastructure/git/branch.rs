@@ -172,6 +172,52 @@ pub fn ahead_behind(repo: &Path, branch: &str, into: &str) -> Option<(usize, usi
         .or_else(|| count_ahead_behind(repo, into, branch))
 }
 
+/// The total added / removed line counts of the worktree's cumulative diff
+/// against the default branch, as `(added, removed)`, or `None` when it cannot
+/// be computed (e.g. an unrelated history or a ref that does not resolve).
+///
+/// The diff is taken from the working tree to the **merge-base** with the
+/// default branch, so it measures only what this session changed — commits the
+/// default branch gained afterwards do not inflate the count — and counts both
+/// committed and uncommitted work (the right side is the working tree). `into`
+/// is resolved against the remote (`origin/<into>`) first, like
+/// [`ahead_behind`], so the badge tracks the integration branch even before a
+/// local fetch updates it.
+pub fn diff_stat(repo: &Path, into: &str) -> Option<(usize, usize)> {
+    let base = merge_base(repo, &format!("origin/{into}")).or_else(|| merge_base(repo, into))?;
+    let output = git_capture(repo, &["diff", "--numstat", &base])
+        .ok()
+        .flatten()?;
+    Some(sum_numstat(&output))
+}
+
+/// The merge-base of `base` and `HEAD`, or `None` when it cannot be resolved
+/// (e.g. `base` does not exist or the histories are unrelated).
+fn merge_base(repo: &Path, base: &str) -> Option<String> {
+    let output = git_capture(repo, &["merge-base", base, "HEAD"])
+        .ok()
+        .flatten()?;
+    let base = output.lines().next()?.trim();
+    (!base.is_empty()).then(|| base.to_string())
+}
+
+/// Sum the added / removed columns of `git diff --numstat` output as
+/// `(added, removed)`. Each line is `<added>\t<removed>\t<path>`; a binary file
+/// reports `-` for both counts, so that row parses as neither and contributes
+/// nothing.
+fn sum_numstat(output: &str) -> (usize, usize) {
+    output.lines().fold((0, 0), |(added, removed), line| {
+        let mut cols = line.split('\t');
+        match (
+            cols.next().and_then(|c| c.parse::<usize>().ok()),
+            cols.next().and_then(|c| c.parse::<usize>().ok()),
+        ) {
+            (Some(a), Some(d)) => (added + a, removed + d),
+            _ => (added, removed),
+        }
+    })
+}
+
 /// Count `(ahead, behind)` of `branch` relative to `target`, or `None` when the
 /// range cannot be resolved (e.g. `target` does not exist).
 fn count_ahead_behind(repo: &Path, target: &str, branch: &str) -> Option<(usize, usize)> {
