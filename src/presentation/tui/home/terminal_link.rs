@@ -124,8 +124,10 @@ fn url_in_chars(chars: &[char], idx: usize) -> Option<String> {
 /// Every `http(s)` URL in the flattened line `chars`, as half-open char-index
 /// ranges. Each maximal whitespace-free run holds at most one link: the earliest
 /// scheme in the run starts it (dropping a leading `(` or stray prefix) and it
-/// runs to the end of the run with trailing prose punctuation trimmed
-/// (see [`trim_trailing`]). A run whose only scheme has no host is skipped.
+/// runs to the first non-URL character (a CJK glyph or full-width punctuation
+/// butted against it with no space, see [`is_url_char`]) with trailing prose
+/// punctuation then trimmed (see [`trim_trailing`]). A run whose only scheme has
+/// no host is skipped.
 fn url_spans(chars: &[char]) -> Vec<std::ops::Range<usize>> {
     let mut spans = Vec::new();
     let mut i = 0;
@@ -143,7 +145,15 @@ fn url_spans(chars: &[char]) -> Vec<std::ops::Range<usize>> {
         if let Some(scheme_off) =
             (run_start..run_end).find(|&j| SCHEMES.iter().any(|s| starts_with_at(chars, j, s)))
         {
-            let raw: String = chars[scheme_off..run_end].iter().collect();
+            // A URL is ASCII, so it ends at the first character it cannot contain.
+            // Japanese text often butts straight against a link with no space
+            // (`…/350（補足）`), so without this the run would swallow `（補足）`
+            // into the link; stop at that `（` (and any CJK char) here.
+            let mut url_end = scheme_off;
+            while url_end < run_end && is_url_char(chars[url_end]) {
+                url_end += 1;
+            }
+            let raw: String = chars[scheme_off..url_end].iter().collect();
             let url = trim_trailing(&raw);
             // A bare scheme with no host is not a link.
             if !SCHEMES.contains(&url) {
@@ -153,6 +163,14 @@ fn url_spans(chars: &[char]) -> Vec<std::ops::Range<usize>> {
         i = run_end;
     }
     spans
+}
+
+/// Whether `c` can appear in a URL. URLs are ASCII, so this is the printable
+/// ASCII range (letters, digits, and punctuation — no space, no controls). The
+/// first character outside it — a CJK glyph or full-width punctuation such as
+/// `（` / `、` / `。` glued to the link with no separating space — ends the URL.
+fn is_url_char(c: char) -> bool {
+    c.is_ascii_graphic()
 }
 
 /// Every grid cell that sits on an `http(s)` URL, so the renderer can underline
@@ -399,6 +417,44 @@ mod tests {
             url_at(screen, Cell::new(0, 8)).as_deref(),
             Some("https://x.io"),
         );
+    }
+
+    #[test]
+    fn full_width_punctuation_glued_to_a_url_is_not_part_of_it() {
+        // Japanese prose often has no space before a parenthetical, so the link
+        // butts straight against a full-width `（…）`. The URL must stop at `（`,
+        // not swallow `（補足）` — the original bug this guards against.
+        let parser = parsed(1, 40, "https://example.com/350（補足）".as_bytes());
+        let screen = parser.screen();
+        // A click inside the URL returns just the URL.
+        assert_eq!(
+            url_at(screen, Cell::new(0, 5)).as_deref(),
+            Some("https://example.com/350"),
+        );
+        // The full-width `（` (col 23, after the 23-char URL) is not a link.
+        assert_eq!(url_at(screen, Cell::new(0, 23)), None);
+    }
+
+    #[test]
+    fn a_cjk_character_glued_to_a_url_ends_it() {
+        // No space between the link and the following Japanese text: the URL ends
+        // at the first CJK character rather than absorbing "見て".
+        let parser = parsed(1, 40, "https://example.com見て".as_bytes());
+        assert_eq!(
+            url_at(parser.screen(), Cell::new(0, 5)).as_deref(),
+            Some("https://example.com"),
+        );
+    }
+
+    #[test]
+    fn link_cells_stop_at_full_width_punctuation() {
+        // The underline run covers only the URL, not the glued `（…）`.
+        let parser = parsed(1, 40, "https://example.com（x）".as_bytes());
+        let cells = link_pairs(parser.screen());
+        // "https://example.com" is 19 chars at cols 0..=18; the full-width `（`
+        // begins at col 19 and carries no link cell.
+        assert!(cells.contains(&(0, 18))); // "m" of .com
+        assert!(!cells.contains(&(0, 19))); // full-width "（"
     }
 
     /// The set of `(row, col)` pairs `link_cells` marks for `screen`.
