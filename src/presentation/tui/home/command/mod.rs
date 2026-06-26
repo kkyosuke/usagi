@@ -19,7 +19,7 @@ mod registry;
 
 pub use registry::CommandRegistry;
 
-use super::state::LogLine;
+use super::state::{LogLine, ModalSize};
 use crate::domain::issue::Issue;
 use crate::domain::settings::AgentCli;
 
@@ -74,9 +74,13 @@ pub enum Effect {
     /// event loop, which returns to the workspace screen when it is dismissed.
     OpenConfig,
     /// Show the result lines in a scrollable text modal (rather than the results
-    /// band), for commands whose output is text to read — `man` / `history`. The
-    /// string is the modal title.
-    ShowText(&'static str),
+    /// band), for commands whose output is text to read — `man` / `history`.
+    /// `title` is the modal title; `size` selects the compact box or the
+    /// terminal-filling one (`man` uses [`ModalSize::Large`]).
+    ShowText {
+        title: &'static str,
+        size: ModalSize,
+    },
     /// Open the right-pane Markdown preview of the named file (the user ran
     /// `preview <path|name>`). The string is the requested target; the event loop
     /// resolves and reads it (under the workspace root) and renders it.
@@ -104,13 +108,26 @@ impl CommandResult {
         Self::lines(vec![line])
     }
 
-    /// A result whose `lines` are shown in a scrollable text modal titled `title`
-    /// (used by text-dumping commands like `man` / `history`) instead of the
-    /// results band.
+    /// A result whose `lines` are shown in a compact scrollable text modal titled
+    /// `title` (used by text-dumping commands like `history` / `session list`)
+    /// instead of the results band.
     fn modal(title: &'static str, lines: Vec<LogLine>) -> Self {
+        Self::sized_modal(title, lines, ModalSize::Normal)
+    }
+
+    /// Like [`modal`](Self::modal) but in the large, terminal-filling box — used
+    /// by `man`, whose help fills the screen so the whole command surface reads
+    /// at once with less scrolling.
+    fn large_modal(title: &'static str, lines: Vec<LogLine>) -> Self {
+        Self::sized_modal(title, lines, ModalSize::Large)
+    }
+
+    /// Shared constructor behind [`modal`](Self::modal) /
+    /// [`large_modal`](Self::large_modal): show `lines` in a text modal of `size`.
+    fn sized_modal(title: &'static str, lines: Vec<LogLine>, size: ModalSize) -> Self {
         Self {
             lines,
-            effect: Effect::ShowText(title),
+            effect: Effect::ShowText { title, size },
         }
     }
 }

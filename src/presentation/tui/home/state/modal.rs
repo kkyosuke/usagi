@@ -294,14 +294,30 @@ impl NoteEditor {
     }
 }
 
+/// How big a [`TextModal`] is drawn. Most text-dumping commands (`history` /
+/// `session list` / `issue …`) use the compact [`Normal`](Self::Normal) floating
+/// box; `man` uses [`Large`](Self::Large), which fills most of the terminal so
+/// the whole command surface is readable at once with less scrolling.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ModalSize {
+    /// The compact, fixed-size floating box (the historical text-modal size).
+    #[default]
+    Normal,
+    /// A terminal-filling box that scales its width and visible-line count to the
+    /// screen (see [`crate::presentation::tui::widgets::large_modal_geometry`]).
+    Large,
+}
+
 /// An open scrollable text modal: the read-only output of a text-dumping command
 /// (`man` / `history` / `session list`). `scroll` is the index of the first
-/// visible body line, advanced by the arrow / page keys and clamped on render.
+/// visible body line, advanced by the arrow / page keys and clamped on render;
+/// `size` selects the compact or terminal-filling box (see [`ModalSize`]).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TextModal {
     pub title: String,
     pub lines: Vec<LogLine>,
     pub scroll: usize,
+    pub size: ModalSize,
 }
 
 /// The right-pane Markdown preview, opened by the `preview` command. It takes

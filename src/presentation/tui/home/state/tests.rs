@@ -413,7 +413,13 @@ fn submitting_a_command_echoes_and_runs_it() {
     let submission = state.submit();
     // `man` is a text-dumping command: it echoes, then opens a text modal
     // (its output does not land in the band's log).
-    assert_eq!(submission.effect, Effect::ShowText("Help"));
+    assert_eq!(
+        submission.effect,
+        Effect::ShowText {
+            title: "Help",
+            size: ModalSize::Large,
+        }
+    );
     assert_eq!(submission.recorded.as_deref(), Some("man"));
     let echoed = state.log().iter().find(|l| l.kind == LineKind::Command);
     assert_eq!(echoed.unwrap().text, "man");
@@ -449,7 +455,13 @@ fn issue_command_reads_injected_issues() {
     }
     let submission = state.submit();
     // The injected issue is surfaced through the `issue` command's modal.
-    assert_eq!(submission.effect, Effect::ShowText("Issues"));
+    assert_eq!(
+        submission.effect,
+        Effect::ShowText {
+            title: "Issues",
+            size: ModalSize::Normal,
+        }
+    );
     let modal = state.text_modal().expect("issue opens a text modal");
     assert!(modal.lines.iter().any(|l| l.text.contains("task")));
 }
@@ -1352,7 +1364,13 @@ fn focus_prompt_runs_a_text_command_into_a_modal() {
         state.focus_prompt_mut().insert(c);
     }
     let submission = state.focus_prompt_submit();
-    assert_eq!(submission.effect, Effect::ShowText("Help"));
+    assert_eq!(
+        submission.effect,
+        Effect::ShowText {
+            title: "Help",
+            size: ModalSize::Large,
+        }
+    );
     let modal = state.text_modal().expect("man opens a modal");
     assert!(modal.lines.iter().any(|l| l.text.contains("Available")));
 }
@@ -1363,7 +1381,7 @@ fn text_modal_opens_scrolls_and_closes() {
     let lines: Vec<LogLine> = (0..30)
         .map(|i| LogLine::output(format!("line {i}")))
         .collect();
-    state.open_text_modal("Help", lines);
+    state.open_text_modal("Help", lines, ModalSize::Normal);
     assert_eq!(state.text_modal().unwrap().scroll, 0);
     // Scrolling up at the top is a no-op.
     state.text_modal_scroll_up();

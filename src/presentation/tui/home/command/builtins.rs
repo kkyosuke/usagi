@@ -61,11 +61,11 @@ impl Command for ManCommand {
             lines.push(LogLine::output(
                 "Type \"man <command>\" for usage and examples.",
             ));
-            return CommandResult::modal("Help", lines);
+            return CommandResult::large_modal("Help", lines);
         }
 
         match ctx.commands.iter().find(|info| info.name == args) {
-            Some(info) => CommandResult::modal("Help", describe(info)),
+            Some(info) => CommandResult::large_modal("Help", describe(info)),
             None => CommandResult::line(LogLine::error(format!("no manual entry for \"{args}\""))),
         }
     }

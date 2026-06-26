@@ -3,7 +3,7 @@ use super::panes::*;
 use super::*;
 
 use super::super::command::{CommandHint, CommandInfo};
-use super::super::state::{LogLine, Preview, TextModal, WorktreeList, ROOT_NAME};
+use super::super::state::{LogLine, ModalSize, Preview, TextModal, WorktreeList, ROOT_NAME};
 use super::super::terminal_pool::MonitorSnapshot;
 use super::super::terminal_view::TerminalView;
 use crate::domain::settings::{SessionActionUi, Sidebar};
@@ -46,8 +46,9 @@ fn text_modal_body_windows_a_long_dump_with_more_counts() {
         title: "Help".to_string(),
         lines,
         scroll: 5,
+        size: ModalSize::Normal,
     };
-    let body = stripped(&text_modal_body(&modal, 60));
+    let body = stripped(&text_modal_body(&modal, 60, TEXT_MODAL_VISIBLE));
     // The hidden-line counts above and below the window show.
     assert!(body.contains("↑ 5 more"));
     // 30 total - (scroll 5 + 16 visible) = 9 hidden below.
@@ -59,13 +60,31 @@ fn text_modal_body_windows_a_long_dump_with_more_counts() {
 }
 
 #[test]
+fn text_modal_geometry_sizes_by_modal_size() {
+    // A compact modal is the fixed inner width / visible-line count, regardless
+    // of the terminal.
+    assert_eq!(
+        text_modal_geometry(40, 90, ModalSize::Normal),
+        (TEXT_MODAL_INNER, TEXT_MODAL_VISIBLE),
+    );
+    // A large modal scales to the terminal (matching the widget geometry).
+    let large = text_modal_geometry(40, 90, ModalSize::Large);
+    assert_eq!(large.0, 90 - 8);
+    assert_eq!(large.1, 40 - 8);
+    // It is wider and taller than the compact modal on a roomy screen.
+    assert!(large.0 > TEXT_MODAL_INNER);
+    assert!(large.1 > TEXT_MODAL_VISIBLE);
+}
+
+#[test]
 fn text_modal_body_shows_a_short_dump_without_scroll_counts() {
     let modal = TextModal {
         title: "History".to_string(),
         lines: vec![LogLine::output("  1  man"), LogLine::output("  2  history")],
         scroll: 0,
+        size: ModalSize::Normal,
     };
-    let body = stripped(&text_modal_body(&modal, 60));
+    let body = stripped(&text_modal_body(&modal, 60, TEXT_MODAL_VISIBLE));
     assert!(body.contains("man"));
     assert!(!body.contains("more"));
 }
@@ -1877,7 +1896,11 @@ fn text_modal_floats_over_the_visible_workspace() {
     // over the live frame like the `:` palette, so the workspace shows around it
     // instead of a black backdrop.
     let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
-    state.open_text_modal("Help", vec![LogLine::output("man — show this help")]);
+    state.open_text_modal(
+        "Help",
+        vec![LogLine::output("man — show this help")],
+        ModalSize::Normal,
+    );
     let frame = render_frame(40, 80, &state);
     let joined = stripped(&frame);
     // The modal box and its content are drawn …

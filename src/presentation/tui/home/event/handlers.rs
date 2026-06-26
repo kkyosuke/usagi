@@ -15,7 +15,7 @@ use crate::presentation::tui::screen::{self, FramePainter};
 use crate::domain::settings::{AgentCli, SessionActionUi};
 
 use super::super::command::Effect;
-use super::super::state::{HomeState, PaneExit, ReturnMode, ROOT_NAME};
+use super::super::state::{HomeState, ModalSize, PaneExit, ReturnMode, ROOT_NAME};
 use super::super::terminal_tabs::TabNav;
 use super::super::ui;
 use super::{
@@ -81,7 +81,7 @@ pub(super) fn palette_key(
                 Effect::ListSessions => match ui::content::session_list(state.sessions()) {
                     ui::content::SessionList::Empty(line) => state.log_output(line),
                     ui::content::SessionList::Modal(title, lines) => {
-                        state.open_text_modal(title, lines)
+                        state.open_text_modal(title, lines, ModalSize::Normal)
                     }
                 },
                 // `session remove <name>` dispatches the removal to a background
@@ -149,7 +149,7 @@ pub(super) fn palette_key(
                 }
                 // `ShowText` already opened its modal inside `submit`; the palette
                 // stays open behind it. `None` / `Clear` likewise keep it open.
-                Effect::None | Effect::Clear | Effect::ShowText(_) => {}
+                Effect::None | Effect::Clear | Effect::ShowText { .. } => {}
             }
         }
         Key::Tab => state.complete(),

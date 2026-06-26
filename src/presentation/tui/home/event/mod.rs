@@ -526,8 +526,10 @@ pub(super) fn event_loop(
         // The text modal (a text-dumping command's output, e.g. `man`), when open,
         // captures every key: the arrows / `j`/`k` and PageUp/PageDown scroll it,
         // and `Esc` / `Enter` / `q` dismiss it.
-        if state.text_modal().is_some() {
-            let page = ui::TEXT_MODAL_VISIBLE;
+        if let Some(size) = state.text_modal().map(|modal| modal.size) {
+            // Page by exactly the window the renderer shows, so PageUp/PageDown
+            // move one screenful for both the compact and the large `man` modal.
+            let (_, page) = ui::text_modal_geometry(height as usize, width as usize, size);
             match key {
                 Key::ArrowUp | Key::Char('k') => state.text_modal_scroll_up(),
                 Key::ArrowDown | Key::Char('j') => state.text_modal_scroll_down(page),
