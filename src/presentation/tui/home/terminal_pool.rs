@@ -650,8 +650,8 @@ fn pane_kind(agent: bool) -> PaneKind {
 
 /// Spawn the watcher thread: every [`POLL_INTERVAL`] it prunes exited sessions,
 /// feeds the live bell counts and recorded phases to the [`SessionMonitor`], and
-/// fires a one-shot notification for each background session that has just begun
-/// waiting for input or whose agent has just finished.
+/// fires a one-shot notification for each session that has just begun waiting for
+/// input (background or attached) or whose background agent has just finished.
 fn spawn_watcher(
     shared: Arc<Mutex<Shared>>,
     stop: Arc<AtomicBool>,
@@ -735,8 +735,8 @@ fn spawn_watcher(
     })
 }
 
-/// Show a desktop notification that a background session changed state: it began
-/// waiting for input, or its agent finished.
+/// Show a desktop notification that a session changed state: it began waiting for
+/// input (background or attached), or a background agent finished.
 ///
 /// Best-effort: failures (e.g. a headless environment without a notification
 /// daemon) are ignored so they never disturb the watcher loop.
