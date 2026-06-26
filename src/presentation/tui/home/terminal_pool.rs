@@ -286,7 +286,7 @@ impl TerminalPool {
             // No live pane (fresh session, or every pane exited): drop any stale
             // entry and spawn the first pane of the requested kind.
             self.sessions.remove(&key);
-            let kind = pane_kind(agent);
+            let kind = terminal_tabs::pane_kind(agent);
             let pane = self.spawn_pane(term, dir, kind, agent_command, cli)?;
             self.sessions.insert(
                 key,
@@ -636,15 +636,6 @@ impl Drop for TerminalPool {
         if let Some(watcher) = self.watcher.take() {
             let _ = watcher.join();
         }
-    }
-}
-
-/// The pane kind a first launch opens: an agent CLI, or a plain terminal.
-fn pane_kind(agent: bool) -> PaneKind {
-    if agent {
-        PaneKind::Agent
-    } else {
-        PaneKind::Terminal
     }
 }
 

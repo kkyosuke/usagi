@@ -108,6 +108,16 @@ fn label(word: &str, ordinal: usize, total: usize) -> String {
     }
 }
 
+/// The pane kind a first launch opens: the agent CLI when `agent`, else a plain
+/// terminal.
+pub fn pane_kind(agent: bool) -> PaneKind {
+    if agent {
+        PaneKind::Agent
+    } else {
+        PaneKind::Terminal
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -183,5 +193,11 @@ mod tests {
     #[test]
     fn labels_of_an_empty_session_are_empty() {
         assert!(tab_labels(&[]).is_empty());
+    }
+
+    #[test]
+    fn pane_kind_opens_an_agent_only_when_asked() {
+        assert_eq!(pane_kind(true), PaneKind::Agent);
+        assert_eq!(pane_kind(false), PaneKind::Terminal);
     }
 }
