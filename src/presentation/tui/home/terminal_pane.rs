@@ -185,6 +185,11 @@ impl Drop for PaneModeGuard<'_> {
     fn drop(&mut self) {
         // Restored in the reverse order they were enabled.
         let _ = self.term.write_str(DISABLE_MOTION);
+        // Reset the cursor shape to the terminal default (DECSCUSR 0): the pane
+        // re-asserted whatever shape its program chose, so without this a bar or
+        // underline would leak into the home screen's caret — or, on quit, into
+        // the user's own shell.
+        let _ = self.term.write_str("\x1b[0 q");
         let _ = self.term.flush();
         let _ = execute!(std::io::stdout(), DisableBracketedPaste);
         let _ = disable_raw_mode();
@@ -238,6 +243,11 @@ fn drive(
     // so hover-only / throttled frames skip the O(all cells) re-scan and reuse
     // them until the shell's output actually changes (see [`terminal_link`]).
     let mut links_cache: Option<(u64, std::collections::HashSet<Cell>)> = None;
+    // The cursor shape (DECSCUSR `Ps`) last emitted to the host terminal, so a
+    // shape is re-asserted only when the program changes it. `None` until the
+    // first paint, which always emits — restoring this pane's shape over whatever
+    // the previously active tab left on the terminal.
+    let mut last_shape: Option<u16> = None;
     let mut first = true;
     loop {
         let (height, width) = term.size();
@@ -315,17 +325,27 @@ fn drive(
             // preedit lands there) and mirror the program's show/hide.
             let cursor = if scrollback == 0 { view.cursor() } else { None };
             let cursor_visible = view.cursor_visible();
+            // Re-assert the shape only when it moved off what we last emitted, so
+            // a stream of output frames doesn't keep re-poking the cursor. The
+            // first paint (`last_shape == None`) always emits, claiming this
+            // pane's shape from the previously active tab.
+            let shape = pty.cursor_shape();
+            let cursor_shape = (last_shape != Some(shape)).then_some(shape);
             state.set_terminal_view(view);
             state.apply_badges(badges);
             render(
                 term,
                 state,
-                cursor,
-                cursor_visible,
+                CursorFrame {
+                    pos: cursor,
+                    visible: cursor_visible,
+                    shape: cursor_shape,
+                },
                 geo,
                 (height, width),
                 &mut prev,
             )?;
+            last_shape = Some(shape);
             last_selection = selection;
             last_hover = hover;
             last_paint = Some(now);
@@ -755,11 +775,23 @@ fn apply_scroll(scrollback: &mut usize, delta: i32) {
 /// update lands in one pass without the flicker of clearing the whole screen.
 /// Finally, park the real cursor over the shell's cursor cell so it tracks the
 /// embedded terminal.
+/// What the embedded pane should do with the host terminal's real cursor this
+/// frame: where to park it, whether to show it, and the shape to assert.
+struct CursorFrame {
+    /// The cell to park the real cursor on (so an OS IME's preedit lands there),
+    /// or `None` while the user is in the scrollback and the cursor is detached.
+    pos: Option<(u16, u16)>,
+    /// Whether to show the hardware cursor, mirroring the program's own show/hide.
+    visible: bool,
+    /// The cursor shape (DECSCUSR `Ps`) to re-assert, or `None` when it has not
+    /// changed since the last paint so an idle pane never re-pokes the cursor.
+    shape: Option<u16>,
+}
+
 fn render(
     term: &Term,
     state: &HomeState,
-    cursor: Option<(u16, u16)>,
-    cursor_visible: bool,
+    cursor: CursorFrame,
     geo: ui::TerminalGeometry,
     size: (u16, u16),
     prev: &mut Vec<String>,
@@ -775,7 +807,15 @@ fn render(
     // for the repaint and re-positioned below over the shell's cell.
     let mut buf = diff_frame(prev, &frame);
 
-    if let Some((row, col)) = cursor {
+    // Re-assert the active pane's cursor shape (DECSCUSR `CSI Ps SP q`) when it
+    // changed — `vt100` swallowed the program's own sequence, so without this the
+    // host terminal would keep whatever shape the previously active tab left it.
+    // The caller only passes `Some` on a change, so an idle pane never re-emits.
+    if let Some(shape) = cursor.shape {
+        let _ = write!(buf, "\x1b[{shape} q");
+    }
+
+    if let Some((row, col)) = cursor.pos {
         // Translate the pane-relative cursor to a 1-based screen position
         // (clamping a deferred-wrap column back onto the pane) and park the real
         // cursor there, so an OS IME draws its preedit on the program's cursor.
@@ -785,7 +825,7 @@ fn render(
         // cursor's position. `\x1b[?25l` is repeated harmlessly so the intent is
         // explicit regardless of what the repaint emitted.
         let (x, y) = geo.cursor_screen_pos(row, col);
-        let show = if cursor_visible {
+        let show = if cursor.visible {
             "\x1b[?25h"
         } else {
             "\x1b[?25l"
