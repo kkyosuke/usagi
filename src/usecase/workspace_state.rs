@@ -11,7 +11,9 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use chrono::Utc;
 
-use crate::domain::workspace_state::{BranchStatus, SessionRecord, WorkspaceState, WorktreeState};
+use crate::domain::workspace_state::{
+    BranchStatus, DiffStat, SessionRecord, WorkspaceState, WorktreeState,
+};
 use crate::infrastructure::error_log::ErrorLog;
 use crate::infrastructure::git;
 use crate::infrastructure::workspace_store::WorkspaceStore;
@@ -152,6 +154,7 @@ pub fn inspect_worktree(path: &Path, default: &str) -> WorktreeState {
         status.upstream.is_some(),
         status.dirty,
     );
+    let diff = measure_diff(path, status.branch.as_deref(), default);
     WorktreeState {
         branch: status.branch,
         path: path.to_path_buf(),
@@ -159,7 +162,26 @@ pub fn inspect_worktree(path: &Path, default: &str) -> WorktreeState {
         primary: false,
         upstream: status.upstream,
         status: classification,
+        diff,
         updated_at: Utc::now(),
+    }
+}
+
+/// Measure the worktree's cumulative diff against the default branch for the
+/// sidebar `+N -M` badge, or `None` when there is nothing to show.
+///
+/// Only a real branch other than the default is measured — the default branch
+/// itself and a detached HEAD report `None`, mirroring [`classify`]'s commit
+/// counts. An empty diff (a session even with the default) also collapses to
+/// `None`, so the badge and the persisted state only carry an actual diff.
+fn measure_diff(repo: &Path, branch: Option<&str>, default: &str) -> Option<DiffStat> {
+    match branch {
+        Some(branch) if branch != default => {
+            let (added, removed) = git::diff_stat(repo, default)?;
+            let stat = DiffStat { added, removed };
+            (!stat.is_empty()).then_some(stat)
+        }
+        _ => None,
     }
 }
 
@@ -218,6 +240,40 @@ mod tests {
         assert_eq!(wt.upstream, None);
         assert_eq!(wt.head.len(), 7);
         assert!(!wt.primary);
+        // The default branch is never measured against itself, so no badge.
+        assert_eq!(wt.diff, None);
+    }
+
+    #[test]
+    fn inspect_worktree_measures_a_feature_branch_diff_and_skips_a_clean_one() {
+        let dir = tempfile::tempdir().unwrap();
+        init_repo(dir.path());
+        let run = |args: &[&str]| {
+            assert!(git(dir.path()).args(args).status().unwrap().success());
+        };
+        // A feature branch with a committed two-line file, then an uncommitted
+        // third line appended to it: +3 against the default overall.
+        run(&["checkout", "-q", "-b", "feature"]);
+        std::fs::write(dir.path().join("new.txt"), "a\nb\n").unwrap();
+        run(&["add", "."]);
+        run(&["commit", "-q", "-m", "work"]);
+        std::fs::write(dir.path().join("new.txt"), "a\nb\nc\n").unwrap();
+
+        let wt = inspect_worktree(dir.path(), "main");
+        assert_eq!(
+            wt.diff,
+            Some(DiffStat {
+                added: 3,
+                removed: 0
+            })
+        );
+
+        // A branch even with the default carries no diff, so the badge collapses
+        // to `None` rather than a `+0 -0`. Force past the uncommitted edit above.
+        run(&["checkout", "-q", "-f", "main"]);
+        run(&["checkout", "-q", "-b", "untouched"]);
+        let clean = inspect_worktree(dir.path(), "main");
+        assert_eq!(clean.diff, None);
     }
 
     #[test]
@@ -301,6 +357,7 @@ mod tests {
                 primary: false,
                 upstream: None,
                 status: BranchStatus::Local,
+                diff: None,
                 updated_at: Utc::now(),
             }],
             created_at: Utc::now(),

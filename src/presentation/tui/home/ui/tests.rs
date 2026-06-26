@@ -21,6 +21,7 @@ fn worktree(branch: Option<&str>, primary: bool, status: BranchStatus) -> Worktr
         primary,
         upstream: None,
         status,
+        diff: None,
         updated_at: Utc::now(),
     }
 }
