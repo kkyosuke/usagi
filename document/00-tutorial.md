@@ -22,15 +22,15 @@
 install ─▶ cd <project> ─▶ usagi init ─▶ usagi hop ─▶ [Open でワークスペースを選ぶ]
                                                           │
                                                           ▼
-                                              統括(Overview) で session create
-                                                          │  ┌─ Ctrl-O ─▶ 切替(Switch) で c → 別セッション作成
+                                              切替(Switch) ─ : ─▶ パレットで session create
+                                                          │  ┌─ c ─▶ 別セッションをその場で作成
                                                           ▼  │
                                               在席(Focus) で agent ─▶ 没入(Attached) で claude を操作
 ```
 
-下の手順はこのまま順に実行できます。モード（**統括・切替・在席・没入**）とキーの考え方は
-[design/05-home.md](design/05-home.md#モードと状態遷移統括切替在席没入) が正本です（`Ctrl-O`＝一段ズームアウト、
-`Esc`＝一段戻る、終了は `Ctrl+C`）。
+下の手順はこのまま順に実行できます。モード（**切替・在席・没入**）とキーの考え方は
+[design/05-home.md](design/05-home.md#モードと状態遷移切替在席没入) が正本です（`Ctrl-O`＝切替へズームアウト、
+`Esc`＝一段戻る、`:`＝[コマンドパレット（統括）](design/05-home.md#コマンドパレット統括overview)、終了は `Ctrl+C`）。
 
 ## 1. インストール
 
@@ -71,19 +71,20 @@ usagi hop
 ```
 
 起動画面（Welcome）が開きます。`Open`（`o`）を選び、先ほど初期化したワークスペースを選択すると
-**ホーム画面**に入り、既定の**統括（Overview）**モードになります。
+**ホーム画面**に入り、既定の**切替（Switch）**モードになります。
 
-- 左ペイン … セッション一覧（先頭は常設の **ルート行 `⌂ root`**）。
-- 下部のコマンドライン … 統括で `session` / `issue` / `config` などを実行する入力面。
+- 左ペイン … セッション一覧（先頭は常設の **ルート行 `⌂ root`**）。キーボードが乗り `↑↓` で選びます。
+- コマンドパレット … `:`（コロン）で開き、`session` / `issue` / `config` などワークスペース全体のコマンドを実行する入力面。
 - 画面・各モードの見た目は [design/05-home.md](design/05-home.md)、画面遷移は
   [design/README.md](design/README.md#画面遷移図) を参照。
 
 ## 4. セッションを作って Agent を起動する
 
-**統括**の下部コマンドラインで、セッション（ワークスペース配下の各 git リポジトリに同名ブランチの
+`:` で**コマンドパレット**を開き、セッション（ワークスペース配下の各 git リポジトリに同名ブランチの
 worktree を張る作業単位）を作ります。`create` は `c` / `new` に短縮できます。
 
 ```text
+:                                 （コマンドパレットを開く）
 session create feature-login      （または短縮形：session c feature-login）
 ```
 
@@ -101,12 +102,12 @@ Run a command:
 **没入（Attached）**に入ります。起動時に usagi の issue MCP サーバ（`usagi mcp`）が組み込まれるので、
 エージェントは起動直後から `issue_*` tool でタスクを操作できます。
 
-- 没入中の**予約キーは `Ctrl-O`・`Ctrl-T`・`Ctrl-N`/`Ctrl-P`・`Ctrl-G`・`Ctrl-W`**で、ほかのキー（`Esc` 含む）はすべて
-  シェルへ流れます。`Ctrl-O` の単押しで**切替**へズームアウト、`Ctrl-T` で**在席へズームアウトしてアクションメニュー**（terminal / agent などを選ぶ画面）を開き、`Ctrl-N`/`Ctrl-P` で**没入のままタブ（ペイン）を前後へ
+- 没入中の**予約キーは `Ctrl-O`・`Ctrl-T`・`Ctrl-N`/`Ctrl-P`（`Ctrl-←`/`Ctrl-→`）・`Ctrl-G`・`Ctrl-W`**で、ほかのキー（`Esc` 含む）はすべて
+  シェルへ流れます。`Ctrl-O` の単押しで**切替**へズームアウト、`Ctrl-T` で**在席へズームアウトしてアクションメニュー**（terminal / agent などを選ぶ画面）を開き、`Ctrl-N`/`Ctrl-P`（または `Ctrl-←`/`Ctrl-→`）で**没入のままタブ（ペイン）を前後へ
   切り替え**、`Ctrl-G` で**没入のまま agent タブを追加**、`Ctrl-W` で**アクティブタブを閉じ**ます
   （その分シェル / Agent 側の同キーは奪われます）。terminal タブの追加は在席のアクションメニュー（`Ctrl-T` で開く）か切替（`t`）、閉じるは切替（`x`）でも行えます。
 - 素のシェルだけ欲しいときは `agent` の代わりに `terminal` を使います。Agent を動かしたまま `Ctrl-T` で在席のアクションメニューを開き、
-  そこから terminal を選べば同じセッションに terminal タブが増え（切替へ抜けて `t` でも可）、`Ctrl-N`/`Ctrl-P`（または切替の `←`/`→`）でタブを行き来できます。
+  そこから terminal を選べば同じセッションに terminal タブが増え（切替へ抜けて `t` でも可）、`Ctrl-N`/`Ctrl-P`（`Ctrl-←`/`Ctrl-→`、または切替の `←`/`→`）でタブを行き来できます。
 - `agent` / `terminal` の仕様は [03-commands/02-tui.md](03-commands/02-tui.md#agent)、MCP の組み込みは
   [03-commands/03-mcp.md](03-commands/03-mcp.md) を参照。
 
@@ -114,18 +115,18 @@ Run a command:
 
 別のタスクを並行で進めたいときは、いまの Agent を**止めずに**新しいセッションを作れます。
 
-1. 没入中に **`Ctrl-O Ctrl-O`**（リーダーキーを 2 回）を押して**切替（Switch）**へズームアウトします（キーボードが左ペインへ移ります）。
+1. 没入中に **`Ctrl-O`**（単押し）を押して**切替（Switch）**へズームアウトします（キーボードが左ペインへ移ります）。
 2. 左ペインで **`c`** を押すと、その場でインラインの名前入力が開きます。新しいセッション名（例 `feature-search`）を
    入力して `Enter` で作成 → そのセッションの**在席**へ移ります。
 3. 在席で再び **`agent`** を起動すれば、2 つ目のセッションでもエージェントが走ります。
 
 ```text
-没入 ──Ctrl-O Ctrl-O──▶ 切替(Switch) ──c──▶ 名前入力 ──Enter──▶ 在席(Focus) ──agent──▶ 没入(Attached)
+没入 ──Ctrl-O──▶ 切替(Switch) ──c──▶ 名前入力 ──Enter──▶ 在席(Focus) ──agent──▶ 没入(Attached)
 ```
 
 各セッションのシェルは画面を開いている間「ターミナルプール」に常駐するので、行き来しても終了しません。
 切替で別のセッションを選んで `Enter`（または `l`）すれば、ライブなセッションへはそのまま再アタッチ、
-アイドルなら在席へ移ります。セッションの破棄は統括で `session remove <name>`（名前を省くと選択モーダル）。
+アイドルなら在席へ移ります。セッションの破棄は `:` で開くコマンドパレットの `session remove <name>`（名前を省くと選択モーダル）。
 ライフサイクルの概念は [04-orchestration.md](04-orchestration.md) を参照。
 
 ## 6. 行き来と入力待ちの通知
@@ -149,6 +150,4 @@ Run a command:
 - [3. コマンドリファレンス](03-commands/README.md) — CLI / TUI 内コマンド / MCP サーバの一覧と詳細。
 - [4. オーケストレーション](04-orchestration.md) — セッション・worktree のライフサイクル。
 - [5. 設定](05-settings.md) — Agent CLI・通知・ローカル LLM などの設定。
-- [design/05-home.md](design/05-home.md) — ホーム画面の 4 モードとキー操作。
-</content>
-</invoke>
+- [design/05-home.md](design/05-home.md) — ホーム画面の 3 モードとキー操作。

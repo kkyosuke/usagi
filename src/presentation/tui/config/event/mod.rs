@@ -89,6 +89,9 @@ pub fn event_loop(
         // install), and Esc cancels.
         if config.install_modal().is_some() {
             match key {
+                // `Ctrl-Q` (the bare `0x11`) quits even mid-entry, matched before the
+                // `Key::Char(c)` arm below that would otherwise capture it as input.
+                Key::Char('\u{0011}') => return Ok(Outcome::Quit),
                 Key::Enter => {
                     notice = run_install(&mut config, install_runtime);
                 }
@@ -119,7 +122,7 @@ pub fn event_loop(
                     notice = run_model_select(&mut config, pull_model);
                 }
                 Key::Escape => config.close_model_modal(),
-                Key::CtrlC => return Ok(Outcome::Quit),
+                Key::CtrlC | Key::Char('\u{0011}') => return Ok(Outcome::Quit),
                 _ => {}
             }
             continue;
@@ -166,7 +169,8 @@ pub fn event_loop(
                 }
             }
             Key::Char('q') | Key::Escape => return Ok(Outcome::Back),
-            Key::CtrlC => return Ok(Outcome::Quit),
+            // `Ctrl-C` / `Ctrl-Q` (the bare `0x11`) quit the app from config too.
+            Key::CtrlC | Key::Char('\u{0011}') => return Ok(Outcome::Quit),
             _ => {}
         }
     }

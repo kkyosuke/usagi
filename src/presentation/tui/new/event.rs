@@ -56,7 +56,8 @@ pub fn event_loop(
 
         match key {
             Key::Escape => return Ok(Outcome::Back),
-            Key::CtrlC => return Ok(Outcome::Quit),
+            // `Ctrl-C` / `Ctrl-Q` (the bare `0x11`) quit the app from here too.
+            Key::CtrlC | Key::Char('\u{0011}') => return Ok(Outcome::Quit),
             Key::Enter => match state.validate() {
                 Ok(project) => return Ok(Outcome::Submitted(project)),
                 Err(message) => notice = Some(message),
@@ -180,6 +181,17 @@ mod tests {
     fn ctrl_c_returns_quit() {
         let term = Term::stdout();
         let mut reader = ScriptedReader::new(vec![Ok(Key::CtrlC)]);
+        assert!(matches!(
+            event_loop(&term, &mut reader, "/base", &FakeDirs).unwrap(),
+            Outcome::Quit
+        ));
+    }
+
+    #[test]
+    fn ctrl_q_returns_quit() {
+        // `Ctrl-Q` (the bare `0x11`) is the global quit chord on this screen too.
+        let term = Term::stdout();
+        let mut reader = ScriptedReader::new(vec![Ok(Key::Char('\u{0011}'))]);
         assert!(matches!(
             event_loop(&term, &mut reader, "/base", &FakeDirs).unwrap(),
             Outcome::Quit

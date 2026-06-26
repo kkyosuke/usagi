@@ -35,6 +35,11 @@ impl Config {
                 self.settings.notifications_enabled = !self.settings.notifications_enabled;
                 true
             }
+            Field::RestorePanes => {
+                // A boolean toggle: direction is irrelevant, it always flips.
+                self.settings.restore_panes_enabled = !self.settings.restore_panes_enabled;
+                true
+            }
             Field::AgentCli => {
                 // Only cycle through installed agents (the current value is always
                 // kept selectable), so an uninstalled CLI is never offered.
@@ -91,6 +96,15 @@ impl Config {
                 let local = self.local_edit_mut();
                 local.settings.notifications_enabled = cycle_optional(
                     local.settings.notifications_enabled,
+                    &[true, false],
+                    forward,
+                );
+                true
+            }
+            LocalField::RestorePanes => {
+                let local = self.local_edit_mut();
+                local.settings.restore_panes_enabled = cycle_optional(
+                    local.settings.restore_panes_enabled,
                     &[true, false],
                     forward,
                 );

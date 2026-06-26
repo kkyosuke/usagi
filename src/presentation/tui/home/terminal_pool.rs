@@ -38,7 +38,8 @@ use std::time::Duration;
 use anyhow::Result;
 use console::Term;
 
-use crate::domain::settings::Sidebar;
+use crate::domain::settings::{AgentCli, Sidebar};
+use crate::infrastructure::open_panes_store::{StoredPane, StoredPaneKind};
 use crate::infrastructure::pty::PtySession;
 use crate::infrastructure::session_monitor::SessionMonitor;
 use crate::infrastructure::{agent_state_store, session_monitor};
@@ -183,6 +184,10 @@ impl MonitorHandle {
 struct Pane {
     pty: PtySession,
     kind: PaneKind,
+    /// For an agent pane, which CLI it ran — recorded so the open-panes snapshot
+    /// can restore the same agent (and resume it) on the next startup. `None` for
+    /// a terminal pane.
+    cli: Option<AgentCli>,
 }
 
 /// The panes of one session (worktree), in tab order, and which one is active
@@ -264,6 +269,7 @@ impl TerminalPool {
         dir: &Path,
         agent: bool,
         agent_command: Option<&str>,
+        cli: AgentCli,
         label: &str,
     ) -> Result<()> {
         let key = dir.to_path_buf();
@@ -281,7 +287,7 @@ impl TerminalPool {
             // entry and spawn the first pane of the requested kind.
             self.sessions.remove(&key);
             let kind = pane_kind(agent);
-            let pane = self.spawn_pane(term, dir, kind, agent_command)?;
+            let pane = self.spawn_pane(term, dir, kind, agent_command, cli)?;
             self.sessions.insert(
                 key,
                 SessionPanes {
@@ -304,9 +310,10 @@ impl TerminalPool {
         dir: &Path,
         kind: PaneKind,
         agent_command: Option<&str>,
+        cli: AgentCli,
         label: &str,
     ) -> Result<()> {
-        let pane = self.spawn_pane(term, dir, kind, agent_command)?;
+        let pane = self.spawn_pane(term, dir, kind, agent_command, cli)?;
         let sp = self
             .sessions
             .entry(dir.to_path_buf())
@@ -318,6 +325,17 @@ impl TerminalPool {
         sp.active = sp.panes.len() - 1;
         self.refresh_watched(dir, label);
         Ok(())
+    }
+
+    /// Set `dir`'s active tab directly (clamped to the pane count), for restoring
+    /// the tab that was active when the session's panes were last persisted. A
+    /// no-op for a session with no panes.
+    pub fn set_active(&mut self, dir: &Path, active: usize) {
+        if let Some(sp) = self.sessions.get_mut(dir) {
+            if !sp.panes.is_empty() {
+                sp.active = active.min(sp.panes.len() - 1);
+            }
+        }
     }
 
     /// Move the active tab within `dir` (next / previous / a numbered jump),
@@ -436,22 +454,26 @@ impl TerminalPool {
         dir: &Path,
         kind: PaneKind,
         agent_command: Option<&str>,
+        cli: AgentCli,
     ) -> Result<Pane> {
         let (height, width) = term.size();
         // Sized to the full-sidebar pane: the 没入 `drive` loop resizes the pane to
         // the live sidebar state on attach, so a session collapsed to the rail
         // still fits the moment it is driven.
         let geo = ui::attached_geometry(height as usize, width as usize, Sidebar::Full);
-        let initial = match kind {
-            PaneKind::Agent => agent_command,
-            PaneKind::Terminal => None,
+        let (initial, cli) = match kind {
+            // An agent pane sends its launch command and remembers its CLI (so the
+            // open-panes snapshot can restore the same agent and resume it).
+            PaneKind::Agent => (agent_command, Some(cli)),
+            // A terminal pane opens a plain shell and has no agent to record.
+            PaneKind::Terminal => (None, None),
         };
         if matches!(kind, PaneKind::Agent) {
             agent_state_store::clear(dir);
             self.lock().monitor.forget(dir);
         }
         let pty = PtySession::spawn(dir, geo.rows, geo.cols, initial)?;
-        Ok(Pane { pty, kind })
+        Ok(Pane { pty, kind, cli })
     }
 
     /// Re-register `dir`'s watched handles from its current panes: liveness is the
@@ -496,7 +518,10 @@ impl TerminalPool {
     /// shell — inheriting the previous run's agent and scrollback — instead of
     /// spawning fresh. Dropping each [`PtySession`] kills its shell (via `Drop`),
     /// and the watched / monitor / phase state for the path is cleared too.
-    pub fn remove_under(&mut self, root: &Path) {
+    /// Returns the worktree paths whose panes were removed, so the caller can also
+    /// clear their persisted open-pane snapshots (a session recreated at the same
+    /// path then starts fresh rather than restoring this run's panes).
+    pub fn remove_under(&mut self, root: &Path) -> Vec<PathBuf> {
         let removed: Vec<PathBuf> = self
             .sessions
             .keys()
@@ -504,7 +529,7 @@ impl TerminalPool {
             .cloned()
             .collect();
         if removed.is_empty() {
-            return;
+            return removed;
         }
         for path in &removed {
             // Dropping the PtySession kills the shell it owns.
@@ -516,6 +541,28 @@ impl TerminalPool {
             shared.monitor.forget(path);
             agent_state_store::clear(path);
         }
+        drop(shared);
+        removed
+    }
+
+    /// The open-pane snapshot for a single session (`dir`), or `None` when no
+    /// session with panes is rooted there. The home screen persists this after a
+    /// pane is attached / closed so the on-disk snapshot tracks the live panes.
+    pub fn snapshot_open_panes_for(&self, dir: &Path) -> Option<(usize, Vec<StoredPane>)> {
+        let sp = self.sessions.get(dir).filter(|sp| !sp.panes.is_empty())?;
+        let panes = sp
+            .panes
+            .iter()
+            .map(|p| StoredPane {
+                kind: match p.kind {
+                    PaneKind::Agent => StoredPaneKind::Agent,
+                    PaneKind::Terminal => StoredPaneKind::Terminal,
+                },
+                cli: p.cli,
+            })
+            .collect();
+        let active = sp.active.min(sp.panes.len().saturating_sub(1));
+        Some((active, panes))
     }
 
     /// Snapshot the live terminal for the session rooted at `dir`, resized to the
@@ -603,8 +650,8 @@ fn pane_kind(agent: bool) -> PaneKind {
 
 /// Spawn the watcher thread: every [`POLL_INTERVAL`] it prunes exited sessions,
 /// feeds the live bell counts and recorded phases to the [`SessionMonitor`], and
-/// fires a one-shot notification for each background session that has just begun
-/// waiting for input or whose agent has just finished.
+/// fires a one-shot notification for each session that has just begun waiting for
+/// input (background or attached) or whose background agent has just finished.
 fn spawn_watcher(
     shared: Arc<Mutex<Shared>>,
     stop: Arc<AtomicBool>,
@@ -688,8 +735,8 @@ fn spawn_watcher(
     })
 }
 
-/// Show a desktop notification that a background session changed state: it began
-/// waiting for input, or its agent finished.
+/// Show a desktop notification that a session changed state: it began waiting for
+/// input (background or attached), or a background agent finished.
 ///
 /// Best-effort: failures (e.g. a headless environment without a notification
 /// daemon) are ignored so they never disturb the watcher loop.

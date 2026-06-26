@@ -140,6 +140,41 @@ fn activate_selected_on_an_empty_list_picks_the_root_row() {
 }
 
 #[test]
+fn activate_selected_records_the_session_left_as_the_jump_back_target() {
+    let mut list = sample(); // root, main, feature, fix
+                             // Nothing recorded until the active row first moves off the root.
+    assert_eq!(list.previous_row(), None);
+    list.move_down(); // cursor on "main"
+    list.activate_selected(); // active main; left the root row behind
+    assert_eq!(list.previous_row(), Some(0)); // jump back to the root row
+    list.move_down(); // cursor on "feature"
+    list.activate_selected(); // active feature; left "main" behind
+    assert_eq!(list.previous_row(), Some(1)); // "main" is row 1
+                                              // Re-activating the same row is a no-op focus: it must not erase the target.
+    list.activate_selected();
+    assert_eq!(list.previous_row(), Some(1));
+}
+
+#[test]
+fn previous_row_is_none_once_the_recorded_session_no_longer_exists() {
+    // A list rebuilt without the recorded session (a removed worktree) carries the
+    // name forward but resolves it to no row.
+    let mut list = sample();
+    list.move_down();
+    list.move_down(); // cursor on "feature"
+    list.activate_selected(); // previous = root
+    list.move_down(); // cursor on "fix"
+    list.activate_selected(); // previous = "feature"
+    assert_eq!(list.previous_active_name(), Some("feature"));
+    assert_eq!(list.previous_row(), Some(2));
+    // Carry the name onto a list that no longer has "feature".
+    let mut rebuilt = WorktreeList::new("usagi", vec![worktree("main"), worktree("fix")]);
+    rebuilt.set_previous_active(list.previous_active_name().map(str::to_string));
+    assert_eq!(rebuilt.previous_active_name(), Some("feature"));
+    assert_eq!(rebuilt.previous_row(), None);
+}
+
+#[test]
 fn activate_by_name_matches_worktrees_the_root_or_reports_missing() {
     let mut list = sample(); // root, main, feature, fix
     assert!(list.activate_by_name("fix"));
@@ -225,9 +260,12 @@ fn state_with_spy() -> (HomeState, SpyLogger) {
 }
 
 #[test]
-fn new_state_starts_in_overview_with_a_hint() {
+fn new_state_starts_in_switch_with_a_hint() {
     let state = state();
-    assert_eq!(state.mode(), Mode::Overview);
+    // The default mode is the base 切替 (Switch); the command palette is closed.
+    assert_eq!(state.mode(), Mode::Switch);
+    assert!(!state.command_palette_open());
+    assert_eq!(state.switch_return(), ReturnMode::Base);
     assert_eq!(state.input(), "");
     assert_eq!(state.list().worktrees().len(), 2);
     // The seed log carries the usage hint.
@@ -235,8 +273,24 @@ fn new_state_starts_in_overview_with_a_hint() {
     assert!(state.log()[0].text.contains("man"));
     // The default action surface is the menu.
     assert_eq!(state.session_action_ui(), SessionActionUi::Menu);
-    // The Overview line is always workspace-scoped.
+    // The command palette line is always workspace-scoped.
     assert_eq!(state.command_scope(), CommandScope::Workspace);
+}
+
+#[test]
+fn command_palette_opens_and_closes_clearing_the_input() {
+    let mut state = state();
+    assert!(!state.command_palette_open());
+    // Typing then opening the palette starts it fresh (input cleared).
+    state.push_char('x');
+    state.open_command_palette();
+    assert!(state.command_palette_open());
+    assert_eq!(state.input(), "");
+    // Closing it clears the input again.
+    state.push_char('y');
+    state.close_command_palette();
+    assert!(!state.command_palette_open());
+    assert_eq!(state.input(), "");
 }
 
 #[test]
@@ -604,9 +658,9 @@ fn recall_and_submit_place_the_caret_at_the_end() {
 #[test]
 fn enter_switch_remembers_its_return_mode_and_moves_the_cursor() {
     let mut state = state(); // root, main, feature
-    state.enter_switch(ReturnMode::Overview);
+    state.enter_switch(ReturnMode::Base);
     assert_eq!(state.mode(), Mode::Switch);
-    assert_eq!(state.switch_return(), ReturnMode::Overview);
+    assert_eq!(state.switch_return(), ReturnMode::Base);
     state.switch_move_down();
     assert_eq!(state.list().selected_index(), 1);
     state.switch_move_up();
@@ -628,7 +682,7 @@ fn switch_return_carries_each_origin() {
 #[test]
 fn switch_inline_create_edits_then_confirms_a_fresh_name() {
     let mut state = state();
-    state.enter_switch(ReturnMode::Overview);
+    state.enter_switch(ReturnMode::Base);
     assert!(!state.is_creating());
     state.switch_begin_create(Vec::new());
     assert!(state.is_creating());
@@ -648,7 +702,7 @@ fn switch_inline_create_edits_then_confirms_a_fresh_name() {
 #[test]
 fn switch_inline_create_rejects_empty_and_duplicate_names() {
     let mut state = state();
-    state.enter_switch(ReturnMode::Overview);
+    state.enter_switch(ReturnMode::Base);
     // "feature" is an existing branch, so it is in the taken set.
     state.switch_begin_create(vec!["feature".to_string()]);
     // Whitespace only is empty after trimming: no live error (it does not nag),
@@ -675,7 +729,7 @@ fn switch_inline_create_rejects_empty_and_duplicate_names() {
 #[test]
 fn switch_inline_create_flags_a_branch_namespace_clash_live() {
     let mut state = state();
-    state.enter_switch(ReturnMode::Overview);
+    state.enter_switch(ReturnMode::Base);
     // Branches nested under `test/` make a plain `test` session impossible.
     state.switch_begin_create(vec!["test/home-ui-e2e".to_string()]);
     for c in "test".chars() {
@@ -702,7 +756,7 @@ fn switch_inline_create_flags_a_branch_namespace_clash_live() {
 #[test]
 fn switch_inline_create_can_be_cancelled() {
     let mut state = state();
-    state.enter_switch(ReturnMode::Overview);
+    state.enter_switch(ReturnMode::Base);
     state.switch_begin_create(Vec::new());
     state.create_mut().unwrap().push_char('x');
     state.create_cancel();
@@ -724,7 +778,7 @@ fn create_accessors_are_none_when_not_creating() {
 #[test]
 fn create_caret_moves_and_edits_mid_name() {
     let mut state = state();
-    state.enter_switch(ReturnMode::Overview);
+    state.enter_switch(ReturnMode::Base);
     state.switch_begin_create(Vec::new());
     for c in "wip".chars() {
         state.create_mut().unwrap().push_char(c);
@@ -752,7 +806,7 @@ fn create_caret_moves_and_edits_mid_name() {
 #[test]
 fn switch_inline_rename_prefills_edits_then_confirms_a_label() {
     let mut state = state(); // sessions: main, feature
-    state.enter_switch(ReturnMode::Overview);
+    state.enter_switch(ReturnMode::Base);
     state.switch_move_down(); // cursor onto "main"
     assert!(state.switch_begin_rename());
     assert!(state.is_renaming());
@@ -780,7 +834,7 @@ fn switch_inline_rename_prefills_edits_then_confirms_a_label() {
 #[test]
 fn switch_begin_rename_is_a_noop_on_the_root_row_and_when_already_open() {
     let mut state = state();
-    state.enter_switch(ReturnMode::Overview);
+    state.enter_switch(ReturnMode::Base);
     // Cursor on the root row: there is no session to rename.
     assert!(state.list().root_selected());
     assert!(!state.switch_begin_rename());
@@ -809,7 +863,7 @@ fn rename_accessors_are_none_when_not_renaming() {
 #[test]
 fn rename_can_be_cancelled() {
     let mut state = state();
-    state.enter_switch(ReturnMode::Overview);
+    state.enter_switch(ReturnMode::Base);
     state.switch_move_down();
     state.switch_begin_rename();
     state.rename_mut().unwrap().push_char('x');
@@ -822,7 +876,7 @@ fn rename_input_supports_caret_movement_and_forward_delete() {
     // The rename input has the same mid-string editing affordances as create: the
     // caret can move and a character can be deleted forward, not only at the end.
     let mut state = state();
-    state.enter_switch(ReturnMode::Overview);
+    state.enter_switch(ReturnMode::Base);
     state.switch_move_down();
     assert!(state.switch_begin_rename());
     let rename = state.rename_mut().unwrap();
@@ -879,6 +933,38 @@ fn enter_focus_activates_a_row_and_resets_the_surface() {
 }
 
 #[test]
+fn previous_session_row_tracks_the_last_focused_session() {
+    let mut state = state(); // root, main, feature
+                             // Nothing to jump back to before a second session is focused.
+    assert_eq!(state.previous_session_row(), None);
+    state.enter_focus(1); // main; left the root behind
+    assert_eq!(state.previous_session_row(), Some(0));
+    state.enter_focus(2); // feature; left "main" behind
+    assert_eq!(state.previous_session_row(), Some(1)); // back to "main"
+}
+
+#[test]
+fn refresh_sessions_keeps_the_previous_session_jump_target() {
+    let mut state = state();
+    state.apply_session_outcome(SessionOutcome {
+        line: LogLine::output("created"),
+        sessions: Some(vec![session_record("alpha", 1), session_record("beta", 1)]),
+        select: Some("beta".to_string()),
+    });
+    state.enter_focus(1); // alpha
+    state.enter_focus(2); // beta; previous = alpha
+    assert_eq!(state.previous_session_row(), Some(1)); // alpha is row 1
+
+    // A re-sync that keeps alpha must keep the jump target pointing at it.
+    state.refresh_sessions(vec![session_record("alpha", 1), session_record("beta", 1)]);
+    assert_eq!(state.previous_session_row(), Some(1));
+
+    // A re-sync that drops alpha leaves no target to jump back to.
+    state.refresh_sessions(vec![session_record("beta", 1)]);
+    assert_eq!(state.previous_session_row(), None);
+}
+
+#[test]
 fn enter_focus_named_focuses_the_matching_session() {
     let mut state = state(); // root, main, feature
     assert!(state.enter_focus_named("feature"));
@@ -893,9 +979,9 @@ fn enter_focus_named_focuses_the_matching_session() {
 #[test]
 fn enter_focus_named_is_a_no_op_for_an_unknown_session() {
     let mut state = state();
-    // An unmatched name leaves the mode and cursor untouched (still 統括, root row).
+    // An unmatched name leaves the mode and cursor untouched (still 切替, root row).
     assert!(!state.enter_focus_named("nope"));
-    assert_eq!(state.mode(), Mode::Overview);
+    assert_eq!(state.mode(), Mode::Switch);
     assert!(state.list().root_active());
 }
 
@@ -908,11 +994,12 @@ fn enter_focus_on_the_root_row_names_root() {
 }
 
 #[test]
-fn leave_focus_returns_to_overview() {
+fn leave_focus_returns_to_base_switch() {
     let mut state = state();
     state.enter_focus(1);
     state.leave_focus();
-    assert_eq!(state.mode(), Mode::Overview);
+    assert_eq!(state.mode(), Mode::Switch);
+    assert_eq!(state.switch_return(), ReturnMode::Base);
 }
 
 #[test]
@@ -1047,6 +1134,40 @@ fn focus_menu_hides_close_on_the_root_row() {
 }
 
 #[test]
+fn preview_menu_commands_follow_the_cursor_not_the_active_row() {
+    // The 切替 preview shows what *selecting* the highlighted row reveals, so its
+    // command list (and `close` visibility) must track the cursor, independent of
+    // whichever row happens to be active.
+    let mut state = state();
+
+    // Active row is the root, cursor moved onto a session row: the preview is the
+    // session's, so `close` is offered even though the active row cannot close.
+    state.enter_focus(0);
+    state.switch_move_down();
+    assert!(state.list().root_active());
+    assert!(!state.list().root_selected());
+    let names: Vec<&str> = state
+        .preview_menu_commands()
+        .iter()
+        .map(|i| i.name)
+        .collect();
+    assert_eq!(names, vec!["terminal", "agent", "close"]);
+
+    // Active row is a session, cursor moved back onto the root row: the preview is
+    // the root's, so `close` is hidden even though the active session could close.
+    state.enter_focus(1);
+    state.switch_move_up();
+    assert!(!state.list().root_active());
+    assert!(state.list().root_selected());
+    let names: Vec<&str> = state
+        .preview_menu_commands()
+        .iter()
+        .map(|i| i.name)
+        .collect();
+    assert_eq!(names, vec!["terminal", "agent"]);
+}
+
+#[test]
 fn focus_menu_cursor_moves_and_wraps_and_selects() {
     let mut state = state();
     state.enter_focus(1);
@@ -1160,7 +1281,7 @@ fn focus_prompt_completes_command_arguments_and_lists_candidates() {
     let mut state = state();
     state.enter_focus(1);
     // `man ` completes its argument against the command names — ambiguous here,
-    // so the candidates are listed in the log (mirroring the Overview line).
+    // so the candidates are listed in the log (mirroring the palette line).
     for c in "man ".chars() {
         state.focus_prompt_mut().insert(c);
     }
@@ -1333,19 +1454,22 @@ fn leaving_attached_drops_the_tab_strip() {
 }
 
 #[test]
-fn enter_overview_clears_transient_state() {
+fn leave_focus_returns_to_base_switch_clearing_the_create_input() {
     let mut state = state();
-    state.enter_switch(ReturnMode::Overview);
+    state.enter_focus(1);
     state.switch_begin_create(Vec::new());
+    // Leaving 在席 returns to the base 切替 (via `enter_switch(Base)`), which clears
+    // the inline create input. Re-entering 在席 later resets the prompt / menu.
+    state.leave_focus();
+    assert_eq!(state.mode(), Mode::Switch);
+    assert_eq!(state.switch_return(), ReturnMode::Base);
+    assert!(!state.is_creating());
+    // Re-entering 在席 resets the focus surface (prompt cleared, cursor at top).
     state.enter_focus(1);
     state.focus_prompt_mut().insert('x');
-    state.focus_menu_move_down();
-    state.enter_overview();
-    assert_eq!(state.mode(), Mode::Overview);
-    assert!(!state.is_creating());
+    state.enter_focus(1);
     assert_eq!(state.focus_prompt(), "");
     assert_eq!(state.focus_menu_cursor(), 0);
-    assert_eq!(state.input(), "");
 }
 
 #[test]

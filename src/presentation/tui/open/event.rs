@@ -44,7 +44,13 @@ pub fn event_loop(
 
     loop {
         let (height, width) = term.size();
-        let frame = ui::render_frame(height as usize, width as usize, &list, notice.as_deref());
+        let frame = ui::render_frame(
+            height as usize,
+            width as usize,
+            &list,
+            notice.as_deref(),
+            chrono::Utc::now(),
+        );
         painter.paint(term, frame)?;
 
         let key = match animated_read(reader, term, &mut painter, &install_task::handle()) {
@@ -67,6 +73,10 @@ pub fn event_loop(
                 // Clone the selection so the immutable borrow is dropped before
                 // promoting it to the top of the list on return.
                 if let Some(workspace) = list.selected().cloned() {
+                    // Opening the workspace is wired by the caller: it hides the
+                    // list, plays the mascot animation while loading the workspace
+                    // off-thread, then shows the home screen (切替). See
+                    // [`super::run`].
                     match open_home(term, &workspace)? {
                         // The home screen drew over the list; force a full
                         // repaint of it on the next pass. The just-opened
@@ -82,7 +92,8 @@ pub fn event_loop(
                 }
             }
             Key::Char('q') | Key::Escape => return Ok(Outcome::Back),
-            Key::CtrlC => return Ok(Outcome::Quit),
+            // `Ctrl-C` / `Ctrl-Q` (the bare `0x11`) quit the app from here too.
+            Key::CtrlC | Key::Char('\u{0011}') => return Ok(Outcome::Quit),
             _ => {}
         }
     }
@@ -125,9 +136,15 @@ mod tests {
     }
 
     fn sample_list() -> ProjectList {
+        use crate::usecase::workspace::WorkspaceOverview;
+        let overview = |name: &str, path: &str| WorkspaceOverview {
+            workspace: Workspace::new(name, path),
+            session_count: 0,
+            open_issue_count: 0,
+        };
         ProjectList::new(vec![
-            Workspace::new("alpha", "/p/alpha"),
-            Workspace::new("beta", "/p/beta"),
+            overview("alpha", "/p/alpha"),
+            overview("beta", "/p/beta"),
         ])
     }
 
@@ -157,6 +174,15 @@ mod tests {
     fn ctrl_c_returns_quit() {
         assert!(matches!(
             run(vec![Ok(Key::CtrlC)], sample_list()).unwrap(),
+            Outcome::Quit
+        ));
+    }
+
+    #[test]
+    fn ctrl_q_returns_quit() {
+        // `Ctrl-Q` is the global quit chord (the bare `0x11` `console` reports).
+        assert!(matches!(
+            run(vec![Ok(Key::Char('\u{0011}'))], sample_list()).unwrap(),
             Outcome::Quit
         ));
     }

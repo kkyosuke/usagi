@@ -1,4 +1,3 @@
-
 use super::*;
 use crate::domain::settings::{AgentCli, LocalSettings, Settings, Theme};
 use std::cell::RefCell;
@@ -95,6 +94,13 @@ fn ctrl_c_returns_quit() {
 }
 
 #[test]
+fn ctrl_q_returns_quit() {
+    // `Ctrl-Q` (the bare `0x11`) quits from the config screen too.
+    let (outcome, _) = run_recording(vec![Ok(Key::Char('\u{0011}'))], sample_config());
+    assert!(matches!(outcome, Outcome::Quit));
+}
+
+#[test]
 fn navigation_keys_move_the_cursor_then_back() {
     // Exercises every navigation arm (arrows + j/k aliases) and the
     // ignored-key arm, then leaves via Escape.
@@ -184,6 +190,7 @@ fn cycling_default_workspace_persists_when_saved() {
         Ok(Key::ArrowDown),  // Default Workspace
         Ok(Key::ArrowRight), // -> alpha
         Ok(Key::ArrowDown),  // Notifications
+        Ok(Key::ArrowDown),  // Restore Panes
         Ok(Key::ArrowDown),  // Agent CLI
         Ok(Key::ArrowDown),  // Session Action UI
         Ok(Key::ArrowDown),  // Local LLM
@@ -285,6 +292,7 @@ fn saving_a_local_override_passes_it_to_save() {
     let keys = vec![
         Ok(Key::ArrowRight), // Agent CLI override: Global -> Claude
         Ok(Key::ArrowDown),  // Notifications
+        Ok(Key::ArrowDown),  // Restore Panes
         Ok(Key::ArrowDown),  // Default Branch
         Ok(Key::ArrowDown),  // Branch Source
         Ok(Key::ArrowDown),  // Save button
@@ -395,6 +403,7 @@ fn keys_to_local_llm() -> Vec<io::Result<Key>> {
     vec![
         Ok(Key::ArrowDown), // Default Workspace
         Ok(Key::ArrowDown), // Notifications
+        Ok(Key::ArrowDown), // Restore Panes
         Ok(Key::ArrowDown), // Agent CLI
         Ok(Key::ArrowDown), // Session Action UI
         Ok(Key::ArrowDown), // Local LLM
@@ -488,6 +497,17 @@ fn ctrl_c_in_the_install_modal_quits() {
 }
 
 #[test]
+fn ctrl_q_in_the_install_modal_quits() {
+    // `Ctrl-Q` arrives as `Key::Char('\u{0011}')`; it must quit even mid-entry
+    // rather than being captured as a password character by the `Char(c)` arm.
+    let mut keys = keys_to_local_llm();
+    keys.extend([Ok(Key::Char(' ')), Ok(Key::Char('\u{0011}'))]);
+    let (outcome, passwords, _) = run_with_install(keys, sample_config(), ok_install, ok_pull);
+    assert!(matches!(outcome, Outcome::Quit));
+    assert!(passwords.is_empty());
+}
+
+#[test]
 fn a_failed_install_is_shown_as_a_notice_and_recovers() {
     let mut keys = keys_to_local_llm();
     keys.extend([
@@ -554,6 +574,16 @@ fn escape_cancels_the_model_picker_without_pulling() {
 fn ctrl_c_in_the_model_picker_quits() {
     let mut keys = keys_to_model_row();
     keys.extend([Ok(Key::Enter), Ok(Key::CtrlC)]);
+    let (outcome, _, pulled) = run_with_install(keys, installed_config(), ok_install, ok_pull);
+    assert!(matches!(outcome, Outcome::Quit));
+    assert!(pulled.is_empty());
+}
+
+#[test]
+fn ctrl_q_in_the_model_picker_quits() {
+    // `Ctrl-Q` (the bare `0x11`) quits from the model picker too.
+    let mut keys = keys_to_model_row();
+    keys.extend([Ok(Key::Enter), Ok(Key::Char('\u{0011}'))]);
     let (outcome, _, pulled) = run_with_install(keys, installed_config(), ok_install, ok_pull);
     assert!(matches!(outcome, Outcome::Quit));
     assert!(pulled.is_empty());
@@ -690,6 +720,7 @@ fn toggling_the_local_llm_after_install_persists_the_enabled_flag() {
     let keys = vec![
         Ok(Key::ArrowDown),  // Default Workspace
         Ok(Key::ArrowDown),  // Notifications
+        Ok(Key::ArrowDown),  // Restore Panes
         Ok(Key::ArrowDown),  // Agent CLI
         Ok(Key::ArrowDown),  // Session Action UI
         Ok(Key::ArrowDown),  // Local LLM

@@ -1,5 +1,5 @@
 //! End-to-end UI tests for the home screen's *main use case*: the engagement
-//! ladder 統括 (Overview) → 切替 (Switch) → 在席 (Focus) → 没入 (Attached).
+//! ladder 切替 (Switch) → 在席 (Focus) → 没入 (Attached).
 //!
 //! Where [`ui::tests`](super::ui) checks individual rendered components and
 //! [`event::tests`](super::event) checks how keys drive the loop, these tie the
@@ -22,7 +22,7 @@ use crate::presentation::tui::screen::KeyReader;
 
 use super::event::{event_loop_compat, ConfigReload, Outcome};
 use super::oneshot::OneShot;
-use super::state::{HomeState, LogLine, PaneExit, ReturnMode, SessionOutcome};
+use super::state::{HomeState, LogLine, PaneExit, SessionOutcome};
 use super::terminal_pool::{MonitorHandle, MonitorSnapshot};
 use super::terminal_tabs::TabNav;
 use super::terminal_view::TerminalView;
@@ -31,14 +31,10 @@ use super::update::UpdateHandle;
 
 /// A full-size frame: the journey is meaningless at a cramped size, and the
 /// component tests already cover the narrow-terminal fallbacks.
-// Tall enough for root (2 lines) + the divider + two sessions (2 lines each)
-// to clear the bottom command-hint band in Overview, plus the blank separator
-// row below the mode ladder.
+// Tall enough for root (2 lines) + the divider + two sessions (2 lines each),
+// plus the blank separator row below the mode ladder.
 const ROWS: usize = 26;
 const COLS: usize = 80;
-/// The byte `console` reports for `Ctrl-O`, the key that zooms out one rung of
-/// the ladder (mirrors `event::CTRL_O`).
-const CTRL_O: char = '\u{000f}';
 /// The path of the `feat` session, marked live (a running agent) throughout.
 const FEAT_PATH: &str = "/repo/feat";
 
@@ -85,20 +81,29 @@ fn walking_the_engagement_ladder_renders_each_rung() {
         ..Default::default()
     });
 
-    // --- 統括 (Overview) ---------------------------------------------------
-    // The landing screen: the workspace title, both sessions in the left pane
-    // with the live agent surfaced, the command line, and the Overview footer.
-    let overview = plain(&render_frame(ROWS, COLS, &state));
-    assert!(overview.contains("usagi"), "title bar names the workspace");
-    assert!(overview.contains("main") && overview.contains("feat"));
-    assert!(overview.contains("running"), "the live agent is surfaced");
-    assert!(overview.contains("overview"), "footer reports the mode");
+    // --- 切替 (Switch): the landing screen, pick a session -----------------
+    // The default screen: the workspace title, both sessions in the left pane
+    // with the live agent surfaced, the picker prompt, and the Switch footer.
+    let landing = plain(&render_frame(ROWS, COLS, &state));
+    assert!(landing.contains("usagi"), "title bar names the workspace");
+    assert!(landing.contains("main") && landing.contains("feat"));
+    assert!(landing.contains("running"), "the live agent is surfaced");
+    assert!(landing.contains("switch"), "footer reports Switch");
+    assert!(
+        landing.contains("Pick a session"),
+        "the picker prompt shows"
+    );
 
-    // --- 切替 (Switch): pick a session -------------------------------------
-    // `Ctrl-O` from Overview opens the picker; the cursor moves down onto the
-    // live `feat` row. The event loop feeds the highlighted session's live
-    // screen into the right-pane preview, so mirror that here.
-    state.enter_switch(ReturnMode::Overview);
+    // The `:` command palette floats the workspace command line over the panes.
+    state.open_command_palette();
+    let palette = plain(&render_frame(ROWS, COLS, &state));
+    assert!(palette.contains("Command"), "the palette is titled");
+    assert!(palette.contains('❯'), "the palette carries the prompt");
+    state.close_command_palette();
+
+    // The cursor moves down onto the live `feat` row. The event loop feeds the
+    // highlighted session's live screen into the right-pane preview, so mirror
+    // that here.
     state.switch_move_down(); // root -> main
     state.switch_move_down(); // main -> feat
     state.set_terminal_view(TerminalView::from_rows(
@@ -106,8 +111,6 @@ fn walking_the_engagement_ladder_renders_each_rung() {
         None,
     ));
     let switch = plain(&render_frame(ROWS, COLS, &state));
-    assert!(switch.contains("switch"), "footer reports Switch");
-    assert!(switch.contains("Pick a session"), "the picker prompt shows");
     assert!(switch.contains("feat"));
     assert!(
         switch.contains("agent: thinking…"),
@@ -170,12 +173,12 @@ fn event_loop_attaches_a_live_session_end_to_end() {
     let term = Term::stdout();
     let mut reader = ScriptedReader {
         keys: [
-            Key::Char(CTRL_O), // Overview -> Switch
-            Key::ArrowDown,    // root -> main
-            Key::ArrowDown,    // main -> feat
-            Key::Enter,        // focus feat; live -> attach the pane
-            Key::Escape,       // pane closed -> Focus -> Overview
-            Key::CtrlC,        // nothing live -> quit
+            // 切替 is the default landing mode, so no Ctrl-O is needed to reach it.
+            Key::ArrowDown, // root -> main
+            Key::ArrowDown, // main -> feat
+            Key::Enter,     // focus feat; live -> attach the pane
+            Key::Escape,    // pane closed -> Focus -> Switch
+            Key::CtrlC,     // nothing live -> quit
         ]
         .into_iter()
         .collect(),

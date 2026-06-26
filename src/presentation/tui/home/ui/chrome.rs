@@ -1,7 +1,7 @@
 //! The chrome around the body: the title bar and engagement-ladder indicator,
-//! the mode-aware command input and footer, the Overview command hints, and the
-//! session-removal / quit-confirmation modals. All functions take plain data
-//! and return styled lines.
+//! the mode-aware command input and footer, the `:` command palette overlay
+//! (with its command hints), and the session-removal / quit-confirmation
+//! modals. All functions take plain data and return styled lines.
 
 use console::{style, Style};
 
@@ -17,6 +17,16 @@ use super::{
 };
 use crate::presentation::tui::widgets;
 
+/// Minimum / maximum display width of the active-session-name field in the
+/// title bar. The field scales with the terminal (a quarter of its width) and
+/// is clamped to this range, so a roomy window shows more of a long name while a
+/// narrow one stays compact. A long name is clipped to the chosen width, a short
+/// one padded out — and since the width depends only on the (per-frame constant)
+/// terminal size, never the name text, the label keeps the same width every
+/// frame, so the centred title never shifts as the active session changes.
+const TITLE_NAME_MIN_W: usize = 12;
+const TITLE_NAME_MAX_W: usize = 24;
+
 /// The centred title bar: workspace name and session count. The count covers
 /// every row in the left pane — the root row plus each session (one row per
 /// session, not per repository) — so it matches what the user sees.
@@ -25,48 +35,33 @@ pub(super) fn title_bar(width: usize, list: &WorktreeList) -> String {
     // The active session's name rides in the title so it is identifiable even
     // when the sidebar is collapsed to the rail (which shows no names). `▸` marks
     // it; the root row reads as the workspace itself.
+    //
+    // Pin the name to a fixed-width field (clipped if long, padded if short) so
+    // the whole label keeps a constant width and the centred bar stays put as
+    // the active session changes — a longer name no longer pushes it sideways.
+    let name_w = (width / 4).clamp(TITLE_NAME_MIN_W, TITLE_NAME_MAX_W);
+    let name = pad_to_width(clip_to_width(list.active_name(), name_w), name_w);
     let label = format!(
-        "{} · ▸ {} · {count} session{}",
+        "{} · ▸ {name} · {count} session{}",
         list.workspace_name(),
-        list.active_name(),
         if count == 1 { "" } else { "s" }
     );
     widgets::title_line(width, &label)
 }
 
-/// The top-right "update available" notice: the usagi mascot beside a short
-/// note that a release newer than the running build (`latest`) has been
-/// published. Shown only while the background update check reports one.
+/// The top-right "update available" notice: a short note that a release newer
+/// than the running build (`latest`) has been published. Shown only while the
+/// background update check reports one.
 ///
-/// Each returned line pairs a mascot row with its message and is right-padded to
-/// a common block width and styled yellow-bold, so the block right-aligns
-/// cleanly when [`overlay_top_right`](super::overlay_top_right) anchors it to the
-/// top rows.
+/// Both lines are right-padded to a common block width and styled yellow-bold so
+/// the block right-aligns cleanly when [`overlay_top_right`](super::overlay_top_right)
+/// anchors it to the header rows.
 pub(super) fn update_banner(latest: &Version) -> Vec<String> {
-    let art = widgets::rabbit_art();
-    let art_w = art
-        .iter()
-        .map(|line| console::measure_text_width(line))
-        .max()
-        .unwrap_or(0);
-    // One message per mascot row; the last row carries only the mascot's feet.
-    let messages = [
-        "アップデートがあるぴょん".to_string(),
-        format!("v{latest}"),
-        String::new(),
-    ];
-    let rows: Vec<String> = art
-        .iter()
-        .zip(messages.iter())
-        .map(|(line, message)| {
-            let cell = pad_to_width((*line).to_string(), art_w);
-            if message.is_empty() {
-                cell
-            } else {
-                format!("{cell}  {message}")
-            }
-        })
-        .collect();
+    // The message on the first line, the new version on the second. No mascot
+    // art: the title bar pads the active session name to a fixed width and so
+    // reaches far enough right that only a compact block fits in the gap on the
+    // header rows where this is anchored.
+    let rows = ["アップデートがあるぴょん".to_string(), format!("v{latest}")];
     let block_w = rows
         .iter()
         .map(|row| console::measure_text_width(row))
@@ -79,8 +74,6 @@ pub(super) fn update_banner(latest: &Version) -> Vec<String> {
                 .bold()
                 .to_string()
         })
-        // 一番下に空行を 1 行足して、下のコンテンツとの間に余白を作る。
-        .chain(std::iter::once(String::new()))
         .collect()
 }
 
@@ -163,13 +156,12 @@ pub(super) fn task_status_line(rows: &[TaskRow], width: usize) -> Vec<String> {
     vec![line1, line2]
 }
 
-/// The engagement-ladder indicator drawn just under the title bar: the four
+/// The engagement-ladder indicator drawn just under the title bar: the three
 /// modes in order with the current one highlighted (cyan-bold) and the rest
 /// dimmed, so the screen always shows which step the keys act on. Centred for
 /// the terminal width.
 pub(super) fn mode_ladder(width: usize, current: Mode) -> String {
-    const STEPS: [(Mode, &str); 4] = [
-        (Mode::Overview, "Overview"),
+    const STEPS: [(Mode, &str); 3] = [
         (Mode::Switch, "Switch"),
         (Mode::Focus, "Focus"),
         (Mode::Attached, "Attached"),
@@ -214,11 +206,11 @@ pub(super) fn command_hint_row(
     format!("  {marker} {name_col}{desc}")
 }
 
-/// The advisory hint lines drawn just above the command input in 統括: the
-/// matching commands while the command word is typed, or the usage and examples
-/// once a known command is given arguments. Empty outside Overview.
+/// The advisory hint lines drawn in the command palette (`:`): the matching
+/// commands while the command word is typed, or the usage and examples once a
+/// known command is given arguments. Empty while the palette is closed.
 pub(super) fn hint_lines(state: &HomeState, width: usize) -> Vec<String> {
-    if state.mode() != Mode::Overview {
+    if !state.command_palette_open() {
         return Vec::new();
     }
     match state.hint() {
@@ -227,7 +219,7 @@ pub(super) fn hint_lines(state: &HomeState, width: usize) -> Vec<String> {
             // Only point a marker at a best match once something is typed; a
             // bare prompt shows the whole menu with nothing pre-selected.
             let highlight = !typed.is_empty();
-            // The Overview line is always workspace-scoped; a partial match just
+            // The palette line is always workspace-scoped; a partial match just
             // says "matches".
             let header = if highlight {
                 "matches".to_string()
@@ -265,12 +257,12 @@ pub(super) fn hint_lines(state: &HomeState, width: usize) -> Vec<String> {
     }
 }
 
-/// The command input line, by mode: the editable 統括 (Overview) command prompt,
-/// a left-pane hint in 切替 (Switch), the focused session in 在席 (Focus), and a
-/// live-terminal status in 没入 (Attached).
+/// The command input line, by mode: a left-pane hint in 切替 (Switch), the
+/// focused session in 在席 (Focus), and a live-terminal status in 没入
+/// (Attached). The workspace command line is the `:` palette overlay, not this
+/// resident line.
 pub(super) fn input_line(state: &HomeState) -> String {
     match state.mode() {
-        Mode::Overview => format!(" {}", overview_input_content(state)),
         Mode::Switch => style(" Pick a session".to_string()).dim().to_string(),
         Mode::Focus => style(format!(
             " Operating session: {}",
@@ -282,26 +274,106 @@ pub(super) fn input_line(state: &HomeState) -> String {
     }
 }
 
-/// The 統括 (Overview) command input rendered as a bordered field — an
-/// HTML-input-like box — so it reads clearly as *where you type*, set apart from
-/// the hints above it and the results band below. Spans the full `width` (three
-/// rows: top border, the `❯ <input>` line, bottom border).
-pub(super) fn overview_input_box(state: &HomeState, width: usize) -> Vec<String> {
-    let content = overview_input_content(state);
-    // `boxed` adds the two borders and one space of padding on each side, so the
-    // inner content area is the width less those four columns.
-    widgets::boxed("", width.saturating_sub(4), &[content])
-}
-
-/// The Overview command line as `❯ <text>` with the caret drawn at the editing
+/// The command palette line as `❯ <text>` with the caret drawn at the editing
 /// position (the byte offset from [`HomeState::cursor`]), so ←/→/Home/End move a
 /// visible caret through the text instead of always sitting at the end.
-fn overview_input_content(state: &HomeState) -> String {
+fn command_input_content(state: &HomeState) -> String {
     let prompt = style("❯").red().bold();
     let input = state.input();
     let (before, after) = input.split_at(state.cursor());
     let value = widgets::block_caret(before, after, &Style::new().cyan());
     format!("{prompt} {value}")
+}
+
+/// Inner (content) width of the command palette box, before the borders and the
+/// space of padding [`widgets::boxed`] adds on each side.
+const PALETTE_INNER: usize = 60;
+
+/// Rows the palette reserves for the advisory hints, always filled to this height
+/// (padded with blanks): a header plus up to [`HINT_MAX`] matches plus an
+/// `… and N more` overflow line. Reserving a fixed block keeps the box the same
+/// height as the match count changes while typing, so it never jumps (no layout
+/// shift).
+const PALETTE_HINT_ROWS: usize = HINT_MAX + 2;
+
+/// Rows the palette reserves for the latest command's response, always filled to
+/// this height (padded with blanks): an `↑ N more` overflow line plus up to
+/// [`PALETTE_RESPONSE_MAX`] of the newest output lines. Fixed, like the hint
+/// block, so running a command does not resize the box.
+const PALETTE_RESPONSE_ROWS: usize = 6;
+
+/// Most response lines the palette shows at once; older lines are elided behind
+/// an `↑ N more` summary so the (fixed-height) response block never overflows.
+const PALETTE_RESPONSE_MAX: usize = PALETTE_RESPONSE_ROWS - 1;
+
+/// Builds the body of the workspace command palette (`:`) at a **fixed height**:
+/// the `❯ <input>` command line (with a block caret), a fixed-height block of
+/// advisory command hints, a fixed-height block of the latest command's response
+/// (capped, with an `↑ N more` line when longer), and a key-hint footer. Every
+/// region is padded to a constant number of rows so the box keeps the same size
+/// as the user types and runs commands — it never grows or shrinks.
+fn command_palette_body(state: &HomeState, inner: usize) -> Vec<String> {
+    let mut body = Vec::with_capacity(PALETTE_HINT_ROWS + PALETTE_RESPONSE_ROWS + 5);
+    body.push(command_input_content(state));
+    body.push(String::new());
+
+    // The advisory hints (matching commands, or the usage of a known command),
+    // padded to a fixed height so a changing match count never resizes the box.
+    let mut hints = hint_lines(state, inner);
+    hints.truncate(PALETTE_HINT_ROWS);
+    pad_block(&mut body, hints, PALETTE_HINT_ROWS);
+
+    body.push(String::new());
+
+    // The latest command's response, capped so a long dump does not swallow the
+    // box (the overflow is summarised with an `↑ N more` line) and padded to a
+    // fixed height so running a command never resizes the box.
+    let response = state.response_lines();
+    let mut rows = Vec::new();
+    if !response.is_empty() {
+        let total = response.len();
+        let start = total.saturating_sub(PALETTE_RESPONSE_MAX);
+        if start > 0 {
+            rows.push(style(format!("  ↑ {start} more")).dim().to_string());
+        }
+        for line in &response[start..] {
+            rows.push(log_line(line, inner));
+        }
+    }
+    rows.truncate(PALETTE_RESPONSE_ROWS);
+    pad_block(&mut body, rows, PALETTE_RESPONSE_ROWS);
+
+    body.push(String::new());
+    body.push(
+        style("Enter: run   Tab: complete   ↑↓ history   Esc: close")
+            .dim()
+            .to_string(),
+    );
+    body
+}
+
+/// Appends `rows` to `body`, then pads with blank lines up to `height` so the
+/// region always occupies a fixed number of rows. `rows` is expected to already
+/// be no longer than `height`.
+fn pad_block(body: &mut Vec<String>, rows: Vec<String>, height: usize) {
+    let filled = rows.len();
+    body.extend(rows);
+    for _ in filled..height {
+        body.push(String::new());
+    }
+}
+
+/// Builds the workspace command palette (`:`) as a bordered box, clamped to the
+/// terminal `width`. It is a fixed-height modal (see [`command_palette_body`])
+/// that [`render_frame`](super::render_frame) floats over the live workspace with
+/// [`widgets::overlay_centered`], so the panes stay visible around it; `Esc`
+/// closes it.
+pub(super) fn command_palette_box(width: usize, state: &HomeState) -> Vec<String> {
+    // Clamp the inner width so the box never overruns a narrow terminal; `boxed`
+    // then clips each line and the title to fit.
+    let inner = PALETTE_INNER.min(width.saturating_sub(4));
+    let body = command_palette_body(state, inner);
+    widgets::boxed("Command", inner, &body)
 }
 
 /// The footer help line, aware of the current mode. It leads with a mode tag so
@@ -323,11 +395,15 @@ pub(super) fn footer_line(width: usize, state: &HomeState) -> String {
             "[preview]  ↑↓ scroll / PgUp/PgDn page / Esc / q: close",
         );
     }
+    // The command palette captures the keyboard while open, so its controls take
+    // over the footer regardless of the underlying mode.
+    if state.command_palette_open() {
+        return widgets::dim_line(
+            width,
+            "[command]  Tab: complete / ↑↓: history / Enter: run / Esc: close",
+        );
+    }
     let help = match state.mode() {
-        Mode::Overview => {
-            "[overview]  Tab: complete / ↑↓: history / Enter: run / \"session switch\": pick session"
-                .to_string()
-        }
         Mode::Switch => {
             // While the highlighted session's note is showing, `Esc` first hides
             // it (a second `Esc` then backs out), so the footer names that.
@@ -337,17 +413,17 @@ pub(super) fn footer_line(width: usize, state: &HomeState) -> String {
                 "Esc back"
             };
             format!(
-                "[switch]  ↑↓ session / ←→ tab / Enter focus / c new / r rename / n/Ctrl-E note / x close tab / {esc}"
+                "[switch]  ↑↓ session / ←→ tab / Enter focus / c new / r rename / n/Ctrl-E note / x close tab / : commands / {esc}"
             )
         }
         Mode::Focus => {
             format!(
-                "[session: {}]  Ctrl-N/P: tab / Enter: open/run / Ctrl-O: switch / Ctrl-E: note / Esc: overview",
+                "[session: {}]  Ctrl-N/P: tab / Enter: open/run / Ctrl-O: switch / Ctrl-^: last / Ctrl-E: note / : commands / Esc: switch",
                 state.focused_session_name()
             )
         }
         Mode::Attached => {
-            "[attached]  Ctrl-O: switch / Ctrl-T: focus / Ctrl-N/P: tab / Ctrl-G: agent / Ctrl-E: note / Ctrl-W: close"
+            "[attached]  Ctrl-O: switch / Ctrl-T: focus / Ctrl-^: last / Ctrl-N/P: tab / Ctrl-G: agent / Ctrl-E: note / Ctrl-W: close"
                 .to_string()
         }
     };
@@ -473,24 +549,35 @@ pub(super) fn remove_modal_frame(
     widgets::render_modal(raw_height, raw_width, "Remove sessions", INNER, &body)
 }
 
-/// Builds the centred quit-confirmation modal, shown when the user presses
-/// `Ctrl-C` while a session is still live: it names how many sessions are still
-/// running and asks whether to close anyway.
+/// Builds the centred quit-confirmation modal. `Ctrl-C` raises it only when a
+/// session is still live (naming how many are running and warning they will be
+/// stopped); `Ctrl-Q` always raises it, so with nothing live (`live == 0`) it
+/// asks a plain "quit?" instead of warning about agents that are not running.
 pub(super) fn quit_confirm_frame(raw_height: usize, raw_width: usize, live: usize) -> Vec<String> {
     // Wide enough for the longest body line ("Close anyway? Running agents
     // will be stopped." = 45 columns) so it does not overflow the box.
     const INNER: usize = 46;
-    let body = vec![
-        style(format!("{live} session(s) still running."))
-            .dim()
-            .to_string(),
-        String::new(),
-        style("Close anyway? Running agents will be stopped.").to_string(),
-        String::new(),
-        style("y / Enter: close   n / Esc: cancel")
-            .dim()
-            .to_string(),
-    ];
+    let body = if live == 0 {
+        vec![
+            style("No sessions are running.").dim().to_string(),
+            String::new(),
+            style("Quit usagi?").to_string(),
+            String::new(),
+            style("y / Enter: quit   n / Esc: cancel").dim().to_string(),
+        ]
+    } else {
+        vec![
+            style(format!("{live} session(s) still running."))
+                .dim()
+                .to_string(),
+            String::new(),
+            style("Close anyway? Running agents will be stopped.").to_string(),
+            String::new(),
+            style("y / Enter: close   n / Esc: cancel")
+                .dim()
+                .to_string(),
+        ]
+    };
     widgets::render_modal(raw_height, raw_width, "Quit usagi?", INNER, &body)
 }
 

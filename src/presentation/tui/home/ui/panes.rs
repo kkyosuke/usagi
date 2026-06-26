@@ -178,7 +178,12 @@ fn gutter_cell(selected: bool, active: bool, in_switch: bool) -> String {
 /// The branch / root name cell: clipped and padded to `width`, cyan, and bold
 /// when the row is active or under the cursor.
 fn name_cell(text: &str, width: usize, emphasised: bool) -> String {
-    let padded = format!("{:<width$}", clip_to_width(text, width));
+    // Pad by *display* width, not char count: `format!("{:<width$}")` counts
+    // `char`s, so a full-width (CJK) branch / session name — the app's own UI is
+    // Japanese — would be padded to `width` chars (≈2×`width` columns), overrun
+    // the cell, and shove the status column sideways. `pad_to_width` measures
+    // display columns, matching the rest of the layout.
+    let padded = pad_to_width(clip_to_width(text, width), width);
     if emphasised {
         style(padded).cyan().bold().to_string()
     } else {
@@ -500,35 +505,25 @@ pub(super) fn log_line(line: &LogLine, width: usize) -> String {
     }
 }
 
-/// Builds a `rows`-tall window pinned to the tail of the log, so the newest
-/// lines are always shown (like a terminal). The TUI never scrolls, so the
-/// window is always at the bottom. Used for the Overview results band.
-pub(super) fn log_tail(log: &[LogLine], width: usize, rows: usize) -> Vec<String> {
-    let start = log.len().saturating_sub(rows);
-    log[start..]
-        .iter()
-        .take(rows)
-        .map(|l| log_line(l, width))
-        .collect()
-}
-
 /// Builds the tab strip's two raw (unclipped) rows: one ` N label ` chip per
 /// pane (the active one reversed and bold, the rest dimmed) and the underline
 /// marker beneath the active chip. Each chip is numbered (1-based) to match the
 /// `←`/`→` tab order. The rows are laid beside the preview header on a shared row
 /// by [`header_tab_rows`], which re-indents the marker to stay under the chips.
+///
+/// The chip text and the [`TAB_CHIP_GAP`] between chips are the single source of
+/// truth for the strip's layout: [`tab_chip_ranges`] reconstructs the on-screen
+/// column of each chip from the same recipe so a click can be mapped back to its
+/// tab (没入 switches tabs on a click; see [`attached_tab_at`]).
 fn tab_strip_parts(strip: &TabStrip) -> (String, String) {
-    // Gap between chips on the top row (and under it on the marker row), so the
-    // chips read as separate tabs without a hard separator glyph.
-    const GAP: &str = "  ";
     let mut chips = String::new();
     let mut marker = String::new();
     for (i, label) in strip.labels.iter().enumerate() {
         if i > 0 {
-            chips.push_str(GAP);
-            marker.push_str(&" ".repeat(GAP.chars().count()));
+            chips.push_str(&" ".repeat(TAB_CHIP_GAP));
+            marker.push_str(&" ".repeat(TAB_CHIP_GAP));
         }
-        let text = format!(" {} {label} ", i + 1);
+        let text = tab_chip_text(i, label);
         let width = text.chars().count();
         if i == strip.active {
             chips.push_str(&style(&text).reverse().bold().to_string());
@@ -567,11 +562,79 @@ pub(super) fn header_tab_rows(
     // Push the marker right past the identity and the divider so it lands under
     // the chips on the row above. The identity is a fixed width, so this indent
     // is the same for every session.
-    let indent = console::measure_text_width(&header) + HEADER_TAB_DIVIDER.chars().count();
+    let indent = tab_strip_indent(&header);
     vec![
         clip_to_width(&format!("{header}{divider}{chips}"), width),
         clip_to_width(&format!("{}{marker}", " ".repeat(indent)), width),
     ]
+}
+
+/// Gap, in columns, between two chips on the strip's top row (and under it on the
+/// marker row), so the chips read as separate tabs without a hard separator glyph.
+const TAB_CHIP_GAP: usize = 2;
+
+/// One chip's text: a leading space, the 1-based tab number, the pane `label`, and
+/// a trailing space — ` N label `. The single recipe both the renderer
+/// ([`tab_strip_parts`]) and the hit test ([`tab_chip_ranges`]) build from.
+fn tab_chip_text(index: usize, label: &str) -> String {
+    format!(" {} {label} ", index + 1)
+}
+
+/// The column the chips begin at, measured from the right pane's left edge: past
+/// the fixed-width identity `header` and the [`HEADER_TAB_DIVIDER`]. Matches the
+/// indent [`header_tab_rows`] lays the chips at, so [`tab_chip_ranges`] places
+/// them where they are actually drawn.
+fn tab_strip_indent(header: &str) -> usize {
+    console::measure_text_width(header) + HEADER_TAB_DIVIDER.chars().count()
+}
+
+/// The column range each tab chip occupies on the strip, measured from the right
+/// pane's left edge — the [`tab_strip_indent`], then one [`tab_chip_text`] chip
+/// per pane with a [`TAB_CHIP_GAP`] between. Reconstructs the layout
+/// [`tab_strip_parts`] / [`header_tab_rows`] draw so a click column can be mapped
+/// to the tab under it (see [`attached_tab_at`]).
+fn tab_chip_ranges(header: &str, strip: &TabStrip) -> Vec<std::ops::Range<usize>> {
+    let mut col = tab_strip_indent(header);
+    let mut ranges = Vec::with_capacity(strip.labels.len());
+    for (i, label) in strip.labels.iter().enumerate() {
+        if i > 0 {
+            col += TAB_CHIP_GAP;
+        }
+        let width = console::measure_text_width(&tab_chip_text(i, label));
+        ranges.push(col..col + width);
+        col += width;
+    }
+    ranges
+}
+
+/// The tab a left click at the 0-based screen (`col`, `row`) lands on while 没入
+/// (Attached), or `None` when the click is not on a switchable chip. The strip
+/// occupies the [`TAB_BAR_ROWS`](super::TAB_BAR_ROWS) rows at the top of the right
+/// pane — the embedded terminal `geo` is pushed down by exactly that — so a click
+/// on either of those rows, in a chip's column, hits its tab. Returns `None` for a
+/// click off the strip rows, off every chip (the indent, the gaps, past the last
+/// chip), or on the already-active tab, so the caller only switches on a real
+/// change. Mirrors what [`right_pane_contents`] draws for [`Mode::Attached`].
+pub(in crate::presentation::tui::home) fn attached_tab_at(
+    state: &HomeState,
+    col: u16,
+    row: u16,
+    geo: super::TerminalGeometry,
+) -> Option<usize> {
+    let strip = state.terminal_tabs()?;
+    // The strip's rows are the `TAB_BAR_ROWS` just above the terminal body.
+    let strip_top = geo.origin_row.checked_sub(super::TAB_BAR_ROWS as u16)?;
+    if row < strip_top || row >= geo.origin_row {
+        return None;
+    }
+    let rel_col = col.checked_sub(geo.origin_col)? as usize;
+    let header = active_session_header(state);
+    let target = tab_chip_ranges(&header, strip)
+        .into_iter()
+        .position(|range| range.contains(&rel_col))?;
+    // A click on the active tab is a no-op: leave it to the caller's selection
+    // handling rather than re-driving the same pane.
+    (target != strip.active).then_some(target)
 }
 
 /// Column widths for the fixed-width header identity. The session name is clipped
@@ -1180,7 +1243,7 @@ pub(super) fn switch_preview(state: &HomeState, width: usize, rows: usize) -> Ve
         match state.session_action_ui() {
             SessionActionUi::Menu => {
                 lines.push(style("Run a command:").dim().to_string());
-                for (i, info) in state.focus_menu_commands().iter().enumerate() {
+                for (i, info) in state.preview_menu_commands().iter().enumerate() {
                     lines.push(focus_menu_row(info, i == 0, width));
                 }
             }
@@ -1200,13 +1263,14 @@ pub(super) fn switch_preview(state: &HomeState, width: usize, rows: usize) -> Ve
     lines
 }
 
-/// The right pane's contents, by mode. Blank in 統括 (the user is on the command
-/// line); a preview of the would-be session screen in 切替; the session's action
-/// surface — a menu or a prompt, per [`SessionActionUi`] — in 在席; and the live
-/// embedded terminal in 没入 (a starting hint until the first snapshot arrives).
+/// The right pane's contents, by mode. A preview of the would-be session screen
+/// in 切替 (the default); the session's action surface — a menu or a prompt, per
+/// [`SessionActionUi`] — in 在席; and the live embedded terminal in 没入 (a
+/// starting hint until the first snapshot arrives).
 pub(super) fn right_pane_contents(state: &HomeState, right_w: usize, rows: usize) -> Vec<String> {
     // The Markdown preview, when open, takes over the right pane regardless of
-    // mode (it is opened from 統括 and captures the keyboard while shown).
+    // mode (it is opened from the `:` palette and captures the keyboard while
+    // shown).
     if let Some(preview) = state.preview() {
         return preview_pane(preview, right_w, rows);
     }
@@ -1215,7 +1279,6 @@ pub(super) fn right_pane_contents(state: &HomeState, right_w: usize, rows: usize
     // below, so editing / reading the note never switches the screen — the
     // preview / terminal stays visible behind the floating box.
     let mut base = match state.mode() {
-        Mode::Overview => Vec::new(),
         Mode::Switch => {
             // Collapsed to the rail, 切替's name input has no room inline in the
             // (5-column) list, so it takes over the wide right pane; at full width
@@ -1363,4 +1426,30 @@ fn heading_style(text: &str, level: u8) -> String {
         _ => base,
     }
     .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn name_cell_pads_by_display_width_not_char_count() {
+        // A full-width (CJK) name must fill its cell by *display* columns, not
+        // char count: `あ機能` is 3 chars but 6 display columns, so padding to a
+        // width-8 cell adds 2 columns (not 5 chars), and the cell measures exactly
+        // 8 — the SGR style escapes have zero display width. The old
+        // `format!("{:<8}")` padded by chars and overran the cell to 11 columns,
+        // shoving the status column sideways (the app's own UI is Japanese).
+        assert_eq!(
+            console::measure_text_width(&name_cell("あ機能", 8, false)),
+            8
+        );
+        // ASCII is unchanged: a short name still pads out to the full width.
+        assert_eq!(console::measure_text_width(&name_cell("main", 8, true)), 8);
+        // A name already wider than the cell is clipped back to the width.
+        assert_eq!(
+            console::measure_text_width(&name_cell("あ機能拡張作業", 8, false)),
+            8
+        );
+    }
 }

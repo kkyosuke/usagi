@@ -182,6 +182,14 @@ pub struct HomeState {
     /// already shown, and cancelling it returns to that overlay rather than
     /// closing it, so the two are independent.
     quit_confirm: bool,
+    /// Whether the workspace command palette overlay is open. Summoned with `:`
+    /// from 切替 (Switch) and 在席 (Focus), it reuses the workspace command-line
+    /// state ([`input`](Self::input) / [`recall`](Self::recall) /
+    /// [`history`](Self::history) / [`log`](Self::log) /
+    /// [`response_start`](Self::response_start)) and floats over the panes while
+    /// open. Separate from [`overlay`](Self::overlay) because a text dump (`man`
+    /// / `session list`) it runs can layer its modal on top of the palette.
+    command_open: bool,
     /// The 在席 (Focus) menu cursor: which Session-scope command is highlighted.
     focus_menu: FocusMenu,
     /// The 在席 (Focus) prompt buffer (the session-scoped command line).
@@ -208,8 +216,8 @@ pub struct HomeState {
     /// (done > waiting > running, atop live) lives in the sidebar renderer.
     badges: MonitorSnapshot,
     /// Index into `log` where the most recent command's response begins. The
-    /// 統括 (Overview) results band renders only `log[response_start..]`, so it
-    /// shows the response to the latest command and nothing earlier.
+    /// command palette (`:`) renders only `log[response_start..]`, so it shows
+    /// the response to the latest command and nothing earlier.
     response_start: usize,
     /// The workspace's task issues, loaded from disk by `mod.rs` and read by the
     /// `issue` command. Empty until injected.
@@ -260,7 +268,7 @@ impl HomeState {
         }
         Self {
             list: WorktreeList::new(workspace_name, worktrees),
-            mode: Mode::Overview,
+            mode: Mode::Switch,
             input: TextInput::new(),
             history: Vec::new(),
             recall: None,
@@ -272,10 +280,11 @@ impl HomeState {
             default_agent: AgentCli::default(),
             installed_agents: Vec::new(),
             agent_choice: None,
-            switch_return: ReturnMode::Overview,
+            switch_return: ReturnMode::Base,
             note_hidden: false,
             overlay: Overlay::default(),
             quit_confirm: false,
+            command_open: false,
             focus_menu: FocusMenu::default(),
             focus_prompt: TextInput::new(),
             focus_new_tab: true,
@@ -415,6 +424,10 @@ impl HomeState {
     pub fn refresh_sessions(&mut self, sessions: Vec<SessionRecord>) {
         let selected = self.list.selected_name().to_string();
         let active = self.list.active_name().to_string();
+        // The fresh list drops the `Ctrl-^` jump target, so carry it across the
+        // rebuild by name (it is re-validated lazily, so a session that vanished
+        // in this sync simply yields no jump).
+        let previous = self.list.previous_active_name().map(str::to_string);
         self.sessions = sessions;
         self.rebuild_list();
         // Restore the cursor (`select_by_name` moves both cursor and active onto
@@ -422,6 +435,7 @@ impl HomeState {
         // the rebuilt default on the root), then correct the active row.
         self.list.select_by_name(&selected);
         self.list.activate_by_name(&active);
+        self.list.set_previous_active(previous);
     }
 
     /// Rebuild the worktree pane from the current sessions: one row per session
@@ -532,7 +546,7 @@ impl HomeState {
         }
     }
 
-    /// The lines of the most recent command's response (what the 統括 results band
+    /// The lines of the most recent command's response (what the command palette
     /// shows): everything in the log from `response_start` onward.
     pub fn response_lines(&self) -> &[LogLine] {
         let start = self.response_start.min(self.log.len());
@@ -579,8 +593,8 @@ impl HomeState {
         self.mode
     }
 
-    /// Which command scope the 統括 (Overview) command line operates in: always
-    /// the whole workspace, since Overview is workspace-only (the session-scoped
+    /// Which command scope the command palette (`:`) operates in: always the
+    /// whole workspace, since the palette is workspace-only (the session-scoped
     /// surface lives in the 在席 right pane instead). Completion, hints, and `man`
     /// grouping follow this. The 在席 prompt calls the registry with
     /// [`CommandScope::Session`] directly via [`Self::focus_prompt_hint`] etc.
@@ -828,16 +842,28 @@ impl HomeState {
         self.list.focus_index(row);
     }
 
-    // --- 統括 (Overview) ---------------------------------------------------
+    // --- command palette (`:`) ---------------------------------------------
 
-    /// Return to 統括 (Overview), clearing the transient 切替 / 在席 state.
-    pub fn enter_overview(&mut self) {
-        self.mode = Mode::Overview;
-        self.overlay.clear_create();
-        self.focus_prompt.clear();
-        self.focus_menu.reset();
+    /// Open the workspace command palette overlay (`:`), clearing any half-typed
+    /// command line so it starts fresh. The palette reuses the workspace
+    /// command-line state ([`input`](Self::input) / [`recall`](Self::recall)),
+    /// floating over the current 切替 / 在席 panes while open.
+    pub fn open_command_palette(&mut self) {
+        self.command_open = true;
         self.input.clear();
         self.recall = None;
+    }
+
+    /// Close the command palette overlay (`Esc`), clearing its command line.
+    pub fn close_command_palette(&mut self) {
+        self.command_open = false;
+        self.input.clear();
+        self.recall = None;
+    }
+
+    /// Whether the workspace command palette overlay is open.
+    pub fn command_palette_open(&self) -> bool {
+        self.command_open
     }
 
     // --- 切替 (Switch) -----------------------------------------------------
@@ -1169,6 +1195,15 @@ impl HomeState {
         true
     }
 
+    /// The row the previously focused session now sits at — the target `Ctrl-^`
+    /// jumps to (vim's `Ctrl-^` / tmux's `last-window`) — or `None` when no other
+    /// session has been focused yet or the previous one has since been removed.
+    /// Delegates to the list, which records it whenever [`enter_focus`] moves the
+    /// active row to a different session.
+    pub fn previous_session_row(&self) -> Option<usize> {
+        self.list.previous_row()
+    }
+
     /// The display name of the focused (active) session: its branch, or
     /// [`ROOT_NAME`] for the root row.
     pub fn focused_session_name(&self) -> String {
@@ -1179,9 +1214,9 @@ impl HomeState {
             .to_string()
     }
 
-    /// Leave 在席 for 統括 (Overview).
+    /// Leave 在席 for the base 切替 (Switch) — the default mode.
     pub fn leave_focus(&mut self) {
-        self.enter_overview();
+        self.enter_switch(ReturnMode::Base);
     }
 
     /// The Session-scope commands the 在席 menu lists, in registry order
@@ -1189,8 +1224,26 @@ impl HomeState {
     /// local LLM is usable (enabled and its model pulled), so it only appears
     /// when running it would actually work. `close` is filtered out on the root
     /// row, which belongs to no session and so cannot be closed.
+    ///
+    /// Resolved for the **active** row: 在席 acts on the session it focused.
     pub fn focus_menu_commands(&self) -> Vec<CommandInfo> {
-        let root = self.list.root_active();
+        self.menu_commands_for_root(self.list.root_active())
+    }
+
+    /// The same Session-scope command list as [`focus_menu_commands`], but
+    /// resolved for the row under the **cursor** rather than the active row. The
+    /// 切替 (Switch) preview shows what *selecting* the highlighted row reveals,
+    /// so its `close` visibility must follow that row — otherwise a session row
+    /// previewed while the root row is active would hide `close` (and vice
+    /// versa), showing the active row's menu instead of the highlighted one's.
+    pub fn preview_menu_commands(&self) -> Vec<CommandInfo> {
+        self.menu_commands_for_root(self.list.root_selected())
+    }
+
+    /// Shared body of [`focus_menu_commands`] / [`preview_menu_commands`]: the
+    /// Session-scope commands, with `ai` gated on local-LLM availability and
+    /// `close` hidden when `root` (the row belongs to no session).
+    fn menu_commands_for_root(&self, root: bool) -> Vec<CommandInfo> {
         self.registry
             .commands_in_scope(CommandScope::Session)
             .into_iter()
@@ -1400,7 +1453,7 @@ impl HomeState {
 
     /// Tab-complete the 在席 prompt's command word against the Session-scope
     /// commands, returning the candidates when ambiguous (so the caller can log
-    /// them, mirroring the Overview line's `complete`).
+    /// them, mirroring the palette line's `complete`).
     pub fn focus_prompt_complete(&mut self) -> Completion {
         let completion = self
             .registry
@@ -1433,7 +1486,7 @@ impl HomeState {
             };
         }
         // Mark where this response begins (before any lines it appends), exactly
-        // as the 統括 line does, so a later switch to Overview shows only this
+        // as the command palette line does, so the palette shows only this
         // command's response — the prompt has no echo line, so the response
         // starts at the current log end.
         self.response_start = self.log.len();
@@ -1445,7 +1498,7 @@ impl HomeState {
         }
     }
 
-    /// Insert a typed character at the caret (Overview line), advancing it.
+    /// Insert a typed character at the caret (command palette line), advancing it.
     pub fn push_char(&mut self, c: char) {
         self.input.insert(c);
         self.recall = None;
@@ -1555,7 +1608,7 @@ impl HomeState {
     }
 
     /// Dispatch `entry` as a command and record it in command history, returning
-    /// the raw result. The shared core of [`submit`](Self::submit) (統括 line) and
+    /// the raw result. The shared core of [`submit`](Self::submit) (palette line) and
     /// [`focus_prompt_submit`](Self::focus_prompt_submit) (在席 prompt) so both
     /// record history identically; folding the result into the log is
     /// [`record_response`](Self::record_response).

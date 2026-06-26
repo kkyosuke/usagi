@@ -7,20 +7,24 @@
 //! Keystrokes are forwarded to the shell as raw bytes.
 //!
 //! The **reserved keys** are `Ctrl-O`, `Ctrl-N`/`Ctrl-P`, `Ctrl-T`/`Ctrl-G`,
-//! `Ctrl-W`, and `Ctrl-B`: everything else, including `Esc`, flows to the shell.
+//! `Ctrl-W`, `Ctrl-^`, `Ctrl-B`, and `Ctrl-Q`: everything else, including `Esc`,
+//! flows to the shell.
 //! `Ctrl-B` collapses / expands the left sidebar in place (it never leaves 没入).
 //! A single
 //! `Ctrl-O` zooms out one engagement level by returning [`PaneStep::Detach`]
 //! immediately, leaving the pane for 切替 (Switch) on the left pane while every
 //! pane stays alive in the pool — there the user moves between sessions
 //! (`↑`/`↓`), between this session's tabs (`←`/`→`), re-attaches (`Enter`), adds a
-//! pane (`t`), or zooms further out to 統括 (`Ctrl-O`). `Ctrl-N`/`Ctrl-P` switch to
-//! the next / previous tab in place ([`PaneStep::NextTab`] / [`PaneStep::PrevTab`]);
+//! pane (`t`), or summons the `:` command palette. `Ctrl-N`/`Ctrl-P` switch to
+//! the next / previous tab in place ([`PaneStep::NextTab`] / [`PaneStep::PrevTab`]),
+//! and a left click on a tab chip jumps straight to it ([`PaneStep::ToTab`]);
 //! `Ctrl-T` zooms out to 在席 (Focus) — the session's action menu — by returning
 //! [`PaneStep::ToFocus`] (every pane stays alive in the pool); `Ctrl-G` adds an
 //! agent tab ([`PaneStep::NewAgentTab`]) and `Ctrl-W` closes the active tab
-//! ([`PaneStep::CloseTab`]) without leaving 没入. The shell exiting on its
-//! own reports [`PaneStep::Closed`].
+//! ([`PaneStep::CloseTab`]) without leaving 没入. `Ctrl-^` jumps to the previously
+//! focused session ([`PaneStep::PrevSession`]). `Ctrl-Q` leaves 没入 to quit usagi
+//! ([`PaneStep::Quit`]), raising the quit-confirmation modal on the home screen.
+//! The shell exiting on its own reports [`PaneStep::Closed`].
 //!
 //! `agent` reuses the same machinery: the pool sends the configured agent CLI to
 //! the shell on first spawn, so the pane lands the user straight in the agent.
@@ -73,6 +77,10 @@ pub enum PaneStep {
     NextTab,
     /// `Ctrl-P`: switch to the previous tab without leaving 没入.
     PrevTab,
+    /// A left click on a tab chip: switch to that (0-based) tab without leaving
+    /// 没入. Like [`NextTab`](Self::NextTab) / [`PrevTab`](Self::PrevTab), the
+    /// caller makes it active and re-drives the pane.
+    ToTab(usize),
     /// `Ctrl-T`: zoom out to 在席 (Focus) — the session's action menu — leaving
     /// every pane alive in the pool. Adding a terminal is then a menu choice.
     ToFocus,
@@ -81,6 +89,14 @@ pub enum PaneStep {
     /// `Ctrl-W`: close the active tab without leaving 没入. The caller drops it,
     /// then keeps driving the next pane or falls to 在席 when none remain.
     CloseTab,
+    /// `Ctrl-^`: leave 没入 to jump to the previously focused session (vim's
+    /// `Ctrl-^` / tmux's `last-window`), attaching it when live. The caller
+    /// re-roots the pane on that session.
+    PrevSession,
+    /// `Ctrl-Q`: leave 没入 to quit usagi. Every pane stays alive in the pool; the
+    /// caller raises the quit-confirmation modal on the home screen rather than
+    /// closing outright, so the running agents are never dropped by accident.
+    Quit,
     /// The active pane's shell exited on its own (e.g. `exit`).
     Closed,
 }
@@ -296,12 +312,23 @@ fn drive(
                 let links = &links_cache.as_ref().expect("links cache set above").1;
                 TerminalView::from_screen_with_links(screen, selection.as_ref(), hover, links)
             };
-            // The cursor belongs to the live screen, so hide it while the user is
-            // viewing scrolled-back history.
+            // The cursor belongs to the live screen, so don't park it while the
+            // user is viewing scrolled-back history. When live, park it on the
+            // program's cursor cell even if the program hid it (so the IME's
+            // preedit lands there) and mirror the program's show/hide.
             let cursor = if scrollback == 0 { view.cursor() } else { None };
+            let cursor_visible = view.cursor_visible();
             state.set_terminal_view(view);
             state.apply_badges(badges);
-            render(term, state, cursor, geo, &mut prev)?;
+            render(
+                term,
+                state,
+                cursor,
+                cursor_visible,
+                geo,
+                (height, width),
+                &mut prev,
+            )?;
             last_selection = selection;
             last_hover = hover;
             last_paint = Some(now);
@@ -386,14 +413,17 @@ fn wait(pty: &PtySession, drawn_gen: u64, redraw_deadline: Option<Instant>) -> R
 /// left-button drag builds a text `selection` instead, and releasing it copies
 /// the selected text to the clipboard (see [`copy_selection`]); a left click with
 /// no drag opens a link under the pointer in the default browser (see
-/// [`open_clicked_url`]). Button-less motion updates `hover` so the link under
-/// the pointer lights up. `Ctrl-O` detaches to 切替 ([`PaneStep::Detach`]),
+/// [`open_clicked_url`]); a left click on a tab chip switches to that tab
+/// ([`PaneStep::ToTab`]; see [`ui::attached_tab_at`]). Button-less motion updates
+/// `hover` so the link under the pointer lights up. `Ctrl-O` detaches to 切替
+/// ([`PaneStep::Detach`]),
 /// leaving every pane alive in the pool; `Ctrl-N` / `Ctrl-P` switch to the next /
 /// previous tab in place ([`PaneStep::NextTab`] / [`PaneStep::PrevTab`]);
 /// `Ctrl-T` zooms out to 在席 (Focus) ([`PaneStep::ToFocus`]), leaving every pane
 /// alive; `Ctrl-G` adds an agent tab ([`PaneStep::NewAgentTab`]) and `Ctrl-W`
-/// closes the active tab ([`PaneStep::CloseTab`]). Other events are ignored so the next redraw picks up
-/// any new size.
+/// closes the active tab ([`PaneStep::CloseTab`]); `Ctrl-^` jumps to the
+/// previously focused session ([`PaneStep::PrevSession`]). Other events are
+/// ignored so the next redraw picks up any new size.
 #[allow(clippy::too_many_arguments)]
 fn pump_input(
     term: &Term,
@@ -471,6 +501,23 @@ fn pump_input(
                     *selection = None;
                     return Ok(Some(PaneStep::CloseTab));
                 }
+                // `Ctrl-^` leaves 没入 to jump to the previously focused session,
+                // re-rooting the pane there (attaching when live). (Like the tab
+                // chords, this claims `Ctrl-^` from the shell/agent.)
+                if is_prev_session(&key) {
+                    *scrollback = 0;
+                    *selection = None;
+                    return Ok(Some(PaneStep::PrevSession));
+                }
+                // `Ctrl-Q` leaves 没入 to quit usagi: hand it back so the home loop
+                // raises the quit-confirmation modal (every pane stays alive in the
+                // pool meanwhile). (Like the tab chords, this claims `Ctrl-Q` from
+                // the shell/agent — the trade for a global quit key.)
+                if is_quit(&key) {
+                    *scrollback = 0;
+                    *selection = None;
+                    return Ok(Some(PaneStep::Quit));
+                }
                 // `Ctrl-B` collapses / expands the left sidebar in place, without
                 // leaving 没入: toggle the state and let the next loop pass re-lay
                 // out the frame and resize the PTY to the new pane width. (Like the
@@ -508,9 +555,15 @@ fn pump_input(
                 pty.write(&encode_paste(&text, pty.bracketed_paste()))?;
             }
             Event::Mouse(mouse) => match mouse.kind {
-                // A left press starts a fresh selection at the clicked cell;
-                // pressing outside the pane just clears any existing one.
+                // A left click on a tab chip switches to that tab in place, like
+                // `Ctrl-N` / `Ctrl-P`; otherwise it starts a fresh selection at
+                // the clicked cell (clearing any existing one when outside the pane).
                 MouseEventKind::Down(MouseButton::Left) => {
+                    if let Some(tab) = ui::attached_tab_at(state, mouse.column, mouse.row, geo) {
+                        *scrollback = 0;
+                        *selection = None;
+                        return Ok(Some(PaneStep::ToTab(tab)));
+                    }
                     *selection = pane_cell(mouse.column, mouse.row, geo).map(Selection::new);
                 }
                 // Dragging the left button stretches the selection's loose end.
@@ -709,21 +762,38 @@ fn render(
     term: &Term,
     state: &HomeState,
     cursor: Option<(u16, u16)>,
+    cursor_visible: bool,
     geo: ui::TerminalGeometry,
+    size: (u16, u16),
     prev: &mut Vec<String>,
 ) -> Result<()> {
-    let (height, width) = term.size();
+    // The terminal size is read once at the top of the `drive` loop and threaded
+    // in, not re-read here: it cannot change between two synchronous calls in the
+    // same loop pass, so a second `term.size()` (a TIOCGWINSZ ioctl) would be a
+    // redundant syscall on every painted frame.
+    let (height, width) = size;
     let frame = ui::render_frame(height as usize, width as usize, state);
 
     // Repaint only the changed rows (see [`diff_frame`]); the cursor is hidden
-    // for the repaint and re-shown below over the shell's cell.
+    // for the repaint and re-positioned below over the shell's cell.
     let mut buf = diff_frame(prev, &frame);
 
     if let Some((row, col)) = cursor {
         // Translate the pane-relative cursor to a 1-based screen position
-        // (clamping a deferred-wrap column back onto the pane) and reveal it.
+        // (clamping a deferred-wrap column back onto the pane) and park the real
+        // cursor there, so an OS IME draws its preedit on the program's cursor.
+        // Mirror the program's show/hide: re-show it (the repaint hid it) when the
+        // program shows it, else leave it hidden but still positioned — exactly as
+        // when the program runs standalone, where the IME still follows a hidden
+        // cursor's position. `\x1b[?25l` is repeated harmlessly so the intent is
+        // explicit regardless of what the repaint emitted.
         let (x, y) = geo.cursor_screen_pos(row, col);
-        let _ = write!(buf, "\x1b[{y};{x}H\x1b[?25h");
+        let show = if cursor_visible {
+            "\x1b[?25h"
+        } else {
+            "\x1b[?25l"
+        };
+        let _ = write!(buf, "\x1b[{y};{x}H{show}");
     }
 
     term.write_str(&buf)?;
@@ -764,10 +834,17 @@ fn is_leader(key: &KeyEvent) -> bool {
     chord(key, '\u{0f}', 'o')
 }
 
-/// Whether this key is `Ctrl-N` (next tab), as the raw `0x0e` (SO) char or
-/// `'n'` + `CONTROL`.
+/// Whether this key is `Ctrl` + the arrow `code`. The home-screen surfaces move
+/// tabs with the bare arrows (via `console`, which can't see the modifier), so
+/// 没入 adds the `Ctrl` qualifier to keep plain arrows flowing to the shell.
+fn is_ctrl_arrow(key: &KeyEvent, code: KeyCode) -> bool {
+    key.modifiers.contains(KeyModifiers::CONTROL) && key.code == code
+}
+
+/// Whether this key moves to the next tab: `Ctrl-N` (the raw `0x0e` (SO) char or
+/// `'n'` + `CONTROL`) or `Ctrl-→`.
 fn is_next_tab(key: &KeyEvent) -> bool {
-    chord(key, '\u{0e}', 'n')
+    chord(key, '\u{0e}', 'n') || is_ctrl_arrow(key, KeyCode::Right)
 }
 
 /// Whether this key is `Ctrl-E` (open the note editor), as the raw `0x05` (ENQ)
@@ -776,10 +853,10 @@ fn is_open_note(key: &KeyEvent) -> bool {
     chord(key, '\u{05}', 'e')
 }
 
-/// Whether this key is `Ctrl-P` (previous tab), as the raw `0x10` (DLE) char or
-/// `'p'` + `CONTROL`.
+/// Whether this key moves to the previous tab: `Ctrl-P` (the raw `0x10` (DLE)
+/// char or `'p'` + `CONTROL`) or `Ctrl-←`.
 fn is_prev_tab(key: &KeyEvent) -> bool {
-    chord(key, '\u{10}', 'p')
+    chord(key, '\u{10}', 'p') || is_ctrl_arrow(key, KeyCode::Left)
 }
 
 /// Whether this key is `Ctrl-T` (zoom out to 在席 / Focus), as the raw `0x14`
@@ -806,11 +883,25 @@ fn is_toggle_sidebar(key: &KeyEvent) -> bool {
     chord(key, '\u{02}', 'b')
 }
 
+/// Whether this key is `Ctrl-^` (jump to the previously focused session), as the
+/// raw `0x1e` (RS) char or `'^'` + `CONTROL`.
+fn is_prev_session(key: &KeyEvent) -> bool {
+    chord(key, '\u{1e}', '^')
+}
+
 /// Whether this key is the copy shortcut (`Ctrl-C`). It only copies when a
 /// selection is active; otherwise the caller forwards it to the shell as the
 /// usual interrupt. `Ctrl+Shift+C` is left to the shell unchanged.
 fn is_copy(key: &KeyEvent) -> bool {
     key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char('c')
+}
+
+/// Whether this key is `Ctrl-Q` (quit usagi), as the raw `0x11` (DC1) char or
+/// `'q'` + `CONTROL`. It is the dedicated global quit chord: 没入 claims it from
+/// the shell/agent so quitting works without first zooming out, and the home loop
+/// raises the quit-confirmation modal when the pane hands this back.
+fn is_quit(key: &KeyEvent) -> bool {
+    chord(key, '\u{11}', 'q')
 }
 
 /// Bracketed-paste start / end markers (DECSET 2004). A program that requested
@@ -932,6 +1023,9 @@ mod tests {
             KeyCode::Char('\u{10}'),
             KeyModifiers::NONE
         )));
+        // Ctrl-→ (next) / Ctrl-← (prev) are accepted alongside the chords.
+        assert!(is_next_tab(&key(KeyCode::Right, KeyModifiers::CONTROL)));
+        assert!(is_prev_tab(&key(KeyCode::Left, KeyModifiers::CONTROL)));
         // Plain letters, the wrong modifier, and the other chord are rejected.
         assert!(!is_next_tab(&key(KeyCode::Char('n'), KeyModifiers::NONE)));
         assert!(!is_prev_tab(&key(KeyCode::Char('p'), KeyModifiers::NONE)));
@@ -943,6 +1037,11 @@ mod tests {
             KeyCode::Char('n'),
             KeyModifiers::CONTROL
         )));
+        // Bare arrows (no Ctrl) stay with the shell, and the axes don't cross.
+        assert!(!is_next_tab(&key(KeyCode::Right, KeyModifiers::NONE)));
+        assert!(!is_prev_tab(&key(KeyCode::Left, KeyModifiers::NONE)));
+        assert!(!is_next_tab(&key(KeyCode::Left, KeyModifiers::CONTROL)));
+        assert!(!is_prev_tab(&key(KeyCode::Right, KeyModifiers::CONTROL)));
     }
 
     #[test]
@@ -1008,6 +1107,28 @@ mod tests {
     }
 
     #[test]
+    fn is_prev_session_matches_both_forms_of_ctrl_caret() {
+        // crossterm's usual decoding, and the bare 0x1e (RS) most terminals send.
+        assert!(is_prev_session(&key(
+            KeyCode::Char('^'),
+            KeyModifiers::CONTROL
+        )));
+        assert!(is_prev_session(&key(
+            KeyCode::Char('\u{1e}'),
+            KeyModifiers::NONE
+        )));
+        // A plain caret or the wrong chord flows to the shell.
+        assert!(!is_prev_session(&key(
+            KeyCode::Char('^'),
+            KeyModifiers::NONE
+        )));
+        assert!(!is_prev_session(&key(
+            KeyCode::Char('o'),
+            KeyModifiers::CONTROL
+        )));
+    }
+
+    #[test]
     fn is_copy_matches_only_plain_ctrl_c() {
         // `Ctrl-C` is the copy shortcut (only meaningful with a selection).
         assert!(is_copy(&key(KeyCode::Char('c'), KeyModifiers::CONTROL)));
@@ -1017,6 +1138,20 @@ mod tests {
         assert!(!is_copy(&key(KeyCode::Char('d'), KeyModifiers::CONTROL)));
         assert!(!is_copy(&key(
             KeyCode::Char('c'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        )));
+    }
+
+    #[test]
+    fn is_quit_matches_both_forms_of_ctrl_q() {
+        // crossterm's usual decoding, and the bare 0x11 (DC1) most terminals send.
+        assert!(is_quit(&key(KeyCode::Char('q'), KeyModifiers::CONTROL)));
+        assert!(is_quit(&key(KeyCode::Char('\u{11}'), KeyModifiers::NONE)));
+        // A bare `q`, the wrong chord, or `Ctrl+Shift+Q` flows to the shell.
+        assert!(!is_quit(&key(KeyCode::Char('q'), KeyModifiers::NONE)));
+        assert!(!is_quit(&key(KeyCode::Char('o'), KeyModifiers::CONTROL)));
+        assert!(!is_quit(&key(
+            KeyCode::Char('Q'),
             KeyModifiers::CONTROL | KeyModifiers::SHIFT,
         )));
     }

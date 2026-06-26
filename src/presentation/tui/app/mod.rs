@@ -72,7 +72,10 @@ pub fn run() -> Result<()> {
             }
         }
     };
-    let mut run_home = |t: &Term, ws: &Workspace| home::run(t, ws);
+    // Jumping straight into a freshly created project's home screen: load its
+    // (minimal) workspace data synchronously — there is no list-hiding animation
+    // to overlap here, unlike the Open screen path (see [`open::run`]).
+    let mut run_home = |t: &Term, ws: &Workspace| home::run(t, ws, home::preload(ws));
     let mut run_config = |t: &Term| config::run(t);
 
     event::event_loop(

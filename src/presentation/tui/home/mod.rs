@@ -24,7 +24,7 @@ pub mod update;
 #[cfg(test)]
 mod e2e_tests;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use console::Term;
@@ -83,22 +83,87 @@ fn complete_or_record_panic(
     }
 }
 
-/// Runs the home screen for `workspace` on the given terminal until the user
-/// goes back or quits. Loads the workspace's worktree state and prior command
-/// history from disk and wires it, with the real terminal, to the testable
-/// event loop in [`event`]. Each command the user runs is appended to the
-/// workspace's `history.json` (best-effort). Assumes the alternate screen is
-/// already active (it is owned by the orchestrator).
-pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
-    // Open the screen immediately from the saved `state.json` (no git): load just
-    // the recorded sessions here, then re-sync the worktree statuses from git on a
-    // background thread (spawned below) and swap in the refreshed sessions in place
-    // when they land. Syncing synchronously here would block the first paint on git
-    // for as long as the workspace has worktrees to inspect. The usecase owns the
-    // store access and surfaces a load error as a notice; a non-git root or a read
-    // failure just leaves these saved statuses, mirroring `reload_sessions`.
+/// The workspace data [`run`] needs at startup, loaded from disk and the `PATH`
+/// without a `Term`: the recorded sessions (and any load-error notice), task
+/// issues, effective settings, installed agent CLIs, and command history.
+///
+/// Building this is the slow part of opening a workspace (several disk reads plus
+/// a PATH probe for the agent CLIs). [`preload`] computes it with no terminal or
+/// thread state, so the caller can run it on a background thread *while the
+/// open→home mascot animation plays* and hand the result to [`run`] — the home
+/// screen then paints the instant it is shown instead of blocking the first frame
+/// on these reads.
+pub struct Preload {
+    sessions: Vec<SessionRecord>,
+    notice: Option<String>,
+    issues: Vec<crate::domain::issue::Issue>,
+    settings: crate::domain::settings::Settings,
+    installed_agents: Vec<crate::domain::settings::AgentCli>,
+    history: Vec<String>,
+}
+
+/// Loads the [`Preload`] for a workspace. Pure disk / PATH work with no `Term`,
+/// so it is safe to run on a background thread behind the open→home animation. A
+/// read failure for any part is non-fatal — that part falls back to empty (the
+/// session load surfaces its error as the screen's notice instead).
+pub fn preload(workspace: &Workspace) -> Preload {
+    // The recorded sessions come from `state.json` (no git): the screen opens from
+    // these immediately, then re-syncs the worktree statuses from git on a
+    // background thread (spawned in `run`) and swaps the refreshed sessions in when
+    // they land. Syncing here would block the first paint on git for as long as the
+    // workspace has worktrees to inspect. A load error surfaces as a notice; a
+    // non-git root or a read failure just leaves these saved statuses.
     let (sessions, notice) =
         crate::usecase::workspace_state::recorded_sessions_for_display(&workspace.path);
+    // Task issues back the `issue` command (list / graph / show); none on failure.
+    let issues = crate::infrastructure::issue_store::IssueStore::new(&workspace.path)
+        .scan()
+        .unwrap_or_default();
+    // The effective settings (project-local overrides on top of the global
+    // default), reused for every setting the screen derives — the 在席 action
+    // surface, the sidebar's initial state, the local-LLM probe, the agent CLI /
+    // wiring, and notifications. Re-read whenever the config screen closes (see
+    // `open_config`) so a change takes effect without reopening this screen.
+    let settings = effective_settings(&workspace.path);
+    // The agents installed on this machine (PATH-probed, canonical order), which
+    // 在席's agent picker offers as alternatives to the configured default.
+    let installed_agents =
+        crate::usecase::agent::available_clis(&crate::usecase::doctor::SystemRunner);
+    // Past commands so `history` and `↑`/`↓` recall span sessions; empty on failure.
+    let history = crate::usecase::history::load(&workspace.path)
+        .map(|entries| entries.into_iter().map(|e| e.command).collect())
+        .unwrap_or_default();
+    Preload {
+        sessions,
+        notice,
+        issues,
+        settings,
+        installed_agents,
+        history,
+    }
+}
+
+/// Runs the home screen for `workspace` on the given terminal until the user
+/// goes back or quits, wiring the already-loaded [`Preload`] and the real
+/// terminal to the testable event loop in [`event`]. The caller loads the
+/// `Preload` (see [`preload`]) — on the Open screen, off-thread behind the mascot
+/// animation — so this does no blocking IO before the first paint. Each command
+/// the user runs is appended to the workspace's `history.json` (best-effort).
+/// Assumes the alternate screen is already active (it is owned by the
+/// orchestrator).
+pub fn run(term: &Term, workspace: &Workspace, preload: Preload) -> Result<Outcome> {
+    // All the disk / PATH reads were done by `preload` (off-thread, behind the
+    // animation), so opening the screen here is just wiring that data into the
+    // state — no blocking IO before the first paint.
+    let Preload {
+        sessions,
+        notice,
+        issues,
+        settings,
+        installed_agents,
+        history,
+    } = preload;
+
     let mut state = HomeState::new(workspace.name.clone(), Vec::new(), notice);
     // The root row (`⌂ root`) operates in the workspace root; record its path so
     // the 切替 preview can recognise the root's live embedded session (keyed by
@@ -110,40 +175,21 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
     // no-op default and record nothing.
     state.set_logger(Box::new(crate::infrastructure::error_log::FileLogger));
     state.restore_sessions(sessions);
-
-    // Load the workspace's task issues so the `issue` command can list / graph /
-    // show them. A read failure is non-fatal: the command just shows none.
-    if let Ok(issues) = crate::infrastructure::issue_store::IssueStore::new(&workspace.path).scan()
-    {
-        state.set_issues(issues);
-    }
-
-    // The effective settings for this workspace (project-local overrides on top of
-    // the global default), read once here and reused for every setting the screen
-    // derives — the 在席 action surface, the sidebar's initial state, the local-LLM
-    // probe, the agent CLI / wiring, and notifications — instead of re-reading
-    // `settings.json` for each (it was previously read three times at startup).
-    // Re-read again whenever the config screen closes (see `open_config`) so a
-    // change takes effect without reopening this screen.
-    let settings = effective_settings(&workspace.path);
+    state.set_issues(issues);
     // Which right-pane action surface 在席 (Focus) presents — a pickable menu or a
     // typed prompt — and the state the left sidebar opens in (full width or the
     // collapsed rail; `Ctrl-B` toggles it from there).
     state.set_session_action_ui(settings.session_action_ui);
     state.set_sidebar(settings.sidebar);
     // The configured default agent (its display name labels 在席's `agent` row and
-    // a bare `agent` launches it) and the agents installed on this machine (PATH-
-    // probed, canonical order), which 在席's agent picker offers as alternatives.
+    // a bare `agent` launches it) and the agents installed on this machine.
     state.set_default_agent(settings.agent_cli);
-    state.set_installed_agents(crate::usecase::agent::available_clis(
-        &crate::usecase::doctor::SystemRunner,
-    ));
+    state.set_installed_agents(installed_agents);
+    // The screen opens in 切替 (Switch) — the base mode (see `HomeState::new`) —
+    // so selecting a project lands on the session list the mascot animation glides
+    // into; no explicit mode switch is needed here.
 
-    // Restore past commands so `history` and `↑`/`↓` recall span sessions.
-    // A read failure is non-fatal: just start with an empty history.
-    if let Ok(entries) = crate::usecase::history::load(&workspace.path) {
-        state.restore_history(entries.into_iter().map(|e| e.command).collect());
-    }
+    state.restore_history(history);
 
     let mut reader = TermKeyReader::new(term.clone());
     // Persisting a command is best-effort; a write failure must not break the
@@ -297,6 +343,10 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
     // agent choice (a bare `agent`, the menu's `a` shortcut / default row).
     let default_cli = settings.agent_cli;
 
+    // Whether each session's open panes are persisted (so they restore on the next
+    // startup). Copied out so the pane driver can read it without holding `settings`.
+    let restore_panes_enabled = settings.restore_panes_enabled;
+
     // usagi's wiring policy (resolved usagi binary + local LLM model) the agent
     // renders into its own invocation; built once and reused for every launch.
     let agent_wiring = settings.agent_wiring(&usagi_bin);
@@ -316,6 +366,15 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
     // loop calls one at a time).
     let pool = std::cell::RefCell::new(terminal_pool::TerminalPool::new(notifications_enabled));
     let monitor = pool.borrow().monitor();
+
+    // Restore each session's panes from the last run, in the background (nothing is
+    // attached yet): an agent relaunches resuming its conversation, a terminal
+    // reopens a fresh shell. The watcher then tracks them so the sidebar badges
+    // move without the user attaching. Gated by the setting; a fresh workspace or a
+    // disabled setting simply starts with no panes.
+    if restore_panes_enabled {
+        restore_open_panes(term, &state, &pool, &agent_wiring, default_cli);
+    }
 
     // Removing a session deletes its worktrees/branches and forgets it, on a
     // background thread like creation so the screen never freezes. A session with
@@ -349,7 +408,12 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
     // finished removal — on this thread, since the pool is not `Send` and so
     // cannot be touched from the worker thread.
     let mut evict_pool = |session_root: &Path| {
-        pool.borrow_mut().remove_under(session_root);
+        // Also drop the removed worktrees' persisted pane snapshots, so a session
+        // recreated at the same path starts fresh instead of restoring this run's
+        // panes on the next startup (mirrors why the pool entry is evicted).
+        for dir in pool.borrow_mut().remove_under(session_root) {
+            crate::infrastructure::open_panes_store::clear(&dir);
+        }
     };
 
     // Check the project's git remote for a newer release than this build, on a
@@ -421,9 +485,8 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
         // picker / `agent <name>`), consumed here so it applies once, falling back
         // to the configured default. `take` clears it whether or not a fresh agent
         // spawn follows, so a stale choice never leaks into a later launch.
-        let agent = crate::infrastructure::agent::agent_for(
-            home.take_agent_choice().unwrap_or(default_cli),
-        );
+        let cli = home.take_agent_choice().unwrap_or(default_cli);
+        let agent = crate::infrastructure::agent::agent_for(cli);
         // Build the agent command for this worktree on demand: when it already
         // has a Claude conversation, launch with `--continue` so `:agent` resumes
         // where it left off; otherwise it starts fresh. The pool only sends it on
@@ -490,9 +553,9 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
                 } else {
                     terminal_tabs::PaneKind::Terminal
                 };
-                pool.add_pane(term, dir, kind, initial, &label)?;
+                pool.add_pane(term, dir, kind, initial, cli, &label)?;
             } else {
-                pool.enter(term, dir, run_agent, initial, &label)?;
+                pool.enter(term, dir, run_agent, initial, cli, &label)?;
             }
             handle.set_attached(Some(dir.to_path_buf()));
             loop {
@@ -516,6 +579,11 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
                     // the tab strip above it) without leaving 没入.
                     terminal_pane::PaneStep::NextTab => pool.nav(dir, terminal_tabs::TabNav::Next),
                     terminal_pane::PaneStep::PrevTab => pool.nav(dir, terminal_tabs::TabNav::Prev),
+                    // A click on a tab chip: jump straight to that pane and loop,
+                    // driving it (and republishing the strip) without leaving 没入.
+                    terminal_pane::PaneStep::ToTab(i) => {
+                        pool.nav(dir, terminal_tabs::TabNav::To(i))
+                    }
                     // `Ctrl-T`: zoom out to 在席 (Focus) so the user picks the next
                     // action from the session's menu, leaving every pane alive in
                     // the pool (like `Ctrl-O`, but one level shallower).
@@ -531,10 +599,18 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
                                 dir,
                                 terminal_tabs::PaneKind::Agent,
                                 later_initial,
+                                cli,
                                 &label,
                             )?;
                         }
                     }
+                    // `Ctrl-^`: leave the pane to jump to the previously focused
+                    // session; the event loop re-roots on it (attaching when live),
+                    // leaving every pane alive in the pool (like `Ctrl-O`).
+                    terminal_pane::PaneStep::PrevSession => return Ok(PaneExit::ToPreviousSession),
+                    // `Ctrl-Q`: leave 没入 to quit usagi. Every pane stays alive in
+                    // the pool; the event loop raises the quit-confirmation modal.
+                    terminal_pane::PaneStep::Quit => return Ok(PaneExit::Quit),
                     // `Ctrl-W`: close the active tab. Same as a shell that exited —
                     // keep driving when a pane remains, else fall to 在席.
                     terminal_pane::PaneStep::CloseTab => {
@@ -559,6 +635,19 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
         // to mop up the stale screen snapshot — so the cleanup holds no matter
         // when control changes hands.
         handle.set_attached(None);
+        // Persist this session's open panes (or clear when the last one closed) so
+        // the next startup restores them — an agent resumes its conversation, a
+        // terminal reopens a fresh shell. Done here, where the pane yields control
+        // and the pool reflects the current set, so the on-disk snapshot tracks
+        // every add / close. Best-effort: a write failure just means no restore.
+        if restore_panes_enabled {
+            match pool.snapshot_open_panes_for(dir) {
+                Some((active, panes)) => {
+                    let _ = crate::infrastructure::open_panes_store::save(dir, active, &panes);
+                }
+                None => crate::infrastructure::open_panes_store::clear(dir),
+            }
+        }
         // Leaving only to edit the note (`Ctrl-E` → `PaneExit::OpenNote`) keeps
         // the last screen snapshot: the note editor floats over the right pane,
         // so the live terminal stays visible behind it, and the event loop
@@ -693,6 +782,79 @@ pub fn run(term: &Term, workspace: &Workspace) -> Result<Outcome> {
     }
 
     outcome
+}
+
+/// Restore each session's persisted panes into the pool on startup, in the
+/// background (nothing is attached yet): a terminal pane reopens a fresh shell, an
+/// agent pane relaunches its CLI — resuming the conversation when one exists, so it
+/// picks up where it left off. Snapshots are read from
+/// [`open_panes_store`](crate::infrastructure::open_panes_store), keyed by worktree,
+/// for the workspace root (the ⌂ root row) and every session worktree.
+///
+/// Best-effort throughout: a missing snapshot skips the session and a failed spawn
+/// skips that one pane, so a partial restore never blocks the screen from opening.
+fn restore_open_panes(
+    term: &Term,
+    state: &HomeState,
+    pool: &std::cell::RefCell<terminal_pool::TerminalPool>,
+    agent_wiring: &crate::domain::agent::AgentWiring,
+    default_cli: crate::domain::settings::AgentCli,
+) {
+    use crate::infrastructure::open_panes_store::{self, StoredPaneKind};
+    use terminal_tabs::PaneKind;
+
+    // The dirs a snapshot may be keyed by — the workspace root and each session
+    // worktree — paired with the label shown in their waiting notification. Deduped
+    // so a path is never restored twice.
+    let mut dirs: Vec<(PathBuf, String)> = Vec::new();
+    let root = state.root_path().to_path_buf();
+    if !root.as_os_str().is_empty() {
+        dirs.push((root, "root".to_string()));
+    }
+    for wt in state.list().worktrees() {
+        if dirs.iter().any(|(d, _)| d == &wt.path) {
+            continue;
+        }
+        dirs.push((wt.path.clone(), state::worktree_name(wt).to_string()));
+    }
+
+    for (dir, label) in dirs {
+        let Some(snapshot) = open_panes_store::load(&dir) else {
+            continue;
+        };
+        for pane in &snapshot.panes {
+            let spawned = match pane.kind {
+                StoredPaneKind::Terminal => pool.borrow_mut().add_pane(
+                    term,
+                    &dir,
+                    PaneKind::Terminal,
+                    None,
+                    default_cli,
+                    &label,
+                ),
+                StoredPaneKind::Agent => {
+                    let cli = pane.cli.unwrap_or(default_cli);
+                    let agent = crate::infrastructure::agent::agent_for(cli);
+                    // Resume the conversation when one exists so the agent continues
+                    // where it left off rather than starting over.
+                    let resume = agent.has_resumable_session(&dir);
+                    let command = agent.launch_command(agent_wiring, resume, None);
+                    pool.borrow_mut().add_pane(
+                        term,
+                        &dir,
+                        PaneKind::Agent,
+                        Some(&command),
+                        cli,
+                        &label,
+                    )
+                }
+            };
+            // A failed spawn just skips that pane; the rest still restore.
+            let _ = spawned;
+        }
+        // Re-select the tab that was active when the snapshot was taken.
+        pool.borrow_mut().set_active(&dir, snapshot.active);
+    }
 }
 
 /// Create a session on a worker thread: run the git / filesystem work and build

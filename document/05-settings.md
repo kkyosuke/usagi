@@ -35,6 +35,7 @@
 | 既定ワークスペース | `default_workspace` | string? | `null` | 既定で開くワークスペース名。未設定なら `null` |
 | クローン先ベース | `workspace_root` | string? | `null`（→ `~/git`） | 新規プロジェクトのクローン先ベースディレクトリ。未設定時は `~/git` にフォールバック |
 | デスクトップ通知 | `notifications_enabled` | bool | `true` | バックグラウンドの `agent` が入力待ち・完了になった時のデスクトップ通知の ON/OFF |
+| ペイン復旧 | `restore_panes_enabled` | bool | `true` | 起動時に各セッションの前回開いていたペイン（agent / terminal）をバックグラウンドで復旧する。agent は会話の続きから再開する（[4. オーケストレーション#ペインの復旧](04-orchestration.md#ペインの復旧)） |
 | Agent CLI | `agent_cli` | enum | `claude` | 起動する AI エージェント CLI（`claude` / `codex` / `codex_fugu` / `gemini`）。`codex_fugu` は Codex 互換 CLI で `codex-fugu` を起動する |
 | セッションアクション UI | `session_action_ui` | enum | `menu` | ホーム画面の[在席](design/05-home.md#在席focus)で右ペインに出すアクション UI のスタイル。`menu`（選べるリスト）/ `prompt`（セッションスコープのコマンドライン） |
 | サイドバー | `sidebar` | enum | `full` | ホーム画面の左セッション一覧を開く初期状態。`full`（全幅の一覧）/ `rail`（幅 5 桁に畳んだレール）。実行時は `Ctrl-B` で随時切り替えられる（[サイドバーの開閉](design/05-home.md#サイドバーの開閉ctrl-b)） |
@@ -68,6 +69,7 @@
 |---|---|---|---|
 | Agent CLI | `agent_cli` | enum? | グローバル設定にフォールバック |
 | デスクトップ通知 | `notifications_enabled` | bool? | グローバル設定にフォールバック |
+| ペイン復旧 | `restore_panes_enabled` | bool? | グローバル設定にフォールバック |
 | デフォルトブランチ | `default_branch` | string? | リポジトリの検出済み既定ブランチ（auto） |
 | デフォルトブランチ基点 | `default_branch_source` | enum? | 既定（`remote`） |
 | ローカル LLM 有効化 | `local_llm_enabled` | bool? | グローバル設定（`local_llm.enabled`）にフォールバック |
@@ -134,6 +136,7 @@ CLI からも設定を確認・編集できます（[3. コマンドリファレ
 | 環境変数 | 役割 |
 |---|---|
 | `USAGI_HOME` | グローバルデータディレクトリ（`workspaces.json` / `settings.json` の置き場）を上書きする。未設定なら `~/.usagi` |
+| `USAGI_TRACE` | 操作トレース（`logs/trace-YYYY-MM-DD.jsonl`）の記録を有効化する。空でも `0` でもない値で ON、未設定なら OFF（[data/01-global.md#logs操作トレース](data/01-global.md#logs操作トレース)） |
 
 ## 設定が効く場面
 
@@ -143,6 +146,7 @@ CLI からも設定を確認・編集できます（[3. コマンドリファレ
 | `default_workspace` | 起動時に既定で開くワークスペースの選択 |
 | `workspace_root` | 新規プロジェクト画面（Clone）の Location 既定値（[design/03-new.md](design/03-new.md)） |
 | `notifications_enabled` | バックグラウンドの `agent` が入力待ち・完了になった時のデスクトップ通知の表示可否 |
+| `restore_panes_enabled` | 起動時に各セッションのペイン（agent / terminal）を復旧するかどうか（[4. オーケストレーション#ペインの復旧](04-orchestration.md#ペインの復旧)） |
 | `agent_cli` | `agent` コマンドが起動する AI エージェント CLI の選択（[4. オーケストレーション](04-orchestration.md)） |
 | `session_action_ui` | ホーム画面の[在席](design/05-home.md#在席focus)で右ペインに出すアクション UI（`menu` / `prompt`）の選択 |
 | `sidebar` | ホーム画面の左セッション一覧を開く初期状態（`full` / `rail`）。実行時は `Ctrl-B` で切り替え（[サイドバーの開閉](design/05-home.md#サイドバーの開閉ctrl-b)） |

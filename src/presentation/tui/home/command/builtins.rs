@@ -398,12 +398,13 @@ impl Command for AgentCommand {
     }
 }
 
-/// `close`: remove the focused session forcefully and return to 統括 (Overview).
-/// It is the 在席 equivalent of `session remove <name> --force` — the worktrees
-/// and branches are deleted and any uncommitted changes discarded, so the
-/// session is gone for good. The removal is a side effect ([`Effect::CloseSession`])
-/// performed by the event loop, which owns the worktree list and the
-/// session-removal callback.
+/// `close`: remove the focused session and return to 切替 (Switch). It is the
+/// 在席 equivalent of `session remove <name>` (no `--force`): a clean session's
+/// worktrees and branches are deleted, but one with **uncommitted changes is
+/// refused** — the removal logs how to discard them — so `close` can never
+/// silently throw away unsaved work. The removal is a side effect
+/// ([`Effect::CloseSession`]) performed by the event loop, which owns the
+/// worktree list and the session-removal callback.
 pub(super) struct CloseCommand;
 
 impl Command for CloseCommand {
@@ -412,7 +413,7 @@ impl Command for CloseCommand {
     }
 
     fn description(&self) -> &'static str {
-        "Close the focused session (remove it, discarding any changes)"
+        "Close the focused session (remove it; kept if it has uncommitted changes)"
     }
 
     fn scope(&self) -> CommandScope {

@@ -22,7 +22,9 @@
 | `usagi init --git <URL>` | カレントディレクトリ配下に `<リポジトリ名>/` を作成して clone し、プロジェクトとして登録する |
 | `usagi` / `usagi hop` | メインの TUI を起動する。起動画面 → プロジェクト選択 → ホーム画面へ遷移（[design/](../design/README.md)）。サブコマンドを省略した `usagi` は `usagi hop` と同じ |
 | `usagi run [N]` | うさぎアニメを全画面で再生して見るギャラリー。`N`（1–5）で種類を選ぶ（既定 1）。なにかキーで終了 |
+| `usagi icon [view]` | 正方形ピクセルで組んだうさぎマークをブロック文字（`█▀▄▘▝▖▗…`）で標準出力に印字する。`view`（`all` / `flip` / `half`、既定 `all`）で表示を選ぶ（下記） |
 | `usagi status` | カレントリポジトリの worktree 状態を `.usagi/state.json` に同期し一覧表示する（[data/02-workspace.md](../data/02-workspace.md)） |
+| `usagi clean [--dry-run] [--agent <NAME>]` | 設定中の Agent CLI をヘッドレスでバックグラウンド起動し、放置・マージ済みのセッション worktree を AI が自律的に判断して削除する。即座に制御を返し、出力は `.usagi/clean.log` に追記する |
 | `usagi feature` | 各 Agent CLI（Claude / Codex / sakana.ai / Gemini）が usagi のどの機能に対応しているかの星取表を表示する（下記） |
 | `usagi config` | 現在のグローバル設定（`settings.json`）を一覧表示する（[5. 設定](../05-settings.md)） |
 | `usagi config --edit` | グローバル設定ファイルを `$EDITOR` で開いて編集し、保存時に形式（JSON / 必須 `version` / 型）を検証する。不正な場合は直前の内容に巻き戻す |
@@ -65,10 +67,41 @@ TUI を起動します。代替スクリーン上で起動画面を表示し、O
 > アニメーションの絵柄そのものは共通ウィジェット（`src/presentation/tui/widgets/`）にあり、`usagi run` は
 > それを全画面で再生する薄い画面（`src/presentation/tui/gallery/`）です。
 
+### `usagi icon`
+
+正方形のマス目（`'#'` 塗り / `'.'` 空き）で設計したうさぎのロゴマークを、ブロック文字で標準出力に印字します。`usagi run` のアニメ（顔文字 AA）とは別物で、こちらは**四角の塊と反転だけで組む静的なマーク**です。引数 `view`（既定 `all`）で表示を選びます。
+
+| `view` | 表示 |
+|---|---|
+| `flip` | 横向きの原型（右向き）とその**水平反転**（左向き）を左右に並べる。四分割ブロック（`▘▝▖▗`）で 2×2 マスを 1 文字に畳んで小型化し、片側を設計して反転すれば逆向きが得られることを示す |
+| `half` | 正面向きの頭部を**半マス（`▀▄`）**で描く。上下 2 マスを 1 文字に畳み、縦を半分に圧縮する |
+| `all`（既定） | 上記すべてを順に表示 |
+
+- 描画はブロック文字のみで、2 種類の圧縮を使い分けます。
+  - **半マス**: 上下 2 マスを `█` / `▀` / `▄` / 空白に畳み、**縦を半分**にする表現。
+  - **四分割**: 2×2 マスを `▘▝▖▗▀▄▌▐▞▚▛▜▙▟█` の 16 種から選び、**縦横とも半分**にする最小表現。
+- マークの絵柄は `src/presentation/cli/icon.rs` にマス目データ（`PROFILE` / `MINI`）として持ち、純粋な描画関数が `Vec<String>` を組み立てます。
+
 ### `usagi status`
 
 `git worktree list` などを読み取り専用で検査し、`<repo>/.usagi/state.json` を同期したうえで、
 各 worktree のブランチ・HEAD・`local` / `pushed` / `synced`（up to date）状態を一覧表示します。
+
+### `usagi clean`
+
+放置された不要なセッション worktree の整理を、設定中の Agent CLI（Claude / Codex / sakana.ai / Gemini）に任せます。
+usagi は対象を自分で判断せず、Agent CLI を**ヘッドレス（非対話）かつバックグラウンドにデタッチ起動**し、即座に制御を返します。
+
+- 起動した AI には「`.usagi/sessions/<name>/` 配下のマージ済み・放置されたセッション worktree を調べ、不要なものを削除する」タスクを与えます。
+  AI は usagi の MCP セッションツール（`session_list` / `session_remove`）や git を使って自律的に削除まで実行します（事前確認なし）。
+  リポジトリ本体・`main/`・未コミットの変更が残る worktree には触れません。
+- ヘッドレス起動時は無人実行のため、各 CLI の権限承認をバイパスするフラグを付けて起動します
+  （Claude: `--dangerously-skip-permissions`、Codex: `--dangerously-bypass-approvals-and-sandbox`、Gemini: `--yolo`）。
+- AI の標準出力・標準エラーは `<workspace>/.usagi/clean.log` に追記します。起動した CLI 名とログの場所を表示して終了します。
+- `--dry-run`: AI に削除させず、削除すべきと判断した対象とその理由だけを報告させます。
+- `--agent <NAME>`: 設定の既定 CLI を上書きし、この実行で使う CLI を指定します（`claude` / `codex` / `codex-fugu` / `gemini`、表示名 `sakana.ai` も可）。
+
+> Gemini は MCP のインライン注入経路を持たないため、起動した Gemini は usagi の MCP セッションツールを使えず git のみで作業します。
 
 ### `usagi feature`
 

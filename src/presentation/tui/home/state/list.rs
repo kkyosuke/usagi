@@ -70,6 +70,15 @@ pub struct WorktreeList {
     labels: Vec<Option<String>>,
     selected_index: usize,
     active_index: usize,
+    /// The display name of the session that was active *before* the current one,
+    /// or `None` until the active row has moved off its initial spot. It is the
+    /// target `Ctrl-^` jumps back to (vim's `Ctrl-^` / tmux's `last-window`):
+    /// recorded by [`activate_selected`](Self::activate_selected) whenever the
+    /// active row changes to a *different* session, and resolved back to a current
+    /// row by [`previous_row`](Self::previous_row). Stored as a name, not an index,
+    /// so a list rebuild (a background re-sync) keeps it pointing at the same
+    /// session — and drops it when that session is gone.
+    previous_active: Option<String>,
 }
 
 impl WorktreeList {
@@ -95,6 +104,7 @@ impl WorktreeList {
             labels,
             selected_index: 0,
             active_index: 0,
+            previous_active: None,
         }
     }
 
@@ -170,9 +180,47 @@ impl WorktreeList {
 
     /// Make the row under the cursor active, returning its display name (the
     /// branch name, or [`ROOT_NAME`] for the root row).
+    ///
+    /// When this lands on a *different* session than the one currently active,
+    /// the one being left is remembered as the [`previous_row`](Self::previous_row)
+    /// `Ctrl-^` jumps back to; re-activating the same row leaves that memory
+    /// untouched (so a no-op focus does not erase where to jump back to).
     pub fn activate_selected(&mut self) -> &str {
+        if self.selected_index != self.active_index {
+            self.previous_active = Some(self.active_name().to_string());
+        }
         self.active_index = self.selected_index;
         self.active_name()
+    }
+
+    /// The name of the previously active session, for carrying the `Ctrl-^` jump
+    /// target across a list rebuild (a background re-sync drops the list and
+    /// builds a fresh one). Paired with [`set_previous_active`](Self::set_previous_active).
+    pub fn previous_active_name(&self) -> Option<&str> {
+        self.previous_active.as_deref()
+    }
+
+    /// Restore the previously active session after a rebuild, so the `Ctrl-^`
+    /// jump survives a background re-sync. The name is validated lazily by
+    /// [`previous_row`](Self::previous_row), so one that no longer matches simply
+    /// yields no jump rather than an error.
+    pub fn set_previous_active(&mut self, name: Option<String>) {
+        self.previous_active = name;
+    }
+
+    /// The row the previously active session now sits at (0 for the root row),
+    /// or `None` when no previous session has been recorded yet or it has since
+    /// been removed from the list. Resolved by name so a list rebuild keeps it
+    /// pointing at the same session — the target `Ctrl-^` focuses.
+    pub fn previous_row(&self) -> Option<usize> {
+        let name = self.previous_active.as_deref()?;
+        if name == ROOT_NAME {
+            return Some(0);
+        }
+        self.worktrees
+            .iter()
+            .position(|w| worktree_name(w) == name)
+            .map(|index| index + 1)
     }
 
     /// The display name of the active row: its branch, or [`ROOT_NAME`] for the

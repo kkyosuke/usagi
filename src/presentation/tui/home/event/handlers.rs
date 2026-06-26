@@ -1,10 +1,10 @@
 //! The home screen's per-mode key handlers. The event loop in [`super`]
-//! dispatches each key to one of the three entry handlers — `overview_key` /
-//! `switch_key` / `focus_key` — by mode; those delegate to the helpers here
-//! (`activate_named`, `leave_switch`, the focus-surface handlers, …) and to
-//! `open_pane`, which drives the embedded terminal (没入). All are pure aside
-//! from the injected callbacks, which they reach through the shared [`Wiring`]
-//! bundle.
+//! dispatches each key to one of the entry handlers — `palette_key` (the `:`
+//! command palette overlay) / `switch_key` / `focus_key` — by overlay and mode;
+//! those delegate to the helpers here (`focus_and_attach`, `leave_switch`, the
+//! focus-surface handlers, …) and to `open_pane`, which drives the embedded
+//! terminal (没入). All are pure aside from the injected callbacks, which they
+//! reach through the shared [`Wiring`] bundle.
 
 use anyhow::Result;
 use console::Key;
@@ -18,11 +18,17 @@ use super::super::command::Effect;
 use super::super::state::{HomeState, PaneExit, ReturnMode, ROOT_NAME};
 use super::super::terminal_tabs::TabNav;
 use super::super::ui;
-use super::{paint_now, selected_dir, Flow, Wiring, CTRL_E, CTRL_N, CTRL_O, CTRL_P, CTRL_S};
+use super::{
+    paint_now, selected_dir, Flow, Wiring, CTRL_CARET, CTRL_E, CTRL_N, CTRL_O, CTRL_P, CTRL_S,
+};
 
-/// Handle one key in 統括 (Overview): edit / complete / recall the workspace
-/// command line and run it on `Enter`, dispatching the resulting [`Effect`].
-pub(super) fn overview_key(
+/// Handle one key in the workspace command palette overlay (`:`): edit /
+/// complete / recall the workspace command line and run it on `Enter`,
+/// dispatching the resulting [`Effect`]. A command with a transitioning effect
+/// (entering a mode, attaching a pane, opening config / preview, …) closes the
+/// palette first so the effect takes over the screen; a non-transitioning one
+/// (a logged result, a text dump) keeps it open so the response shows.
+pub(super) fn palette_key(
     term: &Term,
     state: &mut HomeState,
     painter: &mut FramePainter,
@@ -37,26 +43,41 @@ pub(super) fn overview_key(
             }
             match submission.effect {
                 Effect::Quit => return Ok(Flow::Quit),
-                // `session switch` with no name moves keyboard focus to the left
-                // pane to pick a session, returning here on cancel.
-                Effect::EnterSwitch => state.enter_switch(ReturnMode::Overview),
+                // `session switch` with no name closes the palette and moves
+                // keyboard focus to the base 切替 to pick a session.
+                Effect::EnterSwitch => {
+                    state.close_command_palette();
+                    state.enter_switch(ReturnMode::Base);
+                }
                 // `session switch <name>` focuses that session: if it resolves,
-                // enter 在席 (attaching when it is live); otherwise log an error.
-                Effect::Activate(name) => activate_named(term, state, painter, &name, wiring),
+                // close the palette and enter 在席 (attaching when it is live);
+                // an unknown name keeps the palette open so the error shows.
+                Effect::Activate(name) => match resolve_row(state, &name) {
+                    Some(row) => {
+                        state.close_command_palette();
+                        focus_and_attach(term, state, painter, wiring, row);
+                    }
+                    None => state.log_error(format!("no session named \"{name}\"")),
+                },
                 // `session create <name>` dispatches the git work to a background
                 // worker and returns at once; the new session appears in the list
                 // when the task finishes (tracked in the top-right task panel).
-                Effect::CreateSession(name) => (wiring.dispatch_create)(&name),
-                // `session create` with no name moves to 切替 and opens the inline
-                // name input there (creation lives in Switch now).
+                Effect::CreateSession(name) => {
+                    state.close_command_palette();
+                    (wiring.dispatch_create)(&name);
+                }
+                // `session create` with no name closes the palette, moves to 切替
+                // and opens the inline name input there (creation lives in Switch).
                 Effect::OpenSessionModal => {
-                    state.enter_switch(ReturnMode::Overview);
+                    state.close_command_palette();
+                    state.enter_switch(ReturnMode::Base);
                     let branches = (wiring.existing_branches)();
                     state.switch_begin_create(branches);
                 }
                 // `session list`: the state holds the sessions but not their
                 // wording — the ui layer formats them into the empty-state line
-                // or the scrollable modal, which we then apply.
+                // or the scrollable modal, which we then apply. The palette stays
+                // open behind the modal so the user lands back on it on dismiss.
                 Effect::ListSessions => match ui::content::session_list(state.sessions()) {
                     ui::content::SessionList::Empty(line) => state.log_output(line),
                     ui::content::SessionList::Modal(title, lines) => {
@@ -65,24 +86,32 @@ pub(super) fn overview_key(
                 },
                 // `session remove <name>` dispatches the removal to a background
                 // worker; the session leaves the list when the task finishes.
-                Effect::RemoveSession { name, force } => (wiring.dispatch_remove)(&name, force),
+                Effect::RemoveSession { name, force } => {
+                    state.close_command_palette();
+                    (wiring.dispatch_remove)(&name, force);
+                }
+                // `session remove` with no name opens the removal checklist over
+                // the palette, so it stays open behind it.
                 Effect::OpenRemoveModal { force } => state.open_remove_modal(force),
-                // `terminal` / `agent` are session commands, but the Overview line
-                // still dispatches them if typed: focus the active session (the
+                // `terminal` / `agent` are session commands, but the palette still
+                // dispatches them if typed: close it, focus the active session (the
                 // root by default) and attach a fresh pane.
                 Effect::OpenTerminal => {
+                    state.close_command_palette();
                     let row = state.list().active_index();
                     state.enter_focus(row);
                     launch_pane(term, state, painter, wiring, false);
                 }
                 Effect::OpenAgent(cli) => {
+                    state.close_command_palette();
                     let row = state.list().active_index();
                     state.enter_focus(row);
                     launch_agent(term, state, painter, wiring, cli);
                 }
                 // Hand off to the settings screen; it owns the terminal until
-                // dismissed. Quitting there quits the app; otherwise we resume,
-                // forcing a full repaint over the screen it drew.
+                // dismissed. Quitting there quits the app; otherwise we close the
+                // palette and resume, forcing a full repaint over the screen it
+                // drew.
                 Effect::OpenConfig => match (wiring.open_config)(term)? {
                     // The user quit the app from the settings screen.
                     None => return Ok(Flow::Quit),
@@ -91,29 +120,35 @@ pub(super) fn overview_key(
                     // availability, so apply the re-read settings — otherwise
                     // Focus keeps rendering the old mode / `ai` visibility.
                     Some(reload) => {
+                        state.close_command_palette();
                         state.set_session_action_ui(reload.session_action_ui);
                         state.set_ai_available(reload.ai_available);
                         painter.reset();
                     }
                 },
-                // `close` is a session command; the Overview line still
-                // dispatches it if typed, closing the focused session. On the root
-                // row (the default) it is refused, since the root is the workspace
-                // itself and not a session.
-                Effect::CloseSession => close_focused_session(state, wiring),
+                // `close` is a session command; the palette still dispatches it if
+                // typed, closing the focused session. On the root row (the default)
+                // it is refused, since the root is the workspace itself and not a
+                // session.
+                Effect::CloseSession => {
+                    state.close_command_palette();
+                    close_focused_session(state, wiring);
+                }
                 // `preview <path|name>` opens the right-pane Markdown preview:
-                // resolve and read the file under the workspace root (the impure
-                // step), then render and show it (or log a failure). Reading lives
-                // in the infrastructure layer; rendering and storing the result is
-                // pure state, so both outcomes are testable.
+                // close the palette, then resolve and read the file under the
+                // workspace root (the impure step) and render / show it (or log a
+                // failure). Reading lives in the infrastructure layer; rendering
+                // and storing the result is pure state, so both outcomes are
+                // testable.
                 Effect::OpenPreview(target) => {
+                    state.close_command_palette();
                     state.open_preview_result(crate::infrastructure::markdown_file::read_under(
                         wiring.workspace_root,
                         &target,
                     ))
                 }
-                // `ShowText` already opened its modal inside `submit`; nothing
-                // more for the event loop to do.
+                // `ShowText` already opened its modal inside `submit`; the palette
+                // stays open behind it. `None` / `Clear` likewise keep it open.
                 Effect::None | Effect::Clear | Effect::ShowText(_) => {}
             }
         }
@@ -128,34 +163,12 @@ pub(super) fn overview_key(
         Key::ArrowRight => state.cursor_right(),
         Key::Home => state.cursor_home(),
         Key::End => state.cursor_end(),
-        // `Esc` is inert at the top level: the home screen is not left by backing
-        // out (that would drop into the project list); the only way out is
-        // `Ctrl-C`, handled centrally in the event loop.
-        Key::Escape => {}
-        // `Ctrl-O` opens 切替 (Switch) to pick a session in the left pane,
-        // returning here on cancel.
-        Key::Char(CTRL_O) => state.enter_switch(ReturnMode::Overview),
+        // `Esc` closes the palette, returning to the mode beneath it.
+        Key::Escape => state.close_command_palette(),
         Key::Char(c) => state.push_char(c),
         _ => {}
     }
     Ok(Flow::Continue)
-}
-
-/// Focus the session named `name` (from `session switch <name>`): if it resolves
-/// in the worktree list, enter 在席 (Focus) on its row and, when the session is
-/// live, attach the pane (没入); an unknown name logs an error and stays in
-/// Overview.
-fn activate_named(
-    term: &Term,
-    state: &mut HomeState,
-    painter: &mut FramePainter,
-    name: &str,
-    wiring: &mut Wiring,
-) {
-    match resolve_row(state, name) {
-        Some(row) => focus_and_attach(term, state, painter, wiring, row),
-        None => state.log_error(format!("no session named \"{name}\"")),
-    }
 }
 
 /// The left-pane row a session `name` maps to (0 is the root row), or `None` when
@@ -305,9 +318,14 @@ pub(super) fn switch_key(
         Key::Char('n') | Key::Char(CTRL_E) | Key::End => {
             state.switch_begin_note();
         }
+        // `:` summons the workspace command palette overlay (the `session` /
+        // `config` / `doctor` / `man` commands). It is placed after the inline
+        // create / rename / note guards above, so `:` is a literal character
+        // while typing a name and only opens the palette from the base list.
+        Key::Char(':') => state.open_command_palette(),
         // Esc first dismisses the highlighted session's read-only note overlay
         // (it auto-shows on selection); with no note showing it backs out to
-        // where Switch was opened from.
+        // where Switch was opened from (inert at the base Switch).
         Key::Escape => {
             if state.switch_note_visible() {
                 state.hide_switch_note();
@@ -315,15 +333,16 @@ pub(super) fn switch_key(
                 leave_switch(term, state, painter, wiring);
             }
         }
-        // Ctrl-O zooms one level further out, to 統括.
-        Key::Char(CTRL_O) => state.enter_overview(),
+        // Ctrl-^ jumps straight back to the previously focused session.
+        Key::Char(CTRL_CARET) => jump_to_previous(term, state, painter, wiring),
         _ => {}
     }
     Flow::Continue
 }
 
-/// Back out of 切替 on `Esc`: return to the mode it was opened from. From
-/// 統括 / 在席 this just restores the mode; from 没入 it re-attaches the focused
+/// Back out of 切替 on `Esc`: return to the mode it was opened from. At the base
+/// Switch (the default) `Esc` is inert — the home screen is not left by backing
+/// out. From 在席 it restores Focus; from 没入 it re-attaches the focused
 /// session's pane when that session is still live, mirroring how `Enter` only
 /// attaches a live session (so backing out onto an idle row lands in 在席 rather
 /// than spawning a surprise shell).
@@ -334,7 +353,8 @@ fn leave_switch(
     wiring: &mut Wiring,
 ) {
     match state.switch_return() {
-        ReturnMode::Overview => state.enter_overview(),
+        // The base Switch is the default mode: `Esc` stays put.
+        ReturnMode::Base => {}
         ReturnMode::Focus => {
             let row = state.list().selected_index();
             state.enter_focus(row);
@@ -499,9 +519,26 @@ fn focus_and_attach(
     }
 }
 
+/// Jump to the previously focused session — the `Ctrl-^` action (vim's `Ctrl-^`
+/// / tmux's `last-window`). Focuses the row [`HomeState::previous_session_row`]
+/// resolves to, attaching it when live (so toggling between two running sessions
+/// drops straight back into the shell); a no-op when no other session has been
+/// focused yet or the previous one has since been removed. Focusing it records
+/// the session being left as the new previous, so a second `Ctrl-^` toggles back.
+fn jump_to_previous(
+    term: &Term,
+    state: &mut HomeState,
+    painter: &mut FramePainter,
+    wiring: &mut Wiring,
+) {
+    if let Some(row) = state.previous_session_row() {
+        focus_and_attach(term, state, painter, wiring, row);
+    }
+}
+
 /// Handle one key in 在席 (Focus): drive the right-pane action surface (a menu
 /// of the session's commands or a session-scoped prompt), launching `terminal` /
-/// `agent` into 没入, or back out to 統括 / 切替.
+/// `agent` into 没入, or back out to 切替.
 pub(super) fn focus_key(
     term: &Term,
     state: &mut HomeState,
@@ -512,7 +549,7 @@ pub(super) fn focus_key(
     // `Esc` peels back one step: on the "+ new" launch surface opened over live
     // panes (e.g. after `Ctrl-T` from 没入) it discards the surface and steps onto
     // the pane's tab so that pane previews again; everywhere else (a pane tab, or
-    // an idle session with no pane behind "+ new") it leaves 在席 for 統括. `Ctrl-O`
+    // an idle session with no pane behind "+ new") it leaves 在席 for 切替. `Ctrl-O`
     // opens 切替 (return here on cancel); `Ctrl-P` / `Ctrl-N` move the tab selector
     // across the session's live panes and the trailing "+ new" tab. These bind the
     // same whichever tab is selected.
@@ -530,6 +567,18 @@ pub(super) fn focus_key(
         }
         Key::Char(CTRL_O) => {
             state.enter_switch(ReturnMode::Focus);
+            return Flow::Continue;
+        }
+        // `:` summons the workspace command palette overlay from 在席. Handled
+        // before the action-surface dispatch so it fires whether the menu or the
+        // prompt is showing (in the prompt `:` would otherwise be typed).
+        Key::Char(':') => {
+            state.open_command_palette();
+            return Flow::Continue;
+        }
+        // `Ctrl-^` jumps straight back to the previously focused session.
+        Key::Char(CTRL_CARET) => {
+            jump_to_previous(term, state, painter, wiring);
             return Flow::Continue;
         }
         // `Ctrl-E` edits the focused session's note (a no-op on the root row).
@@ -588,11 +637,17 @@ pub(super) fn focus_key(
     Flow::Continue
 }
 
-/// Close the focused session forcefully — the `close` command's effect.
-/// Dispatches a background removal like `session remove <name> --force`
-/// (discarding any uncommitted changes) and, since the user asked to close this
-/// session, leaves 在席 for 切替 (Switch) at once so they can pick the next one
-/// (`Esc` backs out to 統括); the removal's result is logged and the list
+/// Close the focused session — the `close` command's effect. Dispatches a
+/// background removal like `session remove <name>` (no `--force`): a clean
+/// session is removed, but one with **uncommitted changes is refused** and the
+/// task logs how to discard them (`session remove <name> --force`), so a single
+/// `close` can never silently throw away unsaved work. This matches the CLI's
+/// `session remove` default and the quit-confirm modal's intent to protect
+/// running work, rather than the old unconditional `--force`.
+///
+/// Either way the user asked to leave this session, so 在席 yields to the base
+/// 切替 (Switch) at once to pick the next one (`Esc` is inert there); the
+/// removal's result — success or the dirty refusal — is logged and the list
 /// refreshed when the background task finishes. The root row is the workspace
 /// itself, not a session, so closing it is refused outright and stays in 在席.
 fn close_focused_session(state: &mut HomeState, wiring: &mut Wiring) {
@@ -604,8 +659,10 @@ fn close_focused_session(state: &mut HomeState, wiring: &mut Wiring) {
         state.log_error("the root row is the workspace and cannot be closed");
         return;
     }
-    (wiring.dispatch_remove)(&name, true);
-    state.enter_switch(ReturnMode::Overview);
+    // `false`: do not force. A dirty worktree is refused (the task logs the
+    // `--force` hint) instead of being discarded without confirmation.
+    (wiring.dispatch_remove)(&name, false);
+    state.enter_switch(ReturnMode::Base);
 }
 
 /// 在席 menu surface: `↑`/`↓` move the cursor, `Enter` runs the highlighted
@@ -744,8 +801,8 @@ fn launch_agent(
 
 /// Add a fresh `terminal` / `agent` pane to the focused session and drive it
 /// (没入). `agent` launches the AI agent CLI inside the pane; otherwise a plain
-/// shell. Shared by the three surfaces that launch a pane on command — Overview's
-/// typed `terminal` / `agent`, the 在席 menu, and the 在席 prompt — each of which
+/// shell. Shared by the three surfaces that launch a pane on command — the `:`
+/// palette's typed `terminal` / `agent`, the 在席 menu, and the 在席 prompt — each of which
 /// has already focused the target row.
 fn launch_pane(
     term: &Term,
@@ -772,6 +829,10 @@ fn launch_pane(
 ///   re-attach (`ReturnMode::Attached`) if the user backs out.
 /// - [`PaneExit::ToFocus`] — `Ctrl-T`: zoom out to 在席 (Focus), the session's
 ///   action menu, leaving every pane alive in the pool.
+/// - [`PaneExit::ToPreviousSession`] — `Ctrl-^`: jump to the previously focused
+///   session, re-attaching it when live (or 在席 when none was recorded).
+/// - [`PaneExit::Quit`] — `Ctrl-Q`: leave the pane and raise the quit-confirmation
+///   modal on the home screen (every pane stays alive in the pool until confirmed).
 fn open_pane(
     term: &Term,
     state: &mut HomeState,
@@ -827,6 +888,25 @@ fn open_pane(
             // where the user picks the next action (terminal / agent / …). Every
             // pane stays alive in the pool, so re-launching re-attaches them.
             state.leave_attached();
+        }
+        Ok(PaneExit::ToPreviousSession) => {
+            // `Ctrl-^` jumps to the previously focused session, re-attaching it
+            // when live (like `Enter` in 切替, via `focus_and_attach`); focusing it
+            // records the session being left, so a second `Ctrl-^` toggles back.
+            // With no previous session recorded, fall back to 在席 on the current
+            // one (like `Ctrl-T`), so the pane never lingers in 没入 with no driver.
+            match state.previous_session_row() {
+                Some(row) => focus_and_attach(term, state, painter, wiring, row),
+                None => state.leave_attached(),
+            }
+        }
+        Ok(PaneExit::Quit) => {
+            // `Ctrl-Q` in 没入: leave the pane (every shell / agent stays alive in
+            // the pool) and raise the quit-confirmation modal on the home screen.
+            // The event loop renders it on the next frame; confirming quits, which
+            // then drops the pool — so a live agent is never closed by one keystroke.
+            state.leave_attached();
+            state.open_quit_confirm();
         }
         Ok(PaneExit::Closed) => {
             // The shell exited: drop back to 在席 on the same session.

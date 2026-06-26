@@ -284,7 +284,9 @@ pub fn event_loop(
 
         match key {
             Key::Escape => return Ok(Choice::Cancelled),
-            Key::CtrlC => return Ok(Choice::Quit),
+            // `Ctrl-C` / `Ctrl-Q` (the bare `0x11`) quit; matched before the
+            // `Key::Char(c)` filter arm below that would otherwise capture Ctrl-Q.
+            Key::CtrlC | Key::Char('\u{0011}') => return Ok(Choice::Quit),
             Key::Enter => return Ok(Choice::Selected(dir.chosen())),
             Key::ArrowUp => dir.move_up(),
             Key::ArrowDown => dir.move_down(),
@@ -524,6 +526,17 @@ mod tests {
         let source = FakeSource::new(&[("/home", &["a"])]);
         assert!(matches!(
             run(vec![Ok(Key::CtrlC)], &source, "/home"),
+            Choice::Quit
+        ));
+    }
+
+    #[test]
+    fn ctrl_q_quits() {
+        // `Ctrl-Q` (the bare `0x11`) quits, matched before the `Char(c)` filter arm
+        // so it never lands in the filter as a literal control character.
+        let source = FakeSource::new(&[("/home", &["a"])]);
+        assert!(matches!(
+            run(vec![Ok(Key::Char('\u{0011}'))], &source, "/home"),
             Choice::Quit
         ));
     }
