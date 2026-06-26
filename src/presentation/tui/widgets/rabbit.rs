@@ -126,25 +126,34 @@ impl RabbitMood {
     }
 }
 
-/// The resting mascot for the bottom of the workspace sidebar, its face and
-/// gesture chosen by `mood` so the rabbit reflects the current engagement mode.
-/// The ears (the mascot's [`RABBIT`] row 0) and feet (row 2) are the mascot's
-/// own, and only the middle face row changes between moods, so the usagi stays
-/// recognisably the same animal while its expression shifts.
+/// The mood mascot's three raw rows — ears, face, feet — aligned so the ears, the
+/// head, and the body share one left edge. Shared by [`workspace_rabbit`] and
+/// [`workspace_rabbit_speaking`] so the resting and speaking rabbits stay identical.
 ///
-/// The shared [`RABBIT`] ears carry two leading spaces so they centre over the
-/// 6-wide resting face (`(='-')`). A mood face is a 5-wide head (`(>.<)`) plus a
-/// side paw (`?` / `/` / `9`), so the head sits one column to the left; the ears
-/// drop one leading space to land over the head rather than leaning onto the paw.
-/// Every row is padded to a common block width and painted the mood's colour, so
-/// the block tiles as a rectangle wherever it is placed.
-pub fn workspace_rabbit(mood: RabbitMood) -> Vec<String> {
-    let (face, paint) = mood.face_and_style();
-    let rows = [
+/// The shared [`RABBIT`] ears and feet are tuned for the 6-wide resting face
+/// (`(='-')`): the ears carry two leading spaces to centre over it and the feet
+/// one. A mood face is a 5-wide head (`(>.<)`) plus a side paw (`?` / `/` / `9`),
+/// so the head sits one column to the left. To keep the rabbit coherent the ears
+/// drop one leading space (landing over the head rather than leaning onto the paw)
+/// and the feet drop theirs too, so the body's `(` lines up under the head's and
+/// the ears' `(` instead of trailing one column to the right.
+fn mood_mascot_rows(face: &str) -> [String; 3] {
+    [
         format!(" {}", RABBIT[0].trim()),
         face.to_string(),
-        RABBIT[2].to_string(),
-    ];
+        RABBIT[2].trim_start().to_string(),
+    ]
+}
+
+/// The resting mascot for the bottom of the workspace sidebar, its face and
+/// gesture chosen by `mood` so the rabbit reflects the current engagement mode.
+/// Only the middle face row changes between moods, so the usagi stays recognisably
+/// the same animal while its expression shifts; the ears/head/body alignment is
+/// [`mood_mascot_rows`]'. Every row is padded to a common block width and painted
+/// the mood's colour, so the block tiles as a rectangle wherever it is placed.
+pub fn workspace_rabbit(mood: RabbitMood) -> Vec<String> {
+    let (face, paint) = mood.face_and_style();
+    let rows = mood_mascot_rows(face);
     let block_w = rows
         .iter()
         .map(|row| console::measure_text_width(row))
@@ -221,19 +230,19 @@ pub fn workspace_rabbit_speaking(
                 .to_string(),
         );
     }
-    // The bottom border carries the speech tail (`┬`) one column in, so it lands
-    // over the mascot's ears ([`RABBIT`] row 0 begins at column 2) and the bubble
-    // reads as coming from the usagi just below.
+    // The bottom border carries the speech tail (`┬`) over the mascot's head:
+    // the face's nose sits at column 3 (a leading space, then the head's `(>.<)`),
+    // so the bubble reads as coming from the usagi just below.
     let mut bottom = String::from("╰");
     for i in 0..span {
-        bottom.push(if i == 1 { '┬' } else { '─' });
+        bottom.push(if i == 2 { '┬' } else { '─' });
     }
     bottom.push('╯');
     rows.push(bubble.apply_to(bottom).to_string());
 
     // The resting mascot below, in its mood colour — only the face row changes.
     let (face, paint) = mood.face_and_style();
-    for art in [RABBIT[0], face, RABBIT[2]] {
+    for art in mood_mascot_rows(face) {
         rows.push(paint.apply_to(art).to_string());
     }
 
@@ -255,7 +264,8 @@ pub fn workspace_rabbit_speaking(
 /// sidebar is wide enough to hold it before placing it (and skip it otherwise,
 /// rather than overrunning a narrow pane).
 pub fn workspace_rabbit_width() -> usize {
-    [RABBIT[0], RABBIT[2]]
+    // Every mood's face is the same width, so any one stands in for the block.
+    mood_mascot_rows(RabbitMood::Working.face_and_style().0)
         .iter()
         .map(|row| console::measure_text_width(row))
         .max()
@@ -567,6 +577,29 @@ mod tests {
             let ear_col = plain[0].find('(').expect("ears have an opening paren");
             let head_col = plain[1].find('(').expect("head has an opening paren");
             assert_eq!(ear_col, head_col, "ears sit over the head for {mood:?}");
+        }
+    }
+
+    #[test]
+    fn workspace_rabbit_lines_up_the_body_under_the_head() {
+        // The body's `(` must share the head's (and ears') `(` column, so the
+        // ears, head, and body stack as one rabbit rather than the body trailing a
+        // column to the right.
+        for mood in [
+            RabbitMood::Browsing,
+            RabbitMood::Attentive,
+            RabbitMood::Working,
+        ] {
+            let plain: Vec<String> = workspace_rabbit(mood)
+                .iter()
+                .map(|l| console::strip_ansi_codes(l).into_owned())
+                .collect();
+            let head_col = plain[1].find('(').expect("head has an opening paren");
+            let body_col = plain[2].find('(').expect("body has an opening paren");
+            assert_eq!(
+                body_col, head_col,
+                "body lines up under the head for {mood:?}"
+            );
         }
     }
 
