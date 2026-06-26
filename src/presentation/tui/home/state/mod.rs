@@ -37,7 +37,7 @@ mod mode;
 pub use list::{worktree_name, WorktreeList, ROOT_NAME};
 pub use log::{LineKind, LogLine};
 pub use modal::{CreateInput, NoteEditor, Preview, RemoveModal, RenameInput, TextModal};
-pub use mode::{Mode, PaneExit, ReturnMode};
+pub use mode::{Mode, PaneExit, ResumeLevel, ReturnMode};
 
 use list::session_row;
 use modal::{FocusMenu, Overlay};
@@ -202,6 +202,20 @@ pub struct HomeState {
     /// already shown, and cancelling it returns to that overlay rather than
     /// closing it, so the two are independent.
     quit_confirm: bool,
+    /// The engagement to persist for restore when the next quit is confirmed,
+    /// armed only when the live mode would otherwise be lost. A quit from 没入
+    /// (Attached) drops to [`Mode::Focus`] on its way to the quit modal, so the
+    /// pane driver arms [`ResumeLevel::Attached`] here before that downgrade; for
+    /// 切替 / 在席 the level is read straight off [`mode`](Self::mode) at save time,
+    /// so it stays `None`. Cleared when the quit modal is cancelled, so a later
+    /// quit from a shallower mode is recorded accurately.
+    pending_resume: Option<ResumeLevel>,
+    /// Whether a restored 没入 (Attached) engagement should auto-attach the focused
+    /// session on the event loop's first pass. Set by
+    /// [`restore_focus`](Self::restore_focus) when the recorded engagement was
+    /// Attached — it focuses the session synchronously (so the cursor is already on
+    /// it), but attaching needs the loop's terminal wiring — and taken once there.
+    resume_attach: bool,
     /// Whether the workspace command palette overlay is open. Summoned with `:`
     /// from 切替 (Switch) and 在席 (Focus), it reuses the workspace command-line
     /// state ([`input`](Self::input) / [`recall`](Self::recall) /
@@ -305,6 +319,8 @@ impl HomeState {
             note_hidden: false,
             overlay: Overlay::default(),
             quit_confirm: false,
+            pending_resume: None,
+            resume_attach: false,
             command_open: false,
             focus_menu: FocusMenu::default(),
             focus_prompt: TextInput::new(),
@@ -853,9 +869,65 @@ impl HomeState {
     }
 
     /// Dismiss the quit-confirmation modal without quitting, returning to
-    /// whatever overlay it was raised over.
+    /// whatever overlay it was raised over. Also drops any armed
+    /// [`ResumeLevel`] (e.g. the 没入 arm from a cancelled `Ctrl-Q`), so a later
+    /// quit from a shallower mode is recorded at its actual depth rather than
+    /// inheriting the stale one.
     pub fn cancel_quit_confirm(&mut self) {
         self.quit_confirm = false;
+        self.pending_resume = None;
+    }
+
+    /// Arm [`ResumeLevel::Attached`] to be persisted when the next quit is
+    /// confirmed. Called by the pane driver when `Ctrl-Q` leaves 没入, before the
+    /// mode drops to [`Mode::Focus`] on the way to the quit modal — otherwise the
+    /// recorded engagement would lose that the user was attached.
+    pub fn arm_resume_attached(&mut self) {
+        self.pending_resume = Some(ResumeLevel::Attached);
+    }
+
+    /// The engagement to persist for restore, consuming any arm. An armed level
+    /// (a 没入 quit) wins; otherwise it is read off the current [`mode`](Self::mode)
+    /// — 切替 → [`ResumeLevel::Switch`], 在席 → [`ResumeLevel::Focus`]. The live
+    /// event loop never observes [`Mode::Attached`] (the pane driver arms instead),
+    /// so that arm maps to Focus as a defensive fallback.
+    pub fn resume_level(&mut self) -> ResumeLevel {
+        self.pending_resume.take().unwrap_or(match self.mode {
+            Mode::Switch => ResumeLevel::Switch,
+            Mode::Focus | Mode::Attached => ResumeLevel::Focus,
+        })
+    }
+
+    /// Restore the engagement recorded at the last quit: move the cursor to
+    /// `session` (切替), focus it (在席), or focus it and arm an auto-attach (没入).
+    /// A no-op when the session no longer exists (it was removed since), so a
+    /// stale snapshot never strands the cursor on a missing row. Called at startup
+    /// after the panes are restored, so a 没入 target's pane is already live for
+    /// the event loop's first-pass attach.
+    pub fn restore_focus(&mut self, session: &str, level: ResumeLevel) {
+        match level {
+            ResumeLevel::Switch => {
+                // Move the 切替 cursor onto the session (root stays at the default
+                // cursor, which `select_by_name` leaves put by not matching it).
+                self.list.select_by_name(session);
+            }
+            ResumeLevel::Focus => {
+                self.enter_focus_named(session);
+            }
+            ResumeLevel::Attached => {
+                if self.enter_focus_named(session) {
+                    self.resume_attach = true;
+                }
+            }
+        }
+    }
+
+    /// Whether a restored 没入 engagement should auto-attach the focused session,
+    /// consuming the flag set by [`restore_focus`](Self::restore_focus). `false`
+    /// once consumed (or when the restored engagement was not Attached), so the
+    /// event loop attaches at most once on its first pass.
+    pub fn take_resume_attach(&mut self) -> bool {
+        std::mem::take(&mut self.resume_attach)
     }
 
     /// Focus the session at `row` (0 is the root row, `i` maps to worktree
