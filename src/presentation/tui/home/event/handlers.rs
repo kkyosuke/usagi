@@ -268,6 +268,11 @@ pub(super) fn switch_key(
         // ↑/↓ (k/j) move between sessions.
         Key::ArrowUp | Key::Char('k') => state.switch_move_up(),
         Key::ArrowDown | Key::Char('j') => state.switch_move_down(),
+        // K/J (Shift+k/j) move the *selected session itself* up/down, persisting
+        // the new order — capital mirrors the lower-case cursor move. The cursor
+        // follows the moved session; a no-op on the root row and at the ends.
+        Key::Char('K') => reorder_selected(state, wiring, true),
+        Key::Char('J') => reorder_selected(state, wiring, false),
         // ←/→ (h/l) and Ctrl-P/Ctrl-N move between the highlighted session's tabs,
         // so the preview (and what re-attaching reveals) lands on the chosen pane.
         // A no-op on a session with no panes. The Ctrl chords match what 没入 uses,
@@ -338,6 +343,19 @@ pub(super) fn switch_key(
         _ => {}
     }
     Flow::Continue
+}
+
+/// Move the selected session one row up (`up`) or down in the list (`K` / `J` in
+/// 切替), persisting the new order through the wiring and refreshing the pane so
+/// the cursor follows it. A no-op on the root row, which is not a reorderable
+/// session.
+fn reorder_selected(state: &mut HomeState, wiring: &mut Wiring, up: bool) {
+    if state.list().root_selected() {
+        return;
+    }
+    let name = state.list().selected_name().to_string();
+    let outcome = (wiring.reorder_session)(&name, up);
+    state.apply_reorder(outcome);
 }
 
 /// Back out of 切替 on `Esc`: return to the mode it was opened from. At the base

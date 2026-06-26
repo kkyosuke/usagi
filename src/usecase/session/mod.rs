@@ -281,17 +281,55 @@ pub fn set_note(workspace_root: &Path, name: &str, note: &str) -> Result<Option<
     Ok(stored)
 }
 
-/// List the sessions recorded for `workspace_root`, in creation order.
+/// List the sessions recorded for `workspace_root`, in stored order.
 ///
-/// Returns an empty list when no state has been written yet (a workspace with
-/// no sessions). This reads `state.json` only — it does not reconcile the
-/// on-disk tree, so it is a cheap query callers can run freely.
+/// The `sessions` array order *is* the display order shown in the home list —
+/// initially creation order, then whatever the user has reordered it to (see
+/// [`reorder`]). Returns an empty list when no state has been written yet (a
+/// workspace with no sessions). This reads `state.json` only — it does not
+/// reconcile the on-disk tree, so it is a cheap query callers can run freely.
 pub fn list(workspace_root: &Path) -> Result<Vec<SessionRecord>> {
     let store = WorkspaceStore::new(workspace_root);
     Ok(store
         .load()?
         .map(|state| state.sessions)
         .unwrap_or_default())
+}
+
+/// Move session `name` one row toward the top (`up = true`) or bottom of the
+/// recorded order in `state.json`, returning whether the order changed.
+///
+/// The `sessions` array order is the home list's display order, so reordering
+/// is a swap of adjacent entries persisted in place — there is no separate
+/// order field to keep in sync. Moving the first session up, or the last one
+/// down, is a no-op that leaves `state.json` untouched and returns `false`; an
+/// unknown `name` errors.
+pub fn reorder(workspace_root: &Path, name: &str, up: bool) -> Result<bool> {
+    let store = WorkspaceStore::new(workspace_root);
+    // Hold the lock across the load → edit → save so a concurrent writer cannot
+    // overwrite this reorder (or have it overwrite their change), matching
+    // [`set_display_name`] / [`set_note`].
+    let _lock = store.lock()?;
+    let mut state = store
+        .load()?
+        .ok_or_else(|| anyhow!("no sessions recorded for this workspace"))?;
+    let index = state
+        .sessions
+        .iter()
+        .position(|s| s.name == name)
+        .ok_or_else(|| anyhow!("no such session: \"{name}\""))?;
+    let target = if up {
+        index.checked_sub(1)
+    } else {
+        Some(index + 1).filter(|&t| t < state.sessions.len())
+    };
+    let Some(target) = target else {
+        return Ok(false);
+    };
+    state.sessions.swap(index, target);
+    state.updated_at = Utc::now();
+    store.save(&state)?;
+    Ok(true)
 }
 
 /// The result of attempting to remove a session.
@@ -820,6 +858,50 @@ mod tests {
             .map(|s| s.name)
             .collect();
         assert_eq!(names, vec!["first", "second"]);
+    }
+
+    // --- reorder -----------------------------------------------------------
+
+    fn ordered_names(root: &Path) -> Vec<String> {
+        list(root).unwrap().into_iter().map(|s| s.name).collect()
+    }
+
+    #[test]
+    fn reorder_moves_a_session_up_and_down_and_clamps_at_the_ends() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        create(root.path(), "a").unwrap();
+        create(root.path(), "b").unwrap();
+        create(root.path(), "c").unwrap();
+        assert_eq!(ordered_names(root.path()), vec!["a", "b", "c"]);
+
+        // Up swaps with the previous neighbour.
+        assert!(reorder(root.path(), "b", true).unwrap());
+        assert_eq!(ordered_names(root.path()), vec!["b", "a", "c"]);
+
+        // Down swaps with the next neighbour.
+        assert!(reorder(root.path(), "a", false).unwrap());
+        assert_eq!(ordered_names(root.path()), vec!["b", "c", "a"]);
+
+        // The first session up and the last down are no-ops that report no change
+        // and leave the order untouched.
+        assert!(!reorder(root.path(), "b", true).unwrap());
+        assert!(!reorder(root.path(), "a", false).unwrap());
+        assert_eq!(ordered_names(root.path()), vec!["b", "c", "a"]);
+    }
+
+    #[test]
+    fn reorder_errors_without_state_or_session() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        // No state.json yet.
+        let err = reorder(root.path(), "x", true).unwrap_err();
+        assert!(err.to_string().contains("no sessions recorded"));
+
+        // State exists but the named session does not.
+        create(root.path(), "present").unwrap();
+        let err = reorder(root.path(), "absent", true).unwrap_err();
+        assert!(err.to_string().contains("no such session"));
     }
 
     // --- set_display_name --------------------------------------------------

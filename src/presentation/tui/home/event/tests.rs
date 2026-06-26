@@ -124,6 +124,12 @@ fn noop_tab_op(_: &Path, _: Option<TabNav>) -> (Vec<String>, usize) {
 /// tab from 切替.
 fn noop_close(_: &mut HomeState, _: &Path) {}
 
+/// A `reorder_session` callback reporting nothing moved, for the tests that never
+/// reorder.
+fn noop_reorder(_: &str, _: bool) -> SessionReorder {
+    SessionReorder::Stationary
+}
+
 fn live_preview(_: &Path, _: Sidebar) -> Option<TerminalView> {
     Some(TerminalView::from_rows(vec!["live".to_string()], None))
 }
@@ -181,6 +187,7 @@ fn run_at(keys: Vec<io::Result<Key>>, state: HomeState, root: &Path) -> Result<O
         &mut preview,
         &mut (noop_tab_op as fn(&Path, Option<TabNav>) -> (Vec<String>, usize)),
         &mut (noop_close as fn(&mut HomeState, &Path)),
+        &mut (noop_reorder as fn(&str, bool) -> SessionReorder),
     )
 }
 
@@ -233,6 +240,7 @@ fn run_full(
         preview,
         &mut (noop_tab_op as fn(&Path, Option<TabNav>) -> (Vec<String>, usize)),
         &mut (noop_close as fn(&mut HomeState, &Path)),
+        &mut (noop_reorder as fn(&str, bool) -> SessionReorder),
     )
 }
 
@@ -273,6 +281,7 @@ fn run_with_live_monitor(
         &mut preview,
         &mut (noop_tab_op as fn(&Path, Option<TabNav>) -> (Vec<String>, usize)),
         &mut (noop_close as fn(&mut HomeState, &Path)),
+        &mut (noop_reorder as fn(&str, bool) -> SessionReorder),
     )
 }
 
@@ -351,6 +360,7 @@ fn a_populated_update_handle_is_read_before_painting() {
         &mut preview,
         &mut (noop_tab_op as fn(&Path, Option<TabNav>) -> (Vec<String>, usize)),
         &mut (noop_close as fn(&mut HomeState, &Path)),
+        &mut (noop_reorder as fn(&str, bool) -> SessionReorder),
     )
     .unwrap();
     assert!(matches!(outcome, Outcome::Quit));
@@ -524,6 +534,7 @@ fn run_with_ai_probe(
         &mut preview,
         &mut (noop_tab_op as fn(&Path, Option<TabNav>) -> (Vec<String>, usize)),
         &mut (noop_close as fn(&mut HomeState, &Path)),
+        &mut (noop_reorder as fn(&str, bool) -> SessionReorder),
     )
 }
 
@@ -738,6 +749,7 @@ fn overview_caret_keys_edit_within_the_line() {
         &mut preview,
         &mut (noop_tab_op as fn(&Path, Option<TabNav>) -> (Vec<String>, usize)),
         &mut (noop_close as fn(&mut HomeState, &Path)),
+        &mut (noop_reorder as fn(&str, bool) -> SessionReorder),
     )
     .unwrap();
     assert!(matches!(outcome, Outcome::Quit));
@@ -785,6 +797,7 @@ fn submitted_commands_are_handed_to_persist() {
         &mut preview,
         &mut (noop_tab_op as fn(&Path, Option<TabNav>) -> (Vec<String>, usize)),
         &mut (noop_close as fn(&mut HomeState, &Path)),
+        &mut (noop_reorder as fn(&str, bool) -> SessionReorder),
     )
     .unwrap();
     assert!(matches!(outcome, Outcome::Quit));
@@ -1218,6 +1231,7 @@ fn session_remove_with_a_name_and_force_routes_to_remove() {
         &mut preview,
         &mut (noop_tab_op as fn(&Path, Option<TabNav>) -> (Vec<String>, usize)),
         &mut (noop_close as fn(&mut HomeState, &Path)),
+        &mut (noop_reorder as fn(&str, bool) -> SessionReorder),
     )
     .unwrap();
     assert!(matches!(outcome, Outcome::Quit));
@@ -1265,6 +1279,7 @@ fn close_typed_in_overview_on_root_is_refused() {
         &mut preview,
         &mut (noop_tab_op as fn(&Path, Option<TabNav>) -> (Vec<String>, usize)),
         &mut (noop_close as fn(&mut HomeState, &Path)),
+        &mut (noop_reorder as fn(&str, bool) -> SessionReorder),
     )
     .unwrap();
     assert!(matches!(outcome, Outcome::Quit));
@@ -1331,6 +1346,7 @@ fn focus_close_command_removes_the_focused_session_then_enters_switch() {
         &mut preview,
         &mut (noop_tab_op as fn(&Path, Option<TabNav>) -> (Vec<String>, usize)),
         &mut (noop_close as fn(&mut HomeState, &Path)),
+        &mut (noop_reorder as fn(&str, bool) -> SessionReorder),
     )
     .unwrap();
     assert!(matches!(outcome, Outcome::Quit));
@@ -1395,6 +1411,7 @@ fn focus_menu_close_removes_the_focused_session_then_enters_switch() {
         &mut preview,
         &mut (noop_tab_op as fn(&Path, Option<TabNav>) -> (Vec<String>, usize)),
         &mut (noop_close as fn(&mut HomeState, &Path)),
+        &mut (noop_reorder as fn(&str, bool) -> SessionReorder),
     )
     .unwrap();
     assert!(matches!(outcome, Outcome::Quit));
@@ -1453,6 +1470,7 @@ fn session_remove_without_a_name_opens_the_modal_and_bulk_removes() {
         &mut preview,
         &mut (noop_tab_op as fn(&Path, Option<TabNav>) -> (Vec<String>, usize)),
         &mut (noop_close as fn(&mut HomeState, &Path)),
+        &mut (noop_reorder as fn(&str, bool) -> SessionReorder),
     )
     .unwrap();
     assert!(matches!(outcome, Outcome::Quit));
@@ -1862,6 +1880,7 @@ fn note_editor_opened_while_attached_refreshes_the_attached_terminal_surface() {
         &mut preview,
         &mut tab_op,
         &mut (noop_close as fn(&mut HomeState, &Path)),
+        &mut (noop_reorder as fn(&str, bool) -> SessionReorder),
     )
     .unwrap();
     assert!(matches!(outcome, Outcome::Quit));
@@ -2060,6 +2079,7 @@ fn switch_arrows_move_the_active_tab_via_tab_op() {
         &mut preview,
         &mut tab_op,
         &mut (noop_close as fn(&mut HomeState, &Path)),
+        &mut (noop_reorder as fn(&str, bool) -> SessionReorder),
     )
     .unwrap();
     assert!(matches!(outcome, Outcome::Quit));
@@ -2118,6 +2138,7 @@ fn switch_x_closes_the_highlighted_sessions_active_tab() {
         &mut preview,
         &mut (noop_tab_op as fn(&Path, Option<TabNav>) -> (Vec<String>, usize)),
         &mut close_tab,
+        &mut (noop_reorder as fn(&str, bool) -> SessionReorder),
     )
     .unwrap();
     assert!(matches!(outcome, Outcome::Quit));
@@ -2232,6 +2253,7 @@ fn run_recording_rename(keys: Vec<io::Result<Key>>) -> (Vec<(String, String)>, O
         &mut preview,
         &mut (noop_tab_op as fn(&Path, Option<TabNav>) -> (Vec<String>, usize)),
         &mut (noop_close as fn(&mut HomeState, &Path)),
+        &mut (noop_reorder as fn(&str, bool) -> SessionReorder),
     )
     .unwrap();
     (renamed.into_inner(), outcome)
@@ -2288,6 +2310,128 @@ fn switch_rename_on_the_root_row_is_a_noop() {
     let (renamed, outcome) = run_recording_rename(keys);
     assert!(matches!(outcome, Outcome::Quit));
     assert!(renamed.is_empty());
+}
+
+// --- 切替 (Switch) reorder (K / J) -------------------------------------
+
+/// Drive `event_loop` with a recording reorder callback that returns `response`
+/// for every call, yielding the (name, up) pairs it received and the outcome.
+fn run_recording_reorder(
+    keys: Vec<io::Result<Key>>,
+    response: SessionReorder,
+) -> (Vec<(String, bool)>, Outcome) {
+    let term = Term::stdout();
+    let mut reader = ScriptedReader::new(keys);
+    let monitor = MonitorHandle::detached();
+    let moves = RefCell::new(Vec::new());
+    let mut persist: fn(&str) = noop_persist;
+    let mut create: fn(&str) -> SessionOutcome = noop_create;
+    let mut remove: fn(&str, bool) -> SessionOutcome = noop_remove;
+    let mut open: fn(&mut HomeState, &Path, bool, bool) -> Result<PaneExit> = noop_open;
+    let mut config: fn(&Term) -> Result<Option<ConfigReload>> = noop_config;
+    let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = noop_preview;
+    let mut reorder = |name: &str, up: bool| {
+        moves.borrow_mut().push((name.to_string(), up));
+        response.clone()
+    };
+    let outcome = event_loop_compat(
+        &term,
+        &mut reader,
+        sample_state(),
+        Path::new("/ws"),
+        &monitor,
+        &UpdateHandle::new(),
+        &OneShot::<bool>::new(),
+        &mut persist,
+        &mut create,
+        &mut (noop_rename as fn(&str, &str) -> SessionOutcome),
+        &mut (noop_set_note as fn(&str, &str) -> SessionOutcome),
+        &mut remove,
+        &mut (no_branches as fn() -> Vec<String>),
+        &mut open,
+        &mut config,
+        &mut preview,
+        &mut (noop_tab_op as fn(&Path, Option<TabNav>) -> (Vec<String>, usize)),
+        &mut (noop_close as fn(&mut HomeState, &Path)),
+        &mut reorder,
+    )
+    .unwrap();
+    (moves.into_inner(), outcome)
+}
+
+#[test]
+fn switch_reorder_moves_the_selected_session_up_and_down() {
+    // J moves the selected session down, K moves it up. With a Stationary
+    // response the cursor is undisturbed, so the scripted navigation reaches the
+    // next session as written.
+    let mut keys = cmd("session switch");
+    keys.push(Ok(Key::Enter)); // -> Switch (cursor on root)
+    keys.push(Ok(Key::ArrowDown)); // cursor "main"
+    keys.push(Ok(Key::Char('J'))); // move "main" down
+    keys.push(Ok(Key::ArrowDown)); // cursor "feat"
+    keys.push(Ok(Key::Char('K'))); // move "feat" up
+    keys.push(Ok(Key::CtrlC));
+    let (moves, outcome) = run_recording_reorder(keys, SessionReorder::Stationary);
+    assert!(matches!(outcome, Outcome::Quit));
+    assert_eq!(
+        moves,
+        vec![("main".to_string(), false), ("feat".to_string(), true)]
+    );
+}
+
+#[test]
+fn switch_reorder_on_the_root_row_is_a_noop() {
+    // K / J on the root row (not a session) never reach the reorder callback.
+    let mut keys = cmd("session switch");
+    keys.push(Ok(Key::Enter)); // -> Switch (cursor on root)
+    keys.push(Ok(Key::Char('K')));
+    keys.push(Ok(Key::Char('J')));
+    keys.push(Ok(Key::CtrlC));
+    let (moves, outcome) = run_recording_reorder(keys, SessionReorder::Stationary);
+    assert!(matches!(outcome, Outcome::Quit));
+    assert!(moves.is_empty());
+}
+
+#[test]
+fn switch_reorder_applies_a_moved_result_and_logs_a_failure() {
+    // A Moved result refreshes the pane (the reordered list is applied).
+    let mut keys = cmd("session switch");
+    keys.push(Ok(Key::Enter));
+    keys.push(Ok(Key::ArrowDown)); // cursor "main"
+    keys.push(Ok(Key::Char('K')));
+    keys.push(Ok(Key::CtrlC));
+    let reordered = vec![
+        SessionRecord {
+            name: "feat".to_string(),
+            display_name: None,
+            note: None,
+            root: PathBuf::from("/ws/.usagi/sessions/feat"),
+            worktrees: vec![worktree(Some("feat"), "/ws/feat")],
+            created_at: Utc::now(),
+        },
+        SessionRecord {
+            name: "main".to_string(),
+            display_name: None,
+            note: None,
+            root: PathBuf::from("/ws/.usagi/sessions/main"),
+            worktrees: vec![worktree(Some("main"), "/ws/main")],
+            created_at: Utc::now(),
+        },
+    ];
+    let (moves, outcome) = run_recording_reorder(keys, SessionReorder::Moved(reordered));
+    assert!(matches!(outcome, Outcome::Quit));
+    assert_eq!(moves, vec![("main".to_string(), true)]);
+
+    // A Failed result is logged rather than panicking, and the run continues.
+    let mut keys = cmd("session switch");
+    keys.push(Ok(Key::Enter));
+    keys.push(Ok(Key::ArrowDown)); // cursor "main"
+    keys.push(Ok(Key::Char('J')));
+    keys.push(Ok(Key::CtrlC));
+    let (moves, outcome) =
+        run_recording_reorder(keys, SessionReorder::Failed(LogLine::error("boom")));
+    assert!(matches!(outcome, Outcome::Quit));
+    assert_eq!(moves, vec![("main".to_string(), false)]);
 }
 
 // --- 在席 (Focus) menu surface -----------------------------------------
@@ -2635,6 +2779,7 @@ fn focus_ctrl_n_and_ctrl_p_walk_the_tab_strip_via_tab_op() {
         &mut preview,
         &mut tab_op,
         &mut (noop_close as fn(&mut HomeState, &Path)),
+        &mut (noop_reorder as fn(&str, bool) -> SessionReorder),
     )
     .unwrap();
     assert!(matches!(outcome, Outcome::Quit));
@@ -2689,6 +2834,7 @@ fn focus_tab_nav_is_inert_without_live_panes() {
         &mut preview,
         &mut tab_op,
         &mut (noop_close as fn(&mut HomeState, &Path)),
+        &mut (noop_reorder as fn(&str, bool) -> SessionReorder),
     )
     .unwrap();
     assert!(matches!(outcome, Outcome::Quit));
@@ -2753,6 +2899,7 @@ fn focus_enter_on_a_pane_tab_reattaches_while_other_keys_are_inert() {
         &mut preview,
         &mut tab_op,
         &mut (noop_close as fn(&mut HomeState, &Path)),
+        &mut (noop_reorder as fn(&str, bool) -> SessionReorder),
     )
     .unwrap();
     assert!(matches!(outcome, Outcome::Quit));
@@ -2817,6 +2964,7 @@ fn focus_esc_on_the_new_tab_over_panes_steps_back_onto_the_pane() {
         &mut preview,
         &mut tab_op,
         &mut (noop_close as fn(&mut HomeState, &Path)),
+        &mut (noop_reorder as fn(&str, bool) -> SessionReorder),
     )
     .unwrap();
     assert!(matches!(outcome, Outcome::Quit));
@@ -3160,12 +3308,14 @@ fn run_with_tasks(
     let mut tab_op: fn(&Path, Option<TabNav>) -> (Vec<String>, usize) = noop_tab_op;
     let mut close: fn(&mut HomeState, &Path) = noop_close;
     let mut set_note_fake: fn(&str, &str) -> SessionOutcome = noop_set_note;
+    let mut reorder_fake: fn(&str, bool) -> SessionReorder = noop_reorder;
     let mut wiring = Wiring {
         workspace_root: Path::new("/ws"),
         persist: &mut persist,
         dispatch_create: &mut dispatch_create,
         rename_display: &mut rename,
         set_note: &mut set_note_fake,
+        reorder_session: &mut reorder_fake,
         dispatch_remove: &mut dispatch_remove,
         evict_pool: &mut evict_pool,
         existing_branches: &mut branches,
@@ -3261,12 +3411,14 @@ fn run_with_live_session(reader: &mut dyn KeyReader) -> Result<Outcome> {
     let mut tab_op: fn(&Path, Option<TabNav>) -> (Vec<String>, usize) = noop_tab_op;
     let mut close: fn(&mut HomeState, &Path) = noop_close;
     let mut set_note_fake: fn(&str, &str) -> SessionOutcome = noop_set_note;
+    let mut reorder_fake: fn(&str, bool) -> SessionReorder = noop_reorder;
     let mut wiring = Wiring {
         workspace_root: Path::new("/ws"),
         persist: &mut persist,
         dispatch_create: &mut dispatch_create,
         rename_display: &mut rename,
         set_note: &mut set_note_fake,
+        reorder_session: &mut reorder_fake,
         dispatch_remove: &mut dispatch_remove,
         evict_pool: &mut evict,
         existing_branches: &mut branches,
@@ -3403,6 +3555,7 @@ fn run_notes(
         preview,
         &mut (noop_tab_op as fn(&Path, Option<TabNav>) -> (Vec<String>, usize)),
         &mut (noop_close as fn(&mut HomeState, &Path)),
+        &mut (noop_reorder as fn(&str, bool) -> SessionReorder),
     )
 }
 

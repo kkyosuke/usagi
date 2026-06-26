@@ -370,7 +370,7 @@ pub(super) fn footer_line(width: usize, state: &HomeState) -> String {
                 "Esc back"
             };
             format!(
-                "[switch]  ↑↓ session / ←→ tab / Enter focus / c new / r rename / n/Ctrl-E note / x close tab / : commands / {esc}"
+                "[switch]  ↑↓ session / K/J move / ←→ tab / Enter focus / c new / r rename / n/Ctrl-E note / x close tab / : commands / {esc}"
             )
         }
         Mode::Focus => {

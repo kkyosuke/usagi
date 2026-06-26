@@ -22,7 +22,7 @@ use crate::presentation::tui::screen::KeyReader;
 
 use super::event::{event_loop_compat, ConfigReload, Outcome};
 use super::oneshot::OneShot;
-use super::state::{HomeState, LogLine, PaneExit, SessionOutcome};
+use super::state::{HomeState, LogLine, PaneExit, SessionOutcome, SessionReorder};
 use super::terminal_pool::{MonitorHandle, MonitorSnapshot};
 use super::terminal_tabs::TabNav;
 use super::terminal_view::TerminalView;
@@ -235,6 +235,7 @@ fn event_loop_attaches_a_live_session_end_to_end() {
     let mut tab_op =
         |_dir: &Path, _nav: Option<TabNav>| -> (Vec<String>, usize) { (Vec::new(), 0) };
     let mut close_tab = |_h: &mut HomeState, _dir: &Path| {};
+    let mut reorder = |_: &str, _: bool| SessionReorder::Stationary;
 
     let outcome = event_loop_compat(
         &term,
@@ -255,6 +256,7 @@ fn event_loop_attaches_a_live_session_end_to_end() {
         &mut preview,
         &mut tab_op,
         &mut close_tab,
+        &mut reorder,
     )
     .unwrap();
 
