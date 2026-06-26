@@ -401,7 +401,7 @@ mod tests {
         // override (the worktree note alone with the local LLM off).
         let launch = CodexAgent::new().launch_command(&wiring("usagi", None), false, None);
         assert!(launch.contains(
-            "-c 'developer_instructions=\"あなたは usagi が管理するセッション専用の worktree 内で起動されています。このディレクトリは既に独立した作業環境のため、新たに git worktree を作成する必要はありません。ここで直接作業を進めてください。\"'"
+            "-c 'developer_instructions=\"あなたは usagi が管理するセッション専用の worktree 内で起動されています。このディレクトリは既に独立した作業環境のため、新たに git worktree を作成する必要はありません。ここで直接作業を進めてください。なお、この worktree は親のメインリポジトリの内側に置かれていますが、作業はこのディレクトリ配下だけで完結させ、親ディレクトリ（メインリポジトリ本体）のファイルは読み書きせず、そこへ cd もしないでください。\"'"
         ));
         // With the local LLM on, the delegation nudge is appended to the note.
         let with_llm = CodexAgent::new().launch_command(
