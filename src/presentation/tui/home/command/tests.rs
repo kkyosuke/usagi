@@ -542,9 +542,15 @@ fn complete_offers_issue_subcommands() {
 #[test]
 fn complete_offers_nothing_past_a_completable_position() {
     // Beyond the subcommand word, `session switch`/`issue show` take a free-form
-    // name or number, and `man`'s lone argument is done — so a further token has
-    // no candidates and the input is left as typed.
-    for input in ["session switch fea", "issue show 3", "man session x"] {
+    // name or number, `session create` names a new session, and `man`'s lone
+    // argument is done — so a further token has no candidates and the input is
+    // left as typed.
+    for input in [
+        "session switch fea",
+        "session create x",
+        "issue show 3",
+        "man session x",
+    ] {
         let completion = registry().complete(input, CommandScope::Workspace);
         assert_eq!(completion.input, input);
         assert!(completion.candidates.is_empty());
