@@ -1591,7 +1591,7 @@ impl HomeState {
         // command's response — the prompt has no echo line, so the response
         // starts at the current log end.
         self.response_start = self.log.len();
-        let result = self.dispatch_and_record(&entry);
+        let result = self.dispatch_and_record(&entry, CommandScope::Session);
         let effect = self.record_response(result);
         Submission {
             effect,
@@ -1701,7 +1701,7 @@ impl HomeState {
         // begins (the command echo), so everything earlier drops out of view.
         self.response_start = self.log.len();
         self.log.push(LogLine::command(entry.clone()));
-        let result = self.dispatch_and_record(&entry);
+        let result = self.dispatch_and_record(&entry, self.command_scope());
         let effect = self.record_response(result);
         Submission {
             effect,
@@ -1709,15 +1709,21 @@ impl HomeState {
         }
     }
 
-    /// Dispatch `entry` as a command and record it in command history, returning
-    /// the raw result. The shared core of [`submit`](Self::submit) (palette line) and
-    /// [`focus_prompt_submit`](Self::focus_prompt_submit) (在席 prompt) so both
-    /// record history identically; folding the result into the log is
+    /// Dispatch `entry` as a `scope`-scoped command and record it in command
+    /// history, returning the raw result. The shared core of [`submit`](Self::submit)
+    /// (palette line, [`CommandScope::Workspace`]) and
+    /// [`focus_prompt_submit`](Self::focus_prompt_submit) (在席 prompt,
+    /// [`CommandScope::Session`]) so both record history identically and refuse
+    /// commands outside their surface's scope; folding the result into the log is
     /// [`record_response`](Self::record_response).
-    fn dispatch_and_record(&mut self, entry: &str) -> CommandResult {
-        let result =
-            self.registry
-                .dispatch_with(entry, &self.history, &self.list.refs(), &self.issues);
+    fn dispatch_and_record(&mut self, entry: &str, scope: CommandScope) -> CommandResult {
+        let result = self.registry.dispatch_in_scope(
+            entry,
+            scope,
+            &self.history,
+            &self.list.refs(),
+            &self.issues,
+        );
         self.history.push(entry.to_string());
         result
     }

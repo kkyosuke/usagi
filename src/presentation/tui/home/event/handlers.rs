@@ -92,20 +92,6 @@ pub(super) fn palette_key(
                 // `session remove` with no name opens the removal checklist over
                 // the palette, so it stays open behind it.
                 Effect::OpenRemoveModal { force } => state.open_remove_modal(force),
-                // `terminal` / `agent` are session commands, but the palette still
-                // dispatches them if typed: the palette has already closed above,
-                // so focus the active session (the root by default) and attach a
-                // fresh pane.
-                Effect::OpenTerminal => {
-                    let row = state.list().active_index();
-                    state.enter_focus(row);
-                    launch_pane(term, state, painter, wiring, false);
-                }
-                Effect::OpenAgent(cli) => {
-                    let row = state.list().active_index();
-                    state.enter_focus(row);
-                    launch_agent(term, state, painter, wiring, cli);
-                }
                 // Hand off to the settings screen; it owns the terminal until
                 // dismissed. Quitting there quits the app; otherwise we resume,
                 // forcing a full repaint over the screen it drew.
@@ -122,11 +108,6 @@ pub(super) fn palette_key(
                         painter.reset();
                     }
                 },
-                // `close` is a session command; the palette still dispatches it if
-                // typed, closing the focused session. On the root row (the default)
-                // it is refused, since the root is the workspace itself and not a
-                // session.
-                Effect::CloseSession => close_focused_session(state, wiring),
                 // `preview <path|name>` opens the right-pane Markdown preview (the
                 // palette has already closed above): resolve and read the file
                 // under the workspace root (the impure step) and render / show it
@@ -141,7 +122,18 @@ pub(super) fn palette_key(
                 }
                 // `ShowText` already opened its modal inside `submit`; the palette
                 // stays open behind it. `None` / `Clear` likewise keep it open.
-                Effect::None | Effect::Clear | Effect::ShowText { .. } => {}
+                //
+                // `OpenTerminal` / `OpenAgent` / `CloseSession` are session-scoped
+                // (`terminal` / `agent` / `close`): the palette is a workspace
+                // surface, so `dispatch_in_scope` refuses them before they reach
+                // here — they only fire from the 在席 prompt (see `focus_prompt_key`).
+                // Listed so the match stays exhaustive; they are unreachable here.
+                Effect::None
+                | Effect::Clear
+                | Effect::ShowText { .. }
+                | Effect::OpenTerminal
+                | Effect::OpenAgent(_)
+                | Effect::CloseSession => {}
             }
         }
         Key::Tab => state.complete(),

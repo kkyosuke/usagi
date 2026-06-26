@@ -863,22 +863,24 @@ fn submitted_commands_are_handed_to_persist() {
 }
 
 #[test]
-fn palette_terminal_and_agent_attach_the_active_session() {
-    // Typing `terminal` / `agent` in the `:` palette still dispatches: it closes
-    // the palette, focuses the active row (the root) and attaches the pane.
-    let opened = RefCell::new(Vec::new());
-    let mut open = |_h: &mut HomeState, _d: &Path, a: bool, _n: bool| {
-        opened.borrow_mut().push(a);
+fn palette_refuses_session_scoped_commands() {
+    // `terminal` / `agent` / `close` are session-scoped; the `:` palette is the
+    // workspace surface, so dispatch refuses them (an error line, no action) and
+    // the palette stays open. No pane is ever attached, however they are typed.
+    let opened = RefCell::new(false);
+    let mut open = |_h: &mut HomeState, _d: &Path, _a: bool, _n: bool| {
+        *opened.borrow_mut() = true;
         Ok(PaneExit::Closed)
     };
     let mut create: fn(&str) -> SessionOutcome = noop_create;
     let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = noop_preview;
-    let mut keys = cmd("terminal");
-    keys.push(Ok(Key::Enter)); // attach (root, plain shell) -> Closed -> Focus
-    keys.push(Ok(Key::Escape)); // Focus -> Switch
-    keys.extend(cmd("agent")); // open the palette again and type `agent`
-    keys.push(Ok(Key::Enter)); // attach (root, agent) -> Closed -> Focus
-    keys.push(Ok(Key::Escape)); // Focus -> Switch
+    let mut keys = cmd("terminal"); // open palette, type `terminal`
+    keys.push(Ok(Key::Enter)); // refused -> palette stays open, input cleared
+    keys.extend(typed("agent")); // type `agent` into the still-open palette
+    keys.push(Ok(Key::Enter)); // refused
+    keys.extend(typed("close")); // type `close`
+    keys.push(Ok(Key::Enter)); // refused
+    keys.push(Ok(Key::Escape)); // close the palette -> Switch
     keys.push(Ok(Key::Escape)); // Esc inert at the base Switch; fallback Ctrl-C quits
     assert!(matches!(
         run_full(
@@ -892,7 +894,7 @@ fn palette_terminal_and_agent_attach_the_active_session() {
         .unwrap(),
         Outcome::Quit
     ));
-    assert_eq!(*opened.borrow(), vec![false, true]);
+    assert!(!*opened.borrow(), "no session command should attach a pane");
 }
 
 // --- Ctrl-^ jump to the previously focused session -----------------------
@@ -1046,8 +1048,9 @@ fn ctrl_caret_from_an_attached_pane_with_no_previous_falls_back_to_focus() {
     };
     let mut create: fn(&str) -> SessionOutcome = noop_create;
     let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = live_preview;
-    let mut keys = cmd("terminal");
-    keys.push(Ok(Key::Enter)); // attach root -> ToPreviousSession -> no target -> Focus
+    // The root previews live (`live_preview`), so focusing it from Switch attaches
+    // its pane directly — the first focus, recording no previous.
+    let keys = vec![Ok(Key::Enter)]; // focus + attach root -> ToPreviousSession -> no target -> Focus
     assert!(matches!(
         run_full(
             keys,
@@ -1297,13 +1300,17 @@ fn session_remove_with_a_name_and_force_routes_to_remove() {
 }
 
 #[test]
-fn close_typed_in_overview_on_root_is_refused() {
-    // `close` is a session command, and the `:` palette still dispatches it.
+fn close_typed_on_the_root_in_focus_is_refused() {
+    // `close` is session-scoped, so it reaches `close_focused_session` only from
+    // the 在席 prompt (the palette refuses it — see `palette_refuses_session_scoped_commands`).
     // The focused row is the root by default, which is the workspace itself and
     // not a session, so `close` is refused outright: `remove` is never called and
     // the screen stays put.
-    let mut keys = cmd("close");
-    keys.push(Ok(Key::Enter)); // run `close` from the palette
+    let mut keys = cmd("session switch root"); // focus the root row
+    keys.push(Ok(Key::Enter)); // -> 在席 prompt (root)
+    keys.extend(typed("close"));
+    keys.push(Ok(Key::Enter)); // run `close` on the root -> refused
+    keys.push(Ok(Key::Escape)); // 在席 -> Switch
     keys.push(Ok(Key::Escape)); // Esc inert at the base Switch; fallback Ctrl-C quits
     let term = Term::stdout();
     let mut reader = ScriptedReader::new(keys);
@@ -1321,7 +1328,7 @@ fn close_typed_in_overview_on_root_is_refused() {
     let outcome = event_loop_compat(
         &term,
         &mut reader,
-        sample_state(),
+        prompt_state(), // 在席 prompt surface, so `close` can be typed on the root
         Path::new("/ws"),
         &monitor,
         &UpdateHandle::new(),
@@ -1779,8 +1786,9 @@ fn config_opens_the_settings_screen_and_can_quit() {
 fn returning_from_config_refreshes_the_session_action_ui() {
     // The config screen flipped the 在席 (Focus) surface from the default Menu to
     // Prompt; on returning to home the state must adopt it, so Focus renders the
-    // new surface without reopening the screen. The `terminal` command run right
-    // after attaches a pane, letting us observe the live state's setting.
+    // new surface without reopening the screen. Focusing the root then running
+    // `terminal` from the (now Prompt) 在席 surface attaches a pane, letting us
+    // observe the live state's setting.
     let mut config = |_: &Term| Ok(Some(reload(SessionActionUi::Prompt)));
     let seen = RefCell::new(None);
     let mut open = |state: &mut HomeState, _: &Path, _: bool, _: bool| {
@@ -1790,9 +1798,10 @@ fn returning_from_config_refreshes_the_session_action_ui() {
     let mut create: fn(&str) -> SessionOutcome = noop_create;
     let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = noop_preview;
     let mut keys = cmd("config");
-    keys.push(Ok(Key::Enter));
-    keys.extend(cmd("terminal"));
-    keys.push(Ok(Key::Enter));
+    keys.push(Ok(Key::Enter)); // open config -> returns Prompt -> back to Switch
+    keys.push(Ok(Key::Enter)); // focus root (idle) -> 在席 prompt (the new surface)
+    keys.extend(typed("terminal")); // type into the 在席 prompt
+    keys.push(Ok(Key::Enter)); // run terminal -> attach root, observing the setting
     run_full(
         keys,
         sample_state(), // starts as Menu (the default)
@@ -2648,18 +2657,19 @@ fn typed_agent_name_launches_an_installed_cli_but_refuses_an_uninstalled_one() {
     };
     let mut create: fn(&str) -> SessionOutcome = noop_create;
     let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = noop_preview;
-    let mut state = sample_state();
+    let mut state = prompt_state(); // 在席 prompt is where `agent <name>` is typed
     state.set_default_agent(AgentCli::Claude);
     state.set_installed_agents(vec![AgentCli::Codex]);
-    // `agent gemini` (not installed, not the default) is refused — no launch. It
-    // still closes the palette and focuses the active row, so `Esc` returns to
-    // 切替 to type again.
-    let mut keys = cmd("agent gemini");
-    keys.push(Ok(Key::Enter));
-    keys.push(Ok(Key::Escape)); // refused -> Focus(root) -> back to 切替
-                                // `agent codex` (installed) launches Codex.
-    keys.extend(cmd("agent codex"));
-    keys.push(Ok(Key::Enter));
+    // Focus an idle session to reach its 在席 prompt, then type `agent` there.
+    // `agent gemini` (not installed, not the default) is refused — no launch — and
+    // the prompt stays open, so `agent codex` (installed) can be typed next and
+    // launches Codex.
+    let mut keys = cmd("session switch feat");
+    keys.push(Ok(Key::Enter)); // Focus feat (prompt)
+    keys.extend(typed("agent gemini"));
+    keys.push(Ok(Key::Enter)); // refused -> stays in the 在席 prompt
+    keys.extend(typed("agent codex"));
+    keys.push(Ok(Key::Enter)); // launches Codex -> Closed -> 在席 prompt
     keys.push(Ok(Key::Escape)); // -> 切替
     keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
     assert!(matches!(
@@ -2687,10 +2697,12 @@ fn typed_agent_name_allows_the_default_cli_even_when_not_probed_as_installed() {
     };
     let mut create: fn(&str) -> SessionOutcome = noop_create;
     let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = noop_preview;
-    let mut state = sample_state();
+    let mut state = prompt_state(); // 在席 prompt is where `agent <name>` is typed
     state.set_default_agent(AgentCli::Claude);
     state.set_installed_agents(Vec::new()); // nothing probed as installed
-    let mut keys = cmd("agent claude"); // the configured default by name
+    let mut keys = cmd("session switch feat");
+    keys.push(Ok(Key::Enter)); // Focus feat (prompt)
+    keys.extend(typed("agent claude")); // the configured default by name
     keys.push(Ok(Key::Enter));
     keys.push(Ok(Key::Escape)); // -> Switch
     keys.push(Ok(Key::Escape)); // quit
