@@ -9,8 +9,8 @@ use anyhow::Result;
 use console::Term;
 
 use crate::domain::workspace::Workspace;
+use crate::presentation::tui::io::screen::AlternateScreenGuard;
 use crate::presentation::tui::new::state::NewProject;
-use crate::presentation::tui::screen::AlternateScreenGuard;
 use crate::presentation::tui::{config, home, new, open, welcome};
 
 /// Plays the startup splash once, before the screen graph opens.

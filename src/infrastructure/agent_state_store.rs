@@ -4,7 +4,7 @@
 //! [`crate::domain::settings::AgentCli::launch_command`]). Each hook runs
 //! `usagi agent-phase <phase>`, which records the new
 //! [`AgentPhase`] for the worktree the agent is running in. The home screen's
-//! session watcher ([`crate::presentation::tui::home::terminal_pool`]) reads it
+//! session watcher ([`crate::presentation::tui::home::terminal::pool`]) reads it
 //! back each tick to drive the running / waiting indicator.
 //!
 //! The writer (a hook process) and the reader (the watcher) never share memory,
@@ -87,7 +87,7 @@ fn current_mtime(path: &Path) -> Option<SystemTime> {
 
 /// A stateful reader of phase files with an mtime cache, for the home screen's
 /// session watcher which polls every session every tick (see
-/// [`crate::presentation::tui::home::terminal_pool`]).
+/// [`crate::presentation::tui::home::terminal::pool`]).
 ///
 /// Each call stats the file for its mtime and returns the cached parse while the
 /// file is unchanged, so an idle session costs one `stat` per tick instead of a

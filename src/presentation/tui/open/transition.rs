@@ -19,7 +19,7 @@ use anyhow::Result;
 use console::Term;
 
 use crate::presentation::tui::install_task;
-use crate::presentation::tui::screen::FramePainter;
+use crate::presentation::tui::io::screen::FramePainter;
 use crate::presentation::tui::widgets;
 
 /// Frames the mascot takes to glide from the Open header to the bottom-left

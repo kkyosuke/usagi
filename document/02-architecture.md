@@ -116,16 +116,14 @@ src/
     │   └── session.rs          # セッション操作ツール（SessionMcpServer / AgentBackend）
     └── tui/                    # 自前レンダリングの TUI（console + crossterm、ratatui は不使用）
         ├── app/                # TUI オーケストレーター（画面グラフの遷移を管理 / event）
-        ├── screen.rs           # 端末制御（代替スクリーン・RAII ガード）・差分描画（FramePainter）
-        ├── term_reader.rs      # キー入力・マウスホイール読み取り（ホイールは解析して読み捨て）
-        ├── echo.rs             # 端末エコー/モード制御ヘルパ
+        ├── io/                 # 端末 IO の下回り（screen=端末制御・差分描画 FramePainter / term_reader=キー・ホイール読み取り / echo=エコー制御 / clipboard=OSC 52 コピー）
         ├── splash/             # 起動スプラッシュ（うさぎ AA ＋ タイトルのフェードイン・ui / event）
         ├── gallery/            # うさぎアニメのギャラリー（usagi run <N>・ui / event）
         ├── welcome/            # 起動画面（menu / state / ui / event）
         ├── open/               # プロジェクト選択画面（state / ui / event）
         ├── new/                # 新規プロジェクト画面（state（mod=FormState・型 / validate=検証） / ui / event）
         ├── config/             # 設定画面（state（mod=Config・型定義 / cycling=値巡回ロジック） / ui / event）
-        ├── home/               # ホーム画面（state（mod=HomeState / list・mode・log・modal（サブモード型: create/rename 入力・remove モーダル・focus メニュー、および HomeState が持つ Overlays 集約）に分割） / ui（mod=render_frame・panes・chrome・content=コマンド出力整形 に分割） / event（mod=loop・handlers に分割） / command（mod=語彙・builtins・registry に分割） / terminal_view / terminal_pane / terminal_pool（常駐＋phase/ベル監視・通知））
+        ├── home/               # ホーム画面（state（mod=HomeState / list・mode・log・modal（サブモード型: create/rename 入力・remove モーダル・focus メニュー、および HomeState が持つ Overlays 集約）に分割） / ui（mod=render_frame・panes・chrome・content=コマンド出力整形 に分割） / event（mod=loop・handlers に分割） / command（mod=語彙・builtins・registry に分割） / terminal（埋め込み端末: view / pane / pool（常駐＋phase/ベル監視・通知）/ tabs / selection / link に分割））
         └── widgets/            # 共通 widget（mod / picker / dir_picker / text_input=キャレット編集付き 1 行入力 / text_area=複数行入力（セッションメモ） / rabbit=うさぎアニメの絵柄）
 ```
 

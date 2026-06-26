@@ -5,7 +5,7 @@ use console::Key;
 use console::Term;
 
 use crate::presentation::tui::install_task;
-use crate::presentation::tui::screen::{animated_read, FramePainter, KeyReader};
+use crate::presentation::tui::io::screen::{animated_read, FramePainter, KeyReader};
 use crate::presentation::tui::widgets::dir_picker::{self, Choice, DirSource};
 
 use super::state::{Field, FormState, NewProject};

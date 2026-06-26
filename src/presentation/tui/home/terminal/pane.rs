@@ -33,11 +33,11 @@
 //! `term_reader.rs` / the screen `mod.rs` wirings). The pieces it leans on are
 //! tested elsewhere: the input translation — which chord a key is, how far to
 //! scroll, which cell the pointer hit, and the bytes a key/paste becomes
-//! ([`super::pane_input`]); the layout geometry and frame ([`super::ui`]); the
-//! screen snapshot ([`super::terminal_view`]); and the [`PaneExit`] vocabulary
-//! ([`super::state`]).
+//! ([`super::super::pane_input`]); the layout geometry and frame ([`super::super::ui`]); the
+//! screen snapshot ([`super::view`]); and the [`PaneExit`] vocabulary
+//! ([`super::super::state`]).
 //!
-//! [`TerminalPool`]: super::terminal_pool::TerminalPool
+//! [`TerminalPool`]: super::pool::TerminalPool
 
 use std::fmt::Write as _;
 use std::time::{Duration, Instant};
@@ -51,23 +51,23 @@ use crossterm::execute;
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 
 use crate::infrastructure::pty::PtySession;
-use crate::presentation::tui::clipboard;
-use crate::presentation::tui::screen::diff_frame;
+use crate::presentation::tui::io::clipboard;
+use crate::presentation::tui::io::screen::diff_frame;
 
-use super::pane_input::{
+use super::super::pane_input::{
     apply_scroll, encode_key, encode_mouse_wheel, encode_paste, is_copy, is_leader,
     is_new_agent_tab, is_next_tab, is_open_note, is_press, is_prev_session, is_prev_tab, is_quit,
     is_to_focus, is_toggle_sidebar, key_scroll_lines, pane_cell, wheel_arrows, wheel_delta,
 };
-use super::state::HomeState;
-use super::terminal_link;
-use super::terminal_pool::MonitorHandle;
-use super::terminal_selection::{Cell, Selection};
-use super::terminal_view::TerminalView;
-use super::ui;
+use super::super::state::HomeState;
+use super::super::ui;
+use super::link;
+use super::pool::MonitorHandle;
+use super::selection::{Cell, Selection};
+use super::view::TerminalView;
 
 /// Why the embedded terminal loop handed control back, so the pool-driven loop
-/// in [`super::run`](super) can act on it: the user zoomed out (to 切替 or 在席),
+/// in [`super::super::run`](super) can act on it: the user zoomed out (to 切替 or 在席),
 /// switched tabs, added / closed a tab, or the shell closed. Tab switching and
 /// agent-tab / close management are handled in place without leaving 没入 — the
 /// same actions are also reachable from 切替 (Switch) via `Detach`.
@@ -128,7 +128,7 @@ const MIN_FRAME: Duration = Duration::from_millis(16);
 
 /// Report mouse motion with no button held (DECSET 1003), so the pane can light
 /// up the link under the pointer on hover. The global mouse modes (1000/1002/1006,
-/// see [`super::super::screen`]) only report clicks and drags; this is enabled
+/// see [`super::super::super::io::screen`]) only report clicks and drags; this is enabled
 /// while the pane is up and disabled on the way out so the management screens are
 /// not flooded with motion reports they would only discard.
 const ENABLE_MOTION: &str = "\x1b[?1003h";
@@ -141,7 +141,7 @@ const DISABLE_MOTION: &str = "\x1b[?1003l";
 /// only raw mode and the render/input loop. The reason for returning is the
 /// [`PaneExit`] the event loop acts on.
 ///
-/// [`TerminalPool`]: super::terminal_pool::TerminalPool
+/// [`TerminalPool`]: super::pool::TerminalPool
 pub fn run(
     term: &Term,
     state: &mut HomeState,
@@ -244,7 +244,7 @@ fn drive(
     let mut last_paint: Option<Instant> = None;
     // The screen's URL cells cached against the generation they were detected at,
     // so hover-only / throttled frames skip the O(all cells) re-scan and reuse
-    // them until the shell's output actually changes (see [`terminal_link`]).
+    // them until the shell's output actually changes (see [`link`]).
     let mut links_cache: Option<(u64, std::collections::HashSet<Cell>)> = None;
     // The cursor shape (DECSCUSR `Ps`) last emitted to the host terminal, so a
     // shape is re-asserted only when the program changes it. `None` until the
@@ -317,7 +317,7 @@ fn drive(
                 let parser = pty.parser();
                 let screen = parser.screen();
                 if links_cache.as_ref().map(|(g, _)| *g) != Some(gen) {
-                    links_cache = Some((gen, terminal_link::link_cells(screen)));
+                    links_cache = Some((gen, link::link_cells(screen)));
                 }
                 let links = &links_cache.as_ref().expect("links cache set above").1;
                 TerminalView::from_screen_with_links(screen, selection.as_ref(), hover, links)
@@ -739,7 +739,7 @@ fn open_clicked_url(
     let Some(cell) = pane_cell(col, row, geo) else {
         return false;
     };
-    if let Some(url) = terminal_link::url_at(pty.parser().screen(), cell) {
+    if let Some(url) = link::url_at(pty.parser().screen(), cell) {
         open_url(&url);
         return true;
     }
@@ -747,12 +747,12 @@ fn open_clicked_url(
 }
 
 /// Hand `url` to the platform's default browser (see
-/// [`terminal_link::open_command`]). Best-effort and detached: stdio is closed
+/// [`link::open_command`]). Best-effort and detached: stdio is closed
 /// and a missing opener or spawn failure is ignored, since failing to launch a
 /// browser must not disturb the embedded shell.
 fn open_url(url: &str) {
     use std::process::{Command, Stdio};
-    let argv = terminal_link::open_command(url);
+    let argv = link::open_command(url);
     let Some((cmd, rest)) = argv.split_first() else {
         return;
     };

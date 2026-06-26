@@ -11,7 +11,7 @@ pub mod ui;
 use anyhow::Result;
 use console::Term;
 
-use crate::presentation::tui::term_reader::TermKeyReader;
+use crate::presentation::tui::io::term_reader::TermKeyReader;
 
 pub use event::Outcome;
 
@@ -48,7 +48,7 @@ pub fn run(term: &Term, notice: Option<String>) -> Result<Outcome> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::presentation::tui::screen::KeyReader;
+    use crate::presentation::tui::io::screen::KeyReader;
     use anyhow::bail;
     use std::cell::RefCell;
 

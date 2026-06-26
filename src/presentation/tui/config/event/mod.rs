@@ -4,7 +4,7 @@ use console::Term;
 
 use crate::domain::settings::{LocalSettings, Settings};
 use crate::presentation::tui::install_task::{self, InstallView};
-use crate::presentation::tui::screen::{animated_read, FramePainter, KeyReader};
+use crate::presentation::tui::io::screen::{animated_read, FramePainter, KeyReader};
 
 use super::state::{Config, PendingInstall};
 use super::ui;

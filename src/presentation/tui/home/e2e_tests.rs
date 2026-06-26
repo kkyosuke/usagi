@@ -17,15 +17,16 @@ use anyhow::Result;
 use chrono::Utc;
 use console::{Key, Term};
 
+use crate::domain::settings::AgentCli;
 use crate::domain::workspace_state::{BranchStatus, WorktreeState};
-use crate::presentation::tui::screen::KeyReader;
+use crate::presentation::tui::io::screen::KeyReader;
 
 use super::event::{event_loop_compat, ConfigReload, Outcome};
 use super::oneshot::OneShot;
 use super::state::{HomeState, LogLine, PaneExit, SessionOutcome, SessionReorder};
-use super::terminal_pool::{MonitorHandle, MonitorSnapshot};
-use super::terminal_tabs::TabNav;
-use super::terminal_view::TerminalView;
+use super::terminal::pool::{MonitorHandle, MonitorSnapshot};
+use super::terminal::tabs::TabNav;
+use super::terminal::view::TerminalView;
 use super::ui::render_frame;
 use super::update::UpdateHandle;
 
@@ -245,6 +246,7 @@ fn event_loop_attaches_a_live_session_end_to_end() {
         &monitor,
         &update,
         &OneShot::<bool>::new(),
+        &OneShot::<Vec<AgentCli>>::new(),
         &mut persist,
         &mut create,
         &mut rename,
