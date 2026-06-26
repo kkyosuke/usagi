@@ -9,8 +9,18 @@
 #   . scripts/coverage.sh     # COVERAGE_IGNORE / COVERAGE_MIN を読み込む
 #   coverage_enforce          # ローカルで計測して 100% を強制する (lefthook 用)
 
-# 対象から外す端末 I/O 専用の薄いラッパ（テスト不能なため計測しない）。
-export COVERAGE_IGNORE='(src/main\.rs|cli/hop\.rs|cli/run\.rs|cli/mcp\.rs|cli/llm_mcp\.rs|cli/agent_phase\.rs|cli/clean\.rs|infrastructure/pty\.rs|infrastructure/release\.rs|tui/echo\.rs|tui/term_reader\.rs|tui/app/mod\.rs|tui/splash/mod\.rs|tui/gallery/mod\.rs|tui/welcome/mod\.rs|tui/home/mod\.rs|tui/home/terminal_pane\.rs|tui/home/terminal_pool\.rs|tui/new/mod\.rs|tui/open/mod\.rs|tui/config/mod\.rs|tui/config/provisioning\.rs)'
+# 計測から外すファイル。いずれも「テスト可能なロジックを取り除いたあとに残る、
+# 実 IO そのもの」だけを持つ層に限定する:
+#   - src/main\.rs            : バイナリの合成ルート（clap ディスパッチと実 IO の注入）。
+#   - infrastructure/pty\.rs  : 擬似端末・スレッドの実 IO。
+#   - infrastructure/release\.rs : `git ls-remote` のネットワーク IO とタイムアウト監視。
+#   - tui/term_reader\.rs     : 実端末からのキー入力（live TTY が必要）。
+#   - tui/app/mod\.rs / tui/home/mod\.rs / home/terminal_pane\.rs / home/terminal_pool\.rs
+#     / tui/open/mod\.rs / tui/config/mod\.rs / tui/config/provisioning\.rs
+#                             : 実端末・実 PTY・実スレッドを束ねるオーケストレータ。
+# これら以外の薄いラッパ（hop/run/mcp/llm_mcp/agent_phase/clean、splash/gallery/
+# welcome/new、echo）は依存を注入してテスト可能にし、計測対象に含めている。
+export COVERAGE_IGNORE='(src/main\.rs|infrastructure/pty\.rs|infrastructure/release\.rs|tui/term_reader\.rs|tui/app/mod\.rs|tui/home/mod\.rs|tui/home/terminal_pane\.rs|tui/home/terminal_pool\.rs|tui/open/mod\.rs|tui/config/mod\.rs|tui/config/provisioning\.rs)'
 # 100% を要求するカバレッジ指標。
 export COVERAGE_MIN=100
 

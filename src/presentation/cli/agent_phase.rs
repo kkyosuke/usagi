@@ -9,6 +9,7 @@
 //! live (and are tested) in [`crate::infrastructure::agent_state_store`].
 
 use std::io::Read;
+use std::path::Path;
 
 use anyhow::Result;
 use clap::ValueEnum;
@@ -56,20 +57,121 @@ impl From<Phase> for AgentPhase {
 /// `ready` is a genuine idle start (recorded) or a mid-turn restart (skipped,
 /// preserving whatever phase the session was already in) — keyed off both the
 /// hook `source` and the phase currently recorded for the worktree.
-pub fn run(phase: Phase) -> Result<()> {
+pub fn run(phase: Phase, mut input: impl Read) -> Result<()> {
+    // The hook payload arrives on `input` (stdin in production); reading it is the
+    // caller's only IO, injected so the whole transition is unit-tested without
+    // touching — or blocking on — the process's real stdin.
     let mut raw = String::new();
-    let _ = std::io::stdin().read_to_string(&mut raw);
+    let _ = input.read_to_string(&mut raw);
     let worktree = match agent_state_store::worktree_from_hook_json(&raw) {
         Some(worktree) => worktree,
         None => std::env::current_dir()?,
     };
+    record(phase, &raw, &worktree)
+}
+
+/// Record `phase` for `worktree`, applying the `SessionStart` → `ready` guard so a
+/// mid-turn restart never strands a working session showing idle. The decision is
+/// [`agent_phase_policy::ready_overwrite_allowed`]'s; this wires it to the
+/// recorded phase and the hook `source` parsed from `raw`. Split from [`run`] so
+/// the transition logic is unit-tested without the stdin / `cwd` IO.
+fn record(phase: Phase, raw: &str, worktree: &Path) -> Result<()> {
     if matches!(phase, Phase::Ready)
         && !agent_phase_policy::ready_overwrite_allowed(
-            agent_state_store::read(&worktree),
-            agent_state_store::session_start_source_from_hook_json(&raw).as_deref(),
+            agent_state_store::read(worktree),
+            agent_state_store::session_start_source_from_hook_json(raw).as_deref(),
         )
     {
         return Ok(());
     }
-    agent_state_store::write(&worktree, phase.into())
+    agent_state_store::write(worktree, phase.into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::infrastructure::storage;
+    use std::io::Cursor;
+
+    /// Point the agent-state store at a throwaway data dir for the duration of
+    /// `body`, serialized against other env-mutating tests.
+    fn with_data_dir(body: impl FnOnce(&Path)) {
+        let _guard = crate::test_support::process_env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var(storage::DATA_DIR_ENV, dir.path());
+        body(dir.path());
+        std::env::remove_var(storage::DATA_DIR_ENV);
+    }
+
+    #[test]
+    fn phase_converts_to_its_domain_counterpart() {
+        assert_eq!(AgentPhase::from(Phase::Ready), AgentPhase::Ready);
+        assert_eq!(AgentPhase::from(Phase::Running), AgentPhase::Running);
+        assert_eq!(AgentPhase::from(Phase::Waiting), AgentPhase::Waiting);
+        assert_eq!(AgentPhase::from(Phase::Ended), AgentPhase::Ended);
+    }
+
+    #[test]
+    fn run_records_the_worktree_from_the_hook_payload() {
+        with_data_dir(|_| {
+            let wt = tempfile::tempdir().unwrap();
+            let payload = format!("{{\"cwd\":{:?}}}", wt.path().to_str().unwrap());
+            run(Phase::Running, Cursor::new(payload)).unwrap();
+            assert_eq!(
+                agent_state_store::read(wt.path()),
+                Some(AgentPhase::Running)
+            );
+        });
+    }
+
+    #[test]
+    fn run_records_ready_for_a_fresh_session() {
+        with_data_dir(|_| {
+            let wt = tempfile::tempdir().unwrap();
+            let payload = format!("{{\"cwd\":{:?}}}", wt.path().to_str().unwrap());
+            // No phase recorded yet and no `compact` source: `ready` is written.
+            run(Phase::Ready, Cursor::new(payload)).unwrap();
+            assert_eq!(agent_state_store::read(wt.path()), Some(AgentPhase::Ready));
+        });
+    }
+
+    #[test]
+    fn run_skips_ready_when_a_turn_is_already_in_progress() {
+        with_data_dir(|_| {
+            let wt = tempfile::tempdir().unwrap();
+            let cwd = wt.path().to_str().unwrap();
+            let payload = format!("{{\"cwd\":{cwd:?}}}");
+            run(Phase::Running, Cursor::new(payload.clone())).unwrap();
+            // A mid-turn `SessionStart` → ready must not reset the running phase.
+            run(Phase::Ready, Cursor::new(payload)).unwrap();
+            assert_eq!(
+                agent_state_store::read(wt.path()),
+                Some(AgentPhase::Running)
+            );
+        });
+    }
+
+    #[test]
+    fn run_skips_ready_on_a_compaction_restart() {
+        with_data_dir(|_| {
+            let wt = tempfile::tempdir().unwrap();
+            let cwd = wt.path().to_str().unwrap();
+            // A `compact` source means this `SessionStart` is a mid-turn restart;
+            // nothing is recorded, so the phase file stays absent.
+            let payload = format!("{{\"cwd\":{cwd:?},\"source\":\"compact\"}}");
+            run(Phase::Ready, Cursor::new(payload)).unwrap();
+            assert_eq!(agent_state_store::read(wt.path()), None);
+        });
+    }
+
+    #[test]
+    fn run_falls_back_to_the_current_dir_without_a_cwd_in_the_payload() {
+        with_data_dir(|_| {
+            // An empty payload carries no `cwd`, so `run` records for the process's
+            // current directory instead of erroring.
+            run(Phase::Ended, Cursor::new(String::new())).unwrap();
+            let cwd = std::env::current_dir().unwrap();
+            assert_eq!(agent_state_store::read(&cwd), Some(AgentPhase::Ended));
+        });
+    }
 }
