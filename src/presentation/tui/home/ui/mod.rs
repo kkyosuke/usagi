@@ -334,13 +334,16 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
     // Rest the mascot at the bottom of the (full) sidebar, below the session
     // list, when there is room for it. Its face and colour follow the current
     // mode — browsing in 切替, attentive in 在席, heads-down in 没入 — so the
-    // rabbit reflects what the user is doing. With a list (or an inline create /
-    // rename input) long enough to reach those rows, or a sidebar collapsed to
-    // the narrow rail / too narrow to hold the art, it politely hides rather than
-    // overlapping the list.
+    // rabbit reflects what the user is doing. A blank row always sits between the
+    // list and the rabbit so the art reads as its own thing rather than the next
+    // list entry. With a list (or an inline create / rename input) long enough to
+    // reach those rows, or a sidebar collapsed to the narrow rail / too narrow to
+    // hold the art, it politely hides rather than overlapping the list.
     if sidebar == Sidebar::Full && left_w >= widgets::workspace_rabbit_width() {
         let rabbit = widgets::workspace_rabbit(rabbit_mood(state.mode()));
-        if body_rows >= rabbit.len() && left.len() <= body_rows - rabbit.len() {
+        // Reserve one blank row above the art on top of the rabbit's own rows.
+        let reserved = rabbit.len() + 1;
+        if body_rows >= reserved && left.len() <= body_rows - reserved {
             left.resize(body_rows - rabbit.len(), String::new());
             left.extend(rabbit);
         }
