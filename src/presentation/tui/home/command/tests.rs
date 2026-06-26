@@ -533,6 +533,18 @@ fn complete_offers_session_names_for_switch_and_remove() {
 }
 
 #[test]
+fn complete_offers_nothing_after_free_form_session_subcommands() {
+    // Subcommands other than `switch`/`remove` take a free-form `<name>` with
+    // nothing to complete: once the subcommand word is settled, the completer
+    // offers no further candidates and leaves the input untouched.
+    for input in ["session create ", "session list ", "session bogus "] {
+        let completion = registry().complete(input, CommandScope::Workspace);
+        assert_eq!(completion.input, input);
+        assert!(completion.candidates.is_empty());
+    }
+}
+
+#[test]
 fn complete_offers_issue_subcommands() {
     let completion = registry().complete("issue ga", CommandScope::Workspace);
     assert_eq!(completion.input, "issue gantt");
