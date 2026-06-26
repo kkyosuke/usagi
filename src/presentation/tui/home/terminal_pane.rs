@@ -57,7 +57,7 @@ use crate::presentation::tui::screen::diff_frame;
 use super::pane_input::{
     apply_scroll, encode_key, encode_paste, is_copy, is_leader, is_new_agent_tab, is_next_tab,
     is_open_note, is_press, is_prev_session, is_prev_tab, is_quit, is_to_focus, is_toggle_sidebar,
-    key_scroll_lines, pane_cell, wheel_delta,
+    key_scroll_lines, pane_cell, wheel_arrows, wheel_delta,
 };
 use super::state::HomeState;
 use super::terminal_link;
@@ -609,17 +609,40 @@ fn pump_input(
                 MouseEventKind::Moved => {
                     *hover = pane_cell(mouse.column, mouse.row, geo);
                 }
-                // The wheel scrolls the history only when the pointer is over the
-                // terminal pane; the view shifts, so any selection is dropped.
-                // Hit-test both axes through `pane_cell` (the same test the click
-                // and hover arms use) — a column-only check let the wheel scroll
-                // the pane while the pointer was above it (the tab row) or below
-                // its last line.
+                // The wheel acts only when the pointer is over the terminal pane;
+                // hit-test both axes through `pane_cell` (the same test the click
+                // and hover arms use) — a column-only check let the wheel act while
+                // the pointer was above the pane (the tab row) or below its last
+                // line. What it does depends on which grid the program drew into:
+                //
+                // - On the **primary** screen (a shell), scroll usagi's own history
+                //   view; the view shifts, so any selection is dropped.
+                // - On the **alternate** screen (a full-screen agent / pager / TUI),
+                //   `vt100` keeps no scrollback, so a history scroll is a dead no-op.
+                //   Emulate the terminal's alternate-scroll mode instead: forward
+                //   the wheel as arrow-key presses so the program scrolls its own
+                //   viewport — which is what the wheel does over such a program in a
+                //   standalone terminal. (Selection is left alone; nothing scrolled
+                //   in usagi.)
                 kind => {
                     if let Some(delta) = wheel_delta(kind) {
                         if pane_cell(mouse.column, mouse.row, geo).is_some() {
-                            *selection = None;
-                            apply_scroll(scrollback, delta);
+                            // Read the grid + cursor-key mode under the parser lock,
+                            // dropping the guard before the `&mut self` write below.
+                            let arrows = {
+                                let parser = pty.parser();
+                                let screen = parser.screen();
+                                screen
+                                    .alternate_screen()
+                                    .then(|| wheel_arrows(delta, screen.application_cursor()))
+                            };
+                            match arrows {
+                                Some(seq) => pty.write(seq.as_bytes())?,
+                                None => {
+                                    *selection = None;
+                                    apply_scroll(scrollback, delta);
+                                }
+                            }
                         }
                     }
                 }

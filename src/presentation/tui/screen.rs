@@ -112,8 +112,10 @@ const LEAVE_ALT_SCREEN: &str = "\x1b[?1049l";
 ///
 /// - it makes the terminal hand wheel and click events to us as escape sequences
 ///   rather than acting on the wheel itself, which `term_reader` decodes: a wheel
-///   turn becomes a [`ScrollEvent`] (swallowed by the management screens, acted on
-///   by the embedded pane), everything else is dropped.
+///   turn becomes a [`ScrollEvent`] (swallowed by the management screens; the
+///   embedded pane scrolls its own history on the primary screen, or forwards the
+///   wheel as arrow keys to a full-screen program on the alternate screen — see
+///   `home::terminal_pane`), everything else is dropped.
 /// - button-event tracking (DECSET 1002) additionally reports motion while a
 ///   button is held, so the embedded terminal pane can follow a drag and select
 ///   text (see `home::terminal_selection`). The management screens see these
