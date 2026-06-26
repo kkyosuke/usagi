@@ -65,6 +65,22 @@ pub(super) fn wheel_delta(kind: MouseEventKind) -> Option<i32> {
     }
 }
 
+/// The arrow-key bytes a wheel notch of `delta` lines sends to an alternate-screen
+/// program (alternate-scroll emulation): one arrow per line, `Up` for a scroll up
+/// (`delta < 0`) and `Down` for a scroll down. The encoding follows the program's
+/// cursor-key mode (DECCKM) — `ESC O A`/`ESC O B` in application mode (what an
+/// agent's full-screen UI typically sets), `ESC [ A`/`ESC [ B` otherwise — so the
+/// program reads them as the same arrows the wheel would feed it standalone.
+pub(super) fn wheel_arrows(delta: i32, application_cursor: bool) -> String {
+    let arrow = match (delta < 0, application_cursor) {
+        (true, true) => "\x1bOA",
+        (true, false) => "\x1b[A",
+        (false, true) => "\x1bOB",
+        (false, false) => "\x1b[B",
+    };
+    arrow.repeat(delta.unsigned_abs() as usize)
+}
+
 /// Move the scrollback offset by `delta` lines (negative scrolls up toward
 /// older output). The upper bound is enforced by `set_scrollback` on the next
 /// redraw, so this only has to keep the offset from underflowing past the live
@@ -323,6 +339,19 @@ mod tests {
         assert_eq!(wheel_delta(MouseEventKind::ScrollDown), Some(3));
         // A non-wheel mouse event does not scroll.
         assert_eq!(wheel_delta(MouseEventKind::Moved), None);
+    }
+
+    #[test]
+    fn wheel_arrows_sends_one_arrow_per_line_in_the_program_cursor_mode() {
+        // A scroll up (negative delta) sends `Up` arrows, a scroll down `Down`,
+        // one per line, and follows the program's DECCKM: `ESC O _` in application
+        // cursor mode (what a full-screen agent UI sets), `ESC [ _` otherwise.
+        assert_eq!(wheel_arrows(-WHEEL_LINES, false), "\x1b[A".repeat(3));
+        assert_eq!(wheel_arrows(-WHEEL_LINES, true), "\x1bOA".repeat(3));
+        assert_eq!(wheel_arrows(WHEEL_LINES, false), "\x1b[B".repeat(3));
+        assert_eq!(wheel_arrows(WHEEL_LINES, true), "\x1bOB".repeat(3));
+        // The count tracks the magnitude, so a single-line delta sends one arrow.
+        assert_eq!(wheel_arrows(-1, false), "\x1b[A");
     }
 
     #[test]
