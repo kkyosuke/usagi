@@ -8,7 +8,7 @@
 //! navigation or a close* is pure index/label arithmetic and lives here, unit
 //! tested, so the (coverage-excluded) pool and pane only have to call it.
 //!
-//! [`TerminalPool`]: super::terminal_pool::TerminalPool
+//! [`TerminalPool`]: super::pool::TerminalPool
 
 /// What an embedded pane runs: the configured AI agent CLI, or a plain shell.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -12,8 +12,8 @@ pub mod ui;
 use anyhow::Result;
 use console::Term;
 
-use crate::presentation::tui::screen::AlternateScreenGuard;
-use crate::presentation::tui::term_reader::TermKeyReader;
+use crate::presentation::tui::io::screen::AlternateScreenGuard;
+use crate::presentation::tui::io::term_reader::TermKeyReader;
 
 #[cfg(not(test))]
 use event::event_loop;
@@ -38,7 +38,7 @@ pub fn run(term: &Term, n: u8) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::presentation::tui::screen::KeyReader;
+    use crate::presentation::tui::io::screen::KeyReader;
     use anyhow::bail;
     use std::cell::RefCell;
     use ui::Variation;

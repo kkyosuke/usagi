@@ -4,7 +4,7 @@
 //! [`crate::domain::settings::AgentCli::launch_command`]). Each hook runs
 //! `usagi agent-phase <phase>`, which records the new
 //! [`AgentPhase`] for the worktree the agent is running in. The home screen's
-//! session watcher ([`crate::presentation::tui::home::terminal_pool`]) reads it
+//! session watcher ([`crate::presentation::tui::home::terminal::pool`]) reads it
 //! back each tick to drive the running / waiting indicator.
 //!
 //! The writer (a hook process) and the reader (the watcher) never share memory,
@@ -87,7 +87,7 @@ fn current_mtime(path: &Path) -> Option<SystemTime> {
 
 /// A stateful reader of phase files with an mtime cache, for the home screen's
 /// session watcher which polls every session every tick (see
-/// [`crate::presentation::tui::home::terminal_pool`]).
+/// [`crate::presentation::tui::home::terminal::pool`]).
 ///
 /// Each call stats the file for its mtime and returns the cached parse while the
 /// file is unchanged, so an idle session costs one `stat` per tick instead of a
@@ -167,6 +167,29 @@ pub fn worktree_from_hook_json(raw: &str) -> Option<PathBuf> {
         cwd: Option<PathBuf>,
     }
     serde_json::from_str::<HookInput>(raw).ok()?.cwd
+}
+
+/// Extract the file path a tool is about to touch from a Claude Code
+/// `PreToolUse` hook payload: `tool_input.file_path` (the field Read / Edit /
+/// Write carry). Returns `None` when the payload is not JSON, carries no
+/// `tool_input`, or the tool has no `file_path` (e.g. `Bash`, `Grep`), so the
+/// caller treats those calls as nothing to guard. Used by
+/// [`crate::presentation::cli::guard_workspace`] to confine the agent to its
+/// session worktree.
+pub fn tool_path_from_hook_json(raw: &str) -> Option<PathBuf> {
+    /// The nested fields usagi reads from a `PreToolUse` payload.
+    #[derive(Deserialize)]
+    struct HookInput {
+        tool_input: Option<ToolInput>,
+    }
+    #[derive(Deserialize)]
+    struct ToolInput {
+        file_path: Option<PathBuf>,
+    }
+    serde_json::from_str::<HookInput>(raw)
+        .ok()?
+        .tool_input?
+        .file_path
 }
 
 /// Extract the `source` of a Claude Code `SessionStart` hook from its JSON
@@ -319,6 +342,28 @@ mod tests {
         assert_eq!(worktree_from_hook_json(r#"{"session_id":"x"}"#), None);
         // Not JSON at all.
         assert_eq!(worktree_from_hook_json("not json"), None);
+    }
+
+    #[test]
+    fn tool_path_reads_the_file_path_from_tool_input() {
+        let json = r#"{"cwd":"/repo/wt","tool_name":"Edit","tool_input":{"file_path":"/repo/src/main.rs"}}"#;
+        assert_eq!(
+            tool_path_from_hook_json(json),
+            Some(PathBuf::from("/repo/src/main.rs"))
+        );
+    }
+
+    #[test]
+    fn tool_path_is_none_when_the_tool_has_no_file_path_or_on_garbage() {
+        // A Bash call carries a `command`, not a `file_path`: nothing to guard.
+        assert_eq!(
+            tool_path_from_hook_json(r#"{"tool_name":"Bash","tool_input":{"command":"ls"}}"#),
+            None
+        );
+        // No tool_input at all.
+        assert_eq!(tool_path_from_hook_json(r#"{"cwd":"/repo/wt"}"#), None);
+        // Not JSON at all.
+        assert_eq!(tool_path_from_hook_json("not json"), None);
     }
 
     #[test]

@@ -2,6 +2,7 @@ use std::path::Path;
 
 use clap::{Parser, Subcommand};
 
+use usagi::presentation::mcp::child_io::{read_capped, wait_with_timeout, WaitableChild};
 use usagi::presentation::mcp::llm::LlmBackend;
 use usagi::presentation::mcp::session::AgentBackend;
 use usagi::usecase::session;
@@ -128,7 +129,7 @@ impl LlmBackend for OllamaBackend {
         let out_reader = std::thread::spawn(move || read_capped(&mut out, MAX_OUTPUT_BYTES));
         let err_reader = std::thread::spawn(move || read_capped(&mut err, MAX_STDERR_BYTES));
 
-        let status = wait_with_timeout(&mut child, ASK_TIMEOUT);
+        let status = wait_with_timeout(&mut RealChild(child), ASK_TIMEOUT, ASK_POLL);
         let (stdout, _) = out_reader.join().unwrap_or_default();
         let (stderr, stderr_truncated) = err_reader.join().unwrap_or_default();
 
@@ -148,39 +149,22 @@ impl LlmBackend for OllamaBackend {
     }
 }
 
-/// Read up to `cap` bytes from `reader`, draining (and discarding) the rest so
-/// the child never blocks on a full pipe. Returns the captured bytes and whether
-/// the stream was longer than `cap`.
-fn read_capped(reader: &mut impl std::io::Read, cap: usize) -> (Vec<u8>, bool) {
-    use std::io::Read as _;
-    let mut buf = Vec::new();
-    // Read one past the cap to detect truncation, then drain the remainder.
-    let _ = reader.take(cap as u64 + 1).read_to_end(&mut buf);
-    let truncated = buf.len() > cap;
-    if truncated {
-        buf.truncate(cap);
-        let _ = std::io::copy(reader, &mut std::io::sink());
-    }
-    (buf, truncated)
-}
+/// The production [`WaitableChild`] for [`wait_with_timeout`]: a thin newtype over
+/// a live `ollama run` child that delegates the three lifecycle calls to
+/// `std::process::Child`. The wait-loop decision logic lives (and is tested) in
+/// [`usagi::presentation::mcp::child_io`]; this real-process delegation stays here
+/// at the composition root, like the MCP backends above.
+struct RealChild(std::process::Child);
 
-/// Wait for `child` up to `timeout`, returning its exit status, or `None` after
-/// killing it when the timeout elapses first.
-fn wait_with_timeout(
-    child: &mut std::process::Child,
-    timeout: std::time::Duration,
-) -> Option<std::process::ExitStatus> {
-    let deadline = std::time::Instant::now() + timeout;
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => return Some(status),
-            Ok(None) if std::time::Instant::now() < deadline => std::thread::sleep(ASK_POLL),
-            _ => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return None;
-            }
-        }
+impl WaitableChild for RealChild {
+    fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+        self.0.try_wait()
+    }
+    fn kill(&mut self) -> std::io::Result<()> {
+        self.0.kill()
+    }
+    fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
+        self.0.wait()
     }
 }
 
@@ -228,6 +212,9 @@ enum Commands {
     },
     /// Show which usagi features each agent CLI supports
     Feature,
+    /// Deny an agent tool call that escapes its session worktree (invoked by a Claude PreToolUse hook)
+    #[command(hide = true)]
+    GuardWorkspace,
     /// Hop into the usagi welcome screen
     Hop,
     /// Print the square-pixel usagi marks (flip / half)
@@ -299,6 +286,11 @@ fn main() -> anyhow::Result<()> {
         Commands::Config { edit } => usagi::presentation::cli::config::run(edit),
         Commands::Doctor { fix } => usagi::presentation::cli::doctor::run(fix),
         Commands::Feature => usagi::presentation::cli::feature::run(),
+        Commands::GuardWorkspace => {
+            let stdin = std::io::stdin();
+            let stdout = std::io::stdout();
+            usagi::presentation::cli::guard_workspace::run(stdin.lock(), stdout.lock())
+        }
         Commands::Hop => usagi::presentation::cli::hop::run(usagi::presentation::tui::app::run),
         Commands::Icon { view } => usagi::presentation::cli::icon::run(view),
         Commands::Init { git } => usagi::presentation::cli::init::run(git),
@@ -346,6 +338,7 @@ fn command_name(command: &Commands) -> Option<&'static str> {
         Commands::Config { .. } => Some("config"),
         Commands::Doctor { .. } => Some("doctor"),
         Commands::Feature => Some("feature"),
+        Commands::GuardWorkspace => Some("guard-workspace"),
         Commands::Hop => Some("hop"),
         Commands::Icon { .. } => Some("icon"),
         Commands::Init { .. } => Some("init"),

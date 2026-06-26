@@ -24,9 +24,9 @@ use super::command::{
     CommandInfo, CommandRegistry, CommandResult, CommandScope, Completion, Effect, Hint,
 };
 use super::tasks::TaskRow;
-use super::terminal_pool::MonitorSnapshot;
-use super::terminal_tabs::TabStrip;
-use super::terminal_view::TerminalView;
+use super::terminal::pool::MonitorSnapshot;
+use super::terminal::tabs::TabStrip;
+use super::terminal::view::TerminalView;
 use crate::presentation::tui::widgets::text_input::TextInput;
 
 mod list;
@@ -134,6 +134,141 @@ struct TerminalSurface {
     tabs: Option<TabStrip>,
 }
 
+/// The workspace command line: the editable buffer with its caret, the
+/// committed command history, and the recall cursor into that history.
+///
+/// Extracted from [`HomeState`] so the editing, history-append, and ↑/↓ recall
+/// behaviour — together with the invariant that *any* edit cancels an
+/// in-progress recall — live on one focused type instead of being maintained by
+/// hand at every field access. Both the 切替/在席 command line and the `:`
+/// palette drive the same instance.
+#[derive(Default)]
+struct CommandLine {
+    /// The buffer with its caret — drives in-line editing (←/→/Home/End/Del)
+    /// and where the caret renders.
+    input: TextInput,
+    /// Past commands, oldest first; the recall cursor walks this.
+    history: Vec<String>,
+    /// Index into [`history`](Self::history) while recalling a past command;
+    /// `None` when editing a fresh line.
+    recall: Option<usize>,
+}
+
+impl CommandLine {
+    fn new() -> Self {
+        Self {
+            input: TextInput::new(),
+            history: Vec::new(),
+            recall: None,
+        }
+    }
+
+    /// The current buffer contents.
+    fn value(&self) -> &str {
+        self.input.value()
+    }
+
+    /// The caret position as a byte offset into [`value`](Self::value).
+    fn cursor(&self) -> usize {
+        self.input.cursor()
+    }
+
+    /// The committed history, oldest first.
+    fn history(&self) -> &[String] {
+        &self.history
+    }
+
+    /// Replace the history wholesale (e.g. restored from disk).
+    fn set_history(&mut self, entries: Vec<String>) {
+        self.history = entries;
+    }
+
+    /// Append a committed command.
+    fn push_history(&mut self, entry: String) {
+        self.history.push(entry);
+    }
+
+    /// Clear the buffer and cancel any in-progress recall.
+    fn clear(&mut self) {
+        self.input.clear();
+        self.recall = None;
+    }
+
+    /// Replace the buffer (tab completion); the caller decides whether to also
+    /// cancel recall.
+    fn set_value(&mut self, value: String) {
+        self.input.set_value(value);
+    }
+
+    /// Cancel an in-progress recall without touching the buffer.
+    fn cancel_recall(&mut self) {
+        self.recall = None;
+    }
+
+    /// Insert a typed character at the caret, cancelling recall.
+    fn push_char(&mut self, c: char) {
+        self.input.insert(c);
+        self.recall = None;
+    }
+
+    /// Delete the character before the caret, cancelling recall.
+    fn backspace(&mut self) {
+        self.input.backspace();
+        self.recall = None;
+    }
+
+    /// Delete the character at the caret, cancelling recall.
+    fn delete_forward(&mut self) {
+        self.input.delete_forward();
+        self.recall = None;
+    }
+
+    fn cursor_left(&mut self) {
+        self.input.move_left();
+    }
+
+    fn cursor_right(&mut self) {
+        self.input.move_right();
+    }
+
+    fn cursor_home(&mut self) {
+        self.input.move_home();
+    }
+
+    fn cursor_end(&mut self) {
+        self.input.move_end();
+    }
+
+    /// Recall the previous (older) command into the buffer.
+    fn recall_prev(&mut self) {
+        if self.history.is_empty() {
+            return;
+        }
+        let index = match self.recall {
+            None => self.history.len() - 1,
+            Some(0) => 0,
+            Some(i) => i - 1,
+        };
+        self.recall = Some(index);
+        self.input.set_value(self.history[index].clone());
+    }
+
+    /// Recall the next (newer) command, returning to an empty line past the end.
+    fn recall_next(&mut self) {
+        let index = match self.recall {
+            None => return,
+            Some(i) => i,
+        };
+        if index + 1 < self.history.len() {
+            self.recall = Some(index + 1);
+            self.input.set_value(self.history[index + 1].clone());
+        } else {
+            self.recall = None;
+            self.input.clear();
+        }
+    }
+}
+
 /// The full state of the home screen.
 ///
 /// Not `Clone`/`Debug`: it owns a [`CommandRegistry`] of trait objects, which
@@ -141,13 +276,9 @@ struct TerminalSurface {
 pub struct HomeState {
     list: WorktreeList,
     mode: Mode,
-    /// The command line buffer with its caret — drives in-line editing
-    /// (←/→/Home/End/Del) and where the caret renders.
-    input: TextInput,
-    history: Vec<String>,
-    /// Index into `history` while recalling past commands; `None` when editing
-    /// a fresh line.
-    recall: Option<usize>,
+    /// The workspace command line (buffer, history, and recall cursor). See
+    /// [`CommandLine`].
+    cmdline: CommandLine,
     log: Vec<LogLine>,
     /// The commands available in command mode (the extension point for the
     /// follow-up command features).
@@ -304,9 +435,7 @@ impl HomeState {
         Self {
             list: WorktreeList::new(workspace_name, worktrees),
             mode: Mode::Switch,
-            input: TextInput::new(),
-            history: Vec::new(),
-            recall: None,
+            cmdline: CommandLine::new(),
             log,
             registry: CommandRegistry::with_builtins(),
             session_action_ui: SessionActionUi::default(),
@@ -441,7 +570,7 @@ impl HomeState {
     /// Seed the command history with entries restored from disk (oldest first),
     /// so `history` and `↑`/`↓` recall reflect commands run in past sessions.
     pub fn restore_history(&mut self, entries: Vec<String>) {
-        self.history = entries;
+        self.cmdline.set_history(entries);
     }
 
     /// Seed the recorded sessions (from `state.json`), shown by `session list`,
@@ -647,13 +776,13 @@ impl HomeState {
     }
 
     pub fn input(&self) -> &str {
-        self.input.value()
+        self.cmdline.value()
     }
 
     /// The caret position in [`input`](Self::input) as a byte offset, so the
     /// renderer can split the line and draw the caret where editing happens.
     pub fn cursor(&self) -> usize {
-        self.input.cursor()
+        self.cmdline.cursor()
     }
 
     /// The advisory input hint for the current command input (matching commands,
@@ -661,7 +790,7 @@ impl HomeState {
     /// for rendering; see [`CommandRegistry::suggest`].
     pub fn hint(&self) -> Hint {
         self.registry
-            .suggest(self.input.value(), self.command_scope())
+            .suggest(self.cmdline.value(), self.command_scope())
     }
 
     pub fn log(&self) -> &[LogLine] {
@@ -951,15 +1080,13 @@ impl HomeState {
     /// floating over the current 切替 / 在席 panes while open.
     pub fn open_command_palette(&mut self) {
         self.command_open = true;
-        self.input.clear();
-        self.recall = None;
+        self.cmdline.clear();
     }
 
     /// Close the command palette overlay (`Esc`), clearing its command line.
     pub fn close_command_palette(&mut self) {
         self.command_open = false;
-        self.input.clear();
-        self.recall = None;
+        self.cmdline.clear();
     }
 
     /// Whether the workspace command palette overlay is open.
@@ -1601,41 +1728,38 @@ impl HomeState {
 
     /// Insert a typed character at the caret (command palette line), advancing it.
     pub fn push_char(&mut self, c: char) {
-        self.input.insert(c);
-        self.recall = None;
+        self.cmdline.push_char(c);
     }
 
     /// Delete the character before the caret (command mode), moving it back.
     pub fn backspace(&mut self) {
-        self.input.backspace();
-        self.recall = None;
+        self.cmdline.backspace();
     }
 
     /// Delete the character at the caret (the `Del`/forward-delete key), leaving
     /// the caret in place.
     pub fn delete_forward(&mut self) {
-        self.input.delete_forward();
-        self.recall = None;
+        self.cmdline.delete_forward();
     }
 
     /// Move the caret one character left.
     pub fn cursor_left(&mut self) {
-        self.input.move_left();
+        self.cmdline.cursor_left();
     }
 
     /// Move the caret one character right.
     pub fn cursor_right(&mut self) {
-        self.input.move_right();
+        self.cmdline.cursor_right();
     }
 
     /// Move the caret to the start of the line.
     pub fn cursor_home(&mut self) {
-        self.input.move_home();
+        self.cmdline.cursor_home();
     }
 
     /// Move the caret to the end of the line.
     pub fn cursor_end(&mut self) {
-        self.input.move_end();
+        self.cmdline.cursor_end();
     }
 
     /// Tab-complete the command word, listing candidates when ambiguous.
@@ -1643,42 +1767,23 @@ impl HomeState {
         let session_names: Vec<&str> = self.sessions.iter().map(|s| s.name.as_str()).collect();
         let completion =
             self.registry
-                .complete_with(self.input.value(), self.command_scope(), &session_names);
-        self.input.set_value(completion.input);
+                .complete_with(self.cmdline.value(), self.command_scope(), &session_names);
+        self.cmdline.set_value(completion.input);
         if !completion.candidates.is_empty() {
             self.log
                 .push(LogLine::output(completion.candidates.join("  ")));
         }
-        self.recall = None;
+        self.cmdline.cancel_recall();
     }
 
     /// Recall the previous (older) command into the input.
     pub fn recall_prev(&mut self) {
-        if self.history.is_empty() {
-            return;
-        }
-        let index = match self.recall {
-            None => self.history.len() - 1,
-            Some(0) => 0,
-            Some(i) => i - 1,
-        };
-        self.recall = Some(index);
-        self.input.set_value(self.history[index].clone());
+        self.cmdline.recall_prev();
     }
 
     /// Recall the next (newer) command, returning to an empty line past the end.
     pub fn recall_next(&mut self) {
-        let index = match self.recall {
-            None => return,
-            Some(i) => i,
-        };
-        if index + 1 < self.history.len() {
-            self.recall = Some(index + 1);
-            self.input.set_value(self.history[index + 1].clone());
-        } else {
-            self.recall = None;
-            self.input.clear();
-        }
+        self.cmdline.recall_next();
     }
 
     /// Run the current input as a command: echo it, dispatch it, record it in
@@ -1687,9 +1792,8 @@ impl HomeState {
     /// `Quit`) and the recorded command (so it can be persisted). Empty input is
     /// a no-op.
     pub fn submit(&mut self) -> Submission {
-        let entry = self.input.value().trim().to_string();
-        self.input.clear();
-        self.recall = None;
+        let entry = self.cmdline.value().trim().to_string();
+        self.cmdline.clear();
         if entry.is_empty() {
             return Submission {
                 effect: Effect::None,
@@ -1720,11 +1824,11 @@ impl HomeState {
         let result = self.registry.dispatch_in_scope(
             entry,
             scope,
-            &self.history,
+            self.cmdline.history(),
             &self.list.refs(),
             &self.issues,
         );
-        self.history.push(entry.to_string());
+        self.cmdline.push_history(entry.to_string());
         result
     }
 

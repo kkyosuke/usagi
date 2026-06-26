@@ -101,6 +101,7 @@ mod tests {
                 primary: false,
                 upstream: Some("origin/feature".to_string()),
                 status: BranchStatus::Pushed,
+                diff: None,
                 updated_at: Utc::now(),
             }],
             created_at: Utc::now(),

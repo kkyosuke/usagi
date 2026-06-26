@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use console::{Key, Term};
 
-use crate::presentation::tui::screen::{Input, KeyReader, ScrollEvent};
+use crate::presentation::tui::io::screen::{Input, KeyReader, ScrollEvent};
 
 /// How many lines one wheel notch scrolls a pane.
 const WHEEL_LINES: i32 = 3;

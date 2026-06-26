@@ -3,6 +3,7 @@ pub mod clean;
 pub mod config;
 pub mod doctor;
 pub mod feature;
+pub mod guard_workspace;
 pub mod hop;
 pub mod icon;
 pub mod init;

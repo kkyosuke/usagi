@@ -130,6 +130,42 @@ impl std::fmt::Display for BranchStatus {
     }
 }
 
+/// The added / removed line counts of a worktree's cumulative diff against its
+/// repository's default branch — the size of the work a session has done so far,
+/// shown as the sidebar's `+N -M` badge so a glance separates the sessions that
+/// have progressed from the ones still untouched.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct DiffStat {
+    /// Lines added (the `+N` half of the badge).
+    pub added: usize,
+    /// Lines removed (the `-M` half of the badge).
+    pub removed: usize,
+}
+
+impl DiffStat {
+    /// Whether the diff is empty — no lines added or removed, so a session even
+    /// with its default branch shows no badge.
+    pub fn is_empty(self) -> bool {
+        self.added == 0 && self.removed == 0
+    }
+
+    /// Sum the per-repository diffs of one session into the single total its
+    /// sidebar row shows. `None` entries (a repository even with its default, or
+    /// one whose diff was not measured) contribute nothing; the result is `None`
+    /// when every repository contributes nothing, so a session with no work shows
+    /// no badge — mirroring how [`BranchStatus::aggregate`] rolls statuses up.
+    pub fn aggregate(diffs: impl IntoIterator<Item = Option<DiffStat>>) -> Option<DiffStat> {
+        let total = diffs
+            .into_iter()
+            .flatten()
+            .fold(DiffStat::default(), |acc, d| DiffStat {
+                added: acc.added + d.added,
+                removed: acc.removed + d.removed,
+            });
+        (!total.is_empty()).then_some(total)
+    }
+}
+
 /// State of a single worktree (a branch checked out into a directory).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WorktreeState {
@@ -155,6 +191,14 @@ pub struct WorktreeState {
         deserialize_with = "crate::domain::serde_fallback::or_default"
     )]
     pub status: BranchStatus,
+    /// The worktree's cumulative diff against its repository's default branch —
+    /// the sidebar's `+N -M` badge. `None` when not measured (the default branch
+    /// itself, a detached HEAD, an unreadable diff) or when the tree is even with
+    /// the default (an empty diff); omitted from the file when absent, and an
+    /// older file without it loads as `None`. Re-derived from git on each
+    /// refresh, like [`status`](Self::status).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diff: Option<DiffStat>,
     /// When this worktree's state was last refreshed.
     pub updated_at: DateTime<Utc>,
 }
@@ -315,6 +359,79 @@ mod tests {
         );
     }
 
+    #[test]
+    fn diff_stat_is_empty_only_when_both_counts_are_zero() {
+        assert!(DiffStat::default().is_empty());
+        assert!(DiffStat {
+            added: 0,
+            removed: 0
+        }
+        .is_empty());
+        assert!(!DiffStat {
+            added: 1,
+            removed: 0
+        }
+        .is_empty());
+        assert!(!DiffStat {
+            added: 0,
+            removed: 1
+        }
+        .is_empty());
+    }
+
+    #[test]
+    fn diff_stat_aggregate_sums_repos_and_drops_an_all_empty_session() {
+        // Per-repository diffs sum; `None` and empty entries contribute nothing.
+        assert_eq!(
+            DiffStat::aggregate([
+                Some(DiffStat {
+                    added: 12,
+                    removed: 3
+                }),
+                None,
+                Some(DiffStat {
+                    added: 4,
+                    removed: 1
+                }),
+            ]),
+            Some(DiffStat {
+                added: 16,
+                removed: 4
+            })
+        );
+        // A session whose repositories all contribute nothing shows no badge.
+        assert_eq!(DiffStat::aggregate([None, Some(DiffStat::default())]), None);
+        assert_eq!(DiffStat::aggregate(std::iter::empty()), None);
+    }
+
+    #[test]
+    fn diff_is_omitted_when_absent_and_round_trips_when_set() {
+        let mut state = WorkspaceState::new();
+        state.sessions.push(SessionRecord {
+            name: "feature-x".to_string(),
+            display_name: None,
+            note: None,
+            root: PathBuf::from("/repo/.usagi/sessions/feature-x"),
+            worktrees: vec![sample_worktree()],
+            created_at: Utc::now(),
+        });
+        // No diff → the key is dropped from the file and an older file parses.
+        let json = serde_json::to_string(&state).unwrap();
+        assert!(!json.contains("diff"));
+
+        // A measured diff is stored, and round-trips through JSON.
+        state.sessions[0].worktrees[0].diff = Some(DiffStat {
+            added: 12,
+            removed: 3,
+        });
+        let json = serde_json::to_string(&state).unwrap();
+        assert!(json.contains("\"diff\":{\"added\":12,\"removed\":3}"));
+        assert_eq!(
+            serde_json::from_str::<WorkspaceState>(&json).unwrap(),
+            state
+        );
+    }
+
     fn sample_worktree() -> WorktreeState {
         WorktreeState {
             branch: Some("feature-x".to_string()),
@@ -323,6 +440,7 @@ mod tests {
             primary: false,
             upstream: Some("origin/feature-x".to_string()),
             status: BranchStatus::Pushed,
+            diff: None,
             updated_at: Utc::now(),
         }
     }

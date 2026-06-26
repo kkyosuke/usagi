@@ -20,8 +20,8 @@
 
 use std::sync::Arc;
 
-use super::terminal_link;
-use super::terminal_selection::{Cell, Selection};
+use super::link;
+use super::selection::{Cell, Selection};
 
 /// An owned snapshot of an embedded terminal's visible screen.
 ///
@@ -63,12 +63,12 @@ impl TerminalView {
     ///
     /// Cells within `selection` are drawn inverted (their `inverse` attribute is
     /// flipped), so a mouse drag over the pane shows what it has picked out — see
-    /// [`terminal_selection`](super::terminal_selection).
+    /// [`selection`](super::selection).
     ///
-    /// Cells that sit on an `http(s)` URL (see [`terminal_link::link_cells`]) are
+    /// Cells that sit on an `http(s)` URL (see [`link::link_cells`]) are
     /// drawn underlined, marking them as clickable without disturbing their own
     /// colours. The one link under the pointer — `hover`, the mouse's cell (see
-    /// [`terminal_link::link_cells_at`]) — is additionally recoloured a light
+    /// [`link::link_cells_at`]) — is additionally recoloured a light
     /// blue, so a link lights up as the pointer reaches it the way a browser's
     /// does.
     ///
@@ -80,13 +80,13 @@ impl TerminalView {
         selection: Option<&Selection>,
         hover: Option<Cell>,
     ) -> Self {
-        let links = terminal_link::link_cells(screen);
+        let links = link::link_cells(screen);
         Self::from_screen_with_links(screen, selection, hover, &links)
     }
 
     /// Like [`from_screen_with_selection`](Self::from_screen_with_selection),
     /// but with the screen's URL cells (`links`) supplied by the caller. The
-    /// render loop computes [`terminal_link::link_cells`] only when the screen's
+    /// render loop computes [`link::link_cells`] only when the screen's
     /// generation changes and reuses the result on hover-only / throttled frames,
     /// so a frame that merely moved the pointer skips the O(all cells) re-scan.
     pub fn from_screen_with_links(
@@ -99,7 +99,7 @@ impl TerminalView {
         // Just the hovered link's cells (empty when the pointer is off any link),
         // so only it is recoloured while every link stays underlined.
         let hovered = hover
-            .map(|cell| terminal_link::link_cells_at(screen, cell))
+            .map(|cell| link::link_cells_at(screen, cell))
             .unwrap_or_default();
         let mut out = Vec::with_capacity(rows as usize);
         for row in 0..rows {
@@ -289,7 +289,7 @@ fn push_color(params: &mut String, color: vt100::Color, background: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::presentation::tui::home::terminal_selection::Cell;
+    use crate::presentation::tui::home::terminal::selection::Cell;
 
     /// A parser sized `rows`×`cols`, fed `bytes`, returned for inspection.
     fn parsed(rows: u16, cols: u16, bytes: &[u8]) -> vt100::Parser {
@@ -390,7 +390,7 @@ mod tests {
         let parser = parsed(1, 30, b"x https://example.com y");
         let screen = parser.screen();
         let hover = Some(Cell::new(0, 5));
-        let links = terminal_link::link_cells(screen);
+        let links = link::link_cells(screen);
         let cached = TerminalView::from_screen_with_links(screen, None, hover, &links);
         let detected = TerminalView::from_screen_with_selection(screen, None, hover);
         assert_eq!(cached, detected);

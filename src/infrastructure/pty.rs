@@ -4,7 +4,7 @@
 //! into a real PTY rooted at the selected worktree. A background thread streams
 //! the shell's output into a [`vt100::Parser`], which maintains an in-memory
 //! screen grid; the presentation layer snapshots that grid each frame and draws
-//! it into the right pane (see `presentation::tui::home::terminal_pane`).
+//! it into the right pane (see `presentation::tui::home::terminal::pane`).
 //!
 //! When the shell exits on its own, [`Drop`] reaps it and — if it ended
 //! abnormally (non-zero or by signal) — records the exit to the error log, so a
@@ -12,7 +12,7 @@
 //!
 //! This module is pure I/O and threading, so it is excluded from coverage (cf.
 //! `term_reader.rs`); the pure pieces it feeds — the shell choice
-//! ([`terminal`]), the grid-to-lines rendering (`home::terminal_view`), and the
+//! ([`terminal`]), the grid-to-lines rendering (`home::terminal::view`), and the
 //! exit-status-to-log-line decision ([`pty_exit`]) — are tested on their own.
 
 use std::io::{Read, Write};

@@ -4,7 +4,7 @@
 //! runs on a background thread and the user is free to keep using usagi while it
 //! proceeds. This module owns the one process-global [`InstallHandle`] that the
 //! worker writes its progress to and that every screen reads: the
-//! [`FramePainter`](super::screen::FramePainter) overlays a loading rabbit from
+//! [`FramePainter`](super::io::screen::FramePainter) overlays a loading rabbit from
 //! it, and the event loops poll [`is_active`](InstallHandle::is_active) to keep
 //! the screen animating while the install runs.
 //!
@@ -21,7 +21,7 @@ use crate::presentation::tui::widgets;
 
 /// How often the hop pose and braille spinner advance. Fast, so the rabbit reads
 /// as lively motion. Also the cadence at which a waiting screen repaints the
-/// overlay (see [`animated_read`](super::screen::animated_read)).
+/// overlay (see [`animated_read`](super::io::screen::animated_read)).
 pub const ANIM_TICK: Duration = Duration::from_millis(110);
 
 /// How often the facial expression changes. Slow and **independent of progress**
