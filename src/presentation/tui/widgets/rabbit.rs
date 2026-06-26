@@ -95,6 +95,77 @@ pub fn farewell_lines() -> Vec<String> {
     lines
 }
 
+/// The mascot's mood while it rests at the bottom of the workspace sidebar — one
+/// per home-screen engagement mode (切替 / 在席 / 没入), so the resting rabbit's
+/// expression and gesture mirror what the user is doing. The presentation layer
+/// maps its [`Mode`](crate::presentation::tui::home) onto this so the widget
+/// stays decoupled from the screen's own enum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RabbitMood {
+    /// 切替 (Switch): browsing the session list — ears up, looking around (`?`).
+    Browsing,
+    /// 在席 (Focus): a session is in hand — bright-eyed and attentive, a raised
+    /// paw (`/`).
+    Attentive,
+    /// 没入 (Attached): immersed in the live terminal — eyes screwed up in
+    /// concentration, paws at work (`9`).
+    Working,
+}
+
+impl RabbitMood {
+    /// The mood's face row (the mascot's middle line) and the colour the whole
+    /// block is painted: magenta while browsing (the mascot's resting colour),
+    /// cyan while attending a session (the accent the right pane uses), and green
+    /// while a turn runs (matching the `▶ running` accent).
+    fn face_and_style(self) -> (&'static str, Style) {
+        match self {
+            RabbitMood::Browsing => (" (o.o)? ", Style::new().magenta().bold()),
+            RabbitMood::Attentive => (" (^.^)/ ", Style::new().cyan().bold()),
+            RabbitMood::Working => (" (>.<)9 ", Style::new().green().bold()),
+        }
+    }
+}
+
+/// The resting mascot for the bottom of the workspace sidebar, its face and
+/// gesture chosen by `mood` so the rabbit reflects the current engagement mode.
+/// The ears ([`RABBIT`] row 0) and feet (row 2) are the mascot's own, and only
+/// the middle face row changes between moods, so the usagi stays recognisably
+/// the same animal while its expression shifts. Every row is padded to a common
+/// block width and painted the mood's colour, so the block tiles as a rectangle
+/// wherever it is placed.
+pub fn workspace_rabbit(mood: RabbitMood) -> Vec<String> {
+    let (face, paint) = mood.face_and_style();
+    let rows = [
+        RABBIT[0].to_string(),
+        face.to_string(),
+        RABBIT[2].to_string(),
+    ];
+    let block_w = rows
+        .iter()
+        .map(|row| console::measure_text_width(row))
+        .max()
+        .unwrap_or(0);
+    rows.into_iter()
+        .map(|row| {
+            let pad = block_w.saturating_sub(console::measure_text_width(&row));
+            paint
+                .apply_to(format!("{row}{}", " ".repeat(pad)))
+                .to_string()
+        })
+        .collect()
+}
+
+/// The display width of the [`workspace_rabbit`] block, so a caller can check the
+/// sidebar is wide enough to hold it before placing it (and skip it otherwise,
+/// rather than overrunning a narrow pane).
+pub fn workspace_rabbit_width() -> usize {
+    [RABBIT[0], RABBIT[2]]
+        .iter()
+        .map(|row| console::measure_text_width(row))
+        .max()
+        .unwrap_or(0)
+}
+
 /// The hopping rabbit's poses as `(ears, body)`. The ears sit centred over the
 /// head (the `∩∩` lands on the `ㅅ`), and each "hop" pose shifts the ears *and*
 /// the body together by one column so they bounce as a unit without the ears
@@ -346,6 +417,57 @@ mod tests {
         assert!(plain
             .iter()
             .all(|l| console::measure_text_width(l) == width));
+    }
+
+    #[test]
+    fn workspace_rabbit_keeps_the_mascots_ears_and_feet_across_moods() {
+        // Only the face row changes between moods; the ears (row 0) and feet
+        // (row 2) stay the mascot's own, so the usagi reads as the same animal
+        // whichever mode it reflects.
+        for mood in [
+            RabbitMood::Browsing,
+            RabbitMood::Attentive,
+            RabbitMood::Working,
+        ] {
+            let lines = workspace_rabbit(mood);
+            assert_eq!(lines.len(), 3);
+            let plain: Vec<String> = lines
+                .iter()
+                .map(|l| console::strip_ansi_codes(l).into_owned())
+                .collect();
+            assert!(plain[0].contains("(\\(\\"), "ears on row 0 for {mood:?}");
+            assert!(
+                plain[2].contains("o(_(\")(\")"),
+                "feet on row 2 for {mood:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn workspace_rabbit_changes_face_and_gesture_with_the_mood() {
+        // Each mood shows a distinct expression and gesture, so the resting rabbit
+        // signals the current engagement mode at a glance.
+        let face =
+            |mood| console::strip_ansi_codes(&workspace_rabbit(mood).join("\n")).into_owned();
+        assert!(face(RabbitMood::Browsing).contains("(o.o)?"));
+        assert!(face(RabbitMood::Attentive).contains("(^.^)/"));
+        assert!(face(RabbitMood::Working).contains("(>.<)9"));
+    }
+
+    #[test]
+    fn workspace_rabbit_rows_share_one_block_width() {
+        // Every row pads to the widest, so the block tiles as a rectangle and the
+        // advertised width matches what is drawn.
+        for mood in [
+            RabbitMood::Browsing,
+            RabbitMood::Attentive,
+            RabbitMood::Working,
+        ] {
+            let lines = workspace_rabbit(mood);
+            let w0 = console::measure_text_width(&lines[0]);
+            assert!(lines.iter().all(|l| console::measure_text_width(l) == w0));
+            assert_eq!(w0, workspace_rabbit_width());
+        }
     }
 
     #[test]
