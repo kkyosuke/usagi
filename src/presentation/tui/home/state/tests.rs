@@ -372,6 +372,18 @@ fn tab_completes_a_unique_command() {
 }
 
 #[test]
+fn tab_completes_a_session_name_after_remove() {
+    let mut state = state();
+    state.restore_sessions(vec![session_record("alpha", 1), session_record("beta", 1)]);
+    for c in "session remove al".chars() {
+        state.push_char(c);
+    }
+    state.complete();
+    // The unique session-name prefix fills in.
+    assert_eq!(state.input(), "session remove alpha");
+}
+
+#[test]
 fn tab_lists_candidates_when_ambiguous() {
     let mut state = state();
     // Empty input matches every workspace command, so Tab lists them.

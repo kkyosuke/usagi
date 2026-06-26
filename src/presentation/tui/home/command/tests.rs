@@ -494,6 +494,45 @@ fn complete_offers_the_force_flag_after_session_remove() {
 }
 
 #[test]
+fn complete_offers_session_names_for_switch_and_remove() {
+    // `session switch`/`remove` complete their <name> argument against the
+    // workspace's session names supplied to `complete_with`.
+    let names = ["feature-x", "feature-y", "main-fix"];
+
+    // A unique-prefix name fills in for `switch`.
+    let switch = registry().complete_with("session switch fea", CommandScope::Workspace, &names);
+    assert!(switch
+        .candidates
+        .iter()
+        .all(|c| c == "feature-x" || c == "feature-y"));
+    assert_eq!(switch.input, "session switch feature-"); // longest common prefix
+
+    // A fully matching prefix lands on the single name.
+    let unique = registry().complete_with("session rm main", CommandScope::Workspace, &names);
+    assert_eq!(unique.input, "session rm main-fix");
+    assert!(unique.candidates.is_empty());
+
+    // `remove` offers the session names alongside --force before a name is chosen.
+    let remove = registry().complete_with("session remove ", CommandScope::Workspace, &names);
+    assert!(remove.candidates.iter().any(|c| c == "feature-x"));
+    assert!(remove.candidates.iter().any(|c| c == "--force"));
+
+    // Once a name is settled, only --force remains.
+    let after = registry().complete_with(
+        "session remove feature-x --",
+        CommandScope::Workspace,
+        &names,
+    );
+    assert_eq!(after.input, "session remove feature-x --force");
+
+    // With no session data, only --force is offered (the prior behaviour): the
+    // single candidate fills straight in.
+    let bare = registry().complete("session remove ", CommandScope::Workspace);
+    assert_eq!(bare.input, "session remove --force");
+    assert!(bare.candidates.is_empty());
+}
+
+#[test]
 fn complete_offers_issue_subcommands() {
     let completion = registry().complete("issue ga", CommandScope::Workspace);
     assert_eq!(completion.input, "issue gantt");
