@@ -19,7 +19,7 @@ use super::{
     SYNCED_ICON, TERMINAL_STARTING,
 };
 use crate::domain::settings::{AgentCli, SessionActionUi, Sidebar};
-use crate::domain::workspace_state::{BranchStatus, WorktreeState};
+use crate::domain::workspace_state::{BranchStatus, DiffStat, WorktreeState};
 use crate::presentation::tui::markdown::{LineStyle, MarkdownLine, Rgb, Span, SpanStyle};
 use crate::presentation::tui::widgets;
 
@@ -234,14 +234,54 @@ pub(super) fn worktree_row(
     // active-marker cell, now blank — the active bar lives in the gutter).
     let line1 = format!("{gutter} {kind} {branch}   {status}");
 
-    // Line 2 spells out the agent state with its icon, or is blank when absent.
-    // Only the active bar runs down to it — the `>` cursor stays a single point
-    // on line 1, so the detail-line gutter ignores the cursor.
-    let detail = AgentState::from_flags(live, running, waiting, done)
-        .detail(detail_width)
-        .unwrap_or_default();
+    // Line 2 spells out the agent state with its icon (blank when absent) on the
+    // left, and the `+N -M` diff badge right-aligned at the cell's far edge so it
+    // lines up down the list. The agent label is clipped to the room left of the
+    // badge. Only the active bar runs down to it — the `>` cursor stays a single
+    // point on line 1, so the detail-line gutter ignores the cursor.
+    let badge = diff_badge(worktree.diff);
+    let detail = detail_with_badge(
+        AgentState::from_flags(live, running, waiting, done),
+        badge,
+        detail_width,
+    );
     let line2 = detail_line(&gutter_cell(false, active, in_switch), detail);
     (line1, line2)
+}
+
+/// The `+N -M` diff badge for a worktree's [`DiffStat`] — additions green,
+/// deletions red — or `None` when the row carries no diff (the default branch, a
+/// detached HEAD, or a session even with its default). Shown at the right edge of
+/// the row's detail line, beside the agent state, so a glance separates the
+/// sessions that have progressed from the ones still untouched.
+fn diff_badge(diff: Option<DiffStat>) -> Option<String> {
+    let diff = diff?;
+    let added = style(format!("+{}", diff.added)).green().to_string();
+    let removed = style(format!("-{}", diff.removed)).red().to_string();
+    Some(format!("{added} {removed}"))
+}
+
+/// Compose the detail line's content: the `agent` state label on the left and the
+/// `badge` right-aligned within `width`. The badge keeps its right-edge column
+/// (so the badges line up down the list); the agent label is clipped to the space
+/// left of it — when the two would collide the badge wins, since a row with a
+/// badge but no live agent is the case the badge most needs to read. Either side
+/// may be absent.
+fn detail_with_badge(agent: AgentState, badge: Option<String>, width: usize) -> String {
+    let Some(badge) = badge else {
+        return agent.detail(width).unwrap_or_default();
+    };
+    let badge_w = console::measure_text_width(&badge);
+    if badge_w >= width {
+        // No room for both: the badge alone, clipped to the cell.
+        return clip_to_width(&badge, width);
+    }
+    // Reserve the badge's columns (plus a one-space gap) and clip the agent label
+    // to what's left, so it is styled already-clipped (clean ANSI) rather than
+    // truncated after the fact.
+    let agent = agent.detail(width - badge_w - 1).unwrap_or_default();
+    let pad = width - console::measure_text_width(&agent) - badge_w;
+    format!("{agent}{}{badge}", " ".repeat(pad))
 }
 
 /// Builds the root's two lines: the workspace itself, belonging to no session.
@@ -1552,5 +1592,60 @@ mod tests {
         assert_eq!(rgb_to_ansi256(Rgb { r: 255, g: 0, b: 0 }), 196);
         let blue = rgb_to_ansi256(Rgb { r: 0, g: 0, b: 255 });
         assert!((16..=231).contains(&blue));
+    }
+
+    #[test]
+    fn diff_badge_formats_counts_and_is_absent_without_a_diff() {
+        assert_eq!(diff_badge(None), None);
+        let badge = diff_badge(Some(DiffStat {
+            added: 12,
+            removed: 3,
+        }))
+        .unwrap();
+        // The styling is colour only; the visible text is `+N -M`.
+        assert_eq!(console::strip_ansi_codes(&badge), "+12 -3");
+    }
+
+    #[test]
+    fn detail_with_badge_right_aligns_the_badge_beside_the_agent_label() {
+        let badge = diff_badge(Some(DiffStat {
+            added: 124,
+            removed: 18,
+        }));
+
+        // Agent label on the left, badge pinned to the cell's right edge; the
+        // whole cell measures exactly the width so the badges line up.
+        let line = detail_with_badge(AgentState::Running, badge.clone(), 24);
+        assert_eq!(console::measure_text_width(&line), 24);
+        let plain = console::strip_ansi_codes(&line);
+        assert!(plain.starts_with("▶ running"));
+        assert!(plain.ends_with("+124 -18"));
+
+        // With no agent the badge still rides the right edge — the case the badge
+        // most needs to read (a session with work but nothing running).
+        let line = detail_with_badge(AgentState::Absent, badge.clone(), 24);
+        assert_eq!(console::measure_text_width(&line), 24);
+        assert_eq!(console::strip_ansi_codes(&line).trim_start(), "+124 -18");
+    }
+
+    #[test]
+    fn detail_with_badge_falls_back_to_the_agent_label_or_clips_a_cramped_cell() {
+        // No badge → just the agent label (blank when absent).
+        assert_eq!(detail_with_badge(AgentState::Absent, None, 20), "");
+        assert!(
+            console::strip_ansi_codes(&detail_with_badge(AgentState::Running, None, 20))
+                .contains("running")
+        );
+
+        // Too narrow for both → the badge alone, clipped to the cell.
+        let line = detail_with_badge(
+            AgentState::Running,
+            diff_badge(Some(DiffStat {
+                added: 124,
+                removed: 18,
+            })),
+            5,
+        );
+        assert!(console::measure_text_width(&line) <= 5);
     }
 }

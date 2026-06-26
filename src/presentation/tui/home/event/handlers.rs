@@ -312,6 +312,13 @@ pub(super) fn switch_key(
         // create / rename / note guards above, so `:` is a literal character
         // while typing a name and only opens the palette from the base list.
         Key::Char(':') => state.open_command_palette(),
+        // `?` opens the keybinding cheat sheet (a large scrollable text modal),
+        // so the reserved keys never have to be memorised. Like `:`, it sits
+        // after the inline-input guards above, so `?` types a literal character
+        // into a name field and only opens the sheet from the base list.
+        Key::Char('?') => {
+            state.open_text_modal("Keys", ui::content::cheatsheet(), ModalSize::Large)
+        }
         // Esc first dismisses the highlighted session's read-only note overlay
         // (it auto-shows on selection); with no note showing it backs out to
         // where Switch was opened from (inert at the base Switch).
@@ -624,6 +631,17 @@ pub(super) fn focus_key(
                 && state.session_action_ui() == SessionActionUi::Prompt) =>
         {
             state.open_focused_note(false);
+            return Flow::Continue;
+        }
+        // `?` opens the keybinding cheat sheet. Guarded like `End` above: on every
+        // surface but the typed Prompt it opens the sheet, while in the Prompt's
+        // command line `?` stays a literal character (so a session-scoped command
+        // can contain it).
+        Key::Char('?')
+            if !(state.focus_on_new_tab()
+                && state.session_action_ui() == SessionActionUi::Prompt) =>
+        {
+            state.open_text_modal("Keys", ui::content::cheatsheet(), ModalSize::Large);
             return Flow::Continue;
         }
         // `Ctrl-P` / `Ctrl-N` walk the combined tab strip. Landing on a pane tab

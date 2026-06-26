@@ -2,7 +2,7 @@
 //! into one row each, preceded by the synthetic root row, with the cursor /
 //! active-row navigation the home screen drives.
 
-use crate::domain::workspace_state::{BranchStatus, SessionRecord, WorktreeState};
+use crate::domain::workspace_state::{BranchStatus, DiffStat, SessionRecord, WorktreeState};
 
 use super::super::command::WorktreeRef;
 
@@ -43,6 +43,7 @@ pub(super) fn session_row(session: &SessionRecord) -> WorktreeState {
         primary,
         upstream: first.and_then(|w| w.upstream.clone()),
         status,
+        diff: DiffStat::aggregate(session.worktrees.iter().map(|w| w.diff)),
         updated_at: session.created_at,
     }
 }

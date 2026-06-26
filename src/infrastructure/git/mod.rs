@@ -16,8 +16,8 @@ mod repo;
 mod worktree;
 
 pub use branch::{
-    ahead_behind, branch_namespace_conflict, default_branch, delete_branch, list_branches,
-    local_branches, resolve_base_ref,
+    ahead_behind, branch_namespace_conflict, default_branch, delete_branch, diff_stat,
+    list_branches, local_branches, resolve_base_ref,
 };
 pub use repo::{clone, is_repository, short_hash};
 pub use worktree::{
