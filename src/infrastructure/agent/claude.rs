@@ -157,10 +157,22 @@ fn claude_hooks_settings(usagi_bin: &str) -> String {
             }],
         }]
     };
+    // Before any tool runs, also confine the agent to its session worktree: the
+    // guard denies a Read / Edit / Write whose target escapes the worktree (the
+    // repo root and sibling worktrees sit just above it on disk). It rides
+    // alongside the phase reporter — Claude runs every `PreToolUse` hook, and a
+    // deny from any one blocks the call.
+    let mut pre_tool_use = phase("running");
+    pre_tool_use.push(HookEntry {
+        hooks: vec![HookCommand {
+            kind: "command",
+            command: format!("{usagi_bin} guard-workspace"),
+        }],
+    });
     let settings = HookSettings {
         hooks: Hooks {
             user_prompt_submit: phase("running"),
-            pre_tool_use: phase("running"),
+            pre_tool_use,
             post_tool_use: phase("running"),
             stop: phase("ended"),
             notification: phase("waiting"),
@@ -324,8 +336,8 @@ mod tests {
         assert_eq!(
             launch,
             "claude --mcp-config '{\"mcpServers\":{\"usagi\":{\"command\":\"usagi\",\"args\":[\"mcp\"]}}}' \
-             --append-system-prompt 'あなたは usagi が管理するセッション専用の worktree 内で起動されています。このディレクトリは既に独立した作業環境のため、新たに git worktree を作成する必要はありません。ここで直接作業を進めてください。' \
-             --settings '{\"hooks\":{\"UserPromptSubmit\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase running\"}]}],\"PreToolUse\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase running\"}]}],\"PostToolUse\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase running\"}]}],\"Stop\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase ended\"}]}],\"Notification\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase waiting\"}]}],\"PermissionRequest\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase waiting\"}]}],\"SessionStart\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase ready\"}]}],\"SessionEnd\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase ended\"}]}]}}'"
+             --append-system-prompt 'あなたは usagi が管理するセッション専用の worktree 内で起動されています。このディレクトリは既に独立した作業環境のため、新たに git worktree を作成する必要はありません。ここで直接作業を進めてください。なお、この worktree は親のメインリポジトリの内側に置かれていますが、作業はこのディレクトリ配下だけで完結させ、親ディレクトリ（メインリポジトリ本体）のファイルは読み書きせず、そこへ cd もしないでください。' \
+             --settings '{\"hooks\":{\"UserPromptSubmit\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase running\"}]}],\"PreToolUse\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase running\"}]},{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi guard-workspace\"}]}],\"PostToolUse\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase running\"}]}],\"Stop\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase ended\"}]}],\"Notification\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase waiting\"}]}],\"PermissionRequest\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase waiting\"}]}],\"SessionStart\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase ready\"}]}],\"SessionEnd\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase ended\"}]}]}}'"
         );
     }
 
@@ -418,8 +430,9 @@ mod tests {
             assert!(launch.contains("\"PermissionRequest\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase waiting\"}]}]"));
             // Every tool call mid-turn re-asserts `running`, so a session resumes
             // out of `waiting` once the user answers a prompt or grants a
-            // permission (no fresh UserPromptSubmit fires then).
-            assert!(launch.contains("\"PreToolUse\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase running\"}]}]"));
+            // permission (no fresh UserPromptSubmit fires then). The PreToolUse
+            // array carries a second entry — the worktree guard — right after it.
+            assert!(launch.contains("\"PreToolUse\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase running\"}]},{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi guard-workspace\"}]}]"));
             assert!(launch.contains("\"PostToolUse\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase running\"}]}]"));
         }
     }
@@ -445,6 +458,8 @@ mod tests {
         assert!(launch.contains("/opt/usagi/bin/usagi agent-phase running"));
         assert!(launch.contains("/opt/usagi/bin/usagi agent-phase waiting"));
         assert!(launch.contains("/opt/usagi/bin/usagi agent-phase ended"));
+        // The worktree guard hook runs the same resolved binary too.
+        assert!(launch.contains("/opt/usagi/bin/usagi guard-workspace"));
         // The bare name no longer appears as a standalone command.
         assert!(!launch.contains(r#""command":"usagi""#));
     }

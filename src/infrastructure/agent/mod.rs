@@ -29,7 +29,7 @@ use crate::domain::settings::AgentCli;
 /// single quotes so it survives a single-quoted shell argument verbatim. Shared
 /// by every adapter that can inject a system prompt (Claude via
 /// `--append-system-prompt`, Codex via `developer_instructions`).
-const SESSION_WORKTREE_PROMPT: &str = "あなたは usagi が管理するセッション専用の worktree 内で起動されています。このディレクトリは既に独立した作業環境のため、新たに git worktree を作成する必要はありません。ここで直接作業を進めてください。";
+const SESSION_WORKTREE_PROMPT: &str = "あなたは usagi が管理するセッション専用の worktree 内で起動されています。このディレクトリは既に独立した作業環境のため、新たに git worktree を作成する必要はありません。ここで直接作業を進めてください。なお、この worktree は親のメインリポジトリの内側に置かれていますが、作業はこのディレクトリ配下だけで完結させ、親ディレクトリ（メインリポジトリ本体）のファイルは読み書きせず、そこへ cd もしないでください。";
 
 /// System-prompt addendum added when a local LLM MCP server is wired in.
 ///
