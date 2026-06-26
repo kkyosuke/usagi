@@ -551,3 +551,19 @@ fn focus_ctrl_c_quits() {
     keys.push(Ok(Key::CtrlC));
     assert!(matches!(run(keys, sample_state()).unwrap(), Outcome::Quit));
 }
+
+#[test]
+fn cheatsheet_opens_from_the_focus_menu_and_dismisses() {
+    // `t` enters 在席 (the new-pane action menu) on the selected session; `?`
+    // there opens the cheat sheet, Esc dismisses it back to the menu, and a
+    // further Esc backs out to 切替 where Ctrl-C quits.
+    let keys = vec![
+        Ok(Key::Char('t')), // base 切替 -> 在席 action menu
+        Ok(Key::Char('?')), // open the cheat sheet over the menu
+        Ok(Key::Char('j')), // scroll it
+        Ok(Key::Escape),    // dismiss -> back on the 在席 menu
+        Ok(Key::Escape),    // 在席 -> 切替
+        Ok(Key::CtrlC),     // quit
+    ];
+    assert!(matches!(run(keys, sample_state()).unwrap(), Outcome::Quit));
+}
