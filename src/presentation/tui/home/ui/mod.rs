@@ -240,6 +240,17 @@ pub fn preview_visible(raw_height: usize, raw_width: usize, _state: &HomeState) 
     body_rows_for(height).saturating_sub(1).max(1)
 }
 
+/// Maps the home screen's engagement [`Mode`] onto the resting mascot's
+/// [`RabbitMood`](widgets::RabbitMood), so the sidebar rabbit's expression tracks
+/// what the user is doing without coupling the widget to the screen's enum.
+fn rabbit_mood(mode: Mode) -> widgets::RabbitMood {
+    match mode {
+        Mode::Switch => widgets::RabbitMood::Browsing,
+        Mode::Focus => widgets::RabbitMood::Attentive,
+        Mode::Attached => widgets::RabbitMood::Working,
+    }
+}
+
 /// Builds the full home-screen frame for a raw terminal size.
 pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> Vec<String> {
     // The quit-confirmation modal, when open, overlays everything else.
@@ -316,6 +327,20 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
                 left.push(row);
             }
             left.truncate(body_rows);
+        }
+    }
+    // Rest the mascot at the bottom of the (full) sidebar, below the session
+    // list, when there is room for it. Its face and colour follow the current
+    // mode — browsing in 切替, attentive in 在席, heads-down in 没入 — so the
+    // rabbit reflects what the user is doing. With a list (or an inline create /
+    // rename input) long enough to reach those rows, or a sidebar collapsed to
+    // the narrow rail / too narrow to hold the art, it politely hides rather than
+    // overlapping the list.
+    if sidebar == Sidebar::Full && left_w >= widgets::workspace_rabbit_width() {
+        let rabbit = widgets::workspace_rabbit(rabbit_mood(state.mode()));
+        if body_rows >= rabbit.len() && left.len() <= body_rows - rabbit.len() {
+            left.resize(body_rows - rabbit.len(), String::new());
+            left.extend(rabbit);
         }
     }
     let right = right_pane_contents(state, right_w, body_rows);

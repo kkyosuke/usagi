@@ -1629,6 +1629,69 @@ fn render_frame_draws_the_terminal_in_the_right_pane_when_attached() {
 }
 
 #[test]
+fn render_frame_rests_the_mascot_in_the_bottom_left_with_a_mode_face() {
+    // With the full sidebar and a short list there is room at the bottom of the
+    // sidebar for the resting mascot, whose face follows the current mode:
+    // browsing in 切替 (the default), attentive in 在席, heads-down in 没入.
+    let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Pushed)]);
+    let switch = stripped(&render_frame(24, 80, &state));
+    assert!(switch.contains("(o.o)?"), "browsing face in 切替: {switch}");
+
+    state.enter_focus(1);
+    let focus = stripped(&render_frame(24, 80, &state));
+    assert!(focus.contains("(^.^)/"), "attentive face in 在席: {focus}");
+
+    state.show_attached();
+    let attached = stripped(&render_frame(24, 80, &state));
+    assert!(
+        attached.contains("(>.<)9"),
+        "working face in 没入: {attached}"
+    );
+}
+
+#[test]
+fn render_frame_hides_the_mascot_when_the_session_list_fills_the_sidebar() {
+    // A list long enough to reach the bottom rows takes precedence: the mascot
+    // hides rather than overlapping the sessions.
+    let many: Vec<WorktreeState> = (0..9)
+        .map(|i| worktree(Some(&format!("feat-{i}")), false, BranchStatus::Local))
+        .collect();
+    let state = state_with(many);
+    let frame = stripped(&render_frame(24, 80, &state));
+    assert!(
+        !frame.contains("(o.o)?"),
+        "mascot must yield to a full list: {frame}"
+    );
+}
+
+#[test]
+fn render_frame_omits_the_mascot_when_the_sidebar_or_body_is_too_small() {
+    // A terminal too narrow leaves the full sidebar narrower than the art, and one
+    // too short leaves no body rows to spare — either way the mascot is skipped
+    // rather than overrunning the layout (and the frame still renders).
+    let state = state_with(vec![worktree(Some("main"), true, BranchStatus::Pushed)]);
+    let narrow = stripped(&render_frame(24, 12, &state));
+    assert!(
+        !narrow.contains("(o.o)?"),
+        "no mascot in a narrow sidebar: {narrow}"
+    );
+    let short = stripped(&render_frame(7, 80, &state));
+    assert!(
+        !short.contains("(o.o)?"),
+        "no mascot with no body rows to spare: {short}"
+    );
+}
+
+#[test]
+fn render_frame_omits_the_mascot_on_the_collapsed_rail() {
+    // The rail is too narrow to hold the art, so the mascot does not render there.
+    let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Pushed)]);
+    state.set_sidebar(Sidebar::Rail);
+    let frame = stripped(&render_frame(24, 80, &state));
+    assert!(!frame.contains("(o.o)?"), "no mascot on the rail: {frame}");
+}
+
+#[test]
 fn note_editor_box_keeps_its_bottom_border_over_a_short_pane() {
     // The note editor floats over the attached session's pane. Even when the pane
     // beneath is shorter than the box — e.g. no terminal snapshot has arrived, so
