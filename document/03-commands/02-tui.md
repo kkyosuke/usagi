@@ -34,7 +34,7 @@
 | `issue` | タスク issue を一覧・依存ツリー・ガント・1 件表示で閲覧（Workspace スコープ） |
 | `terminal` | 選択中セッションの worktree でシェルを右ペインに埋め込み起動（Session スコープ） |
 | `agent [名前]` | `terminal` ＋ Agent CLI を起動（Session スコープ）。引数なしは設定中の既定 CLI を起動。名前（`claude` / `codex` / `sakana.ai` / `gemini`）を付けるとその CLI を起動する |
-| `close` | 在席中のセッションを強制削除して切替へ移る（`session remove <名前> --force` と同じ。Session スコープ） |
+| `close` | 在席中のセッションを削除して切替へ移る（`session remove <名前>` と同じで `--force` は付けない。未コミット変更があれば削除を拒否し `--force` の案内をログに出す。Session スコープ） |
 | `config` | 現在のワークスペースのローカル設定を編集する Config 画面を開く（Workspace スコープ） |
 
 > `man` / `help`、`quit` / `exit` はそれぞれ別名（同じ動作）です。

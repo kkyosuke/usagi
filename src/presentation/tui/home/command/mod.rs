@@ -62,12 +62,12 @@ pub enum Effect {
     /// CLI to launch: `None` uses the workspace's configured agent (the common
     /// fast path), `Some(cli)` overrides it for this launch (`agent <name>`).
     OpenAgent(Option<AgentCli>),
-    /// Close (remove) the focused session forcefully (the user ran `close` in
-    /// 在席). It is the session equivalent of `session remove <name> --force`:
-    /// the worktrees/branches are deleted and any uncommitted changes discarded,
-    /// then 在席 is left for the base 切替 (Switch). The focused session's name is
-    /// resolved by the event loop, which owns the worktree list and the removal
-    /// callback.
+    /// Close (remove) the focused session (the user ran `close` in 在席). It is the
+    /// session equivalent of `session remove <name>` (no `--force`): a clean
+    /// session's worktrees/branches are deleted, but one with uncommitted changes
+    /// is refused (the removal logs the `--force` hint). Either way 在席 is left for
+    /// the base 切替 (Switch). The focused session's name is resolved by the event
+    /// loop, which owns the worktree list and the removal callback.
     CloseSession,
     /// Open the configuration screen (the user ran `config`) to edit the global
     /// settings and this workspace's local overrides. The screen is run by the
