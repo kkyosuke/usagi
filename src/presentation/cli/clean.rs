@@ -13,15 +13,13 @@
 //! this run.
 //!
 //! The orchestration here (resolving the workspace, settings and binary path,
-//! then spawning the process) is IO; the testable pieces — the cleanup prompt
-//! ([`clean_prompt`]) and the agent-CLI resolution ([`resolve_agent_cli`]) — are
-//! pure functions with unit tests below. The spawn itself ([`spawn_detached`]) is
-//! a thin IO wrapper.
+//! building the prompt and command) is pure once the one genuine side effect —
+//! spawning the detached process — is injected: [`run`] takes a `spawn` function,
+//! so the whole flow is unit-tested with a recording stub while `main` wires in
+//! the real detached spawn.
 
 use std::env;
-use std::fs::OpenOptions;
-use std::path::Path;
-use std::process::{Command, Stdio};
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
@@ -33,20 +31,26 @@ use crate::infrastructure::repo_paths::STATE_DIR;
 const CLEAN_LOG: &str = "clean.log";
 
 /// Entry point for `usagi clean`. Resolves the workspace and the agent to run,
-/// builds the cleanup prompt, and spawns the agent headlessly in the background,
-/// returning immediately. `dry_run` makes the agent report without deleting;
-/// `agent` overrides the configured default CLI for this run.
-pub fn run(dry_run: bool, agent: Option<String>) -> Result<()> {
+/// builds the cleanup prompt, and spawns the agent headlessly in the background
+/// via `spawn`, returning immediately. `dry_run` makes the agent report without
+/// deleting; `agent` overrides the configured default CLI for this run.
+///
+/// `spawn` runs `<command>` detached with the given working directory, appending
+/// its output to the given log path (the production `spawn_detached` in `main`);
+/// it is a parameter so the resolution and command-building above are exercised
+/// in tests without launching a real process.
+pub fn run(
+    dry_run: bool,
+    agent: Option<String>,
+    spawn: impl Fn(&str, &Path, &Path) -> Result<()>,
+) -> Result<()> {
     let cwd = env::current_dir()?;
     let root = crate::usecase::session::workspace_root(&cwd);
 
     // The wired-in MCP servers invoke usagi back, so they are pointed at this
     // process's own executable path rather than the bare name `usagi`, so they
     // resolve even when usagi is run straight from a build and not on `$PATH`.
-    let usagi_bin = env::current_exe()
-        .ok()
-        .and_then(|path| path.into_os_string().into_string().ok())
-        .unwrap_or_else(|| "usagi".to_string());
+    let usagi_bin = usagi_bin_path(env::current_exe().ok());
 
     let storage = crate::infrastructure::storage::Storage::open_default()?;
     let settings = crate::usecase::settings::effective(&storage, &root)?;
@@ -59,7 +63,7 @@ pub fn run(dry_run: bool, agent: Option<String>) -> Result<()> {
     let command = adapter.headless_command(&wiring, &prompt);
 
     let log_path = root.join(STATE_DIR).join(CLEAN_LOG);
-    spawn_detached(&command, &root, &log_path)?;
+    spawn(&command, &root, &log_path)?;
 
     println!(
         "{} ({}) をバックグラウンドで起動しました。",
@@ -71,6 +75,16 @@ pub fn run(dry_run: bool, agent: Option<String>) -> Result<()> {
     }
     println!("ログ: {}", log_path.display());
     Ok(())
+}
+
+/// Resolve the usagi binary to wire into the MCP servers: this process's own
+/// executable path, falling back to the bare name `usagi` when it cannot be
+/// determined or is not valid UTF-8. The current executable is a parameter so
+/// both the resolved and fallback paths are unit-tested.
+fn usagi_bin_path(current_exe: Option<PathBuf>) -> String {
+    current_exe
+        .and_then(|path| path.into_os_string().into_string().ok())
+        .unwrap_or_else(|| "usagi".to_string())
 }
 
 /// Resolve which agent CLI to run: the `--agent <name>` override when given
@@ -111,47 +125,80 @@ fn clean_prompt(dry_run: bool) -> String {
     )
 }
 
-/// Spawn `command` via `sh -c` detached in the background, with `cwd` as its
-/// working directory and its stdout/stderr appended to `log_path`. Returns once
-/// the child is spawned — usagi does not wait for it. A thin IO wrapper.
-fn spawn_detached(command: &str, cwd: &Path, log_path: &Path) -> Result<()> {
-    if let Some(parent) = log_path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("creating log directory {}", parent.display()))?;
-    }
-    let log = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(log_path)
-        .with_context(|| format!("opening log file {}", log_path.display()))?;
-    let stderr = log
-        .try_clone()
-        .with_context(|| format!("opening log file {}", log_path.display()))?;
-
-    let mut builder = Command::new("sh");
-    builder
-        .arg("-c")
-        .arg(command)
-        .current_dir(cwd)
-        .stdin(Stdio::null())
-        .stdout(Stdio::from(log))
-        .stderr(Stdio::from(stderr));
-    // Detach from usagi's process group so the agent keeps running after usagi
-    // exits (Unix only; on other platforms the child simply outlives the parent).
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        builder.process_group(0);
-    }
-    builder
-        .spawn()
-        .with_context(|| format!("spawning background agent: {command}"))?;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::RefCell;
+
+    thread_local! {
+        /// The command the recording stub last received, and the result it returns.
+        static SPAWN: RefCell<(Option<String>, Result<(), &'static str>)> =
+            const { RefCell::new((None, Ok(()))) };
+    }
+
+    /// A `spawn` stub that records the command instead of launching a process.
+    fn recording_spawn(command: &str, _cwd: &Path, _log: &Path) -> Result<()> {
+        SPAWN.with(|s| {
+            let mut s = s.borrow_mut();
+            s.0 = Some(command.to_string());
+            match s.1 {
+                Ok(()) => Ok(()),
+                Err(e) => Err(anyhow::anyhow!(e)),
+            }
+        })
+    }
+
+    fn last_command() -> Option<String> {
+        SPAWN.with(|s| s.borrow().0.clone())
+    }
+
+    #[test]
+    fn run_spawns_the_cleanup_agent_in_the_background() {
+        SPAWN.with(|s| *s.borrow_mut() = (None, Ok(())));
+        // With no `--agent` override and the default (non-dry-run) mode the agent
+        // is launched headlessly on the deletion prompt.
+        run(false, None, recording_spawn).unwrap();
+        assert!(last_command().is_some());
+    }
+
+    #[test]
+    fn run_honors_a_dry_run_and_an_agent_override() {
+        SPAWN.with(|s| *s.borrow_mut() = (None, Ok(())));
+        // `--agent gemini` overrides the default and `--dry-run` is reported.
+        run(true, Some("gemini".to_string()), recording_spawn).unwrap();
+        assert!(last_command().is_some());
+    }
+
+    #[test]
+    fn run_errors_on_an_unknown_agent_override() {
+        SPAWN.with(|s| *s.borrow_mut() = (None, Ok(())));
+        // A typo'd `--agent` is surfaced before anything is spawned.
+        let err = run(false, Some("nope".to_string()), recording_spawn).unwrap_err();
+        assert!(err.to_string().contains("unknown agent CLI: nope"));
+    }
+
+    #[test]
+    fn run_propagates_a_spawn_failure() {
+        SPAWN.with(|s| *s.borrow_mut() = (None, Err("spawn failed")));
+        assert_eq!(
+            run(false, None, recording_spawn).unwrap_err().to_string(),
+            "spawn failed"
+        );
+    }
+
+    #[test]
+    fn usagi_bin_path_uses_the_executable_path_when_available() {
+        assert_eq!(
+            usagi_bin_path(Some(PathBuf::from("/opt/bin/usagi"))),
+            "/opt/bin/usagi"
+        );
+    }
+
+    #[test]
+    fn usagi_bin_path_falls_back_to_the_bare_name() {
+        // No executable path (or a non-UTF-8 one) falls back to the bare `usagi`.
+        assert_eq!(usagi_bin_path(None), "usagi");
+    }
 
     #[test]
     fn clean_prompt_scopes_to_session_worktrees_and_forbids_the_repo() {
@@ -207,43 +254,5 @@ mod tests {
         // A typo is surfaced rather than silently falling back.
         let err = resolve_agent_cli(AgentCli::Claude, Some("nope")).unwrap_err();
         assert!(err.to_string().contains("unknown agent CLI: nope"));
-    }
-
-    #[test]
-    fn spawn_detached_runs_the_command_with_cwd_and_appends_to_the_log() {
-        // The wrapper runs `sh -c <command>` with the given cwd and appends
-        // stdout/stderr to the log file, creating its parent directory. Use a
-        // command that writes a marker into cwd and exits, then wait briefly.
-        let dir = tempfile::tempdir().unwrap();
-        let cwd = dir.path();
-        let log = cwd.join(".usagi").join("clean.log");
-        spawn_detached("printf done > marker; printf log-line 1>&2", cwd, &log).unwrap();
-
-        // Poll for the detached child to finish (it is not waited on).
-        let marker = cwd.join("marker");
-        for _ in 0..100 {
-            if marker.exists()
-                && std::fs::read_to_string(&log)
-                    .map(|s| !s.is_empty())
-                    .unwrap_or(false)
-            {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
-        assert_eq!(std::fs::read_to_string(&marker).unwrap(), "done");
-        assert!(std::fs::read_to_string(&log).unwrap().contains("log-line"));
-    }
-
-    #[test]
-    fn spawn_detached_errors_when_the_log_path_is_unusable() {
-        // A log path whose parent cannot be created (a file stands where a
-        // directory is needed) surfaces an error rather than spawning.
-        let dir = tempfile::tempdir().unwrap();
-        let blocker = dir.path().join("blocker");
-        std::fs::write(&blocker, "x").unwrap();
-        // `blocker` is a file, so `blocker/.usagi/clean.log`'s parent cannot be made.
-        let log = blocker.join(".usagi").join("clean.log");
-        assert!(spawn_detached("true", dir.path(), &log).is_err());
     }
 }

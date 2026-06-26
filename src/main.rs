@@ -1,4 +1,51 @@
+use std::path::Path;
+
 use clap::{Parser, Subcommand};
+
+use usagi::presentation::mcp::session::AgentBackend;
+use usagi::usecase::session;
+
+/// The production [`AgentBackend`] for `usagi mcp`, wired in here at the
+/// composition root so the mcp transport itself stays free of process / store IO
+/// and unit-testable.
+///
+/// `prompt` *queues* the prompt for the target session's worktree rather than
+/// running an agent itself: the `usagi mcp` process cannot reach into a running
+/// TUI to drive a pane, so it leaves the prompt in `agent_prompt_store` and the
+/// home screen delivers it the next time it freshly launches that session's
+/// agent pane.
+///
+/// `remove` resolves the workspace's effective agent CLI (so the removed
+/// session's persisted conversation is discarded with the right adapter) and
+/// delegates to [`session::remove`].
+struct CliAgentBackend;
+
+impl AgentBackend for CliAgentBackend {
+    fn prompt(&self, worktree: &Path, prompt: &str) -> Result<String, String> {
+        usagi::infrastructure::agent_prompt_store::set(worktree, prompt)
+            .map_err(|e| e.to_string())?;
+        Ok(
+            "Queued the prompt for this session's agent. It is delivered as the agent's \
+            opening message the next time the session's agent pane is launched from the \
+            usagi home screen (focus the session, then run `agent`)."
+                .to_string(),
+        )
+    }
+
+    fn remove(
+        &self,
+        workspace_root: &Path,
+        name: &str,
+        force: bool,
+    ) -> Result<session::RemovalOutcome, String> {
+        let storage =
+            usagi::infrastructure::storage::Storage::open_default().map_err(|e| e.to_string())?;
+        let settings = usagi::usecase::settings::effective(&storage, workspace_root)
+            .map_err(|e| e.to_string())?;
+        let agent = usagi::infrastructure::agent::agent_for(settings.agent_cli);
+        session::remove(workspace_root, name, force, agent.as_ref()).map_err(|e| e.to_string())
+    }
+}
 
 #[derive(Parser)]
 #[command(
@@ -106,18 +153,30 @@ fn main() -> anyhow::Result<()> {
 
     let name = command_name(&command);
     let result = match command {
-        Commands::AgentPhase { phase } => usagi::presentation::cli::agent_phase::run(phase),
-        Commands::Clean { dry_run, agent } => usagi::presentation::cli::clean::run(dry_run, agent),
+        Commands::AgentPhase { phase } => {
+            usagi::presentation::cli::agent_phase::run(phase, std::io::stdin().lock())
+        }
+        Commands::Clean { dry_run, agent } => {
+            usagi::presentation::cli::clean::run(dry_run, agent, spawn_detached)
+        }
         Commands::Config { edit } => usagi::presentation::cli::config::run(edit),
         Commands::Doctor { fix } => usagi::presentation::cli::doctor::run(fix),
         Commands::Feature => usagi::presentation::cli::feature::run(),
-        Commands::Hop => usagi::presentation::cli::hop::run(),
+        Commands::Hop => usagi::presentation::cli::hop::run(usagi::presentation::tui::app::run),
         Commands::Icon { view } => usagi::presentation::cli::icon::run(view),
         Commands::Init { git } => usagi::presentation::cli::init::run(git),
         Commands::Issue { command } => usagi::presentation::cli::issue::run(command),
         Commands::Memory { command } => usagi::presentation::cli::memory::run(command),
         Commands::LlmMcp { model } => usagi::presentation::cli::llm_mcp::run(model),
-        Commands::Mcp => usagi::presentation::cli::mcp::run(),
+        Commands::Mcp => {
+            let stdin = std::io::stdin();
+            let stdout = std::io::stdout();
+            usagi::presentation::cli::mcp::run(
+                Box::new(CliAgentBackend),
+                stdin.lock(),
+                stdout.lock(),
+            )
+        }
         Commands::Run { n } => usagi::presentation::cli::run::run(n),
         Commands::Status => usagi::presentation::cli::status::run(),
     };
@@ -167,4 +226,90 @@ fn trace_command(name: Option<&'static str>, ok: bool) {
 /// swallowed so logging never masks the original error on its way to stderr.
 fn log_error(error: &anyhow::Error) {
     usagi::infrastructure::error_log::ErrorLog::record(&format!("{error:#}"));
+}
+
+/// Spawn `command` via `sh -c` detached in the background, with `cwd` as its
+/// working directory and its stdout/stderr appended to `log_path`. Returns once
+/// the child is spawned — usagi does not wait for it. This is the production
+/// spawner `usagi clean` injects into [`usagi::presentation::cli::clean::run`];
+/// it lives here at the (coverage-excluded) composition root so that command's
+/// orchestration stays a pure, unit-tested flow.
+fn spawn_detached(command: &str, cwd: &Path, log_path: &Path) -> anyhow::Result<()> {
+    use anyhow::Context as _;
+    use std::fs::OpenOptions;
+    use std::process::{Command, Stdio};
+
+    if let Some(parent) = log_path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating log directory {}", parent.display()))?;
+    }
+    let log = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path)
+        .with_context(|| format!("opening log file {}", log_path.display()))?;
+    let stderr = log
+        .try_clone()
+        .with_context(|| format!("opening log file {}", log_path.display()))?;
+
+    let mut builder = Command::new("sh");
+    builder
+        .arg("-c")
+        .arg(command)
+        .current_dir(cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(log))
+        .stderr(Stdio::from(stderr));
+    // Detach from usagi's process group so the agent keeps running after usagi
+    // exits (Unix only; on other platforms the child simply outlives the parent).
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        builder.process_group(0);
+    }
+    builder
+        .spawn()
+        .with_context(|| format!("spawning background agent: {command}"))?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn spawn_detached_runs_the_command_with_cwd_and_appends_to_the_log() {
+        // The wrapper runs `sh -c <command>` with the given cwd and appends
+        // stdout/stderr to the log file, creating its parent directory.
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path();
+        let log = cwd.join(".usagi").join("clean.log");
+        spawn_detached("printf done > marker; printf log-line 1>&2", cwd, &log).unwrap();
+
+        // Poll for the detached child to finish (it is not waited on).
+        let marker = cwd.join("marker");
+        for _ in 0..100 {
+            if marker.exists()
+                && std::fs::read_to_string(&log)
+                    .map(|s| !s.is_empty())
+                    .unwrap_or(false)
+            {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert_eq!(std::fs::read_to_string(&marker).unwrap(), "done");
+        assert!(std::fs::read_to_string(&log).unwrap().contains("log-line"));
+    }
+
+    #[test]
+    fn spawn_detached_errors_when_the_log_path_is_unusable() {
+        // A log path whose parent cannot be created (a file stands where a
+        // directory is needed) surfaces an error rather than spawning.
+        let dir = tempfile::tempdir().unwrap();
+        let blocker = dir.path().join("blocker");
+        std::fs::write(&blocker, "x").unwrap();
+        let log = blocker.join(".usagi").join("clean.log");
+        assert!(spawn_detached("true", dir.path(), &log).is_err());
+    }
 }
