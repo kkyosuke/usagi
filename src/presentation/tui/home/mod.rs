@@ -611,13 +611,6 @@ pub fn run(term: &Term, workspace: &Workspace, preload: Preload) -> Result<Outco
                     // `Ctrl-Q`: leave 没入 to quit usagi. Every pane stays alive in
                     // the pool; the event loop raises the quit-confirmation modal.
                     terminal_pane::PaneStep::Quit => return Ok(PaneExit::Quit),
-                    // `Ctrl-W`: close the active tab. Same as a shell that exited —
-                    // keep driving when a pane remains, else fall to 在席.
-                    terminal_pane::PaneStep::CloseTab => {
-                        if !pool.close_active(dir, &label) {
-                            return Ok(PaneExit::Closed);
-                        }
-                    }
                     // The active pane's shell exited: drop it; keep driving when
                     // a pane remains, else fall to 在席.
                     terminal_pane::PaneStep::Closed => {

@@ -423,7 +423,7 @@ pub(super) fn footer_line(width: usize, state: &HomeState) -> String {
             )
         }
         Mode::Attached => {
-            "[attached]  Ctrl-O: switch / Ctrl-T: focus / Ctrl-^: last / Ctrl-N/P: tab / Ctrl-G: agent / Ctrl-E: note / Ctrl-W: close"
+            "[attached]  Ctrl-O: switch / Ctrl-T: focus / Ctrl-^: last / Ctrl-N/P: tab / Ctrl-G: agent / Ctrl-E: note"
                 .to_string()
         }
     };
