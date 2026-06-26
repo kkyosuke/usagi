@@ -581,10 +581,14 @@ impl TerminalPool {
             return None;
         }
         let (height, width) = term.size();
-        // The preview has no tab strip, so it uses the full-pane geometry. 切替
-        // honours the `Ctrl-B` sidebar toggle, so the snapshot is sized to the
+        // The preview draws the tab strip above the body (the same header + tab
+        // rows 没入 shows), so it must size the snapshot to the tab-reserved
+        // geometry — otherwise the grid is `TAB_BAR_ROWS` taller than the area it
+        // is drawn into and the bottom rows (the live cursor) clip off, only to
+        // reappear once the session is selected and reflowed to this same size.
+        // 切替 honours the `Ctrl-B` sidebar toggle, so the snapshot is sized to the
         // current sidebar state — collapsing the rail widens the preview to match.
-        let geo = ui::terminal_geometry(height as usize, width as usize, sidebar);
+        let geo = ui::attached_geometry(height as usize, width as usize, sidebar);
         let generation = session.generation();
         // The previewed session, the pane geometry, and the shell's output are all
         // unchanged since the last frame: reuse the snapshot without touching the
