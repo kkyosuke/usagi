@@ -41,14 +41,20 @@ pub(super) fn palette_key(
             if let Some(command) = submission.recorded.as_deref() {
                 (wiring.persist)(command);
             }
+            // A transitioning effect closes the palette so it can take over the
+            // screen; a non-transitioning one keeps it open so its response
+            // shows. That per-command setting lives on the effect itself
+            // ([`Effect::closes_palette`]), applied once here rather than arm by
+            // arm. `Activate` is the runtime-conditional exception and closes the
+            // palette inside its own arm.
+            if submission.effect.closes_palette() {
+                state.close_command_palette();
+            }
             match submission.effect {
                 Effect::Quit => return Ok(Flow::Quit),
-                // `session switch` with no name closes the palette and moves
-                // keyboard focus to the base 切替 to pick a session.
-                Effect::EnterSwitch => {
-                    state.close_command_palette();
-                    state.enter_switch(ReturnMode::Base);
-                }
+                // `session switch` with no name moves keyboard focus to the base
+                // 切替 to pick a session.
+                Effect::EnterSwitch => state.enter_switch(ReturnMode::Base),
                 // `session switch <name>` focuses that session: if it resolves,
                 // close the palette and enter 在席 (attaching when it is live);
                 // an unknown name keeps the palette open so the error shows.
@@ -62,14 +68,10 @@ pub(super) fn palette_key(
                 // `session create <name>` dispatches the git work to a background
                 // worker and returns at once; the new session appears in the list
                 // when the task finishes (tracked in the top-right task panel).
-                Effect::CreateSession(name) => {
-                    state.close_command_palette();
-                    (wiring.dispatch_create)(&name);
-                }
-                // `session create` with no name closes the palette, moves to 切替
-                // and opens the inline name input there (creation lives in Switch).
+                Effect::CreateSession(name) => (wiring.dispatch_create)(&name),
+                // `session create` with no name moves to 切替 and opens the inline
+                // name input there (creation lives in Switch).
                 Effect::OpenSessionModal => {
-                    state.close_command_palette();
                     state.enter_switch(ReturnMode::Base);
                     let branches = (wiring.existing_branches)();
                     state.switch_begin_create(branches);
@@ -86,32 +88,27 @@ pub(super) fn palette_key(
                 },
                 // `session remove <name>` dispatches the removal to a background
                 // worker; the session leaves the list when the task finishes.
-                Effect::RemoveSession { name, force } => {
-                    state.close_command_palette();
-                    (wiring.dispatch_remove)(&name, force);
-                }
+                Effect::RemoveSession { name, force } => (wiring.dispatch_remove)(&name, force),
                 // `session remove` with no name opens the removal checklist over
                 // the palette, so it stays open behind it.
                 Effect::OpenRemoveModal { force } => state.open_remove_modal(force),
                 // `terminal` / `agent` are session commands, but the palette still
-                // dispatches them if typed: close it, focus the active session (the
-                // root by default) and attach a fresh pane.
+                // dispatches them if typed: the palette has already closed above,
+                // so focus the active session (the root by default) and attach a
+                // fresh pane.
                 Effect::OpenTerminal => {
-                    state.close_command_palette();
                     let row = state.list().active_index();
                     state.enter_focus(row);
                     launch_pane(term, state, painter, wiring, false);
                 }
                 Effect::OpenAgent(cli) => {
-                    state.close_command_palette();
                     let row = state.list().active_index();
                     state.enter_focus(row);
                     launch_agent(term, state, painter, wiring, cli);
                 }
                 // Hand off to the settings screen; it owns the terminal until
-                // dismissed. Quitting there quits the app; otherwise we close the
-                // palette and resume, forcing a full repaint over the screen it
-                // drew.
+                // dismissed. Quitting there quits the app; otherwise we resume,
+                // forcing a full repaint over the screen it drew.
                 Effect::OpenConfig => match (wiring.open_config)(term)? {
                     // The user quit the app from the settings screen.
                     None => return Ok(Flow::Quit),
@@ -120,7 +117,6 @@ pub(super) fn palette_key(
                     // availability, so apply the re-read settings — otherwise
                     // Focus keeps rendering the old mode / `ai` visibility.
                     Some(reload) => {
-                        state.close_command_palette();
                         state.set_session_action_ui(reload.session_action_ui);
                         state.set_ai_available(reload.ai_available);
                         painter.reset();
@@ -130,18 +126,14 @@ pub(super) fn palette_key(
                 // typed, closing the focused session. On the root row (the default)
                 // it is refused, since the root is the workspace itself and not a
                 // session.
-                Effect::CloseSession => {
-                    state.close_command_palette();
-                    close_focused_session(state, wiring);
-                }
-                // `preview <path|name>` opens the right-pane Markdown preview:
-                // close the palette, then resolve and read the file under the
-                // workspace root (the impure step) and render / show it (or log a
-                // failure). Reading lives in the infrastructure layer; rendering
-                // and storing the result is pure state, so both outcomes are
-                // testable.
+                Effect::CloseSession => close_focused_session(state, wiring),
+                // `preview <path|name>` opens the right-pane Markdown preview (the
+                // palette has already closed above): resolve and read the file
+                // under the workspace root (the impure step) and render / show it
+                // (or log a failure). Reading lives in the infrastructure layer;
+                // rendering and storing the result is pure state, so both outcomes
+                // are testable.
                 Effect::OpenPreview(target) => {
-                    state.close_command_palette();
                     state.open_preview_result(crate::infrastructure::markdown_file::read_under(
                         wiring.workspace_root,
                         &target,
