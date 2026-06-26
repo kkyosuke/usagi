@@ -5,8 +5,6 @@
 
 use console::{style, Style};
 
-use crate::domain::version::Version;
-
 use super::super::command::{CommandHint, Hint};
 use super::super::state::{HomeState, Mode, RemoveModal, TextModal, WorktreeList};
 use super::super::tasks::{TaskMark, TaskRow};
@@ -47,34 +45,6 @@ pub(super) fn title_bar(width: usize, list: &WorktreeList) -> String {
         if count == 1 { "" } else { "s" }
     );
     widgets::title_line(width, &label)
-}
-
-/// The top-right "update available" notice: a short note that a release newer
-/// than the running build (`latest`) has been published. Shown only while the
-/// background update check reports one.
-///
-/// Both lines are right-padded to a common block width and styled yellow-bold so
-/// the block right-aligns cleanly when [`overlay_top_right`](super::overlay_top_right)
-/// anchors it to the header rows.
-pub(super) fn update_banner(latest: &Version) -> Vec<String> {
-    // The message on the first line, the new version on the second. No mascot
-    // art: the title bar pads the active session name to a fixed width and so
-    // reaches far enough right that only a compact block fits in the gap on the
-    // header rows where this is anchored.
-    let rows = ["アップデートがあるぴょん".to_string(), format!("v{latest}")];
-    let block_w = rows
-        .iter()
-        .map(|row| console::measure_text_width(row))
-        .max()
-        .unwrap_or(0);
-    rows.into_iter()
-        .map(|row| {
-            style(pad_to_width(row, block_w))
-                .yellow()
-                .bold()
-                .to_string()
-        })
-        .collect()
 }
 
 /// Minimum / maximum display width of the task-status label field. The field

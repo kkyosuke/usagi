@@ -249,8 +249,8 @@ pub(super) fn event_loop(
         // (the loop no longer keeps its own copy alongside the one in `state`).
         let badges_changed = state.badges() != &badges;
         state.apply_badges(badges);
-        // Surface the top-right "update available" notice once the background
-        // release check has found a newer version than this build.
+        // Surface the sidebar mascot's "update available" notice once the
+        // background release check has found a newer version than this build.
         let latest_update = update.status().map(|status| status.latest);
         state.set_update(latest_update);
         // Apply a session list a background sync produced — a pane-exit detach, or
