@@ -46,10 +46,90 @@ pub fn no_live_session_hint() -> &'static str {
     "No live session here — run \":agent\" to start one (\":terminal\" for a plain shell)."
 }
 
+/// Column the key names are padded to in the cheat sheet, so the descriptions
+/// line up regardless of how wide each key glyph renders.
+const CHEATSHEET_KEY_COL: usize = 16;
+
+/// One key row of the cheat sheet: the key (or chord) padded to a fixed display
+/// column, then its description. Padding is by display width (not byte/char
+/// count) so arrow / chord glyphs (`↑↓`, `Ctrl-^`) still align.
+fn key_row(key: &str, desc: &str) -> LogLine {
+    let pad = CHEATSHEET_KEY_COL.saturating_sub(console::measure_text_width(key));
+    LogLine::output(format!("    {key}{}{desc}", " ".repeat(pad)))
+}
+
+/// A section header in the cheat sheet (a mode name, unindented).
+fn cheatsheet_header(text: &str) -> LogLine {
+    LogLine::output(text.to_string())
+}
+
+/// The keybinding cheat sheet shown by `?` (a large, scrollable text modal):
+/// every reserved key, grouped by the mode it acts in, so "which key does what?"
+/// never has to be memorised. The mode keys themselves live in their per-mode
+/// handlers ([`super::super::event`]); this is the user-facing reference for
+/// them, kept here with the rest of the display text rather than in the state /
+/// handler logic.
+pub fn cheatsheet() -> Vec<LogLine> {
+    let mut lines = vec![
+        LogLine::output("Keybindings, by mode. ↑↓ scroll · Esc / q close.".to_string()),
+        LogLine::output(String::new()),
+        cheatsheet_header("General (any mode)"),
+        key_row(":", "Open the command palette (run \"man\" for commands)"),
+        key_row("?", "Show this cheat sheet"),
+        key_row("Ctrl-B", "Toggle the session sidebar"),
+        key_row("Ctrl-C", "Quit (confirms first when a session is live)"),
+        key_row("Ctrl-Q", "Quit (always confirms first)"),
+        LogLine::output(String::new()),
+        cheatsheet_header("切替 / Switch — pick a session"),
+        key_row("↑↓ / k j", "Move between sessions"),
+        key_row("K / J", "Reorder the selected session"),
+        key_row("←→ / h l", "Move between the session's tabs"),
+        key_row("Ctrl-P / Ctrl-N", "Move between the session's tabs"),
+        key_row("Enter", "Focus the session (attach when live)"),
+        key_row("t", "Open the action surface (add a pane)"),
+        key_row("x", "Close the highlighted tab"),
+        key_row("c", "Create a new session"),
+        key_row("r", "Rename the session"),
+        key_row("n / Ctrl-E", "Edit the session note"),
+        key_row("Ctrl-^", "Jump to the previous session"),
+        key_row("Esc", "Close the note / back out"),
+        LogLine::output(String::new()),
+        cheatsheet_header("在席 / Focus — operate a session"),
+        key_row("↑↓ / k j", "Move the action menu cursor"),
+        key_row("→ / Tab", "Expand the agent picker"),
+        key_row("Enter", "Run the highlighted action / open the pane"),
+        key_row("t / a", "Launch a terminal / agent"),
+        key_row("Ctrl-P / Ctrl-N", "Move between the session's tabs"),
+        key_row("Ctrl-O", "Zoom out to Switch"),
+        key_row("Ctrl-^", "Jump to the previous session"),
+        key_row("Ctrl-E", "Edit the session note"),
+        key_row("Esc", "Back out to Switch"),
+        LogLine::output(String::new()),
+        cheatsheet_header("没入 / Attached — live terminal (other keys go to the shell)"),
+        key_row("Ctrl-O", "Zoom out to Switch"),
+        key_row("Ctrl-T", "Zoom out to Focus (action menu)"),
+        key_row("Ctrl-N / Ctrl-P", "Next / previous tab, in place"),
+        key_row("Ctrl-G", "Add an agent tab"),
+        key_row("Ctrl-E", "Edit the session note"),
+        key_row("Ctrl-B", "Toggle the session sidebar"),
+        key_row("Ctrl-^", "Jump to the previous session"),
+        key_row("Ctrl-Q", "Quit usagi"),
+        key_row("Ctrl-C", "Copy the selection (when one is active)"),
+        key_row("Shift+↑↓", "Scroll the history one line"),
+        key_row("Shift+PgUp/Dn", "Scroll the history one page"),
+    ];
+    lines.push(LogLine::output(String::new()));
+    lines.push(LogLine::output(
+        "Type \":man\" for the command reference.".to_string(),
+    ));
+    lines
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::domain::workspace_state::{BranchStatus, WorktreeState};
+    use crate::presentation::tui::home::state::LineKind;
     use chrono::Utc;
     use std::path::PathBuf;
 
@@ -109,5 +189,38 @@ mod tests {
         let hint = no_live_session_hint();
         assert!(hint.contains(":agent"));
         assert!(hint.contains(":terminal"));
+    }
+
+    #[test]
+    fn cheatsheet_lists_keys_grouped_by_every_mode() {
+        let lines = cheatsheet();
+        let text: Vec<&str> = lines.iter().map(|l| l.text.as_str()).collect();
+        // A header per mode (plus the General group) so the reference is grouped.
+        assert!(text.iter().any(|t| t.starts_with("General")));
+        assert!(text.iter().any(|t| t.contains("切替 / Switch")));
+        assert!(text.iter().any(|t| t.contains("在席 / Focus")));
+        assert!(text.iter().any(|t| t.contains("没入 / Attached")));
+        // The reserved chords the cheat sheet exists to surface are all present.
+        let joined = text.join("\n");
+        for chord in [
+            "Ctrl-O", "Ctrl-T", "Ctrl-N", "Ctrl-G", "Ctrl-Q", "Ctrl-^", "?", ":",
+        ] {
+            assert!(joined.contains(chord), "cheat sheet should mention {chord}");
+        }
+        // Every line is plain output (the modal styles it as a dump).
+        assert!(lines.iter().all(|l| l.kind == LineKind::Output));
+    }
+
+    #[test]
+    fn cheatsheet_key_rows_align_descriptions_by_display_width() {
+        // A short key, a wide chord, and an arrow glyph (whose display width is
+        // not its char count) all pad to the same description column.
+        let short = key_row("?", "desc");
+        let wide = key_row("Ctrl-P / Ctrl-N", "desc");
+        let arrows = key_row("↑↓ / k j", "desc");
+        let col =
+            |line: &LogLine| console::measure_text_width(line.text.split("desc").next().unwrap());
+        assert_eq!(col(&short), col(&wide));
+        assert_eq!(col(&short), col(&arrows));
     }
 }
