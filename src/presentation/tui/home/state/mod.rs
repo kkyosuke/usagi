@@ -24,9 +24,9 @@ use super::command::{
     CommandInfo, CommandRegistry, CommandResult, CommandScope, Completion, Effect, Hint,
 };
 use super::tasks::TaskRow;
-use super::terminal_pool::MonitorSnapshot;
-use super::terminal_tabs::TabStrip;
-use super::terminal_view::TerminalView;
+use super::terminal::pool::MonitorSnapshot;
+use super::terminal::tabs::TabStrip;
+use super::terminal::view::TerminalView;
 use crate::presentation::tui::widgets::text_input::TextInput;
 
 mod list;

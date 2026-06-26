@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use console::{style, Key, Term};
 
-use crate::presentation::tui::screen::{FramePainter, KeyReader};
+use crate::presentation::tui::io::screen::{FramePainter, KeyReader};
 
 use super::picker::Picker;
 

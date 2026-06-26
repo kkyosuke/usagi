@@ -57,7 +57,7 @@ New を選ぶと新規プロジェクト画面へ、Config を選ぶと設定画
   端末が狭い場合は `saturating_sub` によりパディング 0 にフォールバックします。
 - 各画面の描画ロジックは `src/presentation/tui/<screen>/`（状態 `state.rs`・描画 `ui.rs`・
   イベントループ `event.rs` に分離。ホーム画面はさらにコマンド解析/補完を `command/` に分離）、
-  端末制御は `src/presentation/tui/screen.rs` に実装されています。
+  端末制御は `src/presentation/tui/io/screen.rs` に実装されています。
 - 各画面の再描画は `screen.rs` の `FramePainter` による**差分描画**です。`ui.rs` が返す
   「1 行 1 要素」のフレームを直前のフレームと比較し、**変化した行だけ**を ANSI で位置指定して
   書き換え、1 回の書き込みにまとめます。毎フレーム全画面をクリアして全行を再描画する方式を
