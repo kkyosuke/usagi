@@ -19,14 +19,20 @@ use crate::presentation::mcp::session::AgentBackend;
 use crate::presentation::mcp::usagi::UsagiMcpServer;
 use crate::usecase::session;
 
-/// The production [`AgentBackend`]: `session_prompt` *queues* the prompt for the
-/// target session's worktree rather than running an agent itself. The `usagi mcp`
-/// process cannot reach into a running TUI to drive a pane, so it leaves the
-/// prompt in [`agent_prompt_store`] and the home screen delivers it the next time
-/// it freshly launches that session's agent pane — the agent then opens in the
-/// session's right-hand pane already working on the prompt (see
-/// [`crate::presentation::tui::home`]). This keeps a delegated prompt visible and
-/// interactive in the session it belongs to, instead of running detached.
+/// The production [`AgentBackend`].
+///
+/// `session_prompt` *queues* the prompt for the target session's worktree rather
+/// than running an agent itself. The `usagi mcp` process cannot reach into a
+/// running TUI to drive a pane, so it leaves the prompt in [`agent_prompt_store`]
+/// and the home screen delivers it the next time it freshly launches that
+/// session's agent pane — the agent then opens in the session's right-hand pane
+/// already working on the prompt (see [`crate::presentation::tui::home`]). This
+/// keeps a delegated prompt visible and interactive in the session it belongs
+/// to, instead of running detached.
+///
+/// `session_remove` resolves the workspace's effective agent CLI (so the removed
+/// session's persisted conversation is discarded with the right adapter) and
+/// delegates to [`session::remove`].
 struct CliAgentBackend;
 
 impl AgentBackend for CliAgentBackend {
@@ -38,6 +44,20 @@ impl AgentBackend for CliAgentBackend {
             usagi home screen (focus the session, then run `agent`)."
                 .to_string(),
         )
+    }
+
+    fn remove(
+        &self,
+        workspace_root: &Path,
+        name: &str,
+        force: bool,
+    ) -> Result<session::RemovalOutcome, String> {
+        let storage =
+            crate::infrastructure::storage::Storage::open_default().map_err(|e| e.to_string())?;
+        let settings = crate::usecase::settings::effective(&storage, workspace_root)
+            .map_err(|e| e.to_string())?;
+        let agent = crate::infrastructure::agent::agent_for(settings.agent_cli);
+        session::remove(workspace_root, name, force, agent.as_ref()).map_err(|e| e.to_string())
     }
 }
 

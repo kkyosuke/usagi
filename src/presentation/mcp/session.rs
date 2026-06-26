@@ -2,19 +2,21 @@
 //!
 //! Where [`super::issue`] exposes a repository's issues and [`super::llm`]
 //! exposes a local model, this server lets an agent drive usagi's own session
-//! lifecycle: create a parallel worktree session, list the existing ones, and
-//! hand a prompt to the agent of a specific session. This turns a coordinating
-//! agent into an orchestrator that can spin up isolated worktrees and delegate
-//! work into them.
+//! lifecycle: create a parallel worktree session, list the existing ones, hand a
+//! prompt to the agent of a specific session, and remove a session it no longer
+//! needs. This turns a coordinating agent into an orchestrator that can spin up
+//! isolated worktrees, delegate work into them, and tear them down again.
 //!
 //! Session creation and listing delegate to [`crate::usecase::session`], so the
 //! MCP surface stays a thin protocol adapter over the same logic the CLI and
-//! TUI use. Handing a prompt to a session's agent is abstracted behind
-//! [`AgentBackend`] so the dispatch logic is fully unit-tested without touching
-//! the filesystem; the production backend (which queues the prompt for the
-//! session's worktree) lives in the thin stdio entry point
-//! (`presentation/cli/mcp.rs`). The JSON-RPC framing is shared with the other
-//! servers and lives in the parent [`super`] module.
+//! TUI use. The two operations that need a real agent or real filesystem —
+//! handing a prompt to a session's agent, and removing a session (which discards
+//! that agent's conversation) — are abstracted behind [`AgentBackend`] so the
+//! dispatch logic is fully unit-tested without touching the filesystem; the
+//! production backend (which queues the prompt for the session's worktree and
+//! resolves the configured agent for removal) lives in the thin stdio entry
+//! point (`presentation/cli/mcp.rs`). The JSON-RPC framing is shared with the
+//! other servers and lives in the parent [`super`] module.
 
 use std::path::{Path, PathBuf};
 
@@ -28,17 +30,37 @@ use crate::usecase::session;
 /// Names of the session tools this server exposes. The unified `usagi` server
 /// ([`super::usagi`]) uses this to route `tools/call` for these names to the
 /// embedded session server.
-pub const TOOL_NAMES: [&str; 3] = ["session_create", "session_list", "session_prompt"];
+pub const TOOL_NAMES: [&str; 4] = [
+    "session_create",
+    "session_list",
+    "session_prompt",
+    "session_remove",
+];
 
-/// Hands a prompt to the agent rooted at a session's worktree. Abstracted so the
-/// server's protocol handling can be tested with a fake backend that never
-/// touches the filesystem or a real agent.
+/// Drives the parts of session orchestration that touch a real agent or a real
+/// filesystem — handing a session's agent a prompt, and removing a session
+/// (which discards that agent's conversation). Abstracted so the server's
+/// protocol handling can be tested with a fake backend that never touches the
+/// filesystem or a real agent.
 pub trait AgentBackend {
     /// Deliver `prompt` to the agent rooted at `worktree` — the production
     /// backend queues it for the session's next fresh agent launch — returning a
     /// confirmation message (`Ok`) or an error message to surface to the agent
     /// (`Err`).
     fn prompt(&self, worktree: &Path, prompt: &str) -> Result<String, String>;
+
+    /// Remove session `name` under `workspace_root`, resolving the workspace's
+    /// configured agent CLI so the session's persisted conversation is discarded
+    /// along with its worktrees. Without `force`, a session with uncommitted
+    /// changes is left untouched and the [`session::RemovalOutcome`] reports the
+    /// dirty worktrees; with `force`, those changes are discarded. Returns an
+    /// error message to surface to the agent (`Err`).
+    fn remove(
+        &self,
+        workspace_root: &Path,
+        name: &str,
+        force: bool,
+    ) -> Result<session::RemovalOutcome, String>;
 }
 
 /// A JSON-RPC server exposing session tools for one workspace.
@@ -102,6 +124,18 @@ impl SessionMcpServer {
             .ok_or_else(|| format!("no such session: \"{}\"", args.name))?;
         self.backend.prompt(&target.root, &args.prompt)
     }
+
+    fn tool_remove(&self, arguments: Value) -> Result<String, String> {
+        let args: RemoveArgs = parse_args(arguments)?;
+        let outcome = self
+            .backend
+            .remove(&self.workspace_root, &args.name, args.force)?;
+        Ok(to_pretty(&json!({
+            "name": args.name,
+            "removed": outcome.removed,
+            "dirty": outcome.dirty,
+        })))
+    }
 }
 
 impl McpService for SessionMcpServer {
@@ -118,6 +152,7 @@ impl McpService for SessionMcpServer {
             "session_create" => self.tool_create(arguments),
             "session_list" => self.tool_list(),
             "session_prompt" => self.tool_prompt(arguments),
+            "session_remove" => self.tool_remove(arguments),
             other => Err(format!("unknown tool: {other}")),
         }
     }
@@ -134,6 +169,15 @@ struct CreateArgs {
 struct PromptArgs {
     name: String,
     prompt: String,
+}
+
+#[derive(Deserialize)]
+struct RemoveArgs {
+    name: String,
+    /// Discard uncommitted changes instead of refusing; defaults to `false` when
+    /// the caller omits it.
+    #[serde(default)]
+    force: bool,
 }
 
 // --- JSON helpers ----------------------------------------------------------
@@ -202,6 +246,27 @@ fn session_tool_schemas() -> Value {
                 },
                 "required": ["name", "prompt"]
             }
+        },
+        {
+            "name": "session_remove",
+            "description": "Remove a session: tear down every repository's worktree \
+                and its session branch, drop any copied files, discard the \
+                session agent's conversation, and forget it in state.json. \
+                Without force, a session whose worktrees have uncommitted changes \
+                is left untouched and the result lists those dirty worktrees \
+                (removed=false); set force=true to discard the changes and remove \
+                it anyway. Returns { name, removed, dirty }.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Name of the session to remove" },
+                    "force": {
+                        "type": "boolean",
+                        "description": "Discard uncommitted changes instead of refusing (default false)"
+                    }
+                },
+                "required": ["name"]
+            }
         }
     ])
 }
@@ -216,14 +281,17 @@ mod tests {
     use std::rc::Rc;
 
     type CallLog = Rc<RefCell<Vec<(PathBuf, String)>>>;
+    type RemoveLog = Rc<RefCell<Vec<(PathBuf, String, bool)>>>;
 
     /// A backend that records the calls it received and returns a scripted
     /// result, so the server's dispatch can be tested without a real agent. The
-    /// call log is shared via `Rc` so a test can inspect it after the backend is
-    /// moved into the server.
+    /// call logs are shared via `Rc` so a test can inspect them after the backend
+    /// is moved into the server.
     struct FakeBackend {
         result: Result<String, String>,
         calls: CallLog,
+        remove_result: Result<session::RemovalOutcome, String>,
+        remove_calls: RemoveLog,
     }
 
     impl FakeBackend {
@@ -231,6 +299,13 @@ mod tests {
             Self {
                 result: Ok(reply.to_string()),
                 calls: Rc::new(RefCell::new(Vec::new())),
+                // A clean removal by default; tests that exercise the remove tool
+                // override this with `with_remove`.
+                remove_result: Ok(session::RemovalOutcome {
+                    removed: true,
+                    dirty: Vec::new(),
+                }),
+                remove_calls: Rc::new(RefCell::new(Vec::new())),
             }
         }
 
@@ -238,7 +313,18 @@ mod tests {
             Self {
                 result: Err(message.to_string()),
                 calls: Rc::new(RefCell::new(Vec::new())),
+                remove_result: Ok(session::RemovalOutcome {
+                    removed: true,
+                    dirty: Vec::new(),
+                }),
+                remove_calls: Rc::new(RefCell::new(Vec::new())),
             }
+        }
+
+        /// Script the outcome `session_remove` returns.
+        fn with_remove(mut self, outcome: Result<session::RemovalOutcome, String>) -> Self {
+            self.remove_result = outcome;
+            self
         }
     }
 
@@ -248,6 +334,20 @@ mod tests {
                 .borrow_mut()
                 .push((worktree.to_path_buf(), prompt.to_string()));
             self.result.clone()
+        }
+
+        fn remove(
+            &self,
+            workspace_root: &Path,
+            name: &str,
+            force: bool,
+        ) -> Result<session::RemovalOutcome, String> {
+            self.remove_calls.borrow_mut().push((
+                workspace_root.to_path_buf(),
+                name.to_string(),
+                force,
+            ));
+            self.remove_result.clone()
         }
     }
 
@@ -314,7 +414,7 @@ mod tests {
     }
 
     #[test]
-    fn tools_list_returns_the_three_session_tools() {
+    fn tools_list_returns_the_session_tools() {
         let tmp = tempfile::tempdir().unwrap();
         let res = reply(
             &server_at(tmp.path(), FakeBackend::ok("x")),
@@ -324,7 +424,12 @@ mod tests {
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert_eq!(
             names,
-            vec!["session_create", "session_list", "session_prompt"]
+            vec![
+                "session_create",
+                "session_list",
+                "session_prompt",
+                "session_remove"
+            ]
         );
     }
 
@@ -475,6 +580,75 @@ mod tests {
     }
 
     #[test]
+    fn remove_forwards_to_the_backend_and_formats_a_clean_removal() {
+        let root = tempfile::tempdir().unwrap();
+        let backend = FakeBackend::ok("x");
+        let calls = backend.remove_calls.clone(); // inspect after the move
+        let server = server_at(root.path(), backend);
+
+        let result = call(&server, "session_remove", json!({"name":"feature-x"}));
+        assert_eq!(result["isError"], false);
+        let body = tool_json(&result);
+        assert_eq!(body, json!({"name":"feature-x","removed":true,"dirty":[]}));
+
+        // The backend was invoked once with the workspace root, the session name,
+        // and force defaulted to false.
+        let calls = calls.borrow();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, root.path());
+        assert_eq!(calls[0].1, "feature-x");
+        assert!(!calls[0].2);
+    }
+
+    #[test]
+    fn remove_reports_dirty_worktrees_when_blocked() {
+        let root = tempfile::tempdir().unwrap();
+        let dirty = root.path().join(".usagi/sessions/wip");
+        let backend = FakeBackend::ok("x").with_remove(Ok(session::RemovalOutcome {
+            removed: false,
+            dirty: vec![dirty.clone()],
+        }));
+        let server = server_at(root.path(), backend);
+
+        let result = call(&server, "session_remove", json!({"name":"wip"}));
+        // A blocked removal is a successful tool call whose body says removed=false.
+        assert_eq!(result["isError"], false);
+        let body = tool_json(&result);
+        assert_eq!(body["removed"], false);
+        assert_eq!(body["dirty"][0], dirty.to_str().unwrap());
+    }
+
+    #[test]
+    fn remove_passes_the_force_flag_through() {
+        let root = tempfile::tempdir().unwrap();
+        let backend = FakeBackend::ok("x");
+        let calls = backend.remove_calls.clone();
+        let server = server_at(root.path(), backend);
+
+        call(
+            &server,
+            "session_remove",
+            json!({"name":"wip","force":true}),
+        );
+        assert!(calls.borrow()[0].2);
+    }
+
+    #[test]
+    fn remove_surfaces_backend_errors_as_tool_errors() {
+        let root = tempfile::tempdir().unwrap();
+        let backend =
+            FakeBackend::ok("x").with_remove(Err("no such session: \"ghost\"".to_string()));
+        let server = server_at(root.path(), backend);
+
+        let result = call(&server, "session_remove", json!({"name":"ghost"}));
+        assert_eq!(result["isError"], true);
+        assert!(result["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("no such session"));
+    }
+
+    #[test]
     fn invalid_arguments_are_reported() {
         let tmp = tempfile::tempdir().unwrap();
         let server = server_at(tmp.path(), FakeBackend::ok("x"));
@@ -487,6 +661,9 @@ mod tests {
             .contains("invalid arguments"));
         // session_prompt requires both name and prompt.
         let result = call(&server, "session_prompt", json!({"name":"w"}));
+        assert_eq!(result["isError"], true);
+        // session_remove requires a name.
+        let result = call(&server, "session_remove", json!({}));
         assert_eq!(result["isError"], true);
     }
 
