@@ -83,6 +83,40 @@ pub enum Effect {
     OpenPreview(String),
 }
 
+impl Effect {
+    /// Whether dispatching this effect from the `:` command palette closes the
+    /// palette. This is the per-command setting the event loop reads instead of
+    /// scattering the decision across each arm: a *transitioning* effect (enter a
+    /// mode, attach a pane, open config / preview, create or remove a session)
+    /// takes over the screen, so the palette closes first; a *non-transitioning*
+    /// one (a logged result, a text dump, or a modal shown over the palette)
+    /// keeps it open so its response stays visible.
+    ///
+    /// [`Activate`](Self::Activate) is the one runtime-conditional case and is
+    /// excluded here: it closes only when the name resolves, so its handler owns
+    /// that decision (an unknown name keeps the palette open to show the error).
+    pub fn closes_palette(&self) -> bool {
+        match self {
+            Effect::EnterSwitch
+            | Effect::CreateSession(_)
+            | Effect::OpenSessionModal
+            | Effect::RemoveSession { .. }
+            | Effect::OpenTerminal
+            | Effect::OpenAgent(_)
+            | Effect::OpenConfig
+            | Effect::CloseSession
+            | Effect::OpenPreview(_) => true,
+            Effect::None
+            | Effect::Clear
+            | Effect::Quit
+            | Effect::Activate(_)
+            | Effect::ListSessions
+            | Effect::OpenRemoveModal { .. }
+            | Effect::ShowText(_) => false,
+        }
+    }
+}
+
 /// The result of running a command: lines to append plus a side effect.
 #[derive(Debug)]
 pub struct CommandResult {
