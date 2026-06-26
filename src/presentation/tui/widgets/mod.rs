@@ -575,6 +575,32 @@ pub fn render_modal(
     lines
 }
 
+/// The inner (content) width a modal box gets for terminal `width`: the `desired`
+/// width clamped so the box — `desired` plus the two borders and a space of
+/// padding on each side — never overruns the screen. Callers compute the body
+/// with this width so its lines match the box [`overlay_modal`] / [`render_modal`]
+/// draw around them.
+pub fn modal_inner_width(width: usize, desired: usize) -> usize {
+    desired.min(width.saturating_sub(4))
+}
+
+/// Composites a titled modal box centred over `base`, the floating sibling of
+/// [`render_modal`]: it wraps `body` in a [`boxed`] frame and overlays it with
+/// [`overlay_centered`], so the screen behind it stays visible instead of a black
+/// backdrop. The shared path for floating modals (the `:` command palette, the
+/// text modal). `inner_width` is clamped the same way [`modal_inner_width`] does,
+/// so passing a body built with that width lines the rows up inside the box.
+pub fn overlay_modal(
+    base: &mut [String],
+    width: usize,
+    title: &str,
+    inner_width: usize,
+    body: &[String],
+) {
+    let inner = modal_inner_width(width, inner_width);
+    overlay_centered(base, width, &boxed(title, inner, body));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1073,5 +1099,29 @@ mod tests {
         }
         // The box is still drawn (a border row is present).
         assert!(frame.iter().any(|l| l.contains('┌')));
+    }
+
+    #[test]
+    fn modal_inner_width_clamps_to_fit_the_borders_and_padding() {
+        // A roomy terminal keeps the desired width …
+        assert_eq!(modal_inner_width(80, 60), 60);
+        // … a narrow one clamps so the box (inner + 4) never overruns.
+        assert_eq!(modal_inner_width(20, 60), 16);
+    }
+
+    #[test]
+    fn overlay_modal_floats_a_titled_box_over_the_base_keeping_content() {
+        // Unlike `render_modal`, the box is composited over the live frame, so the
+        // surrounding rows stay visible instead of a black backdrop.
+        let mut base = vec!["abcdefghijklmnopqrstuvwxyz".to_string(); 10];
+        overlay_modal(&mut base, 26, "Help", 10, &["row".to_string()]);
+        let joined = base.join("\n");
+        // The titled box and its body are drawn …
+        assert!(joined.contains("Help"));
+        assert!(joined.contains("row"));
+        assert!(joined.contains('┌'));
+        // … and a row outside the box still carries its original content (the
+        // frame shows around the float, not blanked).
+        assert!(base[0].contains('a') || base.last().unwrap().contains('a'));
     }
 }
