@@ -18,7 +18,7 @@ use chrono::Utc;
 use console::{Key, Term};
 
 use crate::domain::workspace_state::{BranchStatus, WorktreeState};
-use crate::presentation::tui::screen::KeyReader;
+use crate::presentation::tui::io::screen::KeyReader;
 
 use super::event::{event_loop_compat, ConfigReload, Outcome};
 use super::oneshot::OneShot;

@@ -27,7 +27,7 @@ use console::Term;
 
 use crate::domain::workspace::Workspace;
 use crate::domain::workspace_state::SessionRecord;
-use crate::presentation::tui::term_reader::TermKeyReader;
+use crate::presentation::tui::io::term_reader::TermKeyReader;
 
 pub use event::Outcome;
 

@@ -4,7 +4,7 @@ use anyhow::Result;
 use console::Term;
 
 use crate::presentation::tui::install_task;
-use crate::presentation::tui::screen::{animated_read, FramePainter, KeyReader};
+use crate::presentation::tui::io::screen::{animated_read, FramePainter, KeyReader};
 
 use super::menu::{Action, Menu};
 use super::ui;

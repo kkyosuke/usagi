@@ -10,7 +10,7 @@ use anyhow::Result;
 use console::Key;
 use console::Term;
 
-use crate::presentation::tui::screen::{self, FramePainter};
+use crate::presentation::tui::io::screen::{self, FramePainter};
 
 use crate::domain::settings::{AgentCli, SessionActionUi};
 
@@ -459,7 +459,7 @@ enum Select {
 }
 
 /// Decode a reassembled modified-cursor-key sequence — `CSI 1 ; <mod> <letter>`,
-/// which [`super::super::super::term_reader`] gathers into one
+/// which [`super::super::super::io::term_reader`] gathers into one
 /// [`Key::UnknownEscSeq`] — into the selection motion it represents, but **only
 /// when `Shift` is among its modifiers** (the chord that extends the selection).
 /// Returns `None` for any other key, modifier, or malformed sequence, so a plain

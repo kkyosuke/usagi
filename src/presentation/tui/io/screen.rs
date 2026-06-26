@@ -5,8 +5,8 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use console::{Key, Term};
 
-use crate::presentation::tui::echo::EchoGuard;
 use crate::presentation::tui::install_task::{self, InstallHandle};
+use crate::presentation::tui::io::echo::EchoGuard;
 use crate::presentation::tui::widgets;
 
 /// A mouse-wheel scroll, decoded from a terminal mouse report.
@@ -16,7 +16,7 @@ use crate::presentation::tui::widgets;
 /// `crossterm`). [`KeyReader::read_key`] drops scrolls, so they are read and
 /// swallowed rather than reaching the host terminal's own viewport and
 /// revealing the pre-launch scrollback. This type stays the unit a decoded wheel
-/// turn drains through in [`term_reader`](crate::presentation::tui::term_reader).
+/// turn drains through in [`term_reader`](crate::presentation::tui::io::term_reader).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ScrollEvent {
     /// Lines to scroll: negative scrolls up (toward older content), positive

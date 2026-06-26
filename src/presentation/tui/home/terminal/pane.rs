@@ -51,8 +51,8 @@ use crossterm::execute;
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 
 use crate::infrastructure::pty::PtySession;
-use crate::presentation::tui::clipboard;
-use crate::presentation::tui::screen::diff_frame;
+use crate::presentation::tui::io::clipboard;
+use crate::presentation::tui::io::screen::diff_frame;
 
 use super::super::pane_input::{
     apply_scroll, encode_key, encode_paste, is_copy, is_leader, is_new_agent_tab, is_next_tab,
@@ -128,7 +128,7 @@ const MIN_FRAME: Duration = Duration::from_millis(16);
 
 /// Report mouse motion with no button held (DECSET 1003), so the pane can light
 /// up the link under the pointer on hover. The global mouse modes (1000/1002/1006,
-/// see [`super::super::super::screen`]) only report clicks and drags; this is enabled
+/// see [`super::super::super::io::screen`]) only report clicks and drags; this is enabled
 /// while the pane is up and disabled on the way out so the management screens are
 /// not flooded with motion reports they would only discard.
 const ENABLE_MOTION: &str = "\x1b[?1003h";

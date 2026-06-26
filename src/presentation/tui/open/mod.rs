@@ -14,8 +14,8 @@ use console::Term;
 
 use crate::infrastructure::storage::Storage;
 use crate::presentation::tui::home;
-use crate::presentation::tui::screen::FramePainter;
-use crate::presentation::tui::term_reader::TermKeyReader;
+use crate::presentation::tui::io::screen::FramePainter;
+use crate::presentation::tui::io::term_reader::TermKeyReader;
 use crate::presentation::tui::{welcome, widgets};
 use crate::usecase::workspace::{self, WorkspaceOverview};
 
