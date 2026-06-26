@@ -14,6 +14,7 @@
 //! [`terminal_pane`]: super::terminal_pane
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind};
+use vt100::MouseProtocolEncoding;
 
 use super::terminal_selection::Cell;
 use super::ui;
@@ -79,6 +80,50 @@ pub(super) fn wheel_arrows(delta: i32, application_cursor: bool) -> String {
         (false, false) => "\x1b[B",
     };
     arrow.repeat(delta.unsigned_abs() as usize)
+}
+
+/// The bytes a wheel notch sends to a program that enabled mouse reporting
+/// (DECSET 1000/1002/1003), so it scrolls its own viewport — exactly what the
+/// wheel does over such a program in a standalone terminal. Some full-screen
+/// agents (`claude`) draw into the **primary** buffer rather than the alternate
+/// screen, so the [`wheel_arrows`] alternate-scroll path never fires for them;
+/// forwarding the wheel as a real mouse report is what lets them scroll.
+///
+/// `up` is a scroll-up notch; `cell` is the 0-based pane-relative cell under the
+/// pointer (reports are 1-based, so each axis is offset by one). One report per
+/// notch — the program decides how far to scroll — matching real terminals. The
+/// wire shape follows the program's chosen [`MouseProtocolEncoding`]:
+///
+/// - `Sgr`: `CSI < Cb ; Cx ; Cy M` (the `M` marks a press; wheel notches are
+///   always reported as presses).
+/// - `Default` (X10) / `Utf8`: `CSI M Cb Cx Cy` with every field offset by 32 —
+///   differing only in how a field past 95 is emitted (one byte capped at 255
+///   for `Default`, its UTF-8 encoding for `Utf8`).
+///
+/// `Cb` carries the 64 ("wheel") flag: 64 for a scroll up, 65 for a scroll down.
+pub(super) fn encode_mouse_wheel(up: bool, cell: Cell, encoding: MouseProtocolEncoding) -> Vec<u8> {
+    let button: u32 = if up { 64 } else { 65 };
+    let col = cell.col as u32 + 1;
+    let row = cell.row as u32 + 1;
+    match encoding {
+        MouseProtocolEncoding::Sgr => format!("\x1b[<{button};{col};{row}M").into_bytes(),
+        enc => {
+            let mut bytes = b"\x1b[M".to_vec();
+            for field in [button, col, row] {
+                let v = field + 32;
+                match char::from_u32(v) {
+                    Some(c) if enc == MouseProtocolEncoding::Utf8 => {
+                        let mut buf = [0u8; 4];
+                        bytes.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
+                    }
+                    // X10: one printable byte per field, capped at the 255 a
+                    // single byte can hold (panes never reach that width/height).
+                    _ => bytes.push(v.min(255) as u8),
+                }
+            }
+            bytes
+        }
+    }
 }
 
 /// Move the scrollback offset by `delta` lines (negative scrolls up toward
@@ -352,6 +397,56 @@ mod tests {
         assert_eq!(wheel_arrows(WHEEL_LINES, true), "\x1bOB".repeat(3));
         // The count tracks the magnitude, so a single-line delta sends one arrow.
         assert_eq!(wheel_arrows(-1, false), "\x1b[A");
+    }
+
+    #[test]
+    fn encode_mouse_wheel_sgr_reports_one_press_per_notch_at_the_one_based_cell() {
+        // SGR: `CSI < Cb ; Cx ; Cy M`. The wheel flag is 64 (up) / 65 (down), the
+        // cell is reported 1-based (the 0-based pane cell + 1 on each axis), and
+        // the trailing `M` marks the press a wheel notch always reports as.
+        assert_eq!(
+            encode_mouse_wheel(true, Cell::new(4, 9), MouseProtocolEncoding::Sgr),
+            b"\x1b[<64;10;5M"
+        );
+        assert_eq!(
+            encode_mouse_wheel(false, Cell::new(0, 0), MouseProtocolEncoding::Sgr),
+            b"\x1b[<65;1;1M"
+        );
+    }
+
+    #[test]
+    fn encode_mouse_wheel_x10_offsets_every_field_by_32() {
+        // Default (X10): `CSI M Cb Cx Cy`, each field a single byte offset by 32.
+        // Up at cell (0,0) → button 64+32=96 (0x60), col/row 1+32=33 (0x21).
+        assert_eq!(
+            encode_mouse_wheel(true, Cell::new(0, 0), MouseProtocolEncoding::Default),
+            b"\x1b[M\x60\x21\x21"
+        );
+        // Down at cell (4,9) → button 65+32=97, col 10+32=42, row 5+32=37.
+        assert_eq!(
+            encode_mouse_wheel(false, Cell::new(4, 9), MouseProtocolEncoding::Default),
+            b"\x1b[M\x61\x2a\x25"
+        );
+    }
+
+    #[test]
+    fn encode_mouse_wheel_x10_caps_a_far_field_at_one_byte() {
+        // A column past 255-32 can't fit one byte; X10 saturates at 255 rather
+        // than overflowing (real panes never get this wide, but the math is safe).
+        let encoded = encode_mouse_wheel(true, Cell::new(0, 400), MouseProtocolEncoding::Default);
+        assert_eq!(encoded, b"\x1b[M\x60\xff\x21");
+    }
+
+    #[test]
+    fn encode_mouse_wheel_utf8_encodes_a_far_field_as_utf8() {
+        // UTF-8 encoding emits a field past 95 as its UTF-8 sequence rather than a
+        // raw byte. Col cell 200 → 201+32 = 233 ('é'), a two-byte UTF-8 char; the
+        // small fields (button, row) stay single bytes, matching X10.
+        let encoded = encode_mouse_wheel(true, Cell::new(0, 200), MouseProtocolEncoding::Utf8);
+        let mut expected = b"\x1b[M\x60".to_vec();
+        expected.extend_from_slice('é'.to_string().as_bytes());
+        expected.push(0x21);
+        assert_eq!(encoded, expected);
     }
 
     #[test]
