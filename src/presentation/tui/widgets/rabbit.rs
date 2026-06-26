@@ -128,15 +128,20 @@ impl RabbitMood {
 
 /// The resting mascot for the bottom of the workspace sidebar, its face and
 /// gesture chosen by `mood` so the rabbit reflects the current engagement mode.
-/// The ears ([`RABBIT`] row 0) and feet (row 2) are the mascot's own, and only
-/// the middle face row changes between moods, so the usagi stays recognisably
-/// the same animal while its expression shifts. Every row is padded to a common
-/// block width and painted the mood's colour, so the block tiles as a rectangle
-/// wherever it is placed.
+/// The ears (the mascot's [`RABBIT`] row 0) and feet (row 2) are the mascot's
+/// own, and only the middle face row changes between moods, so the usagi stays
+/// recognisably the same animal while its expression shifts.
+///
+/// The shared [`RABBIT`] ears carry two leading spaces so they centre over the
+/// 6-wide resting face (`(='-')`). A mood face is a 5-wide head (`(>.<)`) plus a
+/// side paw (`?` / `/` / `9`), so the head sits one column to the left; the ears
+/// drop one leading space to land over the head rather than leaning onto the paw.
+/// Every row is padded to a common block width and painted the mood's colour, so
+/// the block tiles as a rectangle wherever it is placed.
 pub fn workspace_rabbit(mood: RabbitMood) -> Vec<String> {
     let (face, paint) = mood.face_and_style();
     let rows = [
-        RABBIT[0].to_string(),
+        format!(" {}", RABBIT[0].trim()),
         face.to_string(),
         RABBIT[2].to_string(),
     ];
@@ -452,6 +457,26 @@ mod tests {
         assert!(face(RabbitMood::Browsing).contains("(o.o)?"));
         assert!(face(RabbitMood::Attentive).contains("(^.^)/"));
         assert!(face(RabbitMood::Working).contains("(>.<)9"));
+    }
+
+    #[test]
+    fn workspace_rabbit_sits_the_ears_over_the_head() {
+        // The ears must start at the same column as the face's head (`(>.<)`), so
+        // the left ear lands on the head rather than leaning onto the side paw.
+        for mood in [
+            RabbitMood::Browsing,
+            RabbitMood::Attentive,
+            RabbitMood::Working,
+        ] {
+            let lines = workspace_rabbit(mood);
+            let plain: Vec<String> = lines
+                .iter()
+                .map(|l| console::strip_ansi_codes(l).into_owned())
+                .collect();
+            let ear_col = plain[0].find('(').expect("ears have an opening paren");
+            let head_col = plain[1].find('(').expect("head has an opening paren");
+            assert_eq!(ear_col, head_col, "ears sit over the head for {mood:?}");
+        }
     }
 
     #[test]
