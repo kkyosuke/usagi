@@ -119,6 +119,48 @@ impl MemoryStore {
         Ok(memories)
     }
 
+    /// Like [`scan`](Self::scan) but **tolerant**: a markdown file that fails to
+    /// read or parse is recorded to the daily error log and skipped, rather than
+    /// failing the whole scan. Directory-level read failures still propagate.
+    ///
+    /// Used by [`rebuild_derived`](Self::rebuild_derived) so one corrupt or
+    /// half-written memory file cannot fail an unrelated [`write`](Self::write)
+    /// (whose target file is already persisted by the time the index rebuilds) or
+    /// break `memory list` — the index and `MEMORY.md` simply rebuild from the
+    /// files that parse, mirroring how [`load_index`](Self::load_index) self-heals
+    /// a corrupt cache. The strict [`scan`](Self::scan) stays the choice where
+    /// every memory must be readable.
+    fn scan_lenient(&self) -> Result<Vec<Memory>> {
+        use rayon::prelude::*;
+
+        let parsed: Vec<(PathBuf, Result<Memory>)> = self
+            .memory_files()?
+            .into_par_iter()
+            .map(|path| {
+                let memory = fs::read_to_string(&path)
+                    .context(format!("failed to read {}", path.display()))
+                    .and_then(|text| {
+                        Memory::from_markdown(&text)
+                            .with_context(|| format!("failed to parse {}", path.display()))
+                    });
+                (path, memory)
+            })
+            .collect();
+
+        let mut memories = Vec::with_capacity(parsed.len());
+        for (path, memory) in parsed {
+            match memory {
+                Ok(memory) => memories.push(memory),
+                Err(e) => ErrorLog::record(&format!(
+                    "skipping unparseable memory file {} while rebuilding the index: {e:#}",
+                    path.display()
+                )),
+            }
+        }
+        memories.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(memories)
+    }
+
     /// Paths of every memory markdown file in the directory (the `MEMORY.md` table
     /// of contents and any non-`.md` files excluded). Empty when the directory
     /// does not exist.
@@ -235,7 +277,11 @@ impl MemoryStore {
     /// Rebuild `index.json` and `MEMORY.md` from the markdown files and return the
     /// summaries.
     fn rebuild_derived(&self) -> Result<Vec<MemorySummary>> {
-        let summaries: Vec<MemorySummary> = self.scan()?.iter().map(Memory::summary).collect();
+        // Tolerant scan: one corrupt sibling file must not fail a write whose own
+        // file already landed, nor break `memory list`. The skipped files are
+        // logged (see [`scan_lenient`](Self::scan_lenient)).
+        let summaries: Vec<MemorySummary> =
+            self.scan_lenient()?.iter().map(Memory::summary).collect();
         if summaries.is_empty() && !self.dir.exists() {
             // Nothing stored and no directory yet: don't create files eagerly.
             return Ok(summaries);
@@ -494,6 +540,50 @@ mod tests {
 
         let err = store.scan().unwrap_err();
         assert!(err.to_string().contains("failed to parse"));
+    }
+
+    #[test]
+    fn write_tolerates_a_corrupt_sibling_and_indexes_the_parseable_files() {
+        // A corrupt sibling file used to fail every later write: `write` persists
+        // its own file, then `rebuild_derived` scanned *all* markdown and choked on
+        // the bad one. The rebuild is now tolerant. Pin the data dir so the skip's
+        // log line is hermetic.
+        let _guard = crate::test_support::process_env_guard();
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var(crate::infrastructure::storage::DATA_DIR_ENV, home.path());
+
+        let tmp = tempfile::tempdir().unwrap();
+        let store = MemoryStore::new(tmp.path());
+        store.write(&memory("one", "One")).unwrap();
+        // A corrupt, unparseable memory file lands beside the valid one.
+        fs::write(store.dir().join("broken.md"), "not a memory").unwrap();
+
+        // Writing another memory still succeeds — the unrelated corrupt sibling is
+        // skipped during the rebuild instead of failing the whole write.
+        store.write(&memory("two", "Two")).unwrap();
+
+        // The index rebuilt from the files that parse; the corrupt one is skipped,
+        // but the strict `scan` still surfaces it.
+        let names: Vec<String> = store
+            .summaries()
+            .unwrap()
+            .iter()
+            .map(|s| s.name.clone())
+            .collect();
+        assert_eq!(names, vec!["one".to_string(), "two".to_string()]);
+        assert!(store.scan().is_err());
+
+        // The skip is recorded in the daily log rather than silently swallowed.
+        let entry = fs::read_dir(home.path().join("logs"))
+            .expect("logs dir exists")
+            .next()
+            .expect("a log file was written")
+            .expect("readable entry");
+        assert!(fs::read_to_string(entry.path())
+            .unwrap()
+            .contains("skipping unparseable memory file"));
+
+        std::env::remove_var(crate::infrastructure::storage::DATA_DIR_ENV);
     }
 
     #[test]
