@@ -45,6 +45,58 @@ fn empty_input_does_nothing() {
 }
 
 #[test]
+fn dispatch_in_scope_refuses_a_command_outside_the_surface_scope() {
+    // The workspace `:` palette ([`CommandScope::Workspace`]) refuses the
+    // session-scoped `terminal` / `agent` / `close` even when typed in full: an
+    // error line, no effect — not the launch effect.
+    for cmd in ["terminal", "agent codex", "close"] {
+        let result = registry().dispatch_in_scope(cmd, CommandScope::Workspace, &[], &[], &[]);
+        assert_eq!(result.effect, Effect::None);
+        assert_eq!(result.lines.len(), 1);
+        assert_eq!(result.lines[0].kind, LineKind::Error);
+        assert!(result.lines[0].text.contains("not available here"));
+    }
+    // Symmetrically, the 在席 prompt ([`CommandScope::Session`]) refuses the
+    // workspace-scoped `config` / `session`.
+    for cmd in ["config", "session list"] {
+        let result = registry().dispatch_in_scope(cmd, CommandScope::Session, &[], &[], &[]);
+        assert_eq!(result.lines[0].kind, LineKind::Error);
+        assert!(result.lines[0].text.contains("not available here"));
+    }
+}
+
+#[test]
+fn dispatch_in_scope_runs_in_scope_and_shared_commands() {
+    // In-scope commands run: `agent` in Session, `config` in Workspace.
+    assert!(matches!(
+        registry()
+            .dispatch_in_scope("agent codex", CommandScope::Session, &[], &[], &[])
+            .effect,
+        Effect::OpenAgent(Some(_))
+    ));
+    assert_eq!(
+        registry()
+            .dispatch_in_scope("config", CommandScope::Workspace, &[], &[], &[])
+            .effect,
+        Effect::OpenConfig
+    );
+    // [`CommandScope::Both`] utilities run in either surface.
+    for scope in [CommandScope::Workspace, CommandScope::Session] {
+        assert_eq!(
+            registry()
+                .dispatch_in_scope("clear", scope, &[], &[], &[])
+                .effect,
+            Effect::Clear
+        );
+    }
+    // An unknown command falls through to the usual "unknown command" error
+    // rather than the scope refusal.
+    let unknown = registry().dispatch_in_scope("nope", CommandScope::Workspace, &[], &[], &[]);
+    assert_eq!(unknown.lines[0].kind, LineKind::Error);
+    assert!(unknown.lines[0].text.contains("unknown command"));
+}
+
+#[test]
 fn man_without_argument_lists_every_command() {
     let registry = registry();
     let result = registry.dispatch("man", &[], &[]);

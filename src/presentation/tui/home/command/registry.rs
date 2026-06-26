@@ -146,6 +146,34 @@ impl CommandRegistry {
         }
     }
 
+    /// Like [`dispatch_with`](Self::dispatch_with) but gated by the calling
+    /// surface's `scope`: a command not offered in that scope is refused with an
+    /// error line instead of run, so the workspace `:` command palette and the
+    /// 在席 (Focus) prompt each run only their own commands (plus the shared
+    /// [`CommandScope::Both`] utilities). This is the dispatch-time counterpart
+    /// to the scope filter [`complete`](Self::complete) / [`suggest`](Self::suggest)
+    /// already apply to what each surface *offers* — without it, an out-of-scope
+    /// command stays hidden from completion yet still runs if typed in full. An
+    /// unknown command falls through to `dispatch_with`'s usual error.
+    pub fn dispatch_in_scope(
+        &self,
+        input: &str,
+        scope: CommandScope,
+        history: &[String],
+        worktrees: &[WorktreeRef],
+        issues: &[Issue],
+    ) -> CommandResult {
+        let name = input.split_whitespace().next().unwrap_or("");
+        if let Some(command) = self.find(name) {
+            if !command.scope().visible_in(scope) {
+                return CommandResult::line(LogLine::error(format!(
+                    "\"{name}\" is not available here (try \"man\")"
+                )));
+            }
+        }
+        self.dispatch_with(input, history, worktrees, issues)
+    }
+
     /// Complete the `input` in `scope`, matching the spelling under the caret.
     ///
     /// While the command word is being typed (no whitespace yet) it completes
