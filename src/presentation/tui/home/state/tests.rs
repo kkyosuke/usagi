@@ -1936,6 +1936,80 @@ fn quit_confirm_opens_and_cancels() {
 }
 
 #[test]
+fn resume_level_reads_off_the_current_mode_when_nothing_is_armed() {
+    // 切替 (the default) records Switch.
+    let mut switch = state();
+    assert_eq!(switch.resume_level(), ResumeLevel::Switch);
+    // 在席 records Focus.
+    let mut focus = state();
+    focus.enter_focus(1);
+    assert_eq!(focus.resume_level(), ResumeLevel::Focus);
+}
+
+#[test]
+fn arming_attached_overrides_the_mode_for_one_quit() {
+    // A 没入 quit drops to 在席 before the modal, so the level is armed beforehand;
+    // it then wins over the (now Focus) mode, and is consumed once.
+    let mut state = state();
+    state.enter_focus(1);
+    state.arm_resume_attached();
+    assert_eq!(state.resume_level(), ResumeLevel::Attached);
+    // Consumed: a second read falls back to the current mode.
+    assert_eq!(state.resume_level(), ResumeLevel::Focus);
+}
+
+#[test]
+fn cancelling_the_quit_modal_drops_an_armed_level() {
+    // Arming then cancelling the modal (the user backed out of a 没入 Ctrl-Q) must
+    // not leave the Attached arm to mislabel a later, shallower quit.
+    let mut state = state();
+    state.arm_resume_attached();
+    state.cancel_quit_confirm();
+    assert_eq!(state.resume_level(), ResumeLevel::Switch);
+}
+
+#[test]
+fn restore_focus_switch_moves_the_cursor_without_focusing() {
+    let mut state = state(); // root, main, feature
+    state.restore_focus("feature", ResumeLevel::Switch);
+    // The cursor lands on the session, but the screen stays in 切替.
+    assert_eq!(state.mode(), Mode::Switch);
+    assert_eq!(state.list().selected_name(), "feature");
+    assert!(!state.take_resume_attach());
+}
+
+#[test]
+fn restore_focus_focus_enters_the_session_without_arming_attach() {
+    let mut state = state();
+    state.restore_focus("feature", ResumeLevel::Focus);
+    assert_eq!(state.mode(), Mode::Focus);
+    assert_eq!(state.focused_session_name(), "feature");
+    assert!(!state.take_resume_attach());
+}
+
+#[test]
+fn restore_focus_attached_focuses_and_arms_a_one_shot_attach() {
+    let mut state = state();
+    state.restore_focus("feature", ResumeLevel::Attached);
+    // Focused synchronously; the attach is armed for the event loop's first pass.
+    assert_eq!(state.mode(), Mode::Focus);
+    assert_eq!(state.focused_session_name(), "feature");
+    assert!(state.take_resume_attach());
+    // Consumed: only one attach is performed.
+    assert!(!state.take_resume_attach());
+}
+
+#[test]
+fn restore_focus_is_a_no_op_for_a_since_removed_session() {
+    let mut state = state();
+    state.restore_focus("gone", ResumeLevel::Attached);
+    // No matching row: the screen opens in the default 切替 with nothing armed.
+    assert_eq!(state.mode(), Mode::Switch);
+    assert!(state.list().root_selected());
+    assert!(!state.take_resume_attach());
+}
+
+#[test]
 fn open_preview_result_renders_a_loaded_file_and_titles_it() {
     let mut state = state();
     assert!(state.preview().is_none());

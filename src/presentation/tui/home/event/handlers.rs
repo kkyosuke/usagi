@@ -519,6 +519,28 @@ fn focus_and_attach(
     }
 }
 
+/// Re-attach the session a restored 没入 (Attached) engagement recorded, run once
+/// on the event loop's first pass. [`HomeState::restore_focus`] focused the
+/// session synchronously at startup and armed it here; attaching needs the
+/// terminal wiring, so it happens now rather than at startup. A no-op when
+/// nothing was armed, the session has since gone, or it has no live pane (it then
+/// stays in 在席, exactly as `Enter` on an idle row would).
+///
+/// [`HomeState::restore_focus`]: super::super::state::HomeState::restore_focus
+pub(super) fn resume_attach(
+    term: &Term,
+    state: &mut HomeState,
+    painter: &mut FramePainter,
+    wiring: &mut Wiring,
+) {
+    if state.take_resume_attach() {
+        // `restore_focus` already focused the session, so the cursor is on it;
+        // attach the focused row, landing in 在席 when it has no live pane.
+        let row = state.list().selected_index();
+        focus_and_attach(term, state, painter, wiring, row);
+    }
+}
+
 /// Jump to the previously focused session — the `Ctrl-^` action (vim's `Ctrl-^`
 /// / tmux's `last-window`). Focuses the row [`HomeState::previous_session_row`]
 /// resolves to, attaching it when live (so toggling between two running sessions
@@ -905,6 +927,9 @@ fn open_pane(
             // the pool) and raise the quit-confirmation modal on the home screen.
             // The event loop renders it on the next frame; confirming quits, which
             // then drops the pool — so a live agent is never closed by one keystroke.
+            // Arm the 没入 engagement for restore *before* `leave_attached` drops the
+            // mode to 在席, so a confirmed quit records that the user was attached.
+            state.arm_resume_attached();
             state.leave_attached();
             state.open_quit_confirm();
         }
