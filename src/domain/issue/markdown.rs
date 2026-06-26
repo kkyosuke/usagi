@@ -4,6 +4,8 @@
 //! neutralisation) lives once in [`crate::domain::frontmatter`]; this module owns
 //! only the issue's field set and the issue-specific number-list helpers.
 
+use std::fmt::Write;
+
 use chrono::{DateTime, Utc};
 
 use crate::domain::frontmatter::{
@@ -143,15 +145,21 @@ impl Issue {
 }
 
 /// Render numbers as a `[1, 2, 3]` frontmatter list.
+///
+/// Writes the comma-separated numbers straight into the output string, avoiding
+/// the intermediate `Vec<String>` an `iter().map(to_string).collect().join()`
+/// would allocate on every `to_markdown`.
 fn format_number_list(items: &[u32]) -> String {
-    format!(
-        "[{}]",
-        items
-            .iter()
-            .map(|n| n.to_string())
-            .collect::<Vec<_>>()
-            .join(", ")
-    )
+    let mut out = String::from("[");
+    for (i, n) in items.iter().enumerate() {
+        if i > 0 {
+            out.push_str(", ");
+        }
+        // Writing a u32 into a String is infallible.
+        let _ = write!(out, "{n}");
+    }
+    out.push(']');
+    out
 }
 
 /// Parse `[1, 2, 3]` into issue numbers. Used for both `dependson` and

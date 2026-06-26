@@ -24,15 +24,18 @@ pub(super) fn render_grouped(items: Vec<ListedIssue>, axis: GroupBy) -> Vec<Stri
     if items.is_empty() {
         return vec!["No issues found.".to_string()];
     }
-    let overall = IssueStats::from_listed(&items);
+    // Tally each group once and fold it into the overall total in the same pass,
+    // rather than scanning the full listing a second time for the overall: the
+    // groups partition every item, so summing the per-group stats yields the same
+    // overall (one tally per item instead of two).
+    let mut overall = IssueStats::default();
     let mut out = Vec::new();
     for (label, group_items) in group(items, axis) {
+        let group_stats = IssueStats::from_listed(&group_items);
+        overall.merge(&group_stats);
         out.push(format!("== {label} =="));
         out.extend(render_list(&group_items));
-        out.push(format!(
-            "   {}",
-            stats_line(&IssueStats::from_listed(&group_items))
-        ));
+        out.push(format!("   {}", stats_line(&group_stats)));
         out.push(String::new());
     }
     out.push(stats_line(&overall));
