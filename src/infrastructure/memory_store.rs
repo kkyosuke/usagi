@@ -34,11 +34,20 @@ pub(crate) const INDEX_FILE: &str = "index.json";
 const TOC_FILE: &str = "MEMORY.md";
 const FILE_FORMAT_VERSION: u32 = 1;
 
-/// On-disk shape of `index.json`.
-#[derive(Debug, Serialize, Deserialize)]
+/// On-disk shape of `index.json`, read back as owned data. The `version` key is
+/// written (see [`IndexFileRef`]) but ignored on read, so it is not modelled
+/// here — serde skips unknown keys.
+#[derive(Debug, Deserialize)]
 struct IndexFile {
-    version: u32,
     memories: Vec<MemorySummary>,
+}
+
+/// Borrowed view used only when *writing* `index.json`, so the rebuild does not
+/// have to clone every summary just to hand it to the serialiser.
+#[derive(Serialize)]
+struct IndexFileRef<'a> {
+    version: u32,
+    memories: &'a [MemorySummary],
 }
 
 /// The on-disk filename for a memory `name`, rejecting anything that is not a
@@ -289,9 +298,9 @@ impl MemoryStore {
         fs::create_dir_all(&self.dir)
             .context(format!("failed to create {}", self.dir.display()))?;
 
-        let index = IndexFile {
+        let index = IndexFileRef {
             version: FILE_FORMAT_VERSION,
-            memories: summaries.clone(),
+            memories: &summaries,
         };
         // The canonical "pretty JSON + trailing newline, written atomically" path
         // lives in `json_file::write_atomic`; reuse it for the index. `MEMORY.md`

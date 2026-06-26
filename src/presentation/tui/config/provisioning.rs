@@ -34,7 +34,7 @@ pub(super) fn start_install_runtime(password: &str) -> Result<()> {
         );
         let (ok, message) = match result {
             Ok(_) => (true, "ollama を導入しました 🐰".to_string()),
-            Err(e) => (false, install_error_message(&e)),
+            Err(e) => (false, e.user_message()),
         };
         handle.finish(ok, message);
     });
@@ -56,21 +56,9 @@ pub(super) fn start_pull_model(model: &str) -> Result<()> {
         let result = local_llm::ensure_model(&SystemRunner, &model_owned, true);
         let (ok, message) = match result {
             Ok(_) => (true, format!("{model_owned} を導入しました 🐰")),
-            Err(e) => (false, install_error_message(&e)),
+            Err(e) => (false, e.user_message()),
         };
         handle.finish(ok, message);
     });
     Ok(())
-}
-
-/// A short human message for a local LLM provisioning failure.
-fn install_error_message(error: &local_llm::SetupError) -> String {
-    match error {
-        local_llm::SetupError::OllamaUnavailable { manual }
-        | local_llm::SetupError::OllamaInstallFailed { manual, .. } => manual.clone(),
-        local_llm::SetupError::ServerStartFailed => local_llm::server_start_failed_message(),
-        local_llm::SetupError::ModelPullFailed { model } => {
-            format!("could not pull `{model}`")
-        }
-    }
 }

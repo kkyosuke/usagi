@@ -13,7 +13,7 @@
 use console::{style, Style};
 
 /// The usagi mascot artwork (raw, unstyled lines).
-const RABBIT: [&str; 3] = ["  (\\(\\ ", " (='-') ", " o(_(\")(\")"];
+const RABBIT: [&str; 3] = ["  (\\(\\ ", "  (='-') ", " o(_(\")(\")"];
 
 /// The display width of the mascot — the widest of its [`RABBIT`] rows. The
 /// shared measure [`rabbit_lines`] centres by, and the open→home transition
@@ -54,7 +54,7 @@ pub fn rabbit_lines(width: usize) -> Vec<String> {
 
 /// The mascot waving goodbye, drawn inside the farewell box: the usagi from
 /// [`RABBIT`] with a raised paw (`ﾉ`) and its parting words alongside.
-const FAREWELL_ART: [&str; 3] = ["  (\\(\\", " ( ^ω^)ﾉ  またね、ぴょん！", " o(_(\")(\")"];
+const FAREWELL_ART: [&str; 3] = ["  (\\(\\", "  ( ^ω^)ﾉ  またね、ぴょん！", " o(_(\")(\")"];
 /// Spaces padding the art from the box's side borders.
 const FAREWELL_PAD: usize = 2;
 
@@ -130,13 +130,14 @@ impl RabbitMood {
 /// head, and the body share one left edge. Shared by [`workspace_rabbit`] and
 /// [`workspace_rabbit_speaking`] so the resting and speaking rabbits stay identical.
 ///
-/// The shared [`RABBIT`] ears and feet are tuned for the 6-wide resting face
-/// (`(='-')`): the ears carry two leading spaces to centre over it and the feet
-/// one. A mood face is a 5-wide head (`(>.<)`) plus a side paw (`?` / `/` / `9`),
-/// so the head sits one column to the left. To keep the rabbit coherent the ears
-/// drop one leading space (landing over the head rather than leaning onto the paw)
-/// and the feet drop theirs too, so the body's `(` lines up under the head's and
-/// the ears' `(` instead of trailing one column to the right.
+/// The shared [`RABBIT`] art already aligns the resting face (`(='-')`): the ears
+/// and the face carry two leading spaces and the feet one, so the ears', the
+/// head's, and the body's `(` share a column while the feet's `o` hangs one column
+/// to the left. A mood face is a 5-wide head (`(>.<)`) plus a side paw (`?` / `/` /
+/// `9`), one column narrower than the resting face. To keep that same shape the
+/// ears drop one leading space (landing over the head rather than leaning onto the
+/// paw) and the feet drop theirs too, so the body's `(` still lines up under the
+/// head's and the ears' `(` with the `o` hanging one column to the left.
 fn mood_mascot_rows(face: &str) -> [String; 3] {
     [
         format!(" {}", RABBIT[0].trim()),
@@ -498,6 +499,28 @@ mod tests {
             RABBIT.iter().map(|l| l.chars().count()).max().unwrap()
         );
         assert_eq!(rabbit_height(), 3);
+    }
+
+    #[test]
+    fn rabbit_art_aligns_the_head_and_body_under_the_ears() {
+        // The static mascot shares the resting form of the mood mascot: the ears',
+        // the head's, and the body's `(` all sit in one column, with the feet's `o`
+        // hanging one column to the left. (Regression guard for the head drifting a
+        // column off the ears and body.)
+        let paren = |row: &str| row.find('(').expect("a row has an opening paren");
+        let ear = paren(RABBIT[0]);
+        assert_eq!(paren(RABBIT[1]), ear, "the head's ( sits under the ears'");
+        assert_eq!(paren(RABBIT[2]), ear, "the body's ( sits under the ears'");
+        // The feet lead with the `o`, one column left of that shared paren column.
+        assert_eq!(
+            RABBIT[2].find('o'),
+            Some(ear - 1),
+            "the feet's o hangs one left"
+        );
+        // The farewell rabbit keeps the same alignment.
+        let fear = paren(FAREWELL_ART[0]);
+        assert_eq!(paren(FAREWELL_ART[1]), fear, "farewell head under the ears");
+        assert_eq!(paren(FAREWELL_ART[2]), fear, "farewell body under the ears");
     }
 
     #[test]

@@ -375,11 +375,16 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
             ),
             None => widgets::workspace_rabbit(mood),
         };
-        // Reserve one blank row above the art on top of the rabbit's own rows.
-        let reserved = rabbit.len() + 1;
+        // Reserve a blank row above the art (so it reads apart from the list) and
+        // one below it, so the mascot floats clear of the bottom input line —
+        // the `● live terminal` indicator in 没入 — rather than sitting flush
+        // on it.
+        let reserved = rabbit.len() + 2;
         if body_rows >= reserved && left.len() <= body_rows - reserved {
-            left.resize(body_rows - rabbit.len(), String::new());
+            left.resize(body_rows - rabbit.len() - 1, String::new());
             left.extend(rabbit);
+            // Leave the final body row blank (the body loop pads it) so a gap sits
+            // between the rabbit's feet and the input line below.
         }
     }
     let right = right_pane_contents(state, right_w, body_rows);

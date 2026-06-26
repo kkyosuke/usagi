@@ -55,9 +55,9 @@ use crate::presentation::tui::io::clipboard;
 use crate::presentation::tui::io::screen::diff_frame;
 
 use super::super::pane_input::{
-    apply_scroll, encode_key, encode_paste, is_copy, is_leader, is_new_agent_tab, is_next_tab,
-    is_open_note, is_press, is_prev_session, is_prev_tab, is_quit, is_to_focus, is_toggle_sidebar,
-    key_scroll_lines, pane_cell, wheel_arrows, wheel_delta,
+    apply_scroll, encode_key, encode_mouse_wheel, encode_paste, is_copy, is_leader,
+    is_new_agent_tab, is_next_tab, is_open_note, is_press, is_prev_session, is_prev_tab, is_quit,
+    is_to_focus, is_toggle_sidebar, key_scroll_lines, pane_cell, wheel_arrows, wheel_delta,
 };
 use super::super::state::HomeState;
 use super::super::ui;
@@ -613,31 +613,50 @@ fn pump_input(
                 // hit-test both axes through `pane_cell` (the same test the click
                 // and hover arms use) — a column-only check let the wheel act while
                 // the pointer was above the pane (the tab row) or below its last
-                // line. What it does depends on which grid the program drew into:
+                // line. What it does depends on what the running program asked for:
                 //
-                // - On the **primary** screen (a shell), scroll usagi's own history
-                //   view; the view shifts, so any selection is dropped.
-                // - On the **alternate** screen (a full-screen agent / pager / TUI),
-                //   `vt100` keeps no scrollback, so a history scroll is a dead no-op.
-                //   Emulate the terminal's alternate-scroll mode instead: forward
-                //   the wheel as arrow-key presses so the program scrolls its own
-                //   viewport — which is what the wheel does over such a program in a
-                //   standalone terminal. (Selection is left alone; nothing scrolled
-                //   in usagi.)
+                // - The program **tracks the mouse** (DECSET 1000/1002/1003): forward
+                //   the wheel as a mouse report so it scrolls its own viewport — what
+                //   the wheel does over such a program in a standalone terminal. Some
+                //   full-screen agents (`claude`) draw into the *primary* buffer and
+                //   only this signal catches them; the alternate-screen test below
+                //   misses them, so the wheel fell through to a usagi history scroll
+                //   and surfaced old commands instead of scrolling the agent.
+                // - Else on the **alternate** screen (a pager / TUI with no mouse
+                //   tracking, e.g. `less`), `vt100` keeps no scrollback, so a history
+                //   scroll is a dead no-op. Emulate the terminal's alternate-scroll
+                //   mode: forward the wheel as arrow-key presses so the program
+                //   scrolls its own viewport.
+                // - Else (a plain shell on the **primary** screen) scroll usagi's own
+                //   history view; the view shifts, so any selection is dropped.
+                //
+                // In the first two cases the selection is left alone — nothing
+                // scrolled in usagi.
                 kind => {
                     if let Some(delta) = wheel_delta(kind) {
-                        if pane_cell(mouse.column, mouse.row, geo).is_some() {
-                            // Read the grid + cursor-key mode under the parser lock,
+                        if let Some(cell) = pane_cell(mouse.column, mouse.row, geo) {
+                            // Read the grid + input modes under the parser lock,
                             // dropping the guard before the `&mut self` write below.
-                            let arrows = {
+                            let forward = {
                                 let parser = pty.parser();
                                 let screen = parser.screen();
-                                screen
-                                    .alternate_screen()
-                                    .then(|| wheel_arrows(delta, screen.application_cursor()))
+                                if screen.mouse_protocol_mode() != vt100::MouseProtocolMode::None {
+                                    Some(encode_mouse_wheel(
+                                        delta < 0,
+                                        cell,
+                                        screen.mouse_protocol_encoding(),
+                                    ))
+                                } else if screen.alternate_screen() {
+                                    Some(
+                                        wheel_arrows(delta, screen.application_cursor())
+                                            .into_bytes(),
+                                    )
+                                } else {
+                                    None
+                                }
                             };
-                            match arrows {
-                                Some(seq) => pty.write(seq.as_bytes())?,
+                            match forward {
+                                Some(seq) => pty.write(&seq)?,
                                 None => {
                                     *selection = None;
                                     apply_scroll(scrollback, delta);

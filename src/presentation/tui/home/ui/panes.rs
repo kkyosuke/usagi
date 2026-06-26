@@ -219,11 +219,7 @@ pub(super) fn worktree_row(
     waiting: bool,
     done: bool,
 ) -> (String, String) {
-    let kind = if worktree.primary {
-        style("●").magenta().to_string()
-    } else {
-        style("○").dim().to_string()
-    };
+    let kind = kind_dot(worktree);
     // The session's sidebar label (its custom display name, or the branch when
     // unset); a detached worktree with no label falls back to the placeholder.
     let name = if label.is_empty() {
@@ -260,7 +256,7 @@ pub(super) fn root_row(
     active: bool,
     in_switch: bool,
 ) -> (String, String) {
-    let kind = style("⌂").magenta().to_string();
+    let kind = root_glyph();
     let name = name_cell(ROOT_NAME, name_width, active || selected);
     let status = status_cell(None);
     let gutter = gutter_cell(selected, active, in_switch);
@@ -281,6 +277,13 @@ fn kind_dot(worktree: &WorktreeState) -> String {
     } else {
         style("○").dim().to_string()
     }
+}
+
+/// The workspace root's kind glyph (`⌂`, magenta) — shown in the slot where a
+/// worktree shows its [`kind_dot`], by both the full sidebar ([`root_row`]) and
+/// the collapsed rail ([`rail_pane`]).
+fn root_glyph() -> String {
+    style("⌂").magenta().to_string()
 }
 
 /// Builds one collapsed-rail **entry** as the same two lines a full-sidebar entry
@@ -334,12 +337,12 @@ fn rail_pane(
     rows: usize,
     in_switch: bool,
 ) -> Vec<String> {
-    let root_glyph = style("⌂").magenta().to_string();
+    let root = root_glyph();
     let (mut root_top, mut root_detail) = rail_entry(
         list.root_selected(),
         list.root_active(),
         in_switch,
-        &root_glyph,
+        &root,
         None,
         None,
     );

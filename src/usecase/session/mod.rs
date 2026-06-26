@@ -211,6 +211,39 @@ fn record(store: &WorkspaceStore, name: &str, root: &Path, worktrees: &[PathBuf]
     store.save(&state)
 }
 
+/// Run `edit` against the session named `name`, then persist the change,
+/// holding the store lock across the whole load → edit → save.
+///
+/// This is the single home of the locking discipline shared by
+/// [`set_display_name`] and [`set_note`]: holding the lock across the
+/// read-modify-write keeps a concurrent writer from clobbering the edit (or
+/// having it clobber theirs), and `updated_at` is bumped and the state saved in
+/// one place so the two callers cannot drift. `edit` mutates the matched session
+/// and returns the value to hand back. Fails when no state is recorded or no
+/// session named `name` exists.
+///
+/// [`reorder`] does *not* use this: its no-op (a move past either end) must
+/// leave `state.json` untouched, whereas this always saves.
+fn edit_session<T>(
+    store: &WorkspaceStore,
+    name: &str,
+    edit: impl FnOnce(&mut SessionRecord) -> T,
+) -> Result<T> {
+    let _lock = store.lock()?;
+    let mut state = store
+        .load()?
+        .ok_or_else(|| anyhow!("no sessions recorded for this workspace"))?;
+    let session = state
+        .sessions
+        .iter_mut()
+        .find(|s| s.name == name)
+        .ok_or_else(|| anyhow!("no such session: \"{name}\""))?;
+    let result = edit(session);
+    state.updated_at = Utc::now();
+    store.save(&state)?;
+    Ok(result)
+}
+
 /// Set (or clear) a session's sidebar display name override in `state.json`,
 /// leaving its branch / identity untouched.
 ///
@@ -226,27 +259,15 @@ pub fn set_display_name(
     display: &str,
 ) -> Result<Option<String>> {
     let store = WorkspaceStore::new(workspace_root);
-    // Hold the lock across the load → edit → save so a concurrent writer cannot
-    // overwrite this rename (or have it overwrite their change).
-    let _lock = store.lock()?;
-    let mut state = store
-        .load()?
-        .ok_or_else(|| anyhow!("no sessions recorded for this workspace"))?;
-    let session = state
-        .sessions
-        .iter_mut()
-        .find(|s| s.name == name)
-        .ok_or_else(|| anyhow!("no such session: \"{name}\""))?;
-    let trimmed = display.trim();
-    session.display_name = if trimmed.is_empty() || trimmed == session.name {
-        None
-    } else {
-        Some(trimmed.to_string())
-    };
-    let stored = session.display_name.clone();
-    state.updated_at = Utc::now();
-    store.save(&state)?;
-    Ok(stored)
+    edit_session(&store, name, |session| {
+        let trimmed = display.trim();
+        session.display_name = if trimmed.is_empty() || trimmed == session.name {
+            None
+        } else {
+            Some(trimmed.to_string())
+        };
+        session.display_name.clone()
+    })
 }
 
 /// Set (or clear) a session's free-form note in `state.json`, leaving its branch
@@ -258,27 +279,15 @@ pub fn set_display_name(
 /// stored (`None` when cleared). Fails when no session named `name` exists.
 pub fn set_note(workspace_root: &Path, name: &str, note: &str) -> Result<Option<String>> {
     let store = WorkspaceStore::new(workspace_root);
-    // Hold the lock across the load → edit → save so a concurrent writer cannot
-    // overwrite this note (or have it overwrite their change).
-    let _lock = store.lock()?;
-    let mut state = store
-        .load()?
-        .ok_or_else(|| anyhow!("no sessions recorded for this workspace"))?;
-    let session = state
-        .sessions
-        .iter_mut()
-        .find(|s| s.name == name)
-        .ok_or_else(|| anyhow!("no such session: \"{name}\""))?;
-    let trimmed = note.trim_end();
-    session.note = if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed.to_string())
-    };
-    let stored = session.note.clone();
-    state.updated_at = Utc::now();
-    store.save(&state)?;
-    Ok(stored)
+    edit_session(&store, name, |session| {
+        let trimmed = note.trim_end();
+        session.note = if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        };
+        session.note.clone()
+    })
 }
 
 /// List the sessions recorded for `workspace_root`, in stored order.
@@ -381,7 +390,11 @@ pub fn remove(
         .iter()
         .position(|s| s.name == name)
         .ok_or_else(|| anyhow!("no such session: \"{name}\""))?;
-    let session = state.sessions[index].clone();
+    // Take the record out of the in-memory state rather than cloning it: on the
+    // dirty early-return below we never save, so the on-disk state is untouched,
+    // and on the success path the state already has the session dropped by the
+    // time it is saved (no second `remove`).
+    let session = state.sessions.remove(index);
 
     // Refuse to discard uncommitted work unless forced. Dirtiness goes through
     // the same single `worktree_status` call the rest of the codebase uses; a
@@ -417,7 +430,6 @@ pub fn remove(
     let repo_worktrees = reconcile::list_repo_worktrees(workspace_root)?;
     reconcile::discard_session(&session.root, name, &repo_worktrees, force)?;
 
-    state.sessions.remove(index);
     state.updated_at = Utc::now();
     store.save(&state)?;
 
