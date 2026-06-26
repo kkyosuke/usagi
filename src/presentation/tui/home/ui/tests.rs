@@ -1692,7 +1692,7 @@ fn render_frame_omits_the_mascot_when_the_sidebar_or_body_is_too_small() {
     // too short leaves no body rows to spare — either way the mascot is skipped
     // rather than overrunning the layout (and the frame still renders).
     let state = state_with(vec![worktree(Some("main"), true, BranchStatus::Pushed)]);
-    let narrow = stripped(&render_frame(24, 12, &state));
+    let narrow = stripped(&render_frame(24, 11, &state));
     assert!(
         !narrow.contains("(o.o)?"),
         "no mascot in a narrow sidebar: {narrow}"
