@@ -17,6 +17,7 @@ use anyhow::Result;
 use chrono::Utc;
 use console::{Key, Term};
 
+use crate::domain::settings::AgentCli;
 use crate::domain::workspace_state::{BranchStatus, WorktreeState};
 use crate::presentation::tui::screen::KeyReader;
 
@@ -245,6 +246,7 @@ fn event_loop_attaches_a_live_session_end_to_end() {
         &monitor,
         &update,
         &OneShot::<bool>::new(),
+        &OneShot::<Vec<AgentCli>>::new(),
         &mut persist,
         &mut create,
         &mut rename,

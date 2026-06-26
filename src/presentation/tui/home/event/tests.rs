@@ -2,7 +2,7 @@ use super::super::oneshot::OneShot;
 use super::super::state::LogLine;
 use super::super::terminal_tabs::TabNav;
 use super::*;
-use crate::domain::settings::SessionActionUi;
+use crate::domain::settings::{AgentCli, SessionActionUi};
 use crate::domain::workspace_state::{BranchStatus, SessionRecord, WorktreeState};
 use chrono::Utc;
 use std::cell::RefCell;
@@ -176,6 +176,7 @@ fn run_at(keys: Vec<io::Result<Key>>, state: HomeState, root: &Path) -> Result<O
         &monitor,
         &UpdateHandle::new(),
         &OneShot::<bool>::new(),
+        &OneShot::<Vec<AgentCli>>::new(),
         &mut persist,
         &mut create,
         &mut (noop_rename as fn(&str, &str) -> SessionOutcome),
@@ -229,6 +230,7 @@ fn run_full(
         &monitor,
         &UpdateHandle::new(),
         &OneShot::<bool>::new(),
+        &OneShot::<Vec<AgentCli>>::new(),
         &mut persist,
         create_session,
         &mut (noop_rename as fn(&str, &str) -> SessionOutcome),
@@ -270,6 +272,7 @@ fn run_with_live_monitor(
         &monitor,
         &UpdateHandle::new(),
         &OneShot::<bool>::new(),
+        &OneShot::<Vec<AgentCli>>::new(),
         persist,
         &mut create,
         &mut (noop_rename as fn(&str, &str) -> SessionOutcome),
@@ -407,6 +410,7 @@ fn a_populated_update_handle_is_read_before_painting() {
         &monitor,
         &update,
         &OneShot::<bool>::new(),
+        &OneShot::<Vec<AgentCli>>::new(),
         &mut persist,
         &mut create,
         &mut (noop_rename as fn(&str, &str) -> SessionOutcome),
@@ -551,17 +555,18 @@ fn a_background_refresh_updates_the_session_list_exactly_once() {
     assert!(state.sessions().is_empty());
 }
 
-// --- background startup results (the local-LLM probe one-shot) ---------
+// --- background startup results (the local-LLM / installed-agents probes) ----
 
-/// Run the loop with a preset local-LLM probe one-shot, all other callbacks
-/// no-op, quitting on the scripted keys — so the loop's drain of the probe is
-/// exercised. (The entry git-sync feeds the same `SessionsRefreshHandle` the
-/// pane-exit sync uses; its apply path is covered by
-/// `a_background_refresh_updates_the_session_list_exactly_once`.)
-fn run_with_ai_probe(
+/// Run the loop with preset startup probe one-shots (local-LLM availability and
+/// the installed-agent list), all other callbacks no-op, quitting on the scripted
+/// keys — so the loop's drain of both probes is exercised. (The entry git-sync
+/// feeds the same `SessionsRefreshHandle` the pane-exit sync uses; its apply path
+/// is covered by `a_background_refresh_updates_the_session_list_exactly_once`.)
+fn run_with_startup_probes(
     keys: Vec<io::Result<Key>>,
     state: HomeState,
     ai_available: &OneShot<bool>,
+    installed_agents: &OneShot<Vec<AgentCli>>,
 ) -> Result<Outcome> {
     let term = Term::stdout();
     let mut reader = ScriptedReader::new(keys);
@@ -581,6 +586,7 @@ fn run_with_ai_probe(
         &monitor,
         &UpdateHandle::new(),
         ai_available,
+        installed_agents,
         &mut persist,
         &mut create,
         &mut (noop_rename as fn(&str, &str) -> SessionOutcome),
@@ -604,10 +610,36 @@ fn the_background_llm_probe_result_is_drained_then_the_loop_quits() {
     let ai = OneShot::<bool>::new();
     ai.set(true);
     assert!(matches!(
-        run_with_ai_probe(vec![Ok(Key::CtrlC)], sample_state(), &ai).unwrap(),
+        run_with_startup_probes(
+            vec![Ok(Key::CtrlC)],
+            sample_state(),
+            &ai,
+            &OneShot::<Vec<AgentCli>>::new()
+        )
+        .unwrap(),
         Outcome::Quit
     ));
     assert!(ai.take().is_none());
+}
+
+#[test]
+fn the_background_installed_agents_probe_result_is_drained_then_the_loop_quits() {
+    // The installed-agents probe reports the agents found on this machine through
+    // the one-shot; the first frame drains it (filling the picker via
+    // `set_installed_agents`), then Ctrl-C with nothing live quits.
+    let agents = OneShot::<Vec<AgentCli>>::new();
+    agents.set(vec![AgentCli::Claude]);
+    assert!(matches!(
+        run_with_startup_probes(
+            vec![Ok(Key::CtrlC)],
+            sample_state(),
+            &OneShot::<bool>::new(),
+            &agents
+        )
+        .unwrap(),
+        Outcome::Quit
+    ));
+    assert!(agents.take().is_none());
 }
 
 // --- base 切替 (Switch) -------------------------------------------------
@@ -796,6 +828,7 @@ fn overview_caret_keys_edit_within_the_line() {
         &monitor,
         &UpdateHandle::new(),
         &OneShot::<bool>::new(),
+        &OneShot::<Vec<AgentCli>>::new(),
         &mut persist,
         &mut create,
         &mut (noop_rename as fn(&str, &str) -> SessionOutcome),
@@ -844,6 +877,7 @@ fn submitted_commands_are_handed_to_persist() {
         &monitor,
         &UpdateHandle::new(),
         &OneShot::<bool>::new(),
+        &OneShot::<Vec<AgentCli>>::new(),
         &mut persist,
         &mut create,
         &mut (noop_rename as fn(&str, &str) -> SessionOutcome),
@@ -1281,6 +1315,7 @@ fn session_remove_with_a_name_and_force_routes_to_remove() {
         &monitor,
         &UpdateHandle::new(),
         &OneShot::<bool>::new(),
+        &OneShot::<Vec<AgentCli>>::new(),
         &mut persist,
         &mut create,
         &mut (noop_rename as fn(&str, &str) -> SessionOutcome),
@@ -1333,6 +1368,7 @@ fn close_typed_on_the_root_in_focus_is_refused() {
         &monitor,
         &UpdateHandle::new(),
         &OneShot::<bool>::new(),
+        &OneShot::<Vec<AgentCli>>::new(),
         &mut persist,
         &mut create,
         &mut (noop_rename as fn(&str, &str) -> SessionOutcome),
@@ -1400,6 +1436,7 @@ fn focus_close_command_removes_the_focused_session_then_enters_switch() {
         &monitor,
         &UpdateHandle::new(),
         &OneShot::<bool>::new(),
+        &OneShot::<Vec<AgentCli>>::new(),
         &mut persist,
         &mut create,
         &mut (noop_rename as fn(&str, &str) -> SessionOutcome),
@@ -1465,6 +1502,7 @@ fn focus_menu_close_removes_the_focused_session_then_enters_switch() {
         &monitor,
         &UpdateHandle::new(),
         &OneShot::<bool>::new(),
+        &OneShot::<Vec<AgentCli>>::new(),
         &mut persist,
         &mut create,
         &mut (noop_rename as fn(&str, &str) -> SessionOutcome),
@@ -1524,6 +1562,7 @@ fn session_remove_without_a_name_opens_the_modal_and_bulk_removes() {
         &monitor,
         &UpdateHandle::new(),
         &OneShot::<bool>::new(),
+        &OneShot::<Vec<AgentCli>>::new(),
         &mut persist,
         &mut create,
         &mut (noop_rename as fn(&str, &str) -> SessionOutcome),
@@ -1936,6 +1975,7 @@ fn note_editor_opened_while_attached_refreshes_the_attached_terminal_surface() {
         &monitor,
         &UpdateHandle::new(),
         &OneShot::<bool>::new(),
+        &OneShot::<Vec<AgentCli>>::new(),
         &mut persist,
         &mut create,
         &mut (noop_rename as fn(&str, &str) -> SessionOutcome),
@@ -2135,6 +2175,7 @@ fn switch_arrows_move_the_active_tab_via_tab_op() {
         &monitor,
         &UpdateHandle::new(),
         &OneShot::<bool>::new(),
+        &OneShot::<Vec<AgentCli>>::new(),
         &mut persist,
         &mut create,
         &mut (noop_rename as fn(&str, &str) -> SessionOutcome),
@@ -2194,6 +2235,7 @@ fn switch_x_closes_the_highlighted_sessions_active_tab() {
         &monitor,
         &UpdateHandle::new(),
         &OneShot::<bool>::new(),
+        &OneShot::<Vec<AgentCli>>::new(),
         &mut persist,
         &mut create,
         &mut (noop_rename as fn(&str, &str) -> SessionOutcome),
@@ -2309,6 +2351,7 @@ fn run_recording_rename(keys: Vec<io::Result<Key>>) -> (Vec<(String, String)>, O
         &monitor,
         &UpdateHandle::new(),
         &OneShot::<bool>::new(),
+        &OneShot::<Vec<AgentCli>>::new(),
         &mut persist,
         &mut create,
         &mut rename,
@@ -2409,6 +2452,7 @@ fn run_recording_reorder(
         &monitor,
         &UpdateHandle::new(),
         &OneShot::<bool>::new(),
+        &OneShot::<Vec<AgentCli>>::new(),
         &mut persist,
         &mut create,
         &mut (noop_rename as fn(&str, &str) -> SessionOutcome),
@@ -2838,6 +2882,7 @@ fn focus_ctrl_n_and_ctrl_p_walk_the_tab_strip_via_tab_op() {
         &monitor,
         &UpdateHandle::new(),
         &OneShot::<bool>::new(),
+        &OneShot::<Vec<AgentCli>>::new(),
         &mut persist,
         &mut create,
         &mut (noop_rename as fn(&str, &str) -> SessionOutcome),
@@ -2893,6 +2938,7 @@ fn focus_tab_nav_is_inert_without_live_panes() {
         &monitor,
         &UpdateHandle::new(),
         &OneShot::<bool>::new(),
+        &OneShot::<Vec<AgentCli>>::new(),
         &mut persist,
         &mut create,
         &mut (noop_rename as fn(&str, &str) -> SessionOutcome),
@@ -2958,6 +3004,7 @@ fn focus_enter_on_a_pane_tab_reattaches_while_other_keys_are_inert() {
         &monitor,
         &UpdateHandle::new(),
         &OneShot::<bool>::new(),
+        &OneShot::<Vec<AgentCli>>::new(),
         &mut persist,
         &mut create,
         &mut (noop_rename as fn(&str, &str) -> SessionOutcome),
@@ -3023,6 +3070,7 @@ fn focus_esc_on_the_new_tab_over_panes_steps_back_onto_the_pane() {
         &monitor,
         &UpdateHandle::new(),
         &OneShot::<bool>::new(),
+        &OneShot::<Vec<AgentCli>>::new(),
         &mut persist,
         &mut create,
         &mut (noop_rename as fn(&str, &str) -> SessionOutcome),
@@ -3405,6 +3453,7 @@ fn run_with_tasks(
         &UpdateHandle::new(),
         &SessionsRefreshHandle::new(),
         &OneShot::<bool>::new(),
+        &OneShot::<Vec<AgentCli>>::new(),
         tasks,
         &mut wiring,
     )
@@ -3510,6 +3559,7 @@ fn run_with_live_session(reader: &mut dyn KeyReader) -> Result<Outcome> {
         &UpdateHandle::new(),
         &SessionsRefreshHandle::new(),
         &OneShot::<bool>::new(),
+        &OneShot::<Vec<AgentCli>>::new(),
         &tasks,
         &mut wiring,
     )
@@ -3618,6 +3668,7 @@ fn run_notes(
         &monitor,
         &UpdateHandle::new(),
         &OneShot::<bool>::new(),
+        &OneShot::<Vec<AgentCli>>::new(),
         &mut persist,
         &mut create,
         &mut (noop_rename as fn(&str, &str) -> SessionOutcome),
