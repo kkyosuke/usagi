@@ -79,22 +79,23 @@ fn complete_or_record_panic(
     }
 }
 
-/// The workspace data [`run`] needs at startup, loaded from disk and the `PATH`
-/// without a `Term`: the recorded sessions (and any load-error notice), task
-/// issues, effective settings, installed agent CLIs, and command history.
+/// The workspace data [`run`] needs at startup, loaded from disk without a
+/// `Term`: the recorded sessions (and any load-error notice), task issues,
+/// effective settings, and command history.
 ///
-/// Building this is the slow part of opening a workspace (several disk reads plus
-/// a PATH probe for the agent CLIs). [`preload`] computes it with no terminal or
-/// thread state, so the caller can run it on a background thread *while the
-/// open→home mascot animation plays* and hand the result to [`run`] — the home
-/// screen then paints the instant it is shown instead of blocking the first frame
-/// on these reads.
+/// Building this is part of opening a workspace (several disk reads). [`preload`]
+/// computes it with no terminal or thread state, so the caller can run it on a
+/// background thread *while the open→home mascot animation plays* and hand the
+/// result to [`run`] — the home screen then paints the instant it is shown instead
+/// of blocking the first frame on these reads. The agent-CLI PATH probe is *not*
+/// here: it shells out to each CLI (`--version`), which can outlast the animation,
+/// so [`run`] runs it on its own background thread and swaps the result in once it
+/// lands (like the local-LLM probe), keeping the first paint off the subprocesses.
 pub struct Preload {
     sessions: Vec<SessionRecord>,
     notice: Option<String>,
     issues: Vec<crate::domain::issue::Issue>,
     settings: crate::domain::settings::Settings,
-    installed_agents: Vec<crate::domain::settings::AgentCli>,
     history: Vec<String>,
 }
 
@@ -121,10 +122,6 @@ pub fn preload(workspace: &Workspace) -> Preload {
     // wiring, and notifications. Re-read whenever the config screen closes (see
     // `open_config`) so a change takes effect without reopening this screen.
     let settings = effective_settings(&workspace.path);
-    // The agents installed on this machine (PATH-probed, canonical order), which
-    // 在席's agent picker offers as alternatives to the configured default.
-    let installed_agents =
-        crate::usecase::agent::available_clis(&crate::usecase::doctor::SystemRunner);
     // Past commands so `history` and `↑`/`↓` recall span sessions; empty on failure.
     let history = crate::usecase::history::load(&workspace.path)
         .map(|entries| entries.into_iter().map(|e| e.command).collect())
@@ -134,7 +131,6 @@ pub fn preload(workspace: &Workspace) -> Preload {
         notice,
         issues,
         settings,
-        installed_agents,
         history,
     }
 }
@@ -156,7 +152,6 @@ pub fn run(term: &Term, workspace: &Workspace, preload: Preload) -> Result<Outco
         notice,
         issues,
         settings,
-        installed_agents,
         history,
     } = preload;
 
@@ -178,9 +173,9 @@ pub fn run(term: &Term, workspace: &Workspace, preload: Preload) -> Result<Outco
     state.set_session_action_ui(settings.session_action_ui);
     state.set_sidebar(settings.sidebar);
     // The configured default agent (its display name labels 在席's `agent` row and
-    // a bare `agent` launches it) and the agents installed on this machine.
+    // a bare `agent` launches it). The agents installed on this machine fill in
+    // shortly after via the background probe spawned below (state opens with none).
     state.set_default_agent(settings.agent_cli);
-    state.set_installed_agents(installed_agents);
     // The screen opens in 切替 (Switch) — the base mode (see `HomeState::new`) —
     // so selecting a project lands on the session list the mascot animation glides
     // into; no explicit mode switch is needed here.
@@ -340,6 +335,24 @@ pub fn run(term: &Term, workspace: &Workspace, preload: Preload) -> Result<Outco
         let settings = settings.clone();
         std::thread::spawn(move || {
             handle.set(local_llm_available(&settings));
+        });
+    }
+
+    // The agents installed on this machine (which 在席's agent picker offers as
+    // alternatives to the configured default). Probing them shells out to each
+    // candidate CLI with `--version`, one after another, which can take longer than
+    // the open→home animation — so, like the local-LLM probe above, it runs on a
+    // background thread instead of in `preload`: the picker simply offers no
+    // alternatives until the probe lands, and the event loop swaps them in when it
+    // does. Keeping it off `preload` is what stops the home screen from stalling
+    // after the mascot lands while the join waits on the subprocesses.
+    let installed_agents = oneshot::OneShot::new();
+    {
+        let handle = installed_agents.clone();
+        std::thread::spawn(move || {
+            handle.set(crate::usecase::agent::available_clis(
+                &crate::usecase::doctor::SystemRunner,
+            ));
         });
     }
 
@@ -818,6 +831,7 @@ pub fn run(term: &Term, workspace: &Workspace, preload: Preload) -> Result<Outco
         &update,
         &sessions_refresh,
         &ai_available,
+        &installed_agents,
         &tasks,
         &mut wiring,
     );

@@ -122,6 +122,7 @@ fn a_populated_update_handle_is_read_before_painting() {
         &monitor,
         &update,
         &OneShot::<bool>::new(),
+        &OneShot::<Vec<AgentCli>>::new(),
         &mut persist,
         &mut create,
         &mut (noop_rename as fn(&str, &str) -> SessionOutcome),
@@ -244,8 +245,34 @@ fn the_background_llm_probe_result_is_drained_then_the_loop_quits() {
     let ai = OneShot::<bool>::new();
     ai.set(true);
     assert!(matches!(
-        run_with_ai_probe(vec![Ok(Key::CtrlC)], sample_state(), &ai).unwrap(),
+        run_with_startup_probes(
+            vec![Ok(Key::CtrlC)],
+            sample_state(),
+            &ai,
+            &OneShot::<Vec<AgentCli>>::new()
+        )
+        .unwrap(),
         Outcome::Quit
     ));
     assert!(ai.take().is_none());
+}
+
+#[test]
+fn the_background_installed_agents_probe_result_is_drained_then_the_loop_quits() {
+    // The installed-agents probe reports the agents found on this machine through
+    // the one-shot; the first frame drains it (filling the picker via
+    // `set_installed_agents`), then Ctrl-C with nothing live quits.
+    let agents = OneShot::<Vec<AgentCli>>::new();
+    agents.set(vec![AgentCli::Claude]);
+    assert!(matches!(
+        run_with_startup_probes(
+            vec![Ok(Key::CtrlC)],
+            sample_state(),
+            &OneShot::<bool>::new(),
+            &agents
+        )
+        .unwrap(),
+        Outcome::Quit
+    ));
+    assert!(agents.take().is_none());
 }

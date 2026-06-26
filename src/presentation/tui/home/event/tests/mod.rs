@@ -2,7 +2,7 @@ use super::super::oneshot::OneShot;
 use super::super::state::LogLine;
 use super::super::terminal::tabs::TabNav;
 use super::*;
-use crate::domain::settings::SessionActionUi;
+use crate::domain::settings::{AgentCli, SessionActionUi};
 use crate::domain::workspace_state::{BranchStatus, SessionRecord, WorktreeState};
 use chrono::Utc;
 use std::cell::RefCell;
@@ -176,6 +176,7 @@ fn run_at(keys: Vec<io::Result<Key>>, state: HomeState, root: &Path) -> Result<O
         &monitor,
         &UpdateHandle::new(),
         &OneShot::<bool>::new(),
+        &OneShot::<Vec<AgentCli>>::new(),
         &mut persist,
         &mut create,
         &mut (noop_rename as fn(&str, &str) -> SessionOutcome),
@@ -229,6 +230,7 @@ fn run_full(
         &monitor,
         &UpdateHandle::new(),
         &OneShot::<bool>::new(),
+        &OneShot::<Vec<AgentCli>>::new(),
         &mut persist,
         create_session,
         &mut (noop_rename as fn(&str, &str) -> SessionOutcome),
@@ -270,6 +272,7 @@ fn run_with_live_monitor(
         &monitor,
         &UpdateHandle::new(),
         &OneShot::<bool>::new(),
+        &OneShot::<Vec<AgentCli>>::new(),
         persist,
         &mut create,
         &mut (noop_rename as fn(&str, &str) -> SessionOutcome),
@@ -315,15 +318,16 @@ fn state_with_sessions(names: &[&str]) -> HomeState {
     state
 }
 
-/// Run the loop with a preset local-LLM probe one-shot, all other callbacks
-/// no-op, quitting on the scripted keys — so the loop's drain of the probe is
-/// exercised. (The entry git-sync feeds the same `SessionsRefreshHandle` the
-/// pane-exit sync uses; its apply path is covered by
-/// `a_background_refresh_updates_the_session_list_exactly_once`.)
-fn run_with_ai_probe(
+/// Run the loop with preset startup probe one-shots (local-LLM availability and
+/// the installed-agent list), all other callbacks no-op, quitting on the scripted
+/// keys — so the loop's drain of both probes is exercised. (The entry git-sync
+/// feeds the same `SessionsRefreshHandle` the pane-exit sync uses; its apply path
+/// is covered by `a_background_refresh_updates_the_session_list_exactly_once`.)
+fn run_with_startup_probes(
     keys: Vec<io::Result<Key>>,
     state: HomeState,
     ai_available: &OneShot<bool>,
+    installed_agents: &OneShot<Vec<AgentCli>>,
 ) -> Result<Outcome> {
     let term = Term::stdout();
     let mut reader = ScriptedReader::new(keys);
@@ -343,6 +347,7 @@ fn run_with_ai_probe(
         &monitor,
         &UpdateHandle::new(),
         ai_available,
+        installed_agents,
         &mut persist,
         &mut create,
         &mut (noop_rename as fn(&str, &str) -> SessionOutcome),
@@ -417,6 +422,7 @@ fn run_recording_rename(keys: Vec<io::Result<Key>>) -> (Vec<(String, String)>, O
         &monitor,
         &UpdateHandle::new(),
         &OneShot::<bool>::new(),
+        &OneShot::<Vec<AgentCli>>::new(),
         &mut persist,
         &mut create,
         &mut rename,
@@ -462,6 +468,7 @@ fn run_recording_reorder(
         &monitor,
         &UpdateHandle::new(),
         &OneShot::<bool>::new(),
+        &OneShot::<Vec<AgentCli>>::new(),
         &mut persist,
         &mut create,
         &mut (noop_rename as fn(&str, &str) -> SessionOutcome),
@@ -544,6 +551,7 @@ fn run_with_tasks(
         &UpdateHandle::new(),
         &SessionsRefreshHandle::new(),
         &OneShot::<bool>::new(),
+        &OneShot::<Vec<AgentCli>>::new(),
         tasks,
         &mut wiring,
     )
@@ -596,6 +604,7 @@ fn run_with_live_session(reader: &mut dyn KeyReader) -> Result<Outcome> {
         &UpdateHandle::new(),
         &SessionsRefreshHandle::new(),
         &OneShot::<bool>::new(),
+        &OneShot::<Vec<AgentCli>>::new(),
         &tasks,
         &mut wiring,
     )
@@ -627,6 +636,7 @@ fn run_notes(
         &monitor,
         &UpdateHandle::new(),
         &OneShot::<bool>::new(),
+        &OneShot::<Vec<AgentCli>>::new(),
         &mut persist,
         &mut create,
         &mut (noop_rename as fn(&str, &str) -> SessionOutcome),

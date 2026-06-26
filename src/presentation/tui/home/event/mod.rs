@@ -13,7 +13,7 @@ use anyhow::Result;
 use console::Key;
 use console::Term;
 
-use crate::domain::settings::{SessionActionUi, Sidebar};
+use crate::domain::settings::{AgentCli, SessionActionUi, Sidebar};
 use crate::presentation::tui::install_task;
 use crate::presentation::tui::io::screen::{FramePainter, KeyReader};
 
@@ -247,6 +247,7 @@ pub(super) fn event_loop(
     update: &UpdateHandle,
     refresh: &SessionsRefreshHandle,
     ai_available: &OneShot<bool>,
+    installed_agents: &OneShot<Vec<AgentCli>>,
     tasks: &TaskHandle,
     wiring: &mut Wiring,
 ) -> Result<Outcome> {
@@ -292,6 +293,14 @@ pub(super) fn event_loop(
         // repaint so the change is reflected without waiting for the next keypress.
         if let Some(available) = ai_available.take() {
             state.set_ai_available(available);
+            force_paint = true;
+        }
+        // Fill in the installed-agent list once the background PATH probe lands
+        // (drained once), so 在席's agent picker can offer the alternatives it found;
+        // until then the picker simply shows none. Force a repaint so the picker
+        // reflects them without waiting for the next keypress.
+        if let Some(agents) = installed_agents.take() {
+            state.set_installed_agents(agents);
             force_paint = true;
         }
         // Apply any background session task (create / remove) that finished since
@@ -677,6 +686,7 @@ pub(crate) fn event_loop_compat(
     monitor: &MonitorHandle,
     update: &UpdateHandle,
     ai_available: &OneShot<bool>,
+    installed_agents: &OneShot<Vec<AgentCli>>,
     mut persist: impl FnMut(&str),
     mut create_session: impl FnMut(&str) -> SessionOutcome,
     mut rename_display: impl FnMut(&str, &str) -> SessionOutcome,
@@ -764,6 +774,7 @@ pub(crate) fn event_loop_compat(
         update,
         &refresh,
         ai_available,
+        installed_agents,
         &tasks,
         &mut wiring,
     )

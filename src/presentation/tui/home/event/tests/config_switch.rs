@@ -193,6 +193,7 @@ fn note_editor_opened_while_attached_refreshes_the_attached_terminal_surface() {
         &monitor,
         &UpdateHandle::new(),
         &OneShot::<bool>::new(),
+        &OneShot::<Vec<AgentCli>>::new(),
         &mut persist,
         &mut create,
         &mut (noop_rename as fn(&str, &str) -> SessionOutcome),

@@ -409,7 +409,7 @@ fn focus_prompt_submit_runs_a_session_command() {
     assert_eq!(submission.recorded.as_deref(), Some("terminal"));
     // The prompt is cleared and the command recorded in history.
     assert_eq!(state.focus_prompt(), "");
-    assert_eq!(state.history, vec!["terminal"]);
+    assert_eq!(state.cmdline.history, vec!["terminal"]);
 }
 
 #[test]
@@ -468,7 +468,7 @@ fn focus_prompt_submit_on_empty_input_is_a_noop() {
     let submission = state.focus_prompt_submit();
     assert_eq!(submission.effect, Effect::None);
     assert!(submission.recorded.is_none());
-    assert!(state.history.is_empty());
+    assert!(state.cmdline.history.is_empty());
 }
 
 #[test]

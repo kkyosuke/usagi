@@ -264,7 +264,7 @@ fn submitted_commands_are_recorded_in_history() {
         state.push_char(c);
     }
     state.submit();
-    assert_eq!(state.history, vec!["man", "doctor"]);
+    assert_eq!(state.cmdline.history, vec!["man", "doctor"]);
 }
 
 #[test]
@@ -275,9 +275,9 @@ fn restored_history_feeds_recall_and_new_commands_append_to_it() {
     assert_eq!(state.input(), "space");
     state.recall_prev();
     assert_eq!(state.input(), "session");
-    state.input.set_value("man");
+    state.cmdline.input.set_value("man");
     state.submit();
-    assert_eq!(state.history, vec!["session", "space", "man"]);
+    assert_eq!(state.cmdline.history, vec!["session", "space", "man"]);
 }
 
 #[test]
