@@ -173,6 +173,58 @@ fn ahead_behind_counts_against_local_and_remote() {
 }
 
 #[test]
+fn diff_stat_counts_committed_and_tracked_changes_against_the_merge_base() {
+    let dir = tempfile::tempdir().unwrap();
+    init_repo(dir.path());
+
+    // A tracked, three-line file on main so a later edit on the branch can
+    // register removals against the merge-base.
+    std::fs::write(dir.path().join("base.txt"), "L1\nL2\nL3\n").unwrap();
+    run(dir.path(), &["add", "."]);
+    run(dir.path(), &["commit", "-q", "-m", "base"]);
+
+    // Cut feature off this point — the merge-base — then advance main past it
+    // with a commit feature never sees, to prove the diff is taken against the
+    // merge-base: main's later work must not count as the session's.
+    run(dir.path(), &["branch", "feature"]);
+    std::fs::write(dir.path().join("main-only.txt"), "x\ny\n").unwrap();
+    run(dir.path(), &["add", "."]);
+    run(dir.path(), &["commit", "-q", "-m", "main moves on"]);
+
+    run(dir.path(), &["checkout", "-q", "feature"]);
+    // Committed work on feature: a new three-line file (+3).
+    std::fs::write(dir.path().join("a.txt"), "1\n2\n3\n").unwrap();
+    run(dir.path(), &["add", "."]);
+    run(dir.path(), &["commit", "-q", "-m", "feature work"]);
+    // An uncommitted tracked edit: drop two of base.txt's three lines (-2).
+    std::fs::write(dir.path().join("base.txt"), "L1\n").unwrap();
+    // A staged new file (+1) and a staged binary file (ignored — numstat reports
+    // `-`/`-`, exercising `sum_numstat`'s non-numeric branch).
+    std::fs::write(dir.path().join("b.txt"), "9\n").unwrap();
+    std::fs::write(dir.path().join("bin"), [0u8, 159, 146, 150]).unwrap();
+    run(dir.path(), &["add", "b.txt", "bin"]);
+
+    // +3 (a.txt) +1 (b.txt) added; -2 (base.txt) removed. The binary contributes
+    // nothing, and main-only.txt lives past the merge-base, so it does not count.
+    assert_eq!(diff_stat(dir.path(), "main"), Some((4, 2)));
+}
+
+#[test]
+fn diff_stat_measures_against_the_remote_default_and_returns_none_for_an_unknown_base() {
+    let (_tmp, work) = repo_with_remote();
+    // origin/main exists, so the merge-base is resolved against the remote
+    // default (the first branch of `diff_stat`'s `or_else`).
+    run(&work, &["checkout", "-q", "-b", "feature"]);
+    std::fs::write(work.join("n.txt"), "a\nb\n").unwrap();
+    run(&work, &["add", "."]);
+    run(&work, &["commit", "-q", "-m", "two lines"]);
+    assert_eq!(diff_stat(&work, "main"), Some((2, 0)));
+
+    // A default that resolves to no ref at all has no merge-base → None.
+    assert_eq!(diff_stat(&work, "does-not-exist"), None);
+}
+
+#[test]
 fn clone_copies_a_repository() {
     let tmp = tempfile::tempdir().unwrap();
     let src = tmp.path().join("src");

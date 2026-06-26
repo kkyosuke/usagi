@@ -477,3 +477,20 @@ fn switch_s_lifts_the_waiting_session_to_the_top_of_the_pane() {
         "main has dropped below feat, so the cursor never reaches it"
     );
 }
+
+#[test]
+fn cheatsheet_opens_from_the_base_switch_and_dismisses() {
+    // `?` at the base 切替 opens the keybinding cheat sheet (a scrollable text
+    // modal); the arrows / j/k scroll it and Esc dismisses it (back to Switch,
+    // where the trailing Ctrl-C quits).
+    let keys = vec![
+        Ok(Key::Char('?')), // open the cheat sheet
+        Ok(Key::ArrowDown), // scroll down a line
+        Ok(Key::Char('j')),
+        Ok(Key::ArrowUp), // scroll up a line
+        Ok(Key::Char('k')),
+        Ok(Key::Escape), // dismiss -> Switch
+        Ok(Key::CtrlC),  // nothing live: quits outright
+    ];
+    assert!(matches!(run(keys, sample_state()).unwrap(), Outcome::Quit));
+}
