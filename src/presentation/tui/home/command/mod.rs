@@ -116,7 +116,7 @@ impl Effect {
             | Effect::Activate(_)
             | Effect::ListSessions
             | Effect::OpenRemoveModal { .. }
-            | Effect::ShowText(_) => false,
+            | Effect::ShowText { .. } => false,
         }
     }
 }
