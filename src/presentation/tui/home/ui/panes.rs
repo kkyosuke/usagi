@@ -178,7 +178,12 @@ fn gutter_cell(selected: bool, active: bool, in_switch: bool) -> String {
 /// The branch / root name cell: clipped and padded to `width`, cyan, and bold
 /// when the row is active or under the cursor.
 fn name_cell(text: &str, width: usize, emphasised: bool) -> String {
-    let padded = format!("{:<width$}", clip_to_width(text, width));
+    // Pad by *display* width, not char count: `format!("{:<width$}")` counts
+    // `char`s, so a full-width (CJK) branch / session name — the app's own UI is
+    // Japanese — would be padded to `width` chars (≈2×`width` columns), overrun
+    // the cell, and shove the status column sideways. `pad_to_width` measures
+    // display columns, matching the rest of the layout.
+    let padded = pad_to_width(clip_to_width(text, width), width);
     if emphasised {
         style(padded).cyan().bold().to_string()
     } else {
@@ -1421,4 +1426,30 @@ fn heading_style(text: &str, level: u8) -> String {
         _ => base,
     }
     .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn name_cell_pads_by_display_width_not_char_count() {
+        // A full-width (CJK) name must fill its cell by *display* columns, not
+        // char count: `あ機能` is 3 chars but 6 display columns, so padding to a
+        // width-8 cell adds 2 columns (not 5 chars), and the cell measures exactly
+        // 8 — the SGR style escapes have zero display width. The old
+        // `format!("{:<8}")` padded by chars and overran the cell to 11 columns,
+        // shoving the status column sideways (the app's own UI is Japanese).
+        assert_eq!(
+            console::measure_text_width(&name_cell("あ機能", 8, false)),
+            8
+        );
+        // ASCII is unchanged: a short name still pads out to the full width.
+        assert_eq!(console::measure_text_width(&name_cell("main", 8, true)), 8);
+        // A name already wider than the cell is clipped back to the width.
+        assert_eq!(
+            console::measure_text_width(&name_cell("あ機能拡張作業", 8, false)),
+            8
+        );
+    }
 }
