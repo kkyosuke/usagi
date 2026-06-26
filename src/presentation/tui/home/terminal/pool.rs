@@ -25,7 +25,7 @@
 //! handles, runs a watcher thread, and shows desktop notifications), so — like
 //! [`PtySession`] itself — it is excluded from coverage. Its pure core, the
 //! waiting-state bookkeeping, lives in [`SessionMonitor`] and is tested there.
-//! The geometry it spawns at ([`super::ui::terminal_geometry`]) is tested on its
+//! The geometry it spawns at ([`super::super::ui::terminal_geometry`]) is tested on its
 //! own.
 
 use std::collections::{HashMap, HashSet};
@@ -44,9 +44,9 @@ use crate::infrastructure::pty::PtySession;
 use crate::infrastructure::session_monitor::SessionMonitor;
 use crate::infrastructure::{agent_state_store, session_monitor};
 
-use super::terminal_tabs::{self, PaneKind, TabNav};
-use super::terminal_view::TerminalView;
-use super::ui;
+use super::super::ui;
+use super::tabs::{self, PaneKind, TabNav};
+use super::view::TerminalView;
 
 /// How often the watcher thread samples every session's bell count.
 const POLL_INTERVAL: Duration = Duration::from_millis(200);
@@ -219,7 +219,7 @@ struct SessionPanes {
 /// The live shells embedded in the workspace screen, keyed by worktree path —
 /// each path holding one or more panes (an agent alongside any terminals).
 ///
-/// Owned by the screen ([`super::run`]); dropped when the user leaves it, which
+/// Owned by the screen ([`super::super::run`]); dropped when the user leaves it, which
 /// kills every shell it still holds (via [`PtySession`]'s `Drop`) and stops the
 /// watcher thread.
 pub struct TerminalPool {
@@ -304,7 +304,7 @@ impl TerminalPool {
             // No live pane (fresh session, or every pane exited): drop any stale
             // entry and spawn the first pane of the requested kind.
             self.sessions.remove(&key);
-            let kind = terminal_tabs::pane_kind(agent);
+            let kind = tabs::pane_kind(agent);
             let pane = self.spawn_pane(term, dir, kind, agent_command, cli)?;
             self.sessions.insert(
                 key,
@@ -360,7 +360,7 @@ impl TerminalPool {
     /// leaving every pane alive. A no-op for a session with no panes.
     pub fn nav(&mut self, dir: &Path, nav: TabNav) {
         if let Some(sp) = self.sessions.get_mut(dir) {
-            sp.active = terminal_tabs::resolve_nav(sp.active, sp.panes.len(), nav);
+            sp.active = tabs::resolve_nav(sp.active, sp.panes.len(), nav);
         }
     }
 
@@ -376,7 +376,7 @@ impl TerminalPool {
                 let len_before = sp.panes.len();
                 // Dropping the removed Pane kills the shell it owns.
                 sp.panes.remove(active);
-                match terminal_tabs::active_after_close(active, len_before) {
+                match tabs::active_after_close(active, len_before) {
                     Some(next) => {
                         sp.active = next;
                         true
@@ -453,7 +453,7 @@ impl TerminalPool {
             Some(sp) => {
                 let kinds: Vec<PaneKind> = sp.panes.iter().map(|p| p.kind).collect();
                 let active = sp.active.min(sp.panes.len().saturating_sub(1));
-                (terminal_tabs::tab_labels(&kinds), active)
+                (tabs::tab_labels(&kinds), active)
             }
             None => (Vec::new(), 0),
         }

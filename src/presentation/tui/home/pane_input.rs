@@ -3,7 +3,7 @@
 //! Everything that turns a key / mouse event into a decision — which reserved
 //! chord it is, how far the history should scroll, which grid cell the pointer
 //! is over, and the raw bytes a key or a paste becomes for the shell — is pure
-//! and lives here, unit tested. The (coverage-excluded) [`terminal_pane`] drive
+//! and lives here, unit tested. The (coverage-excluded) [`pane`] drive
 //! loop only does the real terminal I/O and calls these.
 //!
 //! The **reserved keys** are `Ctrl-O`, `Ctrl-N`/`Ctrl-P`, `Ctrl-T`/`Ctrl-G`,
@@ -11,12 +11,12 @@
 //! **and `Ctrl-W`** (the universal shell "delete previous word"), flows to the
 //! shell.
 //!
-//! [`terminal_pane`]: super::terminal_pane
+//! [`pane`]: super::terminal::pane
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind};
 use vt100::MouseProtocolEncoding;
 
-use super::terminal_selection::Cell;
+use super::terminal::selection::Cell;
 use super::ui;
 
 /// How many lines one mouse-wheel turn scrolls the history.

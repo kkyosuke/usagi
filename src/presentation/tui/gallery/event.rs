@@ -4,7 +4,7 @@ use anyhow::Result;
 use console::Term;
 
 use crate::presentation::tui::install_task;
-use crate::presentation::tui::screen::{FramePainter, KeyReader};
+use crate::presentation::tui::io::screen::{FramePainter, KeyReader};
 
 use super::ui::{self, Variation};
 

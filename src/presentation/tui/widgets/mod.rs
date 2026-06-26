@@ -176,7 +176,7 @@ pub fn progress_bar(done: usize, total: usize, width: usize) -> String {
 /// entirely when it cannot fit the width.
 ///
 /// Shared by the home screen's top-right notices and by
-/// [`FramePainter`](super::screen::FramePainter), which overlays the global
+/// [`FramePainter`](super::io::screen::FramePainter), which overlays the global
 /// background-install rabbit onto whatever screen is showing.
 pub fn overlay_top_right(lines: &mut [String], top: usize, width: usize, banner: &[String]) {
     let block_w = banner
@@ -452,7 +452,7 @@ pub fn chooser(value: &str, focused: bool, changed: bool) -> String {
 /// Japanese (or any IME) text surfaces at the bottom of the screen instead of in
 /// the input field — and exactly where varies by terminal. The painter strips
 /// this marker from every row before drawing and moves the cursor to the column
-/// it marked (see [`FramePainter`](super::super::screen::FramePainter)).
+/// it marked (see [`FramePainter`](super::super::io::screen::FramePainter)).
 ///
 /// It is a zero-width CSI sequence ([`console::measure_text_width`] and
 /// [`clip_to_width`] both treat it as a no-op escape, so embedding it never

@@ -10,13 +10,13 @@ use anyhow::Result;
 use console::Key;
 use console::Term;
 
-use crate::presentation::tui::screen::{self, FramePainter};
+use crate::presentation::tui::io::screen::{self, FramePainter};
 
 use crate::domain::settings::{AgentCli, SessionActionUi};
 
 use super::super::command::Effect;
 use super::super::state::{HomeState, ModalSize, PaneExit, ReturnMode, ROOT_NAME};
-use super::super::terminal_tabs::TabNav;
+use super::super::terminal::tabs::TabNav;
 use super::super::ui;
 use super::{
     paint_now, selected_dir, Flow, Wiring, CTRL_CARET, CTRL_E, CTRL_N, CTRL_O, CTRL_P, CTRL_S,
@@ -463,7 +463,7 @@ enum Select {
 }
 
 /// Decode a reassembled modified-cursor-key sequence — `CSI 1 ; <mod> <letter>`,
-/// which [`super::super::super::term_reader`] gathers into one
+/// which [`super::super::super::io::term_reader`] gathers into one
 /// [`Key::UnknownEscSeq`] — into the selection motion it represents, but **only
 /// when `Shift` is among its modifiers** (the chord that extends the selection).
 /// Returns `None` for any other key, modifier, or malformed sequence, so a plain
