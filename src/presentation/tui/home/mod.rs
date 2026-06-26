@@ -419,7 +419,7 @@ pub fn run(term: &Term, workspace: &Workspace, preload: Preload) -> Result<Outco
     // Check the project's git remote for a newer release than this build, on a
     // background thread so a slow or unreachable network never delays the screen.
     // The result is written to the handle the event loop reads each redraw; when
-    // a newer version is published it surfaces the top-right "update available"
+    // a newer version is published the sidebar mascot speaks an "update available"
     // notice. Any failure (offline, git missing, already up to date) simply
     // leaves the handle empty and the notice hidden.
     let update = update::UpdateHandle::new();
@@ -611,13 +611,6 @@ pub fn run(term: &Term, workspace: &Workspace, preload: Preload) -> Result<Outco
                     // `Ctrl-Q`: leave 没入 to quit usagi. Every pane stays alive in
                     // the pool; the event loop raises the quit-confirmation modal.
                     terminal_pane::PaneStep::Quit => return Ok(PaneExit::Quit),
-                    // `Ctrl-W`: close the active tab. Same as a shell that exited —
-                    // keep driving when a pane remains, else fall to 在席.
-                    terminal_pane::PaneStep::CloseTab => {
-                        if !pool.close_active(dir, &label) {
-                            return Ok(PaneExit::Closed);
-                        }
-                    }
                     // The active pane's shell exited: drop it; keep driving when
                     // a pane remains, else fall to 在席.
                     terminal_pane::PaneStep::Closed => {

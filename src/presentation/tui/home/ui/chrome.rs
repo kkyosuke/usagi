@@ -5,8 +5,6 @@
 
 use console::{style, Style};
 
-use crate::domain::version::Version;
-
 use super::super::command::{CommandHint, Hint};
 use super::super::state::{HomeState, Mode, RemoveModal, TextModal, WorktreeList};
 use super::super::tasks::{TaskMark, TaskRow};
@@ -47,34 +45,6 @@ pub(super) fn title_bar(width: usize, list: &WorktreeList) -> String {
         if count == 1 { "" } else { "s" }
     );
     widgets::title_line(width, &label)
-}
-
-/// The top-right "update available" notice: a short note that a release newer
-/// than the running build (`latest`) has been published. Shown only while the
-/// background update check reports one.
-///
-/// Both lines are right-padded to a common block width and styled yellow-bold so
-/// the block right-aligns cleanly when [`overlay_top_right`](super::overlay_top_right)
-/// anchors it to the header rows.
-pub(super) fn update_banner(latest: &Version) -> Vec<String> {
-    // The message on the first line, the new version on the second. No mascot
-    // art: the title bar pads the active session name to a fixed width and so
-    // reaches far enough right that only a compact block fits in the gap on the
-    // header rows where this is anchored.
-    let rows = ["アップデートがあるぴょん".to_string(), format!("v{latest}")];
-    let block_w = rows
-        .iter()
-        .map(|row| console::measure_text_width(row))
-        .max()
-        .unwrap_or(0);
-    rows.into_iter()
-        .map(|row| {
-            style(pad_to_width(row, block_w))
-                .yellow()
-                .bold()
-                .to_string()
-        })
-        .collect()
 }
 
 /// Minimum / maximum display width of the task-status label field. The field
@@ -287,7 +257,7 @@ fn command_input_content(state: &HomeState) -> String {
 
 /// Inner (content) width of the command palette box, before the borders and the
 /// space of padding [`widgets::boxed`] adds on each side.
-const PALETTE_INNER: usize = 60;
+pub(super) const PALETTE_INNER: usize = 60;
 
 /// Rows the palette reserves for the advisory hints, always filled to this height
 /// (padded with blanks): a header plus up to [`HINT_MAX`] matches plus an
@@ -312,7 +282,7 @@ const PALETTE_RESPONSE_MAX: usize = PALETTE_RESPONSE_ROWS - 1;
 /// (capped, with an `↑ N more` line when longer), and a key-hint footer. Every
 /// region is padded to a constant number of rows so the box keeps the same size
 /// as the user types and runs commands — it never grows or shrinks.
-fn command_palette_body(state: &HomeState, inner: usize) -> Vec<String> {
+pub(super) fn command_palette_body(state: &HomeState, inner: usize) -> Vec<String> {
     let mut body = Vec::with_capacity(PALETTE_HINT_ROWS + PALETTE_RESPONSE_ROWS + 5);
     body.push(command_input_content(state));
     body.push(String::new());
@@ -363,19 +333,6 @@ fn pad_block(body: &mut Vec<String>, rows: Vec<String>, height: usize) {
     }
 }
 
-/// Builds the workspace command palette (`:`) as a bordered box, clamped to the
-/// terminal `width`. It is a fixed-height modal (see [`command_palette_body`])
-/// that [`render_frame`](super::render_frame) floats over the live workspace with
-/// [`widgets::overlay_centered`], so the panes stay visible around it; `Esc`
-/// closes it.
-pub(super) fn command_palette_box(width: usize, state: &HomeState) -> Vec<String> {
-    // Clamp the inner width so the box never overruns a narrow terminal; `boxed`
-    // then clips each line and the title to fit.
-    let inner = PALETTE_INNER.min(width.saturating_sub(4));
-    let body = command_palette_body(state, inner);
-    widgets::boxed("Command", inner, &body)
-}
-
 /// The footer help line, aware of the current mode. It leads with a mode tag so
 /// it is always clear which engagement level the keys act on.
 pub(super) fn footer_line(width: usize, state: &HomeState) -> String {
@@ -423,7 +380,7 @@ pub(super) fn footer_line(width: usize, state: &HomeState) -> String {
             )
         }
         Mode::Attached => {
-            "[attached]  Ctrl-O: switch / Ctrl-T: focus / Ctrl-^: last / Ctrl-N/P: tab / Ctrl-G: agent / Ctrl-E: note / Ctrl-W: close"
+            "[attached]  Ctrl-O: switch / Ctrl-T: focus / Ctrl-^: last / Ctrl-N/P: tab / Ctrl-G: agent / Ctrl-E: note"
                 .to_string()
         }
     };
@@ -581,16 +538,19 @@ pub(super) fn quit_confirm_frame(raw_height: usize, raw_width: usize, live: usiz
     widgets::render_modal(raw_height, raw_width, "Quit usagi?", INNER, &body)
 }
 
-/// Builds the centred text modal: a scrollable window over a text-dumping
+/// Inner (content) width of the text modal box, before the borders and the
+/// space of padding [`widgets::boxed`] adds on each side.
+pub(super) const TEXT_MODAL_INNER: usize = 60;
+
+/// Builds the body of the text modal: a scrollable window over a text-dumping
 /// command's output (`man` / `history` / `session list`), coloured by line kind,
 /// with `↑`/`↓` more-counts and the dismiss hint below.
-pub(super) fn text_modal_frame(
-    raw_height: usize,
-    raw_width: usize,
-    modal: &TextModal,
-) -> Vec<String> {
-    const INNER: usize = 60;
-
+///
+/// Like the `:` command palette, this is only the body (no border): `inner` is
+/// the box's content width, and [`render_frame`](super::render_frame) wraps it
+/// and floats it over the live workspace with [`widgets::overlay_modal`] so the
+/// panes stay visible around it, rather than a black backdrop.
+pub(super) fn text_modal_body(modal: &TextModal, inner: usize) -> Vec<String> {
     let total = modal.lines.len();
     let start = modal.scroll.min(total.saturating_sub(TEXT_MODAL_VISIBLE));
     let end = (start + TEXT_MODAL_VISIBLE).min(total);
@@ -600,7 +560,7 @@ pub(super) fn text_modal_frame(
         body.push(style(format!("  ↑ {start} more")).dim().to_string());
     }
     for line in &modal.lines[start..end] {
-        body.push(log_line(line, INNER));
+        body.push(log_line(line, inner));
     }
     if end < total {
         body.push(style(format!("  ↓ {} more", total - end)).dim().to_string());
@@ -611,5 +571,5 @@ pub(super) fn text_modal_frame(
             .dim()
             .to_string(),
     );
-    widgets::render_modal(raw_height, raw_width, &modal.title, INNER, &body)
+    body
 }

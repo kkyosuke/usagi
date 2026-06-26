@@ -17,7 +17,8 @@ pub mod text_input;
 pub use rabbit::{
     done_rabbit, farewell_lines, loading_rabbit, loading_rabbit_timed, multiplying_rabbits,
     rabbit_height, rabbit_lines, rabbit_lines_at, rabbit_width, running_rabbit,
-    running_rabbit_width,
+    running_rabbit_width, workspace_rabbit, workspace_rabbit_speaking, workspace_rabbit_width,
+    RabbitMood,
 };
 
 use console::{style, Style};
@@ -76,6 +77,35 @@ pub fn clip_to_width(text: &str, max: usize) -> String {
     }
     out.push('…');
     out
+}
+
+/// Breaks `text` into lines no wider than `width` display columns, splitting
+/// between characters so CJK text (which carries no spaces to break on) still
+/// wraps. Plain (ANSI-free) input is assumed — the caller styles the result.
+///
+/// A glyph wider than `width` on its own (e.g. a width-2 CJK char on a width-1
+/// line) is placed alone and overflows by that much rather than being dropped, so
+/// no character is ever lost. A `width` of 0, or empty `text`, yields no lines.
+pub fn wrap_to_width(text: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return Vec::new();
+    }
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    let mut current_w = 0usize;
+    for ch in text.chars() {
+        let w = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if current_w + w > width && !current.is_empty() {
+            lines.push(std::mem::take(&mut current));
+            current_w = 0;
+        }
+        current.push(ch);
+        current_w += w;
+    }
+    if !current.is_empty() {
+        lines.push(current);
+    }
+    lines
 }
 
 /// Left padding that horizontally centres content of `content_width` columns
@@ -575,9 +605,56 @@ pub fn render_modal(
     lines
 }
 
+/// The inner (content) width a modal box gets for terminal `width`: the `desired`
+/// width clamped so the box — `desired` plus the two borders and a space of
+/// padding on each side — never overruns the screen. Callers compute the body
+/// with this width so its lines match the box [`overlay_modal`] / [`render_modal`]
+/// draw around them.
+pub fn modal_inner_width(width: usize, desired: usize) -> usize {
+    desired.min(width.saturating_sub(4))
+}
+
+/// Composites a titled modal box centred over `base`, the floating sibling of
+/// [`render_modal`]: it wraps `body` in a [`boxed`] frame and overlays it with
+/// [`overlay_centered`], so the screen behind it stays visible instead of a black
+/// backdrop. The shared path for floating modals (the `:` command palette, the
+/// text modal). `inner_width` is clamped the same way [`modal_inner_width`] does,
+/// so passing a body built with that width lines the rows up inside the box.
+pub fn overlay_modal(
+    base: &mut [String],
+    width: usize,
+    title: &str,
+    inner_width: usize,
+    body: &[String],
+) {
+    let inner = modal_inner_width(width, inner_width);
+    overlay_centered(base, width, &boxed(title, inner, body));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wrap_to_width_breaks_cjk_text_between_characters() {
+        // No spaces to break on: the line splits between glyphs, each wrapped line
+        // staying within the width, and no character lost.
+        let lines = wrap_to_width("アップデートがあるぴょん", 12);
+        assert!(lines.len() > 1);
+        assert!(lines.iter().all(|l| console::measure_text_width(l) <= 12));
+        assert_eq!(lines.concat(), "アップデートがあるぴょん");
+    }
+
+    #[test]
+    fn wrap_to_width_keeps_short_text_on_one_line() {
+        assert_eq!(wrap_to_width("v0.2.0", 12), vec!["v0.2.0".to_string()]);
+    }
+
+    #[test]
+    fn wrap_to_width_yields_nothing_for_zero_width_or_empty() {
+        assert!(wrap_to_width("text", 0).is_empty());
+        assert!(wrap_to_width("", 8).is_empty());
+    }
 
     #[test]
     fn centered_padding_centers_content() {
@@ -1073,5 +1150,29 @@ mod tests {
         }
         // The box is still drawn (a border row is present).
         assert!(frame.iter().any(|l| l.contains('┌')));
+    }
+
+    #[test]
+    fn modal_inner_width_clamps_to_fit_the_borders_and_padding() {
+        // A roomy terminal keeps the desired width …
+        assert_eq!(modal_inner_width(80, 60), 60);
+        // … a narrow one clamps so the box (inner + 4) never overruns.
+        assert_eq!(modal_inner_width(20, 60), 16);
+    }
+
+    #[test]
+    fn overlay_modal_floats_a_titled_box_over_the_base_keeping_content() {
+        // Unlike `render_modal`, the box is composited over the live frame, so the
+        // surrounding rows stay visible instead of a black backdrop.
+        let mut base = vec!["abcdefghijklmnopqrstuvwxyz".to_string(); 10];
+        overlay_modal(&mut base, 26, "Help", 10, &["row".to_string()]);
+        let joined = base.join("\n");
+        // The titled box and its body are drawn …
+        assert!(joined.contains("Help"));
+        assert!(joined.contains("row"));
+        assert!(joined.contains('┌'));
+        // … and a row outside the box still carries its original content (the
+        // frame shows around the float, not blanked).
+        assert!(base[0].contains('a') || base.last().unwrap().contains('a'));
     }
 }

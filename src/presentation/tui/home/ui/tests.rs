@@ -38,7 +38,7 @@ fn stripped(lines: &[String]) -> String {
 }
 
 #[test]
-fn text_modal_frame_windows_a_long_dump_with_more_counts() {
+fn text_modal_body_windows_a_long_dump_with_more_counts() {
     let lines: Vec<LogLine> = (0..30)
         .map(|i| LogLine::output(format!("entry {i}")))
         .collect();
@@ -47,29 +47,27 @@ fn text_modal_frame_windows_a_long_dump_with_more_counts() {
         lines,
         scroll: 5,
     };
-    let frame = stripped(&text_modal_frame(40, 120, &modal));
-    // The title and the hidden-line counts above and below the window show.
-    assert!(frame.contains("Help"));
-    assert!(frame.contains("↑ 5 more"));
+    let body = stripped(&text_modal_body(&modal, 60));
+    // The hidden-line counts above and below the window show.
+    assert!(body.contains("↑ 5 more"));
     // 30 total - (scroll 5 + 16 visible) = 9 hidden below.
-    assert!(frame.contains("↓ 9 more"));
+    assert!(body.contains("↓ 9 more"));
     // A windowed line is visible; ones outside the window are not.
-    assert!(frame.contains("entry 5"));
-    assert!(!frame.contains("entry 0"));
-    assert!(frame.contains("Esc / Enter / q: close"));
+    assert!(body.contains("entry 5"));
+    assert!(!body.contains("entry 0"));
+    assert!(body.contains("Esc / Enter / q: close"));
 }
 
 #[test]
-fn text_modal_frame_shows_a_short_dump_without_scroll_counts() {
+fn text_modal_body_shows_a_short_dump_without_scroll_counts() {
     let modal = TextModal {
         title: "History".to_string(),
         lines: vec![LogLine::output("  1  man"), LogLine::output("  2  history")],
         scroll: 0,
     };
-    let frame = stripped(&text_modal_frame(40, 120, &modal));
-    assert!(frame.contains("History"));
-    assert!(frame.contains("man"));
-    assert!(!frame.contains("more"));
+    let body = stripped(&text_modal_body(&modal, 60));
+    assert!(body.contains("man"));
+    assert!(!body.contains("more"));
 }
 
 #[test]
@@ -1629,6 +1627,93 @@ fn render_frame_draws_the_terminal_in_the_right_pane_when_attached() {
 }
 
 #[test]
+fn render_frame_rests_the_mascot_in_the_bottom_left_with_a_mode_face() {
+    // With the full sidebar and a short list there is room at the bottom of the
+    // sidebar for the resting mascot, whose face follows the current mode:
+    // browsing in 切替 (the default), attentive in 在席, heads-down in 没入.
+    let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Pushed)]);
+    let switch = stripped(&render_frame(24, 80, &state));
+    assert!(switch.contains("(o.o)?"), "browsing face in 切替: {switch}");
+
+    state.enter_focus(1);
+    let focus = stripped(&render_frame(24, 80, &state));
+    assert!(focus.contains("(^.^)/"), "attentive face in 在席: {focus}");
+
+    state.show_attached();
+    let attached = stripped(&render_frame(24, 80, &state));
+    assert!(
+        attached.contains("(>.<)9"),
+        "working face in 没入: {attached}"
+    );
+}
+
+#[test]
+fn render_frame_keeps_a_blank_row_between_the_list_and_the_resting_mascot() {
+    // A short list leaves the mascot resting at the bottom with at least one blank
+    // sidebar row above its ears, so the art reads apart from the session list
+    // rather than as the next entry.
+    let state = state_with(vec![worktree(Some("main"), true, BranchStatus::Pushed)]);
+    let lines = render_frame(24, 80, &state);
+    // The ears row (the mascot's top row); its left sidebar cell carries the art.
+    let ears = lines
+        .iter()
+        .map(|l| console::strip_ansi_codes(l).into_owned())
+        .position(|l| l.split(" │ ").next().unwrap_or("").contains("(\\(\\"))
+        .expect("the resting mascot is drawn");
+    let left_cell_above = console::strip_ansi_codes(&lines[ears - 1])
+        .split(" │ ")
+        .next()
+        .unwrap_or("")
+        .to_string();
+    assert!(
+        left_cell_above.trim().is_empty(),
+        "a blank sidebar row separates the list from the mascot: {left_cell_above:?}"
+    );
+}
+
+#[test]
+fn render_frame_hides_the_mascot_when_the_session_list_fills_the_sidebar() {
+    // A list long enough to reach the bottom rows takes precedence: the mascot
+    // hides rather than overlapping the sessions.
+    let many: Vec<WorktreeState> = (0..9)
+        .map(|i| worktree(Some(&format!("feat-{i}")), false, BranchStatus::Local))
+        .collect();
+    let state = state_with(many);
+    let frame = stripped(&render_frame(24, 80, &state));
+    assert!(
+        !frame.contains("(o.o)?"),
+        "mascot must yield to a full list: {frame}"
+    );
+}
+
+#[test]
+fn render_frame_omits_the_mascot_when_the_sidebar_or_body_is_too_small() {
+    // A terminal too narrow leaves the full sidebar narrower than the art, and one
+    // too short leaves no body rows to spare — either way the mascot is skipped
+    // rather than overrunning the layout (and the frame still renders).
+    let state = state_with(vec![worktree(Some("main"), true, BranchStatus::Pushed)]);
+    let narrow = stripped(&render_frame(24, 12, &state));
+    assert!(
+        !narrow.contains("(o.o)?"),
+        "no mascot in a narrow sidebar: {narrow}"
+    );
+    let short = stripped(&render_frame(7, 80, &state));
+    assert!(
+        !short.contains("(o.o)?"),
+        "no mascot with no body rows to spare: {short}"
+    );
+}
+
+#[test]
+fn render_frame_omits_the_mascot_on_the_collapsed_rail() {
+    // The rail is too narrow to hold the art, so the mascot does not render there.
+    let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Pushed)]);
+    state.set_sidebar(Sidebar::Rail);
+    let frame = stripped(&render_frame(24, 80, &state));
+    assert!(!frame.contains("(o.o)?"), "no mascot on the rail: {frame}");
+}
+
+#[test]
 fn note_editor_box_keeps_its_bottom_border_over_a_short_pane() {
     // The note editor floats over the attached session's pane. Even when the pane
     // beneath is shorter than the box — e.g. no terminal snapshot has arrived, so
@@ -1771,6 +1856,34 @@ fn command_palette_floats_over_the_visible_workspace() {
     // The palette box and its prompt are drawn …
     assert!(joined.contains('┌'));
     assert!(joined.contains("❯ m"));
+    // … and the workspace chrome behind it stays visible (the mode ladder and the
+    // workspace title), which a black full-screen modal would have hidden.
+    assert!(joined.contains("Switch"), "the mode ladder shows behind");
+    assert!(joined.contains("usagi"), "the workspace title shows behind");
+    // A row above the box still carries workspace content (it is not blanked).
+    let top = frame
+        .iter()
+        .position(|r| console::strip_ansi_codes(r).contains('┌'))
+        .expect("the box renders");
+    assert!(
+        (0..top).any(|r| !console::strip_ansi_codes(&frame[r]).trim().is_empty()),
+        "the workspace shows above the floating box",
+    );
+}
+
+#[test]
+fn text_modal_floats_over_the_visible_workspace() {
+    // The text modal (`man` / `history` / `session list` output) is composited
+    // over the live frame like the `:` palette, so the workspace shows around it
+    // instead of a black backdrop.
+    let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
+    state.open_text_modal("Help", vec![LogLine::output("man — show this help")]);
+    let frame = render_frame(40, 80, &state);
+    let joined = stripped(&frame);
+    // The modal box and its content are drawn …
+    assert!(joined.contains('┌'));
+    assert!(joined.contains("Help"));
+    assert!(joined.contains("man — show this help"));
     // … and the workspace chrome behind it stays visible (the mode ladder and the
     // workspace title), which a black full-screen modal would have hidden.
     assert!(joined.contains("Switch"), "the mode ladder shows behind");
@@ -1939,28 +2052,32 @@ fn command_palette_frame_is_a_bordered_box() {
 // --- update-available notice -------------------------------------------
 
 #[test]
-fn update_banner_shows_the_message_and_the_latest_version() {
-    let latest = crate::domain::version::Version::parse("0.2.0").unwrap();
-    let banner = update_banner(&latest);
-    // メッセージ行 ＋ バージョン行の 2 行。
-    assert_eq!(banner.len(), 2);
-    let plain = stripped(&banner);
-    assert!(plain.contains("アップデートがあるぴょん"));
-    assert!(plain.contains("v0.2.0"));
-}
-
-#[test]
-fn render_frame_shows_the_update_notice_when_a_newer_release_exists() {
+fn render_frame_speaks_the_update_notice_from_the_sidebar_rabbit() {
+    // A newer release makes the resting sidebar mascot speak the notice (the
+    // message and the new version) from a bubble above it — no top-right banner.
     let mut state = state_with(Vec::new());
     state.set_update(crate::domain::version::Version::parse("9.9.9"));
     let joined = stripped(&render_frame(24, 100, &state));
     assert!(joined.contains("アップデートがあるぴょん"));
     assert!(joined.contains("v9.9.9"));
+    // The bubble's tail points down to the mascot, so the news reads as spoken.
+    assert!(joined.contains('┬'));
 }
 
 #[test]
 fn render_frame_hides_the_update_notice_by_default() {
     let state = state_with(Vec::new());
+    let joined = stripped(&render_frame(24, 100, &state));
+    assert!(!joined.contains("アップデートがあるぴょん"));
+}
+
+#[test]
+fn render_frame_hides_the_update_notice_when_the_sidebar_is_collapsed() {
+    // The notice lives on the sidebar mascot, so collapsing the sidebar to the
+    // rail (which shows no mascot) hides it rather than relocating it.
+    let mut state = state_with(Vec::new());
+    state.set_update(crate::domain::version::Version::parse("9.9.9"));
+    state.set_sidebar(Sidebar::Rail);
     let joined = stripped(&render_frame(24, 100, &state));
     assert!(!joined.contains("アップデートがあるぴょん"));
 }
@@ -2077,10 +2194,11 @@ fn task_status_line_is_empty_without_rows() {
 }
 
 #[test]
-fn render_frame_shows_the_task_status_over_the_update_notice() {
+fn render_frame_shows_the_task_status_alongside_the_spoken_update() {
     use super::super::tasks::{TaskMark, TaskRow};
     let mut state = state_with(Vec::new());
-    // Even with an update available, in-flight tasks take the corner.
+    // The task status (top-right corner) and the update notice (sidebar mascot)
+    // now live in different places, so both show at once.
     state.set_update(crate::domain::version::Version::parse("9.9.9"));
     state.set_tasks(vec![TaskRow {
         label: "作成中… main".to_string(),
@@ -2088,7 +2206,7 @@ fn render_frame_shows_the_task_status_over_the_update_notice() {
     }]);
     let joined = stripped(&render_frame(24, 100, &state));
     assert!(joined.contains("作成中… main"));
-    assert!(!joined.contains("アップデートがあるぴょん"));
+    assert!(joined.contains("アップデートがあるぴょん"));
 }
 
 #[test]
@@ -2115,9 +2233,10 @@ fn render_frame_shows_the_task_status_on_the_header_over_a_live_terminal() {
 }
 
 #[test]
-fn render_frame_rides_the_update_notice_on_the_header_over_a_live_terminal() {
-    // The update notice now anchors to the header rows (like the task status),
-    // so it shows even over a live terminal without overdrawing the shell output.
+fn render_frame_speaks_the_update_from_the_sidebar_over_a_live_terminal() {
+    // The update notice lives on the sidebar mascot, so it shows in the left pane
+    // even while a live terminal fills the right pane — the shell output is never
+    // overdrawn, and the notice stays off the header rows.
     let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Pushed)]);
     state.enter_focus(1);
     state.show_attached();
@@ -2128,9 +2247,9 @@ fn render_frame_rides_the_update_notice_on_the_header_over_a_live_terminal() {
     assert!(joined.contains("アップデートがあるぴょん"));
     // The shell output stays intact in the body.
     assert!(joined.contains("$ echo hi"));
-    // The notice rides the header rows (rows 0-1), not the body where the shell is.
+    // The notice is spoken from the sidebar, not the header rows (rows 0-1).
     let header = stripped(&frame[0..2]);
-    assert!(header.contains("アップデートがあるぴょん"));
+    assert!(!header.contains("アップデートがあるぴょん"));
 }
 
 #[test]
@@ -2148,12 +2267,13 @@ fn render_frame_keeps_the_loading_rabbit_over_a_live_terminal() {
 }
 
 #[test]
-fn update_notice_is_skipped_when_the_terminal_is_too_narrow() {
-    // The banner block is wider than this terminal, so it is dropped rather than
-    // wrapping or clobbering the chrome.
+fn update_notice_is_skipped_when_the_sidebar_is_too_narrow_for_the_mascot() {
+    // The notice rides the sidebar mascot, which is dropped when the sidebar is
+    // too narrow to hold the art — so the notice goes with it rather than
+    // clobbering the cramped chrome.
     let mut state = state_with(Vec::new());
     state.set_update(crate::domain::version::Version::parse("9.9.9"));
-    let joined = stripped(&render_frame(24, 20, &state));
+    let joined = stripped(&render_frame(24, 11, &state));
     assert!(!joined.contains("アップデートがあるぴょん"));
 }
 
@@ -2168,15 +2288,15 @@ fn render_frame_shows_the_loading_rabbit_while_an_action_runs() {
 }
 
 #[test]
-fn loading_rabbit_takes_the_corner_over_the_update_notice() {
-    // With both a pending update and a running action, the loading rabbit wins
-    // the top-right corner so the in-flight work is what the user sees.
+fn loading_rabbit_takes_the_corner_while_the_sidebar_speaks_the_update() {
+    // The loading rabbit owns the top-right corner during a blocking action; the
+    // update notice lives on the sidebar mascot, so both show at once.
     let mut state = state_with(Vec::new());
     state.set_update(crate::domain::version::Version::parse("9.9.9"));
     state.step_loading("作成中…");
     let joined = stripped(&render_frame(24, 100, &state));
     assert!(joined.contains("作成中…"));
-    assert!(!joined.contains("アップデートがあるぴょん"));
+    assert!(joined.contains("アップデートがあるぴょん"));
 }
 
 #[test]

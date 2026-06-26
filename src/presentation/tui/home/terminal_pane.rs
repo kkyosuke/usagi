@@ -7,8 +7,9 @@
 //! Keystrokes are forwarded to the shell as raw bytes.
 //!
 //! The **reserved keys** are `Ctrl-O`, `Ctrl-N`/`Ctrl-P`, `Ctrl-T`/`Ctrl-G`,
-//! `Ctrl-W`, `Ctrl-^`, `Ctrl-B`, and `Ctrl-Q`: everything else, including `Esc`,
-//! flows to the shell.
+//! `Ctrl-^`, `Ctrl-B`, and `Ctrl-Q`: everything else, including `Esc` **and
+//! `Ctrl-W`** (the universal shell "delete previous word" — closing a tab is done
+//! from 切替 instead), flows to the shell.
 //! `Ctrl-B` collapses / expands the left sidebar in place (it never leaves 没入).
 //! A single
 //! `Ctrl-O` zooms out one engagement level by returning [`PaneStep::Detach`]
@@ -20,8 +21,7 @@
 //! and a left click on a tab chip jumps straight to it ([`PaneStep::ToTab`]);
 //! `Ctrl-T` zooms out to 在席 (Focus) — the session's action menu — by returning
 //! [`PaneStep::ToFocus`] (every pane stays alive in the pool); `Ctrl-G` adds an
-//! agent tab ([`PaneStep::NewAgentTab`]) and `Ctrl-W` closes the active tab
-//! ([`PaneStep::CloseTab`]) without leaving 没入. `Ctrl-^` jumps to the previously
+//! agent tab ([`PaneStep::NewAgentTab`]) without leaving 没入. `Ctrl-^` jumps to the previously
 //! focused session ([`PaneStep::PrevSession`]). `Ctrl-Q` leaves 没入 to quit usagi
 //! ([`PaneStep::Quit`]), raising the quit-confirmation modal on the home screen.
 //! The shell exiting on its own reports [`PaneStep::Closed`].
@@ -86,9 +86,6 @@ pub enum PaneStep {
     ToFocus,
     /// `Ctrl-G`: add a new agent tab and make it active, without leaving 没入.
     NewAgentTab,
-    /// `Ctrl-W`: close the active tab without leaving 没入. The caller drops it,
-    /// then keeps driving the next pane or falls to 在席 when none remain.
-    CloseTab,
     /// `Ctrl-^`: leave 没入 to jump to the previously focused session (vim's
     /// `Ctrl-^` / tmux's `last-window`), attaching it when live. The caller
     /// re-roots the pane on that session.
@@ -420,10 +417,10 @@ fn wait(pty: &PtySession, drawn_gen: u64, redraw_deadline: Option<Instant>) -> R
 /// leaving every pane alive in the pool; `Ctrl-N` / `Ctrl-P` switch to the next /
 /// previous tab in place ([`PaneStep::NextTab`] / [`PaneStep::PrevTab`]);
 /// `Ctrl-T` zooms out to 在席 (Focus) ([`PaneStep::ToFocus`]), leaving every pane
-/// alive; `Ctrl-G` adds an agent tab ([`PaneStep::NewAgentTab`]) and `Ctrl-W`
-/// closes the active tab ([`PaneStep::CloseTab`]); `Ctrl-^` jumps to the
-/// previously focused session ([`PaneStep::PrevSession`]). Other events are
-/// ignored so the next redraw picks up any new size.
+/// alive; `Ctrl-G` adds an agent tab ([`PaneStep::NewAgentTab`]); `Ctrl-^` jumps
+/// to the previously focused session ([`PaneStep::PrevSession`]). `Ctrl-W` is not
+/// claimed — it reaches the shell as "delete previous word"; tabs are closed from
+/// 切替 (`x`). Other events are ignored so the next redraw picks up any new size.
 #[allow(clippy::too_many_arguments)]
 fn pump_input(
     term: &Term,
@@ -487,19 +484,19 @@ fn pump_input(
                     *selection = None;
                     return Ok(Some(PaneStep::ToFocus));
                 }
-                // `Ctrl-G` adds an agent tab and `Ctrl-W` closes the active one —
-                // both in place, so the pool-driven loop applies the change and
-                // keeps driving without leaving 没入. (Like the tab chords above,
-                // this claims these from the shell/agent.)
+                // `Ctrl-G` adds an agent tab in place, so the pool-driven loop
+                // applies the change and keeps driving without leaving 没入. (Like
+                // the tab chords above, this claims the chord from the shell/agent.)
+                //
+                // `Ctrl-W` is deliberately *not* claimed: it is the universal
+                // "delete previous word" in shells and readline, so stealing it to
+                // close a tab destroyed a word mid-command and killed the pane. It
+                // now flows to the shell like any other key; closing a tab is done
+                // from 切替 (`Ctrl-O`, then `x`).
                 if is_new_agent_tab(&key) {
                     *scrollback = 0;
                     *selection = None;
                     return Ok(Some(PaneStep::NewAgentTab));
-                }
-                if is_close_tab(&key) {
-                    *scrollback = 0;
-                    *selection = None;
-                    return Ok(Some(PaneStep::CloseTab));
                 }
                 // `Ctrl-^` leaves 没入 to jump to the previously focused session,
                 // re-rooting the pane there (attaching when live). (Like the tab
@@ -871,12 +868,6 @@ fn is_new_agent_tab(key: &KeyEvent) -> bool {
     chord(key, '\u{07}', 'g')
 }
 
-/// Whether this key is `Ctrl-W` (close the active tab), as the raw `0x17` (ETB)
-/// char or `'w'` + `CONTROL`.
-fn is_close_tab(key: &KeyEvent) -> bool {
-    chord(key, '\u{17}', 'w')
-}
-
 /// Whether this key is `Ctrl-B` (toggle the left sidebar), as the raw `0x02`
 /// (STX) char or `'b'` + `CONTROL`.
 fn is_toggle_sidebar(key: &KeyEvent) -> bool {
@@ -1046,9 +1037,9 @@ mod tests {
 
     #[test]
     fn pane_chords_match_both_forms_and_reject_others() {
-        // Ctrl-T (zoom out to 在席) / Ctrl-G (add agent) / Ctrl-W (close):
-        // crossterm's letter + CONTROL, and the bare control char some terminals
-        // deliver instead (0x14 / 0x07 / 0x17).
+        // Ctrl-T (zoom out to 在席) / Ctrl-G (add agent): crossterm's letter +
+        // CONTROL, and the bare control char some terminals deliver instead
+        // (0x14 / 0x07).
         assert!(is_to_focus(&key(KeyCode::Char('t'), KeyModifiers::CONTROL)));
         assert!(is_to_focus(&key(
             KeyCode::Char('\u{14}'),
@@ -1062,23 +1053,20 @@ mod tests {
             KeyCode::Char('\u{07}'),
             KeyModifiers::NONE
         )));
-        assert!(is_close_tab(&key(
-            KeyCode::Char('w'),
-            KeyModifiers::CONTROL
-        )));
-        assert!(is_close_tab(&key(
-            KeyCode::Char('\u{17}'),
-            KeyModifiers::NONE
-        )));
         // Plain letters and the wrong chord are rejected (they flow to the shell).
         assert!(!is_to_focus(&key(KeyCode::Char('t'), KeyModifiers::NONE)));
         assert!(!is_new_agent_tab(&key(
             KeyCode::Char('g'),
             KeyModifiers::NONE
         )));
-        assert!(!is_close_tab(&key(KeyCode::Char('w'), KeyModifiers::NONE)));
-        assert!(!is_close_tab(&key(
-            KeyCode::Char('t'),
+        // Ctrl-W is no longer a pane chord: it flows to the shell ("delete previous
+        // word") rather than closing a tab. Nothing here should treat it specially.
+        assert!(!is_to_focus(&key(
+            KeyCode::Char('w'),
+            KeyModifiers::CONTROL
+        )));
+        assert!(!is_new_agent_tab(&key(
+            KeyCode::Char('w'),
             KeyModifiers::CONTROL
         )));
     }

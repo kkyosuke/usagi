@@ -89,6 +89,48 @@ impl IssueStore {
         Ok(issues)
     }
 
+    /// Like [`scan`](Self::scan) but **tolerant**: a markdown file that fails to
+    /// read or parse is recorded to the daily error log and skipped, rather than
+    /// failing the whole scan. Directory-level read failures still propagate.
+    ///
+    /// Used by [`rebuild_index`](Self::rebuild_index) so one corrupt or
+    /// half-written issue file cannot fail an unrelated [`write`](Self::write)
+    /// (whose target file is already persisted by the time the index rebuilds) or
+    /// break `issue list` — the index simply rebuilds from the files that parse,
+    /// mirroring how [`load_index`](Self::load_index) self-heals a corrupt cache.
+    /// The strict [`scan`](Self::scan) stays the choice where every issue must be
+    /// readable (e.g. the dependency graph).
+    fn scan_lenient(&self) -> Result<Vec<Issue>> {
+        use rayon::prelude::*;
+
+        let parsed: Vec<(PathBuf, Result<Issue>)> = self
+            .issue_files()?
+            .into_par_iter()
+            .map(|path| {
+                let issue = fs::read_to_string(&path)
+                    .context(format!("failed to read {}", path.display()))
+                    .and_then(|text| {
+                        Issue::from_markdown(&text)
+                            .with_context(|| format!("failed to parse {}", path.display()))
+                    });
+                (path, issue)
+            })
+            .collect();
+
+        let mut issues = Vec::with_capacity(parsed.len());
+        for (path, issue) in parsed {
+            match issue {
+                Ok(issue) => issues.push(issue),
+                Err(e) => ErrorLog::record(&format!(
+                    "skipping unparseable issue file {} while rebuilding the index: {e:#}",
+                    path.display()
+                )),
+            }
+        }
+        issues.sort_by_key(|i| i.number);
+        Ok(issues)
+    }
+
     /// Paths of every issue markdown file in the directory (the index and any
     /// non-`.md` files excluded). Empty when the directory does not exist.
     fn issue_files(&self) -> Result<Vec<PathBuf>> {
@@ -237,7 +279,11 @@ impl IssueStore {
 
     /// Rebuild `index.json` from the markdown files and return the summaries.
     fn rebuild_index(&self) -> Result<Vec<IssueSummary>> {
-        let summaries: Vec<IssueSummary> = self.scan()?.iter().map(Issue::summary).collect();
+        // Tolerant scan: one corrupt sibling file must not fail a write whose own
+        // file already landed, nor break `issue list`. The skipped files are
+        // logged (see [`scan_lenient`](Self::scan_lenient)).
+        let summaries: Vec<IssueSummary> =
+            self.scan_lenient()?.iter().map(Issue::summary).collect();
         if summaries.is_empty() && !self.dir.exists() {
             // Nothing stored and no directory yet: don't create files eagerly.
             return Ok(summaries);
@@ -454,6 +500,52 @@ mod tests {
 
         let err = store.scan().unwrap_err();
         assert!(err.to_string().contains("failed to parse"));
+    }
+
+    #[test]
+    fn write_tolerates_a_corrupt_sibling_and_indexes_the_parseable_files() {
+        // A corrupt sibling file used to fail every later write: `write` persists
+        // its own file, then `rebuild_index` scanned *all* markdown and choked on
+        // the bad one, so the write returned an error (with the new file already on
+        // disk and the index stale). The rebuild is now tolerant. Pin the data dir
+        // so the skip's log line is hermetic.
+        let _guard = crate::test_support::process_env_guard();
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var(crate::infrastructure::storage::DATA_DIR_ENV, home.path());
+
+        let tmp = tempfile::tempdir().unwrap();
+        let store = IssueStore::new(tmp.path());
+        store.write(&issue(1, "First")).unwrap();
+        // A corrupt, unparseable issue file lands beside the valid one.
+        fs::write(store.dir().join("002-broken.md"), "not an issue").unwrap();
+
+        // Writing another issue still succeeds — the unrelated corrupt sibling is
+        // skipped during the index rebuild instead of failing the whole write.
+        store.write(&issue(3, "Third")).unwrap();
+
+        // The index rebuilt from the files that parse (1 and 3); the corrupt one
+        // is skipped — but the strict `scan` still surfaces it for callers that
+        // need every issue readable (e.g. the dependency graph).
+        let nums: Vec<u32> = store
+            .summaries()
+            .unwrap()
+            .iter()
+            .map(|s| s.number)
+            .collect();
+        assert_eq!(nums, vec![1, 3]);
+        assert!(store.scan().is_err());
+
+        // The skip is recorded in the daily log rather than silently swallowed.
+        let entry = fs::read_dir(home.path().join("logs"))
+            .expect("logs dir exists")
+            .next()
+            .expect("a log file was written")
+            .expect("readable entry");
+        assert!(fs::read_to_string(entry.path())
+            .unwrap()
+            .contains("skipping unparseable issue file"));
+
+        std::env::remove_var(crate::infrastructure::storage::DATA_DIR_ENV);
     }
 
     #[test]

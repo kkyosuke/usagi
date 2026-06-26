@@ -4,6 +4,8 @@
 //! neutralisation) lives once in [`crate::domain::frontmatter`]; this module owns
 //! only the issue's field set and the issue-specific number-list helpers.
 
+use std::fmt::Write;
+
 use chrono::{DateTime, Utc};
 
 use crate::domain::frontmatter::{
@@ -18,25 +20,26 @@ impl Issue {
     /// Required fields are always emitted; the optional `parent` and `milestone`
     /// lines are written only when set, so issues that don't use them stay clean.
     pub fn to_markdown(&self) -> String {
+        // Writing into a `String` via `std::fmt::Write` is infallible, so each
+        // `writeln!` result is discarded. This appends straight into `out`
+        // rather than allocating a throwaway `String` per field as
+        // `push_str(&format!(…))` would (cf. `format_number_list`).
         let mut out = String::from("---\n");
-        out.push_str(&format!("number: {}\n", self.number));
-        out.push_str(&format!("title: {}\n", inline(&self.title)));
-        out.push_str(&format!("status: {}\n", self.status.as_str()));
-        out.push_str(&format!("priority: {}\n", self.priority.as_str()));
-        out.push_str(&format!("labels: {}\n", format_string_list(&self.labels)));
-        out.push_str(&format!(
-            "dependson: {}\n",
-            format_number_list(&self.dependson)
-        ));
-        out.push_str(&format!("related: {}\n", format_number_list(&self.related)));
+        let _ = writeln!(out, "number: {}", self.number);
+        let _ = writeln!(out, "title: {}", inline(&self.title));
+        let _ = writeln!(out, "status: {}", self.status.as_str());
+        let _ = writeln!(out, "priority: {}", self.priority.as_str());
+        let _ = writeln!(out, "labels: {}", format_string_list(&self.labels));
+        let _ = writeln!(out, "dependson: {}", format_number_list(&self.dependson));
+        let _ = writeln!(out, "related: {}", format_number_list(&self.related));
         if let Some(parent) = self.parent {
-            out.push_str(&format!("parent: {parent}\n"));
+            let _ = writeln!(out, "parent: {parent}");
         }
         if let Some(milestone) = &self.milestone {
-            out.push_str(&format!("milestone: {}\n", inline(milestone)));
+            let _ = writeln!(out, "milestone: {}", inline(milestone));
         }
-        out.push_str(&format!("created_at: {}\n", self.created_at.to_rfc3339()));
-        out.push_str(&format!("updated_at: {}\n", self.updated_at.to_rfc3339()));
+        let _ = writeln!(out, "created_at: {}", self.created_at.to_rfc3339());
+        let _ = writeln!(out, "updated_at: {}", self.updated_at.to_rfc3339());
         out.push_str("---\n\n");
         out.push_str(self.body.trim_end_matches('\n'));
         out.push('\n');
@@ -143,15 +146,21 @@ impl Issue {
 }
 
 /// Render numbers as a `[1, 2, 3]` frontmatter list.
+///
+/// Writes the comma-separated numbers straight into the output string, avoiding
+/// the intermediate `Vec<String>` an `iter().map(to_string).collect().join()`
+/// would allocate on every `to_markdown`.
 fn format_number_list(items: &[u32]) -> String {
-    format!(
-        "[{}]",
-        items
-            .iter()
-            .map(|n| n.to_string())
-            .collect::<Vec<_>>()
-            .join(", ")
-    )
+    let mut out = String::from("[");
+    for (i, n) in items.iter().enumerate() {
+        if i > 0 {
+            out.push_str(", ");
+        }
+        // Writing a u32 into a String is infallible.
+        let _ = write!(out, "{n}");
+    }
+    out.push(']');
+    out
 }
 
 /// Parse `[1, 2, 3]` into issue numbers. Used for both `dependson` and

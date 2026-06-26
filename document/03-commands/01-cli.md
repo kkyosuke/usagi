@@ -4,7 +4,7 @@
 
 シェルから `usagi <cmd>` で実行する CLI コマンドの一覧です。
 
-`issue` / `memory` / `mcp` / `llm-mcp` は **AI エージェントが MCP 経由で扱うためのコマンド**で、`usagi --help` の一覧には表示しません（実行自体は可能）。人手で叩くものではないため、ヘルプを汚さないよう隠しています。
+`issue` / `memory` / `mcp` / `llm-mcp` は **AI エージェントが MCP 経由で扱うためのコマンド**で、`usagi --help` の一覧には表示しません（実行自体は可能）。人手で叩くものではないため、ヘルプを汚さないよう隠しています。`agent-phase`（エージェントのライフサイクルフックが状態を報告するために呼ぶ内部コマンド）も同様に隠しコマンドで、人手で実行するものではありません。
 
 ## 目次
 
@@ -201,7 +201,7 @@ user         tabs                     ユーザーはタブを好む
 
 ### `usagi mcp`
 
-`usagi issue` / `usagi memory` と同じ issue・メモリ操作に加え、セッション操作（`session_create` / `session_list` / `session_prompt`）を、**MCP（Model Context Protocol）サーバ**として AI エージェント（Claude Code など）に stdio 経由で公開します。issue・memory・session の tool を 1 つの `usagi` サーバが提供します。アーキテクチャ・対応 tool・`session_prompt` の挙動・JSON-RPC プロトコルの詳細は専用の章 [3.3 MCP サーバ](03-mcp.md) を参照してください。
+`usagi issue` / `usagi memory` と同じ issue・メモリ操作に加え、セッション操作（`session_create` / `session_list` / `session_prompt` / `session_remove`）を、**MCP（Model Context Protocol）サーバ**として AI エージェント（Claude Code など）に stdio 経由で公開します。issue・memory・session の tool を 1 つの `usagi` サーバが提供します。アーキテクチャ・対応 tool・`session_prompt` の挙動・JSON-RPC プロトコルの詳細は専用の章 [3.3 MCP サーバ](03-mcp.md) を参照してください。
 
 ### `usagi llm-mcp`
 

@@ -267,16 +267,36 @@ impl Command for SessionCommand {
         }
     }
 
-    fn complete_args(&self, args: &str, _ctx: &CompletionContext) -> Vec<String> {
+    fn complete_args(&self, args: &str, ctx: &CompletionContext) -> Vec<String> {
         let (head, _) = arg_tokens(args);
+        // Already-complete argument tokens after the subcommand word, e.g. a
+        // session name or a flag the user has finished typing.
+        let after_sub = || head.iter().skip(1);
+        // Whether a session name has already been settled (any complete non-flag
+        // token), so the `<name>` slot is filled and only flags remain.
+        let name_chosen = || after_sub().any(|tok| !tok.starts_with('-'));
+        let session_names = || ctx.session_names.iter().map(|n| n.to_string());
+
         match head.first().map(|sub| session_subcommand(sub)) {
             // Still on the subcommand word: offer the canonical subcommands.
             None => ["create", "list", "switch", "remove"]
                 .iter()
                 .map(|s| s.to_string())
                 .collect(),
-            // `session remove <name>` takes an optional --force flag.
-            Some("remove") => vec!["--force".to_string()],
+            // `session switch <name>` completes the session name; once one is
+            // chosen there is nothing more to complete.
+            Some("switch") if !name_chosen() => session_names().collect(),
+            // `session remove <name> [--force]`: offer the session names (until
+            // one is chosen) alongside the optional --force flag.
+            Some("remove") => {
+                let mut candidates: Vec<String> = if name_chosen() {
+                    Vec::new()
+                } else {
+                    session_names().collect()
+                };
+                candidates.push("--force".to_string());
+                candidates
+            }
             // Other subcommands take a free-form name with nothing to complete.
             _ => Vec::new(),
         }

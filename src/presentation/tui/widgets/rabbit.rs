@@ -95,6 +95,168 @@ pub fn farewell_lines() -> Vec<String> {
     lines
 }
 
+/// The mascot's mood while it rests at the bottom of the workspace sidebar — one
+/// per home-screen engagement mode (切替 / 在席 / 没入), so the resting rabbit's
+/// expression and gesture mirror what the user is doing. The presentation layer
+/// maps its [`Mode`](crate::presentation::tui::home) onto this so the widget
+/// stays decoupled from the screen's own enum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RabbitMood {
+    /// 切替 (Switch): browsing the session list — ears up, looking around (`?`).
+    Browsing,
+    /// 在席 (Focus): a session is in hand — bright-eyed and attentive, a raised
+    /// paw (`/`).
+    Attentive,
+    /// 没入 (Attached): immersed in the live terminal — eyes screwed up in
+    /// concentration, paws at work (`9`).
+    Working,
+}
+
+impl RabbitMood {
+    /// The mood's face row (the mascot's middle line) and the colour the whole
+    /// block is painted: magenta while browsing (the mascot's resting colour),
+    /// cyan while attending a session (the accent the right pane uses), and green
+    /// while a turn runs (matching the `▶ running` accent).
+    fn face_and_style(self) -> (&'static str, Style) {
+        match self {
+            RabbitMood::Browsing => (" (o.o)? ", Style::new().magenta().bold()),
+            RabbitMood::Attentive => (" (^.^)/ ", Style::new().cyan().bold()),
+            RabbitMood::Working => (" (>.<)9 ", Style::new().green().bold()),
+        }
+    }
+}
+
+/// The resting mascot for the bottom of the workspace sidebar, its face and
+/// gesture chosen by `mood` so the rabbit reflects the current engagement mode.
+/// The ears ([`RABBIT`] row 0) and feet (row 2) are the mascot's own, and only
+/// the middle face row changes between moods, so the usagi stays recognisably
+/// the same animal while its expression shifts. Every row is padded to a common
+/// block width and painted the mood's colour, so the block tiles as a rectangle
+/// wherever it is placed.
+pub fn workspace_rabbit(mood: RabbitMood) -> Vec<String> {
+    let (face, paint) = mood.face_and_style();
+    let rows = [
+        RABBIT[0].to_string(),
+        face.to_string(),
+        RABBIT[2].to_string(),
+    ];
+    let block_w = rows
+        .iter()
+        .map(|row| console::measure_text_width(row))
+        .max()
+        .unwrap_or(0);
+    rows.into_iter()
+        .map(|row| {
+            let pad = block_w.saturating_sub(console::measure_text_width(&row));
+            paint
+                .apply_to(format!("{row}{}", " ".repeat(pad)))
+                .to_string()
+        })
+        .collect()
+}
+
+/// Columns the speech bubble spends on chrome around its text: a rounded border
+/// and one space of padding on each side.
+const SPEECH_CHROME: usize = 4;
+
+/// The resting workspace mascot *speaking* `speech`: a yellow speech bubble
+/// carrying those lines sits above the [`workspace_rabbit`], with a tail pointing
+/// down to the usagi's head — so the rabbit reads as saying them. This is where
+/// the home screen surfaces the "update available" notice (the message and the
+/// new version), moved off the top-right corner so the news comes from the
+/// mascot.
+///
+/// `speech`'s lines are wrapped to fit `max_width` (the sidebar width), so a long
+/// message flows onto more bubble rows rather than overrunning the pane; the
+/// bubble is painted the update accent (yellow-bold) while the rabbit keeps its
+/// `mood` colour, separating the alert from the mascot. When `max_width` leaves
+/// no room for even a one-column bubble, or `speech` is empty, it falls back to
+/// the silent [`workspace_rabbit`]. Every row is padded to a common block width
+/// so the block tiles as a rectangle wherever it is placed.
+pub fn workspace_rabbit_speaking(
+    mood: RabbitMood,
+    speech: &[String],
+    max_width: usize,
+) -> Vec<String> {
+    let inner = max_width.saturating_sub(SPEECH_CHROME);
+    // Wrap every speech line to the bubble's inner width, flattening to the
+    // bubble's content rows.
+    let content: Vec<String> = speech
+        .iter()
+        .flat_map(|line| super::wrap_to_width(line, inner))
+        .collect();
+    if content.is_empty() {
+        // Too narrow for a bubble (or nothing to say): rest silently instead.
+        return workspace_rabbit(mood);
+    }
+    let content_w = content
+        .iter()
+        .map(|row| console::measure_text_width(row))
+        .max()
+        .unwrap_or(0);
+
+    // The bubble is the update accent (yellow-bold); the rabbit keeps its mood
+    // colour, so the alert and the mascot stay visually distinct.
+    let bubble = Style::new().yellow().bold();
+    // Columns between the corner glyphs: the content area plus a padding space on
+    // each side.
+    let span = content_w + 2;
+
+    let mut rows: Vec<String> = Vec::with_capacity(content.len() + 1 + RABBIT.len());
+    rows.push(
+        bubble
+            .apply_to(format!("╭{}╮", "─".repeat(span)))
+            .to_string(),
+    );
+    for line in &content {
+        let pad = content_w.saturating_sub(console::measure_text_width(line));
+        rows.push(
+            bubble
+                .apply_to(format!("│ {line}{} │", " ".repeat(pad)))
+                .to_string(),
+        );
+    }
+    // The bottom border carries the speech tail (`┬`) one column in, so it lands
+    // over the mascot's ears ([`RABBIT`] row 0 begins at column 2) and the bubble
+    // reads as coming from the usagi just below.
+    let mut bottom = String::from("╰");
+    for i in 0..span {
+        bottom.push(if i == 1 { '┬' } else { '─' });
+    }
+    bottom.push('╯');
+    rows.push(bubble.apply_to(bottom).to_string());
+
+    // The resting mascot below, in its mood colour — only the face row changes.
+    let (face, paint) = mood.face_and_style();
+    for art in [RABBIT[0], face, RABBIT[2]] {
+        rows.push(paint.apply_to(art).to_string());
+    }
+
+    // Pad every row to the widest so the block tiles as a rectangle.
+    let block_w = rows
+        .iter()
+        .map(|row| console::measure_text_width(row))
+        .max()
+        .unwrap_or(0);
+    rows.into_iter()
+        .map(|row| {
+            let pad = block_w.saturating_sub(console::measure_text_width(&row));
+            format!("{row}{}", " ".repeat(pad))
+        })
+        .collect()
+}
+
+/// The display width of the [`workspace_rabbit`] block, so a caller can check the
+/// sidebar is wide enough to hold it before placing it (and skip it otherwise,
+/// rather than overrunning a narrow pane).
+pub fn workspace_rabbit_width() -> usize {
+    [RABBIT[0], RABBIT[2]]
+        .iter()
+        .map(|row| console::measure_text_width(row))
+        .max()
+        .unwrap_or(0)
+}
+
 /// The hopping rabbit's poses as `(ears, body)`. The ears sit centred over the
 /// head (the `∩∩` lands on the `ㅅ`), and each "hop" pose shifts the ears *and*
 /// the body together by one column so they bounce as a unit without the ears
@@ -346,6 +508,118 @@ mod tests {
         assert!(plain
             .iter()
             .all(|l| console::measure_text_width(l) == width));
+    }
+
+    #[test]
+    fn workspace_rabbit_keeps_the_mascots_ears_and_feet_across_moods() {
+        // Only the face row changes between moods; the ears (row 0) and feet
+        // (row 2) stay the mascot's own, so the usagi reads as the same animal
+        // whichever mode it reflects.
+        for mood in [
+            RabbitMood::Browsing,
+            RabbitMood::Attentive,
+            RabbitMood::Working,
+        ] {
+            let lines = workspace_rabbit(mood);
+            assert_eq!(lines.len(), 3);
+            let plain: Vec<String> = lines
+                .iter()
+                .map(|l| console::strip_ansi_codes(l).into_owned())
+                .collect();
+            assert!(plain[0].contains("(\\(\\"), "ears on row 0 for {mood:?}");
+            assert!(
+                plain[2].contains("o(_(\")(\")"),
+                "feet on row 2 for {mood:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn workspace_rabbit_changes_face_and_gesture_with_the_mood() {
+        // Each mood shows a distinct expression and gesture, so the resting rabbit
+        // signals the current engagement mode at a glance.
+        let face =
+            |mood| console::strip_ansi_codes(&workspace_rabbit(mood).join("\n")).into_owned();
+        assert!(face(RabbitMood::Browsing).contains("(o.o)?"));
+        assert!(face(RabbitMood::Attentive).contains("(^.^)/"));
+        assert!(face(RabbitMood::Working).contains("(>.<)9"));
+    }
+
+    #[test]
+    fn workspace_rabbit_rows_share_one_block_width() {
+        // Every row pads to the widest, so the block tiles as a rectangle and the
+        // advertised width matches what is drawn.
+        for mood in [
+            RabbitMood::Browsing,
+            RabbitMood::Attentive,
+            RabbitMood::Working,
+        ] {
+            let lines = workspace_rabbit(mood);
+            let w0 = console::measure_text_width(&lines[0]);
+            assert!(lines.iter().all(|l| console::measure_text_width(l) == w0));
+            assert_eq!(w0, workspace_rabbit_width());
+        }
+    }
+
+    #[test]
+    fn workspace_rabbit_speaking_puts_the_speech_in_a_bubble_above_the_mascot() {
+        let lines = workspace_rabbit_speaking(
+            RabbitMood::Browsing,
+            &["アップデートがあるぴょん".to_string(), "v0.2.0".to_string()],
+            40,
+        );
+        let plain: Vec<String> = lines
+            .iter()
+            .map(|l| console::strip_ansi_codes(l).into_owned())
+            .collect();
+        let joined = plain.join("\n");
+        // The bubble carries both speech lines, framed and tailed toward the rabbit.
+        assert!(joined.contains("アップデートがあるぴょん"));
+        assert!(joined.contains("v0.2.0"));
+        assert!(plain[0].starts_with('╭') && plain[0].contains('╮'));
+        assert!(
+            joined.contains('┬'),
+            "the bubble has a tail toward the rabbit"
+        );
+        // The mascot rests below the bubble: its ears and feet are the last rows.
+        assert!(plain[plain.len() - 3].contains("(\\(\\"));
+        assert!(plain.last().unwrap().contains("o(_(\")(\")"));
+    }
+
+    #[test]
+    fn workspace_rabbit_speaking_rows_share_one_block_width() {
+        // Every row pads to the widest, so the block tiles as a rectangle wherever
+        // it is dropped into the sidebar.
+        let lines = workspace_rabbit_speaking(
+            RabbitMood::Attentive,
+            &["アップデートがあるぴょん".to_string(), "v1.2.3".to_string()],
+            40,
+        );
+        let w0 = console::measure_text_width(&lines[0]);
+        assert!(lines.iter().all(|l| console::measure_text_width(l) == w0));
+    }
+
+    #[test]
+    fn workspace_rabbit_speaking_wraps_a_long_message_to_fit_a_narrow_sidebar() {
+        // A bubble narrower than the message wraps it onto more rows rather than
+        // overrunning, and never exceeds the sidebar width.
+        let max = 16;
+        let lines = workspace_rabbit_speaking(
+            RabbitMood::Working,
+            &["アップデートがあるぴょん".to_string(), "v0.2.0".to_string()],
+            max,
+        );
+        assert!(lines.iter().all(|l| console::measure_text_width(l) <= max));
+        // More rows than the un-wrapped block (top + 2 speech + bottom + 3 rabbit).
+        assert!(lines.len() > 6);
+    }
+
+    #[test]
+    fn workspace_rabbit_speaking_falls_back_to_the_silent_mascot_when_too_narrow() {
+        // No room for even a one-column bubble: it rests silently, exactly like
+        // `workspace_rabbit`, rather than drawing a broken frame.
+        let lines = workspace_rabbit_speaking(RabbitMood::Browsing, &["x".to_string()], 2);
+        assert_eq!(lines, workspace_rabbit(RabbitMood::Browsing));
     }
 
     #[test]

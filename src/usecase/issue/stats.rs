@@ -35,6 +35,17 @@ impl IssueStats {
         stats
     }
 
+    /// Fold `other`'s counts into these. Lets a grouped listing accumulate the
+    /// overall total from its per-group tallies in one pass, instead of scanning
+    /// the whole listing again just for the overall.
+    pub fn merge(&mut self, other: &IssueStats) {
+        self.total += other.total;
+        self.todo += other.todo;
+        self.in_progress += other.in_progress;
+        self.done += other.done;
+        self.ready += other.ready;
+    }
+
     /// Completion as a whole-number percentage (0 when there are no issues).
     pub fn completion_percent(&self) -> u32 {
         (self.done * 100).checked_div(self.total).unwrap_or(0) as u32
