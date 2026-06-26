@@ -17,7 +17,7 @@
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -28,22 +28,53 @@ use portable_pty::{native_pty_system, Child, CommandBuilder, ExitStatus, MasterP
 use crate::infrastructure::error_log::ErrorLog;
 use crate::infrastructure::{pty_exit, terminal};
 
-/// Counts the audible bells (`^G`) the shell emits, recorded into a shared
-/// counter as the parser processes output.
+/// Side-channel signals the parser pulls out of the shell's output stream as it
+/// processes it — sequences `vt100` does not fold into the screen grid but the
+/// presentation layer still needs.
 ///
-/// Interactive agents such as Claude Code ring the terminal bell when they
-/// finish a turn and wait for the user — so a rising bell count is the signal
-/// the session monitor watches to flag a worktree as "waiting for input".
+/// - **Audible bells (`^G`)** are counted into a shared counter. Interactive
+///   agents such as Claude Code ring the terminal bell when they finish a turn
+///   and wait for the user — so a rising bell count is the signal the session
+///   monitor watches to flag a worktree as "waiting for input".
+/// - **The cursor shape (DECSCUSR, `CSI Ps SP q`)** is captured into a shared
+///   cell. `vt100` discards it, so without this an agent that picks a bar cursor
+///   would leave its shape stuck on the host terminal — and switching to a tab
+///   that wants a block would keep showing the previous tab's bar. The render
+///   loop reads [`PtySession::cursor_shape`] and re-asserts the active pane's
+///   shape, so each tab restores its own.
 ///
 /// Public only because it appears in [`PtySession::parser`]'s return type; it
 /// carries no usable surface of its own.
-pub struct BellCounter {
+pub struct ScreenCallbacks {
     count: Arc<AtomicU64>,
+    cursor_shape: Arc<AtomicU16>,
 }
 
-impl vt100::Callbacks for BellCounter {
+impl vt100::Callbacks for ScreenCallbacks {
     fn audible_bell(&mut self, _: &mut vt100::Screen) {
         self.count.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// `vt100` routes any CSI it does not implement here. DECSCUSR is
+    /// `CSI Ps SP q` — the space intermediate (`i1`) is what distinguishes it
+    /// from the other `q` finals — and `Ps` selects the cursor shape (0/1 =
+    /// blinking block, 2 = steady block, 3/4 = underline, 5/6 = bar). An absent
+    /// `Ps` defaults to 0. Shapes outside the defined 0..=6 range are ignored so
+    /// only a value we can safely re-emit is ever stored.
+    fn unhandled_csi(
+        &mut self,
+        _: &mut vt100::Screen,
+        i1: Option<u8>,
+        _i2: Option<u8>,
+        params: &[&[u16]],
+        c: char,
+    ) {
+        if c == 'q' && i1 == Some(b' ') {
+            let shape = params.first().and_then(|p| p.first()).copied().unwrap_or(0);
+            if shape <= 6 {
+                self.cursor_shape.store(shape, Ordering::SeqCst);
+            }
+        }
     }
 }
 
@@ -52,7 +83,7 @@ impl vt100::Callbacks for BellCounter {
 pub struct PtySession {
     master: Box<dyn MasterPty + Send>,
     writer: Box<dyn Write + Send>,
-    parser: Arc<Mutex<vt100::Parser<BellCounter>>>,
+    parser: Arc<Mutex<vt100::Parser<ScreenCallbacks>>>,
     alive: Arc<AtomicBool>,
     /// Bumped by the reader thread after every chunk it parses, so the render
     /// loop can tell at a glance whether the screen has changed since it last
@@ -62,6 +93,11 @@ pub struct PtySession {
     /// the parser mutex so the session monitor can poll it without contending
     /// with the render loop.
     bell: Arc<AtomicU64>,
+    /// The cursor shape (DECSCUSR `Ps`) the running program last selected, kept
+    /// outside the parser mutex so the render loop can re-assert the active
+    /// pane's shape cheaply. `0` until the program picks one (the terminal
+    /// default). See [`ScreenCallbacks`].
+    cursor_shape: Arc<AtomicU16>,
     child: Box<dyn Child + Send + Sync>,
     /// The worktree this shell runs in and whether it was launched into an agent
     /// CLI — both only for the line [`Drop`] records when the shell exits
@@ -146,12 +182,14 @@ impl PtySession {
             .context("failed to write to the pseudo-terminal")?;
 
         let bell = Arc::new(AtomicU64::new(0));
+        let cursor_shape = Arc::new(AtomicU16::new(0));
         let parser = Arc::new(Mutex::new(vt100::Parser::new_with_callbacks(
             rows,
             cols,
             SCROLLBACK_LINES,
-            BellCounter {
+            ScreenCallbacks {
                 count: Arc::clone(&bell),
+                cursor_shape: Arc::clone(&cursor_shape),
             },
         )));
         let alive = Arc::new(AtomicBool::new(true));
@@ -207,6 +245,7 @@ impl PtySession {
             alive,
             generation,
             bell,
+            cursor_shape,
             child,
             // A launch command means this pane runs an agent CLI; its absence a
             // plain terminal. Recorded for the exit log line built in Drop.
@@ -224,7 +263,7 @@ impl PtySession {
     /// would poison the mutex and an `expect` here would escalate it into a crash
     /// of the whole TUI — leaving the terminal in raw mode. A possibly-stale
     /// screen grid beats taking the UI down.
-    pub fn parser(&self) -> MutexGuard<'_, vt100::Parser<BellCounter>> {
+    pub fn parser(&self) -> MutexGuard<'_, vt100::Parser<ScreenCallbacks>> {
         self.parser
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -249,6 +288,14 @@ impl PtySession {
     /// without owning (or borrowing) the session.
     pub fn bell_handle(&self) -> Arc<AtomicU64> {
         Arc::clone(&self.bell)
+    }
+
+    /// The cursor shape (DECSCUSR `Ps`) the running program last selected, or `0`
+    /// (the terminal default) until it picks one. The embedded-pane render loop
+    /// re-emits `CSI Ps SP q` for the active pane so switching tabs restores each
+    /// pane's own cursor shape instead of leaking the previous tab's.
+    pub fn cursor_shape(&self) -> u16 {
+        self.cursor_shape.load(Ordering::SeqCst)
     }
 
     /// A shared handle to the liveness flag, so a background watcher can tell
@@ -405,5 +452,74 @@ impl Drop for PtySession {
                 let _ = thread.join();
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Drive a parser wired with [`ScreenCallbacks`] over `bytes` and read back
+    /// the shape the callback captured — the same path the reader thread feeds.
+    fn shape_after(bytes: &[u8]) -> u16 {
+        let cursor_shape = Arc::new(AtomicU16::new(0));
+        let mut parser = vt100::Parser::new_with_callbacks(
+            4,
+            10,
+            0,
+            ScreenCallbacks {
+                count: Arc::new(AtomicU64::new(0)),
+                cursor_shape: Arc::clone(&cursor_shape),
+            },
+        );
+        parser.process(bytes);
+        cursor_shape.load(Ordering::SeqCst)
+    }
+
+    #[test]
+    fn decscusr_captures_each_defined_cursor_shape() {
+        // 0..=6 are the defined DECSCUSR shapes (block / underline / bar, each
+        // blinking or steady); every one round-trips into the shared cell.
+        for ps in 0..=6u16 {
+            assert_eq!(shape_after(format!("\x1b[{ps} q").as_bytes()), ps);
+        }
+    }
+
+    #[test]
+    fn decscusr_with_no_param_is_the_default_shape() {
+        // `CSI SP q` with no `Ps` selects shape 0 (the terminal default).
+        assert_eq!(shape_after(b"\x1b[ q"), 0);
+    }
+
+    #[test]
+    fn out_of_range_shape_is_ignored() {
+        // A program first picks a bar (6), then emits an undefined shape (9): the
+        // junk value is dropped so only a re-emittable shape is ever stored.
+        assert_eq!(shape_after(b"\x1b[6 q\x1b[9 q"), 6);
+    }
+
+    #[test]
+    fn a_q_without_the_space_intermediate_is_not_decscusr() {
+        // `CSI Ps q` (no space) is not DECSCUSR, so it must not move the shape off
+        // its default.
+        assert_eq!(shape_after(b"\x1b[5q"), 0);
+    }
+
+    #[test]
+    fn an_audible_bell_still_counts_alongside_shape_capture() {
+        // The bell side-channel keeps working now that the callbacks also track
+        // the cursor shape.
+        let count = Arc::new(AtomicU64::new(0));
+        let mut parser = vt100::Parser::new_with_callbacks(
+            4,
+            10,
+            0,
+            ScreenCallbacks {
+                count: Arc::clone(&count),
+                cursor_shape: Arc::new(AtomicU16::new(0)),
+            },
+        );
+        parser.process(b"\x07\x07");
+        assert_eq!(count.load(Ordering::SeqCst), 2);
     }
 }
