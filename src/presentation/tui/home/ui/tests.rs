@@ -38,7 +38,7 @@ fn stripped(lines: &[String]) -> String {
 }
 
 #[test]
-fn text_modal_frame_windows_a_long_dump_with_more_counts() {
+fn text_modal_box_windows_a_long_dump_with_more_counts() {
     let lines: Vec<LogLine> = (0..30)
         .map(|i| LogLine::output(format!("entry {i}")))
         .collect();
@@ -47,7 +47,7 @@ fn text_modal_frame_windows_a_long_dump_with_more_counts() {
         lines,
         scroll: 5,
     };
-    let frame = stripped(&text_modal_frame(40, 120, &modal));
+    let frame = stripped(&text_modal_box(120, &modal));
     // The title and the hidden-line counts above and below the window show.
     assert!(frame.contains("Help"));
     assert!(frame.contains("↑ 5 more"));
@@ -60,13 +60,13 @@ fn text_modal_frame_windows_a_long_dump_with_more_counts() {
 }
 
 #[test]
-fn text_modal_frame_shows_a_short_dump_without_scroll_counts() {
+fn text_modal_box_shows_a_short_dump_without_scroll_counts() {
     let modal = TextModal {
         title: "History".to_string(),
         lines: vec![LogLine::output("  1  man"), LogLine::output("  2  history")],
         scroll: 0,
     };
-    let frame = stripped(&text_modal_frame(40, 120, &modal));
+    let frame = stripped(&text_modal_box(120, &modal));
     assert!(frame.contains("History"));
     assert!(frame.contains("man"));
     assert!(!frame.contains("more"));
@@ -1771,6 +1771,34 @@ fn command_palette_floats_over_the_visible_workspace() {
     // The palette box and its prompt are drawn …
     assert!(joined.contains('┌'));
     assert!(joined.contains("❯ m"));
+    // … and the workspace chrome behind it stays visible (the mode ladder and the
+    // workspace title), which a black full-screen modal would have hidden.
+    assert!(joined.contains("Switch"), "the mode ladder shows behind");
+    assert!(joined.contains("usagi"), "the workspace title shows behind");
+    // A row above the box still carries workspace content (it is not blanked).
+    let top = frame
+        .iter()
+        .position(|r| console::strip_ansi_codes(r).contains('┌'))
+        .expect("the box renders");
+    assert!(
+        (0..top).any(|r| !console::strip_ansi_codes(&frame[r]).trim().is_empty()),
+        "the workspace shows above the floating box",
+    );
+}
+
+#[test]
+fn text_modal_floats_over_the_visible_workspace() {
+    // The text modal (`man` / `history` / `session list` output) is composited
+    // over the live frame like the `:` palette, so the workspace shows around it
+    // instead of a black backdrop.
+    let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
+    state.open_text_modal("Help", vec![LogLine::output("man — show this help")]);
+    let frame = render_frame(40, 80, &state);
+    let joined = stripped(&frame);
+    // The modal box and its content are drawn …
+    assert!(joined.contains('┌'));
+    assert!(joined.contains("Help"));
+    assert!(joined.contains("man — show this help"));
     // … and the workspace chrome behind it stays visible (the mode ladder and the
     // workspace title), which a black full-screen modal would have hidden.
     assert!(joined.contains("Switch"), "the mode ladder shows behind");

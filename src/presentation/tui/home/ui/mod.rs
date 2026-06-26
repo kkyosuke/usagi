@@ -24,7 +24,7 @@ use crate::presentation::tui::widgets::clip_to_width;
 
 use chrome::{
     command_palette_box, footer_line, input_line, mode_ladder, quit_confirm_frame,
-    remove_modal_frame, switch_create_rows, switch_rename_rows, task_status_line, text_modal_frame,
+    remove_modal_frame, switch_create_rows, switch_rename_rows, task_status_line, text_modal_box,
     title_bar, update_banner,
 };
 use panes::{left_pane, right_pane_contents};
@@ -250,10 +250,12 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
     if let Some(modal) = state.remove_modal() {
         return remove_modal_frame(raw_height, raw_width, modal);
     }
-    // The text modal (a text-dumping command's output) overlays the screen too.
-    if let Some(modal) = state.text_modal() {
-        return text_modal_frame(raw_height, raw_width, modal);
-    }
+    // The text modal (a text-dumping command's output: `man` / `history` /
+    // `session list`) is *not* a full-screen overlay: like the `:` command
+    // palette it floats as a centred box over the live workspace frame (built
+    // below) so the panes stay visible around it, rather than a black backdrop.
+    // It is composited last, alongside the palette.
+    //
     // The workspace command palette (`:`) is *not* a full-screen overlay: it
     // floats as a centred box over the live workspace frame (built below) so the
     // panes stay visible around it, rather than a black backdrop. It is composited
@@ -390,6 +392,13 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
     // the same position and size as the user types and runs commands — no jump.
     if state.command_palette_open() {
         widgets::overlay_centered(&mut lines, width, &command_palette_box(width, state));
+    }
+
+    // Float the text modal (a text-dumping command's output) as a centred box
+    // over the assembled frame too, so the workspace shows around it instead of
+    // a black backdrop.
+    if let Some(modal) = state.text_modal() {
+        widgets::overlay_centered(&mut lines, width, &text_modal_box(width, modal));
     }
 
     lines

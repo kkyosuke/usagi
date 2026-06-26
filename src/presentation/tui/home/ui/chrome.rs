@@ -581,15 +581,22 @@ pub(super) fn quit_confirm_frame(raw_height: usize, raw_width: usize, live: usiz
     widgets::render_modal(raw_height, raw_width, "Quit usagi?", INNER, &body)
 }
 
-/// Builds the centred text modal: a scrollable window over a text-dumping
-/// command's output (`man` / `history` / `session list`), coloured by line kind,
-/// with `↑`/`↓` more-counts and the dismiss hint below.
-pub(super) fn text_modal_frame(
-    raw_height: usize,
-    raw_width: usize,
-    modal: &TextModal,
-) -> Vec<String> {
-    const INNER: usize = 60;
+/// Inner (content) width of the text modal box, before the borders and the
+/// space of padding [`widgets::boxed`] adds on each side.
+const TEXT_MODAL_INNER: usize = 60;
+
+/// Builds the text modal as a bordered box: a scrollable window over a
+/// text-dumping command's output (`man` / `history` / `session list`), coloured
+/// by line kind, with `↑`/`↓` more-counts and the dismiss hint below.
+///
+/// Like the `:` command palette, this returns just the box (not a full-screen
+/// frame): [`render_frame`](super::render_frame) floats it over the live
+/// workspace with [`widgets::overlay_centered`] so the panes stay visible around
+/// it, rather than a black backdrop.
+pub(super) fn text_modal_box(raw_width: usize, modal: &TextModal) -> Vec<String> {
+    // Clamp the inner width so the box never overruns a narrow terminal; `boxed`
+    // then clips each line and the title to fit.
+    let inner = TEXT_MODAL_INNER.min(raw_width.saturating_sub(4));
 
     let total = modal.lines.len();
     let start = modal.scroll.min(total.saturating_sub(TEXT_MODAL_VISIBLE));
@@ -600,7 +607,7 @@ pub(super) fn text_modal_frame(
         body.push(style(format!("  ↑ {start} more")).dim().to_string());
     }
     for line in &modal.lines[start..end] {
-        body.push(log_line(line, INNER));
+        body.push(log_line(line, inner));
     }
     if end < total {
         body.push(style(format!("  ↓ {} more", total - end)).dim().to_string());
@@ -611,5 +618,5 @@ pub(super) fn text_modal_frame(
             .dim()
             .to_string(),
     );
-    widgets::render_modal(raw_height, raw_width, &modal.title, INNER, &body)
+    widgets::boxed(&modal.title, inner, &body)
 }
