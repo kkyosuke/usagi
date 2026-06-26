@@ -34,7 +34,7 @@
 //! background done ones — so the caller can fire a one-shot notification. All of
 //! this is free of threads and IO, so the transition logic is directly testable;
 //! the live PTY polling and phase-file reading that drive it live in
-//! [`crate::presentation::tui::home::terminal_pool`].
+//! [`crate::presentation::tui::home::terminal::pool`].
 //!
 //! [`observe`]: SessionMonitor::observe
 //! [`running`]: SessionMonitor::running

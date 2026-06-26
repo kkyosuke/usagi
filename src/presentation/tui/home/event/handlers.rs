@@ -16,7 +16,7 @@ use crate::domain::settings::{AgentCli, SessionActionUi};
 
 use super::super::command::Effect;
 use super::super::state::{HomeState, ModalSize, PaneExit, ReturnMode, ROOT_NAME};
-use super::super::terminal_tabs::TabNav;
+use super::super::terminal::tabs::TabNav;
 use super::super::ui;
 use super::{
     paint_now, selected_dir, Flow, Wiring, CTRL_CARET, CTRL_E, CTRL_N, CTRL_O, CTRL_P, CTRL_S,

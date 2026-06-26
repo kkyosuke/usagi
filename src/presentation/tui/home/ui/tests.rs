@@ -4,8 +4,8 @@ use super::*;
 
 use super::super::command::{CommandHint, CommandInfo};
 use super::super::state::{LogLine, ModalSize, Preview, TextModal, WorktreeList, ROOT_NAME};
-use super::super::terminal_pool::MonitorSnapshot;
-use super::super::terminal_view::TerminalView;
+use super::super::terminal::pool::MonitorSnapshot;
+use super::super::terminal::view::TerminalView;
 use crate::domain::settings::{SessionActionUi, Sidebar};
 use crate::domain::workspace_state::{BranchStatus, SessionRecord, WorktreeState};
 use crate::presentation::tui::markdown::{LineStyle, MarkdownLine, Span, SpanStyle};
@@ -1488,7 +1488,7 @@ fn attached_tab_at_is_none_when_the_strip_has_no_room_above_the_body() {
 
 #[test]
 fn header_tab_rows_number_each_pane_beside_the_header_and_clip_to_width() {
-    use super::super::terminal_tabs::TabStrip;
+    use super::super::terminal::tabs::TabStrip;
     // Styling is stripped in the (non-TTY) test environment, so assert on content.
     let strip = TabStrip {
         labels: vec!["agent".to_string(), "terminal".to_string()],

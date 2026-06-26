@@ -1,4 +1,4 @@
-use super::super::terminal_pool::MonitorSnapshot;
+use super::super::terminal::pool::MonitorSnapshot;
 use super::*;
 use crate::domain::workspace_state::BranchStatus;
 use chrono::Utc;

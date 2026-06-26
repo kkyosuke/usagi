@@ -30,7 +30,7 @@ use crate::domain::agent_phase::AgentPhase;
 ///
 /// This stays correct for genuine starts because usagi clears the phase file on
 /// every fresh spawn (see [`crate::infrastructure::agent_state_store::clear`] and
-/// [`crate::presentation::tui::home::terminal_pool::TerminalPool::attach_or_spawn`]):
+/// [`crate::presentation::tui::home::terminal::pool::TerminalPool::attach_or_spawn`]):
 /// a `startup` / `resume` / `clear` always finds no in-progress phase and is
 /// recorded normally.
 ///

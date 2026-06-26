@@ -23,9 +23,9 @@ use crate::presentation::tui::screen::KeyReader;
 use super::event::{event_loop_compat, ConfigReload, Outcome};
 use super::oneshot::OneShot;
 use super::state::{HomeState, LogLine, PaneExit, SessionOutcome, SessionReorder};
-use super::terminal_pool::{MonitorHandle, MonitorSnapshot};
-use super::terminal_tabs::TabNav;
-use super::terminal_view::TerminalView;
+use super::terminal::pool::{MonitorHandle, MonitorSnapshot};
+use super::terminal::tabs::TabNav;
+use super::terminal::view::TerminalView;
 use super::ui::render_frame;
 use super::update::UpdateHandle;
 

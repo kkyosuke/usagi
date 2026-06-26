@@ -1,6 +1,6 @@
 use super::super::oneshot::OneShot;
 use super::super::state::LogLine;
-use super::super::terminal_tabs::TabNav;
+use super::super::terminal::tabs::TabNav;
 use super::*;
 use crate::domain::settings::SessionActionUi;
 use crate::domain::workspace_state::{BranchStatus, SessionRecord, WorktreeState};

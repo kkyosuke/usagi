@@ -21,9 +21,9 @@ use super::oneshot::OneShot;
 use super::sessions_refresh::SessionsRefreshHandle;
 use super::state::{HomeState, Mode, PaneExit, ResumeLevel, SessionOutcome, SessionReorder};
 use super::tasks::TaskHandle;
-use super::terminal_pool::MonitorHandle;
-use super::terminal_tabs::TabNav;
-use super::terminal_view::TerminalView;
+use super::terminal::pool::MonitorHandle;
+use super::terminal::tabs::TabNav;
+use super::terminal::view::TerminalView;
 use super::ui;
 use super::update::UpdateHandle;
 
@@ -48,20 +48,20 @@ const CTRL_P: char = '\u{0010}';
 /// screen — the same passthrough as [`CTRL_O`]. It toggles the left session
 /// sidebar between its full width and the collapsed rail from any non-modal mode.
 /// 没入 (Attached) is driven inside the embedded-terminal loop, so its `Ctrl-B` is
-/// intercepted there instead (see [`super::terminal_pane`]).
+/// intercepted there instead (see [`super::terminal::pane`]).
 const CTRL_B: char = '\u{0002}';
 
 /// The bare control character `console` reports for `Ctrl-S` (`0x13`) on the home
 /// screen — the same passthrough as [`CTRL_O`]. It saves the session-note editor
 /// (`Enter` inserts a newline there, so saving needs its own chord). 没入's
 /// `Ctrl-E` (which opens the editor) is intercepted inside the embedded-terminal
-/// loop instead (see [`super::terminal_pane`]).
+/// loop instead (see [`super::terminal::pane`]).
 const CTRL_S: char = '\u{0013}';
 
 /// The bare control character `console` reports for `Ctrl-E` (`0x05`) on the home
 /// screen — the same passthrough as [`CTRL_O`]. It opens the session-note editor
 /// from 在席 (Focus). 没入 (Attached) is driven inside the embedded-terminal loop,
-/// so its `Ctrl-E` is intercepted there instead (see [`super::terminal_pane`]).
+/// so its `Ctrl-E` is intercepted there instead (see [`super::terminal::pane`]).
 const CTRL_E: char = '\u{0005}';
 
 /// The bare control character `console` reports for `Ctrl-^` (`Ctrl-Shift-6`,
@@ -69,7 +69,7 @@ const CTRL_E: char = '\u{0005}';
 /// the previously focused session (vim's `Ctrl-^` / tmux's `last-window`),
 /// attaching it when live, so two sessions can be toggled between without going
 /// through 切替. 没入 (Attached) is driven inside the embedded-terminal loop, so
-/// its `Ctrl-^` is intercepted there instead (see [`super::terminal_pane`]).
+/// its `Ctrl-^` is intercepted there instead (see [`super::terminal::pane`]).
 const CTRL_CARET: char = '\u{001e}';
 
 /// The bare control character `console` reports for `Ctrl-Q` (`0x11`) on the home
@@ -78,12 +78,12 @@ const CTRL_CARET: char = '\u{001e}';
 /// session is live), `Ctrl-Q` *always* raises the quit-confirmation modal first,
 /// so quitting is never a single keystroke. 没入 (Attached) is driven inside the
 /// embedded-terminal loop, so its `Ctrl-Q` is intercepted there instead (see
-/// [`super::terminal_pane`]) and surfaces as the same modal on the way out.
+/// [`super::terminal::pane`]) and surfaces as the same modal on the way out.
 const CTRL_Q: char = '\u{0011}';
 
 /// The callback 切替 uses to read (`None`) or navigate (`Some(nav)`) the
 /// highlighted session's tabs, returning the strip's labels and active index.
-/// Backed by the [`TerminalPool`](super::terminal_pool::TerminalPool) the pane
+/// Backed by the [`TerminalPool`](super::terminal::pool::TerminalPool) the pane
 /// driver shares, so a tab moved here is the one re-attaching reveals.
 pub(super) type TabOp<'a> = dyn FnMut(&Path, Option<TabNav>) -> (Vec<String>, usize) + 'a;
 
@@ -602,7 +602,7 @@ pub(super) fn event_loop(
         // the (non-modal) screen. It is a pure view toggle, so it is handled here
         // before the per-mode dispatch rather than threaded through each handler.
         // 没入's keys never reach this loop (the pane driver owns them), so its
-        // Ctrl-B is handled inside `terminal_pane` instead.
+        // Ctrl-B is handled inside `terminal::pane` instead.
         if let Key::Char(CTRL_B) = key {
             state.toggle_sidebar();
             continue;
