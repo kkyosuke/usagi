@@ -22,7 +22,7 @@
 
 use std::collections::HashSet;
 
-use super::terminal_selection::Cell;
+use super::selection::Cell;
 
 /// The URL schemes a click recognises. Restricted to `http(s)` so an ordinary
 /// word (or a bare `host:port`) is never mistaken for a link to open.

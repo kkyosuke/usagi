@@ -1,7 +1,7 @@
 //! Copying text to the user's system clipboard from inside the TUI.
 //!
 //! The embedded terminal pane lets the user drag-select text (see
-//! [`home::terminal_selection`](crate::presentation::tui::home::terminal_selection));
+//! [`home::terminal::selection`](crate::presentation::tui::home::terminal::selection));
 //! on release (or `Ctrl-C`) the selection is copied here, by two complementary
 //! routes:
 //!

@@ -55,7 +55,7 @@ pub enum ReturnMode {
 
 /// Why the embedded terminal pane handed control back to the event loop.
 ///
-/// The pane is driven by the impure terminal loop (`terminal_pane`); this enum
+/// The pane is driven by the impure terminal loop (`terminal::pane`); this enum
 /// is the small, testable vocabulary it returns so the event loop can decide
 /// what to do next.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

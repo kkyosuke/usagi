@@ -18,7 +18,7 @@ use console::Term;
 use crate::domain::settings::{LocalSettings, Settings, LOCAL_LLM_MODELS};
 use crate::infrastructure::git;
 use crate::infrastructure::storage::Storage;
-use crate::presentation::tui::term_reader::TermKeyReader;
+use crate::presentation::tui::io::term_reader::TermKeyReader;
 use crate::usecase::doctor::SystemRunner;
 use crate::usecase::{agent, local_llm, settings, workspace};
 

@@ -5,7 +5,7 @@ use console::Term;
 use crate::domain::workspace::Workspace;
 use crate::presentation::tui::home;
 use crate::presentation::tui::install_task;
-use crate::presentation::tui::screen::{animated_read, FramePainter, KeyReader};
+use crate::presentation::tui::io::screen::{animated_read, FramePainter, KeyReader};
 
 use super::state::ProjectList;
 use super::ui;

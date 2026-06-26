@@ -1,0 +1,123 @@
+use super::chrome::*;
+use super::panes::*;
+use super::*;
+
+use super::super::command::{CommandHint, CommandInfo};
+use super::super::state::{LogLine, ModalSize, Preview, TextModal, WorktreeList, ROOT_NAME};
+use super::super::terminal::pool::MonitorSnapshot;
+use super::super::terminal::view::TerminalView;
+use crate::domain::settings::{SessionActionUi, Sidebar};
+use crate::domain::workspace_state::{BranchStatus, SessionRecord, WorktreeState};
+use crate::presentation::tui::markdown::{LineStyle, MarkdownLine, Span, SpanStyle};
+use chrono::Utc;
+use std::collections::HashSet;
+use std::path::PathBuf;
+
+fn worktree(branch: Option<&str>, primary: bool, status: BranchStatus) -> WorktreeState {
+    WorktreeState {
+        branch: branch.map(|b| b.to_string()),
+        path: PathBuf::from("/repo/wt"),
+        head: "abc1234".to_string(),
+        primary,
+        upstream: None,
+        status,
+        diff: None,
+        updated_at: Utc::now(),
+    }
+}
+
+fn list_with(worktrees: Vec<WorktreeState>) -> WorktreeList {
+    WorktreeList::new("usagi", worktrees)
+}
+
+fn state_with(worktrees: Vec<WorktreeState>) -> HomeState {
+    HomeState::new("usagi", worktrees, None)
+}
+
+fn stripped(lines: &[String]) -> String {
+    console::strip_ansi_codes(&lines.join("\n")).into_owned()
+}
+
+/// Attach a session with a two-tab strip (`agent` / `terminal`) whose active tab
+/// is `active`, plus the 没入 geometry for a 120×24 terminal — wide enough that the
+/// right pane shows both chips in full, the fixtures the `attached_tab_at` click
+/// tests share.
+fn attached_with_tabs(active: usize) -> (HomeState, TerminalGeometry) {
+    let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
+    state.enter_focus(1);
+    state.show_attached();
+    state.set_terminal_tabs(vec!["agent".to_string(), "terminal".to_string()], active);
+    (state, attached_geometry(24, 120, Sidebar::Full))
+}
+
+/// The 0-based screen column of the chip text `needle` (e.g. `"2 terminal"`), read
+/// from the rendered chips row so the click tests target where it is actually
+/// drawn rather than a hand-computed indent.
+fn chip_column(state: &HomeState, geo: TerminalGeometry, needle: &str) -> u16 {
+    let rows = right_pane_contents(state, geo.cols as usize, 8);
+    let chips = console::strip_ansi_codes(&rows[0]).into_owned();
+    let rel = chips.find(needle).expect("chip present in the strip row");
+    geo.origin_col + rel as u16
+}
+
+fn typing(typed: &str) -> HomeState {
+    let mut state = HomeState::new("usagi", Vec::new(), None);
+    // The hints belong to the `:` command palette; open it first.
+    state.open_command_palette();
+    for c in typed.chars() {
+        state.push_char(c);
+    }
+    state
+}
+
+fn state_with_sessions(names: &[&str]) -> HomeState {
+    use crate::domain::workspace_state::SessionRecord;
+    let mut state = HomeState::new("usagi", Vec::new(), None);
+    let sessions = names
+        .iter()
+        .map(|n| SessionRecord {
+            name: n.to_string(),
+            display_name: None,
+            note: None,
+            root: PathBuf::from(format!("/ws/{n}")),
+            worktrees: Vec::new(),
+            created_at: Utc::now(),
+        })
+        .collect();
+    state.restore_sessions(sessions);
+    state
+}
+
+/// A `MarkdownLine`-bearing preview opened from `content`, titled `title`.
+fn preview_state(title: &str, content: &str) -> HomeState {
+    let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
+    state.open_preview_result(Ok((title.to_string(), content.to_string())));
+    state
+}
+
+/// A 切替 state with one session named `alpha` carrying `note`, the cursor moved
+/// onto it. `state_with` seeds an unrelated `main` worktree so the root row is
+/// distinct.
+fn switch_state_with_note(note: &str) -> HomeState {
+    let mut state = state_with(vec![worktree(Some("main"), false, BranchStatus::Local)]);
+    state.restore_sessions(vec![SessionRecord {
+        name: "alpha".to_string(),
+        display_name: None,
+        note: Some(note.to_string()),
+        root: PathBuf::from("/repo/.usagi/sessions/alpha"),
+        worktrees: vec![worktree(Some("alpha"), false, BranchStatus::Local)],
+        created_at: Utc::now(),
+    }]);
+    state.enter_switch(super::super::state::ReturnMode::Base);
+    state.switch_move_down(); // root -> alpha
+    state
+}
+
+mod attached_and_terminal;
+mod input_footer;
+mod notices_and_tasks;
+mod removal_modal;
+mod render_compose;
+mod right_pane;
+mod rows;
+mod switch_create_and_hints;

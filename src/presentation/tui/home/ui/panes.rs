@@ -11,8 +11,8 @@ use super::super::command::{CommandInfo, Hint};
 use super::super::state::{
     CreateInput, HomeState, LineKind, LogLine, Mode, Preview, RenameInput, WorktreeList, ROOT_NAME,
 };
-use super::super::terminal_tabs::TabStrip;
-use super::super::terminal_view::TerminalView;
+use super::super::terminal::tabs::TabStrip;
+use super::super::terminal::view::TerminalView;
 use super::{
     clip_to_width, pad_to_width, ACTIVE_COL, DETACHED, DIRTY_ICON, EMPTY_MESSAGE, HINT_INDENT,
     HINT_MAX, LOCAL_ICON, NAME_PREFIX, NEW_ICON, PUSHED_ICON, RAIL_WIDTH, ROOT_DETAIL, STATUS_COL,

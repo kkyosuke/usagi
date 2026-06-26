@@ -5,8 +5,8 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use console::{Key, Term};
 
-use crate::presentation::tui::echo::EchoGuard;
 use crate::presentation::tui::install_task::{self, InstallHandle};
+use crate::presentation::tui::io::echo::EchoGuard;
 use crate::presentation::tui::widgets;
 
 /// A mouse-wheel scroll, decoded from a terminal mouse report.
@@ -16,7 +16,7 @@ use crate::presentation::tui::widgets;
 /// `crossterm`). [`KeyReader::read_key`] drops scrolls, so they are read and
 /// swallowed rather than reaching the host terminal's own viewport and
 /// revealing the pre-launch scrollback. This type stays the unit a decoded wheel
-/// turn drains through in [`term_reader`](crate::presentation::tui::term_reader).
+/// turn drains through in [`term_reader`](crate::presentation::tui::io::term_reader).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ScrollEvent {
     /// Lines to scroll: negative scrolls up (toward older content), positive
@@ -115,10 +115,10 @@ const LEAVE_ALT_SCREEN: &str = "\x1b[?1049l";
 ///   turn becomes a [`ScrollEvent`] (swallowed by the management screens; the
 ///   embedded pane scrolls its own history on the primary screen, or forwards the
 ///   wheel as arrow keys to a full-screen program on the alternate screen — see
-///   `home::terminal_pane`), everything else is dropped.
+///   `home::terminal::pane`), everything else is dropped.
 /// - button-event tracking (DECSET 1002) additionally reports motion while a
 ///   button is held, so the embedded terminal pane can follow a drag and select
-///   text (see `home::terminal_selection`). The management screens see these
+///   text (see `home::terminal::selection`). The management screens see these
 ///   motion reports too, but `term_reader` drops every non-wheel report, so they
 ///   are harmless there.
 ///
