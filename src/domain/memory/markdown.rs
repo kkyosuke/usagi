@@ -4,6 +4,8 @@
 //! neutralisation) lives once in [`crate::domain::frontmatter`]; this module owns
 //! only the memory's field set.
 
+use std::fmt::Write;
+
 use chrono::{DateTime, Utc};
 
 use crate::domain::frontmatter::{
@@ -15,13 +17,17 @@ use super::{Memory, MemoryType, ParseMemoryError};
 impl Memory {
     /// Render this memory to its on-disk markdown representation.
     pub fn to_markdown(&self) -> String {
+        // Writing into a `String` via `std::fmt::Write` is infallible, so each
+        // `writeln!` result is discarded. This appends straight into `out`
+        // rather than allocating a throwaway `String` per field as
+        // `push_str(&format!(…))` would.
         let mut out = String::from("---\n");
-        out.push_str(&format!("name: {}\n", inline(&self.name)));
-        out.push_str(&format!("title: {}\n", inline(&self.title)));
-        out.push_str(&format!("type: {}\n", self.kind.as_str()));
-        out.push_str(&format!("related: {}\n", format_string_list(&self.related)));
-        out.push_str(&format!("created_at: {}\n", self.created_at.to_rfc3339()));
-        out.push_str(&format!("updated_at: {}\n", self.updated_at.to_rfc3339()));
+        let _ = writeln!(out, "name: {}", inline(&self.name));
+        let _ = writeln!(out, "title: {}", inline(&self.title));
+        let _ = writeln!(out, "type: {}", self.kind.as_str());
+        let _ = writeln!(out, "related: {}", format_string_list(&self.related));
+        let _ = writeln!(out, "created_at: {}", self.created_at.to_rfc3339());
+        let _ = writeln!(out, "updated_at: {}", self.updated_at.to_rfc3339());
         out.push_str("---\n\n");
         out.push_str(self.body.trim_end_matches('\n'));
         out.push('\n');

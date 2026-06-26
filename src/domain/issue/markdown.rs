@@ -20,25 +20,26 @@ impl Issue {
     /// Required fields are always emitted; the optional `parent` and `milestone`
     /// lines are written only when set, so issues that don't use them stay clean.
     pub fn to_markdown(&self) -> String {
+        // Writing into a `String` via `std::fmt::Write` is infallible, so each
+        // `writeln!` result is discarded. This appends straight into `out`
+        // rather than allocating a throwaway `String` per field as
+        // `push_str(&format!(…))` would (cf. `format_number_list`).
         let mut out = String::from("---\n");
-        out.push_str(&format!("number: {}\n", self.number));
-        out.push_str(&format!("title: {}\n", inline(&self.title)));
-        out.push_str(&format!("status: {}\n", self.status.as_str()));
-        out.push_str(&format!("priority: {}\n", self.priority.as_str()));
-        out.push_str(&format!("labels: {}\n", format_string_list(&self.labels)));
-        out.push_str(&format!(
-            "dependson: {}\n",
-            format_number_list(&self.dependson)
-        ));
-        out.push_str(&format!("related: {}\n", format_number_list(&self.related)));
+        let _ = writeln!(out, "number: {}", self.number);
+        let _ = writeln!(out, "title: {}", inline(&self.title));
+        let _ = writeln!(out, "status: {}", self.status.as_str());
+        let _ = writeln!(out, "priority: {}", self.priority.as_str());
+        let _ = writeln!(out, "labels: {}", format_string_list(&self.labels));
+        let _ = writeln!(out, "dependson: {}", format_number_list(&self.dependson));
+        let _ = writeln!(out, "related: {}", format_number_list(&self.related));
         if let Some(parent) = self.parent {
-            out.push_str(&format!("parent: {parent}\n"));
+            let _ = writeln!(out, "parent: {parent}");
         }
         if let Some(milestone) = &self.milestone {
-            out.push_str(&format!("milestone: {}\n", inline(milestone)));
+            let _ = writeln!(out, "milestone: {}", inline(milestone));
         }
-        out.push_str(&format!("created_at: {}\n", self.created_at.to_rfc3339()));
-        out.push_str(&format!("updated_at: {}\n", self.updated_at.to_rfc3339()));
+        let _ = writeln!(out, "created_at: {}", self.created_at.to_rfc3339());
+        let _ = writeln!(out, "updated_at: {}", self.updated_at.to_rfc3339());
         out.push_str("---\n\n");
         out.push_str(self.body.trim_end_matches('\n'));
         out.push('\n');

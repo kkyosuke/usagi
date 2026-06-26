@@ -24,6 +24,11 @@ fn type_tokens_round_trip() {
     ] {
         assert_eq!(kind.to_string(), kind.as_str());
         assert_eq!(kind.as_str().parse::<MemoryType>().unwrap(), kind);
+        // `as_str` and the serde `rename_all` derive spell the token
+        // independently; lock them together so a future variant that updates one
+        // but not the other fails here rather than writing a file the other half
+        // cannot read.
+        assert_eq!(serde_json::to_value(kind).unwrap(), kind.as_str());
     }
 }
 

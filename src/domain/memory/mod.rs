@@ -127,6 +127,13 @@ pub fn slugify(text: &str) -> String {
 
 impl Memory {
     /// The file name backing this memory, e.g. `user-prefers-tabs.md`.
+    ///
+    /// `name` is interpolated into the path verbatim, so it must already be a
+    /// filename-safe slug — the entity does not enforce this itself. Callers that
+    /// build a `Memory` from user input go through [`slugify`]; a `Memory` parsed
+    /// from a hand-edited file via [`Memory::from_markdown`] carries whatever
+    /// `name` the file declared, so the store guards against a traversing name
+    /// (`../…`) as defense in depth rather than relying on this method.
     pub fn file_name(&self) -> String {
         format!("{}.md", self.name)
     }

@@ -46,6 +46,28 @@ fn priority_round_trips_through_string() {
 }
 
 #[test]
+fn enum_tokens_match_their_serde_representation() {
+    // `as_str` and the serde `rename_all` derive each spell the on-disk token
+    // independently; this locks them together so adding a variant that updates
+    // one but not the other fails here instead of silently writing a file the
+    // other half cannot read.
+    for s in [
+        IssueStatus::Todo,
+        IssueStatus::InProgress,
+        IssueStatus::Done,
+    ] {
+        assert_eq!(serde_json::to_value(s).unwrap(), s.as_str());
+    }
+    for p in [
+        IssuePriority::High,
+        IssuePriority::Medium,
+        IssuePriority::Low,
+    ] {
+        assert_eq!(serde_json::to_value(p).unwrap(), p.as_str());
+    }
+}
+
+#[test]
 fn defaults_are_todo_and_medium() {
     assert_eq!(IssueStatus::default(), IssueStatus::Todo);
     assert_eq!(IssuePriority::default(), IssuePriority::Medium);
