@@ -13,7 +13,7 @@
 
 | 入力面 | スコープ | 出るコマンド |
 |---|---|---|
-| コマンドパレット（統括 / Overview。`:` で開く） | Workspace（全体） | `session` / `issue` / `config` |
+| コマンドパレット（統括 / Overview。`:` で開く） | Workspace（全体） | `session` / `issue` / `config` / `preview` |
 | 在席（Focus）の右ペイン | Session（個別） | `terminal` / `agent` / `close` |
 | 両方 | 共通 | `man` / `history` / `clear` / `quit` |
 
@@ -29,11 +29,12 @@
 | `man` / `help` | `man` でコマンド一覧、`man <command>` で個別の書式（Usage）と例（Examples）をスクロール可能なテキストモーダルで表示 |
 | `history` | 入力したコマンドの履歴を番号付きでテキストモーダルに表示（過去セッション分も含む） |
 | `clear` | 出力ログを消去 |
-| `quit` / `exit` | アプリを終了 |
+| `quit` / `exit` | usagi を終了してプロジェクト一覧へ戻る |
 | `session` | セッション（branch + worktree）の作成・一覧・切替・削除（Workspace スコープ） |
 | `issue` | タスク issue を一覧・依存ツリー・ガント・1 件表示で閲覧（Workspace スコープ） |
+| `preview <path\|name>` | Markdown ファイルを右ペインにレンダリング表示（Workspace スコープ） |
 | `terminal` | 選択中セッションの worktree でシェルを右ペインに埋め込み起動（Session スコープ） |
-| `agent [名前]` | `terminal` ＋ Agent CLI を起動（Session スコープ）。引数なしは設定中の既定 CLI を起動。名前（`claude` / `codex` / `sakana.ai` / `gemini`）を付けるとその CLI を起動する |
+| `agent [名前]` | `terminal` ＋ Agent CLI を起動（Session スコープ）。引数なしは設定中の既定 CLI を起動。名前（`claude` / `codex` / `codex-fugu` / `sakana.ai` / `gemini`）を付けるとその CLI を起動する |
 | `close` | 在席中のセッションを削除して切替へ移る（`session remove <名前>` と同じで `--force` は付けない。未コミット変更があれば削除を拒否し `--force` の案内をログに出す。Session スコープ） |
 | `config` | 現在のワークスペースのローカル設定を編集する Config 画面を開く（Workspace スコープ） |
 
@@ -66,6 +67,20 @@
 | `issue show <番号>`（別名 `view`） | 1 件の frontmatter + 本文を表示 |
 
 issue が 1 件も無いときは「No issues yet.」を 1 行だけログに出します。
+
+## preview
+
+ワークスペース内の Markdown ファイルを**右ペインにレンダリング表示**します。**`:` で開くコマンドパレット**で実行します。
+
+| 書式 | 動作 |
+|---|---|
+| `preview <path>` | パス指定（例 `preview document/design/05-home.md`）でそのファイルを表示 |
+| `preview <name>` | 拡張子なしの名前（例 `preview README`）は Markdown 拡張子（`.md` / `.markdown`）を補って解決 |
+
+- ファイルはワークスペースルートを基点に解決し、**ルート外へは出られません**（絶対パス・`..` での親への離脱は拒否）。
+- 読めないパスや存在しないファイルはエラーをログに出します。
+- 引数なしは `usage` をログに出します。
+- `preview diff`（差分プレビュー）は未実装で、その旨を返します。
 
 ## terminal
 

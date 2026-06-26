@@ -9,9 +9,9 @@
 //!
 //! Issue/memory operations and session operations have very different
 //! dependencies — the former are pure repository reads/writes, the latter needs
-//! an [`AgentBackend`] that shells out to a real agent for `session_prompt`.
-//! Keeping the two servers separate (each independently unit-tested) and
-//! composing them here keeps that split clean; this module only owns the
+//! an [`AgentBackend`] that reaches a real agent for `session_prompt` and
+//! `session_remove`. Keeping the two servers separate (each independently
+//! unit-tested) and composing them here keeps that split clean; this module only owns the
 //! merge-and-route glue. The JSON-RPC framing is shared and lives in the parent
 //! [`super`] module.
 
@@ -33,7 +33,8 @@ pub struct UsagiMcpServer {
 }
 
 impl UsagiMcpServer {
-    /// Build a server delegating `session_prompt` to `backend`.
+    /// Build a server delegating `session_prompt` and `session_remove` to
+    /// `backend`.
     ///
     /// Issues and memories resolve against `worktree` (the current working tree,
     /// so a session agent's edits stay on its own branch), while session
@@ -97,6 +98,18 @@ mod tests {
         fn prompt(&self, _worktree: &Path, _prompt: &str) -> Result<String, String> {
             Ok("delegated".to_string())
         }
+
+        fn remove(
+            &self,
+            _workspace_root: &Path,
+            _name: &str,
+            _force: bool,
+        ) -> Result<crate::usecase::session::RemovalOutcome, String> {
+            Ok(crate::usecase::session::RemovalOutcome {
+                removed: true,
+                dirty: Vec::new(),
+            })
+        }
     }
 
     fn server_at(root: &Path) -> UsagiMcpServer {
@@ -156,14 +169,15 @@ mod tests {
         );
         let tools = res["result"]["tools"].as_array().unwrap();
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
-        // 7 issue + 6 memory + 3 session.
-        assert_eq!(names.len(), 16);
+        // 7 issue + 6 memory + 4 session.
+        assert_eq!(names.len(), 17);
         assert!(names.contains(&"issue_create"));
         assert!(names.contains(&"issue_to_prompt"));
         assert!(names.contains(&"memory_save"));
         assert!(names.contains(&"session_create"));
         assert!(names.contains(&"session_list"));
         assert!(names.contains(&"session_prompt"));
+        assert!(names.contains(&"session_remove"));
     }
 
     #[test]
@@ -238,6 +252,22 @@ mod tests {
         );
         assert_eq!(result["isError"], false);
         assert_eq!(result["content"][0]["text"], "delegated");
+    }
+
+    #[test]
+    fn session_remove_routes_through_to_the_backend() {
+        let tmp = tempfile::tempdir().unwrap();
+        // The stub backend reports a clean removal, so the unified server's
+        // routing of session_remove to the session server is exercised end to end.
+        let result = call(
+            &server_at(tmp.path()),
+            "session_remove",
+            json!({"name":"gone"}),
+        );
+        assert_eq!(result["isError"], false);
+        let text = result["content"][0]["text"].as_str().unwrap();
+        let body: Value = serde_json::from_str(text).unwrap();
+        assert_eq!(body, json!({"name":"gone","removed":true,"dirty":[]}));
     }
 
     #[test]

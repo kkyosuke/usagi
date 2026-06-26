@@ -54,6 +54,7 @@ src/
 │   ├── workspace.rs            # グローバル登録エントリ Workspace
 │   ├── workspace_state.rs      # WorkspaceState / WorktreeState / BranchStatus
 │   ├── history.rs              # コマンド履歴の 1 件 HistoryEntry
+│   ├── trace.rs                # 操作トレースの 1 件 TraceEvent / TraceCategory（USAGI_TRACE 有効時に記録）
 │   ├── frontmatter.rs          # frontmatter 形式の正本（slug 化・--- 分割・リスト escape・timestamp・改行無害化。issue/memory 共用）
 │   ├── issue/                  # Issue / IssueSummary / IssueStatus / IssuePriority（mod=型 / markdown=frontmatter 読み書き（共通処理は frontmatter に委譲））
 │   ├── memory/                 # Memory / MemorySummary / MemoryType（mod=型・slug / markdown=frontmatter 読み書き（共通処理は frontmatter に委譲））
@@ -83,10 +84,14 @@ src/
 │   ├── git/                    # git CLI 経由の読み取り専用検査 + worktree 追加（command/repo/worktree/branch に分割）
 │   ├── gitignore.rs            # .usagi/.gitignore の書き込みと旧 root .gitignore 行の除去（バイト/行操作）
 │   ├── json_file.rs            # JSON ファイルの共通 read / 原子的 write（temp + rename）
+│   ├── markdown_file.rs        # preview コマンド用に Markdown ファイルを workspace 内に限定して読む（read_under）
+│   ├── store_lock.rs           # ストアの排他ファイルロック（fs2 ベース。session の create/remove の競合を防ぐ）
 │   ├── repo_paths.rs           # リポジトリ内 usagi メタデータの配置（STATE_DIR=".usagi"）の正本。各ストア・session・gitignore が参照
 │   ├── storage.rs              # グローバル ~/.usagi/ の load/save（Storage）
 │   ├── workspace_store.rs      # <repo>/.usagi/ の state.json / settings.json（WorkspaceStore）
 │   ├── history_store.rs        # <repo>/.usagi/history.jsonl の load/append（HistoryStore）
+│   ├── open_panes_store.rs     # worktree 別に開いていたペイン（agent/terminal）を記録し restore_panes で復元（~/.usagi/open-panes/）
+│   ├── trace_log.rs            # 操作トレース logs/trace-YYYY-MM-DD.jsonl の記録（USAGI_TRACE。TraceLog）
 │   ├── terminal.rs             # 起動するシェルの解決（$SHELL / フォールバック）
 │   ├── pty.rs                  # 疑似ターミナルセッション（portable-pty + vt100、ベル回数の計測・異常終了のログ記録）
 │   ├── pty_exit.rs             # シェル/エージェントの終了ステータスをエラーログ文へ変換する純粋ロジック（pty.rs のテスト可能な相棒）
@@ -100,7 +105,7 @@ src/
 │   └── memory_store.rs         # <repo>/.usagi/memory/ の markdown + MEMORY.md + index.json（MemoryStore）
 │
 └── presentation/               # CLI ルーティング・TUI・MCP
-    ├── cli/                    # サブコマンド（init / hop / status / config / doctor / feature（Agent CLI の機能サポート表）/ issue / memory / mcp / llm_mcp / agent_phase（隠し・フック用））
+    ├── cli/                    # サブコマンド（init / hop / status / clean / config / doctor / feature（Agent CLI の機能サポート表）/ icon / run / issue / memory / mcp / llm_mcp / agent_phase（隠し・フック用））
     ├── mcp/                    # MCP サーバ（JSON-RPC 2.0 フレーミングを共有）
     │   ├── mod.rs              # 共有プロトコル（dispatch_line / stdio serve ループ / レスポンス整形 / parse_args・to_pretty / McpService）
     │   ├── usagi.rs            # 統合 usagi サーバ（UsagiMcpServer）。issue/memory サーバと session サーバを合成し公開
@@ -120,7 +125,7 @@ src/
         ├── new/                # 新規プロジェクト画面（state（mod=FormState・型 / validate=検証） / ui / event）
         ├── config/             # 設定画面（state（mod=Config・型定義 / cycling=値巡回ロジック） / ui / event）
         ├── home/               # ホーム画面（state（mod=HomeState / list・mode・log・modal（サブモード型: create/rename 入力・remove モーダル・focus メニュー、および HomeState が持つ Overlays 集約）に分割） / ui（mod=render_frame・panes・chrome・content=コマンド出力整形 に分割） / event（mod=loop・handlers に分割） / command（mod=語彙・builtins・registry に分割） / terminal_view / terminal_pane / terminal_pool（常駐＋phase/ベル監視・通知））
-        └── widgets/            # 共通 widget（mod / picker / dir_picker / text_input=キャレット編集付き 1 行入力）
+        └── widgets/            # 共通 widget（mod / picker / dir_picker / text_input=キャレット編集付き 1 行入力 / text_area=複数行入力（セッションメモ） / rabbit=うさぎアニメの絵柄）
 ```
 
 > `tui/app/` は各画面（splash / welcome / open / new / config / home）を純粋に保ったまま、ユーザーの選択に応じて
@@ -169,6 +174,7 @@ src/
 | 並列処理 | `rayon` | issue 一覧読み込みなどの並列化 |
 | シリアライズ | `serde` / `serde_json` | JSON 永続化（`serde_yaml` は不採用） |
 | 日時 | `chrono` | タイムスタンプ |
+| ファイルロック | `fs2` | ストア（`state.json` など）の排他ロック。session の並行 create/remove の競合防止 |
 | 補助 | `anyhow` / `dirs` / `shell-words` / `libc` / `unicode-width` | エラー処理・データディレクトリ解決・コマンド分割・端末制御・表示幅計算（行クリップ） |
 
 ## テスト構成
