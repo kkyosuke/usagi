@@ -29,11 +29,20 @@ const ISSUES_DIR_NAME: &str = "issues";
 pub(crate) const INDEX_FILE: &str = "index.json";
 const FILE_FORMAT_VERSION: u32 = 1;
 
-/// On-disk shape of `index.json`.
-#[derive(Debug, Serialize, Deserialize)]
+/// On-disk shape of `index.json`, read back as owned data. The `version` key is
+/// written (see [`IndexFileRef`]) but ignored on read, so it is not modelled
+/// here — serde skips unknown keys.
+#[derive(Debug, Deserialize)]
 struct IndexFile {
-    version: u32,
     issues: Vec<IssueSummary>,
+}
+
+/// Borrowed view used only when *writing* `index.json`, so the rebuild does not
+/// have to clone every summary just to hand it to the serialiser.
+#[derive(Serialize)]
+struct IndexFileRef<'a> {
+    version: u32,
+    issues: &'a [IssueSummary],
 }
 
 /// File-based persistence rooted at a repository's `.usagi/issues/` directory.
@@ -290,9 +299,9 @@ impl IssueStore {
         }
         fs::create_dir_all(&self.dir)
             .context(format!("failed to create {}", self.dir.display()))?;
-        let index = IndexFile {
+        let index = IndexFileRef {
             version: FILE_FORMAT_VERSION,
-            issues: summaries.clone(),
+            issues: &summaries,
         };
         // The canonical "pretty JSON + trailing newline, written atomically" path
         // lives in `json_file::write_atomic`; reuse it rather than re-implementing

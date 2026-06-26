@@ -381,7 +381,11 @@ pub fn remove(
         .iter()
         .position(|s| s.name == name)
         .ok_or_else(|| anyhow!("no such session: \"{name}\""))?;
-    let session = state.sessions[index].clone();
+    // Take the record out of the in-memory state rather than cloning it: on the
+    // dirty early-return below we never save, so the on-disk state is untouched,
+    // and on the success path the state already has the session dropped by the
+    // time it is saved (no second `remove`).
+    let session = state.sessions.remove(index);
 
     // Refuse to discard uncommitted work unless forced. Dirtiness goes through
     // the same single `worktree_status` call the rest of the codebase uses; a
@@ -417,7 +421,6 @@ pub fn remove(
     let repo_worktrees = reconcile::list_repo_worktrees(workspace_root)?;
     reconcile::discard_session(&session.root, name, &repo_worktrees, force)?;
 
-    state.sessions.remove(index);
     state.updated_at = Utc::now();
     store.save(&state)?;
 
