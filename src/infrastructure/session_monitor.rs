@@ -24,12 +24,14 @@
 //! Display vs. notification are kept separate. The displayed state always
 //! reflects the agent's true phase, **including the attached session** — so a
 //! session shows the same state whether the user is looking at it or has switched
-//! away (this is what keeps 切替 and 没入 consistent). Being attached only
-//! suppresses two things: the bell heuristic (its bells are seen live, so they
-//! never mark it waiting) and the desktop notification (the user is already
-//! looking at it). [`observe`] is fed the latest readings each tick and returns
-//! the sessions that have *just* transitioned into waiting or done — for the
-//! background ones only — so the caller can fire a one-shot notification. All of
+//! away (this is what keeps 切替 and 没入 consistent). Being attached suppresses
+//! the bell heuristic (its bells are seen live, so they never mark it waiting) and
+//! the *done* notice (`Stop` fires at every turn end, so notifying the foreground
+//! session would ding on each reply). A *waiting* transition still notifies even
+//! when attached: it needs the user's action and they may have switched to another
+//! app. [`observe`] is fed the latest readings each tick and returns the sessions
+//! that have *just* transitioned into waiting or done — every waiting one plus the
+//! background done ones — so the caller can fire a one-shot notification. All of
 //! this is free of threads and IO, so the transition logic is directly testable;
 //! the live PTY polling and phase-file reading that drive it live in
 //! [`crate::presentation::tui::home::terminal_pool`].
@@ -83,7 +85,8 @@ pub struct SessionMonitor {
     /// task is done); the bare shell it ran in may still be alive.
     done: HashSet<PathBuf>,
     /// The session the user is attached to, if any. Its bells are seen live (so
-    /// the bell heuristic is skipped for it) and it never fires a notification.
+    /// the bell heuristic is skipped for it) and it never fires a *done* notice;
+    /// a *waiting* transition still notifies (the user may have switched away).
     attached: Option<PathBuf>,
 }
 
@@ -97,7 +100,7 @@ impl SessionMonitor {
     /// with `None`.
     ///
     /// This only changes which session is exempt from the bell heuristic and from
-    /// notifications; it does **not** touch the displayed state, which keeps
+    /// the *done* notice; it does **not** touch the displayed state, which keeps
     /// reflecting the agent's true phase so 切替 and 没入 agree. The next
     /// [`observe`](Self::observe) reconciles a bell-only session that was flagged
     /// waiting before it was attached.
@@ -152,9 +155,9 @@ impl SessionMonitor {
     /// since the last call — each at most once, until the state changes again.
     ///
     /// The displayed state always tracks the agent's true phase, **whether or not
-    /// the session is attached**. Being attached only suppresses the bell
-    /// heuristic (its bells are seen live) and the returned notices (the user is
-    /// already looking). For each session:
+    /// the session is attached**. Being attached suppresses the bell heuristic
+    /// (its bells are seen live) and the *done* notice; a *waiting* transition
+    /// still returns a notice even when attached. For each session:
     ///
     /// - A reported phase is authoritative. `Ready` clears running, waiting and
     ///   done (the session is idle, awaiting input — no notice); `Running` marks
@@ -191,14 +194,16 @@ impl SessionMonitor {
                     self.baselines.insert(path.clone(), count);
                 }
                 // The agent paused mid-turn for the user's input or permission:
-                // it waits. Fire a one-shot only on a genuine transition, and
-                // never for the attached session (the user is looking right at it).
+                // it waits. Fire a one-shot on a genuine transition — including
+                // for the attached session: a wait needs the user's action, and
+                // they may have switched to another app while it stayed the
+                // foreground usagi session.
                 Some(AgentPhase::Waiting) => {
                     self.running.remove(path);
                     self.done.remove(path);
                     self.baselines.insert(path.clone(), count);
                     let newly = self.waiting.insert(path.clone());
-                    if newly && !attached {
+                    if newly {
                         notices.push(Notice {
                             path: path.clone(),
                             kind: NoticeKind::Waiting,
@@ -206,7 +211,9 @@ impl SessionMonitor {
                     }
                 }
                 // The agent finished — a turn completed or it exited: the task is
-                // done. Same one-shot rule.
+                // done. One-shot on a genuine transition, but stay silent for the
+                // attached session — `Stop` fires at every turn end, so notifying
+                // the foreground session would ding on each reply.
                 Some(AgentPhase::Ended) => {
                     self.running.remove(path);
                     self.waiting.remove(path);
@@ -515,15 +522,16 @@ mod tests {
     }
 
     #[test]
-    fn the_attached_session_still_shows_its_phase_but_never_notifies() {
+    fn the_attached_session_notifies_on_waiting_but_not_on_done() {
         let mut monitor = SessionMonitor::new();
         monitor.set_attached(Some(p("/a")));
-        // Attached: the waiting phase is shown (so 切替 and 没入 agree) but no
-        // notice fires.
+        // Attached: a waiting transition still fires — it needs the user's action
+        // and they may have switched to another app.
         let newly = monitor.observe(&[phased("/a", 0, AgentPhase::Waiting)]);
-        assert!(newly.is_empty());
+        assert_eq!(newly, vec![waiting("/a")]);
         assert!(monitor.is_waiting(&p("/a")));
-        // Likewise on done while attached: shown, not notified.
+        // Done while attached is shown but stays silent: `Stop` fires every turn
+        // end, so the foreground session would ding on each reply.
         let after = monitor.observe(&[phased("/a", 0, AgentPhase::Ended)]);
         assert!(after.is_empty());
         assert!(monitor.is_done(&p("/a")));
@@ -532,11 +540,12 @@ mod tests {
     #[test]
     fn a_waiting_phase_does_not_re_fire_just_because_a_session_was_detached() {
         let mut monitor = SessionMonitor::new();
-        // While attached, the agent stops: shown waiting, but no notice.
+        // While attached, the agent stops: shown waiting and notified once.
         monitor.set_attached(Some(p("/a")));
-        assert!(monitor
-            .observe(&[phased("/a", 0, AgentPhase::Waiting)])
-            .is_empty());
+        assert_eq!(
+            monitor.observe(&[phased("/a", 0, AgentPhase::Waiting)]),
+            vec![waiting("/a")]
+        );
         assert!(monitor.is_waiting(&p("/a")));
         // After detaching, the same still-waiting state does not fire a fresh
         // notice — it was already waiting.
