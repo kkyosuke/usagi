@@ -36,7 +36,7 @@ mod mode;
 
 pub use list::{worktree_name, WorktreeList, ROOT_NAME};
 pub use log::{LineKind, LogLine};
-pub use modal::{CreateInput, NoteEditor, Preview, RemoveModal, RenameInput, TextModal};
+pub use modal::{CreateInput, ModalSize, NoteEditor, Preview, RemoveModal, RenameInput, TextModal};
 pub use mode::{Mode, PaneExit, ResumeLevel, ReturnMode};
 
 use list::session_row;
@@ -495,13 +495,20 @@ impl HomeState {
         &self.sessions
     }
 
-    /// Open a scrollable text modal showing `lines` under `title` (used by the
-    /// text-dumping commands). Replaces any modal already open.
-    pub fn open_text_modal(&mut self, title: impl Into<String>, lines: Vec<LogLine>) {
+    /// Open a scrollable text modal showing `lines` under `title` at the given
+    /// `size` (used by the text-dumping commands). Replaces any modal already
+    /// open.
+    pub fn open_text_modal(
+        &mut self,
+        title: impl Into<String>,
+        lines: Vec<LogLine>,
+        size: ModalSize,
+    ) {
         self.overlay = Overlay::Text(TextModal {
             title: title.into(),
             lines,
             scroll: 0,
+            size,
         });
     }
 
@@ -1732,8 +1739,8 @@ impl HomeState {
                 self.response_start = 0;
             }
             Effect::EnterSwitch | Effect::Activate(_) => {}
-            Effect::ShowText(title) => {
-                self.open_text_modal(title, result.lines);
+            Effect::ShowText { title, size } => {
+                self.open_text_modal(title, result.lines, size);
                 self.response_start = self.log.len();
             }
             _ => self.log.extend(result.lines),

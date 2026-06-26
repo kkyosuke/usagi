@@ -48,8 +48,14 @@ fn empty_input_does_nothing() {
 fn man_without_argument_lists_every_command() {
     let registry = registry();
     let result = registry.dispatch("man", &[], &[]);
-    // `man`'s help text opens a scrollable modal rather than the band.
-    assert_eq!(result.effect, Effect::ShowText("Help"));
+    // `man`'s help text opens a large scrollable modal rather than the band.
+    assert_eq!(
+        result.effect,
+        Effect::ShowText {
+            title: "Help",
+            size: ModalSize::Large,
+        }
+    );
     let joined = result
         .lines
         .iter()
@@ -762,7 +768,13 @@ fn issue_list_shows_readiness_and_progress_in_a_modal() {
         issue(3, "blocked", IssueStatus::Todo, vec![2]),
     ];
     let result = registry().dispatch_with("issue", &[], &[], &issues);
-    assert_eq!(result.effect, Effect::ShowText("Issues"));
+    assert_eq!(
+        result.effect,
+        Effect::ShowText {
+            title: "Issues",
+            size: ModalSize::Normal,
+        }
+    );
     let text = joined(&result);
     assert!(text.contains("#1"));
     assert!(text.contains("done"));
@@ -781,7 +793,10 @@ fn issue_list_alias_and_empty_report() {
         registry()
             .dispatch_with("issue ls", &[], &[], &issues)
             .effect,
-        Effect::ShowText("Issues"),
+        Effect::ShowText {
+            title: "Issues",
+            size: ModalSize::Normal,
+        },
     );
     // With no issues the command logs a single line (no modal).
     let empty = registry().dispatch_with("issue list", &[], &[], &[]);
@@ -796,7 +811,13 @@ fn issue_graph_renders_the_dependency_tree() {
         issue(2, "child", IssueStatus::Todo, vec![1]),
     ];
     let result = registry().dispatch_with("issue tree", &[], &[], &issues);
-    assert_eq!(result.effect, Effect::ShowText("Issue graph"));
+    assert_eq!(
+        result.effect,
+        Effect::ShowText {
+            title: "Issue graph",
+            size: ModalSize::Normal,
+        }
+    );
     let text = joined(&result);
     assert!(text.contains("#1 root"));
     assert!(text.contains("└─ #2 child"));
@@ -814,7 +835,13 @@ fn issue_gantt_renders_a_dated_chart() {
         issue(2, "child", IssueStatus::Todo, vec![1]),
     ];
     let result = registry().dispatch_with("issue chart", &[], &[], &issues);
-    assert_eq!(result.effect, Effect::ShowText("Issue gantt"));
+    assert_eq!(
+        result.effect,
+        Effect::ShowText {
+            title: "Issue gantt",
+            size: ModalSize::Normal,
+        }
+    );
     let text = joined(&result);
     // Header span line and per-issue rows with the dependency annotation.
     assert!(text.contains("→"));
@@ -834,7 +861,13 @@ fn issue_gantt_renders_a_dated_chart() {
 fn issue_show_renders_one_issue_or_reports_missing() {
     let issues = vec![issue(7, "visible", IssueStatus::Todo, vec![])];
     let shown = registry().dispatch_with("issue show 7", &[], &[], &issues);
-    assert_eq!(shown.effect, Effect::ShowText("Issue"));
+    assert_eq!(
+        shown.effect,
+        Effect::ShowText {
+            title: "Issue",
+            size: ModalSize::Normal,
+        }
+    );
     let text = joined(&shown);
     assert!(text.contains("title: visible"));
     assert!(text.contains("Body for visible."));

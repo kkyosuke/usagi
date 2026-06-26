@@ -614,6 +614,57 @@ pub fn modal_inner_width(width: usize, desired: usize) -> usize {
     desired.min(width.saturating_sub(4))
 }
 
+/// Columns the large modal keeps blank on each side of the box, and rows it
+/// keeps above and below it, so the terminal-filling box still floats clear of
+/// the screen edges instead of butting against them.
+const LARGE_MODAL_MARGIN_X: usize = 2;
+const LARGE_MODAL_MARGIN_Y: usize = 1;
+
+/// The widest the large modal's content grows, regardless of terminal width, so
+/// the short help lines stay readable instead of stretching across a very wide
+/// screen.
+const LARGE_MODAL_MAX_INNER: usize = 100;
+
+/// The geometry of the large, terminal-filling text modal (the `man` help): the
+/// inner content width of the box and how many body window lines are visible at
+/// once, both scaled to the terminal and inset so the box keeps a margin from
+/// the screen edges.
+///
+/// Returned together so the renderer (which windows the body and wraps it in a
+/// box) and the event loop (whose paging step scrolls by a screenful) size the
+/// modal from one source — they never drift apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LargeModalGeometry {
+    /// Inner content width of the box, before its borders and the space of
+    /// padding [`boxed`] adds on each side.
+    pub inner_width: usize,
+    /// Body window lines shown at once — the scroll window height the renderer
+    /// and the paging step share.
+    pub visible: usize,
+}
+
+/// Computes the [`LargeModalGeometry`] for a terminal of `height`×`width`.
+///
+/// The width reserves the box overhead (two borders + a space of padding on each
+/// side = 4 columns) plus a side margin, then caps at [`LARGE_MODAL_MAX_INNER`].
+/// The visible-line budget is the height minus the top/bottom margins, the two
+/// borders, the two scroll-hint rows (one above, one below the window) and the
+/// two-row dismiss footer that the body always carries — so the whole box,
+/// hints and footer included, always fits the screen. Both are floored at 1 so a
+/// tiny terminal still yields a drawable (if cramped) box.
+pub fn large_modal_geometry(height: usize, width: usize) -> LargeModalGeometry {
+    let inner_width = width
+        .saturating_sub(4 + LARGE_MODAL_MARGIN_X * 2)
+        .clamp(1, LARGE_MODAL_MAX_INNER);
+    let visible = height
+        .saturating_sub(LARGE_MODAL_MARGIN_Y * 2 + 2 + 2 + 2)
+        .max(1);
+    LargeModalGeometry {
+        inner_width,
+        visible,
+    }
+}
+
 /// Composites a titled modal box centred over `base`, the floating sibling of
 /// [`render_modal`]: it wraps `body` in a [`boxed`] frame and overlays it with
 /// [`overlay_centered`], so the screen behind it stays visible instead of a black
@@ -670,6 +721,29 @@ mod tests {
     #[test]
     fn normalize_size_substitutes_fallbacks_for_zero() {
         assert_eq!(normalize_size(0, 0), (24, 80));
+    }
+
+    #[test]
+    fn large_modal_geometry_scales_with_the_terminal() {
+        // A roomy terminal: the box reserves its overhead (4) plus a side margin
+        // (2 each side) horizontally, and the borders/hints/footer/margin
+        // vertically — so it grows with the screen but never touches the edges.
+        let geo = large_modal_geometry(40, 90);
+        assert_eq!(geo.inner_width, 90 - 8);
+        assert_eq!(geo.visible, 40 - 8);
+    }
+
+    #[test]
+    fn large_modal_geometry_caps_width_and_floors_at_one() {
+        // Very wide: the content width is capped so the short help stays readable.
+        assert_eq!(
+            large_modal_geometry(60, 400).inner_width,
+            LARGE_MODAL_MAX_INNER
+        );
+        // Degenerate sizes never yield a zero-dimension box.
+        let tiny = large_modal_geometry(1, 1);
+        assert_eq!(tiny.inner_width, 1);
+        assert_eq!(tiny.visible, 1);
     }
 
     #[test]

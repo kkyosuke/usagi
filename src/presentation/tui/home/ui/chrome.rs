@@ -11,7 +11,6 @@ use super::super::tasks::{TaskMark, TaskRow};
 use super::panes::log_line;
 use super::{
     clip_to_width, pad_to_width, HINT_INDENT, HINT_MAX, HINT_NAME_COL, REMOVE_MODAL_VISIBLE,
-    TEXT_MODAL_VISIBLE,
 };
 use crate::presentation::tui::widgets;
 
@@ -546,14 +545,19 @@ pub(super) const TEXT_MODAL_INNER: usize = 60;
 /// command's output (`man` / `history` / `session list`), coloured by line kind,
 /// with `↑`/`↓` more-counts and the dismiss hint below.
 ///
+/// `visible` is the window height (how many body lines show at once): the fixed
+/// [`TEXT_MODAL_VISIBLE`](super::TEXT_MODAL_VISIBLE) for a compact modal, or a
+/// terminal-scaled count for the large `man` modal (see
+/// [`super::text_modal_geometry`]).
+///
 /// Like the `:` command palette, this is only the body (no border): `inner` is
 /// the box's content width, and [`render_frame`](super::render_frame) wraps it
 /// and floats it over the live workspace with [`widgets::overlay_modal`] so the
 /// panes stay visible around it, rather than a black backdrop.
-pub(super) fn text_modal_body(modal: &TextModal, inner: usize) -> Vec<String> {
+pub(super) fn text_modal_body(modal: &TextModal, inner: usize, visible: usize) -> Vec<String> {
     let total = modal.lines.len();
-    let start = modal.scroll.min(total.saturating_sub(TEXT_MODAL_VISIBLE));
-    let end = (start + TEXT_MODAL_VISIBLE).min(total);
+    let start = modal.scroll.min(total.saturating_sub(visible));
+    let end = (start + visible).min(total);
 
     let mut body = Vec::new();
     if start > 0 {

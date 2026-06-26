@@ -31,7 +31,7 @@ use panes::{left_pane, right_pane_contents};
 // The embedded terminal pane (没入) maps a click to the tab under it through this.
 pub(super) use panes::attached_tab_at;
 
-use super::state::{HomeState, Mode};
+use super::state::{HomeState, ModalSize, Mode};
 use crate::domain::settings::Sidebar;
 
 /// Shown below the root row when the workspace has no recorded worktrees.
@@ -107,10 +107,33 @@ const HINT_INDENT: usize = 4;
 /// keep the cursor in view, with a count of the hidden rows above and below.
 const REMOVE_MODAL_VISIBLE: usize = 8;
 
-/// Body lines the text modal shows at once; a longer dump scrolls, with a count
-/// of the hidden lines above and below. Shared with the event loop's scroll
-/// clamp and paging step.
+/// Body lines the *compact* text modal shows at once; a longer dump scrolls,
+/// with a count of the hidden lines above and below. The large `man` modal scales
+/// its window to the terminal instead (see [`text_modal_geometry`]).
 pub const TEXT_MODAL_VISIBLE: usize = 16;
+
+/// The geometry the text modal of `size` is drawn with for a terminal of
+/// `height`×`width`: the inner content width of the box and the visible body
+/// window height, as `(inner_width, visible)`.
+///
+/// Both the renderer (which windows the body and wraps it in a box) and the event
+/// loop (whose paging step scrolls by a screenful) read this, so they size the
+/// modal from one source and never disagree on how far a page scrolls. A
+/// [`Normal`](ModalSize::Normal) modal is the fixed [`TEXT_MODAL_INNER`] /
+/// [`TEXT_MODAL_VISIBLE`]; a [`Large`](ModalSize::Large) one scales to the screen
+/// via [`widgets::large_modal_geometry`].
+pub fn text_modal_geometry(height: usize, width: usize, size: ModalSize) -> (usize, usize) {
+    match size {
+        ModalSize::Normal => (
+            widgets::modal_inner_width(width, TEXT_MODAL_INNER),
+            TEXT_MODAL_VISIBLE,
+        ),
+        ModalSize::Large => {
+            let geo = widgets::large_modal_geometry(height, width);
+            (geo.inner_width, geo.visible)
+        }
+    }
+}
 
 /// Right-pads `content` with spaces to fill `width` display columns. Content
 /// already at least that wide is returned unchanged.
@@ -431,8 +454,8 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
     // over the assembled frame too, so the workspace shows around it instead of
     // a black backdrop.
     if let Some(modal) = state.text_modal() {
-        let inner = widgets::modal_inner_width(width, TEXT_MODAL_INNER);
-        let body = text_modal_body(modal, inner);
+        let (inner, visible) = text_modal_geometry(height, width, modal.size);
+        let body = text_modal_body(modal, inner, visible);
         widgets::overlay_modal(&mut lines, width, &modal.title, inner, &body);
     }
 
