@@ -19,7 +19,7 @@ use crate::presentation::tui::screen::{FramePainter, KeyReader};
 
 use super::oneshot::OneShot;
 use super::sessions_refresh::SessionsRefreshHandle;
-use super::state::{HomeState, Mode, PaneExit, ResumeLevel, SessionOutcome};
+use super::state::{HomeState, Mode, PaneExit, ResumeLevel, SessionOutcome, SessionReorder};
 use super::tasks::TaskHandle;
 use super::terminal_pool::MonitorHandle;
 use super::terminal_tabs::TabNav;
@@ -120,6 +120,10 @@ pub(super) struct Wiring<'a> {
     pub rename_display: &'a mut dyn FnMut(&str, &str) -> SessionOutcome,
     /// Save (or clear) a session's note, returning the outcome to apply inline.
     pub set_note: &'a mut dyn FnMut(&str, &str) -> SessionOutcome,
+    /// Reorder the selected session one row up/down (`bool` = up), persisting the
+    /// new order and returning the reloaded list to refresh. Stays synchronous
+    /// (no git work) like `rename_display` / `set_note`.
+    pub reorder_session: &'a mut dyn FnMut(&str, bool) -> SessionReorder,
     /// Dispatch `session remove <name>` to a background worker (`bool` = force).
     pub dispatch_remove: &'a mut dyn FnMut(&str, bool),
     /// Evict a removed session's pooled shell, run on the loop thread (the pool
@@ -682,6 +686,7 @@ pub(crate) fn event_loop_compat(
     mut preview: impl FnMut(&Path, Sidebar) -> Option<TerminalView>,
     mut tab_op: impl FnMut(&Path, Option<TabNav>) -> (Vec<String>, usize),
     mut close_tab: impl FnMut(&mut HomeState, &Path),
+    mut reorder_session: impl FnMut(&str, bool) -> SessionReorder,
 ) -> Result<Outcome> {
     let tasks = TaskHandle::new();
     let mut dispatch_create = |name: &str| {
@@ -738,6 +743,7 @@ pub(crate) fn event_loop_compat(
         dispatch_create: &mut dispatch_create,
         rename_display: &mut rename_display,
         set_note: &mut set_note,
+        reorder_session: &mut reorder_session,
         dispatch_remove: &mut dispatch_remove,
         evict_pool: &mut evict_pool,
         existing_branches: &mut existing_branches,

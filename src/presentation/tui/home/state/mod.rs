@@ -67,6 +67,26 @@ pub struct SessionOutcome {
     pub select: Option<String>,
 }
 
+/// The outcome of a 切替 reorder (`K` / `J`): moving the selected session one
+/// row up or down. Distinct from [`SessionOutcome`] because a successful move is
+/// **silent** — reordering is navigation-like and a per-keypress log line would
+/// flood the log — and it must **not** re-activate the moved session (the active
+/// row is the command target, independent of the cursor). Applied through
+/// [`HomeState::apply_reorder`].
+#[derive(Debug, Clone)]
+pub enum SessionReorder {
+    /// The order changed; carries the reloaded sessions to refresh the pane.
+    /// [`HomeState::refresh_sessions`] keeps both the cursor and the active row on
+    /// their sessions by name, so the cursor follows the moved session to its new
+    /// row while the active row stays put.
+    Moved(Vec<SessionRecord>),
+    /// The selected session was already at the end it was moved toward (or the
+    /// root row, which is not reorderable): nothing changed, nothing to apply.
+    Stationary,
+    /// Persisting the new order failed; carries the error line to log.
+    Failed(LogLine),
+}
+
 /// A transient "working…" indicator shown in the top-right corner while a
 /// blocking action runs (creating or bulk-removing sessions, launching a
 /// terminal / agent). It carries the `label` to show beside the loading rabbit
@@ -1731,6 +1751,20 @@ impl HomeState {
             if let Some(name) = outcome.select {
                 self.list.select_by_name(&name);
             }
+        }
+    }
+
+    /// Apply a [`SessionReorder`] from `K` / `J`: refresh the pane from the
+    /// reloaded sessions on a move (the cursor follows the moved session to its
+    /// new row, the active row stays put — see [`refresh_sessions`](Self::refresh_sessions)),
+    /// do nothing at an edge / on the root row, and log a failure. Kept separate
+    /// from [`apply_session_outcome`](Self::apply_session_outcome) so a move is
+    /// silent and never re-activates the moved session.
+    pub fn apply_reorder(&mut self, outcome: SessionReorder) {
+        match outcome {
+            SessionReorder::Moved(sessions) => self.refresh_sessions(sessions),
+            SessionReorder::Stationary => {}
+            SessionReorder::Failed(line) => self.push_logged_line(line),
         }
     }
 

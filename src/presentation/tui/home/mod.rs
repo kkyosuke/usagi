@@ -35,7 +35,7 @@ use crate::presentation::tui::term_reader::TermKeyReader;
 
 pub use event::Outcome;
 
-use state::{HomeState, LogLine, PaneExit, ResumeLevel, SessionOutcome};
+use state::{HomeState, LogLine, PaneExit, ResumeLevel, SessionOutcome, SessionReorder};
 
 /// Refresh the workspace's session state from git (best-effort) and return the
 /// sessions to show. `sync` rewrites each session worktree's status; for a
@@ -305,6 +305,29 @@ pub fn run(term: &Term, workspace: &Workspace, preload: Preload) -> Result<Outco
                 sessions: None,
                 select: None,
             },
+        }
+    };
+
+    // Reordering a session (`K` / `J` in 切替) swaps it with its neighbour in
+    // state.json and re-reads the sessions so the pane reflects the new order.
+    // Like rename / note it stays synchronous (no git work) but still
+    // load-modify-saves state.json, so it takes the same op-lock to serialise
+    // against the background create / remove workers.
+    let reorder_root = workspace.path.clone();
+    let reorder_lock = op_lock.clone();
+    let mut reorder_session = |name: &str, up: bool| {
+        let _guard = lock_session_ops(&reorder_lock);
+        match crate::usecase::session::reorder(&reorder_root, name, up) {
+            // A successful move re-reads the (now reordered) sessions; if the
+            // re-read somehow yields nothing, treat it as no change rather than
+            // blanking the pane.
+            Ok(true) => match reload_sessions(&reorder_root) {
+                Some(sessions) => SessionReorder::Moved(sessions),
+                None => SessionReorder::Stationary,
+            },
+            // An edge move (first up / last down) changed nothing.
+            Ok(false) => SessionReorder::Stationary,
+            Err(e) => SessionReorder::Failed(LogLine::error(format!("reorder failed: {e}"))),
         }
     };
 
@@ -775,6 +798,7 @@ pub fn run(term: &Term, workspace: &Workspace, preload: Preload) -> Result<Outco
         dispatch_create: &mut dispatch_create,
         rename_display: &mut rename_display,
         set_note: &mut set_note,
+        reorder_session: &mut reorder_session,
         dispatch_remove: &mut dispatch_remove,
         evict_pool: &mut evict_pool,
         existing_branches: &mut existing_branches,
