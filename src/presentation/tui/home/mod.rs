@@ -9,6 +9,7 @@
 pub mod command;
 pub mod event;
 pub mod oneshot;
+pub mod pane_input;
 pub mod sessions_refresh;
 pub mod state;
 pub mod tasks;

@@ -31,8 +31,10 @@
 //!
 //! This is pure terminal I/O and threading, so it is excluded from coverage (cf.
 //! `term_reader.rs` / the screen `mod.rs` wirings). The pieces it leans on are
-//! tested elsewhere: the layout geometry and frame ([`super::ui`]), the screen
-//! snapshot ([`super::terminal_view`]), and the [`PaneExit`] vocabulary
+//! tested elsewhere: the input translation — which chord a key is, how far to
+//! scroll, which cell the pointer hit, and the bytes a key/paste becomes
+//! ([`super::pane_input`]); the layout geometry and frame ([`super::ui`]); the
+//! screen snapshot ([`super::terminal_view`]); and the [`PaneExit`] vocabulary
 //! ([`super::state`]).
 //!
 //! [`TerminalPool`]: super::terminal_pool::TerminalPool
@@ -43,8 +45,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use console::Term;
 use crossterm::event::{
-    self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyEventKind,
-    KeyModifiers, MouseButton, MouseEventKind,
+    self, DisableBracketedPaste, EnableBracketedPaste, Event, MouseButton, MouseEventKind,
 };
 use crossterm::execute;
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
@@ -53,6 +54,11 @@ use crate::infrastructure::pty::PtySession;
 use crate::presentation::tui::clipboard;
 use crate::presentation::tui::screen::diff_frame;
 
+use super::pane_input::{
+    apply_scroll, encode_key, encode_paste, is_copy, is_leader, is_new_agent_tab, is_next_tab,
+    is_open_note, is_press, is_prev_session, is_prev_tab, is_quit, is_to_focus, is_toggle_sidebar,
+    key_scroll_lines, pane_cell, wheel_delta,
+};
 use super::state::HomeState;
 use super::terminal_link;
 use super::terminal_pool::MonitorHandle;
@@ -119,9 +125,6 @@ const IDLE_REEVAL: Duration = Duration::from_millis(200);
 /// cannot see, while interactive changes (input echo, resize, scroll, selection,
 /// hover, badges) still repaint immediately so the pane stays responsive.
 const MIN_FRAME: Duration = Duration::from_millis(16);
-
-/// How many lines one wheel notch scrolls the embedded terminal's history.
-const WHEEL_LINES: i32 = 3;
 
 /// Report mouse motion with no button held (DECSET 1003), so the pane can light
 /// up the link under the pointer on hover. The global mouse modes (1000/1002/1006,
@@ -719,57 +722,6 @@ fn open_url(url: &str) {
         .spawn();
 }
 
-/// Translate an absolute mouse position (0-based screen `col`/`row`) to a cell
-/// in the terminal pane's grid, or `None` when the pointer is outside the pane.
-fn pane_cell(col: u16, row: u16, geo: ui::TerminalGeometry) -> Option<Cell> {
-    let rel_col = col.checked_sub(geo.origin_col)?;
-    let rel_row = row.checked_sub(geo.origin_row)?;
-    if rel_col >= geo.cols || rel_row >= geo.rows {
-        return None;
-    }
-    Some(Cell::new(rel_row, rel_col))
-}
-
-/// The history scroll a key requests, in lines (negative scrolls up toward older
-/// output), or `None` for a key the shell should receive. `Shift` distinguishes
-/// the scroll keys from the `PageUp`/`PageDown`/arrows the shell expects.
-fn key_scroll_lines(key: &KeyEvent, geo: ui::TerminalGeometry) -> Option<i32> {
-    if !key.modifiers.contains(KeyModifiers::SHIFT) {
-        return None;
-    }
-    // A page keeps one row of overlap for context; at least one line.
-    let page = (geo.rows as i32 - 1).max(1);
-    match key.code {
-        KeyCode::PageUp => Some(-page),
-        KeyCode::PageDown => Some(page),
-        KeyCode::Up => Some(-1),
-        KeyCode::Down => Some(1),
-        _ => None,
-    }
-}
-
-/// The history scroll a mouse wheel turn requests, in lines, or `None` for a
-/// non-wheel mouse event.
-fn wheel_delta(kind: MouseEventKind) -> Option<i32> {
-    match kind {
-        MouseEventKind::ScrollUp => Some(-WHEEL_LINES),
-        MouseEventKind::ScrollDown => Some(WHEEL_LINES),
-        _ => None,
-    }
-}
-
-/// Move the scrollback offset by `delta` lines (negative scrolls up toward
-/// older output). The upper bound is enforced by `set_scrollback` on the next
-/// redraw, so this only has to keep the offset from underflowing past the live
-/// screen.
-fn apply_scroll(scrollback: &mut usize, delta: i32) {
-    *scrollback = if delta < 0 {
-        scrollback.saturating_add(delta.unsigned_abs() as usize)
-    } else {
-        scrollback.saturating_sub(delta as usize)
-    };
-}
-
 /// Draw the workspace frame (sidebar + terminal pane), repainting only the rows
 /// that changed since `prev` and batching them into a single write — so an
 /// update lands in one pass without the flicker of clearing the whole screen.
@@ -837,383 +789,4 @@ fn render(
     term.flush()?;
     *prev = frame;
     Ok(())
-}
-
-/// Only forward real key presses (and auto-repeats), never key releases (which
-/// some platforms / the kitty protocol report).
-fn is_press(key: KeyEvent) -> bool {
-    matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat)
-}
-
-/// Whether `key` is the Ctrl chord for `letter`, accepting both forms crossterm
-/// may report — so a chord binds the same regardless of how the terminal /
-/// keyboard protocol delivers it:
-///
-/// - `letter` + `CONTROL` — crossterm's usual decoding of `Ctrl-<letter>`.
-/// - the bare control codepoint `raw` — some terminals/keyboard protocols
-///   deliver the chord as the raw control char with no `CONTROL` modifier (this
-///   is how `console` reports it on the other home-screen surfaces). The raw
-///   control char only ever comes from that chord, so it is accepted regardless
-///   of the reported modifiers — otherwise [`encode_key`] would forward the raw
-///   byte to the agent, which renders the unprintable control char as a
-///   `?`-like placeholder instead of acting on the chord.
-///
-/// `Ctrl+Shift+<letter>` is deliberately *not* matched: its `Char` is the
-/// uppercase letter, so it flows through to the agent unchanged.
-fn chord(key: &KeyEvent, raw: char, letter: char) -> bool {
-    key.code == KeyCode::Char(raw)
-        || (key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char(letter))
-}
-
-/// Whether this key is the reserved `Ctrl-O` leader (zoom out one engagement
-/// level), as the raw `0x0f` (SI) char or `'o'` + `CONTROL`.
-fn is_leader(key: &KeyEvent) -> bool {
-    chord(key, '\u{0f}', 'o')
-}
-
-/// Whether this key is `Ctrl` + the arrow `code`. The home-screen surfaces move
-/// tabs with the bare arrows (via `console`, which can't see the modifier), so
-/// 没入 adds the `Ctrl` qualifier to keep plain arrows flowing to the shell.
-fn is_ctrl_arrow(key: &KeyEvent, code: KeyCode) -> bool {
-    key.modifiers.contains(KeyModifiers::CONTROL) && key.code == code
-}
-
-/// Whether this key moves to the next tab: `Ctrl-N` (the raw `0x0e` (SO) char or
-/// `'n'` + `CONTROL`) or `Ctrl-→`.
-fn is_next_tab(key: &KeyEvent) -> bool {
-    chord(key, '\u{0e}', 'n') || is_ctrl_arrow(key, KeyCode::Right)
-}
-
-/// Whether this key is `Ctrl-E` (open the note editor), as the raw `0x05` (ENQ)
-/// char or `'e'` + `CONTROL`.
-fn is_open_note(key: &KeyEvent) -> bool {
-    chord(key, '\u{05}', 'e')
-}
-
-/// Whether this key moves to the previous tab: `Ctrl-P` (the raw `0x10` (DLE)
-/// char or `'p'` + `CONTROL`) or `Ctrl-←`.
-fn is_prev_tab(key: &KeyEvent) -> bool {
-    chord(key, '\u{10}', 'p') || is_ctrl_arrow(key, KeyCode::Left)
-}
-
-/// Whether this key is `Ctrl-T` (zoom out to 在席 / Focus), as the raw `0x14`
-/// (DC4) char or `'t'` + `CONTROL`.
-fn is_to_focus(key: &KeyEvent) -> bool {
-    chord(key, '\u{14}', 't')
-}
-
-/// Whether this key is `Ctrl-G` (add an agent tab), as the raw `0x07` (BEL) char
-/// or `'g'` + `CONTROL`.
-fn is_new_agent_tab(key: &KeyEvent) -> bool {
-    chord(key, '\u{07}', 'g')
-}
-
-/// Whether this key is `Ctrl-B` (toggle the left sidebar), as the raw `0x02`
-/// (STX) char or `'b'` + `CONTROL`.
-fn is_toggle_sidebar(key: &KeyEvent) -> bool {
-    chord(key, '\u{02}', 'b')
-}
-
-/// Whether this key is `Ctrl-^` (jump to the previously focused session), as the
-/// raw `0x1e` (RS) char or `'^'` + `CONTROL`.
-fn is_prev_session(key: &KeyEvent) -> bool {
-    chord(key, '\u{1e}', '^')
-}
-
-/// Whether this key is the copy shortcut (`Ctrl-C`). It only copies when a
-/// selection is active; otherwise the caller forwards it to the shell as the
-/// usual interrupt. `Ctrl+Shift+C` is left to the shell unchanged.
-fn is_copy(key: &KeyEvent) -> bool {
-    key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char('c')
-}
-
-/// Whether this key is `Ctrl-Q` (quit usagi), as the raw `0x11` (DC1) char or
-/// `'q'` + `CONTROL`. It is the dedicated global quit chord: 没入 claims it from
-/// the shell/agent so quitting works without first zooming out, and the home loop
-/// raises the quit-confirmation modal when the pane hands this back.
-fn is_quit(key: &KeyEvent) -> bool {
-    chord(key, '\u{11}', 'q')
-}
-
-/// Bracketed-paste start / end markers (DECSET 2004). A program that requested
-/// the mode treats everything between them as one paste.
-const PASTE_START: &str = "\x1b[200~";
-const PASTE_END: &str = "\x1b[201~";
-
-/// Encode a paste for the shell. When the running program asked for bracketed
-/// paste (`bracketed`), wrap the text in the start/end markers so it lands as a
-/// single block — the agent inserts the multi-line text rather than submitting
-/// on each newline. Otherwise forward the raw bytes (the program never opted in,
-/// so there is nothing to wrap).
-///
-/// In the bracketed case any [`PASTE_END`] marker the pasted text itself contains
-/// is stripped first: leaving it in would let pasted content close the paste
-/// early and have its tail run as live keystrokes (paste injection), so — like
-/// real terminals — we neutralise the embedded terminator.
-fn encode_paste(text: &str, bracketed: bool) -> Vec<u8> {
-    if !bracketed {
-        return text.as_bytes().to_vec();
-    }
-    let body = text.replace(PASTE_END, "");
-    let mut bytes = Vec::with_capacity(PASTE_START.len() + body.len() + PASTE_END.len());
-    bytes.extend_from_slice(PASTE_START.as_bytes());
-    bytes.extend_from_slice(body.as_bytes());
-    bytes.extend_from_slice(PASTE_END.as_bytes());
-    bytes
-}
-
-/// Translate a key event into the bytes a shell expects on its input. Unknown
-/// keys map to nothing (an empty slice), so they are simply dropped.
-fn encode_key(key: &KeyEvent) -> Vec<u8> {
-    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-    let alt = key.modifiers.contains(KeyModifiers::ALT);
-    match key.code {
-        KeyCode::Char(c) => {
-            let mut bytes = Vec::new();
-            if alt {
-                bytes.push(0x1b);
-            }
-            if ctrl {
-                // Control characters: map the letter to its 0x00–0x1f code.
-                bytes.push((c.to_ascii_uppercase() as u8) & 0x1f);
-            } else {
-                let mut buf = [0u8; 4];
-                bytes.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
-            }
-            bytes
-        }
-        KeyCode::Enter => vec![b'\r'],
-        KeyCode::Tab => vec![b'\t'],
-        KeyCode::BackTab => b"\x1b[Z".to_vec(),
-        KeyCode::Backspace => vec![0x7f],
-        KeyCode::Esc => vec![0x1b],
-        KeyCode::Left => b"\x1b[D".to_vec(),
-        KeyCode::Right => b"\x1b[C".to_vec(),
-        KeyCode::Up => b"\x1b[A".to_vec(),
-        KeyCode::Down => b"\x1b[B".to_vec(),
-        KeyCode::Home => b"\x1b[H".to_vec(),
-        KeyCode::End => b"\x1b[F".to_vec(),
-        KeyCode::PageUp => b"\x1b[5~".to_vec(),
-        KeyCode::PageDown => b"\x1b[6~".to_vec(),
-        KeyCode::Insert => b"\x1b[2~".to_vec(),
-        KeyCode::Delete => b"\x1b[3~".to_vec(),
-        _ => Vec::new(),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn key(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
-        KeyEvent::new(code, modifiers)
-    }
-
-    #[test]
-    fn is_leader_matches_both_forms_of_ctrl_o() {
-        // crossterm's usual decoding: lowercase `'o'` + `CONTROL`.
-        assert!(is_leader(&key(KeyCode::Char('o'), KeyModifiers::CONTROL)));
-        // Some terminals deliver the bare `0x0F` (SI) codepoint instead, with
-        // no `CONTROL` modifier reported — still the leader, so it must not
-        // reach the agent (where it would render as `?`).
-        assert!(is_leader(&key(KeyCode::Char('\u{0f}'), KeyModifiers::NONE)));
-        assert!(is_leader(&key(
-            KeyCode::Char('\u{0f}'),
-            KeyModifiers::CONTROL,
-        )));
-    }
-
-    #[test]
-    fn is_leader_leaves_ctrl_shift_o_alone() {
-        // `Ctrl+Shift+O` is not the leader: it flows to the agent unchanged.
-        assert!(!is_leader(&key(KeyCode::Char('O'), KeyModifiers::CONTROL)));
-        assert!(!is_leader(&key(
-            KeyCode::Char('O'),
-            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
-        )));
-    }
-
-    #[test]
-    fn is_leader_rejects_non_leader_keys() {
-        // No `Ctrl` modifier, or a different letter, is not the leader.
-        assert!(!is_leader(&key(KeyCode::Char('o'), KeyModifiers::NONE)));
-        assert!(!is_leader(&key(KeyCode::Char('a'), KeyModifiers::CONTROL)));
-    }
-
-    #[test]
-    fn tab_chords_match_both_forms_and_reject_others() {
-        // Ctrl-N (next) / Ctrl-P (prev): crossterm's `'n'`/`'p'` + CONTROL, and
-        // the bare control char some terminals deliver instead (0x0e / 0x10).
-        assert!(is_next_tab(&key(KeyCode::Char('n'), KeyModifiers::CONTROL)));
-        assert!(is_next_tab(&key(
-            KeyCode::Char('\u{0e}'),
-            KeyModifiers::NONE
-        )));
-        assert!(is_prev_tab(&key(KeyCode::Char('p'), KeyModifiers::CONTROL)));
-        assert!(is_prev_tab(&key(
-            KeyCode::Char('\u{10}'),
-            KeyModifiers::NONE
-        )));
-        // Ctrl-→ (next) / Ctrl-← (prev) are accepted alongside the chords.
-        assert!(is_next_tab(&key(KeyCode::Right, KeyModifiers::CONTROL)));
-        assert!(is_prev_tab(&key(KeyCode::Left, KeyModifiers::CONTROL)));
-        // Plain letters, the wrong modifier, and the other chord are rejected.
-        assert!(!is_next_tab(&key(KeyCode::Char('n'), KeyModifiers::NONE)));
-        assert!(!is_prev_tab(&key(KeyCode::Char('p'), KeyModifiers::NONE)));
-        assert!(!is_next_tab(&key(
-            KeyCode::Char('p'),
-            KeyModifiers::CONTROL
-        )));
-        assert!(!is_prev_tab(&key(
-            KeyCode::Char('n'),
-            KeyModifiers::CONTROL
-        )));
-        // Bare arrows (no Ctrl) stay with the shell, and the axes don't cross.
-        assert!(!is_next_tab(&key(KeyCode::Right, KeyModifiers::NONE)));
-        assert!(!is_prev_tab(&key(KeyCode::Left, KeyModifiers::NONE)));
-        assert!(!is_next_tab(&key(KeyCode::Left, KeyModifiers::CONTROL)));
-        assert!(!is_prev_tab(&key(KeyCode::Right, KeyModifiers::CONTROL)));
-    }
-
-    #[test]
-    fn pane_chords_match_both_forms_and_reject_others() {
-        // Ctrl-T (zoom out to 在席) / Ctrl-G (add agent): crossterm's letter +
-        // CONTROL, and the bare control char some terminals deliver instead
-        // (0x14 / 0x07).
-        assert!(is_to_focus(&key(KeyCode::Char('t'), KeyModifiers::CONTROL)));
-        assert!(is_to_focus(&key(
-            KeyCode::Char('\u{14}'),
-            KeyModifiers::NONE
-        )));
-        assert!(is_new_agent_tab(&key(
-            KeyCode::Char('g'),
-            KeyModifiers::CONTROL
-        )));
-        assert!(is_new_agent_tab(&key(
-            KeyCode::Char('\u{07}'),
-            KeyModifiers::NONE
-        )));
-        // Plain letters and the wrong chord are rejected (they flow to the shell).
-        assert!(!is_to_focus(&key(KeyCode::Char('t'), KeyModifiers::NONE)));
-        assert!(!is_new_agent_tab(&key(
-            KeyCode::Char('g'),
-            KeyModifiers::NONE
-        )));
-        // Ctrl-W is no longer a pane chord: it flows to the shell ("delete previous
-        // word") rather than closing a tab. Nothing here should treat it specially.
-        assert!(!is_to_focus(&key(
-            KeyCode::Char('w'),
-            KeyModifiers::CONTROL
-        )));
-        assert!(!is_new_agent_tab(&key(
-            KeyCode::Char('w'),
-            KeyModifiers::CONTROL
-        )));
-    }
-
-    #[test]
-    fn is_open_note_matches_both_forms_of_ctrl_e() {
-        // crossterm's usual decoding, and the bare 0x05 (ENQ) some terminals send.
-        assert!(is_open_note(&key(
-            KeyCode::Char('e'),
-            KeyModifiers::CONTROL
-        )));
-        assert!(is_open_note(&key(
-            KeyCode::Char('\u{05}'),
-            KeyModifiers::NONE
-        )));
-        // A plain letter, the wrong chord, or Ctrl+Shift+E flows to the shell.
-        assert!(!is_open_note(&key(KeyCode::Char('e'), KeyModifiers::NONE)));
-        assert!(!is_open_note(&key(
-            KeyCode::Char('o'),
-            KeyModifiers::CONTROL
-        )));
-        assert!(!is_open_note(&key(
-            KeyCode::Char('E'),
-            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
-        )));
-    }
-
-    #[test]
-    fn is_prev_session_matches_both_forms_of_ctrl_caret() {
-        // crossterm's usual decoding, and the bare 0x1e (RS) most terminals send.
-        assert!(is_prev_session(&key(
-            KeyCode::Char('^'),
-            KeyModifiers::CONTROL
-        )));
-        assert!(is_prev_session(&key(
-            KeyCode::Char('\u{1e}'),
-            KeyModifiers::NONE
-        )));
-        // A plain caret or the wrong chord flows to the shell.
-        assert!(!is_prev_session(&key(
-            KeyCode::Char('^'),
-            KeyModifiers::NONE
-        )));
-        assert!(!is_prev_session(&key(
-            KeyCode::Char('o'),
-            KeyModifiers::CONTROL
-        )));
-    }
-
-    #[test]
-    fn is_copy_matches_only_plain_ctrl_c() {
-        // `Ctrl-C` is the copy shortcut (only meaningful with a selection).
-        assert!(is_copy(&key(KeyCode::Char('c'), KeyModifiers::CONTROL)));
-        // A bare `c`, a different letter, or `Ctrl+Shift+C` is not the shortcut
-        // and flows to the shell unchanged.
-        assert!(!is_copy(&key(KeyCode::Char('c'), KeyModifiers::NONE)));
-        assert!(!is_copy(&key(KeyCode::Char('d'), KeyModifiers::CONTROL)));
-        assert!(!is_copy(&key(
-            KeyCode::Char('c'),
-            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
-        )));
-    }
-
-    #[test]
-    fn is_quit_matches_both_forms_of_ctrl_q() {
-        // crossterm's usual decoding, and the bare 0x11 (DC1) most terminals send.
-        assert!(is_quit(&key(KeyCode::Char('q'), KeyModifiers::CONTROL)));
-        assert!(is_quit(&key(KeyCode::Char('\u{11}'), KeyModifiers::NONE)));
-        // A bare `q`, the wrong chord, or `Ctrl+Shift+Q` flows to the shell.
-        assert!(!is_quit(&key(KeyCode::Char('q'), KeyModifiers::NONE)));
-        assert!(!is_quit(&key(KeyCode::Char('o'), KeyModifiers::CONTROL)));
-        assert!(!is_quit(&key(
-            KeyCode::Char('Q'),
-            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
-        )));
-    }
-
-    #[test]
-    fn encode_paste_passes_raw_bytes_when_not_bracketed() {
-        // No bracketed-paste mode: forward the text unwrapped, verbatim.
-        assert_eq!(encode_paste("ls -la\n", false), b"ls -la\n".to_vec());
-    }
-
-    #[test]
-    fn encode_paste_wraps_in_bracketed_markers() {
-        assert_eq!(
-            encode_paste("hi", true),
-            [PASTE_START, "hi", PASTE_END].concat().into_bytes(),
-        );
-    }
-
-    #[test]
-    fn encode_paste_strips_an_embedded_end_marker() {
-        // Paste-injection guard: an end marker inside the pasted text would
-        // otherwise close the paste early and run its tail as live keystrokes.
-        let malicious = format!("safe{PASTE_END}rm -rf ~\n");
-        let encoded = encode_paste(&malicious, true);
-        let expected = [PASTE_START, "saferm -rf ~\n", PASTE_END]
-            .concat()
-            .into_bytes();
-        assert_eq!(encoded, expected);
-        // The terminator appears exactly once — only the wrapper's own trailer.
-        let needle = PASTE_END.as_bytes();
-        let hits = encoded
-            .windows(needle.len())
-            .filter(|w| *w == needle)
-            .count();
-        assert_eq!(hits, 1);
-    }
 }
