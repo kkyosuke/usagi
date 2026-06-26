@@ -1648,6 +1648,30 @@ fn render_frame_rests_the_mascot_in_the_bottom_left_with_a_mode_face() {
 }
 
 #[test]
+fn render_frame_keeps_a_blank_row_between_the_list_and_the_resting_mascot() {
+    // A short list leaves the mascot resting at the bottom with at least one blank
+    // sidebar row above its ears, so the art reads apart from the session list
+    // rather than as the next entry.
+    let state = state_with(vec![worktree(Some("main"), true, BranchStatus::Pushed)]);
+    let lines = render_frame(24, 80, &state);
+    // The ears row (the mascot's top row); its left sidebar cell carries the art.
+    let ears = lines
+        .iter()
+        .map(|l| console::strip_ansi_codes(l).into_owned())
+        .position(|l| l.split(" │ ").next().unwrap_or("").contains("(\\(\\"))
+        .expect("the resting mascot is drawn");
+    let left_cell_above = console::strip_ansi_codes(&lines[ears - 1])
+        .split(" │ ")
+        .next()
+        .unwrap_or("")
+        .to_string();
+    assert!(
+        left_cell_above.trim().is_empty(),
+        "a blank sidebar row separates the list from the mascot: {left_cell_above:?}"
+    );
+}
+
+#[test]
 fn render_frame_hides_the_mascot_when_the_session_list_fills_the_sidebar() {
     // A list long enough to reach the bottom rows takes precedence: the mascot
     // hides rather than overlapping the sessions.
