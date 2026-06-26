@@ -2871,6 +2871,7 @@ fn preview_pane_keeps_a_prefix_unstyled_for_a_non_list_non_quote_line() {
             spans: vec![Span {
                 text: "hello".to_string(),
                 style: SpanStyle::Plain,
+                color: None,
             }],
         }],
         scroll: 0,

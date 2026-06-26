@@ -169,6 +169,7 @@ src/
 | CLI | `clap` | サブコマンド・引数解析 |
 | TUI | `console` + `crossterm` + 自前の差分描画（`FramePainter`） | `console::Term` で端末制御・キー入力、`crossterm` でマウス/キーイベント解析・raw mode、描画は `screen.rs` の差分レンダラ（**ratatui は不使用**） |
 | 疑似ターミナル | `portable-pty` + `vt100` | 埋め込みターミナルの起動と画面状態の解釈 |
+| シンタックスハイライト | `syntect`（`fancy-regex` バックエンド・`onig` 不使用） | Markdown プレビューのコードブロックを言語別にトークン化。RGB を端末 256 色へマッピングして描画 |
 | Git 操作 | システムの `git` コマンド | 読み取り専用検査 + worktree 追加（**git2 は不使用**） |
 | AI 連携 | Agent CLI（`claude` / `codex` / `codex-fugu` / `gemini` など）+ `ollama` サブプロセス | エージェント起動・ローカル LLM 委譲（専用クレートは持たず外部プロセスを起動） |
 | 通知 | `notify-rust` | 入力待ち時のデスクトップ通知 |

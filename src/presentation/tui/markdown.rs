@@ -5,14 +5,21 @@
 //! parser. [`render`] turns the source text into a list of [`MarkdownLine`]s,
 //! each a block kind (heading / list item / quote / code / plain) plus a run of
 //! inline [`Span`]s carrying their own emphasis. The result is **pure data**: no
-//! terminal colours are chosen here, so the parsing is directly testable. Turning
-//! a [`MarkdownLine`] into a styled terminal row is the UI layer's job (see the
-//! home screen's `panes` module).
+//! terminal escapes are produced here, so the parsing is directly testable.
+//! Turning a [`MarkdownLine`] into a styled terminal row is the UI layer's job
+//! (see the home screen's `panes` module).
 //!
 //! Supported: ATX headings (`#`…`######`), unordered (`-`/`*`/`+`) and ordered
 //! (`1.`/`1)`) lists, block quotes (`>`), fenced code blocks (``` ``` ``` / `~~~`),
 //! and the inline spans `**strong**` / `__strong__`, `*em*` / `_em_`,
 //! `` `code` ``, and `[link text](url)` (the URL is dropped, the text kept).
+//!
+//! Fenced code blocks are syntax-highlighted by their info string (the language
+//! token after the opening fence) via the [`highlight`] module: each line
+//! becomes several [`SpanStyle::Code`] spans carrying a per-token foreground
+//! [`Rgb`]. An unknown or absent language falls back to plain, uncoloured text.
+
+mod highlight;
 
 /// The inline emphasis of a run of text within a rendered line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -29,11 +36,23 @@ pub enum SpanStyle {
     Link,
 }
 
-/// A run of text with a single inline style.
+/// A 24-bit foreground colour for a syntax-highlighted code span. Carried as
+/// plain data; the UI layer maps it to a terminal colour when drawing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Rgb {
+    pub r: u8,
+    pub g: u8,
+    pub b: u8,
+}
+
+/// A run of text with a single inline style, and an optional foreground colour
+/// set only for syntax-highlighted code spans (otherwise the UI colours the run
+/// by its [`SpanStyle`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Span {
     pub text: String,
     pub style: SpanStyle,
+    pub color: Option<Rgb>,
 }
 
 impl Span {
@@ -41,6 +60,16 @@ impl Span {
         Self {
             text: text.into(),
             style,
+            color: None,
+        }
+    }
+
+    /// A span carrying an explicit foreground colour (used for highlighted code).
+    fn colored(text: impl Into<String>, style: SpanStyle, color: Rgb) -> Self {
+        Self {
+            text: text.into(),
+            style,
+            color: Some(color),
         }
     }
 }
@@ -88,26 +117,50 @@ pub fn render(source: &str) -> Vec<MarkdownLine> {
     }
     let mut out = Vec::new();
     let mut in_code_block = false;
+    // Body lines of the current fenced block and its language token, buffered so
+    // the whole block can be syntax-highlighted at once (multi-line state needs
+    // the lines together).
+    let mut code_lines: Vec<&str> = Vec::new();
+    let mut code_lang = String::new();
     for raw in source.split('\n') {
         // Tolerate CRLF input by dropping a trailing carriage return.
         let line = raw.strip_suffix('\r').unwrap_or(raw);
 
         // A fence toggles the code block; the fence delimiter line is not emitted.
         if is_fence(line) {
+            if in_code_block {
+                flush_code_block(&mut out, &code_lines, &code_lang);
+                code_lines.clear();
+                code_lang.clear();
+            } else {
+                code_lang = fence_lang(line);
+            }
             in_code_block = !in_code_block;
             continue;
         }
         if in_code_block {
-            out.push(MarkdownLine {
-                style: LineStyle::Code,
-                prefix: String::new(),
-                spans: vec![Span::new(line, SpanStyle::Code)],
-            });
+            code_lines.push(line);
             continue;
         }
         out.push(render_block(line));
     }
+    // An unterminated fence at end of input still renders its buffered body.
+    if in_code_block {
+        flush_code_block(&mut out, &code_lines, &code_lang);
+    }
     out
+}
+
+/// Syntax-highlight `code_lines` (written in `lang`) and append one
+/// [`LineStyle::Code`] line per source line to `out`.
+fn flush_code_block(out: &mut Vec<MarkdownLine>, code_lines: &[&str], lang: &str) {
+    for spans in highlight::highlight_block(code_lines, lang) {
+        out.push(MarkdownLine {
+            style: LineStyle::Code,
+            prefix: String::new(),
+            spans,
+        });
+    }
 }
 
 /// Whether `line` is a code-fence delimiter (``` ``` ``` or `~~~`, with optional
@@ -115,6 +168,19 @@ pub fn render(source: &str) -> Vec<MarkdownLine> {
 fn is_fence(line: &str) -> bool {
     let trimmed = line.trim_start();
     trimmed.starts_with("```") || trimmed.starts_with("~~~")
+}
+
+/// The language token of an opening fence: the first whitespace-delimited word
+/// of its info string, lowercased (e.g. `` ```rust `` → `"rust"`). Empty when the
+/// fence has no info string.
+fn fence_lang(line: &str) -> String {
+    let trimmed = line.trim_start();
+    trimmed
+        .trim_start_matches(['`', '~'])
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .to_lowercase()
 }
 
 /// Classify a single non-code line into its block kind and inline spans.
