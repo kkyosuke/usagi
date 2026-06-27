@@ -95,7 +95,8 @@
           "updated_at": "2026-06-13T05:01:18.659149Z"
         }
       ],
-      "created_at": "2026-06-13T05:01:18.659149Z"
+      "created_at": "2026-06-13T05:01:18.659149Z",
+      "last_active": "2026-06-13T09:42:07.123456Z"
     }
   ],
   "updated_at": "2026-06-13T05:01:18.659149Z"
@@ -126,6 +127,7 @@ worktree を束ねます。各 worktree は git ステータス付き（下記 `
 | `root` | path | セッションツリーのルート（`<workspace>/.usagi/sessions/<name>`） |
 | `worktrees` | array&lt;WorktreeState&gt; | worktree を作成した各リポジトリの状態（下記） |
 | `created_at` | RFC3339(UTC) | セッションの作成日時 |
+| `last_active` | RFC3339(UTC)? | このセッションを最後に触った日時（切替・在席でアクティブにした、または端末／Agent の活動を観測した）。ホーム画面の鮮度ドット（[design/05-home.md](../design/05-home.md#レイアウト)）の基準時刻で、放置するほど淡く沈む。未設定（既定。一度も触っていない）なら省略され、`created_at` にフォールバックする |
 
 セッション作成（`usecase/session`）はこの `SessionRecord` を `state.json` に追記します。
 表示名の変更（`usecase/session::set_display_name`、ホーム画面の[切替モードの `r`](../design/05-home.md#各モードの説明)）は `display_name` だけを、メモの編集（`usecase/session::set_note`、ホーム画面の[切替モードの `n` / 没入の `Ctrl-E`](../design/05-home.md#セッションメモの編集)）は `note` だけを書き換えます。`state.json` はマシンローカル（git 管理外）なので、メモはこの環境にだけ保存され、ブランチや PR では共有されません。

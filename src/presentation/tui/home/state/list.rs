@@ -30,7 +30,10 @@ pub const ROOT_NAME: &str = "root";
 /// - a status [aggregated](BranchStatus::aggregate) across the repositories (the
 ///   least-progressed, so `synced` means every repository's branch has landed),
 /// - `primary` set when any repository's worktree is the primary checkout,
-/// - the first repository's `head` / `upstream` as representative detail.
+/// - the first repository's `head` / `upstream` as representative detail,
+/// - `updated_at` carrying the session's last-active time (or its creation time
+///   when never touched), which the sidebar reads for both the freshness ("heat")
+///   dot and the line-2 `N分前` label.
 ///
 /// For a single-repository workspace the session root *is* that repository's
 /// worktree, so the row matches the lone worktree exactly.
@@ -38,15 +41,6 @@ pub(super) fn session_row(session: &SessionRecord) -> WorktreeState {
     let status = BranchStatus::aggregate(session.worktrees.iter().map(|w| w.status));
     let primary = session.worktrees.iter().any(|w| w.primary);
     let first = session.worktrees.first();
-    // The row's freshness is the most-recently-touched of the session's
-    // repositories (the line-2 "N分前" reads this), falling back to when the
-    // session was created when it has no worktrees yet.
-    let updated_at = session
-        .worktrees
-        .iter()
-        .map(|w| w.updated_at)
-        .max()
-        .unwrap_or(session.created_at);
     WorktreeState {
         branch: Some(session.name.clone()),
         path: session.root.clone(),
@@ -56,7 +50,12 @@ pub(super) fn session_row(session: &SessionRecord) -> WorktreeState {
         status,
         diff: DiffStat::aggregate(session.worktrees.iter().map(|w| w.diff)),
         ahead_behind: AheadBehind::aggregate(session.worktrees.iter().map(|w| w.ahead_behind)),
-        updated_at,
+        // Both the heat dot and the line-2 `N分前` label fade by time since the
+        // session was last touched (switched to, or seen active), falling back to
+        // its creation time when it never has been. Unlike each worktree's git-sync
+        // `updated_at` — reset for every session on each workspace sync — this is a
+        // per-session signal, so it tells the live sessions from the stale ones.
+        updated_at: session.last_active_or_created(),
     }
 }
 

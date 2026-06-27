@@ -189,6 +189,7 @@ mod tests {
             root: PathBuf::from(format!("/repo/.usagi/sessions/{name}")),
             worktrees: (0..worktrees).map(|_| worktree(name)).collect(),
             created_at: Utc::now(),
+            last_active: None,
         }
     }
 

@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use anyhow::Result;
+use chrono::{DateTime, Utc};
 use console::Key;
 use console::Term;
 
@@ -102,6 +103,10 @@ pub struct ConfigReload {
     pub ai_available: bool,
 }
 
+/// A `(session name, last_active)` pair — the freshness ("heat") timestamp
+/// [`Wiring::save_last_active`] flushes to `state.json` on quit.
+pub(super) type SessionLastActive = (String, DateTime<Utc>);
+
 /// The workspace root and the impure callbacks the home event loop and its key
 /// handlers drive, bundled so they thread one value instead of a dozen separate
 /// closures. [`super::run`] builds this against the real terminal, shell pool,
@@ -157,6 +162,11 @@ pub(super) struct Wiring<'a> {
     /// confirmed. [`super::run`] writes it to the resume-focus store (gated by the
     /// restore setting); tests pass a capture or a no-op.
     pub save_resume: &'a mut dyn FnMut(&str, ResumeLevel),
+    /// Flush the freshness ("heat") timestamps accumulated this run — the
+    /// `(session name, last_active)` pairs — so the sidebar dots survive a
+    /// restart. Called alongside [`save_resume`](Self::save_resume) on a confirmed
+    /// quit. [`super::run`] merges them into `state.json`; tests no-op.
+    pub save_last_active: &'a mut dyn FnMut(&[SessionLastActive]),
 }
 
 /// What the user chose to do on the home (workspace) screen.
@@ -229,6 +239,7 @@ fn save_resume_focus(state: &mut HomeState, wiring: &mut Wiring) {
     let session = state.list().selected_name().to_string();
     let level = state.resume_level();
     (wiring.save_resume)(&session, level);
+    (wiring.save_last_active)(&state.last_active_flush());
 }
 
 fn apply_pending_refresh(state: &mut HomeState, refresh: &SessionsRefreshHandle) -> bool {
@@ -779,6 +790,7 @@ pub(crate) fn event_loop_compat(
     // ([`HomeState::resume_level`] / `restore_focus`); here it is a no-op, so a
     // quit in these loop tests does not touch the store.
     let mut save_resume = |_: &str, _: ResumeLevel| {};
+    let mut save_last_active = |_: &[(String, DateTime<Utc>)]| {};
     // The fakes have no equivalent of the production pane-exit sync thread that
     // fills this, so it stays empty here; the apply path is covered directly in
     // `a_background_refresh_updates_the_session_list`.
@@ -799,6 +811,7 @@ pub(crate) fn event_loop_compat(
         tab_op: &mut tab_op,
         close_tab: &mut close_tab,
         save_resume: &mut save_resume,
+        save_last_active: &mut save_last_active,
     };
     event_loop(
         term,

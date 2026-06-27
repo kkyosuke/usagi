@@ -206,6 +206,7 @@ fn multi_repo_session_collapses_to_one_row_with_an_aggregated_status() {
         root: PathBuf::from("/repo/.usagi/sessions/feature"),
         worktrees: vec![merged_a, merged_b, local_c],
         created_at: Utc::now(),
+        last_active: None,
     }]);
 
     // The three repositories collapse into a single row.
@@ -232,6 +233,7 @@ fn a_session_with_no_worktrees_still_yields_a_row() {
         root: PathBuf::from("/repo/.usagi/sessions/empty"),
         worktrees: Vec::new(),
         created_at: Utc::now(),
+        last_active: None,
     }]);
     assert_eq!(state.list().worktrees().len(), 1);
     let row = &state.list().worktrees()[0];
@@ -741,4 +743,92 @@ fn preview_scrolling_is_a_no_op_when_no_preview_is_open() {
     state.preview_scroll_up();
     state.preview_scroll_down(5);
     assert!(state.preview().is_none());
+}
+
+// --- session freshness ("heat") dot --------------------------------------
+
+/// A monitor snapshot marking the named session roots as actively running, for
+/// the heat-bump tests.
+fn running_snapshot(names: &[&str]) -> MonitorSnapshot {
+    MonitorSnapshot {
+        running: names
+            .iter()
+            .map(|n| PathBuf::from(format!("/repo/.usagi/sessions/{n}")))
+            .collect(),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn changed_roots_reports_paths_that_entered_or_left_any_set() {
+    let p = |n: &str| PathBuf::from(format!("/r/{n}"));
+    let old = MonitorSnapshot {
+        running: [p("a")].into_iter().collect(),
+        ..Default::default()
+    };
+    let new = MonitorSnapshot {
+        running: [p("a")].into_iter().collect(), // a unchanged → not reported
+        done: [p("b")].into_iter().collect(),    // b entered the done set
+        ..Default::default()
+    };
+    let changed = changed_roots(&old, &new);
+    assert!(changed.contains(&p("b")));
+    assert!(!changed.contains(&p("a")));
+}
+
+#[test]
+fn apply_badges_bumps_last_active_for_sessions_whose_activity_changed() {
+    let mut state = state();
+    state.restore_sessions(vec![session_record("alpha", 1), session_record("beta", 1)]);
+    // Both start untouched: heat falls back to creation time.
+    assert!(state.sessions().iter().all(|s| s.last_active.is_none()));
+
+    // alpha starts running — only its freshness is stamped.
+    state.apply_badges(running_snapshot(&["alpha"]));
+    let alpha = state.sessions().iter().find(|s| s.name == "alpha").unwrap();
+    let beta = state.sessions().iter().find(|s| s.name == "beta").unwrap();
+    assert!(alpha.last_active.is_some());
+    assert!(beta.last_active.is_none());
+}
+
+#[test]
+fn apply_badges_ignores_activity_on_paths_with_no_session() {
+    let mut state = state();
+    state.restore_sessions(vec![session_record("alpha", 1)]);
+    // A running path matching no recorded session bumps nothing (the
+    // `bump_last_active` miss path) and triggers no rebuild.
+    state.apply_badges(running_snapshot(&["ghost"]));
+    assert!(state.sessions().iter().all(|s| s.last_active.is_none()));
+}
+
+#[test]
+fn entering_focus_touches_the_active_session() {
+    let mut state = state();
+    state.restore_sessions(vec![session_record("alpha", 1), session_record("beta", 1)]);
+    // Row 1 is the first session (row 0 is the workspace root).
+    state.enter_focus(1);
+    assert!(state.sessions()[0].last_active.is_some());
+    assert!(state.sessions()[1].last_active.is_none());
+}
+
+#[test]
+fn focusing_the_root_row_touches_no_session() {
+    let mut state = state();
+    state.restore_sessions(vec![session_record("alpha", 1)]);
+    // The root row belongs to no session, so focusing it stamps nothing.
+    state.enter_focus(0);
+    assert!(state.sessions().iter().all(|s| s.last_active.is_none()));
+}
+
+#[test]
+fn last_active_flush_collects_only_touched_sessions() {
+    let mut state = state();
+    state.restore_sessions(vec![session_record("alpha", 1), session_record("beta", 1)]);
+    // Nothing touched yet → nothing to flush.
+    assert!(state.last_active_flush().is_empty());
+
+    state.apply_badges(running_snapshot(&["alpha"]));
+    let flush = state.last_active_flush();
+    assert_eq!(flush.len(), 1);
+    assert_eq!(flush[0].0, "alpha");
 }

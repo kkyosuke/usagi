@@ -108,6 +108,7 @@ fn a_finished_create_drops_into_focus_on_the_new_session() {
                 root: PathBuf::from("/ws/.usagi/sessions/main"),
                 worktrees: vec![worktree(Some("main"), "/r/main")],
                 created_at: Utc::now(),
+                last_active: None,
             },
             SessionRecord {
                 name: name.to_string(),
@@ -116,6 +117,7 @@ fn a_finished_create_drops_into_focus_on_the_new_session() {
                 root: PathBuf::from("/ws/.usagi/sessions/newx"),
                 worktrees: vec![worktree(Some(name), "/r/newx")],
                 created_at: Utc::now(),
+                last_active: None,
             },
         ]),
         select: None,

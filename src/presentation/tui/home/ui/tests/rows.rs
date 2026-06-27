@@ -213,9 +213,10 @@ fn status_label_pairs_a_git_icon_with_each_word() {
 }
 
 #[test]
-fn worktree_row_marks_selected_primary_and_detached() {
+fn worktree_row_marks_the_cursor_in_switch_and_shows_detached() {
     // The `>` cursor only appears in 切替 (Switch): the selected row carries it
-    // when `in_switch` is set.
+    // when `in_switch` is set. (The kind dot reflects freshness — a just-built
+    // fixture is fresh `●`; heat fading is covered in its own test.)
     let (top, _) = worktree_row(
         &worktree(Some("main"), true, BranchStatus::Pushed),
         "",
@@ -269,7 +270,7 @@ fn worktree_row_marks_selected_primary_and_detached() {
         false,
     );
     assert!(!other_top.contains('>'));
-    assert!(other_top.contains('○'));
+    assert!(other_top.contains('●'));
     assert!(other_top.contains("feature"));
 
     let (detached_top, _) = worktree_row(
@@ -334,6 +335,31 @@ fn worktree_row_shows_a_memo_marker_only_when_the_session_has_a_note() {
         console::measure_text_width(&console::strip_ansi_codes(&with_note)),
         console::measure_text_width(&console::strip_ansi_codes(&without_note)),
     );
+}
+
+#[test]
+fn worktree_row_heat_dot_fades_with_time_since_touched() {
+    // The kind dot is the session's freshness, measured against `now`: `●` within
+    // the quarter-hour, `◐` within four hours, `○` older. Asserted on the stripped
+    // row, with the worktree's `updated_at` set `ago` before a fixed `now`.
+    let now = Utc::now();
+    let dot = |ago: chrono::Duration| {
+        let worktree = WorktreeState {
+            updated_at: now - ago,
+            ..worktree(Some("s"), false, BranchStatus::Local)
+        };
+        let (top, _) = worktree_row(
+            &worktree, "", 10, 10, false, now, false, false, false, false, false, false, false,
+        );
+        console::strip_ansi_codes(&top).into_owned()
+    };
+    // Just touched (and a clock that ran backwards) read as fresh.
+    assert!(dot(chrono::Duration::minutes(1)).contains('●'));
+    assert!(dot(chrono::Duration::minutes(-5)).contains('●'));
+    // Within four hours, but not the quarter-hour: warm.
+    assert!(dot(chrono::Duration::hours(1)).contains('◐'));
+    // Older than the warm window: cold.
+    assert!(dot(chrono::Duration::hours(48)).contains('○'));
 }
 
 #[test]
@@ -888,9 +914,9 @@ fn rail_collapses_each_entry_to_two_rows_without_names_or_numbers() {
     // glyph share row 1 (the 2×2 grid's top half).
     assert!(plain[0].contains('⌂'));
     assert!(plain[2].contains('─'));
-    assert!(plain[3].contains('●')); // primary main
+    assert!(plain[3].contains('●')); // fresh heat dot (main, just touched)
     assert!(plain[3].contains(PUSHED_ICON)); // main's git status
-    assert!(plain[5].contains('○')); // ordinary feature
+    assert!(plain[5].contains('●')); // fresh heat dot (feature, just touched)
     assert!(plain[5].contains(LOCAL_ICON)); // feature's git status
                                             // A space separates the gutter from the glyph, and every row fills the rail.
     assert!(plain[3].starts_with("  ●") || plain[3].starts_with(" ●"));
@@ -971,7 +997,7 @@ fn rail_shows_the_active_bar_down_both_rows_and_the_agent_glyph_on_row_two() {
     let top = console::strip_ansi_codes(&lines[5]).into_owned();
     let detail = console::strip_ansi_codes(&lines[6]).into_owned();
     assert!(top.contains('▎'));
-    assert!(top.contains('○')); // kind dot on row 1
+    assert!(top.contains('●')); // fresh heat dot on row 1
     assert!(detail.contains('▎'));
     assert!(detail.contains('▶')); // agent state on row 2
                                    // The root row (not active) carries no bar.

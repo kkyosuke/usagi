@@ -4,7 +4,7 @@ use super::super::terminal::tabs::TabNav;
 use super::*;
 use crate::domain::settings::{AgentCli, SessionActionUi};
 use crate::domain::workspace_state::{BranchStatus, SessionRecord, WorktreeState};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::io;
@@ -315,6 +315,7 @@ fn state_with_sessions(names: &[&str]) -> HomeState {
             root: PathBuf::from(format!("/ws/.usagi/sessions/{n}")),
             worktrees: vec![worktree(Some(n), &format!("/ws/{n}"))],
             created_at: Utc::now(),
+            last_active: None,
         })
         .collect();
     state.restore_sessions(sessions);
@@ -577,6 +578,7 @@ fn run_with_tasks(
     let mut set_note_fake: fn(&str, &str) -> SessionOutcome = noop_set_note;
     let mut reorder_fake: fn(&str, bool) -> SessionReorder = noop_reorder;
     let mut save_resume = |_: &str, _: ResumeLevel| {};
+    let mut save_last_active = |_: &[(String, DateTime<Utc>)]| {};
     let mut wiring = Wiring {
         workspace_root: Path::new("/ws"),
         persist: &mut persist,
@@ -593,6 +595,7 @@ fn run_with_tasks(
         tab_op: &mut tab_op,
         close_tab: &mut close,
         save_resume: &mut save_resume,
+        save_last_active: &mut save_last_active,
     };
     event_loop(
         &term,
@@ -630,6 +633,7 @@ fn run_with_live_session(reader: &mut dyn KeyReader) -> Result<Outcome> {
     let mut set_note_fake: fn(&str, &str) -> SessionOutcome = noop_set_note;
     let mut reorder_fake: fn(&str, bool) -> SessionReorder = noop_reorder;
     let mut save_resume = |_: &str, _: ResumeLevel| {};
+    let mut save_last_active = |_: &[(String, DateTime<Utc>)]| {};
     let mut wiring = Wiring {
         workspace_root: Path::new("/ws"),
         persist: &mut persist,
@@ -646,6 +650,7 @@ fn run_with_live_session(reader: &mut dyn KeyReader) -> Result<Outcome> {
         tab_op: &mut tab_op,
         close_tab: &mut close,
         save_resume: &mut save_resume,
+        save_last_active: &mut save_last_active,
     };
     event_loop(
         &term,
