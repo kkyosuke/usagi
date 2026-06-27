@@ -140,18 +140,20 @@ fn group_by_milestone_and_parent_put_none_last() {
 
 #[test]
 fn dependency_tree_nests_dependents_under_dependencies() {
-    // #1 root; #2 and #3 depend on #1; #4 depends on #2.
+    // #1 root (done); #2 and #3 depend on #1 (ready); #4 depends on the still
+    // unmet #2 (blocked).
     let items = vec![
         listed(1, IssueStatus::Done, vec![], vec![], None, None),
         listed(2, IssueStatus::Todo, vec![1], vec![], None, None),
         listed(3, IssueStatus::Todo, vec![1], vec![], None, None),
-        listed(4, IssueStatus::Todo, vec![2], vec![], None, None),
+        listed(4, IssueStatus::Todo, vec![2], vec![2], None, None),
     ];
     let lines = dependency_tree(&items);
-    assert_eq!(lines[0], "#1 issue 1 [done]");
-    assert!(lines[1].contains("├─ #2 issue 2 [todo]"));
-    assert!(lines.iter().any(|l| l.contains("└─ #4 issue 4 [todo]")));
-    assert!(lines.iter().any(|l| l.contains("└─ #3 issue 3 [todo]")));
+    // Each node leads with a readiness glyph: ✓ done, ○ ready, ⊘ blocked.
+    assert_eq!(lines[0], "✓ #1 issue 1 [done]");
+    assert!(lines[1].contains("├─ ○ #2 issue 2 [todo]"));
+    assert!(lines.iter().any(|l| l.contains("└─ ⊘ #4 issue 4 [todo]")));
+    assert!(lines.iter().any(|l| l.contains("└─ ○ #3 issue 3 [todo]")));
 }
 
 #[test]

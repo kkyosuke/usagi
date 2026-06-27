@@ -23,7 +23,7 @@ mod tree;
 mod view;
 
 pub use gantt::gantt;
-pub use render::{list_line, readiness_marker, stats_line};
+pub use render::{list_line, readiness_glyph, readiness_marker, stats_line};
 pub use stats::{group, GroupBy, IssueStats};
 pub use tree::dependency_tree;
 pub use view::{IssueView, ListedIssueView};

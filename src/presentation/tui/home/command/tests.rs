@@ -858,9 +858,11 @@ fn issue_list_alias_and_empty_report() {
 
 #[test]
 fn issue_graph_renders_the_dependency_tree() {
+    // done root → ✓ (dim), its ready child → ○, that child's blocked child → ⊘.
     let issues = vec![
-        issue(1, "root", IssueStatus::Todo, vec![]),
+        issue(1, "root", IssueStatus::Done, vec![]),
         issue(2, "child", IssueStatus::Todo, vec![1]),
+        issue(3, "grandchild", IssueStatus::Todo, vec![2]),
     ];
     let result = registry().dispatch_with("issue tree", &[], &[], &issues);
     assert_eq!(
@@ -871,8 +873,9 @@ fn issue_graph_renders_the_dependency_tree() {
         }
     );
     let text = joined(&result);
-    assert!(text.contains("#1 root"));
-    assert!(text.contains("└─ #2 child"));
+    assert!(text.contains("✓ #1 root"));
+    assert!(text.contains("○ #2 child"));
+    assert!(text.contains("⊘ #3 grandchild"));
 
     // Empty graph degrades to a single log line.
     let empty = registry().dispatch_with("issue graph", &[], &[], &[]);

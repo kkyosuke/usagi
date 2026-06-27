@@ -19,6 +19,9 @@ const MAX_DEPTH: usize = 256;
 /// the issues it `dependson`, so reading top-to-bottom follows the order work
 /// can be picked up. Roots are issues with no dependencies; issues reached again
 /// (diamonds or cycles) are shown once with a `↑` marker and not re-expanded.
+/// Each node leads with a readiness glyph (`✓` done, `○` ready to start, `⊘`
+/// blocked by unmet dependencies) so finished, actionable, and blocked issues
+/// stand out at a glance.
 pub fn dependency_tree(items: &[ListedIssue]) -> Vec<String> {
     use std::collections::BTreeMap;
 
@@ -116,8 +119,11 @@ fn node_label(
         Some(item) => {
             let mark = if repeat { " ↑" } else { "" };
             format!(
-                "#{} {} [{}]{mark}",
-                item.summary.number, item.summary.title, item.summary.status
+                "{} #{} {} [{}]{mark}",
+                super::readiness_glyph(item),
+                item.summary.number,
+                item.summary.title,
+                item.summary.status
             )
         }
         // A dependency that points at a non-existent issue.

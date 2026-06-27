@@ -158,6 +158,7 @@ Agent CLI（Claude / Codex / sakana.ai / Gemini）の有無も確認します。
 - **関連の表現**: `--depends-on` はブロックする先行条件、`--related` はブロックしない緩い関連、`--parent` は所属（Epic ⊃ サブタスク）、`--milestone` は束ね。`update` の `--clear-parent` / `--clear-milestone` で解除します。
 - **着手可能（ready）の可視化**: `list` / `search` は各 issue が ready かを示します。ready = `dependson` に挙げた issue が**すべて `done`** で、かつ自身が未 `done`。ブロック中の issue には未達の依存番号（`(blocked by 1, 3)`）を併記するので、いま着手できるタスクが一目で分かります。
 - **グループ化・グラフ・進捗**: `--group-by` は `status` / `priority` / `milestone` / `parent` を受け付け、グループごとに見出しと進捗サマリ（件数・完了率・ready 数・バー）を出します。`graph` は `dependson` の依存ツリーを描き、ダイヤモンドや循環は一度だけ展開して `↑` を付けます。
+- **グラフの状態グリフ**: `graph` は各ノードの先頭に進捗が一目で分かるグリフを付けます。`✓` 完了（`done`）、`○` 着手可能（ready）、`⊘` 依存未達でブロック中（blocked）。TUI の `issue graph` はこれに加えて色分けします（[02-tui.md](02-tui.md#issue)）。
 
 ```
 $ usagi issue list
@@ -166,9 +167,9 @@ $ usagi issue list
 #3   todo         low    blocked   ログアウト  (blocked by 2)
 
 $ usagi issue graph
-#1 認証基盤を実装 [done]
-└─ #2 ログイン画面 [todo]
-   └─ #3 ログアウト [todo]
+✓ #1 認証基盤を実装 [done]
+└─ ○ #2 ログイン画面 [todo]
+   └─ ⊘ #3 ログアウト [todo]
 
 3 issues · 1 done (33%) · 1 ready  [######--------------]
 ```

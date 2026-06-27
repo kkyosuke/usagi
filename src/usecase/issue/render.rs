@@ -23,6 +23,19 @@ pub fn readiness_marker(listed: &ListedIssue) -> &'static str {
     }
 }
 
+/// A single glyph for a listed issue's readiness, so progress reads at a glance
+/// in the dependency graph: `✓` done, `○` ready to start, `⊘` blocked by unmet
+/// dependencies.
+pub fn readiness_glyph(listed: &ListedIssue) -> char {
+    if listed.summary.status == IssueStatus::Done {
+        '✓'
+    } else if listed.is_ready() {
+        '○'
+    } else {
+        '⊘'
+    }
+}
+
 /// One aligned `#N status priority marker title` line for a listed issue, with a
 /// trailing `(blocked by …)` when it has unmet dependencies.
 pub fn list_line(listed: &ListedIssue) -> String {
@@ -105,6 +118,13 @@ mod tests {
             readiness_marker(&listed(IssueStatus::Todo, vec![3])),
             "blocked"
         );
+    }
+
+    #[test]
+    fn glyph_reflects_status_and_readiness() {
+        assert_eq!(readiness_glyph(&listed(IssueStatus::Done, vec![])), '✓');
+        assert_eq!(readiness_glyph(&listed(IssueStatus::Todo, vec![])), '○');
+        assert_eq!(readiness_glyph(&listed(IssueStatus::Todo, vec![3])), '⊘');
     }
 
     #[test]
