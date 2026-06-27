@@ -59,6 +59,7 @@ fn escape_in_switch_closes_the_note_before_backing_out() {
         root: PathBuf::from("/ws/.usagi/sessions/alpha"),
         worktrees: vec![worktree(Some("alpha"), "/ws/alpha")],
         created_at: Utc::now(),
+        last_active: None,
     }]);
     let keys = vec![
         Ok(Key::ArrowDown), // root -> alpha; its note auto-shows

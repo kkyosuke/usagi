@@ -12,7 +12,7 @@ use anyhow::Result;
 use chrono::Utc;
 
 use crate::domain::workspace_state::{
-    BranchStatus, DiffStat, SessionRecord, WorkspaceState, WorktreeState,
+    AheadBehind, BranchStatus, DiffStat, SessionRecord, WorkspaceState, WorktreeState,
 };
 use crate::infrastructure::error_log::ErrorLog;
 use crate::infrastructure::git;
@@ -159,13 +159,14 @@ pub fn inspect_worktree(path: &Path, default: &str) -> WorktreeState {
         upstream: None,
         dirty: false,
     });
-    let classification = classify(
-        path,
-        status.branch.as_deref(),
-        default,
-        status.upstream.is_some(),
-        status.dirty,
-    );
+    // The ahead/behind commit counts feed both the lifecycle status and the
+    // `↑N ↓M` marker, so they are read once here and shared.
+    let counts = branch_counts(path, status.branch.as_deref(), default);
+    let classification = BranchStatus::derive(status.dirty, counts, status.upstream.is_some());
+    let ahead_behind = counts.and_then(|(ahead, behind)| {
+        let ab = AheadBehind { ahead, behind };
+        (!ab.is_empty()).then_some(ab)
+    });
     let diff = measure_diff(path, status.branch.as_deref(), default);
     WorktreeState {
         branch: status.branch,
@@ -175,6 +176,7 @@ pub fn inspect_worktree(path: &Path, default: &str) -> WorktreeState {
         upstream: status.upstream,
         status: classification,
         diff,
+        ahead_behind,
         updated_at: Utc::now(),
     }
 }
@@ -183,7 +185,7 @@ pub fn inspect_worktree(path: &Path, default: &str) -> WorktreeState {
 /// sidebar `+N -M` badge, or `None` when there is nothing to show.
 ///
 /// Only a real branch other than the default is measured — the default branch
-/// itself and a detached HEAD report `None`, mirroring [`classify`]'s commit
+/// itself and a detached HEAD report `None`, mirroring [`branch_counts`]'s commit
 /// counts. An empty diff (a session even with the default) also collapses to
 /// `None`, so the badge and the persisted state only carry an actual diff.
 fn measure_diff(repo: &Path, branch: Option<&str>, default: &str) -> Option<DiffStat> {
@@ -197,27 +199,20 @@ fn measure_diff(repo: &Path, branch: Option<&str>, default: &str) -> Option<Diff
     }
 }
 
-/// Gather the git facts a branch's lifecycle status is derived from — its
-/// commits relative to the default branch — and hand them to
-/// [`BranchStatus::derive`], which holds the (pure) classification rules.
+/// The branch's ahead/behind commit counts against the default — the git facts
+/// the lifecycle status ([`BranchStatus::derive`]) and the `↑N ↓M` marker are both
+/// built from, read once per worktree and shared.
 ///
-/// Only a real branch other than the default is measured against the default;
-/// the default branch and a detached HEAD skip the ahead/behind read. The
-/// default is resolved against the remote (`origin/<default>`) first inside
-/// [`git::ahead_behind`], so the status reflects what has landed on the remote
+/// Only a real branch other than the default is measured; the default branch and a
+/// detached HEAD report `None` (their ahead/behind is not meaningful). The default
+/// is resolved against the remote (`origin/<default>`) first inside
+/// [`git::ahead_behind`], so the counts reflect what has landed on the remote
 /// integration branch even before a local fetch.
-fn classify(
-    repo: &Path,
-    branch: Option<&str>,
-    default: &str,
-    has_upstream: bool,
-    dirty: bool,
-) -> BranchStatus {
-    let counts = match branch {
+fn branch_counts(repo: &Path, branch: Option<&str>, default: &str) -> Option<(usize, usize)> {
+    match branch {
         Some(branch) if branch != default => git::ahead_behind(repo, branch, default),
         _ => None,
-    };
-    BranchStatus::derive(dirty, counts, has_upstream)
+    }
 }
 
 #[cfg(test)]
@@ -370,9 +365,11 @@ mod tests {
                 upstream: None,
                 status: BranchStatus::Local,
                 diff: None,
+                ahead_behind: None,
                 updated_at: Utc::now(),
             }],
             created_at: Utc::now(),
+            last_active: None,
         });
         store.save(&state).unwrap();
 
@@ -393,6 +390,7 @@ mod tests {
             root: PathBuf::from(name),
             worktrees: Vec::new(),
             created_at: Utc::now(),
+            last_active: None,
         }
     }
 
@@ -470,6 +468,20 @@ mod tests {
         assert!(notice.unwrap().contains("Failed to load sessions"));
     }
 
+    /// Re-derive a branch's lifecycle status the way [`inspect_worktree`] does:
+    /// read its ahead/behind via [`branch_counts`] (a real git call) and hand the
+    /// counts to the pure [`BranchStatus::derive`]. Keeps the integration coverage
+    /// the old `classify` had after it was split into fetch + derive.
+    fn classify(
+        repo: &Path,
+        branch: Option<&str>,
+        default: &str,
+        up: bool,
+        dirty: bool,
+    ) -> BranchStatus {
+        BranchStatus::derive(dirty, branch_counts(repo, branch, default), up)
+    }
+
     #[test]
     fn classify_reports_new_for_a_freshly_cut_branch() {
         let dir = tempfile::tempdir().unwrap();
@@ -484,6 +496,11 @@ mod tests {
         assert_eq!(
             classify(dir.path(), Some("feature"), "main", false, false),
             BranchStatus::New
+        );
+        // The freshly-cut branch is even with the default → no `↑↓` marker.
+        assert_eq!(
+            branch_counts(dir.path(), Some("feature"), "main"),
+            Some((0, 0))
         );
     }
 
@@ -506,6 +523,11 @@ mod tests {
         assert_eq!(
             classify(dir.path(), Some("feature"), "main", false, false),
             BranchStatus::Synced
+        );
+        // Behind by the one commit main gained, ahead by none.
+        assert_eq!(
+            branch_counts(dir.path(), Some("feature"), "main"),
+            Some((0, 1))
         );
     }
 
@@ -567,5 +589,55 @@ mod tests {
             classify(dir.path(), Some("main"), "main", false, false),
             BranchStatus::Local
         );
+        // Neither the detached HEAD nor the default branch yields ahead/behind.
+        assert_eq!(branch_counts(dir.path(), None, "main"), None);
+        assert_eq!(branch_counts(dir.path(), Some("main"), "main"), None);
+    }
+
+    #[test]
+    fn inspect_worktree_records_ahead_behind_for_a_diverged_branch() {
+        let dir = tempfile::tempdir().unwrap();
+        init_repo(dir.path());
+        // feature gains a commit (ahead 1); main then gains one feature lacks
+        // (behind 1).
+        git(dir.path())
+            .args(["checkout", "-q", "-b", "feature"])
+            .status()
+            .unwrap();
+        std::fs::write(dir.path().join("f"), "y").unwrap();
+        git(dir.path()).args(["add", "."]).status().unwrap();
+        git(dir.path())
+            .args(["commit", "-q", "-m", "feature work"])
+            .status()
+            .unwrap();
+        git(dir.path())
+            .args(["checkout", "-q", "main"])
+            .status()
+            .unwrap();
+        std::fs::write(dir.path().join("m"), "z").unwrap();
+        git(dir.path()).args(["add", "."]).status().unwrap();
+        git(dir.path())
+            .args(["commit", "-q", "-m", "main work"])
+            .status()
+            .unwrap();
+        git(dir.path())
+            .args(["checkout", "-q", "feature"])
+            .status()
+            .unwrap();
+
+        let wt = inspect_worktree(dir.path(), "main");
+        assert_eq!(
+            wt.ahead_behind,
+            Some(AheadBehind {
+                ahead: 1,
+                behind: 1
+            })
+        );
+
+        // The default branch carries no `↑↓` marker (not measured against itself).
+        let main = inspect_worktree(dir.path(), "feature");
+        // Checked out on feature, so inspecting with default "feature" reads the
+        // current branch as the default → no counts.
+        assert_eq!(main.ahead_behind, None);
     }
 }

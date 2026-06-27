@@ -71,6 +71,7 @@ mod tests {
                 note: None,
                 root: PathBuf::from("/repo/.usagi/sessions/login"),
                 created_at: ts,
+                last_active: None,
                 worktrees: vec![
                     WorktreeState {
                         branch: Some("login".to_string()),
@@ -80,6 +81,7 @@ mod tests {
                         upstream: Some("origin/login".to_string()),
                         status: BranchStatus::Pushed,
                         diff: None,
+                        ahead_behind: None,
                         updated_at: ts,
                     },
                     WorktreeState {
@@ -90,6 +92,7 @@ mod tests {
                         upstream: None,
                         status: BranchStatus::Local,
                         diff: None,
+                        ahead_behind: None,
                         updated_at: ts,
                     },
                 ],

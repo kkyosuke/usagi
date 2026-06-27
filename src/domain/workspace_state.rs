@@ -166,6 +166,42 @@ impl DiffStat {
     }
 }
 
+/// How far a worktree's branch has diverged from its repository's default branch,
+/// in **commits**: `ahead` are commits on the branch the default lacks, `behind`
+/// are commits on the default the branch lacks. Shown on the sidebar as `↑N ↓M`
+/// (the line-count [`DiffStat`] badge sits beside it), so a glance tells whether a
+/// session is unmerged work (ahead) or stale relative to the default (behind).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct AheadBehind {
+    /// Commits on the branch but not on the default (the `↑N` half).
+    pub ahead: usize,
+    /// Commits on the default but not on the branch (the `↓M` half).
+    pub behind: usize,
+}
+
+impl AheadBehind {
+    /// Whether the branch is even with its default — no commits ahead or behind,
+    /// so the row shows no `↑↓` marker.
+    pub fn is_empty(self) -> bool {
+        self.ahead == 0 && self.behind == 0
+    }
+
+    /// Sum the per-repository ahead/behind counts of one session into the single
+    /// total its sidebar row shows. `None` entries (a repository even with its
+    /// default, or one not measured) contribute nothing; the result is `None` when
+    /// every repository is even, mirroring [`DiffStat::aggregate`].
+    pub fn aggregate(counts: impl IntoIterator<Item = Option<AheadBehind>>) -> Option<AheadBehind> {
+        let total = counts
+            .into_iter()
+            .flatten()
+            .fold(AheadBehind::default(), |acc, c| AheadBehind {
+                ahead: acc.ahead + c.ahead,
+                behind: acc.behind + c.behind,
+            });
+        (!total.is_empty()).then_some(total)
+    }
+}
+
 /// State of a single worktree (a branch checked out into a directory).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WorktreeState {
@@ -199,6 +235,14 @@ pub struct WorktreeState {
     /// refresh, like [`status`](Self::status).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diff: Option<DiffStat>,
+    /// How far the branch has diverged from its default in **commits** — the
+    /// sidebar's `↑N ↓M` marker. `None` when not measured (the default branch
+    /// itself, a detached HEAD, an unreadable range) or when the branch is even
+    /// with the default; omitted from the file when absent, and an older file
+    /// without it loads as `None`. Re-derived from git on each refresh, like
+    /// [`status`](Self::status) and [`diff`](Self::diff).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ahead_behind: Option<AheadBehind>,
     /// When this worktree's state was last refreshed.
     pub updated_at: DateTime<Utc>,
 }
@@ -233,6 +277,13 @@ pub struct SessionRecord {
     pub worktrees: Vec<WorktreeState>,
     /// When the session was created.
     pub created_at: DateTime<Utc>,
+    /// When the session was last *touched*: switched to, or observed producing
+    /// terminal/agent activity. Drives the sidebar's freshness ("heat") dot.
+    /// `None` (the default, and omitted from older files) means it has never been
+    /// touched since creation, so callers fall back to
+    /// [`created_at`](Self::created_at) via [`last_active_or_created`](Self::last_active_or_created).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_active: Option<DateTime<Utc>>,
 }
 
 impl SessionRecord {
@@ -245,6 +296,13 @@ impl SessionRecord {
     /// The session's note, or `None` when none has been written.
     pub fn note(&self) -> Option<&str> {
         self.note.as_deref()
+    }
+
+    /// The reference time for the freshness ("heat") dot: the persisted
+    /// [`last_active`](Self::last_active), or [`created_at`](Self::created_at) when
+    /// the session has never been touched.
+    pub fn last_active_or_created(&self) -> DateTime<Utc> {
+        self.last_active.unwrap_or(self.created_at)
     }
 }
 
@@ -281,6 +339,7 @@ impl Default for WorkspaceState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeZone;
 
     #[test]
     fn branch_status_as_str_and_display_match() {
@@ -405,6 +464,49 @@ mod tests {
     }
 
     #[test]
+    fn ahead_behind_is_empty_only_when_both_counts_are_zero() {
+        assert!(AheadBehind::default().is_empty());
+        assert!(!AheadBehind {
+            ahead: 1,
+            behind: 0
+        }
+        .is_empty());
+        assert!(!AheadBehind {
+            ahead: 0,
+            behind: 1
+        }
+        .is_empty());
+    }
+
+    #[test]
+    fn ahead_behind_aggregate_sums_repos_and_drops_an_all_even_session() {
+        // Per-repository counts sum; `None` and even entries contribute nothing.
+        assert_eq!(
+            AheadBehind::aggregate([
+                Some(AheadBehind {
+                    ahead: 2,
+                    behind: 1
+                }),
+                None,
+                Some(AheadBehind {
+                    ahead: 3,
+                    behind: 0
+                }),
+            ]),
+            Some(AheadBehind {
+                ahead: 5,
+                behind: 1
+            })
+        );
+        // A session whose repositories are all even shows no marker.
+        assert_eq!(
+            AheadBehind::aggregate([None, Some(AheadBehind::default())]),
+            None
+        );
+        assert_eq!(AheadBehind::aggregate(std::iter::empty()), None);
+    }
+
+    #[test]
     fn diff_is_omitted_when_absent_and_round_trips_when_set() {
         let mut state = WorkspaceState::new();
         state.sessions.push(SessionRecord {
@@ -414,6 +516,7 @@ mod tests {
             root: PathBuf::from("/repo/.usagi/sessions/feature-x"),
             worktrees: vec![sample_worktree()],
             created_at: Utc::now(),
+            last_active: None,
         });
         // No diff → the key is dropped from the file and an older file parses.
         let json = serde_json::to_string(&state).unwrap();
@@ -441,6 +544,7 @@ mod tests {
             upstream: Some("origin/feature-x".to_string()),
             status: BranchStatus::Pushed,
             diff: None,
+            ahead_behind: None,
             updated_at: Utc::now(),
         }
     }
@@ -462,6 +566,7 @@ mod tests {
             root: PathBuf::from("/repo/.usagi/sessions/feature-x"),
             worktrees: vec![sample_worktree()],
             created_at: Utc::now(),
+            last_active: None,
         });
 
         let json = serde_json::to_string_pretty(&state).unwrap();
@@ -478,6 +583,7 @@ mod tests {
             root: PathBuf::from("/repo/.usagi/sessions/feature-x"),
             worktrees: vec![sample_worktree()],
             created_at: Utc::now(),
+            last_active: None,
         };
         // No override → the session name is the label.
         assert_eq!(session.display_label(), "feature-x");
@@ -495,6 +601,7 @@ mod tests {
             root: PathBuf::from("/repo/.usagi/sessions/feature-x"),
             worktrees: vec![sample_worktree()],
             created_at: Utc::now(),
+            last_active: None,
         });
         let json = serde_json::to_string(&state).unwrap();
         assert!(json.contains("\"display_name\":\"Nice name\""));
@@ -523,6 +630,7 @@ mod tests {
             root: PathBuf::from("/repo/.usagi/sessions/feature-x"),
             worktrees: vec![sample_worktree()],
             created_at: Utc::now(),
+            last_active: None,
         });
         // No note → the accessor is `None` and the key is dropped from the file.
         assert_eq!(state.sessions[0].note(), None);
@@ -543,6 +651,42 @@ mod tests {
         let legacy = r#"{"sessions":[{"name":"x","root":"/r","worktrees":[],"created_at":"2026-06-13T05:01:18.659149Z"}],"updated_at":"2026-06-13T05:01:18.659149Z"}"#;
         let parsed: WorkspaceState = serde_json::from_str(legacy).unwrap();
         assert_eq!(parsed.sessions[0].note(), None);
+    }
+
+    #[test]
+    fn last_active_is_omitted_when_absent_falls_back_to_created_at_and_round_trips() {
+        let created = Utc.with_ymd_and_hms(2026, 6, 13, 5, 0, 0).unwrap();
+        let mut session = SessionRecord {
+            name: "feature-x".to_string(),
+            display_name: None,
+            note: None,
+            root: PathBuf::from("/repo/.usagi/sessions/feature-x"),
+            worktrees: vec![sample_worktree()],
+            created_at: created,
+            last_active: None,
+        };
+        // Never touched → the heat reference falls back to `created_at` and the
+        // key is dropped from the file.
+        assert_eq!(session.last_active_or_created(), created);
+        let json = serde_json::to_string(&session).unwrap();
+        assert!(!json.contains("last_active"));
+
+        // Touched → the reference is `last_active`, and it round-trips.
+        let touched = Utc.with_ymd_and_hms(2026, 6, 14, 9, 30, 0).unwrap();
+        session.last_active = Some(touched);
+        assert_eq!(session.last_active_or_created(), touched);
+        let json = serde_json::to_string(&session).unwrap();
+        assert!(json.contains("last_active"));
+        assert_eq!(
+            serde_json::from_str::<SessionRecord>(&json).unwrap(),
+            session
+        );
+
+        // An older file without `last_active` parses to `None`.
+        let legacy =
+            r#"{"name":"x","root":"/r","worktrees":[],"created_at":"2026-06-13T05:01:18.659149Z"}"#;
+        let parsed: SessionRecord = serde_json::from_str(legacy).unwrap();
+        assert_eq!(parsed.last_active, None);
     }
 
     #[test]

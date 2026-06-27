@@ -2,7 +2,9 @@
 //! into one row each, preceded by the synthetic root row, with the cursor /
 //! active-row navigation the home screen drives.
 
-use crate::domain::workspace_state::{BranchStatus, DiffStat, SessionRecord, WorktreeState};
+use crate::domain::workspace_state::{
+    AheadBehind, BranchStatus, DiffStat, SessionRecord, WorktreeState,
+};
 
 use super::super::command::WorktreeRef;
 
@@ -28,7 +30,10 @@ pub const ROOT_NAME: &str = "root";
 /// - a status [aggregated](BranchStatus::aggregate) across the repositories (the
 ///   least-progressed, so `synced` means every repository's branch has landed),
 /// - `primary` set when any repository's worktree is the primary checkout,
-/// - the first repository's `head` / `upstream` as representative detail.
+/// - the first repository's `head` / `upstream` as representative detail,
+/// - `updated_at` carrying the session's last-active time (or its creation time
+///   when never touched), which the sidebar reads for both the freshness ("heat")
+///   dot and the line-2 `N分前` label.
 ///
 /// For a single-repository workspace the session root *is* that repository's
 /// worktree, so the row matches the lone worktree exactly.
@@ -44,7 +49,13 @@ pub(super) fn session_row(session: &SessionRecord) -> WorktreeState {
         upstream: first.and_then(|w| w.upstream.clone()),
         status,
         diff: DiffStat::aggregate(session.worktrees.iter().map(|w| w.diff)),
-        updated_at: session.created_at,
+        ahead_behind: AheadBehind::aggregate(session.worktrees.iter().map(|w| w.ahead_behind)),
+        // Both the heat dot and the line-2 `N分前` label fade by time since the
+        // session was last touched (switched to, or seen active), falling back to
+        // its creation time when it never has been. Unlike each worktree's git-sync
+        // `updated_at` — reset for every session on each workspace sync — this is a
+        // per-session signal, so it tells the live sessions from the stale ones.
+        updated_at: session.last_active_or_created(),
     }
 }
 
@@ -69,6 +80,11 @@ pub struct WorktreeList {
     /// override is cosmetic only — every name-based lookup keys on the branch (the
     /// session identity), never on the label.
     labels: Vec<Option<String>>,
+    /// Whether each row's session carries a note, aligned 1:1 with `worktrees`
+    /// (`notes[i]` is for `worktrees[i]`). Drives the line-1 memo marker; like
+    /// `labels` it is cosmetic and never used for lookups. Defaults to all-false
+    /// and is filled in by [`set_notes`](Self::set_notes) on a list rebuild.
+    notes: Vec<bool>,
     selected_index: usize,
     active_index: usize,
     /// The display name of the session that was active *before* the current one,
@@ -99,10 +115,12 @@ impl WorktreeList {
         mut labels: Vec<Option<String>>,
     ) -> Self {
         labels.resize(worktrees.len(), None);
+        let notes = vec![false; worktrees.len()];
         Self {
             workspace_name: workspace_name.into(),
             worktrees,
             labels,
+            notes,
             selected_index: 0,
             active_index: 0,
             previous_active: None,
@@ -116,6 +134,20 @@ impl WorktreeList {
             Some(label) => label,
             None => self.worktrees.get(index).map(worktree_name).unwrap_or(""),
         }
+    }
+
+    /// Record which rows carry a note (`notes[i]` for `worktrees[i]`), driving
+    /// the line-1 memo marker. A shorter/longer slice is padded/truncated to
+    /// match the worktree count, mirroring how [`with_labels`](Self::with_labels)
+    /// keeps `labels` aligned.
+    pub fn set_notes(&mut self, mut notes: Vec<bool>) {
+        notes.resize(self.worktrees.len(), false);
+        self.notes = notes;
+    }
+
+    /// Whether the worktree at `index` carries a note (out-of-range is `false`).
+    pub fn has_note(&self, index: usize) -> bool {
+        self.notes.get(index).copied().unwrap_or(false)
     }
 
     pub fn workspace_name(&self) -> &str {

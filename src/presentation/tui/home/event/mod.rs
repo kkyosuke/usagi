@@ -10,10 +10,11 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use anyhow::Result;
+use chrono::{DateTime, Utc};
 use console::Key;
 use console::Term;
 
-use crate::domain::settings::{AgentCli, SessionActionUi, Sidebar};
+use crate::domain::settings::{AgentCli, KeyScheme, SessionActionUi, Sidebar};
 use crate::presentation::tui::install_task;
 use crate::presentation::tui::io::screen::{FramePainter, KeyReader};
 
@@ -94,10 +95,17 @@ pub(super) type TabOp<'a> = dyn FnMut(&Path, Option<TabNav>) -> (Vec<String>, us
 pub struct ConfigReload {
     /// The effective Session Action UI (在席 mode's surface).
     pub session_action_ui: SessionActionUi,
+    /// The effective 没入 key scheme (the `Ctrl-O` prefix or single `Alt`-chords),
+    /// so the pane's key handling reflects the edit without reopening the screen.
+    pub key_scheme: KeyScheme,
     /// Whether the local LLM is usable (enabled and its model pulled), gating
     /// the `ai` command in the 在席 menu.
     pub ai_available: bool,
 }
+
+/// A `(session name, last_active)` pair — the freshness ("heat") timestamp
+/// [`Wiring::save_last_active`] flushes to `state.json` on quit.
+pub(super) type SessionLastActive = (String, DateTime<Utc>);
 
 /// The workspace root and the impure callbacks the home event loop and its key
 /// handlers drive, bundled so they thread one value instead of a dozen separate
@@ -154,6 +162,11 @@ pub(super) struct Wiring<'a> {
     /// confirmed. [`super::run`] writes it to the resume-focus store (gated by the
     /// restore setting); tests pass a capture or a no-op.
     pub save_resume: &'a mut dyn FnMut(&str, ResumeLevel),
+    /// Flush the freshness ("heat") timestamps accumulated this run — the
+    /// `(session name, last_active)` pairs — so the sidebar dots survive a
+    /// restart. Called alongside [`save_resume`](Self::save_resume) on a confirmed
+    /// quit. [`super::run`] merges them into `state.json`; tests no-op.
+    pub save_last_active: &'a mut dyn FnMut(&[SessionLastActive]),
 }
 
 /// What the user chose to do on the home (workspace) screen.
@@ -226,6 +239,7 @@ fn save_resume_focus(state: &mut HomeState, wiring: &mut Wiring) {
     let session = state.list().selected_name().to_string();
     let level = state.resume_level();
     (wiring.save_resume)(&session, level);
+    (wiring.save_last_active)(&state.last_active_flush());
 }
 
 fn apply_pending_refresh(state: &mut HomeState, refresh: &SessionsRefreshHandle) -> bool {
@@ -265,6 +279,10 @@ pub(super) fn event_loop(
     // always repainting.
     let mut last_update = None;
     let mut force_paint = true;
+    // Whether the last paint drew the mascot mid-blink, so the frame that reopens
+    // its eyes (an idle tick, not a keypress) still repaints in a quiet 切替 rather
+    // than being skipped — leaving the eyes stuck shut.
+    let mut last_blinking = false;
     loop {
         // Mark each background session's agent state — running, waiting for
         // input, live (ready), and finished — before painting, applying every
@@ -374,6 +392,12 @@ pub(super) fn event_loop(
         // showing either must repaint even when nothing else moved.
         let now = Instant::now();
         let panel_animating = install_task::handle().is_active(now) || tasks.is_active(now);
+        // Refresh the sidebar mascot for this paint: reopen its eyes once a blink's
+        // window has passed and advance the Working paw on the live tick. Reactive,
+        // not timed — it rides paints that already happen, so a settled mascot
+        // leaves `mascot_blinking` false and a truly idle 切替 still skips painting.
+        state.tick_mascot(now);
+        let blink_changed = state.mascot_blinking() != last_blinking;
         // In a quiet base 切替 (Switch) — no live preview in the right pane and no
         // command palette open — an idle frame's only moving parts are the sidebar
         // badges, the update notice, and those time-animated panels. When none
@@ -392,13 +416,23 @@ pub(super) fn event_loop(
             && !refreshed
             && !panel_animating
             && !badges_changed
+            // A mascot blink (or the frame that ends one) is a moving part too, so
+            // it repaints rather than freezing the eyes mid-blink.
+            && !state.mascot_blinking()
+            && !blink_changed
             && last_update == latest_update;
         let (height, width) = term.size();
         if !skip_paint {
+            // Stamp the frame's render time so the left pane's "N分前" labels track
+            // real time. Only on a real paint — a skipped frame draws nothing, so
+            // the label refreshes on the next change rather than ticking every
+            // second (keeping the loop's repaint budget low).
+            state.set_now(chrono::Utc::now());
             let frame = ui::render_frame(height as usize, width as usize, &state);
             painter.paint(term, frame)?;
         }
         last_update = latest_update;
+        last_blinking = state.mascot_blinking();
         force_paint = false;
 
         // The TUI itself never scrolls, so a wheel turn is read and dropped here
@@ -415,7 +449,9 @@ pub(super) fn event_loop(
         // / finished (✓) without the user typing. With nothing in flight and no
         // live session it blocks on the next key, so a truly idle screen costs
         // nothing.
-        let animate = panel_animating || state.has_live_sessions();
+        // Keep ticking through a mascot blink too, so its eyes reopen on their own
+        // a beat later without waiting for the next keypress.
+        let animate = panel_animating || state.has_live_sessions() || state.mascot_blinking();
         let key = if animate {
             match reader.read_key_timeout(install_task::ANIM_TICK) {
                 Ok(Some(key)) => key,
@@ -444,6 +480,15 @@ pub(super) fn event_loop(
         // A key was pressed: whatever it does to the state, repaint on the next
         // iteration (the skip above only applies to idle ticks that read no key).
         force_paint = true;
+        // Nudge the resting mascot to blink back at the user — reactive, so the
+        // rabbit reacts the moment a key lands without any idle timer. Only while
+        // it shows an open-eyed face (切替 / 在席); 没入's heads-down face has no eyes
+        // to blink and animates on the live tick instead. A fresh `now` (the read
+        // may have blocked a while) so the blink's window starts from the keypress;
+        // the call is a no-op when the mascot animation is turned off.
+        if matches!(state.mode(), Mode::Switch | Mode::Focus) {
+            state.kick_mascot_blink(Instant::now());
+        }
 
         // Record the key press (and the mode it landed in) to the operation trace,
         // so a session's navigation can be analysed after the fact. `record_with`
@@ -745,6 +790,7 @@ pub(crate) fn event_loop_compat(
     // ([`HomeState::resume_level`] / `restore_focus`); here it is a no-op, so a
     // quit in these loop tests does not touch the store.
     let mut save_resume = |_: &str, _: ResumeLevel| {};
+    let mut save_last_active = |_: &[(String, DateTime<Utc>)]| {};
     // The fakes have no equivalent of the production pane-exit sync thread that
     // fills this, so it stays empty here; the apply path is covered directly in
     // `a_background_refresh_updates_the_session_list`.
@@ -765,6 +811,7 @@ pub(crate) fn event_loop_compat(
         tab_op: &mut tab_op,
         close_tab: &mut close_tab,
         save_resume: &mut save_resume,
+        save_last_active: &mut save_last_active,
     };
     event_loop(
         term,

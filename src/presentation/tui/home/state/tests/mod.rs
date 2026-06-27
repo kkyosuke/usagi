@@ -13,6 +13,7 @@ fn worktree(branch: &str) -> WorktreeState {
         upstream: None,
         status: BranchStatus::Local,
         diff: None,
+        ahead_behind: None,
         updated_at: Utc::now(),
     }
 }
@@ -59,6 +60,7 @@ fn session_record(name: &str, worktrees: usize) -> SessionRecord {
         root: std::path::PathBuf::from(format!("/repo/.usagi/sessions/{name}")),
         worktrees: (0..worktrees).map(|_| worktree(name)).collect(),
         created_at: Utc::now(),
+        last_active: None,
     }
 }
 

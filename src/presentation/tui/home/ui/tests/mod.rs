@@ -22,6 +22,7 @@ fn worktree(branch: Option<&str>, primary: bool, status: BranchStatus) -> Worktr
         upstream: None,
         status,
         diff: None,
+        ahead_behind: None,
         updated_at: Utc::now(),
     }
 }
@@ -82,6 +83,7 @@ fn state_with_sessions(names: &[&str]) -> HomeState {
             root: PathBuf::from(format!("/ws/{n}")),
             worktrees: Vec::new(),
             created_at: Utc::now(),
+            last_active: None,
         })
         .collect();
     state.restore_sessions(sessions);
@@ -107,6 +109,7 @@ fn switch_state_with_note(note: &str) -> HomeState {
         root: PathBuf::from("/repo/.usagi/sessions/alpha"),
         worktrees: vec![worktree(Some("alpha"), false, BranchStatus::Local)],
         created_at: Utc::now(),
+        last_active: None,
     }]);
     state.enter_switch(super::super::state::ReturnMode::Base);
     state.switch_move_down(); // root -> alpha

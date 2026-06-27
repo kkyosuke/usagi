@@ -14,9 +14,12 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
+
+use chrono::{DateTime, Utc};
 
 use crate::domain::issue::Issue;
-use crate::domain::settings::{AgentCli, SessionActionUi, Sidebar};
+use crate::domain::settings::{AgentCli, KeyScheme, SessionActionUi, Sidebar};
 use crate::domain::version::Version;
 use crate::domain::workspace_state::{SessionRecord, WorktreeState};
 
@@ -295,6 +298,24 @@ impl CommandLine {
     }
 }
 
+/// The session roots whose activity changed between two monitor snapshots: any
+/// path that entered or left the running / waiting / done / live set. Used to
+/// bump the freshness ("heat") dot of only the sessions that actually did
+/// something between frames — the symmetric difference is set-membership only, so
+/// a quiet frame yields an empty set and no work.
+fn changed_roots(old: &MonitorSnapshot, new: &MonitorSnapshot) -> HashSet<PathBuf> {
+    let mut changed = HashSet::new();
+    for (a, b) in [
+        (&old.running, &new.running),
+        (&old.waiting, &new.waiting),
+        (&old.done, &new.done),
+        (&old.live, &new.live),
+    ] {
+        changed.extend(a.symmetric_difference(b).cloned());
+    }
+    changed
+}
+
 /// The full state of the home screen.
 ///
 /// Not `Clone`/`Debug`: it owns a [`CommandRegistry`] of trait objects, which
@@ -317,6 +338,11 @@ pub struct HomeState {
     /// the effective settings by `mod.rs`. Independent of [`mode`](Self::mode),
     /// so zooming between modes never resets it.
     sidebar: Sidebar,
+    /// How the embedded terminal (没入) reserves its navigation keys — a `Ctrl-O`
+    /// prefix or single `Alt`-chords — so the rest reach the shell / agent.
+    /// Injected from the effective settings by `mod.rs` and re-read when the
+    /// config screen closes; read by the pane input loop ([`super::pane_input`]).
+    key_scheme: KeyScheme,
     /// Whether the `ai` command is offered in the 在席 (Focus) menu: true only
     /// when the local LLM is enabled and its model is pulled. Injected from the
     /// effective settings (and a runtime probe) by `mod.rs`; false by default so
@@ -441,6 +467,29 @@ pub struct HomeState {
     /// session (keyed by this path in `live` / `running` / …). Injected by
     /// `mod.rs`; empty until set (tests that never preview the root leave it so).
     root_path: PathBuf,
+    /// Whether the sidebar mascot reacts to interaction — injected from the
+    /// effective settings by `mod.rs`. While `false` the mascot never blinks and
+    /// the Working rabbit never pumps its paw, so it stays a perfectly still
+    /// resting image (and [`tick_mascot`](Self::tick_mascot) /
+    /// [`kick_mascot_blink`](Self::kick_mascot_blink) become no-ops). On by default.
+    mascot_animation_enabled: bool,
+    /// When set, the mascot is mid-blink until this instant — the eyes stay shut
+    /// while `now` is before it. [`kick_mascot_blink`](Self::kick_mascot_blink)
+    /// arms it the moment the user interacts (in 切替 / 在席), and
+    /// [`tick_mascot`](Self::tick_mascot) clears it once the instant passes, so the
+    /// rabbit blinks back without any idle timer — the blink rides paints that
+    /// already happen.
+    mascot_blink_deadline: Option<Instant>,
+    /// Whether the mascot's eyes are shut on the frame being painted, recomputed
+    /// from [`mascot_blink_deadline`](Self::mascot_blink_deadline) by
+    /// [`tick_mascot`](Self::tick_mascot) just before each paint, so the renderer
+    /// (which has no clock) can read a plain bool.
+    mascot_blinking: bool,
+    /// A slow pose counter for the 没入 (Attached) Working rabbit's pumping paw,
+    /// advanced by [`tick_mascot`](Self::tick_mascot) on each live-loop tick. The
+    /// open-eyed moods ignore it (they animate off the blink instead), so it only
+    /// matters while a session is live and the loop is already ticking.
+    mascot_tick: usize,
     /// The single sink that persists operation-failure error lines to the daily
     /// log file. [`log_error`](Self::log_error) and the failure lines applied from
     /// background tasks / session outcomes flow through it, so an on-screen
@@ -452,7 +501,19 @@ pub struct HomeState {
     /// routed here — they stay command-log notices, so the file log keeps only
     /// real failures rather than the noise of mistyped commands.
     logger: Box<dyn crate::infrastructure::error_log::Logger>,
+    /// The wall-clock instant the current frame renders at, refreshed each paint
+    /// by the event loop ([`set_now`](Self::set_now)). The left pane reads it to
+    /// turn each session's `updated_at` into a relative "N分前" label. Kept on the
+    /// state (rather than threaded through the pure `render_frame`) so the renderer
+    /// stays a `&HomeState`-only function and its many test call sites are
+    /// unaffected; tests that pin the label set a fixed value with `set_now`.
+    now: DateTime<Utc>,
 }
+
+/// How long the mascot holds a blink (eyes shut). A touch longer than the
+/// loop's `ANIM_TICK`, so the blink spans a couple of paints — long enough to
+/// read as a blink, short enough to feel natural — before the eyes reopen.
+const MASCOT_BLINK: Duration = Duration::from_millis(180);
 
 impl HomeState {
     /// Builds the screen state for `workspace_name` and its `worktrees`. An
@@ -474,6 +535,7 @@ impl HomeState {
             registry: CommandRegistry::with_builtins(),
             session_action_ui: SessionActionUi::default(),
             sidebar: Sidebar::default(),
+            key_scheme: KeyScheme::default(),
             ai_available: false,
             default_agent: AgentCli::default(),
             installed_agents: Vec::new(),
@@ -498,8 +560,27 @@ impl HomeState {
             loading: None,
             tasks: Vec::new(),
             root_path: PathBuf::new(),
+            // The mascot reacts by default; `mod.rs` overrides it from the
+            // effective settings, and tests get a lively mascot without setup.
+            mascot_animation_enabled: true,
+            mascot_blink_deadline: None,
+            mascot_blinking: false,
+            mascot_tick: 0,
             logger: Box::new(crate::infrastructure::error_log::NoopLogger),
+            now: Utc::now(),
         }
+    }
+
+    /// Record the instant the next frame renders at, so the left pane's relative
+    /// "N分前" labels track real time. The event loop calls this before each paint;
+    /// tests pin it to control the labels.
+    pub fn set_now(&mut self, now: DateTime<Utc>) {
+        self.now = now;
+    }
+
+    /// The instant the current frame renders at (see [`set_now`](Self::set_now)).
+    pub fn now(&self) -> DateTime<Utc> {
+        self.now
     }
 
     /// Inject the error sink that persists operation failures to the daily log
@@ -541,6 +622,76 @@ impl HomeState {
     /// `mod.rs` at construction).
     pub fn set_sidebar(&mut self, sidebar: Sidebar) {
         self.sidebar = sidebar;
+    }
+
+    /// Set how the embedded terminal (没入) reserves its navigation keys
+    /// (injected from the effective settings by `mod.rs`, and re-read when the
+    /// config screen closes).
+    pub fn set_key_scheme(&mut self, scheme: KeyScheme) {
+        self.key_scheme = scheme;
+    }
+
+    /// How the embedded terminal (没入) reserves its navigation keys — read by the
+    /// pane input loop to classify each key (see [`super::pane_input::classify`]).
+    pub fn key_scheme(&self) -> KeyScheme {
+        self.key_scheme
+    }
+
+    /// Enable or disable the sidebar mascot's reactions (injected from the
+    /// effective settings by `mod.rs` at construction). Disabling it stops the
+    /// blink and the Working paw and clears any blink in flight, so the mascot
+    /// immediately settles into a still resting image.
+    pub fn set_mascot_animation_enabled(&mut self, enabled: bool) {
+        self.mascot_animation_enabled = enabled;
+        if !enabled {
+            self.mascot_blink_deadline = None;
+            self.mascot_blinking = false;
+        }
+    }
+
+    /// Whether the mascot's eyes are shut on the frame being painted, as last
+    /// computed by [`tick_mascot`](Self::tick_mascot). The renderer reads this
+    /// rather than a clock.
+    pub fn mascot_blinking(&self) -> bool {
+        self.mascot_blinking
+    }
+
+    /// The mascot's slow pose counter, driving the 没入 Working rabbit's paw.
+    pub fn mascot_tick(&self) -> usize {
+        self.mascot_tick
+    }
+
+    /// Start a blink: shut the mascot's eyes until [`MASCOT_BLINK`] from `now`. The
+    /// event loop calls this the moment the user interacts in 切替 / 在席, so the
+    /// resting rabbit blinks back. A no-op when the mascot animation is disabled.
+    pub fn kick_mascot_blink(&mut self, now: Instant) {
+        if self.mascot_animation_enabled {
+            self.mascot_blink_deadline = Some(now + MASCOT_BLINK);
+        }
+    }
+
+    /// Refresh the mascot's animation state for the frame about to be painted:
+    /// reopen the eyes once the blink's deadline has passed, and advance the slow
+    /// pose counter the Working paw rides. Called once per event-loop iteration
+    /// with the loop's `now`. A no-op (and forces the eyes open) when the mascot
+    /// animation is disabled, so a toggled-off mascot is perfectly still.
+    pub fn tick_mascot(&mut self, now: Instant) {
+        if !self.mascot_animation_enabled {
+            self.mascot_blinking = false;
+            return;
+        }
+        self.mascot_blinking = match self.mascot_blink_deadline {
+            Some(deadline) if now < deadline => true,
+            // The blink has run its course (or none is armed): reopen the eyes and
+            // drop the spent deadline.
+            _ => {
+                self.mascot_blink_deadline = None;
+                false
+            }
+        };
+        // Bounded so a long-lived session never overflows it; the Working face
+        // only reads it modulo a small period.
+        self.mascot_tick = self.mascot_tick.wrapping_add(1);
     }
 
     /// How the left session sidebar is currently sized (full width or the
@@ -666,7 +817,16 @@ impl HomeState {
             .iter()
             .map(|&i| self.sessions[i].display_name.clone())
             .collect();
-        self.list = WorktreeList::with_labels(name, rows, labels);
+        // Carry each session's note-presence onto its row so the pane can show a
+        // memo marker; the note text itself is read on demand (Switch preview /
+        // editor), never stored on the row.
+        let notes = order
+            .iter()
+            .map(|&i| self.sessions[i].note.is_some())
+            .collect();
+        let mut list = WorktreeList::with_labels(name, rows, labels);
+        list.set_notes(notes);
+        self.list = list;
     }
 
     /// The order the sessions are laid out in the left pane, as indices into
@@ -701,6 +861,42 @@ impl HomeState {
 
     pub fn sessions(&self) -> &[SessionRecord] {
         &self.sessions
+    }
+
+    /// Mark the session rooted at `root` as touched at `now`, driving its sidebar
+    /// freshness ("heat") dot back to fresh. Returns whether a session matched (so
+    /// the caller can skip a needless list rebuild). The bump lives in `sessions`
+    /// (the source [`session_row`] reads), so the dot only reflects it once the
+    /// list is rebuilt — callers that want it shown now rebuild after.
+    fn bump_last_active(&mut self, root: &Path, now: DateTime<Utc>) -> bool {
+        match self.sessions.iter_mut().find(|s| s.root == root) {
+            Some(session) => {
+                session.last_active = Some(now);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Touch the active session (the one 在席/没入 acts on), refreshing its heat dot
+    /// immediately. A no-op when the root row is active (it is no session).
+    fn touch_active(&mut self, now: DateTime<Utc>) {
+        let Some(root) = self.list.active().map(|w| w.path.clone()) else {
+            return;
+        };
+        if self.bump_last_active(&root, now) {
+            self.rebuild_list_keep_cursor();
+        }
+    }
+
+    /// The accumulated `(session name, last_active)` pairs to flush to `state.json`
+    /// on quit, so the freshness dots survive a restart. Only sessions actually
+    /// touched this run (those carrying a `last_active`) are included.
+    pub fn last_active_flush(&self) -> Vec<(String, DateTime<Utc>)> {
+        self.sessions
+            .iter()
+            .filter_map(|s| s.last_active.map(|t| (s.name.clone(), t)))
+            .collect()
     }
 
     /// Open a scrollable text modal showing `lines` under `title` at the given
@@ -960,8 +1156,20 @@ impl HomeState {
         // set actually moved, so the hot per-frame path skips the rebuild whenever
         // nothing relevant changed.
         let resort = self.sort_waiting && self.badges.waiting != badges.waiting;
+        // A session whose activity state changed (entered/left running / waiting /
+        // done / live) was just doing something — bump its heat dot to fresh. The
+        // diff is over set membership only (no I/O), so the per-frame path stays
+        // cheap and a quiet frame bumps nothing.
+        let touched = changed_roots(&self.badges, &badges);
+        let now = Utc::now();
+        let mut bumped = false;
+        for root in &touched {
+            // Every changed root is bumped (not short-circuited), so a frame that
+            // moves several sessions freshens them all.
+            bumped |= self.bump_last_active(root, now);
+        }
         self.badges = badges;
-        if resort {
+        if resort || bumped {
             self.rebuild_list_keep_cursor();
         }
     }
@@ -1496,6 +1704,7 @@ impl HomeState {
     pub fn enter_focus(&mut self, row: usize) {
         self.list.focus_index(row);
         self.list.activate_selected();
+        self.touch_active(Utc::now());
         self.enter_focus_surface();
     }
 
@@ -1522,6 +1731,7 @@ impl HomeState {
         if !self.list.select_by_name(name) {
             return false;
         }
+        self.touch_active(Utc::now());
         self.enter_focus_surface();
         true
     }

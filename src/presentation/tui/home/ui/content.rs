@@ -4,6 +4,7 @@
 //! text, so its logic stays terminal-independent and its tests assert on data
 //! rather than wording.
 
+use crate::domain::settings::KeyScheme;
 use crate::domain::workspace_state::SessionRecord;
 
 use super::super::state::LogLine;
@@ -69,7 +70,11 @@ fn cheatsheet_header(text: &str) -> LogLine {
 /// handlers ([`super::super::event`]); this is the user-facing reference for
 /// them, kept here with the rest of the display text rather than in the state /
 /// handler logic.
-pub fn cheatsheet() -> Vec<LogLine> {
+///
+/// The 没入 (Attached) section reflects the active `scheme`: the `Ctrl-O` prefix
+/// (`Ctrl-O` then a key) or single `Alt`-chords. The other modes are unaffected
+/// — they are usagi's own surfaces, not the shell, so they keep their direct keys.
+pub fn cheatsheet(scheme: KeyScheme) -> Vec<LogLine> {
     let mut lines = vec![
         LogLine::output("Keybindings, by mode. ↑↓ scroll · Esc / q close.".to_string()),
         LogLine::output(String::new()),
@@ -106,23 +111,51 @@ pub fn cheatsheet() -> Vec<LogLine> {
         key_row("Ctrl-E", "Edit the session note"),
         key_row("Esc", "Back out to Switch"),
         LogLine::output(String::new()),
-        cheatsheet_header("没入 / Attached — live terminal (other keys go to the shell)"),
-        key_row("Ctrl-O", "Zoom out to Switch"),
-        key_row("Ctrl-T", "Zoom out to Focus (action menu)"),
-        key_row("Ctrl-N / Ctrl-P", "Next / previous tab, in place"),
-        key_row("Ctrl-G", "Add an agent tab"),
-        key_row("Ctrl-E", "Edit the session note"),
-        key_row("Ctrl-B", "Toggle the session sidebar"),
-        key_row("Ctrl-^", "Jump to the previous session"),
-        key_row("Ctrl-Q", "Quit usagi"),
-        key_row("Ctrl-C", "Copy the selection (when one is active)"),
-        key_row("Shift+↑↓", "Scroll the history one line"),
-        key_row("Shift+PgUp/Dn", "Scroll the history one page"),
     ];
+    lines.extend(attached_keys(scheme));
     lines.push(LogLine::output(String::new()));
     lines.push(LogLine::output(
         "Type \":man\" for the command reference.".to_string(),
     ));
+    lines
+}
+
+/// The 没入 (Attached) section of the cheat sheet for `scheme`. The prefix scheme
+/// claims only the `Ctrl-O` leader (the action is the next key) and frees every
+/// other Ctrl key to the shell; the `Alt` scheme binds one `Alt`-chord per action
+/// and claims no bare Ctrl key. The trailing keys (`Ctrl-^`, `Ctrl-C`, scroll) are
+/// the same in both — they are direct, low-conflict keys.
+fn attached_keys(scheme: KeyScheme) -> Vec<LogLine> {
+    let mut lines = match scheme {
+        KeyScheme::Prefix => vec![
+            cheatsheet_header("没入 / Attached — live terminal (Ctrl-O is the leader)"),
+            key_row("Ctrl-O o", "Zoom out to Switch"),
+            key_row("Ctrl-O a", "Zoom out to Focus (action menu)"),
+            key_row("Ctrl-O n/p", "Next / previous tab (or Ctrl-O →/←)"),
+            key_row("Ctrl-O g", "Add an agent tab"),
+            key_row("Ctrl-O e", "Edit the session note"),
+            key_row("Ctrl-O s", "Toggle the session sidebar"),
+            key_row("Ctrl-O q", "Quit usagi"),
+            key_row("Ctrl-O Ctrl-O", "Send a literal Ctrl-O to the shell"),
+        ],
+        KeyScheme::Alt => vec![
+            cheatsheet_header("没入 / Attached — live terminal (needs Option=Meta on macOS)"),
+            key_row("Alt-o", "Zoom out to Switch"),
+            key_row("Alt-a", "Zoom out to Focus (action menu)"),
+            key_row("Alt-→ / Alt-←", "Next / previous tab"),
+            key_row("Alt-g", "Add an agent tab"),
+            key_row("Alt-e", "Edit the session note"),
+            key_row("Alt-s", "Toggle the session sidebar"),
+            key_row("Alt-q", "Quit usagi"),
+        ],
+    };
+    // Direct, low-conflict keys shared by both schemes (other keys go to the shell).
+    lines.extend([
+        key_row("Ctrl-^", "Jump to the previous session"),
+        key_row("Ctrl-C", "Copy the selection (when one is active)"),
+        key_row("Shift+↑↓", "Scroll the history one line"),
+        key_row("Shift+PgUp/Dn", "Scroll the history one page"),
+    ]);
     lines
 }
 
@@ -143,6 +176,7 @@ mod tests {
             upstream: None,
             status: BranchStatus::Local,
             diff: None,
+            ahead_behind: None,
             updated_at: Utc::now(),
         }
     }
@@ -155,6 +189,7 @@ mod tests {
             root: PathBuf::from(format!("/repo/.usagi/sessions/{name}")),
             worktrees: (0..worktrees).map(|_| worktree(name)).collect(),
             created_at: Utc::now(),
+            last_active: None,
         }
     }
 
@@ -195,22 +230,50 @@ mod tests {
 
     #[test]
     fn cheatsheet_lists_keys_grouped_by_every_mode() {
-        let lines = cheatsheet();
+        let lines = cheatsheet(KeyScheme::Prefix);
         let text: Vec<&str> = lines.iter().map(|l| l.text.as_str()).collect();
         // A header per mode (plus the General group) so the reference is grouped.
         assert!(text.iter().any(|t| t.starts_with("General")));
         assert!(text.iter().any(|t| t.contains("切替 / Switch")));
         assert!(text.iter().any(|t| t.contains("在席 / Focus")));
         assert!(text.iter().any(|t| t.contains("没入 / Attached")));
-        // The reserved chords the cheat sheet exists to surface are all present.
+        // The keys the cheat sheet exists to surface are all present.
         let joined = text.join("\n");
-        for chord in [
-            "Ctrl-O", "Ctrl-T", "Ctrl-N", "Ctrl-G", "Ctrl-Q", "Ctrl-^", "?", ":",
-        ] {
+        for chord in ["Ctrl-O", "Ctrl-^", "Ctrl-Q", "?", ":"] {
             assert!(joined.contains(chord), "cheat sheet should mention {chord}");
         }
         // Every line is plain output (the modal styles it as a dump).
         assert!(lines.iter().all(|l| l.kind == LineKind::Output));
+    }
+
+    #[test]
+    fn cheatsheet_attached_section_reflects_the_active_scheme() {
+        // Prefix scheme: 没入 navigation is "Ctrl-O" then a key, and the leader can
+        // be sent literally — no bare Ctrl-N/Ctrl-T chords are claimed there.
+        let prefix = cheatsheet(KeyScheme::Prefix)
+            .iter()
+            .map(|l| l.text.clone())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(prefix.contains("Ctrl-O is the leader"));
+        assert!(prefix.contains("Ctrl-O o"));
+        assert!(prefix.contains("Ctrl-O Ctrl-O"));
+        assert!(!prefix.contains("Alt-"));
+
+        // Alt scheme: one Alt-chord per action, with the macOS Option=Meta note.
+        let alt = cheatsheet(KeyScheme::Alt)
+            .iter()
+            .map(|l| l.text.clone())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(alt.contains("Option=Meta"));
+        assert!(alt.contains("Alt-o"));
+        assert!(alt.contains("Alt-→ / Alt-←"));
+        // Both schemes keep the direct, low-conflict keys.
+        for sheet in [&prefix, &alt] {
+            assert!(sheet.contains("Ctrl-^"));
+            assert!(sheet.contains("Shift+↑↓"));
+        }
     }
 
     #[test]

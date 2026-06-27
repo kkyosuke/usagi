@@ -74,6 +74,17 @@ fn set_session_action_ui_overrides_the_default() {
 }
 
 #[test]
+fn key_scheme_defaults_to_prefix_and_can_be_overridden() {
+    use crate::domain::settings::KeyScheme;
+    let mut state = state();
+    // 没入 opens with the Ctrl-O prefix scheme unless the injected setting says
+    // otherwise; the pane input loop reads it through `key_scheme()`.
+    assert_eq!(state.key_scheme(), KeyScheme::Prefix);
+    state.set_key_scheme(KeyScheme::Alt);
+    assert_eq!(state.key_scheme(), KeyScheme::Alt);
+}
+
+#[test]
 fn sidebar_defaults_to_full_and_toggles() {
     let mut state = state();
     // Opens full unless the injected setting says otherwise.
@@ -86,6 +97,57 @@ fn sidebar_defaults_to_full_and_toggles() {
     // The injected initial state overrides the default.
     state.set_sidebar(Sidebar::Rail);
     assert_eq!(state.sidebar(), Sidebar::Rail);
+}
+
+#[test]
+fn mascot_blinks_on_a_kick_then_reopens_after_the_window() {
+    use std::time::{Duration, Instant};
+    let mut state = state();
+    let t0 = Instant::now();
+    // Resting: eyes open.
+    state.tick_mascot(t0);
+    assert!(!state.mascot_blinking());
+    // A kick shuts the eyes for the blink window.
+    state.kick_mascot_blink(t0);
+    state.tick_mascot(t0 + Duration::from_millis(50));
+    assert!(state.mascot_blinking());
+    // Once the window passes the eyes reopen, and a later tick stays open (the
+    // spent deadline was dropped, not re-armed).
+    state.tick_mascot(t0 + Duration::from_millis(500));
+    assert!(!state.mascot_blinking());
+    state.tick_mascot(t0 + Duration::from_millis(600));
+    assert!(!state.mascot_blinking());
+}
+
+#[test]
+fn mascot_tick_advances_only_while_animation_is_enabled() {
+    use std::time::Instant;
+    let mut state = state();
+    let t = Instant::now();
+    let start = state.mascot_tick();
+    state.tick_mascot(t);
+    state.tick_mascot(t);
+    assert_eq!(state.mascot_tick(), start + 2);
+    // Disabling it freezes the pose, forces the eyes open, and makes a kick inert.
+    state.set_mascot_animation_enabled(false);
+    state.kick_mascot_blink(t);
+    let frozen = state.mascot_tick();
+    state.tick_mascot(t);
+    assert_eq!(state.mascot_tick(), frozen);
+    assert!(!state.mascot_blinking());
+}
+
+#[test]
+fn disabling_mascot_animation_clears_a_blink_in_flight() {
+    use std::time::Instant;
+    let mut state = state();
+    let t = Instant::now();
+    state.kick_mascot_blink(t);
+    state.tick_mascot(t);
+    assert!(state.mascot_blinking());
+    // Turning the mascot off mid-blink settles it to a still, open-eyed image.
+    state.set_mascot_animation_enabled(false);
+    assert!(!state.mascot_blinking());
 }
 
 #[test]

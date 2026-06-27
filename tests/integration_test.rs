@@ -16,6 +16,7 @@ fn test_diagnose_reports_all_subsystems() {
             "sakana.ai",
             "Gemini",
             "notifications",
+            "nerd font",
             "config"
         ]
     );

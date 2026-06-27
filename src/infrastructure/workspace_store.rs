@@ -102,9 +102,11 @@ mod tests {
                 upstream: Some("origin/feature".to_string()),
                 status: BranchStatus::Pushed,
                 diff: None,
+                ahead_behind: None,
                 updated_at: Utc::now(),
             }],
             created_at: Utc::now(),
+            last_active: None,
         });
         state
     }
