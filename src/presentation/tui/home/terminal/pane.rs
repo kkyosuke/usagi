@@ -361,8 +361,19 @@ fn drive(
                     // `sync` reads; the store accumulates distinct URLs over time.
                     let prs = link::pr_links(screen);
                     if !prs.is_empty() && prs != last_prs {
-                        if let Some(wt) = state.list().active() {
-                            let _ = crate::infrastructure::pr_link_store::add(&wt.path, &prs);
+                        // Clone the active root so the immutable borrow ends before
+                        // the mutable `set_pr_links` below.
+                        if let Some(root) = state.list().active().map(|wt| wt.path.clone()) {
+                            let _ = crate::infrastructure::pr_link_store::add(&root, &prs);
+                            // Reflect the badge in the sidebar *now* instead of
+                            // waiting for the next (slow) workspace re-sync to fold
+                            // `pr-links/` into `state.json`: read back the store's
+                            // accumulated, deduped set (the same value the re-sync
+                            // computes) and set it on the in-memory row. We are
+                            // already inside a repaint pass, so the `#N` badge shows
+                            // on this frame.
+                            let merged = crate::infrastructure::pr_link_store::get(&root);
+                            state.set_pr_links(&root, merged);
                         }
                         last_prs = prs;
                     }
