@@ -73,8 +73,11 @@ fn notice_lines(width: usize, notice: Option<&str>) -> Vec<String> {
 ///
 /// Returns the footer text only; [`render_frame`] pins it to the bottom edge.
 fn footer_lines(width: usize) -> Vec<String> {
+    // Each menu row shows its shortcut letter (right-aligned); the footer names
+    // that those letters select an item directly, so the affordance the rows hint
+    // at is spelled out (Enter and the per-row letter both open the entry).
     let footer = format!(
-        " v{} | ↑↓: move / Enter: select / q: quit",
+        " v{} | ↑↓: move / Enter or shortcut letter: select / q: quit",
         env!("CARGO_PKG_VERSION")
     );
     vec![widgets::dim_line(width, &footer)]

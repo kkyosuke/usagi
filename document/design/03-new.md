@@ -55,9 +55,16 @@
 │                                                                 │
 │        that does not look like a repository URL                 │  ← 通知行（任意・赤太字／バリデーション失敗時）
 │                                                                 │
-│ ←→ type · ↑↓/Tab field · Space browse · Enter create · Esc back │ ← フッター（淡色）
+│ ←→: switch type / ↑↓/Tab: move field / Enter: create / Esc: back │ ← フッター（淡色・フォーカス依存）
 └─────────────────────────────────────────────────────────────────┘
 ```
+
+> **フッターはフォーカス中のフィールドで内容が変わります**。`←/→` と `Space` はフィールドによって
+> 意味が異なる（モードセレクタでは `←→` が Clone/Existing の切替、テキスト欄ではキャレット移動。
+> `Space` はディレクトリ欄でのみブラウザを開き、他の欄では空白入力）ため、その時点のフィールドで
+> 実際に効くキーだけを案内します。上の例はモードセレクタにフォーカスがある状態。ディレクトリ欄
+> （Location など）では `Space: browse dir / ←→: move caret / …`、URL/Name/Branch では
+> `←→: move caret / …` を表示します。
 
 `Existing` に切り替えると、URL / Location / Branch の代わりに次の 2 フィールドを表示します。
 モードを切り替えてもフィールド数の差でレイアウトがずれないよう、フィールドブロックの高さは

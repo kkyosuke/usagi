@@ -46,7 +46,7 @@
 │                                                       │
 │                 Opened "repo" 🐰                      │  ← 通知行（任意・黄色）
 │                                                       │
-│      v0.1.0 | ↑↓: move / Enter: select / q: quit      │  ← フッター（淡色）
+│      v0.1.0 | ↑↓: move / Enter or shortcut letter: select / q: quit      │  ← フッター（淡色）
 └───────────────────────────────────────────────────────┘
 ```
 
@@ -58,7 +58,7 @@
 | タイトル | `USAGI` | 緑・太字 |
 | メニュー | Open / New / Config / Quit の 4 項目。各行は「カーソル + ラベル(10桁左詰め) + キー(5桁右詰め)」 | 選択行：`>` 赤太字／ラベル シアン太字／キー 黄色。非選択行：素のテキスト |
 | 通知行 | メニュー操作の結果メッセージ（例: New 完了後の `Opened "repo" 🐰`）。未表示時は何も描画しない | 黄色 |
-| フッター | バージョンと操作ヘルプ `v<version> \| ↑↓: move / Enter: select / q: quit` | 淡色（dim） |
+| フッター | バージョンと操作ヘルプ `v<version> \| ↑↓: move / Enter or shortcut letter: select / q: quit` | 淡色（dim） |
 
 ## メニュー項目
 

@@ -167,7 +167,7 @@ fn hop_navigates_welcome_to_config_and_back_then_quits() {
 
     // The welcome screen paints its title and menu before reading any key.
     session.wait_for("USAGI");
-    session.wait_for("Enter: select");
+    session.wait_for("Enter or shortcut letter: select");
 
     // 'c' opens the global Config screen (shortcut for the "Config" entry).
     session.send(b"c");
