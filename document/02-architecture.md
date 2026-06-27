@@ -159,7 +159,7 @@ src/
 - コマンドのスコープ（`CommandScope::Workspace` / `Session` / `Both`）で、どの入力面に出るかを制御する。
 
 各コマンドの構文・役割は [3.2 TUI 内コマンド](03-commands/02-tui.md)、画面側の挙動は
-[design/05-home.md](design/05-home.md) を参照してください。
+[design/home/README.md](design/home/README.md) を参照してください。
 
 ## 技術スタック
 

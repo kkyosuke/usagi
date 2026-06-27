@@ -2,6 +2,8 @@
 //! into one row each, preceded by the synthetic root row, with the cursor /
 //! active-row navigation the home screen drives.
 
+use std::path::Path;
+
 use crate::domain::workspace_state::{
     AheadBehind, BranchStatus, DiffStat, PrLink, SessionRecord, WorktreeState,
 };
@@ -219,6 +221,27 @@ impl WorktreeList {
     /// The active worktree, or `None` when the root row is active.
     pub fn active(&self) -> Option<&WorktreeState> {
         self.worktree_at(self.active_index)
+    }
+
+    /// Replaces the PR links of the row whose session root is `root`, returning
+    /// whether the set changed.
+    ///
+    /// Lets an attached pane reflect a freshly detected pull-request URL in the
+    /// sidebar `#N` badge immediately, instead of waiting for the next workspace
+    /// re-sync (a slow, per-worktree `git status`) to fold `pr-links/` into
+    /// `state.json`. The caller passes the store's accumulated, deduped set — the
+    /// same value the re-sync would compute — so the live badge matches what a
+    /// later sync produces. A `root` that matches no row (e.g. the workspace root,
+    /// which has no worktree) is a no-op.
+    pub fn set_pr_links(&mut self, root: &Path, prs: Vec<PrLink>) -> bool {
+        let Some(wt) = self.worktrees.iter_mut().find(|w| w.path.as_path() == root) else {
+            return false;
+        };
+        if wt.pr == prs {
+            return false;
+        }
+        wt.pr = prs;
+        true
     }
 
     /// Whether the cursor is on the root row.
