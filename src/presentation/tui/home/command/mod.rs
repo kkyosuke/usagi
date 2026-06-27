@@ -74,9 +74,10 @@ pub enum Effect {
     /// event loop, which returns to the workspace screen when it is dismissed.
     OpenConfig,
     /// Show the result lines in a scrollable text modal (rather than the results
-    /// band), for commands whose output is text to read — `man` / `history`.
-    /// `title` is the modal title; `size` selects the compact box or the
-    /// terminal-filling one (`man` uses [`ModalSize::Large`]).
+    /// band), for commands whose output is text to read — `man` / `history` /
+    /// `issue`. `title` is the modal title; `size` selects the compact box or the
+    /// terminal-filling one (`man` and `issue graph` / `issue gantt` use
+    /// [`ModalSize::Large`]).
     ShowText {
         title: &'static str,
         size: ModalSize,
@@ -151,7 +152,8 @@ impl CommandResult {
 
     /// Like [`modal`](Self::modal) but in the large, terminal-filling box — used
     /// by `man`, whose help fills the screen so the whole command surface reads
-    /// at once with less scrolling.
+    /// at once with less scrolling, and by `issue graph` / `issue gantt`, whose
+    /// wide forest and date-axis chart need the room to be read without clipping.
     fn large_modal(title: &'static str, lines: Vec<LogLine>) -> Self {
         Self::sized_modal(title, lines, ModalSize::Large)
     }

@@ -622,8 +622,9 @@ const LARGE_MODAL_MARGIN_Y: usize = 1;
 
 /// The widest the large modal's content grows, regardless of terminal width, so
 /// the short help lines stay readable instead of stretching across a very wide
-/// screen.
-const LARGE_MODAL_MAX_INNER: usize = 100;
+/// screen. Public so content built for this modal (the `issue gantt` chart) can
+/// size its line budget to the same cap.
+pub const LARGE_MODAL_MAX_INNER: usize = 100;
 
 /// The geometry of the large, terminal-filling text modal (the `man` help): the
 /// inner content width of the box and how many body window lines are visible at

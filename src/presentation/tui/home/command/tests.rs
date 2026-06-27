@@ -867,7 +867,7 @@ fn issue_graph_renders_the_dependency_tree() {
         result.effect,
         Effect::ShowText {
             title: "Issue graph",
-            size: ModalSize::Normal,
+            size: ModalSize::Large,
         }
     );
     let text = joined(&result);
@@ -891,7 +891,7 @@ fn issue_gantt_renders_a_dated_chart() {
         result.effect,
         Effect::ShowText {
             title: "Issue gantt",
-            size: ModalSize::Normal,
+            size: ModalSize::Large,
         }
     );
     let text = joined(&result);
