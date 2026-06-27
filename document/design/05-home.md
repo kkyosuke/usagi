@@ -934,7 +934,10 @@ TUI 内コマンド（`session` / `terminal` / `agent` / `config` ＋ 共通の 
 ## セッション削除モーダル
 
 `session remove` を **名前なし** で実行すると、コマンドは `Effect::OpenRemoveModal` を返し、
-event loop が記録済みセッションのチェックリストを画面中央のモーダルに表示します。
+event loop が記録済みセッションのチェックリストを**中央オーバーレイ（モーダル）**として表示します。
+[コマンドパレット](#コマンドパレット統括overview)やテキストモーダルと同じく**全画面の暗幕ではなく**、
+背後のワークスペース（タイトルバー・モードラダー・サイドバー・両ペイン）の**上に重ねて合成**し、
+ボックスが覆うのは中央の桁だけで左右・上下には背後の画面が見え続けます。
 `session remove <name>` のように名前を渡した場合は従来どおりモーダルを介さず直接削除します。
 
 ```text
@@ -957,8 +960,8 @@ event loop が記録済みセッションのチェックリストを画面中央
   未コミット変更があるセッションは `--force` なしでは削除されず警告される（`session remove --force` で開くと破棄を伴って削除）。
 - 何も選択していない状態の `Enter` は no-op でモーダルを開いたまま、`Esc` でキャンセルしてホーム画面へ戻る。
 - セッション数が表示枠を超える場合はカーソルが収まるようスクロールし、隠れた件数を `↑ N more` / `↓ N more` で示す。
-- モーダル基盤（`src/presentation/tui/widgets/` の `boxed` / `render_modal`）を再利用し中央寄せ・枠付きボックスで描画。状態は
-  `home/state.rs`（`RemoveModal`）、描画は `home/ui/`、キー処理は `home/event/` に実装。
+- モーダル基盤（`src/presentation/tui/widgets/` の `boxed` / `overlay_modal`）を再利用し、組み上げたワークスペース画面の上に
+  中央寄せ・枠付きボックスを合成する。状態は `home/state.rs`（`RemoveModal`）、描画は `home/ui/`、キー処理は `home/event/` に実装。
 
 ## セッションメモの編集
 

@@ -24,8 +24,8 @@ use crate::presentation::tui::widgets::{clip_to_width, clip_to_width_cow};
 
 use chrome::{
     command_palette_body, footer_line, input_line, mode_ladder, quit_confirm_frame,
-    remove_modal_frame, switch_create_rows, switch_rename_rows, task_status_line, text_modal_body,
-    title_bar, PALETTE_INNER, TEXT_MODAL_INNER,
+    remove_modal_body, switch_create_rows, switch_rename_rows, task_status_line, text_modal_body,
+    title_bar, PALETTE_INNER, REMOVE_MODAL_INNER, TEXT_MODAL_INNER,
 };
 use panes::{left_pane, right_pane_contents};
 // The embedded terminal pane (没入) maps a click to the tab under it through this.
@@ -280,10 +280,11 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
     if state.quit_confirm() {
         return quit_confirm_frame(raw_height, raw_width, state.live_count());
     }
-    // The session-removal modal, when open, overlays the whole screen.
-    if let Some(modal) = state.remove_modal() {
-        return remove_modal_frame(raw_height, raw_width, modal);
-    }
+    // The session-removal modal is *not* a full-screen overlay: like the `:`
+    // command palette and the text modal it floats as a centred box over the live
+    // workspace frame (built below) so the panes stay visible around it, rather
+    // than a black backdrop. It is composited last, alongside them.
+    //
     // The text modal (a text-dumping command's output: `man` / `history` /
     // `session list`) is *not* a full-screen overlay: like the `:` command
     // palette it floats as a centred box over the live workspace frame (built
@@ -462,6 +463,14 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
         let (inner, visible) = text_modal_geometry(height, width, modal.size);
         let body = text_modal_body(modal, inner, visible);
         widgets::overlay_modal(&mut lines, width, &modal.title, inner, &body);
+    }
+
+    // Float the session-removal checklist as a centred box over the assembled
+    // frame too, so the workspace shows around it instead of a black backdrop.
+    if let Some(modal) = state.remove_modal() {
+        let inner = widgets::modal_inner_width(width, REMOVE_MODAL_INNER);
+        let body = remove_modal_body(modal, inner);
+        widgets::overlay_modal(&mut lines, width, "Remove sessions", inner, &body);
     }
 
     lines
