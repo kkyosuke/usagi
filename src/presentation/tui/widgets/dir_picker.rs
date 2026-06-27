@@ -245,7 +245,7 @@ pub fn render(raw_height: usize, raw_width: usize, dir: &DirPicker) -> Vec<Strin
     body.extend(list_lines(dir));
     body.push(String::new());
     body.push(
-        style("↑↓ move · → open · ← up · Enter select · Esc cancel")
+        style("↑↓/Tab move · → open · ← up · Enter select · Esc cancel")
             .dim()
             .to_string(),
     );
@@ -288,8 +288,10 @@ pub fn event_loop(
             // `Key::Char(c)` filter arm below that would otherwise capture Ctrl-Q.
             Key::CtrlC | Key::Char('\u{0011}') => return Ok(Choice::Quit),
             Key::Enter => return Ok(Choice::Selected(dir.chosen())),
-            Key::ArrowUp => dir.move_up(),
-            Key::ArrowDown => dir.move_down(),
+            // Tab mirrors the new-session form, where it steps to the next
+            // field: here it steps to the next/previous matching directory.
+            Key::ArrowUp | Key::BackTab => dir.move_up(),
+            Key::ArrowDown | Key::Tab => dir.move_down(),
             Key::ArrowRight => dir.descend(source),
             Key::ArrowLeft => dir.ascend(source),
             Key::Backspace => dir.backspace(),
@@ -549,6 +551,8 @@ mod tests {
         let keys = vec![
             Ok(Key::ArrowDown),
             Ok(Key::ArrowUp),
+            Ok(Key::Tab),        // step down (alias of ArrowDown)
+            Ok(Key::BackTab),    // step up (alias of ArrowUp)
             Ok(Key::ArrowRight), // into /home/projects
             Ok(Key::ArrowLeft),  // back to /home
             Ok(Key::Char('p')),  // filter
