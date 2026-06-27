@@ -85,6 +85,17 @@ fn key_scheme_defaults_to_prefix_and_can_be_overridden() {
 }
 
 #[test]
+fn prefix_pending_starts_clear_and_tracks_the_leader() {
+    let mut state = state();
+    // No leader is pending until the pane drive loop reports one.
+    assert!(!state.prefix_pending());
+    state.set_prefix_pending(true);
+    assert!(state.prefix_pending());
+    state.set_prefix_pending(false);
+    assert!(!state.prefix_pending());
+}
+
+#[test]
 fn sidebar_defaults_to_full_and_toggles() {
     let mut state = state();
     // Opens full unless the injected setting says otherwise.
