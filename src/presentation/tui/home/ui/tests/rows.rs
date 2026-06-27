@@ -1235,3 +1235,53 @@ fn log_line_colours_each_kind_and_prompts_commands() {
     assert!(log_line(&LogLine::error("boom"), 40).contains("boom"));
     assert!(log_line(&LogLine::notice("note"), 40).contains("note"));
 }
+
+#[test]
+fn left_pane_session_at_maps_each_row_pair_to_its_session() {
+    // Two sessions on a 24×120 screen: left pane is 40 columns, body starts at
+    // screen row 3 (after the title / ladder / blank chrome). Each entry spans two
+    // rows — the root pair (rows 3,4), a divider (row 5), then a pair per worktree.
+    let state = state_with(vec![
+        worktree(Some("main"), true, BranchStatus::Local),
+        worktree(Some("feature"), false, BranchStatus::Local),
+    ]);
+    let at = |col, row| left_pane_session_at(&state, col, row, 24, 120);
+    // The root entry's two rows both select the root (index 0).
+    assert_eq!(at(0, 3), Some(0));
+    assert_eq!(at(10, 4), Some(0));
+    // The divider between the root and the sessions selects nothing.
+    assert_eq!(at(0, 5), None);
+    // Worktree 0 spans rows 6,7 (index 1); worktree 1 spans rows 8,9 (index 2).
+    assert_eq!(at(0, 6), Some(1));
+    assert_eq!(at(39, 7), Some(1));
+    assert_eq!(at(0, 8), Some(2));
+    assert_eq!(at(0, 9), Some(2));
+}
+
+#[test]
+fn left_pane_session_at_ignores_clicks_off_the_session_rows() {
+    let state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
+    let at = |col, row| left_pane_session_at(&state, col, row, 24, 120);
+    // The right pane (past the 40-column left pane) is not a row select.
+    assert_eq!(at(40, 3), None);
+    assert_eq!(at(80, 6), None);
+    // The chrome above the body (title / ladder / blank) selects nothing.
+    assert_eq!(at(0, 0), None);
+    assert_eq!(at(0, 2), None);
+    // Below the only session (rows 6,7) the rows are mascot / blank filler.
+    assert_eq!(at(0, 8), None);
+    // Far below the body (past its 19 rows) selects nothing either.
+    assert_eq!(at(0, 23), None);
+}
+
+#[test]
+fn left_pane_session_at_maps_clicks_on_the_collapsed_rail() {
+    // The rail is 5 columns wide but keeps the same two-rows-per-entry layout, so
+    // the same row maps to the same session — only the column bound narrows.
+    let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
+    state.set_sidebar(Sidebar::Rail);
+    // A click within the rail on worktree 0's rows selects it.
+    assert_eq!(left_pane_session_at(&state, 0, 6, 24, 120), Some(1));
+    // A click just past the 5-column rail is in the right pane, not a select.
+    assert_eq!(left_pane_session_at(&state, 5, 6, 24, 120), None);
+}

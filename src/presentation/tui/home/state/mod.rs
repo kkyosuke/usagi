@@ -1580,6 +1580,15 @@ impl HomeState {
         self.note_hidden = false;
     }
 
+    /// Move the Switch cursor straight to a selectable `row` (0 is the root row),
+    /// clamped to the rows that exist — used when a left click selects a session
+    /// row directly. Re-shows the now-selected session's note like the cursor
+    /// moves above.
+    pub fn switch_select(&mut self, row: usize) {
+        self.list.focus_index(row);
+        self.note_hidden = false;
+    }
+
     /// Begin inline session creation in 切替: open an empty name input that
     /// captures the mode's keys until confirmed (Enter) or cancelled (Esc).
     ///

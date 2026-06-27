@@ -30,7 +30,7 @@ use super::update::UpdateHandle;
 
 mod handlers;
 
-use handlers::{focus_key, note_editor_key, palette_key, switch_key};
+use handlers::{focus_key, note_editor_key, palette_key, switch_click, switch_key};
 
 /// The byte `console` reports for `Ctrl-O` on the home screen: a bare control
 /// character (`0x0f`), since `console` only special-cases a handful of control
@@ -242,6 +242,23 @@ fn save_resume_focus(state: &mut HomeState, wiring: &mut Wiring) {
     (wiring.save_last_active)(&state.last_active_flush());
 }
 
+/// Whether a left click should act on the 切替 session list: only at the base
+/// Switch list, with no overlay or inline input capturing keys. A click while a
+/// modal / palette / note editor / inline create / rename is open is ignored,
+/// mirroring how those overlays capture every key in the loop below — so a stray
+/// click never reaches the session list beneath them.
+fn click_selects_session(state: &HomeState) -> bool {
+    state.mode() == Mode::Switch
+        && !state.quit_confirm()
+        && state.remove_modal().is_none()
+        && state.text_modal().is_none()
+        && state.preview().is_none()
+        && state.note_editor().is_none()
+        && !state.command_palette_open()
+        && !state.is_creating()
+        && !state.is_renaming()
+}
+
 fn apply_pending_refresh(state: &mut HomeState, refresh: &SessionsRefreshHandle) -> bool {
     match refresh.take() {
         Some(sessions) => {
@@ -283,6 +300,9 @@ pub(super) fn event_loop(
     // its eyes (an idle tick, not a keypress) still repaints in a quiet 切替 rather
     // than being skipped — leaving the eyes stuck shut.
     let mut last_blinking = false;
+    // The previous left click's session row and time, so a second click on the
+    // same row within the double-click window confirms it (see [`switch_click`]).
+    let mut last_click: Option<(usize, Instant)> = None;
     loop {
         // Mark each background session's agent state — running, waiting for
         // input, live (ready), and finished — before painting, applying every
@@ -482,12 +502,42 @@ pub(super) fn event_loop(
             Input::Key(key) => key,
             // The TUI never scrolls in place: read the wheel turn and drop it.
             Input::Scroll(_) => continue,
-            // A click only ever makes the sidebar mascot react (in 切替 / 在席, away
-            // from any overlay); anywhere else it is ignored. Either way no key was
-            // pressed, so repaint only when the rabbit actually reacted.
+            // A click on a 切替 session row selects it (a second click on the same
+            // row confirms it, like `Enter`); a click on the resting sidebar mascot
+            // makes it react; anywhere else it is ignored. The two hit disjoint
+            // regions, so the session list is tried first and the mascot only when
+            // it misses. No key was pressed either way, so repaint only when the
+            // click actually did something.
             Input::Click(click) => {
-                if handle_mascot_click(term, &mut state, click) {
-                    force_paint = true;
+                let selected = click_selects_session(&state)
+                    .then(|| {
+                        ui::left_pane_session_at(
+                            &state,
+                            click.col,
+                            click.row,
+                            height as usize,
+                            width as usize,
+                        )
+                    })
+                    .flatten();
+                match selected {
+                    Some(row) => {
+                        switch_click(
+                            term,
+                            &mut state,
+                            &mut painter,
+                            wiring,
+                            row,
+                            Instant::now(),
+                            &mut last_click,
+                        );
+                        force_paint = true;
+                    }
+                    None => {
+                        if handle_mascot_click(term, &mut state, click) {
+                            force_paint = true;
+                        }
+                    }
                 }
                 continue;
             }
