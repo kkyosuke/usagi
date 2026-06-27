@@ -632,6 +632,12 @@ pub fn run(term: &Term, workspace: &Workspace, preload: Preload) -> Result<Outco
                     pool.enter(term, dir, run_agent, initial, cli, &label)?;
                 }
                 handle.set_attached(Some(dir.to_path_buf()));
+                // Whether the next pass enters a fresh pane and so must clear the
+                // surface first: true on the first entry and after any switch that
+                // changes the active tab, false when a tab nav was a no-op (a lone
+                // pane, or a jump to the current tab) so re-driving the same pane
+                // does not blank-and-repaint identical content (a one-frame flicker).
+                let mut clear = true;
                 loop {
                     // Publish the tab strip for this session before driving the pane,
                     // so it reflects any add / close / switch from the last step.
@@ -642,7 +648,7 @@ pub fn run(term: &Term, workspace: &Workspace, preload: Preload) -> Result<Outco
                         // No live pane (every one exited): drop back to 在席.
                         None => return Ok(PaneExit::Closed),
                     };
-                    match terminal::pane::run(term, home, pty, &handle)? {
+                    match terminal::pane::run(term, home, pty, &handle, clear)? {
                         // `Ctrl-O`: zoom out to 切替, leaving every pane alive.
                         terminal::pane::PaneStep::Detach => return Ok(PaneExit::ToSwitch),
                         // `Ctrl-E`: leave the pane to open the note editor over it;
@@ -650,17 +656,20 @@ pub fn run(term: &Term, workspace: &Workspace, preload: Preload) -> Result<Outco
                         terminal::pane::PaneStep::OpenNote => return Ok(PaneExit::OpenNote),
                         // `Ctrl-N` / `Ctrl-P`: move the active tab and loop, so the
                         // next iteration drives the newly active pane (and republishes
-                        // the tab strip above it) without leaving 没入.
+                        // the tab strip above it) without leaving 没入. Clear only when
+                        // the tab actually moved, so a nav on a lone pane stays put
+                        // without a flicker.
                         terminal::pane::PaneStep::NextTab => {
-                            pool.nav(dir, terminal::tabs::TabNav::Next)
+                            clear = pool.nav(dir, terminal::tabs::TabNav::Next);
                         }
                         terminal::pane::PaneStep::PrevTab => {
-                            pool.nav(dir, terminal::tabs::TabNav::Prev)
+                            clear = pool.nav(dir, terminal::tabs::TabNav::Prev);
                         }
                         // A click on a tab chip: jump straight to that pane and loop,
                         // driving it (and republishing the strip) without leaving 没入.
+                        // A click on the active tab does not move it, so skip the clear.
                         terminal::pane::PaneStep::ToTab(i) => {
-                            pool.nav(dir, terminal::tabs::TabNav::To(i))
+                            clear = pool.nav(dir, terminal::tabs::TabNav::To(i));
                         }
                         // `Ctrl-T`: zoom out to 在席 (Focus) so the user picks the next
                         // action from the session's menu, leaving every pane alive in
@@ -681,6 +690,9 @@ pub fn run(term: &Term, workspace: &Workspace, preload: Preload) -> Result<Outco
                                     &label,
                                 )?;
                             }
+                            // Jumped to / opened the agent pane: a different pane drives
+                            // next pass, so clear the surface for it.
+                            clear = true;
                         }
                         // `Ctrl-^`: leave the pane to jump to the previously focused
                         // session; the event loop re-roots on it (attaching when live),
@@ -697,6 +709,9 @@ pub fn run(term: &Term, workspace: &Workspace, preload: Preload) -> Result<Outco
                             if !pool.close_active(dir, &label) {
                                 return Ok(PaneExit::Closed);
                             }
+                            // The surviving pane that slides into the active slot is a
+                            // different shell, so clear the surface before driving it.
+                            clear = true;
                         }
                     }
                 }
