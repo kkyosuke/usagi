@@ -135,8 +135,9 @@ fn switch_inline_create_edits_then_confirms_a_fresh_name() {
 fn switch_inline_create_rejects_empty_and_duplicate_names() {
     let mut state = state();
     state.enter_switch(ReturnMode::Base);
-    // "feature" is an existing branch, so it is in the taken set.
-    state.switch_begin_create(vec!["feature".to_string()]);
+    // The session "feature" would cut `usagi/feature`, which already exists, so
+    // it is in the taken set (a bare `feature` would not collide).
+    state.switch_begin_create(vec!["usagi/feature".to_string()]);
     // Whitespace only is empty after trimming: no live error (it does not nag),
     // but Enter rejects it.
     state.create_mut().unwrap().push_char(' ');
@@ -162,15 +163,16 @@ fn switch_inline_create_rejects_empty_and_duplicate_names() {
 fn switch_inline_create_flags_a_branch_namespace_clash_live() {
     let mut state = state();
     state.enter_switch(ReturnMode::Base);
-    // Branches nested under `test/` make a plain `test` session impossible.
-    state.switch_begin_create(vec!["test/home-ui-e2e".to_string()]);
+    // Branches nested under the session's namespaced branch `usagi/test/` make a
+    // `test` session impossible.
+    state.switch_begin_create(vec!["usagi/test/home-ui-e2e".to_string()]);
     for c in "test".chars() {
         state.create_mut().unwrap().push_char(c);
     }
     // The clash is shown live and blocks confirmation.
     let err = state.create().unwrap().error().unwrap().to_string();
     assert!(err.contains("conflicts with branch"), "{err}");
-    assert!(err.contains("test/home-ui-e2e"), "{err}");
+    assert!(err.contains("usagi/test/home-ui-e2e"), "{err}");
     assert!(state.switch_confirm_create().is_none());
     // Backspacing to "tes" (no longer a clash) clears the error.
     state.create_mut().unwrap().backspace();

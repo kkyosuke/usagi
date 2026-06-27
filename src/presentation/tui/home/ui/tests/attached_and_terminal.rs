@@ -320,6 +320,34 @@ fn render_frame_keeps_a_blank_row_below_the_resting_mascot() {
 }
 
 #[test]
+fn render_frame_aligns_the_mascot_left_edge_with_the_live_terminal_indicator() {
+    // The mascot is indented one column so its left edge lines up with the bottom
+    // input line's content — the `● live terminal` indicator carries a single
+    // leading space, and the mascot's feet (`o`) should start in that same column.
+    let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Pushed)]);
+    state.show_attached();
+    let lines: Vec<String> = render_frame(24, 80, &state)
+        .iter()
+        .map(|l| console::strip_ansi_codes(l).into_owned())
+        .collect();
+    let feet = lines
+        .iter()
+        .position(|l| l.split(" │ ").next().unwrap_or("").contains("o(_("))
+        .expect("the resting mascot is drawn");
+    let indicator = lines
+        .iter()
+        .position(|l| l.contains("● live terminal"))
+        .expect("the live terminal indicator is drawn");
+    let mascot_col = lines[feet].find("o(_(").unwrap();
+    let indicator_col = lines[indicator].find('●').unwrap();
+    assert_eq!(
+        mascot_col, indicator_col,
+        "the mascot's left edge lines up with the live terminal indicator: {:?} vs {:?}",
+        lines[feet], lines[indicator]
+    );
+}
+
+#[test]
 fn render_frame_hides_the_mascot_when_the_session_list_fills_the_sidebar() {
     // A list long enough to reach the bottom rows takes precedence: the mascot
     // hides rather than overlapping the sessions.

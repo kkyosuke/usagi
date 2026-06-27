@@ -3,7 +3,8 @@
 //!
 //! The workspace root need not itself be a git repository. The root is walked
 //! recursively: every git repository found gets a fresh `git worktree` (on a new
-//! branch named after the session) at its mirrored location under
+//! branch `usagi/<name>`, the session name under the [`BRANCH_PREFIX`] namespace)
+//! at its mirrored location under
 //! `.usagi/sessions/<name>/`, while non-git files and directories are copied
 //! there. This supports a single repository, or a tree containing several — e.g.
 //!
@@ -38,10 +39,29 @@ use crate::infrastructure::workspace_store::WorkspaceStore;
 use crate::infrastructure::{agent_state_store, git};
 use crate::usecase::workspace_state;
 
+/// The namespace every session's git branch lives under: a session named
+/// `<name>` checks out the branch `usagi/<name>` in each repository.
+///
+/// Prefixing keeps usagi-managed branches from colliding with the branches a
+/// developer cuts by hand (a bare `<name>`, a `feat/…`, …): everything usagi
+/// creates is corralled under `usagi/`. Only the *branch* is namespaced — the
+/// session name itself (the directory under `.usagi/sessions/`, the `state.json`
+/// record, the sidebar label) stays unprefixed.
+pub const BRANCH_PREFIX: &str = "usagi/";
+
+/// The git branch a session named `name` checks out: `name` under the
+/// [`BRANCH_PREFIX`] namespace. This is the single source of truth mapping a
+/// session name to its branch, shared by [`create`] (cutting the branch),
+/// [`remove`]/[`reconcile`] (dropping it), and the TUI's live-create validation.
+pub fn branch_name(name: &str) -> String {
+    format!("{BRANCH_PREFIX}{name}")
+}
+
 /// The outcome of creating a session.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreatedSession {
-    /// The session name (also the new branch name in every repository).
+    /// The session name (the branch it cuts in every repository is
+    /// [`branch_name`]`(name)`, i.e. `usagi/<name>`).
     pub name: String,
     /// Root of the session tree: `<workspace>/.usagi/sessions/<name>`.
     pub root: PathBuf,
@@ -83,11 +103,12 @@ pub fn create(workspace_root: &Path, name: &str) -> Result<CreatedSession> {
         bail!("session \"{name}\" already exists");
     }
 
-    // A session creates a branch named after it in every source repository.
-    // If a repo already has branches nested under `<name>/` (e.g. `test/foo`),
-    // git cannot create the `<name>` branch and fails partway with a cryptic
-    // `cannot lock ref` error. Refuse up front with a clear, actionable message
-    // before touching any repository.
+    // A session creates the branch `usagi/<name>` (see [`branch_name`]) in every
+    // source repository. If a repo already has branches nested under that branch
+    // (e.g. a hand-made `usagi/<name>/foo`), git cannot create `usagi/<name>` and
+    // fails partway with a cryptic `cannot lock ref` error. Refuse up front with a
+    // clear, actionable message before touching any repository.
+    let branch = branch_name(name);
     for repo in tree::source_repos(workspace_root) {
         // Clear any dangling worktree registration whose directory was deleted
         // out-of-band (a crash, a manual `rm`, or a teardown that left a worktree
@@ -96,11 +117,11 @@ pub fn create(workspace_root: &Path, name: &str) -> Result<CreatedSession> {
         // worktree" and the session can never be recreated. Best-effort: a prune
         // failure must not block creation, so it is logged-and-ignored.
         let _ = git::prune_worktrees(&repo);
-        if let Some(conflict) = git::branch_namespace_conflict(&repo, name) {
+        if let Some(conflict) = git::branch_namespace_conflict(&repo, &branch) {
             bail!(
                 "session \"{name}\" conflicts with the existing branch \"{conflict}\": \
-                 a branch named \"{name}\" cannot be created alongside branches under \
-                 \"{name}/\". Choose a different session name."
+                 the branch \"{branch}\" cannot be created alongside branches under \
+                 \"{branch}/\". Choose a different session name."
             );
         }
     }
@@ -113,13 +134,13 @@ pub fn create(workspace_root: &Path, name: &str) -> Result<CreatedSession> {
             .expect("dest_root always has a .usagi/sessions parent");
         fs::create_dir_all(parent).context(format!("failed to create {}", parent.display()))?;
         let base = tree::base_ref(workspace_root);
-        git::add_worktree(workspace_root, &dest_root, name, base.as_deref())?;
+        git::add_worktree(workspace_root, &dest_root, &branch, base.as_deref())?;
         git::init_submodules(&dest_root)?;
         worktrees.push(dest_root.clone());
     } else {
         fs::create_dir_all(&dest_root)
             .context(format!("failed to create {}", dest_root.display()))?;
-        tree::build_dir(workspace_root, &dest_root, name, &mut worktrees)?;
+        tree::build_dir(workspace_root, &dest_root, &branch, &mut worktrees)?;
     }
 
     record(&store, name, &dest_root, &worktrees)?;
@@ -428,7 +449,7 @@ pub fn remove(
     // ghost session whose worktree was never built (nothing matches the branch,
     // so git is left untouched and only the record is dropped below).
     let repo_worktrees = reconcile::list_repo_worktrees(workspace_root)?;
-    reconcile::discard_session(&session.root, name, &repo_worktrees, force)?;
+    reconcile::discard_session(&session.root, &branch_name(name), &repo_worktrees, force)?;
 
     state.updated_at = Utc::now();
     store.save(&state)?;
@@ -576,8 +597,9 @@ mod tests {
         let wt = root.path().join(".usagi/sessions/feature-x");
         assert_eq!(created.root, wt);
         assert_eq!(created.worktrees, vec![wt.clone()]);
-        // The new worktree is on the session branch and carries the repo files.
-        assert_eq!(head_branch(&wt), "feature-x");
+        // The new worktree is on the namespaced session branch and carries the
+        // repo files.
+        assert_eq!(head_branch(&wt), "usagi/feature-x");
         assert!(wt.join("code.txt").is_file());
         // The session is recorded in state.json.
         let state = WorkspaceStore::new(root.path()).load().unwrap().unwrap();
@@ -606,7 +628,7 @@ mod tests {
         for repo in ["app-a", "app-b", "be/be1"] {
             let wt = base.join(repo);
             assert!(wt.is_dir(), "{repo} worktree missing");
-            assert_eq!(head_branch(&wt), "wip");
+            assert_eq!(head_branch(&wt), "usagi/wip");
             assert!(created.worktrees.contains(&wt));
         }
         assert_eq!(created.worktrees.len(), 3);
@@ -700,15 +722,36 @@ mod tests {
     fn surfaces_a_git_error_when_the_branch_exists() {
         let root = tempfile::tempdir().unwrap();
         init_repo(root.path());
-        // Pre-create the branch so `git worktree add -b` fails.
+        // Pre-create the *namespaced* branch the session would cut so
+        // `git worktree add -b usagi/taken` fails. A plain `taken` branch would
+        // not collide — sessions live under `usagi/`.
         assert!(git_cmd(root.path())
-            .args(["branch", "taken"])
+            .args(["branch", "usagi/taken"])
             .status()
             .unwrap()
             .success());
 
         let err = create(root.path(), "taken").unwrap_err();
         assert!(err.to_string().contains("git worktree add failed"));
+    }
+
+    #[test]
+    fn a_plain_branch_sharing_the_session_name_does_not_collide() {
+        // The whole point of the `usagi/` namespace: a hand-made branch named
+        // exactly like the session no longer blocks creating it.
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        assert!(git_cmd(root.path())
+            .args(["branch", "feature"])
+            .status()
+            .unwrap()
+            .success());
+
+        let created = create(root.path(), "feature").unwrap();
+        assert_eq!(head_branch(&created.root), "usagi/feature");
+        // Both branches coexist: the user's `feature` and the session's.
+        assert!(branch_exists(root.path(), "feature"));
+        assert!(branch_exists(root.path(), "usagi/feature"));
     }
 
     #[test]
@@ -744,9 +787,9 @@ mod tests {
     fn rejects_a_name_that_clashes_with_a_branch_namespace() {
         let root = tempfile::tempdir().unwrap();
         init_repo(root.path());
-        // Pre-create branches under `test/`, mirroring a repo that already has
-        // `test/home-ui-e2e` etc. A plain `test` branch then cannot be created.
-        for branch in ["test/home-ui-e2e", "test/tui-e2e-pty"] {
+        // Pre-create branches nested under the session's namespaced branch
+        // `usagi/test/…`. The `usagi/test` branch then cannot be created.
+        for branch in ["usagi/test/home-ui-e2e", "usagi/test/tui-e2e-pty"] {
             assert!(git_cmd(root.path())
                 .args(["branch", branch])
                 .status()
@@ -757,7 +800,7 @@ mod tests {
         let err = create(root.path(), "test").unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("conflicts with the existing branch"), "{msg}");
-        assert!(msg.contains("test/home-ui-e2e"), "{msg}");
+        assert!(msg.contains("usagi/test/home-ui-e2e"), "{msg}");
         // Nothing was created on the failed attempt.
         assert!(!root.path().join(".usagi/sessions/test").exists());
         assert!(sessions_of(root.path()).is_empty());
@@ -1069,9 +1112,9 @@ mod tests {
         // The worktree directory and the state record are both gone.
         assert!(!created.root.exists());
         assert!(sessions_of(root.path()).is_empty());
-        // The branch was deleted in the source repo.
+        // The namespaced branch was deleted in the source repo.
         assert!(!git_cmd(root.path())
-            .args(["rev-parse", "--verify", "--quiet", "feature"])
+            .args(["rev-parse", "--verify", "--quiet", "usagi/feature"])
             .status()
             .unwrap()
             .success());
@@ -1165,8 +1208,10 @@ mod tests {
             .success());
 
         let repo_worktrees = reconcile::list_repo_worktrees(root.path()).unwrap();
-        // Forced teardown is best-effort and still reports success...
-        reconcile::discard_session(&created.root, "wip", &repo_worktrees, true).unwrap();
+        // Forced teardown is best-effort and still reports success... The branch
+        // is the namespaced `usagi/wip`, still checked out in the locked worktree
+        // git refuses to drop.
+        reconcile::discard_session(&created.root, "usagi/wip", &repo_worktrees, true).unwrap();
 
         // ...but the orphaned-branch failure was recorded to the daily log.
         let logged: String = fs::read_dir(home.path().join("logs"))
@@ -1288,11 +1333,11 @@ mod tests {
         // The stray worktree directory and its branch are gone...
         assert_eq!(removed, vec![stray.root.clone()]);
         assert!(!stray.root.exists());
-        assert!(!branch_exists(root.path(), "stray"));
+        assert!(!branch_exists(root.path(), "usagi/stray"));
         // ...while the tracked session and its branch survive untouched.
         assert!(kept.root.exists());
-        assert_eq!(head_branch(&kept.root), "keep");
-        assert!(branch_exists(root.path(), "keep"));
+        assert_eq!(head_branch(&kept.root), "usagi/keep");
+        assert!(branch_exists(root.path(), "usagi/keep"));
         assert_eq!(sessions_of(root.path()), vec!["keep".to_string()]);
     }
 
@@ -1309,7 +1354,7 @@ mod tests {
 
         assert_eq!(removed, vec![stray.root.clone()]);
         assert!(!stray.root.exists());
-        assert!(!branch_exists(root.path(), "stray"));
+        assert!(!branch_exists(root.path(), "usagi/stray"));
     }
 
     #[test]
@@ -1355,8 +1400,8 @@ mod tests {
         assert_eq!(removed, vec![stray.root.clone()]);
         assert!(!stray.root.exists());
         // The session branch is gone from every source repository.
-        assert!(!branch_exists(&root.path().join("app-a"), "wip"));
-        assert!(!branch_exists(&root.path().join("be/be1"), "wip"));
+        assert!(!branch_exists(&root.path().join("app-a"), "usagi/wip"));
+        assert!(!branch_exists(&root.path().join("be/be1"), "usagi/wip"));
     }
 
     #[test]
@@ -1371,7 +1416,7 @@ mod tests {
         let recreated = create(root.path(), "dup").unwrap();
 
         assert!(recreated.root.exists());
-        assert_eq!(head_branch(&recreated.root), "dup");
+        assert_eq!(head_branch(&recreated.root), "usagi/dup");
         assert_eq!(sessions_of(root.path()), vec!["dup".to_string()]);
     }
 
@@ -1399,7 +1444,7 @@ mod tests {
         let created = create(root.path(), "review").unwrap();
 
         assert!(created.root.exists());
-        assert_eq!(head_branch(&created.root), "review");
+        assert_eq!(head_branch(&created.root), "usagi/review");
         assert_eq!(sessions_of(root.path()), vec!["review".to_string()]);
     }
 
@@ -1449,16 +1494,16 @@ mod tests {
         let created = create(root.path(), "stuck").unwrap();
         // Delete just the directory, leaving the branch + registration behind.
         fs::remove_dir_all(&created.root).unwrap();
-        assert!(branch_exists(root.path(), "stuck"));
+        assert!(branch_exists(root.path(), "usagi/stuck"));
 
         let outcome = remove(root.path(), "stuck", false, noop_agent().as_ref()).unwrap();
         assert!(outcome.removed);
         // The orphaned branch is gone, so the name is reusable...
-        assert!(!branch_exists(root.path(), "stuck"));
+        assert!(!branch_exists(root.path(), "usagi/stuck"));
         assert!(sessions_of(root.path()).is_empty());
         // ...and re-creating the session of the same name succeeds.
         let recreated = create(root.path(), "stuck").unwrap();
-        assert_eq!(head_branch(&recreated.root), "stuck");
+        assert_eq!(head_branch(&recreated.root), "usagi/stuck");
     }
 
     #[test]
