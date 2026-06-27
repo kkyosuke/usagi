@@ -364,10 +364,18 @@ impl TerminalPool {
     }
 
     /// Move the active tab within `dir` (next / previous / a numbered jump),
-    /// leaving every pane alive. A no-op for a session with no panes.
-    pub fn nav(&mut self, dir: &Path, nav: TabNav) {
-        if let Some(sp) = self.sessions.get_mut(dir) {
-            sp.active = tabs::resolve_nav(sp.active, sp.panes.len(), nav);
+    /// leaving every pane alive. A no-op for a session with no panes. Returns
+    /// whether the active tab actually moved, so 没入 can skip the screen clear /
+    /// repaint when a nav lands on the tab already showing (a lone pane, or a
+    /// jump to the current tab) and would otherwise flicker.
+    pub fn nav(&mut self, dir: &Path, nav: TabNav) -> bool {
+        match self.sessions.get_mut(dir) {
+            Some(sp) => {
+                let before = sp.active;
+                sp.active = tabs::resolve_nav(sp.active, sp.panes.len(), nav);
+                sp.active != before
+            }
+            None => false,
         }
     }
 
