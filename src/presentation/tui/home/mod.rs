@@ -1083,7 +1083,7 @@ fn run_remove(
                 sessions: reload_sessions(root),
                 evict: Some(
                     root.join(crate::infrastructure::repo_paths::STATE_DIR)
-                        .join("sessions")
+                        .join(crate::infrastructure::repo_paths::SESSIONS_DIR)
                         .join(name),
                 ),
                 focus: None,

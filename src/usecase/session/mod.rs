@@ -34,7 +34,7 @@ use chrono::{DateTime, Utc};
 
 use crate::domain::agent::Agent;
 use crate::domain::workspace_state::SessionRecord;
-use crate::infrastructure::repo_paths::STATE_DIR;
+use crate::infrastructure::repo_paths::{SESSIONS_DIR, STATE_DIR};
 use crate::infrastructure::workspace_store::WorkspaceStore;
 use crate::infrastructure::{agent_state_store, git};
 use crate::usecase::workspace_state;
@@ -98,7 +98,7 @@ pub fn create(workspace_root: &Path, name: &str) -> Result<CreatedSession> {
     // directory of the same name never blocks a fresh session.
     reconcile::reconcile_locked(workspace_root)?;
 
-    let dest_root = workspace_root.join(STATE_DIR).join("sessions").join(name);
+    let dest_root = workspace_root.join(STATE_DIR).join(SESSIONS_DIR).join(name);
     if dest_root.exists() {
         bail!("session \"{name}\" already exists");
     }
@@ -572,7 +572,7 @@ pub fn workspace_root(start: &Path) -> PathBuf {
         if component.as_os_str() == OsStr::new(STATE_DIR)
             && components
                 .peek()
-                .is_some_and(|next| next.as_os_str() == OsStr::new("sessions"))
+                .is_some_and(|next| next.as_os_str() == OsStr::new(SESSIONS_DIR))
         {
             return prefix;
         }
@@ -600,7 +600,7 @@ pub fn source_repos(workspace_root: &Path) -> Vec<PathBuf> {
 /// every session's own issue store for the workspace-wide maximum, so two
 /// sessions never mint the same number.
 pub fn session_roots(workspace_root: &Path) -> Vec<PathBuf> {
-    let dir = workspace_root.join(STATE_DIR).join("sessions");
+    let dir = workspace_root.join(STATE_DIR).join(SESSIONS_DIR);
     let Ok(entries) = fs::read_dir(&dir) else {
         return Vec::new();
     };
