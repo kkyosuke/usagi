@@ -423,7 +423,7 @@ pub(super) fn event_loop(
             && last_update == latest_update;
         let (height, width) = term.size();
         if !skip_paint {
-            // Stamp the frame's render time so the left pane's "N分前" labels track
+            // Stamp the frame's render time so the left pane's "Nmin ago" labels track
             // real time. Only on a real paint — a skipped frame draws nothing, so
             // the label refreshes on the next change rather than ticking every
             // second (keeping the loop's repaint budget low).

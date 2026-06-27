@@ -509,7 +509,7 @@ pub struct HomeState {
     logger: Box<dyn crate::infrastructure::error_log::Logger>,
     /// The wall-clock instant the current frame renders at, refreshed each paint
     /// by the event loop ([`set_now`](Self::set_now)). The left pane reads it to
-    /// turn each session's `updated_at` into a relative "N分前" label. Kept on the
+    /// turn each session's `updated_at` into a relative "Nmin ago" label. Kept on the
     /// state (rather than threaded through the pure `render_frame`) so the renderer
     /// stays a `&HomeState`-only function and its many test call sites are
     /// unaffected; tests that pin the label set a fixed value with `set_now`.
@@ -579,7 +579,7 @@ impl HomeState {
     }
 
     /// Record the instant the next frame renders at, so the left pane's relative
-    /// "N分前" labels track real time. The event loop calls this before each paint;
+    /// "Nmin ago" labels track real time. The event loop calls this before each paint;
     /// tests pin it to control the labels.
     pub fn set_now(&mut self, now: DateTime<Utc>) {
         self.now = now;
