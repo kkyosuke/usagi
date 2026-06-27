@@ -268,6 +268,63 @@ fn submitted_commands_are_recorded_in_history() {
 }
 
 #[test]
+fn a_repeated_command_is_not_recorded_twice_in_a_row() {
+    let mut state = state();
+    for _ in 0..2 {
+        for c in "man".chars() {
+            state.push_char(c);
+        }
+        state.submit();
+    }
+    // The consecutive duplicate is dropped (shell-style), so recall has one entry.
+    assert_eq!(state.cmdline.history, vec!["man"]);
+}
+
+#[test]
+fn restored_history_is_capped_to_the_most_recent_entries() {
+    let mut state = state();
+    let total = MAX_COMMAND_HISTORY + 5;
+    let entries: Vec<String> = (0..total).map(|i| format!("cmd-{i}")).collect();
+    state.restore_history(entries);
+    assert_eq!(state.cmdline.history.len(), MAX_COMMAND_HISTORY);
+    // The oldest five were dropped; the newest is kept.
+    assert_eq!(state.cmdline.history.first().unwrap(), "cmd-5");
+    assert_eq!(
+        state.cmdline.history.last().unwrap(),
+        &format!("cmd-{}", total - 1)
+    );
+}
+
+#[test]
+fn appending_past_the_cap_drops_the_oldest_command() {
+    let mut state = state();
+    let entries: Vec<String> = (0..MAX_COMMAND_HISTORY)
+        .map(|i| format!("cmd-{i}"))
+        .collect();
+    state.restore_history(entries);
+    state.cmdline.input.set_value("man");
+    state.submit();
+    // Still capped, oldest evicted, newest appended.
+    assert_eq!(state.cmdline.history.len(), MAX_COMMAND_HISTORY);
+    assert_eq!(state.cmdline.history.first().unwrap(), "cmd-1");
+    assert_eq!(state.cmdline.history.last().unwrap(), "man");
+}
+
+#[test]
+fn the_output_log_is_capped_so_it_cannot_grow_without_bound() {
+    let mut state = state();
+    for i in 0..(MAX_LOG_LINES + 10) {
+        state.log_output(format!("line {i}"));
+    }
+    assert_eq!(state.log().len(), MAX_LOG_LINES);
+    // The newest line survives; the oldest were dropped.
+    assert_eq!(
+        state.log().last().unwrap().text,
+        format!("line {}", MAX_LOG_LINES + 9)
+    );
+}
+
+#[test]
 fn restored_history_feeds_recall_and_new_commands_append_to_it() {
     let mut state = state();
     state.restore_history(vec!["session".to_string(), "space".to_string()]);

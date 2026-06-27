@@ -24,27 +24,39 @@ use crate::infrastructure::workspace_store::WorkspaceStore;
 pub fn sync(cwd: &Path) -> Result<WorkspaceState> {
     let root = git::primary_worktree(cwd)?;
     let store = WorkspaceStore::new(&root);
-    // Hold the lock across the load → refresh → save so this status refresh and a
-    // concurrent session create/remove/rename cannot clobber each other.
-    let _lock = store.lock()?;
-    let mut state = store.load()?.unwrap_or_default();
 
-    // Inspect every session's worktrees through the shared helper, which
-    // resolves each repository's default branch once and refreshes the
-    // worktrees in parallel. Flattening across sessions lets a workspace whose
-    // sessions share a repository resolve that repository's default a single
-    // time. The result is scattered back in the same order it was collected.
-    let paths: Vec<PathBuf> = state
+    // Read which worktrees to inspect, then run the expensive git inspection
+    // (several subprocesses per worktree) **without holding the store lock**: it
+    // reads nothing from the store, so holding the lock across it would block a
+    // concurrent session create/remove for the whole git fan-out — long enough on
+    // a large repo to risk the lock-acquire timeout. The lock is taken only for
+    // the cheap load → scatter → save below.
+    let recorded = store.load()?.unwrap_or_default();
+    let paths: Vec<PathBuf> = recorded
         .sessions
         .iter()
         .flat_map(|s| s.worktrees.iter().map(|wt| wt.path.clone()))
         .collect();
-    let mut refreshed = inspect_worktrees(&paths).into_iter();
+    // The shared helper resolves each repository's default branch once and
+    // refreshes the worktrees in parallel; index the results by path so they can
+    // be matched onto whatever the locked re-load below holds.
+    let refreshed: HashMap<PathBuf, WorktreeState> = paths
+        .iter()
+        .cloned()
+        .zip(inspect_worktrees(&paths))
+        .collect();
+
+    // Now take the lock and re-load: a session may have been created or removed
+    // while we were inspecting, so apply the refreshed states onto the *current*
+    // on-disk state, matched by worktree path. A worktree added concurrently (not
+    // in `refreshed`) keeps its recorded state and is picked up by the next sync.
+    let _lock = store.lock()?;
+    let mut state = store.load()?.unwrap_or_default();
     for session in &mut state.sessions {
         for wt in &mut session.worktrees {
-            *wt = refreshed
-                .next()
-                .expect("inspect_worktrees yields one state per input path");
+            if let Some(updated) = refreshed.get(&wt.path) {
+                *wt = updated.clone();
+            }
         }
     }
     state.updated_at = Utc::now();

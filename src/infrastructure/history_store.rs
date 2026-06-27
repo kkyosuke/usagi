@@ -22,6 +22,12 @@ use crate::infrastructure::repo_paths::STATE_DIR;
 
 const HISTORY_FILE: &str = "history.jsonl";
 
+/// The most entries [`HistoryStore::load`] returns — the newest ones. The file is
+/// append-only and grows over a repository's whole lifetime; loading only the tail
+/// bounds the startup parse cost and the in-memory buffer that seeds the screen's
+/// command recall, however large the file has become.
+const MAX_LOADED_ENTRIES: usize = 1_000;
+
 /// File-based persistence for a repository's command history, rooted at its
 /// `.usagi/` directory.
 pub struct HistoryStore {
@@ -67,6 +73,13 @@ impl HistoryStore {
         let mut lines: Vec<&str> = text.lines().collect();
         if !ends_with_newline {
             lines.pop();
+        }
+        // Keep only the most recent entries: an append-only history grows without
+        // bound on disk, but the screen only needs the tail for recall, and a
+        // complete line earlier in the file is never re-validated here.
+        let skip = lines.len().saturating_sub(MAX_LOADED_ENTRIES);
+        if skip > 0 {
+            lines.drain(..skip);
         }
 
         let mut entries = Vec::with_capacity(lines.len());
@@ -182,6 +195,31 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn load_keeps_only_the_most_recent_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = HistoryStore::new(dir.path());
+        fs::create_dir_all(store.dir()).unwrap();
+        // Write more lines than the cap directly, so the file is "large".
+        let total = MAX_LOADED_ENTRIES + 5;
+        let mut text = String::new();
+        for i in 0..total {
+            let line = serde_json::to_string(&HistoryEntry::now(format!("cmd-{i}"))).unwrap();
+            text.push_str(&line);
+            text.push('\n');
+        }
+        fs::write(store.history_path(), text).unwrap();
+
+        let entries = store.load().unwrap();
+        // Only the tail is loaded, newest preserved and in order.
+        assert_eq!(entries.len(), MAX_LOADED_ENTRIES);
+        assert_eq!(entries.first().unwrap().command, "cmd-5");
+        assert_eq!(
+            entries.last().unwrap().command,
+            format!("cmd-{}", total - 1)
+        );
     }
 
     #[test]

@@ -41,11 +41,21 @@ const ESC: char = '\u{1b}';
 /// [`render_modal`] clips modal content to the box so nothing ever overruns its
 /// bounds.
 pub fn clip_to_width(text: &str, max: usize) -> String {
+    clip_to_width_cow(text, max).into_owned()
+}
+
+/// Like [`clip_to_width`], but borrows `text` unchanged when it already fits
+/// (the overwhelmingly common case in the per-frame render path), so a row that
+/// needs no clipping costs no allocation. Callers that must own the result use
+/// [`clip_to_width`]; callers that only `Display` it (e.g. `style(…)`) take the
+/// [`Cow`](std::borrow::Cow) and avoid the copy.
+pub fn clip_to_width_cow(text: &str, max: usize) -> std::borrow::Cow<'_, str> {
+    use std::borrow::Cow;
     if console::measure_text_width(text) <= max {
-        return text.to_string();
+        return Cow::Borrowed(text);
     }
     if max == 0 {
-        return String::new();
+        return Cow::Owned(String::new());
     }
     // Reserve one column for the ellipsis.
     let budget = max - 1;
@@ -76,7 +86,7 @@ pub fn clip_to_width(text: &str, max: usize) -> String {
         out.push(ch);
     }
     out.push('…');
-    out
+    Cow::Owned(out)
 }
 
 /// Breaks `text` into lines no wider than `width` display columns, splitting

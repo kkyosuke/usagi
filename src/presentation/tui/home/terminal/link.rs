@@ -185,6 +185,10 @@ pub fn link_cells(screen: &vt100::Screen) -> HashSet<Cell> {
         return cells;
     }
     let width = cols as usize;
+    // One scratch buffer reused across logical lines: this scan runs while the
+    // render loop holds the parser lock, so allocating a fresh `Vec<char>` per
+    // logical line would add avoidable churn to that critical section.
+    let mut chars: Vec<char> = Vec::with_capacity(width);
     let mut start = 0;
     while start < rows {
         // Extend to the last row of this logical line (each row but the last
@@ -193,7 +197,7 @@ pub fn link_cells(screen: &vt100::Screen) -> HashSet<Cell> {
         while end + 1 < rows && screen.row_wrapped(end) {
             end += 1;
         }
-        let mut chars: Vec<char> = Vec::with_capacity((end - start + 1) as usize * width);
+        chars.clear();
         for row in start..=end {
             for col in 0..cols {
                 chars.push(cell_char(screen.cell(row, col)));

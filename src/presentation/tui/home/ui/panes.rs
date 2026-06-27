@@ -14,9 +14,9 @@ use super::super::state::{
 use super::super::terminal::tabs::TabStrip;
 use super::super::terminal::view::TerminalView;
 use super::{
-    clip_to_width, pad_to_width, ACTIVE_COL, DETACHED, DIRTY_ICON, EMPTY_MESSAGE, HINT_INDENT,
-    HINT_MAX, LOCAL_ICON, NAME_PREFIX, NEW_ICON, PUSHED_ICON, RAIL_WIDTH, ROOT_DETAIL, STATUS_COL,
-    SYNCED_ICON, TERMINAL_STARTING,
+    clip_to_width, clip_to_width_cow, pad_to_width, ACTIVE_COL, DETACHED, DIRTY_ICON,
+    EMPTY_MESSAGE, HINT_INDENT, HINT_MAX, LOCAL_ICON, NAME_PREFIX, NEW_ICON, PUSHED_ICON,
+    RAIL_WIDTH, ROOT_DETAIL, STATUS_COL, SYNCED_ICON, TERMINAL_STARTING,
 };
 use crate::domain::settings::{AgentCli, SessionActionUi, Sidebar};
 use crate::domain::workspace_state::{BranchStatus, DiffStat, WorktreeState};
@@ -121,21 +121,21 @@ impl AgentState {
     fn detail(self, width: usize) -> Option<String> {
         match self {
             AgentState::Absent => None,
-            AgentState::Ready => Some(style(clip_to_width("☾ ready", width)).dim().to_string()),
+            AgentState::Ready => Some(style(clip_to_width_cow("☾ ready", width)).dim().to_string()),
             AgentState::Running => Some(
-                style(clip_to_width("▶ running", width))
+                style(clip_to_width_cow("▶ running", width))
                     .green()
                     .bold()
                     .to_string(),
             ),
             AgentState::Waiting => Some(
-                style(clip_to_width("◆ waiting", width))
+                style(clip_to_width_cow("◆ waiting", width))
                     .yellow()
                     .bold()
                     .to_string(),
             ),
             AgentState::Done => Some(
-                style(clip_to_width("✓ done", width))
+                style(clip_to_width_cow("✓ done", width))
                     .cyan()
                     .bold()
                     .to_string(),
@@ -567,7 +567,10 @@ fn tab_strip_parts(strip: &TabStrip) -> (String, String) {
             marker.push_str(&" ".repeat(TAB_CHIP_GAP));
         }
         let text = tab_chip_text(i, label);
-        let width = text.chars().count();
+        // Display width (not char count) so the underline marker stays aligned
+        // under a non-ASCII chip label, matching the hit test in
+        // [`tab_chip_ranges`], which measures the same chip the same way.
+        let width = console::measure_text_width(&text);
         if i == strip.active {
             chips.push_str(&style(&text).reverse().bold().to_string());
             marker.push_str(&style("▔".repeat(width)).cyan().bold().to_string());

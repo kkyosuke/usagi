@@ -109,6 +109,13 @@ pub struct PtySession {
 
 /// How many lines of scrolled-off output the embedded terminal keeps, so the
 /// user can scroll the pane back over a command's earlier output.
+///
+/// Memory envelope: the pool keeps every pane of every session alive in the
+/// background, and each pane's parser holds up to this many scrollback rows of
+/// `cols` cells. Worst-case resident grid memory is therefore on the order of
+/// `panes × SCROLLBACK_LINES × cols × sizeof(cell)` — bounded (no leak), but it
+/// scales with the number of open panes, so this cap is a deliberate
+/// memory-vs-history trade-off rather than an arbitrary number.
 const SCROLLBACK_LINES: usize = 10_000;
 
 /// Configure `cmd` to run `command` in `shell` and then exit, so the launch
@@ -396,8 +403,7 @@ impl PtySession {
     /// `wait()` here would freeze the UI thread that runs `Drop`. Polling with a
     /// deadline bounds that worst case: an un-reaped child becomes a short-lived
     /// zombie until the process exits, which is far better than a frozen UI.
-    fn reap_within_timeout(&mut self) -> Option<ExitStatus> {
-        let deadline = Instant::now() + TEARDOWN_TIMEOUT;
+    fn reap_within_timeout(&mut self, deadline: Instant) -> Option<ExitStatus> {
         loop {
             match self.child.try_wait() {
                 Ok(Some(status)) => return Some(status),
@@ -408,14 +414,19 @@ impl PtySession {
     }
 }
 
-/// The longest `Drop` waits on the child to be reaped, and (separately) on the
-/// reader thread to finish, before giving up rather than blocking the UI thread.
+/// The longest `Drop` waits in total — across reaping the child **and** joining
+/// the reader thread — before giving up rather than blocking the UI thread. The
+/// two waits share one deadline so a pathological close cannot stack them into a
+/// double-length stall.
 const TEARDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 /// How often [`PtySession::reap_within_timeout`] re-polls within that window.
 const TEARDOWN_POLL: Duration = Duration::from_millis(10);
 
 impl Drop for PtySession {
     fn drop(&mut self) {
+        // One deadline shared by both waits below, so the reap and the reader-join
+        // can never stack into a double-length UI stall on a pathological close.
+        let deadline = Instant::now() + TEARDOWN_TIMEOUT;
         let deliberate = self.is_alive();
         if deliberate {
             // The shell is still running, so dropping the session is a deliberate
@@ -424,8 +435,8 @@ impl Drop for PtySession {
             // thread then sees EOF. A deliberate close is not a failure, so the
             // reaped status is discarded rather than logged.
             self.terminate();
-            let _ = self.reap_within_timeout();
-        } else if let Some(status) = self.reap_within_timeout() {
+            let _ = self.reap_within_timeout(deadline);
+        } else if let Some(status) = self.reap_within_timeout(deadline) {
             // The shell exited on its own (the reader hit EOF): reap it and, if it
             // ended abnormally, record it — an agent CLI crashing or exiting
             // non-zero is otherwise indistinguishable from the user typing `exit`.
@@ -444,7 +455,6 @@ impl Drop for PtySession {
         // rather than hang the UI; it ends when EOF finally arrives or with the
         // process.
         if let Some(thread) = self.reader_thread.take() {
-            let deadline = Instant::now() + TEARDOWN_TIMEOUT;
             while self.is_alive() && Instant::now() < deadline {
                 std::thread::sleep(TEARDOWN_POLL);
             }

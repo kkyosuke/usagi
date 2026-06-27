@@ -134,6 +134,16 @@ struct TerminalSurface {
     tabs: Option<TabStrip>,
 }
 
+/// The most command-history entries kept in memory (and seeded from disk). A
+/// long-running session would otherwise grow the recall buffer without bound.
+const MAX_COMMAND_HISTORY: usize = 1_000;
+
+/// The most output-log lines kept in memory. The results band shows only the
+/// latest command's response, so older lines past this cap are dead weight; the
+/// log is otherwise only ever appended to (cleared only by `clear`), so without a
+/// cap a long session grows it without bound.
+const MAX_LOG_LINES: usize = 5_000;
+
 /// The workspace command line: the editable buffer with its caret, the
 /// committed command history, and the recall cursor into that history.
 ///
@@ -178,14 +188,30 @@ impl CommandLine {
         &self.history
     }
 
-    /// Replace the history wholesale (e.g. restored from disk).
-    fn set_history(&mut self, entries: Vec<String>) {
+    /// Replace the history wholesale (e.g. restored from disk), capped to the most
+    /// recent [`MAX_COMMAND_HISTORY`] entries so a long-lived on-disk history
+    /// never seeds an unbounded in-memory buffer.
+    fn set_history(&mut self, mut entries: Vec<String>) {
+        let overflow = entries.len().saturating_sub(MAX_COMMAND_HISTORY);
+        if overflow > 0 {
+            entries.drain(..overflow);
+        }
         self.history = entries;
     }
 
-    /// Append a committed command.
+    /// Append a committed command, skipping a consecutive duplicate (standard
+    /// shell behaviour) and capping the buffer to [`MAX_COMMAND_HISTORY`] so a
+    /// long session cannot grow it without bound. Recall is reset on every submit,
+    /// so a front-drain here never strands the recall cursor.
     fn push_history(&mut self, entry: String) {
+        if self.history.last() == Some(&entry) {
+            return;
+        }
         self.history.push(entry);
+        let overflow = self.history.len().saturating_sub(MAX_COMMAND_HISTORY);
+        if overflow > 0 {
+            self.history.drain(..overflow);
+        }
     }
 
     /// Clear the buffer and cancel any in-progress recall.
@@ -783,6 +809,19 @@ impl HomeState {
     /// report the result of a command's side effect, e.g. `terminal`).
     pub fn log_output(&mut self, text: impl Into<String>) {
         self.log.push(LogLine::output(text));
+        self.trim_log();
+    }
+
+    /// Drop the oldest log lines once the buffer exceeds [`MAX_LOG_LINES`],
+    /// keeping `response_start` pointing at the same response by shifting it down
+    /// by however many lines were removed. The cap is far larger than any single
+    /// command's response, so the visible results band is never trimmed away.
+    fn trim_log(&mut self) {
+        let overflow = self.log.len().saturating_sub(MAX_LOG_LINES);
+        if overflow > 0 {
+            self.log.drain(..overflow);
+            self.response_start = self.response_start.saturating_sub(overflow);
+        }
     }
 
     /// Append an error line to the log **and** persist it through the injected
@@ -796,6 +835,7 @@ impl HomeState {
         let text = text.into();
         self.logger.record(&text);
         self.log.push(LogLine::error(text));
+        self.trim_log();
     }
 
     /// Push `line` to the log, persisting it through the logger when it is an
@@ -809,6 +849,7 @@ impl HomeState {
             self.logger.record(&line.text);
         }
         self.log.push(line);
+        self.trim_log();
     }
 
     pub fn list(&self) -> &WorktreeList {
@@ -1867,6 +1908,7 @@ impl HomeState {
         // begins (the command echo), so everything earlier drops out of view.
         self.response_start = self.log.len();
         self.log.push(LogLine::command(entry.clone()));
+        self.trim_log();
         let result = self.dispatch_and_record(&entry, self.command_scope());
         let effect = self.record_response(result);
         Submission {
@@ -1915,7 +1957,10 @@ impl HomeState {
                 self.open_text_modal(title, result.lines, size);
                 self.response_start = self.log.len();
             }
-            _ => self.log.extend(result.lines),
+            _ => {
+                self.log.extend(result.lines);
+                self.trim_log();
+            }
         }
         result.effect
     }
