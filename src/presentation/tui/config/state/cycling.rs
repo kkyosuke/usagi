@@ -55,6 +55,11 @@ impl Config {
                 );
                 true
             }
+            Field::MascotAnimation => {
+                // A boolean toggle: direction is irrelevant, it always flips.
+                self.settings.mascot_animation_enabled = !self.settings.mascot_animation_enabled;
+                true
+            }
             Field::LocalLlm => {
                 // Only meaningful once installed: flip the on/off toggle. While
                 // not installed the row is an install action handled by the

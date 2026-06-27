@@ -255,6 +255,11 @@ pub struct Settings {
     /// toggles it at runtime).
     #[serde(deserialize_with = "crate::domain::serde_fallback::or_default")]
     pub sidebar: Sidebar,
+    /// Whether the sidebar mascot reacts to interaction — a quick blink in 切替 /
+    /// 在席 and the 没入 working rabbit's idle paw motion. Purely cosmetic and
+    /// driven by paints that already happen (no idle timer), so turning it off
+    /// just keeps the mascot perfectly still. On unless the user disables it.
+    pub mascot_animation_enabled: bool,
     /// How many lines of scrolled-off output each embedded terminal pane keeps.
     /// Paid once per live pane, so it is the main lever on the TUI's memory when
     /// many sessions are open; [`sanitized`](Self::sanitized) clamps it to
@@ -278,6 +283,8 @@ impl Default for Settings {
             agent_cli: AgentCli::default(),
             session_action_ui: SessionActionUi::default(),
             sidebar: Sidebar::default(),
+            // The mascot's reactions are opt-out: on unless the user disables them.
+            mascot_animation_enabled: true,
             terminal_scrollback_lines: DEFAULT_TERMINAL_SCROLLBACK_LINES,
             local_llm: LocalLlm::default(),
         }
@@ -749,6 +756,25 @@ mod tests {
     fn sidebar_toggles_between_full_and_rail() {
         assert_eq!(Sidebar::Full.toggled(), Sidebar::Rail);
         assert_eq!(Sidebar::Rail.toggled(), Sidebar::Full);
+    }
+
+    #[test]
+    fn mascot_animation_defaults_on_and_round_trips() {
+        // The mascot's reactions are opt-out: on unless explicitly disabled.
+        assert!(Settings::default().mascot_animation_enabled);
+        // An explicit `false` survives a JSON round-trip, and an absent field
+        // falls back to the default (`true`) via `#[serde(default)]`.
+        let off = Settings {
+            mascot_animation_enabled: false,
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&off).unwrap();
+        assert_eq!(serde_json::from_str::<Settings>(&json).unwrap(), off);
+        assert!(
+            serde_json::from_str::<Settings>("{}")
+                .unwrap()
+                .mascot_animation_enabled
+        );
     }
 
     #[test]

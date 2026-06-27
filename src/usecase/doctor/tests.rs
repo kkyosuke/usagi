@@ -44,6 +44,21 @@ fn notification_check_runs_in_the_current_environment() {
 }
 
 #[test]
+fn font_check_for_maps_presence_to_health() {
+    assert_eq!(font_check_for(true).health, Health::Ok);
+
+    let warn = font_check_for(false);
+    assert_eq!(warn.name, "nerd font");
+    assert_eq!(warn.health, Health::Warn);
+    assert!(warn.detail.unwrap().contains("doctor --fix"));
+}
+
+#[test]
+fn font_check_runs_in_the_current_environment() {
+    assert_eq!(font_check().name, "nerd font");
+}
+
+#[test]
 fn config_check_is_ok_when_settings_load() {
     let dir = tempfile::tempdir().expect("failed to create temp dir");
     let storage = Storage::new(dir.path().join("usagi"));
@@ -104,6 +119,7 @@ fn diagnose_covers_tools_agents_notifications_and_config() {
             "sakana.ai",
             "Gemini",
             "notifications",
+            "nerd font",
             "config"
         ]
     );
@@ -127,6 +143,7 @@ fn diagnose_skips_local_llm_when_settings_cannot_be_read() {
             "sakana.ai",
             "Gemini",
             "notifications",
+            "nerd font",
             "config"
         ]
     );

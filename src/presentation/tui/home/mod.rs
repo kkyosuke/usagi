@@ -187,6 +187,9 @@ pub fn run(term: &Term, workspace: &Workspace, preload: Preload) -> Result<Outco
     // collapsed rail; `Ctrl-B` toggles it from there).
     state.set_session_action_ui(settings.session_action_ui);
     state.set_sidebar(settings.sidebar);
+    // Whether the sidebar mascot reacts to interaction (a blink in 切替 / 在席, the
+    // 没入 paw); off keeps it a still resting image.
+    state.set_mascot_animation_enabled(settings.mascot_animation_enabled);
     // The configured default agent (its display name labels 在席's `agent` row and
     // a bare `agent` launches it). The agents installed on this machine fill in
     // shortly after via the background probe spawned below (state opens with none).

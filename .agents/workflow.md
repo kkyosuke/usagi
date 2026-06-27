@@ -20,7 +20,7 @@ AI エージェントが `usagi` で作業する際の標準手順。**新規作
 
 - **usagi セッション内で起動している場合**（`usagi agent` / `terminal` が起動する worktree。
   カレントが `.usagi/sessions/<name>/` 配下）: **すでに隔離された worktree 内にいるので、新しく
-  worktree を作成しない。そのまま作業を進める**。作業ブランチはセッション名（`<name>`）。
+  worktree を作成しない。そのまま作業を進める**。作業ブランチは `usagi/<name>`（セッション名 `<name>` を `usagi/` 名前空間に収めたもの）。
   セッションと worktree の構築は [04-orchestration.md](../document/04-orchestration.md) が正本。
 - **リポジトリのルート（`main` のチェックアウト）で直接作業している場合**: 自分で worktree を切って隔離する。
 

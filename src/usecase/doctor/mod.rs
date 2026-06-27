@@ -7,6 +7,7 @@
 
 use crate::domain::settings::AgentCli;
 use crate::infrastructure::storage::Storage;
+use crate::usecase::font;
 use crate::usecase::local_llm;
 
 mod fix;
@@ -83,6 +84,9 @@ impl Check {
 /// External command-line tools usagi shells out to.
 const REQUIRED_TOOLS: &[&str] = &["git", "bash"];
 
+/// Name of the Nerd Font presence check.
+pub(super) const NERD_FONT_CHECK: &str = "nerd font";
+
 /// Name of the `ollama` runtime check.
 pub(super) const OLLAMA_CHECK: &str = "ollama";
 /// Name of the local LLM model presence check.
@@ -113,6 +117,7 @@ pub fn diagnose(storage: &Storage) -> Vec<Check> {
         .collect();
     checks.extend(agent_checks(&runner));
     checks.push(notification_check());
+    checks.push(font_check());
     checks.push(config_check(storage));
     if let Ok(settings) = storage.load_settings() {
         checks.extend(local_llm_checks(
@@ -217,6 +222,32 @@ fn notifications_supported(os: &str, dbus_session: bool) -> bool {
     match os {
         "macos" | "ios" | "windows" => true,
         _ => dbus_session,
+    }
+}
+
+/// Check whether a Nerd Font (used by the TUI's git/issue glyphs) is installed.
+///
+/// The font is optional — the TUI falls back to colored words without it — so a
+/// missing font is a `warn`, not a `missing`: `doctor` still exits successfully.
+/// Its remedy is the dedicated [`font::ensure`] flow the CLI runs during `--fix`
+/// (not the generic package-manager path), so it is reported like the local-LLM
+/// checks rather than routed through [`fix_missing`].
+fn font_check() -> Check {
+    let home = dirs::home_dir().unwrap_or_default();
+    let dirs = font::font_dirs(std::env::consts::OS, &home);
+    font_check_for(font::nerd_font_installed(&dirs))
+}
+
+/// Pure core of [`font_check`], split out so both branches are testable without
+/// depending on the host's installed fonts.
+fn font_check_for(installed: bool) -> Check {
+    if installed {
+        Check::ok(NERD_FONT_CHECK)
+    } else {
+        Check::warn(
+            NERD_FONT_CHECK,
+            "no Nerd Font found; run `usagi doctor --fix` to install one",
+        )
     }
 }
 

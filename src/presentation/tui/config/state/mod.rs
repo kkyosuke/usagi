@@ -38,6 +38,8 @@ pub enum Field {
     AgentCli,
     /// How 在席 (Focus) mode presents a session's runnable commands.
     SessionActionUi,
+    /// Whether the home-screen sidebar mascot reacts to interaction.
+    MascotAnimation,
     /// The local LLM enable toggle — or an "Install" action when the runtime /
     /// model is not yet present.
     LocalLlm,
@@ -47,13 +49,14 @@ pub enum Field {
 
 impl Field {
     /// The fields shown on the screen, top to bottom.
-    pub const ALL: [Field; 8] = [
+    pub const ALL: [Field; 9] = [
         Field::Theme,
         Field::DefaultWorkspace,
         Field::Notifications,
         Field::RestorePanes,
         Field::AgentCli,
         Field::SessionActionUi,
+        Field::MascotAnimation,
         Field::LocalLlm,
         Field::LocalLlmModel,
     ];
@@ -67,6 +70,7 @@ impl Field {
             Field::RestorePanes => "Restore Panes",
             Field::AgentCli => "Agent CLI",
             Field::SessionActionUi => "Session Action UI",
+            Field::MascotAnimation => "Mascot Animation",
             Field::LocalLlm => "Local LLM",
             Field::LocalLlmModel => "Local LLM Model",
         }
@@ -470,6 +474,9 @@ impl Config {
             Field::SessionActionUi => {
                 self.settings.session_action_ui != self.baseline.session_action_ui
             }
+            Field::MascotAnimation => {
+                self.settings.mascot_animation_enabled != self.baseline.mascot_animation_enabled
+            }
             Field::LocalLlm => self.settings.local_llm.enabled != self.baseline.local_llm.enabled,
             Field::LocalLlmModel => self.settings.local_llm.model != self.baseline.local_llm.model,
         }
@@ -538,6 +545,7 @@ impl Config {
             Field::SessionActionUi => {
                 session_action_ui_label(self.settings.session_action_ui).to_string()
             }
+            Field::MascotAnimation => on_off(self.settings.mascot_animation_enabled).to_string(),
             // Before the runtime is present the row is an install action; once
             // installed it becomes a plain on/off toggle.
             Field::LocalLlm => {

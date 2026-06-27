@@ -36,8 +36,9 @@ fn render_frame_overlays_the_removal_modal_with_a_checklist() {
     assert!(joined.contains("[x]"));
     assert!(joined.contains("1 selected"));
     assert!(joined.contains("Enter: remove"));
-    // The mode chrome is not drawn underneath.
-    assert!(!joined.contains("switch"));
+    // The modal floats over the live workspace: the chrome (here the 切替 footer)
+    // shows through around it rather than a black backdrop.
+    assert!(joined.contains("[switch]"));
 }
 
 #[test]
@@ -87,11 +88,14 @@ fn render_frame_removal_modal_reports_when_there_are_no_sessions() {
     let frame = render_frame(24, 80, &state);
     let joined = console::strip_ansi_codes(&frame.join("\n")).into_owned();
     assert!(joined.contains("No sessions to remove"));
-    assert!(!joined.contains("selected"));
+    // With nothing to remove the modal omits its "N selected" count line (the
+    // workspace behind the overlay may say "selected" elsewhere, so match the
+    // count line specifically).
+    assert!(!joined.contains("0 selected"));
 }
 
 #[test]
-fn remove_modal_frame_scrolls_to_keep_the_cursor_visible() {
+fn remove_modal_scrolls_to_keep_the_cursor_visible() {
     let names: Vec<String> = (0..12).map(|i| format!("s{i:02}")).collect();
     let refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
     let mut state = state_with_sessions(&refs);
@@ -108,16 +112,52 @@ fn remove_modal_frame_scrolls_to_keep_the_cursor_visible() {
 }
 
 #[test]
-fn remove_modal_frame_keeps_every_row_within_the_box() {
+fn remove_modal_overlays_a_well_formed_box_over_the_workspace() {
     let mut state = state_with_sessions(&["scroll", "session-new", "config"]);
     state.open_remove_modal(false);
     let frame = render_frame(24, 80, &state);
-    let widths: Vec<usize> = frame
+    let stripped: Vec<String> = frame
         .iter()
-        .map(|l| console::strip_ansi_codes(l))
-        .filter(|l| l.trim_start().starts_with(['┌', '│', '└']))
-        .map(|l| console::measure_text_width(l.trim_end()))
+        .map(|l| console::strip_ansi_codes(l).into_owned())
         .collect();
-    assert!(!widths.is_empty());
-    assert!(widths.iter().all(|&w| w == widths[0]));
+
+    // The contiguous box-drawing run between `open` and `close` on a line — the
+    // box now floats with workspace content to its left, so the border no longer
+    // starts the line and must be sliced out.
+    fn box_run(line: &str, open: char, close: char) -> Option<String> {
+        let mut out = String::new();
+        let mut started = false;
+        for c in line.chars() {
+            if c == open {
+                started = true;
+            }
+            if started {
+                out.push(c);
+            }
+            if started && c == close {
+                return Some(out);
+            }
+        }
+        None
+    }
+
+    // The modal's top border carries the title; a bottom border of the same width
+    // closes the box.
+    let top_w = stripped
+        .iter()
+        .find(|l| l.contains("Remove sessions"))
+        .and_then(|l| box_run(l, '┌', '┐'))
+        .map(|run| console::measure_text_width(&run))
+        .expect("the modal draws a titled top border");
+    let has_matching_bottom = stripped
+        .iter()
+        .filter_map(|l| box_run(l, '└', '┘'))
+        .any(|run| console::measure_text_width(&run) == top_w);
+    assert!(
+        has_matching_bottom,
+        "the modal box closes at the same width"
+    );
+
+    // It is an overlay, not a full-screen frame: the 切替 footer shows through.
+    assert!(stripped.join("\n").contains("[switch]"));
 }

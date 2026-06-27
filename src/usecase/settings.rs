@@ -68,6 +68,11 @@ pub fn set_agent_cli(storage: &Storage, agent_cli: AgentCli) -> Result<Settings>
     update_settings(storage, |s| s.agent_cli = agent_cli)
 }
 
+/// Enable or disable the sidebar mascot's reactions and persist the choice.
+pub fn set_mascot_animation_enabled(storage: &Storage, enabled: bool) -> Result<Settings> {
+    update_settings(storage, |s| s.mascot_animation_enabled = enabled)
+}
+
 /// Load the project-local setting overrides for the repository at `repo_root`
 /// (all fields unset if none have been saved).
 pub fn load_local(repo_root: &Path) -> Result<LocalSettings> {
@@ -187,5 +192,16 @@ mod tests {
         assert_eq!(updated.theme, Theme::Dark);
         assert_eq!(load(&storage).unwrap().theme, Theme::Dark);
         assert!(storage.dir().join(".lock").is_file());
+    }
+
+    #[test]
+    fn mascot_animation_setter_persists_the_toggle() {
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = Storage::new(tmp.path().join("global"));
+        // On by default; disabling it sticks and reloads as `false`.
+        assert!(load(&storage).unwrap().mascot_animation_enabled);
+        let updated = set_mascot_animation_enabled(&storage, false).unwrap();
+        assert!(!updated.mascot_animation_enabled);
+        assert!(!load(&storage).unwrap().mascot_animation_enabled);
     }
 }

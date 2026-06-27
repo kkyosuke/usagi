@@ -24,8 +24,8 @@ use crate::presentation::tui::widgets::{clip_to_width, clip_to_width_cow};
 
 use chrome::{
     command_palette_body, footer_line, input_line, mode_ladder, quit_confirm_frame,
-    remove_modal_frame, switch_create_rows, switch_rename_rows, task_status_line, text_modal_body,
-    title_bar, PALETTE_INNER, TEXT_MODAL_INNER,
+    remove_modal_body, switch_create_rows, switch_rename_rows, task_status_line, text_modal_body,
+    title_bar, PALETTE_INNER, REMOVE_MODAL_INNER, TEXT_MODAL_INNER,
 };
 use panes::{left_pane, right_pane_contents};
 // The embedded terminal pane (没入) maps a click to the tab under it through this.
@@ -286,10 +286,11 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
     if state.quit_confirm() {
         return quit_confirm_frame(raw_height, raw_width, state.live_count());
     }
-    // The session-removal modal, when open, overlays the whole screen.
-    if let Some(modal) = state.remove_modal() {
-        return remove_modal_frame(raw_height, raw_width, modal);
-    }
+    // The session-removal modal is *not* a full-screen overlay: like the `:`
+    // command palette and the text modal it floats as a centred box over the live
+    // workspace frame (built below) so the panes stay visible around it, rather
+    // than a black backdrop. It is composited last, alongside them.
+    //
     // The text modal (a text-dumping command's output: `man` / `history` /
     // `session list`) is *not* a full-screen overlay: like the `:` command
     // palette it floats as a centred box over the live workspace frame (built
@@ -361,31 +362,58 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
             left.truncate(body_rows);
         }
     }
-    // Rest the mascot at the bottom of the (full) sidebar, below the session
-    // list, when there is room for it. Its face and colour follow the current
-    // mode — browsing in 切替, attentive in 在席, heads-down in 没入 — so the
-    // rabbit reflects what the user is doing. A blank row always sits between the
-    // list and the rabbit so the art reads as its own thing rather than the next
-    // list entry. When the background update check has found a newer release, the
-    // rabbit *speaks* the notice from a bubble above it (the message and the new
-    // version), so the news comes from the mascot rather than a top-right banner.
-    // With a list (or an inline create / rename input) long enough to reach those
-    // rows, or a sidebar collapsed to the narrow rail / too narrow to hold the
-    // art, it politely hides rather than overlapping the list.
-    if sidebar == Sidebar::Full && left_w >= widgets::workspace_rabbit_width() {
-        let mood = rabbit_mood(state.mode());
-        let rabbit = match state.update() {
-            Some(latest) => widgets::workspace_rabbit_speaking(
-                mood,
-                &["アップデートがあるぴょん".to_string(), format!("v{latest}")],
-                left_w,
-            ),
-            None => widgets::workspace_rabbit(mood),
-        };
+    // Rest a mascot at the bottom of the sidebar, below the session list, when
+    // there is room for it: the full mood mascot when expanded, a tiny chibi when
+    // collapsed to the rail (so folding the sidebar keeps the usagi around, just
+    // smaller). The full mascot's face and colour follow the current mode —
+    // browsing in 切替, attentive in 在席, heads-down in 没入 — so it reflects what
+    // the user is doing, and when the background update check has found a newer
+    // release it *speaks* the notice from a bubble above it (the rail chibi is
+    // static; the notice reappears on expand). A blank row always sits between the
+    // list and the art so it reads as its own thing rather than the next list
+    // entry. With a list (or an inline create / rename input) long enough to reach
+    // those rows, or a pane too narrow to hold the art, it politely hides rather
+    // than overlapping the list.
+    //
+    // The art is indented one column so its left edge lines up with the bottom
+    // input line's content (the `● live terminal` indicator carries a single
+    // leading space) rather than sitting flush against the pane edge; the width
+    // checks leave room for that indent.
+    const RABBIT_INDENT: usize = 1;
+    let mascot = match sidebar {
+        Sidebar::Full if left_w >= widgets::workspace_rabbit_width() + RABBIT_INDENT => {
+            let mood = rabbit_mood(state.mode());
+            // The mascot reacts without an idle timer: `blinking` is set for the
+            // frames just after the user interacts (in 切替 / 在席), and `tick`
+            // advances on the live loop so the 没入 Working paw pumps. Both come from
+            // the state the event loop refreshes each frame
+            // ([`HomeState::tick_mascot`]).
+            let (blinking, tick) = (state.mascot_blinking(), state.mascot_tick());
+            Some(match state.update() {
+                Some(latest) => widgets::workspace_rabbit_speaking(
+                    mood,
+                    &["アップデートがあるぴょん".to_string(), format!("v{latest}")],
+                    // Leave room for the indent so the speech bubble still fits the pane.
+                    left_w - RABBIT_INDENT,
+                    blinking,
+                    tick,
+                ),
+                None => widgets::workspace_rabbit(mood, blinking, tick),
+            })
+        }
+        Sidebar::Rail if left_w >= widgets::workspace_rabbit_rail_width() + RABBIT_INDENT => {
+            Some(widgets::workspace_rabbit_rail())
+        }
+        _ => None,
+    };
+    if let Some(rabbit) = mascot {
+        let rabbit: Vec<String> = rabbit
+            .into_iter()
+            .map(|row| format!("{}{row}", " ".repeat(RABBIT_INDENT)))
+            .collect();
         // Reserve a blank row above the art (so it reads apart from the list) and
-        // one below it, so the mascot floats clear of the bottom input line —
-        // the `● live terminal` indicator in 没入 — rather than sitting flush
-        // on it.
+        // one below it, so the mascot floats clear of the bottom input line — the
+        // `● live terminal` indicator in 没入 — rather than sitting flush on it.
         let reserved = rabbit.len() + 2;
         if body_rows >= reserved && left.len() <= body_rows - reserved {
             left.resize(body_rows - rabbit.len() - 1, String::new());
@@ -469,6 +497,14 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
         let (inner, visible) = text_modal_geometry(height, width, modal.size);
         let body = text_modal_body(modal, inner, visible);
         widgets::overlay_modal(&mut lines, width, &modal.title, inner, &body);
+    }
+
+    // Float the session-removal checklist as a centred box over the assembled
+    // frame too, so the workspace shows around it instead of a black backdrop.
+    if let Some(modal) = state.remove_modal() {
+        let inner = widgets::modal_inner_width(width, REMOVE_MODAL_INNER);
+        let body = remove_modal_body(modal, inner);
+        widgets::overlay_modal(&mut lines, width, "Remove sessions", inner, &body);
     }
 
     lines
