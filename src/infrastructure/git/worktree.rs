@@ -168,6 +168,47 @@ pub fn worktree_status(path: &Path) -> Option<WorktreeStatus> {
     Some(status)
 }
 
+/// Ensure `pattern` is listed in the worktree's local git exclude file
+/// (`$GIT_DIR/info/exclude`).
+///
+/// usagi symlinks its shipped skills into each worktree at `.claude/skills`
+/// (see [`crate::infrastructure::skills`]). That symlink is untracked, so in a
+/// project that does not already ignore `.claude/` it would show up in `git
+/// status` and mark the session dirty — blocking `remove` / `finish` and
+/// flagging the session in the TUI. Excluding it here keeps usagi's own artifact
+/// invisible to git. The exclude file is local to the repository and never
+/// committed or pushed, so the user's tracked `.gitignore` is left untouched.
+///
+/// Idempotent: the pattern is appended only when absent. The path is resolved
+/// through git (`rev-parse --git-path`) so it lands in the right place for a
+/// linked worktree, whose `info/exclude` lives in the shared common dir.
+pub fn ensure_excluded(worktree: &Path, pattern: &str) -> Result<()> {
+    let args = [
+        "rev-parse",
+        "--path-format=absolute",
+        "--git-path",
+        "info/exclude",
+    ];
+    let path = match git_capture(worktree, &args)? {
+        Some(raw) => PathBuf::from(raw),
+        None => bail!("{} is not a git worktree", worktree.display()),
+    };
+
+    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+    if existing.lines().any(|line| line.trim() == pattern) {
+        return Ok(());
+    }
+    // Preserve any existing content (git seeds `info/exclude` with comments);
+    // append the pattern on its own line.
+    let mut content = existing;
+    if !content.is_empty() && !content.ends_with('\n') {
+        content.push('\n');
+    }
+    content.push_str(pattern);
+    content.push('\n');
+    std::fs::write(&path, content).context(format!("failed to write {}", path.display()))
+}
+
 /// Remove the worktree at `worktree` from `repo`. With `force`, discard
 /// uncommitted changes; without it, git refuses a dirty worktree.
 pub fn remove_worktree(repo: &Path, worktree: &Path, force: bool) -> Result<()> {

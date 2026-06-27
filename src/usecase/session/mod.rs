@@ -143,6 +143,21 @@ pub fn create(workspace_root: &Path, name: &str) -> Result<CreatedSession> {
         tree::build_dir(workspace_root, &dest_root, &branch, &mut worktrees)?;
     }
 
+    // Symlink usagi's shipped skills into each worktree so the agent launched
+    // there discovers them. The skills themselves are materialised once under the
+    // global data dir at startup (see
+    // [`skills::materialize`](crate::infrastructure::skills::materialize)); this
+    // points each worktree's `.claude/skills/<name>` at that directory and
+    // excludes those symlinks from git so they never mark the session dirty.
+    // Best-effort: a skills hiccup must not fail an otherwise-built session.
+    let skill_excludes = crate::infrastructure::skills::git_exclude_patterns();
+    for wt in &worktrees {
+        for pattern in &skill_excludes {
+            let _ = git::ensure_excluded(wt, pattern);
+        }
+        let _ = crate::infrastructure::skills::link(wt);
+    }
+
     record(&store, name, &dest_root, &worktrees)?;
 
     crate::infrastructure::trace_log::TraceLog::record(
