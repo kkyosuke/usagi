@@ -640,7 +640,7 @@ fn left_pane_shows_each_sessions_relative_update_time_on_the_detail_line() {
     // on the session's detail line (index 4).
     let detail = console::strip_ansi_codes(&lines[4]);
     assert!(
-        detail.contains("5分前"),
+        detail.contains("5min ago"),
         "{detail:?} missing the relative time"
     );
 }

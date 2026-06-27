@@ -33,7 +33,7 @@ pub const ROOT_NAME: &str = "root";
 /// - the first repository's `head` / `upstream` as representative detail,
 /// - `updated_at` carrying the session's last-active time (or its creation time
 ///   when never touched), which the sidebar reads for both the freshness ("heat")
-///   dot and the line-2 `N分前` label.
+///   dot and the line-2 `Nmin ago` label.
 ///
 /// For a single-repository workspace the session root *is* that repository's
 /// worktree, so the row matches the lone worktree exactly.
@@ -50,7 +50,7 @@ pub(super) fn session_row(session: &SessionRecord) -> WorktreeState {
         status,
         diff: DiffStat::aggregate(session.worktrees.iter().map(|w| w.diff)),
         ahead_behind: AheadBehind::aggregate(session.worktrees.iter().map(|w| w.ahead_behind)),
-        // Both the heat dot and the line-2 `N分前` label fade by time since the
+        // Both the heat dot and the line-2 `Nmin ago` label fade by time since the
         // session was last touched (switched to, or seen active), falling back to
         // its creation time when it never has been. Unlike each worktree's git-sync
         // `updated_at` — reset for every session on each workspace sync — this is a
