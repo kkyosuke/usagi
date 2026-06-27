@@ -20,7 +20,7 @@ use super::{
 };
 use crate::domain::settings::{AgentCli, SessionActionUi, Sidebar};
 use crate::domain::workspace_state::{BranchStatus, DiffStat, WorktreeState};
-use crate::presentation::tui::markdown::{LineStyle, MarkdownLine, Span, SpanStyle};
+use crate::presentation::tui::markdown::{LineStyle, MarkdownLine, Rgb, Span, SpanStyle};
 use crate::presentation::tui::widgets;
 
 /// The Nerd Font git glyph for a branch lifecycle status.
@@ -1446,7 +1446,12 @@ fn styled_span(span: &Span, line_style: LineStyle) -> String {
     let text = span.text.as_str();
     match line_style {
         LineStyle::Heading(level) => heading_style(text, level),
-        LineStyle::Code => style(text).green().to_string(),
+        // Syntax-highlighted code carries a per-token colour; an uncoloured code
+        // span (unknown highlight) falls back to a uniform green.
+        LineStyle::Code => match span.color {
+            Some(rgb) => style(text).color256(rgb_to_ansi256(rgb)).to_string(),
+            None => style(text).green().to_string(),
+        },
         LineStyle::Quote => style(text).dim().italic().to_string(),
         _ => match span.style {
             SpanStyle::Plain => text.to_string(),
@@ -1469,6 +1474,39 @@ fn heading_style(text: &str, level: u8) -> String {
         _ => base,
     }
     .to_string()
+}
+
+/// Map a 24-bit colour to the nearest xterm-256 palette index — the broadest
+/// colour depth the `console` styling exposes. Near-grey colours snap to the
+/// 24-step greyscale ramp (232–255); everything else snaps to the 6×6×6 colour
+/// cube (16–231). Both choose the closest step per channel.
+fn rgb_to_ansi256(rgb: Rgb) -> u8 {
+    let Rgb { r, g, b } = rgb;
+    // Treat colours whose channels are within a small spread as grey so subtle
+    // foregrounds use the finer-grained ramp instead of the coarse cube.
+    let max = r.max(g).max(b);
+    let min = r.min(g).min(b);
+    if max - min <= 8 {
+        // The ramp runs grey 8..=238 in steps of 10 across indices 232..=255.
+        let level = ((r as u16 + g as u16 + b as u16) / 3).saturating_sub(8) / 10;
+        let level = level.min(23) as u8;
+        return 232 + level;
+    }
+    let cube = |c: u8| -> u8 {
+        // Cube steps sit at 0, 95, 135, 175, 215, 255; pick the nearest.
+        const STEPS: [u8; 6] = [0, 95, 135, 175, 215, 255];
+        let mut best = 0u8;
+        let mut best_dist = u16::MAX;
+        for (idx, &step) in STEPS.iter().enumerate() {
+            let dist = (c as i16 - step as i16).unsigned_abs();
+            if dist < best_dist {
+                best_dist = dist;
+                best = idx as u8;
+            }
+        }
+        best
+    };
+    16 + 36 * cube(r) + 6 * cube(g) + cube(b)
 }
 
 #[cfg(test)]
@@ -1494,6 +1532,66 @@ mod tests {
             console::measure_text_width(&name_cell("あ機能拡張作業", 8, false)),
             8
         );
+    }
+
+    #[test]
+    fn uncoloured_code_span_falls_back_to_green() {
+        // A code-block span with no highlight colour uses the uniform green arm,
+        // matching the styling of inline code.
+        let span = Span {
+            text: "x".to_string(),
+            style: SpanStyle::Code,
+            color: None,
+        };
+        assert_eq!(
+            styled_span(&span, LineStyle::Code),
+            style("x").green().to_string()
+        );
+    }
+
+    #[test]
+    fn coloured_code_span_takes_the_palette_arm_and_keeps_its_text() {
+        // A highlighted span goes through the 256-colour arm; its visible text is
+        // preserved (colour escapes are stripped when the output is not a TTY).
+        let span = Span {
+            text: "fn".to_string(),
+            style: SpanStyle::Code,
+            color: Some(Rgb {
+                r: 180,
+                g: 120,
+                b: 60,
+            }),
+        };
+        let out = styled_span(&span, LineStyle::Code);
+        assert_eq!(console::strip_ansi_codes(&out), "fn");
+    }
+
+    #[test]
+    fn rgb_maps_near_grey_to_the_greyscale_ramp() {
+        // Equal channels are grey: they snap into the 232–255 ramp.
+        assert!((232..=255).contains(&rgb_to_ansi256(Rgb { r: 0, g: 0, b: 0 })));
+        assert!((232..=255).contains(&rgb_to_ansi256(Rgb {
+            r: 128,
+            g: 130,
+            b: 127
+        })));
+        assert_eq!(
+            rgb_to_ansi256(Rgb {
+                r: 255,
+                g: 255,
+                b: 255
+            }),
+            255
+        );
+    }
+
+    #[test]
+    fn rgb_maps_saturated_colour_to_the_cube() {
+        // A clearly chromatic colour lands in the 16–231 colour cube. Pure red
+        // is cube index (5,0,0) → 16 + 36*5 = 196.
+        assert_eq!(rgb_to_ansi256(Rgb { r: 255, g: 0, b: 0 }), 196);
+        let blue = rgb_to_ansi256(Rgb { r: 0, g: 0, b: 255 });
+        assert!((16..=231).contains(&blue));
     }
 
     #[test]

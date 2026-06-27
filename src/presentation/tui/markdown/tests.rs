@@ -102,14 +102,23 @@ fn block_quotes_drop_the_marker_and_one_space() {
 }
 
 #[test]
-fn fenced_code_blocks_render_verbatim_without_inline_parsing() {
+fn fenced_code_blocks_highlight_without_inline_parsing() {
     let src = "```rust\nlet x = `not code`;\n```";
     let lines = render(src);
     // The two fence lines are dropped; only the body line remains.
     assert_eq!(lines.len(), 1);
     assert_eq!(lines[0].style, LineStyle::Code);
-    assert_eq!(styles(&lines[0]), vec![SpanStyle::Code]);
+    // Highlighting splits the line into several spans, every one a code span
+    // (the inline backticks are not parsed), and the text is preserved verbatim.
+    assert!(lines[0].spans.len() > 1);
+    assert!(lines[0].spans.iter().all(|s| s.style == SpanStyle::Code));
     assert_eq!(lines[0].plain_text(), "let x = `not code`;");
+}
+
+#[test]
+fn highlighted_code_spans_carry_a_foreground_colour() {
+    let lines = render("```rust\nfn main() {}\n```");
+    assert!(lines[0].spans.iter().all(|s| s.color.is_some()));
 }
 
 #[test]
@@ -118,6 +127,42 @@ fn tilde_fences_also_delimit_code_blocks() {
     let lines = render(src);
     assert_eq!(lines.len(), 1);
     assert_eq!(lines[0].style, LineStyle::Code);
+    assert_eq!(lines[0].plain_text(), "code");
+}
+
+#[test]
+fn unknown_language_falls_back_to_plain_text() {
+    // An unrecognised info string still renders its body, one line per source
+    // line, without panicking.
+    let lines = render("```nonexistent-lang\nplain body\n```");
+    assert_eq!(lines.len(), 1);
+    assert_eq!(lines[0].style, LineStyle::Code);
+    assert_eq!(lines[0].plain_text(), "plain body");
+}
+
+#[test]
+fn fence_info_string_is_parsed_case_insensitively_with_extras() {
+    // `Rust,ignore` → language token `rust`; highlighting must still succeed.
+    let lines = render("```RUST ignore\nfn main() {}\n```");
+    assert_eq!(lines[0].style, LineStyle::Code);
+    assert_eq!(lines[0].plain_text(), "fn main() {}");
+}
+
+#[test]
+fn blank_lines_inside_code_blocks_are_preserved() {
+    let lines = render("```rust\nlet a = 1;\n\nlet b = 2;\n```");
+    assert_eq!(lines.len(), 3);
+    assert!(lines[1].spans.is_empty());
+    assert_eq!(lines[0].plain_text(), "let a = 1;");
+    assert_eq!(lines[2].plain_text(), "let b = 2;");
+}
+
+#[test]
+fn unterminated_code_fence_still_renders_its_body() {
+    let lines = render("```rust\nfn main() {}");
+    assert_eq!(lines.len(), 1);
+    assert_eq!(lines[0].style, LineStyle::Code);
+    assert_eq!(lines[0].plain_text(), "fn main() {}");
 }
 
 #[test]
