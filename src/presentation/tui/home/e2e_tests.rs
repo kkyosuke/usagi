@@ -221,6 +221,7 @@ fn event_loop_attaches_a_live_session_end_to_end() {
     let mut config = |_: &Term| {
         Ok(Some(ConfigReload {
             session_action_ui: crate::domain::settings::SessionActionUi::Menu,
+            key_scheme: crate::domain::settings::KeyScheme::default(),
             ai_available: false,
         }))
     };

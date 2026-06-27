@@ -6,25 +6,26 @@
 //! leaving the pane); this module borrows it and runs the render/input loop.
 //! Keystrokes are forwarded to the shell as raw bytes.
 //!
-//! The **reserved keys** are `Ctrl-O`, `Ctrl-N`/`Ctrl-P`, `Ctrl-T`/`Ctrl-G`,
-//! `Ctrl-^`, `Ctrl-B`, and `Ctrl-Q`: everything else, including `Esc` **and
-//! `Ctrl-W`** (the universal shell "delete previous word" — closing a tab is done
-//! from 切替 instead), flows to the shell.
-//! `Ctrl-B` collapses / expands the left sidebar in place (it never leaves 没入).
-//! A single
-//! `Ctrl-O` zooms out one engagement level by returning [`PaneStep::Detach`]
-//! immediately, leaving the pane for 切替 (Switch) on the left pane while every
-//! pane stays alive in the pool — there the user moves between sessions
-//! (`↑`/`↓`), between this session's tabs (`←`/`→`), re-attaches (`Enter`), adds a
-//! pane (`t`), or summons the `:` command palette. `Ctrl-N`/`Ctrl-P` switch to
-//! the next / previous tab in place ([`PaneStep::NextTab`] / [`PaneStep::PrevTab`]),
-//! and a left click on a tab chip jumps straight to it ([`PaneStep::ToTab`]);
-//! `Ctrl-T` zooms out to 在席 (Focus) — the session's action menu — by returning
-//! [`PaneStep::ToFocus`] (every pane stays alive in the pool); `Ctrl-G` adds an
-//! agent tab ([`PaneStep::NewAgentTab`]) without leaving 没入. `Ctrl-^` jumps to the previously
-//! focused session ([`PaneStep::PrevSession`]). `Ctrl-Q` leaves 没入 to quit usagi
-//! ([`PaneStep::Quit`]), raising the quit-confirmation modal on the home screen.
-//! The shell exiting on its own reports [`PaneStep::Closed`].
+//! Which keys the pane **reserves** for its own navigation (rather than
+//! forwarding to the shell) depends on the configured `KeyScheme`, and is decided
+//! purely by [`classify`](super::super::pane_input::classify): the default prefix
+//! scheme claims only the `Ctrl-O` leader (the action is the next key), while the
+//! `Alt` scheme claims a single `Alt`-chord per action and no bare Ctrl key. The
+//! navigation actions, however the scheme spells them, are: zoom out to 切替
+//! (Switch) ([`PaneStep::Detach`]) — leaving the pane on the left pane while every
+//! pane stays alive in the pool, where the user moves between sessions (`↑`/`↓`),
+//! between this session's tabs (`←`/`→`), re-attaches (`Enter`), adds a pane
+//! (`t`), or summons the `:` command palette; next / previous tab in place
+//! ([`PaneStep::NextTab`] / [`PaneStep::PrevTab`]), as does a left click on a tab
+//! chip ([`PaneStep::ToTab`]); zoom out to 在席 (Focus) — the session's action menu
+//! — ([`PaneStep::ToFocus`]); add an agent tab ([`PaneStep::NewAgentTab`]) without
+//! leaving 没入; open the session-note editor ([`PaneStep::OpenNote`]); and collapse
+//! / expand the left sidebar in place (it never leaves 没入). `Ctrl-^` jumps to the
+//! previously focused session ([`PaneStep::PrevSession`]) and `Ctrl-Q` (prefix
+//! scheme) / `Alt-q` leaves 没入 to quit usagi ([`PaneStep::Quit`]), raising the
+//! quit-confirmation modal on the home screen. `Esc` and `Ctrl-W` (the universal
+//! shell "delete previous word") always flow to the shell; closing a tab is done
+//! from 切替. The shell exiting on its own reports [`PaneStep::Closed`].
 //!
 //! `agent` reuses the same machinery: the pool sends the configured agent CLI to
 //! the shell on first spawn, so the pane lands the user straight in the agent.
@@ -55,9 +56,8 @@ use crate::presentation::tui::io::clipboard;
 use crate::presentation::tui::io::screen::diff_frame;
 
 use super::super::pane_input::{
-    apply_scroll, encode_key, encode_mouse_wheel, encode_paste, is_copy, is_leader,
-    is_new_agent_tab, is_next_tab, is_open_note, is_press, is_prev_session, is_prev_tab, is_quit,
-    is_to_focus, is_toggle_sidebar, key_scroll_lines, pane_cell, wheel_arrows, wheel_delta,
+    apply_scroll, classify, encode_key, encode_mouse_wheel, encode_paste, is_copy, is_press,
+    key_scroll_lines, pane_cell, wheel_arrows, wheel_delta, KeyAction, Reserved,
 };
 use super::super::state::HomeState;
 use super::super::ui;
@@ -229,6 +229,10 @@ fn drive(
     // The cell the pointer last moved over, so the link under it (if any) lights
     // up; `None` while the pointer is outside the pane.
     let mut hover: Option<Cell> = None;
+    // Whether a `Ctrl-O` leader press is awaiting its action key (prefix
+    // `KeyScheme` only). Held across `pump_input` calls so the two keystrokes of
+    // a prefix sequence can arrive in separate input drains.
+    let mut pending_prefix = false;
     // What we last told the PTY and last drew, so a pass that finds them
     // unchanged skips the resize ioctl, the grid snapshot, and the repaint. The
     // sentinels (a `None` geometry / scrollback / selection, a first-pass flag)
@@ -383,6 +387,7 @@ fn drive(
                     &mut scrollback,
                     &mut selection,
                     &mut hover,
+                    &mut pending_prefix,
                 )? {
                     return Ok(step);
                 }
@@ -435,15 +440,18 @@ fn wait(pty: &PtySession, drawn_gen: u64, redraw_deadline: Option<Instant>) -> R
 /// no drag opens a link under the pointer in the default browser (see
 /// [`open_clicked_url`]); a left click on a tab chip switches to that tab
 /// ([`PaneStep::ToTab`]; see [`ui::attached_tab_at`]). Button-less motion updates
-/// `hover` so the link under the pointer lights up. `Ctrl-O` detaches to 切替
-/// ([`PaneStep::Detach`]),
-/// leaving every pane alive in the pool; `Ctrl-N` / `Ctrl-P` switch to the next /
-/// previous tab in place ([`PaneStep::NextTab`] / [`PaneStep::PrevTab`]);
-/// `Ctrl-T` zooms out to 在席 (Focus) ([`PaneStep::ToFocus`]), leaving every pane
-/// alive; `Ctrl-G` adds an agent tab ([`PaneStep::NewAgentTab`]); `Ctrl-^` jumps
-/// to the previously focused session ([`PaneStep::PrevSession`]). `Ctrl-W` is not
-/// claimed — it reaches the shell as "delete previous word"; tabs are closed from
-/// 切替 (`x`). Other events are ignored so the next redraw picks up any new size.
+/// `hover` so the link under the pointer lights up. The navigation keys are
+/// classified by the active `KeyScheme` (see
+/// [`classify`](super::super::pane_input::classify)) — the prefix scheme reserves
+/// only the `Ctrl-O` leader (tracked across calls via `pending_prefix`), the
+/// `Alt` scheme a single `Alt`-chord each — and resolve to the steps the
+/// pool-driven loop acts on: detach to 切替 ([`PaneStep::Detach`]), next / previous
+/// tab in place ([`PaneStep::NextTab`] / [`PaneStep::PrevTab`]), zoom out to 在席
+/// ([`PaneStep::ToFocus`]), add an agent tab ([`PaneStep::NewAgentTab`]), open the
+/// note editor ([`PaneStep::OpenNote`]), or jump to the previous session
+/// ([`PaneStep::PrevSession`]); toggling the sidebar stays in 没入. `Esc` and
+/// `Ctrl-W` always reach the shell; tabs are closed from 切替 (`x`). Other events
+/// are ignored so the next redraw picks up any new size.
 #[allow(clippy::too_many_arguments)]
 fn pump_input(
     term: &Term,
@@ -453,6 +461,7 @@ fn pump_input(
     scrollback: &mut usize,
     selection: &mut Option<Selection>,
     hover: &mut Option<Cell>,
+    pending_prefix: &mut bool,
 ) -> Result<Option<PaneStep>> {
     while event::poll(Duration::ZERO)? {
         match event::read()? {
@@ -460,109 +469,74 @@ fn pump_input(
                 if !is_press(key) {
                     continue;
                 }
-                // Scroll keys move the history view in place rather than going
-                // to the shell; the view shifts under any selection, so drop it.
-                if let Some(delta) = key_scroll_lines(&key, geo) {
-                    *selection = None;
-                    apply_scroll(scrollback, delta);
-                    continue;
+                // Scroll keys move the history view in place rather than going to
+                // the shell; the view shifts under any selection, so drop it. Only
+                // when no prefix press is pending — mid-prefix the next key is the
+                // action key, classified below.
+                if !*pending_prefix {
+                    if let Some(delta) = key_scroll_lines(&key, geo) {
+                        *selection = None;
+                        apply_scroll(scrollback, delta);
+                        continue;
+                    }
                 }
-                if is_leader(&key) {
-                    // `Ctrl-O` zooms out to 切替, leaving every pane alive in the
-                    // pool. Pane management lives there now, so a single press is
-                    // all the pane handles. Typing first snaps back to the live
-                    // screen.
-                    *scrollback = 0;
-                    *selection = None;
-                    return Ok(Some(PaneStep::Detach));
-                }
-                // `Ctrl-E` opens the session-note editor over the pane; the caller
-                // re-attaches once it closes. (Like the tab chords, this claims
-                // `Ctrl-E` from the shell/agent.)
-                if is_open_note(&key) {
-                    *scrollback = 0;
-                    *selection = None;
-                    return Ok(Some(PaneStep::OpenNote));
-                }
-                // `Ctrl-N` / `Ctrl-P` move between the session's tabs without
-                // leaving 没入: hand the step back so the pool-driven loop advances
-                // the active pane and re-drives it. (This claims the chords from the
-                // shell/agent — the trade for in-pane tab switching.)
-                if is_next_tab(&key) {
-                    *scrollback = 0;
-                    *selection = None;
-                    return Ok(Some(PaneStep::NextTab));
-                }
-                if is_prev_tab(&key) {
-                    *scrollback = 0;
-                    *selection = None;
-                    return Ok(Some(PaneStep::PrevTab));
-                }
-                // `Ctrl-T` zooms out to 在席 (Focus) so the user picks the next
-                // action (terminal / agent / …) from the session's menu, leaving
-                // every pane alive in the pool — like `Ctrl-O` but landing one
-                // level shallower. (This claims `Ctrl-T` from the shell/agent.)
-                if is_to_focus(&key) {
-                    *scrollback = 0;
-                    *selection = None;
-                    return Ok(Some(PaneStep::ToFocus));
-                }
-                // `Ctrl-G` adds an agent tab in place, so the pool-driven loop
-                // applies the change and keeps driving without leaving 没入. (Like
-                // the tab chords above, this claims the chord from the shell/agent.)
-                //
-                // `Ctrl-W` is deliberately *not* claimed: it is the universal
-                // "delete previous word" in shells and readline, so stealing it to
-                // close a tab destroyed a word mid-command and killed the pane. It
-                // now flows to the shell like any other key; closing a tab is done
-                // from 切替 (`Ctrl-O`, then `x`).
-                if is_new_agent_tab(&key) {
-                    *scrollback = 0;
-                    *selection = None;
-                    return Ok(Some(PaneStep::NewAgentTab));
-                }
-                // `Ctrl-^` leaves 没入 to jump to the previously focused session,
-                // re-rooting the pane there (attaching when live). (Like the tab
-                // chords, this claims `Ctrl-^` from the shell/agent.)
-                if is_prev_session(&key) {
-                    *scrollback = 0;
-                    *selection = None;
-                    return Ok(Some(PaneStep::PrevSession));
-                }
-                // `Ctrl-Q` leaves 没入 to quit usagi: hand it back so the home loop
-                // raises the quit-confirmation modal (every pane stays alive in the
-                // pool meanwhile). (Like the tab chords, this claims `Ctrl-Q` from
-                // the shell/agent — the trade for a global quit key.)
-                if is_quit(&key) {
-                    *scrollback = 0;
-                    *selection = None;
-                    return Ok(Some(PaneStep::Quit));
-                }
-                // `Ctrl-B` collapses / expands the left sidebar in place, without
-                // leaving 没入: toggle the state and let the next loop pass re-lay
-                // out the frame and resize the PTY to the new pane width. (Like the
-                // tab chords, this claims `Ctrl-B` from the shell/agent.)
-                if is_toggle_sidebar(&key) {
-                    state.toggle_sidebar();
-                    continue;
-                }
-                // With text selected, `Ctrl-C` copies it (and clears the
-                // selection) instead of sending SIGINT — the way terminals treat
-                // copy while a selection is active. With nothing selected it
-                // falls through to `encode_key` below and reaches the shell as
-                // the usual interrupt.
-                if is_copy(&key) && selection.as_ref().is_some_and(|s| !s.is_empty()) {
-                    copy_selection(term, pty, selection.as_ref())?;
-                    *selection = None;
-                    continue;
-                }
-                let bytes = encode_key(&key);
-                if !bytes.is_empty() {
-                    // Typing returns to the live screen and ends any selection,
-                    // like a real terminal.
-                    *scrollback = 0;
-                    *selection = None;
-                    pty.write(&bytes)?;
+                // Which keys the pane claims for navigation (vs. forwards to the
+                // shell) depends on the configured `KeyScheme`; `classify` is the
+                // single source of truth and `pending_prefix` carries the one-bit
+                // state a `Ctrl-O` prefix sequence needs (prefix scheme only).
+                match classify(state.key_scheme(), *pending_prefix, &key) {
+                    // The `Ctrl-O` leader was pressed: wait for the action key,
+                    // swallowing the leader itself.
+                    KeyAction::BeginPrefix => *pending_prefix = true,
+                    // An unrecognised key right after the leader: drop it.
+                    KeyAction::Swallow => *pending_prefix = false,
+                    // `Ctrl-B` / `Ctrl-O s` collapses or expands the sidebar in
+                    // place, without leaving 没入: the next loop pass re-lays out
+                    // the frame and resizes the PTY to the new pane width.
+                    KeyAction::Reserved(Reserved::ToggleSidebar) => {
+                        *pending_prefix = false;
+                        state.toggle_sidebar();
+                    }
+                    // Every other navigation action hands a step back to the
+                    // pool-driven loop (some leave 没入, some stay and re-drive in
+                    // place); typing first snaps back to the live screen.
+                    KeyAction::Reserved(action) => {
+                        *pending_prefix = false;
+                        *scrollback = 0;
+                        *selection = None;
+                        return Ok(Some(match action {
+                            Reserved::Detach => PaneStep::Detach,
+                            Reserved::ToFocus => PaneStep::ToFocus,
+                            Reserved::NextTab => PaneStep::NextTab,
+                            Reserved::PrevTab => PaneStep::PrevTab,
+                            Reserved::NewAgentTab => PaneStep::NewAgentTab,
+                            Reserved::OpenNote => PaneStep::OpenNote,
+                            Reserved::PrevSession => PaneStep::PrevSession,
+                            Reserved::Quit => PaneStep::Quit,
+                            Reserved::ToggleSidebar => unreachable!("handled above"),
+                        }));
+                    }
+                    // The key belongs to the shell. With text selected, `Ctrl-C`
+                    // copies it (and clears the selection) the way terminals treat
+                    // copy while a selection is active; otherwise it reaches the
+                    // shell as the usual interrupt. `Ctrl-O Ctrl-O` lands here too,
+                    // sending a literal `Ctrl-O`.
+                    KeyAction::Forward => {
+                        *pending_prefix = false;
+                        if is_copy(&key) && selection.as_ref().is_some_and(|s| !s.is_empty()) {
+                            copy_selection(term, pty, selection.as_ref())?;
+                            *selection = None;
+                            continue;
+                        }
+                        let bytes = encode_key(&key);
+                        if !bytes.is_empty() {
+                            // Typing returns to the live screen and ends any
+                            // selection, like a real terminal.
+                            *scrollback = 0;
+                            *selection = None;
+                            pty.write(&bytes)?;
+                        }
+                    }
                 }
             }
             // A bracketed paste arrives as one block: forward it whole, so an

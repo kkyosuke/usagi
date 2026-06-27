@@ -151,6 +151,10 @@ fn render_settings(settings: &Settings) -> Vec<String> {
         ),
         format!("sidebar                {}", sidebar_label(settings.sidebar)),
         format!(
+            "key_scheme             {}",
+            key_scheme_label(settings.key_scheme)
+        ),
+        format!(
             "terminal_scrollback    {}",
             settings.terminal_scrollback_lines
         ),
@@ -196,6 +200,15 @@ fn sidebar_label(sidebar: crate::domain::settings::Sidebar) -> &'static str {
     }
 }
 
+/// The on-disk label for a [`KeyScheme`].
+fn key_scheme_label(scheme: crate::domain::settings::KeyScheme) -> &'static str {
+    use crate::domain::settings::KeyScheme;
+    match scheme {
+        KeyScheme::Prefix => "prefix",
+        KeyScheme::Alt => "alt",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -232,6 +245,7 @@ mod tests {
             agent_cli: AgentCli::Gemini,
             session_action_ui: crate::domain::settings::SessionActionUi::Prompt,
             sidebar: crate::domain::settings::Sidebar::Rail,
+            key_scheme: crate::domain::settings::KeyScheme::Alt,
             terminal_scrollback_lines: 1_234,
             local_llm: crate::domain::settings::LocalLlm {
                 enabled: true,
@@ -247,9 +261,10 @@ mod tests {
         assert!(lines[5].contains("gemini"));
         assert!(lines[6].contains("prompt"));
         assert!(lines[7].contains("rail"));
-        assert!(lines[8].contains("1234")); // terminal_scrollback
-        assert!(lines[9].contains("true"));
-        assert!(lines[10].contains("qwen2.5-coder:3b"));
+        assert!(lines[8].contains("alt")); // key_scheme
+        assert!(lines[9].contains("1234")); // terminal_scrollback
+        assert!(lines[10].contains("true"));
+        assert!(lines[11].contains("qwen2.5-coder:3b"));
     }
 
     #[test]
@@ -275,6 +290,14 @@ mod tests {
         assert_eq!(
             sidebar_label(crate::domain::settings::Sidebar::Rail),
             "rail"
+        );
+        assert_eq!(
+            key_scheme_label(crate::domain::settings::KeyScheme::Prefix),
+            "prefix"
+        );
+        assert_eq!(
+            key_scheme_label(crate::domain::settings::KeyScheme::Alt),
+            "alt"
         );
     }
 

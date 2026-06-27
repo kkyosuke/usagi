@@ -187,6 +187,9 @@ pub fn run(term: &Term, workspace: &Workspace, preload: Preload) -> Result<Outco
     // collapsed rail; `Ctrl-B` toggles it from there).
     state.set_session_action_ui(settings.session_action_ui);
     state.set_sidebar(settings.sidebar);
+    // How the embedded terminal (没入) reserves its navigation keys — a `Ctrl-O`
+    // prefix or single `Alt`-chords — so the rest reach the shell / agent.
+    state.set_key_scheme(settings.key_scheme);
     // The configured default agent (its display name labels 在席's `agent` row and
     // a bare `agent` launches it). The agents installed on this machine fill in
     // shortly after via the background probe spawned below (state opens with none).
@@ -799,13 +802,15 @@ pub fn run(term: &Term, workspace: &Workspace, preload: Preload) -> Result<Outco
     let config_root = workspace.path.clone();
     let mut open_config = |t: &Term| -> Result<Option<event::ConfigReload>> {
         match crate::presentation::tui::config::run_in(t, Some(config_root.clone()))? {
-            // Back to home: re-read the (possibly changed) Session Action UI and
-            // local LLM availability so the 在席 surface and `ai` command reflect
-            // the edit without reopening the home screen.
+            // Back to home: re-read the (possibly changed) Session Action UI, the
+            // 没入 key scheme, and local LLM availability so the 在席 surface, the
+            // pane's key handling, and the `ai` command reflect the edit without
+            // reopening the home screen.
             crate::presentation::tui::config::Outcome::Back => {
                 let settings = effective_settings(&config_root);
                 Ok(Some(event::ConfigReload {
                     session_action_ui: settings.session_action_ui,
+                    key_scheme: settings.key_scheme,
                     ai_available: local_llm_available(&settings),
                 }))
             }

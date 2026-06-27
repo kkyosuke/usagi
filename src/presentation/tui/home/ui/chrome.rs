@@ -12,6 +12,7 @@ use super::panes::log_line;
 use super::{
     clip_to_width, pad_to_width, HINT_INDENT, HINT_MAX, HINT_NAME_COL, REMOVE_MODAL_VISIBLE,
 };
+use crate::domain::settings::KeyScheme;
 use crate::presentation::tui::widgets;
 
 /// Minimum / maximum display width of the active-session-name field in the
@@ -384,10 +385,18 @@ pub(super) fn footer_line(width: usize, state: &HomeState) -> String {
                 state.focused_session_name()
             )
         }
-        Mode::Attached => {
-            "[attached]  Ctrl-O: switch / Ctrl-T: focus / Ctrl-^: last / Ctrl-N/P: tab / Ctrl-G: agent / Ctrl-E: note"
-                .to_string()
-        }
+        // The 没入 navigation keys depend on the configured key scheme: the
+        // `Ctrl-O` leader (then a key) or single `Alt`-chords.
+        Mode::Attached => match state.key_scheme() {
+            KeyScheme::Prefix => {
+                "[attached]  Ctrl-O then: o switch / a focus / n/p tab / g agent / e note / q quit · Ctrl-^ last"
+                    .to_string()
+            }
+            KeyScheme::Alt => {
+                "[attached]  Alt: o switch / a focus / ←→ tab / g agent / e note / q quit · Ctrl-^ last"
+                    .to_string()
+            }
+        },
     };
     widgets::dim_line(width, &help)
 }

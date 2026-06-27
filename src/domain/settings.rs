@@ -48,6 +48,35 @@ pub enum SessionActionUi {
     Prompt,
 }
 
+/// How the embedded terminal (**没入 / Attached**) reserves its own keys, so
+/// everything else reaches the shell / agent running inside the pane.
+///
+/// The pane has to claim a few keys for its own navigation (switch tab, zoom
+/// out, …). `Prefix` is the tmux / screen-style leader: `Ctrl-O` then a letter
+/// runs the action, so `Ctrl-O` is the *only* chord the pane claims and every
+/// other Ctrl key (`Ctrl-E` end-of-line, `Ctrl-N`/`Ctrl-P` history, …) flows to
+/// the shell untouched. `Alt` instead binds each action to a single `Alt`-chord
+/// (zellij-style): no bare Ctrl key is claimed and navigation stays one
+/// keystroke, but the terminal must send `Alt`/`Option` as Meta (on macOS the
+/// terminal's "Option as Meta" / "Esc+" setting). The per-scheme keymaps live in
+/// the 没入 input layer (`presentation::tui::home::pane_input`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KeyScheme {
+    /// `Ctrl-O` leader, then a key — the default. Claims only `Ctrl-O`; works on
+    /// any terminal with no extra setup.
+    #[default]
+    Prefix,
+    /// Single `Alt`-chords. Claims no bare Ctrl key and keeps navigation to one
+    /// keystroke, but needs the terminal to deliver `Alt`/`Option` as Meta.
+    Alt,
+}
+
+impl KeyScheme {
+    /// Both schemes, in the order the config screen cycles through them.
+    pub const ALL: [KeyScheme; 2] = [KeyScheme::Prefix, KeyScheme::Alt];
+}
+
 /// How the home screen's left **session sidebar** is sized: spelled out at its
 /// full width, or collapsed to a compact rail.
 ///
@@ -251,6 +280,10 @@ pub struct Settings {
     /// commands in the right pane.
     #[serde(deserialize_with = "crate::domain::serde_fallback::or_default")]
     pub session_action_ui: SessionActionUi,
+    /// How the embedded terminal (没入) reserves its navigation keys — a `Ctrl-O`
+    /// prefix or single `Alt`-chords — so the rest reach the shell / agent.
+    #[serde(deserialize_with = "crate::domain::serde_fallback::or_default")]
+    pub key_scheme: KeyScheme,
     /// Which state the home screen's left session sidebar opens in (`Ctrl-B`
     /// toggles it at runtime).
     #[serde(deserialize_with = "crate::domain::serde_fallback::or_default")]
@@ -277,6 +310,7 @@ impl Default for Settings {
             restore_panes_enabled: true,
             agent_cli: AgentCli::default(),
             session_action_ui: SessionActionUi::default(),
+            key_scheme: KeyScheme::default(),
             sidebar: Sidebar::default(),
             terminal_scrollback_lines: DEFAULT_TERMINAL_SCROLLBACK_LINES,
             local_llm: LocalLlm::default(),
@@ -743,6 +777,37 @@ mod tests {
             serde_json::from_str::<Sidebar>("\"rail\"").unwrap(),
             Sidebar::Rail
         );
+    }
+
+    #[test]
+    fn key_scheme_defaults_to_prefix_and_serializes_in_snake_case() {
+        // 没入 opens with the Ctrl-O prefix scheme unless configured otherwise —
+        // it claims only one chord and works on any terminal without setup.
+        assert_eq!(KeyScheme::default(), KeyScheme::Prefix);
+        assert_eq!(Settings::default().key_scheme, KeyScheme::Prefix);
+        // ALL lists both schemes once, in cycle order (prefix first).
+        assert_eq!(KeyScheme::ALL, [KeyScheme::Prefix, KeyScheme::Alt]);
+        // Round-trips through the snake_case JSON the rest of the settings use.
+        assert_eq!(
+            serde_json::to_string(&KeyScheme::Prefix).unwrap(),
+            "\"prefix\""
+        );
+        assert_eq!(serde_json::to_string(&KeyScheme::Alt).unwrap(), "\"alt\"");
+        assert_eq!(
+            serde_json::from_str::<KeyScheme>("\"alt\"").unwrap(),
+            KeyScheme::Alt
+        );
+    }
+
+    #[test]
+    fn key_scheme_falls_back_to_default_when_absent_or_unknown() {
+        // An older settings.json (written before the field existed) loads with the
+        // default scheme rather than failing.
+        let loaded: Settings = serde_json::from_str("{}").unwrap();
+        assert_eq!(loaded.key_scheme, KeyScheme::Prefix);
+        // A hand-edited unknown value degrades to the default too (serde_fallback).
+        let bad: Settings = serde_json::from_str(r#"{"key_scheme": "chord"}"#).unwrap();
+        assert_eq!(bad.key_scheme, KeyScheme::Prefix);
     }
 
     #[test]

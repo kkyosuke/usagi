@@ -13,7 +13,7 @@ use anyhow::Result;
 use console::Key;
 use console::Term;
 
-use crate::domain::settings::{AgentCli, SessionActionUi, Sidebar};
+use crate::domain::settings::{AgentCli, KeyScheme, SessionActionUi, Sidebar};
 use crate::presentation::tui::install_task;
 use crate::presentation::tui::io::screen::{FramePainter, KeyReader};
 
@@ -94,6 +94,9 @@ pub(super) type TabOp<'a> = dyn FnMut(&Path, Option<TabNav>) -> (Vec<String>, us
 pub struct ConfigReload {
     /// The effective Session Action UI (在席 mode's surface).
     pub session_action_ui: SessionActionUi,
+    /// The effective 没入 key scheme (the `Ctrl-O` prefix or single `Alt`-chords),
+    /// so the pane's key handling reflects the edit without reopening the screen.
+    pub key_scheme: KeyScheme,
     /// Whether the local LLM is usable (enabled and its model pulled), gating
     /// the `ai` command in the 在席 menu.
     pub ai_available: bool,

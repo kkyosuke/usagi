@@ -56,6 +56,7 @@
 │          Restore Panes      < On >                    │  │  起動時にペインを復旧（agent は会話を再開）
 │        ● Agent CLI          < Gemini >                │  │  変更済み：ラベル左に黄色 ● + 値も黄色
 │          Session Action UI  < Menu >                  │  │  在席の右ペイン UI（Menu / Prompt）
+│          Terminal Keys      < Ctrl-O prefix >         │  │  没入のキー方式（Ctrl-O prefix / Alt chords）
 │          Local LLM            Install                 │  │  未導入は `Install`（緑・山かっこなし）、導入後は `< On >`/`< Off >`
 │          Local LLM Model      qwen2.5-coder:7b        │  ┘  導入後はアクション。Space/Enter でモデル選択モーダル
 │                                                       │

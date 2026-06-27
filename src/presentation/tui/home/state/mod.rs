@@ -16,7 +16,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use crate::domain::issue::Issue;
-use crate::domain::settings::{AgentCli, SessionActionUi, Sidebar};
+use crate::domain::settings::{AgentCli, KeyScheme, SessionActionUi, Sidebar};
 use crate::domain::version::Version;
 use crate::domain::workspace_state::{SessionRecord, WorktreeState};
 
@@ -317,6 +317,11 @@ pub struct HomeState {
     /// the effective settings by `mod.rs`. Independent of [`mode`](Self::mode),
     /// so zooming between modes never resets it.
     sidebar: Sidebar,
+    /// How the embedded terminal (没入) reserves its navigation keys — a `Ctrl-O`
+    /// prefix or single `Alt`-chords — so the rest reach the shell / agent.
+    /// Injected from the effective settings by `mod.rs` and re-read when the
+    /// config screen closes; read by the pane input loop ([`super::pane_input`]).
+    key_scheme: KeyScheme,
     /// Whether the `ai` command is offered in the 在席 (Focus) menu: true only
     /// when the local LLM is enabled and its model is pulled. Injected from the
     /// effective settings (and a runtime probe) by `mod.rs`; false by default so
@@ -474,6 +479,7 @@ impl HomeState {
             registry: CommandRegistry::with_builtins(),
             session_action_ui: SessionActionUi::default(),
             sidebar: Sidebar::default(),
+            key_scheme: KeyScheme::default(),
             ai_available: false,
             default_agent: AgentCli::default(),
             installed_agents: Vec::new(),
@@ -541,6 +547,19 @@ impl HomeState {
     /// `mod.rs` at construction).
     pub fn set_sidebar(&mut self, sidebar: Sidebar) {
         self.sidebar = sidebar;
+    }
+
+    /// Set how the embedded terminal (没入) reserves its navigation keys
+    /// (injected from the effective settings by `mod.rs`, and re-read when the
+    /// config screen closes).
+    pub fn set_key_scheme(&mut self, scheme: KeyScheme) {
+        self.key_scheme = scheme;
+    }
+
+    /// How the embedded terminal (没入) reserves its navigation keys — read by the
+    /// pane input loop to classify each key (see [`super::pane_input::classify`]).
+    pub fn key_scheme(&self) -> KeyScheme {
+        self.key_scheme
     }
 
     /// How the left session sidebar is currently sized (full width or the

@@ -181,10 +181,17 @@ fn footer_line_differs_by_mode() {
     assert!(focus.contains("session: main"));
     assert!(footer_line(120, &state).contains(": commands"));
     state.show_attached();
-    // 没入 no longer advertises scroll keys in the footer.
+    // 没入 no longer advertises scroll keys in the footer; by default it names the
+    // Ctrl-O prefix sequence.
     let attached = footer_line(80, &state);
     assert!(attached.contains("attached"));
     assert!(!attached.contains("scroll"));
+    assert!(attached.contains("Ctrl-O then"));
+    // The Alt scheme names the Alt-chords instead.
+    state.set_key_scheme(crate::domain::settings::KeyScheme::Alt);
+    let alt = footer_line(80, &state);
+    assert!(alt.contains("Alt:"));
+    assert!(!alt.contains("Ctrl-O then"));
 }
 
 #[test]

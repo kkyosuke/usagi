@@ -55,6 +55,11 @@ impl Config {
                 );
                 true
             }
+            Field::KeyScheme => {
+                self.settings.key_scheme =
+                    cycle_enum(self.settings.key_scheme, &KEY_SCHEMES, forward);
+                true
+            }
             Field::LocalLlm => {
                 // Only meaningful once installed: flip the on/off toggle. While
                 // not installed the row is an install action handled by the
