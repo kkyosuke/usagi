@@ -305,7 +305,13 @@ fn main() -> anyhow::Result<()> {
             let stdout = std::io::stdout();
             usagi::presentation::cli::guard_workspace::run(stdin.lock(), stdout.lock())
         }
-        Commands::Hop => usagi::presentation::cli::hop::run(usagi::presentation::tui::app::run),
+        Commands::Hop => {
+            // Materialise usagi's shipped skills under the data dir before the TUI
+            // launches any agent, so each session worktree's `.claude/skills`
+            // symlink resolves to current content. Best-effort.
+            let _ = usagi::infrastructure::skills::materialize_default();
+            usagi::presentation::cli::hop::run(usagi::presentation::tui::app::run)
+        }
         Commands::Icon { view } => usagi::presentation::cli::icon::run(view),
         Commands::Init { git } => usagi::presentation::cli::init::run(git),
         Commands::Issue { command } => usagi::presentation::cli::issue::run(command),
@@ -323,6 +329,9 @@ fn main() -> anyhow::Result<()> {
             )
         }
         Commands::Mcp => {
+            // A session created over MCP symlinks each worktree at the skills dir;
+            // materialise it here so the target exists. Best-effort.
+            let _ = usagi::infrastructure::skills::materialize_default();
             let stdin = std::io::stdin();
             let stdout = std::io::stdout();
             usagi::presentation::cli::mcp::run(
