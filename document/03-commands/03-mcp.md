@@ -151,8 +151,8 @@ presentation に閉じています（[2. アーキテクチャ](../02-architectu
   `issue_to_prompt(number)` → `session_create(name)` →
   `session_prompt(name, prompt)` と組み合わせると、コーディネータ役のエージェントが「issue を特定の
   セッションのエージェントに実装させる」オーケストレーションを最小手数で組めます。
-- `session_create` は `name` をセッション名（=全リポジトリで作成する新規ブランチ名）として
-  `<root>/.usagi/sessions/<name>/` に worktree を生成します。空・パス区切り文字を含む名前は拒否し、
+- `session_create` は `name` をセッション名として `<root>/.usagi/sessions/<name>/` に worktree を生成します
+  （各リポジトリで切るブランチは `usagi/<name>`）。空・パス区切り文字を含む名前は拒否し、
   既存のセッション名は重複エラーになります（CLI と同じ検証）。`session_list` は `state.json` を読むだけの
   軽量クエリで、on-disk の reconcile は行いません。
 - `session_create` は worktree を生成するだけで、動作中の TUI の[在席](../design/05-home.md#在席focus)には
