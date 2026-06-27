@@ -325,9 +325,13 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let bare = tmp.path().join("remote.git");
         let root = tmp.path().join("work");
+        // `-b main` pins the bare repo's HEAD to `main` so the throwaway clone
+        // in [`push_remote`] checks out `main` regardless of the host's
+        // `init.defaultBranch` (`master` on CI), where it would otherwise commit
+        // onto `master` and fail to `git push origin main`.
         run(
             tmp.path(),
-            &["init", "-q", "--bare", bare.to_str().unwrap()],
+            &["init", "-q", "--bare", "-b", "main", bare.to_str().unwrap()],
         );
         init_repo(&root);
         // `usagi init` gitignores the local `.usagi/` state; mirror that via the
