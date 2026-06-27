@@ -53,15 +53,32 @@ fn unique_tmp_path(path: &Path) -> PathBuf {
 /// some platforms (e.g. Windows), and such an error must not fail the write.
 fn write_synced_then_rename(path: &Path, bytes: &[u8]) -> Result<()> {
     let tmp = unique_tmp_path(path);
+    // Clean up the temp file on any failure after it is created. The write
+    // (write_all / sync_all) or the rename can fail — rename especially
+    // (EXDEV/cross-device, ENOSPC, EACCES) — and without this each failed write
+    // leaves an orphaned `*.tmp.<pid>.<n>` behind, so a recurring failure litters
+    // the data dir without bound. The rename is still atomic, so a failed write
+    // never replaces the existing good file; this only removes the dead temp.
+    let result = write_synced_then_rename_inner(&tmp, path, bytes);
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    result
+}
+
+/// The body of [`write_synced_then_rename`]: create-write-sync the temp file,
+/// rename it onto `path`, then fsync the parent. Split out so the caller can
+/// remove the temp file on any error this returns.
+fn write_synced_then_rename_inner(tmp: &Path, path: &Path, bytes: &[u8]) -> Result<()> {
     {
         let mut file =
-            fs::File::create(&tmp).context(format!("failed to create {}", tmp.display()))?;
+            fs::File::create(tmp).context(format!("failed to create {}", tmp.display()))?;
         file.write_all(bytes)
             .context(format!("failed to write {}", tmp.display()))?;
         file.sync_all()
             .context(format!("failed to flush {}", tmp.display()))?;
     }
-    fs::rename(&tmp, path).context(format!("failed to replace {}", path.display()))?;
+    fs::rename(tmp, path).context(format!("failed to replace {}", path.display()))?;
     fsync_parent_dir(path);
     Ok(())
 }
@@ -203,6 +220,27 @@ mod tests {
         write_atomic(dir.path(), &path, &value2).unwrap();
         let read_back2: Option<Vec<String>> = read(&path).unwrap();
         assert_eq!(read_back2, Some(value2));
+        let leftover: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .filter(|name| name.to_string_lossy().contains(".tmp."))
+            .collect();
+        assert!(leftover.is_empty(), "temp files left behind: {leftover:?}");
+    }
+
+    #[test]
+    fn write_removes_the_temp_file_when_the_rename_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        // The target path is an existing, non-empty directory, so the final
+        // rename(temp, path) fails *after* the temp file has been created and
+        // synced — exercising the failure-cleanup path.
+        let path = dir.path().join("target");
+        fs::create_dir(&path).unwrap();
+        fs::write(path.join("child"), "x").unwrap();
+
+        assert!(write_text_atomic(&path, "data").is_err());
+
+        // The dead temp file was removed rather than orphaned in the data dir.
         let leftover: Vec<_> = fs::read_dir(dir.path())
             .unwrap()
             .map(|e| e.unwrap().file_name())

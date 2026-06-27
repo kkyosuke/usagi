@@ -26,7 +26,7 @@ pub mod memory;
 pub mod session;
 pub mod usagi;
 
-use std::io::{BufRead, Write};
+use std::io::{BufRead, Read, Write};
 
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -34,6 +34,55 @@ use serde_json::{json, Value};
 
 /// MCP protocol version these servers implement.
 pub const PROTOCOL_VERSION: &str = "2024-11-05";
+
+/// Upper bound on the bytes [`serve`] buffers for a single request line before
+/// rejecting it. `read_until` grows its buffer until it sees a newline or EOF, so
+/// without a cap one newline-less line from a wedged or hostile stdio peer would
+/// grow memory without bound (OOM). 64 MiB is far above any real JSON-RPC request
+/// usagi receives while still bounding the damage.
+const MAX_REQUEST_LINE_BYTES: u64 = 64 * 1024 * 1024;
+
+/// The outcome of reading one capped request line (see [`read_capped_line`]).
+enum LineRead {
+    /// End of input: no more requests.
+    Eof,
+    /// A complete line is in the buffer (terminating newline included).
+    Line,
+    /// The line exceeded the cap; its remainder was drained so the next read
+    /// resyncs on a real boundary. No usable line is in the buffer.
+    TooLong,
+}
+
+/// Read one newline-terminated line from `input` into `raw`, buffering at most
+/// `max` bytes. A line longer than `max` is reported as [`LineRead::TooLong`] and
+/// its remainder drained in bounded chunks, so a never-terminating line can never
+/// grow the buffer without bound. `raw` is cleared on entry.
+fn read_capped_line<R: BufRead>(
+    input: &mut R,
+    raw: &mut Vec<u8>,
+    max: u64,
+) -> std::io::Result<LineRead> {
+    raw.clear();
+    let read = input.by_ref().take(max).read_until(b'\n', raw)?;
+    if read == 0 {
+        return Ok(LineRead::Eof);
+    }
+    // The cap was reached without consuming the line's terminating newline: the
+    // line is longer than we will buffer. Drain the rest in bounded chunks so the
+    // following read starts at the next real line, and report it too-long.
+    if read as u64 == max && !raw.ends_with(b"\n") {
+        let mut discard = Vec::new();
+        loop {
+            discard.clear();
+            let n = input.by_ref().take(max).read_until(b'\n', &mut discard)?;
+            if n == 0 || discard.ends_with(b"\n") {
+                break;
+            }
+        }
+        return Ok(LineRead::TooLong);
+    }
+    Ok(LineRead::Line)
+}
 
 /// Deserialize tool arguments into `T`, mapping any error to a tool-facing
 /// message. Shared by every MCP server's tool handlers.
@@ -69,8 +118,19 @@ pub(crate) fn into_schema_array(value: Value) -> Vec<Value> {
 /// production and by in-memory buffers in tests.
 pub fn serve(
     service: &dyn McpService,
+    input: impl BufRead,
+    output: impl Write,
+) -> std::io::Result<()> {
+    serve_capped(service, input, output, MAX_REQUEST_LINE_BYTES)
+}
+
+/// [`serve`] with an explicit per-line byte cap, so tests can drive the
+/// too-long-line path with a small budget instead of a 64 MiB input.
+fn serve_capped(
+    service: &dyn McpService,
     mut input: impl BufRead,
     mut output: impl Write,
+    max_line_bytes: u64,
 ) -> std::io::Result<()> {
     // Read raw bytes and decode lossily rather than using `BufRead::lines`, which
     // yields an `Err` on a line containing invalid UTF-8 — propagating that would
@@ -81,9 +141,19 @@ pub fn serve(
     // propagates and ends the loop.
     let mut raw = Vec::new();
     loop {
-        raw.clear();
-        if input.read_until(b'\n', &mut raw)? == 0 {
-            break; // EOF
+        match read_capped_line(&mut input, &mut raw, max_line_bytes)? {
+            LineRead::Eof => break,
+            // A pathologically long line (a wedged/hostile producer) is refused
+            // with a parse error rather than buffered without bound; the loop
+            // keeps serving the next request.
+            LineRead::TooLong => {
+                let response =
+                    error_response(Value::Null, -32700, "parse error: request too large");
+                writeln!(output, "{response}")?;
+                output.flush()?;
+                continue;
+            }
+            LineRead::Line => {}
         }
         let line = String::from_utf8_lossy(&raw);
         let line = line.trim_end_matches(['\n', '\r']);
@@ -274,6 +344,52 @@ mod tests {
 
         assert!(result.is_ok());
         assert!(output.is_empty());
+    }
+
+    #[test]
+    fn read_capped_line_reports_eof_lines_and_drains_an_overlong_line() {
+        // First line exceeds the 4-byte cap (no newline within 4 bytes); the
+        // following short line is then returned intact, proving the over-long
+        // line's remainder was drained and the reader resynced on a boundary.
+        let mut input = std::io::Cursor::new(b"abcdefgh\nok\n".to_vec());
+        let mut raw = Vec::new();
+        assert!(matches!(
+            read_capped_line(&mut input, &mut raw, 4).unwrap(),
+            LineRead::TooLong
+        ));
+        assert!(matches!(
+            read_capped_line(&mut input, &mut raw, 4).unwrap(),
+            LineRead::Line
+        ));
+        assert_eq!(raw, b"ok\n");
+        assert!(matches!(
+            read_capped_line(&mut input, &mut raw, 4).unwrap(),
+            LineRead::Eof
+        ));
+    }
+
+    #[test]
+    fn serve_rejects_an_overlong_line_with_a_parse_error_and_keeps_going() {
+        // A line larger than the cap is answered with a parse error rather than
+        // buffered without bound, and a valid request after it is still served.
+        // The cap (128) comfortably fits the ping below but not the padded line.
+        let overlong = format!("{}\n", "x".repeat(200));
+        let input = format!("{overlong}{{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"ping\"}}\n");
+        let mut output = Vec::new();
+
+        serve_capped(&EchoService, input.as_bytes(), &mut output, 128).unwrap();
+
+        let response = String::from_utf8(output).unwrap();
+        assert!(response.contains("\"code\":-32700"), "{response}");
+        assert!(response.contains("request too large"), "{response}");
+        // Exactly one rejection, not one per buffered chunk of the long line.
+        assert_eq!(
+            response.matches("request too large").count(),
+            1,
+            "{response}"
+        );
+        // The ping after the over-long line was still answered.
+        assert!(response.contains("\"id\":7"), "{response}");
     }
 
     #[test]
