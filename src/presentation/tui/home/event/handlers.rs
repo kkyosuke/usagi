@@ -104,6 +104,7 @@ pub(super) fn palette_key(
                     // Focus keeps rendering the old mode / `ai` visibility.
                     Some(reload) => {
                         state.set_session_action_ui(reload.session_action_ui);
+                        state.set_key_scheme(reload.key_scheme);
                         state.set_ai_available(reload.ai_available);
                         painter.reset();
                     }
@@ -320,9 +321,11 @@ pub(super) fn switch_key(
         // so the reserved keys never have to be memorised. Like `:`, it sits
         // after the inline-input guards above, so `?` types a literal character
         // into a name field and only opens the sheet from the base list.
-        Key::Char('?') => {
-            state.open_text_modal("Keys", ui::content::cheatsheet(), ModalSize::Large)
-        }
+        Key::Char('?') => state.open_text_modal(
+            "Keys",
+            ui::content::cheatsheet(state.key_scheme()),
+            ModalSize::Large,
+        ),
         // Esc first dismisses the highlighted session's read-only note overlay
         // (it auto-shows on selection); with no note showing it backs out to
         // where Switch was opened from (inert at the base Switch).
@@ -645,7 +648,11 @@ pub(super) fn focus_key(
             if !(state.focus_on_new_tab()
                 && state.session_action_ui() == SessionActionUi::Prompt) =>
         {
-            state.open_text_modal("Keys", ui::content::cheatsheet(), ModalSize::Large);
+            state.open_text_modal(
+                "Keys",
+                ui::content::cheatsheet(state.key_scheme()),
+                ModalSize::Large,
+            );
             return Flow::Continue;
         }
         // `Ctrl-P` / `Ctrl-N` walk the combined tab strip. Landing on a pane tab

@@ -352,23 +352,26 @@ mod tests {
         assert!(lines[4].contains("Claude"));
         assert!(lines[5].contains("Session Action UI"));
         assert!(lines[5].contains("Menu"));
-        assert!(lines[6].contains("Mascot Animation"));
-        assert!(lines[6].contains("On"));
-        // The Local LLM row (index 7) is an action button: plain "Install",
+        // The 没入 key-scheme row is a chooser like the others.
+        assert!(lines[6].contains("Terminal Keys"));
+        assert!(lines[6].contains("Ctrl-O prefix"));
+        assert!(lines[7].contains("Mascot Animation"));
+        assert!(lines[7].contains("On"));
+        // The Local LLM row (index 8) is an action button: plain "Install",
         // with no chevrons.
-        assert!(lines[7].contains("Local LLM"));
-        assert!(lines[7].contains("Install"));
-        assert!(!lines[7].contains('<'));
-        // The model row (index 8) is inert until the runtime is installed: a
-        // plain "—" with no chevrons.
-        assert!(lines[8].contains("Local LLM Model"));
-        assert!(lines[8].contains('—'));
+        assert!(lines[8].contains("Local LLM"));
+        assert!(lines[8].contains("Install"));
         assert!(!lines[8].contains('<'));
+        // The model row (index 9) is inert until the runtime is installed: a
+        // plain "—" with no chevrons.
+        assert!(lines[9].contains("Local LLM Model"));
+        assert!(lines[9].contains('—'));
+        assert!(!lines[9].contains('<'));
         // Every other field is a chooser, so chevrons appear on those rows...
         assert!(lines
             .iter()
             .enumerate()
-            .filter(|(i, _)| *i != 7 && *i != 8)
+            .filter(|(i, _)| *i != 8 && *i != 9)
             .all(|(_, l)| l.contains('<') && l.contains('>')));
         // ...but only the focused (first) row carries the cursor.
         assert!(has_cursor(&lines[0]));

@@ -55,6 +55,11 @@ impl Config {
                 );
                 true
             }
+            Field::KeyScheme => {
+                self.settings.key_scheme =
+                    cycle_enum(self.settings.key_scheme, &KEY_SCHEMES, forward);
+                true
+            }
             Field::MascotAnimation => {
                 // A boolean toggle: direction is irrelevant, it always flips.
                 self.settings.mascot_animation_enabled = !self.settings.mascot_animation_enabled;

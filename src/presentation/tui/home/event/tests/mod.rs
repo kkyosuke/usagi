@@ -16,6 +16,7 @@ use std::path::PathBuf;
 fn reload(ui: SessionActionUi) -> ConfigReload {
     ConfigReload {
         session_action_ui: ui,
+        key_scheme: crate::domain::settings::KeyScheme::default(),
         ai_available: false,
     }
 }

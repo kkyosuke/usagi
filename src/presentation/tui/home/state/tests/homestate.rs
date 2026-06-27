@@ -74,6 +74,17 @@ fn set_session_action_ui_overrides_the_default() {
 }
 
 #[test]
+fn key_scheme_defaults_to_prefix_and_can_be_overridden() {
+    use crate::domain::settings::KeyScheme;
+    let mut state = state();
+    // 没入 opens with the Ctrl-O prefix scheme unless the injected setting says
+    // otherwise; the pane input loop reads it through `key_scheme()`.
+    assert_eq!(state.key_scheme(), KeyScheme::Prefix);
+    state.set_key_scheme(KeyScheme::Alt);
+    assert_eq!(state.key_scheme(), KeyScheme::Alt);
+}
+
+#[test]
 fn sidebar_defaults_to_full_and_toggles() {
     let mut state = state();
     // Opens full unless the injected setting says otherwise.

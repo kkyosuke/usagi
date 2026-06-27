@@ -6,15 +6,27 @@
 //! and lives here, unit tested. The (coverage-excluded) [`pane`] drive
 //! loop only does the real terminal I/O and calls these.
 //!
-//! The **reserved keys** are `Ctrl-O`, `Ctrl-N`/`Ctrl-P`, `Ctrl-T`/`Ctrl-G`,
-//! `Ctrl-^`, `Ctrl-B`, `Ctrl-E`, and `Ctrl-Q`; everything else, including `Esc`
-//! **and `Ctrl-W`** (the universal shell "delete previous word"), flows to the
-//! shell.
+//! Which keys the pane **reserves** for its own navigation (rather than
+//! forwarding to the shell) depends on the configured [`KeyScheme`]:
+//!
+//! - [`KeyScheme::Prefix`] (default) reserves only the `Ctrl-O` leader; the
+//!   action is the *next* key (`Ctrl-O o/a/n/p/g/e/s/q`, or `Ctrl-O →`/`←`).
+//!   Every other Ctrl key — `Ctrl-E`, `Ctrl-N`/`Ctrl-P`, `Ctrl-T`, … — flows to
+//!   the shell, and `Ctrl-O Ctrl-O` sends a literal `Ctrl-O`.
+//! - [`KeyScheme::Alt`] reserves a single `Alt`-chord per action
+//!   (`Alt-o/a/g/e/s/q`, `Alt-→`/`←`) and claims **no** bare Ctrl key.
+//!
+//! `Ctrl-^` (previous session) is a direct key in both schemes, and `Ctrl-C`
+//! copies while a selection is active. `Esc` and `Ctrl-W` (the universal shell
+//! "delete previous word") always flow to the shell. The scheme-aware verdict is
+//! [`classify`]; the drive loop only holds the prefix-pending bit.
 //!
 //! [`pane`]: super::terminal::pane
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind};
 use vt100::MouseProtocolEncoding;
+
+use crate::domain::settings::KeyScheme;
 
 use super::terminal::selection::Cell;
 use super::ui;
@@ -164,59 +176,138 @@ fn chord(key: &KeyEvent, raw: char, letter: char) -> bool {
         || (key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char(letter))
 }
 
-/// Whether this key is the reserved `Ctrl-O` leader (zoom out one engagement
-/// level), as the raw `0x0f` (SI) char or `'o'` + `CONTROL`.
-pub(super) fn is_leader(key: &KeyEvent) -> bool {
+/// A reserved 没入 (Attached) navigation action — what the embedded pane handles
+/// itself instead of forwarding the key to the shell / agent. Which key triggers
+/// each one depends on the active [`KeyScheme`] (see [`classify`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Reserved {
+    /// Zoom out to 切替 (Switch), leaving every pane alive in the pool.
+    Detach,
+    /// Zoom out to 在席 (Focus), the session's action menu.
+    ToFocus,
+    /// Switch to the next tab in place.
+    NextTab,
+    /// Switch to the previous tab in place.
+    PrevTab,
+    /// Add a fresh agent tab without leaving 没入.
+    NewAgentTab,
+    /// Open the session-note editor over the pane.
+    OpenNote,
+    /// Collapse / expand the left session sidebar in place.
+    ToggleSidebar,
+    /// Jump to the previously focused session.
+    PrevSession,
+    /// Leave 没入 to quit usagi (raises the quit-confirmation modal).
+    Quit,
+}
+
+/// What the pane should do with a key, given the active [`KeyScheme`] and (for
+/// the prefix scheme) whether a leader press is pending. The decision is pure so
+/// the coverage-excluded drive loop only has to hold the one-bit pending state
+/// and act on the verdict; all the keymap logic is unit-tested here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum KeyAction {
+    /// Run this reserved navigation action; any pending prefix is cleared.
+    Reserved(Reserved),
+    /// (Prefix scheme) The leader was pressed with nothing pending — start
+    /// waiting for the second key, swallowing the leader itself.
+    BeginPrefix,
+    /// Forward the key to the shell (via [`encode_key`]); clears any pending
+    /// prefix. Pressing the leader twice lands here too, sending a literal
+    /// `Ctrl-O` to the shell.
+    Forward,
+    /// Swallow the key without acting (an unrecognised key right after the
+    /// leader); clears any pending prefix.
+    Swallow,
+}
+
+/// Whether this key is the `Ctrl-O` leader of the prefix scheme (the raw `0x0f`
+/// (SI) char or `'o'` + `CONTROL`).
+fn is_prefix(key: &KeyEvent) -> bool {
     chord(key, '\u{0f}', 'o')
 }
 
-/// Whether this key is `Ctrl` + the arrow `code`. The home-screen surfaces move
-/// tabs with the bare arrows (via `console`, which can't see the modifier), so
-/// 没入 adds the `Ctrl` qualifier to keep plain arrows flowing to the shell.
-fn is_ctrl_arrow(key: &KeyEvent, code: KeyCode) -> bool {
-    key.modifiers.contains(KeyModifiers::CONTROL) && key.code == code
-}
-
-/// Whether this key moves to the next tab: `Ctrl-N` (the raw `0x0e` (SO) char or
-/// `'n'` + `CONTROL`) or `Ctrl-→`.
-pub(super) fn is_next_tab(key: &KeyEvent) -> bool {
-    chord(key, '\u{0e}', 'n') || is_ctrl_arrow(key, KeyCode::Right)
-}
-
-/// Whether this key is `Ctrl-E` (open the note editor), as the raw `0x05` (ENQ)
-/// char or `'e'` + `CONTROL`.
-pub(super) fn is_open_note(key: &KeyEvent) -> bool {
-    chord(key, '\u{05}', 'e')
-}
-
-/// Whether this key moves to the previous tab: `Ctrl-P` (the raw `0x10` (DLE)
-/// char or `'p'` + `CONTROL`) or `Ctrl-←`.
-pub(super) fn is_prev_tab(key: &KeyEvent) -> bool {
-    chord(key, '\u{10}', 'p') || is_ctrl_arrow(key, KeyCode::Left)
-}
-
-/// Whether this key is `Ctrl-T` (zoom out to 在席 / Focus), as the raw `0x14`
-/// (DC4) char or `'t'` + `CONTROL`.
-pub(super) fn is_to_focus(key: &KeyEvent) -> bool {
-    chord(key, '\u{14}', 't')
-}
-
-/// Whether this key is `Ctrl-G` (add an agent tab), as the raw `0x07` (BEL) char
-/// or `'g'` + `CONTROL`.
-pub(super) fn is_new_agent_tab(key: &KeyEvent) -> bool {
-    chord(key, '\u{07}', 'g')
-}
-
-/// Whether this key is `Ctrl-B` (toggle the left sidebar), as the raw `0x02`
-/// (STX) char or `'b'` + `CONTROL`.
-pub(super) fn is_toggle_sidebar(key: &KeyEvent) -> bool {
-    chord(key, '\u{02}', 'b')
-}
-
 /// Whether this key is `Ctrl-^` (jump to the previously focused session), as the
-/// raw `0x1e` (RS) char or `'^'` + `CONTROL`.
-pub(super) fn is_prev_session(key: &KeyEvent) -> bool {
+/// raw `0x1e` (RS) char or `'^'` + `CONTROL`. A dedicated direct key in *both*
+/// schemes — `Ctrl-^` is rarely bound in shells, so it needs no prefix / `Alt`.
+fn is_prev_session(key: &KeyEvent) -> bool {
     chord(key, '\u{1e}', '^')
+}
+
+/// The reserved action a single `Alt`-chord triggers in the [`KeyScheme::Alt`]
+/// scheme, or `None` for a key the shell should receive. Only `Alt` letters and
+/// arrows readline does **not** bind by default are claimed — so `Alt-b`/`Alt-f`
+/// (word motion), `Alt-d` (delete word), `Alt-t` (transpose), `Alt-n`/`Alt-p`
+/// (history search) all still reach the shell.
+fn alt_action(key: &KeyEvent) -> Option<Reserved> {
+    if !key.modifiers.contains(KeyModifiers::ALT) {
+        return None;
+    }
+    Some(match key.code {
+        KeyCode::Char('o') => Reserved::Detach,
+        KeyCode::Char('a') => Reserved::ToFocus,
+        KeyCode::Char('g') => Reserved::NewAgentTab,
+        KeyCode::Char('e') => Reserved::OpenNote,
+        KeyCode::Char('s') => Reserved::ToggleSidebar,
+        KeyCode::Char('q') => Reserved::Quit,
+        KeyCode::Right => Reserved::NextTab,
+        KeyCode::Left => Reserved::PrevTab,
+        _ => return None,
+    })
+}
+
+/// The reserved action the key *after* the `Ctrl-O` leader triggers in the
+/// [`KeyScheme::Prefix`] scheme, or `None` for an unrecognised key (swallowed).
+/// The second key is a plain letter / arrow with no modifier — the shell only
+/// ever sees keys while no prefix is pending, so these never collide with it.
+fn prefix_action(key: &KeyEvent) -> Option<Reserved> {
+    Some(match key.code {
+        KeyCode::Char('o') => Reserved::Detach,
+        KeyCode::Char('a') => Reserved::ToFocus,
+        KeyCode::Char('n') | KeyCode::Right => Reserved::NextTab,
+        KeyCode::Char('p') | KeyCode::Left => Reserved::PrevTab,
+        KeyCode::Char('g') => Reserved::NewAgentTab,
+        KeyCode::Char('e') => Reserved::OpenNote,
+        KeyCode::Char('s') => Reserved::ToggleSidebar,
+        KeyCode::Char('q') => Reserved::Quit,
+        _ => return None,
+    })
+}
+
+/// Classify a key in 没入 (Attached) under the active `scheme`, given whether a
+/// prefix press is `pending` (always `false` in the `Alt` scheme). This is the
+/// single source of truth for the 没入 keymap; the drive loop owns only the
+/// `pending` bit and acts on the returned [`KeyAction`].
+pub(super) fn classify(scheme: KeyScheme, pending: bool, key: &KeyEvent) -> KeyAction {
+    // `Ctrl-^` jumps to the previous session in either scheme — a low-conflict
+    // direct key, so it never needs the leader or an `Alt` modifier.
+    if is_prev_session(key) {
+        return KeyAction::Reserved(Reserved::PrevSession);
+    }
+    match scheme {
+        KeyScheme::Alt => match alt_action(key) {
+            Some(action) => KeyAction::Reserved(action),
+            None => KeyAction::Forward,
+        },
+        KeyScheme::Prefix if pending => {
+            // Pressing the leader twice sends a literal `Ctrl-O` to the shell.
+            if is_prefix(key) {
+                KeyAction::Forward
+            } else {
+                match prefix_action(key) {
+                    Some(action) => KeyAction::Reserved(action),
+                    None => KeyAction::Swallow,
+                }
+            }
+        }
+        KeyScheme::Prefix => {
+            if is_prefix(key) {
+                KeyAction::BeginPrefix
+            } else {
+                KeyAction::Forward
+            }
+        }
+    }
 }
 
 /// Whether this key is the copy shortcut (`Ctrl-C`). It only copies when a
@@ -224,14 +315,6 @@ pub(super) fn is_prev_session(key: &KeyEvent) -> bool {
 /// usual interrupt. `Ctrl+Shift+C` is left to the shell unchanged.
 pub(super) fn is_copy(key: &KeyEvent) -> bool {
     key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char('c')
-}
-
-/// Whether this key is `Ctrl-Q` (quit usagi), as the raw `0x11` (DC1) char or
-/// `'q'` + `CONTROL`. It is the dedicated global quit chord: 没入 claims it from
-/// the shell/agent so quitting works without first zooming out, and the home loop
-/// raises the quit-confirmation modal when the pane hands this back.
-pub(super) fn is_quit(key: &KeyEvent) -> bool {
-    chord(key, '\u{11}', 'q')
 }
 
 /// Encode a paste for the shell. When the running program asked for bracketed
@@ -478,151 +561,174 @@ mod tests {
         assert!(!is_press(release));
     }
 
-    #[test]
-    fn is_leader_matches_both_forms_of_ctrl_o() {
-        // crossterm's usual decoding: lowercase `'o'` + `CONTROL`.
-        assert!(is_leader(&key(KeyCode::Char('o'), KeyModifiers::CONTROL)));
-        // Some terminals deliver the bare `0x0F` (SI) codepoint instead, with
-        // no `CONTROL` modifier reported — still the leader, so it must not
-        // reach the agent (where it would render as `?`).
-        assert!(is_leader(&key(KeyCode::Char('\u{0f}'), KeyModifiers::NONE)));
-        assert!(is_leader(&key(
-            KeyCode::Char('\u{0f}'),
-            KeyModifiers::CONTROL,
-        )));
+    /// `Alt` + `ch`, the shape crossterm reports an `Alt`-chord as.
+    fn alt(ch: char) -> KeyEvent {
+        key(KeyCode::Char(ch), KeyModifiers::ALT)
     }
 
     #[test]
-    fn is_leader_leaves_ctrl_shift_o_alone() {
-        // `Ctrl+Shift+O` is not the leader: it flows to the agent unchanged.
-        assert!(!is_leader(&key(KeyCode::Char('O'), KeyModifiers::CONTROL)));
-        assert!(!is_leader(&key(
-            KeyCode::Char('O'),
-            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
-        )));
+    fn prefix_scheme_claims_only_the_leader_then_maps_the_second_key() {
+        use KeyScheme::Prefix;
+        // With nothing pending the leader (either reported form) begins a prefix
+        // sequence and is swallowed; every other key flows to the shell.
+        assert_eq!(
+            classify(
+                Prefix,
+                false,
+                &key(KeyCode::Char('o'), KeyModifiers::CONTROL)
+            ),
+            KeyAction::BeginPrefix
+        );
+        assert_eq!(
+            classify(
+                Prefix,
+                false,
+                &key(KeyCode::Char('\u{0f}'), KeyModifiers::NONE)
+            ),
+            KeyAction::BeginPrefix
+        );
+        // The conflicting bare-Ctrl keys are no longer claimed — they reach the
+        // shell (the whole point of the prefix scheme).
+        for ch in ['e', 'n', 'p', 't', 'g', 'b', 'q'] {
+            assert_eq!(
+                classify(
+                    Prefix,
+                    false,
+                    &key(KeyCode::Char(ch), KeyModifiers::CONTROL)
+                ),
+                KeyAction::Forward,
+                "Ctrl-{ch} must flow to the shell in the prefix scheme"
+            );
+        }
+        // After the leader, each second key maps to its action.
+        let second = |ch: char| classify(Prefix, true, &key(KeyCode::Char(ch), KeyModifiers::NONE));
+        assert_eq!(second('o'), KeyAction::Reserved(Reserved::Detach));
+        assert_eq!(second('a'), KeyAction::Reserved(Reserved::ToFocus));
+        assert_eq!(second('n'), KeyAction::Reserved(Reserved::NextTab));
+        assert_eq!(second('p'), KeyAction::Reserved(Reserved::PrevTab));
+        assert_eq!(second('g'), KeyAction::Reserved(Reserved::NewAgentTab));
+        assert_eq!(second('e'), KeyAction::Reserved(Reserved::OpenNote));
+        assert_eq!(second('s'), KeyAction::Reserved(Reserved::ToggleSidebar));
+        assert_eq!(second('q'), KeyAction::Reserved(Reserved::Quit));
+        // Arrows after the leader move tabs too.
+        assert_eq!(
+            classify(Prefix, true, &key(KeyCode::Right, KeyModifiers::NONE)),
+            KeyAction::Reserved(Reserved::NextTab)
+        );
+        assert_eq!(
+            classify(Prefix, true, &key(KeyCode::Left, KeyModifiers::NONE)),
+            KeyAction::Reserved(Reserved::PrevTab)
+        );
     }
 
     #[test]
-    fn is_leader_rejects_non_leader_keys() {
-        // No `Ctrl` modifier, or a different letter, is not the leader.
-        assert!(!is_leader(&key(KeyCode::Char('o'), KeyModifiers::NONE)));
-        assert!(!is_leader(&key(KeyCode::Char('a'), KeyModifiers::CONTROL)));
+    fn prefix_double_leader_sends_a_literal_and_unknown_second_key_is_swallowed() {
+        use KeyScheme::Prefix;
+        // `Ctrl-O Ctrl-O` forwards a literal Ctrl-O to the shell.
+        assert_eq!(
+            classify(
+                Prefix,
+                true,
+                &key(KeyCode::Char('o'), KeyModifiers::CONTROL)
+            ),
+            KeyAction::Forward
+        );
+        assert_eq!(
+            classify(
+                Prefix,
+                true,
+                &key(KeyCode::Char('\u{0f}'), KeyModifiers::NONE)
+            ),
+            KeyAction::Forward
+        );
+        // An unrecognised key right after the leader is swallowed (tmux-style),
+        // not sent to the shell.
+        assert_eq!(
+            classify(Prefix, true, &key(KeyCode::Char('z'), KeyModifiers::NONE)),
+            KeyAction::Swallow
+        );
     }
 
     #[test]
-    fn tab_chords_match_both_forms_and_reject_others() {
-        // Ctrl-N (next) / Ctrl-P (prev): crossterm's `'n'`/`'p'` + CONTROL, and
-        // the bare control char some terminals deliver instead (0x0e / 0x10).
-        assert!(is_next_tab(&key(KeyCode::Char('n'), KeyModifiers::CONTROL)));
-        assert!(is_next_tab(&key(
-            KeyCode::Char('\u{0e}'),
-            KeyModifiers::NONE
-        )));
-        assert!(is_prev_tab(&key(KeyCode::Char('p'), KeyModifiers::CONTROL)));
-        assert!(is_prev_tab(&key(
-            KeyCode::Char('\u{10}'),
-            KeyModifiers::NONE
-        )));
-        // Ctrl-→ (next) / Ctrl-← (prev) are accepted alongside the chords.
-        assert!(is_next_tab(&key(KeyCode::Right, KeyModifiers::CONTROL)));
-        assert!(is_prev_tab(&key(KeyCode::Left, KeyModifiers::CONTROL)));
-        // Plain letters, the wrong modifier, and the other chord are rejected.
-        assert!(!is_next_tab(&key(KeyCode::Char('n'), KeyModifiers::NONE)));
-        assert!(!is_prev_tab(&key(KeyCode::Char('p'), KeyModifiers::NONE)));
-        assert!(!is_next_tab(&key(
-            KeyCode::Char('p'),
-            KeyModifiers::CONTROL
-        )));
-        assert!(!is_prev_tab(&key(
-            KeyCode::Char('n'),
-            KeyModifiers::CONTROL
-        )));
-        // Bare arrows (no Ctrl) stay with the shell, and the axes don't cross.
-        assert!(!is_next_tab(&key(KeyCode::Right, KeyModifiers::NONE)));
-        assert!(!is_prev_tab(&key(KeyCode::Left, KeyModifiers::NONE)));
-        assert!(!is_next_tab(&key(KeyCode::Left, KeyModifiers::CONTROL)));
-        assert!(!is_prev_tab(&key(KeyCode::Right, KeyModifiers::CONTROL)));
+    fn alt_scheme_claims_single_alt_chords_and_leaves_the_rest_to_the_shell() {
+        use KeyScheme::Alt;
+        // Each action is one Alt-chord; `pending` is irrelevant in this scheme.
+        assert_eq!(
+            classify(Alt, false, &alt('o')),
+            KeyAction::Reserved(Reserved::Detach)
+        );
+        assert_eq!(
+            classify(Alt, false, &alt('a')),
+            KeyAction::Reserved(Reserved::ToFocus)
+        );
+        assert_eq!(
+            classify(Alt, false, &alt('g')),
+            KeyAction::Reserved(Reserved::NewAgentTab)
+        );
+        assert_eq!(
+            classify(Alt, false, &alt('e')),
+            KeyAction::Reserved(Reserved::OpenNote)
+        );
+        assert_eq!(
+            classify(Alt, false, &alt('s')),
+            KeyAction::Reserved(Reserved::ToggleSidebar)
+        );
+        assert_eq!(
+            classify(Alt, false, &alt('q')),
+            KeyAction::Reserved(Reserved::Quit)
+        );
+        assert_eq!(
+            classify(Alt, false, &key(KeyCode::Right, KeyModifiers::ALT)),
+            KeyAction::Reserved(Reserved::NextTab)
+        );
+        assert_eq!(
+            classify(Alt, false, &key(KeyCode::Left, KeyModifiers::ALT)),
+            KeyAction::Reserved(Reserved::PrevTab)
+        );
+        // No bare Ctrl key is claimed — `Ctrl-O` and friends reach the shell.
+        assert_eq!(
+            classify(Alt, false, &key(KeyCode::Char('o'), KeyModifiers::CONTROL)),
+            KeyAction::Forward
+        );
+        // Alt chords readline binds (Alt-b/f/d/t/n/p) are deliberately NOT claimed.
+        for ch in ['b', 'f', 'd', 't', 'n', 'p'] {
+            assert_eq!(
+                classify(Alt, false, &alt(ch)),
+                KeyAction::Forward,
+                "Alt-{ch} must reach the shell"
+            );
+        }
+        // A plain key flows to the shell.
+        assert_eq!(
+            classify(Alt, false, &key(KeyCode::Char('x'), KeyModifiers::NONE)),
+            KeyAction::Forward
+        );
     }
 
     #[test]
-    fn pane_chords_match_both_forms_and_reject_others() {
-        // Ctrl-T (zoom out to 在席) / Ctrl-G (add agent): crossterm's letter +
-        // CONTROL, and the bare control char some terminals deliver instead
-        // (0x14 / 0x07).
-        assert!(is_to_focus(&key(KeyCode::Char('t'), KeyModifiers::CONTROL)));
-        assert!(is_to_focus(&key(
-            KeyCode::Char('\u{14}'),
-            KeyModifiers::NONE
-        )));
-        assert!(is_new_agent_tab(&key(
-            KeyCode::Char('g'),
-            KeyModifiers::CONTROL
-        )));
-        assert!(is_new_agent_tab(&key(
-            KeyCode::Char('\u{07}'),
-            KeyModifiers::NONE
-        )));
-        // Plain letters and the wrong chord are rejected (they flow to the shell).
-        assert!(!is_to_focus(&key(KeyCode::Char('t'), KeyModifiers::NONE)));
-        assert!(!is_new_agent_tab(&key(
-            KeyCode::Char('g'),
-            KeyModifiers::NONE
-        )));
-        // Ctrl-W is no longer a pane chord: it flows to the shell ("delete previous
-        // word") rather than closing a tab. Nothing here should treat it specially.
-        assert!(!is_to_focus(&key(
-            KeyCode::Char('w'),
-            KeyModifiers::CONTROL
-        )));
-        assert!(!is_new_agent_tab(&key(
-            KeyCode::Char('w'),
-            KeyModifiers::CONTROL
-        )));
-    }
-
-    #[test]
-    fn is_toggle_sidebar_matches_both_forms_of_ctrl_b() {
-        // crossterm's usual decoding, and the bare 0x02 (STX) some terminals send.
-        assert!(is_toggle_sidebar(&key(
-            KeyCode::Char('b'),
-            KeyModifiers::CONTROL
-        )));
-        assert!(is_toggle_sidebar(&key(
-            KeyCode::Char('\u{02}'),
-            KeyModifiers::NONE
-        )));
-        // A plain `b` or the wrong chord flows to the shell.
-        assert!(!is_toggle_sidebar(&key(
-            KeyCode::Char('b'),
-            KeyModifiers::NONE
-        )));
-        assert!(!is_toggle_sidebar(&key(
-            KeyCode::Char('o'),
-            KeyModifiers::CONTROL
-        )));
-    }
-
-    #[test]
-    fn is_open_note_matches_both_forms_of_ctrl_e() {
-        // crossterm's usual decoding, and the bare 0x05 (ENQ) some terminals send.
-        assert!(is_open_note(&key(
-            KeyCode::Char('e'),
-            KeyModifiers::CONTROL
-        )));
-        assert!(is_open_note(&key(
-            KeyCode::Char('\u{05}'),
-            KeyModifiers::NONE
-        )));
-        // A plain letter, the wrong chord, or Ctrl+Shift+E flows to the shell.
-        assert!(!is_open_note(&key(KeyCode::Char('e'), KeyModifiers::NONE)));
-        assert!(!is_open_note(&key(
-            KeyCode::Char('o'),
-            KeyModifiers::CONTROL
-        )));
-        assert!(!is_open_note(&key(
-            KeyCode::Char('E'),
-            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
-        )));
+    fn ctrl_caret_jumps_to_the_previous_session_in_both_schemes() {
+        // `Ctrl-^` is a direct previous-session key in either scheme (and even
+        // mid-prefix), reported as `'^'` + CONTROL or the bare 0x1e (RS) char.
+        for scheme in KeyScheme::ALL {
+            for pending in [false, true] {
+                assert_eq!(
+                    classify(
+                        scheme,
+                        pending,
+                        &key(KeyCode::Char('^'), KeyModifiers::CONTROL)
+                    ),
+                    KeyAction::Reserved(Reserved::PrevSession)
+                );
+                assert_eq!(
+                    classify(
+                        scheme,
+                        pending,
+                        &key(KeyCode::Char('\u{1e}'), KeyModifiers::NONE)
+                    ),
+                    KeyAction::Reserved(Reserved::PrevSession)
+                );
+            }
+        }
     }
 
     #[test]
@@ -657,20 +763,6 @@ mod tests {
         assert!(!is_copy(&key(KeyCode::Char('d'), KeyModifiers::CONTROL)));
         assert!(!is_copy(&key(
             KeyCode::Char('c'),
-            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
-        )));
-    }
-
-    #[test]
-    fn is_quit_matches_both_forms_of_ctrl_q() {
-        // crossterm's usual decoding, and the bare 0x11 (DC1) most terminals send.
-        assert!(is_quit(&key(KeyCode::Char('q'), KeyModifiers::CONTROL)));
-        assert!(is_quit(&key(KeyCode::Char('\u{11}'), KeyModifiers::NONE)));
-        // A bare `q`, the wrong chord, or `Ctrl+Shift+Q` flows to the shell.
-        assert!(!is_quit(&key(KeyCode::Char('q'), KeyModifiers::NONE)));
-        assert!(!is_quit(&key(KeyCode::Char('o'), KeyModifiers::CONTROL)));
-        assert!(!is_quit(&key(
-            KeyCode::Char('Q'),
             KeyModifiers::CONTROL | KeyModifiers::SHIFT,
         )));
     }

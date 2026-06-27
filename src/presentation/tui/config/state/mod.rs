@@ -11,7 +11,7 @@
 //! settings when left unset. Only one scope's fields are shown at a time.
 
 use crate::domain::settings::{
-    AgentCli, BranchSource, LocalSettings, SessionActionUi, Settings, Theme,
+    AgentCli, BranchSource, KeyScheme, LocalSettings, SessionActionUi, Settings, Theme,
 };
 
 mod modal;
@@ -23,6 +23,9 @@ const THEMES: [Theme; 3] = [Theme::Light, Theme::Dark, Theme::System];
 /// The 在席 (Focus) action UIs in the order they cycle through.
 pub(super) const SESSION_ACTION_UIS: [SessionActionUi; 2] =
     [SessionActionUi::Menu, SessionActionUi::Prompt];
+
+/// The 没入 key schemes in the order they cycle through.
+pub(super) const KEY_SCHEMES: [KeyScheme; 2] = [KeyScheme::Prefix, KeyScheme::Alt];
 
 /// The branch sources in the order they cycle through.
 pub(super) const BRANCH_SOURCES: [BranchSource; 2] = [BranchSource::Local, BranchSource::Remote];
@@ -38,6 +41,8 @@ pub enum Field {
     AgentCli,
     /// How 在席 (Focus) mode presents a session's runnable commands.
     SessionActionUi,
+    /// How the embedded terminal (没入) reserves its navigation keys.
+    KeyScheme,
     /// Whether the home-screen sidebar mascot reacts to interaction.
     MascotAnimation,
     /// The local LLM enable toggle — or an "Install" action when the runtime /
@@ -49,13 +54,14 @@ pub enum Field {
 
 impl Field {
     /// The fields shown on the screen, top to bottom.
-    pub const ALL: [Field; 9] = [
+    pub const ALL: [Field; 10] = [
         Field::Theme,
         Field::DefaultWorkspace,
         Field::Notifications,
         Field::RestorePanes,
         Field::AgentCli,
         Field::SessionActionUi,
+        Field::KeyScheme,
         Field::MascotAnimation,
         Field::LocalLlm,
         Field::LocalLlmModel,
@@ -70,6 +76,7 @@ impl Field {
             Field::RestorePanes => "Restore Panes",
             Field::AgentCli => "Agent CLI",
             Field::SessionActionUi => "Session Action UI",
+            Field::KeyScheme => "Terminal Keys",
             Field::MascotAnimation => "Mascot Animation",
             Field::LocalLlm => "Local LLM",
             Field::LocalLlmModel => "Local LLM Model",
@@ -474,6 +481,7 @@ impl Config {
             Field::SessionActionUi => {
                 self.settings.session_action_ui != self.baseline.session_action_ui
             }
+            Field::KeyScheme => self.settings.key_scheme != self.baseline.key_scheme,
             Field::MascotAnimation => {
                 self.settings.mascot_animation_enabled != self.baseline.mascot_animation_enabled
             }
@@ -545,6 +553,7 @@ impl Config {
             Field::SessionActionUi => {
                 session_action_ui_label(self.settings.session_action_ui).to_string()
             }
+            Field::KeyScheme => key_scheme_label(self.settings.key_scheme).to_string(),
             Field::MascotAnimation => on_off(self.settings.mascot_animation_enabled).to_string(),
             // Before the runtime is present the row is an install action; once
             // installed it becomes a plain on/off toggle.
@@ -664,6 +673,15 @@ fn session_action_ui_label(ui: SessionActionUi) -> &'static str {
     match ui {
         SessionActionUi::Menu => "Menu",
         SessionActionUi::Prompt => "Prompt",
+    }
+}
+
+/// The human-readable label for a 没入 key scheme — naming the claimed key so the
+/// trade-off (one chord vs. needing Option=Meta) is legible at a glance.
+fn key_scheme_label(scheme: KeyScheme) -> &'static str {
+    match scheme {
+        KeyScheme::Prefix => "Ctrl-O prefix",
+        KeyScheme::Alt => "Alt chords",
     }
 }
 
