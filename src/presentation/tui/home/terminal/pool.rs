@@ -137,6 +137,24 @@ impl MonitorHandle {
         }
     }
 
+    /// A handle reporting the given paths as waiting for input, for tests that
+    /// exercise the waiting-first sort without driving a real agent (the waiting
+    /// state is seeded through the monitor exactly as a reported `Waiting` phase
+    /// would).
+    #[cfg(test)]
+    pub fn with_waiting(paths: impl IntoIterator<Item = PathBuf>) -> Self {
+        use crate::domain::agent_phase::AgentPhase;
+        let mut shared = Shared::default();
+        let readings: Vec<crate::infrastructure::session_monitor::Reading> = paths
+            .into_iter()
+            .map(|path| (path, 0, Some(AgentPhase::Waiting)))
+            .collect();
+        shared.monitor.observe(&readings);
+        Self {
+            shared: Arc::new(Mutex::new(shared)),
+        }
+    }
+
     /// Read every session-badge set the sidebar needs for one repaint under a
     /// single lock, instead of locking once per set. The render loops took four
     /// separate locks (`running`/`waiting`/`done`/`live`) each frame, contending

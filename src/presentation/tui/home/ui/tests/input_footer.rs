@@ -188,6 +188,18 @@ fn footer_line_differs_by_mode() {
 }
 
 #[test]
+fn switch_footer_reflects_the_waiting_first_sort_toggle() {
+    let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
+    // Off by default, the footer offers the toggle plainly.
+    let off = footer_line(120, &state);
+    assert!(off.contains("s sort"));
+    assert!(!off.contains("s sort:on"));
+    // On, the footer marks it active.
+    state.toggle_sort_waiting();
+    assert!(footer_line(120, &state).contains("s sort:on"));
+}
+
+#[test]
 fn footer_line_shows_palette_controls_while_open() {
     let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
     state.open_command_palette();

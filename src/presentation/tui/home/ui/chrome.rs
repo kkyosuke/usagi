@@ -368,8 +368,14 @@ pub(super) fn footer_line(width: usize, state: &HomeState) -> String {
             } else {
                 "Esc back"
             };
+            // `s sort` names the waiting-first toggle and reflects its state.
+            let sort = if state.sort_waiting() {
+                "s sort:on"
+            } else {
+                "s sort"
+            };
             format!(
-                "[switch]  ↑↓ session / K/J move / ←→ tab / Enter focus / c new / r rename / n/Ctrl-E note / x close tab / : commands / ? keys / {esc}"
+                "[switch]  ↑↓ session / K/J move / {sort} / ←→ tab / Enter focus / c new / r rename / n/Ctrl-E note / x close tab / : commands / ? keys / {esc}"
             )
         }
         Mode::Focus => {

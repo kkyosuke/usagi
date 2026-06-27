@@ -257,6 +257,10 @@ pub(super) fn switch_key(
         // follows the moved session; a no-op on the root row and at the ends.
         Key::Char('K') => reorder_selected(state, wiring, true),
         Key::Char('J') => reorder_selected(state, wiring, false),
+        // `s` toggles lifting the sessions waiting for input (◆) to the top, so the
+        // next session to touch sits at the top. A display-only sort: the manual
+        // `K`/`J` order is preserved within each group and restored when off.
+        Key::Char('s') => state.toggle_sort_waiting(),
         // ←/→ (h/l) and Ctrl-P/Ctrl-N move between the highlighted session's tabs,
         // so the preview (and what re-attaching reveals) lands on the chosen pane.
         // A no-op on a session with no panes. The Ctrl chords match what 没入 uses,

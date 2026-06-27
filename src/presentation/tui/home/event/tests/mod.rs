@@ -487,6 +487,54 @@ fn run_recording_reorder(
     (moves.into_inner(), outcome)
 }
 
+/// Run the loop against a monitor reporting `waiting` sessions, recording the
+/// directory the preview is asked for each frame (the cursor row's). Lets a test
+/// observe which session a row resolves to after the waiting-first sort reorders
+/// the pane.
+fn run_recording_previews(
+    keys: Vec<io::Result<Key>>,
+    state: HomeState,
+    waiting: Vec<PathBuf>,
+) -> Vec<PathBuf> {
+    let term = Term::stdout();
+    let mut reader = ScriptedReader::new(keys);
+    let monitor = MonitorHandle::with_waiting(waiting);
+    let previews = RefCell::new(Vec::new());
+    let mut persist: fn(&str) = noop_persist;
+    let mut create: fn(&str) -> SessionOutcome = noop_create;
+    let mut remove: fn(&str, bool) -> SessionOutcome = noop_remove;
+    let mut open: fn(&mut HomeState, &Path, bool, bool) -> Result<PaneExit> = noop_open;
+    let mut config: fn(&Term) -> Result<Option<ConfigReload>> = noop_config;
+    let mut preview = |dir: &Path, _: Sidebar| -> Option<TerminalView> {
+        previews.borrow_mut().push(dir.to_path_buf());
+        None
+    };
+    event_loop_compat(
+        &term,
+        &mut reader,
+        state,
+        Path::new("/ws"),
+        &monitor,
+        &UpdateHandle::new(),
+        &OneShot::<bool>::new(),
+        &OneShot::<Vec<AgentCli>>::new(),
+        &mut persist,
+        &mut create,
+        &mut (noop_rename as fn(&str, &str) -> SessionOutcome),
+        &mut (noop_set_note as fn(&str, &str) -> SessionOutcome),
+        &mut remove,
+        &mut (no_branches as fn() -> Vec<String>),
+        &mut open,
+        &mut config,
+        &mut preview,
+        &mut (noop_tab_op as fn(&Path, Option<TabNav>) -> (Vec<String>, usize)),
+        &mut (noop_close as fn(&mut HomeState, &Path)),
+        &mut (noop_reorder as fn(&str, bool) -> SessionReorder),
+    )
+    .unwrap();
+    previews.into_inner()
+}
+
 /// A reader that scripts the timeout reads (and blocking reads) separately, so
 /// the loop's background-task animation path can be exercised directly.
 struct TimeoutScript {

@@ -507,6 +507,98 @@ fn has_live_sessions_and_live_count_follow_the_live_set() {
     assert_eq!(state.live_count(), 2);
 }
 
+/// The branch names of the left-pane rows in display order (the synthetic root
+/// row carries no branch and is skipped), for asserting the sessions' ordering.
+fn row_names(state: &HomeState) -> Vec<String> {
+    state
+        .list()
+        .worktrees()
+        .iter()
+        .filter_map(|w| w.branch.clone())
+        .collect()
+}
+
+/// A badge snapshot whose waiting set holds the given sessions (keyed by the
+/// `session_record` root path), leaving the other sets empty.
+fn waiting_snapshot(names: &[&str]) -> MonitorSnapshot {
+    MonitorSnapshot {
+        waiting: names
+            .iter()
+            .map(|n| PathBuf::from(format!("/repo/.usagi/sessions/{n}")))
+            .collect(),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn sort_waiting_is_off_by_default_and_keeps_the_canonical_order() {
+    let mut state = state();
+    state.restore_sessions(vec![
+        session_record("alpha", 1),
+        session_record("beta", 1),
+        session_record("gamma", 1),
+    ]);
+    assert!(!state.sort_waiting());
+    // Even with beta waiting, the order is untouched while the sort is off.
+    state.apply_badges(waiting_snapshot(&["beta"]));
+    assert_eq!(row_names(&state), ["alpha", "beta", "gamma"]);
+}
+
+#[test]
+fn toggle_sort_waiting_lifts_waiting_sessions_to_the_top_then_restores() {
+    let mut state = state();
+    state.restore_sessions(vec![
+        session_record("alpha", 1),
+        session_record("beta", 1),
+        session_record("gamma", 1),
+    ]);
+    // beta and gamma are waiting; alpha is not.
+    state.apply_badges(waiting_snapshot(&["beta", "gamma"]));
+    // Land the cursor on beta so we can confirm it follows its row.
+    state.switch_move_down();
+    state.switch_move_down();
+    assert_eq!(state.list().selected_name(), "beta");
+
+    // Toggling on lifts beta + gamma above alpha, each group keeping its canonical
+    // order (a stable partition), and the cursor follows beta to the top.
+    state.toggle_sort_waiting();
+    assert!(state.sort_waiting());
+    assert_eq!(row_names(&state), ["beta", "gamma", "alpha"]);
+    assert_eq!(state.list().selected_name(), "beta");
+
+    // Toggling off restores the canonical order, cursor still on beta.
+    state.toggle_sort_waiting();
+    assert!(!state.sort_waiting());
+    assert_eq!(row_names(&state), ["alpha", "beta", "gamma"]);
+    assert_eq!(state.list().selected_name(), "beta");
+}
+
+#[test]
+fn apply_badges_resorts_only_when_the_waiting_set_moves_under_the_sort() {
+    let mut state = state();
+    state.restore_sessions(vec![
+        session_record("alpha", 1),
+        session_record("beta", 1),
+        session_record("gamma", 1),
+    ]);
+    state.toggle_sort_waiting();
+    // No one waiting yet, so the order is still canonical.
+    assert_eq!(row_names(&state), ["alpha", "beta", "gamma"]);
+
+    // gamma starts waiting: it rises to the top on the next badge reading.
+    state.apply_badges(waiting_snapshot(&["gamma"]));
+    assert_eq!(row_names(&state), ["gamma", "alpha", "beta"]);
+
+    // Re-applying the same waiting set is a no-op for the order (no needless
+    // rebuild), and the rows stay put.
+    state.apply_badges(waiting_snapshot(&["gamma"]));
+    assert_eq!(row_names(&state), ["gamma", "alpha", "beta"]);
+
+    // gamma stops waiting: it falls back to its canonical place.
+    state.apply_badges(MonitorSnapshot::default());
+    assert_eq!(row_names(&state), ["alpha", "beta", "gamma"]);
+}
+
 #[test]
 fn quit_confirm_opens_and_cancels() {
     let mut state = state();

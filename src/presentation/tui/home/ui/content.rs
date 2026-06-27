@@ -83,6 +83,7 @@ pub fn cheatsheet() -> Vec<LogLine> {
         cheatsheet_header("切替 / Switch — pick a session"),
         key_row("↑↓ / k j", "Move between sessions"),
         key_row("K / J", "Reorder the selected session"),
+        key_row("s", "Sort sessions waiting for input (◆) to the top"),
         key_row("←→ / h l", "Move between the session's tabs"),
         key_row("Ctrl-P / Ctrl-N", "Move between the session's tabs"),
         key_row("Enter", "Focus the session (attach when live)"),

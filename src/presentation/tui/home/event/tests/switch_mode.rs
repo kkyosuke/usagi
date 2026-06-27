@@ -456,6 +456,29 @@ fn switch_reorder_applies_a_moved_result_and_logs_a_failure() {
 }
 
 #[test]
+fn switch_s_lifts_the_waiting_session_to_the_top_of_the_pane() {
+    // `feat` (the second session) is waiting for input. `s` turns on the
+    // waiting-first sort, lifting `feat` above `main`, so the first row the cursor
+    // steps onto — and previews — is now `feat` rather than `main`.
+    let state = state_with_sessions(&["main", "feat"]);
+    let keys = vec![
+        Ok(Key::Char('s')), // sort on: feat (waiting) rises to the top row
+        Ok(Key::ArrowDown), // root -> first row (now feat)
+        Ok(Key::CtrlC),
+    ];
+    let previews =
+        run_recording_previews(keys, state, vec![PathBuf::from("/ws/.usagi/sessions/feat")]);
+    assert!(
+        previews.iter().any(|d| d.ends_with(".usagi/sessions/feat")),
+        "the waiting session sits at the top, so the cursor's first stop previews it"
+    );
+    assert!(
+        !previews.iter().any(|d| d.ends_with(".usagi/sessions/main")),
+        "main has dropped below feat, so the cursor never reaches it"
+    );
+}
+
+#[test]
 fn cheatsheet_opens_from_the_base_switch_and_dismisses() {
     // `?` at the base 切替 opens the keybinding cheat sheet (a scrollable text
     // modal); the arrows / j/k scroll it and Esc dismisses it (back to Switch,

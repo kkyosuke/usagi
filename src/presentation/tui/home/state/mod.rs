@@ -380,6 +380,14 @@ pub struct HomeState {
     /// fresh reading with another's stale one. Rendering precedence among them
     /// (done > waiting > running, atop live) lives in the sidebar renderer.
     badges: MonitorSnapshot,
+    /// When set, the left pane lists the sessions whose agent is waiting for
+    /// input (◆) first, so the next session to touch is at the top. Toggled with
+    /// `s` in 切替. The order is a *display* concern only: `sessions` stays in its
+    /// canonical (manual `K`/`J`) order, and the waiting-first ordering is applied
+    /// when the pane is built ([`rebuild_list`](Self::rebuild_list)) — a stable
+    /// partition, so within each group the manual order is preserved and a session
+    /// returns to its place once its agent stops waiting.
+    sort_waiting: bool,
     /// Index into `log` where the most recent command's response begins. The
     /// command palette (`:`) renders only `log[response_start..]`, so it shows
     /// the response to the latest command and nothing earlier.
@@ -457,6 +465,7 @@ impl HomeState {
             sessions: Vec::new(),
             terminal: TerminalSurface::default(),
             badges: MonitorSnapshot::default(),
+            sort_waiting: false,
             response_start: 0,
             issues: Vec::new(),
             update: None,
@@ -588,13 +597,22 @@ impl HomeState {
     /// did, without yanking the cursor back to the root row the way
     /// [`restore_sessions`](Self::restore_sessions) (which resets it) would.
     pub fn refresh_sessions(&mut self, sessions: Vec<SessionRecord>) {
+        self.sessions = sessions;
+        self.rebuild_list_keep_cursor();
+    }
+
+    /// Rebuild the worktree pane while keeping the cursor, active row, and `Ctrl-^`
+    /// jump target on the same sessions by name. Used whenever the rows are rebuilt
+    /// under the user (a background re-sync, a manual reorder, the waiting-first
+    /// sort toggling on/off, or a session entering/leaving the waiting set) so the
+    /// rows can be replaced wholesale without yanking the cursor back to the root.
+    fn rebuild_list_keep_cursor(&mut self) {
         let selected = self.list.selected_name().to_string();
         let active = self.list.active_name().to_string();
         // The fresh list drops the `Ctrl-^` jump target, so carry it across the
         // rebuild by name (it is re-validated lazily, so a session that vanished
         // in this sync simply yields no jump).
         let previous = self.list.previous_active_name().map(str::to_string);
-        self.sessions = sessions;
         self.rebuild_list();
         // Restore the cursor (`select_by_name` moves both cursor and active onto
         // the row; it is a no-op for the root row / a vanished session, leaving
@@ -605,19 +623,54 @@ impl HomeState {
     }
 
     /// Rebuild the worktree pane from the current sessions: one row per session
-    /// (not per repository), in order. A session spanning several git
-    /// repositories is collapsed into a single row by [`session_row`].
+    /// (not per repository). A session spanning several git repositories is
+    /// collapsed into a single row by [`session_row`]. The rows follow the session
+    /// order from [`display_order`](Self::display_order) — the canonical (manual)
+    /// order, or waiting-first when [`sort_waiting`](Self::sort_waiting) is on.
     fn rebuild_list(&mut self) {
         let name = self.list.workspace_name().to_string();
-        let rows = self.sessions.iter().map(session_row).collect();
+        let order = self.display_order();
+        let rows = order
+            .iter()
+            .map(|&i| session_row(&self.sessions[i]))
+            .collect();
         // Carry each session's sidebar label override onto its row so the pane
         // shows the custom display name while commands still key on the branch.
-        let labels = self
-            .sessions
+        let labels = order
             .iter()
-            .map(|s| s.display_name.clone())
+            .map(|&i| self.sessions[i].display_name.clone())
             .collect();
         self.list = WorktreeList::with_labels(name, rows, labels);
+    }
+
+    /// The order the sessions are laid out in the left pane, as indices into
+    /// `sessions`. Identity (canonical / manual `K`/`J` order) by default; with
+    /// [`sort_waiting`](Self::sort_waiting) on, a *stable* partition that lifts the
+    /// sessions whose agent is waiting for input (◆) above the rest while keeping
+    /// each group in its canonical order.
+    fn display_order(&self) -> Vec<usize> {
+        let mut order: Vec<usize> = (0..self.sessions.len()).collect();
+        if self.sort_waiting {
+            // `sort_by_key` is stable, and `false` (waiting) sorts before `true`,
+            // so waiting sessions rise to the top without disturbing either group's
+            // relative order.
+            order.sort_by_key(|&i| !self.badges.waiting.contains(&self.sessions[i].root));
+        }
+        order
+    }
+
+    /// Whether the left pane is lifting the waiting-for-input (◆) sessions to the
+    /// top — read by the footer to show the toggle's state.
+    pub fn sort_waiting(&self) -> bool {
+        self.sort_waiting
+    }
+
+    /// Toggle the waiting-first ordering of the left pane (`s` in 切替) and rebuild
+    /// the rows, keeping the cursor on the same session by name so it follows its
+    /// row to the new position.
+    pub fn toggle_sort_waiting(&mut self) {
+        self.sort_waiting = !self.sort_waiting;
+        self.rebuild_list_keep_cursor();
     }
 
     pub fn sessions(&self) -> &[SessionRecord] {
@@ -860,7 +913,16 @@ impl HomeState {
     /// frames, the pane driver while a session is 没入. Replacing them as a unit
     /// keeps the four sets consistent with one another (all from the same lock).
     pub fn apply_badges(&mut self, badges: MonitorSnapshot) {
+        // With the waiting-first sort on, a session entering or leaving the
+        // waiting set changes the row order, so rebuild the pane (keeping the
+        // cursor by name). Compared before the move, and only when the *waiting*
+        // set actually moved, so the hot per-frame path skips the rebuild whenever
+        // nothing relevant changed.
+        let resort = self.sort_waiting && self.badges.waiting != badges.waiting;
         self.badges = badges;
+        if resort {
+            self.rebuild_list_keep_cursor();
+        }
     }
 
     /// The badge sets the last [`apply_badges`](Self::apply_badges) stored, so a
