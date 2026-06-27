@@ -393,12 +393,14 @@ fn detail_content(
 
 /// Builds the root's two lines: the workspace itself, belonging to no session.
 /// The far-left gutter carries the `>` cursor (in 切替 (Switch)) or the green `▎`
-/// active bar; line 1 then has a `⌂` kind icon, the [`ROOT_NAME`] label, and a
-/// blank status field (the root has no git status). Line 2 carries a
-/// `workspace root` detail.
+/// active bar; line 1 then has a `⌂` kind icon, the [`ROOT_NAME`] label, a memo
+/// marker (`NOTE_ICON`, when `has_note`) — the root carries its own note, like a
+/// session — and a blank status field (the root has no git status). Line 2
+/// carries a `workspace root` detail.
 pub(super) fn root_row(
     name_width: usize,
     detail_width: usize,
+    has_note: bool,
     selected: bool,
     active: bool,
     in_switch: bool,
@@ -407,7 +409,10 @@ pub(super) fn root_row(
     let name = name_cell(ROOT_NAME, name_width, active || selected);
     let status = status_cell(None);
     let gutter = gutter_cell(selected, active, in_switch);
-    let line1 = format!("{gutter} {kind} {name}   {status}");
+    // The same constant-width memo cell a worktree row uses, so the (blank) status
+    // field stays aligned with the sessions below whether or not a note is present.
+    let note = note_cell(has_note);
+    let line1 = format!("{gutter} {kind} {name}{note}{status}");
 
     // Only the active bar reaches line 2; the cursor stays a point on line 1.
     let detail = style(clip_to_width(ROOT_DETAIL, detail_width))
@@ -625,6 +630,7 @@ pub(super) fn left_pane(
     let (mut root_top, mut root_detail) = root_row(
         name_width,
         detail_width,
+        list.root_has_note(),
         list.root_selected(),
         list.root_active(),
         in_switch,

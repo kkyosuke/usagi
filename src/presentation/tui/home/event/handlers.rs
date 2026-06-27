@@ -927,14 +927,11 @@ fn open_pane(
             state.enter_switch(ReturnMode::Attached);
         }
         Ok(PaneExit::OpenNote) => {
-            // `Ctrl-E` opens the focused session's note editor over the (now
-            // detached) pane; closing it re-attaches. The root row is the
-            // workspace, not a session, so it has no note — fall back to
-            // re-attaching straight away.
-            if !state.open_focused_note(true) {
-                let row = state.list().active_index();
-                focus_and_attach(term, state, painter, wiring, row);
-            }
+            // `Ctrl-E` opens the focused row's note editor over the (now detached)
+            // pane; closing it re-attaches. Works on the root row too (it edits the
+            // workspace root's note). Coming from a live pane there is never a note
+            // overlay already open, so this always opens.
+            state.open_focused_note(true);
         }
         Ok(PaneExit::ToFocus) => {
             // `Ctrl-T` zooms out one level to 在席: the session's action surface,

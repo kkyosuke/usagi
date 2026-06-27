@@ -22,6 +22,17 @@ fn empty_list_still_has_the_root_row() {
 }
 
 #[test]
+fn root_note_marker_defaults_off_and_toggles() {
+    let mut list = WorktreeList::new("usagi", Vec::new());
+    // The root row carries no note until one is recorded.
+    assert!(!list.root_has_note());
+    list.set_root_note_marker(true);
+    assert!(list.root_has_note());
+    list.set_root_note_marker(false);
+    assert!(!list.root_has_note());
+}
+
+#[test]
 fn display_label_uses_the_override_then_falls_back_to_the_branch() {
     // A labels vec shorter than the worktrees is padded with `None`; a longer
     // one is truncated to match.

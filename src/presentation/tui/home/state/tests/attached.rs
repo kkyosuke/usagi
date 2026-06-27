@@ -95,6 +95,7 @@ fn apply_session_outcome_logs_and_rebuilds_the_pane_from_sessions() {
         line: LogLine::output("Created session \"x\""),
         sessions: Some(vec![session_record("main", 1), session_record("x", 1)]),
         select: Some("x".to_string()),
+        root_note: None,
     });
     assert!(state.log().last().unwrap().text.contains("Created session"));
     assert_eq!(state.sessions().len(), 2);
@@ -115,6 +116,7 @@ fn apply_session_outcome_logs_and_rebuilds_the_pane_from_sessions() {
         line: LogLine::output("Removed session \"x\""),
         sessions: Some(vec![session_record("main", 1)]),
         select: None,
+        root_note: None,
     });
     assert_eq!(state.sessions().len(), 1);
     assert_eq!(state.list().worktrees().len(), 1);
@@ -125,6 +127,7 @@ fn apply_session_outcome_logs_and_rebuilds_the_pane_from_sessions() {
         line: LogLine::error("session failed"),
         sessions: None,
         select: None,
+        root_note: None,
     });
     assert_eq!(state.log().last().unwrap().kind, LineKind::Error);
     assert_eq!(state.list().worktrees().len(), 1);
@@ -254,6 +257,7 @@ fn refresh_sessions_updates_statuses_and_keeps_the_cursor_in_place() {
         line: LogLine::output("created"),
         sessions: Some(vec![session_record("alpha", 1), session_record("beta", 1)]),
         select: Some("beta".to_string()),
+        root_note: None,
     });
     assert_eq!(state.list().selected_index(), 2); // root, alpha, beta
     assert_eq!(state.list().active_name(), "beta");
@@ -422,6 +426,7 @@ fn applied_failure_lines_are_recorded_success_lines_are_not() {
         line: LogLine::output("Renamed \"x\""),
         sessions: None,
         select: None,
+        root_note: None,
     });
     assert!(spy.recorded.borrow().is_empty());
 
@@ -431,6 +436,7 @@ fn applied_failure_lines_are_recorded_success_lines_are_not() {
         line: LogLine::error("rename failed: locked"),
         sessions: None,
         select: None,
+        root_note: None,
     });
     assert_eq!(
         spy.recorded.borrow().as_slice(),

@@ -327,6 +327,31 @@ pub fn set_note(workspace_root: &Path, name: &str, note: &str) -> Result<Option<
     })
 }
 
+/// Set (or clear) the workspace **root**'s free-form note in `state.json` — the
+/// `⌂ root` row's counterpart to [`set_note`], which targets a session.
+///
+/// The note is trimmed and cleared-when-empty exactly as [`set_note`] handles a
+/// session's, and returns the note now stored (`None` when cleared). Unlike
+/// [`set_note`] this never errors on a missing `state.json`: the root belongs to
+/// no session, so a workspace with no sessions recorded yet can still carry a
+/// root note — the state is created (defaulted) when absent. Takes the same store
+/// lock across the read-modify-write so it serialises against concurrent writers.
+pub fn set_root_note(workspace_root: &Path, note: &str) -> Result<Option<String>> {
+    let store = WorkspaceStore::new(workspace_root);
+    let _lock = store.lock()?;
+    let mut state = store.load()?.unwrap_or_default();
+    let trimmed = note.trim_end();
+    state.root_note = if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    };
+    let stored = state.root_note.clone();
+    state.updated_at = Utc::now();
+    store.save(&state)?;
+    Ok(stored)
+}
+
 /// List the sessions recorded for `workspace_root`, in stored order.
 ///
 /// The `sessions` array order *is* the display order shown in the home list —
@@ -1138,6 +1163,60 @@ mod tests {
         create(root.path(), "present").unwrap();
         let err = set_note(root.path(), "absent", "hi").unwrap_err();
         assert!(err.to_string().contains("no such session"));
+    }
+
+    fn root_note_of(root: &Path) -> Option<String> {
+        WorkspaceStore::new(root)
+            .load()
+            .unwrap()
+            .and_then(|s| s.root_note)
+    }
+
+    #[test]
+    fn set_root_note_sets_trims_and_clears_without_a_session() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        // No state.json yet: unlike `set_note`, the root note can be written before
+        // any session exists — the state is created on demand.
+        let stored = set_root_note(root.path(), "root line 1\nroot line 2").unwrap();
+        assert_eq!(stored.as_deref(), Some("root line 1\nroot line 2"));
+        assert_eq!(
+            root_note_of(root.path()).as_deref(),
+            Some("root line 1\nroot line 2")
+        );
+
+        // Trailing whitespace / blank lines are trimmed off the end.
+        let stored = set_root_note(root.path(), "kept\n\n  \n").unwrap();
+        assert_eq!(stored.as_deref(), Some("kept"));
+
+        // A note that trims to empty clears it.
+        let stored = set_root_note(root.path(), "   \n ").unwrap();
+        assert_eq!(stored, None);
+        assert_eq!(root_note_of(root.path()), None);
+    }
+
+    #[test]
+    fn set_root_note_leaves_sessions_untouched() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        create(root.path(), "feature").unwrap();
+        set_note(root.path(), "feature", "session memo").unwrap();
+
+        set_root_note(root.path(), "root memo").unwrap();
+        // The root note is recorded alongside the session, which keeps its own note.
+        assert_eq!(root_note_of(root.path()).as_deref(), Some("root memo"));
+        assert_eq!(
+            note_of(root.path(), "feature").as_deref(),
+            Some("session memo")
+        );
+        assert_eq!(
+            list(root.path())
+                .unwrap()
+                .into_iter()
+                .map(|s| s.name)
+                .collect::<Vec<_>>(),
+            vec!["feature".to_string()]
+        );
     }
 
     #[test]

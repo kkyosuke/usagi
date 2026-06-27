@@ -144,6 +144,21 @@ pub fn recorded_sessions(root: &Path) -> Option<Vec<SessionRecord>> {
     }
 }
 
+/// The note recorded for the workspace **root** (the `⌂ root` row) straight from
+/// `<root>/.usagi/state.json`, read by `root` with no git refresh, or `None` when
+/// none has been written or the file cannot be read.
+///
+/// Companion to [`recorded_sessions_for_display`] for the home screen's first
+/// paint: the root row's memo, like a session's, is loaded from the recorded
+/// state without touching git. A read failure simply yields `None` (no root note)
+/// — the screen surfaces a state load error through the sessions path's notice.
+pub fn recorded_root_note(root: &Path) -> Option<String> {
+    match WorkspaceStore::new(root).load() {
+        Ok(state) => state.and_then(|s| s.root_note),
+        Err(_) => None,
+    }
+}
+
 /// Build the [`WorktreeState`] of a single worktree at `path`, classifying its
 /// branch against `default` — the default branch of the worktree's repository,
 /// resolved once by the caller (a workspace may span repositories with differing
@@ -434,6 +449,30 @@ mod tests {
             .contains("failed to load recorded sessions"));
 
         std::env::remove_var(crate::infrastructure::storage::DATA_DIR_ENV);
+    }
+
+    #[test]
+    fn recorded_root_note_reads_the_saved_root_note_and_is_none_when_absent_or_unreadable() {
+        let dir = tempfile::tempdir().unwrap();
+        // No state.json yet → None.
+        assert!(recorded_root_note(dir.path()).is_none());
+
+        // Saved state without a root note → None.
+        let store = WorkspaceStore::new(dir.path());
+        let state = WorkspaceState::new();
+        store.save(&state).unwrap();
+        assert!(recorded_root_note(dir.path()).is_none());
+
+        // Saved state with a root note → that note, read by the raw root.
+        let mut state = WorkspaceState::new();
+        state.root_note = Some("root memo".to_string());
+        store.save(&state).unwrap();
+        assert_eq!(recorded_root_note(dir.path()).as_deref(), Some("root memo"));
+
+        // An unreadable state.json falls back to None (no note).
+        let bad = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(bad.path().join(".usagi/state.json")).unwrap();
+        assert!(recorded_root_note(bad.path()).is_none());
     }
 
     #[test]
