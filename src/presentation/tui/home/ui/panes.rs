@@ -720,6 +720,7 @@ fn rail_pane(
     done: &HashSet<PathBuf>,
     rows: usize,
     in_switch: bool,
+    now: DateTime<Utc>,
 ) -> Vec<String> {
     let root = root_glyph();
     // The root entry is two rows (then a divider), matching the full sidebar's
@@ -751,7 +752,7 @@ fn rail_pane(
         let row = i + 1;
         let selected = row == list.selected_index();
         let active = row == list.active_index();
-        let kind = kind_dot(heat_of(w.updated_at, Utc::now()));
+        let kind = kind_dot(heat_of(w.updated_at, now));
         let git = rail_status_glyph(w.status);
         let agent = AgentState::from_flags(
             live.contains(&w.path),
@@ -828,7 +829,7 @@ pub(super) fn left_pane(
     if sidebar == Sidebar::Rail {
         // The 5-column rail has no room for a CPU / memory figure, so the rail
         // shows only the agent glyph; the resource line belongs to the full list.
-        return rail_pane(list, live, running, waiting, done, rows, in_switch);
+        return rail_pane(list, live, running, waiting, done, rows, in_switch, now);
     }
     // Line 1: prefix + name + the (now-blank) active-marker cell + a space + the
     // right-edge status field.
