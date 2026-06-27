@@ -409,6 +409,11 @@ pub(super) fn event_loop(
             && last_update == latest_update;
         let (height, width) = term.size();
         if !skip_paint {
+            // Stamp the frame's render time so the left pane's "N分前" labels track
+            // real time. Only on a real paint — a skipped frame draws nothing, so
+            // the label refreshes on the next change rather than ticking every
+            // second (keeping the loop's repaint budget low).
+            state.set_now(chrono::Utc::now());
             let frame = ui::render_frame(height as usize, width as usize, &state);
             painter.paint(term, frame)?;
         }

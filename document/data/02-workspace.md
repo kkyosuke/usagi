@@ -91,6 +91,7 @@
           "upstream": null,
           "status": "local",
           "diff": { "added": 124, "removed": 18 },
+          "ahead_behind": { "ahead": 2, "behind": 1 },
           "updated_at": "2026-06-13T05:01:18.659149Z"
         }
       ],
@@ -146,6 +147,7 @@ worktree を束ねます。各 worktree は git ステータス付き（下記 `
 | `upstream` | string? | 上流追跡ブランチ（例 `origin/login`）。無ければ `null` |
 | `status` | enum | ブランチのライフサイクル状態（下記） |
 | `diff` | object? | 既定ブランチとの累積差分の行数 `{ "added": N, "removed": M }`。サイドバーの `+N -M` バッジの元。差分が無い（手つかず）・既定ブランチ自身・detached HEAD・読めなかったときは省略（`null` 相当）。古いファイルにキーが無くても読める |
+| `ahead_behind` | object? | 既定ブランチとのコミット単位の差 `{ "ahead": N, "behind": M }`（`ahead`＝ブランチ側に多いコミット数・`behind`＝既定ブランチ側に多いコミット数）。サイドバーの `↑N ↓M` マーカーの元。差が無い（ahead も behind も 0）・既定ブランチ自身・detached HEAD・読めなかったときは省略（`null` 相当）。古いファイルにキーが無くても読める |
 | `updated_at` | RFC3339(UTC) | この worktree の状態を更新した日時 |
 
 ## `status`: ブランチのライフサイクル状態

@@ -1,6 +1,89 @@
 use super::*;
 
 #[test]
+fn set_now_records_the_frame_render_time() {
+    let mut state = state();
+    let pinned = chrono::DateTime::parse_from_rfc3339("2026-06-27T09:00:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    state.set_now(pinned);
+    assert_eq!(state.now(), pinned);
+}
+
+#[test]
+fn session_row_takes_the_freshest_worktree_as_its_updated_at() {
+    let mut state = state();
+    let older = chrono::DateTime::parse_from_rfc3339("2026-06-20T00:00:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    let newer = chrono::DateTime::parse_from_rfc3339("2026-06-25T00:00:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    let mut session = session_record("multi", 0);
+    let mut wt_old = worktree("multi");
+    wt_old.updated_at = older;
+    let mut wt_new = worktree("multi");
+    wt_new.updated_at = newer;
+    session.worktrees = vec![wt_old, wt_new];
+    state.restore_sessions(vec![session]);
+    // The collapsed row's freshness is the most-recently-touched repository, not
+    // the session's creation time nor the first worktree's.
+    assert_eq!(state.list().worktrees()[0].updated_at, newer);
+}
+
+#[test]
+fn session_row_with_no_worktrees_falls_back_to_the_created_at() {
+    let mut state = state();
+    let created = chrono::DateTime::parse_from_rfc3339("2026-06-01T00:00:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    let mut session = session_record("empty", 0);
+    session.worktrees = vec![];
+    session.created_at = created;
+    state.restore_sessions(vec![session]);
+    assert_eq!(state.list().worktrees()[0].updated_at, created);
+}
+
+#[test]
+fn session_row_sums_ahead_behind_across_the_sessions_worktrees() {
+    use crate::domain::workspace_state::AheadBehind;
+    let mut state = state();
+    let mut session = session_record("multi", 0);
+    let mut a = worktree("multi");
+    a.ahead_behind = Some(AheadBehind {
+        ahead: 2,
+        behind: 1,
+    });
+    let mut b = worktree("multi");
+    b.ahead_behind = Some(AheadBehind {
+        ahead: 3,
+        behind: 0,
+    });
+    session.worktrees = vec![a, b];
+    state.restore_sessions(vec![session]);
+    assert_eq!(
+        state.list().worktrees()[0].ahead_behind,
+        Some(AheadBehind {
+            ahead: 5,
+            behind: 1
+        })
+    );
+}
+
+#[test]
+fn rebuilding_the_list_marks_rows_whose_session_carries_a_note() {
+    let mut state = state();
+    let mut alpha = session_record("alpha", 1);
+    alpha.note = Some("a memo".to_string());
+    let beta = session_record("beta", 1); // no note
+    state.restore_sessions(vec![alpha, beta]);
+    // Row 0 maps to alpha (note), row 1 to beta (none); the pane shows the memo
+    // marker only for the session that has one.
+    assert!(state.list().has_note(0));
+    assert!(!state.list().has_note(1));
+}
+
+#[test]
 fn switch_begin_note_opens_the_editor_prefilled_with_the_sessions_note() {
     let mut state = state_on_alpha();
     assert!(state.switch_begin_note());
