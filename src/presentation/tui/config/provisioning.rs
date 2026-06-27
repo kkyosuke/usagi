@@ -21,7 +21,7 @@ use crate::usecase::local_llm;
 /// paints over the TUI. Errors if an install is already in flight.
 pub(super) fn start_install_runtime(password: &str) -> Result<()> {
     let handle = install_task::handle();
-    if !handle.begin("ollama") {
+    if !handle.begin("LLM 導入中… ollama") {
         return Err(anyhow::anyhow!("インストールは既に実行中です"));
     }
     let password_owned = password.to_string();
@@ -48,7 +48,7 @@ pub(super) fn start_install_runtime(password: &str) -> Result<()> {
 /// install is already in flight.
 pub(super) fn start_pull_model(model: &str) -> Result<()> {
     let handle = install_task::handle();
-    if !handle.begin(model) {
+    if !handle.begin(&format!("LLM 導入中… {model}")) {
         return Err(anyhow::anyhow!("インストールは既に実行中です"));
     }
     let model_owned = model.to_string();

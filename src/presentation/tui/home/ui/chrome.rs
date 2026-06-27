@@ -13,6 +13,7 @@ use super::{
     clip_to_width, pad_to_width, HINT_INDENT, HINT_MAX, HINT_NAME_COL, REMOVE_MODAL_VISIBLE,
 };
 use crate::domain::settings::KeyScheme;
+use crate::domain::version::Version;
 use crate::presentation::tui::widgets;
 
 /// Minimum / maximum display width of the active-session-name field in the
@@ -570,6 +571,31 @@ pub(super) fn quit_confirm_frame(raw_height: usize, raw_width: usize, live: usiz
         ]
     };
     widgets::render_modal(raw_height, raw_width, "Quit usagi?", INNER, &body)
+}
+
+/// Builds the centred update-confirmation modal, raised by clicking the sidebar
+/// mascot while it announces an available release. `latest` is the version that
+/// would be installed; confirming re-runs the install script to replace the
+/// binary, which only takes effect after a restart (so the body says as much).
+pub(super) fn update_confirm_frame(
+    raw_height: usize,
+    raw_width: usize,
+    latest: &Version,
+) -> Vec<String> {
+    // Wide enough for the longest body line ("Download it and replace this build?"
+    // = 35 columns) with room to spare.
+    const INNER: usize = 40;
+    let body = vec![
+        style(format!("最新版 v{latest} があるよ。"))
+            .dim()
+            .to_string(),
+        String::new(),
+        style("ダウンロードして入れ替える？").to_string(),
+        style("（反映には usagi の再起動が必要）").dim().to_string(),
+        String::new(),
+        style("y / Enter: 更新   n / Esc: やめる").dim().to_string(),
+    ];
+    widgets::render_modal(raw_height, raw_width, "アップデート", INNER, &body)
 }
 
 /// Inner (content) width of the text modal box, before the borders and the

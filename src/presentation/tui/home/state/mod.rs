@@ -398,6 +398,13 @@ pub struct HomeState {
     /// already shown, and cancelling it returns to that overlay rather than
     /// closing it, so the two are independent.
     quit_confirm: bool,
+    /// Whether the update-confirmation modal is open. Raised by clicking the
+    /// sidebar mascot while it is announcing an available update (see
+    /// [`update`](Self::update)); confirming it runs the self-update. Like
+    /// [`quit_confirm`](Self::quit_confirm) it is a full-screen modal tracked as a
+    /// flag rather than an [`Overlay`], and the two never coexist (the mascot is
+    /// not clickable while the quit modal is up).
+    update_confirm: bool,
     /// The engagement to persist for restore when the next quit is confirmed,
     /// armed only when the live mode would otherwise be lost. A quit from 没入
     /// (Attached) drops to [`Mode::Focus`] on its way to the quit modal, so the
@@ -589,6 +596,7 @@ impl HomeState {
             note_hidden: false,
             overlay: Overlay::default(),
             quit_confirm: false,
+            update_confirm: false,
             pending_resume: None,
             resume_attach: false,
             command_open: false,
@@ -1479,6 +1487,37 @@ impl HomeState {
     pub fn cancel_quit_confirm(&mut self) {
         self.quit_confirm = false;
         self.pending_resume = None;
+    }
+
+    /// Whether the update-confirmation modal is open.
+    pub fn update_confirm(&self) -> bool {
+        self.update_confirm
+    }
+
+    /// Open the update-confirmation modal — the user clicked the mascot while it
+    /// was announcing an available update and is asked to confirm before the
+    /// self-update runs.
+    pub fn open_update_confirm(&mut self) {
+        self.update_confirm = true;
+    }
+
+    /// Dismiss the update-confirmation modal (cancelled, or the update was
+    /// dispatched), returning to the normal screen.
+    pub fn cancel_update_confirm(&mut self) {
+        self.update_confirm = false;
+    }
+
+    /// React to a click on the resting sidebar mascot: when it is announcing an
+    /// available update ([`update`](Self::update) is `Some`), raise the
+    /// update-confirmation modal; otherwise play a one-shot click reaction. The
+    /// event loop calls this on a hit so the rabbit either offers the update or
+    /// just does something cute back.
+    pub fn click_mascot(&mut self, now: Instant) {
+        if self.update.is_some() {
+            self.open_update_confirm();
+        } else {
+            self.kick_mascot_reaction(now);
+        }
     }
 
     /// Arm [`ResumeLevel::Attached`] to be persisted when the next quit is

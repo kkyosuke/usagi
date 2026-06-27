@@ -8,6 +8,7 @@ pub mod local_llm;
 pub mod memory;
 pub mod project;
 pub mod search;
+pub mod self_update;
 pub mod session;
 pub mod settings;
 pub mod update;
