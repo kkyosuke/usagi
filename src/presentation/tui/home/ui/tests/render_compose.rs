@@ -209,6 +209,20 @@ fn render_frame_rests_the_workspace_total_beside_the_mascot() {
 }
 
 #[test]
+fn render_frame_floats_the_pr_popup_only_while_a_pr_row_is_hovered() {
+    let mut state = state_with(vec![worktree_with_pr(412)]);
+    // Without a hover the row shows only the folded `<icon> <count>` badge — the
+    // expanded `#412` lives in the popup, which is not drawn yet.
+    let resting = stripped(&render_frame(24, 120, &state));
+    assert!(!resting.contains("#412"));
+    // Pointing the hover at the session floats its `#<number>` list in a titled box.
+    assert!(state.set_pr_hover(Some(0)));
+    let hovered = stripped(&render_frame(24, 120, &state));
+    assert!(hovered.contains("#412"));
+    assert!(hovered.contains("PR"));
+}
+
+#[test]
 fn render_frame_survives_a_short_terminal() {
     let state = state_with(Vec::new());
     let frame = render_frame(3, 80, &state);

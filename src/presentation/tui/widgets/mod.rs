@@ -382,9 +382,41 @@ pub fn overlay_centered(base: &mut [String], width: usize, block: &[String]) {
         return;
     }
     let left = centered_padding(width, block_w);
-    let right_start = left + block_w;
     // Centre vertically over the frame, the same maths [`render_modal`] uses.
     let top = base.len().saturating_sub(block.len()) / 2;
+    overlay_block(base, top, left, block_w, block);
+}
+
+/// Composites the pre-sized `block` onto `base` with its top-left at `(top,
+/// left)`, **clamped** so the whole block stays on screen: `left` is pulled back
+/// so the block's right edge fits `width`, and `top` is pulled up so its bottom
+/// fits `base`'s height. Each box row replaces only the columns it spans (the base
+/// content to its left and right survives), the same compositing
+/// [`overlay_centered`] does — but at an arbitrary anchor, for a floating tooltip
+/// (the sidebar's PR hover popup) rather than a centred modal. The block is
+/// skipped when empty or wider than the screen.
+pub fn overlay_at(base: &mut [String], width: usize, top: usize, left: usize, block: &[String]) {
+    let block_w = block
+        .iter()
+        .map(|line| console::measure_text_width(line))
+        .max()
+        .unwrap_or(0);
+    if block_w == 0 || block_w > width {
+        return;
+    }
+    // Pull the anchor back so the block never spills past the right edge or below
+    // the last row — a popup anchored near the bottom-right still shows in full.
+    let left = left.min(width - block_w);
+    let top = top.min(base.len().saturating_sub(block.len()));
+    overlay_block(base, top, left, block_w, block);
+}
+
+/// Shared compositor for the floating overlays: writes each `block` row onto
+/// `base` from `top` down, its left edge at column `left`, keeping the base
+/// columns to the block's left and right. `block_w` is the block's display width
+/// (its rows are assumed that wide, as [`boxed`] produces).
+fn overlay_block(base: &mut [String], top: usize, left: usize, block_w: usize, block: &[String]) {
+    let right_start = left + block_w;
     for (offset, segment) in block.iter().enumerate() {
         let Some(row) = base.get_mut(top + offset) else {
             break;
@@ -1104,6 +1136,58 @@ mod tests {
         );
         assert!(console::strip_ansi_codes(&base[0]).contains('A'));
         assert_eq!(base.len(), 1);
+    }
+
+    #[test]
+    fn overlay_at_anchors_a_box_at_the_given_cell_keeping_the_surrounding_content() {
+        // The box is placed with its top-left at (1, 8): rows 1..4 carry it, and on
+        // those rows the base columns to its left and right survive.
+        let mut base = vec!["L".repeat(20); 5];
+        let block = vec!["┌──┐".to_string(), "│xy│".to_string(), "└──┘".to_string()];
+        overlay_at(&mut base, 20, 1, 8, &block);
+        assert_eq!(
+            base[0],
+            "L".repeat(20),
+            "the row above the box is untouched"
+        );
+        assert_eq!(
+            base[4],
+            "L".repeat(20),
+            "the row below the box is untouched"
+        );
+        let mid = console::strip_ansi_codes(&base[2]);
+        assert!(
+            mid.starts_with("LLLLLLLL"),
+            "the eight columns left of the box survive"
+        );
+        assert!(mid.contains("│xy│"));
+        assert_eq!(
+            console::measure_text_width(&mid),
+            20,
+            "the row stays full width"
+        );
+    }
+
+    #[test]
+    fn overlay_at_clamps_the_anchor_so_the_box_stays_on_screen() {
+        // An anchor past the right / bottom edge is pulled back so the whole box
+        // still shows: width 10, a 4-wide box asked for at column 9 lands at 6
+        // (10 - 4); three box rows asked for at row 4 of a 5-row base land at row 2.
+        let mut base = vec!["..........".to_string(); 5];
+        let block = vec!["[xx]".to_string(), "[yy]".to_string(), "[zz]".to_string()];
+        overlay_at(&mut base, 10, 4, 9, &block);
+        // Rows 2..5 carry the box; row 1 is untouched.
+        assert_eq!(base[1], "..........");
+        assert!(console::strip_ansi_codes(&base[2]).ends_with("[xx]"));
+        assert!(console::strip_ansi_codes(&base[4]).ends_with("[zz]"));
+    }
+
+    #[test]
+    fn overlay_at_is_skipped_when_empty_or_wider_than_the_screen() {
+        let mut base = vec!["keep".to_string()];
+        overlay_at(&mut base, 3, 0, 0, &["WIDE".to_string()]);
+        overlay_at(&mut base, 80, 0, 0, &[]);
+        assert_eq!(base[0], "keep");
     }
 
     #[test]

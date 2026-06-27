@@ -418,7 +418,8 @@ fn read_x10(
 
 /// Build an [`Input`] from a decoded button code, 1-based coordinates, and the
 /// press/release flag: a wheel turn becomes a [`ScrollEvent`], a left-button
-/// press a [`ClickEvent`], and anything else `None` (so it is swallowed).
+/// press a [`ClickEvent`], a bare pointer move an [`Input::Hover`], and anything
+/// else `None` (so it is swallowed).
 fn mouse_event(cb: u32, cx: u32, cy: u32, release: bool) -> Option<Input> {
     let col = cx.saturating_sub(1).min(u16::MAX as u32) as u16;
     let row = cy.saturating_sub(1).min(u16::MAX as u32) as u16;
@@ -442,6 +443,14 @@ fn mouse_event(cb: u32, cx: u32, cy: u32, release: bool) -> Option<Input> {
     // event.
     if !release && cb & 0x20 == 0 && cb & 0b11 == 0 {
         return Some(Input::Click(ClickEvent { col, row }));
+    }
+    // A bare pointer move (DECSET 1003 any-event tracking): the motion bit (32) is
+    // set with no button held — the low two bits read as the "released / no button"
+    // code (3). Surface it as a hover so the home loop can drive the sidebar PR
+    // popup. A drag (motion *with* a held button) keeps the low bits of that button
+    // and so falls through to `None`, dropped like before.
+    if cb & 0x20 != 0 && cb & 0b11 == 0b11 {
+        return Some(Input::Hover(ClickEvent { col, row }));
     }
     None
 }
@@ -589,12 +598,20 @@ mod tests {
     }
 
     #[test]
-    fn sgr_motion_report_is_swallowed() {
-        // A drag / motion report (bit 5, cb 32) is dropped, and the following key
-        // is returned.
+    fn sgr_drag_report_is_swallowed() {
+        // A drag (motion bit 32 with the left button held, low bits 0) is dropped on
+        // the management screens, and the following key is returned.
         let mut keys = sgr(32, 1, 1);
         keys.push(Key::Char('q'));
         assert_eq!(drive(keys), Input::Key(Key::Char('q')));
+    }
+
+    #[test]
+    fn sgr_bare_motion_becomes_a_hover_at_its_position() {
+        // A bare pointer move (motion bit 32 with no button held, low bits 3 → cb
+        // 35) at column 6, row 9 (1-based) surfaces as a hover at the 0-based cell.
+        let input = drive(sgr(35, 6, 9));
+        assert_eq!(input, Input::Hover(ClickEvent { col: 5, row: 8 }));
     }
 
     #[test]
@@ -675,6 +692,18 @@ mod tests {
             Key::Char('!'),
         ];
         assert_eq!(drive(keys), Input::Click(ClickEvent { col: 0, row: 0 }));
+    }
+
+    #[test]
+    fn x10_bare_motion_becomes_a_hover() {
+        // `ESC [ M Cb Cx Cy`: a bare move is cb 35 (+32 = 'C'); column/row 1 are
+        // (1 + 32) = '!'. The report surfaces as a hover at the 0-based cell.
+        let keys = vec![
+            Key::UnknownEscSeq(vec!['[', 'M', 'C']), // cb 35 (67 = 'C')
+            Key::Char('!'),
+            Key::Char('!'),
+        ];
+        assert_eq!(drive(keys), Input::Hover(ClickEvent { col: 0, row: 0 }));
     }
 
     #[test]

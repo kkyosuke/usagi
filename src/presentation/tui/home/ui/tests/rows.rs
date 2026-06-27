@@ -1334,9 +1334,9 @@ fn left_pane_fades_every_row_but_the_cursor_when_asked() {
 
 #[test]
 fn left_pane_shows_the_pr_badge_for_a_session_that_has_one() {
-    // A session whose worktree carries a PR renders `#<number>` on its detail line;
-    // a session without one shows no `#` badge. `left_pane` sizes the PR column
-    // (via `detail_cols`) and `worktree_row` fills the `pr_cell`.
+    // A session whose worktree carries a PR renders the `<icon> <count>` badge on
+    // its detail line; a session without one shows no badge. `left_pane` sizes the
+    // PR column (via `detail_cols`) and `worktree_row` fills the `pr_cell`.
     let list = list_with(vec![
         worktree_with_pr(412),
         worktree(Some("plain"), false, BranchStatus::Local),
@@ -1355,10 +1355,10 @@ fn left_pane_shows_the_pr_badge_for_a_session_that_has_one() {
         Utc::now(),
     );
     let rendered = stripped(&lines);
-    // The first session (rows 3,4 after the root pair + divider) shows `#412`.
-    assert!(rendered.contains("#412"));
-    // The plain session contributes no PR, so there is exactly one `#` on screen.
-    assert_eq!(rendered.matches('#').count(), 1);
+    // The first session (rows 3,4 after the root pair + divider) shows `<icon> 1`.
+    assert!(rendered.contains(format!("{PR_ICON} 1").as_str()));
+    // The plain session contributes no PR, so the icon appears exactly once.
+    assert_eq!(rendered.matches(PR_ICON).count(), 1);
 }
 
 /// An attached (没入) state at 120×24 with the full sidebar, listing a session that
@@ -1423,6 +1423,26 @@ fn sidebar_pr_links_at_is_empty_on_the_collapsed_rail() {
     // The rail shows no PR badge, so a click there opens nothing.
     state.set_sidebar(Sidebar::Rail);
     assert!(sidebar_pr_links_at(&state, 24, 120, 2, 6).is_empty());
+}
+
+#[test]
+fn sidebar_pr_hover_at_maps_a_pr_row_to_its_session_and_misses_elsewhere() {
+    let state = attached_with_pr_sidebar();
+    // Both rows of the PR-bearing session (rows 6 and 7) hover its index.
+    assert_eq!(sidebar_pr_hover_at(&state, 24, 120, 2, 6), Some(0));
+    assert_eq!(sidebar_pr_hover_at(&state, 24, 120, 30, 7), Some(0));
+    // The PR-less second session (rows 9–11), the root entry / divider, and a row
+    // past the list all raise no popup.
+    assert_eq!(sidebar_pr_hover_at(&state, 24, 120, 2, 9), None);
+    assert_eq!(sidebar_pr_hover_at(&state, 24, 120, 2, 3), None);
+    assert_eq!(sidebar_pr_hover_at(&state, 24, 120, 2, 5), None);
+    assert_eq!(sidebar_pr_hover_at(&state, 24, 120, 2, 12), None);
+    // Off the sidebar (right pane / chrome) and on the collapsed rail, nothing.
+    assert_eq!(sidebar_pr_hover_at(&state, 24, 120, 40, 6), None);
+    assert_eq!(sidebar_pr_hover_at(&state, 24, 120, 2, 1), None);
+    let mut rail = attached_with_pr_sidebar();
+    rail.set_sidebar(Sidebar::Rail);
+    assert_eq!(sidebar_pr_hover_at(&rail, 24, 120, 2, 6), None);
 }
 
 #[test]

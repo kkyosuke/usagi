@@ -314,8 +314,8 @@ pub(super) fn worktree_row(
 
     // Line 2 spells out the agent state with its icon (blank when absent) on the
     // left, and a right-aligned cluster of the freshness label (`Nmin ago`), the
-    // commit-divergence marker (`↑N ↓M`), the `+N -M` diff badge, and the `#N` PR
-    // badge. Each field sits in a fixed-width column sized once per render (`cols`),
+    // commit-divergence marker (`↑N ↓M`), the `+N -M` diff badge, and the
+    // `<icon> <count>` PR badge. Each field sits in a fixed-width column sized once per render (`cols`),
     // so a session's time, commits, diff, and PR always land in the same place no
     // matter how many changed lines or how long ago it was touched. Only the active
     // bar runs down to it — the `>` cursor stays a single point on line 1, so the
@@ -385,42 +385,47 @@ pub(super) struct DetailCols {
     /// Digit widths of the diff `+N` / `-M` counts; `added == 0` drops the badge.
     added: usize,
     removed: usize,
-    /// Display width of the `#N` PR cell (`#` + the widest number's digits); 0 = no
-    /// visible session has a PR, so the column is dropped.
+    /// Display width of the `<icon> <count>` PR badge (the glyph, a space, and the
+    /// widest count's digits); 0 = no visible session has a PR, so the column is
+    /// dropped.
     pr: usize,
 }
 
-/// The fixed-width pull-request cell for a worktree's [`PrLink`]s: each PR as
-/// `#<number>` (blue, underlined to read as a link), space-joined and right-aligned
-/// in `width` display columns so the badges line up down the list. A row with no PR
-/// fills the same width with blanks, holding the column. `width` is 0 (and the cell
-/// omitted) when no visible session carries a PR.
+/// Nerd Font glyph leading the pull-request badge — a git pull-request icon in
+/// place of spelling out `PR`, the same icon-led style the git status and resource
+/// fields use. Needs a patched [Nerd Font](https://www.nerdfonts.com/) to render;
+/// without one the terminal shows a fallback box, but the count beside it still
+/// carries the meaning.
+pub(super) const PR_ICON: char = '\u{ea64}'; // nf-cod-git_pull_request
+
+/// The fixed-width pull-request cell for a worktree's [`PrLink`]s: a single
+/// `<icon> <count>` badge (blue, underlined to read as a link) — the PR glyph and
+/// how many PRs the session carries — right-aligned in `width` display columns so
+/// the badges line up down the list. Folding several PRs into one count keeps the
+/// detail line from being crowded out by a long `#442 #447 …` run (the full list
+/// is one hover away; see [`sidebar_pr_hover_at`]). A row with no PR fills the same
+/// width with blanks, holding the column. `width` is 0 (and the cell omitted) when
+/// no visible session carries a PR.
 fn pr_cell(prs: &[PrLink], width: usize) -> String {
     if prs.is_empty() {
         return " ".repeat(width);
     }
-    let joined = prs
-        .iter()
-        .map(|pr| {
-            style(format!("#{}", pr.number))
-                .blue()
-                .underlined()
-                .to_string()
-        })
-        .collect::<Vec<_>>()
-        .join(" ");
-    rpad(&joined, width)
+    let badge = style(format!("{PR_ICON} {}", prs.len()))
+        .blue()
+        .underlined()
+        .to_string();
+    rpad(&badge, width)
 }
 
-/// The display width the `#<number>` badges of `prs` occupy when space-joined —
-/// each badge is `#` + the number's digits, with a one-space gap between badges.
-/// `0` for no PR. Used to size the fixed [`DetailCols::pr`] column.
+/// The display width the `<icon> <count>` PR badge occupies: the glyph, a space,
+/// and the count's digits. `0` for no PR. Used to size the fixed
+/// [`DetailCols::pr`] column.
 fn pr_width(prs: &[PrLink]) -> usize {
     if prs.is_empty() {
         return 0;
     }
-    let badges: usize = prs.iter().map(|pr| 1 + digits(pr.number as usize)).sum();
-    badges + (prs.len() - 1)
+    // icon (1 column) + space + the count's digits.
+    2 + digits(prs.len())
 }
 
 impl DetailCols {
@@ -454,7 +459,7 @@ impl DetailCols {
 
 /// One visible session's inputs to [`detail_cols`]: when it was last touched, its
 /// diff against the default, its commit divergence, and the display width of its
-/// `#N` PR badges (see [`pr_width`]).
+/// `<icon> <count>` PR badge (see [`pr_width`]).
 type ClusterData = (DateTime<Utc>, Option<DiffStat>, Option<AheadBehind>, usize);
 
 /// Measures the fixed [`DetailCols`] for a render: the widest freshness label, the
@@ -489,7 +494,7 @@ fn detail_cols(
                 cols.behind = cols.behind.max(digits(ab.behind));
             }
         }
-        // The widest joined `#N … #M` badge set across the visible sessions.
+        // The widest `<icon> <count>` PR badge across the visible sessions.
         cols.pr = cols.pr.max(*pr_w);
     }
     // Trim low-priority columns (time, then commits) until the cluster fits beside
@@ -1117,30 +1122,139 @@ pub(in crate::presentation::tui::home) fn sidebar_pr_links_at(
     col: u16,
     row: u16,
 ) -> Vec<String> {
-    // Only the full sidebar draws the `#N` badges; the collapsed rail shows no PR,
-    // so a click there maps to nothing.
+    match sidebar_pr_worktree_at(state, raw_height, raw_width, col, row) {
+        Some(idx) => state.list().worktrees()[idx]
+            .pr
+            .iter()
+            .map(|pr| pr.url.clone())
+            .collect(),
+        None => Vec::new(),
+    }
+}
+
+/// The worktree (by index in the list) the 0-based screen (`col`, `row`) lands on
+/// **when it carries a PR**, or `None` otherwise — the shared hit-test behind both
+/// the PR click ([`sidebar_pr_links_at`], which opens its URLs) and the PR hover
+/// popup ([`sidebar_pr_hover_at`], which floats its `#<number>` list). The whole
+/// session entry is the target, since the `#<number>` badge is the only sidebar
+/// affordance and there is nothing else to disambiguate against.
+///
+/// Only the full sidebar draws the badge; the collapsed rail shows no PR, so a
+/// point there maps to nothing. The geometry mirrors what [`super::render_frame`]
+/// lays out: the two-pane body begins at row [`BODY_TOP`] (below the title bar,
+/// mode ladder, and blank separator) and is [`super::body_rows_for`] rows tall; the
+/// left pane is the first `left_w` columns. Within it the entries stack as
+/// [`left_pane`] builds them — the root entry (two rows), a divider (one row), then
+/// [`SESSION_ROWS`] rows per worktree (identity, detail, and the CPU / memory line).
+fn sidebar_pr_worktree_at(
+    state: &HomeState,
+    raw_height: usize,
+    raw_width: usize,
+    col: u16,
+    row: u16,
+) -> Option<usize> {
     if state.sidebar() != Sidebar::Full {
-        return Vec::new();
+        return None;
     }
     let (height, width) = widgets::normalize_size(raw_height, raw_width);
     let (left_w, _) = super::layout(width, Sidebar::Full);
-    // The click must land inside the left pane, on a body row.
+    // The point must land inside the left pane, on a body row.
     if (col as usize) >= left_w || row < BODY_TOP {
-        return Vec::new();
+        return None;
     }
     let line = (row - BODY_TOP) as usize;
     if line >= super::body_rows_for(height) {
-        return Vec::new();
+        return None;
     }
     // Lines 0..2 are the root entry and the divider; worktree rows start at line 3,
     // [`SESSION_ROWS`] lines each.
-    let Some(entry) = line.checked_sub(ROOT_ENTRY_LINES) else {
+    let entry = line.checked_sub(ROOT_ENTRY_LINES)?;
+    let idx = entry / SESSION_ROWS;
+    // The badge (and so the click / hover target) only exists on a row with a PR.
+    state
+        .list()
+        .worktrees()
+        .get(idx)
+        .filter(|wt| !wt.pr.is_empty())
+        .map(|_| idx)
+}
+
+/// The worktree whose PR hover popup the pointer at the 0-based screen (`col`,
+/// `row`) should raise, or `None` when it is not over a PR-bearing session's row.
+/// The home loop feeds pointer moves here and stores the result in
+/// [`HomeState::set_pr_hover`]; the renderer then floats that session's full
+/// `#<number>` list (folded to an `<icon> <count>` badge in the row itself) beside
+/// it. Shares the [`sidebar_pr_worktree_at`] hit-test with the PR click, so a hover
+/// highlights exactly the rows a click would open.
+pub(in crate::presentation::tui::home) fn sidebar_pr_hover_at(
+    state: &HomeState,
+    raw_height: usize,
+    raw_width: usize,
+    col: u16,
+    row: u16,
+) -> Option<usize> {
+    sidebar_pr_worktree_at(state, raw_height, raw_width, col, row)
+}
+
+/// The widest a PR hover popup's content grows before its `#<number>` list wraps to
+/// another line, so a session with many PRs stays a tidy box rather than one long
+/// row.
+const PR_POPUP_INNER: usize = 28;
+
+/// Builds the PR hover popup for a session's `prs`: its `#<number>` links (blue,
+/// underlined), space-joined and wrapped to [`PR_POPUP_INNER`] columns, wrapped in
+/// a titled box ready to float beside the hovered row (see
+/// [`sidebar_pr_hover_at`]). Empty `prs` yields no box (the popup only shows for a
+/// PR-bearing session), so the overlay is a no-op.
+pub(in crate::presentation::tui::home) fn pr_hover_popup(prs: &[PrLink]) -> Vec<String> {
+    if prs.is_empty() {
         return Vec::new();
-    };
-    match state.list().worktrees().get(entry / SESSION_ROWS) {
-        Some(wt) => wt.pr.iter().map(|pr| pr.url.clone()).collect(),
-        None => Vec::new(),
     }
+    // Greedily pack `#N` tokens onto lines up to the inner cap; a token's plain
+    // width is `#` + its digits, with a one-space gap between tokens.
+    let mut rows: Vec<Vec<&PrLink>> = Vec::new();
+    let mut cur: Vec<&PrLink> = Vec::new();
+    let mut cur_w = 0usize;
+    for pr in prs {
+        let tok = 1 + digits(pr.number as usize);
+        if cur.is_empty() {
+            cur_w = tok;
+        } else if cur_w + 1 + tok > PR_POPUP_INNER {
+            rows.push(std::mem::take(&mut cur));
+            cur_w = tok;
+        } else {
+            cur_w += 1 + tok;
+        }
+        cur.push(pr);
+    }
+    rows.push(cur);
+    // Hug the content: the box is as wide as its widest line, never past the cap.
+    let inner = rows
+        .iter()
+        .map(|r| {
+            r.iter()
+                .map(|pr| 1 + digits(pr.number as usize))
+                .sum::<usize>()
+                + (r.len() - 1)
+        })
+        .max()
+        .unwrap_or(0)
+        .min(PR_POPUP_INNER);
+    let lines: Vec<String> = rows
+        .iter()
+        .map(|r| {
+            r.iter()
+                .map(|pr| {
+                    style(format!("#{}", pr.number))
+                        .blue()
+                        .underlined()
+                        .to_string()
+                })
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .collect();
+    widgets::boxed("PR", inner, &lines)
 }
 
 /// The 0-based screen row the two-pane body begins at, matching the title bar,
@@ -1151,7 +1265,7 @@ const BODY_TOP: u16 = 3;
 /// Lines the left pane spends before the first worktree row: the root entry (two
 /// rows) and the divider beneath it. Worktree `i` then occupies the
 /// [`SESSION_ROWS`] lines starting at `ROOT_ENTRY_LINES + SESSION_ROWS * i`.
-const ROOT_ENTRY_LINES: usize = 3;
+pub(super) const ROOT_ENTRY_LINES: usize = 3;
 
 /// Column widths for the fixed-width header identity. The session name is clipped
 /// and every field is padded to a constant width, so the identity block is the
@@ -2221,7 +2335,7 @@ mod tests {
                     ahead: 2,
                     behind: 0,
                 }),
-                pr_width(&[pr(7)]), // "#7" → 2
+                pr_width(&[pr(7)]), // "<icon> 1" → 3
             ),
             (
                 at(now, 12),
@@ -2233,7 +2347,7 @@ mod tests {
                     ahead: 0,
                     behind: 13,
                 }),
-                pr_width(&[pr(412), pr(98)]), // "#412 #98" → 8
+                pr_width(&[pr(412), pr(98)]), // "<icon> 2" → 3
             ),
             // A session with neither a diff nor divergence nor PR: exercises every
             // empty arm so they contribute no columns.
@@ -2244,7 +2358,7 @@ mod tests {
         assert_eq!(cols.removed, 1); // "8" / "3"
         assert_eq!(cols.ahead, 1); // "2"
         assert_eq!(cols.behind, 2); // "13"
-        assert_eq!(cols.pr, 8); // widest is "#412 #98"
+        assert_eq!(cols.pr, 3); // "<icon> 2" — both sessions fold to one badge
         assert_eq!(
             cols.time,
             console::measure_text_width(&relative_time(now, at(now, 12))) // "12min ago"
@@ -2387,30 +2501,70 @@ mod tests {
     }
 
     #[test]
-    fn pr_cell_joins_badges_pads_the_column_and_blanks_when_absent() {
-        // One PR rides the right edge of its fixed column; a wider column left-pads
-        // with spaces so badges line up down the list.
-        let cell = pr_cell(&[pr(7)], 4);
-        assert_eq!(console::measure_text_width(&cell), 4);
-        assert_eq!(console::strip_ansi_codes(&cell), "  #7");
-        // Several PRs are space-joined as `#N #M`.
-        let many = pr_cell(&[pr(412), pr(98)], 8);
-        assert_eq!(console::strip_ansi_codes(&many), "#412 #98");
+    fn pr_cell_folds_prs_into_an_icon_and_count_and_blanks_when_absent() {
+        // One PR rides the right edge of its fixed column as `<icon> 1`; a wider
+        // column left-pads with spaces so badges line up down the list.
+        let cell = pr_cell(&[pr(7)], 5);
+        assert_eq!(console::measure_text_width(&cell), 5);
+        assert_eq!(
+            console::strip_ansi_codes(&cell),
+            format!("  {PR_ICON} 1").as_str()
+        );
+        // Several PRs fold into one `<icon> <count>` badge, not a `#N #M` run.
+        let many = pr_cell(&[pr(412), pr(98)], 3);
+        assert_eq!(
+            console::strip_ansi_codes(&many),
+            format!("{PR_ICON} 2").as_str()
+        );
         // No PR fills the same width with blanks, holding the column.
         assert_eq!(pr_cell(&[], 4), "    ");
     }
 
     #[test]
-    fn pr_width_sums_badges_with_gaps() {
+    fn pr_width_is_the_icon_space_and_count_digits() {
         assert_eq!(pr_width(&[]), 0);
-        assert_eq!(pr_width(&[pr(7)]), 2); // "#7"
-        assert_eq!(pr_width(&[pr(412), pr(98)]), 8); // "#412 #98"
+        assert_eq!(pr_width(&[pr(7)]), 3); // "<icon> 1"
+        assert_eq!(pr_width(&[pr(412), pr(98)]), 3); // "<icon> 2"
+                                                     // A count that reaches two digits widens by one.
+        let ten: Vec<PrLink> = (0..10).map(pr).collect();
+        assert_eq!(pr_width(&ten), 4); // "<icon> 10"
+    }
+
+    #[test]
+    fn pr_hover_popup_lists_the_numbers_in_a_titled_box() {
+        let popup = pr_hover_popup(&[pr(442), pr(447)]);
+        let plain: Vec<String> = popup
+            .iter()
+            .map(|l| console::strip_ansi_codes(l).into_owned())
+            .collect();
+        // The top border carries the `PR` title; a content row lists both numbers.
+        assert!(plain[0].contains("PR"));
+        assert!(plain
+            .iter()
+            .any(|l| l.contains("#442") && l.contains("#447")));
+        // No PR → no box, so the overlay is a no-op for a session without one.
+        assert!(pr_hover_popup(&[]).is_empty());
+    }
+
+    #[test]
+    fn pr_hover_popup_wraps_a_long_list_within_the_inner_cap() {
+        // Twenty `#1NN` badges (4 columns each) cannot fit one capped line, so they
+        // wrap onto several content rows.
+        let many: Vec<PrLink> = (100u32..120).map(pr).collect();
+        let popup = pr_hover_popup(&many);
+        // More than just the top + bottom border: the list spilled onto several rows.
+        assert!(popup.len() > 3);
+        // Every row (content and border alike) stays within the inner cap plus the
+        // two borders and a space of padding on each side.
+        for line in &popup {
+            assert!(console::measure_text_width(line) <= PR_POPUP_INNER + 4);
+        }
     }
 
     #[test]
     fn detail_content_keeps_the_pr_cell_at_the_right_edge() {
         // The PR cell, as the last in `cells`, lands flush against the right edge
-        // beside the diff badge (`+1 -2 #412 #98`).
+        // beside the diff badge (`+1 -2 <icon> 2`).
         let badge = diff_cell(
             Some(DiffStat {
                 added: 1,
@@ -2419,12 +2573,12 @@ mod tests {
             1,
             1,
         );
-        let cell = pr_cell(&[pr(412), pr(98)], 8);
+        let cell = pr_cell(&[pr(412), pr(98)], 3);
         let cells = vec![badge, cell];
         let line = detail_content(AgentState::Running, &cells, 40);
         let plain = console::strip_ansi_codes(&line);
         assert!(plain.starts_with("▶ running"));
-        assert!(plain.contains("+1 -2 #412 #98"));
-        assert!(plain.ends_with("#98"));
+        assert!(plain.contains(format!("+1 -2 {PR_ICON} 2").as_str()));
+        assert!(plain.ends_with(format!("{PR_ICON} 2").as_str()));
     }
 }
