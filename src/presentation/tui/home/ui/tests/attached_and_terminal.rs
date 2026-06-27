@@ -248,6 +248,29 @@ fn render_frame_rests_the_mascot_in_the_bottom_left_with_a_mode_face() {
 }
 
 #[test]
+fn render_frame_blinks_the_resting_mascot_after_an_interaction() {
+    use std::time::Instant;
+    // A kicked blink shuts the resting rabbit's eyes on the painted frame, so the
+    // mascot reacts to the user (here in the default 切替 browsing face).
+    let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Pushed)]);
+    let now = Instant::now();
+    state.kick_mascot_blink(now);
+    state.tick_mascot(now);
+    let blinked = stripped(&render_frame(24, 80, &state));
+    assert!(blinked.contains("(-.-)?"), "the rabbit blinks: {blinked}");
+}
+
+#[test]
+fn render_frame_rests_a_chibi_in_the_collapsed_rail() {
+    // Folded to the rail there is no room for the full mascot, so a tiny two-row
+    // chibi sits at the bottom of the strip instead — the usagi stays around.
+    let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Pushed)]);
+    state.set_sidebar(Sidebar::Rail);
+    let frame = stripped(&render_frame(24, 80, &state));
+    assert!(frame.contains("(･･)"), "the rail chibi is drawn: {frame}");
+}
+
+#[test]
 fn render_frame_keeps_a_blank_row_between_the_list_and_the_resting_mascot() {
     // A short list leaves the mascot resting at the bottom with at least one blank
     // sidebar row above its ears, so the art reads apart from the session list

@@ -18,7 +18,8 @@ fn field_labels_are_distinct() {
     assert_eq!(Field::LocalLlm.label(), "Local LLM");
     assert_eq!(Field::LocalLlmModel.label(), "Local LLM Model");
     assert_eq!(Field::RestorePanes.label(), "Restore Panes");
-    assert_eq!(Field::ALL.len(), 8);
+    assert_eq!(Field::MascotAnimation.label(), "Mascot Animation");
+    assert_eq!(Field::ALL.len(), 9);
 }
 
 #[test]
@@ -33,9 +34,9 @@ fn new_config_starts_at_the_top() {
     assert!(!config.is_dirty());
     assert!(config.local().is_none());
     assert!(config.selected_local_field().is_none());
-    // Global-only: eight field rows.
-    assert_eq!(config.rows().len(), 8);
-    assert_eq!(config.save_index(), 8);
+    // Global-only: nine field rows.
+    assert_eq!(config.rows().len(), 9);
+    assert_eq!(config.save_index(), 9);
 }
 
 #[test]
@@ -51,6 +52,8 @@ fn move_down_advances_through_fields_then_the_save_button_and_wraps() {
     assert_eq!(config.selected_field(), Some(Field::AgentCli));
     config.move_down();
     assert_eq!(config.selected_field(), Some(Field::SessionActionUi));
+    config.move_down();
+    assert_eq!(config.selected_field(), Some(Field::MascotAnimation));
     config.move_down();
     assert_eq!(config.selected_field(), Some(Field::LocalLlm));
     config.move_down();
@@ -74,6 +77,8 @@ fn move_up_wraps_to_the_save_button() {
     assert_eq!(config.selected_field(), Some(Field::LocalLlmModel));
     config.move_up();
     assert_eq!(config.selected_field(), Some(Field::LocalLlm));
+    config.move_up();
+    assert_eq!(config.selected_field(), Some(Field::MascotAnimation));
     config.move_up();
     assert_eq!(config.selected_field(), Some(Field::SessionActionUi));
     config.move_up();
@@ -122,6 +127,26 @@ fn restore_panes_field_toggles_and_reports_its_value() {
     // Toggling backward flips it back on.
     assert!(config.cycle_selected(false));
     assert_eq!(config.value_of(Field::RestorePanes), "On");
+}
+
+#[test]
+fn mascot_animation_field_toggles_and_reports_its_value() {
+    let mut config = config_with_workspaces(&[]);
+    while config.selected_field() != Some(Field::MascotAnimation) {
+        config.move_down();
+    }
+    // On by default, unchanged from the saved baseline.
+    assert_eq!(config.value_of(Field::MascotAnimation), "On");
+    assert!(!config.is_changed(Field::MascotAnimation));
+    // Toggling flips it off (direction is irrelevant for a boolean) and marks it
+    // changed.
+    assert!(config.cycle_selected(true));
+    assert_eq!(config.value_of(Field::MascotAnimation), "Off");
+    assert!(!config.settings().mascot_animation_enabled);
+    assert!(config.is_changed(Field::MascotAnimation));
+    // Toggling backward flips it back on.
+    assert!(config.cycle_selected(false));
+    assert_eq!(config.value_of(Field::MascotAnimation), "On");
 }
 
 #[test]
@@ -364,7 +389,7 @@ fn cycling_the_save_button_is_a_noop() {
 fn rows_render_global_field_values() {
     let config = config_with_workspaces(&["alpha"]);
     let rows = config.rows();
-    assert_eq!(rows.len(), 8);
+    assert_eq!(rows.len(), 9);
     assert_eq!(rows[0].label, "Theme");
     assert_eq!(rows[0].value, "System");
     assert_eq!(rows[3].label, "Restore Panes");
@@ -373,14 +398,16 @@ fn rows_render_global_field_values() {
     assert_eq!(rows[4].value, "Claude");
     assert_eq!(rows[5].label, "Session Action UI");
     assert_eq!(rows[5].value, "Menu");
+    assert_eq!(rows[6].label, "Mascot Animation");
+    assert_eq!(rows[6].value, "On");
     // The runtime is not yet installed: the Local LLM row offers "Install" and
     // the model row is inert (shown as "—") until the runtime is present.
-    assert_eq!(rows[6].label, "Local LLM");
-    assert_eq!(rows[6].value, "Install");
-    assert!(rows[6].action);
-    assert_eq!(rows[7].label, "Local LLM Model");
-    assert_eq!(rows[7].value, "—");
-    assert!(rows[7].disabled);
+    assert_eq!(rows[7].label, "Local LLM");
+    assert_eq!(rows[7].value, "Install");
+    assert!(rows[7].action);
+    assert_eq!(rows[8].label, "Local LLM Model");
+    assert_eq!(rows[8].value, "—");
+    assert!(rows[8].disabled);
     assert!(rows.iter().all(|r| !r.changed));
 }
 
