@@ -1363,7 +1363,7 @@ fn left_pane_shows_the_pr_badge_for_a_session_that_has_one() {
 
 /// An attached (没入) state at 120×24 with the full sidebar, listing a session that
 /// carries two PRs followed by one with no PR — the fixture the
-/// `sidebar_pr_links_at` click tests share. Worktree rows start at screen row 6
+/// `sidebar_pr_link_at` click tests share. Worktree rows start at screen row 6
 /// (the body begins at row 3; the root entry and divider take its first 3 lines),
 /// three screen rows each: the PR session at rows 6–8, the PR-less one at rows 9–11.
 fn attached_with_pr_sidebar() -> HomeState {
@@ -1382,47 +1382,88 @@ fn attached_with_pr_sidebar() -> HomeState {
 }
 
 #[test]
-fn sidebar_pr_links_at_opens_every_pr_of_the_clicked_session() {
+fn sidebar_pr_link_at_opens_the_clicked_badge_only() {
     let state = attached_with_pr_sidebar();
-    // Both lines of the session entry (rows 6 and 7) map to all of its PRs.
-    let urls = vec![
-        "https://github.com/o/r/pull/412".to_string(),
-        "https://github.com/o/other/pull/98".to_string(),
-    ];
-    assert_eq!(sidebar_pr_links_at(&state, 24, 120, 2, 6), urls);
-    assert_eq!(sidebar_pr_links_at(&state, 24, 120, 30, 7), urls);
+    // The left pane is 40 columns at width 120, so the badges seat flush at its
+    // right edge: `#412 #98` is 8 wide, starting at column 32 — `#412` over columns
+    // 32–35, a gap at 36, `#98` over 37–39. They sit on the entry's detail line
+    // (row 7), the second of its three rows.
+    assert_eq!(
+        sidebar_pr_link_at(&state, 24, 120, 33, 7).as_deref(),
+        Some("https://github.com/o/r/pull/412"),
+    );
+    assert_eq!(
+        sidebar_pr_link_at(&state, 24, 120, 38, 7).as_deref(),
+        Some("https://github.com/o/other/pull/98"),
+    );
+    // The one-space gap between the badges opens neither.
+    assert!(sidebar_pr_link_at(&state, 24, 120, 36, 7).is_none());
+    // Left of the badges (the agent-label side of the detail line) maps to nothing.
+    assert!(sidebar_pr_link_at(&state, 24, 120, 10, 7).is_none());
 }
 
 #[test]
-fn sidebar_pr_links_at_ignores_rows_without_a_pr() {
+fn sidebar_pr_link_at_ignores_the_rows_other_than_the_detail_line() {
     let state = attached_with_pr_sidebar();
-    // The second session (rows 9–11) has no PR.
-    assert!(sidebar_pr_links_at(&state, 24, 120, 2, 9).is_empty());
+    // The badge columns on the identity line (row 6) and the CPU / memory line
+    // (row 8) of the same session carry no badge, so a click there opens nothing.
+    assert!(sidebar_pr_link_at(&state, 24, 120, 33, 6).is_none());
+    assert!(sidebar_pr_link_at(&state, 24, 120, 33, 8).is_none());
+}
+
+#[test]
+fn sidebar_pr_link_at_ignores_rows_without_a_pr() {
+    let state = attached_with_pr_sidebar();
+    // The second session's detail line (row 10 of rows 9–11) has no PR.
+    assert!(sidebar_pr_link_at(&state, 24, 120, 33, 10).is_none());
     // The root entry (rows 3–4) and the divider (row 5) are not session rows.
-    assert!(sidebar_pr_links_at(&state, 24, 120, 2, 3).is_empty());
-    assert!(sidebar_pr_links_at(&state, 24, 120, 2, 5).is_empty());
+    assert!(sidebar_pr_link_at(&state, 24, 120, 33, 4).is_none());
+    assert!(sidebar_pr_link_at(&state, 24, 120, 33, 5).is_none());
     // A body row past the end of the session list maps to no worktree.
-    assert!(sidebar_pr_links_at(&state, 24, 120, 2, 12).is_empty());
+    assert!(sidebar_pr_link_at(&state, 24, 120, 33, 13).is_none());
 }
 
 #[test]
-fn sidebar_pr_links_at_ignores_clicks_off_the_sidebar() {
+fn sidebar_pr_link_at_ignores_clicks_off_the_sidebar() {
     let state = attached_with_pr_sidebar();
     // Left pane is 40 columns at width 120, so a click at column 40+ is the
     // divider / right pane, not a sidebar row.
-    assert!(sidebar_pr_links_at(&state, 24, 120, 40, 6).is_empty());
+    assert!(sidebar_pr_link_at(&state, 24, 120, 40, 7).is_none());
     // Rows above the body (the title bar / mode ladder / blank separator).
-    assert!(sidebar_pr_links_at(&state, 24, 120, 2, 1).is_empty());
+    assert!(sidebar_pr_link_at(&state, 24, 120, 33, 1).is_none());
     // A row below the two-pane body (past `body_rows`).
-    assert!(sidebar_pr_links_at(&state, 24, 120, 2, 22).is_empty());
+    assert!(sidebar_pr_link_at(&state, 24, 120, 33, 22).is_none());
 }
 
 #[test]
-fn sidebar_pr_links_at_is_empty_on_the_collapsed_rail() {
+fn sidebar_pr_link_at_is_empty_on_the_collapsed_rail() {
     let mut state = attached_with_pr_sidebar();
     // The rail shows no PR badge, so a click there opens nothing.
     state.set_sidebar(Sidebar::Rail);
-    assert!(sidebar_pr_links_at(&state, 24, 120, 2, 6).is_empty());
+    assert!(sidebar_pr_link_at(&state, 24, 120, 33, 7).is_none());
+}
+
+#[test]
+fn sidebar_pr_link_at_ignores_badges_too_wide_for_the_detail_area() {
+    // A session carrying more PRs than fit the 36-column detail area: their joined
+    // `#<number>` width (5 × `#NNNNNN` + gaps = 39) overruns it, so the cluster is
+    // clipped rather than drawn flush-right and the column math can't place the
+    // badges — a click opens nothing rather than guessing the wrong PR.
+    let mut wt = worktree_with_pr(123456);
+    for n in [234567, 345678, 456789, 567890] {
+        wt.pr.push(PrLink {
+            number: n,
+            url: format!("https://github.com/o/r/pull/{n}"),
+        });
+    }
+    let mut state = state_with(vec![
+        wt,
+        worktree(Some("plain"), false, BranchStatus::Local),
+    ]);
+    state.enter_focus(1);
+    state.show_attached();
+    assert!(sidebar_pr_link_at(&state, 24, 120, 33, 7).is_none());
+    assert!(sidebar_pr_link_at(&state, 24, 120, 39, 7).is_none());
 }
 
 #[test]

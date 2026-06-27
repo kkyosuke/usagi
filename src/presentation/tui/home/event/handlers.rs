@@ -6,7 +6,7 @@
 //! terminal (没入). All are pure aside from the injected callbacks, which they
 //! reach through the shared [`Wiring`] bundle.
 
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use anyhow::Result;
 use console::Key;
@@ -17,6 +17,7 @@ use crate::presentation::tui::io::screen::{self, FramePainter};
 use crate::domain::settings::{AgentCli, KeyScheme, SessionActionUi};
 
 use super::super::command::Effect;
+use super::super::pane_input::{is_double_click, DOUBLE_CLICK};
 use super::super::state::{HomeState, ModalSize, PaneExit, ReturnMode, ROOT_NAME};
 use super::super::terminal::tabs::TabNav;
 use super::super::ui;
@@ -541,19 +542,15 @@ fn focus_and_attach(
     }
 }
 
-/// How close two left clicks on the same session row must fall to count as a
-/// double click — the threshold separating a single click (select the row) from
-/// a double click (confirm, like `Enter`).
-const DOUBLE_CLICK: Duration = Duration::from_millis(400);
-
 /// Handle a left click that landed on the selectable session `row` in 切替
 /// (Switch): a single click selects the row (moves the cursor onto it), and a
 /// second click on the same row within [`DOUBLE_CLICK`] confirms it — focusing
 /// the session and attaching its pane when live, exactly like `Enter`.
 ///
 /// `last_click` carries the previous click's row and time across event-loop
-/// iterations so the double click can be detected; a confirm clears it so a third
-/// click starts a fresh single click rather than re-confirming.
+/// iterations so the double click can be detected (via [`is_double_click`], the
+/// shared core the 没入 pane reuses); a confirm clears it so a third click starts
+/// a fresh single click rather than re-confirming.
 pub(super) fn switch_click(
     term: &Term,
     state: &mut HomeState,
@@ -563,18 +560,11 @@ pub(super) fn switch_click(
     now: Instant,
     last_click: &mut Option<(usize, Instant)>,
 ) {
-    let is_double = matches!(
-        *last_click,
-        Some((prev_row, at)) if prev_row == row && now.duration_since(at) <= DOUBLE_CLICK
-    );
     // Always land the cursor on the clicked row first, so a double click confirms
     // the row it lands on and a single click just leaves it selected.
     state.switch_select(row);
-    if is_double {
-        *last_click = None;
+    if is_double_click(last_click, row, now, DOUBLE_CLICK) {
         focus_and_attach(term, state, painter, wiring, row);
-    } else {
-        *last_click = Some((row, now));
     }
 }
 
@@ -1011,6 +1001,8 @@ fn launch_pane(
 ///   action menu, leaving every pane alive in the pool.
 /// - [`PaneExit::ToPreviousSession`] — `Ctrl-^`: jump to the previously focused
 ///   session, re-attaching it when live (or 在席 when none was recorded).
+/// - [`PaneExit::ToSession`] — a double click on a sidebar session row: switch to
+///   that focus row, re-attaching it when live.
 /// - [`PaneExit::Quit`] — `Ctrl-Q`: leave the pane and raise the quit-confirmation
 ///   modal on the home screen (every pane stays alive in the pool until confirmed).
 fn open_pane(
@@ -1079,6 +1071,13 @@ fn open_pane(
                 Some(row) => focus_and_attach(term, state, painter, wiring, row),
                 None => state.leave_attached(),
             }
+        }
+        Ok(PaneExit::ToSession(row)) => {
+            // A double click on a sidebar session row in 没入: switch to that focus
+            // row, re-attaching it when live (like `Enter` in 切替, via
+            // `focus_and_attach`) — focusing records the session being left, so
+            // `Ctrl-^` can toggle back.
+            focus_and_attach(term, state, painter, wiring, row);
         }
         Ok(PaneExit::Quit) => {
             // `Ctrl-Q` in 没入: leave the pane (every shell / agent stays alive in

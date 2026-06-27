@@ -725,6 +725,12 @@ pub fn run(term: &Term, workspace: &Workspace, preload: Preload) -> Result<Outco
                         terminal::pane::PaneStep::PrevSession => {
                             return Ok(PaneExit::ToPreviousSession)
                         }
+                        // A double click on a sidebar session row: leave the pane so
+                        // the event loop re-roots on that focus row (attaching when
+                        // live), every pane staying alive in the pool (like `Ctrl-^`).
+                        terminal::pane::PaneStep::ToSession(row) => {
+                            return Ok(PaneExit::ToSession(row))
+                        }
                         // `Ctrl-Q`: leave 没入 to quit usagi. Every pane stays alive in
                         // the pool; the event loop raises the quit-confirmation modal.
                         terminal::pane::PaneStep::Quit => return Ok(PaneExit::Quit),

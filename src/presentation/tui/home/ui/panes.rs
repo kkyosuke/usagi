@@ -1095,53 +1095,82 @@ pub(in crate::presentation::tui::home) fn attached_tab_at(
 }
 
 /// The pull-request URL a left click at the 0-based screen (`col`, `row`) should
-/// open, or `None` when the click is not on a session row that carries a PR.
+/// open, or `None` when the click is not on a `#<number>` badge.
 ///
-/// The full sidebar shows each session's `#<number>` badges (the rail does not), so
-/// a click is mapped to a session's PRs only there. The whole session entry is the
-/// target — clicking anywhere on its rows opens its PRs — since the sidebar has no
-/// other click action to disambiguate against, and the `#<number>` badges are the
-/// affordance that marks the row as openable. A session may carry several PRs, so
-/// every recorded URL is returned (the caller opens each).
+/// The full sidebar draws each session's `#<number>` badges on its detail line (the
+/// rail draws none), so a badge is the *only* openable target — a click anywhere
+/// else on a session row maps to nothing, leaving the row free for selection. When a
+/// session carries several PRs only the badge actually under the pointer opens, so
+/// `#412 #98` opens whichever number was clicked rather than both.
 ///
 /// The geometry mirrors what [`super::render_frame`] lays out: the two-pane body
 /// begins at row [`BODY_TOP`] (below the title bar, mode ladder, and blank
 /// separator) and is [`super::body_rows_for`] rows tall; the left pane is the
 /// first `left_w` columns. Within it the entries stack as [`left_pane`] builds
 /// them — the root entry (two rows), a divider (one row), then [`SESSION_ROWS`]
-/// rows per worktree (identity, detail, and the CPU / memory line).
-pub(in crate::presentation::tui::home) fn sidebar_pr_links_at(
+/// rows per worktree (identity, detail, and the CPU / memory line). The `#<number>`
+/// badges are the right-aligned tail of the detail line's cluster, flush to the
+/// pane's right edge (`left_w`); each badge is `#` + the number's digits, joined by
+/// a single space (see [`pr_cell`] / [`pr_width`]).
+pub(in crate::presentation::tui::home) fn sidebar_pr_link_at(
     state: &HomeState,
     raw_height: usize,
     raw_width: usize,
     col: u16,
     row: u16,
-) -> Vec<String> {
+) -> Option<String> {
     // Only the full sidebar draws the `#N` badges; the collapsed rail shows no PR,
     // so a click there maps to nothing.
     if state.sidebar() != Sidebar::Full {
-        return Vec::new();
+        return None;
     }
     let (height, width) = widgets::normalize_size(raw_height, raw_width);
     let (left_w, _) = super::layout(width, Sidebar::Full);
+    let col = col as usize;
     // The click must land inside the left pane, on a body row.
-    if (col as usize) >= left_w || row < BODY_TOP {
-        return Vec::new();
+    if col >= left_w || row < BODY_TOP {
+        return None;
     }
     let line = (row - BODY_TOP) as usize;
     if line >= super::body_rows_for(height) {
-        return Vec::new();
+        return None;
     }
     // Lines 0..2 are the root entry and the divider; worktree rows start at line 3,
-    // [`SESSION_ROWS`] lines each.
-    let Some(entry) = line.checked_sub(ROOT_ENTRY_LINES) else {
-        return Vec::new();
-    };
-    match state.list().worktrees().get(entry / SESSION_ROWS) {
-        Some(wt) => wt.pr.iter().map(|pr| pr.url.clone()).collect(),
-        None => Vec::new(),
+    // [`SESSION_ROWS`] lines each. Badges only live on each entry's detail line.
+    let entry_line = line.checked_sub(ROOT_ENTRY_LINES)?;
+    if entry_line % SESSION_ROWS != DETAIL_LINE {
+        return None;
     }
+    let wt = state.list().worktrees().get(entry_line / SESSION_ROWS)?;
+    if wt.pr.is_empty() {
+        return None;
+    }
+    // The badges seat flush to the pane's right edge. If their joined width does not
+    // fit the detail area the cluster is clipped (not drawn flush-right), so a
+    // column hit would be guesswork — open nothing rather than the wrong PR.
+    let start = left_w.checked_sub(pr_width(&wt.pr))?;
+    if start < NAME_PREFIX {
+        return None;
+    }
+    // Walk the badges left-to-right; return the PR whose `#<number>` span covers the
+    // click (the one-space gap between badges maps to nothing).
+    let mut pos = start;
+    for pr in &wt.pr {
+        let badge_w = 1 + digits(pr.number as usize);
+        if (pos..pos + badge_w).contains(&col) {
+            return Some(pr.url.clone());
+        }
+        pos += badge_w + 1;
+    }
+    None
 }
+
+/// The 0-based line, within a list entry's [`SESSION_ROWS`] rows, that carries the
+/// detail line — the row [`worktree_row`] draws the `#<number>` PR badges on (after
+/// the identity line, before the CPU / memory line). The badge hit-test
+/// ([`sidebar_pr_link_at`]) and the renderer share it so they agree on where the
+/// badges sit.
+const DETAIL_LINE: usize = 1;
 
 /// The 0-based screen row the two-pane body begins at, matching the title bar,
 /// mode ladder, and blank separator [`super::render_frame`] stacks above it (and

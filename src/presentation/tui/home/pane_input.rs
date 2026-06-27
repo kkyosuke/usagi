@@ -73,6 +73,33 @@ pub(super) fn key_scroll_lines(key: &KeyEvent, geo: ui::TerminalGeometry) -> Opt
     }
 }
 
+/// How close two left clicks on the same session row must fall to count as a
+/// double click — the threshold separating a single click (select / arm) from a
+/// double click (confirm, like `Enter`). Shared by 切替's `switch_click` and the
+/// 没入 pane so a sidebar double click confirms a row the same way whether or not a
+/// session is attached.
+pub(super) const DOUBLE_CLICK: Duration = Duration::from_millis(400);
+
+/// Whether a left click on session `row` at `now` completes a double click — a
+/// previous click on the **same** row no more than `threshold` ago. Threads the
+/// pending click through `last_click`: a completing click clears it (so a third
+/// click starts a fresh sequence rather than re-confirming), and any other click
+/// records `(row, now)` as the new pending one. The shared core of 切替's
+/// `switch_click` and the 没入 sidebar double-click-to-switch.
+pub(super) fn is_double_click(
+    last_click: &mut Option<(usize, Instant)>,
+    row: usize,
+    now: Instant,
+    threshold: Duration,
+) -> bool {
+    let doubled = matches!(
+        *last_click,
+        Some((prev, at)) if prev == row && now.duration_since(at) <= threshold
+    );
+    *last_click = if doubled { None } else { Some((row, now)) };
+    doubled
+}
+
 /// The history scroll a mouse wheel turn requests, in lines, or `None` for a
 /// non-wheel mouse event.
 pub(super) fn wheel_delta(kind: MouseEventKind) -> Option<i32> {
@@ -421,6 +448,39 @@ mod tests {
             origin_col,
             origin_row,
         }
+    }
+
+    #[test]
+    fn is_double_click_confirms_a_second_click_on_the_same_row_within_the_threshold() {
+        let threshold = Duration::from_millis(400);
+        let t0 = Instant::now();
+        let mut last = None;
+        // The first click only arms: it records the row and returns false.
+        assert!(!is_double_click(&mut last, 3, t0, threshold));
+        assert_eq!(last, Some((3, t0)));
+        // A second click on the same row within the threshold confirms and clears
+        // the pending click, so a third click starts a fresh sequence.
+        let t1 = t0 + Duration::from_millis(200);
+        assert!(is_double_click(&mut last, 3, t1, threshold));
+        assert_eq!(last, None);
+    }
+
+    #[test]
+    fn is_double_click_rearms_on_a_different_row_or_after_the_threshold() {
+        let threshold = Duration::from_millis(400);
+        let t0 = Instant::now();
+        // A second click on a *different* row does not confirm; it re-arms on the
+        // new row instead.
+        let mut last = Some((3, t0));
+        let t1 = t0 + Duration::from_millis(100);
+        assert!(!is_double_click(&mut last, 4, t1, threshold));
+        assert_eq!(last, Some((4, t1)));
+        // A second click on the same row but past the threshold does not confirm;
+        // it re-arms (its own click becomes the new pending one).
+        let mut last = Some((3, t0));
+        let t2 = t0 + Duration::from_millis(500);
+        assert!(!is_double_click(&mut last, 3, t2, threshold));
+        assert_eq!(last, Some((3, t2)));
     }
 
     #[test]
