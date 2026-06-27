@@ -221,6 +221,8 @@ fn worktree_row_marks_selected_primary_and_detached() {
         "",
         10,
         10,
+        false,
+        Utc::now(),
         true,
         false,
         true,
@@ -239,6 +241,8 @@ fn worktree_row_marks_selected_primary_and_detached() {
         "",
         10,
         10,
+        false,
+        Utc::now(),
         true,
         false,
         false,
@@ -254,6 +258,8 @@ fn worktree_row_marks_selected_primary_and_detached() {
         "",
         10,
         10,
+        false,
+        Utc::now(),
         false,
         false,
         true,
@@ -272,6 +278,8 @@ fn worktree_row_marks_selected_primary_and_detached() {
         10,
         10,
         false,
+        Utc::now(),
+        false,
         false,
         false,
         false,
@@ -283,12 +291,60 @@ fn worktree_row_marks_selected_primary_and_detached() {
 }
 
 #[test]
+fn worktree_row_shows_a_memo_marker_only_when_the_session_has_a_note() {
+    // A session carrying a note shows the memo glyph on line 1; one without does
+    // not. The glyph sits in the cell between the name and the right-edge status.
+    let with_note = worktree_row(
+        &worktree(Some("feature"), false, BranchStatus::Local),
+        "",
+        10,
+        10,
+        true,
+        Utc::now(),
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+    )
+    .0;
+    let without_note = worktree_row(
+        &worktree(Some("feature"), false, BranchStatus::Local),
+        "",
+        10,
+        10,
+        false,
+        Utc::now(),
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+    )
+    .0;
+    assert!(with_note.contains(NOTE_ICON));
+    assert!(!without_note.contains(NOTE_ICON));
+    // The marker is purely additive to line 1: its presence must not shift the
+    // right-edge status column, so both variants render the same display width.
+    assert_eq!(
+        console::measure_text_width(&console::strip_ansi_codes(&with_note)),
+        console::measure_text_width(&console::strip_ansi_codes(&without_note)),
+    );
+}
+
+#[test]
 fn worktree_row_marks_the_active_worktree_with_a_gutter_bar_on_both_lines() {
     let (active_top, active_detail) = worktree_row(
         &worktree(Some("feature"), false, BranchStatus::Local),
         "",
         10,
         10,
+        false,
+        Utc::now(),
         false,
         true,
         false,
@@ -308,6 +364,8 @@ fn worktree_row_marks_the_active_worktree_with_a_gutter_bar_on_both_lines() {
         "",
         10,
         10,
+        false,
+        Utc::now(),
         false,
         false,
         false,
@@ -329,6 +387,8 @@ fn worktree_row_shows_the_agent_state_through_its_lifecycle() {
         10,
         12,
         false,
+        Utc::now(),
+        false,
         false,
         false,
         true,
@@ -346,6 +406,8 @@ fn worktree_row_shows_the_agent_state_through_its_lifecycle() {
         10,
         12,
         false,
+        Utc::now(),
+        false,
         false,
         false,
         true,
@@ -362,6 +424,8 @@ fn worktree_row_shows_the_agent_state_through_its_lifecycle() {
         "",
         10,
         12,
+        false,
+        Utc::now(),
         false,
         false,
         false,
@@ -381,6 +445,8 @@ fn worktree_row_shows_the_agent_state_through_its_lifecycle() {
         10,
         12,
         false,
+        Utc::now(),
+        false,
         false,
         false,
         true,
@@ -398,6 +464,8 @@ fn worktree_row_shows_the_agent_state_through_its_lifecycle() {
         "",
         10,
         12,
+        false,
+        Utc::now(),
         false,
         false,
         false,
@@ -439,6 +507,8 @@ fn worktree_row_truncates_a_long_branch() {
         8,
         8,
         false,
+        Utc::now(),
+        false,
         false,
         false,
         false,
@@ -456,6 +526,8 @@ fn worktree_row_shows_the_label_override_instead_of_the_branch() {
         "Login flow",
         20,
         20,
+        false,
+        Utc::now(),
         false,
         false,
         false,
@@ -505,6 +577,7 @@ fn left_pane_renders_the_root_entry_then_the_empty_message() {
         6,
         false,
         Sidebar::Full,
+        Utc::now(),
     );
     assert_eq!(lines.len(), 4);
     assert!(lines[0].contains(ROOT_NAME));
@@ -514,6 +587,63 @@ fn left_pane_renders_the_root_entry_then_the_empty_message() {
     let hint = console::strip_ansi_codes(&lines[3]);
     assert!(hint.starts_with(&" ".repeat(NAME_PREFIX)));
     assert!(hint[NAME_PREFIX..].starts_with("no sessions"));
+}
+
+#[test]
+fn left_pane_shows_each_sessions_relative_update_time_on_the_detail_line() {
+    let mut w = worktree(Some("main"), true, BranchStatus::Pushed);
+    w.updated_at = chrono::DateTime::parse_from_rfc3339("2026-06-27T12:00:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    let now = chrono::DateTime::parse_from_rfc3339("2026-06-27T12:05:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    let lines = left_pane(
+        &list_with(vec![w]),
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashSet::new(),
+        30,
+        5,
+        false,
+        Sidebar::Full,
+        now,
+    );
+    // Root (2 lines) + divider + the session's 2 lines: the freshness label sits
+    // on the session's detail line (index 4).
+    let detail = console::strip_ansi_codes(&lines[4]);
+    assert!(
+        detail.contains("5分前"),
+        "{detail:?} missing the relative time"
+    );
+}
+
+#[test]
+fn left_pane_shows_the_ahead_behind_marker_on_the_detail_line() {
+    let mut w = worktree(Some("feature"), false, BranchStatus::Local);
+    w.ahead_behind = Some(crate::domain::workspace_state::AheadBehind {
+        ahead: 2,
+        behind: 1,
+    });
+    let lines = left_pane(
+        &list_with(vec![w]),
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashSet::new(),
+        40,
+        5,
+        false,
+        Sidebar::Full,
+        Utc::now(),
+    );
+    // The session's detail line (index 4) carries the `↑N ↓M` commit marker.
+    let detail = console::strip_ansi_codes(&lines[4]);
+    assert!(
+        detail.contains("↑2 ↓1"),
+        "{detail:?} missing the ahead/behind marker"
+    );
 }
 
 #[test]
@@ -532,6 +662,7 @@ fn left_pane_renders_the_root_entry_then_one_entry_per_worktree() {
         7,
         false,
         Sidebar::Full,
+        Utc::now(),
     );
     // Root (2 lines), a divider, then 2 lines per worktree.
     assert_eq!(lines.len(), 7);
@@ -563,6 +694,7 @@ fn left_pane_stops_building_rows_once_the_pane_is_full() {
         5,
         false,
         Sidebar::Full,
+        Utc::now(),
     );
     assert_eq!(lines.len(), 5);
     // Root, divider, then only the first worktree made it in; the rest were never
@@ -595,6 +727,7 @@ fn rail_pane_stops_building_rows_once_the_rail_is_full() {
         5,
         false,
         Sidebar::Rail,
+        Utc::now(),
     );
     assert_eq!(lines.len(), 5);
 }
@@ -616,6 +749,7 @@ fn left_pane_marks_the_agent_state_through_its_lifecycle() {
         6,
         false,
         Sidebar::Full,
+        Utc::now(),
     );
     assert!(ready[4].contains('☾'));
     assert!(ready[4].contains("ready"));
@@ -630,6 +764,7 @@ fn left_pane_marks_the_agent_state_through_its_lifecycle() {
         6,
         false,
         Sidebar::Full,
+        Utc::now(),
     );
     assert!(running[4].contains('▶'));
     assert!(running[4].contains("running"));
@@ -644,6 +779,7 @@ fn left_pane_marks_the_agent_state_through_its_lifecycle() {
         6,
         false,
         Sidebar::Full,
+        Utc::now(),
     );
     assert!(waiting[4].contains('◆'));
     assert!(!waiting[4].contains('▶'));
@@ -658,6 +794,7 @@ fn left_pane_marks_the_agent_state_through_its_lifecycle() {
         6,
         false,
         Sidebar::Full,
+        Utc::now(),
     );
     assert!(!absent[4].contains('▶'));
     assert!(!absent[4].contains('◆'));
@@ -682,6 +819,7 @@ fn left_pane_is_trimmed_to_available_rows() {
         4,
         false,
         Sidebar::Full,
+        Utc::now(),
     );
     // 3 worktrees would be 2 (root) + 1 (divider) + 6 lines; trimmed to 4.
     assert_eq!(lines.len(), 4);
@@ -707,6 +845,7 @@ fn left_pane_marks_the_active_worktree_with_a_gutter_bar() {
         7,
         false,
         Sidebar::Full,
+        Utc::now(),
     );
     // The root is not active; the active "feature" row carries the green `▎`
     // accent bar down both of its lines (identity + detail).
@@ -733,6 +872,7 @@ fn rail_collapses_each_entry_to_two_rows_without_names_or_numbers() {
         8,
         false,
         Sidebar::Rail,
+        Utc::now(),
     );
     // Root (2 rows), a divider, then 2 rows per worktree — the same shape as the
     // full sidebar, so toggling never shifts an entry to a different row.
@@ -771,7 +911,16 @@ fn rail_keeps_the_same_row_count_as_the_full_sidebar() {
         ]);
         let empty = HashSet::new();
         left_pane(
-            &list, &empty, &empty, &empty, &empty, 30, 20, false, sidebar,
+            &list,
+            &empty,
+            &empty,
+            &empty,
+            &empty,
+            30,
+            20,
+            false,
+            sidebar,
+            Utc::now(),
         )
         .len()
     };
@@ -789,6 +938,7 @@ fn rail_keeps_the_same_row_count_as_the_full_sidebar() {
             20,
             false,
             sidebar,
+            Utc::now(),
         )
         .len()
     };
@@ -816,6 +966,7 @@ fn rail_shows_the_active_bar_down_both_rows_and_the_agent_glyph_on_row_two() {
         8,
         false,
         Sidebar::Rail,
+        Utc::now(),
     );
     let top = console::strip_ansi_codes(&lines[5]).into_owned();
     let detail = console::strip_ansi_codes(&lines[6]).into_owned();
@@ -846,6 +997,7 @@ fn rail_shows_each_agent_state_glyph_on_the_detail_row() {
             8,
             false,
             Sidebar::Rail,
+            Utc::now(),
         );
         // Rows: 0/1 root, 2 divider, 3 worktree kind, 4 worktree agent state.
         console::strip_ansi_codes(&lines[4]).into_owned()
@@ -873,6 +1025,7 @@ fn rail_sidebar_marks_the_switch_cursor() {
             8,
             true,
             Sidebar::Rail,
+            Utc::now(),
         )
     };
     // In 切替 the cursor row shows the `>` marker; here the cursor is on the root.
@@ -915,6 +1068,7 @@ fn left_pane_fades_every_row_but_the_cursor_when_asked() {
         6,
         true,
         Sidebar::Full,
+        Utc::now(),
     );
     assert_eq!(dimmed.len(), 6);
     assert!(console::strip_ansi_codes(&dimmed[0]).contains(ROOT_NAME));

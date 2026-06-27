@@ -117,10 +117,24 @@ impl RabbitMood {
     /// block is painted: magenta while browsing (the mascot's resting colour),
     /// cyan while attending a session (the accent the right pane uses), and green
     /// while a turn runs (matching the `▶ running` accent).
-    fn face_and_style(self) -> (&'static str, Style) {
+    ///
+    /// `blinking` shuts the eyes for a beat — the home screen flips it on for the
+    /// frames just after the user interacts, so the resting rabbit blinks back
+    /// without any idle timer. It applies only to the open-eyed moods (Browsing /
+    /// Attentive); the heads-down Working face keeps its squeezed-shut eyes and
+    /// instead pumps its paw on the slow `tick`, so the immersed rabbit looks busy
+    /// while the live terminal ticks. Every face is the same display width
+    /// (width-1 glyphs around the centre), so the block never reflows as it
+    /// animates.
+    fn face_and_style(self, blinking: bool, tick: usize) -> (&'static str, Style) {
         match self {
+            RabbitMood::Browsing if blinking => (" (-.-)? ", Style::new().magenta().bold()),
             RabbitMood::Browsing => (" (o.o)? ", Style::new().magenta().bold()),
+            RabbitMood::Attentive if blinking => (" (-.-)/ ", Style::new().cyan().bold()),
             RabbitMood::Attentive => (" (^.^)/ ", Style::new().cyan().bold()),
+            // Pump the paw on a slow beat so the work looks ongoing (the live tick
+            // advances `tick` ~9×/s, so divide it down to a calm ~2 swings/s).
+            RabbitMood::Working if (tick / 4) % 2 == 1 => (" (>.<)6 ", Style::new().green().bold()),
             RabbitMood::Working => (" (>.<)9 ", Style::new().green().bold()),
         }
     }
@@ -152,8 +166,8 @@ fn mood_mascot_rows(face: &str) -> [String; 3] {
 /// the same animal while its expression shifts; the ears/head/body alignment is
 /// [`mood_mascot_rows`]'. Every row is padded to a common block width and painted
 /// the mood's colour, so the block tiles as a rectangle wherever it is placed.
-pub fn workspace_rabbit(mood: RabbitMood) -> Vec<String> {
-    let (face, paint) = mood.face_and_style();
+pub fn workspace_rabbit(mood: RabbitMood, blinking: bool, tick: usize) -> Vec<String> {
+    let (face, paint) = mood.face_and_style(blinking, tick);
     let rows = mood_mascot_rows(face);
     let block_w = rows
         .iter()
@@ -192,6 +206,8 @@ pub fn workspace_rabbit_speaking(
     mood: RabbitMood,
     speech: &[String],
     max_width: usize,
+    blinking: bool,
+    tick: usize,
 ) -> Vec<String> {
     let inner = max_width.saturating_sub(SPEECH_CHROME);
     // Wrap every speech line to the bubble's inner width, flattening to the
@@ -202,7 +218,7 @@ pub fn workspace_rabbit_speaking(
         .collect();
     if content.is_empty() {
         // Too narrow for a bubble (or nothing to say): rest silently instead.
-        return workspace_rabbit(mood);
+        return workspace_rabbit(mood, blinking, tick);
     }
     let content_w = content
         .iter()
@@ -242,7 +258,7 @@ pub fn workspace_rabbit_speaking(
     rows.push(bubble.apply_to(bottom).to_string());
 
     // The resting mascot below, in its mood colour — only the face row changes.
-    let (face, paint) = mood.face_and_style();
+    let (face, paint) = mood.face_and_style(blinking, tick);
     for art in mood_mascot_rows(face) {
         rows.push(paint.apply_to(art).to_string());
     }
@@ -265,8 +281,44 @@ pub fn workspace_rabbit_speaking(
 /// sidebar is wide enough to hold it before placing it (and skip it otherwise,
 /// rather than overrunning a narrow pane).
 pub fn workspace_rabbit_width() -> usize {
-    // Every mood's face is the same width, so any one stands in for the block.
-    mood_mascot_rows(RabbitMood::Working.face_and_style().0)
+    // Every mood's face is the same width (and a blink / paw-pump never changes
+    // it), so any one stands in for the block.
+    mood_mascot_rows(RabbitMood::Working.face_and_style(false, 0).0)
+        .iter()
+        .map(|row| console::measure_text_width(row))
+        .max()
+        .unwrap_or(0)
+}
+
+/// The chibi mascot for the **collapsed rail** — a tiny two-row bunny that fits
+/// the 5-column strip, so folding the sidebar keeps the usagi around (just
+/// smaller) instead of dropping it entirely. The full-width [`workspace_rabbit`]
+/// is too wide for the rail and its mood face needs the room the rail does not
+/// have, so the rail shows this fixed, neutral chibi. Both rows use width-1
+/// glyphs and are padded to a common block width, styled magenta-bold (the
+/// mascot's resting colour), so they tile as a rectangle the rail can place.
+pub fn workspace_rabbit_rail() -> Vec<String> {
+    let rows = [" ∩∩".to_string(), "(･･)".to_string()];
+    let block_w = rows
+        .iter()
+        .map(|row| console::measure_text_width(row))
+        .max()
+        .unwrap_or(0);
+    rows.into_iter()
+        .map(|row| {
+            let pad = block_w.saturating_sub(console::measure_text_width(&row));
+            style(format!("{row}{}", " ".repeat(pad)))
+                .magenta()
+                .bold()
+                .to_string()
+        })
+        .collect()
+}
+
+/// The display width of the [`workspace_rabbit_rail`] chibi, so the rail can
+/// check the (already narrow) strip can hold it before placing it.
+pub fn workspace_rabbit_rail_width() -> usize {
+    workspace_rabbit_rail()
         .iter()
         .map(|row| console::measure_text_width(row))
         .max()
@@ -558,7 +610,7 @@ mod tests {
             RabbitMood::Attentive,
             RabbitMood::Working,
         ] {
-            let lines = workspace_rabbit(mood);
+            let lines = workspace_rabbit(mood, false, 0);
             assert_eq!(lines.len(), 3);
             let plain: Vec<String> = lines
                 .iter()
@@ -576,8 +628,9 @@ mod tests {
     fn workspace_rabbit_changes_face_and_gesture_with_the_mood() {
         // Each mood shows a distinct expression and gesture, so the resting rabbit
         // signals the current engagement mode at a glance.
-        let face =
-            |mood| console::strip_ansi_codes(&workspace_rabbit(mood).join("\n")).into_owned();
+        let face = |mood| {
+            console::strip_ansi_codes(&workspace_rabbit(mood, false, 0).join("\n")).into_owned()
+        };
         assert!(face(RabbitMood::Browsing).contains("(o.o)?"));
         assert!(face(RabbitMood::Attentive).contains("(^.^)/"));
         assert!(face(RabbitMood::Working).contains("(>.<)9"));
@@ -592,7 +645,7 @@ mod tests {
             RabbitMood::Attentive,
             RabbitMood::Working,
         ] {
-            let lines = workspace_rabbit(mood);
+            let lines = workspace_rabbit(mood, false, 0);
             let plain: Vec<String> = lines
                 .iter()
                 .map(|l| console::strip_ansi_codes(l).into_owned())
@@ -613,7 +666,7 @@ mod tests {
             RabbitMood::Attentive,
             RabbitMood::Working,
         ] {
-            let plain: Vec<String> = workspace_rabbit(mood)
+            let plain: Vec<String> = workspace_rabbit(mood, false, 0)
                 .iter()
                 .map(|l| console::strip_ansi_codes(l).into_owned())
                 .collect();
@@ -635,7 +688,7 @@ mod tests {
             RabbitMood::Attentive,
             RabbitMood::Working,
         ] {
-            let lines = workspace_rabbit(mood);
+            let lines = workspace_rabbit(mood, false, 0);
             let w0 = console::measure_text_width(&lines[0]);
             assert!(lines.iter().all(|l| console::measure_text_width(l) == w0));
             assert_eq!(w0, workspace_rabbit_width());
@@ -648,6 +701,8 @@ mod tests {
             RabbitMood::Browsing,
             &["アップデートがあるぴょん".to_string(), "v0.2.0".to_string()],
             40,
+            false,
+            0,
         );
         let plain: Vec<String> = lines
             .iter()
@@ -675,6 +730,8 @@ mod tests {
             RabbitMood::Attentive,
             &["アップデートがあるぴょん".to_string(), "v1.2.3".to_string()],
             40,
+            false,
+            0,
         );
         let w0 = console::measure_text_width(&lines[0]);
         assert!(lines.iter().all(|l| console::measure_text_width(l) == w0));
@@ -689,6 +746,8 @@ mod tests {
             RabbitMood::Working,
             &["アップデートがあるぴょん".to_string(), "v0.2.0".to_string()],
             max,
+            false,
+            0,
         );
         assert!(lines.iter().all(|l| console::measure_text_width(l) <= max));
         // More rows than the un-wrapped block (top + 2 speech + bottom + 3 rabbit).
@@ -699,8 +758,80 @@ mod tests {
     fn workspace_rabbit_speaking_falls_back_to_the_silent_mascot_when_too_narrow() {
         // No room for even a one-column bubble: it rests silently, exactly like
         // `workspace_rabbit`, rather than drawing a broken frame.
-        let lines = workspace_rabbit_speaking(RabbitMood::Browsing, &["x".to_string()], 2);
-        assert_eq!(lines, workspace_rabbit(RabbitMood::Browsing));
+        let lines =
+            workspace_rabbit_speaking(RabbitMood::Browsing, &["x".to_string()], 2, false, 0);
+        assert_eq!(lines, workspace_rabbit(RabbitMood::Browsing, false, 0));
+    }
+
+    #[test]
+    fn workspace_rabbit_shuts_its_eyes_when_blinking() {
+        // Blinking swaps the open-eyed moods to a shut-eyed face, so the resting
+        // rabbit reads as blinking back at the user; the squeezed-shut Working
+        // face has no open eyes to close, so it is unaffected.
+        let face = |mood, blinking| {
+            console::strip_ansi_codes(&workspace_rabbit(mood, blinking, 0).join("\n")).into_owned()
+        };
+        assert!(face(RabbitMood::Browsing, true).contains("(-.-)?"));
+        assert!(face(RabbitMood::Attentive, true).contains("(-.-)/"));
+        // Working keeps its squeezed eyes whether or not `blinking` is set.
+        assert!(face(RabbitMood::Working, true).contains("(>.<)"));
+    }
+
+    #[test]
+    fn workspace_rabbit_working_paw_pumps_on_the_tick() {
+        // The Working face pumps its paw on a slow beat — `tick` (the live loop's
+        // counter, ~9/s) divided down — so the immersed rabbit looks busy without
+        // flickering. A held tick shows one paw, a tick four steps on the other.
+        let paw = |tick| {
+            console::strip_ansi_codes(
+                &workspace_rabbit(RabbitMood::Working, false, tick).join("\n"),
+            )
+            .into_owned()
+        };
+        assert!(paw(0).contains("(>.<)9"));
+        assert!(paw(4).contains("(>.<)6"));
+        // The block never reflows as the paw swings.
+        assert_eq!(
+            console::measure_text_width(&workspace_rabbit(RabbitMood::Working, false, 0)[1]),
+            console::measure_text_width(&workspace_rabbit(RabbitMood::Working, false, 4)[1]),
+        );
+    }
+
+    #[test]
+    fn workspace_rabbit_speaking_blinks_with_the_mascot_below() {
+        // The speaking mascot blinks just like the silent one — the face below the
+        // bubble shuts its eyes when `blinking` is set.
+        let lines = workspace_rabbit_speaking(
+            RabbitMood::Browsing,
+            &["アップデートがあるぴょん".to_string()],
+            40,
+            true,
+            0,
+        );
+        let joined = console::strip_ansi_codes(&lines.join("\n")).into_owned();
+        assert!(joined.contains("(-.-)?"));
+    }
+
+    #[test]
+    fn workspace_rabbit_rail_is_a_tiny_two_row_chibi() {
+        let lines = workspace_rabbit_rail();
+        assert_eq!(lines.len(), 2);
+        let plain: Vec<String> = lines
+            .iter()
+            .map(|l| console::strip_ansi_codes(l).into_owned())
+            .collect();
+        // Ears over a tiny face, both rows padded to one block width.
+        assert!(plain[0].contains("∩∩"));
+        assert!(plain[1].contains("(･･)"));
+        let w0 = console::measure_text_width(&lines[0]);
+        assert!(lines.iter().all(|l| console::measure_text_width(l) == w0));
+        assert_eq!(w0, workspace_rabbit_rail_width());
+    }
+
+    #[test]
+    fn workspace_rabbit_rail_fits_the_collapsed_strip() {
+        // The chibi must fit the 5-column rail (the rail pads it to that width).
+        assert!(workspace_rabbit_rail_width() <= 5);
     }
 
     #[test]

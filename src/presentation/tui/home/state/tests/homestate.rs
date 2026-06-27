@@ -100,6 +100,57 @@ fn sidebar_defaults_to_full_and_toggles() {
 }
 
 #[test]
+fn mascot_blinks_on_a_kick_then_reopens_after_the_window() {
+    use std::time::{Duration, Instant};
+    let mut state = state();
+    let t0 = Instant::now();
+    // Resting: eyes open.
+    state.tick_mascot(t0);
+    assert!(!state.mascot_blinking());
+    // A kick shuts the eyes for the blink window.
+    state.kick_mascot_blink(t0);
+    state.tick_mascot(t0 + Duration::from_millis(50));
+    assert!(state.mascot_blinking());
+    // Once the window passes the eyes reopen, and a later tick stays open (the
+    // spent deadline was dropped, not re-armed).
+    state.tick_mascot(t0 + Duration::from_millis(500));
+    assert!(!state.mascot_blinking());
+    state.tick_mascot(t0 + Duration::from_millis(600));
+    assert!(!state.mascot_blinking());
+}
+
+#[test]
+fn mascot_tick_advances_only_while_animation_is_enabled() {
+    use std::time::Instant;
+    let mut state = state();
+    let t = Instant::now();
+    let start = state.mascot_tick();
+    state.tick_mascot(t);
+    state.tick_mascot(t);
+    assert_eq!(state.mascot_tick(), start + 2);
+    // Disabling it freezes the pose, forces the eyes open, and makes a kick inert.
+    state.set_mascot_animation_enabled(false);
+    state.kick_mascot_blink(t);
+    let frozen = state.mascot_tick();
+    state.tick_mascot(t);
+    assert_eq!(state.mascot_tick(), frozen);
+    assert!(!state.mascot_blinking());
+}
+
+#[test]
+fn disabling_mascot_animation_clears_a_blink_in_flight() {
+    use std::time::Instant;
+    let mut state = state();
+    let t = Instant::now();
+    state.kick_mascot_blink(t);
+    state.tick_mascot(t);
+    assert!(state.mascot_blinking());
+    // Turning the mascot off mid-blink settles it to a still, open-eyed image.
+    state.set_mascot_animation_enabled(false);
+    assert!(!state.mascot_blinking());
+}
+
+#[test]
 fn backspace_removes_the_last_character() {
     let mut state = state();
     state.push_char('m');

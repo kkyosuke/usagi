@@ -268,6 +268,10 @@ pub(super) fn event_loop(
     // always repainting.
     let mut last_update = None;
     let mut force_paint = true;
+    // Whether the last paint drew the mascot mid-blink, so the frame that reopens
+    // its eyes (an idle tick, not a keypress) still repaints in a quiet 切替 rather
+    // than being skipped — leaving the eyes stuck shut.
+    let mut last_blinking = false;
     loop {
         // Mark each background session's agent state — running, waiting for
         // input, live (ready), and finished — before painting, applying every
@@ -377,6 +381,12 @@ pub(super) fn event_loop(
         // showing either must repaint even when nothing else moved.
         let now = Instant::now();
         let panel_animating = install_task::handle().is_active(now) || tasks.is_active(now);
+        // Refresh the sidebar mascot for this paint: reopen its eyes once a blink's
+        // window has passed and advance the Working paw on the live tick. Reactive,
+        // not timed — it rides paints that already happen, so a settled mascot
+        // leaves `mascot_blinking` false and a truly idle 切替 still skips painting.
+        state.tick_mascot(now);
+        let blink_changed = state.mascot_blinking() != last_blinking;
         // In a quiet base 切替 (Switch) — no live preview in the right pane and no
         // command palette open — an idle frame's only moving parts are the sidebar
         // badges, the update notice, and those time-animated panels. When none
@@ -395,13 +405,23 @@ pub(super) fn event_loop(
             && !refreshed
             && !panel_animating
             && !badges_changed
+            // A mascot blink (or the frame that ends one) is a moving part too, so
+            // it repaints rather than freezing the eyes mid-blink.
+            && !state.mascot_blinking()
+            && !blink_changed
             && last_update == latest_update;
         let (height, width) = term.size();
         if !skip_paint {
+            // Stamp the frame's render time so the left pane's "N分前" labels track
+            // real time. Only on a real paint — a skipped frame draws nothing, so
+            // the label refreshes on the next change rather than ticking every
+            // second (keeping the loop's repaint budget low).
+            state.set_now(chrono::Utc::now());
             let frame = ui::render_frame(height as usize, width as usize, &state);
             painter.paint(term, frame)?;
         }
         last_update = latest_update;
+        last_blinking = state.mascot_blinking();
         force_paint = false;
 
         // The TUI itself never scrolls, so a wheel turn is read and dropped here
@@ -418,7 +438,9 @@ pub(super) fn event_loop(
         // / finished (✓) without the user typing. With nothing in flight and no
         // live session it blocks on the next key, so a truly idle screen costs
         // nothing.
-        let animate = panel_animating || state.has_live_sessions();
+        // Keep ticking through a mascot blink too, so its eyes reopen on their own
+        // a beat later without waiting for the next keypress.
+        let animate = panel_animating || state.has_live_sessions() || state.mascot_blinking();
         let key = if animate {
             match reader.read_key_timeout(install_task::ANIM_TICK) {
                 Ok(Some(key)) => key,
@@ -447,6 +469,15 @@ pub(super) fn event_loop(
         // A key was pressed: whatever it does to the state, repaint on the next
         // iteration (the skip above only applies to idle ticks that read no key).
         force_paint = true;
+        // Nudge the resting mascot to blink back at the user — reactive, so the
+        // rabbit reacts the moment a key lands without any idle timer. Only while
+        // it shows an open-eyed face (切替 / 在席); 没入's heads-down face has no eyes
+        // to blink and animates on the live tick instead. A fresh `now` (the read
+        // may have blocked a while) so the blink's window starts from the keypress;
+        // the call is a no-op when the mascot animation is turned off.
+        if matches!(state.mode(), Mode::Switch | Mode::Focus) {
+            state.kick_mascot_blink(Instant::now());
+        }
 
         // Record the key press (and the mode it landed in) to the operation trace,
         // so a session's navigation can be analysed after the fact. `record_with`

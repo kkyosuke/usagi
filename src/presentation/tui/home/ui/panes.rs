@@ -5,6 +5,7 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
 
+use chrono::{DateTime, Utc};
 use console::{style, Style};
 
 use super::super::command::{CommandInfo, Hint};
@@ -15,11 +16,11 @@ use super::super::terminal::tabs::TabStrip;
 use super::super::terminal::view::TerminalView;
 use super::{
     clip_to_width, clip_to_width_cow, pad_to_width, ACTIVE_COL, DETACHED, DIRTY_ICON,
-    EMPTY_MESSAGE, HINT_INDENT, HINT_MAX, LOCAL_ICON, NAME_PREFIX, NEW_ICON, PUSHED_ICON,
-    RAIL_WIDTH, ROOT_DETAIL, STATUS_COL, SYNCED_ICON, TERMINAL_STARTING,
+    EMPTY_MESSAGE, HINT_INDENT, HINT_MAX, LOCAL_ICON, NAME_PREFIX, NEW_ICON, NOTE_ICON,
+    PUSHED_ICON, RAIL_WIDTH, ROOT_DETAIL, STATUS_COL, SYNCED_ICON, TERMINAL_STARTING,
 };
 use crate::domain::settings::{AgentCli, SessionActionUi, Sidebar};
-use crate::domain::workspace_state::{BranchStatus, DiffStat, WorktreeState};
+use crate::domain::workspace_state::{AheadBehind, BranchStatus, DiffStat, WorktreeState};
 use crate::presentation::tui::markdown::{LineStyle, MarkdownLine, Rgb, Span, SpanStyle};
 use crate::presentation::tui::widgets;
 
@@ -199,18 +200,34 @@ fn detail_line(gutter: &str, detail: String) -> String {
     format!("{gutter}{indent}{detail}")
 }
 
+/// The line-1 cell between the session name and the right-edge git status: a
+/// yellow [`NOTE_ICON`] when the session carries a note, else blank. Three
+/// display columns wide either way (a leading and trailing space frame the
+/// glyph) so the status field stays aligned whether or not a note is present —
+/// it reuses the column the old active marker left blank.
+fn note_cell(has_note: bool) -> String {
+    if has_note {
+        format!(" {} ", style(NOTE_ICON).yellow())
+    } else {
+        " ".repeat(ACTIVE_COL + 1)
+    }
+}
+
 /// Builds a worktree's two lines. The far-left gutter carries a `>` cursor for
 /// the selected entry in 切替 (Switch) or a green `▎` accent bar down the active
 /// worktree's two lines; line 1 then has a `●`/`○` kind icon (primary or ordinary
-/// worktree), the branch name, and the git `status` at the right edge. Line 2 is
-/// indented under the name and, when an agent is in use, carries its icon + label
-/// (`☾ ready` / `▶ running` / `◆ waiting` / `✓ done`).
+/// worktree), the branch name, a memo marker (`NOTE_ICON`, when `has_note`), and
+/// the git `status` at the right edge. Line 2 is indented under the name and,
+/// when an agent is in use, carries its icon + label (`☾ ready` / `▶ running` /
+/// `◆ waiting` / `✓ done`).
 #[allow(clippy::too_many_arguments)]
 pub(super) fn worktree_row(
     worktree: &WorktreeState,
     label: &str,
     name_width: usize,
     detail_width: usize,
+    has_note: bool,
+    now: DateTime<Utc>,
     selected: bool,
     active: bool,
     in_switch: bool,
@@ -231,22 +248,48 @@ pub(super) fn worktree_row(
     let status = status_cell(Some(worktree.status));
     let gutter = gutter_cell(selected, active, in_switch);
     // Three columns sit between the name and the right-edge status (the old
-    // active-marker cell, now blank — the active bar lives in the gutter).
-    let line1 = format!("{gutter} {kind} {branch}   {status}");
+    // active-marker cell, now home to the memo marker — the active bar lives in
+    // the gutter). The cell is a constant width whether or not a note is present,
+    // so the status field never shifts.
+    let note = note_cell(has_note);
+    let line1 = format!("{gutter} {kind} {branch}{note}{status}");
 
     // Line 2 spells out the agent state with its icon (blank when absent) on the
-    // left, and the `+N -M` diff badge right-aligned at the cell's far edge so it
-    // lines up down the list. The agent label is clipped to the room left of the
-    // badge. Only the active bar runs down to it — the `>` cursor stays a single
-    // point on line 1, so the detail-line gutter ignores the cursor.
+    // left, and a right-aligned cluster of the freshness label (`N分前`) and the
+    // `+N -M` diff badge at the cell's far edge so the badges line up down the
+    // list. The agent label is clipped to the room left of the cluster. Only the
+    // active bar runs down to it — the `>` cursor stays a single point on line 1,
+    // so the detail-line gutter ignores the cursor.
     let badge = diff_badge(worktree.diff);
-    let detail = detail_with_badge(
+    let commits = ahead_behind_badge(worktree.ahead_behind);
+    let time = Some(relative_time(now, worktree.updated_at));
+    let detail = detail_content(
         AgentState::from_flags(live, running, waiting, done),
+        time,
+        commits,
         badge,
         detail_width,
     );
     let line2 = detail_line(&gutter_cell(false, active, in_switch), detail);
     (line1, line2)
+}
+
+/// A compact, dimmed freshness label for how long ago `then` was relative to
+/// `now`: `たった今` under a minute, then `N分前` / `N時間前` / `N日前`. A `then`
+/// in the future (clock skew) clamps to `たった今`. Shown on line 2 so a glance
+/// tells the stale sessions from the freshly-touched ones.
+fn relative_time(now: DateTime<Utc>, then: DateTime<Utc>) -> String {
+    let secs = (now - then).num_seconds().max(0);
+    let label = if secs < 60 {
+        "たった今".to_string()
+    } else if secs < 3600 {
+        format!("{}分前", secs / 60)
+    } else if secs < 86_400 {
+        format!("{}時間前", secs / 3600)
+    } else {
+        format!("{}日前", secs / 86_400)
+    };
+    style(label).dim().to_string()
 }
 
 /// The `+N -M` diff badge for a worktree's [`DiffStat`] — additions green,
@@ -261,27 +304,90 @@ fn diff_badge(diff: Option<DiffStat>) -> Option<String> {
     Some(format!("{added} {removed}"))
 }
 
-/// Compose the detail line's content: the `agent` state label on the left and the
-/// `badge` right-aligned within `width`. The badge keeps its right-edge column
-/// (so the badges line up down the list); the agent label is clipped to the space
-/// left of it — when the two would collide the badge wins, since a row with a
-/// badge but no live agent is the case the badge most needs to read. Either side
-/// may be absent.
-fn detail_with_badge(agent: AgentState, badge: Option<String>, width: usize) -> String {
-    let Some(badge) = badge else {
-        return agent.detail(width).unwrap_or_default();
-    };
-    let badge_w = console::measure_text_width(&badge);
-    if badge_w >= width {
-        // No room for both: the badge alone, clipped to the cell.
-        return clip_to_width(&badge, width);
+/// The `↑N ↓M` commit-divergence marker for a worktree's [`AheadBehind`] — `↑N`
+/// (ahead, cyan) the commits the branch has that the default lacks, `↓M` (behind,
+/// magenta) the ones the default has that the branch lacks. Only the non-zero side
+/// is shown (so a branch only ahead reads `↑N`, not `↑N ↓0`); `None` when even
+/// with the default or not measured. Shown on the detail line beside the `+N -M`
+/// diff badge — commits there, lines there — so a glance separates un-merged work
+/// (ahead) from a branch gone stale behind its default.
+fn ahead_behind_badge(ab: Option<AheadBehind>) -> Option<String> {
+    let ab = ab?;
+    let mut parts = Vec::new();
+    if ab.ahead > 0 {
+        parts.push(style(format!("↑{}", ab.ahead)).cyan().to_string());
     }
-    // Reserve the badge's columns (plus a one-space gap) and clip the agent label
-    // to what's left, so it is styled already-clipped (clean ANSI) rather than
-    // truncated after the fact.
-    let agent = agent.detail(width - badge_w - 1).unwrap_or_default();
-    let pad = width - console::measure_text_width(&agent) - badge_w;
-    format!("{agent}{}{badge}", " ".repeat(pad))
+    if ab.behind > 0 {
+        parts.push(style(format!("↓{}", ab.behind)).magenta().to_string());
+    }
+    (!parts.is_empty()).then(|| parts.join(" "))
+}
+
+/// Compose the detail line's content: the `agent` state label on the left, and a
+/// right-aligned cluster of the freshness `time`, the `commits` divergence marker
+/// (`↑N ↓M`), and the diff `badge` (`<time> <commits> <badge>`) within `width`.
+/// The badge keeps the far-right column (so badges line up down the list); the
+/// `commits` and `time` sit to its left; the agent label is clipped to the room
+/// left of the cluster.
+///
+/// Priority under pressure is **badge > agent > commits > time**: the badge is
+/// pinned to the right edge (and clips the agent when both can't fit, the
+/// established rule). The `commits` then the `time` are added left of the badge,
+/// each only when the agent's full label still fits beside the whole cluster —
+/// so the lowest-priority `time` is dropped first, then `commits`, before the
+/// agent state is ever truncated. Any of the four may be absent.
+fn detail_content(
+    agent: AgentState,
+    time: Option<String>,
+    commits: Option<String>,
+    badge: Option<String>,
+    width: usize,
+) -> String {
+    // The agent's natural (un-squeezed) label width, used to decide whether the
+    // optional segments still leave the agent state readable.
+    let agent_natural_w = console::measure_text_width(&agent.detail(width).unwrap_or_default());
+
+    // The right cluster starts as the badge (far right). Higher-priority segments
+    // are prepended first (commits before time), so when room runs out the
+    // lowest-priority time is the one left off — and none of them ever squeezes
+    // the agent's full label, unlike the badge.
+    let (mut cluster, mut cluster_w) = match badge {
+        Some(badge) => {
+            let w = console::measure_text_width(&badge);
+            (badge, w)
+        }
+        None => (String::new(), 0),
+    };
+    for seg in [commits, time].into_iter().flatten() {
+        let seg_w = console::measure_text_width(&seg);
+        let with_seg_w = if cluster_w == 0 {
+            seg_w
+        } else {
+            cluster_w + 1 + seg_w
+        };
+        let gap = usize::from(agent_natural_w > 0);
+        if agent_natural_w + gap + with_seg_w <= width {
+            cluster = if cluster.is_empty() {
+                seg
+            } else {
+                format!("{seg} {cluster}")
+            };
+            cluster_w = with_seg_w;
+        }
+    }
+    if cluster.is_empty() {
+        return agent.detail(width).unwrap_or_default();
+    }
+    if cluster_w >= width {
+        // No room for both: the cluster alone, clipped to the cell.
+        return clip_to_width(&cluster, width);
+    }
+    // Reserve the cluster's columns (plus a one-space gap) and clip the agent
+    // label to what's left, so it is styled already-clipped (clean ANSI) rather
+    // than truncated after the fact.
+    let agent = agent.detail(width - cluster_w - 1).unwrap_or_default();
+    let pad = width - console::measure_text_width(&agent) - cluster_w;
+    format!("{agent}{}{cluster}", " ".repeat(pad))
 }
 
 /// Builds the root's two lines: the workspace itself, belonging to no session.
@@ -471,6 +577,7 @@ pub(super) fn left_pane(
     rows: usize,
     in_switch: bool,
     sidebar: Sidebar,
+    now: DateTime<Utc>,
 ) -> Vec<String> {
     if sidebar == Sidebar::Rail {
         return rail_pane(list, live, running, waiting, done, rows, in_switch);
@@ -527,6 +634,8 @@ pub(super) fn left_pane(
                 list.display_label(i),
                 name_width,
                 detail_width,
+                list.has_note(i),
+                now,
                 selected,
                 row == list.active_index(),
                 in_switch,
@@ -1624,7 +1733,7 @@ mod tests {
     }
 
     #[test]
-    fn detail_with_badge_right_aligns_the_badge_beside_the_agent_label() {
+    fn detail_content_right_aligns_the_badge_beside_the_agent_label() {
         let badge = diff_badge(Some(DiffStat {
             added: 124,
             removed: 18,
@@ -1632,7 +1741,7 @@ mod tests {
 
         // Agent label on the left, badge pinned to the cell's right edge; the
         // whole cell measures exactly the width so the badges line up.
-        let line = detail_with_badge(AgentState::Running, badge.clone(), 24);
+        let line = detail_content(AgentState::Running, None, None, badge.clone(), 24);
         assert_eq!(console::measure_text_width(&line), 24);
         let plain = console::strip_ansi_codes(&line);
         assert!(plain.starts_with("▶ running"));
@@ -1640,23 +1749,29 @@ mod tests {
 
         // With no agent the badge still rides the right edge — the case the badge
         // most needs to read (a session with work but nothing running).
-        let line = detail_with_badge(AgentState::Absent, badge.clone(), 24);
+        let line = detail_content(AgentState::Absent, None, None, badge.clone(), 24);
         assert_eq!(console::measure_text_width(&line), 24);
         assert_eq!(console::strip_ansi_codes(&line).trim_start(), "+124 -18");
     }
 
     #[test]
-    fn detail_with_badge_falls_back_to_the_agent_label_or_clips_a_cramped_cell() {
-        // No badge → just the agent label (blank when absent).
-        assert_eq!(detail_with_badge(AgentState::Absent, None, 20), "");
-        assert!(
-            console::strip_ansi_codes(&detail_with_badge(AgentState::Running, None, 20))
-                .contains("running")
-        );
-
-        // Too narrow for both → the badge alone, clipped to the cell.
-        let line = detail_with_badge(
+    fn detail_content_falls_back_to_the_agent_label_or_clips_a_cramped_cell() {
+        // No badge, no time, no commits → just the agent label (blank when absent).
+        assert_eq!(detail_content(AgentState::Absent, None, None, None, 20), "");
+        assert!(console::strip_ansi_codes(&detail_content(
             AgentState::Running,
+            None,
+            None,
+            None,
+            20
+        ))
+        .contains("running"));
+
+        // Too narrow for both → the cluster alone, clipped to the cell.
+        let line = detail_content(
+            AgentState::Running,
+            None,
+            None,
             diff_badge(Some(DiffStat {
                 added: 124,
                 removed: 18,
@@ -1664,5 +1779,119 @@ mod tests {
             5,
         );
         assert!(console::measure_text_width(&line) <= 5);
+    }
+
+    #[test]
+    fn detail_content_places_time_left_of_the_badge_and_drops_it_when_cramped() {
+        let badge = diff_badge(Some(DiffStat {
+            added: 1,
+            removed: 2,
+        }));
+        let time = Some(style("3分前").dim().to_string());
+
+        // Roomy cell: agent on the left, then `time badge` as the right cluster
+        // with the badge still at the far edge.
+        let line = detail_content(AgentState::Running, time.clone(), None, badge.clone(), 30);
+        let plain = console::strip_ansi_codes(&line);
+        assert!(plain.starts_with("▶ running"));
+        assert!(plain.contains("3分前 +1 -2"));
+        assert!(plain.ends_with("+1 -2"));
+
+        // With no badge the time becomes the right cluster on its own.
+        let only_time = detail_content(AgentState::Absent, time.clone(), None, None, 20);
+        assert_eq!(console::strip_ansi_codes(&only_time).trim_start(), "3分前");
+
+        // Cramped cell: the badge is kept at the right edge and the lower-priority
+        // time is dropped rather than pushing the badge off.
+        let tight = detail_content(AgentState::Absent, time, None, badge, 7);
+        let plain = console::strip_ansi_codes(&tight);
+        assert!(plain.contains("+1 -2"));
+        assert!(!plain.contains("3分前"));
+    }
+
+    #[test]
+    fn detail_content_orders_the_cluster_and_drops_time_before_commits() {
+        let badge = diff_badge(Some(DiffStat {
+            added: 1,
+            removed: 2,
+        }));
+        let commits = ahead_behind_badge(Some(AheadBehind {
+            ahead: 2,
+            behind: 1,
+        }));
+        let time = Some(style("3分前").dim().to_string());
+
+        // Roomy cell: the right cluster reads `time commits badge`, left to right,
+        // with the badge still pinned to the far edge.
+        let line = detail_content(
+            AgentState::Running,
+            time.clone(),
+            commits.clone(),
+            badge.clone(),
+            36,
+        );
+        let plain = console::strip_ansi_codes(&line);
+        assert!(plain.starts_with("▶ running"));
+        assert!(plain.contains("3分前 ↑2 ↓1 +1 -2"));
+        assert!(plain.ends_with("+1 -2"));
+
+        // Tighter cell: the lowest-priority time is dropped first, but the commits
+        // marker and badge survive beside the agent label.
+        let line = detail_content(AgentState::Running, time, commits, badge, 22);
+        let plain = console::strip_ansi_codes(&line);
+        assert!(plain.contains("running"));
+        assert!(plain.contains("↑2 ↓1 +1 -2"));
+        assert!(!plain.contains("3分前"));
+    }
+
+    #[test]
+    fn ahead_behind_badge_shows_only_the_non_zero_sides() {
+        assert_eq!(ahead_behind_badge(None), None);
+        // Even with the default → no marker.
+        assert_eq!(
+            ahead_behind_badge(Some(AheadBehind {
+                ahead: 0,
+                behind: 0
+            })),
+            None
+        );
+        let ahead = ahead_behind_badge(Some(AheadBehind {
+            ahead: 3,
+            behind: 0,
+        }))
+        .unwrap();
+        assert_eq!(console::strip_ansi_codes(&ahead), "↑3");
+        let behind = ahead_behind_badge(Some(AheadBehind {
+            ahead: 0,
+            behind: 2,
+        }))
+        .unwrap();
+        assert_eq!(console::strip_ansi_codes(&behind), "↓2");
+        let both = ahead_behind_badge(Some(AheadBehind {
+            ahead: 3,
+            behind: 2,
+        }))
+        .unwrap();
+        assert_eq!(console::strip_ansi_codes(&both), "↑3 ↓2");
+    }
+
+    #[test]
+    fn relative_time_buckets_by_elapsed_span() {
+        let now = DateTime::parse_from_rfc3339("2026-06-27T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let ago = |secs: i64| {
+            console::strip_ansi_codes(&relative_time(now, now - chrono::Duration::seconds(secs)))
+                .into_owned()
+        };
+        assert_eq!(ago(5), "たった今"); // under a minute
+        assert_eq!(ago(180), "3分前"); // minutes
+        assert_eq!(ago(7200), "2時間前"); // hours
+        assert_eq!(ago(2 * 86_400), "2日前"); // days
+                                              // A future timestamp (clock skew) clamps to "たった今".
+        assert_eq!(
+            console::strip_ansi_codes(&relative_time(now, now + chrono::Duration::seconds(30))),
+            "たった今"
+        );
     }
 }

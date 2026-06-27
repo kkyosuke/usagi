@@ -40,6 +40,7 @@
 | セッションアクション UI | `session_action_ui` | enum | `menu` | ホーム画面の[在席](design/05-home.md#在席focus)で右ペインに出すアクション UI のスタイル。`menu`（選べるリスト）/ `prompt`（セッションスコープのコマンドライン） |
 | サイドバー | `sidebar` | enum | `full` | ホーム画面の左セッション一覧を開く初期状態。`full`（全幅の一覧）/ `rail`（幅 5 桁に畳んだレール）。実行時は `Ctrl-B` で随時切り替えられる（[サイドバーの開閉](design/05-home.md#サイドバーの開閉ctrl-b)） |
 | 端末キー方式 | `key_scheme` | enum | `prefix` | 埋め込み端末（[没入](design/05-home.md#没入attached)）がナビゲーション用に予約するキーの方式。`prefix`（`Ctrl-O` リーダー：`Ctrl-O` の次キーで操作。`Ctrl-O` 以外の Ctrl キーはシェル/エージェントへ流れる）/ `alt`（`Alt` 単打：bare Ctrl キーを一切奪わない。macOS は端末の Option=Meta 設定が前提） |
+| マスコットの動き | `mascot_animation_enabled` | bool | `true` | ホーム画面サイドバーの[マスコットのうさぎ](design/05-home.md#レイアウト)が操作に反応するかどうか。`true` で、切替 / 在席では操作のたびにまばたきし、没入では作業中の手をぴくぴく動かす。`false` にすると一切動かず静止画になる（うさぎ自体は表示される）。再描画はもともと起きる操作に乗せるだけでアイドル時のタイマーは持たない |
 | 端末スクロールバック | `terminal_scrollback_lines` | usize | `2000` | 埋め込み端末ペインが保持するスクロールバック行数。**ライブなペインごとに 1 つ**確保されるため、セッション・ペインを多数開いたときの TUI メモリの主因。深い履歴が欲しければ上げ、メモリを抑えたければ下げる（上限 `50000`） |
 | ローカル LLM 有効化 | `local_llm.enabled` | bool | `false` | 有効にすると `agent` 起動時に [ローカル LLM MCP サーバ](03-commands/04-llm-mcp.md)（`usagi-llm`）を wire し、軽量タスクをローカル LLM に委譲できる |
 | ローカル LLM モデル | `local_llm.model` | string | `qwen2.5-coder:7b` | 委譲先の Ollama モデル名（`qwen2.5-coder:7b` / `:3b` / `:1.5b` / `qwen2.5:7b`） |

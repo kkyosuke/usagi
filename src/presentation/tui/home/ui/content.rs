@@ -176,6 +176,7 @@ mod tests {
             upstream: None,
             status: BranchStatus::Local,
             diff: None,
+            ahead_behind: None,
             updated_at: Utc::now(),
         }
     }

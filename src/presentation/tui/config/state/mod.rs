@@ -43,6 +43,8 @@ pub enum Field {
     SessionActionUi,
     /// How the embedded terminal (没入) reserves its navigation keys.
     KeyScheme,
+    /// Whether the home-screen sidebar mascot reacts to interaction.
+    MascotAnimation,
     /// The local LLM enable toggle — or an "Install" action when the runtime /
     /// model is not yet present.
     LocalLlm,
@@ -52,7 +54,7 @@ pub enum Field {
 
 impl Field {
     /// The fields shown on the screen, top to bottom.
-    pub const ALL: [Field; 9] = [
+    pub const ALL: [Field; 10] = [
         Field::Theme,
         Field::DefaultWorkspace,
         Field::Notifications,
@@ -60,6 +62,7 @@ impl Field {
         Field::AgentCli,
         Field::SessionActionUi,
         Field::KeyScheme,
+        Field::MascotAnimation,
         Field::LocalLlm,
         Field::LocalLlmModel,
     ];
@@ -74,6 +77,7 @@ impl Field {
             Field::AgentCli => "Agent CLI",
             Field::SessionActionUi => "Session Action UI",
             Field::KeyScheme => "Terminal Keys",
+            Field::MascotAnimation => "Mascot Animation",
             Field::LocalLlm => "Local LLM",
             Field::LocalLlmModel => "Local LLM Model",
         }
@@ -478,6 +482,9 @@ impl Config {
                 self.settings.session_action_ui != self.baseline.session_action_ui
             }
             Field::KeyScheme => self.settings.key_scheme != self.baseline.key_scheme,
+            Field::MascotAnimation => {
+                self.settings.mascot_animation_enabled != self.baseline.mascot_animation_enabled
+            }
             Field::LocalLlm => self.settings.local_llm.enabled != self.baseline.local_llm.enabled,
             Field::LocalLlmModel => self.settings.local_llm.model != self.baseline.local_llm.model,
         }
@@ -547,6 +554,7 @@ impl Config {
                 session_action_ui_label(self.settings.session_action_ui).to_string()
             }
             Field::KeyScheme => key_scheme_label(self.settings.key_scheme).to_string(),
+            Field::MascotAnimation => on_off(self.settings.mascot_animation_enabled).to_string(),
             // Before the runtime is present the row is an install action; once
             // installed it becomes a plain on/off toggle.
             Field::LocalLlm => {

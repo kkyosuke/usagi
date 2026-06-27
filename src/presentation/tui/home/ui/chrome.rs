@@ -461,16 +461,16 @@ pub(super) fn remove_modal_row(name: &str, cursor: bool, selected: bool, inner: 
     }
 }
 
-/// Builds the centred session-removal modal: a scrolling checklist of the
-/// workspace's sessions, with the count selected and the key hints below.
-pub(super) fn remove_modal_frame(
-    raw_height: usize,
-    raw_width: usize,
-    modal: &RemoveModal,
-) -> Vec<String> {
-    // Wide enough for the longest body line, the key-hints row below.
-    const INNER: usize = 44;
+/// Inner (content) width of the session-removal modal box, before the borders
+/// and the space of padding [`widgets::boxed`] adds on each side. Wide enough for
+/// the longest body line and the key-hints row below.
+pub(super) const REMOVE_MODAL_INNER: usize = 44;
 
+/// Builds the body of the session-removal modal: a scrolling checklist of the
+/// workspace's sessions, with the count selected and the key hints below. The box
+/// and centring are added by [`widgets::overlay_modal`] so the workspace shows
+/// through around it instead of a black backdrop.
+pub(super) fn remove_modal_body(modal: &RemoveModal, inner: usize) -> Vec<String> {
     let mut body = vec![
         style("Select sessions to remove.").dim().to_string(),
         String::new(),
@@ -497,7 +497,7 @@ pub(super) fn remove_modal_frame(
                 name,
                 i == modal.cursor(),
                 modal.is_selected(i),
-                INNER,
+                inner,
             ));
         }
         if end < total {
@@ -517,7 +517,7 @@ pub(super) fn remove_modal_frame(
             .dim()
             .to_string(),
     );
-    widgets::render_modal(raw_height, raw_width, "Remove sessions", INNER, &body)
+    body
 }
 
 /// Builds the centred quit-confirmation modal. `Ctrl-C` raises it only when a

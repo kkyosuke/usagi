@@ -190,6 +190,9 @@ pub fn run(term: &Term, workspace: &Workspace, preload: Preload) -> Result<Outco
     // How the embedded terminal (没入) reserves its navigation keys — a `Ctrl-O`
     // prefix or single `Alt`-chords — so the rest reach the shell / agent.
     state.set_key_scheme(settings.key_scheme);
+    // Whether the sidebar mascot reacts to interaction (a blink in 切替 / 在席, the
+    // 没入 paw); off keeps it a still resting image.
+    state.set_mascot_animation_enabled(settings.mascot_animation_enabled);
     // The configured default agent (its display name labels 在席's `agent` row and
     // a bare `agent` launches it). The agents installed on this machine fill in
     // shortly after via the background probe spawned below (state opens with none).

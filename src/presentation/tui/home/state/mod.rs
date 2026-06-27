@@ -14,6 +14,9 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
+
+use chrono::{DateTime, Utc};
 
 use crate::domain::issue::Issue;
 use crate::domain::settings::{AgentCli, KeyScheme, SessionActionUi, Sidebar};
@@ -446,6 +449,29 @@ pub struct HomeState {
     /// session (keyed by this path in `live` / `running` / …). Injected by
     /// `mod.rs`; empty until set (tests that never preview the root leave it so).
     root_path: PathBuf,
+    /// Whether the sidebar mascot reacts to interaction — injected from the
+    /// effective settings by `mod.rs`. While `false` the mascot never blinks and
+    /// the Working rabbit never pumps its paw, so it stays a perfectly still
+    /// resting image (and [`tick_mascot`](Self::tick_mascot) /
+    /// [`kick_mascot_blink`](Self::kick_mascot_blink) become no-ops). On by default.
+    mascot_animation_enabled: bool,
+    /// When set, the mascot is mid-blink until this instant — the eyes stay shut
+    /// while `now` is before it. [`kick_mascot_blink`](Self::kick_mascot_blink)
+    /// arms it the moment the user interacts (in 切替 / 在席), and
+    /// [`tick_mascot`](Self::tick_mascot) clears it once the instant passes, so the
+    /// rabbit blinks back without any idle timer — the blink rides paints that
+    /// already happen.
+    mascot_blink_deadline: Option<Instant>,
+    /// Whether the mascot's eyes are shut on the frame being painted, recomputed
+    /// from [`mascot_blink_deadline`](Self::mascot_blink_deadline) by
+    /// [`tick_mascot`](Self::tick_mascot) just before each paint, so the renderer
+    /// (which has no clock) can read a plain bool.
+    mascot_blinking: bool,
+    /// A slow pose counter for the 没入 (Attached) Working rabbit's pumping paw,
+    /// advanced by [`tick_mascot`](Self::tick_mascot) on each live-loop tick. The
+    /// open-eyed moods ignore it (they animate off the blink instead), so it only
+    /// matters while a session is live and the loop is already ticking.
+    mascot_tick: usize,
     /// The single sink that persists operation-failure error lines to the daily
     /// log file. [`log_error`](Self::log_error) and the failure lines applied from
     /// background tasks / session outcomes flow through it, so an on-screen
@@ -457,7 +483,19 @@ pub struct HomeState {
     /// routed here — they stay command-log notices, so the file log keeps only
     /// real failures rather than the noise of mistyped commands.
     logger: Box<dyn crate::infrastructure::error_log::Logger>,
+    /// The wall-clock instant the current frame renders at, refreshed each paint
+    /// by the event loop ([`set_now`](Self::set_now)). The left pane reads it to
+    /// turn each session's `updated_at` into a relative "N分前" label. Kept on the
+    /// state (rather than threaded through the pure `render_frame`) so the renderer
+    /// stays a `&HomeState`-only function and its many test call sites are
+    /// unaffected; tests that pin the label set a fixed value with `set_now`.
+    now: DateTime<Utc>,
 }
+
+/// How long the mascot holds a blink (eyes shut). A touch longer than the
+/// loop's `ANIM_TICK`, so the blink spans a couple of paints — long enough to
+/// read as a blink, short enough to feel natural — before the eyes reopen.
+const MASCOT_BLINK: Duration = Duration::from_millis(180);
 
 impl HomeState {
     /// Builds the screen state for `workspace_name` and its `worktrees`. An
@@ -504,8 +542,27 @@ impl HomeState {
             loading: None,
             tasks: Vec::new(),
             root_path: PathBuf::new(),
+            // The mascot reacts by default; `mod.rs` overrides it from the
+            // effective settings, and tests get a lively mascot without setup.
+            mascot_animation_enabled: true,
+            mascot_blink_deadline: None,
+            mascot_blinking: false,
+            mascot_tick: 0,
             logger: Box::new(crate::infrastructure::error_log::NoopLogger),
+            now: Utc::now(),
         }
+    }
+
+    /// Record the instant the next frame renders at, so the left pane's relative
+    /// "N分前" labels track real time. The event loop calls this before each paint;
+    /// tests pin it to control the labels.
+    pub fn set_now(&mut self, now: DateTime<Utc>) {
+        self.now = now;
+    }
+
+    /// The instant the current frame renders at (see [`set_now`](Self::set_now)).
+    pub fn now(&self) -> DateTime<Utc> {
+        self.now
     }
 
     /// Inject the error sink that persists operation failures to the daily log
@@ -560,6 +617,63 @@ impl HomeState {
     /// pane input loop to classify each key (see [`super::pane_input::classify`]).
     pub fn key_scheme(&self) -> KeyScheme {
         self.key_scheme
+    }
+
+    /// Enable or disable the sidebar mascot's reactions (injected from the
+    /// effective settings by `mod.rs` at construction). Disabling it stops the
+    /// blink and the Working paw and clears any blink in flight, so the mascot
+    /// immediately settles into a still resting image.
+    pub fn set_mascot_animation_enabled(&mut self, enabled: bool) {
+        self.mascot_animation_enabled = enabled;
+        if !enabled {
+            self.mascot_blink_deadline = None;
+            self.mascot_blinking = false;
+        }
+    }
+
+    /// Whether the mascot's eyes are shut on the frame being painted, as last
+    /// computed by [`tick_mascot`](Self::tick_mascot). The renderer reads this
+    /// rather than a clock.
+    pub fn mascot_blinking(&self) -> bool {
+        self.mascot_blinking
+    }
+
+    /// The mascot's slow pose counter, driving the 没入 Working rabbit's paw.
+    pub fn mascot_tick(&self) -> usize {
+        self.mascot_tick
+    }
+
+    /// Start a blink: shut the mascot's eyes until [`MASCOT_BLINK`] from `now`. The
+    /// event loop calls this the moment the user interacts in 切替 / 在席, so the
+    /// resting rabbit blinks back. A no-op when the mascot animation is disabled.
+    pub fn kick_mascot_blink(&mut self, now: Instant) {
+        if self.mascot_animation_enabled {
+            self.mascot_blink_deadline = Some(now + MASCOT_BLINK);
+        }
+    }
+
+    /// Refresh the mascot's animation state for the frame about to be painted:
+    /// reopen the eyes once the blink's deadline has passed, and advance the slow
+    /// pose counter the Working paw rides. Called once per event-loop iteration
+    /// with the loop's `now`. A no-op (and forces the eyes open) when the mascot
+    /// animation is disabled, so a toggled-off mascot is perfectly still.
+    pub fn tick_mascot(&mut self, now: Instant) {
+        if !self.mascot_animation_enabled {
+            self.mascot_blinking = false;
+            return;
+        }
+        self.mascot_blinking = match self.mascot_blink_deadline {
+            Some(deadline) if now < deadline => true,
+            // The blink has run its course (or none is armed): reopen the eyes and
+            // drop the spent deadline.
+            _ => {
+                self.mascot_blink_deadline = None;
+                false
+            }
+        };
+        // Bounded so a long-lived session never overflows it; the Working face
+        // only reads it modulo a small period.
+        self.mascot_tick = self.mascot_tick.wrapping_add(1);
     }
 
     /// How the left session sidebar is currently sized (full width or the
@@ -685,7 +799,16 @@ impl HomeState {
             .iter()
             .map(|&i| self.sessions[i].display_name.clone())
             .collect();
-        self.list = WorktreeList::with_labels(name, rows, labels);
+        // Carry each session's note-presence onto its row so the pane can show a
+        // memo marker; the note text itself is read on demand (Switch preview /
+        // editor), never stored on the row.
+        let notes = order
+            .iter()
+            .map(|&i| self.sessions[i].note.is_some())
+            .collect();
+        let mut list = WorktreeList::with_labels(name, rows, labels);
+        list.set_notes(notes);
+        self.list = list;
     }
 
     /// The order the sessions are laid out in the left pane, as indices into

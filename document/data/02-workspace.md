@@ -84,13 +84,14 @@
       "root": "/Users/me/git/usagi/.usagi/sessions/login",
       "worktrees": [
         {
-          "branch": "login",
+          "branch": "usagi/login",
           "path": "/Users/me/git/usagi/.usagi/sessions/login/app-a",
           "head": "aaf5459",
           "primary": false,
           "upstream": null,
           "status": "local",
           "diff": { "added": 124, "removed": 18 },
+          "ahead_behind": { "ahead": 2, "behind": 1 },
           "updated_at": "2026-06-13T05:01:18.659149Z"
         }
       ],
@@ -119,7 +120,7 @@ worktree を束ねます。各 worktree は git ステータス付き（下記 `
 
 | フィールド | 型 | 意味 |
 |---|---|---|
-| `name` | string | セッション名（各リポジトリで作成したブランチ名でもある）。セッションの識別子で、作成後は変わらない |
+| `name` | string | セッション名。セッションの識別子で、作成後は変わらない。各リポジトリで作成するブランチは `usagi/<name>`（`usagi/` 名前空間に収め、手で切ったブランチと衝突させない） |
 | `display_name` | string? | サイドメニューでの表示名（任意）。設定時は一覧の `name` の代わりに表示する**見た目だけ**の上書きで、ブランチ名・識別子は変えない。未設定（既定）なら省略され、`name` を表示する |
 | `note` | string? | セッションに紐づく自由記述の**複数行メモ**（任意）。用途・残タスク・リンクなどの覚え書きで、**見た目だけ**の付加情報。ブランチ名・識別子には影響しない。未設定（既定）なら省略される |
 | `root` | path | セッションツリーのルート（`<workspace>/.usagi/sessions/<name>`） |
@@ -139,13 +140,14 @@ worktree を束ねます。各 worktree は git ステータス付き（下記 `
 
 | フィールド | 型 | 意味 |
 |---|---|---|
-| `branch` | string? | チェックアウト中のブランチ名。detached HEAD なら `null` |
+| `branch` | string? | チェックアウト中のブランチ名（セッションの worktree なら `usagi/<name>`）。detached HEAD なら `null` |
 | `path` | path | worktree ディレクトリの絶対パス（`.usagi/sessions/<name>/...`） |
 | `head` | string | チェックアウト中コミットの短縮ハッシュ（7 桁） |
 | `primary` | bool | 予約フィールド（セッション worktree では常に `false`） |
 | `upstream` | string? | 上流追跡ブランチ（例 `origin/login`）。無ければ `null` |
 | `status` | enum | ブランチのライフサイクル状態（下記） |
 | `diff` | object? | 既定ブランチとの累積差分の行数 `{ "added": N, "removed": M }`。サイドバーの `+N -M` バッジの元。差分が無い（手つかず）・既定ブランチ自身・detached HEAD・読めなかったときは省略（`null` 相当）。古いファイルにキーが無くても読める |
+| `ahead_behind` | object? | 既定ブランチとのコミット単位の差 `{ "ahead": N, "behind": M }`（`ahead`＝ブランチ側に多いコミット数・`behind`＝既定ブランチ側に多いコミット数）。サイドバーの `↑N ↓M` マーカーの元。差が無い（ahead も behind も 0）・既定ブランチ自身・detached HEAD・読めなかったときは省略（`null` 相当）。古いファイルにキーが無くても読める |
 | `updated_at` | RFC3339(UTC) | この worktree の状態を更新した日時 |
 
 ## `status`: ブランチのライフサイクル状態

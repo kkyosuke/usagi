@@ -525,9 +525,14 @@ impl FocusMenu {
 /// namespace checks here work against the pre-fetched branch list rather than
 /// touching git:
 ///
-/// - an exact duplicate of an existing branch;
-/// - a clash with an existing branch nested under `<name>/` (git cannot create
-///   the `<name>` branch alongside `<name>/…`).
+/// - an exact duplicate of the branch `usagi/<name>` it would cut;
+/// - a clash with an existing branch nested under `usagi/<name>/` (git cannot
+///   create the `usagi/<name>` branch alongside `usagi/<name>/…`).
+///
+/// The name is compared against the *branch* it would create — `usagi/<name>`,
+/// per [`crate::usecase::session::branch_name`] — not the bare name, so a
+/// hand-made branch sharing the bare name (e.g. `<name>` or `feat/<name>`) is no
+/// longer a false conflict: every session branch is namespaced under `usagi/`.
 fn validate_session_name(name: &str, taken: &[String]) -> Option<String> {
     let name = name.trim();
     if name.is_empty() {
@@ -536,10 +541,11 @@ fn validate_session_name(name: &str, taken: &[String]) -> Option<String> {
     if let Some(error) = crate::usecase::session::name_format_error(name) {
         return Some(error);
     }
-    if taken.iter().any(|b| b == name) {
+    let branch = crate::usecase::session::branch_name(name);
+    if taken.contains(&branch) {
         return Some(format!("\"{name}\" already exists."));
     }
-    let prefix = format!("{name}/");
+    let prefix = format!("{branch}/");
     if let Some(conflict) = taken.iter().find(|b| b.starts_with(&prefix)) {
         return Some(format!("\"{name}\" conflicts with branch \"{conflict}\"."));
     }
@@ -627,13 +633,20 @@ mod tests {
         assert!(validate_session_name("-x", &[])
             .unwrap()
             .contains("must not start with"));
-        // An exact duplicate is reported.
-        let taken = vec!["feature".to_string()];
+        // The name is matched against the `usagi/<name>` branch it would cut, so
+        // an existing `usagi/feature` is an exact duplicate...
+        let taken = vec!["usagi/feature".to_string()];
         assert!(validate_session_name("feature", &taken)
             .unwrap()
             .contains("already exists"));
-        // A clash with a nested branch is reported.
-        let taken = vec!["feature/x".to_string()];
+        // ...while a hand-made branch sharing the bare name is not (sessions live
+        // under `usagi/`, so they never collide with `feature` itself).
+        assert_eq!(
+            validate_session_name("feature", &["feature".to_string()]),
+            None
+        );
+        // A clash with a branch nested under `usagi/<name>/` is reported.
+        let taken = vec!["usagi/feature/x".to_string()];
         assert!(validate_session_name("feature", &taken)
             .unwrap()
             .contains("conflicts with branch"));

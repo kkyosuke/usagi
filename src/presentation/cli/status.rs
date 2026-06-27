@@ -80,6 +80,7 @@ mod tests {
                         upstream: Some("origin/login".to_string()),
                         status: BranchStatus::Pushed,
                         diff: None,
+                        ahead_behind: None,
                         updated_at: ts,
                     },
                     WorktreeState {
@@ -90,6 +91,7 @@ mod tests {
                         upstream: None,
                         status: BranchStatus::Local,
                         diff: None,
+                        ahead_behind: None,
                         updated_at: ts,
                     },
                 ],

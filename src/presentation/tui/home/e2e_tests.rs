@@ -48,6 +48,7 @@ fn worktree(branch: &str, path: &str, primary: bool, status: BranchStatus) -> Wo
         upstream: None,
         status,
         diff: None,
+        ahead_behind: None,
         updated_at: Utc::now(),
     }
 }

@@ -194,6 +194,7 @@ fn cycling_default_workspace_persists_when_saved() {
         Ok(Key::ArrowDown),  // Agent CLI
         Ok(Key::ArrowDown),  // Session Action UI
         Ok(Key::ArrowDown),  // Terminal Keys
+        Ok(Key::ArrowDown),  // Mascot Animation
         Ok(Key::ArrowDown),  // Local LLM
         Ok(Key::ArrowDown),  // Local LLM Model
         Ok(Key::ArrowDown),  // Save button
@@ -408,6 +409,7 @@ fn keys_to_local_llm() -> Vec<io::Result<Key>> {
         Ok(Key::ArrowDown), // Agent CLI
         Ok(Key::ArrowDown), // Session Action UI
         Ok(Key::ArrowDown), // Terminal Keys
+        Ok(Key::ArrowDown), // Mascot Animation
         Ok(Key::ArrowDown), // Local LLM
     ]
 }
@@ -726,6 +728,7 @@ fn toggling_the_local_llm_after_install_persists_the_enabled_flag() {
         Ok(Key::ArrowDown),  // Agent CLI
         Ok(Key::ArrowDown),  // Session Action UI
         Ok(Key::ArrowDown),  // Terminal Keys
+        Ok(Key::ArrowDown),  // Mascot Animation
         Ok(Key::ArrowDown),  // Local LLM
         Ok(Key::ArrowRight), // toggle On
         Ok(Key::ArrowDown),  // Local LLM Model

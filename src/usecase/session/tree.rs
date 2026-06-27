@@ -1,8 +1,9 @@
 //! Mirroring a workspace into a session tree and discovering its repositories.
 //!
 //! A session mirrors the workspace under `.usagi/sessions/<name>/`: every git
-//! repository found becomes a fresh `git worktree` (on a new branch named after
-//! the session), while non-git files and directories are copied. The same
+//! repository found becomes a fresh `git worktree` (on a new branch
+//! `usagi/<name>`, the session name under the `usagi/` namespace), while non-git
+//! files and directories are copied. The same
 //! recursive walk that builds the tree ([`build_dir`]) is reused to discover the
 //! source repositories a session spans ([`source_repos`]).
 

@@ -155,6 +155,10 @@ fn render_settings(settings: &Settings) -> Vec<String> {
             key_scheme_label(settings.key_scheme)
         ),
         format!(
+            "mascot_animation       {}",
+            settings.mascot_animation_enabled
+        ),
+        format!(
             "terminal_scrollback    {}",
             settings.terminal_scrollback_lines
         ),
@@ -246,6 +250,7 @@ mod tests {
             session_action_ui: crate::domain::settings::SessionActionUi::Prompt,
             sidebar: crate::domain::settings::Sidebar::Rail,
             key_scheme: crate::domain::settings::KeyScheme::Alt,
+            mascot_animation_enabled: false,
             terminal_scrollback_lines: 1_234,
             local_llm: crate::domain::settings::LocalLlm {
                 enabled: true,
@@ -262,9 +267,10 @@ mod tests {
         assert!(lines[6].contains("prompt"));
         assert!(lines[7].contains("rail"));
         assert!(lines[8].contains("alt")); // key_scheme
-        assert!(lines[9].contains("1234")); // terminal_scrollback
-        assert!(lines[10].contains("true"));
-        assert!(lines[11].contains("qwen2.5-coder:3b"));
+        assert!(lines[9].contains("false")); // mascot_animation_enabled
+        assert!(lines[10].contains("1234")); // terminal_scrollback
+        assert!(lines[11].contains("true"));
+        assert!(lines[12].contains("qwen2.5-coder:3b"));
     }
 
     #[test]
