@@ -83,6 +83,7 @@ fn worktree(branch: Option<&str>, path: &str) -> WorktreeState {
         status: BranchStatus::Local,
         diff: None,
         ahead_behind: None,
+        pr: None,
         updated_at: Utc::now(),
     }
 }

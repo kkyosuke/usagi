@@ -1103,6 +1103,103 @@ fn left_pane_fades_every_row_but_the_cursor_when_asked() {
 }
 
 #[test]
+fn worktree_row_shows_the_pr_badge_only_when_a_pr_is_present() {
+    // A worktree carrying a PR shows `#<number>` on its detail line.
+    let with_pr = worktree_with_pr(412);
+    let (_, detail) = worktree_row(
+        &with_pr,
+        "",
+        12,
+        24,
+        false,
+        Utc::now(),
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+    );
+    assert!(console::strip_ansi_codes(&detail).contains("#412"));
+
+    // The same row with no PR shows no `#` badge.
+    let without_pr = worktree(Some("main"), false, BranchStatus::Pushed);
+    let (_, detail) = worktree_row(
+        &without_pr,
+        "",
+        12,
+        24,
+        false,
+        Utc::now(),
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+    );
+    assert!(!console::strip_ansi_codes(&detail).contains('#'));
+}
+
+/// An attached (没入) state at 120×24 with the full sidebar, listing a session that
+/// carries PR `#412` followed by one with no PR — the fixture the
+/// `sidebar_pr_link_at` click tests share. Worktree rows start at screen row 6
+/// (the body begins at row 3; the root entry and divider take its first 3 lines),
+/// two screen rows each: `#412` at rows 6–7, the PR-less one at rows 8–9.
+fn attached_with_pr_sidebar() -> HomeState {
+    let mut state = state_with(vec![
+        worktree_with_pr(412),
+        worktree(Some("plain"), false, BranchStatus::Local),
+    ]);
+    state.enter_focus(1);
+    state.show_attached();
+    state
+}
+
+#[test]
+fn sidebar_pr_link_at_opens_the_clicked_sessions_pr() {
+    let state = attached_with_pr_sidebar();
+    // Both lines of the session entry (rows 6 and 7) map to its PR.
+    let url = "https://github.com/o/r/pull/412".to_string();
+    assert_eq!(sidebar_pr_link_at(&state, 24, 120, 2, 6), Some(url.clone()));
+    assert_eq!(sidebar_pr_link_at(&state, 24, 120, 30, 7), Some(url));
+}
+
+#[test]
+fn sidebar_pr_link_at_ignores_rows_without_a_pr() {
+    let state = attached_with_pr_sidebar();
+    // The second session (rows 8–9) has no PR.
+    assert_eq!(sidebar_pr_link_at(&state, 24, 120, 2, 8), None);
+    // The root entry (rows 3–4) and the divider (row 5) are not session rows.
+    assert_eq!(sidebar_pr_link_at(&state, 24, 120, 2, 3), None);
+    assert_eq!(sidebar_pr_link_at(&state, 24, 120, 2, 5), None);
+    // A body row past the end of the session list maps to no worktree.
+    assert_eq!(sidebar_pr_link_at(&state, 24, 120, 2, 10), None);
+}
+
+#[test]
+fn sidebar_pr_link_at_ignores_clicks_off_the_sidebar() {
+    let state = attached_with_pr_sidebar();
+    // Left pane is 40 columns at width 120, so a click at column 40+ is the
+    // divider / right pane, not a sidebar row.
+    assert_eq!(sidebar_pr_link_at(&state, 24, 120, 40, 6), None);
+    // Rows above the body (the title bar / mode ladder / blank separator).
+    assert_eq!(sidebar_pr_link_at(&state, 24, 120, 2, 1), None);
+    // A row below the two-pane body (past `body_rows`).
+    assert_eq!(sidebar_pr_link_at(&state, 24, 120, 2, 22), None);
+}
+
+#[test]
+fn sidebar_pr_link_at_is_none_on_the_collapsed_rail() {
+    let mut state = attached_with_pr_sidebar();
+    // The rail shows no PR badge, so a click there opens nothing.
+    state.set_sidebar(Sidebar::Rail);
+    assert_eq!(sidebar_pr_link_at(&state, 24, 120, 2, 6), None);
+}
+
+#[test]
 fn log_line_colours_each_kind_and_prompts_commands() {
     assert!(log_line(&LogLine::command("man"), 40).contains("❯ man"));
     assert_eq!(log_line(&LogLine::output("plain"), 40), "plain");

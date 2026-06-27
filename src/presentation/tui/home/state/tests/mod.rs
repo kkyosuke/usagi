@@ -14,6 +14,7 @@ fn worktree(branch: &str) -> WorktreeState {
         status: BranchStatus::Local,
         diff: None,
         ahead_behind: None,
+        pr: None,
         updated_at: Utc::now(),
     }
 }

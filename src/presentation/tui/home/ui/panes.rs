@@ -20,7 +20,7 @@ use super::{
     PUSHED_ICON, RAIL_WIDTH, ROOT_DETAIL, STATUS_COL, SYNCED_ICON, TERMINAL_STARTING,
 };
 use crate::domain::settings::{AgentCli, SessionActionUi, Sidebar};
-use crate::domain::workspace_state::{AheadBehind, BranchStatus, DiffStat, WorktreeState};
+use crate::domain::workspace_state::{AheadBehind, BranchStatus, DiffStat, PrLink, WorktreeState};
 use crate::presentation::tui::markdown::{LineStyle, MarkdownLine, Rgb, Span, SpanStyle};
 use crate::presentation::tui::widgets;
 
@@ -263,12 +263,14 @@ pub(super) fn worktree_row(
     // so the detail-line gutter ignores the cursor.
     let badge = diff_badge(worktree.diff);
     let commits = ahead_behind_badge(worktree.ahead_behind);
+    let pr = pr_badge(worktree.pr.as_ref());
     let time = Some(relative_time(now, worktree.updated_at));
     let detail = detail_content(
         AgentState::from_flags(live, running, waiting, done),
         time,
         commits,
         badge,
+        pr,
         detail_width,
     );
     let line2 = detail_line(&gutter_cell(false, active, in_switch), detail);
@@ -324,41 +326,61 @@ fn ahead_behind_badge(ab: Option<AheadBehind>) -> Option<String> {
     (!parts.is_empty()).then(|| parts.join(" "))
 }
 
+/// The clickable `#<number>` pull-request badge for a worktree's [`PrLink`] (blue,
+/// underlined to read as a link), or `None` when the session has no PR. Shown at
+/// the far-right of the detail line; a click anywhere on the session's row opens
+/// it (see [`sidebar_pr_link_at`]).
+fn pr_badge(pr: Option<&PrLink>) -> Option<String> {
+    pr.map(|pr| {
+        style(format!("#{}", pr.number))
+            .blue()
+            .underlined()
+            .to_string()
+    })
+}
+
 /// Compose the detail line's content: the `agent` state label on the left, and a
 /// right-aligned cluster of the freshness `time`, the `commits` divergence marker
-/// (`↑N ↓M`), and the diff `badge` (`<time> <commits> <badge>`) within `width`.
-/// The badge keeps the far-right column (so badges line up down the list); the
-/// `commits` and `time` sit to its left; the agent label is clipped to the room
-/// left of the cluster.
+/// (`↑N ↓M`), the diff `badge`, and the `pr` badge (`<time> <commits> <badge>
+/// <pr>`) within `width`. The `badge` and `pr` keep the far-right columns (so they
+/// line up down the list); the `commits` and `time` sit to their left; the agent
+/// label is clipped to the room left of the cluster.
 ///
-/// Priority under pressure is **badge > agent > commits > time**: the badge is
-/// pinned to the right edge (and clips the agent when both can't fit, the
-/// established rule). The `commits` then the `time` are added left of the badge,
-/// each only when the agent's full label still fits beside the whole cluster —
-/// so the lowest-priority `time` is dropped first, then `commits`, before the
-/// agent state is ever truncated. Any of the four may be absent.
+/// Priority under pressure is **badge / pr > agent > commits > time**: the diff
+/// `badge` and the `pr` are pinned to the right edge (and clip the agent when they
+/// can't all fit, the established rule). The `commits` then the `time` are added
+/// left of them, each only when the agent's full label still fits beside the whole
+/// cluster — so the lowest-priority `time` is dropped first, then `commits`, before
+/// the agent state is ever truncated. Any of the five may be absent.
 fn detail_content(
     agent: AgentState,
     time: Option<String>,
     commits: Option<String>,
     badge: Option<String>,
+    pr: Option<String>,
     width: usize,
 ) -> String {
     // The agent's natural (un-squeezed) label width, used to decide whether the
     // optional segments still leave the agent state readable.
     let agent_natural_w = console::measure_text_width(&agent.detail(width).unwrap_or_default());
 
-    // The right cluster starts as the badge (far right). Higher-priority segments
-    // are prepended first (commits before time), so when room runs out the
-    // lowest-priority time is the one left off — and none of them ever squeezes
-    // the agent's full label, unlike the badge.
-    let (mut cluster, mut cluster_w) = match badge {
-        Some(badge) => {
-            let w = console::measure_text_width(&badge);
-            (badge, w)
+    // The right cluster's pinned base: the diff `badge` then the `pr` `#N`, both
+    // kept under pressure (the badge is the established right-edge marker, the PR
+    // the click target). Higher-priority optional segments are prepended after
+    // (commits before time), so when room runs out the lowest-priority time is the
+    // one left off — and none of those ever squeezes the agent's full label.
+    let mut cluster = String::new();
+    let mut cluster_w = 0;
+    for seg in [badge, pr].into_iter().flatten() {
+        let seg_w = console::measure_text_width(&seg);
+        if cluster.is_empty() {
+            cluster = seg;
+            cluster_w = seg_w;
+        } else {
+            cluster = format!("{cluster} {seg}");
+            cluster_w += 1 + seg_w;
         }
-        None => (String::new(), 0),
-    };
+    }
     for seg in [commits, time].into_iter().flatten() {
         let seg_w = console::measure_text_width(&seg);
         let with_seg_w = if cluster_w == 0 {
@@ -840,6 +862,60 @@ pub(in crate::presentation::tui::home) fn attached_tab_at(
     // handling rather than re-driving the same pane.
     (target != strip.active).then_some(target)
 }
+
+/// The pull-request URL a left click at the 0-based screen (`col`, `row`) should
+/// open, or `None` when the click is not on a session row that carries a PR.
+///
+/// The full sidebar shows each session's `#<number>` badge (the rail does not), so
+/// a click is mapped to a PR only there. The whole session entry is the target —
+/// clicking anywhere on its two rows opens the PR — since the sidebar has no other
+/// click action to disambiguate against, and the `#<number>` badge is the
+/// affordance that marks the row as openable.
+///
+/// The geometry mirrors what [`super::render_frame`] lays out: the two-pane body
+/// begins at row [`BODY_TOP`] (below the title bar, mode ladder, and blank
+/// separator) and is [`super::body_rows_for`] rows tall; the left pane is the
+/// first `left_w` columns. Within it the entries stack as [`left_pane`] builds
+/// them — the root entry (two rows), a divider (one row), then two rows per
+/// worktree — so worktree `i` occupies the body lines `3 + 2*i` and `3 + 2*i + 1`.
+pub(in crate::presentation::tui::home) fn sidebar_pr_link_at(
+    state: &HomeState,
+    raw_height: usize,
+    raw_width: usize,
+    col: u16,
+    row: u16,
+) -> Option<String> {
+    // Only the full sidebar draws the `#N` badge; the collapsed rail shows no PR,
+    // so a click there maps to nothing.
+    if state.sidebar() != Sidebar::Full {
+        return None;
+    }
+    let (height, width) = widgets::normalize_size(raw_height, raw_width);
+    let (left_w, _) = super::layout(width, Sidebar::Full);
+    // The click must land inside the left pane, on a body row.
+    if (col as usize) >= left_w || row < BODY_TOP {
+        return None;
+    }
+    let line = (row - BODY_TOP) as usize;
+    if line >= super::body_rows_for(height) {
+        return None;
+    }
+    // Lines 0..2 are the root entry and the divider; worktree rows start at line 3,
+    // two lines each.
+    let entry = line.checked_sub(ROOT_ENTRY_LINES)?;
+    let pr = state.list().worktrees().get(entry / 2)?.pr.as_ref()?;
+    Some(pr.url.clone())
+}
+
+/// The 0-based screen row the two-pane body begins at, matching the title bar,
+/// mode ladder, and blank separator [`super::render_frame`] stacks above it (and
+/// the `origin_row` of [`super::terminal_geometry`]).
+const BODY_TOP: u16 = 3;
+
+/// Lines the left pane spends before the first worktree row: the root entry (two
+/// rows) and the divider beneath it. Worktree `i` then occupies lines
+/// `ROOT_ENTRY_LINES + 2*i` and the one after it.
+const ROOT_ENTRY_LINES: usize = 3;
 
 /// Column widths for the fixed-width header identity. The session name is clipped
 /// and every field is padded to a constant width, so the identity block is the
@@ -1776,7 +1852,7 @@ mod tests {
 
         // Agent label on the left, badge pinned to the cell's right edge; the
         // whole cell measures exactly the width so the badges line up.
-        let line = detail_content(AgentState::Running, None, None, badge.clone(), 24);
+        let line = detail_content(AgentState::Running, None, None, badge.clone(), None, 24);
         assert_eq!(console::measure_text_width(&line), 24);
         let plain = console::strip_ansi_codes(&line);
         assert!(plain.starts_with("▶ running"));
@@ -1784,7 +1860,7 @@ mod tests {
 
         // With no agent the badge still rides the right edge — the case the badge
         // most needs to read (a session with work but nothing running).
-        let line = detail_content(AgentState::Absent, None, None, badge.clone(), 24);
+        let line = detail_content(AgentState::Absent, None, None, badge.clone(), None, 24);
         assert_eq!(console::measure_text_width(&line), 24);
         assert_eq!(console::strip_ansi_codes(&line).trim_start(), "+124 -18");
     }
@@ -1792,9 +1868,13 @@ mod tests {
     #[test]
     fn detail_content_falls_back_to_the_agent_label_or_clips_a_cramped_cell() {
         // No badge, no time, no commits → just the agent label (blank when absent).
-        assert_eq!(detail_content(AgentState::Absent, None, None, None, 20), "");
+        assert_eq!(
+            detail_content(AgentState::Absent, None, None, None, None, 20),
+            ""
+        );
         assert!(console::strip_ansi_codes(&detail_content(
             AgentState::Running,
+            None,
             None,
             None,
             None,
@@ -1811,6 +1891,7 @@ mod tests {
                 added: 124,
                 removed: 18,
             })),
+            None,
             5,
         );
         assert!(console::measure_text_width(&line) <= 5);
@@ -1826,19 +1907,26 @@ mod tests {
 
         // Roomy cell: agent on the left, then `time badge` as the right cluster
         // with the badge still at the far edge.
-        let line = detail_content(AgentState::Running, time.clone(), None, badge.clone(), 30);
+        let line = detail_content(
+            AgentState::Running,
+            time.clone(),
+            None,
+            badge.clone(),
+            None,
+            30,
+        );
         let plain = console::strip_ansi_codes(&line);
         assert!(plain.starts_with("▶ running"));
         assert!(plain.contains("3分前 +1 -2"));
         assert!(plain.ends_with("+1 -2"));
 
         // With no badge the time becomes the right cluster on its own.
-        let only_time = detail_content(AgentState::Absent, time.clone(), None, None, 20);
+        let only_time = detail_content(AgentState::Absent, time.clone(), None, None, None, 20);
         assert_eq!(console::strip_ansi_codes(&only_time).trim_start(), "3分前");
 
         // Cramped cell: the badge is kept at the right edge and the lower-priority
         // time is dropped rather than pushing the badge off.
-        let tight = detail_content(AgentState::Absent, time, None, badge, 7);
+        let tight = detail_content(AgentState::Absent, time, None, badge, None, 7);
         let plain = console::strip_ansi_codes(&tight);
         assert!(plain.contains("+1 -2"));
         assert!(!plain.contains("3分前"));
@@ -1863,6 +1951,7 @@ mod tests {
             time.clone(),
             commits.clone(),
             badge.clone(),
+            None,
             36,
         );
         let plain = console::strip_ansi_codes(&line);
@@ -1872,11 +1961,60 @@ mod tests {
 
         // Tighter cell: the lowest-priority time is dropped first, but the commits
         // marker and badge survive beside the agent label.
-        let line = detail_content(AgentState::Running, time, commits, badge, 22);
+        let line = detail_content(AgentState::Running, time, commits, badge, None, 22);
         let plain = console::strip_ansi_codes(&line);
         assert!(plain.contains("running"));
         assert!(plain.contains("↑2 ↓1 +1 -2"));
         assert!(!plain.contains("3分前"));
+    }
+
+    #[test]
+    fn detail_content_pins_the_pr_badge_to_the_right_of_the_diff_badge() {
+        let badge = diff_badge(Some(DiffStat {
+            added: 1,
+            removed: 2,
+        }));
+        let pr = pr_badge(Some(&PrLink {
+            number: 412,
+            url: "https://github.com/o/r/pull/412".to_string(),
+        }));
+
+        // Roomy cell: the diff badge then the PR ride the right edge, `+1 -2 #412`,
+        // with the PR pinned to the far edge.
+        let line = detail_content(
+            AgentState::Running,
+            None,
+            None,
+            badge.clone(),
+            pr.clone(),
+            30,
+        );
+        let plain = console::strip_ansi_codes(&line);
+        assert!(plain.starts_with("▶ running"));
+        assert!(plain.contains("+1 -2 #412"));
+        assert!(plain.ends_with("#412"));
+
+        // The PR alone (no diff) still rides the right edge.
+        let only_pr = detail_content(AgentState::Absent, None, None, None, pr.clone(), 20);
+        assert_eq!(console::strip_ansi_codes(&only_pr).trim_start(), "#412");
+
+        // Cramped: the PR and diff badge are both kept (pinned) and the agent label
+        // is the one squeezed, clipped to the cell.
+        let tight = detail_content(AgentState::Running, None, None, badge, pr, 12);
+        let plain = console::strip_ansi_codes(&tight);
+        assert!(plain.contains("#412"));
+        assert!(console::measure_text_width(&tight) <= 12);
+    }
+
+    #[test]
+    fn pr_badge_shows_the_number_only_when_present() {
+        assert_eq!(pr_badge(None), None);
+        let badge = pr_badge(Some(&PrLink {
+            number: 7,
+            url: "https://github.com/o/r/pull/7".to_string(),
+        }))
+        .unwrap();
+        assert_eq!(console::strip_ansi_codes(&badge), "#7");
     }
 
     #[test]

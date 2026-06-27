@@ -23,6 +23,7 @@
 use std::collections::HashSet;
 
 use super::selection::Cell;
+use crate::domain::workspace_state::PrLink;
 
 /// The URL schemes a click recognises. Restricted to `http(s)` so an ordinary
 /// word (or a bare `host:port`) is never mistaken for a link to open.
@@ -213,6 +214,81 @@ pub fn link_cells(screen: &vt100::Screen) -> HashSet<Cell> {
         start = end + 1;
     }
     cells
+}
+
+/// The most recent pull-request link visible on `screen`, or `None` when none is.
+///
+/// This is how usagi learns a session's PR without querying GitHub: the embedded
+/// agent prints the PR URL in its reply (e.g. after opening one), and that URL is
+/// already detected as a clickable link here. We reuse that same whole-screen scan
+/// ([`screen_urls`]) and keep the URLs that look like a pull request
+/// ([`parse_pr_url`]). When several are on screen the **last** in reading order —
+/// the lowest, newest line — wins, so a fresh PR supersedes an older one still
+/// scrolled above it. The caller records it against the session so the sidebar can
+/// show `#<number>` and a click can reopen it.
+pub fn pr_link(screen: &vt100::Screen) -> Option<PrLink> {
+    screen_urls(screen)
+        .iter()
+        .rev()
+        .find_map(|u| parse_pr_url(u))
+}
+
+/// Parse a `http(s)` URL into a [`PrLink`] when it is a pull-request URL of the
+/// form `https://<host>/<owner>/<repo>/pull/<N>` (GitHub and GitHub Enterprise),
+/// or `None` otherwise. The number is the `<N>` path segment; a path with no
+/// owner/repo before `pull`, or a non-numeric / overflowing `<N>`, is rejected.
+/// Trailing path segments (`/pull/<N>/files`) are tolerated — only the segment
+/// right after `pull` is read.
+pub fn parse_pr_url(url: &str) -> Option<PrLink> {
+    let rest = SCHEMES.iter().find_map(|s| url.strip_prefix(s))?;
+    let segments: Vec<&str> = rest.split('/').collect();
+    // host / owner / repo / "pull" / <N>: `pull` sits at index 3 at the earliest,
+    // so there is always an owner and repo (and a host) ahead of it.
+    let pull = segments.iter().position(|&s| s == "pull")?;
+    if pull < 3 {
+        return None;
+    }
+    let number = segments.get(pull + 1)?;
+    if number.is_empty() || !number.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    Some(PrLink {
+        number: number.parse().ok()?,
+        url: url.to_string(),
+    })
+}
+
+/// Every `http(s)` URL on `screen`, as text, in reading order (top-to-bottom,
+/// left-to-right). The string counterpart to [`link_cells`]: it flattens each
+/// logical line the same way and lifts each URL span as a string, rather than
+/// marking the cells it covers. Used by [`pr_link`] to find a pull-request URL in
+/// the agent's output.
+fn screen_urls(screen: &vt100::Screen) -> Vec<String> {
+    let (rows, cols) = screen.size();
+    let mut urls = Vec::new();
+    if cols == 0 {
+        return urls;
+    }
+    let width = cols as usize;
+    let mut chars: Vec<char> = Vec::with_capacity(width);
+    let mut start = 0;
+    while start < rows {
+        let mut end = start;
+        while end + 1 < rows && screen.row_wrapped(end) {
+            end += 1;
+        }
+        chars.clear();
+        for row in start..=end {
+            for col in 0..cols {
+                chars.push(cell_char(screen.cell(row, col)));
+            }
+        }
+        for span in url_spans(&chars) {
+            urls.push(chars[span].iter().collect());
+        }
+        start = end + 1;
+    }
+    urls
 }
 
 /// Whether `chars[at..]` begins with `needle`.
@@ -580,6 +656,86 @@ mod tests {
         // A degenerate 0-column screen yields no link cells (and does not panic).
         let parser = parsed(1, 0, b"");
         assert!(link_cells(parser.screen()).is_empty());
+    }
+
+    #[test]
+    fn parse_pr_url_reads_the_number_from_a_pull_request_url() {
+        let pr = parse_pr_url("https://github.com/KKyosuke/usagi/pull/412").unwrap();
+        assert_eq!(pr.number, 412);
+        assert_eq!(pr.url, "https://github.com/KKyosuke/usagi/pull/412");
+        // A trailing path segment after the number is tolerated.
+        assert_eq!(
+            parse_pr_url("https://github.com/o/r/pull/7/files")
+                .unwrap()
+                .number,
+            7,
+        );
+        // GitHub Enterprise (any host) works the same.
+        assert_eq!(
+            parse_pr_url("https://ghe.corp.example/team/app/pull/99")
+                .unwrap()
+                .number,
+            99,
+        );
+    }
+
+    #[test]
+    fn parse_pr_url_rejects_non_pull_request_urls() {
+        // Not a pull-request path.
+        assert!(parse_pr_url("https://github.com/KKyosuke/usagi").is_none());
+        assert!(parse_pr_url("https://github.com/KKyosuke/usagi/issues/412").is_none());
+        // `pull` with no owner/repo ahead of it.
+        assert!(parse_pr_url("https://github.com/pull/1").is_none());
+        // A non-numeric or missing number.
+        assert!(parse_pr_url("https://github.com/o/r/pull/abc").is_none());
+        assert!(parse_pr_url("https://github.com/o/r/pull/").is_none());
+        // A non-http(s) scheme is not a link we open.
+        assert!(parse_pr_url("ftp://github.com/o/r/pull/1").is_none());
+        // A number too large for u32 overflows and is rejected.
+        assert!(parse_pr_url("https://github.com/o/r/pull/99999999999").is_none());
+    }
+
+    #[test]
+    fn pr_link_finds_the_pull_request_url_on_screen() {
+        let parser = parsed(
+            1,
+            60,
+            b"opened PR: https://github.com/KKyosuke/usagi/pull/412 done",
+        );
+        let pr = pr_link(parser.screen()).unwrap();
+        assert_eq!(pr.number, 412);
+        assert_eq!(pr.url, "https://github.com/KKyosuke/usagi/pull/412");
+    }
+
+    #[test]
+    fn pr_link_prefers_the_last_pull_request_in_reading_order() {
+        // Two PRs on screen: the lower (newer) one wins.
+        let parser = parsed(
+            2,
+            40,
+            b"https://github.com/o/r/pull/1\r\nhttps://github.com/o/r/pull/2",
+        );
+        assert_eq!(pr_link(parser.screen()).unwrap().number, 2);
+    }
+
+    #[test]
+    fn pr_link_finds_a_pull_request_url_wrapped_across_rows() {
+        // The URL fills row 0 and continues on row 1; vt100 marks row 0 wrapped, so
+        // `screen_urls` stitches the two rows back into one link before parsing.
+        let parser = parsed(2, 20, b"https://github.com/o/r/pull/42");
+        assert!(parser.screen().row_wrapped(0));
+        let pr = pr_link(parser.screen()).unwrap();
+        assert_eq!(pr.number, 42);
+        assert_eq!(pr.url, "https://github.com/o/r/pull/42");
+    }
+
+    #[test]
+    fn pr_link_is_none_without_a_pull_request_url() {
+        // A plain (non-PR) link on screen, and a zero-width screen, both yield None.
+        let parser = parsed(1, 40, b"see https://example.com/x now");
+        assert!(pr_link(parser.screen()).is_none());
+        let empty = parsed(1, 0, b"");
+        assert!(pr_link(empty.screen()).is_none());
     }
 
     #[test]

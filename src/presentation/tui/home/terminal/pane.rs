@@ -250,6 +250,10 @@ fn drive(
     // so hover-only / throttled frames skip the O(all cells) re-scan and reuse
     // them until the shell's output actually changes (see [`link`]).
     let mut links_cache: Option<(u64, std::collections::HashSet<Cell>)> = None;
+    // The last pull-request URL harvested from this pane's output, so the agent
+    // printing one is recorded for the sidebar (and persisted) just once rather
+    // than on every output frame it stays on screen (see [`link::pr_link`]).
+    let mut last_pr: Option<crate::domain::workspace_state::PrLink> = None;
     // The cursor shape (DECSCUSR `Ps`) last emitted to the host terminal, so a
     // shape is re-asserted only when the program changes it. `None` until the
     // first paint, which always emits — restoring this pane's shape over whatever
@@ -322,6 +326,18 @@ fn drive(
                 let screen = parser.screen();
                 if links_cache.as_ref().map(|(g, _)| *g) != Some(gen) {
                     links_cache = Some((gen, link::link_cells(screen)));
+                    // Fresh output: harvest a pull-request URL the agent may have
+                    // printed, recording it for the attached session so the sidebar
+                    // shows `#<number>` and a click reopens it. Keyed by the session
+                    // root (the dir the agent runs in), matching what `sync` reads.
+                    if let Some(pr) = link::pr_link(screen) {
+                        if last_pr.as_ref() != Some(&pr) {
+                            if let Some(wt) = state.list().active() {
+                                let _ = crate::infrastructure::pr_link_store::set(&wt.path, &pr);
+                            }
+                            last_pr = Some(pr);
+                        }
+                    }
                 }
                 let links = &links_cache.as_ref().expect("links cache set above").1;
                 TerminalView::from_screen_with_links(screen, selection.as_ref(), hover, links)
@@ -569,9 +585,34 @@ fn pump_input(
                     }
                 }
                 // Releasing after a drag copies the selection; a plain click
-                // (no drag) on a link opens it in the default browser instead.
+                // (no drag) opens a link under it in the default browser instead —
+                // a PR badge on a sidebar session row, or a URL in the terminal.
                 MouseEventKind::Up(MouseButton::Left) => {
-                    if open_clicked_url(pty, geo, mouse.column, mouse.row, selection.as_ref()) {
+                    let dragged = selection.as_ref().is_some_and(|s| !s.is_empty());
+                    let (h, w) = term.size();
+                    // A plain click on a sidebar session row with a PR opens it. The
+                    // sidebar reuses the same browser-launch path as a terminal link.
+                    let pr = (!dragged)
+                        .then(|| {
+                            ui::sidebar_pr_link_at(
+                                state,
+                                h as usize,
+                                w as usize,
+                                mouse.column,
+                                mouse.row,
+                            )
+                        })
+                        .flatten();
+                    if let Some(url) = pr {
+                        open_url(&url);
+                        *selection = None;
+                    } else if open_clicked_url(
+                        pty,
+                        geo,
+                        mouse.column,
+                        mouse.row,
+                        selection.as_ref(),
+                    ) {
                         *selection = None;
                     } else {
                         copy_selection(term, pty, selection.as_ref())?;

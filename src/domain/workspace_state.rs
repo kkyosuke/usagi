@@ -202,6 +202,33 @@ impl AheadBehind {
     }
 }
 
+/// A pull request discovered for a worktree: its number and the URL to open.
+///
+/// usagi does not query GitHub for this — it is harvested by scanning the
+/// embedded agent's terminal output for a pull-request URL of the form
+/// `https://<host>/<owner>/<repo>/pull/<N>` (see
+/// [`crate::presentation::tui::home::terminal::link::pr_link`]). The sidebar
+/// shows `#<number>` and a click opens [`url`](Self::url) in the default browser.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrLink {
+    /// The pull request number — the `<N>` of the `/pull/<N>` path. Shown as
+    /// `#<number>`.
+    pub number: u32,
+    /// The full URL to open in the browser when the badge is clicked.
+    pub url: String,
+}
+
+impl PrLink {
+    /// Roll a session's per-worktree pull requests up into the single one its
+    /// sidebar row shows: the first worktree that carries one (mirroring how
+    /// [`crate::presentation::tui::home::state`] takes the first worktree's
+    /// `head` / `upstream` as the session's representative detail). `None` when
+    /// no worktree of the session has a PR.
+    pub fn aggregate(prs: impl IntoIterator<Item = Option<PrLink>>) -> Option<PrLink> {
+        prs.into_iter().flatten().next()
+    }
+}
+
 /// State of a single worktree (a branch checked out into a directory).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WorktreeState {
@@ -243,6 +270,14 @@ pub struct WorktreeState {
     /// [`status`](Self::status) and [`diff`](Self::diff).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ahead_behind: Option<AheadBehind>,
+    /// The pull request discovered for this worktree, or `None` when none has been
+    /// seen. Unlike the git-derived fields above this is **not** re-read from git on
+    /// refresh: it is harvested from the embedded agent's terminal output (a
+    /// `/pull/<N>` URL) and persisted so the sidebar keeps showing `#<number>`
+    /// across restarts. Omitted from the file when absent, and an older file
+    /// without it loads as `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr: Option<PrLink>,
     /// When this worktree's state was last refreshed.
     pub updated_at: DateTime<Utc>,
 }
@@ -507,6 +542,52 @@ mod tests {
     }
 
     #[test]
+    fn pr_link_aggregate_takes_the_first_worktree_with_a_pr() {
+        let a = PrLink {
+            number: 12,
+            url: "https://github.com/o/r/pull/12".to_string(),
+        };
+        let b = PrLink {
+            number: 34,
+            url: "https://github.com/o/r/pull/34".to_string(),
+        };
+        // The first `Some` wins; `None` entries are skipped.
+        assert_eq!(PrLink::aggregate([None, Some(a.clone()), Some(b)]), Some(a));
+        // No worktree carries a PR → no badge.
+        assert_eq!(PrLink::aggregate([None, None]), None);
+        assert_eq!(PrLink::aggregate(std::iter::empty()), None);
+    }
+
+    #[test]
+    fn pr_is_omitted_when_absent_and_round_trips_when_set() {
+        let mut state = WorkspaceState::new();
+        state.sessions.push(SessionRecord {
+            name: "feature-x".to_string(),
+            display_name: None,
+            note: None,
+            root: PathBuf::from("/repo/.usagi/sessions/feature-x"),
+            worktrees: vec![sample_worktree()],
+            created_at: Utc::now(),
+            last_active: None,
+        });
+        // No PR → the key is dropped from the file and an older file parses.
+        let json = serde_json::to_string(&state).unwrap();
+        assert!(!json.contains("\"pr\""));
+
+        // A discovered PR is stored, and round-trips through JSON.
+        state.sessions[0].worktrees[0].pr = Some(PrLink {
+            number: 412,
+            url: "https://github.com/KKyosuke/usagi/pull/412".to_string(),
+        });
+        let json = serde_json::to_string(&state).unwrap();
+        assert!(json.contains("\"pr\":{\"number\":412,"));
+        assert_eq!(
+            serde_json::from_str::<WorkspaceState>(&json).unwrap(),
+            state
+        );
+    }
+
+    #[test]
     fn diff_is_omitted_when_absent_and_round_trips_when_set() {
         let mut state = WorkspaceState::new();
         state.sessions.push(SessionRecord {
@@ -545,6 +626,7 @@ mod tests {
             status: BranchStatus::Pushed,
             diff: None,
             ahead_behind: None,
+            pr: None,
             updated_at: Utc::now(),
         }
     }

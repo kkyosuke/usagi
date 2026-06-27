@@ -16,6 +16,7 @@ use crate::domain::workspace_state::{
 };
 use crate::infrastructure::error_log::ErrorLog;
 use crate::infrastructure::git;
+use crate::infrastructure::pr_link_store;
 use crate::infrastructure::workspace_store::WorkspaceStore;
 
 /// Refresh the saved state for the repository containing `cwd`, persist it, and
@@ -53,10 +54,21 @@ pub fn sync(cwd: &Path) -> Result<WorkspaceState> {
     let _lock = store.lock()?;
     let mut state = store.load()?.unwrap_or_default();
     for session in &mut state.sessions {
-        for wt in &mut session.worktrees {
+        // The PR a session's agent printed is harvested out-of-band into the
+        // PR-link store, keyed by the session root (the dir the agent runs in). Read
+        // it once per session and carry it on the session's first worktree, so the
+        // sidebar's per-session aggregate ([`session_row`]) surfaces it; the git
+        // refresh above never sets a PR, so this both shows it and persists it into
+        // state.json — the badge then survives a restart even though the agent only
+        // prints the URL once.
+        //
+        // [`session_row`]: crate::presentation::tui::home::state
+        let pr = pr_link_store::get(&session.root);
+        for (idx, wt) in session.worktrees.iter_mut().enumerate() {
             if let Some(updated) = refreshed.get(&wt.path) {
                 *wt = updated.clone();
             }
+            wt.pr = (idx == 0).then(|| pr.clone()).flatten();
         }
     }
     state.updated_at = Utc::now();
@@ -177,6 +189,9 @@ pub fn inspect_worktree(path: &Path, default: &str) -> WorktreeState {
         status: classification,
         diff,
         ahead_behind,
+        // The git inspection never sets a PR — it is harvested from the agent's
+        // terminal output and folded in by [`sync`] from the PR-link store.
+        pr: None,
         updated_at: Utc::now(),
     }
 }
@@ -366,6 +381,7 @@ mod tests {
                 status: BranchStatus::Local,
                 diff: None,
                 ahead_behind: None,
+                pr: None,
                 updated_at: Utc::now(),
             }],
             created_at: Utc::now(),
@@ -379,6 +395,62 @@ mod tests {
         let wt = &synced.sessions[0].worktrees[0];
         assert_eq!(wt.branch.as_deref(), Some("wip"));
         assert!(!wt.head.is_empty());
+    }
+
+    #[test]
+    fn sync_folds_in_the_recorded_pr_link() {
+        use crate::domain::workspace_state::PrLink;
+        use crate::infrastructure::workspace_store::WorkspaceStore;
+
+        // The PR-link store lives under the data dir, so pin it to a temp home.
+        let _guard = crate::test_support::process_env_guard();
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var(crate::infrastructure::storage::DATA_DIR_ENV, home.path());
+
+        let dir = tempfile::tempdir().unwrap();
+        init_repo(dir.path());
+        let wt_path = dir.path().join(".usagi/sessions/wip");
+        git(dir.path())
+            .args([
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "wip",
+                wt_path.to_str().unwrap(),
+            ])
+            .status()
+            .unwrap();
+
+        // Seed a session whose worktree has no PR recorded in state.json yet.
+        let store = WorkspaceStore::new(dir.path());
+        let mut state = WorkspaceState::new();
+        state.sessions.push(SessionRecord {
+            name: "wip".to_string(),
+            display_name: None,
+            note: None,
+            root: wt_path.clone(),
+            worktrees: vec![inspect_worktree(&wt_path, "main")],
+            created_at: Utc::now(),
+            last_active: None,
+        });
+        store.save(&state).unwrap();
+
+        // The agent "printed" a PR, harvested into the PR-link store out-of-band.
+        let pr = PrLink {
+            number: 412,
+            url: "https://github.com/KKyosuke/usagi/pull/412".to_string(),
+        };
+        pr_link_store::set(&wt_path, &pr).unwrap();
+
+        // sync folds it onto the worktree and persists it.
+        let synced = sync(dir.path()).unwrap();
+        assert_eq!(synced.sessions[0].worktrees[0].pr, Some(pr.clone()));
+        // It is durable: a fresh load (no sync) still carries the PR.
+        let reloaded = store.load().unwrap().unwrap();
+        assert_eq!(reloaded.sessions[0].worktrees[0].pr, Some(pr));
+
+        std::env::remove_var(crate::infrastructure::storage::DATA_DIR_ENV);
     }
 
     /// A `SessionRecord` with no worktrees, enough to seed `state.json`.
