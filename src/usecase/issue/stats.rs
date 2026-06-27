@@ -1,5 +1,6 @@
 //! Aggregate statistics and grouping for issue listings.
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::str::FromStr;
 
@@ -116,20 +117,21 @@ impl FromStr for GroupBy {
 /// milestone/parent sort with a trailing "(none)" bucket) and empty groups are
 /// omitted.
 pub fn group(items: Vec<ListedIssue>, axis: GroupBy) -> Vec<(String, Vec<ListedIssue>)> {
-    // Assign each item a (sort key, label) pair, then bucket preserving order.
-    let mut buckets: Vec<(String, String, Vec<ListedIssue>)> = Vec::new();
+    // Bucket by each item's sort key. A `BTreeMap` keeps the buckets ordered by
+    // key as they are inserted — so the result needs no separate sort — and looks
+    // each key up in O(log g) rather than the O(g) linear scan a `Vec` would do
+    // per item (which degrades toward O(n²) when grouping by milestone/parent,
+    // where nearly every issue can fall in its own bucket).
+    let mut buckets: BTreeMap<String, (String, Vec<ListedIssue>)> = BTreeMap::new();
     for item in items {
         let (key, label) = group_key(&item, axis);
-        match buckets.iter_mut().find(|(k, _, _)| *k == key) {
-            Some((_, _, group)) => group.push(item),
-            None => buckets.push((key, label, vec![item])),
-        }
+        buckets
+            .entry(key)
+            .or_insert_with(|| (label, Vec::new()))
+            .1
+            .push(item);
     }
-    buckets.sort_by(|a, b| a.0.cmp(&b.0));
-    buckets
-        .into_iter()
-        .map(|(_, label, group)| (label, group))
-        .collect()
+    buckets.into_values().collect()
 }
 
 /// The sort key and display label for `item` under `axis`. The sort key encodes
