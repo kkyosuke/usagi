@@ -210,7 +210,10 @@ pub(super) fn switch_key(
                     Key::ArrowRight => create.move_right(),
                     Key::Home => create.move_home(),
                     Key::End => create.move_end(),
-                    Key::Char(c) => create.push_char(c),
+                    // Filter control chars so a stray chord (e.g. Ctrl-S) that
+                    // arrives as `Key::Char('\x13')` can't inject an invisible
+                    // byte into the name — the note editor guards the same way.
+                    Key::Char(c) if !c.is_control() => create.push_char(c),
                     _ => {}
                 }
             }
@@ -243,7 +246,8 @@ pub(super) fn switch_key(
                     Key::ArrowRight => rename.move_right(),
                     Key::Home => rename.move_home(),
                     Key::End => rename.move_end(),
-                    Key::Char(c) => rename.push_char(c),
+                    // Filter control chars (see the create-input arm above).
+                    Key::Char(c) if !c.is_control() => rename.push_char(c),
                     _ => {}
                 }
             }
@@ -925,7 +929,8 @@ fn focus_prompt_key(
         Key::ArrowRight => state.focus_prompt_mut().move_right(),
         Key::Home => state.focus_prompt_mut().move_home(),
         Key::End => state.focus_prompt_mut().move_end(),
-        Key::Char(c) => state.focus_prompt_mut().insert(c),
+        // Filter control chars (see the create-input arm in `switch_key`).
+        Key::Char(c) if !c.is_control() => state.focus_prompt_mut().insert(c),
         _ => {}
     }
 }
