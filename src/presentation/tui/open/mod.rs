@@ -36,27 +36,45 @@ pub fn run(term: &Term) -> Result<Outcome> {
         ),
     };
     let mut reader = TermKeyReader::new(term.clone());
-    event::event_loop(term, &mut reader, list, notice, &mut |t, ws| {
-        // Mark the workspace as just-used so it sorts to the top of the list on
-        // the next load. A failure to persist must not block opening, so the
-        // error is swallowed.
-        if let Ok(storage) = Storage::open_default() {
-            let _ = workspace::touch(&storage, &ws.name);
-        }
-        // Start loading the workspace (state.json / issues / settings / agent
-        // probe / history) on a background thread, then play the mascot animation
-        // on this thread while it runs. By the time the rabbit lands at the
-        // bottom-left the load is almost always already done, so joining it is
-        // near-instant and the home screen (切替) paints with no perceptible delay.
-        let loader = {
-            let ws = ws.clone();
-            std::thread::spawn(move || home::preload(&ws))
-        };
-        play_open_animation(t)?;
-        // Recover by loading synchronously if the loader thread panicked.
-        let preload = loader.join().unwrap_or_else(|_| home::preload(ws));
-        home::run(t, ws, preload)
-    })
+    // Whether a workspace's directory still exists, and how to drop a stale entry
+    // when the user confirms — injected so the event loop stays testable.
+    let mut exists = |path: &std::path::Path| path.exists();
+    let mut remove = |name: &str| -> Result<()> {
+        let storage = Storage::open_default()?;
+        workspace::remove(&storage, name)
+    };
+    let mut actions = event::ListActions {
+        exists: &mut exists,
+        remove: &mut remove,
+    };
+    event::event_loop(
+        term,
+        &mut reader,
+        list,
+        notice,
+        &mut |t, ws| {
+            // Mark the workspace as just-used so it sorts to the top of the list on
+            // the next load. A failure to persist must not block opening, so the
+            // error is swallowed.
+            if let Ok(storage) = Storage::open_default() {
+                let _ = workspace::touch(&storage, &ws.name);
+            }
+            // Start loading the workspace (state.json / issues / settings / agent
+            // probe / history) on a background thread, then play the mascot animation
+            // on this thread while it runs. By the time the rabbit lands at the
+            // bottom-left the load is almost always already done, so joining it is
+            // near-instant and the home screen (切替) paints with no perceptible delay.
+            let loader = {
+                let ws = ws.clone();
+                std::thread::spawn(move || home::preload(&ws))
+            };
+            play_open_animation(t)?;
+            // Recover by loading synchronously if the loader thread panicked.
+            let preload = loader.join().unwrap_or_else(|_| home::preload(ws));
+            home::run(t, ws, preload)
+        },
+        &mut actions,
+    )
 }
 
 /// Plays the open→home mascot animation: the project list is cleared and the
