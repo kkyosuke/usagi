@@ -129,13 +129,17 @@ pub fn panic_outcome(
     payload: Box<dyn std::any::Any + Send>,
 ) -> (String, Completion) {
     let message = panic_message(payload.as_ref());
+    // The raw panic payload (e.g. `called Result::unwrap() on an Err value: …`)
+    // is developer diagnostics, so it goes to the file log — but the on-screen
+    // line shows a plain user-facing message instead, pointing at the log rather
+    // than spilling internal text into the UI.
     let log_line = format!(
         "{} \"{target}\" worker panicked: {message}",
         kind.op_label()
     );
     let completion = Completion {
         line: LogLine::error(format!(
-            "{}が異常終了しました（{target}）: {message}",
+            "{}が異常終了しました（{target}）。詳細はログを確認してください",
             kind.verb()
         )),
         sessions: None,
@@ -522,14 +526,18 @@ mod tests {
         let payload: Box<dyn std::any::Any + Send> = Box::new("boom");
         let (log_line, completion) = panic_outcome(TaskKind::CreateSession, "alpha", payload);
 
-        // The persisted line names the operation, target, and panic message.
+        // The persisted (file-log) line names the operation, target, and the raw
+        // panic message for diagnosis.
         assert_eq!(log_line, "session create \"alpha\" worker panicked: boom");
         // The row settles as a failure instead of spinning forever.
         assert_eq!(completion.line.kind, LineKind::Error);
+        // The on-screen line is a plain user-facing message — the raw panic text
+        // ("boom") stays in the log, not the UI.
         assert_eq!(
             completion.line.text,
-            "作成が異常終了しました（alpha）: boom"
+            "作成が異常終了しました（alpha）。詳細はログを確認してください"
         );
+        assert!(!completion.line.text.contains("boom"));
         assert!(completion.sessions.is_none());
         assert!(completion.evict.is_none());
         assert!(completion.focus.is_none());
@@ -545,10 +553,12 @@ mod tests {
             log_line,
             "session remove \"beta\" worker panicked: disk gone"
         );
+        // The raw payload is kept out of the on-screen line.
         assert_eq!(
             completion.line.text,
-            "削除が異常終了しました（beta）: disk gone"
+            "削除が異常終了しました（beta）。詳細はログを確認してください"
         );
+        assert!(!completion.line.text.contains("disk gone"));
     }
 
     #[test]
