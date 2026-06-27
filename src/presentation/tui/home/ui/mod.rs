@@ -73,6 +73,11 @@ const NOTE_ICON: char = '\u{f249}'; // nf-fa-sticky_note — the session has a m
 /// between the branch name and the right-edge status field.
 const ACTIVE_COL: usize = 2;
 
+/// Chrome rows above the two-pane body: the title bar, the mode ladder, and a
+/// blank separator. The body — and so the left pane's first row — starts at this
+/// 0-based screen row, which is also the embedded terminal's `origin_row`.
+const CHROME_TOP_ROWS: usize = 3;
+
 /// The vertical bar (with surrounding spaces) dividing the two panes.
 const SEP: &str = " │ ";
 
@@ -223,8 +228,51 @@ pub fn terminal_geometry(
         origin_col: (left_w + SEP_WIDTH) as u16,
         // The body starts below the title bar, the mode ladder, and the blank
         // separator row beneath them.
-        origin_row: 3,
+        origin_row: CHROME_TOP_ROWS as u16,
     }
+}
+
+/// The selectable left-pane row a left click at the 0-based screen (`col`, `row`)
+/// lands on, or `None` when the click is not on a session row. Row 0 is the root
+/// row (`⌂ root`); row `i` maps to `worktrees[i - 1]`, matching
+/// [`WorktreeList::focus_index`](crate::presentation::tui::home::state::WorktreeList).
+///
+/// Mirrors what [`left_pane`](panes::left_pane) (and its rail variant) draw: each
+/// entry spans two rows, the root pair first, then a one-row divider, then one
+/// pair per worktree — so a click maps back to its session without the renderer
+/// and the hit test ever disagreeing on the layout. Returns `None` for a click in
+/// the right pane (past `left_w`), in the chrome above or below the body, on the
+/// divider, or below the last session (the mascot / blank rows).
+pub(super) fn left_pane_session_at(
+    state: &HomeState,
+    col: u16,
+    row: u16,
+    raw_height: usize,
+    raw_width: usize,
+) -> Option<usize> {
+    let (height, width) = widgets::normalize_size(raw_height, raw_width);
+    let (left_w, _right) = layout(width, state.sidebar());
+    let (col, row) = (col as usize, row as usize);
+    // A click in the right pane (or on the divider column) is not a row select.
+    if col >= left_w {
+        return None;
+    }
+    // The body's 0-based line under the click; `None` for the chrome above it.
+    let line = row.checked_sub(CHROME_TOP_ROWS)?;
+    if line >= body_rows_for(height) {
+        return None;
+    }
+    let index = match line {
+        // The root entry's identity / detail rows.
+        0 | 1 => 0,
+        // The divider between the root and the sessions.
+        2 => return None,
+        // Each worktree spans two rows after the divider: lines 3,4 → worktree 0,
+        // lines 5,6 → worktree 1, and so on.
+        l => (l - 3) / 2 + 1,
+    };
+    // Past the last session (the mascot or blank filler rows) selects nothing.
+    (index < state.list().session_count()).then_some(index)
 }
 
 /// Rows the tab strip reserves at the top of the right pane in 没入 (Attached).

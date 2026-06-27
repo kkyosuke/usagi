@@ -16,7 +16,7 @@ use console::Term;
 
 use crate::domain::settings::{AgentCli, KeyScheme, SessionActionUi, Sidebar};
 use crate::presentation::tui::install_task;
-use crate::presentation::tui::io::screen::{FramePainter, KeyReader};
+use crate::presentation::tui::io::screen::{FramePainter, Input, KeyReader};
 
 use super::oneshot::OneShot;
 use super::sessions_refresh::SessionsRefreshHandle;
@@ -30,7 +30,7 @@ use super::update::UpdateHandle;
 
 mod handlers;
 
-use handlers::{focus_key, note_editor_key, palette_key, switch_key};
+use handlers::{focus_key, note_editor_key, palette_key, switch_click, switch_key};
 
 /// The byte `console` reports for `Ctrl-O` on the home screen: a bare control
 /// character (`0x0f`), since `console` only special-cases a handful of control
@@ -242,6 +242,23 @@ fn save_resume_focus(state: &mut HomeState, wiring: &mut Wiring) {
     (wiring.save_last_active)(&state.last_active_flush());
 }
 
+/// Whether a left click should act on the 切替 session list: only at the base
+/// Switch list, with no overlay or inline input capturing keys. A click while a
+/// modal / palette / note editor / inline create / rename is open is ignored,
+/// mirroring how those overlays capture every key in the loop above — so a stray
+/// click never reaches the session list beneath them.
+fn click_selects_session(state: &HomeState) -> bool {
+    state.mode() == Mode::Switch
+        && !state.quit_confirm()
+        && state.remove_modal().is_none()
+        && state.text_modal().is_none()
+        && state.preview().is_none()
+        && state.note_editor().is_none()
+        && !state.command_palette_open()
+        && !state.is_creating()
+        && !state.is_renaming()
+}
+
 fn apply_pending_refresh(state: &mut HomeState, refresh: &SessionsRefreshHandle) -> bool {
     match refresh.take() {
         Some(sessions) => {
@@ -283,6 +300,9 @@ pub(super) fn event_loop(
     // its eyes (an idle tick, not a keypress) still repaints in a quiet 切替 rather
     // than being skipped — leaving the eyes stuck shut.
     let mut last_blinking = false;
+    // The previous left click's session row and time, so a second click on the
+    // same row within the double-click window confirms it (see [`switch_click`]).
+    let mut last_click: Option<(usize, Instant)> = None;
     loop {
         // Mark each background session's agent state — running, waiting for
         // input, live (ready), and finished — before painting, applying every
@@ -452,10 +472,10 @@ pub(super) fn event_loop(
         // Keep ticking through a mascot blink too, so its eyes reopen on their own
         // a beat later without waiting for the next keypress.
         let animate = panel_animating || state.has_live_sessions() || state.mascot_blinking();
-        let key = if animate {
-            match reader.read_key_timeout(install_task::ANIM_TICK) {
-                Ok(Some(key)) => key,
-                // A tick with no key: re-iterate to drain and repaint.
+        let input = if animate {
+            match reader.read_input_timeout(install_task::ANIM_TICK) {
+                Ok(Some(input)) => input,
+                // A tick with no input: re-iterate to drain and repaint.
                 Ok(None) => continue,
                 // A delivered signal (crossterm installs a SIGWINCH handler that
                 // persists after the embedded pane; an exiting agent also raises
@@ -469,12 +489,48 @@ pub(super) fn event_loop(
                 Err(e) => return Err(anyhow::Error::from(e).context("Failed to read key")),
             }
         } else {
-            match reader.read_key() {
-                Ok(key) => key,
+            match reader.read_input() {
+                Ok(input) => input,
                 // An interrupted read (a delivered signal) is not a quit: re-read.
                 // See the animate branch above for the full rationale.
                 Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
                 Err(e) => return Err(anyhow::Error::from(e).context("Failed to read key")),
+            }
+        };
+        let key = match input {
+            Input::Key(key) => key,
+            // The TUI itself never scrolls, so a wheel turn is read and dropped
+            // here (the reader already swallowed it before it could reach the host
+            // terminal's viewport and reveal the pre-launch scrollback). The
+            // embedded terminal pane has its own history scroll, handled separately.
+            Input::Scroll(_) => continue,
+            // A left click on the 切替 session list selects the row it lands on;
+            // a second click on the same row confirms it (focus / attach), like
+            // `Enter`. Acts only at the base Switch list with no overlay capturing
+            // input; a click anywhere else (the right pane, the chrome, while a
+            // modal / palette / inline input is open) is ignored.
+            Input::Click(click) => {
+                force_paint = true;
+                if click_selects_session(&state) {
+                    if let Some(row) = ui::left_pane_session_at(
+                        &state,
+                        click.col,
+                        click.row,
+                        height as usize,
+                        width as usize,
+                    ) {
+                        switch_click(
+                            term,
+                            &mut state,
+                            &mut painter,
+                            wiring,
+                            row,
+                            Instant::now(),
+                            &mut last_click,
+                        );
+                    }
+                }
+                continue;
             }
         };
         // A key was pressed: whatever it does to the state, repaint on the next

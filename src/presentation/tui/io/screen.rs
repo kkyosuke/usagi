@@ -29,11 +29,28 @@ pub struct ScrollEvent {
     pub row: u16,
 }
 
-/// One unit of terminal input: a key press, or a mouse-wheel scroll.
+/// A left-button mouse press, decoded from a terminal mouse report.
+///
+/// Unlike a wheel turn, the management screens *do* act on this: the 切替
+/// (Switch) session list maps a press over a session row to selecting it (see
+/// `home::ui::left_pane_session_at`). Drags, releases, motion, and the other
+/// buttons are still swallowed by [`term_reader`](crate::presentation::tui::io::term_reader);
+/// only a plain left press surfaces as one of these.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClickEvent {
+    /// The 0-based column the button was pressed over.
+    pub col: u16,
+    /// The 0-based row the button was pressed over.
+    pub row: u16,
+}
+
+/// One unit of terminal input: a key press, a mouse-wheel scroll, or a
+/// left-button click.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Input {
     Key(Key),
     Scroll(ScrollEvent),
+    Click(ClickEvent),
 }
 
 /// Source of input driving an interactive screen.
@@ -66,6 +83,17 @@ pub trait KeyReader {
     /// terminal reader overrides it to honour the timeout.
     fn read_key_timeout(&mut self, _timeout: Duration) -> io::Result<Option<Key>> {
         Ok(Some(self.read_key()?))
+    }
+
+    /// The next input event (a key, scroll, or click), or `None` if `timeout`
+    /// elapses with nothing ready — the input-aware counterpart of
+    /// [`read_key_timeout`](Self::read_key_timeout) for the screens that act on a
+    /// click (the home loop's 切替 session list). The default wraps
+    /// [`read_key_timeout`](Self::read_key_timeout) so every key-only stub keeps
+    /// its behaviour and never yields a click; only the real terminal reader
+    /// overrides it to decode mouse reports under the timeout.
+    fn read_input_timeout(&mut self, timeout: Duration) -> io::Result<Option<Input>> {
+        Ok(self.read_key_timeout(timeout)?.map(Input::Key))
     }
 }
 
@@ -495,6 +523,17 @@ mod tests {
         assert_eq!(
             reader.read_key_timeout(Duration::ZERO).unwrap(),
             Some(Key::Char('z'))
+        );
+    }
+
+    #[test]
+    fn default_read_input_timeout_wraps_a_key() {
+        // The trait default reports the next key as `Input::Key`, never a click,
+        // so key-only stubs keep their behaviour under the timeout read.
+        let mut reader = OneKey(Key::Char('q'));
+        assert_eq!(
+            reader.read_input_timeout(Duration::ZERO).unwrap(),
+            Some(Input::Key(Key::Char('q')))
         );
     }
 
