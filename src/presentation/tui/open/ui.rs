@@ -258,6 +258,36 @@ pub fn render_frame(
     lines
 }
 
+/// Inner content width of the stale-workspace confirmation modal.
+const CONFIRM_INNER: usize = 46;
+
+/// Builds the confirmation modal shown when the user opens a workspace whose
+/// directory no longer exists. It offers to drop the stale entry from the list
+/// instead of opening a path that is not there.
+///
+/// Drawn over an otherwise blank frame (like the home screen's quit prompt) so
+/// the event loop can clear and repaint it the same way as the full list.
+pub fn confirm_remove_frame(raw_height: usize, raw_width: usize, name: &str) -> Vec<String> {
+    let body = vec![
+        style(format!("\"{name}\" no longer exists on disk."))
+            .dim()
+            .to_string(),
+        String::new(),
+        style("Remove it from the list?").to_string(),
+        String::new(),
+        style("y / Enter: remove   n / Esc: cancel")
+            .dim()
+            .to_string(),
+    ];
+    widgets::render_modal(
+        raw_height,
+        raw_width,
+        "Workspace not found",
+        CONFIRM_INNER,
+        &body,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -497,6 +527,17 @@ mod tests {
         assert!(plain.contains(SESSION_ICON));
         assert!(plain.contains(ISSUE_ICON));
         assert!(plain.contains(CLOCK_ICON));
+    }
+
+    #[test]
+    fn confirm_remove_frame_names_the_workspace_and_offers_the_choice() {
+        let frame = confirm_remove_frame(24, 80, "mosou-wars");
+        let joined = console::strip_ansi_codes(&frame.join("\n")).into_owned();
+        assert!(joined.contains("Workspace not found"));
+        assert!(joined.contains("mosou-wars"));
+        assert!(joined.contains("no longer exists"));
+        assert!(joined.contains("Remove it from the list?"));
+        assert!(joined.contains("y / Enter: remove   n / Esc: cancel"));
     }
 
     #[test]

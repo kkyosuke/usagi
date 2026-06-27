@@ -64,6 +64,20 @@ impl ProjectList {
         self.selected_index = (self.selected_index + 1) % self.overviews.len();
     }
 
+    /// Remove the workspace under the cursor. The cursor stays on the entry that
+    /// shifts up into its place, or clamps to the new last row when the bottom
+    /// one was removed. No-op when empty. Used after the user confirms dropping a
+    /// stale workspace whose directory no longer exists.
+    pub fn remove_selected(&mut self) {
+        if self.overviews.is_empty() {
+            return;
+        }
+        self.overviews.remove(self.selected_index);
+        if self.selected_index >= self.overviews.len() {
+            self.selected_index = self.overviews.len().saturating_sub(1);
+        }
+    }
+
     /// Move the selected workspace to the top of the list and keep the cursor on
     /// it. Used after opening a project so the most recently opened one sorts
     /// first, mirroring the persisted `updated_at` order. No-op when empty.
@@ -137,6 +151,56 @@ mod tests {
         list.move_up();
         assert_eq!(list.selected_index(), 0);
         list.move_down();
+        assert_eq!(list.selected_index(), 0);
+    }
+
+    #[test]
+    fn remove_selected_drops_the_entry_and_keeps_the_cursor_in_range() {
+        let mut list = sample();
+        list.move_down(); // select "b"
+        list.remove_selected();
+        // "b" is gone; the cursor stays at index 1, now on "c".
+        let names: Vec<_> = list
+            .overviews()
+            .iter()
+            .map(|o| o.workspace.name.as_str())
+            .collect();
+        assert_eq!(names, ["a", "c"]);
+        assert_eq!(list.selected_index(), 1);
+        assert_eq!(list.selected().unwrap().name, "c");
+    }
+
+    #[test]
+    fn remove_selected_clamps_the_cursor_when_the_last_row_goes() {
+        let mut list = sample();
+        list.move_up(); // wraps to the last entry, "c"
+        assert_eq!(list.selected_index(), 2);
+        list.remove_selected();
+        // The bottom row was removed, so the cursor clamps to the new last row.
+        let names: Vec<_> = list
+            .overviews()
+            .iter()
+            .map(|o| o.workspace.name.as_str())
+            .collect();
+        assert_eq!(names, ["a", "b"]);
+        assert_eq!(list.selected_index(), 1);
+        assert_eq!(list.selected().unwrap().name, "b");
+    }
+
+    #[test]
+    fn remove_selected_of_the_last_entry_leaves_an_empty_list() {
+        let mut list = ProjectList::new(vec![overview("solo")]);
+        list.remove_selected();
+        assert!(list.is_empty());
+        assert_eq!(list.selected_index(), 0);
+        assert!(list.selected().is_none());
+    }
+
+    #[test]
+    fn remove_selected_is_a_noop_on_an_empty_list() {
+        let mut list = ProjectList::new(Vec::new());
+        list.remove_selected();
+        assert!(list.is_empty());
         assert_eq!(list.selected_index(), 0);
     }
 

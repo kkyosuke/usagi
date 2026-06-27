@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use anyhow::Result;
 use console::Key;
 use console::Term;
@@ -26,6 +28,20 @@ pub enum Outcome {
 /// terminal: production wires it to [`home::run`], tests pass a stub.
 pub type OpenHome<'a> = dyn FnMut(&Term, &Workspace) -> Result<home::Outcome> + 'a;
 
+/// The workspace-store side effects the selection screen needs when a chosen
+/// workspace's directory is gone: deciding whether it still exists on disk, and
+/// dropping the stale entry from the registry when the user confirms.
+///
+/// Taking these as injected closures keeps [`event_loop`] free of real IO so it
+/// can be driven in tests: production wires `exists` to [`Path::exists`] and
+/// `remove` to the workspace usecase, while tests pass stubs.
+pub struct ListActions<'a> {
+    /// Whether the workspace at this path still exists on disk.
+    pub exists: &'a mut dyn FnMut(&Path) -> bool,
+    /// Drop the named workspace from the registry.
+    pub remove: &'a mut dyn FnMut(&str) -> Result<()>,
+}
+
 /// Runs the project selection screen against the given terminal and key source
 /// until the user goes back or quits. Assumes the alternate screen is already
 /// active (it is owned by the caller).
@@ -38,19 +54,27 @@ pub fn event_loop(
     mut list: ProjectList,
     initial_notice: Option<String>,
     open_home: &mut OpenHome,
+    actions: &mut ListActions,
 ) -> Result<Outcome> {
     let mut notice = initial_notice;
     let mut painter = FramePainter::new();
+    // When `Some`, the selected workspace's directory is gone and we are showing
+    // the "remove it from the list?" prompt for the named workspace instead of
+    // the list. The confirmation modal owns the screen until it is answered.
+    let mut confirming: Option<String> = None;
 
     loop {
         let (height, width) = term.size();
-        let frame = ui::render_frame(
-            height as usize,
-            width as usize,
-            &list,
-            notice.as_deref(),
-            chrono::Utc::now(),
-        );
+        let frame = match &confirming {
+            Some(name) => ui::confirm_remove_frame(height as usize, width as usize, name),
+            None => ui::render_frame(
+                height as usize,
+                width as usize,
+                &list,
+                notice.as_deref(),
+                chrono::Utc::now(),
+            ),
+        };
         painter.paint(term, frame)?;
 
         let key = match animated_read(reader, term, &mut painter, &install_task::handle()) {
@@ -59,6 +83,31 @@ pub fn event_loop(
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => return Ok(Outcome::Quit),
             Err(e) => return Err(anyhow::Error::from(e).context("Failed to read key")),
         };
+
+        // While the stale-workspace prompt is up it captures every key.
+        if let Some(name) = confirming.clone() {
+            match key {
+                Key::Char('y') | Key::Char('Y') | Key::Enter => {
+                    notice = Some(match (actions.remove)(&name) {
+                        Ok(()) => {
+                            list.remove_selected();
+                            format!("Removed \"{name}\".")
+                        }
+                        Err(e) => format!("Failed to remove \"{name}\": {e}"),
+                    });
+                    confirming = None;
+                    painter.reset();
+                }
+                Key::Char('n') | Key::Char('N') | Key::Escape => {
+                    confirming = None;
+                    painter.reset();
+                }
+                // The global quit chords still take effect from the prompt.
+                Key::CtrlC | Key::Char('\u{0011}') => return Ok(Outcome::Quit),
+                _ => {}
+            }
+            continue;
+        }
 
         match key {
             Key::ArrowUp | Key::Char('k') => {
@@ -73,6 +122,14 @@ pub fn event_loop(
                 // Clone the selection so the immutable borrow is dropped before
                 // promoting it to the top of the list on return.
                 if let Some(workspace) = list.selected().cloned() {
+                    // A workspace whose directory has since been deleted cannot be
+                    // opened; offer to drop the stale entry instead of launching
+                    // the home screen on a missing path.
+                    if !(actions.exists)(&workspace.path) {
+                        confirming = Some(workspace.name.clone());
+                        painter.reset();
+                        continue;
+                    }
                     // Opening the workspace is wired by the caller: it hides the
                     // list, plays the mascot animation while loading the workspace
                     // off-thread, then shows the home screen (切替). See
@@ -124,6 +181,24 @@ mod tests {
         }
     }
 
+    // Existence / removal stubs for the stale-workspace prompt. Defined once as
+    // named functions (rather than per-test closure literals) so each body is
+    // covered by whichever test does exercise it — a test that passes one without
+    // calling it (e.g. cancel/quit before confirming) no longer leaves a dead
+    // closure behind.
+    fn exists_true(_path: &Path) -> bool {
+        true
+    }
+    fn exists_false(_path: &Path) -> bool {
+        false
+    }
+    fn remove_ok(_name: &str) -> Result<()> {
+        Ok(())
+    }
+    fn remove_err(_name: &str) -> Result<()> {
+        Err(anyhow::anyhow!("disk on fire"))
+    }
+
     // Home-screen launchers used as stubs; each is exercised by a test below.
     fn home_back(_t: &Term, _w: &Workspace) -> Result<home::Outcome> {
         Ok(home::Outcome::Back)
@@ -148,10 +223,24 @@ mod tests {
         ])
     }
 
+    /// [`ListActions`] reporting every workspace as present with a no-op remove —
+    /// the default for tests not exercising the stale-workspace prompt. Reporting
+    /// every path as present keeps the open-flow tests opening the home screen
+    /// rather than tripping the confirmation.
+    fn present_actions<'a>(
+        exists: &'a mut fn(&Path) -> bool,
+        remove: &'a mut fn(&str) -> Result<()>,
+    ) -> ListActions<'a> {
+        ListActions { exists, remove }
+    }
+
     fn run(keys: Vec<io::Result<Key>>, list: ProjectList) -> Result<Outcome> {
         let term = Term::stdout();
         let mut reader = ScriptedReader::new(keys);
-        event_loop(&term, &mut reader, list, None, &mut home_back)
+        let mut exists: fn(&Path) -> bool = exists_true;
+        let mut remove: fn(&str) -> Result<()> = remove_ok;
+        let mut actions = present_actions(&mut exists, &mut remove);
+        event_loop(&term, &mut reader, list, None, &mut home_back, &mut actions)
     }
 
     #[test]
@@ -214,7 +303,18 @@ mod tests {
         // Opening the home screen and quitting from it quits the whole app.
         let term = Term::stdout();
         let mut reader = ScriptedReader::new(vec![Ok(Key::Enter)]);
-        let outcome = event_loop(&term, &mut reader, sample_list(), None, &mut home_quit).unwrap();
+        let mut exists: fn(&Path) -> bool = exists_true;
+        let mut remove: fn(&str) -> Result<()> = remove_ok;
+        let mut actions = present_actions(&mut exists, &mut remove);
+        let outcome = event_loop(
+            &term,
+            &mut reader,
+            sample_list(),
+            None,
+            &mut home_quit,
+            &mut actions,
+        )
+        .unwrap();
         assert!(matches!(outcome, Outcome::Quit));
     }
 
@@ -222,7 +322,18 @@ mod tests {
     fn home_error_is_propagated() {
         let term = Term::stdout();
         let mut reader = ScriptedReader::new(vec![Ok(Key::Enter)]);
-        let err = event_loop(&term, &mut reader, sample_list(), None, &mut home_err).unwrap_err();
+        let mut exists: fn(&Path) -> bool = exists_true;
+        let mut remove: fn(&str) -> Result<()> = remove_ok;
+        let mut actions = present_actions(&mut exists, &mut remove);
+        let err = event_loop(
+            &term,
+            &mut reader,
+            sample_list(),
+            None,
+            &mut home_err,
+            &mut actions,
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("home screen blew up"));
     }
 
@@ -232,12 +343,16 @@ mod tests {
         // home screen (the erroring stub would surface if it were called).
         let term = Term::stdout();
         let mut reader = ScriptedReader::new(vec![Ok(Key::Enter), Ok(Key::Escape)]);
+        let mut exists: fn(&Path) -> bool = exists_true;
+        let mut remove: fn(&str) -> Result<()> = remove_ok;
+        let mut actions = present_actions(&mut exists, &mut remove);
         let outcome = event_loop(
             &term,
             &mut reader,
             ProjectList::new(Vec::new()),
             None,
             &mut home_err,
+            &mut actions,
         )
         .unwrap();
         assert!(matches!(outcome, Outcome::Back));
@@ -248,15 +363,129 @@ mod tests {
         // A load-error notice passed in is rendered on the first frame.
         let term = Term::stdout();
         let mut reader = ScriptedReader::new(vec![Ok(Key::Escape)]);
+        let mut exists: fn(&Path) -> bool = exists_true;
+        let mut remove: fn(&str) -> Result<()> = remove_ok;
+        let mut actions = present_actions(&mut exists, &mut remove);
         let outcome = event_loop(
             &term,
             &mut reader,
             ProjectList::new(Vec::new()),
             Some("Failed to load projects: boom".to_string()),
             &mut home_back,
+            &mut actions,
         )
         .unwrap();
         assert!(matches!(outcome, Outcome::Back));
+    }
+
+    /// Drives the event loop with the given keys against a list whose workspaces
+    /// are all reported as missing, capturing the names passed to `remove`.
+    /// Returns the outcome and those names.
+    fn run_missing(
+        keys: Vec<io::Result<Key>>,
+        list: ProjectList,
+        remove_result: fn(&str) -> Result<()>,
+    ) -> (Outcome, Vec<String>) {
+        let term = Term::stdout();
+        let mut reader = ScriptedReader::new(keys);
+        let mut removed: Vec<String> = Vec::new();
+        let mut exists: fn(&Path) -> bool = exists_false;
+        let mut remove = |name: &str| {
+            removed.push(name.to_string());
+            remove_result(name)
+        };
+        let mut actions = ListActions {
+            exists: &mut exists,
+            remove: &mut remove,
+        };
+        let outcome =
+            event_loop(&term, &mut reader, list, None, &mut home_err, &mut actions).unwrap();
+        (outcome, removed)
+    }
+
+    #[test]
+    fn selecting_a_missing_workspace_prompts_then_removes_on_confirm() {
+        // Enter on a missing workspace opens the prompt; `y` removes it (home_err
+        // would surface if the home screen were opened instead), then Escape leaves.
+        let (outcome, removed) = run_missing(
+            vec![Ok(Key::Enter), Ok(Key::Char('y')), Ok(Key::Escape)],
+            sample_list(),
+            remove_ok,
+        );
+        assert!(matches!(outcome, Outcome::Back));
+        assert_eq!(removed, vec!["alpha".to_string()]);
+    }
+
+    #[test]
+    fn confirming_a_missing_workspace_with_enter_also_removes_it() {
+        // Enter answers the prompt the same as `y`.
+        let (_outcome, removed) = run_missing(
+            vec![Ok(Key::Enter), Ok(Key::Enter), Ok(Key::Escape)],
+            sample_list(),
+            remove_ok,
+        );
+        assert_eq!(removed, vec!["alpha".to_string()]);
+    }
+
+    #[test]
+    fn cancelling_the_prompt_keeps_the_workspace() {
+        // `n` dismisses the prompt without removing; a second Enter re-opens it,
+        // and Escape from the prompt also cancels.
+        let (outcome, removed) = run_missing(
+            vec![
+                Ok(Key::Enter),
+                Ok(Key::Char('n')),
+                Ok(Key::Enter),
+                Ok(Key::Escape),
+                Ok(Key::Escape),
+            ],
+            sample_list(),
+            remove_ok,
+        );
+        assert!(matches!(outcome, Outcome::Back));
+        assert!(removed.is_empty());
+    }
+
+    #[test]
+    fn a_failed_removal_is_reported_and_the_prompt_closes() {
+        // When the usecase removal fails the entry stays but the prompt closes;
+        // the loop keeps running (Escape leaves).
+        let (outcome, removed) = run_missing(
+            vec![Ok(Key::Enter), Ok(Key::Char('Y')), Ok(Key::Escape)],
+            sample_list(),
+            remove_err,
+        );
+        assert!(matches!(outcome, Outcome::Back));
+        assert_eq!(removed, vec!["alpha".to_string()]);
+    }
+
+    #[test]
+    fn the_prompt_ignores_unrelated_keys() {
+        // An unmapped key inside the prompt is a no-op (the `_` arm); `N` then
+        // cancels and Escape leaves.
+        let (outcome, removed) = run_missing(
+            vec![
+                Ok(Key::Enter),
+                Ok(Key::Char('z')),
+                Ok(Key::Char('N')),
+                Ok(Key::Escape),
+            ],
+            sample_list(),
+            remove_ok,
+        );
+        assert!(matches!(outcome, Outcome::Back));
+        assert!(removed.is_empty());
+    }
+
+    #[test]
+    fn ctrl_c_quits_from_the_prompt() {
+        let (outcome, removed) = run_missing(
+            vec![Ok(Key::Enter), Ok(Key::CtrlC)],
+            sample_list(),
+            remove_ok,
+        );
+        assert!(matches!(outcome, Outcome::Quit));
+        assert!(removed.is_empty());
     }
 
     #[test]
@@ -272,7 +501,29 @@ mod tests {
     fn unexpected_read_error_is_propagated() {
         let term = Term::stdout();
         let mut reader = ScriptedReader::new(vec![Err(io::Error::other("boom"))]);
-        let err = event_loop(&term, &mut reader, sample_list(), None, &mut home_back).unwrap_err();
+        let mut exists: fn(&Path) -> bool = exists_true;
+        let mut remove: fn(&str) -> Result<()> = remove_ok;
+        let mut actions = present_actions(&mut exists, &mut remove);
+        let err = event_loop(
+            &term,
+            &mut reader,
+            sample_list(),
+            None,
+            &mut home_back,
+            &mut actions,
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("Failed to read key"));
+    }
+
+    #[test]
+    fn the_ctrl_q_chord_quits_from_the_prompt() {
+        let (outcome, removed) = run_missing(
+            vec![Ok(Key::Enter), Ok(Key::Char('\u{0011}'))],
+            sample_list(),
+            remove_ok,
+        );
+        assert!(matches!(outcome, Outcome::Quit));
+        assert!(removed.is_empty());
     }
 }
