@@ -27,7 +27,7 @@
 | 2 | [design/02-open.md](design/02-open.md) | プロジェクト選択画面（Open） |
 | 3 | [design/03-new.md](design/03-new.md) | 新規プロジェクト画面（New） |
 | 4 | [design/04-config.md](design/04-config.md) | 設定画面（Config） |
-| 5 | [design/05-home.md](design/05-home.md) | ホーム画面（Home） |
+| 5 | [design/home/README.md](design/home/README.md) | ホーム画面（Home） |
 
 ### データ永続化 — [data/](data/README.md)
 

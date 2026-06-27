@@ -24,4 +24,6 @@ exclude = [
   "^https?://localhost",
   "^https?://127\\.0\\.0\\.1",
   "^https?://example\\.(com|org)",
+  # 応答が遅く CI でタイムアウトしがちな外部ホスト（実在・有効だが計測に向かない）。
+  "^https?://no-color\\.org",
 ]

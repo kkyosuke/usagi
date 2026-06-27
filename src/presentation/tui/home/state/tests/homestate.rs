@@ -584,3 +584,35 @@ fn typing_or_completing_cancels_an_active_recall() {
     state.recall_next();
     assert_eq!(state.input(), "man!");
 }
+
+#[test]
+fn set_pr_links_updates_the_sidebar_row_live() {
+    use crate::domain::workspace_state::PrLink;
+    use std::path::Path;
+
+    // `state()` records two sessions: `main` at /repo/main and `feature` at
+    // /repo/feature.
+    let mut state = state();
+    let pr = |n: u32| PrLink {
+        number: n,
+        url: format!("https://github.com/o/r/pull/{n}"),
+    };
+
+    // A new PR for an existing row updates its in-memory badge and reports the
+    // change (so the attached pane knows it has something fresh to show).
+    assert!(state.set_pr_links(Path::new("/repo/main"), vec![pr(442)]));
+    let row = state
+        .list()
+        .worktrees()
+        .iter()
+        .find(|w| w.branch.as_deref() == Some("main"))
+        .expect("the main row exists");
+    assert_eq!(row.pr, vec![pr(442)]);
+
+    // Re-applying the same set is a no-op, so the pane skips a needless repaint.
+    assert!(!state.set_pr_links(Path::new("/repo/main"), vec![pr(442)]));
+
+    // An unknown root (e.g. the workspace root, which has no worktree row) does
+    // nothing.
+    assert!(!state.set_pr_links(Path::new("/repo/nope"), vec![pr(1)]));
+}
