@@ -177,6 +177,8 @@ TUI / MCP の起動時にここへ展開します（`materialize`）。仕組み
   ないため `version` は持ちません。
 - ベストエフォート: 展開に失敗しても usagi の起動は止めません。
 
+## `logs/`（エラーログ）
+
 実行時エラーを記録するディレクトリです。`infrastructure/error_log.rs` の `ErrorLog` が管理し、
 CLI / TUI / MCP のどの経路で発生したエラーでも横断的に書き出します。記録対象は次の 6 系統です。
 
