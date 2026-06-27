@@ -290,6 +290,17 @@ enum Commands {
 }
 
 fn main() -> anyhow::Result<()> {
+    // Honor the NO_COLOR convention (https://no-color.org/), which `console`'s
+    // built-in detection ignores. Done before any output so it applies to both
+    // the CLI commands and the TUI. The decision is the unit-tested pure helper;
+    // here we read the real environment and apply the global toggle.
+    if usagi::presentation::color::should_disable_colors(
+        std::env::var("NO_COLOR").ok().as_deref(),
+        std::env::var("CLICOLOR_FORCE").ok().as_deref(),
+    ) {
+        console::set_colors_enabled(false);
+    }
+
     let cli = Cli::parse();
 
     // No subcommand behaves the same as `usagi hop`.
