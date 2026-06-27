@@ -42,12 +42,19 @@ pub fn fetch_tags(repo_url: &str) -> Option<String> {
         .ok()?;
 
     // Drain stdout on a thread so a large tag list cannot deadlock on a full pipe
-    // while the main thread bounds the wall-clock wait.
+    // while the main thread bounds the wall-clock wait. Deliver the result over a
+    // channel rather than joining the thread directly: killing the git child does
+    // not close a stdout write-end that a daemonized grandchild (an ssh
+    // ControlMaster, a credential-cache daemon) may have inherited, so
+    // `read_to_end` could block forever. An unbounded `join` would then hang; a
+    // bounded `recv` instead lets the check give up and leak at most one detached
+    // thread, never freezing the caller.
     let mut stdout = child.stdout.take()?;
-    let reader = std::thread::spawn(move || {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
         let mut buf = Vec::new();
         let _ = stdout.read_to_end(&mut buf);
-        buf
+        let _ = tx.send(buf);
     });
 
     let deadline = Instant::now() + FETCH_TIMEOUT;
@@ -63,7 +70,12 @@ pub fn fetch_tags(repo_url: &str) -> Option<String> {
         }
     };
 
-    let bytes = reader.join().ok()?;
+    // Collect the drained stdout, but never wait past the timeout: once the child
+    // has exited normally its buffered output is already readable, so `recv`
+    // returns promptly; only the pathological grandchild-holds-the-pipe case waits
+    // the full window and then gives up (the reader thread exits on its own when
+    // the fd is finally closed).
+    let bytes = rx.recv_timeout(FETCH_TIMEOUT).ok()?;
     if !status?.success() {
         return None;
     }
