@@ -713,8 +713,8 @@ pub(super) fn focus_key(
 /// 没入 prefix grammar (see [`pane_input::prefix_action`]) so the same chords
 /// navigate from either surface:
 ///
-/// - `o` (and a double leader `Ctrl-O Ctrl-O`, which has no shell to take a
-///   literal here) zooms out to 切替, returning to 在席 on cancel.
+/// - `o` (and a double leader `Ctrl-O Ctrl-O`, a control-char second key that
+///   works with a Japanese IME on) zooms out to 切替, returning to 在席 on cancel.
 /// - `n`/`→` and `p`/`←` walk the tab strip, like the direct `Ctrl-N`/`Ctrl-P`.
 /// - `g` launches an agent — 在席's analogue of 没入's "add an agent tab".
 /// - `e` edits the note, `s` toggles the sidebar, `q` raises the quit modal.

@@ -255,8 +255,8 @@ fn focus_ctrl_o_o_opens_switch_then_esc_re_focuses() {
 
 #[test]
 fn focus_ctrl_o_double_leader_also_opens_switch() {
-    // `Ctrl-O Ctrl-O` has no shell to take a literal here, so it falls back to
-    // the most common intent — zooming out to Switch — just like `Ctrl-O o`.
+    // `Ctrl-O Ctrl-O` zooms out to Switch just like `Ctrl-O o`, the same as 没入 —
+    // a control-char second key, so it works with a Japanese IME left on.
     let mut keys = cmd("session switch feat");
     keys.push(Ok(Key::Enter)); // Focus feat
     keys.push(Ok(Key::Char(CTRL_O))); // leader

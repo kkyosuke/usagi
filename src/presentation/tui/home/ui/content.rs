@@ -127,7 +127,7 @@ fn attached_keys(scheme: KeyScheme) -> Vec<LogLine> {
             key_row("Ctrl-O e", "Edit the session note"),
             key_row("Ctrl-O s", "Toggle the session sidebar"),
             key_row("Ctrl-O q", "Quit usagi"),
-            key_row("Ctrl-O Ctrl-O", "Send a literal Ctrl-O to the shell"),
+            key_row("Ctrl-O Ctrl-O", "Zoom out to Switch (IME-safe second key)"),
         ],
         KeyScheme::Alt => vec![
             cheatsheet_header("没入 / Attached — live terminal (needs Option=Meta on macOS)"),
