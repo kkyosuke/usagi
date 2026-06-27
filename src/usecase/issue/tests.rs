@@ -184,6 +184,24 @@ fn dependency_tree_marks_repeats_and_handles_cycles_and_missing() {
 }
 
 #[test]
+fn dependency_tree_caps_a_pathologically_deep_chain_without_overflowing() {
+    // A single linear chain #1 ← #2 ← … ← #N far deeper than MAX_DEPTH (256):
+    // #2 depends on #1, #3 on #2, and so on. Without a depth cap this recurses
+    // N deep and overflows the stack; the cap truncates it with a marker instead.
+    let n: u32 = 5_000;
+    let mut items = vec![listed(1, IssueStatus::Todo, vec![], vec![], None, None)];
+    items.extend((2..=n).map(|k| listed(k, IssueStatus::Todo, vec![k - 1], vec![], None, None)));
+
+    // Must not panic / overflow the stack, and must surface the truncation.
+    let lines = dependency_tree(&items);
+    assert!(lines.iter().any(|l| l.contains("depth limit reached")));
+    // Nothing is silently dropped: truncation re-roots the remaining chain, so
+    // both ends still appear somewhere in the output.
+    assert!(lines.iter().any(|l| l.contains("#1 issue 1 ")));
+    assert!(lines.iter().any(|l| l.contains("#5000 issue 5000 ")));
+}
+
+#[test]
 fn to_prompt_includes_metadata_and_body() {
     let ts = Utc.with_ymd_and_hms(2026, 6, 14, 0, 0, 0).unwrap();
     let issue = Issue {

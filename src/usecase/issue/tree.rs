@@ -4,6 +4,17 @@ use std::collections::HashSet;
 
 use super::ListedIssue;
 
+/// Maximum dependency-chain depth [`dependency_tree`] descends before stopping.
+///
+/// `dependson` comes from issue markdown files (hand- or externally-written), so
+/// a pathological single chain `#1 ← #2 ← … ← #N` makes [`walk_children`] recurse
+/// N deep — deep enough to overflow the stack and abort the process. The
+/// `visited` set stops *re-expanding* a node (cycles/diamonds) but does not bound
+/// a fresh linear chain's depth, so this hard cap does. It is far beyond any real
+/// dependency tree; hitting it means the data is pathological, and the tree is
+/// truncated with a marker rather than crashing.
+const MAX_DEPTH: usize = 256;
+
 /// Render a dependency forest as indented ASCII lines: each issue appears under
 /// the issues it `dependson`, so reading top-to-bottom follows the order work
 /// can be picked up. Roots are issues with no dependencies; issues reached again
@@ -45,22 +56,31 @@ pub fn dependency_tree(items: &[ListedIssue]) -> Vec<String> {
             continue;
         }
         out.push(node_label(num, &by_number, &mut visited));
-        walk_children(num, &children, &by_number, "", &mut visited, &mut out);
+        walk_children(num, &children, &by_number, "", 0, &mut visited, &mut out);
     }
     out
 }
 
+#[allow(clippy::too_many_arguments)]
 fn walk_children(
     num: u32,
     children: &std::collections::BTreeMap<u32, Vec<u32>>,
     by_number: &std::collections::BTreeMap<u32, &ListedIssue>,
     prefix: &str,
+    depth: usize,
     visited: &mut HashSet<u32>,
     out: &mut Vec<String>,
 ) {
     let Some(kids) = children.get(&num) else {
         return;
     };
+    // Stop before a pathologically deep dependency chain overflows the stack
+    // (see MAX_DEPTH). Mark the cutoff so the truncation is visible rather than a
+    // subtree silently vanishing.
+    if depth >= MAX_DEPTH {
+        out.push(format!("{prefix}… (depth limit reached)"));
+        return;
+    }
     let last_index = kids.len() - 1;
     for (i, &child) in kids.iter().enumerate() {
         let is_last = i == last_index;
@@ -77,6 +97,7 @@ fn walk_children(
                 children,
                 by_number,
                 &format!("{prefix}{extension}"),
+                depth + 1,
                 visited,
                 out,
             );
