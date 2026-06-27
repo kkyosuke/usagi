@@ -195,6 +195,29 @@ fn footer_line_differs_by_mode() {
 }
 
 #[test]
+fn focus_footer_reflects_the_prefix_leader_and_scheme() {
+    let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
+    state.enter_focus(1);
+    // Under the prefix scheme 在席 advertises the same `Ctrl-O` leader as 没入.
+    let idle = footer_line(120, &state);
+    assert!(idle.contains("Ctrl-O then"));
+    // While the leader is pending the footer flips to the waiting hint, naming how
+    // to back out — mirroring 没入.
+    state.set_prefix_pending(true);
+    let waiting = footer_line(120, &state);
+    assert!(!waiting.contains("Ctrl-O then"));
+    assert!(waiting.contains("Ctrl-O ▸"));
+    assert!(waiting.contains("Esc cancel"));
+    // The alt scheme keeps `Ctrl-O` a direct zoom-out here, so the footer names it
+    // plainly with no leader (and no pending state applies).
+    state.set_key_scheme(crate::domain::settings::KeyScheme::Alt);
+    let alt = footer_line(120, &state);
+    assert!(alt.contains("Ctrl-O: switch"));
+    assert!(!alt.contains("Ctrl-O then"));
+    assert!(!alt.contains("Ctrl-O ▸"));
+}
+
+#[test]
 fn attached_prefix_footer_flips_to_the_waiting_hint_while_a_leader_is_pending() {
     let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
     state.show_attached();
