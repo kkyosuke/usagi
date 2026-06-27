@@ -11,16 +11,25 @@ pub fn load(storage: &Storage) -> Result<Settings> {
     storage.load_settings()
 }
 
-/// Persist the given settings as-is.
+/// Persist the given settings as-is, serialised against concurrent writers.
+///
+/// `settings.json` is shared by several usagi processes (every TUI instance plus
+/// each session's `usagi mcp` server). The store lock is held across this
+/// one-shot write so it cannot land between a concurrent [`update_settings`]'s
+/// load and save and silently drop that writer's change (a lost update).
 pub fn save(storage: &Storage, settings: &Settings) -> Result<()> {
+    let _lock = storage.lock()?;
     storage.save_settings(settings)
 }
 
 /// Load the global settings, apply `edit`, persist the result, and return it.
 ///
 /// The single load→edit→save→return shape every global setter shares, so each
-/// setter is one line naming the field it touches.
+/// setter is one line naming the field it touches. The store lock is held across
+/// the whole load→edit→save so a concurrent writer cannot read the same snapshot
+/// and overwrite this change — a lost update (see [`Storage::lock`]).
 fn update_settings(storage: &Storage, edit: impl FnOnce(&mut Settings)) -> Result<Settings> {
+    let _lock = storage.lock()?;
     let mut settings = storage.load_settings()?;
     edit(&mut settings);
     storage.save_settings(&settings)?;
@@ -28,11 +37,14 @@ fn update_settings(storage: &Storage, edit: impl FnOnce(&mut Settings)) -> Resul
 }
 
 /// Load the project-local overrides for `repo_root`, apply `edit`, persist the
-/// result, and return it — the local counterpart to [`update_settings`].
+/// result, and return it — the local counterpart to [`update_settings`], holding
+/// the project store lock across the whole sequence for the same reason.
 fn update_local(repo_root: &Path, edit: impl FnOnce(&mut LocalSettings)) -> Result<LocalSettings> {
-    let mut local = load_local(repo_root)?;
+    let store = WorkspaceStore::new(repo_root);
+    let _lock = store.lock()?;
+    let mut local = store.load_settings()?;
     edit(&mut local);
-    save_local(repo_root, &local)?;
+    store.save_settings(&local)?;
     Ok(local)
 }
 
@@ -62,9 +74,12 @@ pub fn load_local(repo_root: &Path) -> Result<LocalSettings> {
     WorkspaceStore::new(repo_root).load_settings()
 }
 
-/// Persist the project-local setting overrides for the repository at `repo_root`.
+/// Persist the project-local setting overrides for the repository at `repo_root`,
+/// serialised against concurrent writers (see [`save`] for why).
 pub fn save_local(repo_root: &Path, local: &LocalSettings) -> Result<()> {
-    WorkspaceStore::new(repo_root).save_settings(local)
+    let store = WorkspaceStore::new(repo_root);
+    let _lock = store.lock()?;
+    store.save_settings(local)
 }
 
 /// The effective settings for a project: the global settings with the
@@ -143,5 +158,34 @@ mod tests {
         )
         .unwrap();
         assert!(repo.join(".usagi/settings.json").is_file());
+        // The save is serialised behind the project store lock.
+        assert!(repo.join(".usagi/.lock").is_file());
+    }
+
+    #[test]
+    fn save_and_load_round_trip_under_the_store_lock() {
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = Storage::new(tmp.path().join("global"));
+        let settings = Settings {
+            theme: Theme::Dark,
+            ..Default::default()
+        };
+        save(&storage, &settings).unwrap();
+        assert_eq!(load(&storage).unwrap(), settings);
+        // The one-shot save holds the store lock so it cannot interleave with a
+        // concurrent setter's load→edit→save (see Storage::lock).
+        assert!(storage.dir().join(".lock").is_file());
+    }
+
+    #[test]
+    fn global_setters_persist_holding_the_store_lock() {
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = Storage::new(tmp.path().join("global"));
+        // A global setter runs load→edit→save under the lock; the change sticks
+        // and the per-store lock file is present.
+        let updated = set_theme(&storage, Theme::Dark).unwrap();
+        assert_eq!(updated.theme, Theme::Dark);
+        assert_eq!(load(&storage).unwrap().theme, Theme::Dark);
+        assert!(storage.dir().join(".lock").is_file());
     }
 }
