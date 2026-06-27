@@ -542,6 +542,64 @@ fn left_pane_renders_the_root_entry_then_one_entry_per_worktree() {
 }
 
 #[test]
+fn left_pane_stops_building_rows_once_the_pane_is_full() {
+    // More sessions than fit: the root (2 lines) + divider take 3 rows, so with
+    // rows = 5 only the first worktree's two lines fit. Building stops at the
+    // visible height instead of rendering all five worktrees and truncating.
+    let list = list_with(vec![
+        worktree(Some("one"), true, BranchStatus::Pushed),
+        worktree(Some("two"), false, BranchStatus::Local),
+        worktree(Some("three"), false, BranchStatus::Local),
+        worktree(Some("four"), false, BranchStatus::Local),
+        worktree(Some("five"), false, BranchStatus::Local),
+    ]);
+    let lines = left_pane(
+        &list,
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashSet::new(),
+        30,
+        5,
+        false,
+        Sidebar::Full,
+    );
+    assert_eq!(lines.len(), 5);
+    // Root, divider, then only the first worktree made it in; the rest were never
+    // built (the result is identical to building all and truncating).
+    assert!(lines[0].contains(ROOT_NAME));
+    assert!(lines[2].contains('─'));
+    assert!(lines[3].contains("one"));
+    let rendered = stripped(&lines);
+    assert!(!rendered.contains("five"));
+}
+
+#[test]
+fn rail_pane_stops_building_rows_once_the_rail_is_full() {
+    // The rail collapses the same list; with rows = 5 only the first worktree's
+    // two lines fit past the root (2 lines) and divider, so building breaks early
+    // just as the full sidebar does.
+    let list = list_with(vec![
+        worktree(Some("one"), true, BranchStatus::Pushed),
+        worktree(Some("two"), false, BranchStatus::Local),
+        worktree(Some("three"), false, BranchStatus::Local),
+        worktree(Some("four"), false, BranchStatus::Local),
+    ]);
+    let lines = left_pane(
+        &list,
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashSet::new(),
+        8,
+        5,
+        false,
+        Sidebar::Rail,
+    );
+    assert_eq!(lines.len(), 5);
+}
+
+#[test]
 fn left_pane_marks_the_agent_state_through_its_lifecycle() {
     let list = list_with(vec![worktree(Some("feature"), false, BranchStatus::Local)]);
     let path: HashSet<PathBuf> = [PathBuf::from("/repo/wt")].into_iter().collect();

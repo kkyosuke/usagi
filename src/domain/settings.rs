@@ -193,6 +193,35 @@ pub enum BranchSource {
     Remote,
 }
 
+/// How many lines of scrolled-off output each embedded terminal pane keeps by
+/// default, so the user can scroll a pane back over earlier output.
+///
+/// Every live pane holds its own scrollback buffer, so this cap is paid once per
+/// pane: with many sessions and panes open at once it is the dominant slice of
+/// the TUI's memory. The pool keeps every pane of every session alive in the
+/// background, and each pane's parser holds up to this many scrollback rows of
+/// `cols` cells, so worst-case resident grid memory is on the order of
+/// `panes × terminal_scrollback_lines × cols × sizeof(cell)` — bounded (no
+/// leak), but it scales with the number of open panes. The default is
+/// deliberately modest — enough to scroll back over a command's recent output
+/// without each pane reserving a large buffer — and the user can raise it (up to
+/// [`MAX_TERMINAL_SCROLLBACK_LINES`]) when they want deeper history.
+pub const DEFAULT_TERMINAL_SCROLLBACK_LINES: usize = 2_000;
+
+/// The largest [`Settings::terminal_scrollback_lines`] value honoured. A
+/// hand-edited `settings.json` could otherwise ask every pane to retain an
+/// unbounded buffer; [`Settings::sanitized`] clamps to this so one setting
+/// cannot blow up memory across every open pane.
+pub const MAX_TERMINAL_SCROLLBACK_LINES: usize = 50_000;
+
+/// The default used for a missing `terminal_scrollback_lines` field, so an older
+/// `settings.json` (written before the field existed) loads with the modest
+/// default rather than `0` — `#[serde(default)]` on the struct would otherwise
+/// fall back to `usize`'s `0`, leaving panes with no scrollback at all.
+fn default_terminal_scrollback_lines() -> usize {
+    DEFAULT_TERMINAL_SCROLLBACK_LINES
+}
+
 /// User-configurable application settings.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -226,6 +255,12 @@ pub struct Settings {
     /// toggles it at runtime).
     #[serde(deserialize_with = "crate::domain::serde_fallback::or_default")]
     pub sidebar: Sidebar,
+    /// How many lines of scrolled-off output each embedded terminal pane keeps.
+    /// Paid once per live pane, so it is the main lever on the TUI's memory when
+    /// many sessions are open; [`sanitized`](Self::sanitized) clamps it to
+    /// [`MAX_TERMINAL_SCROLLBACK_LINES`].
+    #[serde(default = "default_terminal_scrollback_lines")]
+    pub terminal_scrollback_lines: usize,
     /// The optional local LLM the agent can offload light work to.
     pub local_llm: LocalLlm,
 }
@@ -243,6 +278,7 @@ impl Default for Settings {
             agent_cli: AgentCli::default(),
             session_action_ui: SessionActionUi::default(),
             sidebar: Sidebar::default(),
+            terminal_scrollback_lines: DEFAULT_TERMINAL_SCROLLBACK_LINES,
             local_llm: LocalLlm::default(),
         }
     }
@@ -264,6 +300,12 @@ impl Settings {
         if !LOCAL_LLM_MODELS.contains(&self.local_llm.model.as_str()) {
             self.local_llm.model = DEFAULT_LOCAL_LLM_MODEL.to_string();
         }
+        // A hand-edited `settings.json` could ask every pane to keep an enormous
+        // (or effectively unbounded) scrollback buffer; cap it so one setting
+        // cannot exhaust memory across every open pane.
+        self.terminal_scrollback_lines = self
+            .terminal_scrollback_lines
+            .min(MAX_TERMINAL_SCROLLBACK_LINES);
         self
     }
 }
@@ -605,6 +647,54 @@ mod tests {
         assert_eq!(cleaned.local_llm.model, DEFAULT_LOCAL_LLM_MODEL);
         assert!(cleaned.local_llm.enabled);
         assert_eq!(cleaned.theme, Theme::Dark);
+    }
+
+    #[test]
+    fn terminal_scrollback_lines_defaults_to_the_modest_cap() {
+        // The default is the modest per-pane cap, not `usize`'s `0` — every pane
+        // keeps at least this much scrollback out of the box.
+        assert_eq!(
+            Settings::default().terminal_scrollback_lines,
+            DEFAULT_TERMINAL_SCROLLBACK_LINES
+        );
+        assert_eq!(default_terminal_scrollback_lines(), 2_000);
+    }
+
+    #[test]
+    fn terminal_scrollback_lines_falls_back_when_the_field_is_absent() {
+        // An older `settings.json` written before the field existed must load with
+        // the modest default rather than `0` (which would leave panes with no
+        // scrollback). `{}` stands in for any file missing the key.
+        let loaded: Settings = serde_json::from_str("{}").unwrap();
+        assert_eq!(
+            loaded.terminal_scrollback_lines,
+            DEFAULT_TERMINAL_SCROLLBACK_LINES
+        );
+        // A stored value is taken verbatim (clamping is `sanitized`'s job).
+        let stored: Settings =
+            serde_json::from_str(r#"{"terminal_scrollback_lines": 500}"#).unwrap();
+        assert_eq!(stored.terminal_scrollback_lines, 500);
+    }
+
+    #[test]
+    fn sanitized_clamps_an_oversized_scrollback_but_leaves_a_sane_one() {
+        // A value within the cap is preserved untouched.
+        let sane = Settings {
+            terminal_scrollback_lines: 1_000,
+            ..Default::default()
+        };
+        assert_eq!(sane.sanitized().terminal_scrollback_lines, 1_000);
+
+        // A value past the cap — e.g. a hand-edited file asking every pane to keep
+        // an unbounded buffer — is clamped to the maximum.
+        let huge = Settings {
+            terminal_scrollback_lines: usize::MAX,
+            ..Default::default()
+        };
+        assert_eq!(
+            huge.sanitized().terminal_scrollback_lines,
+            MAX_TERMINAL_SCROLLBACK_LINES
+        );
     }
 
     #[test]

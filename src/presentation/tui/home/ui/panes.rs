@@ -393,6 +393,12 @@ fn rail_pane(
     let mut lines = vec![root_top, root_detail];
     lines.push(style("─".repeat(RAIL_WIDTH)).dim().to_string());
     for (i, w) in list.worktrees().iter().enumerate() {
+        // Stop once the built rows fill the rail: the trailing `truncate(rows)`
+        // discards the rest, so building beyond the visible height is wasted work
+        // (same bound as the full sidebar above).
+        if lines.len() >= rows {
+            break;
+        }
         // The root occupies the first entry, so worktree `i` sits at selectable
         // row i + 1.
         let row = i + 1;
@@ -504,6 +510,14 @@ pub(super) fn left_pane(
         );
     } else {
         for (i, w) in list.worktrees().iter().enumerate() {
+            // Stop once the rows built already fill the pane: the trailing
+            // `truncate(rows)` would discard anything past this, so building it
+            // is wasted work. With many sessions open this bounds the per-frame
+            // cost (styling, dimming, ANSI rewriting) to the visible rows instead
+            // of every worktree in the list.
+            if lines.len() >= rows {
+                break;
+            }
             // The root occupies the first entry, so worktree `i` sits at
             // selectable row i + 1.
             let row = i + 1;

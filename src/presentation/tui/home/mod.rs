@@ -402,6 +402,11 @@ pub fn run(term: &Term, workspace: &Workspace, preload: Preload) -> Result<Outco
     // waiting for input or finishes. Opt-out: on unless the user disabled it.
     let notifications_enabled = settings.notifications_enabled;
 
+    // How much scrollback each embedded pane keeps. Paid once per live pane, so a
+    // smaller cap is the main lever on the screen's memory when many sessions and
+    // panes are open. Already clamped by `Settings::sanitized` on load.
+    let scrollback_lines = settings.terminal_scrollback_lines;
+
     // The live shells embedded in the right pane, one per worktree, kept alive
     // across session switches and for as long as this screen is open. Dropped on
     // return, which kills any shell still running. The pool also watches every
@@ -411,7 +416,10 @@ pub fn run(term: &Term, workspace: &Workspace, preload: Preload) -> Result<Outco
     // preview (`preview`), and `remove_session` (which evicts a removed session's
     // shell) can all reach it: their borrows never overlap in time (the event
     // loop calls one at a time).
-    let pool = std::cell::RefCell::new(terminal::pool::TerminalPool::new(notifications_enabled));
+    let pool = std::cell::RefCell::new(terminal::pool::TerminalPool::new(
+        notifications_enabled,
+        scrollback_lines,
+    ));
     let monitor = pool.borrow().monitor();
 
     // Restore each session's panes from the last run, in the background (nothing is

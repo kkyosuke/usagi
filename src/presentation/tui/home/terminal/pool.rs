@@ -231,6 +231,10 @@ pub struct TerminalPool {
     /// frame whose previewed session, geometry, and output are all unchanged
     /// returns the cached view without re-resizing or re-snapshotting the grid.
     preview_cache: Option<PreviewCache>,
+    /// How many scrolled-off lines each spawned pane keeps — the configured
+    /// [`Settings::terminal_scrollback_lines`](crate::domain::settings::Settings),
+    /// handed to every [`PtySession::spawn`].
+    scrollback_lines: usize,
 }
 
 /// The previewed session and the inputs the last [`TerminalView`] was built
@@ -246,8 +250,10 @@ struct PreviewCache {
 impl TerminalPool {
     /// An empty pool with its watcher thread running. `notifications_enabled`
     /// gates the desktop notification fired when a detached session starts
-    /// waiting for input.
-    pub fn new(notifications_enabled: bool) -> Self {
+    /// waiting for input. `scrollback_lines` is how much scrollback each spawned
+    /// pane keeps (the configured
+    /// [`Settings::terminal_scrollback_lines`](crate::domain::settings::Settings)).
+    pub fn new(notifications_enabled: bool, scrollback_lines: usize) -> Self {
         let shared = Arc::new(Mutex::new(Shared::default()));
         let stop = Arc::new(AtomicBool::new(false));
         let watcher = spawn_watcher(
@@ -261,6 +267,7 @@ impl TerminalPool {
             stop,
             watcher: Some(watcher),
             preview_cache: None,
+            scrollback_lines,
         }
     }
 
@@ -490,7 +497,7 @@ impl TerminalPool {
             agent_state_store::clear(dir);
             self.lock().monitor.forget(dir);
         }
-        let pty = PtySession::spawn(dir, geo.rows, geo.cols, initial)?;
+        let pty = PtySession::spawn(dir, geo.rows, geo.cols, initial, self.scrollback_lines)?;
         Ok(Pane { pty, kind, cli })
     }
 
@@ -769,6 +776,9 @@ fn notify(label: &str, kind: session_monitor::NoticeKind) {
 
 impl Default for TerminalPool {
     fn default() -> Self {
-        Self::new(true)
+        Self::new(
+            true,
+            crate::domain::settings::DEFAULT_TERMINAL_SCROLLBACK_LINES,
+        )
     }
 }
