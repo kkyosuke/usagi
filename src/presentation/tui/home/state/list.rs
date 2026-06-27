@@ -85,6 +85,12 @@ pub struct WorktreeList {
     /// `labels` it is cosmetic and never used for lookups. Defaults to all-false
     /// and is filled in by [`set_notes`](Self::set_notes) on a list rebuild.
     notes: Vec<bool>,
+    /// Whether the synthetic root row carries a note, driving its line-1 memo
+    /// marker. Like [`notes`](Self::notes) it is cosmetic and never used for
+    /// lookups; the root belongs to no session, so its note lives on the workspace
+    /// state, not in `notes`. Defaults to false and is filled in by
+    /// [`set_root_note_marker`](Self::set_root_note_marker) on a list rebuild.
+    root_has_note: bool,
     selected_index: usize,
     active_index: usize,
     /// The display name of the session that was active *before* the current one,
@@ -121,6 +127,7 @@ impl WorktreeList {
             worktrees,
             labels,
             notes,
+            root_has_note: false,
             selected_index: 0,
             active_index: 0,
             previous_active: None,
@@ -148,6 +155,18 @@ impl WorktreeList {
     /// Whether the worktree at `index` carries a note (out-of-range is `false`).
     pub fn has_note(&self, index: usize) -> bool {
         self.notes.get(index).copied().unwrap_or(false)
+    }
+
+    /// Record whether the root row carries a note, driving its line-1 memo marker.
+    /// Set on a list rebuild from the workspace state's root note, the way
+    /// [`set_notes`](Self::set_notes) records the worktree notes.
+    pub fn set_root_note_marker(&mut self, has_note: bool) {
+        self.root_has_note = has_note;
+    }
+
+    /// Whether the root row carries a note (drives its memo marker).
+    pub fn root_has_note(&self) -> bool {
+        self.root_has_note
     }
 
     pub fn workspace_name(&self) -> &str {

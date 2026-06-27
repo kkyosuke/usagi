@@ -32,6 +32,7 @@ fn refresh_sessions_keeps_the_previous_session_jump_target() {
         line: LogLine::output("created"),
         sessions: Some(vec![session_record("alpha", 1), session_record("beta", 1)]),
         select: Some("beta".to_string()),
+        root_note: None,
     });
     state.enter_focus(1); // alpha
     state.enter_focus(2); // beta; previous = alpha

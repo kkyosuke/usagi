@@ -103,14 +103,29 @@ fn switch_begin_note_opens_the_editor_prefilled_with_the_sessions_note() {
 }
 
 #[test]
-fn switch_begin_note_is_a_noop_on_the_root_row() {
-    // The cursor starts on the root row, which is the workspace, not a session.
+fn switch_begin_note_on_the_root_row_edits_the_workspace_root_note() {
+    // The cursor starts on the root row: editing its note targets the workspace
+    // root (`ROOT_NAME`), pre-filled with the recorded root note.
     let mut state = state();
     state.restore_sessions(vec![session_record("alpha", 1)]);
-    assert!(!state.switch_begin_note());
-    assert!(state.note_editor().is_none());
-    // The mutable accessor is likewise empty when no editor is open.
+    state.restore_root_note(Some("root memo".to_string()));
+    // Before any editor is open the mutable accessor is empty.
     assert!(state.note_editor_mut().is_none());
+    assert!(state.switch_begin_note());
+    let editor = state.note_editor().expect("editor open");
+    assert_eq!(editor.target(), ROOT_NAME);
+    assert_eq!(editor.area().text(), "root memo");
+}
+
+#[test]
+fn switch_begin_note_on_the_root_row_opens_empty_without_a_root_note() {
+    // No root note recorded: the editor opens blank but still targets the root.
+    let mut state = state();
+    state.restore_sessions(vec![session_record("alpha", 1)]);
+    assert!(state.switch_begin_note());
+    let editor = state.note_editor().expect("editor open");
+    assert_eq!(editor.target(), ROOT_NAME);
+    assert!(editor.area().is_empty());
 }
 
 #[test]
@@ -134,13 +149,17 @@ fn open_focused_note_targets_the_active_session_and_carries_reattach() {
 }
 
 #[test]
-fn open_focused_note_is_a_noop_on_the_root_row() {
-    // The root row is focused by default; it has no note to edit.
+fn open_focused_note_on_the_root_row_edits_the_workspace_root_note() {
+    // Focusing the root row and opening its note targets the workspace root,
+    // pre-filled with the recorded root note.
     let mut state = state();
     state.restore_sessions(vec![session_record("alpha", 1)]);
+    state.restore_root_note(Some("root memo".to_string()));
     state.enter_focus(0);
-    assert!(!state.open_focused_note(false));
-    assert!(state.note_editor().is_none());
+    assert!(state.open_focused_note(false));
+    let editor = state.note_editor().expect("editor open");
+    assert_eq!(editor.target(), ROOT_NAME);
+    assert_eq!(editor.area().text(), "root memo");
 }
 
 #[test]
@@ -183,13 +202,73 @@ fn selected_session_note_reads_the_cursor_rows_note() {
 }
 
 #[test]
-fn selected_session_note_is_none_on_root_and_for_a_noteless_session() {
+fn selected_session_note_is_none_without_a_root_note_or_for_a_noteless_session() {
     let mut state = state();
     // `session_record` records no note.
     state.restore_sessions(vec![session_record("alpha", 1)]);
-    // The cursor starts on the root row (not a session).
+    // The cursor starts on the root row, which carries no note here.
     assert_eq!(state.selected_session_note(), None);
     // Moving onto a session with no note still reports `None`.
     state.switch_move_down();
     assert_eq!(state.selected_session_note(), None);
+}
+
+#[test]
+fn selected_session_note_reads_the_root_note_on_the_root_row() {
+    let mut state = state();
+    state.restore_sessions(vec![session_record("alpha", 1)]);
+    state.restore_root_note(Some("root memo".to_string()));
+    // The cursor starts on the root row, so its note is the workspace root note.
+    assert_eq!(state.selected_session_note(), Some("root memo"));
+}
+
+#[test]
+fn restore_root_note_marks_the_root_row_and_exposes_the_note() {
+    let mut state = state();
+    // No root note: the root row carries no marker.
+    assert!(!state.list().root_has_note());
+    assert_eq!(state.root_note(), None);
+    // Restoring one marks the root row and exposes the note.
+    state.restore_root_note(Some("memo".to_string()));
+    assert!(state.list().root_has_note());
+    assert_eq!(state.root_note(), Some("memo"));
+    // Clearing it drops the marker again.
+    state.restore_root_note(None);
+    assert!(!state.list().root_has_note());
+    assert_eq!(state.root_note(), None);
+}
+
+#[test]
+fn apply_session_outcome_updates_the_root_note_and_its_marker() {
+    let mut state = state();
+    state.restore_sessions(vec![session_record("alpha", 1)]);
+    // A root-note save reports the stored note (and reloads the sessions).
+    state.apply_session_outcome(SessionOutcome {
+        line: LogLine::output("Saved note for \"root\" 📝"),
+        sessions: Some(vec![session_record("alpha", 1)]),
+        select: None,
+        root_note: Some(Some("saved".to_string())),
+    });
+    assert_eq!(state.root_note(), Some("saved"));
+    assert!(state.list().root_has_note());
+
+    // Clearing it (inner `None`) drops the note and the marker.
+    state.apply_session_outcome(SessionOutcome {
+        line: LogLine::output("Cleared note for \"root\" 📝"),
+        sessions: Some(vec![session_record("alpha", 1)]),
+        select: None,
+        root_note: Some(None),
+    });
+    assert_eq!(state.root_note(), None);
+    assert!(!state.list().root_has_note());
+
+    // An outcome that does not touch the root note (`None`) leaves it as is.
+    state.restore_root_note(Some("kept".to_string()));
+    state.apply_session_outcome(SessionOutcome {
+        line: LogLine::output("renamed"),
+        sessions: None,
+        select: None,
+        root_note: None,
+    });
+    assert_eq!(state.root_note(), Some("kept"));
 }

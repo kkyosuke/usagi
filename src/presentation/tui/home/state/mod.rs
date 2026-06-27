@@ -68,6 +68,12 @@ pub struct SessionOutcome {
     /// rebuilt — set when creating a session so the new one is selected. `None`
     /// leaves the cursor on the root row (e.g. removals and failures).
     pub select: Option<String>,
+    /// The workspace root's note as it stands after this action, when the action
+    /// may have changed it (editing the `⌂ root` row's memo). `None` leaves the
+    /// in-memory root note untouched; `Some(value)` replaces it, where the inner
+    /// `None` means the note was cleared. Only the root-note save sets this — every
+    /// session-scoped action leaves it `None`.
+    pub root_note: Option<Option<String>>,
 }
 
 /// The outcome of a 切替 reorder (`K` / `J`): moving the selected session one
@@ -467,6 +473,13 @@ pub struct HomeState {
     /// session (keyed by this path in `live` / `running` / …). Injected by
     /// `mod.rs`; empty until set (tests that never preview the root leave it so).
     root_path: PathBuf,
+    /// The workspace root's free-form note (the `⌂ root` row's memo), loaded from
+    /// `state.json` at startup and updated in place when the user edits it. The
+    /// sidebar reads it for the root row's memo marker; the 切替 preview and the
+    /// note editor read it the way they read a session's [`SessionRecord::note`].
+    /// Only the user editing it changes it — background re-syncs leave it as is —
+    /// so it is carried separately from the re-synced `sessions`.
+    root_note: Option<String>,
     /// Whether the sidebar mascot reacts to interaction — injected from the
     /// effective settings by `mod.rs`. While `false` the mascot never blinks and
     /// the Working rabbit never pumps its paw, so it stays a perfectly still
@@ -560,6 +573,7 @@ impl HomeState {
             loading: None,
             tasks: Vec::new(),
             root_path: PathBuf::new(),
+            root_note: None,
             // The mascot reacts by default; `mod.rs` overrides it from the
             // effective settings, and tests get a lively mascot without setup.
             mascot_animation_enabled: true,
@@ -766,6 +780,22 @@ impl HomeState {
         self.rebuild_list();
     }
 
+    /// Seed the workspace root's note (from `state.json`) at startup, so the `⌂
+    /// root` row's memo marker, the 切替 preview, and the note editor all reflect
+    /// what is on disk.
+    pub fn restore_root_note(&mut self, note: Option<String>) {
+        self.root_note = note;
+        // Seeded after `restore_sessions` built the list, so refresh the marker in
+        // place rather than relying on that earlier (note-less) rebuild.
+        self.list.set_root_note_marker(self.root_note.is_some());
+    }
+
+    /// The workspace root's note (the `⌂ root` row's memo), or `None` when none
+    /// has been written.
+    pub fn root_note(&self) -> Option<&str> {
+        self.root_note.as_deref()
+    }
+
     /// Swap in a freshly re-synced set of sessions while keeping the cursor and
     /// the active row on the same session names (when they still exist).
     ///
@@ -826,6 +856,9 @@ impl HomeState {
             .collect();
         let mut list = WorktreeList::with_labels(name, rows, labels);
         list.set_notes(notes);
+        // The root row's note lives on the workspace state (it belongs to no
+        // session), so its marker is carried separately from the per-session notes.
+        list.set_root_note_marker(self.root_note.is_some());
         self.list = list;
     }
 
@@ -1562,24 +1595,27 @@ impl HomeState {
 
     // --- session note editor ----------------------------------------------
 
-    /// The note recorded for the session named `name`, if any. Looked up in the
-    /// recorded sessions (the sidebar list carries only the worktree rows), so
-    /// the editor opens pre-filled with what is on disk.
+    /// The note recorded for the row named `name`, if any: the workspace root's
+    /// note for [`ROOT_NAME`], otherwise the session's. Looked up in the recorded
+    /// sessions / the root note (the sidebar list carries only the worktree rows),
+    /// so the editor opens pre-filled with what is on disk.
     fn session_note(&self, name: &str) -> Option<&str> {
+        if name == ROOT_NAME {
+            return self.root_note();
+        }
         self.sessions
             .iter()
             .find(|s| s.name == name)
             .and_then(|s| s.note())
     }
 
-    /// The note of the session highlighted in 切替 (the cursor row), or `None` on
-    /// the root row (which is the workspace, not a session) and for a session
-    /// with no note. Read by the right-pane renderer so the highlighted session's
-    /// note (its next-time TODO) shows the moment it is selected — without opening
-    /// the editor.
+    /// The note of the row highlighted in 切替 (the cursor row): the workspace
+    /// root's note on the root row, the session's note otherwise — `None` when the
+    /// highlighted row carries no note. Read by the right-pane renderer so the
+    /// highlighted row's note (its next-time TODO) shows the moment it is selected
+    /// — without opening the editor.
     pub fn selected_session_note(&self) -> Option<&str> {
-        let worktree = self.list.selected()?;
-        self.session_note(worktree_name(worktree))
+        self.session_note(self.list.selected_name())
     }
 
     /// The highlighted session's read-only note when its overlay is currently
@@ -1618,36 +1654,30 @@ impl HomeState {
         self.overlay = Overlay::Note(NoteEditor::new(target, &initial, reattach));
     }
 
-    /// Begin editing the selected session's note in 切替 (Switch): open the note
-    /// editor pre-filled with its current note. A no-op on the root row (which is
-    /// the workspace, not a session) and when an editor is already open. Returns
-    /// whether the editor opened.
+    /// Begin editing the selected row's note in 切替 (Switch): open the note editor
+    /// pre-filled with its current note. Works on the `⌂ root` row too (it edits
+    /// the workspace root's note), as well as a session row. A no-op only when an
+    /// editor is already open. Returns whether the editor opened.
     pub fn switch_begin_note(&mut self) -> bool {
         if matches!(self.overlay, Overlay::Note(_)) {
             return false;
         }
-        let Some(worktree) = self.list.selected() else {
-            return false;
-        };
-        let target = worktree_name(worktree).to_string();
+        let target = self.list.selected_name().to_string();
         self.open_note_for(target, false);
         true
     }
 
-    /// Open the note editor for the focused (active) session — the `Ctrl-E` action
-    /// in 在席 (Focus) and 没入 (Attached). `reattach` records whether closing the
-    /// editor should re-attach the session's pane: `true` from 没入 (drop back into
-    /// the live terminal), `false` from 在席 (return to the action surface). A
-    /// no-op on the root row (the workspace, not a session) and when an editor is
-    /// already open. Returns whether the editor opened.
+    /// Open the note editor for the focused (active) row — the `Ctrl-E` action in
+    /// 在席 (Focus) and 没入 (Attached). `reattach` records whether closing the
+    /// editor should re-attach the row's pane: `true` from 没入 (drop back into the
+    /// live terminal), `false` from 在席 (return to the action surface). Works on
+    /// the `⌂ root` row too (it edits the workspace root's note). A no-op only when
+    /// an editor is already open. Returns whether the editor opened.
     pub fn open_focused_note(&mut self, reattach: bool) -> bool {
         if matches!(self.overlay, Overlay::Note(_)) {
             return false;
         }
         let name = self.focused_session_name();
-        if name == ROOT_NAME {
-            return false;
-        }
         self.open_note_for(name, reattach);
         true
     }
@@ -2179,6 +2209,12 @@ impl HomeState {
     /// creation refreshed the worktree list, swap it in.
     pub fn apply_session_outcome(&mut self, outcome: SessionOutcome) {
         self.push_logged_line(outcome.line);
+        // Apply a refreshed root note (set only by the root-note save) before the
+        // rebuild, so the `⌂ root` row's memo marker reflects the edit this frame.
+        if let Some(root_note) = outcome.root_note {
+            self.root_note = root_note;
+            self.list.set_root_note_marker(self.root_note.is_some());
+        }
         if let Some(sessions) = outcome.sessions {
             self.sessions = sessions;
             self.rebuild_list();
