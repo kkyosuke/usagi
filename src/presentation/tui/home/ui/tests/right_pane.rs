@@ -302,14 +302,18 @@ fn focus_menu_agent_row_shows_the_default_and_expands_into_a_picker() {
     // The agent row always names the default CLI a plain launch uses.
     let base = stripped(&right_pane_contents(&state, 50, 16));
     assert!(base.contains("Launch Claude"));
-    // The expand affordance (▸ / "→ pick agent") shows once the agent row is the
-    // highlighted one (terminal is highlighted on entry).
-    assert!(!base.contains("→ pick agent"));
-    state.focus_menu_move_down(); // terminal -> agent
-    let on_agent = stripped(&right_pane_contents(&state, 50, 16));
-    assert!(on_agent.contains('▸'));
-    assert!(on_agent.contains("→ pick agent"));
-    // Expanding lists every installed agent (default tagged) and swaps the hint.
+    // The expand affordance (▸ / "→ pick agent") shows while the agent row is the
+    // highlighted one — and alphabetical order highlights `agent` on entry.
+    assert!(base.contains('▸'));
+    assert!(base.contains("→ pick agent"));
+    // Moving off the agent row hides the affordance.
+    state.focus_menu_move_down(); // agent -> close
+    let off_agent = stripped(&right_pane_contents(&state, 50, 16));
+    assert!(off_agent.contains("Launch Claude"));
+    assert!(!off_agent.contains("→ pick agent"));
+    // Back onto the agent row, expanding lists the installed agents.
+    state.focus_menu_move_up(); // close -> agent
+                                // Expanding lists every installed agent (default tagged) and swaps the hint.
     state.focus_menu_expand_agent();
     let expanded = stripped(&right_pane_contents(&state, 50, 16));
     assert!(expanded.contains('▾'));
