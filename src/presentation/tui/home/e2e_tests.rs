@@ -49,6 +49,7 @@ fn worktree(branch: &str, path: &str, primary: bool, status: BranchStatus) -> Wo
         status,
         diff: None,
         ahead_behind: None,
+        pr: Vec::new(),
         updated_at: Utc::now(),
     }
 }

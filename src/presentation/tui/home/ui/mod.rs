@@ -30,6 +30,8 @@ use chrome::{
 use panes::{left_pane, right_pane_contents};
 // The embedded terminal pane (没入) maps a click to the tab under it through this.
 pub(super) use panes::attached_tab_at;
+// …and a click on a sidebar session row to that session's PR URLs through this.
+pub(super) use panes::sidebar_pr_links_at;
 
 use super::state::{HomeState, ModalSize, Mode};
 use crate::domain::resource::ResourceUsage;

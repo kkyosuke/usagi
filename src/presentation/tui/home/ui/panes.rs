@@ -21,7 +21,7 @@ use super::{
 };
 use crate::domain::resource::ResourceUsage;
 use crate::domain::settings::{AgentCli, SessionActionUi, Sidebar};
-use crate::domain::workspace_state::{AheadBehind, BranchStatus, DiffStat, WorktreeState};
+use crate::domain::workspace_state::{AheadBehind, BranchStatus, DiffStat, PrLink, WorktreeState};
 use crate::presentation::tui::markdown::{LineStyle, MarkdownLine, Rgb, Span, SpanStyle};
 use crate::presentation::tui::widgets;
 
@@ -278,12 +278,12 @@ pub(super) fn worktree_row(
 
     // Line 2 spells out the agent state with its icon (blank when absent) on the
     // left, and a right-aligned cluster of the freshness label (`Nmin ago`), the
-    // commit-divergence marker (`↑N ↓M`), and the `+N -M` diff badge. Each field
-    // sits in a fixed-width column sized once per render (`cols`), so a session's
-    // time, commits, and diff always land in the same place no matter how many
-    // changed lines or how long ago it was touched. Only the active bar runs down
-    // to it — the `>` cursor stays a single point on line 1, so the detail-line
-    // gutter ignores the cursor.
+    // commit-divergence marker (`↑N ↓M`), the `+N -M` diff badge, and the `#N` PR
+    // badge. Each field sits in a fixed-width column sized once per render (`cols`),
+    // so a session's time, commits, diff, and PR always land in the same place no
+    // matter how many changed lines or how long ago it was touched. Only the active
+    // bar runs down to it — the `>` cursor stays a single point on line 1, so the
+    // detail-line gutter ignores the cursor.
     let agent = AgentState::from_flags(live, running, waiting, done);
     let mut cells = Vec::new();
     if cols.time > 0 {
@@ -294,6 +294,9 @@ pub(super) fn worktree_row(
     }
     if cols.added > 0 {
         cells.push(diff_cell(worktree.diff, cols.added, cols.removed));
+    }
+    if cols.pr > 0 {
+        cells.push(pr_cell(&worktree.pr, cols.pr));
     }
     let detail = detail_content(agent, &cells, detail_width);
     let line2 = detail_line(&gutter_cell(false, active, in_switch), detail);
@@ -346,6 +349,42 @@ pub(super) struct DetailCols {
     /// Digit widths of the diff `+N` / `-M` counts; `added == 0` drops the badge.
     added: usize,
     removed: usize,
+    /// Display width of the `#N` PR cell (`#` + the widest number's digits); 0 = no
+    /// visible session has a PR, so the column is dropped.
+    pr: usize,
+}
+
+/// The fixed-width pull-request cell for a worktree's [`PrLink`]s: each PR as
+/// `#<number>` (blue, underlined to read as a link), space-joined and right-aligned
+/// in `width` display columns so the badges line up down the list. A row with no PR
+/// fills the same width with blanks, holding the column. `width` is 0 (and the cell
+/// omitted) when no visible session carries a PR.
+fn pr_cell(prs: &[PrLink], width: usize) -> String {
+    if prs.is_empty() {
+        return " ".repeat(width);
+    }
+    let joined = prs
+        .iter()
+        .map(|pr| {
+            style(format!("#{}", pr.number))
+                .blue()
+                .underlined()
+                .to_string()
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    rpad(&joined, width)
+}
+
+/// The display width the `#<number>` badges of `prs` occupy when space-joined —
+/// each badge is `#` + the number's digits, with a one-space gap between badges.
+/// `0` for no PR. Used to size the fixed [`DetailCols::pr`] column.
+fn pr_width(prs: &[PrLink]) -> usize {
+    if prs.is_empty() {
+        return 0;
+    }
+    let badges: usize = prs.iter().map(|pr| 1 + digits(pr.number as usize)).sum();
+    badges + (prs.len() - 1)
 }
 
 impl DetailCols {
@@ -371,28 +410,33 @@ impl DetailCols {
     /// Total width of the right cluster: every active field plus a one-space gap
     /// between each pair of adjacent fields.
     fn cluster_width(self) -> usize {
-        let parts = [self.time, self.commits_width(), self.badge_width()];
+        let parts = [self.time, self.commits_width(), self.badge_width(), self.pr];
         let active = parts.iter().filter(|w| **w > 0).count();
         parts.iter().sum::<usize>() + active.saturating_sub(1)
     }
 }
 
+/// One visible session's inputs to [`detail_cols`]: when it was last touched, its
+/// diff against the default, its commit divergence, and the display width of its
+/// `#N` PR badges (see [`pr_width`]).
+type ClusterData = (DateTime<Utc>, Option<DiffStat>, Option<AheadBehind>, usize);
+
 /// Measures the fixed [`DetailCols`] for a render: the widest freshness label, the
-/// widest `↑` / `↓` counts, and the widest `+` / `-` diff counts across the
-/// `worktrees` (already trimmed to the rows that will be drawn), then drops the
-/// low-priority columns — time first, then commits — until the cluster fits beside
-/// the widest agent label (`max_agent_w`) within `detail_width`. The badge is
-/// always kept (it may instead clip a long agent label, the established priority).
-/// Sizing once and handing the same widths to every row is what stops the columns
-/// from wandering between sessions.
+/// widest `↑` / `↓` counts, the widest `+` / `-` diff counts, and the widest PR
+/// badge set across the `worktrees` (already trimmed to the rows that will be
+/// drawn), then drops the low-priority columns — time first, then commits — until
+/// the cluster fits beside the widest agent label (`max_agent_w`) within
+/// `detail_width`. The diff badge and PR are always kept (they may instead clip a
+/// long agent label, the established priority). Sizing once and handing the same
+/// widths to every row is what stops the columns from wandering between sessions.
 fn detail_cols(
-    worktrees: &[(DateTime<Utc>, Option<DiffStat>, Option<AheadBehind>)],
+    worktrees: &[ClusterData],
     now: DateTime<Utc>,
     max_agent_w: usize,
     detail_width: usize,
 ) -> DetailCols {
     let mut cols = DetailCols::default();
-    for (updated_at, diff, ab) in worktrees {
+    for (updated_at, diff, ab, pr_w) in worktrees {
         cols.time = cols.time.max(console::measure_text_width(&relative_time(
             now,
             *updated_at,
@@ -409,6 +453,8 @@ fn detail_cols(
                 cols.behind = cols.behind.max(digits(ab.behind));
             }
         }
+        // The widest joined `#N … #M` badge set across the visible sessions.
+        cols.pr = cols.pr.max(*pr_w);
     }
     // Trim low-priority columns (time, then commits) until the cluster fits beside
     // the widest agent label; the badge is always kept (it clips the agent first).
@@ -761,7 +807,7 @@ pub(super) fn left_pane(
             if let Some(label) = agent.detail(detail_width) {
                 max_agent_w = max_agent_w.max(console::measure_text_width(&label));
             }
-            (w.updated_at, w.diff, w.ahead_behind)
+            (w.updated_at, w.diff, w.ahead_behind, pr_width(&w.pr))
         })
         .collect();
     let cols = detail_cols(&cluster_data, now, max_agent_w, detail_width);
@@ -995,6 +1041,66 @@ pub(in crate::presentation::tui::home) fn attached_tab_at(
     // handling rather than re-driving the same pane.
     (target != strip.active).then_some(target)
 }
+
+/// The pull-request URL a left click at the 0-based screen (`col`, `row`) should
+/// open, or `None` when the click is not on a session row that carries a PR.
+///
+/// The full sidebar shows each session's `#<number>` badges (the rail does not), so
+/// a click is mapped to a session's PRs only there. The whole session entry is the
+/// target — clicking anywhere on its rows opens its PRs — since the sidebar has no
+/// other click action to disambiguate against, and the `#<number>` badges are the
+/// affordance that marks the row as openable. A session may carry several PRs, so
+/// every recorded URL is returned (the caller opens each).
+///
+/// The geometry mirrors what [`super::render_frame`] lays out: the two-pane body
+/// begins at row [`BODY_TOP`] (below the title bar, mode ladder, and blank
+/// separator) and is [`super::body_rows_for`] rows tall; the left pane is the
+/// first `left_w` columns. Within it the entries stack as [`left_pane`] builds
+/// them — the root entry (two rows), a divider (one row), then two rows per
+/// worktree (a live session may add a third, which this mapping does not model —
+/// the same simplification [`super::left_pane_session_at`] makes).
+pub(in crate::presentation::tui::home) fn sidebar_pr_links_at(
+    state: &HomeState,
+    raw_height: usize,
+    raw_width: usize,
+    col: u16,
+    row: u16,
+) -> Vec<String> {
+    // Only the full sidebar draws the `#N` badges; the collapsed rail shows no PR,
+    // so a click there maps to nothing.
+    if state.sidebar() != Sidebar::Full {
+        return Vec::new();
+    }
+    let (height, width) = widgets::normalize_size(raw_height, raw_width);
+    let (left_w, _) = super::layout(width, Sidebar::Full);
+    // The click must land inside the left pane, on a body row.
+    if (col as usize) >= left_w || row < BODY_TOP {
+        return Vec::new();
+    }
+    let line = (row - BODY_TOP) as usize;
+    if line >= super::body_rows_for(height) {
+        return Vec::new();
+    }
+    // Lines 0..2 are the root entry and the divider; worktree rows start at line 3,
+    // two lines each.
+    let Some(entry) = line.checked_sub(ROOT_ENTRY_LINES) else {
+        return Vec::new();
+    };
+    match state.list().worktrees().get(entry / 2) {
+        Some(wt) => wt.pr.iter().map(|pr| pr.url.clone()).collect(),
+        None => Vec::new(),
+    }
+}
+
+/// The 0-based screen row the two-pane body begins at, matching the title bar,
+/// mode ladder, and blank separator [`super::render_frame`] stacks above it (and
+/// the `origin_row` of [`super::terminal_geometry`]).
+const BODY_TOP: u16 = 3;
+
+/// Lines the left pane spends before the first worktree row: the root entry (two
+/// rows) and the divider beneath it. Worktree `i` then occupies lines
+/// `ROOT_ENTRY_LINES + 2*i` and the one after it.
+const ROOT_ENTRY_LINES: usize = 3;
 
 /// Column widths for the fixed-width header identity. The session name is clipped
 /// and every field is padded to a constant width, so the identity block is the
@@ -2019,10 +2125,11 @@ mod tests {
             behind: 1,
             added: 3,
             removed: 2,
+            pr: 4, // "#123"
         };
         assert_eq!(full.commits_width(), 6); // (1+2) + gap + (1+1)
         assert_eq!(full.badge_width(), 8); // 3 + 2 + 3
-        assert_eq!(full.cluster_width(), 8 + 1 + 6 + 1 + 8); // three fields, two gaps
+        assert_eq!(full.cluster_width(), 8 + 1 + 6 + 1 + 8 + 1 + 4); // four fields, three gaps
 
         // Only an ahead side, no diff, no time: one field, no gaps, no `↓` columns.
         let ahead_only = DetailCols {
@@ -2063,6 +2170,7 @@ mod tests {
                     ahead: 2,
                     behind: 0,
                 }),
+                pr_width(&[pr(7)]), // "#7" → 2
             ),
             (
                 at(now, 12),
@@ -2074,16 +2182,18 @@ mod tests {
                     ahead: 0,
                     behind: 13,
                 }),
+                pr_width(&[pr(412), pr(98)]), // "#412 #98" → 8
             ),
-            // A session with neither a diff nor divergence: exercises both `None`
-            // arms so they contribute no columns.
-            (at(now, 1), None, None),
+            // A session with neither a diff nor divergence nor PR: exercises every
+            // empty arm so they contribute no columns.
+            (at(now, 1), None, None, 0),
         ];
         let cols = detail_cols(&data, now, 9, 60);
         assert_eq!(cols.added, 3); // "140"
         assert_eq!(cols.removed, 1); // "8" / "3"
         assert_eq!(cols.ahead, 1); // "2"
         assert_eq!(cols.behind, 2); // "13"
+        assert_eq!(cols.pr, 8); // widest is "#412 #98"
         assert_eq!(
             cols.time,
             console::measure_text_width(&relative_time(now, at(now, 12))) // "12min ago"
@@ -2105,6 +2215,7 @@ mod tests {
                 ahead: 2,
                 behind: 1,
             }),
+            0,
         )];
         // Roomy: every field survives (full cluster needs ~30 columns beside a
         // 9-wide agent label).
@@ -2215,5 +2326,54 @@ mod tests {
             console::strip_ansi_codes(&relative_time(now, now + chrono::Duration::seconds(30))),
             "now"
         );
+    }
+
+    fn pr(number: u32) -> PrLink {
+        PrLink {
+            number,
+            url: format!("https://github.com/o/r/pull/{number}"),
+        }
+    }
+
+    #[test]
+    fn pr_cell_joins_badges_pads_the_column_and_blanks_when_absent() {
+        // One PR rides the right edge of its fixed column; a wider column left-pads
+        // with spaces so badges line up down the list.
+        let cell = pr_cell(&[pr(7)], 4);
+        assert_eq!(console::measure_text_width(&cell), 4);
+        assert_eq!(console::strip_ansi_codes(&cell), "  #7");
+        // Several PRs are space-joined as `#N #M`.
+        let many = pr_cell(&[pr(412), pr(98)], 8);
+        assert_eq!(console::strip_ansi_codes(&many), "#412 #98");
+        // No PR fills the same width with blanks, holding the column.
+        assert_eq!(pr_cell(&[], 4), "    ");
+    }
+
+    #[test]
+    fn pr_width_sums_badges_with_gaps() {
+        assert_eq!(pr_width(&[]), 0);
+        assert_eq!(pr_width(&[pr(7)]), 2); // "#7"
+        assert_eq!(pr_width(&[pr(412), pr(98)]), 8); // "#412 #98"
+    }
+
+    #[test]
+    fn detail_content_keeps_the_pr_cell_at_the_right_edge() {
+        // The PR cell, as the last in `cells`, lands flush against the right edge
+        // beside the diff badge (`+1 -2 #412 #98`).
+        let badge = diff_cell(
+            Some(DiffStat {
+                added: 1,
+                removed: 2,
+            }),
+            1,
+            1,
+        );
+        let cell = pr_cell(&[pr(412), pr(98)], 8);
+        let cells = vec![badge, cell];
+        let line = detail_content(AgentState::Running, &cells, 40);
+        let plain = console::strip_ansi_codes(&line);
+        assert!(plain.starts_with("▶ running"));
+        assert!(plain.contains("+1 -2 #412 #98"));
+        assert!(plain.ends_with("#98"));
     }
 }

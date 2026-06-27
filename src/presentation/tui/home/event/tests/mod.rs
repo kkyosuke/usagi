@@ -129,6 +129,7 @@ fn worktree(branch: Option<&str>, path: &str) -> WorktreeState {
         status: BranchStatus::Local,
         diff: None,
         ahead_behind: None,
+        pr: Vec::new(),
         updated_at: Utc::now(),
     }
 }

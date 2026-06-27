@@ -657,6 +657,7 @@ mod tests {
                 status: BranchStatus::Local,
                 diff: None,
                 ahead_behind: None,
+                pr: Vec::new(),
                 updated_at: chrono::Utc::now(),
             }],
             created_at: chrono::Utc::now(),

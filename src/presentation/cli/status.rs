@@ -83,6 +83,7 @@ mod tests {
                         status: BranchStatus::Pushed,
                         diff: None,
                         ahead_behind: None,
+                        pr: Vec::new(),
                         updated_at: ts,
                     },
                     WorktreeState {
@@ -94,6 +95,7 @@ mod tests {
                         status: BranchStatus::Local,
                         diff: None,
                         ahead_behind: None,
+                        pr: Vec::new(),
                         updated_at: ts,
                     },
                 ],
