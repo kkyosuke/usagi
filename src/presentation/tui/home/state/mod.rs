@@ -385,6 +385,13 @@ pub struct HomeState {
     /// Only meaningful in [`Mode::Switch`]; the note *editor* is independent of
     /// it (it captures the keyboard through [`overlay`](Self::overlay)).
     note_hidden: bool,
+    /// The worktree (by index in [`list`](Self::list)'s worktrees) whose PR hover
+    /// popup is showing, or `None` when the pointer is not over a PR-bearing
+    /// session's row. Set as the pointer moves over the full sidebar (see the home
+    /// loop's [`Input::Hover`] handling); the renderer floats the session's
+    /// `#<number>` list beside its row. Purely transient — it never persists and is
+    /// cleared the instant the pointer leaves a PR row.
+    pr_hover: Option<usize>,
     /// The transient overlay that captures the keyboard while open (the 切替
     /// inline create/rename inputs, the text modal, the right-pane preview, the
     /// session-removal checklist, the note editor). One [`Overlay`] rather than a
@@ -601,6 +608,7 @@ impl HomeState {
             agent_choice: None,
             switch_return: ReturnMode::Base,
             note_hidden: false,
+            pr_hover: None,
             overlay: Overlay::default(),
             quit_confirm: false,
             update_confirm: false,
@@ -1827,6 +1835,22 @@ impl HomeState {
     /// (the first `Esc`). Moving the cursor to another row re-shows it.
     pub fn hide_switch_note(&mut self) {
         self.note_hidden = true;
+    }
+
+    /// The worktree whose PR hover popup is currently showing (by index in the
+    /// list's worktrees), or `None`. Read by the renderer to float the session's
+    /// `#<number>` list beside its row.
+    pub fn pr_hover(&self) -> Option<usize> {
+        self.pr_hover
+    }
+
+    /// Point the PR hover popup at worktree `target` (or clear it with `None`),
+    /// returning whether the target changed — the home loop repaints only then, so
+    /// a pointer sliding within the same row (or empty space) costs no redraw.
+    pub fn set_pr_hover(&mut self, target: Option<usize>) -> bool {
+        let changed = self.pr_hover != target;
+        self.pr_hover = target;
+        changed
     }
 
     /// Open the note editor for `target`, pre-filled with its current note.
