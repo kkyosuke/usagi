@@ -2,7 +2,7 @@
 //! pane (a switch preview, the focus menu/prompt, or the embedded terminal).
 //! All functions take plain data and return styled lines.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use chrono::{DateTime, Duration, Utc};
@@ -19,6 +19,7 @@ use super::{
     EMPTY_MESSAGE, HINT_INDENT, HINT_MAX, LOCAL_ICON, NAME_PREFIX, NEW_ICON, NOTE_ICON,
     PUSHED_ICON, RAIL_WIDTH, ROOT_DETAIL, STATUS_COL, SYNCED_ICON, TERMINAL_STARTING,
 };
+use crate::domain::resource::ResourceUsage;
 use crate::domain::settings::{AgentCli, SessionActionUi, Sidebar};
 use crate::domain::workspace_state::{AheadBehind, BranchStatus, DiffStat, WorktreeState};
 use crate::presentation::tui::markdown::{LineStyle, MarkdownLine, Rgb, Span, SpanStyle};
@@ -236,6 +237,7 @@ pub(super) fn worktree_row(
     running: bool,
     waiting: bool,
     done: bool,
+    resource: Option<ResourceUsage>,
 ) -> (String, String) {
     let kind = kind_dot(heat_of(worktree.updated_at, now));
     // The session's sidebar label (its custom display name, or the branch when
@@ -264,8 +266,10 @@ pub(super) fn worktree_row(
     let badge = diff_badge(worktree.diff);
     let commits = ahead_behind_badge(worktree.ahead_behind);
     let time = Some(relative_time(now, worktree.updated_at));
+    let resource = resource_badge(resource);
     let detail = detail_content(
         AgentState::from_flags(live, running, waiting, done),
+        resource,
         time,
         commits,
         badge,
@@ -273,6 +277,20 @@ pub(super) fn worktree_row(
     );
     let line2 = detail_line(&gutter_cell(false, active, in_switch), detail);
     (line1, line2)
+}
+
+/// The `<cpu>% <mem>` resource badge for a session's process tree — `8% 120MB` —
+/// dimmed, or `None` when the session has no live process to measure (so only the
+/// rows with a running shell / agent carry a figure). Shown on the detail line
+/// among the other right-edge badges, so a glance tells which sessions are
+/// actually burning CPU / memory.
+fn resource_badge(usage: Option<ResourceUsage>) -> Option<String> {
+    let usage = usage?;
+    Some(
+        style(format!("{} {}", usage.format_cpu(), usage.format_memory()))
+            .dim()
+            .to_string(),
+    )
 }
 
 /// A compact, dimmed freshness label for how long ago `then` was relative to
@@ -331,14 +349,16 @@ fn ahead_behind_badge(ab: Option<AheadBehind>) -> Option<String> {
 /// `commits` and `time` sit to its left; the agent label is clipped to the room
 /// left of the cluster.
 ///
-/// Priority under pressure is **badge > agent > commits > time**: the badge is
-/// pinned to the right edge (and clips the agent when both can't fit, the
-/// established rule). The `commits` then the `time` are added left of the badge,
-/// each only when the agent's full label still fits beside the whole cluster —
-/// so the lowest-priority `time` is dropped first, then `commits`, before the
-/// agent state is ever truncated. Any of the four may be absent.
+/// Priority under pressure is **badge > agent > resource > commits > time**: the
+/// badge is pinned to the right edge (and clips the agent when both can't fit, the
+/// established rule). The `resource` (CPU / memory), then `commits`, then `time`
+/// are added left of the badge, each only when the agent's full label still fits
+/// beside the whole cluster — so the lowest-priority `time` is dropped first, then
+/// `commits`, then the `resource`, before the agent state is ever truncated. Any
+/// of the segments may be absent.
 fn detail_content(
     agent: AgentState,
+    resource: Option<String>,
     time: Option<String>,
     commits: Option<String>,
     badge: Option<String>,
@@ -359,7 +379,10 @@ fn detail_content(
         }
         None => (String::new(), 0),
     };
-    for seg in [commits, time].into_iter().flatten() {
+    // Prepended in priority order (highest first): `resource` is added while the
+    // cluster is smallest, so it survives a tight cell best and lands leftmost;
+    // `time` is added last, so it is the first dropped when room runs out.
+    for seg in [resource, commits, time].into_iter().flatten() {
         let seg_w = console::measure_text_width(&seg);
         let with_seg_w = if cluster_w == 0 {
             seg_w
@@ -608,6 +631,7 @@ pub(super) fn left_pane(
     running: &HashSet<PathBuf>,
     waiting: &HashSet<PathBuf>,
     done: &HashSet<PathBuf>,
+    resources: &HashMap<PathBuf, ResourceUsage>,
     left_w: usize,
     rows: usize,
     in_switch: bool,
@@ -615,6 +639,8 @@ pub(super) fn left_pane(
     now: DateTime<Utc>,
 ) -> Vec<String> {
     if sidebar == Sidebar::Rail {
+        // The 5-column rail has no room for a CPU / memory figure, so the rail
+        // shows only the agent glyph; the resource numbers belong to the full list.
         return rail_pane(list, live, running, waiting, done, rows, in_switch);
     }
     // Line 1: prefix + name + the (now-blank) active-marker cell + a space + the
@@ -678,6 +704,7 @@ pub(super) fn left_pane(
                 running.contains(&w.path),
                 waiting.contains(&w.path),
                 done.contains(&w.path),
+                resources.get(&w.path).copied(),
             );
             if in_switch && !selected {
                 top = dim_row(&top);
@@ -1776,7 +1803,7 @@ mod tests {
 
         // Agent label on the left, badge pinned to the cell's right edge; the
         // whole cell measures exactly the width so the badges line up.
-        let line = detail_content(AgentState::Running, None, None, badge.clone(), 24);
+        let line = detail_content(AgentState::Running, None, None, None, badge.clone(), 24);
         assert_eq!(console::measure_text_width(&line), 24);
         let plain = console::strip_ansi_codes(&line);
         assert!(plain.starts_with("▶ running"));
@@ -1784,7 +1811,7 @@ mod tests {
 
         // With no agent the badge still rides the right edge — the case the badge
         // most needs to read (a session with work but nothing running).
-        let line = detail_content(AgentState::Absent, None, None, badge.clone(), 24);
+        let line = detail_content(AgentState::Absent, None, None, None, badge.clone(), 24);
         assert_eq!(console::measure_text_width(&line), 24);
         assert_eq!(console::strip_ansi_codes(&line).trim_start(), "+124 -18");
     }
@@ -1792,9 +1819,13 @@ mod tests {
     #[test]
     fn detail_content_falls_back_to_the_agent_label_or_clips_a_cramped_cell() {
         // No badge, no time, no commits → just the agent label (blank when absent).
-        assert_eq!(detail_content(AgentState::Absent, None, None, None, 20), "");
+        assert_eq!(
+            detail_content(AgentState::Absent, None, None, None, None, 20),
+            ""
+        );
         assert!(console::strip_ansi_codes(&detail_content(
             AgentState::Running,
+            None,
             None,
             None,
             None,
@@ -1805,6 +1836,7 @@ mod tests {
         // Too narrow for both → the cluster alone, clipped to the cell.
         let line = detail_content(
             AgentState::Running,
+            None,
             None,
             None,
             diff_badge(Some(DiffStat {
@@ -1826,19 +1858,26 @@ mod tests {
 
         // Roomy cell: agent on the left, then `time badge` as the right cluster
         // with the badge still at the far edge.
-        let line = detail_content(AgentState::Running, time.clone(), None, badge.clone(), 30);
+        let line = detail_content(
+            AgentState::Running,
+            None,
+            time.clone(),
+            None,
+            badge.clone(),
+            30,
+        );
         let plain = console::strip_ansi_codes(&line);
         assert!(plain.starts_with("▶ running"));
         assert!(plain.contains("3分前 +1 -2"));
         assert!(plain.ends_with("+1 -2"));
 
         // With no badge the time becomes the right cluster on its own.
-        let only_time = detail_content(AgentState::Absent, time.clone(), None, None, 20);
+        let only_time = detail_content(AgentState::Absent, None, time.clone(), None, None, 20);
         assert_eq!(console::strip_ansi_codes(&only_time).trim_start(), "3分前");
 
         // Cramped cell: the badge is kept at the right edge and the lower-priority
         // time is dropped rather than pushing the badge off.
-        let tight = detail_content(AgentState::Absent, time, None, badge, 7);
+        let tight = detail_content(AgentState::Absent, None, time, None, badge, 7);
         let plain = console::strip_ansi_codes(&tight);
         assert!(plain.contains("+1 -2"));
         assert!(!plain.contains("3分前"));
@@ -1860,6 +1899,7 @@ mod tests {
         // with the badge still pinned to the far edge.
         let line = detail_content(
             AgentState::Running,
+            None,
             time.clone(),
             commits.clone(),
             badge.clone(),
@@ -1872,10 +1912,57 @@ mod tests {
 
         // Tighter cell: the lowest-priority time is dropped first, but the commits
         // marker and badge survive beside the agent label.
-        let line = detail_content(AgentState::Running, time, commits, badge, 22);
+        let line = detail_content(AgentState::Running, None, time, commits, badge, 22);
         let plain = console::strip_ansi_codes(&line);
         assert!(plain.contains("running"));
         assert!(plain.contains("↑2 ↓1 +1 -2"));
+        assert!(!plain.contains("3分前"));
+    }
+
+    #[test]
+    fn resource_badge_formats_cpu_and_memory_or_is_absent() {
+        assert_eq!(resource_badge(None), None);
+        let badge = resource_badge(Some(ResourceUsage {
+            cpu_percent: 8,
+            memory_bytes: 120 * 1024 * 1024,
+        }))
+        .unwrap();
+        // The styling is colour only; the visible text is `<cpu>% <mem>`.
+        assert_eq!(console::strip_ansi_codes(&badge), "8% 120MB");
+    }
+
+    #[test]
+    fn detail_content_keeps_the_resource_over_time_and_commits_when_cramped() {
+        let resource = resource_badge(Some(ResourceUsage {
+            cpu_percent: 8,
+            memory_bytes: 120 * 1024 * 1024,
+        }));
+        let commits = ahead_behind_badge(Some(AheadBehind {
+            ahead: 2,
+            behind: 1,
+        }));
+        let time = Some(style("3分前").dim().to_string());
+
+        // Roomy cell: the right cluster reads `time commits resource`, left to
+        // right, with the resource pinned just left of where a diff badge would sit.
+        let line = detail_content(
+            AgentState::Running,
+            resource.clone(),
+            time.clone(),
+            commits.clone(),
+            None,
+            36,
+        );
+        let plain = console::strip_ansi_codes(&line);
+        assert!(plain.starts_with("▶ running"));
+        assert!(plain.contains("3分前 ↑2 ↓1 8% 120MB"));
+
+        // Tighter cell: the lower-priority time then commits are dropped before the
+        // resource, so the CPU / memory figure survives beside the agent label.
+        let line = detail_content(AgentState::Running, resource, time, commits, None, 20);
+        let plain = console::strip_ansi_codes(&line);
+        assert!(plain.contains("running"));
+        assert!(plain.contains("8% 120MB"));
         assert!(!plain.contains("3分前"));
     }
 

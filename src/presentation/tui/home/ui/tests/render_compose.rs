@@ -58,6 +58,76 @@ fn render_frame_surfaces_running_and_waiting_agent_icons() {
 }
 
 #[test]
+fn workspace_total_label_spells_out_cpu_and_memory_or_is_absent_when_idle() {
+    // Nothing live → no label, so the resting mascot carries no number.
+    assert_eq!(workspace_total_label(ResourceUsage::default()), None);
+    let label = workspace_total_label(ResourceUsage {
+        cpu_percent: 23,
+        memory_bytes: 512 * 1024 * 1024,
+    })
+    .unwrap();
+    assert_eq!(console::strip_ansi_codes(&label), "CPU 23%  MEM 512MB");
+}
+
+#[test]
+fn append_total_beside_mascot_writes_on_the_face_row_when_it_fits() {
+    // Three mascot rows (ears / face / feet); the total joins the middle face row.
+    let rabbit_rows = || {
+        vec![
+            " (\\(\\".to_string(),
+            " (^.^)/".to_string(),
+            "o(_(\")(\")".to_string(),
+        ]
+    };
+    let total = ResourceUsage {
+        cpu_percent: 23,
+        memory_bytes: 512 * 1024 * 1024,
+    };
+    let mut rabbit = rabbit_rows();
+    append_total_beside_mascot(&mut rabbit, total, 40);
+    assert!(console::strip_ansi_codes(&rabbit[1]).contains("CPU 23%  MEM 512MB"));
+    // Only the face row gains it; the ears and feet are untouched.
+    assert!(!rabbit[0].contains("CPU"));
+    assert!(!rabbit[2].contains("CPU"));
+
+    // Too narrow for the art plus the label → the row is left alone (never
+    // overrunning the sidebar and pushing the right pane out of line).
+    let mut narrow = rabbit_rows();
+    append_total_beside_mascot(&mut narrow, total, 8);
+    assert!(!narrow[1].contains("CPU"));
+
+    // Idle total → nothing is appended at all.
+    let mut idle = rabbit_rows();
+    append_total_beside_mascot(&mut idle, ResourceUsage::default(), 40);
+    assert!(!idle[1].contains("CPU"));
+
+    // A two-row chibi has no distinct face row → it is left untouched.
+    let mut chibi = vec![" ∩∩".to_string(), "(･･)".to_string()];
+    append_total_beside_mascot(&mut chibi, total, 40);
+    assert!(!chibi.iter().any(|r| r.contains("CPU")));
+}
+
+#[test]
+fn render_frame_rests_the_workspace_total_beside_the_mascot() {
+    let mut wt = worktree(Some("feat"), true, BranchStatus::Local);
+    wt.path = PathBuf::from("/repo/run");
+    let mut state = HomeState::new("usagi", vec![wt], None);
+    state.apply_badges(MonitorSnapshot {
+        live: [PathBuf::from("/repo/run")].into(),
+        running: [PathBuf::from("/repo/run")].into(),
+        resource_total: ResourceUsage {
+            cpu_percent: 23,
+            memory_bytes: 512 * 1024 * 1024,
+        },
+        ..Default::default()
+    });
+    // A wide terminal gives the sidebar room for the art plus the spelled-out
+    // total beside it (a narrow one omits it — see the fit guard's own test).
+    let joined = console::strip_ansi_codes(&render_frame(24, 120, &state).join("\n")).into_owned();
+    assert!(joined.contains("CPU 23%  MEM 512MB"));
+}
+
+#[test]
 fn render_frame_survives_a_short_terminal() {
     let state = state_with(Vec::new());
     let frame = render_frame(3, 80, &state);

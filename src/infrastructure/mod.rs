@@ -15,6 +15,7 @@ pub mod pty;
 pub mod pty_exit;
 pub mod release;
 pub mod repo_paths;
+pub mod resource;
 pub mod resume_focus_store;
 pub mod session_monitor;
 pub mod skills;

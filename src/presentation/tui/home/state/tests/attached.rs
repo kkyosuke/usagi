@@ -458,6 +458,7 @@ fn apply_badges_replaces_every_set_at_once() {
         waiting: [PathBuf::from("/repo/wait")].into(),
         live: [PathBuf::from("/repo/run"), PathBuf::from("/repo/wait")].into(),
         done: [PathBuf::from("/repo/done")].into(),
+        ..Default::default()
     };
     state.apply_badges(snapshot.clone());
     // `badges` echoes the whole applied snapshot, so a loop can detect a change

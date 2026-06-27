@@ -7,6 +7,7 @@ pub mod history;
 pub mod issue;
 pub mod memory;
 pub mod repository;
+pub mod resource;
 pub mod serde_fallback;
 pub mod settings;
 pub mod trace;

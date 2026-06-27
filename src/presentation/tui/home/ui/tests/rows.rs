@@ -231,6 +231,7 @@ fn worktree_row_marks_the_cursor_in_switch_and_shows_detached() {
         false,
         false,
         false,
+        None,
     );
     assert!(top.contains('>'));
     assert!(top.contains('●'));
@@ -251,6 +252,7 @@ fn worktree_row_marks_the_cursor_in_switch_and_shows_detached() {
         false,
         false,
         false,
+        None,
     );
     assert!(!top_no_switch.contains('>'));
 
@@ -268,6 +270,7 @@ fn worktree_row_marks_the_cursor_in_switch_and_shows_detached() {
         false,
         false,
         false,
+        None,
     );
     assert!(!other_top.contains('>'));
     assert!(other_top.contains('●'));
@@ -287,6 +290,7 @@ fn worktree_row_marks_the_cursor_in_switch_and_shows_detached() {
         false,
         false,
         false,
+        None,
     );
     assert!(detached_top.contains("(detached)"));
 }
@@ -309,6 +313,7 @@ fn worktree_row_shows_a_memo_marker_only_when_the_session_has_a_note() {
         false,
         false,
         false,
+        None,
     )
     .0;
     let without_note = worktree_row(
@@ -325,6 +330,7 @@ fn worktree_row_shows_a_memo_marker_only_when_the_session_has_a_note() {
         false,
         false,
         false,
+        None,
     )
     .0;
     assert!(with_note.contains(NOTE_ICON));
@@ -350,6 +356,7 @@ fn worktree_row_heat_dot_fades_with_time_since_touched() {
         };
         let (top, _) = worktree_row(
             &worktree, "", 10, 10, false, now, false, false, false, false, false, false, false,
+            None,
         );
         console::strip_ansi_codes(&top).into_owned()
     };
@@ -378,6 +385,7 @@ fn worktree_row_marks_the_active_worktree_with_a_gutter_bar_on_both_lines() {
         false,
         false,
         false,
+        None,
     );
     // The green `▎` accent bar runs down both lines of the active row (the
     // detail line carries it too, to the left of the agent state).
@@ -399,6 +407,7 @@ fn worktree_row_marks_the_active_worktree_with_a_gutter_bar_on_both_lines() {
         false,
         false,
         false,
+        None,
     );
     assert!(!idle_top.contains('▎'));
     assert!(!idle_detail.contains('▎'));
@@ -421,6 +430,7 @@ fn worktree_row_shows_the_agent_state_through_its_lifecycle() {
         false,
         false,
         false,
+        None,
     );
     assert!(ready_detail.contains('☾'));
     assert!(ready_detail.contains("ready"));
@@ -440,6 +450,7 @@ fn worktree_row_shows_the_agent_state_through_its_lifecycle() {
         true,
         false,
         false,
+        None,
     );
     assert!(running_detail.contains('▶'));
     assert!(running_detail.contains("running"));
@@ -459,6 +470,7 @@ fn worktree_row_shows_the_agent_state_through_its_lifecycle() {
         true,
         true,
         false,
+        None,
     );
     assert!(waiting_detail.contains('◆'));
     assert!(!waiting_detail.contains('▶'));
@@ -479,6 +491,7 @@ fn worktree_row_shows_the_agent_state_through_its_lifecycle() {
         true,
         false,
         true,
+        None,
     );
     assert!(done_detail.contains('✓'));
     assert!(done_detail.contains("done"));
@@ -499,11 +512,88 @@ fn worktree_row_shows_the_agent_state_through_its_lifecycle() {
         false,
         false,
         false,
+        None,
     );
     assert!(!absent_detail.contains('▶'));
     assert!(!absent_detail.contains('◆'));
     assert!(!absent_detail.contains('☾'));
     assert!(absent_top.contains("local"));
+}
+
+#[test]
+fn worktree_row_shows_the_resource_figure_only_when_one_is_supplied() {
+    let usage = ResourceUsage {
+        cpu_percent: 8,
+        memory_bytes: 120 * 1024 * 1024,
+    };
+    // A live row given a sample carries `<cpu>% <mem>` on its detail line.
+    let (_, with_usage) = worktree_row(
+        &worktree(Some("feature"), false, BranchStatus::Local),
+        "",
+        12,
+        24,
+        false,
+        Utc::now(),
+        false,
+        false,
+        false,
+        true,
+        true,
+        false,
+        false,
+        Some(usage),
+    );
+    assert!(console::strip_ansi_codes(&with_usage).contains("8% 120MB"));
+
+    // The same row with no sample (a session with no live process) shows none.
+    let (_, without_usage) = worktree_row(
+        &worktree(Some("feature"), false, BranchStatus::Local),
+        "",
+        12,
+        24,
+        false,
+        Utc::now(),
+        false,
+        false,
+        false,
+        true,
+        true,
+        false,
+        false,
+        None,
+    );
+    assert!(!console::strip_ansi_codes(&without_usage).contains("MB"));
+}
+
+#[test]
+fn left_pane_threads_each_sessions_resource_to_its_row() {
+    let list = list_with(vec![worktree(Some("feature"), false, BranchStatus::Local)]);
+    let path: HashSet<PathBuf> = [PathBuf::from("/repo/wt")].into_iter().collect();
+    let empty = HashSet::new();
+    let resources: HashMap<PathBuf, ResourceUsage> = [(
+        PathBuf::from("/repo/wt"),
+        ResourceUsage {
+            cpu_percent: 12,
+            memory_bytes: 256 * 1024 * 1024,
+        },
+    )]
+    .into_iter()
+    .collect();
+    let lines = left_pane(
+        &list,
+        &path,
+        &path,
+        &empty,
+        &empty,
+        &resources,
+        40,
+        6,
+        false,
+        Sidebar::Full,
+        Utc::now(),
+    );
+    // Row 4 is the worktree's detail line, where the resource figure rides.
+    assert!(console::strip_ansi_codes(&lines[4]).contains("12% 256MB"));
 }
 
 #[test]
@@ -541,6 +631,7 @@ fn worktree_row_truncates_a_long_branch() {
         false,
         false,
         false,
+        None,
     );
     assert!(top.contains('…'));
 }
@@ -561,6 +652,7 @@ fn worktree_row_shows_the_label_override_instead_of_the_branch() {
         false,
         false,
         false,
+        None,
     );
     assert!(top.contains("Login flow"));
     assert!(!top.contains("feat-login"));
@@ -599,6 +691,7 @@ fn left_pane_renders_the_root_entry_then_the_empty_message() {
         &HashSet::new(),
         &HashSet::new(),
         &HashSet::new(),
+        &HashMap::new(),
         80,
         6,
         false,
@@ -630,6 +723,7 @@ fn left_pane_shows_each_sessions_relative_update_time_on_the_detail_line() {
         &HashSet::new(),
         &HashSet::new(),
         &HashSet::new(),
+        &HashMap::new(),
         30,
         5,
         false,
@@ -658,6 +752,7 @@ fn left_pane_shows_the_ahead_behind_marker_on_the_detail_line() {
         &HashSet::new(),
         &HashSet::new(),
         &HashSet::new(),
+        &HashMap::new(),
         40,
         5,
         false,
@@ -684,6 +779,7 @@ fn left_pane_renders_the_root_entry_then_one_entry_per_worktree() {
         &HashSet::new(),
         &HashSet::new(),
         &HashSet::new(),
+        &HashMap::new(),
         30,
         7,
         false,
@@ -716,6 +812,7 @@ fn left_pane_stops_building_rows_once_the_pane_is_full() {
         &HashSet::new(),
         &HashSet::new(),
         &HashSet::new(),
+        &HashMap::new(),
         30,
         5,
         false,
@@ -749,6 +846,7 @@ fn rail_pane_stops_building_rows_once_the_rail_is_full() {
         &HashSet::new(),
         &HashSet::new(),
         &HashSet::new(),
+        &HashMap::new(),
         8,
         5,
         false,
@@ -771,6 +869,7 @@ fn left_pane_marks_the_agent_state_through_its_lifecycle() {
         &empty,
         &empty,
         &empty,
+        &HashMap::new(),
         30,
         6,
         false,
@@ -786,6 +885,7 @@ fn left_pane_marks_the_agent_state_through_its_lifecycle() {
         &path,
         &empty,
         &empty,
+        &HashMap::new(),
         30,
         6,
         false,
@@ -801,6 +901,7 @@ fn left_pane_marks_the_agent_state_through_its_lifecycle() {
         &path,
         &path,
         &empty,
+        &HashMap::new(),
         30,
         6,
         false,
@@ -816,6 +917,7 @@ fn left_pane_marks_the_agent_state_through_its_lifecycle() {
         &empty,
         &empty,
         &empty,
+        &HashMap::new(),
         30,
         6,
         false,
@@ -841,6 +943,7 @@ fn left_pane_is_trimmed_to_available_rows() {
         &HashSet::new(),
         &HashSet::new(),
         &HashSet::new(),
+        &HashMap::new(),
         30,
         4,
         false,
@@ -867,6 +970,7 @@ fn left_pane_marks_the_active_worktree_with_a_gutter_bar() {
         &HashSet::new(),
         &HashSet::new(),
         &HashSet::new(),
+        &HashMap::new(),
         30,
         7,
         false,
@@ -894,6 +998,7 @@ fn rail_collapses_each_entry_to_two_rows_without_names_or_numbers() {
         &empty,
         &empty,
         &empty,
+        &HashMap::new(),
         RAIL_WIDTH,
         8,
         false,
@@ -942,6 +1047,7 @@ fn rail_keeps_the_same_row_count_as_the_full_sidebar() {
             &empty,
             &empty,
             &empty,
+            &HashMap::new(),
             30,
             20,
             false,
@@ -960,6 +1066,7 @@ fn rail_keeps_the_same_row_count_as_the_full_sidebar() {
             &empty,
             &empty,
             &empty,
+            &HashMap::new(),
             30,
             20,
             false,
@@ -988,6 +1095,7 @@ fn rail_shows_the_active_bar_down_both_rows_and_the_agent_glyph_on_row_two() {
         &path,
         &empty,
         &empty,
+        &HashMap::new(),
         RAIL_WIDTH,
         8,
         false,
@@ -1019,6 +1127,7 @@ fn rail_shows_each_agent_state_glyph_on_the_detail_row() {
             running,
             waiting,
             done,
+            &HashMap::new(),
             RAIL_WIDTH,
             8,
             false,
@@ -1047,6 +1156,7 @@ fn rail_sidebar_marks_the_switch_cursor() {
             &empty,
             &empty,
             &empty,
+            &HashMap::new(),
             RAIL_WIDTH,
             8,
             true,
@@ -1090,6 +1200,7 @@ fn left_pane_fades_every_row_but_the_cursor_when_asked() {
         &HashSet::new(),
         &HashSet::new(),
         &HashSet::new(),
+        &HashMap::new(),
         30,
         6,
         true,

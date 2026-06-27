@@ -6,11 +6,12 @@ use super::super::command::{CommandHint, CommandInfo};
 use super::super::state::{LogLine, ModalSize, Preview, TextModal, WorktreeList, ROOT_NAME};
 use super::super::terminal::pool::MonitorSnapshot;
 use super::super::terminal::view::TerminalView;
+use crate::domain::resource::ResourceUsage;
 use crate::domain::settings::{SessionActionUi, Sidebar};
 use crate::domain::workspace_state::{BranchStatus, SessionRecord, WorktreeState};
 use crate::presentation::tui::markdown::{LineStyle, MarkdownLine, Span, SpanStyle};
 use chrono::Utc;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 fn worktree(branch: Option<&str>, primary: bool, status: BranchStatus) -> WorktreeState {

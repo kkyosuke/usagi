@@ -38,9 +38,11 @@ use std::time::Duration;
 use anyhow::Result;
 use console::Term;
 
+use crate::domain::resource::{aggregate_by_root, ResourceUsage};
 use crate::domain::settings::{AgentCli, Sidebar};
 use crate::infrastructure::open_panes_store::{StoredPane, StoredPaneKind};
 use crate::infrastructure::pty::PtySession;
+use crate::infrastructure::resource::{ResourceSampler, SysinfoSampler};
 use crate::infrastructure::session_monitor::SessionMonitor;
 use crate::infrastructure::{agent_state_store, session_monitor};
 
@@ -50,6 +52,12 @@ use super::view::TerminalView;
 
 /// How often the watcher thread samples every session's bell count.
 const POLL_INTERVAL: Duration = Duration::from_millis(200);
+
+/// How many [`POLL_INTERVAL`] bell ticks pass between resource (CPU / memory)
+/// samples. Reading every process is far heavier than reading a bell counter, and
+/// CPU use is meaningful only over a window — so it is sampled on a slower beat
+/// (every fifth tick ≈ once a second) rather than on every poll.
+const RESOURCE_SAMPLE_EVERY: u32 = 5;
 
 /// The handles a background session is watched through, kept separate from the
 /// owned [`PtySession`]s so the watcher thread can poll without holding them.
@@ -65,6 +73,10 @@ struct Watched {
     bell: Arc<AtomicU64>,
     /// Every pane's liveness flag; the session is live while any is `true`.
     alive: Vec<Arc<AtomicBool>>,
+    /// The root process id of each live pane's shell — also its process-group id
+    /// (portable-pty makes the shell a session leader), so the resource sampler
+    /// totals each shell's whole subtree (the shell and any agent CLI beneath it).
+    roots: Vec<u32>,
     /// A human label (the worktree branch) shown in the notification.
     label: String,
 }
@@ -81,6 +93,13 @@ impl Watched {
 struct Shared {
     monitor: SessionMonitor,
     sessions: HashMap<PathBuf, Watched>,
+    /// The CPU / memory each live session is using, keyed by worktree path, as of
+    /// the watcher's last resource sample. Empty while nothing is live (the
+    /// watcher skips sampling then), so an idle workspace carries no figures.
+    resources: HashMap<PathBuf, ResourceUsage>,
+    /// The workspace total — the sum across every live session's process tree —
+    /// as of the last sample. Idle (zero) while nothing is live.
+    resource_total: ResourceUsage,
 }
 
 /// A cloneable read/notify handle onto the shared waiting state, given to the
@@ -106,6 +125,13 @@ pub struct MonitorSnapshot {
     /// Worktree paths with a live embedded session — a shell, and any agent CLI
     /// inside it, still alive whether attached or left running in the background.
     pub live: HashSet<PathBuf>,
+    /// The CPU / memory each live session is using, keyed by worktree path, from
+    /// the watcher's last resource sample. A session with no entry (not yet
+    /// sampled, or not live) shows no figure.
+    pub resources: HashMap<PathBuf, ResourceUsage>,
+    /// The workspace total across every live session's process tree, from the
+    /// last sample — idle (zero) while nothing is live, so the sidebar omits it.
+    pub resource_total: ResourceUsage,
 }
 
 impl MonitorHandle {
@@ -128,6 +154,7 @@ impl MonitorHandle {
                 Watched {
                     bell: Arc::new(AtomicU64::new(0)),
                     alive: vec![Arc::new(AtomicBool::new(true))],
+                    roots: Vec::new(),
                     label: String::new(),
                 },
             );
@@ -174,6 +201,8 @@ impl MonitorHandle {
             waiting: shared.monitor.waiting().clone(),
             done: shared.monitor.done().clone(),
             live,
+            resources: shared.resources.clone(),
+            resource_total: shared.resource_total,
         }
     }
 
@@ -260,6 +289,7 @@ impl TerminalPool {
             Arc::clone(&shared),
             Arc::clone(&stop),
             notifications_enabled,
+            Box::new(SysinfoSampler::new()),
         );
         Self {
             sessions: HashMap::new(),
@@ -515,9 +545,14 @@ impl TerminalPool {
                 .or_else(|| sp.panes.first())
                 .map(|p| p.pty.bell_handle())?;
             let alive = sp.panes.iter().map(|p| p.pty.alive_handle()).collect();
+            // The shell pid of every pane — the roots the resource sampler totals
+            // each session's process tree from. A pane already reaped reports
+            // none and is simply left out.
+            let roots = sp.panes.iter().filter_map(|p| p.pty.process_id()).collect();
             Some(Watched {
                 bell,
                 alive,
+                roots,
                 label: label.to_string(),
             })
         });
@@ -676,10 +711,14 @@ fn spawn_watcher(
     shared: Arc<Mutex<Shared>>,
     stop: Arc<AtomicBool>,
     notifications_enabled: bool,
+    mut sampler: Box<dyn ResourceSampler>,
 ) -> JoinHandle<()> {
     // One reader for the watcher's lifetime so its mtime cache survives across
     // ticks: an unchanged phase file then costs a single `stat`, not a re-read.
     let phase_reader = agent_state_store::PhaseReader::new();
+    // Counts bell ticks so the heavier resource sample runs only every
+    // `RESOURCE_SAMPLE_EVERY`th of them (≈ once a second).
+    let mut tick: u32 = 0;
     std::thread::spawn(move || loop {
         if stop.load(Ordering::SeqCst) {
             break;
@@ -750,6 +789,36 @@ fn spawn_watcher(
         if notifications_enabled {
             for (label, kind) in notices {
                 notify(&label, kind);
+            }
+        }
+
+        // Sample CPU / memory on the slower beat. The shell pids are read under
+        // the lock, then the (heavy) system sample and the pure aggregation run
+        // off-lock, and only the results are written back — so the render loops
+        // contend for the mutex no longer than a bell poll already does. With no
+        // live session the sample is skipped and the figures cleared, so an idle
+        // workspace carries none.
+        tick = tick.wrapping_add(1);
+        if tick.is_multiple_of(RESOURCE_SAMPLE_EVERY) {
+            let roots: Vec<(PathBuf, Vec<u32>)> = match shared.lock() {
+                Ok(shared) => shared
+                    .sessions
+                    .iter()
+                    .filter(|(_, w)| w.any_alive())
+                    .map(|(path, w)| (path.clone(), w.roots.clone()))
+                    .collect(),
+                Err(_) => break,
+            };
+            let (resources, total) = if roots.is_empty() {
+                (HashMap::new(), ResourceUsage::default())
+            } else {
+                let samples = sampler.sample();
+                let (per_root, total) = aggregate_by_root(&samples, &roots);
+                (per_root.into_iter().collect(), total)
+            };
+            if let Ok(mut shared) = shared.lock() {
+                shared.resources = resources;
+                shared.resource_total = total;
             }
         }
     })
