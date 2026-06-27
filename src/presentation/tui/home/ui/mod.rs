@@ -32,6 +32,7 @@ use panes::{left_pane, right_pane_contents};
 pub(super) use panes::attached_tab_at;
 
 use super::state::{HomeState, ModalSize, Mode};
+use crate::domain::resource::ResourceUsage;
 use crate::domain::settings::Sidebar;
 
 /// Shown below the root row when the workspace has no recorded worktrees.
@@ -328,6 +329,45 @@ fn rabbit_mood(mode: Mode) -> widgets::RabbitMood {
     }
 }
 
+/// The workspace-total resource line shown beside the resting mascot's face —
+/// `CPU 23%  MEM 512MB` — dimmed, or `None` when nothing is live (idle), so the
+/// rabbit rests without a number. The labels (`CPU` / `MEM`) are spelled out here,
+/// unlike the cramped per-session rows, because the mascot sits below the list
+/// where there is room.
+fn workspace_total_label(total: ResourceUsage) -> Option<String> {
+    (!total.is_idle()).then(|| {
+        console::style(format!(
+            "CPU {}  MEM {}",
+            total.format_cpu(),
+            total.format_memory()
+        ))
+        .dim()
+        .to_string()
+    })
+}
+
+/// Append the workspace resource `total` to the mascot's face row (its
+/// second-to-last line — ears, **face**, feet), so the figure reads as sitting
+/// beside the rabbit. Skipped when nothing is live, or when the label would not
+/// fit the sidebar beside the art (so the row never overruns `left_w` and pushes
+/// the right pane out of line). `rabbit` is the already-indented mascot block.
+fn append_total_beside_mascot(rabbit: &mut [String], total: ResourceUsage, left_w: usize) {
+    let Some(label) = workspace_total_label(total) else {
+        return;
+    };
+    // The face is the row above the feet; a two-row rail chibi has no distinct
+    // face row, so guard the index.
+    if rabbit.len() < 3 {
+        return;
+    }
+    let face = rabbit.len() - 2;
+    let needed =
+        console::measure_text_width(&rabbit[face]) + 2 + console::measure_text_width(&label);
+    if needed <= left_w {
+        rabbit[face].push_str(&format!("  {label}"));
+    }
+}
+
 /// Builds the full home-screen frame for a raw terminal size.
 pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> Vec<String> {
     // The quit-confirmation modal, when open, overlays everything else.
@@ -496,6 +536,7 @@ fn left_column(
         state.running_paths(),
         state.waiting_paths(),
         state.done_paths(),
+        state.resource_usages(),
         left_w,
         body_rows,
         // In 切替 the keyboard is on the list: fade the rows the cursor is not on.
@@ -596,10 +637,16 @@ fn place_mascot(
         }
         _ => return None,
     };
-    let rabbit: Vec<String> = mascot
+    let mut rabbit: Vec<String> = mascot
         .into_iter()
         .map(|row| format!("{}{row}", " ".repeat(RABBIT_INDENT)))
         .collect();
+    // The workspace CPU / memory total rests beside the full mascot's face; the
+    // rail chibi is too small (and the reaction art has no settled face), so they
+    // carry none — `append_total_beside_mascot` no-ops on a block under three rows.
+    if sidebar == Sidebar::Full {
+        append_total_beside_mascot(&mut rabbit, state.resource_total(), left_w);
+    }
     // Reserve a blank row above the art and one below it.
     let reserved = rabbit.len() + 2;
     if body_rows >= reserved && column.len() <= body_rows - reserved {

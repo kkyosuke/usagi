@@ -2,7 +2,7 @@
 //! pane (a switch preview, the focus menu/prompt, or the embedded terminal).
 //! All functions take plain data and return styled lines.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use chrono::{DateTime, Duration, Utc};
@@ -19,6 +19,7 @@ use super::{
     EMPTY_MESSAGE, HINT_INDENT, HINT_MAX, LOCAL_ICON, NAME_PREFIX, NEW_ICON, NOTE_ICON,
     PUSHED_ICON, RAIL_WIDTH, ROOT_DETAIL, STATUS_COL, SYNCED_ICON, TERMINAL_STARTING,
 };
+use crate::domain::resource::ResourceUsage;
 use crate::domain::settings::{AgentCli, SessionActionUi, Sidebar};
 use crate::domain::workspace_state::{AheadBehind, BranchStatus, DiffStat, WorktreeState};
 use crate::presentation::tui::markdown::{LineStyle, MarkdownLine, Rgb, Span, SpanStyle};
@@ -198,6 +199,25 @@ fn name_cell(text: &str, width: usize, emphasised: bool) -> String {
 fn detail_line(gutter: &str, detail: String) -> String {
     let indent = " ".repeat(NAME_PREFIX - 1);
     format!("{gutter}{indent}{detail}")
+}
+
+/// Builds a live session's **third** line — the CPU / memory its process tree is
+/// using — indented under the name like the detail line, with the row's `gutter`
+/// (so the active accent bar runs down it too). Spelled out as `CPU 8%  MEM 120MB`
+/// in dim text and clipped to the cell. Only live sessions get this row (the
+/// caller passes a usage only when one was sampled), so an idle session stays two
+/// lines and the list spends the extra row only where there is something to show.
+/// The line-2 cluster ([`detail_content`]) stays as it is — this carries the
+/// growing resource detail rather than crowding the already-packed detail line.
+fn resource_line(
+    usage: ResourceUsage,
+    detail_width: usize,
+    active: bool,
+    in_switch: bool,
+) -> String {
+    let text = format!("CPU {}  MEM {}", usage.format_cpu(), usage.format_memory());
+    let detail = style(clip_to_width(&text, detail_width)).dim().to_string();
+    detail_line(&gutter_cell(false, active, in_switch), detail)
 }
 
 /// The line-1 cell between the session name and the right-edge git status: a
@@ -703,6 +723,7 @@ pub(super) fn left_pane(
     running: &HashSet<PathBuf>,
     waiting: &HashSet<PathBuf>,
     done: &HashSet<PathBuf>,
+    resources: &HashMap<PathBuf, ResourceUsage>,
     left_w: usize,
     rows: usize,
     in_switch: bool,
@@ -710,6 +731,8 @@ pub(super) fn left_pane(
     now: DateTime<Utc>,
 ) -> Vec<String> {
     if sidebar == Sidebar::Rail {
+        // The 5-column rail has no room for a CPU / memory figure, so the rail
+        // shows only the agent glyph; the resource line belongs to the full list.
         return rail_pane(list, live, running, waiting, done, rows, in_switch);
     }
     // Line 1: prefix + name + the (now-blank) active-marker cell + a space + the
@@ -801,12 +824,22 @@ pub(super) fn left_pane(
                 waiting.contains(&w.path),
                 done.contains(&w.path),
             );
+            // A live session that has been sampled gets a third line spelling out
+            // its CPU / memory; idle sessions stay two lines, so the list spends the
+            // extra row only where there is something to show.
+            let mut resource = resources.get(&w.path).map(|usage| {
+                resource_line(*usage, detail_width, row == list.active_index(), in_switch)
+            });
             if in_switch && !selected {
                 top = dim_row(&top);
                 detail = dim_row(&detail);
+                resource = resource.as_deref().map(dim_row);
             }
             lines.push(top);
             lines.push(detail);
+            if let Some(resource) = resource {
+                lines.push(resource);
+            }
         }
     }
     lines.truncate(rows);

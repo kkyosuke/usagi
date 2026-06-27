@@ -13,6 +13,8 @@
 # 実 IO そのもの」だけを持つ層に限定する:
 #   - src/main\.rs            : バイナリの合成ルート（clap ディスパッチと実 IO の注入）。
 #   - infrastructure/pty\.rs  : 擬似端末・スレッドの実 IO。
+#   - infrastructure/resource\.rs : `sysinfo` による実プロセスの CPU/メモリ計測 IO。
+#       集計・整形の純ロジックは domain/resource.rs に切り出して計測対象に含めてある。
 #   - infrastructure/release\.rs : `git ls-remote` のネットワーク IO とタイムアウト監視。
 #   - tui/io/term_reader\.rs  : 実端末からのキー入力（live TTY が必要）。
 #   - tui/app/mod\.rs / tui/home/mod\.rs / home/terminal/pane\.rs / home/terminal/pool\.rs
@@ -23,7 +25,7 @@
 #       別モジュールへ切り出して計測対象に含めてあり、ここに残るのは実 IO の束ねだけ。
 # これら以外の薄いラッパ（hop/run/mcp/llm_mcp/agent_phase/clean、splash/gallery/
 # welcome/new、io/echo）は依存を注入してテスト可能にし、計測対象に含めている。
-export COVERAGE_IGNORE='(src/main\.rs|infrastructure/pty\.rs|infrastructure/release\.rs|tui/io/term_reader\.rs|tui/app/mod\.rs|tui/home/mod\.rs|tui/home/terminal/pane\.rs|tui/home/terminal/pool\.rs|tui/open/mod\.rs|tui/config/mod\.rs|tui/config/provisioning\.rs)'
+export COVERAGE_IGNORE='(src/main\.rs|infrastructure/pty\.rs|infrastructure/resource\.rs|infrastructure/release\.rs|tui/io/term_reader\.rs|tui/app/mod\.rs|tui/home/mod\.rs|tui/home/terminal/pane\.rs|tui/home/terminal/pool\.rs|tui/open/mod\.rs|tui/config/mod\.rs|tui/config/provisioning\.rs)'
 # 100% を要求するカバレッジ指標。
 export COVERAGE_MIN=100
 

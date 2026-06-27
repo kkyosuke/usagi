@@ -644,6 +644,7 @@ fn left_pane_marks_the_root_row_when_it_carries_a_note() {
         &HashSet::new(),
         &HashSet::new(),
         &HashSet::new(),
+        &HashMap::new(),
         80,
         6,
         false,
@@ -662,6 +663,7 @@ fn left_pane_renders_the_root_entry_then_the_empty_message() {
         &HashSet::new(),
         &HashSet::new(),
         &HashSet::new(),
+        &HashMap::new(),
         80,
         6,
         false,
@@ -693,6 +695,7 @@ fn left_pane_shows_each_sessions_relative_update_time_on_the_detail_line() {
         &HashSet::new(),
         &HashSet::new(),
         &HashSet::new(),
+        &HashMap::new(),
         30,
         5,
         false,
@@ -721,6 +724,7 @@ fn left_pane_shows_the_ahead_behind_marker_on_the_detail_line() {
         &HashSet::new(),
         &HashSet::new(),
         &HashSet::new(),
+        &HashMap::new(),
         40,
         5,
         false,
@@ -773,6 +777,7 @@ fn left_pane_lines_the_detail_fields_up_across_sessions_of_different_sizes() {
         &HashSet::new(),
         &HashSet::new(),
         &HashSet::new(),
+        &HashMap::new(),
         80,
         8,
         false,
@@ -810,6 +815,7 @@ fn left_pane_renders_the_root_entry_then_one_entry_per_worktree() {
         &HashSet::new(),
         &HashSet::new(),
         &HashSet::new(),
+        &HashMap::new(),
         30,
         7,
         false,
@@ -842,6 +848,7 @@ fn left_pane_stops_building_rows_once_the_pane_is_full() {
         &HashSet::new(),
         &HashSet::new(),
         &HashSet::new(),
+        &HashMap::new(),
         30,
         5,
         false,
@@ -875,6 +882,7 @@ fn rail_pane_stops_building_rows_once_the_rail_is_full() {
         &HashSet::new(),
         &HashSet::new(),
         &HashSet::new(),
+        &HashMap::new(),
         8,
         5,
         false,
@@ -897,6 +905,7 @@ fn left_pane_marks_the_agent_state_through_its_lifecycle() {
         &empty,
         &empty,
         &empty,
+        &HashMap::new(),
         30,
         6,
         false,
@@ -912,6 +921,7 @@ fn left_pane_marks_the_agent_state_through_its_lifecycle() {
         &path,
         &empty,
         &empty,
+        &HashMap::new(),
         30,
         6,
         false,
@@ -927,6 +937,7 @@ fn left_pane_marks_the_agent_state_through_its_lifecycle() {
         &path,
         &path,
         &empty,
+        &HashMap::new(),
         30,
         6,
         false,
@@ -942,6 +953,7 @@ fn left_pane_marks_the_agent_state_through_its_lifecycle() {
         &empty,
         &empty,
         &empty,
+        &HashMap::new(),
         30,
         6,
         false,
@@ -952,6 +964,73 @@ fn left_pane_marks_the_agent_state_through_its_lifecycle() {
     assert!(!absent[4].contains('◆'));
     assert!(!absent[4].contains('☾'));
     assert!(absent[3].contains("local"));
+}
+
+#[test]
+fn left_pane_adds_a_resource_line_only_for_a_sampled_live_session() {
+    let list = list_with(vec![worktree(Some("feature"), false, BranchStatus::Local)]);
+    let path: HashSet<PathBuf> = [PathBuf::from("/repo/wt")].into_iter().collect();
+    let empty = HashSet::new();
+    let resources: HashMap<PathBuf, ResourceUsage> = [(
+        PathBuf::from("/repo/wt"),
+        ResourceUsage {
+            cpu_percent: 12,
+            memory_bytes: 256 * 1024 * 1024,
+        },
+    )]
+    .into_iter()
+    .collect();
+
+    // Rows: 0/1 root, 2 divider, 3 identity, 4 agent detail, 5 the resource line.
+    let with_usage = left_pane(
+        &list,
+        &path,
+        &path,
+        &empty,
+        &empty,
+        &resources,
+        40,
+        8,
+        false,
+        Sidebar::Full,
+        Utc::now(),
+    );
+    assert!(with_usage[4].contains("running"));
+    assert!(console::strip_ansi_codes(&with_usage[5]).contains("CPU 12%  MEM 256MB"));
+
+    // With no sample the session stays two lines — there is no resource row.
+    let without = left_pane(
+        &list,
+        &path,
+        &path,
+        &empty,
+        &empty,
+        &HashMap::new(),
+        40,
+        8,
+        false,
+        Sidebar::Full,
+        Utc::now(),
+    );
+    assert!(without[4].contains("running"));
+    assert!(without.get(5).is_none_or(|l| !l.contains("CPU")));
+
+    // In 切替 the unselected rows (the cursor rests on the root) are dimmed — the
+    // resource line is faded along with the rest of its entry, but its text stays.
+    let in_switch = left_pane(
+        &list,
+        &path,
+        &path,
+        &empty,
+        &empty,
+        &resources,
+        40,
+        8,
+        true,
+        Sidebar::Full,
+        Utc::now(),
+    );
+    assert!(console::strip_ansi_codes(&in_switch[5]).contains("CPU 12%  MEM 256MB"));
 }
 
 #[test]
@@ -967,6 +1046,7 @@ fn left_pane_is_trimmed_to_available_rows() {
         &HashSet::new(),
         &HashSet::new(),
         &HashSet::new(),
+        &HashMap::new(),
         30,
         4,
         false,
@@ -993,6 +1073,7 @@ fn left_pane_marks_the_active_worktree_with_a_gutter_bar() {
         &HashSet::new(),
         &HashSet::new(),
         &HashSet::new(),
+        &HashMap::new(),
         30,
         7,
         false,
@@ -1020,6 +1101,7 @@ fn rail_collapses_each_entry_to_two_rows_without_names_or_numbers() {
         &empty,
         &empty,
         &empty,
+        &HashMap::new(),
         RAIL_WIDTH,
         8,
         false,
@@ -1068,6 +1150,7 @@ fn rail_keeps_the_same_row_count_as_the_full_sidebar() {
             &empty,
             &empty,
             &empty,
+            &HashMap::new(),
             30,
             20,
             false,
@@ -1086,6 +1169,7 @@ fn rail_keeps_the_same_row_count_as_the_full_sidebar() {
             &empty,
             &empty,
             &empty,
+            &HashMap::new(),
             30,
             20,
             false,
@@ -1114,6 +1198,7 @@ fn rail_shows_the_active_bar_down_both_rows_and_the_agent_glyph_on_row_two() {
         &path,
         &empty,
         &empty,
+        &HashMap::new(),
         RAIL_WIDTH,
         8,
         false,
@@ -1145,6 +1230,7 @@ fn rail_shows_each_agent_state_glyph_on_the_detail_row() {
             running,
             waiting,
             done,
+            &HashMap::new(),
             RAIL_WIDTH,
             8,
             false,
@@ -1173,6 +1259,7 @@ fn rail_sidebar_marks_the_switch_cursor() {
             &empty,
             &empty,
             &empty,
+            &HashMap::new(),
             RAIL_WIDTH,
             8,
             true,
@@ -1216,6 +1303,7 @@ fn left_pane_fades_every_row_but_the_cursor_when_asked() {
         &HashSet::new(),
         &HashSet::new(),
         &HashSet::new(),
+        &HashMap::new(),
         30,
         6,
         true,

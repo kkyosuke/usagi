@@ -12,13 +12,14 @@
 //! sibling modules: the worktree [`list`], the [`mode`] enums, the output
 //! [`log`] line model, and the transient [`modal`] state.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 
 use crate::domain::issue::Issue;
+use crate::domain::resource::ResourceUsage;
 use crate::domain::settings::{AgentCli, KeyScheme, SessionActionUi, Sidebar};
 use crate::domain::version::Version;
 use crate::domain::workspace_state::{SessionRecord, WorktreeState};
@@ -1367,6 +1368,20 @@ impl HomeState {
     /// renderer.
     pub fn done_paths(&self) -> &HashSet<PathBuf> {
         &self.badges.done
+    }
+
+    /// The CPU / memory each live session is using, keyed by worktree path, from
+    /// the terminal monitor's last resource sample — the sidebar shows a figure
+    /// only for the rows that have one (the live sessions).
+    pub fn resource_usages(&self) -> &HashMap<PathBuf, ResourceUsage> {
+        &self.badges.resources
+    }
+
+    /// The workspace total CPU / memory across every live session, shown beside
+    /// the resting mascot. Idle (zero) while nothing is live, so the mascot rests
+    /// without a number.
+    pub fn resource_total(&self) -> ResourceUsage {
+        self.badges.resource_total
     }
 
     /// Record the latest released version found by the background update check,
