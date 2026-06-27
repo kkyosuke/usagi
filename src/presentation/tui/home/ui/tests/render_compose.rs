@@ -134,7 +134,9 @@ fn workspace_total_label_spells_out_cpu_and_memory_or_is_absent_when_idle() {
         memory_bytes: 512 * 1024 * 1024,
     })
     .unwrap();
-    assert_eq!(console::strip_ansi_codes(&label), "CPU 23%  MEM 512MB");
+    // The CPU figure is left-padded to a fixed width, so MEM lands in the same
+    // column whatever the percentage's digit count.
+    assert_eq!(console::strip_ansi_codes(&label), "CPU 23%   MEM 512MB");
 }
 
 #[test]
@@ -153,7 +155,7 @@ fn append_total_beside_mascot_writes_on_the_face_row_when_it_fits() {
     };
     let mut rabbit = rabbit_rows();
     append_total_beside_mascot(&mut rabbit, total, 40);
-    assert!(console::strip_ansi_codes(&rabbit[1]).contains("CPU 23%  MEM 512MB"));
+    assert!(console::strip_ansi_codes(&rabbit[1]).contains("CPU 23%   MEM 512MB"));
     // Only the face row gains it; the ears and feet are untouched.
     assert!(!rabbit[0].contains("CPU"));
     assert!(!rabbit[2].contains("CPU"));
@@ -192,7 +194,7 @@ fn render_frame_rests_the_workspace_total_beside_the_mascot() {
     // A wide terminal gives the sidebar room for the art plus the spelled-out
     // total beside it (a narrow one omits it — see the fit guard's own test).
     let joined = console::strip_ansi_codes(&render_frame(24, 120, &state).join("\n")).into_owned();
-    assert!(joined.contains("CPU 23%  MEM 512MB"));
+    assert!(joined.contains("CPU 23%   MEM 512MB"));
 }
 
 #[test]
