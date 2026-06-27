@@ -544,8 +544,9 @@ fn graph_renders_a_tree_with_a_progress_footer() {
     create(repo, "child", vec![1]);
 
     let lines = execute(repo, IssueCommand::Graph).unwrap();
-    assert!(lines[0].contains("#1 root"));
-    assert!(lines.iter().any(|l| l.contains("└─ #2 child")));
+    // root is ready (○); child is blocked on the unfinished root (⊘).
+    assert!(lines[0].contains("○ #1 root"));
+    assert!(lines.iter().any(|l| l.contains("└─ ⊘ #2 child")));
     assert!(lines.iter().any(|l| l.contains("2 issues")));
     assert!(lines.iter().any(|l| l.contains("ready")));
 }

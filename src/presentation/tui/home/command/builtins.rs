@@ -533,6 +533,21 @@ fn issue_list(ctx: &CommandContext) -> CommandResult {
     CommandResult::modal("Issues", lines)
 }
 
+/// Colour a rendered dependency-tree line by the readiness glyph it leads with:
+/// completed issues (`✓`) recede in dim so unfinished work stands out, and
+/// blocked issues (`⊘`) are flagged in red. Ready issues (`○`) stay plain.
+/// Colours collapse to plain text when the output stream is not a terminal.
+fn style_graph_line(text: String) -> String {
+    use console::style;
+    if text.contains('✓') {
+        style(text).dim().to_string()
+    } else if text.contains('⊘') {
+        style(text).red().to_string()
+    } else {
+        text
+    }
+}
+
 /// `issue graph`: the dependency forest with a progress footer.
 fn issue_graph(ctx: &CommandContext) -> CommandResult {
     let listed = annotate_all(ctx.issues);
@@ -541,6 +556,7 @@ fn issue_graph(ctx: &CommandContext) -> CommandResult {
     }
     let mut lines: Vec<LogLine> = dependency_tree(&listed)
         .into_iter()
+        .map(style_graph_line)
         .map(LogLine::output)
         .collect();
     lines.push(LogLine::output(String::new()));

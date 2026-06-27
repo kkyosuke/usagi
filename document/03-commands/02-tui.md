@@ -63,7 +63,7 @@
 | サブコマンド | 動作 |
 |---|---|
 | `issue` / `issue list`（別名 `ls`） | 全 issue を ready/blocked/done 付きで一覧し、末尾に進捗サマリ（件数・完了率・ready 数・バー）を表示 |
-| `issue graph`（別名 `tree`） | `dependson` の依存ツリーを進捗サマリ付きで表示 |
+| `issue graph`（別名 `tree`） | `dependson` の依存ツリーを進捗サマリ付きで表示。各ノードの先頭に状態グリフ（`✓` done / `○` ready / `⊘` blocked）を付け、完了行は淡色（dim）、ブロック行は赤で描いて未完了の作業を際立たせる |
 | `issue gantt`（別名 `chart`） | 各 issue の `created_at`→`updated_at` を実日付軸のガントチャートで表示。バーの字形でステータス（`█` done / `▒` in-progress / `░` todo）を、各行末の `←依存`（`!` は未完了）で依存関係を表す |
 | `issue show <番号>`（別名 `view`） | 1 件の frontmatter + 本文を表示 |
 
