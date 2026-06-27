@@ -187,17 +187,47 @@ pub fn remove_worktree(repo: &Path, worktree: &Path, force: bool) -> Result<()> 
     // git flatly refuses to remove a worktree that contains submodules unless
     // `--force` is given — *regardless of whether it is clean* (`fatal: working
     // trees containing submodules cannot be moved or removed`). That refusal is
-    // structural, not a dirtiness guard, so when it is the only obstacle we
+    // structural, not a dirtiness guard, so when it is the only obstacle we may
     // retry forced (a forced call no longer matches this branch, so the retry
-    // resolves through the success return or the `bail!` below). Uncommitted
-    // work stays protected because the caller already vetted dirtiness via
-    // `worktree_status` (whose `git status` counts a modified submodule as
-    // dirty) before deciding not to force.
+    // resolves through the success return or the `bail!` below).
+    //
+    // But `--force` *would* discard uncommitted submodule work, and the caller's
+    // dirty gate cannot be trusted to have caught it: that gate uses plain
+    // `git status`, which honours the user's `submodule.<name>.ignore` /
+    // `diff.ignoreSubmodules` config and so can report a worktree clean while a
+    // submodule holds uncommitted changes. So before escalating, re-verify
+    // cleanliness in a way that ignores that config; only force when the worktree
+    // (and every submodule) is provably clean, otherwise refuse so the work is
+    // never silently destroyed.
     if !force && stderr.contains("containing submodules") {
-        return remove_worktree(repo, worktree, true);
+        if worktree_clean_ignoring_submodule_config(worktree) {
+            return remove_worktree(repo, worktree, true);
+        }
+        bail!(
+            "refusing to remove worktree {}: it or one of its submodules has \
+             uncommitted changes that a forced removal would discard",
+            worktree.display()
+        );
     }
 
     bail!("git worktree remove failed: {}", stderr.trim());
+}
+
+/// Whether the worktree at `path` — and every submodule under it — has **no**
+/// uncommitted change, checked so the answer does not depend on the user's
+/// `submodule.<name>.ignore` / `diff.ignoreSubmodules` config.
+///
+/// `git status --porcelain --ignore-submodules=none` forces submodule changes to
+/// be reported regardless of that config, so empty output means provably clean.
+/// Used as the safety gate before a destructive `--force` worktree removal: a
+/// status that cannot be read at all is treated as *not* provably clean, so the
+/// caller refuses to force rather than risk discarding work.
+fn worktree_clean_ignoring_submodule_config(path: &Path) -> bool {
+    git_capture(path, &["status", "--porcelain", "--ignore-submodules=none"])
+        .ok()
+        .flatten()
+        .map(|out| out.is_empty())
+        .unwrap_or(false)
 }
 
 /// Run a single `git worktree remove [--force] <worktree>`, returning `Ok(())`

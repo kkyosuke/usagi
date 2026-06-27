@@ -1140,6 +1140,46 @@ mod tests {
     }
 
     #[test]
+    fn discard_session_logs_a_failure_to_drop_an_orphaned_branch() {
+        // When the session branch cannot be dropped during teardown, the failure
+        // must not vanish: it is the "session name permanently unusable" state
+        // (the branch lingers and blocks recreating the session). Reproduce it
+        // with a *locked* worktree, which prune cannot clear, so the branch stays
+        // checked out and `git branch -D` refuses — then assert the failure is
+        // routed to the daily error log.
+        let _guard = crate::test_support::process_env_guard();
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var(crate::infrastructure::storage::DATA_DIR_ENV, home.path());
+
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        let created = create(root.path(), "wip").unwrap();
+
+        // Lock the worktree so the post-removal prune cannot clear its
+        // registration; the branch then remains checked out there.
+        assert!(git_cmd(root.path())
+            .args(["worktree", "lock"])
+            .arg(&created.root)
+            .status()
+            .unwrap()
+            .success());
+
+        let repo_worktrees = reconcile::list_repo_worktrees(root.path()).unwrap();
+        // Forced teardown is best-effort and still reports success...
+        reconcile::discard_session(&created.root, "wip", &repo_worktrees, true).unwrap();
+
+        // ...but the orphaned-branch failure was recorded to the daily log.
+        let logged: String = fs::read_dir(home.path().join("logs"))
+            .unwrap()
+            .map(|entry| fs::read_to_string(entry.unwrap().path()).unwrap())
+            .collect();
+        assert!(logged.contains("orphaned"), "log was: {logged}");
+        assert!(logged.contains("wip"), "log was: {logged}");
+
+        std::env::remove_var(crate::infrastructure::storage::DATA_DIR_ENV);
+    }
+
+    #[test]
     fn remove_clears_the_recorded_agent_phase() {
         // Point the data dir at a throwaway home so the phase file is isolated.
         let _guard = crate::test_support::process_env_guard();

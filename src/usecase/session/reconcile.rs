@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 
 use super::tree;
+use crate::infrastructure::error_log::ErrorLog;
 use crate::infrastructure::git;
 use crate::infrastructure::repo_paths::STATE_DIR;
 use crate::infrastructure::workspace_store::WorkspaceStore;
@@ -171,7 +172,18 @@ pub(super) fn discard_session(
         // branch) with no record left to `remove` — the "name permanently
         // unusable" failure this guards against.
         let _ = git::prune_worktrees(repo);
-        let _ = git::delete_branch(repo, branch);
+        // Dropping the branch is best-effort (a never-built session has none), but
+        // a real failure here *is* that "name permanently unusable" state — the
+        // branch lingers, blocking recreation, with no record left to retry.
+        // Swallowing it silently would make that undiagnosable, so route it to the
+        // daily log (the session teardown itself still succeeds either way).
+        if let Err(e) = git::delete_branch(repo, branch) {
+            ErrorLog::record(&format!(
+                "failed to delete session branch \"{branch}\" in {} during teardown; \
+                 it is now orphaned and may block recreating this session: {e}",
+                repo.display()
+            ));
+        }
     }
     Ok(())
 }

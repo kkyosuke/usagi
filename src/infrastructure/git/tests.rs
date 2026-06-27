@@ -425,6 +425,66 @@ fn remove_worktree_forces_through_a_clean_worktree_containing_submodules() {
 }
 
 #[test]
+fn remove_worktree_refuses_to_force_when_a_submodule_is_dirty_despite_ignore_config() {
+    // The dangerous case the submodule force-escalation must not hit: a worktree
+    // whose *submodule* holds uncommitted work, but whose `submodule.<name>.ignore`
+    // config hides that from plain `git status`. A non-forced removal must refuse
+    // rather than silently `--force` away the submodule changes.
+    let tmp = tempfile::tempdir().unwrap();
+
+    let sub_src = tmp.path().join("sub-src");
+    std::fs::create_dir_all(&sub_src).unwrap();
+    init_repo(&sub_src);
+
+    let sup = tmp.path().join("super");
+    std::fs::create_dir_all(&sup).unwrap();
+    init_repo(&sup);
+    run(
+        &sup,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            sub_src.to_str().unwrap(),
+            "sub",
+        ],
+    );
+    run(&sup, &["commit", "-qm", "add submodule"]);
+
+    let wt = tmp.path().join("wt");
+    add_worktree(&sup, &wt, "feat-x", None).unwrap();
+    run(
+        &wt,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "update",
+            "--init",
+        ],
+    );
+
+    // Dirty a tracked file *inside* the submodule, then tell git to ignore the
+    // submodule's dirtiness in plain status — exactly the config that blinds the
+    // upstream dirty gate.
+    std::fs::write(wt.join("sub").join("f"), "uncommitted submodule work").unwrap();
+    run(&wt, &["config", "submodule.sub.ignore", "all"]);
+    // Plain status now reports the worktree clean, hiding the submodule change...
+    assert!(!worktree_status(&wt).unwrap().dirty);
+
+    // ...but the removal's config-independent re-check still sees it, so a
+    // non-forced removal refuses instead of force-discarding the work.
+    let err = remove_worktree(&sup, &wt, false).unwrap_err();
+    assert!(err.to_string().contains("uncommitted changes"), "{err}");
+    assert!(wt.exists());
+
+    // An explicit force still removes it (the caller has opted into the loss).
+    remove_worktree(&sup, &wt, true).unwrap();
+    assert!(!wt.exists());
+}
+
+#[test]
 fn prune_worktrees_clears_a_dangling_registration() {
     let dir = tempfile::tempdir().unwrap();
     init_repo(dir.path());
