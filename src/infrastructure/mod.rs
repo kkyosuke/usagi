@@ -17,6 +17,7 @@ pub mod release;
 pub mod repo_paths;
 pub mod resume_focus_store;
 pub mod session_monitor;
+pub mod skills;
 pub mod storage;
 pub mod store_lock;
 pub mod terminal;

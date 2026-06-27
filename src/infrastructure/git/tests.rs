@@ -345,6 +345,51 @@ fn worktree_status_reports_no_branch_or_upstream_when_absent() {
 }
 
 #[test]
+fn ensure_excluded_hides_an_untracked_path_from_status() {
+    let dir = tempfile::tempdir().unwrap();
+    init_repo(dir.path());
+    // An untracked file makes the worktree dirty...
+    std::fs::write(dir.path().join("artifact"), "x").unwrap();
+    assert!(worktree_status(dir.path()).unwrap().dirty);
+
+    // ...but once excluded it no longer counts as a change.
+    ensure_excluded(dir.path(), "/artifact").unwrap();
+    assert!(!worktree_status(dir.path()).unwrap().dirty);
+
+    // The pattern landed in the local exclude file, not a tracked .gitignore.
+    let exclude = std::fs::read_to_string(dir.path().join(".git/info/exclude")).unwrap();
+    assert!(exclude.lines().any(|l| l == "/artifact"));
+    assert!(!dir.path().join(".gitignore").exists());
+}
+
+#[test]
+fn ensure_excluded_is_idempotent_and_preserves_existing_content() {
+    let dir = tempfile::tempdir().unwrap();
+    init_repo(dir.path());
+    let exclude = dir.path().join(".git/info/exclude");
+    // Seed the exclude file with prior content that has no trailing newline, so
+    // the appended pattern starts on its own line.
+    std::fs::write(&exclude, "# existing\n*.tmp").unwrap();
+
+    ensure_excluded(dir.path(), "/.claude/skills").unwrap();
+    // A second call adds nothing further.
+    ensure_excluded(dir.path(), "/.claude/skills").unwrap();
+
+    let content = std::fs::read_to_string(&exclude).unwrap();
+    assert!(content.contains("*.tmp"));
+    assert_eq!(
+        content.lines().filter(|l| *l == "/.claude/skills").count(),
+        1
+    );
+}
+
+#[test]
+fn ensure_excluded_errors_outside_a_git_worktree() {
+    let plain = tempfile::tempdir().unwrap();
+    assert!(ensure_excluded(plain.path(), "/x").is_err());
+}
+
+#[test]
 fn remove_worktree_deletes_a_clean_one_and_needs_force_when_dirty() {
     let dir = tempfile::tempdir().unwrap();
     init_repo(dir.path());

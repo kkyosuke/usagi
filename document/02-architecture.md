@@ -98,6 +98,7 @@ src/
 │   ├── pty_exit.rs             # シェル/エージェントの終了ステータスをエラーログ文へ変換する純粋ロジック（pty.rs のテスト可能な相棒）
 │   ├── release.rs              # git ls-remote --tags でリリースタグを取得（薄い IO ラッパ）
 │   ├── session_monitor.rs      # 入力待ち判定の純粋ロジック（phase 優先・ベル基準値・待ち集合・アタッチ）
+│   ├── skills.rs               # バイナリ同梱スキル（assets/skills/）を ~/.usagi/skills/ へ展開（materialize）し worktree の .claude/skills/<name> をスキルごとに symlink（link、プロジェクト独自スキルと共存）。配布の仕組みは 04-orchestration が正本
 │   ├── worktree_keyed_store.rs # worktree → ファイル名（canonical path のハッシュ）導出の正本。agent_state_store / agent_prompt_store が共用
 │   ├── agent_state_store.rs    # worktree 別の Agent phase の記録/読み出し・フック JSON のパース（~/.usagi/agent-state/。遷移ポリシーは usecase/agent_phase）
 │   ├── agent_prompt_store.rs   # worktree 別に session_prompt のプロンプトをキュー/取り出し（~/.usagi/agent-prompts/）
