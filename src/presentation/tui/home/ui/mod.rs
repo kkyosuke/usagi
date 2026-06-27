@@ -446,9 +446,20 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
     let mut left_rows = left.into_iter();
     let mut right_rows = right.into_iter();
     for _ in 0..body_rows {
-        let mut line = pad_to_width(left_rows.next().unwrap_or_default(), left_w);
+        // Clip each cell to its pane width so the composed row never overruns the
+        // terminal. The left row's fixed cells (gutter + status + badges) emit a
+        // minimum width even when the name cell shrinks to nothing, and some
+        // right-pane content (a menu line, a preview header) isn't pre-sized to a
+        // very narrow pane — either can otherwise shove the divider (and the rest
+        // of the row) past the right edge, a layout shift the fixed-column design
+        // forbids. The left cell is clipped then padded so the `│` divider stays
+        // pinned to column `left_w`; the right cell is clipped to `right_w`. At
+        // normal widths both already fit, so these clips are no-ops.
+        let cell = left_rows.next().unwrap_or_default();
+        let mut line = pad_to_width(clip_to_width(&cell, left_w), left_w);
         line.push_str(SEP);
-        line.push_str(&right_rows.next().unwrap_or_default());
+        let right_cell = right_rows.next().unwrap_or_default();
+        line.push_str(&clip_to_width(&right_cell, right_w));
         lines.push(line);
     }
 

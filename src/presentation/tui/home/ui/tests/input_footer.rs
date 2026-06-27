@@ -171,15 +171,17 @@ fn input_line_differs_by_mode() {
 fn footer_line_differs_by_mode() {
     let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
     // The default mode is 切替; its footer advertises the close-tab key and the
-    // `:` palette.
-    let switch = footer_line(120, &state);
+    // `:` palette. Measured at a width wide enough for the full footer — at a
+    // narrow width the lowest-priority trailing keys are elided (see
+    // `footer_elides_to_fit_a_narrow_terminal`).
+    let switch = footer_line(200, &state);
     assert!(switch.contains("switch"));
     assert!(switch.contains("x close tab"));
     assert!(switch.contains(": commands"));
     state.enter_focus(1);
     let focus = footer_line(80, &state);
     assert!(focus.contains("session: main"));
-    assert!(footer_line(120, &state).contains(": commands"));
+    assert!(footer_line(200, &state).contains(": commands"));
     state.show_attached();
     // 没入 no longer advertises scroll keys in the footer; by default it names the
     // Ctrl-O prefix sequence.
@@ -222,18 +224,19 @@ fn attached_prefix_footer_flips_to_the_waiting_hint_while_a_leader_is_pending() 
     let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
     state.show_attached();
     // Idle, the footer advertises the leader sequence ("Ctrl-O then: …").
-    assert!(footer_line(80, &state).contains("Ctrl-O then"));
+    assert!(footer_line(200, &state).contains("Ctrl-O then"));
     // Once the leader is pressed the footer flips to the waiting hint, so a
     // Ctrl-O that drew no visible response reads as "waiting" not "ignored", and
-    // names how to back out.
+    // names how to back out (`Esc cancel` is the lowest-priority trailing key, so
+    // it needs a width wide enough to keep the whole footer).
     state.set_prefix_pending(true);
-    let waiting = footer_line(80, &state);
+    let waiting = footer_line(200, &state);
     assert!(!waiting.contains("Ctrl-O then"));
     assert!(waiting.contains("Ctrl-O ▸"));
     assert!(waiting.contains("Esc cancel"));
     // The Alt scheme has no pending state, so the hint never applies there.
     state.set_key_scheme(crate::domain::settings::KeyScheme::Alt);
-    assert!(footer_line(80, &state).contains("Alt:"));
+    assert!(footer_line(200, &state).contains("Alt:"));
 }
 
 #[test]
@@ -258,17 +261,42 @@ fn footer_line_shows_palette_controls_while_open() {
 }
 
 #[test]
+fn footer_elides_to_fit_a_narrow_terminal() {
+    // The switch footer spells out every key and is far wider than an 80-column
+    // terminal; it must be trimmed to fit (never overrun the row), while keeping
+    // the leading mode tag and the highest-priority keys and marking the drop
+    // with `…`.
+    let state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
+    let width = 80;
+    let footer = footer_line(width, &state);
+    assert!(
+        console::measure_text_width(&console::strip_ansi_codes(&footer)) <= width,
+        "footer overruns {width} cols: {footer:?}",
+    );
+    let plain = console::strip_ansi_codes(&footer);
+    // The mode tag and the first keys survive …
+    assert!(plain.contains("[switch]"));
+    assert!(plain.contains("↑↓ session"));
+    // … the low-priority tail is dropped, marked with an ellipsis.
+    assert!(plain.contains('…'));
+    assert!(!plain.contains("Esc back"));
+}
+
+#[test]
 fn switch_footer_advertises_closing_the_note_while_it_shows() {
     // While the highlighted session's note is showing, `Esc` first closes it, so
     // the footer names that instead of the back-out it normally advertises.
     let mut state = switch_state_with_note("todo");
+    // `Esc close note` is the lowest-priority trailing key, so measure where the
+    // full footer fits (narrow widths elide it; the `?` cheat sheet keeps it
+    // discoverable).
     assert!(
-        footer_line(120, &state).contains("Esc close note"),
+        footer_line(200, &state).contains("Esc close note"),
         "the footer offers closing the note"
     );
     // Dismissed, `Esc` backs out again — the footer reverts.
     state.hide_switch_note();
-    let backed = footer_line(120, &state);
+    let backed = footer_line(200, &state);
     assert!(backed.contains("Esc back"));
     assert!(!backed.contains("close note"));
 }

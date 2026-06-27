@@ -218,6 +218,26 @@ fn render_frame_survives_a_short_terminal() {
 }
 
 #[test]
+fn render_frame_clips_body_rows_to_a_narrow_terminal() {
+    // A long session name on a narrow terminal must not push the `│` divider (or
+    // the whole right pane) sideways: every composed row stays within the
+    // terminal width. The fixed-column design forbids this layout shift.
+    let state = state_with(vec![worktree(
+        Some("a-very-long-feature-branch-name-that-overflows"),
+        true,
+        BranchStatus::Local,
+    )]);
+    let width = 24;
+    let frame = render_frame(20, width, &state);
+    for line in &frame {
+        assert!(
+            console::measure_text_width(line) <= width,
+            "row overflows {width} cols: {line:?}",
+        );
+    }
+}
+
+#[test]
 fn render_frame_focus_menu_keeps_its_height() {
     let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
     state.enter_focus(1);
