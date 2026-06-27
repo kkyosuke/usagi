@@ -104,6 +104,17 @@ fn edit_config(storage: &Storage, editor: &dyn Editor) -> Result<Settings> {
 
     editor.edit(&path)?;
 
+    // An editor that *removed* the file (deleted it, or saved by renaming a temp
+    // away and leaving nothing) is a special case the parse-revert below misses:
+    // `load_settings` maps a missing file to `Ok(defaults)`, not `Err`, so the
+    // revert arm would not fire and the previous configuration would be silently
+    // lost (and defaults reported as if saved). Detect the missing file
+    // explicitly and restore the backup to disk.
+    if !path.exists() {
+        fs::write(&path, &backup)?;
+        bail!("the edited configuration file was removed; reverted to the previous version");
+    }
+
     match storage.load_settings() {
         Ok(settings) => Ok(settings),
         Err(error) => {
@@ -304,6 +315,34 @@ mod tests {
         let error = edit_config(&storage, &editor).unwrap_err();
         assert!(error.to_string().contains("invalid"));
         // The previous valid configuration was restored.
+        assert_eq!(storage.load_settings().unwrap().theme, Theme::Dark);
+    }
+
+    #[test]
+    fn edit_config_restores_backup_when_the_editor_removes_the_file() {
+        let (_dir, storage) = temp_storage();
+        storage
+            .save_settings(&Settings {
+                theme: Theme::Dark,
+                ..Default::default()
+            })
+            .unwrap();
+
+        // An editor that deletes the settings file rather than saving it. Without
+        // the missing-file guard, load_settings would return Ok(defaults) and the
+        // previous configuration would be lost; the guard must restore the backup.
+        struct DeletingEditor;
+        impl Editor for DeletingEditor {
+            fn edit(&self, path: &Path) -> Result<()> {
+                fs::remove_file(path)?;
+                Ok(())
+            }
+        }
+
+        let error = edit_config(&storage, &DeletingEditor).unwrap_err();
+        assert!(error.to_string().contains("removed"));
+        // The previous valid configuration is restored on disk, not lost.
+        assert!(storage.settings_path().exists());
         assert_eq!(storage.load_settings().unwrap().theme, Theme::Dark);
     }
 

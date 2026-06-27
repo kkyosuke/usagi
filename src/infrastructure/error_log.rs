@@ -104,7 +104,16 @@ impl ErrorLog {
             .open(&path)
             .context(format!("failed to open log file {}", path.display()))?;
         let body = message.replace('\n', "\n    ");
-        writeln!(file, "[{}] {body}", now.format("%Y-%m-%d %H:%M:%S"))
+        // Build the whole entry (timestamp + body + newline) as one buffer and
+        // emit it in a single `write_all`. `writeln!` on an unbuffered `File`
+        // issues a separate `write` syscall per format fragment, and O_APPEND only
+        // makes each individual `write` atomic — so a concurrent process appending
+        // to the same daily log (the TUI, a `usagi mcp` server, agent-phase hooks
+        // all do) could interleave its fragments inside this entry's line. One
+        // `write_all` keeps each entry on its own line. (Matches `trace_log` /
+        // `history_store`.)
+        let line = format!("[{}] {body}\n", now.format("%Y-%m-%d %H:%M:%S"));
+        file.write_all(line.as_bytes())
             .context(format!("failed to write log file {}", path.display()))?;
         Ok(())
     }
