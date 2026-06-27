@@ -726,6 +726,7 @@ mod config_switch;
 mod ctrl_caret;
 mod focus_menu;
 mod focus_prompt;
+mod mascot_click;
 mod notes;
 mod palette;
 mod quit_modal;
