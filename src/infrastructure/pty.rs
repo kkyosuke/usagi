@@ -107,16 +107,14 @@ pub struct PtySession {
     reader_thread: Option<JoinHandle<()>>,
 }
 
-/// How many lines of scrolled-off output the embedded terminal keeps, so the
-/// user can scroll the pane back over a command's earlier output.
-///
-/// Memory envelope: the pool keeps every pane of every session alive in the
-/// background, and each pane's parser holds up to this many scrollback rows of
-/// `cols` cells. Worst-case resident grid memory is therefore on the order of
-/// `panes × SCROLLBACK_LINES × cols × sizeof(cell)` — bounded (no leak), but it
-/// scales with the number of open panes, so this cap is a deliberate
-/// memory-vs-history trade-off rather than an arbitrary number.
-const SCROLLBACK_LINES: usize = 10_000;
+/// The stack the PTY reader thread is given. The thread only loops over a
+/// blocking `read` into an 8 KiB buffer and hands the bytes to `vt100::Parser`
+/// (whose own grid lives on the heap), so it needs far less than a thread's
+/// 2 MiB default stack. One reader thread runs per live pane, so with many
+/// sessions and panes open at once the default stacks alone reserve tens of MiB
+/// of address space; a tighter stack keeps that footprint small. 256 KiB leaves
+/// ample headroom over the shallow read/parse call chain.
+const READER_STACK_BYTES: usize = 256 * 1024;
 
 /// Configure `cmd` to run `command` in `shell` and then exit, so the launch
 /// line is passed as an argument (never echoed) rather than typed into the
@@ -154,7 +152,20 @@ impl PtySession {
     /// Passed as an argument it is never echoed. The shell exits once the
     /// command does, so leaving the agent returns to 在席 (Focus) rather than
     /// dropping the user at a bare shell prompt.
-    pub fn spawn(dir: &Path, rows: u16, cols: u16, command: Option<&str>) -> Result<Self> {
+    ///
+    /// `scrollback` caps how many scrolled-off lines the embedded terminal keeps
+    /// for the user to scroll back over (the `vt100` parser grows the buffer
+    /// lazily up to this bound). It is the configured
+    /// [`Settings::terminal_scrollback_lines`](crate::domain::settings::Settings)
+    /// value, threaded down from the pool, so a smaller cap trades scroll depth
+    /// for a smaller per-pane memory footprint when many panes are open.
+    pub fn spawn(
+        dir: &Path,
+        rows: u16,
+        cols: u16,
+        command: Option<&str>,
+        scrollback: usize,
+    ) -> Result<Self> {
         let pty_system = native_pty_system();
         let pair = pty_system
             .openpty(PtySize {
@@ -193,7 +204,7 @@ impl PtySession {
         let parser = Arc::new(Mutex::new(vt100::Parser::new_with_callbacks(
             rows,
             cols,
-            SCROLLBACK_LINES,
+            scrollback,
             ScreenCallbacks {
                 count: Arc::clone(&bell),
                 cursor_shape: Arc::clone(&cursor_shape),
@@ -206,43 +217,47 @@ impl PtySession {
             let parser = Arc::clone(&parser);
             let alive = Arc::clone(&alive);
             let generation = Arc::clone(&generation);
-            std::thread::spawn(move || {
-                // Mark the session dead and wake the render loop on *any* exit from
-                // this thread — clean EOF, a read error, or a panic in
-                // `parser.process` (which parses untrusted shell output). A drop
-                // guard does it so the panic path is covered too: were `alive` left
-                // `true` after a panic, `is_alive()` would report the session live
-                // forever and it would linger in the UI as a zombie that never
-                // closes (and `Drop`'s teardown would wait on a thread that is gone).
-                struct DeathBell {
-                    alive: Arc<AtomicBool>,
-                    generation: Arc<AtomicU64>,
-                }
-                impl Drop for DeathBell {
-                    fn drop(&mut self) {
-                        self.alive.store(false, Ordering::SeqCst);
-                        self.generation.fetch_add(1, Ordering::SeqCst);
+            std::thread::Builder::new()
+                .name("usagi-pty-reader".to_string())
+                .stack_size(READER_STACK_BYTES)
+                .spawn(move || {
+                    // Mark the session dead and wake the render loop on *any* exit from
+                    // this thread — clean EOF, a read error, or a panic in
+                    // `parser.process` (which parses untrusted shell output). A drop
+                    // guard does it so the panic path is covered too: were `alive` left
+                    // `true` after a panic, `is_alive()` would report the session live
+                    // forever and it would linger in the UI as a zombie that never
+                    // closes (and `Drop`'s teardown would wait on a thread that is gone).
+                    struct DeathBell {
+                        alive: Arc<AtomicBool>,
+                        generation: Arc<AtomicU64>,
                     }
-                }
-                let _death = DeathBell {
-                    alive,
-                    generation: Arc::clone(&generation),
-                };
-                let mut buf = [0u8; 8192];
-                loop {
-                    match reader.read(&mut buf) {
-                        Ok(0) | Err(_) => break,
-                        Ok(n) => {
-                            if let Ok(mut parser) = parser.lock() {
-                                parser.process(&buf[..n]);
-                            }
-                            // Announce the new output so a waiting render loop
-                            // redraws it without waiting out its idle timer.
-                            generation.fetch_add(1, Ordering::SeqCst);
+                    impl Drop for DeathBell {
+                        fn drop(&mut self) {
+                            self.alive.store(false, Ordering::SeqCst);
+                            self.generation.fetch_add(1, Ordering::SeqCst);
                         }
                     }
-                }
-            })
+                    let _death = DeathBell {
+                        alive,
+                        generation: Arc::clone(&generation),
+                    };
+                    let mut buf = [0u8; 8192];
+                    loop {
+                        match reader.read(&mut buf) {
+                            Ok(0) | Err(_) => break,
+                            Ok(n) => {
+                                if let Ok(mut parser) = parser.lock() {
+                                    parser.process(&buf[..n]);
+                                }
+                                // Announce the new output so a waiting render loop
+                                // redraws it without waiting out its idle timer.
+                                generation.fetch_add(1, Ordering::SeqCst);
+                            }
+                        }
+                    }
+                })
+                .context("failed to spawn the pseudo-terminal reader thread")?
         };
 
         Ok(Self {

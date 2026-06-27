@@ -150,6 +150,10 @@ fn render_settings(settings: &Settings) -> Vec<String> {
             session_action_ui_label(settings.session_action_ui)
         ),
         format!("sidebar                {}", sidebar_label(settings.sidebar)),
+        format!(
+            "terminal_scrollback    {}",
+            settings.terminal_scrollback_lines
+        ),
         format!("local_llm_enabled      {}", settings.local_llm.enabled),
         format!("local_llm_model        {}", settings.local_llm.model),
     ]
@@ -228,6 +232,7 @@ mod tests {
             agent_cli: AgentCli::Gemini,
             session_action_ui: crate::domain::settings::SessionActionUi::Prompt,
             sidebar: crate::domain::settings::Sidebar::Rail,
+            terminal_scrollback_lines: 1_234,
             local_llm: crate::domain::settings::LocalLlm {
                 enabled: true,
                 model: "qwen2.5-coder:3b".to_string(),
@@ -242,8 +247,9 @@ mod tests {
         assert!(lines[5].contains("gemini"));
         assert!(lines[6].contains("prompt"));
         assert!(lines[7].contains("rail"));
-        assert!(lines[8].contains("true"));
-        assert!(lines[9].contains("qwen2.5-coder:3b"));
+        assert!(lines[8].contains("1234")); // terminal_scrollback
+        assert!(lines[9].contains("true"));
+        assert!(lines[10].contains("qwen2.5-coder:3b"));
     }
 
     #[test]
