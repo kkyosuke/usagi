@@ -39,7 +39,7 @@
 - どの worktree からコマンドを実行しても、`git worktree list` の先頭（＝プライマリ worktree）を基準に保存先を解決します（`infrastructure/git.rs` の `primary_worktree`）。これによりリポジトリ内で 1 つの `.usagi/` に集約されます。
 - `.usagi/` の大半（`state.json` / `settings.json` / `history.jsonl` / `sessions/`）は **マシンローカルな状態・設定** で、後述の `.gitignore` により **コミットされません**。`state.json` 更新を直列化するプロセス間ロック `.usagi/.lock` も同様で、トップレベルの `/*` で除外されます（`issues/` / `memory/` は git 管理対象に戻すため、それぞれの `.lock` を個別に再除外する点が異なります）。
 - 例外は **`.usagi/issues/`** と **`.usagi/memory/`**。タスク issue とエージェントのメモリはチームで共有したいので git 管理対象とします。それぞれの派生キャッシュ `index.json` と、プロセス間書き込みロック用の `.lock` ファイルは再生成可能・ローカル専用なので除外したままにします（メモリの目次 `MEMORY.md` は共有対象）。
-- git 管理の制御は **リポジトリルートの `.gitignore` には書かず、`.usagi/.gitignore` に自己完結させます**（`usagi::usecase::project::ignore_usagi_dir`）。リポジトリルートを汚さず、`.usagi/` 配下だけで完結するのが利点です。`usagi init` 時に次の内容（`.usagi/` 配下からの相対パターン）を書き込み、旧バージョンがルート `.gitignore` に追記していた `.usagi/` 系エントリがあれば除去します。
+- git 管理の制御は **リポジトリルートの `.gitignore` には書かず、`.usagi/.gitignore` に自己完結させます**（`usagi::usecase::project::ignore_usagi_dir`）。リポジトリルートを汚さず、`.usagi/` 配下だけで完結するのが利点です。`usagi init` 時に次の内容（`.usagi/` 配下からの相対パターン）を書き込み、リポジトリルートの `.gitignore` に `.usagi/` 系エントリがあれば除去します。
 
   ```gitignore
   # <repo>/.usagi/.gitignore
@@ -109,7 +109,7 @@
 
 | フィールド | 型 | 意味 |
 |---|---|---|
-| `sessions` | array | 作成済みセッションの一覧（`.usagi/sessions/` 配下）。**配列順がホーム画面の表示順**で、初期値は作成順、切替（Switch）の `K`/`J` で並び替えると入れ替えた順序がこの配列に永続化される（[design/05-home.md](../design/05-home.md#切替switch既定)）。古いファイルには無く、その場合は空として扱う |
+| `sessions` | array | 作成済みセッションの一覧（`.usagi/sessions/` 配下）。**配列順がホーム画面の表示順**で、初期値は作成順、切替（Switch）の `K`/`J` で並び替えると入れ替えた順序がこの配列に永続化される（[design/home/02-layout.md](../design/home/02-layout.md#切替switch既定)）。古いファイルには無く、その場合は空として扱う |
 | `root_note` | string? | ワークスペース**ルート行（`⌂ root`）**に紐づく自由記述の**複数行メモ**（任意）。セッションが持つ `note` のルート版で、ルートはどのセッションにも属さないためトップレベルに置く。**見た目だけ**の付加情報で、未設定（既定）なら省略される |
 | `updated_at` | RFC3339(UTC) | この状態を git から最後に更新した日時 |
 
@@ -130,10 +130,10 @@ worktree を束ねます。各 worktree は git ステータス付き（下記 `
 | `root` | path | セッションツリーのルート（`<workspace>/.usagi/sessions/<name>`） |
 | `worktrees` | array&lt;WorktreeState&gt; | worktree を作成した各リポジトリの状態（下記） |
 | `created_at` | RFC3339(UTC) | セッションの作成日時 |
-| `last_active` | RFC3339(UTC)? | このセッションを最後に触った日時（切替・在席でアクティブにした、または端末／Agent の活動を観測した）。ホーム画面の鮮度ドット（[design/05-home.md](../design/05-home.md#レイアウト)）の基準時刻で、放置するほど淡く沈む。未設定（既定。一度も触っていない）なら省略され、`created_at` にフォールバックする |
+| `last_active` | RFC3339(UTC)? | このセッションを最後に触った日時（切替・在席でアクティブにした、または端末／Agent の活動を観測した）。ホーム画面の鮮度ドット（[design/home/02-layout.md](../design/home/02-layout.md#レイアウト)）の基準時刻で、放置するほど淡く沈む。未設定（既定。一度も触っていない）なら省略され、`created_at` にフォールバックする |
 
 セッション作成（`usecase/session`）はこの `SessionRecord` を `state.json` に追記します。
-表示名の変更（`usecase/session::set_display_name`、ホーム画面の[切替モードの `r`](../design/05-home.md#各モードの説明)）は `display_name` だけを、メモの編集（`usecase/session::set_note`、ホーム画面の[切替モードの `n` / 没入の `Ctrl-E`](../design/05-home.md#セッションメモの編集)）は `note` だけを書き換えます。ルート行（`⌂ root`）のメモも同じ操作で編集でき、こちらはトップレベルの `root_note`（`usecase/session::set_root_note`）を書き換えます。`state.json` はマシンローカル（git 管理外）なので、メモはこの環境にだけ保存され、ブランチや PR では共有されません。
+表示名の変更（`usecase/session::set_display_name`、ホーム画面の[切替モードの `r`](../design/home/01-modes.md#各モードの説明)）は `display_name` だけを、メモの編集（`usecase/session::set_note`、ホーム画面の[切替モードの `n` / 没入の `Ctrl-E`](../design/home/05-overlays.md#セッションメモの編集)）は `note` だけを書き換えます。ルート行（`⌂ root`）のメモも同じ操作で編集でき、こちらはトップレベルの `root_note`（`usecase/session::set_root_note`）を書き換えます。`state.json` はマシンローカル（git 管理外）なので、メモはこの環境にだけ保存され、ブランチや PR では共有されません。
 再同期（`usecase/workspace_state::sync`）は各セッション worktree の git ステータスを
 読み直して更新します。
 
@@ -153,7 +153,7 @@ worktree を束ねます。各 worktree は git ステータス付き（下記 `
 | `status` | enum | ブランチのライフサイクル状態（下記） |
 | `diff` | object? | 既定ブランチとの累積差分の行数 `{ "added": N, "removed": M }`。サイドバーの `+N -M` バッジの元。差分が無い（手つかず）・既定ブランチ自身・detached HEAD・読めなかったときは省略（`null` 相当）。古いファイルにキーが無くても読める |
 | `ahead_behind` | object? | 既定ブランチとのコミット単位の差 `{ "ahead": N, "behind": M }`（`ahead`＝ブランチ側に多いコミット数・`behind`＝既定ブランチ側に多いコミット数）。サイドバーの `↑N ↓M` マーカーの元。差が無い（ahead も behind も 0）・既定ブランチ自身・detached HEAD・読めなかったときは省略（`null` 相当）。古いファイルにキーが無くても読める |
-| `pr` | array | このセッションに紐づく Pull Request の配列 `[{ "number": N, "url": "..." }, …]`。サイドバーの `#N` バッジ（[design/05-home.md](../design/05-home.md#pr-バッジ)）の元で、クリックで各 `url` をブラウザで開く。セッションが複数リポジトリに跨り複数 PR を持つ場合は**全部**並ぶ。上の git 由来フィールドと違い**再同期で git から読み直さない**——没入中にエージェントが出力した PR の URL（`/pull/<N>`）をターミナル出力から拾い、worktree キーの保存先（`pr-links/`、URL 単位で重複排除しつつ蓄積）経由でここへ畳み込む。一度きりの URL でもバッジが再起動後も残るよう永続化する。未観測なら空配列で省略される。古いファイルにキーが無くても読める |
+| `pr` | array | このセッションに紐づく Pull Request の配列 `[{ "number": N, "url": "..." }, …]`。サイドバーの `#N` バッジ（[design/home/03-sidebar.md](../design/home/03-sidebar.md#pr-バッジ)）の元で、クリックで各 `url` をブラウザで開く。セッションが複数リポジトリに跨り複数 PR を持つ場合は**全部**並ぶ。上の git 由来フィールドと違い**再同期で git から読み直さない**——没入中にエージェントが出力した PR の URL（`/pull/<N>`）をターミナル出力から拾い、worktree キーの保存先（`pr-links/`、URL 単位で重複排除しつつ蓄積）経由でここへ畳み込む。一度きりの URL でもバッジが再起動後も残るよう永続化する。未観測なら空配列で省略される。古いファイルにキーが無くても読める |
 | `updated_at` | RFC3339(UTC) | この worktree の状態を更新した日時 |
 
 ## `status`: ブランチのライフサイクル状態
@@ -168,9 +168,9 @@ worktree を束ねます。各 worktree は git ステータス付き（下記 `
 | `pushed` | `pushed` | クリーンで、独自コミットがあり上流追跡ブランチもある（push 済み・未マージ） |
 | `synced` | `synced` | 既定ブランチがこのブランチを追い越した（独自コミット 0 で behind > 0）。ブランチが持っていた変更は既定ブランチに取り込まれている＝マージ済み／最新追従済み |
 
-> **`new` と `synced` を分けた理由**: 旧実装は「独自コミット 0（既定ブランチの ancestor）」を一律 `synced` としていたため、**切っただけの新規ブランチ**も `synced` と表示され「ずっと synced で意味がわからない」状態でした。新規（既定と同位置 = behind 0）と、既定が追い越したマージ済み（behind > 0）を **ahead/behind のコミット数**で区別し、前者を `new`、後者だけを `synced` とします。
+> **`new` と `synced` の区別**: 独自コミット 0 のブランチは、新規（既定と同位置 = behind 0）と、既定ブランチが追い越したマージ済み（behind > 0）を **ahead/behind のコミット数**で区別し、前者を `new`、後者を `synced` とします。
 
-> **後方互換**: 旧 `state.json` はこの状態を `"merged"`→`"up_to_date"` と綴っていました。`BranchStatus` に `#[serde(alias = "merged", alias = "up_to_date")]` を付けているため旧データも `synced` として読み込めます（書き出しは常に `"synced"`）。
+> **後方互換**: `BranchStatus` は `#[serde(alias = "merged", alias = "up_to_date")]` を持ち、`"merged"` / `"up_to_date"` と書かれた `state.json` も `synced` として読み込めます（書き出しは常に `"synced"`）。
 
 > **前方互換**: 新しい usagi が書いた**未知の `status` 値**（将来追加される状態）を古い usagi が読んでも、`state.json` 全体の読み込みは失敗しません。未知値はその worktree の `status` だけを既定（`new`）に縮退させて読み込み、次回 `sync` で git から再判定します（`domain::serde_fallback`）。
 
@@ -188,7 +188,7 @@ worktree を束ねます。各 worktree は git ステータス付き（下記 `
 
 ### 集約（複数リポジトリ → セッション 1 行）
 
-セッションは複数リポジトリの worktree を束ねるため、ホーム画面では各リポジトリの status を **最も進んでいないもの**に集約して 1 行に表示します（`BranchStatus::aggregate`）。進捗順は `new < dirty < local < pushed < synced`。したがってセッションが `synced` と読めるのは **全リポジトリのブランチが synced** のときだけです。詳細は [design/05-home.md](../design/05-home.md) を参照。
+セッションは複数リポジトリの worktree を束ねるため、ホーム画面では各リポジトリの status を **最も進んでいないもの**に集約して 1 行に表示します（`BranchStatus::aggregate`）。進捗順は `new < dirty < local < pushed < synced`。したがってセッションが `synced` と読めるのは **全リポジトリのブランチが synced** のときだけです。詳細は [design/home/README.md](../design/home/README.md) を参照。
 
 ## 同期と参照
 
@@ -285,7 +285,7 @@ session "login"  (/Users/me/git/usagi/.usagi/sessions/login)
 - 読み込みは 1 行ずつパースする。空行は読み飛ばし、改行で終端されていない末尾行は「追記中の書きかけ」とみなして捨てる（破損として失敗させない）。改行で終端された不正な行は本物の破損としてエラーになる。
 - 追記専用ゆえファイルは際限なく伸びるため、読み込みは**末尾の最新 1,000 件のみ**を取り込む（起動時のパース量と画面のメモリを一定に保つ。それより前の行は再検証しない）。画面側の履歴バッファも同数で頭打ちし、直前と同一のコマンドは記録しない。
 - ワークスペース画面での永続化は **ベストエフォート**。書き込みに失敗しても画面の操作は止めない（履歴が残らないだけ）。
-- 対応するドメイン型は `domain/history.rs` の `HistoryEntry`。表示側の挙動は [../design/05-home.md](../design/05-home.md#履歴の永続化) を参照。
+- 対応するドメイン型は `domain/history.rs` の `HistoryEntry`。表示側の挙動は [../design/home/05-overlays.md](../design/home/05-overlays.md#履歴の永続化) を参照。
 
 ## `issues/`: タスク issue
 
