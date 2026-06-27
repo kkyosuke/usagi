@@ -213,7 +213,10 @@ const CPU_LABEL_WIDTH: usize = 4;
 /// to render; without one the terminal shows a fallback box, but the number
 /// beside each glyph still carries the meaning.
 const CPU_ICON: char = '\u{f2db}'; // nf-fa-microchip — processor use
-const MEM_ICON: char = '\u{f538}'; // nf-fa-memory — resident memory
+                                   // nf-fa-server — resident memory. Kept in the Font Awesome 4 range (like the git
+                                   // status icons) so it renders on older/partial Nerd Fonts; the FA5 nf-fa-memory
+                                   // (U+F538) is missing from those and shows a `?` fallback.
+const MEM_ICON: char = '\u{f233}';
 
 /// Rows every list entry (the root and each session) spans, fixed so the list
 /// never reflows as a session goes live or idle: an identity line, a detail
