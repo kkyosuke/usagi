@@ -108,6 +108,13 @@ impl MarkdownLine {
     }
 }
 
+/// The most lines [`render`] emits. The file read is already byte-capped
+/// (`infrastructure::markdown_file`), but a cap in line count too bounds the
+/// pathological case (e.g. a huge fenced block of one-character lines) so the
+/// rendered `Vec` — and the per-line span allocations behind it — can never blow
+/// up regardless of the source's shape.
+const MAX_RENDER_LINES: usize = 20_000;
+
 /// Render `source` Markdown into a list of styled lines, one per source line.
 pub fn render(source: &str) -> Vec<MarkdownLine> {
     // Empty input renders nothing — `split('\n')` would otherwise yield one
@@ -117,12 +124,19 @@ pub fn render(source: &str) -> Vec<MarkdownLine> {
     }
     let mut out = Vec::new();
     let mut in_code_block = false;
+    let mut truncated = false;
     // Body lines of the current fenced block and its language token, buffered so
     // the whole block can be syntax-highlighted at once (multi-line state needs
     // the lines together).
     let mut code_lines: Vec<&str> = Vec::new();
     let mut code_lang = String::new();
     for raw in source.split('\n') {
+        // Stop once the rendered (plus still-buffered) line count reaches the cap
+        // so an enormous file cannot produce an unbounded line/span allocation.
+        if out.len() + code_lines.len() >= MAX_RENDER_LINES {
+            truncated = true;
+            break;
+        }
         // Tolerate CRLF input by dropping a trailing carriage return.
         let line = raw.strip_suffix('\r').unwrap_or(raw);
 
@@ -147,6 +161,15 @@ pub fn render(source: &str) -> Vec<MarkdownLine> {
     // An unterminated fence at end of input still renders its buffered body.
     if in_code_block {
         flush_code_block(&mut out, &code_lines, &code_lang);
+    }
+    // Mark a cut so the reader knows the preview is incomplete rather than the
+    // file ending here.
+    if truncated {
+        out.push(MarkdownLine {
+            style: LineStyle::Text,
+            prefix: String::new(),
+            spans: vec![Span::new("… (preview truncated)", SpanStyle::Plain)],
+        });
     }
     out
 }

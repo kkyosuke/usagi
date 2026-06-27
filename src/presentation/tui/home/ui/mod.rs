@@ -20,7 +20,7 @@ pub mod content;
 mod panes;
 
 use crate::presentation::tui::widgets;
-use crate::presentation::tui::widgets::clip_to_width;
+use crate::presentation::tui::widgets::{clip_to_width, clip_to_width_cow};
 
 use chrome::{
     command_palette_body, footer_line, input_line, mode_ladder, quit_confirm_frame,

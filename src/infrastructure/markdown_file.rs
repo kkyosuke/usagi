@@ -11,7 +11,7 @@
 //! with `..` is refused, so `preview` never reads files outside the project the
 //! user opened.
 
-use std::io::ErrorKind;
+use std::io::{ErrorKind, Read};
 use std::path::{Component, Path};
 
 use anyhow::{bail, Context, Result};
@@ -19,6 +19,14 @@ use anyhow::{bail, Context, Result};
 /// File extensions treated as Markdown when matching a bare name and when
 /// deciding whether a target already names a file directly.
 const MARKDOWN_EXTENSIONS: [&str; 2] = ["md", "markdown"];
+
+/// The most bytes [`read_under`] loads from a previewed file. The preview is a
+/// scrollable terminal pane, not an editor: a multi-megabyte file would be read
+/// wholesale into memory and synchronously rendered + syntax-highlighted on the
+/// event-loop thread, freezing the TUI. Reading at most this much (and marking
+/// the cut) bounds both the memory and the render work to something the pane can
+/// show, whatever the file's true size.
+const MAX_PREVIEW_BYTES: u64 = 512 * 1024;
 
 /// Resolve `target` to a Markdown file under `root`, read it, and return its
 /// workspace-relative display path and contents.
@@ -47,7 +55,7 @@ pub fn read_under(root: &Path, target: &str) -> Result<(String, String)> {
 
     for candidate in candidates(target) {
         let path = root.join(&candidate);
-        match std::fs::read_to_string(&path) {
+        match read_capped(&path) {
             Ok(content) => return Ok((candidate, content)),
             // The candidate does not exist — try the next spelling.
             Err(e) if e.kind() == ErrorKind::NotFound => continue,
@@ -58,6 +66,31 @@ pub fn read_under(root: &Path, target: &str) -> Result<(String, String)> {
     }
 
     bail!("no Markdown file found for \"{target}\"");
+}
+
+/// Read `path` to a `String`, but never more than [`MAX_PREVIEW_BYTES`]. A file
+/// larger than the cap is truncated to it and a marker line is appended, so an
+/// enormous file still opens promptly instead of stalling the UI. Invalid UTF-8
+/// (or a multi-byte char split by the cut) is replaced lossily — acceptable for a
+/// read-only preview. Missing / unreadable paths surface as the matching
+/// [`std::io::Error`], so the caller can tell "not found" from "exists but failed".
+fn read_capped(path: &Path) -> std::io::Result<String> {
+    let mut file = std::fs::File::open(path)?;
+    let mut buf = Vec::new();
+    // Read one byte past the cap so an exactly-cap-sized file is not falsely
+    // marked truncated.
+    file.by_ref()
+        .take(MAX_PREVIEW_BYTES + 1)
+        .read_to_end(&mut buf)?;
+    let truncated = buf.len() as u64 > MAX_PREVIEW_BYTES;
+    if truncated {
+        buf.truncate(MAX_PREVIEW_BYTES as usize);
+    }
+    let mut content = String::from_utf8_lossy(&buf).into_owned();
+    if truncated {
+        content.push_str("\n\n… (preview truncated at 512 KiB)\n");
+    }
+    Ok(content)
 }
 
 /// The display paths to try for `target`, in order. A target that already ends in
@@ -148,6 +181,30 @@ mod tests {
         fs::write(dir.path().join("R.MD"), "x").unwrap();
         let (title, _) = read_under(dir.path(), "R.MD").unwrap();
         assert_eq!(title, "R.MD");
+    }
+
+    #[test]
+    fn reads_a_small_file_verbatim_without_a_truncation_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("small.md"), "a\nb\n").unwrap();
+        let (_, content) = read_under(dir.path(), "small.md").unwrap();
+        assert_eq!(content, "a\nb\n");
+        assert!(!content.contains("truncated"));
+    }
+
+    #[test]
+    fn caps_an_oversized_file_and_marks_it_truncated() {
+        let dir = tempfile::tempdir().unwrap();
+        // A file comfortably larger than the cap.
+        let big = "x".repeat((MAX_PREVIEW_BYTES as usize) + 1024);
+        fs::write(dir.path().join("big.md"), &big).unwrap();
+
+        let (_, content) = read_under(dir.path(), "big.md").unwrap();
+        // The body is cut to the cap and a marker is appended, so the result is
+        // bounded regardless of the source size.
+        assert!(content.len() < big.len());
+        assert!(content.contains("preview truncated"));
+        assert!(content.starts_with("xxxx"));
     }
 
     #[test]

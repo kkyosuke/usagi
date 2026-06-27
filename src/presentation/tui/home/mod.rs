@@ -44,6 +44,21 @@ fn reload_sessions(root: &Path) -> Option<Vec<SessionRecord>> {
     crate::usecase::workspace_state::recorded_sessions(root)
 }
 
+/// Track a freshly spawned session-worker handle, first dropping the handles of
+/// workers that have already finished. The set is only fully drained when the
+/// screen exits (joining any in-flight git work), so without this reap a long
+/// session that creates / removes / detaches many times would accumulate finished
+/// `JoinHandle`s without bound. Reaping keeps the Vec sized to roughly the workers
+/// actually in flight.
+fn track_worker(
+    workers: &std::cell::RefCell<Vec<std::thread::JoinHandle<()>>>,
+    handle: std::thread::JoinHandle<()>,
+) {
+    let mut workers = workers.borrow_mut();
+    workers.retain(|h| !h.is_finished());
+    workers.push(handle);
+}
+
 /// Lock the session op-lock, recovering from a poisoned mutex. The guarded value
 /// is `()` — a worker that panicked while holding it left no invalid state behind
 /// — so recovering keeps session create / remove / rename working instead of
@@ -229,7 +244,7 @@ pub fn run(term: &Term, workspace: &Workspace, preload: Preload) -> Result<Outco
                 run_create(&root, &name)
             });
         });
-        create_workers.borrow_mut().push(worker);
+        track_worker(&create_workers, worker);
     };
 
     // The branch names already taken across the workspace, read fresh each time
@@ -445,7 +460,7 @@ pub fn run(term: &Term, workspace: &Workspace, preload: Preload) -> Result<Outco
                 run_remove(&root, &name, force, agent.as_ref())
             });
         });
-        remove_workers.borrow_mut().push(worker);
+        track_worker(&remove_workers, worker);
     };
 
     // Evict a removed session's still-running shell from the pool so a session
@@ -711,11 +726,14 @@ pub fn run(term: &Term, workspace: &Workspace, preload: Preload) -> Result<Outco
             // Best-effort: a sync failure simply leaves the last-known statuses.
             let refresh_handle = sessions_refresh.clone();
             let refresh_root = terminal_root.clone();
-            workers.borrow_mut().push(std::thread::spawn(move || {
-                if let Some(sessions) = reload_sessions(&refresh_root) {
-                    refresh_handle.set(sessions);
-                }
-            }));
+            track_worker(
+                &workers,
+                std::thread::spawn(move || {
+                    if let Some(sessions) = reload_sessions(&refresh_root) {
+                        refresh_handle.set(sessions);
+                    }
+                }),
+            );
             // A launch / pane failure is surfaced and persisted by the event loop's
             // single error sink: `open_pane` logs the failure through
             // `HomeState::log_error`, which both shows it and writes it to the daily

@@ -141,6 +141,44 @@ fn unknown_language_falls_back_to_plain_text() {
 }
 
 #[test]
+fn tabs_in_code_lines_are_expanded_to_spaces() {
+    // A tab in a code line would measure as zero width and overrun the pane;
+    // it is expanded to spaces so the rendered text lines up. The body has no
+    // tab character left in it.
+    let lines = render("```\n\tindented\n```");
+    assert_eq!(lines.len(), 1);
+    let text = lines[0].plain_text();
+    assert!(!text.contains('\t'), "tab survived: {text:?}");
+    assert!(text.starts_with("    indented"));
+}
+
+#[test]
+fn a_language_alias_still_highlights() {
+    // `sh` is not a registered syntax token but resolves to bash via the alias
+    // map, so the body still highlights (several coloured spans) instead of
+    // falling back to one plain span.
+    let lines = render("```sh\necho hi # note\n```");
+    assert_eq!(lines.len(), 1);
+    assert_eq!(lines[0].style, LineStyle::Code);
+    assert_eq!(lines[0].plain_text(), "echo hi # note");
+    assert!(
+        lines[0].spans.len() > 1,
+        "alias did not resolve to a highlighting syntax: {:?}",
+        lines[0].spans
+    );
+}
+
+#[test]
+fn an_enormous_input_is_truncated_to_a_line_cap() {
+    // Far more lines than the cap: the result is bounded and ends with a
+    // truncation marker rather than growing without limit.
+    let src = "x\n".repeat(30_000);
+    let lines = render(&src);
+    assert!(lines.len() <= 20_001, "not capped: {}", lines.len());
+    assert_eq!(lines.last().unwrap().plain_text(), "… (preview truncated)");
+}
+
+#[test]
 fn fence_info_string_is_parsed_case_insensitively_with_extras() {
     // `Rust,ignore` → language token `rust`; highlighting must still succeed.
     let lines = render("```RUST ignore\nfn main() {}\n```");
