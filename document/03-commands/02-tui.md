@@ -15,7 +15,7 @@
 | 入力面 | スコープ | 出るコマンド |
 |---|---|---|
 | コマンドパレット（統括 / Overview。`:` で開く） | Workspace（全体） | `session` / `issue` / `config` / `preview` |
-| 在席（Focus）の右ペイン | Session（個別） | `terminal` / `agent` / `close` |
+| 在席（Focus）の右ペイン | Session（個別） | `agent` / `close` / `terminal`（Menu はコマンド名のアルファベット順に並べる） |
 | 両方 | 共通 | `man` / `history` / `clear` / `quit` |
 
 ワークスペース全体のコマンドは、切替（Switch）・在席（Focus）から `:`（コロン）で開く**コマンドパレット**（中央オーバーレイ）で実行します。
@@ -109,7 +109,7 @@ issue が 1 件も無いときは「No issues yet.」を 1 行だけログに出
 - 名前付き（Prompt の `agent codex` / `agent sakana.ai`、または在席 Menu の[エージェントピッカー](../design/05-home.md#在席のアクション-uimenu--prompt)）: 指定した CLI を起動。名前は起動コマンド名（`claude` / `codex` / `codex-fugu` / `gemini`）と表示名（`sakana.ai`）を大文字小文字を問わず受け付ける。
 - 既定 CLI 以外でかつ**インストールされていない**（PATH に無い）名前を指定するとエラーになり起動しない。未知の名前も同様に拒否する。Menu のピッカーは**インストール済みの CLI だけ**を候補に出す。
 
-**1 セッションが持てる agent は 1 つだけ**です。すでに agent ペインがあるセッションで `agent`（在席の Menu/`a`・Prompt、または没入の agent-タブ追加キー `Ctrl-O g`／`Alt-g`）を実行しても 2 つ目を起動せず、**既存の agent タブへ移動**します（terminal タブは何枚でも追加できます）。
+**1 セッションが持てる agent は 1 つだけ**です。すでに agent ペインがあるセッションでは、在席の **Menu から `agent` 行を外します**（切替プレビューも同様）。Prompt の `agent`・`a`・没入の agent-タブ追加キー `Ctrl-O g`／`Alt-g` から `agent` を実行しても 2 つ目を起動せず、**既存の agent タブへ移動**します（terminal タブは何枚でも追加できます）。
 
 起動時に usagi 自身の issue MCP サーバ（[`usagi mcp`](03-mcp.md)）を Agent CLI に組み込むため、エージェントは起動直後から
 `issue_*` tool でタスクを操作できます。さらにローカル LLM が有効なら [`usagi llm-mcp`](04-llm-mcp.md) も組み込みます。
