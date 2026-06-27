@@ -10,6 +10,7 @@ pub mod project;
 pub mod search;
 pub mod session;
 pub mod settings;
+pub mod update;
 pub mod update_check;
 pub mod workspace;
 pub mod workspace_guard;

@@ -801,3 +801,137 @@ fn is_repository_detects_git_and_plain_dirs() {
     std::fs::create_dir_all(&plain).unwrap();
     assert!(!is_repository(&plain));
 }
+
+// --- fetch / merge -------------------------------------------------------
+
+/// The full HEAD commit at `dir`.
+fn head_at(dir: &Path) -> String {
+    git_capture(dir, &["rev-parse", "HEAD"])
+        .unwrap()
+        .unwrap_or_default()
+}
+
+/// Push a new commit to `bare`'s `main` from a throwaway clone, so that a repo
+/// tracking `bare` becomes one commit behind `origin/main` after fetching.
+/// `file`/`contents` let a caller stage a change that will conflict with local
+/// work on the same path.
+fn push_new_commit(bare: &Path, file: &str, contents: &str) {
+    let tmp = tempfile::tempdir().unwrap();
+    let clone = tmp.path().join("pusher");
+    run(
+        tmp.path(),
+        &[
+            "clone",
+            "-q",
+            bare.to_str().unwrap(),
+            clone.to_str().unwrap(),
+        ],
+    );
+    run(&clone, &["config", "user.email", "t@e.com"]);
+    run(&clone, &["config", "user.name", "t"]);
+    std::fs::write(clone.join(file), contents).unwrap();
+    run(&clone, &["add", "."]);
+    run(&clone, &["commit", "-q", "-m", "remote work"]);
+    run(&clone, &["push", "-q", "origin", "main"]);
+    // Keep the temp clone alive until the push completes.
+    drop(tmp);
+}
+
+#[test]
+fn fetch_updates_remote_tracking_refs_and_errors_without_a_remote() {
+    let (tmp, work) = repo_with_remote();
+    // A new commit lands on the remote; fetching brings origin/main forward.
+    push_new_commit(&tmp.path().join("remote.git"), "remote.txt", "hi");
+
+    fetch(&work).unwrap();
+    // origin/main now resolves to a commit local main does not have.
+    let local = head_at(&work);
+    let remote = git_capture(&work, &["rev-parse", "origin/main"])
+        .unwrap()
+        .unwrap();
+    assert_ne!(local, remote);
+
+    // A plain repo with no `origin` remote surfaces the failure.
+    let plain = tempfile::tempdir().unwrap();
+    init_repo(plain.path());
+    let err = fetch(plain.path()).unwrap_err();
+    assert!(err.to_string().contains("git fetch failed"), "{err}");
+}
+
+#[test]
+fn merge_ff_only_fast_forwards_reports_up_to_date_and_refuses_to_diverge() {
+    let (tmp, work) = repo_with_remote();
+    push_new_commit(&tmp.path().join("remote.git"), "remote.txt", "hi");
+    fetch(&work).unwrap();
+
+    // Behind by one: a fast-forward advances HEAD to origin/main.
+    let status = merge(&work, "origin/main", true).unwrap();
+    assert_eq!(status, MergeStatus::Updated);
+    assert_eq!(
+        head_at(&work),
+        git_capture(&work, &["rev-parse", "origin/main"])
+            .unwrap()
+            .unwrap()
+    );
+
+    // Now even with the remote: a second ff-only merge is a no-op.
+    let status = merge(&work, "origin/main", true).unwrap();
+    assert_eq!(status, MergeStatus::AlreadyUpToDate);
+
+    // Local commits the remote lacks make a fast-forward impossible: the merge
+    // refuses rather than creating a merge commit, and HEAD is untouched.
+    push_new_commit(&tmp.path().join("remote.git"), "remote.txt", "moved on");
+    fetch(&work).unwrap();
+    std::fs::write(work.join("local.txt"), "local work").unwrap();
+    run(&work, &["add", "."]);
+    run(&work, &["commit", "-q", "-m", "local work"]);
+    let head_before = head_at(&work);
+    let status = merge(&work, "origin/main", true).unwrap();
+    assert_eq!(status, MergeStatus::NotFastForward);
+    assert_eq!(head_at(&work), head_before);
+}
+
+#[test]
+fn merge_creates_a_merge_commit_and_aborts_a_conflict() {
+    let (tmp, work) = repo_with_remote();
+    // The remote advances on `f` (the file init_repo committed).
+    push_new_commit(&tmp.path().join("remote.git"), "f", "remote change\n");
+    fetch(&work).unwrap();
+
+    // Local work on a *different* file merges cleanly into a merge commit.
+    std::fs::write(work.join("local.txt"), "local\n").unwrap();
+    run(&work, &["add", "."]);
+    run(&work, &["commit", "-q", "-m", "local work"]);
+    let status = merge(&work, "origin/main", false).unwrap();
+    assert_eq!(status, MergeStatus::Updated);
+    // Both changes are present after the merge.
+    assert_eq!(
+        std::fs::read_to_string(work.join("f")).unwrap(),
+        "remote change\n"
+    );
+    assert!(work.join("local.txt").exists());
+
+    // The remote changes `f` again; local edits the same line differently and
+    // commits, so the next merge conflicts — it must abort and restore HEAD.
+    push_new_commit(&tmp.path().join("remote.git"), "f", "remote v2\n");
+    fetch(&work).unwrap();
+    std::fs::write(work.join("f"), "local v2\n").unwrap();
+    run(&work, &["add", "."]);
+    run(&work, &["commit", "-q", "-m", "local edit of f"]);
+    let head_before = head_at(&work);
+    let status = merge(&work, "origin/main", false).unwrap();
+    assert_eq!(status, MergeStatus::Conflict);
+    // Aborted: HEAD is restored and no merge is in progress.
+    assert_eq!(head_at(&work), head_before);
+    assert_eq!(
+        std::fs::read_to_string(work.join("f")).unwrap(),
+        "local v2\n"
+    );
+    assert!(
+        git_capture(&work, &["rev-parse", "--verify", "--quiet", "MERGE_HEAD"])
+            .unwrap()
+            .is_none()
+    );
+
+    drop(tmp);
+}

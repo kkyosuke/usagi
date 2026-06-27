@@ -541,6 +541,18 @@ pub fn workspace_root(start: &Path) -> PathBuf {
     start.to_path_buf()
 }
 
+/// The source git repositories a session under `workspace_root` spans: the root
+/// itself when it is a repository, otherwise every repository reached by the
+/// recursive workspace walk.
+///
+/// This is the set whose default branches `usagi update` refreshes from the
+/// remote — the same repositories a new session cuts a worktree in — so the two
+/// views of "which repos does this workspace contain" stay in sync. Returns an
+/// empty list for a non-git, repo-less root.
+pub fn source_repos(workspace_root: &Path) -> Vec<PathBuf> {
+    tree::source_repos(workspace_root)
+}
+
 /// Every existing session worktree root under `<workspace_root>/.usagi/sessions/`.
 ///
 /// Each entry is `<workspace_root>/.usagi/sessions/<name>`. Returns an empty vec

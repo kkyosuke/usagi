@@ -1,17 +1,20 @@
-//! Read-only git inspection used to build a repository's workspace state.
+//! Git operations used to build and maintain a repository's workspace state.
 //!
 //! All operations shell out to the system `git` binary (rather than linking a
 //! git library) so the user's existing git configuration is respected and the
-//! crate stays dependency-light. Everything here is read-only.
+//! crate stays dependency-light. Most are read-only inspection; the worktree
+//! lifecycle ([`worktree`]) and the fetch/merge in [`merge`] mutate state.
 //!
 //! The work is split by concern: [`command`] holds the shared shell-out
 //! helpers, [`repo`] the repository-level operations (clone, dirtiness, repo
-//! detection), [`worktree`] the worktree lifecycle, and [`branch`] the branch
-//! and base-ref queries. The functions are re-exported here so callers use the
-//! flat `git::<fn>` path regardless of which submodule defines them.
+//! detection), [`worktree`] the worktree lifecycle, [`branch`] the branch
+//! and base-ref queries, and [`merge`] the fetch/merge that brings a branch up
+//! to date. The functions are re-exported here so callers use the flat
+//! `git::<fn>` path regardless of which submodule defines them.
 
 mod branch;
 mod command;
+mod merge;
 mod repo;
 mod worktree;
 
@@ -19,6 +22,7 @@ pub use branch::{
     ahead_behind, branch_namespace_conflict, default_branch, delete_branch, diff_stat,
     list_branches, local_branches, resolve_base_ref,
 };
+pub use merge::{fetch, merge, MergeStatus};
 pub use repo::{clone, is_repository, short_hash};
 pub use worktree::{
     add_worktree, init_submodules, list_worktrees, primary_worktree, prune_worktrees,
