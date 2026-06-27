@@ -25,7 +25,7 @@ use crate::presentation::tui::widgets::{clip_to_width, clip_to_width_cow};
 use chrome::{
     command_palette_body, footer_line, input_line, mode_ladder, quit_confirm_frame,
     remove_modal_body, switch_create_rows, switch_rename_rows, task_status_line, text_modal_body,
-    title_bar, PALETTE_INNER, REMOVE_MODAL_INNER, TEXT_MODAL_INNER,
+    title_bar, update_confirm_frame, PALETTE_INNER, REMOVE_MODAL_INNER, TEXT_MODAL_INNER,
 };
 use panes::{left_pane, right_pane_contents};
 // The embedded terminal pane (没入) maps a click to the tab under it through this.
@@ -373,6 +373,14 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
     // The quit-confirmation modal, when open, overlays everything else.
     if state.quit_confirm() {
         return quit_confirm_frame(raw_height, raw_width, state.live_count());
+    }
+    // The update-confirmation modal (raised by clicking the mascot's update
+    // notice) likewise overlays everything. It is only ever opened while an update
+    // is available, so `update()` is `Some` here; fall through defensively if not.
+    if state.update_confirm() {
+        if let Some(latest) = state.update() {
+            return update_confirm_frame(raw_height, raw_width, &latest);
+        }
     }
     // The session-removal modal is *not* a full-screen overlay: like the `:`
     // command palette and the text modal it floats as a centred box over the live

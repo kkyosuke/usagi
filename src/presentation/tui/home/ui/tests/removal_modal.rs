@@ -68,6 +68,41 @@ fn render_frame_overlays_the_quit_confirmation_modal() {
 }
 
 #[test]
+fn render_frame_overlays_the_update_confirmation_modal() {
+    let mut state = state_with_sessions(&["alpha"]);
+    state.set_update(crate::domain::version::Version::parse("9.9.9"));
+    state.open_update_confirm();
+    let frame = render_frame(24, 80, &state);
+    let joined = console::strip_ansi_codes(&frame.join("\n")).into_owned();
+    assert!(joined.contains("アップデート"));
+    assert!(joined.contains("v9.9.9"));
+    assert!(joined.contains("再起動"));
+    assert!(joined.contains("y / Enter: 更新"));
+    // Every bordered line shares the same width (no line overflows `INNER`).
+    let widths: Vec<usize> = joined
+        .lines()
+        .filter(|line| line.trim_start().starts_with('│'))
+        .map(|line| console::measure_text_width(line.trim()))
+        .collect();
+    assert!(widths.iter().all(|&w| w == widths[0]));
+}
+
+#[test]
+fn render_frame_skips_the_update_modal_when_no_update_is_known() {
+    // The flag is only ever set with an update pending; defend against a stale
+    // flag with no version by falling through to the normal frame rather than
+    // showing an empty modal.
+    let mut state = state_with_sessions(&["alpha"]);
+    state.open_update_confirm();
+    assert!(state.update().is_none());
+    let frame = render_frame(24, 80, &state);
+    let joined = console::strip_ansi_codes(&frame.join("\n")).into_owned();
+    assert!(!joined.contains("ダウンロードして入れ替える"));
+    // The normal workspace frame shows instead (the session sidebar is present).
+    assert!(joined.contains("alpha"));
+}
+
+#[test]
 fn render_frame_quit_confirmation_modal_with_nothing_live_asks_a_plain_quit() {
     // Ctrl-Q raises the modal even with no live session; with `live == 0` it must
     // ask a plain "quit?" rather than warn about agents that are not running.

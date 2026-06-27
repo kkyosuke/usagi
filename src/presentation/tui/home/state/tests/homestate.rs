@@ -204,6 +204,40 @@ fn mascot_reaction_varies_across_repeated_clicks() {
 }
 
 #[test]
+fn update_confirm_opens_and_cancels() {
+    let mut state = state();
+    assert!(!state.update_confirm());
+    state.open_update_confirm();
+    assert!(state.update_confirm());
+    state.cancel_update_confirm();
+    assert!(!state.update_confirm());
+}
+
+#[test]
+fn clicking_the_mascot_opens_the_update_modal_when_an_update_is_available() {
+    use crate::domain::version::Version;
+    use std::time::Instant;
+    let mut state = state();
+    state.set_update(Version::parse("9.9.9"));
+    // With an update pending, a click on the mascot asks to update rather than
+    // playing a reaction.
+    state.click_mascot(Instant::now());
+    assert!(state.update_confirm());
+    assert!(!state.mascot_reacting());
+}
+
+#[test]
+fn clicking_the_mascot_without_an_update_plays_a_reaction() {
+    use std::time::Instant;
+    let mut state = state();
+    assert!(state.update().is_none());
+    state.click_mascot(Instant::now());
+    // No update to offer, so the click is just the playful reaction.
+    assert!(!state.update_confirm());
+    assert!(state.mascot_reacting());
+}
+
+#[test]
 fn disabling_mascot_animation_makes_a_click_inert_and_clears_a_reaction() {
     use std::time::Instant;
     let mut state = state();
