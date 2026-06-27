@@ -55,6 +55,51 @@ pub(super) fn pane_cell(col: u16, row: u16, geo: ui::TerminalGeometry) -> Option
     Some(Cell::new(rel_row, rel_col))
 }
 
+/// The shape the host terminal should give the mouse pointer over the embedded
+/// pane, set via the xterm pointer-shape control (OSC 22). The pane shows a text
+/// caret over the selectable terminal grid and a hand over a clickable target (a
+/// URL in the grid, a tab chip, a sidebar PR badge), and restores the default
+/// pointer everywhere else. Terminals that do not implement OSC 22 ignore the
+/// escape, so it is a no-op there rather than leaving a stray sequence on screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PointerShape {
+    /// The terminal's own default pointer (typically an arrow).
+    Default,
+    /// An I-beam text caret, shown over the selectable terminal grid.
+    Text,
+    /// A pointing hand, shown over a clickable target.
+    Hand,
+}
+
+impl PointerShape {
+    /// The OSC 22 escape that sets this pointer shape: `OSC 22 ; <name> ST`, using
+    /// the CSS cursor names the control standardises (`text`, `pointer`) and an
+    /// empty name to restore the default. `ST` (`ESC \`) terminates it, matching
+    /// the OSC 52 clipboard write the pane already emits.
+    pub(super) fn osc22(self) -> &'static str {
+        match self {
+            PointerShape::Default => "\x1b]22;\x1b\\",
+            PointerShape::Text => "\x1b]22;text\x1b\\",
+            PointerShape::Hand => "\x1b]22;pointer\x1b\\",
+        }
+    }
+}
+
+/// The pointer shape for the cell under the mouse: a hand over anything
+/// `clickable` (a URL in the grid, a tab chip, a sidebar PR badge), a text caret
+/// over the selectable terminal grid (`in_pane` with nothing clickable), and the
+/// default pointer everywhere else. `clickable` wins over `in_pane`, so a URL
+/// cell — which is both — shows the hand.
+pub(super) fn pointer_shape(in_pane: bool, clickable: bool) -> PointerShape {
+    if clickable {
+        PointerShape::Hand
+    } else if in_pane {
+        PointerShape::Text
+    } else {
+        PointerShape::Default
+    }
+}
+
 /// The history scroll a key requests, in lines (negative scrolls up toward older
 /// output), or `None` for a key the shell should receive. `Shift` distinguishes
 /// the scroll keys from the `PageUp`/`PageDown`/arrows the shell expects.
@@ -443,6 +488,27 @@ mod tests {
         // One column / row past the pane is outside.
         assert_eq!(pane_cell(90, 5, geo), None);
         assert_eq!(pane_cell(15, 27, geo), None);
+    }
+
+    #[test]
+    fn pointer_shape_picks_hand_text_or_default() {
+        // A clickable target (a URL / tab chip / PR badge) shows a hand — even
+        // inside the grid, where a plain cell would be a text caret.
+        assert_eq!(pointer_shape(true, true), PointerShape::Hand);
+        assert_eq!(pointer_shape(false, true), PointerShape::Hand);
+        // The selectable grid with nothing clickable under the pointer is a caret.
+        assert_eq!(pointer_shape(true, false), PointerShape::Text);
+        // Off the grid and off any target restores the default pointer.
+        assert_eq!(pointer_shape(false, false), PointerShape::Default);
+    }
+
+    #[test]
+    fn pointer_shape_osc22_sets_css_names_with_an_st_terminator() {
+        // The standardised CSS cursor names, terminated by ST (`ESC \`).
+        assert_eq!(PointerShape::Text.osc22(), "\x1b]22;text\x1b\\");
+        assert_eq!(PointerShape::Hand.osc22(), "\x1b]22;pointer\x1b\\");
+        // An empty name resets to the terminal's own pointer.
+        assert_eq!(PointerShape::Default.osc22(), "\x1b]22;\x1b\\");
     }
 
     #[test]
