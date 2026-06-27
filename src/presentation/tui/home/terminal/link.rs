@@ -174,16 +174,32 @@ fn is_url_char(c: char) -> bool {
     c.is_ascii_graphic()
 }
 
-/// Every grid cell that sits on an `http(s)` URL, so the renderer can underline
-/// links to mark them clickable. This is [`url_at`]'s detection
-/// run over the whole screen at once: each logical line (a run of rows stitched
-/// by [`vt100::Screen::row_wrapped`]) is flattened the same way, its URL spans are
-/// found, and each covered index maps back to its `(row, col)` cell.
-pub fn link_cells(screen: &vt100::Screen) -> HashSet<Cell> {
+/// Both products of one whole-screen URL scan: the cells every link covers (to
+/// underline them) and each link's text in reading order (to harvest PR URLs).
+/// See [`scan_links`].
+pub struct ScreenLinks {
+    /// Every grid cell that sits on an `http(s)` URL.
+    pub cells: HashSet<Cell>,
+    /// Each `http(s)` URL on screen, as text, in reading order.
+    pub urls: Vec<String>,
+}
+
+/// Scan the whole screen for `http(s)` URLs once, returning both the cells they
+/// cover and their text. The render loop needs both on a fresh-output frame (the
+/// cells to underline links, the text to harvest PR URLs); computing them in one
+/// pass flattens each logical line and runs [`url_spans`] a single time instead
+/// of twice, halving the work done under the parser lock that the reader thread
+/// contends for.
+///
+/// Each logical line (a run of rows stitched by [`vt100::Screen::row_wrapped`])
+/// is flattened to one char per column, its URL spans are found, and each span
+/// is both mapped back to its `(row, col)` cells and lifted out as a string.
+pub fn scan_links(screen: &vt100::Screen) -> ScreenLinks {
     let (rows, cols) = screen.size();
     let mut cells = HashSet::new();
+    let mut urls = Vec::new();
     if cols == 0 {
-        return cells;
+        return ScreenLinks { cells, urls };
     }
     let width = cols as usize;
     // One scratch buffer reused across logical lines: this scan runs while the
@@ -205,6 +221,7 @@ pub fn link_cells(screen: &vt100::Screen) -> HashSet<Cell> {
             }
         }
         for span in url_spans(&chars) {
+            urls.push(chars[span.clone()].iter().collect());
             for idx in span {
                 let row = start + (idx / width) as u16;
                 let col = (idx % width) as u16;
@@ -213,7 +230,13 @@ pub fn link_cells(screen: &vt100::Screen) -> HashSet<Cell> {
         }
         start = end + 1;
     }
-    cells
+    ScreenLinks { cells, urls }
+}
+
+/// Every grid cell that sits on an `http(s)` URL, so the renderer can underline
+/// links to mark them clickable. The cell half of [`scan_links`].
+pub fn link_cells(screen: &vt100::Screen) -> HashSet<Cell> {
+    scan_links(screen).cells
 }
 
 /// Every distinct pull-request link visible on `screen`, in reading order
@@ -228,8 +251,15 @@ pub fn link_cells(screen: &vt100::Screen) -> HashSet<Cell> {
 /// them against the session so the sidebar can show the `#<number>` badges and a
 /// click can reopen them.
 pub fn pr_links(screen: &vt100::Screen) -> Vec<PrLink> {
+    pr_links_from(&screen_urls(screen))
+}
+
+/// The distinct pull-request links among already-scanned URLs, in order, with
+/// duplicate URLs dropped. Lets the render loop reuse the [`scan_links`] URL list
+/// it already has rather than re-scanning the grid with [`pr_links`].
+pub fn pr_links_from(urls: &[String]) -> Vec<PrLink> {
     let mut out: Vec<PrLink> = Vec::new();
-    for pr in screen_urls(screen).iter().filter_map(|u| parse_pr_url(u)) {
+    for pr in urls.iter().filter_map(|u| parse_pr_url(u)) {
         if !out.iter().any(|p| p.url == pr.url) {
             out.push(pr);
         }
@@ -268,31 +298,7 @@ pub fn parse_pr_url(url: &str) -> Option<PrLink> {
 /// marking the cells it covers. Used by [`pr_link`] to find a pull-request URL in
 /// the agent's output.
 fn screen_urls(screen: &vt100::Screen) -> Vec<String> {
-    let (rows, cols) = screen.size();
-    let mut urls = Vec::new();
-    if cols == 0 {
-        return urls;
-    }
-    let width = cols as usize;
-    let mut chars: Vec<char> = Vec::with_capacity(width);
-    let mut start = 0;
-    while start < rows {
-        let mut end = start;
-        while end + 1 < rows && screen.row_wrapped(end) {
-            end += 1;
-        }
-        chars.clear();
-        for row in start..=end {
-            for col in 0..cols {
-                chars.push(cell_char(screen.cell(row, col)));
-            }
-        }
-        for span in url_spans(&chars) {
-            urls.push(chars[span].iter().collect());
-        }
-        start = end + 1;
-    }
-    urls
+    scan_links(screen).urls
 }
 
 /// Whether `chars[at..]` begins with `needle`.

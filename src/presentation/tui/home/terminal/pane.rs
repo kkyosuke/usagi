@@ -353,13 +353,17 @@ fn drive(
                 let parser = pty.parser();
                 let screen = parser.screen();
                 if links_cache.as_ref().map(|(g, _)| *g) != Some(gen) {
-                    links_cache = Some((gen, link::link_cells(screen)));
+                    // One whole-screen scan yields both the link cells (to
+                    // underline) and the URL text — computing them together avoids
+                    // a second full-grid walk under the parser lock.
+                    let scan = link::scan_links(screen);
                     // Fresh output: harvest the pull-request URLs the agent may have
                     // printed, recording them for the attached session so the sidebar
                     // shows the `#<number>` badges and a click reopens them. Keyed by
                     // the session root (the dir the agent runs in), matching what
                     // `sync` reads; the store accumulates distinct URLs over time.
-                    let prs = link::pr_links(screen);
+                    let prs = link::pr_links_from(&scan.urls);
+                    links_cache = Some((gen, scan.cells));
                     if !prs.is_empty() && prs != last_prs {
                         if let Some(wt) = state.list().active() {
                             let _ = crate::infrastructure::pr_link_store::add(&wt.path, &prs);
