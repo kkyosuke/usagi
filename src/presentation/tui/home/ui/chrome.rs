@@ -388,6 +388,14 @@ pub(super) fn footer_line(width: usize, state: &HomeState) -> String {
         // The 没入 navigation keys depend on the configured key scheme: the
         // `Ctrl-O` leader (then a key) or single `Alt`-chords.
         Mode::Attached => match state.key_scheme() {
+            // While the leader is pending the footer flips to the waiting hint, so
+            // a `Ctrl-O` that drew no visible response reads as "waiting for the
+            // next key" rather than "ignored"; it lapses on its own after
+            // `PREFIX_TIMEOUT`, or on `Esc` / any other unbound key.
+            KeyScheme::Prefix if state.prefix_pending() => {
+                "[attached]  Ctrl-O ▸ o switch / a focus / n/p tab / g agent / e note / q quit · Esc cancel"
+                    .to_string()
+            }
             KeyScheme::Prefix => {
                 "[attached]  Ctrl-O then: o switch / a focus / n/p tab / g agent / e note / q quit · Ctrl-^ last"
                     .to_string()

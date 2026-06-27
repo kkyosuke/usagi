@@ -343,6 +343,12 @@ pub struct HomeState {
     /// Injected from the effective settings by `mod.rs` and re-read when the
     /// config screen closes; read by the pane input loop ([`super::pane_input`]).
     key_scheme: KeyScheme,
+    /// Whether a `Ctrl-O` leader press is awaiting its action key right now
+    /// (prefix [`KeyScheme`] only), so the 没入 footer can show it is waiting. Set
+    /// by the pane drive loop ([`super::terminal::pane`]) as the leader is pressed
+    /// and as it lapses ([`super::pane_input::PREFIX_TIMEOUT`]); read by the
+    /// footer ([`super::ui`]). Always `false` outside 没入 / the prefix scheme.
+    prefix_pending: bool,
     /// Whether the `ai` command is offered in the 在席 (Focus) menu: true only
     /// when the local LLM is enabled and its model is pulled. Injected from the
     /// effective settings (and a runtime probe) by `mod.rs`; false by default so
@@ -536,6 +542,7 @@ impl HomeState {
             session_action_ui: SessionActionUi::default(),
             sidebar: Sidebar::default(),
             key_scheme: KeyScheme::default(),
+            prefix_pending: false,
             ai_available: false,
             default_agent: AgentCli::default(),
             installed_agents: Vec::new(),
@@ -635,6 +642,19 @@ impl HomeState {
     /// pane input loop to classify each key (see [`super::pane_input::classify`]).
     pub fn key_scheme(&self) -> KeyScheme {
         self.key_scheme
+    }
+
+    /// Record whether a `Ctrl-O` leader is currently awaiting its action key, so
+    /// the 没入 footer can show it (set by the pane drive loop as the leader is
+    /// pressed and as it lapses; see [`super::pane_input::prefix_alive`]).
+    pub fn set_prefix_pending(&mut self, pending: bool) {
+        self.prefix_pending = pending;
+    }
+
+    /// Whether a `Ctrl-O` leader is awaiting its action key — read by the footer
+    /// to hint that the next key completes the chord (prefix scheme, 没入 only).
+    pub fn prefix_pending(&self) -> bool {
+        self.prefix_pending
     }
 
     /// Enable or disable the sidebar mascot's reactions (injected from the

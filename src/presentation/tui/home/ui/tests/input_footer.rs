@@ -195,6 +195,25 @@ fn footer_line_differs_by_mode() {
 }
 
 #[test]
+fn attached_prefix_footer_flips_to_the_waiting_hint_while_a_leader_is_pending() {
+    let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
+    state.show_attached();
+    // Idle, the footer advertises the leader sequence ("Ctrl-O then: …").
+    assert!(footer_line(80, &state).contains("Ctrl-O then"));
+    // Once the leader is pressed the footer flips to the waiting hint, so a
+    // Ctrl-O that drew no visible response reads as "waiting" not "ignored", and
+    // names how to back out.
+    state.set_prefix_pending(true);
+    let waiting = footer_line(80, &state);
+    assert!(!waiting.contains("Ctrl-O then"));
+    assert!(waiting.contains("Ctrl-O ▸"));
+    assert!(waiting.contains("Esc cancel"));
+    // The Alt scheme has no pending state, so the hint never applies there.
+    state.set_key_scheme(crate::domain::settings::KeyScheme::Alt);
+    assert!(footer_line(80, &state).contains("Alt:"));
+}
+
+#[test]
 fn switch_footer_reflects_the_waiting_first_sort_toggle() {
     let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
     // Off by default, the footer offers the toggle plainly.
