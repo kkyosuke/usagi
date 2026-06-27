@@ -24,6 +24,7 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 use crate::infrastructure::json_file;
+use crate::infrastructure::store_lock::StoreLock;
 use crate::infrastructure::worktree_keyed_store::{dir, file_name, key};
 
 /// Subdirectory of the data dir the queued-prompt files live under.
@@ -44,6 +45,10 @@ struct PromptFile {
 pub fn set(worktree: &Path, prompt: &str) -> Result<()> {
     let key = key(worktree);
     let dir = dir(PROMPT_SUBDIR)?;
+    // Hold the store lock across the write so a concurrent `take` (in the TUI
+    // process) cannot read an old prompt and then delete the file this write
+    // just renamed into place — which would silently drop the queued prompt.
+    let _lock = StoreLock::acquire(&dir)?;
     let path = dir.join(file_name(&key));
     json_file::write_atomic(
         &dir,
@@ -61,7 +66,14 @@ pub fn set(worktree: &Path, prompt: &str) -> Result<()> {
 /// nothing queued starts the agent without one.
 pub fn take(worktree: &Path) -> Option<String> {
     let key = key(worktree);
-    let path = dir(PROMPT_SUBDIR).ok()?.join(file_name(&key));
+    let dir = dir(PROMPT_SUBDIR).ok()?;
+    // Serialise the read-then-remove against `set` (see there): without the lock
+    // a `set` landing between the read below and the remove would have its file
+    // deleted and its prompt never delivered. If the lock cannot be taken we
+    // return without removing anything, leaving the prompt queued for a later
+    // launch rather than risking a lost or misattributed delivery.
+    let _lock = StoreLock::acquire(&dir).ok()?;
+    let path = dir.join(file_name(&key));
     match json_file::read::<PromptFile>(&path) {
         // Ours: hand back the prompt and remove the file (one-shot delivery).
         Ok(Some(file)) if file.worktree.as_path() == key => {
@@ -108,6 +120,22 @@ mod tests {
             set(wt.path(), "implement issue #50").unwrap();
             assert_eq!(take(wt.path()), Some("implement issue #50".to_string()));
             // Taking again finds nothing: the prompt is one-shot.
+            assert_eq!(take(wt.path()), None);
+        });
+    }
+
+    #[test]
+    fn set_and_take_create_the_shared_store_lock() {
+        with_data_dir(|_| {
+            let wt = tempfile::tempdir().unwrap();
+            set(wt.path(), "queued").unwrap();
+            // The per-store lock file lives alongside the prompt files, so a
+            // concurrent set/take in another process serialises behind it
+            // (see StoreLock) and a queued prompt can never be lost to a race.
+            let dir = dir(PROMPT_SUBDIR).unwrap();
+            assert!(StoreLock::path(&dir).exists());
+            // Delivery still works with the lock held across read-then-remove.
+            assert_eq!(take(wt.path()), Some("queued".to_string()));
             assert_eq!(take(wt.path()), None);
         });
     }
