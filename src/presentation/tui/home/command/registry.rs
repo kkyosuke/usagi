@@ -29,9 +29,6 @@ impl CommandRegistry {
                 Box::new(SessionCommand),
                 Box::new(TerminalCommand),
                 Box::new(AgentCommand),
-                // The not-yet-implemented `ai` placeholder sits after the working
-                // session commands so the 在席 (Focus) menu lists (and highlights)
-                // `terminal` first, matching `document/design/05-home.md`.
                 Box::new(ComingSoonCommand {
                     name: "ai",
                     description: "Talk to the AI agent",
@@ -39,8 +36,6 @@ impl CommandRegistry {
                     examples: &["ai fix the failing test"],
                     scope: CommandScope::Session,
                 }),
-                // `close` is the destructive session action, listed last in the
-                // 在席 menu so it sits below the launch commands.
                 Box::new(CloseCommand),
                 Box::new(ConfigCommand),
                 Box::new(IssueCommand),
@@ -79,10 +74,11 @@ impl CommandRegistry {
             .collect()
     }
 
-    /// The commands belonging exactly to `scope`, in display order — used by the
-    /// 在席 (Focus) menu to list a session's runnable commands (`terminal`,
-    /// `agent`, `ai`). Unlike completion this is an exact-scope filter, so it
-    /// excludes the shared [`CommandScope::Both`] utilities.
+    /// The commands belonging exactly to `scope`, in registry order — used by the
+    /// 在席 (Focus) menu to list a session's runnable commands (`agent`, `ai`,
+    /// `terminal`, `close`); the menu sorts them alphabetically itself. Unlike
+    /// completion this is an exact-scope filter, so it excludes the shared
+    /// [`CommandScope::Both`] utilities.
     pub fn commands_in_scope(&self, scope: CommandScope) -> Vec<CommandInfo> {
         self.infos()
             .into_iter()

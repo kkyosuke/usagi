@@ -1994,15 +1994,17 @@ impl HomeState {
         self.enter_switch(ReturnMode::Base);
     }
 
-    /// The Session-scope commands the 在席 menu lists, in registry order
-    /// (`terminal`, `agent`, `ai`). The `ai` command is filtered out unless the
-    /// local LLM is usable (enabled and its model pulled), so it only appears
-    /// when running it would actually work. `close` is filtered out on the root
-    /// row, which belongs to no session and so cannot be closed.
+    /// The Session-scope commands the 在席 menu lists, in alphabetical order by
+    /// name (`agent`, `ai`, `close`, `terminal`). The `ai` command is filtered
+    /// out unless the local LLM is usable (enabled and its model pulled), so it
+    /// only appears when running it would actually work. `close` is filtered out
+    /// on the root row, which belongs to no session and so cannot be closed.
+    /// `agent` is filtered out when the focused session already has a live
+    /// `agent` pane, since its agent is already running.
     ///
     /// Resolved for the **active** row: 在席 acts on the session it focused.
     pub fn focus_menu_commands(&self) -> Vec<CommandInfo> {
-        self.menu_commands_for_root(self.list.root_active())
+        self.menu_commands_for_root(self.list.root_active(), self.agent_tab_open())
     }
 
     /// The same Session-scope command list as [`focus_menu_commands`], but
@@ -2011,20 +2013,40 @@ impl HomeState {
     /// so its `close` visibility must follow that row — otherwise a session row
     /// previewed while the root row is active would hide `close` (and vice
     /// versa), showing the active row's menu instead of the highlighted one's.
+    /// The preview only renders this menu for a row with no live panes, so its
+    /// `agent` is never hidden (there is no agent pane open to hide it for).
     pub fn preview_menu_commands(&self) -> Vec<CommandInfo> {
-        self.menu_commands_for_root(self.list.root_selected())
+        self.menu_commands_for_root(self.list.root_selected(), false)
     }
 
     /// Shared body of [`focus_menu_commands`] / [`preview_menu_commands`]: the
-    /// Session-scope commands, with `ai` gated on local-LLM availability and
-    /// `close` hidden when `root` (the row belongs to no session).
-    fn menu_commands_for_root(&self, root: bool) -> Vec<CommandInfo> {
-        self.registry
+    /// Session-scope commands sorted alphabetically by name, with `ai` gated on
+    /// local-LLM availability, `close` hidden when `root` (the row belongs to no
+    /// session), and `agent` hidden when `agent_open` (a live agent pane already
+    /// exists for the resolved session).
+    fn menu_commands_for_root(&self, root: bool, agent_open: bool) -> Vec<CommandInfo> {
+        let mut commands: Vec<CommandInfo> = self
+            .registry
             .commands_in_scope(CommandScope::Session)
             .into_iter()
             .filter(|info| info.name != "ai" || self.ai_available)
             .filter(|info| info.name != "close" || !root)
-            .collect()
+            .filter(|info| info.name != "agent" || !agent_open)
+            .collect();
+        commands.sort_by(|a, b| a.name.cmp(b.name));
+        commands
+    }
+
+    /// Whether the focused session already has a live `agent` pane — a tab the
+    /// session's published [`TabStrip`] labels `agent` (or `agent N` when several
+    /// agents run). The 在席 menu hides the `agent` launch command in that case.
+    fn agent_tab_open(&self) -> bool {
+        self.terminal.tabs.as_ref().is_some_and(|strip| {
+            strip
+                .labels
+                .iter()
+                .any(|label| label == "agent" || label.starts_with("agent "))
+        })
     }
 
     /// How many live panes the focused session publishes (the leading 在席 tabs),
