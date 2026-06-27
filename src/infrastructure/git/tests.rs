@@ -27,15 +27,21 @@ fn init_repo(dir: &Path) {
 /// Built without `git clone` so the result does not depend on the host's
 /// `init.defaultBranch` (which differs between developer machines and CI):
 /// the work repo is created explicitly on `main`, then pushed with `-u` to
-/// a bare remote to establish the upstream and `origin/main` ref.
+/// a bare remote (itself created on `main`) to establish the upstream and
+/// `origin/main` ref. The bare repo needs `-b main` too: [`push_new_commit`]
+/// clones it, and a clone checks out whatever branch the bare's HEAD names —
+/// which without `-b main` follows the host's `init.defaultBranch` (`master`
+/// on CI), leaving no local `main` to push back.
 fn repo_with_remote() -> (tempfile::TempDir, std::path::PathBuf) {
     let tmp = tempfile::tempdir().unwrap();
     let bare = tmp.path().join("remote.git");
     let work = tmp.path().join("work");
 
+    // `-b main` pins the bare repo's HEAD to `main` so clones of it (see
+    // [`push_new_commit`]) check out `main` regardless of `init.defaultBranch`.
     run(
         tmp.path(),
-        &["init", "-q", "--bare", bare.to_str().unwrap()],
+        &["init", "-q", "--bare", "-b", "main", bare.to_str().unwrap()],
     );
 
     std::fs::create_dir_all(&work).unwrap();
@@ -342,6 +348,51 @@ fn worktree_status_reports_no_branch_or_upstream_when_absent() {
     // A non-repo path yields nothing.
     let plain = tempfile::tempdir().unwrap();
     assert!(worktree_status(plain.path()).is_none());
+}
+
+#[test]
+fn ensure_excluded_hides_an_untracked_path_from_status() {
+    let dir = tempfile::tempdir().unwrap();
+    init_repo(dir.path());
+    // An untracked file makes the worktree dirty...
+    std::fs::write(dir.path().join("artifact"), "x").unwrap();
+    assert!(worktree_status(dir.path()).unwrap().dirty);
+
+    // ...but once excluded it no longer counts as a change.
+    ensure_excluded(dir.path(), "/artifact").unwrap();
+    assert!(!worktree_status(dir.path()).unwrap().dirty);
+
+    // The pattern landed in the local exclude file, not a tracked .gitignore.
+    let exclude = std::fs::read_to_string(dir.path().join(".git/info/exclude")).unwrap();
+    assert!(exclude.lines().any(|l| l == "/artifact"));
+    assert!(!dir.path().join(".gitignore").exists());
+}
+
+#[test]
+fn ensure_excluded_is_idempotent_and_preserves_existing_content() {
+    let dir = tempfile::tempdir().unwrap();
+    init_repo(dir.path());
+    let exclude = dir.path().join(".git/info/exclude");
+    // Seed the exclude file with prior content that has no trailing newline, so
+    // the appended pattern starts on its own line.
+    std::fs::write(&exclude, "# existing\n*.tmp").unwrap();
+
+    ensure_excluded(dir.path(), "/.claude/skills").unwrap();
+    // A second call adds nothing further.
+    ensure_excluded(dir.path(), "/.claude/skills").unwrap();
+
+    let content = std::fs::read_to_string(&exclude).unwrap();
+    assert!(content.contains("*.tmp"));
+    assert_eq!(
+        content.lines().filter(|l| *l == "/.claude/skills").count(),
+        1
+    );
+}
+
+#[test]
+fn ensure_excluded_errors_outside_a_git_worktree() {
+    let plain = tempfile::tempdir().unwrap();
+    assert!(ensure_excluded(plain.path(), "/x").is_err());
 }
 
 #[test]
@@ -800,4 +851,138 @@ fn is_repository_detects_git_and_plain_dirs() {
     let plain = tmp.path().join("plain");
     std::fs::create_dir_all(&plain).unwrap();
     assert!(!is_repository(&plain));
+}
+
+// --- fetch / merge -------------------------------------------------------
+
+/// The full HEAD commit at `dir`.
+fn head_at(dir: &Path) -> String {
+    git_capture(dir, &["rev-parse", "HEAD"])
+        .unwrap()
+        .unwrap_or_default()
+}
+
+/// Push a new commit to `bare`'s `main` from a throwaway clone, so that a repo
+/// tracking `bare` becomes one commit behind `origin/main` after fetching.
+/// `file`/`contents` let a caller stage a change that will conflict with local
+/// work on the same path.
+fn push_new_commit(bare: &Path, file: &str, contents: &str) {
+    let tmp = tempfile::tempdir().unwrap();
+    let clone = tmp.path().join("pusher");
+    run(
+        tmp.path(),
+        &[
+            "clone",
+            "-q",
+            bare.to_str().unwrap(),
+            clone.to_str().unwrap(),
+        ],
+    );
+    run(&clone, &["config", "user.email", "t@e.com"]);
+    run(&clone, &["config", "user.name", "t"]);
+    std::fs::write(clone.join(file), contents).unwrap();
+    run(&clone, &["add", "."]);
+    run(&clone, &["commit", "-q", "-m", "remote work"]);
+    run(&clone, &["push", "-q", "origin", "main"]);
+    // Keep the temp clone alive until the push completes.
+    drop(tmp);
+}
+
+#[test]
+fn fetch_updates_remote_tracking_refs_and_errors_without_a_remote() {
+    let (tmp, work) = repo_with_remote();
+    // A new commit lands on the remote; fetching brings origin/main forward.
+    push_new_commit(&tmp.path().join("remote.git"), "remote.txt", "hi");
+
+    fetch(&work).unwrap();
+    // origin/main now resolves to a commit local main does not have.
+    let local = head_at(&work);
+    let remote = git_capture(&work, &["rev-parse", "origin/main"])
+        .unwrap()
+        .unwrap();
+    assert_ne!(local, remote);
+
+    // A plain repo with no `origin` remote surfaces the failure.
+    let plain = tempfile::tempdir().unwrap();
+    init_repo(plain.path());
+    let err = fetch(plain.path()).unwrap_err();
+    assert!(err.to_string().contains("git fetch failed"), "{err}");
+}
+
+#[test]
+fn merge_ff_only_fast_forwards_reports_up_to_date_and_refuses_to_diverge() {
+    let (tmp, work) = repo_with_remote();
+    push_new_commit(&tmp.path().join("remote.git"), "remote.txt", "hi");
+    fetch(&work).unwrap();
+
+    // Behind by one: a fast-forward advances HEAD to origin/main.
+    let status = merge(&work, "origin/main", true).unwrap();
+    assert_eq!(status, MergeStatus::Updated);
+    assert_eq!(
+        head_at(&work),
+        git_capture(&work, &["rev-parse", "origin/main"])
+            .unwrap()
+            .unwrap()
+    );
+
+    // Now even with the remote: a second ff-only merge is a no-op.
+    let status = merge(&work, "origin/main", true).unwrap();
+    assert_eq!(status, MergeStatus::AlreadyUpToDate);
+
+    // Local commits the remote lacks make a fast-forward impossible: the merge
+    // refuses rather than creating a merge commit, and HEAD is untouched.
+    push_new_commit(&tmp.path().join("remote.git"), "remote.txt", "moved on");
+    fetch(&work).unwrap();
+    std::fs::write(work.join("local.txt"), "local work").unwrap();
+    run(&work, &["add", "."]);
+    run(&work, &["commit", "-q", "-m", "local work"]);
+    let head_before = head_at(&work);
+    let status = merge(&work, "origin/main", true).unwrap();
+    assert_eq!(status, MergeStatus::NotFastForward);
+    assert_eq!(head_at(&work), head_before);
+}
+
+#[test]
+fn merge_creates_a_merge_commit_and_aborts_a_conflict() {
+    let (tmp, work) = repo_with_remote();
+    // The remote advances on `f` (the file init_repo committed).
+    push_new_commit(&tmp.path().join("remote.git"), "f", "remote change\n");
+    fetch(&work).unwrap();
+
+    // Local work on a *different* file merges cleanly into a merge commit.
+    std::fs::write(work.join("local.txt"), "local\n").unwrap();
+    run(&work, &["add", "."]);
+    run(&work, &["commit", "-q", "-m", "local work"]);
+    let status = merge(&work, "origin/main", false).unwrap();
+    assert_eq!(status, MergeStatus::Updated);
+    // Both changes are present after the merge.
+    assert_eq!(
+        std::fs::read_to_string(work.join("f")).unwrap(),
+        "remote change\n"
+    );
+    assert!(work.join("local.txt").exists());
+
+    // The remote changes `f` again; local edits the same line differently and
+    // commits, so the next merge conflicts — it must abort and restore HEAD.
+    push_new_commit(&tmp.path().join("remote.git"), "f", "remote v2\n");
+    fetch(&work).unwrap();
+    std::fs::write(work.join("f"), "local v2\n").unwrap();
+    run(&work, &["add", "."]);
+    run(&work, &["commit", "-q", "-m", "local edit of f"]);
+    let head_before = head_at(&work);
+    let status = merge(&work, "origin/main", false).unwrap();
+    assert_eq!(status, MergeStatus::Conflict);
+    // Aborted: HEAD is restored and no merge is in progress.
+    assert_eq!(head_at(&work), head_before);
+    assert_eq!(
+        std::fs::read_to_string(work.join("f")).unwrap(),
+        "local v2\n"
+    );
+    assert!(
+        git_capture(&work, &["rev-parse", "--verify", "--quiet", "MERGE_HEAD"])
+            .unwrap()
+            .is_none()
+    );
+
+    drop(tmp);
 }

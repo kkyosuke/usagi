@@ -143,6 +143,21 @@ pub fn create(workspace_root: &Path, name: &str) -> Result<CreatedSession> {
         tree::build_dir(workspace_root, &dest_root, &branch, &mut worktrees)?;
     }
 
+    // Symlink usagi's shipped skills into each worktree so the agent launched
+    // there discovers them. The skills themselves are materialised once under the
+    // global data dir at startup (see
+    // [`skills::materialize`](crate::infrastructure::skills::materialize)); this
+    // points each worktree's `.claude/skills/<name>` at that directory and
+    // excludes those symlinks from git so they never mark the session dirty.
+    // Best-effort: a skills hiccup must not fail an otherwise-built session.
+    let skill_excludes = crate::infrastructure::skills::git_exclude_patterns();
+    for wt in &worktrees {
+        for pattern in &skill_excludes {
+            let _ = git::ensure_excluded(wt, pattern);
+        }
+        let _ = crate::infrastructure::skills::link(wt);
+    }
+
     record(&store, name, &dest_root, &worktrees)?;
 
     crate::infrastructure::trace_log::TraceLog::record(
@@ -310,6 +325,31 @@ pub fn set_note(workspace_root: &Path, name: &str, note: &str) -> Result<Option<
         };
         session.note.clone()
     })
+}
+
+/// Set (or clear) the workspace **root**'s free-form note in `state.json` — the
+/// `⌂ root` row's counterpart to [`set_note`], which targets a session.
+///
+/// The note is trimmed and cleared-when-empty exactly as [`set_note`] handles a
+/// session's, and returns the note now stored (`None` when cleared). Unlike
+/// [`set_note`] this never errors on a missing `state.json`: the root belongs to
+/// no session, so a workspace with no sessions recorded yet can still carry a
+/// root note — the state is created (defaulted) when absent. Takes the same store
+/// lock across the read-modify-write so it serialises against concurrent writers.
+pub fn set_root_note(workspace_root: &Path, note: &str) -> Result<Option<String>> {
+    let store = WorkspaceStore::new(workspace_root);
+    let _lock = store.lock()?;
+    let mut state = store.load()?.unwrap_or_default();
+    let trimmed = note.trim_end();
+    state.root_note = if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    };
+    let stored = state.root_note.clone();
+    state.updated_at = Utc::now();
+    store.save(&state)?;
+    Ok(stored)
 }
 
 /// List the sessions recorded for `workspace_root`, in stored order.
@@ -539,6 +579,18 @@ pub fn workspace_root(start: &Path) -> PathBuf {
         prefix.push(component);
     }
     start.to_path_buf()
+}
+
+/// The source git repositories a session under `workspace_root` spans: the root
+/// itself when it is a repository, otherwise every repository reached by the
+/// recursive workspace walk.
+///
+/// This is the set whose default branches `usagi update` refreshes from the
+/// remote — the same repositories a new session cuts a worktree in — so the two
+/// views of "which repos does this workspace contain" stay in sync. Returns an
+/// empty list for a non-git, repo-less root.
+pub fn source_repos(workspace_root: &Path) -> Vec<PathBuf> {
+    tree::source_repos(workspace_root)
 }
 
 /// Every existing session worktree root under `<workspace_root>/.usagi/sessions/`.
@@ -860,9 +912,11 @@ mod tests {
             assert!(git_cmd(dir).args(args).status().unwrap().success());
         };
 
+        // `-b main` keeps the bare repo's HEAD on `main`, matching the other
+        // test remotes so the idiom is consistent and host-`init.defaultBranch`-proof.
         run(
             tmp.path(),
-            &["init", "-q", "--bare", bare.to_str().unwrap()],
+            &["init", "-q", "--bare", "-b", "main", bare.to_str().unwrap()],
         );
         init_repo(&root);
         run(&root, &["remote", "add", "origin", bare.to_str().unwrap()]);
@@ -1125,6 +1179,60 @@ mod tests {
         assert!(err.to_string().contains("no such session"));
     }
 
+    fn root_note_of(root: &Path) -> Option<String> {
+        WorkspaceStore::new(root)
+            .load()
+            .unwrap()
+            .and_then(|s| s.root_note)
+    }
+
+    #[test]
+    fn set_root_note_sets_trims_and_clears_without_a_session() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        // No state.json yet: unlike `set_note`, the root note can be written before
+        // any session exists — the state is created on demand.
+        let stored = set_root_note(root.path(), "root line 1\nroot line 2").unwrap();
+        assert_eq!(stored.as_deref(), Some("root line 1\nroot line 2"));
+        assert_eq!(
+            root_note_of(root.path()).as_deref(),
+            Some("root line 1\nroot line 2")
+        );
+
+        // Trailing whitespace / blank lines are trimmed off the end.
+        let stored = set_root_note(root.path(), "kept\n\n  \n").unwrap();
+        assert_eq!(stored.as_deref(), Some("kept"));
+
+        // A note that trims to empty clears it.
+        let stored = set_root_note(root.path(), "   \n ").unwrap();
+        assert_eq!(stored, None);
+        assert_eq!(root_note_of(root.path()), None);
+    }
+
+    #[test]
+    fn set_root_note_leaves_sessions_untouched() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        create(root.path(), "feature").unwrap();
+        set_note(root.path(), "feature", "session memo").unwrap();
+
+        set_root_note(root.path(), "root memo").unwrap();
+        // The root note is recorded alongside the session, which keeps its own note.
+        assert_eq!(root_note_of(root.path()).as_deref(), Some("root memo"));
+        assert_eq!(
+            note_of(root.path(), "feature").as_deref(),
+            Some("session memo")
+        );
+        assert_eq!(
+            list(root.path())
+                .unwrap()
+                .into_iter()
+                .map(|s| s.name)
+                .collect::<Vec<_>>(),
+            vec!["feature".to_string()]
+        );
+    }
+
     #[test]
     fn set_display_name_errors_without_state_or_session() {
         let root = tempfile::tempdir().unwrap();
@@ -1350,7 +1458,7 @@ mod tests {
                 status: BranchStatus::Local,
                 diff: None,
                 ahead_behind: None,
-                pr: None,
+                pr: Vec::new(),
                 updated_at: Utc::now(),
             }],
             created_at: Utc::now(),

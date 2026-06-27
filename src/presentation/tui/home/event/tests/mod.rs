@@ -4,11 +4,13 @@ use super::super::terminal::tabs::TabNav;
 use super::*;
 use crate::domain::settings::{AgentCli, SessionActionUi};
 use crate::domain::workspace_state::{BranchStatus, SessionRecord, WorktreeState};
+use crate::presentation::tui::io::screen::{ClickEvent, Input, ScrollEvent};
 use chrono::{DateTime, Utc};
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::io;
 use std::path::PathBuf;
+use std::time::Duration;
 
 /// A [`ConfigReload`] carrying `ui` and the local LLM left unavailable — the
 /// shape the config-close callback returns in tests that only care about the
@@ -26,6 +28,7 @@ fn noop_create(_: &str) -> SessionOutcome {
         line: LogLine::output("created"),
         sessions: None,
         select: None,
+        root_note: None,
     }
 }
 
@@ -34,6 +37,7 @@ fn noop_remove(_: &str, _: bool) -> SessionOutcome {
         line: LogLine::output("removed"),
         sessions: None,
         select: None,
+        root_note: None,
     }
 }
 
@@ -42,6 +46,7 @@ fn noop_rename(_: &str, _: &str) -> SessionOutcome {
         line: LogLine::output("renamed"),
         sessions: None,
         select: None,
+        root_note: None,
     }
 }
 
@@ -50,6 +55,7 @@ fn noop_set_note(_: &str, _: &str) -> SessionOutcome {
         line: LogLine::output("note saved"),
         sessions: None,
         select: None,
+        root_note: None,
     }
 }
 
@@ -73,6 +79,46 @@ impl KeyReader for ScriptedReader {
     }
 }
 
+/// A source that replays a scripted run of full [`Input`] events — keys, scrolls,
+/// and clicks — for the tests that exercise mouse handling (the key-only
+/// [`ScriptedReader`] can only feed keys). Like it, drained reads default to
+/// Ctrl-C so a test can never spin forever.
+struct InputReader {
+    inputs: VecDeque<io::Result<Input>>,
+}
+
+impl InputReader {
+    fn new(inputs: Vec<io::Result<Input>>) -> Self {
+        Self {
+            inputs: inputs.into(),
+        }
+    }
+}
+
+impl KeyReader for InputReader {
+    fn read_key(&mut self) -> io::Result<Key> {
+        // The loop only reads inputs; surface a queued key for completeness, else
+        // the Ctrl-C terminator.
+        match self.inputs.pop_front() {
+            Some(Ok(Input::Key(key))) => Ok(key),
+            _ => Ok(Key::CtrlC),
+        }
+    }
+
+    fn read_input(&mut self) -> io::Result<Input> {
+        self.inputs
+            .pop_front()
+            .unwrap_or(Ok(Input::Key(Key::CtrlC)))
+    }
+
+    // Mirror the real terminal reader: the animate path (a live session, a mascot
+    // blink kicked by the last keypress) reads through the timeout, so it must
+    // drain the same scripted queue rather than the key-only default.
+    fn read_input_timeout(&mut self, _timeout: Duration) -> io::Result<Option<Input>> {
+        Ok(Some(self.read_input()?))
+    }
+}
+
 fn worktree(branch: Option<&str>, path: &str) -> WorktreeState {
     WorktreeState {
         branch: branch.map(|b| b.to_string()),
@@ -83,7 +129,7 @@ fn worktree(branch: Option<&str>, path: &str) -> WorktreeState {
         status: BranchStatus::Local,
         diff: None,
         ahead_behind: None,
-        pr: None,
+        pr: Vec::new(),
         updated_at: Utc::now(),
     }
 }
@@ -390,6 +436,55 @@ fn run_capturing_attached_dirs(keys: Vec<io::Result<Key>>) -> Vec<PathBuf> {
         .unwrap(),
         Outcome::Quit
     ));
+    opened.into_inner()
+}
+
+/// Capture the directories `open_terminal` is driven against while the loop is
+/// driven by scripted [`Input`] events (mouse tests), attaching (closing at once)
+/// for each, with a live preview so every focus attaches. `state` lets a test set
+/// up the sidebar / mode it clicks in.
+fn run_capturing_attached_dirs_for_inputs(
+    inputs: Vec<io::Result<Input>>,
+    state: HomeState,
+) -> Vec<PathBuf> {
+    let term = Term::stdout();
+    let mut reader = InputReader::new(inputs);
+    let monitor = MonitorHandle::detached();
+    let opened = RefCell::new(Vec::new());
+    let mut open = |_h: &mut HomeState, d: &Path, _a: bool, _n: bool| {
+        opened.borrow_mut().push(d.to_path_buf());
+        Ok(PaneExit::Closed)
+    };
+    let mut persist: fn(&str) = noop_persist;
+    let mut create: fn(&str) -> SessionOutcome = noop_create;
+    let mut remove: fn(&str, bool) -> SessionOutcome = noop_remove;
+    let mut config: fn(&Term) -> Result<Option<ConfigReload>> = noop_config;
+    let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = live_preview;
+    let mut branches: fn() -> Vec<String> = no_branches;
+    let outcome = event_loop_compat(
+        &term,
+        &mut reader,
+        state,
+        Path::new("/ws"),
+        &monitor,
+        &UpdateHandle::new(),
+        &OneShot::<bool>::new(),
+        &OneShot::<Vec<AgentCli>>::new(),
+        &mut persist,
+        &mut create,
+        &mut (noop_rename as fn(&str, &str) -> SessionOutcome),
+        &mut (noop_set_note as fn(&str, &str) -> SessionOutcome),
+        &mut remove,
+        &mut branches,
+        &mut open,
+        &mut config,
+        &mut preview,
+        &mut (noop_tab_op as fn(&Path, Option<TabNav>) -> (Vec<String>, usize)),
+        &mut (noop_close as fn(&mut HomeState, &Path)),
+        &mut (noop_reorder as fn(&str, bool) -> SessionReorder),
+    )
+    .unwrap();
+    assert!(matches!(outcome, Outcome::Quit));
     opened.into_inner()
 }
 
@@ -719,10 +814,12 @@ fn shift_arrow(letter: char) -> io::Result<Key> {
 
 mod attached;
 mod background_tasks;
+mod clicks;
 mod config_switch;
 mod ctrl_caret;
 mod focus_menu;
 mod focus_prompt;
+mod mascot_click;
 mod notes;
 mod palette;
 mod quit_modal;

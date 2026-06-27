@@ -92,7 +92,7 @@
           "status": "local",
           "diff": { "added": 124, "removed": 18 },
           "ahead_behind": { "ahead": 2, "behind": 1 },
-          "pr": { "number": 412, "url": "https://github.com/KKyosuke/usagi/pull/412" },
+          "pr": [{ "number": 412, "url": "https://github.com/KKyosuke/usagi/pull/412" }],
           "updated_at": "2026-06-13T05:01:18.659149Z"
         }
       ],
@@ -100,6 +100,7 @@
       "last_active": "2026-06-13T09:42:07.123456Z"
     }
   ],
+  "root_note": "リリース前に CHANGELOG を更新する",
   "updated_at": "2026-06-13T05:01:18.659149Z"
 }
 ```
@@ -109,6 +110,7 @@
 | フィールド | 型 | 意味 |
 |---|---|---|
 | `sessions` | array | 作成済みセッションの一覧（`.usagi/sessions/` 配下）。**配列順がホーム画面の表示順**で、初期値は作成順、切替（Switch）の `K`/`J` で並び替えると入れ替えた順序がこの配列に永続化される（[design/05-home.md](../design/05-home.md#切替switch既定)）。古いファイルには無く、その場合は空として扱う |
+| `root_note` | string? | ワークスペース**ルート行（`⌂ root`）**に紐づく自由記述の**複数行メモ**（任意）。セッションが持つ `note` のルート版で、ルートはどのセッションにも属さないためトップレベルに置く。**見た目だけ**の付加情報で、未設定（既定）なら省略される |
 | `updated_at` | RFC3339(UTC) | この状態を git から最後に更新した日時 |
 
 > ワークスペース共通の「既定ブランチ」は持ちません。複数リポジトリで既定ブランチが異なり得る（`main` / `master` など）ため、各 worktree の status は**その worktree のリポジトリの既定ブランチ**に対して個別に判定します。
@@ -131,7 +133,7 @@ worktree を束ねます。各 worktree は git ステータス付き（下記 `
 | `last_active` | RFC3339(UTC)? | このセッションを最後に触った日時（切替・在席でアクティブにした、または端末／Agent の活動を観測した）。ホーム画面の鮮度ドット（[design/05-home.md](../design/05-home.md#レイアウト)）の基準時刻で、放置するほど淡く沈む。未設定（既定。一度も触っていない）なら省略され、`created_at` にフォールバックする |
 
 セッション作成（`usecase/session`）はこの `SessionRecord` を `state.json` に追記します。
-表示名の変更（`usecase/session::set_display_name`、ホーム画面の[切替モードの `r`](../design/05-home.md#各モードの説明)）は `display_name` だけを、メモの編集（`usecase/session::set_note`、ホーム画面の[切替モードの `n` / 没入の `Ctrl-E`](../design/05-home.md#セッションメモの編集)）は `note` だけを書き換えます。`state.json` はマシンローカル（git 管理外）なので、メモはこの環境にだけ保存され、ブランチや PR では共有されません。
+表示名の変更（`usecase/session::set_display_name`、ホーム画面の[切替モードの `r`](../design/05-home.md#各モードの説明)）は `display_name` だけを、メモの編集（`usecase/session::set_note`、ホーム画面の[切替モードの `n` / 没入の `Ctrl-E`](../design/05-home.md#セッションメモの編集)）は `note` だけを書き換えます。ルート行（`⌂ root`）のメモも同じ操作で編集でき、こちらはトップレベルの `root_note`（`usecase/session::set_root_note`）を書き換えます。`state.json` はマシンローカル（git 管理外）なので、メモはこの環境にだけ保存され、ブランチや PR では共有されません。
 再同期（`usecase/workspace_state::sync`）は各セッション worktree の git ステータスを
 読み直して更新します。
 
@@ -151,7 +153,7 @@ worktree を束ねます。各 worktree は git ステータス付き（下記 `
 | `status` | enum | ブランチのライフサイクル状態（下記） |
 | `diff` | object? | 既定ブランチとの累積差分の行数 `{ "added": N, "removed": M }`。サイドバーの `+N -M` バッジの元。差分が無い（手つかず）・既定ブランチ自身・detached HEAD・読めなかったときは省略（`null` 相当）。古いファイルにキーが無くても読める |
 | `ahead_behind` | object? | 既定ブランチとのコミット単位の差 `{ "ahead": N, "behind": M }`（`ahead`＝ブランチ側に多いコミット数・`behind`＝既定ブランチ側に多いコミット数）。サイドバーの `↑N ↓M` マーカーの元。差が無い（ahead も behind も 0）・既定ブランチ自身・detached HEAD・読めなかったときは省略（`null` 相当）。古いファイルにキーが無くても読める |
-| `pr` | object? | このセッションに紐づく Pull Request `{ "number": N, "url": "..." }`。サイドバーの `#N` バッジ（[design/05-home.md](../design/05-home.md#pr-バッジ)）の元で、クリックで `url` をブラウザで開く。上の git 由来フィールドと違い**再同期で git から読み直さない**——没入中にエージェントが出力した PR の URL（`/pull/<N>`）をターミナル出力から拾い、worktree キーの保存先（`pr-links/`）経由でここへ畳み込む。一度きりの URL でもバッジが再起動後も残るよう永続化する。未観測なら省略（`null` 相当）。古いファイルにキーが無くても読める |
+| `pr` | array | このセッションに紐づく Pull Request の配列 `[{ "number": N, "url": "..." }, …]`。サイドバーの `#N` バッジ（[design/05-home.md](../design/05-home.md#pr-バッジ)）の元で、クリックで各 `url` をブラウザで開く。セッションが複数リポジトリに跨り複数 PR を持つ場合は**全部**並ぶ。上の git 由来フィールドと違い**再同期で git から読み直さない**——没入中にエージェントが出力した PR の URL（`/pull/<N>`）をターミナル出力から拾い、worktree キーの保存先（`pr-links/`、URL 単位で重複排除しつつ蓄積）経由でここへ畳み込む。一度きりの URL でもバッジが再起動後も残るよう永続化する。未観測なら空配列で省略される。古いファイルにキーが無くても読める |
 | `updated_at` | RFC3339(UTC) | この worktree の状態を更新した日時 |
 
 ## `status`: ブランチのライフサイクル状態

@@ -222,6 +222,7 @@ fn worktree_row_marks_the_cursor_in_switch_and_shows_detached() {
         "",
         10,
         10,
+        DetailCols::default(),
         false,
         Utc::now(),
         true,
@@ -242,6 +243,7 @@ fn worktree_row_marks_the_cursor_in_switch_and_shows_detached() {
         "",
         10,
         10,
+        DetailCols::default(),
         false,
         Utc::now(),
         true,
@@ -259,6 +261,7 @@ fn worktree_row_marks_the_cursor_in_switch_and_shows_detached() {
         "",
         10,
         10,
+        DetailCols::default(),
         false,
         Utc::now(),
         false,
@@ -278,6 +281,7 @@ fn worktree_row_marks_the_cursor_in_switch_and_shows_detached() {
         "",
         10,
         10,
+        DetailCols::default(),
         false,
         Utc::now(),
         false,
@@ -300,6 +304,7 @@ fn worktree_row_shows_a_memo_marker_only_when_the_session_has_a_note() {
         "",
         10,
         10,
+        DetailCols::default(),
         true,
         Utc::now(),
         false,
@@ -316,6 +321,7 @@ fn worktree_row_shows_a_memo_marker_only_when_the_session_has_a_note() {
         "",
         10,
         10,
+        DetailCols::default(),
         false,
         Utc::now(),
         false,
@@ -349,7 +355,20 @@ fn worktree_row_heat_dot_fades_with_time_since_touched() {
             ..worktree(Some("s"), false, BranchStatus::Local)
         };
         let (top, _) = worktree_row(
-            &worktree, "", 10, 10, false, now, false, false, false, false, false, false, false,
+            &worktree,
+            "",
+            10,
+            10,
+            DetailCols::default(),
+            false,
+            now,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
         );
         console::strip_ansi_codes(&top).into_owned()
     };
@@ -369,6 +388,7 @@ fn worktree_row_marks_the_active_worktree_with_a_gutter_bar_on_both_lines() {
         "",
         10,
         10,
+        DetailCols::default(),
         false,
         Utc::now(),
         false,
@@ -390,6 +410,7 @@ fn worktree_row_marks_the_active_worktree_with_a_gutter_bar_on_both_lines() {
         "",
         10,
         10,
+        DetailCols::default(),
         false,
         Utc::now(),
         false,
@@ -412,6 +433,7 @@ fn worktree_row_shows_the_agent_state_through_its_lifecycle() {
         "",
         10,
         12,
+        DetailCols::default(),
         false,
         Utc::now(),
         false,
@@ -431,6 +453,7 @@ fn worktree_row_shows_the_agent_state_through_its_lifecycle() {
         "",
         10,
         12,
+        DetailCols::default(),
         false,
         Utc::now(),
         false,
@@ -450,6 +473,7 @@ fn worktree_row_shows_the_agent_state_through_its_lifecycle() {
         "",
         10,
         12,
+        DetailCols::default(),
         false,
         Utc::now(),
         false,
@@ -470,6 +494,7 @@ fn worktree_row_shows_the_agent_state_through_its_lifecycle() {
         "",
         10,
         12,
+        DetailCols::default(),
         false,
         Utc::now(),
         false,
@@ -490,6 +515,7 @@ fn worktree_row_shows_the_agent_state_through_its_lifecycle() {
         "",
         10,
         12,
+        DetailCols::default(),
         false,
         Utc::now(),
         false,
@@ -532,6 +558,7 @@ fn worktree_row_truncates_a_long_branch() {
         "",
         8,
         8,
+        DetailCols::default(),
         false,
         Utc::now(),
         false,
@@ -552,6 +579,7 @@ fn worktree_row_shows_the_label_override_instead_of_the_branch() {
         "Login flow",
         20,
         20,
+        DetailCols::default(),
         false,
         Utc::now(),
         false,
@@ -569,26 +597,62 @@ fn worktree_row_shows_the_label_override_instead_of_the_branch() {
 #[test]
 fn root_row_marks_selected_and_active() {
     // The `>` cursor shows on the selected root only in 切替 (Switch).
-    let (top, detail) = root_row(10, 20, true, false, true);
+    let (top, detail) = root_row(10, 20, false, true, false, true);
     assert!(top.contains('>'));
     assert!(top.contains('⌂'));
     assert!(top.contains(ROOT_NAME));
     assert!(detail.contains("workspace root"));
     // The same selected root outside Switch shows no cursor.
-    let (top_no_switch, _) = root_row(10, 20, true, false, false);
+    let (top_no_switch, _) = root_row(10, 20, false, true, false, false);
     assert!(!top_no_switch.contains('>'));
 
     // The active root carries the green `▎` bar down both lines, not a `*`.
-    let (active_top, active_detail) = root_row(10, 20, false, true, false);
+    let (active_top, active_detail) = root_row(10, 20, false, false, true, false);
     assert!(active_top.contains('▎'));
     assert!(active_detail.contains('▎'));
     assert!(!active_top.contains('*'));
 
-    let (idle_top, idle_detail) = root_row(10, 20, false, false, false);
+    let (idle_top, idle_detail) = root_row(10, 20, false, false, false, false);
     assert!(!idle_top.contains('>'));
     assert!(!idle_top.contains('▎'));
     assert!(!idle_detail.contains('▎'));
     assert!(idle_top.contains(ROOT_NAME));
+}
+
+#[test]
+fn root_row_shows_the_memo_marker_only_when_it_has_a_note() {
+    // The root row carries its own note, like a session: the memo marker shows on
+    // line 1 only when `has_note`, and is purely additive (the right-edge status
+    // column does not shift), matching the worktree row.
+    let (with_note, _) = root_row(10, 20, true, false, false, false);
+    let (without_note, _) = root_row(10, 20, false, false, false, false);
+    assert!(with_note.contains(NOTE_ICON));
+    assert!(!without_note.contains(NOTE_ICON));
+    assert_eq!(
+        console::measure_text_width(&console::strip_ansi_codes(&with_note)),
+        console::measure_text_width(&console::strip_ansi_codes(&without_note)),
+    );
+}
+
+#[test]
+fn left_pane_marks_the_root_row_when_it_carries_a_note() {
+    let mut list = list_with(Vec::new());
+    list.set_root_note_marker(true);
+    let lines = left_pane(
+        &list,
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashMap::new(),
+        80,
+        6,
+        false,
+        Sidebar::Full,
+        Utc::now(),
+    );
+    // Line 0 is the root row; with the marker set it shows the memo glyph.
+    assert!(lines[0].contains(NOTE_ICON));
 }
 
 #[test]
@@ -599,6 +663,7 @@ fn left_pane_renders_the_root_entry_then_the_empty_message() {
         &HashSet::new(),
         &HashSet::new(),
         &HashSet::new(),
+        &HashMap::new(),
         80,
         6,
         false,
@@ -630,6 +695,7 @@ fn left_pane_shows_each_sessions_relative_update_time_on_the_detail_line() {
         &HashSet::new(),
         &HashSet::new(),
         &HashSet::new(),
+        &HashMap::new(),
         30,
         5,
         false,
@@ -640,7 +706,7 @@ fn left_pane_shows_each_sessions_relative_update_time_on_the_detail_line() {
     // on the session's detail line (index 4).
     let detail = console::strip_ansi_codes(&lines[4]);
     assert!(
-        detail.contains("5分前"),
+        detail.contains("5min ago"),
         "{detail:?} missing the relative time"
     );
 }
@@ -658,6 +724,7 @@ fn left_pane_shows_the_ahead_behind_marker_on_the_detail_line() {
         &HashSet::new(),
         &HashSet::new(),
         &HashSet::new(),
+        &HashMap::new(),
         40,
         5,
         false,
@@ -673,6 +740,70 @@ fn left_pane_shows_the_ahead_behind_marker_on_the_detail_line() {
 }
 
 #[test]
+fn left_pane_lines_the_detail_fields_up_across_sessions_of_different_sizes() {
+    use crate::domain::workspace_state::{AheadBehind, DiffStat};
+    let now = chrono::DateTime::parse_from_rfc3339("2026-06-27T12:00:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    // A tiny, just-touched session with a live agent…
+    let mut small = worktree(Some("small"), false, BranchStatus::Local);
+    small.path = PathBuf::from("/repo/small");
+    small.updated_at = now - chrono::Duration::seconds(30);
+    small.diff = Some(DiffStat {
+        added: 5,
+        removed: 3,
+    });
+    small.ahead_behind = Some(AheadBehind {
+        ahead: 2,
+        behind: 0,
+    });
+    // …beside a much larger, staler one with no agent. The change counts differ by
+    // orders of magnitude and the "ago" labels differ in width.
+    let mut big = worktree(Some("big"), false, BranchStatus::Local);
+    big.path = PathBuf::from("/repo/big");
+    big.updated_at = now - chrono::Duration::minutes(12);
+    big.diff = Some(DiffStat {
+        added: 140,
+        removed: 88,
+    });
+    big.ahead_behind = Some(AheadBehind {
+        ahead: 0,
+        behind: 7,
+    });
+    let live = HashSet::from([PathBuf::from("/repo/small")]);
+    let lines = left_pane(
+        &list_with(vec![small, big]),
+        &live,
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashMap::new(),
+        80,
+        8,
+        false,
+        Sidebar::Full,
+        now,
+    );
+    // Detail lines: small at index 4, big at index 6.
+    let small_detail = console::strip_ansi_codes(&lines[4]);
+    let big_detail = console::strip_ansi_codes(&lines[6]);
+    assert!(small_detail.contains("☾ ready")); // the live agent's label
+    assert!(small_detail.contains("+  5 - 3")); // counts padded to the wide columns
+    assert!(big_detail.contains("+140 -88"));
+    assert!(big_detail.contains("12min ago"));
+    // The diff `+` lands in the same display column on both rows regardless of how
+    // many changed lines each carries — the point of the fixed columns.
+    let col_of =
+        |s: &str, ch: char| console::measure_text_width(&s[..s.find(ch).expect("char present")]);
+    assert_eq!(col_of(&small_detail, '+'), col_of(&big_detail, '+'));
+    // Both detail lines fill the same width, so the cluster's right edge lines up.
+    assert_eq!(
+        console::measure_text_width(&small_detail),
+        console::measure_text_width(&big_detail)
+    );
+}
+
+#[test]
 fn left_pane_renders_the_root_entry_then_one_entry_per_worktree() {
     let list = list_with(vec![
         worktree(Some("main"), true, BranchStatus::Pushed),
@@ -684,6 +815,7 @@ fn left_pane_renders_the_root_entry_then_one_entry_per_worktree() {
         &HashSet::new(),
         &HashSet::new(),
         &HashSet::new(),
+        &HashMap::new(),
         30,
         7,
         false,
@@ -716,6 +848,7 @@ fn left_pane_stops_building_rows_once_the_pane_is_full() {
         &HashSet::new(),
         &HashSet::new(),
         &HashSet::new(),
+        &HashMap::new(),
         30,
         5,
         false,
@@ -749,6 +882,7 @@ fn rail_pane_stops_building_rows_once_the_rail_is_full() {
         &HashSet::new(),
         &HashSet::new(),
         &HashSet::new(),
+        &HashMap::new(),
         8,
         5,
         false,
@@ -771,6 +905,7 @@ fn left_pane_marks_the_agent_state_through_its_lifecycle() {
         &empty,
         &empty,
         &empty,
+        &HashMap::new(),
         30,
         6,
         false,
@@ -786,6 +921,7 @@ fn left_pane_marks_the_agent_state_through_its_lifecycle() {
         &path,
         &empty,
         &empty,
+        &HashMap::new(),
         30,
         6,
         false,
@@ -801,6 +937,7 @@ fn left_pane_marks_the_agent_state_through_its_lifecycle() {
         &path,
         &path,
         &empty,
+        &HashMap::new(),
         30,
         6,
         false,
@@ -816,6 +953,7 @@ fn left_pane_marks_the_agent_state_through_its_lifecycle() {
         &empty,
         &empty,
         &empty,
+        &HashMap::new(),
         30,
         6,
         false,
@@ -826,6 +964,73 @@ fn left_pane_marks_the_agent_state_through_its_lifecycle() {
     assert!(!absent[4].contains('◆'));
     assert!(!absent[4].contains('☾'));
     assert!(absent[3].contains("local"));
+}
+
+#[test]
+fn left_pane_adds_a_resource_line_only_for_a_sampled_live_session() {
+    let list = list_with(vec![worktree(Some("feature"), false, BranchStatus::Local)]);
+    let path: HashSet<PathBuf> = [PathBuf::from("/repo/wt")].into_iter().collect();
+    let empty = HashSet::new();
+    let resources: HashMap<PathBuf, ResourceUsage> = [(
+        PathBuf::from("/repo/wt"),
+        ResourceUsage {
+            cpu_percent: 12,
+            memory_bytes: 256 * 1024 * 1024,
+        },
+    )]
+    .into_iter()
+    .collect();
+
+    // Rows: 0/1 root, 2 divider, 3 identity, 4 agent detail, 5 the resource line.
+    let with_usage = left_pane(
+        &list,
+        &path,
+        &path,
+        &empty,
+        &empty,
+        &resources,
+        40,
+        8,
+        false,
+        Sidebar::Full,
+        Utc::now(),
+    );
+    assert!(with_usage[4].contains("running"));
+    assert!(console::strip_ansi_codes(&with_usage[5]).contains("CPU 12%  MEM 256MB"));
+
+    // With no sample the session stays two lines — there is no resource row.
+    let without = left_pane(
+        &list,
+        &path,
+        &path,
+        &empty,
+        &empty,
+        &HashMap::new(),
+        40,
+        8,
+        false,
+        Sidebar::Full,
+        Utc::now(),
+    );
+    assert!(without[4].contains("running"));
+    assert!(without.get(5).is_none_or(|l| !l.contains("CPU")));
+
+    // In 切替 the unselected rows (the cursor rests on the root) are dimmed — the
+    // resource line is faded along with the rest of its entry, but its text stays.
+    let in_switch = left_pane(
+        &list,
+        &path,
+        &path,
+        &empty,
+        &empty,
+        &resources,
+        40,
+        8,
+        true,
+        Sidebar::Full,
+        Utc::now(),
+    );
+    assert!(console::strip_ansi_codes(&in_switch[5]).contains("CPU 12%  MEM 256MB"));
 }
 
 #[test]
@@ -841,6 +1046,7 @@ fn left_pane_is_trimmed_to_available_rows() {
         &HashSet::new(),
         &HashSet::new(),
         &HashSet::new(),
+        &HashMap::new(),
         30,
         4,
         false,
@@ -867,6 +1073,7 @@ fn left_pane_marks_the_active_worktree_with_a_gutter_bar() {
         &HashSet::new(),
         &HashSet::new(),
         &HashSet::new(),
+        &HashMap::new(),
         30,
         7,
         false,
@@ -894,6 +1101,7 @@ fn rail_collapses_each_entry_to_two_rows_without_names_or_numbers() {
         &empty,
         &empty,
         &empty,
+        &HashMap::new(),
         RAIL_WIDTH,
         8,
         false,
@@ -942,6 +1150,7 @@ fn rail_keeps_the_same_row_count_as_the_full_sidebar() {
             &empty,
             &empty,
             &empty,
+            &HashMap::new(),
             30,
             20,
             false,
@@ -960,6 +1169,7 @@ fn rail_keeps_the_same_row_count_as_the_full_sidebar() {
             &empty,
             &empty,
             &empty,
+            &HashMap::new(),
             30,
             20,
             false,
@@ -988,6 +1198,7 @@ fn rail_shows_the_active_bar_down_both_rows_and_the_agent_glyph_on_row_two() {
         &path,
         &empty,
         &empty,
+        &HashMap::new(),
         RAIL_WIDTH,
         8,
         false,
@@ -1019,6 +1230,7 @@ fn rail_shows_each_agent_state_glyph_on_the_detail_row() {
             running,
             waiting,
             done,
+            &HashMap::new(),
             RAIL_WIDTH,
             8,
             false,
@@ -1047,6 +1259,7 @@ fn rail_sidebar_marks_the_switch_cursor() {
             &empty,
             &empty,
             &empty,
+            &HashMap::new(),
             RAIL_WIDTH,
             8,
             true,
@@ -1090,6 +1303,7 @@ fn left_pane_fades_every_row_but_the_cursor_when_asked() {
         &HashSet::new(),
         &HashSet::new(),
         &HashSet::new(),
+        &HashMap::new(),
         30,
         6,
         true,
@@ -1103,54 +1317,47 @@ fn left_pane_fades_every_row_but_the_cursor_when_asked() {
 }
 
 #[test]
-fn worktree_row_shows_the_pr_badge_only_when_a_pr_is_present() {
-    // A worktree carrying a PR shows `#<number>` on its detail line.
-    let with_pr = worktree_with_pr(412);
-    let (_, detail) = worktree_row(
-        &with_pr,
-        "",
-        12,
-        24,
+fn left_pane_shows_the_pr_badge_for_a_session_that_has_one() {
+    // A session whose worktree carries a PR renders `#<number>` on its detail line;
+    // a session without one shows no `#` badge. `left_pane` sizes the PR column
+    // (via `detail_cols`) and `worktree_row` fills the `pr_cell`.
+    let list = list_with(vec![
+        worktree_with_pr(412),
+        worktree(Some("plain"), false, BranchStatus::Local),
+    ]);
+    let lines = left_pane(
+        &list,
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashMap::new(),
+        30,
+        8,
         false,
+        Sidebar::Full,
         Utc::now(),
-        false,
-        false,
-        false,
-        false,
-        false,
-        false,
-        false,
     );
-    assert!(console::strip_ansi_codes(&detail).contains("#412"));
-
-    // The same row with no PR shows no `#` badge.
-    let without_pr = worktree(Some("main"), false, BranchStatus::Pushed);
-    let (_, detail) = worktree_row(
-        &without_pr,
-        "",
-        12,
-        24,
-        false,
-        Utc::now(),
-        false,
-        false,
-        false,
-        false,
-        false,
-        false,
-        false,
-    );
-    assert!(!console::strip_ansi_codes(&detail).contains('#'));
+    let rendered = stripped(&lines);
+    // The first session (rows 3,4 after the root pair + divider) shows `#412`.
+    assert!(rendered.contains("#412"));
+    // The plain session contributes no PR, so there is exactly one `#` on screen.
+    assert_eq!(rendered.matches('#').count(), 1);
 }
 
 /// An attached (没入) state at 120×24 with the full sidebar, listing a session that
-/// carries PR `#412` followed by one with no PR — the fixture the
-/// `sidebar_pr_link_at` click tests share. Worktree rows start at screen row 6
+/// carries two PRs followed by one with no PR — the fixture the
+/// `sidebar_pr_links_at` click tests share. Worktree rows start at screen row 6
 /// (the body begins at row 3; the root entry and divider take its first 3 lines),
-/// two screen rows each: `#412` at rows 6–7, the PR-less one at rows 8–9.
+/// two screen rows each: the PR session at rows 6–7, the PR-less one at rows 8–9.
 fn attached_with_pr_sidebar() -> HomeState {
+    let mut wt = worktree_with_pr(412);
+    wt.pr.push(PrLink {
+        number: 98,
+        url: "https://github.com/o/other/pull/98".to_string(),
+    });
     let mut state = state_with(vec![
-        worktree_with_pr(412),
+        wt,
         worktree(Some("plain"), false, BranchStatus::Local),
     ]);
     state.enter_focus(1);
@@ -1159,44 +1366,47 @@ fn attached_with_pr_sidebar() -> HomeState {
 }
 
 #[test]
-fn sidebar_pr_link_at_opens_the_clicked_sessions_pr() {
+fn sidebar_pr_links_at_opens_every_pr_of_the_clicked_session() {
     let state = attached_with_pr_sidebar();
-    // Both lines of the session entry (rows 6 and 7) map to its PR.
-    let url = "https://github.com/o/r/pull/412".to_string();
-    assert_eq!(sidebar_pr_link_at(&state, 24, 120, 2, 6), Some(url.clone()));
-    assert_eq!(sidebar_pr_link_at(&state, 24, 120, 30, 7), Some(url));
+    // Both lines of the session entry (rows 6 and 7) map to all of its PRs.
+    let urls = vec![
+        "https://github.com/o/r/pull/412".to_string(),
+        "https://github.com/o/other/pull/98".to_string(),
+    ];
+    assert_eq!(sidebar_pr_links_at(&state, 24, 120, 2, 6), urls);
+    assert_eq!(sidebar_pr_links_at(&state, 24, 120, 30, 7), urls);
 }
 
 #[test]
-fn sidebar_pr_link_at_ignores_rows_without_a_pr() {
+fn sidebar_pr_links_at_ignores_rows_without_a_pr() {
     let state = attached_with_pr_sidebar();
     // The second session (rows 8–9) has no PR.
-    assert_eq!(sidebar_pr_link_at(&state, 24, 120, 2, 8), None);
+    assert!(sidebar_pr_links_at(&state, 24, 120, 2, 8).is_empty());
     // The root entry (rows 3–4) and the divider (row 5) are not session rows.
-    assert_eq!(sidebar_pr_link_at(&state, 24, 120, 2, 3), None);
-    assert_eq!(sidebar_pr_link_at(&state, 24, 120, 2, 5), None);
+    assert!(sidebar_pr_links_at(&state, 24, 120, 2, 3).is_empty());
+    assert!(sidebar_pr_links_at(&state, 24, 120, 2, 5).is_empty());
     // A body row past the end of the session list maps to no worktree.
-    assert_eq!(sidebar_pr_link_at(&state, 24, 120, 2, 10), None);
+    assert!(sidebar_pr_links_at(&state, 24, 120, 2, 10).is_empty());
 }
 
 #[test]
-fn sidebar_pr_link_at_ignores_clicks_off_the_sidebar() {
+fn sidebar_pr_links_at_ignores_clicks_off_the_sidebar() {
     let state = attached_with_pr_sidebar();
     // Left pane is 40 columns at width 120, so a click at column 40+ is the
     // divider / right pane, not a sidebar row.
-    assert_eq!(sidebar_pr_link_at(&state, 24, 120, 40, 6), None);
+    assert!(sidebar_pr_links_at(&state, 24, 120, 40, 6).is_empty());
     // Rows above the body (the title bar / mode ladder / blank separator).
-    assert_eq!(sidebar_pr_link_at(&state, 24, 120, 2, 1), None);
+    assert!(sidebar_pr_links_at(&state, 24, 120, 2, 1).is_empty());
     // A row below the two-pane body (past `body_rows`).
-    assert_eq!(sidebar_pr_link_at(&state, 24, 120, 2, 22), None);
+    assert!(sidebar_pr_links_at(&state, 24, 120, 2, 22).is_empty());
 }
 
 #[test]
-fn sidebar_pr_link_at_is_none_on_the_collapsed_rail() {
+fn sidebar_pr_links_at_is_empty_on_the_collapsed_rail() {
     let mut state = attached_with_pr_sidebar();
     // The rail shows no PR badge, so a click there opens nothing.
     state.set_sidebar(Sidebar::Rail);
-    assert_eq!(sidebar_pr_link_at(&state, 24, 120, 2, 6), None);
+    assert!(sidebar_pr_links_at(&state, 24, 120, 2, 6).is_empty());
 }
 
 #[test]
@@ -1205,4 +1415,54 @@ fn log_line_colours_each_kind_and_prompts_commands() {
     assert_eq!(log_line(&LogLine::output("plain"), 40), "plain");
     assert!(log_line(&LogLine::error("boom"), 40).contains("boom"));
     assert!(log_line(&LogLine::notice("note"), 40).contains("note"));
+}
+
+#[test]
+fn left_pane_session_at_maps_each_row_pair_to_its_session() {
+    // Two sessions on a 24×120 screen: left pane is 40 columns, body starts at
+    // screen row 3 (after the title / ladder / blank chrome). Each entry spans two
+    // rows — the root pair (rows 3,4), a divider (row 5), then a pair per worktree.
+    let state = state_with(vec![
+        worktree(Some("main"), true, BranchStatus::Local),
+        worktree(Some("feature"), false, BranchStatus::Local),
+    ]);
+    let at = |col, row| left_pane_session_at(&state, col, row, 24, 120);
+    // The root entry's two rows both select the root (index 0).
+    assert_eq!(at(0, 3), Some(0));
+    assert_eq!(at(10, 4), Some(0));
+    // The divider between the root and the sessions selects nothing.
+    assert_eq!(at(0, 5), None);
+    // Worktree 0 spans rows 6,7 (index 1); worktree 1 spans rows 8,9 (index 2).
+    assert_eq!(at(0, 6), Some(1));
+    assert_eq!(at(39, 7), Some(1));
+    assert_eq!(at(0, 8), Some(2));
+    assert_eq!(at(0, 9), Some(2));
+}
+
+#[test]
+fn left_pane_session_at_ignores_clicks_off_the_session_rows() {
+    let state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
+    let at = |col, row| left_pane_session_at(&state, col, row, 24, 120);
+    // The right pane (past the 40-column left pane) is not a row select.
+    assert_eq!(at(40, 3), None);
+    assert_eq!(at(80, 6), None);
+    // The chrome above the body (title / ladder / blank) selects nothing.
+    assert_eq!(at(0, 0), None);
+    assert_eq!(at(0, 2), None);
+    // Below the only session (rows 6,7) the rows are mascot / blank filler.
+    assert_eq!(at(0, 8), None);
+    // Far below the body (past its 19 rows) selects nothing either.
+    assert_eq!(at(0, 23), None);
+}
+
+#[test]
+fn left_pane_session_at_maps_clicks_on_the_collapsed_rail() {
+    // The rail is 5 columns wide but keeps the same two-rows-per-entry layout, so
+    // the same row maps to the same session — only the column bound narrows.
+    let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
+    state.set_sidebar(Sidebar::Rail);
+    // A click within the rail on worktree 0's rows selects it.
+    assert_eq!(left_pane_session_at(&state, 0, 6, 24, 120), Some(1));
+    // A click just past the 5-column rail is in the right pane, not a select.
+    assert_eq!(left_pane_session_at(&state, 5, 6, 24, 120), None);
 }

@@ -103,7 +103,7 @@ mod tests {
                 status: BranchStatus::Pushed,
                 diff: None,
                 ahead_behind: None,
-                pr: None,
+                pr: Vec::new(),
                 updated_at: Utc::now(),
             }],
             created_at: Utc::now(),

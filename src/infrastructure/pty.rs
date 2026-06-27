@@ -312,6 +312,14 @@ impl PtySession {
         Arc::clone(&self.bell)
     }
 
+    /// The shell's process id — also its process-group id, since portable-pty
+    /// launches it as a session leader (`setsid`), so it is the root a resource
+    /// sampler walks to total the session's whole process tree (the shell and any
+    /// agent CLI beneath it). `None` once the child has been reaped.
+    pub fn process_id(&self) -> Option<u32> {
+        self.child.process_id()
+    }
+
     /// The cursor shape (DECSCUSR `Ps`) the running program last selected, or `0`
     /// (the terminal default) until it picks one. The embedded-pane render loop
     /// re-emits `CSI Ps SP q` for the active pane so switching tabs restores each

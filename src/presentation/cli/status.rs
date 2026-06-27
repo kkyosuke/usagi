@@ -65,6 +65,7 @@ mod tests {
         let ts = Utc.with_ymd_and_hms(2026, 6, 13, 5, 1, 0).unwrap();
         WorkspaceState {
             updated_at: ts,
+            root_note: None,
             sessions: vec![SessionRecord {
                 name: "login".to_string(),
                 display_name: None,
@@ -82,7 +83,7 @@ mod tests {
                         status: BranchStatus::Pushed,
                         diff: None,
                         ahead_behind: None,
-                        pr: None,
+                        pr: Vec::new(),
                         updated_at: ts,
                     },
                     WorktreeState {
@@ -94,7 +95,7 @@ mod tests {
                         status: BranchStatus::Local,
                         diff: None,
                         ahead_behind: None,
-                        pr: None,
+                        pr: Vec::new(),
                         updated_at: ts,
                     },
                 ],

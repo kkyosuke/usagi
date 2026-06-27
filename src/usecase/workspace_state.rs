@@ -54,21 +54,21 @@ pub fn sync(cwd: &Path) -> Result<WorkspaceState> {
     let _lock = store.lock()?;
     let mut state = store.load()?.unwrap_or_default();
     for session in &mut state.sessions {
-        // The PR a session's agent printed is harvested out-of-band into the
+        // The PRs a session's agent printed are harvested out-of-band into the
         // PR-link store, keyed by the session root (the dir the agent runs in). Read
-        // it once per session and carry it on the session's first worktree, so the
-        // sidebar's per-session aggregate ([`session_row`]) surfaces it; the git
-        // refresh above never sets a PR, so this both shows it and persists it into
-        // state.json — the badge then survives a restart even though the agent only
-        // prints the URL once.
+        // them once per session and carry them on the session's first worktree, so
+        // the sidebar's per-session aggregate ([`session_row`]) surfaces them; the
+        // git refresh above never sets a PR, so this both shows them and persists
+        // them into state.json — the badges then survive a restart even though the
+        // agent only prints each URL once.
         //
         // [`session_row`]: crate::presentation::tui::home::state
-        let pr = pr_link_store::get(&session.root);
+        let prs = pr_link_store::get(&session.root);
         for (idx, wt) in session.worktrees.iter_mut().enumerate() {
             if let Some(updated) = refreshed.get(&wt.path) {
                 *wt = updated.clone();
             }
-            wt.pr = (idx == 0).then(|| pr.clone()).flatten();
+            wt.pr = if idx == 0 { prs.clone() } else { Vec::new() };
         }
     }
     state.updated_at = Utc::now();
@@ -156,6 +156,21 @@ pub fn recorded_sessions(root: &Path) -> Option<Vec<SessionRecord>> {
     }
 }
 
+/// The note recorded for the workspace **root** (the `⌂ root` row) straight from
+/// `<root>/.usagi/state.json`, read by `root` with no git refresh, or `None` when
+/// none has been written or the file cannot be read.
+///
+/// Companion to [`recorded_sessions_for_display`] for the home screen's first
+/// paint: the root row's memo, like a session's, is loaded from the recorded
+/// state without touching git. A read failure simply yields `None` (no root note)
+/// — the screen surfaces a state load error through the sessions path's notice.
+pub fn recorded_root_note(root: &Path) -> Option<String> {
+    match WorkspaceStore::new(root).load() {
+        Ok(state) => state.and_then(|s| s.root_note),
+        Err(_) => None,
+    }
+}
+
 /// Build the [`WorktreeState`] of a single worktree at `path`, classifying its
 /// branch against `default` — the default branch of the worktree's repository,
 /// resolved once by the caller (a workspace may span repositories with differing
@@ -189,9 +204,9 @@ pub fn inspect_worktree(path: &Path, default: &str) -> WorktreeState {
         status: classification,
         diff,
         ahead_behind,
-        // The git inspection never sets a PR — it is harvested from the agent's
+        // The git inspection never sets PRs — they are harvested from the agent's
         // terminal output and folded in by [`sync`] from the PR-link store.
-        pr: None,
+        pr: Vec::new(),
         updated_at: Utc::now(),
     }
 }
@@ -381,7 +396,7 @@ mod tests {
                 status: BranchStatus::Local,
                 diff: None,
                 ahead_behind: None,
-                pr: None,
+                pr: Vec::new(),
                 updated_at: Utc::now(),
             }],
             created_at: Utc::now(),
@@ -436,19 +451,25 @@ mod tests {
         });
         store.save(&state).unwrap();
 
-        // The agent "printed" a PR, harvested into the PR-link store out-of-band.
-        let pr = PrLink {
-            number: 412,
-            url: "https://github.com/KKyosuke/usagi/pull/412".to_string(),
-        };
-        pr_link_store::set(&wt_path, &pr).unwrap();
+        // The agent "printed" two PRs, harvested into the PR-link store out-of-band.
+        let prs = vec![
+            PrLink {
+                number: 412,
+                url: "https://github.com/KKyosuke/usagi/pull/412".to_string(),
+            },
+            PrLink {
+                number: 98,
+                url: "https://github.com/KKyosuke/other/pull/98".to_string(),
+            },
+        ];
+        pr_link_store::add(&wt_path, &prs).unwrap();
 
-        // sync folds it onto the worktree and persists it.
+        // sync folds them onto the worktree and persists them.
         let synced = sync(dir.path()).unwrap();
-        assert_eq!(synced.sessions[0].worktrees[0].pr, Some(pr.clone()));
-        // It is durable: a fresh load (no sync) still carries the PR.
+        assert_eq!(synced.sessions[0].worktrees[0].pr, prs);
+        // They are durable: a fresh load (no sync) still carries the PRs.
         let reloaded = store.load().unwrap().unwrap();
-        assert_eq!(reloaded.sessions[0].worktrees[0].pr, Some(pr));
+        assert_eq!(reloaded.sessions[0].worktrees[0].pr, prs);
 
         std::env::remove_var(crate::infrastructure::storage::DATA_DIR_ENV);
     }
@@ -506,6 +527,30 @@ mod tests {
             .contains("failed to load recorded sessions"));
 
         std::env::remove_var(crate::infrastructure::storage::DATA_DIR_ENV);
+    }
+
+    #[test]
+    fn recorded_root_note_reads_the_saved_root_note_and_is_none_when_absent_or_unreadable() {
+        let dir = tempfile::tempdir().unwrap();
+        // No state.json yet → None.
+        assert!(recorded_root_note(dir.path()).is_none());
+
+        // Saved state without a root note → None.
+        let store = WorkspaceStore::new(dir.path());
+        let state = WorkspaceState::new();
+        store.save(&state).unwrap();
+        assert!(recorded_root_note(dir.path()).is_none());
+
+        // Saved state with a root note → that note, read by the raw root.
+        let mut state = WorkspaceState::new();
+        state.root_note = Some("root memo".to_string());
+        store.save(&state).unwrap();
+        assert_eq!(recorded_root_note(dir.path()).as_deref(), Some("root memo"));
+
+        // An unreadable state.json falls back to None (no note).
+        let bad = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(bad.path().join(".usagi/state.json")).unwrap();
+        assert!(recorded_root_note(bad.path()).is_none());
     }
 
     #[test]

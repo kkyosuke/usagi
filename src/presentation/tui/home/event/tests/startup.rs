@@ -163,7 +163,8 @@ fn prompt_focus_ctrl_o_opens_switch_and_can_change_session() {
     };
     let mut keys = cmd("session switch root");
     keys.push(Ok(Key::Enter)); // Focus root (idle -> 在席 prompt, no attach)
-    keys.push(Ok(Key::Char(CTRL_O))); // 在席 -> 切替
+    keys.push(Ok(Key::Char(CTRL_O))); // 在席 leader
+    keys.push(Ok(Key::Char('o'))); // -> 切替
     keys.push(Ok(Key::ArrowDown)); // root -> main
     keys.push(Ok(Key::ArrowDown)); // main -> feat
     keys.push(Ok(Key::Enter)); // focus feat (live) -> attach

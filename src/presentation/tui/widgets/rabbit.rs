@@ -184,6 +184,84 @@ pub fn workspace_rabbit(mood: RabbitMood, blinking: bool, tick: usize) -> Vec<St
         .collect()
 }
 
+/// The resting mascot's playful one-shot reaction to being clicked. The home
+/// screen picks one pseudo-randomly each time the user clicks the sidebar rabbit
+/// ([`HomeState::kick_mascot_reaction`](crate::presentation::tui::home)), then
+/// plays it for a brief window — so a click makes the usagi do something cute and
+/// repeated clicks vary. Rendered by [`workspace_rabbit_reaction`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MascotReaction {
+    /// ぴょん — bounces in place, mouth wide with glee.
+    Hop,
+    /// きらきら — beams while little sparkles flicker around it.
+    Sparkle,
+    /// びっくり→照れ — startles, then melts into a bashful smile.
+    Bashful,
+}
+
+impl MascotReaction {
+    /// The reaction's animated `[ears, face]` rows for sub-frame `phase` (the feet
+    /// row never moves, so — like the blink and the Working paw — only the top two
+    /// rows animate and the block keeps the resting mascot's width). The frames
+    /// cycle modulo each reaction's own length, so a monotonically advancing
+    /// `phase` loops the little animation.
+    fn frame(self, phase: usize) -> [&'static str; 2] {
+        match self {
+            MascotReaction::Hop => match phase % 2 {
+                0 => [" (\\(\\", " (>w<)/"],
+                _ => ["  (\\(\\", "  (>w<)"],
+            },
+            MascotReaction::Sparkle => match phase % 3 {
+                0 => ["*(\\(\\", " (^v^) "],
+                1 => [" (\\(\\*", " (^v^) "],
+                _ => [" (\\(\\", "*(^v^)*"],
+            },
+            MascotReaction::Bashful => match phase % 4 {
+                0 => [" (\\(\\", " (O.O) "],
+                1 => [" (\\(\\", " (o.o) "],
+                2 => [" (\\(\\", " (^.^) "],
+                _ => [" (\\(\\", " (^/^) "],
+            },
+        }
+    }
+
+    /// The colour the reaction is painted: each reaction gets its own cheerful
+    /// accent so the burst reads as distinct from the resting mascot — magenta for
+    /// the bounce, yellow for the sparkles, cyan for the bashful melt.
+    fn style(self) -> Style {
+        match self {
+            MascotReaction::Hop => Style::new().magenta().bold(),
+            MascotReaction::Sparkle => Style::new().yellow().bold(),
+            MascotReaction::Bashful => Style::new().cyan().bold(),
+        }
+    }
+}
+
+/// The resting workspace mascot *reacting* to a click: the bottom-of-sidebar
+/// rabbit playing the one-shot `reaction` at sub-frame `phase`. Only the ears and
+/// face animate; the feet stay [`RABBIT`]'s, so the usagi reads as the same animal
+/// just being playful. Every row is padded to [`workspace_rabbit_width`] — the
+/// resting block's width — so the reaction occupies the exact same footprint and
+/// the sidebar never reflows (and the click target stays put) as it animates.
+pub fn workspace_rabbit_reaction(reaction: MascotReaction, phase: usize) -> Vec<String> {
+    let [ears, face] = reaction.frame(phase);
+    let rows = [
+        ears.to_string(),
+        face.to_string(),
+        RABBIT[2].trim_start().to_string(),
+    ];
+    let block_w = workspace_rabbit_width();
+    let paint = reaction.style();
+    rows.into_iter()
+        .map(|row| {
+            let pad = block_w.saturating_sub(console::measure_text_width(&row));
+            paint
+                .apply_to(format!("{row}{}", " ".repeat(pad)))
+                .to_string()
+        })
+        .collect()
+}
+
 /// Columns the speech bubble spends on chrome around its text: a rounded border
 /// and one space of padding on each side.
 const SPEECH_CHROME: usize = 4;
@@ -810,6 +888,75 @@ mod tests {
         );
         let joined = console::strip_ansi_codes(&lines.join("\n")).into_owned();
         assert!(joined.contains("(-.-)?"));
+    }
+
+    #[test]
+    fn workspace_rabbit_reaction_keeps_the_resting_footprint() {
+        // The reaction must occupy the exact same three-row, common-width block as
+        // the resting mascot, so playing it never reflows the sidebar (or shifts the
+        // click target). Every row is padded to `workspace_rabbit_width`.
+        for reaction in [
+            MascotReaction::Hop,
+            MascotReaction::Sparkle,
+            MascotReaction::Bashful,
+        ] {
+            for phase in 0..6 {
+                let lines = workspace_rabbit_reaction(reaction, phase);
+                assert_eq!(lines.len(), 3, "{reaction:?} is three rows");
+                assert!(
+                    lines
+                        .iter()
+                        .all(|l| console::measure_text_width(l) == workspace_rabbit_width()),
+                    "{reaction:?} phase {phase} keeps the resting width",
+                );
+                // The ears and feet stay the mascot's own, so it reads as the usagi.
+                let plain: Vec<String> = lines
+                    .iter()
+                    .map(|l| console::strip_ansi_codes(l).into_owned())
+                    .collect();
+                assert!(plain[0].contains("(\\(\\"), "{reaction:?} keeps its ears");
+                assert!(
+                    plain[2].contains("o(_(\")(\")"),
+                    "{reaction:?} keeps its feet"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn workspace_rabbit_reaction_animates_and_each_reaction_differs() {
+        // Each reaction shows a distinct expression and advancing the phase moves
+        // it, so the click burst reads as a little animation rather than a freeze.
+        let face = |reaction, phase| {
+            console::strip_ansi_codes(&workspace_rabbit_reaction(reaction, phase).join("\n"))
+                .into_owned()
+        };
+        // Distinct signature faces.
+        assert!(face(MascotReaction::Hop, 0).contains("(>w<)"));
+        assert!(face(MascotReaction::Sparkle, 2).contains('*'));
+        assert!(face(MascotReaction::Bashful, 0).contains("(O.O)"));
+        // Advancing the phase changes the frame for every reaction.
+        for reaction in [
+            MascotReaction::Hop,
+            MascotReaction::Sparkle,
+            MascotReaction::Bashful,
+        ] {
+            assert_ne!(
+                face(reaction, 0),
+                face(reaction, 1),
+                "{reaction:?} animates across phases",
+            );
+        }
+        // The frames cycle modulo their length, so a long-running phase wraps.
+        assert_eq!(face(MascotReaction::Hop, 0), face(MascotReaction::Hop, 2));
+        assert_eq!(
+            face(MascotReaction::Sparkle, 1),
+            face(MascotReaction::Sparkle, 4),
+        );
+        assert_eq!(
+            face(MascotReaction::Bashful, 3),
+            face(MascotReaction::Bashful, 7),
+        );
     }
 
     #[test]

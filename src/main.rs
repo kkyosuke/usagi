@@ -218,9 +218,9 @@ enum Commands {
         #[arg(long)]
         edit: bool,
     },
-    /// Check that required tools are installed
+    /// Check required tools and offer to install anything missing
     Doctor {
-        /// Try to install missing tools (or print manual steps)
+        /// Install everything missing without asking (otherwise prompt first)
         #[arg(long)]
         fix: bool,
     },
@@ -281,6 +281,12 @@ enum Commands {
     },
     /// Sync the current repository's worktree state to .usagi/state.json
     Status,
+    /// Update the default branch from its remote and distribute it into each session worktree (only where it merges cleanly)
+    Update {
+        /// Fetch and report what would change without modifying any branch or worktree
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -305,7 +311,13 @@ fn main() -> anyhow::Result<()> {
             let stdout = std::io::stdout();
             usagi::presentation::cli::guard_workspace::run(stdin.lock(), stdout.lock())
         }
-        Commands::Hop => usagi::presentation::cli::hop::run(usagi::presentation::tui::app::run),
+        Commands::Hop => {
+            // Materialise usagi's shipped skills under the data dir before the TUI
+            // launches any agent, so each session worktree's `.claude/skills`
+            // symlink resolves to current content. Best-effort.
+            let _ = usagi::infrastructure::skills::materialize_default();
+            usagi::presentation::cli::hop::run(usagi::presentation::tui::app::run)
+        }
         Commands::Icon { view } => usagi::presentation::cli::icon::run(view),
         Commands::Init { git } => usagi::presentation::cli::init::run(git),
         Commands::Issue { command } => usagi::presentation::cli::issue::run(command),
@@ -323,6 +335,9 @@ fn main() -> anyhow::Result<()> {
             )
         }
         Commands::Mcp => {
+            // A session created over MCP symlinks each worktree at the skills dir;
+            // materialise it here so the target exists. Best-effort.
+            let _ = usagi::infrastructure::skills::materialize_default();
             let stdin = std::io::stdin();
             let stdout = std::io::stdout();
             usagi::presentation::cli::mcp::run(
@@ -333,6 +348,7 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::Run { n } => usagi::presentation::cli::run::run(n),
         Commands::Status => usagi::presentation::cli::status::run(),
+        Commands::Update { dry_run } => usagi::presentation::cli::update::run(dry_run),
     };
 
     trace_command(name, result.is_ok());
@@ -360,6 +376,7 @@ fn command_name(command: &Commands) -> Option<&'static str> {
         Commands::Memory { .. } => Some("memory"),
         Commands::Run { .. } => Some("run"),
         Commands::Status => Some("status"),
+        Commands::Update { .. } => Some("update"),
         Commands::LlmMcp { .. } | Commands::Mcp => None,
     }
 }

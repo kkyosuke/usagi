@@ -29,11 +29,26 @@ pub struct ScrollEvent {
     pub row: u16,
 }
 
-/// One unit of terminal input: a key press, or a mouse-wheel scroll.
+/// A left-button mouse click, decoded from a terminal mouse report.
+///
+/// The management screens act on one only to make the sidebar mascot react: the
+/// home loop hit-tests the click against the resting rabbit and, if it lands,
+/// plays a playful reaction (see `home::event`). Every other click is dropped, so
+/// nothing else on the TUI is click-driven.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClickEvent {
+    /// The 0-based column the click was reported at.
+    pub col: u16,
+    /// The 0-based row the click was reported at.
+    pub row: u16,
+}
+
+/// One unit of terminal input: a key press, a mouse-wheel scroll, or a click.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Input {
     Key(Key),
     Scroll(ScrollEvent),
+    Click(ClickEvent),
 }
 
 /// Source of input driving an interactive screen.
@@ -66,6 +81,18 @@ pub trait KeyReader {
     /// terminal reader overrides it to honour the timeout.
     fn read_key_timeout(&mut self, _timeout: Duration) -> io::Result<Option<Key>> {
         Ok(Some(self.read_key()?))
+    }
+
+    /// The next input event (key, scroll, or click), or `None` if `timeout`
+    /// elapses with nothing ready — the input-aware counterpart of
+    /// [`read_key_timeout`](Self::read_key_timeout). The home loop reads through
+    /// this so a click can reach it (to make the mascot react) while idle ticks
+    /// still wake it to animate. Defaults to wrapping
+    /// [`read_key_timeout`](Self::read_key_timeout) as a key, so every screen and
+    /// its test stub inherits its existing timeout behaviour unchanged; only the
+    /// real terminal reader overrides it to surface scrolls and clicks.
+    fn read_input_timeout(&mut self, timeout: Duration) -> io::Result<Option<Input>> {
+        Ok(self.read_key_timeout(timeout)?.map(Input::Key))
     }
 }
 
@@ -495,6 +522,18 @@ mod tests {
         assert_eq!(
             reader.read_key_timeout(Duration::ZERO).unwrap(),
             Some(Key::Char('z'))
+        );
+    }
+
+    #[test]
+    fn default_read_input_timeout_wraps_the_key_timeout() {
+        // The default surfaces each timed read as a key, so a stub that only scripts
+        // keys keeps working when the loop reads inputs (clicks come only from the
+        // real terminal reader, which overrides this).
+        let mut reader = OneKey(Key::Char('z'));
+        assert_eq!(
+            reader.read_input_timeout(Duration::ZERO).unwrap(),
+            Some(Input::Key(Key::Char('z')))
         );
     }
 

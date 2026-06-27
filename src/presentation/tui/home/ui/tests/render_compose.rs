@@ -17,6 +17,74 @@ fn render_frame_combines_all_sections_at_full_height() {
 }
 
 #[test]
+fn mascot_hit_rect_covers_where_the_rabbit_is_drawn() {
+    let state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
+    let frame = render_frame(24, 80, &state);
+    let rect = mascot_hit_rect(24, 80, &state).expect("the mascot is shown at full size");
+    // Locate the rabbit's feet row in the rendered frame and assert it (and the
+    // body two rows up) falls inside the click rectangle — so the hit-test lands
+    // exactly where the rabbit was painted, not on hand-computed coordinates.
+    let (feet_row, line) = frame
+        .iter()
+        .enumerate()
+        .find(|(_, l)| console::strip_ansi_codes(l).contains("o(_(\")(\")"))
+        .expect("the rabbit's feet are drawn");
+    let feet_col = console::strip_ansi_codes(line)
+        .find('o')
+        .expect("the feet lead with `o`");
+    assert!(rect.contains(feet_col as u16, feet_row as u16));
+    assert!(rect.contains(feet_col as u16, (feet_row - 2) as u16));
+    // Cells well outside the block are not on the rabbit.
+    assert!(!rect.contains(0, 0));
+    assert!(!rect.contains(60, feet_row as u16));
+}
+
+#[test]
+fn mascot_hit_rect_is_none_when_there_is_no_room() {
+    let state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
+    // A very short screen leaves no room for the mascot below the list, so there is
+    // nothing to click.
+    assert!(mascot_hit_rect(8, 80, &state).is_none());
+}
+
+#[test]
+fn mascot_hit_rect_tracks_the_collapsed_rail_chibi() {
+    let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
+    state.toggle_sidebar(); // collapse to the rail
+    let frame = render_frame(24, 80, &state);
+    let rect = mascot_hit_rect(24, 80, &state).expect("the rail chibi is shown");
+    // The two-row chibi's face is inside the (narrower) rail click target.
+    let (face_row, line) = frame
+        .iter()
+        .enumerate()
+        .find(|(_, l)| console::strip_ansi_codes(l).contains("(･･)"))
+        .expect("the chibi face is drawn");
+    let face_col = console::strip_ansi_codes(line)
+        .find('(')
+        .expect("the chibi has an opening paren");
+    assert!(rect.contains(face_col as u16, face_row as u16));
+}
+
+#[test]
+fn mascot_hit_rect_targets_the_rabbit_below_the_update_bubble() {
+    // When the mascot speaks the update notice the block is taller (bubble + the
+    // rabbit), but only the rabbit's body — the bottom three rows — is clickable,
+    // so a click on the bubble does not count.
+    let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
+    state.set_update(crate::domain::version::Version::parse("9.9.9"));
+    let frame = render_frame(24, 100, &state);
+    let rect = mascot_hit_rect(24, 100, &state).expect("the speaking mascot is shown");
+    let (feet_row, _) = frame
+        .iter()
+        .enumerate()
+        .find(|(_, l)| console::strip_ansi_codes(l).contains("o(_(\")(\")"))
+        .expect("the rabbit's feet are drawn");
+    // The feet are on the rabbit (clickable); the bubble well above it is not.
+    assert!(rect.contains(1, feet_row as u16));
+    assert!(!rect.contains(1, (feet_row - 4) as u16));
+}
+
+#[test]
 fn command_palette_frame_shows_command_output_in_its_band() {
     let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
     state.open_command_palette();
@@ -55,6 +123,76 @@ fn render_frame_surfaces_running_and_waiting_agent_icons() {
     assert!(joined.contains("running"));
     assert!(joined.contains('◆'));
     assert!(joined.contains("waiting"));
+}
+
+#[test]
+fn workspace_total_label_spells_out_cpu_and_memory_or_is_absent_when_idle() {
+    // Nothing live → no label, so the resting mascot carries no number.
+    assert_eq!(workspace_total_label(ResourceUsage::default()), None);
+    let label = workspace_total_label(ResourceUsage {
+        cpu_percent: 23,
+        memory_bytes: 512 * 1024 * 1024,
+    })
+    .unwrap();
+    assert_eq!(console::strip_ansi_codes(&label), "CPU 23%  MEM 512MB");
+}
+
+#[test]
+fn append_total_beside_mascot_writes_on_the_face_row_when_it_fits() {
+    // Three mascot rows (ears / face / feet); the total joins the middle face row.
+    let rabbit_rows = || {
+        vec![
+            " (\\(\\".to_string(),
+            " (^.^)/".to_string(),
+            "o(_(\")(\")".to_string(),
+        ]
+    };
+    let total = ResourceUsage {
+        cpu_percent: 23,
+        memory_bytes: 512 * 1024 * 1024,
+    };
+    let mut rabbit = rabbit_rows();
+    append_total_beside_mascot(&mut rabbit, total, 40);
+    assert!(console::strip_ansi_codes(&rabbit[1]).contains("CPU 23%  MEM 512MB"));
+    // Only the face row gains it; the ears and feet are untouched.
+    assert!(!rabbit[0].contains("CPU"));
+    assert!(!rabbit[2].contains("CPU"));
+
+    // Too narrow for the art plus the label → the row is left alone (never
+    // overrunning the sidebar and pushing the right pane out of line).
+    let mut narrow = rabbit_rows();
+    append_total_beside_mascot(&mut narrow, total, 8);
+    assert!(!narrow[1].contains("CPU"));
+
+    // Idle total → nothing is appended at all.
+    let mut idle = rabbit_rows();
+    append_total_beside_mascot(&mut idle, ResourceUsage::default(), 40);
+    assert!(!idle[1].contains("CPU"));
+
+    // A two-row chibi has no distinct face row → it is left untouched.
+    let mut chibi = vec![" ∩∩".to_string(), "(･･)".to_string()];
+    append_total_beside_mascot(&mut chibi, total, 40);
+    assert!(!chibi.iter().any(|r| r.contains("CPU")));
+}
+
+#[test]
+fn render_frame_rests_the_workspace_total_beside_the_mascot() {
+    let mut wt = worktree(Some("feat"), true, BranchStatus::Local);
+    wt.path = PathBuf::from("/repo/run");
+    let mut state = HomeState::new("usagi", vec![wt], None);
+    state.apply_badges(MonitorSnapshot {
+        live: [PathBuf::from("/repo/run")].into(),
+        running: [PathBuf::from("/repo/run")].into(),
+        resource_total: ResourceUsage {
+            cpu_percent: 23,
+            memory_bytes: 512 * 1024 * 1024,
+        },
+        ..Default::default()
+    });
+    // A wide terminal gives the sidebar room for the art plus the spelled-out
+    // total beside it (a narrow one omits it — see the fit guard's own test).
+    let joined = console::strip_ansi_codes(&render_frame(24, 120, &state).join("\n")).into_owned();
+    assert!(joined.contains("CPU 23%  MEM 512MB"));
 }
 
 #[test]

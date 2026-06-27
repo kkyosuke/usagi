@@ -16,6 +16,41 @@ mod runner;
 pub use fix::{fix_missing, FixOutcome, InstallCommand, Manager};
 pub use runner::{CommandRunner, SystemRunner};
 
+/// Names of the checks `usagi doctor` can install, in display order: missing
+/// required tools, a missing Nerd Font, and (when enabled) the local LLM
+/// runtime/model. This drives the interactive install prompt.
+///
+/// Excluded — they have no automatic install:
+/// - `config` is created on first run, not installed (a `missing` here means
+///   the settings are unreadable, which `--fix` cannot repair).
+/// - The optional agent CLIs and desktop notifications report `warn`, not
+///   `missing`, so they never match.
+///
+/// The Nerd Font is the one `warn` that *is* installable (the TUI falls back to
+/// words without it, so its absence is a `warn`), so it is matched by name
+/// rather than by health.
+pub fn installable_gaps(checks: &[Check]) -> Vec<&'static str> {
+    checks
+        .iter()
+        .filter(|check| is_installable_gap(check))
+        .map(|check| check.name)
+        .collect()
+}
+
+/// Whether a single `check` is an installable gap (see [`installable_gaps`]).
+fn is_installable_gap(check: &Check) -> bool {
+    match check.name {
+        // Created on first run, never auto-installed.
+        CONFIG_CHECK => false,
+        // A missing Nerd Font is a `warn`, but the font flow can install it.
+        NERD_FONT_CHECK => check.health == Health::Warn,
+        // Required tools and the local-LLM runtime/model: `missing` is
+        // installable. Optional agent CLIs / notifications report `warn`, so
+        // they never match here.
+        _ => check.health == Health::Missing,
+    }
+}
+
 /// Health of a single diagnostic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Health {
@@ -86,6 +121,9 @@ const REQUIRED_TOOLS: &[&str] = &["git", "bash"];
 
 /// Name of the Nerd Font presence check.
 pub(super) const NERD_FONT_CHECK: &str = "nerd font";
+
+/// Name of the config/workspace storage check.
+pub(super) const CONFIG_CHECK: &str = "config";
 
 /// Name of the `ollama` runtime check.
 pub(super) const OLLAMA_CHECK: &str = "ollama";
@@ -255,8 +293,8 @@ fn font_check_for(installed: bool) -> Check {
 fn config_check(storage: &Storage) -> Check {
     let dir = storage.dir().display().to_string();
     match storage.load_settings() {
-        Ok(_) => Check::ok_with("config", dir),
-        Err(_) => Check::missing("config", format!("could not read settings under {dir}")),
+        Ok(_) => Check::ok_with(CONFIG_CHECK, dir),
+        Err(_) => Check::missing(CONFIG_CHECK, format!("could not read settings under {dir}")),
     }
 }
 

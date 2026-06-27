@@ -57,7 +57,7 @@ use crate::presentation::tui::io::screen::diff_frame;
 
 use super::super::pane_input::{
     apply_scroll, classify, encode_key, encode_mouse_wheel, encode_paste, is_copy, is_press,
-    key_scroll_lines, pane_cell, wheel_arrows, wheel_delta, KeyAction, Reserved,
+    key_scroll_lines, pane_cell, prefix_alive, wheel_arrows, wheel_delta, KeyAction, Reserved,
 };
 use super::super::state::HomeState;
 use super::super::ui;
@@ -147,6 +147,7 @@ pub fn run(
     state: &mut HomeState,
     pty: &mut PtySession,
     monitor: &MonitorHandle,
+    clear: bool,
 ) -> Result<PaneStep> {
     // Raw mode, bracketed paste, and motion reporting are entered here and
     // restored by the guard's `Drop` — including when `drive` panics and unwinds,
@@ -156,7 +157,14 @@ pub fn run(
     // render/input loop would leave the user's shell in raw mode with bracketed
     // paste and motion reporting still on.
     let _modes = PaneModeGuard::enter(term)?;
-    let _ = term.clear_screen();
+    // Blank the surface before driving so the previous pane's grid does not bleed
+    // through, but only when this is a fresh pane — the first entry or a real tab
+    // switch. A tab nav that lands on the pane already showing (a lone pane, or a
+    // jump to the current tab) re-enters here unchanged; clearing then would blank
+    // and fully repaint identical content, a visible one-frame flicker.
+    if clear {
+        let _ = term.clear_screen();
+    }
     drive(term, state, pty, monitor)
 }
 
@@ -229,10 +237,15 @@ fn drive(
     // The cell the pointer last moved over, so the link under it (if any) lights
     // up; `None` while the pointer is outside the pane.
     let mut hover: Option<Cell> = None;
-    // Whether a `Ctrl-O` leader press is awaiting its action key (prefix
-    // `KeyScheme` only). Held across `pump_input` calls so the two keystrokes of
-    // a prefix sequence can arrive in separate input drains.
-    let mut pending_prefix = false;
+    // When a `Ctrl-O` leader press is awaiting its action key (prefix `KeyScheme`
+    // only): the instant it arrived, so the wait can lapse after `PREFIX_TIMEOUT`
+    // (a forgotten leader must not turn a later `Ctrl-O` into a literal sent to
+    // the agent). Held across `pump_input` calls so the two keystrokes of a prefix
+    // sequence can arrive in separate input drains; `None` when nothing is pending.
+    let mut pending_prefix: Option<Instant> = None;
+    // What we last published as the prefix-pending hint, so the footer repaints
+    // when the leader is pressed or lapses but not every idle pass.
+    let mut last_prefix_pending: Option<bool> = None;
     // What we last told the PTY and last drew, so a pass that finds them
     // unchanged skips the resize ioctl, the grid snapshot, and the repaint. The
     // sentinels (a `None` geometry / scrollback / selection, a first-pass flag)
@@ -250,10 +263,11 @@ fn drive(
     // so hover-only / throttled frames skip the O(all cells) re-scan and reuse
     // them until the shell's output actually changes (see [`link`]).
     let mut links_cache: Option<(u64, std::collections::HashSet<Cell>)> = None;
-    // The last pull-request URL harvested from this pane's output, so the agent
-    // printing one is recorded for the sidebar (and persisted) just once rather
-    // than on every output frame it stays on screen (see [`link::pr_link`]).
-    let mut last_pr: Option<crate::domain::workspace_state::PrLink> = None;
+    // The pull-request URLs last harvested from this pane's output, so the agent
+    // printing them is recorded for the sidebar (and persisted) only when the set
+    // changes rather than on every output frame they stay on screen (see
+    // [`link::pr_links`]).
+    let mut last_prs: Vec<crate::domain::workspace_state::PrLink> = Vec::new();
     // The cursor shape (DECSCUSR `Ps`) last emitted to the host terminal, so a
     // shape is re-asserted only when the program changes it. `None` until the
     // first paint, which always emits — restoring this pane's shape over whatever
@@ -268,10 +282,25 @@ fn drive(
         // the live terminal on the very next pass.
         let geo = ui::attached_geometry(height as usize, width as usize, state.sidebar());
 
+        let now = Instant::now();
+        // Drop a leader that has waited past `PREFIX_TIMEOUT` for its action key,
+        // so the footer hint clears and the next `Ctrl-O` starts a fresh sequence
+        // rather than completing a stale one (`pump_input` makes the same check
+        // exactly when a key arrives; this only catches a leader nobody followed).
+        if !prefix_alive(pending_prefix, now) {
+            pending_prefix = None;
+        }
+
         // Interactive changes (input echo, resize, scroll, selection, hover,
         // badges) always repaint at once to stay responsive; fresh shell output
         // is tracked separately so a flood of it can be coalesced below.
         let mut interactive = first;
+        // Surface the leader-pending state to the footer; repaint when it flips.
+        let prefix_pending = pending_prefix.is_some();
+        state.set_prefix_pending(prefix_pending);
+        if last_prefix_pending != Some(prefix_pending) {
+            interactive = true;
+        }
         // Inform the PTY of a new size only when it actually changed; the old
         // loop took the parser lock (and issued a TIOCSWINSZ ioctl) every pass.
         if last_geo != Some(geo) {
@@ -312,7 +341,6 @@ fn drive(
         // [`MIN_FRAME`] has elapsed since the last paint, so a stream of 8 KiB
         // chunks cannot drive a full-grid redraw faster than the screen refreshes.
         // Anything interactive bypasses the throttle.
-        let now = Instant::now();
         let throttled = output_changed
             && !interactive
             && last_paint.is_some_and(|t| now.duration_since(t) < MIN_FRAME);
@@ -326,17 +354,17 @@ fn drive(
                 let screen = parser.screen();
                 if links_cache.as_ref().map(|(g, _)| *g) != Some(gen) {
                     links_cache = Some((gen, link::link_cells(screen)));
-                    // Fresh output: harvest a pull-request URL the agent may have
-                    // printed, recording it for the attached session so the sidebar
-                    // shows `#<number>` and a click reopens it. Keyed by the session
-                    // root (the dir the agent runs in), matching what `sync` reads.
-                    if let Some(pr) = link::pr_link(screen) {
-                        if last_pr.as_ref() != Some(&pr) {
-                            if let Some(wt) = state.list().active() {
-                                let _ = crate::infrastructure::pr_link_store::set(&wt.path, &pr);
-                            }
-                            last_pr = Some(pr);
+                    // Fresh output: harvest the pull-request URLs the agent may have
+                    // printed, recording them for the attached session so the sidebar
+                    // shows the `#<number>` badges and a click reopens them. Keyed by
+                    // the session root (the dir the agent runs in), matching what
+                    // `sync` reads; the store accumulates distinct URLs over time.
+                    let prs = link::pr_links(screen);
+                    if !prs.is_empty() && prs != last_prs {
+                        if let Some(wt) = state.list().active() {
+                            let _ = crate::infrastructure::pr_link_store::add(&wt.path, &prs);
                         }
+                        last_prs = prs;
                     }
                 }
                 let links = &links_cache.as_ref().expect("links cache set above").1;
@@ -371,6 +399,7 @@ fn drive(
             last_shape = Some(shape);
             last_selection = selection;
             last_hover = hover;
+            last_prefix_pending = Some(prefix_pending);
             last_paint = Some(now);
             first = false;
         }
@@ -477,19 +506,24 @@ fn pump_input(
     scrollback: &mut usize,
     selection: &mut Option<Selection>,
     hover: &mut Option<Cell>,
-    pending_prefix: &mut bool,
+    pending_prefix: &mut Option<Instant>,
 ) -> Result<Option<PaneStep>> {
+    let now = Instant::now();
     while event::poll(Duration::ZERO)? {
         match event::read()? {
             Event::Key(key) => {
                 if !is_press(key) {
                     continue;
                 }
+                // Whether a leader is genuinely still pending: set, and pressed
+                // within `PREFIX_TIMEOUT`. A lapsed leader counts as none, so this
+                // key starts a fresh sequence instead of completing a stale one.
+                let pending = prefix_alive(*pending_prefix, now);
                 // Scroll keys move the history view in place rather than going to
                 // the shell; the view shifts under any selection, so drop it. Only
                 // when no prefix press is pending — mid-prefix the next key is the
                 // action key, classified below.
-                if !*pending_prefix {
+                if !pending {
                     if let Some(delta) = key_scroll_lines(&key, geo) {
                         *selection = None;
                         apply_scroll(scrollback, delta);
@@ -498,26 +532,26 @@ fn pump_input(
                 }
                 // Which keys the pane claims for navigation (vs. forwards to the
                 // shell) depends on the configured `KeyScheme`; `classify` is the
-                // single source of truth and `pending_prefix` carries the one-bit
-                // state a `Ctrl-O` prefix sequence needs (prefix scheme only).
-                match classify(state.key_scheme(), *pending_prefix, &key) {
-                    // The `Ctrl-O` leader was pressed: wait for the action key,
-                    // swallowing the leader itself.
-                    KeyAction::BeginPrefix => *pending_prefix = true,
+                // single source of truth and `pending` carries the one-bit state a
+                // `Ctrl-O` prefix sequence needs (prefix scheme only).
+                match classify(state.key_scheme(), pending, &key) {
+                    // The `Ctrl-O` leader was pressed: wait for the action key
+                    // (stamping when, so the wait can lapse), swallowing the leader.
+                    KeyAction::BeginPrefix => *pending_prefix = Some(now),
                     // An unrecognised key right after the leader: drop it.
-                    KeyAction::Swallow => *pending_prefix = false,
+                    KeyAction::Swallow => *pending_prefix = None,
                     // `Ctrl-B` / `Ctrl-O s` collapses or expands the sidebar in
                     // place, without leaving 没入: the next loop pass re-lays out
                     // the frame and resizes the PTY to the new pane width.
                     KeyAction::Reserved(Reserved::ToggleSidebar) => {
-                        *pending_prefix = false;
+                        *pending_prefix = None;
                         state.toggle_sidebar();
                     }
                     // Every other navigation action hands a step back to the
                     // pool-driven loop (some leave 没入, some stay and re-drive in
                     // place); typing first snaps back to the live screen.
                     KeyAction::Reserved(action) => {
-                        *pending_prefix = false;
+                        *pending_prefix = None;
                         *scrollback = 0;
                         *selection = None;
                         return Ok(Some(match action {
@@ -535,10 +569,9 @@ fn pump_input(
                     // The key belongs to the shell. With text selected, `Ctrl-C`
                     // copies it (and clears the selection) the way terminals treat
                     // copy while a selection is active; otherwise it reaches the
-                    // shell as the usual interrupt. `Ctrl-O Ctrl-O` lands here too,
-                    // sending a literal `Ctrl-O`.
+                    // shell as the usual interrupt.
                     KeyAction::Forward => {
-                        *pending_prefix = false;
+                        *pending_prefix = None;
                         if is_copy(&key) && selection.as_ref().is_some_and(|s| !s.is_empty()) {
                             copy_selection(term, pty, selection.as_ref())?;
                             *selection = None;
@@ -559,128 +592,144 @@ fn pump_input(
             // agent that supports bracketed paste inserts the multi-line text
             // instead of submitting on each embedded newline.
             Event::Paste(text) => {
-                // Pasting returns to the live screen and ends any selection.
+                // Pasting returns to the live screen, ends any selection, and
+                // abandons a pending leader (the paste is the user's next intent,
+                // not the leader's action key).
+                *pending_prefix = None;
                 *scrollback = 0;
                 *selection = None;
                 pty.write(&encode_paste(&text, pty.bracketed_paste()))?;
             }
-            Event::Mouse(mouse) => match mouse.kind {
-                // A left click on a tab chip switches to that tab in place, like
-                // `Ctrl-N` / `Ctrl-P`; otherwise it starts a fresh selection at
-                // the clicked cell (clearing any existing one when outside the pane).
-                MouseEventKind::Down(MouseButton::Left) => {
-                    if let Some(tab) = ui::attached_tab_at(state, mouse.column, mouse.row, geo) {
-                        *scrollback = 0;
-                        *selection = None;
-                        return Ok(Some(PaneStep::ToTab(tab)));
+            // Any mouse activity abandons a pending leader: the user reached for
+            // the pointer instead of completing the chord, so a later `Ctrl-O`
+            // must start fresh rather than complete this one.
+            Event::Mouse(mouse) => {
+                *pending_prefix = None;
+                match mouse.kind {
+                    // A left click on a tab chip switches to that tab in place, like
+                    // `Ctrl-N` / `Ctrl-P`; otherwise it starts a fresh selection at
+                    // the clicked cell (clearing any existing one when outside the pane).
+                    MouseEventKind::Down(MouseButton::Left) => {
+                        if let Some(tab) = ui::attached_tab_at(state, mouse.column, mouse.row, geo)
+                        {
+                            *scrollback = 0;
+                            *selection = None;
+                            return Ok(Some(PaneStep::ToTab(tab)));
+                        }
+                        *selection = pane_cell(mouse.column, mouse.row, geo).map(Selection::new);
                     }
-                    *selection = pane_cell(mouse.column, mouse.row, geo).map(Selection::new);
-                }
-                // Dragging the left button stretches the selection's loose end.
-                MouseEventKind::Drag(MouseButton::Left) => {
-                    if let (Some(sel), Some(cell)) =
-                        (selection.as_mut(), pane_cell(mouse.column, mouse.row, geo))
-                    {
-                        sel.extend(cell);
+                    // Dragging the left button stretches the selection's loose end.
+                    MouseEventKind::Drag(MouseButton::Left) => {
+                        if let (Some(sel), Some(cell)) =
+                            (selection.as_mut(), pane_cell(mouse.column, mouse.row, geo))
+                        {
+                            sel.extend(cell);
+                        }
                     }
-                }
-                // Releasing after a drag copies the selection; a plain click
-                // (no drag) opens a link under it in the default browser instead —
-                // a PR badge on a sidebar session row, or a URL in the terminal.
-                MouseEventKind::Up(MouseButton::Left) => {
-                    let dragged = selection.as_ref().is_some_and(|s| !s.is_empty());
-                    let (h, w) = term.size();
-                    // A plain click on a sidebar session row with a PR opens it. The
-                    // sidebar reuses the same browser-launch path as a terminal link.
-                    let pr = (!dragged)
-                        .then(|| {
-                            ui::sidebar_pr_link_at(
+                    // Releasing after a drag copies the selection; a plain click
+                    // (no drag) opens a link under it in the default browser
+                    // instead — a PR badge on a sidebar session row, or a URL in the
+                    // terminal.
+                    MouseEventKind::Up(MouseButton::Left) => {
+                        let dragged = selection.as_ref().is_some_and(|s| !s.is_empty());
+                        let (h, w) = term.size();
+                        // A plain click on a sidebar session row carrying PR(s) opens
+                        // each, reusing the same browser-launch path as a terminal
+                        // link.
+                        let prs = if dragged {
+                            Vec::new()
+                        } else {
+                            ui::sidebar_pr_links_at(
                                 state,
                                 h as usize,
                                 w as usize,
                                 mouse.column,
                                 mouse.row,
                             )
-                        })
-                        .flatten();
-                    if let Some(url) = pr {
-                        open_url(&url);
-                        *selection = None;
-                    } else if open_clicked_url(
-                        pty,
-                        geo,
-                        mouse.column,
-                        mouse.row,
-                        selection.as_ref(),
-                    ) {
-                        *selection = None;
-                    } else {
-                        copy_selection(term, pty, selection.as_ref())?;
+                        };
+                        if !prs.is_empty() {
+                            for url in &prs {
+                                open_url(url);
+                            }
+                            *selection = None;
+                        } else if open_clicked_url(
+                            pty,
+                            geo,
+                            mouse.column,
+                            mouse.row,
+                            selection.as_ref(),
+                        ) {
+                            *selection = None;
+                        } else {
+                            copy_selection(term, pty, selection.as_ref())?;
+                        }
                     }
-                }
-                // Button-less motion: track the cell under the pointer so the link
-                // there (if any) lights up. `pane_cell` yields `None` past the
-                // pane edges, clearing the highlight as the pointer leaves.
-                MouseEventKind::Moved => {
-                    *hover = pane_cell(mouse.column, mouse.row, geo);
-                }
-                // The wheel acts only when the pointer is over the terminal pane;
-                // hit-test both axes through `pane_cell` (the same test the click
-                // and hover arms use) — a column-only check let the wheel act while
-                // the pointer was above the pane (the tab row) or below its last
-                // line. What it does depends on what the running program asked for:
-                //
-                // - The program **tracks the mouse** (DECSET 1000/1002/1003): forward
-                //   the wheel as a mouse report so it scrolls its own viewport — what
-                //   the wheel does over such a program in a standalone terminal. Some
-                //   full-screen agents (`claude`) draw into the *primary* buffer and
-                //   only this signal catches them; the alternate-screen test below
-                //   misses them, so the wheel fell through to a usagi history scroll
-                //   and surfaced old commands instead of scrolling the agent.
-                // - Else on the **alternate** screen (a pager / TUI with no mouse
-                //   tracking, e.g. `less`), `vt100` keeps no scrollback, so a history
-                //   scroll is a dead no-op. Emulate the terminal's alternate-scroll
-                //   mode: forward the wheel as arrow-key presses so the program
-                //   scrolls its own viewport.
-                // - Else (a plain shell on the **primary** screen) scroll usagi's own
-                //   history view; the view shifts, so any selection is dropped.
-                //
-                // In the first two cases the selection is left alone — nothing
-                // scrolled in usagi.
-                kind => {
-                    if let Some(delta) = wheel_delta(kind) {
-                        if let Some(cell) = pane_cell(mouse.column, mouse.row, geo) {
-                            // Read the grid + input modes under the parser lock,
-                            // dropping the guard before the `&mut self` write below.
-                            let forward = {
-                                let parser = pty.parser();
-                                let screen = parser.screen();
-                                if screen.mouse_protocol_mode() != vt100::MouseProtocolMode::None {
-                                    Some(encode_mouse_wheel(
-                                        delta < 0,
-                                        cell,
-                                        screen.mouse_protocol_encoding(),
-                                    ))
-                                } else if screen.alternate_screen() {
-                                    Some(
-                                        wheel_arrows(delta, screen.application_cursor())
-                                            .into_bytes(),
-                                    )
-                                } else {
-                                    None
-                                }
-                            };
-                            match forward {
-                                Some(seq) => pty.write(&seq)?,
-                                None => {
-                                    *selection = None;
-                                    apply_scroll(scrollback, delta);
+                    // Button-less motion: track the cell under the pointer so the link
+                    // there (if any) lights up. `pane_cell` yields `None` past the
+                    // pane edges, clearing the highlight as the pointer leaves.
+                    MouseEventKind::Moved => {
+                        *hover = pane_cell(mouse.column, mouse.row, geo);
+                    }
+                    // The wheel acts only when the pointer is over the terminal pane;
+                    // hit-test both axes through `pane_cell` (the same test the click
+                    // and hover arms use) — a column-only check let the wheel act while
+                    // the pointer was above the pane (the tab row) or below its last
+                    // line. What it does depends on what the running program asked for:
+                    //
+                    // - The program **tracks the mouse** (DECSET 1000/1002/1003): forward
+                    //   the wheel as a mouse report so it scrolls its own viewport — what
+                    //   the wheel does over such a program in a standalone terminal. Some
+                    //   full-screen agents (`claude`) draw into the *primary* buffer and
+                    //   only this signal catches them; the alternate-screen test below
+                    //   misses them, so the wheel fell through to a usagi history scroll
+                    //   and surfaced old commands instead of scrolling the agent.
+                    // - Else on the **alternate** screen (a pager / TUI with no mouse
+                    //   tracking, e.g. `less`), `vt100` keeps no scrollback, so a history
+                    //   scroll is a dead no-op. Emulate the terminal's alternate-scroll
+                    //   mode: forward the wheel as arrow-key presses so the program
+                    //   scrolls its own viewport.
+                    // - Else (a plain shell on the **primary** screen) scroll usagi's own
+                    //   history view; the view shifts, so any selection is dropped.
+                    //
+                    // In the first two cases the selection is left alone — nothing
+                    // scrolled in usagi.
+                    kind => {
+                        if let Some(delta) = wheel_delta(kind) {
+                            if let Some(cell) = pane_cell(mouse.column, mouse.row, geo) {
+                                // Read the grid + input modes under the parser lock,
+                                // dropping the guard before the `&mut self` write below.
+                                let forward = {
+                                    let parser = pty.parser();
+                                    let screen = parser.screen();
+                                    if screen.mouse_protocol_mode()
+                                        != vt100::MouseProtocolMode::None
+                                    {
+                                        Some(encode_mouse_wheel(
+                                            delta < 0,
+                                            cell,
+                                            screen.mouse_protocol_encoding(),
+                                        ))
+                                    } else if screen.alternate_screen() {
+                                        Some(
+                                            wheel_arrows(delta, screen.application_cursor())
+                                                .into_bytes(),
+                                        )
+                                    } else {
+                                        None
+                                    }
+                                };
+                                match forward {
+                                    Some(seq) => pty.write(&seq)?,
+                                    None => {
+                                        *selection = None;
+                                        apply_scroll(scrollback, delta);
+                                    }
                                 }
                             }
                         }
                     }
                 }
-            },
+            }
             _ => {}
         }
     }

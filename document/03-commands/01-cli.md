@@ -24,12 +24,13 @@
 | `usagi run [N]` | うさぎアニメを全画面で再生して見るギャラリー。`N`（1–5）で種類を選ぶ（既定 1）。なにかキーで終了 |
 | `usagi icon [view]` | 正方形ピクセルで組んだうさぎマークをブロック文字（`█▀▄▘▝▖▗…`）で標準出力に印字する。`view`（`all` / `flip` / `half`、既定 `all`）で表示を選ぶ（下記） |
 | `usagi status` | カレントリポジトリの worktree 状態を `.usagi/state.json` に同期し一覧表示する（[data/02-workspace.md](../data/02-workspace.md)） |
+| `usagi update [--dry-run]` | 各リポジトリのデフォルトブランチ（`main` など）を `origin` から取得して最新化し、その更新を各セッション worktree に配布（コンフリクトしないところだけマージ）する。`--dry-run` は変更せずに結果のみ表示 |
 | `usagi clean [--dry-run] [--agent <NAME>]` | 設定中の Agent CLI をヘッドレスでバックグラウンド起動し、放置・マージ済みのセッション worktree を AI が自律的に判断して削除する。即座に制御を返し、出力は `.usagi/clean.log` に追記する |
 | `usagi feature` | 各 Agent CLI（Claude / Codex / sakana.ai / Gemini）が usagi のどの機能に対応しているかの星取表を表示する（下記） |
 | `usagi config` | 現在のグローバル設定（`settings.json`）を一覧表示する（[5. 設定](../05-settings.md)） |
 | `usagi config --edit` | グローバル設定ファイルを `$EDITOR` で開いて編集し、保存時に形式（JSON / 必須 `version` / 型）を検証する。不正な場合は直前の内容に巻き戻す |
-| `usagi doctor` | `git` / `bash` と各 Agent CLI（Claude / Codex / sakana.ai / Gemini）の導入状況、デスクトップ通知の可否、Nerd Font の有無、設定ストレージの健全性を確認する（ローカル LLM 有効時は `ollama`・モデルも） |
-| `usagi doctor --fix` | 不足ツールを OS のパッケージマネージャ（brew / apt-get / dnf / pacman）で導入を試行し、修復不可なら手動手順を提示する。Nerd Font が無ければ `curl`/`unzip` でダウンロードして導入する。ローカル LLM が有効なら `ollama`・サーバ起動・モデルも導入する |
+| `usagi doctor` | `git` / `bash` と各 Agent CLI（Claude / Codex / sakana.ai / Gemini）の導入状況、デスクトップ通知の可否、Nerd Font の有無、設定ストレージの健全性を確認する（ローカル LLM 有効時は `ollama`・モデルも）。インストール可能な不足（必須ツール・Nerd Font）があれば `[y/N]` で確認し、`y` で導入する |
+| `usagi doctor --fix` | 確認を省いて不足を一括導入する。不足ツールを OS のパッケージマネージャ（brew / apt-get / dnf / pacman）で導入を試行し、修復不可なら手動手順を提示する。Nerd Font が無ければ `curl`/`unzip` でダウンロードして導入する。ローカル LLM が有効なら `ollama`・サーバ起動・モデルも導入する |
 | `usagi issue <create\|list\|graph\|show\|update\|search\|delete>` | （ヘルプ非表示・エージェント向け）カレントリポジトリのタスク issue（`.usagi/issues/`）を操作する（[data/02-workspace.md](../data/02-workspace.md#issues-タスク-issue)） |
 | `usagi memory <save\|list\|show\|update\|search\|delete>` | （ヘルプ非表示・エージェント向け）カレントリポジトリのエージェントのメモリ（`.usagi/memory/`）を操作する（[data/04-memory.md](../data/04-memory.md)） |
 | `usagi mcp` | （ヘルプ非表示・エージェント向け）issue・メモリ・セッションの操作を MCP（Model Context Protocol）サーバとして stdio で公開し、AI エージェントから使えるようにする |
@@ -87,6 +88,19 @@ TUI を起動します。代替スクリーン上で起動画面を表示し、O
 `git worktree list` などを読み取り専用で検査し、`<repo>/.usagi/state.json` を同期したうえで、
 各 worktree のブランチ・HEAD・`local` / `pushed` / `synced`（up to date）状態を一覧表示します。
 
+### `usagi update`
+
+ワークスペースのデフォルトブランチを最新化し、その更新を各セッションの worktree に配布します。`git` への副作用はあるものの、**コンフリクトするセッションには一切触れません**（マージは衝突した時点で自動的に abort して worktree を元に戻します）。処理は 2 段階です。
+
+1. **ルートの最新化**: ワークスペース内の各リポジトリ（[新規作業](../../.agents/workflow.md) と同じ走査で見つける source repo）について `git fetch origin` し、デフォルトブランチ（`origin/HEAD` から検出。例 `main`）を **fast-forward だけ**で `origin` に追従させます。デフォルトブランチがチェックアウトされていない・未コミットの変更がある・ローカルが先行して fast-forward できない場合は、そのリポジトリには触れずスキップ理由を表示します（マージコミットは作りません）。
+2. **セッションへの配布**: `.usagi/state.json` に記録された各セッションの worktree（`usagi/<name>` ブランチ）に、最新化したデフォルトブランチを `git merge` で取り込みます。**クリーンにマージできるところだけ**取り込み、未コミットの変更がある worktree はスキップ、コンフリクトするマージは abort してスキップします。
+
+セッション worktree の中（`.usagi/sessions/<name>/`）から実行しても、ワークスペース全体を対象に動作します。
+
+- `--dry-run`: `origin` の取得（fetch）は行いますが、ローカルのブランチや worktree は一切変更せず、「何が更新されるか / スキップされるか」だけを表示します。
+
+各リポジトリ・各 worktree の結果は `already up to date` / `fast-forwarded (N commits new)` / `merged (N commits new)` / `skipped (...)` のように一覧表示されます。
+
 ### `usagi clean`
 
 放置された不要なセッション worktree の整理を、設定中の Agent CLI（Claude / Codex / sakana.ai / Gemini）に任せます。
@@ -133,12 +147,15 @@ Agent CLI（Claude / Codex / sakana.ai / Gemini）の有無も確認します。
 
 `nerd font` は、TUI が git ライフサイクルや issue グラフのグリフ描画に使う Nerd Font の有無を、ユーザーのフォントディレクトリ（macOS: `~/Library/Fonts`、Linux: `~/.local/share/fonts` / `~/.fonts`）を走査して確認します。Nerd Font は任意（未導入でも色付きの語にフォールバックする）なので、未導入は `warn` 扱いです。
 
-`--fix` を付けると、`missing` の依存ツールを OS に合わせたパッケージマネージャでの導入を試行します
+診断を表示したあと、**インストール可能な不足**があれば導入に進みます。インストール可能な不足とは、`missing` の必須ツール（`git` / `bash`）と未導入の Nerd Font です。任意の Agent CLI（`warn`）と設定ストレージ（`config`）は対象外です（前者は導入が任意、後者は初回起動時に生成されるものでパッケージ導入の対象ではない）。
+
+`--fix` を付けない素の `usagi doctor` は、インストール可能な不足があるときだけ対象を提示して `[y/N]` で確認し、`y`（または `yes`、大文字小文字不問）の場合に導入します。それ以外の入力や、パイプ/CI など対話端末でない（入力が即 EOF になる）場合は導入せず、診断表示だけで終了します。`--fix` を付けると確認を省いて一括導入します。
+
+導入処理では、`missing` の依存ツールを OS に合わせたパッケージマネージャでの導入を試行します
 （macOS: `brew install`、Linux: 利用可能な `sudo apt-get` / `dnf` / `pacman` を優先順に選択）。
 自動修復できない場合（パッケージマネージャ未検出・インストール失敗）は、手動インストール手順を提示します。
-不足が無ければ何もしません。
 
-Nerd Font が未導入なら、`--fix` は Nerd Fonts の GitHub リリースから JetBrainsMono Nerd Font を `curl` で取得し、`unzip` でユーザーのフォントディレクトリへ展開します（Linux では `fc-cache` でフォントキャッシュも更新）。すでに導入済みなら再ダウンロードしません。パッケージマネージャ経由のインストールではないため、`ollama` と同じく汎用の不足ツール修復とは別フローで処理します。`curl`/`unzip` が無い、または対応するフォントディレクトリが無いプラットフォーム（Windows など）では、手動導入の案内を表示します。
+Nerd Font が未導入なら、Nerd Fonts の GitHub リリースから JetBrainsMono Nerd Font を `curl` で取得し、`unzip` でユーザーのフォントディレクトリへ展開します（Linux では `fc-cache` でフォントキャッシュも更新）。すでに導入済みなら再ダウンロードしません。パッケージマネージャ経由のインストールではないため、`ollama` と同じく汎用の不足ツール修復とは別フローで処理します。`curl`/`unzip` が無い、または対応するフォントディレクトリが無いプラットフォーム（Windows など）では、手動導入の案内を表示します。
 
 ローカル LLM が有効な場合は、`ollama` 本体の導入に加えて Ollama サーバの起動を確認し、停止していれば
 `ollama serve` をバックグラウンドで起動してからモデルを取得します（Homebrew 版 `ollama` はサーバを

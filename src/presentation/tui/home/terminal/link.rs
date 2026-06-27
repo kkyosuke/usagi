@@ -216,21 +216,25 @@ pub fn link_cells(screen: &vt100::Screen) -> HashSet<Cell> {
     cells
 }
 
-/// The most recent pull-request link visible on `screen`, or `None` when none is.
+/// Every distinct pull-request link visible on `screen`, in reading order
+/// (top-to-bottom), with duplicate URLs dropped.
 ///
-/// This is how usagi learns a session's PR without querying GitHub: the embedded
-/// agent prints the PR URL in its reply (e.g. after opening one), and that URL is
-/// already detected as a clickable link here. We reuse that same whole-screen scan
+/// This is how usagi learns a session's PRs without querying GitHub: the embedded
+/// agent prints PR URLs in its replies (e.g. after opening one), and those URLs are
+/// already detected as clickable links here. We reuse that same whole-screen scan
 /// ([`screen_urls`]) and keep the URLs that look like a pull request
-/// ([`parse_pr_url`]). When several are on screen the **last** in reading order —
-/// the lowest, newest line — wins, so a fresh PR supersedes an older one still
-/// scrolled above it. The caller records it against the session so the sidebar can
-/// show `#<number>` and a click can reopen it.
-pub fn pr_link(screen: &vt100::Screen) -> Option<PrLink> {
-    screen_urls(screen)
-        .iter()
-        .rev()
-        .find_map(|u| parse_pr_url(u))
+/// ([`parse_pr_url`]). A session may touch several repositories and open a PR in
+/// each, so all of them are returned (de-duplicated by URL); the caller records
+/// them against the session so the sidebar can show the `#<number>` badges and a
+/// click can reopen them.
+pub fn pr_links(screen: &vt100::Screen) -> Vec<PrLink> {
+    let mut out: Vec<PrLink> = Vec::new();
+    for pr in screen_urls(screen).iter().filter_map(|u| parse_pr_url(u)) {
+        if !out.iter().any(|p| p.url == pr.url) {
+            out.push(pr);
+        }
+    }
+    out
 }
 
 /// Parse a `http(s)` URL into a [`PrLink`] when it is a pull-request URL of the
@@ -696,46 +700,50 @@ mod tests {
     }
 
     #[test]
-    fn pr_link_finds_the_pull_request_url_on_screen() {
+    fn pr_links_finds_the_pull_request_url_on_screen() {
         let parser = parsed(
             1,
             60,
             b"opened PR: https://github.com/KKyosuke/usagi/pull/412 done",
         );
-        let pr = pr_link(parser.screen()).unwrap();
-        assert_eq!(pr.number, 412);
-        assert_eq!(pr.url, "https://github.com/KKyosuke/usagi/pull/412");
+        let prs = pr_links(parser.screen());
+        assert_eq!(prs.len(), 1);
+        assert_eq!(prs[0].number, 412);
+        assert_eq!(prs[0].url, "https://github.com/KKyosuke/usagi/pull/412");
     }
 
     #[test]
-    fn pr_link_prefers_the_last_pull_request_in_reading_order() {
-        // Two PRs on screen: the lower (newer) one wins.
+    fn pr_links_collects_every_pr_in_reading_order_and_dedups_urls() {
+        // Three PR URLs across rows, the first repeated: returned in reading order
+        // (top-to-bottom) with the duplicate dropped.
         let parser = parsed(
-            2,
+            3,
             40,
-            b"https://github.com/o/r/pull/1\r\nhttps://github.com/o/r/pull/2",
+            b"https://github.com/o/r/pull/1\r\nhttps://github.com/o/s/pull/2\r\nhttps://github.com/o/r/pull/1",
         );
-        assert_eq!(pr_link(parser.screen()).unwrap().number, 2);
+        let numbers: Vec<u32> = pr_links(parser.screen()).iter().map(|p| p.number).collect();
+        assert_eq!(numbers, vec![1, 2]);
     }
 
     #[test]
-    fn pr_link_finds_a_pull_request_url_wrapped_across_rows() {
+    fn pr_links_finds_a_pull_request_url_wrapped_across_rows() {
         // The URL fills row 0 and continues on row 1; vt100 marks row 0 wrapped, so
         // `screen_urls` stitches the two rows back into one link before parsing.
         let parser = parsed(2, 20, b"https://github.com/o/r/pull/42");
         assert!(parser.screen().row_wrapped(0));
-        let pr = pr_link(parser.screen()).unwrap();
-        assert_eq!(pr.number, 42);
-        assert_eq!(pr.url, "https://github.com/o/r/pull/42");
+        let prs = pr_links(parser.screen());
+        assert_eq!(prs.len(), 1);
+        assert_eq!(prs[0].number, 42);
+        assert_eq!(prs[0].url, "https://github.com/o/r/pull/42");
     }
 
     #[test]
-    fn pr_link_is_none_without_a_pull_request_url() {
-        // A plain (non-PR) link on screen, and a zero-width screen, both yield None.
+    fn pr_links_is_empty_without_a_pull_request_url() {
+        // A plain (non-PR) link on screen, and a zero-width screen, both yield none.
         let parser = parsed(1, 40, b"see https://example.com/x now");
-        assert!(pr_link(parser.screen()).is_none());
+        assert!(pr_links(parser.screen()).is_empty());
         let empty = parsed(1, 0, b"");
-        assert!(pr_link(empty.screen()).is_none());
+        assert!(pr_links(empty.screen()).is_empty());
     }
 
     #[test]
