@@ -334,10 +334,10 @@ fn rabbit_mood(mode: Mode) -> widgets::RabbitMood {
 }
 
 /// The workspace-total resource line shown beside the resting mascot's face —
-/// `CPU 23%  MEM 512MB` — dimmed, or `None` when nothing is live (idle), so the
-/// rabbit rests without a number. The labels (`CPU` / `MEM`) are spelled out here,
-/// unlike the cramped per-session rows, because the mascot sits below the list
-/// where there is room.
+/// the icon-led ` 23%   512MB` — dimmed, or `None` when nothing is live (idle),
+/// so the rabbit rests without a number. It reuses the same icon-led
+/// [`resource_inline_label`](panes::resource_inline_label) the per-session rows
+/// draw, so the mascot total and the list read alike.
 fn workspace_total_label(total: ResourceUsage) -> Option<String> {
     (!total.is_idle()).then(|| {
         console::style(panes::resource_inline_label(total))

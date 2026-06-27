@@ -201,11 +201,19 @@ fn detail_line(gutter: &str, detail: String) -> String {
     format!("{gutter}{indent}{detail}")
 }
 
-/// Display width the CPU figure is left-padded to inside the spelled-out
-/// `CPU … MEM …` label, so the MEM column lands in the same place whether CPU
-/// reads `0%` or `100%` — the CPU digit count never shifts MEM. Holds up to
-/// `100%`; a rarer larger reading just nudges MEM right for that one line.
+/// Display width the CPU figure is left-padded to inside the `<cpu icon> … <mem
+/// icon> …` label, so the memory column lands in the same place whether CPU reads
+/// `0%` or `100%` — the CPU digit count never shifts MEM. Holds up to `100%`; a
+/// rarer larger reading just nudges MEM right for that one line.
 const CPU_LABEL_WIDTH: usize = 4;
+
+/// Nerd Font glyphs labelling the CPU and memory figures on the resource line,
+/// in place of spelling out `CPU` / `MEM` — the same icon-led style the git
+/// status field uses. They need a patched [Nerd Font](https://www.nerdfonts.com/)
+/// to render; without one the terminal shows a fallback box, but the number
+/// beside each glyph still carries the meaning.
+const CPU_ICON: char = '\u{f2db}'; // nf-fa-microchip — processor use
+const MEM_ICON: char = '\u{f538}'; // nf-fa-memory — resident memory
 
 /// Rows every list entry (the root and each session) spans, fixed so the list
 /// never reflows as a session goes live or idle: an identity line, a detail
@@ -214,13 +222,15 @@ const CPU_LABEL_WIDTH: usize = 4;
 /// disagree on where a session's rows are.
 pub(super) const SESSION_ROWS: usize = 3;
 
-/// The spelled-out `CPU <pct>  MEM <mem>` resource label shared by a session's
-/// resource line and the workspace total beside the mascot. The CPU field is
-/// left-padded to [`CPU_LABEL_WIDTH`] so the MEM figure stays column-aligned both
-/// across rows and from frame to frame as the percentages change.
+/// The icon-led `<cpu> <pct>  <mem> <bytes>` resource label shared by a session's
+/// resource line and the workspace total beside the mascot. The CPU figure leads
+/// with [`CPU_ICON`] and the memory with [`MEM_ICON`] (in place of the words
+/// `CPU` / `MEM`), and the CPU field is left-padded to [`CPU_LABEL_WIDTH`] so the
+/// memory figure stays column-aligned both across rows and from frame to frame as
+/// the percentages change.
 pub(super) fn resource_inline_label(usage: ResourceUsage) -> String {
     format!(
-        "CPU {cpu:<width$}  MEM {mem}",
+        "{CPU_ICON} {cpu:<width$}  {MEM_ICON} {mem}",
         cpu = usage.format_cpu(),
         mem = usage.format_memory(),
         width = CPU_LABEL_WIDTH,
@@ -229,10 +239,11 @@ pub(super) fn resource_inline_label(usage: ResourceUsage) -> String {
 
 /// Builds an entry's **third** line — the CPU / memory its process tree is using —
 /// indented under the name like the detail line, with the row's `gutter` (so the
-/// active accent bar runs down it too). Spelled out as `CPU 8%  MEM 120MB` in dim
-/// text and clipped to the cell. Every session draws this row at a fixed height,
-/// so an unsampled or idle session reads `CPU 0%  MEM 0MB` (the caller passes a
-/// default usage) rather than dropping the row and reflowing the list.
+/// active accent bar runs down it too). Drawn icon-led ( `8%`  `120MB`,
+/// the CPU / memory glyphs in place of the words) in dim text and clipped to the
+/// cell. Every session draws this row at a fixed height, so an unsampled or idle
+/// session reads `0%` / `0MB` (the caller passes a default usage) rather than
+/// dropping the row and reflowing the list.
 fn resource_line(
     usage: ResourceUsage,
     detail_width: usize,

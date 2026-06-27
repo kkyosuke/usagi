@@ -997,12 +997,16 @@ fn left_pane_always_draws_a_fixed_three_line_resource_row() {
         Utc::now(),
     );
     assert!(with_usage[4].contains("running"));
+    // The resource line is icon-led (the CPU / memory glyphs in place of the words),
+    // so it carries the figures but not the words `CPU` / `MEM`.
     let resource = console::strip_ansi_codes(&with_usage[5]);
-    assert!(resource.contains("CPU 12%"));
-    assert!(resource.contains("MEM 256MB"));
+    assert!(resource.contains("12%"));
+    assert!(resource.contains("256MB"));
+    assert!(!resource.contains("CPU"));
+    assert!(!resource.contains("MEM"));
 
     // With no sample the session keeps its fixed three lines — the resource row is
-    // still drawn, reading `CPU 0%  MEM 0MB` rather than dropping the row.
+    // still drawn, reading `0%` / `0MB` rather than dropping the row.
     let without = left_pane(
         &list,
         &path,
@@ -1018,8 +1022,8 @@ fn left_pane_always_draws_a_fixed_three_line_resource_row() {
     );
     assert!(without[4].contains("running"));
     let idle_resource = console::strip_ansi_codes(&without[5]);
-    assert!(idle_resource.contains("CPU 0%"));
-    assert!(idle_resource.contains("MEM 0MB"));
+    assert!(idle_resource.contains("0%"));
+    assert!(idle_resource.contains("0MB"));
 
     // In 切替 the unselected rows (the cursor rests on the root) are dimmed — the
     // resource line is faded along with the rest of its entry, but its text stays.
@@ -1036,7 +1040,7 @@ fn left_pane_always_draws_a_fixed_three_line_resource_row() {
         Sidebar::Full,
         Utc::now(),
     );
-    assert!(console::strip_ansi_codes(&in_switch[5]).contains("CPU 12%"));
+    assert!(console::strip_ansi_codes(&in_switch[5]).contains("12%"));
 }
 
 #[test]
