@@ -17,6 +17,74 @@ fn render_frame_combines_all_sections_at_full_height() {
 }
 
 #[test]
+fn mascot_hit_rect_covers_where_the_rabbit_is_drawn() {
+    let state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
+    let frame = render_frame(24, 80, &state);
+    let rect = mascot_hit_rect(24, 80, &state).expect("the mascot is shown at full size");
+    // Locate the rabbit's feet row in the rendered frame and assert it (and the
+    // body two rows up) falls inside the click rectangle — so the hit-test lands
+    // exactly where the rabbit was painted, not on hand-computed coordinates.
+    let (feet_row, line) = frame
+        .iter()
+        .enumerate()
+        .find(|(_, l)| console::strip_ansi_codes(l).contains("o(_(\")(\")"))
+        .expect("the rabbit's feet are drawn");
+    let feet_col = console::strip_ansi_codes(line)
+        .find('o')
+        .expect("the feet lead with `o`");
+    assert!(rect.contains(feet_col as u16, feet_row as u16));
+    assert!(rect.contains(feet_col as u16, (feet_row - 2) as u16));
+    // Cells well outside the block are not on the rabbit.
+    assert!(!rect.contains(0, 0));
+    assert!(!rect.contains(60, feet_row as u16));
+}
+
+#[test]
+fn mascot_hit_rect_is_none_when_there_is_no_room() {
+    let state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
+    // A very short screen leaves no room for the mascot below the list, so there is
+    // nothing to click.
+    assert!(mascot_hit_rect(8, 80, &state).is_none());
+}
+
+#[test]
+fn mascot_hit_rect_tracks_the_collapsed_rail_chibi() {
+    let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
+    state.toggle_sidebar(); // collapse to the rail
+    let frame = render_frame(24, 80, &state);
+    let rect = mascot_hit_rect(24, 80, &state).expect("the rail chibi is shown");
+    // The two-row chibi's face is inside the (narrower) rail click target.
+    let (face_row, line) = frame
+        .iter()
+        .enumerate()
+        .find(|(_, l)| console::strip_ansi_codes(l).contains("(･･)"))
+        .expect("the chibi face is drawn");
+    let face_col = console::strip_ansi_codes(line)
+        .find('(')
+        .expect("the chibi has an opening paren");
+    assert!(rect.contains(face_col as u16, face_row as u16));
+}
+
+#[test]
+fn mascot_hit_rect_targets_the_rabbit_below_the_update_bubble() {
+    // When the mascot speaks the update notice the block is taller (bubble + the
+    // rabbit), but only the rabbit's body — the bottom three rows — is clickable,
+    // so a click on the bubble does not count.
+    let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
+    state.set_update(crate::domain::version::Version::parse("9.9.9"));
+    let frame = render_frame(24, 100, &state);
+    let rect = mascot_hit_rect(24, 100, &state).expect("the speaking mascot is shown");
+    let (feet_row, _) = frame
+        .iter()
+        .enumerate()
+        .find(|(_, l)| console::strip_ansi_codes(l).contains("o(_(\")(\")"))
+        .expect("the rabbit's feet are drawn");
+    // The feet are on the rabbit (clickable); the bubble well above it is not.
+    assert!(rect.contains(1, feet_row as u16));
+    assert!(!rect.contains(1, (feet_row - 4) as u16));
+}
+
+#[test]
 fn command_palette_frame_shows_command_output_in_its_band() {
     let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
     state.open_command_palette();

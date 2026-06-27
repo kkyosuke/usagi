@@ -222,6 +222,7 @@ fn worktree_row_marks_the_cursor_in_switch_and_shows_detached() {
         "",
         10,
         10,
+        DetailCols::default(),
         false,
         Utc::now(),
         true,
@@ -231,7 +232,6 @@ fn worktree_row_marks_the_cursor_in_switch_and_shows_detached() {
         false,
         false,
         false,
-        None,
     );
     assert!(top.contains('>'));
     assert!(top.contains('●'));
@@ -243,6 +243,7 @@ fn worktree_row_marks_the_cursor_in_switch_and_shows_detached() {
         "",
         10,
         10,
+        DetailCols::default(),
         false,
         Utc::now(),
         true,
@@ -252,7 +253,6 @@ fn worktree_row_marks_the_cursor_in_switch_and_shows_detached() {
         false,
         false,
         false,
-        None,
     );
     assert!(!top_no_switch.contains('>'));
 
@@ -261,6 +261,7 @@ fn worktree_row_marks_the_cursor_in_switch_and_shows_detached() {
         "",
         10,
         10,
+        DetailCols::default(),
         false,
         Utc::now(),
         false,
@@ -270,7 +271,6 @@ fn worktree_row_marks_the_cursor_in_switch_and_shows_detached() {
         false,
         false,
         false,
-        None,
     );
     assert!(!other_top.contains('>'));
     assert!(other_top.contains('●'));
@@ -281,6 +281,7 @@ fn worktree_row_marks_the_cursor_in_switch_and_shows_detached() {
         "",
         10,
         10,
+        DetailCols::default(),
         false,
         Utc::now(),
         false,
@@ -290,7 +291,6 @@ fn worktree_row_marks_the_cursor_in_switch_and_shows_detached() {
         false,
         false,
         false,
-        None,
     );
     assert!(detached_top.contains("(detached)"));
 }
@@ -304,6 +304,7 @@ fn worktree_row_shows_a_memo_marker_only_when_the_session_has_a_note() {
         "",
         10,
         10,
+        DetailCols::default(),
         true,
         Utc::now(),
         false,
@@ -313,7 +314,6 @@ fn worktree_row_shows_a_memo_marker_only_when_the_session_has_a_note() {
         false,
         false,
         false,
-        None,
     )
     .0;
     let without_note = worktree_row(
@@ -321,6 +321,7 @@ fn worktree_row_shows_a_memo_marker_only_when_the_session_has_a_note() {
         "",
         10,
         10,
+        DetailCols::default(),
         false,
         Utc::now(),
         false,
@@ -330,7 +331,6 @@ fn worktree_row_shows_a_memo_marker_only_when_the_session_has_a_note() {
         false,
         false,
         false,
-        None,
     )
     .0;
     assert!(with_note.contains(NOTE_ICON));
@@ -355,8 +355,20 @@ fn worktree_row_heat_dot_fades_with_time_since_touched() {
             ..worktree(Some("s"), false, BranchStatus::Local)
         };
         let (top, _) = worktree_row(
-            &worktree, "", 10, 10, false, now, false, false, false, false, false, false, false,
-            None,
+            &worktree,
+            "",
+            10,
+            10,
+            DetailCols::default(),
+            false,
+            now,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
         );
         console::strip_ansi_codes(&top).into_owned()
     };
@@ -376,6 +388,7 @@ fn worktree_row_marks_the_active_worktree_with_a_gutter_bar_on_both_lines() {
         "",
         10,
         10,
+        DetailCols::default(),
         false,
         Utc::now(),
         false,
@@ -385,7 +398,6 @@ fn worktree_row_marks_the_active_worktree_with_a_gutter_bar_on_both_lines() {
         false,
         false,
         false,
-        None,
     );
     // The green `▎` accent bar runs down both lines of the active row (the
     // detail line carries it too, to the left of the agent state).
@@ -398,6 +410,7 @@ fn worktree_row_marks_the_active_worktree_with_a_gutter_bar_on_both_lines() {
         "",
         10,
         10,
+        DetailCols::default(),
         false,
         Utc::now(),
         false,
@@ -407,7 +420,6 @@ fn worktree_row_marks_the_active_worktree_with_a_gutter_bar_on_both_lines() {
         false,
         false,
         false,
-        None,
     );
     assert!(!idle_top.contains('▎'));
     assert!(!idle_detail.contains('▎'));
@@ -421,6 +433,7 @@ fn worktree_row_shows_the_agent_state_through_its_lifecycle() {
         "",
         10,
         12,
+        DetailCols::default(),
         false,
         Utc::now(),
         false,
@@ -430,7 +443,6 @@ fn worktree_row_shows_the_agent_state_through_its_lifecycle() {
         false,
         false,
         false,
-        None,
     );
     assert!(ready_detail.contains('☾'));
     assert!(ready_detail.contains("ready"));
@@ -441,6 +453,7 @@ fn worktree_row_shows_the_agent_state_through_its_lifecycle() {
         "",
         10,
         12,
+        DetailCols::default(),
         false,
         Utc::now(),
         false,
@@ -450,7 +463,6 @@ fn worktree_row_shows_the_agent_state_through_its_lifecycle() {
         true,
         false,
         false,
-        None,
     );
     assert!(running_detail.contains('▶'));
     assert!(running_detail.contains("running"));
@@ -461,6 +473,7 @@ fn worktree_row_shows_the_agent_state_through_its_lifecycle() {
         "",
         10,
         12,
+        DetailCols::default(),
         false,
         Utc::now(),
         false,
@@ -470,7 +483,6 @@ fn worktree_row_shows_the_agent_state_through_its_lifecycle() {
         true,
         true,
         false,
-        None,
     );
     assert!(waiting_detail.contains('◆'));
     assert!(!waiting_detail.contains('▶'));
@@ -482,6 +494,7 @@ fn worktree_row_shows_the_agent_state_through_its_lifecycle() {
         "",
         10,
         12,
+        DetailCols::default(),
         false,
         Utc::now(),
         false,
@@ -491,7 +504,6 @@ fn worktree_row_shows_the_agent_state_through_its_lifecycle() {
         true,
         false,
         true,
-        None,
     );
     assert!(done_detail.contains('✓'));
     assert!(done_detail.contains("done"));
@@ -503,6 +515,7 @@ fn worktree_row_shows_the_agent_state_through_its_lifecycle() {
         "",
         10,
         12,
+        DetailCols::default(),
         false,
         Utc::now(),
         false,
@@ -512,88 +525,11 @@ fn worktree_row_shows_the_agent_state_through_its_lifecycle() {
         false,
         false,
         false,
-        None,
     );
     assert!(!absent_detail.contains('▶'));
     assert!(!absent_detail.contains('◆'));
     assert!(!absent_detail.contains('☾'));
     assert!(absent_top.contains("local"));
-}
-
-#[test]
-fn worktree_row_shows_the_resource_figure_only_when_one_is_supplied() {
-    let usage = ResourceUsage {
-        cpu_percent: 8,
-        memory_bytes: 120 * 1024 * 1024,
-    };
-    // A live row given a sample carries `<cpu>% <mem>` on its detail line.
-    let (_, with_usage) = worktree_row(
-        &worktree(Some("feature"), false, BranchStatus::Local),
-        "",
-        12,
-        24,
-        false,
-        Utc::now(),
-        false,
-        false,
-        false,
-        true,
-        true,
-        false,
-        false,
-        Some(usage),
-    );
-    assert!(console::strip_ansi_codes(&with_usage).contains("8% 120MB"));
-
-    // The same row with no sample (a session with no live process) shows none.
-    let (_, without_usage) = worktree_row(
-        &worktree(Some("feature"), false, BranchStatus::Local),
-        "",
-        12,
-        24,
-        false,
-        Utc::now(),
-        false,
-        false,
-        false,
-        true,
-        true,
-        false,
-        false,
-        None,
-    );
-    assert!(!console::strip_ansi_codes(&without_usage).contains("MB"));
-}
-
-#[test]
-fn left_pane_threads_each_sessions_resource_to_its_row() {
-    let list = list_with(vec![worktree(Some("feature"), false, BranchStatus::Local)]);
-    let path: HashSet<PathBuf> = [PathBuf::from("/repo/wt")].into_iter().collect();
-    let empty = HashSet::new();
-    let resources: HashMap<PathBuf, ResourceUsage> = [(
-        PathBuf::from("/repo/wt"),
-        ResourceUsage {
-            cpu_percent: 12,
-            memory_bytes: 256 * 1024 * 1024,
-        },
-    )]
-    .into_iter()
-    .collect();
-    let lines = left_pane(
-        &list,
-        &path,
-        &path,
-        &empty,
-        &empty,
-        &resources,
-        40,
-        6,
-        false,
-        Sidebar::Full,
-        Utc::now(),
-    );
-    // Row 4 is the worktree's detail line, where the resource figure rides.
-    assert!(console::strip_ansi_codes(&lines[4]).contains("12% 256MB"));
 }
 
 #[test]
@@ -622,6 +558,7 @@ fn worktree_row_truncates_a_long_branch() {
         "",
         8,
         8,
+        DetailCols::default(),
         false,
         Utc::now(),
         false,
@@ -631,7 +568,6 @@ fn worktree_row_truncates_a_long_branch() {
         false,
         false,
         false,
-        None,
     );
     assert!(top.contains('…'));
 }
@@ -643,6 +579,7 @@ fn worktree_row_shows_the_label_override_instead_of_the_branch() {
         "Login flow",
         20,
         20,
+        DetailCols::default(),
         false,
         Utc::now(),
         false,
@@ -652,7 +589,6 @@ fn worktree_row_shows_the_label_override_instead_of_the_branch() {
         false,
         false,
         false,
-        None,
     );
     assert!(top.contains("Login flow"));
     assert!(!top.contains("feat-login"));
@@ -661,26 +597,62 @@ fn worktree_row_shows_the_label_override_instead_of_the_branch() {
 #[test]
 fn root_row_marks_selected_and_active() {
     // The `>` cursor shows on the selected root only in 切替 (Switch).
-    let (top, detail) = root_row(10, 20, true, false, true);
+    let (top, detail) = root_row(10, 20, false, true, false, true);
     assert!(top.contains('>'));
     assert!(top.contains('⌂'));
     assert!(top.contains(ROOT_NAME));
     assert!(detail.contains("workspace root"));
     // The same selected root outside Switch shows no cursor.
-    let (top_no_switch, _) = root_row(10, 20, true, false, false);
+    let (top_no_switch, _) = root_row(10, 20, false, true, false, false);
     assert!(!top_no_switch.contains('>'));
 
     // The active root carries the green `▎` bar down both lines, not a `*`.
-    let (active_top, active_detail) = root_row(10, 20, false, true, false);
+    let (active_top, active_detail) = root_row(10, 20, false, false, true, false);
     assert!(active_top.contains('▎'));
     assert!(active_detail.contains('▎'));
     assert!(!active_top.contains('*'));
 
-    let (idle_top, idle_detail) = root_row(10, 20, false, false, false);
+    let (idle_top, idle_detail) = root_row(10, 20, false, false, false, false);
     assert!(!idle_top.contains('>'));
     assert!(!idle_top.contains('▎'));
     assert!(!idle_detail.contains('▎'));
     assert!(idle_top.contains(ROOT_NAME));
+}
+
+#[test]
+fn root_row_shows_the_memo_marker_only_when_it_has_a_note() {
+    // The root row carries its own note, like a session: the memo marker shows on
+    // line 1 only when `has_note`, and is purely additive (the right-edge status
+    // column does not shift), matching the worktree row.
+    let (with_note, _) = root_row(10, 20, true, false, false, false);
+    let (without_note, _) = root_row(10, 20, false, false, false, false);
+    assert!(with_note.contains(NOTE_ICON));
+    assert!(!without_note.contains(NOTE_ICON));
+    assert_eq!(
+        console::measure_text_width(&console::strip_ansi_codes(&with_note)),
+        console::measure_text_width(&console::strip_ansi_codes(&without_note)),
+    );
+}
+
+#[test]
+fn left_pane_marks_the_root_row_when_it_carries_a_note() {
+    let mut list = list_with(Vec::new());
+    list.set_root_note_marker(true);
+    let lines = left_pane(
+        &list,
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashMap::new(),
+        80,
+        6,
+        false,
+        Sidebar::Full,
+        Utc::now(),
+    );
+    // Line 0 is the root row; with the marker set it shows the memo glyph.
+    assert!(lines[0].contains(NOTE_ICON));
 }
 
 #[test]
@@ -734,7 +706,7 @@ fn left_pane_shows_each_sessions_relative_update_time_on_the_detail_line() {
     // on the session's detail line (index 4).
     let detail = console::strip_ansi_codes(&lines[4]);
     assert!(
-        detail.contains("5分前"),
+        detail.contains("5min ago"),
         "{detail:?} missing the relative time"
     );
 }
@@ -764,6 +736,70 @@ fn left_pane_shows_the_ahead_behind_marker_on_the_detail_line() {
     assert!(
         detail.contains("↑2 ↓1"),
         "{detail:?} missing the ahead/behind marker"
+    );
+}
+
+#[test]
+fn left_pane_lines_the_detail_fields_up_across_sessions_of_different_sizes() {
+    use crate::domain::workspace_state::{AheadBehind, DiffStat};
+    let now = chrono::DateTime::parse_from_rfc3339("2026-06-27T12:00:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    // A tiny, just-touched session with a live agent…
+    let mut small = worktree(Some("small"), false, BranchStatus::Local);
+    small.path = PathBuf::from("/repo/small");
+    small.updated_at = now - chrono::Duration::seconds(30);
+    small.diff = Some(DiffStat {
+        added: 5,
+        removed: 3,
+    });
+    small.ahead_behind = Some(AheadBehind {
+        ahead: 2,
+        behind: 0,
+    });
+    // …beside a much larger, staler one with no agent. The change counts differ by
+    // orders of magnitude and the "ago" labels differ in width.
+    let mut big = worktree(Some("big"), false, BranchStatus::Local);
+    big.path = PathBuf::from("/repo/big");
+    big.updated_at = now - chrono::Duration::minutes(12);
+    big.diff = Some(DiffStat {
+        added: 140,
+        removed: 88,
+    });
+    big.ahead_behind = Some(AheadBehind {
+        ahead: 0,
+        behind: 7,
+    });
+    let live = HashSet::from([PathBuf::from("/repo/small")]);
+    let lines = left_pane(
+        &list_with(vec![small, big]),
+        &live,
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashMap::new(),
+        80,
+        8,
+        false,
+        Sidebar::Full,
+        now,
+    );
+    // Detail lines: small at index 4, big at index 6.
+    let small_detail = console::strip_ansi_codes(&lines[4]);
+    let big_detail = console::strip_ansi_codes(&lines[6]);
+    assert!(small_detail.contains("☾ ready")); // the live agent's label
+    assert!(small_detail.contains("+  5 - 3")); // counts padded to the wide columns
+    assert!(big_detail.contains("+140 -88"));
+    assert!(big_detail.contains("12min ago"));
+    // The diff `+` lands in the same display column on both rows regardless of how
+    // many changed lines each carries — the point of the fixed columns.
+    let col_of =
+        |s: &str, ch: char| console::measure_text_width(&s[..s.find(ch).expect("char present")]);
+    assert_eq!(col_of(&small_detail, '+'), col_of(&big_detail, '+'));
+    // Both detail lines fill the same width, so the cluster's right edge lines up.
+    assert_eq!(
+        console::measure_text_width(&small_detail),
+        console::measure_text_width(&big_detail)
     );
 }
 
@@ -928,6 +964,73 @@ fn left_pane_marks_the_agent_state_through_its_lifecycle() {
     assert!(!absent[4].contains('◆'));
     assert!(!absent[4].contains('☾'));
     assert!(absent[3].contains("local"));
+}
+
+#[test]
+fn left_pane_adds_a_resource_line_only_for_a_sampled_live_session() {
+    let list = list_with(vec![worktree(Some("feature"), false, BranchStatus::Local)]);
+    let path: HashSet<PathBuf> = [PathBuf::from("/repo/wt")].into_iter().collect();
+    let empty = HashSet::new();
+    let resources: HashMap<PathBuf, ResourceUsage> = [(
+        PathBuf::from("/repo/wt"),
+        ResourceUsage {
+            cpu_percent: 12,
+            memory_bytes: 256 * 1024 * 1024,
+        },
+    )]
+    .into_iter()
+    .collect();
+
+    // Rows: 0/1 root, 2 divider, 3 identity, 4 agent detail, 5 the resource line.
+    let with_usage = left_pane(
+        &list,
+        &path,
+        &path,
+        &empty,
+        &empty,
+        &resources,
+        40,
+        8,
+        false,
+        Sidebar::Full,
+        Utc::now(),
+    );
+    assert!(with_usage[4].contains("running"));
+    assert!(console::strip_ansi_codes(&with_usage[5]).contains("CPU 12%  MEM 256MB"));
+
+    // With no sample the session stays two lines — there is no resource row.
+    let without = left_pane(
+        &list,
+        &path,
+        &path,
+        &empty,
+        &empty,
+        &HashMap::new(),
+        40,
+        8,
+        false,
+        Sidebar::Full,
+        Utc::now(),
+    );
+    assert!(without[4].contains("running"));
+    assert!(without.get(5).is_none_or(|l| !l.contains("CPU")));
+
+    // In 切替 the unselected rows (the cursor rests on the root) are dimmed — the
+    // resource line is faded along with the rest of its entry, but its text stays.
+    let in_switch = left_pane(
+        &list,
+        &path,
+        &path,
+        &empty,
+        &empty,
+        &resources,
+        40,
+        8,
+        true,
+        Sidebar::Full,
+        Utc::now(),
+    );
+    assert!(console::strip_ansi_codes(&in_switch[5]).contains("CPU 12%  MEM 256MB"));
 }
 
 #[test]

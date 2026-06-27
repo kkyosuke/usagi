@@ -121,6 +121,7 @@ fn a_finished_create_drops_into_focus_on_the_new_session() {
             },
         ]),
         select: None,
+        root_note: None,
     };
     let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = noop_preview;
     assert!(matches!(
@@ -272,6 +273,7 @@ fn focus_close_command_removes_the_focused_session_then_enters_switch() {
             line: LogLine::output("removed"),
             sessions: Some(Vec::new()),
             select: None,
+            root_note: None,
         }
     };
     let mut open: fn(&mut HomeState, &Path, bool, bool) -> Result<PaneExit> = noop_open;
@@ -338,6 +340,7 @@ fn focus_menu_close_removes_the_focused_session_then_enters_switch() {
             line: LogLine::output("removed"),
             sessions: Some(Vec::new()),
             select: None,
+            root_note: None,
         }
     };
     let mut open: fn(&mut HomeState, &Path, bool, bool) -> Result<PaneExit> = noop_open;

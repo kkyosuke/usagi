@@ -100,18 +100,9 @@ pub fn cheatsheet(scheme: KeyScheme) -> Vec<LogLine> {
         key_row("Ctrl-^", "Jump to the previous session"),
         key_row("Esc", "Close the note / back out"),
         LogLine::output(String::new()),
-        cheatsheet_header("在席 / Focus — operate a session"),
-        key_row("↑↓ / k j", "Move the action menu cursor"),
-        key_row("→ / Tab", "Expand the agent picker"),
-        key_row("Enter", "Run the highlighted action / open the pane"),
-        key_row("t / a", "Launch a terminal / agent"),
-        key_row("Ctrl-P / Ctrl-N", "Move between the session's tabs"),
-        key_row("Ctrl-O", "Zoom out to Switch"),
-        key_row("Ctrl-^", "Jump to the previous session"),
-        key_row("Ctrl-E", "Edit the session note"),
-        key_row("Esc", "Back out to Switch"),
-        LogLine::output(String::new()),
     ];
+    lines.extend(focus_keys(scheme));
+    lines.push(LogLine::output(String::new()));
     lines.extend(attached_keys(scheme));
     lines.push(LogLine::output(String::new()));
     lines.push(LogLine::output(
@@ -136,7 +127,7 @@ fn attached_keys(scheme: KeyScheme) -> Vec<LogLine> {
             key_row("Ctrl-O e", "Edit the session note"),
             key_row("Ctrl-O s", "Toggle the session sidebar"),
             key_row("Ctrl-O q", "Quit usagi"),
-            key_row("Ctrl-O Ctrl-O", "Send a literal Ctrl-O to the shell"),
+            key_row("Ctrl-O Ctrl-O", "Zoom out to Switch (IME-safe second key)"),
         ],
         KeyScheme::Alt => vec![
             cheatsheet_header("没入 / Attached — live terminal (needs Option=Meta on macOS)"),
@@ -155,6 +146,41 @@ fn attached_keys(scheme: KeyScheme) -> Vec<LogLine> {
         key_row("Ctrl-C", "Copy the selection (when one is active)"),
         key_row("Shift+↑↓", "Scroll the history one line"),
         key_row("Shift+PgUp/Dn", "Scroll the history one page"),
+    ]);
+    lines
+}
+
+/// The 在席 (Focus) section of the cheat sheet for `scheme`. Under the prefix
+/// scheme 在席 shares 没入's `Ctrl-O` leader, so the same `Ctrl-O <key>` chords
+/// navigate from either surface (and `Esc` is the one-key exit); the `Alt` scheme
+/// keeps `Ctrl-O` a direct zoom-out here, since it drives 没入 with `Alt`-chords
+/// and never reads `Ctrl-O` as a leader. The menu / tab keys are the same in both.
+fn focus_keys(scheme: KeyScheme) -> Vec<LogLine> {
+    let mut lines = vec![
+        cheatsheet_header("在席 / Focus — operate a session"),
+        key_row("↑↓ / k j", "Move the action menu cursor"),
+        key_row("→ / Tab", "Expand the agent picker"),
+        key_row("Enter", "Run the highlighted action / open the pane"),
+        key_row("t / a", "Launch a terminal / agent"),
+        key_row("Ctrl-P / Ctrl-N", "Move between the session's tabs"),
+    ];
+    match scheme {
+        KeyScheme::Prefix => lines.extend([
+            key_row("Ctrl-O o", "Zoom out to Switch (or Esc)"),
+            key_row("Ctrl-O n/p", "Next / previous tab (or Ctrl-O →/←)"),
+            key_row("Ctrl-O g", "Launch an agent"),
+            key_row("Ctrl-O e", "Edit the session note (or Ctrl-E)"),
+            key_row("Ctrl-O s", "Toggle the session sidebar"),
+            key_row("Ctrl-O q", "Quit usagi"),
+        ]),
+        KeyScheme::Alt => lines.extend([
+            key_row("Ctrl-O", "Zoom out to Switch"),
+            key_row("Ctrl-E", "Edit the session note"),
+        ]),
+    }
+    lines.extend([
+        key_row("Ctrl-^", "Jump to the previous session"),
+        key_row("Esc", "Back out to Switch"),
     ]);
     lines
 }
@@ -274,6 +300,42 @@ mod tests {
             assert!(sheet.contains("Ctrl-^"));
             assert!(sheet.contains("Shift+↑↓"));
         }
+    }
+
+    #[test]
+    fn cheatsheet_focus_section_reflects_the_active_scheme() {
+        // Prefix scheme: 在席 shares 没入's `Ctrl-O` leader, so the same chords
+        // (`Ctrl-O o`, `Ctrl-O g`, …) are listed for it.
+        let prefix = cheatsheet(KeyScheme::Prefix)
+            .iter()
+            .map(|l| l.text.clone())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(prefix.contains("Ctrl-O o"));
+        assert!(prefix.contains("Ctrl-O g"));
+
+        // Alt scheme: `Ctrl-O` stays a direct zoom-out in 在席 (no leader), so the
+        // Focus section names it plainly alongside the direct `Ctrl-E` note key.
+        let alt = cheatsheet(KeyScheme::Alt)
+            .iter()
+            .map(|l| l.text.clone())
+            .collect::<Vec<_>>()
+            .join("\n");
+        // The only `Ctrl-O <key>` rows in the alt sheet are 没入's — none in Focus —
+        // so the Focus header is followed by the bare `Ctrl-O` zoom-out row.
+        let focus_idx = alt
+            .lines()
+            .position(|l| l.contains("在席 / Focus"))
+            .expect("the Focus header renders");
+        let attached_idx = alt
+            .lines()
+            .position(|l| l.contains("没入 / Attached"))
+            .expect("the Attached header renders");
+        let focus_section = alt.lines().collect::<Vec<_>>()[focus_idx..attached_idx].to_vec();
+        assert!(focus_section
+            .iter()
+            .any(|l| l.contains("Ctrl-O") && l.contains("Zoom out to Switch")));
+        assert!(!focus_section.iter().any(|l| l.contains("Ctrl-O o")));
     }
 
     #[test]

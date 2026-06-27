@@ -69,6 +69,12 @@ pub struct SessionOutcome {
     /// rebuilt — set when creating a session so the new one is selected. `None`
     /// leaves the cursor on the root row (e.g. removals and failures).
     pub select: Option<String>,
+    /// The workspace root's note as it stands after this action, when the action
+    /// may have changed it (editing the `⌂ root` row's memo). `None` leaves the
+    /// in-memory root note untouched; `Some(value)` replaces it, where the inner
+    /// `None` means the note was cleared. Only the root-note save sets this — every
+    /// session-scoped action leaves it `None`.
+    pub root_note: Option<Option<String>>,
 }
 
 /// The outcome of a 切替 reorder (`K` / `J`): moving the selected session one
@@ -474,6 +480,13 @@ pub struct HomeState {
     /// session (keyed by this path in `live` / `running` / …). Injected by
     /// `mod.rs`; empty until set (tests that never preview the root leave it so).
     root_path: PathBuf,
+    /// The workspace root's free-form note (the `⌂ root` row's memo), loaded from
+    /// `state.json` at startup and updated in place when the user edits it. The
+    /// sidebar reads it for the root row's memo marker; the 切替 preview and the
+    /// note editor read it the way they read a session's [`SessionRecord::note`].
+    /// Only the user editing it changes it — background re-syncs leave it as is —
+    /// so it is carried separately from the re-synced `sessions`.
+    root_note: Option<String>,
     /// Whether the sidebar mascot reacts to interaction — injected from the
     /// effective settings by `mod.rs`. While `false` the mascot never blinks and
     /// the Working rabbit never pumps its paw, so it stays a perfectly still
@@ -497,6 +510,24 @@ pub struct HomeState {
     /// open-eyed moods ignore it (they animate off the blink instead), so it only
     /// matters while a session is live and the loop is already ticking.
     mascot_tick: usize,
+    /// The one-shot reaction the mascot is playing after being clicked, or `None`
+    /// while it rests. [`kick_mascot_reaction`](Self::kick_mascot_reaction) sets it
+    /// (picking one pseudo-randomly), the renderer reads it to draw the burst, and
+    /// [`tick_mascot`](Self::tick_mascot) clears it once
+    /// [`mascot_reaction_deadline`](Self::mascot_reaction_deadline) passes.
+    mascot_reaction: Option<crate::presentation::tui::widgets::MascotReaction>,
+    /// When set, the click reaction plays until this instant, then
+    /// [`tick_mascot`](Self::tick_mascot) drops it back to rest — the same
+    /// deadline-on-the-clock shape as the blink.
+    mascot_reaction_deadline: Option<Instant>,
+    /// The value of [`mascot_tick`](Self::mascot_tick) when the current reaction
+    /// began, so [`mascot_reaction_phase`](Self::mascot_reaction_phase) yields a
+    /// from-zero sub-frame counter for the reaction's animation.
+    mascot_reaction_start_tick: usize,
+    /// A tiny linear-congruential state advanced on each click to pick the next
+    /// reaction. Deterministic (seeded at zero) so it is unit-testable, while still
+    /// cycling through the reactions in a varied, shuffled-feeling order.
+    mascot_reaction_rng: u32,
     /// The single sink that persists operation-failure error lines to the daily
     /// log file. [`log_error`](Self::log_error) and the failure lines applied from
     /// background tasks / session outcomes flow through it, so an on-screen
@@ -510,7 +541,7 @@ pub struct HomeState {
     logger: Box<dyn crate::infrastructure::error_log::Logger>,
     /// The wall-clock instant the current frame renders at, refreshed each paint
     /// by the event loop ([`set_now`](Self::set_now)). The left pane reads it to
-    /// turn each session's `updated_at` into a relative "N分前" label. Kept on the
+    /// turn each session's `updated_at` into a relative "Nmin ago" label. Kept on the
     /// state (rather than threaded through the pure `render_frame`) so the renderer
     /// stays a `&HomeState`-only function and its many test call sites are
     /// unaffected; tests that pin the label set a fixed value with `set_now`.
@@ -521,6 +552,12 @@ pub struct HomeState {
 /// loop's `ANIM_TICK`, so the blink spans a couple of paints — long enough to
 /// read as a blink, short enough to feel natural — before the eyes reopen.
 const MASCOT_BLINK: Duration = Duration::from_millis(180);
+
+/// How long a click reaction plays before the mascot settles back to rest. Spans
+/// several of the loop's `ANIM_TICK`s, so the reaction's little animation has room
+/// to cycle a few frames — long enough to read as a playful burst, short enough to
+/// stay out of the way.
+const MASCOT_REACTION: Duration = Duration::from_millis(660);
 
 impl HomeState {
     /// Builds the screen state for `workspace_name` and its `worktrees`. An
@@ -568,19 +605,24 @@ impl HomeState {
             loading: None,
             tasks: Vec::new(),
             root_path: PathBuf::new(),
+            root_note: None,
             // The mascot reacts by default; `mod.rs` overrides it from the
             // effective settings, and tests get a lively mascot without setup.
             mascot_animation_enabled: true,
             mascot_blink_deadline: None,
             mascot_blinking: false,
             mascot_tick: 0,
+            mascot_reaction: None,
+            mascot_reaction_deadline: None,
+            mascot_reaction_start_tick: 0,
+            mascot_reaction_rng: 0,
             logger: Box::new(crate::infrastructure::error_log::NoopLogger),
             now: Utc::now(),
         }
     }
 
     /// Record the instant the next frame renders at, so the left pane's relative
-    /// "N分前" labels track real time. The event loop calls this before each paint;
+    /// "Nmin ago" labels track real time. The event loop calls this before each paint;
     /// tests pin it to control the labels.
     pub fn set_now(&mut self, now: DateTime<Utc>) {
         self.now = now;
@@ -667,6 +709,8 @@ impl HomeState {
         if !enabled {
             self.mascot_blink_deadline = None;
             self.mascot_blinking = false;
+            self.mascot_reaction = None;
+            self.mascot_reaction_deadline = None;
         }
     }
 
@@ -680,6 +724,53 @@ impl HomeState {
     /// The mascot's slow pose counter, driving the 没入 Working rabbit's paw.
     pub fn mascot_tick(&self) -> usize {
         self.mascot_tick
+    }
+
+    /// The one-shot reaction the mascot is playing after a click, or `None` while
+    /// it rests. The renderer reads it (with [`mascot_reaction_phase`](Self::mascot_reaction_phase))
+    /// to draw the burst over the resting mascot.
+    pub fn mascot_reaction(&self) -> Option<crate::presentation::tui::widgets::MascotReaction> {
+        self.mascot_reaction
+    }
+
+    /// The current reaction's sub-frame counter, counting up from zero since it
+    /// began — the live tick minus the tick the reaction started on. The widget
+    /// cycles its frames modulo their length, so this can advance freely.
+    pub fn mascot_reaction_phase(&self) -> usize {
+        self.mascot_tick
+            .wrapping_sub(self.mascot_reaction_start_tick)
+    }
+
+    /// Whether a click reaction is in flight, so the event loop keeps ticking (and
+    /// repainting) until it finishes — the burst animates on the live tick, exactly
+    /// like a blink keeps the loop awake until the eyes reopen.
+    pub fn mascot_reacting(&self) -> bool {
+        self.mascot_reaction.is_some()
+    }
+
+    /// Start a click reaction: pick one of the [`MascotReaction`](crate::presentation::tui::widgets::MascotReaction)s
+    /// pseudo-randomly and play it until [`MASCOT_REACTION`] from `now`. The event
+    /// loop calls this when the user clicks the sidebar rabbit in 切替 / 在席, so the
+    /// usagi does something cute back. A no-op when the mascot animation is
+    /// disabled, so a toggled-off mascot stays a still resting image.
+    pub fn kick_mascot_reaction(&mut self, now: Instant) {
+        if !self.mascot_animation_enabled {
+            return;
+        }
+        // Advance a small LCG and pick from it, so repeated clicks vary rather than
+        // replaying the same reaction; the constants are the well-known Numerical
+        // Recipes multiplier/increment, and the high bits (the most well-mixed) pick.
+        self.mascot_reaction_rng = self
+            .mascot_reaction_rng
+            .wrapping_mul(1_664_525)
+            .wrapping_add(1_013_904_223);
+        self.mascot_reaction = Some(match (self.mascot_reaction_rng >> 24) % 3 {
+            0 => crate::presentation::tui::widgets::MascotReaction::Hop,
+            1 => crate::presentation::tui::widgets::MascotReaction::Sparkle,
+            _ => crate::presentation::tui::widgets::MascotReaction::Bashful,
+        });
+        self.mascot_reaction_deadline = Some(now + MASCOT_REACTION);
+        self.mascot_reaction_start_tick = self.mascot_tick;
     }
 
     /// Start a blink: shut the mascot's eyes until [`MASCOT_BLINK`] from `now`. The
@@ -710,6 +801,14 @@ impl HomeState {
                 false
             }
         };
+        // End a click reaction once its window has passed, settling the mascot back
+        // to its resting pose — the same deadline-on-the-clock shape as the blink.
+        if let Some(deadline) = self.mascot_reaction_deadline {
+            if now >= deadline {
+                self.mascot_reaction = None;
+                self.mascot_reaction_deadline = None;
+            }
+        }
         // Bounded so a long-lived session never overflows it; the Working face
         // only reads it modulo a small period.
         self.mascot_tick = self.mascot_tick.wrapping_add(1);
@@ -787,6 +886,22 @@ impl HomeState {
         self.rebuild_list();
     }
 
+    /// Seed the workspace root's note (from `state.json`) at startup, so the `⌂
+    /// root` row's memo marker, the 切替 preview, and the note editor all reflect
+    /// what is on disk.
+    pub fn restore_root_note(&mut self, note: Option<String>) {
+        self.root_note = note;
+        // Seeded after `restore_sessions` built the list, so refresh the marker in
+        // place rather than relying on that earlier (note-less) rebuild.
+        self.list.set_root_note_marker(self.root_note.is_some());
+    }
+
+    /// The workspace root's note (the `⌂ root` row's memo), or `None` when none
+    /// has been written.
+    pub fn root_note(&self) -> Option<&str> {
+        self.root_note.as_deref()
+    }
+
     /// Swap in a freshly re-synced set of sessions while keeping the cursor and
     /// the active row on the same session names (when they still exist).
     ///
@@ -847,6 +962,9 @@ impl HomeState {
             .collect();
         let mut list = WorktreeList::with_labels(name, rows, labels);
         list.set_notes(notes);
+        // The root row's note lives on the workspace state (it belongs to no
+        // session), so its marker is carried separately from the per-session notes.
+        list.set_root_note_marker(self.root_note.is_some());
         self.list = list;
     }
 
@@ -1134,6 +1252,9 @@ impl HomeState {
         self.mode = Mode::Focus;
         self.focus_new_tab = true;
         self.clear_terminal_surface();
+        // The 没入 drive loop may have left its `Ctrl-O` leader bit set when it
+        // exited on the second key; clear it so 在席 starts without one pending.
+        self.prefix_pending = false;
     }
 
     /// Publish the tab strip shown above the embedded terminal: the session's
@@ -1451,6 +1572,8 @@ impl HomeState {
         // A fresh 切替 shows the highlighted session's note (any prior dismissal
         // belonged to the previous visit).
         self.note_hidden = false;
+        // Any 在席 `Ctrl-O` leader is abandoned by leaving the surface.
+        self.prefix_pending = false;
     }
 
     /// Where the current 切替 returns to on `Esc`.
@@ -1597,24 +1720,27 @@ impl HomeState {
 
     // --- session note editor ----------------------------------------------
 
-    /// The note recorded for the session named `name`, if any. Looked up in the
-    /// recorded sessions (the sidebar list carries only the worktree rows), so
-    /// the editor opens pre-filled with what is on disk.
+    /// The note recorded for the row named `name`, if any: the workspace root's
+    /// note for [`ROOT_NAME`], otherwise the session's. Looked up in the recorded
+    /// sessions / the root note (the sidebar list carries only the worktree rows),
+    /// so the editor opens pre-filled with what is on disk.
     fn session_note(&self, name: &str) -> Option<&str> {
+        if name == ROOT_NAME {
+            return self.root_note();
+        }
         self.sessions
             .iter()
             .find(|s| s.name == name)
             .and_then(|s| s.note())
     }
 
-    /// The note of the session highlighted in 切替 (the cursor row), or `None` on
-    /// the root row (which is the workspace, not a session) and for a session
-    /// with no note. Read by the right-pane renderer so the highlighted session's
-    /// note (its next-time TODO) shows the moment it is selected — without opening
-    /// the editor.
+    /// The note of the row highlighted in 切替 (the cursor row): the workspace
+    /// root's note on the root row, the session's note otherwise — `None` when the
+    /// highlighted row carries no note. Read by the right-pane renderer so the
+    /// highlighted row's note (its next-time TODO) shows the moment it is selected
+    /// — without opening the editor.
     pub fn selected_session_note(&self) -> Option<&str> {
-        let worktree = self.list.selected()?;
-        self.session_note(worktree_name(worktree))
+        self.session_note(self.list.selected_name())
     }
 
     /// The highlighted session's read-only note when its overlay is currently
@@ -1653,36 +1779,30 @@ impl HomeState {
         self.overlay = Overlay::Note(NoteEditor::new(target, &initial, reattach));
     }
 
-    /// Begin editing the selected session's note in 切替 (Switch): open the note
-    /// editor pre-filled with its current note. A no-op on the root row (which is
-    /// the workspace, not a session) and when an editor is already open. Returns
-    /// whether the editor opened.
+    /// Begin editing the selected row's note in 切替 (Switch): open the note editor
+    /// pre-filled with its current note. Works on the `⌂ root` row too (it edits
+    /// the workspace root's note), as well as a session row. A no-op only when an
+    /// editor is already open. Returns whether the editor opened.
     pub fn switch_begin_note(&mut self) -> bool {
         if matches!(self.overlay, Overlay::Note(_)) {
             return false;
         }
-        let Some(worktree) = self.list.selected() else {
-            return false;
-        };
-        let target = worktree_name(worktree).to_string();
+        let target = self.list.selected_name().to_string();
         self.open_note_for(target, false);
         true
     }
 
-    /// Open the note editor for the focused (active) session — the `Ctrl-E` action
-    /// in 在席 (Focus) and 没入 (Attached). `reattach` records whether closing the
-    /// editor should re-attach the session's pane: `true` from 没入 (drop back into
-    /// the live terminal), `false` from 在席 (return to the action surface). A
-    /// no-op on the root row (the workspace, not a session) and when an editor is
-    /// already open. Returns whether the editor opened.
+    /// Open the note editor for the focused (active) row — the `Ctrl-E` action in
+    /// 在席 (Focus) and 没入 (Attached). `reattach` records whether closing the
+    /// editor should re-attach the row's pane: `true` from 没入 (drop back into the
+    /// live terminal), `false` from 在席 (return to the action surface). Works on
+    /// the `⌂ root` row too (it edits the workspace root's note). A no-op only when
+    /// an editor is already open. Returns whether the editor opened.
     pub fn open_focused_note(&mut self, reattach: bool) -> bool {
         if matches!(self.overlay, Overlay::Note(_)) {
             return false;
         }
         let name = self.focused_session_name();
-        if name == ROOT_NAME {
-            return false;
-        }
         self.open_note_for(name, reattach);
         true
     }
@@ -1755,6 +1875,9 @@ impl HomeState {
         self.focus_menu.reset();
         self.focus_prompt.clear();
         self.focus_new_tab = true;
+        // Enter 在席 with no `Ctrl-O` leader pending, so the first key is read
+        // as itself rather than as a stale prefix's second key.
+        self.prefix_pending = false;
     }
 
     /// Enter 在席 (Focus) on the session named `name`, returning whether one
@@ -2214,6 +2337,12 @@ impl HomeState {
     /// creation refreshed the worktree list, swap it in.
     pub fn apply_session_outcome(&mut self, outcome: SessionOutcome) {
         self.push_logged_line(outcome.line);
+        // Apply a refreshed root note (set only by the root-note save) before the
+        // rebuild, so the `⌂ root` row's memo marker reflects the edit this frame.
+        if let Some(root_note) = outcome.root_note {
+            self.root_note = root_note;
+            self.list.set_root_note_marker(self.root_note.is_some());
+        }
         if let Some(sessions) = outcome.sessions {
             self.sessions = sessions;
             self.rebuild_list();

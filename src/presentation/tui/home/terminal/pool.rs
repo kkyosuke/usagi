@@ -394,10 +394,18 @@ impl TerminalPool {
     }
 
     /// Move the active tab within `dir` (next / previous / a numbered jump),
-    /// leaving every pane alive. A no-op for a session with no panes.
-    pub fn nav(&mut self, dir: &Path, nav: TabNav) {
-        if let Some(sp) = self.sessions.get_mut(dir) {
-            sp.active = tabs::resolve_nav(sp.active, sp.panes.len(), nav);
+    /// leaving every pane alive. A no-op for a session with no panes. Returns
+    /// whether the active tab actually moved, so 没入 can skip the screen clear /
+    /// repaint when a nav lands on the tab already showing (a lone pane, or a
+    /// jump to the current tab) and would otherwise flicker.
+    pub fn nav(&mut self, dir: &Path, nav: TabNav) -> bool {
+        match self.sessions.get_mut(dir) {
+            Some(sp) => {
+                let before = sp.active;
+                sp.active = tabs::resolve_nav(sp.active, sp.panes.len(), nav);
+                sp.active != before
+            }
+            None => false,
         }
     }
 
@@ -659,14 +667,18 @@ impl TerminalPool {
                 return Some(cache.view.clone());
             }
         }
-        // Reflow the backgrounded session to the visible pane only when the
-        // previewed session or the geometry actually changed — a TIOCSWINSZ ioctl
-        // and parser lock the old loop paid on every frame regardless.
-        let stale_geo = self
-            .preview_cache
-            .as_ref()
-            .is_none_or(|cache| cache.dir != dir || cache.geo != geo);
-        if stale_geo {
+        // Reflow the backgrounded session to the visible pane only when its grid is
+        // not already at this geometry. Gating on the session's actual size — not
+        // merely "the previewed dir changed" — matters: the cache only remembers the
+        // last previewed session, so moving the cursor back onto a session already
+        // sized to the preview would still fire a redundant `resize`. That spurious
+        // TIOCSWINSZ delivers a SIGWINCH to the program inside, and a full-screen TUI
+        // (an agent's UI) answers by clearing and redrawing its whole screen; the
+        // snapshot read just below catches it mid-redraw, so the preview flickers for
+        // a frame or two on every such switch. Skipping the no-op resize keeps a
+        // re-selected session steady, while a genuine size change (a `Ctrl-B` sidebar
+        // toggle, or a session first sized differently) still reflows exactly once.
+        if session.parser().screen().size() != (geo.rows, geo.cols) {
             session.resize(geo.rows, geo.cols);
         }
         let view = TerminalView::from_screen(session.parser().screen());
