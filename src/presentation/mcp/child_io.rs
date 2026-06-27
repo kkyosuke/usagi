@@ -16,16 +16,21 @@ use std::time::{Duration, Instant};
 /// Read up to `cap` bytes from `reader`, draining (and discarding) the rest so
 /// the child never blocks on a full pipe. Returns the captured bytes and whether
 /// the stream was longer than `cap`.
-pub fn read_capped(reader: &mut impl Read, cap: usize) -> (Vec<u8>, bool) {
+///
+/// A read error is **propagated**, not swallowed: a stream that fails partway
+/// must not be handed back as a short-but-complete result, or the caller would
+/// treat a truncated-by-IO-error response as the child's full output. The
+/// post-truncation drain stays best-effort (it only unblocks the pipe).
+pub fn read_capped(reader: &mut impl Read, cap: usize) -> std::io::Result<(Vec<u8>, bool)> {
     let mut buf = Vec::new();
     // Read one past the cap to detect truncation, then drain the remainder.
-    let _ = reader.take(cap as u64 + 1).read_to_end(&mut buf);
+    reader.take(cap as u64 + 1).read_to_end(&mut buf)?;
     let truncated = buf.len() > cap;
     if truncated {
         buf.truncate(cap);
         let _ = std::io::copy(reader, &mut std::io::sink());
     }
-    (buf, truncated)
+    Ok((buf, truncated))
 }
 
 /// The slice of [`std::process::Child`] that [`wait_with_timeout`] needs: poll
@@ -74,7 +79,7 @@ mod tests {
     #[test]
     fn read_capped_returns_all_bytes_when_under_the_cap() {
         let mut reader = Cursor::new(b"hello".to_vec());
-        let (buf, truncated) = read_capped(&mut reader, 64);
+        let (buf, truncated) = read_capped(&mut reader, 64).unwrap();
         assert_eq!(buf, b"hello");
         assert!(!truncated);
     }
@@ -82,7 +87,7 @@ mod tests {
     #[test]
     fn read_capped_keeps_exactly_cap_bytes_without_flagging_truncation() {
         let mut reader = Cursor::new(b"hello".to_vec());
-        let (buf, truncated) = read_capped(&mut reader, 5);
+        let (buf, truncated) = read_capped(&mut reader, 5).unwrap();
         assert_eq!(buf, b"hello");
         assert!(!truncated);
     }
@@ -90,11 +95,25 @@ mod tests {
     #[test]
     fn read_capped_truncates_and_drains_the_rest_when_over_the_cap() {
         let mut reader = Cursor::new(b"hello world".to_vec());
-        let (buf, truncated) = read_capped(&mut reader, 5);
+        let (buf, truncated) = read_capped(&mut reader, 5).unwrap();
         assert_eq!(buf, b"hello");
         assert!(truncated);
         // The remainder was drained to the sink, so the reader is now at EOF.
         assert_eq!(reader.position(), 11);
+    }
+
+    #[test]
+    fn read_capped_propagates_a_read_error_instead_of_a_short_buffer() {
+        // A reader that errors mid-stream must surface the error, not be returned
+        // as a complete-but-short output the caller mistakes for the full result.
+        struct ErroringReader;
+        impl Read for ErroringReader {
+            fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("boom"))
+            }
+        }
+        let err = read_capped(&mut ErroringReader, 64).unwrap_err();
+        assert_eq!(err.to_string(), "boom");
     }
 
     /// A scripted [`WaitableChild`]: each `try_wait` pops the next queued result,

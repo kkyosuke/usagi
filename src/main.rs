@@ -76,8 +76,6 @@ struct OllamaBackend {
 
 impl LlmBackend for OllamaBackend {
     fn ask(&self, prompt: &str, system: Option<&str>) -> Result<String, String> {
-        use std::io::Write as _;
-
         // A Homebrew-installed `ollama` runs no server until one is started, and
         // `run` does not auto-start it — so make sure the server is up first,
         // otherwise every call fails with "could not connect to ollama server".
@@ -105,19 +103,23 @@ impl LlmBackend for OllamaBackend {
             .spawn()
             .map_err(|e| format!("failed to start ollama: {e}"))?;
 
-        // Feed the prompt, then drop stdin so ollama sees EOF and starts.
-        {
-            let mut stdin = child
-                .stdin
-                .take()
-                .ok_or_else(|| "failed to open ollama stdin".to_string())?;
-            stdin
-                .write_all(full.as_bytes())
-                .map_err(|e| format!("failed to write prompt to ollama: {e}"))?;
-        }
+        // Spawn the stdin writer and the stdout/stderr drains *all up front*,
+        // before waiting, so no single full pipe can deadlock: while we feed up to
+        // 256 KiB of prompt, ollama's output is drained concurrently, and vice
+        // versa. (Writing the whole prompt before starting to drain would deadlock
+        // if ollama emitted enough output to fill its stdout pipe before consuming
+        // all of stdin.) Dropping `stdin` at the end of the writer thread closes it
+        // so ollama sees EOF and begins generating.
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| "failed to open ollama stdin".to_string())?;
+        let input = full.into_bytes();
+        let stdin_writer = std::thread::spawn(move || {
+            use std::io::Write as _;
+            let _ = stdin.write_all(&input);
+        });
 
-        // Drain stdout/stderr on threads (capped) so a large output cannot
-        // deadlock on a full pipe, while the main thread bounds the wait.
         let mut out = child
             .stdout
             .take()
@@ -130,14 +132,26 @@ impl LlmBackend for OllamaBackend {
         let err_reader = std::thread::spawn(move || read_capped(&mut err, MAX_STDERR_BYTES));
 
         let status = wait_with_timeout(&mut RealChild(child), ASK_TIMEOUT, ASK_POLL);
-        let (stdout, _) = out_reader.join().unwrap_or_default();
-        let (stderr, stderr_truncated) = err_reader.join().unwrap_or_default();
+        // The writer thread finishes when the prompt is written, or when a killed
+        // ollama closes its stdin read-end (write_all then errors out) — so this
+        // join never hangs.
+        let _ = stdin_writer.join();
+        let stdout_result = out_reader
+            .join()
+            .unwrap_or_else(|_| Ok((Vec::new(), false)));
+        let stderr_result = err_reader
+            .join()
+            .unwrap_or_else(|_| Ok((Vec::new(), false)));
 
         let Some(status) = status else {
             return Err(format!(
                 "ollama did not finish within {ASK_TIMEOUT:?} and was terminated"
             ));
         };
+        // A failed stdout read must not be reported as a complete (empty) reply.
+        let (stdout, _) =
+            stdout_result.map_err(|e| format!("failed to read ollama output: {e}"))?;
+        let (stderr, stderr_truncated) = stderr_result.unwrap_or((Vec::new(), false));
         if !status.success() {
             let mut detail = String::from_utf8_lossy(&stderr).trim().to_string();
             if stderr_truncated {
