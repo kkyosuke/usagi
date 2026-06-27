@@ -27,7 +27,6 @@ const ISSUES_DIR_NAME: &str = "issues";
 /// [`crate::infrastructure::gitignore`], which a test there cross-checks against
 /// this constant.
 pub(crate) const INDEX_FILE: &str = "index.json";
-const FILE_FORMAT_VERSION: u32 = 1;
 
 /// On-disk shape of `index.json`, read back as owned data. The `version` key is
 /// written (see [`IndexFileRef`]) but ignored on read, so it is not modelled
@@ -300,7 +299,7 @@ impl IssueStore {
         fs::create_dir_all(&self.dir)
             .context(format!("failed to create {}", self.dir.display()))?;
         let index = IndexFileRef {
-            version: FILE_FORMAT_VERSION,
+            version: json_file::FILE_FORMAT_VERSION,
             issues: &summaries,
         };
         // The canonical "pretty JSON + trailing newline, written atomically" path
