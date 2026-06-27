@@ -5,7 +5,7 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use console::{style, Style};
 
 use super::super::command::{CommandInfo, Hint};
@@ -215,9 +215,10 @@ fn note_cell(has_note: bool) -> String {
 
 /// Builds a worktree's two lines. The far-left gutter carries a `>` cursor for
 /// the selected entry in 切替 (Switch) or a green `▎` accent bar down the active
-/// worktree's two lines; line 1 then has a `●`/`○` kind icon (primary or ordinary
-/// worktree), the branch name, a memo marker (`NOTE_ICON`, when `has_note`), and
-/// the git `status` at the right edge. Line 2 is indented under the name and,
+/// worktree's two lines; line 1 then has the freshness ("heat") kind dot
+/// (`●`/`◐`/`○`, fading by time since the session was last touched, measured
+/// against `now`), the branch name, a memo marker (`NOTE_ICON`, when `has_note`),
+/// and the git `status` at the right edge. Line 2 is indented under the name and,
 /// when an agent is in use, carries its icon + label (`☾ ready` / `▶ running` /
 /// `◆ waiting` / `✓ done`).
 #[allow(clippy::too_many_arguments)]
@@ -236,7 +237,7 @@ pub(super) fn worktree_row(
     waiting: bool,
     done: bool,
 ) -> (String, String) {
-    let kind = kind_dot(worktree);
+    let kind = kind_dot(heat_of(worktree.updated_at, now));
     // The session's sidebar label (its custom display name, or the branch when
     // unset); a detached worktree with no label falls back to the placeholder.
     let name = if label.is_empty() {
@@ -416,12 +417,46 @@ pub(super) fn root_row(
     (line1, line2)
 }
 
-/// The worktree's kind dot — primary (`●`, magenta) or ordinary (`○`, dim).
-fn kind_dot(worktree: &WorktreeState) -> String {
-    if worktree.primary {
-        style("●").magenta().to_string()
+/// A session's freshness, derived from how long ago it was last touched —
+/// switched to, or seen producing terminal/agent activity. Drives the sidebar
+/// kind dot's glyph and colour.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Heat {
+    /// Touched within the last [`HEAT_FRESH`].
+    Fresh,
+    /// Touched within the last [`HEAT_WARM`] (but not [`HEAT_FRESH`]).
+    Warm,
+    /// Touched longer ago than [`HEAT_WARM`], or never since creation.
+    Cold,
+}
+
+/// A session touched more recently than this reads as [`Heat::Fresh`].
+const HEAT_FRESH_MINUTES: i64 = 15;
+/// A session touched more recently than this — but not [`HEAT_FRESH_MINUTES`] —
+/// reads as [`Heat::Warm`]; anything older is [`Heat::Cold`].
+const HEAT_WARM_HOURS: i64 = 4;
+
+/// Classify a session's freshness from its last-active time and the current
+/// time. A negative age (a clock that went backwards) is treated as fresh, the
+/// safe side — a session is never shown colder than it is.
+fn heat_of(last_active: DateTime<Utc>, now: DateTime<Utc>) -> Heat {
+    let age = now.signed_duration_since(last_active);
+    if age < Duration::minutes(HEAT_FRESH_MINUTES) {
+        Heat::Fresh
+    } else if age < Duration::hours(HEAT_WARM_HOURS) {
+        Heat::Warm
     } else {
-        style("○").dim().to_string()
+        Heat::Cold
+    }
+}
+
+/// The session's freshness ("heat") dot: fresh `●` (green), warm `◐`, or cold
+/// `○` (dim) — the time since the session was last touched, oldest fading out.
+fn kind_dot(heat: Heat) -> String {
+    match heat {
+        Heat::Fresh => style("●").green().to_string(),
+        Heat::Warm => style("◐").to_string(),
+        Heat::Cold => style("○").dim().to_string(),
     }
 }
 
@@ -510,7 +545,7 @@ fn rail_pane(
         let row = i + 1;
         let selected = row == list.selected_index();
         let active = row == list.active_index();
-        let kind = kind_dot(w);
+        let kind = kind_dot(heat_of(w.updated_at, Utc::now()));
         let git = rail_status_glyph(w.status);
         let agent = AgentState::from_flags(
             live.contains(&w.path),

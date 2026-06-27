@@ -106,6 +106,7 @@ mod tests {
                 updated_at: Utc::now(),
             }],
             created_at: Utc::now(),
+            last_active: None,
         });
         state
     }

@@ -216,6 +216,7 @@ fn a_background_refresh_updates_the_session_list_exactly_once() {
                 root: PathBuf::from(format!("/ws/.usagi/sessions/{n}")),
                 worktrees: vec![worktree(Some(n), &format!("/ws/{n}"))],
                 created_at: Utc::now(),
+                last_active: None,
             })
             .collect(),
     );

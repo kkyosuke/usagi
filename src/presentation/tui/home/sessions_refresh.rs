@@ -70,6 +70,7 @@ mod tests {
             root: std::path::PathBuf::from(format!("/repo/.usagi/sessions/{name}")),
             worktrees: Vec::new(),
             created_at: chrono::Utc::now(),
+            last_active: None,
         }]
     }
 

@@ -429,6 +429,7 @@ fn switch_reorder_applies_a_moved_result_and_logs_a_failure() {
             root: PathBuf::from("/ws/.usagi/sessions/feat"),
             worktrees: vec![worktree(Some("feat"), "/ws/feat")],
             created_at: Utc::now(),
+            last_active: None,
         },
         SessionRecord {
             name: "main".to_string(),
@@ -437,6 +438,7 @@ fn switch_reorder_applies_a_moved_result_and_logs_a_failure() {
             root: PathBuf::from("/ws/.usagi/sessions/main"),
             worktrees: vec![worktree(Some("main"), "/ws/main")],
             created_at: Utc::now(),
+            last_active: None,
         },
     ];
     let (moves, outcome) = run_recording_reorder(keys, SessionReorder::Moved(reordered));

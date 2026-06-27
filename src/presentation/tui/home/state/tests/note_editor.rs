@@ -11,24 +11,28 @@ fn set_now_records_the_frame_render_time() {
 }
 
 #[test]
-fn session_row_takes_the_freshest_worktree_as_its_updated_at() {
+fn session_row_takes_last_active_as_its_freshness() {
     let mut state = state();
-    let older = chrono::DateTime::parse_from_rfc3339("2026-06-20T00:00:00Z")
+    let created = chrono::DateTime::parse_from_rfc3339("2026-06-20T00:00:00Z")
         .unwrap()
         .with_timezone(&Utc);
-    let newer = chrono::DateTime::parse_from_rfc3339("2026-06-25T00:00:00Z")
+    let git_synced = chrono::DateTime::parse_from_rfc3339("2026-06-26T00:00:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    let touched = chrono::DateTime::parse_from_rfc3339("2026-06-25T00:00:00Z")
         .unwrap()
         .with_timezone(&Utc);
     let mut session = session_record("multi", 0);
-    let mut wt_old = worktree("multi");
-    wt_old.updated_at = older;
-    let mut wt_new = worktree("multi");
-    wt_new.updated_at = newer;
-    session.worktrees = vec![wt_old, wt_new];
+    session.created_at = created;
+    // The worktree git-sync time is reset for every session on each workspace
+    // sync, so the collapsed row's freshness tracks the session's `last_active`
+    // (when it was last touched), not the worktrees' `updated_at`.
+    let mut wt = worktree("multi");
+    wt.updated_at = git_synced;
+    session.worktrees = vec![wt];
+    session.last_active = Some(touched);
     state.restore_sessions(vec![session]);
-    // The collapsed row's freshness is the most-recently-touched repository, not
-    // the session's creation time nor the first worktree's.
-    assert_eq!(state.list().worktrees()[0].updated_at, newer);
+    assert_eq!(state.list().worktrees()[0].updated_at, touched);
 }
 
 #[test]

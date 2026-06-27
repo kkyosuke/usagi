@@ -840,6 +840,14 @@ pub fn run(term: &Term, workspace: &Workspace, preload: Preload) -> Result<Outco
         let _ = crate::infrastructure::resume_focus_store::save(&resume_root, session, engagement);
     };
 
+    // Flush the freshness ("heat") timestamps gathered while the screen ran into
+    // `state.json` on quit, so the sidebar dots survive a restart. Best-effort:
+    // a write failure just means the dots reset to creation time next launch.
+    let last_active_root = workspace.path.clone();
+    let mut save_last_active = move |pairs: &[(String, chrono::DateTime<chrono::Utc>)]| {
+        let _ = crate::usecase::session::persist_last_active(&last_active_root, pairs);
+    };
+
     let mut wiring = event::Wiring {
         workspace_root: &workspace.path,
         persist: &mut persist,
@@ -856,6 +864,7 @@ pub fn run(term: &Term, workspace: &Workspace, preload: Preload) -> Result<Outco
         tab_op: &mut tab_op,
         close_tab: &mut close_tab,
         save_resume: &mut save_resume,
+        save_last_active: &mut save_last_active,
     };
     let outcome = event::event_loop(
         term,

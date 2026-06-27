@@ -30,7 +30,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, bail, Context, Result};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 
 use crate::domain::agent::Agent;
 use crate::domain::workspace_state::SessionRecord;
@@ -227,6 +227,7 @@ fn record(store: &WorkspaceStore, name: &str, root: &Path, worktrees: &[PathBuf]
         root: root.to_path_buf(),
         worktrees: worktree_states,
         created_at: now,
+        last_active: None,
     });
     state.updated_at = now;
     store.save(&state)
@@ -357,6 +358,46 @@ pub fn reorder(workspace_root: &Path, name: &str, up: bool) -> Result<bool> {
         return Ok(false);
     };
     state.sessions.swap(index, target);
+    state.updated_at = Utc::now();
+    store.save(&state)?;
+    Ok(true)
+}
+
+/// Persist the in-memory `last_active` timestamps the home screen accumulates
+/// while running, merging them into `state.json` in one write.
+///
+/// The sidebar's freshness ("heat") dot is bumped in memory on every session
+/// switch and burst of terminal/agent activity, so persisting on each of those
+/// would hammer the store on a hot path. Instead the home screen flushes the
+/// collected `(name, last_active)` pairs once — on quit — through here. Each pair
+/// updates the matching session's [`last_active`](SessionRecord::last_active);
+/// names with no matching session are ignored. Returns `false` (and writes
+/// nothing) when there is no state, no pairs, or none of them change a value, so
+/// a quit with no activity leaves `state.json` untouched.
+pub fn persist_last_active(
+    workspace_root: &Path,
+    actives: &[(String, DateTime<Utc>)],
+) -> Result<bool> {
+    if actives.is_empty() {
+        return Ok(false);
+    }
+    let store = WorkspaceStore::new(workspace_root);
+    let _lock = store.lock()?;
+    let Some(mut state) = store.load()? else {
+        return Ok(false);
+    };
+    let mut changed = false;
+    for session in &mut state.sessions {
+        if let Some((_, ts)) = actives.iter().find(|(name, _)| name == &session.name) {
+            if session.last_active != Some(*ts) {
+                session.last_active = Some(*ts);
+                changed = true;
+            }
+        }
+    }
+    if !changed {
+        return Ok(false);
+    }
     state.updated_at = Utc::now();
     store.save(&state)?;
     Ok(true)
@@ -959,6 +1000,36 @@ mod tests {
         assert!(err.to_string().contains("no such session"));
     }
 
+    // --- persist_last_active ----------------------------------------------
+
+    #[test]
+    fn persist_last_active_merges_timestamps_skipping_unknown_and_unchanged() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+
+        // No state yet, and an empty input, both write nothing.
+        assert!(!persist_last_active(root.path(), &[("x".to_string(), Utc::now())]).unwrap());
+        create(root.path(), "a").unwrap();
+        create(root.path(), "b").unwrap();
+        assert!(!persist_last_active(root.path(), &[]).unwrap());
+
+        // Stamps the matching session and ignores an unknown name.
+        let ts = Utc::now();
+        assert!(persist_last_active(
+            root.path(),
+            &[("a".to_string(), ts), ("ghost".to_string(), ts)],
+        )
+        .unwrap());
+        let sessions = list(root.path()).unwrap();
+        let a = sessions.iter().find(|s| s.name == "a").unwrap();
+        let b = sessions.iter().find(|s| s.name == "b").unwrap();
+        assert_eq!(a.last_active, Some(ts));
+        assert_eq!(b.last_active, None);
+
+        // Re-applying the same value changes nothing, so no write happens.
+        assert!(!persist_last_active(root.path(), &[("a".to_string(), ts)]).unwrap());
+    }
+
     // --- set_display_name --------------------------------------------------
 
     fn display_name_of(root: &Path, name: &str) -> Option<String> {
@@ -1282,6 +1353,7 @@ mod tests {
                 updated_at: Utc::now(),
             }],
             created_at: Utc::now(),
+            last_active: None,
         });
         store.save(&state).unwrap();
         assert_eq!(sessions_of(root.path()), vec!["ghost".to_string()]);

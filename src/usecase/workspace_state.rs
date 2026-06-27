@@ -369,6 +369,7 @@ mod tests {
                 updated_at: Utc::now(),
             }],
             created_at: Utc::now(),
+            last_active: None,
         });
         store.save(&state).unwrap();
 
@@ -389,6 +390,7 @@ mod tests {
             root: PathBuf::from(name),
             worktrees: Vec::new(),
             created_at: Utc::now(),
+            last_active: None,
         }
     }
 

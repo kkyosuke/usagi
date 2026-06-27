@@ -71,6 +71,7 @@ mod tests {
                 note: None,
                 root: PathBuf::from("/repo/.usagi/sessions/login"),
                 created_at: ts,
+                last_active: None,
                 worktrees: vec![
                     WorktreeState {
                         branch: Some("login".to_string()),

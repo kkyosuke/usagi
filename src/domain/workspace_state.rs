@@ -277,6 +277,13 @@ pub struct SessionRecord {
     pub worktrees: Vec<WorktreeState>,
     /// When the session was created.
     pub created_at: DateTime<Utc>,
+    /// When the session was last *touched*: switched to, or observed producing
+    /// terminal/agent activity. Drives the sidebar's freshness ("heat") dot.
+    /// `None` (the default, and omitted from older files) means it has never been
+    /// touched since creation, so callers fall back to
+    /// [`created_at`](Self::created_at) via [`last_active_or_created`](Self::last_active_or_created).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_active: Option<DateTime<Utc>>,
 }
 
 impl SessionRecord {
@@ -289,6 +296,13 @@ impl SessionRecord {
     /// The session's note, or `None` when none has been written.
     pub fn note(&self) -> Option<&str> {
         self.note.as_deref()
+    }
+
+    /// The reference time for the freshness ("heat") dot: the persisted
+    /// [`last_active`](Self::last_active), or [`created_at`](Self::created_at) when
+    /// the session has never been touched.
+    pub fn last_active_or_created(&self) -> DateTime<Utc> {
+        self.last_active.unwrap_or(self.created_at)
     }
 }
 
@@ -325,6 +339,7 @@ impl Default for WorkspaceState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeZone;
 
     #[test]
     fn branch_status_as_str_and_display_match() {
@@ -501,6 +516,7 @@ mod tests {
             root: PathBuf::from("/repo/.usagi/sessions/feature-x"),
             worktrees: vec![sample_worktree()],
             created_at: Utc::now(),
+            last_active: None,
         });
         // No diff → the key is dropped from the file and an older file parses.
         let json = serde_json::to_string(&state).unwrap();
@@ -550,6 +566,7 @@ mod tests {
             root: PathBuf::from("/repo/.usagi/sessions/feature-x"),
             worktrees: vec![sample_worktree()],
             created_at: Utc::now(),
+            last_active: None,
         });
 
         let json = serde_json::to_string_pretty(&state).unwrap();
@@ -566,6 +583,7 @@ mod tests {
             root: PathBuf::from("/repo/.usagi/sessions/feature-x"),
             worktrees: vec![sample_worktree()],
             created_at: Utc::now(),
+            last_active: None,
         };
         // No override → the session name is the label.
         assert_eq!(session.display_label(), "feature-x");
@@ -583,6 +601,7 @@ mod tests {
             root: PathBuf::from("/repo/.usagi/sessions/feature-x"),
             worktrees: vec![sample_worktree()],
             created_at: Utc::now(),
+            last_active: None,
         });
         let json = serde_json::to_string(&state).unwrap();
         assert!(json.contains("\"display_name\":\"Nice name\""));
@@ -611,6 +630,7 @@ mod tests {
             root: PathBuf::from("/repo/.usagi/sessions/feature-x"),
             worktrees: vec![sample_worktree()],
             created_at: Utc::now(),
+            last_active: None,
         });
         // No note → the accessor is `None` and the key is dropped from the file.
         assert_eq!(state.sessions[0].note(), None);
@@ -631,6 +651,42 @@ mod tests {
         let legacy = r#"{"sessions":[{"name":"x","root":"/r","worktrees":[],"created_at":"2026-06-13T05:01:18.659149Z"}],"updated_at":"2026-06-13T05:01:18.659149Z"}"#;
         let parsed: WorkspaceState = serde_json::from_str(legacy).unwrap();
         assert_eq!(parsed.sessions[0].note(), None);
+    }
+
+    #[test]
+    fn last_active_is_omitted_when_absent_falls_back_to_created_at_and_round_trips() {
+        let created = Utc.with_ymd_and_hms(2026, 6, 13, 5, 0, 0).unwrap();
+        let mut session = SessionRecord {
+            name: "feature-x".to_string(),
+            display_name: None,
+            note: None,
+            root: PathBuf::from("/repo/.usagi/sessions/feature-x"),
+            worktrees: vec![sample_worktree()],
+            created_at: created,
+            last_active: None,
+        };
+        // Never touched → the heat reference falls back to `created_at` and the
+        // key is dropped from the file.
+        assert_eq!(session.last_active_or_created(), created);
+        let json = serde_json::to_string(&session).unwrap();
+        assert!(!json.contains("last_active"));
+
+        // Touched → the reference is `last_active`, and it round-trips.
+        let touched = Utc.with_ymd_and_hms(2026, 6, 14, 9, 30, 0).unwrap();
+        session.last_active = Some(touched);
+        assert_eq!(session.last_active_or_created(), touched);
+        let json = serde_json::to_string(&session).unwrap();
+        assert!(json.contains("last_active"));
+        assert_eq!(
+            serde_json::from_str::<SessionRecord>(&json).unwrap(),
+            session
+        );
+
+        // An older file without `last_active` parses to `None`.
+        let legacy =
+            r#"{"name":"x","root":"/r","worktrees":[],"created_at":"2026-06-13T05:01:18.659149Z"}"#;
+        let parsed: SessionRecord = serde_json::from_str(legacy).unwrap();
+        assert_eq!(parsed.last_active, None);
     }
 
     #[test]

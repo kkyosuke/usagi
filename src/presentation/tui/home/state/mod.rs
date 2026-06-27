@@ -298,6 +298,24 @@ impl CommandLine {
     }
 }
 
+/// The session roots whose activity changed between two monitor snapshots: any
+/// path that entered or left the running / waiting / done / live set. Used to
+/// bump the freshness ("heat") dot of only the sessions that actually did
+/// something between frames — the symmetric difference is set-membership only, so
+/// a quiet frame yields an empty set and no work.
+fn changed_roots(old: &MonitorSnapshot, new: &MonitorSnapshot) -> HashSet<PathBuf> {
+    let mut changed = HashSet::new();
+    for (a, b) in [
+        (&old.running, &new.running),
+        (&old.waiting, &new.waiting),
+        (&old.done, &new.done),
+        (&old.live, &new.live),
+    ] {
+        changed.extend(a.symmetric_difference(b).cloned());
+    }
+    changed
+}
+
 /// The full state of the home screen.
 ///
 /// Not `Clone`/`Debug`: it owns a [`CommandRegistry`] of trait objects, which
@@ -845,6 +863,42 @@ impl HomeState {
         &self.sessions
     }
 
+    /// Mark the session rooted at `root` as touched at `now`, driving its sidebar
+    /// freshness ("heat") dot back to fresh. Returns whether a session matched (so
+    /// the caller can skip a needless list rebuild). The bump lives in `sessions`
+    /// (the source [`session_row`] reads), so the dot only reflects it once the
+    /// list is rebuilt — callers that want it shown now rebuild after.
+    fn bump_last_active(&mut self, root: &Path, now: DateTime<Utc>) -> bool {
+        match self.sessions.iter_mut().find(|s| s.root == root) {
+            Some(session) => {
+                session.last_active = Some(now);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Touch the active session (the one 在席/没入 acts on), refreshing its heat dot
+    /// immediately. A no-op when the root row is active (it is no session).
+    fn touch_active(&mut self, now: DateTime<Utc>) {
+        let Some(root) = self.list.active().map(|w| w.path.clone()) else {
+            return;
+        };
+        if self.bump_last_active(&root, now) {
+            self.rebuild_list_keep_cursor();
+        }
+    }
+
+    /// The accumulated `(session name, last_active)` pairs to flush to `state.json`
+    /// on quit, so the freshness dots survive a restart. Only sessions actually
+    /// touched this run (those carrying a `last_active`) are included.
+    pub fn last_active_flush(&self) -> Vec<(String, DateTime<Utc>)> {
+        self.sessions
+            .iter()
+            .filter_map(|s| s.last_active.map(|t| (s.name.clone(), t)))
+            .collect()
+    }
+
     /// Open a scrollable text modal showing `lines` under `title` at the given
     /// `size` (used by the text-dumping commands). Replaces any modal already
     /// open.
@@ -1102,8 +1156,20 @@ impl HomeState {
         // set actually moved, so the hot per-frame path skips the rebuild whenever
         // nothing relevant changed.
         let resort = self.sort_waiting && self.badges.waiting != badges.waiting;
+        // A session whose activity state changed (entered/left running / waiting /
+        // done / live) was just doing something — bump its heat dot to fresh. The
+        // diff is over set membership only (no I/O), so the per-frame path stays
+        // cheap and a quiet frame bumps nothing.
+        let touched = changed_roots(&self.badges, &badges);
+        let now = Utc::now();
+        let mut bumped = false;
+        for root in &touched {
+            // Every changed root is bumped (not short-circuited), so a frame that
+            // moves several sessions freshens them all.
+            bumped |= self.bump_last_active(root, now);
+        }
         self.badges = badges;
-        if resort {
+        if resort || bumped {
             self.rebuild_list_keep_cursor();
         }
     }
@@ -1638,6 +1704,7 @@ impl HomeState {
     pub fn enter_focus(&mut self, row: usize) {
         self.list.focus_index(row);
         self.list.activate_selected();
+        self.touch_active(Utc::now());
         self.enter_focus_surface();
     }
 
@@ -1664,6 +1731,7 @@ impl HomeState {
         if !self.list.select_by_name(name) {
             return false;
         }
+        self.touch_active(Utc::now());
         self.enter_focus_surface();
         true
     }
