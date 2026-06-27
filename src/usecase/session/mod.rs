@@ -912,9 +912,11 @@ mod tests {
             assert!(git_cmd(dir).args(args).status().unwrap().success());
         };
 
+        // `-b main` keeps the bare repo's HEAD on `main`, matching the other
+        // test remotes so the idiom is consistent and host-`init.defaultBranch`-proof.
         run(
             tmp.path(),
-            &["init", "-q", "--bare", bare.to_str().unwrap()],
+            &["init", "-q", "--bare", "-b", "main", bare.to_str().unwrap()],
         );
         init_repo(&root);
         run(&root, &["remote", "add", "origin", bare.to_str().unwrap()]);
