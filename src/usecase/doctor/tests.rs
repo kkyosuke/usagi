@@ -385,11 +385,55 @@ fn fix_missing_skips_local_llm_checks() {
 }
 
 #[test]
+fn fix_missing_skips_the_config_check() {
+    // A `missing` config means unreadable settings (config is created on first
+    // run, not installed), so `brew install config` would be nonsense. Only the
+    // genuinely installable `git` should produce an outcome.
+    let checks = vec![missing("git"), missing(CONFIG_CHECK)];
+    let runner = FakeRunner::new(vec!["brew"], Ok(true));
+    let outcomes = fix_missing(&checks, "macos", &runner);
+    assert_eq!(
+        outcomes,
+        vec![FixOutcome::Installed {
+            tool: "git".to_string(),
+            manager: "brew",
+        }]
+    );
+}
+
+#[test]
 fn is_local_llm_check_matches_only_the_llm_checks() {
     assert!(is_local_llm_check(OLLAMA_CHECK));
     assert!(is_local_llm_check(LOCAL_LLM_MODEL_CHECK));
     assert!(!is_local_llm_check("git"));
     assert!(!is_local_llm_check("bash"));
+}
+
+#[test]
+fn installable_gaps_lists_only_installable_missing_items() {
+    // A missing required tool and a missing Nerd Font (a `warn`) are installable;
+    // a healthy tool, an optional agent CLI (`warn`), an unreadable config
+    // (`missing`), and a present font are all excluded.
+    let checks = vec![
+        missing("git"),
+        Check::ok("bash"),
+        Check::warn("sakana.ai", "`codex-fugu` not found (optional)"),
+        Check::warn(NERD_FONT_CHECK, "no Nerd Font found"),
+        missing(CONFIG_CHECK),
+        missing(OLLAMA_CHECK),
+    ];
+    // Required tool, Nerd Font, and the local-LLM runtime are gaps; the rest are
+    // not. Order follows the input (display) order.
+    assert_eq!(
+        installable_gaps(&checks),
+        vec!["git", NERD_FONT_CHECK, OLLAMA_CHECK]
+    );
+}
+
+#[test]
+fn installable_gaps_treats_a_present_font_and_healthy_checks_as_no_gap() {
+    let checks = vec![Check::ok("git"), Check::ok(NERD_FONT_CHECK)];
+    assert!(installable_gaps(&checks).is_empty());
 }
 
 #[test]

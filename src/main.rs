@@ -218,9 +218,9 @@ enum Commands {
         #[arg(long)]
         edit: bool,
     },
-    /// Check that required tools are installed
+    /// Check required tools and offer to install anything missing
     Doctor {
-        /// Try to install missing tools (or print manual steps)
+        /// Install everything missing without asking (otherwise prompt first)
         #[arg(long)]
         fix: bool,
     },
