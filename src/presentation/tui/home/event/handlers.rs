@@ -628,16 +628,25 @@ pub(super) fn focus_key(
     // as it does from the live terminal. Unlike 没入 this needs no timeout: 在席 has
     // no shell a forgotten leader could leak a literal `Ctrl-O` into, and the very
     // next key always resolves it.
+    // Any deliberate key other than `Esc` cancels the one-shot return-to-pane
+    // arming (set when 在席 was reached by zooming out of a live pane with
+    // `Ctrl-T` / `Ctrl-O a`), so only an *immediate* `Esc` returns to that pane.
+    if !matches!(key, Key::Escape) {
+        state.clear_focus_return_attach();
+    }
+
     if state.prefix_pending() {
         state.set_prefix_pending(false);
         return focus_prefix_action(term, state, painter, key, wiring);
     }
 
-    // `Esc` peels back one step: on the "+ new" launch surface opened over live
-    // panes (e.g. after `Ctrl-T` from 没入) it discards the surface and steps onto
-    // the pane's tab so that pane previews again; everywhere else (a pane tab, or
-    // an idle session with no pane behind "+ new") it leaves 在席 for 切替. `Ctrl-O`
-    // is the leader for that prefix grammar (the action is the next key);
+    // `Esc` peels back one step. When 在席 was reached by zooming out of a live
+    // pane (`Ctrl-T` / `Ctrl-O a`) the first `Esc` returns straight to that pane
+    // (没入) — back to the tab the zoom started from; otherwise, on a "+ new"
+    // launch surface opened over live panes it discards the surface and steps onto
+    // the pane's tab so that pane previews again, and everywhere else (a pane tab,
+    // or an idle session with no pane behind "+ new") it leaves 在席 for 切替.
+    // `Ctrl-O` is the leader for that prefix grammar (the action is the next key);
     // `Ctrl-P` / `Ctrl-N` also move the tab selector directly across the session's
     // live panes and the trailing "+ new" tab. These bind the same whichever tab
     // is selected.
@@ -646,6 +655,13 @@ pub(super) fn focus_key(
             // A first `Esc` collapses an open agent picker (案A) back to the menu;
             // only when none is open does it peel back a step.
             if state.focus_menu_collapse_agent() {
+                return Flow::Continue;
+            }
+            // When 在席 was reached by zooming out of a live pane (`Ctrl-T` /
+            // `Ctrl-O a`), the first `Esc` returns to that pane (没入) — back to the
+            // tab the zoom started from — rather than peeling back toward 切替.
+            if state.take_focus_return_attach() {
+                open_pane(term, state, painter, wiring, false, false);
                 return Flow::Continue;
             }
             if !state.focus_discard_new_tab() {
@@ -1042,8 +1058,11 @@ fn open_pane(
         Ok(PaneExit::ToFocus) => {
             // `Ctrl-T` zooms out one level to 在席: the session's action surface,
             // where the user picks the next action (terminal / agent / …). Every
-            // pane stays alive in the pool, so re-launching re-attaches them.
+            // pane stays alive in the pool, so re-launching re-attaches them. Arm
+            // the one-shot return-to-pane bit so an immediate `Esc` bounces back to
+            // the pane this zoom started from (没入) rather than peeling back to 切替.
             state.leave_attached();
+            state.arm_focus_return_attach();
         }
         Ok(PaneExit::ToPreviousSession) => {
             // `Ctrl-^` jumps to the previously focused session, re-attaching it

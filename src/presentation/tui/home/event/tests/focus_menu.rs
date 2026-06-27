@@ -679,11 +679,16 @@ fn focus_enter_on_a_pane_tab_reattaches_while_other_keys_are_inert() {
 
 #[test]
 fn focus_esc_on_the_new_tab_over_panes_steps_back_onto_the_pane() {
-    // In 在席 on the "+ new" tab opened over live panes (`Ctrl-T` from 没入), `Esc`
-    // discards the launch surface and steps back onto the active pane's tab —
-    // staying in Focus, not zooming out to 統括. A following `Enter` re-attaches
-    // that pane, proving the selector landed on a pane tab (not "+ new", whose
-    // `Enter` would open a fresh pane with `new_pane = true`).
+    // In 在席 on the "+ new" tab opened over live panes, `Esc` discards the launch
+    // surface and steps back onto the active pane's tab — staying in Focus, not
+    // zooming out to 切替. A following `Enter` re-attaches that pane, proving the
+    // selector landed on a pane tab (not "+ new", whose `Enter` would open a fresh
+    // pane with `new_pane = true`).
+    //
+    // Reaching here via `Ctrl-T` (ToFocus) arms a one-shot "next Esc re-attaches",
+    // so a `j` (menu move) is pressed first to cancel that arming — this test
+    // covers the *unarmed* discard path; the armed re-attach is covered by
+    // `attached::ctrl_t_then_esc_re_attaches_to_the_zoomed_out_pane`.
     let term = Term::stdout();
     let opens = RefCell::new(Vec::new());
     let mut open = |_h: &mut HomeState, _d: &Path, agent: bool, new_pane: bool| {
@@ -702,7 +707,8 @@ fn focus_esc_on_the_new_tab_over_panes_steps_back_onto_the_pane() {
         (vec!["agent".to_string(), "terminal".to_string()], 0)
     };
     let mut keys = cmd("session switch feat");
-    keys.push(Ok(Key::Enter)); // attach feat; open #1 -> ToFocus -> Focus on "+ new"
+    keys.push(Ok(Key::Enter)); // attach feat; open #1 -> ToFocus -> Focus on "+ new" (arm return)
+    keys.push(Ok(Key::Char('j'))); // a menu move cancels the one-shot return arming
     keys.push(Ok(Key::Escape)); // discard "+ new" -> step onto the active pane tab
     keys.push(Ok(Key::Enter)); // re-attach the pane; open #2 (false, false)
     keys.push(Ok(Key::CtrlC));

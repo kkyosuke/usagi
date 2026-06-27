@@ -439,6 +439,13 @@ pub struct HomeState {
     /// selected" (the menu / prompt shows). It is forced on whenever the session
     /// has no live panes, so an idle session always shows the action surface.
     focus_new_tab: bool,
+    /// A one-shot arming bit: 在席 (Focus) was reached by zooming *out* of a live
+    /// pane with `Ctrl-T` / `Ctrl-O a` (`PaneExit::ToFocus`), so the very next
+    /// `Esc` re-attaches that pane — returning to the 没入 (Attached) tab the zoom
+    /// started from rather than peeling back toward 切替. Armed in that zoom-out
+    /// path and cleared the moment any other key is handled (or the mode changes),
+    /// so it only ever turns one immediate `Esc` into a return-to-pane.
+    focus_return_attach: bool,
     /// Sessions recorded for this workspace (from `state.json`), shown by
     /// `session list` and kept current as sessions are created.
     sessions: Vec<SessionRecord>,
@@ -603,6 +610,7 @@ impl HomeState {
             focus_menu: FocusMenu::default(),
             focus_prompt: TextInput::new(),
             focus_new_tab: true,
+            focus_return_attach: false,
             sessions: Vec::new(),
             terminal: TerminalSurface::default(),
             badges: MonitorSnapshot::default(),
@@ -1252,9 +1260,11 @@ impl HomeState {
     /// so drop the surface and return to the focused session's action surface.
     /// The tab selector lands on the trailing "+ new" tab — the launch surface —
     /// so zooming out with `Ctrl-T` opens the action menu over the live panes
-    /// (which still ride the strip), and `Esc` there steps back onto the pane it
-    /// was opened over (see [`focus_discard_new_tab`]).
+    /// (which still ride the strip). When this was a deliberate zoom-out the caller
+    /// arms [`arm_focus_return_attach`], so the next `Esc` re-attaches the pane
+    /// rather than stepping back onto its preview (see [`focus_discard_new_tab`]).
     ///
+    /// [`arm_focus_return_attach`]: Self::arm_focus_return_attach
     /// [`focus_discard_new_tab`]: Self::focus_discard_new_tab
     pub fn leave_attached(&mut self) {
         self.mode = Mode::Focus;
@@ -1923,6 +1933,9 @@ impl HomeState {
         self.focus_menu.reset();
         self.focus_prompt.clear();
         self.focus_new_tab = true;
+        // A fresh 在席 entry is not the zoom-out-from-没入 path, so the one-shot
+        // return-to-pane arming never carries into it.
+        self.focus_return_attach = false;
         // Enter 在席 with no `Ctrl-O` leader pending, so the first key is read
         // as itself rather than as a stale prefix's second key.
         self.prefix_pending = false;
@@ -2082,6 +2095,25 @@ impl HomeState {
         } else {
             false
         }
+    }
+
+    /// Arm the one-shot "next `Esc` re-attaches" bit, set when 在席 (Focus) is
+    /// entered by zooming *out* of a live pane (`Ctrl-T` / `Ctrl-O a`). The next
+    /// `Esc` then returns to that pane (没入) instead of peeling back toward 切替.
+    pub fn arm_focus_return_attach(&mut self) {
+        self.focus_return_attach = true;
+    }
+    /// Take (read and clear) the one-shot return-to-pane bit. The 在席 `Esc`
+    /// handler consumes it to decide whether to re-attach; any other key clears it
+    /// first via [`clear_focus_return_attach`](Self::clear_focus_return_attach), so
+    /// only an immediate `Esc` after the zoom-out re-attaches.
+    pub fn take_focus_return_attach(&mut self) -> bool {
+        std::mem::take(&mut self.focus_return_attach)
+    }
+    /// Clear the one-shot return-to-pane bit. Called for every non-`Esc` key
+    /// handled in 在席 so any deliberate action cancels the pending re-attach.
+    pub fn clear_focus_return_attach(&mut self) {
+        self.focus_return_attach = false;
     }
 
     /// The 在席 menu cursor (which Session-scope command is highlighted).

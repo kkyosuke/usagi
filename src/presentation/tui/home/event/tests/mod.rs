@@ -296,6 +296,48 @@ fn run_full(
     )
 }
 
+/// Like [`run_full`] but with a custom `tab_op`, so a test can mirror production
+/// where 切替 / 在席 republish the focused session's live pane strip each frame
+/// (the default [`run_full`] uses [`noop_tab_op`], which never publishes a strip).
+fn run_full_tabs(
+    keys: Vec<io::Result<Key>>,
+    state: HomeState,
+    open_terminal: &mut dyn FnMut(&mut HomeState, &Path, bool, bool) -> Result<PaneExit>,
+    preview: &mut dyn FnMut(&Path, Sidebar) -> Option<TerminalView>,
+    tab_op: &mut TabOp<'_>,
+) -> Result<Outcome> {
+    let term = Term::stdout();
+    let mut reader = ScriptedReader::new(keys);
+    let monitor = MonitorHandle::detached();
+    let mut persist: fn(&str) = noop_persist;
+    let mut create: fn(&str) -> SessionOutcome = noop_create;
+    let mut config: fn(&Term) -> Result<Option<ConfigReload>> = noop_config;
+    let mut remove_session: fn(&str, bool) -> SessionOutcome = noop_remove;
+    let mut branches: fn() -> Vec<String> = no_branches;
+    event_loop_compat(
+        &term,
+        &mut reader,
+        state,
+        Path::new("/ws"),
+        &monitor,
+        &UpdateHandle::new(),
+        &OneShot::<bool>::new(),
+        &OneShot::<Vec<AgentCli>>::new(),
+        &mut persist,
+        &mut create,
+        &mut (noop_rename as fn(&str, &str) -> SessionOutcome),
+        &mut (noop_set_note as fn(&str, &str) -> SessionOutcome),
+        &mut remove_session,
+        &mut branches,
+        open_terminal,
+        &mut config,
+        preview,
+        tab_op,
+        &mut (noop_close as fn(&mut HomeState, &Path)),
+        &mut (noop_reorder as fn(&str, bool) -> SessionReorder),
+    )
+}
+
 /// Run the loop with a monitor reporting a live session, so `Ctrl-C` raises
 /// the quit-confirmation modal instead of quitting outright. `persist`
 /// records the commands run, so a test can prove the screen kept running
