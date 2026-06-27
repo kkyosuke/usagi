@@ -39,7 +39,7 @@
 - どの worktree からコマンドを実行しても、`git worktree list` の先頭（＝プライマリ worktree）を基準に保存先を解決します（`infrastructure/git.rs` の `primary_worktree`）。これによりリポジトリ内で 1 つの `.usagi/` に集約されます。
 - `.usagi/` の大半（`state.json` / `settings.json` / `history.jsonl` / `sessions/`）は **マシンローカルな状態・設定** で、後述の `.gitignore` により **コミットされません**。`state.json` 更新を直列化するプロセス間ロック `.usagi/.lock` も同様で、トップレベルの `/*` で除外されます（`issues/` / `memory/` は git 管理対象に戻すため、それぞれの `.lock` を個別に再除外する点が異なります）。
 - 例外は **`.usagi/issues/`** と **`.usagi/memory/`**。タスク issue とエージェントのメモリはチームで共有したいので git 管理対象とします。それぞれの派生キャッシュ `index.json` と、プロセス間書き込みロック用の `.lock` ファイルは再生成可能・ローカル専用なので除外したままにします（メモリの目次 `MEMORY.md` は共有対象）。
-- git 管理の制御は **リポジトリルートの `.gitignore` には書かず、`.usagi/.gitignore` に自己完結させます**（`usagi::usecase::project::ignore_usagi_dir`）。リポジトリルートを汚さず、`.usagi/` 配下だけで完結するのが利点です。`usagi init` 時に次の内容（`.usagi/` 配下からの相対パターン）を書き込み、旧バージョンがルート `.gitignore` に追記していた `.usagi/` 系エントリがあれば除去します。
+- git 管理の制御は **リポジトリルートの `.gitignore` には書かず、`.usagi/.gitignore` に自己完結させます**（`usagi::usecase::project::ignore_usagi_dir`）。リポジトリルートを汚さず、`.usagi/` 配下だけで完結するのが利点です。`usagi init` 時に次の内容（`.usagi/` 配下からの相対パターン）を書き込み、リポジトリルートの `.gitignore` に `.usagi/` 系エントリがあれば除去します。
 
   ```gitignore
   # <repo>/.usagi/.gitignore
@@ -168,9 +168,9 @@ worktree を束ねます。各 worktree は git ステータス付き（下記 `
 | `pushed` | `pushed` | クリーンで、独自コミットがあり上流追跡ブランチもある（push 済み・未マージ） |
 | `synced` | `synced` | 既定ブランチがこのブランチを追い越した（独自コミット 0 で behind > 0）。ブランチが持っていた変更は既定ブランチに取り込まれている＝マージ済み／最新追従済み |
 
-> **`new` と `synced` を分けた理由**: 旧実装は「独自コミット 0（既定ブランチの ancestor）」を一律 `synced` としていたため、**切っただけの新規ブランチ**も `synced` と表示され「ずっと synced で意味がわからない」状態でした。新規（既定と同位置 = behind 0）と、既定が追い越したマージ済み（behind > 0）を **ahead/behind のコミット数**で区別し、前者を `new`、後者だけを `synced` とします。
+> **`new` と `synced` の区別**: 独自コミット 0 のブランチは、新規（既定と同位置 = behind 0）と、既定ブランチが追い越したマージ済み（behind > 0）を **ahead/behind のコミット数**で区別し、前者を `new`、後者を `synced` とします。
 
-> **後方互換**: 旧 `state.json` はこの状態を `"merged"`→`"up_to_date"` と綴っていました。`BranchStatus` に `#[serde(alias = "merged", alias = "up_to_date")]` を付けているため旧データも `synced` として読み込めます（書き出しは常に `"synced"`）。
+> **後方互換**: `BranchStatus` は `#[serde(alias = "merged", alias = "up_to_date")]` を持ち、`"merged"` / `"up_to_date"` と書かれた `state.json` も `synced` として読み込めます（書き出しは常に `"synced"`）。
 
 > **前方互換**: 新しい usagi が書いた**未知の `status` 値**（将来追加される状態）を古い usagi が読んでも、`state.json` 全体の読み込みは失敗しません。未知値はその worktree の `status` だけを既定（`new`）に縮退させて読み込み、次回 `sync` で git から再判定します（`domain::serde_fallback`）。
 
