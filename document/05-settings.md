@@ -141,6 +141,8 @@ CLI からも設定を確認・編集できます（[3. コマンドリファレ
 |---|---|
 | `USAGI_HOME` | グローバルデータディレクトリ（`workspaces.json` / `settings.json` の置き場）を上書きする。未設定なら `~/.usagi` |
 | `USAGI_TRACE` | 操作トレース（`logs/trace-YYYY-MM-DD.jsonl`）の記録を有効化する。空でも `0` でもない値で ON、未設定なら OFF（[data/01-global.md#logs操作トレース](data/01-global.md#logs操作トレース)） |
+| `NO_COLOR` | 値が**空でなければ**色出力を抑制する（[no-color.org](https://no-color.org/)。CLI・TUI 両方に効く）。`CLICOLOR_FORCE` が色を強制している（空でも `0` でもない値）ときは無視される |
+| `CLICOLOR_FORCE` | 空でも `0` でもない値なら色出力を強制し、`NO_COLOR` より優先する |
 
 ## 設定が効く場面
 
