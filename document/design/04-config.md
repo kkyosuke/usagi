@@ -1,6 +1,6 @@
 # 4. 設定画面（Config）
 
-> [画面設計トップ](README.md) ｜ ← 前へ [3. 新規プロジェクト画面（New）](03-new.md) ｜ 次へ → [5. ホーム画面（Home）](05-home.md)
+> [画面設計トップ](README.md) ｜ ← 前へ [3. 新規プロジェクト画面（New）](03-new.md) ｜ 次へ → [5. ホーム画面（Home）](home/README.md)
 
 設定の閲覧・編集を行う画面。**どこから開いたかで編集対象（スコープ）が分かれます。**
 
@@ -76,8 +76,8 @@
 | Notifications | デスクトップ通知（`agent` の入力待ち・完了）の ON/OFF | `On` ⇄ `Off` をトグル |
 | Restore Panes | 起動時に各セッションのペイン（agent / terminal）を復旧（agent は会話を再開） | `On` ⇄ `Off` をトグル（[04-orchestration.md#ペインの復旧](../04-orchestration.md#ペインの復旧)） |
 | Agent CLI | usagi が起動する AI エージェント CLI | **PATH に存在する（インストール済みの）agent だけ**を `Claude` → `Codex` → `sakana.ai` → `Gemini` の順に循環（`sakana.ai` は Codex 互換 CLI `codex-fugu` を起動）。未インストールの agent は選択肢に出さない。ただし現在保存されている値が未インストールでも、画面を開いただけで失わないよう選択肢に残す |
-| Session Action UI | 在席（Focus）の右ペインのアクション UI スタイル | `Menu`（選べるリスト）⇄ `Prompt`（コマンドライン）をトグル（[05-home.md](05-home.md#在席のアクション-uimenu--prompt)） |
-| Mascot Animation | サイドバーのマスコットうさぎが操作に反応するか | `On` ⇄ `Off` をトグル。`Off` でうさぎは静止する（[05-home.md#レイアウト](05-home.md#レイアウト)） |
+| Session Action UI | 在席（Focus）の右ペインのアクション UI スタイル | `Menu`（選べるリスト）⇄ `Prompt`（コマンドライン）をトグル（[home/02-layout.md](home/02-layout.md#在席のアクション-uimenu--prompt)） |
+| Mascot Animation | サイドバーのマスコットうさぎが操作に反応するか | `On` ⇄ `Off` をトグル。`Off` でうさぎは静止する（[home/02-layout.md](home/02-layout.md#レイアウト)） |
 | Local LLM | ローカル LLM 委譲の有効化（`ollama` ランタイムの導入と on/off） | 未導入時は値が `Install`（アクション）で、`Space` / `Enter` でランタイムのインストールモーダルを開く。導入後は `On` ⇄ `Off` をトグル |
 | Local LLM Model | 委譲先の Ollama モデル | ランタイム未導入のうちは操作不可（`—` を淡色表示）。導入後はアクション行になり、`Space` / `Enter` で**モデル選択モーダル**を開く。使用中モデルが未取得なら値に `(未導入)` を併記 |
 

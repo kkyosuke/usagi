@@ -37,10 +37,10 @@
 | デスクトップ通知 | `notifications_enabled` | bool | `true` | バックグラウンドの `agent` が入力待ち・完了になった時のデスクトップ通知の ON/OFF |
 | ペイン復旧 | `restore_panes_enabled` | bool | `true` | 起動時に各セッションの前回開いていたペイン（agent / terminal）をバックグラウンドで復旧し、終了時にいたセッションとエンゲージメント段階（切替 / 在席 / 没入）へ復帰する。agent は会話の続きから再開する（[4. オーケストレーション#ペインの復旧](04-orchestration.md#ペインの復旧)） |
 | Agent CLI | `agent_cli` | enum | `claude` | 起動する AI エージェント CLI（`claude` / `codex` / `codex_fugu` / `gemini`）。`codex_fugu` は Codex 互換 CLI で `codex-fugu` を起動する |
-| セッションアクション UI | `session_action_ui` | enum | `menu` | ホーム画面の[在席](design/05-home.md#在席focus)で右ペインに出すアクション UI のスタイル。`menu`（選べるリスト）/ `prompt`（セッションスコープのコマンドライン） |
-| サイドバー | `sidebar` | enum | `full` | ホーム画面の左セッション一覧を開く初期状態。`full`（全幅の一覧）/ `rail`（幅 5 桁に畳んだレール）。実行時は `Ctrl-B` で随時切り替えられる（[サイドバーの開閉](design/05-home.md#サイドバーの開閉ctrl-b)） |
-| 端末キー方式 | `key_scheme` | enum | `prefix` | 埋め込み端末（[没入](design/05-home.md#没入attached)）がナビゲーション用に予約するキーの方式。`prefix`（`Ctrl-O` リーダー：`Ctrl-O` の次キーで操作。`Ctrl-O` 以外の Ctrl キーはシェル/エージェントへ流れる）/ `alt`（`Alt` 単打：bare Ctrl キーを一切奪わない。macOS は端末の Option=Meta 設定が前提） |
-| マスコットの動き | `mascot_animation_enabled` | bool | `true` | ホーム画面サイドバーの[マスコットのうさぎ](design/05-home.md#レイアウト)が操作に反応するかどうか。`true` で、切替 / 在席では操作のたびにまばたきし、没入では作業中の手をぴくぴく動かす。`false` にすると一切動かず静止画になる（うさぎ自体は表示される）。再描画はもともと起きる操作に乗せるだけでアイドル時のタイマーは持たない |
+| セッションアクション UI | `session_action_ui` | enum | `menu` | ホーム画面の[在席](design/home/02-layout.md#在席focus)で右ペインに出すアクション UI のスタイル。`menu`（選べるリスト）/ `prompt`（セッションスコープのコマンドライン） |
+| サイドバー | `sidebar` | enum | `full` | ホーム画面の左セッション一覧を開く初期状態。`full`（全幅の一覧）/ `rail`（幅 5 桁に畳んだレール）。実行時は `Ctrl-B` で随時切り替えられる（[サイドバーの開閉](design/home/03-sidebar.md#サイドバーの開閉ctrl-b)） |
+| 端末キー方式 | `key_scheme` | enum | `prefix` | 埋め込み端末（[没入](design/home/02-layout.md#没入attached)）がナビゲーション用に予約するキーの方式。`prefix`（`Ctrl-O` リーダー：`Ctrl-O` の次キーで操作。`Ctrl-O` 以外の Ctrl キーはシェル/エージェントへ流れる）/ `alt`（`Alt` 単打：bare Ctrl キーを一切奪わない。macOS は端末の Option=Meta 設定が前提） |
+| マスコットの動き | `mascot_animation_enabled` | bool | `true` | ホーム画面サイドバーの[マスコットのうさぎ](design/home/02-layout.md#レイアウト)が操作に反応するかどうか。`true` で、切替 / 在席では操作のたびにまばたきし、没入では作業中の手をぴくぴく動かす。`false` にすると一切動かず静止画になる（うさぎ自体は表示される）。再描画はもともと起きる操作に乗せるだけでアイドル時のタイマーは持たない |
 | 端末スクロールバック | `terminal_scrollback_lines` | usize | `2000` | 埋め込み端末ペインが保持するスクロールバック行数。**ライブなペインごとに 1 つ**確保されるため、セッション・ペインを多数開いたときの TUI メモリの主因。深い履歴が欲しければ上げ、メモリを抑えたければ下げる（上限 `50000`） |
 | ローカル LLM 有効化 | `local_llm.enabled` | bool | `false` | 有効にすると `agent` 起動時に [ローカル LLM MCP サーバ](03-commands/04-llm-mcp.md)（`usagi-llm`）を wire し、軽量タスクをローカル LLM に委譲できる |
 | ローカル LLM モデル | `local_llm.model` | string | `qwen2.5-coder:7b` | 委譲先の Ollama モデル名（`qwen2.5-coder:7b` / `:3b` / `:1.5b` / `qwen2.5:7b`） |
@@ -154,15 +154,15 @@ CLI からも設定を確認・編集できます（[3. コマンドリファレ
 | `notifications_enabled` | バックグラウンドの `agent` が入力待ち・完了になった時のデスクトップ通知の表示可否 |
 | `restore_panes_enabled` | 起動時に各セッションのペイン（agent / terminal）を復旧し、終了時にいたセッション・エンゲージメント段階へ復帰するかどうか（[4. オーケストレーション#ペインの復旧](04-orchestration.md#ペインの復旧)） |
 | `agent_cli` | `agent` コマンドが起動する AI エージェント CLI の選択（[4. オーケストレーション](04-orchestration.md)） |
-| `session_action_ui` | ホーム画面の[在席](design/05-home.md#在席focus)で右ペインに出すアクション UI（`menu` / `prompt`）の選択 |
-| `sidebar` | ホーム画面の左セッション一覧を開く初期状態（`full` / `rail`）。実行時は `Ctrl-B` で切り替え（[サイドバーの開閉](design/05-home.md#サイドバーの開閉ctrl-b)） |
-| `key_scheme` | 埋め込み端末（[没入](design/05-home.md#没入attached)）がナビゲーション用に予約するキー方式（`prefix` / `alt`）の選択 |
+| `session_action_ui` | ホーム画面の[在席](design/home/02-layout.md#在席focus)で右ペインに出すアクション UI（`menu` / `prompt`）の選択 |
+| `sidebar` | ホーム画面の左セッション一覧を開く初期状態（`full` / `rail`）。実行時は `Ctrl-B` で切り替え（[サイドバーの開閉](design/home/03-sidebar.md#サイドバーの開閉ctrl-b)） |
+| `key_scheme` | 埋め込み端末（[没入](design/home/02-layout.md#没入attached)）がナビゲーション用に予約するキー方式（`prefix` / `alt`）の選択 |
 | `terminal_scrollback_lines` | 埋め込み端末ペインが保持するスクロールバック行数。ライブなペインごとに確保されるため、多数のセッションを開いたときのメモリ使用量を左右する |
 | `local_llm.enabled` / `local_llm.model` | 有効時、`agent` 起動コマンドに `usagi-llm` MCP サーバを追加し、軽量タスクをローカル LLM に委譲する（[3.4 ローカル LLM MCP サーバ](03-commands/04-llm-mcp.md)） |
 
 > ホーム画面の `config` で `session_action_ui` や `key_scheme` を変更すると、設定画面を閉じて
-> ホームに戻った時点で実効設定を読み直し、[在席](design/05-home.md#在席focus)の右ペインや
-> [没入](design/05-home.md#没入attached)のキー処理に反映します（ホーム画面を開き直す必要はありません）。
+> ホームに戻った時点で実効設定を読み直し、[在席](design/home/02-layout.md#在席focus)の右ペインや
+> [没入](design/home/02-layout.md#没入attached)のキー処理に反映します（ホーム画面を開き直す必要はありません）。
 
 > 設定の永続化は `usecase/settings.rs`（`load` / `save` / 各 `set_*`）と
 > `infrastructure/storage.rs`（`Storage`）に実装されています。
