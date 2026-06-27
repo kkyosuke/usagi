@@ -552,8 +552,7 @@ fn pump_input(
                     // The key belongs to the shell. With text selected, `Ctrl-C`
                     // copies it (and clears the selection) the way terminals treat
                     // copy while a selection is active; otherwise it reaches the
-                    // shell as the usual interrupt. `Ctrl-O Ctrl-O` lands here too,
-                    // sending a literal `Ctrl-O`.
+                    // shell as the usual interrupt.
                     KeyAction::Forward => {
                         *pending_prefix = None;
                         if is_copy(&key) && selection.as_ref().is_some_and(|s| !s.is_empty()) {
