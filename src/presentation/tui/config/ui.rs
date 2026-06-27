@@ -8,9 +8,6 @@ use super::state::{Config, Field, InstallModal, LocalField, ModelModal};
 /// The label of the Save button row.
 const SAVE_LABEL: &str = "[ Save ]";
 
-/// Fixed width of the settings block; the whole block is centred in the terminal.
-const BLOCK_WIDTH: usize = 52;
-
 /// Inner width of the local-LLM install / progress modal box. Wide enough for
 /// the longest body line ("ローカル LLM (ollama) をインストールします" = 42
 /// columns) so it fits without truncation; `render_modal` still clamps this to
@@ -23,11 +20,7 @@ const MODAL_INNER_WIDTH: usize = 42;
 /// they are passed in. Vertical placement is handled by [`render_frame`], so
 /// this adds no leading padding.
 fn header_lines(width: usize, title: &str, subtitle: &str) -> Vec<String> {
-    let mut lines = widgets::rabbit_lines(width);
-    lines.push(String::new());
-    lines.push(widgets::title_line(width, title));
-    lines.push(widgets::dim_line(width, subtitle));
-    lines
+    widgets::header_lines(width, title, Some(subtitle))
 }
 
 /// The width of the label column: the widest field label across both the
@@ -54,11 +47,7 @@ fn setting_row(
     selected: bool,
     changed: bool,
 ) -> String {
-    let cursor = if selected {
-        style(">").red().bold().to_string()
-    } else {
-        " ".to_string()
-    };
+    let cursor = widgets::cursor_marker(selected);
 
     // A dot to the left of the label flags an edit that has not been saved yet.
     let mark = if changed {
@@ -130,11 +119,7 @@ fn settings_lines(block_pad: &str, config: &Config) -> Vec<String> {
 /// nothing to save it is dimmed, so its state mirrors whether pressing it would
 /// do anything. The `>` cursor marks it when focused, like any other row.
 fn save_button_line(block_pad: &str, dirty: bool, selected: bool) -> String {
-    let marker = if selected {
-        style(">").red().bold().to_string()
-    } else {
-        " ".to_string()
-    };
+    let marker = widgets::cursor_marker(selected);
 
     let button = if dirty {
         style(SAVE_LABEL).green().bold().to_string()
@@ -238,7 +223,7 @@ pub fn render_frame(
     }
 
     let (height, width) = widgets::normalize_size(raw_height, raw_width);
-    let block_pad = " ".repeat(widgets::centered_padding(width, BLOCK_WIDTH));
+    let block_pad = " ".repeat(widgets::centered_padding(width, widgets::BLOCK_WIDTH));
 
     // The body (mascot, title, settings and notice slot) is centred vertically;
     // the footer is pinned to the bottom edge of the frame.

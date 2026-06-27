@@ -15,10 +15,7 @@ const TITLE: &str = "USAGI";
 /// Vertical placement is handled by [`render_frame`], which centres the whole
 /// body in the terminal, so this returns no leading padding.
 fn header_lines(width: usize) -> Vec<String> {
-    let mut lines = widgets::rabbit_lines(width);
-    lines.push(String::new());
-    lines.push(widgets::title_line(width, TITLE));
-    lines
+    widgets::header_lines(width, TITLE, None)
 }
 
 /// Builds the menu lines, highlighting the selected entry.
@@ -31,11 +28,7 @@ fn menu_lines(width: usize, items: &[MenuItem], selected_index: usize) -> Vec<St
     for (i, item) in items.iter().enumerate() {
         let is_selected = i == selected_index;
 
-        let cursor = if is_selected {
-            style(">").red().bold().to_string()
-        } else {
-            " ".to_string()
-        };
+        let cursor = widgets::cursor_marker(is_selected);
         let label = if is_selected {
             style(format!("{:<10}", item.label))
                 .cyan()

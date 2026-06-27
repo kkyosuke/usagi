@@ -28,6 +28,11 @@ use unicode_width::UnicodeWidthChar;
 /// The escape (ESC, `0x1b`) that introduces an ANSI control sequence.
 const ESC: char = '\u{1b}';
 
+/// The column width of the centred content block — form fields and project rows —
+/// that the full-screen forms (config / new / open) render. The single source of
+/// the block width so every screen's block stays the same size and lines up.
+pub const BLOCK_WIDTH: usize = 52;
+
 /// Shortens `text` to at most `max` display columns, appending an ellipsis when
 /// it has to cut (the head of the text is the most informative part).
 ///
@@ -429,6 +434,35 @@ pub fn faded_title_line(width: usize, title: &str, step: usize) -> String {
 /// A centred, dimmed line — used for subtitles and footers.
 pub fn dim_line(width: usize, text: &str) -> String {
     style(centered(width, text)).dim().to_string()
+}
+
+/// The centred mascot + title (+ optional subtitle) block every full-screen form
+/// (welcome / config / new / open) puts at the top.
+///
+/// [`rabbit_lines`] draws the mascot, a blank row separates it from the `title`,
+/// and `subtitle` — when present — is added as a [`dim_line`] below it. Vertical
+/// placement is the caller's `render_frame`'s job, so this adds no leading
+/// padding. The single source of the header layout so the screens stay aligned.
+pub fn header_lines(width: usize, title: &str, subtitle: Option<&str>) -> Vec<String> {
+    let mut lines = rabbit_lines(width);
+    lines.push(String::new());
+    lines.push(title_line(width, title));
+    if let Some(subtitle) = subtitle {
+        lines.push(dim_line(width, subtitle));
+    }
+    lines
+}
+
+/// The `>` cursor a selectable row shows when `selected` (red-bold), or a single
+/// blank space when not — so the marker column stays aligned whether or not the
+/// row is the cursor. The single source of the selection-cursor glyph and its
+/// styling, shared by every screen's row / menu / button rendering.
+pub fn cursor_marker(selected: bool) -> String {
+    if selected {
+        style(">").red().bold().to_string()
+    } else {
+        " ".to_string()
+    }
 }
 
 /// A left/right value chooser — the shared rendering primitive for every
