@@ -239,14 +239,73 @@ fn focus_menu_can_run_the_coming_soon_ai_command() {
 }
 
 #[test]
-fn focus_ctrl_o_opens_switch_then_esc_re_focuses() {
-    // Focus -> Ctrl-O -> Switch(return=Focus); Esc re-enters Focus; Esc ->
-    // base Switch; Esc inert, fallback Ctrl-C quits.
+fn focus_ctrl_o_o_opens_switch_then_esc_re_focuses() {
+    // Under the prefix scheme `Ctrl-O` is the leader in 在席 too, so `Ctrl-O o`
+    // zooms out to Switch(return=Focus) — matching 没入. Esc re-enters Focus; Esc
+    // -> base Switch; Esc inert, fallback Ctrl-C quits.
     let mut keys = cmd("session switch feat");
     keys.push(Ok(Key::Enter)); // Focus feat
-    keys.push(Ok(Key::Char(CTRL_O))); // -> Switch(return Focus)
+    keys.push(Ok(Key::Char(CTRL_O))); // leader (no visible change yet)
+    keys.push(Ok(Key::Char('o'))); // -> Switch(return Focus)
     keys.push(Ok(Key::Escape)); // back -> Focus
     keys.push(Ok(Key::Escape)); // Focus -> base Switch
+    keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
+    assert!(matches!(run(keys, sample_state()).unwrap(), Outcome::Quit));
+}
+
+#[test]
+fn focus_ctrl_o_double_leader_also_opens_switch() {
+    // `Ctrl-O Ctrl-O` has no shell to take a literal here, so it falls back to
+    // the most common intent — zooming out to Switch — just like `Ctrl-O o`.
+    let mut keys = cmd("session switch feat");
+    keys.push(Ok(Key::Enter)); // Focus feat
+    keys.push(Ok(Key::Char(CTRL_O))); // leader
+    keys.push(Ok(Key::Char(CTRL_O))); // double leader -> Switch
+    keys.push(Ok(Key::Escape)); // back -> Focus
+    keys.push(Ok(Key::Escape)); // Focus -> base Switch
+    keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
+    assert!(matches!(run(keys, sample_state()).unwrap(), Outcome::Quit));
+}
+
+#[test]
+fn focus_ctrl_o_q_raises_the_quit_modal() {
+    // `Ctrl-O q` raises the quit-confirmation modal from 在席, mirroring 没入's
+    // `Ctrl-O q`. Confirming it with `y` quits.
+    let mut keys = cmd("session switch feat");
+    keys.push(Ok(Key::Enter)); // Focus feat
+    keys.push(Ok(Key::Char(CTRL_O))); // leader
+    keys.push(Ok(Key::Char('q'))); // -> quit modal
+    keys.push(Ok(Key::Char('y'))); // confirm quit
+    assert!(matches!(run(keys, sample_state()).unwrap(), Outcome::Quit));
+}
+
+#[test]
+fn focus_ctrl_o_s_and_e_drive_the_sidebar_and_note() {
+    // `Ctrl-O s` toggles the sidebar and `Ctrl-O e` opens the note editor from
+    // 在席, mirroring 没入. Both are driven through the loop (the editor is then
+    // dismissed) before quitting.
+    let mut keys = cmd("session switch feat");
+    keys.push(Ok(Key::Enter)); // Focus feat
+    keys.push(Ok(Key::Char(CTRL_O))); // leader
+    keys.push(Ok(Key::Char('s'))); // toggle sidebar
+    keys.push(Ok(Key::Char(CTRL_O))); // leader
+    keys.push(Ok(Key::Char('e'))); // open note editor
+    keys.push(Ok(Key::Escape)); // close note editor -> Focus
+    keys.push(Ok(Key::Escape)); // Focus -> base Switch
+    keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
+    assert!(matches!(run(keys, sample_state()).unwrap(), Outcome::Quit));
+}
+
+#[test]
+fn focus_ctrl_o_then_unknown_key_is_swallowed() {
+    // An unrecognised key right after the leader is swallowed (it clears the
+    // leader and does nothing), exactly as in 没入 — so a following `Esc` still
+    // leaves Focus for Switch rather than acting on the stale leader.
+    let mut keys = cmd("session switch feat");
+    keys.push(Ok(Key::Enter)); // Focus feat
+    keys.push(Ok(Key::Char(CTRL_O))); // leader
+    keys.push(Ok(Key::Char('z'))); // unknown -> swallowed, leader cleared
+    keys.push(Ok(Key::Escape)); // Focus -> base Switch (leader is gone)
     keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
     assert!(matches!(run(keys, sample_state()).unwrap(), Outcome::Quit));
 }
@@ -355,6 +414,146 @@ fn focus_ctrl_n_and_ctrl_p_walk_the_tab_strip_via_tab_op() {
         *navs.borrow(),
         vec![TabNav::To(0), TabNav::To(1), TabNav::To(0)]
     );
+}
+
+#[test]
+fn focus_ctrl_o_prefix_walks_the_tab_strip_with_letters_and_arrows() {
+    // Under the prefix scheme `Ctrl-O n`/`p` (and `Ctrl-O →`/`←`) walk the tab
+    // strip exactly as the direct Ctrl-N/P do — the same prefix grammar as 没入.
+    let term = Term::stdout();
+    let navs = RefCell::new(Vec::new());
+    let active = RefCell::new(0usize);
+    let mut tab_op = |_d: &Path, nav: Option<TabNav>| -> (Vec<String>, usize) {
+        if let Some(n) = nav {
+            navs.borrow_mut().push(n);
+            if let TabNav::To(i) = n {
+                *active.borrow_mut() = i;
+            }
+        }
+        (
+            vec!["agent".to_string(), "terminal".to_string()],
+            *active.borrow(),
+        )
+    };
+    let mut open = |_h: &mut HomeState, _d: &Path, _a: bool, _n: bool| Ok(PaneExit::ToFocus);
+    let mut keys = cmd("session switch feat");
+    keys.push(Ok(Key::Enter)); // attach feat; ToFocus -> Focus on "+ new"
+    keys.push(Ok(Key::Char(CTRL_O))); // leader
+    keys.push(Ok(Key::Char('n'))); // "+ new" wraps to pane 0: To(0)
+    keys.push(Ok(Key::Char(CTRL_O))); // leader
+    keys.push(Ok(Key::ArrowRight)); // pane 0 -> pane 1: To(1)
+    keys.push(Ok(Key::Char(CTRL_O))); // leader
+    keys.push(Ok(Key::Char('p'))); // pane 1 -> pane 0: To(0)
+    keys.push(Ok(Key::Char(CTRL_O))); // leader
+    keys.push(Ok(Key::ArrowLeft)); // pane 0 wraps to "+ new": no tab_op
+    keys.push(Ok(Key::CtrlC)); // quit
+    let mut reader = ScriptedReader::new(keys);
+    let monitor = MonitorHandle::detached();
+    let mut persist: fn(&str) = noop_persist;
+    let mut create: fn(&str) -> SessionOutcome = noop_create;
+    let mut remove: fn(&str, bool) -> SessionOutcome = noop_remove;
+    let mut config: fn(&Term) -> Result<Option<ConfigReload>> = noop_config;
+    let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = live_preview;
+    let mut branches: fn() -> Vec<String> = no_branches;
+    let outcome = event_loop_compat(
+        &term,
+        &mut reader,
+        sample_state(),
+        Path::new("/ws"),
+        &monitor,
+        &UpdateHandle::new(),
+        &OneShot::<bool>::new(),
+        &OneShot::<Vec<AgentCli>>::new(),
+        &mut persist,
+        &mut create,
+        &mut (noop_rename as fn(&str, &str) -> SessionOutcome),
+        &mut (noop_set_note as fn(&str, &str) -> SessionOutcome),
+        &mut remove,
+        &mut branches,
+        &mut open,
+        &mut config,
+        &mut preview,
+        &mut tab_op,
+        &mut (noop_close as fn(&mut HomeState, &Path)),
+        &mut (noop_reorder as fn(&str, bool) -> SessionReorder),
+    )
+    .unwrap();
+    assert!(matches!(outcome, Outcome::Quit));
+    assert_eq!(
+        *navs.borrow(),
+        vec![TabNav::To(0), TabNav::To(1), TabNav::To(0)]
+    );
+}
+
+#[test]
+fn focus_ctrl_o_g_launches_an_agent() {
+    // `Ctrl-O g` launches an agent from 在席 — the analogue of 没入's "add an
+    // agent tab" — driving the open callback (attach) for the focused session.
+    let opened = RefCell::new(Vec::new());
+    let mut open = |_h: &mut HomeState, d: &Path, a: bool, _n: bool| {
+        opened.borrow_mut().push((d.to_path_buf(), a));
+        Ok(PaneExit::Closed)
+    };
+    let mut create: fn(&str) -> SessionOutcome = noop_create;
+    let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = noop_preview;
+    let mut keys = cmd("session switch feat");
+    keys.push(Ok(Key::Enter)); // Focus feat
+    keys.push(Ok(Key::Char(CTRL_O))); // leader
+    keys.push(Ok(Key::Char('g'))); // launch agent (attach) -> Closed -> Focus
+    keys.push(Ok(Key::Escape)); // Focus -> base Switch
+    keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
+    assert!(matches!(
+        run_full(
+            keys,
+            sample_state(),
+            &mut open,
+            &mut create,
+            &mut preview,
+            &mut noop_config
+        )
+        .unwrap(),
+        Outcome::Quit
+    ));
+    assert_eq!(*opened.borrow(), vec![(PathBuf::from("/r/feat"), true)]);
+}
+
+#[test]
+fn focus_ctrl_o_prefix_jumps_to_the_previous_session() {
+    // `Ctrl-O Ctrl-^` jumps to the previously focused session, like the direct
+    // `Ctrl-^` (and like 没入). Focus feat, then main, then `Ctrl-O Ctrl-^` toggles
+    // back to feat.
+    let dirs = run_capturing_attached_dirs({
+        let mut keys = cmd("session switch feat");
+        keys.push(Ok(Key::Enter)); // attach feat
+        keys.push(Ok(Key::Char(CTRL_O))); // leader
+        keys.push(Ok(Key::Char('o'))); // -> Switch
+        keys.push(Ok(Key::ArrowUp)); // cursor main
+        keys.push(Ok(Key::Enter)); // attach main
+        keys.push(Ok(Key::Char(CTRL_O))); // leader
+        keys.push(Ok(Key::Char(CTRL_CARET))); // jump back to feat
+        keys.push(Ok(Key::Char(CTRL_O))); // leader
+        keys.push(Ok(Key::Char('o'))); // -> Switch
+        keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
+        keys
+    });
+    // The last attach is feat again — the previous-session jump landed on it.
+    assert_eq!(dirs.last(), Some(&PathBuf::from("/r/feat")));
+}
+
+#[test]
+fn focus_alt_scheme_keeps_ctrl_o_a_direct_zoom_out() {
+    // Under the alt scheme 没入 navigates with `Alt`-chords and leaves bare
+    // `Ctrl-O` to the shell, so in 在席 `Ctrl-O` keeps its single-key zoom-out to
+    // Switch (no leader). Mirrors the prefix `Ctrl-O o` test, one key shorter.
+    let mut state = sample_state();
+    state.set_key_scheme(crate::domain::settings::KeyScheme::Alt);
+    let mut keys = cmd("session switch feat");
+    keys.push(Ok(Key::Enter)); // Focus feat
+    keys.push(Ok(Key::Char(CTRL_O))); // direct -> Switch(return Focus)
+    keys.push(Ok(Key::Escape)); // back -> Focus
+    keys.push(Ok(Key::Escape)); // Focus -> base Switch
+    keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
+    assert!(matches!(run(keys, state).unwrap(), Outcome::Quit));
 }
 
 #[test]

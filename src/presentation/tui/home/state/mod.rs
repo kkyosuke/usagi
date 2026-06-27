@@ -1166,6 +1166,9 @@ impl HomeState {
         self.mode = Mode::Focus;
         self.focus_new_tab = true;
         self.clear_terminal_surface();
+        // The 没入 drive loop may have left its `Ctrl-O` leader bit set when it
+        // exited on the second key; clear it so 在席 starts without one pending.
+        self.prefix_pending = false;
     }
 
     /// Publish the tab strip shown above the embedded terminal: the session's
@@ -1469,6 +1472,8 @@ impl HomeState {
         // A fresh 切替 shows the highlighted session's note (any prior dismissal
         // belonged to the previous visit).
         self.note_hidden = false;
+        // Any 在席 `Ctrl-O` leader is abandoned by leaving the surface.
+        self.prefix_pending = false;
     }
 
     /// Where the current 切替 returns to on `Esc`.
@@ -1770,6 +1775,9 @@ impl HomeState {
         self.focus_menu.reset();
         self.focus_prompt.clear();
         self.focus_new_tab = true;
+        // Enter 在席 with no `Ctrl-O` leader pending, so the first key is read
+        // as itself rather than as a stale prefix's second key.
+        self.prefix_pending = false;
     }
 
     /// Enter 在席 (Focus) on the session named `name`, returning whether one
