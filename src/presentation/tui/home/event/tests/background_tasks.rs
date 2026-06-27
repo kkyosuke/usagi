@@ -12,7 +12,7 @@ fn interrupted_read_returns_quit() {
 #[test]
 fn unexpected_read_error_is_propagated() {
     let err = run(vec![Err(io::Error::other("boom"))], sample_state()).unwrap_err();
-    assert!(err.to_string().contains("Failed to read key"));
+    assert!(err.to_string().contains("Failed to read input"));
 }
 
 // --- background-task read & drain --------------------------------------
@@ -67,7 +67,7 @@ fn an_unexpected_timeout_read_error_is_propagated() {
     let mut remove = |_: &str, _: bool| {};
     let mut evict = |_: &Path| {};
     let err = run_with_tasks(&tasks, &mut reader, &mut remove, &mut evict).unwrap_err();
-    assert!(err.to_string().contains("Failed to read key"));
+    assert!(err.to_string().contains("Failed to read input"));
 }
 
 #[test]

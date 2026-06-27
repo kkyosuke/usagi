@@ -375,101 +375,12 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
     // footer at the bottom. Everything between is the two-pane body.
     let body_rows = body_rows_for(height);
 
-    let mut left = left_pane(
-        state.list(),
-        state.live_paths(),
-        state.running_paths(),
-        state.waiting_paths(),
-        state.done_paths(),
-        left_w,
-        body_rows,
-        // In 切替 the keyboard is on the list: fade the rows the cursor is not on.
-        state.mode() == Mode::Switch,
-        sidebar,
-        state.now(),
-    );
-    // 切替's inline create / rename input rides the left pane — but only at full
-    // width. Collapsed to the rail (5 columns) there is no room for the name, so
-    // the input renders in the right pane instead (see [`right_pane_contents`]).
-    if sidebar == Sidebar::Full {
-        // While naming a new session in 切替, append the inline create row(s) to
-        // the left pane (trimmed back to the session-list area if it overflows).
-        if let Some(create) = state.create() {
-            for row in switch_create_rows(create.value(), create.cursor(), create.error(), left_w) {
-                left.push(row);
-            }
-            left.truncate(body_rows);
-        }
-        // While renaming a session's sidebar label in 切替, append the inline
-        // rename row to the left pane (trimmed back if it would overflow).
-        if let Some(rename) = state.rename() {
-            for row in switch_rename_rows(rename.target(), rename.value(), rename.cursor(), left_w)
-            {
-                left.push(row);
-            }
-            left.truncate(body_rows);
-        }
-    }
-    // Rest a mascot at the bottom of the sidebar, below the session list, when
-    // there is room for it: the full mood mascot when expanded, a tiny chibi when
-    // collapsed to the rail (so folding the sidebar keeps the usagi around, just
-    // smaller). The full mascot's face and colour follow the current mode —
-    // browsing in 切替, attentive in 在席, heads-down in 没入 — so it reflects what
-    // the user is doing, and when the background update check has found a newer
-    // release it *speaks* the notice from a bubble above it (the rail chibi is
-    // static; the notice reappears on expand). A blank row always sits between the
-    // list and the art so it reads as its own thing rather than the next list
-    // entry. With a list (or an inline create / rename input) long enough to reach
-    // those rows, or a pane too narrow to hold the art, it politely hides rather
-    // than overlapping the list.
-    //
-    // The art is indented one column so its left edge lines up with the bottom
-    // input line's content (the `● live terminal` indicator carries a single
-    // leading space) rather than sitting flush against the pane edge; the width
-    // checks leave room for that indent.
-    const RABBIT_INDENT: usize = 1;
-    let mascot = match sidebar {
-        Sidebar::Full if left_w >= widgets::workspace_rabbit_width() + RABBIT_INDENT => {
-            let mood = rabbit_mood(state.mode());
-            // The mascot reacts without an idle timer: `blinking` is set for the
-            // frames just after the user interacts (in 切替 / 在席), and `tick`
-            // advances on the live loop so the 没入 Working paw pumps. Both come from
-            // the state the event loop refreshes each frame
-            // ([`HomeState::tick_mascot`]).
-            let (blinking, tick) = (state.mascot_blinking(), state.mascot_tick());
-            Some(match state.update() {
-                Some(latest) => widgets::workspace_rabbit_speaking(
-                    mood,
-                    &["アップデートがあるぴょん".to_string(), format!("v{latest}")],
-                    // Leave room for the indent so the speech bubble still fits the pane.
-                    left_w - RABBIT_INDENT,
-                    blinking,
-                    tick,
-                ),
-                None => widgets::workspace_rabbit(mood, blinking, tick),
-            })
-        }
-        Sidebar::Rail if left_w >= widgets::workspace_rabbit_rail_width() + RABBIT_INDENT => {
-            Some(widgets::workspace_rabbit_rail())
-        }
-        _ => None,
-    };
-    if let Some(rabbit) = mascot {
-        let rabbit: Vec<String> = rabbit
-            .into_iter()
-            .map(|row| format!("{}{row}", " ".repeat(RABBIT_INDENT)))
-            .collect();
-        // Reserve a blank row above the art (so it reads apart from the list) and
-        // one below it, so the mascot floats clear of the bottom input line — the
-        // `● live terminal` indicator in 没入 — rather than sitting flush on it.
-        let reserved = rabbit.len() + 2;
-        if body_rows >= reserved && left.len() <= body_rows - reserved {
-            left.resize(body_rows - rabbit.len() - 1, String::new());
-            left.extend(rabbit);
-            // Leave the final body row blank (the body loop pads it) so a gap sits
-            // between the rabbit's feet and the input line below.
-        }
-    }
+    // Build the worktree column (list + 切替's inline create / rename input) and
+    // rest the mode-aware mascot at its foot. Both steps are shared with
+    // [`mascot_hit_rect`], so the drawn rabbit and the click target stay one
+    // computation.
+    let mut left = left_column(state, sidebar, left_w, body_rows);
+    let _ = place_mascot(&mut left, state, sidebar, left_w, body_rows);
     let right = right_pane_contents(state, right_w, body_rows);
 
     let mut lines = Vec::with_capacity(height);
@@ -556,6 +467,201 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
     }
 
     lines
+}
+
+/// Header rows above the two-pane body: the title bar, the mode ladder, and the
+/// blank separator. The body — and so the sidebar mascot — starts just below them,
+/// so a body-row index lifts into a screen row by adding this.
+const HEADER_ROWS: usize = 3;
+
+/// The mascot art's left indent inside the sidebar, so its left edge lines up with
+/// the bottom input line's content (the `● live terminal` indicator carries a
+/// single leading space) rather than sitting flush against the pane edge.
+const RABBIT_INDENT: usize = 1;
+
+/// Build the worktree column exactly as [`render_frame`] does, before the mascot
+/// is rested at its foot: the session list, plus 切替's inline create / rename
+/// input when one is open at full width (collapsed to the rail there is no room,
+/// so the input renders in the right pane instead). Shared with
+/// [`mascot_hit_rect`] so the two always agree on the column the mascot sits in.
+fn left_column(
+    state: &HomeState,
+    sidebar: Sidebar,
+    left_w: usize,
+    body_rows: usize,
+) -> Vec<String> {
+    let mut left = left_pane(
+        state.list(),
+        state.live_paths(),
+        state.running_paths(),
+        state.waiting_paths(),
+        state.done_paths(),
+        left_w,
+        body_rows,
+        // In 切替 the keyboard is on the list: fade the rows the cursor is not on.
+        state.mode() == Mode::Switch,
+        sidebar,
+        state.now(),
+    );
+    if sidebar == Sidebar::Full {
+        // While naming a new session in 切替, append the inline create row(s) to the
+        // left pane (trimmed back to the session-list area if it overflows).
+        if let Some(create) = state.create() {
+            for row in switch_create_rows(create.value(), create.cursor(), create.error(), left_w) {
+                left.push(row);
+            }
+            left.truncate(body_rows);
+        }
+        // While renaming a session's sidebar label in 切替, append the inline rename
+        // row (trimmed back if it would overflow).
+        if let Some(rename) = state.rename() {
+            for row in switch_rename_rows(rename.target(), rename.value(), rename.cursor(), left_w)
+            {
+                left.push(row);
+            }
+            left.truncate(body_rows);
+        }
+    }
+    left
+}
+
+/// Where the sidebar mascot's clickable body landed within the left column: the
+/// animal's top body-row index, how many rows it spans, and its left column and
+/// width (in cells).
+struct MascotSpot {
+    animal_top: usize,
+    animal_rows: usize,
+    left: usize,
+    width: usize,
+}
+
+/// Rest the mode-aware mascot at the foot of the left `column` (mutating it in
+/// place) and report where its clickable body landed, or `None` when there is no
+/// room. Shared by [`render_frame`] (which draws it) and [`mascot_hit_rect`]
+/// (which hit-tests clicks against it), so the drawn rabbit and the click target
+/// are one computation.
+///
+/// The full-width sidebar rests the mood mascot — its face and colour follow the
+/// current mode (browsing in 切替, attentive in 在席, heads-down in 没入), it
+/// *speaks* the update notice from a bubble above when one is pending, and it plays
+/// a click reaction in the foreground while one is in flight. The collapsed rail
+/// shows a tiny static chibi instead. A blank row sits above the art (so it reads
+/// apart from the list) and one below (so it floats clear of the input line); with
+/// a list long enough to reach those rows, or a pane too narrow to hold the art, it
+/// politely hides. Only the bottom [`rabbit_height`](widgets::rabbit_height) rows —
+/// the animal itself — are the click target, so a click on the speech bubble above
+/// it does not count.
+fn place_mascot(
+    column: &mut Vec<String>,
+    state: &HomeState,
+    sidebar: Sidebar,
+    left_w: usize,
+    body_rows: usize,
+) -> Option<MascotSpot> {
+    let (mascot, animal_rows, width) = match sidebar {
+        Sidebar::Full if left_w >= widgets::workspace_rabbit_width() + RABBIT_INDENT => {
+            let mood = rabbit_mood(state.mode());
+            // `blinking` is set for the frames just after the user interacts, and
+            // `tick` advances on the live loop so the 没入 Working paw pumps — both
+            // from the state the event loop refreshes each frame.
+            let (blinking, tick) = (state.mascot_blinking(), state.mascot_tick());
+            let art = match state.mascot_reaction() {
+                // A click reaction plays in the foreground over the resting /
+                // speaking mascot for its brief window.
+                Some(reaction) => {
+                    widgets::workspace_rabbit_reaction(reaction, state.mascot_reaction_phase())
+                }
+                None => match state.update() {
+                    Some(latest) => widgets::workspace_rabbit_speaking(
+                        mood,
+                        &["アップデートがあるぴょん".to_string(), format!("v{latest}")],
+                        // Leave room for the indent so the bubble still fits the pane.
+                        left_w - RABBIT_INDENT,
+                        blinking,
+                        tick,
+                    ),
+                    None => widgets::workspace_rabbit(mood, blinking, tick),
+                },
+            };
+            (
+                art,
+                widgets::rabbit_height(),
+                widgets::workspace_rabbit_width(),
+            )
+        }
+        Sidebar::Rail if left_w >= widgets::workspace_rabbit_rail_width() + RABBIT_INDENT => {
+            let art = widgets::workspace_rabbit_rail();
+            let rows = art.len();
+            (art, rows, widgets::workspace_rabbit_rail_width())
+        }
+        _ => return None,
+    };
+    let rabbit: Vec<String> = mascot
+        .into_iter()
+        .map(|row| format!("{}{row}", " ".repeat(RABBIT_INDENT)))
+        .collect();
+    // Reserve a blank row above the art and one below it.
+    let reserved = rabbit.len() + 2;
+    if body_rows >= reserved && column.len() <= body_rows - reserved {
+        column.resize(body_rows - rabbit.len() - 1, String::new());
+        column.extend(rabbit);
+        // The animal's body is the bottom `animal_rows` of the placed block; its
+        // feet sit on the second-to-last body row, so the body's top is here.
+        Some(MascotSpot {
+            animal_top: body_rows - 1 - animal_rows,
+            animal_rows,
+            left: RABBIT_INDENT,
+            width,
+        })
+    } else {
+        None
+    }
+}
+
+/// The screen rectangle the sidebar mascot's clickable body occupies, in 0-based
+/// terminal cells. The home loop hit-tests a click against it to decide whether to
+/// play a reaction.
+pub(super) struct MascotHit {
+    top: usize,
+    rows: usize,
+    left: usize,
+    width: usize,
+}
+
+impl MascotHit {
+    /// Whether the 0-based `(col, row)` click cell lands on the mascot's body.
+    pub(super) fn contains(&self, col: u16, row: u16) -> bool {
+        let (col, row) = (col as usize, row as usize);
+        row >= self.top
+            && row < self.top + self.rows
+            && col >= self.left
+            && col < self.left + self.width
+    }
+}
+
+/// The screen rectangle the sidebar mascot's body occupies for a raw terminal
+/// size and `state`, or `None` when no mascot is shown. Recomputes the same left
+/// column and mascot placement [`render_frame`] draws, then lifts the placement
+/// into screen coordinates, so a click is hit-tested against exactly where the
+/// rabbit was painted. Purely geometric — the caller ([`super::event`]) gates out
+/// the modes and overlays where a click should be ignored.
+pub(super) fn mascot_hit_rect(
+    raw_height: usize,
+    raw_width: usize,
+    state: &HomeState,
+) -> Option<MascotHit> {
+    let (height, width) = widgets::normalize_size(raw_height, raw_width);
+    let sidebar = state.sidebar();
+    let (left_w, _right_w) = layout(width, sidebar);
+    let body_rows = body_rows_for(height);
+    let mut column = left_column(state, sidebar, left_w, body_rows);
+    let spot = place_mascot(&mut column, state, sidebar, left_w, body_rows)?;
+    Some(MascotHit {
+        top: HEADER_ROWS + spot.animal_top,
+        rows: spot.animal_rows,
+        left: spot.left,
+        width: spot.width,
+    })
 }
 
 #[cfg(test)]

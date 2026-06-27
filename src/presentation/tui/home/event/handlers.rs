@@ -14,7 +14,7 @@ use console::Term;
 
 use crate::presentation::tui::io::screen::{self, FramePainter};
 
-use crate::domain::settings::{AgentCli, SessionActionUi};
+use crate::domain::settings::{AgentCli, KeyScheme, SessionActionUi};
 
 use super::super::command::Effect;
 use super::super::state::{HomeState, ModalSize, PaneExit, ReturnMode, ROOT_NAME};
@@ -623,13 +623,24 @@ pub(super) fn focus_key(
     key: Key,
     wiring: &mut Wiring,
 ) -> Flow {
+    // A pending `Ctrl-O` leader makes this key the second key of the chord — the
+    // same prefix grammar as 没入, so `Ctrl-O o` zooms out to 切替 from 在席 exactly
+    // as it does from the live terminal. Unlike 没入 this needs no timeout: 在席 has
+    // no shell a forgotten leader could leak a literal `Ctrl-O` into, and the very
+    // next key always resolves it.
+    if state.prefix_pending() {
+        state.set_prefix_pending(false);
+        return focus_prefix_action(term, state, painter, key, wiring);
+    }
+
     // `Esc` peels back one step: on the "+ new" launch surface opened over live
     // panes (e.g. after `Ctrl-T` from 没入) it discards the surface and steps onto
     // the pane's tab so that pane previews again; everywhere else (a pane tab, or
     // an idle session with no pane behind "+ new") it leaves 在席 for 切替. `Ctrl-O`
-    // opens 切替 (return here on cancel); `Ctrl-P` / `Ctrl-N` move the tab selector
-    // across the session's live panes and the trailing "+ new" tab. These bind the
-    // same whichever tab is selected.
+    // is the leader for that prefix grammar (the action is the next key);
+    // `Ctrl-P` / `Ctrl-N` also move the tab selector directly across the session's
+    // live panes and the trailing "+ new" tab. These bind the same whichever tab
+    // is selected.
     match key {
         Key::Escape => {
             // A first `Esc` collapses an open agent picker (案A) back to the menu;
@@ -643,7 +654,15 @@ pub(super) fn focus_key(
             return Flow::Continue;
         }
         Key::Char(CTRL_O) => {
-            state.enter_switch(ReturnMode::Focus);
+            // Under the prefix scheme `Ctrl-O` is the leader (the action is the
+            // next key), matching 没入 — `Esc` stays the one-key exit to 切替. The
+            // alt scheme drives 没入 with `Alt`-chords and leaves bare `Ctrl-O` to
+            // the shell, so there `Ctrl-O` keeps its direct zoom-out to 切替.
+            if state.key_scheme() == KeyScheme::Prefix {
+                state.set_prefix_pending(true);
+            } else {
+                state.enter_switch(ReturnMode::Focus);
+            }
             return Flow::Continue;
         }
         // `:` summons the workspace command palette overlay from 在席. Handled
@@ -725,6 +744,54 @@ pub(super) fn focus_key(
         }
     } else if key == Key::Enter {
         open_pane(term, state, painter, wiring, false, false);
+    }
+    Flow::Continue
+}
+
+/// Dispatch the key *after* the `Ctrl-O` leader in 在席 (Focus), mirroring the
+/// 没入 prefix grammar (see [`pane_input::prefix_action`]) so the same chords
+/// navigate from either surface:
+///
+/// - `o` (and a double leader `Ctrl-O Ctrl-O`, a control-char second key that
+///   works with a Japanese IME on) zooms out to 切替, returning to 在席 on cancel.
+/// - `n`/`→` and `p`/`←` walk the tab strip, like the direct `Ctrl-N`/`Ctrl-P`.
+/// - `g` launches an agent — 在席's analogue of 没入's "add an agent tab".
+/// - `e` edits the note, `s` toggles the sidebar, `q` raises the quit modal.
+/// - `Ctrl-^` jumps to the previous session (a direct key in 没入 too).
+///
+/// `a` (zoom to 在席) is a no-op — we are already here — and every other key is
+/// swallowed, exactly as an unrecognised key is after the leader in 没入.
+///
+/// [`pane_input::prefix_action`]: super::super::pane_input
+fn focus_prefix_action(
+    term: &Term,
+    state: &mut HomeState,
+    painter: &mut FramePainter,
+    key: Key,
+    wiring: &mut Wiring,
+) -> Flow {
+    match key {
+        Key::Char('o') | Key::Char(CTRL_O) => state.enter_switch(ReturnMode::Focus),
+        Key::Char('n') | Key::ArrowRight => {
+            if let Some(index) = state.focus_tab_next() {
+                let dir = selected_dir(state, wiring.workspace_root);
+                (wiring.tab_op)(&dir, Some(TabNav::To(index)));
+            }
+        }
+        Key::Char('p') | Key::ArrowLeft => {
+            if let Some(index) = state.focus_tab_prev() {
+                let dir = selected_dir(state, wiring.workspace_root);
+                (wiring.tab_op)(&dir, Some(TabNav::To(index)));
+            }
+        }
+        Key::Char('g') => run_focus_command(term, state, painter, "agent", wiring),
+        Key::Char('e') => {
+            state.open_focused_note(false);
+        }
+        Key::Char('s') => state.toggle_sidebar(),
+        Key::Char('q') => state.open_quit_confirm(),
+        Key::Char(CTRL_CARET) => jump_to_previous(term, state, painter, wiring),
+        _ => {}
     }
     Flow::Continue
 }
@@ -966,14 +1033,11 @@ fn open_pane(
             state.enter_switch(ReturnMode::Attached);
         }
         Ok(PaneExit::OpenNote) => {
-            // `Ctrl-E` opens the focused session's note editor over the (now
-            // detached) pane; closing it re-attaches. The root row is the
-            // workspace, not a session, so it has no note — fall back to
-            // re-attaching straight away.
-            if !state.open_focused_note(true) {
-                let row = state.list().active_index();
-                focus_and_attach(term, state, painter, wiring, row);
-            }
+            // `Ctrl-E` opens the focused row's note editor over the (now detached)
+            // pane; closing it re-attaches. Works on the root row too (it edits the
+            // workspace root's note). Coming from a live pane there is never a note
+            // overlay already open, so this always opens.
+            state.open_focused_note(true);
         }
         Ok(PaneExit::ToFocus) => {
             // `Ctrl-T` zooms out one level to 在席: the session's action surface,

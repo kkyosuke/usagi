@@ -29,23 +29,21 @@ pub struct ScrollEvent {
     pub row: u16,
 }
 
-/// A left-button mouse press, decoded from a terminal mouse report.
+/// A left-button mouse click, decoded from a terminal mouse report.
 ///
-/// Unlike a wheel turn, the management screens *do* act on this: the 切替
-/// (Switch) session list maps a press over a session row to selecting it (see
-/// `home::ui::left_pane_session_at`). Drags, releases, motion, and the other
-/// buttons are still swallowed by [`term_reader`](crate::presentation::tui::io::term_reader);
-/// only a plain left press surfaces as one of these.
+/// The management screens act on one only to make the sidebar mascot react: the
+/// home loop hit-tests the click against the resting rabbit and, if it lands,
+/// plays a playful reaction (see `home::event`). Every other click is dropped, so
+/// nothing else on the TUI is click-driven.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ClickEvent {
-    /// The 0-based column the button was pressed over.
+    /// The 0-based column the click was reported at.
     pub col: u16,
-    /// The 0-based row the button was pressed over.
+    /// The 0-based row the click was reported at.
     pub row: u16,
 }
 
-/// One unit of terminal input: a key press, a mouse-wheel scroll, or a
-/// left-button click.
+/// One unit of terminal input: a key press, a mouse-wheel scroll, or a click.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Input {
     Key(Key),
@@ -85,13 +83,14 @@ pub trait KeyReader {
         Ok(Some(self.read_key()?))
     }
 
-    /// The next input event (a key, scroll, or click), or `None` if `timeout`
+    /// The next input event (key, scroll, or click), or `None` if `timeout`
     /// elapses with nothing ready — the input-aware counterpart of
-    /// [`read_key_timeout`](Self::read_key_timeout) for the screens that act on a
-    /// click (the home loop's 切替 session list). The default wraps
-    /// [`read_key_timeout`](Self::read_key_timeout) so every key-only stub keeps
-    /// its behaviour and never yields a click; only the real terminal reader
-    /// overrides it to decode mouse reports under the timeout.
+    /// [`read_key_timeout`](Self::read_key_timeout). The home loop reads through
+    /// this so a click can reach it (to make the mascot react) while idle ticks
+    /// still wake it to animate. Defaults to wrapping
+    /// [`read_key_timeout`](Self::read_key_timeout) as a key, so every screen and
+    /// its test stub inherits its existing timeout behaviour unchanged; only the
+    /// real terminal reader overrides it to surface scrolls and clicks.
     fn read_input_timeout(&mut self, timeout: Duration) -> io::Result<Option<Input>> {
         Ok(self.read_key_timeout(timeout)?.map(Input::Key))
     }
@@ -527,13 +526,14 @@ mod tests {
     }
 
     #[test]
-    fn default_read_input_timeout_wraps_a_key() {
-        // The trait default reports the next key as `Input::Key`, never a click,
-        // so key-only stubs keep their behaviour under the timeout read.
-        let mut reader = OneKey(Key::Char('q'));
+    fn default_read_input_timeout_wraps_the_key_timeout() {
+        // The default surfaces each timed read as a key, so a stub that only scripts
+        // keys keeps working when the loop reads inputs (clicks come only from the
+        // real terminal reader, which overrides this).
+        let mut reader = OneKey(Key::Char('z'));
         assert_eq!(
             reader.read_input_timeout(Duration::ZERO).unwrap(),
-            Some(Input::Key(Key::Char('q')))
+            Some(Input::Key(Key::Char('z')))
         );
     }
 

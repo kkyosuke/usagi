@@ -256,7 +256,7 @@ pub(super) fn worktree_row(
     let line1 = format!("{gutter} {kind} {branch}{note}{status}");
 
     // Line 2 spells out the agent state with its icon (blank when absent) on the
-    // left, and a right-aligned cluster of the freshness label (`N分前`) and the
+    // left, and a right-aligned cluster of the freshness label (`Nmin ago`) and the
     // `+N -M` diff badge at the cell's far edge so the badges line up down the
     // list. The agent label is clipped to the room left of the cluster. Only the
     // active bar runs down to it — the `>` cursor stays a single point on line 1,
@@ -276,19 +276,19 @@ pub(super) fn worktree_row(
 }
 
 /// A compact, dimmed freshness label for how long ago `then` was relative to
-/// `now`: `たった今` under a minute, then `N分前` / `N時間前` / `N日前`. A `then`
-/// in the future (clock skew) clamps to `たった今`. Shown on line 2 so a glance
+/// `now`: `now` under a minute, then `Nmin ago` / `Nh ago` / `Nd ago`. A `then`
+/// in the future (clock skew) clamps to `now`. Shown on line 2 so a glance
 /// tells the stale sessions from the freshly-touched ones.
 fn relative_time(now: DateTime<Utc>, then: DateTime<Utc>) -> String {
     let secs = (now - then).num_seconds().max(0);
     let label = if secs < 60 {
-        "たった今".to_string()
+        "now".to_string()
     } else if secs < 3600 {
-        format!("{}分前", secs / 60)
+        format!("{}min ago", secs / 60)
     } else if secs < 86_400 {
-        format!("{}時間前", secs / 3600)
+        format!("{}h ago", secs / 3600)
     } else {
-        format!("{}日前", secs / 86_400)
+        format!("{}d ago", secs / 86_400)
     };
     style(label).dim().to_string()
 }
@@ -393,12 +393,14 @@ fn detail_content(
 
 /// Builds the root's two lines: the workspace itself, belonging to no session.
 /// The far-left gutter carries the `>` cursor (in 切替 (Switch)) or the green `▎`
-/// active bar; line 1 then has a `⌂` kind icon, the [`ROOT_NAME`] label, and a
-/// blank status field (the root has no git status). Line 2 carries a
-/// `workspace root` detail.
+/// active bar; line 1 then has a `⌂` kind icon, the [`ROOT_NAME`] label, a memo
+/// marker (`NOTE_ICON`, when `has_note`) — the root carries its own note, like a
+/// session — and a blank status field (the root has no git status). Line 2
+/// carries a `workspace root` detail.
 pub(super) fn root_row(
     name_width: usize,
     detail_width: usize,
+    has_note: bool,
     selected: bool,
     active: bool,
     in_switch: bool,
@@ -407,7 +409,10 @@ pub(super) fn root_row(
     let name = name_cell(ROOT_NAME, name_width, active || selected);
     let status = status_cell(None);
     let gutter = gutter_cell(selected, active, in_switch);
-    let line1 = format!("{gutter} {kind} {name}   {status}");
+    // The same constant-width memo cell a worktree row uses, so the (blank) status
+    // field stays aligned with the sessions below whether or not a note is present.
+    let note = note_cell(has_note);
+    let line1 = format!("{gutter} {kind} {name}{note}{status}");
 
     // Only the active bar reaches line 2; the cursor stays a point on line 1.
     let detail = style(clip_to_width(ROOT_DETAIL, detail_width))
@@ -625,6 +630,7 @@ pub(super) fn left_pane(
     let (mut root_top, mut root_detail) = root_row(
         name_width,
         detail_width,
+        list.root_has_note(),
         list.root_selected(),
         list.root_active(),
         in_switch,
@@ -1822,26 +1828,29 @@ mod tests {
             added: 1,
             removed: 2,
         }));
-        let time = Some(style("3分前").dim().to_string());
+        let time = Some(style("3min ago").dim().to_string());
 
         // Roomy cell: agent on the left, then `time badge` as the right cluster
         // with the badge still at the far edge.
         let line = detail_content(AgentState::Running, time.clone(), None, badge.clone(), 30);
         let plain = console::strip_ansi_codes(&line);
         assert!(plain.starts_with("▶ running"));
-        assert!(plain.contains("3分前 +1 -2"));
+        assert!(plain.contains("3min ago +1 -2"));
         assert!(plain.ends_with("+1 -2"));
 
         // With no badge the time becomes the right cluster on its own.
         let only_time = detail_content(AgentState::Absent, time.clone(), None, None, 20);
-        assert_eq!(console::strip_ansi_codes(&only_time).trim_start(), "3分前");
+        assert_eq!(
+            console::strip_ansi_codes(&only_time).trim_start(),
+            "3min ago"
+        );
 
         // Cramped cell: the badge is kept at the right edge and the lower-priority
         // time is dropped rather than pushing the badge off.
         let tight = detail_content(AgentState::Absent, time, None, badge, 7);
         let plain = console::strip_ansi_codes(&tight);
         assert!(plain.contains("+1 -2"));
-        assert!(!plain.contains("3分前"));
+        assert!(!plain.contains("3min ago"));
     }
 
     #[test]
@@ -1854,7 +1863,7 @@ mod tests {
             ahead: 2,
             behind: 1,
         }));
-        let time = Some(style("3分前").dim().to_string());
+        let time = Some(style("3min ago").dim().to_string());
 
         // Roomy cell: the right cluster reads `time commits badge`, left to right,
         // with the badge still pinned to the far edge.
@@ -1867,7 +1876,7 @@ mod tests {
         );
         let plain = console::strip_ansi_codes(&line);
         assert!(plain.starts_with("▶ running"));
-        assert!(plain.contains("3分前 ↑2 ↓1 +1 -2"));
+        assert!(plain.contains("3min ago ↑2 ↓1 +1 -2"));
         assert!(plain.ends_with("+1 -2"));
 
         // Tighter cell: the lowest-priority time is dropped first, but the commits
@@ -1876,7 +1885,7 @@ mod tests {
         let plain = console::strip_ansi_codes(&line);
         assert!(plain.contains("running"));
         assert!(plain.contains("↑2 ↓1 +1 -2"));
-        assert!(!plain.contains("3分前"));
+        assert!(!plain.contains("3min ago"));
     }
 
     #[test]
@@ -1919,14 +1928,14 @@ mod tests {
             console::strip_ansi_codes(&relative_time(now, now - chrono::Duration::seconds(secs)))
                 .into_owned()
         };
-        assert_eq!(ago(5), "たった今"); // under a minute
-        assert_eq!(ago(180), "3分前"); // minutes
-        assert_eq!(ago(7200), "2時間前"); // hours
-        assert_eq!(ago(2 * 86_400), "2日前"); // days
-                                              // A future timestamp (clock skew) clamps to "たった今".
+        assert_eq!(ago(5), "now"); // under a minute
+        assert_eq!(ago(180), "3min ago"); // minutes
+        assert_eq!(ago(7200), "2h ago"); // hours
+        assert_eq!(ago(2 * 86_400), "2d ago"); // days
+                                               // A future timestamp (clock skew) clamps to "now".
         assert_eq!(
             console::strip_ansi_codes(&relative_time(now, now + chrono::Duration::seconds(30))),
-            "たった今"
+            "now"
         );
     }
 }

@@ -12,9 +12,10 @@
 //! - [`KeyScheme::Prefix`] (default) reserves only the `Ctrl-O` leader; the
 //!   action is the *next* key (`Ctrl-O o/a/n/p/g/e/s/q`, or `Ctrl-O →`/`←`).
 //!   Every other Ctrl key — `Ctrl-E`, `Ctrl-N`/`Ctrl-P`, `Ctrl-T`, … — flows to
-//!   the shell, and `Ctrl-O Ctrl-O` sends a literal `Ctrl-O`. A pending leader
-//!   lapses after [`PREFIX_TIMEOUT`] (and is cleared by a mouse / paste event),
-//!   so a forgotten `Ctrl-O` can't turn a later one into that literal.
+//!   the shell, and `Ctrl-O Ctrl-O` zooms out to 切替 just like `Ctrl-O o` (a
+//!   control-char second key the IME never composes). A pending leader lapses
+//!   after [`PREFIX_TIMEOUT`] (and is cleared by a mouse / paste event), so a
+//!   forgotten `Ctrl-O` can't capture a later key.
 //! - [`KeyScheme::Alt`] reserves a single `Alt`-chord per action
 //!   (`Alt-o/a/g/e/s/q`, `Alt-→`/`←`) and claims **no** bare Ctrl key.
 //!
@@ -217,8 +218,7 @@ pub(super) enum KeyAction {
     /// waiting for the second key, swallowing the leader itself.
     BeginPrefix,
     /// Forward the key to the shell (via [`encode_key`]); clears any pending
-    /// prefix. Pressing the leader twice lands here too, sending a literal
-    /// `Ctrl-O` to the shell.
+    /// prefix.
     Forward,
     /// Swallow the key without acting (an unrecognised key right after the
     /// leader); clears any pending prefix.
@@ -233,11 +233,11 @@ fn is_prefix(key: &KeyEvent) -> bool {
 
 /// How long a `Ctrl-O` leader press waits for its action key before it lapses.
 /// Without it, a leader left pending (the user pressed `Ctrl-O` then got
-/// distracted) would make the *next* `Ctrl-O` — pressed much later as a fresh
-/// command — a `Ctrl-O Ctrl-O` double-leader, leaking a literal `Ctrl-O` to the
-/// agent; one that binds it (like `claude`) then fires its own action. One
-/// second is long enough to type the second key deliberately, short enough that
-/// a forgotten prefix expires before it can capture a later press.
+/// distracted) would make the *next* key — pressed much later as a fresh command
+/// — its action key: a later `Ctrl-O` would zoom out to 切替 by surprise, and a
+/// plain key meant for the shell would be swallowed (or fire a chord). One second
+/// is long enough to type the second key deliberately, short enough that a
+/// forgotten prefix expires before it can capture a later press.
 pub(super) const PREFIX_TIMEOUT: Duration = Duration::from_millis(1000);
 
 /// Whether a leader pressed at `since` is still awaiting its action key at `now`
@@ -313,9 +313,13 @@ pub(super) fn classify(scheme: KeyScheme, pending: bool, key: &KeyEvent) -> KeyA
             None => KeyAction::Forward,
         },
         KeyScheme::Prefix if pending => {
-            // Pressing the leader twice sends a literal `Ctrl-O` to the shell.
+            // `Ctrl-O Ctrl-O` zooms out to 切替, the same as `Ctrl-O o` — a second
+            // leader is two control chars (never an `o` the IME composes into
+            // kana), so 切替 stays reachable with a Japanese IME left on. (The
+            // `alt` scheme keeps bare `Ctrl-O` flowing to the shell for those who
+            // want its readline binding.)
             if is_prefix(key) {
-                KeyAction::Forward
+                KeyAction::Reserved(Reserved::Detach)
             } else {
                 match prefix_action(key) {
                     Some(action) => KeyAction::Reserved(action),
@@ -664,16 +668,19 @@ mod tests {
     }
 
     #[test]
-    fn prefix_double_leader_sends_a_literal_and_unknown_second_key_is_swallowed() {
+    fn prefix_double_leader_zooms_to_switch_and_unknown_second_key_is_swallowed() {
         use KeyScheme::Prefix;
-        // `Ctrl-O Ctrl-O` forwards a literal Ctrl-O to the shell.
+        // `Ctrl-O Ctrl-O` zooms out to 切替 like `Ctrl-O o`, in both control-char
+        // forms crossterm may report (with `CONTROL`, or the raw `0x0f`) — so 切替
+        // stays reachable with a Japanese IME left on, which would compose a plain
+        // `o` into kana before usagi ever saw it.
         assert_eq!(
             classify(
                 Prefix,
                 true,
                 &key(KeyCode::Char('o'), KeyModifiers::CONTROL)
             ),
-            KeyAction::Forward
+            KeyAction::Reserved(Reserved::Detach)
         );
         assert_eq!(
             classify(
@@ -681,7 +688,7 @@ mod tests {
                 true,
                 &key(KeyCode::Char('\u{0f}'), KeyModifiers::NONE)
             ),
-            KeyAction::Forward
+            KeyAction::Reserved(Reserved::Detach)
         );
         // An unrecognised key right after the leader is swallowed (tmux-style),
         // not sent to the shell.

@@ -99,6 +99,7 @@
       "last_active": "2026-06-13T09:42:07.123456Z"
     }
   ],
+  "root_note": "リリース前に CHANGELOG を更新する",
   "updated_at": "2026-06-13T05:01:18.659149Z"
 }
 ```
@@ -108,6 +109,7 @@
 | フィールド | 型 | 意味 |
 |---|---|---|
 | `sessions` | array | 作成済みセッションの一覧（`.usagi/sessions/` 配下）。**配列順がホーム画面の表示順**で、初期値は作成順、切替（Switch）の `K`/`J` で並び替えると入れ替えた順序がこの配列に永続化される（[design/05-home.md](../design/05-home.md#切替switch既定)）。古いファイルには無く、その場合は空として扱う |
+| `root_note` | string? | ワークスペース**ルート行（`⌂ root`）**に紐づく自由記述の**複数行メモ**（任意）。セッションが持つ `note` のルート版で、ルートはどのセッションにも属さないためトップレベルに置く。**見た目だけ**の付加情報で、未設定（既定）なら省略される |
 | `updated_at` | RFC3339(UTC) | この状態を git から最後に更新した日時 |
 
 > ワークスペース共通の「既定ブランチ」は持ちません。複数リポジトリで既定ブランチが異なり得る（`main` / `master` など）ため、各 worktree の status は**その worktree のリポジトリの既定ブランチ**に対して個別に判定します。
@@ -130,7 +132,7 @@ worktree を束ねます。各 worktree は git ステータス付き（下記 `
 | `last_active` | RFC3339(UTC)? | このセッションを最後に触った日時（切替・在席でアクティブにした、または端末／Agent の活動を観測した）。ホーム画面の鮮度ドット（[design/05-home.md](../design/05-home.md#レイアウト)）の基準時刻で、放置するほど淡く沈む。未設定（既定。一度も触っていない）なら省略され、`created_at` にフォールバックする |
 
 セッション作成（`usecase/session`）はこの `SessionRecord` を `state.json` に追記します。
-表示名の変更（`usecase/session::set_display_name`、ホーム画面の[切替モードの `r`](../design/05-home.md#各モードの説明)）は `display_name` だけを、メモの編集（`usecase/session::set_note`、ホーム画面の[切替モードの `n` / 没入の `Ctrl-E`](../design/05-home.md#セッションメモの編集)）は `note` だけを書き換えます。`state.json` はマシンローカル（git 管理外）なので、メモはこの環境にだけ保存され、ブランチや PR では共有されません。
+表示名の変更（`usecase/session::set_display_name`、ホーム画面の[切替モードの `r`](../design/05-home.md#各モードの説明)）は `display_name` だけを、メモの編集（`usecase/session::set_note`、ホーム画面の[切替モードの `n` / 没入の `Ctrl-E`](../design/05-home.md#セッションメモの編集)）は `note` だけを書き換えます。ルート行（`⌂ root`）のメモも同じ操作で編集でき、こちらはトップレベルの `root_note`（`usecase/session::set_root_note`）を書き換えます。`state.json` はマシンローカル（git 管理外）なので、メモはこの環境にだけ保存され、ブランチや PR では共有されません。
 再同期（`usecase/workspace_state::sync`）は各セッション worktree の git ステータスを
 読み直して更新します。
 

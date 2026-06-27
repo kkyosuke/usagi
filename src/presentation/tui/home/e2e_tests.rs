@@ -213,11 +213,13 @@ fn event_loop_attaches_a_live_session_end_to_end() {
         line: LogLine::output("created"),
         sessions: None,
         select: None,
+        root_note: None,
     };
     let mut remove = |_: &str, _: bool| SessionOutcome {
         line: LogLine::output("removed"),
         sessions: None,
         select: None,
+        root_note: None,
     };
     let mut config = |_: &Term| {
         Ok(Some(ConfigReload {
@@ -230,11 +232,13 @@ fn event_loop_attaches_a_live_session_end_to_end() {
         line: LogLine::output("renamed"),
         sessions: None,
         select: None,
+        root_note: None,
     };
     let mut set_note = |_: &str, _: &str| SessionOutcome {
         line: LogLine::output("note saved"),
         sessions: None,
         select: None,
+        root_note: None,
     };
     let mut tab_op =
         |_dir: &Path, _nav: Option<TabNav>| -> (Vec<String>, usize) { (Vec::new(), 0) };

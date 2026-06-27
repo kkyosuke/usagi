@@ -28,6 +28,7 @@ fn noop_create(_: &str) -> SessionOutcome {
         line: LogLine::output("created"),
         sessions: None,
         select: None,
+        root_note: None,
     }
 }
 
@@ -36,6 +37,7 @@ fn noop_remove(_: &str, _: bool) -> SessionOutcome {
         line: LogLine::output("removed"),
         sessions: None,
         select: None,
+        root_note: None,
     }
 }
 
@@ -44,6 +46,7 @@ fn noop_rename(_: &str, _: &str) -> SessionOutcome {
         line: LogLine::output("renamed"),
         sessions: None,
         select: None,
+        root_note: None,
     }
 }
 
@@ -52,6 +55,7 @@ fn noop_set_note(_: &str, _: &str) -> SessionOutcome {
         line: LogLine::output("note saved"),
         sessions: None,
         select: None,
+        root_note: None,
     }
 }
 
@@ -814,6 +818,7 @@ mod config_switch;
 mod ctrl_caret;
 mod focus_menu;
 mod focus_prompt;
+mod mascot_click;
 mod notes;
 mod palette;
 mod quit_modal;

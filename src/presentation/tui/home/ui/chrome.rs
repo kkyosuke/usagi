@@ -379,12 +379,24 @@ pub(super) fn footer_line(width: usize, state: &HomeState) -> String {
                 "[switch]  ↑↓ session / K/J move / {sort} / ←→ tab / Enter focus / c new / r rename / n/Ctrl-E note / x close tab / : commands / ? keys / {esc}"
             )
         }
-        Mode::Focus => {
-            format!(
+        // 在席 shares the 没入 prefix grammar under the prefix scheme: `Ctrl-O` is
+        // a leader, so while one is pending the footer flips to the waiting hint
+        // (mirroring 没入), and otherwise it names the leader. The alt scheme keeps
+        // `Ctrl-O` a direct zoom-out here, so its footer names that instead.
+        Mode::Focus => match state.key_scheme() {
+            KeyScheme::Prefix if state.prefix_pending() => {
+                "[focus]  Ctrl-O ▸ o switch / n/p tab / g agent / e note / s sidebar / q quit · Esc cancel"
+                    .to_string()
+            }
+            KeyScheme::Prefix => format!(
+                "[session: {}]  Ctrl-N/P: tab / Enter: open/run / Ctrl-O then: o switch / g agent … / Ctrl-^: last / : commands / ? keys / Esc: switch",
+                state.focused_session_name()
+            ),
+            KeyScheme::Alt => format!(
                 "[session: {}]  Ctrl-N/P: tab / Enter: open/run / Ctrl-O: switch / Ctrl-^: last / Ctrl-E: note / : commands / ? keys / Esc: switch",
                 state.focused_session_name()
-            )
-        }
+            ),
+        },
         // The 没入 navigation keys depend on the configured key scheme: the
         // `Ctrl-O` leader (then a key) or single `Alt`-chords.
         Mode::Attached => match state.key_scheme() {

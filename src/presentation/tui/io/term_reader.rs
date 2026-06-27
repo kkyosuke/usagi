@@ -47,14 +47,12 @@ impl KeyReader for TermKeyReader {
         key_from_inputs(|| self.read_input())
     }
 
-    fn read_key_timeout(&mut self, timeout: Duration) -> io::Result<Option<Key>> {
+    fn read_input_timeout(&mut self, timeout: Duration) -> io::Result<Option<Input>> {
         // `console` only offers a blocking read, so we wait at most `timeout` for
         // input to be *ready* and then decode it with `console` exactly as a
-        // blocking read would; a wheel turn or other mouse report drains to a tick
-        // (`None`) so the caller just repaints and polls again. This adds no
-        // background thread (one would outlive its screen and steal the next
-        // screen's input, or fight the embedded pane for stdin), so reads stay
-        // strictly sequential.
+        // blocking read would. This adds no background thread (one would outlive its
+        // screen and steal the next screen's input, or fight the embedded pane for
+        // stdin), so reads stay strictly sequential.
         //
         // The readiness wait **must not consume** the bytes it is waiting on:
         // `console`'s decode below reads the tty fd directly, so anything read out
@@ -81,25 +79,22 @@ impl KeyReader for TermKeyReader {
         // keypress deliverable at once, mirroring the per-read raw mode `console`
         // already uses on the blocking path; the guard restores cooked mode on the
         // way out so the rest of the loop is unchanged.
-        match self.read_input_timeout(timeout)? {
-            Some(Input::Key(key)) => Ok(Some(key)),
-            // A wheel turn or click drains to a tick: the key-only screens just
-            // repaint and poll again.
-            Some(Input::Scroll(_)) | Some(Input::Click(_)) | None => Ok(None),
-        }
-    }
-
-    fn read_input_timeout(&mut self, timeout: Duration) -> io::Result<Option<Input>> {
-        // The readiness wait and the `console` decode both run in raw mode for the
-        // same reasons spelled out on [`read_key_timeout`]: the wait must not
-        // consume the bytes it polls, and a lone key must look "ready" at once. The
-        // home loop uses this (over [`read_key_timeout`]) so a click on the 切替
-        // session list reaches it instead of being dropped to a tick.
         let _raw = RawModeGuard::enter()?;
         if !input_ready(timeout)? {
             return Ok(None);
         }
         Ok(Some(self.read_input()?))
+    }
+
+    fn read_key_timeout(&mut self, timeout: Duration) -> io::Result<Option<Key>> {
+        // The key-only screens want the next key within the timeout; a wheel turn
+        // or click drains to a tick (`None`) so the caller just repaints and polls
+        // again. The home loop instead reads through `read_input_timeout` so a
+        // click can reach it.
+        Ok(match self.read_input_timeout(timeout)? {
+            Some(Input::Key(key)) => Some(key),
+            _ => None,
+        })
     }
 }
 
@@ -298,9 +293,10 @@ fn mouse_seq_kind(key: &Key) -> Option<(MouseSeq, Vec<char>)> {
     }
 }
 
-/// Read the next input event: a key, or — for a wheel turn — a [`ScrollEvent`].
-/// Mouse reports that are not wheel turns (clicks, motion) are swallowed so they
-/// never reach the event loop. `read` yields successive keys from the terminal.
+/// Read the next input event: a key, a wheel turn ([`ScrollEvent`]), or a
+/// left-button click ([`ClickEvent`]). Other mouse reports (motion, drags, other
+/// buttons, releases) are swallowed so they never reach the event loop. `read`
+/// yields successive keys from the terminal.
 fn next_input(mut read: impl FnMut() -> io::Result<Key>) -> io::Result<Input> {
     loop {
         let key = read()?;
@@ -313,28 +309,18 @@ fn next_input(mut read: impl FnMut() -> io::Result<Key>) -> io::Result<Input> {
         if is_modified_key_head(&key) {
             return Ok(Input::Key(read_modified_key(&mut read)?));
         }
-        let action = match mouse_seq_kind(&key) {
+        let event = match mouse_seq_kind(&key) {
             Some((MouseSeq::Sgr, head)) => read_sgr(head, &mut read)?,
             Some((MouseSeq::X10, head)) => read_x10(head, &mut read)?,
             // A real key (or an unrelated escape sequence): hand it back.
             None => return Ok(Input::Key(key)),
         };
-        // A wheel turn surfaces as a scroll and a left press as a click; any other
-        // mouse report drains to `None` and we loop for the next real input.
-        match action {
-            Some(Mouse::Scroll(scroll)) => return Ok(Input::Scroll(scroll)),
-            Some(Mouse::Click(click)) => return Ok(Input::Click(click)),
-            None => {}
+        // A wheel turn or left click surfaces as its event; any other mouse report
+        // drains to `None` and we loop for the next real input.
+        if let Some(event) = event {
+            return Ok(event);
         }
     }
-}
-
-/// A decoded mouse report the screens act on: a wheel turn (scroll a pane) or a
-/// left-button press (select in the 切替 list). Drags, releases, motion, and the
-/// other buttons classify to `None` and are swallowed.
-enum Mouse {
-    Scroll(ScrollEvent),
-    Click(ClickEvent),
 }
 
 /// Whether `key` is the head `console` emits for a modified cursor key: the
@@ -370,12 +356,13 @@ fn read_modified_key(read: &mut impl FnMut() -> io::Result<Key>) -> io::Result<K
 }
 
 /// Drain an SGR report (the parameters plus the `M`/`m` terminator), starting
-/// from the `head` bytes `console` already consumed, and classify it (see
-/// [`classify`]). Returns `None` for a swallowed report or a malformed one.
+/// from the `head` bytes `console` already consumed, and turn a wheel turn into a
+/// scroll or a left-button press into a click. Returns `None` for any other
+/// report (motion, other buttons, releases) or a malformed one.
 fn read_sgr(
     head: Vec<char>,
     read: &mut impl FnMut() -> io::Result<Key>,
-) -> io::Result<Option<Mouse>> {
+) -> io::Result<Option<Input>> {
     let mut payload: String = head.into_iter().collect();
     let release = loop {
         match read()? {
@@ -389,32 +376,31 @@ fn read_sgr(
     Ok(parse_sgr(&payload, release))
 }
 
-/// Parse the `Cb;Cx;Cy` parameters of an SGR report into the mouse action it
-/// represents. A release (lowercase `m`) is never a wheel turn or a fresh press,
-/// so it is dropped before classifying.
-fn parse_sgr(payload: &str, release: bool) -> Option<Mouse> {
-    if release {
-        return None;
-    }
+/// Parse the `Cb;Cx;Cy` parameters of an SGR report (with its press/release flag)
+/// into a wheel scroll or a left click.
+fn parse_sgr(payload: &str, release: bool) -> Option<Input> {
     let mut params = payload.split(';');
     let cb: u32 = params.next()?.parse().ok()?;
     let cx: u32 = params.next()?.parse().ok()?;
     let cy: u32 = params.next()?.parse().ok()?;
-    classify(cb, cx, cy)
+    mouse_event(cb, cx, cy, release)
 }
 
 /// Drain an X10 report (three bytes, each value + 32), starting from the `head`
-/// bytes `console` already consumed, and classify it (see [`classify`]). Returns
-/// `None` for a swallowed or malformed report.
+/// bytes `console` already consumed, and turn a wheel turn into a scroll or a
+/// left-button press into a click. Returns `None` for any other or malformed
+/// report.
 ///
 /// Best-effort: we always request SGR coordinates (DECSET 1006), so a compliant
 /// terminal never sends X10 and this path is effectively a fallback. It assumes
 /// each coordinate byte is a single `char`; columns/rows past 95 (byte ≥ 128)
 /// would mis-frame, but at worst the report is dropped — it cannot move a list.
+/// X10 has no separate release flag (a button release is its own code, `3`), so
+/// the report is always treated as a press.
 fn read_x10(
     head: Vec<char>,
     read: &mut impl FnMut() -> io::Result<Key>,
-) -> io::Result<Option<Mouse>> {
+) -> io::Result<Option<Input>> {
     let mut bytes = head;
     while bytes.len() < 3 {
         match read()? {
@@ -427,40 +413,37 @@ fn read_x10(
     let cb = (bytes[0] as u32).saturating_sub(32);
     let cx = (bytes[1] as u32).saturating_sub(32);
     let cy = (bytes[2] as u32).saturating_sub(32);
-    Ok(classify(cb, cx, cy))
+    Ok(mouse_event(cb, cx, cy, false))
 }
 
-/// Classify a decoded button code and 1-based coordinates into the mouse action
-/// the screens act on, or `None` to swallow it. A vertical wheel turn becomes a
-/// [`Mouse::Scroll`]; a plain left-button press becomes a [`Mouse::Click`];
-/// everything else (the horizontal wheel, drags / motion, releases, the other
-/// buttons) is dropped.
-fn classify(cb: u32, cx: u32, cy: u32) -> Option<Mouse> {
-    let col = to_zero_based(cx);
-    let row = to_zero_based(cy);
+/// Build an [`Input`] from a decoded button code, 1-based coordinates, and the
+/// press/release flag: a wheel turn becomes a [`ScrollEvent`], a left-button
+/// press a [`ClickEvent`], and anything else `None` (so it is swallowed).
+fn mouse_event(cb: u32, cx: u32, cy: u32, release: bool) -> Option<Input> {
+    let col = cx.saturating_sub(1).min(u16::MAX as u32) as u16;
+    let row = cy.saturating_sub(1).min(u16::MAX as u32) as u16;
     // Wheel turns set bit 6 (64); the low two bits pick the axis and direction:
-    // 0 = up, 1 = down (2 / 3 are the horizontal wheel, which we ignore).
+    // 0 = up, 1 = down (2 / 3 are the horizontal wheel, which we ignore). A wheel
+    // reports only a press, so a (spurious) release is dropped.
     if cb & 0x40 != 0 {
+        if release {
+            return None;
+        }
         let lines = match cb & 0b11 {
             0 => -WHEEL_LINES,
             1 => WHEEL_LINES,
             _ => return None,
         };
-        return Some(Mouse::Scroll(ScrollEvent { lines, col, row }));
+        return Some(Input::Scroll(ScrollEvent { lines, col, row }));
     }
-    // A plain left-button press: not a motion report (bit 5 / 32) and the button
-    // bits (low two) are 0 = left. Modifier bits (shift / meta / ctrl) are
-    // ignored, so a modified left click still selects.
-    if cb & 0x20 == 0 && cb & 0b11 == 0 {
-        return Some(Mouse::Click(ClickEvent { col, row }));
+    // A plain left-button click: not the wheel (handled above), not a motion
+    // report (bit 5, 32), and the low two bits select the button (0 = left). Fire
+    // on the press (`M`) and drop the matching release (`m`), so one click is one
+    // event.
+    if !release && cb & 0x20 == 0 && cb & 0b11 == 0 {
+        return Some(Input::Click(ClickEvent { col, row }));
     }
     None
-}
-
-/// Convert a 1-based mouse coordinate to the 0-based screen column/row the events
-/// carry, clamping to `u16` (a coordinate past 65535 is reported as the edge).
-fn to_zero_based(coord: u32) -> u16 {
-    coord.saturating_sub(1).min(u16::MAX as u32) as u16
 }
 
 #[cfg(test)]
@@ -589,38 +572,26 @@ mod tests {
     }
 
     #[test]
-    fn sgr_left_press_becomes_a_click_at_its_position() {
-        // A left-button press (cb 0) at column 4, row 7 (both 1-based) surfaces as
-        // a click at the 0-based position the screens act on.
-        assert_eq!(
-            drive(sgr(0, 4, 7)),
-            Input::Click(ClickEvent { col: 3, row: 6 })
-        );
+    fn sgr_left_click_press_becomes_a_click_at_its_position() {
+        // A left-button press (cb 0) at column 6, row 9 (1-based) surfaces as a
+        // click at the 0-based cell — what the home loop hit-tests the mascot with.
+        let input = drive(sgr(0, 6, 9));
+        assert_eq!(input, Input::Click(ClickEvent { col: 5, row: 8 }));
     }
 
     #[test]
-    fn sgr_modified_left_press_still_clicks() {
-        // Modifier bits (here ctrl = 16) ride the button code; a modified left
-        // press still selects, so they are ignored when classifying.
-        assert_eq!(
-            drive(sgr(16, 2, 2)),
-            Input::Click(ClickEvent { col: 1, row: 1 })
-        );
-    }
-
-    #[test]
-    fn sgr_right_press_is_swallowed_then_next_key_returned() {
-        // A right-button press (cb 2) is neither a wheel turn nor a left click, so
-        // it is dropped and the following key is returned.
+    fn sgr_non_left_button_is_swallowed_then_next_key_returned() {
+        // A right-button press (cb 2) is not a left click, so it is dropped and the
+        // following key is returned.
         let mut keys = sgr(2, 1, 1);
         keys.push(Key::Enter);
         assert_eq!(drive(keys), Input::Key(Key::Enter));
     }
 
     #[test]
-    fn sgr_left_drag_is_swallowed() {
-        // A left drag sets the motion bit (32) atop the left button (cb 32), so it
-        // is not a fresh press; it drains and the following key is returned.
+    fn sgr_motion_report_is_swallowed() {
+        // A drag / motion report (bit 5, cb 32) is dropped, and the following key
+        // is returned.
         let mut keys = sgr(32, 1, 1);
         keys.push(Key::Char('q'));
         assert_eq!(drive(keys), Input::Key(Key::Char('q')));
@@ -636,7 +607,8 @@ mod tests {
 
     #[test]
     fn sgr_release_report_is_swallowed() {
-        // SGR release reports end with a lowercase `m`; never a wheel turn.
+        // SGR release reports end with a lowercase `m`; a click's release is
+        // dropped (the press already fired), so only the following key surfaces.
         let keys = vec![
             Key::UnknownEscSeq(vec!['[', '<', '0']),
             Key::Char(';'),
@@ -694,9 +666,9 @@ mod tests {
     }
 
     #[test]
-    fn x10_left_press_becomes_a_click() {
-        // `ESC [ M Cb Cx Cy`: a left press is cb 0 (+32 = ' '); column/row 1 are
-        // (1 + 32) = '!'. It surfaces as a click at the 0-based origin.
+    fn x10_left_click_becomes_a_click() {
+        // `ESC [ M Cb Cx Cy`: left press is cb 0 (+32 = ' '); column/row 1 are
+        // (1 + 32) = '!'. The report surfaces as a click at the 0-based cell.
         let keys = vec![
             Key::UnknownEscSeq(vec!['[', 'M', ' ']), // cb 0 (space = 32)
             Key::Char('!'),
@@ -706,11 +678,11 @@ mod tests {
     }
 
     #[test]
-    fn x10_right_press_drops_exactly_two_trailing_bytes() {
-        // A right-button X10 report (cb 2, +32 = '"') is swallowed, and its two
+    fn x10_non_left_button_drops_exactly_two_trailing_bytes() {
+        // A non-left-button X10 report (cb 2, '"') is swallowed, and its two
         // coordinate chars must not reach the event loop.
         let keys = vec![
-            Key::UnknownEscSeq(vec!['[', 'M', '"']), // cb 2 ('"' = 34)
+            Key::UnknownEscSeq(vec!['[', 'M', '"']), // cb 2 (34 = '"')
             Key::Char('!'),
             Key::Char('"'),
             Key::ArrowDown,

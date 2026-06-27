@@ -569,26 +569,61 @@ fn worktree_row_shows_the_label_override_instead_of_the_branch() {
 #[test]
 fn root_row_marks_selected_and_active() {
     // The `>` cursor shows on the selected root only in 切替 (Switch).
-    let (top, detail) = root_row(10, 20, true, false, true);
+    let (top, detail) = root_row(10, 20, false, true, false, true);
     assert!(top.contains('>'));
     assert!(top.contains('⌂'));
     assert!(top.contains(ROOT_NAME));
     assert!(detail.contains("workspace root"));
     // The same selected root outside Switch shows no cursor.
-    let (top_no_switch, _) = root_row(10, 20, true, false, false);
+    let (top_no_switch, _) = root_row(10, 20, false, true, false, false);
     assert!(!top_no_switch.contains('>'));
 
     // The active root carries the green `▎` bar down both lines, not a `*`.
-    let (active_top, active_detail) = root_row(10, 20, false, true, false);
+    let (active_top, active_detail) = root_row(10, 20, false, false, true, false);
     assert!(active_top.contains('▎'));
     assert!(active_detail.contains('▎'));
     assert!(!active_top.contains('*'));
 
-    let (idle_top, idle_detail) = root_row(10, 20, false, false, false);
+    let (idle_top, idle_detail) = root_row(10, 20, false, false, false, false);
     assert!(!idle_top.contains('>'));
     assert!(!idle_top.contains('▎'));
     assert!(!idle_detail.contains('▎'));
     assert!(idle_top.contains(ROOT_NAME));
+}
+
+#[test]
+fn root_row_shows_the_memo_marker_only_when_it_has_a_note() {
+    // The root row carries its own note, like a session: the memo marker shows on
+    // line 1 only when `has_note`, and is purely additive (the right-edge status
+    // column does not shift), matching the worktree row.
+    let (with_note, _) = root_row(10, 20, true, false, false, false);
+    let (without_note, _) = root_row(10, 20, false, false, false, false);
+    assert!(with_note.contains(NOTE_ICON));
+    assert!(!without_note.contains(NOTE_ICON));
+    assert_eq!(
+        console::measure_text_width(&console::strip_ansi_codes(&with_note)),
+        console::measure_text_width(&console::strip_ansi_codes(&without_note)),
+    );
+}
+
+#[test]
+fn left_pane_marks_the_root_row_when_it_carries_a_note() {
+    let mut list = list_with(Vec::new());
+    list.set_root_note_marker(true);
+    let lines = left_pane(
+        &list,
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashSet::new(),
+        80,
+        6,
+        false,
+        Sidebar::Full,
+        Utc::now(),
+    );
+    // Line 0 is the root row; with the marker set it shows the memo glyph.
+    assert!(lines[0].contains(NOTE_ICON));
 }
 
 #[test]
@@ -640,7 +675,7 @@ fn left_pane_shows_each_sessions_relative_update_time_on_the_detail_line() {
     // on the session's detail line (index 4).
     let detail = console::strip_ansi_codes(&lines[4]);
     assert!(
-        detail.contains("5分前"),
+        detail.contains("5min ago"),
         "{detail:?} missing the relative time"
     );
 }

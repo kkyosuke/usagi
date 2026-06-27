@@ -147,6 +147,7 @@ pub fn run(
     state: &mut HomeState,
     pty: &mut PtySession,
     monitor: &MonitorHandle,
+    clear: bool,
 ) -> Result<PaneStep> {
     // Raw mode, bracketed paste, and motion reporting are entered here and
     // restored by the guard's `Drop` — including when `drive` panics and unwinds,
@@ -156,7 +157,14 @@ pub fn run(
     // render/input loop would leave the user's shell in raw mode with bracketed
     // paste and motion reporting still on.
     let _modes = PaneModeGuard::enter(term)?;
-    let _ = term.clear_screen();
+    // Blank the surface before driving so the previous pane's grid does not bleed
+    // through, but only when this is a fresh pane — the first entry or a real tab
+    // switch. A tab nav that lands on the pane already showing (a lone pane, or a
+    // jump to the current tab) re-enters here unchanged; clearing then would blank
+    // and fully repaint identical content, a visible one-frame flicker.
+    if clear {
+        let _ = term.clear_screen();
+    }
     drive(term, state, pty, monitor)
 }
 
@@ -544,8 +552,7 @@ fn pump_input(
                     // The key belongs to the shell. With text selected, `Ctrl-C`
                     // copies it (and clears the selection) the way terminals treat
                     // copy while a selection is active; otherwise it reaches the
-                    // shell as the usual interrupt. `Ctrl-O Ctrl-O` lands here too,
-                    // sending a literal `Ctrl-O`.
+                    // shell as the usual interrupt.
                     KeyAction::Forward => {
                         *pending_prefix = None;
                         if is_copy(&key) && selection.as_ref().is_some_and(|s| !s.is_empty()) {

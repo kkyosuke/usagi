@@ -16,7 +16,7 @@ use console::Term;
 
 use crate::domain::settings::{AgentCli, KeyScheme, SessionActionUi, Sidebar};
 use crate::presentation::tui::install_task;
-use crate::presentation::tui::io::screen::{FramePainter, Input, KeyReader};
+use crate::presentation::tui::io::screen::{ClickEvent, FramePainter, Input, KeyReader};
 
 use super::oneshot::OneShot;
 use super::sessions_refresh::SessionsRefreshHandle;
@@ -245,7 +245,7 @@ fn save_resume_focus(state: &mut HomeState, wiring: &mut Wiring) {
 /// Whether a left click should act on the 切替 session list: only at the base
 /// Switch list, with no overlay or inline input capturing keys. A click while a
 /// modal / palette / note editor / inline create / rename is open is ignored,
-/// mirroring how those overlays capture every key in the loop above — so a stray
+/// mirroring how those overlays capture every key in the loop below — so a stray
 /// click never reaches the session list beneath them.
 fn click_selects_session(state: &HomeState) -> bool {
     state.mode() == Mode::Switch
@@ -443,7 +443,7 @@ pub(super) fn event_loop(
             && last_update == latest_update;
         let (height, width) = term.size();
         if !skip_paint {
-            // Stamp the frame's render time so the left pane's "N分前" labels track
+            // Stamp the frame's render time so the left pane's "Nmin ago" labels track
             // real time. Only on a real paint — a skipped frame draws nothing, so
             // the label refreshes on the next change rather than ticking every
             // second (keeping the loop's repaint budget low).
@@ -455,23 +455,24 @@ pub(super) fn event_loop(
         last_blinking = state.mascot_blinking();
         force_paint = false;
 
-        // The TUI itself never scrolls, so a wheel turn is read and dropped here
-        // (it is swallowed by the reader before it can reach the host terminal's
-        // viewport and reveal the pre-launch scrollback). The embedded terminal
-        // pane has its own history scroll, handled separately.
+        // Read the next input event. A wheel turn is read and dropped (the TUI
+        // never scrolls in place; the embedded pane scrolls its own history
+        // separately), and a click only ever pokes the sidebar mascot — neither is
+        // a key, so both loop without dispatching one.
         //
         // While a background install or a session task is in flight — or any
-        // session is live — the read wakes every `ANIM_TICK` so the loop
-        // re-iterates: re-draining finished work, re-reading the monitor badges
-        // and update notice, and (when something changed) repainting — which also
-        // advances the task panel's and install rabbit's time-based animation.
-        // This is what keeps a live background agent's badge moving to waiting (◆)
-        // / finished (✓) without the user typing. With nothing in flight and no
-        // live session it blocks on the next key, so a truly idle screen costs
-        // nothing.
-        // Keep ticking through a mascot blink too, so its eyes reopen on their own
-        // a beat later without waiting for the next keypress.
-        let animate = panel_animating || state.has_live_sessions() || state.mascot_blinking();
+        // session is live, or the mascot is mid-animation — the read wakes every
+        // `ANIM_TICK` so the loop re-iterates: re-draining finished work, re-reading
+        // the monitor badges and update notice, and (when something changed)
+        // repainting — which also advances the task panel's, install rabbit's, and
+        // mascot's time-based animation. This is what keeps a live background
+        // agent's badge moving to waiting (◆) / finished (✓) — and a click reaction
+        // playing out — without the user typing. With nothing in flight and no live
+        // session it blocks on the next input, so a truly idle screen costs nothing.
+        let animate = panel_animating
+            || state.has_live_sessions()
+            || state.mascot_blinking()
+            || state.mascot_reacting();
         let input = if animate {
             match reader.read_input_timeout(install_task::ANIM_TICK) {
                 Ok(Some(input)) => input,
@@ -486,7 +487,7 @@ pub(super) fn event_loop(
                 // revealed the pre-launch scrollback whenever a signal landed
                 // mid-read (e.g. exiting an agent, then `Ctrl-O` while waiting).
                 Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-                Err(e) => return Err(anyhow::Error::from(e).context("Failed to read key")),
+                Err(e) => return Err(anyhow::Error::from(e).context("Failed to read input")),
             }
         } else {
             match reader.read_input() {
@@ -494,31 +495,33 @@ pub(super) fn event_loop(
                 // An interrupted read (a delivered signal) is not a quit: re-read.
                 // See the animate branch above for the full rationale.
                 Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-                Err(e) => return Err(anyhow::Error::from(e).context("Failed to read key")),
+                Err(e) => return Err(anyhow::Error::from(e).context("Failed to read input")),
             }
         };
         let key = match input {
             Input::Key(key) => key,
-            // The TUI itself never scrolls, so a wheel turn is read and dropped
-            // here (the reader already swallowed it before it could reach the host
-            // terminal's viewport and reveal the pre-launch scrollback). The
-            // embedded terminal pane has its own history scroll, handled separately.
+            // The TUI never scrolls in place: read the wheel turn and drop it.
             Input::Scroll(_) => continue,
-            // A left click on the 切替 session list selects the row it lands on;
-            // a second click on the same row confirms it (focus / attach), like
-            // `Enter`. Acts only at the base Switch list with no overlay capturing
-            // input; a click anywhere else (the right pane, the chrome, while a
-            // modal / palette / inline input is open) is ignored.
+            // A click on a 切替 session row selects it (a second click on the same
+            // row confirms it, like `Enter`); a click on the resting sidebar mascot
+            // makes it react; anywhere else it is ignored. The two hit disjoint
+            // regions, so the session list is tried first and the mascot only when
+            // it misses. No key was pressed either way, so repaint only when the
+            // click actually did something.
             Input::Click(click) => {
-                force_paint = true;
-                if click_selects_session(&state) {
-                    if let Some(row) = ui::left_pane_session_at(
-                        &state,
-                        click.col,
-                        click.row,
-                        height as usize,
-                        width as usize,
-                    ) {
+                let selected = click_selects_session(&state)
+                    .then(|| {
+                        ui::left_pane_session_at(
+                            &state,
+                            click.col,
+                            click.row,
+                            height as usize,
+                            width as usize,
+                        )
+                    })
+                    .flatten();
+                match selected {
+                    Some(row) => {
                         switch_click(
                             term,
                             &mut state,
@@ -528,6 +531,12 @@ pub(super) fn event_loop(
                             Instant::now(),
                             &mut last_click,
                         );
+                        force_paint = true;
+                    }
+                    None => {
+                        if handle_mascot_click(term, &mut state, click) {
+                            force_paint = true;
+                        }
                     }
                 }
                 continue;
@@ -765,6 +774,47 @@ fn selected_dir(state: &HomeState, workspace_root: &Path) -> PathBuf {
         .selected()
         .map(|w| w.path.clone())
         .unwrap_or_else(|| workspace_root.to_path_buf())
+}
+
+/// Whether a click is allowed to poke the sidebar mascot: only on the plain home
+/// view (切替 / 在席) with nothing floating over the panes. Anywhere an overlay
+/// sits — the quit-confirm / removal / text modals, the Markdown preview, the note
+/// editor, or the command palette — a click is meant for it (or for nothing), not
+/// the rabbit drawn beneath it.
+fn mascot_clickable(state: &HomeState) -> bool {
+    matches!(state.mode(), Mode::Switch | Mode::Focus)
+        && !state.quit_confirm()
+        && state.remove_modal().is_none()
+        && state.text_modal().is_none()
+        && state.preview().is_none()
+        && state.note_editor().is_none()
+        && !state.command_palette_open()
+}
+
+/// Handle a mouse click: when it lands on the resting sidebar mascot (and the
+/// screen is in a state where the rabbit is clickable), kick off a playful one-shot
+/// reaction and report `true` so the loop repaints. A click anywhere else — or
+/// while an overlay is up — is ignored (`false`), so nothing else on the TUI is
+/// click-driven. The mascot's screen rectangle is recomputed from the same layout
+/// the renderer used ([`ui::mascot_hit_rect`]), so the hit-test matches exactly
+/// where the rabbit was drawn.
+fn handle_mascot_click(term: &Term, state: &mut HomeState, click: ClickEvent) -> bool {
+    if !mascot_clickable(state) {
+        return false;
+    }
+    let (height, width) = term.size();
+    click_hits_mascot(height as usize, width as usize, state, click)
+        .then(|| state.kick_mascot_reaction(Instant::now()))
+        .is_some()
+}
+
+/// Whether `click` lands on the sidebar mascot's body for a terminal of the given
+/// size. Split from [`handle_mascot_click`] (which owns the mode/overlay gate and
+/// the side effect) so the geometry — including the "no mascot shown" case — is
+/// unit-testable at an explicit size rather than the live terminal's.
+fn click_hits_mascot(height: usize, width: usize, state: &HomeState, click: ClickEvent) -> bool {
+    ui::mascot_hit_rect(height, width, state)
+        .is_some_and(|rect| rect.contains(click.col, click.row))
 }
 
 /// Test-only adapter that keeps the event-loop tests' synchronous shape —

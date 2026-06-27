@@ -317,6 +317,13 @@ pub struct WorkspaceState {
     /// workspace tree. Empty (and omitted from older files) when none exist.
     #[serde(default)]
     pub sessions: Vec<SessionRecord>,
+    /// A free-form, multi-line note attached to the workspace **root** (the `⌂
+    /// root` row, which belongs to no session) — the same scratch space sessions
+    /// carry in [`SessionRecord::note`], but for the workspace itself. Display /
+    /// UX only. `None` (the default, and omitted from the file) means no root note
+    /// has been written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root_note: Option<String>,
     /// When the state was last refreshed from git.
     pub updated_at: DateTime<Utc>,
 }
@@ -325,8 +332,14 @@ impl WorkspaceState {
     pub fn new() -> Self {
         Self {
             sessions: Vec::new(),
+            root_note: None,
             updated_at: Utc::now(),
         }
+    }
+
+    /// The workspace root's note, or `None` when none has been written.
+    pub fn root_note(&self) -> Option<&str> {
+        self.root_note.as_deref()
     }
 }
 
@@ -340,6 +353,27 @@ impl Default for WorkspaceState {
 mod tests {
     use super::*;
     use chrono::TimeZone;
+
+    #[test]
+    fn root_note_round_trips_and_is_omitted_when_absent() {
+        // A default state has no root note; the accessor and the serialized form
+        // both reflect that — the field is omitted from the file entirely.
+        let mut state = WorkspaceState::new();
+        assert_eq!(state.root_note(), None);
+        let json = serde_json::to_string(&state).unwrap();
+        assert!(!json.contains("root_note"));
+        // An older file with no `root_note` key still loads (the field defaults).
+        let restored: WorkspaceState =
+            serde_json::from_str(r#"{"updated_at":"2026-06-13T05:01:18.659149Z"}"#).unwrap();
+        assert_eq!(restored.root_note(), None);
+
+        // A set root note round-trips through the file and the accessor.
+        state.root_note = Some("root memo".to_string());
+        let json = serde_json::to_string(&state).unwrap();
+        assert!(json.contains("root_note"));
+        let restored: WorkspaceState = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.root_note(), Some("root memo"));
+    }
 
     #[test]
     fn branch_status_as_str_and_display_match() {
