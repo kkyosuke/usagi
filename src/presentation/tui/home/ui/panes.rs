@@ -201,22 +201,58 @@ fn detail_line(gutter: &str, detail: String) -> String {
     format!("{gutter}{indent}{detail}")
 }
 
-/// Builds a live session's **third** line — the CPU / memory its process tree is
-/// using — indented under the name like the detail line, with the row's `gutter`
-/// (so the active accent bar runs down it too). Spelled out as `CPU 8%  MEM 120MB`
-/// in dim text and clipped to the cell. Only live sessions get this row (the
-/// caller passes a usage only when one was sampled), so an idle session stays two
-/// lines and the list spends the extra row only where there is something to show.
-/// The line-2 cluster ([`detail_content`]) stays as it is — this carries the
-/// growing resource detail rather than crowding the already-packed detail line.
+/// Display width the CPU figure is left-padded to inside the `<cpu icon> … <mem
+/// icon> …` label, so the memory column lands in the same place whether CPU reads
+/// `0%` or `100%` — the CPU digit count never shifts MEM. Holds up to `100%`; a
+/// rarer larger reading just nudges MEM right for that one line.
+const CPU_LABEL_WIDTH: usize = 4;
+
+/// Nerd Font glyphs labelling the CPU and memory figures on the resource line,
+/// in place of spelling out `CPU` / `MEM` — the same icon-led style the git
+/// status field uses. They need a patched [Nerd Font](https://www.nerdfonts.com/)
+/// to render; without one the terminal shows a fallback box, but the number
+/// beside each glyph still carries the meaning.
+const CPU_ICON: char = '\u{f2db}'; // nf-fa-microchip — processor use
+const MEM_ICON: char = '\u{f538}'; // nf-fa-memory — resident memory
+
+/// Rows every list entry (the root and each session) spans, fixed so the list
+/// never reflows as a session goes live or idle: an identity line, a detail
+/// line, and the CPU / memory line. Shared by the full sidebar, the collapsed
+/// rail, and the click hit-tests so the renderer and the hit-tests never
+/// disagree on where a session's rows are.
+pub(super) const SESSION_ROWS: usize = 3;
+
+/// The icon-led `<cpu> <pct>  <mem> <bytes>` resource label shared by a session's
+/// resource line and the workspace total beside the mascot. The CPU figure leads
+/// with [`CPU_ICON`] and the memory with [`MEM_ICON`] (in place of the words
+/// `CPU` / `MEM`), and the CPU field is left-padded to [`CPU_LABEL_WIDTH`] so the
+/// memory figure stays column-aligned both across rows and from frame to frame as
+/// the percentages change.
+pub(super) fn resource_inline_label(usage: ResourceUsage) -> String {
+    format!(
+        "{CPU_ICON} {cpu:<width$}  {MEM_ICON} {mem}",
+        cpu = usage.format_cpu(),
+        mem = usage.format_memory(),
+        width = CPU_LABEL_WIDTH,
+    )
+}
+
+/// Builds an entry's **third** line — the CPU / memory its process tree is using —
+/// indented under the name like the detail line, with the row's `gutter` (so the
+/// active accent bar runs down it too). Drawn icon-led ( `8%`  `120MB`,
+/// the CPU / memory glyphs in place of the words) in dim text and clipped to the
+/// cell. Every session draws this row at a fixed height, so an unsampled or idle
+/// session reads `0%` / `0MB` (the caller passes a default usage) rather than
+/// dropping the row and reflowing the list.
 fn resource_line(
     usage: ResourceUsage,
     detail_width: usize,
     active: bool,
     in_switch: bool,
 ) -> String {
-    let text = format!("CPU {}  MEM {}", usage.format_cpu(), usage.format_memory());
-    let detail = style(clip_to_width(&text, detail_width)).dim().to_string();
+    let detail = style(clip_to_width(&resource_inline_label(usage), detail_width))
+        .dim()
+        .to_string();
     detail_line(&gutter_cell(false, active, in_switch), detail)
 }
 
@@ -628,19 +664,22 @@ fn root_glyph() -> String {
     style("⌂").magenta().to_string()
 }
 
-/// Builds one collapsed-rail **entry** as the same two lines a full-sidebar entry
-/// spans, so toggling the sidebar never moves a session to a different row (no
-/// layout shift) — only the width changes. The glyphs form a 2×2 grid beside the
-/// gutter:
+/// Builds one collapsed-rail **entry** as the same [`SESSION_ROWS`] lines a
+/// full-sidebar entry spans, so toggling the sidebar never moves a session to a
+/// different row (no layout shift) — only the width changes. The glyphs form a
+/// 2×2 grid beside the gutter, and a third (blank) row matches the full sidebar's
+/// resource line — the narrow rail has no room for a CPU / memory figure, so it
+/// keeps the row's height without the number:
 ///
 /// ```text
 /// ▎ <kind> <git>     row 1: identity dot (⌂/●/○) + git-status glyph
 /// ▎       <agent>    row 2: agent-state glyph (▶/◆/☾/✓), under the git column
+/// ▎                  row 3: blank (the full sidebar's resource line has no rail twin)
 /// ```
 ///
 /// `git` is blank on the root (no git status); `agent` is blank when no agent is
-/// in use. The active `▎` bar runs down both rows; the 切替 `>` cursor stays a
-/// point on row 1, matching the full sidebar.
+/// in use. The active `▎` bar runs down all three rows; the 切替 `>` cursor stays
+/// a point on row 1, matching the full sidebar.
 fn rail_entry(
     selected: bool,
     active: bool,
@@ -648,7 +687,7 @@ fn rail_entry(
     kind: &str,
     git: Option<&str>,
     agent: Option<&str>,
-) -> (String, String) {
+) -> (String, String, String) {
     let gutter = gutter_cell(selected, active, in_switch);
     let bar = gutter_cell(false, active, in_switch);
     // Columns: gutter @0, kind @2, git/agent @4 — so the agent glyph sits under
@@ -658,7 +697,10 @@ fn rail_entry(
         RAIL_WIDTH,
     );
     let detail = pad_to_width(format!("{bar}   {}", agent.unwrap_or(" ")), RAIL_WIDTH);
-    (top, detail)
+    // The resource row's rail twin: the active bar runs down it, but the rail has
+    // no room for the CPU / memory figure, so the rest is blank.
+    let resource = pad_to_width(bar, RAIL_WIDTH);
+    (top, detail, resource)
 }
 
 /// Builds the collapsed-rail sidebar ([`Sidebar::Rail`]): the root entry first, a
@@ -680,7 +722,10 @@ fn rail_pane(
     in_switch: bool,
 ) -> Vec<String> {
     let root = root_glyph();
-    let (mut root_top, mut root_detail) = rail_entry(
+    // The root entry is two rows (then a divider), matching the full sidebar's
+    // [`root_row`]; only worktree entries carry the third resource row, so the
+    // root drops the rail entry's (blank) third line.
+    let (mut root_top, mut root_detail, _) = rail_entry(
         list.root_selected(),
         list.root_active(),
         in_switch,
@@ -715,7 +760,7 @@ fn rail_pane(
             done.contains(&w.path),
         )
         .rail_icon();
-        let (mut top, mut detail) = rail_entry(
+        let (mut top, mut detail, mut resource) = rail_entry(
             selected,
             active,
             in_switch,
@@ -726,9 +771,11 @@ fn rail_pane(
         if in_switch && !selected {
             top = dim_row(&top);
             detail = dim_row(&detail);
+            resource = dim_row(&resource);
         }
         lines.push(top);
         lines.push(detail);
+        lines.push(resource);
     }
     if list.is_empty() {
         // Mirror the full sidebar's single empty-message row so the row count
@@ -750,9 +797,11 @@ pub(super) fn dim_row(line: &str) -> String {
     style(console::strip_ansi_codes(line)).dim().to_string()
 }
 
-/// Builds the left pane: each entry spans two lines (an identity line and a
-/// detail line) — the root entry first, then one per worktree (or the empty
-/// message when none are recorded), trimmed to the available `rows`. `live` holds
+/// Builds the left pane: the root entry (two lines) first, then a divider, then
+/// one [`SESSION_ROWS`]-line entry per worktree — an identity line, a detail
+/// line, and a CPU / memory line (`CPU 0%  MEM 0MB` when unsampled, so the entry
+/// is a fixed height and the list never reflows) — or the empty message when none
+/// are recorded, trimmed to the available `rows`. `live` holds
 /// the worktree paths with an embedded session (a live-but-idle one shows
 /// `☾ ready`), `running` the ones working a turn (`▶ running`), `waiting` the
 /// ones whose agent awaits input (`◆ waiting`), and `done` the finished ones
@@ -790,8 +839,11 @@ pub(super) fn left_pane(
     // that will actually be drawn (the render loop below stops at the same bound),
     // so each field lands in the same column on every row and an off-screen session
     // never widens a visible column. Two header lines (root) + the divider precede
-    // the sessions, and each session spans two rows.
-    let visible_n = list.worktrees().len().min(rows.saturating_sub(2) / 2);
+    // the sessions, and each session spans [`SESSION_ROWS`] rows.
+    let visible_n = list
+        .worktrees()
+        .len()
+        .min(rows.saturating_sub(ROOT_ENTRY_LINES).div_ceil(SESSION_ROWS));
     let mut max_agent_w = 0;
     let cluster_data: Vec<_> = list
         .worktrees()
@@ -870,22 +922,21 @@ pub(super) fn left_pane(
                 waiting.contains(&w.path),
                 done.contains(&w.path),
             );
-            // A live session that has been sampled gets a third line spelling out
-            // its CPU / memory; idle sessions stay two lines, so the list spends the
-            // extra row only where there is something to show.
-            let mut resource = resources.get(&w.path).map(|usage| {
-                resource_line(*usage, detail_width, row == list.active_index(), in_switch)
-            });
+            // Every session draws a third CPU / memory line at a fixed height, so
+            // the list never reflows as a session goes live or idle. An unsampled
+            // session shows `CPU 0%  MEM 0MB` (a default usage) rather than dropping
+            // the row.
+            let usage = resources.get(&w.path).copied().unwrap_or_default();
+            let mut resource =
+                resource_line(usage, detail_width, row == list.active_index(), in_switch);
             if in_switch && !selected {
                 top = dim_row(&top);
                 detail = dim_row(&detail);
-                resource = resource.as_deref().map(dim_row);
+                resource = dim_row(&resource);
             }
             lines.push(top);
             lines.push(detail);
-            if let Some(resource) = resource {
-                lines.push(resource);
-            }
+            lines.push(resource);
         }
     }
     lines.truncate(rows);
@@ -1056,9 +1107,8 @@ pub(in crate::presentation::tui::home) fn attached_tab_at(
 /// begins at row [`BODY_TOP`] (below the title bar, mode ladder, and blank
 /// separator) and is [`super::body_rows_for`] rows tall; the left pane is the
 /// first `left_w` columns. Within it the entries stack as [`left_pane`] builds
-/// them — the root entry (two rows), a divider (one row), then two rows per
-/// worktree (a live session may add a third, which this mapping does not model —
-/// the same simplification [`super::left_pane_session_at`] makes).
+/// them — the root entry (two rows), a divider (one row), then [`SESSION_ROWS`]
+/// rows per worktree (identity, detail, and the CPU / memory line).
 pub(in crate::presentation::tui::home) fn sidebar_pr_links_at(
     state: &HomeState,
     raw_height: usize,
@@ -1082,11 +1132,11 @@ pub(in crate::presentation::tui::home) fn sidebar_pr_links_at(
         return Vec::new();
     }
     // Lines 0..2 are the root entry and the divider; worktree rows start at line 3,
-    // two lines each.
+    // [`SESSION_ROWS`] lines each.
     let Some(entry) = line.checked_sub(ROOT_ENTRY_LINES) else {
         return Vec::new();
     };
-    match state.list().worktrees().get(entry / 2) {
+    match state.list().worktrees().get(entry / SESSION_ROWS) {
         Some(wt) => wt.pr.iter().map(|pr| pr.url.clone()).collect(),
         None => Vec::new(),
     }
@@ -1098,8 +1148,8 @@ pub(in crate::presentation::tui::home) fn sidebar_pr_links_at(
 const BODY_TOP: u16 = 3;
 
 /// Lines the left pane spends before the first worktree row: the root entry (two
-/// rows) and the divider beneath it. Worktree `i` then occupies lines
-/// `ROOT_ENTRY_LINES + 2*i` and the one after it.
+/// rows) and the divider beneath it. Worktree `i` then occupies the
+/// [`SESSION_ROWS`] lines starting at `ROOT_ENTRY_LINES + SESSION_ROWS * i`.
 const ROOT_ENTRY_LINES: usize = 3;
 
 /// Column widths for the fixed-width header identity. The session name is clipped

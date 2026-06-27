@@ -779,14 +779,14 @@ fn left_pane_lines_the_detail_fields_up_across_sessions_of_different_sizes() {
         &HashSet::new(),
         &HashMap::new(),
         80,
-        8,
+        9,
         false,
         Sidebar::Full,
         now,
     );
-    // Detail lines: small at index 4, big at index 6.
+    // Detail lines: small at index 4, big at index 7 (each entry spans three rows).
     let small_detail = console::strip_ansi_codes(&lines[4]);
-    let big_detail = console::strip_ansi_codes(&lines[6]);
+    let big_detail = console::strip_ansi_codes(&lines[7]);
     assert!(small_detail.contains("☾ ready")); // the live agent's label
     assert!(small_detail.contains("+  5 - 3")); // counts padded to the wide columns
     assert!(big_detail.contains("+140 -88"));
@@ -817,17 +817,18 @@ fn left_pane_renders_the_root_entry_then_one_entry_per_worktree() {
         &HashSet::new(),
         &HashMap::new(),
         30,
-        7,
+        9,
         false,
         Sidebar::Full,
         Utc::now(),
     );
-    // Root (2 lines), a divider, then 2 lines per worktree.
-    assert_eq!(lines.len(), 7);
+    // Root (2 lines), a divider, then 3 lines per worktree (identity, detail,
+    // resource).
+    assert_eq!(lines.len(), 9);
     assert!(lines[0].contains(ROOT_NAME));
     assert!(lines[2].contains('─'));
     assert!(lines[3].contains("main"));
-    assert!(lines[5].contains("feature"));
+    assert!(lines[6].contains("feature"));
 }
 
 #[test]
@@ -967,7 +968,7 @@ fn left_pane_marks_the_agent_state_through_its_lifecycle() {
 }
 
 #[test]
-fn left_pane_adds_a_resource_line_only_for_a_sampled_live_session() {
+fn left_pane_always_draws_a_fixed_three_line_resource_row() {
     let list = list_with(vec![worktree(Some("feature"), false, BranchStatus::Local)]);
     let path: HashSet<PathBuf> = [PathBuf::from("/repo/wt")].into_iter().collect();
     let empty = HashSet::new();
@@ -996,9 +997,16 @@ fn left_pane_adds_a_resource_line_only_for_a_sampled_live_session() {
         Utc::now(),
     );
     assert!(with_usage[4].contains("running"));
-    assert!(console::strip_ansi_codes(&with_usage[5]).contains("CPU 12%  MEM 256MB"));
+    // The resource line is icon-led (the CPU / memory glyphs in place of the words),
+    // so it carries the figures but not the words `CPU` / `MEM`.
+    let resource = console::strip_ansi_codes(&with_usage[5]);
+    assert!(resource.contains("12%"));
+    assert!(resource.contains("256MB"));
+    assert!(!resource.contains("CPU"));
+    assert!(!resource.contains("MEM"));
 
-    // With no sample the session stays two lines — there is no resource row.
+    // With no sample the session keeps its fixed three lines — the resource row is
+    // still drawn, reading `0%` / `0MB` rather than dropping the row.
     let without = left_pane(
         &list,
         &path,
@@ -1013,7 +1021,9 @@ fn left_pane_adds_a_resource_line_only_for_a_sampled_live_session() {
         Utc::now(),
     );
     assert!(without[4].contains("running"));
-    assert!(without.get(5).is_none_or(|l| !l.contains("CPU")));
+    let idle_resource = console::strip_ansi_codes(&without[5]);
+    assert!(idle_resource.contains("0%"));
+    assert!(idle_resource.contains("0MB"));
 
     // In 切替 the unselected rows (the cursor rests on the root) are dimmed — the
     // resource line is faded along with the rest of its entry, but its text stays.
@@ -1030,7 +1040,7 @@ fn left_pane_adds_a_resource_line_only_for_a_sampled_live_session() {
         Sidebar::Full,
         Utc::now(),
     );
-    assert!(console::strip_ansi_codes(&in_switch[5]).contains("CPU 12%  MEM 256MB"));
+    assert!(console::strip_ansi_codes(&in_switch[5]).contains("12%"));
 }
 
 #[test]
@@ -1075,21 +1085,22 @@ fn left_pane_marks_the_active_worktree_with_a_gutter_bar() {
         &HashSet::new(),
         &HashMap::new(),
         30,
-        7,
+        9,
         false,
         Sidebar::Full,
         Utc::now(),
     );
     // The root is not active; the active "feature" row carries the green `▎`
-    // accent bar down both of its lines (identity + detail).
+    // accent bar down all three of its lines (identity + detail + resource).
     assert!(!lines[0].contains('▎'));
-    assert!(lines[5].contains("feature"));
-    assert!(lines[5].contains('▎'));
+    assert!(lines[6].contains("feature"));
     assert!(lines[6].contains('▎'));
+    assert!(lines[7].contains('▎'));
+    assert!(lines[8].contains('▎'));
 }
 
 #[test]
-fn rail_collapses_each_entry_to_two_rows_without_names_or_numbers() {
+fn rail_collapses_each_entry_to_three_rows_without_names_or_numbers() {
     let list = list_with(vec![
         worktree(Some("main"), true, BranchStatus::Pushed),
         worktree(Some("feature"), false, BranchStatus::Local),
@@ -1103,14 +1114,14 @@ fn rail_collapses_each_entry_to_two_rows_without_names_or_numbers() {
         &empty,
         &HashMap::new(),
         RAIL_WIDTH,
-        8,
+        9,
         false,
         Sidebar::Rail,
         Utc::now(),
     );
-    // Root (2 rows), a divider, then 2 rows per worktree — the same shape as the
+    // Root (2 rows), a divider, then 3 rows per worktree — the same shape as the
     // full sidebar, so toggling never shifts an entry to a different row.
-    assert_eq!(lines.len(), 7);
+    assert_eq!(lines.len(), 9);
     let plain: Vec<String> = lines
         .iter()
         .map(|l| console::strip_ansi_codes(l).into_owned())
@@ -1124,8 +1135,8 @@ fn rail_collapses_each_entry_to_two_rows_without_names_or_numbers() {
     assert!(plain[2].contains('─'));
     assert!(plain[3].contains('●')); // fresh heat dot (main, just touched)
     assert!(plain[3].contains(PUSHED_ICON)); // main's git status
-    assert!(plain[5].contains('●')); // fresh heat dot (feature, just touched)
-    assert!(plain[5].contains(LOCAL_ICON)); // feature's git status
+    assert!(plain[6].contains('●')); // fresh heat dot (feature, just touched)
+    assert!(plain[6].contains(LOCAL_ICON)); // feature's git status
                                             // A space separates the gutter from the glyph, and every row fills the rail.
     assert!(plain[3].starts_with("  ●") || plain[3].starts_with(" ●"));
     assert!(lines
@@ -1182,7 +1193,7 @@ fn rail_keeps_the_same_row_count_as_the_full_sidebar() {
 }
 
 #[test]
-fn rail_shows_the_active_bar_down_both_rows_and_the_agent_glyph_on_row_two() {
+fn rail_shows_the_active_bar_down_all_rows_and_the_agent_glyph_on_row_two() {
     let mut list = list_with(vec![
         worktree(Some("main"), true, BranchStatus::Pushed),
         worktree(Some("feature"), false, BranchStatus::Local),
@@ -1190,8 +1201,9 @@ fn rail_shows_the_active_bar_down_both_rows_and_the_agent_glyph_on_row_two() {
     list.activate_by_name("feature");
     let path: HashSet<PathBuf> = [PathBuf::from("/repo/wt")].into_iter().collect();
     let empty = HashSet::new();
-    // "feature" is active and running: the green `▎` bar runs down both of its
-    // rows, the kind dot is on row 1, and the running glyph on row 2.
+    // "feature" is active and running: the green `▎` bar runs down all three of its
+    // rows, the kind dot is on row 1, the running glyph on row 2, and the (blank)
+    // resource row keeps the bar on row 3.
     let lines = left_pane(
         &list,
         &path,
@@ -1200,18 +1212,22 @@ fn rail_shows_the_active_bar_down_both_rows_and_the_agent_glyph_on_row_two() {
         &empty,
         &HashMap::new(),
         RAIL_WIDTH,
-        8,
+        9,
         false,
         Sidebar::Rail,
         Utc::now(),
     );
-    let top = console::strip_ansi_codes(&lines[5]).into_owned();
-    let detail = console::strip_ansi_codes(&lines[6]).into_owned();
+    // "feature" is the second worktree: root (2) + divider (1) + main (3) puts its
+    // rows at indices 6,7,8.
+    let top = console::strip_ansi_codes(&lines[6]).into_owned();
+    let detail = console::strip_ansi_codes(&lines[7]).into_owned();
+    let resource = console::strip_ansi_codes(&lines[8]).into_owned();
     assert!(top.contains('▎'));
     assert!(top.contains('●')); // fresh heat dot on row 1
     assert!(detail.contains('▎'));
     assert!(detail.contains('▶')); // agent state on row 2
-                                   // The root row (not active) carries no bar.
+    assert!(resource.contains('▎')); // the bar reaches the (blank) resource row
+                                     // The root row (not active) carries no bar.
     assert!(!console::strip_ansi_codes(&lines[0]).contains('▎'));
 }
 
@@ -1305,15 +1321,15 @@ fn left_pane_fades_every_row_but_the_cursor_when_asked() {
         &HashSet::new(),
         &HashMap::new(),
         30,
-        6,
+        9,
         true,
         Sidebar::Full,
         Utc::now(),
     );
-    assert_eq!(dimmed.len(), 6);
+    assert_eq!(dimmed.len(), 9);
     assert!(console::strip_ansi_codes(&dimmed[0]).contains(ROOT_NAME));
     assert!(console::strip_ansi_codes(&dimmed[3]).contains("main"));
-    assert!(console::strip_ansi_codes(&dimmed[5]).contains("feature"));
+    assert!(console::strip_ansi_codes(&dimmed[6]).contains("feature"));
 }
 
 #[test]
@@ -1349,7 +1365,7 @@ fn left_pane_shows_the_pr_badge_for_a_session_that_has_one() {
 /// carries two PRs followed by one with no PR — the fixture the
 /// `sidebar_pr_links_at` click tests share. Worktree rows start at screen row 6
 /// (the body begins at row 3; the root entry and divider take its first 3 lines),
-/// two screen rows each: the PR session at rows 6–7, the PR-less one at rows 8–9.
+/// three screen rows each: the PR session at rows 6–8, the PR-less one at rows 9–11.
 fn attached_with_pr_sidebar() -> HomeState {
     let mut wt = worktree_with_pr(412);
     wt.pr.push(PrLink {
@@ -1380,13 +1396,13 @@ fn sidebar_pr_links_at_opens_every_pr_of_the_clicked_session() {
 #[test]
 fn sidebar_pr_links_at_ignores_rows_without_a_pr() {
     let state = attached_with_pr_sidebar();
-    // The second session (rows 8–9) has no PR.
-    assert!(sidebar_pr_links_at(&state, 24, 120, 2, 8).is_empty());
+    // The second session (rows 9–11) has no PR.
+    assert!(sidebar_pr_links_at(&state, 24, 120, 2, 9).is_empty());
     // The root entry (rows 3–4) and the divider (row 5) are not session rows.
     assert!(sidebar_pr_links_at(&state, 24, 120, 2, 3).is_empty());
     assert!(sidebar_pr_links_at(&state, 24, 120, 2, 5).is_empty());
     // A body row past the end of the session list maps to no worktree.
-    assert!(sidebar_pr_links_at(&state, 24, 120, 2, 10).is_empty());
+    assert!(sidebar_pr_links_at(&state, 24, 120, 2, 12).is_empty());
 }
 
 #[test]
@@ -1420,8 +1436,8 @@ fn log_line_colours_each_kind_and_prompts_commands() {
 #[test]
 fn left_pane_session_at_maps_each_row_pair_to_its_session() {
     // Two sessions on a 24×120 screen: left pane is 40 columns, body starts at
-    // screen row 3 (after the title / ladder / blank chrome). Each entry spans two
-    // rows — the root pair (rows 3,4), a divider (row 5), then a pair per worktree.
+    // screen row 3 (after the title / ladder / blank chrome). The root pair spans
+    // rows 3,4, a divider on row 5, then each worktree spans three rows.
     let state = state_with(vec![
         worktree(Some("main"), true, BranchStatus::Local),
         worktree(Some("feature"), false, BranchStatus::Local),
@@ -1432,11 +1448,12 @@ fn left_pane_session_at_maps_each_row_pair_to_its_session() {
     assert_eq!(at(10, 4), Some(0));
     // The divider between the root and the sessions selects nothing.
     assert_eq!(at(0, 5), None);
-    // Worktree 0 spans rows 6,7 (index 1); worktree 1 spans rows 8,9 (index 2).
+    // Worktree 0 spans rows 6,7,8 (index 1); worktree 1 spans rows 9,10,11 (index 2).
     assert_eq!(at(0, 6), Some(1));
     assert_eq!(at(39, 7), Some(1));
-    assert_eq!(at(0, 8), Some(2));
+    assert_eq!(at(0, 8), Some(1));
     assert_eq!(at(0, 9), Some(2));
+    assert_eq!(at(0, 11), Some(2));
 }
 
 #[test]
@@ -1449,8 +1466,8 @@ fn left_pane_session_at_ignores_clicks_off_the_session_rows() {
     // The chrome above the body (title / ladder / blank) selects nothing.
     assert_eq!(at(0, 0), None);
     assert_eq!(at(0, 2), None);
-    // Below the only session (rows 6,7) the rows are mascot / blank filler.
-    assert_eq!(at(0, 8), None);
+    // Below the only session (rows 6,7,8) the rows are mascot / blank filler.
+    assert_eq!(at(0, 9), None);
     // Far below the body (past its 19 rows) selects nothing either.
     assert_eq!(at(0, 23), None);
 }

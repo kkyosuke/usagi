@@ -96,9 +96,10 @@ const LEFT_MAX: usize = 40;
 /// the active bar plus a 2×2 glyph grid — kind + git status on row 1, agent state
 /// on row 2 (under the git status). Narrow enough to hand most of the width to the
 /// right pane while still showing which session is active, its git state, and what
-/// its agent is doing. Each entry spans **two rows**, exactly like the full
-/// sidebar, so toggling the sidebar never shifts a session to a different row —
-/// only the width changes.
+/// its agent is doing. Each worktree entry spans the same
+/// [`SESSION_ROWS`](panes::SESSION_ROWS) rows as the full sidebar (its third row
+/// blank — the rail has no room for a CPU / memory figure), so toggling the
+/// sidebar never shifts a session to a different row — only the width changes.
 const RAIL_WIDTH: usize = 5;
 
 /// Shown in the right pane between attaching the terminal and its first screen
@@ -240,12 +241,13 @@ pub fn terminal_geometry(
 /// row (`⌂ root`); row `i` maps to `worktrees[i - 1]`, matching
 /// [`WorktreeList::focus_index`](crate::presentation::tui::home::state::WorktreeList).
 ///
-/// Mirrors what [`left_pane`](panes::left_pane) (and its rail variant) draw: each
-/// entry spans two rows, the root pair first, then a one-row divider, then one
-/// pair per worktree — so a click maps back to its session without the renderer
-/// and the hit test ever disagreeing on the layout. Returns `None` for a click in
-/// the right pane (past `left_w`), in the chrome above or below the body, on the
-/// divider, or below the last session (the mascot / blank rows).
+/// Mirrors what [`left_pane`](panes::left_pane) (and its rail variant) draw: the
+/// root pair first (two rows), then a one-row divider, then
+/// [`SESSION_ROWS`](panes::SESSION_ROWS) rows per worktree (identity, detail, and
+/// the CPU / memory line) — so a click maps back to its session without the
+/// renderer and the hit test ever disagreeing on the layout. Returns `None` for a
+/// click in the right pane (past `left_w`), in the chrome above or below the body,
+/// on the divider, or below the last session (the mascot / blank rows).
 pub(super) fn left_pane_session_at(
     state: &HomeState,
     col: u16,
@@ -270,9 +272,9 @@ pub(super) fn left_pane_session_at(
         0 | 1 => 0,
         // The divider between the root and the sessions.
         2 => return None,
-        // Each worktree spans two rows after the divider: lines 3,4 → worktree 0,
-        // lines 5,6 → worktree 1, and so on.
-        l => (l - 3) / 2 + 1,
+        // Each worktree spans `SESSION_ROWS` rows after the divider: lines 3,4,5 →
+        // worktree 0, lines 6,7,8 → worktree 1, and so on.
+        l => (l - 3) / panes::SESSION_ROWS + 1,
     };
     // Past the last session (the mascot or blank filler rows) selects nothing.
     (index < state.list().session_count()).then_some(index)
@@ -332,19 +334,15 @@ fn rabbit_mood(mode: Mode) -> widgets::RabbitMood {
 }
 
 /// The workspace-total resource line shown beside the resting mascot's face —
-/// `CPU 23%  MEM 512MB` — dimmed, or `None` when nothing is live (idle), so the
-/// rabbit rests without a number. The labels (`CPU` / `MEM`) are spelled out here,
-/// unlike the cramped per-session rows, because the mascot sits below the list
-/// where there is room.
+/// the icon-led ` 23%   512MB` — dimmed, or `None` when nothing is live (idle),
+/// so the rabbit rests without a number. It reuses the same icon-led
+/// [`resource_inline_label`](panes::resource_inline_label) the per-session rows
+/// draw, so the mascot total and the list read alike.
 fn workspace_total_label(total: ResourceUsage) -> Option<String> {
     (!total.is_idle()).then(|| {
-        console::style(format!(
-            "CPU {}  MEM {}",
-            total.format_cpu(),
-            total.format_memory()
-        ))
-        .dim()
-        .to_string()
+        console::style(panes::resource_inline_label(total))
+            .dim()
+            .to_string()
     })
 }
 

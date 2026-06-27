@@ -126,7 +126,7 @@ fn render_frame_surfaces_running_and_waiting_agent_icons() {
 }
 
 #[test]
-fn workspace_total_label_spells_out_cpu_and_memory_or_is_absent_when_idle() {
+fn workspace_total_label_shows_cpu_and_memory_figures_or_is_absent_when_idle() {
     // Nothing live → no label, so the resting mascot carries no number.
     assert_eq!(workspace_total_label(ResourceUsage::default()), None);
     let label = workspace_total_label(ResourceUsage {
@@ -134,7 +134,17 @@ fn workspace_total_label_spells_out_cpu_and_memory_or_is_absent_when_idle() {
         memory_bytes: 512 * 1024 * 1024,
     })
     .unwrap();
-    assert_eq!(console::strip_ansi_codes(&label), "CPU 23%  MEM 512MB");
+    let plain = console::strip_ansi_codes(&label);
+    // The figures show, led by the CPU / memory icons (the words `CPU` / `MEM` are
+    // gone). The CPU figure is left-padded to a fixed width, so MEM lands in the
+    // same column whatever the percentage's digit count.
+    assert!(plain.contains("23%"), "{plain:?} missing the CPU figure");
+    assert!(
+        plain.contains("512MB"),
+        "{plain:?} missing the memory figure"
+    );
+    assert!(!plain.contains("CPU"));
+    assert!(!plain.contains("MEM"));
 }
 
 #[test]
@@ -153,26 +163,28 @@ fn append_total_beside_mascot_writes_on_the_face_row_when_it_fits() {
     };
     let mut rabbit = rabbit_rows();
     append_total_beside_mascot(&mut rabbit, total, 40);
-    assert!(console::strip_ansi_codes(&rabbit[1]).contains("CPU 23%  MEM 512MB"));
+    let face = console::strip_ansi_codes(&rabbit[1]);
+    assert!(face.contains("23%"), "{face:?} missing the CPU figure");
+    assert!(face.contains("512MB"), "{face:?} missing the memory figure");
     // Only the face row gains it; the ears and feet are untouched.
-    assert!(!rabbit[0].contains("CPU"));
-    assert!(!rabbit[2].contains("CPU"));
+    assert!(!rabbit[0].contains("512MB"));
+    assert!(!rabbit[2].contains("512MB"));
 
     // Too narrow for the art plus the label → the row is left alone (never
     // overrunning the sidebar and pushing the right pane out of line).
     let mut narrow = rabbit_rows();
     append_total_beside_mascot(&mut narrow, total, 8);
-    assert!(!narrow[1].contains("CPU"));
+    assert!(!narrow[1].contains("512MB"));
 
     // Idle total → nothing is appended at all.
     let mut idle = rabbit_rows();
     append_total_beside_mascot(&mut idle, ResourceUsage::default(), 40);
-    assert!(!idle[1].contains("CPU"));
+    assert!(!idle[1].contains("512MB"));
 
     // A two-row chibi has no distinct face row → it is left untouched.
     let mut chibi = vec![" ∩∩".to_string(), "(･･)".to_string()];
     append_total_beside_mascot(&mut chibi, total, 40);
-    assert!(!chibi.iter().any(|r| r.contains("CPU")));
+    assert!(!chibi.iter().any(|r| r.contains("512MB")));
 }
 
 #[test]
@@ -189,10 +201,11 @@ fn render_frame_rests_the_workspace_total_beside_the_mascot() {
         },
         ..Default::default()
     });
-    // A wide terminal gives the sidebar room for the art plus the spelled-out
-    // total beside it (a narrow one omits it — see the fit guard's own test).
+    // A wide terminal gives the sidebar room for the art plus the icon-led total
+    // beside it (a narrow one omits it — see the fit guard's own test).
     let joined = console::strip_ansi_codes(&render_frame(24, 120, &state).join("\n")).into_owned();
-    assert!(joined.contains("CPU 23%  MEM 512MB"));
+    assert!(joined.contains("23%"));
+    assert!(joined.contains("512MB"));
 }
 
 #[test]

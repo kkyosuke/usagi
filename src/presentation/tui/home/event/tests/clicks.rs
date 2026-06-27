@@ -3,8 +3,8 @@
 //! the list — or while an overlay is open — are ignored.
 //!
 //! The left pane lays the root pair on body rows 3,4, a divider on row 5, then a
-//! two-row pair per worktree (main on rows 6,7, feat on rows 8,9). The fixtures
-//! click column 0 so the hit lands in the left pane at any terminal width.
+//! three-row entry per worktree (main on rows 6,7,8, feat on rows 9,10,11). The
+//! fixtures click column 0 so the hit lands in the left pane at any terminal width.
 
 use super::*;
 
@@ -14,9 +14,9 @@ fn click(col: u16, row: u16) -> io::Result<Input> {
 }
 
 /// Screen row of the first line of the second worktree (`feat`, selectable index
-/// 2): body rows start at 3, root spans 3,4, the divider is 5, `main` 6,7, `feat`
-/// 8,9.
-const FEAT_ROW: u16 = 8;
+/// 2): body rows start at 3, root spans 3,4, the divider is 5, `main` 6,7,8,
+/// `feat` 9,10,11.
+const FEAT_ROW: u16 = 9;
 
 #[test]
 fn a_double_click_on_a_session_row_focuses_and_attaches_it() {
