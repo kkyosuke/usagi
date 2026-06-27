@@ -32,7 +32,6 @@ const MEMORY_DIR_NAME: &str = "memory";
 /// this constant.
 pub(crate) const INDEX_FILE: &str = "index.json";
 const TOC_FILE: &str = "MEMORY.md";
-const FILE_FORMAT_VERSION: u32 = 1;
 
 /// On-disk shape of `index.json`, read back as owned data. The `version` key is
 /// written (see [`IndexFileRef`]) but ignored on read, so it is not modelled
@@ -299,7 +298,7 @@ impl MemoryStore {
             .context(format!("failed to create {}", self.dir.display()))?;
 
         let index = IndexFileRef {
-            version: FILE_FORMAT_VERSION,
+            version: json_file::FILE_FORMAT_VERSION,
             memories: &summaries,
         };
         // The canonical "pretty JSON + trailing newline, written atomically" path
