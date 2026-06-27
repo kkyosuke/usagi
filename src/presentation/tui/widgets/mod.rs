@@ -140,8 +140,16 @@ pub fn normalize_size(height: usize, width: usize) -> (usize, usize) {
 }
 
 /// Centres a single line of `text` by left-padding it with spaces.
+///
+/// The width is measured in **display columns** ([`console::measure_text_width`]),
+/// not `char` count, so CJK and other wide glyphs (the app's own Japanese titles
+/// and footers) centre on their true rendered width instead of drifting left. The
+/// text is first clipped to `width` so a label wider than the terminal (a long
+/// footer on an 80-column screen) is truncated with an ellipsis rather than
+/// overrunning the row and corrupting the frame.
 fn centered(width: usize, text: &str) -> String {
-    let padding = " ".repeat(centered_padding(width, text.chars().count()));
+    let text = clip_to_width_cow(text, width);
+    let padding = " ".repeat(centered_padding(width, console::measure_text_width(&text)));
     format!("{padding}{text}")
 }
 
@@ -651,6 +659,12 @@ pub fn render_modal(
     while lines.len() < height {
         lines.push(String::new());
     }
+    // Clamp to the terminal height: when the box is taller than a very short
+    // terminal `top_padding` collapses to 0 and the box rows alone exceed
+    // `height`, so trim the overflow rather than letting the diff painter address
+    // rows past the bottom (which the terminal clamps onto the last line, garbling
+    // it). The box loses its lower rows on a cramped screen, but never overruns.
+    lines.truncate(height);
     lines
 }
 
@@ -804,6 +818,45 @@ mod tests {
     #[test]
     fn title_line_contains_the_title() {
         assert!(title_line(80, "USAGI").contains("USAGI"));
+    }
+
+    #[test]
+    fn centered_clips_a_line_wider_than_the_terminal() {
+        // A footer/title longer than the terminal must be truncated (with an
+        // ellipsis), never overrun the row — the diff painter would otherwise
+        // wrap or corrupt the line. Measured by display width, ANSI stripped.
+        let long = "a / b / c / d / e / f / g / h / i / j / k / l / m / n / o / p";
+        let line = dim_line(20, long);
+        assert!(console::measure_text_width(&line) <= 20);
+        assert!(line.contains('…'));
+    }
+
+    #[test]
+    fn centered_centres_cjk_by_display_width_not_char_count() {
+        // Each CJK char is two display columns, so a 4-char title is 8 columns
+        // wide and its left padding is (20 - 8) / 2 = 6 — not (20 - 4) / 2 = 8,
+        // which a char-count centring would (mis)compute.
+        let line = title_line(20, "セッション一覧"); // 7 wide chars = 14 cols
+        let lead = line.chars().take_while(|c| *c == ' ').count();
+        assert_eq!(lead, centered_padding(20, 14));
+    }
+
+    #[test]
+    fn render_modal_clamps_to_a_short_terminal_height() {
+        // A box taller than a very short terminal must not return more rows than
+        // the screen has, or the painter addresses lines past the bottom.
+        let frame = render_modal(
+            3,
+            40,
+            "Confirm",
+            30,
+            &[
+                "line a".to_string(),
+                "line b".to_string(),
+                "line c".to_string(),
+            ],
+        );
+        assert_eq!(frame.len(), 3);
     }
 
     #[test]
