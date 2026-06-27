@@ -271,6 +271,12 @@ pub struct TerminalPool {
 /// the geometry is unchanged and the `from_screen` rebuild when the output is.
 struct PreviewCache {
     dir: PathBuf,
+    /// The session's active pane index the cached view was snapshotted from. A
+    /// session has one generation counter *per pane* (each starts at 0), so two
+    /// quiet panes can share a generation value; without this, switching the
+    /// active tab while `dir` and `geo` are unchanged could return the previously
+    /// active pane's view for the now-active tab.
+    active: usize,
     geo: ui::TerminalGeometry,
     generation: u64,
     view: TerminalView,
@@ -663,7 +669,11 @@ impl TerminalPool {
         // parser lock at all. The 没入 `drive` loop differs the same way; this
         // brings the read-only preview in line with it.
         if let Some(cache) = &self.preview_cache {
-            if cache.dir == dir && cache.geo == geo && cache.generation == generation {
+            if cache.dir == dir
+                && cache.active == active
+                && cache.geo == geo
+                && cache.generation == generation
+            {
                 return Some(cache.view.clone());
             }
         }
@@ -684,6 +694,7 @@ impl TerminalPool {
         let view = TerminalView::from_screen(session.parser().screen());
         self.preview_cache = Some(PreviewCache {
             dir: dir.to_path_buf(),
+            active,
             geo,
             generation,
             view: view.clone(),
