@@ -27,15 +27,21 @@ fn init_repo(dir: &Path) {
 /// Built without `git clone` so the result does not depend on the host's
 /// `init.defaultBranch` (which differs between developer machines and CI):
 /// the work repo is created explicitly on `main`, then pushed with `-u` to
-/// a bare remote to establish the upstream and `origin/main` ref.
+/// a bare remote (itself created on `main`) to establish the upstream and
+/// `origin/main` ref. The bare repo needs `-b main` too: [`push_new_commit`]
+/// clones it, and a clone checks out whatever branch the bare's HEAD names —
+/// which without `-b main` follows the host's `init.defaultBranch` (`master`
+/// on CI), leaving no local `main` to push back.
 fn repo_with_remote() -> (tempfile::TempDir, std::path::PathBuf) {
     let tmp = tempfile::tempdir().unwrap();
     let bare = tmp.path().join("remote.git");
     let work = tmp.path().join("work");
 
+    // `-b main` pins the bare repo's HEAD to `main` so clones of it (see
+    // [`push_new_commit`]) check out `main` regardless of `init.defaultBranch`.
     run(
         tmp.path(),
-        &["init", "-q", "--bare", bare.to_str().unwrap()],
+        &["init", "-q", "--bare", "-b", "main", bare.to_str().unwrap()],
     );
 
     std::fs::create_dir_all(&work).unwrap();
