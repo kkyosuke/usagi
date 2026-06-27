@@ -215,7 +215,7 @@ fn execute(repo: &Path, command: IssueCommand) -> Result<Vec<String>> {
         IssueCommand::Graph => {
             let items = issue::list(repo, &IssueFilter::default())?;
             if items.is_empty() {
-                return Ok(vec!["No issues found.".to_string()]);
+                return Ok(vec![NO_ISSUES_FOUND.to_string()]);
             }
             let mut lines = dependency_tree(&items);
             lines.push(String::new());
@@ -309,7 +309,7 @@ fn optional_change<T>(value: Option<T>, clear: bool) -> Option<Option<T>> {
 
 mod render;
 use super::render::json_lines;
-use render::{render_grouped, render_listing};
+use render::{render_grouped, render_listing, NO_ISSUES_FOUND};
 
 #[cfg(test)]
 mod tests;

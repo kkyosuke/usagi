@@ -184,11 +184,14 @@ pub fn get(repo_root: &Path, number: u32) -> Result<Option<Issue>> {
 /// which operate on usagi's own issue store.
 pub fn to_prompt(issue: &Issue) -> String {
     use std::fmt::Write as _;
+    // Placeholder for an empty metadata field, shared by every field below so the
+    // prompt reads consistently and the wording lives in one place.
+    const NONE_LABEL: &str = "なし";
     let number = issue.number;
     let title = &issue.title;
     let numbers = |xs: &[u32]| -> String {
         if xs.is_empty() {
-            return "なし".to_string();
+            return NONE_LABEL.to_string();
         }
         let mut out = String::new();
         for (i, n) in xs.iter().enumerate() {
@@ -200,15 +203,17 @@ pub fn to_prompt(issue: &Issue) -> String {
         out
     };
     let labels = if issue.labels.is_empty() {
-        "なし".to_string()
+        NONE_LABEL.to_string()
     } else {
         issue.labels.join(", ")
     };
-    let parent = issue.parent.map_or("なし".to_string(), |p| p.to_string());
+    let parent = issue
+        .parent
+        .map_or(NONE_LABEL.to_string(), |p| p.to_string());
     let milestone = issue
         .milestone
         .clone()
-        .unwrap_or_else(|| "なし".to_string());
+        .unwrap_or_else(|| NONE_LABEL.to_string());
     let body = if issue.body.trim().is_empty() {
         "（本文なし）"
     } else {
