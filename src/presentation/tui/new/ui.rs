@@ -8,19 +8,12 @@ use super::state::{Field, FormState, Mode};
 const TITLE: &str = "New Project";
 const SUBTITLE: &str = "Clone a repository or register an existing directory";
 
-/// Fixed width of the form block; the whole block is centred in the terminal.
-const BLOCK_WIDTH: usize = 52;
-
 /// Builds the centred mascot, title, and subtitle block.
 ///
 /// Vertical placement is handled by [`render_frame`], so this adds no leading
 /// padding.
 fn header_lines(width: usize) -> Vec<String> {
-    let mut lines = widgets::rabbit_lines(width);
-    lines.push(String::new());
-    lines.push(widgets::title_line(width, TITLE));
-    lines.push(widgets::dim_line(width, SUBTITLE));
-    lines
+    widgets::header_lines(width, TITLE, Some(SUBTITLE))
 }
 
 /// Builds one input row: a `>` cursor for the focused field, the value (or a
@@ -33,11 +26,7 @@ fn input_line(
     placeholder: &str,
     focused: bool,
 ) -> String {
-    let marker = if focused {
-        style(">").red().bold().to_string()
-    } else {
-        " ".to_string()
-    };
+    let marker = widgets::cursor_marker(focused);
 
     let body = if value.is_empty() {
         if focused {
@@ -67,11 +56,7 @@ fn mode_lines(block_pad: &str, mode: Mode, focused: bool) -> Vec<String> {
             format!(" {} ", style(label).dim())
         }
     };
-    let marker = if focused {
-        style(">").red().bold().to_string()
-    } else {
-        " ".to_string()
-    };
+    let marker = widgets::cursor_marker(focused);
     let tabs = format!(
         "{}  {}",
         tab("Clone", mode == Mode::Clone),
@@ -214,7 +199,7 @@ pub fn render_frame(
     notice: Option<&str>,
 ) -> Vec<String> {
     let (height, width) = widgets::normalize_size(raw_height, raw_width);
-    let block_pad = " ".repeat(widgets::centered_padding(width, BLOCK_WIDTH));
+    let block_pad = " ".repeat(widgets::centered_padding(width, widgets::BLOCK_WIDTH));
 
     // The body (mascot, title, mode selector, form fields and notice slot) is
     // centred vertically; the footer is pinned to the bottom edge of the frame.
