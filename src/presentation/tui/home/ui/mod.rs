@@ -366,16 +366,25 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
     // With a list (or an inline create / rename input) long enough to reach those
     // rows, or a sidebar collapsed to the narrow rail / too narrow to hold the
     // art, it politely hides rather than overlapping the list.
-    if sidebar == Sidebar::Full && left_w >= widgets::workspace_rabbit_width() {
+    // Indent the mascot by one column so its left edge lines up with the bottom
+    // input line's content (the `● live terminal` indicator carries a single
+    // leading space) rather than sitting flush against the pane edge.
+    const RABBIT_INDENT: usize = 1;
+    if sidebar == Sidebar::Full && left_w >= widgets::workspace_rabbit_width() + RABBIT_INDENT {
         let mood = rabbit_mood(state.mode());
         let rabbit = match state.update() {
             Some(latest) => widgets::workspace_rabbit_speaking(
                 mood,
                 &["アップデートがあるぴょん".to_string(), format!("v{latest}")],
-                left_w,
+                // Leave room for the indent so the speech bubble still fits the pane.
+                left_w - RABBIT_INDENT,
             ),
             None => widgets::workspace_rabbit(mood),
         };
+        let rabbit: Vec<String> = rabbit
+            .into_iter()
+            .map(|row| format!("{}{row}", " ".repeat(RABBIT_INDENT)))
+            .collect();
         // Reserve a blank row above the art (so it reads apart from the list) and
         // one below it, so the mascot floats clear of the bottom input line —
         // the `● live terminal` indicator in 没入 — rather than sitting flush
