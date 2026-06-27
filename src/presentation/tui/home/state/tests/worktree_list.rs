@@ -38,6 +38,29 @@ fn display_label_uses_the_override_then_falls_back_to_the_branch() {
 }
 
 #[test]
+fn notes_default_to_absent_and_set_notes_aligns_to_the_worktrees() {
+    let mut list = WorktreeList::with_labels(
+        "usagi",
+        vec![worktree("main"), worktree("feature"), worktree("fix")],
+        vec![],
+    );
+    // A fresh list records no notes.
+    assert!(!list.has_note(0));
+    assert!(!list.has_note(2));
+    // A shorter slice is padded with `false`; a longer one is truncated to the
+    // worktree count, mirroring how labels stay aligned.
+    list.set_notes(vec![true, false]);
+    assert!(list.has_note(0));
+    assert!(!list.has_note(1));
+    assert!(!list.has_note(2)); // padded
+    assert!(!list.has_note(9)); // out of range
+    list.set_notes(vec![false, true, true, true]);
+    assert!(!list.has_note(0));
+    assert!(list.has_note(2));
+    assert!(!list.has_note(3)); // truncated away
+}
+
+#[test]
 fn move_down_advances_past_the_root_row_and_wraps() {
     let mut list = sample(); // root, main, feature, fix
     list.move_down();

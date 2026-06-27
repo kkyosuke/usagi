@@ -166,6 +166,42 @@ impl DiffStat {
     }
 }
 
+/// How far a worktree's branch has diverged from its repository's default branch,
+/// in **commits**: `ahead` are commits on the branch the default lacks, `behind`
+/// are commits on the default the branch lacks. Shown on the sidebar as `↑N ↓M`
+/// (the line-count [`DiffStat`] badge sits beside it), so a glance tells whether a
+/// session is unmerged work (ahead) or stale relative to the default (behind).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct AheadBehind {
+    /// Commits on the branch but not on the default (the `↑N` half).
+    pub ahead: usize,
+    /// Commits on the default but not on the branch (the `↓M` half).
+    pub behind: usize,
+}
+
+impl AheadBehind {
+    /// Whether the branch is even with its default — no commits ahead or behind,
+    /// so the row shows no `↑↓` marker.
+    pub fn is_empty(self) -> bool {
+        self.ahead == 0 && self.behind == 0
+    }
+
+    /// Sum the per-repository ahead/behind counts of one session into the single
+    /// total its sidebar row shows. `None` entries (a repository even with its
+    /// default, or one not measured) contribute nothing; the result is `None` when
+    /// every repository is even, mirroring [`DiffStat::aggregate`].
+    pub fn aggregate(counts: impl IntoIterator<Item = Option<AheadBehind>>) -> Option<AheadBehind> {
+        let total = counts
+            .into_iter()
+            .flatten()
+            .fold(AheadBehind::default(), |acc, c| AheadBehind {
+                ahead: acc.ahead + c.ahead,
+                behind: acc.behind + c.behind,
+            });
+        (!total.is_empty()).then_some(total)
+    }
+}
+
 /// State of a single worktree (a branch checked out into a directory).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WorktreeState {
@@ -199,6 +235,14 @@ pub struct WorktreeState {
     /// refresh, like [`status`](Self::status).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diff: Option<DiffStat>,
+    /// How far the branch has diverged from its default in **commits** — the
+    /// sidebar's `↑N ↓M` marker. `None` when not measured (the default branch
+    /// itself, a detached HEAD, an unreadable range) or when the branch is even
+    /// with the default; omitted from the file when absent, and an older file
+    /// without it loads as `None`. Re-derived from git on each refresh, like
+    /// [`status`](Self::status) and [`diff`](Self::diff).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ahead_behind: Option<AheadBehind>,
     /// When this worktree's state was last refreshed.
     pub updated_at: DateTime<Utc>,
 }
@@ -405,6 +449,49 @@ mod tests {
     }
 
     #[test]
+    fn ahead_behind_is_empty_only_when_both_counts_are_zero() {
+        assert!(AheadBehind::default().is_empty());
+        assert!(!AheadBehind {
+            ahead: 1,
+            behind: 0
+        }
+        .is_empty());
+        assert!(!AheadBehind {
+            ahead: 0,
+            behind: 1
+        }
+        .is_empty());
+    }
+
+    #[test]
+    fn ahead_behind_aggregate_sums_repos_and_drops_an_all_even_session() {
+        // Per-repository counts sum; `None` and even entries contribute nothing.
+        assert_eq!(
+            AheadBehind::aggregate([
+                Some(AheadBehind {
+                    ahead: 2,
+                    behind: 1
+                }),
+                None,
+                Some(AheadBehind {
+                    ahead: 3,
+                    behind: 0
+                }),
+            ]),
+            Some(AheadBehind {
+                ahead: 5,
+                behind: 1
+            })
+        );
+        // A session whose repositories are all even shows no marker.
+        assert_eq!(
+            AheadBehind::aggregate([None, Some(AheadBehind::default())]),
+            None
+        );
+        assert_eq!(AheadBehind::aggregate(std::iter::empty()), None);
+    }
+
+    #[test]
     fn diff_is_omitted_when_absent_and_round_trips_when_set() {
         let mut state = WorkspaceState::new();
         state.sessions.push(SessionRecord {
@@ -441,6 +528,7 @@ mod tests {
             upstream: Some("origin/feature-x".to_string()),
             status: BranchStatus::Pushed,
             diff: None,
+            ahead_behind: None,
             updated_at: Utc::now(),
         }
     }

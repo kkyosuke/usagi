@@ -2,7 +2,9 @@
 //! into one row each, preceded by the synthetic root row, with the cursor /
 //! active-row navigation the home screen drives.
 
-use crate::domain::workspace_state::{BranchStatus, DiffStat, SessionRecord, WorktreeState};
+use crate::domain::workspace_state::{
+    AheadBehind, BranchStatus, DiffStat, SessionRecord, WorktreeState,
+};
 
 use super::super::command::WorktreeRef;
 
@@ -36,6 +38,15 @@ pub(super) fn session_row(session: &SessionRecord) -> WorktreeState {
     let status = BranchStatus::aggregate(session.worktrees.iter().map(|w| w.status));
     let primary = session.worktrees.iter().any(|w| w.primary);
     let first = session.worktrees.first();
+    // The row's freshness is the most-recently-touched of the session's
+    // repositories (the line-2 "N分前" reads this), falling back to when the
+    // session was created when it has no worktrees yet.
+    let updated_at = session
+        .worktrees
+        .iter()
+        .map(|w| w.updated_at)
+        .max()
+        .unwrap_or(session.created_at);
     WorktreeState {
         branch: Some(session.name.clone()),
         path: session.root.clone(),
@@ -44,7 +55,8 @@ pub(super) fn session_row(session: &SessionRecord) -> WorktreeState {
         upstream: first.and_then(|w| w.upstream.clone()),
         status,
         diff: DiffStat::aggregate(session.worktrees.iter().map(|w| w.diff)),
-        updated_at: session.created_at,
+        ahead_behind: AheadBehind::aggregate(session.worktrees.iter().map(|w| w.ahead_behind)),
+        updated_at,
     }
 }
 
@@ -69,6 +81,11 @@ pub struct WorktreeList {
     /// override is cosmetic only — every name-based lookup keys on the branch (the
     /// session identity), never on the label.
     labels: Vec<Option<String>>,
+    /// Whether each row's session carries a note, aligned 1:1 with `worktrees`
+    /// (`notes[i]` is for `worktrees[i]`). Drives the line-1 memo marker; like
+    /// `labels` it is cosmetic and never used for lookups. Defaults to all-false
+    /// and is filled in by [`set_notes`](Self::set_notes) on a list rebuild.
+    notes: Vec<bool>,
     selected_index: usize,
     active_index: usize,
     /// The display name of the session that was active *before* the current one,
@@ -99,10 +116,12 @@ impl WorktreeList {
         mut labels: Vec<Option<String>>,
     ) -> Self {
         labels.resize(worktrees.len(), None);
+        let notes = vec![false; worktrees.len()];
         Self {
             workspace_name: workspace_name.into(),
             worktrees,
             labels,
+            notes,
             selected_index: 0,
             active_index: 0,
             previous_active: None,
@@ -116,6 +135,20 @@ impl WorktreeList {
             Some(label) => label,
             None => self.worktrees.get(index).map(worktree_name).unwrap_or(""),
         }
+    }
+
+    /// Record which rows carry a note (`notes[i]` for `worktrees[i]`), driving
+    /// the line-1 memo marker. A shorter/longer slice is padded/truncated to
+    /// match the worktree count, mirroring how [`with_labels`](Self::with_labels)
+    /// keeps `labels` aligned.
+    pub fn set_notes(&mut self, mut notes: Vec<bool>) {
+        notes.resize(self.worktrees.len(), false);
+        self.notes = notes;
+    }
+
+    /// Whether the worktree at `index` carries a note (out-of-range is `false`).
+    pub fn has_note(&self, index: usize) -> bool {
+        self.notes.get(index).copied().unwrap_or(false)
     }
 
     pub fn workspace_name(&self) -> &str {

@@ -62,6 +62,12 @@ const LOCAL_ICON: char = '\u{e725}'; // nf-dev-git_branch — committed, lives o
 const PUSHED_ICON: char = '\u{f0ee}'; // nf-fa-cloud_upload — pushed to the remote
 const SYNCED_ICON: char = '\u{f00c}'; // nf-fa-check — up to date, nothing un-merged
 
+/// Nerd Font glyph marking a session that carries a [note](crate::domain::workspace_state::SessionRecord)
+/// — a yellow sticky-note shown in the otherwise-blank cell between the session
+/// name and the right-edge git status on line 1, so the sessions with a memo read
+/// at a glance. Needs a Nerd Font to render, like the status glyphs above.
+const NOTE_ICON: char = '\u{f249}'; // nf-fa-sticky_note — the session has a memo
+
 /// Width of the active-session marker cell on line 1: the `*` marker (or a
 /// blank) plus the space that separates it from the branch name. It sits
 /// between the branch name and the right-edge status field.
@@ -331,6 +337,7 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
         // In 切替 the keyboard is on the list: fade the rows the cursor is not on.
         state.mode() == Mode::Switch,
         sidebar,
+        state.now(),
     );
     // 切替's inline create / rename input rides the left pane — but only at full
     // width. Collapsed to the rail (5 columns) there is no room for the name, so

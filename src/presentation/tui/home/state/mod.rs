@@ -15,6 +15,8 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
+use chrono::{DateTime, Utc};
+
 use crate::domain::issue::Issue;
 use crate::domain::settings::{AgentCli, SessionActionUi, Sidebar};
 use crate::domain::version::Version;
@@ -452,6 +454,13 @@ pub struct HomeState {
     /// routed here — they stay command-log notices, so the file log keeps only
     /// real failures rather than the noise of mistyped commands.
     logger: Box<dyn crate::infrastructure::error_log::Logger>,
+    /// The wall-clock instant the current frame renders at, refreshed each paint
+    /// by the event loop ([`set_now`](Self::set_now)). The left pane reads it to
+    /// turn each session's `updated_at` into a relative "N分前" label. Kept on the
+    /// state (rather than threaded through the pure `render_frame`) so the renderer
+    /// stays a `&HomeState`-only function and its many test call sites are
+    /// unaffected; tests that pin the label set a fixed value with `set_now`.
+    now: DateTime<Utc>,
 }
 
 impl HomeState {
@@ -499,7 +508,20 @@ impl HomeState {
             tasks: Vec::new(),
             root_path: PathBuf::new(),
             logger: Box::new(crate::infrastructure::error_log::NoopLogger),
+            now: Utc::now(),
         }
+    }
+
+    /// Record the instant the next frame renders at, so the left pane's relative
+    /// "N分前" labels track real time. The event loop calls this before each paint;
+    /// tests pin it to control the labels.
+    pub fn set_now(&mut self, now: DateTime<Utc>) {
+        self.now = now;
+    }
+
+    /// The instant the current frame renders at (see [`set_now`](Self::set_now)).
+    pub fn now(&self) -> DateTime<Utc> {
+        self.now
     }
 
     /// Inject the error sink that persists operation failures to the daily log
@@ -666,7 +688,16 @@ impl HomeState {
             .iter()
             .map(|&i| self.sessions[i].display_name.clone())
             .collect();
-        self.list = WorktreeList::with_labels(name, rows, labels);
+        // Carry each session's note-presence onto its row so the pane can show a
+        // memo marker; the note text itself is read on demand (Switch preview /
+        // editor), never stored on the row.
+        let notes = order
+            .iter()
+            .map(|&i| self.sessions[i].note.is_some())
+            .collect();
+        let mut list = WorktreeList::with_labels(name, rows, labels);
+        list.set_notes(notes);
+        self.list = list;
     }
 
     /// The order the sessions are laid out in the left pane, as indices into
