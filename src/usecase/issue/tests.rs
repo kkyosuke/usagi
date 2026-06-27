@@ -59,6 +59,22 @@ fn empty_stats_have_zero_completion_and_empty_bar() {
 }
 
 #[test]
+fn stats_progress_math_is_overflow_safe_for_huge_counts() {
+    // Counts near `usize::MAX` must not overflow the internal `done * 100` /
+    // `done * width` before the divide. The visible output is unchanged from the
+    // ordinary case: half done is 50% and fills half the bar.
+    let stats = IssueStats {
+        total: usize::MAX - 1,
+        done: (usize::MAX - 1) / 2,
+        todo: (usize::MAX - 1) / 2,
+        in_progress: 0,
+        ready: 0,
+    };
+    assert_eq!(stats.completion_percent(), 50);
+    assert_eq!(stats.progress_bar(8), "[####----]");
+}
+
+#[test]
 fn group_by_round_trips_through_string() {
     for g in [
         GroupBy::Status,

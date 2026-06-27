@@ -153,7 +153,11 @@ pub fn progress_bar(done: usize, total: usize, width: usize) -> String {
     }
     let done = done.min(total);
     // Round the filled fraction onto the bar's columns.
-    let filled = (done * width + total / 2) / total;
+    //
+    // Compute in `u128` so pathological counts or terminal widths cannot
+    // overflow before the divide. The value is bounded by `width`, so it fits
+    // back in `usize`.
+    let filled = ((done as u128 * width as u128 + total as u128 / 2) / total as u128) as usize;
     if filled == 0 {
         return format!("[{}]", " ".repeat(width));
     }
@@ -822,6 +826,17 @@ mod tests {
             let bar = progress_bar(done, 4, 10);
             assert_eq!(console::measure_text_width(&bar), 12);
         }
+    }
+
+    #[test]
+    fn progress_bar_math_is_overflow_safe_for_huge_counts() {
+        // Counts near `usize::MAX` must not overflow the internal
+        // `done * width + total / 2` before the divide. Half done rounds to half
+        // the bar, matching ordinary-sized inputs.
+        assert_eq!(
+            progress_bar((usize::MAX - 1) / 2, usize::MAX - 1, 8),
+            "[===>    ]"
+        );
     }
 
     #[test]

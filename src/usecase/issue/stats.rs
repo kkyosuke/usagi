@@ -48,12 +48,25 @@ impl IssueStats {
 
     /// Completion as a whole-number percentage (0 when there are no issues).
     pub fn completion_percent(&self) -> u32 {
-        (self.done * 100).checked_div(self.total).unwrap_or(0) as u32
+        if self.total == 0 {
+            return 0;
+        }
+        // Compute in `u128` so a large `done` can never overflow the `* 100`
+        // before the divide. Real stats have `done <= total`, but saturate the
+        // public result defensively if a hand-built value violates that.
+        ((self.done as u128 * 100) / self.total as u128).min(u32::MAX as u128) as u32
     }
 
     /// A fixed-width `[####----]` bar reflecting completion.
     pub fn progress_bar(&self, width: usize) -> String {
-        let filled = (self.done * width).checked_div(self.total).unwrap_or(0);
+        // Compute in `u128` so a large `done * width` can never overflow before
+        // the divide; the result is bounded by `width`, so it fits back in
+        // `usize`.
+        let filled = if self.total == 0 {
+            0
+        } else {
+            ((self.done as u128 * width as u128) / self.total as u128).min(width as u128) as usize
+        };
         let mut bar = String::with_capacity(width + 2);
         bar.push('[');
         for i in 0..width {
