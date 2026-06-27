@@ -102,7 +102,7 @@ Run a command:
 **没入（Attached）**に入ります。起動時に usagi の issue MCP サーバ（`usagi mcp`）が組み込まれるので、
 エージェントは起動直後から `issue_*` tool でタスクを操作できます。
 
-- 没入中にナビゲーション用に予約するキーは**[キー方式（`key_scheme`）](05-settings.md#設定項目)**で決まります。既定の **`prefix` 方式**はリーダー `Ctrl-O` だけを奪い、操作は**その次のキー**です — `Ctrl-O o`（**切替**へズームアウト）・`Ctrl-O a`（**在席へ**アクションメニュー）・`Ctrl-O n`/`p`（タブ前後。`Ctrl-O →`/`←` も）・`Ctrl-O g`（**agent タブを追加**）。`Ctrl-O` 以外の bare Ctrl キーと `Esc`・`Ctrl-W` はすべてシェルへ流れ、`Ctrl-O Ctrl-O` でも切替へズームアウトできます（IME を ON にしたままでも届く。`Ctrl-O` 自体をシェルへ送りたいときは `alt` 方式）。**`alt` 方式**にすると各操作が `Alt` 単打（`Alt-o`/`a`/`g`・`Alt-→`/`←`）になり bare Ctrl キーを奪いません（macOS は Option=Meta 設定が前提）。`Ctrl-W` を奪わないため、タブを閉じるのは切替（切替へ抜けて `x`）で行います。terminal タブの追加は在席のアクションメニュー（没入では「在席へ」で開く）か切替（`t`）でも行えます。
+- 没入中にナビゲーション用に予約するキーは**[キー方式（`key_scheme`）](05-settings.md#設定項目)**で決まります。既定の **`prefix` 方式**ではリーダー `Ctrl-O` の次キーで操作し（`Ctrl-O o` で**切替**へズームアウト、`Ctrl-O a` で**在席へ**）、`Ctrl-O` 以外のキーはシェルへ流れます。予約キーの全一覧と `alt` 方式は [design/05-home.md#没入のキー操作](design/05-home.md#没入のキー操作attached--terminal--agent-実行中) が正本です。
 - 素のシェルだけ欲しいときは `agent` の代わりに `terminal` を使います。Agent を動かしたまま「在席へ」（既定 `Ctrl-O a`）で在席のアクションメニューを開き、
   そこから terminal を選べば同じセッションに terminal タブが増え（切替へ抜けて `t` でも可）、タブ前後キー（既定 `Ctrl-O n`/`p`、または切替の `←`/`→`）でタブを行き来できます。
 - `agent` / `terminal` の仕様は [03-commands/02-tui.md](03-commands/02-tui.md#agent)、MCP の組み込みは
