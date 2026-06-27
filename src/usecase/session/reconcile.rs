@@ -78,7 +78,8 @@ pub(super) fn reconcile_locked(workspace_root: &Path) -> Result<Vec<PathBuf>> {
     let mut removed = Vec::new();
     for (stray, name) in strays {
         // A stray is untracked and possibly dirty: force it out unconditionally.
-        discard_session(&stray, &name, &repo_worktrees, true)?;
+        // Its branch is `usagi/<name>` (see [`super::branch_name`]).
+        discard_session(&stray, &super::branch_name(&name), &repo_worktrees, true)?;
         removed.push(stray);
     }
 

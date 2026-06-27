@@ -211,14 +211,15 @@ fn session_tool_schemas() -> Value {
         {
             "name": "session_create",
             "description": "Create a new usagi session: a parallel worktree under \
-                .usagi/sessions/<name>/ on a fresh branch for every repository in \
-                the workspace. Returns the session name, root, and worktree paths.",
+                .usagi/sessions/<name>/ on a fresh branch usagi/<name> for every \
+                repository in the workspace. Returns the session name, root, and \
+                worktree paths.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "name": {
                         "type": "string",
-                        "description": "Session name (also the new branch name in every repository)"
+                        "description": "Session name (the branch it cuts in every repository is usagi/<name>)"
                     }
                 },
                 "required": ["name"]
@@ -460,7 +461,8 @@ mod tests {
         assert_eq!(arr[0]["name"], "feature-x");
         // No sidebar override set yet, so display_name is present but null.
         assert_eq!(arr[0]["display_name"], Value::Null);
-        assert_eq!(arr[0]["worktrees"][0]["branch"], "feature-x");
+        // The worktree is checked out on the namespaced session branch.
+        assert_eq!(arr[0]["worktrees"][0]["branch"], "usagi/feature-x");
     }
 
     #[test]
