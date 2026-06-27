@@ -354,31 +354,47 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
             left.truncate(body_rows);
         }
     }
-    // Rest the mascot at the bottom of the (full) sidebar, below the session
-    // list, when there is room for it. Its face and colour follow the current
-    // mode — browsing in 切替, attentive in 在席, heads-down in 没入 — so the
-    // rabbit reflects what the user is doing. A blank row always sits between the
-    // list and the rabbit so the art reads as its own thing rather than the next
-    // list entry. When the background update check has found a newer release, the
-    // rabbit *speaks* the notice from a bubble above it (the message and the new
-    // version), so the news comes from the mascot rather than a top-right banner.
-    // With a list (or an inline create / rename input) long enough to reach those
-    // rows, or a sidebar collapsed to the narrow rail / too narrow to hold the
-    // art, it politely hides rather than overlapping the list.
-    if sidebar == Sidebar::Full && left_w >= widgets::workspace_rabbit_width() {
-        let mood = rabbit_mood(state.mode());
-        let rabbit = match state.update() {
-            Some(latest) => widgets::workspace_rabbit_speaking(
-                mood,
-                &["アップデートがあるぴょん".to_string(), format!("v{latest}")],
-                left_w,
-            ),
-            None => widgets::workspace_rabbit(mood),
-        };
+    // Rest a mascot at the bottom of the sidebar, below the session list, when
+    // there is room for it: the full mood mascot when expanded, a tiny chibi when
+    // collapsed to the rail (so folding the sidebar keeps the usagi around, just
+    // smaller). The full mascot's face and colour follow the current mode —
+    // browsing in 切替, attentive in 在席, heads-down in 没入 — so it reflects what
+    // the user is doing, and when the background update check has found a newer
+    // release it *speaks* the notice from a bubble above it (the rail chibi is
+    // static; the notice reappears on expand). A blank row always sits between the
+    // list and the art so it reads as its own thing rather than the next list
+    // entry. With a list (or an inline create / rename input) long enough to reach
+    // those rows, or a pane too narrow to hold the art, it politely hides rather
+    // than overlapping the list.
+    let mascot = match sidebar {
+        Sidebar::Full if left_w >= widgets::workspace_rabbit_width() => {
+            let mood = rabbit_mood(state.mode());
+            // The mascot reacts without an idle timer: `blinking` is set for the
+            // frames just after the user interacts (in 切替 / 在席), and `tick`
+            // advances on the live loop so the 没入 Working paw pumps. Both come from
+            // the state the event loop refreshes each frame
+            // ([`HomeState::tick_mascot`]).
+            let (blinking, tick) = (state.mascot_blinking(), state.mascot_tick());
+            Some(match state.update() {
+                Some(latest) => widgets::workspace_rabbit_speaking(
+                    mood,
+                    &["アップデートがあるぴょん".to_string(), format!("v{latest}")],
+                    left_w,
+                    blinking,
+                    tick,
+                ),
+                None => widgets::workspace_rabbit(mood, blinking, tick),
+            })
+        }
+        Sidebar::Rail if left_w >= widgets::workspace_rabbit_rail_width() => {
+            Some(widgets::workspace_rabbit_rail())
+        }
+        _ => None,
+    };
+    if let Some(rabbit) = mascot {
         // Reserve a blank row above the art (so it reads apart from the list) and
-        // one below it, so the mascot floats clear of the bottom input line —
-        // the `● live terminal` indicator in 没入 — rather than sitting flush
-        // on it.
+        // one below it, so the mascot floats clear of the bottom input line — the
+        // `● live terminal` indicator in 没入 — rather than sitting flush on it.
         let reserved = rabbit.len() + 2;
         if body_rows >= reserved && left.len() <= body_rows - reserved {
             left.resize(body_rows - rabbit.len() - 1, String::new());
