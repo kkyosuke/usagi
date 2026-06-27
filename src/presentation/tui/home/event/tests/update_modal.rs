@@ -137,6 +137,19 @@ fn escape_cancels_the_update_modal_without_dispatching() {
 }
 
 #[test]
+fn ctrl_c_and_ctrl_q_cancel_the_update_modal_without_dispatching() {
+    // The update modal sits above the global Ctrl-C / Ctrl-Q quit chords, so it
+    // must handle them itself or they would be inert while it is open. Each
+    // cancels the modal (it must not dispatch the update); the trailing Ctrl-C
+    // the reader falls back to then quits, the modal having closed.
+    for chord in [Key::CtrlC, Key::Char(CTRL_Q)] {
+        let (outcome, dispatched) = run_update(vec![chord]);
+        assert!(matches!(outcome, Outcome::Quit));
+        assert_eq!(dispatched, 0);
+    }
+}
+
+#[test]
 fn the_compat_loop_dispatches_through_its_update_hook() {
     // The compat shim builds its own `Wiring` whose `dispatch_update` is a no-op
     // (its tests never shell out). Open the modal and confirm with `y` so that

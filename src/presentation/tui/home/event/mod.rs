@@ -588,13 +588,23 @@ pub(super) fn event_loop(
         // The update-confirmation modal, when open, captures every key: `y` /
         // `Enter` launches the self-update (and closes the modal — its progress
         // then shows as the shared loading rabbit), `n` / `Esc` cancels.
+        //
+        // `Ctrl-C` / `Ctrl-Q` also cancel here. This block sits above the global
+        // quit chords below, so without handling them they would be inert while
+        // this modal is open (unlike every other overlay, which sits below those
+        // handlers and so passes them through). Routing them to the global path
+        // instead would raise the quit modal on top of this one, but the two are
+        // documented never to coexist; cancelling first — a second press then
+        // quits — keeps that invariant.
         if state.update_confirm() {
             match key {
                 Key::Char('y') | Key::Char('Y') | Key::Enter => {
                     (wiring.dispatch_update)();
                     state.cancel_update_confirm();
                 }
-                Key::Char('n') | Key::Char('N') | Key::Escape => state.cancel_update_confirm(),
+                Key::Char('n') | Key::Char('N') | Key::Escape | Key::CtrlC | Key::Char(CTRL_Q) => {
+                    state.cancel_update_confirm()
+                }
                 _ => {}
             }
             continue;
