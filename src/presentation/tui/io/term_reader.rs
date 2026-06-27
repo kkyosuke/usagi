@@ -326,15 +326,19 @@ fn is_modified_key_head(key: &Key) -> bool {
 
 /// Reassemble a modified cursor key into one [`Key::UnknownEscSeq`] holding the
 /// whole `[ 1 ; <mod> <letter>` sequence, draining the `<mod><letter>` tail (the
-/// modifier digits, then the terminating letter) that `console` left unread. A
-/// non-`Char` interrupting the tail ends it early, so a stray key is never
-/// swallowed; the event loop ignores an incomplete sequence just like a complete
-/// one it does not recognise.
+/// modifier digits, then the terminating letter) that `console` left unread.
+///
+/// A non-`Char` interrupting the tail ends the (incomplete) sequence early and is
+/// itself consumed and dropped — the same way [`read_sgr`] / [`read_x10`] abandon
+/// a mouse report interrupted mid-stream. This only arises on corrupted or
+/// interleaved input: a real terminal emits `CSI 1 ; <mod> <letter>` atomically,
+/// so the tail is never interrupted in practice. The event loop ignores the
+/// returned incomplete sequence just like any complete one it does not recognise.
 fn read_modified_key(read: &mut impl FnMut() -> io::Result<Key>) -> io::Result<Key> {
     let mut seq = vec!['[', '1', ';'];
     // Drain the `<mod><letter>` tail: digits accumulate, and the first non-digit
-    // `Char` is the terminating letter. A non-`Char` ends the (incomplete) tail
-    // without being consumed as part of it.
+    // `Char` is the terminating letter. A non-`Char` ends the (incomplete) tail;
+    // it is consumed by this `read()` and dropped (see the doc above).
     while let Key::Char(c) = read()? {
         seq.push(c);
         if !c.is_ascii_digit() {
@@ -489,18 +493,30 @@ mod tests {
     }
 
     #[test]
-    fn a_non_char_truncating_a_modified_key_ends_it_without_eating_the_next() {
-        // A non-`Char` mid-tail ends the sequence; it is not consumed as part of
-        // it, but the reassembled (incomplete) key is still returned first.
-        let keys = vec![
+    fn a_non_char_interrupting_a_modified_key_ends_it_and_is_dropped() {
+        // A non-`Char` mid-tail ends the (incomplete) sequence, returned first.
+        // Like the SGR/X10 mouse readers, that interrupting key is consumed and
+        // dropped — it does not resurface on the next read. (Unreachable on real
+        // terminals, which emit `CSI 1;<mod><letter>` atomically; this only pins
+        // the corrupted/interleaved-input contract.)
+        let mut queue: VecDeque<Key> = vec![
             Key::UnknownEscSeq(vec!['[', '1', ';']),
             Key::Char('2'),
             Key::Enter, // interrupts before the letter
-        ];
+        ]
+        .into();
+        let mut read = || {
+            queue
+                .pop_front()
+                .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "drained"))
+        };
+        // First read: the reassembled (incomplete) modified key.
         assert_eq!(
-            drive(keys),
+            next_input(&mut read).unwrap(),
             Input::Key(Key::UnknownEscSeq(vec!['[', '1', ';', '2']))
         );
+        // The interrupting Enter was dropped, so the next read finds nothing left.
+        assert!(next_input(&mut read).is_err());
     }
 
     #[test]

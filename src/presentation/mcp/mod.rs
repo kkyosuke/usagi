@@ -195,14 +195,19 @@ pub fn dispatch_line(service: &dyn McpService, line: &str) -> Option<String> {
     let method = value.get("method").and_then(Value::as_str);
     let id = value.get("id").cloned();
     match (method, id) {
-        // A request without a method is malformed.
-        (None, _) => Some(error_response(
-            Value::Null,
+        // A request with an id but no method is malformed (Invalid Request). Echo
+        // the client's id so it can correlate the error with its in-flight
+        // request — per JSON-RPC the response id is null only when the id cannot
+        // be detected, which is not the case here.
+        (None, Some(id)) => Some(error_response(
+            id,
             -32600,
             "invalid request: missing method",
         )),
-        // No id means a notification: act on it but send no reply.
-        (Some(_), None) => None,
+        // No id means a notification: act on it but send no reply. A message with
+        // neither method nor id is a malformed notification and likewise gets none
+        // (there is no id to correlate a reply against).
+        (Some(_), None) | (None, None) => None,
         (Some(method), Some(id)) => {
             Some(dispatch_request(service, method, value.get("params"), id))
         }
@@ -334,6 +339,23 @@ mod tests {
         let response = String::from_utf8(output).unwrap();
         assert!(response.contains("\"name\":\"echo\""));
         assert!(response.contains("\"tools\":[]"));
+    }
+
+    #[test]
+    fn missing_method_with_an_id_echoes_that_id_in_the_error() {
+        // A request that omits `method` but carries an id is Invalid Request; the
+        // error response must echo the id so a strict client can correlate it.
+        let response = dispatch_line(&EchoService, r#"{"jsonrpc":"2.0","id":5}"#).expect("a reply");
+        let value: Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(value["error"]["code"], -32600);
+        assert_eq!(value["id"], json!(5));
+    }
+
+    #[test]
+    fn a_message_with_neither_method_nor_id_gets_no_reply() {
+        // No id means nothing to correlate a reply against, so a method-less,
+        // id-less message is treated as a malformed notification: no response.
+        assert!(dispatch_line(&EchoService, "{}").is_none());
     }
 
     #[test]

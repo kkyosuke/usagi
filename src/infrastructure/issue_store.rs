@@ -311,16 +311,18 @@ impl IssueStore {
     }
 
     /// Every file that backs `number` (normally zero or one).
+    ///
+    /// Keys files by [`number_from_filename`] — the same `NNN-`/`N-` prefix rule
+    /// [`max_number`](Self::max_number) uses — rather than a zero-padded `"{:03}-"`
+    /// string prefix. The two must agree, or a non-canonically named file (e.g. a
+    /// hand-created `1-foo.md`, or `0001-foo.md`) that `max_number` recognises as
+    /// `1` would be missed here, so `read`/`remove`/the stale-file cleanup in
+    /// `write` would silently skip it.
     fn files_for(&self, number: u32) -> Result<Vec<PathBuf>> {
-        let prefix = format!("{number:03}-");
         Ok(self
             .issue_files()?
             .into_iter()
-            .filter(|path| {
-                path.file_name()
-                    .and_then(|n| n.to_str())
-                    .is_some_and(|name| name.starts_with(&prefix))
-            })
+            .filter(|path| number_from_filename(path) == Some(number))
             .collect())
     }
 }
@@ -428,6 +430,23 @@ mod tests {
         assert!(tmp.path().join(".usagi/issues/001-new-title.md").is_file());
         assert_eq!(store.files_for(1).unwrap().len(), 1);
         assert_eq!(store.read(1).unwrap().unwrap().title, "New title");
+    }
+
+    #[test]
+    fn files_for_matches_any_numeric_prefix_not_just_zero_padded() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = IssueStore::new(tmp.path());
+        store.write(&issue(1, "First")).unwrap();
+
+        // Rename the canonical `001-first.md` to a non-zero-padded name, as a
+        // hand-created or externally-synced file might be. `number_from_filename`
+        // reads it as #1, so `files_for`/`read` must key it the same way rather
+        // than only matching the `001-` prefix — otherwise the file is orphaned.
+        let dir = store.dir().to_path_buf();
+        fs::rename(dir.join("001-first.md"), dir.join("1-first.md")).unwrap();
+
+        assert_eq!(store.files_for(1).unwrap().len(), 1);
+        assert_eq!(store.read(1).unwrap().unwrap().title, "First");
     }
 
     #[test]
