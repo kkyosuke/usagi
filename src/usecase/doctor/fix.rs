@@ -89,10 +89,18 @@ pub enum FixOutcome {
 /// dedicated remedy in [`local_llm::ensure`] that the CLI runs separately.
 /// Routing them through the generic package manager would spuriously fail
 /// (`brew install "local-llm model"`) or double-install `ollama`.
+///
+/// The `config` check is skipped for the same reason: it is created on first
+/// run, so a `missing` here means unreadable settings — `brew install config`
+/// would be nonsense.
 pub fn fix_missing(checks: &[Check], os: &str, runner: &dyn CommandRunner) -> Vec<FixOutcome> {
     checks
         .iter()
-        .filter(|check| check.health == Health::Missing && !is_local_llm_check(check.name))
+        .filter(|check| {
+            check.health == Health::Missing
+                && !is_local_llm_check(check.name)
+                && check.name != CONFIG_CHECK
+        })
         .map(|check| fix_one(check.name, os, runner))
         .collect()
 }

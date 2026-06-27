@@ -1,48 +1,117 @@
+use std::io::{BufRead, Write};
 use std::path::PathBuf;
 
 use crate::domain::settings::LocalLlm;
 use crate::infrastructure::storage::Storage;
 use crate::usecase::doctor::{
-    diagnose, fix_missing, Check, CommandRunner, FixOutcome, SystemRunner,
+    diagnose, fix_missing, installable_gaps, Check, CommandRunner, FixOutcome, SystemRunner,
 };
 use crate::usecase::font::{self, FontError, FontStep};
 use crate::usecase::local_llm::{self, SetupError, SetupStep};
 
-/// Entry point for `usagi doctor`. With `fix`, attempts to install missing
-/// tools (or prints manual steps); otherwise just prints the diagnostics.
+/// Entry point for `usagi doctor`. Prints the diagnostics, then runs the install
+/// pass for anything missing: `--fix` installs without asking, while plain
+/// `usagi doctor` prompts for confirmation first. Binds the real terminal IO and
+/// delegates the testable logic to [`doctor`].
 pub fn run(fix: bool) -> anyhow::Result<()> {
     let storage = Storage::open_default()?;
     let os = std::env::consts::OS;
     let font_dirs = font::font_dirs(os, &dirs::home_dir().unwrap_or_default());
-    for line in doctor_lines(&storage, fix, os, &font_dirs, &SystemRunner) {
-        println!("{line}");
-    }
-    Ok(())
+    let stdin = std::io::stdin();
+    let mut stdout = std::io::stdout();
+    doctor(
+        &storage,
+        fix,
+        os,
+        &font_dirs,
+        &SystemRunner,
+        stdin.lock(),
+        &mut stdout,
+    )
 }
 
-/// Build the lines [`run`] prints: the diagnostics, or — with `fix` — the
-/// remediation pass (tool installs, the Nerd Font download, and local LLM
-/// provisioning). Split from [`run`] so the fix path is unit-tested with a fake
-/// runner and temporary font directories instead of shelling out / downloading
-/// a real font; [`run`] itself only binds the real IO.
-fn doctor_lines(
+/// Gather the diagnostics and saved settings (the real IO), then hand off to
+/// [`report_and_fix`]. Thin on purpose so the branching logic lives in a
+/// function that takes its `checks` directly and is exercised with fakes;
+/// `diagnose` runs its own [`SystemRunner`], so a test cannot steer the gap set
+/// through the injected `runner` here.
+fn doctor(
     storage: &Storage,
     fix: bool,
     os: &str,
     font_dirs: &[PathBuf],
     runner: &dyn CommandRunner,
-) -> Vec<String> {
+    input: impl BufRead,
+    output: &mut impl Write,
+) -> anyhow::Result<()> {
     let checks = diagnose(storage);
-    if fix {
-        // Fall back to defaults (local LLM off) if settings cannot be read.
-        let local_llm = storage
-            .load_settings()
-            .map(|s| s.local_llm)
-            .unwrap_or_default();
-        fix_lines(&checks, os, &local_llm, font_dirs, runner)
-    } else {
-        render(&checks)
+    // Fall back to defaults (local LLM off) if settings cannot be read.
+    let local_llm = storage
+        .load_settings()
+        .map(|s| s.local_llm)
+        .unwrap_or_default();
+    report_and_fix(
+        &checks, fix, os, &local_llm, font_dirs, runner, input, output,
+    )
+}
+
+/// Print the diagnostics, then install missing tools/fonts. `--fix` installs
+/// without asking; otherwise the user is prompted, and only when there is
+/// something installable to do (see [`installable_gaps`]). Takes its `checks`
+/// and `local_llm` directly so the prompt and remediation are unit-tested with a
+/// fake runner, scripted `input`, and a captured `output` — no real terminal,
+/// package manager, or font download.
+#[allow(clippy::too_many_arguments)]
+fn report_and_fix(
+    checks: &[Check],
+    fix: bool,
+    os: &str,
+    local_llm: &LocalLlm,
+    font_dirs: &[PathBuf],
+    runner: &dyn CommandRunner,
+    mut input: impl BufRead,
+    output: &mut impl Write,
+) -> anyhow::Result<()> {
+    for line in render(checks) {
+        writeln!(output, "{line}")?;
     }
+    let gaps = installable_gaps(checks);
+    // `--fix` installs unconditionally; plain `doctor` asks, but only when there
+    // is an installable gap (no point prompting when everything is present).
+    let install = if fix {
+        true
+    } else if gaps.is_empty() {
+        false
+    } else {
+        confirm_install(&gaps, &mut input, output)?
+    };
+    if install {
+        for line in fix_lines(checks, os, local_llm, font_dirs, runner) {
+            writeln!(output, "{line}")?;
+        }
+    }
+    Ok(())
+}
+
+/// Ask whether to install the missing `gaps`, returning the user's choice. Only
+/// `y`/`yes` (case-insensitive) accepts; every other answer — including EOF or a
+/// non-interactive stdin — declines, so the command never blocks in a script or
+/// CI.
+fn confirm_install(
+    gaps: &[&str],
+    input: &mut impl BufRead,
+    output: &mut impl Write,
+) -> anyhow::Result<bool> {
+    let items = gaps.join(", ");
+    writeln!(output, "未インストールの項目があります: {items}")?;
+    write!(output, "インストールしますか? [y/N]: ")?;
+    output.flush()?;
+    let mut answer = String::new();
+    input.read_line(&mut answer)?;
+    Ok(matches!(
+        answer.trim().to_ascii_lowercase().as_str(),
+        "y" | "yes"
+    ))
 }
 
 /// The lines printed by `usagi doctor --fix`: the standard tool remediation,
@@ -210,36 +279,101 @@ mod tests {
         );
     }
 
-    #[test]
-    fn doctor_lines_diagnoses_without_fix() {
-        // Without `fix`, the lines are the formatted diagnostics (every check
-        // produces one line); the runner/font dirs are unused.
-        let dir = tempfile::tempdir().expect("failed to create temp dir");
-        let storage = Storage::new(dir.path().join("usagi"));
-        let runner = FakeRunner {
-            available: vec![],
-            check: false,
-        };
-        let lines = doctor_lines(&storage, false, "macos", &[], &runner);
-        assert!(lines.iter().any(|l| l.starts_with("git")));
-        assert!(lines.iter().any(|l| l.starts_with("nerd font")));
+    /// A `git` check that is `missing`, so [`installable_gaps`] reports a gap and
+    /// the prompt path is exercised deterministically (without depending on what
+    /// the host actually has installed).
+    fn missing_git() -> Vec<Check> {
+        vec![Check {
+            name: "git",
+            health: Health::Missing,
+            detail: Some("`git` was not found on your PATH".into()),
+        }]
     }
 
-    #[test]
-    fn doctor_lines_runs_the_fix_pass() {
-        // With `fix`, the remediation lines are produced. A pre-installed font
-        // keeps `font::ensure` from downloading for real.
-        let dir = tempfile::tempdir().expect("failed to create temp dir");
-        let storage = Storage::new(dir.path().join("usagi"));
+    /// Run [`report_and_fix`] against `input`, returning the captured output as a
+    /// string. Uses a pre-installed font so the font flow never downloads.
+    fn run_report(checks: &[Check], fix: bool, input: &str) -> String {
         let runner = FakeRunner {
             available: vec![],
             check: false,
         };
         let (_guard, font_dirs) = font_dirs_with_font();
-        let lines = doctor_lines(&storage, true, "macos", &font_dirs, &runner);
-        assert!(lines
-            .iter()
-            .any(|l| l.contains("a Nerd Font is already installed")));
+        let mut out = Vec::new();
+        report_and_fix(
+            checks,
+            fix,
+            "macos",
+            &LocalLlm::default(),
+            &font_dirs,
+            &runner,
+            input.as_bytes(),
+            &mut out,
+        )
+        .expect("report_and_fix should not fail writing to a Vec");
+        String::from_utf8(out).expect("output is valid UTF-8")
+    }
+
+    #[test]
+    fn report_and_fix_diagnoses_without_installing_when_nothing_is_missing() {
+        // All checks healthy and no `--fix`: only the diagnostics are printed,
+        // with no prompt and no install pass.
+        let checks = vec![Check {
+            name: "git",
+            health: Health::Ok,
+            detail: None,
+        }];
+        let out = run_report(&checks, false, "");
+        assert!(out.contains("git            ok"));
+        assert!(!out.contains("インストールしますか"));
+        assert!(!out.contains("Nerd Font"));
+    }
+
+    #[test]
+    fn report_and_fix_installs_without_prompting_under_fix() {
+        // `--fix` skips the prompt and runs the remediation even with a gap; the
+        // (pre-installed) font reports the no-op line.
+        let out = run_report(&missing_git(), true, "");
+        assert!(!out.contains("インストールしますか"));
+        assert!(out.contains("a Nerd Font is already installed"));
+    }
+
+    #[test]
+    fn report_and_fix_installs_when_the_user_confirms() {
+        // A gap + `y`: the prompt is shown and the install pass runs.
+        let out = run_report(&missing_git(), false, "y\n");
+        assert!(out.contains("未インストールの項目があります: git"));
+        assert!(out.contains("インストールしますか? [y/N]:"));
+        assert!(out.contains("a Nerd Font is already installed"));
+    }
+
+    #[test]
+    fn report_and_fix_skips_install_when_the_user_declines() {
+        // A gap + `n`: the prompt is shown but nothing is installed.
+        let out = run_report(&missing_git(), false, "n\n");
+        assert!(out.contains("インストールしますか? [y/N]:"));
+        assert!(!out.contains("Nerd Font"));
+    }
+
+    #[test]
+    fn confirm_install_accepts_y_and_yes_case_insensitively() {
+        for answer in ["y\n", "Y\n", "yes\n", "  YES  \n"] {
+            let mut out = Vec::new();
+            let accepted = confirm_install(&["git"], &mut answer.as_bytes(), &mut out)
+                .expect("writing to a Vec never fails");
+            assert!(accepted, "{answer:?} should accept");
+        }
+    }
+
+    #[test]
+    fn confirm_install_declines_on_other_answers_and_eof() {
+        // A blank/`n` answer and an empty (EOF / non-interactive) stream both
+        // decline, so the command never blocks in a script or CI.
+        for answer in ["n\n", "\n", "nope\n", ""] {
+            let mut out = Vec::new();
+            let accepted = confirm_install(&["git"], &mut answer.as_bytes(), &mut out)
+                .expect("writing to a Vec never fails");
+            assert!(!accepted, "{answer:?} should decline");
+        }
     }
 
     #[test]
