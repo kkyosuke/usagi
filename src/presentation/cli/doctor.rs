@@ -1,41 +1,66 @@
+use std::path::PathBuf;
+
 use crate::domain::settings::LocalLlm;
 use crate::infrastructure::storage::Storage;
 use crate::usecase::doctor::{
     diagnose, fix_missing, Check, CommandRunner, FixOutcome, SystemRunner,
 };
+use crate::usecase::font::{self, FontError, FontStep};
 use crate::usecase::local_llm::{self, SetupError, SetupStep};
 
 /// Entry point for `usagi doctor`. With `fix`, attempts to install missing
 /// tools (or prints manual steps); otherwise just prints the diagnostics.
 pub fn run(fix: bool) -> anyhow::Result<()> {
     let storage = Storage::open_default()?;
-    let checks = diagnose(&storage);
-    let lines = if fix {
-        // Fall back to defaults (local LLM off) if settings cannot be read.
-        let local_llm = storage
-            .load_settings()
-            .map(|s| s.local_llm)
-            .unwrap_or_default();
-        fix_lines(&checks, std::env::consts::OS, &local_llm, &SystemRunner)
-    } else {
-        render(&checks)
-    };
-    for line in lines {
+    let os = std::env::consts::OS;
+    let font_dirs = font::font_dirs(os, &dirs::home_dir().unwrap_or_default());
+    for line in doctor_lines(&storage, fix, os, &font_dirs, &SystemRunner) {
         println!("{line}");
     }
     Ok(())
 }
 
+/// Build the lines [`run`] prints: the diagnostics, or — with `fix` — the
+/// remediation pass (tool installs, the Nerd Font download, and local LLM
+/// provisioning). Split from [`run`] so the fix path is unit-tested with a fake
+/// runner and temporary font directories instead of shelling out / downloading
+/// a real font; [`run`] itself only binds the real IO.
+fn doctor_lines(
+    storage: &Storage,
+    fix: bool,
+    os: &str,
+    font_dirs: &[PathBuf],
+    runner: &dyn CommandRunner,
+) -> Vec<String> {
+    let checks = diagnose(storage);
+    if fix {
+        // Fall back to defaults (local LLM off) if settings cannot be read.
+        let local_llm = storage
+            .load_settings()
+            .map(|s| s.local_llm)
+            .unwrap_or_default();
+        fix_lines(&checks, os, &local_llm, font_dirs, runner)
+    } else {
+        render(&checks)
+    }
+}
+
 /// The lines printed by `usagi doctor --fix`: the standard tool remediation,
-/// followed by local LLM provisioning when it is enabled. Pure (the side
-/// effects are confined to `runner`) so every branch is unit-testable.
+/// the Nerd Font download, then local LLM provisioning when it is enabled. Pure
+/// (the side effects are confined to `runner`/the filesystem under `font_dirs`)
+/// so every branch is unit-testable.
 fn fix_lines(
     checks: &[Check],
     os: &str,
     local_llm: &LocalLlm,
+    font_dirs: &[PathBuf],
     runner: &dyn CommandRunner,
 ) -> Vec<String> {
     let mut lines = render_fixes(&fix_missing(checks, os, runner));
+    // Downloading a Nerd Font is not a package-manager install, so it has its
+    // own flow (like the local LLM) rather than going through `fix_missing`.
+    // Idempotent: an already-installed font is reported, not re-downloaded.
+    lines.extend(render_font_fix(&font::ensure(os, runner, font_dirs)));
     if local_llm.enabled {
         // The CLI runs on a real terminal, so the installer can prompt for
         // sudo itself; no pre-supplied password (that is the TUI flow). Output
@@ -44,6 +69,32 @@ fn fix_lines(
         lines.extend(render_local_llm_fix(&result));
     }
     lines
+}
+
+/// Formats Nerd Font provisioning ([`font::ensure`]) into printable lines.
+fn render_font_fix(result: &Result<FontStep, FontError>) -> Vec<String> {
+    let line = match result {
+        Ok(FontStep::AlreadyPresent) => "a Nerd Font is already installed".to_string(),
+        Ok(FontStep::Installed { font, dir }) => {
+            format!("installed the {font} Nerd Font into {dir}")
+        }
+        Err(FontError::Unsupported { manual }) => {
+            format!("could not install a Nerd Font automatically; {manual}")
+        }
+        Err(FontError::ToolMissing { tool, manual }) => {
+            format!("`{tool}` is required to install a Nerd Font; {manual}")
+        }
+        Err(FontError::DirCreateFailed { dir, manual }) => {
+            format!("could not create the font directory {dir}; {manual}")
+        }
+        Err(FontError::DownloadFailed { manual }) => {
+            format!("could not download the Nerd Font; {manual}")
+        }
+        Err(FontError::ExtractFailed { manual }) => {
+            format!("could not extract the Nerd Font; {manual}")
+        }
+    };
+    vec![line]
 }
 
 /// Formats local LLM provisioning ([`local_llm::ensure`]) into printable lines.
@@ -160,10 +211,35 @@ mod tests {
     }
 
     #[test]
-    fn run_with_fix_succeeds() {
-        // In the test environment the required tools are present, so `--fix`
-        // has nothing to install and simply reports success.
-        assert!(run(true).is_ok());
+    fn doctor_lines_diagnoses_without_fix() {
+        // Without `fix`, the lines are the formatted diagnostics (every check
+        // produces one line); the runner/font dirs are unused.
+        let dir = tempfile::tempdir().expect("failed to create temp dir");
+        let storage = Storage::new(dir.path().join("usagi"));
+        let runner = FakeRunner {
+            available: vec![],
+            check: false,
+        };
+        let lines = doctor_lines(&storage, false, "macos", &[], &runner);
+        assert!(lines.iter().any(|l| l.starts_with("git")));
+        assert!(lines.iter().any(|l| l.starts_with("nerd font")));
+    }
+
+    #[test]
+    fn doctor_lines_runs_the_fix_pass() {
+        // With `fix`, the remediation lines are produced. A pre-installed font
+        // keeps `font::ensure` from downloading for real.
+        let dir = tempfile::tempdir().expect("failed to create temp dir");
+        let storage = Storage::new(dir.path().join("usagi"));
+        let runner = FakeRunner {
+            available: vec![],
+            check: false,
+        };
+        let (_guard, font_dirs) = font_dirs_with_font();
+        let lines = doctor_lines(&storage, true, "macos", &font_dirs, &runner);
+        assert!(lines
+            .iter()
+            .any(|l| l.contains("a Nerd Font is already installed")));
     }
 
     #[test]
@@ -237,15 +313,49 @@ mod tests {
         assert!(runner.spawn("ollama", &["serve"]).is_ok());
     }
 
+    /// A temp directory pre-populated with a Nerd Font, so `font::ensure`
+    /// reports it already present (the install path has its own tests). Returns
+    /// the guard (kept alive by the caller) and the dirs list to pass in.
+    fn font_dirs_with_font() -> (tempfile::TempDir, Vec<PathBuf>) {
+        let dir = tempfile::tempdir().expect("failed to create temp dir");
+        std::fs::write(dir.path().join("JetBrainsMonoNerdFont-Regular.ttf"), b"x").unwrap();
+        let dirs = vec![dir.path().to_path_buf()];
+        (dir, dirs)
+    }
+
     #[test]
     fn fix_lines_omits_local_llm_when_disabled() {
-        // All checks healthy + local LLM off: only the standard success line.
+        // All checks healthy + local LLM off: the standard success line followed
+        // by the (idempotent) Nerd Font report.
         let runner = FakeRunner {
             available: vec![],
             check: false,
         };
-        let lines = fix_lines(&[], "macos", &LocalLlm::default(), &runner);
-        assert_eq!(lines, vec!["All required tools are installed 🎉"]);
+        let (_guard, dirs) = font_dirs_with_font();
+        let lines = fix_lines(&[], "macos", &LocalLlm::default(), &dirs, &runner);
+        assert_eq!(
+            lines,
+            vec![
+                "All required tools are installed 🎉",
+                "a Nerd Font is already installed",
+            ]
+        );
+    }
+
+    #[test]
+    fn fix_lines_installs_a_nerd_font_when_missing() {
+        // No font present and the download tools available: the font is fetched
+        // and its install line is appended after the tools report.
+        let runner = FakeRunner {
+            available: vec!["curl", "unzip"],
+            check: false,
+        };
+        let dir = tempfile::tempdir().expect("failed to create temp dir");
+        let dirs = vec![dir.path().to_path_buf()];
+        let lines = fix_lines(&[], "macos", &LocalLlm::default(), &dirs, &runner);
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0], "All required tools are installed 🎉");
+        assert!(lines[1].starts_with("installed the JetBrainsMono Nerd Font into"));
     }
 
     #[test]
@@ -260,11 +370,13 @@ mod tests {
             enabled: true,
             model: "qwen2.5-coder:7b".to_string(),
         };
-        let lines = fix_lines(&[], "macos", &local_llm, &runner);
+        let (_guard, dirs) = font_dirs_with_font();
+        let lines = fix_lines(&[], "macos", &local_llm, &dirs, &runner);
         assert_eq!(
             lines,
             vec![
                 "All required tools are installed 🎉",
+                "a Nerd Font is already installed",
                 "ollama is already installed",
                 "ollama server is already running",
                 "local LLM model `qwen2.5-coder:7b` is already pulled",
@@ -284,15 +396,64 @@ mod tests {
             enabled: true,
             model: "qwen2.5:7b".to_string(),
         };
-        let lines = fix_lines(&[], "macos", &local_llm, &runner);
+        let (_guard, dirs) = font_dirs_with_font();
+        let lines = fix_lines(&[], "macos", &local_llm, &dirs, &runner);
         assert_eq!(
             lines,
             vec![
                 "All required tools are installed 🎉",
+                "a Nerd Font is already installed",
                 "installed `ollama` via ollama.com/install.sh",
                 "ollama server is already running",
                 "pulled local LLM model `qwen2.5:7b`",
             ]
+        );
+    }
+
+    #[test]
+    fn render_font_fix_describes_each_step_and_error() {
+        assert_eq!(
+            render_font_fix(&Ok(FontStep::AlreadyPresent)),
+            vec!["a Nerd Font is already installed"]
+        );
+        assert_eq!(
+            render_font_fix(&Ok(FontStep::Installed {
+                font: "JetBrainsMono",
+                dir: "/fonts".to_string(),
+            })),
+            vec!["installed the JetBrainsMono Nerd Font into /fonts"]
+        );
+        assert_eq!(
+            render_font_fix(&Err(FontError::Unsupported {
+                manual: "M".to_string(),
+            })),
+            vec!["could not install a Nerd Font automatically; M"]
+        );
+        assert_eq!(
+            render_font_fix(&Err(FontError::ToolMissing {
+                tool: "curl",
+                manual: "M".to_string(),
+            })),
+            vec!["`curl` is required to install a Nerd Font; M"]
+        );
+        assert_eq!(
+            render_font_fix(&Err(FontError::DirCreateFailed {
+                dir: "/fonts".to_string(),
+                manual: "M".to_string(),
+            })),
+            vec!["could not create the font directory /fonts; M"]
+        );
+        assert_eq!(
+            render_font_fix(&Err(FontError::DownloadFailed {
+                manual: "M".to_string(),
+            })),
+            vec!["could not download the Nerd Font; M"]
+        );
+        assert_eq!(
+            render_font_fix(&Err(FontError::ExtractFailed {
+                manual: "M".to_string(),
+            })),
+            vec!["could not extract the Nerd Font; M"]
         );
     }
 
