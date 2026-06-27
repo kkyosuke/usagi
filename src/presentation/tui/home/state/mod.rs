@@ -496,6 +496,24 @@ pub struct HomeState {
     /// open-eyed moods ignore it (they animate off the blink instead), so it only
     /// matters while a session is live and the loop is already ticking.
     mascot_tick: usize,
+    /// The one-shot reaction the mascot is playing after being clicked, or `None`
+    /// while it rests. [`kick_mascot_reaction`](Self::kick_mascot_reaction) sets it
+    /// (picking one pseudo-randomly), the renderer reads it to draw the burst, and
+    /// [`tick_mascot`](Self::tick_mascot) clears it once
+    /// [`mascot_reaction_deadline`](Self::mascot_reaction_deadline) passes.
+    mascot_reaction: Option<crate::presentation::tui::widgets::MascotReaction>,
+    /// When set, the click reaction plays until this instant, then
+    /// [`tick_mascot`](Self::tick_mascot) drops it back to rest — the same
+    /// deadline-on-the-clock shape as the blink.
+    mascot_reaction_deadline: Option<Instant>,
+    /// The value of [`mascot_tick`](Self::mascot_tick) when the current reaction
+    /// began, so [`mascot_reaction_phase`](Self::mascot_reaction_phase) yields a
+    /// from-zero sub-frame counter for the reaction's animation.
+    mascot_reaction_start_tick: usize,
+    /// A tiny linear-congruential state advanced on each click to pick the next
+    /// reaction. Deterministic (seeded at zero) so it is unit-testable, while still
+    /// cycling through the reactions in a varied, shuffled-feeling order.
+    mascot_reaction_rng: u32,
     /// The single sink that persists operation-failure error lines to the daily
     /// log file. [`log_error`](Self::log_error) and the failure lines applied from
     /// background tasks / session outcomes flow through it, so an on-screen
@@ -520,6 +538,12 @@ pub struct HomeState {
 /// loop's `ANIM_TICK`, so the blink spans a couple of paints — long enough to
 /// read as a blink, short enough to feel natural — before the eyes reopen.
 const MASCOT_BLINK: Duration = Duration::from_millis(180);
+
+/// How long a click reaction plays before the mascot settles back to rest. Spans
+/// several of the loop's `ANIM_TICK`s, so the reaction's little animation has room
+/// to cycle a few frames — long enough to read as a playful burst, short enough to
+/// stay out of the way.
+const MASCOT_REACTION: Duration = Duration::from_millis(660);
 
 impl HomeState {
     /// Builds the screen state for `workspace_name` and its `worktrees`. An
@@ -573,6 +597,10 @@ impl HomeState {
             mascot_blink_deadline: None,
             mascot_blinking: false,
             mascot_tick: 0,
+            mascot_reaction: None,
+            mascot_reaction_deadline: None,
+            mascot_reaction_start_tick: 0,
+            mascot_reaction_rng: 0,
             logger: Box::new(crate::infrastructure::error_log::NoopLogger),
             now: Utc::now(),
         }
@@ -666,6 +694,8 @@ impl HomeState {
         if !enabled {
             self.mascot_blink_deadline = None;
             self.mascot_blinking = false;
+            self.mascot_reaction = None;
+            self.mascot_reaction_deadline = None;
         }
     }
 
@@ -679,6 +709,53 @@ impl HomeState {
     /// The mascot's slow pose counter, driving the 没入 Working rabbit's paw.
     pub fn mascot_tick(&self) -> usize {
         self.mascot_tick
+    }
+
+    /// The one-shot reaction the mascot is playing after a click, or `None` while
+    /// it rests. The renderer reads it (with [`mascot_reaction_phase`](Self::mascot_reaction_phase))
+    /// to draw the burst over the resting mascot.
+    pub fn mascot_reaction(&self) -> Option<crate::presentation::tui::widgets::MascotReaction> {
+        self.mascot_reaction
+    }
+
+    /// The current reaction's sub-frame counter, counting up from zero since it
+    /// began — the live tick minus the tick the reaction started on. The widget
+    /// cycles its frames modulo their length, so this can advance freely.
+    pub fn mascot_reaction_phase(&self) -> usize {
+        self.mascot_tick
+            .wrapping_sub(self.mascot_reaction_start_tick)
+    }
+
+    /// Whether a click reaction is in flight, so the event loop keeps ticking (and
+    /// repainting) until it finishes — the burst animates on the live tick, exactly
+    /// like a blink keeps the loop awake until the eyes reopen.
+    pub fn mascot_reacting(&self) -> bool {
+        self.mascot_reaction.is_some()
+    }
+
+    /// Start a click reaction: pick one of the [`MascotReaction`](crate::presentation::tui::widgets::MascotReaction)s
+    /// pseudo-randomly and play it until [`MASCOT_REACTION`] from `now`. The event
+    /// loop calls this when the user clicks the sidebar rabbit in 切替 / 在席, so the
+    /// usagi does something cute back. A no-op when the mascot animation is
+    /// disabled, so a toggled-off mascot stays a still resting image.
+    pub fn kick_mascot_reaction(&mut self, now: Instant) {
+        if !self.mascot_animation_enabled {
+            return;
+        }
+        // Advance a small LCG and pick from it, so repeated clicks vary rather than
+        // replaying the same reaction; the constants are the well-known Numerical
+        // Recipes multiplier/increment, and the high bits (the most well-mixed) pick.
+        self.mascot_reaction_rng = self
+            .mascot_reaction_rng
+            .wrapping_mul(1_664_525)
+            .wrapping_add(1_013_904_223);
+        self.mascot_reaction = Some(match (self.mascot_reaction_rng >> 24) % 3 {
+            0 => crate::presentation::tui::widgets::MascotReaction::Hop,
+            1 => crate::presentation::tui::widgets::MascotReaction::Sparkle,
+            _ => crate::presentation::tui::widgets::MascotReaction::Bashful,
+        });
+        self.mascot_reaction_deadline = Some(now + MASCOT_REACTION);
+        self.mascot_reaction_start_tick = self.mascot_tick;
     }
 
     /// Start a blink: shut the mascot's eyes until [`MASCOT_BLINK`] from `now`. The
@@ -709,6 +786,14 @@ impl HomeState {
                 false
             }
         };
+        // End a click reaction once its window has passed, settling the mascot back
+        // to its resting pose — the same deadline-on-the-clock shape as the blink.
+        if let Some(deadline) = self.mascot_reaction_deadline {
+            if now >= deadline {
+                self.mascot_reaction = None;
+                self.mascot_reaction_deadline = None;
+            }
+        }
         // Bounded so a long-lived session never overflows it; the Working face
         // only reads it modulo a small period.
         self.mascot_tick = self.mascot_tick.wrapping_add(1);

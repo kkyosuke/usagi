@@ -149,6 +149,76 @@ fn mascot_tick_advances_only_while_animation_is_enabled() {
 }
 
 #[test]
+fn mascot_reacts_on_a_click_then_settles_after_the_window() {
+    use std::time::{Duration, Instant};
+    let mut state = state();
+    let t0 = Instant::now();
+    // Resting: no reaction in flight.
+    state.tick_mascot(t0);
+    assert!(!state.mascot_reacting());
+    assert_eq!(state.mascot_reaction(), None);
+    // A click kicks a reaction that plays for the reaction window.
+    state.kick_mascot_reaction(t0);
+    assert!(state.mascot_reacting());
+    assert!(state.mascot_reaction().is_some());
+    state.tick_mascot(t0 + Duration::from_millis(100));
+    assert!(state.mascot_reacting());
+    // Once the window passes the reaction settles back to rest and stays settled.
+    state.tick_mascot(t0 + Duration::from_millis(700));
+    assert!(!state.mascot_reacting());
+    assert_eq!(state.mascot_reaction(), None);
+    state.tick_mascot(t0 + Duration::from_millis(900));
+    assert!(!state.mascot_reacting());
+}
+
+#[test]
+fn mascot_reaction_phase_counts_from_the_click() {
+    use std::time::{Duration, Instant};
+    let mut state = state();
+    let t0 = Instant::now();
+    // Advance the live tick a few times so the reaction's start tick is non-zero.
+    state.tick_mascot(t0);
+    state.tick_mascot(t0);
+    state.kick_mascot_reaction(t0);
+    // Right after the kick the phase is zero (no tick has advanced since).
+    assert_eq!(state.mascot_reaction_phase(), 0);
+    // Each in-window tick advances the phase by one, counting from the click.
+    state.tick_mascot(t0 + Duration::from_millis(100));
+    assert_eq!(state.mascot_reaction_phase(), 1);
+    state.tick_mascot(t0 + Duration::from_millis(200));
+    assert_eq!(state.mascot_reaction_phase(), 2);
+}
+
+#[test]
+fn mascot_reaction_varies_across_repeated_clicks() {
+    use std::time::Instant;
+    let mut state = state();
+    let t = Instant::now();
+    // Repeated clicks pick from all three reactions rather than replaying one.
+    let mut seen = std::collections::HashSet::new();
+    for _ in 0..12 {
+        state.kick_mascot_reaction(t);
+        seen.insert(state.mascot_reaction());
+    }
+    assert!(seen.len() >= 2, "repeated clicks vary the reaction");
+}
+
+#[test]
+fn disabling_mascot_animation_makes_a_click_inert_and_clears_a_reaction() {
+    use std::time::Instant;
+    let mut state = state();
+    let t = Instant::now();
+    // A reaction in flight is cleared the moment the mascot is turned off.
+    state.kick_mascot_reaction(t);
+    assert!(state.mascot_reacting());
+    state.set_mascot_animation_enabled(false);
+    assert!(!state.mascot_reacting());
+    // And a click on a disabled mascot kicks nothing.
+    state.kick_mascot_reaction(t);
+    assert!(!state.mascot_reacting());
+}
+
+#[test]
 fn disabling_mascot_animation_clears_a_blink_in_flight() {
     use std::time::Instant;
     let mut state = state();
