@@ -1207,6 +1207,21 @@ impl HomeState {
         &self.list
     }
 
+    /// Reflects freshly detected pull-request links in the sidebar `#N` badge of
+    /// the session row at `root`, without waiting for the next workspace re-sync.
+    ///
+    /// The attached pane calls this when it spots a new `/pull/<N>` URL in the
+    /// shell output, passing the PR-link store's accumulated set so the live badge
+    /// matches what a later re-sync would fold in from `pr-links/`. Returns whether
+    /// anything changed, so the caller repaints only when it did.
+    pub fn set_pr_links(
+        &mut self,
+        root: &Path,
+        prs: Vec<crate::domain::workspace_state::PrLink>,
+    ) -> bool {
+        self.list.set_pr_links(root, prs)
+    }
+
     pub fn mode(&self) -> Mode {
         self.mode
     }
