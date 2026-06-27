@@ -12,9 +12,11 @@ use crate::usecase::issue::{
     annotate_all, dependency_tree, gantt, list_line, stats_line, IssueStats, ListedIssue,
 };
 
-/// Line-width budget for the `issue gantt` chart, matching the text modal's
-/// inner width so bars fill the box without being clipped.
-const GANTT_WIDTH: usize = 60;
+/// Line-width budget for the `issue gantt` chart. It renders in the large,
+/// terminal-filling modal (like `man`), so the budget matches that box's widest
+/// inner width ([`widgets::LARGE_MODAL_MAX_INNER`]) — bars and titles fill the
+/// box, and a narrower terminal only clips the (clippable) trailing title.
+const GANTT_WIDTH: usize = widgets::LARGE_MODAL_MAX_INNER;
 
 /// `man` / `help`: lists every command, or describes one.
 pub(super) struct ManCommand;
@@ -563,7 +565,7 @@ fn issue_graph(ctx: &CommandContext) -> CommandResult {
     lines.push(LogLine::output(stats_line(&IssueStats::from_listed(
         &listed,
     ))));
-    CommandResult::modal("Issue graph", lines)
+    CommandResult::large_modal("Issue graph", lines)
 }
 
 /// `issue gantt`: a date-axis Gantt chart with a progress footer.
@@ -580,7 +582,7 @@ fn issue_gantt(ctx: &CommandContext) -> CommandResult {
     lines.push(LogLine::output(stats_line(&IssueStats::from_listed(
         &listed,
     ))));
-    CommandResult::modal("Issue gantt", lines)
+    CommandResult::large_modal("Issue gantt", lines)
 }
 
 /// `issue show <number>`: one issue's full markdown (frontmatter + body).
