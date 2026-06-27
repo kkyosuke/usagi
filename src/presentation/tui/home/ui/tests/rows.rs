@@ -222,6 +222,7 @@ fn worktree_row_marks_the_cursor_in_switch_and_shows_detached() {
         "",
         10,
         10,
+        DetailCols::default(),
         false,
         Utc::now(),
         true,
@@ -242,6 +243,7 @@ fn worktree_row_marks_the_cursor_in_switch_and_shows_detached() {
         "",
         10,
         10,
+        DetailCols::default(),
         false,
         Utc::now(),
         true,
@@ -259,6 +261,7 @@ fn worktree_row_marks_the_cursor_in_switch_and_shows_detached() {
         "",
         10,
         10,
+        DetailCols::default(),
         false,
         Utc::now(),
         false,
@@ -278,6 +281,7 @@ fn worktree_row_marks_the_cursor_in_switch_and_shows_detached() {
         "",
         10,
         10,
+        DetailCols::default(),
         false,
         Utc::now(),
         false,
@@ -300,6 +304,7 @@ fn worktree_row_shows_a_memo_marker_only_when_the_session_has_a_note() {
         "",
         10,
         10,
+        DetailCols::default(),
         true,
         Utc::now(),
         false,
@@ -316,6 +321,7 @@ fn worktree_row_shows_a_memo_marker_only_when_the_session_has_a_note() {
         "",
         10,
         10,
+        DetailCols::default(),
         false,
         Utc::now(),
         false,
@@ -349,7 +355,20 @@ fn worktree_row_heat_dot_fades_with_time_since_touched() {
             ..worktree(Some("s"), false, BranchStatus::Local)
         };
         let (top, _) = worktree_row(
-            &worktree, "", 10, 10, false, now, false, false, false, false, false, false, false,
+            &worktree,
+            "",
+            10,
+            10,
+            DetailCols::default(),
+            false,
+            now,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
         );
         console::strip_ansi_codes(&top).into_owned()
     };
@@ -369,6 +388,7 @@ fn worktree_row_marks_the_active_worktree_with_a_gutter_bar_on_both_lines() {
         "",
         10,
         10,
+        DetailCols::default(),
         false,
         Utc::now(),
         false,
@@ -390,6 +410,7 @@ fn worktree_row_marks_the_active_worktree_with_a_gutter_bar_on_both_lines() {
         "",
         10,
         10,
+        DetailCols::default(),
         false,
         Utc::now(),
         false,
@@ -412,6 +433,7 @@ fn worktree_row_shows_the_agent_state_through_its_lifecycle() {
         "",
         10,
         12,
+        DetailCols::default(),
         false,
         Utc::now(),
         false,
@@ -431,6 +453,7 @@ fn worktree_row_shows_the_agent_state_through_its_lifecycle() {
         "",
         10,
         12,
+        DetailCols::default(),
         false,
         Utc::now(),
         false,
@@ -450,6 +473,7 @@ fn worktree_row_shows_the_agent_state_through_its_lifecycle() {
         "",
         10,
         12,
+        DetailCols::default(),
         false,
         Utc::now(),
         false,
@@ -470,6 +494,7 @@ fn worktree_row_shows_the_agent_state_through_its_lifecycle() {
         "",
         10,
         12,
+        DetailCols::default(),
         false,
         Utc::now(),
         false,
@@ -490,6 +515,7 @@ fn worktree_row_shows_the_agent_state_through_its_lifecycle() {
         "",
         10,
         12,
+        DetailCols::default(),
         false,
         Utc::now(),
         false,
@@ -532,6 +558,7 @@ fn worktree_row_truncates_a_long_branch() {
         "",
         8,
         8,
+        DetailCols::default(),
         false,
         Utc::now(),
         false,
@@ -552,6 +579,7 @@ fn worktree_row_shows_the_label_override_instead_of_the_branch() {
         "Login flow",
         20,
         20,
+        DetailCols::default(),
         false,
         Utc::now(),
         false,
@@ -704,6 +732,69 @@ fn left_pane_shows_the_ahead_behind_marker_on_the_detail_line() {
     assert!(
         detail.contains("↑2 ↓1"),
         "{detail:?} missing the ahead/behind marker"
+    );
+}
+
+#[test]
+fn left_pane_lines_the_detail_fields_up_across_sessions_of_different_sizes() {
+    use crate::domain::workspace_state::{AheadBehind, DiffStat};
+    let now = chrono::DateTime::parse_from_rfc3339("2026-06-27T12:00:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    // A tiny, just-touched session with a live agent…
+    let mut small = worktree(Some("small"), false, BranchStatus::Local);
+    small.path = PathBuf::from("/repo/small");
+    small.updated_at = now - chrono::Duration::seconds(30);
+    small.diff = Some(DiffStat {
+        added: 5,
+        removed: 3,
+    });
+    small.ahead_behind = Some(AheadBehind {
+        ahead: 2,
+        behind: 0,
+    });
+    // …beside a much larger, staler one with no agent. The change counts differ by
+    // orders of magnitude and the "ago" labels differ in width.
+    let mut big = worktree(Some("big"), false, BranchStatus::Local);
+    big.path = PathBuf::from("/repo/big");
+    big.updated_at = now - chrono::Duration::minutes(12);
+    big.diff = Some(DiffStat {
+        added: 140,
+        removed: 88,
+    });
+    big.ahead_behind = Some(AheadBehind {
+        ahead: 0,
+        behind: 7,
+    });
+    let live = HashSet::from([PathBuf::from("/repo/small")]);
+    let lines = left_pane(
+        &list_with(vec![small, big]),
+        &live,
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashSet::new(),
+        80,
+        8,
+        false,
+        Sidebar::Full,
+        now,
+    );
+    // Detail lines: small at index 4, big at index 6.
+    let small_detail = console::strip_ansi_codes(&lines[4]);
+    let big_detail = console::strip_ansi_codes(&lines[6]);
+    assert!(small_detail.contains("☾ ready")); // the live agent's label
+    assert!(small_detail.contains("+  5 - 3")); // counts padded to the wide columns
+    assert!(big_detail.contains("+140 -88"));
+    assert!(big_detail.contains("12min ago"));
+    // The diff `+` lands in the same display column on both rows regardless of how
+    // many changed lines each carries — the point of the fixed columns.
+    let col_of =
+        |s: &str, ch: char| console::measure_text_width(&s[..s.find(ch).expect("char present")]);
+    assert_eq!(col_of(&small_detail, '+'), col_of(&big_detail, '+'));
+    // Both detail lines fill the same width, so the cluster's right edge lines up.
+    assert_eq!(
+        console::measure_text_width(&small_detail),
+        console::measure_text_width(&big_detail)
     );
 }
 
