@@ -202,6 +202,40 @@ impl AheadBehind {
     }
 }
 
+/// A pull request discovered for a worktree: its number and the URL to open.
+///
+/// usagi does not query GitHub for this — it is harvested by scanning the
+/// embedded agent's terminal output for pull-request URLs of the form
+/// `https://<host>/<owner>/<repo>/pull/<N>` (see
+/// [`crate::presentation::tui::home::terminal::link::pr_links`]). The sidebar
+/// shows `#<number>` and a click opens [`url`](Self::url) in the default browser.
+/// A session may carry several — one per repository it touches, or several opened
+/// over its life — so they are kept as a list ([`WorktreeState::pr`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrLink {
+    /// The pull request number — the `<N>` of the `/pull/<N>` path. Shown as
+    /// `#<number>`.
+    pub number: u32,
+    /// The full URL to open in the browser when the badge is clicked.
+    pub url: String,
+}
+
+impl PrLink {
+    /// Roll a session's per-worktree pull requests up into the single list its
+    /// sidebar row shows: every worktree's PRs, in order, with duplicates (same
+    /// `url`) dropped so a PR shared across repositories is listed once. Empty when
+    /// no worktree of the session has a PR.
+    pub fn aggregate(prs: impl IntoIterator<Item = PrLink>) -> Vec<PrLink> {
+        let mut out: Vec<PrLink> = Vec::new();
+        for pr in prs {
+            if !out.iter().any(|p| p.url == pr.url) {
+                out.push(pr);
+            }
+        }
+        out
+    }
+}
+
 /// State of a single worktree (a branch checked out into a directory).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WorktreeState {
@@ -243,6 +277,15 @@ pub struct WorktreeState {
     /// [`status`](Self::status) and [`diff`](Self::diff).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ahead_behind: Option<AheadBehind>,
+    /// The pull requests discovered for this worktree — one per `/pull/<N>` URL the
+    /// embedded agent has printed, in the order first seen (a session may open
+    /// several across the repositories it touches). Unlike the git-derived fields
+    /// above this is **not** re-read from git on refresh: it is harvested from the
+    /// agent's terminal output and persisted so the sidebar keeps showing the
+    /// `#<number>` badges across restarts. Empty (and omitted from the file) when
+    /// none has been seen, and an older file without it loads empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pr: Vec<PrLink>,
     /// When this worktree's state was last refreshed.
     pub updated_at: DateTime<Utc>,
 }
@@ -317,6 +360,13 @@ pub struct WorkspaceState {
     /// workspace tree. Empty (and omitted from older files) when none exist.
     #[serde(default)]
     pub sessions: Vec<SessionRecord>,
+    /// A free-form, multi-line note attached to the workspace **root** (the `⌂
+    /// root` row, which belongs to no session) — the same scratch space sessions
+    /// carry in [`SessionRecord::note`], but for the workspace itself. Display /
+    /// UX only. `None` (the default, and omitted from the file) means no root note
+    /// has been written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root_note: Option<String>,
     /// When the state was last refreshed from git.
     pub updated_at: DateTime<Utc>,
 }
@@ -325,8 +375,14 @@ impl WorkspaceState {
     pub fn new() -> Self {
         Self {
             sessions: Vec::new(),
+            root_note: None,
             updated_at: Utc::now(),
         }
+    }
+
+    /// The workspace root's note, or `None` when none has been written.
+    pub fn root_note(&self) -> Option<&str> {
+        self.root_note.as_deref()
     }
 }
 
@@ -340,6 +396,27 @@ impl Default for WorkspaceState {
 mod tests {
     use super::*;
     use chrono::TimeZone;
+
+    #[test]
+    fn root_note_round_trips_and_is_omitted_when_absent() {
+        // A default state has no root note; the accessor and the serialized form
+        // both reflect that — the field is omitted from the file entirely.
+        let mut state = WorkspaceState::new();
+        assert_eq!(state.root_note(), None);
+        let json = serde_json::to_string(&state).unwrap();
+        assert!(!json.contains("root_note"));
+        // An older file with no `root_note` key still loads (the field defaults).
+        let restored: WorkspaceState =
+            serde_json::from_str(r#"{"updated_at":"2026-06-13T05:01:18.659149Z"}"#).unwrap();
+        assert_eq!(restored.root_note(), None);
+
+        // A set root note round-trips through the file and the accessor.
+        state.root_note = Some("root memo".to_string());
+        let json = serde_json::to_string(&state).unwrap();
+        assert!(json.contains("root_note"));
+        let restored: WorkspaceState = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.root_note(), Some("root memo"));
+    }
 
     #[test]
     fn branch_status_as_str_and_display_match() {
@@ -507,6 +584,60 @@ mod tests {
     }
 
     #[test]
+    fn pr_link_aggregate_collects_every_pr_and_drops_duplicate_urls() {
+        let a = PrLink {
+            number: 12,
+            url: "https://github.com/o/r/pull/12".to_string(),
+        };
+        let b = PrLink {
+            number: 34,
+            url: "https://github.com/o/s/pull/34".to_string(),
+        };
+        // Every PR is collected, in order; a duplicate `url` is listed once.
+        assert_eq!(
+            PrLink::aggregate([a.clone(), b.clone(), a.clone()]),
+            vec![a, b]
+        );
+        // No worktree carries a PR → empty.
+        assert_eq!(PrLink::aggregate(std::iter::empty()), Vec::new());
+    }
+
+    #[test]
+    fn pr_is_omitted_when_empty_and_round_trips_when_set() {
+        let mut state = WorkspaceState::new();
+        state.sessions.push(SessionRecord {
+            name: "feature-x".to_string(),
+            display_name: None,
+            note: None,
+            root: PathBuf::from("/repo/.usagi/sessions/feature-x"),
+            worktrees: vec![sample_worktree()],
+            created_at: Utc::now(),
+            last_active: None,
+        });
+        // No PR → the key is dropped from the file and an older file parses.
+        let json = serde_json::to_string(&state).unwrap();
+        assert!(!json.contains("\"pr\""));
+
+        // Discovered PRs are stored as a list, and round-trip through JSON.
+        state.sessions[0].worktrees[0].pr = vec![
+            PrLink {
+                number: 412,
+                url: "https://github.com/KKyosuke/usagi/pull/412".to_string(),
+            },
+            PrLink {
+                number: 98,
+                url: "https://github.com/KKyosuke/other/pull/98".to_string(),
+            },
+        ];
+        let json = serde_json::to_string(&state).unwrap();
+        assert!(json.contains("\"pr\":[{\"number\":412,"));
+        assert_eq!(
+            serde_json::from_str::<WorkspaceState>(&json).unwrap(),
+            state
+        );
+    }
+
+    #[test]
     fn diff_is_omitted_when_absent_and_round_trips_when_set() {
         let mut state = WorkspaceState::new();
         state.sessions.push(SessionRecord {
@@ -545,6 +676,7 @@ mod tests {
             status: BranchStatus::Pushed,
             diff: None,
             ahead_behind: None,
+            pr: Vec::new(),
             updated_at: Utc::now(),
         }
     }

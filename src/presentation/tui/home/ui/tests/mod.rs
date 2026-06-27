@@ -6,11 +6,12 @@ use super::super::command::{CommandHint, CommandInfo};
 use super::super::state::{LogLine, ModalSize, Preview, TextModal, WorktreeList, ROOT_NAME};
 use super::super::terminal::pool::MonitorSnapshot;
 use super::super::terminal::view::TerminalView;
+use crate::domain::resource::ResourceUsage;
 use crate::domain::settings::{SessionActionUi, Sidebar};
-use crate::domain::workspace_state::{BranchStatus, SessionRecord, WorktreeState};
+use crate::domain::workspace_state::{BranchStatus, PrLink, SessionRecord, WorktreeState};
 use crate::presentation::tui::markdown::{LineStyle, MarkdownLine, Span, SpanStyle};
 use chrono::Utc;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 fn worktree(branch: Option<&str>, primary: bool, status: BranchStatus) -> WorktreeState {
@@ -23,12 +24,24 @@ fn worktree(branch: Option<&str>, primary: bool, status: BranchStatus) -> Worktr
         status,
         diff: None,
         ahead_behind: None,
+        pr: Vec::new(),
         updated_at: Utc::now(),
     }
 }
 
 fn list_with(worktrees: Vec<WorktreeState>) -> WorktreeList {
     WorktreeList::new("usagi", worktrees)
+}
+
+/// A `main` worktree carrying pull request `#<number>`, for the PR-badge and
+/// sidebar-click tests.
+fn worktree_with_pr(number: u32) -> WorktreeState {
+    let mut wt = worktree(Some("main"), false, BranchStatus::Pushed);
+    wt.pr = vec![PrLink {
+        number,
+        url: format!("https://github.com/o/r/pull/{number}"),
+    }];
+    wt
 }
 
 fn state_with(worktrees: Vec<WorktreeState>) -> HomeState {

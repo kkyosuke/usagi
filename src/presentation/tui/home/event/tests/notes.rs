@@ -16,7 +16,6 @@ fn switch_n_opens_the_note_editor_edits_the_buffer_and_saves() {
 
     let mut keys = vec![
         Ok(Key::Char(CTRL_O)),     // no-op at base Switch (cursor already on root)
-        Ok(Key::Char('n')),        // `n` on the root row: a no-op (not a session)
         Ok(Key::ArrowDown),        // root -> alpha
         Ok(Key::Char('n')),        // open the note editor for alpha
         Ok(Key::Tab),              // ignored inside the editor
@@ -49,6 +48,41 @@ fn switch_n_opens_the_note_editor_edits_the_buffer_and_saves() {
     assert_eq!(
         *recorded.borrow(),
         vec![("alpha".to_string(), "ab\nz".to_string())]
+    );
+}
+
+#[test]
+fn switch_n_on_the_root_row_edits_and_saves_the_workspace_root_note() {
+    // 切替, `n` on the `⌂ root` row opens the editor targeting the workspace root
+    // (`root`); Ctrl-S persists it through `set_note` under that name.
+    let recorded = RefCell::new(Vec::<(String, String)>::new());
+    let mut set_note = |name: &str, text: &str| {
+        recorded
+            .borrow_mut()
+            .push((name.to_string(), text.to_string()));
+        noop_set_note(name, text)
+    };
+    let mut open: fn(&mut HomeState, &Path, bool, bool) -> Result<PaneExit> = noop_open;
+    let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = noop_preview;
+
+    // The cursor starts on the root row, so `n` edits the root note straight away.
+    let mut keys = vec![Ok(Key::Char('n'))];
+    keys.extend(typed("hi"));
+    keys.push(Ok(Key::Char(CTRL_S))); // save
+    keys.push(Ok(Key::CtrlC)); // quit
+
+    let outcome = run_notes(
+        keys,
+        state_with_sessions(&["alpha"]),
+        &mut open,
+        &mut preview,
+        &mut set_note,
+    )
+    .unwrap();
+    assert!(matches!(outcome, Outcome::Quit));
+    assert_eq!(
+        *recorded.borrow(),
+        vec![("root".to_string(), "hi".to_string())]
     );
 }
 
@@ -312,9 +346,10 @@ fn attached_ctrl_e_re_attaches_on_cancel_without_saving() {
 }
 
 #[test]
-fn attached_ctrl_e_on_the_root_row_re_attaches_without_opening_an_editor() {
-    // The root row is the workspace, not a session: Ctrl-E there opens no editor
-    // and simply re-attaches the pane.
+fn attached_ctrl_e_on_the_root_row_opens_the_editor_and_saves_the_workspace_root_note() {
+    // The root row carries its own note: Ctrl-E in 没入 (reported as OpenNote)
+    // opens the editor over the (detached) pane, and Ctrl-S persists it under
+    // `root` and re-attaches — exactly like a session.
     let opened = RefCell::new(0);
     let mut open = |_h: &mut HomeState, _d: &Path, _a: bool, _n: bool| {
         let mut n = opened.borrow_mut();
@@ -335,8 +370,10 @@ fn attached_ctrl_e_on_the_root_row_re_attaches_without_opening_an_editor() {
     };
 
     let mut keys = cmd("session switch root");
-    keys.push(Ok(Key::Enter)); // focus + attach root -> OpenNote
-    keys.push(Ok(Key::Escape)); // (re-attached, now Focus) -> Switch
+    keys.push(Ok(Key::Enter)); // focus + attach root -> OpenNote -> editor
+    keys.extend(typed("ws"));
+    keys.push(Ok(Key::Char(CTRL_S))); // save -> re-attach -> Closed -> Focus
+    keys.push(Ok(Key::Escape)); // Focus -> Switch
     keys.push(Ok(Key::CtrlC));
 
     let outcome = run_notes(
@@ -351,9 +388,12 @@ fn attached_ctrl_e_on_the_root_row_re_attaches_without_opening_an_editor() {
     assert_eq!(
         *opened.borrow(),
         2,
-        "the root pane is re-attached straight away"
+        "the root pane is re-attached after saving"
     );
-    assert!(recorded.borrow().is_empty());
+    assert_eq!(
+        *recorded.borrow(),
+        vec![("root".to_string(), "ws".to_string())]
+    );
 }
 
 #[test]

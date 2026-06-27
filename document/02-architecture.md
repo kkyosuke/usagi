@@ -48,6 +48,7 @@ src/
 │   ├── agent_phase.rs          # Agent のライフサイクル phase（Ready / Running / Waiting / Ended）
 │   ├── agent_feature.rs        # Agent CLI ごとの機能サポート行列の SSoT（exhaustive match で新 CLI 追加を強制）
 │   ├── repository.rs           # Git URL パース・ディレクトリ名導出
+│   ├── resource.rs             # ResourceUsage（CPU%/メモリ）と、サンプルしたプロセス表を親子でたどりルート別に合算する純粋ロジック（実計測は infrastructure/resource）
 │   ├── serde_fallback.rs       # 未知の enum 値を default に縮退させる serde ヘルパ（or_default。1 フィールドの不正値で settings.json/state.json 全体の読み込みを失敗させない）
 │   ├── settings.rs             # Settings / Theme / AgentCli / LocalLlm、LocalSettings（with_local で上書き解決）・起動ポリシー agent_wiring（純データ。起動コマンド生成は infrastructure/agent のアダプタが担う）
 │   ├── agent.rs                # Agent port（usagi が agent に求める IF：launch_command）・AgentWiring
@@ -97,11 +98,13 @@ src/
 │   ├── pty.rs                  # 疑似ターミナルセッション（portable-pty + vt100、ベル回数の計測・異常終了のログ記録）
 │   ├── pty_exit.rs             # シェル/エージェントの終了ステータスをエラーログ文へ変換する純粋ロジック（pty.rs のテスト可能な相棒）
 │   ├── release.rs              # git ls-remote --tags でリリースタグを取得（薄い IO ラッパ）
+│   ├── resource.rs             # sysinfo による実プロセスの CPU/メモリ計測（ResourceSampler トレイト + SysinfoSampler。集計は domain/resource）
 │   ├── session_monitor.rs      # 入力待ち判定の純粋ロジック（phase 優先・ベル基準値・待ち集合・アタッチ）
 │   ├── skills.rs               # バイナリ同梱スキル（assets/skills/）を ~/.usagi/skills/ へ展開（materialize）し worktree の .claude/skills/<name> をスキルごとに symlink（link、プロジェクト独自スキルと共存）。配布の仕組みは 04-orchestration が正本
-│   ├── worktree_keyed_store.rs # worktree → ファイル名（canonical path のハッシュ）導出の正本。agent_state_store / agent_prompt_store が共用
+│   ├── worktree_keyed_store.rs # worktree → ファイル名（canonical path のハッシュ）導出の正本。agent_state_store / agent_prompt_store / pr_link_store が共用
 │   ├── agent_state_store.rs    # worktree 別の Agent phase の記録/読み出し・フック JSON のパース（~/.usagi/agent-state/。遷移ポリシーは usecase/agent_phase）
 │   ├── agent_prompt_store.rs   # worktree 別に session_prompt のプロンプトをキュー/取り出し（~/.usagi/agent-prompts/）
+│   ├── pr_link_store.rs        # worktree 別に検出した PR 群（PrLink のリスト）を URL 単位で重複排除しつつ蓄積/読み出し（~/.usagi/pr-links/）。sync が state.json の pr へ畳み込む
 │   ├── agent/                  # Agent port のアダプタ（Claude は MCP・システムプロンプト・フックを serde_json で組み立てて launch コマンド生成 / Codex は MCP・システムプロンプト(developer_instructions)・フックを -c 設定上書きで注入し resume/forget も対応（Codex 互換の codex-fugu は同じ CodexAgent を起動プログラム名と rollout 保存先だけ変えて再利用）/ Gemini はインライン注入不可のため MCP/フック/system prompt は組み込まず resume(-r latest)/初期プロンプト(-i)/forget のみ配線）・session_system_prompt 共有・agent_for
 │   ├── issue_store.rs          # <repo>/.usagi/issues/ の markdown + index.json（IssueStore）
 │   └── memory_store.rs         # <repo>/.usagi/memory/ の markdown + MEMORY.md + index.json（MemoryStore）
@@ -172,6 +175,7 @@ src/
 | Git 操作 | システムの `git` コマンド | 読み取り専用検査 + worktree 追加（**git2 は不使用**） |
 | AI 連携 | Agent CLI（`claude` / `codex` / `codex-fugu` / `gemini` など）+ `ollama` サブプロセス | エージェント起動・ローカル LLM 委譲（専用クレートは持たず外部プロセスを起動） |
 | 通知 | `notify-rust` | 入力待ち時のデスクトップ通知 |
+| プロセス計測 | `sysinfo`（`system` フィーチャのみ） | 各セッションのプロセスツリーの CPU・メモリ使用量の計測（ホーム画面のリソース表示） |
 | 並列処理 | `rayon` | issue 一覧読み込みなどの並列化 |
 | シリアライズ | `serde` / `serde_json` | JSON 永続化（`serde_yaml` は不採用） |
 | 日時 | `chrono` | タイムスタンプ |

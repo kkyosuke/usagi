@@ -2,7 +2,7 @@
 //! pane (a switch preview, the focus menu/prompt, or the embedded terminal).
 //! All functions take plain data and return styled lines.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use chrono::{DateTime, Duration, Utc};
@@ -19,8 +19,9 @@ use super::{
     EMPTY_MESSAGE, HINT_INDENT, HINT_MAX, LOCAL_ICON, NAME_PREFIX, NEW_ICON, NOTE_ICON,
     PUSHED_ICON, RAIL_WIDTH, ROOT_DETAIL, STATUS_COL, SYNCED_ICON, TERMINAL_STARTING,
 };
+use crate::domain::resource::ResourceUsage;
 use crate::domain::settings::{AgentCli, SessionActionUi, Sidebar};
-use crate::domain::workspace_state::{AheadBehind, BranchStatus, DiffStat, WorktreeState};
+use crate::domain::workspace_state::{AheadBehind, BranchStatus, DiffStat, PrLink, WorktreeState};
 use crate::presentation::tui::markdown::{LineStyle, MarkdownLine, Rgb, Span, SpanStyle};
 use crate::presentation::tui::widgets;
 
@@ -200,6 +201,25 @@ fn detail_line(gutter: &str, detail: String) -> String {
     format!("{gutter}{indent}{detail}")
 }
 
+/// Builds a live session's **third** line — the CPU / memory its process tree is
+/// using — indented under the name like the detail line, with the row's `gutter`
+/// (so the active accent bar runs down it too). Spelled out as `CPU 8%  MEM 120MB`
+/// in dim text and clipped to the cell. Only live sessions get this row (the
+/// caller passes a usage only when one was sampled), so an idle session stays two
+/// lines and the list spends the extra row only where there is something to show.
+/// The line-2 cluster ([`detail_content`]) stays as it is — this carries the
+/// growing resource detail rather than crowding the already-packed detail line.
+fn resource_line(
+    usage: ResourceUsage,
+    detail_width: usize,
+    active: bool,
+    in_switch: bool,
+) -> String {
+    let text = format!("CPU {}  MEM {}", usage.format_cpu(), usage.format_memory());
+    let detail = style(clip_to_width(&text, detail_width)).dim().to_string();
+    detail_line(&gutter_cell(false, active, in_switch), detail)
+}
+
 /// The line-1 cell between the session name and the right-edge git status: a
 /// yellow [`NOTE_ICON`] when the session carries a note, else blank. Three
 /// display columns wide either way (a leading and trailing space frame the
@@ -227,6 +247,7 @@ pub(super) fn worktree_row(
     label: &str,
     name_width: usize,
     detail_width: usize,
+    cols: DetailCols,
     has_note: bool,
     now: DateTime<Utc>,
     selected: bool,
@@ -256,129 +277,264 @@ pub(super) fn worktree_row(
     let line1 = format!("{gutter} {kind} {branch}{note}{status}");
 
     // Line 2 spells out the agent state with its icon (blank when absent) on the
-    // left, and a right-aligned cluster of the freshness label (`N分前`) and the
-    // `+N -M` diff badge at the cell's far edge so the badges line up down the
-    // list. The agent label is clipped to the room left of the cluster. Only the
-    // active bar runs down to it — the `>` cursor stays a single point on line 1,
-    // so the detail-line gutter ignores the cursor.
-    let badge = diff_badge(worktree.diff);
-    let commits = ahead_behind_badge(worktree.ahead_behind);
-    let time = Some(relative_time(now, worktree.updated_at));
-    let detail = detail_content(
-        AgentState::from_flags(live, running, waiting, done),
-        time,
-        commits,
-        badge,
-        detail_width,
-    );
+    // left, and a right-aligned cluster of the freshness label (`Nmin ago`), the
+    // commit-divergence marker (`↑N ↓M`), the `+N -M` diff badge, and the `#N` PR
+    // badge. Each field sits in a fixed-width column sized once per render (`cols`),
+    // so a session's time, commits, diff, and PR always land in the same place no
+    // matter how many changed lines or how long ago it was touched. Only the active
+    // bar runs down to it — the `>` cursor stays a single point on line 1, so the
+    // detail-line gutter ignores the cursor.
+    let agent = AgentState::from_flags(live, running, waiting, done);
+    let mut cells = Vec::new();
+    if cols.time > 0 {
+        cells.push(rpad(&relative_time(now, worktree.updated_at), cols.time));
+    }
+    if cols.ahead > 0 || cols.behind > 0 {
+        cells.push(commits_cell(worktree.ahead_behind, cols.ahead, cols.behind));
+    }
+    if cols.added > 0 {
+        cells.push(diff_cell(worktree.diff, cols.added, cols.removed));
+    }
+    if cols.pr > 0 {
+        cells.push(pr_cell(&worktree.pr, cols.pr));
+    }
+    let detail = detail_content(agent, &cells, detail_width);
     let line2 = detail_line(&gutter_cell(false, active, in_switch), detail);
     (line1, line2)
 }
 
 /// A compact, dimmed freshness label for how long ago `then` was relative to
-/// `now`: `たった今` under a minute, then `N分前` / `N時間前` / `N日前`. A `then`
-/// in the future (clock skew) clamps to `たった今`. Shown on line 2 so a glance
+/// `now`: `now` under a minute, then `Nmin ago` / `Nh ago` / `Nd ago`. A `then`
+/// in the future (clock skew) clamps to `now`. Shown on line 2 so a glance
 /// tells the stale sessions from the freshly-touched ones.
 fn relative_time(now: DateTime<Utc>, then: DateTime<Utc>) -> String {
     let secs = (now - then).num_seconds().max(0);
     let label = if secs < 60 {
-        "たった今".to_string()
+        "now".to_string()
     } else if secs < 3600 {
-        format!("{}分前", secs / 60)
+        format!("{}min ago", secs / 60)
     } else if secs < 86_400 {
-        format!("{}時間前", secs / 3600)
+        format!("{}h ago", secs / 3600)
     } else {
-        format!("{}日前", secs / 86_400)
+        format!("{}d ago", secs / 86_400)
     };
     style(label).dim().to_string()
 }
 
-/// The `+N -M` diff badge for a worktree's [`DiffStat`] — additions green,
-/// deletions red — or `None` when the row carries no diff (the default branch, a
-/// detached HEAD, or a session even with its default). Shown at the right edge of
-/// the row's detail line, beside the agent state, so a glance separates the
-/// sessions that have progressed from the ones still untouched.
-fn diff_badge(diff: Option<DiffStat>) -> Option<String> {
-    let diff = diff?;
-    let added = style(format!("+{}", diff.added)).green().to_string();
-    let removed = style(format!("-{}", diff.removed)).red().to_string();
-    Some(format!("{added} {removed}"))
+/// Number of decimal digits in `n`, at least 1 (so `0` is one column wide). Used
+/// to size the fixed-width diff / commit columns so every row's counts align.
+fn digits(mut n: usize) -> usize {
+    let mut d = 1;
+    n /= 10;
+    while n > 0 {
+        n /= 10;
+        d += 1;
+    }
+    d
 }
 
-/// The `↑N ↓M` commit-divergence marker for a worktree's [`AheadBehind`] — `↑N`
-/// (ahead, cyan) the commits the branch has that the default lacks, `↓M` (behind,
-/// magenta) the ones the default has that the branch lacks. Only the non-zero side
-/// is shown (so a branch only ahead reads `↑N`, not `↑N ↓0`); `None` when even
-/// with the default or not measured. Shown on the detail line beside the `+N -M`
-/// diff badge — commits there, lines there — so a glance separates un-merged work
-/// (ahead) from a branch gone stale behind its default.
-fn ahead_behind_badge(ab: Option<AheadBehind>) -> Option<String> {
-    let ab = ab?;
-    let mut parts = Vec::new();
-    if ab.ahead > 0 {
-        parts.push(style(format!("↑{}", ab.ahead)).cyan().to_string());
-    }
-    if ab.behind > 0 {
-        parts.push(style(format!("↓{}", ab.behind)).magenta().to_string());
-    }
-    (!parts.is_empty()).then(|| parts.join(" "))
+/// The fixed-width column sizes for the detail line's right cluster, measured once
+/// across the visible sessions (see [`detail_cols`]) so every row draws its
+/// freshness, commit-divergence, and diff fields in the **same** columns — a
+/// session's time / commits / `+N -M` never shifts because another row has more
+/// changed lines or a longer "ago". A `0` width drops that field for the pane.
+#[derive(Clone, Copy, Default)]
+pub(super) struct DetailCols {
+    /// Display width of the freshness (`Nmin ago`) cell; 0 drops it.
+    time: usize,
+    /// Digit width of the `↑N` (ahead) count; 0 = no visible session is ahead.
+    ahead: usize,
+    /// Digit width of the `↓N` (behind) count; 0 = no visible session is behind.
+    behind: usize,
+    /// Digit widths of the diff `+N` / `-M` counts; `added == 0` drops the badge.
+    added: usize,
+    removed: usize,
+    /// Display width of the `#N` PR cell (`#` + the widest number's digits); 0 = no
+    /// visible session has a PR, so the column is dropped.
+    pr: usize,
 }
 
-/// Compose the detail line's content: the `agent` state label on the left, and a
-/// right-aligned cluster of the freshness `time`, the `commits` divergence marker
-/// (`↑N ↓M`), and the diff `badge` (`<time> <commits> <badge>`) within `width`.
-/// The badge keeps the far-right column (so badges line up down the list); the
-/// `commits` and `time` sit to its left; the agent label is clipped to the room
-/// left of the cluster.
-///
-/// Priority under pressure is **badge > agent > commits > time**: the badge is
-/// pinned to the right edge (and clips the agent when both can't fit, the
-/// established rule). The `commits` then the `time` are added left of the badge,
-/// each only when the agent's full label still fits beside the whole cluster —
-/// so the lowest-priority `time` is dropped first, then `commits`, before the
-/// agent state is ever truncated. Any of the four may be absent.
-fn detail_content(
-    agent: AgentState,
-    time: Option<String>,
-    commits: Option<String>,
-    badge: Option<String>,
-    width: usize,
-) -> String {
-    // The agent's natural (un-squeezed) label width, used to decide whether the
-    // optional segments still leave the agent state readable.
-    let agent_natural_w = console::measure_text_width(&agent.detail(width).unwrap_or_default());
+/// The fixed-width pull-request cell for a worktree's [`PrLink`]s: each PR as
+/// `#<number>` (blue, underlined to read as a link), space-joined and right-aligned
+/// in `width` display columns so the badges line up down the list. A row with no PR
+/// fills the same width with blanks, holding the column. `width` is 0 (and the cell
+/// omitted) when no visible session carries a PR.
+fn pr_cell(prs: &[PrLink], width: usize) -> String {
+    if prs.is_empty() {
+        return " ".repeat(width);
+    }
+    let joined = prs
+        .iter()
+        .map(|pr| {
+            style(format!("#{}", pr.number))
+                .blue()
+                .underlined()
+                .to_string()
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    rpad(&joined, width)
+}
 
-    // The right cluster starts as the badge (far right). Higher-priority segments
-    // are prepended first (commits before time), so when room runs out the
-    // lowest-priority time is the one left off — and none of them ever squeezes
-    // the agent's full label, unlike the badge.
-    let (mut cluster, mut cluster_w) = match badge {
-        Some(badge) => {
-            let w = console::measure_text_width(&badge);
-            (badge, w)
-        }
-        None => (String::new(), 0),
-    };
-    for seg in [commits, time].into_iter().flatten() {
-        let seg_w = console::measure_text_width(&seg);
-        let with_seg_w = if cluster_w == 0 {
-            seg_w
+/// The display width the `#<number>` badges of `prs` occupy when space-joined —
+/// each badge is `#` + the number's digits, with a one-space gap between badges.
+/// `0` for no PR. Used to size the fixed [`DetailCols::pr`] column.
+fn pr_width(prs: &[PrLink]) -> usize {
+    if prs.is_empty() {
+        return 0;
+    }
+    let badges: usize = prs.iter().map(|pr| 1 + digits(pr.number as usize)).sum();
+    badges + (prs.len() - 1)
+}
+
+impl DetailCols {
+    /// Width of the `↑N ↓M` commit cell — only the sides some visible session uses
+    /// are reserved (a pane with nothing behind spends no columns on `↓`), with a
+    /// one-space gap when both sides are present.
+    fn commits_width(self) -> usize {
+        let up = if self.ahead > 0 { 1 + self.ahead } else { 0 };
+        let down = if self.behind > 0 { 1 + self.behind } else { 0 };
+        up + usize::from(up > 0 && down > 0) + down
+    }
+
+    /// Width of the `+N -M` diff cell (`+`, added digits, space, `-`, removed
+    /// digits), or 0 when no visible session carries a diff.
+    fn badge_width(self) -> usize {
+        if self.added > 0 {
+            self.added + self.removed + 3
         } else {
-            cluster_w + 1 + seg_w
-        };
-        let gap = usize::from(agent_natural_w > 0);
-        if agent_natural_w + gap + with_seg_w <= width {
-            cluster = if cluster.is_empty() {
-                seg
-            } else {
-                format!("{seg} {cluster}")
-            };
-            cluster_w = with_seg_w;
+            0
         }
     }
-    if cluster.is_empty() {
+
+    /// Total width of the right cluster: every active field plus a one-space gap
+    /// between each pair of adjacent fields.
+    fn cluster_width(self) -> usize {
+        let parts = [self.time, self.commits_width(), self.badge_width(), self.pr];
+        let active = parts.iter().filter(|w| **w > 0).count();
+        parts.iter().sum::<usize>() + active.saturating_sub(1)
+    }
+}
+
+/// One visible session's inputs to [`detail_cols`]: when it was last touched, its
+/// diff against the default, its commit divergence, and the display width of its
+/// `#N` PR badges (see [`pr_width`]).
+type ClusterData = (DateTime<Utc>, Option<DiffStat>, Option<AheadBehind>, usize);
+
+/// Measures the fixed [`DetailCols`] for a render: the widest freshness label, the
+/// widest `↑` / `↓` counts, the widest `+` / `-` diff counts, and the widest PR
+/// badge set across the `worktrees` (already trimmed to the rows that will be
+/// drawn), then drops the low-priority columns — time first, then commits — until
+/// the cluster fits beside the widest agent label (`max_agent_w`) within
+/// `detail_width`. The diff badge and PR are always kept (they may instead clip a
+/// long agent label, the established priority). Sizing once and handing the same
+/// widths to every row is what stops the columns from wandering between sessions.
+fn detail_cols(
+    worktrees: &[ClusterData],
+    now: DateTime<Utc>,
+    max_agent_w: usize,
+    detail_width: usize,
+) -> DetailCols {
+    let mut cols = DetailCols::default();
+    for (updated_at, diff, ab, pr_w) in worktrees {
+        cols.time = cols.time.max(console::measure_text_width(&relative_time(
+            now,
+            *updated_at,
+        )));
+        if let Some(diff) = diff {
+            cols.added = cols.added.max(digits(diff.added));
+            cols.removed = cols.removed.max(digits(diff.removed));
+        }
+        if let Some(ab) = ab {
+            if ab.ahead > 0 {
+                cols.ahead = cols.ahead.max(digits(ab.ahead));
+            }
+            if ab.behind > 0 {
+                cols.behind = cols.behind.max(digits(ab.behind));
+            }
+        }
+        // The widest joined `#N … #M` badge set across the visible sessions.
+        cols.pr = cols.pr.max(*pr_w);
+    }
+    // Trim low-priority columns (time, then commits) until the cluster fits beside
+    // the widest agent label; the badge is always kept (it clips the agent first).
+    let gap = usize::from(max_agent_w > 0);
+    if max_agent_w + gap + cols.cluster_width() > detail_width {
+        cols.time = 0;
+    }
+    if max_agent_w + gap + cols.cluster_width() > detail_width {
+        cols.ahead = 0;
+        cols.behind = 0;
+    }
+    cols
+}
+
+/// Right-aligns the already-styled `content` within `width` display columns by
+/// left-padding with spaces, so a field seats at its column's right edge and the
+/// edges line up down the list.
+fn rpad(content: &str, width: usize) -> String {
+    let pad = width.saturating_sub(console::measure_text_width(content));
+    format!("{}{content}", " ".repeat(pad))
+}
+
+/// The `+N -M` diff cell for a worktree's [`DiffStat`] — additions green,
+/// deletions red — laid out in fixed `added_w` / `removed_w` digit columns so the
+/// `+` and `-` align down the list regardless of each session's change count. A
+/// row with no diff fills the same width with blanks, holding the column.
+fn diff_cell(diff: Option<DiffStat>, added_w: usize, removed_w: usize) -> String {
+    match diff {
+        Some(diff) => {
+            let added = style(format!("+{:>added_w$}", diff.added)).green();
+            let removed = style(format!("-{:>removed_w$}", diff.removed)).red();
+            format!("{added} {removed}")
+        }
+        None => " ".repeat(added_w + removed_w + 3),
+    }
+}
+
+/// The `↑N ↓M` commit-divergence cell for a worktree's [`AheadBehind`] — `↑N`
+/// (ahead, cyan) the commits the branch has that the default lacks, `↓M` (behind,
+/// magenta) the ones it lacks — in fixed `ahead_w` / `behind_w` digit columns so
+/// the arrows line up. Only the sides the pane uses are drawn; a side this row is
+/// even on fills its width with blanks, holding the column. An empty side reads as
+/// blanks rather than `↑0` / `↓0`.
+fn commits_cell(ab: Option<AheadBehind>, ahead_w: usize, behind_w: usize) -> String {
+    let ahead = ab.map_or(0, |ab| ab.ahead);
+    let behind = ab.map_or(0, |ab| ab.behind);
+    let up = (ahead_w > 0).then(|| {
+        if ahead > 0 {
+            style(format!("↑{ahead:>ahead_w$}")).cyan().to_string()
+        } else {
+            " ".repeat(1 + ahead_w)
+        }
+    });
+    let down = (behind_w > 0).then(|| {
+        if behind > 0 {
+            style(format!("↓{behind:>behind_w$}")).magenta().to_string()
+        } else {
+            " ".repeat(1 + behind_w)
+        }
+    });
+    match (up, down) {
+        (Some(up), Some(down)) => format!("{up} {down}"),
+        (Some(side), None) | (None, Some(side)) => side,
+        (None, None) => String::new(),
+    }
+}
+
+/// Compose the detail line: the `agent` state label on the left and the
+/// right-aligned `cells` cluster (each already a fixed-width column, in display
+/// order `time commits badge`) flush to the cell's right edge, joined by single
+/// spaces, within `width`. The cluster keeps the right edge; the agent label is
+/// clipped to the room left of it (the badge can thus clip a long agent label, the
+/// established rule). With no cells the agent label fills the cell; when the
+/// cluster alone overflows it is clipped to the cell.
+fn detail_content(agent: AgentState, cells: &[String], width: usize) -> String {
+    if cells.is_empty() {
         return agent.detail(width).unwrap_or_default();
     }
+    let cluster = cells.join(" ");
+    let cluster_w = console::measure_text_width(&cluster);
     if cluster_w >= width {
         // No room for both: the cluster alone, clipped to the cell.
         return clip_to_width(&cluster, width);
@@ -393,12 +549,14 @@ fn detail_content(
 
 /// Builds the root's two lines: the workspace itself, belonging to no session.
 /// The far-left gutter carries the `>` cursor (in 切替 (Switch)) or the green `▎`
-/// active bar; line 1 then has a `⌂` kind icon, the [`ROOT_NAME`] label, and a
-/// blank status field (the root has no git status). Line 2 carries a
-/// `workspace root` detail.
+/// active bar; line 1 then has a `⌂` kind icon, the [`ROOT_NAME`] label, a memo
+/// marker (`NOTE_ICON`, when `has_note`) — the root carries its own note, like a
+/// session — and a blank status field (the root has no git status). Line 2
+/// carries a `workspace root` detail.
 pub(super) fn root_row(
     name_width: usize,
     detail_width: usize,
+    has_note: bool,
     selected: bool,
     active: bool,
     in_switch: bool,
@@ -407,7 +565,10 @@ pub(super) fn root_row(
     let name = name_cell(ROOT_NAME, name_width, active || selected);
     let status = status_cell(None);
     let gutter = gutter_cell(selected, active, in_switch);
-    let line1 = format!("{gutter} {kind} {name}   {status}");
+    // The same constant-width memo cell a worktree row uses, so the (blank) status
+    // field stays aligned with the sessions below whether or not a note is present.
+    let note = note_cell(has_note);
+    let line1 = format!("{gutter} {kind} {name}{note}{status}");
 
     // Only the active bar reaches line 2; the cursor stays a point on line 1.
     let detail = style(clip_to_width(ROOT_DETAIL, detail_width))
@@ -608,6 +769,7 @@ pub(super) fn left_pane(
     running: &HashSet<PathBuf>,
     waiting: &HashSet<PathBuf>,
     done: &HashSet<PathBuf>,
+    resources: &HashMap<PathBuf, ResourceUsage>,
     left_w: usize,
     rows: usize,
     in_switch: bool,
@@ -615,6 +777,8 @@ pub(super) fn left_pane(
     now: DateTime<Utc>,
 ) -> Vec<String> {
     if sidebar == Sidebar::Rail {
+        // The 5-column rail has no room for a CPU / memory figure, so the rail
+        // shows only the agent glyph; the resource line belongs to the full list.
         return rail_pane(list, live, running, waiting, done, rows, in_switch);
     }
     // Line 1: prefix + name + the (now-blank) active-marker cell + a space + the
@@ -622,9 +786,35 @@ pub(super) fn left_pane(
     let name_width = left_w.saturating_sub(NAME_PREFIX + ACTIVE_COL + 1 + STATUS_COL);
     // Line 2: indented under the branch name, then the detail text.
     let detail_width = left_w.saturating_sub(NAME_PREFIX);
+    // Size the detail line's right-cluster columns once, across only the sessions
+    // that will actually be drawn (the render loop below stops at the same bound),
+    // so each field lands in the same column on every row and an off-screen session
+    // never widens a visible column. Two header lines (root) + the divider precede
+    // the sessions, and each session spans two rows.
+    let visible_n = list.worktrees().len().min(rows.saturating_sub(2) / 2);
+    let mut max_agent_w = 0;
+    let cluster_data: Vec<_> = list
+        .worktrees()
+        .iter()
+        .take(visible_n)
+        .map(|w| {
+            let agent = AgentState::from_flags(
+                live.contains(&w.path),
+                running.contains(&w.path),
+                waiting.contains(&w.path),
+                done.contains(&w.path),
+            );
+            if let Some(label) = agent.detail(detail_width) {
+                max_agent_w = max_agent_w.max(console::measure_text_width(&label));
+            }
+            (w.updated_at, w.diff, w.ahead_behind, pr_width(&w.pr))
+        })
+        .collect();
+    let cols = detail_cols(&cluster_data, now, max_agent_w, detail_width);
     let (mut root_top, mut root_detail) = root_row(
         name_width,
         detail_width,
+        list.root_has_note(),
         list.root_selected(),
         list.root_active(),
         in_switch,
@@ -669,6 +859,7 @@ pub(super) fn left_pane(
                 list.display_label(i),
                 name_width,
                 detail_width,
+                cols,
                 list.has_note(i),
                 now,
                 selected,
@@ -679,12 +870,22 @@ pub(super) fn left_pane(
                 waiting.contains(&w.path),
                 done.contains(&w.path),
             );
+            // A live session that has been sampled gets a third line spelling out
+            // its CPU / memory; idle sessions stay two lines, so the list spends the
+            // extra row only where there is something to show.
+            let mut resource = resources.get(&w.path).map(|usage| {
+                resource_line(*usage, detail_width, row == list.active_index(), in_switch)
+            });
             if in_switch && !selected {
                 top = dim_row(&top);
                 detail = dim_row(&detail);
+                resource = resource.as_deref().map(dim_row);
             }
             lines.push(top);
             lines.push(detail);
+            if let Some(resource) = resource {
+                lines.push(resource);
+            }
         }
     }
     lines.truncate(rows);
@@ -840,6 +1041,66 @@ pub(in crate::presentation::tui::home) fn attached_tab_at(
     // handling rather than re-driving the same pane.
     (target != strip.active).then_some(target)
 }
+
+/// The pull-request URL a left click at the 0-based screen (`col`, `row`) should
+/// open, or `None` when the click is not on a session row that carries a PR.
+///
+/// The full sidebar shows each session's `#<number>` badges (the rail does not), so
+/// a click is mapped to a session's PRs only there. The whole session entry is the
+/// target — clicking anywhere on its rows opens its PRs — since the sidebar has no
+/// other click action to disambiguate against, and the `#<number>` badges are the
+/// affordance that marks the row as openable. A session may carry several PRs, so
+/// every recorded URL is returned (the caller opens each).
+///
+/// The geometry mirrors what [`super::render_frame`] lays out: the two-pane body
+/// begins at row [`BODY_TOP`] (below the title bar, mode ladder, and blank
+/// separator) and is [`super::body_rows_for`] rows tall; the left pane is the
+/// first `left_w` columns. Within it the entries stack as [`left_pane`] builds
+/// them — the root entry (two rows), a divider (one row), then two rows per
+/// worktree (a live session may add a third, which this mapping does not model —
+/// the same simplification [`super::left_pane_session_at`] makes).
+pub(in crate::presentation::tui::home) fn sidebar_pr_links_at(
+    state: &HomeState,
+    raw_height: usize,
+    raw_width: usize,
+    col: u16,
+    row: u16,
+) -> Vec<String> {
+    // Only the full sidebar draws the `#N` badges; the collapsed rail shows no PR,
+    // so a click there maps to nothing.
+    if state.sidebar() != Sidebar::Full {
+        return Vec::new();
+    }
+    let (height, width) = widgets::normalize_size(raw_height, raw_width);
+    let (left_w, _) = super::layout(width, Sidebar::Full);
+    // The click must land inside the left pane, on a body row.
+    if (col as usize) >= left_w || row < BODY_TOP {
+        return Vec::new();
+    }
+    let line = (row - BODY_TOP) as usize;
+    if line >= super::body_rows_for(height) {
+        return Vec::new();
+    }
+    // Lines 0..2 are the root entry and the divider; worktree rows start at line 3,
+    // two lines each.
+    let Some(entry) = line.checked_sub(ROOT_ENTRY_LINES) else {
+        return Vec::new();
+    };
+    match state.list().worktrees().get(entry / 2) {
+        Some(wt) => wt.pr.iter().map(|pr| pr.url.clone()).collect(),
+        None => Vec::new(),
+    }
+}
+
+/// The 0-based screen row the two-pane body begins at, matching the title bar,
+/// mode ladder, and blank separator [`super::render_frame`] stacks above it (and
+/// the `origin_row` of [`super::terminal_geometry`]).
+const BODY_TOP: u16 = 3;
+
+/// Lines the left pane spends before the first worktree row: the root entry (two
+/// rows) and the divider beneath it. Worktree `i` then occupies lines
+/// `ROOT_ENTRY_LINES + 2*i` and the one after it.
+const ROOT_ENTRY_LINES: usize = 3;
 
 /// Column widths for the fixed-width header identity. The session name is clipped
 /// and every field is padded to a constant width, so the identity block is the
@@ -1756,158 +2017,295 @@ mod tests {
     }
 
     #[test]
-    fn diff_badge_formats_counts_and_is_absent_without_a_diff() {
-        assert_eq!(diff_badge(None), None);
-        let badge = diff_badge(Some(DiffStat {
-            added: 12,
-            removed: 3,
-        }))
-        .unwrap();
-        // The styling is colour only; the visible text is `+N -M`.
-        assert_eq!(console::strip_ansi_codes(&badge), "+12 -3");
+    fn digits_counts_decimal_places_with_a_floor_of_one() {
+        assert_eq!(digits(0), 1);
+        assert_eq!(digits(9), 1);
+        assert_eq!(digits(10), 2);
+        assert_eq!(digits(999), 3);
+        assert_eq!(digits(1000), 4);
     }
 
     #[test]
-    fn detail_content_right_aligns_the_badge_beside_the_agent_label() {
-        let badge = diff_badge(Some(DiffStat {
-            added: 124,
-            removed: 18,
-        }));
+    fn rpad_left_pads_to_the_column_width_and_never_shrinks() {
+        assert_eq!(rpad("ab", 5), "   ab");
+        // Already at/over width → returned unchanged (rpad never truncates).
+        assert_eq!(rpad("abcde", 3), "abcde");
+    }
 
-        // Agent label on the left, badge pinned to the cell's right edge; the
+    #[test]
+    fn diff_cell_pads_counts_to_fixed_columns_and_blanks_when_absent() {
+        // `+N` right-aligned in 3 digit columns, `-M` in 2, so the `+`/`-` of every
+        // row line up however many changed lines each session has.
+        let cell = diff_cell(
+            Some(DiffStat {
+                added: 5,
+                removed: 3,
+            }),
+            3,
+            2,
+        );
+        assert_eq!(console::strip_ansi_codes(&cell), "+  5 - 3");
+        let wide = diff_cell(
+            Some(DiffStat {
+                added: 124,
+                removed: 18,
+            }),
+            3,
+            2,
+        );
+        assert_eq!(console::strip_ansi_codes(&wide), "+124 -18");
+        // Same width whether or not the row has a diff, so the column never moves.
+        assert_eq!(
+            console::measure_text_width(&cell),
+            console::measure_text_width(&diff_cell(None, 3, 2)),
+        );
+        assert!(diff_cell(None, 3, 2).trim().is_empty());
+    }
+
+    #[test]
+    fn commits_cell_aligns_arrows_in_fixed_columns_and_blanks_even_sides() {
+        // Both sides drawn in this render (ahead in 2 cols, behind in 1).
+        let both = commits_cell(
+            Some(AheadBehind {
+                ahead: 2,
+                behind: 1,
+            }),
+            2,
+            1,
+        );
+        assert_eq!(console::strip_ansi_codes(&both), "↑ 2 ↓1");
+        // This row is even-behind → the `↓` side is blanks, holding the column so
+        // the next row's `↓` still lines up.
+        let ahead_only = commits_cell(
+            Some(AheadBehind {
+                ahead: 2,
+                behind: 0,
+            }),
+            2,
+            1,
+        );
+        assert!(console::strip_ansi_codes(&ahead_only).starts_with("↑ 2"));
+        assert_eq!(
+            console::measure_text_width(&ahead_only),
+            console::measure_text_width(&both),
+        );
+        // No behind side anywhere in the render → only the `↑` column is spent.
+        let no_behind = commits_cell(
+            Some(AheadBehind {
+                ahead: 3,
+                behind: 0,
+            }),
+            1,
+            0,
+        );
+        assert_eq!(console::strip_ansi_codes(&no_behind), "↑3");
+        // No ahead side → only the `↓` column.
+        let no_ahead = commits_cell(
+            Some(AheadBehind {
+                ahead: 0,
+                behind: 2,
+            }),
+            0,
+            1,
+        );
+        assert_eq!(console::strip_ansi_codes(&no_ahead), "↓2");
+        // Column dropped entirely → empty.
+        assert_eq!(commits_cell(None, 0, 0), "");
+        // A drawn column but no measurement for this row → blanks.
+        let none = commits_cell(None, 1, 0);
+        assert_eq!(console::measure_text_width(&none), 2);
+        assert!(none.trim().is_empty());
+    }
+
+    #[test]
+    fn detail_cols_widths_reserve_only_the_used_sides() {
+        let full = DetailCols {
+            time: 8,
+            ahead: 2,
+            behind: 1,
+            added: 3,
+            removed: 2,
+            pr: 4, // "#123"
+        };
+        assert_eq!(full.commits_width(), 6); // (1+2) + gap + (1+1)
+        assert_eq!(full.badge_width(), 8); // 3 + 2 + 3
+        assert_eq!(full.cluster_width(), 8 + 1 + 6 + 1 + 8 + 1 + 4); // four fields, three gaps
+
+        // Only an ahead side, no diff, no time: one field, no gaps, no `↓` columns.
+        let ahead_only = DetailCols {
+            ahead: 2,
+            ..DetailCols::default()
+        };
+        assert_eq!(ahead_only.commits_width(), 3);
+        assert_eq!(ahead_only.badge_width(), 0);
+        assert_eq!(ahead_only.cluster_width(), 3);
+
+        // Only a behind side (covers the `up == 0` half of the commit gap).
+        let behind_only = DetailCols {
+            behind: 2,
+            ..DetailCols::default()
+        };
+        assert_eq!(behind_only.commits_width(), 3);
+
+        assert_eq!(DetailCols::default().cluster_width(), 0);
+    }
+
+    fn at(now: DateTime<Utc>, mins: i64) -> DateTime<Utc> {
+        now - chrono::Duration::minutes(mins)
+    }
+
+    #[test]
+    fn detail_cols_sizes_columns_to_the_widest_visible_session() {
+        let now = DateTime::parse_from_rfc3339("2026-06-27T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let data = vec![
+            (
+                at(now, 3),
+                Some(DiffStat {
+                    added: 5,
+                    removed: 3,
+                }),
+                Some(AheadBehind {
+                    ahead: 2,
+                    behind: 0,
+                }),
+                pr_width(&[pr(7)]), // "#7" → 2
+            ),
+            (
+                at(now, 12),
+                Some(DiffStat {
+                    added: 140,
+                    removed: 8,
+                }),
+                Some(AheadBehind {
+                    ahead: 0,
+                    behind: 13,
+                }),
+                pr_width(&[pr(412), pr(98)]), // "#412 #98" → 8
+            ),
+            // A session with neither a diff nor divergence nor PR: exercises every
+            // empty arm so they contribute no columns.
+            (at(now, 1), None, None, 0),
+        ];
+        let cols = detail_cols(&data, now, 9, 60);
+        assert_eq!(cols.added, 3); // "140"
+        assert_eq!(cols.removed, 1); // "8" / "3"
+        assert_eq!(cols.ahead, 1); // "2"
+        assert_eq!(cols.behind, 2); // "13"
+        assert_eq!(cols.pr, 8); // widest is "#412 #98"
+        assert_eq!(
+            cols.time,
+            console::measure_text_width(&relative_time(now, at(now, 12))) // "12min ago"
+        );
+    }
+
+    #[test]
+    fn detail_cols_drops_time_then_commits_under_width_pressure() {
+        let now = DateTime::parse_from_rfc3339("2026-06-27T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let data = vec![(
+            at(now, 3),
+            Some(DiffStat {
+                added: 1,
+                removed: 2,
+            }),
+            Some(AheadBehind {
+                ahead: 2,
+                behind: 1,
+            }),
+            0,
+        )];
+        // Roomy: every field survives (full cluster needs ~30 columns beside a
+        // 9-wide agent label).
+        let roomy = detail_cols(&data, now, 9, 60);
+        assert!(roomy.time > 0);
+        assert!(roomy.ahead > 0 || roomy.behind > 0);
+        assert!(roomy.added > 0);
+        // Tighter: the lowest-priority time is dropped, commits + badge stay.
+        let mid = detail_cols(&data, now, 9, 25);
+        assert_eq!(mid.time, 0);
+        assert!(mid.ahead > 0 || mid.behind > 0);
+        assert!(mid.added > 0);
+        // Tightest: commits also dropped, but the badge is always kept.
+        let tight = detail_cols(&data, now, 9, 18);
+        assert_eq!(tight.time, 0);
+        assert_eq!(tight.ahead, 0);
+        assert_eq!(tight.behind, 0);
+        assert!(tight.added > 0);
+    }
+
+    #[test]
+    fn detail_content_right_aligns_the_cluster_and_clips_the_agent() {
+        let badge = diff_cell(
+            Some(DiffStat {
+                added: 124,
+                removed: 18,
+            }),
+            3,
+            2,
+        );
+        // Agent label on the left, the cluster pinned to the cell's right edge; the
         // whole cell measures exactly the width so the badges line up.
-        let line = detail_content(AgentState::Running, None, None, badge.clone(), 24);
+        let line = detail_content(AgentState::Running, std::slice::from_ref(&badge), 24);
         assert_eq!(console::measure_text_width(&line), 24);
         let plain = console::strip_ansi_codes(&line);
         assert!(plain.starts_with("▶ running"));
         assert!(plain.ends_with("+124 -18"));
 
-        // With no agent the badge still rides the right edge — the case the badge
-        // most needs to read (a session with work but nothing running).
-        let line = detail_content(AgentState::Absent, None, None, badge.clone(), 24);
+        // With no agent the cluster still rides the right edge.
+        let line = detail_content(AgentState::Absent, std::slice::from_ref(&badge), 24);
         assert_eq!(console::measure_text_width(&line), 24);
         assert_eq!(console::strip_ansi_codes(&line).trim_start(), "+124 -18");
     }
 
     #[test]
-    fn detail_content_falls_back_to_the_agent_label_or_clips_a_cramped_cell() {
-        // No badge, no time, no commits → just the agent label (blank when absent).
-        assert_eq!(detail_content(AgentState::Absent, None, None, None, 20), "");
-        assert!(console::strip_ansi_codes(&detail_content(
-            AgentState::Running,
-            None,
-            None,
-            None,
-            20
-        ))
-        .contains("running"));
-
-        // Too narrow for both → the cluster alone, clipped to the cell.
-        let line = detail_content(
-            AgentState::Running,
-            None,
-            None,
-            diff_badge(Some(DiffStat {
+    fn detail_content_falls_back_to_the_agent_or_clips_a_cramped_cluster() {
+        // No cells → just the agent label (blank when absent).
+        assert_eq!(detail_content(AgentState::Absent, &[], 20), "");
+        assert!(
+            console::strip_ansi_codes(&detail_content(AgentState::Running, &[], 20))
+                .contains("running")
+        );
+        // Cluster alone wider than the cell → clipped to the cell.
+        let badge = diff_cell(
+            Some(DiffStat {
                 added: 124,
                 removed: 18,
-            })),
-            5,
+            }),
+            3,
+            2,
         );
+        let line = detail_content(AgentState::Running, std::slice::from_ref(&badge), 5);
         assert!(console::measure_text_width(&line) <= 5);
     }
 
     #[test]
-    fn detail_content_places_time_left_of_the_badge_and_drops_it_when_cramped() {
-        let badge = diff_badge(Some(DiffStat {
-            added: 1,
-            removed: 2,
-        }));
-        let time = Some(style("3分前").dim().to_string());
-
-        // Roomy cell: agent on the left, then `time badge` as the right cluster
-        // with the badge still at the far edge.
-        let line = detail_content(AgentState::Running, time.clone(), None, badge.clone(), 30);
+    fn detail_content_joins_the_cells_in_order_with_single_space_gaps() {
+        let time = rpad(&style("3min ago").dim().to_string(), 8);
+        let commits = commits_cell(
+            Some(AheadBehind {
+                ahead: 2,
+                behind: 1,
+            }),
+            1,
+            1,
+        );
+        let badge = diff_cell(
+            Some(DiffStat {
+                added: 1,
+                removed: 2,
+            }),
+            1,
+            1,
+        );
+        let cells = vec![time, commits, badge];
+        let line = detail_content(AgentState::Running, &cells, 40);
         let plain = console::strip_ansi_codes(&line);
         assert!(plain.starts_with("▶ running"));
-        assert!(plain.contains("3分前 +1 -2"));
+        assert!(plain.contains("3min ago ↑2 ↓1 +1 -2"));
         assert!(plain.ends_with("+1 -2"));
-
-        // With no badge the time becomes the right cluster on its own.
-        let only_time = detail_content(AgentState::Absent, time.clone(), None, None, 20);
-        assert_eq!(console::strip_ansi_codes(&only_time).trim_start(), "3分前");
-
-        // Cramped cell: the badge is kept at the right edge and the lower-priority
-        // time is dropped rather than pushing the badge off.
-        let tight = detail_content(AgentState::Absent, time, None, badge, 7);
-        let plain = console::strip_ansi_codes(&tight);
-        assert!(plain.contains("+1 -2"));
-        assert!(!plain.contains("3分前"));
-    }
-
-    #[test]
-    fn detail_content_orders_the_cluster_and_drops_time_before_commits() {
-        let badge = diff_badge(Some(DiffStat {
-            added: 1,
-            removed: 2,
-        }));
-        let commits = ahead_behind_badge(Some(AheadBehind {
-            ahead: 2,
-            behind: 1,
-        }));
-        let time = Some(style("3分前").dim().to_string());
-
-        // Roomy cell: the right cluster reads `time commits badge`, left to right,
-        // with the badge still pinned to the far edge.
-        let line = detail_content(
-            AgentState::Running,
-            time.clone(),
-            commits.clone(),
-            badge.clone(),
-            36,
-        );
-        let plain = console::strip_ansi_codes(&line);
-        assert!(plain.starts_with("▶ running"));
-        assert!(plain.contains("3分前 ↑2 ↓1 +1 -2"));
-        assert!(plain.ends_with("+1 -2"));
-
-        // Tighter cell: the lowest-priority time is dropped first, but the commits
-        // marker and badge survive beside the agent label.
-        let line = detail_content(AgentState::Running, time, commits, badge, 22);
-        let plain = console::strip_ansi_codes(&line);
-        assert!(plain.contains("running"));
-        assert!(plain.contains("↑2 ↓1 +1 -2"));
-        assert!(!plain.contains("3分前"));
-    }
-
-    #[test]
-    fn ahead_behind_badge_shows_only_the_non_zero_sides() {
-        assert_eq!(ahead_behind_badge(None), None);
-        // Even with the default → no marker.
-        assert_eq!(
-            ahead_behind_badge(Some(AheadBehind {
-                ahead: 0,
-                behind: 0
-            })),
-            None
-        );
-        let ahead = ahead_behind_badge(Some(AheadBehind {
-            ahead: 3,
-            behind: 0,
-        }))
-        .unwrap();
-        assert_eq!(console::strip_ansi_codes(&ahead), "↑3");
-        let behind = ahead_behind_badge(Some(AheadBehind {
-            ahead: 0,
-            behind: 2,
-        }))
-        .unwrap();
-        assert_eq!(console::strip_ansi_codes(&behind), "↓2");
-        let both = ahead_behind_badge(Some(AheadBehind {
-            ahead: 3,
-            behind: 2,
-        }))
-        .unwrap();
-        assert_eq!(console::strip_ansi_codes(&both), "↑3 ↓2");
     }
 
     #[test]
@@ -1919,14 +2317,63 @@ mod tests {
             console::strip_ansi_codes(&relative_time(now, now - chrono::Duration::seconds(secs)))
                 .into_owned()
         };
-        assert_eq!(ago(5), "たった今"); // under a minute
-        assert_eq!(ago(180), "3分前"); // minutes
-        assert_eq!(ago(7200), "2時間前"); // hours
-        assert_eq!(ago(2 * 86_400), "2日前"); // days
-                                              // A future timestamp (clock skew) clamps to "たった今".
+        assert_eq!(ago(5), "now"); // under a minute
+        assert_eq!(ago(180), "3min ago"); // minutes
+        assert_eq!(ago(7200), "2h ago"); // hours
+        assert_eq!(ago(2 * 86_400), "2d ago"); // days
+                                               // A future timestamp (clock skew) clamps to "now".
         assert_eq!(
             console::strip_ansi_codes(&relative_time(now, now + chrono::Duration::seconds(30))),
-            "たった今"
+            "now"
         );
+    }
+
+    fn pr(number: u32) -> PrLink {
+        PrLink {
+            number,
+            url: format!("https://github.com/o/r/pull/{number}"),
+        }
+    }
+
+    #[test]
+    fn pr_cell_joins_badges_pads_the_column_and_blanks_when_absent() {
+        // One PR rides the right edge of its fixed column; a wider column left-pads
+        // with spaces so badges line up down the list.
+        let cell = pr_cell(&[pr(7)], 4);
+        assert_eq!(console::measure_text_width(&cell), 4);
+        assert_eq!(console::strip_ansi_codes(&cell), "  #7");
+        // Several PRs are space-joined as `#N #M`.
+        let many = pr_cell(&[pr(412), pr(98)], 8);
+        assert_eq!(console::strip_ansi_codes(&many), "#412 #98");
+        // No PR fills the same width with blanks, holding the column.
+        assert_eq!(pr_cell(&[], 4), "    ");
+    }
+
+    #[test]
+    fn pr_width_sums_badges_with_gaps() {
+        assert_eq!(pr_width(&[]), 0);
+        assert_eq!(pr_width(&[pr(7)]), 2); // "#7"
+        assert_eq!(pr_width(&[pr(412), pr(98)]), 8); // "#412 #98"
+    }
+
+    #[test]
+    fn detail_content_keeps_the_pr_cell_at_the_right_edge() {
+        // The PR cell, as the last in `cells`, lands flush against the right edge
+        // beside the diff badge (`+1 -2 #412 #98`).
+        let badge = diff_cell(
+            Some(DiffStat {
+                added: 1,
+                removed: 2,
+            }),
+            1,
+            1,
+        );
+        let cell = pr_cell(&[pr(412), pr(98)], 8);
+        let cells = vec![badge, cell];
+        let line = detail_content(AgentState::Running, &cells, 40);
+        let plain = console::strip_ansi_codes(&line);
+        assert!(plain.starts_with("▶ running"));
+        assert!(plain.contains("+1 -2 #412 #98"));
+        assert!(plain.ends_with("#98"));
     }
 }

@@ -31,7 +31,7 @@ use crate::presentation::tui::io::term_reader::TermKeyReader;
 
 pub use event::Outcome;
 
-use state::{HomeState, LogLine, PaneExit, ResumeLevel, SessionOutcome, SessionReorder};
+use state::{HomeState, LogLine, PaneExit, ResumeLevel, SessionOutcome, SessionReorder, ROOT_NAME};
 
 /// Refresh the workspace's session state from git (best-effort) and return the
 /// sessions to show. `sync` rewrites each session worktree's status; for a
@@ -108,6 +108,7 @@ fn complete_or_record_panic(
 /// lands (like the local-LLM probe), keeping the first paint off the subprocesses.
 pub struct Preload {
     sessions: Vec<SessionRecord>,
+    root_note: Option<String>,
     notice: Option<String>,
     issues: Vec<crate::domain::issue::Issue>,
     settings: crate::domain::settings::Settings,
@@ -127,6 +128,10 @@ pub fn preload(workspace: &Workspace) -> Preload {
     // non-git root or a read failure just leaves these saved statuses.
     let (sessions, notice) =
         crate::usecase::workspace_state::recorded_sessions_for_display(&workspace.path);
+    // The `⌂ root` row's memo, loaded from the same recorded state (no git) so the
+    // sidebar marker and the 切替 preview show it on the first paint, mirroring how
+    // a session's note is loaded with the session.
+    let root_note = crate::usecase::workspace_state::recorded_root_note(&workspace.path);
     // Task issues back the `issue` command (list / graph / show); none on failure.
     let issues = crate::infrastructure::issue_store::IssueStore::new(&workspace.path)
         .scan()
@@ -143,6 +148,7 @@ pub fn preload(workspace: &Workspace) -> Preload {
         .unwrap_or_default();
     Preload {
         sessions,
+        root_note,
         notice,
         issues,
         settings,
@@ -164,6 +170,7 @@ pub fn run(term: &Term, workspace: &Workspace, preload: Preload) -> Result<Outco
     // state — no blocking IO before the first paint.
     let Preload {
         sessions,
+        root_note,
         notice,
         issues,
         settings,
@@ -181,6 +188,7 @@ pub fn run(term: &Term, workspace: &Workspace, preload: Preload) -> Result<Outco
     // no-op default and record nothing.
     state.set_logger(Box::new(crate::infrastructure::error_log::FileLogger));
     state.restore_sessions(sessions);
+    state.restore_root_note(root_note);
     state.set_issues(issues);
     // Which right-pane action surface 在席 (Focus) presents — a pickable menu or a
     // typed prompt — and the state the left sidebar opens in (full width or the
@@ -285,17 +293,22 @@ pub fn run(term: &Term, workspace: &Workspace, preload: Preload) -> Result<Outco
                 )),
                 sessions: reload_sessions(&rename_root),
                 select: Some(name.to_string()),
+                root_note: None,
             },
             Err(e) => SessionOutcome {
                 line: LogLine::error(format!("rename failed: {e}")),
                 sessions: None,
                 select: None,
+                root_note: None,
             },
         }
     };
 
-    // Saving a session's note persists it to state.json and re-reads the sessions
-    // so the editor's next open reflects it. Like `rename_display` this stays
+    // Saving a note persists it to state.json and re-reads the sessions so the
+    // editor's next open reflects it. The `⌂ root` row carries its own note (kept
+    // on the workspace state, not a session), so a `name` of [`ROOT_NAME`] routes
+    // to `set_root_note` and carries the stored value back as `root_note`; every
+    // other name edits the named session's note. Like `rename_display` this stays
     // synchronous (no git work) but still load-modify-saves `state.json`, so it
     // takes the same op-lock to serialise against the background create / remove
     // workers. `select` keeps the cursor on the edited session after the rebuild.
@@ -303,19 +316,31 @@ pub fn run(term: &Term, workspace: &Workspace, preload: Preload) -> Result<Outco
     let note_lock = op_lock.clone();
     let mut set_note = |name: &str, note: &str| {
         let _guard = lock_session_ops(&note_lock);
-        match crate::usecase::session::set_note(&note_root, name, note) {
+        let is_root = name == ROOT_NAME;
+        let result = if is_root {
+            crate::usecase::session::set_root_note(&note_root, note)
+        } else {
+            crate::usecase::session::set_note(&note_root, name, note)
+        };
+        match result {
             Ok(stored) => SessionOutcome {
                 line: LogLine::output(match stored {
                     Some(_) => format!("Saved note for \"{name}\" 📝"),
                     None => format!("Cleared note for \"{name}\" 📝"),
                 }),
                 sessions: reload_sessions(&note_root),
-                select: Some(name.to_string()),
+                // The root row is not selectable by session name; the session path
+                // keeps the cursor on the session it edited.
+                select: (!is_root).then(|| name.to_string()),
+                // Only the root-note save reports a new root note for the screen to
+                // pick up; a session note leaves the in-memory root note untouched.
+                root_note: is_root.then_some(stored),
             },
             Err(e) => SessionOutcome {
                 line: LogLine::error(format!("note failed: {e}")),
                 sessions: None,
                 select: None,
+                root_note: None,
             },
         }
     };
@@ -632,6 +657,12 @@ pub fn run(term: &Term, workspace: &Workspace, preload: Preload) -> Result<Outco
                     pool.enter(term, dir, run_agent, initial, cli, &label)?;
                 }
                 handle.set_attached(Some(dir.to_path_buf()));
+                // Whether the next pass enters a fresh pane and so must clear the
+                // surface first: true on the first entry and after any switch that
+                // changes the active tab, false when a tab nav was a no-op (a lone
+                // pane, or a jump to the current tab) so re-driving the same pane
+                // does not blank-and-repaint identical content (a one-frame flicker).
+                let mut clear = true;
                 loop {
                     // Publish the tab strip for this session before driving the pane,
                     // so it reflects any add / close / switch from the last step.
@@ -642,7 +673,7 @@ pub fn run(term: &Term, workspace: &Workspace, preload: Preload) -> Result<Outco
                         // No live pane (every one exited): drop back to 在席.
                         None => return Ok(PaneExit::Closed),
                     };
-                    match terminal::pane::run(term, home, pty, &handle)? {
+                    match terminal::pane::run(term, home, pty, &handle, clear)? {
                         // `Ctrl-O`: zoom out to 切替, leaving every pane alive.
                         terminal::pane::PaneStep::Detach => return Ok(PaneExit::ToSwitch),
                         // `Ctrl-E`: leave the pane to open the note editor over it;
@@ -650,17 +681,20 @@ pub fn run(term: &Term, workspace: &Workspace, preload: Preload) -> Result<Outco
                         terminal::pane::PaneStep::OpenNote => return Ok(PaneExit::OpenNote),
                         // `Ctrl-N` / `Ctrl-P`: move the active tab and loop, so the
                         // next iteration drives the newly active pane (and republishes
-                        // the tab strip above it) without leaving 没入.
+                        // the tab strip above it) without leaving 没入. Clear only when
+                        // the tab actually moved, so a nav on a lone pane stays put
+                        // without a flicker.
                         terminal::pane::PaneStep::NextTab => {
-                            pool.nav(dir, terminal::tabs::TabNav::Next)
+                            clear = pool.nav(dir, terminal::tabs::TabNav::Next);
                         }
                         terminal::pane::PaneStep::PrevTab => {
-                            pool.nav(dir, terminal::tabs::TabNav::Prev)
+                            clear = pool.nav(dir, terminal::tabs::TabNav::Prev);
                         }
                         // A click on a tab chip: jump straight to that pane and loop,
                         // driving it (and republishing the strip) without leaving 没入.
+                        // A click on the active tab does not move it, so skip the clear.
                         terminal::pane::PaneStep::ToTab(i) => {
-                            pool.nav(dir, terminal::tabs::TabNav::To(i))
+                            clear = pool.nav(dir, terminal::tabs::TabNav::To(i));
                         }
                         // `Ctrl-T`: zoom out to 在席 (Focus) so the user picks the next
                         // action from the session's menu, leaving every pane alive in
@@ -681,6 +715,9 @@ pub fn run(term: &Term, workspace: &Workspace, preload: Preload) -> Result<Outco
                                     &label,
                                 )?;
                             }
+                            // Jumped to / opened the agent pane: a different pane drives
+                            // next pass, so clear the surface for it.
+                            clear = true;
                         }
                         // `Ctrl-^`: leave the pane to jump to the previously focused
                         // session; the event loop re-roots on it (attaching when live),
@@ -697,6 +734,9 @@ pub fn run(term: &Term, workspace: &Workspace, preload: Preload) -> Result<Outco
                             if !pool.close_active(dir, &label) {
                                 return Ok(PaneExit::Closed);
                             }
+                            // The surviving pane that slides into the active slot is a
+                            // different shell, so clear the surface before driving it.
+                            clear = true;
                         }
                     }
                 }
