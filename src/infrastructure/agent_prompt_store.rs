@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::infrastructure::json_file;
 use crate::infrastructure::store_lock::StoreLock;
-use crate::infrastructure::worktree_keyed_store::{dir, file_name, key};
+use crate::infrastructure::worktree_keyed_store::{dir, file_name, key, path_for};
 
 /// Subdirectory of the data dir the queued-prompt files live under.
 const PROMPT_SUBDIR: &str = "agent-prompts";
@@ -95,6 +95,18 @@ pub fn take(worktree: &Path) -> Option<String> {
     }
 }
 
+/// Discard any prompt queued for `worktree` (best-effort), so a session removed
+/// before its agent ever launched — and later recreated at the same path — does
+/// not inherit a prompt queued for the previous session. Called from session
+/// removal (see [`crate::usecase::session::remove`]); a no-op when nothing is
+/// queued. Unlike [`take`] this does not hand the prompt back: it is being
+/// thrown away with the session, not delivered.
+pub fn clear(worktree: &Path) {
+    if let Ok(path) = path_for(PROMPT_SUBDIR, worktree) {
+        let _ = fs::remove_file(path);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -147,6 +159,20 @@ mod tests {
             set(wt.path(), "first").unwrap();
             set(wt.path(), "second").unwrap();
             assert_eq!(take(wt.path()), Some("second".to_string()));
+        });
+    }
+
+    #[test]
+    fn clear_discards_a_queued_prompt_without_delivering_it() {
+        with_data_dir(|_| {
+            let wt = tempfile::tempdir().unwrap();
+            set(wt.path(), "queued for the old session").unwrap();
+            clear(wt.path());
+            // The prompt is gone: a session recreated at the same path does not
+            // inherit it.
+            assert_eq!(take(wt.path()), None);
+            // Clearing again (nothing queued) is a harmless no-op.
+            clear(wt.path());
         });
     }
 
