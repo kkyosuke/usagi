@@ -108,6 +108,15 @@ fn render_frame_reuses_the_unite_gap_for_inline_create_without_shifting_lower_wo
 }
 
 #[test]
+fn splice_rows_inserts_inside_an_existing_column_without_replacing_rows() {
+    let mut column = vec!["a".to_string(), "d".to_string()];
+
+    splice_rows(&mut column, 1, vec!["b".to_string(), "c".to_string()]);
+
+    assert_eq!(column, ["a", "b", "c", "d"]);
+}
+
+#[test]
 fn switch_rename_rows_show_the_target_and_typed_label() {
     // Caret at the end of the label.
     let rows = switch_rename_rows("main", "My main", "My main".len(), 40);
