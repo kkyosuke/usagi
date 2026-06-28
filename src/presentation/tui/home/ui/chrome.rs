@@ -533,12 +533,12 @@ pub(super) fn remove_modal_body(modal: &RemoveModal, inner: usize) -> Vec<String
         String::new(),
     ];
 
-    let names = modal.names();
-    if names.is_empty() {
+    let entries = modal.entries();
+    if entries.is_empty() {
         body.push(style("No sessions to remove.").dim().to_string());
     } else {
         // Scroll the window so the cursor is always visible on a long list.
-        let total = names.len();
+        let total = entries.len();
         let start = if modal.cursor() < REMOVE_MODAL_VISIBLE {
             0
         } else {
@@ -548,10 +548,10 @@ pub(super) fn remove_modal_body(modal: &RemoveModal, inner: usize) -> Vec<String
         if start > 0 {
             body.push(style(format!("  ↑ {start} more")).dim().to_string());
         }
-        for (offset, name) in names[start..end].iter().enumerate() {
+        for (offset, entry) in entries[start..end].iter().enumerate() {
             let i = start + offset;
             body.push(remove_modal_row(
-                name,
+                entry.display(),
                 i == modal.cursor(),
                 modal.is_selected(i),
                 inner,

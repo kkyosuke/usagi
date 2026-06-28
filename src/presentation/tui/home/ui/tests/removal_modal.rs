@@ -42,6 +42,31 @@ fn render_frame_overlays_the_removal_modal_with_a_checklist() {
 }
 
 #[test]
+fn render_frame_removal_modal_prefixes_rows_in_unite_mode() {
+    let mut state = state_with_sessions(&["alpha"]);
+    state.set_extra_groups(vec![GroupSource {
+        name: "tools".to_string(),
+        root_path: "/ws/tools".into(),
+        root_note: None,
+        sessions: vec![SessionRecord {
+            name: "beta".to_string(),
+            display_name: None,
+            note: None,
+            root: PathBuf::from("/ws/tools/.usagi/sessions/beta"),
+            worktrees: Vec::new(),
+            created_at: Utc::now(),
+            last_active: None,
+        }],
+    }]);
+    state.open_remove_modal(false);
+
+    let frame = render_frame(24, 80, &state);
+    let joined = console::strip_ansi_codes(&frame.join("\n")).into_owned();
+    assert!(joined.contains("usagi: alpha"));
+    assert!(joined.contains("tools: beta"));
+}
+
+#[test]
 fn render_frame_overlays_the_quit_confirmation_modal() {
     let mut state = state_with_sessions(&["alpha", "beta"]);
     let live: std::collections::HashSet<std::path::PathBuf> =

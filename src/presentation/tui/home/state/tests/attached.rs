@@ -175,13 +175,14 @@ fn apply_task_completion_logs_and_refreshes_keeping_the_cursor() {
             session_record("feature", 1),
             session_record("x", 1),
         ]),
+        None,
     );
     assert!(state.log().last().unwrap().text.contains("Created session"));
     assert_eq!(state.sessions().len(), 3);
     assert_eq!(state.list().selected_name(), "feature");
 
     // A failure (no refreshed list) only logs; the pane is untouched.
-    state.apply_task_completion(LogLine::error("session remove failed"), None);
+    state.apply_task_completion(LogLine::error("session remove failed"), None, None);
     assert_eq!(state.log().last().unwrap().kind, LineKind::Error);
     assert_eq!(state.sessions().len(), 3);
 }
@@ -285,11 +286,48 @@ fn open_remove_modal_lists_the_session_names() {
     assert!(state.remove_modal().is_none());
     state.open_remove_modal(false);
     let modal = state.remove_modal().unwrap();
-    assert_eq!(modal.names(), ["alpha", "beta"]);
+    let names: Vec<&str> = modal.entries().iter().map(|entry| entry.name()).collect();
+    let labels: Vec<&str> = modal
+        .entries()
+        .iter()
+        .map(|entry| entry.display())
+        .collect();
+    assert_eq!(names, ["alpha", "beta"]);
+    assert_eq!(labels, ["alpha", "beta"]);
     assert_eq!(modal.cursor(), 0);
     assert_eq!(modal.selected_count(), 0);
     assert!(!modal.is_empty());
     assert!(!modal.is_selected(0));
+}
+
+#[test]
+fn open_remove_modal_lists_all_united_sessions_with_workspace_prefixes() {
+    let mut state = state();
+    state.set_root_path("/repo/usagi");
+    state.restore_sessions(vec![session_record("alpha", 1)]);
+    state.set_extra_groups(vec![GroupSource {
+        name: "tools".to_string(),
+        root_path: "/repo/tools".into(),
+        root_note: None,
+        sessions: vec![session_record("alpha", 1), session_record("beta", 1)],
+    }]);
+
+    state.open_remove_modal(false);
+    let modal = state.remove_modal().unwrap();
+    let labels: Vec<&str> = modal
+        .entries()
+        .iter()
+        .map(|entry| entry.display())
+        .collect();
+    assert_eq!(labels, ["usagi: alpha", "tools: alpha", "tools: beta"]);
+    assert_eq!(
+        modal.entries()[0].root_path(),
+        &PathBuf::from("/repo/usagi")
+    );
+    assert_eq!(
+        modal.entries()[1].root_path(),
+        &PathBuf::from("/repo/tools")
+    );
 }
 
 #[test]
@@ -360,8 +398,9 @@ fn submit_remove_modal_returns_checked_names_in_order_and_closes() {
     state.remove_modal_mut().unwrap().move_up();
     state.remove_modal_mut().unwrap().move_up();
     state.remove_modal_mut().unwrap().toggle(); // "a"
-    let (names, force) = state.submit_remove_modal().unwrap();
-    assert_eq!(names, vec!["a".to_string(), "c".to_string()]);
+    let (entries, force) = state.submit_remove_modal().unwrap();
+    let names: Vec<&str> = entries.iter().map(|entry| entry.name()).collect();
+    assert_eq!(names, ["a", "c"]);
     assert!(force);
     assert!(state.remove_modal().is_none());
 }
@@ -421,7 +460,7 @@ fn input_mistakes_are_shown_but_not_recorded() {
 fn applied_failure_lines_are_recorded_success_lines_are_not() {
     let (mut state, spy) = state_with_spy();
     // A background task / session outcome that succeeded only logs its line.
-    state.apply_task_completion(LogLine::output("Created session \"x\" 🐰"), None);
+    state.apply_task_completion(LogLine::output("Created session \"x\" 🐰"), None, None);
     state.apply_session_outcome(SessionOutcome {
         line: LogLine::output("Renamed \"x\""),
         sessions: None,
@@ -431,7 +470,7 @@ fn applied_failure_lines_are_recorded_success_lines_are_not() {
     assert!(spy.recorded.borrow().is_empty());
 
     // A failure line from either path is persisted through the sink.
-    state.apply_task_completion(LogLine::error("session remove failed: boom"), None);
+    state.apply_task_completion(LogLine::error("session remove failed: boom"), None, None);
     state.apply_session_outcome(SessionOutcome {
         line: LogLine::error("rename failed: locked"),
         sessions: None,

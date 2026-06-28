@@ -32,7 +32,7 @@ use super::update::UpdateHandle;
 
 mod handlers;
 
-use handlers::{focus_key, note_editor_key, palette_key, switch_click, switch_key};
+use handlers::{focus_click, focus_key, note_editor_key, palette_key, switch_click, switch_key};
 
 /// The byte `console` reports for `Ctrl-O` on the home screen: a bare control
 /// character (`0x0f`), since `console` only special-cases a handful of control
@@ -257,13 +257,15 @@ fn save_resume_focus(state: &mut HomeState, wiring: &mut Wiring) {
     (wiring.save_last_active)(&state.last_active_flush());
 }
 
-/// Whether a left click should act on the 切替 session list: only at the base
-/// Switch list, with no overlay or inline input capturing keys. A click while a
-/// modal / palette / note editor / inline create / rename is open is ignored,
-/// mirroring how those overlays capture every key in the loop below — so a stray
-/// click never reaches the session list beneath them.
+/// Whether a left click should act on the session list: in 切替 (Switch), where it
+/// is the picker, and in 在席 (Focus), where the list still shows beside the action
+/// surface so a click re-focuses onto another session (see [`focus_click`]). Not in
+/// 没入 (Attached) — there the right pane owns the pointer. In either acting mode a
+/// click while a modal / palette / note editor / inline create / rename is open is
+/// ignored, mirroring how those overlays capture every key in the loop below — so a
+/// stray click never reaches the session list beneath them.
 fn click_selects_session(state: &HomeState) -> bool {
-    state.mode() == Mode::Switch
+    matches!(state.mode(), Mode::Switch | Mode::Focus)
         && !state.quit_confirm()
         && state.remove_modal().is_none()
         && state.text_modal().is_none()
@@ -367,13 +369,14 @@ pub(super) fn event_loop(
             let super::tasks::Completion {
                 line,
                 sessions,
+                target_root,
                 evict,
                 focus,
             } = completion;
             if let Some(path) = evict {
                 (wiring.evict_pool)(&path);
             }
-            state.apply_task_completion(line, sessions);
+            state.apply_task_completion(line, sessions, target_root.as_deref());
             // A finished create asks to drop into 在席 (Focus) on its new session.
             // Done after the refresh above so the new branch is in the list to
             // match. Unlike that refresh — which deliberately keeps the cursor put
@@ -517,12 +520,14 @@ pub(super) fn event_loop(
             Input::Key(key) => key,
             // The TUI never scrolls in place: read the wheel turn and drop it.
             Input::Scroll(_) => continue,
-            // A click on a 切替 session row selects it (a second click on the same
-            // row confirms it, like `Enter`); a click on the resting sidebar mascot
-            // makes it react; anywhere else it is ignored. The two hit disjoint
-            // regions, so the session list is tried first and the mascot only when
-            // it misses. No key was pressed either way, so repaint only when the
-            // click actually did something.
+            // A click on a session row in the left pane acts on it: in 切替 (Switch)
+            // it selects the row (a second click on the same row confirms it, like
+            // `Enter`); in 在席 (Focus) it re-focuses onto that session (a second
+            // click attaches its pane when live). A click on the resting sidebar
+            // mascot makes it react; anywhere else it is ignored. The two hit
+            // disjoint regions, so the session list is tried first and the mascot
+            // only when it misses. No key was pressed either way, so repaint only
+            // when the click actually did something.
             Input::Click(click) => {
                 let selected = click_selects_session(&state)
                     .then(|| {
@@ -537,15 +542,28 @@ pub(super) fn event_loop(
                     .flatten();
                 match selected {
                     Some(row) => {
-                        switch_click(
-                            term,
-                            &mut state,
-                            &mut painter,
-                            wiring,
-                            row,
-                            Instant::now(),
-                            &mut last_click,
-                        );
+                        let now = Instant::now();
+                        if state.mode() == Mode::Focus {
+                            focus_click(
+                                term,
+                                &mut state,
+                                &mut painter,
+                                wiring,
+                                row,
+                                now,
+                                &mut last_click,
+                            );
+                        } else {
+                            switch_click(
+                                term,
+                                &mut state,
+                                &mut painter,
+                                wiring,
+                                row,
+                                now,
+                                &mut last_click,
+                            );
+                        }
                         force_paint = true;
                     }
                     None => {
@@ -690,15 +708,17 @@ pub(super) fn event_loop(
                     }
                 }
                 Key::Enter => {
-                    if let Some((names, force)) = state.submit_remove_modal() {
+                    if let Some((entries, force)) = state.submit_remove_modal() {
                         // Each checked session is dispatched to a background
                         // worker, so the loop never blocks on the git work; the
                         // task panel stacks them and the loop drains each as it
-                        // finishes. Each is removed from the workspace it lives in.
-                        for name in &names {
-                            let root = state.workspace_root_for_session(name);
+                        // finishes. Each row already carries the owning workspace
+                        // root, which keeps 統合(unite) bulk-removal correct even
+                        // when different workspaces contain the same session name.
+                        for entry in &entries {
+                            let root = entry.root_path().to_path_buf();
                             state.set_op_target(root.clone());
-                            (wiring.dispatch_remove)(&root, name, force);
+                            (wiring.dispatch_remove)(&root, entry.name(), force);
                         }
                     }
                 }
@@ -944,6 +964,7 @@ pub(crate) fn event_loop_compat(
             super::tasks::Completion {
                 line: outcome.line,
                 sessions: outcome.sessions,
+                target_root: Some(_root.to_path_buf()),
                 evict: None,
                 focus,
             },
@@ -965,6 +986,7 @@ pub(crate) fn event_loop_compat(
             super::tasks::Completion {
                 line: outcome.line,
                 sessions: outcome.sessions,
+                target_root: Some(_root.to_path_buf()),
                 evict,
                 focus: None,
             },
