@@ -27,7 +27,7 @@ use chrome::{
     remove_modal_body, switch_create_rows, switch_rename_rows, task_status_line, text_modal_body,
     title_bar, update_confirm_frame, PALETTE_INNER, REMOVE_MODAL_INNER, TEXT_MODAL_INNER,
 };
-use panes::{left_pane, right_pane_contents};
+use panes::{group_inline_insert_line, left_pane, right_pane_contents};
 // The embedded terminal pane (没入) maps a click to the tab under it through this.
 pub(super) use panes::attached_tab_at;
 // …and a click on a sidebar session row to that session's PR URLs through this.
@@ -570,12 +570,15 @@ fn left_column(
         state.now(),
     );
     if sidebar == Sidebar::Full {
-        // While naming a new session in 切替, append the inline create row(s) to the
-        // left pane (trimmed back to the session-list area if it overflows).
+        // While naming a new session in 切替, insert the inline create row(s) into
+        // the selected workspace's own block: directly after that workspace's
+        // session rows in the regular sidebar flow. In 統合(unite) mode this keeps
+        // the "+ new" input attached to the workspace that `c` targets, instead
+        // of drifting to another workspace or to the whole column's foot.
         if let Some(create) = state.create() {
-            for row in switch_create_rows(create.value(), create.cursor(), create.error(), left_w) {
-                left.push(row);
-            }
+            let rows = switch_create_rows(create.value(), create.cursor(), create.error(), left_w);
+            let insert = group_inline_insert_line(state.list(), state.list().selected_group());
+            splice_rows(&mut left, insert, rows);
             left.truncate(body_rows);
         }
         // While renaming a session's sidebar label in 切替, append the inline rename
@@ -589,6 +592,19 @@ fn left_column(
         }
     }
     left
+}
+
+/// Insert `rows` into `column` at `line`, padding with blanks when the target line
+/// is below the rows currently built. This preserves the normal sidebar flow for
+/// inline inputs: they sit after the targeted workspace's list, not at the bottom
+/// of the viewport.
+fn splice_rows(column: &mut Vec<String>, line: usize, rows: Vec<String>) {
+    if line >= column.len() {
+        column.resize(line, String::new());
+        column.extend(rows);
+    } else {
+        column.splice(line..line, rows);
+    }
 }
 
 /// Where the sidebar mascot's clickable body landed within the left column: the
