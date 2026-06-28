@@ -19,7 +19,7 @@ use super::{
     EMPTY_MESSAGE, HINT_INDENT, HINT_MAX, LOCAL_ICON, NAME_PREFIX, NEW_ICON, NOTE_ICON,
     PUSHED_ICON, RAIL_WIDTH, ROOT_DETAIL, STATUS_COL, SYNCED_ICON, TERMINAL_STARTING,
 };
-use crate::domain::resource::ResourceUsage;
+use crate::domain::resource::{Load, ResourceUsage};
 use crate::domain::settings::{AgentCli, SessionActionUi, Sidebar};
 use crate::domain::workspace_state::{AheadBehind, BranchStatus, DiffStat, PrLink, WorktreeState};
 use crate::presentation::tui::markdown::{LineStyle, MarkdownLine, Rgb, Span, SpanStyle};
@@ -238,6 +238,38 @@ pub(super) fn resource_inline_label(usage: ResourceUsage) -> String {
         mem = usage.format_memory(),
         width = CPU_LABEL_WIDTH,
     )
+}
+
+/// The same icon-led resource label as [`resource_inline_label`], but with the
+/// CPU and memory fields each **tinted by their own load band** — dim when calm,
+/// yellow when busy, red when hot — so a heavy figure stands out beside the
+/// mascot. Used for the workspace total only; the per-session rows stay uniformly
+/// dim via [`resource_inline_label`].
+pub(super) fn resource_inline_label_tinted(usage: ResourceUsage) -> String {
+    let cpu = tint_by_load(
+        format!(
+            "{CPU_ICON} {cpu:<width$}",
+            cpu = usage.format_cpu(),
+            width = CPU_LABEL_WIDTH,
+        ),
+        usage.cpu_load(),
+    );
+    let mem = tint_by_load(
+        format!("{MEM_ICON} {mem}", mem = usage.format_memory()),
+        usage.memory_load(),
+    );
+    format!("{cpu}  {mem}")
+}
+
+/// Paint a resource field by its [`Load`] band: dim (calm), yellow (busy), or red
+/// (hot), so the colour rises with the figure.
+fn tint_by_load(field: String, load: Load) -> String {
+    match load {
+        Load::Calm => style(field).dim(),
+        Load::Busy => style(field).yellow(),
+        Load::Hot => style(field).red(),
+    }
+    .to_string()
 }
 
 /// Builds an entry's **third** line — the CPU / memory its process tree is using —
@@ -2102,6 +2134,38 @@ fn rgb_to_ansi256(rgb: Rgb) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resource_inline_label_tinted_carries_the_figures_for_every_load_band() {
+        // The CPU and memory fields are tinted by their own load band (dim / yellow
+        // / red); whatever the tint, both figures still read through. Cover calm,
+        // busy, and hot for each field.
+        for usage in [
+            ResourceUsage {
+                cpu_percent: 1,
+                memory_bytes: 1,
+            }, // calm / calm
+            ResourceUsage {
+                cpu_percent: 50,
+                memory_bytes: 600 * 1024 * 1024,
+            }, // busy / busy
+            ResourceUsage {
+                cpu_percent: 200,
+                memory_bytes: 3 * 1024 * 1024 * 1024,
+            }, // hot / hot
+        ] {
+            let plain =
+                console::strip_ansi_codes(&resource_inline_label_tinted(usage)).into_owned();
+            assert!(
+                plain.contains(&usage.format_cpu()),
+                "{plain:?} keeps the CPU figure"
+            );
+            assert!(
+                plain.contains(&usage.format_memory()),
+                "{plain:?} keeps the memory figure"
+            );
+        }
+    }
 
     #[test]
     fn name_cell_pads_by_display_width_not_char_count() {

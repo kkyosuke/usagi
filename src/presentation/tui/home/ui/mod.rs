@@ -335,38 +335,35 @@ fn rabbit_mood(mode: Mode) -> widgets::RabbitMood {
     }
 }
 
-/// The workspace-total resource line shown beside the resting mascot's face —
-/// the icon-led ` 23%   512MB` — dimmed, or `None` when nothing is live (idle),
-/// so the rabbit rests without a number. It reuses the same icon-led
-/// [`resource_inline_label`](panes::resource_inline_label) the per-session rows
-/// draw, so the mascot total and the list read alike.
+/// The workspace-total resource line shown beside the resting mascot's feet —
+/// the icon-led ` 23%   512MB` — or `None` when nothing is live (idle), so the
+/// rabbit rests without a number. The CPU and memory figures are each tinted by
+/// their load band (dim / yellow / red) via
+/// [`resource_inline_label_tinted`](panes::resource_inline_label_tinted), so a
+/// heavy figure stands out beside the mascot.
 fn workspace_total_label(total: ResourceUsage) -> Option<String> {
-    (!total.is_idle()).then(|| {
-        console::style(panes::resource_inline_label(total))
-            .dim()
-            .to_string()
-    })
+    (!total.is_idle()).then(|| panes::resource_inline_label_tinted(total))
 }
 
-/// Append the workspace resource `total` to the mascot's face row (its
-/// second-to-last line — ears, **face**, feet), so the figure reads as sitting
-/// beside the rabbit. Skipped when nothing is live, or when the label would not
-/// fit the sidebar beside the art (so the row never overruns `left_w` and pushes
-/// the right pane out of line). `rabbit` is the already-indented mascot block.
+/// Append the workspace resource `total` to the mascot's feet row (its last line
+/// — ears, face, **feet**), so the label rests on the rabbit's foot line. Skipped
+/// when nothing is live, or when the label would not fit the sidebar beside the
+/// art (so the row never overruns `left_w` and pushes the right pane out of
+/// line). `rabbit` is the already-indented mascot block.
 fn append_total_beside_mascot(rabbit: &mut [String], total: ResourceUsage, left_w: usize) {
     let Some(label) = workspace_total_label(total) else {
         return;
     };
-    // The face is the row above the feet; a two-row rail chibi has no distinct
-    // face row, so guard the index.
+    // The feet are the block's last row; a two-row rail chibi carries no total,
+    // so guard against blocks too short to be the full three-row mascot.
     if rabbit.len() < 3 {
         return;
     }
-    let face = rabbit.len() - 2;
+    let feet = rabbit.len() - 1;
     let needed =
-        console::measure_text_width(&rabbit[face]) + 2 + console::measure_text_width(&label);
+        console::measure_text_width(&rabbit[feet]) + 2 + console::measure_text_width(&label);
     if needed <= left_w {
-        rabbit[face].push_str(&format!("  {label}"));
+        rabbit[feet].push_str(&format!("  {label}"));
     }
 }
 
@@ -639,6 +636,9 @@ fn place_mascot(
     let (mascot, animal_rows, width) = match sidebar {
         Sidebar::Full if left_w >= widgets::workspace_rabbit_width() + RABBIT_INDENT => {
             let mood = rabbit_mood(state.mode());
+            // The CPU load drives how strained and busy the rabbit looks (and how
+            // fast it animates), from the same workspace total shown beside it.
+            let load = state.resource_total().cpu_load();
             // `blinking` is set for the frames just after the user interacts, and
             // `tick` advances on the live loop so the 没入 Working paw pumps — both
             // from the state the event loop refreshes each frame.
@@ -652,13 +652,14 @@ fn place_mascot(
                 None => match state.update() {
                     Some(latest) => widgets::workspace_rabbit_speaking(
                         mood,
+                        load,
                         &["アップデートがあるぴょん".to_string(), format!("v{latest}")],
                         // Leave room for the indent so the bubble still fits the pane.
                         left_w - RABBIT_INDENT,
                         blinking,
                         tick,
                     ),
-                    None => widgets::workspace_rabbit(mood, blinking, tick),
+                    None => widgets::workspace_rabbit(mood, load, blinking, tick),
                 },
             };
             (
@@ -678,7 +679,7 @@ fn place_mascot(
         .into_iter()
         .map(|row| format!("{}{row}", " ".repeat(RABBIT_INDENT)))
         .collect();
-    // The workspace CPU / memory total rests beside the full mascot's face; the
+    // The workspace CPU / memory total rests beside the full mascot's feet; the
     // rail chibi is too small (and the reaction art has no settled face), so they
     // carry none — `append_total_beside_mascot` no-ops on a block under three rows.
     if sidebar == Sidebar::Full {

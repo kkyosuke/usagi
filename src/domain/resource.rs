@@ -47,6 +47,32 @@ const MIB: u64 = 1024 * 1024;
 /// One gibibyte, the threshold memory switches to `N.NGB` at.
 const GIB: u64 = 1024 * MIB;
 
+/// CPU percent at or above which usage reads **busy** — the workspace total is
+/// summed across the whole process tree and all cores (so it can exceed 100), so
+/// this sits above a quiet baseline rather than at a single core's share.
+const CPU_BUSY: u32 = 30;
+/// CPU percent at or above which usage reads **hot** — roughly a core's worth of
+/// sustained work across the tree.
+const CPU_HOT: u32 = 120;
+/// Resident memory at or above which usage reads **busy**.
+const MEM_BUSY: u64 = 512 * MIB;
+/// Resident memory at or above which usage reads **hot**.
+const MEM_HOT: u64 = 2 * GIB;
+
+/// A coarse load band for a CPU or memory figure — calm, busy, or hot. It tints
+/// the figures beside the mascot (calm dim, busy yellow, hot red) and, for CPU,
+/// drives how strained the resting rabbit looks and how fast it animates, so the
+/// number and the mascot stay tied to one set of thresholds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Load {
+    /// Below the busy threshold — a quiet baseline.
+    Calm,
+    /// At or above the busy threshold but below hot.
+    Busy,
+    /// At or above the hot threshold — working hard.
+    Hot,
+}
+
 impl ResourceUsage {
     /// Whether nothing is being used — no CPU and no memory. A session with no
     /// live process (or one not yet sampled) reads idle, and the workspace total
@@ -68,6 +94,30 @@ impl ResourceUsage {
     /// The CPU share as a compact label — `8%` — for the sidebar.
     pub fn format_cpu(&self) -> String {
         format!("{}%", self.cpu_percent)
+    }
+
+    /// The CPU figure's load band ([`CPU_BUSY`] / [`CPU_HOT`] thresholds), used to
+    /// tint the figure and animate the resting rabbit.
+    pub fn cpu_load(&self) -> Load {
+        if self.cpu_percent >= CPU_HOT {
+            Load::Hot
+        } else if self.cpu_percent >= CPU_BUSY {
+            Load::Busy
+        } else {
+            Load::Calm
+        }
+    }
+
+    /// The memory figure's load band ([`MEM_BUSY`] / [`MEM_HOT`] thresholds), used
+    /// to tint the figure beside the mascot.
+    pub fn memory_load(&self) -> Load {
+        if self.memory_bytes >= MEM_HOT {
+            Load::Hot
+        } else if self.memory_bytes >= MEM_BUSY {
+            Load::Busy
+        } else {
+            Load::Calm
+        }
     }
 
     /// The memory as a compact, human label: whole mebibytes below a gibibyte
@@ -197,6 +247,40 @@ mod tests {
             .format_cpu(),
             "8%"
         );
+    }
+
+    #[test]
+    fn cpu_load_bands_at_the_busy_and_hot_thresholds() {
+        let cpu = |p| {
+            ResourceUsage {
+                cpu_percent: p,
+                memory_bytes: 0,
+            }
+            .cpu_load()
+        };
+        assert_eq!(cpu(0), Load::Calm);
+        assert_eq!(cpu(CPU_BUSY - 1), Load::Calm);
+        assert_eq!(cpu(CPU_BUSY), Load::Busy);
+        assert_eq!(cpu(CPU_HOT - 1), Load::Busy);
+        assert_eq!(cpu(CPU_HOT), Load::Hot);
+        assert_eq!(cpu(CPU_HOT + 500), Load::Hot);
+    }
+
+    #[test]
+    fn memory_load_bands_at_the_busy_and_hot_thresholds() {
+        let mem = |b| {
+            ResourceUsage {
+                cpu_percent: 0,
+                memory_bytes: b,
+            }
+            .memory_load()
+        };
+        assert_eq!(mem(0), Load::Calm);
+        assert_eq!(mem(MEM_BUSY - 1), Load::Calm);
+        assert_eq!(mem(MEM_BUSY), Load::Busy);
+        assert_eq!(mem(MEM_HOT - 1), Load::Busy);
+        assert_eq!(mem(MEM_HOT), Load::Hot);
+        assert_eq!(mem(MEM_HOT * 2), Load::Hot);
     }
 
     #[test]

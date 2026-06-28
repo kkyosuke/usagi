@@ -148,8 +148,9 @@ fn workspace_total_label_shows_cpu_and_memory_figures_or_is_absent_when_idle() {
 }
 
 #[test]
-fn append_total_beside_mascot_writes_on_the_face_row_when_it_fits() {
-    // Three mascot rows (ears / face / feet); the total joins the middle face row.
+fn append_total_beside_mascot_writes_on_the_feet_row_when_it_fits() {
+    // Three mascot rows (ears / face / feet); the total joins the bottom feet row
+    // so the label rests on the rabbit's foot line.
     let rabbit_rows = || {
         vec![
             " (\\(\\".to_string(),
@@ -163,25 +164,25 @@ fn append_total_beside_mascot_writes_on_the_face_row_when_it_fits() {
     };
     let mut rabbit = rabbit_rows();
     append_total_beside_mascot(&mut rabbit, total, 40);
-    let face = console::strip_ansi_codes(&rabbit[1]);
-    assert!(face.contains("23%"), "{face:?} missing the CPU figure");
-    assert!(face.contains("512MB"), "{face:?} missing the memory figure");
-    // Only the face row gains it; the ears and feet are untouched.
+    let feet = console::strip_ansi_codes(&rabbit[2]);
+    assert!(feet.contains("23%"), "{feet:?} missing the CPU figure");
+    assert!(feet.contains("512MB"), "{feet:?} missing the memory figure");
+    // Only the feet row gains it; the ears and face are untouched.
     assert!(!rabbit[0].contains("512MB"));
-    assert!(!rabbit[2].contains("512MB"));
+    assert!(!rabbit[1].contains("512MB"));
 
     // Too narrow for the art plus the label → the row is left alone (never
     // overrunning the sidebar and pushing the right pane out of line).
     let mut narrow = rabbit_rows();
     append_total_beside_mascot(&mut narrow, total, 8);
-    assert!(!narrow[1].contains("512MB"));
+    assert!(!narrow[2].contains("512MB"));
 
     // Idle total → nothing is appended at all.
     let mut idle = rabbit_rows();
     append_total_beside_mascot(&mut idle, ResourceUsage::default(), 40);
-    assert!(!idle[1].contains("512MB"));
+    assert!(!idle[2].contains("512MB"));
 
-    // A two-row chibi has no distinct face row → it is left untouched.
+    // A two-row chibi is too short to be the full mascot → it is left untouched.
     let mut chibi = vec![" ∩∩".to_string(), "(･･)".to_string()];
     append_total_beside_mascot(&mut chibi, total, 40);
     assert!(!chibi.iter().any(|r| r.contains("512MB")));
