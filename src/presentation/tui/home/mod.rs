@@ -199,13 +199,18 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
     // stack them below the primary as display groups. The mascot animation has
     // already played, so this synchronous read does not delay the first paint.
     if workspaces.len() > 1 {
-        let extras: Vec<state::WorkspaceGroup> = workspaces[1..]
+        let extras: Vec<state::GroupSource> = workspaces[1..]
             .iter()
             .map(|w| {
                 let (sessions, _) =
                     crate::usecase::workspace_state::recorded_sessions_for_display(&w.path);
                 let root_note = crate::usecase::workspace_state::recorded_root_note(&w.path);
-                state::WorkspaceGroup::from_sessions(&w.name, &sessions, root_note.is_some())
+                state::GroupSource {
+                    name: w.name.clone(),
+                    root_path: w.path.clone(),
+                    root_note,
+                    sessions,
+                }
             })
             .collect();
         state.set_extra_groups(extras);
@@ -264,13 +269,14 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
     // op-lock, and stores the result for the event loop to drain (logging it and
     // refreshing the pane). Returns the moment the thread is spawned.
     let create_tasks = tasks.clone();
-    let create_root = workspace.path.clone();
     let create_lock = op_lock.clone();
     let create_workers = workers.clone();
-    let mut dispatch_create = move |name: &str| {
+    // `root` is the workspace the cursor's group points at (the primary, or an
+    // extra 統合/unite workspace), so the session lands where the user is pointing.
+    let mut dispatch_create = move |root: &Path, name: &str| {
         let id = create_tasks.begin(tasks::TaskKind::CreateSession, name);
         let handle = create_tasks.clone();
-        let root = create_root.clone();
+        let root = root.to_path_buf();
         let name = name.to_string();
         let lock = create_lock.clone();
         let worker = std::thread::spawn(move || {
@@ -300,11 +306,10 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
     // mid-`worktree add` would be clobbered by the worker's later write. The lock
     // is only contended while a background op is genuinely in flight, so the
     // momentary wait is bounded to exactly the window where serialising matters.
-    let rename_root = workspace.path.clone();
     let rename_lock = op_lock.clone();
-    let mut rename_display = |name: &str, label: &str| {
+    let mut rename_display = |root: &Path, name: &str, label: &str| {
         let _guard = lock_session_ops(&rename_lock);
-        match crate::usecase::session::set_display_name(&rename_root, name, label) {
+        match crate::usecase::session::set_display_name(root, name, label) {
             // The usecase persists the raw override; the label shown falls back to
             // the session name when the override was cleared (presentation's call).
             Ok(stored) => SessionOutcome {
@@ -312,7 +317,7 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
                     "Renamed \"{name}\" to \"{}\" 🏷",
                     stored.as_deref().unwrap_or(name)
                 )),
-                sessions: reload_sessions(&rename_root),
+                sessions: reload_sessions(root),
                 select: Some(name.to_string()),
                 root_note: None,
             },
@@ -333,15 +338,14 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
     // synchronous (no git work) but still load-modify-saves `state.json`, so it
     // takes the same op-lock to serialise against the background create / remove
     // workers. `select` keeps the cursor on the edited session after the rebuild.
-    let note_root = workspace.path.clone();
     let note_lock = op_lock.clone();
-    let mut set_note = |name: &str, note: &str| {
+    let mut set_note = |root: &Path, name: &str, note: &str| {
         let _guard = lock_session_ops(&note_lock);
         let is_root = name == ROOT_NAME;
         let result = if is_root {
-            crate::usecase::session::set_root_note(&note_root, note)
+            crate::usecase::session::set_root_note(root, note)
         } else {
-            crate::usecase::session::set_note(&note_root, name, note)
+            crate::usecase::session::set_note(root, name, note)
         };
         match result {
             Ok(stored) => SessionOutcome {
@@ -349,7 +353,7 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
                     Some(_) => format!("Saved note for \"{name}\" 📝"),
                     None => format!("Cleared note for \"{name}\" 📝"),
                 }),
-                sessions: reload_sessions(&note_root),
+                sessions: reload_sessions(root),
                 // The root row is not selectable by session name; the session path
                 // keeps the cursor on the session it edited.
                 select: (!is_root).then(|| name.to_string()),
@@ -503,14 +507,15 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
     // under the op-lock; the result (and, on success, the pool path whose shell
     // to evict) is stored for the event loop to drain.
     let remove_tasks = tasks.clone();
-    let remove_root = workspace.path.clone();
     let remove_lock = op_lock.clone();
     let remove_agent = agent.clone();
     let remove_workers = workers.clone();
-    let mut dispatch_remove = move |name: &str, force: bool| {
+    // `root` is the workspace the targeted session lives in (the cursor's group in
+    // 統合/unite mode), resolved by the handler before dispatch.
+    let mut dispatch_remove = move |root: &Path, name: &str, force: bool| {
         let id = remove_tasks.begin(tasks::TaskKind::RemoveSession, name);
         let handle = remove_tasks.clone();
-        let root = remove_root.clone();
+        let root = root.to_path_buf();
         let name = name.to_string();
         let lock = remove_lock.clone();
         let agent = remove_agent.clone();

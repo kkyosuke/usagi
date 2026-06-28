@@ -1,5 +1,5 @@
 use super::super::oneshot::OneShot;
-use super::super::state::LogLine;
+use super::super::state::{GroupSource, LogLine};
 use super::super::terminal::tabs::TabNav;
 use super::*;
 use crate::domain::settings::{AgentCli, SessionActionUi};
@@ -705,19 +705,22 @@ fn run_with_tasks(
     let term = Term::stdout();
     let monitor = MonitorHandle::detached();
     let mut persist: fn(&str) = noop_persist;
-    let mut dispatch_create = |_: &str| {};
-    let mut rename: fn(&str, &str) -> SessionOutcome = noop_rename;
+    let mut dispatch_create = |_: &Path, _: &str| {};
+    let mut rename = |_: &Path, n: &str, l: &str| noop_rename(n, l);
     let mut branches: fn() -> Vec<String> = no_branches;
     let mut open: fn(&mut HomeState, &Path, bool, bool) -> Result<PaneExit> = noop_open;
     let mut config: fn(&Term) -> Result<Option<ConfigReload>> = noop_config;
     let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = noop_preview;
     let mut tab_op: fn(&Path, Option<TabNav>) -> (Vec<String>, usize) = noop_tab_op;
     let mut close: fn(&mut HomeState, &Path) = noop_close;
-    let mut set_note_fake: fn(&str, &str) -> SessionOutcome = noop_set_note;
+    let mut set_note_fake = |_: &Path, n: &str, t: &str| noop_set_note(n, t);
     let mut reorder_fake: fn(&str, bool) -> SessionReorder = noop_reorder;
     let mut save_resume = |_: &str, _: ResumeLevel| {};
     let mut save_last_active = |_: &[(String, DateTime<Utc>)]| {};
     let mut dispatch_update = || {};
+    // The unite target root is irrelevant to this single-workspace fake, so wrap
+    // the caller's removal hook to the production 3-arg shape, dropping the root.
+    let mut dispatch_remove_w = |_: &Path, name: &str, force: bool| dispatch_remove(name, force);
     let mut wiring = Wiring {
         workspace_root: Path::new("/ws"),
         persist: &mut persist,
@@ -725,7 +728,7 @@ fn run_with_tasks(
         rename_display: &mut rename,
         set_note: &mut set_note_fake,
         reorder_session: &mut reorder_fake,
-        dispatch_remove: &mut dispatch_remove,
+        dispatch_remove: &mut dispatch_remove_w,
         dispatch_update: &mut dispatch_update,
         evict_pool: &mut evict_pool,
         existing_branches: &mut branches,
@@ -760,9 +763,9 @@ fn run_with_live_session(reader: &mut dyn KeyReader) -> Result<Outcome> {
     let monitor = MonitorHandle::with_live(vec![PathBuf::from("/r/main")]);
     let tasks = TaskHandle::new();
     let mut persist: fn(&str) = noop_persist;
-    let mut dispatch_create = |_: &str| {};
-    let mut rename: fn(&str, &str) -> SessionOutcome = noop_rename;
-    let mut dispatch_remove = |_: &str, _: bool| {};
+    let mut dispatch_create = |_: &Path, _: &str| {};
+    let mut rename = |_: &Path, n: &str, l: &str| noop_rename(n, l);
+    let mut dispatch_remove = |_: &Path, _: &str, _: bool| {};
     let mut evict = |_: &Path| {};
     let mut branches: fn() -> Vec<String> = no_branches;
     let mut open: fn(&mut HomeState, &Path, bool, bool) -> Result<PaneExit> = noop_open;
@@ -770,7 +773,7 @@ fn run_with_live_session(reader: &mut dyn KeyReader) -> Result<Outcome> {
     let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = noop_preview;
     let mut tab_op: fn(&Path, Option<TabNav>) -> (Vec<String>, usize) = noop_tab_op;
     let mut close: fn(&mut HomeState, &Path) = noop_close;
-    let mut set_note_fake: fn(&str, &str) -> SessionOutcome = noop_set_note;
+    let mut set_note_fake = |_: &Path, n: &str, t: &str| noop_set_note(n, t);
     let mut reorder_fake: fn(&str, bool) -> SessionReorder = noop_reorder;
     let mut save_resume = |_: &str, _: ResumeLevel| {};
     let mut save_last_active = |_: &[(String, DateTime<Utc>)]| {};
@@ -856,6 +859,32 @@ fn run_notes(
 /// down, `H` home, `F` end).
 fn shift_arrow(letter: char) -> io::Result<Key> {
     Ok(Key::UnknownEscSeq(vec!['[', '1', ';', '2', letter]))
+}
+
+#[test]
+fn selected_dir_roots_at_the_cursor_groups_workspace() {
+    // A united home: primary "primary" (root only) plus an empty extra group "wsB".
+    // Flat rows: 0 = primary root, 1 = wsB root.
+    let mut state = HomeState::new("primary", Vec::new(), None);
+    state.set_root_path("/primary");
+    state.set_extra_groups(vec![GroupSource {
+        name: "wsB".to_string(),
+        root_path: PathBuf::from("/wsB"),
+        root_note: None,
+        sessions: Vec::new(),
+    }]);
+    // The primary group's root row uses the screen's base workspace root.
+    state.switch_select(0);
+    assert_eq!(
+        selected_dir(&state, Path::new("/primary")),
+        PathBuf::from("/primary")
+    );
+    // An extra group's root row roots at that group's own workspace.
+    state.switch_select(1);
+    assert_eq!(
+        selected_dir(&state, Path::new("/primary")),
+        PathBuf::from("/wsB")
+    );
 }
 
 mod attached;

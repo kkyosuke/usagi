@@ -1078,10 +1078,20 @@ fn row_select_click_works_in_unite_mode_but_pr_mouse_stays_single_group() {
     // The row-select click maps to the right session across groups; the PR
     // click/hover (whose popup geometry is single-group) is disabled in unite.
     let mut state = state_with_sessions(&["main"]); // primary "usagi" with one session
-    state.set_extra_groups(vec![WorkspaceGroup::new(
-        "wsB",
-        vec![worktree(Some("b1"), false, BranchStatus::Local)],
-    )]);
+    state.set_extra_groups(vec![GroupSource {
+        name: "wsB".to_string(),
+        root_path: PathBuf::from("/wsB"),
+        root_note: None,
+        sessions: vec![SessionRecord {
+            name: "b1".to_string(),
+            display_name: None,
+            note: None,
+            root: PathBuf::from("/wsB/.usagi/sessions/b1"),
+            worktrees: Vec::new(),
+            created_at: Utc::now(),
+            last_active: None,
+        }],
+    }]);
     // Body line 4 (header 0, root 1-2, divider 3, session 4) is the primary's
     // session → flat row 1. Screen row = CHROME_TOP_ROWS (3) + 4 = 7.
     assert_eq!(left_pane_session_at(&state, 2, 7, 24, 120), Some(1));

@@ -23,7 +23,12 @@ fn set_extra_groups_stacks_other_workspaces_below_the_primary() {
     // primary: root + 2 sessions
     assert_eq!(state.list().session_count(), 3);
 
-    state.set_extra_groups(vec![WorkspaceGroup::new("wsB", vec![worktree("b1")])]);
+    state.set_extra_groups(vec![GroupSource {
+        name: "wsB".to_string(),
+        root_path: PathBuf::from("/wsB"),
+        root_note: None,
+        sessions: vec![session("b1")],
+    }]);
     assert!(state.is_united());
     assert_eq!(state.list().group_count(), 2);
     assert_eq!(state.list().groups()[1].name(), "wsB");
@@ -40,6 +45,108 @@ fn set_extra_groups_stacks_other_workspaces_below_the_primary() {
     state.set_extra_groups(Vec::new());
     assert!(!state.is_united());
     assert_eq!(state.list().group_count(), 1);
+}
+
+fn united_state() -> HomeState {
+    let mut state = HomeState::new("usagi", Vec::new(), None);
+    state.set_root_path("/usagi");
+    state.restore_sessions(vec![session("main")]);
+    state.restore_root_note(Some("primary note".to_string()));
+    state.set_extra_groups(vec![GroupSource {
+        name: "wsB".to_string(),
+        root_path: PathBuf::from("/wsB"),
+        root_note: Some("b note".to_string()),
+        sessions: vec![session("b1")],
+    }]);
+    state
+}
+
+#[test]
+fn selected_workspace_root_and_note_follow_the_cursor_group() {
+    // Flat rows: 0 usagi root, 1 main, 2 wsB root, 3 b1.
+    let mut state = united_state();
+    state.switch_select(0); // primary root
+    assert_eq!(state.selected_workspace_root(), PathBuf::from("/usagi"));
+    assert_eq!(state.selected_root_note(), Some("primary note"));
+    state.switch_select(2); // the extra group's root
+    assert_eq!(state.selected_workspace_root(), PathBuf::from("/wsB"));
+    assert_eq!(state.selected_root_note(), Some("b note"));
+
+    // An extra group with no root note reports none when the cursor is on it.
+    state.set_extra_groups(vec![GroupSource {
+        name: "wsC".to_string(),
+        root_path: PathBuf::from("/wsC"),
+        root_note: None,
+        sessions: Vec::new(),
+    }]);
+    state.switch_select(2); // wsC root (primary root 0, main 1, wsC root 2)
+    assert_eq!(state.selected_root_note(), None);
+}
+
+#[test]
+fn workspace_root_for_session_finds_the_owning_group() {
+    let state = united_state();
+    assert_eq!(
+        state.workspace_root_for_session("main"),
+        PathBuf::from("/usagi")
+    );
+    assert_eq!(
+        state.workspace_root_for_session("b1"),
+        PathBuf::from("/wsB")
+    );
+    // An unknown session falls back to the primary workspace.
+    assert_eq!(
+        state.workspace_root_for_session("ghost"),
+        PathBuf::from("/usagi")
+    );
+}
+
+#[test]
+fn a_session_op_targets_the_recorded_group_then_clears() {
+    let mut state = united_state();
+    // A create targeting the extra group lands its reloaded sessions there, leaving
+    // the primary untouched.
+    state.set_op_target(PathBuf::from("/wsB"));
+    state.apply_task_completion(
+        LogLine::output("created"),
+        Some(vec![session("b1"), session("b2")]),
+    );
+    assert_eq!(state.list().groups()[1].worktrees().len(), 2); // wsB: b1, b2
+    assert_eq!(state.list().groups()[0].worktrees().len(), 1); // primary: main
+
+    // With no target recorded (or the primary's root), a completion routes to the
+    // primary workspace.
+    state.set_op_target(PathBuf::from("/usagi"));
+    state.apply_task_completion(LogLine::output("created"), Some(vec![session("main2")]));
+    assert_eq!(state.list().groups()[0].worktrees().len(), 1);
+    assert_eq!(state.sessions().len(), 1);
+    assert_eq!(state.sessions()[0].name, "main2");
+}
+
+#[test]
+fn a_sync_outcome_routes_sessions_and_root_note_to_the_target_group() {
+    let mut state = united_state();
+    // A rename-style outcome (carries sessions) for the extra group.
+    state.set_op_target(PathBuf::from("/wsB"));
+    state.apply_session_outcome(SessionOutcome {
+        line: LogLine::output("renamed"),
+        sessions: Some(vec![session("b1"), session("b3")]),
+        select: None,
+        root_note: None,
+    });
+    assert_eq!(state.list().groups()[1].worktrees().len(), 2);
+
+    // A root-note save for the extra group updates that group's marker, leaving the
+    // primary's note alone.
+    state.set_op_target(PathBuf::from("/wsB"));
+    state.apply_session_outcome(SessionOutcome {
+        line: LogLine::output("noted"),
+        sessions: None,
+        select: None,
+        root_note: Some(Some("new b note".to_string())),
+    });
+    assert!(state.list().groups()[1].root_has_note());
+    assert_eq!(state.root_note(), Some("primary note")); // primary untouched
 }
 
 #[test]
