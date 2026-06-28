@@ -59,7 +59,8 @@
 │          Terminal Keys      < Ctrl-O prefix >         │  │  没入のキー方式（Ctrl-O prefix / Alt chords）
 │          Mascot Animation   < On >                    │  │  サイドバーうさぎの動き（On / Off）
 │          Local LLM            Install                 │  │  未導入は `Install`（緑・山かっこなし）、導入後は `< On >`/`< Off >`
-│          Local LLM Model      qwen2.5-coder:7b        │  ┘  導入後はアクション。Space/Enter でモデル選択モーダル
+│          Local LLM Model      qwen2.5-coder:7b        │  │  導入後はアクション。Space/Enter でモデル選択モーダル
+│          PR Skills          < On >                    │  ┘  同梱スキル機能の ON/OFF（機能ごとに 1 行）
 │                                                       │
 │                           [ Save ]                    │  ← Save ボタン（変更時のみ緑で有効）
 │                                                       │
@@ -80,6 +81,7 @@
 | Mascot Animation | サイドバーのマスコットうさぎが操作に反応するか | `On` ⇄ `Off` をトグル。`Off` でうさぎは静止する（[home/02-layout.md](home/02-layout.md#レイアウト)） |
 | Local LLM | ローカル LLM 委譲の有効化（`ollama` ランタイムの導入と on/off） | 未導入時は値が `Install`（アクション）で、`Space` / `Enter` でランタイムのインストールモーダルを開く。導入後は `On` ⇄ `Off` をトグル |
 | Local LLM Model | 委譲先の Ollama モデル | ランタイム未導入のうちは操作不可（`—` を淡色表示）。導入後はアクション行になり、`Space` / `Enter` で**モデル選択モーダル**を開く。使用中モデルが未取得なら値に `(未導入)` を併記 |
+| PR Skills | 同梱スキル機能 `pull-request`（PR 作成・更新・修正）の配布 ON/OFF | `On` ⇄ `Off` をトグル。固定項目の下に、トグル可能な[同梱スキル機能](../04-orchestration.md#スキルの配布)ごとに 1 行並ぶ（`usagi-session` は常時 ON で出ない） |
 
 > ほとんどの項目は共通の chooser widget で描画し、現在値を常に `< 値 >` の形で表示します。例外は `Local LLM` の
 > **インストールアクション**と `Local LLM Model` の**モデル選択アクション**で、これらは選択肢を循環するのではなく動作（モーダル）を
@@ -113,7 +115,7 @@
 
 ホーム画面のコマンドモードで `config` を実行したときのスコープ。起動中のワークスペース
 （`<workspace>/.usagi/settings.json`）だけに効く **ローカルの上書き**を編集します。グローバル設定は
-ここには表示されず、対象は次の 4 項目だけです。
+ここには表示されず、対象は次の固定 5 項目と、その下に並ぶ同梱スキル機能（`PR Skills` など）です。
 
 ```text
 ┌───────────────────────────────────────────────────────┐
@@ -123,11 +125,12 @@
 │                   Workspace Config                    │  ← タイトル（緑・太字）
 │            Adjust this workspace's settings           │  ← サブタイトル（淡色）
 │                                                       │
-│      >   Agent CLI       < Global (Claude) >          │  ┐ ローカル設定一覧（5 項目）
+│      >   Agent CLI       < Global (Claude) >          │  ┐ ローカル設定一覧（固定 5 項目）
 │        ● Notifications   < Override: Off >            │  │  選択行：左端の赤 ">"
 │          Restore Panes   < Global (On) >              │  │  変更済み：ラベル左に黄色 ●
 │          Default Branch  < develop >                  │  │
 │          Branch Source   < Remote >                   │  ┘
+│          PR Skills       < Global (On) >              │  ← 同梱スキル機能の上書き（機能ごとに 1 行）
 │                                                       │
 │                           [ Save ]                    │  ← Save ボタン
 │                                                       │
@@ -142,6 +145,7 @@
 | Restore Panes | このワークスペースのペイン復旧 ON/OFF 上書き | `Global (実効値)` → `Override: On` → `Override: Off` の順に循環 |
 | Default Branch | `session create` で worktree を切る基点ブランチ | `Default (auto)` → リポジトリの各ブランチ名 の順に循環（実在ブランチを検出） |
 | Branch Source | 上のブランチをローカル形／リモート形のどちらで使うか | `Local` ⇄ `Remote` をトグル（未設定時は `Default (Remote)` を表示） |
+| PR Skills | 同梱スキル機能 `pull-request` のこのワークスペースでの上書き | `Global (実効値)` → `Override: On` → `Override: Off` の順に循環。固定項目の下に機能ごとに 1 行並ぶ |
 
 - Agent CLI と Notifications は **「グローバルに従う / ローカルで上書き」** を 1 つの chooser で切り替えます。
   `Global (...)` は未上書き（グローバル設定にフォールバック）で、かっこ内に現在の実効値を表示します。

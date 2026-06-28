@@ -13,27 +13,65 @@
 //! copy, is what keeps the worktrees in sync with the shipped skills.
 //!
 //! To add a skill, drop `assets/skills/<name>/SKILL.md` in the repo and add an
-//! entry to [`SKILLS`].
+//! entry to [`SKILLS`]. Set its `feature` to `None` to ship it always, or to a
+//! [`SkillFeature`] to make it user-toggleable (globally and per-project); only
+//! [`link`] honours the toggle — [`materialize`] always writes every skill.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
+use crate::domain::settings::{Settings, SkillFeature};
 use crate::infrastructure::storage;
 
-/// A skill compiled into the binary: its directory name under `skills/` and the
-/// `SKILL.md` body written there.
+/// A skill compiled into the binary: its directory name under `skills/`, the
+/// `SKILL.md` body written there, and the toggleable feature it belongs to.
 struct Embedded {
     name: &'static str,
     body: &'static str,
+    /// The [`SkillFeature`] this skill is grouped under, or `None` for a
+    /// mandatory skill (`usagi-session`) that is always linked. A skill with a
+    /// feature is linked only when that feature is enabled in the effective
+    /// settings (see [`link`]).
+    feature: Option<SkillFeature>,
 }
 
 /// The skills shipped with usagi, embedded at build time.
-const SKILLS: &[Embedded] = &[Embedded {
-    name: "usagi-session",
-    body: include_str!("../../assets/skills/usagi-session/SKILL.md"),
-}];
+const SKILLS: &[Embedded] = &[
+    // The mandatory session skill: always linked, not user-toggleable.
+    Embedded {
+        name: "usagi-session",
+        body: include_str!("../../assets/skills/usagi-session/SKILL.md"),
+        feature: None,
+    },
+    // The PR-workflow skills, grouped under the toggleable `pull-request` feature.
+    Embedded {
+        name: "usagi-pr-create",
+        body: include_str!("../../assets/skills/usagi-pr-create/SKILL.md"),
+        feature: Some(SkillFeature::PullRequest),
+    },
+    Embedded {
+        name: "usagi-pr-update",
+        body: include_str!("../../assets/skills/usagi-pr-update/SKILL.md"),
+        feature: Some(SkillFeature::PullRequest),
+    },
+    Embedded {
+        name: "usagi-pr-fix",
+        body: include_str!("../../assets/skills/usagi-pr-fix/SKILL.md"),
+        feature: Some(SkillFeature::PullRequest),
+    },
+];
+
+/// Whether `skill` should be linked into a worktree given the effective
+/// `settings`: a mandatory skill (no feature) always is; a feature skill only
+/// when its feature is enabled.
+fn skill_enabled(skill: &Embedded, settings: &Settings) -> bool {
+    match skill.feature {
+        None => true,
+        Some(feature) => settings.skill_feature_enabled(feature),
+    }
+}
 
 /// The git exclude patterns for the skill symlinks usagi creates in a worktree,
 /// each anchored to the worktree root with a leading `/`. Sessions add these to
@@ -84,20 +122,30 @@ pub fn materialize_default() -> Result<PathBuf> {
     materialize(&storage::data_dir()?)
 }
 
-/// Symlink each shipped skill into `<worktree>/.claude/skills/<name>`, pointing
-/// at usagi's materialised copy under [`target`], so the agent launched in
-/// `worktree` discovers them. Creates `.claude/skills/` if absent.
+/// Symlink each *enabled* shipped skill into `<worktree>/.claude/skills/<name>`,
+/// pointing at usagi's materialised copy under [`target`], so the agent launched
+/// in `worktree` discovers them. Creates `.claude/skills/` if absent.
+///
+/// `settings` are the effective settings for the worktree's workspace (global
+/// overlaid with the project's local overrides). A skill is linked when
+/// [`skill_enabled`] says so: the mandatory `usagi-session` skill always, a
+/// feature skill only while its [`SkillFeature`] is enabled. A disabled feature's
+/// skills are simply not linked (the worktree is freshly built, so there is no
+/// stale symlink to clear).
 ///
 /// Linked **per skill**, not as the whole `skills/` directory, so usagi's skills
 /// coexist with a project's own skills in the same `.claude/skills/` directory.
 /// Idempotent: an existing usagi symlink is repaired, while a *real* file or
 /// directory at a skill's name — a project's own same-named skill — is left
 /// untouched rather than clobbered.
-pub fn link(worktree: &Path) -> Result<()> {
+pub fn link(worktree: &Path, settings: &Settings) -> Result<()> {
     let skills = worktree.join(".claude").join("skills");
     fs::create_dir_all(&skills).context(format!("failed to create {}", skills.display()))?;
     let source = target()?;
     for skill in SKILLS {
+        if !skill_enabled(skill, settings) {
+            continue;
+        }
         link_one(&skills.join(skill.name), &source.join(skill.name))?;
     }
     Ok(())
@@ -188,7 +236,8 @@ mod tests {
     fn link_symlinks_each_skill_into_the_skills_dir() {
         with_data_dir(|home| {
             let wt = tempfile::tempdir().unwrap();
-            link(wt.path()).unwrap();
+            // Default settings leave every feature on, so all skills are linked.
+            link(wt.path(), &Settings::default()).unwrap();
             let skills = wt.path().join(".claude").join("skills");
             for skill in SKILLS {
                 let link_path = skills.join(skill.name);
@@ -205,6 +254,33 @@ mod tests {
     }
 
     #[test]
+    fn link_skips_a_disabled_feature_but_keeps_mandatory_skills() {
+        with_data_dir(|_| {
+            let wt = tempfile::tempdir().unwrap();
+            // Turn the PR-skills feature off; its skills must not be linked, while
+            // the mandatory `usagi-session` skill (no feature) still is.
+            let mut settings = Settings::default();
+            settings
+                .skill_features
+                .insert(SkillFeature::PullRequest.id().to_string(), false);
+            link(wt.path(), &settings).unwrap();
+
+            let skills = wt.path().join(".claude").join("skills");
+            for skill in SKILLS {
+                let present = skills.join(skill.name).symlink_metadata().is_ok();
+                match skill.feature {
+                    // Mandatory skills are always linked.
+                    None => assert!(present, "{} should be linked", skill.name),
+                    // The disabled feature's skills are not.
+                    Some(SkillFeature::PullRequest) => {
+                        assert!(!present, "{} should be skipped", skill.name)
+                    }
+                }
+            }
+        });
+    }
+
+    #[test]
     fn link_coexists_with_a_projects_own_skills() {
         with_data_dir(|home| {
             let wt = tempfile::tempdir().unwrap();
@@ -214,7 +290,7 @@ mod tests {
             fs::create_dir_all(&own).unwrap();
             fs::write(own.join("SKILL.md"), "mine").unwrap();
 
-            link(wt.path()).unwrap();
+            link(wt.path(), &Settings::default()).unwrap();
 
             // The project's skill is untouched...
             assert!(own.join("SKILL.md").is_file());
@@ -241,7 +317,7 @@ mod tests {
             let ours = skills.join(SKILLS[0].name);
             symlink_dir(Path::new("/somewhere/else"), &ours).unwrap();
 
-            link(wt.path()).unwrap();
+            link(wt.path(), &Settings::default()).unwrap();
             assert_eq!(
                 fs::read_link(&ours).unwrap(),
                 home.join("skills").join(SKILLS[0].name)
@@ -252,7 +328,7 @@ mod tests {
             fs::remove_file(&ours).unwrap();
             fs::create_dir_all(&ours).unwrap();
             fs::write(ours.join("SKILL.md"), "mine").unwrap();
-            link(wt.path()).unwrap();
+            link(wt.path(), &Settings::default()).unwrap();
             assert!(!fs::symlink_metadata(&ours)
                 .unwrap()
                 .file_type()
@@ -267,7 +343,7 @@ mod tests {
             let wt = tempfile::tempdir().unwrap();
             // A file at `.claude` makes create_dir_all of `.claude/skills` fail.
             fs::write(wt.path().join(".claude"), "blocker").unwrap();
-            assert!(link(wt.path()).is_err());
+            assert!(link(wt.path(), &Settings::default()).is_err());
         });
     }
 

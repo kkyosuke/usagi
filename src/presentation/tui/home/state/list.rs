@@ -1,6 +1,18 @@
 //! The selectable worktree list (left pane): the workspace's sessions collapsed
-//! into one row each, preceded by the synthetic root row, with the cursor /
-//! active-row navigation the home screen drives.
+//! into one row each, preceded by the synthetic root row.
+//!
+//! The list is modelled as a sequence of [`WorkspaceGroup`]s — one per opened
+//! workspace — so the future *unite* mode (several workspaces shown together)
+//! reuses the same navigation. Each group contributes a synthetic root row
+//! followed by one row per session. Today the home screen opens a single
+//! workspace, so the list holds exactly one group and behaves identically to the
+//! old single-workspace list; the multi-group machinery is exercised by the unit
+//! tests until a producer (the Open screen's multi-select) lands.
+//!
+//! Navigation runs over a *flat selectable-row space* that concatenates every
+//! group's rows: group 0's root, then its worktrees, then group 1's root, and so
+//! on. The cursor (`selected_index`) and the command target (`active_index`) are
+//! indices into that flat space.
 
 use std::path::Path;
 
@@ -62,21 +74,15 @@ pub(super) fn session_row(session: &SessionRecord) -> WorktreeState {
     }
 }
 
-/// The opened workspace and the selectable list of its worktrees, preceded by a
-/// synthetic *root row*.
+/// One opened workspace's slice of the left pane: its sessions (collapsed to one
+/// [`WorktreeState`] row each by [`session_row`]) plus the per-row sidebar
+/// metadata, fronted in the list by a synthetic root row the group owns.
 ///
-/// The first row (index 0) is the workspace root, which belongs to no session:
-/// activating it and running `terminal`/`agent` there works at the workspace
-/// root rather than inside a session's worktree. Indices `1..=worktrees.len()`
-/// are the recorded worktrees, so row `i` maps to `worktrees[i - 1]`.
-///
-/// Two cursors are tracked: `selected_index` is where the keyboard cursor sits
-/// while navigating, and `active_index` is the row subsequent commands
-/// (`session switch`, and later `terminal`/`ai`) act on. Both default to the
-/// root row.
+/// In single-workspace mode the [`WorktreeList`] holds one of these; *unite* mode
+/// holds several, stacked under per-workspace headers.
 #[derive(Debug, Clone)]
-pub struct WorktreeList {
-    workspace_name: String,
+pub struct WorkspaceGroup {
+    name: String,
     worktrees: Vec<WorktreeState>,
     /// Sidebar label overrides, aligned 1:1 with `worktrees`: `labels[i]` is the
     /// custom display name for `worktrees[i]`, or `None` to show its branch. The
@@ -88,12 +94,125 @@ pub struct WorktreeList {
     /// `labels` it is cosmetic and never used for lookups. Defaults to all-false
     /// and is filled in by [`set_notes`](Self::set_notes) on a list rebuild.
     notes: Vec<bool>,
-    /// Whether the synthetic root row carries a note, driving its line-1 memo
-    /// marker. Like [`notes`](Self::notes) it is cosmetic and never used for
+    /// Whether this group's synthetic root row carries a note, driving its line-1
+    /// memo marker. Like [`notes`](Self::notes) it is cosmetic and never used for
     /// lookups; the root belongs to no session, so its note lives on the workspace
-    /// state, not in `notes`. Defaults to false and is filled in by
-    /// [`set_root_note_marker`](Self::set_root_note_marker) on a list rebuild.
+    /// state, not in `notes`.
     root_has_note: bool,
+}
+
+impl WorkspaceGroup {
+    /// A group for `name` with no label overrides and no notes yet.
+    pub fn new(name: impl Into<String>, worktrees: Vec<WorktreeState>) -> Self {
+        let labels = vec![None; worktrees.len()];
+        Self::with_labels(name, worktrees, labels)
+    }
+
+    /// Build a group's rows from a workspace's recorded sessions — the same
+    /// collapse [`HomeState::rebuild_list`] does for the primary workspace: one row
+    /// per session via [`session_row`], carrying each session's display-name label
+    /// and note marker, plus whether the workspace root itself carries a note.
+    /// Used by the orchestrator to build the extra 統合(unite) groups.
+    ///
+    /// [`HomeState::rebuild_list`]: super::HomeState
+    pub fn from_sessions(
+        name: impl Into<String>,
+        sessions: &[SessionRecord],
+        root_has_note: bool,
+    ) -> Self {
+        let rows = sessions.iter().map(session_row).collect();
+        let labels = sessions.iter().map(|s| s.display_name.clone()).collect();
+        let notes = sessions.iter().map(|s| s.note.is_some()).collect();
+        let mut group = Self::with_labels(name, rows, labels);
+        group.set_notes(notes);
+        group.set_root_note_marker(root_has_note);
+        group
+    }
+
+    /// A group with a sidebar label override per worktree (`labels[i]` applies to
+    /// `worktrees[i]`; a shorter/longer `labels` is padded/truncated to match).
+    pub fn with_labels(
+        name: impl Into<String>,
+        worktrees: Vec<WorktreeState>,
+        mut labels: Vec<Option<String>>,
+    ) -> Self {
+        labels.resize(worktrees.len(), None);
+        let notes = vec![false; worktrees.len()];
+        Self {
+            name: name.into(),
+            worktrees,
+            labels,
+            notes,
+            root_has_note: false,
+        }
+    }
+
+    /// The workspace name shown in this group's header / title bar.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// The group's session rows (one per session, root row excluded).
+    pub fn worktrees(&self) -> &[WorktreeState] {
+        &self.worktrees
+    }
+
+    /// The sidebar label for the worktree at `index`: its override when set,
+    /// otherwise its branch name (the same string [`worktree_name`] returns).
+    pub fn display_label(&self, index: usize) -> &str {
+        match self.labels.get(index).and_then(Option::as_deref) {
+            Some(label) => label,
+            None => self.worktrees.get(index).map(worktree_name).unwrap_or(""),
+        }
+    }
+
+    /// Record which rows carry a note (`notes[i]` for `worktrees[i]`). A
+    /// shorter/longer slice is padded/truncated to the worktree count, mirroring
+    /// how [`with_labels`](Self::with_labels) keeps `labels` aligned.
+    pub fn set_notes(&mut self, mut notes: Vec<bool>) {
+        notes.resize(self.worktrees.len(), false);
+        self.notes = notes;
+    }
+
+    /// Whether the worktree at `index` carries a note (out-of-range is `false`).
+    pub fn has_note(&self, index: usize) -> bool {
+        self.notes.get(index).copied().unwrap_or(false)
+    }
+
+    /// Record whether the root row carries a note, driving its memo marker.
+    pub fn set_root_note_marker(&mut self, has_note: bool) {
+        self.root_has_note = has_note;
+    }
+
+    /// Whether the root row carries a note (drives its memo marker).
+    pub fn root_has_note(&self) -> bool {
+        self.root_has_note
+    }
+
+    /// Number of selectable rows this group contributes: its root row plus every
+    /// worktree (≥ 1).
+    fn selectable_rows(&self) -> usize {
+        self.worktrees.len() + 1
+    }
+}
+
+/// The opened workspace(s) and their selectable rows, each group fronted by a
+/// synthetic *root row*.
+///
+/// Within a group, the first row is the workspace root, which belongs to no
+/// session: activating it and running `terminal`/`agent` there works at the
+/// workspace root rather than inside a session's worktree. Navigation runs over a
+/// flat row space concatenating every group's rows.
+///
+/// Two cursors are tracked: `selected_index` is where the keyboard cursor sits
+/// while navigating, and `active_index` is the row subsequent commands
+/// (`session switch`, `terminal`/`agent`) act on. Both default to the first
+/// group's root row.
+#[derive(Debug, Clone)]
+pub struct WorktreeList {
+    /// The opened workspaces, in display order. Always non-empty in practice (the
+    /// home screen opens at least one workspace).
+    groups: Vec<WorkspaceGroup>,
     selected_index: usize,
     active_index: usize,
     /// The display name of the session that was active *before* the current one,
@@ -108,77 +227,103 @@ pub struct WorktreeList {
 }
 
 impl WorktreeList {
-    /// Builds a list for the named workspace, with both the cursor and the
-    /// active row on the root (no session selected yet) and no label overrides.
+    /// Builds a single-group list for the named workspace, with both the cursor
+    /// and the active row on the root (no session selected yet) and no label
+    /// overrides.
     pub fn new(workspace_name: impl Into<String>, worktrees: Vec<WorktreeState>) -> Self {
-        let labels = vec![None; worktrees.len()];
-        Self::with_labels(workspace_name, worktrees, labels)
+        Self::from_groups(vec![WorkspaceGroup::new(workspace_name, worktrees)])
     }
 
-    /// Builds a list with a sidebar label override per worktree (`labels[i]`
-    /// applies to `worktrees[i]`; a shorter/longer `labels` is padded/ignored to
-    /// match), with both cursors on the root row.
+    /// Builds a single-group list with a sidebar label override per worktree
+    /// (`labels[i]` applies to `worktrees[i]`; a shorter/longer `labels` is
+    /// padded/ignored to match), with both cursors on the root row.
     pub fn with_labels(
         workspace_name: impl Into<String>,
         worktrees: Vec<WorktreeState>,
-        mut labels: Vec<Option<String>>,
+        labels: Vec<Option<String>>,
     ) -> Self {
-        labels.resize(worktrees.len(), None);
-        let notes = vec![false; worktrees.len()];
-        Self {
-            workspace_name: workspace_name.into(),
+        Self::from_groups(vec![WorkspaceGroup::with_labels(
+            workspace_name,
             worktrees,
             labels,
-            notes,
-            root_has_note: false,
+        )])
+    }
+
+    /// Builds a list from one or more workspace groups (unite mode supplies
+    /// several), with both cursors on the first group's root row.
+    pub fn from_groups(groups: Vec<WorkspaceGroup>) -> Self {
+        Self {
+            groups,
             selected_index: 0,
             active_index: 0,
             previous_active: None,
         }
     }
 
-    /// The sidebar label for the worktree at `index`: its override when set,
-    /// otherwise its branch name (the same string [`worktree_name`] returns).
-    pub fn display_label(&self, index: usize) -> &str {
-        match self.labels.get(index).and_then(Option::as_deref) {
-            Some(label) => label,
-            None => self.worktrees.get(index).map(worktree_name).unwrap_or(""),
-        }
+    /// Append another workspace group (unite mode) and return its index.
+    pub fn add_group(&mut self, group: WorkspaceGroup) -> usize {
+        self.groups.push(group);
+        self.groups.len() - 1
     }
 
-    /// Record which rows carry a note (`notes[i]` for `worktrees[i]`), driving
-    /// the line-1 memo marker. A shorter/longer slice is padded/truncated to
-    /// match the worktree count, mirroring how [`with_labels`](Self::with_labels)
-    /// keeps `labels` aligned.
-    pub fn set_notes(&mut self, mut notes: Vec<bool>) {
-        notes.resize(self.worktrees.len(), false);
-        self.notes = notes;
+    /// The workspace groups, in display order.
+    pub fn groups(&self) -> &[WorkspaceGroup] {
+        &self.groups
     }
 
-    /// Whether the worktree at `index` carries a note (out-of-range is `false`).
-    pub fn has_note(&self, index: usize) -> bool {
-        self.notes.get(index).copied().unwrap_or(false)
+    /// Number of workspace groups (1 in single-workspace mode).
+    pub fn group_count(&self) -> usize {
+        self.groups.len()
     }
 
-    /// Record whether the root row carries a note, driving its line-1 memo marker.
-    /// Set on a list rebuild from the workspace state's root note, the way
-    /// [`set_notes`](Self::set_notes) records the worktree notes.
-    pub fn set_root_note_marker(&mut self, has_note: bool) {
-        self.root_has_note = has_note;
+    /// The first group, the one the legacy single-workspace accessors delegate to.
+    fn first(&self) -> Option<&WorkspaceGroup> {
+        self.groups.first()
     }
 
-    /// Whether the root row carries a note (drives its memo marker).
-    pub fn root_has_note(&self) -> bool {
-        self.root_has_note
-    }
+    // --- legacy single-workspace accessors (delegate to the first group) ---
 
     pub fn workspace_name(&self) -> &str {
-        &self.workspace_name
+        self.first().map(WorkspaceGroup::name).unwrap_or("")
     }
 
     pub fn worktrees(&self) -> &[WorktreeState] {
-        &self.worktrees
+        self.first().map(WorkspaceGroup::worktrees).unwrap_or(&[])
     }
+
+    /// The sidebar label for the worktree at `index` in the first group.
+    pub fn display_label(&self, index: usize) -> &str {
+        self.first().map(|g| g.display_label(index)).unwrap_or("")
+    }
+
+    /// Record the first group's per-worktree notes (see
+    /// [`WorkspaceGroup::set_notes`]).
+    pub fn set_notes(&mut self, notes: Vec<bool>) {
+        if let Some(group) = self.groups.first_mut() {
+            group.set_notes(notes);
+        }
+    }
+
+    /// Whether the worktree at `index` in the first group carries a note.
+    pub fn has_note(&self, index: usize) -> bool {
+        self.first().map(|g| g.has_note(index)).unwrap_or(false)
+    }
+
+    /// Record whether the first group's root row carries a note.
+    pub fn set_root_note_marker(&mut self, has_note: bool) {
+        if let Some(group) = self.groups.first_mut() {
+            group.set_root_note_marker(has_note);
+        }
+    }
+
+    /// Whether the first group's root row carries a note.
+    pub fn root_has_note(&self) -> bool {
+        self.first()
+            .map(WorkspaceGroup::root_has_note)
+            .unwrap_or(false)
+    }
+
+    // --- flat row-space navigation (spans every group) ---
 
     pub fn selected_index(&self) -> usize {
         self.selected_index
@@ -189,38 +334,69 @@ impl WorktreeList {
         self.active_index
     }
 
-    /// Whether the workspace has no recorded worktrees (only the root row).
+    /// Whether no group has any recorded worktrees (only root rows).
     pub fn is_empty(&self) -> bool {
-        self.worktrees.is_empty()
+        self.groups.iter().all(|g| g.worktrees.is_empty())
     }
 
-    /// Number of selectable rows: the root row plus every worktree (≥ 1).
+    /// Total selectable rows across every group: each group's root row plus its
+    /// worktrees.
     fn selectable_rows(&self) -> usize {
-        self.worktrees.len() + 1
+        self.groups
+            .iter()
+            .map(WorkspaceGroup::selectable_rows)
+            .sum()
     }
 
-    /// Number of sessions listed in the left pane: the root row plus every
-    /// worktree (≥ 1). The title bar reports this so the header count matches
-    /// the rows the user actually sees.
+    /// Number of rows listed in the left pane (every group's root row plus its
+    /// worktrees). The title bar reports this so the header count matches the rows
+    /// the user actually sees.
     pub fn session_count(&self) -> usize {
         self.selectable_rows()
     }
 
-    /// The worktree at a selectable row: row 0 is the root (no worktree), and
-    /// row `i` maps to `worktrees[i - 1]`.
-    fn worktree_at(&self, row: usize) -> Option<&WorktreeState> {
-        row.checked_sub(1).and_then(|i| self.worktrees.get(i))
+    /// Resolve a flat selectable `row` to `(group index, worktree index within the
+    /// group)`, where the worktree index is `None` for that group's root row.
+    /// `None` when `row` is past the end.
+    fn locate(&self, row: usize) -> Option<(usize, Option<usize>)> {
+        let mut start = 0;
+        self.groups.iter().enumerate().find_map(|(g, group)| {
+            let end = start + group.selectable_rows();
+            let found = (start..end)
+                .contains(&row)
+                .then(|| (g, (row - start).checked_sub(1)));
+            start = end;
+            found
+        })
     }
 
-    /// The worktree under the cursor, or `None` when the cursor is on the root
-    /// row (which belongs to no session).
+    /// The worktree at a selectable `row`, or `None` when the row is a group's
+    /// root row (which belongs to no session) or past the end.
+    fn worktree_at(&self, row: usize) -> Option<&WorktreeState> {
+        let (g, within) = self.locate(row)?;
+        self.groups[g].worktrees.get(within?)
+    }
+
+    /// The worktree under the cursor, or `None` when the cursor is on a root row.
     pub fn selected(&self) -> Option<&WorktreeState> {
         self.worktree_at(self.selected_index)
     }
 
-    /// The active worktree, or `None` when the root row is active.
+    /// The active worktree, or `None` when a root row is active.
     pub fn active(&self) -> Option<&WorktreeState> {
         self.worktree_at(self.active_index)
+    }
+
+    /// The group the cursor currently sits in (0 in single-workspace mode).
+    pub fn selected_group(&self) -> usize {
+        self.locate(self.selected_index)
+            .map(|(g, _)| g)
+            .unwrap_or(0)
+    }
+
+    /// The group the active row sits in (0 in single-workspace mode).
+    pub fn active_group(&self) -> usize {
+        self.locate(self.active_index).map(|(g, _)| g).unwrap_or(0)
     }
 
     /// Replaces the PR links of the row whose session root is `root`, returning
@@ -234,7 +410,12 @@ impl WorktreeList {
     /// later sync produces. A `root` that matches no row (e.g. the workspace root,
     /// which has no worktree) is a no-op.
     pub fn set_pr_links(&mut self, root: &Path, prs: Vec<PrLink>) -> bool {
-        let Some(wt) = self.worktrees.iter_mut().find(|w| w.path.as_path() == root) else {
+        let Some(wt) = self
+            .groups
+            .iter_mut()
+            .flat_map(|g| g.worktrees.iter_mut())
+            .find(|w| w.path.as_path() == root)
+        else {
             return false;
         };
         if wt.pr == prs {
@@ -244,18 +425,18 @@ impl WorktreeList {
         true
     }
 
-    /// Whether the cursor is on the root row.
+    /// Whether the cursor is on a (any group's) root row.
     pub fn root_selected(&self) -> bool {
-        self.selected_index == 0
+        matches!(self.locate(self.selected_index), Some((_, None)))
     }
 
-    /// Whether the root row is the active one.
+    /// Whether a root row is the active one.
     pub fn root_active(&self) -> bool {
-        self.active_index == 0
+        matches!(self.locate(self.active_index), Some((_, None)))
     }
 
     /// Make the row under the cursor active, returning its display name (the
-    /// branch name, or [`ROOT_NAME`] for the root row).
+    /// branch name, or [`ROOT_NAME`] for a root row).
     ///
     /// When this lands on a *different* session than the one currently active,
     /// the one being left is remembered as the [`previous_row`](Self::previous_row)
@@ -284,44 +465,41 @@ impl WorktreeList {
         self.previous_active = name;
     }
 
-    /// The row the previously active session now sits at (0 for the root row),
-    /// or `None` when no previous session has been recorded yet or it has since
-    /// been removed from the list. Resolved by name so a list rebuild keeps it
-    /// pointing at the same session — the target `Ctrl-^` focuses.
+    /// The flat row the previously active session now sits at (a group's root row
+    /// for [`ROOT_NAME`]), or `None` when no previous session has been recorded
+    /// yet or it has since been removed from the list. Resolved by name so a list
+    /// rebuild keeps it pointing at the same session — the target `Ctrl-^` focuses.
     pub fn previous_row(&self) -> Option<usize> {
         let name = self.previous_active.as_deref()?;
-        if name == ROOT_NAME {
-            return Some(0);
-        }
-        self.worktrees
-            .iter()
-            .position(|w| worktree_name(w) == name)
-            .map(|index| index + 1)
+        (0..self.selectable_rows()).find(|&row| match self.worktree_at(row) {
+            Some(w) => worktree_name(w) == name,
+            None => name == ROOT_NAME,
+        })
     }
 
-    /// The display name of the active row: its branch, or [`ROOT_NAME`] for the
+    /// The display name of the active row: its branch, or [`ROOT_NAME`] for a
     /// root row.
     pub fn active_name(&self) -> &str {
         self.active().map(worktree_name).unwrap_or(ROOT_NAME)
     }
 
     /// The display name of the row under the cursor: its branch, or [`ROOT_NAME`]
-    /// for the root row.
+    /// for a root row.
     pub fn selected_name(&self) -> &str {
         self.selected().map(worktree_name).unwrap_or(ROOT_NAME)
     }
 
-    /// Make the row named `name` active, returning whether one matched. The
-    /// root row matches [`ROOT_NAME`]; every other name is matched against the
-    /// worktree branches.
+    /// Make the row named `name` active, returning whether one matched.
+    /// [`ROOT_NAME`] activates the first group's root row; every other name is
+    /// matched against the worktree branches (the first match across groups).
     pub fn activate_by_name(&mut self, name: &str) -> bool {
         if name == ROOT_NAME {
             self.active_index = 0;
             return true;
         }
-        match self.worktrees.iter().position(|w| worktree_name(w) == name) {
-            Some(index) => {
-                self.active_index = index + 1;
+        match self.row_of_name(name) {
+            Some(row) => {
+                self.active_index = row;
                 true
             }
             None => false,
@@ -333,38 +511,54 @@ impl WorktreeList {
     /// matched. Used after creating a session so the new one is selected and
     /// active without the user navigating to it.
     pub fn select_by_name(&mut self, name: &str) -> bool {
-        match self.worktrees.iter().position(|w| worktree_name(w) == name) {
-            Some(index) => {
-                self.selected_index = index + 1;
-                self.active_index = index + 1;
+        match self.row_of_name(name) {
+            Some(row) => {
+                self.selected_index = row;
+                self.active_index = row;
                 true
             }
             None => false,
         }
     }
 
-    /// The rows as command-facing [`WorktreeRef`]s (name + active flag): the
-    /// root row first, then every worktree.
+    /// The flat row of the first worktree named `name` across all groups.
+    fn row_of_name(&self, name: &str) -> Option<usize> {
+        (0..self.selectable_rows()).find(|&row| {
+            self.worktree_at(row)
+                .is_some_and(|w| worktree_name(w) == name)
+        })
+    }
+
+    /// The rows as command-facing [`WorktreeRef`]s (name + active flag): each
+    /// group's root row, then its worktrees, in display order.
     pub fn refs(&self) -> Vec<WorktreeRef> {
-        let mut refs = vec![WorktreeRef {
-            name: ROOT_NAME.to_string(),
-            active: self.active_index == 0,
-        }];
-        refs.extend(self.worktrees.iter().enumerate().map(|(i, w)| WorktreeRef {
-            name: worktree_name(w).to_string(),
-            active: i + 1 == self.active_index,
-        }));
+        let mut refs = Vec::with_capacity(self.selectable_rows());
+        let mut row = 0;
+        for group in &self.groups {
+            refs.push(WorktreeRef {
+                name: ROOT_NAME.to_string(),
+                active: row == self.active_index,
+            });
+            row += 1;
+            for w in &group.worktrees {
+                refs.push(WorktreeRef {
+                    name: worktree_name(w).to_string(),
+                    active: row == self.active_index,
+                });
+                row += 1;
+            }
+        }
         refs
     }
 
-    /// Move the cursor directly to a selectable `row` (0 is the root row, `i`
-    /// maps to `worktrees[i - 1]`), clamped to the rows that exist. Used by the
-    /// session picker (`Ctrl-O`) to jump straight to the chosen session.
+    /// Move the cursor directly to a flat selectable `row`, clamped to the rows
+    /// that exist. Used by the session picker (`Ctrl-O`) to jump straight to the
+    /// chosen session.
     pub fn focus_index(&mut self, row: usize) {
-        self.selected_index = row.min(self.selectable_rows() - 1);
+        self.selected_index = row.min(self.selectable_rows().saturating_sub(1));
     }
 
-    /// Move the cursor up one row, wrapping from the root row to the bottom.
+    /// Move the cursor up one row, wrapping from the top to the bottom.
     pub fn move_up(&mut self) {
         self.selected_index = self
             .selected_index
@@ -372,7 +566,7 @@ impl WorktreeList {
             .unwrap_or(self.selectable_rows() - 1);
     }
 
-    /// Move the cursor down one row, wrapping from the bottom to the root row.
+    /// Move the cursor down one row, wrapping from the bottom to the top.
     pub fn move_down(&mut self) {
         self.selected_index = (self.selected_index + 1) % self.selectable_rows();
     }

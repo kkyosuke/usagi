@@ -36,7 +36,9 @@ use crate::domain::agent::Agent;
 use crate::domain::workspace_state::SessionRecord;
 use crate::infrastructure::repo_paths::{SESSIONS_DIR, STATE_DIR};
 use crate::infrastructure::workspace_store::WorkspaceStore;
-use crate::infrastructure::{agent_state_store, git};
+use crate::infrastructure::{
+    agent_prompt_store, agent_state_store, git, open_panes_store, pr_link_store,
+};
 use crate::usecase::workspace_state;
 
 /// The namespace every session's git branch lives under: a session named
@@ -149,13 +151,18 @@ pub fn create(workspace_root: &Path, name: &str) -> Result<CreatedSession> {
     // [`skills::materialize`](crate::infrastructure::skills::materialize)); this
     // points each worktree's `.claude/skills/<name>` at that directory and
     // excludes those symlinks from git so they never mark the session dirty.
-    // Best-effort: a skills hiccup must not fail an otherwise-built session.
+    // Only the skills whose feature is enabled in the workspace's effective
+    // settings are linked; a settings read failure falls back to the defaults
+    // (every feature on). Best-effort: a skills hiccup must not fail an
+    // otherwise-built session.
+    let skill_settings =
+        crate::usecase::settings::effective_for(workspace_root).unwrap_or_default();
     let skill_excludes = crate::infrastructure::skills::git_exclude_patterns();
     for wt in &worktrees {
         for pattern in &skill_excludes {
             let _ = git::ensure_excluded(wt, pattern);
         }
-        let _ = crate::infrastructure::skills::link(wt);
+        let _ = crate::infrastructure::skills::link(wt, &skill_settings);
     }
 
     record(&store, name, &dest_root, &worktrees)?;
@@ -460,8 +467,11 @@ pub struct RemovalOutcome {
 /// `agent` is the session's configured agent CLI: its persisted conversation for
 /// each worktree (e.g. Claude's transcript directory) is discarded so the chat
 /// history does not outlive the session, and a session recreated at the same
-/// path later starts fresh. usagi's own per-worktree agent phase
-/// ([`agent_state_store`]) is cleared too.
+/// path later starts fresh. usagi's own per-worktree files keyed by the worktree
+/// path are cleared too — the agent phase ([`agent_state_store`]), the discovered
+/// PR badges ([`pr_link_store`]), any queued prompt ([`agent_prompt_store`]), and
+/// the open-pane snapshot ([`open_panes_store`]) — so none of them is re-read by a
+/// session later recreated at the same path.
 ///
 /// Without `force`, a session whose worktrees have uncommitted changes is left
 /// untouched and the dirty worktrees are returned for the caller to warn about.
@@ -514,13 +524,22 @@ pub fn remove(
         });
     }
 
-    // Clear the chat history and running-state usagi keeps for each worktree so
-    // nothing outlives the session (a path reused later starts clean). This runs
-    // *before* the worktree directories are removed, so the canonicalized
-    // worktree path still resolves to the key the running agent recorded under.
+    // Clear the chat history and every per-worktree file usagi keeps for each
+    // worktree so nothing outlives the session: a path reused later starts clean
+    // rather than inheriting the removed session's agent phase, PR badges, queued
+    // prompt, or open-pane snapshot — all of which are keyed by the worktree path
+    // and would otherwise be re-read by a session recreated there. The TUI also
+    // clears the phase and pane snapshot as it evicts the live pool, but removal
+    // can come from the CLI or MCP with no TUI running, so the durable files are
+    // wiped here for every caller. This runs *before* the worktree directories
+    // are removed, so the canonicalized worktree path still resolves to the key
+    // the running agent recorded under.
     for wt in &session.worktrees {
         agent.forget_session(&wt.path);
         agent_state_store::clear(&wt.path);
+        pr_link_store::clear(&wt.path);
+        agent_prompt_store::clear(&wt.path);
+        open_panes_store::clear(&wt.path);
     }
 
     // Physically destroy the session: unregister each repository's worktree on
@@ -1404,8 +1423,9 @@ mod tests {
     }
 
     #[test]
-    fn remove_clears_the_recorded_agent_phase() {
-        // Point the data dir at a throwaway home so the phase file is isolated.
+    fn remove_clears_every_per_worktree_file_keyed_by_the_session_path() {
+        // Point the data dir at a throwaway home so the per-worktree files are
+        // isolated.
         let _guard = crate::test_support::process_env_guard();
         let home = tempfile::tempdir().unwrap();
         std::env::set_var(crate::infrastructure::storage::DATA_DIR_ENV, home.path());
@@ -1413,20 +1433,48 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         init_repo(root.path());
         let created = create(root.path(), "feature").unwrap();
-        // Record a phase for the session's worktree, as the running agent's hooks
-        // would, then confirm it landed.
-        crate::infrastructure::agent_state_store::write(
+        // Seed every per-worktree store keyed by the session's worktree, as the
+        // running agent's hooks, the PR-link scanner, the MCP prompt queue, and the
+        // pane snapshotter would, then confirm each file landed.
+        agent_state_store::write(
             &created.root,
             crate::domain::agent_phase::AgentPhase::Waiting,
         )
         .unwrap();
-        let state_dir = home.path().join("agent-state");
-        assert_eq!(fs::read_dir(&state_dir).unwrap().count(), 1);
+        pr_link_store::add(
+            &created.root,
+            &[crate::domain::workspace_state::PrLink {
+                number: 7,
+                url: "https://github.com/o/r/pull/7".to_string(),
+            }],
+        )
+        .unwrap();
+        agent_prompt_store::set(&created.root, "queued prompt").unwrap();
+        open_panes_store::save(
+            &created.root,
+            0,
+            &[open_panes_store::StoredPane {
+                kind: open_panes_store::StoredPaneKind::Terminal,
+                cli: None,
+            }],
+        )
+        .unwrap();
+        // Assert through each store's read API rather than counting directory
+        // entries, since the locked stores (PR links, prompts) also drop a `.lock`
+        // file in their directory that survives the data file.
+        assert!(agent_state_store::read(&created.root).is_some());
+        assert!(!pr_link_store::get(&created.root).is_empty());
+        assert!(open_panes_store::load(&created.root).is_some());
 
-        // Removing the session clears the recorded phase along with it.
+        // Removing the session wipes all of them, so a session recreated at the
+        // same path inherits none of the previous run's state.
         let outcome = remove(root.path(), "feature", false, noop_agent().as_ref()).unwrap();
         assert!(outcome.removed);
-        assert_eq!(fs::read_dir(&state_dir).unwrap().count(), 0);
+        assert!(agent_state_store::read(&created.root).is_none());
+        assert!(pr_link_store::get(&created.root).is_empty());
+        assert!(open_panes_store::load(&created.root).is_none());
+        // The queued prompt is gone too — a take after removal finds nothing.
+        assert!(agent_prompt_store::take(&created.root).is_none());
 
         std::env::remove_var(crate::infrastructure::storage::DATA_DIR_ENV);
     }

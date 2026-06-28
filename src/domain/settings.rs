@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -222,6 +223,58 @@ pub enum BranchSource {
     Remote,
 }
 
+/// A toggleable group of the Claude Code skills usagi ships to its agents.
+///
+/// usagi embeds a set of skills in its binary and symlinks them into every
+/// session worktree (see [`crate::infrastructure::skills`]). The mandatory
+/// `usagi-session` skill belongs to no feature and is always linked; every other
+/// shipped skill is grouped under one of these features so the user can turn the
+/// whole group on or off — globally in [`Settings`] and per-project in
+/// [`LocalSettings`]. Adding a new toggleable skill means adding (or reusing) a
+/// variant here and tagging the skill with it in `infrastructure::skills`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum SkillFeature {
+    /// The PR-workflow skills: creating, updating, and fixing a pull request
+    /// (`usagi-pr-create` / `usagi-pr-update` / `usagi-pr-fix`).
+    PullRequest,
+}
+
+impl SkillFeature {
+    /// Every toggleable skill feature, in the order the config screen lists them.
+    pub const ALL: [SkillFeature; 1] = [SkillFeature::PullRequest];
+
+    /// The stable on-disk identifier used as the [`Settings::skill_features`] /
+    /// [`LocalSettings::skill_features`] map key. Never change an existing id: it
+    /// is what a saved `settings.json` keys the toggle under.
+    pub fn id(self) -> &'static str {
+        match self {
+            SkillFeature::PullRequest => "pull-request",
+        }
+    }
+
+    /// The human-facing label shown for this feature on the config screen.
+    pub fn label(self) -> &'static str {
+        match self {
+            SkillFeature::PullRequest => "PR Skills",
+        }
+    }
+
+    /// Whether the feature is enabled when neither the global settings nor a
+    /// project override say otherwise. Shipped skills are opt-out: on by default.
+    pub fn default_enabled(self) -> bool {
+        match self {
+            SkillFeature::PullRequest => true,
+        }
+    }
+
+    /// Resolve a stored [`id`](Self::id) back to its feature, or `None` for an
+    /// id no current usagi knows (e.g. a feature removed since the file was
+    /// written, or a hand-edited typo).
+    pub fn from_id(id: &str) -> Option<SkillFeature> {
+        SkillFeature::ALL.into_iter().find(|f| f.id() == id)
+    }
+}
+
 /// How many lines of scrolled-off output each embedded terminal pane keeps by
 /// default, so the user can scroll a pane back over earlier output.
 ///
@@ -301,6 +354,15 @@ pub struct Settings {
     pub terminal_scrollback_lines: usize,
     /// The optional local LLM the agent can offload light work to.
     pub local_llm: LocalLlm,
+    /// Which of usagi's optional shipped-skill features are enabled, keyed by
+    /// [`SkillFeature::id`]. A feature absent from the map uses its
+    /// [`default_enabled`](SkillFeature::default_enabled), so the map only ever
+    /// records a value that differs from the default; query it through
+    /// [`skill_feature_enabled`](Self::skill_feature_enabled) rather than reading
+    /// the map directly. Unknown keys (a feature this usagi does not know) are
+    /// dropped by [`sanitized`](Self::sanitized).
+    #[serde(default)]
+    pub skill_features: BTreeMap<String, bool>,
 }
 
 impl Default for Settings {
@@ -321,6 +383,9 @@ impl Default for Settings {
             mascot_animation_enabled: true,
             terminal_scrollback_lines: DEFAULT_TERMINAL_SCROLLBACK_LINES,
             local_llm: LocalLlm::default(),
+            // No overrides recorded: every shipped-skill feature uses its own
+            // default (see [`SkillFeature::default_enabled`]).
+            skill_features: BTreeMap::new(),
         }
     }
 }
@@ -347,7 +412,23 @@ impl Settings {
         self.terminal_scrollback_lines = self
             .terminal_scrollback_lines
             .min(MAX_TERMINAL_SCROLLBACK_LINES);
+        // Drop skill-feature keys this usagi does not recognise (a feature
+        // removed since the file was written, or a hand-edited typo) so a stale
+        // entry never lingers in the saved file or the `usagi config` output.
+        self.skill_features
+            .retain(|id, _| SkillFeature::from_id(id).is_some());
         self
+    }
+
+    /// Whether the shipped-skill `feature` is enabled, resolving an absent entry
+    /// to the feature's [`default_enabled`](SkillFeature::default_enabled). This
+    /// is the single read path for a feature's enablement — callers never index
+    /// [`skill_features`](Self::skill_features) directly.
+    pub fn skill_feature_enabled(&self, feature: SkillFeature) -> bool {
+        self.skill_features
+            .get(feature.id())
+            .copied()
+            .unwrap_or_else(|| feature.default_enabled())
     }
 }
 
@@ -369,6 +450,12 @@ impl Settings {
         }
         if let Some(local_llm_enabled) = local.local_llm_enabled {
             self.local_llm.enabled = local_llm_enabled;
+        }
+        // Each project-local skill-feature override replaces the global entry for
+        // that feature; features the project does not mention keep the global
+        // value. The merged map is still read through `skill_feature_enabled`.
+        for (id, enabled) in &local.skill_features {
+            self.skill_features.insert(id.clone(), *enabled);
         }
         self
     }
@@ -424,6 +511,12 @@ pub struct LocalSettings {
     /// Override whether the local LLM is enabled for this project. `None` defers
     /// to the global [`LocalLlm::enabled`] setting.
     pub local_llm_enabled: Option<bool>,
+    /// Per-project overrides of shipped-skill features, keyed by
+    /// [`SkillFeature::id`]. A feature present here overrides the global setting
+    /// for this project; a feature absent here defers to the global value. Read
+    /// the override through [`skill_feature_override`](Self::skill_feature_override).
+    #[serde(default)]
+    pub skill_features: BTreeMap<String, bool>,
 }
 
 impl LocalSettings {
@@ -435,6 +528,15 @@ impl LocalSettings {
             && self.default_branch_source.is_none()
             && self.default_branch.is_none()
             && self.local_llm_enabled.is_none()
+            && self.skill_features.is_empty()
+    }
+
+    /// This project's override for the shipped-skill `feature`: `Some(enabled)`
+    /// when the project pins it on or off, or `None` to defer to the global
+    /// setting. The single read path for a local override — callers never index
+    /// [`skill_features`](Self::skill_features) directly.
+    pub fn skill_feature_override(&self, feature: SkillFeature) -> Option<bool> {
+        self.skill_features.get(feature.id()).copied()
     }
 
     /// The branch source to use, resolving an unset value to the default.
@@ -856,5 +958,105 @@ mod tests {
             serde_json::from_str::<BranchSource>("\"remote\"").unwrap(),
             BranchSource::Remote
         );
+    }
+
+    #[test]
+    fn skill_feature_metadata_is_consistent() {
+        // Every feature in ALL round-trips through its id and is on by default
+        // (shipped skills are opt-out).
+        for feature in SkillFeature::ALL {
+            assert_eq!(SkillFeature::from_id(feature.id()), Some(feature));
+            assert!(!feature.label().is_empty());
+            assert!(feature.default_enabled());
+        }
+        assert_eq!(SkillFeature::PullRequest.id(), "pull-request");
+        // An unknown id resolves to nothing.
+        assert_eq!(SkillFeature::from_id("nope"), None);
+    }
+
+    #[test]
+    fn skill_feature_enabled_defaults_on_and_honours_an_explicit_value() {
+        // Absent from the map → the feature's default (on).
+        let mut settings = Settings::default();
+        assert!(settings.skill_feature_enabled(SkillFeature::PullRequest));
+        // An explicit `false` is honoured...
+        settings
+            .skill_features
+            .insert("pull-request".to_string(), false);
+        assert!(!settings.skill_feature_enabled(SkillFeature::PullRequest));
+        // ...as is an explicit `true`.
+        settings
+            .skill_features
+            .insert("pull-request".to_string(), true);
+        assert!(settings.skill_feature_enabled(SkillFeature::PullRequest));
+    }
+
+    #[test]
+    fn sanitized_drops_unknown_skill_feature_keys() {
+        let mut settings = Settings::default();
+        settings
+            .skill_features
+            .insert("pull-request".to_string(), false);
+        // A key no current usagi knows (a removed feature or a hand-edited typo).
+        settings
+            .skill_features
+            .insert("ghost-feature".to_string(), true);
+        let cleaned = settings.sanitized();
+        // The known key survives; the unknown one is dropped.
+        assert_eq!(
+            cleaned.skill_features.get("pull-request").copied(),
+            Some(false)
+        );
+        assert!(!cleaned.skill_features.contains_key("ghost-feature"));
+    }
+
+    #[test]
+    fn with_local_overrides_a_skill_feature_when_set() {
+        // Global leaves the PR skills on (the default); a project override turns
+        // them off for just this project.
+        let global = Settings::default();
+        assert!(global.skill_feature_enabled(SkillFeature::PullRequest));
+        let mut local = LocalSettings::default();
+        local
+            .skill_features
+            .insert("pull-request".to_string(), false);
+
+        let effective = global.with_local(&local);
+        assert!(!effective.skill_feature_enabled(SkillFeature::PullRequest));
+    }
+
+    #[test]
+    fn is_empty_counts_a_skill_feature_override() {
+        assert!(LocalSettings::default().is_empty());
+        let mut local = LocalSettings::default();
+        local
+            .skill_features
+            .insert("pull-request".to_string(), false);
+        assert!(!local.is_empty());
+        assert_eq!(
+            local.skill_feature_override(SkillFeature::PullRequest),
+            Some(false)
+        );
+        // A feature the project does not mention defers to the global setting.
+        assert_eq!(
+            LocalSettings::default().skill_feature_override(SkillFeature::PullRequest),
+            None
+        );
+    }
+
+    #[test]
+    fn skill_features_default_to_empty_and_round_trip() {
+        // An older settings.json (written before the field existed) loads with an
+        // empty map — every feature then uses its default.
+        let loaded: Settings = serde_json::from_str("{}").unwrap();
+        assert!(loaded.skill_features.is_empty());
+        assert!(loaded.skill_feature_enabled(SkillFeature::PullRequest));
+        // An explicit entry survives a JSON round-trip.
+        let mut settings = Settings::default();
+        settings
+            .skill_features
+            .insert("pull-request".to_string(), false);
+        let json = serde_json::to_string(&settings).unwrap();
+        assert_eq!(serde_json::from_str::<Settings>(&json).unwrap(), settings);
     }
 }

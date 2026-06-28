@@ -3,7 +3,9 @@ use super::panes::*;
 use super::*;
 
 use super::super::command::{CommandHint, CommandInfo};
-use super::super::state::{LogLine, ModalSize, Preview, TextModal, WorktreeList, ROOT_NAME};
+use super::super::state::{
+    LogLine, ModalSize, Preview, TextModal, WorkspaceGroup, WorktreeList, ROOT_NAME,
+};
 use super::super::terminal::pool::MonitorSnapshot;
 use super::super::terminal::view::TerminalView;
 use crate::domain::resource::ResourceUsage;

@@ -26,4 +26,7 @@ exclude = [
   "^https?://example\\.(com|org)",
   # 応答が遅く CI でタイムアウトしがちな外部ホスト（実在・有効だが計測に向かない）。
   "^https?://no-color\\.org",
+  # CI（GitHub Actions）からの接続を拒否/リセットする外部ホスト（実在・有効だが計測に向かない）。
+  # max_retries でも "Connection reset by peer" で失敗するため除外する。
+  "^https?://www\\.conventionalcommits\\.org",
 ]

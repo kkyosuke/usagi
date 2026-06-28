@@ -197,6 +197,7 @@ fn cycling_default_workspace_persists_when_saved() {
         Ok(Key::ArrowDown),  // Mascot Animation
         Ok(Key::ArrowDown),  // Local LLM
         Ok(Key::ArrowDown),  // Local LLM Model
+        Ok(Key::ArrowDown),  // PR Skills
         Ok(Key::ArrowDown),  // Save button
         Ok(Key::Enter),      // saves
         Ok(Key::Escape),
@@ -297,6 +298,7 @@ fn saving_a_local_override_passes_it_to_save() {
         Ok(Key::ArrowDown),  // Restore Panes
         Ok(Key::ArrowDown),  // Default Branch
         Ok(Key::ArrowDown),  // Branch Source
+        Ok(Key::ArrowDown),  // PR Skills
         Ok(Key::ArrowDown),  // Save button
         Ok(Key::Enter),      // save
         Ok(Key::Escape),
@@ -732,6 +734,7 @@ fn toggling_the_local_llm_after_install_persists_the_enabled_flag() {
         Ok(Key::ArrowDown),  // Local LLM
         Ok(Key::ArrowRight), // toggle On
         Ok(Key::ArrowDown),  // Local LLM Model
+        Ok(Key::ArrowDown),  // PR Skills
         Ok(Key::ArrowDown),  // Save button
         Ok(Key::Enter),      // save
         Ok(Key::Escape),

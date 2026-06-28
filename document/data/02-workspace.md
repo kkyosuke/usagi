@@ -242,7 +242,10 @@ session "login"  (/Users/me/git/usagi/.usagi/sessions/login)
   "notifications_enabled": false,    // 任意。未設定ならグローバル値
   "default_branch": "develop",       // 任意。未設定なら検出済み既定ブランチ（auto）
   "default_branch_source": "local",  // 任意。未設定なら remote
-  "local_llm_enabled": true          // 任意。未設定ならグローバル値（local_llm.enabled）
+  "local_llm_enabled": true,         // 任意。未設定ならグローバル値（local_llm.enabled）
+  "skill_features": {                 // 任意。機能 ID ごとに上書き（未記載はグローバル値）
+    "pull-request": false             // 例: このプロジェクトでだけ PR スキル群を無効化
+  }
 }
 ```
 
@@ -253,6 +256,7 @@ session "login"  (/Users/me/git/usagi/.usagi/sessions/login)
 | `default_branch` | string? | リポジトリの検出済み既定ブランチ（auto）。**リポジトリ単位**（グローバルに対応項目なし） |
 | `default_branch_source` | enum? | `remote`。**リポジトリ単位**（グローバルに対応項目なし） |
 | `local_llm_enabled` | bool? | グローバル `local_llm.enabled` にフォールバック |
+| `skill_features` | map<string, bool> | 機能 ID 単位で上書き。未記載の機能はグローバル `skill_features` にフォールバック |
 
 - 全フィールドが任意（`Option`）で、`null` は「グローバル設定に従う」を意味します。各項目の意味・選択肢は
   [../05-settings.md#ローカル設定プロジェクト単位の上書き](../05-settings.md#ローカル設定プロジェクト単位の上書き)、`default_branch` / `default_branch_source` を使った

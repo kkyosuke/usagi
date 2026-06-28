@@ -3,6 +3,8 @@ use console::style;
 use crate::presentation::tui::welcome;
 use crate::presentation::tui::widgets;
 
+use crate::domain::settings::SkillFeature;
+
 use super::state::{Config, Field, InstallModal, LocalField, ModelModal};
 
 /// The label of the Save button row.
@@ -29,7 +31,10 @@ fn header_lines(width: usize, title: &str, subtitle: &str) -> Vec<String> {
 fn label_width() -> usize {
     let global = Field::ALL.iter().map(|f| f.label().chars().count());
     let local = LocalField::ALL.iter().map(|f| f.label().chars().count());
-    global.chain(local).max().unwrap_or(0)
+    // The shipped-skill feature rows appear in both scopes, so their labels
+    // factor into the shared column width too.
+    let skills = SkillFeature::ALL.iter().map(|f| f.label().chars().count());
+    global.chain(local).chain(skills).max().unwrap_or(0)
 }
 
 /// Builds one setting row. Two single-column gutters sit left of the label: the
@@ -323,7 +328,8 @@ mod tests {
     fn settings_lines_render_one_row_per_field() {
         let config = sample_config();
         let lines = settings_lines("", &config);
-        assert_eq!(lines.len(), Field::ALL.len());
+        // One row per fixed field, then one per shipped-skill feature.
+        assert_eq!(lines.len(), Field::ALL.len() + SkillFeature::ALL.len());
         assert!(lines[0].contains("Theme"));
         assert!(lines[0].contains("Dark"));
         assert!(lines[1].contains("Default Workspace"));
@@ -352,6 +358,10 @@ mod tests {
         assert!(lines[9].contains("Local LLM Model"));
         assert!(lines[9].contains('—'));
         assert!(!lines[9].contains('<'));
+        // The shipped-skill feature rows follow the fixed fields: a chooser
+        // showing the feature's on/off state (on by default).
+        assert!(lines[10].contains("PR Skills"));
+        assert!(lines[10].contains("On"));
         // Every other field is a chooser, so chevrons appear on those rows...
         assert!(lines
             .iter()
@@ -446,8 +456,9 @@ mod tests {
     #[test]
     fn render_frame_marks_the_save_button_when_focused() {
         let mut config = sample_config();
-        // Move the cursor down onto the Save button (past all the fields).
-        for _ in 0..Field::ALL.len() {
+        // Move the cursor down onto the Save button (past every field, including
+        // the shipped-skill feature rows).
+        for _ in 0..config.save_index() {
             config.move_down();
         }
         assert!(config.is_save_selected());

@@ -11,7 +11,7 @@ use std::path::Path;
 
 use anyhow::{bail, Context, Result};
 
-use crate::domain::settings::{AgentCli, Settings, Theme};
+use crate::domain::settings::{AgentCli, Settings, SkillFeature, Theme};
 use crate::infrastructure::storage::Storage;
 
 /// Entry point for `usagi config`.
@@ -132,7 +132,7 @@ fn render_settings(settings: &Settings) -> Vec<String> {
         .workspace_root
         .as_ref()
         .map(|path| path.display().to_string());
-    vec![
+    let mut lines = vec![
         format!("theme                  {}", theme_label(settings.theme)),
         format!(
             "default_workspace      {}",
@@ -164,7 +164,16 @@ fn render_settings(settings: &Settings) -> Vec<String> {
         ),
         format!("local_llm_enabled      {}", settings.local_llm.enabled),
         format!("local_llm_model        {}", settings.local_llm.model),
-    ]
+    ];
+    // One line per toggleable shipped-skill feature, keyed by its stable id.
+    for feature in SkillFeature::ALL {
+        lines.push(format!(
+            "skill:{:<16}{}",
+            feature.id(),
+            settings.skill_feature_enabled(feature)
+        ));
+    }
+    lines
 }
 
 /// The on-disk label for a [`Theme`].
@@ -256,6 +265,8 @@ mod tests {
                 enabled: true,
                 model: "qwen2.5-coder:3b".to_string(),
             },
+            // The PR-skills feature pinned off, to exercise the skill line.
+            skill_features: [("pull-request".to_string(), false)].into_iter().collect(),
         };
         let lines = render_settings(&settings);
         assert!(lines[0].contains("dark"));
@@ -271,6 +282,9 @@ mod tests {
         assert!(lines[10].contains("1234")); // terminal_scrollback
         assert!(lines[11].contains("true"));
         assert!(lines[12].contains("qwen2.5-coder:3b"));
+        // The shipped-skill feature line shows its id and effective state.
+        assert!(lines[13].contains("pull-request"));
+        assert!(lines[13].contains("false"));
     }
 
     #[test]

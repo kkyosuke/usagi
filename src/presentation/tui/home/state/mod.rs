@@ -38,7 +38,7 @@ mod log;
 mod modal;
 mod mode;
 
-pub use list::{worktree_name, WorktreeList, ROOT_NAME};
+pub use list::{worktree_name, WorkspaceGroup, WorktreeList, ROOT_NAME};
 pub use log::{LineKind, LogLine};
 pub use modal::{CreateInput, ModalSize, NoteEditor, Preview, RemoveModal, RenameInput, TextModal};
 pub use mode::{Mode, PaneExit, ResumeLevel, ReturnMode};
@@ -508,6 +508,15 @@ pub struct HomeState {
     /// Only the user editing it changes it — background re-syncs leave it as is —
     /// so it is carried separately from the re-synced `sessions`.
     root_note: Option<String>,
+    /// The *additional* workspace groups shown below the primary one in 統合(unite)
+    /// mode — empty in single-workspace mode. The primary workspace (its sessions,
+    /// root path, and root note) stays in [`sessions`](Self::sessions) /
+    /// [`root_path`](Self::root_path) / [`root_note`](Self::root_note) and is
+    /// re-synced live; these extra groups are display snapshots appended after the
+    /// primary on every [`rebuild_list`](Self::rebuild_list). Built by the
+    /// orchestrator from the other selected workspaces' preloads via
+    /// [`set_extra_groups`](Self::set_extra_groups).
+    extra_groups: Vec<WorkspaceGroup>,
     /// Whether the sidebar mascot reacts to interaction — injected from the
     /// effective settings by `mod.rs`. While `false` the mascot never blinks and
     /// the Working rabbit never pumps its paw, so it stays a perfectly still
@@ -630,6 +639,7 @@ impl HomeState {
             tasks: Vec::new(),
             root_path: PathBuf::new(),
             root_note: None,
+            extra_groups: Vec::new(),
             // The mascot reacts by default; `mod.rs` overrides it from the
             // effective settings, and tests get a lively mascot without setup.
             mascot_animation_enabled: true,
@@ -926,6 +936,23 @@ impl HomeState {
         self.root_note.as_deref()
     }
 
+    /// Add the additional workspace groups shown below the primary one in
+    /// 統合(unite) mode (the other workspaces the user selected on the Open
+    /// screen), then rebuild the pane so they appear. Empty restores the
+    /// single-workspace view. Each group carries its own sessions, sidebar labels,
+    /// note markers, and root path; the orchestrator builds them from the other
+    /// workspaces' preloads. The primary workspace stays first and is the one the
+    /// live re-sync, `session` commands, and root row act on.
+    pub fn set_extra_groups(&mut self, groups: Vec<WorkspaceGroup>) {
+        self.extra_groups = groups;
+        self.rebuild_list_keep_cursor();
+    }
+
+    /// Whether the home screen is showing more than one workspace (統合/unite mode).
+    pub fn is_united(&self) -> bool {
+        !self.extra_groups.is_empty()
+    }
+
     /// Swap in a freshly re-synced set of sessions while keeping the cursor and
     /// the active row on the same session names (when they still exist).
     ///
@@ -989,6 +1016,13 @@ impl HomeState {
         // The root row's note lives on the workspace state (it belongs to no
         // session), so its marker is carried separately from the per-session notes.
         list.set_root_note_marker(self.root_note.is_some());
+        // 統合(unite) mode: stack the other selected workspaces below the primary
+        // one. They are display snapshots (built once by the orchestrator), so they
+        // are re-appended verbatim on every rebuild while the primary group above is
+        // the one re-synced live.
+        for group in &self.extra_groups {
+            list.add_group(group.clone());
+        }
         self.list = list;
     }
 
