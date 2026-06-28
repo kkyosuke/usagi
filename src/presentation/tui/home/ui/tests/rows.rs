@@ -1139,9 +1139,8 @@ fn group_inline_insert_line_includes_unite_gaps_before_later_groups() {
 }
 
 #[test]
-fn row_select_click_works_in_unite_mode_but_pr_mouse_stays_single_group() {
-    // The row-select click maps to the right session across groups; the PR
-    // click/hover (whose popup geometry is single-group) is disabled in unite.
+fn row_select_click_works_in_unite_mode() {
+    // The row-select click maps to the right session across groups.
     let mut state = state_with_sessions(&["main"]); // primary "usagi" with one session
     state.set_extra_groups(vec![GroupSource {
         name: "wsB".to_string(),
@@ -1160,8 +1159,102 @@ fn row_select_click_works_in_unite_mode_but_pr_mouse_stays_single_group() {
     // Body line 4 (header 0, root 1-2, divider 3, session 4) is the primary's
     // session → flat row 1. Screen row = CHROME_TOP_ROWS (3) + 4 = 7.
     assert_eq!(left_pane_session_at(&state, 2, 7, 24, 120), Some(1));
-    // The PR affordance is still off in unite (its popup geometry is single-group).
-    assert_eq!(sidebar_pr_badge_at(&state, 24, 120, 2, 7), None);
+}
+
+/// A 統合(unite) state at 120×24 with the full sidebar: the primary workspace
+/// "usagi" carries session `main` with PR #412, and an extra workspace "wsB"
+/// carries session `b1` with PR #777 — so a badge / popup must reach across the
+/// per-workspace group headers and the inter-workspace gap, not just the first
+/// group. Worktree rows (per [`full_sidebar_worktree_entries`]): `main` starts on
+/// body line 4 (header 0, root 1-2, divider 3) → detail screen row 8; `b1` starts
+/// on body line 13 (the 2-row gap, wsB's header, root, divider) → detail row 17.
+fn unite_with_prs() -> HomeState {
+    let mut state = HomeState::new("usagi", Vec::new(), None);
+    state.restore_sessions(vec![SessionRecord {
+        name: "main".to_string(),
+        display_name: None,
+        note: None,
+        root: PathBuf::from("/ws/main"),
+        worktrees: vec![worktree_with_pr(412)],
+        created_at: Utc::now(),
+        last_active: None,
+    }]);
+    state.set_extra_groups(vec![GroupSource {
+        name: "wsB".to_string(),
+        root_path: PathBuf::from("/wsB"),
+        root_note: None,
+        sessions: vec![SessionRecord {
+            name: "b1".to_string(),
+            display_name: None,
+            note: None,
+            root: PathBuf::from("/wsB/.usagi/sessions/b1"),
+            worktrees: vec![worktree_with_pr(777)],
+            created_at: Utc::now(),
+            last_active: None,
+        }],
+    }]);
+    state
+}
+
+#[test]
+fn sidebar_pr_badge_at_maps_badges_across_unite_groups() {
+    let state = unite_with_prs();
+    // The primary workspace's badge (detail row 8) maps to global index 0, and the
+    // extra workspace's badge (detail row 17, past the gap and header) to global
+    // index 1 — the popup reaches a session in any group, not just the first.
+    assert_eq!(sidebar_pr_badge_at(&state, 24, 120, 38, 8), Some(0));
+    assert_eq!(sidebar_pr_badge_at(&state, 24, 120, 38, 17), Some(1));
+    // The identity line (row 7 / 16) above each detail line carries no badge.
+    assert_eq!(sidebar_pr_badge_at(&state, 24, 120, 38, 7), None);
+    assert_eq!(sidebar_pr_badge_at(&state, 24, 120, 38, 16), None);
+}
+
+#[test]
+fn sidebar_pr_badge_at_skips_an_empty_earlier_unite_group() {
+    // An empty primary workspace contributes only its one-row "no sessions" line,
+    // which the walk steps over so the extra workspace's badge still resolves. `b1`
+    // starts on body line 11 (empty primary: header 0, root 1-2, divider 3, message
+    // 4; then the gap 5-6, wsB header 7, root 8-9, divider 10) → detail row 15.
+    let mut state = HomeState::new("usagi", Vec::new(), None);
+    state.set_extra_groups(vec![GroupSource {
+        name: "wsB".to_string(),
+        root_path: PathBuf::from("/wsB"),
+        root_note: None,
+        sessions: vec![SessionRecord {
+            name: "b1".to_string(),
+            display_name: None,
+            note: None,
+            root: PathBuf::from("/wsB/.usagi/sessions/b1"),
+            worktrees: vec![worktree_with_pr(777)],
+            created_at: Utc::now(),
+            last_active: None,
+        }],
+    }]);
+    assert_eq!(sidebar_pr_badge_at(&state, 24, 120, 38, 15), Some(0));
+}
+
+#[test]
+fn pr_popup_floats_and_opens_across_unite_groups() {
+    let mut state = unite_with_prs();
+    // The primary workspace's PR (global 0) floats at its entry's first row (screen
+    // row 7) just past the 40-column pane and 3-column divider (left 43).
+    state.set_pr_popup(Some(0));
+    let (popup, top, left) = pr_popup_placement(&state, 24, 120).expect("a box for group 0");
+    assert_eq!((top, left), (7, 43));
+    assert!(stripped(&popup).contains("#412"));
+    // The extra workspace's PR (global 1) floats lower, past the gap and header
+    // (entry starts on body line 13 → screen row 16).
+    state.set_pr_popup(Some(1));
+    let (popup, top, left) = pr_popup_placement(&state, 24, 120).expect("a box for group 1");
+    assert_eq!((top, left), (16, 43));
+    assert!(stripped(&popup).contains("#777"));
+    // Clicking `#777` in that box (content row 17, the token flush at left+2 = 45)
+    // opens the extra workspace's PR — the click resolves the right session's URL
+    // across groups.
+    assert!(matches!(
+        pr_popup_click(&state, 24, 120, 45, 17),
+        PopupClick::Open(url) if url == "https://github.com/o/r/pull/777"
+    ));
 }
 
 #[test]
@@ -1878,18 +1971,18 @@ fn pr_popup_click_on_the_box_borders_stays_pinned() {
 }
 
 #[test]
-fn pr_popup_placement_is_none_in_unite_or_when_too_narrow() {
-    // 統合(unite): with more than one group the single-group anchor is disabled, so
-    // even a pinned popup floats nothing.
-    let mut unite = state_with(vec![worktree_with_pr(412)]);
-    unite.set_extra_groups(vec![GroupSource {
+fn pr_popup_placement_is_none_when_empty_or_too_narrow() {
+    // No session carries the pinned index (both workspaces are empty), so there is
+    // no worktree to anchor a box on.
+    let mut empty = state_with(vec![worktree_with_pr(412)]);
+    empty.set_extra_groups(vec![GroupSource {
         name: "wsB".to_string(),
         root_path: PathBuf::from("/wsB"),
         root_note: None,
         sessions: Vec::new(),
     }]);
-    unite.set_pr_popup(Some(0));
-    assert!(pr_popup_placement(&unite, 24, 120).is_none());
+    empty.set_pr_popup(Some(0));
+    assert!(pr_popup_placement(&empty, 24, 120).is_none());
     // Too narrow: the `PR` box can't fit the terminal width, so it is not placed.
     let mut narrow = attached_with_pr_sidebar();
     narrow.set_pr_popup(Some(0));
