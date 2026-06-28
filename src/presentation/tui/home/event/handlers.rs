@@ -95,8 +95,12 @@ pub(super) fn palette_key(
                 },
                 // `session remove <name>` dispatches the removal to a background
                 // worker; the session leaves the list when the task finishes.
-                Effect::RemoveSession { name, force } => {
-                    let root = state.workspace_root_for_session(&name);
+                Effect::RemoveSession {
+                    workspace,
+                    name,
+                    force,
+                } => {
+                    let root = state.workspace_root_for_session(workspace.as_deref(), &name);
                     state.set_op_target(root.clone());
                     (wiring.dispatch_remove)(&root, &name, force);
                 }
@@ -896,7 +900,7 @@ fn close_focused_session(state: &mut HomeState, wiring: &mut Wiring) {
     }
     // `false`: do not force. A dirty worktree is refused (the task logs the
     // `--force` hint) instead of being discarded without confirmation.
-    let root = state.workspace_root_for_session(&name);
+    let root = state.workspace_root_for_session(None, &name);
     state.set_op_target(root.clone());
     (wiring.dispatch_remove)(&root, &name, false);
     state.enter_switch(ReturnMode::Base);

@@ -1048,7 +1048,19 @@ impl HomeState {
     /// primary workspace and every extra (unite) group, falling back to the primary
     /// when no group claims it. Used by name-based operations (remove / close) so
     /// they act on the workspace the session actually lives in, not just the cursor's.
-    pub fn workspace_root_for_session(&self, name: &str) -> PathBuf {
+    pub fn workspace_root_for_session(&self, workspace: Option<&str>, name: &str) -> PathBuf {
+        // A `workspace:` qualifier (統合(unite) mode) targets that workspace's
+        // root directly, even when the name is shared across workspaces or absent
+        // there — so the removal acts on, and reports against, the named one. An
+        // unknown qualifier falls through to name-only resolution.
+        if let Some(workspace) = workspace {
+            if workspace == self.list.workspace_name() {
+                return self.root_path.clone();
+            }
+            if let Some(group) = self.extra_groups.iter().find(|g| g.name == workspace) {
+                return group.root_path.clone();
+            }
+        }
         if self.sessions.iter().any(|s| s.name == name) {
             return self.root_path.clone();
         }
@@ -2555,9 +2567,17 @@ impl HomeState {
     /// Tab-complete the command word, listing candidates when ambiguous.
     pub fn complete(&mut self) {
         let session_names: Vec<&str> = self.sessions.iter().map(|s| s.name.as_str()).collect();
-        let completion =
-            self.registry
-                .complete_with(self.cmdline.value(), self.command_scope(), &session_names);
+        // `session remove` completes against qualified `workspace:session` names
+        // in 統合(unite) mode (so a shared name can be disambiguated), and plain
+        // session names otherwise.
+        let removable_owned = self.removable_session_names();
+        let removable: Vec<&str> = removable_owned.iter().map(String::as_str).collect();
+        let completion = self.registry.complete_with(
+            self.cmdline.value(),
+            self.command_scope(),
+            &session_names,
+            &removable,
+        );
         self.cmdline.set_value(completion.input);
         if !completion.candidates.is_empty() {
             self.log
@@ -2746,6 +2766,31 @@ impl HomeState {
         }
 
         entries
+    }
+
+    /// The `<name>` argument completions for `session remove`, in display order.
+    /// In single-workspace mode these are the plain session names; in 統合(unite)
+    /// mode every visible workspace contributes its sessions qualified as
+    /// `workspace:session`, matching the form `session remove` accepts there.
+    fn removable_session_names(&self) -> Vec<String> {
+        if !self.is_united() {
+            return self.sessions.iter().map(|s| s.name.clone()).collect();
+        }
+        let primary = self.list.workspace_name();
+        let mut names: Vec<String> = self
+            .sessions
+            .iter()
+            .map(|s| format!("{primary}:{}", s.name))
+            .collect();
+        for group in &self.extra_groups {
+            names.extend(
+                group
+                    .sessions
+                    .iter()
+                    .map(|s| format!("{}:{}", group.name, s.name)),
+            );
+        }
+        names
     }
 
     /// Open the session-removal modal, seeded with the current sessions and
