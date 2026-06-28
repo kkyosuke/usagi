@@ -740,6 +740,17 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
                             // next pass, so clear the surface for it.
                             clear = true;
                         }
+                        // `Ctrl-O x` / `Alt-x`: close the active tab and keep driving
+                        // the surviving pane that slides into the active slot (a
+                        // different shell, so clear the surface); when it was the last
+                        // pane the session empties, so drop back to 在席 — the same
+                        // handling as a shell that exits on its own (`Closed`).
+                        terminal::pane::PaneStep::CloseTab => {
+                            if !pool.close_active(dir, &label) {
+                                return Ok(PaneExit::Closed);
+                            }
+                            clear = true;
+                        }
                         // `Ctrl-^`: leave the pane to jump to the previously focused
                         // session; the event loop re-roots on it (attaching when live),
                         // leaving every pane alive in the pool (like `Ctrl-O`).
