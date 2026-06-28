@@ -1382,27 +1382,44 @@ fn attached_with_pr_sidebar() -> HomeState {
 }
 
 #[test]
-fn sidebar_pr_links_at_opens_every_pr_of_the_clicked_session() {
+fn sidebar_pr_links_at_opens_every_pr_when_the_badge_is_clicked() {
     let state = attached_with_pr_sidebar();
-    // Both lines of the session entry (rows 6 and 7) map to all of its PRs.
-    let urls = vec![
-        "https://github.com/o/r/pull/412".to_string(),
-        "https://github.com/o/other/pull/98".to_string(),
-    ];
-    assert_eq!(sidebar_pr_links_at(&state, 24, 120, 2, 6), urls);
-    assert_eq!(sidebar_pr_links_at(&state, 24, 120, 30, 7), urls);
+    // The left pane is 40 columns at width 120, so the folded `<icon> <count>` badge
+    // (here ` 2`, three columns wide) seats flush at its right edge — columns 37–39
+    // on the entry's detail line (row 7, the second of its three rows). A click on
+    // the badge opens every PR the session carries, in order.
+    assert_eq!(
+        sidebar_pr_links_at(&state, 24, 120, 37, 7),
+        vec![
+            "https://github.com/o/r/pull/412".to_string(),
+            "https://github.com/o/other/pull/98".to_string(),
+        ],
+    );
+    assert_eq!(sidebar_pr_links_at(&state, 24, 120, 39, 7).len(), 2);
+    // Left of the badge (the agent-label side of the detail line) opens nothing.
+    assert!(sidebar_pr_links_at(&state, 24, 120, 33, 7).is_empty());
+    assert!(sidebar_pr_links_at(&state, 24, 120, 10, 7).is_empty());
+}
+
+#[test]
+fn sidebar_pr_links_at_ignores_the_rows_other_than_the_detail_line() {
+    let state = attached_with_pr_sidebar();
+    // The badge columns on the identity line (row 6) and the CPU / memory line
+    // (row 8) of the same session carry no badge, so a click there opens nothing.
+    assert!(sidebar_pr_links_at(&state, 24, 120, 38, 6).is_empty());
+    assert!(sidebar_pr_links_at(&state, 24, 120, 38, 8).is_empty());
 }
 
 #[test]
 fn sidebar_pr_links_at_ignores_rows_without_a_pr() {
     let state = attached_with_pr_sidebar();
-    // The second session (rows 9–11) has no PR.
-    assert!(sidebar_pr_links_at(&state, 24, 120, 2, 9).is_empty());
+    // The second session's detail line (row 10 of rows 9–11) has no PR.
+    assert!(sidebar_pr_links_at(&state, 24, 120, 38, 10).is_empty());
     // The root entry (rows 3–4) and the divider (row 5) are not session rows.
-    assert!(sidebar_pr_links_at(&state, 24, 120, 2, 3).is_empty());
-    assert!(sidebar_pr_links_at(&state, 24, 120, 2, 5).is_empty());
+    assert!(sidebar_pr_links_at(&state, 24, 120, 38, 4).is_empty());
+    assert!(sidebar_pr_links_at(&state, 24, 120, 38, 5).is_empty());
     // A body row past the end of the session list maps to no worktree.
-    assert!(sidebar_pr_links_at(&state, 24, 120, 2, 12).is_empty());
+    assert!(sidebar_pr_links_at(&state, 24, 120, 38, 13).is_empty());
 }
 
 #[test]
@@ -1410,11 +1427,11 @@ fn sidebar_pr_links_at_ignores_clicks_off_the_sidebar() {
     let state = attached_with_pr_sidebar();
     // Left pane is 40 columns at width 120, so a click at column 40+ is the
     // divider / right pane, not a sidebar row.
-    assert!(sidebar_pr_links_at(&state, 24, 120, 40, 6).is_empty());
+    assert!(sidebar_pr_links_at(&state, 24, 120, 40, 7).is_empty());
     // Rows above the body (the title bar / mode ladder / blank separator).
-    assert!(sidebar_pr_links_at(&state, 24, 120, 2, 1).is_empty());
+    assert!(sidebar_pr_links_at(&state, 24, 120, 38, 1).is_empty());
     // A row below the two-pane body (past `body_rows`).
-    assert!(sidebar_pr_links_at(&state, 24, 120, 2, 22).is_empty());
+    assert!(sidebar_pr_links_at(&state, 24, 120, 38, 22).is_empty());
 }
 
 #[test]
@@ -1422,7 +1439,17 @@ fn sidebar_pr_links_at_is_empty_on_the_collapsed_rail() {
     let mut state = attached_with_pr_sidebar();
     // The rail shows no PR badge, so a click there opens nothing.
     state.set_sidebar(Sidebar::Rail);
-    assert!(sidebar_pr_links_at(&state, 24, 120, 2, 6).is_empty());
+    assert!(sidebar_pr_links_at(&state, 24, 120, 3, 7).is_empty());
+}
+
+#[test]
+fn sidebar_pr_links_at_ignores_a_badge_clipped_by_a_cramped_pane() {
+    let state = attached_with_pr_sidebar();
+    // On a very narrow screen the left pane shrinks until the folded badge can no
+    // longer seat flush-right past the name indent, so its columns can't be placed —
+    // a click opens nothing rather than guessing. At width 9 the left pane is 6
+    // columns and the 3-column badge would start at column 3, inside `NAME_PREFIX`.
+    assert!(sidebar_pr_links_at(&state, 24, 9, 3, 7).is_empty());
 }
 
 #[test]
@@ -1431,12 +1458,13 @@ fn sidebar_pr_hover_at_maps_a_pr_row_to_its_session_and_misses_elsewhere() {
     // Both rows of the PR-bearing session (rows 6 and 7) hover its index.
     assert_eq!(sidebar_pr_hover_at(&state, 24, 120, 2, 6), Some(0));
     assert_eq!(sidebar_pr_hover_at(&state, 24, 120, 30, 7), Some(0));
-    // The PR-less second session (rows 9–11), the root entry / divider, and a row
-    // past the list all raise no popup.
+    // The PR-less second session (rows 9–11), the root entry / divider, a row past
+    // the list, and a row below the two-pane body all raise no popup.
     assert_eq!(sidebar_pr_hover_at(&state, 24, 120, 2, 9), None);
     assert_eq!(sidebar_pr_hover_at(&state, 24, 120, 2, 3), None);
     assert_eq!(sidebar_pr_hover_at(&state, 24, 120, 2, 5), None);
     assert_eq!(sidebar_pr_hover_at(&state, 24, 120, 2, 12), None);
+    assert_eq!(sidebar_pr_hover_at(&state, 24, 120, 2, 22), None);
     // Off the sidebar (right pane / chrome) and on the collapsed rail, nothing.
     assert_eq!(sidebar_pr_hover_at(&state, 24, 120, 40, 6), None);
     assert_eq!(sidebar_pr_hover_at(&state, 24, 120, 2, 1), None);

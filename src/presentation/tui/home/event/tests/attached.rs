@@ -194,3 +194,39 @@ fn pane_failure_is_reported_and_returns_to_focus() {
         Outcome::Quit
     ));
 }
+
+#[test]
+fn a_double_click_in_an_attached_pane_switches_to_the_clicked_session() {
+    // From 没入, a sidebar double click surfaces as PaneExit::ToSession(row):
+    // attaching `feat` hands it back targeting focus row 1 (`main`), so the loop
+    // re-roots on `main` (re-attaching it), then `main` closes and drops to 在席.
+    let opened = RefCell::new(Vec::new());
+    let mut open = |_h: &mut HomeState, d: &Path, _a: bool, _n: bool| {
+        opened.borrow_mut().push(d.to_path_buf());
+        if d.ends_with("feat") {
+            Ok(PaneExit::ToSession(1)) // focus row 1 -> `main`
+        } else {
+            Ok(PaneExit::Closed)
+        }
+    };
+    let mut create: fn(&str) -> SessionOutcome = noop_create;
+    let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = live_preview;
+    let mut keys = cmd("session switch feat");
+    keys.push(Ok(Key::Enter)); // attach feat -> ToSession(1) -> re-attach main -> Closed
+    assert!(matches!(
+        run_full(
+            keys,
+            sample_state(),
+            &mut open,
+            &mut create,
+            &mut preview,
+            &mut noop_config
+        )
+        .unwrap(),
+        Outcome::Quit
+    ));
+    assert_eq!(
+        *opened.borrow(),
+        vec![PathBuf::from("/r/feat"), PathBuf::from("/r/main")],
+    );
+}

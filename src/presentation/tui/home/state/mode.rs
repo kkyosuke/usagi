@@ -79,6 +79,11 @@ pub enum PaneExit {
     /// attaching it when live. With no previous session recorded the pane returns
     /// to 在席 (Focus) on the current session instead.
     ToPreviousSession,
+    /// The user double-clicked a session row in the sidebar: leave the pane to
+    /// jump to that focus row (0 is the root), attaching it when live — the same
+    /// confirm a double click does in 切替 (Switch). The payload is the focus row
+    /// `left_pane_session_at` reports (0 the root, `i` the worktree `i - 1`).
+    ToSession(usize),
     /// The user pressed `Ctrl-Q`: leave the pane to quit usagi. Every pane stays
     /// alive in the pool; the caller raises the quit-confirmation modal rather
     /// than closing outright, so a live agent is never dropped by accident.
