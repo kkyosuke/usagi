@@ -434,15 +434,15 @@ pub(super) fn footer_line(width: usize, state: &HomeState) -> String {
             // next key" rather than "ignored"; it lapses on its own after
             // `PREFIX_TIMEOUT`, or on `Esc` / any other unbound key.
             KeyScheme::Prefix if state.prefix_pending() => {
-                "[attached]  Ctrl-O ▸ o switch / a focus / n/p tab / g agent / e note / q quit · Esc cancel"
+                "[attached]  Ctrl-O ▸ o switch / a focus / n/p tab / g agent / e note / x close / q quit · Esc cancel"
                     .to_string()
             }
             KeyScheme::Prefix => {
-                "[attached]  Ctrl-O then: o switch / a focus / n/p tab / g agent / e note / q quit · Ctrl-^ last"
+                "[attached]  Ctrl-O then: o switch / a focus / n/p tab / g agent / e note / x close / q quit · Ctrl-^ last"
                     .to_string()
             }
             KeyScheme::Alt => {
-                "[attached]  Alt: o switch / a focus / ←→ tab / g agent / e note / q quit · Ctrl-^ last"
+                "[attached]  Alt: o switch / a focus / ←→ tab / g agent / e note / x close / q quit · Ctrl-^ last"
                     .to_string()
             }
         },

@@ -130,6 +130,7 @@ fn attached_keys(scheme: KeyScheme) -> Vec<LogLine> {
             key_row("Ctrl-O g", "Add an agent tab"),
             key_row("Ctrl-O e", "Edit the session note"),
             key_row("Ctrl-O s", "Toggle the session sidebar"),
+            key_row("Ctrl-O x", "Close the active tab"),
             key_row("Ctrl-O q", "Quit usagi"),
             key_row("Ctrl-O Ctrl-O", "Zoom out to Switch (IME-safe second key)"),
         ],
@@ -141,6 +142,7 @@ fn attached_keys(scheme: KeyScheme) -> Vec<LogLine> {
             key_row("Alt-g", "Add an agent tab"),
             key_row("Alt-e", "Edit the session note"),
             key_row("Alt-s", "Toggle the session sidebar"),
+            key_row("Alt-x", "Close the active tab"),
             key_row("Alt-q", "Quit usagi"),
         ],
     };
@@ -288,6 +290,7 @@ mod tests {
             .join("\n");
         assert!(prefix.contains("Ctrl-O is the leader"));
         assert!(prefix.contains("Ctrl-O o"));
+        assert!(prefix.contains("Ctrl-O x"));
         assert!(prefix.contains("Ctrl-O Ctrl-O"));
         assert!(!prefix.contains("Alt-"));
 
@@ -299,6 +302,7 @@ mod tests {
             .join("\n");
         assert!(alt.contains("Option=Meta"));
         assert!(alt.contains("Alt-o"));
+        assert!(alt.contains("Alt-x"));
         assert!(alt.contains("Alt-→ / Alt-←"));
         // Both schemes keep the direct, low-conflict keys.
         for sheet in [&prefix, &alt] {
