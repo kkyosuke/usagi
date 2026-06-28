@@ -239,17 +239,18 @@ pub fn terminal_geometry(
 }
 
 /// The selectable left-pane row a left click at the 0-based screen (`col`, `row`)
-/// lands on, or `None` when the click is not on a session row. Row 0 is the root
-/// row (`⌂ root`); row `i` maps to `worktrees[i - 1]`, matching
+/// lands on, or `None` when the click is not on a session row. Row 0 is the first
+/// group's root row (`⌂ root`); each subsequent flat row maps to a worktree or a
+/// later group's root, matching
 /// [`WorktreeList::focus_index`](crate::presentation::tui::home::state::WorktreeList).
 ///
-/// Mirrors what [`left_pane`](panes::left_pane) (and its rail variant) draw: the
-/// root pair first (two rows), then a one-row divider, then
-/// [`SESSION_ROWS`](panes::SESSION_ROWS) rows per worktree (identity, detail, and
-/// the CPU / memory line) — so a click maps back to its session without the
-/// renderer and the hit test ever disagreeing on the layout. Returns `None` for a
-/// click in the right pane (past `left_w`), in the chrome above or below the body,
-/// on the divider, or below the last session (the mascot / blank rows).
+/// Defers the layout walk to [`panes::sidebar_row_at_line`], which replays exactly
+/// what [`left_pane`](panes::left_pane) draws — in both single-workspace and
+/// 統合(unite) mode (per-group headers, root pairs, dividers, and
+/// [`SESSION_ROWS`](panes::SESSION_ROWS) rows per worktree) — so a click maps back
+/// to its row without the renderer and the hit test ever disagreeing. Returns
+/// `None` for a click in the right pane (past `left_w`), in the chrome above or
+/// below the body, on a header / divider, or below the last session.
 pub(super) fn left_pane_session_at(
     state: &HomeState,
     col: u16,
@@ -257,12 +258,6 @@ pub(super) fn left_pane_session_at(
     raw_height: usize,
     raw_width: usize,
 ) -> Option<usize> {
-    // 統合(unite) mode stacks several workspaces with per-group headers and roots,
-    // a layout this single-group hit test does not model; selection there is
-    // keyboard-driven, so a click selects nothing rather than the wrong row.
-    if state.list().group_count() > 1 {
-        return None;
-    }
     let (height, width) = widgets::normalize_size(raw_height, raw_width);
     let (left_w, _right) = layout(width, state.sidebar());
     let (col, row) = (col as usize, row as usize);
@@ -275,17 +270,7 @@ pub(super) fn left_pane_session_at(
     if line >= body_rows_for(height) {
         return None;
     }
-    let index = match line {
-        // The root entry's identity / detail rows.
-        0 | 1 => 0,
-        // The divider between the root and the sessions.
-        2 => return None,
-        // Each worktree spans `SESSION_ROWS` rows after the divider: lines 3,4,5 →
-        // worktree 0, lines 6,7,8 → worktree 1, and so on.
-        l => (l - 3) / panes::SESSION_ROWS + 1,
-    };
-    // Past the last session (the mascot or blank filler rows) selects nothing.
-    (index < state.list().session_count()).then_some(index)
+    panes::sidebar_row_at_line(state.list(), line)
 }
 
 /// Rows the tab strip reserves at the top of the right pane in 没入 (Attached).
