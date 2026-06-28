@@ -900,6 +900,30 @@ pub(super) fn sidebar_row_at_line(list: &WorktreeList, line: usize) -> Option<us
     None
 }
 
+/// The 0-based body line just past `group`'s block in the layout [`left_pane`]
+/// builds — its (optional unite) header, the two-row root entry, the divider, and
+/// then either the empty-workspace message or [`SESSION_ROWS`] rows per session.
+/// 切替's inline create / rename input is spliced in here so it renders within the
+/// targeted workspace's block (after that workspace's sessions, before the next
+/// group's header) rather than at the foot of the whole column — which matters in
+/// 統合(unite) mode where several workspaces stack. Walks the same layout as
+/// [`sidebar_row_at_line`].
+pub(super) fn group_inline_insert_line(list: &WorktreeList, group: usize) -> usize {
+    let header = usize::from(list.group_count() > 1);
+    list.groups()
+        .iter()
+        .take(group + 1)
+        .map(|g| {
+            let body = if g.worktrees().is_empty() {
+                1
+            } else {
+                SESSION_ROWS * g.worktrees().len()
+            };
+            header + 2 + 1 + body
+        })
+        .sum()
+}
+
 /// Builds a 統合(unite) group header: the workspace name in bold behind a left
 /// bar, clipped to the sidebar width. Drawn above each workspace's rows only when
 /// more than one workspace is shown, so single-workspace mode is byte-for-byte
