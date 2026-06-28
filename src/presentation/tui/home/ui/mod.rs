@@ -624,20 +624,12 @@ fn place_create_rows(column: &mut Vec<String>, list: &WorktreeList, rows: Vec<St
     }
 }
 
-/// Replace rows in-place, padding only when the replacement begins past the
-/// currently built column. Unlike [`splice_rows`], this never pushes later rows
-/// down; it is used to draw temporary inline UI in reserved blank space.
-fn replace_rows(column: &mut Vec<String>, line: usize, rows: Vec<String>) {
-    if line >= column.len() {
-        column.resize(line, String::new());
-    }
-    for (offset, row) in rows.into_iter().enumerate() {
-        let target = line + offset;
-        if target < column.len() {
-            column[target] = row;
-        } else {
-            column.push(row);
-        }
+/// Replace rows in-place without pushing later rows down. Unlike [`splice_rows`],
+/// this never grows the column; it draws temporary inline UI only in already
+/// reserved blank space.
+fn replace_rows(column: &mut [String], line: usize, rows: Vec<String>) {
+    for (slot, row) in column.iter_mut().skip(line).zip(rows) {
+        *slot = row;
     }
 }
 
