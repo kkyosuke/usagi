@@ -9,8 +9,8 @@
 #                 ※ usagi のセッション worktree (.usagi/sessions/<name>/) はブランチ名が usagi/<name> になるため対象外
 #   - コミットメッセージ: Conventional Commits (例: feat: 〇〇を追加 / fix(cli): 〇〇を修正)
 #   - コミット時に staged な .rs ファイルを自動フォーマット
-#   - コミット時にテストカバレッジ100%を確認 (Coverage CI と同条件)
-#   - push 時に clippy とテストを実行 (CI と同条件)
+#   - push 時に clippy とテストカバレッジ100%を確認 (Coverage CI と同条件)
+#     ※ カバレッジ計測 (cargo llvm-cov) はテストも実行するため、push 時のテスト実行を兼ねる
 
 pre-commit:
   parallel: true
@@ -37,11 +37,6 @@ pre-commit:
       glob: "*.rs"
       run: cargo fmt -- {staged_files}
       stage_fixed: true
-    coverage:
-      # 除外条件・閾値は SSoT (scripts/coverage.sh) を Coverage CI と共有する。
-      run: |
-        . ./scripts/coverage.sh
-        coverage_enforce
 
 commit-msg:
   commands:
@@ -68,5 +63,9 @@ pre-push:
   commands:
     clippy:
       run: cargo clippy --all-targets -- -D warnings
-    test:
-      run: cargo test
+    coverage:
+      # 除外条件・閾値は SSoT (scripts/coverage.sh) を Coverage CI と共有する。
+      # cargo llvm-cov がテストも実行するため、別途 cargo test は走らせない。
+      run: |
+        . ./scripts/coverage.sh
+        coverage_enforce

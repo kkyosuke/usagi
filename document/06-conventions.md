@@ -127,7 +127,7 @@ cargo test                                 # テスト
 |---|---|
 | pre-commit | ブランチ名チェック / staged な `.rs` を `cargo fmt` |
 | commit-msg | Conventional Commits 形式チェック |
-| pre-push | `cargo clippy -- -D warnings` / `cargo test` |
+| pre-push | `cargo clippy -- -D warnings` / テストカバレッジ 100% 確認（`cargo llvm-cov`。テスト実行を兼ねる） |
 
 ## CI（GitHub Actions）
 
