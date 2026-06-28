@@ -67,6 +67,56 @@ fn render_frame_inserts_the_inline_create_row_before_the_next_unite_group() {
 }
 
 #[test]
+fn render_frame_reuses_the_unite_gap_for_inline_create_without_shifting_lower_workspaces() {
+    let mut state = state_with_sessions(&["a1"]);
+    state.set_extra_groups(vec![GroupSource {
+        name: "wsB".to_string(),
+        root_path: PathBuf::from("/wsB"),
+        root_note: None,
+        sessions: vec![SessionRecord {
+            name: "b1".to_string(),
+            display_name: None,
+            note: None,
+            root: PathBuf::from("/wsB/.usagi/sessions/b1"),
+            worktrees: Vec::new(),
+            created_at: Utc::now(),
+            last_active: None,
+        }],
+    }]);
+    state.enter_switch(super::super::super::state::ReturnMode::Base);
+    let before = render_frame(24, 80, &state)
+        .iter()
+        .position(|line| console::strip_ansi_codes(line).contains("▌ wsB"))
+        .unwrap();
+
+    state.switch_begin_create(Vec::new());
+    for c in "wip".chars() {
+        state.create_mut().unwrap().push_char(c);
+    }
+    let frame = render_frame(24, 80, &state);
+    let plain: Vec<_> = frame
+        .iter()
+        .map(|line| console::strip_ansi_codes(line).into_owned())
+        .collect();
+    let after = plain
+        .iter()
+        .position(|line| line.contains("▌ wsB"))
+        .unwrap();
+
+    assert_eq!(after, before, "lower workspace header must not shift");
+    assert!(plain[after - 2].contains("+ new: wip"));
+}
+
+#[test]
+fn splice_rows_inserts_inside_an_existing_column_without_replacing_rows() {
+    let mut column = vec!["a".to_string(), "d".to_string()];
+
+    splice_rows(&mut column, 1, vec!["b".to_string(), "c".to_string()]);
+
+    assert_eq!(column, ["a", "b", "c", "d"]);
+}
+
+#[test]
 fn switch_rename_rows_show_the_target_and_typed_label() {
     // Caret at the end of the label.
     let rows = switch_rename_rows("main", "My main", "My main".len(), 40);
