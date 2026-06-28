@@ -30,10 +30,24 @@ struct Embedded {
 }
 
 /// The skills shipped with usagi, embedded at build time.
-const SKILLS: &[Embedded] = &[Embedded {
-    name: "usagi-session",
-    body: include_str!("../../assets/skills/usagi-session/SKILL.md"),
-}];
+const SKILLS: &[Embedded] = &[
+    Embedded {
+        name: "usagi-session",
+        body: include_str!("../../assets/skills/usagi-session/SKILL.md"),
+    },
+    Embedded {
+        name: "usagi-pr-create",
+        body: include_str!("../../assets/skills/usagi-pr-create/SKILL.md"),
+    },
+    Embedded {
+        name: "usagi-pr-update",
+        body: include_str!("../../assets/skills/usagi-pr-update/SKILL.md"),
+    },
+    Embedded {
+        name: "usagi-pr-fix",
+        body: include_str!("../../assets/skills/usagi-pr-fix/SKILL.md"),
+    },
+];
 
 /// The git exclude patterns for the skill symlinks usagi creates in a worktree,
 /// each anchored to the worktree root with a leading `/`. Sessions add these to

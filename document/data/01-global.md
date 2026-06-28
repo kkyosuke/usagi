@@ -165,7 +165,13 @@ TUI / MCP の起動時にここへ展開します（`materialize`）。仕組み
 
 ```
 ~/.usagi/skills/
-└── usagi-session/
+├── usagi-session/      # セッション worktree での作業手順
+│   └── SKILL.md
+├── usagi-pr-create/    # PR の新規作成
+│   └── SKILL.md
+├── usagi-pr-update/    # PR の概要更新・レビュー返信
+│   └── SKILL.md
+└── usagi-pr-fix/       # レビュー対応・最新化・コンフリクト解消
     └── SKILL.md
 ```
 
