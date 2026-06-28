@@ -763,65 +763,81 @@ fn rail_pane(
     now: DateTime<Utc>,
 ) -> Vec<String> {
     let root = root_glyph();
-    // The root entry is two rows (then a divider), matching the full sidebar's
-    // [`root_row`]; only worktree entries carry the third resource row, so the
-    // root drops the rail entry's (blank) third line.
-    let (mut root_top, mut root_detail, _) = rail_entry(
-        list.root_selected(),
-        list.root_active(),
-        in_switch,
-        &root,
-        None,
-        None,
-    );
-    if in_switch && !list.root_selected() {
-        root_top = dim_row(&root_top);
-        root_detail = dim_row(&root_detail);
-    }
-    let mut lines = vec![root_top, root_detail];
-    lines.push(style("─".repeat(RAIL_WIDTH)).dim().to_string());
-    for (i, w) in list.worktrees().iter().enumerate() {
-        // Stop once the built rows fill the rail: the trailing `truncate(rows)`
-        // discards the rest, so building beyond the visible height is wasted work
-        // (same bound as the full sidebar above).
+    let mut lines: Vec<String> = Vec::new();
+    // The flat selectable-row index, matching `WorktreeList`'s row space (the
+    // 統合 group separators are pure decoration and do not advance it).
+    let mut flat_row = 0usize;
+    let united = list.group_count() > 1;
+    'groups: for (g, group) in list.groups().iter().enumerate() {
         if lines.len() >= rows {
             break;
         }
-        // The root occupies the first entry, so worktree `i` sits at selectable
-        // row i + 1.
-        let row = i + 1;
-        let selected = row == list.selected_index();
-        let active = row == list.active_index();
-        let kind = kind_dot(heat_of(w.updated_at, now));
-        let git = rail_status_glyph(w.status);
-        let agent = AgentState::from_flags(
-            live.contains(&w.path),
-            running.contains(&w.path),
-            waiting.contains(&w.path),
-            done.contains(&w.path),
-        )
-        .rail_icon();
-        let (mut top, mut detail, mut resource) = rail_entry(
-            selected,
-            active,
-            in_switch,
-            &kind,
-            Some(&git),
-            agent.as_deref(),
-        );
-        if in_switch && !selected {
-            top = dim_row(&top);
-            detail = dim_row(&detail);
-            resource = dim_row(&resource);
+        // In 統合(unite) mode a thin rule separates each workspace's block (the
+        // rail is too narrow for the workspace name the full sidebar shows).
+        if united && g > 0 {
+            lines.push(style("━".repeat(RAIL_WIDTH)).dim().to_string());
         }
-        lines.push(top);
-        lines.push(detail);
-        lines.push(resource);
-    }
-    if list.is_empty() {
-        // Mirror the full sidebar's single empty-message row so the row count
-        // matches and toggling never shifts the layout.
-        lines.push(pad_to_width(String::new(), RAIL_WIDTH));
+        // The root entry is two rows (then a divider), matching the full sidebar's
+        // [`root_row`]; only worktree entries carry the third resource row, so the
+        // root drops the rail entry's (blank) third line.
+        let (mut root_top, mut root_detail, _) = rail_entry(
+            flat_row == list.selected_index(),
+            flat_row == list.active_index(),
+            in_switch,
+            &root,
+            None,
+            None,
+        );
+        if in_switch && flat_row != list.selected_index() {
+            root_top = dim_row(&root_top);
+            root_detail = dim_row(&root_detail);
+        }
+        lines.push(root_top);
+        lines.push(root_detail);
+        flat_row += 1;
+        lines.push(style("─".repeat(RAIL_WIDTH)).dim().to_string());
+        if group.worktrees().is_empty() {
+            // Mirror the full sidebar's single empty-message row so the row count
+            // matches and toggling never shifts the layout.
+            lines.push(pad_to_width(String::new(), RAIL_WIDTH));
+            continue;
+        }
+        for w in group.worktrees() {
+            // Stop once the built rows fill the rail: the trailing `truncate(rows)`
+            // discards the rest, so building beyond the visible height is wasted
+            // work (same bound as the full sidebar above).
+            if lines.len() >= rows {
+                break 'groups;
+            }
+            let selected = flat_row == list.selected_index();
+            let active = flat_row == list.active_index();
+            let kind = kind_dot(heat_of(w.updated_at, now));
+            let git = rail_status_glyph(w.status);
+            let agent = AgentState::from_flags(
+                live.contains(&w.path),
+                running.contains(&w.path),
+                waiting.contains(&w.path),
+                done.contains(&w.path),
+            )
+            .rail_icon();
+            let (mut top, mut detail, mut resource) = rail_entry(
+                selected,
+                active,
+                in_switch,
+                &kind,
+                Some(&git),
+                agent.as_deref(),
+            );
+            if in_switch && !selected {
+                top = dim_row(&top);
+                detail = dim_row(&detail);
+                resource = dim_row(&resource);
+            }
+            lines.push(top);
+            lines.push(detail);
+            lines.push(resource);
+            flat_row += 1;
+        }
     }
     lines.truncate(rows);
     lines
@@ -836,6 +852,16 @@ pub(super) fn dim_row(line: &str) -> String {
     // extra owned copy `into_owned` would force before the single styled string is
     // built.
     style(console::strip_ansi_codes(line)).dim().to_string()
+}
+
+/// Builds a 統合(unite) group header: the workspace name in bold behind a left
+/// bar, clipped to the sidebar width. Drawn above each workspace's rows only when
+/// more than one workspace is shown, so single-workspace mode is byte-for-byte
+/// unchanged.
+fn group_header(name: &str, width: usize) -> String {
+    style(clip_to_width(&format!("▌ {name}"), width))
+        .bold()
+        .to_string()
 }
 
 /// Builds the left pane: the root entry (two lines) first, then a divider, then
@@ -876,20 +902,14 @@ pub(super) fn left_pane(
     let name_width = left_w.saturating_sub(NAME_PREFIX + ACTIVE_COL + 1 + STATUS_COL);
     // Line 2: indented under the branch name, then the detail text.
     let detail_width = left_w.saturating_sub(NAME_PREFIX);
-    // Size the detail line's right-cluster columns once, across only the sessions
-    // that will actually be drawn (the render loop below stops at the same bound),
-    // so each field lands in the same column on every row and an off-screen session
-    // never widens a visible column. Two header lines (root) + the divider precede
-    // the sessions, and each session spans [`SESSION_ROWS`] rows.
-    let visible_n = list
-        .worktrees()
-        .len()
-        .min(rows.saturating_sub(ROOT_ENTRY_LINES).div_ceil(SESSION_ROWS));
+    // Size the detail line's right-cluster columns once across every group's
+    // worktrees, so a field lands in the same column on every row regardless of
+    // which workspace (group) it belongs to.
     let mut max_agent_w = 0;
     let cluster_data: Vec<_> = list
-        .worktrees()
+        .groups()
         .iter()
-        .take(visible_n)
+        .flat_map(|g| g.worktrees())
         .map(|w| {
             let agent = AgentState::from_flags(
                 live.contains(&w.path),
@@ -904,59 +924,75 @@ pub(super) fn left_pane(
         })
         .collect();
     let cols = detail_cols(&cluster_data, now, max_agent_w, detail_width);
-    let (mut root_top, mut root_detail) = root_row(
-        name_width,
-        detail_width,
-        list.root_has_note(),
-        list.root_selected(),
-        list.root_active(),
-        in_switch,
-    );
-    if in_switch && !list.root_selected() {
-        root_top = dim_row(&root_top);
-        root_detail = dim_row(&root_detail);
-    }
-    let mut lines = vec![root_top, root_detail];
-    // A divider separating the workspace root from the sessions below — indented
-    // to start under the `root` label (past the cursor and kind-icon cells).
+
+    // A divider separating each workspace root from its sessions — indented to
+    // start under the `root` label (past the cursor and kind-icon cells).
     let indent = " ".repeat(NAME_PREFIX);
     let inner_w = left_w.saturating_sub(NAME_PREFIX);
-    lines.push(
-        style(format!("{indent}{}", "─".repeat(inner_w)))
-            .dim()
-            .to_string(),
-    );
-    if list.is_empty() {
-        // No sessions yet — show the empty message under the divider.
+    // In 統合(unite) mode each workspace's rows are headed by its name.
+    let united = list.group_count() > 1;
+
+    let mut lines: Vec<String> = Vec::new();
+    // The flat selectable-row index, matching `WorktreeList`'s row space (group
+    // headers are pure decoration and do not advance it).
+    let mut flat_row = 0usize;
+    'groups: for group in list.groups() {
+        if lines.len() >= rows {
+            break;
+        }
+        if united {
+            lines.push(group_header(group.name(), left_w));
+        }
+        let (mut root_top, mut root_detail) = root_row(
+            name_width,
+            detail_width,
+            group.root_has_note(),
+            flat_row == list.selected_index(),
+            flat_row == list.active_index(),
+            in_switch,
+        );
+        if in_switch && flat_row != list.selected_index() {
+            root_top = dim_row(&root_top);
+            root_detail = dim_row(&root_detail);
+        }
+        lines.push(root_top);
+        lines.push(root_detail);
+        flat_row += 1;
         lines.push(
-            style(format!("{indent}{}", clip_to_width(EMPTY_MESSAGE, inner_w)))
+            style(format!("{indent}{}", "─".repeat(inner_w)))
                 .dim()
                 .to_string(),
         );
-    } else {
-        for (i, w) in list.worktrees().iter().enumerate() {
+        if group.worktrees().is_empty() {
+            // No sessions yet in this workspace — show the empty message under the
+            // divider.
+            lines.push(
+                style(format!("{indent}{}", clip_to_width(EMPTY_MESSAGE, inner_w)))
+                    .dim()
+                    .to_string(),
+            );
+            continue;
+        }
+        for (i, w) in group.worktrees().iter().enumerate() {
             // Stop once the rows built already fill the pane: the trailing
-            // `truncate(rows)` would discard anything past this, so building it
-            // is wasted work. With many sessions open this bounds the per-frame
-            // cost (styling, dimming, ANSI rewriting) to the visible rows instead
-            // of every worktree in the list.
+            // `truncate(rows)` would discard anything past this, so building it is
+            // wasted work. With many sessions open this bounds the per-frame cost
+            // (styling, dimming, ANSI rewriting) to the visible rows.
             if lines.len() >= rows {
-                break;
+                break 'groups;
             }
-            // The root occupies the first entry, so worktree `i` sits at
-            // selectable row i + 1.
-            let row = i + 1;
-            let selected = row == list.selected_index();
+            let selected = flat_row == list.selected_index();
+            let active = flat_row == list.active_index();
             let (mut top, mut detail) = worktree_row(
                 w,
-                list.display_label(i),
+                group.display_label(i),
                 name_width,
                 detail_width,
                 cols,
-                list.has_note(i),
+                group.has_note(i),
                 now,
                 selected,
-                row == list.active_index(),
+                active,
                 in_switch,
                 live.contains(&w.path),
                 running.contains(&w.path),
@@ -968,8 +1004,7 @@ pub(super) fn left_pane(
             // session shows `CPU 0%  MEM 0MB` (a default usage) rather than dropping
             // the row.
             let usage = resources.get(&w.path).copied().unwrap_or_default();
-            let mut resource =
-                resource_line(usage, detail_width, row == list.active_index(), in_switch);
+            let mut resource = resource_line(usage, detail_width, active, in_switch);
             if in_switch && !selected {
                 top = dim_row(&top);
                 detail = dim_row(&detail);
@@ -978,6 +1013,7 @@ pub(super) fn left_pane(
             lines.push(top);
             lines.push(detail);
             lines.push(resource);
+            flat_row += 1;
         }
     }
     lines.truncate(rows);
@@ -1244,6 +1280,11 @@ fn sidebar_pr_worktree_at(
     row: u16,
 ) -> Option<usize> {
     if state.sidebar() != Sidebar::Full {
+        return None;
+    }
+    // 統合(unite) mode stacks several workspaces, a layout this single-group hit
+    // test does not model; the PR click / hover affordance is disabled there.
+    if state.list().group_count() > 1 {
         return None;
     }
     let (height, width) = widgets::normalize_size(raw_height, raw_width);

@@ -156,7 +156,7 @@ pub fn preload(workspace: &Workspace) -> Preload {
     }
 }
 
-/// Runs the home screen for `workspace` on the given terminal until the user
+/// Runs the home screen for `workspaces` on the given terminal until the user
 /// goes back or quits, wiring the already-loaded [`Preload`] and the real
 /// terminal to the testable event loop in [`event`]. The caller loads the
 /// `Preload` (see [`preload`]) — on the Open screen, off-thread behind the mascot
@@ -164,7 +164,13 @@ pub fn preload(workspace: &Workspace) -> Preload {
 /// the user runs is appended to the workspace's `history.json` (best-effort).
 /// Assumes the alternate screen is already active (it is owned by the
 /// orchestrator).
-pub fn run(term: &Term, workspace: &Workspace, preload: Preload) -> Result<Outcome> {
+///
+/// `workspaces[0]` is the *primary* workspace the `Preload` belongs to — the one
+/// the live re-sync, `session` commands, and root row act on. Any further entries
+/// are 統合(unite) mode: their sessions are loaded here (the animation has already
+/// played) and stacked below the primary as display groups.
+pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Outcome> {
+    let workspace = &workspaces[0];
     // All the disk / PATH reads were done by `preload` (off-thread, behind the
     // animation), so opening the screen here is just wiring that data into the
     // state — no blocking IO before the first paint.
@@ -189,6 +195,21 @@ pub fn run(term: &Term, workspace: &Workspace, preload: Preload) -> Result<Outco
     state.set_logger(Box::new(crate::infrastructure::error_log::FileLogger));
     state.restore_sessions(sessions);
     state.restore_root_note(root_note);
+    // 統合(unite) mode: load the other selected workspaces' recorded sessions and
+    // stack them below the primary as display groups. The mascot animation has
+    // already played, so this synchronous read does not delay the first paint.
+    if workspaces.len() > 1 {
+        let extras: Vec<state::WorkspaceGroup> = workspaces[1..]
+            .iter()
+            .map(|w| {
+                let (sessions, _) =
+                    crate::usecase::workspace_state::recorded_sessions_for_display(&w.path);
+                let root_note = crate::usecase::workspace_state::recorded_root_note(&w.path);
+                state::WorkspaceGroup::from_sessions(&w.name, &sessions, root_note.is_some())
+            })
+            .collect();
+        state.set_extra_groups(extras);
+    }
     state.set_issues(issues);
     // Which right-pane action surface 在席 (Focus) presents — a pickable menu or a
     // typed prompt — and the state the left sidebar opens in (full width or the

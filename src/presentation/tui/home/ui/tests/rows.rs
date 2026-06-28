@@ -832,6 +832,186 @@ fn left_pane_renders_the_root_entry_then_one_entry_per_worktree() {
 }
 
 #[test]
+fn left_pane_in_unite_mode_heads_each_workspace_with_its_name() {
+    // Two stacked workspaces (統合): each gets a name header, its own root row, a
+    // divider, and its sessions, in the flat order the cursor navigates.
+    let list = WorktreeList::from_groups(vec![
+        WorkspaceGroup::new(
+            "wsA",
+            vec![worktree(Some("a1"), true, BranchStatus::Pushed)],
+        ),
+        WorkspaceGroup::new(
+            "wsB",
+            vec![worktree(Some("b1"), false, BranchStatus::Local)],
+        ),
+    ]);
+    let lines = left_pane(
+        &list,
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashMap::new(),
+        30,
+        40,
+        false,
+        Sidebar::Full,
+        Utc::now(),
+    );
+    let rendered = stripped(&lines);
+    // Both workspace names head their blocks (the unite header bar), and both
+    // groups' sessions render below their own root.
+    assert!(rendered.contains("▌ wsA"));
+    assert!(rendered.contains("▌ wsB"));
+    assert!(rendered.contains("a1"));
+    assert!(rendered.contains("b1"));
+    // The header precedes its workspace's session.
+    let a_header = rendered.find("▌ wsA").unwrap();
+    let b_header = rendered.find("▌ wsB").unwrap();
+    assert!(a_header < rendered.find("a1").unwrap());
+    assert!(a_header < b_header);
+}
+
+#[test]
+fn rail_pane_in_unite_mode_separates_each_workspace() {
+    // The collapsed rail stacks both workspaces too: two root entries, separated
+    // by a rule, with each group's session below its root.
+    let list = WorktreeList::from_groups(vec![
+        WorkspaceGroup::new(
+            "wsA",
+            vec![worktree(Some("a1"), true, BranchStatus::Pushed)],
+        ),
+        WorkspaceGroup::new(
+            "wsB",
+            vec![worktree(Some("b1"), false, BranchStatus::Local)],
+        ),
+    ]);
+    let lines = left_pane(
+        &list,
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashMap::new(),
+        30,
+        40,
+        false,
+        Sidebar::Rail,
+        Utc::now(),
+    );
+    let rendered = stripped(&lines);
+    // The unite group separator (a heavy rule) appears between the two workspaces.
+    assert!(rendered.contains('━'));
+}
+
+#[test]
+fn left_pane_in_unite_mode_shows_an_empty_workspaces_message() {
+    // A stacked workspace with no sessions still shows its header, root, divider,
+    // and the empty message under it.
+    let list = WorktreeList::from_groups(vec![
+        WorkspaceGroup::new(
+            "wsA",
+            vec![worktree(Some("a1"), true, BranchStatus::Pushed)],
+        ),
+        WorkspaceGroup::new("wsB", Vec::new()),
+    ]);
+    let full = left_pane(
+        &list,
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashMap::new(),
+        30,
+        40,
+        false,
+        Sidebar::Full,
+        Utc::now(),
+    );
+    let rendered = stripped(&full);
+    assert!(rendered.contains("a1")); // wsA's session
+    assert!(rendered.contains("▌ wsB")); // the empty workspace still gets a header
+    assert!(rendered.contains(EMPTY_MESSAGE)); // and the "no sessions" message
+}
+
+#[test]
+fn left_pane_stops_at_a_later_group_once_the_pane_is_full() {
+    // The first (empty) workspace alone fills the pane — header + root (2) +
+    // divider + empty message = 5 rows — so the second group is never started
+    // (the per-group full check breaks before building it).
+    let list = WorktreeList::from_groups(vec![
+        WorkspaceGroup::new("wsA", Vec::new()),
+        WorkspaceGroup::new(
+            "wsB",
+            vec![worktree(Some("b1"), false, BranchStatus::Local)],
+        ),
+    ]);
+    let lines = left_pane(
+        &list,
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashMap::new(),
+        30,
+        5,
+        false,
+        Sidebar::Full,
+        Utc::now(),
+    );
+    assert_eq!(lines.len(), 5);
+    let rendered = stripped(&lines);
+    assert!(rendered.contains("▌ wsA"));
+    assert!(!rendered.contains("wsB")); // the second group was never reached
+}
+
+#[test]
+fn rail_pane_stops_at_a_later_group_once_the_rail_is_full() {
+    // The first (empty) workspace fills the rail — root (2) + divider + blank = 4
+    // rows — so the second group's rule and rows are never built.
+    let list = WorktreeList::from_groups(vec![
+        WorkspaceGroup::new("wsA", Vec::new()),
+        WorkspaceGroup::new(
+            "wsB",
+            vec![worktree(Some("b1"), false, BranchStatus::Local)],
+        ),
+    ]);
+    let lines = left_pane(
+        &list,
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashMap::new(),
+        30,
+        4,
+        false,
+        Sidebar::Rail,
+        Utc::now(),
+    );
+    assert_eq!(lines.len(), 4);
+    // The second group's heavy separator was never built.
+    assert!(!stripped(&lines).contains('━'));
+}
+
+#[test]
+fn mouse_hit_tests_are_disabled_in_unite_mode() {
+    // In 統合 mode the single-group layout the hit tests model no longer holds, so
+    // both the row-select click and the PR click/hover map to nothing (selection
+    // is keyboard-driven there).
+    let mut state = state_with(vec![worktree_with_pr(442)]);
+    state.set_extra_groups(vec![WorkspaceGroup::new(
+        "wsB",
+        vec![worktree(Some("b1"), false, BranchStatus::Local)],
+    )]);
+    // A click that would land on the first session in single-group mode now selects
+    // nothing.
+    assert_eq!(left_pane_session_at(&state, 2, 6, 24, 120), None);
+    assert!(sidebar_pr_links_at(&state, 24, 120, 2, 6).is_empty());
+    assert_eq!(sidebar_pr_hover_at(&state, 24, 120, 2, 6), None);
+}
+
+#[test]
 fn left_pane_stops_building_rows_once_the_pane_is_full() {
     // More sessions than fit: the root (2 lines) + divider take 3 rows, so with
     // rows = 5 only the first worktree's two lines fit. Building stops at the

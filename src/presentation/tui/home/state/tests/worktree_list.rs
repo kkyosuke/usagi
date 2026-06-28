@@ -358,6 +358,35 @@ fn set_pr_links_finds_the_row_in_any_group() {
 }
 
 #[test]
+fn workspace_group_from_sessions_collapses_rows_with_labels_and_notes() {
+    use crate::domain::workspace_state::SessionRecord;
+    let session = |name: &str, label: Option<&str>, note: Option<&str>| SessionRecord {
+        name: name.to_string(),
+        display_name: label.map(str::to_string),
+        note: note.map(str::to_string),
+        root: std::path::PathBuf::from(format!("/ws/.usagi/sessions/{name}")),
+        worktrees: Vec::new(),
+        created_at: chrono::Utc::now(),
+        last_active: None,
+    };
+    let group = WorkspaceGroup::from_sessions(
+        "wsB",
+        &[
+            session("main", None, None),
+            session("feat", Some("Feature"), Some("a note")),
+        ],
+        true,
+    );
+    assert_eq!(group.name(), "wsB");
+    assert_eq!(group.worktrees().len(), 2);
+    assert_eq!(group.worktrees()[0].branch.as_deref(), Some("main"));
+    assert_eq!(group.display_label(1), "Feature"); // display-name override
+    assert!(!group.has_note(0));
+    assert!(group.has_note(1)); // the session with a note
+    assert!(group.root_has_note()); // the workspace root note marker
+}
+
+#[test]
 fn workspace_group_carries_per_row_labels_and_notes() {
     let mut group = WorkspaceGroup::with_labels(
         "wsA",
