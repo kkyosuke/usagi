@@ -40,8 +40,15 @@ pub enum Effect {
     CreateSession(String),
     /// List the workspace's sessions (the user ran `session list`).
     ListSessions,
-    /// Remove a session (the user ran `session remove <name> [--force]`).
-    RemoveSession { name: String, force: bool },
+    /// Remove a session (the user ran `session remove [workspace:]<name>
+    /// [--force]`). `workspace` carries the optional `workspace:` qualifier used
+    /// in 統合(unite) mode to disambiguate a session that shares a name across
+    /// the visible workspaces; it is `None` for an unqualified name.
+    RemoveSession {
+        workspace: Option<String>,
+        name: String,
+        force: bool,
+    },
     /// Open the session-removal modal (the user ran `session remove` without a
     /// name) to pick one or more sessions to delete at once. `force` carries the
     /// `--force` flag so the confirmed removal can discard uncommitted changes.
@@ -243,10 +250,16 @@ pub struct CompletionContext<'a> {
     /// completes its `[command]` argument against. Aliases are not offered, to
     /// match command-word completion.
     pub command_names: &'a [&'a str],
-    /// The workspace's session names, in display order — what `session
-    /// switch`/`remove` complete their `<name>` argument against. Empty when the
-    /// caller has no session data to offer.
+    /// The workspace's session names, in display order — what `session switch`
+    /// completes its `<name>` argument against. Empty when the caller has no
+    /// session data to offer.
     pub session_names: &'a [&'a str],
+    /// The session names `session remove` completes its `[workspace:]<name>`
+    /// argument against. In single-workspace mode these equal
+    /// [`session_names`](Self::session_names); in 統合(unite) mode they are the
+    /// qualified `workspace:session` names, so the disambiguating prefix
+    /// completes. Empty when the caller has no session data to offer.
+    pub removable_sessions: &'a [&'a str],
 }
 
 /// Everything a command may read while running, beyond its own argument string.

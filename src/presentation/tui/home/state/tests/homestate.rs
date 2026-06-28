@@ -123,18 +123,62 @@ fn selected_workspace_root_and_note_follow_the_cursor_group() {
 #[test]
 fn workspace_root_for_session_finds_the_owning_group() {
     let state = united_state();
+    // Unqualified: the first workspace (primary, then extras) owning the name.
     assert_eq!(
-        state.workspace_root_for_session("main"),
+        state.workspace_root_for_session(None, "main"),
         PathBuf::from("/usagi")
     );
     assert_eq!(
-        state.workspace_root_for_session("b1"),
+        state.workspace_root_for_session(None, "b1"),
         PathBuf::from("/wsB")
     );
     // An unknown session falls back to the primary workspace.
     assert_eq!(
-        state.workspace_root_for_session("ghost"),
+        state.workspace_root_for_session(None, "ghost"),
         PathBuf::from("/usagi")
+    );
+}
+
+#[test]
+fn workspace_root_for_session_honours_the_workspace_qualifier() {
+    let state = united_state();
+    // A `workspace:` qualifier targets that workspace's root directly: the
+    // primary by its name...
+    assert_eq!(
+        state.workspace_root_for_session(Some("usagi"), "main"),
+        PathBuf::from("/usagi")
+    );
+    // ...and an extra group by its name.
+    assert_eq!(
+        state.workspace_root_for_session(Some("wsB"), "b1"),
+        PathBuf::from("/wsB")
+    );
+    // The qualifier wins even when the name only exists elsewhere, so the
+    // removal acts on (and reports against) the named workspace.
+    assert_eq!(
+        state.workspace_root_for_session(Some("wsB"), "main"),
+        PathBuf::from("/wsB")
+    );
+    // An unknown qualifier falls through to name-only resolution.
+    assert_eq!(
+        state.workspace_root_for_session(Some("ghost"), "b1"),
+        PathBuf::from("/wsB")
+    );
+}
+
+#[test]
+fn removable_session_names_qualify_in_unite_mode() {
+    // Single-workspace mode offers plain session names.
+    let mut state = HomeState::new("usagi", Vec::new(), None);
+    state.set_root_path("/usagi");
+    state.restore_sessions(vec![session("main")]);
+    assert_eq!(state.removable_session_names(), vec!["main".to_string()]);
+
+    // 統合(unite) mode qualifies every session as `workspace:session`.
+    let state = united_state();
+    assert_eq!(
+        state.removable_session_names(),
+        vec!["usagi:main".to_string(), "wsB:b1".to_string()]
     );
 }
 
@@ -529,6 +573,17 @@ fn tab_completes_a_session_name_after_remove() {
     state.complete();
     // The unique session-name prefix fills in.
     assert_eq!(state.input(), "session remove alpha");
+}
+
+#[test]
+fn tab_completes_a_qualified_session_name_after_remove_in_unite_mode() {
+    let mut state = united_state(); // primary "usagi" (main), extra "wsB" (b1)
+    for c in "session remove wsB:".chars() {
+        state.push_char(c);
+    }
+    state.complete();
+    // The lone session under the qualified workspace fills straight in.
+    assert_eq!(state.input(), "session remove wsB:b1");
 }
 
 #[test]

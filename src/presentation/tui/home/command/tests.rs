@@ -256,6 +256,7 @@ fn session_rm_is_an_alias_for_remove() {
     assert_eq!(
         result.effect,
         Effect::RemoveSession {
+            workspace: None,
             name: "old".to_string(),
             force: false,
         }
@@ -292,6 +293,7 @@ fn session_remove_parses_name_and_force_flag() {
     assert_eq!(
         result.effect,
         Effect::RemoveSession {
+            workspace: None,
             name: "old".to_string(),
             force: false,
         }
@@ -308,8 +310,51 @@ fn session_remove_parses_name_and_force_flag() {
         assert_eq!(
             result.effect,
             Effect::RemoveSession {
+                workspace: None,
                 name: "old".to_string(),
                 force: true,
+            }
+        );
+    }
+}
+
+#[test]
+fn session_remove_parses_a_workspace_qualifier() {
+    // In 統合(unite) mode a `workspace:session` target carries the workspace so
+    // the event loop can route the removal to the owning workspace's root.
+    let result = registry().dispatch("session remove app:old", &[], &[]);
+    assert_eq!(
+        result.effect,
+        Effect::RemoveSession {
+            workspace: Some("app".to_string()),
+            name: "old".to_string(),
+            force: false,
+        }
+    );
+
+    // The qualifier composes with `--force` and the `rm` alias.
+    let forced = registry().dispatch("session rm app:old --force", &[], &[]);
+    assert_eq!(
+        forced.effect,
+        Effect::RemoveSession {
+            workspace: Some("app".to_string()),
+            name: "old".to_string(),
+            force: true,
+        }
+    );
+
+    // A lone or trailing `:` is not a qualifier — the whole token is the name.
+    for (input, name) in [
+        ("session remove :old", ":old"),
+        ("session remove old:", "old:"),
+    ] {
+        let result = registry().dispatch(input, &[], &[]);
+        assert_eq!(
+            result.effect,
+            Effect::RemoveSession {
+                workspace: None,
+                name: name.to_string(),
+                force: false,
             }
         );
     }
@@ -553,12 +598,18 @@ fn complete_offers_the_force_flag_after_session_remove() {
 
 #[test]
 fn complete_offers_session_names_for_switch_and_remove() {
-    // `session switch`/`remove` complete their <name> argument against the
-    // workspace's session names supplied to `complete_with`.
+    // `session switch` completes against `session_names`; `session remove`
+    // against `removable_sessions`. In single-workspace mode they are the same
+    // plain session names.
     let names = ["feature-x", "feature-y", "main-fix"];
 
     // A unique-prefix name fills in for `switch`.
-    let switch = registry().complete_with("session switch fea", CommandScope::Workspace, &names);
+    let switch = registry().complete_with(
+        "session switch fea",
+        CommandScope::Workspace,
+        &names,
+        &names,
+    );
     assert!(switch
         .candidates
         .iter()
@@ -566,12 +617,14 @@ fn complete_offers_session_names_for_switch_and_remove() {
     assert_eq!(switch.input, "session switch feature-"); // longest common prefix
 
     // A fully matching prefix lands on the single name.
-    let unique = registry().complete_with("session rm main", CommandScope::Workspace, &names);
+    let unique =
+        registry().complete_with("session rm main", CommandScope::Workspace, &names, &names);
     assert_eq!(unique.input, "session rm main-fix");
     assert!(unique.candidates.is_empty());
 
     // `remove` offers the session names alongside --force before a name is chosen.
-    let remove = registry().complete_with("session remove ", CommandScope::Workspace, &names);
+    let remove =
+        registry().complete_with("session remove ", CommandScope::Workspace, &names, &names);
     assert!(remove.candidates.iter().any(|c| c == "feature-x"));
     assert!(remove.candidates.iter().any(|c| c == "--force"));
 
@@ -579,6 +632,7 @@ fn complete_offers_session_names_for_switch_and_remove() {
     let after = registry().complete_with(
         "session remove feature-x --",
         CommandScope::Workspace,
+        &names,
         &names,
     );
     assert_eq!(after.input, "session remove feature-x --force");
@@ -588,6 +642,45 @@ fn complete_offers_session_names_for_switch_and_remove() {
     let bare = registry().complete("session remove ", CommandScope::Workspace);
     assert_eq!(bare.input, "session remove --force");
     assert!(bare.candidates.is_empty());
+}
+
+#[test]
+fn complete_offers_qualified_names_for_remove_in_unite_mode() {
+    // In 統合(unite) mode `session remove` completes against the qualified
+    // `workspace:session` names (its own `removable_sessions` list), while
+    // `session switch` keeps completing the plain `session_names`.
+    let switch_names = ["feature-x", "feature-y"];
+    let removable = ["app:feature-x", "app:deploy", "web:feature-x"];
+
+    // A `workspace:` prefix narrows to that workspace's sessions.
+    let remove = registry().complete_with(
+        "session remove app:",
+        CommandScope::Workspace,
+        &switch_names,
+        &removable,
+    );
+    assert!(remove.candidates.iter().any(|c| c == "app:feature-x"));
+    assert!(remove.candidates.iter().any(|c| c == "app:deploy"));
+    assert!(!remove.candidates.iter().any(|c| c == "web:feature-x"));
+
+    // A unique qualified prefix fills straight in.
+    let unique = registry().complete_with(
+        "session rm web:fea",
+        CommandScope::Workspace,
+        &switch_names,
+        &removable,
+    );
+    assert_eq!(unique.input, "session rm web:feature-x");
+    assert!(unique.candidates.is_empty());
+
+    // `switch` still completes plain names, ignoring the qualified list.
+    let switch = registry().complete_with(
+        "session switch fea",
+        CommandScope::Workspace,
+        &switch_names,
+        &removable,
+    );
+    assert_eq!(switch.input, "session switch feature-");
 }
 
 #[test]
@@ -740,12 +833,13 @@ fn suggest_shows_usage_and_examples_once_arguments_are_typed() {
             registry().suggest("session ", CommandScope::Workspace),
             Hint::Usage {
                 usage:
-                    "session [create|list|switch|remove] <name>  (aliases: create=c/new, list=ls, remove=rm)",
+                    "session [create|list|switch|remove] <name>  (remove in unite: workspace:name; aliases: create=c/new, list=ls, remove=rm)",
                 examples: &[
                     "session create feature-x",
                     "session switch feature-x",
                     "session ls",
                     "session rm feature-x",
+                    "session rm app:feature-x  (unite: pick app's session)",
                 ],
             }
         );
