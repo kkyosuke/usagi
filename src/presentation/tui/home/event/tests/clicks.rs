@@ -76,6 +76,49 @@ fn a_click_while_the_command_palette_is_open_is_ignored() {
     assert_eq!(dirs, vec![PathBuf::from("/ws")]);
 }
 
+/// A `sample_state` already in 在席 (Focus) on the root row, so a click on another
+/// session row exercises [`focus_click`] rather than 切替's `switch_click`.
+fn focused_state() -> HomeState {
+    let mut state = sample_state();
+    state.enter_focus(0);
+    state
+}
+
+#[test]
+fn a_single_click_in_focus_switches_the_focused_session() {
+    // Focused on the root row, one click on `feat` re-focuses onto it without
+    // attaching; the following `t` (the menu's terminal shortcut) then attaches the
+    // now-focused session — `/r/feat`, proving the click moved the focus there
+    // (without it, `t` would attach the root `/ws`).
+    let dirs = run_capturing_attached_dirs_for_inputs(
+        vec![click(0, FEAT_ROW), Ok(Input::Key(Key::Char('t')))],
+        focused_state(),
+    );
+    assert_eq!(dirs, vec![PathBuf::from("/r/feat")]);
+}
+
+#[test]
+fn a_double_click_in_focus_attaches_the_clicked_session() {
+    // Two clicks on `feat`'s row attach it without any keypress — the second click
+    // on the same row confirms it, exactly like a 切替 double click.
+    let dirs = run_capturing_attached_dirs_for_inputs(
+        vec![click(0, FEAT_ROW), click(0, FEAT_ROW)],
+        focused_state(),
+    );
+    assert_eq!(dirs, vec![PathBuf::from("/r/feat")]);
+}
+
+#[test]
+fn a_click_off_the_list_in_focus_is_ignored() {
+    // A click in the right pane (column 70 is past the left pane at any width)
+    // re-focuses nothing, so `t` attaches the still-focused root (`/ws`), not `feat`.
+    let dirs = run_capturing_attached_dirs_for_inputs(
+        vec![click(70, FEAT_ROW), Ok(Input::Key(Key::Char('t')))],
+        focused_state(),
+    );
+    assert_eq!(dirs, vec![PathBuf::from("/ws")]);
+}
+
 #[test]
 fn a_scroll_is_ignored() {
     // The TUI itself never scrolls: a wheel turn is dropped without moving the

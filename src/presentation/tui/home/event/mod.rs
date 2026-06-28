@@ -32,7 +32,7 @@ use super::update::UpdateHandle;
 
 mod handlers;
 
-use handlers::{focus_key, note_editor_key, palette_key, switch_click, switch_key};
+use handlers::{focus_click, focus_key, note_editor_key, palette_key, switch_click, switch_key};
 
 /// The byte `console` reports for `Ctrl-O` on the home screen: a bare control
 /// character (`0x0f`), since `console` only special-cases a handful of control
@@ -257,13 +257,15 @@ fn save_resume_focus(state: &mut HomeState, wiring: &mut Wiring) {
     (wiring.save_last_active)(&state.last_active_flush());
 }
 
-/// Whether a left click should act on the 切替 session list: only at the base
-/// Switch list, with no overlay or inline input capturing keys. A click while a
-/// modal / palette / note editor / inline create / rename is open is ignored,
-/// mirroring how those overlays capture every key in the loop below — so a stray
-/// click never reaches the session list beneath them.
+/// Whether a left click should act on the session list: in 切替 (Switch), where it
+/// is the picker, and in 在席 (Focus), where the list still shows beside the action
+/// surface so a click re-focuses onto another session (see [`focus_click`]). Not in
+/// 没入 (Attached) — there the right pane owns the pointer. In either acting mode a
+/// click while a modal / palette / note editor / inline create / rename is open is
+/// ignored, mirroring how those overlays capture every key in the loop below — so a
+/// stray click never reaches the session list beneath them.
 fn click_selects_session(state: &HomeState) -> bool {
-    state.mode() == Mode::Switch
+    matches!(state.mode(), Mode::Switch | Mode::Focus)
         && !state.quit_confirm()
         && state.remove_modal().is_none()
         && state.text_modal().is_none()
@@ -517,12 +519,14 @@ pub(super) fn event_loop(
             Input::Key(key) => key,
             // The TUI never scrolls in place: read the wheel turn and drop it.
             Input::Scroll(_) => continue,
-            // A click on a 切替 session row selects it (a second click on the same
-            // row confirms it, like `Enter`); a click on the resting sidebar mascot
-            // makes it react; anywhere else it is ignored. The two hit disjoint
-            // regions, so the session list is tried first and the mascot only when
-            // it misses. No key was pressed either way, so repaint only when the
-            // click actually did something.
+            // A click on a session row in the left pane acts on it: in 切替 (Switch)
+            // it selects the row (a second click on the same row confirms it, like
+            // `Enter`); in 在席 (Focus) it re-focuses onto that session (a second
+            // click attaches its pane when live). A click on the resting sidebar
+            // mascot makes it react; anywhere else it is ignored. The two hit
+            // disjoint regions, so the session list is tried first and the mascot
+            // only when it misses. No key was pressed either way, so repaint only
+            // when the click actually did something.
             Input::Click(click) => {
                 let selected = click_selects_session(&state)
                     .then(|| {
@@ -537,15 +541,28 @@ pub(super) fn event_loop(
                     .flatten();
                 match selected {
                     Some(row) => {
-                        switch_click(
-                            term,
-                            &mut state,
-                            &mut painter,
-                            wiring,
-                            row,
-                            Instant::now(),
-                            &mut last_click,
-                        );
+                        let now = Instant::now();
+                        if state.mode() == Mode::Focus {
+                            focus_click(
+                                term,
+                                &mut state,
+                                &mut painter,
+                                wiring,
+                                row,
+                                now,
+                                &mut last_click,
+                            );
+                        } else {
+                            switch_click(
+                                term,
+                                &mut state,
+                                &mut painter,
+                                wiring,
+                                row,
+                                now,
+                                &mut last_click,
+                            );
+                        }
                         force_paint = true;
                     }
                     None => {

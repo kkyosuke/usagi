@@ -604,6 +604,36 @@ pub(super) fn switch_click(
     }
 }
 
+/// Handle a left click on a session `row` in the left pane while in 在席 (Focus):
+/// re-focus onto that session — its right-pane action surface rebuilds for the
+/// clicked session (menu cursor and prompt reset) — so the list stays a live
+/// session switcher even after a session has been entered. A second click on the
+/// same row within [`DOUBLE_CLICK`] attaches its pane when live, exactly like
+/// `Enter` / a 切替 double click ([`switch_click`]).
+///
+/// `last_click` is the same cross-iteration click memory `switch_click` threads
+/// through [`is_double_click`], so the double-click grammar is identical in both
+/// modes; a confirm clears it so a third click starts a fresh single click.
+pub(super) fn focus_click(
+    term: &Term,
+    state: &mut HomeState,
+    painter: &mut FramePainter,
+    wiring: &mut Wiring,
+    row: usize,
+    now: Instant,
+    last_click: &mut Option<(usize, Instant)>,
+) {
+    if is_double_click(last_click, row, now, DOUBLE_CLICK) {
+        // `focus_and_attach` re-enters 在席 on the row and attaches when live, so a
+        // double click on a running session drops straight into 没入.
+        focus_and_attach(term, state, painter, wiring, row);
+    } else {
+        // A single click switches the focused session, rebuilding the action
+        // surface for it; an idle row just stays in 在席, like `Enter` would.
+        state.enter_focus(row);
+    }
+}
+
 /// Re-attach the session a restored 没入 (Attached) engagement recorded, run once
 /// on the event loop's first pass. [`HomeState::restore_focus`] focused the
 /// session synchronously at startup and armed it here; attaching needs the
