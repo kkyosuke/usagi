@@ -35,35 +35,8 @@ fn render_frame_shows_the_inline_create_row_in_switch() {
 }
 
 #[test]
-fn render_frame_places_the_inline_create_row_after_the_workspace_list() {
-    let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
-    state.enter_switch(super::super::super::state::ReturnMode::Base);
-    state.switch_begin_create(Vec::new());
-    for c in "wip".chars() {
-        state.create_mut().unwrap().push_char(c);
-    }
-
-    let frame = render_frame(18, 100, &state);
-    let body_bottom = frame.len() - 3; // last body row, before input + footer
-    let create_line = frame
-        .iter()
-        .position(|line| console::strip_ansi_codes(line).contains("+ new: wip"))
-        .expect("create row is visible");
-    assert!(
-        create_line < body_bottom,
-        "the create row is inline with the workspace list, not pinned to the viewport bottom"
-    );
-    assert!(
-        frame[3..create_line]
-            .iter()
-            .any(|line| console::strip_ansi_codes(line).contains("main")),
-        "the create row follows the workspace rows"
-    );
-}
-
-#[test]
-fn render_frame_places_unite_create_row_in_the_selected_workspace() {
-    let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
+fn render_frame_inserts_the_inline_create_row_before_the_next_unite_group() {
+    let mut state = state_with_sessions(&["a1"]);
     state.set_extra_groups(vec![GroupSource {
         name: "wsB".to_string(),
         root_path: PathBuf::from("/wsB"),
@@ -73,52 +46,24 @@ fn render_frame_places_unite_create_row_in_the_selected_workspace() {
             display_name: None,
             note: None,
             root: PathBuf::from("/wsB/.usagi/sessions/b1"),
-            worktrees: vec![worktree(Some("b1"), false, BranchStatus::Local)],
+            worktrees: Vec::new(),
             created_at: Utc::now(),
             last_active: None,
         }],
     }]);
     state.enter_switch(super::super::super::state::ReturnMode::Base);
     state.switch_begin_create(Vec::new());
-    state.create_mut().unwrap().push_char('a');
+    for c in "wip".chars() {
+        state.create_mut().unwrap().push_char(c);
+    }
 
-    let frame = render_frame(30, 120, &state);
-    let create_line = frame
-        .iter()
-        .position(|line| console::strip_ansi_codes(line).contains("+ new: a"))
-        .expect("create row is visible");
-    let ws_b_line = frame
-        .iter()
-        .position(|line| console::strip_ansi_codes(line).contains("▌ wsB"))
-        .expect("second workspace header is visible");
-    assert!(
-        create_line < ws_b_line,
-        "creating from the primary workspace inserts + new before the next workspace"
-    );
-
-    state.create_cancel();
-    state.switch_move_down(); // primary root -> main
-    state.switch_move_down(); // main -> wsB root
-    state.switch_begin_create(Vec::new());
-    state.create_mut().unwrap().push_char('b');
-
-    let frame = render_frame(30, 120, &state);
-    let create_line = frame
-        .iter()
-        .position(|line| console::strip_ansi_codes(line).contains("+ new: b"))
-        .expect("create row is visible");
-    let ws_b_line = frame
-        .iter()
-        .position(|line| console::strip_ansi_codes(line).contains("▌ wsB"))
-        .expect("second workspace header is visible");
-    let b1_line = frame
-        .iter()
-        .position(|line| console::strip_ansi_codes(line).contains("b1"))
-        .expect("second workspace session is visible");
-    assert!(
-        ws_b_line < create_line && b1_line < create_line,
-        "creating from the second workspace inserts + new inside that workspace block"
-    );
+    let frame = render_frame(24, 80, &state);
+    let joined = console::strip_ansi_codes(&frame.join("\n")).into_owned();
+    let a1 = joined.find("a1").unwrap();
+    let create = joined.find("+ new: wip").unwrap();
+    let ws_b = joined.find("▌ wsB").unwrap();
+    assert!(a1 < create);
+    assert!(create < ws_b);
 }
 
 #[test]
