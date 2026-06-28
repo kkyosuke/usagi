@@ -19,6 +19,24 @@ fn new_state_starts_in_switch_with_a_hint() {
 }
 
 #[test]
+fn pr_hover_tracks_the_target_and_reports_changes() {
+    let mut state = state();
+    // No PR popup by default.
+    assert_eq!(state.pr_hover(), None);
+    // Pointing at a session both records it and reports the change.
+    assert!(state.set_pr_hover(Some(1)));
+    assert_eq!(state.pr_hover(), Some(1));
+    // Re-pointing at the same row is no change (the loop skips the repaint).
+    assert!(!state.set_pr_hover(Some(1)));
+    // Moving to another row, then clearing, each count as changes.
+    assert!(state.set_pr_hover(Some(0)));
+    assert!(state.set_pr_hover(None));
+    assert_eq!(state.pr_hover(), None);
+    // Clearing an already-clear popup is no change.
+    assert!(!state.set_pr_hover(None));
+}
+
+#[test]
 fn command_palette_opens_and_closes_clearing_the_input() {
     let mut state = state();
     assert!(!state.command_palette_open());

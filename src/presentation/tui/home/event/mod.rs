@@ -546,10 +546,34 @@ pub(super) fn event_loop(
                 }
                 continue;
             }
+            // A bare pointer move: track which PR-bearing session (if any) it is
+            // over so the renderer floats that session's `#<number>` list. Repaint
+            // only when the target changes — a pointer sliding within a row, or over
+            // empty space, costs no redraw, so the any-motion report flood never
+            // thrashes the screen. No key was pressed, so it loops without
+            // dispatching one.
+            Input::Hover(ev) => {
+                let target = ui::sidebar_pr_hover_at(
+                    &state,
+                    height as usize,
+                    width as usize,
+                    ev.col,
+                    ev.row,
+                );
+                if state.set_pr_hover(target) {
+                    force_paint = true;
+                }
+                continue;
+            }
         };
         // A key was pressed: whatever it does to the state, repaint on the next
         // iteration (the skip above only applies to idle ticks that read no key).
         force_paint = true;
+        // Touching the keyboard dismisses the transient PR hover popup, so it never
+        // lingers over a screen the user has moved on from (a stale hover would
+        // otherwise survive a keypress, a mode change, or attaching a pane, since
+        // those paths read no pointer move to clear it).
+        state.set_pr_hover(None);
         // Nudge the resting mascot to blink back at the user — reactive, so the
         // rabbit reacts the moment a key lands without any idle timer. Only while
         // it shows an open-eyed face (切替 / 在席); 没入's heads-down face has no eyes

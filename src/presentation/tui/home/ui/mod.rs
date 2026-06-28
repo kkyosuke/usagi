@@ -31,7 +31,9 @@ use panes::{left_pane, right_pane_contents};
 // The embedded terminal pane (没入) maps a click to the tab under it through this.
 pub(super) use panes::attached_tab_at;
 // …and a click on a sidebar session row to that session's PR URLs through this.
-pub(super) use panes::sidebar_pr_link_at;
+pub(super) use panes::sidebar_pr_links_at;
+// …and a pointer hovering a sidebar session row to that session (for the PR popup).
+pub(super) use panes::sidebar_pr_hover_at;
 
 use super::state::{HomeState, ModalSize, Mode};
 use crate::domain::resource::ResourceUsage;
@@ -461,6 +463,22 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
         let right_cell = right_rows.next().unwrap_or_default();
         line.push_str(&clip_to_width(&right_cell, right_w));
         lines.push(line);
+    }
+
+    // Float the PR hover popup beside the session the pointer is over. `pr_hover`
+    // is only ever set on the full sidebar (see [`sidebar_pr_hover_at`]), and only
+    // for a PR-bearing session, so `pr_hover_popup` always yields a box here. It
+    // lists the session's `#<number>` PRs — the row itself folds them to an
+    // `<icon> <count>` badge — anchored at the session's first row and pushed just
+    // past the divider into the right pane, so it never hides the sidebar it
+    // describes. Composited now, while `lines` holds only the body rows, so the box
+    // stays within the panes and never spills onto the input / footer below.
+    if let Some(idx) = state.pr_hover() {
+        if let Some(wt) = state.list().worktrees().get(idx) {
+            let popup = panes::pr_hover_popup(&wt.pr);
+            let top = body_start + panes::ROOT_ENTRY_LINES + panes::SESSION_ROWS * idx;
+            widgets::overlay_at(&mut lines, width, top, left_w + SEP_WIDTH, &popup);
+        }
     }
 
     lines.extend(input_lines);

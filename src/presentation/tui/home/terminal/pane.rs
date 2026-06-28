@@ -57,8 +57,8 @@ use crate::presentation::tui::io::screen::diff_frame;
 
 use super::super::pane_input::{
     apply_scroll, classify, encode_key, encode_mouse_wheel, encode_paste, is_copy, is_double_click,
-    is_press, key_scroll_lines, pane_cell, prefix_alive, wheel_arrows, wheel_delta, KeyAction,
-    Reserved, DOUBLE_CLICK,
+    is_press, key_scroll_lines, pane_cell, pointer_shape, prefix_alive, wheel_arrows, wheel_delta,
+    KeyAction, PointerShape, Reserved, DOUBLE_CLICK,
 };
 use super::super::state::HomeState;
 use super::super::ui;
@@ -200,6 +200,10 @@ impl<'t> PaneModeGuard<'t> {
 impl Drop for PaneModeGuard<'_> {
     fn drop(&mut self) {
         // Restored in the reverse order they were enabled.
+        // Restore the terminal's default mouse pointer (OSC 22): the pane switches
+        // it to a text caret / hand on hover, so without this the last shape would
+        // linger over the home screen — or the user's own shell on quit.
+        let _ = self.term.write_str(PointerShape::Default.osc22());
         let _ = self.term.write_str(DISABLE_MOTION);
         // Reset the cursor shape to the terminal default (DECSCUSR 0): the pane
         // re-asserted whatever shape its program chose, so without this a bar or
@@ -283,6 +287,11 @@ fn drive(
     // to that session) — the same double-click-to-confirm 切替 uses. Held across
     // `pump_input` calls; `None` when no click is pending a partner.
     let mut last_click: Option<(usize, Instant)> = None;
+    // The mouse pointer shape (OSC 22) last written to the host terminal, so it is
+    // re-emitted only when the pointer crosses between selectable text, a clickable
+    // target, and plain chrome — not on every motion report. `None` until the first
+    // mouse event sets a shape.
+    let mut last_pointer: Option<PointerShape> = None;
     let mut first = true;
     loop {
         let (height, width) = term.size();
@@ -454,11 +463,13 @@ fn drive(
                     state,
                     pty,
                     geo,
+                    (height, width),
                     &mut scrollback,
                     &mut selection,
                     &mut hover,
                     &mut pending_prefix,
                     &mut last_click,
+                    &mut last_pointer,
                 )? {
                     return Ok(step);
                 }
@@ -509,7 +520,7 @@ fn wait(pty: &PtySession, drawn_gen: u64, redraw_deadline: Option<Instant>) -> R
 /// left-button drag builds a text `selection` instead, and releasing it copies
 /// the selected text to the clipboard (see [`copy_selection`]); a left click with
 /// no drag opens the `#<number>` PR badge or terminal link under the pointer in the
-/// default browser (see [`ui::sidebar_pr_link_at`] / [`open_clicked_url`]), or —
+/// default browser (see [`ui::sidebar_pr_links_at`] / [`open_clicked_url`]), or —
 /// double-clicked on a sidebar session row — switches to that session
 /// ([`PaneStep::ToSession`], tracked across calls via `last_click`); a left click
 /// on a tab chip switches to that tab ([`PaneStep::ToTab`]; see
@@ -533,11 +544,13 @@ fn pump_input(
     state: &mut HomeState,
     pty: &mut PtySession,
     geo: ui::TerminalGeometry,
+    size: (u16, u16),
     scrollback: &mut usize,
     selection: &mut Option<Selection>,
     hover: &mut Option<Cell>,
     pending_prefix: &mut Option<Instant>,
     last_click: &mut Option<(usize, Instant)>,
+    last_pointer: &mut Option<PointerShape>,
 ) -> Result<Option<PaneStep>> {
     let now = Instant::now();
     while event::poll(Duration::ZERO)? {
@@ -636,6 +649,19 @@ fn pump_input(
             // must start fresh rather than complete this one.
             Event::Mouse(mouse) => {
                 *pending_prefix = None;
+                // Reshape the host pointer for the cell under it (text caret over
+                // the selectable grid, hand over a clickable target), emitting OSC
+                // 22 only on a change.
+                update_pointer(
+                    term,
+                    state,
+                    pty,
+                    geo,
+                    size,
+                    mouse.column,
+                    mouse.row,
+                    last_pointer,
+                )?;
                 match mouse.kind {
                     // A left click on a tab chip switches to that tab in place, like
                     // `Ctrl-N` / `Ctrl-P`; otherwise it starts a fresh selection at
@@ -664,13 +690,14 @@ fn pump_input(
                     MouseEventKind::Up(MouseButton::Left) => {
                         let dragged = selection.as_ref().is_some_and(|s| !s.is_empty());
                         let (h, w) = term.size();
-                        // A plain click on a sidebar session row's `#<number>` badge
-                        // opens that PR, reusing the same browser-launch path as a
-                        // terminal link. A click elsewhere on the row maps to nothing.
-                        let pr = if dragged {
-                            None
+                        // A plain click on a sidebar session row's PR badge opens
+                        // every PR the session carries, reusing the same
+                        // browser-launch path as a terminal link. A click elsewhere
+                        // on the row maps to nothing here.
+                        let prs = if dragged {
+                            Vec::new()
                         } else {
-                            ui::sidebar_pr_link_at(
+                            ui::sidebar_pr_links_at(
                                 state,
                                 h as usize,
                                 w as usize,
@@ -683,7 +710,7 @@ fn pump_input(
                         // `DOUBLE_CLICK` switches to that session (attaching when
                         // live) — the confirm 切替 does, so the list is navigable
                         // without first zooming out. A single click only arms.
-                        let session = (pr.is_none() && !dragged)
+                        let session = (prs.is_empty() && !dragged)
                             .then(|| {
                                 ui::left_pane_session_at(
                                     state,
@@ -694,8 +721,10 @@ fn pump_input(
                                 )
                             })
                             .flatten();
-                        if let Some(url) = pr {
-                            open_url(&url);
+                        if !prs.is_empty() {
+                            for url in &prs {
+                                open_url(url);
+                            }
                             *selection = None;
                         } else if let Some(row) = session {
                             *selection = None;
@@ -784,6 +813,45 @@ fn pump_input(
         }
     }
     Ok(None)
+}
+
+/// Give the host terminal's mouse pointer the shape that fits the cell under it,
+/// writing the OSC 22 escape only when it changes from `last` so a stream of
+/// motion reports does not re-emit it every cell. A URL in the grid or a clickable
+/// chrome element (a tab chip, a sidebar PR badge) shows a hand, the selectable
+/// terminal grid a text caret, and everything else the terminal's default pointer
+/// (see [`pointer_shape`]). Terminals without OSC 22 ignore the escape.
+#[allow(clippy::too_many_arguments)]
+fn update_pointer(
+    term: &Term,
+    state: &HomeState,
+    pty: &PtySession,
+    geo: ui::TerminalGeometry,
+    size: (u16, u16),
+    col: u16,
+    row: u16,
+    last: &mut Option<PointerShape>,
+) -> Result<()> {
+    let cell = pane_cell(col, row, geo);
+    let clickable = match cell {
+        // Inside the grid only a URL cell is clickable; the parser lock is held
+        // just long enough to test the cell under the pointer.
+        Some(cell) => link::url_at(pty.parser().screen(), cell).is_some(),
+        // Off the grid, a tab chip or a sidebar PR badge is the clickable target.
+        None => {
+            let (height, width) = size;
+            ui::attached_tab_at(state, col, row, geo).is_some()
+                || !ui::sidebar_pr_links_at(state, height as usize, width as usize, col, row)
+                    .is_empty()
+        }
+    };
+    let shape = pointer_shape(cell.is_some(), clickable);
+    if *last != Some(shape) {
+        term.write_str(shape.osc22())?;
+        term.flush()?;
+        *last = Some(shape);
+    }
+    Ok(())
 }
 
 /// Copy `selection`'s text to the user's clipboard by two routes (see
