@@ -1413,7 +1413,7 @@ fn pr_popup_inner(rows: &[Vec<&PrLink>]) -> usize {
             r.iter()
                 .map(|pr| 1 + digits(pr.number as usize))
                 .sum::<usize>()
-                + (r.len() - 1)
+                + r.len().saturating_sub(1)
         })
         .max()
         .unwrap_or(0)
@@ -1850,7 +1850,7 @@ fn focus_pane(state: &HomeState, width: usize, rows: usize) -> Vec<String> {
     let mut labels = strip.labels.clone();
     let active = if on_new {
         labels.push(FOCUS_NEW_TAB_LABEL.to_string());
-        labels.len() - 1
+        labels.len().saturating_sub(1)
     } else {
         strip.active
     };

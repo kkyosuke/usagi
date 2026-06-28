@@ -89,7 +89,10 @@ impl Picker {
         if self.matches.is_empty() {
             return;
         }
-        self.cursor = self.cursor.checked_sub(1).unwrap_or(self.matches.len() - 1);
+        self.cursor = self
+            .cursor
+            .checked_sub(1)
+            .unwrap_or(self.matches.len().saturating_sub(1));
     }
 
     /// Move the cursor down one match, wrapping to the top. No-op with no

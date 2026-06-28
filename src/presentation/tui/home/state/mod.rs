@@ -302,7 +302,7 @@ impl CommandLine {
             return;
         }
         let index = match self.recall {
-            None => self.history.len() - 1,
+            None => self.history.len().saturating_sub(1),
             Some(0) => 0,
             Some(i) => i - 1,
         };

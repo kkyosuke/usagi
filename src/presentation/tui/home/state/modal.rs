@@ -436,7 +436,10 @@ impl RemoveModal {
         if self.entries.is_empty() {
             return;
         }
-        self.cursor = self.cursor.checked_sub(1).unwrap_or(self.entries.len() - 1);
+        self.cursor = self
+            .cursor
+            .checked_sub(1)
+            .unwrap_or(self.entries.len().saturating_sub(1));
     }
 
     /// Move the cursor down one row, wrapping to the top. No-op with no sessions.

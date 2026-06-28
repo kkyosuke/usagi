@@ -260,22 +260,22 @@ fn manager_binaries_and_candidates_per_os() {
 }
 
 #[test]
-fn install_commands_use_sudo_for_system_managers() {
+fn install_commands_use_non_interactive_sudo_for_system_managers() {
     assert_eq!(
         Manager::Brew.install("git"),
         InstallCommand::new("brew", &["install", "git"])
     );
     assert_eq!(
         Manager::Apt.install("git"),
-        InstallCommand::new("sudo", &["apt-get", "install", "-y", "git"])
+        InstallCommand::new("sudo", &["-n", "apt-get", "install", "-y", "git"])
     );
     assert_eq!(
         Manager::Dnf.install("git"),
-        InstallCommand::new("sudo", &["dnf", "install", "-y", "git"])
+        InstallCommand::new("sudo", &["-n", "dnf", "install", "-y", "git"])
     );
     assert_eq!(
         Manager::Pacman.install("git"),
-        InstallCommand::new("sudo", &["pacman", "-S", "--noconfirm", "git"])
+        InstallCommand::new("sudo", &["-n", "pacman", "-S", "--noconfirm", "git"])
     );
 }
 

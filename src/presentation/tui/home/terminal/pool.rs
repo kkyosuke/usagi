@@ -383,7 +383,7 @@ impl TerminalPool {
                 active: 0,
             });
         sp.panes.push(pane);
-        sp.active = sp.panes.len() - 1;
+        sp.active = sp.panes.len().saturating_sub(1);
         self.refresh_watched(dir, label);
         Ok(())
     }
@@ -394,7 +394,7 @@ impl TerminalPool {
     pub fn set_active(&mut self, dir: &Path, active: usize) {
         if let Some(sp) = self.sessions.get_mut(dir) {
             if !sp.panes.is_empty() {
-                sp.active = active.min(sp.panes.len() - 1);
+                sp.active = active.min(sp.panes.len().saturating_sub(1));
             }
         }
     }
@@ -423,7 +423,7 @@ impl TerminalPool {
         let key = dir.to_path_buf();
         let remains = match self.sessions.get_mut(&key) {
             Some(sp) if !sp.panes.is_empty() => {
-                let active = sp.active.min(sp.panes.len() - 1);
+                let active = sp.active.min(sp.panes.len().saturating_sub(1));
                 let len_before = sp.panes.len();
                 // Dropping the removed Pane kills the shell it owns.
                 sp.panes.remove(active);
@@ -492,7 +492,7 @@ impl TerminalPool {
         if sp.panes.is_empty() {
             return None;
         }
-        let active = sp.active.min(sp.panes.len() - 1);
+        let active = sp.active.min(sp.panes.len().saturating_sub(1));
         Some(&mut sp.panes[active].pty)
     }
 
@@ -649,7 +649,7 @@ impl TerminalPool {
         if sp.panes.is_empty() {
             return None;
         }
-        let active = sp.active.min(sp.panes.len() - 1);
+        let active = sp.active.min(sp.panes.len().saturating_sub(1));
         let session = &mut sp.panes[active].pty;
         if !session.is_alive() {
             return None;

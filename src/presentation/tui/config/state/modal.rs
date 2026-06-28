@@ -80,7 +80,7 @@ impl ModelModal {
         self.cursor = self
             .cursor
             .checked_sub(1)
-            .unwrap_or(LOCAL_LLM_MODELS.len() - 1);
+            .unwrap_or(LOCAL_LLM_MODELS.len().saturating_sub(1));
     }
 
     /// Move the cursor down one model, wrapping to the top.
