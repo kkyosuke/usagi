@@ -35,9 +35,9 @@ fn new_config_starts_at_the_top() {
     assert!(!config.is_dirty());
     assert!(config.local().is_none());
     assert!(config.selected_local_field().is_none());
-    // Global-only: ten field rows.
-    assert_eq!(config.rows().len(), 10);
-    assert_eq!(config.save_index(), 10);
+    // Global scope: ten fixed field rows, then one shipped-skill feature row.
+    assert_eq!(config.rows().len(), 10 + SkillFeature::ALL.len());
+    assert_eq!(config.save_index(), 10 + SkillFeature::ALL.len());
 }
 
 #[test]
@@ -61,9 +61,19 @@ fn move_down_advances_through_fields_then_the_save_button_and_wraps() {
     assert_eq!(config.selected_field(), Some(Field::LocalLlm));
     config.move_down();
     assert_eq!(config.selected_field(), Some(Field::LocalLlmModel));
-    // The Save button sits below the last field.
+    // The shipped-skill feature row sits below the fixed fields (not the Save
+    // button yet).
     config.move_down();
     assert_eq!(config.selected_field(), None);
+    assert_eq!(
+        config.selected_skill_feature(),
+        Some(SkillFeature::PullRequest)
+    );
+    assert!(!config.is_save_selected());
+    // The Save button sits below the skill rows.
+    config.move_down();
+    assert_eq!(config.selected_field(), None);
+    assert_eq!(config.selected_skill_feature(), None);
     assert!(config.is_save_selected());
     // Wraps from the Save button back to the first field.
     config.move_down();
@@ -76,6 +86,12 @@ fn move_up_wraps_to_the_save_button() {
     // From the top field, up wraps to the Save button at the bottom.
     config.move_up();
     assert!(config.is_save_selected());
+    // Just above the Save button is the shipped-skill feature row.
+    config.move_up();
+    assert_eq!(
+        config.selected_skill_feature(),
+        Some(SkillFeature::PullRequest)
+    );
     config.move_up();
     assert_eq!(config.selected_field(), Some(Field::LocalLlmModel));
     config.move_up();
@@ -415,7 +431,7 @@ fn cycling_the_save_button_is_a_noop() {
 fn rows_render_global_field_values() {
     let config = config_with_workspaces(&["alpha"]);
     let rows = config.rows();
-    assert_eq!(rows.len(), 10);
+    assert_eq!(rows.len(), 10 + SkillFeature::ALL.len());
     assert_eq!(rows[0].label, "Theme");
     assert_eq!(rows[0].value, "System");
     assert_eq!(rows[3].label, "Restore Panes");
@@ -437,6 +453,12 @@ fn rows_render_global_field_values() {
     assert_eq!(rows[9].label, "Local LLM Model");
     assert_eq!(rows[9].value, "—");
     assert!(rows[9].disabled);
+    // The shipped-skill feature row follows the fixed fields: a plain on/off
+    // chooser, on by default and neither an action nor disabled.
+    assert_eq!(rows[10].label, "PR Skills");
+    assert_eq!(rows[10].value, "On");
+    assert!(!rows[10].action);
+    assert!(!rows[10].disabled);
     assert!(rows.iter().all(|r| !r.changed));
 }
 
@@ -680,19 +702,24 @@ fn local_config_with_branches(branches: &[&str]) -> Config {
 fn local_scope_shows_only_the_local_override_rows() {
     let config = local_config();
     assert!(config.local().is_some());
-    // The local scope shows just the five override rows — no global fields.
-    assert_eq!(config.field_count(), 5);
-    assert_eq!(config.save_index(), 5);
+    // The local scope shows the five override rows, then the shipped-skill
+    // feature row(s) — no global fixed fields.
+    assert_eq!(config.field_count(), 5 + SkillFeature::ALL.len());
+    assert_eq!(config.save_index(), 5 + SkillFeature::ALL.len());
     // The cursor starts on the first local field, not a global one.
     assert_eq!(config.selected_field(), None);
     assert_eq!(config.selected_local_field(), Some(LocalField::AgentCli));
     let rows = config.rows();
-    assert_eq!(rows.len(), 5);
+    assert_eq!(rows.len(), 5 + SkillFeature::ALL.len());
     assert_eq!(rows[0].label, "Agent CLI");
     assert_eq!(rows[1].label, "Notifications");
     assert_eq!(rows[2].label, "Restore Panes");
     assert_eq!(rows[3].label, "Default Branch");
     assert_eq!(rows[4].label, "Branch Source");
+    // The skill feature row falls back to the global value (on) when unset.
+    assert_eq!(rows[5].label, "PR Skills");
+    assert!(rows[5].value.contains("Global"));
+    assert!(rows[5].value.contains("On"));
     // Unset overrides display the value they fall back to.
     assert!(rows[0].value.contains("Global"));
     assert!(rows[0].value.contains("Claude"));
@@ -735,9 +762,18 @@ fn local_fields_are_selectable_then_the_save_button() {
         config.selected_local_field(),
         Some(LocalField::BranchSource)
     );
+    // Below the fixed local fields sits the shipped-skill feature row, then Save.
+    config.move_down();
+    assert_eq!(config.selected_local_field(), None);
+    assert_eq!(
+        config.selected_skill_feature(),
+        Some(SkillFeature::PullRequest)
+    );
+    assert!(!config.is_save_selected());
     config.move_down();
     assert!(config.is_save_selected());
     assert!(config.selected_local_field().is_none());
+    assert_eq!(config.selected_skill_feature(), None);
 }
 
 /// Move the cursor onto the given local field.
@@ -950,6 +986,95 @@ fn value_of_local_shows_overrides_and_is_empty_without_a_context() {
         local.value_of_local(LocalField::Notifications),
         "Global (On)"
     );
+}
+
+// --- shipped-skill feature toggles -------------------------------------
+
+/// Move the cursor onto the first shipped-skill feature row.
+fn select_skill_feature(config: &mut Config) {
+    while config.selected_skill_feature().is_none() {
+        config.move_down();
+    }
+}
+
+#[test]
+fn global_skill_feature_row_toggles_on_off_and_tracks_dirty() {
+    let mut config = config_with_workspaces(&[]);
+    select_skill_feature(&mut config);
+    assert_eq!(
+        config.selected_skill_feature(),
+        Some(SkillFeature::PullRequest)
+    );
+    // On by default, nothing dirty.
+    assert_eq!(config.value_of_skill(SkillFeature::PullRequest), "On");
+    assert!(!config.is_dirty());
+
+    // Toggling flips it off (a boolean: direction is irrelevant): reflected in
+    // the settings, flagged changed, and the config goes dirty.
+    assert!(config.cycle_selected(true));
+    assert_eq!(config.value_of_skill(SkillFeature::PullRequest), "Off");
+    assert!(!config
+        .settings()
+        .skill_feature_enabled(SkillFeature::PullRequest));
+    assert!(config.is_dirty());
+    assert!(config.rows().last().unwrap().changed);
+
+    // Toggling back on matches the default, so the override map is emptied again
+    // and the config is clean (no stray key left behind).
+    assert!(config.cycle_selected(false));
+    assert_eq!(config.value_of_skill(SkillFeature::PullRequest), "On");
+    assert!(config.settings().skill_features.is_empty());
+    assert!(!config.is_dirty());
+    assert!(!config.rows().last().unwrap().changed);
+}
+
+#[test]
+fn local_skill_feature_override_cycles_global_on_off() {
+    let mut config = local_config();
+    select_skill_feature(&mut config);
+    // Unset: the override follows the global value (on).
+    assert_eq!(
+        config.value_of_skill(SkillFeature::PullRequest),
+        "Global (On)"
+    );
+    assert!(!config.is_dirty());
+
+    // None (follow global) -> On -> Off -> None.
+    assert!(config.cycle_selected(true));
+    assert_eq!(
+        config
+            .local()
+            .unwrap()
+            .skill_feature_override(SkillFeature::PullRequest),
+        Some(true)
+    );
+    assert_eq!(
+        config.value_of_skill(SkillFeature::PullRequest),
+        "Override: On"
+    );
+    assert!(config.is_dirty());
+    assert!(config.cycle_selected(true));
+    assert_eq!(
+        config
+            .local()
+            .unwrap()
+            .skill_feature_override(SkillFeature::PullRequest),
+        Some(false)
+    );
+    assert_eq!(
+        config.value_of_skill(SkillFeature::PullRequest),
+        "Override: Off"
+    );
+    assert!(config.cycle_selected(true));
+    assert_eq!(
+        config
+            .local()
+            .unwrap()
+            .skill_feature_override(SkillFeature::PullRequest),
+        None
+    );
+    // Back to following global: clean again.
+    assert!(!config.is_dirty());
 }
 
 #[test]
