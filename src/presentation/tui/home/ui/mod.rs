@@ -570,13 +570,13 @@ fn left_column(
         state.now(),
     );
     if sidebar == Sidebar::Full {
-        // While naming a new session in 切替, append the inline create row(s) to the
-        // left pane (trimmed back to the session-list area if it overflows).
+        // While naming a new session in 切替, pin the inline create row(s) to the
+        // *bottom* of the left pane — the workspace foot — rather than letting them
+        // float directly under the last session row. The "+ new" input then always
+        // reads as the workspace's trailing "add a session" affordance.
         if let Some(create) = state.create() {
-            for row in switch_create_rows(create.value(), create.cursor(), create.error(), left_w) {
-                left.push(row);
-            }
-            left.truncate(body_rows);
+            let rows = switch_create_rows(create.value(), create.cursor(), create.error(), left_w);
+            pin_rows_to_bottom(&mut left, rows, body_rows);
         }
         // While renaming a session's sidebar label in 切替, append the inline rename
         // row (trimmed back if it would overflow).
@@ -589,6 +589,27 @@ fn left_column(
         }
     }
     left
+}
+
+/// Pin `rows` to the bottom of the left `column`, padding the column with blank
+/// rows so the appended block lands on the final `body_rows` of the pane (and
+/// trimming the column back when there are more session rows than fit). Used to
+/// rest 切替's inline "+ new" create input at the workspace foot rather than
+/// directly under the last session row.
+fn pin_rows_to_bottom(column: &mut Vec<String>, rows: Vec<String>, body_rows: usize) {
+    let n = rows.len();
+    if n >= body_rows {
+        // The block alone fills (or overflows) the pane: keep its first visible
+        // lines so the input row itself wins over a following validation error in
+        // extremely short terminals.
+        column.clear();
+        column.extend(rows.into_iter().take(body_rows));
+        return;
+    }
+    // Pad (or trim) the session list so the pinned block occupies the last `n`
+    // body rows, with blank rows filling any gap above it.
+    column.resize(body_rows - n, String::new());
+    column.extend(rows);
 }
 
 /// Where the sidebar mascot's clickable body landed within the left column: the

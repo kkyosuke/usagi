@@ -35,6 +35,42 @@ fn render_frame_shows_the_inline_create_row_in_switch() {
 }
 
 #[test]
+fn render_frame_pins_the_inline_create_row_to_the_workspace_bottom() {
+    let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
+    state.enter_switch(super::super::super::state::ReturnMode::Base);
+    state.switch_begin_create(Vec::new());
+    for c in "wip".chars() {
+        state.create_mut().unwrap().push_char(c);
+    }
+
+    let frame = render_frame(18, 100, &state);
+    let body_bottom = frame.len() - 3; // last body row, before input + footer
+    assert!(
+        console::strip_ansi_codes(&frame[body_bottom]).contains("+ new: wip"),
+        "the create row stays at the bottom of the workspace column"
+    );
+    assert!(
+        frame[3..body_bottom]
+            .iter()
+            .all(|line| !console::strip_ansi_codes(line).contains("+ new:")),
+        "the create row no longer floats directly below the session list"
+    );
+}
+
+#[test]
+fn render_frame_keeps_the_create_input_visible_when_the_body_is_tiny() {
+    let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
+    state.enter_switch(super::super::super::state::ReturnMode::Base);
+    state.switch_begin_create(Vec::new());
+
+    let frame = render_frame(6, 80, &state);
+    assert!(
+        console::strip_ansi_codes(&frame[3]).contains("+ new:"),
+        "when only one body row fits, the create input itself remains visible"
+    );
+}
+
+#[test]
 fn switch_rename_rows_show_the_target_and_typed_label() {
     // Caret at the end of the label.
     let rows = switch_rename_rows("main", "My main", "My main".len(), 40);
