@@ -244,9 +244,10 @@ pub fn terminal_geometry(
 /// later group's root, matching
 /// [`WorktreeList::focus_index`](crate::presentation::tui::home::state::WorktreeList).
 ///
-/// Defers the layout walk to [`panes::sidebar_row_at_line`], which replays exactly
-/// what [`left_pane`](panes::left_pane) draws — in both single-workspace and
-/// 統合(unite) mode (per-group headers, root pairs, dividers, and
+/// Defers the layout walk to [`panes::sidebar_row_at_line_for_sidebar`], which
+/// replays exactly what [`left_pane`](panes::left_pane) draws — in both
+/// single-workspace mode and 統合(unite) mode (full-sidebar group headers,
+/// inter-workspace gaps, root pairs, dividers, and
 /// [`SESSION_ROWS`](panes::SESSION_ROWS) rows per worktree) — so a click maps back
 /// to its row without the renderer and the hit test ever disagreeing. Returns
 /// `None` for a click in the right pane (past `left_w`), in the chrome above or
@@ -270,7 +271,7 @@ pub(super) fn left_pane_session_at(
     if line >= body_rows_for(height) {
         return None;
     }
-    panes::sidebar_row_at_line(state.list(), line)
+    panes::sidebar_row_at_line_for_sidebar(state.list(), line, state.sidebar())
 }
 
 /// Rows the tab strip reserves at the top of the right pane in 没入 (Attached).

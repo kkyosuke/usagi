@@ -884,17 +884,25 @@ fn left_pane_in_unite_mode_heads_each_workspace_with_its_name() {
     assert!(rendered.contains("▌ wsB"));
     assert!(rendered.contains("a1"));
     assert!(rendered.contains("b1"));
-    // The header precedes its workspace's session.
+    // The header precedes its workspace's session, and a two-row blank gap makes
+    // the next workspace's boundary obvious.
     let a_header = rendered.find("▌ wsA").unwrap();
     let b_header = rendered.find("▌ wsB").unwrap();
     assert!(a_header < rendered.find("a1").unwrap());
     assert!(a_header < b_header);
+    let plain_lines: Vec<_> = lines
+        .iter()
+        .map(|line| console::strip_ansi_codes(line).into_owned())
+        .collect();
+    assert!(plain_lines[7].trim().is_empty());
+    assert!(plain_lines[8].trim().is_empty());
+    assert!(plain_lines[9].contains("▌ wsB"));
 }
 
 #[test]
 fn rail_pane_in_unite_mode_separates_each_workspace() {
     // The collapsed rail stacks both workspaces too: two root entries, separated
-    // by a rule, with each group's session below its root.
+    // by two blank rows, with each group's session below its root.
     let list = WorktreeList::from_groups(vec![
         WorkspaceGroup::new(
             "wsA",
@@ -918,9 +926,14 @@ fn rail_pane_in_unite_mode_separates_each_workspace() {
         Sidebar::Rail,
         Utc::now(),
     );
-    let rendered = stripped(&lines);
-    // The unite group separator (a heavy rule) appears between the two workspaces.
-    assert!(rendered.contains('━'));
+    let plain_lines: Vec<_> = lines
+        .iter()
+        .map(|line| console::strip_ansi_codes(line).into_owned())
+        .collect();
+    // The unite group separator is a two-row gap between the two workspaces.
+    assert!(plain_lines[6].trim().is_empty());
+    assert!(plain_lines[7].trim().is_empty());
+    assert!(!stripped(&lines).contains('━'));
 }
 
 #[test]
@@ -987,7 +1000,7 @@ fn left_pane_stops_at_a_later_group_once_the_pane_is_full() {
 #[test]
 fn rail_pane_stops_at_a_later_group_once_the_rail_is_full() {
     // The first (empty) workspace fills the rail — root (2) + divider + blank = 4
-    // rows — so the second group's rule and rows are never built.
+    // rows — so the second group's gap and rows are never built.
     let list = WorktreeList::from_groups(vec![
         WorkspaceGroup::new("wsA", Vec::new()),
         WorkspaceGroup::new(
@@ -1009,8 +1022,8 @@ fn rail_pane_stops_at_a_later_group_once_the_rail_is_full() {
         Utc::now(),
     );
     assert_eq!(lines.len(), 4);
-    // The second group's heavy separator was never built.
-    assert!(!stripped(&lines).contains('━'));
+    // The second group's blank gap was never built; only the first empty workspace
+    // contributes its spacer row.
 }
 
 #[test]
@@ -1020,20 +1033,22 @@ fn sidebar_row_at_line_walks_a_single_group_layout() {
         worktree(Some("main"), true, BranchStatus::Pushed),
         worktree(Some("feature"), false, BranchStatus::Local),
     ]);
-    assert_eq!(sidebar_row_at_line(&list, 0), Some(0)); // root id
-    assert_eq!(sidebar_row_at_line(&list, 1), Some(0)); // root detail
-    assert_eq!(sidebar_row_at_line(&list, 2), None); // divider
-    assert_eq!(sidebar_row_at_line(&list, 3), Some(1)); // main
-    assert_eq!(sidebar_row_at_line(&list, 6), Some(2)); // feature
-    assert_eq!(sidebar_row_at_line(&list, 99), None); // past the end
+    let at = |line| sidebar_row_at_line_for_sidebar(&list, line, Sidebar::Full);
+    assert_eq!(at(0), Some(0)); // root id
+    assert_eq!(at(1), Some(0)); // root detail
+    assert_eq!(at(2), None); // divider
+    assert_eq!(at(3), Some(1)); // main
+    assert_eq!(at(6), Some(2)); // feature
+    assert_eq!(at(99), None); // past the end
 }
 
 #[test]
 fn sidebar_row_at_line_walks_a_unite_layout_with_headers() {
     // Two groups; each is headed by a name line (unite), then root (2), divider,
-    // then sessions. Flat rows run across groups: wsA root=0, a1=1, wsB root=2,
-    // b1=3. Layout lines: 0 hdrA, 1-2 root, 3 div, 4-6 a1, 7 hdrB, 8-9 root,
-    // 10 div, 11-13 b1.
+    // then sessions. A two-row visual gap separates workspace blocks. Flat rows
+    // run across groups: wsA root=0, a1=1, wsB root=2, b1=3. Layout lines:
+    // 0 hdrA, 1-2 root, 3 div, 4-6 a1, 7-8 gap, 9 hdrB, 10-11 root,
+    // 12 div, 13-15 b1.
     let list = WorktreeList::from_groups(vec![
         WorkspaceGroup::new(
             "wsA",
@@ -1044,14 +1059,42 @@ fn sidebar_row_at_line_walks_a_unite_layout_with_headers() {
             vec![worktree(Some("b1"), false, BranchStatus::Local)],
         ),
     ]);
-    assert_eq!(sidebar_row_at_line(&list, 0), None); // wsA header
-    assert_eq!(sidebar_row_at_line(&list, 1), Some(0)); // wsA root
-    assert_eq!(sidebar_row_at_line(&list, 3), None); // wsA divider
-    assert_eq!(sidebar_row_at_line(&list, 4), Some(1)); // a1
-    assert_eq!(sidebar_row_at_line(&list, 7), None); // wsB header
-    assert_eq!(sidebar_row_at_line(&list, 8), Some(2)); // wsB root
-    assert_eq!(sidebar_row_at_line(&list, 10), None); // wsB divider
-    assert_eq!(sidebar_row_at_line(&list, 11), Some(3)); // b1
+    let at = |line| sidebar_row_at_line_for_sidebar(&list, line, Sidebar::Full);
+    assert_eq!(at(0), None); // wsA header
+    assert_eq!(at(1), Some(0)); // wsA root
+    assert_eq!(at(3), None); // wsA divider
+    assert_eq!(at(4), Some(1)); // a1
+    assert_eq!(at(7), None); // first gap row
+    assert_eq!(at(8), None); // second gap row
+    assert_eq!(at(9), None); // wsB header
+    assert_eq!(at(10), Some(2)); // wsB root
+    assert_eq!(at(12), None); // wsB divider
+    assert_eq!(at(13), Some(3)); // b1
+}
+
+#[test]
+fn sidebar_row_at_line_walks_a_unite_rail_layout_with_gaps() {
+    // The rail does not draw workspace-name headers, but it keeps the two-row
+    // inter-workspace gap so row-selection matches what the rail renders.
+    let list = WorktreeList::from_groups(vec![
+        WorkspaceGroup::new(
+            "wsA",
+            vec![worktree(Some("a1"), true, BranchStatus::Pushed)],
+        ),
+        WorkspaceGroup::new(
+            "wsB",
+            vec![worktree(Some("b1"), false, BranchStatus::Local)],
+        ),
+    ]);
+    let at = |line| sidebar_row_at_line_for_sidebar(&list, line, Sidebar::Rail);
+    assert_eq!(at(0), Some(0)); // wsA root
+    assert_eq!(at(2), None); // wsA divider
+    assert_eq!(at(3), Some(1)); // a1
+    assert_eq!(at(6), None); // first gap row
+    assert_eq!(at(7), None); // second gap row
+    assert_eq!(at(8), Some(2)); // wsB root
+    assert_eq!(at(10), None); // wsB divider
+    assert_eq!(at(11), Some(3)); // b1
 }
 
 #[test]
@@ -1065,12 +1108,34 @@ fn sidebar_row_at_line_skips_an_empty_workspaces_message() {
             vec![worktree(Some("b1"), false, BranchStatus::Local)],
         ),
     ]);
-    // wsA: 0 hdr, 1-2 root, 3 div, 4 empty message.
-    assert_eq!(sidebar_row_at_line(&list, 1), Some(0)); // wsA root
-    assert_eq!(sidebar_row_at_line(&list, 4), None); // empty-workspace message
-                                                     // wsB: 5 hdr, 6-7 root, 8 div, 9-11 b1.
-    assert_eq!(sidebar_row_at_line(&list, 6), Some(1)); // wsB root
-    assert_eq!(sidebar_row_at_line(&list, 9), Some(2)); // b1
+    let at = |line| sidebar_row_at_line_for_sidebar(&list, line, Sidebar::Full);
+    // wsA: 0 hdr, 1-2 root, 3 div, 4 empty message, 5-6 gap.
+    assert_eq!(at(1), Some(0)); // wsA root
+    assert_eq!(at(4), None); // empty-workspace message
+    assert_eq!(at(5), None); // first gap row
+    assert_eq!(at(6), None); // second gap row
+
+    // wsB: 7 hdr, 8-9 root, 10 div, 11-13 b1.
+    assert_eq!(at(8), Some(1)); // wsB root
+    assert_eq!(at(11), Some(2)); // b1
+}
+
+#[test]
+fn group_inline_insert_line_includes_unite_gaps_before_later_groups() {
+    let list = WorktreeList::from_groups(vec![
+        WorkspaceGroup::new(
+            "wsA",
+            vec![worktree(Some("a1"), true, BranchStatus::Pushed)],
+        ),
+        WorkspaceGroup::new(
+            "wsB",
+            vec![worktree(Some("b1"), false, BranchStatus::Local)],
+        ),
+    ]);
+    // Group A: header + root(2) + divider + session(3) = 7.
+    assert_eq!(group_inline_insert_line(&list, 0), 7);
+    // Group B starts after the two-row gap, then has the same 7-row block.
+    assert_eq!(group_inline_insert_line(&list, 1), 16);
 }
 
 #[test]
