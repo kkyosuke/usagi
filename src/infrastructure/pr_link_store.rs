@@ -30,7 +30,7 @@ use serde::{Deserialize, Serialize};
 use crate::domain::workspace_state::PrLink;
 use crate::infrastructure::json_file;
 use crate::infrastructure::store_lock::StoreLock;
-use crate::infrastructure::worktree_keyed_store::{dir, file_name, key};
+use crate::infrastructure::worktree_keyed_store::{dir, file_name, key, path_for};
 
 /// Subdirectory of the data dir the PR-link files live under.
 const PR_SUBDIR: &str = "pr-links";
@@ -83,6 +83,16 @@ pub fn get(worktree: &Path) -> Vec<PrLink> {
     dir(PR_SUBDIR)
         .map(|dir| read_ours(&dir.join(file_name(&key)), &key))
         .unwrap_or_default()
+}
+
+/// Forget any PRs recorded for `worktree` (best-effort), so a session removed
+/// and later recreated at the same path does not inherit the previous session's
+/// PR badges. Called from session removal (see
+/// [`crate::usecase::session::remove`]); a no-op when nothing is recorded.
+pub fn clear(worktree: &Path) {
+    if let Ok(path) = path_for(PR_SUBDIR, worktree) {
+        let _ = std::fs::remove_file(path);
+    }
 }
 
 /// Read the PR list from `path`, but only when the file is stamped with `key` (our
@@ -144,6 +154,19 @@ mod tests {
             // de-duplicated, appending only the new PR.
             add(wt.path(), &[pr(1), pr(3)]).unwrap();
             assert_eq!(get(wt.path()), vec![pr(1), pr(2), pr(3)]);
+        });
+    }
+
+    #[test]
+    fn clear_forgets_recorded_prs() {
+        with_data_dir(|| {
+            let wt = tempfile::tempdir().unwrap();
+            add(wt.path(), &[pr(1), pr(2)]).unwrap();
+            clear(wt.path());
+            // The PRs are gone: a session recreated at the same path starts fresh.
+            assert_eq!(get(wt.path()), Vec::new());
+            // Clearing again (nothing there) is a harmless no-op.
+            clear(wt.path());
         });
     }
 
