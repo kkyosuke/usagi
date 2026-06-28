@@ -20,7 +20,9 @@ use crate::presentation::tui::io::screen::{ClickEvent, FramePainter, Input, KeyR
 
 use super::oneshot::OneShot;
 use super::sessions_refresh::SessionsRefreshHandle;
-use super::state::{HomeState, Mode, PaneExit, ResumeLevel, SessionOutcome, SessionReorder};
+use super::state::{
+    GroupSource, HomeState, Mode, PaneExit, ResumeLevel, SessionOutcome, SessionReorder,
+};
 use super::tasks::TaskHandle;
 use super::terminal::pool::MonitorHandle;
 use super::terminal::tabs::TabNav;
@@ -138,6 +140,10 @@ pub(super) struct Wiring<'a> {
     /// Dispatch `session remove <name>` to a background worker (`bool` = force),
     /// in the workspace rooted at the given path.
     pub dispatch_remove: &'a mut dyn FnMut(&Path, &str, bool),
+    /// Resolve a registered workspace by name and load it into a [`GroupSource`]
+    /// to stack into the 統合(unite) view (`unite add <name>`), or an error message
+    /// to log when no such workspace is registered.
+    pub unite_resolve: &'a mut dyn FnMut(&str) -> std::result::Result<GroupSource, String>,
     /// Launch the self-update on a background thread (replace the installed
     /// binary with the latest release). Called when the user confirms the
     /// update-confirmation modal raised by clicking the mascot's update notice;
@@ -982,6 +988,9 @@ pub(crate) fn event_loop_compat(
     // the production 3-arg shape, dropping the unite target root.
     let mut rename_display_w = |_root: &Path, name: &str, label: &str| rename_display(name, label);
     let mut set_note_w = |_root: &Path, name: &str, note: &str| set_note(name, note);
+    // `unite add` is not exercised by the compat-shim loop tests; report no match.
+    let mut unite_resolve =
+        |name: &str| Err::<GroupSource, String>(format!("no workspace named \"{name}\""));
     let mut wiring = Wiring {
         workspace_root,
         persist: &mut persist,
@@ -990,6 +999,7 @@ pub(crate) fn event_loop_compat(
         set_note: &mut set_note_w,
         reorder_session: &mut reorder_session,
         dispatch_remove: &mut dispatch_remove,
+        unite_resolve: &mut unite_resolve,
         dispatch_update: &mut dispatch_update,
         evict_pool: &mut evict_pool,
         existing_branches: &mut existing_branches,

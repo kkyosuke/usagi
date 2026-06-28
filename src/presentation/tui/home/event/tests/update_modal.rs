@@ -63,6 +63,7 @@ fn run_update(keys: Vec<Key>) -> (Outcome, u32) {
     let mut save_resume = |_: &str, _: ResumeLevel| {};
     let mut save_last_active = |_: &[(String, DateTime<Utc>)]| {};
     let mut dispatch_update = || count.set(count.get() + 1);
+    let mut unite_resolve = no_unite_resolve;
     let mut wiring = Wiring {
         workspace_root: Path::new("/ws"),
         persist: &mut persist,
@@ -71,6 +72,7 @@ fn run_update(keys: Vec<Key>) -> (Outcome, u32) {
         set_note: &mut set_note_fake,
         reorder_session: &mut reorder_fake,
         dispatch_remove: &mut dispatch_remove,
+        unite_resolve: &mut unite_resolve,
         dispatch_update: &mut dispatch_update,
         evict_pool: &mut evict,
         existing_branches: &mut branches,

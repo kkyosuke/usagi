@@ -981,6 +981,45 @@ impl HomeState {
         !self.extra_groups.is_empty()
     }
 
+    /// Stack another workspace into the 統合(unite) view (`unite add`), keeping the
+    /// cursor put. A no-op (returning `false`) when that workspace is already shown
+    /// — the primary, or an extra group with the same root — so adding twice does
+    /// not duplicate it.
+    pub fn add_extra_group(&mut self, group: GroupSource) -> bool {
+        if group.root_path == self.root_path
+            || self
+                .extra_groups
+                .iter()
+                .any(|g| g.root_path == group.root_path)
+        {
+            return false;
+        }
+        self.extra_groups.push(group);
+        self.rebuild_list_keep_cursor();
+        true
+    }
+
+    /// Drop the extra (unite) workspace named `name` from the view (`unite
+    /// remove`), returning whether one matched. Removing the last extra group
+    /// restores the single-workspace view (no headers). The primary workspace
+    /// cannot be removed this way.
+    pub fn remove_extra_group(&mut self, name: &str) -> bool {
+        let Some(i) = self.extra_groups.iter().position(|g| g.name == name) else {
+            return false;
+        };
+        self.extra_groups.remove(i);
+        self.rebuild_list_keep_cursor();
+        true
+    }
+
+    /// The names of every workspace currently shown — the primary first, then each
+    /// extra (unite) group — for persisting the active unite set.
+    pub fn united_workspace_names(&self) -> Vec<String> {
+        std::iter::once(self.list.workspace_name().to_string())
+            .chain(self.extra_groups.iter().map(|g| g.name.clone()))
+            .collect()
+    }
+
     /// The workspace root the cursor's group operates in — the primary's root when
     /// the cursor is in the first group, otherwise the matching extra group's root.
     /// `session` commands (create / remove / rename / note) run against this so a

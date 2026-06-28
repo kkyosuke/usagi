@@ -14,7 +14,7 @@
 
 | 入力面 | スコープ | 出るコマンド |
 |---|---|---|
-| コマンドパレット（統括 / Overview。`:` で開く） | Workspace（全体） | `session` / `issue` / `config` / `preview` |
+| コマンドパレット（統括 / Overview。`:` で開く） | Workspace（全体） | `session` / `unite` / `issue` / `config` / `preview` |
 | 在席（Focus）の右ペイン | Session（個別） | `agent` / `close` / `terminal`（Menu はコマンド名のアルファベット順に並べる） |
 | 両方 | 共通 | `man` / `history` / `clear` / `quit` |
 
@@ -32,6 +32,7 @@
 | `clear` | 出力ログを消去 |
 | `quit` / `exit` | usagi を終了してプロジェクト一覧へ戻る |
 | `session` | セッション（branch + worktree）の作成・一覧・切替・削除（Workspace スコープ） |
+| `unite` | 統合(unite)ビューにワークスペースを追加・削除（Workspace スコープ） |
 | `issue` | タスク issue を一覧・依存ツリー・ガント・1 件表示で閲覧（Workspace スコープ） |
 | `preview <path\|name>` | Markdown ファイルを右ペインにレンダリング表示（Workspace スコープ） |
 | `terminal` | 選択中セッションの worktree でシェルを右ペインに埋め込み起動（Session スコープ） |
@@ -55,6 +56,17 @@
 
 セッション作成・削除時の孤児ディレクトリの掃除など、ライフサイクルの概念は
 [4. オーケストレーション](../04-orchestration.md)を参照してください。
+
+## unite
+
+**`:` で開くコマンドパレット**から、いま開いているホーム画面に**別の登録済みワークスペースを足し引き**します（統合 / unite モード。[design/home/03-sidebar.md#統合uniteモードの積み重ね表示](../design/home/03-sidebar.md#統合uniteモードの積み重ね表示)）。
+
+| コマンド | 役割 |
+|---|---|
+| `unite add <workspace>` | 登録済みワークスペース（`workspaces.json` の名前）を統合ビューに追加し、サイドバーにそのグループを積む。既に表示中・未登録の名前は拒否してログに出す |
+| `unite remove <workspace>`（別名 `rm`） | 統合ビューからそのワークスペースを外す。最後の 1 つを外すと単一ワークスペース表示へ戻る |
+
+Open 画面の複数選択で開く導線は [design/02-open.md#統合uniteモードで開く](../design/02-open.md#統合uniteモードで開く) を参照してください。
 
 ## issue
 

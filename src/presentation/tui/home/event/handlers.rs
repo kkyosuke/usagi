@@ -132,6 +132,27 @@ pub(super) fn palette_key(
                         &target,
                     ))
                 }
+                // `unite add <name>`: resolve and load the named workspace, then
+                // stack it into the view (refusing a duplicate or an unknown name).
+                Effect::UniteAdd(name) => match (wiring.unite_resolve)(&name) {
+                    Ok(group) => {
+                        if state.add_extra_group(group) {
+                            state.log_output(format!("Added \"{name}\" to the unite view 🪟"));
+                        } else {
+                            state.log_error(format!("\"{name}\" is already in the view"));
+                        }
+                    }
+                    Err(e) => state.log_error(e),
+                },
+                // `unite remove <name>`: drop the named extra workspace; removing the
+                // last one collapses back to the single-workspace view.
+                Effect::UniteRemove(name) => {
+                    if state.remove_extra_group(&name) {
+                        state.log_output(format!("Removed \"{name}\" from the unite view"));
+                    } else {
+                        state.log_error(format!("\"{name}\" is not in the unite view"));
+                    }
+                }
                 // `ShowText` already opened its modal inside `submit`; the palette
                 // stays open behind it. `None` / `Clear` likewise keep it open.
                 //
