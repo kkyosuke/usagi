@@ -7,7 +7,7 @@
 #
 # 使い方:
 #   . scripts/coverage.sh     # COVERAGE_IGNORE / COVERAGE_MIN を読み込む
-#   coverage_enforce          # ローカルで計測して 100% を強制する (lefthook 用)
+#   coverage_enforce          # ローカルで計測して 100% を強制する (lefthook pre-push 用)
 
 # 計測から外すファイル。いずれも「テスト可能なロジックを取り除いたあとに残る、
 # 実 IO そのもの」だけを持つ層に限定する:
@@ -29,7 +29,7 @@ export COVERAGE_IGNORE='(src/main\.rs|infrastructure/pty\.rs|infrastructure/reso
 # 100% を要求するカバレッジ指標。
 export COVERAGE_MIN=100
 
-# ローカル（lefthook pre-commit）で計測から 100% 強制までを一括実行する。
+# ローカル（lefthook pre-push）で計測から 100% 強制までを一括実行する。
 # CI は計測（lcov 生成）と report を分けて実行するため、こちらは使わない。
 coverage_enforce() {
   if ! command -v cargo-llvm-cov >/dev/null 2>&1; then
