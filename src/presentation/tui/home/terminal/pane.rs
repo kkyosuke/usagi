@@ -56,8 +56,9 @@ use crate::presentation::tui::io::clipboard;
 use crate::presentation::tui::io::screen::diff_frame;
 
 use super::super::pane_input::{
-    apply_scroll, classify, encode_key, encode_mouse_wheel, encode_paste, is_copy, is_press,
-    key_scroll_lines, pane_cell, prefix_alive, wheel_arrows, wheel_delta, KeyAction, Reserved,
+    apply_scroll, classify, encode_key, encode_mouse_wheel, encode_paste, is_copy, is_double_click,
+    is_press, key_scroll_lines, pane_cell, pointer_shape, prefix_alive, wheel_arrows, wheel_delta,
+    KeyAction, PointerShape, Reserved, DOUBLE_CLICK,
 };
 use super::super::state::HomeState;
 use super::super::ui;
@@ -96,6 +97,10 @@ pub enum PaneStep {
     /// `Ctrl-^` / tmux's `last-window`), attaching it when live. The caller
     /// re-roots the pane on that session.
     PrevSession,
+    /// A double click on a sidebar session row: leave 没入 to jump to that focus
+    /// row, attaching it when live — the confirm a double click does in 切替. The
+    /// caller re-roots the pane on it, like [`PrevSession`](Self::PrevSession).
+    ToSession(usize),
     /// `Ctrl-Q`: leave 没入 to quit usagi. Every pane stays alive in the pool; the
     /// caller raises the quit-confirmation modal on the home screen rather than
     /// closing outright, so the running agents are never dropped by accident.
@@ -195,6 +200,10 @@ impl<'t> PaneModeGuard<'t> {
 impl Drop for PaneModeGuard<'_> {
     fn drop(&mut self) {
         // Restored in the reverse order they were enabled.
+        // Restore the terminal's default mouse pointer (OSC 22): the pane switches
+        // it to a text caret / hand on hover, so without this the last shape would
+        // linger over the home screen — or the user's own shell on quit.
+        let _ = self.term.write_str(PointerShape::Default.osc22());
         let _ = self.term.write_str(DISABLE_MOTION);
         // Reset the cursor shape to the terminal default (DECSCUSR 0): the pane
         // re-asserted whatever shape its program chose, so without this a bar or
@@ -273,6 +282,16 @@ fn drive(
     // first paint, which always emits — restoring this pane's shape over whatever
     // the previously active tab left on the terminal.
     let mut last_shape: Option<u16> = None;
+    // The previous left click on a sidebar session row and when it landed, so a
+    // second click on the same row within [`DOUBLE_CLICK`] confirms it (switching
+    // to that session) — the same double-click-to-confirm 切替 uses. Held across
+    // `pump_input` calls; `None` when no click is pending a partner.
+    let mut last_click: Option<(usize, Instant)> = None;
+    // The mouse pointer shape (OSC 22) last written to the host terminal, so it is
+    // re-emitted only when the pointer crosses between selectable text, a clickable
+    // target, and plain chrome — not on every motion report. `None` until the first
+    // mouse event sets a shape.
+    let mut last_pointer: Option<PointerShape> = None;
     let mut first = true;
     loop {
         let (height, width) = term.size();
@@ -353,16 +372,31 @@ fn drive(
                 let parser = pty.parser();
                 let screen = parser.screen();
                 if links_cache.as_ref().map(|(g, _)| *g) != Some(gen) {
-                    links_cache = Some((gen, link::link_cells(screen)));
+                    // One whole-screen scan yields both the link cells (to
+                    // underline) and the URL text — computing them together avoids
+                    // a second full-grid walk under the parser lock.
+                    let scan = link::scan_links(screen);
                     // Fresh output: harvest the pull-request URLs the agent may have
                     // printed, recording them for the attached session so the sidebar
                     // shows the `#<number>` badges and a click reopens them. Keyed by
                     // the session root (the dir the agent runs in), matching what
                     // `sync` reads; the store accumulates distinct URLs over time.
-                    let prs = link::pr_links(screen);
+                    let prs = link::pr_links_from(&scan.urls);
+                    links_cache = Some((gen, scan.cells));
                     if !prs.is_empty() && prs != last_prs {
-                        if let Some(wt) = state.list().active() {
-                            let _ = crate::infrastructure::pr_link_store::add(&wt.path, &prs);
+                        // Clone the active root so the immutable borrow ends before
+                        // the mutable `set_pr_links` below.
+                        if let Some(root) = state.list().active().map(|wt| wt.path.clone()) {
+                            let _ = crate::infrastructure::pr_link_store::add(&root, &prs);
+                            // Reflect the badge in the sidebar *now* instead of
+                            // waiting for the next (slow) workspace re-sync to fold
+                            // `pr-links/` into `state.json`: read back the store's
+                            // accumulated, deduped set (the same value the re-sync
+                            // computes) and set it on the in-memory row. We are
+                            // already inside a repaint pass, so the `#N` badge shows
+                            // on this frame.
+                            let merged = crate::infrastructure::pr_link_store::get(&root);
+                            state.set_pr_links(&root, merged);
                         }
                         last_prs = prs;
                     }
@@ -429,10 +463,13 @@ fn drive(
                     state,
                     pty,
                     geo,
+                    (height, width),
                     &mut scrollback,
                     &mut selection,
                     &mut hover,
                     &mut pending_prefix,
+                    &mut last_click,
+                    &mut last_pointer,
                 )? {
                     return Ok(step);
                 }
@@ -482,9 +519,12 @@ fn wait(pty: &PtySession, drawn_gen: u64, redraw_deadline: Option<Instant>) -> R
 /// `Shift`+`PageUp`/`PageDown` — scroll the pane's history via `scrollback`. A
 /// left-button drag builds a text `selection` instead, and releasing it copies
 /// the selected text to the clipboard (see [`copy_selection`]); a left click with
-/// no drag opens a link under the pointer in the default browser (see
-/// [`open_clicked_url`]); a left click on a tab chip switches to that tab
-/// ([`PaneStep::ToTab`]; see [`ui::attached_tab_at`]). Button-less motion updates
+/// no drag opens the `#<number>` PR badge or terminal link under the pointer in the
+/// default browser (see [`ui::sidebar_pr_links_at`] / [`open_clicked_url`]), or —
+/// double-clicked on a sidebar session row — switches to that session
+/// ([`PaneStep::ToSession`], tracked across calls via `last_click`); a left click
+/// on a tab chip switches to that tab ([`PaneStep::ToTab`]; see
+/// [`ui::attached_tab_at`]). Button-less motion updates
 /// `hover` so the link under the pointer lights up. The navigation keys are
 /// classified by the active `KeyScheme` (see
 /// [`classify`](super::super::pane_input::classify)) — the prefix scheme reserves
@@ -493,8 +533,9 @@ fn wait(pty: &PtySession, drawn_gen: u64, redraw_deadline: Option<Instant>) -> R
 /// pool-driven loop acts on: detach to 切替 ([`PaneStep::Detach`]), next / previous
 /// tab in place ([`PaneStep::NextTab`] / [`PaneStep::PrevTab`]), zoom out to 在席
 /// ([`PaneStep::ToFocus`]), add an agent tab ([`PaneStep::NewAgentTab`]), open the
-/// note editor ([`PaneStep::OpenNote`]), or jump to the previous session
-/// ([`PaneStep::PrevSession`]); toggling the sidebar stays in 没入. `Esc` and
+/// note editor ([`PaneStep::OpenNote`]), jump to the previous session
+/// ([`PaneStep::PrevSession`]), or switch to a sidebar-clicked session
+/// ([`PaneStep::ToSession`]); toggling the sidebar stays in 没入. `Esc` and
 /// `Ctrl-W` always reach the shell; tabs are closed from 切替 (`x`). Other events
 /// are ignored so the next redraw picks up any new size.
 #[allow(clippy::too_many_arguments)]
@@ -503,10 +544,13 @@ fn pump_input(
     state: &mut HomeState,
     pty: &mut PtySession,
     geo: ui::TerminalGeometry,
+    size: (u16, u16),
     scrollback: &mut usize,
     selection: &mut Option<Selection>,
     hover: &mut Option<Cell>,
     pending_prefix: &mut Option<Instant>,
+    last_click: &mut Option<(usize, Instant)>,
+    last_pointer: &mut Option<PointerShape>,
 ) -> Result<Option<PaneStep>> {
     let now = Instant::now();
     while event::poll(Duration::ZERO)? {
@@ -605,6 +649,19 @@ fn pump_input(
             // must start fresh rather than complete this one.
             Event::Mouse(mouse) => {
                 *pending_prefix = None;
+                // Reshape the host pointer for the cell under it (text caret over
+                // the selectable grid, hand over a clickable target), emitting OSC
+                // 22 only on a change.
+                update_pointer(
+                    term,
+                    state,
+                    pty,
+                    geo,
+                    size,
+                    mouse.column,
+                    mouse.row,
+                    last_pointer,
+                )?;
                 match mouse.kind {
                     // A left click on a tab chip switches to that tab in place, like
                     // `Ctrl-N` / `Ctrl-P`; otherwise it starts a fresh selection at
@@ -628,14 +685,15 @@ fn pump_input(
                     }
                     // Releasing after a drag copies the selection; a plain click
                     // (no drag) opens a link under it in the default browser
-                    // instead — a PR badge on a sidebar session row, or a URL in the
-                    // terminal.
+                    // instead — a `#<number>` PR badge on a sidebar session row, or a
+                    // URL in the terminal.
                     MouseEventKind::Up(MouseButton::Left) => {
                         let dragged = selection.as_ref().is_some_and(|s| !s.is_empty());
                         let (h, w) = term.size();
-                        // A plain click on a sidebar session row carrying PR(s) opens
-                        // each, reusing the same browser-launch path as a terminal
-                        // link.
+                        // A plain click on a sidebar session row's PR badge opens
+                        // every PR the session carries, reusing the same
+                        // browser-launch path as a terminal link. A click elsewhere
+                        // on the row maps to nothing here.
                         let prs = if dragged {
                             Vec::new()
                         } else {
@@ -647,11 +705,32 @@ fn pump_input(
                                 mouse.row,
                             )
                         };
+                        // Otherwise a plain click on a sidebar session row arms a
+                        // double click; a second click on the same row within
+                        // `DOUBLE_CLICK` switches to that session (attaching when
+                        // live) — the confirm 切替 does, so the list is navigable
+                        // without first zooming out. A single click only arms.
+                        let session = (prs.is_empty() && !dragged)
+                            .then(|| {
+                                ui::left_pane_session_at(
+                                    state,
+                                    mouse.column,
+                                    mouse.row,
+                                    h as usize,
+                                    w as usize,
+                                )
+                            })
+                            .flatten();
                         if !prs.is_empty() {
                             for url in &prs {
                                 open_url(url);
                             }
                             *selection = None;
+                        } else if let Some(row) = session {
+                            *selection = None;
+                            if is_double_click(last_click, row, now, DOUBLE_CLICK) {
+                                return Ok(Some(PaneStep::ToSession(row)));
+                            }
                         } else if open_clicked_url(
                             pty,
                             geo,
@@ -734,6 +813,45 @@ fn pump_input(
         }
     }
     Ok(None)
+}
+
+/// Give the host terminal's mouse pointer the shape that fits the cell under it,
+/// writing the OSC 22 escape only when it changes from `last` so a stream of
+/// motion reports does not re-emit it every cell. A URL in the grid or a clickable
+/// chrome element (a tab chip, a sidebar PR badge) shows a hand, the selectable
+/// terminal grid a text caret, and everything else the terminal's default pointer
+/// (see [`pointer_shape`]). Terminals without OSC 22 ignore the escape.
+#[allow(clippy::too_many_arguments)]
+fn update_pointer(
+    term: &Term,
+    state: &HomeState,
+    pty: &PtySession,
+    geo: ui::TerminalGeometry,
+    size: (u16, u16),
+    col: u16,
+    row: u16,
+    last: &mut Option<PointerShape>,
+) -> Result<()> {
+    let cell = pane_cell(col, row, geo);
+    let clickable = match cell {
+        // Inside the grid only a URL cell is clickable; the parser lock is held
+        // just long enough to test the cell under the pointer.
+        Some(cell) => link::url_at(pty.parser().screen(), cell).is_some(),
+        // Off the grid, a tab chip or a sidebar PR badge is the clickable target.
+        None => {
+            let (height, width) = size;
+            ui::attached_tab_at(state, col, row, geo).is_some()
+                || !ui::sidebar_pr_links_at(state, height as usize, width as usize, col, row)
+                    .is_empty()
+        }
+    };
+    let shape = pointer_shape(cell.is_some(), clickable);
+    if *last != Some(shape) {
+        term.write_str(shape.osc22())?;
+        term.flush()?;
+        *last = Some(shape);
+    }
+    Ok(())
 }
 
 /// Copy `selection`'s text to the user's clipboard by two routes (see

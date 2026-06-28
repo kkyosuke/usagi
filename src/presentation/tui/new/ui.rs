@@ -8,19 +8,12 @@ use super::state::{Field, FormState, Mode};
 const TITLE: &str = "New Project";
 const SUBTITLE: &str = "Clone a repository or register an existing directory";
 
-/// Fixed width of the form block; the whole block is centred in the terminal.
-const BLOCK_WIDTH: usize = 52;
-
 /// Builds the centred mascot, title, and subtitle block.
 ///
 /// Vertical placement is handled by [`render_frame`], so this adds no leading
 /// padding.
 fn header_lines(width: usize) -> Vec<String> {
-    let mut lines = widgets::rabbit_lines(width);
-    lines.push(String::new());
-    lines.push(widgets::title_line(width, TITLE));
-    lines.push(widgets::dim_line(width, SUBTITLE));
-    lines
+    widgets::header_lines(width, TITLE, Some(SUBTITLE))
 }
 
 /// Builds one input row: a `>` cursor for the focused field, the value (or a
@@ -33,11 +26,7 @@ fn input_line(
     placeholder: &str,
     focused: bool,
 ) -> String {
-    let marker = if focused {
-        style(">").red().bold().to_string()
-    } else {
-        " ".to_string()
-    };
+    let marker = widgets::cursor_marker(focused);
 
     let body = if value.is_empty() {
         if focused {
@@ -67,11 +56,7 @@ fn mode_lines(block_pad: &str, mode: Mode, focused: bool) -> Vec<String> {
             format!(" {} ", style(label).dim())
         }
     };
-    let marker = if focused {
-        style(">").red().bold().to_string()
-    } else {
-        " ".to_string()
-    };
+    let marker = widgets::cursor_marker(focused);
     let tabs = format!(
         "{}  {}",
         tab("Clone", mode == Mode::Clone),
@@ -110,14 +95,24 @@ fn notice_lines(block_pad: &str, notice: Option<&str>) -> Vec<String> {
     vec![String::new(), slot]
 }
 
-/// Builds the footer help line.
+/// Builds the footer help line, sensitive to the focused field.
 ///
-/// Returns the footer text only; [`render_frame`] pins it to the bottom edge.
-fn footer_lines(width: usize) -> Vec<String> {
-    vec![widgets::dim_line(
-        width,
-        "←→: switch type / ↑↓/Tab: move field / Space: browse dir / Enter: create / Esc: back",
-    )]
+/// `←/→` and `Space` mean different things by field — on the mode selector the
+/// arrows switch Clone/Existing, on a text field they move the caret; `Space`
+/// browses only on a directory field and types a literal space elsewhere — so a
+/// single static footer would misstate two of its keys (the form's actual key
+/// handling lives in [`super::event`]). The footer names only what the *current*
+/// field does. Returns the footer text only; [`render_frame`] pins it to the
+/// bottom edge.
+fn footer_lines(width: usize, state: &FormState) -> Vec<String> {
+    let help = if state.focus() == Field::Mode {
+        "←→: switch type / ↑↓/Tab: move field / Enter: create / Esc: back"
+    } else if state.focus_is_directory() {
+        "Space: browse dir / ←→: move caret / ↑↓/Tab: move field / Enter: create / Esc: back"
+    } else {
+        "←→: move caret / ↑↓/Tab: move field / Enter: create / Esc: back"
+    };
+    vec![widgets::dim_line(width, help)]
 }
 
 /// Builds the Clone-mode fields (URL, Location, Directory, Branch), each
@@ -214,7 +209,7 @@ pub fn render_frame(
     notice: Option<&str>,
 ) -> Vec<String> {
     let (height, width) = widgets::normalize_size(raw_height, raw_width);
-    let block_pad = " ".repeat(widgets::centered_padding(width, BLOCK_WIDTH));
+    let block_pad = " ".repeat(widgets::centered_padding(width, widgets::BLOCK_WIDTH));
 
     // The body (mascot, title, mode selector, form fields and notice slot) is
     // centred vertically; the footer is pinned to the bottom edge of the frame.
@@ -228,7 +223,7 @@ pub fn render_frame(
     body.push(String::new());
     body.extend(fields_lines(&block_pad, state));
     body.extend(notice_lines(&block_pad, notice));
-    let footer = footer_lines(width);
+    let footer = footer_lines(width, state);
 
     let mut lines = Vec::with_capacity(height);
 
@@ -338,9 +333,37 @@ mod tests {
     }
 
     #[test]
-    fn footer_lines_include_help_text() {
-        let lines = footer_lines(80);
-        assert!(lines.iter().any(|l| l.contains("Esc")));
+    fn footer_help_is_sensitive_to_the_focused_field() {
+        let mut state = FormState::new();
+        // Mode selector: ←→ switches the type, and Space does not browse here.
+        assert_eq!(state.focus(), Field::Mode);
+        let mode = console::strip_ansi_codes(&footer_lines(80, &state)[0]).into_owned();
+        assert!(mode.contains("switch type"));
+        assert!(!mode.contains("browse"));
+        assert!(!mode.contains("move caret"));
+
+        // A directory field (Location, in Clone mode): Space browses; arrows are
+        // the caret, not a type switch.
+        state.focus_next(); // Mode -> Url
+        state.focus_next(); // Url -> Location (a directory field)
+        assert!(state.focus_is_directory());
+        let dir = console::strip_ansi_codes(&footer_lines(80, &state)[0]).into_owned();
+        assert!(dir.contains("browse dir"));
+        assert!(dir.contains("move caret"));
+        assert!(!dir.contains("switch type"));
+
+        // A plain text field (URL): arrows move the caret; Space does not browse.
+        state.focus_prev(); // back to Url
+        assert_eq!(state.focus(), Field::Url);
+        let text = console::strip_ansi_codes(&footer_lines(80, &state)[0]).into_owned();
+        assert!(text.contains("move caret"));
+        assert!(!text.contains("browse"));
+        assert!(!text.contains("switch type"));
+
+        // Every variant still names how to leave.
+        assert!(mode.contains("Esc"));
+        assert!(dir.contains("Esc"));
+        assert!(text.contains("Esc"));
     }
 
     #[test]

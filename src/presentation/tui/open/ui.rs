@@ -10,9 +10,6 @@ use super::state::ProjectList;
 const TITLE: &str = "Open Project";
 const SUBTITLE: &str = "Open a registered workspace";
 
-/// Fixed width of the list block; the whole block is centred in the terminal.
-const BLOCK_WIDTH: usize = 52;
-
 /// Shown in place of the list when no workspaces are registered.
 const EMPTY_MESSAGE: &str = "No workspaces yet. Choose \"New\" to add one.";
 
@@ -74,11 +71,7 @@ fn stats_line(block_pad: &str, overview: &WorkspaceOverview, now: DateTime<Utc>)
 /// Vertical placement is handled by [`render_frame`], so this adds no leading
 /// padding.
 fn header_lines(width: usize) -> Vec<String> {
-    let mut lines = widgets::rabbit_lines(width);
-    lines.push(String::new());
-    lines.push(widgets::title_line(width, TITLE));
-    lines.push(widgets::dim_line(width, SUBTITLE));
-    lines
+    widgets::header_lines(width, TITLE, Some(SUBTITLE))
 }
 
 /// Shortens `text` to at most `max` columns, keeping the tail and prefixing an
@@ -104,11 +97,7 @@ fn project_row(
     path: &str,
     selected: bool,
 ) -> String {
-    let marker = if selected {
-        style(">").red().bold().to_string()
-    } else {
-        " ".to_string()
-    };
+    let marker = widgets::cursor_marker(selected);
 
     let padded = format!("{name:<name_width$}");
     let name = if selected {
@@ -118,7 +107,7 @@ fn project_row(
     };
 
     // "> " + name column + "  " precede the path; cap the path to the block.
-    let path_budget = BLOCK_WIDTH.saturating_sub(2 + name_width + 2);
+    let path_budget = widgets::BLOCK_WIDTH.saturating_sub(2 + name_width + 2);
     let path = style(truncate_start(path, path_budget)).dim().to_string();
 
     format!("{block_pad}{marker} {name}  {path}")
@@ -213,7 +202,7 @@ pub fn mascot_top(
     now: DateTime<Utc>,
 ) -> usize {
     let (height, width) = widgets::normalize_size(raw_height, raw_width);
-    let block_pad = " ".repeat(widgets::centered_padding(width, BLOCK_WIDTH));
+    let block_pad = " ".repeat(widgets::centered_padding(width, widgets::BLOCK_WIDTH));
     let body = body_lines(width, &block_pad, list, notice, now);
     let footer = footer_lines(width);
     // Anchor to the shared mascot row, but never so low that the body overflows
@@ -232,7 +221,7 @@ pub fn render_frame(
     now: DateTime<Utc>,
 ) -> Vec<String> {
     let (height, width) = widgets::normalize_size(raw_height, raw_width);
-    let block_pad = " ".repeat(widgets::centered_padding(width, BLOCK_WIDTH));
+    let block_pad = " ".repeat(widgets::centered_padding(width, widgets::BLOCK_WIDTH));
 
     // The body (mascot, title, list and notice slot) hangs from the shared mascot
     // row; the footer is pinned to the bottom edge of the frame.
@@ -256,6 +245,36 @@ pub fn render_frame(
     lines.extend(footer);
 
     lines
+}
+
+/// Inner content width of the stale-workspace confirmation modal.
+const CONFIRM_INNER: usize = 46;
+
+/// Builds the confirmation modal shown when the user opens a workspace whose
+/// directory no longer exists. It offers to drop the stale entry from the list
+/// instead of opening a path that is not there.
+///
+/// Drawn over an otherwise blank frame (like the home screen's quit prompt) so
+/// the event loop can clear and repaint it the same way as the full list.
+pub fn confirm_remove_frame(raw_height: usize, raw_width: usize, name: &str) -> Vec<String> {
+    let body = vec![
+        style(format!("\"{name}\" no longer exists on disk."))
+            .dim()
+            .to_string(),
+        String::new(),
+        style("Remove it from the list?").to_string(),
+        String::new(),
+        style("y / Enter: remove   n / Esc: cancel")
+            .dim()
+            .to_string(),
+    ];
+    widgets::render_modal(
+        raw_height,
+        raw_width,
+        "Workspace not found",
+        CONFIRM_INNER,
+        &body,
+    )
 }
 
 #[cfg(test)]
@@ -497,6 +516,17 @@ mod tests {
         assert!(plain.contains(SESSION_ICON));
         assert!(plain.contains(ISSUE_ICON));
         assert!(plain.contains(CLOCK_ICON));
+    }
+
+    #[test]
+    fn confirm_remove_frame_names_the_workspace_and_offers_the_choice() {
+        let frame = confirm_remove_frame(24, 80, "mosou-wars");
+        let joined = console::strip_ansi_codes(&frame.join("\n")).into_owned();
+        assert!(joined.contains("Workspace not found"));
+        assert!(joined.contains("mosou-wars"));
+        assert!(joined.contains("no longer exists"));
+        assert!(joined.contains("Remove it from the list?"));
+        assert!(joined.contains("y / Enter: remove   n / Esc: cancel"));
     }
 
     #[test]

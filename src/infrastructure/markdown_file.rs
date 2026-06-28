@@ -26,7 +26,8 @@ const MARKDOWN_EXTENSIONS: [&str; 2] = ["md", "markdown"];
 /// event-loop thread, freezing the TUI. Reading at most this much (and marking
 /// the cut) bounds both the memory and the render work to something the pane can
 /// show, whatever the file's true size.
-const MAX_PREVIEW_BYTES: u64 = 512 * 1024;
+const MAX_PREVIEW_KIB: u64 = 512;
+const MAX_PREVIEW_BYTES: u64 = MAX_PREVIEW_KIB * 1024;
 
 /// Resolve `target` to a Markdown file under `root`, read it, and return its
 /// workspace-relative display path and contents.
@@ -88,7 +89,9 @@ fn read_capped(path: &Path) -> std::io::Result<String> {
     }
     let mut content = String::from_utf8_lossy(&buf).into_owned();
     if truncated {
-        content.push_str("\n\n… (preview truncated at 512 KiB)\n");
+        content.push_str(&format!(
+            "\n\n… (preview truncated at {MAX_PREVIEW_KIB} KiB)\n"
+        ));
     }
     Ok(content)
 }

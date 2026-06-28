@@ -13,6 +13,7 @@ use super::{
     clip_to_width, pad_to_width, HINT_INDENT, HINT_MAX, HINT_NAME_COL, REMOVE_MODAL_VISIBLE,
 };
 use crate::domain::settings::KeyScheme;
+use crate::domain::version::Version;
 use crate::presentation::tui::widgets;
 
 /// Minimum / maximum display width of the active-session-name field in the
@@ -146,7 +147,11 @@ pub(super) fn mode_ladder(width: usize, current: Mode) -> String {
             }
         })
         .collect();
-    let ladder = steps.join(&style(" › ").dim().to_string());
+    // Clip to the terminal width so the ladder never overruns a very narrow
+    // window (the styling is ANSI, which `clip_to_width` carries through); at any
+    // normal width the fixed `Switch › Focus › Attached` label fits and this is a
+    // no-op.
+    let ladder = widgets::clip_to_width(&steps.join(&style(" › ").dim().to_string()), width);
     let pad = widgets::centered_padding(width, console::measure_text_width(&ladder));
     format!("{}{ladder}", " ".repeat(pad))
 }
@@ -333,34 +338,58 @@ fn pad_block(body: &mut Vec<String>, rows: Vec<String>, height: usize) {
     }
 }
 
+/// Trims a `/`-separated footer help line to fit `width` display columns.
+///
+/// The footers spell out every key, which on a narrow (e.g. 80-column) terminal
+/// runs wider than the row — and a footer that overruns the frame wraps and
+/// corrupts the bottom of the screen. Rather than hard-clip mid-word (which can
+/// drop the leading, most-important keys), this keeps the **leading** segment
+/// (the mode tag plus the first keys) and appends as many following `/`-separated
+/// segments as fit, marking any it had to drop with a trailing `…`. The keys are
+/// ordered most-important-first, so the high-value hints survive on a small
+/// screen; full discoverability always remains via the `?` cheat sheet.
+fn fit_help(width: usize, help: &str) -> String {
+    if console::measure_text_width(help) <= width {
+        return help.to_string();
+    }
+    let segments: Vec<&str> = help.split(" / ").collect();
+    // The leading segment (mode tag + first keys) is always kept; the final
+    // `centered` clip is the backstop if even that overruns a tiny terminal.
+    let mut out = segments[0].to_string();
+    let mut included = 1;
+    for seg in &segments[1..] {
+        let candidate = format!("{out} / {seg}");
+        // Reserve two columns for the trailing " …" that marks the elision.
+        if console::measure_text_width(&candidate) + 2 > width {
+            break;
+        }
+        out = candidate;
+        included += 1;
+    }
+    if included < segments.len() {
+        out.push_str(" …");
+    }
+    out
+}
+
 /// The footer help line, aware of the current mode. It leads with a mode tag so
-/// it is always clear which engagement level the keys act on.
+/// it is always clear which engagement level the keys act on. The assembled line
+/// is trimmed to the terminal width by [`fit_help`] (dropping the lowest-priority
+/// trailing keys with a `…`) so it never overruns the row.
 pub(super) fn footer_line(width: usize, state: &HomeState) -> String {
-    // The note editor captures the keyboard while open (rendered in the right
-    // pane, so the screen never switches), so its controls take over the footer.
-    if state.note_editor().is_some() {
-        return widgets::dim_line(
-            width,
-            "[note]  Ctrl-S: save / Esc: cancel / Enter: newline / ←→↑↓: move / Shift+←→↑↓: select",
-        );
-    }
-    // The preview captures the keyboard, so its controls take over the footer
-    // regardless of the underlying mode.
-    if state.preview().is_some() {
-        return widgets::dim_line(
-            width,
-            "[preview]  ↑↓ scroll / PgUp/PgDn page / Esc / q: close",
-        );
-    }
-    // The command palette captures the keyboard while open, so its controls take
-    // over the footer regardless of the underlying mode.
-    if state.command_palette_open() {
-        return widgets::dim_line(
-            width,
-            "[command]  Tab: complete / ↑↓: history / Enter: run / Esc: close",
-        );
-    }
-    let help = match state.mode() {
+    // The note editor / preview / command palette each capture the keyboard while
+    // open (the note and preview are drawn in the right pane, so the screen never
+    // switches), so their controls take over the footer regardless of the
+    // underlying mode.
+    let help = if state.note_editor().is_some() {
+        "[note]  Ctrl-S: save / Esc: cancel / Enter: newline / ←→↑↓: move / Shift+←→↑↓: select"
+            .to_string()
+    } else if state.preview().is_some() {
+        "[preview]  ↑↓ scroll / PgUp/PgDn page / Esc / q: close".to_string()
+    } else if state.command_palette_open() {
+        "[command]  Tab: complete / ↑↓: history / Enter: run / Esc: close".to_string()
+    } else {
+        match state.mode() {
         Mode::Switch => {
             // While the highlighted session's note is showing, `Esc` first hides
             // it (a second `Esc` then backs out), so the footer names that.
@@ -417,8 +446,9 @@ pub(super) fn footer_line(width: usize, state: &HomeState) -> String {
                     .to_string()
             }
         },
+        }
     };
-    widgets::dim_line(width, &help)
+    widgets::dim_line(width, &fit_help(width, &help))
 }
 
 /// Builds the inline create row appended to the left pane in 切替 (Switch) while
@@ -570,6 +600,31 @@ pub(super) fn quit_confirm_frame(raw_height: usize, raw_width: usize, live: usiz
         ]
     };
     widgets::render_modal(raw_height, raw_width, "Quit usagi?", INNER, &body)
+}
+
+/// Builds the centred update-confirmation modal, raised by clicking the sidebar
+/// mascot while it announces an available release. `latest` is the version that
+/// would be installed; confirming re-runs the install script to replace the
+/// binary, which only takes effect after a restart (so the body says as much).
+pub(super) fn update_confirm_frame(
+    raw_height: usize,
+    raw_width: usize,
+    latest: &Version,
+) -> Vec<String> {
+    // Wide enough for the longest body line ("Download it and replace this build?"
+    // = 35 columns) with room to spare.
+    const INNER: usize = 40;
+    let body = vec![
+        style(format!("最新版 v{latest} があるよ。"))
+            .dim()
+            .to_string(),
+        String::new(),
+        style("ダウンロードして入れ替える？").to_string(),
+        style("（反映には usagi の再起動が必要）").dim().to_string(),
+        String::new(),
+        style("y / Enter: 更新   n / Esc: やめる").dim().to_string(),
+    ];
+    widgets::render_modal(raw_height, raw_width, "アップデート", INNER, &body)
 }
 
 /// Inner (content) width of the text modal box, before the borders and the

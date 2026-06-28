@@ -8,6 +8,10 @@ use crate::usecase::issue::{
     group, list_line, stats_line, GroupBy, IssueStats, ListedIssue, ListedIssueView,
 };
 
+/// Shown in place of a listing when no issues match. The single source of the
+/// empty-listing message, reused by the plain, grouped, and graph renderers.
+pub(super) const NO_ISSUES_FOUND: &str = "No issues found.";
+
 /// Render a listing (from `list` or `search`) either as JSON or as aligned
 /// human-readable lines.
 pub(super) fn render_listing(items: Vec<ListedIssue>, json: bool) -> Result<Vec<String>> {
@@ -22,7 +26,7 @@ pub(super) fn render_listing(items: Vec<ListedIssue>, json: bool) -> Result<Vec<
 /// footer, followed by an overall total.
 pub(super) fn render_grouped(items: Vec<ListedIssue>, axis: GroupBy) -> Vec<String> {
     if items.is_empty() {
-        return vec!["No issues found.".to_string()];
+        return vec![NO_ISSUES_FOUND.to_string()];
     }
     // Tally each group once and fold it into the overall total in the same pass,
     // rather than scanning the full listing a second time for the overall: the
@@ -47,7 +51,7 @@ pub(super) fn render_grouped(items: Vec<ListedIssue>, axis: GroupBy) -> Vec<Stri
 /// `issue` command render identically.
 pub(super) fn render_list(items: &[ListedIssue]) -> Vec<String> {
     if items.is_empty() {
-        return vec!["No issues found.".to_string()];
+        return vec![NO_ISSUES_FOUND.to_string()];
     }
     items.iter().map(list_line).collect()
 }

@@ -25,13 +25,15 @@ use crate::presentation::tui::widgets::{clip_to_width, clip_to_width_cow};
 use chrome::{
     command_palette_body, footer_line, input_line, mode_ladder, quit_confirm_frame,
     remove_modal_body, switch_create_rows, switch_rename_rows, task_status_line, text_modal_body,
-    title_bar, PALETTE_INNER, REMOVE_MODAL_INNER, TEXT_MODAL_INNER,
+    title_bar, update_confirm_frame, PALETTE_INNER, REMOVE_MODAL_INNER, TEXT_MODAL_INNER,
 };
 use panes::{left_pane, right_pane_contents};
 // The embedded terminal pane (没入) maps a click to the tab under it through this.
 pub(super) use panes::attached_tab_at;
 // …and a click on a sidebar session row to that session's PR URLs through this.
 pub(super) use panes::sidebar_pr_links_at;
+// …and a pointer hovering a sidebar session row to that session (for the PR popup).
+pub(super) use panes::sidebar_pr_hover_at;
 
 use super::state::{HomeState, ModalSize, Mode};
 use crate::domain::resource::ResourceUsage;
@@ -96,9 +98,10 @@ const LEFT_MAX: usize = 40;
 /// the active bar plus a 2×2 glyph grid — kind + git status on row 1, agent state
 /// on row 2 (under the git status). Narrow enough to hand most of the width to the
 /// right pane while still showing which session is active, its git state, and what
-/// its agent is doing. Each entry spans **two rows**, exactly like the full
-/// sidebar, so toggling the sidebar never shifts a session to a different row —
-/// only the width changes.
+/// its agent is doing. Each worktree entry spans the same
+/// [`SESSION_ROWS`](panes::SESSION_ROWS) rows as the full sidebar (its third row
+/// blank — the rail has no room for a CPU / memory figure), so toggling the
+/// sidebar never shifts a session to a different row — only the width changes.
 const RAIL_WIDTH: usize = 5;
 
 /// Shown in the right pane between attaching the terminal and its first screen
@@ -240,12 +243,13 @@ pub fn terminal_geometry(
 /// row (`⌂ root`); row `i` maps to `worktrees[i - 1]`, matching
 /// [`WorktreeList::focus_index`](crate::presentation::tui::home::state::WorktreeList).
 ///
-/// Mirrors what [`left_pane`](panes::left_pane) (and its rail variant) draw: each
-/// entry spans two rows, the root pair first, then a one-row divider, then one
-/// pair per worktree — so a click maps back to its session without the renderer
-/// and the hit test ever disagreeing on the layout. Returns `None` for a click in
-/// the right pane (past `left_w`), in the chrome above or below the body, on the
-/// divider, or below the last session (the mascot / blank rows).
+/// Mirrors what [`left_pane`](panes::left_pane) (and its rail variant) draw: the
+/// root pair first (two rows), then a one-row divider, then
+/// [`SESSION_ROWS`](panes::SESSION_ROWS) rows per worktree (identity, detail, and
+/// the CPU / memory line) — so a click maps back to its session without the
+/// renderer and the hit test ever disagreeing on the layout. Returns `None` for a
+/// click in the right pane (past `left_w`), in the chrome above or below the body,
+/// on the divider, or below the last session (the mascot / blank rows).
 pub(super) fn left_pane_session_at(
     state: &HomeState,
     col: u16,
@@ -270,9 +274,9 @@ pub(super) fn left_pane_session_at(
         0 | 1 => 0,
         // The divider between the root and the sessions.
         2 => return None,
-        // Each worktree spans two rows after the divider: lines 3,4 → worktree 0,
-        // lines 5,6 → worktree 1, and so on.
-        l => (l - 3) / 2 + 1,
+        // Each worktree spans `SESSION_ROWS` rows after the divider: lines 3,4,5 →
+        // worktree 0, lines 6,7,8 → worktree 1, and so on.
+        l => (l - 3) / panes::SESSION_ROWS + 1,
     };
     // Past the last session (the mascot or blank filler rows) selects nothing.
     (index < state.list().session_count()).then_some(index)
@@ -331,42 +335,35 @@ fn rabbit_mood(mode: Mode) -> widgets::RabbitMood {
     }
 }
 
-/// The workspace-total resource line shown beside the resting mascot's face —
-/// `CPU 23%  MEM 512MB` — dimmed, or `None` when nothing is live (idle), so the
-/// rabbit rests without a number. The labels (`CPU` / `MEM`) are spelled out here,
-/// unlike the cramped per-session rows, because the mascot sits below the list
-/// where there is room.
+/// The workspace-total resource line shown beside the resting mascot's feet —
+/// the icon-led ` 23%   512MB` — or `None` when nothing is live (idle), so the
+/// rabbit rests without a number. The CPU and memory figures are each tinted by
+/// their load band (dim / yellow / red) via
+/// [`resource_inline_label_tinted`](panes::resource_inline_label_tinted), so a
+/// heavy figure stands out beside the mascot.
 fn workspace_total_label(total: ResourceUsage) -> Option<String> {
-    (!total.is_idle()).then(|| {
-        console::style(format!(
-            "CPU {}  MEM {}",
-            total.format_cpu(),
-            total.format_memory()
-        ))
-        .dim()
-        .to_string()
-    })
+    (!total.is_idle()).then(|| panes::resource_inline_label_tinted(total))
 }
 
-/// Append the workspace resource `total` to the mascot's face row (its
-/// second-to-last line — ears, **face**, feet), so the figure reads as sitting
-/// beside the rabbit. Skipped when nothing is live, or when the label would not
-/// fit the sidebar beside the art (so the row never overruns `left_w` and pushes
-/// the right pane out of line). `rabbit` is the already-indented mascot block.
+/// Append the workspace resource `total` to the mascot's feet row (its last line
+/// — ears, face, **feet**), so the label rests on the rabbit's foot line. Skipped
+/// when nothing is live, or when the label would not fit the sidebar beside the
+/// art (so the row never overruns `left_w` and pushes the right pane out of
+/// line). `rabbit` is the already-indented mascot block.
 fn append_total_beside_mascot(rabbit: &mut [String], total: ResourceUsage, left_w: usize) {
     let Some(label) = workspace_total_label(total) else {
         return;
     };
-    // The face is the row above the feet; a two-row rail chibi has no distinct
-    // face row, so guard the index.
+    // The feet are the block's last row; a two-row rail chibi carries no total,
+    // so guard against blocks too short to be the full three-row mascot.
     if rabbit.len() < 3 {
         return;
     }
-    let face = rabbit.len() - 2;
+    let feet = rabbit.len() - 1;
     let needed =
-        console::measure_text_width(&rabbit[face]) + 2 + console::measure_text_width(&label);
+        console::measure_text_width(&rabbit[feet]) + 2 + console::measure_text_width(&label);
     if needed <= left_w {
-        rabbit[face].push_str(&format!("  {label}"));
+        rabbit[feet].push_str(&format!("  {label}"));
     }
 }
 
@@ -375,6 +372,14 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
     // The quit-confirmation modal, when open, overlays everything else.
     if state.quit_confirm() {
         return quit_confirm_frame(raw_height, raw_width, state.live_count());
+    }
+    // The update-confirmation modal (raised by clicking the mascot's update
+    // notice) likewise overlays everything. It is only ever opened while an update
+    // is available, so `update()` is `Some` here; fall through defensively if not.
+    if state.update_confirm() {
+        if let Some(latest) = state.update() {
+            return update_confirm_frame(raw_height, raw_width, &latest);
+        }
     }
     // The session-removal modal is *not* a full-screen overlay: like the `:`
     // command palette and the text modal it floats as a centred box over the live
@@ -440,10 +445,37 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
     let mut left_rows = left.into_iter();
     let mut right_rows = right.into_iter();
     for _ in 0..body_rows {
-        let mut line = pad_to_width(left_rows.next().unwrap_or_default(), left_w);
+        // Clip each cell to its pane width so the composed row never overruns the
+        // terminal. The left row's fixed cells (gutter + status + badges) emit a
+        // minimum width even when the name cell shrinks to nothing, and some
+        // right-pane content (a menu line, a preview header) isn't pre-sized to a
+        // very narrow pane — either can otherwise shove the divider (and the rest
+        // of the row) past the right edge, a layout shift the fixed-column design
+        // forbids. The left cell is clipped then padded so the `│` divider stays
+        // pinned to column `left_w`; the right cell is clipped to `right_w`. At
+        // normal widths both already fit, so these clips are no-ops.
+        let cell = left_rows.next().unwrap_or_default();
+        let mut line = pad_to_width(clip_to_width(&cell, left_w), left_w);
         line.push_str(SEP);
-        line.push_str(&right_rows.next().unwrap_or_default());
+        let right_cell = right_rows.next().unwrap_or_default();
+        line.push_str(&clip_to_width(&right_cell, right_w));
         lines.push(line);
+    }
+
+    // Float the PR hover popup beside the session the pointer is over. `pr_hover`
+    // is only ever set on the full sidebar (see [`sidebar_pr_hover_at`]), and only
+    // for a PR-bearing session, so `pr_hover_popup` always yields a box here. It
+    // lists the session's `#<number>` PRs — the row itself folds them to an
+    // `<icon> <count>` badge — anchored at the session's first row and pushed just
+    // past the divider into the right pane, so it never hides the sidebar it
+    // describes. Composited now, while `lines` holds only the body rows, so the box
+    // stays within the panes and never spills onto the input / footer below.
+    if let Some(idx) = state.pr_hover() {
+        if let Some(wt) = state.list().worktrees().get(idx) {
+            let popup = panes::pr_hover_popup(&wt.pr);
+            let top = body_start + panes::ROOT_ENTRY_LINES + panes::SESSION_ROWS * idx;
+            widgets::overlay_at(&mut lines, width, top, left_w + SEP_WIDTH, &popup);
+        }
     }
 
     lines.extend(input_lines);
@@ -604,6 +636,9 @@ fn place_mascot(
     let (mascot, animal_rows, width) = match sidebar {
         Sidebar::Full if left_w >= widgets::workspace_rabbit_width() + RABBIT_INDENT => {
             let mood = rabbit_mood(state.mode());
+            // The CPU load drives how strained and busy the rabbit looks (and how
+            // fast it animates), from the same workspace total shown beside it.
+            let load = state.resource_total().cpu_load();
             // `blinking` is set for the frames just after the user interacts, and
             // `tick` advances on the live loop so the 没入 Working paw pumps — both
             // from the state the event loop refreshes each frame.
@@ -617,13 +652,14 @@ fn place_mascot(
                 None => match state.update() {
                     Some(latest) => widgets::workspace_rabbit_speaking(
                         mood,
+                        load,
                         &["アップデートがあるぴょん".to_string(), format!("v{latest}")],
                         // Leave room for the indent so the bubble still fits the pane.
                         left_w - RABBIT_INDENT,
                         blinking,
                         tick,
                     ),
-                    None => widgets::workspace_rabbit(mood, blinking, tick),
+                    None => widgets::workspace_rabbit(mood, load, blinking, tick),
                 },
             };
             (
@@ -643,7 +679,7 @@ fn place_mascot(
         .into_iter()
         .map(|row| format!("{}{row}", " ".repeat(RABBIT_INDENT)))
         .collect();
-    // The workspace CPU / memory total rests beside the full mascot's face; the
+    // The workspace CPU / memory total rests beside the full mascot's feet; the
     // rail chibi is too small (and the reaction art has no settled face), so they
     // carry none — `append_total_beside_mascot` no-ops on a block under three rows.
     if sidebar == Sidebar::Full {

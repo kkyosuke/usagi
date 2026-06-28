@@ -12,6 +12,8 @@
 
 use console::{style, Style};
 
+use crate::domain::resource::Load;
+
 /// The usagi mascot artwork (raw, unstyled lines).
 const RABBIT: [&str; 3] = ["  (\\(\\ ", "  (='-') ", " o(_(\")(\")"];
 
@@ -113,67 +115,157 @@ pub enum RabbitMood {
 }
 
 impl RabbitMood {
-    /// The mood's face row (the mascot's middle line) and the colour the whole
-    /// block is painted: magenta while browsing (the mascot's resting colour),
-    /// cyan while attending a session (the accent the right pane uses), and green
-    /// while a turn runs (matching the `▶ running` accent).
-    ///
-    /// `blinking` shuts the eyes for a beat — the home screen flips it on for the
-    /// frames just after the user interacts, so the resting rabbit blinks back
-    /// without any idle timer. It applies only to the open-eyed moods (Browsing /
-    /// Attentive); the heads-down Working face keeps its squeezed-shut eyes and
-    /// instead pumps its paw on the slow `tick`, so the immersed rabbit looks busy
-    /// while the live terminal ticks. Every face is the same display width
-    /// (width-1 glyphs around the centre), so the block never reflows as it
-    /// animates.
-    fn face_and_style(self, blinking: bool, tick: usize) -> (&'static str, Style) {
+    /// The colour the whole mascot block is painted: magenta while browsing (the
+    /// mascot's resting colour), cyan while attending a session (the accent the
+    /// right pane uses), and green while a turn runs (matching the `▶ running`
+    /// accent). The colour follows the engagement mode only — the CPU load tints
+    /// the *figures* beside the rabbit, not the rabbit itself.
+    fn paint(self) -> Style {
         match self {
-            RabbitMood::Browsing if blinking => (" (-.-)? ", Style::new().magenta().bold()),
-            RabbitMood::Browsing => (" (o.o)? ", Style::new().magenta().bold()),
-            RabbitMood::Attentive if blinking => (" (-.-)/ ", Style::new().cyan().bold()),
-            RabbitMood::Attentive => (" (^.^)/ ", Style::new().cyan().bold()),
-            // Pump the paw on a slow beat so the work looks ongoing (the live tick
-            // advances `tick` ~9×/s, so divide it down to a calm ~2 swings/s).
-            RabbitMood::Working if (tick / 4) % 2 == 1 => (" (>.<)6 ", Style::new().green().bold()),
-            RabbitMood::Working => (" (>.<)9 ", Style::new().green().bold()),
+            RabbitMood::Browsing => Style::new().magenta(),
+            RabbitMood::Attentive => Style::new().cyan(),
+            RabbitMood::Working => Style::new().green(),
+        }
+        .bold()
+    }
+
+    /// The three eye/mouth glyphs at the centre of the face. A calm CPU shows the
+    /// mood's own resting eyes (the open-eyed moods shut them while `blinking`); a
+    /// busy load grits them (`>_<`) and a hot load screws them shut (`X_X`),
+    /// overriding the mood so the strain reads first. Every variant is three
+    /// width-1 glyphs, so the face stays the same width whatever the load.
+    fn eyes(self, load: Load, blinking: bool) -> &'static str {
+        match load {
+            Load::Hot => "X_X",
+            Load::Busy => ">_<",
+            Load::Calm => match self {
+                RabbitMood::Browsing if blinking => "-.-",
+                RabbitMood::Browsing => "o.o",
+                RabbitMood::Attentive if blinking => "-.-",
+                RabbitMood::Attentive => "^.^",
+                // The heads-down face is already squeezed shut, so it has no open
+                // eyes to blink.
+                RabbitMood::Working => ">.<",
+            },
+        }
+    }
+
+    /// The side-paw glyph: the mood's gesture (`?` browsing, `/` attentive), or the
+    /// immersed mood's paw pumping between `9` and `6` on a beat that quickens with
+    /// the CPU `load`.
+    fn paw(self, load: Load, tick: usize) -> char {
+        match self {
+            RabbitMood::Browsing => '?',
+            RabbitMood::Attentive => '/',
+            RabbitMood::Working if pump(load, tick) => '6',
+            RabbitMood::Working => '9',
         }
     }
 }
 
-/// The mood mascot's three raw rows — ears, face, feet — aligned so the ears, the
-/// head, and the body share one left edge. Shared by [`workspace_rabbit`] and
-/// [`workspace_rabbit_speaking`] so the resting and speaking rabbits stay identical.
+/// Frames between animation steps at each CPU load: the busier the CPU, the
+/// shorter the beat, so the paw pump, ear twitch, sweat, tremble, and kicking feet
+/// all quicken together. `tick` advances ~9×/s on the live loop, so a calm beat of
+/// 4 reads as a slow ~2 steps/s.
+fn load_beat(load: Load) -> usize {
+    match load {
+        Load::Calm => 4,
+        Load::Busy => 3,
+        Load::Hot => 2,
+    }
+}
+
+/// The animation phase for `load` at `tick` — `tick` divided down by the load's
+/// [`load_beat`], so a higher load advances the phase faster.
+fn anim_phase(load: Load, tick: usize) -> usize {
+    tick / load_beat(load)
+}
+
+/// Whether the immersed mood's paw is on its raised pump frame this phase.
+fn pump(load: Load, tick: usize) -> bool {
+    anim_phase(load, tick) % 2 == 1
+}
+
+/// The ears row (`(\(\`), flicking one ear on a beat once the CPU is busy so the
+/// rabbit's ears twitch as the work picks up; calm keeps them still. The leading
+/// `(` stays put either way, so the ears never drift off the head.
+fn ears_row(load: Load, tick: usize) -> String {
+    let twitch = load != Load::Calm && anim_phase(load, tick).is_multiple_of(4);
+    if twitch {
+        " (\\(/".to_string()
+    } else {
+        " (\\(\\".to_string()
+    }
+}
+
+/// The feet row (`o(_(")(")`), kicking on a beat once the CPU is busy — the paws
+/// drop to commas as if flailing, so the legs bata-bata as the work picks up; calm
+/// keeps them planted. The `o` and the body's `(` stay put, so the feet stay under
+/// the body.
+fn feet_row(load: Load, tick: usize) -> String {
+    let kick = load != Load::Calm && anim_phase(load, tick) % 2 == 1;
+    if kick {
+        "o(_(,)(,)".to_string()
+    } else {
+        "o(_(\")(\")".to_string()
+    }
+}
+
+/// The face row — ` (eyes)paw ` — with a bead of sweat (`;`) flicking off the side
+/// on a beat once the CPU is hot, so the straining rabbit visibly sweats. The
+/// sweat rides the row's existing trailing column, so it never widens the face.
+fn face_row(mood: RabbitMood, load: Load, blinking: bool, tick: usize) -> String {
+    let eyes = mood.eyes(load, blinking);
+    let paw = mood.paw(load, tick);
+    let sweat = load == Load::Hot && anim_phase(load, tick) % 2 == 1;
+    let trail = if sweat { ';' } else { ' ' };
+    format!(" ({eyes}){paw}{trail}")
+}
+
+/// How far the whole block is nudged right this frame — one column on a beat once
+/// the CPU is hot, so the rabbit trembles. The nudge is absorbed by the column
+/// [`workspace_rabbit_width`] reserves, so the shake never widens the block or
+/// shifts the pane beside it.
+fn jitter(load: Load, tick: usize) -> usize {
+    if load == Load::Hot && anim_phase(load, tick) % 2 == 1 {
+        1
+    } else {
+        0
+    }
+}
+
+/// The mood mascot's three raw rows — ears, face, feet — animated for the CPU
+/// `load` at `tick` (and `blinking`), aligned so the ears, head, and body share
+/// one left edge. The whole block is nudged right by [`jitter`] so a hot load
+/// trembles. Shared by [`workspace_rabbit`] and [`workspace_rabbit_speaking`] so
+/// the resting and speaking rabbits stay identical.
 ///
-/// The shared [`RABBIT`] art already aligns the resting face (`(='-')`): the ears
-/// and the face carry two leading spaces and the feet one, so the ears', the
-/// head's, and the body's `(` share a column while the feet's `o` hangs one column
-/// to the left. A mood face is a 5-wide head (`(>.<)`) plus a side paw (`?` / `/` /
-/// `9`), one column narrower than the resting face. To keep that same shape the
-/// ears drop one leading space (landing over the head rather than leaning onto the
-/// paw) and the feet drop theirs too, so the body's `(` still lines up under the
-/// head's and the ears' `(` with the `o` hanging one column to the left.
-fn mood_mascot_rows(face: &str) -> [String; 3] {
+/// The ears carry one leading space (landing over the head rather than leaning
+/// onto the paw) and the feet none, so the head's and the ears' `(` share a column
+/// while the feet's `o` hangs one column to the left — the same shape the static
+/// [`RABBIT`] rests in.
+fn mood_mascot_rows(mood: RabbitMood, load: Load, blinking: bool, tick: usize) -> [String; 3] {
+    let nudge = " ".repeat(jitter(load, tick));
     [
-        format!(" {}", RABBIT[0].trim()),
-        face.to_string(),
-        RABBIT[2].trim_start().to_string(),
+        format!("{nudge}{}", ears_row(load, tick)),
+        format!("{nudge}{}", face_row(mood, load, blinking, tick)),
+        format!("{nudge}{}", feet_row(load, tick)),
     ]
 }
 
-/// The resting mascot for the bottom of the workspace sidebar, its face and
-/// gesture chosen by `mood` so the rabbit reflects the current engagement mode.
-/// Only the middle face row changes between moods, so the usagi stays recognisably
-/// the same animal while its expression shifts; the ears/head/body alignment is
-/// [`mood_mascot_rows`]'. Every row is padded to a common block width and painted
-/// the mood's colour, so the block tiles as a rectangle wherever it is placed.
-pub fn workspace_rabbit(mood: RabbitMood, blinking: bool, tick: usize) -> Vec<String> {
-    let (face, paint) = mood.face_and_style(blinking, tick);
-    let rows = mood_mascot_rows(face);
-    let block_w = rows
-        .iter()
-        .map(|row| console::measure_text_width(row))
-        .max()
-        .unwrap_or(0);
+/// The resting mascot for the bottom of the workspace sidebar. Its face and
+/// gesture follow `mood` (so the rabbit reflects the current engagement mode) and
+/// its strain and motion follow the CPU `load`: a busy load grits its face, a hot
+/// load screws it shut and sets it sweating and trembling, and across busy/hot its
+/// ears twitch, its feet kick, and its paw pumps faster — so the usagi looks
+/// busier the harder the workspace works. The usagi stays recognisably the same
+/// animal throughout; the ears/head/body alignment is [`mood_mascot_rows`]'. Every
+/// row is padded to a common block width and painted the mood's colour, so the
+/// block tiles as a rectangle wherever it is placed.
+pub fn workspace_rabbit(mood: RabbitMood, load: Load, blinking: bool, tick: usize) -> Vec<String> {
+    let rows = mood_mascot_rows(mood, load, blinking, tick);
+    let paint = mood.paint();
+    let block_w = workspace_rabbit_width();
     rows.into_iter()
         .map(|row| {
             let pad = block_w.saturating_sub(console::measure_text_width(&row));
@@ -282,6 +374,7 @@ const SPEECH_CHROME: usize = 4;
 /// so the block tiles as a rectangle wherever it is placed.
 pub fn workspace_rabbit_speaking(
     mood: RabbitMood,
+    load: Load,
     speech: &[String],
     max_width: usize,
     blinking: bool,
@@ -296,7 +389,7 @@ pub fn workspace_rabbit_speaking(
         .collect();
     if content.is_empty() {
         // Too narrow for a bubble (or nothing to say): rest silently instead.
-        return workspace_rabbit(mood, blinking, tick);
+        return workspace_rabbit(mood, load, blinking, tick);
     }
     let content_w = content
         .iter()
@@ -335,9 +428,10 @@ pub fn workspace_rabbit_speaking(
     bottom.push('╯');
     rows.push(bubble.apply_to(bottom).to_string());
 
-    // The resting mascot below, in its mood colour — only the face row changes.
-    let (face, paint) = mood.face_and_style(blinking, tick);
-    for art in mood_mascot_rows(face) {
+    // The resting mascot below, in its mood colour, reacting to the CPU load just
+    // as the silent rabbit does.
+    let paint = mood.paint();
+    for art in mood_mascot_rows(mood, load, blinking, tick) {
         rows.push(paint.apply_to(art).to_string());
     }
 
@@ -359,13 +453,11 @@ pub fn workspace_rabbit_speaking(
 /// sidebar is wide enough to hold it before placing it (and skip it otherwise,
 /// rather than overrunning a narrow pane).
 pub fn workspace_rabbit_width() -> usize {
-    // Every mood's face is the same width (and a blink / paw-pump never changes
-    // it), so any one stands in for the block.
-    mood_mascot_rows(RabbitMood::Working.face_and_style(false, 0).0)
-        .iter()
-        .map(|row| console::measure_text_width(row))
-        .max()
-        .unwrap_or(0)
+    // The widest row is the feet (`o(_(")(")`); reserve one extra column for the
+    // hot-load tremble ([`jitter`]) so the shake stays within the block and never
+    // widens it frame to frame. The face and ears are narrower, and a blink, paw
+    // pump, ear twitch, or kicking foot never changes a row's width.
+    console::measure_text_width(&feet_row(Load::Calm, 0)) + 1
 }
 
 /// The chibi mascot for the **collapsed rail** — a tiny two-row bunny that fits
@@ -688,7 +780,7 @@ mod tests {
             RabbitMood::Attentive,
             RabbitMood::Working,
         ] {
-            let lines = workspace_rabbit(mood, false, 0);
+            let lines = workspace_rabbit(mood, Load::Calm, false, 0);
             assert_eq!(lines.len(), 3);
             let plain: Vec<String> = lines
                 .iter()
@@ -707,7 +799,8 @@ mod tests {
         // Each mood shows a distinct expression and gesture, so the resting rabbit
         // signals the current engagement mode at a glance.
         let face = |mood| {
-            console::strip_ansi_codes(&workspace_rabbit(mood, false, 0).join("\n")).into_owned()
+            console::strip_ansi_codes(&workspace_rabbit(mood, Load::Calm, false, 0).join("\n"))
+                .into_owned()
         };
         assert!(face(RabbitMood::Browsing).contains("(o.o)?"));
         assert!(face(RabbitMood::Attentive).contains("(^.^)/"));
@@ -723,7 +816,7 @@ mod tests {
             RabbitMood::Attentive,
             RabbitMood::Working,
         ] {
-            let lines = workspace_rabbit(mood, false, 0);
+            let lines = workspace_rabbit(mood, Load::Calm, false, 0);
             let plain: Vec<String> = lines
                 .iter()
                 .map(|l| console::strip_ansi_codes(l).into_owned())
@@ -744,7 +837,7 @@ mod tests {
             RabbitMood::Attentive,
             RabbitMood::Working,
         ] {
-            let plain: Vec<String> = workspace_rabbit(mood, false, 0)
+            let plain: Vec<String> = workspace_rabbit(mood, Load::Calm, false, 0)
                 .iter()
                 .map(|l| console::strip_ansi_codes(l).into_owned())
                 .collect();
@@ -766,7 +859,7 @@ mod tests {
             RabbitMood::Attentive,
             RabbitMood::Working,
         ] {
-            let lines = workspace_rabbit(mood, false, 0);
+            let lines = workspace_rabbit(mood, Load::Calm, false, 0);
             let w0 = console::measure_text_width(&lines[0]);
             assert!(lines.iter().all(|l| console::measure_text_width(l) == w0));
             assert_eq!(w0, workspace_rabbit_width());
@@ -777,6 +870,7 @@ mod tests {
     fn workspace_rabbit_speaking_puts_the_speech_in_a_bubble_above_the_mascot() {
         let lines = workspace_rabbit_speaking(
             RabbitMood::Browsing,
+            Load::Calm,
             &["アップデートがあるぴょん".to_string(), "v0.2.0".to_string()],
             40,
             false,
@@ -806,6 +900,7 @@ mod tests {
         // it is dropped into the sidebar.
         let lines = workspace_rabbit_speaking(
             RabbitMood::Attentive,
+            Load::Calm,
             &["アップデートがあるぴょん".to_string(), "v1.2.3".to_string()],
             40,
             false,
@@ -822,6 +917,7 @@ mod tests {
         let max = 16;
         let lines = workspace_rabbit_speaking(
             RabbitMood::Working,
+            Load::Calm,
             &["アップデートがあるぴょん".to_string(), "v0.2.0".to_string()],
             max,
             false,
@@ -836,9 +932,18 @@ mod tests {
     fn workspace_rabbit_speaking_falls_back_to_the_silent_mascot_when_too_narrow() {
         // No room for even a one-column bubble: it rests silently, exactly like
         // `workspace_rabbit`, rather than drawing a broken frame.
-        let lines =
-            workspace_rabbit_speaking(RabbitMood::Browsing, &["x".to_string()], 2, false, 0);
-        assert_eq!(lines, workspace_rabbit(RabbitMood::Browsing, false, 0));
+        let lines = workspace_rabbit_speaking(
+            RabbitMood::Browsing,
+            Load::Calm,
+            &["x".to_string()],
+            2,
+            false,
+            0,
+        );
+        assert_eq!(
+            lines,
+            workspace_rabbit(RabbitMood::Browsing, Load::Calm, false, 0)
+        );
     }
 
     #[test]
@@ -847,7 +952,8 @@ mod tests {
         // rabbit reads as blinking back at the user; the squeezed-shut Working
         // face has no open eyes to close, so it is unaffected.
         let face = |mood, blinking| {
-            console::strip_ansi_codes(&workspace_rabbit(mood, blinking, 0).join("\n")).into_owned()
+            console::strip_ansi_codes(&workspace_rabbit(mood, Load::Calm, blinking, 0).join("\n"))
+                .into_owned()
         };
         assert!(face(RabbitMood::Browsing, true).contains("(-.-)?"));
         assert!(face(RabbitMood::Attentive, true).contains("(-.-)/"));
@@ -862,7 +968,7 @@ mod tests {
         // flickering. A held tick shows one paw, a tick four steps on the other.
         let paw = |tick| {
             console::strip_ansi_codes(
-                &workspace_rabbit(RabbitMood::Working, false, tick).join("\n"),
+                &workspace_rabbit(RabbitMood::Working, Load::Calm, false, tick).join("\n"),
             )
             .into_owned()
         };
@@ -870,9 +976,143 @@ mod tests {
         assert!(paw(4).contains("(>.<)6"));
         // The block never reflows as the paw swings.
         assert_eq!(
-            console::measure_text_width(&workspace_rabbit(RabbitMood::Working, false, 0)[1]),
-            console::measure_text_width(&workspace_rabbit(RabbitMood::Working, false, 4)[1]),
+            console::measure_text_width(
+                &workspace_rabbit(RabbitMood::Working, Load::Calm, false, 0)[1]
+            ),
+            console::measure_text_width(
+                &workspace_rabbit(RabbitMood::Working, Load::Calm, false, 4)[1]
+            ),
         );
+    }
+
+    #[test]
+    fn workspace_rabbit_grits_its_face_as_the_cpu_load_rises() {
+        // A busy CPU grits the face (`>_<`) and a hot CPU screws it shut (`X_X`),
+        // overriding the mood so the strain reads first whatever the mode.
+        let face = |mood, load| {
+            console::strip_ansi_codes(&workspace_rabbit(mood, load, false, 0).join("\n"))
+                .into_owned()
+        };
+        for mood in [
+            RabbitMood::Browsing,
+            RabbitMood::Attentive,
+            RabbitMood::Working,
+        ] {
+            assert!(
+                face(mood, Load::Busy).contains("(>_<)"),
+                "{mood:?} grits busy"
+            );
+            assert!(
+                face(mood, Load::Hot).contains("(X_X)"),
+                "{mood:?} shuts hot"
+            );
+        }
+        // The mood's own resting face still shows when calm.
+        assert!(face(RabbitMood::Browsing, Load::Calm).contains("(o.o)"));
+    }
+
+    #[test]
+    fn workspace_rabbit_paw_pumps_faster_as_the_load_rises() {
+        // The immersed paw pumps on a beat that shortens with load (calm every 4
+        // ticks, busy every 3, hot every 2), so the same tick can show a different
+        // paw by load.
+        let paw_at = |load, tick| {
+            console::strip_ansi_codes(
+                &workspace_rabbit(RabbitMood::Working, load, false, tick).join("\n"),
+            )
+            .into_owned()
+        };
+        // tick 0 rests the paw at every load; the higher beats then flip it sooner.
+        assert!(paw_at(Load::Calm, 0).contains(")9"));
+        assert!(paw_at(Load::Busy, 0).contains(")9"));
+        assert!(paw_at(Load::Calm, 2).contains(")9")); // calm beat 4 → phase 0
+        assert!(paw_at(Load::Busy, 3).contains(")6")); // busy beat 3 → phase 1
+        assert!(paw_at(Load::Hot, 2).contains(")6")); // hot beat 2 → phase 1
+    }
+
+    #[test]
+    fn workspace_rabbit_twitches_its_ears_and_kicks_its_feet_under_load() {
+        // Once the CPU is busy the ears flick and the feet kick on a beat; calm
+        // keeps both still.
+        let rows = |load, tick| {
+            workspace_rabbit(RabbitMood::Browsing, load, false, tick)
+                .iter()
+                .map(|l| console::strip_ansi_codes(l).into_owned())
+                .collect::<Vec<_>>()
+        };
+        // Calm: the resting ears and feet at every tick.
+        let calm = rows(Load::Calm, 0);
+        assert!(calm[0].contains("(\\(\\"));
+        assert!(calm[2].contains("o(_(\")(\")"));
+        // Busy tick 0 (phase 0): ears twitch (`%4==0`), feet still (`%2==0`).
+        let busy0 = rows(Load::Busy, 0);
+        assert!(busy0[0].contains("(\\(/"), "ears twitch busy");
+        assert!(busy0[2].contains("o(_(\")(\")"));
+        // Busy tick 3 (phase 1): ears still, feet kick (`%2==1`).
+        let busy3 = rows(Load::Busy, 3);
+        assert!(busy3[0].contains("(\\(\\"));
+        assert!(busy3[2].contains("o(_(,)(,)"), "feet kick busy");
+    }
+
+    #[test]
+    fn workspace_rabbit_sweats_and_trembles_only_when_hot() {
+        let rows = |load, tick| {
+            workspace_rabbit(RabbitMood::Browsing, load, false, tick)
+                .iter()
+                .map(|l| console::strip_ansi_codes(l).into_owned())
+                .collect::<Vec<_>>()
+        };
+        // Hot tick 2 (phase 1): the face sweats (`;`) and the whole block trembles
+        // a column to the right (a second leading space before the art).
+        let hot = rows(Load::Hot, 2);
+        assert!(hot[1].contains(';'), "the hot face sweats");
+        assert!(hot[1].starts_with("  ("), "the hot rabbit trembles right");
+        // Hot tick 0 (phase 0): steady — no sweat, no tremble.
+        let steady = rows(Load::Hot, 0);
+        assert!(!steady[1].contains(';'));
+        assert!(steady[1].starts_with(" (") && !steady[1].starts_with("  ("));
+        // Busy never sweats or trembles.
+        let busy = rows(Load::Busy, 2);
+        assert!(!busy.iter().any(|r| r.contains(';')));
+        assert!(busy[1].starts_with(" (") && !busy[1].starts_with("  ("));
+    }
+
+    #[test]
+    fn workspace_rabbit_keeps_one_block_width_under_load_and_tremble() {
+        // Every load and tick — including the hot tremble — tiles to one rectangle
+        // whose width matches the advertised one, so the sidebar never reflows and
+        // the pane beside it never shifts.
+        for load in [Load::Calm, Load::Busy, Load::Hot] {
+            for tick in 0..8 {
+                let lines = workspace_rabbit(RabbitMood::Working, load, false, tick);
+                let w0 = console::measure_text_width(&lines[0]);
+                assert!(
+                    lines.iter().all(|l| console::measure_text_width(l) == w0),
+                    "rectangle at {load:?} tick {tick}",
+                );
+                assert_eq!(
+                    w0,
+                    workspace_rabbit_width(),
+                    "width at {load:?} tick {tick}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn workspace_rabbit_speaking_reacts_to_the_load_below_the_bubble() {
+        // The speaking mascot strains with the load just like the silent one — the
+        // face below the bubble grits when hot.
+        let lines = workspace_rabbit_speaking(
+            RabbitMood::Attentive,
+            Load::Hot,
+            &["アップデートがあるぴょん".to_string()],
+            40,
+            false,
+            0,
+        );
+        let joined = console::strip_ansi_codes(&lines.join("\n")).into_owned();
+        assert!(joined.contains("(X_X)"));
     }
 
     #[test]
@@ -881,6 +1121,7 @@ mod tests {
         // bubble shuts its eyes when `blinking` is set.
         let lines = workspace_rabbit_speaking(
             RabbitMood::Browsing,
+            Load::Calm,
             &["アップデートがあるぴょん".to_string()],
             40,
             true,

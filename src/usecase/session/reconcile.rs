@@ -11,7 +11,7 @@ use anyhow::{Context, Result};
 use super::tree;
 use crate::infrastructure::error_log::ErrorLog;
 use crate::infrastructure::git;
-use crate::infrastructure::repo_paths::STATE_DIR;
+use crate::infrastructure::repo_paths::{SESSIONS_DIR, STATE_DIR};
 use crate::infrastructure::workspace_store::WorkspaceStore;
 
 /// Reconcile the on-disk session tree under `.usagi/sessions/` with the sessions
@@ -41,7 +41,7 @@ pub fn reconcile(workspace_root: &Path) -> Result<Vec<PathBuf>> {
 /// record so the whole sequence is serialised against other usagi processes;
 /// they call this directly to avoid re-acquiring the non-reentrant lock.
 pub(super) fn reconcile_locked(workspace_root: &Path) -> Result<Vec<PathBuf>> {
-    let sessions_base = workspace_root.join(STATE_DIR).join("sessions");
+    let sessions_base = workspace_root.join(STATE_DIR).join(SESSIONS_DIR);
     if !sessions_base.is_dir() {
         return Ok(Vec::new());
     }

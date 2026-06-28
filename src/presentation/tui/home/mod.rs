@@ -725,6 +725,12 @@ pub fn run(term: &Term, workspace: &Workspace, preload: Preload) -> Result<Outco
                         terminal::pane::PaneStep::PrevSession => {
                             return Ok(PaneExit::ToPreviousSession)
                         }
+                        // A double click on a sidebar session row: leave the pane so
+                        // the event loop re-roots on that focus row (attaching when
+                        // live), every pane staying alive in the pool (like `Ctrl-^`).
+                        terminal::pane::PaneStep::ToSession(row) => {
+                            return Ok(PaneExit::ToSession(row))
+                        }
                         // `Ctrl-Q`: leave 没入 to quit usagi. Every pane stays alive in
                         // the pool; the event loop raises the quit-confirmation modal.
                         terminal::pane::PaneStep::Quit => return Ok(PaneExit::Quit),
@@ -888,6 +894,26 @@ pub fn run(term: &Term, workspace: &Workspace, preload: Preload) -> Result<Outco
         let _ = crate::usecase::session::persist_last_active(&last_active_root, pairs);
     };
 
+    // Launch the self-update on a background thread when the user confirms the
+    // update notice: re-run the documented install script (downloading the latest
+    // release over `bash -c "curl … | bash"`) and surface its progress as the
+    // shared loading rabbit, finishing with a restart prompt. Runs off-thread so a
+    // slow download never blocks the screen; a second click while one is in flight
+    // is ignored by the handle's `begin` guard.
+    let mut dispatch_update = || {
+        let handle = crate::presentation::tui::install_task::handle();
+        if !handle.begin("アップデート中…") {
+            return;
+        }
+        std::thread::spawn(move || {
+            let (ok, message) = crate::usecase::self_update::run(
+                &crate::usecase::doctor::SystemRunner,
+                env!("CARGO_PKG_REPOSITORY"),
+            );
+            handle.finish(ok, message);
+        });
+    };
+
     let mut wiring = event::Wiring {
         workspace_root: &workspace.path,
         persist: &mut persist,
@@ -896,6 +922,7 @@ pub fn run(term: &Term, workspace: &Workspace, preload: Preload) -> Result<Outco
         set_note: &mut set_note,
         reorder_session: &mut reorder_session,
         dispatch_remove: &mut dispatch_remove,
+        dispatch_update: &mut dispatch_update,
         evict_pool: &mut evict_pool,
         existing_branches: &mut existing_branches,
         open_terminal: &mut open_terminal,
@@ -1062,7 +1089,7 @@ fn run_remove(
                 sessions: reload_sessions(root),
                 evict: Some(
                     root.join(crate::infrastructure::repo_paths::STATE_DIR)
-                        .join("sessions")
+                        .join(crate::infrastructure::repo_paths::SESSIONS_DIR)
                         .join(name),
                 ),
                 focus: None,

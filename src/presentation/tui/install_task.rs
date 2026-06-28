@@ -1,12 +1,15 @@
-//! The single in-flight local-LLM install, shared across every TUI screen.
+//! The single in-flight background install, shared across every TUI screen.
 //!
-//! Provisioning the local LLM (`ollama` runtime + model) can take minutes, so it
-//! runs on a background thread and the user is free to keep using usagi while it
-//! proceeds. This module owns the one process-global [`InstallHandle`] that the
-//! worker writes its progress to and that every screen reads: the
+//! Some background work takes a while — provisioning the local LLM (`ollama`
+//! runtime + model) can take minutes, and a self-update downloads a fresh release
+//! — so it runs on a background thread and the user is free to keep using usagi
+//! while it proceeds. This module owns the one process-global [`InstallHandle`]
+//! that the worker writes its progress to and that every screen reads: the
 //! [`FramePainter`](super::io::screen::FramePainter) overlays a loading rabbit from
 //! it, and the event loops poll [`is_active`](InstallHandle::is_active) to keep
-//! the screen animating while the install runs.
+//! the screen animating while the work runs. The caller supplies the label shown
+//! beside the rabbit (e.g. `LLM 導入中… <model>` or `アップデート中…`), so the
+//! handle stays agnostic about what kind of work is in flight.
 //!
 //! The thread spawn itself lives in the (test-excluded) config screen module —
 //! mirroring how the home screen spawns the update check while
@@ -39,8 +42,9 @@ enum TaskState {
     /// No install has run (or the last one's message has been dismissed).
     #[default]
     Idle,
-    /// An install is in progress, started at `started`.
-    Running { model: String, started: Instant },
+    /// An install is in progress, started at `started`. `label` is the caller's
+    /// description shown beside the loading rabbit.
+    Running { label: String, started: Instant },
     /// The install finished at `finished`; `message` is shown until [`DISMISS`].
     Done {
         message: String,
@@ -73,11 +77,6 @@ fn face_index(elapsed: Duration) -> usize {
     (elapsed.as_millis() / FACE_TICK.as_millis()) as usize
 }
 
-/// The label shown beside the running rabbit.
-fn running_label(model: &str) -> String {
-    format!("LLM 導入中… {model}")
-}
-
 /// A cloneable handle onto the one tracked install.
 ///
 /// Cloning shares the same slot, so the worker thread's
@@ -105,24 +104,24 @@ impl InstallHandle {
         self.shared.lock().unwrap_or_else(|p| p.into_inner())
     }
 
-    /// Mark an install for `model` as started at `at`. Returns `false` (a no-op)
-    /// when one is already running, so a second trigger cannot start a duplicate
-    /// install over the first.
-    pub fn begin_at(&self, model: &str, at: Instant) -> bool {
+    /// Mark an install labelled `label` as started at `at`. Returns `false` (a
+    /// no-op) when one is already running, so a second trigger cannot start a
+    /// duplicate install over the first.
+    pub fn begin_at(&self, label: &str, at: Instant) -> bool {
         let mut state = self.lock();
         if matches!(&*state, TaskState::Running { .. }) {
             return false;
         }
         *state = TaskState::Running {
-            model: model.to_string(),
+            label: label.to_string(),
             started: at,
         };
         true
     }
 
     /// Mark an install as started now (production entry point).
-    pub fn begin(&self, model: &str) -> bool {
-        self.begin_at(model, Instant::now())
+    pub fn begin(&self, label: &str) -> bool {
+        self.begin_at(label, Instant::now())
     }
 
     /// Record that the install finished at `at`, with the message to show.
@@ -158,10 +157,10 @@ impl InstallHandle {
         let mut state = self.lock();
         match &*state {
             TaskState::Idle => None,
-            TaskState::Running { model, started } => {
+            TaskState::Running { label, started } => {
                 let elapsed = now.saturating_duration_since(*started);
                 Some(InstallView::Running {
-                    label: running_label(model),
+                    label: label.clone(),
                     hop_frame: hop_frame(elapsed),
                     face_index: face_index(elapsed),
                 })
@@ -235,15 +234,16 @@ mod tests {
     fn begin_marks_it_running_and_blocks_a_duplicate() {
         let handle = InstallHandle::new();
         let t0 = Instant::now();
-        assert!(handle.begin_at("qwen2.5:7b", t0));
+        assert!(handle.begin_at("LLM 導入中… qwen2.5:7b", t0));
         // A second begin while running is refused, leaving the first untouched.
         assert!(!handle.begin_at("other", t0));
         assert!(handle.is_active(t0));
-        // At t0 nothing has elapsed, so the hop and face sit at frame 0.
+        // At t0 nothing has elapsed, so the hop and face sit at frame 0. The label
+        // is the caller's string verbatim.
         assert_eq!(
             handle.view(t0),
             Some(InstallView::Running {
-                label: running_label("qwen2.5:7b"),
+                label: "LLM 導入中… qwen2.5:7b".to_string(),
                 hop_frame: 0,
                 face_index: 0,
             })
@@ -261,7 +261,7 @@ mod tests {
         assert_eq!(
             view,
             InstallView::Running {
-                label: running_label("m"),
+                label: "m".to_string(),
                 hop_frame: 3,
                 face_index: 0,
             }
@@ -272,7 +272,7 @@ mod tests {
         assert_eq!(
             handle.view(t0 + Duration::from_millis(1600)),
             Some(InstallView::Running {
-                label: running_label("m"),
+                label: "m".to_string(),
                 hop_frame: 14,
                 face_index: 1,
             })

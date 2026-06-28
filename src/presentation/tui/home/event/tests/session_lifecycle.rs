@@ -318,13 +318,14 @@ fn focus_close_command_removes_the_focused_session_then_enters_switch() {
 
 #[test]
 fn focus_menu_close_removes_the_focused_session_then_enters_switch() {
-    // The 在席 menu lists `close` last; ArrowUp from the top wraps to it. Enter
-    // removes the focused session like `session remove feat` (no `--force`), then
-    // drops into 切替 (Switch) — the `c` keypress that follows opens the inline
+    // The 在席 menu lists its commands alphabetically (`agent`, `close`,
+    // `terminal`) with `agent` highlighted by default; ArrowDown lands on `close`.
+    // Enter removes the focused session like `session remove feat` (no `--force`),
+    // then drops into 切替 (Switch) — the `c` keypress that follows opens the inline
     // create input (a Switch-only action), proving the landing mode.
     let mut keys = cmd("session switch feat");
     keys.push(Ok(Key::Enter)); // -> Focus (feat), menu UI
-    keys.push(Ok(Key::ArrowUp)); // terminal -> wrap to `close`
+    keys.push(Ok(Key::ArrowDown)); // agent -> `close`
     keys.push(Ok(Key::Enter)); // run `close` -> session removed -> 切替 (Switch)
     keys.push(Ok(Key::Char('c'))); // Switch-only: begin inline create
     keys.push(Ok(Key::Escape)); // cancel create; reader then runs out -> quit

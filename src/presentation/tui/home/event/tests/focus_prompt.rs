@@ -42,6 +42,43 @@ fn focus_prompt_edits_completes_and_runs_terminal() {
 }
 
 #[test]
+fn focus_prompt_drops_control_chars() {
+    // A control char that surfaces as `Key::Char` (e.g. Ctrl-S -> '\x13') must not
+    // be inserted into the prompt. Were it, the typed "ter" would become "ter\x13"
+    // and Tab-completion to "terminal" would no longer match, so the terminal would
+    // never attach (`opened` would stay 0).
+    let opened = RefCell::new(0);
+    let mut open = |_h: &mut HomeState, _d: &Path, a: bool, _n: bool| {
+        assert!(!a);
+        *opened.borrow_mut() += 1;
+        Ok(PaneExit::Closed)
+    };
+    let mut create: fn(&str) -> SessionOutcome = noop_create;
+    let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = noop_preview;
+    let mut keys = cmd("session switch feat");
+    keys.push(Ok(Key::Enter)); // Focus feat (prompt UI)
+    keys.extend(typed("ter"));
+    keys.push(Ok(Key::Char('\u{13}'))); // Ctrl-S: dropped, not inserted
+    keys.push(Ok(Key::Tab)); // completes "ter" -> "terminal"
+    keys.push(Ok(Key::Enter)); // run terminal (attach)
+    keys.push(Ok(Key::Escape)); // -> Switch
+    keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
+    assert!(matches!(
+        run_full(
+            keys,
+            prompt_state(),
+            &mut open,
+            &mut create,
+            &mut preview,
+            &mut noop_config
+        )
+        .unwrap(),
+        Outcome::Quit
+    ));
+    assert_eq!(*opened.borrow(), 1);
+}
+
+#[test]
 fn focus_prompt_runs_agent_and_coming_soon_and_ignores_empty() {
     let opened = RefCell::new(Vec::new());
     let mut open = |_h: &mut HomeState, _d: &Path, a: bool, _n: bool| {

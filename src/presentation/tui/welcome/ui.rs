@@ -15,10 +15,7 @@ const TITLE: &str = "USAGI";
 /// Vertical placement is handled by [`render_frame`], which centres the whole
 /// body in the terminal, so this returns no leading padding.
 fn header_lines(width: usize) -> Vec<String> {
-    let mut lines = widgets::rabbit_lines(width);
-    lines.push(String::new());
-    lines.push(widgets::title_line(width, TITLE));
-    lines
+    widgets::header_lines(width, TITLE, None)
 }
 
 /// Builds the menu lines, highlighting the selected entry.
@@ -31,11 +28,7 @@ fn menu_lines(width: usize, items: &[MenuItem], selected_index: usize) -> Vec<St
     for (i, item) in items.iter().enumerate() {
         let is_selected = i == selected_index;
 
-        let cursor = if is_selected {
-            style(">").red().bold().to_string()
-        } else {
-            " ".to_string()
-        };
+        let cursor = widgets::cursor_marker(is_selected);
         let label = if is_selected {
             style(format!("{:<10}", item.label))
                 .cyan()
@@ -73,8 +66,11 @@ fn notice_lines(width: usize, notice: Option<&str>) -> Vec<String> {
 ///
 /// Returns the footer text only; [`render_frame`] pins it to the bottom edge.
 fn footer_lines(width: usize) -> Vec<String> {
+    // Each menu row shows its shortcut letter (right-aligned); the footer names
+    // that those letters select an item directly, so the affordance the rows hint
+    // at is spelled out (Enter and the per-row letter both open the entry).
     let footer = format!(
-        " v{} | ↑↓: move / Enter: select / q: quit",
+        " v{} | ↑↓: move / Enter or shortcut letter: select / q: quit",
         env!("CARGO_PKG_VERSION")
     );
     vec![widgets::dim_line(width, &footer)]

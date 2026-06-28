@@ -43,12 +43,17 @@ pub struct ClickEvent {
     pub row: u16,
 }
 
-/// One unit of terminal input: a key press, a mouse-wheel scroll, or a click.
+/// One unit of terminal input: a key press, a mouse-wheel scroll, a click, or a
+/// bare pointer move (hover).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Input {
     Key(Key),
     Scroll(ScrollEvent),
     Click(ClickEvent),
+    /// The pointer moved with no button held — its current cell (the same
+    /// `(col, row)` shape as a [`ClickEvent`]). The home loop uses it to show the
+    /// sidebar's PR hover popup; every key-only screen drops it.
+    Hover(ClickEvent),
 }
 
 /// Source of input driving an interactive screen.
@@ -145,9 +150,11 @@ const LEAVE_ALT_SCREEN: &str = "\x1b[?1049l";
 ///   `home::terminal::pane`), everything else is dropped.
 /// - button-event tracking (DECSET 1002) additionally reports motion while a
 ///   button is held, so the embedded terminal pane can follow a drag and select
-///   text (see `home::terminal::selection`). The management screens see these
-///   motion reports too, but `term_reader` drops every non-wheel report, so they
-///   are harmless there.
+///   text (see `home::terminal::selection`).
+/// - any-event tracking (DECSET 1003) additionally reports bare motion (no button
+///   held), which `term_reader` surfaces as an [`Input::Hover`] so the home loop
+///   can show the sidebar's PR hover popup. Key-only screens drop it like any
+///   other non-key report, so it is harmless there.
 ///
 /// We deliberately do *not* enable alternate scroll (DECSET 1007). Alternate
 /// scroll makes the wheel masquerade as cursor-key presses, and those are
@@ -158,10 +165,10 @@ const LEAVE_ALT_SCREEN: &str = "\x1b[?1049l";
 /// ignores mouse reporting (Apple Terminal.app) the wheel does nothing in the
 /// embedded pane either; there the pane scrolls via `Shift`+`↑`/`↓` (and
 /// `Shift`+`PageUp`/`PageDown` where the terminal does not bind them itself).
-const ENABLE_MOUSE: &str = "\x1b[?1000h\x1b[?1002h\x1b[?1006h";
+const ENABLE_MOUSE: &str = "\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1006h";
 /// Disable mouse reporting, restoring the terminal's normal wheel / selection
 /// behaviour once the TUI exits. Reset in the reverse order of [`ENABLE_MOUSE`].
-const DISABLE_MOUSE: &str = "\x1b[?1006l\x1b[?1002l\x1b[?1000l";
+const DISABLE_MOUSE: &str = "\x1b[?1006l\x1b[?1003l\x1b[?1002l\x1b[?1000l";
 
 /// RAII guard that activates the terminal alternate screen and restores it on drop.
 pub struct AlternateScreenGuard {

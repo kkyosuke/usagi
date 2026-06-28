@@ -131,9 +131,10 @@ pub fn write_text_atomic(path: &Path, text: &str) -> Result<()> {
 
 /// The on-disk format version stamped onto every versioned store file
 /// (`storage`'s `workspaces.json` / `settings.json`, `workspace_store`'s
-/// `state.json` / per-repo `settings.json`). Bumped only on an incompatible
-/// on-disk format change; the single source of truth for the envelope's
-/// `version` field so each store no longer carries its own copy.
+/// `state.json` / per-repo `settings.json`, and the issue/memory `index.json`
+/// derived caches). Bumped only on an incompatible on-disk format change; the
+/// single source of truth for the envelope's `version` field so no store carries
+/// its own copy.
 pub const FILE_FORMAT_VERSION: u32 = 1;
 
 /// The on-disk envelope shared by every versioned store file: a `version` plus

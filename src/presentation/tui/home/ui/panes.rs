@@ -19,7 +19,7 @@ use super::{
     EMPTY_MESSAGE, HINT_INDENT, HINT_MAX, LOCAL_ICON, NAME_PREFIX, NEW_ICON, NOTE_ICON,
     PUSHED_ICON, RAIL_WIDTH, ROOT_DETAIL, STATUS_COL, SYNCED_ICON, TERMINAL_STARTING,
 };
-use crate::domain::resource::ResourceUsage;
+use crate::domain::resource::{Load, ResourceUsage};
 use crate::domain::settings::{AgentCli, SessionActionUi, Sidebar};
 use crate::domain::workspace_state::{AheadBehind, BranchStatus, DiffStat, PrLink, WorktreeState};
 use crate::presentation::tui::markdown::{LineStyle, MarkdownLine, Rgb, Span, SpanStyle};
@@ -201,22 +201,93 @@ fn detail_line(gutter: &str, detail: String) -> String {
     format!("{gutter}{indent}{detail}")
 }
 
-/// Builds a live session's **third** line — the CPU / memory its process tree is
-/// using — indented under the name like the detail line, with the row's `gutter`
-/// (so the active accent bar runs down it too). Spelled out as `CPU 8%  MEM 120MB`
-/// in dim text and clipped to the cell. Only live sessions get this row (the
-/// caller passes a usage only when one was sampled), so an idle session stays two
-/// lines and the list spends the extra row only where there is something to show.
-/// The line-2 cluster ([`detail_content`]) stays as it is — this carries the
-/// growing resource detail rather than crowding the already-packed detail line.
+/// Display width the CPU figure is left-padded to inside the `<cpu icon> … <mem
+/// icon> …` label, so the memory column lands in the same place whether CPU reads
+/// `0%` or `100%` — the CPU digit count never shifts MEM. Holds up to `100%`; a
+/// rarer larger reading just nudges MEM right for that one line.
+const CPU_LABEL_WIDTH: usize = 4;
+
+/// Nerd Font glyphs labelling the CPU and memory figures on the resource line,
+/// in place of spelling out `CPU` / `MEM` — the same icon-led style the git
+/// status field uses. They need a patched [Nerd Font](https://www.nerdfonts.com/)
+/// to render; without one the terminal shows a fallback box, but the number
+/// beside each glyph still carries the meaning.
+const CPU_ICON: char = '\u{f2db}'; // nf-fa-microchip — processor use
+                                   // nf-fa-server — resident memory. Kept in the Font Awesome 4 range (like the git
+                                   // status icons) so it renders on older/partial Nerd Fonts; the FA5 nf-fa-memory
+                                   // (U+F538) is missing from those and shows a `?` fallback.
+const MEM_ICON: char = '\u{f233}';
+
+/// Rows every list entry (the root and each session) spans, fixed so the list
+/// never reflows as a session goes live or idle: an identity line, a detail
+/// line, and the CPU / memory line. Shared by the full sidebar, the collapsed
+/// rail, and the click hit-tests so the renderer and the hit-tests never
+/// disagree on where a session's rows are.
+pub(super) const SESSION_ROWS: usize = 3;
+
+/// The icon-led `<cpu> <pct>  <mem> <bytes>` resource label shared by a session's
+/// resource line and the workspace total beside the mascot. The CPU figure leads
+/// with [`CPU_ICON`] and the memory with [`MEM_ICON`] (in place of the words
+/// `CPU` / `MEM`), and the CPU field is left-padded to [`CPU_LABEL_WIDTH`] so the
+/// memory figure stays column-aligned both across rows and from frame to frame as
+/// the percentages change.
+pub(super) fn resource_inline_label(usage: ResourceUsage) -> String {
+    format!(
+        "{CPU_ICON} {cpu:<width$}  {MEM_ICON} {mem}",
+        cpu = usage.format_cpu(),
+        mem = usage.format_memory(),
+        width = CPU_LABEL_WIDTH,
+    )
+}
+
+/// The same icon-led resource label as [`resource_inline_label`], but with the
+/// CPU and memory fields each **tinted by their own load band** — dim when calm,
+/// yellow when busy, red when hot — so a heavy figure stands out beside the
+/// mascot. Used for the workspace total only; the per-session rows stay uniformly
+/// dim via [`resource_inline_label`].
+pub(super) fn resource_inline_label_tinted(usage: ResourceUsage) -> String {
+    let cpu = tint_by_load(
+        format!(
+            "{CPU_ICON} {cpu:<width$}",
+            cpu = usage.format_cpu(),
+            width = CPU_LABEL_WIDTH,
+        ),
+        usage.cpu_load(),
+    );
+    let mem = tint_by_load(
+        format!("{MEM_ICON} {mem}", mem = usage.format_memory()),
+        usage.memory_load(),
+    );
+    format!("{cpu}  {mem}")
+}
+
+/// Paint a resource field by its [`Load`] band: dim (calm), yellow (busy), or red
+/// (hot), so the colour rises with the figure.
+fn tint_by_load(field: String, load: Load) -> String {
+    match load {
+        Load::Calm => style(field).dim(),
+        Load::Busy => style(field).yellow(),
+        Load::Hot => style(field).red(),
+    }
+    .to_string()
+}
+
+/// Builds an entry's **third** line — the CPU / memory its process tree is using —
+/// indented under the name like the detail line, with the row's `gutter` (so the
+/// active accent bar runs down it too). Drawn icon-led ( `8%`  `120MB`,
+/// the CPU / memory glyphs in place of the words) in dim text and clipped to the
+/// cell. Every session draws this row at a fixed height, so an unsampled or idle
+/// session reads `0%` / `0MB` (the caller passes a default usage) rather than
+/// dropping the row and reflowing the list.
 fn resource_line(
     usage: ResourceUsage,
     detail_width: usize,
     active: bool,
     in_switch: bool,
 ) -> String {
-    let text = format!("CPU {}  MEM {}", usage.format_cpu(), usage.format_memory());
-    let detail = style(clip_to_width(&text, detail_width)).dim().to_string();
+    let detail = style(clip_to_width(&resource_inline_label(usage), detail_width))
+        .dim()
+        .to_string();
     detail_line(&gutter_cell(false, active, in_switch), detail)
 }
 
@@ -278,8 +349,8 @@ pub(super) fn worktree_row(
 
     // Line 2 spells out the agent state with its icon (blank when absent) on the
     // left, and a right-aligned cluster of the freshness label (`Nmin ago`), the
-    // commit-divergence marker (`↑N ↓M`), the `+N -M` diff badge, and the `#N` PR
-    // badge. Each field sits in a fixed-width column sized once per render (`cols`),
+    // commit-divergence marker (`↑N ↓M`), the `+N -M` diff badge, and the
+    // `<icon> <count>` PR badge. Each field sits in a fixed-width column sized once per render (`cols`),
     // so a session's time, commits, diff, and PR always land in the same place no
     // matter how many changed lines or how long ago it was touched. Only the active
     // bar runs down to it — the `>` cursor stays a single point on line 1, so the
@@ -349,42 +420,47 @@ pub(super) struct DetailCols {
     /// Digit widths of the diff `+N` / `-M` counts; `added == 0` drops the badge.
     added: usize,
     removed: usize,
-    /// Display width of the `#N` PR cell (`#` + the widest number's digits); 0 = no
-    /// visible session has a PR, so the column is dropped.
+    /// Display width of the `<icon> <count>` PR badge (the glyph, a space, and the
+    /// widest count's digits); 0 = no visible session has a PR, so the column is
+    /// dropped.
     pr: usize,
 }
 
-/// The fixed-width pull-request cell for a worktree's [`PrLink`]s: each PR as
-/// `#<number>` (blue, underlined to read as a link), space-joined and right-aligned
-/// in `width` display columns so the badges line up down the list. A row with no PR
-/// fills the same width with blanks, holding the column. `width` is 0 (and the cell
-/// omitted) when no visible session carries a PR.
+/// Nerd Font glyph leading the pull-request badge — a git pull-request icon in
+/// place of spelling out `PR`, the same icon-led style the git status and resource
+/// fields use. Needs a patched [Nerd Font](https://www.nerdfonts.com/) to render;
+/// without one the terminal shows a fallback box, but the count beside it still
+/// carries the meaning.
+pub(super) const PR_ICON: char = '\u{ea64}'; // nf-cod-git_pull_request
+
+/// The fixed-width pull-request cell for a worktree's [`PrLink`]s: a single
+/// `<icon> <count>` badge (blue, underlined to read as a link) — the PR glyph and
+/// how many PRs the session carries — right-aligned in `width` display columns so
+/// the badges line up down the list. Folding several PRs into one count keeps the
+/// detail line from being crowded out by a long `#442 #447 …` run (the full list
+/// is one hover away; see [`sidebar_pr_hover_at`]). A row with no PR fills the same
+/// width with blanks, holding the column. `width` is 0 (and the cell omitted) when
+/// no visible session carries a PR.
 fn pr_cell(prs: &[PrLink], width: usize) -> String {
     if prs.is_empty() {
         return " ".repeat(width);
     }
-    let joined = prs
-        .iter()
-        .map(|pr| {
-            style(format!("#{}", pr.number))
-                .blue()
-                .underlined()
-                .to_string()
-        })
-        .collect::<Vec<_>>()
-        .join(" ");
-    rpad(&joined, width)
+    let badge = style(format!("{PR_ICON} {}", prs.len()))
+        .blue()
+        .underlined()
+        .to_string();
+    rpad(&badge, width)
 }
 
-/// The display width the `#<number>` badges of `prs` occupy when space-joined —
-/// each badge is `#` + the number's digits, with a one-space gap between badges.
-/// `0` for no PR. Used to size the fixed [`DetailCols::pr`] column.
+/// The display width the `<icon> <count>` PR badge occupies: the glyph, a space,
+/// and the count's digits. `0` for no PR. Used to size the fixed
+/// [`DetailCols::pr`] column.
 fn pr_width(prs: &[PrLink]) -> usize {
     if prs.is_empty() {
         return 0;
     }
-    let badges: usize = prs.iter().map(|pr| 1 + digits(pr.number as usize)).sum();
-    badges + (prs.len() - 1)
+    // icon (1 column) + space + the count's digits.
+    2 + digits(prs.len())
 }
 
 impl DetailCols {
@@ -418,7 +494,7 @@ impl DetailCols {
 
 /// One visible session's inputs to [`detail_cols`]: when it was last touched, its
 /// diff against the default, its commit divergence, and the display width of its
-/// `#N` PR badges (see [`pr_width`]).
+/// `<icon> <count>` PR badge (see [`pr_width`]).
 type ClusterData = (DateTime<Utc>, Option<DiffStat>, Option<AheadBehind>, usize);
 
 /// Measures the fixed [`DetailCols`] for a render: the widest freshness label, the
@@ -453,7 +529,7 @@ fn detail_cols(
                 cols.behind = cols.behind.max(digits(ab.behind));
             }
         }
-        // The widest joined `#N … #M` badge set across the visible sessions.
+        // The widest `<icon> <count>` PR badge across the visible sessions.
         cols.pr = cols.pr.max(*pr_w);
     }
     // Trim low-priority columns (time, then commits) until the cluster fits beside
@@ -628,19 +704,22 @@ fn root_glyph() -> String {
     style("⌂").magenta().to_string()
 }
 
-/// Builds one collapsed-rail **entry** as the same two lines a full-sidebar entry
-/// spans, so toggling the sidebar never moves a session to a different row (no
-/// layout shift) — only the width changes. The glyphs form a 2×2 grid beside the
-/// gutter:
+/// Builds one collapsed-rail **entry** as the same [`SESSION_ROWS`] lines a
+/// full-sidebar entry spans, so toggling the sidebar never moves a session to a
+/// different row (no layout shift) — only the width changes. The glyphs form a
+/// 2×2 grid beside the gutter, and a third (blank) row matches the full sidebar's
+/// resource line — the narrow rail has no room for a CPU / memory figure, so it
+/// keeps the row's height without the number:
 ///
 /// ```text
 /// ▎ <kind> <git>     row 1: identity dot (⌂/●/○) + git-status glyph
 /// ▎       <agent>    row 2: agent-state glyph (▶/◆/☾/✓), under the git column
+/// ▎                  row 3: blank (the full sidebar's resource line has no rail twin)
 /// ```
 ///
 /// `git` is blank on the root (no git status); `agent` is blank when no agent is
-/// in use. The active `▎` bar runs down both rows; the 切替 `>` cursor stays a
-/// point on row 1, matching the full sidebar.
+/// in use. The active `▎` bar runs down all three rows; the 切替 `>` cursor stays
+/// a point on row 1, matching the full sidebar.
 fn rail_entry(
     selected: bool,
     active: bool,
@@ -648,7 +727,7 @@ fn rail_entry(
     kind: &str,
     git: Option<&str>,
     agent: Option<&str>,
-) -> (String, String) {
+) -> (String, String, String) {
     let gutter = gutter_cell(selected, active, in_switch);
     let bar = gutter_cell(false, active, in_switch);
     // Columns: gutter @0, kind @2, git/agent @4 — so the agent glyph sits under
@@ -658,7 +737,10 @@ fn rail_entry(
         RAIL_WIDTH,
     );
     let detail = pad_to_width(format!("{bar}   {}", agent.unwrap_or(" ")), RAIL_WIDTH);
-    (top, detail)
+    // The resource row's rail twin: the active bar runs down it, but the rail has
+    // no room for the CPU / memory figure, so the rest is blank.
+    let resource = pad_to_width(bar, RAIL_WIDTH);
+    (top, detail, resource)
 }
 
 /// Builds the collapsed-rail sidebar ([`Sidebar::Rail`]): the root entry first, a
@@ -678,9 +760,13 @@ fn rail_pane(
     done: &HashSet<PathBuf>,
     rows: usize,
     in_switch: bool,
+    now: DateTime<Utc>,
 ) -> Vec<String> {
     let root = root_glyph();
-    let (mut root_top, mut root_detail) = rail_entry(
+    // The root entry is two rows (then a divider), matching the full sidebar's
+    // [`root_row`]; only worktree entries carry the third resource row, so the
+    // root drops the rail entry's (blank) third line.
+    let (mut root_top, mut root_detail, _) = rail_entry(
         list.root_selected(),
         list.root_active(),
         in_switch,
@@ -706,7 +792,7 @@ fn rail_pane(
         let row = i + 1;
         let selected = row == list.selected_index();
         let active = row == list.active_index();
-        let kind = kind_dot(heat_of(w.updated_at, Utc::now()));
+        let kind = kind_dot(heat_of(w.updated_at, now));
         let git = rail_status_glyph(w.status);
         let agent = AgentState::from_flags(
             live.contains(&w.path),
@@ -715,7 +801,7 @@ fn rail_pane(
             done.contains(&w.path),
         )
         .rail_icon();
-        let (mut top, mut detail) = rail_entry(
+        let (mut top, mut detail, mut resource) = rail_entry(
             selected,
             active,
             in_switch,
@@ -726,9 +812,11 @@ fn rail_pane(
         if in_switch && !selected {
             top = dim_row(&top);
             detail = dim_row(&detail);
+            resource = dim_row(&resource);
         }
         lines.push(top);
         lines.push(detail);
+        lines.push(resource);
     }
     if list.is_empty() {
         // Mirror the full sidebar's single empty-message row so the row count
@@ -750,9 +838,11 @@ pub(super) fn dim_row(line: &str) -> String {
     style(console::strip_ansi_codes(line)).dim().to_string()
 }
 
-/// Builds the left pane: each entry spans two lines (an identity line and a
-/// detail line) — the root entry first, then one per worktree (or the empty
-/// message when none are recorded), trimmed to the available `rows`. `live` holds
+/// Builds the left pane: the root entry (two lines) first, then a divider, then
+/// one [`SESSION_ROWS`]-line entry per worktree — an identity line, a detail
+/// line, and a CPU / memory line (`CPU 0%  MEM 0MB` when unsampled, so the entry
+/// is a fixed height and the list never reflows) — or the empty message when none
+/// are recorded, trimmed to the available `rows`. `live` holds
 /// the worktree paths with an embedded session (a live-but-idle one shows
 /// `☾ ready`), `running` the ones working a turn (`▶ running`), `waiting` the
 /// ones whose agent awaits input (`◆ waiting`), and `done` the finished ones
@@ -779,7 +869,7 @@ pub(super) fn left_pane(
     if sidebar == Sidebar::Rail {
         // The 5-column rail has no room for a CPU / memory figure, so the rail
         // shows only the agent glyph; the resource line belongs to the full list.
-        return rail_pane(list, live, running, waiting, done, rows, in_switch);
+        return rail_pane(list, live, running, waiting, done, rows, in_switch, now);
     }
     // Line 1: prefix + name + the (now-blank) active-marker cell + a space + the
     // right-edge status field.
@@ -790,8 +880,11 @@ pub(super) fn left_pane(
     // that will actually be drawn (the render loop below stops at the same bound),
     // so each field lands in the same column on every row and an off-screen session
     // never widens a visible column. Two header lines (root) + the divider precede
-    // the sessions, and each session spans two rows.
-    let visible_n = list.worktrees().len().min(rows.saturating_sub(2) / 2);
+    // the sessions, and each session spans [`SESSION_ROWS`] rows.
+    let visible_n = list
+        .worktrees()
+        .len()
+        .min(rows.saturating_sub(ROOT_ENTRY_LINES).div_ceil(SESSION_ROWS));
     let mut max_agent_w = 0;
     let cluster_data: Vec<_> = list
         .worktrees()
@@ -870,22 +963,21 @@ pub(super) fn left_pane(
                 waiting.contains(&w.path),
                 done.contains(&w.path),
             );
-            // A live session that has been sampled gets a third line spelling out
-            // its CPU / memory; idle sessions stay two lines, so the list spends the
-            // extra row only where there is something to show.
-            let mut resource = resources.get(&w.path).map(|usage| {
-                resource_line(*usage, detail_width, row == list.active_index(), in_switch)
-            });
+            // Every session draws a third CPU / memory line at a fixed height, so
+            // the list never reflows as a session goes live or idle. An unsampled
+            // session shows `CPU 0%  MEM 0MB` (a default usage) rather than dropping
+            // the row.
+            let usage = resources.get(&w.path).copied().unwrap_or_default();
+            let mut resource =
+                resource_line(usage, detail_width, row == list.active_index(), in_switch);
             if in_switch && !selected {
                 top = dim_row(&top);
                 detail = dim_row(&detail);
-                resource = resource.as_deref().map(dim_row);
+                resource = dim_row(&resource);
             }
             lines.push(top);
             lines.push(detail);
-            if let Some(resource) = resource {
-                lines.push(resource);
-            }
+            lines.push(resource);
         }
     }
     lines.truncate(rows);
@@ -1042,23 +1134,26 @@ pub(in crate::presentation::tui::home) fn attached_tab_at(
     (target != strip.active).then_some(target)
 }
 
-/// The pull-request URL a left click at the 0-based screen (`col`, `row`) should
-/// open, or `None` when the click is not on a session row that carries a PR.
+/// The pull-request URLs a left click at the 0-based screen (`col`, `row`) should
+/// open — every PR the session carries — or an empty `Vec` when the click is not
+/// on its folded `<icon> <count>` PR badge.
 ///
-/// The full sidebar shows each session's `#<number>` badges (the rail does not), so
-/// a click is mapped to a session's PRs only there. The whole session entry is the
-/// target — clicking anywhere on its rows opens its PRs — since the sidebar has no
-/// other click action to disambiguate against, and the `#<number>` badges are the
-/// affordance that marks the row as openable. A session may carry several PRs, so
-/// every recorded URL is returned (the caller opens each).
+/// The full sidebar folds a session's PRs into one `<icon> <count>` badge on its
+/// detail line (the rail draws none), so the badge is the *only* openable target —
+/// a click anywhere else on the row opens nothing, leaving it free for the
+/// double-click-to-switch the immersive pane arms. The badge stands for the whole
+/// set, so clicking it opens them all; the individual `#<number>` list is the hover
+/// popup's job (see [`sidebar_pr_hover_at`]).
 ///
 /// The geometry mirrors what [`super::render_frame`] lays out: the two-pane body
 /// begins at row [`BODY_TOP`] (below the title bar, mode ladder, and blank
 /// separator) and is [`super::body_rows_for`] rows tall; the left pane is the
 /// first `left_w` columns. Within it the entries stack as [`left_pane`] builds
-/// them — the root entry (two rows), a divider (one row), then two rows per
-/// worktree (a live session may add a third, which this mapping does not model —
-/// the same simplification [`super::left_pane_session_at`] makes).
+/// them — the root entry (two rows), a divider (one row), then [`SESSION_ROWS`]
+/// rows per worktree (identity, detail, and the CPU / memory line). The badge is
+/// the right-aligned tail of the detail line's cluster, flush to the pane's right
+/// edge (`left_w`); it is the PR glyph, a space, and the count's digits (see
+/// [`pr_cell`] / [`pr_width`]).
 pub(in crate::presentation::tui::home) fn sidebar_pr_links_at(
     state: &HomeState,
     raw_height: usize,
@@ -1066,31 +1161,198 @@ pub(in crate::presentation::tui::home) fn sidebar_pr_links_at(
     col: u16,
     row: u16,
 ) -> Vec<String> {
-    // Only the full sidebar draws the `#N` badges; the collapsed rail shows no PR,
-    // so a click there maps to nothing.
-    if state.sidebar() != Sidebar::Full {
-        return Vec::new();
-    }
-    let (height, width) = widgets::normalize_size(raw_height, raw_width);
-    let (left_w, _) = super::layout(width, Sidebar::Full);
-    // The click must land inside the left pane, on a body row.
-    if (col as usize) >= left_w || row < BODY_TOP {
-        return Vec::new();
-    }
-    let line = (row - BODY_TOP) as usize;
-    if line >= super::body_rows_for(height) {
-        return Vec::new();
-    }
-    // Lines 0..2 are the root entry and the divider; worktree rows start at line 3,
-    // two lines each.
-    let Some(entry) = line.checked_sub(ROOT_ENTRY_LINES) else {
-        return Vec::new();
-    };
-    match state.list().worktrees().get(entry / 2) {
-        Some(wt) => wt.pr.iter().map(|pr| pr.url.clone()).collect(),
+    match sidebar_pr_badge_at(state, raw_height, raw_width, col, row) {
+        Some(idx) => state.list().worktrees()[idx]
+            .pr
+            .iter()
+            .map(|pr| pr.url.clone())
+            .collect(),
         None => Vec::new(),
     }
 }
+
+/// The worktree (by index in the list) whose folded `<icon> <count>` PR badge the
+/// 0-based screen (`col`, `row`) lands on, or `None` otherwise — the column-precise
+/// hit-test behind the PR click ([`sidebar_pr_links_at`]). Only the badge columns
+/// count, so the rest of the row stays free for selection; the wider whole-entry
+/// test that raises the hover popup is [`sidebar_pr_worktree_at`].
+///
+/// Only the full sidebar draws the badge; the collapsed rail shows no PR, so a
+/// click there maps to nothing.
+fn sidebar_pr_badge_at(
+    state: &HomeState,
+    raw_height: usize,
+    raw_width: usize,
+    col: u16,
+    row: u16,
+) -> Option<usize> {
+    if state.sidebar() != Sidebar::Full {
+        return None;
+    }
+    let (height, width) = widgets::normalize_size(raw_height, raw_width);
+    let (left_w, _) = super::layout(width, Sidebar::Full);
+    let col = col as usize;
+    // The click must land inside the left pane, on a body row.
+    if col >= left_w || row < BODY_TOP {
+        return None;
+    }
+    let line = (row - BODY_TOP) as usize;
+    if line >= super::body_rows_for(height) {
+        return None;
+    }
+    // Lines 0..2 are the root entry and the divider; worktree rows start at line 3,
+    // [`SESSION_ROWS`] lines each. The badge only lives on each entry's detail line.
+    let entry_line = line.checked_sub(ROOT_ENTRY_LINES)?;
+    if entry_line % SESSION_ROWS != DETAIL_LINE {
+        return None;
+    }
+    let idx = entry_line / SESSION_ROWS;
+    let wt = state.list().worktrees().get(idx)?;
+    if wt.pr.is_empty() {
+        return None;
+    }
+    // The badge seats flush to the pane's right edge. If its width does not fit the
+    // detail area (a cramped pane), the cluster is clipped rather than drawn
+    // flush-right, so its columns can't be placed — open nothing rather than guess.
+    let start = left_w.checked_sub(pr_width(&wt.pr))?;
+    if start < NAME_PREFIX {
+        return None;
+    }
+    // The badge stands for every PR, so a click anywhere across its span opens them.
+    (start..left_w).contains(&col).then_some(idx)
+}
+
+/// The worktree (by index in the list) the 0-based screen (`col`, `row`) lands on
+/// **when it carries a PR**, or `None` otherwise — the whole-entry hit-test behind
+/// the PR hover popup ([`sidebar_pr_hover_at`], which floats its `#<number>` list).
+/// The whole session entry is the target so a hover anywhere on the row raises the
+/// popup; the click that opens the URLs uses the tighter badge-only
+/// [`sidebar_pr_badge_at`] instead.
+///
+/// Only the full sidebar draws the badge; the collapsed rail shows no PR, so a
+/// point there maps to nothing. The geometry mirrors what [`super::render_frame`]
+/// lays out: the two-pane body begins at row [`BODY_TOP`] (below the title bar,
+/// mode ladder, and blank separator) and is [`super::body_rows_for`] rows tall; the
+/// left pane is the first `left_w` columns. Within it the entries stack as
+/// [`left_pane`] builds them — the root entry (two rows), a divider (one row), then
+/// [`SESSION_ROWS`] rows per worktree (identity, detail, and the CPU / memory line).
+fn sidebar_pr_worktree_at(
+    state: &HomeState,
+    raw_height: usize,
+    raw_width: usize,
+    col: u16,
+    row: u16,
+) -> Option<usize> {
+    if state.sidebar() != Sidebar::Full {
+        return None;
+    }
+    let (height, width) = widgets::normalize_size(raw_height, raw_width);
+    let (left_w, _) = super::layout(width, Sidebar::Full);
+    // The point must land inside the left pane, on a body row.
+    if (col as usize) >= left_w || row < BODY_TOP {
+        return None;
+    }
+    let line = (row - BODY_TOP) as usize;
+    if line >= super::body_rows_for(height) {
+        return None;
+    }
+    // Lines 0..2 are the root entry and the divider; worktree rows start at line 3,
+    // [`SESSION_ROWS`] lines each.
+    let entry = line.checked_sub(ROOT_ENTRY_LINES)?;
+    let idx = entry / SESSION_ROWS;
+    // The badge (and so the hover target) only exists on a row with a PR.
+    state
+        .list()
+        .worktrees()
+        .get(idx)
+        .filter(|wt| !wt.pr.is_empty())
+        .map(|_| idx)
+}
+
+/// The worktree whose PR hover popup the pointer at the 0-based screen (`col`,
+/// `row`) should raise, or `None` when it is not over a PR-bearing session's row.
+/// The home loop feeds pointer moves here and stores the result in
+/// [`HomeState::set_pr_hover`]; the renderer then floats that session's full
+/// `#<number>` list (folded to an `<icon> <count>` badge in the row itself) beside
+/// it. Shares the whole-entry [`sidebar_pr_worktree_at`] hit-test, so the popup
+/// rises wherever the row is hovered.
+pub(in crate::presentation::tui::home) fn sidebar_pr_hover_at(
+    state: &HomeState,
+    raw_height: usize,
+    raw_width: usize,
+    col: u16,
+    row: u16,
+) -> Option<usize> {
+    sidebar_pr_worktree_at(state, raw_height, raw_width, col, row)
+}
+
+/// The widest a PR hover popup's content grows before its `#<number>` list wraps to
+/// another line, so a session with many PRs stays a tidy box rather than one long
+/// row.
+const PR_POPUP_INNER: usize = 28;
+
+/// Builds the PR hover popup for a session's `prs`: its `#<number>` links (blue,
+/// underlined), space-joined and wrapped to [`PR_POPUP_INNER`] columns, wrapped in
+/// a titled box ready to float beside the hovered row (see
+/// [`sidebar_pr_hover_at`]). Empty `prs` yields no box (the popup only shows for a
+/// PR-bearing session), so the overlay is a no-op.
+pub(in crate::presentation::tui::home) fn pr_hover_popup(prs: &[PrLink]) -> Vec<String> {
+    if prs.is_empty() {
+        return Vec::new();
+    }
+    // Greedily pack `#N` tokens onto lines up to the inner cap; a token's plain
+    // width is `#` + its digits, with a one-space gap between tokens.
+    let mut rows: Vec<Vec<&PrLink>> = Vec::new();
+    let mut cur: Vec<&PrLink> = Vec::new();
+    let mut cur_w = 0usize;
+    for pr in prs {
+        let tok = 1 + digits(pr.number as usize);
+        if cur.is_empty() {
+            cur_w = tok;
+        } else if cur_w + 1 + tok > PR_POPUP_INNER {
+            rows.push(std::mem::take(&mut cur));
+            cur_w = tok;
+        } else {
+            cur_w += 1 + tok;
+        }
+        cur.push(pr);
+    }
+    rows.push(cur);
+    // Hug the content: the box is as wide as its widest line, never past the cap.
+    let inner = rows
+        .iter()
+        .map(|r| {
+            r.iter()
+                .map(|pr| 1 + digits(pr.number as usize))
+                .sum::<usize>()
+                + (r.len() - 1)
+        })
+        .max()
+        .unwrap_or(0)
+        .min(PR_POPUP_INNER);
+    let lines: Vec<String> = rows
+        .iter()
+        .map(|r| {
+            r.iter()
+                .map(|pr| {
+                    style(format!("#{}", pr.number))
+                        .blue()
+                        .underlined()
+                        .to_string()
+                })
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .collect();
+    widgets::boxed("PR", inner, &lines)
+}
+
+/// The 0-based line, within a list entry's [`SESSION_ROWS`] rows, that carries the
+/// detail line — the row [`worktree_row`] draws the `#<number>` PR badges on (after
+/// the identity line, before the CPU / memory line). The badge hit-test
+/// ([`sidebar_pr_badge_at`]) and the renderer share it so they agree on where the
+/// badges sit.
+const DETAIL_LINE: usize = 1;
 
 /// The 0-based screen row the two-pane body begins at, matching the title bar,
 /// mode ladder, and blank separator [`super::render_frame`] stacks above it (and
@@ -1098,9 +1360,9 @@ pub(in crate::presentation::tui::home) fn sidebar_pr_links_at(
 const BODY_TOP: u16 = 3;
 
 /// Lines the left pane spends before the first worktree row: the root entry (two
-/// rows) and the divider beneath it. Worktree `i` then occupies lines
-/// `ROOT_ENTRY_LINES + 2*i` and the one after it.
-const ROOT_ENTRY_LINES: usize = 3;
+/// rows) and the divider beneath it. Worktree `i` then occupies the
+/// [`SESSION_ROWS`] lines starting at `ROOT_ENTRY_LINES + SESSION_ROWS * i`.
+pub(super) const ROOT_ENTRY_LINES: usize = 3;
 
 /// Column widths for the fixed-width header identity. The session name is clipped
 /// and every field is padded to a constant width, so the identity block is the
@@ -1936,6 +2198,38 @@ mod tests {
     use super::*;
 
     #[test]
+    fn resource_inline_label_tinted_carries_the_figures_for_every_load_band() {
+        // The CPU and memory fields are tinted by their own load band (dim / yellow
+        // / red); whatever the tint, both figures still read through. Cover calm,
+        // busy, and hot for each field.
+        for usage in [
+            ResourceUsage {
+                cpu_percent: 1,
+                memory_bytes: 1,
+            }, // calm / calm
+            ResourceUsage {
+                cpu_percent: 50,
+                memory_bytes: 600 * 1024 * 1024,
+            }, // busy / busy
+            ResourceUsage {
+                cpu_percent: 200,
+                memory_bytes: 3 * 1024 * 1024 * 1024,
+            }, // hot / hot
+        ] {
+            let plain =
+                console::strip_ansi_codes(&resource_inline_label_tinted(usage)).into_owned();
+            assert!(
+                plain.contains(&usage.format_cpu()),
+                "{plain:?} keeps the CPU figure"
+            );
+            assert!(
+                plain.contains(&usage.format_memory()),
+                "{plain:?} keeps the memory figure"
+            );
+        }
+    }
+
+    #[test]
     fn name_cell_pads_by_display_width_not_char_count() {
         // A full-width (CJK) name must fill its cell by *display* columns, not
         // char count: `あ機能` is 3 chars but 6 display columns, so padding to a
@@ -2170,7 +2464,7 @@ mod tests {
                     ahead: 2,
                     behind: 0,
                 }),
-                pr_width(&[pr(7)]), // "#7" → 2
+                pr_width(&[pr(7)]), // "<icon> 1" → 3
             ),
             (
                 at(now, 12),
@@ -2182,7 +2476,7 @@ mod tests {
                     ahead: 0,
                     behind: 13,
                 }),
-                pr_width(&[pr(412), pr(98)]), // "#412 #98" → 8
+                pr_width(&[pr(412), pr(98)]), // "<icon> 2" → 3
             ),
             // A session with neither a diff nor divergence nor PR: exercises every
             // empty arm so they contribute no columns.
@@ -2193,7 +2487,7 @@ mod tests {
         assert_eq!(cols.removed, 1); // "8" / "3"
         assert_eq!(cols.ahead, 1); // "2"
         assert_eq!(cols.behind, 2); // "13"
-        assert_eq!(cols.pr, 8); // widest is "#412 #98"
+        assert_eq!(cols.pr, 3); // "<icon> 2" — both sessions fold to one badge
         assert_eq!(
             cols.time,
             console::measure_text_width(&relative_time(now, at(now, 12))) // "12min ago"
@@ -2336,30 +2630,70 @@ mod tests {
     }
 
     #[test]
-    fn pr_cell_joins_badges_pads_the_column_and_blanks_when_absent() {
-        // One PR rides the right edge of its fixed column; a wider column left-pads
-        // with spaces so badges line up down the list.
-        let cell = pr_cell(&[pr(7)], 4);
-        assert_eq!(console::measure_text_width(&cell), 4);
-        assert_eq!(console::strip_ansi_codes(&cell), "  #7");
-        // Several PRs are space-joined as `#N #M`.
-        let many = pr_cell(&[pr(412), pr(98)], 8);
-        assert_eq!(console::strip_ansi_codes(&many), "#412 #98");
+    fn pr_cell_folds_prs_into_an_icon_and_count_and_blanks_when_absent() {
+        // One PR rides the right edge of its fixed column as `<icon> 1`; a wider
+        // column left-pads with spaces so badges line up down the list.
+        let cell = pr_cell(&[pr(7)], 5);
+        assert_eq!(console::measure_text_width(&cell), 5);
+        assert_eq!(
+            console::strip_ansi_codes(&cell),
+            format!("  {PR_ICON} 1").as_str()
+        );
+        // Several PRs fold into one `<icon> <count>` badge, not a `#N #M` run.
+        let many = pr_cell(&[pr(412), pr(98)], 3);
+        assert_eq!(
+            console::strip_ansi_codes(&many),
+            format!("{PR_ICON} 2").as_str()
+        );
         // No PR fills the same width with blanks, holding the column.
         assert_eq!(pr_cell(&[], 4), "    ");
     }
 
     #[test]
-    fn pr_width_sums_badges_with_gaps() {
+    fn pr_width_is_the_icon_space_and_count_digits() {
         assert_eq!(pr_width(&[]), 0);
-        assert_eq!(pr_width(&[pr(7)]), 2); // "#7"
-        assert_eq!(pr_width(&[pr(412), pr(98)]), 8); // "#412 #98"
+        assert_eq!(pr_width(&[pr(7)]), 3); // "<icon> 1"
+        assert_eq!(pr_width(&[pr(412), pr(98)]), 3); // "<icon> 2"
+                                                     // A count that reaches two digits widens by one.
+        let ten: Vec<PrLink> = (0..10).map(pr).collect();
+        assert_eq!(pr_width(&ten), 4); // "<icon> 10"
+    }
+
+    #[test]
+    fn pr_hover_popup_lists_the_numbers_in_a_titled_box() {
+        let popup = pr_hover_popup(&[pr(442), pr(447)]);
+        let plain: Vec<String> = popup
+            .iter()
+            .map(|l| console::strip_ansi_codes(l).into_owned())
+            .collect();
+        // The top border carries the `PR` title; a content row lists both numbers.
+        assert!(plain[0].contains("PR"));
+        assert!(plain
+            .iter()
+            .any(|l| l.contains("#442") && l.contains("#447")));
+        // No PR → no box, so the overlay is a no-op for a session without one.
+        assert!(pr_hover_popup(&[]).is_empty());
+    }
+
+    #[test]
+    fn pr_hover_popup_wraps_a_long_list_within_the_inner_cap() {
+        // Twenty `#1NN` badges (4 columns each) cannot fit one capped line, so they
+        // wrap onto several content rows.
+        let many: Vec<PrLink> = (100u32..120).map(pr).collect();
+        let popup = pr_hover_popup(&many);
+        // More than just the top + bottom border: the list spilled onto several rows.
+        assert!(popup.len() > 3);
+        // Every row (content and border alike) stays within the inner cap plus the
+        // two borders and a space of padding on each side.
+        for line in &popup {
+            assert!(console::measure_text_width(line) <= PR_POPUP_INNER + 4);
+        }
     }
 
     #[test]
     fn detail_content_keeps_the_pr_cell_at_the_right_edge() {
         // The PR cell, as the last in `cells`, lands flush against the right edge
-        // beside the diff badge (`+1 -2 #412 #98`).
+        // beside the diff badge (`+1 -2 <icon> 2`).
         let badge = diff_cell(
             Some(DiffStat {
                 added: 1,
@@ -2368,12 +2702,12 @@ mod tests {
             1,
             1,
         );
-        let cell = pr_cell(&[pr(412), pr(98)], 8);
+        let cell = pr_cell(&[pr(412), pr(98)], 3);
         let cells = vec![badge, cell];
         let line = detail_content(AgentState::Running, &cells, 40);
         let plain = console::strip_ansi_codes(&line);
         assert!(plain.starts_with("▶ running"));
-        assert!(plain.contains("+1 -2 #412 #98"));
-        assert!(plain.ends_with("#98"));
+        assert!(plain.contains(format!("+1 -2 {PR_ICON} 2").as_str()));
+        assert!(plain.ends_with(format!("{PR_ICON} 2").as_str()));
     }
 }

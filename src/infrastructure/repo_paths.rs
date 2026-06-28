@@ -15,3 +15,10 @@
 /// The repository-relative directory holding usagi's per-project metadata
 /// (`issues/`, `memory/`, `sessions/`, `state.json`, …): `<repo>/.usagi`.
 pub const STATE_DIR: &str = ".usagi";
+
+/// The directory under [`STATE_DIR`] that holds session worktrees, one per
+/// session: `<repo>/.usagi/sessions/<name>`. Several layers join it (the
+/// session lifecycle builds and reconciles it, the TUI evicts a removed
+/// session's tree under it), so it is named here once rather than re-spelled as
+/// a `"sessions"` literal at each site.
+pub const SESSIONS_DIR: &str = "sessions";

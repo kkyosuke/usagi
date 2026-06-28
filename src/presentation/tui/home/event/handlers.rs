@@ -6,7 +6,7 @@
 //! terminal (没入). All are pure aside from the injected callbacks, which they
 //! reach through the shared [`Wiring`] bundle.
 
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use anyhow::Result;
 use console::Key;
@@ -17,6 +17,7 @@ use crate::presentation::tui::io::screen::{self, FramePainter};
 use crate::domain::settings::{AgentCli, KeyScheme, SessionActionUi};
 
 use super::super::command::Effect;
+use super::super::pane_input::{is_double_click, DOUBLE_CLICK};
 use super::super::state::{HomeState, ModalSize, PaneExit, ReturnMode, ROOT_NAME};
 use super::super::terminal::tabs::TabNav;
 use super::super::ui;
@@ -210,7 +211,10 @@ pub(super) fn switch_key(
                     Key::ArrowRight => create.move_right(),
                     Key::Home => create.move_home(),
                     Key::End => create.move_end(),
-                    Key::Char(c) => create.push_char(c),
+                    // Filter control chars so a stray chord (e.g. Ctrl-S) that
+                    // arrives as `Key::Char('\x13')` can't inject an invisible
+                    // byte into the name — the note editor guards the same way.
+                    Key::Char(c) if !c.is_control() => create.push_char(c),
                     _ => {}
                 }
             }
@@ -243,7 +247,8 @@ pub(super) fn switch_key(
                     Key::ArrowRight => rename.move_right(),
                     Key::Home => rename.move_home(),
                     Key::End => rename.move_end(),
-                    Key::Char(c) => rename.push_char(c),
+                    // Filter control chars (see the create-input arm above).
+                    Key::Char(c) if !c.is_control() => rename.push_char(c),
                     _ => {}
                 }
             }
@@ -537,19 +542,15 @@ fn focus_and_attach(
     }
 }
 
-/// How close two left clicks on the same session row must fall to count as a
-/// double click — the threshold separating a single click (select the row) from
-/// a double click (confirm, like `Enter`).
-const DOUBLE_CLICK: Duration = Duration::from_millis(400);
-
 /// Handle a left click that landed on the selectable session `row` in 切替
 /// (Switch): a single click selects the row (moves the cursor onto it), and a
 /// second click on the same row within [`DOUBLE_CLICK`] confirms it — focusing
 /// the session and attaching its pane when live, exactly like `Enter`.
 ///
 /// `last_click` carries the previous click's row and time across event-loop
-/// iterations so the double click can be detected; a confirm clears it so a third
-/// click starts a fresh single click rather than re-confirming.
+/// iterations so the double click can be detected (via [`is_double_click`], the
+/// shared core the 没入 pane reuses); a confirm clears it so a third click starts
+/// a fresh single click rather than re-confirming.
 pub(super) fn switch_click(
     term: &Term,
     state: &mut HomeState,
@@ -559,18 +560,11 @@ pub(super) fn switch_click(
     now: Instant,
     last_click: &mut Option<(usize, Instant)>,
 ) {
-    let is_double = matches!(
-        *last_click,
-        Some((prev_row, at)) if prev_row == row && now.duration_since(at) <= DOUBLE_CLICK
-    );
     // Always land the cursor on the clicked row first, so a double click confirms
     // the row it lands on and a single click just leaves it selected.
     state.switch_select(row);
-    if is_double {
-        *last_click = None;
+    if is_double_click(last_click, row, now, DOUBLE_CLICK) {
         focus_and_attach(term, state, painter, wiring, row);
-    } else {
-        *last_click = Some((row, now));
     }
 }
 
@@ -628,16 +622,25 @@ pub(super) fn focus_key(
     // as it does from the live terminal. Unlike 没入 this needs no timeout: 在席 has
     // no shell a forgotten leader could leak a literal `Ctrl-O` into, and the very
     // next key always resolves it.
+    // Any deliberate key other than `Esc` cancels the one-shot return-to-pane
+    // arming (set when 在席 was reached by zooming out of a live pane with
+    // `Ctrl-T` / `Ctrl-O a`), so only an *immediate* `Esc` returns to that pane.
+    if !matches!(key, Key::Escape) {
+        state.clear_focus_return_attach();
+    }
+
     if state.prefix_pending() {
         state.set_prefix_pending(false);
         return focus_prefix_action(term, state, painter, key, wiring);
     }
 
-    // `Esc` peels back one step: on the "+ new" launch surface opened over live
-    // panes (e.g. after `Ctrl-T` from 没入) it discards the surface and steps onto
-    // the pane's tab so that pane previews again; everywhere else (a pane tab, or
-    // an idle session with no pane behind "+ new") it leaves 在席 for 切替. `Ctrl-O`
-    // is the leader for that prefix grammar (the action is the next key);
+    // `Esc` peels back one step. When 在席 was reached by zooming out of a live
+    // pane (`Ctrl-T` / `Ctrl-O a`) the first `Esc` returns straight to that pane
+    // (没入) — back to the tab the zoom started from; otherwise, on a "+ new"
+    // launch surface opened over live panes it discards the surface and steps onto
+    // the pane's tab so that pane previews again, and everywhere else (a pane tab,
+    // or an idle session with no pane behind "+ new") it leaves 在席 for 切替.
+    // `Ctrl-O` is the leader for that prefix grammar (the action is the next key);
     // `Ctrl-P` / `Ctrl-N` also move the tab selector directly across the session's
     // live panes and the trailing "+ new" tab. These bind the same whichever tab
     // is selected.
@@ -646,6 +649,13 @@ pub(super) fn focus_key(
             // A first `Esc` collapses an open agent picker (案A) back to the menu;
             // only when none is open does it peel back a step.
             if state.focus_menu_collapse_agent() {
+                return Flow::Continue;
+            }
+            // When 在席 was reached by zooming out of a live pane (`Ctrl-T` /
+            // `Ctrl-O a`), the first `Esc` returns to that pane (没入) — back to the
+            // tab the zoom started from — rather than peeling back toward 切替.
+            if state.take_focus_return_attach() {
+                open_pane(term, state, painter, wiring, false, false);
                 return Flow::Continue;
             }
             if !state.focus_discard_new_tab() {
@@ -909,7 +919,8 @@ fn focus_prompt_key(
         Key::ArrowRight => state.focus_prompt_mut().move_right(),
         Key::Home => state.focus_prompt_mut().move_home(),
         Key::End => state.focus_prompt_mut().move_end(),
-        Key::Char(c) => state.focus_prompt_mut().insert(c),
+        // Filter control chars (see the create-input arm in `switch_key`).
+        Key::Char(c) if !c.is_control() => state.focus_prompt_mut().insert(c),
         _ => {}
     }
 }
@@ -990,6 +1001,8 @@ fn launch_pane(
 ///   action menu, leaving every pane alive in the pool.
 /// - [`PaneExit::ToPreviousSession`] — `Ctrl-^`: jump to the previously focused
 ///   session, re-attaching it when live (or 在席 when none was recorded).
+/// - [`PaneExit::ToSession`] — a double click on a sidebar session row: switch to
+///   that focus row, re-attaching it when live.
 /// - [`PaneExit::Quit`] — `Ctrl-Q`: leave the pane and raise the quit-confirmation
 ///   modal on the home screen (every pane stays alive in the pool until confirmed).
 fn open_pane(
@@ -1042,8 +1055,11 @@ fn open_pane(
         Ok(PaneExit::ToFocus) => {
             // `Ctrl-T` zooms out one level to 在席: the session's action surface,
             // where the user picks the next action (terminal / agent / …). Every
-            // pane stays alive in the pool, so re-launching re-attaches them.
+            // pane stays alive in the pool, so re-launching re-attaches them. Arm
+            // the one-shot return-to-pane bit so an immediate `Esc` bounces back to
+            // the pane this zoom started from (没入) rather than peeling back to 切替.
             state.leave_attached();
+            state.arm_focus_return_attach();
         }
         Ok(PaneExit::ToPreviousSession) => {
             // `Ctrl-^` jumps to the previously focused session, re-attaching it
@@ -1055,6 +1071,13 @@ fn open_pane(
                 Some(row) => focus_and_attach(term, state, painter, wiring, row),
                 None => state.leave_attached(),
             }
+        }
+        Ok(PaneExit::ToSession(row)) => {
+            // A double click on a sidebar session row in 没入: switch to that focus
+            // row, re-attaching it when live (like `Enter` in 切替, via
+            // `focus_and_attach`) — focusing records the session being left, so
+            // `Ctrl-^` can toggle back.
+            focus_and_attach(term, state, painter, wiring, row);
         }
         Ok(PaneExit::Quit) => {
             // `Ctrl-Q` in 没入: leave the pane (every shell / agent stays alive in

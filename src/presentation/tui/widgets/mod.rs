@@ -28,6 +28,11 @@ use unicode_width::UnicodeWidthChar;
 /// The escape (ESC, `0x1b`) that introduces an ANSI control sequence.
 const ESC: char = '\u{1b}';
 
+/// The column width of the centred content block — form fields and project rows —
+/// that the full-screen forms (config / new / open) render. The single source of
+/// the block width so every screen's block stays the same size and lines up.
+pub const BLOCK_WIDTH: usize = 52;
+
 /// Shortens `text` to at most `max` display columns, appending an ellipsis when
 /// it has to cut (the head of the text is the most informative part).
 ///
@@ -135,8 +140,16 @@ pub fn normalize_size(height: usize, width: usize) -> (usize, usize) {
 }
 
 /// Centres a single line of `text` by left-padding it with spaces.
+///
+/// The width is measured in **display columns** ([`console::measure_text_width`]),
+/// not `char` count, so CJK and other wide glyphs (the app's own Japanese titles
+/// and footers) centre on their true rendered width instead of drifting left. The
+/// text is first clipped to `width` so a label wider than the terminal (a long
+/// footer on an 80-column screen) is truncated with an ellipsis rather than
+/// overrunning the row and corrupting the frame.
 fn centered(width: usize, text: &str) -> String {
-    let padding = " ".repeat(centered_padding(width, text.chars().count()));
+    let text = clip_to_width_cow(text, width);
+    let padding = " ".repeat(centered_padding(width, console::measure_text_width(&text)));
     format!("{padding}{text}")
 }
 
@@ -369,9 +382,41 @@ pub fn overlay_centered(base: &mut [String], width: usize, block: &[String]) {
         return;
     }
     let left = centered_padding(width, block_w);
-    let right_start = left + block_w;
     // Centre vertically over the frame, the same maths [`render_modal`] uses.
     let top = base.len().saturating_sub(block.len()) / 2;
+    overlay_block(base, top, left, block_w, block);
+}
+
+/// Composites the pre-sized `block` onto `base` with its top-left at `(top,
+/// left)`, **clamped** so the whole block stays on screen: `left` is pulled back
+/// so the block's right edge fits `width`, and `top` is pulled up so its bottom
+/// fits `base`'s height. Each box row replaces only the columns it spans (the base
+/// content to its left and right survives), the same compositing
+/// [`overlay_centered`] does — but at an arbitrary anchor, for a floating tooltip
+/// (the sidebar's PR hover popup) rather than a centred modal. The block is
+/// skipped when empty or wider than the screen.
+pub fn overlay_at(base: &mut [String], width: usize, top: usize, left: usize, block: &[String]) {
+    let block_w = block
+        .iter()
+        .map(|line| console::measure_text_width(line))
+        .max()
+        .unwrap_or(0);
+    if block_w == 0 || block_w > width {
+        return;
+    }
+    // Pull the anchor back so the block never spills past the right edge or below
+    // the last row — a popup anchored near the bottom-right still shows in full.
+    let left = left.min(width - block_w);
+    let top = top.min(base.len().saturating_sub(block.len()));
+    overlay_block(base, top, left, block_w, block);
+}
+
+/// Shared compositor for the floating overlays: writes each `block` row onto
+/// `base` from `top` down, its left edge at column `left`, keeping the base
+/// columns to the block's left and right. `block_w` is the block's display width
+/// (its rows are assumed that wide, as [`boxed`] produces).
+fn overlay_block(base: &mut [String], top: usize, left: usize, block_w: usize, block: &[String]) {
+    let right_start = left + block_w;
     for (offset, segment) in block.iter().enumerate() {
         let Some(row) = base.get_mut(top + offset) else {
             break;
@@ -429,6 +474,35 @@ pub fn faded_title_line(width: usize, title: &str, step: usize) -> String {
 /// A centred, dimmed line — used for subtitles and footers.
 pub fn dim_line(width: usize, text: &str) -> String {
     style(centered(width, text)).dim().to_string()
+}
+
+/// The centred mascot + title (+ optional subtitle) block every full-screen form
+/// (welcome / config / new / open) puts at the top.
+///
+/// [`rabbit_lines`] draws the mascot, a blank row separates it from the `title`,
+/// and `subtitle` — when present — is added as a [`dim_line`] below it. Vertical
+/// placement is the caller's `render_frame`'s job, so this adds no leading
+/// padding. The single source of the header layout so the screens stay aligned.
+pub fn header_lines(width: usize, title: &str, subtitle: Option<&str>) -> Vec<String> {
+    let mut lines = rabbit_lines(width);
+    lines.push(String::new());
+    lines.push(title_line(width, title));
+    if let Some(subtitle) = subtitle {
+        lines.push(dim_line(width, subtitle));
+    }
+    lines
+}
+
+/// The `>` cursor a selectable row shows when `selected` (red-bold), or a single
+/// blank space when not — so the marker column stays aligned whether or not the
+/// row is the cursor. The single source of the selection-cursor glyph and its
+/// styling, shared by every screen's row / menu / button rendering.
+pub fn cursor_marker(selected: bool) -> String {
+    if selected {
+        style(">").red().bold().to_string()
+    } else {
+        " ".to_string()
+    }
 }
 
 /// A left/right value chooser — the shared rendering primitive for every
@@ -617,6 +691,12 @@ pub fn render_modal(
     while lines.len() < height {
         lines.push(String::new());
     }
+    // Clamp to the terminal height: when the box is taller than a very short
+    // terminal `top_padding` collapses to 0 and the box rows alone exceed
+    // `height`, so trim the overflow rather than letting the diff painter address
+    // rows past the bottom (which the terminal clamps onto the last line, garbling
+    // it). The box loses its lower rows on a cramped screen, but never overruns.
+    lines.truncate(height);
     lines
 }
 
@@ -770,6 +850,45 @@ mod tests {
     #[test]
     fn title_line_contains_the_title() {
         assert!(title_line(80, "USAGI").contains("USAGI"));
+    }
+
+    #[test]
+    fn centered_clips_a_line_wider_than_the_terminal() {
+        // A footer/title longer than the terminal must be truncated (with an
+        // ellipsis), never overrun the row — the diff painter would otherwise
+        // wrap or corrupt the line. Measured by display width, ANSI stripped.
+        let long = "a / b / c / d / e / f / g / h / i / j / k / l / m / n / o / p";
+        let line = dim_line(20, long);
+        assert!(console::measure_text_width(&line) <= 20);
+        assert!(line.contains('…'));
+    }
+
+    #[test]
+    fn centered_centres_cjk_by_display_width_not_char_count() {
+        // Each CJK char is two display columns, so a 4-char title is 8 columns
+        // wide and its left padding is (20 - 8) / 2 = 6 — not (20 - 4) / 2 = 8,
+        // which a char-count centring would (mis)compute.
+        let line = title_line(20, "セッション一覧"); // 7 wide chars = 14 cols
+        let lead = line.chars().take_while(|c| *c == ' ').count();
+        assert_eq!(lead, centered_padding(20, 14));
+    }
+
+    #[test]
+    fn render_modal_clamps_to_a_short_terminal_height() {
+        // A box taller than a very short terminal must not return more rows than
+        // the screen has, or the painter addresses lines past the bottom.
+        let frame = render_modal(
+            3,
+            40,
+            "Confirm",
+            30,
+            &[
+                "line a".to_string(),
+                "line b".to_string(),
+                "line c".to_string(),
+            ],
+        );
+        assert_eq!(frame.len(), 3);
     }
 
     #[test]
@@ -1017,6 +1136,58 @@ mod tests {
         );
         assert!(console::strip_ansi_codes(&base[0]).contains('A'));
         assert_eq!(base.len(), 1);
+    }
+
+    #[test]
+    fn overlay_at_anchors_a_box_at_the_given_cell_keeping_the_surrounding_content() {
+        // The box is placed with its top-left at (1, 8): rows 1..4 carry it, and on
+        // those rows the base columns to its left and right survive.
+        let mut base = vec!["L".repeat(20); 5];
+        let block = vec!["┌──┐".to_string(), "│xy│".to_string(), "└──┘".to_string()];
+        overlay_at(&mut base, 20, 1, 8, &block);
+        assert_eq!(
+            base[0],
+            "L".repeat(20),
+            "the row above the box is untouched"
+        );
+        assert_eq!(
+            base[4],
+            "L".repeat(20),
+            "the row below the box is untouched"
+        );
+        let mid = console::strip_ansi_codes(&base[2]);
+        assert!(
+            mid.starts_with("LLLLLLLL"),
+            "the eight columns left of the box survive"
+        );
+        assert!(mid.contains("│xy│"));
+        assert_eq!(
+            console::measure_text_width(&mid),
+            20,
+            "the row stays full width"
+        );
+    }
+
+    #[test]
+    fn overlay_at_clamps_the_anchor_so_the_box_stays_on_screen() {
+        // An anchor past the right / bottom edge is pulled back so the whole box
+        // still shows: width 10, a 4-wide box asked for at column 9 lands at 6
+        // (10 - 4); three box rows asked for at row 4 of a 5-row base land at row 2.
+        let mut base = vec!["..........".to_string(); 5];
+        let block = vec!["[xx]".to_string(), "[yy]".to_string(), "[zz]".to_string()];
+        overlay_at(&mut base, 10, 4, 9, &block);
+        // Rows 2..5 carry the box; row 1 is untouched.
+        assert_eq!(base[1], "..........");
+        assert!(console::strip_ansi_codes(&base[2]).ends_with("[xx]"));
+        assert!(console::strip_ansi_codes(&base[4]).ends_with("[zz]"));
+    }
+
+    #[test]
+    fn overlay_at_is_skipped_when_empty_or_wider_than_the_screen() {
+        let mut base = vec!["keep".to_string()];
+        overlay_at(&mut base, 3, 0, 0, &["WIDE".to_string()]);
+        overlay_at(&mut base, 80, 0, 0, &[]);
+        assert_eq!(base[0], "keep");
     }
 
     #[test]

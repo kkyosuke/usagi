@@ -134,6 +134,11 @@ pub(super) struct Wiring<'a> {
     pub reorder_session: &'a mut dyn FnMut(&str, bool) -> SessionReorder,
     /// Dispatch `session remove <name>` to a background worker (`bool` = force).
     pub dispatch_remove: &'a mut dyn FnMut(&str, bool),
+    /// Launch the self-update on a background thread (replace the installed
+    /// binary with the latest release). Called when the user confirms the
+    /// update-confirmation modal raised by clicking the mascot's update notice;
+    /// returns at once, the progress showing as the shared loading rabbit.
+    pub dispatch_update: &'a mut dyn FnMut(),
     /// Evict a removed session's pooled shell, run on the loop thread (the pool
     /// is not `Send`).
     pub evict_pool: &'a mut dyn FnMut(&Path),
@@ -541,10 +546,34 @@ pub(super) fn event_loop(
                 }
                 continue;
             }
+            // A bare pointer move: track which PR-bearing session (if any) it is
+            // over so the renderer floats that session's `#<number>` list. Repaint
+            // only when the target changes — a pointer sliding within a row, or over
+            // empty space, costs no redraw, so the any-motion report flood never
+            // thrashes the screen. No key was pressed, so it loops without
+            // dispatching one.
+            Input::Hover(ev) => {
+                let target = ui::sidebar_pr_hover_at(
+                    &state,
+                    height as usize,
+                    width as usize,
+                    ev.col,
+                    ev.row,
+                );
+                if state.set_pr_hover(target) {
+                    force_paint = true;
+                }
+                continue;
+            }
         };
         // A key was pressed: whatever it does to the state, repaint on the next
         // iteration (the skip above only applies to idle ticks that read no key).
         force_paint = true;
+        // Touching the keyboard dismisses the transient PR hover popup, so it never
+        // lingers over a screen the user has moved on from (a stale hover would
+        // otherwise survive a keypress, a mode change, or attaching a pane, since
+        // those paths read no pointer move to clear it).
+        state.set_pr_hover(None);
         // Nudge the resting mascot to blink back at the user — reactive, so the
         // rabbit reacts the moment a key lands without any idle timer. Only while
         // it shows an open-eyed face (切替 / 在席); 没入's heads-down face has no eyes
@@ -575,6 +604,31 @@ pub(super) fn event_loop(
                     return Ok(Outcome::Quit);
                 }
                 Key::Char('n') | Key::Char('N') | Key::Escape => state.cancel_quit_confirm(),
+                _ => {}
+            }
+            continue;
+        }
+
+        // The update-confirmation modal, when open, captures every key: `y` /
+        // `Enter` launches the self-update (and closes the modal — its progress
+        // then shows as the shared loading rabbit), `n` / `Esc` cancels.
+        //
+        // `Ctrl-C` / `Ctrl-Q` also cancel here. This block sits above the global
+        // quit chords below, so without handling them they would be inert while
+        // this modal is open (unlike every other overlay, which sits below those
+        // handlers and so passes them through). Routing them to the global path
+        // instead would raise the quit modal on top of this one, but the two are
+        // documented never to coexist; cancelling first — a second press then
+        // quits — keeps that invariant.
+        if state.update_confirm() {
+            match key {
+                Key::Char('y') | Key::Char('Y') | Key::Enter => {
+                    (wiring.dispatch_update)();
+                    state.cancel_update_confirm();
+                }
+                Key::Char('n') | Key::Char('N') | Key::Escape | Key::CtrlC | Key::Char(CTRL_Q) => {
+                    state.cancel_update_confirm()
+                }
                 _ => {}
             }
             continue;
@@ -784,6 +838,7 @@ fn selected_dir(state: &HomeState, workspace_root: &Path) -> PathBuf {
 fn mascot_clickable(state: &HomeState) -> bool {
     matches!(state.mode(), Mode::Switch | Mode::Focus)
         && !state.quit_confirm()
+        && !state.update_confirm()
         && state.remove_modal().is_none()
         && state.text_modal().is_none()
         && state.preview().is_none()
@@ -792,19 +847,21 @@ fn mascot_clickable(state: &HomeState) -> bool {
 }
 
 /// Handle a mouse click: when it lands on the resting sidebar mascot (and the
-/// screen is in a state where the rabbit is clickable), kick off a playful one-shot
-/// reaction and report `true` so the loop repaints. A click anywhere else — or
-/// while an overlay is up — is ignored (`false`), so nothing else on the TUI is
-/// click-driven. The mascot's screen rectangle is recomputed from the same layout
-/// the renderer used ([`ui::mascot_hit_rect`]), so the hit-test matches exactly
-/// where the rabbit was drawn.
+/// screen is in a state where the rabbit is clickable), let the mascot respond
+/// ([`HomeState::click_mascot`] — raise the update-confirmation modal when it is
+/// announcing an update, otherwise a playful one-shot reaction) and report `true`
+/// so the loop repaints. A click anywhere else — or while an overlay is up — is
+/// ignored (`false`), so nothing else on the TUI is click-driven. The mascot's
+/// screen rectangle is recomputed from the same layout the renderer used
+/// ([`ui::mascot_hit_rect`]), so the hit-test matches exactly where the rabbit was
+/// drawn.
 fn handle_mascot_click(term: &Term, state: &mut HomeState, click: ClickEvent) -> bool {
     if !mascot_clickable(state) {
         return false;
     }
     let (height, width) = term.size();
     click_hits_mascot(height as usize, width as usize, state, click)
-        .then(|| state.kick_mascot_reaction(Instant::now()))
+        .then(|| state.click_mascot(Instant::now()))
         .is_some()
 }
 
@@ -892,6 +949,10 @@ pub(crate) fn event_loop_compat(
         );
     };
     let mut evict_pool = |_: &Path| {};
+    // The self-update spawn is real IO wired in `super::run`; here it is a no-op,
+    // so the compat-shim loop tests never shell out. The dispatch path itself is
+    // covered by the dedicated update-modal tests that build a capturing `Wiring`.
+    let mut dispatch_update = || {};
     // The resume-focus persistence is exercised through its own state unit tests
     // ([`HomeState::resume_level`] / `restore_focus`); here it is a no-op, so a
     // quit in these loop tests does not touch the store.
@@ -909,6 +970,7 @@ pub(crate) fn event_loop_compat(
         set_note: &mut set_note,
         reorder_session: &mut reorder_session,
         dispatch_remove: &mut dispatch_remove,
+        dispatch_update: &mut dispatch_update,
         evict_pool: &mut evict_pool,
         existing_branches: &mut existing_branches,
         open_terminal: &mut open_terminal,

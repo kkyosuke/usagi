@@ -385,6 +385,13 @@ pub struct HomeState {
     /// Only meaningful in [`Mode::Switch`]; the note *editor* is independent of
     /// it (it captures the keyboard through [`overlay`](Self::overlay)).
     note_hidden: bool,
+    /// The worktree (by index in [`list`](Self::list)'s worktrees) whose PR hover
+    /// popup is showing, or `None` when the pointer is not over a PR-bearing
+    /// session's row. Set as the pointer moves over the full sidebar (see the home
+    /// loop's [`Input::Hover`] handling); the renderer floats the session's
+    /// `#<number>` list beside its row. Purely transient — it never persists and is
+    /// cleared the instant the pointer leaves a PR row.
+    pr_hover: Option<usize>,
     /// The transient overlay that captures the keyboard while open (the 切替
     /// inline create/rename inputs, the text modal, the right-pane preview, the
     /// session-removal checklist, the note editor). One [`Overlay`] rather than a
@@ -398,6 +405,13 @@ pub struct HomeState {
     /// already shown, and cancelling it returns to that overlay rather than
     /// closing it, so the two are independent.
     quit_confirm: bool,
+    /// Whether the update-confirmation modal is open. Raised by clicking the
+    /// sidebar mascot while it is announcing an available update (see
+    /// [`update`](Self::update)); confirming it runs the self-update. Like
+    /// [`quit_confirm`](Self::quit_confirm) it is a full-screen modal tracked as a
+    /// flag rather than an [`Overlay`], and the two never coexist (the mascot is
+    /// not clickable while the quit modal is up).
+    update_confirm: bool,
     /// The engagement to persist for restore when the next quit is confirmed,
     /// armed only when the live mode would otherwise be lost. A quit from 没入
     /// (Attached) drops to [`Mode::Focus`] on its way to the quit modal, so the
@@ -432,6 +446,13 @@ pub struct HomeState {
     /// selected" (the menu / prompt shows). It is forced on whenever the session
     /// has no live panes, so an idle session always shows the action surface.
     focus_new_tab: bool,
+    /// A one-shot arming bit: 在席 (Focus) was reached by zooming *out* of a live
+    /// pane with `Ctrl-T` / `Ctrl-O a` (`PaneExit::ToFocus`), so the very next
+    /// `Esc` re-attaches that pane — returning to the 没入 (Attached) tab the zoom
+    /// started from rather than peeling back toward 切替. Armed in that zoom-out
+    /// path and cleared the moment any other key is handled (or the mode changes),
+    /// so it only ever turns one immediate `Esc` into a return-to-pane.
+    focus_return_attach: bool,
     /// Sessions recorded for this workspace (from `state.json`), shown by
     /// `session list` and kept current as sessions are created.
     sessions: Vec<SessionRecord>,
@@ -587,14 +608,17 @@ impl HomeState {
             agent_choice: None,
             switch_return: ReturnMode::Base,
             note_hidden: false,
+            pr_hover: None,
             overlay: Overlay::default(),
             quit_confirm: false,
+            update_confirm: false,
             pending_resume: None,
             resume_attach: false,
             command_open: false,
             focus_menu: FocusMenu::default(),
             focus_prompt: TextInput::new(),
             focus_new_tab: true,
+            focus_return_attach: false,
             sessions: Vec::new(),
             terminal: TerminalSurface::default(),
             badges: MonitorSnapshot::default(),
@@ -1191,6 +1215,21 @@ impl HomeState {
         &self.list
     }
 
+    /// Reflects freshly detected pull-request links in the sidebar `#N` badge of
+    /// the session row at `root`, without waiting for the next workspace re-sync.
+    ///
+    /// The attached pane calls this when it spots a new `/pull/<N>` URL in the
+    /// shell output, passing the PR-link store's accumulated set so the live badge
+    /// matches what a later re-sync would fold in from `pr-links/`. Returns whether
+    /// anything changed, so the caller repaints only when it did.
+    pub fn set_pr_links(
+        &mut self,
+        root: &Path,
+        prs: Vec<crate::domain::workspace_state::PrLink>,
+    ) -> bool {
+        self.list.set_pr_links(root, prs)
+    }
+
     pub fn mode(&self) -> Mode {
         self.mode
     }
@@ -1244,9 +1283,11 @@ impl HomeState {
     /// so drop the surface and return to the focused session's action surface.
     /// The tab selector lands on the trailing "+ new" tab — the launch surface —
     /// so zooming out with `Ctrl-T` opens the action menu over the live panes
-    /// (which still ride the strip), and `Esc` there steps back onto the pane it
-    /// was opened over (see [`focus_discard_new_tab`]).
+    /// (which still ride the strip). When this was a deliberate zoom-out the caller
+    /// arms [`arm_focus_return_attach`], so the next `Esc` re-attaches the pane
+    /// rather than stepping back onto its preview (see [`focus_discard_new_tab`]).
     ///
+    /// [`arm_focus_return_attach`]: Self::arm_focus_return_attach
     /// [`focus_discard_new_tab`]: Self::focus_discard_new_tab
     pub fn leave_attached(&mut self) {
         self.mode = Mode::Focus;
@@ -1479,6 +1520,37 @@ impl HomeState {
     pub fn cancel_quit_confirm(&mut self) {
         self.quit_confirm = false;
         self.pending_resume = None;
+    }
+
+    /// Whether the update-confirmation modal is open.
+    pub fn update_confirm(&self) -> bool {
+        self.update_confirm
+    }
+
+    /// Open the update-confirmation modal — the user clicked the mascot while it
+    /// was announcing an available update and is asked to confirm before the
+    /// self-update runs.
+    pub fn open_update_confirm(&mut self) {
+        self.update_confirm = true;
+    }
+
+    /// Dismiss the update-confirmation modal (cancelled, or the update was
+    /// dispatched), returning to the normal screen.
+    pub fn cancel_update_confirm(&mut self) {
+        self.update_confirm = false;
+    }
+
+    /// React to a click on the resting sidebar mascot: when it is announcing an
+    /// available update ([`update`](Self::update) is `Some`), raise the
+    /// update-confirmation modal; otherwise play a one-shot click reaction. The
+    /// event loop calls this on a hit so the rabbit either offers the update or
+    /// just does something cute back.
+    pub fn click_mascot(&mut self, now: Instant) {
+        if self.update.is_some() {
+            self.open_update_confirm();
+        } else {
+            self.kick_mascot_reaction(now);
+        }
     }
 
     /// Arm [`ResumeLevel::Attached`] to be persisted when the next quit is
@@ -1780,6 +1852,22 @@ impl HomeState {
         self.note_hidden = true;
     }
 
+    /// The worktree whose PR hover popup is currently showing (by index in the
+    /// list's worktrees), or `None`. Read by the renderer to float the session's
+    /// `#<number>` list beside its row.
+    pub fn pr_hover(&self) -> Option<usize> {
+        self.pr_hover
+    }
+
+    /// Point the PR hover popup at worktree `target` (or clear it with `None`),
+    /// returning whether the target changed — the home loop repaints only then, so
+    /// a pointer sliding within the same row (or empty space) costs no redraw.
+    pub fn set_pr_hover(&mut self, target: Option<usize>) -> bool {
+        let changed = self.pr_hover != target;
+        self.pr_hover = target;
+        changed
+    }
+
     /// Open the note editor for `target`, pre-filled with its current note.
     /// `reattach` records whether closing it should re-attach the session's pane
     /// (没入's `Ctrl-E`); `false` for 切替's `n`.
@@ -1884,6 +1972,9 @@ impl HomeState {
         self.focus_menu.reset();
         self.focus_prompt.clear();
         self.focus_new_tab = true;
+        // A fresh 在席 entry is not the zoom-out-from-没入 path, so the one-shot
+        // return-to-pane arming never carries into it.
+        self.focus_return_attach = false;
         // Enter 在席 with no `Ctrl-O` leader pending, so the first key is read
         // as itself rather than as a stale prefix's second key.
         self.prefix_pending = false;
@@ -1927,15 +2018,17 @@ impl HomeState {
         self.enter_switch(ReturnMode::Base);
     }
 
-    /// The Session-scope commands the 在席 menu lists, in registry order
-    /// (`terminal`, `agent`, `ai`). The `ai` command is filtered out unless the
-    /// local LLM is usable (enabled and its model pulled), so it only appears
-    /// when running it would actually work. `close` is filtered out on the root
-    /// row, which belongs to no session and so cannot be closed.
+    /// The Session-scope commands the 在席 menu lists, in alphabetical order by
+    /// name (`agent`, `ai`, `close`, `terminal`). The `ai` command is filtered
+    /// out unless the local LLM is usable (enabled and its model pulled), so it
+    /// only appears when running it would actually work. `close` is filtered out
+    /// on the root row, which belongs to no session and so cannot be closed.
+    /// `agent` is filtered out when the focused session already has a live
+    /// `agent` pane, since its agent is already running.
     ///
     /// Resolved for the **active** row: 在席 acts on the session it focused.
     pub fn focus_menu_commands(&self) -> Vec<CommandInfo> {
-        self.menu_commands_for_root(self.list.root_active())
+        self.menu_commands_for_root(self.list.root_active(), self.agent_tab_open())
     }
 
     /// The same Session-scope command list as [`focus_menu_commands`], but
@@ -1944,20 +2037,40 @@ impl HomeState {
     /// so its `close` visibility must follow that row — otherwise a session row
     /// previewed while the root row is active would hide `close` (and vice
     /// versa), showing the active row's menu instead of the highlighted one's.
+    /// The preview only renders this menu for a row with no live panes, so its
+    /// `agent` is never hidden (there is no agent pane open to hide it for).
     pub fn preview_menu_commands(&self) -> Vec<CommandInfo> {
-        self.menu_commands_for_root(self.list.root_selected())
+        self.menu_commands_for_root(self.list.root_selected(), false)
     }
 
     /// Shared body of [`focus_menu_commands`] / [`preview_menu_commands`]: the
-    /// Session-scope commands, with `ai` gated on local-LLM availability and
-    /// `close` hidden when `root` (the row belongs to no session).
-    fn menu_commands_for_root(&self, root: bool) -> Vec<CommandInfo> {
-        self.registry
+    /// Session-scope commands sorted alphabetically by name, with `ai` gated on
+    /// local-LLM availability, `close` hidden when `root` (the row belongs to no
+    /// session), and `agent` hidden when `agent_open` (a live agent pane already
+    /// exists for the resolved session).
+    fn menu_commands_for_root(&self, root: bool, agent_open: bool) -> Vec<CommandInfo> {
+        let mut commands: Vec<CommandInfo> = self
+            .registry
             .commands_in_scope(CommandScope::Session)
             .into_iter()
             .filter(|info| info.name != "ai" || self.ai_available)
             .filter(|info| info.name != "close" || !root)
-            .collect()
+            .filter(|info| info.name != "agent" || !agent_open)
+            .collect();
+        commands.sort_by(|a, b| a.name.cmp(b.name));
+        commands
+    }
+
+    /// Whether the focused session already has a live `agent` pane — a tab the
+    /// session's published [`TabStrip`] labels `agent` (or `agent N` when several
+    /// agents run). The 在席 menu hides the `agent` launch command in that case.
+    fn agent_tab_open(&self) -> bool {
+        self.terminal.tabs.as_ref().is_some_and(|strip| {
+            strip
+                .labels
+                .iter()
+                .any(|label| label == "agent" || label.starts_with("agent "))
+        })
     }
 
     /// How many live panes the focused session publishes (the leading 在席 tabs),
@@ -2043,6 +2156,25 @@ impl HomeState {
         } else {
             false
         }
+    }
+
+    /// Arm the one-shot "next `Esc` re-attaches" bit, set when 在席 (Focus) is
+    /// entered by zooming *out* of a live pane (`Ctrl-T` / `Ctrl-O a`). The next
+    /// `Esc` then returns to that pane (没入) instead of peeling back toward 切替.
+    pub fn arm_focus_return_attach(&mut self) {
+        self.focus_return_attach = true;
+    }
+    /// Take (read and clear) the one-shot return-to-pane bit. The 在席 `Esc`
+    /// handler consumes it to decide whether to re-attach; any other key clears it
+    /// first via [`clear_focus_return_attach`](Self::clear_focus_return_attach), so
+    /// only an immediate `Esc` after the zoom-out re-attaches.
+    pub fn take_focus_return_attach(&mut self) -> bool {
+        std::mem::take(&mut self.focus_return_attach)
+    }
+    /// Clear the one-shot return-to-pane bit. Called for every non-`Esc` key
+    /// handled in 在席 so any deliberate action cancels the pending re-attach.
+    pub fn clear_focus_return_attach(&mut self) {
+        self.focus_return_attach = false;
     }
 
     /// The 在席 menu cursor (which Session-scope command is highlighted).

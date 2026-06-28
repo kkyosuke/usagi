@@ -19,6 +19,24 @@ fn new_state_starts_in_switch_with_a_hint() {
 }
 
 #[test]
+fn pr_hover_tracks_the_target_and_reports_changes() {
+    let mut state = state();
+    // No PR popup by default.
+    assert_eq!(state.pr_hover(), None);
+    // Pointing at a session both records it and reports the change.
+    assert!(state.set_pr_hover(Some(1)));
+    assert_eq!(state.pr_hover(), Some(1));
+    // Re-pointing at the same row is no change (the loop skips the repaint).
+    assert!(!state.set_pr_hover(Some(1)));
+    // Moving to another row, then clearing, each count as changes.
+    assert!(state.set_pr_hover(Some(0)));
+    assert!(state.set_pr_hover(None));
+    assert_eq!(state.pr_hover(), None);
+    // Clearing an already-clear popup is no change.
+    assert!(!state.set_pr_hover(None));
+}
+
+#[test]
 fn command_palette_opens_and_closes_clearing_the_input() {
     let mut state = state();
     assert!(!state.command_palette_open());
@@ -201,6 +219,40 @@ fn mascot_reaction_varies_across_repeated_clicks() {
         seen.insert(state.mascot_reaction());
     }
     assert!(seen.len() >= 2, "repeated clicks vary the reaction");
+}
+
+#[test]
+fn update_confirm_opens_and_cancels() {
+    let mut state = state();
+    assert!(!state.update_confirm());
+    state.open_update_confirm();
+    assert!(state.update_confirm());
+    state.cancel_update_confirm();
+    assert!(!state.update_confirm());
+}
+
+#[test]
+fn clicking_the_mascot_opens_the_update_modal_when_an_update_is_available() {
+    use crate::domain::version::Version;
+    use std::time::Instant;
+    let mut state = state();
+    state.set_update(Version::parse("9.9.9"));
+    // With an update pending, a click on the mascot asks to update rather than
+    // playing a reaction.
+    state.click_mascot(Instant::now());
+    assert!(state.update_confirm());
+    assert!(!state.mascot_reacting());
+}
+
+#[test]
+fn clicking_the_mascot_without_an_update_plays_a_reaction() {
+    use std::time::Instant;
+    let mut state = state();
+    assert!(state.update().is_none());
+    state.click_mascot(Instant::now());
+    // No update to offer, so the click is just the playful reaction.
+    assert!(!state.update_confirm());
+    assert!(state.mascot_reacting());
 }
 
 #[test]
@@ -531,4 +583,36 @@ fn typing_or_completing_cancels_an_active_recall() {
     state.push_char('!');
     state.recall_next();
     assert_eq!(state.input(), "man!");
+}
+
+#[test]
+fn set_pr_links_updates_the_sidebar_row_live() {
+    use crate::domain::workspace_state::PrLink;
+    use std::path::Path;
+
+    // `state()` records two sessions: `main` at /repo/main and `feature` at
+    // /repo/feature.
+    let mut state = state();
+    let pr = |n: u32| PrLink {
+        number: n,
+        url: format!("https://github.com/o/r/pull/{n}"),
+    };
+
+    // A new PR for an existing row updates its in-memory badge and reports the
+    // change (so the attached pane knows it has something fresh to show).
+    assert!(state.set_pr_links(Path::new("/repo/main"), vec![pr(442)]));
+    let row = state
+        .list()
+        .worktrees()
+        .iter()
+        .find(|w| w.branch.as_deref() == Some("main"))
+        .expect("the main row exists");
+    assert_eq!(row.pr, vec![pr(442)]);
+
+    // Re-applying the same set is a no-op, so the pane skips a needless repaint.
+    assert!(!state.set_pr_links(Path::new("/repo/main"), vec![pr(442)]));
+
+    // An unknown root (e.g. the workspace root, which has no worktree row) does
+    // nothing.
+    assert!(!state.set_pr_links(Path::new("/repo/nope"), vec![pr(1)]));
 }
