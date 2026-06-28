@@ -1109,6 +1109,7 @@ fn run_create(root: &Path, name: &str) -> (bool, tasks::Completion) {
                     created.worktrees.len()
                 )),
                 sessions: reload_sessions(root),
+                target_root: Some(root.to_path_buf()),
                 evict: None,
                 // Drop straight into 在席 (Focus) on the new session once the event
                 // loop applies this — the user just asked for it, so operate it
@@ -1124,6 +1125,7 @@ fn run_create(root: &Path, name: &str) -> (bool, tasks::Completion) {
             tasks::Completion {
                 line: LogLine::error(format!("session failed: {e}")),
                 sessions: None,
+                target_root: Some(root.to_path_buf()),
                 evict: None,
                 focus: None,
             },
@@ -1148,6 +1150,7 @@ fn run_remove(
             tasks::Completion {
                 line: LogLine::output(format!("Removed session \"{name}\" 🧹")),
                 sessions: reload_sessions(root),
+                target_root: Some(root.to_path_buf()),
                 evict: Some(
                     root.join(crate::infrastructure::repo_paths::STATE_DIR)
                         .join(crate::infrastructure::repo_paths::SESSIONS_DIR)
@@ -1171,6 +1174,7 @@ fn run_remove(
                          Use \"session remove {name} --force\" to discard."
                     )),
                     sessions: None,
+                    target_root: Some(root.to_path_buf()),
                     evict: None,
                     focus: None,
                 },
@@ -1184,6 +1188,7 @@ fn run_remove(
             tasks::Completion {
                 line: LogLine::error(format!("session remove failed: {e}")),
                 sessions: None,
+                target_root: Some(root.to_path_buf()),
                 evict: None,
                 focus: None,
             },
