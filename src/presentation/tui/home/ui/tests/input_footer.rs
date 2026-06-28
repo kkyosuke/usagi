@@ -223,8 +223,10 @@ fn focus_footer_reflects_the_prefix_leader_and_scheme() {
 fn attached_prefix_footer_flips_to_the_waiting_hint_while_a_leader_is_pending() {
     let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
     state.show_attached();
-    // Idle, the footer advertises the leader sequence ("Ctrl-O then: …").
+    // Idle, the footer advertises the leader sequence ("Ctrl-O then: …") and the
+    // close-tab key among the actions it leads to.
     assert!(footer_line(200, &state).contains("Ctrl-O then"));
+    assert!(footer_line(200, &state).contains("x close"));
     // Once the leader is pressed the footer flips to the waiting hint, so a
     // Ctrl-O that drew no visible response reads as "waiting" not "ignored", and
     // names how to back out (`Esc cancel` is the lowest-priority trailing key, so

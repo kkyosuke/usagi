@@ -1,14 +1,14 @@
 ---
 number: 80
 title: feat(tui): unite描画 — グループヘッダ・カーソルのヘッダ飛ばし・横断合計
-status: todo
+status: done
 priority: medium
 labels: [feat, tui]
 dependson: [78]
 related: []
 parent: 77
 created_at: 2026-06-28T00:08:22.607703+00:00
-updated_at: 2026-06-28T00:08:22.607703+00:00
+updated_at: 2026-06-28T02:36:27.641578+00:00
 ---
 
 親 #77 のフェーズ3。統合表示のレンダリング。

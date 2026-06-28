@@ -48,11 +48,11 @@ fn run_update(keys: Vec<Key>) -> (Outcome, u32) {
     let count = std::cell::Cell::new(0u32);
 
     let mut persist: fn(&str) = noop_persist;
-    let mut dispatch_create = |_: &str| {};
-    let mut rename: fn(&str, &str) -> SessionOutcome = noop_rename;
-    let mut set_note_fake: fn(&str, &str) -> SessionOutcome = noop_set_note;
+    let mut dispatch_create = |_: &Path, _: &str| {};
+    let mut rename = |_: &Path, n: &str, l: &str| noop_rename(n, l);
+    let mut set_note_fake = |_: &Path, n: &str, t: &str| noop_set_note(n, t);
     let mut reorder_fake: fn(&str, bool) -> SessionReorder = noop_reorder;
-    let mut dispatch_remove = |_: &str, _: bool| {};
+    let mut dispatch_remove = |_: &Path, _: &str, _: bool| {};
     let mut evict = |_: &Path| {};
     let mut branches: fn() -> Vec<String> = no_branches;
     let mut open: fn(&mut HomeState, &Path, bool, bool) -> Result<PaneExit> = noop_open;
@@ -63,6 +63,7 @@ fn run_update(keys: Vec<Key>) -> (Outcome, u32) {
     let mut save_resume = |_: &str, _: ResumeLevel| {};
     let mut save_last_active = |_: &[(String, DateTime<Utc>)]| {};
     let mut dispatch_update = || count.set(count.get() + 1);
+    let mut unite_resolve = no_unite_resolve;
     let mut wiring = Wiring {
         workspace_root: Path::new("/ws"),
         persist: &mut persist,
@@ -71,6 +72,7 @@ fn run_update(keys: Vec<Key>) -> (Outcome, u32) {
         set_note: &mut set_note_fake,
         reorder_session: &mut reorder_fake,
         dispatch_remove: &mut dispatch_remove,
+        unite_resolve: &mut unite_resolve,
         dispatch_update: &mut dispatch_update,
         evict_pool: &mut evict,
         existing_branches: &mut branches,

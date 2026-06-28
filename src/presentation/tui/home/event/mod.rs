@@ -20,7 +20,9 @@ use crate::presentation::tui::io::screen::{ClickEvent, FramePainter, Input, KeyR
 
 use super::oneshot::OneShot;
 use super::sessions_refresh::SessionsRefreshHandle;
-use super::state::{HomeState, Mode, PaneExit, ResumeLevel, SessionOutcome, SessionReorder};
+use super::state::{
+    GroupSource, HomeState, Mode, PaneExit, ResumeLevel, SessionOutcome, SessionReorder,
+};
 use super::tasks::TaskHandle;
 use super::terminal::pool::MonitorHandle;
 use super::terminal::tabs::TabNav;
@@ -122,18 +124,26 @@ pub(super) struct Wiring<'a> {
     pub workspace_root: &'a Path,
     /// Append a run command to the workspace history (best-effort; tests no-op).
     pub persist: &'a mut dyn FnMut(&str),
-    /// Dispatch `session create <name>` to a background worker.
-    pub dispatch_create: &'a mut dyn FnMut(&str),
-    /// Rename a session's sidebar label, returning the outcome to apply inline.
-    pub rename_display: &'a mut dyn FnMut(&str, &str) -> SessionOutcome,
-    /// Save (or clear) a session's note, returning the outcome to apply inline.
-    pub set_note: &'a mut dyn FnMut(&str, &str) -> SessionOutcome,
+    /// Dispatch `session create <name>` to a background worker, in the workspace
+    /// rooted at the given path (the cursor's group in 統合/unite mode).
+    pub dispatch_create: &'a mut dyn FnMut(&Path, &str),
+    /// Rename a session's sidebar label in the given workspace, returning the
+    /// outcome to apply inline.
+    pub rename_display: &'a mut dyn FnMut(&Path, &str, &str) -> SessionOutcome,
+    /// Save (or clear) a session's note in the given workspace, returning the
+    /// outcome to apply inline.
+    pub set_note: &'a mut dyn FnMut(&Path, &str, &str) -> SessionOutcome,
     /// Reorder the selected session one row up/down (`bool` = up), persisting the
     /// new order and returning the reloaded list to refresh. Stays synchronous
     /// (no git work) like `rename_display` / `set_note`.
     pub reorder_session: &'a mut dyn FnMut(&str, bool) -> SessionReorder,
-    /// Dispatch `session remove <name>` to a background worker (`bool` = force).
-    pub dispatch_remove: &'a mut dyn FnMut(&str, bool),
+    /// Dispatch `session remove <name>` to a background worker (`bool` = force),
+    /// in the workspace rooted at the given path.
+    pub dispatch_remove: &'a mut dyn FnMut(&Path, &str, bool),
+    /// Resolve a registered workspace by name and load it into a [`GroupSource`]
+    /// to stack into the 統合(unite) view (`unite add <name>`), or an error message
+    /// to log when no such workspace is registered.
+    pub unite_resolve: &'a mut dyn FnMut(&str) -> std::result::Result<GroupSource, String>,
     /// Launch the self-update on a background thread (replace the installed
     /// binary with the latest release). Called when the user confirms the
     /// update-confirmation modal raised by clicking the mascot's update notice;
@@ -684,9 +694,11 @@ pub(super) fn event_loop(
                         // Each checked session is dispatched to a background
                         // worker, so the loop never blocks on the git work; the
                         // task panel stacks them and the loop drains each as it
-                        // finishes.
+                        // finishes. Each is removed from the workspace it lives in.
                         for name in &names {
-                            (wiring.dispatch_remove)(name, force);
+                            let root = state.workspace_root_for_session(name);
+                            state.set_op_target(root.clone());
+                            (wiring.dispatch_remove)(&root, name, force);
                         }
                     }
                 }
@@ -820,14 +832,22 @@ pub(super) fn paint_now(term: &Term, painter: &mut FramePainter, state: &HomeSta
 }
 
 /// The directory the pane should root at for the focused list row: the selected
-/// worktree's path, or `workspace_root` when the cursor is on the root row
-/// (which belongs to no session, so `selected()` is `None`).
+/// worktree's path, or the workspace root when the cursor is on a root row (which
+/// belongs to no session, so `selected()` is `None`). In 統合(unite) mode a root
+/// row past the first group resolves to *that group's* workspace, so a root-row
+/// `terminal` / `agent` opens in the workspace the cursor is pointing at; the
+/// primary group's root row uses `workspace_root` (the screen's base directory).
 fn selected_dir(state: &HomeState, workspace_root: &Path) -> PathBuf {
-    state
-        .list()
-        .selected()
-        .map(|w| w.path.clone())
-        .unwrap_or_else(|| workspace_root.to_path_buf())
+    if let Some(w) = state.list().selected() {
+        return w.path.clone();
+    }
+    // A root row: the primary group uses the screen's base root; an extra (unite)
+    // group uses its own workspace root.
+    if state.list().selected_group() == 0 {
+        workspace_root.to_path_buf()
+    } else {
+        state.selected_workspace_root()
+    }
 }
 
 /// Whether a click is allowed to poke the sidebar mascot: only on the plain home
@@ -909,7 +929,9 @@ pub(crate) fn event_loop_compat(
     mut reorder_session: impl FnMut(&str, bool) -> SessionReorder,
 ) -> Result<Outcome> {
     let tasks = TaskHandle::new();
-    let mut dispatch_create = |name: &str| {
+    // The unite target root is irrelevant to these single-workspace test fakes, so
+    // the shim accepts it (matching the production [`Wiring`] signature) and drops it.
+    let mut dispatch_create = |_root: &Path, name: &str| {
         let id = tasks.begin(super::tasks::TaskKind::CreateSession, name);
         let outcome = create_session(name);
         // Mirror a production create, which carries the new branch to focus, so the
@@ -927,7 +949,7 @@ pub(crate) fn event_loop_compat(
             },
         );
     };
-    let mut dispatch_remove = |name: &str, force: bool| {
+    let mut dispatch_remove = |_root: &Path, name: &str, force: bool| {
         let id = tasks.begin(super::tasks::TaskKind::RemoveSession, name);
         let outcome = remove_session(name, force);
         // Mirror a production removal, which carries the session root to evict, so
@@ -962,14 +984,22 @@ pub(crate) fn event_loop_compat(
     // fills this, so it stays empty here; the apply path is covered directly in
     // `a_background_refresh_updates_the_session_list`.
     let refresh = SessionsRefreshHandle::new();
+    // The sync rename / note fakes are single-workspace (no root arg); wrap them to
+    // the production 3-arg shape, dropping the unite target root.
+    let mut rename_display_w = |_root: &Path, name: &str, label: &str| rename_display(name, label);
+    let mut set_note_w = |_root: &Path, name: &str, note: &str| set_note(name, note);
+    // `unite add` is not exercised by the compat-shim loop tests; report no match.
+    let mut unite_resolve =
+        |name: &str| Err::<GroupSource, String>(format!("no workspace named \"{name}\""));
     let mut wiring = Wiring {
         workspace_root,
         persist: &mut persist,
         dispatch_create: &mut dispatch_create,
-        rename_display: &mut rename_display,
-        set_note: &mut set_note,
+        rename_display: &mut rename_display_w,
+        set_note: &mut set_note_w,
         reorder_session: &mut reorder_session,
         dispatch_remove: &mut dispatch_remove,
+        unite_resolve: &mut unite_resolve,
         dispatch_update: &mut dispatch_update,
         evict_pool: &mut evict_pool,
         existing_branches: &mut existing_branches,

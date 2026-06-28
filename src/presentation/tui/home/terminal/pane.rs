@@ -19,13 +19,15 @@
 //! ([`PaneStep::NextTab`] / [`PaneStep::PrevTab`]), as does a left click on a tab
 //! chip ([`PaneStep::ToTab`]); zoom out to 在席 (Focus) — the session's action menu
 //! — ([`PaneStep::ToFocus`]); add an agent tab ([`PaneStep::NewAgentTab`]) without
-//! leaving 没入; open the session-note editor ([`PaneStep::OpenNote`]); and collapse
+//! leaving 没入; close the active tab in place ([`PaneStep::CloseTab`]); open the
+//! session-note editor ([`PaneStep::OpenNote`]); and collapse
 //! / expand the left sidebar in place (it never leaves 没入). `Ctrl-^` jumps to the
 //! previously focused session ([`PaneStep::PrevSession`]) and `Ctrl-Q` (prefix
 //! scheme) / `Alt-q` leaves 没入 to quit usagi ([`PaneStep::Quit`]), raising the
 //! quit-confirmation modal on the home screen. `Esc` and `Ctrl-W` (the universal
-//! shell "delete previous word") always flow to the shell; closing a tab is done
-//! from 切替. The shell exiting on its own reports [`PaneStep::Closed`].
+//! shell "delete previous word") always flow to the shell; closing a tab is
+//! `Ctrl-O x` / `Alt-x` here, or `x` from 切替. The shell exiting on its own
+//! reports [`PaneStep::Closed`].
 //!
 //! `agent` reuses the same machinery: the pool sends the configured agent CLI to
 //! the shell on first spawn, so the pane lands the user straight in the agent.
@@ -93,6 +95,10 @@ pub enum PaneStep {
     ToFocus,
     /// `Ctrl-G`: add a new agent tab and make it active, without leaving 没入.
     NewAgentTab,
+    /// `Ctrl-O x` / `Alt-x`: close the active tab in place, killing its shell.
+    /// The caller drives the next surviving tab, or drops back to 在席 when this
+    /// was the last one (the same handling as a shell that exits on its own).
+    CloseTab,
     /// `Ctrl-^`: leave 没入 to jump to the previously focused session (vim's
     /// `Ctrl-^` / tmux's `last-window`), attaching it when live. The caller
     /// re-roots the pane on that session.
@@ -604,6 +610,7 @@ fn pump_input(
                             Reserved::NextTab => PaneStep::NextTab,
                             Reserved::PrevTab => PaneStep::PrevTab,
                             Reserved::NewAgentTab => PaneStep::NewAgentTab,
+                            Reserved::CloseTab => PaneStep::CloseTab,
                             Reserved::OpenNote => PaneStep::OpenNote,
                             Reserved::PrevSession => PaneStep::PrevSession,
                             Reserved::Quit => PaneStep::Quit,

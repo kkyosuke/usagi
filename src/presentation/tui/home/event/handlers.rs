@@ -71,7 +71,11 @@ pub(super) fn palette_key(
                 // `session create <name>` dispatches the git work to a background
                 // worker and returns at once; the new session appears in the list
                 // when the task finishes (tracked in the top-right task panel).
-                Effect::CreateSession(name) => (wiring.dispatch_create)(&name),
+                Effect::CreateSession(name) => {
+                    let root = state.selected_workspace_root();
+                    state.set_op_target(root.clone());
+                    (wiring.dispatch_create)(&root, &name);
+                }
                 // `session create` with no name moves to 切替 and opens the inline
                 // name input there (creation lives in Switch).
                 Effect::OpenSessionModal => {
@@ -91,7 +95,11 @@ pub(super) fn palette_key(
                 },
                 // `session remove <name>` dispatches the removal to a background
                 // worker; the session leaves the list when the task finishes.
-                Effect::RemoveSession { name, force } => (wiring.dispatch_remove)(&name, force),
+                Effect::RemoveSession { name, force } => {
+                    let root = state.workspace_root_for_session(&name);
+                    state.set_op_target(root.clone());
+                    (wiring.dispatch_remove)(&root, &name, force);
+                }
                 // `session remove` with no name opens the removal checklist over
                 // the palette, so it stays open behind it.
                 Effect::OpenRemoveModal { force } => state.open_remove_modal(force),
@@ -123,6 +131,27 @@ pub(super) fn palette_key(
                         wiring.workspace_root,
                         &target,
                     ))
+                }
+                // `unite add <name>`: resolve and load the named workspace, then
+                // stack it into the view (refusing a duplicate or an unknown name).
+                Effect::UniteAdd(name) => match (wiring.unite_resolve)(&name) {
+                    Ok(group) => {
+                        if state.add_extra_group(group) {
+                            state.log_output(format!("Added \"{name}\" to the unite view 🪟"));
+                        } else {
+                            state.log_error(format!("\"{name}\" is already in the view"));
+                        }
+                    }
+                    Err(e) => state.log_error(e),
+                },
+                // `unite remove <name>`: drop the named extra workspace; removing the
+                // last one collapses back to the single-workspace view.
+                Effect::UniteRemove(name) => {
+                    if state.remove_extra_group(&name) {
+                        state.log_output(format!("Removed \"{name}\" from the unite view"));
+                    } else {
+                        state.log_error(format!("\"{name}\" is not in the unite view"));
+                    }
                 }
                 // `ShowText` already opened its modal inside `submit`; the palette
                 // stays open behind it. `None` / `Clear` likewise keep it open.
@@ -193,7 +222,10 @@ pub(super) fn switch_key(
                     // Dispatch the git work to a background worker and stay in
                     // 切替 so the user keeps navigating; the new session appears in
                     // the list when the task finishes (tracked in the task panel).
-                    (wiring.dispatch_create)(&name);
+                    // It lands in the cursor's group's workspace (統合/unite mode).
+                    let root = state.selected_workspace_root();
+                    state.set_op_target(root.clone());
+                    (wiring.dispatch_create)(&root, &name);
                 }
             }
             Key::Escape => state.create_cancel(),
@@ -227,7 +259,9 @@ pub(super) fn switch_key(
         match key {
             Key::Enter => {
                 if let Some((target, label)) = state.switch_confirm_rename() {
-                    let outcome = (wiring.rename_display)(&target, &label);
+                    let root = state.selected_workspace_root();
+                    state.set_op_target(root.clone());
+                    let outcome = (wiring.rename_display)(&root, &target, &label);
                     state.apply_session_outcome(outcome);
                 }
             }
@@ -413,7 +447,9 @@ pub(super) fn note_editor_key(
             let (target, text, reattach) = state
                 .confirm_note_editor()
                 .expect("note editor open while editing");
-            let outcome = (wiring.set_note)(&target, &text);
+            let root = state.selected_workspace_root();
+            state.set_op_target(root.clone());
+            let outcome = (wiring.set_note)(&root, &target, &text);
             state.apply_session_outcome(outcome);
             if reattach {
                 reattach_focused(term, state, painter, wiring);
@@ -830,7 +866,9 @@ fn close_focused_session(state: &mut HomeState, wiring: &mut Wiring) {
     }
     // `false`: do not force. A dirty worktree is refused (the task logs the
     // `--force` hint) instead of being discarded without confirmation.
-    (wiring.dispatch_remove)(&name, false);
+    let root = state.workspace_root_for_session(&name);
+    state.set_op_target(root.clone());
+    (wiring.dispatch_remove)(&root, &name, false);
     state.enter_switch(ReturnMode::Base);
 }
 

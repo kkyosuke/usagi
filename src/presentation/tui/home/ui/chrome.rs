@@ -40,11 +40,18 @@ pub(super) fn title_bar(width: usize, list: &WorktreeList) -> String {
     // the active session changes — a longer name no longer pushes it sideways.
     let name_w = (width / 4).clamp(TITLE_NAME_MIN_W, TITLE_NAME_MAX_W);
     let name = pad_to_width(clip_to_width(list.active_name(), name_w), name_w);
-    let label = format!(
-        "{} · ▸ {name} · {count} session{}",
-        list.workspace_name(),
-        if count == 1 { "" } else { "s" }
-    );
+    let groups = list.group_count();
+    let label = if groups > 1 {
+        // 統合(unite): the title names the union, not one workspace, and counts the
+        // workspaces stacked in the sidebar.
+        format!("unite · ▸ {name} · {count} sessions across {groups} workspaces")
+    } else {
+        format!(
+            "{} · ▸ {name} · {count} session{}",
+            list.workspace_name(),
+            if count == 1 { "" } else { "s" }
+        )
+    };
     widgets::title_line(width, &label)
 }
 
@@ -434,15 +441,15 @@ pub(super) fn footer_line(width: usize, state: &HomeState) -> String {
             // next key" rather than "ignored"; it lapses on its own after
             // `PREFIX_TIMEOUT`, or on `Esc` / any other unbound key.
             KeyScheme::Prefix if state.prefix_pending() => {
-                "[attached]  Ctrl-O ▸ o switch / a focus / n/p tab / g agent / e note / q quit · Esc cancel"
+                "[attached]  Ctrl-O ▸ o switch / a focus / n/p tab / g agent / e note / x close / q quit · Esc cancel"
                     .to_string()
             }
             KeyScheme::Prefix => {
-                "[attached]  Ctrl-O then: o switch / a focus / n/p tab / g agent / e note / q quit · Ctrl-^ last"
+                "[attached]  Ctrl-O then: o switch / a focus / n/p tab / g agent / e note / x close / q quit · Ctrl-^ last"
                     .to_string()
             }
             KeyScheme::Alt => {
-                "[attached]  Alt: o switch / a focus / ←→ tab / g agent / e note / q quit · Ctrl-^ last"
+                "[attached]  Alt: o switch / a focus / ←→ tab / g agent / e note / x close / q quit · Ctrl-^ last"
                     .to_string()
             }
         },

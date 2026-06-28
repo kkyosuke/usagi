@@ -10,14 +10,14 @@
 //! forwarding to the shell) depends on the configured [`KeyScheme`]:
 //!
 //! - [`KeyScheme::Prefix`] (default) reserves only the `Ctrl-O` leader; the
-//!   action is the *next* key (`Ctrl-O o/a/n/p/g/e/s/q`, or `Ctrl-O →`/`←`).
+//!   action is the *next* key (`Ctrl-O o/a/n/p/g/e/s/x/q`, or `Ctrl-O →`/`←`).
 //!   Every other Ctrl key — `Ctrl-E`, `Ctrl-N`/`Ctrl-P`, `Ctrl-T`, … — flows to
 //!   the shell, and `Ctrl-O Ctrl-O` zooms out to 切替 just like `Ctrl-O o` (a
 //!   control-char second key the IME never composes). A pending leader lapses
 //!   after [`PREFIX_TIMEOUT`] (and is cleared by a mouse / paste event), so a
 //!   forgotten `Ctrl-O` can't capture a later key.
 //! - [`KeyScheme::Alt`] reserves a single `Alt`-chord per action
-//!   (`Alt-o/a/g/e/s/q`, `Alt-→`/`←`) and claims **no** bare Ctrl key.
+//!   (`Alt-o/a/g/e/s/x/q`, `Alt-→`/`←`) and claims **no** bare Ctrl key.
 //!
 //! `Ctrl-^` (previous session) is a direct key in both schemes, and `Ctrl-C`
 //! copies while a selection is active. `Esc` and `Ctrl-W` (the universal shell
@@ -268,6 +268,9 @@ pub(super) enum Reserved {
     PrevTab,
     /// Add a fresh agent tab without leaving 没入.
     NewAgentTab,
+    /// Close the active tab in place, killing its shell. Mirrors 切替's `x`, so
+    /// closing a tab no longer means zooming out first.
+    CloseTab,
     /// Open the session-note editor over the pane.
     OpenNote,
     /// Collapse / expand the left session sidebar in place.
@@ -344,6 +347,7 @@ fn alt_action(key: &KeyEvent) -> Option<Reserved> {
         KeyCode::Char('g') => Reserved::NewAgentTab,
         KeyCode::Char('e') => Reserved::OpenNote,
         KeyCode::Char('s') => Reserved::ToggleSidebar,
+        KeyCode::Char('x') => Reserved::CloseTab,
         KeyCode::Char('q') => Reserved::Quit,
         KeyCode::Right => Reserved::NextTab,
         KeyCode::Left => Reserved::PrevTab,
@@ -364,6 +368,7 @@ fn prefix_action(key: &KeyEvent) -> Option<Reserved> {
         KeyCode::Char('g') => Reserved::NewAgentTab,
         KeyCode::Char('e') => Reserved::OpenNote,
         KeyCode::Char('s') => Reserved::ToggleSidebar,
+        KeyCode::Char('x') => Reserved::CloseTab,
         KeyCode::Char('q') => Reserved::Quit,
         _ => return None,
     })
@@ -741,8 +746,10 @@ mod tests {
             KeyAction::BeginPrefix
         );
         // The conflicting bare-Ctrl keys are no longer claimed — they reach the
-        // shell (the whole point of the prefix scheme).
-        for ch in ['e', 'n', 'p', 't', 'g', 'b', 'q'] {
+        // shell (the whole point of the prefix scheme). `Ctrl-X` is among them: a
+        // readline prefix (`Ctrl-X Ctrl-E` …), so closing a tab is `Ctrl-O x`, not
+        // a bare chord that would steal it.
+        for ch in ['e', 'n', 'p', 't', 'g', 'b', 'x', 'q'] {
             assert_eq!(
                 classify(
                     Prefix,
@@ -762,6 +769,7 @@ mod tests {
         assert_eq!(second('g'), KeyAction::Reserved(Reserved::NewAgentTab));
         assert_eq!(second('e'), KeyAction::Reserved(Reserved::OpenNote));
         assert_eq!(second('s'), KeyAction::Reserved(Reserved::ToggleSidebar));
+        assert_eq!(second('x'), KeyAction::Reserved(Reserved::CloseTab));
         assert_eq!(second('q'), KeyAction::Reserved(Reserved::Quit));
         // Arrows after the leader move tabs too.
         assert_eq!(
@@ -847,6 +855,10 @@ mod tests {
         assert_eq!(
             classify(Alt, false, &alt('s')),
             KeyAction::Reserved(Reserved::ToggleSidebar)
+        );
+        assert_eq!(
+            classify(Alt, false, &alt('x')),
+            KeyAction::Reserved(Reserved::CloseTab)
         );
         assert_eq!(
             classify(Alt, false, &alt('q')),

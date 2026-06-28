@@ -305,6 +305,66 @@ impl Command for SessionCommand {
     }
 }
 
+/// `unite add|remove <workspace>`: stack another registered workspace into the
+/// 統合(unite) view, or drop one from it. The view collapses back to a single
+/// workspace when the last extra one is removed. Resolving / loading the workspace
+/// is a side effect ([`Effect::UniteAdd`] / [`Effect::UniteRemove`]) the event
+/// loop performs, since it owns the workspace registry and the session store.
+pub(super) struct UniteCommand;
+
+impl Command for UniteCommand {
+    fn name(&self) -> &'static str {
+        "unite"
+    }
+
+    fn description(&self) -> &'static str {
+        "Add or remove a workspace in the unite (multi-workspace) view"
+    }
+
+    fn usage(&self) -> &'static str {
+        "unite [add|remove] <workspace>"
+    }
+
+    fn examples(&self) -> &'static [&'static str] {
+        &["unite add backend", "unite remove backend"]
+    }
+
+    fn scope(&self) -> CommandScope {
+        CommandScope::Workspace
+    }
+
+    fn run(&self, args: &str, _ctx: &CommandContext) -> CommandResult {
+        let mut parts = args.splitn(2, char::is_whitespace);
+        let sub = parts.next().unwrap_or("");
+        let name = parts.next().unwrap_or("").trim();
+        let usage = || CommandResult::line(LogLine::error(format!("usage: {}", self.usage())));
+        if name.is_empty() {
+            return usage();
+        }
+        match sub {
+            "add" => CommandResult {
+                lines: Vec::new(),
+                effect: Effect::UniteAdd(name.to_string()),
+            },
+            "remove" | "rm" => CommandResult {
+                lines: Vec::new(),
+                effect: Effect::UniteRemove(name.to_string()),
+            },
+            _ => usage(),
+        }
+    }
+
+    fn complete_args(&self, args: &str, _ctx: &CompletionContext) -> Vec<String> {
+        let (head, _) = arg_tokens(args);
+        // Offer the two subcommands until one is typed; the workspace name itself is
+        // free-form (the registry is not threaded into completion).
+        match head.first() {
+            None => ["add", "remove"].iter().map(|s| s.to_string()).collect(),
+            _ => Vec::new(),
+        }
+    }
+}
+
 /// Normalize a `session` subcommand alias to its canonical spelling (`c`/`new`
 /// → `create`, `ls` → `list`, `rm` → `remove`), passing anything else through.
 /// Shared by dispatch and completion so both honour the same aliases.

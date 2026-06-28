@@ -5,6 +5,7 @@
 use super::builtins::{
     AgentCommand, ClearCommand, CloseCommand, ComingSoonCommand, ConfigCommand, HistoryCommand,
     IssueCommand, ManCommand, PreviewCommand, QuitCommand, SessionCommand, TerminalCommand,
+    UniteCommand,
 };
 use super::{
     Command, CommandContext, CommandHint, CommandInfo, CommandResult, CommandScope, Completion,
@@ -27,6 +28,7 @@ impl CommandRegistry {
         Self {
             commands: vec![
                 Box::new(SessionCommand),
+                Box::new(UniteCommand),
                 Box::new(TerminalCommand),
                 Box::new(AgentCommand),
                 Box::new(ComingSoonCommand {

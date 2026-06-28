@@ -854,6 +854,52 @@ pub(super) fn dim_row(line: &str) -> String {
     style(console::strip_ansi_codes(line)).dim().to_string()
 }
 
+/// The flat selectable row (root rows included, matching `WorktreeList`'s row
+/// space) a 0-based body `line` lands on, or `None` for a group header, a divider,
+/// an empty-workspace message, or a line past the last group. Replays the exact
+/// layout [`left_pane`] builds so a click maps back to its row in both
+/// single-workspace and 統合(unite) mode without the renderer and the hit test ever
+/// disagreeing.
+pub(super) fn sidebar_row_at_line(list: &WorktreeList, line: usize) -> Option<usize> {
+    let united = list.group_count() > 1;
+    let mut cur = 0usize; // body line being walked
+    let mut flat = 0usize; // flat selectable-row index
+    for group in list.groups() {
+        // The unite group header (only when more than one workspace is shown).
+        if united {
+            if line == cur {
+                return None;
+            }
+            cur += 1;
+        }
+        // The root entry spans two rows, then a one-row divider.
+        if line == cur || line == cur + 1 {
+            return Some(flat);
+        }
+        cur += 2;
+        flat += 1;
+        if line == cur {
+            return None; // the divider
+        }
+        cur += 1;
+        if group.worktrees().is_empty() {
+            if line == cur {
+                return None; // the empty-workspace message
+            }
+            cur += 1;
+            continue;
+        }
+        for _ in group.worktrees() {
+            if line >= cur && line < cur + SESSION_ROWS {
+                return Some(flat);
+            }
+            cur += SESSION_ROWS;
+            flat += 1;
+        }
+    }
+    None
+}
+
 /// Builds a 統合(unite) group header: the workspace name in bold behind a left
 /// bar, clipped to the sidebar width. Drawn above each workspace's rows only when
 /// more than one workspace is shown, so single-workspace mode is byte-for-byte

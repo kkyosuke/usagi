@@ -46,6 +46,25 @@ pub use mode::{Mode, PaneExit, ResumeLevel, ReturnMode};
 use list::session_row;
 use modal::{FocusMenu, Overlay};
 
+/// One additional workspace shown below the primary in 統合(unite) mode — its
+/// name, root directory, root-row note, and recorded sessions. Unlike the primary
+/// workspace (whose sessions live in [`HomeState::sessions`] and are re-synced
+/// live), these are seeded by the orchestrator and refreshed when a `session`
+/// command targets this workspace. Collapsed into a [`WorkspaceGroup`] on every
+/// [`rebuild_list`](HomeState::rebuild_list).
+#[derive(Debug, Clone)]
+pub struct GroupSource {
+    /// The workspace's display name (its sidebar header).
+    pub name: String,
+    /// The workspace root directory — the `⌂ root` row's working dir, and the
+    /// target `session` commands run against when the cursor is in this group.
+    pub root_path: PathBuf,
+    /// The workspace root's free-form note (the `⌂ root` row's memo).
+    pub root_note: Option<String>,
+    /// The workspace's recorded sessions (from its `state.json`).
+    pub sessions: Vec<SessionRecord>,
+}
+
 /// The outcome of submitting the command line: the side effect to act on, plus
 /// the command that was recorded in history (so the event loop can persist it).
 #[derive(Debug)]
@@ -516,7 +535,15 @@ pub struct HomeState {
     /// primary on every [`rebuild_list`](Self::rebuild_list). Built by the
     /// orchestrator from the other selected workspaces' preloads via
     /// [`set_extra_groups`](Self::set_extra_groups).
-    extra_groups: Vec<WorkspaceGroup>,
+    extra_groups: Vec<GroupSource>,
+    /// The workspace root the most recently dispatched `session` operation
+    /// (create / remove / rename / note) acts on, so its async (or sync) result is
+    /// applied back to the right 統合(unite) group rather than always the primary.
+    /// `None` (or the primary's root) routes to [`sessions`](Self::sessions);
+    /// otherwise it matches an [`extra_groups`](Self::extra_groups) entry. Set by
+    /// the handlers from the cursor's group just before dispatching and cleared as
+    /// the result lands.
+    op_target: Option<PathBuf>,
     /// Whether the sidebar mascot reacts to interaction — injected from the
     /// effective settings by `mod.rs`. While `false` the mascot never blinks and
     /// the Working rabbit never pumps its paw, so it stays a perfectly still
@@ -640,6 +667,7 @@ impl HomeState {
             root_path: PathBuf::new(),
             root_note: None,
             extra_groups: Vec::new(),
+            op_target: None,
             // The mascot reacts by default; `mod.rs` overrides it from the
             // effective settings, and tests get a lively mascot without setup.
             mascot_animation_enabled: true,
@@ -943,7 +971,7 @@ impl HomeState {
     /// note markers, and root path; the orchestrator builds them from the other
     /// workspaces' preloads. The primary workspace stays first and is the one the
     /// live re-sync, `session` commands, and root row act on.
-    pub fn set_extra_groups(&mut self, groups: Vec<WorkspaceGroup>) {
+    pub fn set_extra_groups(&mut self, groups: Vec<GroupSource>) {
         self.extra_groups = groups;
         self.rebuild_list_keep_cursor();
     }
@@ -951,6 +979,98 @@ impl HomeState {
     /// Whether the home screen is showing more than one workspace (統合/unite mode).
     pub fn is_united(&self) -> bool {
         !self.extra_groups.is_empty()
+    }
+
+    /// Stack another workspace into the 統合(unite) view (`unite add`), keeping the
+    /// cursor put. A no-op (returning `false`) when that workspace is already shown
+    /// — the primary, or an extra group with the same root — so adding twice does
+    /// not duplicate it.
+    pub fn add_extra_group(&mut self, group: GroupSource) -> bool {
+        if group.root_path == self.root_path
+            || self
+                .extra_groups
+                .iter()
+                .any(|g| g.root_path == group.root_path)
+        {
+            return false;
+        }
+        self.extra_groups.push(group);
+        self.rebuild_list_keep_cursor();
+        true
+    }
+
+    /// Drop the extra (unite) workspace named `name` from the view (`unite
+    /// remove`), returning whether one matched. Removing the last extra group
+    /// restores the single-workspace view (no headers). The primary workspace
+    /// cannot be removed this way.
+    pub fn remove_extra_group(&mut self, name: &str) -> bool {
+        let Some(i) = self.extra_groups.iter().position(|g| g.name == name) else {
+            return false;
+        };
+        self.extra_groups.remove(i);
+        self.rebuild_list_keep_cursor();
+        true
+    }
+
+    /// The names of every workspace currently shown — the primary first, then each
+    /// extra (unite) group — for persisting the active unite set.
+    pub fn united_workspace_names(&self) -> Vec<String> {
+        std::iter::once(self.list.workspace_name().to_string())
+            .chain(self.extra_groups.iter().map(|g| g.name.clone()))
+            .collect()
+    }
+
+    /// The workspace root the cursor's group operates in — the primary's root when
+    /// the cursor is in the first group, otherwise the matching extra group's root.
+    /// `session` commands (create / remove / rename / note) run against this so a
+    /// new session lands in the workspace the user is pointing at.
+    pub fn selected_workspace_root(&self) -> PathBuf {
+        // `selected_group()` is always a valid group index, so group 0 is the
+        // primary and `i = g - 1` indexes the extra (unite) workspaces in step.
+        match self.list.selected_group().checked_sub(1) {
+            None => self.root_path.clone(),
+            Some(i) => self.extra_groups[i].root_path.clone(),
+        }
+    }
+
+    /// The root-row note of the cursor's group (the primary's, or the matching
+    /// extra group's), so the note editor opens prefilled with the right text.
+    pub fn selected_root_note(&self) -> Option<&str> {
+        match self.list.selected_group().checked_sub(1) {
+            None => self.root_note.as_deref(),
+            Some(i) => self.extra_groups[i].root_note.as_deref(),
+        }
+    }
+
+    /// The workspace root that owns the session named `name` — searched across the
+    /// primary workspace and every extra (unite) group, falling back to the primary
+    /// when no group claims it. Used by name-based operations (remove / close) so
+    /// they act on the workspace the session actually lives in, not just the cursor's.
+    pub fn workspace_root_for_session(&self, name: &str) -> PathBuf {
+        if self.sessions.iter().any(|s| s.name == name) {
+            return self.root_path.clone();
+        }
+        self.extra_groups
+            .iter()
+            .find(|g| g.sessions.iter().any(|s| s.name == name))
+            .map(|g| g.root_path.clone())
+            .unwrap_or_else(|| self.root_path.clone())
+    }
+
+    /// Record the workspace a `session` operation is about to act on (the cursor's
+    /// group), so its result is applied back to that group. Cleared when the result
+    /// lands ([`apply_task_completion`](Self::apply_task_completion) /
+    /// [`apply_session_outcome`](Self::apply_session_outcome)).
+    pub fn set_op_target(&mut self, root: PathBuf) {
+        self.op_target = Some(root);
+    }
+
+    /// The index into [`extra_groups`](Self::extra_groups) the recorded
+    /// [`op_target`](Self::op_target) matches, or `None` for the primary workspace
+    /// (or no target). Takes (clears) the target.
+    fn take_op_target_group(&mut self) -> Option<usize> {
+        let target = self.op_target.take()?;
+        self.extra_groups.iter().position(|g| g.root_path == target)
     }
 
     /// Swap in a freshly re-synced set of sessions while keeping the cursor and
@@ -1017,11 +1137,13 @@ impl HomeState {
         // session), so its marker is carried separately from the per-session notes.
         list.set_root_note_marker(self.root_note.is_some());
         // 統合(unite) mode: stack the other selected workspaces below the primary
-        // one. They are display snapshots (built once by the orchestrator), so they
-        // are re-appended verbatim on every rebuild while the primary group above is
-        // the one re-synced live.
+        // one, each collapsed from its recorded sessions the same way the primary is.
         for group in &self.extra_groups {
-            list.add_group(group.clone());
+            list.add_group(WorkspaceGroup::from_sessions(
+                &group.name,
+                &group.sessions,
+                group.root_note.is_some(),
+            ));
         }
         self.list = list;
     }
@@ -1519,7 +1641,15 @@ impl HomeState {
     pub fn apply_task_completion(&mut self, line: LogLine, sessions: Option<Vec<SessionRecord>>) {
         self.push_logged_line(line);
         if let Some(sessions) = sessions {
-            self.refresh_sessions(sessions);
+            // Route the reloaded sessions to the workspace the operation targeted:
+            // an extra (unite) group when the cursor was in one, else the primary.
+            match self.take_op_target_group() {
+                Some(i) => {
+                    self.extra_groups[i].sessions = sessions;
+                    self.rebuild_list_keep_cursor();
+                }
+                None => self.refresh_sessions(sessions),
+            }
         }
     }
 
@@ -2512,18 +2642,33 @@ impl HomeState {
     /// creation refreshed the worktree list, swap it in.
     pub fn apply_session_outcome(&mut self, outcome: SessionOutcome) {
         self.push_logged_line(outcome.line);
+        // Route the result to the workspace the operation targeted (an extra unite
+        // group when the cursor was in one, else the primary).
+        let target_group = self.take_op_target_group();
         // Apply a refreshed root note (set only by the root-note save) before the
         // rebuild, so the `⌂ root` row's memo marker reflects the edit this frame.
+        let note_changed = outcome.root_note.is_some();
         if let Some(root_note) = outcome.root_note {
-            self.root_note = root_note;
-            self.list.set_root_note_marker(self.root_note.is_some());
+            match target_group {
+                Some(i) => self.extra_groups[i].root_note = root_note,
+                None => self.root_note = root_note,
+            }
         }
         if let Some(sessions) = outcome.sessions {
-            self.sessions = sessions;
+            // A create / remove changed the rows: rebuild and (for a create) move
+            // the cursor onto the new session.
+            match target_group {
+                Some(i) => self.extra_groups[i].sessions = sessions,
+                None => self.sessions = sessions,
+            }
             self.rebuild_list();
             if let Some(name) = outcome.select {
                 self.list.select_by_name(&name);
             }
+        } else if note_changed {
+            // A note edit changes no session rows, so refresh the memo markers
+            // without yanking the cursor back to the root row.
+            self.rebuild_list_keep_cursor();
         }
     }
 
