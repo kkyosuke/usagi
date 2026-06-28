@@ -407,12 +407,12 @@ pub struct HomeState {
     /// it (it captures the keyboard through [`overlay`](Self::overlay)).
     note_hidden: bool,
     /// The worktree (by index in [`list`](Self::list)'s worktrees) whose PR hover
-    /// popup is showing, or `None` when the pointer is not over a PR-bearing
-    /// session's row. Set as the pointer moves over the full sidebar (see the home
-    /// loop's [`Input::Hover`] handling); the renderer floats the session's
-    /// `#<number>` list beside its row. Purely transient — it never persists and is
-    /// cleared the instant the pointer leaves a PR row.
-    pr_hover: Option<usize>,
+    /// popup is pinned open, or `None` when none is. Set by clicking a session's PR
+    /// badge (in any mode, on the full sidebar) and held open across pointer moves —
+    /// unlike a hover tooltip — so the pointer can travel into the box to click a
+    /// `#<number>`; cleared by a click outside it, a keypress, or `Esc`. The
+    /// renderer floats the session's `#<number>` list beside its row.
+    pr_popup: Option<usize>,
     /// The transient overlay that captures the keyboard while open (the 切替
     /// inline create/rename inputs, the text modal, the right-pane preview, the
     /// session-removal checklist, the note editor). One [`Overlay`] rather than a
@@ -646,7 +646,7 @@ impl HomeState {
             agent_choice: None,
             switch_return: ReturnMode::Base,
             note_hidden: false,
-            pr_hover: None,
+            pr_popup: None,
             overlay: Overlay::default(),
             quit_confirm: false,
             update_confirm: false,
@@ -2030,19 +2030,19 @@ impl HomeState {
         self.note_hidden = true;
     }
 
-    /// The worktree whose PR hover popup is currently showing (by index in the
-    /// list's worktrees), or `None`. Read by the renderer to float the session's
+    /// The worktree whose PR popup is pinned open (by index in the list's
+    /// worktrees), or `None`. Read by the renderer to float the session's
     /// `#<number>` list beside its row.
-    pub fn pr_hover(&self) -> Option<usize> {
-        self.pr_hover
+    pub fn pr_popup(&self) -> Option<usize> {
+        self.pr_popup
     }
 
-    /// Point the PR hover popup at worktree `target` (or clear it with `None`),
-    /// returning whether the target changed — the home loop repaints only then, so
-    /// a pointer sliding within the same row (or empty space) costs no redraw.
-    pub fn set_pr_hover(&mut self, target: Option<usize>) -> bool {
-        let changed = self.pr_hover != target;
-        self.pr_hover = target;
+    /// Pin the PR popup to worktree `target` (or close it with `None`), returning
+    /// whether the target changed — the loop repaints only then, so re-pinning the
+    /// same session (or a no-op close) costs no redraw.
+    pub fn set_pr_popup(&mut self, target: Option<usize>) -> bool {
+        let changed = self.pr_popup != target;
+        self.pr_popup = target;
         changed
     }
 

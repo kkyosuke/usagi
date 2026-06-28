@@ -30,10 +30,10 @@ use chrome::{
 use panes::{group_inline_insert_line, left_pane, right_pane_contents};
 // The embedded terminal pane (没入) maps a click to the tab under it through this.
 pub(super) use panes::attached_tab_at;
-// …and a click on a sidebar session row to that session's PR URLs through this.
-pub(super) use panes::sidebar_pr_links_at;
-// …and a pointer hovering a sidebar session row to that session (for the PR popup).
-pub(super) use panes::sidebar_pr_hover_at;
+// …a click on a sidebar session's PR badge to that session (to pin its PR popup).
+pub(super) use panes::sidebar_pr_badge_at;
+// …and a click anywhere to the pinned PR popup: open a `#<number>`, or dismiss it.
+pub(super) use panes::{pr_popup_click, PopupClick};
 
 use super::state::{HomeState, ModalSize, Mode};
 use crate::domain::resource::ResourceUsage;
@@ -454,20 +454,18 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
         lines.push(line);
     }
 
-    // Float the PR hover popup beside the session the pointer is over. `pr_hover`
-    // is only ever set on the full sidebar (see [`sidebar_pr_hover_at`]), and only
-    // for a PR-bearing session, so `pr_hover_popup` always yields a box here. It
-    // lists the session's `#<number>` PRs — the row itself folds them to an
-    // `<icon> <count>` badge — anchored at the session's first row and pushed just
-    // past the divider into the right pane, so it never hides the sidebar it
-    // describes. Composited now, while `lines` holds only the body rows, so the box
-    // stays within the panes and never spills onto the input / footer below.
-    if let Some(idx) = state.pr_hover() {
-        if let Some(wt) = state.list().worktrees().get(idx) {
-            let popup = panes::pr_hover_popup(&wt.pr);
-            let top = body_start + panes::ROOT_ENTRY_LINES + panes::SESSION_ROWS * idx;
-            widgets::overlay_at(&mut lines, width, top, left_w + SEP_WIDTH, &popup);
-        }
+    // Float the pinned PR popup beside the session whose badge was clicked. The
+    // placement is only ever produced on the full sidebar, for a PR-bearing session,
+    // with its anchor already clamped to where this overlay lands (see
+    // [`panes::pr_popup_placement`] — the click hit-test shares it so a click on a
+    // `#<number>` opens exactly the link the user sees). It lists the session's PRs
+    // — the row itself folds them to an `<icon> <count>` badge — anchored at the
+    // session's first row and pushed just past the divider into the right pane, so
+    // it never hides the sidebar it describes. Composited now, while `lines` holds
+    // only the body rows, so the box stays within the panes and never spills onto
+    // the input / footer below.
+    if let Some((popup, top, left)) = panes::pr_popup_placement(state, raw_height, raw_width) {
+        widgets::overlay_at(&mut lines, width, top, left, &popup);
     }
 
     lines.extend(input_lines);
