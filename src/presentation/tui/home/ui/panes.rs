@@ -1284,21 +1284,55 @@ pub(in crate::presentation::tui::home) fn attached_tab_at(
     (target != strip.active).then_some(target)
 }
 
-/// The worktree (by index in the list) whose folded `<icon> <count>` PR badge the
-/// 0-based screen (`col`, `row`) lands on, or `None` otherwise — the column-precise
-/// hit-test behind opening the PR popup. Clicking the badge pins that session's
-/// `#<number>` popup open ([`pr_popup_placement`]); only the badge columns count,
-/// so the rest of the row stays free for selection.
+/// For the full sidebar, each worktree's global index (across every group, root
+/// rows excluded) paired with the 0-based body line its [`SESSION_ROWS`] entry
+/// starts on. Walks the same layout [`left_pane`] builds — in single-workspace
+/// mode and 統合(unite) mode (the [`UNITE_WORKSPACE_GAP_ROWS`]-row gap and the
+/// one-row group header before each later workspace, the two-row root entry, the
+/// divider, then either the empty-workspace message or the worktree rows) — so
+/// the PR badge hit-test and popup anchor agree with what is drawn without ever
+/// drifting from the renderer. The global index is what the PR popup pins, so a
+/// badge in any workspace (not just the first group) can open its popup.
+fn full_sidebar_worktree_entries(list: &WorktreeList) -> Vec<(usize, usize)> {
+    let united = list.group_count() > 1;
+    let mut cur = 0usize; // body line being walked
+    let mut global = 0usize; // worktree index across all groups
+    let mut out = Vec::new();
+    for (g, group) in list.groups().iter().enumerate() {
+        if united && g > 0 {
+            cur += UNITE_WORKSPACE_GAP_ROWS;
+        }
+        if united {
+            cur += 1; // the unite group header
+        }
+        cur += ROOT_ENTRY_LINES; // root entry (two rows) + divider
+        if group.worktrees().is_empty() {
+            cur += 1; // the empty-workspace message
+            continue;
+        }
+        for _ in group.worktrees() {
+            out.push((global, cur));
+            cur += SESSION_ROWS;
+            global += 1;
+        }
+    }
+    out
+}
+
+/// The worktree (by global index across every group) whose folded `<icon>
+/// <count>` PR badge the 0-based screen (`col`, `row`) lands on, or `None`
+/// otherwise — the column-precise hit-test behind opening the PR popup. Clicking
+/// the badge pins that session's `#<number>` popup open ([`pr_popup_placement`]);
+/// only the badge columns count, so the rest of the row stays free for selection.
 ///
 /// The geometry mirrors what [`super::render_frame`] lays out: the two-pane body
 /// begins at row [`BODY_TOP`] (below the title bar, mode ladder, and blank
 /// separator) and is [`super::body_rows_for`] rows tall; the left pane is the
 /// first `left_w` columns. Within it the entries stack as [`left_pane`] builds
-/// them — the root entry (two rows), a divider (one row), then [`SESSION_ROWS`]
-/// rows per worktree (identity, detail, and the CPU / memory line). The badge is
-/// the right-aligned tail of the detail line's cluster, flush to the pane's right
-/// edge (`left_w`); it is the PR glyph, a space, and the count's digits (see
-/// [`pr_cell`] / [`pr_width`]).
+/// them — including the 統合(unite) gaps and group headers, walked by
+/// [`full_sidebar_worktree_entries`]. The badge is the right-aligned tail of the
+/// detail line's cluster, flush to the pane's right edge (`left_w`); it is the PR
+/// glyph, a space, and the count's digits (see [`pr_cell`] / [`pr_width`]).
 ///
 /// Only the full sidebar draws the badge; the collapsed rail shows no PR, so a
 /// click there maps to nothing.
@@ -1309,7 +1343,7 @@ pub(in crate::presentation::tui::home) fn sidebar_pr_badge_at(
     col: u16,
     row: u16,
 ) -> Option<usize> {
-    if state.sidebar() != Sidebar::Full || state.list().group_count() > 1 {
+    if state.sidebar() != Sidebar::Full {
         return None;
     }
     let (height, width) = widgets::normalize_size(raw_height, raw_width);
@@ -1323,14 +1357,11 @@ pub(in crate::presentation::tui::home) fn sidebar_pr_badge_at(
     if line >= super::body_rows_for(height) {
         return None;
     }
-    // Lines 0..2 are the root entry and the divider; worktree rows start at line 3,
-    // [`SESSION_ROWS`] lines each. The badge only lives on each entry's detail line.
-    let entry_line = line.checked_sub(ROOT_ENTRY_LINES)?;
-    if entry_line % SESSION_ROWS != DETAIL_LINE {
-        return None;
-    }
-    let idx = entry_line / SESSION_ROWS;
-    let wt = state.list().worktrees().get(idx)?;
+    // The badge only lives on each entry's detail line.
+    let (idx, _) = full_sidebar_worktree_entries(state.list())
+        .into_iter()
+        .find(|&(_, start)| line == start + DETAIL_LINE)?;
+    let wt = state.list().worktree_by_global_index(idx)?;
     if wt.pr.is_empty() {
         return None;
     }
@@ -1438,12 +1469,7 @@ pub(in crate::presentation::tui::home) fn pr_popup_placement(
     if state.sidebar() != Sidebar::Full {
         return None;
     }
-    // 統合(unite) mode stacks several workspaces, a layout this single-group anchor
-    // does not model; the PR popup is disabled there.
-    if state.list().group_count() > 1 {
-        return None;
-    }
-    let wt = state.list().worktrees().get(idx)?;
+    let wt = state.list().worktree_by_global_index(idx)?;
     if wt.pr.is_empty() {
         return None;
     }
@@ -1458,11 +1484,17 @@ pub(in crate::presentation::tui::home) fn pr_popup_placement(
     if block_w == 0 || block_w > width {
         return None;
     }
+    // The body line the pinned session's entry starts on — walked the same way the
+    // sidebar is drawn so the box floats beside it even in 統合(unite) mode, where
+    // gaps, headers, and earlier groups push it down.
+    let (_, entry_line) = full_sidebar_worktree_entries(state.list())
+        .into_iter()
+        .find(|&(global, _)| global == idx)?;
     // `render_frame` overlays the box while `lines` holds only the chrome above the
     // body (`BODY_TOP` rows) and the body itself, so the anchor clamps against that
     // same length — and the left edge against the width — exactly as `overlay_at`.
     let base_len = BODY_TOP as usize + super::body_rows_for(height);
-    let raw_top = BODY_TOP as usize + ROOT_ENTRY_LINES + SESSION_ROWS * idx;
+    let raw_top = BODY_TOP as usize + entry_line;
     let top = raw_top.min(base_len.saturating_sub(popup.len()));
     let left = (left_w + super::SEP_WIDTH).min(width - block_w);
     Some((popup, top, left))
@@ -1508,8 +1540,13 @@ pub(in crate::presentation::tui::home) fn pr_popup_click(
     // The first row is the box's top border; content rows follow, the last being the
     // bottom border. `checked_sub` drops a click on the top border, and `pack.get`
     // drops one on the bottom border (its index runs one past the packed rows).
-    let prs = &state.list().worktrees()[idx].pr;
-    let pack = pr_popup_pack(prs);
+    // `pr_popup_placement` above resolved this same index to a worktree, so it is
+    // in range here; re-fetch its PRs to map the token columns.
+    let wt = state
+        .list()
+        .worktree_by_global_index(idx)
+        .expect("the pinned index placement already resolved");
+    let pack = pr_popup_pack(&wt.pr);
     let Some(tokens) = row.checked_sub(top + 1).and_then(|i| pack.get(i)) else {
         return PopupClick::Inside;
     };
