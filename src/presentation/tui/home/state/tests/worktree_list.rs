@@ -240,3 +240,138 @@ fn worktree_name_falls_back_to_detached() {
     detached.branch = None;
     assert_eq!(worktree_name(&detached), "(detached)");
 }
+
+// --- unite mode: multiple workspace groups -------------------------------
+//
+// A list can stack several `WorkspaceGroup`s (one opened workspace each). The
+// cursor / active row run over a flat row space concatenating every group's rows:
+//   group A "wsA": [root, a1, a2]   rows 0,1,2
+//   group B "wsB": [root, b1]       rows 3,4
+// Single-workspace mode is just the one-group case the tests above cover.
+
+fn united() -> WorktreeList {
+    WorktreeList::from_groups(vec![
+        WorkspaceGroup::new("wsA", vec![worktree("a1"), worktree("a2")]),
+        WorkspaceGroup::new("wsB", vec![worktree("b1")]),
+    ])
+}
+
+#[test]
+fn from_groups_stacks_each_workspaces_rows() {
+    let list = united();
+    assert_eq!(list.group_count(), 2);
+    assert_eq!(list.groups()[0].name(), "wsA");
+    assert_eq!(list.groups()[1].name(), "wsB");
+    // Two root rows (one per group) plus three worktrees.
+    assert_eq!(list.session_count(), 5);
+    // The first group is the one the legacy single-workspace accessors see.
+    assert_eq!(list.workspace_name(), "wsA");
+    assert_eq!(list.worktrees().len(), 2);
+    // Both cursors start on the first group's root row.
+    assert!(list.root_selected());
+    assert_eq!(list.selected_group(), 0);
+}
+
+#[test]
+fn add_group_appends_a_workspace_and_returns_its_index() {
+    let mut list = WorktreeList::new("wsA", vec![worktree("a1")]);
+    let idx = list.add_group(WorkspaceGroup::new("wsB", vec![worktree("b1")]));
+    assert_eq!(idx, 1);
+    assert_eq!(list.group_count(), 2);
+    assert_eq!(list.session_count(), 4); // wsA: root,a1 + wsB: root,b1
+}
+
+#[test]
+fn movement_crosses_group_boundaries_and_lands_on_each_root_row() {
+    let mut list = united(); // 0:wsA.root 1:a1 2:a2 3:wsB.root 4:b1
+    list.move_down();
+    assert_eq!(list.selected().unwrap().branch.as_deref(), Some("a1"));
+    list.move_down();
+    list.move_down(); // row 3 = wsB's root row
+    assert_eq!(list.selected_index(), 3);
+    assert!(list.root_selected());
+    assert_eq!(list.selected_group(), 1);
+    assert!(list.selected().is_none());
+    list.move_down(); // row 4 = b1
+    assert_eq!(list.selected().unwrap().branch.as_deref(), Some("b1"));
+    assert_eq!(list.selected_group(), 1);
+    // Wraps from the last row of the last group back to the first group's root.
+    list.move_down();
+    assert_eq!(list.selected_index(), 0);
+    list.move_up(); // wraps back to the bottom
+    assert_eq!(list.selected_index(), 4);
+}
+
+#[test]
+fn activate_and_active_group_follow_the_cursor_across_groups() {
+    let mut list = united();
+    list.focus_index(4); // b1 in wsB
+    assert_eq!(list.activate_selected(), "b1");
+    assert_eq!(list.active_group(), 1);
+    assert!(!list.root_active());
+    // Activating wsB's root row makes that group's root active.
+    list.focus_index(3);
+    assert_eq!(list.activate_selected(), ROOT_NAME);
+    assert!(list.root_active());
+    assert_eq!(list.active_group(), 1);
+}
+
+#[test]
+fn name_lookups_find_the_first_match_across_groups() {
+    let mut list = united();
+    assert!(list.select_by_name("b1"));
+    assert_eq!(list.selected_index(), 4);
+    assert_eq!(list.active_index(), 4);
+    assert!(list.activate_by_name("a2"));
+    assert_eq!(list.active_index(), 2);
+    // ROOT_NAME activates the first group's root row.
+    assert!(list.activate_by_name(ROOT_NAME));
+    assert_eq!(list.active_index(), 0);
+    assert!(!list.activate_by_name("nope"));
+}
+
+#[test]
+fn refs_list_every_groups_root_then_its_worktrees() {
+    let mut list = united();
+    list.focus_index(1); // a1
+    list.activate_selected();
+    let refs = list.refs();
+    let names: Vec<&str> = refs.iter().map(|r| r.name.as_str()).collect();
+    assert_eq!(names, ["root", "a1", "a2", "root", "b1"]);
+    // Only the active row (a1, index 1) is flagged active.
+    assert!(refs[1].active);
+    assert_eq!(refs.iter().filter(|r| r.active).count(), 1);
+}
+
+#[test]
+fn set_pr_links_finds_the_row_in_any_group() {
+    let mut list = united();
+    let b1_root = list.groups()[1].worktrees()[0].path.clone();
+    let prs = vec![crate::domain::workspace_state::PrLink {
+        url: "https://example.com/pull/7".to_string(),
+        number: 7,
+    }];
+    assert!(list.set_pr_links(&b1_root, prs.clone()));
+    assert_eq!(list.groups()[1].worktrees()[0].pr, prs);
+    // A path matching no row is a no-op.
+    assert!(!list.set_pr_links(std::path::Path::new("/nope"), prs));
+}
+
+#[test]
+fn workspace_group_carries_per_row_labels_and_notes() {
+    let mut group = WorkspaceGroup::with_labels(
+        "wsA",
+        vec![worktree("a1"), worktree("a2")],
+        vec![Some("One".to_string())],
+    );
+    assert_eq!(group.name(), "wsA");
+    assert_eq!(group.display_label(0), "One"); // override
+    assert_eq!(group.display_label(1), "a2"); // padded None → branch
+    assert!(!group.has_note(0));
+    group.set_notes(vec![true]);
+    assert!(group.has_note(0));
+    assert!(!group.has_note(1)); // padded false
+    assert!(!group.root_has_note());
+    group.set_root_note_marker(true);
+    assert!(group.root_has_note());
+}

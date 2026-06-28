@@ -38,7 +38,7 @@ mod log;
 mod modal;
 mod mode;
 
-pub use list::{worktree_name, WorktreeList, ROOT_NAME};
+pub use list::{worktree_name, WorkspaceGroup, WorktreeList, ROOT_NAME};
 pub use log::{LineKind, LogLine};
 pub use modal::{CreateInput, ModalSize, NoteEditor, Preview, RemoveModal, RenameInput, TextModal};
 pub use mode::{Mode, PaneExit, ResumeLevel, ReturnMode};
