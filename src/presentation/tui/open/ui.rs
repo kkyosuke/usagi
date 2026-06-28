@@ -88,16 +88,30 @@ fn truncate_start(text: &str, max: usize) -> String {
     format!("…{tail}")
 }
 
-/// Builds one project row: a `>` cursor for the selected entry, the name in a
-/// fixed-width column, and the (possibly truncated) path dimmed beside it.
+/// Glyph in the unite-mode check column: a check for a selected entry, a blank of
+/// the same width otherwise (so the column never shifts the name).
+const CHECK_ICON: &str = "✓";
+
+/// Builds one project row: a `>` cursor for the selected entry, a unite-mode
+/// check column, the name in a fixed-width column, and the (possibly truncated)
+/// path dimmed beside it.
 fn project_row(
     block_pad: &str,
     name: &str,
     name_width: usize,
     path: &str,
     selected: bool,
+    checked: bool,
 ) -> String {
     let marker = widgets::cursor_marker(selected);
+
+    // The unite-mode check column: a green check when the entry is selected for
+    // 統合, a blank otherwise. Always one column wide, so names stay aligned.
+    let check = if checked {
+        style(CHECK_ICON).green().bold().to_string()
+    } else {
+        " ".to_string()
+    };
 
     let padded = format!("{name:<name_width$}");
     let name = if selected {
@@ -106,11 +120,12 @@ fn project_row(
         style(padded).cyan().to_string()
     };
 
-    // "> " + name column + "  " precede the path; cap the path to the block.
-    let path_budget = widgets::BLOCK_WIDTH.saturating_sub(2 + name_width + 2);
+    // "> " + check column + " " + name column + "  " precede the path; cap the
+    // path to the block.
+    let path_budget = widgets::BLOCK_WIDTH.saturating_sub(2 + 2 + name_width + 2);
     let path = style(truncate_start(path, path_budget)).dim().to_string();
 
-    format!("{block_pad}{marker} {name}  {path}")
+    format!("{block_pad}{marker} {check} {name}  {path}")
 }
 
 /// Builds the list body: two rows per workspace — a name/path row and a dimmed
@@ -140,6 +155,7 @@ fn list_lines(
             name_width,
             &overview.workspace.path.to_string_lossy(),
             i == list.selected_index(),
+            list.is_checked(i),
         ));
         lines.push(stats_line(block_pad, overview, now));
     }
@@ -164,7 +180,7 @@ fn notice_lines(block_pad: &str, notice: Option<&str>) -> Vec<String> {
 fn footer_lines(width: usize) -> Vec<String> {
     vec![widgets::dim_line(
         width,
-        "↑↓: move / Enter: open / Esc: back",
+        "↑↓: move / Space: select / Enter: open / Esc: back",
     )]
 }
 
@@ -328,12 +344,37 @@ mod tests {
 
     #[test]
     fn project_row_marks_only_the_selected_entry() {
-        let selected = project_row("", "alpha", 5, "/p/alpha", true);
+        let selected = project_row("", "alpha", 5, "/p/alpha", true, false);
         assert!(selected.contains('>'));
         assert!(selected.contains("alpha"));
-        let unselected = project_row("", "beta", 5, "/p/beta", false);
+        let unselected = project_row("", "beta", 5, "/p/beta", false, false);
         assert!(!unselected.contains('>'));
         assert!(unselected.contains("beta"));
+    }
+
+    #[test]
+    fn project_row_shows_a_check_only_when_selected_for_unite() {
+        let checked = project_row("", "alpha", 5, "/p/alpha", false, true);
+        assert!(checked.contains(CHECK_ICON));
+        let unchecked = project_row("", "beta", 5, "/p/beta", false, false);
+        assert!(!unchecked.contains(CHECK_ICON));
+    }
+
+    #[test]
+    fn footer_mentions_the_space_select_chord() {
+        let lines = footer_lines(80);
+        assert!(lines.iter().any(|l| l.contains("Space")));
+    }
+
+    #[test]
+    fn list_lines_render_the_check_for_a_checked_entry() {
+        let mut list = list_with(&["alpha", "beta"]);
+        list.move_down();
+        list.toggle_checked(); // check "beta"
+        let lines = list_lines(80, "", &list, now());
+        // "beta" is the second workspace, so its name row is index 2.
+        assert!(lines[2].contains(CHECK_ICON));
+        assert!(!lines[0].contains(CHECK_ICON)); // "alpha" unchecked
     }
 
     #[test]

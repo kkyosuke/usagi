@@ -24,5 +24,6 @@ pub mod storage;
 pub mod store_lock;
 pub mod terminal;
 pub mod trace_log;
+pub mod unite_store;
 pub mod workspace_store;
 pub mod worktree_keyed_store;

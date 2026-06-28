@@ -257,6 +257,12 @@ pub(super) fn left_pane_session_at(
     raw_height: usize,
     raw_width: usize,
 ) -> Option<usize> {
+    // 統合(unite) mode stacks several workspaces with per-group headers and roots,
+    // a layout this single-group hit test does not model; selection there is
+    // keyboard-driven, so a click selects nothing rather than the wrong row.
+    if state.list().group_count() > 1 {
+        return None;
+    }
     let (height, width) = widgets::normalize_size(raw_height, raw_width);
     let (left_w, _right) = layout(width, state.sidebar());
     let (col, row) = (col as usize, row as usize);

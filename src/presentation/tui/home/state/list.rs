@@ -108,6 +108,27 @@ impl WorkspaceGroup {
         Self::with_labels(name, worktrees, labels)
     }
 
+    /// Build a group's rows from a workspace's recorded sessions — the same
+    /// collapse [`HomeState::rebuild_list`] does for the primary workspace: one row
+    /// per session via [`session_row`], carrying each session's display-name label
+    /// and note marker, plus whether the workspace root itself carries a note.
+    /// Used by the orchestrator to build the extra 統合(unite) groups.
+    ///
+    /// [`HomeState::rebuild_list`]: super::HomeState
+    pub fn from_sessions(
+        name: impl Into<String>,
+        sessions: &[SessionRecord],
+        root_has_note: bool,
+    ) -> Self {
+        let rows = sessions.iter().map(session_row).collect();
+        let labels = sessions.iter().map(|s| s.display_name.clone()).collect();
+        let notes = sessions.iter().map(|s| s.note.is_some()).collect();
+        let mut group = Self::with_labels(name, rows, labels);
+        group.set_notes(notes);
+        group.set_root_note_marker(root_has_note);
+        group
+    }
+
     /// A group with a sidebar label override per worktree (`labels[i]` applies to
     /// `worktrees[i]`; a shorter/longer `labels` is padded/truncated to match).
     pub fn with_labels(

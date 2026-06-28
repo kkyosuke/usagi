@@ -1,5 +1,47 @@
 use super::*;
 
+/// A minimal recorded session rooted at `/repo/.usagi/sessions/<name>`, used to
+/// give the primary workspace real rows that survive a rebuild.
+fn session(name: &str) -> crate::domain::workspace_state::SessionRecord {
+    crate::domain::workspace_state::SessionRecord {
+        name: name.to_string(),
+        display_name: None,
+        note: None,
+        root: PathBuf::from(format!("/repo/.usagi/sessions/{name}")),
+        worktrees: Vec::new(),
+        created_at: Utc::now(),
+        last_active: None,
+    }
+}
+
+#[test]
+fn set_extra_groups_stacks_other_workspaces_below_the_primary() {
+    let mut state = HomeState::new("usagi", Vec::new(), None);
+    state.restore_sessions(vec![session("main"), session("feature")]);
+    assert!(!state.is_united());
+    assert_eq!(state.list().group_count(), 1);
+    // primary: root + 2 sessions
+    assert_eq!(state.list().session_count(), 3);
+
+    state.set_extra_groups(vec![WorkspaceGroup::new("wsB", vec![worktree("b1")])]);
+    assert!(state.is_united());
+    assert_eq!(state.list().group_count(), 2);
+    assert_eq!(state.list().groups()[1].name(), "wsB");
+    // primary(root+2) + extra(root+1) = 5
+    assert_eq!(state.list().session_count(), 5);
+
+    // A live re-sync of the primary keeps the extra group appended below it.
+    state.refresh_sessions(vec![session("main")]);
+    assert_eq!(state.list().group_count(), 2);
+    assert_eq!(state.list().groups()[0].worktrees().len(), 1);
+    assert_eq!(state.list().groups()[1].worktrees().len(), 1);
+
+    // Clearing the extra groups restores the single-workspace view.
+    state.set_extra_groups(Vec::new());
+    assert!(!state.is_united());
+    assert_eq!(state.list().group_count(), 1);
+}
+
 #[test]
 fn new_state_starts_in_switch_with_a_hint() {
     let state = state();

@@ -26,7 +26,10 @@ pub enum Outcome {
 ///
 /// Taking this as a parameter lets the event loop be tested without a real
 /// terminal: production wires it to [`home::run`], tests pass a stub.
-pub type OpenHome<'a> = dyn FnMut(&Term, &Workspace) -> Result<home::Outcome> + 'a;
+///
+/// The slice holds every workspace the user chose to open together: one for the
+/// ordinary single-workspace home, several for 統合(unite) mode.
+pub type OpenHome<'a> = dyn FnMut(&Term, &[Workspace]) -> Result<home::Outcome> + 'a;
 
 /// The workspace-store side effects the selection screen needs when a chosen
 /// workspace's directory is gone: deciding whether it still exists on disk, and
@@ -118,28 +121,38 @@ pub fn event_loop(
                 list.move_down();
                 notice = None;
             }
+            // `Space` toggles the cursor entry's unite-mode check, so `Enter` can
+            // open several workspaces together.
+            Key::Char(' ') => {
+                list.toggle_checked();
+                notice = None;
+            }
             Key::Enter => {
-                // Clone the selection so the immutable borrow is dropped before
-                // promoting it to the top of the list on return.
-                if let Some(workspace) = list.selected().cloned() {
+                // The workspaces to open: every checked one, or just the cursor's
+                // when none are checked. Owned clones, so the list can be mutated
+                // (promote / focus) afterwards without a borrow conflict.
+                let chosen = list.chosen();
+                if let Some(first) = chosen.first() {
                     // A workspace whose directory has since been deleted cannot be
-                    // opened; offer to drop the stale entry instead of launching
-                    // the home screen on a missing path.
-                    if !(actions.exists)(&workspace.path) {
-                        confirming = Some(workspace.name.clone());
+                    // opened; offer to drop the first stale entry instead of
+                    // launching on a missing path. Land the cursor on it so the
+                    // removal prompt acts on the right row.
+                    if let Some(missing) = chosen.iter().find(|w| !(actions.exists)(&w.path)) {
+                        list.focus_name(&missing.name);
+                        confirming = Some(missing.name.clone());
                         painter.reset();
                         continue;
                     }
-                    // Opening the workspace is wired by the caller: it hides the
-                    // list, plays the mascot animation while loading the workspace
-                    // off-thread, then shows the home screen (切替). See
-                    // [`super::run`].
-                    match open_home(term, &workspace)? {
-                        // The home screen drew over the list; force a full
-                        // repaint of it on the next pass. The just-opened
-                        // project moves to the top so the list reflects
-                        // most-recently-opened order without a reload.
+                    // Opening is wired by the caller: it hides the list, plays the
+                    // mascot animation while loading the workspaces off-thread, then
+                    // shows the home screen (切替). See [`super::run`].
+                    match open_home(term, &chosen)? {
+                        // The home screen drew over the list; force a full repaint of
+                        // it on the next pass. The (first) just-opened project moves
+                        // to the top so the list reflects most-recently-opened order
+                        // without a reload.
                         home::Outcome::Back => {
+                            list.focus_name(&first.name);
                             list.promote_selected();
                             notice = None;
                             painter.reset();
@@ -200,13 +213,13 @@ mod tests {
     }
 
     // Home-screen launchers used as stubs; each is exercised by a test below.
-    fn home_back(_t: &Term, _w: &Workspace) -> Result<home::Outcome> {
+    fn home_back(_t: &Term, _w: &[Workspace]) -> Result<home::Outcome> {
         Ok(home::Outcome::Back)
     }
-    fn home_quit(_t: &Term, _w: &Workspace) -> Result<home::Outcome> {
+    fn home_quit(_t: &Term, _w: &[Workspace]) -> Result<home::Outcome> {
         Ok(home::Outcome::Quit)
     }
-    fn home_err(_t: &Term, _w: &Workspace) -> Result<home::Outcome> {
+    fn home_err(_t: &Term, _w: &[Workspace]) -> Result<home::Outcome> {
         Err(anyhow::anyhow!("home screen blew up"))
     }
 
@@ -296,6 +309,64 @@ mod tests {
         // Enter opens the home screen (stub returns Back), then Escape leaves.
         let keys = vec![Ok(Key::Enter), Ok(Key::Escape)];
         assert!(matches!(run(keys, sample_list()).unwrap(), Outcome::Back));
+    }
+
+    #[test]
+    fn space_checks_entries_and_enter_opens_them_together() {
+        // Space checks "alpha", move down + Space checks "beta", Enter opens both
+        // in one go (统合/unite). The capturing stub records what it was handed.
+        let term = Term::stdout();
+        let mut reader = ScriptedReader::new(vec![
+            Ok(Key::Char(' ')),
+            Ok(Key::ArrowDown),
+            Ok(Key::Char(' ')),
+            Ok(Key::Enter),
+            Ok(Key::Escape),
+        ]);
+        let mut opened: Vec<Vec<String>> = Vec::new();
+        let mut open = |_t: &Term, ws: &[Workspace]| {
+            opened.push(ws.iter().map(|w| w.name.clone()).collect());
+            Ok(home::Outcome::Back)
+        };
+        let mut exists: fn(&Path) -> bool = exists_true;
+        let mut remove: fn(&str) -> Result<()> = remove_ok;
+        let mut actions = present_actions(&mut exists, &mut remove);
+        let outcome = event_loop(
+            &term,
+            &mut reader,
+            sample_list(),
+            None,
+            &mut open,
+            &mut actions,
+        )
+        .unwrap();
+        assert!(matches!(outcome, Outcome::Back));
+        assert_eq!(opened, vec![vec!["alpha".to_string(), "beta".to_string()]]);
+    }
+
+    #[test]
+    fn enter_with_nothing_checked_opens_just_the_cursor_workspace() {
+        let term = Term::stdout();
+        let mut reader = ScriptedReader::new(vec![Ok(Key::Enter), Ok(Key::Escape)]);
+        let mut opened: Vec<Vec<String>> = Vec::new();
+        let mut open = |_t: &Term, ws: &[Workspace]| {
+            opened.push(ws.iter().map(|w| w.name.clone()).collect());
+            Ok(home::Outcome::Back)
+        };
+        let mut exists: fn(&Path) -> bool = exists_true;
+        let mut remove: fn(&str) -> Result<()> = remove_ok;
+        let mut actions = present_actions(&mut exists, &mut remove);
+        let outcome = event_loop(
+            &term,
+            &mut reader,
+            sample_list(),
+            None,
+            &mut open,
+            &mut actions,
+        )
+        .unwrap();
+        assert!(matches!(outcome, Outcome::Back));
+        assert_eq!(opened, vec![vec!["alpha".to_string()]]);
     }
 
     #[test]
