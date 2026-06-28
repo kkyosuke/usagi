@@ -351,7 +351,7 @@ fn append_total_beside_mascot(rabbit: &mut [String], total: ResourceUsage, left_
     if rabbit.len() < 3 {
         return;
     }
-    let feet = rabbit.len() - 1;
+    let feet = rabbit.len().saturating_sub(1);
     let needed =
         console::measure_text_width(&rabbit[feet]) + 2 + console::measure_text_width(&label);
     if needed <= left_w {
@@ -719,7 +719,7 @@ fn place_mascot(
     // Reserve a blank row above the art and one below it.
     let reserved = rabbit.len() + 2;
     if body_rows >= reserved && column.len() <= body_rows - reserved {
-        column.resize(body_rows - rabbit.len() - 1, String::new());
+        column.resize(body_rows.saturating_sub(rabbit.len() + 1), String::new());
         column.extend(rabbit);
         // The animal's body is the bottom `animal_rows` of the placed block; its
         // feet sit on the second-to-last body row, so the body's top is here.

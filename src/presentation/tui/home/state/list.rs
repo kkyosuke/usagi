@@ -263,7 +263,7 @@ impl WorktreeList {
     /// Append another workspace group (unite mode) and return its index.
     pub fn add_group(&mut self, group: WorkspaceGroup) -> usize {
         self.groups.push(group);
-        self.groups.len() - 1
+        self.groups.len().saturating_sub(1)
     }
 
     /// The workspace groups, in display order.

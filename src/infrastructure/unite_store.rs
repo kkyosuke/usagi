@@ -34,7 +34,7 @@ pub struct UniteSet {
 pub fn save(names: &[String]) -> Result<()> {
     let dir = storage::data_dir()?;
     let path = dir.join(UNITE_FILE);
-    json_file::write_atomic(
+    json_file::write_versioned(
         &dir,
         &path,
         &UniteSet {
@@ -49,7 +49,7 @@ pub fn load() -> Vec<String> {
     storage::data_dir()
         .ok()
         .and_then(|dir| {
-            json_file::read::<UniteSet>(&dir.join(UNITE_FILE))
+            json_file::read_versioned::<UniteSet>(&dir.join(UNITE_FILE))
                 .ok()
                 .flatten()
         })
@@ -83,6 +83,13 @@ mod tests {
         with_data_dir(|| {
             save(&["beta".to_string(), "alpha".to_string()]).unwrap();
             assert_eq!(load(), vec!["beta".to_string(), "alpha".to_string()]);
+            let path = storage::data_dir().unwrap().join(UNITE_FILE);
+            let json: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+            assert_eq!(
+                json["version"],
+                serde_json::Value::from(json_file::FILE_FORMAT_VERSION)
+            );
         });
     }
 
@@ -102,6 +109,16 @@ mod tests {
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(&path, "not json").unwrap();
             assert!(load().is_empty());
+        });
+    }
+
+    #[test]
+    fn an_unversioned_legacy_file_still_loads() {
+        with_data_dir(|| {
+            let path = storage::data_dir().unwrap().join(UNITE_FILE);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, r#"{"workspaces":["old","set"]}"#).unwrap();
+            assert_eq!(load(), vec!["old".to_string(), "set".to_string()]);
         });
     }
 }

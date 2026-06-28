@@ -24,19 +24,33 @@ impl UpdateStatus {
     }
 }
 
-/// The highest `vX.Y.Z` tag in `git ls-remote --tags` output.
+/// Parse a release tag that is eligible for the "latest stable" update check.
+///
+/// Pre-release tags (`v1.2.3-rc.1`) are deliberately excluded. [`Version::parse`]
+/// accepts and normalises them to their numeric core for display/comparison
+/// elsewhere, but the updater should not announce an RC as if the final `1.2.3`
+/// release exists.
+fn release_tag_version(tag: &str) -> Option<Version> {
+    let tag = tag.trim_end_matches("^{}");
+    let core = tag.split('+').next().unwrap_or(tag);
+    if core.contains('-') {
+        return None;
+    }
+    Version::parse(tag)
+}
+
+/// The highest stable `vX.Y.Z` tag in `git ls-remote --tags` output.
 ///
 /// Each line looks like `<sha>\trefs/tags/v0.2.0`. Non-tag lines, the
-/// `refs/tags/` prefix, peeled-tag suffixes (`^{}`), and any tag that is not a
-/// version are all ignored. Returns the greatest version, or `None` when there
-/// are no version tags.
+/// `refs/tags/` prefix, peeled-tag suffixes (`^{}`), pre-release tags, and any
+/// tag that is not a version are all ignored. Returns the greatest version, or
+/// `None` when there are no stable version tags.
 pub fn latest_tag(ls_remote_stdout: &str) -> Option<Version> {
     ls_remote_stdout
         .lines()
         .filter_map(|line| line.split_once('\t'))
         .filter_map(|(_, reference)| reference.trim().strip_prefix("refs/tags/"))
-        .map(|tag| tag.trim_end_matches("^{}"))
-        .filter_map(Version::parse)
+        .filter_map(release_tag_version)
         .max()
 }
 
@@ -86,9 +100,21 @@ cafef00d\trefs/tags/v0.1.0
     }
 
     #[test]
+    fn latest_tag_ignores_pre_release_tags() {
+        let stdout = "\
+1\trefs/tags/v1.0.0
+2\trefs/tags/v2.0.0-rc.1
+3\trefs/tags/v1.9.0-beta.2";
+        // RC/beta tags are not announced as stable updates; the highest stable
+        // release wins even when a numerically newer pre-release exists.
+        assert_eq!(latest_tag(stdout), Version::parse("1.0.0"));
+    }
+
+    #[test]
     fn latest_tag_is_none_without_version_tags() {
         assert_eq!(latest_tag(""), None);
         assert_eq!(latest_tag("abc\trefs/tags/nightly"), None);
+        assert_eq!(latest_tag("abc\trefs/tags/v1.0.0-rc.1"), None);
         // A malformed line with no tab is skipped.
         assert_eq!(latest_tag("no-tab-here"), None);
     }
