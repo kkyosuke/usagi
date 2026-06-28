@@ -40,11 +40,18 @@ pub(super) fn title_bar(width: usize, list: &WorktreeList) -> String {
     // the active session changes — a longer name no longer pushes it sideways.
     let name_w = (width / 4).clamp(TITLE_NAME_MIN_W, TITLE_NAME_MAX_W);
     let name = pad_to_width(clip_to_width(list.active_name(), name_w), name_w);
-    let label = format!(
-        "{} · ▸ {name} · {count} session{}",
-        list.workspace_name(),
-        if count == 1 { "" } else { "s" }
-    );
+    let groups = list.group_count();
+    let label = if groups > 1 {
+        // 統合(unite): the title names the union, not one workspace, and counts the
+        // workspaces stacked in the sidebar.
+        format!("unite · ▸ {name} · {count} sessions across {groups} workspaces")
+    } else {
+        format!(
+            "{} · ▸ {name} · {count} session{}",
+            list.workspace_name(),
+            if count == 1 { "" } else { "s" }
+        )
+    };
     widgets::title_line(width, &label)
 }
 

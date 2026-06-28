@@ -154,6 +154,25 @@ fn title_bar_singular_and_plural() {
 }
 
 #[test]
+fn title_bar_names_the_union_and_counts_workspaces_in_unite_mode() {
+    let list = WorktreeList::from_groups(vec![
+        WorkspaceGroup::new(
+            "wsA",
+            vec![worktree(Some("a1"), true, BranchStatus::Pushed)],
+        ),
+        WorkspaceGroup::new(
+            "wsB",
+            vec![worktree(Some("b1"), false, BranchStatus::Local)],
+        ),
+    ]);
+    let bar = console::strip_ansi_codes(&title_bar(120, &list)).into_owned();
+    assert!(bar.contains("unite"));
+    assert!(bar.contains("across 2 workspaces"));
+    // 2 roots + 2 sessions = 4 rows.
+    assert!(bar.contains("4 sessions across"));
+}
+
+#[test]
 fn title_bar_shows_the_active_session_name() {
     // With nothing activated the root row is active, so the workspace itself is
     // named — keeping the active entry identifiable even when the sidebar is the
@@ -995,20 +1014,80 @@ fn rail_pane_stops_at_a_later_group_once_the_rail_is_full() {
 }
 
 #[test]
-fn mouse_hit_tests_are_disabled_in_unite_mode() {
-    // In 統合 mode the single-group layout the hit tests model no longer holds, so
-    // both the row-select click and the PR click/hover map to nothing (selection
-    // is keyboard-driven there).
-    let mut state = state_with(vec![worktree_with_pr(442)]);
+fn sidebar_row_at_line_walks_a_single_group_layout() {
+    // root (lines 0,1) → row 0, divider (2) → none, then 3 lines per worktree.
+    let list = list_with(vec![
+        worktree(Some("main"), true, BranchStatus::Pushed),
+        worktree(Some("feature"), false, BranchStatus::Local),
+    ]);
+    assert_eq!(sidebar_row_at_line(&list, 0), Some(0)); // root id
+    assert_eq!(sidebar_row_at_line(&list, 1), Some(0)); // root detail
+    assert_eq!(sidebar_row_at_line(&list, 2), None); // divider
+    assert_eq!(sidebar_row_at_line(&list, 3), Some(1)); // main
+    assert_eq!(sidebar_row_at_line(&list, 6), Some(2)); // feature
+    assert_eq!(sidebar_row_at_line(&list, 99), None); // past the end
+}
+
+#[test]
+fn sidebar_row_at_line_walks_a_unite_layout_with_headers() {
+    // Two groups; each is headed by a name line (unite), then root (2), divider,
+    // then sessions. Flat rows run across groups: wsA root=0, a1=1, wsB root=2,
+    // b1=3. Layout lines: 0 hdrA, 1-2 root, 3 div, 4-6 a1, 7 hdrB, 8-9 root,
+    // 10 div, 11-13 b1.
+    let list = WorktreeList::from_groups(vec![
+        WorkspaceGroup::new(
+            "wsA",
+            vec![worktree(Some("a1"), true, BranchStatus::Pushed)],
+        ),
+        WorkspaceGroup::new(
+            "wsB",
+            vec![worktree(Some("b1"), false, BranchStatus::Local)],
+        ),
+    ]);
+    assert_eq!(sidebar_row_at_line(&list, 0), None); // wsA header
+    assert_eq!(sidebar_row_at_line(&list, 1), Some(0)); // wsA root
+    assert_eq!(sidebar_row_at_line(&list, 3), None); // wsA divider
+    assert_eq!(sidebar_row_at_line(&list, 4), Some(1)); // a1
+    assert_eq!(sidebar_row_at_line(&list, 7), None); // wsB header
+    assert_eq!(sidebar_row_at_line(&list, 8), Some(2)); // wsB root
+    assert_eq!(sidebar_row_at_line(&list, 10), None); // wsB divider
+    assert_eq!(sidebar_row_at_line(&list, 11), Some(3)); // b1
+}
+
+#[test]
+fn sidebar_row_at_line_skips_an_empty_workspaces_message() {
+    // An empty group contributes header, root, divider, and an empty message line
+    // (which maps to no row); the next group's rows follow.
+    let list = WorktreeList::from_groups(vec![
+        WorkspaceGroup::new("wsA", Vec::new()),
+        WorkspaceGroup::new(
+            "wsB",
+            vec![worktree(Some("b1"), false, BranchStatus::Local)],
+        ),
+    ]);
+    // wsA: 0 hdr, 1-2 root, 3 div, 4 empty message.
+    assert_eq!(sidebar_row_at_line(&list, 1), Some(0)); // wsA root
+    assert_eq!(sidebar_row_at_line(&list, 4), None); // empty-workspace message
+                                                     // wsB: 5 hdr, 6-7 root, 8 div, 9-11 b1.
+    assert_eq!(sidebar_row_at_line(&list, 6), Some(1)); // wsB root
+    assert_eq!(sidebar_row_at_line(&list, 9), Some(2)); // b1
+}
+
+#[test]
+fn row_select_click_works_in_unite_mode_but_pr_mouse_stays_single_group() {
+    // The row-select click maps to the right session across groups; the PR
+    // click/hover (whose popup geometry is single-group) is disabled in unite.
+    let mut state = state_with_sessions(&["main"]); // primary "usagi" with one session
     state.set_extra_groups(vec![WorkspaceGroup::new(
         "wsB",
         vec![worktree(Some("b1"), false, BranchStatus::Local)],
     )]);
-    // A click that would land on the first session in single-group mode now selects
-    // nothing.
-    assert_eq!(left_pane_session_at(&state, 2, 6, 24, 120), None);
-    assert!(sidebar_pr_links_at(&state, 24, 120, 2, 6).is_empty());
-    assert_eq!(sidebar_pr_hover_at(&state, 24, 120, 2, 6), None);
+    // Body line 4 (header 0, root 1-2, divider 3, session 4) is the primary's
+    // session → flat row 1. Screen row = CHROME_TOP_ROWS (3) + 4 = 7.
+    assert_eq!(left_pane_session_at(&state, 2, 7, 24, 120), Some(1));
+    // The PR affordance is still off in unite (its popup geometry is single-group).
+    assert!(sidebar_pr_links_at(&state, 24, 120, 2, 7).is_empty());
+    assert_eq!(sidebar_pr_hover_at(&state, 24, 120, 2, 7), None);
 }
 
 #[test]
