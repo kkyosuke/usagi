@@ -974,6 +974,22 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
         })
     };
 
+    // Open a PR clicked in the pinned popup in the platform's default browser — the
+    // same detached, best-effort spawn the immersive pane uses for a clicked link,
+    // so a missing opener or a spawn failure never disturbs the screen.
+    let mut open_url = |url: &str| {
+        use std::process::{Command, Stdio};
+        let argv = terminal::link::open_command(url);
+        if let Some((cmd, rest)) = argv.split_first() {
+            let _ = Command::new(cmd)
+                .args(rest)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn();
+        }
+    };
+
     let mut wiring = event::Wiring {
         workspace_root: &workspace.path,
         persist: &mut persist,
@@ -987,6 +1003,7 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
         evict_pool: &mut evict_pool,
         existing_branches: &mut existing_branches,
         open_terminal: &mut open_terminal,
+        open_url: &mut open_url,
         open_config: &mut open_config,
         preview: &mut preview,
         tab_op: &mut tab_op,

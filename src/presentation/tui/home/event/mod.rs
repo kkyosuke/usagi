@@ -158,6 +158,11 @@ pub(super) struct Wiring<'a> {
     /// Embed a live shell in the right pane (没入) and drive it: the first `bool`
     /// is `agent` vs plain `terminal`, the second `new_pane` vs re-attach.
     pub open_terminal: &'a mut dyn FnMut(&mut HomeState, &Path, bool, bool) -> Result<PaneExit>,
+    /// Open `url` in the platform's default browser — the side effect behind
+    /// clicking a `#<number>` in a session's pinned PR popup. [`super::run`] wires
+    /// the real launcher (the same detached spawn the immersive pane uses); tests
+    /// pass a capture or a no-op so the loop's open path runs without shelling out.
+    pub open_url: &'a mut dyn FnMut(&str),
     /// Open the settings screen, re-reading the affected settings on return
     /// (`None` when the user quit the app from it).
     pub open_config: &'a mut dyn FnMut(&Term) -> Result<Option<ConfigReload>>,
@@ -529,6 +534,40 @@ pub(super) fn event_loop(
             // only when it misses. No key was pressed either way, so repaint only
             // when the click actually did something.
             Input::Click(click) => {
+                // A pinned PR popup intercepts the click first: a `#<number>` opens
+                // that PR in the browser, a click elsewhere in the box keeps it
+                // pinned, and a click outside dismisses it — consuming the click so
+                // it neither selects a row nor re-pins on the same press.
+                if state.pr_popup().is_some() {
+                    match ui::pr_popup_click(
+                        &state,
+                        height as usize,
+                        width as usize,
+                        click.col,
+                        click.row,
+                    ) {
+                        ui::PopupClick::Open(url) => (wiring.open_url)(&url),
+                        ui::PopupClick::Inside => {}
+                        ui::PopupClick::Outside => {
+                            state.set_pr_popup(None);
+                            force_paint = true;
+                        }
+                    }
+                    continue;
+                }
+                // No popup open: a click on a session's PR badge pins that session's
+                // popup so the pointer can travel into it and click a `#<number>`.
+                if let Some(idx) = ui::sidebar_pr_badge_at(
+                    &state,
+                    height as usize,
+                    width as usize,
+                    click.col,
+                    click.row,
+                ) {
+                    state.set_pr_popup(Some(idx));
+                    force_paint = true;
+                    continue;
+                }
                 let selected = click_selects_session(&state)
                     .then(|| {
                         ui::left_pane_session_at(
@@ -574,34 +613,21 @@ pub(super) fn event_loop(
                 }
                 continue;
             }
-            // A bare pointer move: track which PR-bearing session (if any) it is
-            // over so the renderer floats that session's `#<number>` list. Repaint
-            // only when the target changes — a pointer sliding within a row, or over
-            // empty space, costs no redraw, so the any-motion report flood never
-            // thrashes the screen. No key was pressed, so it loops without
-            // dispatching one.
-            Input::Hover(ev) => {
-                let target = ui::sidebar_pr_hover_at(
-                    &state,
-                    height as usize,
-                    width as usize,
-                    ev.col,
-                    ev.row,
-                );
-                if state.set_pr_hover(target) {
-                    force_paint = true;
-                }
-                continue;
-            }
+            // A bare pointer move no longer drives the PR popup — it is pinned by a
+            // badge click and dismissed only by a click or a keypress — so motion
+            // reports are ignored. Moving the pointer toward the popup to click a
+            // `#<number>` must not dismiss it. No key was pressed, so it loops
+            // without dispatching one.
+            Input::Hover(_) => continue,
         };
         // A key was pressed: whatever it does to the state, repaint on the next
         // iteration (the skip above only applies to idle ticks that read no key).
         force_paint = true;
-        // Touching the keyboard dismisses the transient PR hover popup, so it never
-        // lingers over a screen the user has moved on from (a stale hover would
-        // otherwise survive a keypress, a mode change, or attaching a pane, since
-        // those paths read no pointer move to clear it).
-        state.set_pr_hover(None);
+        // Touching the keyboard dismisses the pinned PR popup (so `Esc` — or any
+        // key — closes it), so it never lingers over a screen the user has moved on
+        // from: a stale popup would otherwise survive a keypress, a mode change, or
+        // attaching a pane, since those paths read no click to dismiss it.
+        state.set_pr_popup(None);
         // Nudge the resting mascot to blink back at the user — reactive, so the
         // rabbit reacts the moment a key lands without any idle timer. Only while
         // it shows an open-eyed face (切替 / 在席); 没入's heads-down face has no eyes
@@ -1013,6 +1039,10 @@ pub(crate) fn event_loop_compat(
     // `unite add` is not exercised by the compat-shim loop tests; report no match.
     let mut unite_resolve =
         |name: &str| Err::<GroupSource, String>(format!("no workspace named \"{name}\""));
+    // Opening a PR in the browser is a no-op here so the compat-shim loop tests
+    // never shell out; the open path itself is covered by the dedicated popup tests
+    // that build a capturing `Wiring`.
+    let mut open_url = |_: &str| {};
     let mut wiring = Wiring {
         workspace_root,
         persist: &mut persist,
@@ -1026,6 +1056,7 @@ pub(crate) fn event_loop_compat(
         evict_pool: &mut evict_pool,
         existing_branches: &mut existing_branches,
         open_terminal: &mut open_terminal,
+        open_url: &mut open_url,
         open_config: &mut open_config,
         preview: &mut preview,
         tab_op: &mut tab_op,

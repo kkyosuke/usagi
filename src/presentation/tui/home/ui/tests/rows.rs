@@ -1161,8 +1161,7 @@ fn row_select_click_works_in_unite_mode_but_pr_mouse_stays_single_group() {
     // session → flat row 1. Screen row = CHROME_TOP_ROWS (3) + 4 = 7.
     assert_eq!(left_pane_session_at(&state, 2, 7, 24, 120), Some(1));
     // The PR affordance is still off in unite (its popup geometry is single-group).
-    assert!(sidebar_pr_links_at(&state, 24, 120, 2, 7).is_empty());
-    assert_eq!(sidebar_pr_hover_at(&state, 24, 120, 2, 7), None);
+    assert_eq!(sidebar_pr_badge_at(&state, 24, 120, 2, 7), None);
 }
 
 #[test]
@@ -1696,10 +1695,10 @@ fn left_pane_shows_the_pr_badge_for_a_session_that_has_one() {
 }
 
 /// An attached (没入) state at 120×24 with the full sidebar, listing a session that
-/// carries two PRs followed by one with no PR — the fixture the
-/// `sidebar_pr_links_at` click tests share. Worktree rows start at screen row 6
-/// (the body begins at row 3; the root entry and divider take its first 3 lines),
-/// three screen rows each: the PR session at rows 6–8, the PR-less one at rows 9–11.
+/// carries two PRs followed by one with no PR — the fixture the PR badge / popup
+/// click tests share. Worktree rows start at screen row 6 (the body begins at row 3;
+/// the root entry and divider take its first 3 lines), three screen rows each: the
+/// PR session at rows 6–8, the PR-less one at rows 9–11.
 fn attached_with_pr_sidebar() -> HomeState {
     let mut wt = worktree_with_pr(412);
     wt.pr.push(PrLink {
@@ -1716,95 +1715,185 @@ fn attached_with_pr_sidebar() -> HomeState {
 }
 
 #[test]
-fn sidebar_pr_links_at_opens_every_pr_when_the_badge_is_clicked() {
+fn sidebar_pr_badge_at_maps_the_badge_columns_to_its_session() {
     let state = attached_with_pr_sidebar();
     // The left pane is 40 columns at width 120, so the folded `<icon> <count>` badge
     // (here ` 2`, three columns wide) seats flush at its right edge — columns 37–39
     // on the entry's detail line (row 7, the second of its three rows). A click on
-    // the badge opens every PR the session carries, in order.
-    assert_eq!(
-        sidebar_pr_links_at(&state, 24, 120, 37, 7),
-        vec![
-            "https://github.com/o/r/pull/412".to_string(),
-            "https://github.com/o/other/pull/98".to_string(),
-        ],
-    );
-    assert_eq!(sidebar_pr_links_at(&state, 24, 120, 39, 7).len(), 2);
-    // Left of the badge (the agent-label side of the detail line) opens nothing.
-    assert!(sidebar_pr_links_at(&state, 24, 120, 33, 7).is_empty());
-    assert!(sidebar_pr_links_at(&state, 24, 120, 10, 7).is_empty());
+    // the badge maps to that session (index 0), so the loop pins its PR popup.
+    assert_eq!(sidebar_pr_badge_at(&state, 24, 120, 37, 7), Some(0));
+    assert_eq!(sidebar_pr_badge_at(&state, 24, 120, 39, 7), Some(0));
+    // Left of the badge (the agent-label side of the detail line) maps to nothing.
+    assert_eq!(sidebar_pr_badge_at(&state, 24, 120, 33, 7), None);
+    assert_eq!(sidebar_pr_badge_at(&state, 24, 120, 10, 7), None);
 }
 
 #[test]
-fn sidebar_pr_links_at_ignores_the_rows_other_than_the_detail_line() {
+fn sidebar_pr_badge_at_ignores_the_rows_other_than_the_detail_line() {
     let state = attached_with_pr_sidebar();
     // The badge columns on the identity line (row 6) and the CPU / memory line
-    // (row 8) of the same session carry no badge, so a click there opens nothing.
-    assert!(sidebar_pr_links_at(&state, 24, 120, 38, 6).is_empty());
-    assert!(sidebar_pr_links_at(&state, 24, 120, 38, 8).is_empty());
+    // (row 8) of the same session carry no badge, so a click there maps to nothing.
+    assert_eq!(sidebar_pr_badge_at(&state, 24, 120, 38, 6), None);
+    assert_eq!(sidebar_pr_badge_at(&state, 24, 120, 38, 8), None);
 }
 
 #[test]
-fn sidebar_pr_links_at_ignores_rows_without_a_pr() {
+fn sidebar_pr_badge_at_ignores_rows_without_a_pr() {
     let state = attached_with_pr_sidebar();
     // The second session's detail line (row 10 of rows 9–11) has no PR.
-    assert!(sidebar_pr_links_at(&state, 24, 120, 38, 10).is_empty());
+    assert_eq!(sidebar_pr_badge_at(&state, 24, 120, 38, 10), None);
     // The root entry (rows 3–4) and the divider (row 5) are not session rows.
-    assert!(sidebar_pr_links_at(&state, 24, 120, 38, 4).is_empty());
-    assert!(sidebar_pr_links_at(&state, 24, 120, 38, 5).is_empty());
+    assert_eq!(sidebar_pr_badge_at(&state, 24, 120, 38, 4), None);
+    assert_eq!(sidebar_pr_badge_at(&state, 24, 120, 38, 5), None);
     // A body row past the end of the session list maps to no worktree.
-    assert!(sidebar_pr_links_at(&state, 24, 120, 38, 13).is_empty());
+    assert_eq!(sidebar_pr_badge_at(&state, 24, 120, 38, 13), None);
 }
 
 #[test]
-fn sidebar_pr_links_at_ignores_clicks_off_the_sidebar() {
+fn sidebar_pr_badge_at_ignores_clicks_off_the_sidebar() {
     let state = attached_with_pr_sidebar();
     // Left pane is 40 columns at width 120, so a click at column 40+ is the
     // divider / right pane, not a sidebar row.
-    assert!(sidebar_pr_links_at(&state, 24, 120, 40, 7).is_empty());
+    assert_eq!(sidebar_pr_badge_at(&state, 24, 120, 40, 7), None);
     // Rows above the body (the title bar / mode ladder / blank separator).
-    assert!(sidebar_pr_links_at(&state, 24, 120, 38, 1).is_empty());
+    assert_eq!(sidebar_pr_badge_at(&state, 24, 120, 38, 1), None);
     // A row below the two-pane body (past `body_rows`).
-    assert!(sidebar_pr_links_at(&state, 24, 120, 38, 22).is_empty());
+    assert_eq!(sidebar_pr_badge_at(&state, 24, 120, 38, 22), None);
 }
 
 #[test]
-fn sidebar_pr_links_at_is_empty_on_the_collapsed_rail() {
+fn sidebar_pr_badge_at_is_none_on_the_collapsed_rail() {
     let mut state = attached_with_pr_sidebar();
-    // The rail shows no PR badge, so a click there opens nothing.
+    // The rail shows no PR badge, so a click there maps to nothing.
     state.set_sidebar(Sidebar::Rail);
-    assert!(sidebar_pr_links_at(&state, 24, 120, 3, 7).is_empty());
+    assert_eq!(sidebar_pr_badge_at(&state, 24, 120, 3, 7), None);
 }
 
 #[test]
-fn sidebar_pr_links_at_ignores_a_badge_clipped_by_a_cramped_pane() {
+fn sidebar_pr_badge_at_ignores_a_badge_clipped_by_a_cramped_pane() {
     let state = attached_with_pr_sidebar();
     // On a very narrow screen the left pane shrinks until the folded badge can no
     // longer seat flush-right past the name indent, so its columns can't be placed —
-    // a click opens nothing rather than guessing. At width 9 the left pane is 6
+    // a click maps to nothing rather than guessing. At width 9 the left pane is 6
     // columns and the 3-column badge would start at column 3, inside `NAME_PREFIX`.
-    assert!(sidebar_pr_links_at(&state, 24, 9, 3, 7).is_empty());
+    assert_eq!(sidebar_pr_badge_at(&state, 24, 9, 3, 7), None);
 }
 
 #[test]
-fn sidebar_pr_hover_at_maps_a_pr_row_to_its_session_and_misses_elsewhere() {
-    let state = attached_with_pr_sidebar();
-    // Both rows of the PR-bearing session (rows 6 and 7) hover its index.
-    assert_eq!(sidebar_pr_hover_at(&state, 24, 120, 2, 6), Some(0));
-    assert_eq!(sidebar_pr_hover_at(&state, 24, 120, 30, 7), Some(0));
-    // The PR-less second session (rows 9–11), the root entry / divider, a row past
-    // the list, and a row below the two-pane body all raise no popup.
-    assert_eq!(sidebar_pr_hover_at(&state, 24, 120, 2, 9), None);
-    assert_eq!(sidebar_pr_hover_at(&state, 24, 120, 2, 3), None);
-    assert_eq!(sidebar_pr_hover_at(&state, 24, 120, 2, 5), None);
-    assert_eq!(sidebar_pr_hover_at(&state, 24, 120, 2, 12), None);
-    assert_eq!(sidebar_pr_hover_at(&state, 24, 120, 2, 22), None);
-    // Off the sidebar (right pane / chrome) and on the collapsed rail, nothing.
-    assert_eq!(sidebar_pr_hover_at(&state, 24, 120, 40, 6), None);
-    assert_eq!(sidebar_pr_hover_at(&state, 24, 120, 2, 1), None);
-    let mut rail = attached_with_pr_sidebar();
-    rail.set_sidebar(Sidebar::Rail);
-    assert_eq!(sidebar_pr_hover_at(&rail, 24, 120, 2, 6), None);
+fn pr_popup_placement_floats_the_box_beside_the_pinned_session() {
+    let mut state = attached_with_pr_sidebar();
+    // Nothing pinned → no box to float.
+    assert!(pr_popup_placement(&state, 24, 120).is_none());
+    // Pinning the PR session floats its box at its first row (screen row 6) just
+    // past the 40-column pane and the 3-column divider (left 43).
+    state.set_pr_popup(Some(0));
+    let (popup, top, left) = pr_popup_placement(&state, 24, 120).expect("a box for a pinned PR");
+    assert_eq!((top, left), (6, 43));
+    let plain = stripped(&popup);
+    assert!(plain.contains("#412") && plain.contains("#98"));
+    // Pinning the PR-less second session yields nothing, and so does the rail.
+    state.set_pr_popup(Some(1));
+    assert!(pr_popup_placement(&state, 24, 120).is_none());
+    state.set_pr_popup(Some(0));
+    state.set_sidebar(Sidebar::Rail);
+    assert!(pr_popup_placement(&state, 24, 120).is_none());
+}
+
+#[test]
+fn pr_popup_click_opens_the_number_under_the_pointer() {
+    let mut state = attached_with_pr_sidebar();
+    state.set_pr_popup(Some(0));
+    // Content sits two columns in from the box's left edge (left 43 → col 45). The
+    // packed row is `#412 #98`: `#412` spans cols 45–48, a gap at 49, `#98` 50–52,
+    // all on the box's content row (top 6 + 1 = row 7).
+    assert!(matches!(
+        pr_popup_click(&state, 24, 120, 45, 7),
+        PopupClick::Open(url) if url == "https://github.com/o/r/pull/412"
+    ));
+    assert!(matches!(
+        pr_popup_click(&state, 24, 120, 50, 7),
+        PopupClick::Open(url) if url == "https://github.com/o/other/pull/98"
+    ));
+    // The gap between tokens is inside the box but on no number → stays pinned.
+    assert!(matches!(
+        pr_popup_click(&state, 24, 120, 49, 7),
+        PopupClick::Inside
+    ));
+    // The box's borders (top row 6, bottom row 8) are inside it too.
+    assert!(matches!(
+        pr_popup_click(&state, 24, 120, 45, 6),
+        PopupClick::Inside
+    ));
+    assert!(matches!(
+        pr_popup_click(&state, 24, 120, 45, 8),
+        PopupClick::Inside
+    ));
+}
+
+#[test]
+fn pr_popup_click_outside_the_box_dismisses_it() {
+    let mut state = attached_with_pr_sidebar();
+    // With nothing pinned every click is outside.
+    assert!(matches!(
+        pr_popup_click(&state, 24, 120, 45, 7),
+        PopupClick::Outside
+    ));
+    state.set_pr_popup(Some(0));
+    // A click left of the box (over the sidebar), above it, and below it all land
+    // outside the box's rectangle and so dismiss the popup.
+    assert!(matches!(
+        pr_popup_click(&state, 24, 120, 2, 7),
+        PopupClick::Outside
+    ));
+    assert!(matches!(
+        pr_popup_click(&state, 24, 120, 45, 5),
+        PopupClick::Outside
+    ));
+    assert!(matches!(
+        pr_popup_click(&state, 24, 120, 45, 9),
+        PopupClick::Outside
+    ));
+}
+
+#[test]
+fn pr_popup_click_on_the_box_borders_stays_pinned() {
+    let mut state = attached_with_pr_sidebar();
+    state.set_pr_popup(Some(0));
+    // The box spans columns 43–54 (left 43, `#412 #98` → width 12) on content row 7.
+    // Its left border / pad (43, 44) and right border (54) are inside the rectangle
+    // but on no `#<number>`, as is a content column past the last token — all keep
+    // the popup pinned rather than opening or dismissing.
+    assert!(matches!(
+        pr_popup_click(&state, 24, 120, 43, 7),
+        PopupClick::Inside
+    ));
+    assert!(matches!(
+        pr_popup_click(&state, 24, 120, 44, 7),
+        PopupClick::Inside
+    ));
+    assert!(matches!(
+        pr_popup_click(&state, 24, 120, 54, 7),
+        PopupClick::Inside
+    ));
+}
+
+#[test]
+fn pr_popup_placement_is_none_in_unite_or_when_too_narrow() {
+    // 統合(unite): with more than one group the single-group anchor is disabled, so
+    // even a pinned popup floats nothing.
+    let mut unite = state_with(vec![worktree_with_pr(412)]);
+    unite.set_extra_groups(vec![GroupSource {
+        name: "wsB".to_string(),
+        root_path: PathBuf::from("/wsB"),
+        root_note: None,
+        sessions: Vec::new(),
+    }]);
+    unite.set_pr_popup(Some(0));
+    assert!(pr_popup_placement(&unite, 24, 120).is_none());
+    // Too narrow: the `PR` box can't fit the terminal width, so it is not placed.
+    let mut narrow = attached_with_pr_sidebar();
+    narrow.set_pr_popup(Some(0));
+    assert!(pr_popup_placement(&narrow, 24, 10).is_none());
 }
 
 #[test]
