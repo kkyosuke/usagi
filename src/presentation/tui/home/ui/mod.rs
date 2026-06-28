@@ -35,7 +35,7 @@ pub(super) use panes::sidebar_pr_links_at;
 // …and a pointer hovering a sidebar session row to that session (for the PR popup).
 pub(super) use panes::sidebar_pr_hover_at;
 
-use super::state::{HomeState, ModalSize, Mode};
+use super::state::{HomeState, ModalSize, Mode, WorktreeList};
 use crate::domain::resource::ResourceUsage;
 use crate::domain::settings::Sidebar;
 
@@ -578,8 +578,7 @@ fn left_column(
         // of drifting to another workspace or to the whole column's foot.
         if let Some(create) = state.create() {
             let rows = switch_create_rows(create.value(), create.cursor(), create.error(), left_w);
-            let insert = group_inline_insert_line(state.list(), state.list().selected_group());
-            splice_rows(&mut left, insert, rows);
+            place_create_rows(&mut left, state.list(), rows);
             left.truncate(body_rows);
         }
         // While renaming a session's sidebar label in 切替, append the inline rename
@@ -605,6 +604,40 @@ fn splice_rows(column: &mut Vec<String>, line: usize, rows: Vec<String>) {
         column.extend(rows);
     } else {
         column.splice(line..line, rows);
+    }
+}
+
+/// Place 切替's inline create rows inside the selected workspace block without
+/// moving the workspaces below it. In 統合(unite) mode every following workspace
+/// already has a fixed two-row gap before its header; while creating in a group
+/// that has such a follower, reuse those gap rows as the input slot instead of
+/// inserting new rows. The follower's header therefore stays on the same screen
+/// line (no CLS). The last group has no lower workspace to protect, so it keeps
+/// the single-workspace behaviour and appends the input after that group.
+fn place_create_rows(column: &mut Vec<String>, list: &WorktreeList, rows: Vec<String>) {
+    let group = list.selected_group();
+    let line = group_inline_insert_line(list, group);
+    if group + 1 < list.group_count() {
+        replace_rows(column, line, rows);
+    } else {
+        splice_rows(column, line, rows);
+    }
+}
+
+/// Replace rows in-place, padding only when the replacement begins past the
+/// currently built column. Unlike [`splice_rows`], this never pushes later rows
+/// down; it is used to draw temporary inline UI in reserved blank space.
+fn replace_rows(column: &mut Vec<String>, line: usize, rows: Vec<String>) {
+    if line >= column.len() {
+        column.resize(line, String::new());
+    }
+    for (offset, row) in rows.into_iter().enumerate() {
+        let target = line + offset;
+        if target < column.len() {
+            column[target] = row;
+        } else {
+            column.push(row);
+        }
     }
 }
 
