@@ -149,13 +149,18 @@ pub fn create(workspace_root: &Path, name: &str) -> Result<CreatedSession> {
     // [`skills::materialize`](crate::infrastructure::skills::materialize)); this
     // points each worktree's `.claude/skills/<name>` at that directory and
     // excludes those symlinks from git so they never mark the session dirty.
-    // Best-effort: a skills hiccup must not fail an otherwise-built session.
+    // Only the skills whose feature is enabled in the workspace's effective
+    // settings are linked; a settings read failure falls back to the defaults
+    // (every feature on). Best-effort: a skills hiccup must not fail an
+    // otherwise-built session.
+    let skill_settings =
+        crate::usecase::settings::effective_for(workspace_root).unwrap_or_default();
     let skill_excludes = crate::infrastructure::skills::git_exclude_patterns();
     for wt in &worktrees {
         for pattern in &skill_excludes {
             let _ = git::ensure_excluded(wt, pattern);
         }
-        let _ = crate::infrastructure::skills::link(wt);
+        let _ = crate::infrastructure::skills::link(wt, &skill_settings);
     }
 
     record(&store, name, &dest_root, &worktrees)?;

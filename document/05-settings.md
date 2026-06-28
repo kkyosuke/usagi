@@ -44,6 +44,13 @@
 | 端末スクロールバック | `terminal_scrollback_lines` | usize | `2000` | 埋め込み端末ペインが保持するスクロールバック行数。**ライブなペインごとに 1 つ**確保されるため、セッション・ペインを多数開いたときの TUI メモリの主因。深い履歴が欲しければ上げ、メモリを抑えたければ下げる（上限 `50000`） |
 | ローカル LLM 有効化 | `local_llm.enabled` | bool | `false` | 有効にすると `agent` 起動時に [ローカル LLM MCP サーバ](03-commands/04-llm-mcp.md)（`usagi-llm`）を wire し、軽量タスクをローカル LLM に委譲できる |
 | ローカル LLM モデル | `local_llm.model` | string | `qwen2.5-coder:7b` | 委譲先の Ollama モデル名（`qwen2.5-coder:7b` / `:3b` / `:1.5b` / `qwen2.5:7b`） |
+| 同梱スキル機能 | `skill_features` | map<string, bool> | `{}` | usagi が各セッションに配布する[同梱スキル](04-orchestration.md#スキルの配布)を**機能（feature）単位**で ON/OFF する。キーは機能 ID（現状 `pull-request`：PR 作成・更新・修正の 3 スキルをまとめたもの）、値が有効・無効。既定値（ON）と同じ機能はマップに残さない（未記載 = 既定）。`usagi-session` は usagi 固有の常時 ON スキルで、この設定の対象外 |
+
+> **同梱スキル機能（`skill_features`）**: usagi はビルド時に埋め込んだ Claude Code スキルを、起動する
+> エージェントへ配布します（[スキルの配布](04-orchestration.md#スキルの配布)）。このうち**機能ごとにまとめた
+> グループ**を ON/OFF できます。`pull-request` 機能（`usagi-pr-create` / `usagi-pr-update` /
+> `usagi-pr-fix`）が現状の対象で、OFF にするとそのセッションの worktree にこれらのスキルを symlink しません。
+> 既定はすべて ON（同梱スキルはオプトアウト）。`usagi-session` は機能に属さず常に配布されます。
 
 > ローカル LLM は **オプトイン**（既定 `false`）です。資材は Config 画面で **2 段階**に導入します:
 > まず `Local LLM` 行の Install アクション（`Space` / `Enter` でモーダルを開き sudo パスワードを入力 →
@@ -76,6 +83,7 @@
 | デフォルトブランチ | `default_branch` | string? | リポジトリの検出済み既定ブランチ（auto） |
 | デフォルトブランチ基点 | `default_branch_source` | enum? | 既定（`remote`） |
 | ローカル LLM 有効化 | `local_llm_enabled` | bool? | グローバル設定（`local_llm.enabled`）にフォールバック |
+| 同梱スキル機能 | `skill_features` | map<string, bool> | 機能 ID 単位で上書き。未記載の機能はグローバル設定にフォールバック |
 
 > **デフォルトブランチ（`default_branch`）**: `session create` でセッションを作るとき、各 git リポジトリの
 > worktree を切る新ブランチを**どのブランチから**切るかを選びます。未設定（`null` = auto）ならリポジトリの
@@ -95,8 +103,9 @@
 - **実効設定 = グローバル設定にローカルの上書きを適用した結果**。解決は `domain/settings.rs` の
   `Settings::with_local`、ユースケースは `usecase/settings.rs` の `effective(storage, repo_root)` が担います。
 - 読み書きロジック・永続化に加え、編集 UI も実装済みです。ホーム画面のコマンドモードで `config` を実行すると
-  設定画面が**ワークスペーススコープ**で開き、「Agent CLI」「Notifications」「Default Branch」「Branch Source」
-  の 4 項目を編集できます。Agent CLI と Notifications は **「グローバルに従う / ローカルで上書き」**、Default
+  設定画面が**ワークスペーススコープ**で開き、「Agent CLI」「Notifications」「Restore Panes」「Default Branch」
+  「Branch Source」と、固定項目の下に並ぶ**同梱スキル機能**（`PR Skills` など）を編集できます。Agent CLI /
+  Notifications / Restore Panes と各スキル機能は **「グローバルに従う / ローカルで上書き（On/Off）」**、Default
   Branch は **`auto`（検出済み既定）／ リポジトリの各ブランチ**、Branch Source は **`local` / `remote`** を
   切り替えられます。詳細は [design/04-config.md](design/04-config.md) を参照。
 - JSON 例・フィールド詳細は [data/02-workspace.md](data/02-workspace.md#settingsjson-プロジェクト固有の設定上書きローカル設定) を参照。
@@ -122,15 +131,16 @@
 
 > グローバルスコープで編集できるのは Theme / Default Workspace / Notifications / Restore Panes /
 > Agent CLI / Session Action UI / Terminal Keys / Local LLM 系の各項目（`key_scheme` は
-> 「Session Action UI」と「Local LLM」の間の **Terminal Keys** 行）、ワークスペーススコープで編集できるのは
-> Agent CLI / Notifications / Default Branch / Branch Source の 4 項目です。
+> 「Session Action UI」と「Local LLM」の間の **Terminal Keys** 行）に加え、固定項目の下に並ぶ**同梱スキル機能**
+> （`PR Skills` など）。ワークスペーススコープで編集できるのは Agent CLI / Notifications / Restore Panes /
+> Default Branch / Branch Source と、同じく**同梱スキル機能**です。
 > `workspace_root` は `settings.json` に保存されますが、設定画面では編集せず、`usagi config --edit` で変更します。
 
 ### CLI
 
 CLI からも設定を確認・編集できます（[3. コマンドリファレンス](03-commands/README.md)）。
 
-- `usagi config` — 現在のグローバル設定を `key  value` 形式で一覧表示。
+- `usagi config` — 現在のグローバル設定を `key  value` 形式で一覧表示（同梱スキル機能は `skill:<機能 ID>  true/false` の行で表示）。
 - `usagi config --edit` — 設定ファイルを `$EDITOR`（→ `$VISUAL` → OS 既定）で開いて編集。保存後に
   再パースで形式（JSON 構文・必須 `version`・各フィールドの型）を検証し、不正なら編集前の内容へ
   巻き戻します。
@@ -159,6 +169,7 @@ CLI からも設定を確認・編集できます（[3. コマンドリファレ
 | `key_scheme` | 埋め込み端末（[没入](design/home/02-layout.md#没入attached)）がナビゲーション用に予約するキー方式（`prefix` / `alt`）の選択 |
 | `terminal_scrollback_lines` | 埋め込み端末ペインが保持するスクロールバック行数。ライブなペインごとに確保されるため、多数のセッションを開いたときのメモリ使用量を左右する |
 | `local_llm.enabled` / `local_llm.model` | 有効時、`agent` 起動コマンドに `usagi-llm` MCP サーバを追加し、軽量タスクをローカル LLM に委譲する（[3.4 ローカル LLM MCP サーバ](03-commands/04-llm-mcp.md)） |
+| `skill_features` | `session create` 時に、機能が有効な[同梱スキル](04-orchestration.md#スキルの配布)だけを各 worktree の `.claude/skills/` へ symlink する。無効な機能のスキルは配布しない（`usagi-session` は常時配布） |
 
 > ホーム画面の `config` で `session_action_ui` や `key_scheme` を変更すると、設定画面を閉じて
 > ホームに戻った時点で実効設定を読み直し、[在席](design/home/02-layout.md#在席focus)の右ペインや

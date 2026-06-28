@@ -11,7 +11,8 @@
 //! settings when left unset. Only one scope's fields are shown at a time.
 
 use crate::domain::settings::{
-    AgentCli, BranchSource, KeyScheme, LocalSettings, SessionActionUi, Settings, Theme,
+    AgentCli, BranchSource, KeyScheme, LocalSettings, SessionActionUi, Settings, SkillFeature,
+    Theme,
 };
 
 mod modal;
@@ -412,12 +413,19 @@ impl Config {
         }
     }
 
-    /// Number of selectable field rows shown for the current scope.
-    fn field_count(&self) -> usize {
+    /// Number of fixed (non-skill) field rows shown for the current scope, i.e.
+    /// the count before the shipped-skill feature rows are appended.
+    fn base_field_count(&self) -> usize {
         match self.scope {
             Scope::Global => Field::ALL.len(),
             Scope::Local => LocalField::ALL.len(),
         }
+    }
+
+    /// Number of selectable field rows shown for the current scope: the fixed
+    /// fields, then one row per toggleable shipped-skill feature.
+    fn field_count(&self) -> usize {
+        self.base_field_count() + SkillFeature::ALL.len()
     }
 
     /// The cursor row index of the Save button: it sits just below the fields.
@@ -451,6 +459,17 @@ impl Config {
             return None;
         }
         LocalField::ALL.get(self.selected_index).copied()
+    }
+
+    /// The shipped-skill feature row under the cursor, or `None` when a fixed
+    /// field or the Save button is selected. Skill rows sit just below the fixed
+    /// fields in both scopes, so this maps any index past them onto
+    /// [`SkillFeature::ALL`].
+    pub fn selected_skill_feature(&self) -> Option<SkillFeature> {
+        let base = self.base_field_count();
+        self.selected_index
+            .checked_sub(base)
+            .and_then(|i| SkillFeature::ALL.get(i).copied())
     }
 
     /// Whether the scope's settings differ from their last-saved baseline.
@@ -614,10 +633,47 @@ impl Config {
         }
     }
 
-    /// The display rows for the current scope, in display order. The Save button
+    /// The display value for a shipped-skill feature row. In the global scope it
+    /// is the plain on/off state; in the local scope it shows the project
+    /// override, or the effective global value it falls back to when unset.
+    pub fn value_of_skill(&self, feature: SkillFeature) -> String {
+        match self.scope {
+            Scope::Global => on_off(self.settings.skill_feature_enabled(feature)).to_string(),
+            Scope::Local => match self
+                .local
+                .as_ref()
+                .and_then(|l| l.settings.skill_feature_override(feature))
+            {
+                None => format!(
+                    "Global ({})",
+                    on_off(self.settings.skill_feature_enabled(feature))
+                ),
+                Some(on) => format!("Override: {}", on_off(on)),
+            },
+        }
+    }
+
+    /// Whether a shipped-skill feature row differs from the saved baseline. In
+    /// the global scope it compares the effective on/off value; in the local
+    /// scope it compares the raw override (set vs. unset, on vs. off).
+    fn is_skill_changed(&self, feature: SkillFeature) -> bool {
+        match self.scope {
+            Scope::Global => {
+                self.settings.skill_feature_enabled(feature)
+                    != self.baseline.skill_feature_enabled(feature)
+            }
+            Scope::Local => self.local.as_ref().is_some_and(|l| {
+                l.settings.skill_feature_override(feature)
+                    != l.baseline.skill_feature_override(feature)
+            }),
+        }
+    }
+
+    /// The display rows for the current scope, in display order: the fixed fields
+    /// first, then one row per toggleable shipped-skill feature. The Save button
     /// is not included.
     pub fn rows(&self) -> Vec<RowView> {
-        match self.scope {
+        let mut rows: Vec<RowView> = match self.scope {
             Scope::Global => Field::ALL
                 .iter()
                 .map(|&field| RowView {
@@ -646,7 +702,19 @@ impl Config {
                     disabled: false,
                 })
                 .collect(),
+        };
+        // The shipped-skill feature toggles sit below the fixed fields in both
+        // scopes; each is a plain on/off (or Global/Override) value chooser.
+        for &feature in &SkillFeature::ALL {
+            rows.push(RowView {
+                label: feature.label(),
+                value: self.value_of_skill(feature),
+                changed: self.is_skill_changed(feature),
+                action: false,
+                disabled: false,
+            });
         }
+        rows
     }
 }
 

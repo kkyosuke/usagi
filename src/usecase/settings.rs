@@ -95,6 +95,13 @@ pub fn effective(storage: &Storage, repo_root: &Path) -> Result<Settings> {
     Ok(global.with_local(&local))
 }
 
+/// The effective settings for the workspace at `repo_root`, resolving the global
+/// data dir itself — a convenience over [`effective`] for callers (e.g. session
+/// creation) that hold only the workspace root, not a [`Storage`].
+pub fn effective_for(repo_root: &Path) -> Result<Settings> {
+    effective(&Storage::open_default()?, repo_root)
+}
+
 /// Override the agent CLI for a single project, or clear the override with
 /// `None`. Returns the updated local settings.
 pub fn set_local_agent_cli(repo_root: &Path, agent_cli: Option<AgentCli>) -> Result<LocalSettings> {
@@ -113,6 +120,7 @@ pub fn set_local_notifications_enabled(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::settings::SkillFeature;
 
     #[test]
     fn local_overrides_round_trip_and_resolve_against_global() {
@@ -192,6 +200,34 @@ mod tests {
         assert_eq!(updated.theme, Theme::Dark);
         assert_eq!(load(&storage).unwrap().theme, Theme::Dark);
         assert!(storage.dir().join(".lock").is_file());
+    }
+
+    #[test]
+    fn effective_for_resolves_the_global_data_dir_and_applies_local_overrides() {
+        let _guard = crate::test_support::process_env_guard();
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::env::set_var(crate::infrastructure::storage::DATA_DIR_ENV, &home);
+
+        // No settings anywhere yet: the PR-skills feature follows its default (on).
+        assert!(effective_for(&repo)
+            .unwrap()
+            .skill_feature_enabled(SkillFeature::PullRequest));
+
+        // A project-local override turns the feature off for just this repo, and
+        // `effective_for` reflects it (global ⊕ local).
+        let mut local = LocalSettings::default();
+        local
+            .skill_features
+            .insert(SkillFeature::PullRequest.id().to_string(), false);
+        save_local(&repo, &local).unwrap();
+        assert!(!effective_for(&repo)
+            .unwrap()
+            .skill_feature_enabled(SkillFeature::PullRequest));
+
+        std::env::remove_var(crate::infrastructure::storage::DATA_DIR_ENV);
     }
 
     #[test]

@@ -3,6 +3,8 @@
 //! enums and string lists. Split from the parent module to keep each file
 //! focused on one concern.
 
+use std::collections::BTreeMap;
+
 use super::*;
 
 impl Config {
@@ -18,8 +20,37 @@ impl Config {
         if let Some(field) = self.selected_local_field() {
             return self.cycle_local(field, forward);
         }
+        if let Some(feature) = self.selected_skill_feature() {
+            return self.cycle_skill_feature(feature, forward);
+        }
         // The cursor is on the Save button: nothing to cycle.
         false
+    }
+
+    /// Toggle a shipped-skill feature row. In the global scope it flips the
+    /// effective on/off, recording the value in the map only when it differs from
+    /// the feature's default (so the map stays minimal and dirty-tracking stays
+    /// consistent). In the local scope it cycles "follow global" → On → Off,
+    /// storing or clearing the per-project override. Always reports a change.
+    fn cycle_skill_feature(&mut self, feature: SkillFeature, forward: bool) -> bool {
+        match self.scope {
+            Scope::Global => {
+                let next = !self.settings.skill_feature_enabled(feature);
+                // Record the value only when it differs from the feature's
+                // default; matching the default clears the entry so toggling back
+                // leaves no stray key (keeps `is_dirty` honest, the map minimal).
+                let stored = (next != feature.default_enabled()).then_some(next);
+                set_skill_override(&mut self.settings.skill_features, feature, stored);
+                true
+            }
+            Scope::Local => {
+                let local = self.local_edit_mut();
+                let current = local.settings.skill_feature_override(feature);
+                let next = cycle_optional(current, &[true, false], forward);
+                set_skill_override(&mut local.settings.skill_features, feature, next);
+                true
+            }
+        }
     }
 
     /// Cycle a global field's value.
@@ -230,6 +261,23 @@ fn cycle_enum<T: Copy + PartialEq>(current: T, choices: &[T], forward: bool) -> 
         (i + len - 1) % len
     };
     choices[next]
+}
+
+/// Apply a skill-feature override to `map`: store the boolean under the
+/// feature's id, or remove the entry when `None` (defer to the default / global).
+fn set_skill_override(
+    map: &mut BTreeMap<String, bool>,
+    feature: SkillFeature,
+    value: Option<bool>,
+) {
+    match value {
+        Some(enabled) => {
+            map.insert(feature.id().to_string(), enabled);
+        }
+        None => {
+            map.remove(feature.id());
+        }
+    }
 }
 
 /// Cycle an optional override through `None` (follow global) then each value in

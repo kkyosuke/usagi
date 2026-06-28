@@ -171,6 +171,7 @@ mod tests {
             default_branch_source: Some(BranchSource::Local),
             default_branch: Some("develop".to_string()),
             local_llm_enabled: Some(true),
+            skill_features: [("pull-request".to_string(), false)].into_iter().collect(),
         };
 
         store.save_settings(&settings).unwrap();
