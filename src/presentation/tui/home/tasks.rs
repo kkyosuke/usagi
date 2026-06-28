@@ -88,6 +88,11 @@ pub struct Completion {
     /// The refreshed session list, when the action changed it; `None` on a
     /// failure that left the sessions untouched.
     pub sessions: Option<Vec<SessionRecord>>,
+    /// The workspace root the task targeted. Background tasks may finish in any
+    /// order, so the event loop uses this instead of the transient cursor target
+    /// to route refreshed sessions back to the right 統合(unite) group (and to
+    /// clear the target after failures).
+    pub target_root: Option<PathBuf>,
     /// The session root whose embedded shell to evict from the pool — set on a
     /// successful removal so a session later recreated at the same path starts
     /// fresh. `None` for creations and failures.
@@ -143,6 +148,7 @@ pub fn panic_outcome(
             kind.verb()
         )),
         sessions: None,
+        target_root: None,
         evict: None,
         focus: None,
     };
@@ -346,6 +352,7 @@ mod tests {
         Completion {
             line: LogLine::output("done"),
             sessions: None,
+            target_root: None,
             evict: None,
             focus: None,
         }

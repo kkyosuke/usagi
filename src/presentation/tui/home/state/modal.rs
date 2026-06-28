@@ -8,6 +8,7 @@
 //! flat forwarding methods on the screen state.
 
 use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 
 use super::LogLine;
 use crate::presentation::tui::markdown::MarkdownLine;
@@ -335,33 +336,79 @@ pub struct Preview {
     pub scroll: usize,
 }
 
-/// The open session-removal modal: the workspace's session names with a
-/// checklist the user toggles to pick which to delete in one go. A cursor marks
-/// the row the keyboard acts on, `selected` holds the checked rows, and `force`
-/// carries the `--force` flag from `session remove --force` so the confirmed
-/// removal can discard uncommitted changes.
+/// One row in the open session-removal checklist.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoveEntry {
+    name: String,
+    root_path: PathBuf,
+    display: String,
+}
+
+impl RemoveEntry {
+    /// Create a removal row for a session, remembering the workspace root the
+    /// confirmed removal must target and the label the UI should show.
+    pub(super) fn new(
+        name: impl Into<String>,
+        root_path: PathBuf,
+        workspace_name: Option<&str>,
+    ) -> Self {
+        let name = name.into();
+        let display = workspace_name
+            .map(|workspace_name| format!("{workspace_name}: {name}"))
+            .unwrap_or_else(|| name.clone());
+        Self {
+            name,
+            root_path,
+            display,
+        }
+    }
+
+    /// The raw session name passed to the session-removal backend.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// The workspace root that owns this session.
+    pub fn root_path(&self) -> &Path {
+        &self.root_path
+    }
+
+    /// The UI label for this row. In 統合(unite) mode this includes the workspace
+    /// name (`workspace: session`); otherwise it is just the session name.
+    pub fn display(&self) -> &str {
+        &self.display
+    }
+}
+
+/// The open session-removal modal: the session entries with a checklist the
+/// user toggles to pick which to delete in one go. In 統合(unite) mode entries
+/// span every visible workspace and are labelled as `workspace: session`. A
+/// cursor marks the row the keyboard acts on, `selected` holds the checked rows,
+/// and `force` carries the `--force` flag from `session remove --force` so the
+/// confirmed removal can discard uncommitted changes.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RemoveModal {
-    names: Vec<String>,
+    entries: Vec<RemoveEntry>,
     cursor: usize,
     selected: HashSet<usize>,
     force: bool,
 }
 
 impl RemoveModal {
-    /// Open the modal over `names`, nothing checked, carrying the `--force` flag.
-    pub(super) fn new(names: Vec<String>, force: bool) -> Self {
+    /// Open the modal over `entries`, nothing checked, carrying the `--force`
+    /// flag.
+    pub(super) fn new(entries: Vec<RemoveEntry>, force: bool) -> Self {
         Self {
-            names,
+            entries,
             cursor: 0,
             selected: HashSet::new(),
             force,
         }
     }
 
-    /// The session names, in display order.
-    pub fn names(&self) -> &[String] {
-        &self.names
+    /// The removal entries, in display order.
+    pub fn entries(&self) -> &[RemoveEntry] {
+        &self.entries
     }
 
     /// The row the keyboard cursor sits on.
@@ -381,29 +428,29 @@ impl RemoveModal {
 
     /// Whether there are no sessions to remove.
     pub fn is_empty(&self) -> bool {
-        self.names.is_empty()
+        self.entries.is_empty()
     }
 
     /// Move the cursor up one row, wrapping to the bottom. No-op with no sessions.
     pub fn move_up(&mut self) {
-        if self.names.is_empty() {
+        if self.entries.is_empty() {
             return;
         }
-        self.cursor = self.cursor.checked_sub(1).unwrap_or(self.names.len() - 1);
+        self.cursor = self.cursor.checked_sub(1).unwrap_or(self.entries.len() - 1);
     }
 
     /// Move the cursor down one row, wrapping to the top. No-op with no sessions.
     pub fn move_down(&mut self) {
-        if self.names.is_empty() {
+        if self.entries.is_empty() {
             return;
         }
-        self.cursor = (self.cursor + 1) % self.names.len();
+        self.cursor = (self.cursor + 1) % self.entries.len();
     }
 
     /// Toggle the checked state of the session under the cursor. No-op with no
     /// sessions.
     pub fn toggle(&mut self) {
-        if self.names.is_empty() {
+        if self.entries.is_empty() {
             return;
         }
         if !self.selected.insert(self.cursor) {
@@ -411,20 +458,21 @@ impl RemoveModal {
         }
     }
 
-    /// The checked session names (in display order) together with the `--force`
-    /// flag, or `None` when nothing is checked (so the modal stays open).
-    pub(super) fn confirm(&self) -> Option<(Vec<String>, bool)> {
+    /// The checked removal entries (in display order) together with the
+    /// `--force` flag, or `None` when nothing is checked (so the modal stays
+    /// open).
+    pub(super) fn confirm(&self) -> Option<(Vec<RemoveEntry>, bool)> {
         if self.selected.is_empty() {
             return None;
         }
-        let names = self
-            .names
+        let entries = self
+            .entries
             .iter()
             .enumerate()
             .filter(|(i, _)| self.selected.contains(i))
-            .map(|(_, name)| name.clone())
+            .map(|(_, entry)| entry.clone())
             .collect();
-        Some((names, self.force))
+        Some((entries, self.force))
     }
 }
 

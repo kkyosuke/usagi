@@ -369,13 +369,14 @@ pub(super) fn event_loop(
             let super::tasks::Completion {
                 line,
                 sessions,
+                target_root,
                 evict,
                 focus,
             } = completion;
             if let Some(path) = evict {
                 (wiring.evict_pool)(&path);
             }
-            state.apply_task_completion(line, sessions);
+            state.apply_task_completion(line, sessions, target_root.as_deref());
             // A finished create asks to drop into 在席 (Focus) on its new session.
             // Done after the refresh above so the new branch is in the list to
             // match. Unlike that refresh — which deliberately keeps the cursor put
@@ -707,15 +708,17 @@ pub(super) fn event_loop(
                     }
                 }
                 Key::Enter => {
-                    if let Some((names, force)) = state.submit_remove_modal() {
+                    if let Some((entries, force)) = state.submit_remove_modal() {
                         // Each checked session is dispatched to a background
                         // worker, so the loop never blocks on the git work; the
                         // task panel stacks them and the loop drains each as it
-                        // finishes. Each is removed from the workspace it lives in.
-                        for name in &names {
-                            let root = state.workspace_root_for_session(name);
+                        // finishes. Each row already carries the owning workspace
+                        // root, which keeps 統合(unite) bulk-removal correct even
+                        // when different workspaces contain the same session name.
+                        for entry in &entries {
+                            let root = entry.root_path().to_path_buf();
                             state.set_op_target(root.clone());
-                            (wiring.dispatch_remove)(&root, name, force);
+                            (wiring.dispatch_remove)(&root, entry.name(), force);
                         }
                     }
                 }
@@ -961,6 +964,7 @@ pub(crate) fn event_loop_compat(
             super::tasks::Completion {
                 line: outcome.line,
                 sessions: outcome.sessions,
+                target_root: Some(_root.to_path_buf()),
                 evict: None,
                 focus,
             },
@@ -982,6 +986,7 @@ pub(crate) fn event_loop_compat(
             super::tasks::Completion {
                 line: outcome.line,
                 sessions: outcome.sessions,
+                target_root: Some(_root.to_path_buf()),
                 evict,
                 focus: None,
             },

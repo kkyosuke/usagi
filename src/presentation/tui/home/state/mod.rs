@@ -40,7 +40,9 @@ mod mode;
 
 pub use list::{worktree_name, WorkspaceGroup, WorktreeList, ROOT_NAME};
 pub use log::{LineKind, LogLine};
-pub use modal::{CreateInput, ModalSize, NoteEditor, Preview, RemoveModal, RenameInput, TextModal};
+pub use modal::{
+    CreateInput, ModalSize, NoteEditor, Preview, RemoveEntry, RemoveModal, RenameInput, TextModal,
+};
 pub use mode::{Mode, PaneExit, ResumeLevel, ReturnMode};
 
 use list::session_row;
@@ -1638,12 +1640,24 @@ impl HomeState {
     /// **keeping the cursor and active row where they are** (via
     /// [`refresh_sessions`](Self::refresh_sessions)) — a session created or
     /// removed in the background must never yank the user's cursor mid-navigation.
-    pub fn apply_task_completion(&mut self, line: LogLine, sessions: Option<Vec<SessionRecord>>) {
+    pub fn apply_task_completion(
+        &mut self,
+        line: LogLine,
+        sessions: Option<Vec<SessionRecord>>,
+        target_root: Option<&Path>,
+    ) {
         self.push_logged_line(line);
+        let target_group = match target_root {
+            Some(root) => {
+                self.op_target = None;
+                self.extra_groups.iter().position(|g| g.root_path == root)
+            }
+            None => None,
+        };
         if let Some(sessions) = sessions {
             // Route the reloaded sessions to the workspace the operation targeted:
             // an extra (unite) group when the cursor was in one, else the primary.
-            match self.take_op_target_group() {
+            match target_group.or_else(|| self.take_op_target_group()) {
                 Some(i) => {
                     self.extra_groups[i].sessions = sessions;
                     self.rebuild_list_keep_cursor();
@@ -2704,11 +2718,40 @@ impl HomeState {
         }
     }
 
-    /// Open the session-removal modal, seeded with the current session names and
+    /// Build the session-removal rows in display order. In single-workspace mode
+    /// labels are plain session names; in 統合(unite) mode every visible
+    /// workspace contributes rows labelled as `workspace: session` so duplicate
+    /// session names stay distinguishable and can be removed from their own root.
+    fn remove_entries(&self) -> Vec<RemoveEntry> {
+        let united = self.is_united();
+        let primary_name = self.list.workspace_name();
+        let primary_label = united.then_some(primary_name);
+
+        let mut entries: Vec<RemoveEntry> = self
+            .sessions
+            .iter()
+            .map(|session| {
+                RemoveEntry::new(session.name.clone(), self.root_path.clone(), primary_label)
+            })
+            .collect();
+
+        for group in &self.extra_groups {
+            entries.extend(group.sessions.iter().map(|session| {
+                RemoveEntry::new(
+                    session.name.clone(),
+                    group.root_path.clone(),
+                    united.then_some(group.name.as_str()),
+                )
+            }));
+        }
+
+        entries
+    }
+
+    /// Open the session-removal modal, seeded with the current sessions and
     /// nothing selected. `force` is carried from `session remove --force`.
     pub fn open_remove_modal(&mut self, force: bool) {
-        let names = self.sessions.iter().map(|s| s.name.clone()).collect();
-        self.overlay = Overlay::Remove(RemoveModal::new(names, force));
+        self.overlay = Overlay::Remove(RemoveModal::new(self.remove_entries(), force));
     }
 
     /// Close the removal modal, discarding any selection. Called only while the
@@ -2717,11 +2760,12 @@ impl HomeState {
         self.overlay = Overlay::None;
     }
 
-    /// Confirm the removal modal: close it and return the checked session names
-    /// (in display order) together with the `--force` flag, for the event loop
-    /// to remove each (see [`RemoveModal::confirm`]). Returns `None` when nothing
-    /// is checked, leaving the modal open; also `None` when it is closed.
-    pub fn submit_remove_modal(&mut self) -> Option<(Vec<String>, bool)> {
+    /// Confirm the removal modal: close it and return the checked session
+    /// entries (in display order) together with the `--force` flag, for the
+    /// event loop to remove each (see [`RemoveModal::confirm`]). Returns `None`
+    /// when nothing is checked, leaving the modal open; also `None` when it is
+    /// closed.
+    pub fn submit_remove_modal(&mut self) -> Option<(Vec<RemoveEntry>, bool)> {
         let Overlay::Remove(modal) = &self.overlay else {
             return None;
         };

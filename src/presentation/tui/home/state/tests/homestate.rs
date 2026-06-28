@@ -147,6 +147,7 @@ fn a_session_op_targets_the_recorded_group_then_clears() {
     state.apply_task_completion(
         LogLine::output("created"),
         Some(vec![session("b1"), session("b2")]),
+        None,
     );
     assert_eq!(state.list().groups()[1].worktrees().len(), 2); // wsB: b1, b2
     assert_eq!(state.list().groups()[0].worktrees().len(), 1); // primary: main
@@ -154,10 +155,35 @@ fn a_session_op_targets_the_recorded_group_then_clears() {
     // With no target recorded (or the primary's root), a completion routes to the
     // primary workspace.
     state.set_op_target(PathBuf::from("/usagi"));
-    state.apply_task_completion(LogLine::output("created"), Some(vec![session("main2")]));
+    state.apply_task_completion(
+        LogLine::output("created"),
+        Some(vec![session("main2")]),
+        None,
+    );
     assert_eq!(state.list().groups()[0].worktrees().len(), 1);
     assert_eq!(state.sessions().len(), 1);
     assert_eq!(state.sessions()[0].name, "main2");
+}
+
+#[test]
+fn a_background_task_completion_routes_by_its_target_root() {
+    let mut state = united_state();
+    // Even if the transient target currently points at the primary, an explicit
+    // background completion root routes the refreshed sessions to the matching
+    // unite group. This matters when bulk removals across workspaces finish out
+    // of dispatch order.
+    state.set_op_target(PathBuf::from("/usagi"));
+    state.apply_task_completion(
+        LogLine::output("removed"),
+        Some(vec![session("b2")]),
+        Some(Path::new("/wsB")),
+    );
+    assert_eq!(state.list().groups()[1].worktrees().len(), 1);
+    assert_eq!(
+        state.list().groups()[1].worktrees()[0].branch.as_deref(),
+        Some("b2")
+    );
+    assert_eq!(state.sessions()[0].name, "main");
 }
 
 #[test]
