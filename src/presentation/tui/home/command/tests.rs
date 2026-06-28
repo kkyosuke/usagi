@@ -986,3 +986,34 @@ fn preview_diff_reports_that_it_is_not_built_yet() {
     assert_eq!(result.lines[0].kind, LineKind::Output);
     assert!(joined(&result).contains("Diff preview"));
 }
+
+#[test]
+fn unite_add_and_remove_emit_their_effects() {
+    let add = registry().dispatch("unite add backend", &[], &[]);
+    assert_eq!(add.effect, Effect::UniteAdd("backend".to_string()));
+    let remove = registry().dispatch("unite remove backend", &[], &[]);
+    assert_eq!(remove.effect, Effect::UniteRemove("backend".to_string()));
+    // `rm` is an accepted alias for remove.
+    let rm = registry().dispatch("unite rm backend", &[], &[]);
+    assert_eq!(rm.effect, Effect::UniteRemove("backend".to_string()));
+}
+
+#[test]
+fn unite_without_a_name_or_with_a_bad_subcommand_shows_usage() {
+    for input in ["unite", "unite add", "unite wat backend"] {
+        let result = registry().dispatch(input, &[], &[]);
+        assert_eq!(result.effect, Effect::None);
+        assert_eq!(result.lines[0].kind, LineKind::Error);
+        assert!(joined(&result).contains("usage"));
+    }
+}
+
+#[test]
+fn unite_completes_its_subcommands_then_nothing() {
+    // On the subcommand word, offer add / remove.
+    let completion = registry().complete("unite ", CommandScope::Workspace);
+    assert_eq!(completion.candidates, vec!["add", "remove"]);
+    // Once a subcommand is chosen, the workspace name is free-form (nothing more).
+    let after = registry().complete("unite add ", CommandScope::Workspace);
+    assert!(after.candidates.is_empty());
+}

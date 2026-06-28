@@ -100,7 +100,7 @@
 
 - **開く** — **切替（Switch）／在席（Focus）の両方**から `:` で開けます。没入（Attached）はキーがシェルへ
   流れるため対象外です（まず `Ctrl-O o`（既定）で切替へ抜けてから `:`）。
-- **実行できるコマンド** — `session` / `config` / `issue` / `man` / `history` / `preview` / `terminal` / `agent` /
+- **実行できるコマンド** — `session` / `unite` / `config` / `issue` / `man` / `history` / `preview` / `terminal` / `agent` /
   `close` / `doctor` / `quit` / `clear` など、ワークスペース全体（[コマンドスコープ](#コマンドスコープ)の Workspace ＋共通）の
   コマンドを実行します。構文と役割は [../03-commands/02-tui.md](../../03-commands/02-tui.md) が正本です。
 - **表示** — 入力欄 `❯ …`、入力中のコマンドに応じた[候補・ヒント](02-layout.md#入力候補ヒントコマンドライン)（コマンド一覧の絞り込み、または
@@ -141,7 +141,7 @@
 
 | スコープ | 入力面 | 出るコマンド |
 |---|---|---|
-| **Workspace（全体）** | コマンドパレット（`:` で開く） | `session` / `issue` / `config` ＋ 共通 |
+| **Workspace（全体）** | コマンドパレット（`:` で開く） | `session` / `unite` / `issue` / `config` ＋ 共通 |
 | **Session（個別）** | 在席の右ペインのアクション UI | `terminal` / `agent` / `close` ＋ 共通 |
 | **共通** | 両方 | `man` / `history` / `clear` / `quit` |
 

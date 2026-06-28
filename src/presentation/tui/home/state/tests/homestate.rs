@@ -62,6 +62,43 @@ fn united_state() -> HomeState {
 }
 
 #[test]
+fn add_and_remove_extra_groups_drive_unite_mode() {
+    let mut state = HomeState::new("usagi", Vec::new(), None);
+    state.set_root_path("/usagi");
+    state.restore_sessions(vec![session("main")]);
+    assert!(!state.is_united());
+
+    let wsb = || GroupSource {
+        name: "wsB".to_string(),
+        root_path: PathBuf::from("/wsB"),
+        root_note: None,
+        sessions: vec![session("b1")],
+    };
+    // Adding a workspace enters unite mode.
+    assert!(state.add_extra_group(wsb()));
+    assert!(state.is_united());
+    assert_eq!(state.list().group_count(), 2);
+    assert_eq!(state.united_workspace_names(), vec!["usagi", "wsB"]);
+    // Adding the same workspace again (same root) is refused.
+    assert!(!state.add_extra_group(wsb()));
+    // Adding the primary's own root is refused too.
+    assert!(!state.add_extra_group(GroupSource {
+        name: "dup".to_string(),
+        root_path: PathBuf::from("/usagi"),
+        root_note: None,
+        sessions: Vec::new(),
+    }));
+    assert_eq!(state.list().group_count(), 2);
+
+    // Removing the last extra group restores the single-workspace view.
+    assert!(state.remove_extra_group("wsB"));
+    assert!(!state.is_united());
+    assert_eq!(state.list().group_count(), 1);
+    // Removing an unknown workspace is a no-op.
+    assert!(!state.remove_extra_group("ghost"));
+}
+
+#[test]
 fn selected_workspace_root_and_note_follow_the_cursor_group() {
     // Flat rows: 0 usagi root, 1 main, 2 wsB root, 3 b1.
     let mut state = united_state();

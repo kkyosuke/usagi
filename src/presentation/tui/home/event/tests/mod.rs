@@ -23,6 +23,12 @@ fn reload(ui: SessionActionUi) -> ConfigReload {
     }
 }
 
+/// A `unite_resolve` fake that reports no workspace, for the loop tests that do
+/// not exercise `unite add` (the dispatch path has its own dedicated test).
+fn no_unite_resolve(name: &str) -> std::result::Result<GroupSource, String> {
+    Err(format!("no workspace named \"{name}\""))
+}
+
 fn noop_create(_: &str) -> SessionOutcome {
     SessionOutcome {
         line: LogLine::output("created"),
@@ -721,6 +727,7 @@ fn run_with_tasks(
     // The unite target root is irrelevant to this single-workspace fake, so wrap
     // the caller's removal hook to the production 3-arg shape, dropping the root.
     let mut dispatch_remove_w = |_: &Path, name: &str, force: bool| dispatch_remove(name, force);
+    let mut unite_resolve: fn(&str) -> std::result::Result<GroupSource, String> = no_unite_resolve;
     let mut wiring = Wiring {
         workspace_root: Path::new("/ws"),
         persist: &mut persist,
@@ -729,6 +736,7 @@ fn run_with_tasks(
         set_note: &mut set_note_fake,
         reorder_session: &mut reorder_fake,
         dispatch_remove: &mut dispatch_remove_w,
+        unite_resolve: &mut unite_resolve,
         dispatch_update: &mut dispatch_update,
         evict_pool: &mut evict_pool,
         existing_branches: &mut branches,
@@ -778,6 +786,7 @@ fn run_with_live_session(reader: &mut dyn KeyReader) -> Result<Outcome> {
     let mut save_resume = |_: &str, _: ResumeLevel| {};
     let mut save_last_active = |_: &[(String, DateTime<Utc>)]| {};
     let mut dispatch_update = || {};
+    let mut unite_resolve: fn(&str) -> std::result::Result<GroupSource, String> = no_unite_resolve;
     let mut wiring = Wiring {
         workspace_root: Path::new("/ws"),
         persist: &mut persist,
@@ -786,6 +795,7 @@ fn run_with_live_session(reader: &mut dyn KeyReader) -> Result<Outcome> {
         set_note: &mut set_note_fake,
         reorder_session: &mut reorder_fake,
         dispatch_remove: &mut dispatch_remove,
+        unite_resolve: &mut unite_resolve,
         dispatch_update: &mut dispatch_update,
         evict_pool: &mut evict,
         existing_branches: &mut branches,
@@ -859,6 +869,108 @@ fn run_notes(
 /// down, `H` home, `F` end).
 fn shift_arrow(letter: char) -> io::Result<Key> {
     Ok(Key::UnknownEscSeq(vec!['[', '1', ';', '2', letter]))
+}
+
+/// Map a string to the `:`-palette key sequence that types it then presses Enter,
+/// so a test can run a full `:command` in one go.
+fn typed_command(cmd: &str) -> Vec<io::Result<Key>> {
+    let mut keys = vec![Ok(Key::Char(':'))];
+    keys.extend(cmd.chars().map(|c| Ok(Key::Char(c))));
+    keys.push(Ok(Key::Enter));
+    keys
+}
+
+#[test]
+fn unite_add_through_the_compat_shim_reports_an_unresolved_workspace() {
+    // The compat shim's resolver always reports no match, so `:unite add` logs the
+    // error and the loop keeps running until the reader's Ctrl-C fallback quits.
+    let outcome = run(typed_command("unite add nope"), sample_state()).unwrap();
+    assert!(matches!(outcome, Outcome::Quit));
+}
+
+#[test]
+fn unite_add_and_remove_run_through_the_palette() {
+    // A capturing resolver: it loads "wsB" into a group and refuses anything else,
+    // so the palette `unite add/remove` arms exercise every branch (add, duplicate,
+    // remove, missing, and an unresolved name).
+    let term = Term::stdout();
+    let monitor = MonitorHandle::detached();
+    let calls = std::cell::RefCell::new(Vec::<String>::new());
+    let mut unite_resolve = |name: &str| -> std::result::Result<GroupSource, String> {
+        calls.borrow_mut().push(name.to_string());
+        if name == "wsB" {
+            Ok(GroupSource {
+                name: "wsB".to_string(),
+                root_path: PathBuf::from("/wsB"),
+                root_note: None,
+                sessions: Vec::new(),
+            })
+        } else {
+            Err(format!("no workspace named \"{name}\""))
+        }
+    };
+    let mut keys = Vec::new();
+    keys.extend(typed_command("unite add wsB")); // add → enters unite mode
+    keys.extend(typed_command("unite add wsB")); // duplicate → refused
+    keys.extend(typed_command("unite remove wsB")); // remove → back to single
+    keys.extend(typed_command("unite remove wsB")); // missing → refused
+    keys.extend(typed_command("unite add ghost")); // resolver error
+    keys.push(Ok(Key::CtrlC));
+    let mut reader = ScriptedReader::new(keys);
+
+    let mut persist: fn(&str) = noop_persist;
+    let mut dispatch_create = |_: &Path, _: &str| {};
+    let mut rename = |_: &Path, n: &str, l: &str| noop_rename(n, l);
+    let mut set_note_fake = |_: &Path, n: &str, t: &str| noop_set_note(n, t);
+    let mut reorder_fake: fn(&str, bool) -> SessionReorder = noop_reorder;
+    let mut dispatch_remove = |_: &Path, _: &str, _: bool| {};
+    let mut evict = |_: &Path| {};
+    let mut branches: fn() -> Vec<String> = no_branches;
+    let mut open: fn(&mut HomeState, &Path, bool, bool) -> Result<PaneExit> = noop_open;
+    let mut config: fn(&Term) -> Result<Option<ConfigReload>> = noop_config;
+    let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = noop_preview;
+    let mut tab_op: fn(&Path, Option<TabNav>) -> (Vec<String>, usize) = noop_tab_op;
+    let mut close: fn(&mut HomeState, &Path) = noop_close;
+    let mut save_resume = |_: &str, _: ResumeLevel| {};
+    let mut save_last_active = |_: &[(String, DateTime<Utc>)]| {};
+    let mut dispatch_update = || {};
+    let mut wiring = Wiring {
+        workspace_root: Path::new("/ws"),
+        persist: &mut persist,
+        dispatch_create: &mut dispatch_create,
+        rename_display: &mut rename,
+        set_note: &mut set_note_fake,
+        reorder_session: &mut reorder_fake,
+        dispatch_remove: &mut dispatch_remove,
+        unite_resolve: &mut unite_resolve,
+        dispatch_update: &mut dispatch_update,
+        evict_pool: &mut evict,
+        existing_branches: &mut branches,
+        open_terminal: &mut open,
+        open_config: &mut config,
+        preview: &mut preview,
+        tab_op: &mut tab_op,
+        close_tab: &mut close,
+        save_resume: &mut save_resume,
+        save_last_active: &mut save_last_active,
+    };
+    let outcome = event_loop(
+        &term,
+        &mut reader,
+        sample_state(),
+        &monitor,
+        &UpdateHandle::new(),
+        &SessionsRefreshHandle::new(),
+        &OneShot::<bool>::new(),
+        &OneShot::<Vec<AgentCli>>::new(),
+        &TaskHandle::new(),
+        &mut wiring,
+    )
+    .unwrap();
+    assert!(matches!(outcome, Outcome::Quit));
+    // The resolver was consulted for both `add` calls and the unresolved name (not
+    // for `remove`, which is pure state).
+    assert_eq!(calls.into_inner(), vec!["wsB", "wsB", "ghost"]);
 }
 
 #[test]

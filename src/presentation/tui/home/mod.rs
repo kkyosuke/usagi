@@ -951,6 +951,29 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
         });
     };
 
+    // `unite add <name>`: resolve a registered workspace by name and load its
+    // recorded sessions into a group to stack into the view. Reads the registry and
+    // the workspace's `state.json`; an unknown name is reported back to log.
+    let mut unite_resolve = |name: &str| -> std::result::Result<state::GroupSource, String> {
+        let storage = crate::infrastructure::storage::Storage::open_default()
+            .map_err(|e| format!("failed to open storage: {e}"))?;
+        let ws = crate::usecase::workspace::overviews(&storage)
+            .map_err(|e| format!("failed to load workspaces: {e}"))?
+            .into_iter()
+            .map(|o| o.workspace)
+            .find(|w| w.name == name)
+            .ok_or_else(|| format!("no workspace named \"{name}\""))?;
+        let (sessions, _) =
+            crate::usecase::workspace_state::recorded_sessions_for_display(&ws.path);
+        let root_note = crate::usecase::workspace_state::recorded_root_note(&ws.path);
+        Ok(state::GroupSource {
+            name: ws.name,
+            root_path: ws.path,
+            root_note,
+            sessions,
+        })
+    };
+
     let mut wiring = event::Wiring {
         workspace_root: &workspace.path,
         persist: &mut persist,
@@ -959,6 +982,7 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
         set_note: &mut set_note,
         reorder_session: &mut reorder_session,
         dispatch_remove: &mut dispatch_remove,
+        unite_resolve: &mut unite_resolve,
         dispatch_update: &mut dispatch_update,
         evict_pool: &mut evict_pool,
         existing_branches: &mut existing_branches,

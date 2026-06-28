@@ -86,6 +86,13 @@ pub enum Effect {
     /// `preview <path|name>`). The string is the requested target; the event loop
     /// resolves and reads it (under the workspace root) and renders it.
     OpenPreview(String),
+    /// Stack another registered workspace into the 統合(unite) view (the user ran
+    /// `unite add <workspace>`). The event loop resolves the name to a workspace,
+    /// loads its sessions, and appends it as an extra group.
+    UniteAdd(String),
+    /// Drop a workspace from the 統合(unite) view (the user ran `unite remove
+    /// <workspace>`), restoring the single-workspace view when none remain.
+    UniteRemove(String),
 }
 
 impl Effect {
@@ -110,7 +117,9 @@ impl Effect {
             | Effect::OpenAgent(_)
             | Effect::OpenConfig
             | Effect::CloseSession
-            | Effect::OpenPreview(_) => true,
+            | Effect::OpenPreview(_)
+            | Effect::UniteAdd(_)
+            | Effect::UniteRemove(_) => true,
             Effect::None
             | Effect::Clear
             | Effect::Quit
