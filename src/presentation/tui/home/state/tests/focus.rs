@@ -503,3 +503,27 @@ fn focus_prompt_runs_the_coming_soon_ai_command() {
     assert_eq!(submission.effect, Effect::None);
     assert!(state.log().last().unwrap().text.contains("coming soon"));
 }
+
+#[test]
+fn focus_select_pane_tab_clamps_to_a_live_pane_and_clears_the_new_tab() {
+    let mut state = state();
+    state.enter_focus(1);
+    state.set_terminal_tabs(vec!["agent".to_string(), "terminal".to_string()], 0);
+    // Entry lands on "+ new"; clicking a concrete pane tab clears it and returns
+    // that pane's index.
+    assert!(state.focus_on_new_tab());
+    assert_eq!(state.focus_select_pane_tab(1), Some(1));
+    assert!(!state.focus_on_new_tab());
+    // Out-of-range clicks clamp onto the last pane.
+    assert_eq!(state.focus_select_pane_tab(9), Some(1));
+}
+
+#[test]
+fn focus_select_pane_tab_without_live_panes_falls_back_to_the_new_tab() {
+    let mut state = state();
+    state.enter_focus(1);
+    // An idle session has no live panes, so there is nothing to select: the
+    // selector snaps back to "+ new".
+    assert_eq!(state.focus_select_pane_tab(0), None);
+    assert!(state.focus_on_new_tab());
+}

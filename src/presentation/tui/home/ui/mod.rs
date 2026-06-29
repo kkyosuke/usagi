@@ -28,8 +28,8 @@ use chrome::{
     title_bar, update_confirm_frame, PALETTE_INNER, REMOVE_MODAL_INNER, TEXT_MODAL_INNER,
 };
 use panes::{group_inline_insert_line, left_pane, right_pane_contents};
-// The embedded terminal pane (没入) maps a click to the tab under it through this.
-pub(super) use panes::attached_tab_at;
+// The right-pane tab strips map clicks to the tab under them through these.
+pub(super) use panes::{attached_tab_at, focus_tab_at};
 // …a click on a sidebar session's PR badge to that session (to pin its PR popup).
 pub(super) use panes::sidebar_pr_badge_at;
 // …and a click anywhere to the pinned PR popup: open a `#<number>`, or dismiss it.

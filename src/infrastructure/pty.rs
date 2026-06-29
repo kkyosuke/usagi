@@ -555,4 +555,47 @@ mod tests {
         parser.process(b"\x07\x07");
         assert_eq!(count.load(Ordering::SeqCst), 2);
     }
+
+    /// Lines scrolled out of a **top-anchored** DECSTBM region (`ESC[1;Nr`) must
+    /// still land in the scrollback. Inline full-screen TUIs (e.g. the Codex CLI)
+    /// reserve their composer with such a region and scroll the transcript inside
+    /// it; upstream `vt100` only fed the scrollback when *no* region was active,
+    /// so the embedded pane had nothing to wheel back through. This guards the
+    /// vendored patch in `third_party/vt100`.
+    #[test]
+    fn top_anchored_scroll_region_still_feeds_the_scrollback() {
+        let mut parser = vt100::Parser::new(6, 20, 100);
+        // Reserve the bottom two rows (a composer) by anchoring the region to the
+        // top, then scroll ten lines of transcript through the upper region.
+        parser.process(b"\x1b[1;4r");
+        for i in 0..10 {
+            parser.process(format!("line {i}\r\n").as_bytes());
+        }
+        let screen = parser.screen_mut();
+        screen.set_scrollback(100);
+        assert!(
+            screen.scrollback() > 0,
+            "a top-anchored region must feed the scrollback (got {})",
+            screen.scrollback()
+        );
+    }
+
+    /// A region that does **not** start at the top (`ESC[2;Nr`) keeps upstream
+    /// behaviour: its scrolled-out lines are dropped, matching xterm (only a
+    /// top margin of the first row saves lines).
+    #[test]
+    fn an_offset_scroll_region_does_not_feed_the_scrollback() {
+        let mut parser = vt100::Parser::new(6, 20, 100);
+        parser.process(b"\x1b[2;5r");
+        for i in 0..10 {
+            parser.process(format!("line {i}\r\n").as_bytes());
+        }
+        let screen = parser.screen_mut();
+        screen.set_scrollback(100);
+        assert_eq!(
+            screen.scrollback(),
+            0,
+            "an offset region must not feed the scrollback"
+        );
+    }
 }
