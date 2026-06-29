@@ -9,11 +9,17 @@ use super::state::{Mode, ProjectList};
 
 const TITLE: &str = "Open Project";
 const SUBTITLE_SINGLE: &str = "Choose one registered workspace";
-const UNITE_TITLE: &str = "Unite Workspaces";
 const SUBTITLE_UNITE: &str = "Select workspaces to open together";
+
+/// Labels for the two selection tabs shown under the title.
+const TAB_SINGLE: &str = "Single";
+const TAB_UNITE: &str = "Unite";
 
 /// Shown in place of the list when no workspaces are registered.
 const EMPTY_MESSAGE: &str = "No workspaces yet. Choose \"New\" to add one.";
+
+/// Shown in place of the list when a non-empty filter matches nothing.
+const NO_MATCHES_MESSAGE: &str = "No projects match the filter.";
 
 /// Glyphs tagging each figure on a project's stats line. They are plain
 /// monochrome symbols drawn in the terminal's text font (not colour emoji), so
@@ -73,10 +79,37 @@ fn stats_line(block_pad: &str, overview: &WorkspaceOverview, now: DateTime<Utc>)
 /// Vertical placement is handled by [`render_frame`], so this adds no leading
 /// padding.
 fn header_lines(width: usize, mode: Mode) -> Vec<String> {
-    match mode {
-        Mode::Single => widgets::header_lines(width, TITLE, Some(SUBTITLE_SINGLE)),
-        Mode::Unite => widgets::header_lines(width, UNITE_TITLE, Some(SUBTITLE_UNITE)),
-    }
+    // The title stays constant; the active mode is shown by the tab strip below
+    // it, and the subtitle describes whichever tab is selected.
+    let mut lines = widgets::header_lines(width, TITLE, None);
+    lines.push(mode_tabs(width, mode));
+    let subtitle = match mode {
+        Mode::Single => SUBTITLE_SINGLE,
+        Mode::Unite => SUBTITLE_UNITE,
+    };
+    lines.push(widgets::dim_line(width, subtitle));
+    lines
+}
+
+/// Builds the centred `Single │ Unite` tab strip drawn under the title. The
+/// active tab is cyan-bold, the other dimmed, so the screen always shows which
+/// mode `←`/`→` and the action keys operate on.
+fn mode_tabs(width: usize, mode: Mode) -> String {
+    let tab = |label: &str, active: bool| {
+        if active {
+            style(label).cyan().bold().to_string()
+        } else {
+            style(label).dim().to_string()
+        }
+    };
+    let sep = style(" │ ").dim().to_string();
+    let strip = format!(
+        "{}{sep}{}",
+        tab(TAB_SINGLE, mode == Mode::Single),
+        tab(TAB_UNITE, mode == Mode::Unite),
+    );
+    let pad = widgets::centered_padding(width, console::measure_text_width(&strip));
+    format!("{}{strip}", " ".repeat(pad))
 }
 
 /// Shortens `text` to at most `max` columns, keeping the tail and prefixing an
@@ -138,8 +171,21 @@ fn project_row(
     format!("{block_pad}{marker}{check_prefix} {name}  {path}")
 }
 
+/// Builds the always-visible filter/search bar. The bar is shown even with an
+/// empty query so users can discover that typing filters the list.
+fn filter_line(block_pad: &str, list: &ProjectList) -> String {
+    let label = style("Filter:").dim().to_string();
+    let value = if list.filter().is_empty() {
+        style(" type to filter").dim().to_string()
+    } else {
+        format!(" {}", style(list.filter()).cyan())
+    };
+    format!("{block_pad}{label}{value}")
+}
+
 /// Builds the list body: two rows per workspace — a name/path row and a dimmed
-/// stats row below it — or a centred empty message when nothing is registered.
+/// stats row below it — or a centred message when nothing is registered / no
+/// row matches the filter.
 fn list_lines(
     width: usize,
     block_pad: &str,
@@ -149,24 +195,28 @@ fn list_lines(
     if list.is_empty() {
         return vec![widgets::dim_line(width, EMPTY_MESSAGE)];
     }
+    let rows = list.rows();
+    if rows.is_empty() {
+        return vec![widgets::dim_line(width, NO_MATCHES_MESSAGE)];
+    }
 
-    let name_width = list
-        .overviews()
+    let name_width = rows
         .iter()
-        .map(|o| o.workspace.name.chars().count())
+        .map(|row| row.overview.workspace.name.chars().count())
         .max()
         .unwrap_or(0);
 
-    let mut lines = Vec::with_capacity(list.overviews().len() * 2);
+    let mut lines = Vec::with_capacity(rows.len() * 2);
     let show_check = list.mode() == Mode::Unite;
-    for (i, overview) in list.overviews().iter().enumerate() {
+    for row in rows {
+        let overview = row.overview;
         lines.push(project_row(
             block_pad,
             &overview.workspace.name,
             name_width,
             &overview.workspace.path.to_string_lossy(),
-            i == list.selected_index(),
-            list.is_checked(i),
+            row.selected,
+            row.checked,
             show_check,
         ));
         lines.push(stats_line(block_pad, overview, now));
@@ -191,8 +241,8 @@ fn notice_lines(block_pad: &str, notice: Option<&str>) -> Vec<String> {
 /// Returns the footer text only; [`render_frame`] pins it to the bottom edge.
 fn footer_lines(width: usize, mode: Mode) -> Vec<String> {
     let help = match mode {
-        Mode::Single => "↑↓: move / Enter: open / Space,u: unite / Esc: back",
-        Mode::Unite => "↑↓: move / Space: toggle / Enter: open checked / Esc: single / q: back",
+        Mode::Single => "←→ tab / ↑↓ move / type,/: filter / Enter open / Esc back",
+        Mode::Unite => "←→ tab / ↑↓ move / Space toggle / Enter open checked / Esc single",
     };
     vec![widgets::dim_line(width, help)]
 }
@@ -209,6 +259,8 @@ fn body_lines(
     now: DateTime<Utc>,
 ) -> Vec<String> {
     let mut body = header_lines(width, list.mode());
+    body.push(String::new());
+    body.push(filter_line(block_pad, list));
     body.push(String::new());
     body.extend(list_lines(width, block_pad, list, now));
     body.extend(notice_lines(block_pad, notice));
@@ -343,8 +395,19 @@ mod tests {
     fn header_lines_switch_for_unite_mode() {
         let lines = header_lines(80, Mode::Unite);
         let joined = lines.join("\n");
-        assert!(joined.contains("Unite Workspaces"));
+        assert!(joined.contains("Open Project"));
+        assert!(joined.contains("Single"));
+        assert!(joined.contains("Unite"));
         assert!(joined.contains("Select workspaces to open together"));
+    }
+
+    #[test]
+    fn mode_tabs_highlight_the_active_tab() {
+        let single = console::strip_ansi_codes(&mode_tabs(80, Mode::Single)).into_owned();
+        let unite = console::strip_ansi_codes(&mode_tabs(80, Mode::Unite)).into_owned();
+        assert!(single.contains("Single"));
+        assert!(single.contains("Unite"));
+        assert_eq!(single, unite);
     }
 
     #[test]
@@ -388,10 +451,10 @@ mod tests {
     }
 
     #[test]
-    fn footer_mentions_the_space_unite_chord_in_single_mode() {
+    fn footer_mentions_tabs_and_filtering_in_single_mode() {
         let lines = footer_lines(80, Mode::Single);
-        assert!(lines.iter().any(|l| l.contains("Space")));
-        assert!(lines.iter().any(|l| l.contains("unite")));
+        assert!(lines.iter().any(|l| l.contains("←→ tab")));
+        assert!(lines.iter().any(|l| l.contains("filter")));
     }
 
     #[test]
@@ -400,7 +463,33 @@ mod tests {
         let joined = lines.join("\n");
         assert!(joined.contains("toggle"));
         assert!(joined.contains("open checked"));
-        assert!(joined.contains("single"));
+        assert!(joined.contains("tab"));
+    }
+
+    #[test]
+    fn filter_line_shows_the_query_without_a_focus_cursor() {
+        let mut list = list_with(&["alpha", "beta"]);
+        list.push_filter('b');
+        let line = console::strip_ansi_codes(&filter_line("", &list)).into_owned();
+        assert!(line.contains("Filter: b"));
+        assert!(!line.contains('▌'));
+    }
+
+    #[test]
+    fn filter_line_keeps_the_query_without_a_cursor() {
+        let mut list = list_with(&["alpha", "beta"]);
+        list.push_filter('b');
+        let line = console::strip_ansi_codes(&filter_line("", &list)).into_owned();
+        assert!(line.contains("Filter: b"));
+        assert!(!line.contains('▌'));
+    }
+
+    #[test]
+    fn filter_line_shows_a_hint_when_empty_and_blurred() {
+        let list = list_with(&["alpha"]);
+        let line = console::strip_ansi_codes(&filter_line("", &list)).into_owned();
+        assert!(line.contains("type to filter"));
+        assert!(!line.contains('▌'));
     }
 
     #[test]
@@ -460,6 +549,15 @@ mod tests {
         let lines = list_lines(80, "", &list, now());
         assert_eq!(lines.len(), 1);
         assert!(lines[0].contains("No workspaces yet"));
+    }
+
+    #[test]
+    fn list_lines_show_no_matches_for_an_empty_filtered_view() {
+        let mut list = list_with(&["alpha"]);
+        list.push_filter('z');
+        let lines = list_lines(80, "", &list, now());
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("No projects match"));
     }
 
     #[test]
