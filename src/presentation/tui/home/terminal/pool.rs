@@ -56,8 +56,10 @@ const POLL_INTERVAL: Duration = Duration::from_millis(200);
 /// How many [`POLL_INTERVAL`] bell ticks pass between resource (CPU / memory)
 /// samples. Reading every process is far heavier than reading a bell counter, and
 /// CPU use is meaningful only over a window — so it is sampled on a slower beat
-/// (every fifth tick ≈ once a second) rather than on every poll.
-const RESOURCE_SAMPLE_EVERY: u32 = 5;
+/// (every tenth tick ≈ two seconds) rather than on every poll. The sidebar's
+/// figures are coarse health indicators, not a profiler, so this halves the
+/// full-system process-table refresh cost while keeping the display fresh enough.
+const RESOURCE_SAMPLE_EVERY: u32 = 10;
 
 /// The handles a background session is watched through, kept separate from the
 /// owned [`PtySession`]s so the watcher thread can poll without holding them.
@@ -108,6 +110,13 @@ struct Shared {
 #[derive(Clone)]
 pub struct MonitorHandle {
     shared: Arc<Mutex<Shared>>,
+    /// A monotonic counter the watcher (and pane registration) bump whenever the
+    /// badge sets behind [`snapshot`](Self::snapshot) could have moved. The render
+    /// loops read it lock-free each frame and only take the lock to re-snapshot
+    /// (and clone the sets) when it advances, so an unchanged frame costs a single
+    /// atomic load instead of cloning every badge set. Monotonic, so a missed bump
+    /// only ever causes one extra (harmless) re-snapshot, never a stale one.
+    version: Arc<AtomicU64>,
 }
 
 /// Every session-badge set the sidebar draws, read together under one lock by
@@ -140,6 +149,7 @@ impl MonitorHandle {
     pub fn detached() -> Self {
         Self {
             shared: Arc::new(Mutex::new(Shared::default())),
+            version: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -161,6 +171,7 @@ impl MonitorHandle {
         }
         Self {
             shared: Arc::new(Mutex::new(shared)),
+            version: Arc::new(AtomicU64::new(1)),
         }
     }
 
@@ -179,6 +190,7 @@ impl MonitorHandle {
         shared.monitor.observe(&readings);
         Self {
             shared: Arc::new(Mutex::new(shared)),
+            version: Arc::new(AtomicU64::new(1)),
         }
     }
 
@@ -190,20 +202,14 @@ impl MonitorHandle {
     /// can also skip repainting when the badges have not changed.
     pub fn snapshot(&self) -> MonitorSnapshot {
         let shared = self.lock();
-        let live = shared
-            .sessions
-            .iter()
-            .filter(|(_, w)| w.any_alive())
-            .map(|(path, _)| path.clone())
-            .collect();
-        MonitorSnapshot {
-            running: shared.monitor.running().clone(),
-            waiting: shared.monitor.waiting().clone(),
-            done: shared.monitor.done().clone(),
-            live,
-            resources: shared.resources.clone(),
-            resource_total: shared.resource_total,
-        }
+        snapshot_locked(&shared)
+    }
+
+    /// The current badge version (see [`version`](Self::version)). A render loop
+    /// caches the value it last snapshotted at and only re-snapshots when this
+    /// differs, skipping the per-frame clone of every badge set when nothing moved.
+    pub fn badge_version(&self) -> u64 {
+        self.version.load(Ordering::SeqCst)
     }
 
     /// Declare the foreground (attached) session, or clear it with `None`. The
@@ -226,6 +232,26 @@ impl MonitorHandle {
     }
 }
 
+/// Build the renderable badge snapshot from already-locked watcher state. Kept
+/// as a helper so the hot render path and the watcher can compare before/after
+/// states without duplicating the clone/derive logic.
+fn snapshot_locked(shared: &Shared) -> MonitorSnapshot {
+    let live = shared
+        .sessions
+        .iter()
+        .filter(|(_, w)| w.any_alive())
+        .map(|(path, _)| path.clone())
+        .collect();
+    MonitorSnapshot {
+        running: shared.monitor.running().clone(),
+        waiting: shared.monitor.waiting().clone(),
+        done: shared.monitor.done().clone(),
+        live,
+        resources: shared.resources.clone(),
+        resource_total: shared.resource_total,
+    }
+}
+
 /// One embedded pane: a live [`PtySession`] and what it runs (so the tab strip
 /// can label it and the agent pane can be told apart for the badge heuristic).
 struct Pane {
@@ -243,6 +269,27 @@ struct Pane {
 struct SessionPanes {
     panes: Vec<Pane>,
     active: usize,
+    /// Cached labels for `panes`, rebuilt only when panes are added/closed. The
+    /// active index changes far more often (and previews read tabs every frame),
+    /// but it does not affect labels.
+    tab_labels: Vec<String>,
+}
+
+impl SessionPanes {
+    fn new(panes: Vec<Pane>, active: usize) -> Self {
+        let mut this = Self {
+            panes,
+            active,
+            tab_labels: Vec::new(),
+        };
+        this.rebuild_tab_labels();
+        this
+    }
+
+    fn rebuild_tab_labels(&mut self) {
+        let kinds: Vec<PaneKind> = self.panes.iter().map(|p| p.kind).collect();
+        self.tab_labels = tabs::tab_labels(&kinds);
+    }
 }
 
 /// The live shells embedded in the workspace screen, keyed by worktree path —
@@ -254,6 +301,10 @@ struct SessionPanes {
 pub struct TerminalPool {
     sessions: HashMap<PathBuf, SessionPanes>,
     shared: Arc<Mutex<Shared>>,
+    /// Monotonic badge-state version shared with [`MonitorHandle`]. Bumped by
+    /// session registration/removal and by the watcher when monitor/resource
+    /// state changes, letting render loops avoid cloning unchanged snapshots.
+    version: Arc<AtomicU64>,
     stop: Arc<AtomicBool>,
     watcher: Option<JoinHandle<()>>,
     /// Set true whenever a session is registered, and cleared by the watcher (under
@@ -298,12 +349,14 @@ impl TerminalPool {
     /// [`Settings::terminal_scrollback_lines`](crate::domain::settings::Settings)).
     pub fn new(notifications_enabled: bool, scrollback_lines: usize) -> Self {
         let shared = Arc::new(Mutex::new(Shared::default()));
+        let version = Arc::new(AtomicU64::new(0));
         let stop = Arc::new(AtomicBool::new(false));
         // Starts empty, so the watcher idles without locking until the first
         // session is registered (see [`has_sessions`](Self::has_sessions)).
         let has_sessions = Arc::new(AtomicBool::new(false));
         let watcher = spawn_watcher(
             Arc::clone(&shared),
+            Arc::clone(&version),
             Arc::clone(&stop),
             Arc::clone(&has_sessions),
             notifications_enabled,
@@ -312,6 +365,7 @@ impl TerminalPool {
         Self {
             sessions: HashMap::new(),
             shared,
+            version,
             stop,
             watcher: Some(watcher),
             has_sessions,
@@ -325,6 +379,7 @@ impl TerminalPool {
     pub fn monitor(&self) -> MonitorHandle {
         MonitorHandle {
             shared: Arc::clone(&self.shared),
+            version: Arc::clone(&self.version),
         }
     }
 
@@ -362,13 +417,7 @@ impl TerminalPool {
             self.sessions.remove(&key);
             let kind = tabs::pane_kind(agent);
             let pane = self.spawn_pane(term, dir, kind, agent_command, cli)?;
-            self.sessions.insert(
-                key,
-                SessionPanes {
-                    panes: vec![pane],
-                    active: 0,
-                },
-            );
+            self.sessions.insert(key, SessionPanes::new(vec![pane], 0));
         }
         self.refresh_watched(dir, label);
         Ok(())
@@ -391,12 +440,10 @@ impl TerminalPool {
         let sp = self
             .sessions
             .entry(dir.to_path_buf())
-            .or_insert_with(|| SessionPanes {
-                panes: Vec::new(),
-                active: 0,
-            });
+            .or_insert_with(|| SessionPanes::new(Vec::new(), 0));
         sp.panes.push(pane);
         sp.active = sp.panes.len().saturating_sub(1);
+        sp.rebuild_tab_labels();
         self.refresh_watched(dir, label);
         Ok(())
     }
@@ -440,6 +487,7 @@ impl TerminalPool {
                 let len_before = sp.panes.len();
                 // Dropping the removed Pane kills the shell it owns.
                 sp.panes.remove(active);
+                sp.rebuild_tab_labels();
                 match tabs::active_after_close(active, len_before) {
                     Some(next) => {
                         sp.active = next;
@@ -515,9 +563,8 @@ impl TerminalPool {
     pub fn tabs(&self, dir: &Path) -> (Vec<String>, usize) {
         match self.sessions.get(dir) {
             Some(sp) => {
-                let kinds: Vec<PaneKind> = sp.panes.iter().map(|p| p.kind).collect();
                 let active = sp.active.min(sp.panes.len().saturating_sub(1));
-                (tabs::tab_labels(&kinds), active)
+                (sp.tab_labels.clone(), active)
             }
             None => (Vec::new(), 0),
         }
@@ -587,6 +634,7 @@ impl TerminalPool {
         match watched {
             Some(watched) => {
                 shared.sessions.insert(key, watched);
+                self.version.fetch_add(1, Ordering::SeqCst);
                 // Wake the watcher out of its no-session cheap path. Store before
                 // dropping the lock so the next tick will take the lock and observe
                 // the newly registered session.
@@ -596,6 +644,7 @@ impl TerminalPool {
                 shared.sessions.remove(&key);
                 shared.monitor.forget(dir);
                 agent_state_store::clear(dir);
+                self.version.fetch_add(1, Ordering::SeqCst);
             }
         }
     }
@@ -749,6 +798,7 @@ impl Drop for TerminalPool {
 /// input (background or attached) or whose background agent has just finished.
 fn spawn_watcher(
     shared: Arc<Mutex<Shared>>,
+    version: Arc<AtomicU64>,
     stop: Arc<AtomicBool>,
     has_sessions: Arc<AtomicBool>,
     notifications_enabled: bool,
@@ -758,7 +808,7 @@ fn spawn_watcher(
     // ticks: an unchanged phase file then costs a single `stat`, not a re-read.
     let phase_reader = agent_state_store::PhaseReader::new();
     // Counts bell ticks so the heavier resource sample runs only every
-    // `RESOURCE_SAMPLE_EVERY`th of them (≈ once a second).
+    // `RESOURCE_SAMPLE_EVERY`th of them (≈ two seconds).
     let mut tick: u32 = 0;
     std::thread::spawn(move || loop {
         if stop.load(Ordering::SeqCst) {
@@ -791,6 +841,7 @@ fn spawn_watcher(
                     break;
                 }
             };
+            let before = snapshot_locked(&shared);
 
             // Prune sessions whose every pane has exited so they stop being
             // tracked (the path is live while any pane is alive).
@@ -805,7 +856,7 @@ fn spawn_watcher(
                 shared.monitor.forget(&path);
                 agent_state_store::clear(&path);
             }
-            if shared.sessions.is_empty() {
+            let notices = if shared.sessions.is_empty() {
                 shared.resources.clear();
                 shared.resource_total = ResourceUsage::default();
                 // The authoritative empty observation happens while holding the
@@ -839,7 +890,11 @@ fn spawn_watcher(
                             .map(|w| (w.label.clone(), notice.kind))
                     })
                     .collect()
+            };
+            if snapshot_locked(&shared) != before {
+                version.fetch_add(1, Ordering::SeqCst);
             }
+            notices
         };
 
         if notifications_enabled {
@@ -873,8 +928,12 @@ fn spawn_watcher(
                 (per_root.into_iter().collect(), total)
             };
             if let Ok(mut shared) = shared.lock() {
+                let changed = shared.resources != resources || shared.resource_total != total;
                 shared.resources = resources;
                 shared.resource_total = total;
+                if changed {
+                    version.fetch_add(1, Ordering::SeqCst);
+                }
             }
         }
     })

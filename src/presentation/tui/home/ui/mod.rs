@@ -450,7 +450,12 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
         let mut line = pad_to_width(clip_to_width(&cell, left_w), left_w);
         line.push_str(SEP);
         let right_cell = right_rows.next().unwrap_or_default();
-        line.push_str(&clip_to_width(&right_cell, right_w));
+        // The right cell fits its pane at normal widths (the clip is a no-op),
+        // so borrow it through `clip_to_width_cow` and append in place — only a
+        // row actually too wide allocates a clipped copy. The owned `clip_to_width`
+        // here allocated a fresh string for every body row each paint just to copy
+        // it straight back out.
+        line.push_str(&clip_to_width_cow(&right_cell, right_w));
         lines.push(line);
     }
 
