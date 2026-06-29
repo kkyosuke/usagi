@@ -4,7 +4,7 @@
 
 シェルから `usagi <cmd>` で実行する CLI コマンドの一覧です。
 
-`issue` / `memory` / `mcp` / `llm-mcp` は **AI エージェントが MCP 経由で扱うためのコマンド**で、`usagi --help` の一覧には表示しません（実行自体は可能）。人手で叩くものではないため、ヘルプを汚さないよう隠しています。`agent-phase`（エージェントのライフサイクルフックが状態を報告するために呼ぶ内部コマンド）と `guard-workspace`（Claude の `PreToolUse` フックがツールの対象パスを検査し、worktree の外への読み書きを拒否する内部コマンド）も同様に隠しコマンドで、人手で実行するものではありません。
+`issue` / `memory` / `mcp` / `llm-mcp` / `op-mcp` は **AI エージェントが MCP 経由で扱うためのコマンド**で、`usagi --help` の一覧には表示しません（実行自体は可能）。人手で叩くものではないため、ヘルプを汚さないよう隠しています。`agent-phase`（エージェントのライフサイクルフックが状態を報告するために呼ぶ内部コマンド）と `guard-workspace`（Claude の `PreToolUse` フックがツールの対象パスを検査し、worktree の外への読み書きを拒否する内部コマンド）も同様に隠しコマンドで、人手で実行するものではありません。
 
 ## 目次
 
@@ -13,6 +13,7 @@
   - [`usagi memory`](#usagi-memory)
   - [`usagi mcp`](#usagi-mcp)
   - [`usagi llm-mcp`](#usagi-llm-mcp)
+  - [`usagi op-mcp`](#usagi-op-mcp)
 
 ## CLI コマンド一覧
 
@@ -35,6 +36,7 @@
 | `usagi memory <save\|list\|show\|update\|search\|delete>` | （ヘルプ非表示・エージェント向け）カレントリポジトリのエージェントのメモリ（`.usagi/memory/`）を操作する（[data/04-memory.md](../data/04-memory.md)） |
 | `usagi mcp` | （ヘルプ非表示・エージェント向け）issue・メモリ・セッションの操作を MCP（Model Context Protocol）サーバとして stdio で公開し、AI エージェントから使えるようにする |
 | `usagi llm-mcp [--model <MODEL>]` | （ヘルプ非表示・エージェント向け）ローカル LLM（Ollama）を MCP サーバとして公開し、クラウド Agent が軽量タスクを委譲できるようにする（トークン節約） |
+| `usagi op-mcp` | （ヘルプ非表示・エージェント向け）1Password CLI（`op`）を MCP サーバとして公開し、AI エージェントが secret を読み取れるようにする（読み取り専用） |
 
 ### `usagi init`
 
@@ -228,3 +230,7 @@ user         tabs                     ユーザーはタブを好む
 ### `usagi llm-mcp`
 
 ローカル LLM（Ollama）を **MCP サーバ**として公開し、クラウド Agent が要約・命名・定型文生成などの軽量タスクを `local_llm_ask` ツールで委譲できるようにします。`--model` で委譲先モデルを指定します（既定は `qwen2.5-coder:7b`）。設定での有効化・資材のインストール・対応 tool の詳細は専用の章 [3.4 ローカル LLM MCP サーバ](04-llm-mcp.md) を参照してください。
+
+### `usagi op-mcp`
+
+[1Password CLI（`op`）](https://developer.1password.com/docs/cli/)を **MCP サーバ**として公開し、AI エージェントが secret reference の解決（`op_read`）や item / vault の参照（`op_item_get` / `op_item_list` / `op_vault_list` / `op_whoami`）を**読み取り専用**で行えるようにします。認証は `op`（環境）に委ねます。対応 tool・登録方法・前提の詳細は専用の章 [3.5 1Password MCP サーバ](05-op-mcp.md) を参照してください。

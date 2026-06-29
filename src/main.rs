@@ -4,6 +4,7 @@ use clap::{Parser, Subcommand};
 
 use usagi::presentation::mcp::child_io::{read_capped, wait_with_timeout, WaitableChild};
 use usagi::presentation::mcp::llm::LlmBackend;
+use usagi::presentation::mcp::op::OpBackend;
 use usagi::presentation::mcp::session::AgentBackend;
 use usagi::usecase::session;
 
@@ -182,6 +183,80 @@ impl WaitableChild for RealChild {
     }
 }
 
+/// The longest a single `op` CLI call may take before it is killed and the MCP
+/// tool fails. 1Password reads should be quick; the budget only prevents a
+/// wedged authentication helper or CLI process from blocking the agent forever.
+const OP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+/// How often the wait loop re-polls the `op` child while it runs.
+const OP_POLL: std::time::Duration = std::time::Duration::from_millis(50);
+/// Largest `op` stdout captured; item JSON is usually small, but this bounds a
+/// hostile or unexpectedly huge response.
+const MAX_OP_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
+/// How much of `op`'s stderr is echoed back in an error.
+const MAX_OP_STDERR_BYTES: usize = 4 * 1024;
+
+/// The production [`OpBackend`] for `usagi op-mcp`, wired in at the composition
+/// root so the op-mcp transport stays free of subprocess IO and unit-testable.
+/// Each tool call runs exactly one `op` invocation with stdin closed, returning
+/// stdout on success and a bounded stderr diagnostic on failure.
+struct OpCliBackend;
+
+impl OpBackend for OpCliBackend {
+    fn run(&self, args: &[String]) -> Result<String, String> {
+        let mut child = std::process::Command::new("op")
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("failed to start op: {e}"))?;
+
+        let mut out = child
+            .stdout
+            .take()
+            .ok_or_else(|| "failed to open op stdout".to_string())?;
+        let mut err = child
+            .stderr
+            .take()
+            .ok_or_else(|| "failed to open op stderr".to_string())?;
+        let out_reader = std::thread::spawn(move || read_capped(&mut out, MAX_OP_OUTPUT_BYTES));
+        let err_reader = std::thread::spawn(move || read_capped(&mut err, MAX_OP_STDERR_BYTES));
+
+        let status = wait_with_timeout(&mut RealChild(child), OP_TIMEOUT, OP_POLL);
+        let stdout_result = out_reader
+            .join()
+            .unwrap_or_else(|_| Ok((Vec::new(), false)));
+        let stderr_result = err_reader
+            .join()
+            .unwrap_or_else(|_| Ok((Vec::new(), false)));
+
+        let Some(status) = status else {
+            return Err(format!(
+                "op did not finish within {OP_TIMEOUT:?} and was terminated"
+            ));
+        };
+        let (stdout, stdout_truncated) =
+            stdout_result.map_err(|e| format!("failed to read op output: {e}"))?;
+        let (stderr, stderr_truncated) = stderr_result.unwrap_or((Vec::new(), false));
+        if !status.success() {
+            let mut detail = String::from_utf8_lossy(&stderr).trim().to_string();
+            if stderr_truncated {
+                detail.push_str(" …(truncated)");
+            }
+            if detail.is_empty() {
+                detail = "no stderr".to_string();
+            }
+            return Err(format!("op exited with {status}: {detail}"));
+        }
+
+        let mut text = String::from_utf8_lossy(&stdout).to_string();
+        if stdout_truncated {
+            text.push_str(" …(truncated)");
+        }
+        Ok(text.trim_end_matches(['\n', '\r']).to_string())
+    }
+}
+
 #[derive(Parser)]
 #[command(
     name = "usagi",
@@ -273,6 +348,11 @@ enum Commands {
     /// Hidden from the CLI: launched by AI agents, not invoked by hand.
     #[command(hide = true)]
     Mcp,
+    /// Run the 1Password CLI MCP server over stdio (for AI agents to read secrets)
+    ///
+    /// Hidden from the CLI: launched by AI agents, not invoked by hand.
+    #[command(hide = true)]
+    OpMcp,
     /// Play a usagi animation (1=走る 2=増える 3,4=読み込み 5=マスコット)
     Run {
         /// Which animation to play (1–5)
@@ -357,6 +437,15 @@ fn main() -> anyhow::Result<()> {
                 stdout.lock(),
             )
         }
+        Commands::OpMcp => {
+            let stdin = std::io::stdin();
+            let stdout = std::io::stdout();
+            usagi::presentation::cli::op_mcp::run(
+                Box::new(OpCliBackend),
+                stdin.lock(),
+                stdout.lock(),
+            )
+        }
         Commands::Run { n } => usagi::presentation::cli::run::run(n),
         Commands::Status => usagi::presentation::cli::status::run(),
         Commands::Update { dry_run } => usagi::presentation::cli::update::run(dry_run),
@@ -388,7 +477,7 @@ fn command_name(command: &Commands) -> Option<&'static str> {
         Commands::Run { .. } => Some("run"),
         Commands::Status => Some("status"),
         Commands::Update { .. } => Some("update"),
-        Commands::LlmMcp { .. } | Commands::Mcp => None,
+        Commands::LlmMcp { .. } | Commands::Mcp | Commands::OpMcp => None,
     }
 }
 
