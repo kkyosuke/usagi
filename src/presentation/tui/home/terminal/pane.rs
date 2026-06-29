@@ -158,7 +158,6 @@ pub fn run(
     state: &mut HomeState,
     pty: &mut PtySession,
     monitor: &MonitorHandle,
-    clear: bool,
 ) -> Result<PaneStep> {
     // Raw mode, bracketed paste, and motion reporting are entered here and
     // restored by the guard's `Drop` — including when `drive` panics and unwinds,
@@ -168,14 +167,11 @@ pub fn run(
     // render/input loop would leave the user's shell in raw mode with bracketed
     // paste and motion reporting still on.
     let _modes = PaneModeGuard::enter(term)?;
-    // Blank the surface before driving so the previous pane's grid does not bleed
-    // through, but only when this is a fresh pane — the first entry or a real tab
-    // switch. A tab nav that lands on the pane already showing (a lone pane, or a
-    // jump to the current tab) re-enters here unchanged; clearing then would blank
-    // and fully repaint identical content, a visible one-frame flicker.
-    if clear {
-        let _ = term.clear_screen();
-    }
+    // Do not clear the screen here. The first pane repaint starts with an empty
+    // diff base, so [`diff_frame`] already emits "clear + all rows" as one batched
+    // terminal write. A separate `clear_screen()` would flush an all-blank frame
+    // just before the real frame and is visible as a one-frame flicker when
+    // switching sessions or tabs.
     drive(term, state, pty, monitor)
 }
 

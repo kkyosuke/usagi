@@ -578,7 +578,7 @@ fn focus_and_attach(
     // A liveness test only — the snapshot geometry is irrelevant here, so it is
     // sized to the current sidebar state and the result is just tested for `Some`.
     if (wiring.preview)(&dir, state.sidebar()).is_some() {
-        open_pane(term, state, painter, wiring, false, false);
+        open_pane(term, state, painter, wiring, false, false, true);
     }
 }
 
@@ -725,7 +725,7 @@ pub(super) fn focus_key(
             // `Ctrl-O a`), the first `Esc` returns to that pane (没入) — back to the
             // tab the zoom started from — rather than peeling back toward 切替.
             if state.take_focus_return_attach() {
-                open_pane(term, state, painter, wiring, false, false);
+                open_pane(term, state, painter, wiring, false, false, true);
                 return Flow::Continue;
             }
             if !state.focus_discard_new_tab() {
@@ -823,7 +823,7 @@ pub(super) fn focus_key(
             SessionActionUi::Prompt => focus_prompt_key(term, state, painter, key, wiring),
         }
     } else if key == Key::Enter {
-        open_pane(term, state, painter, wiring, false, false);
+        open_pane(term, state, painter, wiring, false, false, true);
     }
     Flow::Continue
 }
@@ -1053,7 +1053,7 @@ fn launch_pane(
     wiring: &mut Wiring,
     agent: bool,
 ) {
-    open_pane(term, state, painter, wiring, agent, true);
+    open_pane(term, state, painter, wiring, agent, true, false);
 }
 
 /// Open the embedded terminal pane (没入) for the focused session and run it
@@ -1077,6 +1077,10 @@ fn launch_pane(
 ///   that focus row, re-attaching it when live.
 /// - [`PaneExit::Quit`] — `Ctrl-Q`: leave the pane and raise the quit-confirmation
 ///   modal on the home screen (every pane stays alive in the pool until confirmed).
+///
+/// `known_live` means the caller already proved that the focused session has a
+/// live pane (typically via a preview snapshot). Re-attaching that pane should
+/// avoid both the loading frame and a second preview snapshot.
 fn open_pane(
     term: &Term,
     state: &mut HomeState,
@@ -1084,6 +1088,7 @@ fn open_pane(
     wiring: &mut Wiring,
     agent: bool,
     new_pane: bool,
+    known_live: bool,
 ) {
     let (label, fail) = if agent {
         ("Agent", "agent")
@@ -1091,16 +1096,27 @@ fn open_pane(
         ("Terminal", "terminal")
     };
     let dir = selected_dir(state, wiring.workspace_root);
-    // Spawning the PTY (and launching the agent CLI inside it) blocks for a beat;
-    // flash the loading rabbit in the top-right so the wait reads as deliberate,
-    // until the pane itself paints over the screen.
-    state.step_loading(if agent {
-        "エージェント起動中…"
-    } else {
-        "ターミナル起動中…"
-    });
-    let _ = paint_now(term, painter, state);
-    state.finish_loading();
+    // Re-attaching a pane that is already live in the pool is instant — the grid
+    // is already buffered, so the pane paints over the screen in the same beat.
+    // Only a *fresh spawn* (a brand-new pane, or the session's first pane when
+    // none is live yet) blocks while the PTY and agent CLI start up. Flashing the
+    // loading rabbit means painting the whole home frame for one tick; doing that
+    // on a re-attach is the visible flicker when switching sessions (the home
+    // screen blinks between the old pane and the new one), so restrict it to the
+    // spawning case where the wait is real.
+    let will_spawn = new_pane || (!known_live && (wiring.preview)(&dir, state.sidebar()).is_none());
+    if will_spawn {
+        // Spawning the PTY (and launching the agent CLI inside it) blocks for a
+        // beat; flash the loading rabbit in the top-right so the wait reads as
+        // deliberate, until the pane itself paints over the screen.
+        state.step_loading(if agent {
+            "エージェント起動中…"
+        } else {
+            "ターミナル起動中…"
+        });
+        let _ = paint_now(term, painter, state);
+        state.finish_loading();
+    }
     state.show_attached();
     let outcome = (wiring.open_terminal)(state, &dir, agent, new_pane);
     // The pane toggled `crossterm`'s raw mode around itself and ran a full-screen
