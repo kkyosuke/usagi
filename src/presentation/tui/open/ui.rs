@@ -5,10 +5,12 @@ use crate::presentation::tui::welcome;
 use crate::presentation::tui::widgets;
 use crate::usecase::workspace::WorkspaceOverview;
 
-use super::state::ProjectList;
+use super::state::{Mode, ProjectList};
 
 const TITLE: &str = "Open Project";
-const SUBTITLE: &str = "Open a registered workspace";
+const SUBTITLE_SINGLE: &str = "Choose one registered workspace";
+const UNITE_TITLE: &str = "Unite Workspaces";
+const SUBTITLE_UNITE: &str = "Select workspaces to open together";
 
 /// Shown in place of the list when no workspaces are registered.
 const EMPTY_MESSAGE: &str = "No workspaces yet. Choose \"New\" to add one.";
@@ -70,8 +72,11 @@ fn stats_line(block_pad: &str, overview: &WorkspaceOverview, now: DateTime<Utc>)
 ///
 /// Vertical placement is handled by [`render_frame`], so this adds no leading
 /// padding.
-fn header_lines(width: usize) -> Vec<String> {
-    widgets::header_lines(width, TITLE, Some(SUBTITLE))
+fn header_lines(width: usize, mode: Mode) -> Vec<String> {
+    match mode {
+        Mode::Single => widgets::header_lines(width, TITLE, Some(SUBTITLE_SINGLE)),
+        Mode::Unite => widgets::header_lines(width, UNITE_TITLE, Some(SUBTITLE_UNITE)),
+    }
 }
 
 /// Shortens `text` to at most `max` columns, keeping the tail and prefixing an
@@ -93,8 +98,8 @@ fn truncate_start(text: &str, max: usize) -> String {
 const CHECK_ICON: &str = "✓";
 
 /// Builds one project row: a `>` cursor for the selected entry, a unite-mode
-/// check column, the name in a fixed-width column, and the (possibly truncated)
-/// path dimmed beside it.
+/// check column (only when the explicit unite screen is active), the name in a
+/// fixed-width column, and the (possibly truncated) path dimmed beside it.
 fn project_row(
     block_pad: &str,
     name: &str,
@@ -102,15 +107,22 @@ fn project_row(
     path: &str,
     selected: bool,
     checked: bool,
+    show_check: bool,
 ) -> String {
     let marker = widgets::cursor_marker(selected);
 
-    // The unite-mode check column: a green check when the entry is selected for
-    // 統合, a blank otherwise. Always one column wide, so names stay aligned.
-    let check = if checked {
-        style(CHECK_ICON).green().bold().to_string()
+    // The unite-mode check column only appears inside the explicit multi-select
+    // screen. In the default single-open picker it disappears entirely, keeping
+    // that UI visually separate from batch opening.
+    let check_prefix = if show_check {
+        let check = if checked {
+            style(CHECK_ICON).green().bold().to_string()
+        } else {
+            " ".to_string()
+        };
+        format!(" {check}")
     } else {
-        " ".to_string()
+        String::new()
     };
 
     let padded = format!("{name:<name_width$}");
@@ -120,12 +132,13 @@ fn project_row(
         style(padded).cyan().to_string()
     };
 
-    // "> " + check column + " " + name column + "  " precede the path; cap the
-    // path to the block.
-    let path_budget = widgets::BLOCK_WIDTH.saturating_sub(2 + 2 + name_width + 2);
+    // "> " plus the optional check column and the padded name precede the path;
+    // cap the path to the block.
+    let prefix_width = 2 + if show_check { 2 } else { 0 } + name_width + 2;
+    let path_budget = widgets::BLOCK_WIDTH.saturating_sub(prefix_width);
     let path = style(truncate_start(path, path_budget)).dim().to_string();
 
-    format!("{block_pad}{marker} {check} {name}  {path}")
+    format!("{block_pad}{marker}{check_prefix} {name}  {path}")
 }
 
 /// Builds the list body: two rows per workspace — a name/path row and a dimmed
@@ -148,6 +161,7 @@ fn list_lines(
         .unwrap_or(0);
 
     let mut lines = Vec::with_capacity(list.overviews().len() * 2);
+    let show_check = list.mode() == Mode::Unite;
     for (i, overview) in list.overviews().iter().enumerate() {
         lines.push(project_row(
             block_pad,
@@ -156,6 +170,7 @@ fn list_lines(
             &overview.workspace.path.to_string_lossy(),
             i == list.selected_index(),
             list.is_checked(i),
+            show_check,
         ));
         lines.push(stats_line(block_pad, overview, now));
     }
@@ -177,11 +192,12 @@ fn notice_lines(block_pad: &str, notice: Option<&str>) -> Vec<String> {
 /// Builds the footer help line.
 ///
 /// Returns the footer text only; [`render_frame`] pins it to the bottom edge.
-fn footer_lines(width: usize) -> Vec<String> {
-    vec![widgets::dim_line(
-        width,
-        "↑↓: move / Space: select / Enter: open / Esc: back",
-    )]
+fn footer_lines(width: usize, mode: Mode) -> Vec<String> {
+    let help = match mode {
+        Mode::Single => "↑↓: move / Enter: open / Space,u: unite / Esc: back",
+        Mode::Unite => "↑↓: move / Space: toggle / Enter: open checked / Esc: single / q: back",
+    };
+    vec![widgets::dim_line(width, help)]
 }
 
 /// Builds the body block — mascot, title, list, and notice slot — that
@@ -195,7 +211,7 @@ fn body_lines(
     notice: Option<&str>,
     now: DateTime<Utc>,
 ) -> Vec<String> {
-    let mut body = header_lines(width);
+    let mut body = header_lines(width, list.mode());
     body.push(String::new());
     body.extend(list_lines(width, block_pad, list, now));
     body.extend(notice_lines(block_pad, notice));
@@ -220,7 +236,7 @@ pub fn mascot_top(
     let (height, width) = widgets::normalize_size(raw_height, raw_width);
     let block_pad = " ".repeat(widgets::centered_padding(width, widgets::BLOCK_WIDTH));
     let body = body_lines(width, &block_pad, list, notice, now);
-    let footer = footer_lines(width);
+    let footer = footer_lines(width, list.mode());
     // Anchor to the shared mascot row, but never so low that the body overflows
     // the footer on a short terminal.
     let available = height.saturating_sub(body.len() + footer.len());
@@ -242,7 +258,7 @@ pub fn render_frame(
     // The body (mascot, title, list and notice slot) hangs from the shared mascot
     // row; the footer is pinned to the bottom edge of the frame.
     let body = body_lines(width, &block_pad, list, notice, now);
-    let footer = footer_lines(width);
+    let footer = footer_lines(width, list.mode());
 
     let mut lines = Vec::with_capacity(height);
 
@@ -319,11 +335,19 @@ mod tests {
 
     #[test]
     fn header_lines_render_mascot_title_and_subtitle() {
-        let lines = header_lines(80);
+        let lines = header_lines(80, Mode::Single);
         assert!(!lines[0].is_empty());
         let joined = lines.join("\n");
         assert!(joined.contains("Open Project"));
-        assert!(joined.contains("Open a registered workspace"));
+        assert!(joined.contains("Choose one registered workspace"));
+    }
+
+    #[test]
+    fn header_lines_switch_for_unite_mode() {
+        let lines = header_lines(80, Mode::Unite);
+        let joined = lines.join("\n");
+        assert!(joined.contains("Unite Workspaces"));
+        assert!(joined.contains("Select workspaces to open together"));
     }
 
     #[test]
@@ -344,37 +368,62 @@ mod tests {
 
     #[test]
     fn project_row_marks_only_the_selected_entry() {
-        let selected = project_row("", "alpha", 5, "/p/alpha", true, false);
+        let selected = project_row("", "alpha", 5, "/p/alpha", true, false, false);
         assert!(selected.contains('>'));
         assert!(selected.contains("alpha"));
-        let unselected = project_row("", "beta", 5, "/p/beta", false, false);
+        let unselected = project_row("", "beta", 5, "/p/beta", false, false, false);
         assert!(!unselected.contains('>'));
         assert!(unselected.contains("beta"));
     }
 
     #[test]
     fn project_row_shows_a_check_only_when_selected_for_unite() {
-        let checked = project_row("", "alpha", 5, "/p/alpha", false, true);
+        let checked = project_row("", "alpha", 5, "/p/alpha", false, true, true);
         assert!(checked.contains(CHECK_ICON));
-        let unchecked = project_row("", "beta", 5, "/p/beta", false, false);
+        let unchecked = project_row("", "beta", 5, "/p/beta", false, false, true);
         assert!(!unchecked.contains(CHECK_ICON));
     }
 
     #[test]
-    fn footer_mentions_the_space_select_chord() {
-        let lines = footer_lines(80);
+    fn project_row_hides_the_check_column_in_single_mode() {
+        let checked = project_row("", "alpha", 5, "/p/alpha", false, true, false);
+        assert!(!checked.contains(CHECK_ICON));
+    }
+
+    #[test]
+    fn footer_mentions_the_space_unite_chord_in_single_mode() {
+        let lines = footer_lines(80, Mode::Single);
         assert!(lines.iter().any(|l| l.contains("Space")));
+        assert!(lines.iter().any(|l| l.contains("unite")));
+    }
+
+    #[test]
+    fn footer_switches_for_unite_mode() {
+        let lines = footer_lines(80, Mode::Unite);
+        let joined = lines.join("\n");
+        assert!(joined.contains("toggle"));
+        assert!(joined.contains("open checked"));
+        assert!(joined.contains("single"));
     }
 
     #[test]
     fn list_lines_render_the_check_for_a_checked_entry() {
         let mut list = list_with(&["alpha", "beta"]);
+        list.enter_unite();
         list.move_down();
         list.toggle_checked(); // check "beta"
         let lines = list_lines(80, "", &list, now());
         // "beta" is the second workspace, so its name row is index 2.
         assert!(lines[2].contains(CHECK_ICON));
-        assert!(!lines[0].contains(CHECK_ICON)); // "alpha" unchecked
+        assert!(lines[0].contains(CHECK_ICON)); // "alpha" was seeded on enter
+    }
+
+    #[test]
+    fn list_lines_hide_checks_in_single_mode() {
+        let mut list = list_with(&["alpha"]);
+        list.toggle_checked();
+        let lines = list_lines(80, "", &list, now());
+        assert!(!lines[0].contains(CHECK_ICON));
     }
 
     #[test]
@@ -416,7 +465,7 @@ mod tests {
 
     #[test]
     fn footer_lines_include_help_text() {
-        let lines = footer_lines(80);
+        let lines = footer_lines(80, Mode::Single);
         assert!(lines.iter().any(|l| l.contains("Esc")));
     }
 

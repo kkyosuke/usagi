@@ -35,9 +35,11 @@ pub fn run(term: &Term) -> Result<Outcome> {
             Some(format!("Failed to load projects: {e}")),
         ),
     };
-    // Pre-check the workspaces from the last 統合(unite) open, so re-opening the
-    // same union is one `Enter` away. Names no longer registered are ignored.
-    list.preselect(&crate::infrastructure::unite_store::load());
+    // Remember the workspaces from the last 統合(unite) open, but keep the
+    // default screen a plain single-workspace picker. The remembered set is only
+    // applied when the user explicitly enters unite mode, so a normal `Enter`
+    // always opens the cursor row alone.
+    list.remember(crate::infrastructure::unite_store::load());
     let mut reader = TermKeyReader::new(term.clone());
     // Whether a workspace's directory still exists, and how to drop a stale entry
     // when the user confirms — injected so the event loop stays testable.
@@ -67,9 +69,13 @@ pub fn run(term: &Term) -> Result<Outcome> {
                     let _ = workspace::touch(&storage, &ws.name);
                 }
             }
-            // Remember this selection so the next Open pre-checks the same union.
-            let names: Vec<String> = wss.iter().map(|w| w.name.clone()).collect();
-            let _ = crate::infrastructure::unite_store::save(&names);
+            // Remember only real unite selections. Single opens must not replace
+            // the last batch, otherwise the next unite screen would be seeded
+            // with an accidental singleton.
+            if wss.len() > 1 {
+                let names: Vec<String> = wss.iter().map(|w| w.name.clone()).collect();
+                let _ = crate::infrastructure::unite_store::save(&names);
+            }
             // Start loading the primary workspace (state.json / issues / settings /
             // agent probe / history) on a background thread, then play the mascot
             // animation on this thread while it runs. By the time the rabbit lands at
