@@ -126,7 +126,7 @@ impl ProjectList {
         self.selected_index = self
             .selected_index
             .checked_sub(1)
-            .unwrap_or(self.overviews.len() - 1);
+            .unwrap_or(self.overviews.len().saturating_sub(1));
     }
 
     /// Move the cursor down one row, wrapping to the top. No-op when empty.

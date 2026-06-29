@@ -123,18 +123,62 @@ fn selected_workspace_root_and_note_follow_the_cursor_group() {
 #[test]
 fn workspace_root_for_session_finds_the_owning_group() {
     let state = united_state();
+    // Unqualified: the first workspace (primary, then extras) owning the name.
     assert_eq!(
-        state.workspace_root_for_session("main"),
+        state.workspace_root_for_session(None, "main"),
         PathBuf::from("/usagi")
     );
     assert_eq!(
-        state.workspace_root_for_session("b1"),
+        state.workspace_root_for_session(None, "b1"),
         PathBuf::from("/wsB")
     );
     // An unknown session falls back to the primary workspace.
     assert_eq!(
-        state.workspace_root_for_session("ghost"),
+        state.workspace_root_for_session(None, "ghost"),
         PathBuf::from("/usagi")
+    );
+}
+
+#[test]
+fn workspace_root_for_session_honours_the_workspace_qualifier() {
+    let state = united_state();
+    // A `workspace:` qualifier targets that workspace's root directly: the
+    // primary by its name...
+    assert_eq!(
+        state.workspace_root_for_session(Some("usagi"), "main"),
+        PathBuf::from("/usagi")
+    );
+    // ...and an extra group by its name.
+    assert_eq!(
+        state.workspace_root_for_session(Some("wsB"), "b1"),
+        PathBuf::from("/wsB")
+    );
+    // The qualifier wins even when the name only exists elsewhere, so the
+    // removal acts on (and reports against) the named workspace.
+    assert_eq!(
+        state.workspace_root_for_session(Some("wsB"), "main"),
+        PathBuf::from("/wsB")
+    );
+    // An unknown qualifier falls through to name-only resolution.
+    assert_eq!(
+        state.workspace_root_for_session(Some("ghost"), "b1"),
+        PathBuf::from("/wsB")
+    );
+}
+
+#[test]
+fn removable_session_names_qualify_in_unite_mode() {
+    // Single-workspace mode offers plain session names.
+    let mut state = HomeState::new("usagi", Vec::new(), None);
+    state.set_root_path("/usagi");
+    state.restore_sessions(vec![session("main")]);
+    assert_eq!(state.removable_session_names(), vec!["main".to_string()]);
+
+    // 統合(unite) mode qualifies every session as `workspace:session`.
+    let state = united_state();
+    assert_eq!(
+        state.removable_session_names(),
+        vec!["usagi:main".to_string(), "wsB:b1".to_string()]
     );
 }
 
@@ -147,6 +191,7 @@ fn a_session_op_targets_the_recorded_group_then_clears() {
     state.apply_task_completion(
         LogLine::output("created"),
         Some(vec![session("b1"), session("b2")]),
+        None,
     );
     assert_eq!(state.list().groups()[1].worktrees().len(), 2); // wsB: b1, b2
     assert_eq!(state.list().groups()[0].worktrees().len(), 1); // primary: main
@@ -154,10 +199,35 @@ fn a_session_op_targets_the_recorded_group_then_clears() {
     // With no target recorded (or the primary's root), a completion routes to the
     // primary workspace.
     state.set_op_target(PathBuf::from("/usagi"));
-    state.apply_task_completion(LogLine::output("created"), Some(vec![session("main2")]));
+    state.apply_task_completion(
+        LogLine::output("created"),
+        Some(vec![session("main2")]),
+        None,
+    );
     assert_eq!(state.list().groups()[0].worktrees().len(), 1);
     assert_eq!(state.sessions().len(), 1);
     assert_eq!(state.sessions()[0].name, "main2");
+}
+
+#[test]
+fn a_background_task_completion_routes_by_its_target_root() {
+    let mut state = united_state();
+    // Even if the transient target currently points at the primary, an explicit
+    // background completion root routes the refreshed sessions to the matching
+    // unite group. This matters when bulk removals across workspaces finish out
+    // of dispatch order.
+    state.set_op_target(PathBuf::from("/usagi"));
+    state.apply_task_completion(
+        LogLine::output("removed"),
+        Some(vec![session("b2")]),
+        Some(Path::new("/wsB")),
+    );
+    assert_eq!(state.list().groups()[1].worktrees().len(), 1);
+    assert_eq!(
+        state.list().groups()[1].worktrees()[0].branch.as_deref(),
+        Some("b2")
+    );
+    assert_eq!(state.sessions()[0].name, "main");
 }
 
 #[test]
@@ -205,21 +275,21 @@ fn new_state_starts_in_switch_with_a_hint() {
 }
 
 #[test]
-fn pr_hover_tracks_the_target_and_reports_changes() {
+fn pr_popup_tracks_the_target_and_reports_changes() {
     let mut state = state();
-    // No PR popup by default.
-    assert_eq!(state.pr_hover(), None);
-    // Pointing at a session both records it and reports the change.
-    assert!(state.set_pr_hover(Some(1)));
-    assert_eq!(state.pr_hover(), Some(1));
-    // Re-pointing at the same row is no change (the loop skips the repaint).
-    assert!(!state.set_pr_hover(Some(1)));
-    // Moving to another row, then clearing, each count as changes.
-    assert!(state.set_pr_hover(Some(0)));
-    assert!(state.set_pr_hover(None));
-    assert_eq!(state.pr_hover(), None);
-    // Clearing an already-clear popup is no change.
-    assert!(!state.set_pr_hover(None));
+    // No PR popup pinned by default.
+    assert_eq!(state.pr_popup(), None);
+    // Pinning a session both records it and reports the change.
+    assert!(state.set_pr_popup(Some(1)));
+    assert_eq!(state.pr_popup(), Some(1));
+    // Re-pinning the same session is no change (the loop skips the repaint).
+    assert!(!state.set_pr_popup(Some(1)));
+    // Pinning another session, then closing, each count as changes.
+    assert!(state.set_pr_popup(Some(0)));
+    assert!(state.set_pr_popup(None));
+    assert_eq!(state.pr_popup(), None);
+    // Closing an already-closed popup is no change.
+    assert!(!state.set_pr_popup(None));
 }
 
 #[test]
@@ -503,6 +573,17 @@ fn tab_completes_a_session_name_after_remove() {
     state.complete();
     // The unique session-name prefix fills in.
     assert_eq!(state.input(), "session remove alpha");
+}
+
+#[test]
+fn tab_completes_a_qualified_session_name_after_remove_in_unite_mode() {
+    let mut state = united_state(); // primary "usagi" (main), extra "wsB" (b1)
+    for c in "session remove wsB:".chars() {
+        state.push_char(c);
+    }
+    state.complete();
+    // The lone session under the qualified workspace fills straight in.
+    assert_eq!(state.input(), "session remove wsB:b1");
 }
 
 #[test]

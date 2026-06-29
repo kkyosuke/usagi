@@ -38,13 +38,18 @@ impl Manager {
     }
 
     /// The command that installs `tool` through this manager. System managers
-    /// are prefixed with `sudo`, since installing a package needs root.
+    /// are prefixed with non-interactive `sudo -n`, since installing a package
+    /// needs root but `doctor --fix` must not hang a TUI / CI run waiting for a
+    /// password prompt. If sudo cannot run without prompting, the command fails
+    /// quickly and the caller shows the manual install hint.
     pub(super) fn install(self, tool: &str) -> InstallCommand {
         match self {
             Manager::Brew => InstallCommand::new("brew", &["install", tool]),
-            Manager::Apt => InstallCommand::new("sudo", &["apt-get", "install", "-y", tool]),
-            Manager::Dnf => InstallCommand::new("sudo", &["dnf", "install", "-y", tool]),
-            Manager::Pacman => InstallCommand::new("sudo", &["pacman", "-S", "--noconfirm", tool]),
+            Manager::Apt => InstallCommand::new("sudo", &["-n", "apt-get", "install", "-y", tool]),
+            Manager::Dnf => InstallCommand::new("sudo", &["-n", "dnf", "install", "-y", tool]),
+            Manager::Pacman => {
+                InstallCommand::new("sudo", &["-n", "pacman", "-S", "--noconfirm", tool])
+            }
         }
     }
 }

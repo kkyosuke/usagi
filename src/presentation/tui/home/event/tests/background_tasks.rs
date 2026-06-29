@@ -103,6 +103,7 @@ fn a_finished_removal_evicts_the_pooled_shell() {
         super::super::super::tasks::Completion {
             line: LogLine::output("Removed session \"feat\" 🧹"),
             sessions: None,
+            target_root: None,
             evict: Some(path.clone()),
             focus: None,
         },

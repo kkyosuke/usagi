@@ -192,6 +192,10 @@ fn live_preview(_: &Path, _: Sidebar) -> Option<TerminalView> {
 
 fn noop_persist(_: &str) {}
 
+/// A no-op browser launcher for the loop fakes: clicking a PR in the popup shells
+/// out for real only in production, so the tests just drop the URL.
+fn noop_open_url(_: &str) {}
+
 fn no_branches() -> Vec<String> {
     Vec::new()
 }
@@ -723,6 +727,7 @@ fn run_with_tasks(
     let mut reorder_fake: fn(&str, bool) -> SessionReorder = noop_reorder;
     let mut save_resume = |_: &str, _: ResumeLevel| {};
     let mut save_last_active = |_: &[(String, DateTime<Utc>)]| {};
+    let mut open_url: fn(&str) = noop_open_url;
     let mut dispatch_update = || {};
     // The unite target root is irrelevant to this single-workspace fake, so wrap
     // the caller's removal hook to the production 3-arg shape, dropping the root.
@@ -741,6 +746,7 @@ fn run_with_tasks(
         evict_pool: &mut evict_pool,
         existing_branches: &mut branches,
         open_terminal: &mut open,
+        open_url: &mut open_url,
         open_config: &mut config,
         preview: &mut preview,
         tab_op: &mut tab_op,
@@ -785,6 +791,7 @@ fn run_with_live_session(reader: &mut dyn KeyReader) -> Result<Outcome> {
     let mut reorder_fake: fn(&str, bool) -> SessionReorder = noop_reorder;
     let mut save_resume = |_: &str, _: ResumeLevel| {};
     let mut save_last_active = |_: &[(String, DateTime<Utc>)]| {};
+    let mut open_url: fn(&str) = noop_open_url;
     let mut dispatch_update = || {};
     let mut unite_resolve: fn(&str) -> std::result::Result<GroupSource, String> = no_unite_resolve;
     let mut wiring = Wiring {
@@ -800,6 +807,7 @@ fn run_with_live_session(reader: &mut dyn KeyReader) -> Result<Outcome> {
         evict_pool: &mut evict,
         existing_branches: &mut branches,
         open_terminal: &mut open,
+        open_url: &mut open_url,
         open_config: &mut config,
         preview: &mut preview,
         tab_op: &mut tab_op,
@@ -933,6 +941,7 @@ fn unite_add_and_remove_run_through_the_palette() {
     let mut close: fn(&mut HomeState, &Path) = noop_close;
     let mut save_resume = |_: &str, _: ResumeLevel| {};
     let mut save_last_active = |_: &[(String, DateTime<Utc>)]| {};
+    let mut open_url: fn(&str) = noop_open_url;
     let mut dispatch_update = || {};
     let mut wiring = Wiring {
         workspace_root: Path::new("/ws"),
@@ -947,6 +956,7 @@ fn unite_add_and_remove_run_through_the_palette() {
         evict_pool: &mut evict,
         existing_branches: &mut branches,
         open_terminal: &mut open,
+        open_url: &mut open_url,
         open_config: &mut config,
         preview: &mut preview,
         tab_op: &mut tab_op,
@@ -1006,10 +1016,10 @@ mod config_switch;
 mod ctrl_caret;
 mod focus_menu;
 mod focus_prompt;
-mod hover;
 mod mascot_click;
 mod notes;
 mod palette;
+mod pr_popup;
 mod quit_modal;
 mod session_lifecycle;
 mod startup;

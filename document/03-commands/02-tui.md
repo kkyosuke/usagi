@@ -20,7 +20,7 @@
 
 ワークスペース全体のコマンドは、切替（Switch）・在席（Focus）から `:`（コロン）で開く**コマンドパレット**（中央オーバーレイ）で実行します。
 入力欄に応じた候補・ヒント（コマンド一覧の絞り込み、または引数入力中の `usage` / `examples`）が
-表示され、`Tab` でキャレット位置の語（コマンド名／引数のサブコマンド・オプション・既存のセッション名）を補完、`↑↓` で履歴を遡れます。`session switch`・`session remove` の `<name>` 位置では現在のセッション名が補完候補になります。フッターに現在のスコープ（`[palette]` / `[session: <名前>]`）が出ます。
+表示され、`Tab` でキャレット位置の語（コマンド名／引数のサブコマンド・オプション・既存のセッション名）を補完、`↑↓` で履歴を遡れます。`session switch`・`session remove` の `<name>` 位置では現在のセッション名が補完候補になります（統合（unite）モードの `session remove` では `workspace:session` 形式の修飾名が候補になり、`workspace:` まで打って `Tab` でそのワークスペースのセッションに絞り込めます）。フッターに現在のスコープ（`[palette]` / `[session: <名前>]`）が出ます。
 モード遷移・キー操作の詳細は [design/home/01-modes.md](../design/home/01-modes.md#コマンドスコープ) を参照してください。
 
 ## コマンド一覧
@@ -52,7 +52,7 @@
 | `session create <name>` | `.usagi/sessions/<name>/` 配下に再帰的に worktree を構築してセッションを作成。名前を省くと[切替](../design/home/02-layout.md#切替switch既定)の左ペイン内インライン入力で作成 |
 | `session list` | セッション一覧（件数 + 各セッション名 + worktree 数）をテキストモーダルに表示 |
 | `session switch <name>` | アクティブセッションを切り替えて**在席**へ。`switch root` でルート行へ。引数なしで[切替](../design/home/02-layout.md#切替switch既定)モードを開く |
-| `session remove <name> [--force]` | セッションの worktree・ブランチ・コピーに加え、その worktree の会話履歴（Claude の transcript / Codex の rollout / Gemini の chats）と Agent phase も削除。未コミット変更があれば警告し `--force` で破棄。名前を省くと一覧モーダルを開き、`Space` で選択して `Enter` で一括削除 |
+| `session remove <name> [--force]` | セッションの worktree・ブランチ・コピーに加え、その worktree の会話履歴（Claude の transcript / Codex の rollout / Gemini の chats）と Agent phase も削除。未コミット変更があれば警告し `--force` で破棄。名前を省くと一覧モーダルを開き、`Space` で選択して `Enter` で一括削除。統合（unite）モードでは名前を `workspace:session`（コロン区切り・空白なし）で修飾して、ワークスペース間で重複する名前を一意に指定できる（無修飾の名前は表示中のワークスペースを先頭から探して最初に一致したものを対象にする）。一覧モーダルは表示中の全ワークスペースのセッションを `workspace: session` 形式で並べる |
 
 セッション作成・削除時の孤児ディレクトリの掃除など、ライフサイクルの概念は
 [4. オーケストレーション](../04-orchestration.md)を参照してください。

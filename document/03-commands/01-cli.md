@@ -30,7 +30,7 @@
 | `usagi config` | 現在のグローバル設定（`settings.json`）を一覧表示する（[5. 設定](../05-settings.md)） |
 | `usagi config --edit` | グローバル設定ファイルを `$EDITOR` で開いて編集し、保存時に形式（JSON / 必須 `version` / 型）を検証する。不正な場合は直前の内容に巻き戻す |
 | `usagi doctor` | `git` / `bash` と各 Agent CLI（Claude / Codex / sakana.ai / Gemini）の導入状況、デスクトップ通知の可否、Nerd Font の有無、設定ストレージの健全性を確認する（ローカル LLM 有効時は `ollama`・モデルも）。インストール可能な不足（必須ツール・Nerd Font）があれば `[y/N]` で確認し、`y` で導入する |
-| `usagi doctor --fix` | 確認を省いて不足を一括導入する。不足ツールを OS のパッケージマネージャ（brew / apt-get / dnf / pacman）で導入を試行し、修復不可なら手動手順を提示する。Nerd Font が無ければ `curl`/`unzip` でダウンロードして導入する。ローカル LLM が有効なら `ollama`・サーバ起動・モデルも導入する |
+| `usagi doctor --fix` | 確認を省いて不足を一括導入する。不足ツールを OS のパッケージマネージャ（brew / apt-get / dnf / pacman）で導入を試行し、Linux のシステムパッケージは `sudo -n` で非対話に失敗させてパスワード待ちで固まらないようにする。修復不可なら手動手順を提示する。Nerd Font が無ければ `curl`/`unzip` でダウンロードして導入する。ローカル LLM が有効なら `ollama`・サーバ起動・モデルも導入する |
 | `usagi issue <create\|list\|graph\|show\|update\|search\|delete>` | （ヘルプ非表示・エージェント向け）カレントリポジトリのタスク issue（`.usagi/issues/`）を操作する（[data/02-workspace.md](../data/02-workspace.md#issues-タスク-issue)） |
 | `usagi memory <save\|list\|show\|update\|search\|delete>` | （ヘルプ非表示・エージェント向け）カレントリポジトリのエージェントのメモリ（`.usagi/memory/`）を操作する（[data/04-memory.md](../data/04-memory.md)） |
 | `usagi mcp` | （ヘルプ非表示・エージェント向け）issue・メモリ・セッションの操作を MCP（Model Context Protocol）サーバとして stdio で公開し、AI エージェントから使えるようにする |

@@ -187,7 +187,9 @@ impl Command for QuitCommand {
 ///   marks the active one.
 /// - `session remove <name> [--force]` removes a session; `session remove` with
 ///   no name returns [`Effect::OpenRemoveModal`] so the screen can show a
-///   checklist of sessions to delete in one go.
+///   checklist of sessions to delete in one go. In 統合(unite) mode the name may
+///   be qualified as `workspace:session` to pick a session that shares a name
+///   across workspaces.
 pub(super) struct SessionCommand;
 
 impl Command for SessionCommand {
@@ -200,7 +202,7 @@ impl Command for SessionCommand {
     }
 
     fn usage(&self) -> &'static str {
-        "session [create|list|switch|remove] <name>  (aliases: create=c/new, list=ls, remove=rm)"
+        "session [create|list|switch|remove] <name>  (remove in unite: workspace:name; aliases: create=c/new, list=ls, remove=rm)"
     }
 
     fn examples(&self) -> &'static [&'static str] {
@@ -209,6 +211,7 @@ impl Command for SessionCommand {
             "session switch feature-x",
             "session ls",
             "session rm feature-x",
+            "session rm app:feature-x  (unite: pick app's session)",
         ]
     }
 
@@ -253,11 +256,20 @@ impl Command for SessionCommand {
                     }
                 }
                 match target {
-                    // A name removes that session directly.
-                    Some(name) => CommandResult {
-                        lines: Vec::new(),
-                        effect: Effect::RemoveSession { name, force },
-                    },
+                    // A name removes that session directly. In 統合(unite) mode it
+                    // may be qualified as `workspace:session` to disambiguate a
+                    // shared name; the event loop resolves the owning workspace.
+                    Some(token) => {
+                        let (workspace, name) = split_workspace_qualifier(&token);
+                        CommandResult {
+                            lines: Vec::new(),
+                            effect: Effect::RemoveSession {
+                                workspace,
+                                name,
+                                force,
+                            },
+                        }
+                    }
                     // No name: open the picker to remove one or more at once.
                     None => CommandResult {
                         lines: Vec::new(),
@@ -288,13 +300,18 @@ impl Command for SessionCommand {
             // `session switch <name>` completes the session name; once one is
             // chosen there is nothing more to complete.
             Some("switch") if !name_chosen() => session_names().collect(),
-            // `session remove <name> [--force]`: offer the session names (until
-            // one is chosen) alongside the optional --force flag.
+            // `session remove [workspace:]<name> [--force]`: offer the removable
+            // session names (until one is chosen) alongside the optional --force
+            // flag. In 統合(unite) mode the names are qualified as
+            // `workspace:session` so the disambiguating prefix completes.
             Some("remove") => {
                 let mut candidates: Vec<String> = if name_chosen() {
                     Vec::new()
                 } else {
-                    session_names().collect()
+                    ctx.removable_sessions
+                        .iter()
+                        .map(|n| n.to_string())
+                        .collect()
                 };
                 candidates.push("--force".to_string());
                 candidates
@@ -368,6 +385,20 @@ impl Command for UniteCommand {
 /// Normalize a `session` subcommand alias to its canonical spelling (`c`/`new`
 /// → `create`, `ls` → `list`, `rm` → `remove`), passing anything else through.
 /// Shared by dispatch and completion so both honour the same aliases.
+/// Split a `session remove` target into an optional `workspace:` qualifier and
+/// the bare session name. In 統合(unite) mode the user disambiguates a session
+/// that shares a name across workspaces by prefixing its workspace
+/// (`workspace:session`); a token without a `:` (or with an empty side) is taken
+/// whole as the session name.
+fn split_workspace_qualifier(token: &str) -> (Option<String>, String) {
+    match token.split_once(':') {
+        Some((workspace, name)) if !workspace.is_empty() && !name.is_empty() => {
+            (Some(workspace.to_string()), name.to_string())
+        }
+        _ => (None, token.to_string()),
+    }
+}
+
 fn session_subcommand(sub: &str) -> &str {
     match sub {
         "create" | "c" | "new" => "create",

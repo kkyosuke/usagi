@@ -158,7 +158,6 @@ pub fn run(
     state: &mut HomeState,
     pty: &mut PtySession,
     monitor: &MonitorHandle,
-    clear: bool,
 ) -> Result<PaneStep> {
     // Raw mode, bracketed paste, and motion reporting are entered here and
     // restored by the guard's `Drop` — including when `drive` panics and unwinds,
@@ -168,14 +167,11 @@ pub fn run(
     // render/input loop would leave the user's shell in raw mode with bracketed
     // paste and motion reporting still on.
     let _modes = PaneModeGuard::enter(term)?;
-    // Blank the surface before driving so the previous pane's grid does not bleed
-    // through, but only when this is a fresh pane — the first entry or a real tab
-    // switch. A tab nav that lands on the pane already showing (a lone pane, or a
-    // jump to the current tab) re-enters here unchanged; clearing then would blank
-    // and fully repaint identical content, a visible one-frame flicker.
-    if clear {
-        let _ = term.clear_screen();
-    }
+    // Do not clear the screen here. The first pane repaint starts with an empty
+    // diff base, so [`diff_frame`] already emits "clear + all rows" as one batched
+    // terminal write. A separate `clear_screen()` would flush an all-blank frame
+    // just before the real frame and is visible as a one-frame flicker when
+    // switching sessions or tabs.
     drive(term, state, pty, monitor)
 }
 
@@ -269,6 +265,9 @@ fn drive(
     let mut applied_scrollback: Option<usize> = None;
     let mut last_selection: Option<Selection> = None;
     let mut last_hover: Option<Cell> = None;
+    // The pinned PR popup last drawn, so opening / closing it (or moving it to
+    // another session) repaints the floating box over the live pane just once.
+    let mut last_pr_popup: Option<usize> = None;
     let mut drawn_gen = pty.generation();
     // When the last repaint landed, so a flood of output-only frames coalesces to
     // at most one per [`MIN_FRAME`]; `None` until the first paint, which never
@@ -352,6 +351,11 @@ fn drive(
         // The pointer moved onto / off a different cell: repaint so the hovered
         // link's highlight follows it.
         if last_hover != hover {
+            interactive = true;
+        }
+        // The pinned PR popup opened, closed, or moved to another session: repaint
+        // so the floating box appears / clears / relocates over the live pane.
+        if last_pr_popup != state.pr_popup() {
             interactive = true;
         }
         // The sidebar's running / waiting / live-agent / finished markers, read
@@ -439,6 +443,7 @@ fn drive(
             last_shape = Some(shape);
             last_selection = selection;
             last_hover = hover;
+            last_pr_popup = state.pr_popup();
             last_prefix_pending = Some(prefix_pending);
             last_paint = Some(now);
             first = false;
@@ -565,6 +570,10 @@ fn pump_input(
                 if !is_press(key) {
                     continue;
                 }
+                // A keypress dismisses a pinned PR popup (so `Esc` — or typing —
+                // closes it), the same as on the home screen; the keystroke still
+                // drives the shell below. The drive loop repaints on the change.
+                state.set_pr_popup(None);
                 // Whether a leader is genuinely still pending: set, and pressed
                 // within `PREFIX_TIMEOUT`. A lapsed leader counts as none, so this
                 // key starts a fresh sequence instead of completing a stale one.
@@ -674,13 +683,20 @@ fn pump_input(
                     // `Ctrl-N` / `Ctrl-P`; otherwise it starts a fresh selection at
                     // the clicked cell (clearing any existing one when outside the pane).
                     MouseEventKind::Down(MouseButton::Left) => {
-                        if let Some(tab) = ui::attached_tab_at(state, mouse.column, mouse.row, geo)
-                        {
-                            *scrollback = 0;
-                            *selection = None;
-                            return Ok(Some(PaneStep::ToTab(tab)));
+                        // A pinned PR popup owns the whole click: swallow the press
+                        // (no tab switch, no selection) so its button release resolves
+                        // the popup cleanly.
+                        if state.pr_popup().is_none() {
+                            if let Some(tab) =
+                                ui::attached_tab_at(state, mouse.column, mouse.row, geo)
+                            {
+                                *scrollback = 0;
+                                *selection = None;
+                                return Ok(Some(PaneStep::ToTab(tab)));
+                            }
+                            *selection =
+                                pane_cell(mouse.column, mouse.row, geo).map(Selection::new);
                         }
-                        *selection = pane_cell(mouse.column, mouse.row, geo).map(Selection::new);
                     }
                     // Dragging the left button stretches the selection's loose end.
                     MouseEventKind::Drag(MouseButton::Left) => {
@@ -691,33 +707,52 @@ fn pump_input(
                         }
                     }
                     // Releasing after a drag copies the selection; a plain click
-                    // (no drag) opens a link under it in the default browser
-                    // instead — a `#<number>` PR badge on a sidebar session row, or a
-                    // URL in the terminal.
+                    // (no drag) drives the pinned PR popup if one is open, else opens
+                    // a link under it in the default browser — a `#<number>` PR badge
+                    // on a sidebar session row pins its popup, or a URL in the
+                    // terminal opens.
                     MouseEventKind::Up(MouseButton::Left) => {
                         let dragged = selection.as_ref().is_some_and(|s| !s.is_empty());
                         let (h, w) = term.size();
-                        // A plain click on a sidebar session row's PR badge opens
-                        // every PR the session carries, reusing the same
-                        // browser-launch path as a terminal link. A click elsewhere
-                        // on the row maps to nothing here.
-                        let prs = if dragged {
-                            Vec::new()
-                        } else {
-                            ui::sidebar_pr_links_at(
+                        // A pinned PR popup owns a plain click: a `#<number>` opens
+                        // that PR, a click elsewhere in the box keeps it pinned, and a
+                        // click outside dismisses it.
+                        if !dragged && state.pr_popup().is_some() {
+                            match ui::pr_popup_click(
                                 state,
                                 h as usize,
                                 w as usize,
                                 mouse.column,
                                 mouse.row,
-                            )
-                        };
+                            ) {
+                                ui::PopupClick::Open(url) => open_url(&url),
+                                ui::PopupClick::Inside => {}
+                                ui::PopupClick::Outside => {
+                                    state.set_pr_popup(None);
+                                }
+                            }
+                            *selection = None;
+                            continue;
+                        }
+                        // No popup open: a plain click on a session's PR badge pins
+                        // its popup (so the pointer can travel in to click a number).
+                        let badge = (!dragged)
+                            .then(|| {
+                                ui::sidebar_pr_badge_at(
+                                    state,
+                                    h as usize,
+                                    w as usize,
+                                    mouse.column,
+                                    mouse.row,
+                                )
+                            })
+                            .flatten();
                         // Otherwise a plain click on a sidebar session row arms a
                         // double click; a second click on the same row within
                         // `DOUBLE_CLICK` switches to that session (attaching when
                         // live) — the confirm 切替 does, so the list is navigable
                         // without first zooming out. A single click only arms.
-                        let session = (prs.is_empty() && !dragged)
+                        let session = (badge.is_none() && !dragged)
                             .then(|| {
                                 ui::left_pane_session_at(
                                     state,
@@ -728,10 +763,8 @@ fn pump_input(
                                 )
                             })
                             .flatten();
-                        if !prs.is_empty() {
-                            for url in &prs {
-                                open_url(url);
-                            }
+                        if let Some(idx) = badge {
+                            state.set_pr_popup(Some(idx));
                             *selection = None;
                         } else if let Some(row) = session {
                             *selection = None;
@@ -844,12 +877,17 @@ fn update_pointer(
         // Inside the grid only a URL cell is clickable; the parser lock is held
         // just long enough to test the cell under the pointer.
         Some(cell) => link::url_at(pty.parser().screen(), cell).is_some(),
-        // Off the grid, a tab chip or a sidebar PR badge is the clickable target.
+        // Off the grid, a tab chip, a sidebar PR badge, or a `#<number>` in the
+        // pinned PR popup is the clickable target.
         None => {
             let (height, width) = size;
             ui::attached_tab_at(state, col, row, geo).is_some()
-                || !ui::sidebar_pr_links_at(state, height as usize, width as usize, col, row)
-                    .is_empty()
+                || ui::sidebar_pr_badge_at(state, height as usize, width as usize, col, row)
+                    .is_some()
+                || matches!(
+                    ui::pr_popup_click(state, height as usize, width as usize, col, row),
+                    ui::PopupClick::Open(_)
+                )
         }
     };
     let shape = pointer_shape(cell.is_some(), clickable);

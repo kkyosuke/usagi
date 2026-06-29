@@ -79,7 +79,7 @@ Rust (edition 2021) で実装。clap（CLI）/ console + crossterm（TUI）/ por
 
 導入状況は `usagi doctor` で確認できます（git / bash と各 Agent CLI（Claude / Codex / sakana.ai / Gemini）の有無、デスクトップ通知の可否、設定ストレージの健全性、
 ローカル LLM 有効時は ollama とモデルの有無）。`usagi doctor --fix` は OS のパッケージマネージャ
-（brew / apt / dnf / pacman）経由での導入を試行し、自動修復できないものは手動手順を表示します。詳細は
+（brew / apt / dnf / pacman）経由での導入を試行します。Linux のシステムパッケージ導入は `sudo -n` で非対話に失敗させるため、パスワード待ちで固まらず、自動修復できないものは手動手順を表示します。詳細は
 [3. コマンドリファレンス](03-commands/01-cli.md#usagi-doctor) を参照してください。
 
 ## usagi.ai との関係

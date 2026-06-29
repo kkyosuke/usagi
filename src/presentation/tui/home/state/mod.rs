@@ -40,7 +40,9 @@ mod mode;
 
 pub use list::{worktree_name, WorkspaceGroup, WorktreeList, ROOT_NAME};
 pub use log::{LineKind, LogLine};
-pub use modal::{CreateInput, ModalSize, NoteEditor, Preview, RemoveModal, RenameInput, TextModal};
+pub use modal::{
+    CreateInput, ModalSize, NoteEditor, Preview, RemoveEntry, RemoveModal, RenameInput, TextModal,
+};
 pub use mode::{Mode, PaneExit, ResumeLevel, ReturnMode};
 
 use list::session_row;
@@ -300,7 +302,7 @@ impl CommandLine {
             return;
         }
         let index = match self.recall {
-            None => self.history.len() - 1,
+            None => self.history.len().saturating_sub(1),
             Some(0) => 0,
             Some(i) => i - 1,
         };
@@ -405,12 +407,12 @@ pub struct HomeState {
     /// it (it captures the keyboard through [`overlay`](Self::overlay)).
     note_hidden: bool,
     /// The worktree (by index in [`list`](Self::list)'s worktrees) whose PR hover
-    /// popup is showing, or `None` when the pointer is not over a PR-bearing
-    /// session's row. Set as the pointer moves over the full sidebar (see the home
-    /// loop's [`Input::Hover`] handling); the renderer floats the session's
-    /// `#<number>` list beside its row. Purely transient — it never persists and is
-    /// cleared the instant the pointer leaves a PR row.
-    pr_hover: Option<usize>,
+    /// popup is pinned open, or `None` when none is. Set by clicking a session's PR
+    /// badge (in any mode, on the full sidebar) and held open across pointer moves —
+    /// unlike a hover tooltip — so the pointer can travel into the box to click a
+    /// `#<number>`; cleared by a click outside it, a keypress, or `Esc`. The
+    /// renderer floats the session's `#<number>` list beside its row.
+    pr_popup: Option<usize>,
     /// The transient overlay that captures the keyboard while open (the 切替
     /// inline create/rename inputs, the text modal, the right-pane preview, the
     /// session-removal checklist, the note editor). One [`Overlay`] rather than a
@@ -644,7 +646,7 @@ impl HomeState {
             agent_choice: None,
             switch_return: ReturnMode::Base,
             note_hidden: false,
-            pr_hover: None,
+            pr_popup: None,
             overlay: Overlay::default(),
             quit_confirm: false,
             update_confirm: false,
@@ -1046,7 +1048,19 @@ impl HomeState {
     /// primary workspace and every extra (unite) group, falling back to the primary
     /// when no group claims it. Used by name-based operations (remove / close) so
     /// they act on the workspace the session actually lives in, not just the cursor's.
-    pub fn workspace_root_for_session(&self, name: &str) -> PathBuf {
+    pub fn workspace_root_for_session(&self, workspace: Option<&str>, name: &str) -> PathBuf {
+        // A `workspace:` qualifier (統合(unite) mode) targets that workspace's
+        // root directly, even when the name is shared across workspaces or absent
+        // there — so the removal acts on, and reports against, the named one. An
+        // unknown qualifier falls through to name-only resolution.
+        if let Some(workspace) = workspace {
+            if workspace == self.list.workspace_name() {
+                return self.root_path.clone();
+            }
+            if let Some(group) = self.extra_groups.iter().find(|g| g.name == workspace) {
+                return group.root_path.clone();
+            }
+        }
         if self.sessions.iter().any(|s| s.name == name) {
             return self.root_path.clone();
         }
@@ -1638,12 +1652,24 @@ impl HomeState {
     /// **keeping the cursor and active row where they are** (via
     /// [`refresh_sessions`](Self::refresh_sessions)) — a session created or
     /// removed in the background must never yank the user's cursor mid-navigation.
-    pub fn apply_task_completion(&mut self, line: LogLine, sessions: Option<Vec<SessionRecord>>) {
+    pub fn apply_task_completion(
+        &mut self,
+        line: LogLine,
+        sessions: Option<Vec<SessionRecord>>,
+        target_root: Option<&Path>,
+    ) {
         self.push_logged_line(line);
+        let target_group = match target_root {
+            Some(root) => {
+                self.op_target = None;
+                self.extra_groups.iter().position(|g| g.root_path == root)
+            }
+            None => None,
+        };
         if let Some(sessions) = sessions {
             // Route the reloaded sessions to the workspace the operation targeted:
             // an extra (unite) group when the cursor was in one, else the primary.
-            match self.take_op_target_group() {
+            match target_group.or_else(|| self.take_op_target_group()) {
                 Some(i) => {
                     self.extra_groups[i].sessions = sessions;
                     self.rebuild_list_keep_cursor();
@@ -2016,19 +2042,19 @@ impl HomeState {
         self.note_hidden = true;
     }
 
-    /// The worktree whose PR hover popup is currently showing (by index in the
-    /// list's worktrees), or `None`. Read by the renderer to float the session's
+    /// The worktree whose PR popup is pinned open (by index in the list's
+    /// worktrees), or `None`. Read by the renderer to float the session's
     /// `#<number>` list beside its row.
-    pub fn pr_hover(&self) -> Option<usize> {
-        self.pr_hover
+    pub fn pr_popup(&self) -> Option<usize> {
+        self.pr_popup
     }
 
-    /// Point the PR hover popup at worktree `target` (or clear it with `None`),
-    /// returning whether the target changed — the home loop repaints only then, so
-    /// a pointer sliding within the same row (or empty space) costs no redraw.
-    pub fn set_pr_hover(&mut self, target: Option<usize>) -> bool {
-        let changed = self.pr_hover != target;
-        self.pr_hover = target;
+    /// Pin the PR popup to worktree `target` (or close it with `None`), returning
+    /// whether the target changed — the loop repaints only then, so re-pinning the
+    /// same session (or a no-op close) costs no redraw.
+    pub fn set_pr_popup(&mut self, target: Option<usize>) -> bool {
+        let changed = self.pr_popup != target;
+        self.pr_popup = target;
         changed
     }
 
@@ -2541,9 +2567,17 @@ impl HomeState {
     /// Tab-complete the command word, listing candidates when ambiguous.
     pub fn complete(&mut self) {
         let session_names: Vec<&str> = self.sessions.iter().map(|s| s.name.as_str()).collect();
-        let completion =
-            self.registry
-                .complete_with(self.cmdline.value(), self.command_scope(), &session_names);
+        // `session remove` completes against qualified `workspace:session` names
+        // in 統合(unite) mode (so a shared name can be disambiguated), and plain
+        // session names otherwise.
+        let removable_owned = self.removable_session_names();
+        let removable: Vec<&str> = removable_owned.iter().map(String::as_str).collect();
+        let completion = self.registry.complete_with(
+            self.cmdline.value(),
+            self.command_scope(),
+            &session_names,
+            &removable,
+        );
         self.cmdline.set_value(completion.input);
         if !completion.candidates.is_empty() {
             self.log
@@ -2704,11 +2738,65 @@ impl HomeState {
         }
     }
 
-    /// Open the session-removal modal, seeded with the current session names and
+    /// Build the session-removal rows in display order. In single-workspace mode
+    /// labels are plain session names; in 統合(unite) mode every visible
+    /// workspace contributes rows labelled as `workspace: session` so duplicate
+    /// session names stay distinguishable and can be removed from their own root.
+    fn remove_entries(&self) -> Vec<RemoveEntry> {
+        let united = self.is_united();
+        let primary_name = self.list.workspace_name();
+        let primary_label = united.then_some(primary_name);
+
+        let mut entries: Vec<RemoveEntry> = self
+            .sessions
+            .iter()
+            .map(|session| {
+                RemoveEntry::new(session.name.clone(), self.root_path.clone(), primary_label)
+            })
+            .collect();
+
+        for group in &self.extra_groups {
+            entries.extend(group.sessions.iter().map(|session| {
+                RemoveEntry::new(
+                    session.name.clone(),
+                    group.root_path.clone(),
+                    united.then_some(group.name.as_str()),
+                )
+            }));
+        }
+
+        entries
+    }
+
+    /// The `<name>` argument completions for `session remove`, in display order.
+    /// In single-workspace mode these are the plain session names; in 統合(unite)
+    /// mode every visible workspace contributes its sessions qualified as
+    /// `workspace:session`, matching the form `session remove` accepts there.
+    fn removable_session_names(&self) -> Vec<String> {
+        if !self.is_united() {
+            return self.sessions.iter().map(|s| s.name.clone()).collect();
+        }
+        let primary = self.list.workspace_name();
+        let mut names: Vec<String> = self
+            .sessions
+            .iter()
+            .map(|s| format!("{primary}:{}", s.name))
+            .collect();
+        for group in &self.extra_groups {
+            names.extend(
+                group
+                    .sessions
+                    .iter()
+                    .map(|s| format!("{}:{}", group.name, s.name)),
+            );
+        }
+        names
+    }
+
+    /// Open the session-removal modal, seeded with the current sessions and
     /// nothing selected. `force` is carried from `session remove --force`.
     pub fn open_remove_modal(&mut self, force: bool) {
-        let names = self.sessions.iter().map(|s| s.name.clone()).collect();
-        self.overlay = Overlay::Remove(RemoveModal::new(names, force));
+        self.overlay = Overlay::Remove(RemoveModal::new(self.remove_entries(), force));
     }
 
     /// Close the removal modal, discarding any selection. Called only while the
@@ -2717,11 +2805,12 @@ impl HomeState {
         self.overlay = Overlay::None;
     }
 
-    /// Confirm the removal modal: close it and return the checked session names
-    /// (in display order) together with the `--force` flag, for the event loop
-    /// to remove each (see [`RemoveModal::confirm`]). Returns `None` when nothing
-    /// is checked, leaving the modal open; also `None` when it is closed.
-    pub fn submit_remove_modal(&mut self) -> Option<(Vec<String>, bool)> {
+    /// Confirm the removal modal: close it and return the checked session
+    /// entries (in display order) together with the `--force` flag, for the
+    /// event loop to remove each (see [`RemoveModal::confirm`]). Returns `None`
+    /// when nothing is checked, leaving the modal open; also `None` when it is
+    /// closed.
+    pub fn submit_remove_modal(&mut self) -> Option<(Vec<RemoveEntry>, bool)> {
         let Overlay::Remove(modal) = &self.overlay else {
             return None;
         };

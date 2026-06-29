@@ -183,18 +183,21 @@ impl CommandRegistry {
     /// extends to the longest common prefix and reports the candidates; no match
     /// leaves the input untouched.
     pub fn complete(&self, input: &str, scope: CommandScope) -> Completion {
-        self.complete_with(input, scope, &[])
+        self.complete_with(input, scope, &[], &[])
     }
 
     /// Like [`complete`](Self::complete) but also supplies the workspace's
-    /// `session_names`, which `session switch`/`remove` complete their `<name>`
-    /// argument against. Kept separate so the many session-agnostic call sites
-    /// (and `man`'s own argument completion) can stay on the shorter `complete`.
+    /// session names: `session_names` for `session switch` and
+    /// `removable_sessions` for `session remove` (the latter qualified as
+    /// `workspace:session` in 統合(unite) mode). Kept separate so the many
+    /// session-agnostic call sites (and `man`'s own argument completion) can stay
+    /// on the shorter `complete`.
     pub fn complete_with(
         &self,
         input: &str,
         scope: CommandScope,
         session_names: &[&str],
+        removable_sessions: &[&str],
     ) -> Completion {
         let Some((word, args)) = input.split_once(char::is_whitespace) else {
             // Still on the command word: complete against the in-scope names.
@@ -222,6 +225,7 @@ impl CommandRegistry {
         let ctx = CompletionContext {
             command_names: &command_names,
             session_names,
+            removable_sessions,
         };
         let candidates = command.complete_args(args, &ctx);
         let (_, partial) = arg_tokens(args);

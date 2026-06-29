@@ -70,7 +70,7 @@ impl Menu {
                 self.selected_index = self
                     .selected_index
                     .checked_sub(1)
-                    .unwrap_or(self.items.len() - 1);
+                    .unwrap_or(self.items.len().saturating_sub(1));
                 self.notice = None;
                 Action::Continue
             }

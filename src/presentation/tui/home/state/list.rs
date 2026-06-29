@@ -263,7 +263,7 @@ impl WorktreeList {
     /// Append another workspace group (unite mode) and return its index.
     pub fn add_group(&mut self, group: WorkspaceGroup) -> usize {
         self.groups.push(group);
-        self.groups.len() - 1
+        self.groups.len().saturating_sub(1)
     }
 
     /// The workspace groups, in display order.
@@ -375,6 +375,13 @@ impl WorktreeList {
     fn worktree_at(&self, row: usize) -> Option<&WorktreeState> {
         let (g, within) = self.locate(row)?;
         self.groups[g].worktrees.get(within?)
+    }
+
+    /// The worktree at a global 0-based index across every group (root rows
+    /// excluded), or `None` when out of range. The PR popup keys off this so it
+    /// can pin a session's badge in any workspace, not just the first group.
+    pub fn worktree_by_global_index(&self, idx: usize) -> Option<&WorktreeState> {
+        self.groups.iter().flat_map(|g| g.worktrees()).nth(idx)
     }
 
     /// The worktree under the cursor, or `None` when the cursor is on a root row.

@@ -32,7 +32,7 @@ use super::update::UpdateHandle;
 
 mod handlers;
 
-use handlers::{focus_key, note_editor_key, palette_key, switch_click, switch_key};
+use handlers::{focus_click, focus_key, note_editor_key, palette_key, switch_click, switch_key};
 
 /// The byte `console` reports for `Ctrl-O` on the home screen: a bare control
 /// character (`0x0f`), since `console` only special-cases a handful of control
@@ -158,6 +158,11 @@ pub(super) struct Wiring<'a> {
     /// Embed a live shell in the right pane (没入) and drive it: the first `bool`
     /// is `agent` vs plain `terminal`, the second `new_pane` vs re-attach.
     pub open_terminal: &'a mut dyn FnMut(&mut HomeState, &Path, bool, bool) -> Result<PaneExit>,
+    /// Open `url` in the platform's default browser — the side effect behind
+    /// clicking a `#<number>` in a session's pinned PR popup. [`super::run`] wires
+    /// the real launcher (the same detached spawn the immersive pane uses); tests
+    /// pass a capture or a no-op so the loop's open path runs without shelling out.
+    pub open_url: &'a mut dyn FnMut(&str),
     /// Open the settings screen, re-reading the affected settings on return
     /// (`None` when the user quit the app from it).
     pub open_config: &'a mut dyn FnMut(&Term) -> Result<Option<ConfigReload>>,
@@ -257,13 +262,15 @@ fn save_resume_focus(state: &mut HomeState, wiring: &mut Wiring) {
     (wiring.save_last_active)(&state.last_active_flush());
 }
 
-/// Whether a left click should act on the 切替 session list: only at the base
-/// Switch list, with no overlay or inline input capturing keys. A click while a
-/// modal / palette / note editor / inline create / rename is open is ignored,
-/// mirroring how those overlays capture every key in the loop below — so a stray
-/// click never reaches the session list beneath them.
+/// Whether a left click should act on the session list: in 切替 (Switch), where it
+/// is the picker, and in 在席 (Focus), where the list still shows beside the action
+/// surface so a click re-focuses onto another session (see [`focus_click`]). Not in
+/// 没入 (Attached) — there the right pane owns the pointer. In either acting mode a
+/// click while a modal / palette / note editor / inline create / rename is open is
+/// ignored, mirroring how those overlays capture every key in the loop below — so a
+/// stray click never reaches the session list beneath them.
 fn click_selects_session(state: &HomeState) -> bool {
-    state.mode() == Mode::Switch
+    matches!(state.mode(), Mode::Switch | Mode::Focus)
         && !state.quit_confirm()
         && state.remove_modal().is_none()
         && state.text_modal().is_none()
@@ -367,13 +374,14 @@ pub(super) fn event_loop(
             let super::tasks::Completion {
                 line,
                 sessions,
+                target_root,
                 evict,
                 focus,
             } = completion;
             if let Some(path) = evict {
                 (wiring.evict_pool)(&path);
             }
-            state.apply_task_completion(line, sessions);
+            state.apply_task_completion(line, sessions, target_root.as_deref());
             // A finished create asks to drop into 在席 (Focus) on its new session.
             // Done after the refresh above so the new branch is in the list to
             // match. Unlike that refresh — which deliberately keeps the cursor put
@@ -517,13 +525,49 @@ pub(super) fn event_loop(
             Input::Key(key) => key,
             // The TUI never scrolls in place: read the wheel turn and drop it.
             Input::Scroll(_) => continue,
-            // A click on a 切替 session row selects it (a second click on the same
-            // row confirms it, like `Enter`); a click on the resting sidebar mascot
-            // makes it react; anywhere else it is ignored. The two hit disjoint
-            // regions, so the session list is tried first and the mascot only when
-            // it misses. No key was pressed either way, so repaint only when the
-            // click actually did something.
+            // A click on a session row in the left pane acts on it: in 切替 (Switch)
+            // it selects the row (a second click on the same row confirms it, like
+            // `Enter`); in 在席 (Focus) it re-focuses onto that session (a second
+            // click attaches its pane when live). A click on the resting sidebar
+            // mascot makes it react; anywhere else it is ignored. The two hit
+            // disjoint regions, so the session list is tried first and the mascot
+            // only when it misses. No key was pressed either way, so repaint only
+            // when the click actually did something.
             Input::Click(click) => {
+                // A pinned PR popup intercepts the click first: a `#<number>` opens
+                // that PR in the browser, a click elsewhere in the box keeps it
+                // pinned, and a click outside dismisses it — consuming the click so
+                // it neither selects a row nor re-pins on the same press.
+                if state.pr_popup().is_some() {
+                    match ui::pr_popup_click(
+                        &state,
+                        height as usize,
+                        width as usize,
+                        click.col,
+                        click.row,
+                    ) {
+                        ui::PopupClick::Open(url) => (wiring.open_url)(&url),
+                        ui::PopupClick::Inside => {}
+                        ui::PopupClick::Outside => {
+                            state.set_pr_popup(None);
+                            force_paint = true;
+                        }
+                    }
+                    continue;
+                }
+                // No popup open: a click on a session's PR badge pins that session's
+                // popup so the pointer can travel into it and click a `#<number>`.
+                if let Some(idx) = ui::sidebar_pr_badge_at(
+                    &state,
+                    height as usize,
+                    width as usize,
+                    click.col,
+                    click.row,
+                ) {
+                    state.set_pr_popup(Some(idx));
+                    force_paint = true;
+                    continue;
+                }
                 let selected = click_selects_session(&state)
                     .then(|| {
                         ui::left_pane_session_at(
@@ -537,15 +581,28 @@ pub(super) fn event_loop(
                     .flatten();
                 match selected {
                     Some(row) => {
-                        switch_click(
-                            term,
-                            &mut state,
-                            &mut painter,
-                            wiring,
-                            row,
-                            Instant::now(),
-                            &mut last_click,
-                        );
+                        let now = Instant::now();
+                        if state.mode() == Mode::Focus {
+                            focus_click(
+                                term,
+                                &mut state,
+                                &mut painter,
+                                wiring,
+                                row,
+                                now,
+                                &mut last_click,
+                            );
+                        } else {
+                            switch_click(
+                                term,
+                                &mut state,
+                                &mut painter,
+                                wiring,
+                                row,
+                                now,
+                                &mut last_click,
+                            );
+                        }
                         force_paint = true;
                     }
                     None => {
@@ -556,34 +613,21 @@ pub(super) fn event_loop(
                 }
                 continue;
             }
-            // A bare pointer move: track which PR-bearing session (if any) it is
-            // over so the renderer floats that session's `#<number>` list. Repaint
-            // only when the target changes — a pointer sliding within a row, or over
-            // empty space, costs no redraw, so the any-motion report flood never
-            // thrashes the screen. No key was pressed, so it loops without
-            // dispatching one.
-            Input::Hover(ev) => {
-                let target = ui::sidebar_pr_hover_at(
-                    &state,
-                    height as usize,
-                    width as usize,
-                    ev.col,
-                    ev.row,
-                );
-                if state.set_pr_hover(target) {
-                    force_paint = true;
-                }
-                continue;
-            }
+            // A bare pointer move no longer drives the PR popup — it is pinned by a
+            // badge click and dismissed only by a click or a keypress — so motion
+            // reports are ignored. Moving the pointer toward the popup to click a
+            // `#<number>` must not dismiss it. No key was pressed, so it loops
+            // without dispatching one.
+            Input::Hover(_) => continue,
         };
         // A key was pressed: whatever it does to the state, repaint on the next
         // iteration (the skip above only applies to idle ticks that read no key).
         force_paint = true;
-        // Touching the keyboard dismisses the transient PR hover popup, so it never
-        // lingers over a screen the user has moved on from (a stale hover would
-        // otherwise survive a keypress, a mode change, or attaching a pane, since
-        // those paths read no pointer move to clear it).
-        state.set_pr_hover(None);
+        // Touching the keyboard dismisses the pinned PR popup (so `Esc` — or any
+        // key — closes it), so it never lingers over a screen the user has moved on
+        // from: a stale popup would otherwise survive a keypress, a mode change, or
+        // attaching a pane, since those paths read no click to dismiss it.
+        state.set_pr_popup(None);
         // Nudge the resting mascot to blink back at the user — reactive, so the
         // rabbit reacts the moment a key lands without any idle timer. Only while
         // it shows an open-eyed face (切替 / 在席); 没入's heads-down face has no eyes
@@ -690,15 +734,17 @@ pub(super) fn event_loop(
                     }
                 }
                 Key::Enter => {
-                    if let Some((names, force)) = state.submit_remove_modal() {
+                    if let Some((entries, force)) = state.submit_remove_modal() {
                         // Each checked session is dispatched to a background
                         // worker, so the loop never blocks on the git work; the
                         // task panel stacks them and the loop drains each as it
-                        // finishes. Each is removed from the workspace it lives in.
-                        for name in &names {
-                            let root = state.workspace_root_for_session(name);
+                        // finishes. Each row already carries the owning workspace
+                        // root, which keeps 統合(unite) bulk-removal correct even
+                        // when different workspaces contain the same session name.
+                        for entry in &entries {
+                            let root = entry.root_path().to_path_buf();
                             state.set_op_target(root.clone());
-                            (wiring.dispatch_remove)(&root, name, force);
+                            (wiring.dispatch_remove)(&root, entry.name(), force);
                         }
                     }
                 }
@@ -944,6 +990,7 @@ pub(crate) fn event_loop_compat(
             super::tasks::Completion {
                 line: outcome.line,
                 sessions: outcome.sessions,
+                target_root: Some(_root.to_path_buf()),
                 evict: None,
                 focus,
             },
@@ -965,6 +1012,7 @@ pub(crate) fn event_loop_compat(
             super::tasks::Completion {
                 line: outcome.line,
                 sessions: outcome.sessions,
+                target_root: Some(_root.to_path_buf()),
                 evict,
                 focus: None,
             },
@@ -991,6 +1039,10 @@ pub(crate) fn event_loop_compat(
     // `unite add` is not exercised by the compat-shim loop tests; report no match.
     let mut unite_resolve =
         |name: &str| Err::<GroupSource, String>(format!("no workspace named \"{name}\""));
+    // Opening a PR in the browser is a no-op here so the compat-shim loop tests
+    // never shell out; the open path itself is covered by the dedicated popup tests
+    // that build a capturing `Wiring`.
+    let mut open_url = |_: &str| {};
     let mut wiring = Wiring {
         workspace_root,
         persist: &mut persist,
@@ -1004,6 +1056,7 @@ pub(crate) fn event_loop_compat(
         evict_pool: &mut evict_pool,
         existing_branches: &mut existing_branches,
         open_terminal: &mut open_terminal,
+        open_url: &mut open_url,
         open_config: &mut open_config,
         preview: &mut preview,
         tab_op: &mut tab_op,

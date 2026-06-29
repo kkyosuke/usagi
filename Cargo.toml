@@ -31,3 +31,14 @@ libc = "0.2"
 tempfile = "3"
 portable-pty = "0.9.0"
 vt100 = "0.16.2"
+
+# Release profile tuned for the binaries published to the four release targets
+# (Linux / macOS amd64・arm64 / Windows). `lto` + a single codegen unit let the
+# optimizer inline across crate boundaries, and `strip` drops debug symbols, so
+# the distributed binary is smaller and a touch faster. `panic` is left at the
+# default `unwind`: background TUI tasks rely on `catch_unwind` (see
+# `presentation/tui/home/tasks.rs`), which `abort` would break.
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true

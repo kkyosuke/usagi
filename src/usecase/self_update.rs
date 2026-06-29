@@ -22,17 +22,18 @@ use crate::usecase::doctor::CommandRunner;
 ///
 /// `repo_url` is the package's repository URL (`CARGO_PKG_REPOSITORY`, e.g.
 /// `https://github.com/KKyosuke/usagi`); the install script lives at
-/// `raw.githubusercontent.com/<owner>/<repo>/main/scripts/install.sh`. A URL that
-/// is not a recognised GitHub HTTPS remote falls back to using it verbatim as the
-/// `<owner>/<repo>` slug, so a misconfigured remote still yields a runnable (if
-/// wrong) command rather than a panic.
-pub fn install_command(repo_url: &str) -> String {
+/// `raw.githubusercontent.com/<owner>/<repo>/main/scripts/install.sh`.
+/// Non-GitHub repository URLs return `None`: silently treating an arbitrary URL
+/// as a GitHub slug builds a broken `raw.githubusercontent.com/https://…` URL and
+/// would make the updater fail later with a misleading network error.
+pub fn install_command(repo_url: &str) -> Option<String> {
     let slug = repo_url
         .trim_end_matches('/')
         .trim_end_matches(".git")
-        .strip_prefix("https://github.com/")
-        .unwrap_or(repo_url);
-    format!("curl -fsSL https://raw.githubusercontent.com/{slug}/main/scripts/install.sh | bash")
+        .strip_prefix("https://github.com/")?;
+    Some(format!(
+        "curl -fsSL https://raw.githubusercontent.com/{slug}/main/scripts/install.sh | bash"
+    ))
 }
 
 /// Run the self-update through `runner`, returning whether it succeeded and the
@@ -41,7 +42,13 @@ pub fn install_command(repo_url: &str) -> String {
 /// message tells the user to restart — the replaced binary only takes effect on
 /// the next launch.
 pub fn run(runner: &dyn CommandRunner, repo_url: &str) -> (bool, String) {
-    let command = install_command(repo_url);
+    let Some(command) = install_command(repo_url) else {
+        return (
+            false,
+            "アップデートに失敗したぴょん…このビルドの repository URL が GitHub 形式ではないよ"
+                .to_string(),
+        );
+    };
     match runner.run_quiet("bash", &["-c", &command]) {
         Ok(true) => (
             true,
@@ -95,30 +102,37 @@ mod tests {
 
     #[test]
     fn install_command_builds_the_raw_script_url_from_a_github_remote() {
+        let expected =
+            "curl -fsSL https://raw.githubusercontent.com/KKyosuke/usagi/main/scripts/install.sh | bash"
+                .to_string();
         assert_eq!(
             install_command("https://github.com/KKyosuke/usagi"),
-            "curl -fsSL https://raw.githubusercontent.com/KKyosuke/usagi/main/scripts/install.sh | bash"
+            Some(expected)
         );
     }
 
     #[test]
     fn install_command_trims_a_trailing_slash_and_git_suffix() {
+        let expected =
+            "curl -fsSL https://raw.githubusercontent.com/KKyosuke/usagi/main/scripts/install.sh | bash"
+                .to_string();
         assert_eq!(
             install_command("https://github.com/KKyosuke/usagi.git"),
-            "curl -fsSL https://raw.githubusercontent.com/KKyosuke/usagi/main/scripts/install.sh | bash"
+            Some(expected.clone())
         );
         assert_eq!(
             install_command("https://github.com/KKyosuke/usagi/"),
-            "curl -fsSL https://raw.githubusercontent.com/KKyosuke/usagi/main/scripts/install.sh | bash"
+            Some(expected)
         );
     }
 
     #[test]
-    fn install_command_uses_a_non_github_url_verbatim_as_the_slug() {
-        assert_eq!(
-            install_command("https://example.com/x"),
-            "curl -fsSL https://raw.githubusercontent.com/https://example.com/x/main/scripts/install.sh | bash"
-        );
+    fn install_command_is_none_for_a_non_github_url() {
+        // A repository URL that is not a GitHub HTTPS remote yields no command,
+        // so the updater reports a clear error instead of building a broken
+        // `raw.githubusercontent.com/https://…` URL that fails mid-download.
+        assert_eq!(install_command("https://example.com/x"), None);
+        assert_eq!(install_command("git@github.com:KKyosuke/usagi.git"), None);
     }
 
     #[test]
@@ -137,7 +151,7 @@ mod tests {
         assert_eq!(seen[0].1[0], "-c");
         assert_eq!(
             seen[0].1[1],
-            install_command("https://github.com/KKyosuke/usagi")
+            install_command("https://github.com/KKyosuke/usagi").unwrap()
         );
     }
 
@@ -161,6 +175,15 @@ mod tests {
         let (ok, message) = run(&runner, "https://github.com/KKyosuke/usagi");
         assert!(!ok);
         assert!(message.contains("失敗"));
+    }
+
+    #[test]
+    fn run_reports_failure_without_running_when_the_repository_is_not_github() {
+        let runner = FakeRunner::default();
+        let (ok, message) = run(&runner, "https://example.com/x");
+        assert!(!ok);
+        assert!(message.contains("GitHub"));
+        assert!(runner.seen.borrow().is_empty());
     }
 
     #[test]

@@ -58,7 +58,7 @@ impl TextArea {
         } else {
             text.split('\n').map(str::to_string).collect()
         };
-        let row = lines.len() - 1;
+        let row = lines.len().saturating_sub(1);
         let col = lines[row].len();
         Self {
             lines,

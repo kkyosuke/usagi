@@ -27,15 +27,15 @@ use chrome::{
     remove_modal_body, switch_create_rows, switch_rename_rows, task_status_line, text_modal_body,
     title_bar, update_confirm_frame, PALETTE_INNER, REMOVE_MODAL_INNER, TEXT_MODAL_INNER,
 };
-use panes::{left_pane, right_pane_contents};
+use panes::{group_inline_insert_line, left_pane, right_pane_contents};
 // The embedded terminal pane (没入) maps a click to the tab under it through this.
 pub(super) use panes::attached_tab_at;
-// …and a click on a sidebar session row to that session's PR URLs through this.
-pub(super) use panes::sidebar_pr_links_at;
-// …and a pointer hovering a sidebar session row to that session (for the PR popup).
-pub(super) use panes::sidebar_pr_hover_at;
+// …a click on a sidebar session's PR badge to that session (to pin its PR popup).
+pub(super) use panes::sidebar_pr_badge_at;
+// …and a click anywhere to the pinned PR popup: open a `#<number>`, or dismiss it.
+pub(super) use panes::{pr_popup_click, PopupClick};
 
-use super::state::{HomeState, ModalSize, Mode};
+use super::state::{HomeState, ModalSize, Mode, WorktreeList};
 use crate::domain::resource::ResourceUsage;
 use crate::domain::settings::Sidebar;
 
@@ -244,9 +244,10 @@ pub fn terminal_geometry(
 /// later group's root, matching
 /// [`WorktreeList::focus_index`](crate::presentation::tui::home::state::WorktreeList).
 ///
-/// Defers the layout walk to [`panes::sidebar_row_at_line`], which replays exactly
-/// what [`left_pane`](panes::left_pane) draws — in both single-workspace and
-/// 統合(unite) mode (per-group headers, root pairs, dividers, and
+/// Defers the layout walk to [`panes::sidebar_row_at_line_for_sidebar`], which
+/// replays exactly what [`left_pane`](panes::left_pane) draws — in both
+/// single-workspace mode and 統合(unite) mode (full-sidebar group headers,
+/// inter-workspace gaps, root pairs, dividers, and
 /// [`SESSION_ROWS`](panes::SESSION_ROWS) rows per worktree) — so a click maps back
 /// to its row without the renderer and the hit test ever disagreeing. Returns
 /// `None` for a click in the right pane (past `left_w`), in the chrome above or
@@ -270,7 +271,7 @@ pub(super) fn left_pane_session_at(
     if line >= body_rows_for(height) {
         return None;
     }
-    panes::sidebar_row_at_line(state.list(), line)
+    panes::sidebar_row_at_line_for_sidebar(state.list(), line, state.sidebar())
 }
 
 /// Rows the tab strip reserves at the top of the right pane in 没入 (Attached).
@@ -350,7 +351,7 @@ fn append_total_beside_mascot(rabbit: &mut [String], total: ResourceUsage, left_
     if rabbit.len() < 3 {
         return;
     }
-    let feet = rabbit.len() - 1;
+    let feet = rabbit.len().saturating_sub(1);
     let needed =
         console::measure_text_width(&rabbit[feet]) + 2 + console::measure_text_width(&label);
     if needed <= left_w {
@@ -453,20 +454,18 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
         lines.push(line);
     }
 
-    // Float the PR hover popup beside the session the pointer is over. `pr_hover`
-    // is only ever set on the full sidebar (see [`sidebar_pr_hover_at`]), and only
-    // for a PR-bearing session, so `pr_hover_popup` always yields a box here. It
-    // lists the session's `#<number>` PRs — the row itself folds them to an
-    // `<icon> <count>` badge — anchored at the session's first row and pushed just
-    // past the divider into the right pane, so it never hides the sidebar it
-    // describes. Composited now, while `lines` holds only the body rows, so the box
-    // stays within the panes and never spills onto the input / footer below.
-    if let Some(idx) = state.pr_hover() {
-        if let Some(wt) = state.list().worktrees().get(idx) {
-            let popup = panes::pr_hover_popup(&wt.pr);
-            let top = body_start + panes::ROOT_ENTRY_LINES + panes::SESSION_ROWS * idx;
-            widgets::overlay_at(&mut lines, width, top, left_w + SEP_WIDTH, &popup);
-        }
+    // Float the pinned PR popup beside the session whose badge was clicked. The
+    // placement is only ever produced on the full sidebar, for a PR-bearing session,
+    // with its anchor already clamped to where this overlay lands (see
+    // [`panes::pr_popup_placement`] — the click hit-test shares it so a click on a
+    // `#<number>` opens exactly the link the user sees). It lists the session's PRs
+    // — the row itself folds them to an `<icon> <count>` badge — anchored at the
+    // session's first row and pushed just past the divider into the right pane, so
+    // it never hides the sidebar it describes. Composited now, while `lines` holds
+    // only the body rows, so the box stays within the panes and never spills onto
+    // the input / footer below.
+    if let Some((popup, top, left)) = panes::pr_popup_placement(state, raw_height, raw_width) {
+        widgets::overlay_at(&mut lines, width, top, left, &popup);
     }
 
     lines.extend(input_lines);
@@ -570,12 +569,14 @@ fn left_column(
         state.now(),
     );
     if sidebar == Sidebar::Full {
-        // While naming a new session in 切替, append the inline create row(s) to the
-        // left pane (trimmed back to the session-list area if it overflows).
+        // While naming a new session in 切替, insert the inline create row(s) into
+        // the selected workspace's own block: directly after that workspace's
+        // session rows in the regular sidebar flow. In 統合(unite) mode this keeps
+        // the "+ new" input attached to the workspace that `c` targets, instead
+        // of drifting to another workspace or to the whole column's foot.
         if let Some(create) = state.create() {
-            for row in switch_create_rows(create.value(), create.cursor(), create.error(), left_w) {
-                left.push(row);
-            }
+            let rows = switch_create_rows(create.value(), create.cursor(), create.error(), left_w);
+            place_create_rows(&mut left, state.list(), rows);
             left.truncate(body_rows);
         }
         // While renaming a session's sidebar label in 切替, append the inline rename
@@ -589,6 +590,45 @@ fn left_column(
         }
     }
     left
+}
+
+/// Insert `rows` into `column` at `line`, padding with blanks when the target line
+/// is below the rows currently built. This preserves the normal sidebar flow for
+/// inline inputs: they sit after the targeted workspace's list, not at the bottom
+/// of the viewport.
+fn splice_rows(column: &mut Vec<String>, line: usize, rows: Vec<String>) {
+    if line >= column.len() {
+        column.resize(line, String::new());
+        column.extend(rows);
+    } else {
+        column.splice(line..line, rows);
+    }
+}
+
+/// Place 切替's inline create rows inside the selected workspace block without
+/// moving the workspaces below it. In 統合(unite) mode every following workspace
+/// already has a fixed two-row gap before its header; while creating in a group
+/// that has such a follower, reuse those gap rows as the input slot instead of
+/// inserting new rows. The follower's header therefore stays on the same screen
+/// line (no CLS). The last group has no lower workspace to protect, so it keeps
+/// the single-workspace behaviour and appends the input after that group.
+fn place_create_rows(column: &mut Vec<String>, list: &WorktreeList, rows: Vec<String>) {
+    let group = list.selected_group();
+    let line = group_inline_insert_line(list, group);
+    if group + 1 < list.group_count() {
+        replace_rows(column, line, rows);
+    } else {
+        splice_rows(column, line, rows);
+    }
+}
+
+/// Replace rows in-place without pushing later rows down. Unlike [`splice_rows`],
+/// this never grows the column; it draws temporary inline UI only in already
+/// reserved blank space.
+fn replace_rows(column: &mut [String], line: usize, rows: Vec<String>) {
+    for (slot, row) in column.iter_mut().skip(line).zip(rows) {
+        *slot = row;
+    }
 }
 
 /// Where the sidebar mascot's clickable body landed within the left column: the
@@ -679,7 +719,7 @@ fn place_mascot(
     // Reserve a blank row above the art and one below it.
     let reserved = rabbit.len() + 2;
     if body_rows >= reserved && column.len() <= body_rows - reserved {
-        column.resize(body_rows - rabbit.len() - 1, String::new());
+        column.resize(body_rows.saturating_sub(rabbit.len() + 1), String::new());
         column.extend(rabbit);
         // The animal's body is the bottom `animal_rows` of the placed block; its
         // feet sit on the second-to-last body row, so the body's top is here.

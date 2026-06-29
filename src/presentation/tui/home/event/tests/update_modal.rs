@@ -62,6 +62,7 @@ fn run_update(keys: Vec<Key>) -> (Outcome, u32) {
     let mut close: fn(&mut HomeState, &Path) = noop_close;
     let mut save_resume = |_: &str, _: ResumeLevel| {};
     let mut save_last_active = |_: &[(String, DateTime<Utc>)]| {};
+    let mut open_url: fn(&str) = noop_open_url;
     let mut dispatch_update = || count.set(count.get() + 1);
     let mut unite_resolve = no_unite_resolve;
     let mut wiring = Wiring {
@@ -77,6 +78,7 @@ fn run_update(keys: Vec<Key>) -> (Outcome, u32) {
         evict_pool: &mut evict,
         existing_branches: &mut branches,
         open_terminal: &mut open,
+        open_url: &mut open_url,
         open_config: &mut config,
         preview: &mut preview,
         tab_op: &mut tab_op,
