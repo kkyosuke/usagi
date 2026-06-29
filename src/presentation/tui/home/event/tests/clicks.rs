@@ -120,6 +120,78 @@ fn a_click_off_the_list_in_focus_is_ignored() {
 }
 
 #[test]
+fn a_click_on_a_focus_right_pane_tab_switches_that_live_pane() {
+    // With live panes published, 在席's right-pane tab strip is clickable: a click
+    // on the inactive pane chip selects that pane through `tab_op(To(index))`.
+    let term = Term::stdout();
+    let (height, width) = term.size();
+    let mut state = sample_state();
+    state.enter_focus(2); // feat
+    state.set_terminal_tabs(vec!["a".to_string(), "b".to_string()], 0);
+    let geo = crate::presentation::tui::home::ui::terminal_geometry(
+        height as usize,
+        width as usize,
+        state.sidebar(),
+    );
+    let col = (geo.origin_col..geo.origin_col + geo.cols)
+        .find(|&col| {
+            crate::presentation::tui::home::ui::focus_tab_at(
+                &state,
+                col,
+                geo.origin_row,
+                height as usize,
+                width as usize,
+            ) == Some(1)
+        })
+        .expect("terminal tab chip is visible at the test terminal width");
+
+    let navs = RefCell::new(Vec::new());
+    let active = RefCell::new(0usize);
+    let mut tab_op = |_d: &Path, nav: Option<TabNav>| -> (Vec<String>, usize) {
+        if let Some(n) = nav {
+            navs.borrow_mut().push(n);
+            if let TabNav::To(i) = n {
+                *active.borrow_mut() = i;
+            }
+        }
+        (vec!["a".to_string(), "b".to_string()], *active.borrow())
+    };
+    let mut reader = InputReader::new(vec![click(col, geo.origin_row), Ok(Input::Key(Key::CtrlC))]);
+    let monitor = MonitorHandle::detached();
+    let mut persist: fn(&str) = noop_persist;
+    let mut create: fn(&str) -> SessionOutcome = noop_create;
+    let mut remove: fn(&str, bool) -> SessionOutcome = noop_remove;
+    let mut config: fn(&Term) -> Result<Option<ConfigReload>> = noop_config;
+    let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = live_preview;
+    let mut branches: fn() -> Vec<String> = no_branches;
+    let outcome = event_loop_compat(
+        &term,
+        &mut reader,
+        state,
+        Path::new("/ws"),
+        &monitor,
+        &UpdateHandle::new(),
+        &OneShot::<bool>::new(),
+        &OneShot::<Vec<AgentCli>>::new(),
+        &mut persist,
+        &mut create,
+        &mut (noop_rename as fn(&str, &str) -> SessionOutcome),
+        &mut (noop_set_note as fn(&str, &str) -> SessionOutcome),
+        &mut remove,
+        &mut branches,
+        &mut (noop_open as fn(&mut HomeState, &Path, bool, bool) -> Result<PaneExit>),
+        &mut config,
+        &mut preview,
+        &mut tab_op,
+        &mut (noop_close as fn(&mut HomeState, &Path)),
+        &mut (noop_reorder as fn(&str, bool) -> SessionReorder),
+    )
+    .unwrap();
+    assert!(matches!(outcome, Outcome::Quit));
+    assert_eq!(*navs.borrow(), vec![TabNav::To(1)]);
+}
+
+#[test]
 fn a_scroll_is_ignored() {
     // The TUI itself never scrolls: a wheel turn is dropped without moving the
     // cursor, so the following `Enter` attaches the still-selected root (`/ws`).
