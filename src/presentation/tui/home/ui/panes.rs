@@ -439,7 +439,7 @@ pub(super) struct DetailCols {
 pub(super) const PR_ICON: char = '\u{ea64}'; // nf-cod-git_pull_request
 
 /// The fixed-width pull-request cell for a worktree's [`PrLink`]s: a single
-/// `<icon> <count>` badge (blue, underlined to read as a link) — the PR glyph and
+/// `<icon> <count>` badge (bright blue, underlined to read as a link) — the PR glyph and
 /// how many PRs the session carries — right-aligned in `width` display columns so
 /// the badges line up down the list. Folding several PRs into one count keeps the
 /// detail line from being crowded out by a long `#442 #447 …` run (the full list is
@@ -452,6 +452,7 @@ fn pr_cell(prs: &[PrLink], width: usize) -> String {
     }
     let badge = style(format!("{PR_ICON} {}", prs.len()))
         .blue()
+        .bright()
         .underlined()
         .to_string();
     rpad(&badge, width)
@@ -1464,9 +1465,9 @@ fn pr_popup_inner(rows: &[Vec<&PrLink>]) -> usize {
         .min(PR_POPUP_INNER)
 }
 
-/// Builds the pinned PR popup for a session's `prs`: its `#<number>` links (blue,
-/// underlined), space-joined and wrapped to [`PR_POPUP_INNER`] columns, wrapped in
-/// a titled box ready to float beside the session's row (see
+/// Builds the pinned PR popup for a session's `prs`: its `#<number>` links
+/// (bright blue, underlined), space-joined and wrapped to [`PR_POPUP_INNER`]
+/// columns, wrapped in a titled box ready to float beside the session's row (see
 /// [`pr_popup_placement`]). Empty `prs` yields no box (the popup only shows for a
 /// PR-bearing session), so the overlay is a no-op.
 pub(in crate::presentation::tui::home) fn pr_popup_box(prs: &[PrLink]) -> Vec<String> {
@@ -1482,6 +1483,7 @@ pub(in crate::presentation::tui::home) fn pr_popup_box(prs: &[PrLink]) -> Vec<St
                 .map(|pr| {
                     style(format!("#{}", pr.number))
                         .blue()
+                        .bright()
                         .underlined()
                         .to_string()
                 })
