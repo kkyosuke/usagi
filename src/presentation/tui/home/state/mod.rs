@@ -48,6 +48,12 @@ pub use mode::{Mode, PaneExit, ResumeLevel, ReturnMode};
 use list::session_row;
 use modal::{FocusMenu, Overlay};
 
+fn sorted_session_menu_commands(registry: &CommandRegistry) -> Vec<CommandInfo> {
+    let mut commands = registry.commands_in_scope(CommandScope::Session);
+    commands.sort_by(|a, b| a.name.cmp(b.name));
+    commands
+}
+
 /// One additional workspace shown below the primary in 統合(unite) mode — its
 /// name, root directory, root-row note, and recorded sessions. Unlike the primary
 /// workspace (whose sessions live in [`HomeState::sessions`] and are re-synced
@@ -358,6 +364,11 @@ pub struct HomeState {
     /// The commands available in command mode (the extension point for the
     /// follow-up command features).
     registry: CommandRegistry,
+    /// Sorted Session-scope commands used by the 在席 menu. This static part is
+    /// derived once from [`registry`](Self::registry); each render then only
+    /// applies the dynamic gates (`ai`, `close`, `agent`) instead of cloning and
+    /// sorting the registry metadata again.
+    session_menu_commands: Vec<CommandInfo>,
     /// Which right-pane action surface 在席 (Focus) presents — a pickable menu
     /// or a typed prompt. Injected from the effective settings by `mod.rs`.
     session_action_ui: SessionActionUi,
@@ -630,12 +641,15 @@ impl HomeState {
         if let Some(notice) = notice {
             log.push(LogLine::error(notice));
         }
+        let registry = CommandRegistry::with_builtins();
+        let session_menu_commands = sorted_session_menu_commands(&registry);
         Self {
             list: WorktreeList::new(workspace_name, worktrees),
             mode: Mode::Switch,
             cmdline: CommandLine::new(),
             log,
-            registry: CommandRegistry::with_builtins(),
+            registry,
+            session_menu_commands,
             session_action_ui: SessionActionUi::default(),
             sidebar: Sidebar::default(),
             key_scheme: KeyScheme::default(),
@@ -2239,16 +2253,13 @@ impl HomeState {
     /// session), and `agent` hidden when `agent_open` (a live agent pane already
     /// exists for the resolved session).
     fn menu_commands_for_root(&self, root: bool, agent_open: bool) -> Vec<CommandInfo> {
-        let mut commands: Vec<CommandInfo> = self
-            .registry
-            .commands_in_scope(CommandScope::Session)
-            .into_iter()
+        self.session_menu_commands
+            .iter()
+            .copied()
             .filter(|info| info.name != "ai" || self.ai_available)
             .filter(|info| info.name != "close" || !root)
             .filter(|info| info.name != "agent" || !agent_open)
-            .collect();
-        commands.sort_by(|a, b| a.name.cmp(b.name));
-        commands
+            .collect()
     }
 
     /// Whether the focused session already has a live `agent` pane — a tab the
