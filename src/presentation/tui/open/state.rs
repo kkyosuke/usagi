@@ -470,6 +470,18 @@ mod tests {
     }
 
     #[test]
+    fn unite_mode_falls_back_to_the_cursor_when_nothing_is_checked() {
+        let mut list = sample(); // a, b, c
+        list.enter_unite(); // seeds the cursor row ("a")
+        list.toggle_checked(); // uncheck it: still unite, but nothing checked
+        assert_eq!(list.mode(), Mode::Unite);
+        assert_eq!(list.checked_count(), 0);
+        // `chosen` falls back to the cursor row rather than returning empty.
+        let names: Vec<_> = list.chosen().into_iter().map(|w| w.name).collect();
+        assert_eq!(names, ["a"]);
+    }
+
+    #[test]
     fn toggle_is_a_noop_on_an_empty_list() {
         let mut list = ProjectList::new(Vec::new());
         list.toggle_checked();
