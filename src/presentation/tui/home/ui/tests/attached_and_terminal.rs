@@ -68,6 +68,50 @@ fn attached_tab_at_is_none_when_the_strip_has_no_room_above_the_body() {
 }
 
 #[test]
+fn focus_tab_at_switches_from_new_tab_to_a_clicked_pane_tab() {
+    let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
+    state.enter_focus(1);
+    state.set_terminal_tabs(vec!["agent".to_string(), "terminal".to_string()], 0);
+    let geo = terminal_geometry(24, 120, Sidebar::Full);
+    let col = chip_column(&state, geo, "2 terminal");
+    assert_eq!(
+        focus_tab_at(&state, col, geo.origin_row, 24, 120),
+        Some(FocusTabClick::Pane(1))
+    );
+    // The underline row is part of the same tab target.
+    assert_eq!(
+        focus_tab_at(&state, col, geo.origin_row + 1, 24, 120),
+        Some(FocusTabClick::Pane(1))
+    );
+}
+
+#[test]
+fn focus_tab_at_ignores_the_active_tab_and_clicks_off_the_strip() {
+    let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
+    state.enter_focus(1);
+    state.set_terminal_tabs(vec!["agent".to_string(), "terminal".to_string()], 0);
+    let geo = terminal_geometry(24, 120, Sidebar::Full);
+    // While Focus opens on "+ new", clicking that already-active tab is a no-op.
+    let new_col = chip_column(&state, geo, "3 + new");
+    assert_eq!(focus_tab_at(&state, new_col, geo.origin_row, 24, 120), None);
+    // Off the chip columns, and below the two tab rows, miss.
+    assert_eq!(
+        focus_tab_at(&state, geo.origin_col, geo.origin_row, 24, 120),
+        None
+    );
+    assert_eq!(
+        focus_tab_at(
+            &state,
+            new_col,
+            geo.origin_row + TAB_BAR_ROWS as u16,
+            24,
+            120
+        ),
+        None
+    );
+}
+
+#[test]
 fn header_tab_rows_number_each_pane_beside_the_header_and_clip_to_width() {
     use super::super::super::terminal::tabs::TabStrip;
     // Styling is stripped in the (non-TTY) test environment, so assert on content.

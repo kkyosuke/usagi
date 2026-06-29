@@ -1284,6 +1284,61 @@ pub(in crate::presentation::tui::home) fn attached_tab_at(
     (target != strip.active).then_some(target)
 }
 
+/// Which 在席 (Focus) tab a click selected in the right pane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::presentation::tui::home) enum FocusTabClick {
+    /// One of the live pane tabs (0-based, matching [`TabStrip::labels`]).
+    Pane(usize),
+    /// The trailing `+ new` launch tab.
+    New,
+}
+
+/// The tab a left click at the 0-based screen (`col`, `row`) lands on while 在席
+/// (Focus), or `None` when the click is not on a changeable tab.
+///
+/// 在席 draws the same two-row header/tab block as 没入 at the top of the right
+/// pane, but the terminal body is only a preview and the selector may also sit on
+/// the trailing `+ new` tab. This hit-test reconstructs that rendered strip so
+/// the event loop can make right-pane tabs mouse-selectable, mirroring the
+/// keyboard `Ctrl-N` / `Ctrl-P` path.
+pub(in crate::presentation::tui::home) fn focus_tab_at(
+    state: &HomeState,
+    col: u16,
+    row: u16,
+    raw_height: usize,
+    raw_width: usize,
+) -> Option<FocusTabClick> {
+    let strip = state.terminal_tabs()?.clone();
+    if strip.labels.is_empty() {
+        return None;
+    }
+    let geo = super::terminal_geometry(raw_height, raw_width, state.sidebar());
+    if row < geo.origin_row || row >= geo.origin_row + super::TAB_BAR_ROWS as u16 {
+        return None;
+    }
+    let rel_col = col.checked_sub(geo.origin_col)? as usize;
+    let mut labels = strip.labels.clone();
+    let active = if state.focus_on_new_tab() {
+        labels.push(FOCUS_NEW_TAB_LABEL.to_string());
+        labels.len().saturating_sub(1)
+    } else {
+        strip.active
+    };
+    let combined = TabStrip { labels, active };
+    let header = active_session_header(state);
+    let target = tab_chip_ranges(&header, &combined)
+        .into_iter()
+        .position(|range| range.contains(&rel_col))?;
+    if target == combined.active {
+        return None;
+    }
+    if target >= strip.labels.len() {
+        Some(FocusTabClick::New)
+    } else {
+        Some(FocusTabClick::Pane(target))
+    }
+}
+
 /// For the full sidebar, each worktree's global index (across every group, root
 /// rows excluded) paired with the 0-based body line its [`SESSION_ROWS`] entry
 /// starts on. Walks the same layout [`left_pane`] builds — in single-workspace

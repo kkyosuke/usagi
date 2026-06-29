@@ -2344,6 +2344,25 @@ impl HomeState {
         }
     }
 
+    /// Select a concrete live-pane tab in 在席 (Focus), returning the clamped
+    /// pane index the terminal pool should activate. Used by right-pane mouse
+    /// clicks; keyboard navigation uses [`focus_tab_next`](Self::focus_tab_next)
+    /// / [`focus_tab_prev`](Self::focus_tab_prev).
+    pub fn focus_select_pane_tab(&mut self, index: usize) -> Option<usize> {
+        let panes = self.focus_pane_count();
+        if panes == 0 {
+            self.focus_new_tab = true;
+            return None;
+        }
+        self.focus_new_tab = false;
+        Some(index.min(panes - 1))
+    }
+
+    /// Select the trailing `+ new` launch tab in 在席 (Focus).
+    pub fn focus_select_new_tab(&mut self) {
+        self.focus_new_tab = true;
+    }
+
     /// Discard 在席's "+ new" launch surface when it sits over live panes — the
     /// state after zooming out with `Ctrl-T` (or navigating onto "+ new") — by
     /// stepping the selector back onto the active pane's tab, so that pane
