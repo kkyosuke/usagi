@@ -11,6 +11,8 @@ pub mod issue;
 pub mod llm_mcp;
 pub mod mcp;
 pub mod memory;
+pub mod op;
+pub mod op_mcp;
 mod render;
 pub mod run;
 pub mod status;

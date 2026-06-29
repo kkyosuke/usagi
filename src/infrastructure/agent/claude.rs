@@ -28,14 +28,16 @@ struct McpServer {
 
 /// The `"mcpServers"` map wired into Claude: always the unified `usagi` server
 /// (`<usagi_bin> mcp`) so the agent can manage issues, memories and sessions;
-/// plus the `usagi-llm` server (`<usagi_bin> llm-mcp --model <model>`) when the
-/// local LLM is enabled, so the agent can offload light work to it. Field order
-/// is the serialized key order, so `usagi` precedes `usagi-llm`.
+/// plus optional `usagi-llm` and `usagi-op` servers when their settings are
+/// enabled. Field order is the serialized key order, so `usagi` precedes
+/// `usagi-llm`, then `usagi-op`.
 #[derive(Serialize)]
 struct McpServers {
     usagi: McpServer,
     #[serde(rename = "usagi-llm", skip_serializing_if = "Option::is_none")]
     usagi_llm: Option<McpServer>,
+    #[serde(rename = "usagi-op", skip_serializing_if = "Option::is_none")]
+    usagi_op: Option<McpServer>,
 }
 
 /// The `--mcp-config` payload: `{"mcpServers": …}`.
@@ -124,7 +126,7 @@ struct HookSettings {
 /// not on `$PATH`); `serde_json` escapes it, so a Windows path with backslashes
 /// stays valid JSON. The model name comes from a fixed allowlist
 /// (`LOCAL_LLM_MODELS`).
-fn mcp_config_json(local_llm_model: Option<&str>, usagi_bin: &str) -> String {
+fn mcp_config_json(local_llm_model: Option<&str>, op_mcp_enabled: bool, usagi_bin: &str) -> String {
     let config = McpConfig {
         mcp_servers: McpServers {
             usagi: McpServer {
@@ -138,6 +140,10 @@ fn mcp_config_json(local_llm_model: Option<&str>, usagi_bin: &str) -> String {
                     "--model".to_string(),
                     model.to_string(),
                 ],
+            }),
+            usagi_op: op_mcp_enabled.then(|| McpServer {
+                command: usagi_bin.to_string(),
+                args: vec!["op-mcp".to_string()],
             }),
         },
     };
@@ -209,7 +215,7 @@ impl Agent for ClaudeAgent {
         initial_prompt: Option<&str>,
     ) -> String {
         let local_llm_model = wiring.local_llm_model.as_deref();
-        let mcp_config = mcp_config_json(local_llm_model, &wiring.usagi_bin);
+        let mcp_config = mcp_config_json(local_llm_model, wiring.op_mcp_enabled, &wiring.usagi_bin);
         // The system prompt tells the agent it is already inside a usagi worktree,
         // so it skips creating one, and — when the local LLM is on — to delegate
         // light tasks to it.
@@ -250,7 +256,11 @@ impl Agent for ClaudeAgent {
         // is present, so `--dangerously-skip-permissions` lets it act (delete
         // worktrees, run git) without approval prompts. Lifecycle hooks are
         // omitted: a headless run reports no phase to watch.
-        let mcp_config = mcp_config_json(wiring.local_llm_model.as_deref(), &wiring.usagi_bin);
+        let mcp_config = mcp_config_json(
+            wiring.local_llm_model.as_deref(),
+            wiring.op_mcp_enabled,
+            &wiring.usagi_bin,
+        );
         let mcp_config = shell_single_quote(&mcp_config);
         let prompt = shell_single_quote(prompt);
         format!("claude -p {prompt} --dangerously-skip-permissions --mcp-config {mcp_config}")
@@ -319,9 +329,18 @@ mod tests {
     /// resolved binary path the caller passes, with the local LLM off unless a
     /// model is given.
     fn wiring(usagi_bin: &str, local_llm_model: Option<&str>) -> AgentWiring {
+        wiring_with_op(usagi_bin, local_llm_model, false)
+    }
+
+    fn wiring_with_op(
+        usagi_bin: &str,
+        local_llm_model: Option<&str>,
+        op_mcp_enabled: bool,
+    ) -> AgentWiring {
         AgentWiring {
             usagi_bin: usagi_bin.to_string(),
             local_llm_model: local_llm_model.map(str::to_string),
+            op_mcp_enabled,
         }
     }
 
@@ -411,6 +430,26 @@ mod tests {
         assert!(launch.contains("\"usagi\":{\"command\":\"usagi\",\"args\":[\"mcp\"]}"));
         // The delegation instruction is appended to the worktree note.
         assert!(launch.contains("local_llm_ask"));
+    }
+
+    #[test]
+    fn launch_command_wires_in_the_op_server_only_when_enabled() {
+        // With op disabled, the 1Password server is absent from the MCP config.
+        let off = ClaudeAgent::new().launch_command(&wiring("usagi", None), false, None);
+        assert!(!off.contains("usagi-op"));
+        // With op enabled, the `usagi-op` server joins the unified usagi server,
+        // launched as `usagi op-mcp` (no secret on the command line).
+        let on =
+            ClaudeAgent::new().launch_command(&wiring_with_op("usagi", None, true), false, None);
+        assert!(on.contains("\"usagi-op\":{\"command\":\"usagi\",\"args\":[\"op-mcp\"]}"));
+        assert!(on.contains("\"usagi\":{\"command\":\"usagi\",\"args\":[\"mcp\"]}"));
+    }
+
+    #[test]
+    fn headless_command_wires_in_the_op_server_when_enabled() {
+        let cmd =
+            ClaudeAgent::new().headless_command(&wiring_with_op("usagi", None, true), "clean up");
+        assert!(cmd.contains("\"usagi-op\":{\"command\":\"usagi\",\"args\":[\"op-mcp\"]}"));
     }
 
     #[test]
