@@ -256,6 +256,14 @@ pub struct TerminalPool {
     shared: Arc<Mutex<Shared>>,
     stop: Arc<AtomicBool>,
     watcher: Option<JoinHandle<()>>,
+    /// Set true whenever a session is registered, and cleared by the watcher (under
+    /// the shared lock) on the tick it observes no sessions. The watcher reads it
+    /// *without* taking the lock, so an idle workspace with no live session stops
+    /// locking `Shared` and walking an empty map five times a second — it just
+    /// loads this flag and sleeps. Only ever set true here; the watcher is the sole
+    /// authority that clears it, so a removal need not touch it (the next locked
+    /// tick observes the empty map and clears it itself).
+    has_sessions: Arc<AtomicBool>,
     /// The last 切替 preview built by [`snapshot`](TerminalPool::snapshot), so a
     /// frame whose previewed session, geometry, and output are all unchanged
     /// returns the cached view without re-resizing or re-snapshotting the grid.
@@ -291,9 +299,13 @@ impl TerminalPool {
     pub fn new(notifications_enabled: bool, scrollback_lines: usize) -> Self {
         let shared = Arc::new(Mutex::new(Shared::default()));
         let stop = Arc::new(AtomicBool::new(false));
+        // Starts empty, so the watcher idles without locking until the first
+        // session is registered (see [`has_sessions`](Self::has_sessions)).
+        let has_sessions = Arc::new(AtomicBool::new(false));
         let watcher = spawn_watcher(
             Arc::clone(&shared),
             Arc::clone(&stop),
+            Arc::clone(&has_sessions),
             notifications_enabled,
             Box::new(SysinfoSampler::new()),
         );
@@ -302,6 +314,7 @@ impl TerminalPool {
             shared,
             stop,
             watcher: Some(watcher),
+            has_sessions,
             preview_cache: None,
             scrollback_lines,
         }
@@ -574,6 +587,10 @@ impl TerminalPool {
         match watched {
             Some(watched) => {
                 shared.sessions.insert(key, watched);
+                // Wake the watcher out of its no-session cheap path. Store before
+                // dropping the lock so the next tick will take the lock and observe
+                // the newly registered session.
+                self.has_sessions.store(true, Ordering::Release);
             }
             None => {
                 shared.sessions.remove(&key);
@@ -733,6 +750,7 @@ impl Drop for TerminalPool {
 fn spawn_watcher(
     shared: Arc<Mutex<Shared>>,
     stop: Arc<AtomicBool>,
+    has_sessions: Arc<AtomicBool>,
     notifications_enabled: bool,
     mut sampler: Box<dyn ResourceSampler>,
 ) -> JoinHandle<()> {
@@ -747,6 +765,12 @@ fn spawn_watcher(
             break;
         }
         std::thread::sleep(POLL_INTERVAL);
+        // Nothing has ever been registered (or the previous locked tick observed
+        // the map empty): keep the idle watcher down to one atomic load per tick,
+        // instead of contending with render-time `snapshot()` on `Shared`.
+        if !has_sessions.load(Ordering::Acquire) {
+            continue;
+        }
 
         // Snapshot the bookkeeping under the lock: prune dead sessions and observe
         // the phases/bells.
@@ -781,32 +805,41 @@ fn spawn_watcher(
                 shared.monitor.forget(&path);
                 agent_state_store::clear(&path);
             }
-
-            // Each session's reading pairs its bell count with the phase its
-            // agent's hooks last recorded (if any); the monitor prefers the phase
-            // and falls back to the bell.
-            let readings: Vec<session_monitor::Reading> = shared
-                .sessions
-                .iter()
-                .map(|(path, w)| {
-                    (
-                        path.clone(),
-                        w.bell.load(Ordering::SeqCst),
-                        phase_reader.read(path),
-                    )
-                })
-                .collect();
-            shared
-                .monitor
-                .observe(&readings)
-                .into_iter()
-                .filter_map(|notice| {
-                    shared
-                        .sessions
-                        .get(&notice.path)
-                        .map(|w| (w.label.clone(), notice.kind))
-                })
-                .collect()
+            if shared.sessions.is_empty() {
+                shared.resources.clear();
+                shared.resource_total = ResourceUsage::default();
+                // The authoritative empty observation happens while holding the
+                // lock. Future ticks can skip the lock until `refresh_watched`
+                // registers a session and flips this back to true.
+                has_sessions.store(false, Ordering::Release);
+                Vec::new()
+            } else {
+                // Each session's reading pairs its bell count with the phase its
+                // agent's hooks last recorded (if any); the monitor prefers the phase
+                // and falls back to the bell.
+                let readings: Vec<session_monitor::Reading> = shared
+                    .sessions
+                    .iter()
+                    .map(|(path, w)| {
+                        (
+                            path.clone(),
+                            w.bell.load(Ordering::SeqCst),
+                            phase_reader.read(path),
+                        )
+                    })
+                    .collect();
+                shared
+                    .monitor
+                    .observe(&readings)
+                    .into_iter()
+                    .filter_map(|notice| {
+                        shared
+                            .sessions
+                            .get(&notice.path)
+                            .map(|w| (w.label.clone(), notice.kind))
+                    })
+                    .collect()
+            }
         };
 
         if notifications_enabled {

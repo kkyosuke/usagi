@@ -120,6 +120,17 @@ pub enum PaneStep {
 /// the pane stays responsive instead of trailing a fixed redraw timer.
 const POLL_SLICE: Duration = Duration::from_millis(4);
 
+/// Once the pane has been completely quiet for this long, the wait loop backs
+/// off to [`QUIET_POLL_SLICE`]. `event::poll` still wakes immediately for user
+/// input; the trade-off is only that a brand-new PTY output burst may wait up to
+/// the longer slice before the generation check sees it.
+const QUIET_AFTER: Duration = Duration::from_secs(1);
+
+/// Poll interval while fully idle. This cuts the idle attached-pane wakeups from
+/// roughly 250/s (4 ms) to ~31/s without affecting active output/input bursts,
+/// which stay on [`POLL_SLICE`].
+const QUIET_POLL_SLICE: Duration = Duration::from_millis(32);
+
 /// The longest the loop sits idle before *re-evaluating* — re-reading the
 /// terminal size and the sidebar badges to decide whether anything changed.
 /// Output and key presses wake it far sooner; this only bounds how stale a
@@ -297,6 +308,10 @@ fn drive(
     // target, and plain chrome — not on every motion report. `None` until the first
     // mouse event sets a shape.
     let mut last_pointer: Option<PointerShape> = None;
+    // The wait loop polls at 4 ms while the pane is active, then backs off after a
+    // quiet spell. This preserves stream responsiveness while removing most idle
+    // wakeups from an attached-but-quiescent shell.
+    let mut last_activity = Instant::now();
     let mut first = true;
     loop {
         let (height, width) = term.size();
@@ -343,6 +358,9 @@ fn drive(
         // Fresh shell output (or the shell exiting) bumps the generation.
         let gen = pty.generation();
         let output_changed = gen != drawn_gen;
+        if output_changed {
+            last_activity = now;
+        }
         // A change to the mouse selection — a new drag position, or clearing it —
         // must repaint so the inverted highlight tracks the pointer.
         if last_selection != selection {
@@ -461,7 +479,7 @@ fn drive(
         } else {
             None
         };
-        match wait(pty, drawn_gen, redraw_deadline)? {
+        match wait(pty, drawn_gen, redraw_deadline, last_activity)? {
             // New output, or the idle re-evaluation tick (a possible resize /
             // badge change): loop and let the checks above decide whether to
             // repaint — an unchanged tick redraws nothing.
@@ -469,6 +487,7 @@ fn drive(
             // Input is queued: forward every pending key (or scroll the
             // history), then loop and repaint.
             Wake::Input => {
+                last_activity = Instant::now();
                 if let Some(step) = pump_input(
                     term,
                     state,
@@ -505,17 +524,31 @@ enum Wake {
 /// pending output is then held back (while still answering input at once) until
 /// the deadline passes, so coalesced output lands exactly at the frame boundary
 /// rather than immediately re-waking the loop into a busy spin.
-fn wait(pty: &PtySession, drawn_gen: u64, redraw_deadline: Option<Instant>) -> Result<Wake> {
+fn wait(
+    pty: &PtySession,
+    drawn_gen: u64,
+    redraw_deadline: Option<Instant>,
+    last_activity: Instant,
+) -> Result<Wake> {
     let start = Instant::now();
     loop {
+        let now = Instant::now();
         // Fresh output (or the shell exiting, which also bumps the counter) wakes
         // the loop — but a throttled frame waits out its deadline first.
-        if pty.generation() != drawn_gen
-            && redraw_deadline.is_none_or(|deadline| Instant::now() >= deadline)
-        {
+        if pty.generation() != drawn_gen && redraw_deadline.is_none_or(|deadline| now >= deadline) {
             return Ok(Wake::Output);
         }
-        if event::poll(POLL_SLICE)? {
+        let mut timeout = if now.duration_since(last_activity) >= QUIET_AFTER {
+            QUIET_POLL_SLICE
+        } else {
+            POLL_SLICE
+        };
+        if let Some(deadline) = redraw_deadline {
+            timeout = timeout.min(deadline.saturating_duration_since(now));
+        } else {
+            timeout = timeout.min(IDLE_REEVAL.saturating_sub(start.elapsed()));
+        }
+        if event::poll(timeout)? {
             return Ok(Wake::Input);
         }
         // The idle tick only bounds how stale a resize / badge change can get; a
@@ -564,6 +597,7 @@ fn pump_input(
     last_pointer: &mut Option<PointerShape>,
 ) -> Result<Option<PaneStep>> {
     let now = Instant::now();
+    let mut pending_bytes = Vec::new();
     while event::poll(Duration::ZERO)? {
         match event::read()? {
             Event::Key(key) => {
@@ -613,6 +647,7 @@ fn pump_input(
                         *pending_prefix = None;
                         *scrollback = 0;
                         *selection = None;
+                        flush_pending_input(pty, &mut pending_bytes)?;
                         return Ok(Some(match action {
                             Reserved::Detach => PaneStep::Detach,
                             Reserved::ToFocus => PaneStep::ToFocus,
@@ -643,7 +678,7 @@ fn pump_input(
                             // selection, like a real terminal.
                             *scrollback = 0;
                             *selection = None;
-                            pty.write(&bytes)?;
+                            pending_bytes.extend_from_slice(&bytes);
                         }
                     }
                 }
@@ -658,7 +693,7 @@ fn pump_input(
                 *pending_prefix = None;
                 *scrollback = 0;
                 *selection = None;
-                pty.write(&encode_paste(&text, pty.bracketed_paste()))?;
+                pending_bytes.extend_from_slice(&encode_paste(&text, pty.bracketed_paste()));
             }
             // Any mouse activity abandons a pending leader: the user reached for
             // the pointer instead of completing the chord, so a later `Ctrl-O`
@@ -692,6 +727,7 @@ fn pump_input(
                             {
                                 *scrollback = 0;
                                 *selection = None;
+                                flush_pending_input(pty, &mut pending_bytes)?;
                                 return Ok(Some(PaneStep::ToTab(tab)));
                             }
                             *selection =
@@ -769,6 +805,7 @@ fn pump_input(
                         } else if let Some(row) = session {
                             *selection = None;
                             if is_double_click(last_click, row, now, DOUBLE_CLICK) {
+                                flush_pending_input(pty, &mut pending_bytes)?;
                                 return Ok(Some(PaneStep::ToSession(row)));
                             }
                         } else if open_clicked_url(
@@ -838,7 +875,7 @@ fn pump_input(
                                     }
                                 };
                                 match forward {
-                                    Some(seq) => pty.write(&seq)?,
+                                    Some(seq) => pending_bytes.extend_from_slice(&seq),
                                     None => {
                                         *selection = None;
                                         apply_scroll(scrollback, delta);
@@ -852,7 +889,20 @@ fn pump_input(
             _ => {}
         }
     }
+    flush_pending_input(pty, &mut pending_bytes)?;
     Ok(None)
+}
+
+/// Flush the bytes forwarded during a single input-drain pass in one PTY write.
+/// A fast key repeat can queue several `Event::Key`s before the next repaint; the
+/// old loop wrote and flushed once per key, while batching keeps the shell input
+/// equivalent and cuts the syscall count to one write+flush per drain.
+fn flush_pending_input(pty: &mut PtySession, pending: &mut Vec<u8>) -> Result<()> {
+    if !pending.is_empty() {
+        pty.write(pending)?;
+        pending.clear();
+    }
+    Ok(())
 }
 
 /// Give the host terminal's mouse pointer the shape that fits the cell under it,

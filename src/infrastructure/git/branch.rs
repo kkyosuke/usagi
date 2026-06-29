@@ -184,21 +184,18 @@ pub fn ahead_behind(repo: &Path, branch: &str, into: &str) -> Option<(usize, usi
 /// [`ahead_behind`], so the badge tracks the integration branch even before a
 /// local fetch updates it.
 pub fn diff_stat(repo: &Path, into: &str) -> Option<(usize, usize)> {
-    let base = merge_base(repo, &format!("origin/{into}")).or_else(|| merge_base(repo, into))?;
-    let output = git_capture(repo, &["diff", "--numstat", &base])
+    // `git diff --merge-base <base>` is equivalent to diffing the working tree
+    // against `$(git merge-base <base> HEAD)`, so it preserves the previous
+    // behaviour (including uncommitted work on the right-hand side) while folding
+    // the old `merge-base` + `diff` pair into one git process in the common case.
+    diff_stat_against(repo, &format!("origin/{into}")).or_else(|| diff_stat_against(repo, into))
+}
+
+fn diff_stat_against(repo: &Path, base: &str) -> Option<(usize, usize)> {
+    let output = git_capture(repo, &["diff", "--numstat", "--merge-base", base])
         .ok()
         .flatten()?;
     Some(sum_numstat(&output))
-}
-
-/// The merge-base of `base` and `HEAD`, or `None` when it cannot be resolved
-/// (e.g. `base` does not exist or the histories are unrelated).
-fn merge_base(repo: &Path, base: &str) -> Option<String> {
-    let output = git_capture(repo, &["merge-base", base, "HEAD"])
-        .ok()
-        .flatten()?;
-    let base = output.lines().next()?.trim();
-    (!base.is_empty()).then(|| base.to_string())
 }
 
 /// Sum the added / removed columns of `git diff --numstat` output as
