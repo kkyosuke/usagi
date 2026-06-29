@@ -122,8 +122,11 @@ impl TerminalView {
                 // while keeping its own colour; only the link under the pointer is
                 // recoloured light blue, lighting it up on hover. Applied before
                 // the selection flip so a drag still inverts (and stays visible)
-                // over a link.
-                if links.contains(&Cell::new(row, col)) {
+                // over a link. The whole-screen `links` set is empty on a plain
+                // shell screen (no URL on it), so skipping the per-cell lookups
+                // when it is keeps the common case off the hash probes entirely —
+                // the snapshot runs for every output frame, cell by cell.
+                if !links.is_empty() && links.contains(&Cell::new(row, col)) {
                     style.underline = true;
                     if hovered.contains(&Cell::new(row, col)) {
                         style.fg = LINK_COLOR;

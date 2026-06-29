@@ -325,17 +325,29 @@ pub(super) fn event_loop(
     // The previous left click's session row and time, so a second click on the
     // same row within the double-click window confirms it (see [`switch_click`]).
     let mut last_click: Option<(usize, Instant)> = None;
+    // The monitor snapshot version last applied to `state`. When unchanged, the
+    // loop skips `monitor.snapshot()` entirely — avoiding the clone of every badge
+    // set on each idle/live-frame pass.
+    let mut seen_badge_version = u64::MAX;
     loop {
         // Mark each background session's agent state — running, waiting for
         // input, live (ready), and finished — before painting, applying every
         // badge set together (read under a single lock) so the frame never mixes
         // one set's fresh reading with another's stale one.
-        let badges = monitor.snapshot();
-        // Whether the sidebar badges moved since the last paint, decided before
-        // storing them so the snapshot can be applied by move rather than cloned
-        // (the loop no longer keeps its own copy alongside the one in `state`).
-        let badges_changed = state.badges() != &badges;
-        state.apply_badges(badges);
+        let badge_version = monitor.badge_version();
+        let badges_changed = if badge_version != seen_badge_version {
+            let badges = monitor.snapshot();
+            // Whether the sidebar badges moved since the last paint, decided
+            // before storing them so the snapshot can be applied by move rather
+            // than cloned (the loop no longer keeps its own copy alongside the one
+            // in `state`).
+            let changed = state.badges() != &badges;
+            state.apply_badges(badges);
+            seen_badge_version = badge_version;
+            changed
+        } else {
+            false
+        };
         // Surface the sidebar mascot's "update available" notice once the
         // background release check has found a newer version than this build.
         let latest_update = update.status().map(|status| status.latest);
