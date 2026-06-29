@@ -1425,6 +1425,11 @@ pub(in crate::presentation::tui::home) fn sidebar_pr_badge_at(
 /// row.
 const PR_POPUP_INNER: usize = 28;
 
+/// The popup box's title, embedded in its top border by [`widgets::boxed`] as
+/// `─ PR `. The box must stay at least this wide so the title keeps its closing
+/// frame instead of butting against the corner.
+const PR_POPUP_TITLE: &str = "PR";
+
 /// Greedily packs a session's `prs` into the popup's rows: each `#<number>` token
 /// is `#` + its digits wide, joined by a one-space gap, and a row never grows past
 /// [`PR_POPUP_INNER`]. Shared by the popup's renderer ([`pr_popup_box`]) and its
@@ -1450,8 +1455,14 @@ fn pr_popup_pack(prs: &[PrLink]) -> Vec<Vec<&PrLink>> {
 }
 
 /// The popup box's inner content width: as wide as its widest packed row, never
-/// past [`PR_POPUP_INNER`]. `0` for an empty pack.
+/// past [`PR_POPUP_INNER`], and at least wide enough to keep the title readable.
 fn pr_popup_inner(rows: &[Vec<&PrLink>]) -> usize {
+    // `boxed` frames the title as `─ {title} ` inside the `inner + 2`-wide top
+    // border, so the inner width must clear `title + 1` columns or the trailing
+    // space (and the title itself) gets clipped — most visibly for a single
+    // narrow `#<n>` token, where the content alone would size the box smaller
+    // than its own title.
+    let title_floor = PR_POPUP_TITLE.chars().count() + 1;
     rows.iter()
         .map(|r| {
             r.iter()
@@ -1462,6 +1473,7 @@ fn pr_popup_inner(rows: &[Vec<&PrLink>]) -> usize {
         .max()
         .unwrap_or(0)
         .min(PR_POPUP_INNER)
+        .max(title_floor)
 }
 
 /// Builds the pinned PR popup for a session's `prs`: its `#<number>` links (blue,
@@ -1489,7 +1501,7 @@ pub(in crate::presentation::tui::home) fn pr_popup_box(prs: &[PrLink]) -> Vec<St
                 .join(" ")
         })
         .collect();
-    widgets::boxed("PR", inner, &lines)
+    widgets::boxed(PR_POPUP_TITLE, inner, &lines)
 }
 
 /// The pinned PR popup's box and where [`super::render_frame`] floats it — its
@@ -2940,6 +2952,18 @@ mod tests {
             .any(|l| l.contains("#442") && l.contains("#447")));
         // No PR → no box, so the overlay is a no-op for a session without one.
         assert!(pr_popup_box(&[]).is_empty());
+    }
+
+    #[test]
+    fn pr_popup_box_keeps_the_title_clear_for_a_single_digit_pr() {
+        let popup = pr_popup_box(&[pr(7)]);
+        let plain: Vec<String> = popup
+            .iter()
+            .map(|l| console::strip_ansi_codes(l).into_owned())
+            .collect();
+
+        assert_eq!(plain[0], "┌─ PR ┐");
+        assert_eq!(plain[1], "│ #7  │");
     }
 
     #[test]
