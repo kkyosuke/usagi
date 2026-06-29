@@ -55,15 +55,17 @@ impl ResourceSampler for SysinfoSampler {
             true,
             ProcessRefreshKind::nothing().with_cpu().with_memory(),
         );
-        self.system
-            .processes()
-            .iter()
-            .map(|(pid, process)| ProcSample {
-                pid: pid.as_u32(),
-                parent: process.parent().map(|p| p.as_u32()),
-                cpu_percent: process.cpu_usage(),
-                memory_bytes: process.memory(),
-            })
-            .collect()
+        let processes = self.system.processes();
+        // Size the sample buffer to the live process count up front so the per-tick
+        // collect does not grow-and-reallocate the Vec as it fills (the table holds
+        // every process on the host).
+        let mut out = Vec::with_capacity(processes.len());
+        out.extend(processes.iter().map(|(pid, process)| ProcSample {
+            pid: pid.as_u32(),
+            parent: process.parent().map(|p| p.as_u32()),
+            cpu_percent: process.cpu_usage(),
+            memory_bytes: process.memory(),
+        }));
+        out
     }
 }

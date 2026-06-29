@@ -312,6 +312,10 @@ fn drive(
     // quiet spell. This preserves stream responsiveness while removing most idle
     // wakeups from an attached-but-quiescent shell.
     let mut last_activity = Instant::now();
+    // The monitor snapshot version last applied to `state`. When unchanged, the
+    // loop skips `monitor.snapshot()` entirely — avoiding the clone of every badge
+    // set on each idle/live-frame pass.
+    let mut seen_badge_version = u64::MAX;
     let mut first = true;
     loop {
         let (height, width) = term.size();
@@ -379,9 +383,18 @@ fn drive(
         // The sidebar's running / waiting / live-agent / finished markers, read
         // together under a single lock; repaint when they move so sessions
         // (including this one) keep their current state.
-        let badges = monitor.snapshot();
-        if state.badges() != &badges {
-            interactive = true;
+        let badge_version = monitor.badge_version();
+        let badges = if badge_version != seen_badge_version {
+            Some(monitor.snapshot())
+        } else {
+            None
+        };
+        if let Some(badges) = badges.as_ref() {
+            if state.badges() != badges {
+                interactive = true;
+            } else {
+                seen_badge_version = badge_version;
+            }
         }
 
         // Coalesce pure-output frames: an output-only change repaints only once
@@ -445,7 +458,10 @@ fn drive(
             let shape = pty.cursor_shape();
             let cursor_shape = (last_shape != Some(shape)).then_some(shape);
             state.set_terminal_view(view);
-            state.apply_badges(badges);
+            if let Some(badges) = badges {
+                state.apply_badges(badges);
+                seen_badge_version = badge_version;
+            }
             render(
                 term,
                 state,

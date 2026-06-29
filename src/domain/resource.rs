@@ -149,10 +149,11 @@ pub fn aggregate_by_root<K: Clone>(
     samples: &[ProcSample],
     roots: &[(K, Vec<u32>)],
 ) -> (Vec<(K, ResourceUsage)>, ResourceUsage) {
-    let by_pid: HashMap<u32, &ProcSample> = samples.iter().map(|s| (s.pid, s)).collect();
+    let mut by_pid: HashMap<u32, &ProcSample> = HashMap::with_capacity(samples.len());
+    by_pid.extend(samples.iter().map(|s| (s.pid, s)));
     // The child pids of each process, so a subtree can be walked downward from
     // its root rather than scanning every sample per root.
-    let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
+    let mut children: HashMap<u32, Vec<u32>> = HashMap::with_capacity(samples.len());
     for s in samples {
         if let Some(parent) = s.parent {
             children.entry(parent).or_default().push(s.pid);
