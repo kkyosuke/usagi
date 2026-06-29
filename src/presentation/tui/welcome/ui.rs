@@ -36,7 +36,7 @@ fn header_lines(width: usize) -> Vec<String> {
 /// Builds the left menu column, highlighting the selected entry.
 fn menu_column_lines(items: &[MenuItem], selected_index: usize) -> Vec<String> {
     // "> Label..... key" — cursor + 10-char label + right-aligned key.
-    let mut lines = vec![String::new()];
+    let mut lines = vec![style("Menu").green().bold().to_string(), String::new()];
     for (i, item) in items.iter().enumerate() {
         let is_selected = i == selected_index;
 
@@ -91,7 +91,7 @@ fn recent_card(item: Option<&RecentItem>, index: usize, now: DateTime<Utc>) -> V
 /// The height is fixed: a heading plus three compact cards. Keeping the section
 /// height stable means loading or clearing recents never shifts the mascot row.
 fn recent_lines(items: &[RecentItem], now: DateTime<Utc>) -> Vec<String> {
-    let mut lines = vec![String::new(), style("Recent").green().bold().to_string()];
+    let mut lines = vec![style("Recent").green().bold().to_string()];
     for i in 0..3 {
         lines.extend(recent_card(items.get(i), i, now));
     }
@@ -187,6 +187,7 @@ pub fn body_top_padding(
     notice: Option<&str>,
 ) -> usize {
     let body = header_lines(0).len()
+        + 1
         + menu_lines(0, items, 0, recent_items, Utc::now()).len()
         + notice_lines(0, notice).len();
     let footer = footer_lines(0).len();
@@ -207,6 +208,9 @@ pub fn render_frame(
     // The body (mascot, title, menu and notice slot) is centred vertically;
     // the footer is pinned to the bottom edge of the frame.
     let mut body = header_lines(width);
+    // Keep visual breathing room between the centred USAGI title and the
+    // vertical divider that splits the menu and recent columns.
+    body.push(String::new());
     body.extend(menu_lines(
         width,
         items,
@@ -308,6 +312,7 @@ mod tests {
         let lines = menu_lines(80, &items, 0, &recents, now());
         let joined = lines.join("\n");
         assert!(joined.contains("Open"));
+        assert!(joined.contains("Menu"));
         assert!(joined.contains("Recent"));
         assert!(joined.contains("alpha"));
         assert!(joined.contains('│'));
@@ -328,7 +333,7 @@ mod tests {
         assert!(joined.contains("#1"));
         assert!(joined.contains("● 4"));
         // Heading + three compact card frames.
-        assert_eq!(lines.len(), 11);
+        assert_eq!(lines.len(), 10);
     }
 
     #[test]
