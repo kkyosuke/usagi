@@ -33,7 +33,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use chrono::{DateTime, Utc};
 
 use crate::domain::agent::Agent;
-use crate::domain::workspace_state::SessionRecord;
+use crate::domain::workspace_state::{PrLink, SessionRecord};
 use crate::infrastructure::repo_paths::{SESSIONS_DIR, STATE_DIR};
 use crate::infrastructure::workspace_store::WorkspaceStore;
 use crate::infrastructure::{
@@ -372,6 +372,31 @@ pub fn list(workspace_root: &Path) -> Result<Vec<SessionRecord>> {
         .load()?
         .map(|state| state.sessions)
         .unwrap_or_default())
+}
+
+/// Return the pull requests associated with session `name`, along with the
+/// session's root worktree.
+///
+/// PR links are primarily persisted in the out-of-band [`pr_link_store`] as soon
+/// as an agent prints a pull-request URL; workspace sync later folds them into
+/// `state.json` so the TUI can show badges from saved state. Read both sources
+/// here and de-duplicate by URL so MCP callers see the newest harvested links
+/// even before the next sync, while still preserving links already present in
+/// older state files.
+pub fn pr_links(workspace_root: &Path, name: &str) -> Result<(PathBuf, Vec<PrLink>)> {
+    let session = list(workspace_root)?
+        .into_iter()
+        .find(|s| s.name == name)
+        .ok_or_else(|| anyhow!("no such session: \"{name}\""))?;
+    let state_prs = session
+        .worktrees
+        .iter()
+        .flat_map(|wt| wt.pr.iter().cloned());
+    let recorded_prs = pr_link_store::get(&session.root);
+    Ok((
+        session.root,
+        PrLink::aggregate(state_prs.chain(recorded_prs)),
+    ))
 }
 
 /// Move session `name` one row toward the top (`up = true`) or bottom of the
