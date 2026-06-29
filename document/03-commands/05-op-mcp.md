@@ -12,7 +12,7 @@
 ## 目次
 
 - [概要](#概要)
-- [有効化（settings に secret を登録）](#有効化settings-に-secret-を登録)
+- [有効化（OS のシークレットストアに保存）](#有効化os-のシークレットストアに保存)
 - [前提（認証）](#前提認証)
 - [起動と登録](#起動と登録)
 - [対応 tool 一覧](#対応-tool-一覧)
@@ -29,39 +29,41 @@
   item の作成・編集・削除や `op run` のような任意コマンド実行は公開しない。
 - **状態を持たない**: サーバは資格情報を保持せず、認証は `op` 側（環境）に委ねる。
 
-## 有効化（settings に secret を登録）
+## 有効化（OS のシークレットストアに保存）
 
-このサーバは**既定では wire されません**。グローバル設定 `settings.json` に **1Password サービスアカウントトークン**を
-登録することが、エージェントへ自動 wire するための唯一のスイッチです（[5. 設定](../05-settings.md) 参照）。
+このサーバは**既定では wire されません**。`usagi op login` で **1Password サービスアカウントトークン**を
+OS のシークレットストア（macOS Keychain / Linux Secret Service）に保存すると、エージェントへ自動 wire されます
+（[5. 設定](../05-settings.md) 参照）。
 
-| キー | 既定 | 意味 |
-|---|---|---|
-| `op_mcp.service_account_token` | `null` | 登録すると `agent` 起動時に `usagi-op` サーバが wire される。空・未登録なら wire しない |
+| コマンド / 設定 | 役割 |
+|---|---|
+| `usagi op login` | トークンを OS シークレットストアに保存し、`op_mcp.enabled = true` にする |
+| `usagi op logout` | トークンを OS シークレットストアから削除し、`op_mcp.enabled = false` にする |
+| `usagi op status` | `op_mcp.enabled` と、OS シークレットストアにトークンが存在するかを表示する |
+| `op_mcp.enabled` | `agent` 起動時に `usagi-op` サーバを wire する非 secret な設定フラグ（トークン本体ではない） |
 
-登録は `usagi config --edit`（`settings.json` を `$EDITOR` で開く）で行います。
+登録:
 
-```jsonc
-{
-  "version": 1,
-  "op_mcp": { "service_account_token": "ops_xxxxxxxx..." }
-}
+```bash
+usagi op login
 ```
 
-- トークンを登録すると、Claude は `--mcp-config`、Codex は `-c mcp_servers.usagi-op.*` 設定上書きで
+- `usagi op login` はトークンをエコーしない入力で受け取り、OS シークレットストアに保存します。`settings.json` には
+  トークン本体を書きません。
+- `op_mcp.enabled` が `true` のとき、Claude は `--mcp-config`、Codex は `-c mcp_servers.usagi-op.*` 設定上書きで
   `usagi-op` サーバ（`usagi op-mcp`）が起動コマンドに追加されます（Gemini はインライン注入に対応しないため wire されません）。
-- トークンは **`usagi op-mcp` プロセスが settings から読み取り**、`op` サブプロセスへ環境変数
+- トークンは **`usagi op-mcp` プロセスが OS シークレットストアから読み取り**、`op` サブプロセスへ環境変数
   `OP_SERVICE_ACCOUNT_TOKEN` として渡します。**エージェントの起動コマンド行やプロセス一覧には出ません**。
-- 空白だけの値はロード時に未登録（`null`）として扱われ、wire されません。
-- `usagi config`（表示）はトークン値を出力せず、登録の有無を `op_mcp_secret (registered)` / `(none)` で示します。
+- `usagi config`（表示）は `op_mcp.enabled` だけを出力します。実際にトークンが保存されているかは
+  `usagi op status` で確認します。
 
-> **セキュリティ注記**: トークンは `settings.json` に**平文**で保存されます。ファイル権限（`~/.usagi/settings.json`）に
-> 留意してください。サインイン済みなら、エージェントはこのトークンで読める secret をすべて参照できます。
+> **セキュリティ注記**: サインイン済みなら、エージェントはこのトークンで読める secret をすべて参照できます。
 
 ## 前提（認証）
 
 このサーバは `op` を呼び出すだけで、認証そのものは `op`（環境）に委ねます。次のいずれかが必要です。
 
-- **settings に登録（推奨・自動 wire の前提）**: 上記 `op_mcp.service_account_token`。`usagi op-mcp` が
+- **OS シークレットストアに登録（推奨・自動 wire の前提）**: 上記 `usagi op login`。`usagi op-mcp` が
   これを読み、`op` へ `OP_SERVICE_ACCOUNT_TOKEN` として渡す。
 - **対話的**: `op signin`（1Password デスクトップアプリ連携、または `eval $(op signin)`）。手動登録で
   サーバを直接起動する場合に使える（自動 wire はトークン登録が前提）。
@@ -72,7 +74,7 @@ tool 実行エラー（`isError: true`）としてそのまま返ります。
 
 ## 起動と登録
 
-通常は上記のとおり **settings にトークンを登録すれば usagi が自動で wire** します。手元での確認や、usagi 以外の
+通常は上記のとおり **`usagi op login` でトークンを保存すれば usagi が自動で wire** します。手元での確認や、usagi 以外の
 MCP クライアントから使う場合はシェルから直接起動・登録もできます。
 
 ```bash

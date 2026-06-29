@@ -215,8 +215,7 @@ impl Agent for ClaudeAgent {
         initial_prompt: Option<&str>,
     ) -> String {
         let local_llm_model = wiring.local_llm_model.as_deref();
-        let mcp_config =
-            mcp_config_json(local_llm_model, wiring.op_mcp_enabled, &wiring.usagi_bin);
+        let mcp_config = mcp_config_json(local_llm_model, wiring.op_mcp_enabled, &wiring.usagi_bin);
         // The system prompt tells the agent it is already inside a usagi worktree,
         // so it skips creating one, and — when the local LLM is on — to delegate
         // light tasks to it.
@@ -440,19 +439,16 @@ mod tests {
         assert!(!off.contains("usagi-op"));
         // With op enabled, the `usagi-op` server joins the unified usagi server,
         // launched as `usagi op-mcp` (no secret on the command line).
-        let on = ClaudeAgent::new().launch_command(
-            &wiring_with_op("usagi", None, true),
-            false,
-            None,
-        );
+        let on =
+            ClaudeAgent::new().launch_command(&wiring_with_op("usagi", None, true), false, None);
         assert!(on.contains("\"usagi-op\":{\"command\":\"usagi\",\"args\":[\"op-mcp\"]}"));
         assert!(on.contains("\"usagi\":{\"command\":\"usagi\",\"args\":[\"mcp\"]}"));
     }
 
     #[test]
     fn headless_command_wires_in_the_op_server_when_enabled() {
-        let cmd = ClaudeAgent::new()
-            .headless_command(&wiring_with_op("usagi", None, true), "clean up");
+        let cmd =
+            ClaudeAgent::new().headless_command(&wiring_with_op("usagi", None, true), "clean up");
         assert!(cmd.contains("\"usagi-op\":{\"command\":\"usagi\",\"args\":[\"op-mcp\"]}"));
     }
 

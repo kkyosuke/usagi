@@ -11,6 +11,7 @@
 - [CLI コマンド一覧](#cli-コマンド一覧)
   - [`usagi issue`](#usagi-issue)
   - [`usagi memory`](#usagi-memory)
+  - [`usagi op`](#usagi-op)
   - [`usagi mcp`](#usagi-mcp)
   - [`usagi llm-mcp`](#usagi-llm-mcp)
   - [`usagi op-mcp`](#usagi-op-mcp)
@@ -34,6 +35,7 @@
 | `usagi doctor --fix` | 確認を省いて不足を一括導入する。不足ツールを OS のパッケージマネージャ（brew / apt-get / dnf / pacman）で導入を試行し、Linux のシステムパッケージは `sudo -n` で非対話に失敗させてパスワード待ちで固まらないようにする。修復不可なら手動手順を提示する。Nerd Font が無ければ `curl`/`unzip` でダウンロードして導入する。ローカル LLM が有効なら `ollama`・サーバ起動・モデルも導入する |
 | `usagi issue <create\|list\|graph\|show\|update\|search\|delete>` | （ヘルプ非表示・エージェント向け）カレントリポジトリのタスク issue（`.usagi/issues/`）を操作する（[data/02-workspace.md](../data/02-workspace.md#issues-タスク-issue)） |
 | `usagi memory <save\|list\|show\|update\|search\|delete>` | （ヘルプ非表示・エージェント向け）カレントリポジトリのエージェントのメモリ（`.usagi/memory/`）を操作する（[data/04-memory.md](../data/04-memory.md)） |
+| `usagi op <login\|logout\|status>` | 1Password MCP サーバが使うサービスアカウントトークンを OS シークレットストアに保存・削除・確認する |
 | `usagi mcp` | （ヘルプ非表示・エージェント向け）issue・メモリ・セッションの操作を MCP（Model Context Protocol）サーバとして stdio で公開し、AI エージェントから使えるようにする |
 | `usagi llm-mcp [--model <MODEL>]` | （ヘルプ非表示・エージェント向け）ローカル LLM（Ollama）を MCP サーバとして公開し、クラウド Agent が軽量タスクを委譲できるようにする（トークン節約） |
 | `usagi op-mcp` | （ヘルプ非表示・エージェント向け）1Password CLI（`op`）を MCP サーバとして公開し、AI エージェントが secret を読み取れるようにする（読み取り専用） |
@@ -231,6 +233,10 @@ user         tabs                     ユーザーはタブを好む
 
 ローカル LLM（Ollama）を **MCP サーバ**として公開し、クラウド Agent が要約・命名・定型文生成などの軽量タスクを `local_llm_ask` ツールで委譲できるようにします。`--model` で委譲先モデルを指定します（既定は `qwen2.5-coder:7b`）。設定での有効化・資材のインストール・対応 tool の詳細は専用の章 [3.4 ローカル LLM MCP サーバ](04-llm-mcp.md) を参照してください。
 
+### `usagi op`
+
+`usagi op login` は、[1Password MCP サーバ](05-op-mcp.md)が使う 1Password サービスアカウントトークンを OS シークレットストア（macOS Keychain / Linux Secret Service）に保存し、`op_mcp.enabled` を `true` にします。`logout` はトークンを削除して `op_mcp.enabled` を `false` に戻し、`status` は有効化フラグとトークンの保存有無を表示します。
+
 ### `usagi op-mcp`
 
-[1Password CLI（`op`）](https://developer.1password.com/docs/cli/)を **MCP サーバ**として公開し、AI エージェントが secret reference の解決（`op_read`）や item / vault の参照（`op_item_get` / `op_item_list` / `op_vault_list` / `op_whoami`）を**読み取り専用**で行えるようにします。認証は `op`（環境）に委ねます。対応 tool・登録方法・前提の詳細は専用の章 [3.5 1Password MCP サーバ](05-op-mcp.md) を参照してください。
+[1Password CLI（`op`）](https://developer.1password.com/docs/cli/)を **MCP サーバ**として公開し、AI エージェントが secret reference の解決（`op_read`）や item / vault の参照（`op_item_get` / `op_item_list` / `op_vault_list` / `op_whoami`）を**読み取り専用**で行えるようにします。認証は `op`（環境）に委ね、`usagi op login` 済みなら OS シークレットストアのトークンを `op` へ渡します。対応 tool・登録方法・前提の詳細は専用の章 [3.5 1Password MCP サーバ](05-op-mcp.md) を参照してください。

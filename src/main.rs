@@ -2,6 +2,7 @@ use std::path::Path;
 
 use clap::{Parser, Subcommand};
 
+use usagi::infrastructure::secret_store::SecretStore;
 use usagi::presentation::mcp::child_io::{read_capped, wait_with_timeout, WaitableChild};
 use usagi::presentation::mcp::llm::LlmBackend;
 use usagi::presentation::mcp::op::OpBackend;
@@ -264,6 +265,49 @@ impl OpBackend for OpCliBackend {
     }
 }
 
+/// The production [`SecretStore`] backed by the operating system's native secret
+/// store. It is deliberately kept at the composition root because it is pure
+/// process/OS IO; the use cases are tested against an injected fake store.
+/// The production [`SecretStore`] backed by the operating system's native secret
+/// store via the cross-platform [`keyring`] crate: Apple Keychain on macOS, the
+/// Windows Credential Manager on Windows, and the Linux kernel keyutils store on
+/// Linux. Kept at the composition root because it is pure OS IO; the use cases
+/// are tested against an injected fake store.
+struct SystemSecretStore;
+
+/// The keyring "service" namespace usagi stores its credentials under. The entry
+/// "user" is the secret's key (e.g. the 1Password token key).
+const KEYRING_SERVICE: &str = "usagi";
+
+impl SecretStore for SystemSecretStore {
+    fn get(&self, key: &str) -> Result<Option<String>, String> {
+        let entry = keyring::Entry::new(KEYRING_SERVICE, key)
+            .map_err(|e| format!("opening keychain entry: {e}"))?;
+        match entry.get_password() {
+            Ok(password) => Ok(Some(password)),
+            Err(keyring::Error::NoEntry) => Ok(None),
+            Err(e) => Err(format!("reading keychain entry: {e}")),
+        }
+    }
+
+    fn set(&self, key: &str, value: &str) -> Result<(), String> {
+        let entry = keyring::Entry::new(KEYRING_SERVICE, key)
+            .map_err(|e| format!("opening keychain entry: {e}"))?;
+        entry
+            .set_password(value)
+            .map_err(|e| format!("writing keychain entry: {e}"))
+    }
+
+    fn delete(&self, key: &str) -> Result<(), String> {
+        let entry = keyring::Entry::new(KEYRING_SERVICE, key)
+            .map_err(|e| format!("opening keychain entry: {e}"))?;
+        match entry.delete_credential() {
+            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+            Err(e) => Err(format!("deleting keychain entry: {e}")),
+        }
+    }
+}
+
 #[derive(Parser)]
 #[command(
     name = "usagi",
@@ -340,6 +384,11 @@ enum Commands {
     Memory {
         #[command(subcommand)]
         command: usagi::presentation::cli::memory::MemoryCommand,
+    },
+    /// Manage the 1Password credential used by `usagi op-mcp`
+    Op {
+        #[command(subcommand)]
+        command: usagi::presentation::cli::op::OpCommand,
     },
     /// Run the local LLM MCP server over stdio (for AI agents to offload work)
     ///
@@ -420,6 +469,21 @@ fn main() -> anyhow::Result<()> {
         Commands::Init { git } => usagi::presentation::cli::init::run(git),
         Commands::Issue { command } => usagi::presentation::cli::issue::run(command),
         Commands::Memory { command } => usagi::presentation::cli::memory::run(command),
+        Commands::Op { command } => {
+            let storage = usagi::infrastructure::storage::Storage::open_default()?;
+            let mut stdout = std::io::stdout();
+            usagi::presentation::cli::op::run(
+                command,
+                &SystemSecretStore,
+                &storage,
+                Some(Box::new(|| {
+                    console::Term::stderr()
+                        .read_secure_line()
+                        .map_err(Into::into)
+                })),
+                &mut stdout,
+            )
+        }
         Commands::LlmMcp { model } => {
             let stdin = std::io::stdin();
             let stdout = std::io::stdout();
@@ -483,6 +547,7 @@ fn command_name(command: &Commands) -> Option<&'static str> {
         Commands::Init { .. } => Some("init"),
         Commands::Issue { .. } => Some("issue"),
         Commands::Memory { .. } => Some("memory"),
+        Commands::Op { .. } => Some("op"),
         Commands::Run { .. } => Some("run"),
         Commands::Status => Some("status"),
         Commands::Update { .. } => Some("update"),
@@ -517,10 +582,11 @@ fn log_error(error: &anyhow::Error) {
 /// environment variable, not a command-line argument, so it does not appear in
 /// agent launch commands or process listings.
 fn op_service_account_token() -> Option<String> {
-    usagi::infrastructure::storage::Storage::open_default()
+    use usagi::infrastructure::secret_store::OP_SERVICE_ACCOUNT_TOKEN_KEY;
+    SystemSecretStore
+        .get(OP_SERVICE_ACCOUNT_TOKEN_KEY)
         .ok()
-        .and_then(|storage| storage.load_settings().ok())
-        .and_then(|settings| settings.op_mcp.token().map(str::to_string))
+        .flatten()
 }
 
 /// Spawn `command` via `sh -c` detached in the background, with `cwd` as its

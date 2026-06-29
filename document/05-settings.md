@@ -44,7 +44,7 @@
 | 端末スクロールバック | `terminal_scrollback_lines` | usize | `2000` | 埋め込み端末ペインが保持するスクロールバック行数。**ライブなペインごとに 1 つ**確保されるため、セッション・ペインを多数開いたときの TUI メモリの主因。深い履歴が欲しければ上げ、メモリを抑えたければ下げる（上限 `50000`） |
 | ローカル LLM 有効化 | `local_llm.enabled` | bool | `false` | 有効にすると `agent` 起動時に [ローカル LLM MCP サーバ](03-commands/04-llm-mcp.md)（`usagi-llm`）を wire し、軽量タスクをローカル LLM に委譲できる |
 | ローカル LLM モデル | `local_llm.model` | string | `qwen2.5-coder:7b` | 委譲先の Ollama モデル名（`qwen2.5-coder:7b` / `:3b` / `:1.5b` / `qwen2.5:7b`） |
-| 1Password トークン | `op_mcp.service_account_token` | string? | `null` | 1Password サービスアカウントトークン。登録すると `agent` 起動時に [1Password MCP サーバ](03-commands/05-op-mcp.md)（`usagi-op`）を wire し、エージェントが `op` 経由で secret を読み取れる。空・未登録なら wire しない |
+| 1Password MCP 有効化 | `op_mcp.enabled` | bool | `false` | 有効にすると `agent` 起動時に [1Password MCP サーバ](03-commands/05-op-mcp.md)（`usagi-op`）を wire し、エージェントが `op` 経由で secret を読み取れる。1Password サービスアカウントトークン本体は OS のシークレットストアに保存する |
 | 同梱スキル機能 | `skill_features` | map<string, bool> | `{}` | usagi が各セッションに配布する[同梱スキル](04-orchestration.md#スキルの配布)を**機能（feature）単位**で ON/OFF する。キーは機能 ID（現状 `pull-request`：PR 作成・更新・修正の 3 スキルをまとめたもの）、値が有効・無効。既定値（ON）と同じ機能はマップに残さない（未記載 = 既定）。`usagi-session` は usagi 固有の常時 ON スキルで、この設定の対象外 |
 
 > **同梱スキル機能（`skill_features`）**: usagi はビルド時に埋め込んだ Claude Code スキルを、起動する
@@ -68,16 +68,15 @@
 > - `local_llm.model` は上表の allowlist の値のみ有効です。`settings.json` を手編集して allowlist 外の値を入れた場合、
 >   ロード時に既定（`qwen2.5-coder:7b`）へ戻されます（model 名はエージェント起動コマンドに展開されるため）。
 
-> **1Password トークン（`op_mcp.service_account_token`）**: [1Password MCP サーバ](03-commands/05-op-mcp.md)を
-> エージェントへ自動 wire するための**唯一のスイッチ**です。トークンを登録すると `usagi-op` サーバが `agent` 起動
-> コマンドに追加され、登録を外す（空にする）と wire されません。トークンは `usagi op-mcp` プロセスが読み取り、
-> `op` サブプロセスへ環境変数 `OP_SERVICE_ACCOUNT_TOKEN` として渡します（**エージェントの起動コマンド行や
-> プロセス一覧には出ません**）。
+> **1Password トークン**: 1Password サービスアカウントトークンは `settings.json` には保存せず、OS 固有の
+> シークレットストア（macOS Keychain / Linux Secret Service）に保存します。登録は `usagi op login`、削除は
+> `usagi op logout`、状態確認は `usagi op status` で行います。`login` はトークンをシークレットストアに保存したうえで
+> `op_mcp.enabled` を `true` にし、`logout` はトークンを削除して `false` に戻します。
 >
-> **セキュリティ注記**: トークンは `settings.json` に**平文**で保存されます。ファイルの権限（`~/.usagi/settings.json`）に
-> 留意してください。`usagi config`（表示）はトークン値を表示せず、登録の有無だけを `(registered)` / `(none)` で示します。
-> 登録・変更は `usagi config --edit`（`settings.json` を `$EDITOR` で編集）で `op_mcp.service_account_token` に値を入れて
-> 行います。空白だけの値はロード時に未登録（`null`）として扱われます。
+> `usagi op-mcp` は起動時にシークレットストアからトークンを読み取り、`op` サブプロセスへ環境変数
+> `OP_SERVICE_ACCOUNT_TOKEN` として渡します（**エージェントの起動コマンド行やプロセス一覧には出ません**）。
+> `usagi config`（表示）はトークン値を表示せず、`op_mcp.enabled` だけを示します。実際にトークンが保存されているかは
+> `usagi op status` で確認します。
 
 > すべての項目はフォーマットバージョン `version: 1` とともに `settings.json` に格納されます。
 > 完全な JSON 例は [data/01-global.md](data/01-global.md#settingsjson) を参照してください。
@@ -181,7 +180,7 @@ CLI からも設定を確認・編集できます（[3. コマンドリファレ
 | `key_scheme` | 埋め込み端末（[没入](design/home/02-layout.md#没入attached)）がナビゲーション用に予約するキー方式（`prefix` / `alt`）の選択 |
 | `terminal_scrollback_lines` | 埋め込み端末ペインが保持するスクロールバック行数。ライブなペインごとに確保されるため、多数のセッションを開いたときのメモリ使用量を左右する |
 | `local_llm.enabled` / `local_llm.model` | 有効時、`agent` 起動コマンドに `usagi-llm` MCP サーバを追加し、軽量タスクをローカル LLM に委譲する（[3.4 ローカル LLM MCP サーバ](03-commands/04-llm-mcp.md)） |
-| `op_mcp.service_account_token` | 登録時、`agent` 起動コマンドに `usagi-op` MCP サーバを追加し、エージェントが `op` 経由で secret を読み取れるようにする（[3.5 1Password MCP サーバ](03-commands/05-op-mcp.md)） |
+| `op_mcp.enabled` | 有効時、`agent` 起動コマンドに `usagi-op` MCP サーバを追加し、エージェントが `op` 経由で secret を読み取れるようにする（[3.5 1Password MCP サーバ](03-commands/05-op-mcp.md)） |
 | `skill_features` | `session create` 時に、機能が有効な[同梱スキル](04-orchestration.md#スキルの配布)だけを各 worktree の `.claude/skills/` へ symlink する。無効な機能のスキルは配布しない（`usagi-session` は常時配布） |
 
 > ホーム画面の `config` で `session_action_ui` や `key_scheme` を変更すると、設定画面を閉じて

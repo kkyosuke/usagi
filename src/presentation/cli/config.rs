@@ -164,7 +164,7 @@ fn render_settings(settings: &Settings) -> Vec<String> {
         ),
         format!("local_llm_enabled      {}", settings.local_llm.enabled),
         format!("local_llm_model        {}", settings.local_llm.model),
-        format!("op_mcp_secret          {}", op_mcp_secret_label(settings)),
+        format!("op_mcp_enabled        {}", settings.op_mcp.enabled),
     ];
     // One line per toggleable shipped-skill feature, keyed by its stable id.
     for feature in SkillFeature::ALL {
@@ -175,17 +175,6 @@ fn render_settings(settings: &Settings) -> Vec<String> {
         ));
     }
     lines
-}
-
-/// The display label for the optional 1Password service account token. The
-/// token itself is never printed by `usagi config`; the user edits
-/// `op_mcp.service_account_token` in `settings.json` when they need to change it.
-fn op_mcp_secret_label(settings: &Settings) -> &'static str {
-    if settings.op_mcp.enabled() {
-        "(registered)"
-    } else {
-        "(none)"
-    }
 }
 
 /// The on-disk label for a [`Theme`].
@@ -277,9 +266,7 @@ mod tests {
                 enabled: true,
                 model: "qwen2.5-coder:3b".to_string(),
             },
-            op_mcp: crate::domain::settings::OpMcp {
-                service_account_token: Some("ops_123".to_string()),
-            },
+            op_mcp: crate::domain::settings::OpMcp { enabled: true },
             // The PR-skills feature pinned off, to exercise the skill line.
             skill_features: [("pull-request".to_string(), false)].into_iter().collect(),
         };
@@ -297,7 +284,7 @@ mod tests {
         assert!(lines[10].contains("1234")); // terminal_scrollback
         assert!(lines[11].contains("true"));
         assert!(lines[12].contains("qwen2.5-coder:3b"));
-        assert!(lines[13].contains("(registered)"));
+        assert!(lines[13].contains("true"));
         // The shipped-skill feature line shows its id and effective state.
         assert!(lines[14].contains("pull-request"));
         assert!(lines[14].contains("false"));
@@ -308,7 +295,7 @@ mod tests {
         let lines = render_settings(&Settings::default());
         assert!(lines[1].contains("(none)"));
         assert!(lines[2].contains("(none)"));
-        assert!(lines[13].contains("(none)"));
+        assert!(lines[13].contains("false"));
     }
 
     #[test]

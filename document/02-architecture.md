@@ -110,7 +110,7 @@ src/
 │   └── memory_store.rs         # <repo>/.usagi/memory/ の markdown + MEMORY.md + index.json（MemoryStore）
 │
 └── presentation/               # CLI ルーティング・TUI・MCP
-    ├── cli/                    # サブコマンド（init / hop / status / clean / config / doctor / feature（Agent CLI の機能サポート表）/ icon / run / issue / memory / mcp / llm_mcp / op_mcp / agent_phase（隠し・フック用））
+    ├── cli/                    # サブコマンド（init / hop / status / clean / config / doctor / feature（Agent CLI の機能サポート表）/ icon / run / issue / memory / op / mcp / llm_mcp / op_mcp / agent_phase（隠し・フック用））
     ├── mcp/                    # MCP サーバ（JSON-RPC 2.0 フレーミングを共有）
     │   ├── mod.rs              # 共有プロトコル（dispatch_line / stdio serve ループ / レスポンス整形 / parse_args・to_pretty / McpService）
     │   ├── usagi.rs            # 統合 usagi サーバ（UsagiMcpServer）。issue/memory サーバと session サーバを合成し公開
