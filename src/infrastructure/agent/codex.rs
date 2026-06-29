@@ -3,8 +3,9 @@
 //! Wires usagi into Codex through its `-c key=value` config overrides (the same
 //! dotted-path overrides Codex would otherwise read from `~/.codex/config.toml`):
 //!
-//! - **MCP servers** — the unified `usagi` server, plus the `usagi-llm` server
-//!   when the local LLM is enabled (`mcp_servers.<name>.command` / `.args`).
+//! - **MCP servers** — the unified `usagi` server, plus optional `usagi-llm`
+//!   and `usagi-op` servers when their settings are enabled
+//!   (`mcp_servers.<name>.command` / `.args`).
 //! - **System prompt** — the session note (already in a worktree; delegate light
 //!   work to the local LLM when on) via `developer_instructions`, Codex's
 //!   additive instruction override.
@@ -114,7 +115,7 @@ fn wiring_overrides(wiring: &AgentWiring) -> Vec<String> {
     let bin = &wiring.usagi_bin;
     let local_llm_model = wiring.local_llm_model.as_deref();
     // The unified usagi MCP server is always wired in (issues, memories,
-    // sessions); the local-LLM server joins it when enabled.
+    // sessions); optional servers join it when enabled.
     let mut overrides = vec![
         config_override("mcp_servers.usagi.command", bin),
         config_override("mcp_servers.usagi.args", &toml_string_array(&["mcp"])),
@@ -124,6 +125,13 @@ fn wiring_overrides(wiring: &AgentWiring) -> Vec<String> {
         overrides.push(config_override(
             "mcp_servers.usagi-llm.args",
             &toml_string_array(&["llm-mcp", "--model", model]),
+        ));
+    }
+    if wiring.op_mcp_enabled {
+        overrides.push(config_override("mcp_servers.usagi-op.command", bin));
+        overrides.push(config_override(
+            "mcp_servers.usagi-op.args",
+            &toml_string_array(&["op-mcp"]),
         ));
     }
     // The system prompt rides along as Codex's additive `developer_instructions`.
@@ -323,6 +331,13 @@ impl Agent for CodexAgent {
                 &toml_string_array(&["llm-mcp", "--model", model]),
             ));
         }
+        if wiring.op_mcp_enabled {
+            parts.push(config_override("mcp_servers.usagi-op.command", bin));
+            parts.push(config_override(
+                "mcp_servers.usagi-op.args",
+                &toml_string_array(&["op-mcp"]),
+            ));
+        }
         parts.push(shell_single_quote(prompt));
         parts.join(" ")
     }
@@ -349,9 +364,18 @@ mod tests {
     /// resolved binary path the caller passes, with the local LLM off unless a
     /// model is given.
     fn wiring(usagi_bin: &str, local_llm_model: Option<&str>) -> AgentWiring {
+        wiring_with_op(usagi_bin, local_llm_model, false)
+    }
+
+    fn wiring_with_op(
+        usagi_bin: &str,
+        local_llm_model: Option<&str>,
+        op_mcp_enabled: bool,
+    ) -> AgentWiring {
         AgentWiring {
             usagi_bin: usagi_bin.to_string(),
             local_llm_model: local_llm_model.map(str::to_string),
+            op_mcp_enabled,
         }
     }
 
@@ -378,6 +402,27 @@ mod tests {
         assert!(launch.contains("-c 'mcp_servers.usagi.args=[\"mcp\"]'"));
         // The local-LLM server is absent when no model is given.
         assert!(!launch.contains("usagi-llm"));
+    }
+
+    #[test]
+    fn launch_command_wires_in_the_op_server_only_when_enabled() {
+        // Off by default: no 1Password overrides appear.
+        let off = CodexAgent::new().launch_command(&wiring("usagi", None), false, None);
+        assert!(!off.contains("usagi-op"));
+        // Enabled: the `usagi-op` server is wired via `-c` overrides as `op-mcp`
+        // (no secret on the command line).
+        let on =
+            CodexAgent::new().launch_command(&wiring_with_op("usagi", None, true), false, None);
+        assert!(on.contains("-c 'mcp_servers.usagi-op.command=usagi'"));
+        assert!(on.contains("-c 'mcp_servers.usagi-op.args=[\"op-mcp\"]'"));
+    }
+
+    #[test]
+    fn headless_command_wires_in_the_op_server_when_enabled() {
+        let cmd =
+            CodexAgent::new().headless_command(&wiring_with_op("usagi", None, true), "clean up");
+        assert!(cmd.contains("-c 'mcp_servers.usagi-op.command=usagi'"));
+        assert!(cmd.contains("-c 'mcp_servers.usagi-op.args=[\"op-mcp\"]'"));
     }
 
     #[test]

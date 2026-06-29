@@ -199,15 +199,22 @@ const MAX_OP_STDERR_BYTES: usize = 4 * 1024;
 /// root so the op-mcp transport stays free of subprocess IO and unit-testable.
 /// Each tool call runs exactly one `op` invocation with stdin closed, returning
 /// stdout on success and a bounded stderr diagnostic on failure.
-struct OpCliBackend;
+struct OpCliBackend {
+    service_account_token: Option<String>,
+}
 
 impl OpBackend for OpCliBackend {
     fn run(&self, args: &[String]) -> Result<String, String> {
-        let mut child = std::process::Command::new("op")
+        let mut command = std::process::Command::new("op");
+        command
             .args(args)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        if let Some(token) = self.service_account_token.as_deref() {
+            command.env("OP_SERVICE_ACCOUNT_TOKEN", token);
+        }
+        let mut child = command
             .spawn()
             .map_err(|e| format!("failed to start op: {e}"))?;
 
@@ -441,7 +448,9 @@ fn main() -> anyhow::Result<()> {
             let stdin = std::io::stdin();
             let stdout = std::io::stdout();
             usagi::presentation::cli::op_mcp::run(
-                Box::new(OpCliBackend),
+                Box::new(OpCliBackend {
+                    service_account_token: op_service_account_token(),
+                }),
                 stdin.lock(),
                 stdout.lock(),
             )
@@ -498,6 +507,20 @@ fn trace_command(name: Option<&'static str>, ok: bool) {
 /// swallowed so logging never masks the original error on its way to stderr.
 fn log_error(error: &anyhow::Error) {
     usagi::infrastructure::error_log::ErrorLog::record(&format!("{error:#}"));
+}
+
+/// The 1Password service account token registered in global settings, if any.
+///
+/// Best-effort at the composition root: if settings cannot be read, `op-mcp`
+/// still starts and simply relies on an ambient `op` session (or returns `op`'s
+/// own "not signed in" error). The token is supplied to `op` through an
+/// environment variable, not a command-line argument, so it does not appear in
+/// agent launch commands or process listings.
+fn op_service_account_token() -> Option<String> {
+    usagi::infrastructure::storage::Storage::open_default()
+        .ok()
+        .and_then(|storage| storage.load_settings().ok())
+        .and_then(|settings| settings.op_mcp.token().map(str::to_string))
 }
 
 /// Spawn `command` via `sh -c` detached in the background, with `cwd` as its

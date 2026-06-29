@@ -148,6 +148,46 @@ impl Default for LocalLlm {
     }
 }
 
+/// Configuration for the optional 1Password MCP server the agent can read
+/// secrets through (`usagi op-mcp`).
+///
+/// Disabled by default: usagi never wires it automatically. Registering a
+/// 1Password **service account token** here turns it on — the 1Password MCP
+/// server is then wired into launched agents and authenticates `op` with that
+/// token, so the agent can resolve secret references (`op://…`) on demand. The
+/// token is read only by the `usagi op-mcp` process and used to set
+/// `OP_SERVICE_ACCOUNT_TOKEN` for the `op` subprocess; it is never placed on a
+/// command line.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct OpMcp {
+    /// The 1Password service account token `op` authenticates with. `None` (or a
+    /// blank string) leaves the server unwired and falls back to whatever ambient
+    /// `op` session exists.
+    pub service_account_token: Option<String>,
+}
+
+impl OpMcp {
+    /// Whether a non-blank service account token is registered — i.e. the
+    /// 1Password MCP server should be wired into launched agents. A present but
+    /// whitespace-only token counts as unset.
+    pub fn enabled(&self) -> bool {
+        self.service_account_token
+            .as_deref()
+            .is_some_and(|token| !token.trim().is_empty())
+    }
+
+    /// The registered service account token, trimmed, when it is non-blank.
+    /// `None` when no usable token is set. The single read path used by the
+    /// composition root to authenticate `op`.
+    pub fn token(&self) -> Option<&str> {
+        self.service_account_token
+            .as_deref()
+            .map(str::trim)
+            .filter(|token| !token.is_empty())
+    }
+}
+
 impl AgentCli {
     /// Every agent CLI variant, in the canonical order menus, the config-screen
     /// selector, and the `usagi feature` table list them.
@@ -354,6 +394,8 @@ pub struct Settings {
     pub terminal_scrollback_lines: usize,
     /// The optional local LLM the agent can offload light work to.
     pub local_llm: LocalLlm,
+    /// The optional 1Password MCP server the agent can read secrets through.
+    pub op_mcp: OpMcp,
     /// Which of usagi's optional shipped-skill features are enabled, keyed by
     /// [`SkillFeature::id`]. A feature absent from the map uses its
     /// [`default_enabled`](SkillFeature::default_enabled), so the map only ever
@@ -383,6 +425,7 @@ impl Default for Settings {
             mascot_animation_enabled: true,
             terminal_scrollback_lines: DEFAULT_TERMINAL_SCROLLBACK_LINES,
             local_llm: LocalLlm::default(),
+            op_mcp: OpMcp::default(),
             // No overrides recorded: every shipped-skill feature uses its own
             // default (see [`SkillFeature::default_enabled`]).
             skill_features: BTreeMap::new(),
@@ -406,6 +449,11 @@ impl Settings {
         if !LOCAL_LLM_MODELS.contains(&self.local_llm.model.as_str()) {
             self.local_llm.model = DEFAULT_LOCAL_LLM_MODEL.to_string();
         }
+        // A blank service-account token is equivalent to "not configured" and
+        // should not wire the 1Password MCP server. A non-blank token is trimmed
+        // so accidental surrounding whitespace from copy/paste is not persisted
+        // or passed through to `op`.
+        self.op_mcp.service_account_token = self.op_mcp.token().map(str::to_string);
         // A hand-edited `settings.json` could ask every pane to keep an enormous
         // (or effectively unbounded) scrollback buffer; cap it so one setting
         // cannot exhaust memory across every open pane.
@@ -475,6 +523,7 @@ impl Settings {
         AgentWiring {
             usagi_bin: usagi_bin.to_string(),
             local_llm_model: self.local_llm.enabled.then(|| self.local_llm.model.clone()),
+            op_mcp_enabled: self.op_mcp.enabled(),
         }
     }
 }
@@ -749,6 +798,62 @@ mod tests {
         settings.local_llm.model = "qwen2.5-coder:3b".to_string();
         let on = settings.agent_wiring("usagi");
         assert_eq!(on.local_llm_model.as_deref(), Some("qwen2.5-coder:3b"));
+    }
+
+    #[test]
+    fn agent_wiring_enables_op_mcp_only_when_a_token_is_registered() {
+        // Disabled by default: no 1Password token registered.
+        let mut settings = Settings::default();
+        assert!(!settings.agent_wiring("usagi").op_mcp_enabled);
+        // A blank token still counts as not registered.
+        settings.op_mcp.service_account_token = Some("   ".to_string());
+        assert!(!settings.agent_wiring("usagi").op_mcp_enabled);
+        // A non-blank token turns the wiring on.
+        settings.op_mcp.service_account_token = Some("ops_token".to_string());
+        assert!(settings.agent_wiring("usagi").op_mcp_enabled);
+    }
+
+    #[test]
+    fn op_mcp_enabled_and_token_treat_blank_as_unset() {
+        // Default: no token, disabled, nothing to read.
+        let default = OpMcp::default();
+        assert!(!default.enabled());
+        assert_eq!(default.token(), None);
+        // Whitespace-only: treated as unset.
+        let blank = OpMcp {
+            service_account_token: Some("  \t ".to_string()),
+        };
+        assert!(!blank.enabled());
+        assert_eq!(blank.token(), None);
+        // A real token: enabled, and `token()` returns it trimmed.
+        let set = OpMcp {
+            service_account_token: Some("  ops_abc  ".to_string()),
+        };
+        assert!(set.enabled());
+        assert_eq!(set.token(), Some("ops_abc"));
+    }
+
+    #[test]
+    fn sanitized_trims_or_clears_the_op_mcp_token() {
+        // Surrounding whitespace is trimmed off a real token.
+        let padded = Settings {
+            op_mcp: OpMcp {
+                service_account_token: Some("  ops_abc  ".to_string()),
+            },
+            ..Default::default()
+        };
+        assert_eq!(
+            padded.sanitized().op_mcp.service_account_token.as_deref(),
+            Some("ops_abc")
+        );
+        // A blank token is cleared to None so it never wires the server.
+        let blank = Settings {
+            op_mcp: OpMcp {
+                service_account_token: Some("   ".to_string()),
+            },
+            ..Default::default()
+        };
+        assert_eq!(blank.sanitized().op_mcp.service_account_token, None);
     }
 
     #[test]

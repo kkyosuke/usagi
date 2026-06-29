@@ -12,6 +12,7 @@
 ## 目次
 
 - [概要](#概要)
+- [有効化（settings に secret を登録）](#有効化settings-に-secret-を登録)
 - [前提（認証）](#前提認証)
 - [起動と登録](#起動と登録)
 - [対応 tool 一覧](#対応-tool-一覧)
@@ -28,25 +29,57 @@
   item の作成・編集・削除や `op run` のような任意コマンド実行は公開しない。
 - **状態を持たない**: サーバは資格情報を保持せず、認証は `op` 側（環境）に委ねる。
 
+## 有効化（settings に secret を登録）
+
+このサーバは**既定では wire されません**。グローバル設定 `settings.json` に **1Password サービスアカウントトークン**を
+登録することが、エージェントへ自動 wire するための唯一のスイッチです（[5. 設定](../05-settings.md) 参照）。
+
+| キー | 既定 | 意味 |
+|---|---|---|
+| `op_mcp.service_account_token` | `null` | 登録すると `agent` 起動時に `usagi-op` サーバが wire される。空・未登録なら wire しない |
+
+登録は `usagi config --edit`（`settings.json` を `$EDITOR` で開く）で行います。
+
+```jsonc
+{
+  "version": 1,
+  "op_mcp": { "service_account_token": "ops_xxxxxxxx..." }
+}
+```
+
+- トークンを登録すると、Claude は `--mcp-config`、Codex は `-c mcp_servers.usagi-op.*` 設定上書きで
+  `usagi-op` サーバ（`usagi op-mcp`）が起動コマンドに追加されます（Gemini はインライン注入に対応しないため wire されません）。
+- トークンは **`usagi op-mcp` プロセスが settings から読み取り**、`op` サブプロセスへ環境変数
+  `OP_SERVICE_ACCOUNT_TOKEN` として渡します。**エージェントの起動コマンド行やプロセス一覧には出ません**。
+- 空白だけの値はロード時に未登録（`null`）として扱われ、wire されません。
+- `usagi config`（表示）はトークン値を出力せず、登録の有無を `op_mcp_secret (registered)` / `(none)` で示します。
+
+> **セキュリティ注記**: トークンは `settings.json` に**平文**で保存されます。ファイル権限（`~/.usagi/settings.json`）に
+> 留意してください。サインイン済みなら、エージェントはこのトークンで読める secret をすべて参照できます。
+
 ## 前提（認証）
 
-このサーバは `op` を呼び出すだけで、認証は行いません。`op` が**サインイン済み**である必要があります。
+このサーバは `op` を呼び出すだけで、認証そのものは `op`（環境）に委ねます。次のいずれかが必要です。
 
-- **対話的**: `op signin`（1Password デスクトップアプリ連携、または `eval $(op signin)`）。
-- **非対話的**: サービスアカウントトークンを `OP_SERVICE_ACCOUNT_TOKEN` 環境変数で渡す。
+- **settings に登録（推奨・自動 wire の前提）**: 上記 `op_mcp.service_account_token`。`usagi op-mcp` が
+  これを読み、`op` へ `OP_SERVICE_ACCOUNT_TOKEN` として渡す。
+- **対話的**: `op signin`（1Password デスクトップアプリ連携、または `eval $(op signin)`）。手動登録で
+  サーバを直接起動する場合に使える（自動 wire はトークン登録が前提）。
+- **非対話的（環境変数）**: シェルで `OP_SERVICE_ACCOUNT_TOKEN` を export 済みなら、`op` がそれを使う。
 
 未認証のまま tool を呼ぶと、`op` のエラー（例: `no active session found`）が
 tool 実行エラー（`isError: true`）としてそのまま返ります。
 
 ## 起動と登録
 
-シェルから直接起動できますが、通常は MCP クライアント（エージェント）に登録して使います。
+通常は上記のとおり **settings にトークンを登録すれば usagi が自動で wire** します。手元での確認や、usagi 以外の
+MCP クライアントから使う場合はシェルから直接起動・登録もできます。
 
 ```bash
 usagi op-mcp   # stdin から JSON-RPC を読み、stdout へ応答を書く
 ```
 
-MCP クライアントへの登録例:
+usagi 以外の MCP クライアントへ手動登録する例:
 
 ```json
 {
