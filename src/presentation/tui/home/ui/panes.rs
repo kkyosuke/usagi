@@ -1284,30 +1284,24 @@ pub(in crate::presentation::tui::home) fn attached_tab_at(
     (target != strip.active).then_some(target)
 }
 
-/// Which 在席 (Focus) tab a click selected in the right pane.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(in crate::presentation::tui::home) enum FocusTabClick {
-    /// One of the live pane tabs (0-based, matching [`TabStrip::labels`]).
-    Pane(usize),
-    /// The trailing `+ new` launch tab.
-    New,
-}
-
-/// The tab a left click at the 0-based screen (`col`, `row`) lands on while 在席
-/// (Focus), or `None` when the click is not on a changeable tab.
+/// The live-pane tab (0-based, matching [`TabStrip::labels`]) a left click at the
+/// 0-based screen (`col`, `row`) lands on while 在席 (Focus), or `None` when the
+/// click is not on a changeable pane tab.
 ///
 /// 在席 draws the same two-row header/tab block as 没入 at the top of the right
 /// pane, but the terminal body is only a preview and the selector may also sit on
-/// the trailing `+ new` tab. This hit-test reconstructs that rendered strip so
-/// the event loop can make right-pane tabs mouse-selectable, mirroring the
-/// keyboard `Ctrl-N` / `Ctrl-P` path.
+/// the trailing `+ new` tab. The `+ new` chip is only rendered while it is the
+/// selected tab, so a click can never land on it (clicking the active tab is a
+/// no-op); only the live pane chips are selectable here. This hit-test
+/// reconstructs that rendered strip so the event loop can make right-pane pane
+/// tabs mouse-selectable, mirroring the keyboard `Ctrl-N` / `Ctrl-P` path.
 pub(in crate::presentation::tui::home) fn focus_tab_at(
     state: &HomeState,
     col: u16,
     row: u16,
     raw_height: usize,
     raw_width: usize,
-) -> Option<FocusTabClick> {
+) -> Option<usize> {
     let strip = state.terminal_tabs()?.clone();
     if strip.labels.is_empty() {
         return None;
@@ -1329,14 +1323,9 @@ pub(in crate::presentation::tui::home) fn focus_tab_at(
     let target = tab_chip_ranges(&header, &combined)
         .into_iter()
         .position(|range| range.contains(&rel_col))?;
-    if target == combined.active {
-        return None;
-    }
-    if target >= strip.labels.len() {
-        Some(FocusTabClick::New)
-    } else {
-        Some(FocusTabClick::Pane(target))
-    }
+    // Clicking the active tab — including the appended `+ new` chip, which only
+    // shows while selected — is a no-op; every other hit is a live pane chip.
+    (target != combined.active).then_some(target)
 }
 
 /// For the full sidebar, each worktree's global index (across every group, root

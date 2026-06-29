@@ -2358,11 +2358,6 @@ impl HomeState {
         Some(index.min(panes - 1))
     }
 
-    /// Select the trailing `+ new` launch tab in 在席 (Focus).
-    pub fn focus_select_new_tab(&mut self) {
-        self.focus_new_tab = true;
-    }
-
     /// Discard 在席's "+ new" launch surface when it sits over live panes — the
     /// state after zooming out with `Ctrl-T` (or navigating onto "+ new") — by
     /// stepping the selector back onto the active pane's tab, so that pane

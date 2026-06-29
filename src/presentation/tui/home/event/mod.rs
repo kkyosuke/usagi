@@ -582,26 +582,20 @@ pub(super) fn event_loop(
                 }
                 // 在席's right pane owns its tab strip too: clicking a pane tab
                 // previews/activates that live pane through the same `tab_op`
-                // keyboard navigation uses, while clicking `+ new` returns to
-                // the launch surface. 切替 deliberately keeps the right pane a
-                // dim preview; 没入 handles its own tab clicks inside the pane
-                // driver.
+                // keyboard navigation uses. 切替 deliberately keeps the right
+                // pane a dim preview; 没入 handles its own tab clicks inside the
+                // pane driver.
                 if state.mode() == Mode::Focus {
-                    if let Some(hit) = ui::focus_tab_at(
+                    if let Some(index) = ui::focus_tab_at(
                         &state,
                         click.col,
                         click.row,
                         height as usize,
                         width as usize,
                     ) {
-                        match hit {
-                            ui::FocusTabClick::Pane(index) => {
-                                if let Some(index) = state.focus_select_pane_tab(index) {
-                                    let dir = selected_dir(&state, wiring.workspace_root);
-                                    (wiring.tab_op)(&dir, Some(TabNav::To(index)));
-                                }
-                            }
-                            ui::FocusTabClick::New => state.focus_select_new_tab(),
+                        if let Some(index) = state.focus_select_pane_tab(index) {
+                            let dir = selected_dir(&state, wiring.workspace_root);
+                            (wiring.tab_op)(&dir, Some(TabNav::To(index)));
                         }
                         force_paint = true;
                         continue;

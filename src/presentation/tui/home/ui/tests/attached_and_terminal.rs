@@ -74,14 +74,11 @@ fn focus_tab_at_switches_from_new_tab_to_a_clicked_pane_tab() {
     state.set_terminal_tabs(vec!["agent".to_string(), "terminal".to_string()], 0);
     let geo = terminal_geometry(24, 120, Sidebar::Full);
     let col = chip_column(&state, geo, "2 terminal");
-    assert_eq!(
-        focus_tab_at(&state, col, geo.origin_row, 24, 120),
-        Some(FocusTabClick::Pane(1))
-    );
+    assert_eq!(focus_tab_at(&state, col, geo.origin_row, 24, 120), Some(1));
     // The underline row is part of the same tab target.
     assert_eq!(
         focus_tab_at(&state, col, geo.origin_row + 1, 24, 120),
-        Some(FocusTabClick::Pane(1))
+        Some(1)
     );
 }
 
@@ -107,6 +104,29 @@ fn focus_tab_at_ignores_the_active_tab_and_clicks_off_the_strip() {
             24,
             120
         ),
+        None
+    );
+}
+
+#[test]
+fn focus_tab_at_switches_between_pane_tabs_while_off_the_new_tab() {
+    // Off the "+ new" tab (stepped onto a pane tab, where the "+ new" chip is
+    // dropped) a click on the other, inactive pane chip selects that pane — the
+    // branch that reads the strip's own active index rather than the appended
+    // "+ new" slot.
+    let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
+    state.enter_focus(1);
+    state.set_terminal_tabs(vec!["agent".to_string(), "terminal".to_string()], 0);
+    state.focus_tab_prev(); // leave "+ new"; pane 0 ("agent") stays active.
+    assert!(!state.focus_on_new_tab());
+    let geo = terminal_geometry(24, 120, Sidebar::Full);
+    // Clicking the inactive "terminal" chip selects pane 1.
+    let col = chip_column(&state, geo, "2 terminal");
+    assert_eq!(focus_tab_at(&state, col, geo.origin_row, 24, 120), Some(1));
+    // Clicking the already-active "agent" chip is a no-op.
+    let active_col = chip_column(&state, geo, "1 agent");
+    assert_eq!(
+        focus_tab_at(&state, active_col, geo.origin_row, 24, 120),
         None
     );
 }
