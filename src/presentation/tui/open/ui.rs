@@ -97,9 +97,9 @@ fn truncate_start(text: &str, max: usize) -> String {
 /// the same width otherwise (so the column never shifts the name).
 const CHECK_ICON: &str = "✓";
 
-/// Builds one project row: a `>` cursor for the selected entry, a unite-mode
-/// check column (only when the explicit unite screen is active), the name in a
-/// fixed-width column, and the (possibly truncated) path dimmed beside it.
+/// Builds one project row: a `>` cursor for the selected entry, a reserved
+/// unite-mode check column, the name in a fixed-width column, and the (possibly
+/// truncated) path dimmed beside it.
 fn project_row(
     block_pad: &str,
     name: &str,
@@ -111,19 +111,16 @@ fn project_row(
 ) -> String {
     let marker = widgets::cursor_marker(selected);
 
-    // The unite-mode check column only appears inside the explicit multi-select
-    // screen. In the default single-open picker it disappears entirely, keeping
-    // that UI visually separate from batch opening.
-    let check_prefix = if show_check {
-        let check = if checked {
-            style(CHECK_ICON).green().bold().to_string()
-        } else {
-            " ".to_string()
-        };
-        format!(" {check}")
+    // Reserve the unite-mode check column even in the default single-open picker
+    // so entering unite does not shift workspace names horizontally (no CLS).
+    // Outside unite the column is blank; inside unite it shows a green check for
+    // selected entries and a blank for unselected ones.
+    let check = if show_check && checked {
+        style(CHECK_ICON).green().bold().to_string()
     } else {
-        String::new()
+        " ".to_string()
     };
+    let check_prefix = format!(" {check}");
 
     let padded = format!("{name:<name_width$}");
     let name = if selected {
@@ -134,7 +131,7 @@ fn project_row(
 
     // "> " plus the optional check column and the padded name precede the path;
     // cap the path to the block.
-    let prefix_width = 2 + if show_check { 2 } else { 0 } + name_width + 2;
+    let prefix_width = 2 + 2 + name_width + 2;
     let path_budget = widgets::BLOCK_WIDTH.saturating_sub(prefix_width);
     let path = style(truncate_start(path, path_budget)).dim().to_string();
 
@@ -385,7 +382,7 @@ mod tests {
     }
 
     #[test]
-    fn project_row_hides_the_check_column_in_single_mode() {
+    fn project_row_reserves_a_blank_check_column_in_single_mode() {
         let checked = project_row("", "alpha", 5, "/p/alpha", false, true, false);
         assert!(!checked.contains(CHECK_ICON));
     }
@@ -410,6 +407,7 @@ mod tests {
     fn list_lines_render_the_check_for_a_checked_entry() {
         let mut list = list_with(&["alpha", "beta"]);
         list.enter_unite();
+        list.select_cursor(); // check "alpha"
         list.move_down();
         list.toggle_checked(); // check "beta"
         let lines = list_lines(80, "", &list, now());
@@ -424,6 +422,21 @@ mod tests {
         list.toggle_checked();
         let lines = list_lines(80, "", &list, now());
         assert!(!lines[0].contains(CHECK_ICON));
+    }
+
+    #[test]
+    fn list_lines_keep_workspace_names_at_the_same_column_when_entering_unite() {
+        let mut list = list_with(&["alpha"]);
+        let single = console::strip_ansi_codes(&list_lines(80, "", &list, now())[0]).into_owned();
+        list.enter_unite();
+        list.select_cursor();
+        let unite = console::strip_ansi_codes(&list_lines(80, "", &list, now())[0]).into_owned();
+        let single_prefix = single.split_once("alpha").unwrap().0;
+        let unite_prefix = unite.split_once("alpha").unwrap().0;
+        assert_eq!(
+            console::measure_text_width(single_prefix),
+            console::measure_text_width(unite_prefix)
+        );
     }
 
     #[test]

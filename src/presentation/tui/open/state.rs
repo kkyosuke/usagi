@@ -90,19 +90,35 @@ impl ProjectList {
         self.remembered = names;
     }
 
-    /// Switch into [`Mode::Unite`]. The first time, restore the remembered union
-    /// (see [`ProjectList::remember`]); thereafter the existing checks are kept.
-    /// The unite set is never left empty — when nothing is checked the cursor row
-    /// is seeded so `Enter` always has something to open.
+    /// Switch into [`Mode::Unite`] without touching the checks. Callers decide
+    /// what the initial selection is: `Space` selects the row it was pressed on
+    /// ([`ProjectList::select_cursor`]); `u` restores the remembered union
+    /// ([`ProjectList::restore_remembered`]).
     pub fn enter_unite(&mut self) {
         self.mode = Mode::Unite;
+    }
+
+    /// Check the cursor row, leaving it checked if it already was. Used when
+    /// `Space` enters unite from the picker so the workspace the user pressed
+    /// `Space` on is the one selected. No-op when the list is empty.
+    pub fn select_cursor(&mut self) {
+        if let Some(checked) = self.checked.get_mut(self.selected_index) {
+            *checked = true;
+        }
+    }
+
+    /// Restore the remembered union (see [`ProjectList::remember`]) the first
+    /// time unite is entered via `u`, moving the cursor to the first restored
+    /// entry; thereafter the existing checks are kept. Seeds the cursor row when
+    /// there is nothing to restore so the unite set is never empty.
+    pub fn restore_remembered(&mut self) {
         if !self.unite_initialized {
             self.unite_initialized = true;
             let remembered = std::mem::take(&mut self.remembered);
             self.preselect(&remembered);
         }
         if self.checked_count() == 0 {
-            self.toggle_checked();
+            self.select_cursor();
         }
     }
 
@@ -389,7 +405,8 @@ mod tests {
     #[test]
     fn toggling_checks_the_cursor_row_and_chosen_lists_every_checked_one() {
         let mut list = sample(); // a, b, c
-        list.enter_unite(); // seeds "a" and switches `chosen` to checked rows
+        list.enter_unite(); // switches `chosen` to checked rows
+        list.select_cursor(); // select "a"
         list.move_down();
         list.move_down(); // cursor on "c"
         list.toggle_checked(); // check "c"
@@ -417,20 +434,33 @@ mod tests {
     }
 
     #[test]
-    fn enter_unite_seeds_the_cursor_when_nothing_is_checked() {
+    fn select_cursor_checks_the_row_space_was_pressed_on() {
         let mut list = sample(); // a, b, c
         list.move_down(); // cursor on "b"
         list.enter_unite();
+        list.select_cursor();
         assert_eq!(list.mode(), Mode::Unite);
+        assert!(list.is_checked(1));
+        // Selecting the same row again keeps it checked (it does not toggle off).
+        list.select_cursor();
         assert!(list.is_checked(1));
         let names: Vec<_> = list.chosen().into_iter().map(|w| w.name).collect();
         assert_eq!(names, ["b"]);
     }
 
     #[test]
+    fn select_cursor_is_a_noop_on_an_empty_list() {
+        let mut list = ProjectList::new(Vec::new());
+        list.enter_unite();
+        list.select_cursor();
+        assert_eq!(list.checked_count(), 0);
+    }
+
+    #[test]
     fn exit_unite_returns_to_single_without_clearing_checks() {
         let mut list = sample(); // a, b, c
-        list.enter_unite(); // check "a"
+        list.enter_unite();
+        list.select_cursor(); // check "a"
         assert!(list.is_checked(0));
         list.exit_unite();
         assert_eq!(list.mode(), Mode::Single);
@@ -442,10 +472,11 @@ mod tests {
     }
 
     #[test]
-    fn enter_unite_restores_the_remembered_set_only_once() {
+    fn restore_remembered_applies_the_remembered_set_only_once() {
         let mut list = sample(); // a, b, c
         list.remember(vec!["b".to_string(), "c".to_string()]);
         list.enter_unite();
+        list.restore_remembered();
         assert!(list.is_checked(1));
         assert!(list.is_checked(2));
         assert_eq!(list.selected_index(), 1);
@@ -455,25 +486,34 @@ mod tests {
         list.toggle_checked(); // uncheck "b"
         list.exit_unite();
         list.enter_unite();
+        list.restore_remembered();
         assert!(!list.is_checked(1));
         assert!(list.is_checked(2));
     }
 
     #[test]
-    fn enter_unite_with_no_remembered_match_seeds_the_cursor_row() {
+    fn restore_remembered_with_no_match_seeds_the_cursor_row() {
         let mut list = sample(); // a, b, c
         list.move_down(); // cursor on "b"
         list.remember(vec!["ghost".to_string()]);
         list.enter_unite();
+        list.restore_remembered();
         assert!(list.is_checked(1));
         assert_eq!(list.checked_count(), 1);
     }
 
     #[test]
+    fn restore_remembered_seeds_the_cursor_on_an_empty_list() {
+        let mut list = ProjectList::new(Vec::new());
+        list.enter_unite();
+        list.restore_remembered();
+        assert_eq!(list.checked_count(), 0);
+    }
+
+    #[test]
     fn unite_mode_falls_back_to_the_cursor_when_nothing_is_checked() {
         let mut list = sample(); // a, b, c
-        list.enter_unite(); // seeds the cursor row ("a")
-        list.toggle_checked(); // uncheck it: still unite, but nothing checked
+        list.enter_unite(); // unite, but nothing selected yet
         assert_eq!(list.mode(), Mode::Unite);
         assert_eq!(list.checked_count(), 0);
         // `chosen` falls back to the cursor row rather than returning empty.

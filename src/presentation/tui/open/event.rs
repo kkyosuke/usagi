@@ -95,7 +95,7 @@ pub fn event_loop(
                         Ok(()) => {
                             list.remove_selected();
                             if list.mode() == Mode::Unite && list.checked_count() == 0 {
-                                list.enter_unite();
+                                list.select_cursor();
                             }
                             format!("Removed \"{name}\".")
                         }
@@ -125,12 +125,16 @@ pub fn event_loop(
                 notice = None;
             }
             // In the default single-open picker, `Space` enters the explicit
-            // unite multi-select screen and seeds it with the cursor row. Once in
+            // unite multi-select screen and selects the cursor row. Once in
             // unite, `Space` toggles membership. Keeping this as a distinct mode
             // makes `Enter` predictable in the default screen: it is always just
             // the cursor row there, no matter what had been checked before.
             Key::Char(' ') => match list.mode() {
-                Mode::Single => list.enter_unite(),
+                Mode::Single => {
+                    list.enter_unite();
+                    list.select_cursor();
+                    notice = None;
+                }
                 Mode::Unite => {
                     let would_empty_current_set =
                         list.is_checked(list.selected_index()) && list.checked_count() == 1;
@@ -144,6 +148,7 @@ pub fn event_loop(
             },
             Key::Char('u') | Key::Char('U') => {
                 list.enter_unite();
+                list.restore_remembered();
                 notice = None;
             }
             Key::Enter => {
@@ -396,6 +401,30 @@ mod tests {
             &mut actions,
         )
         .unwrap();
+        assert!(matches!(outcome, Outcome::Back));
+        assert_eq!(opened, vec![vec!["beta".to_string()]]);
+    }
+
+    #[test]
+    fn space_enters_unite_and_selects_the_cursor_row_even_with_a_remembered_set() {
+        let term = Term::stdout();
+        let mut reader = ScriptedReader::new(vec![
+            Ok(Key::ArrowDown), // cursor on "beta"
+            Ok(Key::Char(' ')),
+            Ok(Key::Enter),
+            Ok(Key::Escape),
+        ]);
+        let mut opened: Vec<Vec<String>> = Vec::new();
+        let mut open = |_t: &Term, ws: &[Workspace]| {
+            opened.push(ws.iter().map(|w| w.name.clone()).collect());
+            Ok(home::Outcome::Back)
+        };
+        let mut exists: fn(&Path) -> bool = exists_true;
+        let mut remove: fn(&str) -> Result<()> = remove_ok;
+        let mut actions = present_actions(&mut exists, &mut remove);
+        let mut list = sample_list();
+        list.remember(vec!["alpha".to_string()]);
+        let outcome = event_loop(&term, &mut reader, list, None, &mut open, &mut actions).unwrap();
         assert!(matches!(outcome, Outcome::Back));
         assert_eq!(opened, vec![vec!["beta".to_string()]]);
     }
