@@ -12,6 +12,12 @@ use anyhow::Result;
 use console::Term;
 
 use crate::presentation::tui::io::term_reader::TermKeyReader;
+use crate::usecase::workspace::WorkspaceOverview;
+
+#[cfg(not(test))]
+use crate::infrastructure::storage::Storage;
+#[cfg(not(test))]
+use crate::usecase::workspace;
 
 pub use event::Outcome;
 
@@ -30,7 +36,8 @@ use tests::mock_event_loop as event_loop;
 /// centres the welcome body over its footer — and the others align to it; built
 /// from the screen's own fixed [`menu`] so it depends only on `height`.
 pub fn mascot_top_padding(height: usize) -> usize {
-    ui::body_top_padding(height, menu::Menu::new().items(), None)
+    let menu = menu::Menu::empty();
+    ui::body_top_padding(height, menu.items(), menu.recent_items(), None)
 }
 
 /// Runs the welcome menu on the given terminal until the user picks an action.
@@ -41,8 +48,29 @@ pub fn mascot_top_padding(height: usize) -> usize {
 /// `notice` seeds the notice line, e.g. an error carried back from a failed
 /// project creation.
 pub fn run(term: &Term, notice: Option<String>) -> Result<Outcome> {
+    let (recent_overviews, notice) = match load_recent_overviews() {
+        Ok(overviews) => (overviews, notice),
+        Err(e) => (
+            Vec::new(),
+            notice.or_else(|| Some(format!("Failed to load recent projects: {e}"))),
+        ),
+    };
     let mut reader = TermKeyReader::new(term.clone());
-    event_loop(term, &mut reader, notice)
+    event_loop(term, &mut reader, recent_overviews, notice)
+}
+
+/// Loads the most-recently-used workspaces shown in the welcome screen's right
+/// column. The usecase already sorts most-recent first, so the menu can take the
+/// first three entries directly.
+#[cfg(not(test))]
+fn load_recent_overviews() -> Result<Vec<WorkspaceOverview>> {
+    let storage = Storage::open_default()?;
+    workspace::overviews(&storage)
+}
+
+#[cfg(test)]
+fn load_recent_overviews() -> Result<Vec<WorkspaceOverview>> {
+    Ok(Vec::new())
 }
 
 #[cfg(test)]
@@ -64,6 +92,7 @@ mod tests {
     pub(super) fn mock_event_loop(
         _term: &Term,
         _reader: &mut dyn KeyReader,
+        _recent_overviews: Vec<WorkspaceOverview>,
         notice: Option<String>,
     ) -> Result<Outcome> {
         MOCK.with(|m| {
@@ -98,9 +127,10 @@ mod tests {
     fn mascot_top_padding_matches_the_body_layout() {
         // The shared mascot row is derived from the welcome screen's own menu, so
         // it depends only on the terminal height.
+        let menu = menu::Menu::empty();
         assert_eq!(
             mascot_top_padding(40),
-            ui::body_top_padding(40, menu::Menu::new().items(), None)
+            ui::body_top_padding(40, menu.items(), menu.recent_items(), None)
         );
     }
 }

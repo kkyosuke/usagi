@@ -55,7 +55,7 @@
 |---|---|---|
 | `⎇` | セッション数（セッションごとの worktree） | `state.json`（[../data/02-workspace.md](../data/02-workspace.md)） |
 | `●` | 未完了（`done` 以外）の issue 数 | `.usagi/issues/`（[../data/03-issues.md](../data/03-issues.md)） |
-| `◷` | 最終利用からの経過時間。`just now` / `5m ago` / `3h ago` / `2d ago` / `3w ago`、1 か月を超えると `YYYY-MM-DD` の絶対日付 | `workspaces.json` の `updated_at`（[../data/01-global.md](../data/01-global.md)） |
+| `◷` | 最終利用からの経過時間。`just now` / `5min ago` / `3h ago` / `2d ago` / `3w ago`、1 か月を超えると `YYYY-MM-DD` の絶対日付 | `workspaces.json` の `updated_at`（[../data/01-global.md](../data/01-global.md)） |
 
 各ワークスペースのパスが見つからない・読めない場合でも、その行の統計は 0 として表示し、一覧全体は描画を続けます。
 

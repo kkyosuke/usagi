@@ -25,6 +25,8 @@ pub use rabbit::{
 use console::{style, Style};
 use unicode_width::UnicodeWidthChar;
 
+use chrono::{DateTime, Utc};
+
 /// The escape (ESC, `0x1b`) that introduces an ANSI control sequence.
 const ESC: char = '\u{1b}';
 
@@ -137,6 +139,36 @@ pub fn normalize_size(height: usize, width: usize) -> (usize, usize) {
     let height = if height == 0 { 24 } else { height };
     let width = if width == 0 { 80 } else { width };
     (height, width)
+}
+
+/// Formats how long ago `from` was, relative to `now`, as a compact label:
+/// `just now`, `5min ago`, `3h ago`, `2d ago`, `3w ago`, falling back to an
+/// absolute `YYYY-MM-DD` date once it is over a month old. A `from` in the
+/// future (clock skew) reads as `just now`.
+///
+/// The single source of the "last used" phrasing, shared by the project
+/// selection screen and the welcome screen's recent cards.
+pub fn relative_time(from: DateTime<Utc>, now: DateTime<Utc>) -> String {
+    let secs = (now - from).num_seconds();
+    if secs < 60 {
+        return "just now".to_string();
+    }
+    let mins = secs / 60;
+    if mins < 60 {
+        return format!("{mins}min ago");
+    }
+    let hours = mins / 60;
+    if hours < 24 {
+        return format!("{hours}h ago");
+    }
+    let days = hours / 24;
+    if days < 7 {
+        return format!("{days}d ago");
+    }
+    if days < 30 {
+        return format!("{}w ago", days / 7);
+    }
+    from.format("%Y-%m-%d").to_string()
 }
 
 /// Centres a single line of `text` by left-padding it with spaces.

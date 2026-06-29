@@ -12,6 +12,7 @@ pub mod ui;
 use anyhow::Result;
 use console::Term;
 
+use crate::domain::workspace::Workspace;
 use crate::infrastructure::storage::Storage;
 use crate::presentation::tui::home;
 use crate::presentation::tui::io::screen::FramePainter;
@@ -55,39 +56,49 @@ pub fn run(term: &Term) -> Result<Outcome> {
         &mut reader,
         list,
         notice,
-        &mut |t, wss| {
-            // The primary workspace the `Preload` belongs to; any further entries
-            // are stacked below it in 統合(unite) mode.
-            let primary = &wss[0];
-            // Mark every opened workspace as just-used so they sort to the top of the
-            // list on the next load. A failure to persist must not block opening, so
-            // the error is swallowed.
-            if let Ok(storage) = Storage::open_default() {
-                for ws in wss {
-                    let _ = workspace::touch(&storage, &ws.name);
-                }
-            }
-            // Remember this selection so the next Open pre-checks the same union.
-            let names: Vec<String> = wss.iter().map(|w| w.name.clone()).collect();
-            let _ = crate::infrastructure::unite_store::save(&names);
-            // Start loading the primary workspace (state.json / issues / settings /
-            // agent probe / history) on a background thread, then play the mascot
-            // animation on this thread while it runs. By the time the rabbit lands at
-            // the bottom-left the load is almost always already done, so joining it is
-            // near-instant and the home screen (切替) paints with no perceptible delay.
-            // Any extra unite workspaces are loaded inside `home::run`, after the
-            // animation, since they only seed display snapshots.
-            let loader = {
-                let ws = primary.clone();
-                std::thread::spawn(move || home::preload(&ws))
-            };
-            play_open_animation(t)?;
-            // Recover by loading synchronously if the loader thread panicked.
-            let preload = loader.join().unwrap_or_else(|_| home::preload(primary));
-            home::run(t, wss, preload)
-        },
+        &mut |t, wss| open_home(t, wss),
         &mut actions,
     )
+}
+
+/// Opens the home screen for the chosen workspace(s): marks them just-used,
+/// remembers the selection, plays the open→home mascot animation while the
+/// primary workspace loads in the background, then runs the home screen.
+///
+/// The slice holds every workspace the user chose to open together: one for the
+/// ordinary single-workspace home, several for 統合(unite) mode. Shared by the
+/// project selection screen and the welcome screen's "recent" shortcuts so both
+/// open a workspace exactly the same way.
+pub fn open_home(term: &Term, wss: &[Workspace]) -> Result<home::Outcome> {
+    // The primary workspace the `Preload` belongs to; any further entries are
+    // stacked below it in 統合(unite) mode.
+    let primary = &wss[0];
+    // Mark every opened workspace as just-used so they sort to the top of the
+    // list on the next load. A failure to persist must not block opening, so the
+    // error is swallowed.
+    if let Ok(storage) = Storage::open_default() {
+        for ws in wss {
+            let _ = workspace::touch(&storage, &ws.name);
+        }
+    }
+    // Remember this selection so the next Open pre-checks the same union.
+    let names: Vec<String> = wss.iter().map(|w| w.name.clone()).collect();
+    let _ = crate::infrastructure::unite_store::save(&names);
+    // Start loading the primary workspace (state.json / issues / settings / agent
+    // probe / history) on a background thread, then play the mascot animation on
+    // this thread while it runs. By the time the rabbit lands at the bottom-left
+    // the load is almost always already done, so joining it is near-instant and
+    // the home screen (切替) paints with no perceptible delay. Any extra unite
+    // workspaces are loaded inside `home::run`, after the animation, since they
+    // only seed display snapshots.
+    let loader = {
+        let ws = primary.clone();
+        std::thread::spawn(move || home::preload(&ws))
+    };
+    play_open_animation(term)?;
+    // Recover by loading synchronously if the loader thread panicked.
+    let preload = loader.join().unwrap_or_else(|_| home::preload(primary));
+    home::run(term, wss, preload)
 }
 
 /// Plays the open→home mascot animation: the project list is cleared and the

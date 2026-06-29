@@ -229,6 +229,7 @@ mod tests {
             workspace: Workspace::new(name, path),
             session_count: 0,
             open_issue_count: 0,
+            pr_count: 0,
         };
         ProjectList::new(vec![
             overview("alpha", "/p/alpha"),

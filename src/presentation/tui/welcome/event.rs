@@ -3,8 +3,10 @@ use std::io;
 use anyhow::Result;
 use console::Term;
 
+use crate::domain::workspace::Workspace;
 use crate::presentation::tui::install_task;
 use crate::presentation::tui::io::screen::{animated_read, FramePainter, KeyReader};
+use crate::usecase::workspace::WorkspaceOverview;
 
 use super::menu::{Action, Menu};
 use super::ui;
@@ -14,7 +16,7 @@ use super::ui;
 /// The welcome screen only reports the chosen action; deciding what each action
 /// does (opening a sub-screen, creating a project, …) is the orchestrator's job
 /// in [`crate::presentation::tui::app`].
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq)]
 pub enum Outcome {
     /// Open the project selection screen.
     OpenProjects,
@@ -22,6 +24,8 @@ pub enum Outcome {
     NewProject,
     /// Open the Config screen.
     Configure,
+    /// Open a recent workspace directly from the welcome screen.
+    RecentProject(Workspace),
     /// Leave the welcome screen (quit the application).
     Quit,
 }
@@ -35,9 +39,10 @@ pub enum Outcome {
 pub fn event_loop(
     term: &Term,
     reader: &mut dyn KeyReader,
+    recent_overviews: Vec<WorkspaceOverview>,
     initial_notice: Option<String>,
 ) -> Result<Outcome> {
-    let mut menu = Menu::new();
+    let mut menu = Menu::new(recent_overviews.clone());
     menu.set_notice(initial_notice);
     let mut painter = FramePainter::new();
 
@@ -48,6 +53,7 @@ pub fn event_loop(
             width as usize,
             menu.items(),
             menu.selected_index(),
+            menu.recent_items(),
             menu.notice(),
         );
         painter.paint(term, frame)?;
@@ -58,6 +64,11 @@ pub fn event_loop(
                 Action::OpenOpen => return Ok(Outcome::OpenProjects),
                 Action::OpenNew => return Ok(Outcome::NewProject),
                 Action::OpenConfig => return Ok(Outcome::Configure),
+                Action::OpenRecent(index) => {
+                    if let Some(overview) = recent_overviews.get(index) {
+                        return Ok(Outcome::RecentProject(overview.workspace.clone()));
+                    }
+                }
                 Action::Quit => return Ok(Outcome::Quit),
             },
             // Treat an interrupted read (e.g. Ctrl+C delivered as a signal) as quit.
@@ -94,7 +105,16 @@ mod tests {
     fn run(keys: Vec<io::Result<Key>>) -> Result<Outcome> {
         let term = Term::stdout();
         let mut reader = ScriptedReader::new(keys);
-        event_loop(&term, &mut reader, None)
+        event_loop(&term, &mut reader, Vec::new(), None)
+    }
+
+    fn overview(name: &str) -> WorkspaceOverview {
+        WorkspaceOverview {
+            workspace: Workspace::new(name, format!("/tmp/{name}")),
+            session_count: 0,
+            open_issue_count: 0,
+            pr_count: 0,
+        }
     }
 
     #[test]
@@ -145,7 +165,7 @@ mod tests {
     fn unexpected_read_error_is_propagated() {
         let term = Term::stdout();
         let mut reader = ScriptedReader::new(vec![Err(io::Error::other("boom"))]);
-        let err = event_loop(&term, &mut reader, None).unwrap_err();
+        let err = event_loop(&term, &mut reader, Vec::new(), None).unwrap_err();
         assert!(err.to_string().contains("Failed to read key"));
     }
 
@@ -158,9 +178,27 @@ mod tests {
         let outcome = event_loop(
             &term,
             &mut reader,
+            Vec::new(),
             Some("Could not create project: boom".to_string()),
         )
         .unwrap();
         assert_eq!(outcome, Outcome::OpenProjects);
+    }
+
+    #[test]
+    fn recent_number_key_returns_that_workspace() {
+        let term = Term::stdout();
+        let mut reader = ScriptedReader::new(vec![Ok(Key::Char('2'))]);
+        let outcome = event_loop(
+            &term,
+            &mut reader,
+            vec![overview("alpha"), overview("beta")],
+            None,
+        )
+        .unwrap();
+        match outcome {
+            Outcome::RecentProject(workspace) => assert_eq!(workspace.name, "beta"),
+            other => panic!("expected recent workspace, got {other:?}"),
+        }
     }
 }

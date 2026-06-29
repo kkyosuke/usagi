@@ -4,9 +4,11 @@ use anyhow::{bail, Result};
 
 use crate::domain::issue::IssueStatus;
 use crate::domain::workspace::Workspace;
+use crate::domain::workspace_state::PrLink;
 use crate::infrastructure::storage::Storage;
 use crate::usecase::issue::{self, IssueFilter};
 use crate::usecase::session;
+use crate::usecase::workspace_state;
 
 /// Register a new workspace. Fails if the name is already taken.
 pub fn add(storage: &Storage, name: &str, path: impl Into<PathBuf>) -> Result<Workspace> {
@@ -33,8 +35,9 @@ pub fn list(storage: &Storage) -> Result<Vec<Workspace>> {
 
 /// A registered workspace enriched with the at-a-glance figures the project
 /// selection screen shows beside it: how many sessions it has and how many of
-/// its issues are still open. The workspace's own `updated_at` carries the
-/// last-used time, so it is not duplicated here.
+/// its issues are still open, and how many pull requests have been discovered
+/// across those sessions. The workspace's own `updated_at` carries the last-used
+/// time, so it is not duplicated here.
 #[derive(Debug, Clone)]
 pub struct WorkspaceOverview {
     pub workspace: Workspace,
@@ -42,6 +45,8 @@ pub struct WorkspaceOverview {
     pub session_count: usize,
     /// Issues not yet `done` in the workspace's issue store.
     pub open_issue_count: usize,
+    /// Unique pull requests recorded across the workspace's sessions.
+    pub pr_count: usize,
 }
 
 /// List every registered workspace (most recently updated first) together with
@@ -60,11 +65,30 @@ fn overview_for(workspace: Workspace) -> WorkspaceOverview {
         .map(|sessions| sessions.len())
         .unwrap_or(0);
     let open_issue_count = open_issue_count(&workspace.path);
+    let pr_count = pr_count(&workspace.path);
     WorkspaceOverview {
         workspace,
         session_count,
         open_issue_count,
+        pr_count,
     }
+}
+
+/// Count unique PR URLs recorded under the workspace sessions. Returns zero
+/// when the workspace has no recorded state (or it cannot be read), matching the
+/// overview's "one broken entry must not blank the screen" policy.
+fn pr_count(path: &Path) -> usize {
+    workspace_state::recorded_sessions(path)
+        .map(|sessions| {
+            PrLink::aggregate(
+                sessions
+                    .into_iter()
+                    .flat_map(|session| session.worktrees)
+                    .flat_map(|worktree| worktree.pr),
+            )
+            .len()
+        })
+        .unwrap_or(0)
 }
 
 /// Count the issues under `path` that are not yet `done`. Returns zero when the
@@ -240,6 +264,8 @@ mod tests {
         assert_eq!(overviews[0].session_count, 0);
         // Three created, one marked done.
         assert_eq!(overviews[0].open_issue_count, 2);
+        // No PRs have been recorded under the fresh workspace.
+        assert_eq!(overviews[0].pr_count, 0);
     }
 
     #[test]
@@ -251,5 +277,6 @@ mod tests {
         assert_eq!(overviews.len(), 1);
         assert_eq!(overviews[0].session_count, 0);
         assert_eq!(overviews[0].open_issue_count, 0);
+        assert_eq!(overviews[0].pr_count, 0);
     }
 }

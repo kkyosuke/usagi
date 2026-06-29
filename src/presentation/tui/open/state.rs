@@ -176,6 +176,7 @@ mod tests {
             workspace: Workspace::new(name, format!("/tmp/{name}")),
             session_count: 0,
             open_issue_count: 0,
+            pr_count: 0,
         }
     }
 

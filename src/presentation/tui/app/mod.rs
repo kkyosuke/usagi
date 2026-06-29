@@ -77,6 +77,7 @@ pub fn run() -> Result<()> {
     // to overlap here, unlike the Open screen path (see [`open::run`]).
     let mut run_home =
         |t: &Term, ws: &Workspace| home::run(t, std::slice::from_ref(ws), home::preload(ws));
+    let mut run_recent = |t: &Term, ws: &Workspace| open::open_home(t, std::slice::from_ref(ws));
     let mut run_config = |t: &Term| config::run(t);
 
     event::event_loop(
@@ -87,6 +88,7 @@ pub fn run() -> Result<()> {
         &mut run_new,
         &mut create_project,
         &mut run_home,
+        &mut run_recent,
         &mut run_config,
     )
 }
