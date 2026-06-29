@@ -6,16 +6,33 @@
 use crate::domain::workspace::Workspace;
 use crate::usecase::workspace::WorkspaceOverview;
 
+/// Which selection screen the user is on.
+///
+/// The Open screen separates the two ways of opening into distinct modes so the
+/// single-open and 統合(unite) flows never blur together: [`Mode::Single`] is a
+/// plain picker (no check column, `Enter` opens the cursor row alone), and
+/// [`Mode::Unite`] is an explicit multi-select (a check column appears, `Space`
+/// toggles membership, `Enter` opens the whole checked set together).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    /// Single-open picker: `Enter` opens the cursor row by itself; no checks.
+    Single,
+    /// 統合(unite) multi-select: `Space` toggles membership, `Enter` opens the
+    /// checked workspaces together.
+    Unite,
+}
+
 /// The selectable list of workspaces and the current cursor position.
 ///
 /// Each entry is a [`WorkspaceOverview`] — the workspace plus the session and
 /// open-issue counts shown beside it — so the screen can render the figures
 /// without re-reading the disk every frame.
 ///
-/// Entries can be *checked* for 統合(unite) mode: `Space` toggles the entry under
-/// the cursor, and `Enter` opens every checked workspace together (or just the
-/// cursor's when none are checked). The checks are tracked in `checked`, aligned
-/// 1:1 with `overviews`.
+/// The screen runs in one of two [`Mode`]s. In [`Mode::Unite`] entries can be
+/// *checked*: `Space` toggles the entry under the cursor, and `Enter` opens every
+/// checked workspace together. The checks are tracked in `checked`, aligned 1:1
+/// with `overviews`, and persist across mode switches so toggling back into unite
+/// keeps the in-progress selection.
 #[derive(Debug, Clone)]
 pub struct ProjectList {
     overviews: Vec<WorkspaceOverview>,
@@ -23,17 +40,29 @@ pub struct ProjectList {
     /// `overviews[i]`). Kept the same length as `overviews` through every mutation.
     checked: Vec<bool>,
     selected_index: usize,
+    /// Which selection screen is active. Starts in [`Mode::Single`].
+    mode: Mode,
+    /// Names of the workspaces from the last 統合(unite) open, applied as the
+    /// initial checks the first time the user enters [`Mode::Unite`] so the same
+    /// union is one selection away. Empty when there is nothing to restore.
+    remembered: Vec<String>,
+    /// Whether the remembered set has already been applied (so re-entering unite
+    /// does not re-check what the user has since unchecked).
+    unite_initialized: bool,
 }
 
 impl ProjectList {
     /// Builds a list from the given workspace overviews, cursor at the top and
-    /// nothing checked.
+    /// nothing checked, starting in [`Mode::Single`].
     pub fn new(overviews: Vec<WorkspaceOverview>) -> Self {
         let checked = vec![false; overviews.len()];
         Self {
             overviews,
             checked,
             selected_index: 0,
+            mode: Mode::Single,
+            remembered: Vec::new(),
+            unite_initialized: false,
         }
     }
 
@@ -47,6 +76,57 @@ impl ProjectList {
 
     pub fn is_empty(&self) -> bool {
         self.overviews.is_empty()
+    }
+
+    /// The active selection mode.
+    pub fn mode(&self) -> Mode {
+        self.mode
+    }
+
+    /// Record the workspace names from the last 統合(unite) open so the first
+    /// switch into [`Mode::Unite`] restores that union. Stored verbatim; names no
+    /// longer registered are ignored when applied.
+    pub fn remember(&mut self, names: Vec<String>) {
+        self.remembered = names;
+    }
+
+    /// Switch into [`Mode::Unite`] without touching the checks. Callers decide
+    /// what the initial selection is: `Space` selects the row it was pressed on
+    /// ([`ProjectList::select_cursor`]); `u` restores the remembered union
+    /// ([`ProjectList::restore_remembered`]).
+    pub fn enter_unite(&mut self) {
+        self.mode = Mode::Unite;
+    }
+
+    /// Check the cursor row, leaving it checked if it already was. Used when
+    /// `Space` enters unite from the picker so the workspace the user pressed
+    /// `Space` on is the one selected. No-op when the list is empty.
+    pub fn select_cursor(&mut self) {
+        if let Some(checked) = self.checked.get_mut(self.selected_index) {
+            *checked = true;
+        }
+    }
+
+    /// Restore the remembered union (see [`ProjectList::remember`]) the first
+    /// time unite is entered via `u`, moving the cursor to the first restored
+    /// entry; thereafter the existing checks are kept. Seeds the cursor row when
+    /// there is nothing to restore so the unite set is never empty.
+    pub fn restore_remembered(&mut self) {
+        if !self.unite_initialized {
+            self.unite_initialized = true;
+            let remembered = std::mem::take(&mut self.remembered);
+            self.preselect(&remembered);
+        }
+        if self.checked_count() == 0 {
+            self.select_cursor();
+        }
+    }
+
+    /// Leave [`Mode::Unite`] back to the single-open picker. The checks are kept
+    /// so switching back into unite resumes the selection. No-op when already in
+    /// [`Mode::Single`].
+    pub fn exit_unite(&mut self) {
+        self.mode = Mode::Single;
     }
 
     /// Whether the entry at `index` is checked for unite mode.
@@ -80,11 +160,15 @@ impl ProjectList {
         }
     }
 
-    /// The workspaces to open: every checked one in list order, or — when none
-    /// are checked — just the one under the cursor. Empty only when the list is.
-    /// `Enter` opens these together (one workspace → single-workspace home, more →
-    /// 統合(unite) mode).
+    /// The workspaces to open. In [`Mode::Single`] this is just the cursor row,
+    /// so `Enter` is always predictable. In [`Mode::Unite`] it is every checked
+    /// one in list order, falling back to the cursor row when none are checked.
+    /// Empty only when the list is. `Enter` opens these together (one workspace →
+    /// single-workspace home, more → 統合(unite) mode).
     pub fn chosen(&self) -> Vec<Workspace> {
+        if self.mode == Mode::Single {
+            return self.selected().cloned().into_iter().collect();
+        }
         let checked: Vec<Workspace> = self
             .overviews
             .iter()
@@ -191,6 +275,7 @@ mod tests {
         assert_eq!(list.overviews().len(), 3);
         assert!(!list.is_empty());
         assert_eq!(list.selected().unwrap().name, "a");
+        assert_eq!(list.mode(), Mode::Single);
     }
 
     #[test]
@@ -321,7 +406,8 @@ mod tests {
     #[test]
     fn toggling_checks_the_cursor_row_and_chosen_lists_every_checked_one() {
         let mut list = sample(); // a, b, c
-        list.toggle_checked(); // check "a"
+        list.enter_unite(); // switches `chosen` to checked rows
+        list.select_cursor(); // select "a"
         list.move_down();
         list.move_down(); // cursor on "c"
         list.toggle_checked(); // check "c"
@@ -336,6 +422,104 @@ mod tests {
         list.toggle_checked();
         assert!(!list.is_checked(2));
         assert_eq!(list.checked_count(), 1);
+    }
+
+    #[test]
+    fn single_mode_ignores_checks_when_choosing() {
+        let mut list = sample(); // a, b, c
+        list.toggle_checked(); // check "a" (kept for unite, ignored by single)
+        list.move_down(); // cursor on "b"
+        assert_eq!(list.mode(), Mode::Single);
+        let names: Vec<_> = list.chosen().into_iter().map(|w| w.name).collect();
+        assert_eq!(names, ["b"]);
+    }
+
+    #[test]
+    fn select_cursor_checks_the_row_space_was_pressed_on() {
+        let mut list = sample(); // a, b, c
+        list.move_down(); // cursor on "b"
+        list.enter_unite();
+        list.select_cursor();
+        assert_eq!(list.mode(), Mode::Unite);
+        assert!(list.is_checked(1));
+        // Selecting the same row again keeps it checked (it does not toggle off).
+        list.select_cursor();
+        assert!(list.is_checked(1));
+        let names: Vec<_> = list.chosen().into_iter().map(|w| w.name).collect();
+        assert_eq!(names, ["b"]);
+    }
+
+    #[test]
+    fn select_cursor_is_a_noop_on_an_empty_list() {
+        let mut list = ProjectList::new(Vec::new());
+        list.enter_unite();
+        list.select_cursor();
+        assert_eq!(list.checked_count(), 0);
+    }
+
+    #[test]
+    fn exit_unite_returns_to_single_without_clearing_checks() {
+        let mut list = sample(); // a, b, c
+        list.enter_unite();
+        list.select_cursor(); // check "a"
+        assert!(list.is_checked(0));
+        list.exit_unite();
+        assert_eq!(list.mode(), Mode::Single);
+        assert!(list.is_checked(0));
+        // Single-open is still just the cursor row even while checks exist.
+        list.move_down(); // cursor on "b"
+        let names: Vec<_> = list.chosen().into_iter().map(|w| w.name).collect();
+        assert_eq!(names, ["b"]);
+    }
+
+    #[test]
+    fn restore_remembered_applies_the_remembered_set_only_once() {
+        let mut list = sample(); // a, b, c
+        list.remember(vec!["b".to_string(), "c".to_string()]);
+        list.enter_unite();
+        list.restore_remembered();
+        assert!(list.is_checked(1));
+        assert!(list.is_checked(2));
+        assert_eq!(list.selected_index(), 1);
+
+        // User edits the set, then leaves and re-enters. The remembered set is
+        // not re-applied over the user's in-progress changes.
+        list.toggle_checked(); // uncheck "b"
+        list.exit_unite();
+        list.enter_unite();
+        list.restore_remembered();
+        assert!(!list.is_checked(1));
+        assert!(list.is_checked(2));
+    }
+
+    #[test]
+    fn restore_remembered_with_no_match_seeds_the_cursor_row() {
+        let mut list = sample(); // a, b, c
+        list.move_down(); // cursor on "b"
+        list.remember(vec!["ghost".to_string()]);
+        list.enter_unite();
+        list.restore_remembered();
+        assert!(list.is_checked(1));
+        assert_eq!(list.checked_count(), 1);
+    }
+
+    #[test]
+    fn restore_remembered_seeds_the_cursor_on_an_empty_list() {
+        let mut list = ProjectList::new(Vec::new());
+        list.enter_unite();
+        list.restore_remembered();
+        assert_eq!(list.checked_count(), 0);
+    }
+
+    #[test]
+    fn unite_mode_falls_back_to_the_cursor_when_nothing_is_checked() {
+        let mut list = sample(); // a, b, c
+        list.enter_unite(); // unite, but nothing selected yet
+        assert_eq!(list.mode(), Mode::Unite);
+        assert_eq!(list.checked_count(), 0);
+        // `chosen` falls back to the cursor row rather than returning empty.
+        let names: Vec<_> = list.chosen().into_iter().map(|w| w.name).collect();
+        assert_eq!(names, ["a"]);
     }
 
     #[test]

@@ -3,9 +3,10 @@
 //! Where [`super::issue`] exposes a repository's issues and [`super::llm`]
 //! exposes a local model, this server lets an agent drive usagi's own session
 //! lifecycle: create a parallel worktree session, list the existing ones, hand a
-//! prompt to the agent of a specific session, and remove a session it no longer
-//! needs. This turns a coordinating agent into an orchestrator that can spin up
-//! isolated worktrees, delegate work into them, and tear them down again.
+//! prompt to the agent of a specific session, list the pull requests discovered
+//! for a session, and remove a session it no longer needs. This turns a
+//! coordinating agent into an orchestrator that can spin up isolated worktrees,
+//! delegate work into them, and tear them down again.
 //!
 //! Session creation and listing delegate to [`crate::usecase::session`], so the
 //! MCP surface stays a thin protocol adapter over the same logic the CLI and
@@ -30,10 +31,11 @@ use crate::usecase::session;
 /// Names of the session tools this server exposes. The unified `usagi` server
 /// ([`super::usagi`]) uses this to route `tools/call` for these names to the
 /// embedded session server.
-pub const TOOL_NAMES: [&str; 4] = [
+pub const TOOL_NAMES: [&str; 5] = [
     "session_create",
     "session_list",
     "session_prompt",
+    "session_pr",
     "session_remove",
 ];
 
@@ -125,6 +127,17 @@ impl SessionMcpServer {
         self.backend.prompt(&target.root, &args.prompt)
     }
 
+    fn tool_pr(&self, arguments: Value) -> Result<String, String> {
+        let args: PrArgs = parse_args(arguments)?;
+        let (root, prs) =
+            session::pr_links(&self.workspace_root, &args.name).map_err(|e| e.to_string())?;
+        Ok(to_pretty(&json!({
+            "name": args.name,
+            "root": root,
+            "pr": prs,
+        })))
+    }
+
     fn tool_remove(&self, arguments: Value) -> Result<String, String> {
         let args: RemoveArgs = parse_args(arguments)?;
         let outcome = self
@@ -152,6 +165,7 @@ impl McpService for SessionMcpServer {
             "session_create" => self.tool_create(arguments),
             "session_list" => self.tool_list(),
             "session_prompt" => self.tool_prompt(arguments),
+            "session_pr" => self.tool_pr(arguments),
             "session_remove" => self.tool_remove(arguments),
             other => Err(format!("unknown tool: {other}")),
         }
@@ -169,6 +183,11 @@ struct CreateArgs {
 struct PromptArgs {
     name: String,
     prompt: String,
+}
+
+#[derive(Deserialize)]
+struct PrArgs {
+    name: String,
 }
 
 #[derive(Deserialize)]
@@ -249,6 +268,19 @@ fn session_tool_schemas() -> Value {
             }
         },
         {
+            "name": "session_pr",
+            "description": "Return the pull requests recorded for a specific \
+                session. These are the PR URLs harvested from that session's \
+                agent output and shown as PR badges in the TUI.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Target session name" }
+                },
+                "required": ["name"]
+            }
+        },
+        {
             "name": "session_remove",
             "description": "Remove a session: tear down every repository's worktree \
                 and its session branch, drop any copied files, discard the \
@@ -275,7 +307,9 @@ fn session_tool_schemas() -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::workspace_state::PrLink;
     use crate::infrastructure::git::test_command as git_cmd;
+    use crate::infrastructure::pr_link_store;
     use crate::presentation::mcp::PROTOCOL_VERSION;
     use std::cell::RefCell;
     use std::fs;
@@ -429,6 +463,7 @@ mod tests {
                 "session_create",
                 "session_list",
                 "session_prompt",
+                "session_pr",
                 "session_remove"
             ]
         );
@@ -582,6 +617,62 @@ mod tests {
     }
 
     #[test]
+    fn pr_returns_the_pull_requests_recorded_for_the_session() {
+        let _guard = crate::test_support::process_env_guard();
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var(crate::infrastructure::storage::DATA_DIR_ENV, home.path());
+
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        let server = server_at(root.path(), FakeBackend::ok("x"));
+        call(&server, "session_create", json!({"name":"work"}));
+        let worktree = root.path().join(".usagi/sessions/work");
+        pr_link_store::add(
+            &worktree,
+            &[
+                PrLink {
+                    number: 12,
+                    url: "https://github.com/o/r/pull/12".to_string(),
+                },
+                PrLink {
+                    number: 34,
+                    url: "https://github.com/o/r/pull/34".to_string(),
+                },
+            ],
+        )
+        .unwrap();
+
+        let result = call(&server, "session_pr", json!({"name":"work"}));
+        assert_eq!(result["isError"], false);
+        assert_eq!(
+            tool_json(&result),
+            json!({
+                "name": "work",
+                "root": worktree,
+                "pr": [
+                    {"number": 12, "url": "https://github.com/o/r/pull/12"},
+                    {"number": 34, "url": "https://github.com/o/r/pull/34"},
+                ]
+            })
+        );
+
+        std::env::remove_var(crate::infrastructure::storage::DATA_DIR_ENV);
+    }
+
+    #[test]
+    fn pr_for_an_unknown_session_is_a_tool_error() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        let server = server_at(root.path(), FakeBackend::ok("x"));
+        let result = call(&server, "session_pr", json!({"name":"ghost"}));
+        assert_eq!(result["isError"], true);
+        assert!(result["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("no such session"));
+    }
+
+    #[test]
     fn remove_forwards_to_the_backend_and_formats_a_clean_removal() {
         let root = tempfile::tempdir().unwrap();
         let backend = FakeBackend::ok("x");
@@ -663,6 +754,9 @@ mod tests {
             .contains("invalid arguments"));
         // session_prompt requires both name and prompt.
         let result = call(&server, "session_prompt", json!({"name":"w"}));
+        assert_eq!(result["isError"], true);
+        // session_pr requires a name.
+        let result = call(&server, "session_pr", json!({}));
         assert_eq!(result["isError"], true);
         // session_remove requires a name.
         let result = call(&server, "session_remove", json!({}));

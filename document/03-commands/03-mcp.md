@@ -11,8 +11,9 @@
 - **memory**: `usagi memory`（[01-cli.md](01-cli.md#usagi-memory)）と同じメモリ操作（セッションをまたいで
   覚えておく知識の保存・想起）。
 - **session**: usagi のセッション（[4. オーケストレーション](../04-orchestration.md)）操作。セッションを
-  作成し、特定のセッションのエージェントにプロンプトを送って作業を委譲し、不要になったセッションを削除できます。
-  コーディネータ役のエージェントが、並行する worktree にタスクを振り分けるオーケストレータとして振る舞えます。
+  作成し、特定のセッションのエージェントにプロンプトを送って作業を委譲し、セッションに紐づく PR を取得し、
+  不要になったセッションを削除できます。コーディネータ役のエージェントが、並行する worktree にタスクを
+  振り分けるオーケストレータとして振る舞えます。
 
 ## 目次
 
@@ -115,7 +116,7 @@ presentation に閉じています（[2. アーキテクチャ](../02-architectu
 
 ## 対応 tool 一覧
 
-`tools/list` で以下の 17 tool（issue 7 + memory 6 + session 4）を公開します。結果はいずれも JSON テキストで
+`tools/list` で以下の 18 tool（issue 7 + memory 6 + session 5）を公開します。結果はいずれも JSON テキストで
 返ります。
 
 | tool | 必須引数 | 任意引数 | 返り値 |
@@ -136,6 +137,7 @@ presentation に閉じています（[2. アーキテクチャ](../02-architectu
 | `session_create` | `name` | — | 作成されたセッション（`name` / `root` / `worktrees`） |
 | `session_list` | — | — | セッション配列（各要素に `name` / `display_name` / `root` / `created_at` / `worktrees`） |
 | `session_prompt` | `name` / `prompt` | — | プロンプトを対象セッションにキューした旨の確認メッセージ（[挙動](#session_prompt-の挙動)） |
+| `session_pr` | `name` | — | `{ "name": "…", "root": "…", "pr": [{ "number": N, "url": "…" }] }` |
 | `session_remove` | `name` | `force` | `{ "name": "…", "removed": bool, "dirty": [worktree…] }`（[挙動](#session_remove-の挙動)） |
 
 - `status` は `todo` / `in-progress` / `done`、`priority` は `high` / `medium` / `low`、`type`（memory）は `user` / `feedback` / `project` / `reference`。
@@ -159,6 +161,9 @@ presentation に閉じています（[2. アーキテクチャ](../02-architectu
   入りません（`usagi mcp` は TUI を操作できない別プロセスのため）。TUI から作成したときは作成完了後にその
   セッションへ自動で在席しますが、MCP 経由の作成はホーム画面の一覧にバックグラウンドで反映されるだけで
   カーソルは動きません。
+- `session_pr` は、対象セッションのエージェント出力から検出され、TUI の PR バッジとして表示される
+  PR URL を返します。PR が記録されていないセッションは `pr: []` を返します。存在しないセッション名は
+  実行エラー（`isError: true`）になります。
 - `session_remove` はセッションの全 worktree とブランチを破棄し、コピーされたファイルとエージェントの会話履歴を
   消して `state.json` から削除します。`usagi clean` が起動するバックグラウンドエージェントは、このツールで
   放置セッションを片付けます（[挙動](#session_remove-の挙動)）。

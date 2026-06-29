@@ -9,7 +9,7 @@ use crate::presentation::tui::home;
 use crate::presentation::tui::install_task;
 use crate::presentation::tui::io::screen::{animated_read, FramePainter, KeyReader};
 
-use super::state::ProjectList;
+use super::state::{Mode, ProjectList};
 use super::ui;
 
 /// What the user chose to do on the project selection screen.
@@ -94,6 +94,9 @@ pub fn event_loop(
                     notice = Some(match (actions.remove)(&name) {
                         Ok(()) => {
                             list.remove_selected();
+                            if list.mode() == Mode::Unite && list.checked_count() == 0 {
+                                list.select_cursor();
+                            }
                             format!("Removed \"{name}\".")
                         }
                         Err(e) => format!("Failed to remove \"{name}\": {e}"),
@@ -121,16 +124,38 @@ pub fn event_loop(
                 list.move_down();
                 notice = None;
             }
-            // `Space` toggles the cursor entry's unite-mode check, so `Enter` can
-            // open several workspaces together.
-            Key::Char(' ') => {
-                list.toggle_checked();
+            // In the default single-open picker, `Space` enters the explicit
+            // unite multi-select screen and selects the cursor row. Once in
+            // unite, `Space` toggles membership. Keeping this as a distinct mode
+            // makes `Enter` predictable in the default screen: it is always just
+            // the cursor row there, no matter what had been checked before.
+            Key::Char(' ') => match list.mode() {
+                Mode::Single => {
+                    list.enter_unite();
+                    list.select_cursor();
+                    notice = None;
+                }
+                Mode::Unite => {
+                    let would_empty_current_set =
+                        list.is_checked(list.selected_index()) && list.checked_count() == 1;
+                    if would_empty_current_set {
+                        notice = Some("Select at least one workspace for unite.".to_string());
+                    } else {
+                        list.toggle_checked();
+                        notice = None;
+                    }
+                }
+            },
+            Key::Char('u') | Key::Char('U') => {
+                list.enter_unite();
+                list.restore_remembered();
                 notice = None;
             }
             Key::Enter => {
-                // The workspaces to open: every checked one, or just the cursor's
-                // when none are checked. Owned clones, so the list can be mutated
-                // (promote / focus) afterwards without a borrow conflict.
+                // The workspaces to open are mode-dependent: single mode opens the
+                // cursor row, unite mode opens the checked set. Owned clones, so
+                // the list can be mutated (promote / focus) afterwards without a
+                // borrow conflict.
                 let chosen = list.chosen();
                 if let Some(first) = chosen.first() {
                     // A workspace whose directory has since been deleted cannot be
@@ -154,12 +179,18 @@ pub fn event_loop(
                         home::Outcome::Back => {
                             list.focus_name(&first.name);
                             list.promote_selected();
+                            list.exit_unite();
                             notice = None;
                             painter.reset();
                         }
                         home::Outcome::Quit => return Ok(Outcome::Quit),
                     }
                 }
+            }
+            Key::Escape if list.mode() == Mode::Unite => {
+                list.exit_unite();
+                notice = None;
+                painter.reset();
             }
             Key::Char('q') | Key::Escape => return Ok(Outcome::Back),
             // `Ctrl-C` / `Ctrl-Q` (the bare `0x11`) quit the app from here too.
@@ -346,6 +377,121 @@ mod tests {
     }
 
     #[test]
+    fn u_enters_unite_and_enter_opens_the_checked_set() {
+        let term = Term::stdout();
+        let mut reader = ScriptedReader::new(vec![
+            Ok(Key::ArrowDown), // cursor on "beta"
+            Ok(Key::Char('u')),
+            Ok(Key::Enter),
+            Ok(Key::Escape),
+        ]);
+        let mut opened: Vec<Vec<String>> = Vec::new();
+        let mut open = |_t: &Term, ws: &[Workspace]| {
+            opened.push(ws.iter().map(|w| w.name.clone()).collect());
+            Ok(home::Outcome::Back)
+        };
+        let mut exists: fn(&Path) -> bool = exists_true;
+        let mut remove: fn(&str) -> Result<()> = remove_ok;
+        let mut actions = present_actions(&mut exists, &mut remove);
+        let outcome = event_loop(
+            &term,
+            &mut reader,
+            sample_list(),
+            None,
+            &mut open,
+            &mut actions,
+        )
+        .unwrap();
+        assert!(matches!(outcome, Outcome::Back));
+        assert_eq!(opened, vec![vec!["beta".to_string()]]);
+    }
+
+    #[test]
+    fn space_enters_unite_and_selects_the_cursor_row_even_with_a_remembered_set() {
+        let term = Term::stdout();
+        let mut reader = ScriptedReader::new(vec![
+            Ok(Key::ArrowDown), // cursor on "beta"
+            Ok(Key::Char(' ')),
+            Ok(Key::Enter),
+            Ok(Key::Escape),
+        ]);
+        let mut opened: Vec<Vec<String>> = Vec::new();
+        let mut open = |_t: &Term, ws: &[Workspace]| {
+            opened.push(ws.iter().map(|w| w.name.clone()).collect());
+            Ok(home::Outcome::Back)
+        };
+        let mut exists: fn(&Path) -> bool = exists_true;
+        let mut remove: fn(&str) -> Result<()> = remove_ok;
+        let mut actions = present_actions(&mut exists, &mut remove);
+        let mut list = sample_list();
+        list.remember(vec!["alpha".to_string()]);
+        let outcome = event_loop(&term, &mut reader, list, None, &mut open, &mut actions).unwrap();
+        assert!(matches!(outcome, Outcome::Back));
+        assert_eq!(opened, vec![vec!["beta".to_string()]]);
+    }
+
+    #[test]
+    fn escape_in_unite_returns_to_single_before_backing_out() {
+        let term = Term::stdout();
+        let mut reader = ScriptedReader::new(vec![
+            Ok(Key::Char(' ')), // enter unite, seed "alpha"
+            Ok(Key::ArrowDown),
+            Ok(Key::Escape), // cancel unite mode, stay on the Open screen
+            Ok(Key::Enter),  // single-open "beta", not checked "alpha"
+            Ok(Key::Escape),
+        ]);
+        let mut opened: Vec<Vec<String>> = Vec::new();
+        let mut open = |_t: &Term, ws: &[Workspace]| {
+            opened.push(ws.iter().map(|w| w.name.clone()).collect());
+            Ok(home::Outcome::Back)
+        };
+        let mut exists: fn(&Path) -> bool = exists_true;
+        let mut remove: fn(&str) -> Result<()> = remove_ok;
+        let mut actions = present_actions(&mut exists, &mut remove);
+        let outcome = event_loop(
+            &term,
+            &mut reader,
+            sample_list(),
+            None,
+            &mut open,
+            &mut actions,
+        )
+        .unwrap();
+        assert!(matches!(outcome, Outcome::Back));
+        assert_eq!(opened, vec![vec!["beta".to_string()]]);
+    }
+
+    #[test]
+    fn unite_keeps_at_least_one_workspace_checked() {
+        let term = Term::stdout();
+        let mut reader = ScriptedReader::new(vec![
+            Ok(Key::Char(' ')), // enter unite, seed "alpha"
+            Ok(Key::Char(' ')), // trying to uncheck the only row is ignored
+            Ok(Key::Enter),
+            Ok(Key::Escape),
+        ]);
+        let mut opened: Vec<Vec<String>> = Vec::new();
+        let mut open = |_t: &Term, ws: &[Workspace]| {
+            opened.push(ws.iter().map(|w| w.name.clone()).collect());
+            Ok(home::Outcome::Back)
+        };
+        let mut exists: fn(&Path) -> bool = exists_true;
+        let mut remove: fn(&str) -> Result<()> = remove_ok;
+        let mut actions = present_actions(&mut exists, &mut remove);
+        let outcome = event_loop(
+            &term,
+            &mut reader,
+            sample_list(),
+            None,
+            &mut open,
+            &mut actions,
+        )
+        .unwrap();
+        assert!(matches!(outcome, Outcome::Back));
+        assert_eq!(opened, vec![vec!["alpha".to_string()]]);
+    }
+
+    #[test]
     fn enter_with_nothing_checked_opens_just_the_cursor_workspace() {
         let term = Term::stdout();
         let mut reader = ScriptedReader::new(vec![Ok(Key::Enter), Ok(Key::Escape)]);
@@ -481,6 +627,26 @@ mod tests {
         // would surface if the home screen were opened instead), then Escape leaves.
         let (outcome, removed) = run_missing(
             vec![Ok(Key::Enter), Ok(Key::Char('y')), Ok(Key::Escape)],
+            sample_list(),
+            remove_ok,
+        );
+        assert!(matches!(outcome, Outcome::Back));
+        assert_eq!(removed, vec!["alpha".to_string()]);
+    }
+
+    #[test]
+    fn removing_the_only_checked_missing_workspace_reseeds_unite_selection() {
+        // Space enters unite and checks "alpha"; removing that stale row would
+        // otherwise leave unite with an empty checked set. The event loop reseeds
+        // the next row, then the two Esc presses leave unite and the Open screen.
+        let (outcome, removed) = run_missing(
+            vec![
+                Ok(Key::Char(' ')),
+                Ok(Key::Enter),
+                Ok(Key::Char('y')),
+                Ok(Key::Escape),
+                Ok(Key::Escape),
+            ],
             sample_list(),
             remove_ok,
         );
