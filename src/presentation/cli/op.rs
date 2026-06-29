@@ -20,6 +20,10 @@ use crate::infrastructure::secret_store::SecretStore;
 use crate::infrastructure::storage::Storage;
 use crate::usecase::op_auth;
 
+const LOGIN_PROMPT: &str = "Paste your 1Password service account token, then press Enter:";
+const LOGIN_DONE: &str = "Stored the token in the OS keychain and enabled op-mcp.";
+const LOGOUT_DONE: &str = "Removed the token from the OS keychain and disabled op-mcp.";
+
 /// `usagi op <subcommand>`.
 #[derive(Subcommand)]
 pub enum OpCommand {
@@ -47,30 +51,21 @@ pub fn run(
     match command {
         OpCommand::Login => {
             let settings = storage.load_settings()?;
-            writeln!(
-                output,
-                "Paste your 1Password service account token, then press Enter:"
-            )?;
+            writeln!(output, "{LOGIN_PROMPT}")?;
             let read_token =
                 read_token.ok_or_else(|| anyhow::anyhow!("token reader is required"))?;
             let token = read_token().context("reading the token")?;
             let updated = op_auth::login(store, settings, &token)
                 .map_err(|e| anyhow::anyhow!("failed to store the token: {e}"))?;
             storage.save_settings(&updated)?;
-            writeln!(
-                output,
-                "Stored the token in the OS keychain and enabled op-mcp."
-            )?;
+            writeln!(output, "{LOGIN_DONE}")?;
         }
         OpCommand::Logout => {
             let settings = storage.load_settings()?;
             let updated = op_auth::logout(store, settings)
                 .map_err(|e| anyhow::anyhow!("failed to remove the token: {e}"))?;
             storage.save_settings(&updated)?;
-            writeln!(
-                output,
-                "Removed the token from the OS keychain and disabled op-mcp."
-            )?;
+            writeln!(output, "{LOGOUT_DONE}")?;
         }
         OpCommand::Status => {
             let settings = storage.load_settings()?;
