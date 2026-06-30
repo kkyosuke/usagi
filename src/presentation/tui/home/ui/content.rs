@@ -168,6 +168,7 @@ fn focus_keys(scheme: KeyScheme) -> Vec<LogLine> {
         key_row("→ / Tab", "Expand the agent picker"),
         key_row("Enter", "Run the highlighted action / open the pane"),
         key_row("t / a", "Launch a terminal / agent"),
+        key_row("Shift+c", "Close the focused session with --force"),
         key_row("Ctrl-P / Ctrl-N", "Move between the session's tabs"),
     ];
     match scheme {

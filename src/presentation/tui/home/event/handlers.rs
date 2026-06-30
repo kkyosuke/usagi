@@ -171,7 +171,7 @@ pub(super) fn palette_key(
                 | Effect::ShowText { .. }
                 | Effect::OpenTerminal
                 | Effect::OpenAgent(_)
-                | Effect::CloseSession => {}
+                | Effect::CloseSession { .. } => {}
             }
         }
         Key::Tab => state.complete(),
@@ -879,19 +879,17 @@ fn focus_prefix_action(
 }
 
 /// Close the focused session — the `close` command's effect. Dispatches a
-/// background removal like `session remove <name>` (no `--force`): a clean
-/// session is removed, but one with **uncommitted changes is refused** and the
-/// task logs how to discard them (`session remove <name> --force`), so a single
-/// `close` can never silently throw away unsaved work. This matches the CLI's
-/// `session remove` default and the quit-confirm modal's intent to protect
-/// running work, rather than the old unconditional `--force`.
+/// background removal like `session remove <name>`: a clean session is removed,
+/// while a dirty one is refused unless `force` is true. This keeps bare `close`
+/// safe, while `close --force` and the 在席 menu's `Shift`+`c` deliberately mirror
+/// `session remove <name> --force`.
 ///
 /// Either way the user asked to leave this session, so 在席 yields to the base
 /// 切替 (Switch) at once to pick the next one (`Esc` is inert there); the
 /// removal's result — success or the dirty refusal — is logged and the list
 /// refreshed when the background task finishes. The root row is the workspace
 /// itself, not a session, so closing it is refused outright and stays in 在席.
-fn close_focused_session(state: &mut HomeState, wiring: &mut Wiring) {
+fn close_focused_session(state: &mut HomeState, wiring: &mut Wiring, force: bool) {
     let name = state.focused_session_name();
     // The root row is the workspace itself, not a session, so it cannot be
     // closed. The 在席 menu hides `close` here, but the prompt could still be
@@ -900,17 +898,16 @@ fn close_focused_session(state: &mut HomeState, wiring: &mut Wiring) {
         state.log_error("the root row is the workspace and cannot be closed");
         return;
     }
-    // `false`: do not force. A dirty worktree is refused (the task logs the
-    // `--force` hint) instead of being discarded without confirmation.
     let root = state.workspace_root_for_session(None, &name);
     state.set_op_target(root.clone());
-    (wiring.dispatch_remove)(&root, &name, false);
+    (wiring.dispatch_remove)(&root, &name, force);
     state.enter_switch(ReturnMode::Base);
 }
 
 /// 在席 menu surface: `↑`/`↓` move the cursor, `Enter` runs the highlighted
-/// command, and `t` / `a` are shortcuts for `terminal` / `agent`. `ai` runs its
-/// coming-soon line.
+/// command, `t` / `a` are shortcuts for `terminal` / `agent`, and `Shift`+`c`
+/// runs the deliberate discard path (`close --force`). `ai` runs its coming-soon
+/// line.
 ///
 /// On the `agent` row, `→` / `Tab` expands the agent picker (案A) when more than
 /// one CLI is installed; while it is expanded the keys drive the picker instead —
@@ -952,6 +949,10 @@ fn focus_menu_key(
         }
         Key::Char('t') => run_focus_command(term, state, painter, "terminal", wiring),
         Key::Char('a') => run_focus_command(term, state, painter, "agent", wiring),
+        // `Shift`+`c` is the deliberate discard shortcut: run `close --force`
+        // instead of the safe `close`, matching the existing capital-letter
+        // convention for shifted actions in 切替 (`K`/`J` reorder).
+        Key::Char('C') => run_focus_command(term, state, painter, "close --force", wiring),
         _ => {}
     }
 }
@@ -974,7 +975,7 @@ fn focus_prompt_key(
             match effect {
                 Effect::OpenTerminal => launch_pane(term, state, painter, wiring, false),
                 Effect::OpenAgent(cli) => launch_agent(term, state, painter, wiring, cli),
-                Effect::CloseSession => close_focused_session(state, wiring),
+                Effect::CloseSession { force } => close_focused_session(state, wiring, force),
                 _ => {}
             }
         }
@@ -999,9 +1000,10 @@ fn focus_prompt_key(
     }
 }
 
-/// Run a named session command (`terminal` / `agent` / `ai`) from the 在席 menu:
-/// the two launch commands attach the pane (没入); `ai` logs its coming-soon
-/// line.
+/// Run a named session command (`terminal` / `agent` / `close` / `close --force`
+/// / `ai`) from the 在席 menu: the two launch commands attach the pane (没入),
+/// `close` variants remove the session and leave 在席, and `ai` logs its
+/// coming-soon line.
 fn run_focus_command(
     term: &Term,
     state: &mut HomeState,
@@ -1013,8 +1015,11 @@ fn run_focus_command(
         "terminal" => launch_pane(term, state, painter, wiring, false),
         // The menu's `agent` row / `a` shortcut launch the configured default.
         "agent" => launch_agent(term, state, painter, wiring, None),
-        // `close` removes the focused session forcefully and leaves 在席.
-        "close" => close_focused_session(state, wiring),
+        // `close` removes the focused session safely and leaves 在席.
+        "close" => close_focused_session(state, wiring, false),
+        // `close --force` is exposed as `Shift`+`c` on the 在席 menu for the
+        // explicit discard path.
+        "close --force" => close_focused_session(state, wiring, true),
         // `ai` (and any future coming-soon command) just logs its line.
         _ => state.log_output(format!("\"{name}\" is coming soon 🐰")),
     }
