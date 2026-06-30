@@ -9,9 +9,9 @@
 //! closing, routing keys, and reading the result — split out of the parent
 //! [`super`] module to keep the core editor state focused.
 
-use super::Config;
+use super::{Config, LocalField};
 use crate::domain::settings::LOCAL_LLM_MODELS;
-use crate::presentation::tui::widgets::{self, text_input::TextInput};
+use crate::presentation::tui::widgets::{self, text_area::TextArea, text_input::TextInput};
 use console::Style;
 
 /// The open local-LLM install modal: collects the sudo password before the
@@ -58,6 +58,41 @@ pub struct ModelModal {
     cursor: usize,
     /// Whether each model in [`LOCAL_LLM_MODELS`] is pulled, parallel by index.
     installed: Vec<bool>,
+}
+
+/// The open workspace setup-command editor. Each line is one shell command that
+/// will be run in the session root after creating a new session; blank lines are
+/// accepted while editing and dropped when applied.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SetupCommandsModal {
+    area: TextArea,
+}
+
+impl SetupCommandsModal {
+    fn new(commands: &[String]) -> Self {
+        Self {
+            area: TextArea::from_text(&commands.join("\n")),
+        }
+    }
+
+    /// The command lines currently in the editor.
+    pub fn lines(&self) -> &[String] {
+        self.area.lines()
+    }
+
+    /// The caret position as `(row, byte_col)` for rendering.
+    pub fn cursor(&self) -> (usize, usize) {
+        self.area.cursor()
+    }
+
+    fn commands(&self) -> Vec<String> {
+        let text = self.area.text();
+        text.lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(str::to_string)
+            .collect()
+    }
 }
 
 impl ModelModal {
@@ -240,5 +275,101 @@ impl Config {
         self.install_modal
             .as_ref()
             .map(|m| m.password.value().to_string())
+    }
+
+    /// Open the setup-command editor on the workspace-local Setup Commands row.
+    /// A no-op outside the local scope or on any other row.
+    pub fn open_setup_modal(&mut self) {
+        if !matches!(self.selected_local_field(), Some(LocalField::SetupCommands)) {
+            return;
+        }
+        let commands = self
+            .local
+            .as_ref()
+            .map(|l| l.settings.setup_commands.clone())
+            .unwrap_or_default();
+        self.setup_modal = Some(SetupCommandsModal::new(&commands));
+    }
+
+    /// The open setup-command editor, if any. While present the event loop routes
+    /// every key into it.
+    pub fn setup_modal(&self) -> Option<&SetupCommandsModal> {
+        self.setup_modal.as_ref()
+    }
+
+    /// Close the setup-command editor without applying its current buffer.
+    pub fn close_setup_modal(&mut self) {
+        self.setup_modal = None;
+    }
+
+    /// Apply the setup-command editor's non-empty, trimmed lines into the local
+    /// settings, then close it. A no-op when no editor is open.
+    pub fn apply_setup_modal(&mut self) {
+        let Some(modal) = self.setup_modal.take() else {
+            return;
+        };
+        if let Some(local) = &mut self.local {
+            local.settings.setup_commands = modal.commands();
+        }
+    }
+
+    pub fn setup_modal_insert(&mut self, c: char) {
+        if let Some(modal) = &mut self.setup_modal {
+            modal.area.insert(c);
+        }
+    }
+
+    pub fn setup_modal_newline(&mut self) {
+        if let Some(modal) = &mut self.setup_modal {
+            modal.area.newline();
+        }
+    }
+
+    pub fn setup_modal_backspace(&mut self) {
+        if let Some(modal) = &mut self.setup_modal {
+            modal.area.backspace();
+        }
+    }
+
+    pub fn setup_modal_delete_forward(&mut self) {
+        if let Some(modal) = &mut self.setup_modal {
+            modal.area.delete_forward();
+        }
+    }
+
+    pub fn setup_modal_cursor_left(&mut self) {
+        if let Some(modal) = &mut self.setup_modal {
+            modal.area.move_left();
+        }
+    }
+
+    pub fn setup_modal_cursor_right(&mut self) {
+        if let Some(modal) = &mut self.setup_modal {
+            modal.area.move_right();
+        }
+    }
+
+    pub fn setup_modal_cursor_up(&mut self) {
+        if let Some(modal) = &mut self.setup_modal {
+            modal.area.move_up();
+        }
+    }
+
+    pub fn setup_modal_cursor_down(&mut self) {
+        if let Some(modal) = &mut self.setup_modal {
+            modal.area.move_down();
+        }
+    }
+
+    pub fn setup_modal_cursor_home(&mut self) {
+        if let Some(modal) = &mut self.setup_modal {
+            modal.area.move_home();
+        }
+    }
+
+    pub fn setup_modal_cursor_end(&mut self) {
+        if let Some(modal) = &mut self.setup_modal {
+            modal.area.move_end();
+        }
     }
 }

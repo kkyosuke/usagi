@@ -26,7 +26,12 @@
 #       別モジュールへ切り出して計測対象に含めてあり、ここに残るのは実 IO の束ねだけ。
 # これら以外の薄いラッパ（hop/run/mcp/llm_mcp/agent_phase/clean、splash/gallery/
 # new、io/echo）は依存を注入してテスト可能にし、計測対象に含めている。
-export COVERAGE_IGNORE='(src/main\.rs|infrastructure/pty\.rs|infrastructure/resource\.rs|infrastructure/release\.rs|tui/io/term_reader\.rs|tui/app/mod\.rs|tui/home/mod\.rs|tui/home/terminal/pane\.rs|tui/home/terminal/pool\.rs|tui/open/mod\.rs|tui/config/mod\.rs|tui/config/provisioning\.rs|tui/welcome/mod\.rs)'
+#   - infrastructure/setup_runner\.rs : セッション setup コマンドを子プロセスで実行する
+#       実 IO。cargo llvm-cov --workspace ではバイナリクレートと lib クレートの両方が
+#       コンパイルされ、テストが触れるのは lib 側のシンボルだけのため、binary 側の
+#       インスタンスが常に未カバーになってしまう（二重ビルド問題）。実 IO 層として
+#       除外することで正確な計測結果を維持する。
+export COVERAGE_IGNORE='(src/main\.rs|infrastructure/pty\.rs|infrastructure/resource\.rs|infrastructure/release\.rs|infrastructure/setup_runner\.rs|tui/io/term_reader\.rs|tui/app/mod\.rs|tui/home/mod\.rs|tui/home/terminal/pane\.rs|tui/home/terminal/pool\.rs|tui/open/mod\.rs|tui/config/mod\.rs|tui/config/provisioning\.rs|tui/welcome/mod\.rs)'
 # 100% を要求するカバレッジ指標。
 export COVERAGE_MIN=100
 

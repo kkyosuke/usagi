@@ -33,8 +33,10 @@ use anyhow::{anyhow, bail, Context, Result};
 use chrono::{DateTime, Utc};
 
 use crate::domain::agent::Agent;
+use crate::domain::settings::LocalSettings;
 use crate::domain::workspace_state::{PrLink, SessionRecord};
 use crate::infrastructure::repo_paths::{SESSIONS_DIR, STATE_DIR};
+use crate::infrastructure::setup_runner::SystemSetupCommandRunner;
 use crate::infrastructure::workspace_store::WorkspaceStore;
 use crate::infrastructure::{
     agent_prompt_store, agent_state_store, git, open_panes_store, pr_link_store,
@@ -71,12 +73,29 @@ pub struct CreatedSession {
     pub worktrees: Vec<PathBuf>,
 }
 
+/// Runs one configured session setup command.
+///
+/// Abstracted so session creation can be tested without launching arbitrary
+/// shell commands. The production implementation executes the command line via
+/// the platform shell with the new session root as its current directory.
+pub trait SetupCommandRunner {
+    fn run(&self, cwd: &Path, command: &str) -> Result<()>;
+}
+
 /// Create session `name` under `workspace_root`.
 ///
 /// Fails if the name is empty or contains path separators, or if the session
 /// already exists. Any git error (e.g. the branch already exists in a repo) is
 /// surfaced.
 pub fn create(workspace_root: &Path, name: &str) -> Result<CreatedSession> {
+    create_with_setup_runner(workspace_root, name, &SystemSetupCommandRunner)
+}
+
+fn create_with_setup_runner(
+    workspace_root: &Path,
+    name: &str,
+    setup_runner: &dyn SetupCommandRunner,
+) -> Result<CreatedSession> {
     let name = name.trim();
     if name.is_empty() {
         bail!("session name must not be empty");
@@ -165,6 +184,9 @@ pub fn create(workspace_root: &Path, name: &str) -> Result<CreatedSession> {
         let _ = crate::infrastructure::skills::link(wt, &skill_settings);
     }
 
+    let local_settings = crate::usecase::settings::load_local(workspace_root).unwrap_or_default();
+    run_setup_commands(&dest_root, name, &local_settings, setup_runner);
+
     record(&store, name, &dest_root, &worktrees)?;
 
     crate::infrastructure::trace_log::TraceLog::record(
@@ -180,6 +202,40 @@ pub fn create(workspace_root: &Path, name: &str) -> Result<CreatedSession> {
         root: dest_root,
         worktrees,
     })
+}
+
+/// Run the workspace's configured setup commands in the newly-created session
+/// root. Failures are logged and traced, but they do not roll back the session:
+/// at this point the worktree exists and the user can inspect/fix the setup
+/// command from inside it.
+fn run_setup_commands(
+    session_root: &Path,
+    session_name: &str,
+    settings: &LocalSettings,
+    runner: &dyn SetupCommandRunner,
+) {
+    for command in settings.setup_commands() {
+        crate::infrastructure::trace_log::TraceLog::record(
+            crate::domain::trace::TraceEvent::now(
+                crate::domain::trace::TraceCategory::Session,
+                "setup_command",
+            )
+            .with_detail(format!("{session_name}: {command}")),
+        );
+        if let Err(error) = runner.run(session_root, command) {
+            crate::infrastructure::error_log::ErrorLog::record(&format!(
+                "session setup command failed for {session_name} in {}: {error:#}",
+                session_root.display()
+            ));
+            crate::infrastructure::trace_log::TraceLog::record(
+                crate::domain::trace::TraceEvent::now(
+                    crate::domain::trace::TraceCategory::Session,
+                    "setup_command_failed",
+                )
+                .with_detail(format!("{session_name}: {command}")),
+            );
+        }
+    }
 }
 
 /// The reason a session name breaks a structural rule, or `None` when its format
@@ -674,7 +730,10 @@ pub fn session_roots(workspace_root: &Path) -> Vec<PathBuf> {
 mod tests {
     use super::*;
     use crate::infrastructure::git::test_command as git_cmd;
+    use crate::infrastructure::setup_runner::SystemSetupCommandRunner;
     use crate::usecase::settings;
+    use anyhow::anyhow;
+    use std::cell::RefCell;
 
     /// Initialise a throwaway git repo with one commit on `main`.
     fn init_repo(dir: &Path) {
@@ -706,6 +765,61 @@ mod tests {
     fn head_commit(dir: &Path) -> String {
         let out = git_cmd(dir).args(["rev-parse", "HEAD"]).output().unwrap();
         String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    #[derive(Default)]
+    struct RecordingSetupRunner {
+        calls: RefCell<Vec<(PathBuf, String)>>,
+        fail_on: Option<String>,
+    }
+
+    impl SetupCommandRunner for RecordingSetupRunner {
+        fn run(&self, cwd: &Path, command: &str) -> Result<()> {
+            self.calls
+                .borrow_mut()
+                .push((cwd.to_path_buf(), command.to_string()));
+            if self.fail_on.as_deref() == Some(command) {
+                Err(anyhow!("boom"))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    #[test]
+    fn system_setup_runner_runs_in_the_given_directory_and_reports_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let runner = SystemSetupCommandRunner;
+        #[cfg(not(windows))]
+        let command = "printf hello > setup.txt";
+        #[cfg(windows)]
+        let command = "echo hello> setup.txt";
+
+        runner.run(dir.path(), command).unwrap();
+        assert_eq!(
+            fs::read_to_string(dir.path().join("setup.txt")).unwrap(),
+            "hello"
+        );
+
+        // Failing command with non-empty stderr (covers the stderr branch).
+        #[cfg(not(windows))]
+        let failing = "echo nope >&2; exit 7";
+        #[cfg(windows)]
+        let failing = "exit /B 7";
+        let err = runner.run(dir.path(), failing).unwrap_err();
+        assert!(err.to_string().contains("setup command"));
+
+        // Failing command with non-empty stdout and empty stderr (covers the
+        // stdout branch and the empty-stderr branch in the error message).
+        #[cfg(not(windows))]
+        {
+            let err = runner
+                .run(dir.path(), "echo hi; exit 2")
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("stdout"));
+            assert!(!err.contains("stderr"));
+        }
     }
 
     #[test]
@@ -758,6 +872,72 @@ mod tests {
         assert_eq!(state.sessions.len(), 1);
         assert_eq!(state.sessions[0].name, "feature-x");
         assert_eq!(state.sessions[0].root, wt);
+    }
+
+    #[test]
+    fn create_runs_configured_setup_commands_in_the_session_root() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        settings::save_local(
+            root.path(),
+            &LocalSettings {
+                setup_commands: vec!["first".to_string(), "  ".to_string(), "second".to_string()],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let runner = RecordingSetupRunner::default();
+
+        let created = create_with_setup_runner(root.path(), "with-setup", &runner).unwrap();
+
+        assert_eq!(
+            *runner.calls.borrow(),
+            vec![
+                (created.root.clone(), "first".to_string()),
+                (created.root.clone(), "second".to_string()),
+            ]
+        );
+        assert_eq!(list(root.path()).unwrap()[0].name, "with-setup");
+    }
+
+    #[test]
+    fn setup_command_failures_are_logged_without_aborting_creation() {
+        let _guard = crate::test_support::process_env_guard();
+        let root = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        std::env::set_var(crate::infrastructure::storage::DATA_DIR_ENV, data.path());
+        init_repo(root.path());
+        settings::save_local(
+            root.path(),
+            &LocalSettings {
+                setup_commands: vec!["fail".to_string(), "after".to_string()],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let runner = RecordingSetupRunner {
+            fail_on: Some("fail".to_string()),
+            ..Default::default()
+        };
+
+        let created = create_with_setup_runner(root.path(), "keeps-going", &runner).unwrap();
+
+        assert!(created.root.exists());
+        assert_eq!(
+            runner
+                .calls
+                .borrow()
+                .iter()
+                .map(|(_, command)| command.as_str())
+                .collect::<Vec<_>>(),
+            vec!["fail", "after"]
+        );
+        assert!(list(root.path())
+            .unwrap()
+            .iter()
+            .any(|session| session.name == "keeps-going"));
+        assert!(data.path().join("logs").is_dir());
+        std::env::remove_var(crate::infrastructure::storage::DATA_DIR_ENV);
     }
 
     #[test]
