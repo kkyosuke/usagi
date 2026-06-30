@@ -12,6 +12,12 @@ use anyhow::Result;
 use console::Term;
 
 use crate::presentation::tui::io::term_reader::TermKeyReader;
+use crate::usecase::workspace::WorkspaceOverview;
+
+#[cfg(not(test))]
+use crate::infrastructure::storage::Storage;
+#[cfg(not(test))]
+use crate::usecase::workspace;
 
 pub use event::Outcome;
 
@@ -30,7 +36,8 @@ use tests::mock_event_loop as event_loop;
 /// centres the welcome body over its footer — and the others align to it; built
 /// from the screen's own fixed [`menu`] so it depends only on `height`.
 pub fn mascot_top_padding(height: usize) -> usize {
-    ui::body_top_padding(height, menu::Menu::new().items(), None)
+    let menu = menu::Menu::empty();
+    ui::body_top_padding(height, menu.items(), menu.recent_items(), None)
 }
 
 /// Runs the welcome menu on the given terminal until the user picks an action.
@@ -41,8 +48,39 @@ pub fn mascot_top_padding(height: usize) -> usize {
 /// `notice` seeds the notice line, e.g. an error carried back from a failed
 /// project creation.
 pub fn run(term: &Term, notice: Option<String>) -> Result<Outcome> {
+    run_with_recent_loader(term, notice, load_recent_overviews)
+}
+
+fn run_with_recent_loader(
+    term: &Term,
+    notice: Option<String>,
+    load_recent: impl FnOnce() -> Result<Vec<WorkspaceOverview>>,
+) -> Result<Outcome> {
+    let (recent_overviews, notice) = match load_recent() {
+        Ok(overviews) => (overviews, notice),
+        Err(e) => {
+            let notice = match notice {
+                Some(notice) => Some(notice),
+                None => Some(format!("Failed to load recent projects: {e}")),
+            };
+            (Vec::new(), notice)
+        }
+    };
     let mut reader = TermKeyReader::new(term.clone());
-    event_loop(term, &mut reader, notice)
+    event_loop(term, &mut reader, recent_overviews, notice)
+}
+
+/// Loads the most-recently-used workspaces shown in the welcome screen's right
+/// column. The usecase already sorts most-recent first, so the menu can take the
+/// first three entries directly.
+#[cfg(not(test))]
+fn load_recent_overviews() -> Result<Vec<WorkspaceOverview>> {
+    Storage::open_default().and_then(|storage| workspace::overviews(&storage))
+}
+
+#[cfg(test)]
+fn load_recent_overviews() -> Result<Vec<WorkspaceOverview>> {
+    Ok(Vec::new())
 }
 
 #[cfg(test)]
@@ -64,6 +102,7 @@ mod tests {
     pub(super) fn mock_event_loop(
         _term: &Term,
         _reader: &mut dyn KeyReader,
+        _recent_overviews: Vec<WorkspaceOverview>,
         notice: Option<String>,
     ) -> Result<Outcome> {
         MOCK.with(|m| {
@@ -95,12 +134,41 @@ mod tests {
     }
 
     #[test]
+    fn run_shows_a_notice_when_recent_loading_fails() {
+        MOCK.with(|m| *m.borrow_mut() = (None, Ok(Outcome::Quit)));
+        let outcome = run_with_recent_loader(&Term::stdout(), None, || {
+            Err(anyhow::anyhow!("storage unavailable"))
+        })
+        .unwrap();
+        assert_eq!(outcome, Outcome::Quit);
+        MOCK.with(|m| {
+            assert_eq!(
+                m.borrow().0.as_deref(),
+                Some("Failed to load recent projects: storage unavailable")
+            )
+        });
+    }
+
+    #[test]
+    fn run_keeps_an_existing_notice_when_recent_loading_fails() {
+        MOCK.with(|m| *m.borrow_mut() = (None, Ok(Outcome::Quit)));
+        run_with_recent_loader(
+            &Term::stdout(),
+            Some("Could not create project".to_string()),
+            || Err(anyhow::anyhow!("storage unavailable")),
+        )
+        .unwrap();
+        MOCK.with(|m| assert_eq!(m.borrow().0.as_deref(), Some("Could not create project")));
+    }
+
+    #[test]
     fn mascot_top_padding_matches_the_body_layout() {
         // The shared mascot row is derived from the welcome screen's own menu, so
         // it depends only on the terminal height.
+        let menu = menu::Menu::empty();
         assert_eq!(
             mascot_top_padding(40),
-            ui::body_top_padding(40, menu::Menu::new().items(), None)
+            ui::body_top_padding(40, menu.items(), menu.recent_items(), None)
         );
     }
 }

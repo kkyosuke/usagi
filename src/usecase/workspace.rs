@@ -4,9 +4,11 @@ use anyhow::{bail, Result};
 
 use crate::domain::issue::IssueStatus;
 use crate::domain::workspace::Workspace;
+use crate::domain::workspace_state::PrLink;
 use crate::infrastructure::storage::Storage;
 use crate::usecase::issue::{self, IssueFilter};
 use crate::usecase::session;
+use crate::usecase::workspace_state;
 
 /// Register a new workspace. Fails if the name is already taken.
 pub fn add(storage: &Storage, name: &str, path: impl Into<PathBuf>) -> Result<Workspace> {
@@ -33,8 +35,9 @@ pub fn list(storage: &Storage) -> Result<Vec<Workspace>> {
 
 /// A registered workspace enriched with the at-a-glance figures the project
 /// selection screen shows beside it: how many sessions it has and how many of
-/// its issues are still open. The workspace's own `updated_at` carries the
-/// last-used time, so it is not duplicated here.
+/// its issues are still open, and how many pull requests have been discovered
+/// across those sessions. The workspace's own `updated_at` carries the last-used
+/// time, so it is not duplicated here.
 #[derive(Debug, Clone)]
 pub struct WorkspaceOverview {
     pub workspace: Workspace,
@@ -42,6 +45,8 @@ pub struct WorkspaceOverview {
     pub session_count: usize,
     /// Issues not yet `done` in the workspace's issue store.
     pub open_issue_count: usize,
+    /// Unique pull requests recorded across the workspace's sessions.
+    pub pr_count: usize,
 }
 
 /// List every registered workspace (most recently updated first) together with
@@ -60,11 +65,30 @@ fn overview_for(workspace: Workspace) -> WorkspaceOverview {
         .map(|sessions| sessions.len())
         .unwrap_or(0);
     let open_issue_count = open_issue_count(&workspace.path);
+    let pr_count = pr_count(&workspace.path);
     WorkspaceOverview {
         workspace,
         session_count,
         open_issue_count,
+        pr_count,
     }
+}
+
+/// Count unique PR URLs recorded under the workspace sessions. Returns zero
+/// when the workspace has no recorded state (or it cannot be read), matching the
+/// overview's "one broken entry must not blank the screen" policy.
+fn pr_count(path: &Path) -> usize {
+    workspace_state::recorded_sessions(path)
+        .map(|sessions| {
+            PrLink::aggregate(
+                sessions
+                    .into_iter()
+                    .flat_map(|session| session.worktrees)
+                    .flat_map(|worktree| worktree.pr),
+            )
+            .len()
+        })
+        .unwrap_or(0)
 }
 
 /// Count the issues under `path` that are not yet `done`. Returns zero when the
@@ -198,7 +222,12 @@ mod tests {
 
     #[test]
     fn overviews_count_open_issues_and_sessions() {
+        use crate::domain::workspace_state::{
+            BranchStatus, PrLink, SessionRecord, WorkspaceState, WorktreeState,
+        };
+        use crate::infrastructure::workspace_store::WorkspaceStore;
         use crate::usecase::issue::{self, IssueChanges, NewIssue};
+        use chrono::Utc;
 
         let (_dir, storage) = temp_storage();
         // Point the workspace at a real directory so its issue/session stores
@@ -233,13 +262,54 @@ mod tests {
         )
         .unwrap();
 
+        // Two sessions record the same PR URL; the overview counts unique PRs
+        // across the workspace, so the duplicate contributes once.
+        let pr = PrLink {
+            number: 493,
+            url: "https://github.com/kkyosuke/usagi/pull/493".to_string(),
+        };
+        let other_pr = PrLink {
+            number: 494,
+            url: "https://github.com/kkyosuke/usagi/pull/494".to_string(),
+        };
+        let now = Utc::now();
+        let worktree = |name: &str, prs: Vec<PrLink>| WorktreeState {
+            branch: Some(name.to_string()),
+            path: repo.path().join(name),
+            head: "abcdef0".to_string(),
+            primary: false,
+            upstream: None,
+            status: BranchStatus::New,
+            diff: None,
+            ahead_behind: None,
+            pr: prs,
+            updated_at: now,
+        };
+        let session = |name: &str, prs: Vec<PrLink>| SessionRecord {
+            name: name.to_string(),
+            display_name: None,
+            note: None,
+            root: repo.path().join(".usagi/sessions").join(name),
+            worktrees: vec![worktree(name, prs)],
+            created_at: now,
+            last_active: None,
+        };
+        let mut state = WorkspaceState::new();
+        state.sessions = vec![
+            session("one", vec![pr.clone()]),
+            session("two", vec![pr, other_pr]),
+        ];
+        WorkspaceStore::new(repo.path()).save(&state).unwrap();
+
         let overviews = overviews(&storage).unwrap();
         assert_eq!(overviews.len(), 1);
         assert_eq!(overviews[0].workspace.name, "alpha");
-        // No sessions have been created under the fresh workspace.
-        assert_eq!(overviews[0].session_count, 0);
+        // Two sessions were recorded under the workspace state.
+        assert_eq!(overviews[0].session_count, 2);
         // Three created, one marked done.
         assert_eq!(overviews[0].open_issue_count, 2);
+        // Two unique PR URLs recorded under the workspace.
+        assert_eq!(overviews[0].pr_count, 2);
     }
 
     #[test]
@@ -251,5 +321,6 @@ mod tests {
         assert_eq!(overviews.len(), 1);
         assert_eq!(overviews[0].session_count, 0);
         assert_eq!(overviews[0].open_issue_count, 0);
+        assert_eq!(overviews[0].pr_count, 0);
     }
 }

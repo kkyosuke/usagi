@@ -37,6 +37,10 @@ pub type CreateProject<'a> = dyn FnMut(&NewProject) -> Result<Workspace> + 'a;
 /// Runs the home screen for a workspace and returns the user's choice.
 pub type RunHome<'a> = dyn FnMut(&Term, &Workspace) -> Result<home::Outcome> + 'a;
 
+/// Opens a recent workspace from the welcome screen and returns the home
+/// screen's choice.
+pub type RunRecent<'a> = dyn FnMut(&Term, &Workspace) -> Result<home::Outcome> + 'a;
+
 /// Runs the Config screen and returns the user's choice.
 pub type RunConfig<'a> = dyn FnMut(&Term) -> Result<config::Outcome> + 'a;
 
@@ -57,6 +61,7 @@ pub fn event_loop(
     run_new: &mut RunNew,
     create_project: &mut CreateProject,
     run_home: &mut RunHome,
+    run_recent: &mut RunRecent,
     run_config: &mut RunConfig,
 ) -> Result<()> {
     let mut guard = AlternateScreenGuard::new(term.clone())?;
@@ -71,6 +76,11 @@ pub fn event_loop(
             Ok(welcome::Outcome::OpenProjects) => match run_open(term) {
                 Ok(open::Outcome::Back) => {}
                 Ok(open::Outcome::Quit) => return Ok(()),
+                Err(e) => return dismiss_and_fail(&mut guard, e),
+            },
+            Ok(welcome::Outcome::RecentProject(workspace)) => match run_recent(term, &workspace) {
+                Ok(home::Outcome::Back) => {}
+                Ok(home::Outcome::Quit) => return Ok(()),
                 Err(e) => return dismiss_and_fail(&mut guard, e),
             },
             Ok(welcome::Outcome::NewProject) => match run_new(term) {
@@ -137,6 +147,12 @@ mod tests {
     fn welcome_config(_t: &Term, _n: Option<String>) -> Result<welcome::Outcome> {
         Ok(welcome::Outcome::Configure)
     }
+    fn welcome_recent(_t: &Term, _n: Option<String>) -> Result<welcome::Outcome> {
+        Ok(welcome::Outcome::RecentProject(Workspace::new(
+            "recent",
+            "/tmp/recent",
+        )))
+    }
     fn welcome_err(_t: &Term, _n: Option<String>) -> Result<welcome::Outcome> {
         Err(anyhow::anyhow!("welcome screen blew up"))
     }
@@ -200,6 +216,9 @@ mod tests {
     fn home_err(_t: &Term, _w: &Workspace) -> Result<home::Outcome> {
         Err(anyhow::anyhow!("home screen blew up"))
     }
+    fn recent_err(_t: &Term, _w: &Workspace) -> Result<home::Outcome> {
+        Err(anyhow::anyhow!("recent screen blew up"))
+    }
 
     // Config-screen stubs.
     fn config_back(_t: &Term) -> Result<config::Outcome> {
@@ -244,6 +263,7 @@ mod tests {
             &mut new_back,
             &mut create_ok,
             &mut home_back,
+            &mut home_back,
             &mut config_back,
         )
         .is_ok());
@@ -259,6 +279,7 @@ mod tests {
             &mut open_back,
             &mut new_back,
             &mut create_ok,
+            &mut home_back,
             &mut home_back,
             &mut config_back,
         )
@@ -279,6 +300,7 @@ mod tests {
             &mut new_back,
             &mut create_ok,
             &mut home_back,
+            &mut home_back,
             &mut config_back,
         )
         .is_ok());
@@ -294,6 +316,7 @@ mod tests {
             &mut open_quit,
             &mut new_back,
             &mut create_ok,
+            &mut home_back,
             &mut home_back,
             &mut config_back,
         )
@@ -311,10 +334,67 @@ mod tests {
             &mut new_back,
             &mut create_ok,
             &mut home_back,
+            &mut home_back,
             &mut config_back,
         )
         .unwrap_err();
         assert!(err.to_string().contains("open screen blew up"));
+    }
+
+    #[test]
+    fn recent_back_returns_to_menu_then_quits() {
+        let t = term();
+        let mut welcome = ScriptedWelcome::new(vec![
+            welcome::Outcome::RecentProject(Workspace::new("recent", "/tmp/recent")),
+            welcome::Outcome::Quit,
+        ]);
+        assert!(event_loop(
+            &t,
+            &mut splash_noop,
+            &mut |tt, n| welcome.next(tt, n),
+            &mut open_back,
+            &mut new_back,
+            &mut create_ok,
+            &mut home_back,
+            &mut home_back,
+            &mut config_back,
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn recent_quit_ends_the_session() {
+        let t = term();
+        assert!(event_loop(
+            &t,
+            &mut splash_noop,
+            &mut welcome_recent,
+            &mut open_back,
+            &mut new_back,
+            &mut create_ok,
+            &mut home_back,
+            &mut home_quit,
+            &mut config_back,
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn recent_error_is_propagated() {
+        let t = term();
+        let err = event_loop(
+            &t,
+            &mut splash_noop,
+            &mut welcome_recent,
+            &mut open_back,
+            &mut new_back,
+            &mut create_ok,
+            &mut home_back,
+            &mut recent_err,
+            &mut config_back,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("recent screen blew up"));
     }
 
     #[test]
@@ -329,6 +409,7 @@ mod tests {
             &mut open_back,
             &mut new_back,
             &mut create_ok,
+            &mut home_back,
             &mut home_back,
             &mut config_back,
         )
@@ -346,6 +427,7 @@ mod tests {
             &mut new_quit,
             &mut create_ok,
             &mut home_back,
+            &mut home_back,
             &mut config_back,
         )
         .is_ok());
@@ -361,6 +443,7 @@ mod tests {
             &mut open_back,
             &mut new_err,
             &mut create_ok,
+            &mut home_back,
             &mut home_back,
             &mut config_back,
         )
@@ -381,6 +464,7 @@ mod tests {
             &mut new_submitted,
             &mut create_ok,
             &mut home_back,
+            &mut home_back,
             &mut config_back,
         )
         .is_ok());
@@ -399,6 +483,7 @@ mod tests {
             &mut new_submitted_existing,
             &mut create_ok,
             &mut home_back,
+            &mut home_back,
             &mut config_back,
         )
         .is_ok());
@@ -415,6 +500,7 @@ mod tests {
             &mut new_submitted,
             &mut create_ok,
             &mut home_quit,
+            &mut home_back,
             &mut config_back,
         )
         .is_ok());
@@ -431,6 +517,7 @@ mod tests {
             &mut new_submitted,
             &mut create_ok,
             &mut home_err,
+            &mut home_back,
             &mut config_back,
         )
         .unwrap_err();
@@ -452,6 +539,7 @@ mod tests {
             &mut new_submitted,
             &mut create_err,
             &mut home_err,
+            &mut home_back,
             &mut config_back,
         )
         .is_ok());
@@ -470,6 +558,7 @@ mod tests {
             &mut new_back,
             &mut create_ok,
             &mut home_back,
+            &mut home_back,
             &mut config_back,
         )
         .is_ok());
@@ -486,6 +575,7 @@ mod tests {
             &mut new_back,
             &mut create_ok,
             &mut home_back,
+            &mut home_back,
             &mut config_quit,
         )
         .is_ok());
@@ -501,6 +591,7 @@ mod tests {
             &mut open_back,
             &mut new_back,
             &mut create_ok,
+            &mut home_back,
             &mut home_back,
             &mut config_err,
         )
@@ -521,6 +612,7 @@ mod tests {
             &mut open_back,
             &mut new_back,
             &mut create_ok,
+            &mut home_back,
             &mut home_back,
             &mut config_back,
         )

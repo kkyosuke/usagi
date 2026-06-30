@@ -19,13 +19,14 @@
 #   - tui/io/term_reader\.rs  : 実端末からのキー入力（live TTY が必要）。
 #   - tui/app/mod\.rs / tui/home/mod\.rs / home/terminal/pane\.rs / home/terminal/pool\.rs
 #     / tui/open/mod\.rs / tui/config/mod\.rs / tui/config/provisioning\.rs
+#     / tui/welcome/mod\.rs
 #                             : 実端末・実 PTY・実スレッドを束ねるオーケストレータ。
 #       terminal/pane / terminal/pool の純ロジック（キー/マウスの入力変換は
 #       home/pane_input.rs、タブのインデックス・ラベル算術は home/terminal/tabs.rs）は
 #       別モジュールへ切り出して計測対象に含めてあり、ここに残るのは実 IO の束ねだけ。
 # これら以外の薄いラッパ（hop/run/mcp/llm_mcp/agent_phase/clean、splash/gallery/
-# welcome/new、io/echo）は依存を注入してテスト可能にし、計測対象に含めている。
-export COVERAGE_IGNORE='(src/main\.rs|infrastructure/pty\.rs|infrastructure/resource\.rs|infrastructure/release\.rs|tui/io/term_reader\.rs|tui/app/mod\.rs|tui/home/mod\.rs|tui/home/terminal/pane\.rs|tui/home/terminal/pool\.rs|tui/open/mod\.rs|tui/config/mod\.rs|tui/config/provisioning\.rs)'
+# new、io/echo）は依存を注入してテスト可能にし、計測対象に含めている。
+export COVERAGE_IGNORE='(src/main\.rs|infrastructure/pty\.rs|infrastructure/resource\.rs|infrastructure/release\.rs|tui/io/term_reader\.rs|tui/app/mod\.rs|tui/home/mod\.rs|tui/home/terminal/pane\.rs|tui/home/terminal/pool\.rs|tui/open/mod\.rs|tui/config/mod\.rs|tui/config/provisioning\.rs|tui/welcome/mod\.rs)'
 # 100% を要求するカバレッジ指標。
 export COVERAGE_MIN=100
 

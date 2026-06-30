@@ -32,40 +32,13 @@ const CLOCK_ICON: &str = "◷"; // when the workspace was last used
 /// columns the `> ` cursor and its trailing space occupy).
 const STATS_INDENT: &str = "    ";
 
-/// Formats how long ago `from` was, relative to `now`, as a compact label:
-/// `just now`, `5m ago`, `3h ago`, `2d ago`, `3w ago`, falling back to an
-/// absolute `YYYY-MM-DD` date once it is over a month old. A `from` in the
-/// future (clock skew) reads as `just now`.
-fn relative_time(from: DateTime<Utc>, now: DateTime<Utc>) -> String {
-    let secs = (now - from).num_seconds();
-    if secs < 60 {
-        return "just now".to_string();
-    }
-    let mins = secs / 60;
-    if mins < 60 {
-        return format!("{mins}m ago");
-    }
-    let hours = mins / 60;
-    if hours < 24 {
-        return format!("{hours}h ago");
-    }
-    let days = hours / 24;
-    if days < 7 {
-        return format!("{days}d ago");
-    }
-    if days < 30 {
-        return format!("{}w ago", days / 7);
-    }
-    from.format("%Y-%m-%d").to_string()
-}
-
 /// Builds the dimmed stats line shown under a project: session count, open-issue
 /// count, and how recently the workspace was used, each tagged with a glyph.
 fn stats_line(block_pad: &str, overview: &WorkspaceOverview, now: DateTime<Utc>) -> String {
     let sessions = overview.session_count;
     let session_word = if sessions == 1 { "session" } else { "sessions" };
     let open = overview.open_issue_count;
-    let updated = relative_time(overview.workspace.updated_at, now);
+    let updated = widgets::relative_time(overview.workspace.updated_at, now);
     let content = format!(
         "{SESSION_ICON} {sessions} {session_word}   {ISSUE_ICON} {open} open   {CLOCK_ICON} {updated}",
     );
@@ -375,6 +348,7 @@ mod tests {
             workspace: Workspace::new(name, format!("/home/user/projects/{name}")),
             session_count: 0,
             open_issue_count: 0,
+            pr_count: 0,
         }
     }
 
@@ -670,6 +644,7 @@ mod tests {
             ),
             session_count: 0,
             open_issue_count: 0,
+            pr_count: 0,
         }]);
         let lines = list_lines(80, "", &list, now());
         // The ellipsis marks that the long path was shortened to fit the block.
@@ -680,17 +655,32 @@ mod tests {
     fn relative_time_scales_from_just_now_to_an_absolute_date() {
         use chrono::Duration;
         let base = now();
-        assert_eq!(relative_time(base, base), "just now");
+        assert_eq!(widgets::relative_time(base, base), "just now");
         assert_eq!(
-            relative_time(base - Duration::seconds(30), base),
+            widgets::relative_time(base - Duration::seconds(30), base),
             "just now"
         );
-        assert_eq!(relative_time(base - Duration::minutes(5), base), "5m ago");
-        assert_eq!(relative_time(base - Duration::hours(3), base), "3h ago");
-        assert_eq!(relative_time(base - Duration::days(2), base), "2d ago");
-        assert_eq!(relative_time(base - Duration::days(20), base), "2w ago");
+        assert_eq!(
+            widgets::relative_time(base - Duration::minutes(5), base),
+            "5min ago"
+        );
+        assert_eq!(
+            widgets::relative_time(base - Duration::hours(3), base),
+            "3h ago"
+        );
+        assert_eq!(
+            widgets::relative_time(base - Duration::days(2), base),
+            "2d ago"
+        );
+        assert_eq!(
+            widgets::relative_time(base - Duration::days(20), base),
+            "2w ago"
+        );
         // Over a month falls back to the absolute date of `from`.
-        assert_eq!(relative_time(base - Duration::days(60), base), "2026-04-26");
+        assert_eq!(
+            widgets::relative_time(base - Duration::days(60), base),
+            "2026-04-26"
+        );
     }
 
     #[test]
@@ -698,7 +688,10 @@ mod tests {
         use chrono::Duration;
         let base = now();
         // Clock skew can place `from` slightly ahead of `now`.
-        assert_eq!(relative_time(base + Duration::hours(1), base), "just now");
+        assert_eq!(
+            widgets::relative_time(base + Duration::hours(1), base),
+            "just now"
+        );
     }
 
     #[test]
@@ -707,6 +700,7 @@ mod tests {
             workspace: Workspace::new("proj", "/p/proj"),
             session_count: 1,
             open_issue_count: 4,
+            pr_count: 0,
         };
         let line = stats_line("", &overview, now());
         let plain = console::strip_ansi_codes(&line).into_owned();
@@ -736,6 +730,7 @@ mod tests {
             workspace: Workspace::new("proj", "/p/proj"),
             session_count: 3,
             open_issue_count: 0,
+            pr_count: 0,
         };
         let plain = console::strip_ansi_codes(&stats_line("", &overview, now())).into_owned();
         assert!(plain.contains("3 sessions"));
