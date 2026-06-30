@@ -266,6 +266,10 @@ pub(super) enum Reserved {
     NextTab,
     /// Switch to the previous tab in place.
     PrevTab,
+    /// Move the active tab one slot to the right, keeping it active.
+    SwapTabRight,
+    /// Move the active tab one slot to the left, keeping it active.
+    SwapTabLeft,
     /// Add a fresh agent tab without leaving 没入.
     NewAgentTab,
     /// Close the active tab in place, killing its shell. Mirrors 切替's `x`, so
@@ -332,6 +336,18 @@ fn is_prev_session(key: &KeyEvent) -> bool {
     chord(key, '\u{1e}', '^')
 }
 
+/// Whether this key is `Ctrl+Shift+letter`. crossterm reports the chord as the
+/// **uppercase** `Char` (Shift having already cased the letter) carrying the
+/// `CONTROL` modifier — so matching the uppercase `Char` + `CONTROL` keeps it
+/// distinct from the bare `Ctrl-<lowercase>` that still flows to the shell / the
+/// prefix scheme. `letter` is given lowercase; its uppercase is what we match.
+/// Terminals that cannot report Ctrl combined with Shift simply never produce
+/// this, leaving the old `Ctrl-N`/`Ctrl-P` bytes untouched.
+fn ctrl_shift_letter(key: &KeyEvent, letter: char) -> bool {
+    key.modifiers.contains(KeyModifiers::CONTROL)
+        && key.code == KeyCode::Char(letter.to_ascii_uppercase())
+}
+
 /// The reserved action a single `Alt`-chord triggers in the [`KeyScheme::Alt`]
 /// scheme, or `None` for a key the shell should receive. Only `Alt` letters and
 /// arrows readline does **not** bind by default are claimed — so `Alt-b`/`Alt-f`
@@ -383,6 +399,15 @@ pub(super) fn classify(scheme: KeyScheme, pending: bool, key: &KeyEvent) -> KeyA
     // direct key, so it never needs the leader or an `Alt` modifier.
     if is_prev_session(key) {
         return KeyAction::Reserved(Reserved::PrevSession);
+    }
+    // `Ctrl+Shift+N/P` reorder the active tab in either scheme. These chords are
+    // only available when the terminal reports Shift distinctly from Ctrl; when
+    // it does not, the old `Ctrl-N/P` bytes keep flowing exactly as before.
+    if ctrl_shift_letter(key, 'n') {
+        return KeyAction::Reserved(Reserved::SwapTabRight);
+    }
+    if ctrl_shift_letter(key, 'p') {
+        return KeyAction::Reserved(Reserved::SwapTabLeft);
     }
     match scheme {
         KeyScheme::Alt => match alt_action(key) {
@@ -780,6 +805,28 @@ mod tests {
             classify(Prefix, true, &key(KeyCode::Left, KeyModifiers::NONE)),
             KeyAction::Reserved(Reserved::PrevTab)
         );
+    }
+
+    #[test]
+    fn ctrl_shift_n_and_p_reorder_tabs_in_both_schemes() {
+        let ctrl = KeyModifiers::CONTROL;
+        for scheme in KeyScheme::ALL {
+            for pending in [false, true] {
+                assert_eq!(
+                    classify(scheme, pending, &key(KeyCode::Char('N'), ctrl)),
+                    KeyAction::Reserved(Reserved::SwapTabRight)
+                );
+                assert_eq!(
+                    classify(scheme, pending, &key(KeyCode::Char('P'), ctrl)),
+                    KeyAction::Reserved(Reserved::SwapTabLeft)
+                );
+            }
+            assert_eq!(
+                classify(scheme, false, &key(KeyCode::Char('n'), ctrl)),
+                KeyAction::Forward,
+                "bare Ctrl-n stays unchanged; terminals without Ctrl+Shift reporting keep the old behaviour"
+            );
+        }
     }
 
     #[test]

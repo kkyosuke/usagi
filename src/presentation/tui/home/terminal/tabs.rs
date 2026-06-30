@@ -31,6 +31,17 @@ pub enum TabNav {
     To(usize),
 }
 
+/// How the user asked to *reorder* the active tab within the session — moving
+/// the pane itself one slot, rather than moving the cursor between panes
+/// ([`TabNav`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TabSwap {
+    /// Swap the active tab with its left neighbour (toward the first tab).
+    Left,
+    /// Swap the active tab with its right neighbour (toward the last tab).
+    Right,
+}
+
 /// The tab strip the renderer draws above the embedded terminal: one label per
 /// live pane and which one is active.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,6 +64,41 @@ pub fn resolve_nav(active: usize, len: usize, nav: TabNav) -> usize {
         TabNav::Prev => (active + len - 1) % len,
         TabNav::To(index) => index.min(len - 1),
     }
+}
+
+/// The two pane indices to swap to move the active tab one slot in `swap`'s
+/// direction, given a session of `len` panes whose active tab is `active`. The
+/// active tab follows the pane, so the second index of the pair is its new
+/// position. Returns `None` when the move is impossible — fewer than two panes,
+/// or the active tab already sits at the edge it would move toward — so
+/// reordering does **not** wrap around the ends (unlike [`resolve_nav`]) and a
+/// no-op lets 没入 skip the repaint.
+pub fn resolve_swap(active: usize, len: usize, swap: TabSwap) -> Option<(usize, usize)> {
+    if len < 2 || active >= len {
+        return None;
+    }
+    match swap {
+        TabSwap::Left => {
+            let target = active.checked_sub(1)?;
+            Some((active, target))
+        }
+        TabSwap::Right => {
+            let target = active + 1;
+            (target < len).then_some((active, target))
+        }
+    }
+}
+
+/// The source and destination indices for moving a tab to an arbitrary slot
+/// (drag/drop). Both indices are clamped to the live tab range; moving to the
+/// same slot is a no-op. The active tab follows the moved pane, so the second
+/// index of the pair is its new active index.
+pub fn resolve_move(from: usize, to: usize, len: usize) -> Option<(usize, usize)> {
+    if len < 2 || from >= len {
+        return None;
+    }
+    let target = to.min(len - 1);
+    (from != target).then_some((from, target))
 }
 
 /// The active tab index after the active pane is closed, given the session had
@@ -153,6 +199,48 @@ mod tests {
         assert_eq!(resolve_nav(0, 0, TabNav::Next), 0);
         assert_eq!(resolve_nav(0, 0, TabNav::Prev), 0);
         assert_eq!(resolve_nav(0, 0, TabNav::To(5)), 0);
+    }
+
+    #[test]
+    fn swap_moves_the_active_tab_one_slot_without_wrapping() {
+        assert_eq!(resolve_swap(1, 3, TabSwap::Left), Some((1, 0)));
+        assert_eq!(resolve_swap(1, 3, TabSwap::Right), Some((1, 2)));
+        assert_eq!(
+            resolve_swap(0, 3, TabSwap::Left),
+            None,
+            "left edge does not wrap to the right edge"
+        );
+        assert_eq!(
+            resolve_swap(2, 3, TabSwap::Right),
+            None,
+            "right edge does not wrap to the left edge"
+        );
+    }
+
+    #[test]
+    fn swap_is_a_noop_without_a_valid_active_tab() {
+        assert_eq!(resolve_swap(0, 0, TabSwap::Right), None);
+        assert_eq!(resolve_swap(0, 1, TabSwap::Right), None);
+        assert_eq!(resolve_swap(2, 2, TabSwap::Left), None);
+    }
+
+    #[test]
+    fn move_reorders_to_a_clamped_target_slot() {
+        assert_eq!(resolve_move(0, 2, 3), Some((0, 2)));
+        assert_eq!(resolve_move(2, 0, 3), Some((2, 0)));
+        assert_eq!(
+            resolve_move(0, 99, 3),
+            Some((0, 2)),
+            "a drop past the end lands on the last tab"
+        );
+    }
+
+    #[test]
+    fn move_is_a_noop_for_same_or_invalid_slots() {
+        assert_eq!(resolve_move(1, 1, 3), None);
+        assert_eq!(resolve_move(0, 0, 0), None);
+        assert_eq!(resolve_move(0, 0, 1), None);
+        assert_eq!(resolve_move(3, 0, 3), None);
     }
 
     #[test]

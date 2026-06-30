@@ -148,6 +148,7 @@ fn attached_keys(scheme: KeyScheme) -> Vec<LogLine> {
     };
     // Direct, low-conflict keys shared by both schemes (other keys go to the shell).
     lines.extend([
+        key_row("Ctrl+Shift+N/P", "Move the active tab right / left"),
         key_row("Ctrl-^", "Jump to the previous session"),
         key_row("Ctrl-C", "Copy the selection (when one is active)"),
         key_row("Shift+↑↓", "Scroll the history one line"),
