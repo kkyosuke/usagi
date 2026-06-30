@@ -909,7 +909,11 @@ mod tests {
         init_repo(root.path());
         let server = server_in_session(root.path(), "work", FakeBackend::ok("x"));
         call(&server, "session_create", json!({"name":"work"}));
-        call(&server, "session_note_update", json!({"note":"to be cleared"}));
+        call(
+            &server,
+            "session_note_update",
+            json!({"note":"to be cleared"}),
+        );
 
         let cleared = call(&server, "session_note_update", json!({"note":""}));
         assert_eq!(cleared["isError"], false);
