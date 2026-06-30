@@ -1734,29 +1734,16 @@ fn menu_marker(selected: bool) -> String {
 /// Builds one 在席 (Focus) menu row: a `›` cursor for the highlighted command,
 /// its name, and its dimmed description, clipped to `width`.
 pub(super) fn focus_menu_row(info: &CommandInfo, selected: bool, width: usize) -> String {
-    menu_row(
-        info.name,
-        info.description,
-        selected,
-        width,
-        info.name == "close",
-    )
+    menu_row(info.name, info.description, selected, width)
 }
 
 /// The shared layout for an action row: a `›` cursor when `selected`, a fixed-
-/// width `name`, and a dimmed `desc`, clipped to `width`. Used by the plain
+/// width cyan `name`, and a dimmed `desc`, clipped to `width`. Used by the plain
 /// command rows ([`focus_menu_row`]) and the `agent` row, which substitutes a
-/// "Launch <default>" description and an expand chevron. When `danger` is true
-/// the name is rendered red (used for the destructive `close` row).
-fn menu_row(name: &str, desc: &str, selected: bool, width: usize, danger: bool) -> String {
+/// "Launch <default>" description and an expand chevron.
+fn menu_row(name: &str, desc: &str, selected: bool, width: usize) -> String {
     let marker = menu_marker(selected);
-    let name = if danger {
-        if selected {
-            style(format!("{name:<9}")).red().bold().to_string()
-        } else {
-            style(format!("{name:<9}")).red().to_string()
-        }
-    } else if selected {
+    let name = if selected {
         style(format!("{name:<9}")).cyan().bold().to_string()
     } else {
         style(format!("{name:<9}")).cyan().to_string()
@@ -1779,7 +1766,7 @@ fn focus_agent_command_row(state: &HomeState, selected: bool, width: usize) -> S
         ""
     };
     let desc = format!("{chevron}Launch {}", state.default_agent().display_name());
-    menu_row("agent", &desc, selected, width, false)
+    menu_row("agent", &desc, selected, width)
 }
 
 /// One agent-picker sub-row, indented under the expanded `agent` row: a `›`
