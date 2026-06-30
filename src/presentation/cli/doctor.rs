@@ -1,10 +1,12 @@
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
 
+use console::style;
+
 use crate::domain::settings::LocalLlm;
 use crate::infrastructure::storage::Storage;
 use crate::usecase::doctor::{
-    diagnose, fix_missing, installable_gaps, Check, CommandRunner, FixOutcome, SystemRunner,
+    diagnose, fix_missing, installable_gaps, Check, CommandRunner, FixOutcome, Health, SystemRunner,
 };
 use crate::usecase::font::{self, FontError, FontStep};
 use crate::usecase::local_llm::{self, SetupError, SetupStep};
@@ -227,16 +229,81 @@ fn render_fixes(outcomes: &[FixOutcome]) -> Vec<String> {
 
 /// Formats the diagnostics into the lines printed by `usagi doctor`.
 fn render(checks: &[Check]) -> Vec<String> {
-    checks
+    let name_width = checks
         .iter()
-        .map(|check| {
-            let status = format!("{:<14} {}", check.name, check.health.label());
-            match &check.detail {
-                Some(detail) => format!("{status}  ({detail})"),
-                None => status,
-            }
-        })
-        .collect()
+        .map(|check| check.name.chars().count())
+        .max()
+        .unwrap_or(0);
+    let status_width = [Health::Ok, Health::Warn, Health::Missing]
+        .iter()
+        .map(|health| health.label().chars().count())
+        .max()
+        .unwrap_or(0);
+
+    let mut lines = vec![style("usagi doctor").bold().to_string()];
+    lines.extend(checks.iter().map(|check| {
+        let name = format!("{:<name_width$}", check.name);
+        let status = format!("{:<status_width$}", check.health.label());
+        let status = health_label(check.health, status);
+        let row = match &check.detail {
+            Some(detail) => format!(
+                "  {}  {}  {}  {}",
+                health_icon(check.health),
+                status,
+                name,
+                style(detail).dim()
+            ),
+            None => format!("  {}  {}  {}", health_icon(check.health), status, name),
+        };
+        row.trim_end().to_string()
+    }));
+    lines.push(String::new());
+    lines.push(render_summary(checks));
+    lines
+}
+
+/// Single-character status marker shown at the start of each diagnostic row:
+/// a green `✓` (ok), a yellow `!` (warn), or a red `✗` (missing). The glyph
+/// (not just its color) distinguishes the three states, so the output still
+/// reads on a no-color terminal.
+fn health_icon(health: Health) -> String {
+    match health {
+        Health::Ok => style("✓").green().to_string(),
+        Health::Warn => style("!").yellow().to_string(),
+        Health::Missing => style("✗").red().to_string(),
+    }
+}
+
+/// Colored health label printed next to [`health_icon`].
+fn health_label(health: Health, label: String) -> String {
+    match health {
+        Health::Ok => style(label).green().to_string(),
+        Health::Warn => style(label).yellow().to_string(),
+        Health::Missing => style(label).red().to_string(),
+    }
+}
+
+/// Summary footer tallying the diagnostic results by health.
+fn render_summary(checks: &[Check]) -> String {
+    let ok = checks
+        .iter()
+        .filter(|check| check.health == Health::Ok)
+        .count();
+    let warn = checks
+        .iter()
+        .filter(|check| check.health == Health::Warn)
+        .count();
+    let missing = checks
+        .iter()
+        .filter(|check| check.health == Health::Missing)
+        .count();
+
+    format!(
+        "summary: {} ok, {} warn, {} missing",
+        style(ok).green(),
+        style(warn).yellow(),
+        style(missing).red()
+    )
 }
 
 #[cfg(test)]
@@ -323,7 +390,9 @@ mod tests {
             detail: None,
         }];
         let out = run_report(&checks, false, "");
-        assert!(out.contains("git            ok"));
+        let out = console::strip_ansi_codes(&out);
+        assert!(out.contains("✓  ok       git"));
+        assert!(out.contains("summary: 1 ok, 0 warn, 0 missing"));
         assert!(!out.contains("インストールしますか"));
         assert!(!out.contains("Nerd Font"));
     }
@@ -377,7 +446,7 @@ mod tests {
     }
 
     #[test]
-    fn render_aligns_status_and_appends_detail() {
+    fn render_aligns_rows_and_appends_summary() {
         let checks = vec![
             Check {
                 name: "git",
@@ -390,12 +459,18 @@ mod tests {
                 detail: Some("no D-Bus session bus".into()),
             },
         ];
-        let lines = render(&checks);
+        let lines = render(&checks)
+            .into_iter()
+            .map(|line| console::strip_ansi_codes(&line).into_owned())
+            .collect::<Vec<_>>();
         assert_eq!(
             lines,
             vec![
-                "git            ok",
-                "notifications  warn  (no D-Bus session bus)",
+                "usagi doctor",
+                "  ✓  ok       git",
+                "  !  warn     notifications  no D-Bus session bus",
+                "",
+                "summary: 1 ok, 1 warn, 0 missing",
             ]
         );
     }
