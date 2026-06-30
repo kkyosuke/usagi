@@ -4,8 +4,9 @@
 //! single source of truth ([`crate::domain::agent_feature`]), so users can see at
 //! a glance which usagi integrations each agent CLI receives.
 
-use crate::domain::agent_feature::{support, AgentFeature};
+use crate::domain::agent_feature::{support, AgentFeature, Support};
 use crate::domain::settings::AgentCli;
+use unicode_width::UnicodeWidthStr;
 
 /// The CLIs shown as columns, left to right: every [`AgentCli`] in canonical
 /// order, labelled by its display name (the domain's single source of truth).
@@ -19,38 +20,41 @@ pub fn run() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The lines printed by `usagi feature`: a title, a Markdown table of the support
-/// matrix (features as rows, CLIs as columns), and a legend. A Markdown table
-/// keeps the columns readable without per-cell width math over mixed-width CJK
-/// labels and emoji, and stays copy-pasteable.
+/// The lines printed by `usagi feature`: a short title, a terminal-friendly
+/// support matrix, and a legend. The matrix is drawn as a box table instead of a
+/// Markdown table so the command reads well directly in a terminal. Widths are
+/// measured with [`UnicodeWidthStr`] because the rows mix Japanese labels and
+/// status symbols.
 fn render() -> Vec<String> {
+    let headers: Vec<String> = std::iter::once("機能".to_string())
+        .chain(COLUMNS.iter().map(|cli| cli.display_name().to_string()))
+        .collect();
+    let rows: Vec<Vec<String>> = AgentFeature::ALL
+        .into_iter()
+        .map(|feature| {
+            let mut cells = vec![feature.label().to_string()];
+            cells.extend(
+                COLUMNS
+                    .iter()
+                    .map(|cli| feature_cell(support(*cli, feature))),
+            );
+            cells
+        })
+        .collect();
+
+    let alignments = std::iter::once(Alignment::Left)
+        .chain(COLUMNS.iter().map(|_| Alignment::Center))
+        .collect::<Vec<_>>();
+    let table = render_table(&headers, &rows, &alignments);
+
     let mut lines = vec![
-        "usagi が各 Agent CLI に組み込む機能の対応状況:".to_string(),
+        "usagi feature".to_string(),
+        "各 Agent CLI に組み込む機能の対応状況".to_string(),
         String::new(),
     ];
-
-    let header: Vec<&str> = std::iter::once("機能")
-        .chain(COLUMNS.iter().map(|cli| cli.display_name()))
-        .collect();
-    lines.push(format!("| {} |", header.join(" | ")));
-
-    // The separator centers the CLI columns and left-aligns the feature column.
-    let mut separator = vec!["---".to_string()];
-    separator.extend(COLUMNS.iter().map(|_| ":---:".to_string()));
-    lines.push(format!("| {} |", separator.join(" | ")));
-
-    for feature in AgentFeature::ALL {
-        let mut cells = vec![feature.label().to_string()];
-        cells.extend(
-            COLUMNS
-                .iter()
-                .map(|cli| support(*cli, feature).glyph().to_string()),
-        );
-        lines.push(format!("| {} |", cells.join(" | ")));
-    }
-
+    lines.extend(table);
     lines.push(String::new());
-    lines.push("凡例: ✅ usagi が配線 / ❌ CLI 制約により非対応".to_string());
+    lines.push("凡例: yes = usagi が配線 / no = CLI 制約により非対応".to_string());
     lines.push(
         "注: Gemini は MCP・フック・system prompt のインライン注入経路が無いため非対応\
          （状態はターミナルベルで推定する）。"
@@ -59,10 +63,87 @@ fn render() -> Vec<String> {
     lines
 }
 
+fn feature_cell(support: Support) -> String {
+    let label = match support {
+        Support::Yes => "yes",
+        Support::No => "no",
+    };
+    format!("{} {label}", support.glyph())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Alignment {
+    Left,
+    Center,
+}
+
+fn render_table(headers: &[String], rows: &[Vec<String>], alignments: &[Alignment]) -> Vec<String> {
+    debug_assert_eq!(headers.len(), alignments.len());
+    debug_assert!(rows.iter().all(|row| row.len() == headers.len()));
+
+    let widths = column_widths(headers, rows);
+    let mut lines = Vec::with_capacity(rows.len() + 4);
+
+    lines.push(border('┌', '┬', '┐', &widths));
+    lines.push(table_row(headers, &widths, alignments));
+    lines.push(border('├', '┼', '┤', &widths));
+    for row in rows {
+        lines.push(table_row(row, &widths, alignments));
+    }
+    lines.push(border('└', '┴', '┘', &widths));
+
+    lines
+}
+
+fn column_widths(headers: &[String], rows: &[Vec<String>]) -> Vec<usize> {
+    let mut widths: Vec<usize> = headers.iter().map(|cell| display_width(cell)).collect();
+    for row in rows {
+        for (i, cell) in row.iter().enumerate() {
+            widths[i] = widths[i].max(display_width(cell));
+        }
+    }
+    widths
+}
+
+fn border(left: char, join: char, right: char, widths: &[usize]) -> String {
+    let segments = widths
+        .iter()
+        .map(|width| "─".repeat(width + 2))
+        .collect::<Vec<_>>()
+        .join(&join.to_string());
+    format!("{left}{segments}{right}")
+}
+
+fn table_row(cells: &[String], widths: &[usize], alignments: &[Alignment]) -> String {
+    let rendered_cells = cells
+        .iter()
+        .zip(widths)
+        .zip(alignments)
+        .map(|((cell, width), alignment)| padded_cell(cell, *width, *alignment))
+        .collect::<Vec<_>>()
+        .join("│");
+    format!("│{rendered_cells}│")
+}
+
+fn padded_cell(cell: &str, width: usize, alignment: Alignment) -> String {
+    let padding = width.saturating_sub(display_width(cell));
+    match alignment {
+        Alignment::Left => format!(" {cell}{} ", " ".repeat(padding)),
+        Alignment::Center => {
+            let left = padding / 2;
+            let right = padding - left;
+            format!(" {}{cell}{} ", " ".repeat(left), " ".repeat(right))
+        }
+    }
+}
+
+fn display_width(s: &str) -> usize {
+    UnicodeWidthStr::width(s)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::agent_feature::Support;
 
     #[test]
     fn render_lists_every_feature_row() {
@@ -80,36 +161,58 @@ mod tests {
     #[test]
     fn render_has_a_header_with_each_cli_column() {
         let lines = render();
-        let header = lines
-            .iter()
-            .find(|line| line.starts_with("| 機能 |"))
-            .unwrap();
+        let header = lines.iter().find(|line| line.contains("│ 機能")).unwrap();
         for cli in COLUMNS {
             let label = cli.display_name();
             assert!(header.contains(label), "header missing column {label}");
         }
-        // The alignment separator row follows the header.
-        assert!(lines.iter().any(|line| line.contains(":---:")));
+        assert!(lines.iter().any(|line| line.starts_with('┌')));
+        assert!(lines.iter().any(|line| line.starts_with('└')));
     }
 
     #[test]
-    fn render_shows_the_matrix_glyphs_per_cli() {
+    fn render_shows_the_matrix_support_per_cli() {
         let lines = render();
-        // Claude's MCP row cell is ✅; Gemini's is ❌ — the row carries both.
+        // Claude's MCP row cell is yes; Gemini's is no — the row carries both.
         let mcp_row = lines
             .iter()
             .find(|line| line.contains(AgentFeature::Mcp.label()))
             .unwrap();
-        assert!(mcp_row.contains(Support::Yes.glyph()));
-        assert!(mcp_row.contains(Support::No.glyph()));
+        assert!(mcp_row.contains(&feature_cell(Support::Yes)));
+        assert!(mcp_row.contains(&feature_cell(Support::No)));
 
-        // Gemini's resume row is supported, so that row has no ❌ from Gemini —
-        // every column is ✅.
+        // Gemini's resume row is supported, so that row has no no-cell — every
+        // column is yes.
         let resume_row = lines
             .iter()
             .find(|line| line.contains(AgentFeature::Resume.label()))
             .unwrap();
-        assert!(!resume_row.contains(Support::No.glyph()));
+        assert!(!resume_row.contains(&feature_cell(Support::No)));
+    }
+
+    #[test]
+    fn render_table_uses_equal_display_width_for_every_line() {
+        let lines = render();
+        let table_lines: Vec<_> = lines
+            .iter()
+            .filter(|line| {
+                line.starts_with('┌')
+                    || line.starts_with('│')
+                    || line.starts_with('├')
+                    || line.starts_with('└')
+            })
+            .collect();
+        let width = display_width(table_lines[0]);
+        let all_lines_are_aligned = table_lines.iter().all(|line| display_width(line) == width);
+        let diagnostics = table_lines
+            .iter()
+            .map(|line| format!("{}: {line}", display_width(line)))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            all_lines_are_aligned,
+            "table lines should align:\n{diagnostics}"
+        );
     }
 
     #[test]
@@ -123,5 +226,11 @@ mod tests {
     fn run_prints_without_error() {
         // The thin print wrapper renders the same matrix and succeeds.
         assert!(run().is_ok());
+    }
+
+    #[test]
+    fn display_width_counts_japanese_as_wide() {
+        assert_eq!(display_width("機能"), 4);
+        assert_eq!(display_width(&feature_cell(Support::Yes)), 5);
     }
 }
