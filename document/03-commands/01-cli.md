@@ -31,7 +31,7 @@
 | `usagi update [--dry-run]` | 各リポジトリのデフォルトブランチ（`main` など）を `origin` から取得して最新化し、その更新を各セッション worktree に配布（コンフリクトしないところだけマージ）する。`--dry-run` は変更せずに結果のみ表示 |
 | `usagi clean [--dry-run] [--agent <NAME>]` | 設定中の Agent CLI をヘッドレスでバックグラウンド起動し、放置・マージ済みのセッション worktree を AI が自律的に判断して削除する。即座に制御を返し、出力は `.usagi/clean.log` に追記する |
 | `usagi completion <shell>` | 指定したシェル（`bash` / `zsh` / `fish` / `powershell` / `elvish`）の補完スクリプトを標準出力に印字する。シェルに読み込ませると `usagi <TAB>` でサブコマンド・フラグ・値が Tab 補完できる |
-| `usagi feature` | 各 Agent CLI（Claude / Codex / sakana.ai / Gemini）が usagi のどの機能に対応しているかの星取表を表示する（下記） |
+| `usagi feature` | 各 Agent CLI（Claude / Codex / sakana.ai / Gemini）が usagi のどの機能に対応しているかを、端末向けの表で表示する（下記） |
 | `usagi config` | （ヘルプ非表示・上級者向け）現在のグローバル設定（`settings.json`）を一覧表示する（[5. 設定](../05-settings.md)） |
 | `usagi config --edit` | （ヘルプ非表示・上級者向け）グローバル設定ファイルを `$EDITOR` で開いて編集し、保存時に形式（JSON / 必須 `version` / 型）を検証する。不正な場合は直前の内容に巻き戻す |
 | `usagi doctor` | `git` / `bash` と各 Agent CLI（Claude / Codex / sakana.ai / Gemini）の導入状況、デスクトップ通知の可否、Nerd Font の有無、設定ストレージの健全性を確認する（ローカル LLM 有効時は `ollama`・モデルも）。インストール可能な不足（必須ツール・Nerd Font）があれば `[y/N]` で確認し、`y` で導入する |
@@ -147,8 +147,8 @@ usagi completion fish > ~/.config/fish/completions/usagi.fish
 ### `usagi feature`
 
 `agent` で起動する各 Agent CLI（Claude / Codex / sakana.ai / Gemini）が、usagi のどの統合機能に対応しているかを
-星取表（Markdown テーブル）で表示します。行は機能（MCP / ローカル LLM 委譲 / 状態報告（フック）/ 初期プロンプト /
-system prompt 注入 / 会話の再開 / 会話履歴の破棄）、列は CLI で、`✅`（usagi が配線）/ `❌`（CLI 制約により非対応）で示します。
+端末向けの罫線付き表で表示します。行は機能（MCP / ローカル LLM 委譲 / 状態報告（フック）/ 初期プロンプト /
+system prompt 注入 / 会話の再開 / 会話履歴の破棄）、列は CLI で、`✓ yes`（usagi が配線）/ `— no`（CLI 制約により非対応）で示します。
 
 - 対応状況の正本は `domain/agent_feature.rs`（CLI ごと・機能ごとの対応を一元管理）です。
 - `sakana.ai`（起動コマンド `codex-fugu`、rollout は `~/.codex-fugu`）は Codex 互換 CLI で、Codex と同じ統合機能をすべて受けます。

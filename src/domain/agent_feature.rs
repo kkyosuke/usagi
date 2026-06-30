@@ -68,11 +68,11 @@ pub enum Support {
 }
 
 impl Support {
-    /// A compact glyph for terminal tables.
+    /// A compact terminal glyph for support status.
     pub fn glyph(self) -> &'static str {
         match self {
-            Support::Yes => "✅",
-            Support::No => "❌",
+            Support::Yes => "✓",
+            Support::No => "—",
         }
     }
 }
@@ -116,8 +116,8 @@ mod tests {
 
     #[test]
     fn glyphs_distinguish_support() {
-        assert_eq!(Support::Yes.glyph(), "✅");
-        assert_eq!(Support::No.glyph(), "❌");
+        assert_eq!(Support::Yes.glyph(), "✓");
+        assert_eq!(Support::No.glyph(), "—");
         assert_ne!(Support::Yes.glyph(), Support::No.glyph());
     }
 
