@@ -31,12 +31,14 @@ use crate::usecase::session;
 /// Names of the session tools this server exposes. The unified `usagi` server
 /// ([`super::usagi`]) uses this to route `tools/call` for these names to the
 /// embedded session server.
-pub const TOOL_NAMES: [&str; 5] = [
+pub const TOOL_NAMES: [&str; 7] = [
     "session_create",
     "session_list",
     "session_prompt",
     "session_pr",
     "session_remove",
+    "session_note_get",
+    "session_note_update",
 ];
 
 /// Drives the parts of session orchestration that touch a real agent or a real
@@ -70,16 +72,24 @@ pub struct SessionMcpServer {
     /// Workspace root that owns `.usagi/sessions/` and the `state.json` tracking
     /// every session.
     workspace_root: PathBuf,
+    /// The name of the session the MCP process is running inside, if any.
+    /// `None` when the server runs from the workspace root (not inside a session).
+    current_session: Option<String>,
     /// Delegate that actually drives a session's agent for `session_prompt`.
     backend: Box<dyn AgentBackend>,
 }
 
 impl SessionMcpServer {
     /// Build a server operating on the workspace at `workspace_root`, delegating
-    /// `session_prompt` to `backend`.
-    pub fn new(workspace_root: PathBuf, backend: Box<dyn AgentBackend>) -> Self {
+    /// `session_prompt` to `backend`. The `worktree` is the agent's current
+    /// working directory; when it sits under `.usagi/sessions/<name>/` the server
+    /// derives the current session name from it, enabling the note self-access
+    /// tools (`session_note_get` / `session_note_update`).
+    pub fn new(workspace_root: PathBuf, worktree: &Path, backend: Box<dyn AgentBackend>) -> Self {
+        let current_session = derive_current_session(worktree, &workspace_root);
         Self {
             workspace_root,
+            current_session,
             backend,
         }
     }
@@ -149,6 +159,32 @@ impl SessionMcpServer {
             "dirty": outcome.dirty,
         })))
     }
+
+    fn tool_note_get(&self) -> Result<String, String> {
+        let name = self
+            .current_session
+            .as_deref()
+            .ok_or("session_note_get is only available from inside a session worktree")?;
+        let note = session::get_note(&self.workspace_root, name).map_err(|e| e.to_string())?;
+        Ok(to_pretty(&json!({
+            "name": name,
+            "note": note,
+        })))
+    }
+
+    fn tool_note_update(&self, arguments: Value) -> Result<String, String> {
+        let args: NoteUpdateArgs = parse_args(arguments)?;
+        let name = self
+            .current_session
+            .as_deref()
+            .ok_or("session_note_update is only available from inside a session worktree")?;
+        let stored =
+            session::set_note(&self.workspace_root, name, &args.note).map_err(|e| e.to_string())?;
+        Ok(to_pretty(&json!({
+            "name": name,
+            "note": stored,
+        })))
+    }
 }
 
 impl McpService for SessionMcpServer {
@@ -167,6 +203,8 @@ impl McpService for SessionMcpServer {
             "session_prompt" => self.tool_prompt(arguments),
             "session_pr" => self.tool_pr(arguments),
             "session_remove" => self.tool_remove(arguments),
+            "session_note_get" => self.tool_note_get(),
+            "session_note_update" => self.tool_note_update(arguments),
             other => Err(format!("unknown tool: {other}")),
         }
     }
@@ -197,6 +235,28 @@ struct RemoveArgs {
     /// the caller omits it.
     #[serde(default)]
     force: bool,
+}
+
+#[derive(Deserialize)]
+struct NoteUpdateArgs {
+    /// New note text. An empty string (or one that trims to empty) clears the note.
+    note: String,
+}
+
+// --- helpers ---------------------------------------------------------------
+
+/// Derive the session name from the worktree path when it sits under
+/// `<workspace_root>/.usagi/sessions/<name>/`, returning `None` when the
+/// worktree is not inside a session directory.
+fn derive_current_session(worktree: &Path, workspace_root: &Path) -> Option<String> {
+    use crate::infrastructure::repo_paths::{SESSIONS_DIR, STATE_DIR};
+    let sessions_dir = workspace_root.join(STATE_DIR).join(SESSIONS_DIR);
+    worktree
+        .strip_prefix(&sessions_dir)
+        .ok()?
+        .components()
+        .next()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
 }
 
 // --- JSON helpers ----------------------------------------------------------
@@ -299,6 +359,31 @@ fn session_tool_schemas() -> Value {
                     }
                 },
                 "required": ["name"]
+            }
+        },
+        {
+            "name": "session_note_get",
+            "description": "Return the free-form note stored for the current session \
+                (the session whose worktree the agent is running inside). \
+                Returns { name, note } where note is null when none has been written. \
+                Only available from inside a session worktree.",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "session_note_update",
+            "description": "Set (or clear) the free-form note for the current session. \
+                The note is stored verbatim; trailing whitespace is trimmed and an \
+                empty note clears it. Returns { name, note } with the value now stored \
+                (null when cleared). Only available from inside a session worktree.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "note": {
+                        "type": "string",
+                        "description": "Note text to store. Pass an empty string to clear."
+                    }
+                },
+                "required": ["note"]
             }
         }
     ])
@@ -422,7 +507,16 @@ mod tests {
     }
 
     fn server_at(root: &Path, backend: FakeBackend) -> SessionMcpServer {
-        SessionMcpServer::new(root.to_path_buf(), Box::new(backend))
+        // Tests that don't exercise the note self-access tools run from the
+        // workspace root (not inside a session), so current_session is None.
+        SessionMcpServer::new(root.to_path_buf(), root, Box::new(backend))
+    }
+
+    /// Build a server that pretends to run inside session `name` under `root`.
+    fn server_in_session(root: &Path, name: &str, backend: FakeBackend) -> SessionMcpServer {
+        use crate::infrastructure::repo_paths::{SESSIONS_DIR, STATE_DIR};
+        let worktree = root.join(STATE_DIR).join(SESSIONS_DIR).join(name);
+        SessionMcpServer::new(root.to_path_buf(), &worktree, Box::new(backend))
     }
 
     #[test]
@@ -464,7 +558,9 @@ mod tests {
                 "session_list",
                 "session_prompt",
                 "session_pr",
-                "session_remove"
+                "session_remove",
+                "session_note_get",
+                "session_note_update",
             ]
         );
     }
@@ -773,6 +869,74 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("unknown tool"));
+    }
+
+    #[test]
+    fn note_get_returns_null_when_no_note_set() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        let server = server_in_session(root.path(), "work", FakeBackend::ok("x"));
+        call(&server, "session_create", json!({"name":"work"}));
+
+        let result = call(&server, "session_note_get", json!({}));
+        assert_eq!(result["isError"], false);
+        let body = tool_json(&result);
+        assert_eq!(body["name"], "work");
+        assert_eq!(body["note"], Value::Null);
+    }
+
+    #[test]
+    fn note_update_and_get_round_trip() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        let server = server_in_session(root.path(), "work", FakeBackend::ok("x"));
+        call(&server, "session_create", json!({"name":"work"}));
+
+        let update = call(&server, "session_note_update", json!({"note":"memo line"}));
+        assert_eq!(update["isError"], false);
+        let body = tool_json(&update);
+        assert_eq!(body["name"], "work");
+        assert_eq!(body["note"], "memo line");
+
+        let get = call(&server, "session_note_get", json!({}));
+        assert_eq!(get["isError"], false);
+        assert_eq!(tool_json(&get)["note"], "memo line");
+    }
+
+    #[test]
+    fn note_update_with_empty_string_clears_the_note() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        let server = server_in_session(root.path(), "work", FakeBackend::ok("x"));
+        call(&server, "session_create", json!({"name":"work"}));
+        call(&server, "session_note_update", json!({"note":"to be cleared"}));
+
+        let cleared = call(&server, "session_note_update", json!({"note":""}));
+        assert_eq!(cleared["isError"], false);
+        assert_eq!(tool_json(&cleared)["note"], Value::Null);
+    }
+
+    #[test]
+    fn note_tools_fail_when_not_inside_a_session() {
+        // When the server's worktree is the workspace root (not under
+        // .usagi/sessions/<name>), current_session is None and both note tools
+        // return an error rather than panicking.
+        let root = tempfile::tempdir().unwrap();
+        let server = server_at(root.path(), FakeBackend::ok("x"));
+
+        let get = call(&server, "session_note_get", json!({}));
+        assert_eq!(get["isError"], true);
+        assert!(get["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("inside a session worktree"));
+
+        let upd = call(&server, "session_note_update", json!({"note":"x"}));
+        assert_eq!(upd["isError"], true);
+        assert!(upd["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("inside a session worktree"));
     }
 
     #[test]

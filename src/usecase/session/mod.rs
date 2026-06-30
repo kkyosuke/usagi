@@ -334,6 +334,21 @@ pub fn set_note(workspace_root: &Path, name: &str, note: &str) -> Result<Option<
     })
 }
 
+/// Return a session's free-form note, or `None` when none has been written.
+/// Fails when no session named `name` exists.
+pub fn get_note(workspace_root: &Path, name: &str) -> Result<Option<String>> {
+    let store = WorkspaceStore::new(workspace_root);
+    let state = store
+        .load()?
+        .ok_or_else(|| anyhow!("no sessions recorded for this workspace"))?;
+    state
+        .sessions
+        .into_iter()
+        .find(|s| s.name == name)
+        .map(|s| s.note)
+        .ok_or_else(|| anyhow!("no such session: \"{name}\""))
+}
+
 /// Set (or clear) the workspace **root**'s free-form note in `state.json` — the
 /// `⌂ root` row's counterpart to [`set_note`], which targets a session.
 ///
