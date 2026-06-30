@@ -128,6 +128,33 @@ pub fn event_loop(
             continue;
         }
 
+        // The setup-command editor captures every key. Enter inserts a new
+        // command line, Ctrl-S applies the buffer into the in-memory local
+        // settings (still requiring the main Save button to persist), and Esc
+        // cancels.
+        if config.setup_modal().is_some() {
+            match key {
+                Key::Char('\u{0013}') => {
+                    config.apply_setup_modal();
+                    notice = None;
+                }
+                Key::Enter => config.setup_modal_newline(),
+                Key::Backspace => config.setup_modal_backspace(),
+                Key::Del => config.setup_modal_delete_forward(),
+                Key::ArrowLeft => config.setup_modal_cursor_left(),
+                Key::ArrowRight => config.setup_modal_cursor_right(),
+                Key::ArrowUp => config.setup_modal_cursor_up(),
+                Key::ArrowDown => config.setup_modal_cursor_down(),
+                Key::Home => config.setup_modal_cursor_home(),
+                Key::End => config.setup_modal_cursor_end(),
+                Key::Char(c) => config.setup_modal_insert(c),
+                Key::Escape => config.close_setup_modal(),
+                Key::CtrlC => return Ok(Outcome::Quit),
+                _ => {}
+            }
+            continue;
+        }
+
         match key {
             Key::ArrowUp | Key::Char('k') => {
                 config.move_up();
@@ -145,17 +172,19 @@ pub fn event_loop(
             }
             Key::Char(' ') => {
                 // Space opens the install modal on the Local LLM install action,
-                // or the model picker on the active model row; each is a no-op
-                // off its own row, so calling both is safe.
+                // the model picker on the active model row, or the setup-command
+                // editor on its action row; each is a no-op off its own row, so
+                // calling all three is safe.
                 config.open_install_modal();
                 config.open_model_modal();
+                config.open_setup_modal();
                 notice = None;
             }
             Key::Enter => {
                 // Enter saves on the Save button, opens the install modal on the
-                // Local LLM install action, opens the model picker on the active
-                // model row, and otherwise advances the focused field (a
-                // convenient alias for →).
+                // Local LLM install action, opens the model picker / setup editor
+                // on their action rows, and otherwise advances the focused field
+                // (a convenient alias for →).
                 if config.is_save_selected() {
                     notice = save_changes(&mut config, save);
                 } else if config.local_llm_needs_install() {
@@ -163,6 +192,9 @@ pub fn event_loop(
                     notice = None;
                 } else if config.model_row_active() {
                     config.open_model_modal();
+                    notice = None;
+                } else if config.setup_row_active() {
+                    config.open_setup_modal();
                     notice = None;
                 } else {
                     notice = activate_field(&mut config, true);

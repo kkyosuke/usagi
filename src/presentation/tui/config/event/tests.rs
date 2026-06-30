@@ -298,6 +298,7 @@ fn saving_a_local_override_passes_it_to_save() {
         Ok(Key::ArrowDown),  // Restore Panes
         Ok(Key::ArrowDown),  // Default Branch
         Ok(Key::ArrowDown),  // Branch Source
+        Ok(Key::ArrowDown),  // Setup Commands
         Ok(Key::ArrowDown),  // PR Skills
         Ok(Key::ArrowDown),  // Save button
         Ok(Key::Enter),      // save
@@ -325,6 +326,125 @@ fn saving_a_local_override_passes_it_to_save() {
     assert!(matches!(outcome, Outcome::Back));
     let local = captured.into_inner().expect("save received local settings");
     assert_eq!(local.agent_cli, Some(AgentCli::Claude));
+}
+
+#[test]
+fn setup_commands_modal_applies_to_local_settings_before_save() {
+    let term = Term::stdout();
+    let config = Config::workspace(Settings::default(), LocalSettings::default(), Vec::new());
+    let keys = vec![
+        Ok(Key::ArrowDown), // Notifications
+        Ok(Key::ArrowDown), // Restore Panes
+        Ok(Key::ArrowDown), // Default Branch
+        Ok(Key::ArrowDown), // Branch Source
+        Ok(Key::ArrowDown), // Setup Commands
+        Ok(Key::Enter),     // open editor
+        Ok(Key::Char('a')),
+        Ok(Key::Char('b')),
+        Ok(Key::ArrowLeft),
+        Ok(Key::Char('X')),
+        Ok(Key::ArrowRight),
+        Ok(Key::Backspace),
+        Ok(Key::Home),
+        Ok(Key::Del),
+        Ok(Key::End),
+        Ok(Key::Enter), // second command line
+        Ok(Key::Char(' ')),
+        Ok(Key::Char('c')),
+        Ok(Key::Char(' ')),
+        Ok(Key::ArrowUp),
+        Ok(Key::ArrowDown),
+        Ok(Key::Char('\u{0013}')), // Ctrl-S applies the modal buffer
+        Ok(Key::ArrowDown),        // PR Skills
+        Ok(Key::ArrowDown),        // Save
+        Ok(Key::Enter),
+        Ok(Key::Escape),
+    ];
+
+    let mut reader = ScriptedReader::new(keys);
+    let captured: RefCell<Option<LocalSettings>> = RefCell::new(None);
+    let mut save = |_: &Settings, local: Option<&LocalSettings>| {
+        *captured.borrow_mut() = local.cloned();
+        Ok(())
+    };
+    let mut install: fn(&str) -> Result<()> = ok_install;
+    let mut pull: fn(&str) -> Result<()> = ok_pull;
+    let outcome = event_loop(
+        &term,
+        &mut reader,
+        config,
+        &mut save,
+        &mut install,
+        &mut pull,
+        None,
+    )
+    .unwrap();
+
+    assert!(matches!(outcome, Outcome::Back));
+    let local = captured.into_inner().expect("save received local settings");
+    assert_eq!(local.setup_commands, vec!["X".to_string(), "c".to_string()]);
+}
+
+#[test]
+fn setup_commands_modal_can_be_cancelled_and_can_quit() {
+    let term = Term::stdout();
+    let to_setup = || {
+        vec![
+            Ok(Key::ArrowDown),
+            Ok(Key::ArrowDown),
+            Ok(Key::ArrowDown),
+            Ok(Key::ArrowDown),
+            Ok(Key::ArrowDown),
+        ]
+    };
+
+    let mut keys = to_setup();
+    keys.extend([
+        Ok(Key::Char(' ')), // open editor with Space
+        Ok(Key::Char('x')),
+        Ok(Key::Escape), // cancel editor
+        Ok(Key::Escape), // leave config
+    ]);
+    let mut reader = ScriptedReader::new(keys);
+    let captured: RefCell<Option<LocalSettings>> = RefCell::new(None);
+    let mut save = |_: &Settings, local: Option<&LocalSettings>| {
+        *captured.borrow_mut() = local.cloned();
+        Ok(())
+    };
+    let mut install: fn(&str) -> Result<()> = ok_install;
+    let mut pull: fn(&str) -> Result<()> = ok_pull;
+    assert!(matches!(
+        event_loop(
+            &term,
+            &mut reader,
+            Config::workspace(Settings::default(), LocalSettings::default(), Vec::new()),
+            &mut save,
+            &mut install,
+            &mut pull,
+            None,
+        )
+        .unwrap(),
+        Outcome::Back
+    ));
+    assert!(captured.into_inner().is_none());
+
+    let mut keys = to_setup();
+    keys.extend([Ok(Key::Enter), Ok(Key::CtrlC)]);
+    let mut reader = ScriptedReader::new(keys);
+    let mut save: fn(&Settings, Option<&LocalSettings>) -> Result<()> = noop_save;
+    assert!(matches!(
+        event_loop(
+            &term,
+            &mut reader,
+            Config::workspace(Settings::default(), LocalSettings::default(), Vec::new()),
+            &mut save,
+            &mut install,
+            &mut pull,
+            None,
+        )
+        .unwrap(),
+        Outcome::Quit
+    ));
 }
 
 #[test]

@@ -95,6 +95,7 @@
 | デフォルトブランチ基点 | `default_branch_source` | enum? | 既定（`remote`） |
 | ローカル LLM 有効化 | `local_llm_enabled` | bool? | グローバル設定（`local_llm.enabled`）にフォールバック |
 | 同梱スキル機能 | `skill_features` | map<string, bool> | 機能 ID 単位で上書き。未記載の機能はグローバル設定にフォールバック |
+| セットアップコマンド | `setup_commands` | string[] | 空配列（実行しない） |
 
 > **デフォルトブランチ（`default_branch`）**: `session create` でセッションを作るとき、各 git リポジトリの
 > worktree を切る新ブランチを**どのブランチから**切るかを選びます。未設定（`null` = auto）ならリポジトリの
@@ -109,16 +110,22 @@
 > いずれもワークスペースのローカル設定（`<workspace>/.usagi/settings.json`）に保存され、ホーム画面の
 > `config` から編集します。
 
+> **セットアップコマンド（`setup_commands`）**: `session create` でセッションを作成した直後に、そのセッション root
+> （`<workspace>/.usagi/sessions/<name>`）をカレントディレクトリとして上から順に実行する shell コマンド列です。
+> 1 行 = 1 コマンドとして保存し、空行は実行時に無視します。コマンドは各 OS の標準 shell（Unix 系は
+> `sh -lc`、Windows は `cmd /C`）で実行します。失敗はログに残しますが、作成済みセッションは残し、後から
+> そのセッション内で原因を確認・修正できます。
+
 - 全フィールドが任意（`Option`）で、`null` は「グローバル設定に従う」を意味します。テーマ（`theme`）や
   クローン先（`workspace_root`）のようにプロジェクト単位で変える意味の薄い項目は対象外です。
 - **実効設定 = グローバル設定にローカルの上書きを適用した結果**。解決は `domain/settings.rs` の
   `Settings::with_local`、ユースケースは `usecase/settings.rs` の `effective(storage, repo_root)` が担います。
 - 読み書きロジック・永続化に加え、編集 UI も実装済みです。ホーム画面のコマンドモードで `config` を実行すると
   設定画面が**ワークスペーススコープ**で開き、「Agent CLI」「Notifications」「Restore Panes」「Default Branch」
-  「Branch Source」と、固定項目の下に並ぶ**同梱スキル機能**（`PR Skills` など）を編集できます。Agent CLI /
+  「Branch Source」「Setup Commands」と、固定項目の下に並ぶ**同梱スキル機能**（`PR Skills` など）を編集できます。Agent CLI /
   Notifications / Restore Panes と各スキル機能は **「グローバルに従う / ローカルで上書き（On/Off）」**、Default
   Branch は **`auto`（検出済み既定）／ リポジトリの各ブランチ**、Branch Source は **`local` / `remote`** を
-  切り替えられます。詳細は [design/04-config.md](design/04-config.md) を参照。
+  切り替えられます。Setup Commands はモーダルで複数行を編集します。詳細は [design/04-config.md](design/04-config.md) を参照。
 - JSON 例・フィールド詳細は [data/02-workspace.md](data/02-workspace.md#settingsjson-プロジェクト固有の設定上書きローカル設定) を参照。
 
 ## 設定の変更方法
@@ -144,7 +151,7 @@
 > Agent CLI / Session Action UI / Terminal Keys / Local LLM 系の各項目（`key_scheme` は
 > 「Session Action UI」と「Local LLM」の間の **Terminal Keys** 行）に加え、固定項目の下に並ぶ**同梱スキル機能**
 > （`PR Skills` など）。ワークスペーススコープで編集できるのは Agent CLI / Notifications / Restore Panes /
-> Default Branch / Branch Source と、同じく**同梱スキル機能**です。
+> Default Branch / Branch Source / Setup Commands と、同じく**同梱スキル機能**です。
 > `workspace_root` は `settings.json` に保存されますが、設定画面では編集せず、`usagi config --edit` で変更します。
 
 ### CLI

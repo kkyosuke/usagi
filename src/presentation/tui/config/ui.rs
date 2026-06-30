@@ -1,11 +1,11 @@
-use console::style;
+use console::{style, Style};
 
 use crate::presentation::tui::welcome;
 use crate::presentation::tui::widgets;
 
 use crate::domain::settings::SkillFeature;
 
-use super::state::{Config, Field, InstallModal, LocalField, ModelModal};
+use super::state::{Config, Field, InstallModal, LocalField, ModelModal, SetupCommandsModal};
 
 /// The label of the Save button row.
 const SAVE_LABEL: &str = "[ Save ]";
@@ -211,6 +211,45 @@ fn model_modal_frame(raw_height: usize, raw_width: usize, modal: &ModelModal) ->
     )
 }
 
+/// Builds the workspace setup-command editor. Each visible line maps to one
+/// command; saving the modal trims/drops blank lines before the settings are
+/// persisted.
+fn setup_modal_frame(
+    raw_height: usize,
+    raw_width: usize,
+    modal: &SetupCommandsModal,
+) -> Vec<String> {
+    let (cursor_row, cursor_col) = modal.cursor();
+    let mut body = vec![
+        "新規セッション作成後に実行するコマンド".to_string(),
+        "1 行につき 1 コマンド（session root で実行）".to_string(),
+        String::new(),
+    ];
+    for (i, line) in modal.lines().iter().enumerate() {
+        let number = format!("{:>2} ", i + 1);
+        if i == cursor_row {
+            let (before, after) = line.split_at(cursor_col);
+            body.push(format!(
+                "{number}{}",
+                widgets::block_caret(before, after, &Style::new())
+            ));
+        } else if line.is_empty() {
+            body.push(format!("{number}{}", style("·").dim()));
+        } else {
+            body.push(format!("{number}{line}"));
+        }
+    }
+    body.push(String::new());
+    body.push(style("Ctrl-S 保存  Enter 改行  Esc 取消").dim().to_string());
+    widgets::render_modal(
+        raw_height,
+        raw_width,
+        "Setup Commands",
+        MODAL_INNER_WIDTH.max(56),
+        &body,
+    )
+}
+
 /// Builds the full configuration frame for a raw terminal size.
 pub fn render_frame(
     raw_height: usize,
@@ -225,6 +264,9 @@ pub fn render_frame(
     }
     if let Some(modal) = config.model_modal() {
         return model_modal_frame(raw_height, raw_width, modal);
+    }
+    if let Some(modal) = config.setup_modal() {
+        return setup_modal_frame(raw_height, raw_width, modal);
     }
 
     let (height, width) = widgets::normalize_size(raw_height, raw_width);
