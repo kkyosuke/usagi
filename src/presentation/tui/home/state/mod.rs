@@ -2473,12 +2473,13 @@ impl HomeState {
         self.focus_menu.collapse_close()
     }
 
-    /// Whether the selected close-picker option is `--force`. `None` when the
-    /// close picker is not open.
-    pub fn focus_menu_selected_close_force(&self) -> Option<bool> {
-        self.focus_menu
-            .close_cursor()
-            .map(|_| self.focus_menu.close_selected() == 1)
+    /// Whether the selected close-picker option is `--force`. Call only while
+    /// the close picker is expanded ([`focus_close_expanded`] is true), which
+    /// guarantees `close_cursor` is `Some`.
+    ///
+    /// [`focus_close_expanded`]: Self::focus_close_expanded
+    pub fn focus_menu_selected_close_force(&self) -> bool {
+        self.focus_menu.close_selected() == 1
     }
 
     /// The agent CLI highlighted in the picker, or `None` when collapsed / there

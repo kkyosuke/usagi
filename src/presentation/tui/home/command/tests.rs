@@ -392,6 +392,12 @@ fn close_requests_the_close_session_effect() {
 }
 
 #[test]
+fn close_completes_the_force_flag() {
+    let completion = registry().complete("close --f", CommandScope::Session);
+    assert_eq!(completion.input, "close --force");
+}
+
+#[test]
 fn coming_soon_commands_are_recognised() {
     let registry = registry();
     for name in ["ai", "doctor"] {

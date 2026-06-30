@@ -948,11 +948,10 @@ fn focus_menu_key(
                 state.focus_menu_collapse_close();
             }
             Key::Enter => {
-                if let Some(force) = state.focus_menu_selected_close_force() {
-                    state.focus_menu_collapse_close();
-                    let cmd = if force { "close --force" } else { "close" };
-                    run_focus_command(term, state, painter, cmd, wiring);
-                }
+                let force = state.focus_menu_selected_close_force();
+                state.focus_menu_collapse_close();
+                let cmd = if force { "close --force" } else { "close" };
+                run_focus_command(term, state, painter, cmd, wiring);
             }
             _ => {}
         }
