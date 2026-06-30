@@ -718,9 +718,9 @@ pub(super) fn focus_key(
     // is selected.
     match key {
         Key::Escape => {
-            // A first `Esc` collapses an open agent picker (案A) back to the menu;
-            // only when none is open does it peel back a step.
-            if state.focus_menu_collapse_agent() {
+            // A first `Esc` collapses an open agent or close picker back to the
+            // menu; only when none is open does it peel back a step.
+            if state.focus_menu_collapse_agent() || state.focus_menu_collapse_close() {
                 return Flow::Continue;
             }
             // When 在席 was reached by zooming out of a live pane (`Ctrl-T` /
@@ -913,6 +913,9 @@ fn close_focused_session(state: &mut HomeState, wiring: &mut Wiring, force: bool
 /// one CLI is installed; while it is expanded the keys drive the picker instead —
 /// `↑`/`↓` move within it, `Enter` launches the highlighted CLI, and `←` collapses
 /// it (as does `Esc`, handled one level up in [`focus_key`]).
+///
+/// On the `close` row, `→` / `Tab` expands the close picker (plain close vs.
+/// close --force); the same `↑`/`↓` / `Enter` / `←` pattern drives it.
 fn focus_menu_key(
     term: &Term,
     state: &mut HomeState,
@@ -937,11 +940,33 @@ fn focus_menu_key(
         }
         return;
     }
+    if state.focus_close_expanded() {
+        match key {
+            Key::ArrowUp | Key::Char('k') => state.focus_menu_move_up(),
+            Key::ArrowDown | Key::Char('j') => state.focus_menu_move_down(),
+            Key::ArrowLeft => {
+                state.focus_menu_collapse_close();
+            }
+            Key::Enter => {
+                if let Some(force) = state.focus_menu_selected_close_force() {
+                    state.focus_menu_collapse_close();
+                    let cmd = if force { "close --force" } else { "close" };
+                    run_focus_command(term, state, painter, cmd, wiring);
+                }
+            }
+            _ => {}
+        }
+        return;
+    }
     match key {
         Key::ArrowUp | Key::Char('k') => state.focus_menu_move_up(),
         Key::ArrowDown | Key::Char('j') => state.focus_menu_move_down(),
         // On the `agent` row, open the picker to choose a non-default CLI.
-        Key::ArrowRight | Key::Tab => state.focus_menu_expand_agent(),
+        // On the `close` row, open the picker to choose plain or --force.
+        Key::ArrowRight | Key::Tab => {
+            state.focus_menu_expand_agent();
+            state.focus_menu_expand_close();
+        }
         Key::Enter => {
             if let Some(command) = state.focus_selected_command() {
                 run_focus_command(term, state, painter, command.name, wiring);
