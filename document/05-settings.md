@@ -149,7 +149,7 @@
 
 ### CLI
 
-CLI からも設定を確認・編集できます（[3. コマンドリファレンス](03-commands/README.md)）。
+CLI からも設定を確認・編集できます（[3. コマンドリファレンス](03-commands/README.md)）。ただし `config` は通常の導線ではなく、起動画面の Config に揃えるため `usagi --help` には表示しない上級者向けコマンドです。
 
 - `usagi config` — 現在のグローバル設定を `key  value` 形式で一覧表示（同梱スキル機能は `skill:<機能 ID>  true/false` の行で表示）。
 - `usagi config --edit` — 設定ファイルを `$EDITOR`（→ `$VISUAL` → OS 既定）で開いて編集。保存後に
