@@ -119,6 +119,10 @@ pub(super) type SessionLastActive = (String, DateTime<Utc>);
 /// work to a background worker; the loop drains the finished ones each frame.
 /// `rename_display` stays synchronous (no git work) and returns its outcome.
 pub(super) struct Wiring<'a> {
+    /// A monotonically increasing counter for user input handled by the home
+    /// loop. Create tasks copy it at dispatch time, and only auto-focus when it
+    /// is unchanged at completion time.
+    pub interaction_epoch: u64,
     /// The workspace root: where the root row's pane is rooted, and the base
     /// [`selected_dir`] falls back to when the cursor is on the root row.
     pub workspace_root: &'a Path,
@@ -126,7 +130,7 @@ pub(super) struct Wiring<'a> {
     pub persist: &'a mut dyn FnMut(&str),
     /// Dispatch `session create <name>` to a background worker, in the workspace
     /// rooted at the given path (the cursor's group in 統合/unite mode).
-    pub dispatch_create: &'a mut dyn FnMut(&Path, &str),
+    pub dispatch_create: &'a mut dyn FnMut(&Path, &str, u64),
     /// Rename a session's sidebar label in the given workspace, returning the
     /// outcome to apply inline.
     pub rename_display: &'a mut dyn FnMut(&Path, &str, &str) -> SessionOutcome,
@@ -291,6 +295,10 @@ fn apply_pending_refresh(state: &mut HomeState, refresh: &SessionsRefreshHandle)
     }
 }
 
+fn bump_interaction_epoch(wiring: &mut Wiring) {
+    wiring.interaction_epoch = wiring.interaction_epoch.saturating_add(1);
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn event_loop(
     term: &Term,
@@ -399,8 +407,10 @@ pub(super) fn event_loop(
             // match. Unlike that refresh — which deliberately keeps the cursor put
             // for background changes — this is the user's own create landing, so
             // moving the cursor onto it is the intended result.
-            if let Some(name) = focus {
-                state.enter_focus_named(&name);
+            if let Some(focus) = focus {
+                if focus.interaction_epoch == wiring.interaction_epoch {
+                    state.enter_focus_named(&focus.name);
+                }
             }
         }
         state.set_tasks(tasks.view(Instant::now()));
@@ -534,9 +544,15 @@ pub(super) fn event_loop(
             }
         };
         let key = match input {
-            Input::Key(key) => key,
+            Input::Key(key) => {
+                bump_interaction_epoch(wiring);
+                key
+            }
             // The TUI never scrolls in place: read the wheel turn and drop it.
-            Input::Scroll(_) => continue,
+            Input::Scroll(_) => {
+                bump_interaction_epoch(wiring);
+                continue;
+            }
             // A click on a session row in the left pane acts on it: in 切替 (Switch)
             // it selects the row (a second click on the same row confirms it, like
             // `Enter`); in 在席 (Focus) it re-focuses onto that session (a second
@@ -546,6 +562,7 @@ pub(super) fn event_loop(
             // only when it misses. No key was pressed either way, so repaint only
             // when the click actually did something.
             Input::Click(click) => {
+                bump_interaction_epoch(wiring);
                 // A pinned PR popup intercepts the click first: a `#<number>` opens
                 // that PR in the browser, a click elsewhere in the box keeps it
                 // pinned, and a click outside dismisses it — consuming the click so
@@ -1010,13 +1027,16 @@ pub(crate) fn event_loop_compat(
     let tasks = TaskHandle::new();
     // The unite target root is irrelevant to these single-workspace test fakes, so
     // the shim accepts it (matching the production [`Wiring`] signature) and drops it.
-    let mut dispatch_create = |_root: &Path, name: &str| {
+    let mut dispatch_create = |_root: &Path, name: &str, interaction_epoch: u64| {
         let id = tasks.begin(super::tasks::TaskKind::CreateSession, name);
         let outcome = create_session(name);
         // Mirror a production create, which carries the new branch to focus, so the
         // loop's auto-focus path is exercised; a fake whose `create_session` reports
         // no new sessions just won't match it.
-        let focus = outcome.sessions.as_ref().map(|_| name.to_string());
+        let focus = outcome.sessions.as_ref().map(|_| super::tasks::AutoFocus {
+            name: name.to_string(),
+            interaction_epoch,
+        });
         tasks.complete(
             id,
             true,
@@ -1077,6 +1097,7 @@ pub(crate) fn event_loop_compat(
     // that build a capturing `Wiring`.
     let mut open_url = |_: &str| {};
     let mut wiring = Wiring {
+        interaction_epoch: 0,
         workspace_root,
         persist: &mut persist,
         dispatch_create: &mut dispatch_create,

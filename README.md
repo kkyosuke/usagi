@@ -149,7 +149,7 @@ cargo run -- hop  # TUI を起動
 
 ```text
 :                          # コマンドパレットを開く
-session create feature-x   # .usagi/sessions/feature-x/ にセッション（worktree）を作成（短縮形 c / new）→ 在席
+session create feature-x   # .usagi/sessions/feature-x/ にセッション（worktree）を作成（短縮形 c / new。待機中に他操作がなければ → 在席）
 agent                      # 選んだセッションで Agent CLI（既定 claude）を埋め込み起動 → 没入
 ```
 

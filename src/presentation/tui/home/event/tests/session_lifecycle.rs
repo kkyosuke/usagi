@@ -145,6 +145,161 @@ fn a_finished_create_drops_into_focus_on_the_new_session() {
 }
 
 #[test]
+fn finished_create_does_not_auto_focus_after_another_operation() {
+    use super::super::super::tasks::{AutoFocus, Completion, TaskKind};
+    use std::rc::Rc;
+
+    struct CompleteOnArrowDown {
+        keys: VecDeque<io::Result<Key>>,
+        tasks: TaskHandle,
+        task_id: Rc<RefCell<Option<u64>>>,
+        focus: Rc<RefCell<Option<AutoFocus>>>,
+    }
+
+    impl KeyReader for CompleteOnArrowDown {
+        fn read_key(&mut self) -> io::Result<Key> {
+            let key = self.keys.pop_front().unwrap_or(Ok(Key::CtrlC))?;
+            if matches!(key, Key::ArrowDown) {
+                let task_id = self.task_id.borrow_mut().take();
+                let focus = self.focus.borrow_mut().take();
+                if let (Some(id), Some(focus)) = (task_id, focus) {
+                    self.tasks.complete(
+                        id,
+                        true,
+                        Completion {
+                            line: LogLine::output("created"),
+                            sessions: Some(vec![
+                                SessionRecord {
+                                    name: "main".to_string(),
+                                    display_name: None,
+                                    note: None,
+                                    root: PathBuf::from("/ws/.usagi/sessions/main"),
+                                    worktrees: vec![worktree(Some("main"), "/r/main")],
+                                    created_at: Utc::now(),
+                                    last_active: None,
+                                },
+                                SessionRecord {
+                                    name: "feat".to_string(),
+                                    display_name: None,
+                                    note: None,
+                                    root: PathBuf::from("/ws/.usagi/sessions/feat"),
+                                    worktrees: vec![worktree(Some("feat"), "/r/feat")],
+                                    created_at: Utc::now(),
+                                    last_active: None,
+                                },
+                                SessionRecord {
+                                    name: "newx".to_string(),
+                                    display_name: None,
+                                    note: None,
+                                    root: PathBuf::from("/ws/.usagi/sessions/newx"),
+                                    worktrees: vec![worktree(Some("newx"), "/r/newx")],
+                                    created_at: Utc::now(),
+                                    last_active: None,
+                                },
+                            ]),
+                            target_root: Some(PathBuf::from("/ws")),
+                            evict: None,
+                            focus: Some(focus),
+                        },
+                    );
+                }
+            }
+            Ok(key)
+        }
+    }
+
+    let mut keys = cmd("session create newx");
+    keys.push(Ok(Key::Enter)); // dispatch create, but leave the task running
+    keys.push(Ok(Key::ArrowDown)); // another user operation before completion lands
+    keys.push(Ok(Key::Char('t'))); // Switch-only: focus the selected existing row
+    keys.push(Ok(Key::Char('t'))); // Focus menu: open terminal on that row
+
+    let tasks = TaskHandle::new();
+    let task_id = Rc::new(RefCell::new(None));
+    let focus = Rc::new(RefCell::new(None));
+    let mut reader = CompleteOnArrowDown {
+        keys: keys.into(),
+        tasks: tasks.clone(),
+        task_id: task_id.clone(),
+        focus: focus.clone(),
+    };
+    let term = Term::stdout();
+    let monitor = MonitorHandle::detached();
+    let opened = RefCell::new(Vec::new());
+    let mut open = |_: &mut HomeState, dir: &Path, _: bool, _: bool| {
+        opened.borrow_mut().push(dir.to_path_buf());
+        Ok(PaneExit::Closed)
+    };
+    let mut persist: fn(&str) = noop_persist;
+    let mut dispatch_create = |_: &Path, name: &str, interaction_epoch: u64| {
+        let id = tasks.begin(TaskKind::CreateSession, name);
+        *task_id.borrow_mut() = Some(id);
+        *focus.borrow_mut() = Some(AutoFocus {
+            name: name.to_string(),
+            interaction_epoch,
+        });
+    };
+    let mut rename = |_: &Path, n: &str, l: &str| noop_rename(n, l);
+    let mut set_note_fake = |_: &Path, n: &str, t: &str| noop_set_note(n, t);
+    let mut reorder_fake: fn(&str, bool) -> SessionReorder = noop_reorder;
+    let mut remove = |_: &Path, _: &str, _: bool| {};
+    let mut unite_resolve: fn(&str) -> std::result::Result<GroupSource, String> = no_unite_resolve;
+    let mut update = || {};
+    let mut evict = |_: &Path| {};
+    let mut branches: fn() -> Vec<String> = no_branches;
+    let mut open_url: fn(&str) = noop_open_url;
+    let mut config: fn(&Term) -> Result<Option<ConfigReload>> = noop_config;
+    let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = noop_preview;
+    let mut tab_op: fn(&Path, Option<TabNav>) -> (Vec<String>, usize) = noop_tab_op;
+    let mut close: fn(&mut HomeState, &Path) = noop_close;
+    let mut save_resume = |_: &str, _: ResumeLevel| {};
+    let mut save_last_active = |_: &[(String, DateTime<Utc>)]| {};
+    let mut wiring = Wiring {
+        interaction_epoch: 0,
+        workspace_root: Path::new("/ws"),
+        persist: &mut persist,
+        dispatch_create: &mut dispatch_create,
+        rename_display: &mut rename,
+        set_note: &mut set_note_fake,
+        reorder_session: &mut reorder_fake,
+        dispatch_remove: &mut remove,
+        unite_resolve: &mut unite_resolve,
+        dispatch_update: &mut update,
+        evict_pool: &mut evict,
+        existing_branches: &mut branches,
+        open_terminal: &mut open,
+        open_url: &mut open_url,
+        open_config: &mut config,
+        preview: &mut preview,
+        tab_op: &mut tab_op,
+        close_tab: &mut close,
+        save_resume: &mut save_resume,
+        save_last_active: &mut save_last_active,
+    };
+
+    assert!(matches!(
+        event_loop(
+            &term,
+            &mut reader,
+            sample_state(),
+            &monitor,
+            &UpdateHandle::new(),
+            &SessionsRefreshHandle::new(),
+            &OneShot::<bool>::new(),
+            &OneShot::<Vec<AgentCli>>::new(),
+            &tasks,
+            &mut wiring,
+        )
+        .unwrap(),
+        Outcome::Quit
+    ));
+    assert_eq!(
+        opened.borrow().as_slice(),
+        &[PathBuf::from("/ws/.usagi/sessions/main")]
+    );
+}
+
+#[test]
 fn session_remove_with_a_name_and_force_routes_to_remove() {
     let mut keys = cmd("session remove old --force");
     keys.push(Ok(Key::Enter));

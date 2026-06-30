@@ -273,7 +273,7 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
     let create_workers = workers.clone();
     // `root` is the workspace the cursor's group points at (the primary, or an
     // extra 統合/unite workspace), so the session lands where the user is pointing.
-    let mut dispatch_create = move |root: &Path, name: &str| {
+    let mut dispatch_create = move |root: &Path, name: &str, interaction_epoch: u64| {
         let id = create_tasks.begin(tasks::TaskKind::CreateSession, name);
         let handle = create_tasks.clone();
         let root = root.to_path_buf();
@@ -282,7 +282,7 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
         let worker = std::thread::spawn(move || {
             complete_or_record_panic(&handle, id, tasks::TaskKind::CreateSession, &name, || {
                 let _guard = lock_session_ops(&lock);
-                run_create(&root, &name)
+                run_create(&root, &name, interaction_epoch)
             });
         });
         track_worker(&create_workers, worker);
@@ -979,6 +979,7 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
     };
 
     let mut wiring = event::Wiring {
+        interaction_epoch: 0,
         workspace_root: &workspace.path,
         persist: &mut persist,
         dispatch_create: &mut dispatch_create,
@@ -1103,7 +1104,7 @@ fn restore_open_panes(
 /// the [`Completion`](tasks::Completion) the event loop applies (the success or
 /// failure line, and the refreshed sessions read back with each worktree's git
 /// status). The `bool` is whether it succeeded, for the task row's mark.
-fn run_create(root: &Path, name: &str) -> (bool, tasks::Completion) {
+fn run_create(root: &Path, name: &str, interaction_epoch: u64) -> (bool, tasks::Completion) {
     match crate::usecase::session::create(root, name) {
         Ok(created) => (
             true,
@@ -1119,7 +1120,10 @@ fn run_create(root: &Path, name: &str) -> (bool, tasks::Completion) {
                 // Drop straight into 在席 (Focus) on the new session once the event
                 // loop applies this — the user just asked for it, so operate it
                 // without making them navigate over. (MCP creates never reach here.)
-                focus: Some(created.name.clone()),
+                focus: Some(tasks::AutoFocus {
+                    name: created.name.clone(),
+                    interaction_epoch,
+                }),
             },
         ),
         // The failure line is recorded to the daily log when the event loop applies

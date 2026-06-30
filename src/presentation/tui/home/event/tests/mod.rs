@@ -715,7 +715,7 @@ fn run_with_tasks(
     let term = Term::stdout();
     let monitor = MonitorHandle::detached();
     let mut persist: fn(&str) = noop_persist;
-    let mut dispatch_create = |_: &Path, _: &str| {};
+    let mut dispatch_create = |_: &Path, _: &str, _: u64| {};
     let mut rename = |_: &Path, n: &str, l: &str| noop_rename(n, l);
     let mut branches: fn() -> Vec<String> = no_branches;
     let mut open: fn(&mut HomeState, &Path, bool, bool) -> Result<PaneExit> = noop_open;
@@ -734,6 +734,7 @@ fn run_with_tasks(
     let mut dispatch_remove_w = |_: &Path, name: &str, force: bool| dispatch_remove(name, force);
     let mut unite_resolve: fn(&str) -> std::result::Result<GroupSource, String> = no_unite_resolve;
     let mut wiring = Wiring {
+        interaction_epoch: 0,
         workspace_root: Path::new("/ws"),
         persist: &mut persist,
         dispatch_create: &mut dispatch_create,
@@ -777,7 +778,7 @@ fn run_with_live_session(reader: &mut dyn KeyReader) -> Result<Outcome> {
     let monitor = MonitorHandle::with_live(vec![PathBuf::from("/r/main")]);
     let tasks = TaskHandle::new();
     let mut persist: fn(&str) = noop_persist;
-    let mut dispatch_create = |_: &Path, _: &str| {};
+    let mut dispatch_create = |_: &Path, _: &str, _: u64| {};
     let mut rename = |_: &Path, n: &str, l: &str| noop_rename(n, l);
     let mut dispatch_remove = |_: &Path, _: &str, _: bool| {};
     let mut evict = |_: &Path| {};
@@ -795,6 +796,7 @@ fn run_with_live_session(reader: &mut dyn KeyReader) -> Result<Outcome> {
     let mut dispatch_update = || {};
     let mut unite_resolve: fn(&str) -> std::result::Result<GroupSource, String> = no_unite_resolve;
     let mut wiring = Wiring {
+        interaction_epoch: 0,
         workspace_root: Path::new("/ws"),
         persist: &mut persist,
         dispatch_create: &mut dispatch_create,
@@ -927,7 +929,7 @@ fn unite_add_and_remove_run_through_the_palette() {
     let mut reader = ScriptedReader::new(keys);
 
     let mut persist: fn(&str) = noop_persist;
-    let mut dispatch_create = |_: &Path, _: &str| {};
+    let mut dispatch_create = |_: &Path, _: &str, _: u64| {};
     let mut rename = |_: &Path, n: &str, l: &str| noop_rename(n, l);
     let mut set_note_fake = |_: &Path, n: &str, t: &str| noop_set_note(n, t);
     let mut reorder_fake: fn(&str, bool) -> SessionReorder = noop_reorder;
@@ -944,6 +946,7 @@ fn unite_add_and_remove_run_through_the_palette() {
     let mut open_url: fn(&str) = noop_open_url;
     let mut dispatch_update = || {};
     let mut wiring = Wiring {
+        interaction_epoch: 0,
         workspace_root: Path::new("/ws"),
         persist: &mut persist,
         dispatch_create: &mut dispatch_create,
