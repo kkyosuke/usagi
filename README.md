@@ -119,6 +119,17 @@ curl -L https://github.com/KKyosuke/usagi/releases/latest/download/usagi-linux-a
 cargo install --path .
 ```
 
+### Tab 補完
+
+`usagi completion <shell>` は、シェルに読み込ませる補完スクリプトを標準出力へ印字します。読み込み後は
+`usagi <TAB>` でサブコマンドやフラグを補完できます。
+
+```bash
+source <(usagi completion bash)                         # bash（現在のシェル）
+usagi completion zsh > ~/.zfunc/_usagi                  # zsh（fpath/compinit で読み込み）
+usagi completion fish > ~/.config/fish/completions/usagi.fish
+```
+
 ## Quick Start
 
 依存ツール・通知・設定ストレージの健全性確認:

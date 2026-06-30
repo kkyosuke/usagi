@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 
 use usagi::infrastructure::secret_store::SecretStore;
 use usagi::presentation::mcp::child_io::{read_capped, wait_with_timeout, WaitableChild};
@@ -338,6 +338,12 @@ enum Commands {
         #[arg(long, value_name = "NAME")]
         agent: Option<String>,
     },
+    /// Print a shell completion script for Tab completion
+    Completion {
+        /// Which shell to generate the completion script for
+        #[arg(value_enum)]
+        shell: clap_complete::Shell,
+    },
     /// Show usagi's configuration (or edit it with --edit)
     Config {
         /// Open the configuration file in $EDITOR and validate it on save
@@ -450,6 +456,12 @@ fn main() -> anyhow::Result<()> {
         Commands::Clean { dry_run, agent } => {
             usagi::presentation::cli::clean::run(dry_run, agent, spawn_detached)
         }
+        Commands::Completion { shell } => {
+            let mut cmd = Cli::command();
+            let mut stdout = std::io::stdout();
+            usagi::presentation::cli::completion::write(shell, &mut cmd, &mut stdout);
+            Ok(())
+        }
         Commands::Config { edit } => usagi::presentation::cli::config::run(edit),
         Commands::Doctor { fix } => usagi::presentation::cli::doctor::run(fix),
         Commands::Feature => usagi::presentation::cli::feature::run(),
@@ -538,6 +550,7 @@ fn command_name(command: &Commands) -> Option<&'static str> {
     match command {
         Commands::AgentPhase { .. } => Some("agent-phase"),
         Commands::Clean { .. } => Some("clean"),
+        Commands::Completion { .. } => Some("completion"),
         Commands::Config { .. } => Some("config"),
         Commands::Doctor { .. } => Some("doctor"),
         Commands::Feature => Some("feature"),
