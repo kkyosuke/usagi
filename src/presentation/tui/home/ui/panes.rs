@@ -41,7 +41,7 @@ fn status_icon(status: BranchStatus) -> char {
 /// never drift apart.
 fn status_style(status: BranchStatus) -> Style {
     match status {
-        BranchStatus::New => Style::new().blue(),
+        BranchStatus::New => Style::new().blue().bright(),
         BranchStatus::Dirty => Style::new().magenta(),
         BranchStatus::Local => Style::new().yellow(),
         BranchStatus::Pushed => Style::new().green(),
