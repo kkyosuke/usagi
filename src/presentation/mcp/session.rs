@@ -1012,4 +1012,38 @@ mod tests {
         let result = call(&server, "session_list", json!({}));
         assert_eq!(result["isError"], true);
     }
+
+    #[test]
+    fn note_get_surfaces_usecase_error_when_no_state_exists() {
+        // A server inside a session worktree, but no state.json — get_note fails
+        // "no sessions recorded" and the tool surfaces it as a tool error.
+        // This also covers the map_err closure in tool_note_get.
+        let root = tempfile::tempdir().unwrap();
+        let server = server_in_session(root.path(), "work", FakeBackend::ok("x"));
+        let result = call(&server, "session_note_get", json!({}));
+        assert_eq!(result["isError"], true);
+        assert!(result["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("no sessions recorded"));
+    }
+
+    #[test]
+    fn note_update_surfaces_usecase_error_when_session_not_in_state() {
+        // A server inside "work" session, state.json exists but lists "other" —
+        // set_note fails "no such session" and the tool surfaces it.
+        // This also covers the map_err closure in tool_note_update.
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        let server_other = server_in_session(root.path(), "other", FakeBackend::ok("x"));
+        call(&server_other, "session_create", json!({"name":"other"}));
+        // Now there IS a state.json, but it only has "other", not "work".
+        let server = server_in_session(root.path(), "work", FakeBackend::ok("x"));
+        let result = call(&server, "session_note_update", json!({"note":"x"}));
+        assert_eq!(result["isError"], true);
+        assert!(result["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("no such session"));
+    }
 }
