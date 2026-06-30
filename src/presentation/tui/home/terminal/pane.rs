@@ -86,10 +86,17 @@ pub enum PaneStep {
     NextTab,
     /// `Ctrl-P`: switch to the previous tab without leaving 没入.
     PrevTab,
+    /// `Ctrl+Shift+N`: move the active tab one slot right, keeping it active.
+    SwapTabRight,
+    /// `Ctrl+Shift+P`: move the active tab one slot left, keeping it active.
+    SwapTabLeft,
     /// A left click on a tab chip: switch to that (0-based) tab without leaving
     /// 没入. Like [`NextTab`](Self::NextTab) / [`PrevTab`](Self::PrevTab), the
     /// caller makes it active and re-drives the pane.
     ToTab(usize),
+    /// A drag/drop from one tab chip to another: move the source tab to the
+    /// target slot and keep that moved pane active.
+    MoveTab { from: usize, to: usize },
     /// `Ctrl-T`: zoom out to 在席 (Focus) — the session's action menu — leaving
     /// every pane alive in the pool. Adding a terminal is then a menu choice.
     ToFocus,
@@ -259,6 +266,10 @@ fn drive(
     // The cell the pointer last moved over, so the link under it (if any) lights
     // up; `None` while the pointer is outside the pane.
     let mut hover: Option<Cell> = None;
+    // A tab chip pressed with the left mouse button, held until release so a
+    // press/release on the same chip remains click-to-switch while a release on
+    // another chip reorders tabs.
+    let mut drag_tab: Option<usize> = None;
     // When a `Ctrl-O` leader press is awaiting its action key (prefix `KeyScheme`
     // only): the instant it arrived, so the wait can lapse after `PREFIX_TIMEOUT`
     // (a forgotten leader must not turn a later `Ctrl-O` into a literal sent to
@@ -512,6 +523,7 @@ fn drive(
                     (height, width),
                     &mut scrollback,
                     &mut selection,
+                    &mut drag_tab,
                     &mut hover,
                     &mut pending_prefix,
                     &mut last_click,
@@ -607,6 +619,7 @@ fn pump_input(
     size: (u16, u16),
     scrollback: &mut usize,
     selection: &mut Option<Selection>,
+    drag_tab: &mut Option<usize>,
     hover: &mut Option<Cell>,
     pending_prefix: &mut Option<Instant>,
     last_click: &mut Option<(usize, Instant)>,
@@ -620,6 +633,7 @@ fn pump_input(
                 if !is_press(key) {
                     continue;
                 }
+                *drag_tab = None;
                 // A keypress dismisses a pinned PR popup (so `Esc` — or typing —
                 // closes it), the same as on the home screen; the keystroke still
                 // drives the shell below. The drive loop repaints on the change.
@@ -669,6 +683,8 @@ fn pump_input(
                             Reserved::ToFocus => PaneStep::ToFocus,
                             Reserved::NextTab => PaneStep::NextTab,
                             Reserved::PrevTab => PaneStep::PrevTab,
+                            Reserved::SwapTabRight => PaneStep::SwapTabRight,
+                            Reserved::SwapTabLeft => PaneStep::SwapTabLeft,
                             Reserved::NewAgentTab => PaneStep::NewAgentTab,
                             Reserved::CloseTab => PaneStep::CloseTab,
                             Reserved::OpenNote => PaneStep::OpenNote,
@@ -730,32 +746,36 @@ fn pump_input(
                     last_pointer,
                 )?;
                 match mouse.kind {
-                    // A left click on a tab chip switches to that tab in place, like
-                    // `Ctrl-N` / `Ctrl-P`; otherwise it starts a fresh selection at
-                    // the clicked cell (clearing any existing one when outside the pane).
+                    // A left press on a tab chip arms a tab click/drag: releasing on
+                    // the same chip switches to it, while releasing on another chip
+                    // reorders the source tab to that slot. Pressing outside the tab
+                    // strip starts the normal terminal text selection.
                     MouseEventKind::Down(MouseButton::Left) => {
                         // A pinned PR popup owns the whole click: swallow the press
                         // (no tab switch, no selection) so its button release resolves
                         // the popup cleanly.
                         if state.pr_popup().is_none() {
                             if let Some(tab) =
-                                ui::attached_tab_at(state, mouse.column, mouse.row, geo)
+                                ui::attached_tab_hit(state, mouse.column, mouse.row, geo)
                             {
-                                *scrollback = 0;
+                                *drag_tab = Some(tab);
                                 *selection = None;
-                                flush_pending_input(pty, &mut pending_bytes)?;
-                                return Ok(Some(PaneStep::ToTab(tab)));
+                            } else {
+                                *drag_tab = None;
+                                *selection =
+                                    pane_cell(mouse.column, mouse.row, geo).map(Selection::new);
                             }
-                            *selection =
-                                pane_cell(mouse.column, mouse.row, geo).map(Selection::new);
                         }
                     }
-                    // Dragging the left button stretches the selection's loose end.
+                    // Dragging the left button stretches the terminal selection
+                    // unless a tab drag is armed.
                     MouseEventKind::Drag(MouseButton::Left) => {
-                        if let (Some(sel), Some(cell)) =
-                            (selection.as_mut(), pane_cell(mouse.column, mouse.row, geo))
-                        {
-                            sel.extend(cell);
+                        if drag_tab.is_none() {
+                            if let (Some(sel), Some(cell)) =
+                                (selection.as_mut(), pane_cell(mouse.column, mouse.row, geo))
+                            {
+                                sel.extend(cell);
+                            }
                         }
                     }
                     // Releasing after a drag copies the selection; a plain click
@@ -764,6 +784,26 @@ fn pump_input(
                     // on a sidebar session row pins its popup, or a URL in the
                     // terminal opens.
                     MouseEventKind::Up(MouseButton::Left) => {
+                        if let Some(from) = drag_tab.take() {
+                            if let Some(to) =
+                                ui::attached_tab_hit(state, mouse.column, mouse.row, geo)
+                            {
+                                *scrollback = 0;
+                                *selection = None;
+                                flush_pending_input(pty, &mut pending_bytes)?;
+                                if from == to
+                                    && ui::attached_tab_at(state, mouse.column, mouse.row, geo)
+                                        .is_none()
+                                {
+                                    continue;
+                                }
+                                return Ok(Some(if from == to {
+                                    PaneStep::ToTab(to)
+                                } else {
+                                    PaneStep::MoveTab { from, to }
+                                }));
+                            }
+                        }
                         let dragged = selection.as_ref().is_some_and(|s| !s.is_empty());
                         let (h, w) = term.size();
                         // A pinned PR popup owns a plain click: a `#<number>` opens
@@ -947,7 +987,7 @@ fn update_pointer(
         // pinned PR popup is the clickable target.
         None => {
             let (height, width) = size;
-            ui::attached_tab_at(state, col, row, geo).is_some()
+            ui::attached_tab_hit(state, col, row, geo).is_some()
                 || ui::sidebar_pr_badge_at(state, height as usize, width as usize, col, row)
                     .is_some()
                 || matches!(

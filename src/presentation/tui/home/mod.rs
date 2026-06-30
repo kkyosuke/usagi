@@ -708,10 +708,23 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
                         terminal::pane::PaneStep::PrevTab => {
                             let _ = pool.nav(dir, terminal::tabs::TabNav::Prev);
                         }
+                        // `Ctrl+Shift+N` / `Ctrl+Shift+P`: reorder the active tab
+                        // in place and keep driving that same pane at its new slot.
+                        terminal::pane::PaneStep::SwapTabRight => {
+                            let _ = pool.swap_active(dir, terminal::tabs::TabSwap::Right);
+                        }
+                        terminal::pane::PaneStep::SwapTabLeft => {
+                            let _ = pool.swap_active(dir, terminal::tabs::TabSwap::Left);
+                        }
                         // A click on a tab chip: jump straight to that pane and loop,
                         // driving it (and republishing the strip) without leaving 没入.
                         terminal::pane::PaneStep::ToTab(i) => {
                             let _ = pool.nav(dir, terminal::tabs::TabNav::To(i));
+                        }
+                        // Dragging one tab chip onto another reorders the pane
+                        // list; the moved pane stays active at its new slot.
+                        terminal::pane::PaneStep::MoveTab { from, to } => {
+                            let _ = pool.move_tab(dir, from, to);
                         }
                         // `Ctrl-T`: zoom out to 在席 (Focus) so the user picks the next
                         // action from the session's menu, leaving every pane alive in
