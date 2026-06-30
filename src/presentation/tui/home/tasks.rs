@@ -77,6 +77,17 @@ impl TaskKind {
     }
 }
 
+/// A successful create's request to automatically land in 在席 (Focus). The
+/// `interaction_epoch` is the user-input counter from the moment the create was
+/// dispatched; the event loop only honors it when no later input has arrived.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AutoFocus {
+    /// The branch/session name to focus after the refreshed list lands.
+    pub name: String,
+    /// The user-input epoch at dispatch time.
+    pub interaction_epoch: u64,
+}
+
 /// What a worker hands back when its task finishes, for the event loop to apply
 /// to the screen on the next frame: the line to log, the refreshed session list
 /// (when the action changed it), and, for a removal, the pool path whose live
@@ -98,11 +109,12 @@ pub struct Completion {
     /// fresh. `None` for creations and failures.
     pub evict: Option<PathBuf>,
     /// The branch of a freshly created session to drop into 在席 (Focus) once the
-    /// refreshed list lands — set only on a successful TUI-initiated create, so
-    /// the user starts operating the new session without navigating to it. `None`
-    /// for removals and failures (and, by construction, for MCP-driven creates,
-    /// which never build a [`Completion`]).
-    pub focus: Option<String>,
+    /// refreshed list lands, plus the interaction epoch that must still be current.
+    /// Set only on a successful TUI-initiated create, so the user starts operating
+    /// the new session without navigating to it when they have waited for creation.
+    /// `None` for removals and failures (and, by construction, for MCP-driven
+    /// creates, which never build a [`Completion`]).
+    pub focus: Option<AutoFocus>,
 }
 
 /// Decode the message a worker thread panicked with, from the payload

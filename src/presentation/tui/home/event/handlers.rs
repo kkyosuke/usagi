@@ -74,7 +74,8 @@ pub(super) fn palette_key(
                 Effect::CreateSession(name) => {
                     let root = state.selected_workspace_root();
                     state.set_op_target(root.clone());
-                    (wiring.dispatch_create)(&root, &name);
+                    let interaction_epoch = wiring.interaction_epoch;
+                    (wiring.dispatch_create)(&root, &name, interaction_epoch);
                 }
                 // `session create` with no name moves to 切替 and opens the inline
                 // name input there (creation lives in Switch).
@@ -229,7 +230,8 @@ pub(super) fn switch_key(
                     // It lands in the cursor's group's workspace (統合/unite mode).
                     let root = state.selected_workspace_root();
                     state.set_op_target(root.clone());
-                    (wiring.dispatch_create)(&root, &name);
+                    let interaction_epoch = wiring.interaction_epoch;
+                    (wiring.dispatch_create)(&root, &name, interaction_epoch);
                 }
             }
             Key::Escape => state.create_cancel(),
