@@ -99,8 +99,8 @@ impl SetupCommandRunner for SystemSetupCommandRunner {
             .args(["-lc", command])
             .current_dir(cwd)
             .output();
-        let output = output_result
-            .with_context(|| format!("failed to run setup command `{command}`"))?;
+        let output =
+            output_result.with_context(|| format!("failed to run setup command `{command}`"))?;
 
         if output.status.success() {
             return Ok(());

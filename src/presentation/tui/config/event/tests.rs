@@ -869,8 +869,7 @@ fn unhandled_keys_inside_the_setup_modal_are_silently_ignored() {
     // Press PageUp while the setup-commands editor is open — it matches the
     // `_ => {}` catch-all and must not close or corrupt the modal.
     let term = Term::stdout();
-    let config =
-        Config::workspace(Settings::default(), LocalSettings::default(), Vec::new());
+    let config = Config::workspace(Settings::default(), LocalSettings::default(), Vec::new());
     let keys = vec![
         Ok(Key::ArrowDown), // Notifications
         Ok(Key::ArrowDown), // Restore Panes
@@ -886,6 +885,15 @@ fn unhandled_keys_inside_the_setup_modal_are_silently_ignored() {
     let mut save: fn(&Settings, Option<&LocalSettings>) -> Result<()> = noop_save;
     let mut install: fn(&str) -> Result<()> = ok_install;
     let mut pull: fn(&str) -> Result<()> = ok_pull;
-    let outcome = event_loop(&term, &mut reader, config, &mut save, &mut install, &mut pull, None).unwrap();
+    let outcome = event_loop(
+        &term,
+        &mut reader,
+        config,
+        &mut save,
+        &mut install,
+        &mut pull,
+        None,
+    )
+    .unwrap();
     assert!(matches!(outcome, Outcome::Back));
 }
