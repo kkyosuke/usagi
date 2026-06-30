@@ -1734,16 +1734,29 @@ fn menu_marker(selected: bool) -> String {
 /// Builds one 在席 (Focus) menu row: a `›` cursor for the highlighted command,
 /// its name, and its dimmed description, clipped to `width`.
 pub(super) fn focus_menu_row(info: &CommandInfo, selected: bool, width: usize) -> String {
-    menu_row(info.name, info.description, selected, width)
+    menu_row(
+        info.name,
+        info.description,
+        selected,
+        width,
+        info.name == "close",
+    )
 }
 
 /// The shared layout for an action row: a `›` cursor when `selected`, a fixed-
-/// width cyan `name`, and a dimmed `desc`, clipped to `width`. Used by the plain
+/// width `name`, and a dimmed `desc`, clipped to `width`. Used by the plain
 /// command rows ([`focus_menu_row`]) and the `agent` row, which substitutes a
-/// "Launch <default>" description and an expand chevron.
-fn menu_row(name: &str, desc: &str, selected: bool, width: usize) -> String {
+/// "Launch <default>" description and an expand chevron. When `danger` is true
+/// the name is rendered red (used for the destructive `close` row).
+fn menu_row(name: &str, desc: &str, selected: bool, width: usize, danger: bool) -> String {
     let marker = menu_marker(selected);
-    let name = if selected {
+    let name = if danger {
+        if selected {
+            style(format!("{name:<9}")).red().bold().to_string()
+        } else {
+            style(format!("{name:<9}")).red().to_string()
+        }
+    } else if selected {
         style(format!("{name:<9}")).cyan().bold().to_string()
     } else {
         style(format!("{name:<9}")).cyan().to_string()
@@ -1766,7 +1779,7 @@ fn focus_agent_command_row(state: &HomeState, selected: bool, width: usize) -> S
         ""
     };
     let desc = format!("{chevron}Launch {}", state.default_agent().display_name());
-    menu_row("agent", &desc, selected, width)
+    menu_row("agent", &desc, selected, width, false)
 }
 
 /// One agent-picker sub-row, indented under the expanded `agent` row: a `›`
@@ -1809,7 +1822,8 @@ fn focus_menu_body(state: &HomeState, width: usize) -> Vec<String> {
     let mut lines = vec![style("Run a command:").dim().to_string()];
     let cursor = state.focus_menu_cursor();
     let expanded = state.focus_menu_expanded();
-    for (i, info) in state.focus_menu_commands().iter().enumerate() {
+    let commands = state.focus_menu_commands();
+    for (i, info) in commands.iter().enumerate() {
         let selected = i == cursor;
         if info.name == "agent" {
             // The `agent` row names the default CLI; when expanded, its installed
@@ -1835,11 +1849,11 @@ fn focus_menu_body(state: &HomeState, width: usize) -> Vec<String> {
     // The hint follows the surface: picker keys while expanded, an extra
     // "→ pick agent" affordance when the picker can open, else the base keys.
     let hint = if expanded {
-        "↑↓ move   Enter launch   ← back"
+        "↑↓ move   Enter launch   ← back".to_string()
     } else if state.focus_menu_agent_can_expand() {
-        "↑↓ move   Enter run   → pick agent   t terminal   a agent"
+        "↑↓ move   Enter run   → pick agent   t terminal   a agent".to_string()
     } else {
-        "↑↓ move   Enter run   t terminal   a agent"
+        "↑↓ move   Enter run   t terminal   a agent".to_string()
     };
     lines.push(style(hint).dim().to_string());
     lines
