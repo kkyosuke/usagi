@@ -20,6 +20,7 @@ pub mod resource;
 pub mod resume_focus_store;
 pub mod secret_store;
 pub mod session_monitor;
+pub mod setup_runner;
 pub mod skills;
 pub mod storage;
 pub mod store_lock;

@@ -28,7 +28,6 @@ pub use reconcile::reconcile;
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use anyhow::{anyhow, bail, Context, Result};
 use chrono::{DateTime, Utc};
@@ -37,6 +36,7 @@ use crate::domain::agent::Agent;
 use crate::domain::settings::LocalSettings;
 use crate::domain::workspace_state::{PrLink, SessionRecord};
 use crate::infrastructure::repo_paths::{SESSIONS_DIR, STATE_DIR};
+use crate::infrastructure::setup_runner::SystemSetupCommandRunner;
 use crate::infrastructure::workspace_store::WorkspaceStore;
 use crate::infrastructure::{
     agent_prompt_store, agent_state_store, git, open_panes_store, pr_link_store,
@@ -80,49 +80,6 @@ pub struct CreatedSession {
 /// the platform shell with the new session root as its current directory.
 pub trait SetupCommandRunner {
     fn run(&self, cwd: &Path, command: &str) -> Result<()>;
-}
-
-/// Production [`SetupCommandRunner`] that executes command lines with the
-/// platform shell.
-#[derive(Debug, Clone, Copy)]
-pub struct SystemSetupCommandRunner;
-
-impl SetupCommandRunner for SystemSetupCommandRunner {
-    fn run(&self, cwd: &Path, command: &str) -> Result<()> {
-        #[cfg(windows)]
-        let output_result = Command::new("cmd")
-            .args(["/C", command])
-            .current_dir(cwd)
-            .output();
-        #[cfg(not(windows))]
-        let output_result = Command::new("sh")
-            .args(["-lc", command])
-            .current_dir(cwd)
-            .output();
-        let output =
-            output_result.with_context(|| format!("failed to run setup command `{command}`"))?;
-
-        if output.status.success() {
-            return Ok(());
-        }
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!(
-            "setup command `{command}` exited with {}{}{}",
-            output.status,
-            if stdout.trim().is_empty() {
-                String::new()
-            } else {
-                format!("\nstdout:\n{}", stdout.trim_end())
-            },
-            if stderr.trim().is_empty() {
-                String::new()
-            } else {
-                format!("\nstderr:\n{}", stderr.trim_end())
-            }
-        );
-    }
 }
 
 /// Create session `name` under `workspace_root`.
@@ -773,6 +730,7 @@ pub fn session_roots(workspace_root: &Path) -> Vec<PathBuf> {
 mod tests {
     use super::*;
     use crate::infrastructure::git::test_command as git_cmd;
+    use crate::infrastructure::setup_runner::SystemSetupCommandRunner;
     use crate::usecase::settings;
     use anyhow::anyhow;
     use std::cell::RefCell;
