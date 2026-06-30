@@ -100,24 +100,42 @@ chmod +x "$BIN_DIR/$BINARY_NAME"
 # 新しくインストールされたバージョン
 NEW_VERSION="$(read_version "$BIN_DIR/$BINARY_NAME")"
 
-# インストール結果のメッセージを決める
+# インストール結果のメッセージと顔を決める
 if [ -z "$OLD_VERSION" ]; then
     # 既存インストールなし → 新規
     MESSAGE="usagi v${NEW_VERSION} をインストールしたよ！ぴょん"
+    FACE="( ◕ω◕)"
 elif [ "$OLD_VERSION" = "$NEW_VERSION" ]; then
     # 同じバージョン → 再インストール
     MESSAGE="usagi v${NEW_VERSION} は既に最新だよ！再インストールしたぴょん"
+    FACE="( -ω-)"
 else
-    # バージョンが変わった → アップデート
+    # バージョンが変わった → アップデート（度合いで顔が変わる）
     MESSAGE="usagi を v${OLD_VERSION} から v${NEW_VERSION} にぴょんしたよ！"
+    OLD_MAJOR="${OLD_VERSION%%.*}"
+    NEW_MAJOR="${NEW_VERSION%%.*}"
+    OLD_MINOR="${OLD_VERSION#*.}"; OLD_MINOR="${OLD_MINOR%%.*}"
+    NEW_MINOR="${NEW_VERSION#*.}"; NEW_MINOR="${NEW_MINOR%%.*}"
+    if [ "$OLD_MAJOR" != "$NEW_MAJOR" ]; then
+        FACE="(*^ω^)"
+    elif [ "$OLD_MINOR" != "$NEW_MINOR" ]; then
+        FACE="( ◕ω◕)"
+    else
+        FACE="( ^ω^)"
+    fi
 fi
 
-cat <<EOF
+C_RST=$'\033[0m'
+C_BOLD=$'\033[1m'
+C_PINK=$'\033[95m'
+C_CYAN=$'\033[96m'
+C_DIM=$'\033[2m'
 
-   (\\(\\
-   ( -.-)   $MESSAGE
-   o_(")(")  -> $BIN_DIR/$BINARY_NAME
-EOF
+printf "\n"
+printf "   %s(\(\\%s\n" "$C_PINK" "$C_RST"
+printf "   %s%s%s  %s%s%s\n" "$C_PINK" "$FACE" "$C_RST" "$C_BOLD" "$MESSAGE" "$C_RST"
+printf "   %so_(\")(\")%s  %s→%s  %s%s/%s%s\n" "$C_PINK" "$C_RST" "$C_DIM" "$C_RST" "$C_CYAN" "$BIN_DIR" "$BINARY_NAME" "$C_RST"
+printf "\n"
 
 # PATH 案内（まだ PATH に入っていない場合のみ）
 case ":$PATH:" in
