@@ -334,6 +334,21 @@ pub fn set_note(workspace_root: &Path, name: &str, note: &str) -> Result<Option<
     })
 }
 
+/// Return a session's free-form note, or `None` when none has been written.
+/// Fails when no session named `name` exists.
+pub fn get_note(workspace_root: &Path, name: &str) -> Result<Option<String>> {
+    let store = WorkspaceStore::new(workspace_root);
+    let state = store
+        .load()?
+        .ok_or_else(|| anyhow!("no sessions recorded for this workspace"))?;
+    state
+        .sessions
+        .into_iter()
+        .find(|s| s.name == name)
+        .map(|s| s.note)
+        .ok_or_else(|| anyhow!("no such session: \"{name}\""))
+}
+
 /// Set (or clear) the workspace **root**'s free-form note in `state.json` — the
 /// `⌂ root` row's counterpart to [`set_note`], which targets a session.
 ///
@@ -1207,6 +1222,30 @@ mod tests {
         let stored = set_note(root.path(), "feature", "   \n  ").unwrap();
         assert_eq!(stored, None);
         assert_eq!(note_of(root.path(), "feature"), None);
+    }
+
+    #[test]
+    fn get_note_returns_the_stored_note_and_errors_without_state_or_session() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        // No state.json yet.
+        let err = get_note(root.path(), "x").unwrap_err();
+        assert!(err.to_string().contains("no sessions recorded"));
+
+        // State exists but the named session does not.
+        create(root.path(), "present").unwrap();
+        let err = get_note(root.path(), "absent").unwrap_err();
+        assert!(err.to_string().contains("no such session"));
+
+        // Session exists with no note → Ok(None).
+        assert_eq!(get_note(root.path(), "present").unwrap(), None);
+
+        // After setting a note it is returned.
+        set_note(root.path(), "present", "hello").unwrap();
+        assert_eq!(
+            get_note(root.path(), "present").unwrap().as_deref(),
+            Some("hello")
+        );
     }
 
     #[test]

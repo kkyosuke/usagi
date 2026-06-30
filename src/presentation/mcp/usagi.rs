@@ -43,7 +43,7 @@ impl UsagiMcpServer {
     pub fn new(worktree: PathBuf, workspace_root: PathBuf, backend: Box<dyn AgentBackend>) -> Self {
         Self {
             issue: IssueServer::new(&worktree),
-            session: SessionMcpServer::new(workspace_root, backend),
+            session: SessionMcpServer::new(workspace_root, &worktree, backend),
         }
     }
 
@@ -169,8 +169,8 @@ mod tests {
         );
         let tools = res["result"]["tools"].as_array().unwrap();
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
-        // 7 issue + 6 memory + 5 session.
-        assert_eq!(names.len(), 18);
+        // 7 issue + 6 memory + 7 session.
+        assert_eq!(names.len(), 20);
         assert!(names.contains(&"issue_create"));
         assert!(names.contains(&"issue_to_prompt"));
         assert!(names.contains(&"memory_save"));
@@ -179,6 +179,8 @@ mod tests {
         assert!(names.contains(&"session_prompt"));
         assert!(names.contains(&"session_pr"));
         assert!(names.contains(&"session_remove"));
+        assert!(names.contains(&"session_note_get"));
+        assert!(names.contains(&"session_note_update"));
     }
 
     #[test]
