@@ -694,4 +694,15 @@ mod tests {
         assert!(!joined.contains("first"));
         assert!(joined.contains("Setup Commands"));
     }
+
+    #[test]
+    fn setup_modal_renders_empty_non_cursor_rows_with_placeholder() {
+        // An empty line that is NOT the cursor row must render with the "·"
+        // placeholder, not as a blank.  Use ["", "cmd"]: cursor lands on row 1
+        // ("cmd"), so row 0 ("") exercises the else-if branch.
+        let config = config_with_open_setup_modal(&["", "cmd"]);
+        let joined = render_frame(40, 80, &config, None).join("\n");
+        assert!(joined.contains('·'));
+        assert!(joined.contains("cmd"));
+    }
 }

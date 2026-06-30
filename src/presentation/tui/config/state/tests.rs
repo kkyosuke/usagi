@@ -1171,3 +1171,28 @@ fn title_and_subtitle_reflect_the_scope() {
     assert_eq!(local.title(), "Workspace Config");
     assert_eq!(local.subtitle(), "Adjust this workspace's settings");
 }
+
+#[test]
+fn setup_commands_label_shows_singular_for_one_command() {
+    let mut config = local_config();
+    select_local(&mut config, LocalField::SetupCommands);
+    config.open_setup_modal();
+    for c in "bun install".chars() {
+        config.setup_modal_insert(c);
+    }
+    config.apply_setup_modal();
+    assert_eq!(
+        config.value_of_local(LocalField::SetupCommands),
+        "Edit (1 command)"
+    );
+}
+
+#[test]
+fn apply_setup_modal_is_a_noop_when_no_modal_is_open() {
+    let mut config = local_config();
+    select_local(&mut config, LocalField::SetupCommands);
+    // No modal opened — calling apply must not panic and must not change state.
+    config.apply_setup_modal();
+    assert!(config.setup_modal().is_none());
+    assert!(config.local().unwrap().setup_commands.is_empty());
+}

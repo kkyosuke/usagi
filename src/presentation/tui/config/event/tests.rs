@@ -863,3 +863,29 @@ fn toggling_the_local_llm_after_install_persists_the_enabled_flag() {
     assert_eq!(saved.len(), 1);
     assert!(saved[0].local_llm.enabled);
 }
+
+#[test]
+fn unhandled_keys_inside_the_setup_modal_are_silently_ignored() {
+    // Press PageUp while the setup-commands editor is open — it matches the
+    // `_ => {}` catch-all and must not close or corrupt the modal.
+    let term = Term::stdout();
+    let config =
+        Config::workspace(Settings::default(), LocalSettings::default(), Vec::new());
+    let keys = vec![
+        Ok(Key::ArrowDown), // Notifications
+        Ok(Key::ArrowDown), // Restore Panes
+        Ok(Key::ArrowDown), // Default Branch
+        Ok(Key::ArrowDown), // Branch Source
+        Ok(Key::ArrowDown), // Setup Commands
+        Ok(Key::Enter),     // open modal
+        Ok(Key::PageUp),    // unhandled key — exercises the `_ => {}` branch
+        Ok(Key::Escape),    // close modal
+        Ok(Key::Escape),    // leave config
+    ];
+    let mut reader = ScriptedReader::new(keys);
+    let mut save: fn(&Settings, Option<&LocalSettings>) -> Result<()> = noop_save;
+    let mut install: fn(&str) -> Result<()> = ok_install;
+    let mut pull: fn(&str) -> Result<()> = ok_pull;
+    let outcome = event_loop(&term, &mut reader, config, &mut save, &mut install, &mut pull, None).unwrap();
+    assert!(matches!(outcome, Outcome::Back));
+}

@@ -89,18 +89,18 @@ pub struct SystemSetupCommandRunner;
 
 impl SetupCommandRunner for SystemSetupCommandRunner {
     fn run(&self, cwd: &Path, command: &str) -> Result<()> {
-        let output = if cfg!(windows) {
-            Command::new("cmd")
-                .args(["/C", command])
-                .current_dir(cwd)
-                .output()
-        } else {
-            Command::new("sh")
-                .args(["-lc", command])
-                .current_dir(cwd)
-                .output()
-        }
-        .with_context(|| format!("failed to run setup command `{command}`"))?;
+        #[cfg(windows)]
+        let output_result = Command::new("cmd")
+            .args(["/C", command])
+            .current_dir(cwd)
+            .output();
+        #[cfg(not(windows))]
+        let output_result = Command::new("sh")
+            .args(["-lc", command])
+            .current_dir(cwd)
+            .output();
+        let output = output_result
+            .with_context(|| format!("failed to run setup command `{command}`"))?;
 
         if output.status.success() {
             return Ok(());
@@ -832,11 +832,10 @@ mod tests {
     fn system_setup_runner_runs_in_the_given_directory_and_reports_failure() {
         let dir = tempfile::tempdir().unwrap();
         let runner = SystemSetupCommandRunner;
-        let command = if cfg!(windows) {
-            "echo hello> setup.txt"
-        } else {
-            "printf hello > setup.txt"
-        };
+        #[cfg(not(windows))]
+        let command = "printf hello > setup.txt";
+        #[cfg(windows)]
+        let command = "echo hello> setup.txt";
 
         runner.run(dir.path(), command).unwrap();
         assert_eq!(
@@ -844,13 +843,25 @@ mod tests {
             "hello"
         );
 
-        let failing = if cfg!(windows) {
-            "exit /B 7"
-        } else {
-            "echo nope >&2; exit 7"
-        };
+        // Failing command with non-empty stderr (covers the stderr branch).
+        #[cfg(not(windows))]
+        let failing = "echo nope >&2; exit 7";
+        #[cfg(windows)]
+        let failing = "exit /B 7";
         let err = runner.run(dir.path(), failing).unwrap_err();
         assert!(err.to_string().contains("setup command"));
+
+        // Failing command with non-empty stdout and empty stderr (covers the
+        // stdout branch and the empty-stderr branch in the error message).
+        #[cfg(not(windows))]
+        {
+            let err = runner
+                .run(dir.path(), "echo hi; exit 2")
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("stdout"));
+            assert!(!err.contains("stderr"));
+        }
     }
 
     #[test]
