@@ -1,6 +1,6 @@
 //! Project selection screen (画面 #2).
 //!
-//! Lists the registered workspaces (most recently used first) and lets the
+//! Lists the registered workspaces (alphabetically by name) and lets the
 //! user pick one to open. Selecting a project opens the home screen for that
 //! workspace; returning from the home screen leaves the user back on this list.
 
@@ -75,9 +75,9 @@ pub fn open_home(term: &Term, wss: &[Workspace]) -> Result<home::Outcome> {
     // The primary workspace the `Preload` belongs to; any further entries are
     // stacked below it in 統合(unite) mode.
     let primary = &wss[0];
-    // Mark every opened workspace as just-used so they sort to the top of the
-    // list on the next load. A failure to persist must not block opening, so the
-    // error is swallowed.
+    // Mark every opened workspace as just-used for the persisted metadata (shown
+    // in the stats line). The Open list itself remains alphabetical. A failure
+    // to persist must not block opening, so the error is swallowed.
     if let Ok(storage) = Storage::open_default() {
         for ws in wss {
             let _ = workspace::touch(&storage, &ws.name);
@@ -127,8 +127,8 @@ fn play_open_animation(term: &Term) -> Result<()> {
     })
 }
 
-/// Loads the registered workspaces (most recently used first) with their
-/// session and open-issue counts.
+/// Loads the registered workspaces with their session and open-issue counts.
+/// [`ProjectList`] sorts them alphabetically before display.
 fn load_overviews() -> Result<Vec<WorkspaceOverview>> {
     let storage = Storage::open_default()?;
     workspace::overviews(&storage)

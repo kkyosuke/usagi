@@ -2,6 +2,12 @@
 //!
 //! Holds the list of registered workspaces and the cursor position. Keeping the
 //! navigation logic free of any terminal IO makes it directly testable.
+//!
+//! The workspaces are kept in **alphabetical order** (case-insensitive by name)
+//! and a **filter** narrows the list to the names matching a query the user
+//! types into the search bar. Navigation and selection operate over the visible
+//! (filtered) subset; the checked set used by 統合(unite) mode stays tied to the
+//! underlying workspaces so a filter never silently drops a checked entry.
 
 use crate::domain::workspace::Workspace;
 use crate::usecase::workspace::WorkspaceOverview;
@@ -22,6 +28,18 @@ pub enum Mode {
     Unite,
 }
 
+/// One visible (filter-passing) row, handed to the renderer so it never needs to
+/// map visible positions back to the underlying workspace list.
+#[derive(Debug)]
+pub struct Row<'a> {
+    /// The workspace overview shown on this row.
+    pub overview: &'a WorkspaceOverview,
+    /// Whether the cursor is on this row.
+    pub selected: bool,
+    /// Whether this row is checked for 統合(unite) mode.
+    pub checked: bool,
+}
+
 /// The selectable list of workspaces and the current cursor position.
 ///
 /// Each entry is a [`WorkspaceOverview`] — the workspace plus the session and
@@ -35,11 +53,20 @@ pub enum Mode {
 /// keeps the in-progress selection.
 #[derive(Debug, Clone)]
 pub struct ProjectList {
+    /// Every registered workspace, sorted alphabetically by name
+    /// (case-insensitive). The display order, independent of recency.
     overviews: Vec<WorkspaceOverview>,
     /// Whether each entry is checked for unite mode (`checked[i]` for
     /// `overviews[i]`). Kept the same length as `overviews` through every mutation.
     checked: Vec<bool>,
-    selected_index: usize,
+    /// The current search query. Empty means "show everything". Matched
+    /// case-insensitively against each workspace name.
+    filter: String,
+    /// Indices into `overviews` that pass the current filter, in display order.
+    /// Rebuilt whenever the filter or the workspace set changes.
+    visible: Vec<usize>,
+    /// Cursor position as an index into `visible` (not `overviews`).
+    selected: usize,
     /// Which selection screen is active. Starts in [`Mode::Single`].
     mode: Mode,
     /// Names of the workspaces from the last 統合(unite) open, applied as the
@@ -52,30 +79,114 @@ pub struct ProjectList {
 }
 
 impl ProjectList {
-    /// Builds a list from the given workspace overviews, cursor at the top and
-    /// nothing checked, starting in [`Mode::Single`].
-    pub fn new(overviews: Vec<WorkspaceOverview>) -> Self {
+    /// Builds a list from the given workspace overviews, sorting them
+    /// alphabetically by name (case-insensitive), cursor at the top and nothing
+    /// checked, starting in [`Mode::Single`] with no filter.
+    pub fn new(mut overviews: Vec<WorkspaceOverview>) -> Self {
+        overviews.sort_by(|a, b| {
+            a.workspace
+                .name
+                .to_lowercase()
+                .cmp(&b.workspace.name.to_lowercase())
+        });
         let checked = vec![false; overviews.len()];
+        let visible = (0..overviews.len()).collect();
         Self {
             overviews,
             checked,
-            selected_index: 0,
+            filter: String::new(),
+            visible,
+            selected: 0,
             mode: Mode::Single,
             remembered: Vec::new(),
             unite_initialized: false,
         }
     }
 
+    /// The visible (filter-passing) rows, in display order, each tagged with
+    /// whether it is under the cursor and whether it is checked for unite mode.
+    pub fn rows(&self) -> Vec<Row<'_>> {
+        self.visible
+            .iter()
+            .enumerate()
+            .map(|(pos, &idx)| Row {
+                overview: &self.overviews[idx],
+                selected: pos == self.selected,
+                checked: self.checked[idx],
+            })
+            .collect()
+    }
+
     pub fn overviews(&self) -> &[WorkspaceOverview] {
         &self.overviews
     }
 
+    /// The cursor position as an index into the visible (filtered) rows.
     pub fn selected_index(&self) -> usize {
-        self.selected_index
+        self.selected
     }
 
+    /// Whether no workspaces are registered at all (independent of the filter).
     pub fn is_empty(&self) -> bool {
         self.overviews.is_empty()
+    }
+
+    /// Whether the current filter matches no workspace (the registry may still
+    /// hold entries). Distinguished from [`is_empty`](Self::is_empty) so the
+    /// screen can show a "no matches" hint rather than the empty-registry one.
+    pub fn visible_is_empty(&self) -> bool {
+        self.visible.is_empty()
+    }
+
+    /// The current search query (empty when nothing is typed).
+    pub fn filter(&self) -> &str {
+        &self.filter
+    }
+
+    /// Append a character to the filter and re-narrow the list, moving the
+    /// cursor back to the first match.
+    pub fn push_filter(&mut self, c: char) {
+        self.filter.push(c);
+        self.selected = 0;
+        self.recompute_visible();
+    }
+
+    /// Delete the last character of the filter (no-op when empty) and re-narrow
+    /// the list, moving the cursor back to the first match.
+    pub fn pop_filter(&mut self) {
+        self.filter.pop();
+        self.selected = 0;
+        self.recompute_visible();
+    }
+
+    /// Clear the filter entirely, showing every workspace again with the cursor
+    /// on the first row.
+    pub fn clear_filter(&mut self) {
+        self.filter.clear();
+        self.selected = 0;
+        self.recompute_visible();
+    }
+
+    /// Rebuild `visible` from the current filter, clamping the cursor so it never
+    /// points past the last visible row.
+    fn recompute_visible(&mut self) {
+        let query = self.filter.to_lowercase();
+        self.visible = self
+            .overviews
+            .iter()
+            .enumerate()
+            .filter(|(_, o)| query.is_empty() || o.workspace.name.to_lowercase().contains(&query))
+            .map(|(i, _)| i)
+            .collect();
+        if self.selected >= self.visible.len() {
+            self.selected = self.visible.len().saturating_sub(1);
+        }
+    }
+
+    /// The index into `overviews` of the row under the cursor, or `None` when no
+    /// row is visible.
+    fn cursor_overview(&self) -> Option<usize> {
+        self.visible.get(self.selected).copied()
     }
 
     /// The active selection mode.
@@ -102,8 +213,8 @@ impl ProjectList {
     /// `Space` enters unite from the picker so the workspace the user pressed
     /// `Space` on is the one selected. No-op when the list is empty.
     pub fn select_cursor(&mut self) {
-        if let Some(checked) = self.checked.get_mut(self.selected_index) {
-            *checked = true;
+        if let Some(idx) = self.cursor_overview() {
+            self.checked[idx] = true;
         }
     }
 
@@ -130,8 +241,14 @@ impl ProjectList {
     }
 
     /// Whether the entry at `index` is checked for unite mode.
+    ///
+    /// `index` is a **visible** position (matching [`selected_index`](Self::selected_index)),
+    /// so it lines up with the rows the screen draws.
     pub fn is_checked(&self, index: usize) -> bool {
-        self.checked.get(index).copied().unwrap_or(false)
+        self.visible
+            .get(index)
+            .map(|&i| self.checked[i])
+            .unwrap_or(false)
     }
 
     /// How many entries are checked for unite mode.
@@ -141,8 +258,8 @@ impl ProjectList {
 
     /// Toggle the unite-mode check on the entry under the cursor. No-op when empty.
     pub fn toggle_checked(&mut self) {
-        if let Some(checked) = self.checked.get_mut(self.selected_index) {
-            *checked = !*checked;
+        if let Some(idx) = self.cursor_overview() {
+            self.checked[idx] = !self.checked[idx];
         }
     }
 
@@ -155,70 +272,68 @@ impl ProjectList {
                 self.checked[i] = true;
             }
         }
-        if let Some(first) = self.checked.iter().position(|&c| c) {
-            self.selected_index = first;
+        if let Some(pos) = self.visible.iter().position(|&i| self.checked[i]) {
+            self.selected = pos;
         }
     }
 
     /// The workspaces to open. In [`Mode::Single`] this is just the cursor row,
     /// so `Enter` is always predictable. In [`Mode::Unite`] it is every checked
-    /// one in list order, falling back to the cursor row when none are checked.
-    /// Empty only when the list is. `Enter` opens these together (one workspace →
-    /// single-workspace home, more → 統合(unite) mode).
+    /// one in list order; if none are checked, nothing is chosen yet.
+    /// `Enter` opens these together (one workspace → single-workspace home, more
+    /// → 統合(unite) mode).
     pub fn chosen(&self) -> Vec<Workspace> {
         if self.mode == Mode::Single {
             return self.selected().cloned().into_iter().collect();
         }
-        let checked: Vec<Workspace> = self
-            .overviews
+        self.overviews
             .iter()
             .zip(&self.checked)
             .filter(|(_, &c)| c)
             .map(|(o, _)| o.workspace.clone())
-            .collect();
-        if !checked.is_empty() {
-            return checked;
-        }
-        self.selected().cloned().into_iter().collect()
+            .collect()
     }
 
     /// Move the cursor to the entry named `name`, returning whether one matched.
     /// Used to land on a chosen-but-missing workspace so the removal prompt acts
-    /// on the right entry.
+    /// on the right entry. When an active filter hides the match, the filter is
+    /// cleared so the entry becomes visible and the cursor can land on it.
     pub fn focus_name(&mut self, name: &str) -> bool {
-        match self.overviews.iter().position(|o| o.workspace.name == name) {
-            Some(index) => {
-                self.selected_index = index;
-                true
-            }
-            None => false,
+        let Some(idx) = self.overviews.iter().position(|o| o.workspace.name == name) else {
+            return false;
+        };
+        if !self.visible.contains(&idx) {
+            self.filter.clear();
+            self.recompute_visible();
         }
+        if let Some(pos) = self.visible.iter().position(|&i| i == idx) {
+            self.selected = pos;
+        }
+        true
     }
 
     /// The workspace under the cursor, or `None` when the list is empty.
     pub fn selected(&self) -> Option<&Workspace> {
-        self.overviews
-            .get(self.selected_index)
-            .map(|o| &o.workspace)
+        self.cursor_overview().map(|i| &self.overviews[i].workspace)
     }
 
     /// Move the cursor up one row, wrapping to the bottom. No-op when empty.
     pub fn move_up(&mut self) {
-        if self.overviews.is_empty() {
+        if self.visible.is_empty() {
             return;
         }
-        self.selected_index = self
-            .selected_index
+        self.selected = self
+            .selected
             .checked_sub(1)
-            .unwrap_or(self.overviews.len().saturating_sub(1));
+            .unwrap_or(self.visible.len().saturating_sub(1));
     }
 
     /// Move the cursor down one row, wrapping to the top. No-op when empty.
     pub fn move_down(&mut self) {
-        if self.overviews.is_empty() {
+        if self.visible.is_empty() {
             return;
         }
-        self.selected_index = (self.selected_index + 1) % self.overviews.len();
+        self.selected = (self.selected + 1) % self.visible.len();
     }
 
     /// Remove the workspace under the cursor. The cursor stays on the entry that
@@ -226,28 +341,14 @@ impl ProjectList {
     /// one was removed. No-op when empty. Used after the user confirms dropping a
     /// stale workspace whose directory no longer exists.
     pub fn remove_selected(&mut self) {
-        if self.overviews.is_empty() {
+        let Some(idx) = self.cursor_overview() else {
             return;
-        }
-        self.overviews.remove(self.selected_index);
-        self.checked.remove(self.selected_index);
-        if self.selected_index >= self.overviews.len() {
-            self.selected_index = self.overviews.len().saturating_sub(1);
-        }
-    }
-
-    /// Move the selected workspace to the top of the list and keep the cursor on
-    /// it. Used after opening a project so the most recently opened one sorts
-    /// first, mirroring the persisted `updated_at` order. No-op when empty.
-    pub fn promote_selected(&mut self) {
-        if self.overviews.is_empty() {
-            return;
-        }
-        let overview = self.overviews.remove(self.selected_index);
-        self.overviews.insert(0, overview);
-        let checked = self.checked.remove(self.selected_index);
-        self.checked.insert(0, checked);
-        self.selected_index = 0;
+        };
+        self.overviews.remove(idx);
+        self.checked.remove(idx);
+        // Rebuild the visible set; the cursor keeps its numeric position so it
+        // lands on the row that shifted up, clamped to the new last row.
+        self.recompute_visible();
     }
 }
 
@@ -367,28 +468,19 @@ mod tests {
     }
 
     #[test]
-    fn promote_selected_moves_the_selection_to_the_top() {
-        let mut list = sample();
-        list.move_down();
-        list.move_down(); // select "c"
-        list.promote_selected();
-        // "c" is now first and stays under the cursor; the others keep order.
+    fn new_list_sorts_workspaces_alphabetically_by_name() {
+        let list = ProjectList::new(vec![
+            overview("charlie"),
+            overview("Alpha"),
+            overview("beta"),
+        ]);
         let names: Vec<_> = list
             .overviews()
             .iter()
             .map(|o| o.workspace.name.as_str())
             .collect();
-        assert_eq!(names, ["c", "a", "b"]);
-        assert_eq!(list.selected_index(), 0);
-        assert_eq!(list.selected().unwrap().name, "c");
-    }
-
-    #[test]
-    fn promote_selected_is_a_noop_on_an_empty_list() {
-        let mut list = ProjectList::new(Vec::new());
-        list.promote_selected();
-        assert!(list.is_empty());
-        assert_eq!(list.selected_index(), 0);
+        assert_eq!(names, ["Alpha", "beta", "charlie"]);
+        assert_eq!(list.selected().unwrap().name, "Alpha");
     }
 
     // --- unite-mode multi-select ---------------------------------------------
@@ -512,14 +604,14 @@ mod tests {
     }
 
     #[test]
-    fn unite_mode_falls_back_to_the_cursor_when_nothing_is_checked() {
+    fn unite_mode_with_nothing_checked_has_no_chosen_workspaces() {
         let mut list = sample(); // a, b, c
         list.enter_unite(); // unite, but nothing selected yet
         assert_eq!(list.mode(), Mode::Unite);
         assert_eq!(list.checked_count(), 0);
-        // `chosen` falls back to the cursor row rather than returning empty.
+        // Nothing checked means nothing is chosen yet.
         let names: Vec<_> = list.chosen().into_iter().map(|w| w.name).collect();
-        assert_eq!(names, ["a"]);
+        assert!(names.is_empty());
     }
 
     #[test]
@@ -583,20 +675,46 @@ mod tests {
     }
 
     #[test]
-    fn promote_selected_carries_the_check_to_the_top() {
-        let mut list = sample(); // a, b, c
-        list.move_down();
-        list.move_down(); // cursor on "c"
-        list.toggle_checked(); // check "c"
-        list.promote_selected(); // move "c" to the top
+    fn filter_matches_names_case_insensitively_and_moves_the_cursor_to_matches() {
+        let mut list = ProjectList::new(vec![
+            overview("alpha"),
+            overview("Beta"),
+            overview("alphabet"),
+            overview("gamma"),
+        ]);
+        list.push_filter('A');
+        list.push_filter('l');
         let names: Vec<_> = list
-            .overviews()
-            .iter()
-            .map(|o| o.workspace.name.as_str())
+            .rows()
+            .into_iter()
+            .map(|row| row.overview.workspace.name.as_str())
             .collect();
-        assert_eq!(names, ["c", "a", "b"]);
-        // The check followed "c" to index 0.
-        assert!(list.is_checked(0));
+        assert_eq!(names, ["alpha", "alphabet"]);
+        assert_eq!(list.selected().unwrap().name, "alpha");
+        assert!(!list.visible_is_empty());
+    }
+
+    #[test]
+    fn clearing_filter_restores_all_rows_without_losing_checks() {
+        let mut list = sample(); // a, b, c
+        list.move_down(); // b
+        list.toggle_checked();
+        list.push_filter('c');
+        assert_eq!(list.rows().len(), 1);
+        assert_eq!(list.selected().unwrap().name, "c");
+        list.clear_filter();
+        assert_eq!(list.rows().len(), 3);
+        assert!(list.is_checked(1)); // b is visible at index 1 again
         assert_eq!(list.checked_count(), 1);
+    }
+
+    #[test]
+    fn focus_name_clears_a_filter_that_hides_the_target() {
+        let mut list = sample(); // a, b, c
+        list.push_filter('a');
+        assert_eq!(list.rows().len(), 1);
+        assert!(list.focus_name("c"));
+        assert_eq!(list.filter(), "");
+        assert_eq!(list.selected().unwrap().name, "c");
     }
 }

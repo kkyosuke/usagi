@@ -94,9 +94,6 @@ pub fn event_loop(
                     notice = Some(match (actions.remove)(&name) {
                         Ok(()) => {
                             list.remove_selected();
-                            if list.mode() == Mode::Unite && list.checked_count() == 0 {
-                                list.select_cursor();
-                            }
                             format!("Removed \"{name}\".")
                         }
                         Err(e) => format!("Failed to remove \"{name}\": {e}"),
@@ -116,12 +113,27 @@ pub fn event_loop(
         }
 
         match key {
-            Key::ArrowUp | Key::Char('k') => {
+            Key::Backspace => {
+                list.pop_filter();
+                notice = None;
+            }
+            Key::ArrowUp => {
                 list.move_up();
                 notice = None;
             }
-            Key::ArrowDown | Key::Char('j') => {
+            Key::ArrowDown => {
                 list.move_down();
+                notice = None;
+            }
+            // `←` / `→` switch between the Single and Unite tabs shown under the
+            // title. Moving onto the Unite tab starts with the current checked set
+            // as-is (often empty); moving back to Single leaves the picker as-is.
+            Key::ArrowLeft => {
+                list.exit_unite();
+                notice = None;
+            }
+            Key::ArrowRight => {
+                list.enter_unite();
                 notice = None;
             }
             // In the default single-open picker, `Space` enters the explicit
@@ -136,28 +148,19 @@ pub fn event_loop(
                     notice = None;
                 }
                 Mode::Unite => {
-                    let would_empty_current_set =
-                        list.is_checked(list.selected_index()) && list.checked_count() == 1;
-                    if would_empty_current_set {
-                        notice = Some("Select at least one workspace for unite.".to_string());
-                    } else {
-                        list.toggle_checked();
-                        notice = None;
-                    }
+                    list.toggle_checked();
+                    notice = None;
                 }
             },
-            Key::Char('u') | Key::Char('U') => {
-                list.enter_unite();
-                list.restore_remembered();
-                notice = None;
-            }
             Key::Enter => {
                 // The workspaces to open are mode-dependent: single mode opens the
                 // cursor row, unite mode opens the checked set. Owned clones, so
-                // the list can be mutated (promote / focus) afterwards without a
-                // borrow conflict.
+                // the list can be mutated (focus / stale removal) afterwards
+                // without a borrow conflict.
                 let chosen = list.chosen();
-                if let Some(first) = chosen.first() {
+                if chosen.is_empty() && list.mode() == Mode::Unite && !list.is_empty() {
+                    notice = Some("Select at least one workspace to unite.".to_string());
+                } else if let Some(first) = chosen.first() {
                     // A workspace whose directory has since been deleted cannot be
                     // opened; offer to drop the first stale entry instead of
                     // launching on a missing path. Land the cursor on it so the
@@ -173,12 +176,11 @@ pub fn event_loop(
                     // shows the home screen (切替). See [`super::run`].
                     match open_home(term, &chosen)? {
                         // The home screen drew over the list; force a full repaint of
-                        // it on the next pass. The (first) just-opened project moves
-                        // to the top so the list reflects most-recently-opened order
-                        // without a reload.
+                        // it on the next pass. The list itself stays alphabetical;
+                        // focus the project that was just opened so returning from
+                        // home keeps the user's place without changing the order.
                         home::Outcome::Back => {
                             list.focus_name(&first.name);
-                            list.promote_selected();
                             list.exit_unite();
                             notice = None;
                             painter.reset();
@@ -192,9 +194,13 @@ pub fn event_loop(
                 notice = None;
                 painter.reset();
             }
-            Key::Char('q') | Key::Escape => return Ok(Outcome::Back),
+            Key::Escape => return Ok(Outcome::Back),
             // `Ctrl-C` / `Ctrl-Q` (the bare `0x11`) quit the app from here too.
             Key::CtrlC | Key::Char('\u{0011}') => return Ok(Outcome::Quit),
+            Key::Char(c) if !c.is_control() => {
+                list.push_filter(c);
+                notice = None;
+            }
             _ => {}
         }
     }
@@ -297,11 +303,34 @@ mod tests {
     }
 
     #[test]
-    fn q_returns_back() {
-        assert!(matches!(
-            run(vec![Ok(Key::Char('q'))], sample_list()).unwrap(),
-            Outcome::Back
-        ));
+    fn q_is_filter_text_not_a_back_shortcut() {
+        let term = Term::stdout();
+        let mut reader = ScriptedReader::new(vec![
+            Ok(Key::Char('q')), // no matches, but does not leave the screen
+            Ok(Key::Backspace),
+            Ok(Key::ArrowDown),
+            Ok(Key::Enter),
+            Ok(Key::Escape),
+        ]);
+        let mut opened: Vec<Vec<String>> = Vec::new();
+        let mut open = |_t: &Term, ws: &[Workspace]| {
+            opened.push(ws.iter().map(|w| w.name.clone()).collect());
+            Ok(home::Outcome::Back)
+        };
+        let mut exists: fn(&Path) -> bool = exists_true;
+        let mut remove: fn(&str) -> Result<()> = remove_ok;
+        let mut actions = present_actions(&mut exists, &mut remove);
+        let outcome = event_loop(
+            &term,
+            &mut reader,
+            sample_list(),
+            None,
+            &mut open,
+            &mut actions,
+        )
+        .unwrap();
+        assert!(matches!(outcome, Outcome::Back));
+        assert_eq!(opened, vec![vec!["beta".to_string()]]);
     }
 
     #[test]
@@ -323,17 +352,147 @@ mod tests {
 
     #[test]
     fn navigation_keys_move_the_cursor_then_back() {
-        // Exercises every navigation arm (arrows + j/k aliases) and the
-        // ignored-key arm, then leaves via Escape.
+        // Exercises the navigation arms and the ignored-key arm, then leaves via
+        // Escape. Letter keys are filter text, not movement aliases.
         let keys = vec![
             Ok(Key::ArrowDown),
             Ok(Key::ArrowUp),
-            Ok(Key::Char('j')),
-            Ok(Key::Char('k')),
             Ok(Key::Home), // ignored (the `_` arm)
             Ok(Key::Escape),
         ];
         assert!(matches!(run(keys, sample_list()).unwrap(), Outcome::Back));
+    }
+
+    #[test]
+    fn slash_is_just_filter_text_and_backspace_can_remove_it() {
+        let term = Term::stdout();
+        let mut reader = ScriptedReader::new(vec![
+            Ok(Key::Char('/')),
+            Ok(Key::Backspace),
+            Ok(Key::Char('b')),
+            Ok(Key::Enter), // open the only visible match
+            Ok(Key::Escape),
+        ]);
+        let mut opened: Vec<Vec<String>> = Vec::new();
+        let mut open = |_t: &Term, ws: &[Workspace]| {
+            opened.push(ws.iter().map(|w| w.name.clone()).collect());
+            Ok(home::Outcome::Back)
+        };
+        let mut exists: fn(&Path) -> bool = exists_true;
+        let mut remove: fn(&str) -> Result<()> = remove_ok;
+        let mut actions = present_actions(&mut exists, &mut remove);
+        let outcome = event_loop(
+            &term,
+            &mut reader,
+            sample_list(),
+            None,
+            &mut open,
+            &mut actions,
+        )
+        .unwrap();
+        assert!(matches!(outcome, Outcome::Back));
+        assert_eq!(opened, vec![vec!["beta".to_string()]]);
+    }
+
+    #[test]
+    fn filter_backspace_restores_rows_without_a_focus_mode() {
+        let term = Term::stdout();
+        let mut reader = ScriptedReader::new(vec![
+            Ok(Key::Char('z')), // no matches
+            Ok(Key::Backspace), // back to all rows
+            Ok(Key::ArrowDown), // navigation works while the filter remains always available
+            Ok(Key::ArrowUp),
+            Ok(Key::ArrowDown),
+            Ok(Key::Home),  // ignored
+            Ok(Key::Enter), // open beta
+            Ok(Key::Escape),
+        ]);
+        let mut opened: Vec<Vec<String>> = Vec::new();
+        let mut open = |_t: &Term, ws: &[Workspace]| {
+            opened.push(ws.iter().map(|w| w.name.clone()).collect());
+            Ok(home::Outcome::Back)
+        };
+        let mut exists: fn(&Path) -> bool = exists_true;
+        let mut remove: fn(&str) -> Result<()> = remove_ok;
+        let mut actions = present_actions(&mut exists, &mut remove);
+        let outcome = event_loop(
+            &term,
+            &mut reader,
+            sample_list(),
+            None,
+            &mut open,
+            &mut actions,
+        )
+        .unwrap();
+        assert!(matches!(outcome, Outcome::Back));
+        assert_eq!(opened, vec![vec!["beta".to_string()]]);
+    }
+
+    #[test]
+    fn typing_a_regular_character_starts_filtering_without_slash() {
+        let term = Term::stdout();
+        let mut reader = ScriptedReader::new(vec![
+            Ok(Key::Char('b')),
+            Ok(Key::Enter), // open the only visible match
+            Ok(Key::Escape),
+        ]);
+        let mut opened: Vec<Vec<String>> = Vec::new();
+        let mut open = |_t: &Term, ws: &[Workspace]| {
+            opened.push(ws.iter().map(|w| w.name.clone()).collect());
+            Ok(home::Outcome::Back)
+        };
+        let mut exists: fn(&Path) -> bool = exists_true;
+        let mut remove: fn(&str) -> Result<()> = remove_ok;
+        let mut actions = present_actions(&mut exists, &mut remove);
+        let outcome = event_loop(
+            &term,
+            &mut reader,
+            sample_list(),
+            None,
+            &mut open,
+            &mut actions,
+        )
+        .unwrap();
+        assert!(matches!(outcome, Outcome::Back));
+        assert_eq!(opened, vec![vec!["beta".to_string()]]);
+    }
+
+    #[test]
+    fn ctrl_c_quits_after_typing_filter_text() {
+        let term = Term::stdout();
+        let mut reader = ScriptedReader::new(vec![Ok(Key::Char('/')), Ok(Key::CtrlC)]);
+        let mut exists: fn(&Path) -> bool = exists_true;
+        let mut remove: fn(&str) -> Result<()> = remove_ok;
+        let mut actions = present_actions(&mut exists, &mut remove);
+        let outcome = event_loop(
+            &term,
+            &mut reader,
+            sample_list(),
+            None,
+            &mut home_back,
+            &mut actions,
+        )
+        .unwrap();
+        assert!(matches!(outcome, Outcome::Quit));
+    }
+
+    #[test]
+    fn ctrl_q_quits_after_typing_filter_text() {
+        let term = Term::stdout();
+        let mut reader = ScriptedReader::new(vec![Ok(Key::Char('/')), Ok(Key::Char('\u{0011}'))]);
+        let mut exists: fn(&Path) -> bool = exists_true;
+        let mut remove: fn(&str) -> Result<()> = remove_ok;
+        let mut actions = present_actions(&mut exists, &mut remove);
+        let outcome = event_loop(
+            &term,
+            &mut reader,
+            sample_list(),
+            None,
+            &mut home_back,
+            &mut actions,
+        )
+        .unwrap();
+        assert!(matches!(outcome, Outcome::Quit));
     }
 
     #[test]
@@ -377,11 +536,13 @@ mod tests {
     }
 
     #[test]
-    fn u_enters_unite_and_enter_opens_the_checked_set() {
+    fn right_enters_unite_with_nothing_checked_until_space_selects() {
         let term = Term::stdout();
         let mut reader = ScriptedReader::new(vec![
             Ok(Key::ArrowDown), // cursor on "beta"
-            Ok(Key::Char('u')),
+            Ok(Key::ArrowRight),
+            Ok(Key::Enter), // no checked rows yet: show a notice, do not open
+            Ok(Key::Char(' ')),
             Ok(Key::Enter),
             Ok(Key::Escape),
         ]);
@@ -404,6 +565,38 @@ mod tests {
         .unwrap();
         assert!(matches!(outcome, Outcome::Back));
         assert_eq!(opened, vec![vec!["beta".to_string()]]);
+    }
+
+    #[test]
+    fn arrow_keys_switch_between_single_and_unite_tabs() {
+        let term = Term::stdout();
+        let mut reader = ScriptedReader::new(vec![
+            Ok(Key::ArrowDown),  // cursor on "beta"
+            Ok(Key::ArrowRight), // Unite tab; seeds "beta"
+            Ok(Key::ArrowLeft),  // back to Single
+            Ok(Key::ArrowUp),    // cursor on "alpha"
+            Ok(Key::Enter),      // single-open ignores the checked beta
+            Ok(Key::Escape),
+        ]);
+        let mut opened: Vec<Vec<String>> = Vec::new();
+        let mut open = |_t: &Term, ws: &[Workspace]| {
+            opened.push(ws.iter().map(|w| w.name.clone()).collect());
+            Ok(home::Outcome::Back)
+        };
+        let mut exists: fn(&Path) -> bool = exists_true;
+        let mut remove: fn(&str) -> Result<()> = remove_ok;
+        let mut actions = present_actions(&mut exists, &mut remove);
+        let outcome = event_loop(
+            &term,
+            &mut reader,
+            sample_list(),
+            None,
+            &mut open,
+            &mut actions,
+        )
+        .unwrap();
+        assert!(matches!(outcome, Outcome::Back));
+        assert_eq!(opened, vec![vec!["alpha".to_string()]]);
     }
 
     #[test]
@@ -462,12 +655,14 @@ mod tests {
     }
 
     #[test]
-    fn unite_keeps_at_least_one_workspace_checked() {
+    fn unite_allows_zero_checked_but_enter_waits_for_a_selection() {
         let term = Term::stdout();
         let mut reader = ScriptedReader::new(vec![
             Ok(Key::Char(' ')), // enter unite, seed "alpha"
-            Ok(Key::Char(' ')), // trying to uncheck the only row is ignored
-            Ok(Key::Enter),
+            Ok(Key::Char(' ')), // uncheck the only row; zero checked is allowed
+            Ok(Key::Enter),     // no-op with a notice
+            Ok(Key::Char(' ')), // check "alpha" again
+            Ok(Key::Enter),     // now it opens
             Ok(Key::Escape),
         ]);
         let mut opened: Vec<Vec<String>> = Vec::new();
