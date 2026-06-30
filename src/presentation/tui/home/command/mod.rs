@@ -70,12 +70,14 @@ pub enum Effect {
     /// fast path), `Some(cli)` overrides it for this launch (`agent <name>`).
     OpenAgent(Option<AgentCli>),
     /// Close (remove) the focused session (the user ran `close` in 在席). It is the
-    /// session equivalent of `session remove <name>` (no `--force`): a clean
-    /// session's worktrees/branches are deleted, but one with uncommitted changes
-    /// is refused (the removal logs the `--force` hint). Either way 在席 is left for
-    /// the base 切替 (Switch). The focused session's name is resolved by the event
-    /// loop, which owns the worktree list and the removal callback.
-    CloseSession,
+    /// session equivalent of `session remove <name>`: a clean session's
+    /// worktrees/branches are deleted. `force` mirrors `session remove`'s
+    /// `--force` flag — `false` (the default `close`) refuses a session with
+    /// uncommitted changes (the removal logs the `--force` hint), while `true`
+    /// (`close --force`, the 在席 menu's `Shift`+`c`) discards them. Either way 在席
+    /// is left for the base 切替 (Switch). The focused session's name is resolved by
+    /// the event loop, which owns the worktree list and the removal callback.
+    CloseSession { force: bool },
     /// Open the configuration screen (the user ran `config`) to edit the global
     /// settings and this workspace's local overrides. The screen is run by the
     /// event loop, which returns to the workspace screen when it is dismissed.
@@ -123,7 +125,7 @@ impl Effect {
             | Effect::OpenTerminal
             | Effect::OpenAgent(_)
             | Effect::OpenConfig
-            | Effect::CloseSession
+            | Effect::CloseSession { .. }
             | Effect::OpenPreview(_)
             | Effect::UniteAdd(_)
             | Effect::UniteRemove(_) => true,

@@ -1806,6 +1806,45 @@ fn focus_agent_pick_row(cli: AgentCli, selected: bool, is_default: bool, width: 
     clip_to_width(&format!("      {marker} {name}{tag}"), width)
 }
 
+/// The 在席 menu's `close` row: like a plain command row but carries a `▾`/`▸`
+/// expand affordance to open the close picker (plain close vs. close --force).
+fn focus_close_command_row(
+    state: &HomeState,
+    info: &CommandInfo,
+    selected: bool,
+    width: usize,
+) -> String {
+    let chevron = if state.focus_close_expanded() {
+        "▾ "
+    } else if state.focus_close_can_expand() {
+        "▸ "
+    } else {
+        ""
+    };
+    let desc = format!("{chevron}{}", info.description);
+    menu_row(info.name, &desc, selected, width)
+}
+
+/// One close-picker sub-row, indented under the expanded `close` row: a `›`
+/// cursor on the highlighted option, the command label, and a dimmed hint.
+/// `force = false` → plain close; `force = true` → close --force.
+fn focus_close_pick_row(force: bool, selected: bool, width: usize) -> String {
+    let marker = menu_marker(selected);
+    let label = if force { "close --force" } else { "close" };
+    let hint = if force {
+        "(discard uncommitted changes)"
+    } else {
+        "(safe)"
+    };
+    let name = if selected {
+        style(format!("{label:<14}")).cyan().bold().to_string()
+    } else {
+        style(format!("{label:<14}")).cyan().to_string()
+    };
+    let hint = style(hint).dim();
+    clip_to_width(&format!("      {marker} {name}{hint}"), width)
+}
+
 /// The `session: <name>` header line shown above the 在席 (Focus) action surface
 /// when the session has no live panes (an idle session, no tab strip). With live
 /// panes the identity rides the tab strip ([`active_session_header`]) instead.
@@ -1823,7 +1862,9 @@ fn focus_menu_body(state: &HomeState, width: usize) -> Vec<String> {
     let mut lines = vec![style("Run a command:").dim().to_string()];
     let cursor = state.focus_menu_cursor();
     let expanded = state.focus_menu_expanded();
-    for (i, info) in state.focus_menu_commands().iter().enumerate() {
+    let close_expanded = state.focus_close_expanded();
+    let commands = state.focus_menu_commands();
+    for (i, info) in commands.iter().enumerate() {
         let selected = i == cursor;
         if info.name == "agent" {
             // The `agent` row names the default CLI; when expanded, its installed
@@ -1841,19 +1882,33 @@ fn focus_menu_body(state: &HomeState, width: usize) -> Vec<String> {
                     ));
                 }
             }
+        } else if info.name == "close" {
+            // The `close` row carries a chevron affordance; when expanded the two
+            // options (plain close and close --force) follow as sub-rows.
+            lines.push(focus_close_command_row(state, info, selected, width));
+            if close_expanded {
+                let close_cursor = state.focus_close_cursor();
+                for j in 0..2usize {
+                    lines.push(focus_close_pick_row(j == 1, Some(j) == close_cursor, width));
+                }
+            }
         } else {
             lines.push(focus_menu_row(info, selected, width));
         }
     }
     lines.push(String::new());
-    // The hint follows the surface: picker keys while expanded, an extra
-    // "→ pick agent" affordance when the picker can open, else the base keys.
+    // The hint is contextual: picker-navigation keys while any picker is open,
+    // a row-specific expand affordance while the cursor can open one, else base.
     let hint = if expanded {
-        "↑↓ move   Enter launch   ← back"
+        "↑↓ move   Enter launch   ← back".to_string()
+    } else if close_expanded {
+        "↑↓ move   Enter run   ← back".to_string()
     } else if state.focus_menu_agent_can_expand() {
-        "↑↓ move   Enter run   → pick agent   t terminal   a agent"
+        "↑↓ move   Enter run   → pick agent   t terminal   a agent".to_string()
+    } else if state.focus_close_can_expand() {
+        "↑↓ move   Enter run   → expand   t terminal   a agent".to_string()
     } else {
-        "↑↓ move   Enter run   t terminal   a agent"
+        "↑↓ move   Enter run   t terminal   a agent".to_string()
     };
     lines.push(style(hint).dim().to_string());
     lines

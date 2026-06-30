@@ -2442,6 +2442,46 @@ impl HomeState {
         self.focus_menu.collapse()
     }
 
+    /// Whether the 在席 menu's `close` row is expanded into the close picker.
+    pub fn focus_close_expanded(&self) -> bool {
+        self.focus_menu.is_close_expanded()
+    }
+
+    /// The highlighted option in the 在席 menu's close picker, or `None` collapsed.
+    /// `Some(0)` = plain close, `Some(1)` = close --force.
+    pub fn focus_close_cursor(&self) -> Option<usize> {
+        self.focus_menu.close_cursor()
+    }
+
+    /// Whether the 在席 menu's `close` row can expand: the cursor is on `close`.
+    pub fn focus_close_can_expand(&self) -> bool {
+        self.focus_selected_command()
+            .is_some_and(|info| info.name == "close")
+    }
+
+    /// Expand the 在席 menu's close picker, starting at option 0 (plain close).
+    /// No-op unless the cursor is on the `close` row.
+    pub fn focus_menu_expand_close(&mut self) {
+        if !self.focus_close_can_expand() {
+            return;
+        }
+        self.focus_menu.expand_close();
+    }
+
+    /// Collapse the 在席 menu's close picker, returning whether it was expanded.
+    pub fn focus_menu_collapse_close(&mut self) -> bool {
+        self.focus_menu.collapse_close()
+    }
+
+    /// Whether the selected close-picker option is `--force`. Call only while
+    /// the close picker is expanded ([`focus_close_expanded`] is true), which
+    /// guarantees `close_cursor` is `Some`.
+    ///
+    /// [`focus_close_expanded`]: Self::focus_close_expanded
+    pub fn focus_menu_selected_close_force(&self) -> bool {
+        self.focus_menu.close_selected() == 1
+    }
+
     /// The agent CLI highlighted in the picker, or `None` when collapsed / there
     /// are none installed. Used to launch the chosen CLI on `Enter`.
     pub fn focus_menu_selected_agent(&self) -> Option<AgentCli> {
@@ -2465,10 +2505,13 @@ impl HomeState {
     }
 
     /// The row count the menu cursor wraps against: the installed agents while the
-    /// picker is expanded, otherwise the Session-scope commands.
+    /// agent picker is expanded, 2 while the close picker is expanded, otherwise
+    /// the Session-scope commands.
     fn focus_menu_nav_count(&self) -> usize {
         if self.focus_menu.is_expanded() {
             self.installed_agents.len()
+        } else if self.focus_menu.is_close_expanded() {
+            2
         } else {
             self.focus_menu_commands().len()
         }
