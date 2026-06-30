@@ -36,7 +36,7 @@
 | `local_llm.enabled` | `false` | 有効化すると Agent 起動時に `usagi-llm` サーバが wire される |
 | `local_llm.model` | `qwen2.5-coder:7b` | 委譲先の Ollama モデル名 |
 
-Config 画面（`usagi hop` → `config`、または `usagi config --edit`）からも編集できます。
+Config 画面（`usagi hop` → Config）から編集できます。上級者向けには、ヘルプ非表示の `usagi config --edit` でも編集できます。
 
 - **Local LLM** 行: `ollama` ランタイムが未導入のうちは値が `Install`（緑のアクションラベル）になり、
   `Space` / `Enter` で**インストールモーダル**を開きます。モーダルで sudo パスワードを入力し `Enter` で確定すると、

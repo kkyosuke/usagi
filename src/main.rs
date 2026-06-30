@@ -339,6 +339,10 @@ enum Commands {
         agent: Option<String>,
     },
     /// Show usagi's configuration (or edit it with --edit)
+    // Hidden from `usagi --help`: global settings are edited from the welcome
+    // screen's Config. This command stays available for raw settings inspection
+    // and `--edit` fields the TUI does not expose (e.g. `workspace_root`).
+    #[command(hide = true)]
     Config {
         /// Open the configuration file in $EDITOR and validate it on save
         #[arg(long)]
