@@ -16,7 +16,6 @@ fn switch_navigates_and_backs_out_to_overview() {
     keys.push(Ok(Key::ArrowRight)); // tab next (no-op)
     keys.push(Ok(Key::Char('h'))); // tab prev via vim key (no-op)
     keys.push(Ok(Key::Char('l'))); // tab next via vim key (no-op)
-    keys.push(Ok(Key::Home)); // ignored
     keys.push(Ok(Key::Escape)); // back to the base Switch
     keys.push(Ok(Key::Escape)); // Esc inert at the base Switch; fallback Ctrl-C quits
     assert!(matches!(run(keys, sample_state()).unwrap(), Outcome::Quit));
@@ -272,6 +271,43 @@ fn switch_inline_create_makes_and_focuses_the_new_session() {
     keys.push(Ok(Key::Enter)); // confirm -> Focus
     keys.push(Ok(Key::Escape)); // Focus -> Switch
     keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
+    let created = RefCell::new(Vec::new());
+    let mut create = |name: &str| {
+        created.borrow_mut().push(name.to_string());
+        noop_create(name)
+    };
+    let mut open: fn(&mut HomeState, &Path, bool, bool) -> Result<PaneExit> = noop_open;
+    let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = noop_preview;
+    assert!(matches!(
+        run_full(
+            keys,
+            sample_state(),
+            &mut open,
+            &mut create,
+            &mut preview,
+            &mut noop_config
+        )
+        .unwrap(),
+        Outcome::Quit
+    ));
+    assert_eq!(*created.borrow(), vec!["wip"]);
+}
+
+#[test]
+fn switch_ctrl_a_alias_begins_inline_create_for_ime_users() {
+    // `console` decodes Ctrl-A as `Key::Home`. In the base Switch list that has
+    // no caret to move, so the key is an IME-safe alias for `c` (create): a
+    // Japanese IME may compose bare `c`, but the control chord still reaches
+    // usagi. Once the inline input is open, Home keeps its normal caret meaning.
+    let mut keys = cmd("session switch");
+    keys.push(Ok(Key::Enter)); // -> Switch
+    keys.push(Ok(Key::Home)); // Ctrl-A alias -> begin create
+    keys.extend(typed("Xwip"));
+    keys.push(Ok(Key::Home)); // inside create: caret to start
+    keys.push(Ok(Key::Del)); // delete the stray X, proving Home was not re-triggering create
+    keys.push(Ok(Key::End));
+    keys.push(Ok(Key::Enter)); // confirm -> Focus
+    keys.push(Ok(Key::Escape)); // Focus -> Switch
     let created = RefCell::new(Vec::new());
     let mut create = |name: &str| {
         created.borrow_mut().push(name.to_string());

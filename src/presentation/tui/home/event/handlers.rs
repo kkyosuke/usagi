@@ -341,8 +341,14 @@ pub(super) fn switch_key(
             let dir = selected_dir(state, wiring.workspace_root);
             (wiring.close_tab)(state, &dir);
         }
-        // `c` begins inline session creation.
-        Key::Char('c') => {
+        // `c` begins inline session creation. `Ctrl-A` (which `console` decodes
+        // as `Key::Home`) is an IME-safe alias: with a Japanese IME left on, the
+        // bare letter `c` composes into kana and never reaches usagi, but a
+        // control chord still does — mirroring the note editor's `Ctrl-E` below.
+        // It is unambiguous here, as 切替 list navigation has no caret to move
+        // (the inline create / rename inputs consume `Home` earlier and return
+        // before this match).
+        Key::Char('c') | Key::Home => {
             let branches = (wiring.existing_branches)();
             state.switch_begin_create(branches);
         }
@@ -353,9 +359,11 @@ pub(super) fn switch_key(
         }
         // `n` (or `Ctrl-E`, matching 在席 / 没入) opens the selected session's note
         // editor (a no-op on the root row). `console` decodes Ctrl-E as `Key::End`
-        // (see 在席's `Ctrl-E`), so accept that too — here it is unambiguous, as
-        // 切替 list navigation has no caret to move (the inline create / rename
-        // inputs consume `End` earlier and return before this match).
+        // (see 在席's `Ctrl-E`), so accept that too — it doubles as an IME-safe
+        // alias for `n` (a control chord reaches usagi even with a Japanese IME
+        // left on). Unambiguous here, as 切替 list navigation has no caret to move
+        // (the inline create / rename inputs consume `End` earlier and return
+        // before this match).
         Key::Char('n') | Key::Char(CTRL_E) | Key::End => {
             state.switch_begin_note();
         }
