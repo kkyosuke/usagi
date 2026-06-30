@@ -222,7 +222,12 @@ mod tests {
 
     #[test]
     fn overviews_count_open_issues_and_sessions() {
+        use crate::domain::workspace_state::{
+            BranchStatus, PrLink, SessionRecord, WorkspaceState, WorktreeState,
+        };
+        use crate::infrastructure::workspace_store::WorkspaceStore;
         use crate::usecase::issue::{self, IssueChanges, NewIssue};
+        use chrono::Utc;
 
         let (_dir, storage) = temp_storage();
         // Point the workspace at a real directory so its issue/session stores
@@ -257,15 +262,54 @@ mod tests {
         )
         .unwrap();
 
+        // Two sessions record the same PR URL; the overview counts unique PRs
+        // across the workspace, so the duplicate contributes once.
+        let pr = PrLink {
+            number: 493,
+            url: "https://github.com/kkyosuke/usagi/pull/493".to_string(),
+        };
+        let other_pr = PrLink {
+            number: 494,
+            url: "https://github.com/kkyosuke/usagi/pull/494".to_string(),
+        };
+        let now = Utc::now();
+        let worktree = |name: &str, prs: Vec<PrLink>| WorktreeState {
+            branch: Some(name.to_string()),
+            path: repo.path().join(name),
+            head: "abcdef0".to_string(),
+            primary: false,
+            upstream: None,
+            status: BranchStatus::New,
+            diff: None,
+            ahead_behind: None,
+            pr: prs,
+            updated_at: now,
+        };
+        let session = |name: &str, prs: Vec<PrLink>| SessionRecord {
+            name: name.to_string(),
+            display_name: None,
+            note: None,
+            root: repo.path().join(".usagi/sessions").join(name),
+            worktrees: vec![worktree(name, prs)],
+            created_at: now,
+            last_active: None,
+        };
+        let mut state = WorkspaceState::new();
+        state.sessions = vec![
+            session("one", vec![pr.clone()]),
+            session("two", vec![pr, other_pr]),
+        ];
+        WorkspaceStore::new(repo.path()).save(&state).unwrap();
+
         let overviews = overviews(&storage).unwrap();
         assert_eq!(overviews.len(), 1);
         assert_eq!(overviews[0].workspace.name, "alpha");
-        // No sessions have been created under the fresh workspace.
-        assert_eq!(overviews[0].session_count, 0);
+        // Two sessions were recorded under the workspace state.
+        assert_eq!(overviews[0].session_count, 2);
         // Three created, one marked done.
         assert_eq!(overviews[0].open_issue_count, 2);
-        // No PRs have been recorded under the fresh workspace.
-        assert_eq!(overviews[0].pr_count, 0);
+        // Two unique PR URLs recorded under the workspace.
+        assert_eq!(overviews[0].pr_count, 2);
     }
 
     #[test]

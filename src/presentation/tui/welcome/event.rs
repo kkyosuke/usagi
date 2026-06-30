@@ -65,9 +65,9 @@ pub fn event_loop(
                 Action::OpenNew => return Ok(Outcome::NewProject),
                 Action::OpenConfig => return Ok(Outcome::Configure),
                 Action::OpenRecent(index) => {
-                    if let Some(overview) = recent_overviews.get(index) {
-                        return Ok(Outcome::RecentProject(overview.workspace.clone()));
-                    }
+                    return Ok(Outcome::RecentProject(
+                        recent_overviews[index].workspace.clone(),
+                    ));
                 }
                 Action::Quit => return Ok(Outcome::Quit),
             },
@@ -196,9 +196,9 @@ mod tests {
             None,
         )
         .unwrap();
-        match outcome {
-            Outcome::RecentProject(workspace) => assert_eq!(workspace.name, "beta"),
-            other => panic!("expected recent workspace, got {other:?}"),
-        }
+        assert!(matches!(
+            &outcome,
+            Outcome::RecentProject(workspace) if workspace.name == "beta"
+        ));
     }
 }

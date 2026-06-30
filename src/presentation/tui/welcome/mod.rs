@@ -48,12 +48,23 @@ pub fn mascot_top_padding(height: usize) -> usize {
 /// `notice` seeds the notice line, e.g. an error carried back from a failed
 /// project creation.
 pub fn run(term: &Term, notice: Option<String>) -> Result<Outcome> {
-    let (recent_overviews, notice) = match load_recent_overviews() {
+    run_with_recent_loader(term, notice, load_recent_overviews)
+}
+
+fn run_with_recent_loader(
+    term: &Term,
+    notice: Option<String>,
+    load_recent: impl FnOnce() -> Result<Vec<WorkspaceOverview>>,
+) -> Result<Outcome> {
+    let (recent_overviews, notice) = match load_recent() {
         Ok(overviews) => (overviews, notice),
-        Err(e) => (
-            Vec::new(),
-            notice.or_else(|| Some(format!("Failed to load recent projects: {e}"))),
-        ),
+        Err(e) => {
+            let notice = match notice {
+                Some(notice) => Some(notice),
+                None => Some(format!("Failed to load recent projects: {e}")),
+            };
+            (Vec::new(), notice)
+        }
     };
     let mut reader = TermKeyReader::new(term.clone());
     event_loop(term, &mut reader, recent_overviews, notice)
@@ -64,8 +75,7 @@ pub fn run(term: &Term, notice: Option<String>) -> Result<Outcome> {
 /// first three entries directly.
 #[cfg(not(test))]
 fn load_recent_overviews() -> Result<Vec<WorkspaceOverview>> {
-    let storage = Storage::open_default()?;
-    workspace::overviews(&storage)
+    Storage::open_default().and_then(|storage| workspace::overviews(&storage))
 }
 
 #[cfg(test)]
@@ -121,6 +131,34 @@ mod tests {
             run(&Term::stdout(), None).unwrap_err().to_string(),
             "read failed"
         );
+    }
+
+    #[test]
+    fn run_shows_a_notice_when_recent_loading_fails() {
+        MOCK.with(|m| *m.borrow_mut() = (None, Ok(Outcome::Quit)));
+        let outcome = run_with_recent_loader(&Term::stdout(), None, || {
+            Err(anyhow::anyhow!("storage unavailable"))
+        })
+        .unwrap();
+        assert_eq!(outcome, Outcome::Quit);
+        MOCK.with(|m| {
+            assert_eq!(
+                m.borrow().0.as_deref(),
+                Some("Failed to load recent projects: storage unavailable")
+            )
+        });
+    }
+
+    #[test]
+    fn run_keeps_an_existing_notice_when_recent_loading_fails() {
+        MOCK.with(|m| *m.borrow_mut() = (None, Ok(Outcome::Quit)));
+        run_with_recent_loader(
+            &Term::stdout(),
+            Some("Could not create project".to_string()),
+            || Err(anyhow::anyhow!("storage unavailable")),
+        )
+        .unwrap();
+        MOCK.with(|m| assert_eq!(m.borrow().0.as_deref(), Some("Could not create project")));
     }
 
     #[test]
