@@ -47,7 +47,7 @@ use crate::infrastructure::session_monitor::SessionMonitor;
 use crate::infrastructure::{agent_state_store, session_monitor};
 
 use super::super::ui;
-use super::tabs::{self, PaneKind, TabNav};
+use super::tabs::{self, PaneKind, TabNav, TabSwap};
 use super::view::TerminalView;
 
 /// How often the watcher thread samples every session's bell count.
@@ -471,6 +471,42 @@ impl TerminalPool {
                 sp.active = tabs::resolve_nav(sp.active, sp.panes.len(), nav);
                 sp.active != before
             }
+            None => false,
+        }
+    }
+
+    /// Move the active tab one slot left / right, keeping the moved pane active.
+    /// The move does not wrap around the ends. Returns whether the tab order
+    /// changed so the caller can skip a flickering redraw on edge no-ops.
+    pub fn swap_active(&mut self, dir: &Path, swap: TabSwap) -> bool {
+        match self.sessions.get_mut(dir) {
+            Some(sp) => match tabs::resolve_swap(sp.active, sp.panes.len(), swap) {
+                Some((from, to)) => {
+                    sp.panes.swap(from, to);
+                    sp.active = to;
+                    sp.rebuild_tab_labels();
+                    true
+                }
+                None => false,
+            },
+            None => false,
+        }
+    }
+
+    /// Move `from` tab to `target`, keeping the moved pane active. Used by tab
+    /// drag/drop; `target` is clamped to the last live tab.
+    pub fn move_tab(&mut self, dir: &Path, from: usize, target: usize) -> bool {
+        match self.sessions.get_mut(dir) {
+            Some(sp) => match tabs::resolve_move(from, target, sp.panes.len()) {
+                Some((from, to)) => {
+                    let pane = sp.panes.remove(from);
+                    sp.panes.insert(to, pane);
+                    sp.active = to;
+                    sp.rebuild_tab_labels();
+                    true
+                }
+                None => false,
+            },
             None => false,
         }
     }

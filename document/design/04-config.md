@@ -115,7 +115,7 @@
 
 ホーム画面のコマンドモードで `config` を実行したときのスコープ。起動中のワークスペース
 （`<workspace>/.usagi/settings.json`）だけに効く **ローカルの上書き**を編集します。グローバル設定は
-ここには表示されず、対象は次の固定 5 項目と、その下に並ぶ同梱スキル機能（`PR Skills` など）です。
+ここには表示されず、対象は次の固定 6 項目と、その下に並ぶ同梱スキル機能（`PR Skills` など）です。
 
 ```text
 ┌───────────────────────────────────────────────────────┐
@@ -125,11 +125,12 @@
 │                   Workspace Config                    │  ← タイトル（緑・太字）
 │            Adjust this workspace's settings           │  ← サブタイトル（淡色）
 │                                                       │
-│      >   Agent CLI       < Global (Claude) >          │  ┐ ローカル設定一覧（固定 5 項目）
+│      >   Agent CLI       < Global (Claude) >          │  ┐ ローカル設定一覧（固定 6 項目）
 │        ● Notifications   < Override: Off >            │  │  選択行：左端の赤 ">"
 │          Restore Panes   < Global (On) >              │  │  変更済み：ラベル左に黄色 ●
 │          Default Branch  < develop >                  │  │
-│          Branch Source   < Remote >                   │  ┘
+│          Branch Source   < Remote >                   │  │
+│          Setup Commands  Edit (2 commands)            │  ┘
 │          PR Skills       < Global (On) >              │  ← 同梱スキル機能の上書き（機能ごとに 1 行）
 │                                                       │
 │                           [ Save ]                    │  ← Save ボタン
@@ -145,6 +146,7 @@
 | Restore Panes | このワークスペースのペイン復旧 ON/OFF 上書き | `Global (実効値)` → `Override: On` → `Override: Off` の順に循環 |
 | Default Branch | `session create` で worktree を切る基点ブランチ | `Default (auto)` → リポジトリの各ブランチ名 の順に循環（実在ブランチを検出） |
 | Branch Source | 上のブランチをローカル形／リモート形のどちらで使うか | `Local` ⇄ `Remote` をトグル（未設定時は `Default (Remote)` を表示） |
+| Setup Commands | `session create` 後に session root で実行するコマンド列 | 値は `Edit (none)` / `Edit (1 command)` / `Edit (N commands)`。`Space` / `Enter` で複数行エディタを開く |
 | PR Skills | 同梱スキル機能 `pull-request` のこのワークスペースでの上書き | `Global (実効値)` → `Override: On` → `Override: Off` の順に循環。固定項目の下に機能ごとに 1 行並ぶ |
 
 - Agent CLI と Notifications は **「グローバルに従う / ローカルで上書き」** を 1 つの chooser で切り替えます。
@@ -156,6 +158,9 @@
 - Branch Source もグローバルに対応項目がないため、`Local`（ローカルのブランチ）と `Remote`（リモート追従の
   ブランチ）の 2 値だけを切り替えます。未設定時は既定値を `Default (Remote)` と表示し、`←→` で切り替えると
   明示値（`Local` / `Remote`）として保存されます。
+- Setup Commands は action 行です。`Space` / `Enter` で複数行エディタを開き、1 行につき 1 つの shell コマンドを
+  入力します。`Ctrl-S` でエディタ内容をメモリ上のローカル設定に反映し、空行は保存時に除外します。実際の
+  `<workspace>/.usagi/settings.json` への書き込みは通常どおり Save ボタンで行います。
 - Save を押すと、そのワークスペースのローカル設定（`<workspace>/.usagi/settings.json`）のみを保存します。
   全項目を未上書きに戻した場合もファイルは残し（中身は空に近い JSON）、「グローバルに従う」を意味します
   （削除はしません）。
@@ -191,10 +196,10 @@
 |---|---|
 | `↑` / `k` | 選択を 1 つ上へ移動（設定一覧と Save ボタンの間をラップ）。通知をクリア |
 | `↓` / `j` | 選択を 1 つ下へ移動（末尾の Save ボタンの次は先頭へラップ）。通知をクリア |
-| `→` / `l` | 選択中の項目の値を次の選択肢へ切り替え（メモリ上のみ。保存はしない）。Save ボタン上・`Local LLM` の `Install` 上・`Local LLM Model`（モーダルで選ぶ）上では無効 |
-| `←` / `h` | 選択中の項目の値を前の選択肢へ切り替え（メモリ上のみ。保存はしない）。Save ボタン上・`Local LLM` の `Install` 上・`Local LLM Model` 上では無効 |
-| `Space` | `Local LLM` の `Install` 行でインストールモーダルを、`Local LLM Model`（導入後）行でモデル選択モーダルを開く（他の行・スコープでは無効） |
-| `Enter` | Save ボタン上では編集内容を `settings.json` へ保存。`Local LLM`（未導入時）上ではインストールモーダルを、`Local LLM Model`（導入後）上ではモデル選択モーダルを開く。その他の設定項目上では `→` と同じく値を次へ切り替え |
+| `→` / `l` | 選択中の項目の値を次の選択肢へ切り替え（メモリ上のみ。保存はしない）。Save ボタン上・`Local LLM` の `Install` 上・`Local LLM Model`（モーダルで選ぶ）上・`Setup Commands` 上では無効 |
+| `←` / `h` | 選択中の項目の値を前の選択肢へ切り替え（メモリ上のみ。保存はしない）。Save ボタン上・`Local LLM` の `Install` 上・`Local LLM Model` 上・`Setup Commands` 上では無効 |
+| `Space` | `Local LLM` の `Install` 行でインストールモーダル、`Local LLM Model`（導入後）行でモデル選択モーダル、`Setup Commands` 行で複数行エディタを開く（他の行では無効） |
+| `Enter` | Save ボタン上では編集内容を `settings.json` へ保存。`Local LLM`（未導入時）上ではインストールモーダルを、`Local LLM Model`（導入後）上ではモデル選択モーダルを、`Setup Commands` 上では複数行エディタを開く。その他の設定項目上では `→` と同じく値を次へ切り替え |
 | `q` / `Esc` | 前の画面へ戻る（起動画面から開いた場合は起動画面、ホーム画面の `config` から開いた場合はホーム画面。未保存の編集は破棄） |
 | `Ctrl+C` / `Ctrl+Q` | アプリを終了 |
 
@@ -203,6 +208,21 @@
 `Local LLM` の `Install` を起動するとモーダルが開き、開いている間はすべてのキーを受け取ります。
 
 パスワードは共通の入力ウィジェットで編集され、キャレット位置での挿入・削除と左右移動に対応します（伏せ字でもブロックカーソルが正しい伏せ字 `•` の上に表示されます）。
+
+### Setup Commands エディタのキー操作
+
+`Setup Commands` を起動すると複数行エディタが開き、開いている間はすべてのキーを受け取ります。各行は
+`session create` 後に session root で実行される 1 つの shell コマンドです。
+
+| キー | 動作 |
+|---|---|
+| 文字入力 | キャレット位置に文字を挿入 |
+| `Enter` | 行を分割して新しいコマンド行を作成 |
+| `Backspace` / `Del` | キャレット前後の文字を削除（行頭では前行と結合） |
+| `←` / `→` / `↑` / `↓` / `Home` / `End` | キャレット移動 |
+| `Ctrl-S` | 空行を除いたコマンド列をメモリ上のローカル設定へ反映し、エディタを閉じる |
+| `Esc` | 変更を破棄してエディタを閉じる |
+| `Ctrl+C` | アプリを終了 |
 
 | キー | 動作 |
 |---|---|

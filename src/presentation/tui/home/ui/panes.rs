@@ -41,7 +41,7 @@ fn status_icon(status: BranchStatus) -> char {
 /// never drift apart.
 fn status_style(status: BranchStatus) -> Style {
     match status {
-        BranchStatus::New => Style::new().blue(),
+        BranchStatus::New => Style::new().blue().bright(),
         BranchStatus::Dirty => Style::new().magenta(),
         BranchStatus::Local => Style::new().yellow(),
         BranchStatus::Pushed => Style::new().green(),
@@ -1255,6 +1255,29 @@ fn tab_chip_ranges(header: &str, strip: &TabStrip) -> Vec<std::ops::Range<usize>
     ranges
 }
 
+/// The tab a pointer event at the 0-based screen (`col`, `row`) lands on while
+/// 没入 (Attached), including the active tab. Returns `None` for an event off the
+/// strip rows, off every chip (the indent, the gaps, past the last chip), or
+/// when no tab strip is published.
+pub(in crate::presentation::tui::home) fn attached_tab_hit(
+    state: &HomeState,
+    col: u16,
+    row: u16,
+    geo: super::TerminalGeometry,
+) -> Option<usize> {
+    let strip = state.terminal_tabs()?;
+    // The strip's rows are the `TAB_BAR_ROWS` just above the terminal body.
+    let strip_top = geo.origin_row.checked_sub(super::TAB_BAR_ROWS as u16)?;
+    if row < strip_top || row >= geo.origin_row {
+        return None;
+    }
+    let rel_col = col.checked_sub(geo.origin_col)? as usize;
+    let header = active_session_header(state);
+    tab_chip_ranges(&header, strip)
+        .into_iter()
+        .position(|range| range.contains(&rel_col))
+}
+
 /// The tab a left click at the 0-based screen (`col`, `row`) lands on while 没入
 /// (Attached), or `None` when the click is not on a switchable chip. The strip
 /// occupies the [`TAB_BAR_ROWS`](super::TAB_BAR_ROWS) rows at the top of the right
@@ -1270,16 +1293,7 @@ pub(in crate::presentation::tui::home) fn attached_tab_at(
     geo: super::TerminalGeometry,
 ) -> Option<usize> {
     let strip = state.terminal_tabs()?;
-    // The strip's rows are the `TAB_BAR_ROWS` just above the terminal body.
-    let strip_top = geo.origin_row.checked_sub(super::TAB_BAR_ROWS as u16)?;
-    if row < strip_top || row >= geo.origin_row {
-        return None;
-    }
-    let rel_col = col.checked_sub(geo.origin_col)? as usize;
-    let header = active_session_header(state);
-    let target = tab_chip_ranges(&header, strip)
-        .into_iter()
-        .position(|range| range.contains(&rel_col))?;
+    let target = attached_tab_hit(state, col, row, geo)?;
     // A click on the active tab is a no-op: leave it to the caller's selection
     // handling rather than re-driving the same pane.
     (target != strip.active).then_some(target)

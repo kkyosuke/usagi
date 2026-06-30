@@ -21,6 +21,13 @@ fn field_labels_are_distinct() {
     assert_eq!(Field::RestorePanes.label(), "Restore Panes");
     assert_eq!(Field::MascotAnimation.label(), "Mascot Animation");
     assert_eq!(Field::ALL.len(), 10);
+    assert_eq!(LocalField::AgentCli.label(), "Agent CLI");
+    assert_eq!(LocalField::Notifications.label(), "Notifications");
+    assert_eq!(LocalField::RestorePanes.label(), "Restore Panes");
+    assert_eq!(LocalField::DefaultBranch.label(), "Default Branch");
+    assert_eq!(LocalField::BranchSource.label(), "Branch Source");
+    assert_eq!(LocalField::SetupCommands.label(), "Setup Commands");
+    assert_eq!(LocalField::ALL.len(), 6);
 }
 
 #[test]
@@ -702,24 +709,27 @@ fn local_config_with_branches(branches: &[&str]) -> Config {
 fn local_scope_shows_only_the_local_override_rows() {
     let config = local_config();
     assert!(config.local().is_some());
-    // The local scope shows the five override rows, then the shipped-skill
+    // The local scope shows the six override rows, then the shipped-skill
     // feature row(s) — no global fixed fields.
-    assert_eq!(config.field_count(), 5 + SkillFeature::ALL.len());
-    assert_eq!(config.save_index(), 5 + SkillFeature::ALL.len());
+    assert_eq!(config.field_count(), 6 + SkillFeature::ALL.len());
+    assert_eq!(config.save_index(), 6 + SkillFeature::ALL.len());
     // The cursor starts on the first local field, not a global one.
     assert_eq!(config.selected_field(), None);
     assert_eq!(config.selected_local_field(), Some(LocalField::AgentCli));
     let rows = config.rows();
-    assert_eq!(rows.len(), 5 + SkillFeature::ALL.len());
+    assert_eq!(rows.len(), 6 + SkillFeature::ALL.len());
     assert_eq!(rows[0].label, "Agent CLI");
     assert_eq!(rows[1].label, "Notifications");
     assert_eq!(rows[2].label, "Restore Panes");
     assert_eq!(rows[3].label, "Default Branch");
     assert_eq!(rows[4].label, "Branch Source");
+    assert_eq!(rows[5].label, "Setup Commands");
+    assert!(rows[5].action);
+    assert_eq!(rows[5].value, "Edit (none)");
     // The skill feature row falls back to the global value (on) when unset.
-    assert_eq!(rows[5].label, "PR Skills");
-    assert!(rows[5].value.contains("Global"));
-    assert!(rows[5].value.contains("On"));
+    assert_eq!(rows[6].label, "PR Skills");
+    assert!(rows[6].value.contains("Global"));
+    assert!(rows[6].value.contains("On"));
     // Unset overrides display the value they fall back to.
     assert!(rows[0].value.contains("Global"));
     assert!(rows[0].value.contains("Claude"));
@@ -761,6 +771,11 @@ fn local_fields_are_selectable_then_the_save_button() {
     assert_eq!(
         config.selected_local_field(),
         Some(LocalField::BranchSource)
+    );
+    config.move_down();
+    assert_eq!(
+        config.selected_local_field(),
+        Some(LocalField::SetupCommands)
     );
     // Below the fixed local fields sits the shipped-skill feature row, then Save.
     config.move_down();
@@ -854,6 +869,64 @@ fn cycling_the_default_branch_without_branches_is_a_noop() {
     assert_eq!(config.local().unwrap().default_branch, None);
     assert!(!config.cycle_selected(false));
     assert_eq!(config.local().unwrap().default_branch, None);
+}
+
+#[test]
+fn setup_commands_row_opens_a_multiline_editor_and_applies_trimmed_commands() {
+    let mut config = local_config();
+    select_local(&mut config, LocalField::SetupCommands);
+    assert!(config.setup_row_active());
+    assert!(!config.cycle_selected(true));
+    assert_eq!(
+        config.value_of_local(LocalField::SetupCommands),
+        "Edit (none)"
+    );
+
+    config.open_setup_modal();
+    assert_eq!(config.setup_modal().unwrap().lines(), &["".to_string()]);
+    assert_eq!(config.setup_modal().unwrap().cursor(), (0, 0));
+    for c in "first".chars() {
+        config.setup_modal_insert(c);
+    }
+    config.setup_modal_cursor_home();
+    config.setup_modal_cursor_right();
+    config.setup_modal_cursor_left();
+    config.setup_modal_cursor_end();
+    config.setup_modal_newline();
+    config.setup_modal_cursor_up();
+    config.setup_modal_cursor_down();
+    for c in " second ".chars() {
+        config.setup_modal_insert(c);
+    }
+    config.setup_modal_backspace();
+    config.setup_modal_delete_forward();
+
+    config.apply_setup_modal();
+
+    assert!(config.setup_modal().is_none());
+    assert_eq!(
+        config.local().unwrap().setup_commands,
+        vec!["first".to_string(), "second".to_string()]
+    );
+    assert_eq!(
+        config.value_of_local(LocalField::SetupCommands),
+        "Edit (2 commands)"
+    );
+    assert!(config.is_dirty());
+    assert!(config.rows()[5].changed);
+}
+
+#[test]
+fn closing_setup_commands_modal_discards_the_buffer() {
+    let mut config = local_config();
+    select_local(&mut config, LocalField::SetupCommands);
+    config.open_setup_modal();
+    config.setup_modal_insert('x');
+    config.close_setup_modal();
+
+    assert!(config.setup_modal().is_none());
+    assert!(config.local().unwrap().setup_commands.is_empty());
+    assert!(!config.is_dirty());
 }
 
 #[test]
@@ -1084,7 +1157,8 @@ fn local_field_labels_are_distinct() {
     assert_eq!(LocalField::RestorePanes.label(), "Restore Panes");
     assert_eq!(LocalField::DefaultBranch.label(), "Default Branch");
     assert_eq!(LocalField::BranchSource.label(), "Branch Source");
-    assert_eq!(LocalField::ALL.len(), 5);
+    assert_eq!(LocalField::SetupCommands.label(), "Setup Commands");
+    assert_eq!(LocalField::ALL.len(), 6);
 }
 
 #[test]
@@ -1096,4 +1170,29 @@ fn title_and_subtitle_reflect_the_scope() {
     let local = local_config();
     assert_eq!(local.title(), "Workspace Config");
     assert_eq!(local.subtitle(), "Adjust this workspace's settings");
+}
+
+#[test]
+fn setup_commands_label_shows_singular_for_one_command() {
+    let mut config = local_config();
+    select_local(&mut config, LocalField::SetupCommands);
+    config.open_setup_modal();
+    for c in "bun install".chars() {
+        config.setup_modal_insert(c);
+    }
+    config.apply_setup_modal();
+    assert_eq!(
+        config.value_of_local(LocalField::SetupCommands),
+        "Edit (1 command)"
+    );
+}
+
+#[test]
+fn apply_setup_modal_is_a_noop_when_no_modal_is_open() {
+    let mut config = local_config();
+    select_local(&mut config, LocalField::SetupCommands);
+    // No modal opened — calling apply must not panic and must not change state.
+    config.apply_setup_modal();
+    assert!(config.setup_modal().is_none());
+    assert!(config.local().unwrap().setup_commands.is_empty());
 }

@@ -548,6 +548,15 @@ pub struct LocalSettings {
     /// the override through [`skill_feature_override`](Self::skill_feature_override).
     #[serde(default)]
     pub skill_features: BTreeMap<String, bool>,
+    /// Shell commands run, in order, in each freshly built session worktree
+    /// right after a session is created in this workspace — a per-project setup
+    /// hook (e.g. `npm install`, `cp .env.example .env`). Empty by default (no
+    /// commands run). Each entry is one command line, executed through the
+    /// platform shell with the worktree as the working directory; a command's
+    /// failure is logged but never aborts the already-built session. Read the
+    /// list through [`setup_commands`](Self::setup_commands).
+    #[serde(default)]
+    pub setup_commands: Vec<String>,
 }
 
 impl LocalSettings {
@@ -560,6 +569,7 @@ impl LocalSettings {
             && self.default_branch.is_none()
             && self.local_llm_enabled.is_none()
             && self.skill_features.is_empty()
+            && self.setup_commands.is_empty()
     }
 
     /// This project's override for the shipped-skill `feature`: `Some(enabled)`
@@ -579,6 +589,17 @@ impl LocalSettings {
     /// repository's detected default branch.
     pub fn default_branch(&self) -> Option<&str> {
         self.default_branch.as_deref()
+    }
+
+    /// The non-empty setup command lines to run for newly-created sessions in
+    /// this workspace, in persisted order. Blank lines are ignored so the
+    /// multi-line config editor can leave visual spacing without launching an
+    /// empty shell command.
+    pub fn setup_commands(&self) -> impl Iterator<Item = &str> {
+        self.setup_commands
+            .iter()
+            .map(String::as_str)
+            .filter(|command| !command.trim().is_empty())
     }
 }
 
@@ -694,6 +715,29 @@ mod tests {
             ..Default::default()
         }
         .is_empty());
+        // Setup commands are project-local state too.
+        assert!(!LocalSettings {
+            setup_commands: vec!["npm install".to_string()],
+            ..Default::default()
+        }
+        .is_empty());
+    }
+
+    #[test]
+    fn setup_commands_filters_blank_lines_but_keeps_order() {
+        let local = LocalSettings {
+            setup_commands: vec![
+                "npm install".to_string(),
+                "  ".to_string(),
+                "cargo test".to_string(),
+            ],
+            ..Default::default()
+        };
+
+        assert_eq!(
+            local.setup_commands().collect::<Vec<_>>(),
+            vec!["npm install", "cargo test"]
+        );
     }
 
     #[test]

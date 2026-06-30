@@ -98,9 +98,9 @@ pub fn cheatsheet(scheme: KeyScheme) -> Vec<LogLine> {
         key_row("Enter", "Focus the session (attach when live)"),
         key_row("t", "Open the action surface (add a pane)"),
         key_row("x", "Close the highlighted tab"),
-        key_row("c", "Create a new session"),
+        key_row("c / Ctrl-A", "Create a new session (Ctrl-A is IME-safe)"),
         key_row("r", "Rename the session"),
-        key_row("n / Ctrl-E", "Edit the session note"),
+        key_row("n / Ctrl-E", "Edit the session note (Ctrl-E is IME-safe)"),
         key_row("Ctrl-^", "Jump to the previous session"),
         key_row("Esc", "Close the note / back out"),
         LogLine::output(String::new()),
@@ -148,6 +148,7 @@ fn attached_keys(scheme: KeyScheme) -> Vec<LogLine> {
     };
     // Direct, low-conflict keys shared by both schemes (other keys go to the shell).
     lines.extend([
+        key_row("Ctrl+Shift+N/P", "Move the active tab right / left"),
         key_row("Ctrl-^", "Jump to the previous session"),
         key_row("Ctrl-C", "Copy the selection (when one is active)"),
         key_row("Shift+↑↓", "Scroll the history one line"),

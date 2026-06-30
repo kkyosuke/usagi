@@ -24,6 +24,25 @@ fn attached_tab_at_ignores_a_click_on_the_active_tab() {
 }
 
 #[test]
+fn attached_tab_hit_includes_the_active_tab_for_dragging() {
+    let (state, geo) = attached_with_tabs(0);
+    let chips_row = geo.origin_row - super::TAB_BAR_ROWS as u16;
+    assert_eq!(
+        attached_tab_hit(&state, chip_column(&state, geo, "1 agent"), chips_row, geo),
+        Some(0)
+    );
+    assert_eq!(
+        attached_tab_hit(
+            &state,
+            chip_column(&state, geo, "2 terminal"),
+            chips_row,
+            geo
+        ),
+        Some(1)
+    );
+}
+
+#[test]
 fn attached_tab_at_ignores_clicks_off_the_chips() {
     let (state, geo) = attached_with_tabs(0);
     let chips_row = geo.origin_row - super::TAB_BAR_ROWS as u16;

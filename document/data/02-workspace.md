@@ -243,6 +243,10 @@ session "login"  (/Users/me/git/usagi/.usagi/sessions/login)
   "default_branch": "develop",       // 任意。未設定なら検出済み既定ブランチ（auto）
   "default_branch_source": "local",  // 任意。未設定なら remote
   "local_llm_enabled": true,         // 任意。未設定ならグローバル値（local_llm.enabled）
+  "setup_commands": [                // 任意。新規セッション作成後に session root で実行
+    "npm install",
+    "cp .env.example .env"
+  ],
   "skill_features": {                 // 任意。機能 ID ごとに上書き（未記載はグローバル値）
     "pull-request": false             // 例: このプロジェクトでだけ PR スキル群を無効化
   }
@@ -256,6 +260,7 @@ session "login"  (/Users/me/git/usagi/.usagi/sessions/login)
 | `default_branch` | string? | リポジトリの検出済み既定ブランチ（auto）。**リポジトリ単位**（グローバルに対応項目なし） |
 | `default_branch_source` | enum? | `remote`。**リポジトリ単位**（グローバルに対応項目なし） |
 | `local_llm_enabled` | bool? | グローバル `local_llm.enabled` にフォールバック |
+| `setup_commands` | string[] | 空配列。セッション作成後に実行するコマンドなし |
 | `skill_features` | map<string, bool> | 機能 ID 単位で上書き。未記載の機能はグローバル `skill_features` にフォールバック |
 
 - 全フィールドが任意（`Option`）で、`null` は「グローバル設定に従う」を意味します。各項目の意味・選択肢は
@@ -263,6 +268,8 @@ session "login"  (/Users/me/git/usagi/.usagi/sessions/login)
   新ブランチの基点解決は [4. オーケストレーション#新ブランチの基点local--remote](../04-orchestration.md#新ブランチの基点local--remote)、編集画面は
   [design/04-config.md](../design/04-config.md) が正本です。
 - **実効設定 = グローバル設定にローカルの上書きを適用した結果**。解決は `domain/settings.rs` の `Settings::with_local`、ユースケースは `usecase/settings.rs` の `effective(storage, repo_root)` が担います。
+- `setup_commands` はローカル設定専用です。各要素は 1 つの shell コマンド行で、`session create` 後に
+  `<workspace>/.usagi/sessions/<name>` をカレントディレクトリとして保存順に実行されます。空白だけの要素は無視されます。
 - 全項目を未上書きに戻しても `settings.json` は残し（中身は実質空）、「グローバルに従う／既定に従う」を意味します。
 
 対応するユースケース（`usecase/settings.rs`）: `load_local` / `save_local` / `effective` /
