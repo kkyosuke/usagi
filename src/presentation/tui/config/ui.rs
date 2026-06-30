@@ -16,6 +16,12 @@ const SAVE_LABEL: &str = "[ Save ]";
 /// the terminal and clips any line that overruns it on a narrow screen.
 const MODAL_INNER_WIDTH: usize = 42;
 
+/// How many command rows the setup-command editor shows at once. The editor box
+/// always reserves exactly this many rows (padding with blanks and scrolling the
+/// window to keep the caret visible) so adding a line never grows the box or
+/// shifts it on screen.
+const SETUP_MODAL_VISIBLE_LINES: usize = 8;
+
 /// Builds the centred mascot, title, and subtitle block.
 ///
 /// The title and subtitle reflect the screen's scope (global vs. workspace), so
@@ -220,12 +226,22 @@ fn setup_modal_frame(
     modal: &SetupCommandsModal,
 ) -> Vec<String> {
     let (cursor_row, cursor_col) = modal.cursor();
+    let lines = modal.lines();
+    // Scroll a fixed-size window so the caret row stays visible without changing
+    // the number of rendered rows (and thus the box height / position).
+    let offset = cursor_row.saturating_sub(SETUP_MODAL_VISIBLE_LINES - 1);
     let mut body = vec![
         "新規セッション作成後に実行するコマンド".to_string(),
         "1 行につき 1 コマンド（session root で実行）".to_string(),
         String::new(),
     ];
-    for (i, line) in modal.lines().iter().enumerate() {
+    for win in 0..SETUP_MODAL_VISIBLE_LINES {
+        let i = offset + win;
+        let Some(line) = lines.get(i) else {
+            // Pad the unused rows so the box keeps a constant height.
+            body.push(String::new());
+            continue;
+        };
         let number = format!("{:>2} ", i + 1);
         if i == cursor_row {
             let (before, after) = line.split_at(cursor_col);
@@ -621,5 +637,61 @@ mod tests {
         assert!(joined.contains("未導入"));
         // The picker replaces the settings list.
         assert!(!joined.contains("Save"));
+    }
+
+    /// A workspace-scoped config focused on the Setup Commands row with the
+    /// editor open and `commands` already populated.
+    fn config_with_open_setup_modal(commands: &[&str]) -> Config {
+        use crate::domain::settings::LocalSettings;
+        let local = LocalSettings {
+            setup_commands: commands.iter().map(|c| c.to_string()).collect(),
+            ..Default::default()
+        };
+        let mut config = Config::workspace(Settings::default(), local, Vec::new());
+        while config.selected_local_field() != Some(LocalField::SetupCommands) {
+            config.move_down();
+        }
+        config.open_setup_modal();
+        config
+    }
+
+    /// Count the box rows (lines containing a vertical border) so the modal's
+    /// height can be compared regardless of vertical centering padding.
+    fn box_row_count(frame: &[String]) -> usize {
+        frame.iter().filter(|l| l.contains('│')).count()
+    }
+
+    #[test]
+    fn setup_modal_keeps_a_constant_height_as_lines_are_added() {
+        // Adding command lines must not grow or shift the modal: the editor
+        // reserves a fixed window of rows and pads the unused ones.
+        let empty = render_frame(40, 80, &config_with_open_setup_modal(&[]), None);
+        let few = render_frame(40, 80, &config_with_open_setup_modal(&["a", "b"]), None);
+        let full = render_frame(
+            40,
+            80,
+            &config_with_open_setup_modal(&["1", "2", "3", "4", "5", "6", "7", "8", "9", "10"]),
+            None,
+        );
+        assert_eq!(empty.len(), few.len());
+        assert_eq!(empty.len(), full.len());
+        assert_eq!(box_row_count(&empty), box_row_count(&few));
+        assert_eq!(box_row_count(&empty), box_row_count(&full));
+    }
+
+    #[test]
+    fn setup_modal_scrolls_to_keep_the_caret_row_visible() {
+        // With more lines than the window, the editor scrolls so the last
+        // (caret) line stays rendered while earlier ones drop out of view.
+        let commands: Vec<&str> = vec![
+            "first", "two", "three", "four", "five", "six", "seven", "eight", "nine", "last",
+        ];
+        let config = config_with_open_setup_modal(&commands);
+        let joined = render_frame(40, 80, &config, None).join("\n");
+        // The caret sits on the final line (cursor placed at the end on open).
+        assert!(joined.contains("last"));
+        // The first line scrolled out of the fixed window.
+        assert!(!joined.contains("first"));
+        assert!(joined.contains("Setup Commands"));
     }
 }
