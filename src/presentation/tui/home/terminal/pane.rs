@@ -220,10 +220,15 @@ impl<'t> PaneModeGuard<'t> {
 impl Drop for PaneModeGuard<'_> {
     fn drop(&mut self) {
         // Restored in the reverse order they were enabled.
-        // Restore the terminal's default mouse pointer (OSC 22): the pane switches
-        // it to a text caret / hand on hover, so without this the last shape would
-        // linger over the home screen — or the user's own shell on quit.
-        let _ = self.term.write_str(PointerShape::Default.osc22());
+        // The mouse pointer (OSC 22) is intentionally *not* reset here. This guard
+        // is per-`run` — i.e. per tab — and a `Ctrl-O ←/→` tab switch (or a new /
+        // closed tab) drops one guard and enters the next within the *same* 没入
+        // session. Resetting the pointer on every hop flipped it back to the arrow
+        // until the mouse next crossed a shape boundary, so the text caret flickered
+        // away on each tab switch. The default pointer is restored once 没入 hands
+        // back to a management screen (see `open_pane`) and, as a teardown backstop,
+        // when the whole TUI exits (see `AlternateScreenGuard`), so a caret never
+        // lingers on the home screen or the user's own shell.
         let _ = self.term.write_str(DISABLE_MOTION);
         // Reset the cursor shape to the terminal default (DECSCUSR 0): the pane
         // re-asserted whatever shape its program chose, so without this a bar or
