@@ -131,11 +131,14 @@
   `Settings::with_local`、ユースケースは `usecase/settings.rs` の `effective(storage, repo_root)` が担います。
 - 読み書きロジック・永続化に加え、編集 UI も実装済みです。ホーム画面のコマンドモードで `config` を実行すると
   設定画面が**ワークスペーススコープ**で開き、「Agent CLI」「Notifications」「Restore Panes」「Default Branch」
-  「Branch Source」「Setup Commands」と、固定項目の下に並ぶ**同梱スキル機能**（`PR Skills` など）を編集できます。`env` は
-  `<workspace>/.usagi/settings.json` を手編集して設定します。Agent CLI /
+  「Branch Source」「Setup Commands」「Env Vars」と、固定項目の下に並ぶ**同梱スキル機能**（`PR Skills` など）を
+  編集できます。Agent CLI /
   Notifications / Restore Panes と各スキル機能は **「グローバルに従う / ローカルで上書き（On/Off）」**、Default
   Branch は **`auto`（検出済み既定）／ リポジトリの各ブランチ**、Branch Source は **`local` / `remote`** を
-  切り替えられます。Setup Commands はモーダルで複数行を編集します。詳細は [design/04-config.md](design/04-config.md) を参照。
+  切り替えられます。Setup Commands・Env Vars（`NAME=op://...`）はモーダルで複数行を編集します。Env Vars は
+  コマンドパレットの `env` からも編集でき、そちらは Config 画面へ遷移せず Overview に重なる
+  [オーバーレイエディタ](design/home/05-overlays.md#workspace-env-エディタ)で完結します。詳細は
+  [design/04-config.md](design/04-config.md) を参照。
 - JSON 例・フィールド詳細は [data/02-workspace.md](data/02-workspace.md#settingsjson-プロジェクト固有の設定上書きローカル設定) を参照。
 
 ## 設定の変更方法

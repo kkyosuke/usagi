@@ -47,6 +47,8 @@ pub(super) enum Overlay {
     Preview(Preview),
     /// The session-note editor modal.
     Note(NoteEditor),
+    /// The workspace-env editor modal (the `env` command), overlaying the palette.
+    Env(EnvEditor),
 }
 
 /// Which tab-menu row is currently highlighted.
@@ -511,6 +513,45 @@ impl NoteEditor {
     /// usecase; an empty buffer clears the note.
     pub(super) fn confirm(self) -> (String, String, bool) {
         (self.target, self.area.text(), self.reattach)
+    }
+}
+
+/// The workspace-env editor modal, opened by the `env` command as an overlay
+/// over the command palette (Overview). It holds the multi-line buffer of
+/// `NAME=op://vault/item/field` bindings, seeded from the workspace's current
+/// settings. Editing and caret movement live on [`TextArea`] (the event loop
+/// routes keys straight to it, like the note editor); the modal bundles it and
+/// parses the valid bindings on confirm. Because it overlays the palette rather
+/// than replacing it, closing it (save or cancel) returns to the Overview.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnvEditor {
+    area: TextArea,
+}
+
+impl EnvEditor {
+    /// Open the editor seeded from `env` (one `NAME=reference` line per binding,
+    /// in sorted order), caret at the end.
+    pub(super) fn new(env: &crate::domain::settings::SecretEnv) -> Self {
+        Self {
+            area: TextArea::from_text(&crate::domain::settings::format_env_bindings(env)),
+        }
+    }
+
+    /// The text buffer, for rendering its lines and caret.
+    pub fn area(&self) -> &TextArea {
+        &self.area
+    }
+
+    /// The editable buffer: the event loop routes its keys straight to the
+    /// [`TextArea`]'s own editing methods, so the modal has no per-key forwarders.
+    pub fn area_mut(&mut self) -> &mut TextArea {
+        &mut self.area
+    }
+
+    /// The valid bindings currently in the buffer (see
+    /// [`crate::domain::settings::parse_env_bindings`] for the filtering rule).
+    pub(super) fn bindings(&self) -> crate::domain::settings::SecretEnv {
+        crate::domain::settings::parse_env_bindings(&self.area.text())
     }
 }
 

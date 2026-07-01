@@ -78,10 +78,15 @@ pub enum Effect {
     /// is left for the base 切替 (Switch). The focused session's name is resolved by
     /// the event loop, which owns the worktree list and the removal callback.
     CloseSession { force: bool },
-    /// Open the configuration screen (the user ran `config`) to edit the global
-    /// settings and this workspace's local overrides. The screen is run by the
-    /// event loop, which returns to the workspace screen when it is dismissed.
+    /// Open the configuration screen to edit this workspace's local overrides.
+    /// The screen is run by the event loop, which returns to the workspace screen
+    /// when it is dismissed.
     OpenConfig,
+    /// Open the workspace-env editor (the `env` command) as an overlay over the
+    /// command palette, so editing the 1Password-backed environment bindings
+    /// stays in the Overview and returns to it on save / cancel. The event loop
+    /// seeds it from — and saves it to — this workspace's local settings.
+    OpenEnvEditor,
     /// Show the result lines in a scrollable text modal (rather than the results
     /// band), for commands whose output is text to read — `man` / `history` /
     /// `issue`. `title` is the modal title; `size` selects the compact box or the
@@ -135,6 +140,7 @@ impl Effect {
             | Effect::Activate(_)
             | Effect::ListSessions
             | Effect::OpenRemoveModal { .. }
+            | Effect::OpenEnvEditor
             | Effect::ShowText { .. } => false,
         }
     }

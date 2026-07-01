@@ -78,6 +78,7 @@ fn state_on_alpha() -> HomeState {
 
 mod attached;
 mod caret_switch;
+mod env_editor;
 mod focus;
 mod homestate;
 mod note_editor;

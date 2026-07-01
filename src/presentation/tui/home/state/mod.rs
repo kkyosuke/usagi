@@ -41,8 +41,8 @@ mod mode;
 pub use list::{worktree_name, WorkspaceGroup, WorktreeList, ROOT_NAME};
 pub use log::{LineKind, LogLine};
 pub use modal::{
-    CreateInput, ModalSize, NoteEditor, Preview, RemoveEntry, RemoveModal, RenameInput, TabMenu,
-    TabMenuItem, TabRenameInput, TextModal,
+    CreateInput, EnvEditor, ModalSize, NoteEditor, Preview, RemoveEntry, RemoveModal, RenameInput,
+    TabMenu, TabMenuItem, TabRenameInput, TextModal,
 };
 pub use mode::{Mode, PaneExit, ResumeLevel, ReturnMode};
 
@@ -2355,6 +2355,48 @@ impl HomeState {
         match std::mem::take(&mut self.overlay) {
             Overlay::Note(editor) => Some(editor.confirm()),
             // Not editing: leave whatever was open (if anything) untouched.
+            other => {
+                self.overlay = other;
+                None
+            }
+        }
+    }
+
+    /// Open the workspace-env editor (the `env` command) over the palette, seeded
+    /// from the workspace's current bindings. Replaces any open overlay.
+    pub fn open_env_editor(&mut self, env: crate::domain::settings::SecretEnv) {
+        self.overlay = Overlay::Env(EnvEditor::new(&env));
+    }
+
+    /// The open env editor, when any — its buffer and caret are read through it.
+    pub fn env_editor(&self) -> Option<&EnvEditor> {
+        match &self.overlay {
+            Overlay::Env(editor) => Some(editor),
+            _ => None,
+        }
+    }
+
+    /// The open env editor for editing, when any: the event loop routes its keys
+    /// to the buffer's own methods (via [`EnvEditor::area_mut`]).
+    pub fn env_editor_mut(&mut self) -> Option<&mut EnvEditor> {
+        match &mut self.overlay {
+            Overlay::Env(editor) => Some(editor),
+            _ => None,
+        }
+    }
+
+    /// Cancel the env editor, discarding the edits and returning to the Overview.
+    /// Called only while the env editor is the open overlay, so it clears the
+    /// overlay outright (the palette stays open beneath it).
+    pub fn env_editor_cancel(&mut self) {
+        self.overlay = Overlay::None;
+    }
+
+    /// Accept the env edit: close the editor and return the parsed bindings for
+    /// the event loop to persist. A no-op (returning `None`) when not editing.
+    pub fn confirm_env_editor(&mut self) -> Option<crate::domain::settings::SecretEnv> {
+        match std::mem::take(&mut self.overlay) {
+            Overlay::Env(editor) => Some(editor.bindings()),
             other => {
                 self.overlay = other;
                 None

@@ -155,6 +155,33 @@ pub fn event_loop(
             continue;
         }
 
+        // The workspace-env editor captures every key, the same way the
+        // setup-command editor does: Enter inserts a new binding line, Ctrl-S
+        // applies the buffer into the in-memory local settings (still requiring
+        // the main Save button to persist), and Esc cancels.
+        if config.env_modal().is_some() {
+            match key {
+                Key::Char('\u{0013}') => {
+                    config.apply_env_modal();
+                    notice = None;
+                }
+                Key::Enter => config.env_modal_newline(),
+                Key::Backspace => config.env_modal_backspace(),
+                Key::Del => config.env_modal_delete_forward(),
+                Key::ArrowLeft => config.env_modal_cursor_left(),
+                Key::ArrowRight => config.env_modal_cursor_right(),
+                Key::ArrowUp => config.env_modal_cursor_up(),
+                Key::ArrowDown => config.env_modal_cursor_down(),
+                Key::Home => config.env_modal_cursor_home(),
+                Key::End => config.env_modal_cursor_end(),
+                Key::Char(c) => config.env_modal_insert(c),
+                Key::Escape => config.close_env_modal(),
+                Key::CtrlC => return Ok(Outcome::Quit),
+                _ => {}
+            }
+            continue;
+        }
+
         match key {
             Key::ArrowUp | Key::Char('k') => {
                 config.move_up();
@@ -172,12 +199,13 @@ pub fn event_loop(
             }
             Key::Char(' ') => {
                 // Space opens the install modal on the Local LLM install action,
-                // the model picker on the active model row, or the setup-command
-                // editor on its action row; each is a no-op off its own row, so
-                // calling all three is safe.
+                // the model picker on the active model row, or the setup-command /
+                // env editor on their action rows; each is a no-op off its own row,
+                // so calling all of them is safe.
                 config.open_install_modal();
                 config.open_model_modal();
                 config.open_setup_modal();
+                config.open_env_modal();
                 notice = None;
             }
             Key::Enter => {
@@ -195,6 +223,9 @@ pub fn event_loop(
                     notice = None;
                 } else if config.setup_row_active() {
                     config.open_setup_modal();
+                    notice = None;
+                } else if config.env_row_active() {
+                    config.open_env_modal();
                     notice = None;
                 } else {
                     notice = activate_field(&mut config, true);

@@ -799,6 +799,35 @@ impl Command for ConfigCommand {
     }
 }
 
+/// `env`: edit this workspace's 1Password-backed environment bindings
+/// (`NAME=op://vault/item/field`), resolved and injected into panes launched in
+/// this workspace. It opens an editor as an overlay over the command palette
+/// ([`Effect::OpenEnvEditor`]) — staying in the Overview and returning to it on
+/// save / cancel — rather than handing off to the full Config screen (the same
+/// bindings are also editable from `config` → Env Vars).
+pub(super) struct EnvCommand;
+
+impl Command for EnvCommand {
+    fn name(&self) -> &'static str {
+        "env"
+    }
+
+    fn description(&self) -> &'static str {
+        "Edit this workspace's 1Password-backed environment variables"
+    }
+
+    fn scope(&self) -> CommandScope {
+        CommandScope::Workspace
+    }
+
+    fn run(&self, _args: &str, _ctx: &CommandContext) -> CommandResult {
+        CommandResult {
+            lines: Vec::new(),
+            effect: Effect::OpenEnvEditor,
+        }
+    }
+}
+
 /// A recognised command whose real behaviour is not built yet. It produces a
 /// friendly "coming soon" line so the surface stays discoverable; the follow-up
 /// issues replace each one with a real [`Command`] implementation. It still

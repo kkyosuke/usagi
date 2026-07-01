@@ -158,6 +158,16 @@ pub(super) fn palette_key(
                         state.log_error(format!("\"{name}\" is not in the unite view"));
                     }
                 }
+                // `env`: open the workspace-env editor as an overlay *over* the
+                // palette (the palette stayed open — `OpenEnvEditor` does not
+                // close it), so saving / cancelling returns to the Overview. Seed
+                // it from the workspace's current bindings.
+                Effect::OpenEnvEditor => {
+                    let env = crate::usecase::settings::load_local(wiring.workspace_root)
+                        .unwrap_or_default()
+                        .env;
+                    state.open_env_editor(env);
+                }
                 // `ShowText` already opened its modal inside `submit`; the palette
                 // stays open behind it. `None` / `Clear` likewise keep it open.
                 //
@@ -536,6 +546,55 @@ pub(super) fn note_editor_key(
                 Key::Backspace => area.backspace(),
                 Key::Del => area.delete_forward(),
                 // A plain (unshifted) motion collapses any selection and moves.
+                Key::ArrowLeft => area.move_left(),
+                Key::ArrowRight => area.move_right(),
+                Key::ArrowUp => area.move_up(),
+                Key::ArrowDown => area.move_down(),
+                Key::Home => area.move_home(),
+                Key::End => area.move_end(),
+                Key::Char(c) if !c.is_control() => area.insert(c),
+                _ => {}
+            }
+        }
+    }
+}
+
+/// Handle one key in the workspace-env editor overlay (the `env` command), which
+/// sits over the command palette. `Ctrl-S` parses the buffer's valid bindings,
+/// writes them into this workspace's local settings (preserving the other
+/// overrides), and closes back to the Overview; `Esc` cancels; every other key
+/// edits the multi-line `NAME=op://…` buffer in place. Saving touches the
+/// settings file, so this is a handler rather than inline in the loop.
+pub(super) fn env_editor_key(state: &mut HomeState, key: Key, wiring: &mut Wiring) {
+    // Only entered while the env editor is open (the loop guards on
+    // `env_editor().is_some()`), so the accessors below always resolve.
+    match key {
+        // `Ctrl-S` saves the bindings and returns to the palette.
+        Key::Char(CTRL_S) => {
+            let env = state
+                .confirm_env_editor()
+                .expect("env editor open while editing");
+            let root = wiring.workspace_root;
+            // Read-modify-write so the workspace's other local overrides survive.
+            let mut settings = crate::usecase::settings::load_local(root).unwrap_or_default();
+            settings.env = env;
+            match crate::usecase::settings::save_local(root, &settings) {
+                Ok(()) => state.log_output("Saved workspace env 🐰".to_string()),
+                Err(e) => state.log_error(format!("Failed to save env: {e}")),
+            }
+        }
+        // `Esc` closes without saving, returning to the palette.
+        Key::Escape => state.env_editor_cancel(),
+        // Every other key edits the multi-line buffer in place.
+        key => {
+            let area = state
+                .env_editor_mut()
+                .expect("env editor open while editing")
+                .area_mut();
+            match key {
+                Key::Enter => area.newline(),
+                Key::Backspace => area.backspace(),
+                Key::Del => area.delete_forward(),
                 Key::ArrowLeft => area.move_left(),
                 Key::ArrowRight => area.move_right(),
                 Key::ArrowUp => area.move_up(),

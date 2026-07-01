@@ -132,6 +132,7 @@ fn switch_state_with_note(note: &str) -> HomeState {
 }
 
 mod attached_and_terminal;
+mod env_editor;
 mod input_footer;
 mod notices_and_tasks;
 mod removal_modal;

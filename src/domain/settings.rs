@@ -650,6 +650,36 @@ pub fn is_valid_env_name(name: &str) -> bool {
     chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
 }
 
+/// Parse a `NAME=op://vault/item/field` editor buffer (one binding per line)
+/// into the valid bindings, keyed by name so a later line with the same name
+/// wins and the map keeps its sorted order. Lines without a `=`, with a name that
+/// is not a portable identifier, or with a blank reference are dropped — the same
+/// filter [`LocalSettings::env`] applies at read time, so what is saved is exactly
+/// what will be injected. Shared by the config-screen and command-palette editors.
+pub fn parse_env_bindings(text: &str) -> SecretEnv {
+    let mut env = SecretEnv::new();
+    for line in text.lines() {
+        let Some((name, reference)) = line.split_once('=') else {
+            continue;
+        };
+        let name = name.trim();
+        let reference = reference.trim();
+        if is_valid_env_name(name) && !reference.is_empty() {
+            env.insert(name.to_string(), reference.to_string());
+        }
+    }
+    env
+}
+
+/// Render `env` back into the editor buffer form ([`parse_env_bindings`]'s
+/// inverse): one `NAME=reference` line per binding, in the map's sorted order.
+pub fn format_env_bindings(env: &SecretEnv) -> String {
+    env.iter()
+        .map(|(name, reference)| format!("{name}={reference}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -809,6 +839,46 @@ mod tests {
         assert!(is_valid_env_name("_TOKEN_1"));
         assert!(!is_valid_env_name("1TOKEN"));
         assert!(!is_valid_env_name("BAD-NAME"));
+    }
+
+    #[test]
+    fn parse_env_bindings_keeps_valid_lines_drops_the_rest_and_lets_later_win() {
+        let env = parse_env_bindings(
+            "GH_TOKEN = op://Private/GH/token\n\
+             no_equals_line\n\
+             1BAD=op://x/y/z\n\
+             EMPTY=   \n\
+             DUP=op://v/i/first\n\
+             DUP=op://v/i/second\n",
+        );
+        assert_eq!(
+            env.get("GH_TOKEN").map(String::as_str),
+            Some("op://Private/GH/token")
+        );
+        assert!(!env.contains_key("1BAD"));
+        assert!(!env.contains_key("EMPTY"));
+        // A later line with the same name wins.
+        assert_eq!(env.get("DUP").map(String::as_str), Some("op://v/i/second"));
+        assert_eq!(env.len(), 2);
+    }
+
+    #[test]
+    fn format_env_bindings_is_the_inverse_in_sorted_order() {
+        let env: SecretEnv = [
+            ("B_TOKEN".to_string(), "op://v/i/b".to_string()),
+            ("A_TOKEN".to_string(), "op://v/i/a".to_string()),
+        ]
+        .into_iter()
+        .collect();
+        // Sorted by name (BTreeMap order), one binding per line.
+        assert_eq!(
+            format_env_bindings(&env),
+            "A_TOKEN=op://v/i/a\nB_TOKEN=op://v/i/b"
+        );
+        // Round-trips back to the same map.
+        assert_eq!(parse_env_bindings(&format_env_bindings(&env)), env);
+        // The empty map formats to an empty buffer.
+        assert_eq!(format_env_bindings(&SecretEnv::new()), "");
     }
 
     #[test]
