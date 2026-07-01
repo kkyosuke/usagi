@@ -666,6 +666,17 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
             };
             let initial = Some(spawn_command.as_str());
             let later_initial = Some(plain_command.as_str());
+            // Resolve workspace-scoped secret env only when this request will
+            // actually spawn a fresh shell. Re-attaching to an existing pane
+            // keeps the environment it was originally launched with.
+            let will_spawn = (new_pane && !reuse_agent) || (!new_pane && !pool.has_live_pane(dir));
+            let pane_env = if will_spawn {
+                crate::infrastructure::env_resolver::resolve_workspace_env(
+                    &crate::usecase::session::workspace_root(dir),
+                )
+            } else {
+                std::collections::BTreeMap::new()
+            };
             // Capture every failure of this launch — the initial spawn (`add_pane`
             // / `enter`) and anything during the pane loop — in one `result`, so a
             // launch that never gets a live pane is cleaned up and logged just like a
@@ -684,9 +695,29 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
                     } else {
                         terminal::tabs::PaneKind::Terminal
                     };
-                    pool.add_pane(term, dir, kind, initial, cli, &label)?;
+                    pool.add_pane(
+                        term,
+                        dir,
+                        kind,
+                        terminal::pool::PaneLaunch {
+                            agent_command: initial,
+                            cli,
+                            label: &label,
+                            env: &pane_env,
+                        },
+                    )?;
                 } else {
-                    pool.enter(term, dir, run_agent, initial, cli, &label)?;
+                    pool.enter(
+                        term,
+                        dir,
+                        run_agent,
+                        terminal::pool::PaneLaunch {
+                            agent_command: initial,
+                            cli,
+                            label: &label,
+                            env: &pane_env,
+                        },
+                    )?;
                 }
                 handle.set_attached(Some(dir.to_path_buf()));
                 loop {
@@ -743,13 +774,20 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
                         // without leaving 没入).
                         terminal::pane::PaneStep::NewAgentTab => {
                             if !pool.activate_agent(dir) {
+                                let add_env =
+                                    crate::infrastructure::env_resolver::resolve_workspace_env(
+                                        &crate::usecase::session::workspace_root(dir),
+                                    );
                                 pool.add_pane(
                                     term,
                                     dir,
                                     terminal::tabs::PaneKind::Agent,
-                                    later_initial,
-                                    cli,
-                                    &label,
+                                    terminal::pool::PaneLaunch {
+                                        agent_command: later_initial,
+                                        cli,
+                                        label: &label,
+                                        env: &add_env,
+                                    },
                                 )?;
                             }
                             // Jumped to / opened the agent pane: the next loop pass
@@ -1085,15 +1123,21 @@ fn restore_open_panes(
         let Some(snapshot) = open_panes_store::load(&dir) else {
             continue;
         };
+        let pane_env = crate::infrastructure::env_resolver::resolve_workspace_env(
+            &crate::usecase::session::workspace_root(&dir),
+        );
         for pane in &snapshot.panes {
             let spawned = match pane.kind {
                 StoredPaneKind::Terminal => pool.borrow_mut().add_pane(
                     term,
                     &dir,
                     PaneKind::Terminal,
-                    None,
-                    default_cli,
-                    &label,
+                    terminal::pool::PaneLaunch {
+                        agent_command: None,
+                        cli: default_cli,
+                        label: &label,
+                        env: &pane_env,
+                    },
                 ),
                 StoredPaneKind::Agent => {
                     let cli = pane.cli.unwrap_or(default_cli);
@@ -1106,9 +1150,12 @@ fn restore_open_panes(
                         term,
                         &dir,
                         PaneKind::Agent,
-                        Some(&command),
-                        cli,
-                        &label,
+                        terminal::pool::PaneLaunch {
+                            agent_command: Some(&command),
+                            cli,
+                            label: &label,
+                            env: &pane_env,
+                        },
                     )
                 }
             };
