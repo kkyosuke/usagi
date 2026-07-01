@@ -192,7 +192,6 @@ fn note_editor_opened_while_attached_refreshes_the_attached_terminal_surface() {
         Path::new("/ws"),
         &monitor,
         &UpdateHandle::new(),
-        &OneShot::<bool>::new(),
         &OneShot::<Vec<AgentCli>>::new(),
         &mut persist,
         &mut create,

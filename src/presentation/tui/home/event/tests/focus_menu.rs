@@ -217,26 +217,6 @@ fn typed_agent_name_allows_the_default_cli_even_when_not_probed_as_installed() {
 }
 
 #[test]
-fn focus_menu_can_run_the_coming_soon_ai_command() {
-    // With the local LLM available the menu lists, alphabetically, agent (0,
-    // default), ai (1), close (2), terminal (3). ArrowUp from the top wraps to
-    // "terminal"; back down to "agent"; one more lands on "ai"; Enter on it just
-    // logs (no attach).
-    let mut state = sample_state();
-    state.set_ai_available(true);
-    let mut keys = cmd("session switch feat");
-    keys.push(Ok(Key::Enter)); // Focus ("agent" highlighted by default)
-    keys.push(Ok(Key::Home)); // ignored in the menu
-    keys.push(Ok(Key::ArrowUp)); // agent wraps up to "terminal"
-    keys.push(Ok(Key::ArrowDown)); // back to "agent"
-    keys.push(Ok(Key::ArrowDown)); // agent -> ai
-    keys.push(Ok(Key::Enter)); // run ai (coming soon)
-    keys.push(Ok(Key::Escape)); // -> Switch
-    keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
-    assert!(matches!(run(keys, state).unwrap(), Outcome::Quit));
-}
-
-#[test]
 fn focus_ctrl_o_o_opens_switch_then_esc_re_focuses() {
     // Under the prefix scheme `Ctrl-O` is the leader in 在席 too, so `Ctrl-O o`
     // zooms out to Switch(return=Focus) — matching 没入. Esc re-enters Focus; Esc
@@ -391,7 +371,6 @@ fn focus_ctrl_n_and_ctrl_p_walk_the_tab_strip_via_tab_op() {
         Path::new("/ws"),
         &monitor,
         &UpdateHandle::new(),
-        &OneShot::<bool>::new(),
         &OneShot::<Vec<AgentCli>>::new(),
         &mut persist,
         &mut create,
@@ -460,7 +439,6 @@ fn focus_ctrl_o_prefix_walks_the_tab_strip_with_letters_and_arrows() {
         Path::new("/ws"),
         &monitor,
         &UpdateHandle::new(),
-        &OneShot::<bool>::new(),
         &OneShot::<Vec<AgentCli>>::new(),
         &mut persist,
         &mut create,
@@ -587,7 +565,6 @@ fn focus_tab_nav_is_inert_without_live_panes() {
         Path::new("/ws"),
         &monitor,
         &UpdateHandle::new(),
-        &OneShot::<bool>::new(),
         &OneShot::<Vec<AgentCli>>::new(),
         &mut persist,
         &mut create,
@@ -653,7 +630,6 @@ fn focus_enter_on_a_pane_tab_reattaches_while_other_keys_are_inert() {
         Path::new("/ws"),
         &monitor,
         &UpdateHandle::new(),
-        &OneShot::<bool>::new(),
         &OneShot::<Vec<AgentCli>>::new(),
         &mut persist,
         &mut create,
@@ -725,7 +701,6 @@ fn focus_esc_on_the_new_tab_over_panes_steps_back_onto_the_pane() {
         Path::new("/ws"),
         &monitor,
         &UpdateHandle::new(),
-        &OneShot::<bool>::new(),
         &OneShot::<Vec<AgentCli>>::new(),
         &mut persist,
         &mut create,

@@ -114,7 +114,6 @@ fn run_pr_clicks(inputs: Vec<io::Result<Input>>, state: HomeState) -> (Vec<Strin
         &monitor,
         &UpdateHandle::new(),
         &SessionsRefreshHandle::new(),
-        &OneShot::<bool>::new(),
         &OneShot::<Vec<AgentCli>>::new(),
         &tasks,
         &mut wiring,

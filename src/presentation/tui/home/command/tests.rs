@@ -377,7 +377,7 @@ fn session_remove_without_a_name_opens_the_removal_modal() {
 fn close_requests_the_close_session_effect() {
     // `close` is a session-scope command; it carries no arguments and asks the
     // event loop to remove the focused session (the equivalent of
-    // `session remove <name> --force`).
+    // `session remove <name>`).
     let result = registry().dispatch("close", &[], &[]);
     assert!(result.lines.is_empty());
     assert_eq!(result.effect, Effect::CloseSession);
@@ -386,13 +386,11 @@ fn close_requests_the_close_session_effect() {
 #[test]
 fn coming_soon_commands_are_recognised() {
     let registry = registry();
-    for name in ["ai", "doctor"] {
-        let result = registry.dispatch(name, &[], &[]);
-        assert_eq!(result.effect, Effect::None);
-        assert_eq!(result.lines[0].kind, LineKind::Output);
-        assert!(result.lines[0].text.contains("coming soon"));
-        assert!(result.lines[0].text.contains(name));
-    }
+    let result = registry.dispatch("doctor", &[], &[]);
+    assert_eq!(result.effect, Effect::None);
+    assert_eq!(result.lines[0].kind, LineKind::Output);
+    assert!(result.lines[0].text.contains("coming soon"));
+    assert!(result.lines[0].text.contains("doctor"));
 }
 
 fn worktree_refs() -> Vec<WorktreeRef> {
@@ -444,6 +442,24 @@ fn agent_requests_opening_the_agent() {
     let result = registry().dispatch("agent", &[], &[]);
     assert!(result.lines.is_empty());
     assert_eq!(result.effect, Effect::OpenAgent(None));
+}
+
+#[test]
+fn ai_requests_opening_the_configured_agent_with_a_prompt() {
+    let result = registry().dispatch("ai fix the failing test", &[], &[]);
+    assert!(result.lines.is_empty());
+    assert_eq!(
+        result.effect,
+        Effect::OpenAgentPrompt("fix the failing test".to_string())
+    );
+}
+
+#[test]
+fn ai_requires_a_prompt() {
+    let result = registry().dispatch("ai   ", &[], &[]);
+    assert_eq!(result.effect, Effect::None);
+    assert_eq!(result.lines[0].kind, LineKind::Error);
+    assert!(result.lines[0].text.contains("usage: ai <prompt>"));
 }
 
 #[test]

@@ -366,7 +366,7 @@ pub struct HomeState {
     registry: CommandRegistry,
     /// Sorted Session-scope commands used by the 在席 menu. This static part is
     /// derived once from [`registry`](Self::registry); each render then only
-    /// applies the dynamic gates (`ai`, `close`, `agent`) instead of cloning and
+    /// applies the dynamic gates (`close`, `agent`) instead of cloning and
     /// sorting the registry metadata again.
     session_menu_commands: Vec<CommandInfo>,
     /// Which right-pane action surface 在席 (Focus) presents — a pickable menu
@@ -388,11 +388,6 @@ pub struct HomeState {
     /// and as it lapses ([`super::pane_input::PREFIX_TIMEOUT`]); read by the
     /// footer ([`super::ui`]). Always `false` outside 没入 / the prefix scheme.
     prefix_pending: bool,
-    /// Whether the `ai` command is offered in the 在席 (Focus) menu: true only
-    /// when the local LLM is enabled and its model is pulled. Injected from the
-    /// effective settings (and a runtime probe) by `mod.rs`; false by default so
-    /// the command stays hidden until the model is actually usable.
-    ai_available: bool,
     /// The configured agent CLI launched by `agent` with no explicit choice (the
     /// 在席 menu's `agent` row / `a` shortcut and a bare `agent` prompt). Injected
     /// from the effective settings by `mod.rs`; its display name labels the menu's
@@ -407,6 +402,11 @@ pub struct HomeState {
     /// terminal-pool wiring on a fresh agent spawn. `None` means "use
     /// [`default_agent`](Self::default_agent)".
     agent_choice: Option<AgentCli>,
+    /// The opening prompt the next configured-agent launch should deliver,
+    /// captured from `ai <prompt>` and consumed by the terminal-pool wiring. It is
+    /// separate from [`agent_choice`](Self::agent_choice) because `ai` always uses
+    /// the configured default CLI rather than an ad-hoc override.
+    agent_initial_prompt: Option<String>,
     /// Where a 切替 (Switch) returns to on `Esc`; only meaningful in
     /// [`Mode::Switch`].
     switch_return: ReturnMode,
@@ -654,10 +654,10 @@ impl HomeState {
             sidebar: Sidebar::default(),
             key_scheme: KeyScheme::default(),
             prefix_pending: false,
-            ai_available: false,
             default_agent: AgentCli::default(),
             installed_agents: Vec::new(),
             agent_choice: None,
+            agent_initial_prompt: None,
             switch_return: ReturnMode::Base,
             note_hidden: false,
             pr_popup: None,
@@ -904,12 +904,6 @@ impl HomeState {
         self.sidebar = self.sidebar.toggled();
     }
 
-    /// Set whether the `ai` command is offered in the 在席 (Focus) menu (injected
-    /// from the effective settings and a runtime probe by `mod.rs`).
-    pub fn set_ai_available(&mut self, available: bool) {
-        self.ai_available = available;
-    }
-
     /// Inject the configured default agent CLI (its display name labels the 在席
     /// menu's `agent` row, and a bare `agent` / the `a` shortcut launch it).
     pub fn set_default_agent(&mut self, cli: AgentCli) {
@@ -943,6 +937,19 @@ impl HomeState {
     /// next agent spawn should launch, or `None` to use the configured default.
     pub fn take_agent_choice(&mut self) -> Option<AgentCli> {
         self.agent_choice.take()
+    }
+
+    /// Record the opening prompt for the next configured-agent launch, set by
+    /// `ai <prompt>` just before launching and consumed by
+    /// [`take_agent_initial_prompt`](Self::take_agent_initial_prompt).
+    pub fn set_agent_initial_prompt(&mut self, prompt: String) {
+        self.agent_initial_prompt = Some(prompt);
+    }
+
+    /// Take the pending `ai <prompt>` opening prompt, leaving no prompt behind.
+    /// Returns `None` for ordinary `agent` launches.
+    pub fn take_agent_initial_prompt(&mut self) -> Option<String> {
+        self.agent_initial_prompt.take()
     }
 
     /// Inject the workspace's task issues (loaded from disk by `mod.rs`), read by
@@ -2223,12 +2230,12 @@ impl HomeState {
     }
 
     /// The Session-scope commands the 在席 menu lists, in alphabetical order by
-    /// name (`agent`, `ai`, `close`, `terminal`). The `ai` command is filtered
-    /// out unless the local LLM is usable (enabled and its model pulled), so it
-    /// only appears when running it would actually work. `close` is filtered out
-    /// on the root row, which belongs to no session and so cannot be closed.
-    /// `agent` is filtered out when the focused session already has a live
-    /// `agent` pane, since its agent is already running.
+    /// name (`agent`, `close`, `terminal`). Prompt-taking commands such as
+    /// `ai <prompt>` are kept out of the pickable menu because they need typed
+    /// arguments; they are available from the Prompt UI instead. `close` is
+    /// filtered out on the root row, which belongs to no session and so cannot
+    /// be closed. `agent` is filtered out when the focused session already has a
+    /// live `agent` pane, since its agent is already running.
     ///
     /// Resolved for the **active** row: 在席 acts on the session it focused.
     pub fn focus_menu_commands(&self) -> Vec<CommandInfo> {
@@ -2248,15 +2255,15 @@ impl HomeState {
     }
 
     /// Shared body of [`focus_menu_commands`] / [`preview_menu_commands`]: the
-    /// Session-scope commands sorted alphabetically by name, with `ai` gated on
-    /// local-LLM availability, `close` hidden when `root` (the row belongs to no
-    /// session), and `agent` hidden when `agent_open` (a live agent pane already
-    /// exists for the resolved session).
+    /// Session-scope commands sorted alphabetically by name, with `ai` hidden
+    /// from the menu (it requires a prompt argument), `close` hidden when `root`
+    /// (the row belongs to no session), and `agent` hidden when `agent_open` (a
+    /// live agent pane already exists for the resolved session).
     fn menu_commands_for_root(&self, root: bool, agent_open: bool) -> Vec<CommandInfo> {
         self.session_menu_commands
             .iter()
             .copied()
-            .filter(|info| info.name != "ai" || self.ai_available)
+            .filter(|info| info.name != "ai")
             .filter(|info| info.name != "close" || !root)
             .filter(|info| info.name != "agent" || !agent_open)
             .collect()

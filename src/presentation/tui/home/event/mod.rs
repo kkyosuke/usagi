@@ -92,7 +92,7 @@ pub(super) type TabOp<'a> = dyn FnMut(&Path, Option<TabNav>) -> (Vec<String>, us
 
 /// The settings-derived values re-read when the config screen closes, so an
 /// edit takes effect without reopening the home screen: the 在席 (Focus)
-/// right-pane surface and whether the `ai` command is offered.
+/// right-pane surface and the 没入 key scheme.
 #[derive(Debug, Clone, Copy)]
 pub struct ConfigReload {
     /// The effective Session Action UI (在席 mode's surface).
@@ -100,9 +100,6 @@ pub struct ConfigReload {
     /// The effective 没入 key scheme (the `Ctrl-O` prefix or single `Alt`-chords),
     /// so the pane's key handling reflects the edit without reopening the screen.
     pub key_scheme: KeyScheme,
-    /// Whether the local LLM is usable (enabled and its model pulled), gating
-    /// the `ai` command in the 在席 menu.
-    pub ai_available: bool,
 }
 
 /// A `(session name, last_active)` pair — the freshness ("heat") timestamp
@@ -307,7 +304,6 @@ pub(super) fn event_loop(
     monitor: &MonitorHandle,
     update: &UpdateHandle,
     refresh: &SessionsRefreshHandle,
-    ai_available: &OneShot<bool>,
     installed_agents: &OneShot<Vec<AgentCli>>,
     tasks: &TaskHandle,
     wiring: &mut Wiring,
@@ -368,13 +364,6 @@ pub(super) fn event_loop(
         // (which the badge snapshot does not capture), so `refreshed` forces a
         // repaint below.
         let refreshed = apply_pending_refresh(&mut state, refresh);
-        // Flip the `ai` command on once the background local-LLM probe confirms it
-        // is usable (drained once); until then the 在席 menu simply omits it. Force a
-        // repaint so the change is reflected without waiting for the next keypress.
-        if let Some(available) = ai_available.take() {
-            state.set_ai_available(available);
-            force_paint = true;
-        }
         // Fill in the installed-agent list once the background PATH probe lands
         // (drained once), so 在席's agent picker can offer the alternatives it found;
         // until then the picker simply shows none. Force a repaint so the picker
@@ -1009,7 +998,6 @@ pub(crate) fn event_loop_compat(
     workspace_root: &Path,
     monitor: &MonitorHandle,
     update: &UpdateHandle,
-    ai_available: &OneShot<bool>,
     installed_agents: &OneShot<Vec<AgentCli>>,
     mut persist: impl FnMut(&str),
     mut create_session: impl FnMut(&str) -> SessionOutcome,
@@ -1125,7 +1113,6 @@ pub(crate) fn event_loop_compat(
         monitor,
         update,
         &refresh,
-        ai_available,
         installed_agents,
         &tasks,
         &mut wiring,

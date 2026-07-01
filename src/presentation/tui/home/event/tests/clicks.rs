@@ -171,7 +171,6 @@ fn a_click_on_a_focus_right_pane_tab_switches_that_live_pane() {
         Path::new("/ws"),
         &monitor,
         &UpdateHandle::new(),
-        &OneShot::<bool>::new(),
         &OneShot::<Vec<AgentCli>>::new(),
         &mut persist,
         &mut create,

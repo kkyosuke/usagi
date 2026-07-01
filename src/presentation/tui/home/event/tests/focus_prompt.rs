@@ -79,7 +79,7 @@ fn focus_prompt_drops_control_chars() {
 }
 
 #[test]
-fn focus_prompt_runs_agent_and_coming_soon_and_ignores_empty() {
+fn focus_prompt_runs_agent_and_ignores_empty() {
     let opened = RefCell::new(Vec::new());
     let mut open = |_h: &mut HomeState, _d: &Path, a: bool, _n: bool| {
         opened.borrow_mut().push(a);
@@ -91,8 +91,6 @@ fn focus_prompt_runs_agent_and_coming_soon_and_ignores_empty() {
     keys.push(Ok(Key::Enter)); // Focus (prompt)
     keys.push(Ok(Key::Home)); // ignored in the prompt
     keys.push(Ok(Key::Enter)); // empty prompt -> no-op
-    keys.extend(typed("ai go"));
-    keys.push(Ok(Key::Enter)); // coming soon -> log, no attach
     keys.extend(typed("agent"));
     keys.push(Ok(Key::Enter)); // attach agent
     keys.push(Ok(Key::Escape)); // -> Switch
@@ -110,6 +108,79 @@ fn focus_prompt_runs_agent_and_coming_soon_and_ignores_empty() {
         Outcome::Quit
     ));
     assert_eq!(*opened.borrow(), vec![true]);
+}
+
+#[test]
+fn focus_prompt_ai_launches_the_configured_agent_with_a_prompt() {
+    use crate::domain::settings::AgentCli;
+    let opened = RefCell::new(Vec::new());
+    let mut open = |h: &mut HomeState, _d: &Path, a: bool, _n: bool| {
+        opened
+            .borrow_mut()
+            .push((a, h.take_agent_choice(), h.take_agent_initial_prompt()));
+        Ok(PaneExit::Closed)
+    };
+    let mut create: fn(&str) -> SessionOutcome = noop_create;
+    let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = noop_preview;
+    let mut state = prompt_state();
+    state.set_default_agent(AgentCli::Claude);
+    state.set_installed_agents(vec![AgentCli::Claude]);
+    let mut keys = cmd("session switch feat");
+    keys.push(Ok(Key::Enter)); // Focus (prompt)
+    keys.extend(typed("ai fix the failing test"));
+    keys.push(Ok(Key::Enter)); // attach configured agent carrying the prompt
+    keys.push(Ok(Key::Escape)); // -> Switch
+    keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
+    assert!(matches!(
+        run_full(
+            keys,
+            state,
+            &mut open,
+            &mut create,
+            &mut preview,
+            &mut noop_config
+        )
+        .unwrap(),
+        Outcome::Quit
+    ));
+    assert_eq!(
+        *opened.borrow(),
+        vec![(true, None, Some("fix the failing test".to_string()))]
+    );
+}
+
+#[test]
+fn focus_prompt_ai_refuses_when_the_configured_agent_is_not_installed() {
+    use crate::domain::settings::AgentCli;
+    let opened = RefCell::new(0);
+    let mut open = |_h: &mut HomeState, _d: &Path, _a: bool, _n: bool| {
+        *opened.borrow_mut() += 1;
+        Ok(PaneExit::Closed)
+    };
+    let mut create: fn(&str) -> SessionOutcome = noop_create;
+    let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = noop_preview;
+    let mut state = prompt_state();
+    state.set_default_agent(AgentCli::Gemini);
+    state.set_installed_agents(vec![AgentCli::Claude]);
+    let mut keys = cmd("session switch feat");
+    keys.push(Ok(Key::Enter)); // Focus (prompt)
+    keys.extend(typed("ai fix it"));
+    keys.push(Ok(Key::Enter)); // refused because Gemini was not probed installed
+    keys.push(Ok(Key::Escape)); // -> Switch
+    keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
+    assert!(matches!(
+        run_full(
+            keys,
+            state,
+            &mut open,
+            &mut create,
+            &mut preview,
+            &mut noop_config
+        )
+        .unwrap(),
+        Outcome::Quit
+    ));
+    assert_eq!(*opened.borrow(), 0);
 }
 
 #[test]

@@ -69,6 +69,13 @@ pub enum Effect {
     /// CLI to launch: `None` uses the workspace's configured agent (the common
     /// fast path), `Some(cli)` overrides it for this launch (`agent <name>`).
     OpenAgent(Option<AgentCli>),
+    /// Open an AI agent in the selected worktree already working on `prompt` (the
+    /// user ran `ai <prompt>`). Like [`OpenAgent`](Self::OpenAgent) it launches the
+    /// workspace's configured agent CLI in the session's worktree, but it also
+    /// hands the agent an opening prompt so it starts on the task at once. The
+    /// event loop resolves the directory and configured CLI, queues the prompt for
+    /// the fresh agent spawn, and launches the pane.
+    OpenAgentPrompt(String),
     /// Close (remove) the focused session (the user ran `close` in 在席). It is the
     /// session equivalent of `session remove <name>` (no `--force`): a clean
     /// session's worktrees/branches are deleted, but one with uncommitted changes
@@ -122,6 +129,7 @@ impl Effect {
             | Effect::RemoveSession { .. }
             | Effect::OpenTerminal
             | Effect::OpenAgent(_)
+            | Effect::OpenAgentPrompt(_)
             | Effect::OpenConfig
             | Effect::CloseSession
             | Effect::OpenPreview(_)

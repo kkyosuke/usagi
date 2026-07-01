@@ -3,9 +3,9 @@
 //! new commands can be added with [`CommandRegistry::register`].
 
 use super::builtins::{
-    AgentCommand, ClearCommand, CloseCommand, ComingSoonCommand, ConfigCommand, HistoryCommand,
-    IssueCommand, ManCommand, PreviewCommand, QuitCommand, SessionCommand, TerminalCommand,
-    UniteCommand,
+    AgentCommand, AiCommand, ClearCommand, CloseCommand, ComingSoonCommand, ConfigCommand,
+    HistoryCommand, IssueCommand, ManCommand, PreviewCommand, QuitCommand, SessionCommand,
+    TerminalCommand, UniteCommand,
 };
 use super::{
     Command, CommandContext, CommandHint, CommandInfo, CommandResult, CommandScope, Completion,
@@ -22,8 +22,9 @@ pub struct CommandRegistry {
 
 impl CommandRegistry {
     /// A registry with every built-in command, in display order. The not-yet
-    /// implemented feature commands (`ai`, `doctor`) are present as discoverable
-    /// "coming soon" placeholders; `session` and `terminal` are fully implemented.
+    /// implemented `doctor` command is present as a discoverable "coming soon"
+    /// placeholder; every other command (`session`, `terminal`, `agent`, `ai`, …)
+    /// is fully implemented.
     pub fn with_builtins() -> Self {
         Self {
             commands: vec![
@@ -31,13 +32,7 @@ impl CommandRegistry {
                 Box::new(UniteCommand),
                 Box::new(TerminalCommand),
                 Box::new(AgentCommand),
-                Box::new(ComingSoonCommand {
-                    name: "ai",
-                    description: "Talk to the AI agent",
-                    usage: "ai <prompt>",
-                    examples: &["ai fix the failing test"],
-                    scope: CommandScope::Session,
-                }),
+                Box::new(AiCommand),
                 Box::new(CloseCommand),
                 Box::new(ConfigCommand),
                 Box::new(IssueCommand),

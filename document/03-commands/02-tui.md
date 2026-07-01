@@ -15,7 +15,7 @@
 | 入力面 | スコープ | 出るコマンド |
 |---|---|---|
 | コマンドパレット（統括 / Overview。`:` で開く） | Workspace（全体） | `session` / `unite` / `issue` / `config` / `preview` |
-| 在席（Focus）の右ペイン | Session（個別） | `agent` / `close` / `terminal`（Menu はコマンド名のアルファベット順に並べる） |
+| 在席（Focus）の右ペイン | Session（個別） | `agent` / `ai` / `close` / `terminal`（Menu は引数不要の `agent` / `close` / `terminal` だけをコマンド名のアルファベット順に並べる。`ai <prompt>` は Prompt で入力する） |
 | 両方 | 共通 | `man` / `history` / `clear` / `quit` |
 
 ワークスペース全体のコマンドは、切替（Switch）・在席（Focus）から `:`（コロン）で開く**コマンドパレット**（中央オーバーレイ）で実行します。
@@ -37,6 +37,7 @@
 | `preview <path\|name>` | Markdown ファイルを右ペインにレンダリング表示（Workspace スコープ） |
 | `terminal` | 選択中セッションの worktree でシェルを右ペインに埋め込み起動（Session スコープ） |
 | `agent [名前]` | `terminal` ＋ Agent CLI を起動（Session スコープ）。引数なしは設定中の既定 CLI を起動。名前（`claude` / `codex` / `codex-fugu` / `sakana.ai` / `gemini`）を付けるとその CLI を起動する |
+| `ai <prompt>` | 設定中の既定 Agent CLI を選択中セッションの worktree で起動し、`<prompt>` を初期プロンプトとして渡す（Session スコープ。Prompt で入力する） |
 | `close` | 在席中のセッションを削除して切替へ移る（`session remove <名前>` と同じで `--force` は付けない。未コミット変更があれば削除を拒否し `--force` の案内をログに出す。Session スコープ） |
 | `config` | 現在のワークスペースのローカル設定を編集する Config 画面を開く（Workspace スコープ） |
 
@@ -134,11 +135,24 @@ Codex は `codex resume --last`（`codex-fugu` も同様に `codex-fugu resume -
 入力待ちの検知・`◆ waiting` マーカー・デスクトップ通知の挙動は
 [design/home/04-keys.md](../design/home/04-keys.md#使用中-agent-の表示入力待ちの検知と通知) を参照してください。
 
+## ai
+
+**在席の Prompt** から `ai <prompt>` と入力すると、設定中の**既定 Agent CLI**を選択中セッションの worktree で起動し、
+`<prompt>` を初期プロンプトとして渡します。起動先のディレクトリ・MCP 配線・会話再開の扱いは [`agent`](#agent) と同じです。
+
+- agent ペインがまだ無い場合: 既定 CLI を新規起動し、`<prompt>` を CLI の初期プロンプト引数として渡す。
+- agent ペインがすでにある場合: 既存の agent タブへ移動し、`<prompt>` をその対話入力へ送る。
+- `<prompt>` を省くと `usage: ai <prompt>` を表示して起動しない。
+- 既定 CLI がインストール済み候補から外れている場合は、Config でインストール済みの Agent CLI を選ぶよう案内して起動しない。
+
+在席の **Menu** は引数を入力できないため `ai` 行を出しません。`ai` を使うワークスペースでは
+[設定](../05-settings.md#設定項目)の `session_action_ui` を `prompt` にします。
+
 ## close
 
-**在席の右ペイン**から実行します。在席中のセッションを強制削除します。`session remove <名前> --force`
-と同じ挙動で、そのセッションの worktree・ブランチ・コピーを削除し、未コミット変更があっても破棄します。
-削除が成功するとセッションは消えるので、次のセッションを選べるよう**切替**へ移ります（基底の切替なので `Esc` での戻り先はありません）。
+**在席の右ペイン**から実行します。在席中のセッションを削除します。`session remove <名前>` と同じ挙動で、
+そのセッションの worktree・ブランチ・コピーを削除します。未コミット変更があるセッションは削除を拒否し、
+ログで `--force` 付き削除の案内を出します。削除が成功するとセッションは消えるので、次のセッションを選べるよう**切替**へ移ります（基底の切替なので `Esc` での戻り先はありません）。
 ルート行はワークスペースそのものでセッションではないため `close` できません。在席の Menu ではルート行で `close` を出さず、
 Prompt から打ってもエラーをログに出して在席に留まります。削除そのものはバックグラウンドのコールバックが行い、孤児ディレクトリの掃除など
 ライフサイクルの概念は [4. オーケストレーション](../04-orchestration.md) を参照してください。

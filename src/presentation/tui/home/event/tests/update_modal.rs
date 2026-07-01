@@ -100,7 +100,6 @@ fn run_update(keys: Vec<Key>) -> (Outcome, u32) {
         &monitor,
         &update,
         &SessionsRefreshHandle::new(),
-        &OneShot::<bool>::new(),
         &OneShot::<Vec<AgentCli>>::new(),
         &tasks,
         &mut wiring,

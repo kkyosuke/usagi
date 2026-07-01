@@ -115,13 +115,12 @@ pub(super) fn palette_key(
                     // The user quit the app from the settings screen.
                     None => return Ok(Flow::Quit),
                     // Back to home: the config screen may have changed the Session
-                    // Action UI (在席 mode's surface) or the local LLM's
-                    // availability, so apply the re-read settings — otherwise
-                    // Focus keeps rendering the old mode / `ai` visibility.
+                    // Action UI (在席 mode's surface) or the pane key scheme, so
+                    // apply the re-read settings — otherwise Focus / 没入 keep
+                    // rendering with the old settings.
                     Some(reload) => {
                         state.set_session_action_ui(reload.session_action_ui);
                         state.set_key_scheme(reload.key_scheme);
-                        state.set_ai_available(reload.ai_available);
                         painter.reset();
                     }
                 },
@@ -171,6 +170,7 @@ pub(super) fn palette_key(
                 | Effect::ShowText { .. }
                 | Effect::OpenTerminal
                 | Effect::OpenAgent(_)
+                | Effect::OpenAgentPrompt(_)
                 | Effect::CloseSession => {}
             }
         }
@@ -917,8 +917,7 @@ fn close_focused_session(state: &mut HomeState, wiring: &mut Wiring) {
 }
 
 /// 在席 menu surface: `↑`/`↓` move the cursor, `Enter` runs the highlighted
-/// command, and `t` / `a` are shortcuts for `terminal` / `agent`. `ai` runs its
-/// coming-soon line.
+/// command, and `t` / `a` are shortcuts for `terminal` / `agent`.
 ///
 /// On the `agent` row, `→` / `Tab` expands the agent picker (案A) when more than
 /// one CLI is installed; while it is expanded the keys drive the picker instead —
@@ -965,7 +964,8 @@ fn focus_menu_key(
 }
 
 /// 在席 prompt surface: edit / complete the session-scoped command line and run
-/// it on `Enter`, attaching the pane on `terminal` / `agent`.
+/// it on `Enter`, attaching the pane on `terminal` / `agent`, and launching the
+/// configured agent with an opening prompt on `ai <prompt>`.
 fn focus_prompt_key(
     term: &Term,
     state: &mut HomeState,
@@ -975,13 +975,16 @@ fn focus_prompt_key(
 ) {
     match key {
         Key::Enter => {
-            // `terminal` / `agent` attach the pane; `close` removes the session
-            // and leaves 在席; `ai` (coming soon) and anything else only log,
-            // staying in Focus.
+            // `terminal` / `agent` attach the pane; `ai <prompt>` attaches the
+            // configured agent and hands it that prompt; `close` removes the
+            // session and leaves 在席; anything else only logs, staying in Focus.
             let effect = state.focus_prompt_submit().effect;
             match effect {
                 Effect::OpenTerminal => launch_pane(term, state, painter, wiring, false),
                 Effect::OpenAgent(cli) => launch_agent(term, state, painter, wiring, cli),
+                Effect::OpenAgentPrompt(prompt) => {
+                    launch_agent_with_prompt(term, state, painter, wiring, prompt)
+                }
                 Effect::CloseSession => close_focused_session(state, wiring),
                 _ => {}
             }
@@ -1007,9 +1010,11 @@ fn focus_prompt_key(
     }
 }
 
-/// Run a named session command (`terminal` / `agent` / `ai`) from the 在席 menu:
-/// the two launch commands attach the pane (没入); `ai` logs its coming-soon
-/// line.
+/// Run a named session command from the 在席 menu. The menu is action-oriented, so
+/// only the zero-argument launch commands are runnable from it: `terminal` /
+/// `agent` attach a pane, and `close` removes the focused session. Prompt-taking
+/// commands such as `ai <prompt>` are intentionally kept out of the menu and are
+/// typed in the Prompt UI.
 fn run_focus_command(
     term: &Term,
     state: &mut HomeState,
@@ -1021,10 +1026,9 @@ fn run_focus_command(
         "terminal" => launch_pane(term, state, painter, wiring, false),
         // The menu's `agent` row / `a` shortcut launch the configured default.
         "agent" => launch_agent(term, state, painter, wiring, None),
-        // `close` removes the focused session forcefully and leaves 在席.
+        // `close` removes the focused session (without `--force`) and leaves 在席.
         "close" => close_focused_session(state, wiring),
-        // `ai` (and any future coming-soon command) just logs its line.
-        _ => state.log_output(format!("\"{name}\" is coming soon 🐰")),
+        _ => {}
     }
 }
 
@@ -1048,6 +1052,34 @@ fn launch_agent(
         }
     }
     state.set_agent_choice(cli);
+    launch_pane(term, state, painter, wiring, true);
+}
+
+/// Launch the configured agent with an opening prompt from `ai <prompt>`.
+///
+/// The prompt belongs to the worktree currently focused in 在席. The terminal
+/// pool consumes it only for a fresh agent-pane spawn; when the session already
+/// has an agent pane, it is sent directly to that live pane as interactive input.
+/// If the configured Agent CLI has not been probed as installed, refuse the
+/// command with a clear Config-oriented hint rather than opening a terminal that
+/// immediately fails with `command not found`.
+fn launch_agent_with_prompt(
+    term: &Term,
+    state: &mut HomeState,
+    painter: &mut FramePainter,
+    wiring: &mut Wiring,
+    prompt: String,
+) {
+    let cli = state.default_agent();
+    if !state.installed_agents().is_empty() && !state.installed_agents().contains(&cli) {
+        state.log_error(format!(
+            "Agent CLI is not configured or installed: {} (open config and choose an installed Agent CLI)",
+            cli.display_name()
+        ));
+        return;
+    }
+    state.set_agent_initial_prompt(prompt);
+    state.set_agent_choice(None);
     launch_pane(term, state, painter, wiring, true);
 }
 

@@ -188,18 +188,14 @@ fn focus_tab_prev_walks_the_new_tab_then_panes() {
 }
 
 #[test]
-fn focus_menu_hides_ai_until_the_local_llm_is_available() {
+fn focus_menu_hides_prompt_taking_ai_command() {
     // Focus a session row (not the root) so `close` is offered.
     let mut state = state();
     state.enter_focus(1);
-    // By default the local LLM is unavailable, so the `ai` command is hidden.
-    // The menu lists the remaining commands alphabetically.
+    // `ai <prompt>` needs typed arguments, so the pickable menu hides it and
+    // lists only zero-argument session actions alphabetically.
     let names: Vec<&str> = state.focus_menu_commands().iter().map(|i| i.name).collect();
     assert_eq!(names, vec!["agent", "close", "terminal"]);
-    // Once the local LLM is usable (enabled + model pulled), `ai` appears.
-    state.set_ai_available(true);
-    let names: Vec<&str> = state.focus_menu_commands().iter().map(|i| i.name).collect();
-    assert_eq!(names, vec!["agent", "ai", "close", "terminal"]);
 }
 
 #[test]
@@ -493,15 +489,15 @@ fn focus_prompt_submit_on_empty_input_is_a_noop() {
 }
 
 #[test]
-fn focus_prompt_runs_the_coming_soon_ai_command() {
+fn focus_prompt_runs_the_ai_prompt_command() {
     let mut state = state();
     state.enter_focus(1);
     for c in "ai hi".chars() {
         state.focus_prompt_mut().insert(c);
     }
     let submission = state.focus_prompt_submit();
-    assert_eq!(submission.effect, Effect::None);
-    assert!(state.log().last().unwrap().text.contains("coming soon"));
+    assert_eq!(submission.effect, Effect::OpenAgentPrompt("hi".to_string()));
+    assert!(submission.recorded.is_some());
 }
 
 #[test]

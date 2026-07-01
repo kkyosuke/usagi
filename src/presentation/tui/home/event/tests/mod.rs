@@ -12,14 +12,12 @@ use std::io;
 use std::path::PathBuf;
 use std::time::Duration;
 
-/// A [`ConfigReload`] carrying `ui` and the local LLM left unavailable — the
-/// shape the config-close callback returns in tests that only care about the
-/// 在席 surface.
+/// A [`ConfigReload`] carrying `ui` — the shape the config-close callback returns
+/// in tests that only care about the 在席 surface.
 fn reload(ui: SessionActionUi) -> ConfigReload {
     ConfigReload {
         session_action_ui: ui,
         key_scheme: crate::domain::settings::KeyScheme::default(),
-        ai_available: false,
     }
 }
 
@@ -235,7 +233,6 @@ fn run_at(keys: Vec<io::Result<Key>>, state: HomeState, root: &Path) -> Result<O
         root,
         &monitor,
         &UpdateHandle::new(),
-        &OneShot::<bool>::new(),
         &OneShot::<Vec<AgentCli>>::new(),
         &mut persist,
         &mut create,
@@ -289,7 +286,6 @@ fn run_full(
         Path::new("/ws"),
         &monitor,
         &UpdateHandle::new(),
-        &OneShot::<bool>::new(),
         &OneShot::<Vec<AgentCli>>::new(),
         &mut persist,
         create_session,
@@ -331,7 +327,6 @@ fn run_full_tabs(
         Path::new("/ws"),
         &monitor,
         &UpdateHandle::new(),
-        &OneShot::<bool>::new(),
         &OneShot::<Vec<AgentCli>>::new(),
         &mut persist,
         &mut create,
@@ -373,7 +368,6 @@ fn run_with_live_monitor(
         Path::new("/ws"),
         &monitor,
         &UpdateHandle::new(),
-        &OneShot::<bool>::new(),
         &OneShot::<Vec<AgentCli>>::new(),
         persist,
         &mut create,
@@ -421,15 +415,14 @@ fn state_with_sessions(names: &[&str]) -> HomeState {
     state
 }
 
-/// Run the loop with preset startup probe one-shots (local-LLM availability and
-/// the installed-agent list), all other callbacks no-op, quitting on the scripted
-/// keys — so the loop's drain of both probes is exercised. (The entry git-sync
-/// feeds the same `SessionsRefreshHandle` the pane-exit sync uses; its apply path
-/// is covered by `a_background_refresh_updates_the_session_list_exactly_once`.)
+/// Run the loop with a preset installed-agent startup probe, all other callbacks
+/// no-op, quitting on the scripted keys — so the loop's probe-drain path is
+/// exercised. (The entry git-sync feeds the same `SessionsRefreshHandle` the
+/// pane-exit sync uses; its apply path is covered by
+/// `a_background_refresh_updates_the_session_list_exactly_once`.)
 fn run_with_startup_probes(
     keys: Vec<io::Result<Key>>,
     state: HomeState,
-    ai_available: &OneShot<bool>,
     installed_agents: &OneShot<Vec<AgentCli>>,
 ) -> Result<Outcome> {
     let term = Term::stdout();
@@ -449,7 +442,6 @@ fn run_with_startup_probes(
         Path::new("/ws"),
         &monitor,
         &UpdateHandle::new(),
-        ai_available,
         installed_agents,
         &mut persist,
         &mut create,
@@ -520,7 +512,6 @@ fn run_capturing_attached_dirs_for_inputs(
         Path::new("/ws"),
         &monitor,
         &UpdateHandle::new(),
-        &OneShot::<bool>::new(),
         &OneShot::<Vec<AgentCli>>::new(),
         &mut persist,
         &mut create,
@@ -573,7 +564,6 @@ fn run_recording_rename(keys: Vec<io::Result<Key>>) -> (Vec<(String, String)>, O
         Path::new("/ws"),
         &monitor,
         &UpdateHandle::new(),
-        &OneShot::<bool>::new(),
         &OneShot::<Vec<AgentCli>>::new(),
         &mut persist,
         &mut create,
@@ -619,7 +609,6 @@ fn run_recording_reorder(
         Path::new("/ws"),
         &monitor,
         &UpdateHandle::new(),
-        &OneShot::<bool>::new(),
         &OneShot::<Vec<AgentCli>>::new(),
         &mut persist,
         &mut create,
@@ -667,7 +656,6 @@ fn run_recording_previews(
         Path::new("/ws"),
         &monitor,
         &UpdateHandle::new(),
-        &OneShot::<bool>::new(),
         &OneShot::<Vec<AgentCli>>::new(),
         &mut persist,
         &mut create,
@@ -762,7 +750,6 @@ fn run_with_tasks(
         &monitor,
         &UpdateHandle::new(),
         &SessionsRefreshHandle::new(),
-        &OneShot::<bool>::new(),
         &OneShot::<Vec<AgentCli>>::new(),
         tasks,
         &mut wiring,
@@ -824,7 +811,6 @@ fn run_with_live_session(reader: &mut dyn KeyReader) -> Result<Outcome> {
         &monitor,
         &UpdateHandle::new(),
         &SessionsRefreshHandle::new(),
-        &OneShot::<bool>::new(),
         &OneShot::<Vec<AgentCli>>::new(),
         &tasks,
         &mut wiring,
@@ -856,7 +842,6 @@ fn run_notes(
         Path::new("/ws"),
         &monitor,
         &UpdateHandle::new(),
-        &OneShot::<bool>::new(),
         &OneShot::<Vec<AgentCli>>::new(),
         &mut persist,
         &mut create,
@@ -974,7 +959,6 @@ fn unite_add_and_remove_run_through_the_palette() {
         &monitor,
         &UpdateHandle::new(),
         &SessionsRefreshHandle::new(),
-        &OneShot::<bool>::new(),
         &OneShot::<Vec<AgentCli>>::new(),
         &TaskHandle::new(),
         &mut wiring,
