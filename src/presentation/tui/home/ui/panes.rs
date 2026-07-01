@@ -1769,13 +1769,18 @@ fn menu_row(name: &str, desc: &str, selected: bool, width: usize) -> String {
 
 /// The 在席 menu's `agent` row: like a plain command row but its description
 /// names the agent a plain launch uses (the configured default) and carries an
-/// expand affordance — `▾` while the picker is open, `▸` when it can open (more
-/// than one CLI installed), nothing otherwise.
+/// expand affordance — `▾` while the picker is open, `▸` when the cursor is on
+/// this row and it can open (more than one CLI installed). When more than one
+/// CLI is installed but the cursor is elsewhere the slot is held with blanks so
+/// the description never shifts as the cursor moves on/off the row; with a
+/// single CLI (the chevron can never show) no slot is reserved.
 fn focus_agent_command_row(state: &HomeState, selected: bool, width: usize) -> String {
     let chevron = if state.focus_menu_expanded() {
         "▾ "
     } else if state.focus_menu_agent_can_expand() {
         "▸ "
+    } else if state.installed_agents().len() > 1 {
+        "  "
     } else {
         ""
     };
