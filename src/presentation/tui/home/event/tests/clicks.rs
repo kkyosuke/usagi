@@ -78,6 +78,18 @@ fn a_click_on_the_create_row_opens_the_inline_create_input() {
 }
 
 #[test]
+fn a_click_on_the_create_row_from_focus_opens_the_inline_create_input() {
+    // The same visible row also works while the right pane is in 在席: clicking it
+    // zooms back to 切替 and opens the create input.
+    let mut inputs = vec![click(0, CREATE_ROW)];
+    inputs.extend(typed("focus").into_iter().map(|key| key.map(Input::Key)));
+    inputs.push(Ok(Input::Key(Key::Enter)));
+    inputs.push(Ok(Input::Key(Key::CtrlC)));
+    let created = run_capturing_creates_for_inputs(inputs, focused_state());
+    assert_eq!(created, vec!["focus"]);
+}
+
+#[test]
 fn a_click_while_the_command_palette_is_open_is_ignored() {
     // With the `:` palette open the click is swallowed, so closing it (`Esc`) and
     // pressing `Enter` focuses the still-selected root row, not the clicked `feat`.
