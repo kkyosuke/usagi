@@ -16,6 +16,12 @@ use crate::domain::settings::KeyScheme;
 use crate::domain::version::Version;
 use crate::presentation::tui::widgets;
 
+/// Prefix shared by the persistent "+ new session" row and the inline
+/// `+ new: ...` editor that replaces it: a one-cell gutter plus a following
+/// space. Keeping this explicit prevents the `+` from jumping horizontally when
+/// the row enters input mode.
+const CREATE_ROW_INDENT: &str = "  ";
+
 /// Minimum / maximum display width of the active-session-name field in the
 /// title bar. The field scales with the terminal (a quarter of its width) and
 /// is clamped to this range, so a roomy window shows more of a long name while a
@@ -476,10 +482,21 @@ pub(super) fn switch_create_rows(
     let base = Style::new().green().bold();
     let (before, after) = input.split_at(cursor);
     let value = widgets::block_caret(before, after, &base);
-    let label = clip_to_width(&format!("{}{value}", base.apply_to("+ new: ")), left_w);
+    // Align the `+` with the persistent "+ new session" affordance it replaces:
+    // both sit two columns in (a one-cell gutter plus a space), so opening the
+    // input never shifts the glyph sideways. `CREATE_ROW_INDENT` is that shared
+    // two-column prefix.
+    let label = clip_to_width(
+        &format!("{CREATE_ROW_INDENT}{}{value}", base.apply_to("+ new: ")),
+        left_w,
+    );
     let mut rows = vec![label];
     if let Some(err) = error {
-        rows.push(style(clip_to_width(err, left_w)).red().to_string());
+        rows.push(
+            style(clip_to_width(&format!("{CREATE_ROW_INDENT}{err}"), left_w))
+                .red()
+                .to_string(),
+        );
     }
     rows
 }
