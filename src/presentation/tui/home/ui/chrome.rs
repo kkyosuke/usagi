@@ -134,6 +134,32 @@ pub(super) fn task_status_line(rows: &[TaskRow], width: usize) -> Vec<String> {
     vec![line1, line2]
 }
 
+/// The Nerd Font bell (`nf-fa-bell`) leading the top-right waiting notice — the
+/// familiar "notification" glyph, so an at-a-glance count of sessions paused for
+/// the user reads as an alert rather than blending into the per-session `◆`.
+const WAITING_ICON: char = '\u{f0f3}'; // nf-fa-bell — a session wants attention
+
+/// The top-right "you have sessions waiting" notice: a single fixed-shape row
+/// (`<bell> N waiting`) drawn in the sidebar's waiting colour (yellow-bold) so
+/// the header carries an at-a-glance count of how many sessions have paused for
+/// the user's input or a permission, even when those rows are scrolled out of
+/// the sidebar or the pane is collapsed to the rail. The count shares the
+/// per-session badge's hue, and leads with the Nerd Font bell
+/// ([`WAITING_ICON`]) so it reads as a notification.
+///
+/// Returns no lines when nothing is waiting (`count == 0`), so the caller falls
+/// back to whatever else wants the corner. Anchored to the header rows by
+/// [`overlay_top_right`](super::overlay_top_right) like the task status block,
+/// so it tucks into the blank right column beside the centred title and never
+/// collides with the right pane below.
+pub(super) fn waiting_notice(count: usize) -> Vec<String> {
+    if count == 0 {
+        return Vec::new();
+    }
+    let label = format!("{WAITING_ICON} {count} waiting");
+    vec![style(label).yellow().bold().to_string()]
+}
+
 /// The engagement-ladder indicator drawn just under the title bar: the three
 /// modes in order with the current one highlighted (cyan-bold) and the rest
 /// dimmed, so the screen always shows which step the keys act on. Centred for
