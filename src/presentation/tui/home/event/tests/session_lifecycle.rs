@@ -160,6 +160,8 @@ fn create_row_keeps_arrow_escape_and_ignored_key_paths() {
         Ok(Key::ArrowDown), // main -> "+ new session"
         Ok(Key::ArrowUp),   // create -> main
         Ok(Key::ArrowDown), // main -> create
+        Ok(Key::ArrowDown), // create -> root
+        Ok(Key::ArrowUp),   // root -> create
         Ok(Key::ArrowLeft), // ignored on create row
         Ok(Key::Escape),    // handled on create row (base Switch stays put)
         Ok(Key::CtrlC),
