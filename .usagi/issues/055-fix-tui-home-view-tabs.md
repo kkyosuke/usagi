@@ -1,13 +1,13 @@
 ---
 number: 55
 title: fix(tui-home): 右ペイン状態（view/tabs/バッジ）の二重書き込みを単一所有化する
-status: todo
+status: done
 priority: high
 labels: [refactor, tui, review]
 dependson: []
 related: []
 created_at: 2026-06-19T22:15:34.983774+00:00
-updated_at: 2026-06-19T22:15:34.983774+00:00
+updated_at: 2026-07-01T22:25:31.456655+00:00
 ---
 
 ## 背景

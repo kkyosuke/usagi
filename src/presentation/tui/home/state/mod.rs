@@ -155,12 +155,21 @@ impl LoadingIndicator {
 /// snapshot" path any more — the asymmetry that let a stale view linger after the
 /// pane yielded control (it cleared its tabs but left the view for the event
 /// loop's next frame to mop up). Exactly one party drives the surface at a time:
-/// the event loop while previewing a session in 切替 (Switch), and the
-/// embedded-terminal driver while a session is 没入 (Attached). Each clears it via
-/// [`HomeState::clear_terminal_surface`] when it yields, so a snapshot never
-/// outlives the mode that produced it regardless of *when* control changes hands.
+/// the event loop while previewing a session in 切替 (Switch) / 在席 (Focus), and
+/// the embedded-terminal driver while a session is 没入 (Attached).
+///
+/// Which party that is is no longer a bare convention: the surface can only be
+/// written through a [`SurfaceWriter`] obtained from
+/// [`HomeState::surface_writer`], keyed to the [`SurfaceOwner`] that claimed it.
+/// [`claim`](Self::claim) drops whatever a *different* owner left behind, so a
+/// stale snapshot can never outlive the hand-off regardless of *when* — or
+/// whether — the previous owner remembered to clear on yield.
 #[derive(Default)]
 struct TerminalSurface {
+    /// Which party last published the surface, or `None` when it is empty. The
+    /// gate [`claim`](Self::claim) checks to decide whether the incoming owner is
+    /// taking over from the other party (drop its snapshot) or refreshing its own.
+    owner: Option<SurfaceOwner>,
     /// The latest snapshot of the embedded terminal's screen, set while a session
     /// is 没入 (Attached) or previewed in 切替 (Switch) and rendered in the right
     /// pane.
@@ -169,6 +178,82 @@ struct TerminalSurface {
     /// which one is active. Published alongside the snapshot by whichever party
     /// owns the surface; `None` outside 没入 / a 切替 preview.
     tabs: Option<TabStrip>,
+}
+
+impl TerminalSurface {
+    /// Claim the surface for `owner`, discarding any snapshot a *different* owner
+    /// left behind so the two never mix. A re-claim by the current owner keeps
+    /// what it already published — the event loop re-deriving its own preview, or
+    /// the pane driver refreshing its own live screen — so the hot per-frame path
+    /// does not churn the snapshot it is about to overwrite anyway.
+    fn claim(&mut self, owner: SurfaceOwner) {
+        if self.owner != Some(owner) {
+            self.view = None;
+            self.tabs = None;
+            self.owner = Some(owner);
+        }
+    }
+}
+
+/// Which party is currently publishing the embedded-terminal surface (the
+/// right-pane screen snapshot + tab strip). Exactly one drives it at a time — the
+/// home event loop while it previews the highlighted / focused session (切替 /
+/// 在席), and the embedded-terminal driver while a session is 没入 (Attached) — and
+/// [`HomeState::surface_writer`] is the only way to publish to it. Naming the
+/// owner at the write is what makes the single-owner rule enforced rather than
+/// merely documented: taking over from the other party drops its leftovers (see
+/// [`TerminalSurface::claim`]).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SurfaceOwner {
+    /// The home event loop, previewing the highlighted (切替) / focused (在席)
+    /// session's live terminal in the right pane.
+    Preview,
+    /// The embedded-terminal driver, while a session is 没入 (Attached).
+    Attached,
+}
+
+/// The sole handle for publishing the embedded-terminal surface, tied to the
+/// [`SurfaceOwner`] that claimed it via [`HomeState::surface_writer`]. Holding it
+/// is what enforces single-owner publishing: a party cannot set the screen
+/// snapshot or the tab strip without first naming itself the owner, and doing so
+/// drops a *different* owner's snapshot up front — so no stale frame survives the
+/// hand-off between 切替 / 在席 previews and 没入.
+pub struct SurfaceWriter<'a> {
+    surface: &'a mut TerminalSurface,
+}
+
+impl SurfaceWriter<'_> {
+    /// Publish the latest embedded-terminal screen snapshot, shown in the right
+    /// pane while the session is 没入 (Attached) or previewed in 切替 (Switch) /
+    /// 在席 (Focus).
+    pub fn set_view(&mut self, view: TerminalView) {
+        self.surface.view = Some(view);
+    }
+
+    /// Publish the tab strip shown above the embedded terminal: the session's
+    /// pane `labels` and which one is `active`.
+    pub fn set_tabs(&mut self, labels: Vec<String>, active: usize) {
+        self.surface.tabs = Some(TabStrip { labels, active });
+    }
+}
+
+/// The sole handle for replacing the activity badge snapshot
+/// (running / waiting / live / done), tied to the [`SurfaceOwner`] that claimed
+/// it via [`HomeState::badge_writer`]. The snapshot itself is already an atomic
+/// value (all four sets are read under one monitor lock and replaced together);
+/// this handle adds the missing ownership boundary, so the event loop and the
+/// embedded-terminal driver cannot both update badge state without explicitly
+/// naming who is driving the screen at that moment.
+pub struct BadgeWriter<'a> {
+    state: &'a mut HomeState,
+}
+
+impl BadgeWriter<'_> {
+    /// Replace every session activity badge set at once with a fresh reading
+    /// from the terminal monitor.
+    pub fn apply(&mut self, badges: MonitorSnapshot) {
+        self.state.replace_badges(badges);
+    }
 }
 
 /// The most command-history entries kept in memory (and seeded from disk). A
@@ -493,11 +578,18 @@ pub struct HomeState {
     terminal: TerminalSurface,
     /// The session activity badge sets read together from the terminal monitor
     /// before each redraw: the worktree paths whose agent is running / waiting /
-    /// live / done. Stored as one [`MonitorSnapshot`] and replaced wholesale by
-    /// [`apply_badges`](Self::apply_badges), so a frame never mixes one set's
-    /// fresh reading with another's stale one. Rendering precedence among them
-    /// (done > waiting > running, atop live) lives in the sidebar renderer.
+    /// live / done. Stored as one [`MonitorSnapshot`] and replaced wholesale by a
+    /// [`BadgeWriter`] claimed through [`badge_writer`](Self::badge_writer), so a
+    /// frame never mixes one set's fresh reading with another's stale one *and*
+    /// the screen driver updating it is explicit. Rendering precedence among
+    /// them (done > waiting > running, atop live) lives in the sidebar renderer.
     badges: MonitorSnapshot,
+    /// Which screen driver last replaced [`badges`](Self::badges). The value is
+    /// not needed to merge the snapshot (replacement is atomic), but recording it
+    /// in the same owner vocabulary as [`terminal`](Self::terminal) makes badge
+    /// writes go through the same single-owner gate instead of two call sites
+    /// mutating screen state by convention.
+    badge_owner: Option<SurfaceOwner>,
     /// When set, the left pane lists the sessions whose agent is waiting for
     /// input (◆) first, so the next session to touch is at the top. Toggled with
     /// `s` in 切替. The order is a *display* concern only: `sessions` stays in its
@@ -674,6 +766,7 @@ impl HomeState {
             sessions: Vec::new(),
             terminal: TerminalSurface::default(),
             badges: MonitorSnapshot::default(),
+            badge_owner: None,
             sort_waiting: false,
             response_start: 0,
             issues: Vec::new(),
@@ -1456,9 +1549,9 @@ impl HomeState {
     }
 
     /// Enter 没入 (Attached): an embedded terminal / agent is going live in the
-    /// right pane. The first snapshot arrives via [`set_terminal_view`].
-    ///
-    /// [`set_terminal_view`]: Self::set_terminal_view
+    /// right pane. The first snapshot arrives via a
+    /// [`SurfaceOwner::Attached`] writer from
+    /// [`surface_writer`](Self::surface_writer).
     pub fn show_attached(&mut self) {
         self.mode = Mode::Attached;
     }
@@ -1482,41 +1575,69 @@ impl HomeState {
         self.prefix_pending = false;
     }
 
-    /// Publish the tab strip shown above the embedded terminal: the session's
-    /// pane `labels` and which one is `active`. Published alongside
-    /// [`set_terminal_view`](Self::set_terminal_view) by whichever party owns the
-    /// surface (the pane driver in 没入, the event loop's 切替 preview).
-    pub fn set_terminal_tabs(&mut self, labels: Vec<String>, active: usize) {
-        self.terminal.tabs = Some(TabStrip { labels, active });
-    }
-
     /// The tab strip shown above the embedded terminal, when the surface is live.
     pub fn terminal_tabs(&self) -> Option<&TabStrip> {
         self.terminal.tabs.as_ref()
     }
 
-    /// Store the latest embedded-terminal screen snapshot, shown in the right
-    /// pane while the session is 没入 (Attached) or previewed in 切替 (Switch).
-    pub fn set_terminal_view(&mut self, view: TerminalView) {
-        self.terminal.view = Some(view);
+    /// Claim the embedded-terminal surface for `owner` and return the only handle
+    /// that can publish a view or tab strip to it. Claiming from a different owner
+    /// first drops that owner's snapshot as a unit, so the right pane cannot be
+    /// composed from a stale view written by one party and tabs written by the
+    /// other.
+    pub fn surface_writer(&mut self, owner: SurfaceOwner) -> SurfaceWriter<'_> {
+        self.terminal.claim(owner);
+        SurfaceWriter {
+            surface: &mut self.terminal,
+        }
     }
 
     /// Drop the embedded-terminal surface — both the screen snapshot and the tab
-    /// strip — without changing the mode. Whichever party owns the surface calls
-    /// this when it yields control (the event loop between frames, the pane driver
-    /// when it leaves 没入), so a stale snapshot never lingers in the right pane.
-    /// Clearing the two together is the whole point of bundling them: there is no
-    /// path that drops one and forgets the other.
+    /// strip — without changing the mode. Clearing the two together is the whole
+    /// point of bundling them: there is no path that drops one and forgets the
+    /// other. It also releases ownership, so the next writer must explicitly claim
+    /// the surface before publishing.
     pub fn clear_terminal_surface(&mut self) {
         self.terminal = TerminalSurface::default();
     }
 
+    /// Test-only convenience for publishing a tab strip without making every UI
+    /// renderer test spell out the ownership claim. Production code uses
+    /// [`surface_writer`](Self::surface_writer), so the single-writer hand-off is
+    /// enforced outside tests.
+    #[cfg(test)]
+    pub fn set_terminal_tabs(&mut self, labels: Vec<String>, active: usize) {
+        self.surface_writer(SurfaceOwner::Preview)
+            .set_tabs(labels, active);
+    }
+
+    /// Test-only convenience for publishing a terminal snapshot without making
+    /// every UI renderer test spell out the ownership claim. Production code uses
+    /// [`surface_writer`](Self::surface_writer), so the single-writer hand-off is
+    /// enforced outside tests.
+    #[cfg(test)]
+    pub fn set_terminal_view(&mut self, view: TerminalView) {
+        self.surface_writer(SurfaceOwner::Preview).set_view(view);
+    }
+
+    /// Claim the activity badge snapshot for `owner` and return the only handle
+    /// that can replace it. The snapshot itself is replaced as a unit, and the
+    /// claim makes the write owner explicit (the event loop between frames, or
+    /// the pane driver while a session is 没入) instead of letting both mutate the
+    /// home state directly.
+    pub fn badge_writer(&mut self, owner: SurfaceOwner) -> BadgeWriter<'_> {
+        if self.badge_owner != Some(owner) {
+            self.badge_owner = Some(owner);
+        }
+        BadgeWriter { state: self }
+    }
+
     /// Replace every session activity badge set at once with a fresh reading from
-    /// the terminal monitor (running / waiting / live / done). Called before each
-    /// redraw by whichever party is driving the screen — the event loop between
-    /// frames, the pane driver while a session is 没入. Replacing them as a unit
-    /// keeps the four sets consistent with one another (all from the same lock).
-    pub fn apply_badges(&mut self, badges: MonitorSnapshot) {
+    /// the terminal monitor (running / waiting / live / done). Kept private so
+    /// production callers must go through [`badge_writer`](Self::badge_writer) and
+    /// declare which screen driver owns this write. Replacing them as a unit keeps
+    /// the four sets consistent with one another (all from the same lock).
+    fn replace_badges(&mut self, badges: MonitorSnapshot) {
         // With the waiting-first sort on, a session entering or leaving the
         // waiting set changes the row order, so rebuild the pane (keeping the
         // cursor by name). Compared before the move, and only when the *waiting*
@@ -1541,10 +1662,19 @@ impl HomeState {
         }
     }
 
-    /// The badge sets the last [`apply_badges`](Self::apply_badges) stored, so a
-    /// render loop can compare a freshly read snapshot against what it last drew
-    /// and skip the repaint when nothing moved — without keeping (and cloning into)
-    /// its own copy each frame.
+    /// Test-only convenience for replacing badge sets without making every state
+    /// test spell out the ownership claim. Production code uses
+    /// [`badge_writer`](Self::badge_writer), so the single-writer ownership is
+    /// enforced outside tests.
+    #[cfg(test)]
+    pub fn apply_badges(&mut self, badges: MonitorSnapshot) {
+        self.badge_writer(SurfaceOwner::Preview).apply(badges);
+    }
+
+    /// The badge sets the last [`BadgeWriter::apply`] stored, so a render loop can
+    /// compare a freshly read snapshot against what it last drew and skip the
+    /// repaint when nothing moved — without keeping (and cloning into) its own
+    /// copy each frame.
     pub fn badges(&self) -> &MonitorSnapshot {
         &self.badges
     }
