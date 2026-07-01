@@ -6,7 +6,7 @@
 use console::{style, Style};
 
 use super::super::command::{CommandHint, Hint};
-use super::super::state::{HomeState, Mode, RemoveModal, TextModal, WorktreeList};
+use super::super::state::{HomeState, Mode, RemoveModal, TabMenu, TextModal, WorktreeList};
 use super::super::tasks::{TaskMark, TaskRow};
 use super::panes::log_line;
 use super::{
@@ -498,6 +498,38 @@ pub(super) fn switch_rename_rows(
         left_w,
     );
     vec![label]
+}
+
+pub(super) fn tab_menu_box(menu: &TabMenu) -> Vec<String> {
+    let rows: Vec<String> = super::super::state::TabMenuItem::ALL
+        .iter()
+        .enumerate()
+        .map(|(idx, item)| {
+            let marker = if idx == menu.cursor() { "›" } else { " " };
+            let line = format!("{marker} {}", item.label());
+            if idx == menu.cursor() {
+                style(line).cyan().bold().to_string()
+            } else {
+                style(line).dim().to_string()
+            }
+        })
+        .collect();
+    widgets::boxed(&format!("tab {}", menu.tab() + 1), 12, &rows)
+}
+
+pub(super) fn tab_rename_body(label: &str, cursor: usize, width: usize) -> Vec<String> {
+    let base = Style::new().cyan().bold();
+    let (before, after) = label.split_at(cursor);
+    let value = widgets::block_caret(before, after, &base);
+    vec![
+        style("Rename tab label. Empty resets to default.")
+            .dim()
+            .to_string(),
+        String::new(),
+        clip_to_width(&format!("{} {value}", base.apply_to("label:")), width),
+        String::new(),
+        style("Enter save · Esc cancel").dim().to_string(),
+    ]
 }
 
 /// Builds one removal-modal row: a `>` cursor for the highlighted entry, a

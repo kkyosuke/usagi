@@ -35,6 +35,10 @@ pub(super) enum Overlay {
     Create(CreateInput),
     /// The inline display-name input open while renaming a session from 切替.
     Rename(RenameInput),
+    /// A context menu opened by right-clicking a live-pane tab chip.
+    TabMenu(TabMenu),
+    /// The inline label input opened from the tab context menu.
+    TabRename(TabRenameInput),
     /// The session-removal checklist modal.
     Remove(RemoveModal),
     /// The scrollable text modal (a text-dumping command's output).
@@ -43,6 +47,166 @@ pub(super) enum Overlay {
     Preview(Preview),
     /// The session-note editor modal.
     Note(NoteEditor),
+}
+
+/// Which tab-menu row is currently highlighted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TabMenuItem {
+    MoveLeft,
+    MoveRight,
+    Rename,
+    Close,
+}
+
+impl TabMenuItem {
+    pub const ALL: [Self; 4] = [Self::MoveLeft, Self::MoveRight, Self::Rename, Self::Close];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::MoveLeft => "Move left",
+            Self::MoveRight => "Move right",
+            Self::Rename => "Rename",
+            Self::Close => "Close",
+        }
+    }
+}
+
+/// Context menu opened from a live-pane tab chip. It records the screen anchor so
+/// the renderer can float the menu beside the clicked chip, and the session/tab
+/// target so the event loop can apply the selected operation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TabMenu {
+    dir: PathBuf,
+    tab: usize,
+    label: String,
+    col: u16,
+    row: u16,
+    cursor: usize,
+}
+
+impl TabMenu {
+    pub(super) fn new(
+        dir: PathBuf,
+        tab: usize,
+        label: impl Into<String>,
+        col: u16,
+        row: u16,
+    ) -> Self {
+        Self {
+            dir,
+            tab,
+            label: label.into(),
+            col,
+            row,
+            cursor: 0,
+        }
+    }
+
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
+
+    pub fn tab(&self) -> usize {
+        self.tab
+    }
+
+    pub fn label(&self) -> &str {
+        &self.label
+    }
+
+    pub fn col(&self) -> u16 {
+        self.col
+    }
+
+    pub fn row(&self) -> u16 {
+        self.row
+    }
+
+    pub fn cursor(&self) -> usize {
+        self.cursor
+    }
+
+    pub fn item(&self) -> TabMenuItem {
+        TabMenuItem::ALL[self.cursor]
+    }
+
+    pub fn move_up(&mut self) {
+        self.cursor = if self.cursor == 0 {
+            TabMenuItem::ALL.len() - 1
+        } else {
+            self.cursor - 1
+        };
+    }
+
+    pub fn move_down(&mut self) {
+        self.cursor = (self.cursor + 1) % TabMenuItem::ALL.len();
+    }
+}
+
+/// Inline tab-label editor opened from [`TabMenuItem::Rename`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TabRenameInput {
+    dir: PathBuf,
+    tab: usize,
+    input: TextInput,
+}
+
+impl TabRenameInput {
+    pub(super) fn new(dir: PathBuf, tab: usize, label: impl Into<String>) -> Self {
+        Self {
+            dir,
+            tab,
+            input: TextInput::with_value(label),
+        }
+    }
+
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
+
+    pub fn tab(&self) -> usize {
+        self.tab
+    }
+
+    pub fn value(&self) -> &str {
+        self.input.value()
+    }
+
+    pub fn cursor(&self) -> usize {
+        self.input.cursor()
+    }
+
+    pub fn push_char(&mut self, c: char) {
+        self.input.insert(c);
+    }
+
+    pub fn backspace(&mut self) {
+        self.input.backspace();
+    }
+
+    pub fn delete_forward(&mut self) {
+        self.input.delete_forward();
+    }
+
+    pub fn move_left(&mut self) {
+        self.input.move_left();
+    }
+
+    pub fn move_right(&mut self) {
+        self.input.move_right();
+    }
+
+    pub fn move_home(&mut self) {
+        self.input.move_home();
+    }
+
+    pub fn move_end(&mut self) {
+        self.input.move_end();
+    }
+
+    pub(super) fn confirm(self) -> (PathBuf, usize, String) {
+        (self.dir, self.tab, self.input.value().trim().to_string())
+    }
 }
 
 impl Overlay {

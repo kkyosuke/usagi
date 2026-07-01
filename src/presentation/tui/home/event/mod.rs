@@ -26,6 +26,7 @@ use super::state::{
 use super::tasks::TaskHandle;
 use super::terminal::pool::MonitorHandle;
 use super::terminal::tabs::TabNav;
+use super::terminal::tabs::TabSwap;
 use super::terminal::view::TerminalView;
 use super::ui;
 use super::update::UpdateHandle;
@@ -89,6 +90,14 @@ const CTRL_Q: char = '\u{0011}';
 /// Backed by the [`TerminalPool`](super::terminal::pool::TerminalPool) the pane
 /// driver shares, so a tab moved here is the one re-attaching reveals.
 pub(super) type TabOp<'a> = dyn FnMut(&Path, Option<TabNav>) -> (Vec<String>, usize) + 'a;
+pub(super) type TabActionOp<'a> = dyn FnMut(&mut HomeState, &Path, usize, TabMenuAction) + 'a;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum TabMenuAction {
+    Move(TabSwap),
+    Rename(String),
+    Close,
+}
 
 /// The settings-derived values re-read when the config screen closes, so an
 /// edit takes effect without reopening the home screen: the 在席 (Focus)
@@ -181,6 +190,8 @@ pub(super) struct Wiring<'a> {
     pub tab_op: &'a mut TabOp<'a>,
     /// Close the highlighted session's active tab (pane) from 切替.
     pub close_tab: &'a mut dyn FnMut(&mut HomeState, &Path),
+    /// Apply a tab-context-menu action to a concrete tab.
+    pub tab_action: &'a mut TabActionOp<'a>,
     /// Persist the engagement to restore on the next launch — the focused
     /// session's name and how deeply it was engaged — called when a quit is
     /// confirmed. [`super::run`] writes it to the resume-focus store (gated by the
@@ -280,6 +291,8 @@ fn click_selects_session(state: &HomeState) -> bool {
         && state.text_modal().is_none()
         && state.preview().is_none()
         && state.note_editor().is_none()
+        && state.tab_menu().is_none()
+        && state.tab_rename().is_none()
         && !state.command_palette_open()
         && !state.is_creating()
         && !state.is_renaming()
@@ -680,6 +693,41 @@ pub(super) fn event_loop(
                 }
                 continue;
             }
+            Input::RightClick(click) => {
+                bump_interaction_epoch(wiring);
+                state.set_pr_popup(None);
+                let hit = match state.mode() {
+                    Mode::Switch => ui::switch_tab_hit(
+                        &state,
+                        click.col,
+                        click.row,
+                        height as usize,
+                        width as usize,
+                    ),
+                    Mode::Focus => ui::focus_tab_hit(
+                        &state,
+                        click.col,
+                        click.row,
+                        height as usize,
+                        width as usize,
+                    ),
+                    Mode::Attached => None,
+                };
+                if let Some(index) = hit {
+                    let dir = selected_dir(&state, wiring.workspace_root);
+                    let label = state
+                        .terminal_tabs()
+                        .and_then(|tabs| tabs.labels.get(index))
+                        .cloned()
+                        .unwrap_or_else(|| format!("tab {}", index + 1));
+                    state.open_tab_menu(dir, index, label, click.col, click.row);
+                    force_paint = true;
+                } else if state.tab_menu().is_some() {
+                    state.close_tab_menu();
+                    force_paint = true;
+                }
+                continue;
+            }
             // A bare pointer move no longer drives the PR popup — it is pinned by a
             // badge click and dismissed only by a click or a keypress — so motion
             // reports are ignored. Moving the pointer toward the popup to click a
@@ -775,6 +823,84 @@ pub(super) fn event_loop(
         // and `open_pane` opens the same modal on the way out.)
         if let Key::Char(CTRL_Q) = key {
             state.open_quit_confirm();
+            continue;
+        }
+
+        if state.tab_menu().is_some() {
+            match key {
+                Key::ArrowUp | Key::Char('k') => {
+                    if let Some(menu) = state.tab_menu_mut() {
+                        menu.move_up();
+                    }
+                }
+                Key::ArrowDown | Key::Char('j') => {
+                    if let Some(menu) = state.tab_menu_mut() {
+                        menu.move_down();
+                    }
+                }
+                Key::Escape => state.close_tab_menu(),
+                Key::Enter => {
+                    if let Some((dir, tab, item)) = state
+                        .tab_menu()
+                        .map(|menu| (menu.dir().to_path_buf(), menu.tab(), menu.item()))
+                    {
+                        match item {
+                            super::state::TabMenuItem::MoveLeft => {
+                                state.close_tab_menu();
+                                (wiring.tab_action)(
+                                    &mut state,
+                                    &dir,
+                                    tab,
+                                    TabMenuAction::Move(TabSwap::Left),
+                                );
+                            }
+                            super::state::TabMenuItem::MoveRight => {
+                                state.close_tab_menu();
+                                (wiring.tab_action)(
+                                    &mut state,
+                                    &dir,
+                                    tab,
+                                    TabMenuAction::Move(TabSwap::Right),
+                                );
+                            }
+                            super::state::TabMenuItem::Rename => {
+                                state.begin_tab_rename_from_menu();
+                            }
+                            super::state::TabMenuItem::Close => {
+                                state.close_tab_menu();
+                                (wiring.tab_action)(&mut state, &dir, tab, TabMenuAction::Close);
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+            continue;
+        }
+
+        if state.tab_rename().is_some() {
+            match key {
+                Key::Enter => {
+                    if let Some((dir, tab, label)) = state.confirm_tab_rename() {
+                        (wiring.tab_action)(&mut state, &dir, tab, TabMenuAction::Rename(label));
+                    }
+                }
+                Key::Escape => state.cancel_tab_rename(),
+                _ => {
+                    if let Some(rename) = state.tab_rename_mut() {
+                        match key {
+                            Key::Backspace => rename.backspace(),
+                            Key::Del => rename.delete_forward(),
+                            Key::ArrowLeft => rename.move_left(),
+                            Key::ArrowRight => rename.move_right(),
+                            Key::Home => rename.move_home(),
+                            Key::End => rename.move_end(),
+                            Key::Char(c) if !c.is_control() => rename.push_char(c),
+                            _ => {}
+                        }
+                    }
+                }
+            }
             continue;
         }
 
@@ -1113,6 +1239,7 @@ pub(crate) fn event_loop_compat(
     // never shell out; the open path itself is covered by the dedicated popup tests
     // that build a capturing `Wiring`.
     let mut open_url = |_: &str| {};
+    let mut tab_action = |_: &mut HomeState, _: &Path, _: usize, _: TabMenuAction| {};
     let mut wiring = Wiring {
         interaction_epoch: 0,
         workspace_root,
@@ -1132,6 +1259,7 @@ pub(crate) fn event_loop_compat(
         preview: &mut preview,
         tab_op: &mut tab_op,
         close_tab: &mut close_tab,
+        tab_action: &mut tab_action,
         save_resume: &mut save_resume,
         save_last_active: &mut save_last_active,
     };

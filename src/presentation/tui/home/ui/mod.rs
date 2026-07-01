@@ -24,12 +24,15 @@ use crate::presentation::tui::widgets::{clip_to_width, clip_to_width_cow};
 
 use chrome::{
     command_palette_body, footer_line, input_line, mode_ladder, quit_confirm_frame,
-    remove_modal_body, switch_create_rows, switch_rename_rows, task_status_line, text_modal_body,
-    title_bar, update_confirm_frame, PALETTE_INNER, REMOVE_MODAL_INNER, TEXT_MODAL_INNER,
+    remove_modal_body, switch_create_rows, switch_rename_rows, tab_menu_box, tab_rename_body,
+    task_status_line, text_modal_body, title_bar, update_confirm_frame, PALETTE_INNER,
+    REMOVE_MODAL_INNER, TEXT_MODAL_INNER,
 };
 use panes::{group_inline_insert_line, left_pane, right_pane_contents};
 // The right-pane tab strips map clicks to the tab under them through these.
-pub(super) use panes::{attached_tab_at, attached_tab_hit, focus_tab_at, switch_tab_at};
+pub(super) use panes::{
+    attached_tab_at, attached_tab_hit, focus_tab_at, focus_tab_hit, switch_tab_at, switch_tab_hit,
+};
 // …a click on a sidebar session's PR badge to that session (to pin its PR popup).
 pub(super) use panes::sidebar_pr_badge_at;
 // …and a click anywhere to the pinned PR popup: open a `#<number>`, or dismiss it.
@@ -473,6 +476,16 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
         widgets::overlay_at(&mut lines, width, top, left, &popup);
     }
 
+    if let Some(menu) = state.tab_menu() {
+        widgets::overlay_at(
+            &mut lines,
+            width,
+            menu.row() as usize,
+            menu.col() as usize,
+            &tab_menu_box(menu),
+        );
+    }
+
     lines.extend(input_lines);
     lines.push(footer_line(width, state));
 
@@ -533,6 +546,13 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
         let inner = widgets::modal_inner_width(width, REMOVE_MODAL_INNER);
         let body = remove_modal_body(modal, inner);
         widgets::overlay_modal(&mut lines, width, "Remove sessions", inner, &body);
+    }
+
+    if let Some(input) = state.tab_rename() {
+        const TAB_RENAME_INNER: usize = 44;
+        let inner = widgets::modal_inner_width(width, TAB_RENAME_INNER);
+        let body = tab_rename_body(input.value(), input.cursor(), inner);
+        widgets::overlay_modal(&mut lines, width, "Rename tab", inner, &body);
     }
 
     lines

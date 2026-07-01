@@ -8,10 +8,15 @@
 
 use super::*;
 use crate::presentation::tui::home::terminal::pool::MonitorSnapshot;
+use crate::presentation::tui::home::terminal::tabs::TabSwap;
 
 /// A left-button click input at the 0-based screen (`col`, `row`).
 fn click(col: u16, row: u16) -> io::Result<Input> {
     Ok(Input::Click(ClickEvent { col, row }))
+}
+
+fn right_click(col: u16, row: u16) -> io::Result<Input> {
+    Ok(Input::RightClick(ClickEvent { col, row }))
 }
 
 /// Screen row of the first line of the second worktree (`feat`, selectable index
@@ -272,6 +277,114 @@ fn a_click_on_a_switch_right_pane_tab_switches_the_previewed_live_pane() {
     .unwrap();
     assert!(matches!(outcome, Outcome::Quit));
     assert_eq!(*navs.borrow(), vec![TabNav::To(1)]);
+}
+
+#[test]
+fn a_right_click_on_a_switch_tab_opens_a_menu_and_runs_the_selected_action() {
+    let term = Term::stdout();
+    let (height, width) = term.size();
+    let mut state = sample_state();
+    state.apply_badges(MonitorSnapshot {
+        live: [PathBuf::from("/r/feat")].into(),
+        ..Default::default()
+    });
+    state.switch_move_down();
+    state.switch_move_down(); // feat
+    state.set_terminal_tabs(vec!["a".to_string(), "b".to_string()], 1);
+    let geo = crate::presentation::tui::home::ui::terminal_geometry(
+        height as usize,
+        width as usize,
+        state.sidebar(),
+    );
+    let col = (geo.origin_col..geo.origin_col + geo.cols)
+        .find(|&col| {
+            crate::presentation::tui::home::ui::switch_tab_hit(
+                &state,
+                col,
+                geo.origin_row,
+                height as usize,
+                width as usize,
+            ) == Some(1)
+        })
+        .expect("switch preview tab chip is visible at the test terminal width");
+
+    let actions = RefCell::new(Vec::new());
+    let mut tab_action = |_: &mut HomeState, dir: &Path, tab: usize, action: TabMenuAction| {
+        actions
+            .borrow_mut()
+            .push((dir.to_path_buf(), tab, action.clone()));
+    };
+    let mut reader = InputReader::new(vec![
+        right_click(col, geo.origin_row),
+        Ok(Input::Key(Key::Enter)), // default menu row: Move left
+        Ok(Input::Key(Key::CtrlC)),
+    ]);
+    let monitor = MonitorHandle::with_live(vec![PathBuf::from("/r/feat")]);
+    let mut persist: fn(&str) = noop_persist;
+    let mut create: fn(&Path, &str, u64) = |_, _, _| {};
+    let mut rename = |_: &Path, n: &str, l: &str| noop_rename(n, l);
+    let mut note = |_: &Path, n: &str, v: &str| noop_set_note(n, v);
+    let mut reorder: fn(&str, bool) -> SessionReorder = noop_reorder;
+    let mut remove: fn(&Path, &str, bool) = |_, _, _| {};
+    let mut unite_resolve: fn(&str) -> std::result::Result<GroupSource, String> = no_unite_resolve;
+    let mut dispatch_update = || {};
+    let mut evict: fn(&Path) = |_| {};
+    let mut branches: fn() -> Vec<String> = no_branches;
+    let mut open: fn(&mut HomeState, &Path, bool, bool) -> Result<PaneExit> = noop_open;
+    let mut open_url: fn(&str) = noop_open_url;
+    let mut config: fn(&Term) -> Result<Option<ConfigReload>> = noop_config;
+    let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = live_preview;
+    let mut tab_op = |_: &Path, _: Option<TabNav>| -> (Vec<String>, usize) {
+        (vec!["a".to_string(), "b".to_string()], 1)
+    };
+    let mut close: fn(&mut HomeState, &Path) = noop_close;
+    let mut save_resume = |_: &str, _: ResumeLevel| {};
+    let mut save_last_active = |_: &[(String, DateTime<Utc>)]| {};
+    let mut wiring = Wiring {
+        interaction_epoch: 0,
+        workspace_root: Path::new("/ws"),
+        persist: &mut persist,
+        dispatch_create: &mut create,
+        rename_display: &mut rename,
+        set_note: &mut note,
+        reorder_session: &mut reorder,
+        dispatch_remove: &mut remove,
+        unite_resolve: &mut unite_resolve,
+        dispatch_update: &mut dispatch_update,
+        evict_pool: &mut evict,
+        existing_branches: &mut branches,
+        open_terminal: &mut open,
+        open_url: &mut open_url,
+        open_config: &mut config,
+        preview: &mut preview,
+        tab_op: &mut tab_op,
+        close_tab: &mut close,
+        tab_action: &mut tab_action,
+        save_resume: &mut save_resume,
+        save_last_active: &mut save_last_active,
+    };
+    let outcome = event_loop(
+        &term,
+        &mut reader,
+        state,
+        &monitor,
+        &UpdateHandle::new(),
+        &SessionsRefreshHandle::new(),
+        &OneShot::<bool>::new(),
+        &OneShot::<Vec<AgentCli>>::new(),
+        &TaskHandle::new(),
+        &mut wiring,
+    )
+    .unwrap();
+    assert!(matches!(outcome, Outcome::Quit));
+    assert_eq!(
+        *actions.borrow(),
+        vec![(
+            PathBuf::from("/r/feat"),
+            1,
+            TabMenuAction::Move(TabSwap::Left)
+        )]
+    );
 }
 
 #[test]

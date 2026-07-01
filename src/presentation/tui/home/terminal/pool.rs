@@ -257,6 +257,7 @@ fn snapshot_locked(shared: &Shared) -> MonitorSnapshot {
 struct Pane {
     pty: PtySession,
     kind: PaneKind,
+    label_override: Option<String>,
     /// For an agent pane, which CLI it ran — recorded so the open-panes snapshot
     /// can restore the same agent (and resume it) on the next startup. `None` for
     /// a terminal pane.
@@ -288,7 +289,17 @@ impl SessionPanes {
 
     fn rebuild_tab_labels(&mut self) {
         let kinds: Vec<PaneKind> = self.panes.iter().map(|p| p.kind).collect();
-        self.tab_labels = tabs::tab_labels(&kinds);
+        self.tab_labels = tabs::tab_labels(&kinds)
+            .into_iter()
+            .zip(self.panes.iter())
+            .map(|(default, pane)| {
+                pane.label_override
+                    .as_deref()
+                    .filter(|label| !label.trim().is_empty())
+                    .unwrap_or(&default)
+                    .to_string()
+            })
+            .collect();
     }
 }
 
@@ -511,6 +522,71 @@ impl TerminalPool {
         }
     }
 
+    /// Move a concrete tab one slot left / right and keep that tab active.
+    pub fn move_tab_by(&mut self, dir: &Path, tab: usize, swap: TabSwap) -> bool {
+        match self.sessions.get_mut(dir) {
+            Some(sp) => match tabs::resolve_swap(tab, sp.panes.len(), swap) {
+                Some((from, to)) => {
+                    sp.panes.swap(from, to);
+                    sp.active = to;
+                    sp.rebuild_tab_labels();
+                    true
+                }
+                None => false,
+            },
+            None => false,
+        }
+    }
+
+    /// Rename a concrete tab. An empty `label` clears the override and falls back
+    /// to the generated `agent` / `terminal N` label.
+    pub fn rename_tab(&mut self, dir: &Path, tab: usize, label: &str) -> bool {
+        match self.sessions.get_mut(dir) {
+            Some(sp) if tab < sp.panes.len() => {
+                let trimmed = label.trim();
+                sp.panes[tab].label_override = (!trimmed.is_empty()).then(|| trimmed.to_string());
+                sp.rebuild_tab_labels();
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Close a concrete tab, killing its shell. Returns whether any pane remains.
+    pub fn close_tab(&mut self, dir: &Path, tab: usize, label: &str) -> bool {
+        let key = dir.to_path_buf();
+        let remains = match self.sessions.get_mut(&key) {
+            Some(sp) if tab < sp.panes.len() => {
+                let len_before = sp.panes.len();
+                sp.panes.remove(tab);
+                sp.rebuild_tab_labels();
+                match tabs::active_after_close(sp.active.min(len_before - 1), len_before) {
+                    Some(next) => {
+                        // If a tab before the active one closed, the same pane shifts
+                        // left; if the active tab closed, active_after_close picks the
+                        // nearest successor/predecessor. If a tab after it closed, the
+                        // active index stays put.
+                        sp.active = if tab < sp.active {
+                            sp.active.saturating_sub(1)
+                        } else if tab == sp.active {
+                            next
+                        } else {
+                            sp.active.min(sp.panes.len().saturating_sub(1))
+                        };
+                        true
+                    }
+                    None => false,
+                }
+            }
+            _ => false,
+        };
+        if !remains {
+            self.sessions.remove(&key);
+        }
+        self.refresh_watched(dir, label);
+        remains
+    }
+
     /// Close `dir`'s active pane, killing its shell (its [`PtySession`] drops).
     /// Returns whether any pane remains: `true` leaves the next tab active so the
     /// caller keeps driving, `false` means the session is empty and the caller
@@ -638,7 +714,12 @@ impl TerminalPool {
             self.lock().monitor.forget(dir);
         }
         let pty = PtySession::spawn(dir, geo.rows, geo.cols, initial, self.scrollback_lines)?;
-        Ok(Pane { pty, kind, cli })
+        Ok(Pane {
+            pty,
+            kind,
+            label_override: None,
+            cli,
+        })
     }
 
     /// Re-register `dir`'s watched handles from its current panes: liveness is the
@@ -735,6 +816,7 @@ impl TerminalPool {
                     PaneKind::Terminal => StoredPaneKind::Terminal,
                 },
                 cli: p.cli,
+                label: p.label_override.clone(),
             })
             .collect();
         let active = sp.active.min(sp.panes.len().saturating_sub(1));

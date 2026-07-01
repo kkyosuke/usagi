@@ -733,6 +733,7 @@ fn run_with_tasks(
     // the caller's removal hook to the production 3-arg shape, dropping the root.
     let mut dispatch_remove_w = |_: &Path, name: &str, force: bool| dispatch_remove(name, force);
     let mut unite_resolve: fn(&str) -> std::result::Result<GroupSource, String> = no_unite_resolve;
+    let mut tab_action = |_: &mut HomeState, _: &Path, _: usize, _: TabMenuAction| {};
     let mut wiring = Wiring {
         interaction_epoch: 0,
         workspace_root: Path::new("/ws"),
@@ -752,6 +753,7 @@ fn run_with_tasks(
         preview: &mut preview,
         tab_op: &mut tab_op,
         close_tab: &mut close,
+        tab_action: &mut tab_action,
         save_resume: &mut save_resume,
         save_last_active: &mut save_last_active,
     };
@@ -795,6 +797,7 @@ fn run_with_live_session(reader: &mut dyn KeyReader) -> Result<Outcome> {
     let mut open_url: fn(&str) = noop_open_url;
     let mut dispatch_update = || {};
     let mut unite_resolve: fn(&str) -> std::result::Result<GroupSource, String> = no_unite_resolve;
+    let mut tab_action = |_: &mut HomeState, _: &Path, _: usize, _: TabMenuAction| {};
     let mut wiring = Wiring {
         interaction_epoch: 0,
         workspace_root: Path::new("/ws"),
@@ -814,6 +817,7 @@ fn run_with_live_session(reader: &mut dyn KeyReader) -> Result<Outcome> {
         preview: &mut preview,
         tab_op: &mut tab_op,
         close_tab: &mut close,
+        tab_action: &mut tab_action,
         save_resume: &mut save_resume,
         save_last_active: &mut save_last_active,
     };
@@ -945,6 +949,7 @@ fn unite_add_and_remove_run_through_the_palette() {
     let mut save_last_active = |_: &[(String, DateTime<Utc>)]| {};
     let mut open_url: fn(&str) = noop_open_url;
     let mut dispatch_update = || {};
+    let mut tab_action = |_: &mut HomeState, _: &Path, _: usize, _: TabMenuAction| {};
     let mut wiring = Wiring {
         interaction_epoch: 0,
         workspace_root: Path::new("/ws"),
@@ -964,6 +969,7 @@ fn unite_add_and_remove_run_through_the_palette() {
         preview: &mut preview,
         tab_op: &mut tab_op,
         close_tab: &mut close,
+        tab_action: &mut tab_action,
         save_resume: &mut save_resume,
         save_last_active: &mut save_last_active,
     };

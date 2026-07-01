@@ -293,8 +293,8 @@ fn mouse_seq_kind(key: &Key) -> Option<(MouseSeq, Vec<char>)> {
     }
 }
 
-/// Read the next input event: a key, a wheel turn ([`ScrollEvent`]), or a
-/// left-button click ([`ClickEvent`]). Other mouse reports (motion, drags, other
+/// Read the next input event: a key, a wheel turn ([`ScrollEvent`]), or a left /
+/// right-button click ([`ClickEvent`]). Other mouse reports (motion, drags, other
 /// buttons, releases) are swallowed so they never reach the event loop. `read`
 /// yields successive keys from the terminal.
 fn next_input(mut read: impl FnMut() -> io::Result<Key>) -> io::Result<Input> {
@@ -315,8 +315,8 @@ fn next_input(mut read: impl FnMut() -> io::Result<Key>) -> io::Result<Input> {
             // A real key (or an unrelated escape sequence): hand it back.
             None => return Ok(Input::Key(key)),
         };
-        // A wheel turn or left click surfaces as its event; any other mouse report
-        // drains to `None` and we loop for the next real input.
+        // A wheel turn or button click surfaces as its event; any other mouse
+        // report drains to `None` and we loop for the next real input.
         if let Some(event) = event {
             return Ok(event);
         }
@@ -357,7 +357,7 @@ fn read_modified_key(read: &mut impl FnMut() -> io::Result<Key>) -> io::Result<K
 
 /// Drain an SGR report (the parameters plus the `M`/`m` terminator), starting
 /// from the `head` bytes `console` already consumed, and turn a wheel turn into a
-/// scroll or a left-button press into a click. Returns `None` for any other
+/// scroll or a left / right-button press into a click. Returns `None` for any other
 /// report (motion, other buttons, releases) or a malformed one.
 fn read_sgr(
     head: Vec<char>,
@@ -377,7 +377,7 @@ fn read_sgr(
 }
 
 /// Parse the `Cb;Cx;Cy` parameters of an SGR report (with its press/release flag)
-/// into a wheel scroll or a left click.
+/// into a wheel scroll or a left / right click.
 fn parse_sgr(payload: &str, release: bool) -> Option<Input> {
     let mut params = payload.split(';');
     let cb: u32 = params.next()?.parse().ok()?;
@@ -388,7 +388,7 @@ fn parse_sgr(payload: &str, release: bool) -> Option<Input> {
 
 /// Drain an X10 report (three bytes, each value + 32), starting from the `head`
 /// bytes `console` already consumed, and turn a wheel turn into a scroll or a
-/// left-button press into a click. Returns `None` for any other or malformed
+/// left / right-button press into a click. Returns `None` for any other or malformed
 /// report.
 ///
 /// Best-effort: we always request SGR coordinates (DECSET 1006), so a compliant
@@ -417,7 +417,7 @@ fn read_x10(
 }
 
 /// Build an [`Input`] from a decoded button code, 1-based coordinates, and the
-/// press/release flag: a wheel turn becomes a [`ScrollEvent`], a left-button
+/// press/release flag: a wheel turn becomes a [`ScrollEvent`], a left / right
 /// press a [`ClickEvent`], a bare pointer move an [`Input::Hover`], and anything
 /// else `None` (so it is swallowed).
 fn mouse_event(cb: u32, cx: u32, cy: u32, release: bool) -> Option<Input> {
@@ -437,12 +437,16 @@ fn mouse_event(cb: u32, cx: u32, cy: u32, release: bool) -> Option<Input> {
         };
         return Some(Input::Scroll(ScrollEvent { lines, col, row }));
     }
-    // A plain left-button click: not the wheel (handled above), not a motion
-    // report (bit 5, 32), and the low two bits select the button (0 = left). Fire
-    // on the press (`M`) and drop the matching release (`m`), so one click is one
-    // event.
-    if !release && cb & 0x20 == 0 && cb & 0b11 == 0 {
-        return Some(Input::Click(ClickEvent { col, row }));
+    // A plain button click: not the wheel (handled above), not a motion report
+    // (bit 5, 32), and the low two bits select the button (0 = left, 2 = right).
+    // Fire on the press (`M`) and drop the matching release (`m`), so one click is
+    // one event.
+    if !release && cb & 0x20 == 0 {
+        return match cb & 0b11 {
+            0 => Some(Input::Click(ClickEvent { col, row })),
+            2 => Some(Input::RightClick(ClickEvent { col, row })),
+            _ => None,
+        };
     }
     // A bare pointer move (DECSET 1003 any-event tracking): the motion bit (32) is
     // set with no button held — the low two bits read as the "released / no button"
@@ -589,12 +593,11 @@ mod tests {
     }
 
     #[test]
-    fn sgr_non_left_button_is_swallowed_then_next_key_returned() {
-        // A right-button press (cb 2) is not a left click, so it is dropped and the
-        // following key is returned.
-        let mut keys = sgr(2, 1, 1);
-        keys.push(Key::Enter);
-        assert_eq!(drive(keys), Input::Key(Key::Enter));
+    fn sgr_right_button_press_becomes_a_right_click() {
+        // A right-button press (cb 2) at column 3, row 4 (1-based) opens context
+        // menus on screens that support them.
+        let input = drive(sgr(2, 3, 4));
+        assert_eq!(input, Input::RightClick(ClickEvent { col: 2, row: 3 }));
     }
 
     #[test]
@@ -707,16 +710,18 @@ mod tests {
     }
 
     #[test]
-    fn x10_non_left_button_drops_exactly_two_trailing_bytes() {
-        // A non-left-button X10 report (cb 2, '"') is swallowed, and its two
-        // coordinate chars must not reach the event loop.
+    fn x10_right_click_becomes_a_right_click() {
+        // A right-button X10 report (cb 2, '"') surfaces and consumes its two
+        // coordinate chars.
         let keys = vec![
             Key::UnknownEscSeq(vec!['[', 'M', '"']), // cb 2 (34 = '"')
             Key::Char('!'),
             Key::Char('"'),
-            Key::ArrowDown,
         ];
-        assert_eq!(drive(keys), Input::Key(Key::ArrowDown));
+        assert_eq!(
+            drive(keys),
+            Input::RightClick(ClickEvent { col: 0, row: 1 })
+        );
     }
 
     #[test]
