@@ -172,6 +172,12 @@ mod tests {
             default_branch: Some("develop".to_string()),
             local_llm_enabled: Some(true),
             skill_features: [("pull-request".to_string(), false)].into_iter().collect(),
+            env: [(
+                "GH_TOKEN".to_string(),
+                "op://Private/GitHub/token".to_string(),
+            )]
+            .into_iter()
+            .collect(),
             setup_commands: vec!["npm install".to_string()],
         };
 
