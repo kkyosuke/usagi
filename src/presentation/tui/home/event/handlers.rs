@@ -161,15 +161,17 @@ pub(super) fn palette_key(
                 // `ShowText` already opened its modal inside `submit`; the palette
                 // stays open behind it. `None` / `Clear` likewise keep it open.
                 //
-                // `OpenTerminal` / `OpenAgent` / `CloseSession` are session-scoped
-                // (`terminal` / `agent` / `close`): the palette is a workspace
-                // surface, so `dispatch_in_scope` refuses them before they reach
-                // here — they only fire from the 在席 prompt (see `focus_prompt_key`).
+                // `OpenTerminal` / `OpenExternalTerminal` / `OpenAgent` /
+                // `CloseSession` are session-scoped (`terminal` / `agent` /
+                // `close`): the palette is a workspace surface, so
+                // `dispatch_in_scope` refuses them before they reach here — they
+                // only fire from the 在席 prompt (see `focus_prompt_key`).
                 // Listed so the match stays exhaustive; they are unreachable here.
                 Effect::None
                 | Effect::Clear
                 | Effect::ShowText { .. }
                 | Effect::OpenTerminal
+                | Effect::OpenExternalTerminal
                 | Effect::OpenAgent(_)
                 | Effect::CloseSession { .. } => {}
             }
@@ -942,24 +944,19 @@ fn focus_menu_key(
                 if let Some(cli) = state.focus_menu_selected_agent() {
                     state.focus_menu_collapse_agent();
                     launch_agent(term, state, painter, wiring, Some(cli));
+                } else if let Some(action) = state.focus_menu_selected_terminal_action() {
+                    state.focus_menu_collapse_agent();
+                    match action {
+                        "open" => launch_pane(term, state, painter, wiring, false),
+                        "new" => open_external_terminal(state, wiring),
+                        _ => {}
+                    }
+                } else if state.focus_close_expanded() {
+                    let force = state.focus_menu_selected_close_force();
+                    state.focus_menu_collapse_close();
+                    let cmd = if force { "close --force" } else { "close" };
+                    run_focus_command(term, state, painter, cmd, wiring);
                 }
-            }
-            _ => {}
-        }
-        return;
-    }
-    if state.focus_close_expanded() {
-        match key {
-            Key::ArrowUp | Key::Char('k') => state.focus_menu_move_up(),
-            Key::ArrowDown | Key::Char('j') => state.focus_menu_move_down(),
-            Key::ArrowLeft => {
-                state.focus_menu_collapse_close();
-            }
-            Key::Enter => {
-                let force = state.focus_menu_selected_close_force();
-                state.focus_menu_collapse_close();
-                let cmd = if force { "close --force" } else { "close" };
-                run_focus_command(term, state, painter, cmd, wiring);
             }
             _ => {}
         }
@@ -968,11 +965,15 @@ fn focus_menu_key(
     match key {
         Key::ArrowUp | Key::Char('k') => state.focus_menu_move_up(),
         Key::ArrowDown | Key::Char('j') => state.focus_menu_move_down(),
-        // On the `agent` row, open the picker to choose a non-default CLI.
-        // On the `close` row, open the picker to choose plain or --force.
+        // On the `agent` / `terminal` rows, open their inline pickers.
         Key::ArrowRight | Key::Tab => {
-            state.focus_menu_expand_agent();
-            state.focus_menu_expand_close();
+            if state.focus_menu_agent_can_expand() {
+                state.focus_menu_expand_agent();
+            } else if state.focus_menu_terminal_can_expand() {
+                state.focus_menu_expand_terminal();
+            } else if state.focus_close_can_expand() {
+                state.focus_menu_expand_close();
+            }
         }
         Key::Enter => {
             if let Some(command) = state.focus_selected_command() {
@@ -1006,6 +1007,7 @@ fn focus_prompt_key(
             let effect = state.focus_prompt_submit().effect;
             match effect {
                 Effect::OpenTerminal => launch_pane(term, state, painter, wiring, false),
+                Effect::OpenExternalTerminal => open_external_terminal(state, wiring),
                 Effect::OpenAgent(cli) => launch_agent(term, state, painter, wiring, cli),
                 Effect::CloseSession { force } => close_focused_session(state, wiring, force),
                 _ => {}
@@ -1054,6 +1056,17 @@ fn run_focus_command(
         "close --force" => close_focused_session(state, wiring, true),
         // `ai` (and any future coming-soon command) just logs its line.
         _ => state.log_output(format!("\"{name}\" is coming soon 🐰")),
+    }
+}
+
+/// Open a native terminal application at the focused row's directory. Unlike
+/// [`launch_pane`], this does not enter 没入: the OS owns the new terminal, and
+/// usagi stays in 在席 so the user can continue navigating.
+fn open_external_terminal(state: &mut HomeState, wiring: &mut Wiring) {
+    let dir = selected_dir(state, wiring.workspace_root);
+    match (wiring.open_external_terminal)(&dir) {
+        Ok(()) => state.log_output(format!("Opened a new terminal in {}.", dir.display())),
+        Err(e) => state.log_error(e),
     }
 }
 

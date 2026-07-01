@@ -67,6 +67,7 @@ fn run_pr_clicks(inputs: Vec<io::Result<Input>>, state: HomeState) -> (Vec<Strin
         Ok(PaneExit::Closed)
     };
     let mut open_url = |u: &str| urls.borrow_mut().push(u.to_string());
+    let mut open_external_terminal = |_: &Path| Ok::<(), String>(());
     let mut persist: fn(&str) = noop_persist;
     let mut dispatch_create = |_: &Path, _: &str, _: u64| {};
     let mut rename = |_: &Path, n: &str, l: &str| noop_rename(n, l);
@@ -100,6 +101,7 @@ fn run_pr_clicks(inputs: Vec<io::Result<Input>>, state: HomeState) -> (Vec<Strin
         existing_branches: &mut branches,
         open_terminal: &mut open,
         open_url: &mut open_url,
+        open_external_terminal: &mut open_external_terminal,
         open_config: &mut config,
         preview: &mut preview,
         tab_op: &mut tab_op,

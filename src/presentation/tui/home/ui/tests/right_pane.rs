@@ -347,6 +347,25 @@ fn focus_close_row_shows_chevron_and_expands_into_a_picker() {
 }
 
 #[test]
+fn focus_menu_terminal_row_expands_into_open_and_new_actions() {
+    let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
+    state.enter_focus(1);
+    state.focus_menu_move_up(); // alphabetical menu wraps agent -> terminal
+    let base = stripped(&right_pane_contents(&state, 56, 16));
+    assert!(base.contains("terminal"));
+    assert!(base.contains('▸'));
+    assert!(base.contains("→ pick terminal"));
+    state.focus_menu_expand_terminal();
+    let expanded = stripped(&right_pane_contents(&state, 56, 16));
+    assert!(expanded.contains('▾'));
+    assert!(expanded.contains("open"));
+    assert!(expanded.contains("new"));
+    assert!(expanded.contains("(default)"));
+    assert!(expanded.contains("new terminal"));
+    assert!(expanded.contains("Enter launch"));
+}
+
+#[test]
 fn focus_shows_pane_tabs_with_a_trailing_new_tab_and_the_action_surface() {
     // With live panes published, 在席 gains a tab strip — one chip per pane plus a
     // trailing "+ new" tab. On the "+ new" tab (the default on entry) the action

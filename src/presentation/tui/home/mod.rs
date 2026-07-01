@@ -990,6 +990,23 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
                 .spawn();
         }
     };
+    let mut open_external_terminal = |dir: &Path| -> std::result::Result<(), String> {
+        use std::process::{Command, Stdio};
+        let argv = terminal::link::open_terminal_command(dir);
+        let Some((cmd, rest)) = argv.split_first() else {
+            return Err(
+                "opening an external terminal is not supported on this platform".to_string(),
+            );
+        };
+        Command::new(cmd)
+            .args(rest)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| format!("failed to open external terminal: {e}"))
+    };
 
     let mut wiring = event::Wiring {
         interaction_epoch: 0,
@@ -1006,6 +1023,7 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
         existing_branches: &mut existing_branches,
         open_terminal: &mut open_terminal,
         open_url: &mut open_url,
+        open_external_terminal: &mut open_external_terminal,
         open_config: &mut open_config,
         preview: &mut preview,
         tab_op: &mut tab_op,

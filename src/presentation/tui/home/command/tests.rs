@@ -450,6 +450,29 @@ fn terminal_requests_opening_a_shell() {
     let result = registry().dispatch("terminal", &[], &[]);
     assert!(result.lines.is_empty());
     assert_eq!(result.effect, Effect::OpenTerminal);
+    assert_eq!(
+        registry().dispatch("terminal open", &[], &[]).effect,
+        Effect::OpenTerminal
+    );
+    assert_eq!(
+        registry().dispatch("terminal new", &[], &[]).effect,
+        Effect::OpenExternalTerminal
+    );
+    let unknown = registry().dispatch("terminal split", &[], &[]);
+    assert_eq!(unknown.effect, Effect::None);
+    assert!(unknown.lines[0]
+        .text
+        .contains("unknown terminal action \"split\""));
+}
+
+#[test]
+fn terminal_completes_open_and_new_actions() {
+    let completion = registry().complete("terminal n", CommandScope::Session);
+    assert_eq!(completion.input, "terminal new");
+    assert!(completion.candidates.is_empty());
+    let all = registry().complete("terminal ", CommandScope::Session);
+    assert_eq!(all.input, "terminal ");
+    assert_eq!(all.candidates, vec!["open", "new"]);
 }
 
 #[test]

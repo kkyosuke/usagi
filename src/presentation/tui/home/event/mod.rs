@@ -167,6 +167,10 @@ pub(super) struct Wiring<'a> {
     /// the real launcher (the same detached spawn the immersive pane uses); tests
     /// pass a capture or a no-op so the loop's open path runs without shelling out.
     pub open_url: &'a mut dyn FnMut(&str),
+    /// Open a new native terminal application rooted at the selected directory.
+    /// Tests pass a capture or a no-op; production shells out through the
+    /// platform-specific terminal launcher.
+    pub open_external_terminal: &'a mut dyn FnMut(&Path) -> std::result::Result<(), String>,
     /// Open the settings screen, re-reading the affected settings on return
     /// (`None` when the user quit the app from it).
     pub open_config: &'a mut dyn FnMut(&Term) -> Result<Option<ConfigReload>>,
@@ -1096,6 +1100,7 @@ pub(crate) fn event_loop_compat(
     // never shell out; the open path itself is covered by the dedicated popup tests
     // that build a capturing `Wiring`.
     let mut open_url = |_: &str| {};
+    let mut open_external_terminal = |_: &Path| Ok::<(), String>(());
     let mut wiring = Wiring {
         interaction_epoch: 0,
         workspace_root,
@@ -1111,6 +1116,7 @@ pub(crate) fn event_loop_compat(
         existing_branches: &mut existing_branches,
         open_terminal: &mut open_terminal,
         open_url: &mut open_url,
+        open_external_terminal: &mut open_external_terminal,
         open_config: &mut open_config,
         preview: &mut preview,
         tab_op: &mut tab_op,

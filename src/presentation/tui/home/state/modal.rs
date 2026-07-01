@@ -479,10 +479,21 @@ impl RemoveModal {
     }
 }
 
+/// Which inline sub-picker is expanded under a 在席 (Focus) menu row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum FocusSubmenu {
+    /// The `agent` row's installed-CLI picker.
+    Agent,
+    /// The `terminal` row's `open` / `new` picker.
+    Terminal,
+    /// The `close` row's plain / `--force` picker.
+    Close,
+}
+
 /// The 在席 (Focus) menu cursor: which Session-scope command is highlighted, and
-/// — when the `agent` row is expanded into the agent picker — which installed
-/// agent is highlighted. The Session-scope command list is always non-empty, so
-/// the navigation methods take the current `count` and keep the cursor
+/// — when the `agent` or `terminal` row is expanded into a picker — which
+/// sub-action is highlighted. The Session-scope command list is always non-empty,
+/// so the navigation methods take the current `count` and keep the cursor
 /// underflow-safe and in range.
 ///
 /// The agent picker (案A) lets a session launch a CLI other than the configured
@@ -494,12 +505,9 @@ impl RemoveModal {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(super) struct FocusMenu {
     cursor: usize,
-    /// The agent picker's sub-cursor while the `agent` row is expanded, or `None`
-    /// when the menu is in its normal (collapsed) state.
-    agent_cursor: Option<usize>,
-    /// The close picker's sub-cursor while the `close` row is expanded, or `None`
-    /// when collapsed. `0` = plain close, `1` = close --force.
-    close_cursor: Option<usize>,
+    /// The expanded inline picker and its sub-cursor, or `None` when the menu is
+    /// in its normal (collapsed) state.
+    expanded: Option<(FocusSubmenu, usize)>,
 }
 
 impl FocusMenu {
@@ -508,78 +516,91 @@ impl FocusMenu {
         self.cursor
     }
 
-    /// Whether the `agent` row is expanded into the agent picker.
+    /// Whether any row is expanded into an inline picker.
     pub(super) fn is_expanded(self) -> bool {
-        self.agent_cursor.is_some()
+        self.expanded.is_some()
     }
 
     /// Whether the `close` row is expanded into the close picker.
     pub(super) fn is_close_expanded(self) -> bool {
-        self.close_cursor.is_some()
+        self.close_cursor().is_some()
     }
 
     /// The agent picker's highlighted index while expanded, or `None` collapsed.
     pub(super) fn agent_cursor(self) -> Option<usize> {
-        self.agent_cursor
+        match self.expanded {
+            Some((FocusSubmenu::Agent, cursor)) => Some(cursor),
+            _ => None,
+        }
+    }
+
+    /// The terminal picker's highlighted index while expanded, or `None`
+    /// collapsed.
+    pub(super) fn terminal_cursor(self) -> Option<usize> {
+        match self.expanded {
+            Some((FocusSubmenu::Terminal, cursor)) => Some(cursor),
+            _ => None,
+        }
     }
 
     /// The close picker's highlighted index while expanded, or `None` collapsed.
     pub(super) fn close_cursor(self) -> Option<usize> {
-        self.close_cursor
+        match self.expanded {
+            Some((FocusSubmenu::Close, cursor)) => Some(cursor),
+            _ => None,
+        }
     }
 
     /// Reset to the top, collapsed (entering 在席 / leaving for 切替).
     pub(super) fn reset(&mut self) {
         self.cursor = 0;
-        self.agent_cursor = None;
-        self.close_cursor = None;
+        self.expanded = None;
     }
 
-    /// Expand the agent picker, highlighting `default_index` (the configured
-    /// agent's position in the installed list, clamped by the renderer).
-    pub(super) fn expand(&mut self, default_index: usize) {
-        self.agent_cursor = Some(default_index);
+    /// Expand an inline picker, highlighting `default_index` (clamped by the
+    /// renderer).
+    pub(super) fn expand(&mut self, submenu: FocusSubmenu, default_index: usize) {
+        self.expanded = Some((submenu, default_index));
     }
 
-    /// Collapse the agent picker back to the normal menu. Returns whether it was
+    /// Collapse an inline picker back to the normal menu. Returns whether it was
     /// expanded (so the caller can treat `←` / `Esc` as "consumed" only then).
     pub(super) fn collapse(&mut self) -> bool {
-        self.agent_cursor.take().is_some()
+        self.expanded.take().is_some()
     }
 
     /// Expand the close picker, starting at option 0 (plain close).
     pub(super) fn expand_close(&mut self) {
-        self.close_cursor = Some(0);
+        self.expanded = Some((FocusSubmenu::Close, 0));
     }
 
     /// Collapse the close picker back to the normal menu. Returns whether it was
     /// expanded (so the caller can treat `←` / `Esc` as "consumed" only then).
     pub(super) fn collapse_close(&mut self) -> bool {
-        self.close_cursor.take().is_some()
+        if self.is_close_expanded() {
+            self.expanded = None;
+            true
+        } else {
+            false
+        }
     }
 
     /// Move up one row, wrapping. Acts on whichever picker is open, or the
     /// command list when none is. `count` is clamped to at least 1.
     pub(super) fn move_up(&mut self, count: usize) {
         let count = count.max(1);
-        if let Some(c) = &mut self.agent_cursor {
-            *c = c.checked_sub(1).unwrap_or(count - 1);
-        } else if let Some(c) = &mut self.close_cursor {
-            *c = c.checked_sub(1).unwrap_or(count - 1);
-        } else {
-            self.cursor = self.cursor.checked_sub(1).unwrap_or(count - 1);
+        match &mut self.expanded {
+            Some((_, c)) => *c = c.checked_sub(1).unwrap_or(count - 1),
+            None => self.cursor = self.cursor.checked_sub(1).unwrap_or(count - 1),
         }
     }
 
     /// Move down one row, wrapping (the mirror of [`move_up`](Self::move_up)).
     pub(super) fn move_down(&mut self, count: usize) {
         let count = count.max(1);
-        if let Some(c) = &mut self.agent_cursor {
-            *c = (*c + 1) % count;
-        } else if let Some(c) = &mut self.close_cursor {
-            *c = (*c + 1) % count;
-        } else {
-            self.cursor = (self.cursor + 1) % count;
+        match &mut self.expanded {
+            Some((_, c)) => *c = (*c + 1) % count,
+            None => self.cursor = (self.cursor + 1) % count,
         }
     }
 
@@ -591,12 +612,22 @@ impl FocusMenu {
     /// The selected agent-picker index, clamped to the available `count`. `0`
     /// when collapsed (no picker open).
     pub(super) fn agent_selected(self, count: usize) -> usize {
-        self.agent_cursor.unwrap_or(0).min(count.saturating_sub(1))
+        self.agent_cursor()
+            .unwrap_or(0)
+            .min(count.saturating_sub(1))
+    }
+
+    /// The selected terminal-picker index, clamped to the available `count`. `0`
+    /// when collapsed (no picker open).
+    pub(super) fn terminal_selected(self, count: usize) -> usize {
+        self.terminal_cursor()
+            .unwrap_or(0)
+            .min(count.saturating_sub(1))
     }
 
     /// The selected close-picker index, clamped to 0 or 1. `0` when collapsed.
     pub(super) fn close_selected(self) -> usize {
-        self.close_cursor.unwrap_or(0).min(1)
+        self.close_cursor().unwrap_or(0).min(1)
     }
 }
 
@@ -668,7 +699,7 @@ mod tests {
         let mut menu = FocusMenu::default();
         // Expanding highlights the given default index and routes navigation to
         // the picker, leaving the command cursor untouched.
-        menu.expand(2);
+        menu.expand(FocusSubmenu::Agent, 2);
         assert!(menu.is_expanded());
         assert_eq!(menu.agent_cursor(), Some(2));
         assert_eq!(menu.cursor(), 0);
@@ -694,10 +725,23 @@ mod tests {
     fn focus_menu_reset_clears_both_cursors() {
         let mut menu = FocusMenu::default();
         menu.move_down(3);
-        menu.expand(1);
+        menu.expand(FocusSubmenu::Agent, 1);
         menu.reset();
         assert_eq!(menu.cursor(), 0);
         assert!(!menu.is_expanded());
+    }
+
+    #[test]
+    fn focus_menu_expand_can_drive_the_terminal_picker() {
+        let mut menu = FocusMenu::default();
+        menu.expand(FocusSubmenu::Terminal, 0);
+        assert!(menu.is_expanded());
+        assert_eq!(menu.agent_cursor(), None);
+        assert_eq!(menu.terminal_cursor(), Some(0));
+        menu.move_down(2);
+        assert_eq!(menu.terminal_cursor(), Some(1));
+        assert_eq!(menu.terminal_selected(2), 1);
+        assert!(menu.collapse());
     }
 
     #[test]
