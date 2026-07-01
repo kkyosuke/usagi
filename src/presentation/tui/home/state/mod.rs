@@ -1041,9 +1041,14 @@ impl HomeState {
     /// `session` commands (create / remove / rename / note) run against this so a
     /// new session lands in the workspace the user is pointing at.
     pub fn selected_workspace_root(&self) -> PathBuf {
+        let selected_group = if self.list.create_row_selected() {
+            self.list.group_count().saturating_sub(1)
+        } else {
+            self.list.selected_group()
+        };
         // `selected_group()` is always a valid group index, so group 0 is the
         // primary and `i = g - 1` indexes the extra (unite) workspaces in step.
-        match self.list.selected_group().checked_sub(1) {
+        match selected_group.checked_sub(1) {
             None => self.root_path.clone(),
             Some(i) => self.extra_groups[i].root_path.clone(),
         }
@@ -1812,7 +1817,8 @@ impl HomeState {
     /// Focus the session at `row` (0 is the root row, `i` maps to worktree
     /// `i - 1`) in the list, so the embedded terminal re-roots there.
     pub fn focus_session(&mut self, row: usize) {
-        self.list.focus_index(row);
+        self.list
+            .focus_index(row.min(self.list.create_row().saturating_sub(1)));
     }
 
     // --- command palette (`:`) ---------------------------------------------

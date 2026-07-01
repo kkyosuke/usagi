@@ -580,6 +580,16 @@ fn left_column(
         // the "+ new" input attached to the workspace that `c` targets, instead
         // of drifting to another workspace or to the whole column's foot.
         if let Some(create) = state.create() {
+            // `left_pane` always draws the persistent "+ new session" affordance at
+            // the list foot; while the input is open it *becomes* that input, so
+            // drop the affordance row first and let the input take its slot.
+            let persistent = group_inline_insert_line(
+                state.list(),
+                state.list().group_count().saturating_sub(1),
+            );
+            if persistent < left.len() {
+                left.remove(persistent);
+            }
             let rows = switch_create_rows(create.value(), create.cursor(), create.error(), left_w);
             place_create_rows(&mut left, state.list(), rows);
             left.truncate(body_rows);
@@ -618,7 +628,13 @@ fn splice_rows(column: &mut Vec<String>, line: usize, rows: Vec<String>) {
 /// line (no CLS). The last group has no lower workspace to protect, so it keeps
 /// the single-workspace behaviour and appends the input after that group.
 fn place_create_rows(column: &mut Vec<String>, list: &WorktreeList, rows: Vec<String>) {
-    let group = list.selected_group();
+    // The create row lives at the foot of the last group, so a cursor resting on
+    // it targets that group; every other cursor targets its own group.
+    let group = if list.create_row_selected() {
+        list.group_count().saturating_sub(1)
+    } else {
+        list.selected_group()
+    };
     let line = group_inline_insert_line(list, group);
     if group + 1 < list.group_count() {
         replace_rows(column, line, rows);

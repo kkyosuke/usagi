@@ -245,6 +245,11 @@ pub(super) fn hint_lines(state: &HomeState, width: usize) -> Vec<String> {
 /// resident line.
 pub(super) fn input_line(state: &HomeState) -> String {
     match state.mode() {
+        Mode::Switch if state.list().create_row_selected() => {
+            style(" Type a session name to create".to_string())
+                .green()
+                .to_string()
+        }
         Mode::Switch => style(" Pick a session".to_string()).dim().to_string(),
         Mode::Focus => style(format!(
             " Operating session: {}",
@@ -412,7 +417,7 @@ pub(super) fn footer_line(width: usize, state: &HomeState) -> String {
                 "s sort"
             };
             format!(
-                "[switch]  ↑↓ session / K/J move / {sort} / ←→ tab / Enter focus / c new / r rename / n/Ctrl-E note / x close tab / : commands / ? keys / {esc}"
+                "[switch]  ↑↓ session / + row type/Enter new / K/J move / {sort} / ←→ tab / Enter focus / c new / r rename / n/Ctrl-E note / x close tab / : commands / ? keys / {esc}"
             )
         }
         // 在席 shares the 没入 prefix grammar under the prefix scheme: `Ctrl-O` is

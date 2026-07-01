@@ -547,6 +547,53 @@ fn config_keys() -> Vec<io::Result<Key>> {
     keys
 }
 
+/// Drive the loop with scripted [`Input`] events (mouse tests) and a recording
+/// create callback, returning the session names creation was dispatched for.
+fn run_capturing_creates_for_inputs(
+    inputs: Vec<io::Result<Input>>,
+    state: HomeState,
+) -> Vec<String> {
+    let term = Term::stdout();
+    let mut reader = InputReader::new(inputs);
+    let monitor = MonitorHandle::detached();
+    let created = RefCell::new(Vec::new());
+    let mut create = |name: &str| {
+        created.borrow_mut().push(name.to_string());
+        noop_create(name)
+    };
+    let mut persist: fn(&str) = noop_persist;
+    let mut remove: fn(&str, bool) -> SessionOutcome = noop_remove;
+    let mut open: fn(&mut HomeState, &Path, bool, bool) -> Result<PaneExit> = noop_open;
+    let mut config: fn(&Term) -> Result<Option<ConfigReload>> = noop_config;
+    let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = noop_preview;
+    let mut branches: fn() -> Vec<String> = no_branches;
+    let outcome = event_loop_compat(
+        &term,
+        &mut reader,
+        state,
+        Path::new("/ws"),
+        &monitor,
+        &UpdateHandle::new(),
+        &OneShot::<bool>::new(),
+        &OneShot::<Vec<AgentCli>>::new(),
+        &mut persist,
+        &mut create,
+        &mut (noop_rename as fn(&str, &str) -> SessionOutcome),
+        &mut (noop_set_note as fn(&str, &str) -> SessionOutcome),
+        &mut remove,
+        &mut branches,
+        &mut open,
+        &mut config,
+        &mut preview,
+        &mut (noop_tab_op as fn(&Path, Option<TabNav>) -> (Vec<String>, usize)),
+        &mut (noop_close as fn(&mut HomeState, &Path)),
+        &mut (noop_reorder as fn(&str, bool) -> SessionReorder),
+    )
+    .unwrap();
+    assert!(matches!(outcome, Outcome::Quit));
+    created.into_inner()
+}
+
 /// Drive `event_loop` with a recording rename callback, returning the (target,
 /// label) pairs it received and the final outcome.
 fn run_recording_rename(keys: Vec<io::Result<Key>>) -> (Vec<(String, String)>, Outcome) {

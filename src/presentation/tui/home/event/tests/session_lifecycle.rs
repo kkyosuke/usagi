@@ -81,6 +81,41 @@ fn bare_session_create_moves_to_switch_and_opens_the_inline_input() {
 }
 
 #[test]
+fn typing_on_the_visible_create_row_creates_a_session() {
+    // The persistent "+ new session" row is a real keyboard target: once the
+    // cursor rests on it, the first printable character opens the inline editor
+    // and becomes the first character of the new session name.
+    let mut keys = vec![
+        Ok(Key::ArrowDown), // root -> main
+        Ok(Key::ArrowDown), // main -> "+ new session"
+    ];
+    keys.extend(typed("wip"));
+    keys.push(Ok(Key::Enter));
+    keys.push(Ok(Key::CtrlC));
+
+    let created = RefCell::new(Vec::new());
+    let mut create = |name: &str| {
+        created.borrow_mut().push(name.to_string());
+        noop_create(name)
+    };
+    let mut open: fn(&mut HomeState, &Path, bool, bool) -> Result<PaneExit> = noop_open;
+    let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = noop_preview;
+    assert!(matches!(
+        run_full(
+            keys,
+            state_with_sessions(&["main"]),
+            &mut open,
+            &mut create,
+            &mut preview,
+            &mut noop_config
+        )
+        .unwrap(),
+        Outcome::Quit
+    ));
+    assert_eq!(*created.borrow(), vec!["wip"]);
+}
+
+#[test]
 fn a_finished_create_drops_into_focus_on_the_new_session() {
     // Creating a session from 統括 dispatches the git work to a worker; when it
     // finishes the loop drops straight into 在席 (Focus) on the new session, so the

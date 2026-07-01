@@ -18,6 +18,10 @@ fn click(col: u16, row: u16) -> io::Result<Input> {
 /// `feat` 9,10,11.
 const FEAT_ROW: u16 = 9;
 
+/// Screen row of the persistent "+ new session" row after `sample_state`'s two
+/// sessions: root rows 3,4; divider 5; `main` 6-8; `feat` 9-11; create row 12.
+const CREATE_ROW: u16 = 12;
+
 #[test]
 fn a_double_click_on_a_session_row_focuses_and_attaches_it() {
     // Two clicks on `feat`'s row attach it without any keypress — the second
@@ -58,6 +62,19 @@ fn a_click_off_the_session_list_is_ignored() {
         sample_state(),
     );
     assert_eq!(dirs, vec![PathBuf::from("/ws")]);
+}
+
+#[test]
+fn a_click_on_the_create_row_opens_the_inline_create_input() {
+    // A single click on the visible create affordance starts input mode. The
+    // subsequent typed name and Enter create the session; no double-click is
+    // needed because the row is an action target, not a session selection.
+    let mut inputs = vec![click(0, CREATE_ROW)];
+    inputs.extend(typed("wip").into_iter().map(|key| key.map(Input::Key)));
+    inputs.push(Ok(Input::Key(Key::Enter)));
+    inputs.push(Ok(Input::Key(Key::CtrlC)));
+    let created = run_capturing_creates_for_inputs(inputs, sample_state());
+    assert_eq!(created, vec!["wip"]);
 }
 
 #[test]
