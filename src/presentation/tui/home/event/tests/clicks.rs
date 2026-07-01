@@ -7,6 +7,7 @@
 //! fixtures click column 0 so the hit lands in the left pane at any terminal width.
 
 use super::*;
+use crate::presentation::tui::home::terminal::pool::MonitorSnapshot;
 
 /// A left-button click input at the 0-based screen (`col`, `row`).
 fn click(col: u16, row: u16) -> io::Result<Input> {
@@ -158,6 +159,88 @@ fn a_click_on_a_focus_right_pane_tab_switches_that_live_pane() {
     };
     let mut reader = InputReader::new(vec![click(col, geo.origin_row), Ok(Input::Key(Key::CtrlC))]);
     let monitor = MonitorHandle::detached();
+    let mut persist: fn(&str) = noop_persist;
+    let mut create: fn(&str) -> SessionOutcome = noop_create;
+    let mut remove: fn(&str, bool) -> SessionOutcome = noop_remove;
+    let mut config: fn(&Term) -> Result<Option<ConfigReload>> = noop_config;
+    let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = live_preview;
+    let mut branches: fn() -> Vec<String> = no_branches;
+    let outcome = event_loop_compat(
+        &term,
+        &mut reader,
+        state,
+        Path::new("/ws"),
+        &monitor,
+        &UpdateHandle::new(),
+        &OneShot::<bool>::new(),
+        &OneShot::<Vec<AgentCli>>::new(),
+        &mut persist,
+        &mut create,
+        &mut (noop_rename as fn(&str, &str) -> SessionOutcome),
+        &mut (noop_set_note as fn(&str, &str) -> SessionOutcome),
+        &mut remove,
+        &mut branches,
+        &mut (noop_open as fn(&mut HomeState, &Path, bool, bool) -> Result<PaneExit>),
+        &mut config,
+        &mut preview,
+        &mut tab_op,
+        &mut (noop_close as fn(&mut HomeState, &Path)),
+        &mut (noop_reorder as fn(&str, bool) -> SessionReorder),
+    )
+    .unwrap();
+    assert!(matches!(outcome, Outcome::Quit));
+    assert_eq!(*navs.borrow(), vec![TabNav::To(1)]);
+}
+
+#[test]
+fn a_click_on_a_switch_right_pane_tab_switches_the_previewed_live_pane() {
+    // 切替 also draws a live session's pane tabs in the right pane. Clicking an
+    // inactive chip should drive `tab_op(To(index))`, just like ←/→ keyboard
+    // navigation, without treating the click as a left-pane row selection.
+    let term = Term::stdout();
+    let (height, width) = term.size();
+    let mut state = sample_state();
+    state.apply_badges(MonitorSnapshot {
+        live: [PathBuf::from("/r/feat")].into(),
+        ..Default::default()
+    });
+    state.switch_move_down(); // root -> main
+    state.switch_move_down(); // main -> feat
+    state.set_terminal_tabs(vec!["a".to_string(), "b".to_string()], 0);
+    let geo = crate::presentation::tui::home::ui::terminal_geometry(
+        height as usize,
+        width as usize,
+        state.sidebar(),
+    );
+    let col = (geo.origin_col..geo.origin_col + geo.cols)
+        .find(|&col| {
+            crate::presentation::tui::home::ui::switch_tab_at(
+                &state,
+                col,
+                geo.origin_row,
+                height as usize,
+                width as usize,
+            ) == Some(1)
+        })
+        .expect("switch preview tab chip is visible at the test terminal width");
+
+    let navs = RefCell::new(Vec::new());
+    let active = RefCell::new(0usize);
+    let mut tab_op = |_d: &Path, nav: Option<TabNav>| -> (Vec<String>, usize) {
+        if let Some(n) = nav {
+            navs.borrow_mut().push(n);
+            if let TabNav::To(i) = n {
+                *active.borrow_mut() = i;
+            }
+        }
+        (vec!["a".to_string(), "b".to_string()], *active.borrow())
+    };
+    let mut reader = InputReader::new(vec![
+        click(col, geo.origin_row),
+        Ok(Input::Key(Key::Char(CTRL_Q))),
+        Ok(Input::Key(Key::Char('y'))),
+    ]);
+    let monitor = MonitorHandle::with_live(vec![PathBuf::from("/r/feat")]);
     let mut persist: fn(&str) = noop_persist;
     let mut create: fn(&str) -> SessionOutcome = noop_create;
     let mut remove: fn(&str, bool) -> SessionOutcome = noop_remove;

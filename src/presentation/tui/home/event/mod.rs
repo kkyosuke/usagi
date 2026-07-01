@@ -597,26 +597,43 @@ pub(super) fn event_loop(
                     force_paint = true;
                     continue;
                 }
-                // 在席's right pane owns its tab strip too: clicking a pane tab
-                // previews/activates that live pane through the same `tab_op`
-                // keyboard navigation uses. 切替 deliberately keeps the right
-                // pane a dim preview; 没入 handles its own tab clicks inside the
-                // pane driver.
-                if state.mode() == Mode::Focus {
-                    if let Some(index) = ui::focus_tab_at(
-                        &state,
-                        click.col,
-                        click.row,
-                        height as usize,
-                        width as usize,
-                    ) {
-                        if let Some(index) = state.focus_select_pane_tab(index) {
+                // The right-pane tab strips are active in both 切替 and 在席:
+                // clicking an inactive pane tab drives the same `tab_op` keyboard
+                // navigation uses, so the preview and the pane that `Enter`
+                // re-attaches move together. 没入 handles its own tab clicks
+                // inside the pane driver.
+                match state.mode() {
+                    Mode::Switch => {
+                        if let Some(index) = ui::switch_tab_at(
+                            &state,
+                            click.col,
+                            click.row,
+                            height as usize,
+                            width as usize,
+                        ) {
                             let dir = selected_dir(&state, wiring.workspace_root);
                             (wiring.tab_op)(&dir, Some(TabNav::To(index)));
+                            force_paint = true;
+                            continue;
                         }
-                        force_paint = true;
-                        continue;
                     }
+                    Mode::Focus => {
+                        if let Some(index) = ui::focus_tab_at(
+                            &state,
+                            click.col,
+                            click.row,
+                            height as usize,
+                            width as usize,
+                        ) {
+                            if let Some(index) = state.focus_select_pane_tab(index) {
+                                let dir = selected_dir(&state, wiring.workspace_root);
+                                (wiring.tab_op)(&dir, Some(TabNav::To(index)));
+                            }
+                            force_paint = true;
+                            continue;
+                        }
+                    }
+                    Mode::Attached => {}
                 }
                 let selected = click_selects_session(&state)
                     .then(|| {

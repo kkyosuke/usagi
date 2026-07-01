@@ -29,7 +29,7 @@ use chrome::{
 };
 use panes::{group_inline_insert_line, left_pane, right_pane_contents};
 // The right-pane tab strips map clicks to the tab under them through these.
-pub(super) use panes::{attached_tab_at, attached_tab_hit, focus_tab_at};
+pub(super) use panes::{attached_tab_at, attached_tab_hit, focus_tab_at, switch_tab_at};
 // …a click on a sidebar session's PR badge to that session (to pin its PR popup).
 pub(super) use panes::sidebar_pr_badge_at;
 // …and a click anywhere to the pinned PR popup: open a `#<number>`, or dismiss it.

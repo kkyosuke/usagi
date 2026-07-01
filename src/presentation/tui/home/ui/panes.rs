@@ -1343,6 +1343,41 @@ pub(in crate::presentation::tui::home) fn focus_tab_at(
     (target != combined.active).then_some(target)
 }
 
+/// The live-pane tab (0-based, matching [`TabStrip::labels`]) a left click at the
+/// 0-based screen (`col`, `row`) lands on while 切替 (Switch), or `None` when the
+/// click is not on a changeable pane tab.
+///
+/// 切替's right pane draws the highlighted session's preview and exposes the
+/// same tab strip that `←`/`→` navigate by keyboard. This mirrors the renderer's
+/// header/geometry so a click on an inactive chip moves the preview — and the
+/// pane that `Enter` re-attaches — to that tab without entering 在席 first.
+pub(in crate::presentation::tui::home) fn switch_tab_at(
+    state: &HomeState,
+    col: u16,
+    row: u16,
+    raw_height: usize,
+    raw_width: usize,
+) -> Option<usize> {
+    let strip = state.terminal_tabs()?;
+    if strip.labels.is_empty() {
+        return None;
+    }
+    let (header, live) = switch_preview_header(state);
+    if !live {
+        return None;
+    }
+    let geo = super::terminal_geometry(raw_height, raw_width, state.sidebar());
+    if row < geo.origin_row || row >= geo.origin_row + super::TAB_BAR_ROWS as u16 {
+        return None;
+    }
+    let rel_col = col.checked_sub(geo.origin_col)? as usize;
+    let target = tab_chip_ranges(&header, strip)
+        .into_iter()
+        .position(|range| range.contains(&rel_col))?;
+    // Clicking the active tab is a no-op; inactive chips select that pane.
+    (target != strip.active).then_some(target)
+}
+
 /// For the full sidebar, each worktree's global index (across every group, root
 /// rows excluded) paired with the 0-based body line its [`SESSION_ROWS`] entry
 /// starts on. Walks the same layout [`left_pane`] builds — in single-workspace
@@ -2200,41 +2235,15 @@ fn note_overlay(state: &HomeState, width: usize, rows: usize) -> Option<Vec<Stri
 /// inline), so it never pushes this preview around.
 pub(super) fn switch_preview(state: &HomeState, width: usize, rows: usize) -> Vec<String> {
     let body_rows = rows;
-    // Identify the highlighted row. `selected()` is `Some` for a real session
-    // row and `None` on the root row (which carries no git status / tracked
-    // path), so the match doubles as the root/session split.
-    let (name, live, running, waiting, done, status) = match state.list().selected() {
-        Some(w) => (
-            w.branch.as_deref().unwrap_or(DETACHED).to_string(),
-            state.is_live(&w.path),
-            state.is_running(&w.path),
-            state.is_waiting(&w.path),
-            state.is_done(&w.path),
-            Some(w.status),
-        ),
-        None => {
-            // The root row carries no worktree, but its embedded session is
-            // keyed by the workspace root path, so match it against the same
-            // live / running / waiting / done sets — otherwise a running root
-            // agent never previews live here (it only re-appears once selected).
-            let root = state.root_path();
-            (
-                ROOT_NAME.to_string(),
-                state.is_live(root),
-                state.is_running(root),
-                state.is_waiting(root),
-                state.is_done(root),
-                None,
-            )
-        }
-    };
+    // The highlighted row's identity plus whether it has a live pane. The header
+    // and the `live` flag drive both this preview and the tab hit-test
+    // ([`switch_tab_at`]), so they are built once in [`switch_preview_header`]
+    // and shared — the strip a click lands on is exactly the one drawn here.
+    let (header, live) = switch_preview_header(state);
 
-    // Header: the name, then either the git status + agent state (a session) or
-    // the workspace-root note (the root row). A live session's tabs share the
-    // header's row (the `←`/`→` targets), so the identity and the tabs read
-    // together on one line; the preview below mirrors the active pane.
-    let agent = AgentState::from_flags(live, running, waiting, done).detail(HEADER_AGENT_COL);
-    let header = preview_header(&name, status, agent);
+    // A live session's tabs share the header's row (the `←`/`→` — and click —
+    // targets), so the identity and the tabs read together on one line; the
+    // preview below mirrors the active pane.
     let mut lines = header_tab_rows(
         header,
         if live { state.terminal_tabs() } else { None },
@@ -2283,6 +2292,42 @@ pub(super) fn switch_preview(state: &HomeState, width: usize, rows: usize) -> Ve
     lines.truncate(body_rows);
     lines.resize(body_rows, String::new());
     lines
+}
+
+/// Header text for 切替's right-pane preview, plus whether the highlighted row is
+/// live. `switch_preview` and `switch_tab_at` share this so tab chips are measured
+/// from the same header text the renderer puts beside them.
+fn switch_preview_header(state: &HomeState) -> (String, bool) {
+    // Identify the highlighted row. `selected()` is `Some` for a real session
+    // row and `None` on the root row (which carries no git status / tracked
+    // path), so the match doubles as the root/session split.
+    let (name, live, running, waiting, done, status) = match state.list().selected() {
+        Some(w) => (
+            w.branch.as_deref().unwrap_or(DETACHED).to_string(),
+            state.is_live(&w.path),
+            state.is_running(&w.path),
+            state.is_waiting(&w.path),
+            state.is_done(&w.path),
+            Some(w.status),
+        ),
+        None => {
+            // The root row carries no worktree, but its embedded session is
+            // keyed by the workspace root path, so match it against the same
+            // live / running / waiting / done sets — otherwise a running root
+            // agent never previews live here (it only re-appears once selected).
+            let root = state.root_path();
+            (
+                ROOT_NAME.to_string(),
+                state.is_live(root),
+                state.is_running(root),
+                state.is_waiting(root),
+                state.is_done(root),
+                None,
+            )
+        }
+    };
+    let agent = AgentState::from_flags(live, running, waiting, done).detail(HEADER_AGENT_COL);
+    (preview_header(&name, status, agent), live)
 }
 
 /// The right pane's contents, by mode. A preview of the would-be session screen
