@@ -661,6 +661,9 @@ pub(super) struct FocusMenu {
     /// The agent picker's sub-cursor while the `agent` row is expanded, or `None`
     /// when the menu is in its normal (collapsed) state.
     agent_cursor: Option<usize>,
+    /// The close picker's sub-cursor while the `close` row is expanded, or `None`
+    /// when collapsed. `0` = plain close, `1` = close --force.
+    close_cursor: Option<usize>,
 }
 
 impl FocusMenu {
@@ -674,15 +677,26 @@ impl FocusMenu {
         self.agent_cursor.is_some()
     }
 
+    /// Whether the `close` row is expanded into the close picker.
+    pub(super) fn is_close_expanded(self) -> bool {
+        self.close_cursor.is_some()
+    }
+
     /// The agent picker's highlighted index while expanded, or `None` collapsed.
     pub(super) fn agent_cursor(self) -> Option<usize> {
         self.agent_cursor
+    }
+
+    /// The close picker's highlighted index while expanded, or `None` collapsed.
+    pub(super) fn close_cursor(self) -> Option<usize> {
+        self.close_cursor
     }
 
     /// Reset to the top, collapsed (entering 在席 / leaving for 切替).
     pub(super) fn reset(&mut self) {
         self.cursor = 0;
         self.agent_cursor = None;
+        self.close_cursor = None;
     }
 
     /// Expand the agent picker, highlighting `default_index` (the configured
@@ -697,22 +711,39 @@ impl FocusMenu {
         self.agent_cursor.take().is_some()
     }
 
-    /// Move up one row, wrapping. Acts on the agent picker while expanded,
-    /// otherwise the command list. `count` is clamped to at least 1.
+    /// Expand the close picker, starting at option 0 (plain close).
+    pub(super) fn expand_close(&mut self) {
+        self.close_cursor = Some(0);
+    }
+
+    /// Collapse the close picker back to the normal menu. Returns whether it was
+    /// expanded (so the caller can treat `←` / `Esc` as "consumed" only then).
+    pub(super) fn collapse_close(&mut self) -> bool {
+        self.close_cursor.take().is_some()
+    }
+
+    /// Move up one row, wrapping. Acts on whichever picker is open, or the
+    /// command list when none is. `count` is clamped to at least 1.
     pub(super) fn move_up(&mut self, count: usize) {
         let count = count.max(1);
-        match &mut self.agent_cursor {
-            Some(c) => *c = c.checked_sub(1).unwrap_or(count - 1),
-            None => self.cursor = self.cursor.checked_sub(1).unwrap_or(count - 1),
+        if let Some(c) = &mut self.agent_cursor {
+            *c = c.checked_sub(1).unwrap_or(count - 1);
+        } else if let Some(c) = &mut self.close_cursor {
+            *c = c.checked_sub(1).unwrap_or(count - 1);
+        } else {
+            self.cursor = self.cursor.checked_sub(1).unwrap_or(count - 1);
         }
     }
 
     /// Move down one row, wrapping (the mirror of [`move_up`](Self::move_up)).
     pub(super) fn move_down(&mut self, count: usize) {
         let count = count.max(1);
-        match &mut self.agent_cursor {
-            Some(c) => *c = (*c + 1) % count,
-            None => self.cursor = (self.cursor + 1) % count,
+        if let Some(c) = &mut self.agent_cursor {
+            *c = (*c + 1) % count;
+        } else if let Some(c) = &mut self.close_cursor {
+            *c = (*c + 1) % count;
+        } else {
+            self.cursor = (self.cursor + 1) % count;
         }
     }
 
@@ -725,6 +756,11 @@ impl FocusMenu {
     /// when collapsed (no picker open).
     pub(super) fn agent_selected(self, count: usize) -> usize {
         self.agent_cursor.unwrap_or(0).min(count.saturating_sub(1))
+    }
+
+    /// The selected close-picker index, clamped to 0 or 1. `0` when collapsed.
+    pub(super) fn close_selected(self) -> usize {
+        self.close_cursor.unwrap_or(0).min(1)
     }
 }
 

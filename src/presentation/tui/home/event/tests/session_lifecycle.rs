@@ -242,7 +242,7 @@ fn finished_create_does_not_auto_focus_after_another_operation() {
     let mut rename = |_: &Path, n: &str, l: &str| noop_rename(n, l);
     let mut set_note_fake = |_: &Path, n: &str, t: &str| noop_set_note(n, t);
     let mut reorder_fake: fn(&str, bool) -> SessionReorder = noop_reorder;
-    let mut remove = |_: &Path, _: &str, _: bool| {};
+    let mut remove = |_: &Path, _: &str, _: bool, _| {};
     let mut unite_resolve: fn(&str) -> std::result::Result<GroupSource, String> = no_unite_resolve;
     let mut update = || {};
     let mut evict = |_: &Path| {};
@@ -298,6 +298,216 @@ fn finished_create_does_not_auto_focus_after_another_operation() {
     assert_eq!(
         opened.borrow().as_slice(),
         &[PathBuf::from("/ws/.usagi/sessions/main")]
+    );
+}
+
+#[test]
+fn finished_close_drops_into_focus_on_the_previous_session() {
+    // `close` removes the focused session on a worker. When it finishes before
+    // the user does anything else, the landing mirrors create's auto-focus path:
+    // focus the nearest session above the closed one instead of snapping to root.
+    // Prove that by pressing Focus menu's `t` shortcut after completion — it can
+    // only open `/main` if the close landed in 在席 on `main`.
+    let mut keys = cmd("session switch feat");
+    keys.push(Ok(Key::Enter)); // -> Focus(feat), menu UI
+    keys.push(Ok(Key::ArrowDown)); // agent -> close
+    keys.push(Ok(Key::Enter)); // dispatch close; completion drains next frame -> Focus(main)
+    keys.push(Ok(Key::Char('t'))); // Focus menu shortcut: open terminal on `main`
+
+    let term = Term::stdout();
+    let mut reader = ScriptedReader::new(keys);
+    let monitor = MonitorHandle::detached();
+    let opened = RefCell::new(Vec::new());
+    let mut open = |_: &mut HomeState, dir: &Path, _: bool, _: bool| {
+        opened.borrow_mut().push(dir.to_path_buf());
+        Ok(PaneExit::Closed)
+    };
+    let mut persist: fn(&str) = noop_persist;
+    let mut create: fn(&str) -> SessionOutcome = noop_create;
+    let mut remove = |name: &str, force: bool| {
+        assert_eq!((name, force), ("feat", false));
+        SessionOutcome {
+            line: LogLine::output("removed"),
+            sessions: Some(vec![SessionRecord {
+                name: "main".to_string(),
+                display_name: None,
+                note: None,
+                root: PathBuf::from("/ws/.usagi/sessions/main"),
+                worktrees: vec![worktree(Some("main"), "/r/main")],
+                created_at: Utc::now(),
+                last_active: None,
+            }]),
+            select: None,
+            root_note: None,
+        }
+    };
+    let mut config: fn(&Term) -> Result<Option<ConfigReload>> = noop_config;
+    let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = noop_preview;
+    assert!(matches!(
+        event_loop_compat(
+            &term,
+            &mut reader,
+            sample_state(),
+            Path::new("/ws"),
+            &monitor,
+            &UpdateHandle::new(),
+            &OneShot::<bool>::new(),
+            &OneShot::<Vec<AgentCli>>::new(),
+            &mut persist,
+            &mut create,
+            &mut (noop_rename as fn(&str, &str) -> SessionOutcome),
+            &mut (noop_set_note as fn(&str, &str) -> SessionOutcome),
+            &mut remove,
+            &mut (no_branches as fn() -> Vec<String>),
+            &mut open,
+            &mut config,
+            &mut preview,
+            &mut (noop_tab_op as fn(&Path, Option<TabNav>) -> (Vec<String>, usize)),
+            &mut (noop_close as fn(&mut HomeState, &Path)),
+            &mut (noop_reorder as fn(&str, bool) -> SessionReorder),
+        )
+        .unwrap(),
+        Outcome::Quit
+    ));
+    assert_eq!(
+        opened.borrow().as_slice(),
+        &[PathBuf::from("/ws/.usagi/sessions/main")]
+    );
+}
+
+#[test]
+fn finished_close_does_not_auto_focus_after_another_operation() {
+    use super::super::super::tasks::{AutoFocus, Completion, TaskKind};
+    use std::rc::Rc;
+
+    struct CompleteRemoveOnArrowUp {
+        keys: VecDeque<io::Result<Key>>,
+        tasks: TaskHandle,
+        task_id: Rc<RefCell<Option<u64>>>,
+        focus: Rc<RefCell<Option<AutoFocus>>>,
+    }
+
+    impl KeyReader for CompleteRemoveOnArrowUp {
+        fn read_key(&mut self) -> io::Result<Key> {
+            let key = self.keys.pop_front().unwrap_or(Ok(Key::CtrlC))?;
+            if matches!(key, Key::ArrowUp) {
+                let task_id = self.task_id.borrow_mut().take();
+                let focus = self.focus.borrow_mut().take();
+                if let (Some(id), Some(focus)) = (task_id, focus) {
+                    self.tasks.complete(
+                        id,
+                        true,
+                        Completion {
+                            line: LogLine::output("removed"),
+                            sessions: Some(vec![SessionRecord {
+                                name: "main".to_string(),
+                                display_name: None,
+                                note: None,
+                                root: PathBuf::from("/ws/.usagi/sessions/main"),
+                                worktrees: vec![worktree(Some("main"), "/r/main")],
+                                created_at: Utc::now(),
+                                last_active: None,
+                            }]),
+                            target_root: Some(PathBuf::from("/ws")),
+                            evict: Some(PathBuf::from("/ws/.usagi/sessions/feat")),
+                            focus: Some(focus),
+                        },
+                    );
+                }
+            }
+            Ok(key)
+        }
+    }
+
+    let mut keys = cmd("session switch feat");
+    keys.push(Ok(Key::Enter)); // -> Focus(feat), menu UI
+    keys.push(Ok(Key::ArrowDown)); // agent -> close
+    keys.push(Ok(Key::Enter)); // dispatch close, but leave the task running
+    keys.push(Ok(Key::ArrowUp)); // another Switch operation before completion lands
+    keys.push(Ok(Key::Char('c'))); // still Switch: begin inline create
+    keys.push(Ok(Key::Escape)); // cancel create; reader then runs out -> quit
+
+    let tasks = TaskHandle::new();
+    let task_id = Rc::new(RefCell::new(None));
+    let focus = Rc::new(RefCell::new(None));
+    let mut reader = CompleteRemoveOnArrowUp {
+        keys: keys.into(),
+        tasks: tasks.clone(),
+        task_id: task_id.clone(),
+        focus: focus.clone(),
+    };
+    let term = Term::stdout();
+    let monitor = MonitorHandle::detached();
+    let mut persist: fn(&str) = noop_persist;
+    let mut dispatch_create = |_: &Path, _: &str, _: u64| {};
+    let mut rename = |_: &Path, n: &str, l: &str| noop_rename(n, l);
+    let mut set_note_fake = |_: &Path, n: &str, t: &str| noop_set_note(n, t);
+    let mut reorder_fake: fn(&str, bool) -> SessionReorder = noop_reorder;
+    let mut remove = |_: &Path, name: &str, _: bool, auto_focus: Option<AutoFocus>| {
+        let id = tasks.begin(TaskKind::RemoveSession, name);
+        *task_id.borrow_mut() = Some(id);
+        *focus.borrow_mut() = auto_focus;
+    };
+    let mut unite_resolve: fn(&str) -> std::result::Result<GroupSource, String> = no_unite_resolve;
+    let mut update = || {};
+    let mut evict = |_: &Path| {};
+    let mut branches_called = 0;
+    let mut branches = || {
+        branches_called += 1;
+        Vec::new()
+    };
+    let mut open: fn(&mut HomeState, &Path, bool, bool) -> Result<PaneExit> = noop_open;
+    let mut open_url: fn(&str) = noop_open_url;
+    let mut config: fn(&Term) -> Result<Option<ConfigReload>> = noop_config;
+    let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = noop_preview;
+    let mut tab_op: fn(&Path, Option<TabNav>) -> (Vec<String>, usize) = noop_tab_op;
+    let mut close: fn(&mut HomeState, &Path) = noop_close;
+    let mut save_resume = |_: &str, _: ResumeLevel| {};
+    let mut save_last_active = |_: &[(String, DateTime<Utc>)]| {};
+    let mut tab_action = |_: &mut HomeState, _: &Path, _: usize, _: TabMenuAction| {};
+    let mut wiring = Wiring {
+        interaction_epoch: 0,
+        workspace_root: Path::new("/ws"),
+        persist: &mut persist,
+        dispatch_create: &mut dispatch_create,
+        rename_display: &mut rename,
+        set_note: &mut set_note_fake,
+        reorder_session: &mut reorder_fake,
+        dispatch_remove: &mut remove,
+        unite_resolve: &mut unite_resolve,
+        dispatch_update: &mut update,
+        evict_pool: &mut evict,
+        existing_branches: &mut branches,
+        open_terminal: &mut open,
+        open_url: &mut open_url,
+        open_config: &mut config,
+        preview: &mut preview,
+        tab_op: &mut tab_op,
+        close_tab: &mut close,
+        tab_action: &mut tab_action,
+        save_resume: &mut save_resume,
+        save_last_active: &mut save_last_active,
+    };
+
+    assert!(matches!(
+        event_loop(
+            &term,
+            &mut reader,
+            sample_state(),
+            &monitor,
+            &UpdateHandle::new(),
+            &SessionsRefreshHandle::new(),
+            &OneShot::<bool>::new(),
+            &OneShot::<Vec<AgentCli>>::new(),
+            &tasks,
+            &mut wiring,
+        )
+        .unwrap(),
+        Outcome::Quit
+    ));
+    assert_eq!(
+        branches_called, 1,
+        "`c` after the delayed close completion stayed in 切替 instead of auto-focusing"
     );
 }
 
@@ -539,6 +749,274 @@ fn focus_menu_close_removes_the_focused_session_then_enters_switch() {
         branches_called, 1,
         "`c` after close began inline create, so the screen is in 切替 (Switch)"
     );
+}
+
+#[test]
+fn focus_menu_shift_c_force_closes_the_focused_session_then_enters_switch() {
+    // Shift+c (reported by `console` as capital `C`) is the 在席 menu's explicit
+    // discard shortcut: it runs `close --force` without moving the menu cursor.
+    // The screen still lands in 切替 (Switch), proven by the following `c`
+    // beginning inline creation.
+    let mut keys = cmd("session switch feat");
+    keys.push(Ok(Key::Enter)); // -> Focus (feat), menu UI
+    keys.push(Ok(Key::Char('C'))); // run `close --force` -> 切替 (Switch)
+    keys.push(Ok(Key::Char('c'))); // Switch-only: begin inline create
+    keys.push(Ok(Key::Escape)); // cancel create; reader then runs out -> quit
+    let term = Term::stdout();
+    let mut reader = ScriptedReader::new(keys);
+    let monitor = MonitorHandle::detached();
+    let mut persist: fn(&str) = noop_persist;
+    let mut create: fn(&str) -> SessionOutcome = noop_create;
+    let mut removed = Vec::new();
+    let mut remove = |name: &str, force: bool| {
+        removed.push((name.to_string(), force));
+        SessionOutcome {
+            line: LogLine::output("removed"),
+            sessions: Some(Vec::new()),
+            select: None,
+            root_note: None,
+        }
+    };
+    let mut open: fn(&mut HomeState, &Path, bool, bool) -> Result<PaneExit> = noop_open;
+    let mut config: fn(&Term) -> Result<Option<ConfigReload>> = noop_config;
+    let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = noop_preview;
+    let mut branches_called = 0;
+    let mut branches = || {
+        branches_called += 1;
+        Vec::new()
+    };
+    let outcome = event_loop_compat(
+        &term,
+        &mut reader,
+        sample_state(),
+        Path::new("/ws"),
+        &monitor,
+        &UpdateHandle::new(),
+        &OneShot::<bool>::new(),
+        &OneShot::<Vec<AgentCli>>::new(),
+        &mut persist,
+        &mut create,
+        &mut (noop_rename as fn(&str, &str) -> SessionOutcome),
+        &mut (noop_set_note as fn(&str, &str) -> SessionOutcome),
+        &mut remove,
+        &mut branches,
+        &mut open,
+        &mut config,
+        &mut preview,
+        &mut (noop_tab_op as fn(&Path, Option<TabNav>) -> (Vec<String>, usize)),
+        &mut (noop_close as fn(&mut HomeState, &Path)),
+        &mut (noop_reorder as fn(&str, bool) -> SessionReorder),
+    )
+    .unwrap();
+    assert!(matches!(outcome, Outcome::Quit));
+    assert_eq!(removed, vec![("feat".to_string(), true)]);
+    assert_eq!(
+        branches_called, 1,
+        "`c` after Shift+c close began inline create, so the screen is in 切替 (Switch)"
+    );
+}
+
+#[test]
+fn focus_menu_close_picker_enter_runs_plain_close() {
+    // `→` on the close row opens the picker; `Enter` on option 0 runs plain `close`.
+    let mut keys = cmd("session switch feat");
+    keys.push(Ok(Key::Enter)); // -> Focus (feat)
+    keys.push(Ok(Key::ArrowDown)); // agent -> close
+    keys.push(Ok(Key::ArrowRight)); // open close picker (option 0 = close)
+    keys.push(Ok(Key::Enter)); // run `close` -> 切替
+    keys.push(Ok(Key::Char('c'))); // Switch-only: begin inline create
+    keys.push(Ok(Key::Escape)); // cancel; reader runs out -> quit
+    let term = Term::stdout();
+    let mut reader = ScriptedReader::new(keys);
+    let monitor = MonitorHandle::detached();
+    let mut persist: fn(&str) = noop_persist;
+    let mut create: fn(&str) -> SessionOutcome = noop_create;
+    let mut removed = Vec::new();
+    let mut remove = |name: &str, force: bool| {
+        removed.push((name.to_string(), force));
+        SessionOutcome {
+            line: LogLine::output("removed"),
+            sessions: Some(Vec::new()),
+            select: None,
+            root_note: None,
+        }
+    };
+    let mut open: fn(&mut HomeState, &Path, bool, bool) -> Result<PaneExit> = noop_open;
+    let mut config: fn(&Term) -> Result<Option<ConfigReload>> = noop_config;
+    let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = noop_preview;
+    let mut branches_called = 0;
+    let mut branches = || {
+        branches_called += 1;
+        Vec::new()
+    };
+    let outcome = event_loop_compat(
+        &term,
+        &mut reader,
+        sample_state(),
+        Path::new("/ws"),
+        &monitor,
+        &UpdateHandle::new(),
+        &OneShot::<bool>::new(),
+        &OneShot::<Vec<AgentCli>>::new(),
+        &mut persist,
+        &mut create,
+        &mut (noop_rename as fn(&str, &str) -> SessionOutcome),
+        &mut (noop_set_note as fn(&str, &str) -> SessionOutcome),
+        &mut remove,
+        &mut branches,
+        &mut open,
+        &mut config,
+        &mut preview,
+        &mut (noop_tab_op as fn(&Path, Option<TabNav>) -> (Vec<String>, usize)),
+        &mut (noop_close as fn(&mut HomeState, &Path)),
+        &mut (noop_reorder as fn(&str, bool) -> SessionReorder),
+    )
+    .unwrap();
+    assert!(matches!(outcome, Outcome::Quit));
+    assert_eq!(removed, vec![("feat".to_string(), false)]);
+    assert_eq!(branches_called, 1, "landed in 切替 after plain close");
+}
+
+#[test]
+fn focus_menu_close_picker_enter_on_force_runs_force_close() {
+    // `→` opens the picker; `↓` selects `--force`; `Enter` runs `close --force`.
+    let mut keys = cmd("session switch feat");
+    keys.push(Ok(Key::Enter)); // -> Focus (feat)
+    keys.push(Ok(Key::ArrowDown)); // agent -> close
+    keys.push(Ok(Key::ArrowRight)); // open close picker
+    keys.push(Ok(Key::ArrowDown)); // option 0 -> option 1 (close --force)
+    keys.push(Ok(Key::Enter)); // run `close --force` -> 切替
+    keys.push(Ok(Key::Char('c'))); // Switch-only: begin inline create
+    keys.push(Ok(Key::Escape)); // cancel; reader runs out -> quit
+    let term = Term::stdout();
+    let mut reader = ScriptedReader::new(keys);
+    let monitor = MonitorHandle::detached();
+    let mut persist: fn(&str) = noop_persist;
+    let mut create: fn(&str) -> SessionOutcome = noop_create;
+    let mut removed = Vec::new();
+    let mut remove = |name: &str, force: bool| {
+        removed.push((name.to_string(), force));
+        SessionOutcome {
+            line: LogLine::output("removed"),
+            sessions: Some(Vec::new()),
+            select: None,
+            root_note: None,
+        }
+    };
+    let mut open: fn(&mut HomeState, &Path, bool, bool) -> Result<PaneExit> = noop_open;
+    let mut config: fn(&Term) -> Result<Option<ConfigReload>> = noop_config;
+    let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = noop_preview;
+    let mut branches_called = 0;
+    let mut branches = || {
+        branches_called += 1;
+        Vec::new()
+    };
+    let outcome = event_loop_compat(
+        &term,
+        &mut reader,
+        sample_state(),
+        Path::new("/ws"),
+        &monitor,
+        &UpdateHandle::new(),
+        &OneShot::<bool>::new(),
+        &OneShot::<Vec<AgentCli>>::new(),
+        &mut persist,
+        &mut create,
+        &mut (noop_rename as fn(&str, &str) -> SessionOutcome),
+        &mut (noop_set_note as fn(&str, &str) -> SessionOutcome),
+        &mut remove,
+        &mut branches,
+        &mut open,
+        &mut config,
+        &mut preview,
+        &mut (noop_tab_op as fn(&Path, Option<TabNav>) -> (Vec<String>, usize)),
+        &mut (noop_close as fn(&mut HomeState, &Path)),
+        &mut (noop_reorder as fn(&str, bool) -> SessionReorder),
+    )
+    .unwrap();
+    assert!(matches!(outcome, Outcome::Quit));
+    assert_eq!(removed, vec![("feat".to_string(), true)]);
+    assert_eq!(branches_called, 1, "landed in 切替 after close --force");
+}
+
+/// Minimal event-loop harness for close-picker navigation tests.
+fn run_close_picker_keys(extra_keys: Vec<io::Result<Key>>) -> (Outcome, Vec<(String, bool)>) {
+    // Start: navigate to close row, open picker, then apply caller's keys.
+    let mut keys = cmd("session switch feat");
+    keys.push(Ok(Key::Enter)); // -> Focus (feat)
+    keys.push(Ok(Key::ArrowDown)); // agent -> close
+    keys.push(Ok(Key::ArrowRight)); // open close picker
+    keys.extend(extra_keys);
+    let term = Term::stdout();
+    let mut reader = ScriptedReader::new(keys);
+    let monitor = MonitorHandle::detached();
+    let mut persist: fn(&str) = noop_persist;
+    let mut create: fn(&str) -> SessionOutcome = noop_create;
+    let mut removed = Vec::new();
+    let mut remove = |name: &str, force: bool| {
+        removed.push((name.to_string(), force));
+        SessionOutcome {
+            line: LogLine::output("removed"),
+            sessions: Some(Vec::new()),
+            select: None,
+            root_note: None,
+        }
+    };
+    let mut open: fn(&mut HomeState, &Path, bool, bool) -> Result<PaneExit> = noop_open;
+    let mut config: fn(&Term) -> Result<Option<ConfigReload>> = noop_config;
+    let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = noop_preview;
+    let mut branches = || Vec::new();
+    let outcome = event_loop_compat(
+        &term,
+        &mut reader,
+        sample_state(),
+        Path::new("/ws"),
+        &monitor,
+        &UpdateHandle::new(),
+        &OneShot::<bool>::new(),
+        &OneShot::<Vec<AgentCli>>::new(),
+        &mut persist,
+        &mut create,
+        &mut (noop_rename as fn(&str, &str) -> SessionOutcome),
+        &mut (noop_set_note as fn(&str, &str) -> SessionOutcome),
+        &mut remove,
+        &mut branches,
+        &mut open,
+        &mut config,
+        &mut preview,
+        &mut (noop_tab_op as fn(&Path, Option<TabNav>) -> (Vec<String>, usize)),
+        &mut (noop_close as fn(&mut HomeState, &Path)),
+        &mut (noop_reorder as fn(&str, bool) -> SessionReorder),
+    )
+    .unwrap();
+    (outcome, removed)
+}
+
+#[test]
+fn focus_menu_close_picker_left_collapses_without_executing() {
+    // `←` collapses the picker back to the menu without running any command.
+    // An unhandled key (`t`) while the picker is open is also a no-op (catch-all arm).
+    let (outcome, removed) = run_close_picker_keys(vec![
+        Ok(Key::Char('t')), // no-op: unhandled key inside close picker
+        Ok(Key::ArrowLeft), // collapse picker
+        Ok(Key::Escape),    // leave Focus -> 切替
+        Ok(Key::Escape),    // quit
+    ]);
+    assert!(matches!(outcome, Outcome::Quit));
+    assert!(removed.is_empty(), "← must not execute close");
+}
+
+#[test]
+fn focus_menu_close_picker_up_wraps_to_force_and_runs_it() {
+    // `↑` from option 0 (close) wraps to option 1 (close --force); `Enter` runs it.
+    let (outcome, removed) = run_close_picker_keys(vec![
+        Ok(Key::ArrowUp),   // 0 -> 1 (close --force), exercises move_up close_cursor path
+        Ok(Key::Enter),     // run close --force
+        Ok(Key::Char('c')), // Switch-only: begin inline create -> proves 切替
+        Ok(Key::Escape),    // cancel; reader runs out -> quit
+    ]);
+    assert!(matches!(outcome, Outcome::Quit));
+    assert_eq!(removed, vec![("feat".to_string(), true)]);
 }
 
 #[test]

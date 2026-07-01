@@ -22,6 +22,7 @@ pub use rabbit::{
     RabbitMood,
 };
 
+use crate::presentation::theme::{self, Palette};
 use console::{style, Style};
 use unicode_width::UnicodeWidthChar;
 
@@ -469,26 +470,23 @@ fn overlay_block(base: &mut [String], top: usize, left: usize, block_w: usize, b
     }
 }
 
-/// A centred, green-bold screen title.
+/// A centred screen title in the palette's success colour.
 pub fn title_line(width: usize, title: &str) -> String {
-    style(centered(width, title)).green().bold().to_string()
+    style(centered(width, title)).success().bold().to_string()
 }
 
-/// xterm-256 green shades from dim to bright — the brightness ramp the splash
-/// fades the title up through before it settles on the welcome screen's
-/// green-bold title.
-const TITLE_FADE: [u8; 4] = [22, 28, 34, 40];
-
-/// The number of fade steps [`faded_title_line`] accepts: one per [`TITLE_FADE`]
-/// shade plus the final green-bold step that matches [`title_line`].
-pub const TITLE_FADE_STEPS: usize = TITLE_FADE.len() + 1;
+/// The number of fade steps [`faded_title_line`] accepts: one per
+/// [`theme::TITLE_FADE`] shade plus the final success-bold step that matches
+/// [`title_line`]. The ramp itself lives in the central [`theme`] palette.
+pub const TITLE_FADE_STEPS: usize = theme::TITLE_FADE.len() + 1;
 
 /// A centred title faded to `step` of [`TITLE_FADE_STEPS`].
 ///
 /// `step` 0 is a blank line (the title not shown yet), so a screen can reserve
 /// the title's row before it appears without the layout shifting. Intermediate
-/// steps ramp the green from dim to bright through [`TITLE_FADE`], and the final
-/// step (and anything past it) is the canonical green-bold [`title_line`] — so
+/// steps ramp the title from dim to bright through [`theme::TITLE_FADE`], and
+/// the final step (and anything past it) is the canonical success-bold
+/// [`title_line`] — so
 /// the splash can fade the title in and hand off to the welcome screen with no
 /// visible jump.
 pub fn faded_title_line(width: usize, title: &str, step: usize) -> String {
@@ -499,7 +497,7 @@ pub fn faded_title_line(width: usize, title: &str, step: usize) -> String {
         return title_line(width, title);
     }
     style(centered(width, title))
-        .color256(TITLE_FADE[step - 1])
+        .color256(theme::TITLE_FADE[step - 1])
         .to_string()
 }
 
@@ -531,7 +529,7 @@ pub fn header_lines(width: usize, title: &str, subtitle: Option<&str>) -> Vec<St
 /// styling, shared by every screen's row / menu / button rendering.
 pub fn cursor_marker(selected: bool) -> String {
     if selected {
-        style(">").red().bold().to_string()
+        style(">").danger().bold().to_string()
     } else {
         " ".to_string()
     }
@@ -552,9 +550,9 @@ pub fn chooser(value: &str, focused: bool, changed: bool) -> String {
     let paint = |text: &str| {
         let styled = style(text.to_string());
         if changed {
-            styled.yellow().bold()
+            styled.warning().bold()
         } else if focused {
-            styled.cyan().bold()
+            styled.accent().bold()
         } else {
             styled.dim()
         }
@@ -942,7 +940,7 @@ mod tests {
 
     #[test]
     fn faded_title_line_settles_on_the_canonical_title() {
-        // The final step (and anything past it) is exactly the green-bold
+        // The final step (and anything past it) is exactly the success-bold
         // title_line, so the splash hands off to the welcome screen with no jump.
         assert_eq!(
             faded_title_line(80, "USAGI", TITLE_FADE_STEPS),

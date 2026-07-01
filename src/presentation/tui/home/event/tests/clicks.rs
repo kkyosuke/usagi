@@ -7,6 +7,7 @@
 //! fixtures click column 0 so the hit lands in the left pane at any terminal width.
 
 use super::*;
+use crate::presentation::tui::home::tasks::AutoFocus;
 use crate::presentation::tui::home::terminal::pool::MonitorSnapshot;
 use crate::presentation::tui::home::terminal::tabs::TabSwap;
 
@@ -325,7 +326,7 @@ fn a_right_click_on_a_switch_tab_opens_a_menu_and_runs_the_selected_action() {
     let mut rename = |_: &Path, n: &str, l: &str| noop_rename(n, l);
     let mut note = |_: &Path, n: &str, v: &str| noop_set_note(n, v);
     let mut reorder: fn(&str, bool) -> SessionReorder = noop_reorder;
-    let mut remove: fn(&Path, &str, bool) = |_, _, _| {};
+    let mut remove: fn(&Path, &str, bool, Option<AutoFocus>) = |_, _, _, _| {};
     let mut unite_resolve: fn(&str) -> std::result::Result<GroupSource, String> = no_unite_resolve;
     let mut dispatch_update = || {};
     let mut evict: fn(&Path) = |_| {};

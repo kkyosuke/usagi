@@ -25,8 +25,8 @@ use crate::presentation::tui::widgets::{clip_to_width, clip_to_width_cow};
 use chrome::{
     command_palette_body, footer_line, input_line, mode_ladder, quit_confirm_frame,
     remove_modal_body, switch_create_rows, switch_rename_rows, tab_menu_box, tab_rename_body,
-    task_status_line, text_modal_body, title_bar, update_confirm_frame, PALETTE_INNER,
-    REMOVE_MODAL_INNER, TEXT_MODAL_INNER,
+    task_status_line, text_modal_body, title_bar, update_confirm_frame, waiting_notice,
+    PALETTE_INNER, REMOVE_MODAL_INNER, TEXT_MODAL_INNER,
 };
 use panes::{group_inline_insert_line, left_pane, right_pane_contents};
 // The right-pane tab strips map clicks to the tab under them through these.
@@ -492,10 +492,12 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
     // Overlay the top-right corner, in priority order: a momentary blocking
     // action (terminal / agent launch) shows the loading rabbit; otherwise any
     // in-flight background session work (create / remove) shows the task status
-    // line. The loading rabbit anchors to the top of the right pane (the rows
-    // below the title bar and mode ladder); the task status rides the header rows.
-    // The "update available" notice is no longer a corner overlay — the sidebar
-    // mascot speaks it (above) instead.
+    // line; otherwise a `◆ N waiting` notice appears while at least one session
+    // is waiting for the user's input. The loading rabbit anchors to the top of
+    // the right pane (the rows below the title bar and mode ladder); the task
+    // status and waiting notice ride the header rows. The "update available"
+    // notice is no longer a corner overlay — the sidebar mascot speaks it
+    // (above) instead.
     if let Some(loading) = state.loading() {
         // The transient launch indicator is deliberate and short-lived, so it
         // takes the corner even over a live pane.
@@ -517,6 +519,13 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
             0,
             width,
             &task_status_line(state.tasks(), width),
+        );
+    } else {
+        widgets::overlay_top_right(
+            &mut lines,
+            0,
+            width,
+            &waiting_notice(state.waiting_paths().len()),
         );
     }
 

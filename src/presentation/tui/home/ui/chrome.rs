@@ -3,6 +3,7 @@
 //! (with its command hints), and the session-removal / quit-confirmation
 //! modals. All functions take plain data and return styled lines.
 
+use crate::presentation::theme::Palette;
 use console::{style, Style};
 
 use super::super::command::{CommandHint, Hint};
@@ -101,10 +102,10 @@ pub(super) fn task_status_line(rows: &[TaskRow], width: usize) -> Vec<String> {
     let (icon, icon_style) = match lead.mark {
         TaskMark::Running(frame) => (
             widgets::spinner_char(frame).to_string(),
-            Style::new().cyan().bold(),
+            Style::new().accent().bold(),
         ),
-        TaskMark::Done(true) => ("✓".to_string(), Style::new().green().bold()),
-        TaskMark::Done(false) => ("✗".to_string(), Style::new().red().bold()),
+        TaskMark::Done(true) => ("✓".to_string(), Style::new().success().bold()),
+        TaskMark::Done(false) => ("✗".to_string(), Style::new().danger().bold()),
     };
     // Scale the label field with the terminal, clamped so the block still tucks
     // into the blank gap beside the centred title / mode ladder. Constant for
@@ -134,6 +135,32 @@ pub(super) fn task_status_line(rows: &[TaskRow], width: usize) -> Vec<String> {
     vec![line1, line2]
 }
 
+/// The Nerd Font bell (`nf-fa-bell`) leading the top-right waiting notice — the
+/// familiar "notification" glyph, so an at-a-glance count of sessions paused for
+/// the user reads as an alert rather than blending into the per-session `◆`.
+const WAITING_ICON: char = '\u{f0f3}'; // nf-fa-bell — a session wants attention
+
+/// The top-right "you have sessions waiting" notice: a single fixed-shape row
+/// (`<bell> N waiting`) drawn in the sidebar's waiting colour (yellow-bold) so
+/// the header carries an at-a-glance count of how many sessions have paused for
+/// the user's input or a permission, even when those rows are scrolled out of
+/// the sidebar or the pane is collapsed to the rail. The count shares the
+/// per-session badge's hue, and leads with the Nerd Font bell
+/// ([`WAITING_ICON`]) so it reads as a notification.
+///
+/// Returns no lines when nothing is waiting (`count == 0`), so the caller falls
+/// back to whatever else wants the corner. Anchored to the header rows by
+/// [`overlay_top_right`](super::overlay_top_right) like the task status block,
+/// so it tucks into the blank right column beside the centred title and never
+/// collides with the right pane below.
+pub(super) fn waiting_notice(count: usize) -> Vec<String> {
+    if count == 0 {
+        return Vec::new();
+    }
+    let label = format!("{WAITING_ICON} {count} waiting");
+    vec![style(label).yellow().bold().to_string()]
+}
+
 /// The engagement-ladder indicator drawn just under the title bar: the three
 /// modes in order with the current one highlighted (cyan-bold) and the rest
 /// dimmed, so the screen always shows which step the keys act on. Centred for
@@ -148,7 +175,7 @@ pub(super) fn mode_ladder(width: usize, current: Mode) -> String {
         .iter()
         .map(|(mode, label)| {
             if *mode == current {
-                style(*label).cyan().bold().to_string()
+                style(*label).accent().bold().to_string()
             } else {
                 style(*label).dim().to_string()
             }
@@ -173,7 +200,7 @@ pub(super) fn command_hint_row(
     width: usize,
 ) -> String {
     let marker = if selected {
-        style("›").red().bold().to_string()
+        style("›").danger().bold().to_string()
     } else {
         " ".to_string()
     };
@@ -181,7 +208,7 @@ pub(super) fn command_hint_row(
     // continuation of what is in the input line.
     let split = typed_len.min(hint.name.len());
     let (head, tail) = hint.name.split_at(split);
-    let name = format!("{}{}", style(head).cyan().bold(), style(tail).cyan());
+    let name = format!("{}{}", style(head).accent().bold(), style(tail).accent());
     let name_col = pad_to_width(name, HINT_NAME_COL);
     let desc_budget = width.saturating_sub(HINT_INDENT + HINT_NAME_COL);
     let desc = style(clip_to_width(hint.description, desc_budget)).dim();
@@ -227,7 +254,7 @@ pub(super) fn hint_lines(state: &HomeState, width: usize) -> Vec<String> {
             let mut lines = vec![format!(
                 "  {} {}",
                 style("usage").dim(),
-                style(usage).cyan()
+                style(usage).accent()
             )];
             for example in examples.iter().take(HINT_MAX) {
                 let text = clip_to_width(example, width.saturating_sub(HINT_INDENT + 6));
@@ -252,7 +279,7 @@ pub(super) fn input_line(state: &HomeState) -> String {
         ))
         .dim()
         .to_string(),
-        Mode::Attached => style(" ● live terminal".to_string()).green().to_string(),
+        Mode::Attached => style(" ● live terminal".to_string()).success().to_string(),
     }
 }
 
@@ -260,10 +287,10 @@ pub(super) fn input_line(state: &HomeState) -> String {
 /// position (the byte offset from [`HomeState::cursor`]), so ←/→/Home/End move a
 /// visible caret through the text instead of always sitting at the end.
 fn command_input_content(state: &HomeState) -> String {
-    let prompt = style("❯").red().bold();
+    let prompt = style("❯").danger().bold();
     let input = state.input();
     let (before, after) = input.split_at(state.cursor());
-    let value = widgets::block_caret(before, after, &Style::new().cyan());
+    let value = widgets::block_caret(before, after, &Style::new().accent());
     format!("{prompt} {value}")
 }
 
@@ -468,13 +495,13 @@ pub(super) fn switch_create_rows(
     error: Option<&str>,
     left_w: usize,
 ) -> Vec<String> {
-    let base = Style::new().green().bold();
+    let base = Style::new().success().bold();
     let (before, after) = input.split_at(cursor);
     let value = widgets::block_caret(before, after, &base);
     let label = clip_to_width(&format!("{}{value}", base.apply_to("+ new: ")), left_w);
     let mut rows = vec![label];
     if let Some(err) = error {
-        rows.push(style(clip_to_width(err, left_w)).red().to_string());
+        rows.push(style(clip_to_width(err, left_w)).danger().to_string());
     }
     rows
 }
@@ -490,7 +517,7 @@ pub(super) fn switch_rename_rows(
     cursor: usize,
     left_w: usize,
 ) -> Vec<String> {
-    let base = Style::new().cyan().bold();
+    let base = Style::new().accent().bold();
     let (before, after) = input.split_at(cursor);
     let value = widgets::block_caret(before, after, &base);
     let label = clip_to_width(
@@ -542,9 +569,9 @@ pub(super) fn remove_modal_row(name: &str, cursor: bool, selected: bool, inner: 
     let text = clip_to_width(name, inner.saturating_sub(6));
     let line = format!("{marker} {check} {text}");
     if cursor {
-        style(line).cyan().bold().to_string()
+        style(line).accent().bold().to_string()
     } else if selected {
-        style(line).cyan().to_string()
+        style(line).accent().to_string()
     } else {
         style(line).dim().to_string()
     }

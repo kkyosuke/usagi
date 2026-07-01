@@ -7,6 +7,7 @@ use super::{
     Command, CommandContext, CommandInfo, CommandResult, CommandScope, CompletionContext, Effect,
     LogLine,
 };
+use crate::presentation::theme::Palette;
 use crate::presentation::tui::widgets;
 use crate::usecase::issue::{
     annotate_all, dependency_tree, gantt, list_line, stats_line, IssueStats, ListedIssue,
@@ -512,12 +513,13 @@ impl Command for AgentCommand {
 }
 
 /// `close`: remove the focused session and return to 切替 (Switch). It is the
-/// 在席 equivalent of `session remove <name>` (no `--force`): a clean session's
-/// worktrees and branches are deleted, but one with **uncommitted changes is
-/// refused** — the removal logs how to discard them — so `close` can never
-/// silently throw away unsaved work. The removal is a side effect
-/// ([`Effect::CloseSession`]) performed by the event loop, which owns the
-/// worktree list and the session-removal callback.
+/// 在席 equivalent of `session remove <name>`: a clean session's worktrees and
+/// branches are deleted. Bare `close` (no `--force`) **refuses a session with
+/// uncommitted changes** — the removal logs how to discard them — so it can
+/// never silently throw away unsaved work; `close --force` (alias `-f`, the 在席
+/// menu's `Shift`+`c`) discards them, mirroring `session remove <name> --force`.
+/// The removal is a side effect ([`Effect::CloseSession`]) performed by the
+/// event loop, which owns the worktree list and the session-removal callback.
 pub(super) struct CloseCommand;
 
 impl Command for CloseCommand {
@@ -529,15 +531,33 @@ impl Command for CloseCommand {
         "Close the focused session (remove it; kept if it has uncommitted changes)"
     }
 
+    fn usage(&self) -> &'static str {
+        "close [--force]  (alias: -f; --force discards uncommitted changes)"
+    }
+
+    fn examples(&self) -> &'static [&'static str] {
+        &["close", "close --force"]
+    }
+
     fn scope(&self) -> CommandScope {
         CommandScope::Session
     }
 
-    fn run(&self, _args: &str, _ctx: &CommandContext) -> CommandResult {
+    fn run(&self, args: &str, _ctx: &CommandContext) -> CommandResult {
+        // `--force` / `-f` discards uncommitted changes, like `session remove
+        // <name> --force`; any other token is ignored (close takes no name — it
+        // always acts on the focused session).
+        let force = args
+            .split_whitespace()
+            .any(|tok| tok == "--force" || tok == "-f");
         CommandResult {
             lines: Vec::new(),
-            effect: Effect::CloseSession,
+            effect: Effect::CloseSession { force },
         }
+    }
+
+    fn complete_args(&self, _args: &str, _ctx: &CompletionContext) -> Vec<String> {
+        vec!["--force".to_string()]
     }
 }
 
@@ -635,7 +655,7 @@ fn style_graph_line(text: String) -> String {
     if text.contains('✓') {
         style(text).dim().to_string()
     } else if text.contains('⊘') {
-        style(text).red().to_string()
+        style(text).danger().to_string()
     } else {
         text
     }

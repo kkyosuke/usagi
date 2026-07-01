@@ -310,6 +310,7 @@ fn focus_menu_agent_row_shows_the_default_and_expands_into_a_picker() {
     state.focus_menu_move_down(); // agent -> close
     let off_agent = stripped(&right_pane_contents(&state, 50, 16));
     assert!(off_agent.contains("Launch Claude"));
+    assert!(off_agent.contains("  Launch Claude"));
     assert!(!off_agent.contains("→ pick agent"));
     // Back onto the agent row, expanding lists the installed agents.
     state.focus_menu_move_up(); // close -> agent
@@ -320,6 +321,30 @@ fn focus_menu_agent_row_shows_the_default_and_expands_into_a_picker() {
     assert!(expanded.contains("Codex"));
     assert!(expanded.contains("(default)"));
     assert!(expanded.contains("Enter launch"));
+}
+
+#[test]
+fn focus_close_row_shows_chevron_and_expands_into_a_picker() {
+    let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
+    state.enter_focus(1);
+    // Alphabetical order: agent is first; move down once to land on close.
+    state.focus_menu_move_down();
+    // The close row shows ▸ and "→ expand" in the hint while cursor is on it.
+    let on_close = stripped(&right_pane_contents(&state, 60, 18));
+    assert!(on_close.contains('▸'));
+    assert!(on_close.contains("→ expand"));
+    // Expanding shows the two sub-rows (plain close and --force) and swaps the hint.
+    state.focus_menu_expand_close();
+    let expanded = stripped(&right_pane_contents(&state, 60, 18));
+    assert!(expanded.contains('▾'));
+    assert!(expanded.contains("close --force"));
+    assert!(expanded.contains("(safe)"));
+    assert!(expanded.contains("discard uncommitted changes"));
+    assert!(expanded.contains("Enter run"));
+    // Collapsing hides the sub-rows.
+    state.focus_menu_collapse_close();
+    let collapsed = stripped(&right_pane_contents(&state, 60, 18));
+    assert!(!collapsed.contains("close --force"));
 }
 
 #[test]
