@@ -231,6 +231,11 @@ pub(super) const SESSION_ROWS: usize = 3;
 /// hit-tests skip over it.
 const UNITE_WORKSPACE_GAP_ROWS: usize = 2;
 
+/// The persistent row kept at the foot of the left pane to create a session
+/// without remembering the `c` shortcut. It is a navigation target, not a
+/// session, and turns into the inline `+ new: <name>` input when activated.
+const CREATE_ROW_LABEL: &str = "+ new session";
+
 /// The icon-led `<cpu> <pct>  <mem> <bytes>` resource label shared by a session's
 /// resource line and the workspace total beside the mascot. The CPU figure leads
 /// with [`CPU_ICON`] and the memory with [`MEM_ICON`] (in place of the words
@@ -750,6 +755,34 @@ fn rail_entry(
     (top, detail, resource)
 }
 
+/// The persistent create row in the full sidebar. It uses the same gutter grammar
+/// as real rows (`>` only in 切替 when selected) but has no heat/status/resource
+/// lines because it is an action target rather than a session. The row is still
+/// always present at the list foot so keyboard focus and mouse clicks can enter
+/// the create input from a visible affordance.
+fn create_row(selected: bool, in_switch: bool, width: usize) -> String {
+    let gutter = gutter_cell(selected, false, in_switch);
+    let label = if selected && in_switch {
+        style(CREATE_ROW_LABEL).green().bold().to_string()
+    } else {
+        style(CREATE_ROW_LABEL).green().to_string()
+    };
+    clip_to_width(&format!("{gutter} {label}"), width)
+}
+
+/// The rail twin of [`create_row`]: the `+` glyph in the same row position. The
+/// input itself moves to the right pane while the sidebar is collapsed, but the
+/// click / focus target remains visible at the rail's bottom.
+fn rail_create_row(selected: bool, in_switch: bool) -> String {
+    let gutter = gutter_cell(selected, false, in_switch);
+    let label = if selected && in_switch {
+        style("+").green().bold().to_string()
+    } else {
+        style("+").green().to_string()
+    };
+    pad_to_width(format!("{gutter} {label}"), RAIL_WIDTH)
+}
+
 fn push_unite_workspace_gap(lines: &mut Vec<String>, width: usize) {
     for _ in 0..UNITE_WORKSPACE_GAP_ROWS {
         lines.push(pad_to_width(String::new(), width));
@@ -871,6 +904,13 @@ fn rail_pane(
             flat_row += 1;
         }
     }
+    if lines.len() < rows {
+        let mut row = rail_create_row(list.create_row_selected(), in_switch);
+        if in_switch && !list.create_row_selected() {
+            row = dim_row(&row);
+        }
+        lines.push(row);
+    }
     lines.truncate(rows);
     lines
 }
@@ -935,6 +975,9 @@ fn sidebar_row_at_line_walk(list: &WorktreeList, line: usize, with_headers: bool
             cur += SESSION_ROWS;
             flat += 1;
         }
+    }
+    if line == cur {
+        return Some(list.create_row());
     }
     None
 }
@@ -1131,6 +1174,13 @@ pub(super) fn left_pane(
             lines.push(resource);
             flat_row += 1;
         }
+    }
+    if lines.len() < rows {
+        let mut row = create_row(list.create_row_selected(), in_switch, left_w);
+        if in_switch && !list.create_row_selected() {
+            row = dim_row(&row);
+        }
+        lines.push(row);
     }
     lines.truncate(rows);
     lines
@@ -2260,6 +2310,29 @@ fn note_overlay(state: &HomeState, width: usize, rows: usize) -> Option<Vec<Stri
 /// highlighted session's note is drawn over the top by [`note_overlay`] (not
 /// inline), so it never pushes this preview around.
 pub(super) fn switch_preview(state: &HomeState, width: usize, rows: usize) -> Vec<String> {
+    if state.list().create_row_selected() {
+        let mut lines = vec![
+            style(clip_to_width("+ new session", width))
+                .green()
+                .bold()
+                .to_string(),
+            style(clip_to_width(
+                "Type a name here, or press Enter, to create a session.",
+                width,
+            ))
+            .dim()
+            .to_string(),
+            style(clip_to_width(
+                "Esc cancels the input after it opens.",
+                width,
+            ))
+            .dim()
+            .to_string(),
+        ];
+        lines.truncate(rows);
+        return lines;
+    }
+
     let body_rows = rows;
     // Identify the highlighted row. `selected()` is `Some` for a real session
     // row and `None` on the root row (which carries no git status / tracked

@@ -689,11 +689,12 @@ fn left_pane_renders_the_root_entry_then_the_empty_message() {
         Sidebar::Full,
         Utc::now(),
     );
-    assert_eq!(lines.len(), 4);
+    assert_eq!(lines.len(), 5);
     assert!(lines[0].contains(ROOT_NAME));
     assert!(lines[1].contains("workspace root"));
     assert!(lines[2].contains('─'));
     assert!(lines[3].contains("no sessions"));
+    assert!(console::strip_ansi_codes(&lines[4]).contains("+ new session"));
     let hint = console::strip_ansi_codes(&lines[3]);
     assert!(hint.starts_with(&" ".repeat(NAME_PREFIX)));
     assert!(hint[NAME_PREFIX..].starts_with("no sessions"));
@@ -2030,8 +2031,8 @@ fn left_pane_session_at_ignores_clicks_off_the_session_rows() {
     // The chrome above the body (title / ladder / blank) selects nothing.
     assert_eq!(at(0, 0), None);
     assert_eq!(at(0, 2), None);
-    // Below the only session (rows 6,7,8) the rows are mascot / blank filler.
-    assert_eq!(at(0, 9), None);
+    // The persistent create row sits below the only session (rows 6,7,8).
+    assert_eq!(at(0, 9), Some(2));
     // Far below the body (past its 19 rows) selects nothing either.
     assert_eq!(at(0, 23), None);
 }
@@ -2046,4 +2047,79 @@ fn left_pane_session_at_maps_clicks_on_the_collapsed_rail() {
     assert_eq!(left_pane_session_at(&state, 0, 6, 24, 120), Some(1));
     // A click just past the 5-column rail is in the right pane, not a select.
     assert_eq!(left_pane_session_at(&state, 5, 6, 24, 120), None);
+}
+
+#[test]
+fn left_pane_draws_the_create_row_at_the_foot_and_marks_the_cursor() {
+    // The persistent "+ new session" row is always the last built list row; in
+    // 切替 the cursor on it shows the `>` gutter while the other rows fade.
+    let mut list = list_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
+    list.focus_index(list.create_row());
+    let lines = left_pane(
+        &list,
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashMap::new(),
+        80,
+        12,
+        true,
+        Sidebar::Full,
+        Utc::now(),
+    );
+    // root(2) + divider(1) + session(3) = 6, so the create row is line 6.
+    let create = console::strip_ansi_codes(&lines[6]).into_owned();
+    assert!(create.contains("+ new session"));
+    assert!(create.trim_start().starts_with('>'));
+}
+
+#[test]
+fn rail_pane_draws_the_create_row_glyph() {
+    let mut list = list_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
+    list.focus_index(list.create_row());
+    let lines = left_pane(
+        &list,
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashMap::new(),
+        5,
+        12,
+        true,
+        Sidebar::Rail,
+        Utc::now(),
+    );
+    let create = console::strip_ansi_codes(lines.last().unwrap()).into_owned();
+    assert!(create.contains('+'));
+    assert!(create.trim_start().starts_with('>'));
+}
+
+#[test]
+fn sidebar_row_at_line_maps_the_create_row_after_the_sessions() {
+    // root(0,1) → 0, divider(2), main 3,4,5 → row 1, then the create row on line 6
+    // maps to the list's create-row index (2).
+    let list = list_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
+    assert_eq!(list.create_row(), 2);
+    assert_eq!(
+        sidebar_row_at_line_for_sidebar(&list, 6, Sidebar::Full),
+        Some(2)
+    );
+    // The rail keeps the same row layout, so the create row lands on the same line.
+    assert_eq!(
+        sidebar_row_at_line_for_sidebar(&list, 6, Sidebar::Rail),
+        Some(2)
+    );
+}
+
+#[test]
+fn switch_preview_prompts_to_create_when_the_create_row_is_selected() {
+    let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
+    state.enter_switch(super::super::super::state::ReturnMode::Base);
+    state.switch_select(state.list().create_row());
+    let lines = switch_preview(&state, 60, 10);
+    let text = console::strip_ansi_codes(&lines.join("\n")).into_owned();
+    assert!(text.contains("+ new session"));
+    assert!(text.contains("Type a name"));
 }

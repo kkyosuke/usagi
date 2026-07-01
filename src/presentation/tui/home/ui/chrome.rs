@@ -17,6 +17,12 @@ use crate::domain::settings::KeyScheme;
 use crate::domain::version::Version;
 use crate::presentation::tui::widgets;
 
+/// Prefix shared by the persistent "+ new session" row and the inline
+/// `+ new: ...` editor that replaces it: a one-cell gutter plus a following
+/// space. Keeping this explicit prevents the `+` from jumping horizontally when
+/// the row enters input mode.
+const CREATE_ROW_INDENT: &str = "  ";
+
 /// Minimum / maximum display width of the active-session-name field in the
 /// title bar. The field scales with the terminal (a quarter of its width) and
 /// is clamped to this range, so a roomy window shows more of a long name while a
@@ -272,6 +278,11 @@ pub(super) fn hint_lines(state: &HomeState, width: usize) -> Vec<String> {
 /// resident line.
 pub(super) fn input_line(state: &HomeState) -> String {
     match state.mode() {
+        Mode::Switch if state.list().create_row_selected() => {
+            style(" Type a session name to create".to_string())
+                .green()
+                .to_string()
+        }
         Mode::Switch => style(" Pick a session".to_string()).dim().to_string(),
         Mode::Focus => style(format!(
             " Operating session: {}",
@@ -439,7 +450,7 @@ pub(super) fn footer_line(width: usize, state: &HomeState) -> String {
                 "s sort"
             };
             format!(
-                "[switch]  ↑↓ session / K/J move / {sort} / ←→ tab / Enter focus / c new / r rename / n/Ctrl-E note / x close tab / : commands / ? keys / {esc}"
+                "[switch]  ↑↓ session / + row type/Enter new / K/J move / {sort} / ←→ tab / Enter focus / c new / r rename / n/Ctrl-E note / x close tab / : commands / ? keys / {esc}"
             )
         }
         // 在席 shares the 没入 prefix grammar under the prefix scheme: `Ctrl-O` is
@@ -498,10 +509,21 @@ pub(super) fn switch_create_rows(
     let base = Style::new().success().bold();
     let (before, after) = input.split_at(cursor);
     let value = widgets::block_caret(before, after, &base);
-    let label = clip_to_width(&format!("{}{value}", base.apply_to("+ new: ")), left_w);
+    // Align the `+` with the persistent "+ new session" affordance it replaces:
+    // both sit two columns in (a one-cell gutter plus a space), so opening the
+    // input never shifts the glyph sideways. `CREATE_ROW_INDENT` is that shared
+    // two-column prefix.
+    let label = clip_to_width(
+        &format!("{CREATE_ROW_INDENT}{}{value}", base.apply_to("+ new: ")),
+        left_w,
+    );
     let mut rows = vec![label];
     if let Some(err) = error {
-        rows.push(style(clip_to_width(err, left_w)).danger().to_string());
+        rows.push(
+            style(clip_to_width(&format!("{CREATE_ROW_INDENT}{err}"), left_w))
+                .danger()
+                .to_string(),
+        );
     }
     rows
 }
