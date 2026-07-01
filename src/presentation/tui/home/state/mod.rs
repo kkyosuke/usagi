@@ -2347,6 +2347,21 @@ impl HomeState {
             .to_string()
     }
 
+    /// The session that should receive focus after the currently focused session
+    /// is closed: the nearest session visually above it, or (when none exists)
+    /// the nearest session below it. Root rows are skipped so a close never lands
+    /// on `⌂ root` merely because the closed session was the first row.
+    pub fn focus_target_after_close(&self) -> Option<String> {
+        let refs = self.list.refs();
+        let active = refs.iter().position(|r| r.active && r.name != ROOT_NAME)?;
+        refs[..active]
+            .iter()
+            .rev()
+            .chain(refs[active + 1..].iter())
+            .find(|r| r.name != ROOT_NAME)
+            .map(|r| r.name.clone())
+    }
+
     /// Leave 在席 for the base 切替 (Switch) — the default mode.
     pub fn leave_focus(&mut self) {
         self.enter_switch(ReturnMode::Base);
