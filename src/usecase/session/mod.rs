@@ -39,7 +39,8 @@ use crate::infrastructure::repo_paths::{SESSIONS_DIR, STATE_DIR};
 use crate::infrastructure::setup_runner::SystemSetupCommandRunner;
 use crate::infrastructure::workspace_store::WorkspaceStore;
 use crate::infrastructure::{
-    agent_prompt_store, agent_state_store, git, open_panes_store, pr_link_store,
+    agent_live_prompt_store, agent_prompt_store, agent_state_store, git, open_panes_store,
+    pr_link_store,
 };
 use crate::usecase::workspace_state;
 
@@ -623,8 +624,9 @@ pub fn remove(
     // Clear the chat history and every per-worktree file usagi keeps for each
     // worktree so nothing outlives the session: a path reused later starts clean
     // rather than inheriting the removed session's agent phase, PR badges, queued
-    // prompt, or open-pane snapshot — all of which are keyed by the worktree path
-    // and would otherwise be re-read by a session recreated there. The TUI also
+    // prompt (launch-time or live), or open-pane snapshot — all of which are keyed
+    // by the worktree path and would otherwise be re-read by a session recreated
+    // there. The TUI also
     // clears the phase and pane snapshot as it evicts the live pool, but removal
     // can come from the CLI or MCP with no TUI running, so the durable files are
     // wiped here for every caller. This runs *before* the worktree directories
@@ -635,6 +637,7 @@ pub fn remove(
         agent_state_store::clear(&wt.path);
         pr_link_store::clear(&wt.path);
         agent_prompt_store::clear(&wt.path);
+        agent_live_prompt_store::clear(&wt.path);
         open_panes_store::clear(&wt.path);
     }
 

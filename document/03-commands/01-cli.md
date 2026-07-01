@@ -256,7 +256,7 @@ user         tabs                     ユーザーはタブを好む
 
 ### `usagi mcp`
 
-`usagi issue` / `usagi memory` と同じ issue・メモリ操作に加え、セッション操作（`session_create` / `session_list` / `session_prompt` / `session_pr` / `session_remove`）を、**MCP（Model Context Protocol）サーバ**として AI エージェント（Claude Code など）に stdio 経由で公開します。issue・memory・session の tool を 1 つの `usagi` サーバが提供します。アーキテクチャ・対応 tool・`session_prompt` の挙動・JSON-RPC プロトコルの詳細は専用の章 [3.3 MCP サーバ](03-mcp.md) を参照してください。
+`usagi issue` / `usagi memory` と同じ issue・メモリ操作に加え、セッション操作（`session_create` / `session_list` / `session_prompt` / `session_send` / `session_pr` / `session_remove`）を、**MCP（Model Context Protocol）サーバ**として AI エージェント（Claude Code など）に stdio 経由で公開します。issue・memory・session の tool を 1 つの `usagi` サーバが提供します。アーキテクチャ・対応 tool・`session_prompt` / `session_send` の挙動・JSON-RPC プロトコルの詳細は専用の章 [3.3 MCP サーバ](03-mcp.md) を参照してください。
 
 ### `usagi llm-mcp`
 

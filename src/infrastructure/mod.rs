@@ -1,5 +1,6 @@
 // Persistence, Git operations, and other external integrations live here.
 pub mod agent;
+pub mod agent_live_prompt_store;
 pub mod agent_prompt_store;
 pub mod agent_state_store;
 pub mod error_log;

@@ -62,6 +62,10 @@ mod tests {
             Ok("queued".to_string())
         }
 
+        fn send(&self, _worktree: &Path, _prompt: &str) -> Result<String, String> {
+            Ok("sent".to_string())
+        }
+
         fn remove(
             &self,
             _workspace_root: &Path,

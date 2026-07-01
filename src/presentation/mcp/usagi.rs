@@ -9,8 +9,8 @@
 //!
 //! Issue/memory operations and session operations have very different
 //! dependencies — the former are pure repository reads/writes, the latter needs
-//! an [`AgentBackend`] that reaches a real agent for `session_prompt` and
-//! `session_remove`. Keeping the two servers separate (each independently
+//! an [`AgentBackend`] that reaches a real agent for `session_prompt`,
+//! `session_send`, and `session_remove`. Keeping the two servers separate (each independently
 //! unit-tested) and composing them here keeps that split clean; this module only owns the
 //! merge-and-route glue. The JSON-RPC framing is shared and lives in the parent
 //! [`super`] module.
@@ -33,7 +33,8 @@ pub struct UsagiMcpServer {
 }
 
 impl UsagiMcpServer {
-    /// Build a server delegating `session_prompt` and `session_remove` to
+    /// Build a server delegating `session_prompt`, `session_send`, and
+    /// `session_remove` to
     /// `backend`.
     ///
     /// Issues and memories resolve against `worktree` (the current working tree,
@@ -91,12 +92,16 @@ mod tests {
     use std::path::Path;
 
     /// A backend that returns a fixed reply, so the unified server's routing of
-    /// `session_prompt` to the session server can be exercised without a real
+    /// session prompt/send routing to the session server can be exercised without a real
     /// agent.
     struct StubBackend;
     impl AgentBackend for StubBackend {
         fn prompt(&self, _worktree: &Path, _prompt: &str) -> Result<String, String> {
             Ok("delegated".to_string())
+        }
+
+        fn send(&self, _worktree: &Path, _prompt: &str) -> Result<String, String> {
+            Ok("sent".to_string())
         }
 
         fn remove(
@@ -170,13 +175,14 @@ mod tests {
         let tools = res["result"]["tools"].as_array().unwrap();
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         // 7 issue + 6 memory + 7 session.
-        assert_eq!(names.len(), 20);
+        assert_eq!(names.len(), 21);
         assert!(names.contains(&"issue_create"));
         assert!(names.contains(&"issue_to_prompt"));
         assert!(names.contains(&"memory_save"));
         assert!(names.contains(&"session_create"));
         assert!(names.contains(&"session_list"));
         assert!(names.contains(&"session_prompt"));
+        assert!(names.contains(&"session_send"));
         assert!(names.contains(&"session_pr"));
         assert!(names.contains(&"session_remove"));
         assert!(names.contains(&"session_note_get"));
@@ -255,6 +261,22 @@ mod tests {
         );
         assert_eq!(result["isError"], false);
         assert_eq!(result["content"][0]["text"], "delegated");
+    }
+
+    #[test]
+    fn session_send_routes_through_to_the_backend() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        let server = server_at(root.path());
+        call(&server, "session_create", json!({"name":"work"}));
+
+        let result = call(
+            &server,
+            "session_send",
+            json!({"name":"work","prompt":"do it now"}),
+        );
+        assert_eq!(result["isError"], false);
+        assert_eq!(result["content"][0]["text"], "sent");
     }
 
     #[test]

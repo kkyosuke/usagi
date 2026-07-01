@@ -468,6 +468,18 @@ pub(super) fn encode_paste(text: &str, bracketed: bool) -> Vec<u8> {
     bytes
 }
 
+/// Encode a prompt injected by MCP into a live agent pane.
+///
+/// The prompt itself is pasted (respecting the program's bracketed-paste mode
+/// when enabled) and then submitted with a terminal Enter (`\r`). This mirrors
+/// the user's "paste task, press Enter" workflow while keeping multi-line prompts
+/// from turning into multiple submits for agents that request bracketed paste.
+pub(super) fn encode_prompt_submit(prompt: &str, bracketed: bool) -> Vec<u8> {
+    let mut bytes = encode_paste(prompt, bracketed);
+    bytes.push(b'\r');
+    bytes
+}
+
 /// Translate a key event into the bytes a shell expects on its input. Unknown
 /// keys map to nothing (an empty slice), so they are simply dropped.
 pub(super) fn encode_key(key: &KeyEvent) -> Vec<u8> {
@@ -1032,6 +1044,22 @@ mod tests {
             .filter(|w| *w == needle)
             .count();
         assert_eq!(hits, 1);
+    }
+
+    #[test]
+    fn encode_prompt_submit_pastes_then_enters_without_bracketed_mode() {
+        assert_eq!(
+            encode_prompt_submit("do this\nwith context", false),
+            b"do this\nwith context\r".to_vec()
+        );
+    }
+
+    #[test]
+    fn encode_prompt_submit_wraps_bracketed_prompt_before_enter() {
+        assert_eq!(
+            encode_prompt_submit("hi", true),
+            [PASTE_START, "hi", PASTE_END, "\r"].concat().into_bytes()
+        );
     }
 
     #[test]

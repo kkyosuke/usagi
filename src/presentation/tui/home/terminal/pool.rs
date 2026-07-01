@@ -41,11 +41,14 @@ use console::Term;
 use crate::domain::resource::{aggregate_by_root, ResourceUsage};
 use crate::domain::settings::{AgentCli, Sidebar};
 use crate::infrastructure::open_panes_store::{StoredPane, StoredPaneKind};
-use crate::infrastructure::pty::PtySession;
+use crate::infrastructure::pty::{PtyInputHandle, PtySession};
 use crate::infrastructure::resource::{ResourceSampler, SysinfoSampler};
 use crate::infrastructure::session_monitor::SessionMonitor;
-use crate::infrastructure::{agent_state_store, session_monitor};
+use crate::infrastructure::{
+    agent_live_prompt_store, agent_state_store, error_log, session_monitor,
+};
 
+use super::super::pane_input;
 use super::super::ui;
 use super::tabs::{self, PaneKind, TabNav, TabSwap};
 use super::view::TerminalView;
@@ -79,6 +82,10 @@ struct Watched {
     /// (portable-pty makes the shell a session leader), so the resource sampler
     /// totals each shell's whole subtree (the shell and any agent CLI beneath it).
     roots: Vec<u32>,
+    /// Input handle for the agent pane, when this session currently has one.
+    /// The watcher drains MCP `session_send` prompts only for sessions with this
+    /// handle, so prompts sent while no agent pane is live remain queued.
+    agent_input: Option<PtyInputHandle>,
     /// A human label (the worktree branch) shown in the notification.
     label: String,
 }
@@ -88,6 +95,13 @@ impl Watched {
     fn any_alive(&self) -> bool {
         self.alive.iter().any(|a| a.load(Ordering::SeqCst))
     }
+}
+
+/// A live agent input target snapshotted out of [`Shared`] so the watcher can
+/// release the shared-state lock before it drains disk queues or writes to PTYs.
+struct LivePromptTarget {
+    path: PathBuf,
+    input: PtyInputHandle,
 }
 
 /// State shared between the pool, the watcher thread, and the render loops.
@@ -165,6 +179,7 @@ impl MonitorHandle {
                     bell: Arc::new(AtomicU64::new(0)),
                     alive: vec![Arc::new(AtomicBool::new(true))],
                     roots: Vec::new(),
+                    agent_input: None,
                     label: String::new(),
                 },
             );
@@ -659,10 +674,16 @@ impl TerminalPool {
             // each session's process tree from. A pane already reaped reports
             // none and is simply left out.
             let roots = sp.panes.iter().filter_map(|p| p.pty.process_id()).collect();
+            let agent_input = sp
+                .panes
+                .iter()
+                .find(|p| matches!(p.kind, PaneKind::Agent))
+                .map(|p| p.pty.input_handle());
             Some(Watched {
                 bell,
                 alive,
                 roots,
+                agent_input,
                 label: label.to_string(),
             })
         });
@@ -859,8 +880,12 @@ fn spawn_watcher(
         }
 
         // Snapshot the bookkeeping under the lock: prune dead sessions and observe
-        // the phases/bells.
-        let notices: Vec<(String, session_monitor::NoticeKind)> = {
+        // the phases/bells. Clone live-prompt input handles while locked, then
+        // drain disk queues and write to PTYs after releasing it.
+        let (notices, live_prompt_targets): (
+            Vec<(String, session_monitor::NoticeKind)>,
+            Vec<LivePromptTarget>,
+        ) = {
             let mut shared = match shared.lock() {
                 Ok(shared) => shared,
                 // The shared state's mutex is poisoned: a thread panicked while
@@ -927,11 +952,23 @@ fn spawn_watcher(
                     })
                     .collect()
             };
+            let live_prompt_targets = shared
+                .sessions
+                .iter()
+                .filter_map(|(path, watched)| {
+                    watched.agent_input.as_ref().map(|input| LivePromptTarget {
+                        path: path.clone(),
+                        input: input.clone(),
+                    })
+                })
+                .collect();
             if snapshot_locked(&shared) != before {
                 version.fetch_add(1, Ordering::SeqCst);
             }
-            notices
+            (notices, live_prompt_targets)
         };
+
+        deliver_live_prompts(live_prompt_targets);
 
         if notifications_enabled {
             for (label, kind) in notices {
@@ -973,6 +1010,25 @@ fn spawn_watcher(
             }
         }
     })
+}
+
+/// Drain prompts queued by the MCP `session_send` tool and type them into each
+/// session's live agent pane. Only sessions that had a live agent pane when the
+/// watcher snapshotted them are passed here; sessions without one leave any
+/// queued prompts on disk for a later pane to drain. A failed PTY write leaves
+/// already drained prompts undelivered, so it is logged for diagnosis.
+fn deliver_live_prompts(targets: Vec<LivePromptTarget>) {
+    for LivePromptTarget { path, input } in targets {
+        for prompt in agent_live_prompt_store::take_all(&path) {
+            let bytes = pane_input::encode_prompt_submit(&prompt, input.bracketed_paste());
+            if let Err(err) = input.write(&bytes) {
+                error_log::ErrorLog::record(&format!(
+                    "failed to inject live prompt into {}: {err:#}",
+                    path.display()
+                ));
+            }
+        }
+    }
 }
 
 /// Show a desktop notification that a session changed state: it began waiting for

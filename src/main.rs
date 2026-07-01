@@ -14,10 +14,11 @@ use usagi::usecase::session;
 /// and unit-testable.
 ///
 /// `prompt` *queues* the prompt for the target session's worktree rather than
-/// running an agent itself: the `usagi mcp` process cannot reach into a running
-/// TUI to drive a pane, so it leaves the prompt in `agent_prompt_store` and the
+/// running an agent itself: it leaves the prompt in `agent_prompt_store` and the
 /// home screen delivers it the next time it freshly launches that session's
-/// agent pane.
+/// agent pane. `send` is the live counterpart: it appends the prompt to
+/// `agent_live_prompt_store`, which a currently running TUI drains into the
+/// session's existing agent pane.
 ///
 /// `remove` resolves the workspace's effective agent CLI (so the removed
 /// session's persisted conversation is discarded with the right adapter) and
@@ -32,6 +33,17 @@ impl AgentBackend for CliAgentBackend {
             "Queued the prompt for this session's agent. It is delivered as the agent's \
             opening message the next time the session's agent pane is launched from the \
             usagi home screen (focus the session, then run `agent`)."
+                .to_string(),
+        )
+    }
+
+    fn send(&self, worktree: &Path, prompt: &str) -> Result<String, String> {
+        usagi::infrastructure::agent_live_prompt_store::append(worktree, prompt)
+            .map_err(|e| e.to_string())?;
+        Ok(
+            "Queued the prompt for this session's running agent pane. A running usagi TUI \
+            delivers it to the live agent by pasting it and pressing Enter; if no live \
+            agent pane is open, it waits until one is available."
                 .to_string(),
         )
     }
