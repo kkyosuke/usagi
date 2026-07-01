@@ -103,7 +103,7 @@ pub(super) fn palette_key(
                 } => {
                     let root = state.workspace_root_for_session(workspace.as_deref(), &name);
                     state.set_op_target(root.clone());
-                    (wiring.dispatch_remove)(&root, &name, force);
+                    (wiring.dispatch_remove)(&root, &name, force, None);
                 }
                 // `session remove` with no name opens the removal checklist over
                 // the palette, so it stays open behind it.
@@ -893,8 +893,10 @@ fn focus_prefix_action(
 /// `session remove <name> --force`.
 ///
 /// Either way the user asked to leave this session, so 在席 yields to the base
-/// 切替 (Switch) at once to pick the next one (`Esc` is inert there); the
-/// removal's result — success or the dirty refusal — is logged and the list
+/// 切替 (Switch) at once (`Esc` is inert there). If removal finishes before any
+/// other operation, the task then lands on the neighbouring session instead of
+/// root; otherwise the refreshed list preserves the user's current operation.
+/// The removal's result — success or the dirty refusal — is logged and the list
 /// refreshed when the background task finishes. The root row is the workspace
 /// itself, not a session, so closing it is refused outright and stays in 在席.
 fn close_focused_session(state: &mut HomeState, wiring: &mut Wiring, force: bool) {
@@ -908,7 +910,13 @@ fn close_focused_session(state: &mut HomeState, wiring: &mut Wiring, force: bool
     }
     let root = state.workspace_root_for_session(None, &name);
     state.set_op_target(root.clone());
-    (wiring.dispatch_remove)(&root, &name, force);
+    let focus = state
+        .focus_target_after_close()
+        .map(|name| super::super::tasks::AutoFocus {
+            name,
+            interaction_epoch: wiring.interaction_epoch,
+        });
+    (wiring.dispatch_remove)(&root, &name, force, focus);
     state.enter_switch(ReturnMode::Base);
 }
 
