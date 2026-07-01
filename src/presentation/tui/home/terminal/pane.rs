@@ -62,7 +62,7 @@ use super::super::pane_input::{
     is_press, key_scroll_lines, pane_cell, pointer_shape, prefix_alive, wheel_arrows, wheel_delta,
     KeyAction, PointerShape, Reserved, DOUBLE_CLICK,
 };
-use super::super::state::HomeState;
+use super::super::state::{HomeState, SurfaceOwner};
 use super::super::ui;
 use super::link;
 use super::pool::MonitorHandle;
@@ -468,9 +468,9 @@ fn drive(
             // pane's shape from the previously active tab.
             let shape = pty.cursor_shape();
             let cursor_shape = (last_shape != Some(shape)).then_some(shape);
-            state.set_terminal_view(view);
+            state.surface_writer(SurfaceOwner::Attached).set_view(view);
             if let Some(badges) = badges {
-                state.apply_badges(badges);
+                state.badge_writer(SurfaceOwner::Attached).apply(badges);
                 seen_badge_version = badge_version;
             }
             render(

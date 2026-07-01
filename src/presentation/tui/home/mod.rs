@@ -31,7 +31,10 @@ use crate::presentation::tui::io::term_reader::TermKeyReader;
 
 pub use event::Outcome;
 
-use state::{HomeState, LogLine, PaneExit, ResumeLevel, SessionOutcome, SessionReorder, ROOT_NAME};
+use state::{
+    HomeState, LogLine, PaneExit, ResumeLevel, SessionOutcome, SessionReorder, SurfaceOwner,
+    ROOT_NAME,
+};
 
 /// Refresh the workspace's session state from git (best-effort) and return the
 /// sessions to show. `sync` rewrites each session worktree's status; for a
@@ -512,7 +515,10 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
     let remove_workers = workers.clone();
     // `root` is the workspace the targeted session lives in (the cursor's group in
     // 統合/unite mode), resolved by the handler before dispatch.
-    let mut dispatch_remove = move |root: &Path, name: &str, force: bool| {
+    let mut dispatch_remove = move |root: &Path,
+                                    name: &str,
+                                    force: bool,
+                                    focus: Option<tasks::AutoFocus>| {
         let id = remove_tasks.begin(tasks::TaskKind::RemoveSession, name);
         let handle = remove_tasks.clone();
         let root = root.to_path_buf();
@@ -522,7 +528,7 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
         let worker = std::thread::spawn(move || {
             complete_or_record_panic(&handle, id, tasks::TaskKind::RemoveSession, &name, || {
                 let _guard = lock_session_ops(&lock);
-                run_remove(&root, &name, force, agent.as_ref())
+                run_remove(&root, &name, force, agent.as_ref(), focus)
             });
         });
         track_worker(&remove_workers, worker);
@@ -687,7 +693,8 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
                     // Publish the tab strip for this session before driving the pane,
                     // so it reflects any add / close / switch from the last step.
                     let (labels, active_tab) = pool.tabs(dir);
-                    home.set_terminal_tabs(labels, active_tab);
+                    home.surface_writer(SurfaceOwner::Attached)
+                        .set_tabs(labels, active_tab);
                     let pty = match pool.active_pty(dir) {
                         Some(pty) => pty,
                         // No live pane (every one exited): drop back to 在席.
@@ -1165,6 +1172,7 @@ fn run_remove(
     name: &str,
     force: bool,
     agent: &dyn crate::domain::agent::Agent,
+    focus: Option<tasks::AutoFocus>,
 ) -> (bool, tasks::Completion) {
     match crate::usecase::session::remove(root, name, force, agent) {
         Ok(outcome) if outcome.removed => (
@@ -1178,7 +1186,7 @@ fn run_remove(
                         .join(crate::infrastructure::repo_paths::SESSIONS_DIR)
                         .join(name),
                 ),
-                focus: None,
+                focus,
             },
         ),
         Ok(outcome) => {

@@ -31,6 +31,52 @@ fn render_frame_hides_the_update_notice_when_the_sidebar_is_collapsed() {
     assert!(!joined.contains("アップデートがあるぴょん"));
 }
 
+// --- waiting notice -----------------------------------------------------
+
+#[test]
+fn waiting_notice_is_empty_without_waiting_sessions() {
+    assert!(waiting_notice(0).is_empty());
+}
+
+#[test]
+fn render_frame_shows_waiting_count_on_the_header() {
+    // The sidebar still shows the per-session `◆ waiting` row; the header adds
+    // a compact top-right summary so a waiting session is visible even when the
+    // sidebar is scrolled or collapsed.
+    let mut waiting = worktree(Some("fix"), false, BranchStatus::Pushed);
+    waiting.path = PathBuf::from("/repo/wait");
+    let mut state = state_with(vec![waiting]);
+    state.apply_badges(MonitorSnapshot {
+        live: [PathBuf::from("/repo/wait")].into(),
+        waiting: [PathBuf::from("/repo/wait")].into(),
+        ..Default::default()
+    });
+    let frame = render_frame(24, 100, &state);
+    let header = stripped(&[frame[0].clone()]);
+    assert!(header.contains(" 1 waiting"));
+}
+
+#[test]
+fn render_frame_hides_waiting_notice_while_task_status_has_the_corner() {
+    use super::super::super::tasks::{TaskMark, TaskRow};
+    let mut waiting = worktree(Some("fix"), false, BranchStatus::Pushed);
+    waiting.path = PathBuf::from("/repo/wait");
+    let mut state = state_with(vec![waiting]);
+    state.apply_badges(MonitorSnapshot {
+        live: [PathBuf::from("/repo/wait")].into(),
+        waiting: [PathBuf::from("/repo/wait")].into(),
+        ..Default::default()
+    });
+    state.set_tasks(vec![TaskRow {
+        label: "作成中… main".to_string(),
+        mark: TaskMark::Running(0),
+    }]);
+    let frame = render_frame(24, 100, &state);
+    let header = stripped(&[frame[0].clone()]);
+    assert!(header.contains("作成中… main"));
+    assert!(!header.contains(" 1 waiting"));
+}
+
 // --- background-task panel ---------------------------------------------
 
 #[test]

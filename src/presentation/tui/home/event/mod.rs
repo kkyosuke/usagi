@@ -22,6 +22,7 @@ use super::oneshot::OneShot;
 use super::sessions_refresh::SessionsRefreshHandle;
 use super::state::{
     GroupSource, HomeState, Mode, PaneExit, ResumeLevel, SessionOutcome, SessionReorder,
+    SurfaceOwner,
 };
 use super::tasks::TaskHandle;
 use super::terminal::pool::MonitorHandle;
@@ -109,6 +110,8 @@ pub struct ConfigReload {
 /// [`Wiring::save_last_active`] flushes to `state.json` on quit.
 pub(super) type SessionLastActive = (String, DateTime<Utc>);
 
+type RemoveDispatch<'a> = dyn FnMut(&Path, &str, bool, Option<super::tasks::AutoFocus>) + 'a;
+
 /// The workspace root and the impure callbacks the home event loop and its key
 /// handlers drive, bundled so they thread one value instead of a dozen separate
 /// closures. [`super::run`] builds this against the real terminal, shell pool,
@@ -142,8 +145,10 @@ pub(super) struct Wiring<'a> {
     /// (no git work) like `rename_display` / `set_note`.
     pub reorder_session: &'a mut dyn FnMut(&str, bool) -> SessionReorder,
     /// Dispatch `session remove <name>` to a background worker (`bool` = force),
-    /// in the workspace rooted at the given path.
-    pub dispatch_remove: &'a mut dyn FnMut(&Path, &str, bool),
+    /// in the workspace rooted at the given path. The optional auto-focus is set
+    /// by `close`, which wants to land on a neighbouring session if the user does
+    /// nothing else while removal runs.
+    pub dispatch_remove: &'a mut RemoveDispatch<'a>,
     /// Resolve a registered workspace by name and load it into a [`GroupSource`]
     /// to stack into the 統合(unite) view (`unite add <name>`), or an error message
     /// to log when no such workspace is registered.
@@ -350,7 +355,7 @@ pub(super) fn event_loop(
             // than cloned (the loop no longer keeps its own copy alongside the one
             // in `state`).
             let changed = state.badges() != &badges;
-            state.apply_badges(badges);
+            state.badge_writer(SurfaceOwner::Preview).apply(badges);
             seen_badge_version = badge_version;
             changed
         } else {
@@ -402,11 +407,11 @@ pub(super) fn event_loop(
                 (wiring.evict_pool)(&path);
             }
             state.apply_task_completion(line, sessions, target_root.as_deref());
-            // A finished create asks to drop into 在席 (Focus) on its new session.
-            // Done after the refresh above so the new branch is in the list to
-            // match. Unlike that refresh — which deliberately keeps the cursor put
-            // for background changes — this is the user's own create landing, so
-            // moving the cursor onto it is the intended result.
+            // A finished create/close may ask to drop into 在席 (Focus) on its
+            // landing session. Done after the refresh above so the branch is in
+            // the list to match. Unlike that refresh — which deliberately keeps
+            // the cursor put for background changes — this is the user's own
+            // task landing, so moving the cursor onto it is the intended result.
             if let Some(focus) = focus {
                 if focus.interaction_epoch == wiring.interaction_epoch {
                     state.enter_focus_named(&focus.name);
@@ -449,9 +454,10 @@ pub(super) fn event_loop(
             .then(|| selected_dir(&state, workspace_root))
             .and_then(|dir| (wiring.preview)(&dir, state.sidebar()).map(|view| (dir, view)))
         {
-            state.set_terminal_view(view);
             let (labels, active) = (wiring.tab_op)(&dir, None);
-            state.set_terminal_tabs(labels, active);
+            let mut surface = state.surface_writer(SurfaceOwner::Preview);
+            surface.set_view(view);
+            surface.set_tabs(labels, active);
         }
         // The task panel and the install rabbit animate on the clock, so a frame
         // showing either must repaint even when nothing else moved.
@@ -794,7 +800,7 @@ pub(super) fn event_loop(
                         for entry in &entries {
                             let root = entry.root_path().to_path_buf();
                             state.set_op_target(root.clone());
-                            (wiring.dispatch_remove)(&root, entry.name(), force);
+                            (wiring.dispatch_remove)(&root, entry.name(), force, None);
                         }
                     }
                 }
@@ -1049,28 +1055,30 @@ pub(crate) fn event_loop_compat(
             },
         );
     };
-    let mut dispatch_remove = |_root: &Path, name: &str, force: bool| {
-        let id = tasks.begin(super::tasks::TaskKind::RemoveSession, name);
-        let outcome = remove_session(name, force);
-        // Mirror a production removal, which carries the session root to evict, so
-        // the loop's eviction path is exercised; the tests' `evict_pool` is a
-        // no-op (they have no pool).
-        let evict = outcome
-            .sessions
-            .as_ref()
-            .map(|_| std::path::PathBuf::from(name));
-        tasks.complete(
-            id,
-            true,
-            super::tasks::Completion {
-                line: outcome.line,
-                sessions: outcome.sessions,
-                target_root: Some(_root.to_path_buf()),
-                evict,
-                focus: None,
-            },
-        );
-    };
+    let mut dispatch_remove =
+        |_root: &Path, name: &str, force: bool, focus: Option<super::tasks::AutoFocus>| {
+            let id = tasks.begin(super::tasks::TaskKind::RemoveSession, name);
+            let outcome = remove_session(name, force);
+            // Mirror a production removal, which carries the session root to evict, so
+            // the loop's eviction path is exercised; the tests' `evict_pool` is a
+            // no-op (they have no pool).
+            let evict = outcome
+                .sessions
+                .as_ref()
+                .map(|_| std::path::PathBuf::from(name));
+            let focus = outcome.sessions.as_ref().and(focus);
+            tasks.complete(
+                id,
+                true,
+                super::tasks::Completion {
+                    line: outcome.line,
+                    sessions: outcome.sessions,
+                    target_root: Some(_root.to_path_buf()),
+                    evict,
+                    focus,
+                },
+            );
+        };
     let mut evict_pool = |_: &Path| {};
     // The self-update spawn is real IO wired in `super::run`; here it is a no-op,
     // so the compat-shim loop tests never shell out. The dispatch path itself is

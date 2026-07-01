@@ -20,6 +20,8 @@
 
 use std::sync::Arc;
 
+use crate::presentation::theme;
+
 use super::link;
 use super::selection::{Cell, Selection};
 
@@ -198,10 +200,11 @@ impl TerminalView {
 /// The ANSI escape that clears all colours and attributes back to default.
 const SGR_RESET: &str = "\x1b[0m";
 
-/// The colour the *hovered* link is drawn in — a light blue ("水色") which lights
-/// the underlined URL under the pointer up as clickable. A 24-bit RGB value so it
-/// reads the same regardless of the user's terminal palette.
-const LINK_COLOR: vt100::Color = vt100::Color::Rgb(102, 178, 255);
+/// The colour the *hovered* link is drawn in. A 24-bit RGB value from the
+/// central palette so it reads the same regardless of the user's terminal
+/// palette.
+const LINK_COLOR: vt100::Color =
+    vt100::Color::Rgb(theme::LINK_RGB.0, theme::LINK_RGB.1, theme::LINK_RGB.2);
 
 /// The drawable style of one screen cell: its colours and text attributes,
 /// distilled from a [`vt100::Cell`] into something comparable and renderable.

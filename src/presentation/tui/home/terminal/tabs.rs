@@ -20,6 +20,18 @@ pub enum PaneKind {
     Terminal,
 }
 
+/// Stable tab-label identity for a live pane: its kind plus a monotonically
+/// assigned creation id. Labels are emitted in pane order, but duplicate
+/// ordinals are derived from creation-id order so dragging tabs does not rename
+/// them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PaneTab {
+    /// What the pane runs.
+    pub kind: PaneKind,
+    /// Monotonic id assigned when the pane is spawned/restored.
+    pub id: u64,
+}
+
 /// How the user asked to move the active tab within the session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TabNav {
@@ -91,14 +103,42 @@ pub fn resolve_swap(active: usize, len: usize, swap: TabSwap) -> Option<(usize, 
 
 /// The source and destination indices for moving a tab to an arbitrary slot
 /// (drag/drop). Both indices are clamped to the live tab range; moving to the
-/// same slot is a no-op. The active tab follows the moved pane, so the second
-/// index of the pair is its new active index.
+/// same slot is a no-op. Use [`active_after_move`] to keep the active cursor on
+/// the same pane after applying the move.
 pub fn resolve_move(from: usize, to: usize, len: usize) -> Option<(usize, usize)> {
     if len < 2 || from >= len {
         return None;
     }
     let target = to.min(len - 1);
     (from != target).then_some((from, target))
+}
+
+/// The active tab index after a pane is moved from `from` to `to` (the clamped
+/// pair [`resolve_move`] returns), tracking whichever tab was active *before*
+/// the move rather than the moved pane itself.
+///
+/// Keyboard reordering ([`resolve_swap`]) always moves the active tab, so the
+/// active index simply follows it. Drag/drop, though, moves the pane the pointer
+/// grabbed — which need not be the active one — so the active tab must instead
+/// stay on the same pane, whose slot shifts when a *different* pane is pulled out
+/// of `from` and pushed in at `to`:
+/// - `from == active`: the active pane is the one moved, so it lands on `to`.
+/// - `from < active <= to`: a pane to its left was pulled past it, so it slides
+///   one slot left.
+/// - `to <= active < from`: a pane to its right was inserted before it, so it
+///   slides one slot right.
+/// - otherwise the move happens entirely on one side of the active pane and its
+///   index is unchanged.
+pub fn active_after_move(active: usize, from: usize, to: usize) -> usize {
+    if from == active {
+        to
+    } else if from < active && active <= to {
+        active - 1
+    } else if to <= active && active < from {
+        active + 1
+    } else {
+        active
+    }
 }
 
 /// The active tab index after the active pane is closed, given the session had
@@ -117,31 +157,45 @@ pub fn active_after_close(active: usize, len_before: usize) -> Option<usize> {
 /// One label per pane, in pane order: `agent` / `terminal`, with a 1-based
 /// ordinal appended only when a kind appears more than once (`terminal 1`,
 /// `terminal 2`) so duplicate tabs stay distinguishable while a lone tab reads
-/// cleanly.
-pub fn tab_labels(kinds: &[PaneKind]) -> Vec<String> {
-    let agents = kinds
+/// cleanly. Duplicate ordinals are assigned by stable creation id, not current
+/// tab-strip order, so reordering tabs does not rename the panes.
+pub fn tab_labels(panes: &[PaneTab]) -> Vec<String> {
+    let agent_ordinals = ordinals_for_kind(panes, PaneKind::Agent);
+    let terminal_ordinals = ordinals_for_kind(panes, PaneKind::Terminal);
+    let agent_total = agent_ordinals
         .iter()
-        .filter(|k| matches!(k, PaneKind::Agent))
+        .filter(|&&ordinal| ordinal > 0)
         .count();
-    let terminals = kinds
+    let terminal_total = terminal_ordinals
         .iter()
-        .filter(|k| matches!(k, PaneKind::Terminal))
+        .filter(|&&ordinal| ordinal > 0)
         .count();
-    let mut seen_agent = 0usize;
-    let mut seen_terminal = 0usize;
-    kinds
+
+    panes
         .iter()
-        .map(|kind| match kind {
-            PaneKind::Agent => {
-                seen_agent += 1;
-                label("agent", seen_agent, agents)
-            }
-            PaneKind::Terminal => {
-                seen_terminal += 1;
-                label("terminal", seen_terminal, terminals)
-            }
+        .enumerate()
+        .map(|(index, pane)| match pane.kind {
+            PaneKind::Agent => label("agent", agent_ordinals[index], agent_total),
+            PaneKind::Terminal => label("terminal", terminal_ordinals[index], terminal_total),
         })
         .collect()
+}
+
+/// A sparse vector keyed by pane index: entries for `kind` hold their 1-based
+/// ordinal in creation-id order, and entries for other kinds stay 0.
+fn ordinals_for_kind(panes: &[PaneTab], kind: PaneKind) -> Vec<usize> {
+    let mut by_creation: Vec<(usize, u64)> = panes
+        .iter()
+        .enumerate()
+        .filter_map(|(index, pane)| (pane.kind == kind).then_some((index, pane.id)))
+        .collect();
+    by_creation.sort_by_key(|(index, id)| (*id, *index));
+
+    let mut ordinals = vec![0; panes.len()];
+    for (ordinal, (index, _)) in by_creation.into_iter().enumerate() {
+        ordinals[index] = ordinal + 1;
+    }
+    ordinals
 }
 
 /// `word` on its own when it is the only pane of its kind, or `word N`
@@ -244,6 +298,36 @@ mod tests {
     }
 
     #[test]
+    fn active_follows_the_moved_pane_when_dragging_the_active_tab() {
+        assert_eq!(active_after_move(1, 1, 3), 3);
+        assert_eq!(active_after_move(3, 3, 0), 0);
+    }
+
+    #[test]
+    fn active_stays_on_the_same_unmoved_pane_after_drag_drop() {
+        assert_eq!(
+            active_after_move(2, 0, 3),
+            1,
+            "pulling a tab from the left past the active pane shifts it left"
+        );
+        assert_eq!(
+            active_after_move(1, 3, 0),
+            2,
+            "inserting a tab from the right before the active pane shifts it right"
+        );
+        assert_eq!(
+            active_after_move(0, 2, 3),
+            0,
+            "moves entirely to the right leave the active index alone"
+        );
+        assert_eq!(
+            active_after_move(3, 0, 1),
+            3,
+            "moves entirely to the left leave the active index alone"
+        );
+    }
+
+    #[test]
     fn closing_keeps_the_slot_clamped_to_the_new_last() {
         // Closing a middle tab keeps the index (the next tab shifts into place).
         assert_eq!(active_after_close(1, 3), Some(1));
@@ -260,13 +344,35 @@ mod tests {
 
     #[test]
     fn labels_stay_bare_when_a_kind_is_unique() {
-        let labels = tab_labels(&[PaneKind::Agent, PaneKind::Terminal]);
+        let labels = tab_labels(&[
+            PaneTab {
+                kind: PaneKind::Agent,
+                id: 1,
+            },
+            PaneTab {
+                kind: PaneKind::Terminal,
+                id: 2,
+            },
+        ]);
         assert_eq!(labels, vec!["agent".to_string(), "terminal".to_string()]);
     }
 
     #[test]
     fn labels_number_duplicates_of_a_kind() {
-        let labels = tab_labels(&[PaneKind::Agent, PaneKind::Terminal, PaneKind::Terminal]);
+        let labels = tab_labels(&[
+            PaneTab {
+                kind: PaneKind::Agent,
+                id: 1,
+            },
+            PaneTab {
+                kind: PaneKind::Terminal,
+                id: 2,
+            },
+            PaneTab {
+                kind: PaneKind::Terminal,
+                id: 3,
+            },
+        ]);
         assert_eq!(
             labels,
             vec![
@@ -275,6 +381,33 @@ mod tests {
                 "terminal 2".to_string(),
             ],
             "the unique agent stays bare; the two terminals are numbered"
+        );
+    }
+
+    #[test]
+    fn labels_keep_duplicate_ordinals_after_reordering_tabs() {
+        let labels = tab_labels(&[
+            PaneTab {
+                kind: PaneKind::Terminal,
+                id: 7,
+            },
+            PaneTab {
+                kind: PaneKind::Terminal,
+                id: 2,
+            },
+            PaneTab {
+                kind: PaneKind::Terminal,
+                id: 5,
+            },
+        ]);
+        assert_eq!(
+            labels,
+            vec![
+                "terminal 3".to_string(),
+                "terminal 1".to_string(),
+                "terminal 2".to_string(),
+            ],
+            "the output follows tab order, but the numbers follow creation-id order"
         );
     }
 

@@ -778,7 +778,7 @@ fn run_with_tasks(
     let mut dispatch_update = || {};
     // The unite target root is irrelevant to this single-workspace fake, so wrap
     // the caller's removal hook to the production 3-arg shape, dropping the root.
-    let mut dispatch_remove_w = |_: &Path, name: &str, force: bool| dispatch_remove(name, force);
+    let mut dispatch_remove_w = |_: &Path, name: &str, force: bool, _| dispatch_remove(name, force);
     let mut unite_resolve: fn(&str) -> std::result::Result<GroupSource, String> = no_unite_resolve;
     let mut wiring = Wiring {
         interaction_epoch: 0,
@@ -827,7 +827,7 @@ fn run_with_live_session(reader: &mut dyn KeyReader) -> Result<Outcome> {
     let mut persist: fn(&str) = noop_persist;
     let mut dispatch_create = |_: &Path, _: &str, _: u64| {};
     let mut rename = |_: &Path, n: &str, l: &str| noop_rename(n, l);
-    let mut dispatch_remove = |_: &Path, _: &str, _: bool| {};
+    let mut dispatch_remove = |_: &Path, _: &str, _: bool, _| {};
     let mut evict = |_: &Path| {};
     let mut branches: fn() -> Vec<String> = no_branches;
     let mut open: fn(&mut HomeState, &Path, bool, bool) -> Result<PaneExit> = noop_open;
@@ -980,7 +980,7 @@ fn unite_add_and_remove_run_through_the_palette() {
     let mut rename = |_: &Path, n: &str, l: &str| noop_rename(n, l);
     let mut set_note_fake = |_: &Path, n: &str, t: &str| noop_set_note(n, t);
     let mut reorder_fake: fn(&str, bool) -> SessionReorder = noop_reorder;
-    let mut dispatch_remove = |_: &Path, _: &str, _: bool| {};
+    let mut dispatch_remove = |_: &Path, _: &str, _: bool, _| {};
     let mut evict = |_: &Path| {};
     let mut branches: fn() -> Vec<String> = no_branches;
     let mut open: fn(&mut HomeState, &Path, bool, bool) -> Result<PaneExit> = noop_open;
