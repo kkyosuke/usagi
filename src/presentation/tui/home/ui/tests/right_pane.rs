@@ -310,6 +310,7 @@ fn focus_menu_agent_row_shows_the_default_and_expands_into_a_picker() {
     state.focus_menu_move_down(); // agent -> close
     let off_agent = stripped(&right_pane_contents(&state, 50, 16));
     assert!(off_agent.contains("Launch Claude"));
+    assert!(off_agent.contains("  Launch Claude"));
     assert!(!off_agent.contains("→ pick agent"));
     // Back onto the agent row, expanding lists the installed agents.
     state.focus_menu_move_up(); // close -> agent
