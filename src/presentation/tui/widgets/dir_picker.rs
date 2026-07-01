@@ -9,6 +9,7 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::presentation::theme::Palette;
 use anyhow::Result;
 use console::{style, Key, Term};
 
@@ -187,7 +188,7 @@ fn list_lines(dir: &DirPicker) -> Vec<String> {
 /// marked. [`list_lines`] pads the result to a fixed height.
 fn list_content(dir: &DirPicker) -> Vec<String> {
     if let Some(error) = dir.error() {
-        return vec![style(format!("⚠ {error}")).red().to_string()];
+        return vec![style(format!("⚠ {error}")).danger().to_string()];
     }
     let matches = dir.matches();
     if matches.is_empty() {
@@ -212,7 +213,11 @@ fn list_content(dir: &DirPicker) -> Vec<String> {
         .map(|(offset, name)| {
             let row = format!("{name}/");
             if start + offset == cursor {
-                format!("{} {}", style(">").red().bold(), style(row).cyan().bold())
+                format!(
+                    "{} {}",
+                    style(">").danger().bold(),
+                    style(row).accent().bold()
+                )
             } else {
                 format!("  {row}")
             }
@@ -231,14 +236,14 @@ fn list_content(dir: &DirPicker) -> Vec<String> {
 pub fn render(raw_height: usize, raw_width: usize, dir: &DirPicker) -> Vec<String> {
     let mut body = vec![
         style(dir.current().display().to_string())
-            .cyan()
+            .accent()
             .bold()
             .to_string(),
         format!(
             "{} {}{}",
             style("Search:").dim(),
             dir.query(),
-            style("▏").cyan()
+            style("▏").accent()
         ),
         String::new(),
     ];

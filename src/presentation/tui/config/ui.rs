@@ -1,3 +1,4 @@
+use crate::presentation::theme::Palette;
 use console::{style, Style};
 
 use crate::presentation::tui::welcome;
@@ -62,16 +63,16 @@ fn setting_row(
 
     // A dot to the left of the label flags an edit that has not been saved yet.
     let mark = if changed {
-        style("●").yellow().bold().to_string()
+        style("●").warning().bold().to_string()
     } else {
         " ".to_string()
     };
 
     let padded = format!("{label:<label_width$}");
     let label = if selected {
-        style(padded).cyan().bold().to_string()
+        style(padded).accent().bold().to_string()
     } else {
-        style(padded).cyan().to_string()
+        style(padded).accent().to_string()
     };
 
     format!("{block_pad}{cursor} {mark} {label}  {value}")
@@ -83,9 +84,9 @@ fn setting_row(
 fn action_label(text: &str, selected: bool) -> String {
     let styled = style(text.to_string());
     if selected {
-        styled.green().bold()
+        styled.success().bold()
     } else {
-        styled.green()
+        styled.success()
     }
     .to_string()
 }
@@ -133,7 +134,7 @@ fn save_button_line(block_pad: &str, dirty: bool, selected: bool) -> String {
     let marker = widgets::cursor_marker(selected);
 
     let button = if dirty {
-        style(SAVE_LABEL).green().bold().to_string()
+        style(SAVE_LABEL).success().bold().to_string()
     } else {
         style(SAVE_LABEL).dim().to_string()
     };
@@ -150,7 +151,7 @@ fn save_button_line(block_pad: &str, dirty: bool, selected: bool) -> String {
 /// when absent) — so showing or clearing a notice never shifts the layout.
 fn notice_lines(block_pad: &str, notice: Option<&str>) -> Vec<String> {
     let slot = match notice {
-        Some(notice) => format!("{block_pad}{}", style(notice).yellow()),
+        Some(notice) => format!("{block_pad}{}", style(notice).warning()),
         None => String::new(),
     };
     vec![String::new(), slot]
@@ -201,7 +202,7 @@ fn model_modal_frame(raw_height: usize, raw_width: usize, modal: &ModelModal) ->
         let cursor = if row.selected { ">" } else { " " };
         let line = format!("{cursor} {:<20} {marker}", row.model);
         body.push(if row.selected {
-            style(line).cyan().bold().to_string()
+            style(line).accent().bold().to_string()
         } else {
             style(line).dim().to_string()
         });

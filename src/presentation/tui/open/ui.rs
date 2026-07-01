@@ -1,3 +1,4 @@
+use crate::presentation::theme::Palette;
 use chrono::{DateTime, Utc};
 use console::style;
 
@@ -70,7 +71,7 @@ fn header_lines(width: usize, mode: Mode) -> Vec<String> {
 fn mode_tabs(width: usize, mode: Mode) -> String {
     let tab = |label: &str, active: bool| {
         if active {
-            style(label).cyan().bold().to_string()
+            style(label).accent().bold().to_string()
         } else {
             style(label).dim().to_string()
         }
@@ -122,7 +123,7 @@ fn project_row(
     // Outside unite the column is blank; inside unite it shows a green check for
     // selected entries and a blank for unselected ones.
     let check = if show_check && checked {
-        style(CHECK_ICON).green().bold().to_string()
+        style(CHECK_ICON).success().bold().to_string()
     } else {
         " ".to_string()
     };
@@ -130,9 +131,9 @@ fn project_row(
 
     let padded = format!("{name:<name_width$}");
     let name = if selected {
-        style(padded).cyan().bold().to_string()
+        style(padded).accent().bold().to_string()
     } else {
-        style(padded).cyan().to_string()
+        style(padded).accent().to_string()
     };
 
     // "> " plus the optional check column and the padded name precede the path;
@@ -151,7 +152,7 @@ fn filter_line(block_pad: &str, list: &ProjectList) -> String {
     let value = if list.filter().is_empty() {
         style(" type to filter").dim().to_string()
     } else {
-        format!(" {}", style(list.filter()).cyan())
+        format!(" {}", style(list.filter()).accent())
     };
     format!("{block_pad}{label}{value}")
 }
@@ -203,7 +204,7 @@ fn list_lines(
 /// when absent) — so showing or clearing a notice never shifts the layout.
 fn notice_lines(block_pad: &str, notice: Option<&str>) -> Vec<String> {
     let slot = match notice {
-        Some(notice) => format!("{block_pad}{}", style(notice).yellow()),
+        Some(notice) => format!("{block_pad}{}", style(notice).warning()),
         None => String::new(),
     };
     vec![String::new(), slot]
