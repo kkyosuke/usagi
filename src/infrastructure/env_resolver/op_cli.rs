@@ -1,19 +1,19 @@
-//! Resolve workspace-scoped secret environment variables before launching a pane.
+//! Real 1Password `op` CLI subprocess and OS-keyring IO that backs
+//! [`resolve_workspace_env`](super::resolve_workspace_env).
 //!
-//! Workspaces store only `NAME = op://vault/item/field` references in
-//! [`LocalSettings`](crate::domain::settings::LocalSettings). This module turns
-//! those references into actual secret values just-in-time for an embedded agent
-//! or terminal process and returns a plain environment map the PTY layer can put
-//! on the child process. Failed reads are reported to the error log and omitted;
-//! a missing or locked 1Password account should not make the pane impossible to
-//! open.
+//! Everything here is genuine external IO — spawning the `op` binary, streaming
+//! its stdout/stderr on worker threads, waiting with a timeout, and reading the
+//! service-account token from the OS keychain. The testable resolution logic is
+//! injected via [`SecretResolver`] and lives (with its unit tests) in the parent
+//! module; this file is the thin real-IO layer left after that extraction, so it
+//! is excluded from coverage (see `scripts/coverage.sh`).
 
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-use crate::domain::settings::LocalSettings;
+use super::{resolve_env, SecretResolver};
 use crate::infrastructure::secret_store::OP_SERVICE_ACCOUNT_TOKEN_KEY;
 use crate::presentation::mcp::child_io::{read_capped, wait_with_timeout, WaitableChild};
 
@@ -25,36 +25,12 @@ const MAX_OP_STDERR_BYTES: usize = 4 * 1024;
 /// Resolve the secret environment configured for `workspace_root`.
 ///
 /// The returned map contains only variables whose name/reference pass
-/// [`LocalSettings::env`] and whose `op read --no-newline` call succeeds. Errors
-/// are logged with the variable name and reference but never the resolved secret.
+/// [`LocalSettings::env`](crate::domain::settings::LocalSettings::env) and whose
+/// `op read --no-newline` call succeeds. Errors are logged with the variable name
+/// and reference but never the resolved secret.
 pub fn resolve_workspace_env(workspace_root: &Path) -> BTreeMap<String, String> {
     let settings = crate::usecase::settings::load_local(workspace_root).unwrap_or_default();
     resolve_env(&settings, &OpCliResolver)
-}
-
-/// Resolve `settings.env` through `resolver`. Public so the behaviour is covered
-/// without shelling out to the real `op` CLI.
-pub fn resolve_env(
-    settings: &LocalSettings,
-    resolver: &dyn SecretResolver,
-) -> BTreeMap<String, String> {
-    let mut env = BTreeMap::new();
-    for (name, reference) in settings.env() {
-        match resolver.read(reference) {
-            Ok(value) => {
-                env.insert(name.to_string(), value);
-            }
-            Err(error) => crate::infrastructure::error_log::ErrorLog::record(&format!(
-                "failed to resolve workspace env {name} from {reference}: {error}"
-            )),
-        }
-    }
-    env
-}
-
-/// Reads one secret reference. Abstracted for unit tests.
-pub trait SecretResolver {
-    fn read(&self, reference: &str) -> Result<String, String>;
 }
 
 struct OpCliResolver;
@@ -151,66 +127,5 @@ impl WaitableChild for RealChild {
 
     fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
         self.0.wait()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::cell::RefCell;
-
-    struct FakeResolver {
-        calls: RefCell<Vec<String>>,
-        fail: &'static str,
-    }
-
-    impl FakeResolver {
-        fn new(fail: &'static str) -> Self {
-            Self {
-                calls: RefCell::new(Vec::new()),
-                fail,
-            }
-        }
-    }
-
-    impl SecretResolver for FakeResolver {
-        fn read(&self, reference: &str) -> Result<String, String> {
-            self.calls.borrow_mut().push(reference.to_string());
-            if reference == self.fail {
-                Err("nope".to_string())
-            } else {
-                Ok(format!("value:{reference}"))
-            }
-        }
-    }
-
-    #[test]
-    fn resolve_env_reads_valid_bindings_and_skips_invalid_or_failed_ones() {
-        let mut settings = LocalSettings::default();
-        settings.env.insert(
-            "GH_TOKEN".to_string(),
-            "op://Private/GitHub/token".to_string(),
-        );
-        settings
-            .env
-            .insert("1BAD".to_string(), "op://Private/Bad/token".to_string());
-        settings.env.insert("EMPTY".to_string(), "  ".to_string());
-        settings
-            .env
-            .insert("FAIL".to_string(), "op://Private/Fail/token".to_string());
-        let resolver = FakeResolver::new("op://Private/Fail/token");
-
-        let env = resolve_env(&settings, &resolver);
-
-        assert_eq!(
-            resolver.calls.borrow().as_slice(),
-            ["op://Private/Fail/token", "op://Private/GitHub/token"]
-        );
-        assert_eq!(env.len(), 1);
-        assert_eq!(
-            env.get("GH_TOKEN").map(String::as_str),
-            Some("value:op://Private/GitHub/token")
-        );
-        assert!(!env.contains_key("FAIL"));
     }
 }
