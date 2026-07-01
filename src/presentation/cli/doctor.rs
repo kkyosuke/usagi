@@ -1,6 +1,7 @@
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
 
+use crate::presentation::theme::Palette;
 use console::style;
 
 use crate::domain::settings::LocalLlm;
@@ -268,18 +269,18 @@ fn render(checks: &[Check]) -> Vec<String> {
 /// reads on a no-color terminal.
 fn health_icon(health: Health) -> String {
     match health {
-        Health::Ok => style("✓").green().to_string(),
-        Health::Warn => style("!").yellow().to_string(),
-        Health::Missing => style("✗").red().to_string(),
+        Health::Ok => style("✓").success().to_string(),
+        Health::Warn => style("!").warning().to_string(),
+        Health::Missing => style("✗").danger().to_string(),
     }
 }
 
 /// Colored health label printed next to [`health_icon`].
 fn health_label(health: Health, label: String) -> String {
     match health {
-        Health::Ok => style(label).green().to_string(),
-        Health::Warn => style(label).yellow().to_string(),
-        Health::Missing => style(label).red().to_string(),
+        Health::Ok => style(label).success().to_string(),
+        Health::Warn => style(label).warning().to_string(),
+        Health::Missing => style(label).danger().to_string(),
     }
 }
 
@@ -300,9 +301,9 @@ fn render_summary(checks: &[Check]) -> String {
 
     format!(
         "summary: {} ok, {} warn, {} missing",
-        style(ok).green(),
-        style(warn).yellow(),
-        style(missing).red()
+        style(ok).success(),
+        style(warn).warning(),
+        style(missing).danger()
     )
 }
 
