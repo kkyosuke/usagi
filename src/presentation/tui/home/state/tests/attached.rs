@@ -49,6 +49,69 @@ fn tab_strip_is_published_and_cleared_with_the_view() {
 }
 
 #[test]
+fn surface_owner_claim_drops_the_previous_owners_snapshot() {
+    let mut state = state();
+    state.enter_focus(1);
+    state.show_attached();
+    {
+        let mut surface = state.surface_writer(SurfaceOwner::Attached);
+        surface.set_tabs(vec!["agent".to_string()], 0);
+        surface.set_view(TerminalView::from_rows(vec!["attached".to_string()], None));
+    }
+    assert_eq!(state.terminal_view().unwrap().rows(), ["attached"]);
+    assert_eq!(
+        state.terminal_tabs().expect("attached tabs are set").labels,
+        ["agent"]
+    );
+
+    // A preview taking over clears the attached pane's screen before it publishes
+    // anything of its own, so an event-loop preview can never be rendered with a
+    // stale 没入 snapshot underneath it.
+    state
+        .surface_writer(SurfaceOwner::Preview)
+        .set_tabs(vec!["terminal".to_string()], 0);
+    assert!(state.terminal_view().is_none());
+    assert_eq!(
+        state.terminal_tabs().expect("preview tabs are set").labels,
+        ["terminal"]
+    );
+
+    state
+        .surface_writer(SurfaceOwner::Preview)
+        .set_view(TerminalView::from_rows(vec!["preview".to_string()], None));
+    assert_eq!(state.terminal_view().unwrap().rows(), ["preview"]);
+
+    // And the same hand-off works in the other direction: the pane driver claims
+    // the surface before setting its strip, dropping the event-loop preview's
+    // snapshot until the live pane publishes a fresh frame.
+    state
+        .surface_writer(SurfaceOwner::Attached)
+        .set_tabs(vec!["agent".to_string()], 0);
+    assert!(state.terminal_view().is_none());
+    assert_eq!(
+        state.terminal_tabs().expect("attached tabs are set").labels,
+        ["agent"]
+    );
+}
+
+#[test]
+fn badge_snapshot_is_replaced_through_an_owner_writer() {
+    let mut state = state();
+    let running = PathBuf::from("/repo/feature");
+    let mut badges = MonitorSnapshot::default();
+    badges.running.insert(running.clone());
+    state.badge_writer(SurfaceOwner::Preview).apply(badges);
+    assert!(state.badges().running.contains(&running));
+
+    let waiting = PathBuf::from("/repo/fix");
+    let mut next = MonitorSnapshot::default();
+    next.waiting.insert(waiting.clone());
+    state.badge_writer(SurfaceOwner::Attached).apply(next);
+    assert!(!state.badges().running.contains(&running));
+    assert!(state.badges().waiting.contains(&waiting));
+}
+
+#[test]
 fn leaving_attached_drops_the_tab_strip() {
     let mut state = state();
     state.enter_focus(1);

@@ -47,7 +47,7 @@ use crate::infrastructure::session_monitor::SessionMonitor;
 use crate::infrastructure::{agent_state_store, session_monitor};
 
 use super::super::ui;
-use super::tabs::{self, PaneKind, TabNav, TabSwap};
+use super::tabs::{self, PaneKind, PaneTab, TabNav, TabSwap};
 use super::view::TerminalView;
 
 /// How often the watcher thread samples every session's bell count.
@@ -255,6 +255,9 @@ fn snapshot_locked(shared: &Shared) -> MonitorSnapshot {
 /// One embedded pane: a live [`PtySession`] and what it runs (so the tab strip
 /// can label it and the agent pane can be told apart for the badge heuristic).
 struct Pane {
+    /// Stable creation id used to number duplicate tab labels independently of
+    /// the current tab-strip order.
+    id: u64,
     pty: PtySession,
     kind: PaneKind,
     /// For an agent pane, which CLI it ran — recorded so the open-panes snapshot
@@ -287,8 +290,15 @@ impl SessionPanes {
     }
 
     fn rebuild_tab_labels(&mut self) {
-        let kinds: Vec<PaneKind> = self.panes.iter().map(|p| p.kind).collect();
-        self.tab_labels = tabs::tab_labels(&kinds);
+        let tabs: Vec<PaneTab> = self
+            .panes
+            .iter()
+            .map(|p| PaneTab {
+                kind: p.kind,
+                id: p.id,
+            })
+            .collect();
+        self.tab_labels = tabs::tab_labels(&tabs);
     }
 }
 
@@ -323,6 +333,10 @@ pub struct TerminalPool {
     /// [`Settings::terminal_scrollback_lines`](crate::domain::settings::Settings),
     /// handed to every [`PtySession::spawn`].
     scrollback_lines: usize,
+    /// Monotonic id source for panes spawned during this TUI run. The id is not a
+    /// storage key; it exists only to keep duplicate tab labels stable while the
+    /// user reorders tabs.
+    next_pane_id: u64,
 }
 
 /// The previewed session and the inputs the last [`TerminalView`] was built
@@ -371,6 +385,7 @@ impl TerminalPool {
             has_sessions,
             preview_cache: None,
             scrollback_lines,
+            next_pane_id: 0,
         }
     }
 
@@ -493,15 +508,21 @@ impl TerminalPool {
         }
     }
 
-    /// Move `from` tab to `target`, keeping the moved pane active. Used by tab
-    /// drag/drop; `target` is clamped to the last live tab.
+    /// Move `from` tab to `target` for tab drag/drop. `target` is clamped to the
+    /// last live tab, and the active cursor stays on whichever pane was active
+    /// before the drag (unless that pane itself is the one moved).
     pub fn move_tab(&mut self, dir: &Path, from: usize, target: usize) -> bool {
         match self.sessions.get_mut(dir) {
             Some(sp) => match tabs::resolve_move(from, target, sp.panes.len()) {
                 Some((from, to)) => {
+                    let active = tabs::active_after_move(
+                        sp.active.min(sp.panes.len().saturating_sub(1)),
+                        from,
+                        to,
+                    );
                     let pane = sp.panes.remove(from);
                     sp.panes.insert(to, pane);
-                    sp.active = to;
+                    sp.active = active;
                     sp.rebuild_tab_labels();
                     true
                 }
@@ -614,7 +635,7 @@ impl TerminalPool {
     /// into its stdin) so it is never echoed before the agent draws (see
     /// [`PtySession::spawn`]).
     fn spawn_pane(
-        &self,
+        &mut self,
         term: &Term,
         dir: &Path,
         kind: PaneKind,
@@ -638,7 +659,14 @@ impl TerminalPool {
             self.lock().monitor.forget(dir);
         }
         let pty = PtySession::spawn(dir, geo.rows, geo.cols, initial, self.scrollback_lines)?;
-        Ok(Pane { pty, kind, cli })
+        let id = self.allocate_pane_id();
+        Ok(Pane { id, pty, kind, cli })
+    }
+
+    fn allocate_pane_id(&mut self) -> u64 {
+        let id = self.next_pane_id;
+        self.next_pane_id = self.next_pane_id.wrapping_add(1);
+        id
     }
 
     /// Re-register `dir`'s watched handles from its current panes: liveness is the

@@ -375,12 +375,26 @@ fn session_remove_without_a_name_opens_the_removal_modal() {
 
 #[test]
 fn close_requests_the_close_session_effect() {
-    // `close` is a session-scope command; it carries no arguments and asks the
-    // event loop to remove the focused session (the equivalent of
-    // `session remove <name>`).
+    // `close` is a session-scope command; it asks the event loop to remove the
+    // focused session, mirroring `session remove <name>` unless `--force` is
+    // present.
     let result = registry().dispatch("close", &[], &[]);
     assert!(result.lines.is_empty());
-    assert_eq!(result.effect, Effect::CloseSession);
+    assert_eq!(result.effect, Effect::CloseSession { force: false });
+
+    let forced = registry().dispatch("close --force", &[], &[]);
+    assert!(forced.lines.is_empty());
+    assert_eq!(forced.effect, Effect::CloseSession { force: true });
+
+    let forced_short = registry().dispatch("close -f", &[], &[]);
+    assert!(forced_short.lines.is_empty());
+    assert_eq!(forced_short.effect, Effect::CloseSession { force: true });
+}
+
+#[test]
+fn close_completes_the_force_flag() {
+    let completion = registry().complete("close --f", CommandScope::Session);
+    assert_eq!(completion.input, "close --force");
 }
 
 #[test]

@@ -7,6 +7,23 @@ description: 既存の PR を直すときの進め方。レビューコメント
 
 レビュー対応・最新化・コンフリクト解消をまとめて行い、PR を仕上げる手順。プログラミング言語に依存しない共通ルール。最後に必ず `usagi-pr-update` スキルを実行する。
 
+## 前提: gh が認証で使えないとき（1Password のトークンで代替）
+
+このスキルの手順は `gh` を使う。`gh` が未認証・認証エラーで使えない場合（`gh auth status` が失敗する等）で、**`usagi-op`（1Password）MCP が利用可能なら、そこに GitHub 用のトークンがある**ので、それを取得して使う。
+
+1. まず `gh auth status` を確認する。通っていればそのまま `gh` を使い、この節は不要。
+2. `gh` が使えないときは `usagi-op` MCP が使えるか確認する（`op_whoami`）。使えなければユーザーに `gh auth login` を促して中断する（トークンを勝手に探さない）。
+3. GitHub トークンを読み取る。secret reference が分かれば `op_read`（`op://<vault>/<item>/<field>` を解決）、item 名なら `op_item_get`（見つからなければ `op_item_list` で探す）を使う。どの item / field かはプロジェクトの設定や会話に従い、不明ならユーザーに確認する。
+4. 取得したトークンを環境変数 `GH_TOKEN`（または `GITHUB_TOKEN`）で渡して `gh` を実行する。
+
+   ```bash
+   # GH_TOKEN を安全な方法で環境変数にセット済みの状態で実行する
+   gh pr view <番号> --comments
+   gh api repos/{owner}/{repo}/pulls/<番号>/comments
+   ```
+
+- トークンは PR 本文・コメント・コミット・ログ・コマンド履歴に残さない。値をそのまま貼り付けたり表示したりしない。
+
 ## 1. レビューコメントに対応する
 
 PR に付いているレビュー（コメント・変更要求）を取得し、内容を直す。

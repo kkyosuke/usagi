@@ -171,7 +171,7 @@ pub(super) fn palette_key(
                 | Effect::OpenTerminal
                 | Effect::OpenAgent(_)
                 | Effect::OpenAgentPrompt(_)
-                | Effect::CloseSession => {}
+                | Effect::CloseSession { .. } => {}
             }
         }
         Key::Tab => state.complete(),
@@ -726,9 +726,9 @@ pub(super) fn focus_key(
     // is selected.
     match key {
         Key::Escape => {
-            // A first `Esc` collapses an open agent picker (案A) back to the menu;
-            // only when none is open does it peel back a step.
-            if state.focus_menu_collapse_agent() {
+            // A first `Esc` collapses an open agent or close picker back to the
+            // menu; only when none is open does it peel back a step.
+            if state.focus_menu_collapse_agent() || state.focus_menu_collapse_close() {
                 return Flow::Continue;
             }
             // When 在席 was reached by zooming out of a live pane (`Ctrl-T` /
@@ -887,19 +887,17 @@ fn focus_prefix_action(
 }
 
 /// Close the focused session — the `close` command's effect. Dispatches a
-/// background removal like `session remove <name>` (no `--force`): a clean
-/// session is removed, but one with **uncommitted changes is refused** and the
-/// task logs how to discard them (`session remove <name> --force`), so a single
-/// `close` can never silently throw away unsaved work. This matches the CLI's
-/// `session remove` default and the quit-confirm modal's intent to protect
-/// running work, rather than the old unconditional `--force`.
+/// background removal like `session remove <name>`: a clean session is removed,
+/// while a dirty one is refused unless `force` is true. This keeps bare `close`
+/// safe, while `close --force` and the 在席 menu's `Shift`+`c` deliberately mirror
+/// `session remove <name> --force`.
 ///
 /// Either way the user asked to leave this session, so 在席 yields to the base
 /// 切替 (Switch) at once to pick the next one (`Esc` is inert there); the
 /// removal's result — success or the dirty refusal — is logged and the list
 /// refreshed when the background task finishes. The root row is the workspace
 /// itself, not a session, so closing it is refused outright and stays in 在席.
-fn close_focused_session(state: &mut HomeState, wiring: &mut Wiring) {
+fn close_focused_session(state: &mut HomeState, wiring: &mut Wiring, force: bool) {
     let name = state.focused_session_name();
     // The root row is the workspace itself, not a session, so it cannot be
     // closed. The 在席 menu hides `close` here, but the prompt could still be
@@ -908,21 +906,23 @@ fn close_focused_session(state: &mut HomeState, wiring: &mut Wiring) {
         state.log_error("the root row is the workspace and cannot be closed");
         return;
     }
-    // `false`: do not force. A dirty worktree is refused (the task logs the
-    // `--force` hint) instead of being discarded without confirmation.
     let root = state.workspace_root_for_session(None, &name);
     state.set_op_target(root.clone());
-    (wiring.dispatch_remove)(&root, &name, false);
+    (wiring.dispatch_remove)(&root, &name, force);
     state.enter_switch(ReturnMode::Base);
 }
 
 /// 在席 menu surface: `↑`/`↓` move the cursor, `Enter` runs the highlighted
-/// command, and `t` / `a` are shortcuts for `terminal` / `agent`.
+/// command, `t` / `a` are shortcuts for `terminal` / `agent`, and `Shift`+`c`
+/// runs the deliberate discard path (`close --force`).
 ///
 /// On the `agent` row, `→` / `Tab` expands the agent picker (案A) when more than
 /// one CLI is installed; while it is expanded the keys drive the picker instead —
 /// `↑`/`↓` move within it, `Enter` launches the highlighted CLI, and `←` collapses
 /// it (as does `Esc`, handled one level up in [`focus_key`]).
+///
+/// On the `close` row, `→` / `Tab` expands the close picker (plain close vs.
+/// close --force); the same `↑`/`↓` / `Enter` / `←` pattern drives it.
 fn focus_menu_key(
     term: &Term,
     state: &mut HomeState,
@@ -947,11 +947,32 @@ fn focus_menu_key(
         }
         return;
     }
+    if state.focus_close_expanded() {
+        match key {
+            Key::ArrowUp | Key::Char('k') => state.focus_menu_move_up(),
+            Key::ArrowDown | Key::Char('j') => state.focus_menu_move_down(),
+            Key::ArrowLeft => {
+                state.focus_menu_collapse_close();
+            }
+            Key::Enter => {
+                let force = state.focus_menu_selected_close_force();
+                state.focus_menu_collapse_close();
+                let cmd = if force { "close --force" } else { "close" };
+                run_focus_command(term, state, painter, cmd, wiring);
+            }
+            _ => {}
+        }
+        return;
+    }
     match key {
         Key::ArrowUp | Key::Char('k') => state.focus_menu_move_up(),
         Key::ArrowDown | Key::Char('j') => state.focus_menu_move_down(),
         // On the `agent` row, open the picker to choose a non-default CLI.
-        Key::ArrowRight | Key::Tab => state.focus_menu_expand_agent(),
+        // On the `close` row, open the picker to choose plain or --force.
+        Key::ArrowRight | Key::Tab => {
+            state.focus_menu_expand_agent();
+            state.focus_menu_expand_close();
+        }
         Key::Enter => {
             if let Some(command) = state.focus_selected_command() {
                 run_focus_command(term, state, painter, command.name, wiring);
@@ -959,6 +980,10 @@ fn focus_menu_key(
         }
         Key::Char('t') => run_focus_command(term, state, painter, "terminal", wiring),
         Key::Char('a') => run_focus_command(term, state, painter, "agent", wiring),
+        // `Shift`+`c` is the deliberate discard shortcut: run `close --force`
+        // instead of the safe `close`, matching the existing capital-letter
+        // convention for shifted actions in 切替 (`K`/`J` reorder).
+        Key::Char('C') => run_focus_command(term, state, painter, "close --force", wiring),
         _ => {}
     }
 }
@@ -985,7 +1010,7 @@ fn focus_prompt_key(
                 Effect::OpenAgentPrompt(prompt) => {
                     launch_agent_with_prompt(term, state, painter, wiring, prompt)
                 }
-                Effect::CloseSession => close_focused_session(state, wiring),
+                Effect::CloseSession { force } => close_focused_session(state, wiring, force),
                 _ => {}
             }
         }
@@ -1012,9 +1037,9 @@ fn focus_prompt_key(
 
 /// Run a named session command from the 在席 menu. The menu is action-oriented, so
 /// only the zero-argument launch commands are runnable from it: `terminal` /
-/// `agent` attach a pane, and `close` removes the focused session. Prompt-taking
-/// commands such as `ai <prompt>` are intentionally kept out of the menu and are
-/// typed in the Prompt UI.
+/// `agent` attach a pane, and `close` / `close --force` remove the focused
+/// session. Prompt-taking commands such as `ai <prompt>` are intentionally kept
+/// out of the menu and are typed in the Prompt UI.
 fn run_focus_command(
     term: &Term,
     state: &mut HomeState,
@@ -1024,11 +1049,14 @@ fn run_focus_command(
 ) {
     match name {
         "terminal" => launch_pane(term, state, painter, wiring, false),
-        // The menu's `agent` row / `a` shortcut launch the configured default.
-        "agent" => launch_agent(term, state, painter, wiring, None),
-        // `close` removes the focused session (without `--force`) and leaves 在席.
-        "close" => close_focused_session(state, wiring),
-        _ => {}
+        // `close` removes the focused session safely and leaves 在席.
+        "close" => close_focused_session(state, wiring, false),
+        // `close --force` is exposed as `Shift`+`c` on the 在席 menu for the
+        // explicit discard path.
+        "close --force" => close_focused_session(state, wiring, true),
+        // `agent` (the menu row / `a` shortcut) launches the configured default;
+        // it is also the fallback for any other menu entry.
+        _ => launch_agent(term, state, painter, wiring, None),
     }
 }
 

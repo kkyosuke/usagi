@@ -31,7 +31,10 @@ use crate::presentation::tui::io::term_reader::TermKeyReader;
 
 pub use event::Outcome;
 
-use state::{HomeState, LogLine, PaneExit, ResumeLevel, SessionOutcome, SessionReorder, ROOT_NAME};
+use state::{
+    HomeState, LogLine, PaneExit, ResumeLevel, SessionOutcome, SessionReorder, SurfaceOwner,
+    ROOT_NAME,
+};
 
 /// Refresh the workspace's session state from git (best-effort) and return the
 /// sessions to show. `sync` rewrites each session worktree's status; for a
@@ -691,7 +694,8 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
                     // Publish the tab strip for this session before driving the pane,
                     // so it reflects any add / close / switch from the last step.
                     let (labels, active_tab) = pool.tabs(dir);
-                    home.set_terminal_tabs(labels, active_tab);
+                    home.surface_writer(SurfaceOwner::Attached)
+                        .set_tabs(labels, active_tab);
                     let pty = match pool.active_pty(dir) {
                         Some(pty) => pty,
                         // No live pane (every one exited): drop back to 在席.

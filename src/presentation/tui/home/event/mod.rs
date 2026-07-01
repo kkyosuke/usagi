@@ -22,6 +22,7 @@ use super::oneshot::OneShot;
 use super::sessions_refresh::SessionsRefreshHandle;
 use super::state::{
     GroupSource, HomeState, Mode, PaneExit, ResumeLevel, SessionOutcome, SessionReorder,
+    SurfaceOwner,
 };
 use super::tasks::TaskHandle;
 use super::terminal::pool::MonitorHandle;
@@ -346,7 +347,7 @@ pub(super) fn event_loop(
             // than cloned (the loop no longer keeps its own copy alongside the one
             // in `state`).
             let changed = state.badges() != &badges;
-            state.apply_badges(badges);
+            state.badge_writer(SurfaceOwner::Preview).apply(badges);
             seen_badge_version = badge_version;
             changed
         } else {
@@ -438,9 +439,10 @@ pub(super) fn event_loop(
             .then(|| selected_dir(&state, workspace_root))
             .and_then(|dir| (wiring.preview)(&dir, state.sidebar()).map(|view| (dir, view)))
         {
-            state.set_terminal_view(view);
             let (labels, active) = (wiring.tab_op)(&dir, None);
-            state.set_terminal_tabs(labels, active);
+            let mut surface = state.surface_writer(SurfaceOwner::Preview);
+            surface.set_view(view);
+            surface.set_tabs(labels, active);
         }
         // The task panel and the install rabbit animate on the clock, so a frame
         // showing either must repaint even when nothing else moved.
