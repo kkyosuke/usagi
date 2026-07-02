@@ -27,7 +27,8 @@ fn field_labels_are_distinct() {
     assert_eq!(LocalField::DefaultBranch.label(), "Default Branch");
     assert_eq!(LocalField::BranchSource.label(), "Branch Source");
     assert_eq!(LocalField::SetupCommands.label(), "Setup Commands");
-    assert_eq!(LocalField::ALL.len(), 6);
+    assert_eq!(LocalField::EnvVars.label(), "Env Vars");
+    assert_eq!(LocalField::ALL.len(), 7);
 }
 
 #[test]
@@ -709,15 +710,15 @@ fn local_config_with_branches(branches: &[&str]) -> Config {
 fn local_scope_shows_only_the_local_override_rows() {
     let config = local_config();
     assert!(config.local().is_some());
-    // The local scope shows the six override rows, then the shipped-skill
+    // The local scope shows the seven override rows, then the shipped-skill
     // feature row(s) — no global fixed fields.
-    assert_eq!(config.field_count(), 6 + SkillFeature::ALL.len());
-    assert_eq!(config.save_index(), 6 + SkillFeature::ALL.len());
+    assert_eq!(config.field_count(), 7 + SkillFeature::ALL.len());
+    assert_eq!(config.save_index(), 7 + SkillFeature::ALL.len());
     // The cursor starts on the first local field, not a global one.
     assert_eq!(config.selected_field(), None);
     assert_eq!(config.selected_local_field(), Some(LocalField::AgentCli));
     let rows = config.rows();
-    assert_eq!(rows.len(), 6 + SkillFeature::ALL.len());
+    assert_eq!(rows.len(), 7 + SkillFeature::ALL.len());
     assert_eq!(rows[0].label, "Agent CLI");
     assert_eq!(rows[1].label, "Notifications");
     assert_eq!(rows[2].label, "Restore Panes");
@@ -726,10 +727,13 @@ fn local_scope_shows_only_the_local_override_rows() {
     assert_eq!(rows[5].label, "Setup Commands");
     assert!(rows[5].action);
     assert_eq!(rows[5].value, "Edit (none)");
+    assert_eq!(rows[6].label, "Env Vars");
+    assert!(rows[6].action);
+    assert_eq!(rows[6].value, "Edit (none)");
     // The skill feature row falls back to the global value (on) when unset.
-    assert_eq!(rows[6].label, "PR Skills");
-    assert!(rows[6].value.contains("Global"));
-    assert!(rows[6].value.contains("On"));
+    assert_eq!(rows[7].label, "PR Skills");
+    assert!(rows[7].value.contains("Global"));
+    assert!(rows[7].value.contains("On"));
     // Unset overrides display the value they fall back to.
     assert!(rows[0].value.contains("Global"));
     assert!(rows[0].value.contains("Claude"));
@@ -777,6 +781,8 @@ fn local_fields_are_selectable_then_the_save_button() {
         config.selected_local_field(),
         Some(LocalField::SetupCommands)
     );
+    config.move_down();
+    assert_eq!(config.selected_local_field(), Some(LocalField::EnvVars));
     // Below the fixed local fields sits the shipped-skill feature row, then Save.
     config.move_down();
     assert_eq!(config.selected_local_field(), None);
@@ -927,6 +933,128 @@ fn closing_setup_commands_modal_discards_the_buffer() {
     assert!(config.setup_modal().is_none());
     assert!(config.local().unwrap().setup_commands.is_empty());
     assert!(!config.is_dirty());
+}
+
+#[test]
+fn env_vars_row_opens_a_multiline_editor_and_applies_valid_bindings() {
+    let mut config = local_config();
+    select_local(&mut config, LocalField::EnvVars);
+    assert!(config.env_row_active());
+    // The Env Vars row is an action row, so ←/→ have nothing to cycle.
+    assert!(!config.cycle_selected(true));
+    assert_eq!(config.value_of_local(LocalField::EnvVars), "Edit (none)");
+
+    config.open_env_modal();
+    assert_eq!(config.env_modal().unwrap().lines(), &["".to_string()]);
+    assert_eq!(config.env_modal().unwrap().cursor(), (0, 0));
+    // Exercise every editing / caret method.
+    for c in "GH_TOKEN=op://Private/GH/tokenX".chars() {
+        config.env_modal_insert(c);
+    }
+    config.env_modal_cursor_home();
+    config.env_modal_cursor_right();
+    config.env_modal_cursor_left();
+    config.env_modal_cursor_end();
+    config.env_modal_backspace(); // drop the trailing X
+    config.env_modal_newline();
+    config.env_modal_cursor_up();
+    config.env_modal_cursor_down();
+    // A malformed line (no `=`) and an invalid name are dropped on apply; a blank
+    // reference is dropped too. Only the valid binding survives.
+    for c in "1BAD=op://x/y/z".chars() {
+        config.env_modal_insert(c);
+    }
+    config.env_modal_delete_forward();
+
+    config.apply_env_modal();
+
+    assert!(config.env_modal().is_none());
+    assert_eq!(
+        config
+            .local()
+            .unwrap()
+            .env
+            .get("GH_TOKEN")
+            .map(String::as_str),
+        Some("op://Private/GH/token")
+    );
+    assert!(!config.local().unwrap().env.contains_key("1BAD"));
+    assert_eq!(config.value_of_local(LocalField::EnvVars), "Edit (1 var)");
+    assert!(config.is_dirty());
+    assert!(config.rows()[6].changed);
+}
+
+#[test]
+fn env_editor_seeds_from_existing_bindings_and_the_label_counts_them() {
+    let mut config = local_config();
+    config.local.as_mut().unwrap().settings.env = [
+        ("A_TOKEN".to_string(), "op://v/i/a".to_string()),
+        ("B_TOKEN".to_string(), "op://v/i/b".to_string()),
+    ]
+    .into_iter()
+    .collect();
+    assert_eq!(config.value_of_local(LocalField::EnvVars), "Edit (2 vars)");
+
+    // Opening the editor on the Env Vars row seeds the buffer from the bindings
+    // in sorted order.
+    select_local(&mut config, LocalField::EnvVars);
+    config.open_env_modal();
+    assert_eq!(
+        config.env_modal().unwrap().lines(),
+        &[
+            "A_TOKEN=op://v/i/a".to_string(),
+            "B_TOKEN=op://v/i/b".to_string()
+        ]
+    );
+}
+
+#[test]
+fn a_later_binding_line_overrides_an_earlier_one_with_the_same_name() {
+    let mut config = local_config();
+    select_local(&mut config, LocalField::EnvVars);
+    config.open_env_modal();
+    for c in "DUP=op://v/i/first".chars() {
+        config.env_modal_insert(c);
+    }
+    config.env_modal_newline();
+    for c in "DUP=op://v/i/second".chars() {
+        config.env_modal_insert(c);
+    }
+    config.apply_env_modal();
+
+    assert_eq!(
+        config.local().unwrap().env.get("DUP").map(String::as_str),
+        Some("op://v/i/second")
+    );
+}
+
+#[test]
+fn closing_env_vars_modal_discards_the_buffer() {
+    let mut config = local_config();
+    select_local(&mut config, LocalField::EnvVars);
+    config.open_env_modal();
+    config.env_modal_insert('X');
+    config.close_env_modal();
+
+    assert!(config.env_modal().is_none());
+    assert!(config.local().unwrap().env.is_empty());
+    assert!(!config.is_dirty());
+}
+
+#[test]
+fn open_env_modal_is_a_noop_off_the_env_row() {
+    let mut config = local_config();
+    select_local(&mut config, LocalField::SetupCommands);
+    config.open_env_modal();
+    assert!(config.env_modal().is_none());
+}
+
+#[test]
+fn apply_env_modal_is_a_noop_when_no_modal_is_open() {
+    let mut config = local_config();
+    config.apply_env_modal();
+    assert!(config.env_modal().is_none());
+    assert!(config.local().unwrap().env.is_empty());
 }
 
 #[test]
@@ -1158,7 +1286,8 @@ fn local_field_labels_are_distinct() {
     assert_eq!(LocalField::DefaultBranch.label(), "Default Branch");
     assert_eq!(LocalField::BranchSource.label(), "Branch Source");
     assert_eq!(LocalField::SetupCommands.label(), "Setup Commands");
-    assert_eq!(LocalField::ALL.len(), 6);
+    assert_eq!(LocalField::EnvVars.label(), "Env Vars");
+    assert_eq!(LocalField::ALL.len(), 7);
 }
 
 #[test]

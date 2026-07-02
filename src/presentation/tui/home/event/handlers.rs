@@ -17,7 +17,7 @@ use crate::presentation::tui::io::screen::{self, FramePainter};
 use crate::domain::settings::{AgentCli, KeyScheme, SessionActionUi};
 
 use super::super::command::Effect;
-use super::super::pane_input::{is_double_click, DOUBLE_CLICK};
+use super::super::pane_input::{is_double_click, PointerShape, DOUBLE_CLICK};
 use super::super::state::{HomeState, ModalSize, PaneExit, ReturnMode, ROOT_NAME};
 use super::super::terminal::tabs::TabNav;
 use super::super::ui;
@@ -103,7 +103,7 @@ pub(super) fn palette_key(
                 } => {
                     let root = state.workspace_root_for_session(workspace.as_deref(), &name);
                     state.set_op_target(root.clone());
-                    (wiring.dispatch_remove)(&root, &name, force);
+                    (wiring.dispatch_remove)(&root, &name, force, None);
                 }
                 // `session remove` with no name opens the removal checklist over
                 // the palette, so it stays open behind it.
@@ -157,6 +157,16 @@ pub(super) fn palette_key(
                     } else {
                         state.log_error(format!("\"{name}\" is not in the unite view"));
                     }
+                }
+                // `env`: open the workspace-env editor as an overlay *over* the
+                // palette (the palette stayed open — `OpenEnvEditor` does not
+                // close it), so saving / cancelling returns to the Overview. Seed
+                // it from the workspace's current bindings.
+                Effect::OpenEnvEditor => {
+                    let env = crate::usecase::settings::load_local(wiring.workspace_root)
+                        .unwrap_or_default()
+                        .env;
+                    state.open_env_editor(env);
                 }
                 // `ShowText` already opened its modal inside `submit`; the palette
                 // stays open behind it. `None` / `Clear` likewise keep it open.
@@ -298,6 +308,25 @@ pub(super) fn switch_key(
         return Flow::Continue;
     }
 
+    if state.list().create_row_selected() {
+        match key {
+            // The visible "+ new session" row behaves like an input affordance:
+            // clicking it or pressing Enter starts the inline create editor, while
+            // typing a printable character starts the editor and inserts that
+            // character as the first byte of the session name.
+            Key::Enter | Key::Home => begin_switch_create(state, wiring, None),
+            Key::Char(c) if !c.is_control() => begin_switch_create(state, wiring, Some(c)),
+            // Keep keyboard escape hatches on the row: arrows still navigate away
+            // (the create row carries no session, so it needs no note / tab keys),
+            // and Esc backs out of Switch just as it does on real session rows.
+            Key::ArrowUp => state.switch_move_up(),
+            Key::ArrowDown => state.switch_move_down(),
+            Key::Escape => leave_switch(term, state, painter, wiring),
+            _ => {}
+        }
+        return Flow::Continue;
+    }
+
     match key {
         // ↑/↓ (k/j) move between sessions.
         Key::ArrowUp | Key::Char('k') => state.switch_move_up(),
@@ -351,8 +380,7 @@ pub(super) fn switch_key(
         // (the inline create / rename inputs consume `Home` earlier and return
         // before this match).
         Key::Char('c') | Key::Home => {
-            let branches = (wiring.existing_branches)();
-            state.switch_begin_create(branches);
+            begin_switch_create(state, wiring, None);
         }
         // `r` begins inline rename of the selected session's sidebar label
         // (a no-op on the root row, which is not a session).
@@ -398,6 +426,19 @@ pub(super) fn switch_key(
         _ => {}
     }
     Flow::Continue
+}
+
+/// Open 切替's inline create input, seeded with `first` when the visible
+/// `+ new session` affordance was typed into directly. The branch-name snapshot is
+/// taken exactly when the editor opens so validation sees the current workspace.
+fn begin_switch_create(state: &mut HomeState, wiring: &mut Wiring, first: Option<char>) {
+    let branches = (wiring.existing_branches)();
+    state.switch_begin_create(branches);
+    if let Some(c) = first {
+        if let Some(create) = state.create_mut() {
+            create.push_char(c);
+        }
+    }
 }
 
 /// Move the selected session one row up (`up`) or down in the list (`K` / `J` in
@@ -520,6 +561,55 @@ pub(super) fn note_editor_key(
     }
 }
 
+/// Handle one key in the workspace-env editor overlay (the `env` command), which
+/// sits over the command palette. `Ctrl-S` parses the buffer's valid bindings,
+/// writes them into this workspace's local settings (preserving the other
+/// overrides), and closes back to the Overview; `Esc` cancels; every other key
+/// edits the multi-line `NAME=op://…` buffer in place. Saving touches the
+/// settings file, so this is a handler rather than inline in the loop.
+pub(super) fn env_editor_key(state: &mut HomeState, key: Key, wiring: &mut Wiring) {
+    // Only entered while the env editor is open (the loop guards on
+    // `env_editor().is_some()`), so the accessors below always resolve.
+    match key {
+        // `Ctrl-S` saves the bindings and returns to the palette.
+        Key::Char(CTRL_S) => {
+            let env = state
+                .confirm_env_editor()
+                .expect("env editor open while editing");
+            let root = wiring.workspace_root;
+            // Read-modify-write so the workspace's other local overrides survive.
+            let mut settings = crate::usecase::settings::load_local(root).unwrap_or_default();
+            settings.env = env;
+            match crate::usecase::settings::save_local(root, &settings) {
+                Ok(()) => state.log_output("Saved workspace env 🐰".to_string()),
+                Err(e) => state.log_error(format!("Failed to save env: {e}")),
+            }
+        }
+        // `Esc` closes without saving, returning to the palette.
+        Key::Escape => state.env_editor_cancel(),
+        // Every other key edits the multi-line buffer in place.
+        key => {
+            let area = state
+                .env_editor_mut()
+                .expect("env editor open while editing")
+                .area_mut();
+            match key {
+                Key::Enter => area.newline(),
+                Key::Backspace => area.backspace(),
+                Key::Del => area.delete_forward(),
+                Key::ArrowLeft => area.move_left(),
+                Key::ArrowRight => area.move_right(),
+                Key::ArrowUp => area.move_up(),
+                Key::ArrowDown => area.move_down(),
+                Key::Home => area.move_home(),
+                Key::End => area.move_end(),
+                Key::Char(c) if !c.is_control() => area.insert(c),
+                _ => {}
+            }
+        }
+    }
+}
+
 /// A cursor motion that, held with `Shift`, extends the note selection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Select {
@@ -615,6 +705,10 @@ pub(super) fn switch_click(
     // Always land the cursor on the clicked row first, so a double click confirms
     // the row it lands on and a single click just leaves it selected.
     state.switch_select(row);
+    if state.list().create_row_selected() {
+        begin_switch_create(state, wiring, None);
+        return;
+    }
     if is_double_click(last_click, row, now, DOUBLE_CLICK) {
         focus_and_attach(term, state, painter, wiring, row);
     }
@@ -639,6 +733,14 @@ pub(super) fn focus_click(
     now: Instant,
     last_click: &mut Option<(usize, Instant)>,
 ) {
+    if row == state.list().create_row() {
+        // The create row lives in 切替: a click on it from 在席 zooms back to the
+        // picker and opens the same inline input a 切替 click would.
+        state.enter_switch(ReturnMode::Focus);
+        state.switch_select(row);
+        begin_switch_create(state, wiring, None);
+        return;
+    }
     if is_double_click(last_click, row, now, DOUBLE_CLICK) {
         // `focus_and_attach` re-enters 在席 on the row and attaches when live, so a
         // double click on a running session drops straight into 没入.
@@ -895,8 +997,10 @@ fn focus_prefix_action(
 /// `session remove <name> --force`.
 ///
 /// Either way the user asked to leave this session, so 在席 yields to the base
-/// 切替 (Switch) at once to pick the next one (`Esc` is inert there); the
-/// removal's result — success or the dirty refusal — is logged and the list
+/// 切替 (Switch) at once (`Esc` is inert there). If removal finishes before any
+/// other operation, the task then lands on the neighbouring session instead of
+/// root; otherwise the refreshed list preserves the user's current operation.
+/// The removal's result — success or the dirty refusal — is logged and the list
 /// refreshed when the background task finishes. The root row is the workspace
 /// itself, not a session, so closing it is refused outright and stays in 在席.
 fn close_focused_session(state: &mut HomeState, wiring: &mut Wiring, force: bool) {
@@ -910,7 +1014,13 @@ fn close_focused_session(state: &mut HomeState, wiring: &mut Wiring, force: bool
     }
     let root = state.workspace_root_for_session(None, &name);
     state.set_op_target(root.clone());
-    (wiring.dispatch_remove)(&root, &name, force);
+    let focus = state
+        .focus_target_after_close()
+        .map(|name| super::super::tasks::AutoFocus {
+            name,
+            interaction_epoch: wiring.interaction_epoch,
+        });
+    (wiring.dispatch_remove)(&root, &name, force, focus);
     state.enter_switch(ReturnMode::Base);
 }
 
@@ -1189,6 +1299,14 @@ fn open_pane(
     // wheel-capture modes so the wheel can't scroll the host terminal once we are
     // back on the workspace screen.
     let _ = screen::write_input_modes(term);
+    // Leaving the embedded pane returns the pointer to management chrome. The
+    // pane itself keeps the last OSC 22 pointer shape across in-pane tab hops so
+    // a text caret does not flicker back to an arrow during `Ctrl-O ←/→`, so the
+    // boundary between 没入 and the home UI owns the reset instead. Emit this
+    // after re-entering the alternate screen so terminals that scope pointer
+    // shapes per screen also reset the visible management screen.
+    let _ = term.write_str(PointerShape::Default.osc22());
+    let _ = term.flush();
     // The embedded terminal drew over the whole screen, so the remembered frame
     // is stale: force a full repaint on the next pass.
     painter.reset();

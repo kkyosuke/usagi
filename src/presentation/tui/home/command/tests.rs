@@ -512,6 +512,13 @@ fn config_requests_opening_the_settings_screen() {
 }
 
 #[test]
+fn env_requests_opening_the_workspace_env_editor() {
+    let result = registry().dispatch("env", &[], &[]);
+    assert!(result.lines.is_empty());
+    assert_eq!(result.effect, Effect::OpenEnvEditor);
+}
+
+#[test]
 fn unknown_command_is_reported_as_an_error() {
     let result = registry().dispatch("frobnicate", &[], &[]);
     assert_eq!(result.lines[0].kind, LineKind::Error);
@@ -923,6 +930,7 @@ fn commands_in_scope_lists_a_scopes_own_commands_in_order() {
         .collect();
     assert!(workspace.contains(&"session"));
     assert!(workspace.contains(&"config"));
+    assert!(workspace.contains(&"env"));
     assert!(!workspace.contains(&"terminal"));
 }
 

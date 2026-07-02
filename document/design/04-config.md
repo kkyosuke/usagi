@@ -125,12 +125,13 @@
 │                   Workspace Config                    │  ← タイトル（緑・太字）
 │            Adjust this workspace's settings           │  ← サブタイトル（淡色）
 │                                                       │
-│      >   Agent CLI       < Global (Claude) >          │  ┐ ローカル設定一覧（固定 6 項目）
+│      >   Agent CLI       < Global (Claude) >          │  ┐ ローカル設定一覧（固定 7 項目）
 │        ● Notifications   < Override: Off >            │  │  選択行：左端の赤 ">"
 │          Restore Panes   < Global (On) >              │  │  変更済み：ラベル左に黄色 ●
 │          Default Branch  < develop >                  │  │
 │          Branch Source   < Remote >                   │  │
-│          Setup Commands  Edit (2 commands)            │  ┘
+│          Setup Commands  Edit (2 commands)            │  │
+│          Env Vars        Edit (1 var)                 │  ┘
 │          PR Skills       < Global (On) >              │  ← 同梱スキル機能の上書き（機能ごとに 1 行）
 │                                                       │
 │                           [ Save ]                    │  ← Save ボタン
@@ -147,6 +148,7 @@
 | Default Branch | `session create` で worktree を切る基点ブランチ | `Default (auto)` → リポジトリの各ブランチ名 の順に循環（実在ブランチを検出） |
 | Branch Source | 上のブランチをローカル形／リモート形のどちらで使うか | `Local` ⇄ `Remote` をトグル（未設定時は `Default (Remote)` を表示） |
 | Setup Commands | `session create` 後に session root で実行するコマンド列 | 値は `Edit (none)` / `Edit (1 command)` / `Edit (N commands)`。`Space` / `Enter` で複数行エディタを開く |
+| Env Vars | pane 起動時に 1Password から解決して注入する環境変数（`NAME = op://vault/item/field`） | 値は `Edit (none)` / `Edit (1 var)` / `Edit (N vars)`（有効な binding 数）。`Space` / `Enter` で複数行エディタを開く |
 | PR Skills | 同梱スキル機能 `pull-request` のこのワークスペースでの上書き | `Global (実効値)` → `Override: On` → `Override: Off` の順に循環。固定項目の下に機能ごとに 1 行並ぶ |
 
 - Agent CLI と Notifications は **「グローバルに従う / ローカルで上書き」** を 1 つの chooser で切り替えます。
@@ -161,6 +163,12 @@
 - Setup Commands は action 行です。`Space` / `Enter` で複数行エディタを開き、1 行につき 1 つの shell コマンドを
   入力します。`Ctrl-S` でエディタ内容をメモリ上のローカル設定に反映し、空行は保存時に除外します。実際の
   `<workspace>/.usagi/settings.json` への書き込みは通常どおり Save ボタンで行います。
+- Env Vars も action 行です。`Space` / `Enter` で複数行エディタを開き、1 行につき 1 件の `NAME=op://vault/item/field`
+  を入力します。`Ctrl-S` で反映するとき、`=` を含まない行・環境変数名として不正な名前・reference が空の行は破棄し、
+  同名は後勝ちで解決します（[`env`](../05-settings.md#設定項目) の読み取り時と同じフィルタ）。保存する値は 1Password
+  reference だけで、解決した secret 本体は保存しません。同じ binding は、コマンドパレットの
+  [`env`](../03-commands/02-tui.md#env) を実行して開く[オーバーレイエディタ](home/05-overlays.md#workspace-env-エディタ)からも
+  編集できます（そちらは Config 画面へ遷移せず Overview 上で完結します）。
 - Save を押すと、そのワークスペースのローカル設定（`<workspace>/.usagi/settings.json`）のみを保存します。
   全項目を未上書きに戻した場合もファイルは残し（中身は空に近い JSON）、「グローバルに従う」を意味します
   （削除はしません）。
@@ -196,10 +204,10 @@
 |---|---|
 | `↑` / `k` | 選択を 1 つ上へ移動（設定一覧と Save ボタンの間をラップ）。通知をクリア |
 | `↓` / `j` | 選択を 1 つ下へ移動（末尾の Save ボタンの次は先頭へラップ）。通知をクリア |
-| `→` / `l` | 選択中の項目の値を次の選択肢へ切り替え（メモリ上のみ。保存はしない）。Save ボタン上・`Local LLM` の `Install` 上・`Local LLM Model`（モーダルで選ぶ）上・`Setup Commands` 上では無効 |
-| `←` / `h` | 選択中の項目の値を前の選択肢へ切り替え（メモリ上のみ。保存はしない）。Save ボタン上・`Local LLM` の `Install` 上・`Local LLM Model` 上・`Setup Commands` 上では無効 |
-| `Space` | `Local LLM` の `Install` 行でインストールモーダル、`Local LLM Model`（導入後）行でモデル選択モーダル、`Setup Commands` 行で複数行エディタを開く（他の行では無効） |
-| `Enter` | Save ボタン上では編集内容を `settings.json` へ保存。`Local LLM`（未導入時）上ではインストールモーダルを、`Local LLM Model`（導入後）上ではモデル選択モーダルを、`Setup Commands` 上では複数行エディタを開く。その他の設定項目上では `→` と同じく値を次へ切り替え |
+| `→` / `l` | 選択中の項目の値を次の選択肢へ切り替え（メモリ上のみ。保存はしない）。Save ボタン上・`Local LLM` の `Install` 上・`Local LLM Model`（モーダルで選ぶ）上・`Setup Commands`・`Env Vars` 上では無効 |
+| `←` / `h` | 選択中の項目の値を前の選択肢へ切り替え（メモリ上のみ。保存はしない）。Save ボタン上・`Local LLM` の `Install` 上・`Local LLM Model` 上・`Setup Commands`・`Env Vars` 上では無効 |
+| `Space` | `Local LLM` の `Install` 行でインストールモーダル、`Local LLM Model`（導入後）行でモデル選択モーダル、`Setup Commands` 行・`Env Vars` 行で複数行エディタを開く（他の行では無効） |
+| `Enter` | Save ボタン上では編集内容を `settings.json` へ保存。`Local LLM`（未導入時）上ではインストールモーダルを、`Local LLM Model`（導入後）上ではモデル選択モーダルを、`Setup Commands`・`Env Vars` 上では複数行エディタを開く。その他の設定項目上では `→` と同じく値を次へ切り替え |
 | `q` / `Esc` | 前の画面へ戻る（起動画面から開いた場合は起動画面、ホーム画面の `config` から開いた場合はホーム画面。未保存の編集は破棄） |
 | `Ctrl+C` / `Ctrl+Q` | アプリを終了 |
 
@@ -221,6 +229,22 @@
 | `Backspace` / `Del` | キャレット前後の文字を削除（行頭では前行と結合） |
 | `←` / `→` / `↑` / `↓` / `Home` / `End` | キャレット移動 |
 | `Ctrl-S` | 空行を除いたコマンド列をメモリ上のローカル設定へ反映し、エディタを閉じる |
+| `Esc` | 変更を破棄してエディタを閉じる |
+| `Ctrl+C` | アプリを終了 |
+
+### Env Vars エディタのキー操作
+
+`Env Vars` を起動すると複数行エディタが開き、開いている間はすべてのキーを受け取ります。各行は
+`NAME=op://vault/item/field` の 1 件で、pane 起動時に 1Password から解決して子プロセス環境へ注入されます。
+コマンドパレットの [`env`](../03-commands/02-tui.md#env) はこのエディタへ直接入ります。
+
+| キー | 動作 |
+|---|---|
+| 文字入力 | キャレット位置に文字を挿入 |
+| `Enter` | 行を分割して新しい binding 行を作成 |
+| `Backspace` / `Del` | キャレット前後の文字を削除（行頭では前行と結合） |
+| `←` / `→` / `↑` / `↓` / `Home` / `End` | キャレット移動 |
+| `Ctrl-S` | 有効な binding だけをメモリ上のローカル設定へ反映し、エディタを閉じる（`=` の無い行・不正名・空 reference は破棄、同名は後勝ち） |
 | `Esc` | 変更を破棄してエディタを閉じる |
 | `Ctrl+C` | アプリを終了 |
 

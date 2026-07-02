@@ -35,6 +35,10 @@ pub(super) enum Overlay {
     Create(CreateInput),
     /// The inline display-name input open while renaming a session from 切替.
     Rename(RenameInput),
+    /// A context menu opened by right-clicking a live-pane tab chip.
+    TabMenu(TabMenu),
+    /// The inline label input opened from the tab context menu.
+    TabRename(TabRenameInput),
     /// The session-removal checklist modal.
     Remove(RemoveModal),
     /// The scrollable text modal (a text-dumping command's output).
@@ -43,6 +47,223 @@ pub(super) enum Overlay {
     Preview(Preview),
     /// The session-note editor modal.
     Note(NoteEditor),
+    /// The workspace-env editor modal (the `env` command), overlaying the palette.
+    Env(EnvEditor),
+}
+
+/// Which tab-menu row is currently highlighted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TabMenuItem {
+    MoveLeft,
+    MoveRight,
+    Rename,
+    Close,
+}
+
+impl TabMenuItem {
+    pub const ALL: [Self; 4] = [Self::MoveLeft, Self::MoveRight, Self::Rename, Self::Close];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::MoveLeft => "Move left",
+            Self::MoveRight => "Move right",
+            Self::Rename => "Rename",
+            Self::Close => "Close",
+        }
+    }
+}
+
+/// Context menu opened from a live-pane tab chip. It records the screen anchor so
+/// the renderer can float the menu beside the clicked chip, and the session/tab
+/// target so the event loop can apply the selected operation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TabMenu {
+    dir: PathBuf,
+    tab: usize,
+    label: String,
+    col: u16,
+    row: u16,
+    cursor: usize,
+}
+
+impl TabMenu {
+    pub(super) fn new(
+        dir: PathBuf,
+        tab: usize,
+        label: impl Into<String>,
+        col: u16,
+        row: u16,
+    ) -> Self {
+        Self {
+            dir,
+            tab,
+            label: label.into(),
+            col,
+            row,
+            cursor: 0,
+        }
+    }
+
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
+
+    pub fn tab(&self) -> usize {
+        self.tab
+    }
+
+    pub fn label(&self) -> &str {
+        &self.label
+    }
+
+    pub fn col(&self) -> u16 {
+        self.col
+    }
+
+    pub fn row(&self) -> u16 {
+        self.row
+    }
+
+    pub fn cursor(&self) -> usize {
+        self.cursor
+    }
+
+    pub fn item(&self) -> TabMenuItem {
+        TabMenuItem::ALL[self.cursor]
+    }
+
+    pub fn move_up(&mut self) {
+        self.cursor = if self.cursor == 0 {
+            TabMenuItem::ALL.len() - 1
+        } else {
+            self.cursor - 1
+        };
+    }
+
+    pub fn move_down(&mut self) {
+        self.cursor = (self.cursor + 1) % TabMenuItem::ALL.len();
+    }
+}
+
+/// Inline tab-label editor opened from [`TabMenuItem::Rename`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TabRenameInput {
+    dir: PathBuf,
+    tab: usize,
+    input: TextInput,
+}
+
+#[cfg(test)]
+mod tab_menu_tests {
+    use super::*;
+
+    #[test]
+    fn tab_menu_moves_wrap_and_exposes_target() {
+        let mut menu = TabMenu::new(PathBuf::from("/repo/wt"), 2, "agent", 10, 4);
+        assert_eq!(menu.dir(), Path::new("/repo/wt"));
+        assert_eq!(menu.tab(), 2);
+        assert_eq!(menu.label(), "agent");
+        assert_eq!(menu.col(), 10);
+        assert_eq!(menu.row(), 4);
+        assert_eq!(menu.cursor(), 0);
+        assert_eq!(menu.item(), TabMenuItem::MoveLeft);
+
+        menu.move_up();
+        assert_eq!(menu.cursor(), 3);
+        assert_eq!(menu.item(), TabMenuItem::Close);
+        menu.move_down();
+        assert_eq!(menu.item(), TabMenuItem::MoveLeft);
+        menu.move_down();
+        assert_eq!(menu.item(), TabMenuItem::MoveRight);
+        menu.move_up();
+        assert_eq!(menu.item(), TabMenuItem::MoveLeft);
+        menu.move_down();
+        menu.move_down();
+        assert_eq!(menu.item(), TabMenuItem::Rename);
+    }
+
+    #[test]
+    fn tab_rename_input_edits_and_confirms_trimmed_label() {
+        let mut input = TabRenameInput::new(PathBuf::from("/repo/wt"), 1, "terminal");
+        assert_eq!(input.dir(), Path::new("/repo/wt"));
+        assert_eq!(input.tab(), 1);
+        assert_eq!(input.value(), "terminal");
+        assert_eq!(input.cursor(), "terminal".len());
+
+        input.move_home();
+        assert_eq!(input.cursor(), 0);
+        input.push_char(' ');
+        input.move_end();
+        input.push_char('!');
+        input.move_left();
+        input.backspace();
+        input.delete_forward();
+        input.move_right();
+        input.push_char(' ');
+
+        let (dir, tab, label) = input.confirm();
+        assert_eq!(dir, PathBuf::from("/repo/wt"));
+        assert_eq!(tab, 1);
+        assert_eq!(label, "termina");
+    }
+}
+
+impl TabRenameInput {
+    pub(super) fn new(dir: PathBuf, tab: usize, label: impl Into<String>) -> Self {
+        Self {
+            dir,
+            tab,
+            input: TextInput::with_value(label),
+        }
+    }
+
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
+
+    pub fn tab(&self) -> usize {
+        self.tab
+    }
+
+    pub fn value(&self) -> &str {
+        self.input.value()
+    }
+
+    pub fn cursor(&self) -> usize {
+        self.input.cursor()
+    }
+
+    pub fn push_char(&mut self, c: char) {
+        self.input.insert(c);
+    }
+
+    pub fn backspace(&mut self) {
+        self.input.backspace();
+    }
+
+    pub fn delete_forward(&mut self) {
+        self.input.delete_forward();
+    }
+
+    pub fn move_left(&mut self) {
+        self.input.move_left();
+    }
+
+    pub fn move_right(&mut self) {
+        self.input.move_right();
+    }
+
+    pub fn move_home(&mut self) {
+        self.input.move_home();
+    }
+
+    pub fn move_end(&mut self) {
+        self.input.move_end();
+    }
+
+    pub(super) fn confirm(self) -> (PathBuf, usize, String) {
+        (self.dir, self.tab, self.input.value().trim().to_string())
+    }
 }
 
 impl Overlay {
@@ -292,6 +513,45 @@ impl NoteEditor {
     /// usecase; an empty buffer clears the note.
     pub(super) fn confirm(self) -> (String, String, bool) {
         (self.target, self.area.text(), self.reattach)
+    }
+}
+
+/// The workspace-env editor modal, opened by the `env` command as an overlay
+/// over the command palette (Overview). It holds the multi-line buffer of
+/// `NAME=op://vault/item/field` bindings, seeded from the workspace's current
+/// settings. Editing and caret movement live on [`TextArea`] (the event loop
+/// routes keys straight to it, like the note editor); the modal bundles it and
+/// parses the valid bindings on confirm. Because it overlays the palette rather
+/// than replacing it, closing it (save or cancel) returns to the Overview.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnvEditor {
+    area: TextArea,
+}
+
+impl EnvEditor {
+    /// Open the editor seeded from `env` (one `NAME=reference` line per binding,
+    /// in sorted order), caret at the end.
+    pub(super) fn new(env: &crate::domain::settings::SecretEnv) -> Self {
+        Self {
+            area: TextArea::from_text(&crate::domain::settings::format_env_bindings(env)),
+        }
+    }
+
+    /// The text buffer, for rendering its lines and caret.
+    pub fn area(&self) -> &TextArea {
+        &self.area
+    }
+
+    /// The editable buffer: the event loop routes its keys straight to the
+    /// [`TextArea`]'s own editing methods, so the modal has no per-key forwarders.
+    pub fn area_mut(&mut self) -> &mut TextArea {
+        &mut self.area
+    }
+
+    /// The valid bindings currently in the buffer (see
+    /// [`crate::domain::settings::parse_env_bindings`] for the filtering rule).
+    pub(super) fn bindings(&self) -> crate::domain::settings::SecretEnv {
+        crate::domain::settings::parse_env_bindings(&self.area.text())
     }
 }
 

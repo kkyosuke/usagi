@@ -8,6 +8,10 @@ fn switch_create_rows_show_the_input_and_an_error() {
     assert_eq!(rows.len(), 1);
     let plain = console::strip_ansi_codes(&rows[0]).into_owned();
     assert!(plain.contains("+ new: wip"));
+    assert!(
+        plain.starts_with("  +"),
+        "input mode keeps the + aligned with the persistent create row: {plain:?}"
+    );
 
     // Caret in the middle: the block caret sits on a character, so the name reads
     // intact without an inserted glyph.
@@ -17,7 +21,9 @@ fn switch_create_rows_show_the_input_and_an_error() {
 
     let with_error = switch_create_rows("feature", 7, Some("\"feature\" already exists."), 40);
     assert_eq!(with_error.len(), 2);
-    assert!(console::strip_ansi_codes(&with_error[1]).contains("already exists"));
+    let err = console::strip_ansi_codes(&with_error[1]).into_owned();
+    assert!(err.contains("already exists"));
+    assert!(err.starts_with("  "));
 }
 
 #[test]
@@ -117,25 +123,7 @@ fn splice_rows_inserts_inside_an_existing_column_without_replacing_rows() {
 }
 
 #[test]
-fn switch_rename_rows_show_the_target_and_typed_label() {
-    // Caret at the end of the label.
-    let rows = switch_rename_rows("main", "My main", "My main".len(), 40);
-    assert_eq!(rows.len(), 1);
-    let plain = console::strip_ansi_codes(&rows[0]).into_owned();
-    assert!(plain.contains("rename main: My main"));
-}
-
-#[test]
-fn switch_rename_rows_place_the_caret_mid_label() {
-    // With the caret in the middle of the label the block caret falls on the
-    // character at the cursor rather than past the end, matching the create row.
-    let rows = switch_rename_rows("main", "abc", 1, 40);
-    let plain = console::strip_ansi_codes(&rows[0]).into_owned();
-    assert!(plain.contains("rename main: abc"));
-}
-
-#[test]
-fn render_frame_shows_the_inline_rename_row_in_switch() {
+fn render_frame_edits_the_selected_row_name_in_place_when_renaming_in_switch() {
     let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
     state.enter_switch(super::super::super::state::ReturnMode::Base);
     state.switch_move_down(); // cursor onto "main"
@@ -144,9 +132,18 @@ fn render_frame_shows_the_inline_rename_row_in_switch() {
         state.rename_mut().unwrap().push_char(c);
     }
     let frame = render_frame(24, 80, &state);
-    let joined = console::strip_ansi_codes(&frame.join("\n")).into_owned();
-    // Prefilled with the branch name, then edited to "main 2".
-    assert!(joined.contains("rename main: main 2"));
+    let plain: Vec<String> = frame
+        .iter()
+        .map(|row| console::strip_ansi_codes(row).into_owned())
+        .collect();
+    // The selected session's own name line becomes the editable label in place:
+    // the `>` cursor and the typed "main 2" (prefilled "main", then edited) sit on
+    // the same row — the rename is not banished to a separate row at the list foot.
+    assert!(plain
+        .iter()
+        .any(|line| line.contains('>') && line.contains("main 2")));
+    // And the old foot-anchored `rename <target>:` affordance is gone.
+    assert!(!plain.iter().any(|line| line.contains("rename main:")));
 }
 
 // --- command hints (command palette) -----------------------------------
@@ -246,4 +243,24 @@ fn render_frame_shows_command_hints_in_the_palette_and_keeps_its_height() {
     let joined = console::strip_ansi_codes(&frame.join("\n")).into_owned();
     assert!(joined.contains("matches"));
     assert!(joined.contains("session"));
+}
+
+#[test]
+fn tab_menu_box_and_rename_body_render_action_surface() {
+    let mut state = state_with(vec![]);
+    state.open_tab_menu(PathBuf::from("/repo/main"), 1, "terminal", 12, 3);
+    let menu = state.tab_menu().unwrap();
+    let menu_text = stripped(&tab_menu_box(menu));
+    assert!(menu_text.contains("tab 2"));
+    assert!(menu_text.contains("Move left"));
+    assert!(menu_text.contains("Move right"));
+    assert!(menu_text.contains("Rename"));
+    assert!(menu_text.contains("Close"));
+
+    let body = tab_rename_body("term", 2, 30);
+    let text = stripped(&body);
+    assert!(text.contains("Rename tab label"));
+    assert!(text.contains("label:"));
+    assert!(text.contains("term"));
+    assert!(text.contains("Enter save"));
 }

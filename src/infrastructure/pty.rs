@@ -15,6 +15,7 @@
 //! ([`terminal`]), the grid-to-lines rendering (`home::terminal::view`), and the
 //! exit-status-to-log-line decision ([`pty_exit`]) — are tested on their own.
 
+use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering};
@@ -153,6 +154,10 @@ impl PtySession {
     /// command does, so leaving the agent returns to 在席 (Focus) rather than
     /// dropping the user at a bare shell prompt.
     ///
+    /// `env` is a map of workspace-scoped secret environment variables already
+    /// resolved by the caller. The values are injected through the child process
+    /// environment, never through the launch command line.
+    ///
     /// `scrollback` caps how many scrolled-off lines the embedded terminal keeps
     /// for the user to scroll back over (the `vt100` parser grows the buffer
     /// lazily up to this bound). It is the configured
@@ -165,6 +170,7 @@ impl PtySession {
         cols: u16,
         command: Option<&str>,
         scrollback: usize,
+        env: &BTreeMap<String, String>,
     ) -> Result<Self> {
         let pty_system = native_pty_system();
         let pair = pty_system
@@ -179,6 +185,9 @@ impl PtySession {
         let shell = terminal::default_shell();
         let mut cmd = CommandBuilder::new(&shell);
         cmd.cwd(dir);
+        for (name, value) in env {
+            cmd.env(name, value);
+        }
         if let Some(command) = command {
             configure_initial_command(&mut cmd, &shell, command);
         }
@@ -375,6 +384,16 @@ impl PtySession {
         } else {
             0
         }
+    }
+
+    /// The scroll offset currently applied to the buffered history (`0` is the
+    /// live screen). Output streaming in while the pane is scrolled back advances
+    /// this on its own — the vendored `vt100`'s `scroll_up` bumps the offset as
+    /// lines enter the scrollback so the viewed region stays pinned — so the
+    /// render loop reads it back to keep its tracked offset in step (otherwise a
+    /// later wheel notch would scroll relative to a stale value).
+    pub fn scrollback(&self) -> usize {
+        self.parser().screen().scrollback()
     }
 
     /// Whether the shell is still running (the reader has not hit EOF).
@@ -596,6 +615,34 @@ mod tests {
             screen.scrollback(),
             0,
             "an offset region must not feed the scrollback"
+        );
+    }
+
+    /// While the pane is scrolled back, output streaming in advances the parser's
+    /// own offset so the viewed region stays pinned to the same lines. The render
+    /// loop (`terminal/pane.rs`) relies on this to re-read the offset and keep its
+    /// tracked value in step — otherwise a later wheel notch scrolls relative to a
+    /// stale offset and the view jumps by however many lines streamed in. This
+    /// guards the offset auto-advance in the vendored `vt100` `scroll_up`.
+    #[test]
+    fn streaming_output_advances_the_offset_while_scrolled_back() {
+        let mut parser = vt100::Parser::new(6, 20, 1000);
+        for i in 0..50 {
+            parser.process(format!("line {i}\r\n").as_bytes());
+        }
+        // Scroll back a few lines into the history.
+        parser.screen_mut().set_scrollback(3);
+        assert_eq!(parser.screen().scrollback(), 3);
+        // Ten more lines stream in with no further scroll input.
+        for i in 50..60 {
+            parser.process(format!("line {i}\r\n").as_bytes());
+        }
+        // The offset advanced by the ten streamed lines so the same content stays
+        // in view — the value the render loop must adopt.
+        assert_eq!(
+            parser.screen().scrollback(),
+            13,
+            "the offset must track the lines that streamed in while scrolled back"
         );
     }
 }

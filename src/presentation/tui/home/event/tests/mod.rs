@@ -1,5 +1,6 @@
 use super::super::oneshot::OneShot;
 use super::super::state::{GroupSource, LogLine};
+use super::super::tasks::AutoFocus;
 use super::super::terminal::tabs::TabNav;
 use super::*;
 use crate::domain::settings::{AgentCli, SessionActionUi};
@@ -321,7 +322,7 @@ fn run_full_external(
     let mut rename = |_: &Path, n: &str, l: &str| noop_rename(n, l);
     let mut set_note_fake = |_: &Path, n: &str, t: &str| noop_set_note(n, t);
     let mut reorder_fake: fn(&str, bool) -> SessionReorder = noop_reorder;
-    let mut dispatch_remove = |_: &Path, _: &str, _: bool| {};
+    let mut dispatch_remove = |_: &Path, _: &str, _: bool, _: Option<AutoFocus>| {};
     let mut evict = |_: &Path| {};
     let mut branches: fn() -> Vec<String> = no_branches;
     let mut config: fn(&Term) -> Result<Option<ConfigReload>> = noop_config;
@@ -333,6 +334,7 @@ fn run_full_external(
     let mut open_url: fn(&str) = noop_open_url;
     let mut dispatch_update = || {};
     let mut unite_resolve: fn(&str) -> std::result::Result<GroupSource, String> = no_unite_resolve;
+    let mut tab_action = |_: &mut HomeState, _: &Path, _: usize, _: TabMenuAction| {};
     let mut wiring = Wiring {
         interaction_epoch: 0,
         workspace_root: Path::new("/ws"),
@@ -353,6 +355,7 @@ fn run_full_external(
         preview: &mut preview,
         tab_op: &mut tab_op,
         close_tab: &mut close,
+        tab_action: &mut tab_action,
         save_resume: &mut save_resume,
         save_last_active: &mut save_last_active,
     };
@@ -611,6 +614,53 @@ fn config_keys() -> Vec<io::Result<Key>> {
     keys
 }
 
+/// Drive the loop with scripted [`Input`] events (mouse tests) and a recording
+/// create callback, returning the session names creation was dispatched for.
+fn run_capturing_creates_for_inputs(
+    inputs: Vec<io::Result<Input>>,
+    state: HomeState,
+) -> Vec<String> {
+    let term = Term::stdout();
+    let mut reader = InputReader::new(inputs);
+    let monitor = MonitorHandle::detached();
+    let created = RefCell::new(Vec::new());
+    let mut create = |name: &str| {
+        created.borrow_mut().push(name.to_string());
+        noop_create(name)
+    };
+    let mut persist: fn(&str) = noop_persist;
+    let mut remove: fn(&str, bool) -> SessionOutcome = noop_remove;
+    let mut open: fn(&mut HomeState, &Path, bool, bool) -> Result<PaneExit> = noop_open;
+    let mut config: fn(&Term) -> Result<Option<ConfigReload>> = noop_config;
+    let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = noop_preview;
+    let mut branches: fn() -> Vec<String> = no_branches;
+    let outcome = event_loop_compat(
+        &term,
+        &mut reader,
+        state,
+        Path::new("/ws"),
+        &monitor,
+        &UpdateHandle::new(),
+        &OneShot::<bool>::new(),
+        &OneShot::<Vec<AgentCli>>::new(),
+        &mut persist,
+        &mut create,
+        &mut (noop_rename as fn(&str, &str) -> SessionOutcome),
+        &mut (noop_set_note as fn(&str, &str) -> SessionOutcome),
+        &mut remove,
+        &mut branches,
+        &mut open,
+        &mut config,
+        &mut preview,
+        &mut (noop_tab_op as fn(&Path, Option<TabNav>) -> (Vec<String>, usize)),
+        &mut (noop_close as fn(&mut HomeState, &Path)),
+        &mut (noop_reorder as fn(&str, bool) -> SessionReorder),
+    )
+    .unwrap();
+    assert!(matches!(outcome, Outcome::Quit));
+    created.into_inner()
+}
+
 /// Drive `event_loop` with a recording rename callback, returning the (target,
 /// label) pairs it received and the final outcome.
 fn run_recording_rename(keys: Vec<io::Result<Key>>) -> (Vec<(String, String)>, Outcome) {
@@ -796,8 +846,9 @@ fn run_with_tasks(
     let mut dispatch_update = || {};
     // The unite target root is irrelevant to this single-workspace fake, so wrap
     // the caller's removal hook to the production 3-arg shape, dropping the root.
-    let mut dispatch_remove_w = |_: &Path, name: &str, force: bool| dispatch_remove(name, force);
+    let mut dispatch_remove_w = |_: &Path, name: &str, force: bool, _| dispatch_remove(name, force);
     let mut unite_resolve: fn(&str) -> std::result::Result<GroupSource, String> = no_unite_resolve;
+    let mut tab_action = |_: &mut HomeState, _: &Path, _: usize, _: TabMenuAction| {};
     let mut wiring = Wiring {
         interaction_epoch: 0,
         workspace_root: Path::new("/ws"),
@@ -818,6 +869,7 @@ fn run_with_tasks(
         preview: &mut preview,
         tab_op: &mut tab_op,
         close_tab: &mut close,
+        tab_action: &mut tab_action,
         save_resume: &mut save_resume,
         save_last_active: &mut save_last_active,
     };
@@ -846,7 +898,7 @@ fn run_with_live_session(reader: &mut dyn KeyReader) -> Result<Outcome> {
     let mut persist: fn(&str) = noop_persist;
     let mut dispatch_create = |_: &Path, _: &str, _: u64| {};
     let mut rename = |_: &Path, n: &str, l: &str| noop_rename(n, l);
-    let mut dispatch_remove = |_: &Path, _: &str, _: bool| {};
+    let mut dispatch_remove = |_: &Path, _: &str, _: bool, _| {};
     let mut evict = |_: &Path| {};
     let mut branches: fn() -> Vec<String> = no_branches;
     let mut open: fn(&mut HomeState, &Path, bool, bool) -> Result<PaneExit> = noop_open;
@@ -862,6 +914,7 @@ fn run_with_live_session(reader: &mut dyn KeyReader) -> Result<Outcome> {
     let mut open_external_terminal = |_: &Path| Ok::<(), String>(());
     let mut dispatch_update = || {};
     let mut unite_resolve: fn(&str) -> std::result::Result<GroupSource, String> = no_unite_resolve;
+    let mut tab_action = |_: &mut HomeState, _: &Path, _: usize, _: TabMenuAction| {};
     let mut wiring = Wiring {
         interaction_epoch: 0,
         workspace_root: Path::new("/ws"),
@@ -882,6 +935,7 @@ fn run_with_live_session(reader: &mut dyn KeyReader) -> Result<Outcome> {
         preview: &mut preview,
         tab_op: &mut tab_op,
         close_tab: &mut close,
+        tab_action: &mut tab_action,
         save_resume: &mut save_resume,
         save_last_active: &mut save_last_active,
     };
@@ -1001,7 +1055,7 @@ fn unite_add_and_remove_run_through_the_palette() {
     let mut rename = |_: &Path, n: &str, l: &str| noop_rename(n, l);
     let mut set_note_fake = |_: &Path, n: &str, t: &str| noop_set_note(n, t);
     let mut reorder_fake: fn(&str, bool) -> SessionReorder = noop_reorder;
-    let mut dispatch_remove = |_: &Path, _: &str, _: bool| {};
+    let mut dispatch_remove = |_: &Path, _: &str, _: bool, _| {};
     let mut evict = |_: &Path| {};
     let mut branches: fn() -> Vec<String> = no_branches;
     let mut open: fn(&mut HomeState, &Path, bool, bool) -> Result<PaneExit> = noop_open;
@@ -1014,6 +1068,7 @@ fn unite_add_and_remove_run_through_the_palette() {
     let mut open_url: fn(&str) = noop_open_url;
     let mut open_external_terminal = |_: &Path| Ok::<(), String>(());
     let mut dispatch_update = || {};
+    let mut tab_action = |_: &mut HomeState, _: &Path, _: usize, _: TabMenuAction| {};
     let mut wiring = Wiring {
         interaction_epoch: 0,
         workspace_root: Path::new("/ws"),
@@ -1034,6 +1089,7 @@ fn unite_add_and_remove_run_through_the_palette() {
         preview: &mut preview,
         tab_op: &mut tab_op,
         close_tab: &mut close,
+        tab_action: &mut tab_action,
         save_resume: &mut save_resume,
         save_last_active: &mut save_last_active,
     };
@@ -1087,6 +1143,7 @@ mod background_tasks;
 mod clicks;
 mod config_switch;
 mod ctrl_caret;
+mod env_editor;
 mod focus_menu;
 mod focus_prompt;
 mod mascot_click;

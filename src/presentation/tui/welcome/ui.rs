@@ -1,3 +1,4 @@
+use crate::presentation::theme::Palette;
 use chrono::{DateTime, Utc};
 use console::style;
 
@@ -36,21 +37,21 @@ fn header_lines(width: usize) -> Vec<String> {
 /// Builds the left menu column, highlighting the selected entry.
 fn menu_column_lines(items: &[MenuItem], selected_index: usize) -> Vec<String> {
     // "> Label..... key" — cursor + 10-char label + right-aligned key.
-    let mut lines = vec![style("Menu").green().bold().to_string(), String::new()];
+    let mut lines = vec![style("Menu").success().bold().to_string(), String::new()];
     for (i, item) in items.iter().enumerate() {
         let is_selected = i == selected_index;
 
         let cursor = widgets::cursor_marker(is_selected);
         let label = if is_selected {
             style(format!("{:<10}", item.label))
-                .cyan()
+                .accent()
                 .bold()
                 .to_string()
         } else {
             format!("{:<10}", item.label)
         };
         let key = if is_selected {
-            style(format!("{:>5}", item.key)).yellow().to_string()
+            style(format!("{:>5}", item.key)).warning().to_string()
         } else {
             format!("{:>5}", item.key)
         };
@@ -66,7 +67,7 @@ fn recent_card(item: Option<&RecentItem>, index: usize, now: DateTime<Utc>) -> V
     let fallback_key = char::from_digit((index + 1) as u32, 10).unwrap_or('?');
     match item {
         Some(item) => {
-            let title = format!("{} {}", style(item.key).yellow().bold(), item.label);
+            let title = format!("{} {}", style(item.key).warning().bold(), item.label);
             let body = vec![style(format!(
                 "◷ {}  ⎇ {}  #{}  ● {}",
                 widgets::relative_time(item.updated_at, now),
@@ -91,7 +92,7 @@ fn recent_card(item: Option<&RecentItem>, index: usize, now: DateTime<Utc>) -> V
 /// The height is fixed: a heading plus three compact cards. Keeping the section
 /// height stable means loading or clearing recents never shifts the mascot row.
 fn recent_lines(items: &[RecentItem], now: DateTime<Utc>) -> Vec<String> {
-    let mut lines = vec![style("Recent").green().bold().to_string()];
+    let mut lines = vec![style("Recent").success().bold().to_string()];
     for i in 0..3 {
         lines.extend(recent_card(items.get(i), i, now));
     }
@@ -154,7 +155,7 @@ fn notice_lines(width: usize, notice: Option<&str>) -> Vec<String> {
         return vec![String::new()];
     };
     let padding = " ".repeat(widgets::centered_padding(width, notice.chars().count()));
-    vec![format!("{padding}{}", style(notice).yellow())]
+    vec![format!("{padding}{}", style(notice).warning())]
 }
 
 /// Builds the status footer shown at the bottom of the welcome screen.

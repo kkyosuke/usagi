@@ -17,6 +17,18 @@ fn render_frame_combines_all_sections_at_full_height() {
 }
 
 #[test]
+fn render_frame_overlays_tab_rename_modal() {
+    let mut state = state_with(vec![worktree(Some("main"), false, BranchStatus::Local)]);
+    state.open_tab_menu(PathBuf::from("/repo/wt"), 0, "agent", 10, 3);
+    assert!(state.begin_tab_rename_from_menu().is_some());
+    let frame = render_frame(24, 100, &state);
+    let text = stripped(&frame);
+    assert!(text.contains("Rename tab"));
+    assert!(text.contains("label:"));
+    assert!(text.contains("agent"));
+}
+
+#[test]
 fn mascot_hit_rect_covers_where_the_rabbit_is_drawn() {
     let state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
     let frame = render_frame(24, 80, &state);

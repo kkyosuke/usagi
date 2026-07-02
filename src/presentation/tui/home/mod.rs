@@ -31,7 +31,10 @@ use crate::presentation::tui::io::term_reader::TermKeyReader;
 
 pub use event::Outcome;
 
-use state::{HomeState, LogLine, PaneExit, ResumeLevel, SessionOutcome, SessionReorder, ROOT_NAME};
+use state::{
+    HomeState, LogLine, PaneExit, ResumeLevel, SessionOutcome, SessionReorder, SurfaceOwner,
+    ROOT_NAME,
+};
 
 /// Refresh the workspace's session state from git (best-effort) and return the
 /// sessions to show. `sync` rewrites each session worktree's status; for a
@@ -296,9 +299,15 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
         move || crate::usecase::session::existing_branch_names(&branches_root);
 
     // Renaming a session's sidebar label persists the new display name to
-    // state.json and re-reads the sessions so the pane reflects it. The branch /
-    // identity is untouched, so the renamed session keeps its row: `select` holds
-    // its name to keep the cursor on it after the list rebuilds.
+    // state.json and re-reads the recorded sessions so the pane reflects it. The
+    // branch / identity is untouched, so the renamed session keeps its row:
+    // `select` holds its name to keep the cursor on it after the list rebuilds.
+    //
+    // The re-read uses `recorded_sessions` (a plain state.json read), not
+    // `reload_sessions`: a rename changes only state.json metadata and never git,
+    // so the last-synced worktree status already on disk stays valid — running a
+    // git fan-out here would just block the UI thread for a label edit. The
+    // background monitor keeps the badges live.
     //
     // Unlike create / remove this stays synchronous (no git work to block on),
     // but it still load-modify-saves `state.json`, so it takes the same op-lock
@@ -317,7 +326,7 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
                     "Renamed \"{name}\" to \"{}\" 🏷",
                     stored.as_deref().unwrap_or(name)
                 )),
-                sessions: reload_sessions(root),
+                sessions: crate::usecase::workspace_state::recorded_sessions(root),
                 select: Some(name.to_string()),
                 root_note: None,
             },
@@ -338,6 +347,8 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
     // synchronous (no git work) but still load-modify-saves `state.json`, so it
     // takes the same op-lock to serialise against the background create / remove
     // workers. `select` keeps the cursor on the edited session after the rebuild.
+    // The re-read is git-free (`recorded_sessions`): a note touches only
+    // state.json, so there is nothing for a git sync to refresh here.
     let note_lock = op_lock.clone();
     let mut set_note = |root: &Path, name: &str, note: &str| {
         let _guard = lock_session_ops(&note_lock);
@@ -353,7 +364,7 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
                     Some(_) => format!("Saved note for \"{name}\" 📝"),
                     None => format!("Cleared note for \"{name}\" 📝"),
                 }),
-                sessions: reload_sessions(root),
+                sessions: crate::usecase::workspace_state::recorded_sessions(root),
                 // The root row is not selectable by session name; the session path
                 // keeps the cursor on the session it edited.
                 select: (!is_root).then(|| name.to_string()),
@@ -371,10 +382,13 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
     };
 
     // Reordering a session (`K` / `J` in 切替) swaps it with its neighbour in
-    // state.json and re-reads the sessions so the pane reflects the new order.
-    // Like rename / note it stays synchronous (no git work) but still
+    // state.json and re-reads the recorded sessions so the pane reflects the new
+    // order. Like rename / note it stays synchronous (no git work) but still
     // load-modify-saves state.json, so it takes the same op-lock to serialise
-    // against the background create / remove workers.
+    // against the background create / remove workers. The re-read is git-free
+    // (`recorded_sessions`): reordering only rewrites state.json's session order,
+    // so a git fan-out on the UI thread would be pure latency — pressing `K`/`J`
+    // must not stall behind a worktree status pass.
     let reorder_root = workspace.path.clone();
     let reorder_lock = op_lock.clone();
     let mut reorder_session = |name: &str, up: bool| {
@@ -383,7 +397,7 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
             // A successful move re-reads the (now reordered) sessions; if the
             // re-read somehow yields nothing, treat it as no change rather than
             // blanking the pane.
-            Ok(true) => match reload_sessions(&reorder_root) {
+            Ok(true) => match crate::usecase::workspace_state::recorded_sessions(&reorder_root) {
                 Some(sessions) => SessionReorder::Moved(sessions),
                 None => SessionReorder::Stationary,
             },
@@ -512,7 +526,10 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
     let remove_workers = workers.clone();
     // `root` is the workspace the targeted session lives in (the cursor's group in
     // 統合/unite mode), resolved by the handler before dispatch.
-    let mut dispatch_remove = move |root: &Path, name: &str, force: bool| {
+    let mut dispatch_remove = move |root: &Path,
+                                    name: &str,
+                                    force: bool,
+                                    focus: Option<tasks::AutoFocus>| {
         let id = remove_tasks.begin(tasks::TaskKind::RemoveSession, name);
         let handle = remove_tasks.clone();
         let root = root.to_path_buf();
@@ -522,7 +539,7 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
         let worker = std::thread::spawn(move || {
             complete_or_record_panic(&handle, id, tasks::TaskKind::RemoveSession, &name, || {
                 let _guard = lock_session_ops(&lock);
-                run_remove(&root, &name, force, agent.as_ref())
+                run_remove(&root, &name, force, agent.as_ref(), focus)
             });
         });
         track_worker(&remove_workers, worker);
@@ -660,6 +677,17 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
             };
             let initial = Some(spawn_command.as_str());
             let later_initial = Some(plain_command.as_str());
+            // Resolve workspace-scoped secret env only when this request will
+            // actually spawn a fresh shell. Re-attaching to an existing pane
+            // keeps the environment it was originally launched with.
+            let will_spawn = (new_pane && !reuse_agent) || (!new_pane && !pool.has_live_pane(dir));
+            let pane_env = if will_spawn {
+                crate::infrastructure::env_resolver::resolve_workspace_env(
+                    &crate::usecase::session::workspace_root(dir),
+                )
+            } else {
+                std::collections::BTreeMap::new()
+            };
             // Capture every failure of this launch — the initial spawn (`add_pane`
             // / `enter`) and anything during the pane loop — in one `result`, so a
             // launch that never gets a live pane is cleaned up and logged just like a
@@ -678,16 +706,37 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
                     } else {
                         terminal::tabs::PaneKind::Terminal
                     };
-                    pool.add_pane(term, dir, kind, initial, cli, &label)?;
+                    pool.add_pane(
+                        term,
+                        dir,
+                        kind,
+                        terminal::pool::PaneLaunch {
+                            agent_command: initial,
+                            cli,
+                            label: &label,
+                            env: &pane_env,
+                        },
+                    )?;
                 } else {
-                    pool.enter(term, dir, run_agent, initial, cli, &label)?;
+                    pool.enter(
+                        term,
+                        dir,
+                        run_agent,
+                        terminal::pool::PaneLaunch {
+                            agent_command: initial,
+                            cli,
+                            label: &label,
+                            env: &pane_env,
+                        },
+                    )?;
                 }
                 handle.set_attached(Some(dir.to_path_buf()));
                 loop {
                     // Publish the tab strip for this session before driving the pane,
                     // so it reflects any add / close / switch from the last step.
                     let (labels, active_tab) = pool.tabs(dir);
-                    home.set_terminal_tabs(labels, active_tab);
+                    home.surface_writer(SurfaceOwner::Attached)
+                        .set_tabs(labels, active_tab);
                     let pty = match pool.active_pty(dir) {
                         Some(pty) => pty,
                         // No live pane (every one exited): drop back to 在席.
@@ -736,13 +785,20 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
                         // without leaving 没入).
                         terminal::pane::PaneStep::NewAgentTab => {
                             if !pool.activate_agent(dir) {
+                                let add_env =
+                                    crate::infrastructure::env_resolver::resolve_workspace_env(
+                                        &crate::usecase::session::workspace_root(dir),
+                                    );
                                 pool.add_pane(
                                     term,
                                     dir,
                                     terminal::tabs::PaneKind::Agent,
-                                    later_initial,
-                                    cli,
-                                    &label,
+                                    terminal::pool::PaneLaunch {
+                                        agent_command: later_initial,
+                                        cli,
+                                        label: &label,
+                                        env: &add_env,
+                                    },
                                 )?;
                             }
                             // Jumped to / opened the agent pane: the next loop pass
@@ -879,6 +935,42 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
             });
         pool.borrow_mut().close_active(dir, &label);
     };
+
+    let mut tab_action =
+        |home: &mut HomeState, dir: &Path, tab: usize, action: event::TabMenuAction| {
+            let label = home
+                .list()
+                .worktrees()
+                .iter()
+                .find(|w| w.path.as_path() == dir)
+                .map(state::worktree_name)
+                .map(str::to_string)
+                .unwrap_or_else(|| {
+                    dir.file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| dir.display().to_string())
+                });
+            let mut pool = pool.borrow_mut();
+            match action {
+                event::TabMenuAction::Move(swap) => {
+                    pool.move_tab_by(dir, tab, swap);
+                }
+                event::TabMenuAction::Rename(name) => {
+                    pool.rename_tab(dir, tab, &name);
+                }
+                event::TabMenuAction::Close => {
+                    pool.close_tab(dir, tab, &label);
+                }
+            }
+            if restore_panes_enabled {
+                match pool.snapshot_open_panes_for(dir) {
+                    Some((active, panes)) => {
+                        let _ = crate::infrastructure::open_panes_store::save(dir, active, &panes);
+                    }
+                    None => crate::infrastructure::open_panes_store::clear(dir),
+                }
+            }
+        };
 
     // Opening `config` hands off to the settings screen in its workspace scope,
     // editing only this workspace's local overrides
@@ -1028,6 +1120,7 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
         preview: &mut preview,
         tab_op: &mut tab_op,
         close_tab: &mut close_tab,
+        tab_action: &mut tab_action,
         save_resume: &mut save_resume,
         save_last_active: &mut save_last_active,
     };
@@ -1096,15 +1189,21 @@ fn restore_open_panes(
         let Some(snapshot) = open_panes_store::load(&dir) else {
             continue;
         };
+        let pane_env = crate::infrastructure::env_resolver::resolve_workspace_env(
+            &crate::usecase::session::workspace_root(&dir),
+        );
         for pane in &snapshot.panes {
             let spawned = match pane.kind {
                 StoredPaneKind::Terminal => pool.borrow_mut().add_pane(
                     term,
                     &dir,
                     PaneKind::Terminal,
-                    None,
-                    default_cli,
-                    &label,
+                    terminal::pool::PaneLaunch {
+                        agent_command: None,
+                        cli: default_cli,
+                        label: &label,
+                        env: &pane_env,
+                    },
                 ),
                 StoredPaneKind::Agent => {
                     let cli = pane.cli.unwrap_or(default_cli);
@@ -1117,14 +1216,24 @@ fn restore_open_panes(
                         term,
                         &dir,
                         PaneKind::Agent,
-                        Some(&command),
-                        cli,
-                        &label,
+                        terminal::pool::PaneLaunch {
+                            agent_command: Some(&command),
+                            cli,
+                            label: &label,
+                            env: &pane_env,
+                        },
                     )
                 }
             };
             // A failed spawn just skips that pane; the rest still restore.
-            let _ = spawned;
+            if spawned.is_ok() {
+                if let Some(label) = pane.label.as_deref() {
+                    let (labels, _) = pool.borrow().tabs(&dir);
+                    if let Some(index) = labels.len().checked_sub(1) {
+                        let _ = pool.borrow_mut().rename_tab(&dir, index, label);
+                    }
+                }
+            }
         }
         // Re-select the tab that was active when the snapshot was taken.
         pool.borrow_mut().set_active(&dir, snapshot.active);
@@ -1183,6 +1292,7 @@ fn run_remove(
     name: &str,
     force: bool,
     agent: &dyn crate::domain::agent::Agent,
+    focus: Option<tasks::AutoFocus>,
 ) -> (bool, tasks::Completion) {
     match crate::usecase::session::remove(root, name, force, agent) {
         Ok(outcome) if outcome.removed => (
@@ -1196,7 +1306,7 @@ fn run_remove(
                         .join(crate::infrastructure::repo_paths::SESSIONS_DIR)
                         .join(name),
                 ),
-                focus: None,
+                focus,
             },
         ),
         Ok(outcome) => {

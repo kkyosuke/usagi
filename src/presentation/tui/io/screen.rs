@@ -29,12 +29,12 @@ pub struct ScrollEvent {
     pub row: u16,
 }
 
-/// A left-button mouse click, decoded from a terminal mouse report.
+/// A mouse click, decoded from a terminal mouse report.
 ///
-/// The management screens act on one only to make the sidebar mascot react: the
-/// home loop hit-tests the click against the resting rabbit and, if it lands,
-/// plays a playful reaction (see `home::event`). Every other click is dropped, so
-/// nothing else on the TUI is click-driven.
+/// Management screens mostly act on left clicks (sidebar/session selection,
+/// links, tab chips), while right clicks open context menus such as the home
+/// tab menu. Keeping the coordinates in one small DTO lets tests synthesize both
+/// paths without a real terminal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ClickEvent {
     /// The 0-based column the click was reported at.
@@ -50,6 +50,7 @@ pub enum Input {
     Key(Key),
     Scroll(ScrollEvent),
     Click(ClickEvent),
+    RightClick(ClickEvent),
     /// The pointer moved with no button held — its current cell (the same
     /// `(col, row)` shape as a [`ClickEvent`]). The home loop uses it to show the
     /// sidebar's PR hover popup; every key-only screen drops it.
@@ -235,6 +236,11 @@ impl AlternateScreenGuard {
 
 impl Drop for AlternateScreenGuard {
     fn drop(&mut self) {
+        // Backstop for the embedded terminal's OSC 22 mouse pointer shape. The
+        // pane restores the default when it returns to the home UI, but a panic
+        // or early process exit could bypass that boundary; never leave the
+        // user's shell with usagi's text-caret / hand pointer.
+        let _ = self.term.write_str("\x1b]22;\x1b\\");
         let _ = self.term.write_str(DISABLE_MOUSE);
         let _ = self.term.write_str(LEAVE_ALT_SCREEN);
         let _ = self.term.show_cursor();

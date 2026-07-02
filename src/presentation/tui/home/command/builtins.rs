@@ -7,6 +7,7 @@ use super::{
     Command, CommandContext, CommandInfo, CommandResult, CommandScope, CompletionContext, Effect,
     LogLine,
 };
+use crate::presentation::theme::Palette;
 use crate::presentation::tui::widgets;
 use crate::usecase::issue::{
     annotate_all, dependency_tree, gantt, list_line, stats_line, IssueStats, ListedIssue,
@@ -683,7 +684,7 @@ fn style_graph_line(text: String) -> String {
     if text.contains('✓') {
         style(text).dim().to_string()
     } else if text.contains('⊘') {
-        style(text).red().to_string()
+        style(text).danger().to_string()
     } else {
         text
     }
@@ -823,6 +824,35 @@ impl Command for ConfigCommand {
         CommandResult {
             lines: Vec::new(),
             effect: Effect::OpenConfig,
+        }
+    }
+}
+
+/// `env`: edit this workspace's 1Password-backed environment bindings
+/// (`NAME=op://vault/item/field`), resolved and injected into panes launched in
+/// this workspace. It opens an editor as an overlay over the command palette
+/// ([`Effect::OpenEnvEditor`]) — staying in the Overview and returning to it on
+/// save / cancel — rather than handing off to the full Config screen (the same
+/// bindings are also editable from `config` → Env Vars).
+pub(super) struct EnvCommand;
+
+impl Command for EnvCommand {
+    fn name(&self) -> &'static str {
+        "env"
+    }
+
+    fn description(&self) -> &'static str {
+        "Edit this workspace's 1Password-backed environment variables"
+    }
+
+    fn scope(&self) -> CommandScope {
+        CommandScope::Workspace
+    }
+
+    fn run(&self, _args: &str, _ctx: &CommandContext) -> CommandResult {
+        CommandResult {
+            lines: Vec::new(),
+            effect: Effect::OpenEnvEditor,
         }
     }
 }

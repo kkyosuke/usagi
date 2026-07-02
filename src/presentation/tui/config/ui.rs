@@ -1,3 +1,4 @@
+use crate::presentation::theme::Palette;
 use console::{style, Style};
 
 use crate::presentation::tui::welcome;
@@ -5,7 +6,9 @@ use crate::presentation::tui::widgets;
 
 use crate::domain::settings::SkillFeature;
 
-use super::state::{Config, Field, InstallModal, LocalField, ModelModal, SetupCommandsModal};
+use super::state::{
+    Config, EnvModal, Field, InstallModal, LocalField, ModelModal, SetupCommandsModal,
+};
 
 /// The label of the Save button row.
 const SAVE_LABEL: &str = "[ Save ]";
@@ -16,11 +19,11 @@ const SAVE_LABEL: &str = "[ Save ]";
 /// the terminal and clips any line that overruns it on a narrow screen.
 const MODAL_INNER_WIDTH: usize = 42;
 
-/// How many command rows the setup-command editor shows at once. The editor box
-/// always reserves exactly this many rows (padding with blanks and scrolling the
-/// window to keep the caret visible) so adding a line never grows the box or
-/// shifts it on screen.
-const SETUP_MODAL_VISIBLE_LINES: usize = 8;
+/// How many entry rows the text-editor modals (setup commands, env vars) show at
+/// once. The editor box always reserves exactly this many rows (padding with
+/// blanks and scrolling the window to keep the caret visible) so adding a line
+/// never grows the box or shifts it on screen.
+const EDITOR_MODAL_VISIBLE_LINES: usize = 8;
 
 /// Builds the centred mascot, title, and subtitle block.
 ///
@@ -62,16 +65,16 @@ fn setting_row(
 
     // A dot to the left of the label flags an edit that has not been saved yet.
     let mark = if changed {
-        style("●").yellow().bold().to_string()
+        style("●").warning().bold().to_string()
     } else {
         " ".to_string()
     };
 
     let padded = format!("{label:<label_width$}");
     let label = if selected {
-        style(padded).cyan().bold().to_string()
+        style(padded).accent().bold().to_string()
     } else {
-        style(padded).cyan().to_string()
+        style(padded).accent().to_string()
     };
 
     format!("{block_pad}{cursor} {mark} {label}  {value}")
@@ -83,9 +86,9 @@ fn setting_row(
 fn action_label(text: &str, selected: bool) -> String {
     let styled = style(text.to_string());
     if selected {
-        styled.green().bold()
+        styled.success().bold()
     } else {
-        styled.green()
+        styled.success()
     }
     .to_string()
 }
@@ -133,7 +136,7 @@ fn save_button_line(block_pad: &str, dirty: bool, selected: bool) -> String {
     let marker = widgets::cursor_marker(selected);
 
     let button = if dirty {
-        style(SAVE_LABEL).green().bold().to_string()
+        style(SAVE_LABEL).success().bold().to_string()
     } else {
         style(SAVE_LABEL).dim().to_string()
     };
@@ -150,7 +153,7 @@ fn save_button_line(block_pad: &str, dirty: bool, selected: bool) -> String {
 /// when absent) — so showing or clearing a notice never shifts the layout.
 fn notice_lines(block_pad: &str, notice: Option<&str>) -> Vec<String> {
     let slot = match notice {
-        Some(notice) => format!("{block_pad}{}", style(notice).yellow()),
+        Some(notice) => format!("{block_pad}{}", style(notice).warning()),
         None => String::new(),
     };
     vec![String::new(), slot]
@@ -201,7 +204,7 @@ fn model_modal_frame(raw_height: usize, raw_width: usize, modal: &ModelModal) ->
         let cursor = if row.selected { ">" } else { " " };
         let line = format!("{cursor} {:<20} {marker}", row.model);
         body.push(if row.selected {
-            style(line).cyan().bold().to_string()
+            style(line).accent().bold().to_string()
         } else {
             style(line).dim().to_string()
         });
@@ -229,13 +232,13 @@ fn setup_modal_frame(
     let lines = modal.lines();
     // Scroll a fixed-size window so the caret row stays visible without changing
     // the number of rendered rows (and thus the box height / position).
-    let offset = cursor_row.saturating_sub(SETUP_MODAL_VISIBLE_LINES - 1);
+    let offset = cursor_row.saturating_sub(EDITOR_MODAL_VISIBLE_LINES - 1);
     let mut body = vec![
         "新規セッション作成後に実行するコマンド".to_string(),
         "1 行につき 1 コマンド（session root で実行）".to_string(),
         String::new(),
     ];
-    for win in 0..SETUP_MODAL_VISIBLE_LINES {
+    for win in 0..EDITOR_MODAL_VISIBLE_LINES {
         let i = offset + win;
         let Some(line) = lines.get(i) else {
             // Pad the unused rows so the box keeps a constant height.
@@ -266,6 +269,51 @@ fn setup_modal_frame(
     )
 }
 
+/// Builds the workspace-env editor. Each visible line maps to one
+/// `NAME=op://vault/item/field` binding; saving the modal keeps only the valid
+/// ones (a name plus a non-empty reference) before the settings are persisted.
+fn env_modal_frame(raw_height: usize, raw_width: usize, modal: &EnvModal) -> Vec<String> {
+    let (cursor_row, cursor_col) = modal.cursor();
+    let lines = modal.lines();
+    // Scroll a fixed-size window so the caret row stays visible without changing
+    // the number of rendered rows (and thus the box height / position).
+    let offset = cursor_row.saturating_sub(EDITOR_MODAL_VISIBLE_LINES - 1);
+    let mut body = vec![
+        "1Password から解決する環境変数".to_string(),
+        "NAME=op://vault/item/field（1 行 1 件）".to_string(),
+        String::new(),
+    ];
+    for win in 0..EDITOR_MODAL_VISIBLE_LINES {
+        let i = offset + win;
+        let Some(line) = lines.get(i) else {
+            // Pad the unused rows so the box keeps a constant height.
+            body.push(String::new());
+            continue;
+        };
+        let number = format!("{:>2} ", i + 1);
+        if i == cursor_row {
+            let (before, after) = line.split_at(cursor_col);
+            body.push(format!(
+                "{number}{}",
+                widgets::block_caret(before, after, &Style::new())
+            ));
+        } else if line.is_empty() {
+            body.push(format!("{number}{}", style("·").dim()));
+        } else {
+            body.push(format!("{number}{line}"));
+        }
+    }
+    body.push(String::new());
+    body.push(style("Ctrl-S 保存  Enter 改行  Esc 取消").dim().to_string());
+    widgets::render_modal(
+        raw_height,
+        raw_width,
+        "Env Vars",
+        MODAL_INNER_WIDTH.max(56),
+        &body,
+    )
+}
+
 /// Builds the full configuration frame for a raw terminal size.
 pub fn render_frame(
     raw_height: usize,
@@ -283,6 +331,9 @@ pub fn render_frame(
     }
     if let Some(modal) = config.setup_modal() {
         return setup_modal_frame(raw_height, raw_width, modal);
+    }
+    if let Some(modal) = config.env_modal() {
+        return env_modal_frame(raw_height, raw_width, modal);
     }
 
     let (height, width) = widgets::normalize_size(raw_height, raw_width);
@@ -704,5 +755,75 @@ mod tests {
         let joined = render_frame(40, 80, &config, None).join("\n");
         assert!(joined.contains('·'));
         assert!(joined.contains("cmd"));
+    }
+
+    /// A workspace-scoped config focused on the Env Vars row with the editor open
+    /// and `bindings` (`NAME`, `reference`) already populated.
+    fn config_with_open_env_modal(bindings: &[(&str, &str)]) -> Config {
+        use crate::domain::settings::LocalSettings;
+        let local = LocalSettings {
+            env: bindings
+                .iter()
+                .map(|(n, r)| (n.to_string(), r.to_string()))
+                .collect(),
+            ..Default::default()
+        };
+        let mut config = Config::workspace(Settings::default(), local, Vec::new());
+        while config.selected_local_field() != Some(LocalField::EnvVars) {
+            config.move_down();
+        }
+        config.open_env_modal();
+        config
+    }
+
+    #[test]
+    fn env_modal_keeps_a_constant_height_as_lines_are_added() {
+        let empty = render_frame(40, 80, &config_with_open_env_modal(&[]), None);
+        let few = render_frame(
+            40,
+            80,
+            &config_with_open_env_modal(&[("A", "op://v/i/a"), ("B", "op://v/i/b")]),
+            None,
+        );
+        // Distinct names so the BTreeMap keeps every entry.
+        let many: Vec<(&str, &str)> = ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L"]
+            .iter()
+            .map(|n| (*n, "op://v/i/x"))
+            .collect();
+        let full = render_frame(40, 80, &config_with_open_env_modal(&many), None);
+        assert_eq!(empty.len(), few.len());
+        assert_eq!(empty.len(), full.len());
+        assert_eq!(box_row_count(&empty), box_row_count(&few));
+        assert_eq!(box_row_count(&empty), box_row_count(&full));
+    }
+
+    #[test]
+    fn env_modal_scrolls_to_keep_the_caret_row_visible() {
+        // The editor opens with the caret at the end, so with more bindings than
+        // the window the last one stays rendered while the first scrolls out.
+        let bindings: Vec<(&str, &str)> =
+            ["AA", "BB", "CC", "DD", "EE", "FF", "GG", "HH", "II", "JJ"]
+                .iter()
+                .map(|n| (*n, "op://v/i/x"))
+                .collect();
+        let config = config_with_open_env_modal(&bindings);
+        let joined = render_frame(40, 80, &config, None).join("\n");
+        assert!(joined.contains("JJ=op://v/i/x"));
+        assert!(!joined.contains("AA=op://v/i/x"));
+        assert!(joined.contains("Env Vars"));
+    }
+
+    #[test]
+    fn env_modal_renders_empty_non_cursor_rows_with_placeholder() {
+        // An empty binding line that is NOT the cursor row renders with the "·"
+        // placeholder. Opening on an empty buffer gives one blank row (the cursor
+        // row); a newline then leaves row 0 empty and non-cursor (caret moves to
+        // row 1), exercising the else-if branch.
+        let mut config = config_with_open_env_modal(&[]);
+        config.env_modal_newline();
+        let joined = render_frame(40, 80, &config, None).join("\n");
+        assert!(joined.contains("Env Vars"));
+        assert!(joined.contains("op://vault/item/field"));
+        assert!(joined.contains('·'));
     }
 }

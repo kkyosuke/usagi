@@ -23,13 +23,16 @@ use crate::presentation::tui::widgets;
 use crate::presentation::tui::widgets::{clip_to_width, clip_to_width_cow};
 
 use chrome::{
-    command_palette_body, footer_line, input_line, mode_ladder, quit_confirm_frame,
-    remove_modal_body, switch_create_rows, switch_rename_rows, task_status_line, text_modal_body,
-    title_bar, update_confirm_frame, PALETTE_INNER, REMOVE_MODAL_INNER, TEXT_MODAL_INNER,
+    command_palette_body, env_editor_body, footer_line, input_line, mode_ladder,
+    quit_confirm_frame, remove_modal_body, switch_create_rows, tab_menu_box, tab_rename_body,
+    task_status_line, text_modal_body, title_bar, update_confirm_frame, waiting_notice,
+    ENV_MODAL_INNER, PALETTE_INNER, REMOVE_MODAL_INNER, TEXT_MODAL_INNER,
 };
 use panes::{group_inline_insert_line, left_pane, right_pane_contents};
 // The right-pane tab strips map clicks to the tab under them through these.
-pub(super) use panes::{attached_tab_at, attached_tab_hit, focus_tab_at};
+pub(super) use panes::{
+    attached_tab_at, attached_tab_hit, focus_tab_at, focus_tab_hit, switch_tab_at, switch_tab_hit,
+};
 // …a click on a sidebar session's PR badge to that session (to pin its PR popup).
 pub(super) use panes::sidebar_pr_badge_at;
 // …and a click anywhere to the pinned PR popup: open a `#<number>`, or dismiss it.
@@ -395,9 +398,9 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
     // there while browsing.
 
     let (height, width) = widgets::normalize_size(raw_height, raw_width);
-    // The left sidebar honours the `Ctrl-B` toggle in every mode — 切替 (Switch)
-    // included, so the picker works collapsed to the rail (the cursor `>` and the
-    // dimming still render there). 切替's inline create / rename name input needs
+    // The left sidebar honours the `Ctrl-B` toggle on every usagi surface — 切替
+    // (Switch) included, so the picker works collapsed to the rail (the cursor `>`
+    // and the dimming still render there). 切替's inline create / rename name needs
     // room: at full width it rides the left pane inline (below), but collapsed to
     // the rail there is none, so it moves to the right pane instead (see
     // [`right_pane_contents`]). The pool sizes the 切替 preview to this same state,
@@ -473,16 +476,28 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
         widgets::overlay_at(&mut lines, width, top, left, &popup);
     }
 
+    if let Some(menu) = state.tab_menu() {
+        widgets::overlay_at(
+            &mut lines,
+            width,
+            menu.row() as usize,
+            menu.col() as usize,
+            &tab_menu_box(menu),
+        );
+    }
+
     lines.extend(input_lines);
     lines.push(footer_line(width, state));
 
     // Overlay the top-right corner, in priority order: a momentary blocking
     // action (terminal / agent launch) shows the loading rabbit; otherwise any
     // in-flight background session work (create / remove) shows the task status
-    // line. The loading rabbit anchors to the top of the right pane (the rows
-    // below the title bar and mode ladder); the task status rides the header rows.
-    // The "update available" notice is no longer a corner overlay — the sidebar
-    // mascot speaks it (above) instead.
+    // line; otherwise a `◆ N waiting` notice appears while at least one session
+    // is waiting for the user's input. The loading rabbit anchors to the top of
+    // the right pane (the rows below the title bar and mode ladder); the task
+    // status and waiting notice ride the header rows. The "update available"
+    // notice is no longer a corner overlay — the sidebar mascot speaks it
+    // (above) instead.
     if let Some(loading) = state.loading() {
         // The transient launch indicator is deliberate and short-lived, so it
         // takes the corner even over a live pane.
@@ -505,6 +520,13 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
             width,
             &task_status_line(state.tasks(), width),
         );
+    } else {
+        widgets::overlay_top_right(
+            &mut lines,
+            0,
+            width,
+            &waiting_notice(state.waiting_paths().len()),
+        );
     }
 
     // Float the `:` command palette as a centred box over the assembled frame, so
@@ -516,6 +538,15 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
         let inner = widgets::modal_inner_width(width, PALETTE_INNER);
         let body = command_palette_body(state, inner);
         widgets::overlay_modal(&mut lines, width, "Command", inner, &body);
+    }
+
+    // Float the workspace-env editor (`env`) over the palette, so editing the
+    // 1Password bindings stays in the Overview. Its body is a fixed height, so the
+    // box never resizes as bindings are added (no layout shift).
+    if let Some(editor) = state.env_editor() {
+        let inner = widgets::modal_inner_width(width, ENV_MODAL_INNER);
+        let body = env_editor_body(editor);
+        widgets::overlay_modal(&mut lines, width, "Env Vars", inner, &body);
     }
 
     // Float the text modal (a text-dumping command's output) as a centred box
@@ -533,6 +564,13 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
         let inner = widgets::modal_inner_width(width, REMOVE_MODAL_INNER);
         let body = remove_modal_body(modal, inner);
         widgets::overlay_modal(&mut lines, width, "Remove sessions", inner, &body);
+    }
+
+    if let Some(input) = state.tab_rename() {
+        const TAB_RENAME_INNER: usize = 44;
+        let inner = widgets::modal_inner_width(width, TAB_RENAME_INNER);
+        let body = tab_rename_body(input.value(), input.cursor(), inner);
+        widgets::overlay_modal(&mut lines, width, "Rename tab", inner, &body);
     }
 
     lines
@@ -572,6 +610,11 @@ fn left_column(
         state.mode() == Mode::Switch,
         sidebar,
         state.now(),
+        // While renaming, the selected session's name line is drawn as the inline
+        // editable label in place (full sidebar only; the rail uses the right pane).
+        state
+            .rename()
+            .map(|rename| (rename.value(), rename.cursor())),
     );
     if sidebar == Sidebar::Full {
         // While naming a new session in 切替, insert the inline create row(s) into
@@ -580,19 +623,23 @@ fn left_column(
         // the "+ new" input attached to the workspace that `c` targets, instead
         // of drifting to another workspace or to the whole column's foot.
         if let Some(create) = state.create() {
+            // `left_pane` always draws the persistent "+ new session" affordance at
+            // the list foot; while the input is open it *becomes* that input, so
+            // drop the affordance row first and let the input take its slot.
+            let persistent = group_inline_insert_line(
+                state.list(),
+                state.list().group_count().saturating_sub(1),
+            );
+            if persistent < left.len() {
+                left.remove(persistent);
+            }
             let rows = switch_create_rows(create.value(), create.cursor(), create.error(), left_w);
             place_create_rows(&mut left, state.list(), rows);
             left.truncate(body_rows);
         }
-        // While renaming a session's sidebar label in 切替, append the inline rename
-        // row (trimmed back if it would overflow).
-        if let Some(rename) = state.rename() {
-            for row in switch_rename_rows(rename.target(), rename.value(), rename.cursor(), left_w)
-            {
-                left.push(row);
-            }
-            left.truncate(body_rows);
-        }
+        // The inline rename is not spliced here: unlike create (a *new* row), it
+        // edits the selected session's own name line, which `left_pane` renders in
+        // place from the `rename` argument above.
     }
     left
 }
@@ -618,7 +665,13 @@ fn splice_rows(column: &mut Vec<String>, line: usize, rows: Vec<String>) {
 /// line (no CLS). The last group has no lower workspace to protect, so it keeps
 /// the single-workspace behaviour and appends the input after that group.
 fn place_create_rows(column: &mut Vec<String>, list: &WorktreeList, rows: Vec<String>) {
-    let group = list.selected_group();
+    // The create row lives at the foot of the last group, so a cursor resting on
+    // it targets that group; every other cursor targets its own group.
+    let group = if list.create_row_selected() {
+        list.group_count().saturating_sub(1)
+    } else {
+        list.selected_group()
+    };
     let line = group_inline_insert_line(list, group);
     if group + 1 < list.group_count() {
         replace_rows(column, line, rows);

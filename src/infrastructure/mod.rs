@@ -2,6 +2,7 @@
 pub mod agent;
 pub mod agent_prompt_store;
 pub mod agent_state_store;
+pub mod env_resolver;
 pub mod error_log;
 pub mod git;
 pub mod gitignore;

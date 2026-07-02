@@ -111,6 +111,8 @@ src/
 │
 └── presentation/               # CLI ルーティング・TUI・MCP
     ├── cli/                    # サブコマンド（init / hop / status / clean / config / doctor / feature（Agent CLI の機能サポート表）/ icon / run / issue / memory / op / mcp / llm_mcp / op_mcp / agent_phase（隠し・フック用））
+    ├── color.rs                # NO_COLOR / CLICOLOR_FORCE から terminal colour の有効/無効を判定
+    ├── theme.rs                # CLI/TUI の色セット（Palette トレイト + 固定 RGB/ANSI-256 値）の正本
     ├── mcp/                    # MCP サーバ（JSON-RPC 2.0 フレーミングを共有）
     │   ├── mod.rs              # 共有プロトコル（dispatch_line / stdio serve ループ / レスポンス整形 / parse_args・to_pretty / McpService）
     │   ├── usagi.rs            # 統合 usagi サーバ（UsagiMcpServer）。issue/memory サーバと session サーバを合成し公開

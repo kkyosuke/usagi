@@ -77,9 +77,10 @@ impl TaskKind {
     }
 }
 
-/// A successful create's request to automatically land in 在席 (Focus). The
-/// `interaction_epoch` is the user-input counter from the moment the create was
-/// dispatched; the event loop only honors it when no later input has arrived.
+/// A successful create/close's request to automatically land in 在席 (Focus).
+/// The `interaction_epoch` is the user-input counter from the moment the task
+/// was dispatched; the event loop only honors it when no later input has
+/// arrived.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AutoFocus {
     /// The branch/session name to focus after the refreshed list lands.
@@ -108,12 +109,12 @@ pub struct Completion {
     /// successful removal so a session later recreated at the same path starts
     /// fresh. `None` for creations and failures.
     pub evict: Option<PathBuf>,
-    /// The branch of a freshly created session to drop into 在席 (Focus) once the
-    /// refreshed list lands, plus the interaction epoch that must still be current.
-    /// Set only on a successful TUI-initiated create, so the user starts operating
-    /// the new session without navigating to it when they have waited for creation.
-    /// `None` for removals and failures (and, by construction, for MCP-driven
-    /// creates, which never build a [`Completion`]).
+    /// The branch to drop into 在席 (Focus) once the refreshed list lands, plus
+    /// the interaction epoch that must still be current. Set on successful
+    /// TUI-initiated creates and on successful `close` removals that have a
+    /// neighbouring session, so the user starts operating the intended session
+    /// without navigating to it when they have waited for the background work.
+    /// `None` for failures, bulk removals, and MCP-driven creates/removals.
     pub focus: Option<AutoFocus>,
 }
 

@@ -97,9 +97,11 @@ fn enter_switch_remembers_its_return_mode_and_moves_the_cursor() {
     assert_eq!(state.list().selected_index(), 1);
     state.switch_move_up();
     assert_eq!(state.list().selected_index(), 0);
-    // Up from the root wraps to the bottom (the last worktree row, 2).
+    // Up from the root wraps to the bottom — the persistent "+ new session" row
+    // (index 3, just past the two worktrees).
     state.switch_move_up();
-    assert_eq!(state.list().selected_index(), 2);
+    assert_eq!(state.list().selected_index(), 3);
+    assert!(state.list().create_row_selected());
 }
 
 #[test]

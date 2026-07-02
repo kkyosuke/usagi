@@ -3,10 +3,13 @@
 //! (with its command hints), and the session-removal / quit-confirmation
 //! modals. All functions take plain data and return styled lines.
 
+use crate::presentation::theme::Palette;
 use console::{style, Style};
 
 use super::super::command::{CommandHint, Hint};
-use super::super::state::{HomeState, Mode, RemoveModal, TextModal, WorktreeList};
+use super::super::state::{
+    EnvEditor, HomeState, Mode, RemoveModal, TabMenu, TextModal, WorktreeList,
+};
 use super::super::tasks::{TaskMark, TaskRow};
 use super::panes::log_line;
 use super::{
@@ -15,6 +18,12 @@ use super::{
 use crate::domain::settings::KeyScheme;
 use crate::domain::version::Version;
 use crate::presentation::tui::widgets;
+
+/// Prefix shared by the persistent "+ new session" row and the inline
+/// `+ new: ...` editor that replaces it: a one-cell gutter plus a following
+/// space. Keeping this explicit prevents the `+` from jumping horizontally when
+/// the row enters input mode.
+const CREATE_ROW_INDENT: &str = "  ";
 
 /// Minimum / maximum display width of the active-session-name field in the
 /// title bar. The field scales with the terminal (a quarter of its width) and
@@ -101,10 +110,10 @@ pub(super) fn task_status_line(rows: &[TaskRow], width: usize) -> Vec<String> {
     let (icon, icon_style) = match lead.mark {
         TaskMark::Running(frame) => (
             widgets::spinner_char(frame).to_string(),
-            Style::new().cyan().bold(),
+            Style::new().accent().bold(),
         ),
-        TaskMark::Done(true) => ("✓".to_string(), Style::new().green().bold()),
-        TaskMark::Done(false) => ("✗".to_string(), Style::new().red().bold()),
+        TaskMark::Done(true) => ("✓".to_string(), Style::new().success().bold()),
+        TaskMark::Done(false) => ("✗".to_string(), Style::new().danger().bold()),
     };
     // Scale the label field with the terminal, clamped so the block still tucks
     // into the blank gap beside the centred title / mode ladder. Constant for
@@ -134,6 +143,32 @@ pub(super) fn task_status_line(rows: &[TaskRow], width: usize) -> Vec<String> {
     vec![line1, line2]
 }
 
+/// The Nerd Font bell (`nf-fa-bell`) leading the top-right waiting notice — the
+/// familiar "notification" glyph, so an at-a-glance count of sessions paused for
+/// the user reads as an alert rather than blending into the per-session `◆`.
+const WAITING_ICON: char = '\u{f0f3}'; // nf-fa-bell — a session wants attention
+
+/// The top-right "you have sessions waiting" notice: a single fixed-shape row
+/// (`<bell> N waiting`) drawn in the sidebar's waiting colour (yellow-bold) so
+/// the header carries an at-a-glance count of how many sessions have paused for
+/// the user's input or a permission, even when those rows are scrolled out of
+/// the sidebar or the pane is collapsed to the rail. The count shares the
+/// per-session badge's hue, and leads with the Nerd Font bell
+/// ([`WAITING_ICON`]) so it reads as a notification.
+///
+/// Returns no lines when nothing is waiting (`count == 0`), so the caller falls
+/// back to whatever else wants the corner. Anchored to the header rows by
+/// [`overlay_top_right`](super::overlay_top_right) like the task status block,
+/// so it tucks into the blank right column beside the centred title and never
+/// collides with the right pane below.
+pub(super) fn waiting_notice(count: usize) -> Vec<String> {
+    if count == 0 {
+        return Vec::new();
+    }
+    let label = format!("{WAITING_ICON} {count} waiting");
+    vec![style(label).yellow().bold().to_string()]
+}
+
 /// The engagement-ladder indicator drawn just under the title bar: the three
 /// modes in order with the current one highlighted (cyan-bold) and the rest
 /// dimmed, so the screen always shows which step the keys act on. Centred for
@@ -148,7 +183,7 @@ pub(super) fn mode_ladder(width: usize, current: Mode) -> String {
         .iter()
         .map(|(mode, label)| {
             if *mode == current {
-                style(*label).cyan().bold().to_string()
+                style(*label).accent().bold().to_string()
             } else {
                 style(*label).dim().to_string()
             }
@@ -173,7 +208,7 @@ pub(super) fn command_hint_row(
     width: usize,
 ) -> String {
     let marker = if selected {
-        style("›").red().bold().to_string()
+        style("›").danger().bold().to_string()
     } else {
         " ".to_string()
     };
@@ -181,7 +216,7 @@ pub(super) fn command_hint_row(
     // continuation of what is in the input line.
     let split = typed_len.min(hint.name.len());
     let (head, tail) = hint.name.split_at(split);
-    let name = format!("{}{}", style(head).cyan().bold(), style(tail).cyan());
+    let name = format!("{}{}", style(head).accent().bold(), style(tail).accent());
     let name_col = pad_to_width(name, HINT_NAME_COL);
     let desc_budget = width.saturating_sub(HINT_INDENT + HINT_NAME_COL);
     let desc = style(clip_to_width(hint.description, desc_budget)).dim();
@@ -227,7 +262,7 @@ pub(super) fn hint_lines(state: &HomeState, width: usize) -> Vec<String> {
             let mut lines = vec![format!(
                 "  {} {}",
                 style("usage").dim(),
-                style(usage).cyan()
+                style(usage).accent()
             )];
             for example in examples.iter().take(HINT_MAX) {
                 let text = clip_to_width(example, width.saturating_sub(HINT_INDENT + 6));
@@ -245,6 +280,11 @@ pub(super) fn hint_lines(state: &HomeState, width: usize) -> Vec<String> {
 /// resident line.
 pub(super) fn input_line(state: &HomeState) -> String {
     match state.mode() {
+        Mode::Switch if state.list().create_row_selected() => {
+            style(" Type a session name to create".to_string())
+                .green()
+                .to_string()
+        }
         Mode::Switch => style(" Pick a session".to_string()).dim().to_string(),
         Mode::Focus => style(format!(
             " Operating session: {}",
@@ -252,7 +292,7 @@ pub(super) fn input_line(state: &HomeState) -> String {
         ))
         .dim()
         .to_string(),
-        Mode::Attached => style(" ● live terminal".to_string()).green().to_string(),
+        Mode::Attached => style(" ● live terminal".to_string()).success().to_string(),
     }
 }
 
@@ -260,10 +300,10 @@ pub(super) fn input_line(state: &HomeState) -> String {
 /// position (the byte offset from [`HomeState::cursor`]), so ←/→/Home/End move a
 /// visible caret through the text instead of always sitting at the end.
 fn command_input_content(state: &HomeState) -> String {
-    let prompt = style("❯").red().bold();
+    let prompt = style("❯").danger().bold();
     let input = state.input();
     let (before, after) = input.split_at(state.cursor());
-    let value = widgets::block_caret(before, after, &Style::new().cyan());
+    let value = widgets::block_caret(before, after, &Style::new().accent());
     format!("{prompt} {value}")
 }
 
@@ -412,7 +452,7 @@ pub(super) fn footer_line(width: usize, state: &HomeState) -> String {
                 "s sort"
             };
             format!(
-                "[switch]  ↑↓ session / K/J move / {sort} / ←→ tab / Enter focus / c new / r rename / n/Ctrl-E note / x close tab / : commands / ? keys / {esc}"
+                "[switch]  ↑↓ session / + row type/Enter new / K/J move / {sort} / ←→ tab / Enter focus / c new / r rename / n/Ctrl-E note / x close tab / : commands / ? keys / {esc}"
             )
         }
         // 在席 shares the 没入 prefix grammar under the prefix scheme: `Ctrl-O` is
@@ -468,36 +508,58 @@ pub(super) fn switch_create_rows(
     error: Option<&str>,
     left_w: usize,
 ) -> Vec<String> {
-    let base = Style::new().green().bold();
+    let base = Style::new().success().bold();
     let (before, after) = input.split_at(cursor);
     let value = widgets::block_caret(before, after, &base);
-    let label = clip_to_width(&format!("{}{value}", base.apply_to("+ new: ")), left_w);
+    // Align the `+` with the persistent "+ new session" affordance it replaces:
+    // both sit two columns in (a one-cell gutter plus a space), so opening the
+    // input never shifts the glyph sideways. `CREATE_ROW_INDENT` is that shared
+    // two-column prefix.
+    let label = clip_to_width(
+        &format!("{CREATE_ROW_INDENT}{}{value}", base.apply_to("+ new: ")),
+        left_w,
+    );
     let mut rows = vec![label];
     if let Some(err) = error {
-        rows.push(style(clip_to_width(err, left_w)).red().to_string());
+        rows.push(
+            style(clip_to_width(&format!("{CREATE_ROW_INDENT}{err}"), left_w))
+                .danger()
+                .to_string(),
+        );
     }
     rows
 }
 
-/// Builds the inline rename row appended to the left pane in 切替 (Switch) while
-/// editing a session's sidebar label: `rename <target>: <input>` with a block
-/// caret on the character being edited (`cursor`, a byte offset into `input`),
-/// clipped to the pane width. The label is cosmetic, so there is no validation
-/// row.
-pub(super) fn switch_rename_rows(
-    target: &str,
-    input: &str,
-    cursor: usize,
-    left_w: usize,
-) -> Vec<String> {
+pub(super) fn tab_menu_box(menu: &TabMenu) -> Vec<String> {
+    let rows: Vec<String> = super::super::state::TabMenuItem::ALL
+        .iter()
+        .enumerate()
+        .map(|(idx, item)| {
+            let marker = if idx == menu.cursor() { "›" } else { " " };
+            let line = format!("{marker} {}", item.label());
+            if idx == menu.cursor() {
+                style(line).cyan().bold().to_string()
+            } else {
+                style(line).dim().to_string()
+            }
+        })
+        .collect();
+    widgets::boxed(&format!("tab {}", menu.tab() + 1), 12, &rows)
+}
+
+pub(super) fn tab_rename_body(label: &str, cursor: usize, width: usize) -> Vec<String> {
     let base = Style::new().cyan().bold();
-    let (before, after) = input.split_at(cursor);
+    let (before, after) = label.split_at(cursor);
     let value = widgets::block_caret(before, after, &base);
-    let label = clip_to_width(
-        &format!("{}{value}", base.apply_to(format!("rename {target}: "))),
-        left_w,
-    );
-    vec![label]
+    vec![
+        style("Rename tab label. Empty resets to default.")
+            .dim()
+            .to_string(),
+        String::new(),
+        clip_to_width(&format!("{} {value}", base.apply_to("label:")), width),
+        String::new(),
+        style("Enter save · Esc cancel").dim().to_string(),
+    ]
 }
 
 /// Builds one removal-modal row: a `>` cursor for the highlighted entry, a
@@ -510,9 +572,9 @@ pub(super) fn remove_modal_row(name: &str, cursor: bool, selected: bool, inner: 
     let text = clip_to_width(name, inner.saturating_sub(6));
     let line = format!("{marker} {check} {text}");
     if cursor {
-        style(line).cyan().bold().to_string()
+        style(line).accent().bold().to_string()
     } else if selected {
-        style(line).cyan().to_string()
+        style(line).accent().to_string()
     } else {
         style(line).dim().to_string()
     }
@@ -574,6 +636,61 @@ pub(super) fn remove_modal_body(modal: &RemoveModal, inner: usize) -> Vec<String
             .dim()
             .to_string(),
     );
+    body
+}
+
+/// Inner (content) width of the workspace-env editor box — wide enough for a
+/// typical `NAME=op://vault/item/field` binding before [`widgets::overlay_modal`]
+/// clips any overrun to the terminal.
+pub(super) const ENV_MODAL_INNER: usize = 56;
+
+/// Editor rows the env modal always reserves (padded with blanks, scrolled to
+/// keep the caret visible) so adding a binding line never grows or shifts the
+/// box — no layout shift.
+const ENV_MODAL_VISIBLE_LINES: usize = 8;
+
+/// Builds the body of the workspace-env editor (`env`) at a **fixed height**: a
+/// two-line format hint, a fixed window of `NAME=op://…` binding rows (numbered,
+/// with a block caret on the cursor row and a `·` placeholder on other empty
+/// rows), and a key-hint footer. The window scrolls to keep the caret visible
+/// without changing the row count, so the box keeps the same size and position as
+/// bindings are added (no layout shift). The border / centring are added by
+/// [`widgets::overlay_modal`] so the workspace shows through around it.
+pub(super) fn env_editor_body(editor: &EnvEditor) -> Vec<String> {
+    let (cursor_row, cursor_col) = editor.area().cursor();
+    let lines = editor.area().lines();
+    // Scroll a fixed-size window so the caret row stays visible without changing
+    // the number of rendered rows (and thus the box height / position).
+    let offset = cursor_row.saturating_sub(ENV_MODAL_VISIBLE_LINES - 1);
+    let mut body = vec![
+        style("1Password から解決する環境変数").dim().to_string(),
+        style("NAME=op://vault/item/field（1 行 1 件）")
+            .dim()
+            .to_string(),
+        String::new(),
+    ];
+    for win in 0..ENV_MODAL_VISIBLE_LINES {
+        let i = offset + win;
+        let Some(line) = lines.get(i) else {
+            // Pad the unused rows so the box keeps a constant height.
+            body.push(String::new());
+            continue;
+        };
+        let number = format!("{:>2} ", i + 1);
+        if i == cursor_row {
+            let (before, after) = line.split_at(cursor_col);
+            body.push(format!(
+                "{number}{}",
+                widgets::block_caret(before, after, &Style::new().accent())
+            ));
+        } else if line.is_empty() {
+            body.push(format!("{number}{}", style("·").dim()));
+        } else {
+            body.push(format!("{number}{line}"));
+        }
+    }
+    body.push(String::new());
+    body.push(style("Ctrl-S 保存  Enter 改行  Esc 取消").dim().to_string());
     body
 }
 

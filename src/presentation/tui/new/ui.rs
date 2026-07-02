@@ -1,3 +1,4 @@
+use crate::presentation::theme::Palette;
 use console::{style, Style};
 
 use crate::presentation::tui::welcome;
@@ -31,16 +32,16 @@ fn input_line(
     let body = if value.is_empty() {
         if focused {
             // Focused but empty: show only the block caret so typing is obvious.
-            widgets::block_caret("", "", &Style::new().cyan().bold())
+            widgets::block_caret("", "", &Style::new().accent().bold())
         } else {
             style(placeholder).dim().italic().to_string()
         }
     } else if focused {
         // Split at the caret so it can sit mid-value, not only at the end.
         let (before, after) = value.split_at(cursor.min(value.len()));
-        widgets::block_caret(before, after, &Style::new().cyan().bold())
+        widgets::block_caret(before, after, &Style::new().accent().bold())
     } else {
-        style(value).cyan().to_string()
+        style(value).accent().to_string()
     };
 
     format!("{block_pad}{marker} {body}")
@@ -51,7 +52,7 @@ fn input_line(
 fn mode_lines(block_pad: &str, mode: Mode, focused: bool) -> Vec<String> {
     let tab = |label: &str, active: bool| {
         if active {
-            format!("[{}]", style(label).cyan().bold())
+            format!("[{}]", style(label).accent().bold())
         } else {
             format!(" {} ", style(label).dim())
         }
@@ -89,7 +90,7 @@ fn field_lines(
 /// when absent) — so showing or clearing the error never shifts the form.
 fn notice_lines(block_pad: &str, notice: Option<&str>) -> Vec<String> {
     let slot = match notice {
-        Some(notice) => format!("{block_pad}{}", style(notice).red().bold()),
+        Some(notice) => format!("{block_pad}{}", style(notice).danger().bold()),
         None => String::new(),
     };
     vec![String::new(), slot]
