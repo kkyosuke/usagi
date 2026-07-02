@@ -106,9 +106,11 @@ impl IssueStore {
     /// (whose target file is already persisted by the time the index rebuilds) or
     /// break `issue list` — the index simply rebuilds from the files that parse,
     /// mirroring how [`load_index`](Self::load_index) self-heals a corrupt cache.
-    /// The strict [`scan`](Self::scan) stays the choice where every issue must be
-    /// readable (e.g. the dependency graph).
-    fn scan_lenient(&self) -> Result<Vec<Issue>> {
+    /// Full-text `issue search` uses it too, so one unparseable file yields partial
+    /// results instead of failing the whole query. The strict [`scan`](Self::scan)
+    /// stays the choice where every issue must be readable (e.g. the dependency
+    /// graph).
+    pub fn scan_lenient(&self) -> Result<Vec<Issue>> {
         use rayon::prelude::*;
 
         let parsed: Vec<(PathBuf, Result<Issue>)> = self
@@ -130,7 +132,7 @@ impl IssueStore {
             match issue {
                 Ok(issue) => issues.push(issue),
                 Err(e) => ErrorLog::record(&format!(
-                    "skipping unparseable issue file {} while rebuilding the index: {e:#}",
+                    "skipping unparseable issue file {}: {e:#}",
                     path.display()
                 )),
             }
