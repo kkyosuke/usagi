@@ -136,9 +136,10 @@ impl MemoryStore {
     /// (whose target file is already persisted by the time the index rebuilds) or
     /// break `memory list` — the index and `MEMORY.md` simply rebuild from the
     /// files that parse, mirroring how [`load_index`](Self::load_index) self-heals
-    /// a corrupt cache. The strict [`scan`](Self::scan) stays the choice where
-    /// every memory must be readable.
-    fn scan_lenient(&self) -> Result<Vec<Memory>> {
+    /// a corrupt cache. Full-text `memory search` uses it too, so one unparseable
+    /// file yields partial results instead of failing the whole query. The strict
+    /// [`scan`](Self::scan) stays the choice where every memory must be readable.
+    pub fn scan_lenient(&self) -> Result<Vec<Memory>> {
         use rayon::prelude::*;
 
         let parsed: Vec<(PathBuf, Result<Memory>)> = self
@@ -160,7 +161,7 @@ impl MemoryStore {
             match memory {
                 Ok(memory) => memories.push(memory),
                 Err(e) => ErrorLog::record(&format!(
-                    "skipping unparseable memory file {} while rebuilding the index: {e:#}",
+                    "skipping unparseable memory file {}: {e:#}",
                     path.display()
                 )),
             }
