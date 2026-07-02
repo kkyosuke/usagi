@@ -339,24 +339,40 @@ pub(super) fn worktree_row(
     running: bool,
     waiting: bool,
     done: bool,
+    // While inline-renaming this (selected) session in 切替, the label being typed
+    // and the caret's byte offset into it: line 1's name cell becomes that
+    // editable field in place, so the rename happens on the row itself rather than
+    // in a separate input at the list foot.
+    rename: Option<(&str, usize)>,
 ) -> (String, String) {
     let kind = kind_dot(heat_of(worktree.updated_at, now));
-    // The session's sidebar label (its custom display name, or the branch when
-    // unset); a detached worktree with no label falls back to the placeholder.
-    let name = if label.is_empty() {
-        worktree.branch.as_deref().unwrap_or(DETACHED)
-    } else {
-        label
-    };
-    let branch = name_cell(name, name_width, active || selected);
-    let status = status_cell(Some(worktree.status));
     let gutter = gutter_cell(selected, active, in_switch);
-    // Three columns sit between the name and the right-edge status (the old
-    // active-marker cell, now home to the memo marker — the active bar lives in
-    // the gutter). The cell is a constant width whether or not a note is present,
-    // so the status field never shifts.
-    let note = note_cell(has_note);
-    let line1 = format!("{gutter} {kind} {branch}{note}{status}");
+    let line1 = if let Some((value, cursor)) = rename {
+        // Inline rename: the session's own name line turns into the editable label
+        // with a block caret. The gutter cursor and kind dot stay put so the row
+        // does not shift, and the field runs across where the note and status
+        // fields sat (dropped while editing) so a longer name has room to type.
+        let (before, after) = value.split_at(cursor);
+        let field = widgets::block_caret(before, after, &Style::new().accent().bold());
+        let field_width = name_width + ACTIVE_COL + 1 + STATUS_COL;
+        format!("{gutter} {kind} {}", clip_to_width(&field, field_width))
+    } else {
+        // The session's sidebar label (its custom display name, or the branch when
+        // unset); a detached worktree with no label falls back to the placeholder.
+        let name = if label.is_empty() {
+            worktree.branch.as_deref().unwrap_or(DETACHED)
+        } else {
+            label
+        };
+        let branch = name_cell(name, name_width, active || selected);
+        let status = status_cell(Some(worktree.status));
+        // Three columns sit between the name and the right-edge status (the old
+        // active-marker cell, now home to the memo marker — the active bar lives in
+        // the gutter). The cell is a constant width whether or not a note is
+        // present, so the status field never shifts.
+        let note = note_cell(has_note);
+        format!("{gutter} {kind} {branch}{note}{status}")
+    };
 
     // Line 2 spells out the agent state with its icon (blank when absent) on the
     // left, and a right-aligned cluster of the freshness label (`Nmin ago`), the
@@ -1047,6 +1063,11 @@ pub(super) fn left_pane(
     in_switch: bool,
     sidebar: Sidebar,
     now: DateTime<Utc>,
+    // The inline rename being typed (its label and caret offset) when 切替's rename
+    // input is open, so the selected session's name line renders as that editable
+    // field in place. `None` when not renaming. Only the full sidebar edits inline;
+    // the rail has no room and renders the input in the right pane instead.
+    rename: Option<(&str, usize)>,
 ) -> Vec<String> {
     if sidebar == Sidebar::Rail {
         // The 5-column rail has no room for a CPU / memory figure, so the rail
@@ -1157,6 +1178,9 @@ pub(super) fn left_pane(
                 running.contains(&w.path),
                 waiting.contains(&w.path),
                 done.contains(&w.path),
+                // The rename input targets the selected session, so its editable
+                // label rides that row only; every other row renders normally.
+                if selected { rename } else { None },
             );
             // Every session draws a third CPU / memory line at a fixed height, so
             // the list never reflows as a session goes live or idle. An unsampled
@@ -2243,8 +2267,9 @@ fn switch_create_pane(create: &CreateInput, width: usize, rows: usize) -> Vec<St
 /// The 切替 (Switch) display-name input rendered in the **right pane** while
 /// renaming a session with the sidebar collapsed to the rail: a header naming the
 /// session, the typed label in a bordered box with a block caret, a hint, and the
-/// key hint pinned to the bottom row. At full width it rides the left pane inline
-/// instead (see [`super::switch_rename_rows`]).
+/// key hint pinned to the bottom row. At full width there is room to edit on the
+/// row itself, so the session's own name line becomes the editable label in place
+/// (see the `rename` branch of [`worktree_row`]) and this pane is not used.
 fn switch_rename_pane(rename: &RenameInput, width: usize, rows: usize) -> Vec<String> {
     let inner = width.saturating_sub(4).max(1);
     let value = widgets::block_caret(rename.value(), "", &Style::new().accent());
