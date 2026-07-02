@@ -1122,7 +1122,7 @@ fn session_remove_without_a_name_opens_the_modal_and_bulk_removes() {
     keys.push(Ok(Key::Char('k')));
     keys.push(Ok(Key::ArrowUp)); // cursor 0
     keys.push(Ok(Key::Home)); // ignored
-    keys.push(Ok(Key::Enter)); // confirm
+    keys.push(Ok(Key::Char('y'))); // confirm via the yes-key (same as Enter)
     keys.push(Ok(Key::Escape)); // back to the palette
     let term = Term::stdout();
     let mut reader = ScriptedReader::new(keys);
@@ -1172,6 +1172,7 @@ fn removal_modal_cancels_via_escape_and_keeps_open_on_empty_enter() {
     let mut keys = cmd("session remove");
     keys.push(Ok(Key::Enter)); // open
     keys.push(Ok(Key::Enter)); // nothing checked -> stays open
+    keys.push(Ok(Key::Char('Y'))); // nothing checked (yes-key) -> also stays open
     keys.push(Ok(Key::Char(' '))); // check alpha
     keys.push(Ok(Key::Escape)); // cancel the modal
     keys.push(Ok(Key::Escape)); // back to the palette

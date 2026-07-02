@@ -941,7 +941,9 @@ pub(super) fn event_loop(
                         .expect("remove modal open while handling its keys")
                         .toggle();
                 }
-                Key::Enter => {
+                // `y`/`Y` confirm removal like `Enter`, matching the yes-key
+                // convention of the quit / delete confirmations.
+                Key::Enter | Key::Char('y') | Key::Char('Y') => {
                     if let Some((entries, force)) = state.submit_remove_modal() {
                         // Each checked session is dispatched to a background
                         // worker, so the loop never blocks on the git work; the
@@ -977,7 +979,8 @@ pub(super) fn event_loop(
                         state.text_modal_scroll_up();
                     }
                 }
-                Key::PageDown => {
+                // `Space` pages forward too, matching the less / pager convention.
+                Key::PageDown | Key::Char(' ') => {
                     for _ in 0..page {
                         state.text_modal_scroll_down(page);
                     }
@@ -1001,7 +1004,8 @@ pub(super) fn event_loop(
                         state.preview_scroll_up();
                     }
                 }
-                Key::PageDown => {
+                // `Space` pages forward too, matching the less / pager convention.
+                Key::PageDown | Key::Char(' ') => {
                     for _ in 0..page {
                         state.preview_scroll_down(page);
                     }
