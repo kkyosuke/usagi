@@ -236,6 +236,11 @@ impl AlternateScreenGuard {
 
 impl Drop for AlternateScreenGuard {
     fn drop(&mut self) {
+        // Backstop for the embedded terminal's OSC 22 mouse pointer shape. The
+        // pane restores the default when it returns to the home UI, but a panic
+        // or early process exit could bypass that boundary; never leave the
+        // user's shell with usagi's text-caret / hand pointer.
+        let _ = self.term.write_str("\x1b]22;\x1b\\");
         let _ = self.term.write_str(DISABLE_MOUSE);
         let _ = self.term.write_str(LEAVE_ALT_SCREEN);
         let _ = self.term.show_cursor();
