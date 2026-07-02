@@ -331,6 +331,16 @@ fn default_terminal_scrollback_lines() -> usize {
     DEFAULT_TERMINAL_SCROLLBACK_LINES
 }
 
+/// A map of environment variables whose values are resolved from 1Password
+/// references (`op://vault/item/field`) before launching an embedded agent or
+/// terminal.
+///
+/// The map key is the environment variable name (e.g. `GH_TOKEN`), and the map
+/// value is the 1Password secret reference to read. Values are intentionally
+/// references, not secrets: the actual secret is fetched at process-launch time
+/// and injected only into the child process environment.
+pub type SecretEnv = BTreeMap<String, String>;
+
 /// User-configurable application settings.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -548,6 +558,14 @@ pub struct LocalSettings {
     /// the override through [`skill_feature_override`](Self::skill_feature_override).
     #[serde(default)]
     pub skill_features: BTreeMap<String, bool>,
+    /// Workspace-scoped environment variables resolved from 1Password references
+    /// when launching an embedded agent or terminal. The key is the environment
+    /// variable name (for example `GH_TOKEN`) and the value is an `op://...`
+    /// reference. The resolved secret is never persisted in settings; it is read
+    /// just-in-time via `op read --no-newline` and injected into the child
+    /// process environment.
+    #[serde(default)]
+    pub env: SecretEnv,
     /// Shell commands run, in order, in each freshly built session worktree
     /// right after a session is created in this workspace — a per-project setup
     /// hook (e.g. `npm install`, `cp .env.example .env`). Empty by default (no
@@ -569,6 +587,7 @@ impl LocalSettings {
             && self.default_branch.is_none()
             && self.local_llm_enabled.is_none()
             && self.skill_features.is_empty()
+            && self.env.is_empty()
             && self.setup_commands.is_empty()
     }
 
@@ -591,6 +610,22 @@ impl LocalSettings {
         self.default_branch.as_deref()
     }
 
+    /// The non-empty, valid environment bindings to resolve and inject when a
+    /// process is launched inside this workspace. Blank names/references are
+    /// ignored, as are names that are not portable environment identifiers; the
+    /// remaining pairs keep the BTreeMap's stable sorted order.
+    pub fn env(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.env.iter().filter_map(|(name, reference)| {
+            let name = name.trim();
+            let reference = reference.trim();
+            if is_valid_env_name(name) && !reference.is_empty() {
+                Some((name, reference))
+            } else {
+                None
+            }
+        })
+    }
+
     /// The non-empty setup command lines to run for newly-created sessions in
     /// this workspace, in persisted order. Blank lines are ignored so the
     /// multi-line config editor can leave visual spacing without launching an
@@ -601,6 +636,18 @@ impl LocalSettings {
             .map(String::as_str)
             .filter(|command| !command.trim().is_empty())
     }
+}
+
+/// Whether `name` is a portable environment variable name. Keep this strict so
+/// a hand-edited settings file cannot smuggle shell syntax into diagnostics or
+/// platform-specific odd names into child environments.
+pub fn is_valid_env_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(c) if c == '_' || c.is_ascii_alphabetic() => {}
+        _ => return false,
+    }
+    chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
 }
 
 #[cfg(test)]
@@ -715,12 +762,53 @@ mod tests {
             ..Default::default()
         }
         .is_empty());
+        // Workspace env references are project-local state too.
+        assert!(!LocalSettings {
+            env: [(
+                "GH_TOKEN".to_string(),
+                "op://Private/GitHub/token".to_string()
+            )]
+            .into_iter()
+            .collect(),
+            ..Default::default()
+        }
+        .is_empty());
         // Setup commands are project-local state too.
         assert!(!LocalSettings {
             setup_commands: vec!["npm install".to_string()],
             ..Default::default()
         }
         .is_empty());
+    }
+
+    #[test]
+    fn env_filters_blank_and_invalid_bindings_but_keeps_valid_refs() {
+        let local = LocalSettings {
+            env: [
+                (
+                    "GH_TOKEN".to_string(),
+                    "op://Private/GitHub/token".to_string(),
+                ),
+                ("1BAD".to_string(), "op://Private/Bad/token".to_string()),
+                ("EMPTY".to_string(), "   ".to_string()),
+                ("_OK".to_string(), "op://Private/Ok/token".to_string()),
+            ]
+            .into_iter()
+            .collect(),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            local.env().collect::<Vec<_>>(),
+            vec![
+                ("GH_TOKEN", "op://Private/GitHub/token"),
+                ("_OK", "op://Private/Ok/token"),
+            ]
+        );
+        assert!(is_valid_env_name("GH_TOKEN"));
+        assert!(is_valid_env_name("_TOKEN_1"));
+        assert!(!is_valid_env_name("1TOKEN"));
+        assert!(!is_valid_env_name("BAD-NAME"));
     }
 
     #[test]

@@ -3,7 +3,8 @@ use crate::presentation::tui::{welcome, widgets};
 /// Frames the splash plays before the welcome menu takes over. The usagi mascot
 /// holds for the whole run; the `USAGI` title stays hidden for [`TITLE_DELAY`]
 /// frames, then fades in over [`TITLE_FADE_STEPS`](widgets::TITLE_FADE_STEPS)
-/// brightness steps and holds at full green-bold for [`TITLE_HOLD`] more frames.
+/// brightness steps and holds at full success-bold for [`TITLE_HOLD`] more
+/// frames.
 /// At [`ANIM_TICK`](crate::presentation::tui::install_task::ANIM_TICK) per frame
 /// this is a brief flash before the menu.
 pub const FRAMES: usize = TITLE_DELAY + widgets::TITLE_FADE_STEPS + TITLE_HOLD;
@@ -18,7 +19,7 @@ const TITLE_HOLD: usize = 4;
 
 /// The title's fade step at `frame`: blank ([`step 0`](widgets::faded_title_line))
 /// through the [`TITLE_DELAY`] frames the mascot shows alone, then one step per
-/// frame up to the full green-bold title, which it holds at thereafter.
+/// frame up to the full success-bold title, which it holds at thereafter.
 fn title_fade_step(frame: usize) -> usize {
     if frame < TITLE_DELAY {
         0

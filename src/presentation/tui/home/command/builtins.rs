@@ -7,6 +7,7 @@ use super::{
     Command, CommandContext, CommandInfo, CommandResult, CommandScope, CompletionContext, Effect,
     LogLine,
 };
+use crate::presentation::theme::Palette;
 use crate::presentation::tui::widgets;
 use crate::usecase::issue::{
     annotate_all, dependency_tree, gantt, list_line, stats_line, IssueStats, ListedIssue,
@@ -697,7 +698,7 @@ fn style_graph_line(text: String) -> String {
     if text.contains('✓') {
         style(text).dim().to_string()
     } else if text.contains('⊘') {
-        style(text).red().to_string()
+        style(text).danger().to_string()
     } else {
         text
     }

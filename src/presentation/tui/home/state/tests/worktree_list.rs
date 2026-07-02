@@ -73,7 +73,7 @@ fn notes_default_to_absent_and_set_notes_aligns_to_the_worktrees() {
 
 #[test]
 fn move_down_advances_past_the_root_row_and_wraps() {
-    let mut list = sample(); // root, main, feature, fix
+    let mut list = sample(); // root, main, feature, fix, + new session
     list.move_down();
     assert_eq!(list.selected_index(), 1);
     assert_eq!(list.selected().unwrap().branch.as_deref(), Some("main"));
@@ -81,7 +81,12 @@ fn move_down_advances_past_the_root_row_and_wraps() {
     list.move_down();
     assert_eq!(list.selected_index(), 3);
     assert_eq!(list.selected().unwrap().branch.as_deref(), Some("fix"));
-    // Wraps from the last worktree back to the root row.
+    // The persistent create row sits after the last worktree.
+    list.move_down();
+    assert_eq!(list.selected_index(), 4);
+    assert!(list.create_row_selected());
+    assert!(!list.root_selected());
+    // One more step wraps back to the root row.
     list.move_down();
     assert_eq!(list.selected_index(), 0);
     assert!(list.root_selected());
@@ -89,23 +94,25 @@ fn move_down_advances_past_the_root_row_and_wraps() {
 
 #[test]
 fn move_up_wraps_from_the_root_row_to_the_bottom() {
-    let mut list = sample(); // root, main, feature, fix
+    let mut list = sample(); // root, main, feature, fix, + new session
+    list.move_up();
+    assert_eq!(list.selected_index(), 4);
+    assert!(list.create_row_selected());
     list.move_up();
     assert_eq!(list.selected_index(), 3);
     assert_eq!(list.selected().unwrap().branch.as_deref(), Some("fix"));
-    list.move_up();
-    assert_eq!(list.selected_index(), 2);
-    assert_eq!(list.selected().unwrap().branch.as_deref(), Some("feature"));
 }
 
 #[test]
 fn movement_wraps_around_the_lone_root_row_when_empty() {
     let mut list = WorktreeList::new("usagi", Vec::new());
-    // Only the root row exists, so movement keeps the cursor on it.
+    // The root and persistent create row exist even with no sessions.
     list.move_up();
-    assert_eq!(list.selected_index(), 0);
+    assert_eq!(list.selected_index(), 1);
+    assert!(list.create_row_selected());
     list.move_down();
     assert_eq!(list.selected_index(), 0);
+    assert!(list.root_selected());
 }
 
 #[test]
@@ -295,11 +302,15 @@ fn movement_crosses_group_boundaries_and_lands_on_each_root_row() {
     list.move_down(); // row 4 = b1
     assert_eq!(list.selected().unwrap().branch.as_deref(), Some("b1"));
     assert_eq!(list.selected_group(), 1);
-    // Wraps from the last row of the last group back to the first group's root.
+    // The create row sits after the last row of the last group, then wraps.
+    list.move_down();
+    assert_eq!(list.selected_index(), 5);
+    assert!(list.create_row_selected());
     list.move_down();
     assert_eq!(list.selected_index(), 0);
-    list.move_up(); // wraps back to the bottom
-    assert_eq!(list.selected_index(), 4);
+    list.move_up(); // wraps back to the bottom create row
+    assert_eq!(list.selected_index(), 5);
+    assert!(list.create_row_selected());
 }
 
 #[test]

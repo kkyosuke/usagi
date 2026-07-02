@@ -39,6 +39,26 @@ pub fn ready_overwrite_allowed(current: Option<AgentPhase>, source: Option<&str>
     source != Some("compact") && !matches!(current, Some(AgentPhase::Running | AgentPhase::Waiting))
 }
 
+/// Whether a `Notification` → `waiting` hook should actually be recorded for a
+/// worktree whose currently recorded phase is `current`.
+///
+/// Claude fires `Notification` not only for a mid-turn permission prompt but also
+/// when it sits idle waiting for the user's next prompt. That idle notification
+/// arrives **after** the turn's `Stop` (→ `ended`), so recording `waiting` then
+/// overwrites the `ended` phase and flips a finished session's ✓ back to ◆
+/// waiting. We refuse the write when the recorded phase is already `Ended`.
+///
+/// This never drops a genuine waiting: a real mid-turn pause (permission /
+/// input) is always preceded by a fresh `UserPromptSubmit` → `running`, so the
+/// recorded phase right before it is `Running`, never `Ended`. Only the spurious
+/// post-`Stop` idle notification lands on an `Ended` phase, which is exactly the
+/// transition this guard blocks. It also matches usagi's own model, where a
+/// completed turn is `done`, not `waiting`. Codex never wires a `Notification`
+/// hook, so this only ever fires for Claude.
+pub fn waiting_overwrite_allowed(current: Option<AgentPhase>) -> bool {
+    !matches!(current, Some(AgentPhase::Ended))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -88,5 +108,23 @@ mod tests {
         ));
         assert!(!ready_overwrite_allowed(Some(AgentPhase::Waiting), None));
         assert!(!ready_overwrite_allowed(Some(AgentPhase::Running), None));
+    }
+
+    #[test]
+    fn waiting_is_skipped_over_a_finished_session() {
+        // Claude's post-`Stop` idle notification: a `waiting` landing on an
+        // `Ended` phase is the spurious one that flips ✓ back to ◆. Refuse it.
+        assert!(!waiting_overwrite_allowed(Some(AgentPhase::Ended)));
+    }
+
+    #[test]
+    fn waiting_is_recorded_for_a_genuine_mid_turn_pause() {
+        // A real mid-turn pause (permission / input) follows a fresh
+        // `UserPromptSubmit` → running, so the recorded phase before it is
+        // `Running`; that (and every non-`Ended` phase) records `waiting`.
+        assert!(waiting_overwrite_allowed(Some(AgentPhase::Running)));
+        assert!(waiting_overwrite_allowed(Some(AgentPhase::Ready)));
+        assert!(waiting_overwrite_allowed(Some(AgentPhase::Waiting)));
+        assert!(waiting_overwrite_allowed(None));
     }
 }

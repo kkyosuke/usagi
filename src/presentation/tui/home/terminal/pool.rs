@@ -28,6 +28,7 @@
 //! The geometry it spawns at ([`super::super::ui::terminal_geometry`]) is tested on its
 //! own.
 
+use std::collections::BTreeMap;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -302,6 +303,18 @@ impl SessionPanes {
     }
 }
 
+/// The per-spawn inputs that travel together whenever the pool creates a pane.
+/// Bundling them keeps the public pool methods small while making it explicit
+/// that the launch command, agent CLI metadata, notification label, and child
+/// environment all describe the same pane spawn.
+#[derive(Clone, Copy)]
+pub struct PaneLaunch<'a> {
+    pub agent_command: Option<&'a str>,
+    pub cli: AgentCli,
+    pub label: &'a str,
+    pub env: &'a BTreeMap<String, String>,
+}
+
 /// The live shells embedded in the workspace screen, keyed by worktree path —
 /// each path holding one or more panes (an agent alongside any terminals).
 ///
@@ -412,9 +425,7 @@ impl TerminalPool {
         term: &Term,
         dir: &Path,
         agent: bool,
-        agent_command: Option<&str>,
-        cli: AgentCli,
-        label: &str,
+        launch: PaneLaunch<'_>,
     ) -> Result<()> {
         let key = dir.to_path_buf();
         let alive = self
@@ -431,10 +442,10 @@ impl TerminalPool {
             // entry and spawn the first pane of the requested kind.
             self.sessions.remove(&key);
             let kind = tabs::pane_kind(agent);
-            let pane = self.spawn_pane(term, dir, kind, agent_command, cli)?;
+            let pane = self.spawn_pane(term, dir, kind, launch)?;
             self.sessions.insert(key, SessionPanes::new(vec![pane], 0));
         }
-        self.refresh_watched(dir, label);
+        self.refresh_watched(dir, launch.label);
         Ok(())
     }
 
@@ -447,11 +458,9 @@ impl TerminalPool {
         term: &Term,
         dir: &Path,
         kind: PaneKind,
-        agent_command: Option<&str>,
-        cli: AgentCli,
-        label: &str,
+        launch: PaneLaunch<'_>,
     ) -> Result<()> {
-        let pane = self.spawn_pane(term, dir, kind, agent_command, cli)?;
+        let pane = self.spawn_pane(term, dir, kind, launch)?;
         let sp = self
             .sessions
             .entry(dir.to_path_buf())
@@ -459,7 +468,7 @@ impl TerminalPool {
         sp.panes.push(pane);
         sp.active = sp.panes.len().saturating_sub(1);
         sp.rebuild_tab_labels();
-        self.refresh_watched(dir, label);
+        self.refresh_watched(dir, launch.label);
         Ok(())
     }
 
@@ -639,8 +648,7 @@ impl TerminalPool {
         term: &Term,
         dir: &Path,
         kind: PaneKind,
-        agent_command: Option<&str>,
-        cli: AgentCli,
+        launch: PaneLaunch<'_>,
     ) -> Result<Pane> {
         let (height, width) = term.size();
         // Sized to the full-sidebar pane: the 没入 `drive` loop resizes the pane to
@@ -650,7 +658,7 @@ impl TerminalPool {
         let (initial, cli) = match kind {
             // An agent pane sends its launch command and remembers its CLI (so the
             // open-panes snapshot can restore the same agent and resume it).
-            PaneKind::Agent => (agent_command, Some(cli)),
+            PaneKind::Agent => (launch.agent_command, Some(launch.cli)),
             // A terminal pane opens a plain shell and has no agent to record.
             PaneKind::Terminal => (None, None),
         };
@@ -658,7 +666,14 @@ impl TerminalPool {
             agent_state_store::clear(dir);
             self.lock().monitor.forget(dir);
         }
-        let pty = PtySession::spawn(dir, geo.rows, geo.cols, initial, self.scrollback_lines)?;
+        let pty = PtySession::spawn(
+            dir,
+            geo.rows,
+            geo.cols,
+            initial,
+            self.scrollback_lines,
+            launch.env,
+        )?;
         let id = self.allocate_pane_id();
         Ok(Pane { id, pty, kind, cli })
     }

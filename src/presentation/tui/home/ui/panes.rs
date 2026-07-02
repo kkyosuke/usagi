@@ -5,6 +5,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
+use crate::presentation::theme::Palette;
 use chrono::{DateTime, Duration, Utc};
 use console::{style, Style};
 
@@ -41,11 +42,11 @@ fn status_icon(status: BranchStatus) -> char {
 /// never drift apart.
 fn status_style(status: BranchStatus) -> Style {
     match status {
-        BranchStatus::New => Style::new().blue().bright(),
-        BranchStatus::Dirty => Style::new().magenta(),
-        BranchStatus::Local => Style::new().yellow(),
-        BranchStatus::Pushed => Style::new().green(),
-        BranchStatus::Synced => Style::new().cyan(),
+        BranchStatus::New => Style::new().info().bright(),
+        BranchStatus::Dirty => Style::new().feature(),
+        BranchStatus::Local => Style::new().warning(),
+        BranchStatus::Pushed => Style::new().success(),
+        BranchStatus::Synced => Style::new().accent(),
     }
 }
 
@@ -126,19 +127,19 @@ impl AgentState {
             AgentState::Ready => Some(style(clip_to_width_cow("☾ ready", width)).dim().to_string()),
             AgentState::Running => Some(
                 style(clip_to_width_cow("▶ running", width))
-                    .green()
+                    .success()
                     .bold()
                     .to_string(),
             ),
             AgentState::Waiting => Some(
                 style(clip_to_width_cow("◆ waiting", width))
-                    .yellow()
+                    .warning()
                     .bold()
                     .to_string(),
             ),
             AgentState::Done => Some(
                 style(clip_to_width_cow("✓ done", width))
-                    .cyan()
+                    .accent()
                     .bold()
                     .to_string(),
             ),
@@ -153,9 +154,9 @@ impl AgentState {
         match self {
             AgentState::Absent => None,
             AgentState::Ready => Some(style("☾").dim().to_string()),
-            AgentState::Running => Some(style("▶").green().bold().to_string()),
-            AgentState::Waiting => Some(style("◆").yellow().bold().to_string()),
-            AgentState::Done => Some(style("✓").cyan().bold().to_string()),
+            AgentState::Running => Some(style("▶").success().bold().to_string()),
+            AgentState::Waiting => Some(style("◆").warning().bold().to_string()),
+            AgentState::Done => Some(style("✓").accent().bold().to_string()),
         }
     }
 }
@@ -169,9 +170,9 @@ impl AgentState {
 /// cursor and the active row coincide in Switch, the cursor takes the column.
 fn gutter_cell(selected: bool, active: bool, in_switch: bool) -> String {
     if in_switch && selected {
-        style(">").red().bold().to_string()
+        style(">").danger().bold().to_string()
     } else if active {
-        style("▎").green().bold().to_string()
+        style("▎").success().bold().to_string()
     } else {
         " ".to_string()
     }
@@ -187,9 +188,9 @@ fn name_cell(text: &str, width: usize, emphasised: bool) -> String {
     // display columns, matching the rest of the layout.
     let padded = pad_to_width(clip_to_width(text, width), width);
     if emphasised {
-        style(padded).cyan().bold().to_string()
+        style(padded).accent().bold().to_string()
     } else {
-        style(padded).cyan().to_string()
+        style(padded).accent().to_string()
     }
 }
 
@@ -229,6 +230,11 @@ pub(super) const SESSION_ROWS: usize = 3;
 /// pure decoration: it does not advance the flat selectable-row index and click
 /// hit-tests skip over it.
 const UNITE_WORKSPACE_GAP_ROWS: usize = 2;
+
+/// The persistent row kept at the foot of the left pane to create a session
+/// without remembering the `c` shortcut. It is a navigation target, not a
+/// session, and turns into the inline `+ new: <name>` input when activated.
+const CREATE_ROW_LABEL: &str = "+ new session";
 
 /// The icon-led `<cpu> <pct>  <mem> <bytes>` resource label shared by a session's
 /// resource line and the workspace total beside the mascot. The CPU figure leads
@@ -271,8 +277,8 @@ pub(super) fn resource_inline_label_tinted(usage: ResourceUsage) -> String {
 fn tint_by_load(field: String, load: Load) -> String {
     match load {
         Load::Calm => style(field).dim(),
-        Load::Busy => style(field).yellow(),
-        Load::Hot => style(field).red(),
+        Load::Busy => style(field).warning(),
+        Load::Hot => style(field).danger(),
     }
     .to_string()
 }
@@ -303,7 +309,7 @@ fn resource_line(
 /// it reuses the column the old active marker left blank.
 fn note_cell(has_note: bool) -> String {
     if has_note {
-        format!(" {} ", style(NOTE_ICON).yellow())
+        format!(" {} ", style(NOTE_ICON).warning())
     } else {
         " ".repeat(ACTIVE_COL + 1)
     }
@@ -451,7 +457,7 @@ fn pr_cell(prs: &[PrLink], width: usize) -> String {
         return " ".repeat(width);
     }
     let badge = style(format!("{PR_ICON} {}", prs.len()))
-        .blue()
+        .info()
         .bright()
         .underlined()
         .to_string();
@@ -566,8 +572,8 @@ fn rpad(content: &str, width: usize) -> String {
 fn diff_cell(diff: Option<DiffStat>, added_w: usize, removed_w: usize) -> String {
     match diff {
         Some(diff) => {
-            let added = style(format!("+{:>added_w$}", diff.added)).green();
-            let removed = style(format!("-{:>removed_w$}", diff.removed)).red();
+            let added = style(format!("+{:>added_w$}", diff.added)).success();
+            let removed = style(format!("-{:>removed_w$}", diff.removed)).danger();
             format!("{added} {removed}")
         }
         None => " ".repeat(added_w + removed_w + 3),
@@ -585,14 +591,14 @@ fn commits_cell(ab: Option<AheadBehind>, ahead_w: usize, behind_w: usize) -> Str
     let behind = ab.map_or(0, |ab| ab.behind);
     let up = (ahead_w > 0).then(|| {
         if ahead > 0 {
-            style(format!("↑{ahead:>ahead_w$}")).cyan().to_string()
+            style(format!("↑{ahead:>ahead_w$}")).accent().to_string()
         } else {
             " ".repeat(1 + ahead_w)
         }
     });
     let down = (behind_w > 0).then(|| {
         if behind > 0 {
-            style(format!("↓{behind:>behind_w$}")).magenta().to_string()
+            style(format!("↓{behind:>behind_w$}")).feature().to_string()
         } else {
             " ".repeat(1 + behind_w)
         }
@@ -697,7 +703,7 @@ fn heat_of(last_active: DateTime<Utc>, now: DateTime<Utc>) -> Heat {
 /// `○` (dim) — the time since the session was last touched, oldest fading out.
 fn kind_dot(heat: Heat) -> String {
     match heat {
-        Heat::Fresh => style("●").green().to_string(),
+        Heat::Fresh => style("●").success().to_string(),
         Heat::Warm => style("◐").to_string(),
         Heat::Cold => style("○").dim().to_string(),
     }
@@ -707,7 +713,7 @@ fn kind_dot(heat: Heat) -> String {
 /// worktree shows its [`kind_dot`], by both the full sidebar ([`root_row`]) and
 /// the collapsed rail ([`rail_pane`]).
 fn root_glyph() -> String {
-    style("⌂").magenta().to_string()
+    style("⌂").feature().to_string()
 }
 
 /// Builds one collapsed-rail **entry** as the same [`SESSION_ROWS`] lines a
@@ -747,6 +753,34 @@ fn rail_entry(
     // no room for the CPU / memory figure, so the rest is blank.
     let resource = pad_to_width(bar, RAIL_WIDTH);
     (top, detail, resource)
+}
+
+/// The persistent create row in the full sidebar. It uses the same gutter grammar
+/// as real rows (`>` only in 切替 when selected) but has no heat/status/resource
+/// lines because it is an action target rather than a session. The row is still
+/// always present at the list foot so keyboard focus and mouse clicks can enter
+/// the create input from a visible affordance.
+fn create_row(selected: bool, in_switch: bool, width: usize) -> String {
+    let gutter = gutter_cell(selected, false, in_switch);
+    let label = if selected && in_switch {
+        style(CREATE_ROW_LABEL).green().bold().to_string()
+    } else {
+        style(CREATE_ROW_LABEL).green().to_string()
+    };
+    clip_to_width(&format!("{gutter} {label}"), width)
+}
+
+/// The rail twin of [`create_row`]: the `+` glyph in the same row position. The
+/// input itself moves to the right pane while the sidebar is collapsed, but the
+/// click / focus target remains visible at the rail's bottom.
+fn rail_create_row(selected: bool, in_switch: bool) -> String {
+    let gutter = gutter_cell(selected, false, in_switch);
+    let label = if selected && in_switch {
+        style("+").green().bold().to_string()
+    } else {
+        style("+").green().to_string()
+    };
+    pad_to_width(format!("{gutter} {label}"), RAIL_WIDTH)
 }
 
 fn push_unite_workspace_gap(lines: &mut Vec<String>, width: usize) {
@@ -870,6 +904,13 @@ fn rail_pane(
             flat_row += 1;
         }
     }
+    if lines.len() < rows {
+        let mut row = rail_create_row(list.create_row_selected(), in_switch);
+        if in_switch && !list.create_row_selected() {
+            row = dim_row(&row);
+        }
+        lines.push(row);
+    }
     lines.truncate(rows);
     lines
 }
@@ -934,6 +975,9 @@ fn sidebar_row_at_line_walk(list: &WorktreeList, line: usize, with_headers: bool
             cur += SESSION_ROWS;
             flat += 1;
         }
+    }
+    if line == cur {
+        return Some(list.create_row());
     }
     None
 }
@@ -1131,6 +1175,13 @@ pub(super) fn left_pane(
             flat_row += 1;
         }
     }
+    if lines.len() < rows {
+        let mut row = create_row(list.create_row_selected(), in_switch, left_w);
+        if in_switch && !list.create_row_selected() {
+            row = dim_row(&row);
+        }
+        lines.push(row);
+    }
     lines.truncate(rows);
     lines
 }
@@ -1143,10 +1194,10 @@ pub(super) fn log_line(line: &LogLine, width: usize) -> String {
     };
     let clipped = clip_to_width(&raw, width);
     match line.kind {
-        LineKind::Command => style(clipped).cyan().bold().to_string(),
+        LineKind::Command => style(clipped).accent().bold().to_string(),
         LineKind::Output => clipped,
-        LineKind::Error => style(clipped).red().to_string(),
-        LineKind::Notice => style(clipped).yellow().to_string(),
+        LineKind::Error => style(clipped).danger().to_string(),
+        LineKind::Notice => style(clipped).warning().to_string(),
     }
 }
 
@@ -1175,7 +1226,7 @@ fn tab_strip_parts(strip: &TabStrip) -> (String, String) {
         let width = console::measure_text_width(&text);
         if i == strip.active {
             chips.push_str(&style(&text).reverse().bold().to_string());
-            marker.push_str(&style("▔".repeat(width)).cyan().bold().to_string());
+            marker.push_str(&style("▔".repeat(width)).accent().bold().to_string());
         } else {
             chips.push_str(&style(&text).dim().to_string());
             marker.push_str(&" ".repeat(width));
@@ -1508,7 +1559,7 @@ pub(in crate::presentation::tui::home) fn pr_popup_box(prs: &[PrLink]) -> Vec<St
             r.iter()
                 .map(|pr| {
                     style(format!("#{}", pr.number))
-                        .blue()
+                        .info()
                         .bright()
                         .underlined()
                         .to_string()
@@ -1679,7 +1730,7 @@ const HEADER_DETAIL_COL: usize = STATUS_COL + 2 + HEADER_AGENT_COL;
 fn preview_header(name: &str, status: Option<BranchStatus>, agent: Option<String>) -> String {
     let name = pad_to_width(
         style(clip_to_width(name, HEADER_NAME_COL))
-            .cyan()
+            .accent()
             .bold()
             .to_string(),
         HEADER_NAME_COL,
@@ -1739,7 +1790,7 @@ pub(super) fn terminal_pane(view: &TerminalView, right_w: usize, rows: usize) ->
 /// The `›` cursor cell for a highlighted action-menu row, or a blank otherwise.
 fn menu_marker(selected: bool) -> String {
     if selected {
-        style("›").red().bold().to_string()
+        style("›").danger().bold().to_string()
     } else {
         " ".to_string()
     }
@@ -1758,9 +1809,9 @@ pub(super) fn focus_menu_row(info: &CommandInfo, selected: bool, width: usize) -
 fn menu_row(name: &str, desc: &str, selected: bool, width: usize) -> String {
     let marker = menu_marker(selected);
     let name = if selected {
-        style(format!("{name:<9}")).cyan().bold().to_string()
+        style(format!("{name:<9}")).accent().bold().to_string()
     } else {
-        style(format!("{name:<9}")).cyan().to_string()
+        style(format!("{name:<9}")).accent().to_string()
     };
     let desc_budget = width.saturating_sub(HINT_INDENT + 9);
     let desc = style(clip_to_width(desc, desc_budget)).dim();
@@ -1795,12 +1846,12 @@ fn focus_agent_pick_row(cli: AgentCli, selected: bool, is_default: bool, width: 
     let marker = menu_marker(selected);
     let name = if selected {
         style(format!("{:<10}", cli.display_name()))
-            .cyan()
+            .accent()
             .bold()
             .to_string()
     } else {
         style(format!("{:<10}", cli.display_name()))
-            .cyan()
+            .accent()
             .to_string()
     };
     let tag = if is_default {
@@ -1855,7 +1906,7 @@ fn focus_close_pick_row(force: bool, selected: bool, width: usize) -> String {
 /// panes the identity rides the tab strip ([`active_session_header`]) instead.
 fn focus_session_header(state: &HomeState) -> String {
     style(format!("session: {}", state.focused_session_name()))
-        .cyan()
+        .accent()
         .bold()
         .to_string()
 }
@@ -1923,10 +1974,10 @@ fn focus_menu_body(state: &HomeState, width: usize) -> Vec<String> {
 /// session-scoped command line (`❯ <input>▏`) and the Session-scope hint below
 /// it. Shared by the idle-session [`focus_prompt`] and the "+ new" tab.
 fn focus_prompt_body(state: &HomeState, width: usize) -> Vec<String> {
-    let prompt = style("❯").red().bold();
+    let prompt = style("❯").danger().bold();
     // Split at the caret so ←/→/Home/End move a visible block caret through the prompt.
     let (before, after) = state.focus_prompt().split_at(state.focus_prompt_cursor());
-    let value = widgets::block_caret(before, after, &Style::new().cyan());
+    let value = widgets::block_caret(before, after, &Style::new().accent());
     let mut lines = vec![clip_to_width(&format!("{prompt} {value}"), width)];
     lines.push(String::new());
     lines.extend(focus_hint_lines(state.focus_prompt_hint(), width));
@@ -2007,7 +2058,7 @@ fn focus_pane(state: &HomeState, width: usize, rows: usize) -> Vec<String> {
                 lines.extend(terminal_pane(view, width, body));
             }
             None => {
-                lines.push(style("● live terminal").green().to_string());
+                lines.push(style("● live terminal").success().to_string());
                 lines.push(style("Enter で再アタッチ").dim().to_string());
             }
         }
@@ -2026,7 +2077,7 @@ fn focus_hint_lines(hint: Hint, width: usize) -> Vec<String> {
             .iter()
             .take(HINT_MAX)
             .map(|h| {
-                let name = style(format!("{:<9}", h.name)).cyan().to_string();
+                let name = style(format!("{:<9}", h.name)).accent().to_string();
                 let desc = style(clip_to_width(
                     h.description,
                     width.saturating_sub(HINT_INDENT + 9),
@@ -2039,7 +2090,7 @@ fn focus_hint_lines(hint: Hint, width: usize) -> Vec<String> {
             let mut lines = vec![format!(
                 "  {} {}",
                 style("usage").dim(),
-                style(usage).cyan()
+                style(usage).accent()
             )];
             for example in examples.iter().take(HINT_MAX) {
                 let text = clip_to_width(example, width.saturating_sub(HINT_INDENT + 6));
@@ -2072,13 +2123,13 @@ fn switch_create_pane(create: &CreateInput, width: usize, rows: usize) -> Vec<St
     // content area is the pane width less those four columns.
     let inner = width.saturating_sub(4).max(1);
     let (before, after) = create.value().split_at(create.cursor());
-    let value = widgets::block_caret(before, after, &Style::new().cyan());
-    let mut lines = vec![style("+ new session").green().bold().to_string()];
+    let value = widgets::block_caret(before, after, &Style::new().accent());
+    let mut lines = vec![style("+ new session").success().bold().to_string()];
     lines.extend(widgets::boxed("", inner, &[value]));
     // Keep the row count stable whether or not the name is currently invalid: an
     // error replaces the dim hint in place rather than adding a row.
     match create.error() {
-        Some(err) => lines.push(style(clip_to_width(err, width)).red().to_string()),
+        Some(err) => lines.push(style(clip_to_width(err, width)).danger().to_string()),
         None => lines.push(
             style("空文字・重複・\"/\" は作成できません")
                 .dim()
@@ -2095,10 +2146,10 @@ fn switch_create_pane(create: &CreateInput, width: usize, rows: usize) -> Vec<St
 /// instead (see [`super::switch_rename_rows`]).
 fn switch_rename_pane(rename: &RenameInput, width: usize, rows: usize) -> Vec<String> {
     let inner = width.saturating_sub(4).max(1);
-    let value = widgets::block_caret(rename.value(), "", &Style::new().cyan());
+    let value = widgets::block_caret(rename.value(), "", &Style::new().accent());
     let mut lines = vec![clip_to_width(
         &style(format!("rename {}", rename.target()))
-            .cyan()
+            .accent()
             .bold()
             .to_string(),
         width,
@@ -2259,6 +2310,29 @@ fn note_overlay(state: &HomeState, width: usize, rows: usize) -> Option<Vec<Stri
 /// highlighted session's note is drawn over the top by [`note_overlay`] (not
 /// inline), so it never pushes this preview around.
 pub(super) fn switch_preview(state: &HomeState, width: usize, rows: usize) -> Vec<String> {
+    if state.list().create_row_selected() {
+        let mut lines = vec![
+            style(clip_to_width("+ new session", width))
+                .green()
+                .bold()
+                .to_string(),
+            style(clip_to_width(
+                "Type a name here, or press Enter, to create a session.",
+                width,
+            ))
+            .dim()
+            .to_string(),
+            style(clip_to_width(
+                "Esc cancels the input after it opens.",
+                width,
+            ))
+            .dim()
+            .to_string(),
+        ];
+        lines.truncate(rows);
+        return lines;
+    }
+
     let body_rows = rows;
     // Identify the highlighted row. `selected()` is `Some` for a real session
     // row and `None` on the root row (which carries no git status / tracked
@@ -2312,7 +2386,7 @@ pub(super) fn switch_preview(state: &HomeState, width: usize, rows: usize) -> Ve
                 lines.extend(terminal_pane(view, width, body));
             }
             None => {
-                lines.push(style("● live terminal").green().to_string());
+                lines.push(style("● live terminal").success().to_string());
                 lines.push(style("Enter で再アタッチ").dim().to_string());
             }
         }
@@ -2330,8 +2404,8 @@ pub(super) fn switch_preview(state: &HomeState, width: usize, rows: usize) -> Ve
                 }
             }
             SessionActionUi::Prompt => {
-                let prompt = style("❯").red().bold();
-                let value = widgets::block_caret("", "", &Style::new().cyan());
+                let prompt = style("❯").danger().bold();
+                let value = widgets::block_caret("", "", &Style::new().accent());
                 lines.push(clip_to_width(&format!("{prompt} {value}"), width));
             }
         }
@@ -2466,7 +2540,7 @@ fn markdown_row(line: &MarkdownLine, width: usize) -> String {
     let mut out = String::new();
     if !line.prefix.is_empty() {
         let prefix = match line.style {
-            LineStyle::Bullet | LineStyle::Number => style(&line.prefix).cyan().to_string(),
+            LineStyle::Bullet | LineStyle::Number => style(&line.prefix).accent().to_string(),
             LineStyle::Quote => style(&line.prefix).dim().to_string(),
             _ => line.prefix.clone(),
         };
@@ -2486,18 +2560,18 @@ fn styled_span(span: &Span, line_style: LineStyle) -> String {
     match line_style {
         LineStyle::Heading(level) => heading_style(text, level),
         // Syntax-highlighted code carries a per-token colour; an uncoloured code
-        // span (unknown highlight) falls back to a uniform green.
+        // span (unknown highlight) falls back to the palette's success colour.
         LineStyle::Code => match span.color {
             Some(rgb) => style(text).color256(rgb_to_ansi256(rgb)).to_string(),
-            None => style(text).green().to_string(),
+            None => style(text).success().to_string(),
         },
         LineStyle::Quote => style(text).dim().italic().to_string(),
         _ => match span.style {
             SpanStyle::Plain => text.to_string(),
             SpanStyle::Strong => style(text).bold().to_string(),
             SpanStyle::Emphasis => style(text).italic().to_string(),
-            SpanStyle::Code => style(text).green().to_string(),
-            SpanStyle::Link => style(text).blue().underlined().to_string(),
+            SpanStyle::Code => style(text).success().to_string(),
+            SpanStyle::Link => style(text).info().underlined().to_string(),
         },
     }
 }
@@ -2507,9 +2581,9 @@ fn styled_span(span: &Span, line_style: LineStyle) -> String {
 fn heading_style(text: &str, level: u8) -> String {
     let base = style(text).bold();
     match level {
-        1 => base.magenta(),
-        2 => base.cyan(),
-        3 => base.yellow(),
+        1 => base.feature(),
+        2 => base.accent(),
+        3 => base.warning(),
         _ => base,
     }
     .to_string()
@@ -2606,9 +2680,9 @@ mod tests {
     }
 
     #[test]
-    fn uncoloured_code_span_falls_back_to_green() {
-        // A code-block span with no highlight colour uses the uniform green arm,
-        // matching the styling of inline code.
+    fn uncoloured_code_span_falls_back_to_success() {
+        // A code-block span with no highlight colour uses the palette's success
+        // colour, matching the styling of inline code.
         let span = Span {
             text: "x".to_string(),
             style: SpanStyle::Code,
@@ -2616,7 +2690,7 @@ mod tests {
         };
         assert_eq!(
             styled_span(&span, LineStyle::Code),
-            style("x").green().to_string()
+            style("x").success().to_string()
         );
     }
 

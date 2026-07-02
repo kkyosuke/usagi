@@ -8,6 +8,10 @@ fn switch_create_rows_show_the_input_and_an_error() {
     assert_eq!(rows.len(), 1);
     let plain = console::strip_ansi_codes(&rows[0]).into_owned();
     assert!(plain.contains("+ new: wip"));
+    assert!(
+        plain.starts_with("  +"),
+        "input mode keeps the + aligned with the persistent create row: {plain:?}"
+    );
 
     // Caret in the middle: the block caret sits on a character, so the name reads
     // intact without an inserted glyph.
@@ -17,7 +21,9 @@ fn switch_create_rows_show_the_input_and_an_error() {
 
     let with_error = switch_create_rows("feature", 7, Some("\"feature\" already exists."), 40);
     assert_eq!(with_error.len(), 2);
-    assert!(console::strip_ansi_codes(&with_error[1]).contains("already exists"));
+    let err = console::strip_ansi_codes(&with_error[1]).into_owned();
+    assert!(err.contains("already exists"));
+    assert!(err.starts_with("  "));
 }
 
 #[test]

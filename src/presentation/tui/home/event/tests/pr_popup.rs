@@ -72,7 +72,7 @@ fn run_pr_clicks(inputs: Vec<io::Result<Input>>, state: HomeState) -> (Vec<Strin
     let mut rename = |_: &Path, n: &str, l: &str| noop_rename(n, l);
     let mut set_note_fake = |_: &Path, n: &str, t: &str| noop_set_note(n, t);
     let mut reorder_fake: fn(&str, bool) -> SessionReorder = noop_reorder;
-    let mut dispatch_remove = |_: &Path, _: &str, _: bool| {};
+    let mut dispatch_remove = |_: &Path, _: &str, _: bool, _| {};
     let mut evict = |_: &Path| {};
     let mut branches: fn() -> Vec<String> = no_branches;
     let mut config: fn(&Term) -> Result<Option<ConfigReload>> = noop_config;

@@ -16,6 +16,10 @@
 #   - infrastructure/resource\.rs : `sysinfo` による実プロセスの CPU/メモリ計測 IO。
 #       集計・整形の純ロジックは domain/resource.rs に切り出して計測対象に含めてある。
 #   - infrastructure/release\.rs : `git ls-remote` のネットワーク IO とタイムアウト監視。
+#   - infrastructure/env_resolver/op_cli\.rs : ワークスペース env を解決する `op` CLI
+#       子プロセスの実 IO（stdout/stderr のスレッド読み出し・タイムアウト待ち）と OS
+#       キーチェーンからのサービスアカウントトークン取得。解決ロジック自体は
+#       `SecretResolver` を注入して env_resolver/mod.rs に切り出し、計測対象に含めてある。
 #   - tui/io/term_reader\.rs  : 実端末からのキー入力（live TTY が必要）。
 #   - tui/app/mod\.rs / tui/home/mod\.rs / home/terminal/pane\.rs / home/terminal/pool\.rs
 #     / tui/open/mod\.rs / tui/config/mod\.rs / tui/config/provisioning\.rs
@@ -31,7 +35,7 @@
 #       コンパイルされ、テストが触れるのは lib 側のシンボルだけのため、binary 側の
 #       インスタンスが常に未カバーになってしまう（二重ビルド問題）。実 IO 層として
 #       除外することで正確な計測結果を維持する。
-export COVERAGE_IGNORE='(src/main\.rs|infrastructure/pty\.rs|infrastructure/resource\.rs|infrastructure/release\.rs|infrastructure/setup_runner\.rs|tui/io/term_reader\.rs|tui/app/mod\.rs|tui/home/mod\.rs|tui/home/terminal/pane\.rs|tui/home/terminal/pool\.rs|tui/open/mod\.rs|tui/config/mod\.rs|tui/config/provisioning\.rs|tui/welcome/mod\.rs)'
+export COVERAGE_IGNORE='(src/main\.rs|infrastructure/pty\.rs|infrastructure/resource\.rs|infrastructure/release\.rs|infrastructure/env_resolver/op_cli\.rs|infrastructure/setup_runner\.rs|tui/io/term_reader\.rs|tui/app/mod\.rs|tui/home/mod\.rs|tui/home/terminal/pane\.rs|tui/home/terminal/pool\.rs|tui/open/mod\.rs|tui/config/mod\.rs|tui/config/provisioning\.rs|tui/welcome/mod\.rs)'
 # 100% を要求するカバレッジ指標。
 export COVERAGE_MIN=100
 

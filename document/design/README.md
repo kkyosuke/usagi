@@ -52,7 +52,9 @@ New を選ぶと新規プロジェクト画面へ、Config を選ぶと設定画
 
 ## 設計メモ（共通）
 
-- 配色には `console` クレートのスタイル（magenta / green / cyan / yellow / red / dim）を使用。
+- 配色は `src/presentation/theme.rs` の `Palette` で一括管理する。各画面は `accent` / `success` /
+  `danger` / `warning` / `feature` / `info` の意味役割を使い、具体的な ANSI 色やタイトルフェード用
+  ANSI-256 値、埋め込みターミナルのリンク RGB は同ファイルを正本とする。
 - 中央寄せは「端末幅 − コンテンツ幅」を 2 で割った左パディングで実現（`centered_padding`）。
   幅は**表示桁（display width）**で測るため、CJK など全角グリフを含むタイトル・フッターも実際の
   描画幅で中央に寄ります。端末が狭い場合は `saturating_sub` によりパディング 0 にフォールバックし、

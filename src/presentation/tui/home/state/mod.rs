@@ -1141,9 +1141,14 @@ impl HomeState {
     /// `session` commands (create / remove / rename / note) run against this so a
     /// new session lands in the workspace the user is pointing at.
     pub fn selected_workspace_root(&self) -> PathBuf {
+        let selected_group = if self.list.create_row_selected() {
+            self.list.group_count().saturating_sub(1)
+        } else {
+            self.list.selected_group()
+        };
         // `selected_group()` is always a valid group index, so group 0 is the
         // primary and `i = g - 1` indexes the extra (unite) workspaces in step.
-        match self.list.selected_group().checked_sub(1) {
+        match selected_group.checked_sub(1) {
             None => self.root_path.clone(),
             Some(i) => self.extra_groups[i].root_path.clone(),
         }
@@ -1949,7 +1954,8 @@ impl HomeState {
     /// Focus the session at `row` (0 is the root row, `i` maps to worktree
     /// `i - 1`) in the list, so the embedded terminal re-roots there.
     pub fn focus_session(&mut self, row: usize) {
-        self.list.focus_index(row);
+        self.list
+            .focus_index(row.min(self.list.create_row().saturating_sub(1)));
     }
 
     // --- command palette (`:`) ---------------------------------------------
@@ -2352,6 +2358,21 @@ impl HomeState {
             .map(worktree_name)
             .unwrap_or(ROOT_NAME)
             .to_string()
+    }
+
+    /// The session that should receive focus after the currently focused session
+    /// is closed: the nearest session visually above it, or (when none exists)
+    /// the nearest session below it. Root rows are skipped so a close never lands
+    /// on `⌂ root` merely because the closed session was the first row.
+    pub fn focus_target_after_close(&self) -> Option<String> {
+        let refs = self.list.refs();
+        let active = refs.iter().position(|r| r.active && r.name != ROOT_NAME)?;
+        refs[..active]
+            .iter()
+            .rev()
+            .chain(refs[active + 1..].iter())
+            .find(|r| r.name != ROOT_NAME)
+            .map(|r| r.name.clone())
     }
 
     /// Leave 在席 for the base 切替 (Switch) — the default mode.

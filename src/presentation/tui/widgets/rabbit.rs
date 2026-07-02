@@ -10,6 +10,7 @@
 //! rest of the TUI. The functions are re-exported from [`super`], so callers
 //! still reach them as `widgets::rabbit_lines` etc.
 
+use crate::presentation::theme::Palette;
 use console::{style, Style};
 
 use crate::domain::resource::Load;
@@ -42,7 +43,7 @@ pub fn rabbit_lines_at(col: usize) -> Vec<String> {
         .iter()
         .map(|line| {
             style(format!("{padding}{line}"))
-                .magenta()
+                .feature()
                 .bold()
                 .to_string()
         })
@@ -80,7 +81,7 @@ pub fn farewell_lines() -> Vec<String> {
     let inner = content + FAREWELL_PAD * 2;
     let rule = "─".repeat(inner);
     let frame = Style::new().dim();
-    let rabbit = Style::new().cyan();
+    let rabbit = Style::new().accent();
 
     let mut lines = Vec::with_capacity(FAREWELL_ART.len() + 2);
     lines.push(frame.apply_to(format!("╭{rule}╮")).to_string());
@@ -122,9 +123,9 @@ impl RabbitMood {
     /// the *figures* beside the rabbit, not the rabbit itself.
     fn paint(self) -> Style {
         match self {
-            RabbitMood::Browsing => Style::new().magenta(),
-            RabbitMood::Attentive => Style::new().cyan(),
-            RabbitMood::Working => Style::new().green(),
+            RabbitMood::Browsing => Style::new().feature(),
+            RabbitMood::Attentive => Style::new().accent(),
+            RabbitMood::Working => Style::new().success(),
         }
         .bold()
     }
@@ -322,9 +323,9 @@ impl MascotReaction {
     /// the bounce, yellow for the sparkles, cyan for the bashful melt.
     fn style(self) -> Style {
         match self {
-            MascotReaction::Hop => Style::new().magenta().bold(),
-            MascotReaction::Sparkle => Style::new().yellow().bold(),
-            MascotReaction::Bashful => Style::new().cyan().bold(),
+            MascotReaction::Hop => Style::new().feature().bold(),
+            MascotReaction::Sparkle => Style::new().warning().bold(),
+            MascotReaction::Bashful => Style::new().accent().bold(),
         }
     }
 }
@@ -399,7 +400,7 @@ pub fn workspace_rabbit_speaking(
 
     // The bubble is the update accent (yellow-bold); the rabbit keeps its mood
     // colour, so the alert and the mascot stay visually distinct.
-    let bubble = Style::new().yellow().bold();
+    let bubble = Style::new().warning().bold();
     // Columns between the corner glyphs: the content area plus a padding space on
     // each side.
     let span = content_w + 2;
@@ -478,7 +479,7 @@ pub fn workspace_rabbit_rail() -> Vec<String> {
         .map(|row| {
             let pad = block_w.saturating_sub(console::measure_text_width(&row));
             style(format!("{row}{}", " ".repeat(pad)))
-                .magenta()
+                .feature()
                 .bold()
                 .to_string()
         })
@@ -530,7 +531,7 @@ pub fn loading_rabbit(frame: usize, label: &str) -> Vec<String> {
         .map(|row| {
             let pad = block_w.saturating_sub(console::measure_text_width(&row));
             style(format!("{row}{}", " ".repeat(pad)))
-                .magenta()
+                .feature()
                 .bold()
                 .to_string()
         })
@@ -575,7 +576,7 @@ pub fn loading_rabbit_timed(hop_frame: usize, face_index: usize, label: &str) ->
         .map(|row| {
             let pad = block_w.saturating_sub(console::measure_text_width(&row));
             style(format!("{row}{}", " ".repeat(pad)))
-                .magenta()
+                .feature()
                 .bold()
                 .to_string()
         })
@@ -599,7 +600,7 @@ pub fn done_rabbit(ok: bool, message: &str) -> Vec<String> {
         .map(|row| {
             let pad = block_w.saturating_sub(console::measure_text_width(&row));
             style(format!("{row}{}", " ".repeat(pad)))
-                .magenta()
+                .feature()
                 .bold()
                 .to_string()
         })
@@ -652,7 +653,7 @@ pub fn running_rabbit(col: usize, face_right: bool, airborne: bool) -> Vec<Strin
         [String::new(), ears, body]
     };
     rows.into_iter()
-        .map(|row| style(row).magenta().bold().to_string())
+        .map(|row| style(row).feature().bold().to_string())
         .collect()
 }
 
@@ -679,7 +680,7 @@ pub fn multiplying_rabbits(count: usize) -> Vec<String> {
         MULTIPLY_FEET.repeat(count),
     ];
     rows.into_iter()
-        .map(|row| style(row).magenta().bold().to_string())
+        .map(|row| style(row).feature().bold().to_string())
         .collect()
 }
 

@@ -15,6 +15,7 @@
 //! ([`terminal`]), the grid-to-lines rendering (`home::terminal::view`), and the
 //! exit-status-to-log-line decision ([`pty_exit`]) — are tested on their own.
 
+use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering};
@@ -153,6 +154,10 @@ impl PtySession {
     /// command does, so leaving the agent returns to 在席 (Focus) rather than
     /// dropping the user at a bare shell prompt.
     ///
+    /// `env` is a map of workspace-scoped secret environment variables already
+    /// resolved by the caller. The values are injected through the child process
+    /// environment, never through the launch command line.
+    ///
     /// `scrollback` caps how many scrolled-off lines the embedded terminal keeps
     /// for the user to scroll back over (the `vt100` parser grows the buffer
     /// lazily up to this bound). It is the configured
@@ -165,6 +170,7 @@ impl PtySession {
         cols: u16,
         command: Option<&str>,
         scrollback: usize,
+        env: &BTreeMap<String, String>,
     ) -> Result<Self> {
         let pty_system = native_pty_system();
         let pair = pty_system
@@ -179,6 +185,9 @@ impl PtySession {
         let shell = terminal::default_shell();
         let mut cmd = CommandBuilder::new(&shell);
         cmd.cwd(dir);
+        for (name, value) in env {
+            cmd.env(name, value);
+        }
         if let Some(command) = command {
             configure_initial_command(&mut cmd, &shell, command);
         }

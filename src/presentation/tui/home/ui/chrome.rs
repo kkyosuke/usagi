@@ -3,6 +3,7 @@
 //! (with its command hints), and the session-removal / quit-confirmation
 //! modals. All functions take plain data and return styled lines.
 
+use crate::presentation::theme::Palette;
 use console::{style, Style};
 
 use super::super::command::{CommandHint, Hint};
@@ -15,6 +16,12 @@ use super::{
 use crate::domain::settings::KeyScheme;
 use crate::domain::version::Version;
 use crate::presentation::tui::widgets;
+
+/// Prefix shared by the persistent "+ new session" row and the inline
+/// `+ new: ...` editor that replaces it: a one-cell gutter plus a following
+/// space. Keeping this explicit prevents the `+` from jumping horizontally when
+/// the row enters input mode.
+const CREATE_ROW_INDENT: &str = "  ";
 
 /// Minimum / maximum display width of the active-session-name field in the
 /// title bar. The field scales with the terminal (a quarter of its width) and
@@ -101,10 +108,10 @@ pub(super) fn task_status_line(rows: &[TaskRow], width: usize) -> Vec<String> {
     let (icon, icon_style) = match lead.mark {
         TaskMark::Running(frame) => (
             widgets::spinner_char(frame).to_string(),
-            Style::new().cyan().bold(),
+            Style::new().accent().bold(),
         ),
-        TaskMark::Done(true) => ("✓".to_string(), Style::new().green().bold()),
-        TaskMark::Done(false) => ("✗".to_string(), Style::new().red().bold()),
+        TaskMark::Done(true) => ("✓".to_string(), Style::new().success().bold()),
+        TaskMark::Done(false) => ("✗".to_string(), Style::new().danger().bold()),
     };
     // Scale the label field with the terminal, clamped so the block still tucks
     // into the blank gap beside the centred title / mode ladder. Constant for
@@ -174,7 +181,7 @@ pub(super) fn mode_ladder(width: usize, current: Mode) -> String {
         .iter()
         .map(|(mode, label)| {
             if *mode == current {
-                style(*label).cyan().bold().to_string()
+                style(*label).accent().bold().to_string()
             } else {
                 style(*label).dim().to_string()
             }
@@ -199,7 +206,7 @@ pub(super) fn command_hint_row(
     width: usize,
 ) -> String {
     let marker = if selected {
-        style("›").red().bold().to_string()
+        style("›").danger().bold().to_string()
     } else {
         " ".to_string()
     };
@@ -207,7 +214,7 @@ pub(super) fn command_hint_row(
     // continuation of what is in the input line.
     let split = typed_len.min(hint.name.len());
     let (head, tail) = hint.name.split_at(split);
-    let name = format!("{}{}", style(head).cyan().bold(), style(tail).cyan());
+    let name = format!("{}{}", style(head).accent().bold(), style(tail).accent());
     let name_col = pad_to_width(name, HINT_NAME_COL);
     let desc_budget = width.saturating_sub(HINT_INDENT + HINT_NAME_COL);
     let desc = style(clip_to_width(hint.description, desc_budget)).dim();
@@ -253,7 +260,7 @@ pub(super) fn hint_lines(state: &HomeState, width: usize) -> Vec<String> {
             let mut lines = vec![format!(
                 "  {} {}",
                 style("usage").dim(),
-                style(usage).cyan()
+                style(usage).accent()
             )];
             for example in examples.iter().take(HINT_MAX) {
                 let text = clip_to_width(example, width.saturating_sub(HINT_INDENT + 6));
@@ -271,6 +278,11 @@ pub(super) fn hint_lines(state: &HomeState, width: usize) -> Vec<String> {
 /// resident line.
 pub(super) fn input_line(state: &HomeState) -> String {
     match state.mode() {
+        Mode::Switch if state.list().create_row_selected() => {
+            style(" Type a session name to create".to_string())
+                .green()
+                .to_string()
+        }
         Mode::Switch => style(" Pick a session".to_string()).dim().to_string(),
         Mode::Focus => style(format!(
             " Operating session: {}",
@@ -278,7 +290,7 @@ pub(super) fn input_line(state: &HomeState) -> String {
         ))
         .dim()
         .to_string(),
-        Mode::Attached => style(" ● live terminal".to_string()).green().to_string(),
+        Mode::Attached => style(" ● live terminal".to_string()).success().to_string(),
     }
 }
 
@@ -286,10 +298,10 @@ pub(super) fn input_line(state: &HomeState) -> String {
 /// position (the byte offset from [`HomeState::cursor`]), so ←/→/Home/End move a
 /// visible caret through the text instead of always sitting at the end.
 fn command_input_content(state: &HomeState) -> String {
-    let prompt = style("❯").red().bold();
+    let prompt = style("❯").danger().bold();
     let input = state.input();
     let (before, after) = input.split_at(state.cursor());
-    let value = widgets::block_caret(before, after, &Style::new().cyan());
+    let value = widgets::block_caret(before, after, &Style::new().accent());
     format!("{prompt} {value}")
 }
 
@@ -438,7 +450,7 @@ pub(super) fn footer_line(width: usize, state: &HomeState) -> String {
                 "s sort"
             };
             format!(
-                "[switch]  ↑↓ session / K/J move / {sort} / ←→ tab / Enter focus / c new / r rename / n/Ctrl-E note / x close tab / : commands / ? keys / {esc}"
+                "[switch]  ↑↓ session / + row type/Enter new / K/J move / {sort} / ←→ tab / Enter focus / c new / r rename / n/Ctrl-E note / x close tab / : commands / ? keys / {esc}"
             )
         }
         // 在席 shares the 没入 prefix grammar under the prefix scheme: `Ctrl-O` is
@@ -494,13 +506,24 @@ pub(super) fn switch_create_rows(
     error: Option<&str>,
     left_w: usize,
 ) -> Vec<String> {
-    let base = Style::new().green().bold();
+    let base = Style::new().success().bold();
     let (before, after) = input.split_at(cursor);
     let value = widgets::block_caret(before, after, &base);
-    let label = clip_to_width(&format!("{}{value}", base.apply_to("+ new: ")), left_w);
+    // Align the `+` with the persistent "+ new session" affordance it replaces:
+    // both sit two columns in (a one-cell gutter plus a space), so opening the
+    // input never shifts the glyph sideways. `CREATE_ROW_INDENT` is that shared
+    // two-column prefix.
+    let label = clip_to_width(
+        &format!("{CREATE_ROW_INDENT}{}{value}", base.apply_to("+ new: ")),
+        left_w,
+    );
     let mut rows = vec![label];
     if let Some(err) = error {
-        rows.push(style(clip_to_width(err, left_w)).red().to_string());
+        rows.push(
+            style(clip_to_width(&format!("{CREATE_ROW_INDENT}{err}"), left_w))
+                .danger()
+                .to_string(),
+        );
     }
     rows
 }
@@ -516,7 +539,7 @@ pub(super) fn switch_rename_rows(
     cursor: usize,
     left_w: usize,
 ) -> Vec<String> {
-    let base = Style::new().cyan().bold();
+    let base = Style::new().accent().bold();
     let (before, after) = input.split_at(cursor);
     let value = widgets::block_caret(before, after, &base);
     let label = clip_to_width(
@@ -536,9 +559,9 @@ pub(super) fn remove_modal_row(name: &str, cursor: bool, selected: bool, inner: 
     let text = clip_to_width(name, inner.saturating_sub(6));
     let line = format!("{marker} {check} {text}");
     if cursor {
-        style(line).cyan().bold().to_string()
+        style(line).accent().bold().to_string()
     } else if selected {
-        style(line).cyan().to_string()
+        style(line).accent().to_string()
     } else {
         style(line).dim().to_string()
     }
