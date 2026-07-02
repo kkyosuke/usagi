@@ -82,6 +82,15 @@ pub(super) fn status_cell(status: Option<BranchStatus>) -> String {
 
 /// The state of a session's embedded agent, shown by an icon on the row's first
 /// line and spelled out on its detail line.
+/// Nerd Font glyph flagging that the row's detail line reports an **AI agent's**
+/// state (rather than a plain shell). It leads the agent label — `<robot> ☾ ready`
+/// — so an agent-backed session reads at a glance. Kept in the Font Awesome **4**
+/// range (like the git-status glyphs above), where every Nerd Font — old or partial
+/// — carries it: the FA5 `nf-fa-robot` (U+F544) is absent from those and shows a `?`
+/// fallback (the same trap noted for [`MEM_ICON`]). Without any Nerd Font the phase
+/// glyph and word beside it still carry the meaning.
+const AGENT_ICON: char = '\u{f17b}'; // nf-fa-android — an AI agent (robot) drives this session
+
 #[derive(Clone, Copy)]
 enum AgentState {
     /// No live embedded session: the row carries no agent detail.
@@ -118,27 +127,33 @@ impl AgentState {
         }
     }
 
-    /// The detail-line content: an icon together with its label — `☾ ready`
-    /// (dim), `▶ running` (green), `◆ waiting` (yellow), or `✓ done` (cyan) —
-    /// clipped to `width`, or `None` when absent (the row has no agent in use).
+    /// The detail-line content: an [AI-agent glyph](AGENT_ICON), then a phase icon
+    /// together with its label — `<robot> ☾ ready` (dim), `<robot> ▶ running`
+    /// (green), `<robot> ◆ waiting` (yellow), or `<robot> ✓ done` (cyan) — clipped
+    /// to `width`, or `None` when absent (the row has no agent in use). The AI glyph
+    /// rides inside the same styled span, so it takes the phase's colour.
     fn detail(self, width: usize) -> Option<String> {
         match self {
             AgentState::Absent => None,
-            AgentState::Ready => Some(style(clip_to_width_cow("☾ ready", width)).dim().to_string()),
+            AgentState::Ready => Some(
+                style(clip_to_width_cow(&format!("{AGENT_ICON} ☾ ready"), width))
+                    .dim()
+                    .to_string(),
+            ),
             AgentState::Running => Some(
-                style(clip_to_width_cow("▶ running", width))
+                style(clip_to_width_cow(&format!("{AGENT_ICON} ▶ running"), width))
                     .success()
                     .bold()
                     .to_string(),
             ),
             AgentState::Waiting => Some(
-                style(clip_to_width_cow("◆ waiting", width))
+                style(clip_to_width_cow(&format!("{AGENT_ICON} ◆ waiting"), width))
                     .warning()
                     .bold()
                     .to_string(),
             ),
             AgentState::Done => Some(
-                style(clip_to_width_cow("✓ done", width))
+                style(clip_to_width_cow(&format!("{AGENT_ICON} ✓ done"), width))
                     .accent()
                     .bold()
                     .to_string(),
@@ -1839,7 +1854,9 @@ pub(super) const ROOT_ENTRY_LINES: usize = 3;
 /// ellipsis) instead of shoving the divider and tabs sideways, and the 切替
 /// preview does not jitter as the cursor moves between sessions.
 const HEADER_NAME_COL: usize = 16;
-const HEADER_AGENT_COL: usize = 9;
+/// Wide enough for the longest agent label with its leading [AI glyph](AGENT_ICON)
+/// and phase icon: `<robot> ▶ running` measures 11 columns.
+const HEADER_AGENT_COL: usize = 11;
 /// The status + agent block that follows the name: the right-edge status field
 /// ([`STATUS_COL`]) and the agent label, with a two-space gap between them.
 const HEADER_DETAIL_COL: usize = STATUS_COL + 2 + HEADER_AGENT_COL;
@@ -3108,7 +3125,7 @@ mod tests {
         let line = detail_content(AgentState::Running, std::slice::from_ref(&badge), 24);
         assert_eq!(console::measure_text_width(&line), 24);
         let plain = console::strip_ansi_codes(&line);
-        assert!(plain.starts_with("▶ running"));
+        assert!(plain.starts_with(&format!("{AGENT_ICON} ▶ running")));
         assert!(plain.ends_with("+124 -18"));
 
         // With no agent the cluster still rides the right edge.
@@ -3160,7 +3177,7 @@ mod tests {
         let cells = vec![time, commits, badge];
         let line = detail_content(AgentState::Running, &cells, 40);
         let plain = console::strip_ansi_codes(&line);
-        assert!(plain.starts_with("▶ running"));
+        assert!(plain.starts_with(&format!("{AGENT_ICON} ▶ running")));
         assert!(plain.contains("3min ago ↑2 ↓1 +1 -2"));
         assert!(plain.ends_with("+1 -2"));
     }
@@ -3281,7 +3298,7 @@ mod tests {
         let cells = vec![badge, cell];
         let line = detail_content(AgentState::Running, &cells, 40);
         let plain = console::strip_ansi_codes(&line);
-        assert!(plain.starts_with("▶ running"));
+        assert!(plain.starts_with(&format!("{AGENT_ICON} ▶ running")));
         assert!(plain.contains(format!("+1 -2 {PR_ICON} 2").as_str()));
         assert!(plain.ends_with(format!("{PR_ICON} 2").as_str()));
     }
