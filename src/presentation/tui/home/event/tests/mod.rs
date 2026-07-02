@@ -783,6 +783,7 @@ fn run_with_tasks(
     let mut tab_action = |_: &mut HomeState, _: &Path, _: usize, _: TabMenuAction| {};
     let mut wiring = Wiring {
         interaction_epoch: 0,
+        watch_sessions: false,
         workspace_root: Path::new("/ws"),
         persist: &mut persist,
         dispatch_create: &mut dispatch_create,
@@ -847,6 +848,74 @@ fn run_with_live_session(reader: &mut dyn KeyReader) -> Result<Outcome> {
     let mut tab_action = |_: &mut HomeState, _: &Path, _: usize, _: TabMenuAction| {};
     let mut wiring = Wiring {
         interaction_epoch: 0,
+        watch_sessions: false,
+        workspace_root: Path::new("/ws"),
+        persist: &mut persist,
+        dispatch_create: &mut dispatch_create,
+        rename_display: &mut rename,
+        set_note: &mut set_note_fake,
+        reorder_session: &mut reorder_fake,
+        dispatch_remove: &mut dispatch_remove,
+        unite_resolve: &mut unite_resolve,
+        dispatch_update: &mut dispatch_update,
+        evict_pool: &mut evict,
+        existing_branches: &mut branches,
+        open_terminal: &mut open,
+        open_url: &mut open_url,
+        open_config: &mut config,
+        preview: &mut preview,
+        tab_op: &mut tab_op,
+        close_tab: &mut close,
+        tab_action: &mut tab_action,
+        save_resume: &mut save_resume,
+        save_last_active: &mut save_last_active,
+    };
+    event_loop(
+        &term,
+        reader,
+        sample_state(),
+        &monitor,
+        &UpdateHandle::new(),
+        &SessionsRefreshHandle::new(),
+        &OneShot::<bool>::new(),
+        &OneShot::<Vec<AgentCli>>::new(),
+        &tasks,
+        &mut wiring,
+    )
+}
+
+/// Run the real loop idle — no live session and nothing in flight — but with
+/// `watch_sessions` on, so it wakes on the watch tick to apply a session list a
+/// background watcher published instead of blocking on the next key. Mirrors
+/// [`run_with_live_session`], swapping the live monitor for a detached one and
+/// turning the watcher flag on, so the loop's idle-watching read path is
+/// exercised directly.
+fn run_idle_watching(reader: &mut dyn KeyReader) -> Result<Outcome> {
+    let term = Term::stdout();
+    let monitor = MonitorHandle::detached();
+    let tasks = TaskHandle::new();
+    let mut persist: fn(&str) = noop_persist;
+    let mut dispatch_create = |_: &Path, _: &str, _: u64| {};
+    let mut rename = |_: &Path, n: &str, l: &str| noop_rename(n, l);
+    let mut dispatch_remove = |_: &Path, _: &str, _: bool, _| {};
+    let mut evict = |_: &Path| {};
+    let mut branches: fn() -> Vec<String> = no_branches;
+    let mut open: fn(&mut HomeState, &Path, bool, bool) -> Result<PaneExit> = noop_open;
+    let mut config: fn(&Term) -> Result<Option<ConfigReload>> = noop_config;
+    let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = noop_preview;
+    let mut tab_op: fn(&Path, Option<TabNav>) -> (Vec<String>, usize) = noop_tab_op;
+    let mut close: fn(&mut HomeState, &Path) = noop_close;
+    let mut set_note_fake = |_: &Path, n: &str, t: &str| noop_set_note(n, t);
+    let mut reorder_fake: fn(&str, bool) -> SessionReorder = noop_reorder;
+    let mut save_resume = |_: &str, _: ResumeLevel| {};
+    let mut save_last_active = |_: &[(String, DateTime<Utc>)]| {};
+    let mut open_url: fn(&str) = noop_open_url;
+    let mut dispatch_update = || {};
+    let mut unite_resolve: fn(&str) -> std::result::Result<GroupSource, String> = no_unite_resolve;
+    let mut tab_action = |_: &mut HomeState, _: &Path, _: usize, _: TabMenuAction| {};
+    let mut wiring = Wiring {
+        interaction_epoch: 0,
+        watch_sessions: true,
         workspace_root: Path::new("/ws"),
         persist: &mut persist,
         dispatch_create: &mut dispatch_create,
@@ -999,6 +1068,7 @@ fn unite_add_and_remove_run_through_the_palette() {
     let mut tab_action = |_: &mut HomeState, _: &Path, _: usize, _: TabMenuAction| {};
     let mut wiring = Wiring {
         interaction_epoch: 0,
+        watch_sessions: false,
         workspace_root: Path::new("/ws"),
         persist: &mut persist,
         dispatch_create: &mut dispatch_create,

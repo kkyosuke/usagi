@@ -47,6 +47,23 @@ fn reload_sessions(root: &Path) -> Option<Vec<SessionRecord>> {
     crate::usecase::workspace_state::recorded_sessions(root)
 }
 
+/// How often the background watcher stats `state.json` for an external change (a
+/// create / remove made by an agent's MCP call, another usagi window, or the CLI).
+/// Paired with the event loop's own `WATCH_SESSIONS_TICK`, so a change lands in the
+/// sidebar within roughly a second — cheap enough to poll continuously while the
+/// screen is open.
+const SESSIONS_WATCH_POLL: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// The last-modified time of `state.json` at `path`, or `None` when it does not
+/// exist yet or cannot be stat'd — the watcher's change signal. A stable value
+/// means no external write since the last poll; any change (including the file
+/// first appearing) re-reads the recorded sessions.
+fn state_mtime(path: &Path) -> Option<std::time::SystemTime> {
+    std::fs::metadata(path)
+        .and_then(|meta| meta.modified())
+        .ok()
+}
+
 /// Track a freshly spawned session-worker handle, first dropping the handles of
 /// workers that have already finished. The set is only fully drained when the
 /// screen exits (joining any in-flight git work), so without this reap a long
@@ -592,6 +609,47 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
         });
     }
 
+    // Reflect session create / remove made outside this screen — an agent's MCP
+    // `session_create` / `session_remove`, another usagi window, or the CLI — which
+    // write `state.json` with no signal to this process. Poll the file's mtime on a
+    // background thread and, when it changes, re-read the recorded sessions and
+    // publish them through the same `sessions_refresh` slot a detach uses; the event
+    // loop (kept ticking by `watch_sessions`) applies them on the next frame without
+    // yanking the cursor. Reading the recorded state (no git re-sync) neither writes
+    // the file back — which would retrigger this poll forever — nor blocks on the git
+    // fan-out: a newly-appeared session's worktree statuses fill in on the next real
+    // sync (detach / restart). Like the entry re-sync above, the thread is detached
+    // (it only reads, so it never leaves half-written state): `watch_stop` below tells
+    // it to exit when the screen closes, so it stops within one poll instead of piling
+    // up across re-entries — and quitting never waits on it.
+    let watch_stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    {
+        let handle = sessions_refresh.clone();
+        let root = workspace.path.clone();
+        let state_path =
+            crate::infrastructure::workspace_store::WorkspaceStore::new(&root).state_path();
+        let stop = watch_stop.clone();
+        std::thread::spawn(move || {
+            // Seed with the state already on screen so only a later external write
+            // triggers a refresh, not the current contents.
+            let mut last = state_mtime(&state_path);
+            loop {
+                std::thread::sleep(SESSIONS_WATCH_POLL);
+                if stop.load(std::sync::atomic::Ordering::SeqCst) {
+                    break;
+                }
+                let mtime = state_mtime(&state_path);
+                if mtime == last {
+                    continue;
+                }
+                last = mtime;
+                if let Some(sessions) = crate::usecase::workspace_state::recorded_sessions(&root) {
+                    handle.set(sessions);
+                }
+            }
+        });
+    }
+
     // Opening a terminal embeds a live shell in the right pane: the pane stays
     // inside the workspace screen (sidebar still visible) and runs the shell
     // until the user detaches, switches sessions, or it exits. `:agent` is the
@@ -1074,6 +1132,9 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
 
     let mut wiring = event::Wiring {
         interaction_epoch: 0,
+        // The state.json watcher below is always running, so let the idle loop wake
+        // to apply the refreshes it publishes.
+        watch_sessions: true,
         workspace_root: &workspace.path,
         persist: &mut persist,
         dispatch_create: &mut dispatch_create,
@@ -1115,6 +1176,11 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
     // at most this waits out the git work in flight (serialised by the op-lock).
     // Their completions go undrained, which is fine: nothing renders after exit
     // and the pool (its shells) is about to be dropped anyway.
+    //
+    // Signal the detached state.json watcher to stop so it exits within one
+    // `SESSIONS_WATCH_POLL` instead of outliving the screen (it is not joined —
+    // quitting never waits on a read-only poller).
+    watch_stop.store(true, std::sync::atomic::Ordering::SeqCst);
     for worker in workers.borrow_mut().drain(..) {
         let _ = worker.join();
     }
