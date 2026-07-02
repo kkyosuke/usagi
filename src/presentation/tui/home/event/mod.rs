@@ -1282,6 +1282,7 @@ pub(crate) fn event_loop_compat(
     // by event-loop tests with a capturing callback.
     let mut dummy = HomeState::new("", Vec::new(), None);
     tab_action(&mut dummy, Path::new(""), 0, TabMenuAction::Close);
+    let _ = open_external_terminal(Path::new(""));
     let mut wiring = Wiring {
         interaction_epoch: 0,
         workspace_root,

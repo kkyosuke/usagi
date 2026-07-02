@@ -1055,8 +1055,7 @@ fn focus_menu_key(
                     state.focus_menu_collapse_agent();
                     launch_agent(term, state, painter, wiring, Some(cli));
                     return;
-                }
-                if let Some(action) = state.focus_menu_selected_terminal_action() {
+                } else if let Some(action) = state.focus_menu_selected_terminal_action() {
                     state.focus_menu_collapse_agent();
                     if action == "new" {
                         open_external_terminal(state, wiring);
@@ -1064,8 +1063,7 @@ fn focus_menu_key(
                         launch_pane(term, state, painter, wiring, false);
                     }
                     return;
-                }
-                if state.focus_close_expanded() {
+                } else if state.focus_close_expanded() {
                     return run_focus_close_picker(term, state, painter, wiring);
                 }
             }
