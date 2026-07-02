@@ -193,13 +193,24 @@ fn focus_menu_hides_ai_until_the_local_llm_is_available() {
     let mut state = state();
     state.enter_focus(1);
     // By default the local LLM is unavailable, so the `ai` command is hidden.
-    // The menu lists the remaining commands alphabetically.
+    // The menu lists the remaining commands in the fixed display order.
     let names: Vec<&str> = state.focus_menu_commands().iter().map(|i| i.name).collect();
-    assert_eq!(names, vec!["agent", "close", "terminal"]);
+    assert_eq!(names, vec!["agent", "terminal", "close"]);
     // Once the local LLM is usable (enabled + model pulled), `ai` appears.
     state.set_ai_available(true);
     let names: Vec<&str> = state.focus_menu_commands().iter().map(|i| i.name).collect();
-    assert_eq!(names, vec!["agent", "ai", "close", "terminal"]);
+    assert_eq!(names, vec!["agent", "terminal", "ai", "close"]);
+}
+
+#[test]
+fn session_menu_rank_orders_the_known_commands_and_ranks_others_last() {
+    use super::super::session_menu_rank;
+    // The fixed 在席 display order: agent, terminal, ai, close.
+    assert!(session_menu_rank("agent") < session_menu_rank("terminal"));
+    assert!(session_menu_rank("terminal") < session_menu_rank("ai"));
+    assert!(session_menu_rank("ai") < session_menu_rank("close"));
+    // Any command outside the four sorts after all of them.
+    assert!(session_menu_rank("close") < session_menu_rank("session"));
 }
 
 #[test]
@@ -214,7 +225,7 @@ fn focus_menu_hides_close_on_the_root_row() {
     // A session row still offers `close`.
     state.enter_focus(1);
     let names: Vec<&str> = state.focus_menu_commands().iter().map(|i| i.name).collect();
-    assert_eq!(names, vec!["agent", "close", "terminal"]);
+    assert_eq!(names, vec!["agent", "terminal", "close"]);
 }
 
 #[test]
@@ -224,16 +235,16 @@ fn focus_menu_hides_agent_when_an_agent_pane_is_already_open() {
     state.enter_focus(1);
     // No live panes yet: `agent` is offered.
     let names: Vec<&str> = state.focus_menu_commands().iter().map(|i| i.name).collect();
-    assert_eq!(names, vec!["agent", "close", "terminal"]);
+    assert_eq!(names, vec!["agent", "terminal", "close"]);
     // Once the session publishes a live `agent` pane, the launch command is hidden
-    // (its agent is already running); the rest still list alphabetically.
+    // (its agent is already running); the rest keep the fixed display order.
     state.set_terminal_tabs(vec!["agent".to_string(), "terminal".to_string()], 0);
     let names: Vec<&str> = state.focus_menu_commands().iter().map(|i| i.name).collect();
-    assert_eq!(names, vec!["close", "terminal"]);
+    assert_eq!(names, vec!["terminal", "close"]);
     // A session whose only live panes are plain terminals keeps offering `agent`.
     state.set_terminal_tabs(vec!["terminal".to_string()], 0);
     let names: Vec<&str> = state.focus_menu_commands().iter().map(|i| i.name).collect();
-    assert_eq!(names, vec!["agent", "close", "terminal"]);
+    assert_eq!(names, vec!["agent", "terminal", "close"]);
 }
 
 #[test]
@@ -254,7 +265,7 @@ fn preview_menu_commands_follow_the_cursor_not_the_active_row() {
         .iter()
         .map(|i| i.name)
         .collect();
-    assert_eq!(names, vec!["agent", "close", "terminal"]);
+    assert_eq!(names, vec!["agent", "terminal", "close"]);
 
     // Active row is a session, cursor moved back onto the root row: the preview is
     // the root's, so `close` is hidden even though the active session could close.
@@ -274,17 +285,17 @@ fn preview_menu_commands_follow_the_cursor_not_the_active_row() {
 fn focus_menu_cursor_moves_and_wraps_and_selects() {
     let mut state = state();
     state.enter_focus(1);
-    // With `ai` hidden, alphabetical order: agent (0, highlighted by default),
-    // close (1), terminal (2).
+    // With `ai` hidden, fixed order: agent (0, highlighted by default),
+    // terminal (1), close (2).
     assert_eq!(state.focus_selected_command().unwrap().name, "agent");
     state.focus_menu_move_down();
-    assert_eq!(state.focus_selected_command().unwrap().name, "close");
+    assert_eq!(state.focus_selected_command().unwrap().name, "terminal");
     state.focus_menu_move_down();
     state.focus_menu_move_down(); // wraps to the top
     assert_eq!(state.focus_menu_cursor(), 0);
-    // Up from the top wraps to the bottom (`terminal`).
+    // Up from the top wraps to the bottom (`close`).
     state.focus_menu_move_up();
-    assert_eq!(state.focus_selected_command().unwrap().name, "terminal");
+    assert_eq!(state.focus_selected_command().unwrap().name, "close");
 }
 
 #[test]
@@ -296,8 +307,8 @@ fn focus_menu_terminal_picker_expands_only_on_terminal_row() {
     state.focus_menu_expand_terminal();
     assert!(!state.focus_menu_expanded());
 
-    // Move up from agent to terminal (wrap) and open the terminal picker.
-    state.focus_menu_move_up();
+    // Move down from agent to terminal and open the terminal picker.
+    state.focus_menu_move_down();
     assert_eq!(state.focus_selected_command().unwrap().name, "terminal");
     assert!(state.focus_menu_terminal_can_expand());
     state.focus_menu_expand_terminal();
@@ -317,7 +328,8 @@ fn focus_menu_close_picker_expands_only_on_close_row() {
     state.focus_menu_expand_close();
     assert!(!state.focus_menu_expanded());
 
-    state.focus_menu_move_down(); // agent -> close
+    state.focus_menu_move_down(); // agent -> terminal
+    state.focus_menu_move_down(); // terminal -> close
     assert_eq!(state.focus_selected_command().unwrap().name, "close");
     assert!(state.focus_close_can_expand());
     state.focus_menu_expand_close();
@@ -356,7 +368,7 @@ fn focus_menu_agent_picker_expands_only_with_a_choice_and_navigates_agents() {
     use crate::domain::settings::AgentCli;
     let mut state = state();
     state.enter_focus(1);
-    // Alphabetical order (agent, close, terminal) highlights the `agent` row on entry.
+    // Fixed order (agent, terminal, close) highlights the `agent` row on entry.
     assert_eq!(state.focus_selected_command().unwrap().name, "agent");
     // With fewer than two agents installed there is nothing to pick: no expand.
     state.set_installed_agents(vec![AgentCli::Claude]);
@@ -387,9 +399,9 @@ fn focus_menu_agent_picker_does_not_expand_off_the_agent_row() {
     let mut state = state();
     state.enter_focus(1);
     state.set_installed_agents(vec![AgentCli::Claude, AgentCli::Codex]);
-    // Move off the `agent` row (down to `close`): the picker cannot open there.
+    // Move off the `agent` row (down to `terminal`): the picker cannot open there.
     state.focus_menu_move_down();
-    assert_eq!(state.focus_selected_command().unwrap().name, "close");
+    assert_eq!(state.focus_selected_command().unwrap().name, "terminal");
     assert!(!state.focus_menu_agent_can_expand());
     state.focus_menu_expand_agent();
     assert!(!state.focus_menu_expanded());

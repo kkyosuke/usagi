@@ -79,7 +79,8 @@ impl CommandRegistry {
 
     /// The commands belonging exactly to `scope`, in registry order — used by the
     /// 在席 (Focus) menu to list a session's runnable commands (`agent`, `ai`,
-    /// `terminal`, `close`); the menu sorts them alphabetically itself. Unlike
+    /// `terminal`, `close`); the menu reorders them into its own fixed display
+    /// order itself. Unlike
     /// completion this is an exact-scope filter, so it excludes the shared
     /// [`CommandScope::Both`] utilities.
     pub fn commands_in_scope(&self, scope: CommandScope) -> Vec<CommandInfo> {

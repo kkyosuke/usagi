@@ -7,7 +7,6 @@ use crate::domain::workspace::Workspace;
 use crate::domain::workspace_state::PrLink;
 use crate::infrastructure::storage::Storage;
 use crate::usecase::issue::{self, IssueFilter};
-use crate::usecase::session;
 use crate::usecase::workspace_state;
 
 /// Register a new workspace. Fails if the name is already taken.
@@ -60,35 +59,29 @@ pub fn overviews(storage: &Storage) -> Result<Vec<WorkspaceOverview>> {
 }
 
 /// Build one workspace's overview, counting its sessions and open issues.
+///
+/// The session count and the unique-PR count both come from the workspace's
+/// `state.json`, so it is read **once** here and both are derived from it, rather
+/// than loading and parsing it twice (once for the sessions, once for the PRs).
+/// A missing or unreadable state yields zero for both, matching the overview's
+/// "one broken entry must not blank the screen" policy.
 fn overview_for(workspace: Workspace) -> WorkspaceOverview {
-    let session_count = session::list(&workspace.path)
-        .map(|sessions| sessions.len())
-        .unwrap_or(0);
+    let sessions = workspace_state::recorded_sessions(&workspace.path).unwrap_or_default();
+    let session_count = sessions.len();
+    let pr_count = PrLink::aggregate(
+        sessions
+            .into_iter()
+            .flat_map(|session| session.worktrees)
+            .flat_map(|worktree| worktree.pr),
+    )
+    .len();
     let open_issue_count = open_issue_count(&workspace.path);
-    let pr_count = pr_count(&workspace.path);
     WorkspaceOverview {
         workspace,
         session_count,
         open_issue_count,
         pr_count,
     }
-}
-
-/// Count unique PR URLs recorded under the workspace sessions. Returns zero
-/// when the workspace has no recorded state (or it cannot be read), matching the
-/// overview's "one broken entry must not blank the screen" policy.
-fn pr_count(path: &Path) -> usize {
-    workspace_state::recorded_sessions(path)
-        .map(|sessions| {
-            PrLink::aggregate(
-                sessions
-                    .into_iter()
-                    .flat_map(|session| session.worktrees)
-                    .flat_map(|worktree| worktree.pr),
-            )
-            .len()
-        })
-        .unwrap_or(0)
 }
 
 /// Count the issues under `path` that are not yet `done`. Returns zero when the

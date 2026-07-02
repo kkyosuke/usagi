@@ -373,6 +373,7 @@ fn a_right_click_on_a_switch_tab_opens_a_menu_and_runs_the_selected_action() {
     let mut save_last_active = |_: &[(String, DateTime<Utc>)]| {};
     let mut wiring = Wiring {
         interaction_epoch: 0,
+        watch_sessions: false,
         workspace_root: Path::new("/ws"),
         persist: &mut persist,
         dispatch_create: &mut create,
@@ -482,6 +483,7 @@ fn run_switch_tab_menu_inputs(after_open: Vec<io::Result<Input>>) -> Vec<TabMenu
     let mut save_last_active = |_: &[(String, DateTime<Utc>)]| {};
     let mut wiring = Wiring {
         interaction_epoch: 0,
+        watch_sessions: false,
         workspace_root: Path::new("/ws"),
         persist: &mut persist,
         dispatch_create: &mut create,
@@ -636,6 +638,7 @@ fn right_click_tab_paths_cover_focus_and_attached_modes() {
         let mut save_last_active = |_: &[(String, DateTime<Utc>)]| {};
         let mut wiring = Wiring {
             interaction_epoch: 0,
+            watch_sessions: false,
             workspace_root: Path::new("/ws"),
             persist: &mut persist,
             dispatch_create: &mut create,

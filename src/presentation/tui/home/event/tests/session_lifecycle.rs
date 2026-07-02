@@ -350,6 +350,7 @@ fn finished_create_does_not_auto_focus_after_another_operation() {
     let mut tab_action = |_: &mut HomeState, _: &Path, _: usize, _: TabMenuAction| {};
     let mut wiring = Wiring {
         interaction_epoch: 0,
+        watch_sessions: false,
         workspace_root: Path::new("/ws"),
         persist: &mut persist,
         dispatch_create: &mut dispatch_create,
@@ -404,7 +405,7 @@ fn finished_close_drops_into_focus_on_the_previous_session() {
     // only open `/main` if the close landed in 在席 on `main`.
     let mut keys = cmd("session switch feat");
     keys.push(Ok(Key::Enter)); // -> Focus(feat), menu UI
-    keys.push(Ok(Key::ArrowDown)); // agent -> close
+    keys.push(Ok(Key::ArrowUp)); // agent wraps up to close (last)
     keys.push(Ok(Key::Enter)); // dispatch close; completion drains next frame -> Focus(main)
     keys.push(Ok(Key::Char('t'))); // Focus menu shortcut: open terminal on `main`
 
@@ -513,9 +514,12 @@ fn finished_close_does_not_auto_focus_after_another_operation() {
         }
     }
 
+    // Reach `close` (last) with ArrowDown, not ArrowUp: this reader completes the
+    // remove task on ArrowUp, and that must only fire *after* close is dispatched.
     let mut keys = cmd("session switch feat");
     keys.push(Ok(Key::Enter)); // -> Focus(feat), menu UI
-    keys.push(Ok(Key::ArrowDown)); // agent -> close
+    keys.push(Ok(Key::ArrowDown)); // agent -> terminal
+    keys.push(Ok(Key::ArrowDown)); // terminal -> close (last)
     keys.push(Ok(Key::Enter)); // dispatch close, but leave the task running
     keys.push(Ok(Key::ArrowUp)); // another Switch operation before completion lands
     keys.push(Ok(Key::Char('c'))); // still Switch: begin inline create
@@ -562,6 +566,7 @@ fn finished_close_does_not_auto_focus_after_another_operation() {
     let mut tab_action = |_: &mut HomeState, _: &Path, _: usize, _: TabMenuAction| {};
     let mut wiring = Wiring {
         interaction_epoch: 0,
+        watch_sessions: false,
         workspace_root: Path::new("/ws"),
         persist: &mut persist,
         dispatch_create: &mut dispatch_create,
@@ -781,14 +786,14 @@ fn focus_close_command_removes_the_focused_session_then_enters_switch() {
 
 #[test]
 fn focus_menu_close_removes_the_focused_session_then_enters_switch() {
-    // The 在席 menu lists its commands alphabetically (`agent`, `close`,
-    // `terminal`) with `agent` highlighted by default; ArrowDown lands on `close`.
-    // Enter removes the focused session like `session remove feat` (no `--force`),
-    // then drops into 切替 (Switch) — the `c` keypress that follows opens the inline
-    // create input (a Switch-only action), proving the landing mode.
+    // The 在席 menu lists its commands in the fixed order (`agent`, `terminal`,
+    // `close`) with `agent` highlighted by default; `close` is last, so ArrowUp
+    // wraps up to it. Enter removes the focused session like `session remove feat`
+    // (no `--force`), then drops into 切替 (Switch) — the `c` keypress that follows
+    // opens the inline create input (a Switch-only action), proving the landing mode.
     let mut keys = cmd("session switch feat");
     keys.push(Ok(Key::Enter)); // -> Focus (feat), menu UI
-    keys.push(Ok(Key::ArrowDown)); // agent -> `close`
+    keys.push(Ok(Key::ArrowUp)); // agent wraps up to `close` (last)
     keys.push(Ok(Key::Enter)); // run `close` -> session removed -> 切替 (Switch)
     keys.push(Ok(Key::Char('c'))); // Switch-only: begin inline create
     keys.push(Ok(Key::Escape)); // cancel create; reader then runs out -> quit
@@ -917,7 +922,7 @@ fn focus_menu_close_picker_enter_runs_plain_close() {
     // `→` on the close row opens the picker; `Enter` on option 0 runs plain `close`.
     let mut keys = cmd("session switch feat");
     keys.push(Ok(Key::Enter)); // -> Focus (feat)
-    keys.push(Ok(Key::ArrowDown)); // agent -> close
+    keys.push(Ok(Key::ArrowUp)); // agent wraps up to close (last)
     keys.push(Ok(Key::ArrowRight)); // open close picker (option 0 = close)
     keys.push(Ok(Key::Enter)); // run `close` -> 切替
     keys.push(Ok(Key::Char('c'))); // Switch-only: begin inline create
@@ -978,7 +983,7 @@ fn focus_menu_close_picker_enter_on_force_runs_force_close() {
     // `→` opens the picker; `↓` selects `--force`; `Enter` runs `close --force`.
     let mut keys = cmd("session switch feat");
     keys.push(Ok(Key::Enter)); // -> Focus (feat)
-    keys.push(Ok(Key::ArrowDown)); // agent -> close
+    keys.push(Ok(Key::ArrowUp)); // agent wraps up to close (last)
     keys.push(Ok(Key::ArrowRight)); // open close picker
     keys.push(Ok(Key::ArrowDown)); // option 0 -> option 1 (close --force)
     keys.push(Ok(Key::Enter)); // run `close --force` -> 切替
@@ -1040,7 +1045,7 @@ fn run_close_picker_keys(extra_keys: Vec<io::Result<Key>>) -> (Outcome, Vec<(Str
     // Start: navigate to close row, open picker, then apply caller's keys.
     let mut keys = cmd("session switch feat");
     keys.push(Ok(Key::Enter)); // -> Focus (feat)
-    keys.push(Ok(Key::ArrowDown)); // agent -> close
+    keys.push(Ok(Key::ArrowUp)); // agent wraps up to close (last)
     keys.push(Ok(Key::ArrowRight)); // open close picker
     keys.extend(extra_keys);
     let term = Term::stdout();

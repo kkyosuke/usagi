@@ -1981,14 +1981,15 @@ fn focus_agent_command_row(state: &HomeState, selected: bool, width: usize) -> S
 
 /// The 在席 menu's `terminal` row: like a plain command row but it can expand
 /// into the `open` / `new` picker. `open` is the default and preserves the
-/// existing embedded-tab behaviour.
+/// existing embedded-tab behaviour. The row always reserves the same 2-column
+/// chevron slot as `agent` and `close` so descriptions never shift (no CLS).
 fn focus_terminal_command_row(state: &HomeState, selected: bool, width: usize) -> String {
     let chevron = if state.focus_menu_terminal_expanded() {
         "▾ "
     } else if state.focus_menu_terminal_can_expand() {
         "▸ "
     } else {
-        ""
+        "  "
     };
     let desc = format!("{chevron}Open a shell");
     menu_row("terminal", &desc, selected, width)
@@ -2018,7 +2019,11 @@ fn focus_agent_pick_row(cli: AgentCli, selected: bool, is_default: bool, width: 
 }
 
 /// The 在席 menu's `close` row: like a plain command row but carries a `▾`/`▸`
-/// expand affordance to open the close picker (plain close vs. close --force).
+/// expand affordance to open the close picker (plain close vs. close --force) —
+/// `▾` while the picker is open, `▸` when the cursor is on this row (it can
+/// always expand). When the cursor is elsewhere the slot is held with blanks so
+/// the description never shifts as the cursor moves on/off the row (no CLS),
+/// mirroring the `agent` row.
 fn focus_close_command_row(
     state: &HomeState,
     info: &CommandInfo,
@@ -2030,7 +2035,7 @@ fn focus_close_command_row(
     } else if state.focus_close_can_expand() {
         "▸ "
     } else {
-        ""
+        "  "
     };
     let desc = format!("{chevron}{}", info.description);
     menu_row(info.name, &desc, selected, width)

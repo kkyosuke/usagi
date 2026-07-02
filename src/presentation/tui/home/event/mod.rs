@@ -7,7 +7,7 @@
 //! `open_pane`, which drives the embedded terminal — live in [`handlers`].
 
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
@@ -57,6 +57,14 @@ const CTRL_P: char = '\u{0010}';
 /// 没入 (Attached) is driven inside the embedded-terminal loop, so its `Ctrl-B` is
 /// intercepted there instead (see [`super::terminal::pane`]).
 const CTRL_B: char = '\u{0002}';
+
+/// How often an otherwise-idle screen wakes to pick up a session list a
+/// background watcher published — a create / remove made outside this screen (an
+/// agent's MCP call, another usagi window, or the CLI) that only wrote
+/// `state.json`. Slow relative to [`ANIM_TICK`](install_task::ANIM_TICK) so a
+/// quiet screen stays cheap while still reflecting external changes within about
+/// a second, instead of freezing the sidebar until the next keypress or detach.
+const WATCH_SESSIONS_TICK: Duration = Duration::from_millis(500);
 
 /// The bare control character `console` reports for `Ctrl-S` (`0x13`) on the home
 /// screen — the same passthrough as [`CTRL_O`]. It saves the session-note editor
@@ -137,6 +145,11 @@ pub(super) struct Wiring<'a> {
     /// loop. Create tasks copy it at dispatch time, and only auto-focus when it
     /// is unchanged at completion time.
     pub interaction_epoch: u64,
+    /// Whether a background thread is polling `state.json` for changes made
+    /// outside this screen and publishing them through the shared refresh slot.
+    /// When set, an otherwise-idle loop wakes on [`WATCH_SESSIONS_TICK`] to apply
+    /// them; when clear (the tests' default) a truly idle screen blocks on input.
+    pub watch_sessions: bool,
     /// The workspace root: where the root row's pane is rooted, and the base
     /// [`selected_dir`] falls back to when the cursor is on the root row.
     pub workspace_root: &'a Path,
@@ -543,8 +556,23 @@ pub(super) fn event_loop(
             || state.has_live_sessions()
             || state.mascot_blinking()
             || state.mascot_reacting();
-        let input = if animate {
-            match reader.read_input_timeout(install_task::ANIM_TICK) {
+        // How long to wait for input before re-iterating, or `None` to block until
+        // it arrives. An animating frame ticks fast (`ANIM_TICK`) to advance its
+        // moving parts; an otherwise-idle screen still wakes on the slower
+        // [`WATCH_SESSIONS_TICK`] while the session watcher is running, so a create
+        // / remove made outside this screen (an agent's MCP call, another usagi
+        // window, or the CLI — all of which only write `state.json`) lands in the
+        // sidebar without waiting for the next keypress. With no watcher (the
+        // tests' default) a truly idle screen blocks and costs nothing.
+        let idle_tick = if animate {
+            Some(install_task::ANIM_TICK)
+        } else if wiring.watch_sessions {
+            Some(WATCH_SESSIONS_TICK)
+        } else {
+            None
+        };
+        let input = match idle_tick {
+            Some(tick) => match reader.read_input_timeout(tick) {
                 Ok(Some(input)) => input,
                 // A tick with no input: re-iterate to drain and repaint.
                 Ok(None) => continue,
@@ -558,15 +586,14 @@ pub(super) fn event_loop(
                 // mid-read (e.g. exiting an agent, then `Ctrl-O` while waiting).
                 Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
                 Err(e) => return Err(anyhow::Error::from(e).context("Failed to read input")),
-            }
-        } else {
-            match reader.read_input() {
+            },
+            None => match reader.read_input() {
                 Ok(input) => input,
                 // An interrupted read (a delivered signal) is not a quit: re-read.
-                // See the animate branch above for the full rationale.
+                // See the tick branch above for the full rationale.
                 Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
                 Err(e) => return Err(anyhow::Error::from(e).context("Failed to read input")),
-            }
+            },
         };
         let key = match input {
             Input::Key(key) => {
@@ -1285,6 +1312,7 @@ pub(crate) fn event_loop_compat(
     let _ = open_external_terminal(Path::new(""));
     let mut wiring = Wiring {
         interaction_epoch: 0,
+        watch_sessions: false,
         workspace_root,
         persist: &mut persist,
         dispatch_create: &mut dispatch_create,
