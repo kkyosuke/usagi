@@ -22,7 +22,9 @@ use super::{
     PUSHED_ICON, RAIL_WIDTH, ROOT_DETAIL, STATUS_COL, SYNCED_ICON, TERMINAL_STARTING,
 };
 use crate::domain::resource::{Load, ResourceUsage};
-use crate::domain::settings::{AgentCli, SessionActionUi, Sidebar};
+use crate::domain::settings::{
+    AgentCli, LabelColor, SessionActionUi, SessionLabelDef, SessionLabelMaster, Sidebar,
+};
 use crate::domain::workspace_state::{AheadBehind, BranchStatus, DiffStat, PrLink, WorktreeState};
 use crate::presentation::tui::diff::{split_rows, DiffRow, DiffSpan, RowKind, SplitRow};
 use crate::presentation::tui::markdown::{LineStyle, MarkdownLine, Rgb, Span, SpanStyle};
@@ -81,6 +83,79 @@ pub(super) fn status_cell(status: Option<BranchStatus>) -> String {
             format!("{}{label}", " ".repeat(pad))
         }
     }
+}
+
+/// The largest column width the manual-status label cell may claim on the full
+/// sidebar, so a long user-defined label name cannot crowd out the branch name;
+/// a longer label is clipped to this. Only reserved when a visible session
+/// actually carries a label (else the column is dropped entirely).
+const LABEL_COL_MAX: usize = 12;
+
+/// The [`Style`] a manual-status [`LabelColor`] paints in, resolved through the
+/// semantic [`Palette`] so the label column follows a theme retune like every
+/// other coloured element (`Gray` reads as a dim, unobtrusive tag).
+fn label_style(color: LabelColor) -> Style {
+    match color {
+        LabelColor::Gray => Style::new().dim(),
+        LabelColor::Red => Style::new().danger(),
+        LabelColor::Green => Style::new().success(),
+        LabelColor::Yellow => Style::new().warning(),
+        LabelColor::Blue => Style::new().info(),
+        LabelColor::Magenta => Style::new().feature(),
+        LabelColor::Cyan => Style::new().accent(),
+    }
+}
+
+/// The manual-status label column on a full-sidebar row: a leading space
+/// separator then the colour-coded `<glyph> <name>` for `label`, clipped/padded
+/// to fill `col` columns so the note / status fields stay aligned down the list.
+/// An unset row (or `col == 0`, when no visible session carries a label) fills
+/// the same width with blanks, holding the column.
+fn label_cell(label: Option<&SessionLabelDef>, col: usize) -> String {
+    if col == 0 {
+        return String::new();
+    }
+    // One column is the separating space before the label; the rest is its body.
+    let inner = col - 1;
+    let body = match label {
+        None => " ".repeat(inner),
+        Some(def) => {
+            let text = format!("{} {}", def.glyph(), def.name);
+            let padded = pad_to_width(clip_to_width(&text, inner), inner);
+            label_style(def.color).apply_to(padded).to_string()
+        }
+    };
+    format!(" {body}")
+}
+
+/// The width the manual-status label column claims across the visible sessions:
+/// the widest resolved `<glyph> <name>` (capped at [`LABEL_COL_MAX`]) plus one
+/// separating space, or `0` when no visible session carries a label — in which
+/// case the column is dropped and the sidebar is byte-for-byte what it was before
+/// the feature. Mirrors how [`detail_cols`] sizes the detail cluster.
+fn label_col_width(list: &WorktreeList, master: &SessionLabelMaster) -> usize {
+    let widest = list
+        .groups()
+        .iter()
+        .flat_map(|g| {
+            (0..g.worktrees().len()).filter_map(|i| g.row_label_id(i).and_then(|id| master.get(id)))
+        })
+        .map(|def| console::measure_text_width(&format!("{} {}", def.glyph(), def.name)))
+        .max()
+        .unwrap_or(0)
+        .min(LABEL_COL_MAX);
+    if widest == 0 {
+        0
+    } else {
+        widest + 1
+    }
+}
+
+/// The single colour-coded glyph for a session's manual-status label on the
+/// collapsed rail (the icon from [`label_cell`] without the name), or `None` when
+/// the session carries no label — the rail then keeps its agent / kind glyph.
+fn rail_label_glyph(label: Option<&SessionLabelDef>) -> Option<String> {
+    label.map(|def| label_style(def.color).apply_to(def.glyph()).to_string())
 }
 
 /// The state of a session's embedded agent, shown by an icon on the row's first
@@ -381,6 +456,8 @@ fn note_cell(has_note: bool) -> String {
 pub(super) fn worktree_row(
     worktree: &WorktreeState,
     label: &str,
+    status_label: Option<&SessionLabelDef>,
+    label_col: usize,
     name_width: usize,
     detail_width: usize,
     cols: DetailCols,
@@ -408,7 +485,7 @@ pub(super) fn worktree_row(
         // fields sat (dropped while editing) so a longer name has room to type.
         let (before, after) = value.split_at(cursor);
         let field = widgets::block_caret(before, after, &Style::new().accent().bold());
-        let field_width = name_width + ACTIVE_COL + 1 + STATUS_COL;
+        let field_width = name_width + label_col + ACTIVE_COL + 1 + STATUS_COL;
         format!("{gutter} {kind} {}", clip_to_width(&field, field_width))
     } else {
         // The session's sidebar label (its custom display name, or the branch when
@@ -420,12 +497,17 @@ pub(super) fn worktree_row(
         };
         let branch = name_cell(name, name_width, active || selected);
         let status = status_cell(Some(worktree.status));
+        // The manual-status label sits between the branch name and the memo marker
+        // in its own fixed-width column (blank when this row has none, dropped
+        // entirely when no visible session carries a label — `label_col == 0`), so
+        // the note and git-status fields stay aligned down the list.
+        let status_tag = label_cell(status_label, label_col);
         // Three columns sit between the name and the right-edge status (the old
         // active-marker cell, now home to the memo marker — the active bar lives in
         // the gutter). The cell is a constant width whether or not a note is
         // present, so the status field never shifts.
         let note = note_cell(has_note);
-        format!("{gutter} {kind} {branch}{note}{status}")
+        format!("{gutter} {kind} {branch}{status_tag}{note}{status}")
     };
 
     // Line 2 spells out the agent state with its icon (blank when absent) on the
@@ -712,6 +794,7 @@ fn detail_content(agent: AgentState, cells: &[String], width: usize) -> String {
 /// carries a `workspace root` detail.
 pub(super) fn root_row(
     name_width: usize,
+    label_col: usize,
     detail_width: usize,
     has_note: bool,
     selected: bool,
@@ -722,10 +805,14 @@ pub(super) fn root_row(
     let name = name_cell(ROOT_NAME, name_width, active || selected);
     let status = status_cell(None);
     let gutter = gutter_cell(selected, active, in_switch);
+    // The root belongs to no session, so it carries no manual-status label — but it
+    // reserves the same (blank) label column as the sessions below, so the note /
+    // status fields stay aligned.
+    let status_tag = label_cell(None, label_col);
     // The same constant-width memo cell a worktree row uses, so the (blank) status
     // field stays aligned with the sessions below whether or not a note is present.
     let note = note_cell(has_note);
-    let line1 = format!("{gutter} {kind} {name}{note}{status}");
+    let line1 = format!("{gutter} {kind} {name}{status_tag}{note}{status}");
 
     // Only the active bar reaches line 2; the cursor stays a point on line 1.
     let detail = style(clip_to_width(ROOT_DETAIL, detail_width))
@@ -802,6 +889,7 @@ fn root_glyph() -> String {
 /// in use. The active `▎` bar runs down all three rows; a selected session uses
 /// the same `󰤇` / `▎` / `▎` stack as the full sidebar, while the root keeps the
 /// compact `>` cursor in 切替.
+#[allow(clippy::too_many_arguments)]
 fn rail_entry(
     selected: bool,
     session: bool,
@@ -809,6 +897,7 @@ fn rail_entry(
     in_switch: bool,
     kind: &str,
     git: Option<&str>,
+    label: Option<&str>,
     agent: Option<&str>,
 ) -> (String, String, String) {
     let gutter = if session {
@@ -832,8 +921,14 @@ fn rail_entry(
         format!("{gutter} {kind} {}", git.unwrap_or(" ")),
         RAIL_WIDTH,
     );
+    // Row 2: the manual-status glyph sits at column 2 (under the kind dot, blank
+    // when the session has no label) and the agent glyph at column 4 (under git).
     let detail = pad_to_width(
-        format!("{detail_gutter}   {}", agent.unwrap_or(" ")),
+        format!(
+            "{detail_gutter} {} {}",
+            label.unwrap_or(" "),
+            agent.unwrap_or(" ")
+        ),
         RAIL_WIDTH,
     );
     // The resource row's rail twin: the active bar runs down it, but the rail has
@@ -911,6 +1006,7 @@ fn rail_pane(
     running: &HashSet<PathBuf>,
     waiting: &HashSet<PathBuf>,
     done: &HashSet<PathBuf>,
+    label_master: &SessionLabelMaster,
     rows: usize,
     in_switch: bool,
     now: DateTime<Utc>,
@@ -940,6 +1036,7 @@ fn rail_pane(
             &root,
             None,
             None,
+            None,
         );
         if in_switch && flat_row != list.selected_index() {
             root_top = dim_row(&root_top);
@@ -955,7 +1052,7 @@ fn rail_pane(
             lines.push(pad_to_width(String::new(), RAIL_WIDTH));
             continue;
         }
-        for w in group.worktrees() {
+        for (i, w) in group.worktrees().iter().enumerate() {
             // Stop once the built rows fill the rail: the trailing `truncate(rows)`
             // discards the rest, so building beyond the visible height is wasted
             // work (same bound as the full sidebar above).
@@ -966,6 +1063,7 @@ fn rail_pane(
             let active = flat_row == list.active_index();
             let kind = kind_dot(heat_of(w.updated_at, now));
             let git = rail_status_glyph(w.status);
+            let label = rail_label_glyph(group.row_label_id(i).and_then(|id| label_master.get(id)));
             let agent = AgentState::from_flags(
                 live.contains(&w.path),
                 running.contains(&w.path),
@@ -980,6 +1078,7 @@ fn rail_pane(
                 in_switch,
                 &kind,
                 Some(&git),
+                label.as_deref(),
                 agent.as_deref(),
             );
             if in_switch && !selected {
@@ -1131,6 +1230,7 @@ pub(super) fn left_pane(
     waiting: &HashSet<PathBuf>,
     done: &HashSet<PathBuf>,
     resources: &HashMap<PathBuf, ResourceUsage>,
+    label_master: &SessionLabelMaster,
     left_w: usize,
     rows: usize,
     in_switch: bool,
@@ -1145,11 +1245,25 @@ pub(super) fn left_pane(
     if sidebar == Sidebar::Rail {
         // The 5-column rail has no room for a CPU / memory figure, so the rail
         // shows only the agent glyph; the resource line belongs to the full list.
-        return rail_pane(list, live, running, waiting, done, rows, in_switch, now);
+        return rail_pane(
+            list,
+            live,
+            running,
+            waiting,
+            done,
+            label_master,
+            rows,
+            in_switch,
+            now,
+        );
     }
-    // Line 1: prefix + name + the (now-blank) active-marker cell + a space + the
-    // right-edge status field.
-    let name_width = left_w.saturating_sub(NAME_PREFIX + ACTIVE_COL + 1 + STATUS_COL);
+    // The manual-status label column, reserved across every group's rows so the
+    // labels line up; `0` (no visible session carries a label) drops it, leaving
+    // the sidebar exactly as it was before the feature.
+    let label_col = label_col_width(list, label_master);
+    // Line 1: prefix + name + the manual-status label column + the (now-blank)
+    // active-marker cell + a space + the right-edge status field.
+    let name_width = left_w.saturating_sub(NAME_PREFIX + label_col + ACTIVE_COL + 1 + STATUS_COL);
     // Line 2: indented under the branch name, then the detail text.
     let detail_width = left_w.saturating_sub(NAME_PREFIX);
     // Size the detail line's right-cluster columns once across every group's
@@ -1198,6 +1312,7 @@ pub(super) fn left_pane(
         }
         let (mut root_top, mut root_detail) = root_row(
             name_width,
+            label_col,
             detail_width,
             group.root_has_note(),
             flat_row == list.selected_index(),
@@ -1236,9 +1351,12 @@ pub(super) fn left_pane(
             }
             let selected = flat_row == list.selected_index();
             let active = flat_row == list.active_index();
+            let status_label = group.row_label_id(i).and_then(|id| label_master.get(id));
             let (mut top, mut detail) = worktree_row(
                 w,
                 group.display_label(i),
+                status_label,
+                label_col,
                 name_width,
                 detail_width,
                 cols,
@@ -3211,6 +3329,202 @@ mod tests {
                 "{plain:?} keeps the memory figure"
             );
         }
+    }
+
+    fn label_def(id: &str, name: &str, color: LabelColor, icon: Option<&str>) -> SessionLabelDef {
+        SessionLabelDef {
+            id: id.to_string(),
+            name: name.to_string(),
+            color,
+            icon: icon.map(str::to_string),
+        }
+    }
+
+    fn wt(branch: &str, path: &str) -> WorktreeState {
+        WorktreeState {
+            branch: Some(branch.to_string()),
+            path: PathBuf::from(path),
+            head: "abc1234".to_string(),
+            primary: false,
+            upstream: None,
+            status: BranchStatus::Local,
+            diff: None,
+            ahead_behind: None,
+            pr: Vec::new(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn label_style_maps_every_colour_to_its_palette_role() {
+        // Each colour renders through the semantic palette; cover all arms and pin
+        // the mapping to the concrete ANSI colour it should resolve to.
+        for (color, expected) in [
+            (LabelColor::Gray, Style::new().dim()),
+            (LabelColor::Red, Style::new().danger()),
+            (LabelColor::Green, Style::new().success()),
+            (LabelColor::Yellow, Style::new().warning()),
+            (LabelColor::Blue, Style::new().info()),
+            (LabelColor::Magenta, Style::new().feature()),
+            (LabelColor::Cyan, Style::new().accent()),
+        ] {
+            assert_eq!(
+                label_style(color)
+                    .force_styling(true)
+                    .apply_to("x")
+                    .to_string(),
+                expected.force_styling(true).apply_to("x").to_string()
+            );
+        }
+    }
+
+    #[test]
+    fn label_cell_renders_the_glyph_and_name_pads_blank_and_drops_at_zero() {
+        let def = label_def("review", "Review", LabelColor::Magenta, Some("◇"));
+        // A set label shows its glyph and name, and the cell is exactly `col` wide.
+        let cell = label_cell(Some(&def), 10);
+        let plain = console::strip_ansi_codes(&cell).into_owned();
+        assert!(plain.contains("◇ Review"), "{plain:?} shows the label");
+        assert_eq!(console::measure_text_width(&cell), 10);
+        // An unset row holds the same width in blanks.
+        let blank = label_cell(None, 10);
+        assert_eq!(console::measure_text_width(&blank), 10);
+        assert!(console::strip_ansi_codes(&blank).trim().is_empty());
+        // A zero-width column (no visible label anywhere) draws nothing.
+        assert_eq!(label_cell(Some(&def), 0), "");
+        assert_eq!(label_cell(None, 0), "");
+    }
+
+    #[test]
+    fn label_cell_clips_a_long_name_to_the_column() {
+        let def = label_def("x", "A very long status name", LabelColor::Gray, None);
+        let cell = label_cell(Some(&def), 8);
+        assert_eq!(console::measure_text_width(&cell), 8);
+    }
+
+    #[test]
+    fn label_col_width_sizes_to_the_widest_visible_label_and_caps_it() {
+        let master = SessionLabelMaster {
+            labels: vec![
+                label_def("todo", "Todo", LabelColor::Gray, Some("○")),
+                label_def("long", "Averylonglabelname", LabelColor::Gray, Some("◇")),
+            ],
+        };
+        // No labels assigned → the column is dropped (0), leaving the sidebar as it
+        // was before the feature.
+        let mut list = WorktreeList::new("ws", vec![wt("main", "/r/main")]);
+        assert_eq!(label_col_width(&list, &master), 0);
+        // A short label → its `<glyph> <name>` width plus a separating space.
+        list.set_label_ids(vec![Some("todo".to_string())]);
+        assert_eq!(
+            label_col_width(&list, &master),
+            "○ Todo".chars().count() + 1
+        );
+        // A label longer than the cap is clamped to LABEL_COL_MAX (+1 separator).
+        list.set_label_ids(vec![Some("long".to_string())]);
+        assert_eq!(label_col_width(&list, &master), LABEL_COL_MAX + 1);
+    }
+
+    #[test]
+    fn rail_label_glyph_shows_the_coloured_glyph_or_nothing() {
+        let def = label_def("review", "Review", LabelColor::Magenta, Some("◇"));
+        let glyph = rail_label_glyph(Some(&def)).unwrap();
+        assert!(console::strip_ansi_codes(&glyph).contains('◇'));
+        assert_eq!(rail_label_glyph(None), None);
+    }
+
+    #[test]
+    fn worktree_row_draws_the_manual_status_label_on_line_one() {
+        let def = label_def("review", "Review", LabelColor::Magenta, Some("◇"));
+        let (line1, _) = worktree_row(
+            &wt("main", "/r/main"),
+            "",
+            Some(&def),
+            "◇ Review".chars().count() + 1,
+            10,
+            20,
+            DetailCols::default(),
+            false,
+            Utc::now(),
+            false,
+            false,
+            true,
+            false,
+            false,
+            false,
+            false,
+            None,
+        );
+        assert!(console::strip_ansi_codes(&line1).contains("◇ Review"));
+    }
+
+    #[test]
+    fn root_row_reserves_the_label_column_without_drawing_a_label() {
+        // The root carries no label, but with a label column active its blank cell
+        // keeps the note / status fields aligned with the sessions below.
+        let (with_col, _) = root_row(10, 8, 20, false, false, false, false);
+        let (without_col, _) = root_row(10, 0, 20, false, false, false, false);
+        assert_eq!(
+            console::measure_text_width(&with_col),
+            console::measure_text_width(&without_col) + 8
+        );
+    }
+
+    #[test]
+    fn left_pane_full_and_rail_draw_a_sessions_manual_label() {
+        let master = SessionLabelMaster {
+            labels: vec![label_def(
+                "review",
+                "Review",
+                LabelColor::Magenta,
+                Some("◇"),
+            )],
+        };
+        let mut list = WorktreeList::new("ws", vec![wt("main", "/r/main")]);
+        list.set_label_ids(vec![Some("review".to_string())]);
+        let empty = HashSet::new();
+        let res = HashMap::new();
+        let join = |lines: Vec<String>| {
+            lines
+                .iter()
+                .map(|l| console::strip_ansi_codes(l).into_owned())
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        // The full sidebar spells out the label (glyph + name) beside the session.
+        let full = join(left_pane(
+            &list,
+            &empty,
+            &empty,
+            &empty,
+            &empty,
+            &res,
+            &master,
+            60,
+            40,
+            false,
+            Sidebar::Full,
+            Utc::now(),
+            None,
+        ));
+        assert!(full.contains("◇ Review"), "{full:?}");
+        // The collapsed rail shows just the coloured glyph.
+        let rail = join(left_pane(
+            &list,
+            &empty,
+            &empty,
+            &empty,
+            &empty,
+            &res,
+            &master,
+            RAIL_WIDTH,
+            40,
+            false,
+            Sidebar::Rail,
+            Utc::now(),
+            None,
+        ));
+        assert!(rail.contains('◇'), "{rail:?}");
     }
 
     #[test]

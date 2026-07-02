@@ -67,6 +67,7 @@ mod tests {
             name: name.to_string(),
             display_name: None,
             note: None,
+            label_id: None,
             root: std::path::PathBuf::from(format!("/repo/.usagi/sessions/{name}")),
             worktrees: Vec::new(),
             created_at: chrono::Utc::now(),

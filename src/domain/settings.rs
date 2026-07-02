@@ -275,6 +275,174 @@ impl SkillFeature {
     }
 }
 
+/// A colour role a session label ([`SessionLabelDef`]) is painted in.
+///
+/// The variants are spelled as intuitive colour names (what a user hand-editing
+/// `settings.json` reaches for), but they are resolved through usagi's semantic
+/// [`Palette`](crate::presentation::theme::Palette) at render time — the domain
+/// only records the choice, the presentation layer decides the concrete colour —
+/// so the sidebar's manual-status column follows a theme retune like every other
+/// coloured element. `Gray` (the default) reads as a dim, unobtrusive tag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LabelColor {
+    /// Dim / neutral — the default, an unobtrusive tag.
+    #[default]
+    Gray,
+    Red,
+    Green,
+    Yellow,
+    Blue,
+    Magenta,
+    Cyan,
+}
+
+impl LabelColor {
+    /// Every colour, in the order the config screen cycles through them (the
+    /// neutral default first). The single source of truth for the choice list.
+    pub const ALL: [LabelColor; 7] = [
+        LabelColor::Gray,
+        LabelColor::Red,
+        LabelColor::Green,
+        LabelColor::Yellow,
+        LabelColor::Blue,
+        LabelColor::Magenta,
+        LabelColor::Cyan,
+    ];
+}
+
+/// The glyph a session label falls back to when its [`SessionLabelDef::icon`] is
+/// unset — a small filled bullet, one terminal column wide.
+pub const DEFAULT_LABEL_ICON: char = '●';
+
+/// One user-defined **manual session status** — a label the user assigns to a
+/// session in the home screen's 切替 (Switch) mode (`Tab` cycles through them,
+/// `1`–`9` jump straight to one). Distinct from the git-derived
+/// [`BranchStatus`](crate::domain::workspace_state::BranchStatus) and the runtime
+/// agent state: this is a human-assigned tag (todo / doing / review …), stored on
+/// the session ([`SessionRecord::label_id`](crate::domain::workspace_state::SessionRecord::label_id))
+/// as this def's [`id`](Self::id) and resolved back through the master for display.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionLabelDef {
+    /// Stable identifier persisted on a session and used to resolve back to this
+    /// def. Never reuse an id for a different meaning: it is what a session's
+    /// stored `label_id` points at. Renaming the [`name`](Self::name) is safe; the
+    /// id is the identity.
+    pub id: String,
+    /// The human-facing text shown in the sidebar (e.g. "Review").
+    pub name: String,
+    /// The colour the label is painted in. An unrecognised stored value degrades
+    /// to [`LabelColor::Gray`] rather than failing the whole master — see
+    /// [`crate::domain::serde_fallback`].
+    #[serde(
+        default,
+        deserialize_with = "crate::domain::serde_fallback::or_default"
+    )]
+    pub color: LabelColor,
+    /// An optional single-glyph icon shown before the name; `None` falls back to
+    /// [`DEFAULT_LABEL_ICON`]. Omitted from the file when unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
+}
+
+impl SessionLabelDef {
+    /// The icon glyph to render before the name: the first character of a set
+    /// [`icon`](Self::icon), or [`DEFAULT_LABEL_ICON`] when unset/blank. Kept to a
+    /// single character so the sidebar's label column stays one glyph wide.
+    pub fn glyph(&self) -> char {
+        self.icon
+            .as_deref()
+            .and_then(|s| s.trim().chars().next())
+            .unwrap_or(DEFAULT_LABEL_ICON)
+    }
+}
+
+/// The set of [`SessionLabelDef`]s a user can assign — the **master** the
+/// config screen and a hand-edited `settings.json` define, and 切替's `Tab` /
+/// digit keys cycle through.
+///
+/// Global by default ([`Settings::session_labels`]); a project may replace the
+/// whole set with its own ([`LocalSettings::session_labels`]). Empty means the
+/// feature is dormant — `Tab` becomes a no-op — so [`Default`] ships a small,
+/// generic kanban-style set to make it usable with zero configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct SessionLabelMaster {
+    /// The labels, in the order `Tab` cycles and the digit keys index (`1` is the
+    /// first). Resolution and cycling go through the accessors, never this field
+    /// directly.
+    pub labels: Vec<SessionLabelDef>,
+}
+
+impl Default for SessionLabelMaster {
+    fn default() -> Self {
+        // A generic kanban-style set so the feature works out of the box; a user
+        // overrides it wholesale in settings.json.
+        let of = |id: &str, name: &str, color: LabelColor, icon: char| SessionLabelDef {
+            id: id.to_string(),
+            name: name.to_string(),
+            color,
+            icon: Some(icon.to_string()),
+        };
+        Self {
+            labels: vec![
+                of("todo", "Todo", LabelColor::Gray, '○'),
+                of("doing", "Doing", LabelColor::Blue, '▸'),
+                of("review", "Review", LabelColor::Magenta, '◇'),
+                of("blocked", "Blocked", LabelColor::Red, '✕'),
+                of("done", "Done", LabelColor::Green, '✓'),
+            ],
+        }
+    }
+}
+
+impl SessionLabelMaster {
+    /// The labels, in cycle / index order.
+    pub fn labels(&self) -> &[SessionLabelDef] {
+        &self.labels
+    }
+
+    /// Whether no label is defined — the manual-status feature is then dormant
+    /// (`Tab` is a no-op and no column is drawn).
+    pub fn is_empty(&self) -> bool {
+        self.labels.is_empty()
+    }
+
+    /// The number of defined labels — the range the digit keys (`1`..) address.
+    pub fn len(&self) -> usize {
+        self.labels.len()
+    }
+
+    /// The label with the given `id`, or `None` when no label matches (an id from
+    /// a since-removed def, so a session pointing at it reads as unset).
+    pub fn get(&self, id: &str) -> Option<&SessionLabelDef> {
+        self.labels.iter().find(|l| l.id == id)
+    }
+
+    /// The 0-based position of the label with `id`, or `None` when absent. Used to
+    /// resume cycling from a session's current label.
+    pub fn position(&self, id: &str) -> Option<usize> {
+        self.labels.iter().position(|l| l.id == id)
+    }
+
+    /// The label at 0-based `index` (what digit key `index + 1` selects), or
+    /// `None` when out of range.
+    pub fn at(&self, index: usize) -> Option<&SessionLabelDef> {
+        self.labels.get(index)
+    }
+
+    /// Coerce a loaded master into a trusted state: drop labels with a blank id or
+    /// name, and keep only the first def for each id so a hand-edited duplicate id
+    /// cannot make a session's `label_id` ambiguous. Order is otherwise preserved.
+    pub fn sanitized(mut self) -> Self {
+        let mut seen = std::collections::BTreeSet::new();
+        self.labels.retain(|l| {
+            !l.id.trim().is_empty() && !l.name.trim().is_empty() && seen.insert(l.id.clone())
+        });
+        self
+    }
+}
+
 /// How many lines of scrolled-off output each embedded terminal pane keeps by
 /// default, so the user can scroll a pane back over earlier output.
 ///
@@ -382,6 +550,13 @@ pub struct Settings {
     /// secret. Read the valid bindings through [`env`](Self::env).
     #[serde(default)]
     pub env: SecretEnv,
+    /// The user-defined manual session-status labels 切替 (Switch) assigns with
+    /// `Tab` / the digit keys, resolved onto the sidebar's status column. Ships a
+    /// generic set by default (see [`SessionLabelMaster`]); an empty set leaves
+    /// the feature dormant. A project may replace it wholesale
+    /// ([`LocalSettings::session_labels`]).
+    #[serde(default)]
+    pub session_labels: SessionLabelMaster,
 }
 
 impl Default for Settings {
@@ -408,6 +583,7 @@ impl Default for Settings {
             // No application-wide secret env is injected unless explicitly
             // configured.
             env: SecretEnv::new(),
+            session_labels: SessionLabelMaster::default(),
         }
     }
 }
@@ -439,6 +615,9 @@ impl Settings {
         // entry never lingers in the saved file or the `usagi config` output.
         self.skill_features
             .retain(|id, _| SkillFeature::from_id(id).is_some());
+        // Drop blank / duplicate-id labels a hand-edited file may carry, so a
+        // session's stored `label_id` never resolves ambiguously.
+        self.session_labels = std::mem::take(&mut self.session_labels).sanitized();
         self
     }
 
@@ -492,6 +671,12 @@ impl Settings {
         // specific to that repository while inheriting the rest.
         for (name, reference) in local.env() {
             self.env.insert(name.to_string(), reference.to_string());
+        }
+        // A project may define its own manual-status label set, replacing the
+        // global one wholesale (an empty set turns the feature off for the
+        // project). Sanitized on the way in, like the global set is.
+        if let Some(labels) = &local.session_labels {
+            self.session_labels = labels.clone().sanitized();
         }
         self
     }
@@ -570,6 +755,12 @@ pub struct LocalSettings {
     /// list through [`setup_commands`](Self::setup_commands).
     #[serde(default)]
     pub setup_commands: Vec<String>,
+    /// Replace the global manual-status label master
+    /// ([`Settings::session_labels`]) for this project. `None` (the default,
+    /// omitted from the file) defers to the global set; `Some` — including an empty
+    /// set — overrides it wholesale (an empty set turns the feature off here).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_labels: Option<SessionLabelMaster>,
 }
 
 impl LocalSettings {
@@ -584,6 +775,7 @@ impl LocalSettings {
             && self.skill_features.is_empty()
             && self.env.is_empty()
             && self.setup_commands.is_empty()
+            && self.session_labels.is_none()
     }
 
     /// This project's override for the shipped-skill `feature`: `Some(enabled)`
@@ -1349,5 +1541,248 @@ mod tests {
             .insert("pull-request".to_string(), false);
         let json = serde_json::to_string(&settings).unwrap();
         assert_eq!(serde_json::from_str::<Settings>(&json).unwrap(), settings);
+    }
+
+    #[test]
+    fn label_color_all_lists_every_variant_and_defaults_to_gray() {
+        // ALL lists each colour once, neutral (the default) first.
+        assert_eq!(
+            LabelColor::ALL,
+            [
+                LabelColor::Gray,
+                LabelColor::Red,
+                LabelColor::Green,
+                LabelColor::Yellow,
+                LabelColor::Blue,
+                LabelColor::Magenta,
+                LabelColor::Cyan,
+            ]
+        );
+        assert_eq!(LabelColor::default(), LabelColor::Gray);
+        // Round-trips through the snake_case JSON the rest of the settings use.
+        assert_eq!(
+            serde_json::to_string(&LabelColor::Magenta).unwrap(),
+            "\"magenta\""
+        );
+        assert_eq!(
+            serde_json::from_str::<LabelColor>("\"cyan\"").unwrap(),
+            LabelColor::Cyan
+        );
+    }
+
+    #[test]
+    fn label_def_glyph_uses_first_char_or_the_default() {
+        // A set icon shows its first character (kept to one glyph wide)...
+        let with_icon = SessionLabelDef {
+            id: "x".to_string(),
+            name: "X".to_string(),
+            color: LabelColor::Gray,
+            icon: Some("◆".to_string()),
+        };
+        assert_eq!(with_icon.glyph(), '◆');
+        // ...a blank icon falls back to the default bullet...
+        let blank = SessionLabelDef {
+            icon: Some("   ".to_string()),
+            ..with_icon.clone()
+        };
+        assert_eq!(blank.glyph(), DEFAULT_LABEL_ICON);
+        // ...and an unset icon does too.
+        let none = SessionLabelDef {
+            icon: None,
+            ..with_icon
+        };
+        assert_eq!(none.glyph(), DEFAULT_LABEL_ICON);
+    }
+
+    #[test]
+    fn label_def_color_degrades_an_unknown_value_and_omits_an_unset_icon() {
+        // An unrecognised colour degrades to the default rather than failing.
+        let def: SessionLabelDef =
+            serde_json::from_str(r#"{"id":"a","name":"A","color":"chartreuse"}"#).unwrap();
+        assert_eq!(def.color, LabelColor::Gray);
+        assert_eq!(def.icon, None);
+        // An unset icon is dropped from the serialized form.
+        let json = serde_json::to_string(&def).unwrap();
+        assert!(!json.contains("icon"));
+    }
+
+    #[test]
+    fn label_master_defaults_to_a_non_empty_kanban_set() {
+        let master = SessionLabelMaster::default();
+        assert!(!master.is_empty());
+        assert_eq!(master.len(), 5);
+        // The default set is addressable by id, position, and index.
+        assert_eq!(master.at(0).map(|l| l.id.as_str()), Some("todo"));
+        assert_eq!(
+            master.get("review").map(|l| l.name.as_str()),
+            Some("Review")
+        );
+        assert_eq!(master.position("done"), Some(4));
+        // An unknown id / out-of-range index resolves to nothing.
+        assert_eq!(master.get("ghost"), None);
+        assert_eq!(master.position("ghost"), None);
+        assert!(master.at(99).is_none());
+    }
+
+    #[test]
+    fn label_master_is_transparent_json_and_defaults_when_absent() {
+        // The master serializes as a bare array (transparent), not a wrapper object.
+        let master = SessionLabelMaster {
+            labels: vec![SessionLabelDef {
+                id: "todo".to_string(),
+                name: "Todo".to_string(),
+                color: LabelColor::Gray,
+                icon: None,
+            }],
+        };
+        let json = serde_json::to_string(&master).unwrap();
+        assert!(json.starts_with('['));
+        assert_eq!(
+            serde_json::from_str::<SessionLabelMaster>(&json).unwrap(),
+            master
+        );
+
+        // Absent from settings.json → the default (non-empty) set loads.
+        let loaded: Settings = serde_json::from_str("{}").unwrap();
+        assert_eq!(loaded.session_labels, SessionLabelMaster::default());
+        // An explicit empty array leaves the feature dormant.
+        let empty: Settings = serde_json::from_str(r#"{"session_labels":[]}"#).unwrap();
+        assert!(empty.session_labels.is_empty());
+    }
+
+    #[test]
+    fn label_master_sanitized_drops_blank_and_duplicate_ids() {
+        let master = SessionLabelMaster {
+            labels: vec![
+                SessionLabelDef {
+                    id: "todo".to_string(),
+                    name: "Todo".to_string(),
+                    color: LabelColor::Gray,
+                    icon: None,
+                },
+                // Blank id — dropped.
+                SessionLabelDef {
+                    id: "  ".to_string(),
+                    name: "Nameless".to_string(),
+                    color: LabelColor::Gray,
+                    icon: None,
+                },
+                // Blank name — dropped.
+                SessionLabelDef {
+                    id: "empty".to_string(),
+                    name: "".to_string(),
+                    color: LabelColor::Gray,
+                    icon: None,
+                },
+                // Duplicate id — only the first "todo" survives.
+                SessionLabelDef {
+                    id: "todo".to_string(),
+                    name: "Todo again".to_string(),
+                    color: LabelColor::Red,
+                    icon: None,
+                },
+                SessionLabelDef {
+                    id: "done".to_string(),
+                    name: "Done".to_string(),
+                    color: LabelColor::Green,
+                    icon: None,
+                },
+            ],
+        };
+        let clean = master.sanitized();
+        assert_eq!(
+            clean
+                .labels()
+                .iter()
+                .map(|l| l.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["todo", "done"]
+        );
+        // The surviving "todo" is the first one (Gray), not the duplicate (Red).
+        assert_eq!(clean.get("todo").unwrap().color, LabelColor::Gray);
+    }
+
+    #[test]
+    fn sanitized_cleans_the_label_master() {
+        let settings = Settings {
+            session_labels: SessionLabelMaster {
+                labels: vec![
+                    SessionLabelDef {
+                        id: "todo".to_string(),
+                        name: "Todo".to_string(),
+                        color: LabelColor::Gray,
+                        icon: None,
+                    },
+                    SessionLabelDef {
+                        id: "  ".to_string(),
+                        name: "blank".to_string(),
+                        color: LabelColor::Gray,
+                        icon: None,
+                    },
+                ],
+            },
+            ..Default::default()
+        };
+        assert_eq!(settings.sanitized().session_labels.len(), 1);
+    }
+
+    #[test]
+    fn with_local_replaces_the_label_master_only_when_set() {
+        let global = Settings::default();
+        // Unset → the global (default) set is kept.
+        assert_eq!(
+            global
+                .clone()
+                .with_local(&LocalSettings::default())
+                .session_labels,
+            SessionLabelMaster::default()
+        );
+        // A project set replaces it wholesale (and is sanitized on the way in — the
+        // blank-id entry is dropped).
+        let local = LocalSettings {
+            session_labels: Some(SessionLabelMaster {
+                labels: vec![
+                    SessionLabelDef {
+                        id: "wip".to_string(),
+                        name: "WIP".to_string(),
+                        color: LabelColor::Yellow,
+                        icon: None,
+                    },
+                    SessionLabelDef {
+                        id: "".to_string(),
+                        name: "blank".to_string(),
+                        color: LabelColor::Gray,
+                        icon: None,
+                    },
+                ],
+            }),
+            ..Default::default()
+        };
+        let effective = global.with_local(&local);
+        assert_eq!(
+            effective
+                .session_labels
+                .labels()
+                .iter()
+                .map(|l| l.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["wip"]
+        );
+        // An empty project set turns the feature off for the project.
+        let off = Settings::default().with_local(&LocalSettings {
+            session_labels: Some(SessionLabelMaster { labels: vec![] }),
+            ..Default::default()
+        });
+        assert!(off.session_labels.is_empty());
+    }
+
+    #[test]
+    fn is_empty_counts_a_label_master_override() {
+        assert!(LocalSettings::default().is_empty());
+        assert!(!LocalSettings {
+            session_labels: Some(SessionLabelMaster::default()),
+            ..Default::default()
+        }
+        .is_empty());
     }
 }

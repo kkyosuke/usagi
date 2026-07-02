@@ -93,6 +93,7 @@ mod tests {
             name: "feature".to_string(),
             display_name: Some("My Feature".to_string()),
             note: None,
+            label_id: None,
             root: PathBuf::from("/repo/.usagi/sessions/feature"),
             worktrees: vec![WorktreeState {
                 branch: Some("feature".to_string()),
@@ -179,6 +180,7 @@ mod tests {
             .into_iter()
             .collect(),
             setup_commands: vec!["npm install".to_string()],
+            session_labels: Some(crate::domain::settings::SessionLabelMaster::default()),
         };
 
         store.save_settings(&settings).unwrap();

@@ -372,6 +372,7 @@ fn set_pr_links_finds_the_row_in_any_group() {
 fn workspace_group_from_sessions_collapses_rows_with_labels_and_notes() {
     use crate::domain::workspace_state::SessionRecord;
     let session = |name: &str, label: Option<&str>, note: Option<&str>| SessionRecord {
+        label_id: None,
         name: name.to_string(),
         display_name: label.map(str::to_string),
         note: note.map(str::to_string),

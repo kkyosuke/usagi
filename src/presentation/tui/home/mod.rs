@@ -239,6 +239,9 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
     // collapsed rail; `Ctrl-B` toggles it from there).
     state.set_session_action_ui(settings.session_action_ui);
     state.set_sidebar(settings.sidebar);
+    // The manual-status label master 切替 assigns with `Tab` / the digit keys and
+    // the sidebar's status column resolves each session's `label_id` against.
+    state.set_label_master(settings.session_labels.clone());
     // How the embedded terminal (没入) reserves its navigation keys — a `Ctrl-O`
     // prefix or single `Alt`-chords — so the rest reach the shell / agent.
     state.set_key_scheme(settings.key_scheme);
@@ -389,6 +392,35 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
             },
             Err(e) => SessionOutcome {
                 line: LogLine::error(format!("note failed: {e}")),
+                sessions: None,
+                select: None,
+                root_note: None,
+            },
+        }
+    };
+
+    // Assigning a manual status label (`Tab` / digit keys in 切替) persists the
+    // label id to state.json and re-reads the sessions so the sidebar's status
+    // column reflects it. The branch / identity is untouched, so the session keeps
+    // its row: `select` holds its name to keep the cursor on it after the rebuild.
+    // Like rename / note it stays synchronous (no git work) but still
+    // load-modify-saves state.json, so it takes the same op-lock to serialise
+    // against the background create / remove workers.
+    let label_lock = op_lock.clone();
+    let mut set_label = |root: &Path, name: &str, id: Option<&str>| {
+        let _guard = lock_session_ops(&label_lock);
+        match crate::usecase::session::set_label(root, name, id) {
+            Ok(stored) => SessionOutcome {
+                line: LogLine::output(match stored {
+                    Some(id) => format!("Set status \"{id}\" for \"{name}\" 🏷"),
+                    None => format!("Cleared status for \"{name}\" 🏷"),
+                }),
+                sessions: reload_sessions(root),
+                select: Some(name.to_string()),
+                root_note: None,
+            },
+            Err(e) => SessionOutcome {
+                line: LogLine::error(format!("status failed: {e}")),
                 sessions: None,
                 select: None,
                 root_note: None,
@@ -1167,6 +1199,7 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
         dispatch_create: &mut dispatch_create,
         rename_display: &mut rename_display,
         set_note: &mut set_note,
+        set_label: &mut set_label,
         reorder_session: &mut reorder_session,
         dispatch_remove: &mut dispatch_remove,
         unite_resolve: &mut unite_resolve,

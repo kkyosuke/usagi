@@ -386,6 +386,7 @@ mod tests {
             name: "wip".to_string(),
             display_name: None,
             note: None,
+            label_id: None,
             root: wt_path.clone(),
             worktrees: vec![WorktreeState {
                 branch: None,
@@ -444,6 +445,7 @@ mod tests {
             name: "wip".to_string(),
             display_name: None,
             note: None,
+            label_id: None,
             root: wt_path.clone(),
             worktrees: vec![inspect_worktree(&wt_path, "main")],
             created_at: Utc::now(),
@@ -480,6 +482,7 @@ mod tests {
             name: name.to_string(),
             display_name: None,
             note: None,
+            label_id: None,
             root: PathBuf::from(name),
             worktrees: Vec::new(),
             created_at: Utc::now(),
