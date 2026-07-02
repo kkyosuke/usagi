@@ -95,37 +95,40 @@ pub fn take_all(worktree: &Path) -> Vec<String> {
         Ok(path) if path.exists() => {}
         _ => return Vec::new(),
     }
+    // The file existed a moment ago; drain it under the lock. A missing data dir
+    // or a contended lock yields nothing, leaving anything queued for a later tick.
+    drain(worktree).unwrap_or_default()
+}
+
+/// Read-and-remove the queued prompts under the store lock, or `None` when the
+/// data dir or lock is unavailable. Split from [`take_all`] so those two early
+/// exits collapse onto single `?` lines rather than never-taken `return` arms.
+fn drain(worktree: &Path) -> Option<Vec<String>> {
     let key = key(worktree);
-    let dir = match dir(PROMPT_SUBDIR) {
-        Ok(dir) => dir,
-        Err(_) => return Vec::new(),
-    };
+    let dir = dir(PROMPT_SUBDIR).ok()?;
     // Serialise the read-then-remove against `append` (see there): without the
     // lock an `append` landing between the read below and the remove would have
     // its file deleted and its prompt never delivered. If the lock cannot be
     // taken, leave everything queued for a later drain rather than risk loss.
-    let _lock = match StoreLock::acquire(&dir) {
-        Ok(lock) => lock,
-        Err(_) => return Vec::new(),
-    };
+    let _lock = StoreLock::acquire(&dir).ok()?;
     let path = dir.join(file_name(&key));
-    match json_file::read::<LivePromptFile>(&path) {
+    Some(match json_file::read::<LivePromptFile>(&path) {
         // Ours: hand back the queued prompts and remove the file (one-shot).
         Ok(Some(file)) if file.worktree.as_path() == key => {
             let _ = fs::remove_file(&path);
             file.prompts
         }
-        // A parseable file stamped with a different worktree: leave it untouched
-        // for its rightful owner.
-        Ok(Some(_)) => Vec::new(),
-        // Nothing queued.
-        Ok(None) => Vec::new(),
+        // A file stamped for another worktree (hash collision) — leave it for its
+        // rightful owner — or nothing parseable there (a race removed it between
+        // the fast-path check and here). Either way there is nothing to hand back
+        // and nothing of ours to remove.
+        Ok(Some(_)) | Ok(None) => Vec::new(),
         // Corrupt / unparseable: it can never be delivered, so clear it.
         Err(_) => {
             let _ = fs::remove_file(&path);
             Vec::new()
         }
-    }
+    })
 }
 
 /// Discard any prompts queued for `worktree` (best-effort), so a session removed
