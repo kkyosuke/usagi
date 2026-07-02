@@ -177,10 +177,11 @@ fn create_with_setup_runner(
     let skill_settings =
         crate::usecase::settings::effective_for(workspace_root).unwrap_or_default();
     let skill_excludes = crate::infrastructure::skills::git_exclude_patterns();
+    let exclude_patterns: Vec<&str> = skill_excludes.iter().map(String::as_str).collect();
     for wt in &worktrees {
-        for pattern in &skill_excludes {
-            let _ = git::ensure_excluded(wt, pattern);
-        }
+        // Exclude every skill's symlink in one pass so the exclude path is resolved
+        // and the file rewritten once per worktree, not once per skill pattern.
+        let _ = git::ensure_all_excluded(wt, &exclude_patterns);
         let _ = crate::infrastructure::skills::link(wt, &skill_settings);
     }
 

@@ -89,23 +89,28 @@ pub fn sync(cwd: &Path) -> Result<WorkspaceState> {
 pub fn inspect_worktrees(paths: &[PathBuf]) -> Vec<WorktreeState> {
     use rayon::prelude::*;
 
-    // Map each worktree to its repository in parallel, then resolve each
-    // distinct repository's default branch once.
-    let repos: Vec<PathBuf> = paths
+    // Identify each worktree's repository by its shared git common directory — one
+    // cheap `rev-parse` per path. This used to call `primary_worktree`, which shells
+    // out to `git worktree list` and parses *every* worktree of the repository, so N
+    // session worktrees of one repo cost O(N²) porcelain output just to group them.
+    let repo_keys: Vec<PathBuf> = paths
         .par_iter()
-        .map(|path| git::primary_worktree(path).unwrap_or_else(|_| path.clone()))
+        .map(|path| git::git_common_dir(path).unwrap_or_else(|| path.clone()))
         .collect();
+    // Resolve each distinct repository's default branch once, keyed by its common
+    // dir. `default_branch` works from any worktree of the repository, so it is run
+    // against the first path that maps to each key.
     let mut defaults: HashMap<&Path, String> = HashMap::new();
-    for repo in &repos {
+    for (key, path) in repo_keys.iter().zip(paths.iter()) {
         defaults
-            .entry(repo.as_path())
-            .or_insert_with(|| git::default_branch(repo));
+            .entry(key.as_path())
+            .or_insert_with(|| git::default_branch(path));
     }
 
     paths
         .par_iter()
-        .zip(repos.par_iter())
-        .map(|(path, repo)| inspect_worktree(path, &defaults[repo.as_path()]))
+        .zip(repo_keys.par_iter())
+        .map(|(path, key)| inspect_worktree(path, &defaults[key.as_path()]))
         .collect()
 }
 
