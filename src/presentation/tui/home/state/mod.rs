@@ -49,9 +49,25 @@ pub use mode::{Mode, PaneExit, ResumeLevel, ReturnMode};
 use list::session_row;
 use modal::{FocusMenu, Overlay};
 
+/// The fixed 在席 (Focus) menu display order, independent of registry order and
+/// (unlike before) not alphabetical: the pane-launch actions first (`agent`,
+/// then `terminal`), then `ai`, then the destructive `close` last. Any command
+/// not in this list sorts after these four, then alphabetically among itself.
+fn session_menu_rank(name: &str) -> usize {
+    match name {
+        "agent" => 0,
+        "terminal" => 1,
+        "ai" => 2,
+        "close" => 3,
+        _ => 4,
+    }
+}
+
 fn sorted_session_menu_commands(registry: &CommandRegistry) -> Vec<CommandInfo> {
     let mut commands = registry.commands_in_scope(CommandScope::Session);
-    commands.sort_by(|a, b| a.name.cmp(b.name));
+    // A stable sort keeps any commands past the known four (all rank 4) in their
+    // original registry order rather than needing a secondary key.
+    commands.sort_by_key(|info| session_menu_rank(info.name));
     commands
 }
 
@@ -2489,10 +2505,11 @@ impl HomeState {
         self.enter_switch(ReturnMode::Base);
     }
 
-    /// The Session-scope commands the 在席 menu lists, in alphabetical order by
-    /// name (`agent`, `ai`, `close`, `terminal`). The `ai` command is filtered
-    /// out unless the local LLM is usable (enabled and its model pulled), so it
-    /// only appears when running it would actually work. `close` is filtered out
+    /// The Session-scope commands the 在席 menu lists, in the fixed display order
+    /// `agent`, `terminal`, `ai`, `close` (see [`session_menu_rank`]). The `ai`
+    /// command is filtered out unless the local LLM is usable (enabled and its
+    /// model pulled), so it only appears when running it would actually work.
+    /// `close` is filtered out
     /// on the root row, which belongs to no session and so cannot be closed.
     /// `agent` is filtered out when the focused session already has a live
     /// `agent` pane, since its agent is already running.
@@ -2515,7 +2532,8 @@ impl HomeState {
     }
 
     /// Shared body of [`focus_menu_commands`] / [`preview_menu_commands`]: the
-    /// Session-scope commands sorted alphabetically by name, with `ai` gated on
+    /// Session-scope commands in the fixed display order (see
+    /// [`session_menu_rank`]), with `ai` gated on
     /// local-LLM availability, `close` hidden when `root` (the row belongs to no
     /// session), and `agent` hidden when `agent_open` (a live agent pane already
     /// exists for the resolved session).
