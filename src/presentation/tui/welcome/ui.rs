@@ -191,8 +191,16 @@ pub fn body_top_padding(
         + 1
         + menu_lines(0, items, 0, recent_items, Utc::now()).len()
         + notice_lines(0, notice).len();
-    let footer = footer_lines(0).len();
-    height.saturating_sub(body + footer) / 2
+    centered_top_padding(height, body, footer_lines(0).len())
+}
+
+/// The blank rows that vertically centre a `body_lines`-tall body above a
+/// `footer_lines`-tall pinned footer in `height` rows. The shared centering math,
+/// so [`render_frame`] (which has already built the body) and [`body_top_padding`]
+/// (which only knows the section line counts) agree without one rebuilding the
+/// other's sections.
+fn centered_top_padding(height: usize, body_lines: usize, footer_lines: usize) -> usize {
+    height.saturating_sub(body_lines + footer_lines) / 2
 }
 
 /// Builds the full welcome-screen frame for a raw terminal size.
@@ -225,8 +233,9 @@ pub fn render_frame(
     let mut lines = Vec::with_capacity(height);
 
     // Centre the body in the space above the footer (shared with the splash so
-    // the mascot and title line up across the two screens).
-    let top_padding = body_top_padding(height, items, recent_items, notice);
+    // the mascot and title line up across the two screens). The body is already
+    // built, so measure it directly rather than rebuilding it in `body_top_padding`.
+    let top_padding = centered_top_padding(height, body.len(), footer.len());
     for _ in 0..top_padding {
         lines.push(String::new());
     }
