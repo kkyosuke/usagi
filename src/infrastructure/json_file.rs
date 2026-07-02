@@ -43,15 +43,18 @@ fn unique_tmp_path(path: &Path) -> PathBuf {
     PathBuf::from(tmp)
 }
 
-/// Write `bytes` to a unique temp file, fsync its contents, rename it onto
-/// `path`, then best-effort fsync the parent directory so the rename is durable.
+/// Write `bytes` to a unique temp file and rename it onto `path`. When `durable`,
+/// the temp file's contents are fsynced before the rename and the parent
+/// directory is fsynced after it, so the write survives a power loss; otherwise
+/// only the atomic rename is guaranteed (a crash never exposes a half-written
+/// file, but the latest bytes may not have reached disk yet).
 ///
-/// fsyncing the temp file before the rename guarantees the file's contents have
-/// reached disk, so a power loss after the rename cannot expose a zero-length or
-/// half-written file. The directory fsync makes the rename itself durable where
-/// supported; it is best-effort because directory fsync is a no-op or errors on
-/// some platforms (e.g. Windows), and such an error must not fail the write.
-fn write_synced_then_rename(path: &Path, bytes: &[u8]) -> Result<()> {
+/// The non-durable mode is for rebuildable derived *caches* (`index.json`): they
+/// are never relied on for correctness — a stale or missing cache self-heals from
+/// the source-of-truth markdown on the next read — so paying an fsync on every
+/// write to make them power-loss durable is wasted IO in the store lock's hot path.
+/// Source-of-truth files (JSON state, memory/issue markdown) stay durable.
+fn write_atomically(path: &Path, bytes: &[u8], durable: bool) -> Result<()> {
     let tmp = unique_tmp_path(path);
     // Clean up the temp file on any failure after it is created. The write
     // (write_all / sync_all) or the rename can fail — rename especially
@@ -59,27 +62,31 @@ fn write_synced_then_rename(path: &Path, bytes: &[u8]) -> Result<()> {
     // leaves an orphaned `*.tmp.<pid>.<n>` behind, so a recurring failure litters
     // the data dir without bound. The rename is still atomic, so a failed write
     // never replaces the existing good file; this only removes the dead temp.
-    let result = write_synced_then_rename_inner(&tmp, path, bytes);
+    let result = write_atomically_inner(&tmp, path, bytes, durable);
     if result.is_err() {
         let _ = fs::remove_file(&tmp);
     }
     result
 }
 
-/// The body of [`write_synced_then_rename`]: create-write-sync the temp file,
-/// rename it onto `path`, then fsync the parent. Split out so the caller can
+/// The body of [`write_atomically`]: create-write(-sync) the temp file, rename it
+/// onto `path`, then (when durable) fsync the parent. Split out so the caller can
 /// remove the temp file on any error this returns.
-fn write_synced_then_rename_inner(tmp: &Path, path: &Path, bytes: &[u8]) -> Result<()> {
+fn write_atomically_inner(tmp: &Path, path: &Path, bytes: &[u8], durable: bool) -> Result<()> {
     {
         let mut file =
             fs::File::create(tmp).context(format!("failed to create {}", tmp.display()))?;
         file.write_all(bytes)
             .context(format!("failed to write {}", tmp.display()))?;
-        file.sync_all()
-            .context(format!("failed to flush {}", tmp.display()))?;
+        if durable {
+            file.sync_all()
+                .context(format!("failed to flush {}", tmp.display()))?;
+        }
     }
     fs::rename(tmp, path).context(format!("failed to replace {}", path.display()))?;
-    fsync_parent_dir(path);
+    if durable {
+        fsync_parent_dir(path);
+    }
     Ok(())
 }
 
@@ -111,22 +118,37 @@ pub fn read<T: DeserializeOwned>(path: &Path) -> Result<Option<T>> {
     Ok(Some(value))
 }
 
-/// Serialize `value` to pretty JSON and write it atomically to `path` (temp
-/// file + rename), creating `dir` (the directory that contains `path`) first.
+/// Serialize `value` to pretty JSON and write it durably and atomically to `path`
+/// (temp file + fsync + rename), creating `dir` (the directory that contains
+/// `path`) first. For source-of-truth JSON; a rebuildable cache uses
+/// [`write_atomic_cache`].
 pub fn write_atomic<T: Serialize>(dir: &Path, path: &Path, value: &T) -> Result<()> {
+    write_json(dir, path, value, true)
+}
+
+/// Like [`write_atomic`] but for a rebuildable derived cache: the write is atomic
+/// (temp file + rename) but not fsynced, so it does not pay the durability cost of
+/// a source-of-truth file. A power loss may lose the latest cache bytes; the cache
+/// self-heals from the markdown source of truth on the next read.
+pub fn write_atomic_cache<T: Serialize>(dir: &Path, path: &Path, value: &T) -> Result<()> {
+    write_json(dir, path, value, false)
+}
+
+fn write_json<T: Serialize>(dir: &Path, path: &Path, value: &T, durable: bool) -> Result<()> {
     fs::create_dir_all(dir).context(format!("failed to create {}", dir.display()))?;
     let mut text = serde_json::to_string_pretty(value)?;
     text.push('\n');
-    write_synced_then_rename(path, text.as_bytes())
+    write_atomically(path, text.as_bytes(), durable)
 }
 
-/// Write `text` to `path` atomically (per-writer-unique temp file + rename) so
-/// a crash never leaves a half-written file behind and two processes writing
-/// the same path never clobber each other's temp. Unlike [`write_atomic`],
-/// `text` is written verbatim and the parent directory is assumed to exist
-/// already — the markdown stores create it when they set up their data dir.
+/// Write `text` to `path` durably and atomically (per-writer-unique temp file +
+/// fsync + rename) so a crash never leaves a half-written file behind and two
+/// processes writing the same path never clobber each other's temp. Unlike
+/// [`write_atomic`], `text` is written verbatim and the parent directory is
+/// assumed to exist already — the markdown stores create it when they set up their
+/// data dir.
 pub fn write_text_atomic(path: &Path, text: &str) -> Result<()> {
-    write_synced_then_rename(path, text.as_bytes())
+    write_atomically(path, text.as_bytes(), true)
 }
 
 /// The on-disk format version stamped onto every versioned store file
@@ -242,6 +264,33 @@ mod tests {
         assert!(write_text_atomic(&path, "data").is_err());
 
         // The dead temp file was removed rather than orphaned in the data dir.
+        let leftover: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .filter(|name| name.to_string_lossy().contains(".tmp."))
+            .collect();
+        assert!(leftover.is_empty(), "temp files left behind: {leftover:?}");
+    }
+
+    #[test]
+    fn write_atomic_cache_round_trips_json_without_fsync() {
+        // The cache variant skips the temp-file fsync and the parent-dir fsync
+        // (the non-durable branch of `write_atomically`) but still writes atomically
+        // through a temp file + rename, so it round-trips and leaves no temp behind.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index.json");
+        let value = vec!["a".to_string(), "b".to_string()];
+        write_atomic_cache(dir.path(), &path, &value).unwrap();
+
+        let read_back: Option<Vec<String>> = read(&path).unwrap();
+        assert_eq!(read_back, Some(value));
+        assert!(fs::read_to_string(&path).unwrap().ends_with("\n"));
+
+        // A second cache write replaces in place and leaves no temp behind.
+        let value2 = vec!["c".to_string()];
+        write_atomic_cache(dir.path(), &path, &value2).unwrap();
+        let read_back2: Option<Vec<String>> = read(&path).unwrap();
+        assert_eq!(read_back2, Some(value2));
         let leftover: Vec<_> = fs::read_dir(dir.path())
             .unwrap()
             .map(|e| e.unwrap().file_name())
