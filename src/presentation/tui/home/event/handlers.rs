@@ -944,18 +944,19 @@ fn focus_menu_key(
                 if let Some(cli) = state.focus_menu_selected_agent() {
                     state.focus_menu_collapse_agent();
                     launch_agent(term, state, painter, wiring, Some(cli));
-                } else if let Some(action) = state.focus_menu_selected_terminal_action() {
+                    return;
+                }
+                if let Some(action) = state.focus_menu_selected_terminal_action() {
                     state.focus_menu_collapse_agent();
-                    match action {
-                        "open" => launch_pane(term, state, painter, wiring, false),
-                        "new" => open_external_terminal(state, wiring),
-                        _ => {}
+                    if action == "new" {
+                        open_external_terminal(state, wiring);
+                    } else {
+                        launch_pane(term, state, painter, wiring, false);
                     }
-                } else if state.focus_close_expanded() {
-                    let force = state.focus_menu_selected_close_force();
-                    state.focus_menu_collapse_close();
-                    let cmd = if force { "close --force" } else { "close" };
-                    run_focus_command(term, state, painter, cmd, wiring);
+                    return;
+                }
+                if state.focus_close_expanded() {
+                    return run_focus_close_picker(term, state, painter, wiring);
                 }
             }
             _ => {}
@@ -988,6 +989,18 @@ fn focus_menu_key(
         Key::Char('C') => run_focus_command(term, state, painter, "close --force", wiring),
         _ => {}
     }
+}
+
+fn run_focus_close_picker(
+    term: &Term,
+    state: &mut HomeState,
+    painter: &mut FramePainter,
+    wiring: &mut Wiring,
+) {
+    let force = state.focus_menu_selected_close_force();
+    state.focus_menu_collapse_close();
+    let cmd = if force { "close --force" } else { "close" };
+    run_focus_command(term, state, painter, cmd, wiring);
 }
 
 /// 在席 prompt surface: edit / complete the session-scoped command line and run

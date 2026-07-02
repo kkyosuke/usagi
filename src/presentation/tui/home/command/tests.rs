@@ -473,6 +473,9 @@ fn terminal_completes_open_and_new_actions() {
     let all = registry().complete("terminal ", CommandScope::Session);
     assert_eq!(all.input, "terminal ");
     assert_eq!(all.candidates, vec!["open", "new"]);
+    let after_action = registry().complete("terminal open ", CommandScope::Session);
+    assert_eq!(after_action.input, "terminal open ");
+    assert!(after_action.candidates.is_empty());
 }
 
 #[test]

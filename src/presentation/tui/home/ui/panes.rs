@@ -1870,10 +1870,10 @@ fn focus_terminal_pick_row(action: &str, selected: bool, width: usize) -> String
     } else {
         style(format!("{action:<10}")).cyan().to_string()
     };
-    let desc = match action {
-        "open" => "add tab",
-        "new" => "new terminal",
-        _ => "",
+    let desc = if action == "new" {
+        "new terminal"
+    } else {
+        "add tab"
     };
     let tag = if action == "open" {
         style("(default)").dim().to_string()
