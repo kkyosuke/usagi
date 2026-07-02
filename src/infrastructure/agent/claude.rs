@@ -233,9 +233,12 @@ impl Agent for ClaudeAgent {
         let resume_flag = if resume { "--continue " } else { "" };
         // A queued prompt rides along as Claude's positional query, so the agent
         // opens interactively already working on it. Placed last so it is the
-        // trailing argument.
+        // trailing argument, behind a `--` end-of-options marker: the prompt is
+        // arbitrary user text (`ai <prompt>` / MCP `session_prompt`), so one
+        // starting with `-` (e.g. `ai --help`) must reach the CLI as the query,
+        // not be parsed as a flag that aborts the launch.
         let prompt_arg = match initial_prompt {
-            Some(prompt) => format!(" {}", shell_single_quote(prompt)),
+            Some(prompt) => format!(" -- {}", shell_single_quote(prompt)),
             None => String::new(),
         };
         let mcp_config = shell_single_quote(&mcp_config);
@@ -376,19 +379,25 @@ mod tests {
     #[test]
     fn launch_command_appends_an_initial_prompt_as_the_trailing_query() {
         // A queued prompt rides along as Claude's positional query so the agent
-        // opens already working on it. It is the trailing, single-quoted argument;
-        // the wiring before it is unchanged.
+        // opens already working on it. It is the trailing, single-quoted argument
+        // behind a `--` end-of-options marker (so a `-`-leading prompt cannot be
+        // parsed as a flag); the wiring before it is unchanged.
         let launch =
             ClaudeAgent::new().launch_command(&wiring("usagi", None), false, Some("fix issue #50"));
-        assert!(launch.ends_with(" 'fix issue #50'"));
+        assert!(launch.ends_with(" -- 'fix issue #50'"));
         // The wiring is still present and the program still starts plainly.
         assert!(launch.starts_with("claude --mcp-config '"));
         assert!(launch.contains("--append-system-prompt '"));
         // With no prompt the trailing query is absent: the command is exactly the
-        // prompt-carrying one with its ` '…'` suffix stripped.
+        // prompt-carrying one with its ` -- '…'` suffix stripped.
         let plain = ClaudeAgent::new().launch_command(&wiring("usagi", None), false, None);
         assert!(!plain.contains("fix issue #50"));
-        assert_eq!(launch, format!("{plain} 'fix issue #50'"));
+        assert_eq!(launch, format!("{plain} -- 'fix issue #50'"));
+        // A dash-leading prompt (`ai --help`) stays behind the separator as the
+        // positional query instead of aborting the launch as an unknown flag.
+        let dashed =
+            ClaudeAgent::new().launch_command(&wiring("usagi", None), false, Some("--help"));
+        assert!(dashed.ends_with(" -- '--help'"));
     }
 
     #[test]

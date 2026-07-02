@@ -297,9 +297,12 @@ impl Agent for CodexAgent {
         parts.extend(overrides);
         // A queued prompt rides along as Codex's trailing positional query (only
         // on the fresh path, where it is unambiguous). It is arbitrary user text,
-        // so it is escaped for the single-quoted shell context.
+        // so it is escaped for the single-quoted shell context and placed behind a
+        // `--` end-of-options marker: a prompt starting with `-` (e.g. `ai --help`)
+        // must bind to the positional, not be parsed as a flag.
         if !resuming {
             if let Some(prompt) = initial_prompt {
+                parts.push("--".to_string());
                 parts.push(shell_single_quote(prompt));
             }
         }
@@ -524,16 +527,22 @@ mod tests {
     #[test]
     fn launch_command_appends_an_initial_prompt_as_the_trailing_query() {
         // A queued prompt rides along as Codex's positional query so the agent
-        // opens already working on it. It is the trailing, single-quoted argument;
-        // the wiring before it is unchanged.
+        // opens already working on it. It is the trailing, single-quoted argument
+        // behind a `--` end-of-options marker (so a `-`-leading prompt cannot be
+        // parsed as a flag); the wiring before it is unchanged.
         let launch =
             CodexAgent::new().launch_command(&wiring("usagi", None), false, Some("fix issue #50"));
-        assert!(launch.ends_with(" 'fix issue #50'"));
+        assert!(launch.ends_with(" -- 'fix issue #50'"));
         // With no prompt the trailing query is absent: the command is exactly the
-        // prompt-carrying one with its ` '…'` suffix stripped.
+        // prompt-carrying one with its ` -- '…'` suffix stripped.
         let plain = CodexAgent::new().launch_command(&wiring("usagi", None), false, None);
         assert!(!plain.contains("fix issue #50"));
-        assert_eq!(launch, format!("{plain} 'fix issue #50'"));
+        assert_eq!(launch, format!("{plain} -- 'fix issue #50'"));
+        // A dash-leading prompt (`ai --help`) stays behind the separator as the
+        // positional query instead of aborting the launch as an unknown flag.
+        let dashed =
+            CodexAgent::new().launch_command(&wiring("usagi", None), false, Some("--help"));
+        assert!(dashed.ends_with(" -- '--help'"));
     }
 
     #[test]
