@@ -438,7 +438,18 @@ fn focus_prompt_submit_runs_a_session_command() {
     }
     let submission = state.focus_prompt_submit();
     assert_eq!(submission.effect, Effect::OpenTerminal);
-    assert_eq!(submission.recorded.as_deref(), Some("terminal"));
+    assert_eq!(
+        submission.recorded.as_ref().map(|e| e.command.as_str()),
+        Some("terminal")
+    );
+    assert_eq!(
+        submission
+            .recorded
+            .as_ref()
+            .and_then(|e| e.session.as_deref()),
+        Some("main")
+    );
+    assert!(submission.recorded.as_ref().is_some_and(|e| e.success));
     // The prompt is cleared and the command recorded in history.
     assert_eq!(state.focus_prompt(), "");
     assert_eq!(state.cmdline.history, vec!["terminal"]);

@@ -192,6 +192,8 @@ fn live_preview(_: &Path, _: Sidebar) -> Option<TerminalView> {
 
 fn noop_persist(_: &str) {}
 
+fn noop_persist_entry(_: &crate::domain::history::HistoryEntry) {}
+
 /// A no-op browser launcher for the loop fakes: clicking a PR in the popup shells
 /// out for real only in production, so the tests just drop the URL.
 fn noop_open_url(_: &str) {}
@@ -761,7 +763,7 @@ fn run_with_tasks(
 ) -> Result<Outcome> {
     let term = Term::stdout();
     let monitor = MonitorHandle::detached();
-    let mut persist: fn(&str) = noop_persist;
+    let mut persist: fn(&crate::domain::history::HistoryEntry) = noop_persist_entry;
     let mut dispatch_create = |_: &Path, _: &str, _: u64| {};
     let mut rename = |_: &Path, n: &str, l: &str| noop_rename(n, l);
     let mut branches: fn() -> Vec<String> = no_branches;
@@ -827,7 +829,7 @@ fn run_with_live_session(reader: &mut dyn KeyReader) -> Result<Outcome> {
     let term = Term::stdout();
     let monitor = MonitorHandle::with_live(vec![PathBuf::from("/r/main")]);
     let tasks = TaskHandle::new();
-    let mut persist: fn(&str) = noop_persist;
+    let mut persist: fn(&crate::domain::history::HistoryEntry) = noop_persist_entry;
     let mut dispatch_create = |_: &Path, _: &str, _: u64| {};
     let mut rename = |_: &Path, n: &str, l: &str| noop_rename(n, l);
     let mut dispatch_remove = |_: &Path, _: &str, _: bool, _| {};
@@ -894,7 +896,7 @@ fn run_idle_watching(reader: &mut dyn KeyReader) -> Result<Outcome> {
     let term = Term::stdout();
     let monitor = MonitorHandle::detached();
     let tasks = TaskHandle::new();
-    let mut persist: fn(&str) = noop_persist;
+    let mut persist: fn(&crate::domain::history::HistoryEntry) = noop_persist_entry;
     let mut dispatch_create = |_: &Path, _: &str, _: u64| {};
     let mut rename = |_: &Path, n: &str, l: &str| noop_rename(n, l);
     let mut dispatch_remove = |_: &Path, _: &str, _: bool, _| {};
@@ -1048,7 +1050,7 @@ fn unite_add_and_remove_run_through_the_palette() {
     keys.push(Ok(Key::CtrlC));
     let mut reader = ScriptedReader::new(keys);
 
-    let mut persist: fn(&str) = noop_persist;
+    let mut persist: fn(&crate::domain::history::HistoryEntry) = noop_persist_entry;
     let mut dispatch_create = |_: &Path, _: &str, _: u64| {};
     let mut rename = |_: &Path, n: &str, l: &str| noop_rename(n, l);
     let mut set_note_fake = |_: &Path, n: &str, t: &str| noop_set_note(n, t);

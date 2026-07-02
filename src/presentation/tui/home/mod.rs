@@ -132,7 +132,7 @@ pub struct Preload {
     notice: Option<String>,
     issues: Vec<crate::domain::issue::Issue>,
     settings: crate::domain::settings::Settings,
-    history: Vec<String>,
+    history: Vec<crate::domain::history::HistoryEntry>,
 }
 
 /// Loads the [`Preload`] for a workspace. Pure disk / PATH work with no `Term`,
@@ -163,9 +163,7 @@ pub fn preload(workspace: &Workspace) -> Preload {
     // `open_config`) so a change takes effect without reopening this screen.
     let settings = effective_settings(&workspace.path);
     // Past commands so `history` and `↑`/`↓` recall span sessions; empty on failure.
-    let history = crate::usecase::history::load(&workspace.path)
-        .map(|entries| entries.into_iter().map(|e| e.command).collect())
-        .unwrap_or_default();
+    let history = crate::usecase::history::load(&workspace.path).unwrap_or_default();
     Preload {
         sessions,
         root_note,
@@ -261,8 +259,8 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
     // Persisting a command is best-effort; a write failure must not break the
     // screen, so the error is intentionally dropped (cf. `hop`'s notification).
     let history_root = workspace.path.clone();
-    let mut persist = move |command: &str| {
-        let _ = crate::usecase::history::append(&history_root, command);
+    let mut persist = move |entry: &crate::domain::history::HistoryEntry| {
+        let _ = crate::usecase::history::append(&history_root, entry);
     };
 
     // The background session tasks (create / remove) the event loop dispatches
