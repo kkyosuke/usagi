@@ -239,6 +239,8 @@ fn worktree_row_marks_the_cursor_in_switch_and_shows_detached() {
     let (top, _) = worktree_row(
         &worktree(Some("main"), true, BranchStatus::Pushed),
         "",
+        None,
+        0,
         10,
         10,
         DetailCols::default(),
@@ -260,6 +262,8 @@ fn worktree_row_marks_the_cursor_in_switch_and_shows_detached() {
     let (top_no_switch, _) = worktree_row(
         &worktree(Some("main"), true, BranchStatus::Pushed),
         "",
+        None,
+        0,
         10,
         10,
         DetailCols::default(),
@@ -278,6 +282,8 @@ fn worktree_row_marks_the_cursor_in_switch_and_shows_detached() {
     let (other_top, _) = worktree_row(
         &worktree(Some("feature"), false, BranchStatus::Local),
         "",
+        None,
+        0,
         10,
         10,
         DetailCols::default(),
@@ -298,6 +304,8 @@ fn worktree_row_marks_the_cursor_in_switch_and_shows_detached() {
     let (detached_top, _) = worktree_row(
         &worktree(None, false, BranchStatus::Local),
         "",
+        None,
+        0,
         10,
         10,
         DetailCols::default(),
@@ -321,6 +329,8 @@ fn worktree_row_shows_a_memo_marker_only_when_the_session_has_a_note() {
     let with_note = worktree_row(
         &worktree(Some("feature"), false, BranchStatus::Local),
         "",
+        None,
+        0,
         10,
         10,
         DetailCols::default(),
@@ -338,6 +348,8 @@ fn worktree_row_shows_a_memo_marker_only_when_the_session_has_a_note() {
     let without_note = worktree_row(
         &worktree(Some("feature"), false, BranchStatus::Local),
         "",
+        None,
+        0,
         10,
         10,
         DetailCols::default(),
@@ -376,6 +388,8 @@ fn worktree_row_heat_dot_fades_with_time_since_touched() {
         let (top, _) = worktree_row(
             &worktree,
             "",
+            None,
+            0,
             10,
             10,
             DetailCols::default(),
@@ -405,6 +419,8 @@ fn worktree_row_marks_the_active_worktree_with_a_gutter_bar_on_both_lines() {
     let (active_top, active_detail) = worktree_row(
         &worktree(Some("feature"), false, BranchStatus::Local),
         "",
+        None,
+        0,
         10,
         10,
         DetailCols::default(),
@@ -427,6 +443,8 @@ fn worktree_row_marks_the_active_worktree_with_a_gutter_bar_on_both_lines() {
     let (idle_top, idle_detail) = worktree_row(
         &worktree(Some("feature"), false, BranchStatus::Local),
         "",
+        None,
+        0,
         10,
         10,
         DetailCols::default(),
@@ -450,6 +468,8 @@ fn worktree_row_shows_the_agent_state_through_its_lifecycle() {
     let (_, ready_detail) = worktree_row(
         &worktree(Some("feature"), false, BranchStatus::Local),
         "",
+        None,
+        0,
         10,
         12,
         DetailCols::default(),
@@ -470,6 +490,8 @@ fn worktree_row_shows_the_agent_state_through_its_lifecycle() {
     let (_, running_detail) = worktree_row(
         &worktree(Some("feature"), false, BranchStatus::Local),
         "",
+        None,
+        0,
         10,
         12,
         DetailCols::default(),
@@ -490,6 +512,8 @@ fn worktree_row_shows_the_agent_state_through_its_lifecycle() {
     let (_, waiting_detail) = worktree_row(
         &worktree(Some("feature"), false, BranchStatus::Local),
         "",
+        None,
+        0,
         10,
         12,
         DetailCols::default(),
@@ -511,6 +535,8 @@ fn worktree_row_shows_the_agent_state_through_its_lifecycle() {
     let (_, done_detail) = worktree_row(
         &worktree(Some("feature"), false, BranchStatus::Local),
         "",
+        None,
+        0,
         10,
         12,
         DetailCols::default(),
@@ -532,6 +558,8 @@ fn worktree_row_shows_the_agent_state_through_its_lifecycle() {
     let (absent_top, absent_detail) = worktree_row(
         &worktree(Some("feature"), false, BranchStatus::Local),
         "",
+        None,
+        0,
         10,
         12,
         DetailCols::default(),
@@ -575,6 +603,8 @@ fn worktree_row_truncates_a_long_branch() {
             BranchStatus::Local,
         ),
         "",
+        None,
+        0,
         8,
         8,
         DetailCols::default(),
@@ -596,6 +626,8 @@ fn worktree_row_shows_the_label_override_instead_of_the_branch() {
     let (top, _) = worktree_row(
         &worktree(Some("feat-login"), false, BranchStatus::Local),
         "Login flow",
+        None,
+        0,
         20,
         20,
         DetailCols::default(),
@@ -616,22 +648,22 @@ fn worktree_row_shows_the_label_override_instead_of_the_branch() {
 #[test]
 fn root_row_marks_selected_and_active() {
     // The `>` cursor shows on the selected root only in 切替 (Switch).
-    let (top, detail) = root_row(10, 20, false, true, false, true);
+    let (top, detail) = root_row(10, 0, 20, false, true, false, true);
     assert!(top.contains('>'));
     assert!(top.contains('⌂'));
     assert!(top.contains(ROOT_NAME));
     assert!(detail.contains("workspace root"));
     // The same selected root outside Switch shows no cursor.
-    let (top_no_switch, _) = root_row(10, 20, false, true, false, false);
+    let (top_no_switch, _) = root_row(10, 0, 20, false, true, false, false);
     assert!(!top_no_switch.contains('>'));
 
     // The active root carries the green `▎` bar down both lines, not a `*`.
-    let (active_top, active_detail) = root_row(10, 20, false, false, true, false);
+    let (active_top, active_detail) = root_row(10, 0, 20, false, false, true, false);
     assert!(active_top.contains('▎'));
     assert!(active_detail.contains('▎'));
     assert!(!active_top.contains('*'));
 
-    let (idle_top, idle_detail) = root_row(10, 20, false, false, false, false);
+    let (idle_top, idle_detail) = root_row(10, 0, 20, false, false, false, false);
     assert!(!idle_top.contains('>'));
     assert!(!idle_top.contains('▎'));
     assert!(!idle_detail.contains('▎'));
@@ -643,8 +675,8 @@ fn root_row_shows_the_memo_marker_only_when_it_has_a_note() {
     // The root row carries its own note, like a session: the memo marker shows on
     // line 1 only when `has_note`, and is purely additive (the right-edge status
     // column does not shift), matching the worktree row.
-    let (with_note, _) = root_row(10, 20, true, false, false, false);
-    let (without_note, _) = root_row(10, 20, false, false, false, false);
+    let (with_note, _) = root_row(10, 0, 20, true, false, false, false);
+    let (without_note, _) = root_row(10, 0, 20, false, false, false, false);
     assert!(with_note.contains(NOTE_ICON));
     assert!(!without_note.contains(NOTE_ICON));
     assert_eq!(
@@ -664,6 +696,7 @@ fn left_pane_marks_the_root_row_when_it_carries_a_note() {
         &HashSet::new(),
         &HashSet::new(),
         &HashMap::new(),
+        &crate::domain::settings::SessionLabelMaster::default(),
         80,
         6,
         false,
@@ -683,6 +716,7 @@ fn left_pane_renders_the_root_entry_then_the_empty_message() {
         &HashSet::new(),
         &HashSet::new(),
         &HashMap::new(),
+        &crate::domain::settings::SessionLabelMaster::default(),
         80,
         6,
         false,
@@ -716,6 +750,7 @@ fn left_pane_shows_each_sessions_relative_update_time_on_the_detail_line() {
         &HashSet::new(),
         &HashSet::new(),
         &HashMap::new(),
+        &crate::domain::settings::SessionLabelMaster::default(),
         30,
         5,
         false,
@@ -745,6 +780,7 @@ fn left_pane_shows_the_ahead_behind_marker_on_the_detail_line() {
         &HashSet::new(),
         &HashSet::new(),
         &HashMap::new(),
+        &crate::domain::settings::SessionLabelMaster::default(),
         40,
         5,
         false,
@@ -798,6 +834,7 @@ fn left_pane_lines_the_detail_fields_up_across_sessions_of_different_sizes() {
         &HashSet::new(),
         &HashSet::new(),
         &HashMap::new(),
+        &crate::domain::settings::SessionLabelMaster::default(),
         80,
         9,
         false,
@@ -836,6 +873,7 @@ fn left_pane_renders_the_root_entry_then_one_entry_per_worktree() {
         &HashSet::new(),
         &HashSet::new(),
         &HashMap::new(),
+        &crate::domain::settings::SessionLabelMaster::default(),
         30,
         9,
         false,
@@ -872,6 +910,7 @@ fn left_pane_in_unite_mode_heads_each_workspace_with_its_name() {
         &HashSet::new(),
         &HashSet::new(),
         &HashMap::new(),
+        &crate::domain::settings::SessionLabelMaster::default(),
         30,
         40,
         false,
@@ -921,6 +960,7 @@ fn rail_pane_in_unite_mode_separates_each_workspace() {
         &HashSet::new(),
         &HashSet::new(),
         &HashMap::new(),
+        &crate::domain::settings::SessionLabelMaster::default(),
         30,
         40,
         false,
@@ -955,6 +995,7 @@ fn left_pane_in_unite_mode_shows_an_empty_workspaces_message() {
         &HashSet::new(),
         &HashSet::new(),
         &HashMap::new(),
+        &crate::domain::settings::SessionLabelMaster::default(),
         30,
         40,
         false,
@@ -986,6 +1027,7 @@ fn left_pane_stops_at_a_later_group_once_the_pane_is_full() {
         &HashSet::new(),
         &HashSet::new(),
         &HashMap::new(),
+        &crate::domain::settings::SessionLabelMaster::default(),
         30,
         5,
         false,
@@ -1016,6 +1058,7 @@ fn rail_pane_stops_at_a_later_group_once_the_rail_is_full() {
         &HashSet::new(),
         &HashSet::new(),
         &HashMap::new(),
+        &crate::domain::settings::SessionLabelMaster::default(),
         30,
         4,
         false,
@@ -1151,6 +1194,7 @@ fn row_select_click_works_in_unite_mode() {
             name: "b1".to_string(),
             display_name: None,
             note: None,
+            label_id: None,
             root: PathBuf::from("/wsB/.usagi/sessions/b1"),
             worktrees: Vec::new(),
             created_at: Utc::now(),
@@ -1175,6 +1219,7 @@ fn unite_with_prs() -> HomeState {
         name: "main".to_string(),
         display_name: None,
         note: None,
+        label_id: None,
         root: PathBuf::from("/ws/main"),
         worktrees: vec![worktree_with_pr(412)],
         created_at: Utc::now(),
@@ -1188,6 +1233,7 @@ fn unite_with_prs() -> HomeState {
             name: "b1".to_string(),
             display_name: None,
             note: None,
+            label_id: None,
             root: PathBuf::from("/wsB/.usagi/sessions/b1"),
             worktrees: vec![worktree_with_pr(777)],
             created_at: Utc::now(),
@@ -1225,6 +1271,7 @@ fn sidebar_pr_badge_at_skips_an_empty_earlier_unite_group() {
             name: "b1".to_string(),
             display_name: None,
             note: None,
+            label_id: None,
             root: PathBuf::from("/wsB/.usagi/sessions/b1"),
             worktrees: vec![worktree_with_pr(777)],
             created_at: Utc::now(),
@@ -1277,6 +1324,7 @@ fn left_pane_stops_building_rows_once_the_pane_is_full() {
         &HashSet::new(),
         &HashSet::new(),
         &HashMap::new(),
+        &crate::domain::settings::SessionLabelMaster::default(),
         30,
         5,
         false,
@@ -1311,6 +1359,7 @@ fn rail_pane_stops_building_rows_once_the_rail_is_full() {
         &HashSet::new(),
         &HashSet::new(),
         &HashMap::new(),
+        &crate::domain::settings::SessionLabelMaster::default(),
         8,
         5,
         false,
@@ -1334,6 +1383,7 @@ fn left_pane_marks_the_agent_state_through_its_lifecycle() {
         &empty,
         &empty,
         &HashMap::new(),
+        &crate::domain::settings::SessionLabelMaster::default(),
         30,
         6,
         false,
@@ -1350,6 +1400,7 @@ fn left_pane_marks_the_agent_state_through_its_lifecycle() {
         &empty,
         &empty,
         &HashMap::new(),
+        &crate::domain::settings::SessionLabelMaster::default(),
         30,
         6,
         false,
@@ -1366,6 +1417,7 @@ fn left_pane_marks_the_agent_state_through_its_lifecycle() {
         &path,
         &empty,
         &HashMap::new(),
+        &crate::domain::settings::SessionLabelMaster::default(),
         30,
         6,
         false,
@@ -1382,6 +1434,7 @@ fn left_pane_marks_the_agent_state_through_its_lifecycle() {
         &empty,
         &empty,
         &HashMap::new(),
+        &crate::domain::settings::SessionLabelMaster::default(),
         30,
         6,
         false,
@@ -1417,6 +1470,7 @@ fn left_pane_always_draws_a_fixed_three_line_resource_row() {
         &empty,
         &empty,
         &resources,
+        &crate::domain::settings::SessionLabelMaster::default(),
         40,
         8,
         false,
@@ -1441,6 +1495,7 @@ fn left_pane_always_draws_a_fixed_three_line_resource_row() {
         &empty,
         &empty,
         &HashMap::new(),
+        &crate::domain::settings::SessionLabelMaster::default(),
         40,
         8,
         false,
@@ -1461,6 +1516,7 @@ fn left_pane_always_draws_a_fixed_three_line_resource_row() {
         &empty,
         &empty,
         &resources,
+        &crate::domain::settings::SessionLabelMaster::default(),
         40,
         8,
         true,
@@ -1484,6 +1540,7 @@ fn left_pane_is_trimmed_to_available_rows() {
         &HashSet::new(),
         &HashSet::new(),
         &HashMap::new(),
+        &crate::domain::settings::SessionLabelMaster::default(),
         30,
         4,
         false,
@@ -1511,6 +1568,7 @@ fn left_pane_marks_the_active_worktree_with_a_gutter_bar() {
         &HashSet::new(),
         &HashSet::new(),
         &HashMap::new(),
+        &crate::domain::settings::SessionLabelMaster::default(),
         30,
         9,
         false,
@@ -1540,6 +1598,7 @@ fn rail_collapses_each_entry_to_three_rows_without_names_or_numbers() {
         &empty,
         &empty,
         &HashMap::new(),
+        &crate::domain::settings::SessionLabelMaster::default(),
         RAIL_WIDTH,
         9,
         false,
@@ -1589,6 +1648,7 @@ fn rail_keeps_the_same_row_count_as_the_full_sidebar() {
             &empty,
             &empty,
             &HashMap::new(),
+            &crate::domain::settings::SessionLabelMaster::default(),
             30,
             20,
             false,
@@ -1608,6 +1668,7 @@ fn rail_keeps_the_same_row_count_as_the_full_sidebar() {
             &empty,
             &empty,
             &HashMap::new(),
+            &crate::domain::settings::SessionLabelMaster::default(),
             30,
             20,
             false,
@@ -1638,6 +1699,7 @@ fn rail_shows_the_active_bar_down_all_rows_and_the_agent_glyph_on_row_two() {
         &empty,
         &empty,
         &HashMap::new(),
+        &crate::domain::settings::SessionLabelMaster::default(),
         RAIL_WIDTH,
         9,
         false,
@@ -1674,6 +1736,7 @@ fn rail_shows_each_agent_state_glyph_on_the_detail_row() {
             waiting,
             done,
             &HashMap::new(),
+            &crate::domain::settings::SessionLabelMaster::default(),
             RAIL_WIDTH,
             8,
             false,
@@ -1703,6 +1766,7 @@ fn rail_sidebar_marks_the_switch_cursor() {
             &empty,
             &empty,
             &HashMap::new(),
+            &crate::domain::settings::SessionLabelMaster::default(),
             RAIL_WIDTH,
             8,
             true,
@@ -1747,6 +1811,7 @@ fn left_pane_fades_every_row_but_the_cursor_when_asked() {
         &HashSet::new(),
         &HashSet::new(),
         &HashMap::new(),
+        &crate::domain::settings::SessionLabelMaster::default(),
         30,
         9,
         true,
@@ -1775,6 +1840,7 @@ fn left_pane_shows_the_pr_badge_for_a_session_that_has_one() {
         &HashSet::new(),
         &HashSet::new(),
         &HashMap::new(),
+        &crate::domain::settings::SessionLabelMaster::default(),
         30,
         8,
         false,
@@ -2062,6 +2128,7 @@ fn left_pane_draws_the_create_row_at_the_foot_and_marks_the_cursor() {
         &HashSet::new(),
         &HashSet::new(),
         &HashMap::new(),
+        &crate::domain::settings::SessionLabelMaster::default(),
         80,
         12,
         true,
@@ -2085,6 +2152,7 @@ fn rail_pane_draws_the_create_row_glyph() {
         &HashSet::new(),
         &HashSet::new(),
         &HashMap::new(),
+        &crate::domain::settings::SessionLabelMaster::default(),
         5,
         12,
         true,

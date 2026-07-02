@@ -314,6 +314,17 @@ pub struct SessionRecord {
     /// default, and omitted from the file) means no note has been written.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+    /// The [`id`](crate::domain::settings::SessionLabelDef::id) of the manual
+    /// status label the user has assigned to this session in 切替 (Switch), or
+    /// `None` when unset. Resolved back to a
+    /// [`SessionLabelDef`](crate::domain::settings::SessionLabelDef) through the
+    /// effective [`SessionLabelMaster`](crate::domain::settings::SessionLabelMaster)
+    /// for display; an id no longer in the master reads as unset. Purely a
+    /// user-assigned tag — unlike [`WorktreeState::status`] it is never derived
+    /// from git, so a workspace refresh leaves it untouched. `None` (the default)
+    /// is omitted from the file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label_id: Option<String>,
     /// Root of the session tree: `<workspace>/.usagi/sessions/<name>`.
     pub root: PathBuf,
     /// One entry per repository that received a worktree, with its git status.
@@ -609,6 +620,7 @@ mod tests {
             name: "feature-x".to_string(),
             display_name: None,
             note: None,
+            label_id: None,
             root: PathBuf::from("/repo/.usagi/sessions/feature-x"),
             worktrees: vec![sample_worktree()],
             created_at: Utc::now(),
@@ -644,6 +656,7 @@ mod tests {
             name: "feature-x".to_string(),
             display_name: None,
             note: None,
+            label_id: None,
             root: PathBuf::from("/repo/.usagi/sessions/feature-x"),
             worktrees: vec![sample_worktree()],
             created_at: Utc::now(),
@@ -695,6 +708,7 @@ mod tests {
             name: "feature-x".to_string(),
             display_name: None,
             note: None,
+            label_id: None,
             root: PathBuf::from("/repo/.usagi/sessions/feature-x"),
             worktrees: vec![sample_worktree()],
             created_at: Utc::now(),
@@ -712,6 +726,7 @@ mod tests {
             name: "feature-x".to_string(),
             display_name: None,
             note: None,
+            label_id: None,
             root: PathBuf::from("/repo/.usagi/sessions/feature-x"),
             worktrees: vec![sample_worktree()],
             created_at: Utc::now(),
@@ -730,6 +745,7 @@ mod tests {
             name: "feature-x".to_string(),
             display_name: Some("Nice name".to_string()),
             note: None,
+            label_id: None,
             root: PathBuf::from("/repo/.usagi/sessions/feature-x"),
             worktrees: vec![sample_worktree()],
             created_at: Utc::now(),
@@ -759,6 +775,7 @@ mod tests {
             name: "feature-x".to_string(),
             display_name: None,
             note: None,
+            label_id: None,
             root: PathBuf::from("/repo/.usagi/sessions/feature-x"),
             worktrees: vec![sample_worktree()],
             created_at: Utc::now(),
@@ -792,6 +809,7 @@ mod tests {
             name: "feature-x".to_string(),
             display_name: None,
             note: None,
+            label_id: None,
             root: PathBuf::from("/repo/.usagi/sessions/feature-x"),
             worktrees: vec![sample_worktree()],
             created_at: created,
@@ -819,6 +837,39 @@ mod tests {
             r#"{"name":"x","root":"/r","worktrees":[],"created_at":"2026-06-13T05:01:18.659149Z"}"#;
         let parsed: SessionRecord = serde_json::from_str(legacy).unwrap();
         assert_eq!(parsed.last_active, None);
+    }
+
+    #[test]
+    fn label_id_is_omitted_when_absent_round_trips_when_set_and_reads_legacy_files() {
+        let mut state = WorkspaceState::new();
+        state.sessions.push(SessionRecord {
+            name: "feature-x".to_string(),
+            display_name: None,
+            note: None,
+            label_id: None,
+            root: PathBuf::from("/repo/.usagi/sessions/feature-x"),
+            worktrees: vec![sample_worktree()],
+            created_at: Utc::now(),
+            last_active: None,
+        });
+        // No label → the key is dropped from the file (an unset tag).
+        let json = serde_json::to_string(&state).unwrap();
+        assert!(!json.contains("label_id"));
+
+        // An assigned label id round-trips through JSON.
+        state.sessions[0].label_id = Some("review".to_string());
+        let json = serde_json::to_string(&state).unwrap();
+        assert!(json.contains("\"label_id\":\"review\""));
+        assert_eq!(
+            serde_json::from_str::<WorkspaceState>(&json).unwrap(),
+            state
+        );
+
+        // An older file without a `label_id` key parses (defaults to `None`).
+        let legacy =
+            r#"{"name":"x","root":"/r","worktrees":[],"created_at":"2026-06-13T05:01:18.659149Z"}"#;
+        let parsed: SessionRecord = serde_json::from_str(legacy).unwrap();
+        assert_eq!(parsed.label_id, None);
     }
 
     #[test]

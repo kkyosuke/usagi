@@ -70,6 +70,7 @@ mod tests {
                 name: "login".to_string(),
                 display_name: None,
                 note: None,
+                label_id: None,
                 root: PathBuf::from("/repo/.usagi/sessions/login"),
                 created_at: ts,
                 last_active: None,

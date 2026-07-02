@@ -576,6 +576,7 @@ fn left_column(
         state.waiting_paths(),
         state.done_paths(),
         state.resource_usages(),
+        state.label_master(),
         left_w,
         body_rows,
         // In 切替 the keyboard is on the list: fade the rows the cursor is not on.

@@ -270,6 +270,7 @@ mod tests {
             op_mcp: crate::domain::settings::OpMcp { enabled: true },
             // The PR-skills feature pinned off, to exercise the skill line.
             skill_features: [("pull-request".to_string(), false)].into_iter().collect(),
+            session_labels: crate::domain::settings::SessionLabelMaster::default(),
         };
         let lines = render_settings(&settings);
         assert!(lines[0].contains("dark"));

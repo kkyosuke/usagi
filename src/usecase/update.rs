@@ -647,6 +647,7 @@ mod tests {
             name: "ghost".to_string(),
             display_name: None,
             note: None,
+            label_id: None,
             root: ghost.clone(),
             worktrees: vec![WorktreeState {
                 branch: Some("usagi/ghost".to_string()),

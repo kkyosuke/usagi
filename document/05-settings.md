@@ -46,12 +46,46 @@
 | ローカル LLM モデル | `local_llm.model` | string | `qwen2.5-coder:7b` | 委譲先の Ollama モデル名（`qwen2.5-coder:7b` / `:3b` / `:1.5b` / `qwen2.5:7b`） |
 | 1Password MCP 有効化 | `op_mcp.enabled` | bool | `false` | 有効にすると `agent` 起動時に [1Password MCP サーバ](03-commands/05-op-mcp.md)（`usagi-op`）を wire し、エージェントが `op` 経由で secret を読み取れる。1Password サービスアカウントトークン本体は OS のシークレットストアに保存する |
 | 同梱スキル機能 | `skill_features` | map<string, bool> | `{}` | usagi が各セッションに配布する[同梱スキル](04-orchestration.md#スキルの配布)を**機能（feature）単位**で ON/OFF する。キーは機能 ID（現状 `pull-request`：PR 作成・更新・修正の 3 スキルをまとめたもの）、値が有効・無効。既定値（ON）と同じ機能はマップに残さない（未記載 = 既定）。`usagi-session` は usagi 固有の常時 ON スキルで、この設定の対象外 |
+| ステータスラベル | `session_labels` | array | 既定 5 件（下記） | ホーム画面の[切替](design/home/02-layout.md#切替switch既定)で `Tab` / 数字キーによりセッションへ手で付ける**ステータスラベルのマスタ（選択肢一覧）**。空配列にすると機能が休止（`Tab` は無反応）。下の[ステータスラベル](#ステータスラベルsession_labels)節を参照 |
 
 > **同梱スキル機能（`skill_features`）**: usagi はビルド時に埋め込んだ Claude Code スキルを、起動する
 > エージェントへ配布します（[スキルの配布](04-orchestration.md#スキルの配布)）。このうち**機能ごとにまとめた
 > グループ**を ON/OFF できます。`pull-request` 機能（`usagi-pr-create` / `usagi-pr-update` /
 > `usagi-pr-fix`）が現状の対象で、OFF にするとそのセッションの worktree にこれらのスキルを symlink しません。
 > 既定はすべて ON（同梱スキルはオプトアウト）。`usagi-session` は機能に属さず常に配布されます。
+
+### ステータスラベル（session_labels）
+
+ホーム画面の[切替](design/home/02-layout.md#切替switch既定)では、選択中のセッションに**手でステータスラベルを付けられます**（todo / 作業中 / レビュー中 …のようなカンバン的な意味づけ）。git 由来のブランチ状態（[`status`](data/02-workspace.md#status-ブランチのライフサイクル状態)）やエージェント実行状態とは別レイヤーの、**ユーザーが割り当てる第 3 のステータス**です。付けた値は各セッションに[`label_id`](data/02-workspace.md#statejson) として保存され、サイドバーの専用カラムに色付きで表示されます（[サイドバー](design/home/03-sidebar.md)）。
+
+`session_labels` は、そこで選べる**ラベルのマスタ（選択肢一覧）**です。配列として並べた順が `Tab` の巡回順・数字キーの割り当て順（`1` が先頭）になります。各要素は次のフィールドを持ちます。
+
+| フィールド | 型 | 必須 | 意味 |
+|---|---|---|---|
+| `id` | string | ○ | セッションが参照する安定 ID。セッションの `label_id` はこの値を指す。名前の変更は安全だが、id は同一性なので使い回さない |
+| `name` | string | ○ | サイドバーに表示する文字列（例: `レビュー中`） |
+| `color` | enum | | 表示色。`gray`（既定・淡色）/ `red` / `green` / `yellow` / `blue` / `magenta` / `cyan`。テーマパレットに解決されるので配色変更に追従する |
+| `icon` | string? | | 先頭に付く 1 文字グリフ。未指定は既定のビュレット `●` |
+
+- **既定マスタ**: `session_labels` を書かない場合、汎用的な 5 件（`todo` / `doing` / `review` / `blocked` / `done`）が使われる。
+- **空配列** `[]` にすると機能が休止する（`Tab` / 数字キーは無反応、サイドバーにカラムを描かない）。
+- `id` が空・`name` が空・`id` が重複する要素は読み込み時に落とされる（重複 id は最初の 1 件だけ残す）。
+- プロジェクト単位で運用を変えたい場合は、ローカル設定（`<repo>/.usagi/settings.json`）の `session_labels` でマスタを**丸ごと差し替え**できる（[ローカル設定](#ローカル設定プロジェクト単位の上書き)）。
+
+```jsonc
+// ~/.usagi/settings.json（マスタを自分で定義する例）
+{
+  "session_labels": [
+    { "id": "todo",    "name": "未着手",     "color": "gray",   "icon": "○" },
+    { "id": "doing",   "name": "作業中",     "color": "blue",   "icon": "▸" },
+    { "id": "review",  "name": "レビュー中", "color": "magenta", "icon": "◇" },
+    { "id": "blocked", "name": "ブロック",   "color": "red",    "icon": "✕" },
+    { "id": "done",    "name": "完了",       "color": "green",  "icon": "✓" }
+  ]
+}
+```
+
+**付け方（切替モードでの操作）**は[キー操作](design/home/04-keys.md)が正本。`Tab` / `Shift-Tab` でマスタを順送り／逆送り（未設定スロットを含めて巡回）、`1`〜`9` でマスタの N 番目を直接指定、`0` で解除する。
 
 > ローカル LLM は **オプトイン**（既定 `false`）です。資材は Config 画面で **2 段階**に導入します:
 > まず `Local LLM` 行の Install アクション（`Space` / `Enter` でモーダルを開き sudo パスワードを入力 →
@@ -97,6 +131,7 @@
 | 同梱スキル機能 | `skill_features` | map<string, bool> | 機能 ID 単位で上書き。未記載の機能はグローバル設定にフォールバック |
 | secret 環境変数 | `env` | map<string, string> | 空 map（注入しない） |
 | セットアップコマンド | `setup_commands` | string[] | 空配列（実行しない） |
+| ステータスラベル | `session_labels` | array? | グローバルのマスタにフォールバック（設定時はマスタを丸ごと差し替え。空配列でこのプロジェクトでは機能休止） |
 
 > **デフォルトブランチ（`default_branch`）**: `session create` でセッションを作るとき、各 git リポジトリの
 > worktree を切る新ブランチを**どのブランチから**切るかを選びます。未設定（`null` = auto）ならリポジトリの

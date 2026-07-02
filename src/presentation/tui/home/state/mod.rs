@@ -20,7 +20,7 @@ use chrono::{DateTime, Utc};
 
 use crate::domain::issue::Issue;
 use crate::domain::resource::ResourceUsage;
-use crate::domain::settings::{AgentCli, KeyScheme, SessionActionUi, Sidebar};
+use crate::domain::settings::{AgentCli, KeyScheme, SessionActionUi, SessionLabelMaster, Sidebar};
 use crate::domain::version::Version;
 use crate::domain::workspace_state::{SessionRecord, WorktreeState};
 
@@ -462,6 +462,13 @@ pub struct HomeState {
     /// the effective settings by `mod.rs`. Independent of [`mode`](Self::mode),
     /// so zooming between modes never resets it.
     sidebar: Sidebar,
+    /// The effective manual-status label master 切替 (Switch) cycles with `Tab` /
+    /// the digit keys and the sidebar resolves each session's
+    /// [`label_id`](crate::domain::workspace_state::SessionRecord::label_id)
+    /// against. Injected from the effective settings by `mod.rs`; defaults to the
+    /// generic built-in set (see [`SessionLabelMaster`]). Empty leaves the feature
+    /// dormant — `Tab` is a no-op and no label column is drawn.
+    label_master: SessionLabelMaster,
     /// How the embedded terminal (没入) reserves its navigation keys — a `Ctrl-O`
     /// prefix or single `Alt`-chords — so the rest reach the shell / agent.
     /// Injected from the effective settings by `mod.rs` and re-read when the
@@ -744,6 +751,7 @@ impl HomeState {
             session_menu_commands,
             session_action_ui: SessionActionUi::default(),
             sidebar: Sidebar::default(),
+            label_master: SessionLabelMaster::default(),
             key_scheme: KeyScheme::default(),
             prefix_pending: false,
             ai_available: false,
@@ -843,6 +851,101 @@ impl HomeState {
     /// `mod.rs` at construction).
     pub fn set_sidebar(&mut self, sidebar: Sidebar) {
         self.sidebar = sidebar;
+    }
+
+    /// Set the manual-status label master (injected from the effective settings by
+    /// `mod.rs` at construction, and re-read when the config screen closes).
+    pub fn set_label_master(&mut self, master: SessionLabelMaster) {
+        self.label_master = master;
+    }
+
+    /// The effective manual-status label master — read by the sidebar renderer to
+    /// resolve each session's [`label_id`] and by the footer to decide whether the
+    /// `Tab` hint applies.
+    ///
+    /// [`label_id`]: crate::domain::workspace_state::SessionRecord::label_id
+    pub fn label_master(&self) -> &SessionLabelMaster {
+        &self.label_master
+    }
+
+    /// The resolved manual-status label of the worktree at `index` in the first
+    /// group's rows (the sidebar's display order), or `None` when that session has
+    /// no label set or its stored id no longer resolves in the master. The sidebar
+    /// renderer calls this per row to draw the label column.
+    pub fn row_label(&self, index: usize) -> Option<&crate::domain::settings::SessionLabelDef> {
+        let id = self.list.row_label_id(index)?;
+        self.label_master.get(id)
+    }
+
+    /// The name of the session under the cursor and the label id to store next
+    /// when 切替's `Tab` (`forward`) / `Shift-Tab` cycles its manual status — the
+    /// next entry in the master, ringing through the "unset" slot — or `None` when
+    /// the cursor is not on a session or no labels are defined. Pure: the caller
+    /// persists it (and the reload refreshes the row); the inner `None` clears the
+    /// label.
+    pub fn cycle_selected_label(&self, forward: bool) -> Option<(String, Option<String>)> {
+        if self.label_master.is_empty() {
+            return None;
+        }
+        let name = self.list.selected().map(worktree_name)?.to_string();
+        let current = self
+            .sessions
+            .iter()
+            .find(|s| s.name == name)
+            .and_then(|s| s.label_id.as_deref());
+        let new_id = self.next_label_in_cycle(current, forward);
+        // The ring has ≥ 2 slots (master non-empty), so a cycle always advances to
+        // a different slot; the equality guard is belt-and-braces.
+        (current.map(str::to_string) != new_id).then_some((name, new_id))
+    }
+
+    /// The name of the session under the cursor and the id of the master's
+    /// `index`-th label (what digit key `index + 1` selects), or `None` when the
+    /// cursor is not on a session, the index is out of range, or that label is
+    /// already set (a no-op). Pure, like [`cycle_selected_label`](Self::cycle_selected_label).
+    pub fn select_label_index(&self, index: usize) -> Option<(String, Option<String>)> {
+        let id = self.label_master.at(index)?.id.clone();
+        self.resolve_label_change(Some(id))
+    }
+
+    /// The name of the session under the cursor paired with `None` to clear its
+    /// manual status (the digit `0` key), or `None` when the cursor is not on a
+    /// session or it carries no label already. Pure, like
+    /// [`cycle_selected_label`](Self::cycle_selected_label).
+    pub fn clear_selected_label(&self) -> Option<(String, Option<String>)> {
+        self.resolve_label_change(None)
+    }
+
+    /// Pair the selected session's name with `new_id` when it differs from the
+    /// session's current label, or `None` when the cursor is not on a session or
+    /// the label is unchanged (so a repeat keypress writes nothing).
+    fn resolve_label_change(&self, new_id: Option<String>) -> Option<(String, Option<String>)> {
+        let name = self.list.selected().map(worktree_name)?.to_string();
+        let current = self
+            .sessions
+            .iter()
+            .find(|s| s.name == name)
+            .and_then(|s| s.label_id.clone());
+        (current != new_id).then_some((name, new_id))
+    }
+
+    /// The label id one step from `current` through the master's ring — the labels
+    /// in order preceded by the "unset" slot (index 0). `forward` advances; a
+    /// `current` id no longer in the master is treated as the unset slot. Returns
+    /// `None` for the unset slot, `Some(id)` otherwise.
+    fn next_label_in_cycle(&self, current: Option<&str>, forward: bool) -> Option<String> {
+        let n = self.label_master.len();
+        let ring = n + 1;
+        let cur = match current {
+            None => 0,
+            Some(id) => self.label_master.position(id).map(|p| p + 1).unwrap_or(0),
+        };
+        let next = if forward {
+            (cur + 1) % ring
+        } else {
+            (cur + ring - 1) % ring
+        };
+        (next != 0).then(|| self.label_master.at(next - 1).unwrap().id.clone())
     }
 
     /// Set how the embedded terminal (没入) reserves its navigation keys
@@ -1257,8 +1360,16 @@ impl HomeState {
             .iter()
             .map(|&i| self.sessions[i].note.is_some())
             .collect();
+        // Carry each session's manual-status label id onto its row so the sidebar
+        // can resolve it against the master; the id itself is cosmetic and every
+        // command still keys on the branch.
+        let label_ids = order
+            .iter()
+            .map(|&i| self.sessions[i].label_id.clone())
+            .collect();
         let mut list = WorktreeList::with_labels(name, rows, labels);
         list.set_notes(notes);
+        list.set_label_ids(label_ids);
         // The root row's note lives on the workspace state (it belongs to no
         // session), so its marker is carried separately from the per-session notes.
         list.set_root_note_marker(self.root_note.is_some());

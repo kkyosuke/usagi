@@ -197,6 +197,7 @@ fn a_finished_create_drops_into_focus_on_the_new_session() {
                 name: "main".to_string(),
                 display_name: None,
                 note: None,
+                label_id: None,
                 root: PathBuf::from("/ws/.usagi/sessions/main"),
                 worktrees: vec![worktree(Some("main"), "/r/main")],
                 created_at: Utc::now(),
@@ -206,6 +207,7 @@ fn a_finished_create_drops_into_focus_on_the_new_session() {
                 name: name.to_string(),
                 display_name: None,
                 note: None,
+                label_id: None,
                 root: PathBuf::from("/ws/.usagi/sessions/newx"),
                 worktrees: vec![worktree(Some(name), "/r/newx")],
                 created_at: Utc::now(),
@@ -265,6 +267,7 @@ fn finished_create_does_not_auto_focus_after_another_operation() {
                                     name: "main".to_string(),
                                     display_name: None,
                                     note: None,
+                                    label_id: None,
                                     root: PathBuf::from("/ws/.usagi/sessions/main"),
                                     worktrees: vec![worktree(Some("main"), "/r/main")],
                                     created_at: Utc::now(),
@@ -274,6 +277,7 @@ fn finished_create_does_not_auto_focus_after_another_operation() {
                                     name: "feat".to_string(),
                                     display_name: None,
                                     note: None,
+                                    label_id: None,
                                     root: PathBuf::from("/ws/.usagi/sessions/feat"),
                                     worktrees: vec![worktree(Some("feat"), "/r/feat")],
                                     created_at: Utc::now(),
@@ -283,6 +287,7 @@ fn finished_create_does_not_auto_focus_after_another_operation() {
                                     name: "newx".to_string(),
                                     display_name: None,
                                     note: None,
+                                    label_id: None,
                                     root: PathBuf::from("/ws/.usagi/sessions/newx"),
                                     worktrees: vec![worktree(Some("newx"), "/r/newx")],
                                     created_at: Utc::now(),
@@ -333,6 +338,7 @@ fn finished_create_does_not_auto_focus_after_another_operation() {
     };
     let mut rename = |_: &Path, n: &str, l: &str| noop_rename(n, l);
     let mut set_note_fake = |_: &Path, n: &str, t: &str| noop_set_note(n, t);
+    let mut set_label_fake = |_: &Path, n: &str, id: Option<&str>| noop_set_label(n, id);
     let mut reorder_fake: fn(&str, bool) -> SessionReorder = noop_reorder;
     let mut remove = |_: &Path, _: &str, _: bool, _| {};
     let mut unite_resolve: fn(&str) -> std::result::Result<GroupSource, String> = no_unite_resolve;
@@ -353,6 +359,7 @@ fn finished_create_does_not_auto_focus_after_another_operation() {
         dispatch_create: &mut dispatch_create,
         rename_display: &mut rename,
         set_note: &mut set_note_fake,
+        set_label: &mut set_label_fake,
         reorder_session: &mut reorder_fake,
         dispatch_remove: &mut remove,
         unite_resolve: &mut unite_resolve,
@@ -422,6 +429,7 @@ fn finished_close_drops_into_focus_on_the_previous_session() {
                 name: "main".to_string(),
                 display_name: None,
                 note: None,
+                label_id: None,
                 root: PathBuf::from("/ws/.usagi/sessions/main"),
                 worktrees: vec![worktree(Some("main"), "/r/main")],
                 created_at: Utc::now(),
@@ -493,6 +501,7 @@ fn finished_close_does_not_auto_focus_after_another_operation() {
                                 name: "main".to_string(),
                                 display_name: None,
                                 note: None,
+                                label_id: None,
                                 root: PathBuf::from("/ws/.usagi/sessions/main"),
                                 worktrees: vec![worktree(Some("main"), "/r/main")],
                                 created_at: Utc::now(),
@@ -532,6 +541,7 @@ fn finished_close_does_not_auto_focus_after_another_operation() {
     let mut dispatch_create = |_: &Path, _: &str, _: u64| {};
     let mut rename = |_: &Path, n: &str, l: &str| noop_rename(n, l);
     let mut set_note_fake = |_: &Path, n: &str, t: &str| noop_set_note(n, t);
+    let mut set_label_fake = |_: &Path, n: &str, id: Option<&str>| noop_set_label(n, id);
     let mut reorder_fake: fn(&str, bool) -> SessionReorder = noop_reorder;
     let mut remove = |_: &Path, name: &str, _: bool, auto_focus: Option<AutoFocus>| {
         let id = tasks.begin(TaskKind::RemoveSession, name);
@@ -561,6 +571,7 @@ fn finished_close_does_not_auto_focus_after_another_operation() {
         dispatch_create: &mut dispatch_create,
         rename_display: &mut rename,
         set_note: &mut set_note_fake,
+        set_label: &mut set_label_fake,
         reorder_session: &mut reorder_fake,
         dispatch_remove: &mut remove,
         unite_resolve: &mut unite_resolve,

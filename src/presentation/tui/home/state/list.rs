@@ -94,6 +94,12 @@ pub struct WorkspaceGroup {
     /// `labels` it is cosmetic and never used for lookups. Defaults to all-false
     /// and is filled in by [`set_notes`](Self::set_notes) on a list rebuild.
     notes: Vec<bool>,
+    /// The manual-status label id each row's session carries, aligned 1:1 with
+    /// `worktrees` (`label_ids[i]` is for `worktrees[i]`), or `None` when unset.
+    /// Resolved against the effective label master by the renderer; like `labels`
+    /// / `notes` it is cosmetic and never used for lookups. Defaults to all-`None`
+    /// and is filled in by [`set_label_ids`](Self::set_label_ids) on a rebuild.
+    label_ids: Vec<Option<String>>,
     /// Whether this group's synthetic root row carries a note, driving its line-1
     /// memo marker. Like [`notes`](Self::notes) it is cosmetic and never used for
     /// lookups; the root belongs to no session, so its note lives on the workspace
@@ -123,8 +129,10 @@ impl WorkspaceGroup {
         let rows = sessions.iter().map(session_row).collect();
         let labels = sessions.iter().map(|s| s.display_name.clone()).collect();
         let notes = sessions.iter().map(|s| s.note.is_some()).collect();
+        let label_ids = sessions.iter().map(|s| s.label_id.clone()).collect();
         let mut group = Self::with_labels(name, rows, labels);
         group.set_notes(notes);
+        group.set_label_ids(label_ids);
         group.set_root_note_marker(root_has_note);
         group
     }
@@ -138,11 +146,13 @@ impl WorkspaceGroup {
     ) -> Self {
         labels.resize(worktrees.len(), None);
         let notes = vec![false; worktrees.len()];
+        let label_ids = vec![None; worktrees.len()];
         Self {
             name: name.into(),
             worktrees,
             labels,
             notes,
+            label_ids,
             root_has_note: false,
         }
     }
@@ -177,6 +187,20 @@ impl WorkspaceGroup {
     /// Whether the worktree at `index` carries a note (out-of-range is `false`).
     pub fn has_note(&self, index: usize) -> bool {
         self.notes.get(index).copied().unwrap_or(false)
+    }
+
+    /// Record each row's manual-status label id (`label_ids[i]` for
+    /// `worktrees[i]`). A shorter/longer slice is padded/truncated to the worktree
+    /// count, mirroring [`set_notes`](Self::set_notes).
+    pub fn set_label_ids(&mut self, mut label_ids: Vec<Option<String>>) {
+        label_ids.resize(self.worktrees.len(), None);
+        self.label_ids = label_ids;
+    }
+
+    /// The manual-status label id the worktree at `index` carries, or `None` when
+    /// unset / out of range. Resolved against the effective master by the renderer.
+    pub fn row_label_id(&self, index: usize) -> Option<&str> {
+        self.label_ids.get(index).and_then(Option::as_deref)
     }
 
     /// Record whether the root row carries a note, driving its memo marker.
@@ -307,6 +331,20 @@ impl WorktreeList {
     /// Whether the worktree at `index` in the first group carries a note.
     pub fn has_note(&self, index: usize) -> bool {
         self.first().map(|g| g.has_note(index)).unwrap_or(false)
+    }
+
+    /// Record the first group's per-worktree manual-status label ids (see
+    /// [`WorkspaceGroup::set_label_ids`]).
+    pub fn set_label_ids(&mut self, label_ids: Vec<Option<String>>) {
+        if let Some(group) = self.groups.first_mut() {
+            group.set_label_ids(label_ids);
+        }
+    }
+
+    /// The manual-status label id the worktree at `index` in the first group
+    /// carries, or `None` when unset (see [`WorkspaceGroup::row_label_id`]).
+    pub fn row_label_id(&self, index: usize) -> Option<&str> {
+        self.first().and_then(|g| g.row_label_id(index))
     }
 
     /// Record whether the first group's root row carries a note.

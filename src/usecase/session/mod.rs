@@ -302,6 +302,7 @@ fn record(store: &WorkspaceStore, name: &str, root: &Path, worktrees: &[PathBuf]
         name: name.to_string(),
         display_name: None,
         note: None,
+        label_id: None,
         root: root.to_path_buf(),
         worktrees: worktree_states,
         created_at: now,
@@ -387,6 +388,27 @@ pub fn set_note(workspace_root: &Path, name: &str, note: &str) -> Result<Option<
             Some(trimmed.to_string())
         };
         session.note.clone()
+    })
+}
+
+/// Set (or clear) a session's manual status label in `state.json`, leaving its
+/// branch / identity untouched.
+///
+/// `label_id` is the [`SessionLabelDef`](crate::domain::settings::SessionLabelDef)
+/// id to assign, or `None` to clear the label. The id is stored verbatim — this
+/// usecase does not validate it against the effective label master (an id that no
+/// longer resolves simply reads as unset at display time), so the presentation
+/// layer, which owns the master, decides which id to pass. Returns the id now
+/// stored (`None` when cleared). Fails when no session named `name` exists.
+pub fn set_label(
+    workspace_root: &Path,
+    name: &str,
+    label_id: Option<&str>,
+) -> Result<Option<String>> {
+    let store = WorkspaceStore::new(workspace_root);
+    edit_session(&store, name, |session| {
+        session.label_id = label_id.map(str::to_string);
+        session.label_id.clone()
     })
 }
 
@@ -1510,6 +1532,54 @@ mod tests {
         assert!(err.to_string().contains("no such session"));
     }
 
+    // --- set_label ---------------------------------------------------------
+
+    fn label_of(root: &Path, name: &str) -> Option<String> {
+        list(root)
+            .unwrap()
+            .into_iter()
+            .find(|s| s.name == name)
+            .and_then(|s| s.label_id)
+    }
+
+    #[test]
+    fn set_label_sets_clears_and_leaves_other_sessions_alone() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        create(root.path(), "feature").unwrap();
+        create(root.path(), "other").unwrap();
+
+        // Assign a label id → it is stored verbatim and returned.
+        let stored = set_label(root.path(), "feature", Some("review")).unwrap();
+        assert_eq!(stored.as_deref(), Some("review"));
+        assert_eq!(label_of(root.path(), "feature").as_deref(), Some("review"));
+        // Other sessions keep their (unset) label.
+        assert_eq!(label_of(root.path(), "other"), None);
+
+        // Re-assigning replaces the id (the usecase does not validate it).
+        set_label(root.path(), "feature", Some("done")).unwrap();
+        assert_eq!(label_of(root.path(), "feature").as_deref(), Some("done"));
+
+        // Clearing with None removes the label.
+        let stored = set_label(root.path(), "feature", None).unwrap();
+        assert_eq!(stored, None);
+        assert_eq!(label_of(root.path(), "feature"), None);
+    }
+
+    #[test]
+    fn set_label_errors_without_state_or_session() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        // No state.json yet.
+        let err = set_label(root.path(), "x", Some("todo")).unwrap_err();
+        assert!(err.to_string().contains("no sessions recorded"));
+
+        // State exists but the named session does not.
+        create(root.path(), "present").unwrap();
+        let err = set_label(root.path(), "absent", Some("todo")).unwrap_err();
+        assert!(err.to_string().contains("no such session"));
+    }
+
     // --- remove ------------------------------------------------------------
 
     fn sessions_of(root: &Path) -> Vec<String> {
@@ -1740,6 +1810,7 @@ mod tests {
             name: "ghost".to_string(),
             display_name: None,
             note: None,
+            label_id: None,
             root: ghost_root.clone(),
             worktrees: vec![WorktreeState {
                 branch: None,

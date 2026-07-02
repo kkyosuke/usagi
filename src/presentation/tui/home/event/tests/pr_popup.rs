@@ -71,6 +71,7 @@ fn run_pr_clicks(inputs: Vec<io::Result<Input>>, state: HomeState) -> (Vec<Strin
     let mut dispatch_create = |_: &Path, _: &str, _: u64| {};
     let mut rename = |_: &Path, n: &str, l: &str| noop_rename(n, l);
     let mut set_note_fake = |_: &Path, n: &str, t: &str| noop_set_note(n, t);
+    let mut set_label_fake = |_: &Path, n: &str, id: Option<&str>| noop_set_label(n, id);
     let mut reorder_fake: fn(&str, bool) -> SessionReorder = noop_reorder;
     let mut dispatch_remove = |_: &Path, _: &str, _: bool, _| {};
     let mut evict = |_: &Path| {};
@@ -92,6 +93,7 @@ fn run_pr_clicks(inputs: Vec<io::Result<Input>>, state: HomeState) -> (Vec<Strin
         dispatch_create: &mut dispatch_create,
         rename_display: &mut rename,
         set_note: &mut set_note_fake,
+        set_label: &mut set_label_fake,
         reorder_session: &mut reorder_fake,
         dispatch_remove: &mut dispatch_remove,
         unite_resolve: &mut unite_resolve,

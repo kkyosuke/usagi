@@ -7,6 +7,7 @@ fn session(name: &str) -> crate::domain::workspace_state::SessionRecord {
         name: name.to_string(),
         display_name: None,
         note: None,
+        label_id: None,
         root: PathBuf::from(format!("/repo/.usagi/sessions/{name}")),
         worktrees: Vec::new(),
         created_at: Utc::now(),

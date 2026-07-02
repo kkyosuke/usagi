@@ -56,6 +56,7 @@ fn escape_in_switch_closes_the_note_before_backing_out() {
         name: "alpha".to_string(),
         display_name: None,
         note: Some("todo".to_string()),
+        label_id: None,
         root: PathBuf::from("/ws/.usagi/sessions/alpha"),
         worktrees: vec![worktree(Some("alpha"), "/ws/alpha")],
         created_at: Utc::now(),

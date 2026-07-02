@@ -409,11 +409,42 @@ pub(super) fn switch_key(
                 leave_switch(term, state, painter, wiring);
             }
         }
+        // `Tab` / `Shift-Tab` cycle the selected session's manual status label
+        // forward / back through the effective master, ringing through the "unset"
+        // slot. A no-op on the root row or when no labels are defined.
+        Key::Tab => apply_label_change(state, wiring, state.cycle_selected_label(true)),
+        Key::BackTab => apply_label_change(state, wiring, state.cycle_selected_label(false)),
+        // `1`–`9` assign the master's Nth label directly (out of range is a no-op),
+        // and `0` clears the label. Terminals cannot reliably distinguish `Ctrl`+digit
+        // chords, so the bare digits — free while navigating the list — carry this.
+        Key::Char(d @ '1'..='9') => {
+            let index = d as usize - '1' as usize;
+            apply_label_change(state, wiring, state.select_label_index(index));
+        }
+        Key::Char('0') => apply_label_change(state, wiring, state.clear_selected_label()),
         // Ctrl-^ jumps straight back to the previously focused session.
         Key::Char(CTRL_CARET) => jump_to_previous(term, state, painter, wiring),
         _ => {}
     }
     Flow::Continue
+}
+
+/// Persist a manual-status label change computed by [`HomeState`] and apply the
+/// result inline: `change` is the `(session name, new label id)` to store — or
+/// `None` when the keypress was a no-op (root row, no labels, or unchanged), in
+/// which case nothing is written. Mirrors the rename / note persistence path.
+fn apply_label_change(
+    state: &mut HomeState,
+    wiring: &mut Wiring,
+    change: Option<(String, Option<String>)>,
+) {
+    let Some((name, id)) = change else {
+        return;
+    };
+    let root = state.selected_workspace_root();
+    state.set_op_target(root.clone());
+    let outcome = (wiring.set_label)(&root, &name, id.as_deref());
+    state.apply_session_outcome(outcome);
 }
 
 /// Open 切替's inline create input, seeded with `first` when the visible
