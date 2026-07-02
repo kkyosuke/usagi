@@ -340,6 +340,7 @@ fn finished_create_does_not_auto_focus_after_another_operation() {
     let mut evict = |_: &Path| {};
     let mut branches: fn() -> Vec<String> = no_branches;
     let mut open_url: fn(&str) = noop_open_url;
+    let mut open_external_terminal = |_: &Path| Ok::<(), String>(());
     let mut config: fn(&Term) -> Result<Option<ConfigReload>> = noop_config;
     let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = noop_preview;
     let mut tab_op: fn(&Path, Option<TabNav>) -> (Vec<String>, usize) = noop_tab_op;
@@ -363,6 +364,7 @@ fn finished_create_does_not_auto_focus_after_another_operation() {
         existing_branches: &mut branches,
         open_terminal: &mut open,
         open_url: &mut open_url,
+        open_external_terminal: &mut open_external_terminal,
         open_config: &mut config,
         preview: &mut preview,
         tab_op: &mut tab_op,
@@ -554,6 +556,7 @@ fn finished_close_does_not_auto_focus_after_another_operation() {
     };
     let mut open: fn(&mut HomeState, &Path, bool, bool) -> Result<PaneExit> = noop_open;
     let mut open_url: fn(&str) = noop_open_url;
+    let mut open_external_terminal = |_: &Path| Ok::<(), String>(());
     let mut config: fn(&Term) -> Result<Option<ConfigReload>> = noop_config;
     let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = noop_preview;
     let mut tab_op: fn(&Path, Option<TabNav>) -> (Vec<String>, usize) = noop_tab_op;
@@ -577,6 +580,7 @@ fn finished_close_does_not_auto_focus_after_another_operation() {
         existing_branches: &mut branches,
         open_terminal: &mut open,
         open_url: &mut open_url,
+        open_external_terminal: &mut open_external_terminal,
         open_config: &mut config,
         preview: &mut preview,
         tab_op: &mut tab_op,

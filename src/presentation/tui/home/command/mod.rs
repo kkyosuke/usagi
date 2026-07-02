@@ -61,8 +61,13 @@ pub enum Effect {
     /// for a live session, attaches the pane.
     Activate(String),
     /// Open an interactive terminal in the selected worktree (the user ran
-    /// `terminal`). The directory is resolved by the event loop.
+    /// `terminal` or `terminal open`). The directory is resolved by the event
+    /// loop, and the terminal is embedded as a usagi pane/tab.
     OpenTerminal,
+    /// Open a new native terminal application rooted at the selected worktree
+    /// (the user ran `terminal new`). The directory is resolved by the event
+    /// loop, then handed to the platform launcher.
+    OpenExternalTerminal,
     /// Open an AI agent in the selected worktree (the user ran `agent`). This is
     /// `terminal` with the agent CLI launched inside it; the directory and agent
     /// command are resolved by the event loop / wiring. The payload selects which
@@ -128,6 +133,7 @@ impl Effect {
             | Effect::OpenSessionModal
             | Effect::RemoveSession { .. }
             | Effect::OpenTerminal
+            | Effect::OpenExternalTerminal
             | Effect::OpenAgent(_)
             | Effect::OpenConfig
             | Effect::CloseSession { .. }

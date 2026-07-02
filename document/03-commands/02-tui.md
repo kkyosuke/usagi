@@ -35,7 +35,7 @@
 | `unite` | 統合(unite)ビューにワークスペースを追加・削除（Workspace スコープ） |
 | `issue` | タスク issue を一覧・依存ツリー・ガント・1 件表示で閲覧（Workspace スコープ） |
 | `preview <path\|name>` | Markdown ファイルを右ペインにレンダリング表示（Workspace スコープ） |
-| `terminal` | 選択中セッションの worktree でシェルを右ペインに埋め込み起動（Session スコープ） |
+| `terminal [open\|new]` | 選択中セッションの worktree でシェルを開く（Session スコープ）。引数なし / `open` は右ペインに埋め込みタブを追加、`new` は同じディレクトリで OS ネイティブの新規ターミナルを開く |
 | `agent [名前]` | `terminal` ＋ Agent CLI を起動（Session スコープ）。引数なしは設定中の既定 CLI を起動。名前（`claude` / `codex` / `codex-fugu` / `sakana.ai` / `gemini`）を付けるとその CLI を起動する |
 | `close [--force]` | 在席中のセッションを削除して切替へ移る（`session remove <名前>` と同じ。既定では未コミット変更があれば削除を拒否し `--force` の案内をログに出す。`--force` / `-f` で未コミット変更を破棄。Session スコープ） |
 | `config` | 現在のワークスペースのローカル設定を編集する Config 画面を開く（Workspace スコープ） |
@@ -101,9 +101,11 @@ issue が 1 件も無いときは「No issues yet.」を 1 行だけログに出
 
 ## terminal
 
-**在席の右ペイン**から実行します。選択中の worktree（先頭の**ルート行**を選んでいればワークスペースルート）を
-作業ディレクトリに、対話型シェルを**右ペインに埋め込んで**起動し**没入**へ移ります（疑似ターミナル: portable-pty + vt100）。
+**在席の右ペイン**から実行します。書式は `terminal [open|new]` です。選択中の worktree（先頭の**ルート行**を選んでいればワークスペースルート）を
+作業ディレクトリにします。引数なし、または `terminal open` は、対話型シェルを**右ペインに埋め込んで**起動し**没入**へ移ります（疑似ターミナル: portable-pty + vt100）。
 左ペインの一覧は表示したままなので、シェルを操作しながらセッションを見渡せます。
+
+`terminal new` は、同じ作業ディレクトリを OS ネイティブの新規ターミナルアプリで開きます。usagi の右ペインには埋め込まず、実行後も在席に留まります。在席 Menu では `terminal` 行を `→` / `Tab` で展開して `open`（既定）/ `new` を選べます。
 
 没入中のキー操作（切替・在席へのズームアウト、タブの追加/切替/クローズ、メモ編集、終了など）は**[キー方式（`key_scheme`）](../05-settings.md#設定項目)**で決まり、既定の `prefix` 方式ではリーダー `Ctrl-O` の次キーで操作します。予約キーの全一覧・`alt` 方式・スクロール・マウスでのテキスト選択とコピー・端末ごとの差異・[直前のセッションへ切り替え](../design/home/03-sidebar.md#直前のセッションへ切り替えctrl-)は [design/home/04-keys.md](../design/home/04-keys.md#没入のキー操作attached--terminal--agent-実行中) が正本です。シェルは画面を開いている間プールに常駐し、行き来しても終了しません。
 

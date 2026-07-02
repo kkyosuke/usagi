@@ -332,7 +332,7 @@ fn focus_close_row_shows_chevron_and_expands_into_a_picker() {
     // cursor moves on/off them (no CLS), like the `agent` row.
     let off_close = stripped(&right_pane_contents(&state, 60, 18));
     assert!(off_close.contains("  Close the focused session"));
-    assert!(off_close.contains("  Open an interactive terminal"));
+    assert!(off_close.contains("  Open a shell"));
     // Fixed order: agent is first and close is last; move up once (wraps) to close.
     state.focus_menu_move_up();
     // The close row shows ▸ and "→ expand" in the hint while cursor is on it.
@@ -351,6 +351,25 @@ fn focus_close_row_shows_chevron_and_expands_into_a_picker() {
     state.focus_menu_collapse_close();
     let collapsed = stripped(&right_pane_contents(&state, 60, 18));
     assert!(!collapsed.contains("close --force"));
+}
+
+#[test]
+fn focus_menu_terminal_row_expands_into_open_and_new_actions() {
+    let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
+    state.enter_focus(1);
+    state.focus_menu_move_down(); // fixed order: agent -> terminal
+    let base = stripped(&right_pane_contents(&state, 56, 16));
+    assert!(base.contains("terminal"));
+    assert!(base.contains('▸'));
+    assert!(base.contains("→ pick terminal"));
+    state.focus_menu_expand_terminal();
+    let expanded = stripped(&right_pane_contents(&state, 56, 16));
+    assert!(expanded.contains('▾'));
+    assert!(expanded.contains("open"));
+    assert!(expanded.contains("new"));
+    assert!(expanded.contains("(default)"));
+    assert!(expanded.contains("new terminal"));
+    assert!(expanded.contains("Enter launch"));
 }
 
 #[test]

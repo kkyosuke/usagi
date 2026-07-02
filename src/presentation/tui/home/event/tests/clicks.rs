@@ -362,6 +362,7 @@ fn a_right_click_on_a_switch_tab_opens_a_menu_and_runs_the_selected_action() {
     let mut branches: fn() -> Vec<String> = no_branches;
     let mut open: fn(&mut HomeState, &Path, bool, bool) -> Result<PaneExit> = noop_open;
     let mut open_url: fn(&str) = noop_open_url;
+    let mut open_external_terminal = |_: &Path| Ok::<(), String>(());
     let mut config: fn(&Term) -> Result<Option<ConfigReload>> = noop_config;
     let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = live_preview;
     let mut tab_op = |_: &Path, _: Option<TabNav>| -> (Vec<String>, usize) {
@@ -386,6 +387,7 @@ fn a_right_click_on_a_switch_tab_opens_a_menu_and_runs_the_selected_action() {
         existing_branches: &mut branches,
         open_terminal: &mut open,
         open_url: &mut open_url,
+        open_external_terminal: &mut open_external_terminal,
         open_config: &mut config,
         preview: &mut preview,
         tab_op: &mut tab_op,
@@ -470,6 +472,7 @@ fn run_switch_tab_menu_inputs(after_open: Vec<io::Result<Input>>) -> Vec<TabMenu
     let mut branches: fn() -> Vec<String> = no_branches;
     let mut open: fn(&mut HomeState, &Path, bool, bool) -> Result<PaneExit> = noop_open;
     let mut open_url: fn(&str) = noop_open_url;
+    let mut open_external_terminal = |_: &Path| Ok::<(), String>(());
     let mut config: fn(&Term) -> Result<Option<ConfigReload>> = noop_config;
     let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = live_preview;
     let mut tab_op = |_: &Path, _: Option<TabNav>| -> (Vec<String>, usize) {
@@ -494,6 +497,7 @@ fn run_switch_tab_menu_inputs(after_open: Vec<io::Result<Input>>) -> Vec<TabMenu
         existing_branches: &mut branches,
         open_terminal: &mut open,
         open_url: &mut open_url,
+        open_external_terminal: &mut open_external_terminal,
         open_config: &mut config,
         preview: &mut preview,
         tab_op: &mut tab_op,
@@ -623,6 +627,7 @@ fn right_click_tab_paths_cover_focus_and_attached_modes() {
         let mut branches: fn() -> Vec<String> = no_branches;
         let mut open: fn(&mut HomeState, &Path, bool, bool) -> Result<PaneExit> = noop_open;
         let mut open_url: fn(&str) = noop_open_url;
+        let mut open_external_terminal = |_: &Path| Ok::<(), String>(());
         let mut config: fn(&Term) -> Result<Option<ConfigReload>> = noop_config;
         let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = live_preview;
         let mut tab_op = |_: &Path, _: Option<TabNav>| -> (Vec<String>, usize) {
@@ -647,6 +652,7 @@ fn right_click_tab_paths_cover_focus_and_attached_modes() {
             existing_branches: &mut branches,
             open_terminal: &mut open,
             open_url: &mut open_url,
+            open_external_terminal: &mut open_external_terminal,
             open_config: &mut config,
             preview: &mut preview,
             tab_op: &mut tab_op,

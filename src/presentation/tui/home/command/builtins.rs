@@ -429,10 +429,12 @@ fn switch(name: &str, _ctx: &CommandContext) -> CommandResult {
     }
 }
 
-/// `terminal`: open an interactive shell in the selected worktree, or at the
-/// workspace root when the root row is selected. The spawn is a side effect
-/// ([`Effect::OpenTerminal`]) performed by the event loop, which holds the
-/// worktree paths and the terminal handle.
+/// `terminal [open|new]`: open an interactive shell in the selected worktree, or
+/// at the workspace root when the root row is selected. With no argument, and
+/// with `open`, it adds an embedded usagi pane/tab. `new` opens the platform's
+/// native terminal app at the same directory. Both spawns are side effects
+/// performed by the event loop, which holds the worktree paths and terminal
+/// launchers.
 pub(super) struct TerminalCommand;
 
 impl Command for TerminalCommand {
@@ -444,14 +446,41 @@ impl Command for TerminalCommand {
         "Open an interactive terminal in the selected session"
     }
 
+    fn usage(&self) -> &'static str {
+        "terminal [open|new]"
+    }
+
+    fn examples(&self) -> &'static [&'static str] {
+        &["terminal", "terminal open", "terminal new"]
+    }
+
     fn scope(&self) -> CommandScope {
         CommandScope::Session
     }
 
-    fn run(&self, _args: &str, _ctx: &CommandContext) -> CommandResult {
-        CommandResult {
-            lines: Vec::new(),
-            effect: Effect::OpenTerminal,
+    fn run(&self, args: &str, _ctx: &CommandContext) -> CommandResult {
+        match args.trim() {
+            "" | "open" => CommandResult {
+                lines: Vec::new(),
+                effect: Effect::OpenTerminal,
+            },
+            "new" => CommandResult {
+                lines: Vec::new(),
+                effect: Effect::OpenExternalTerminal,
+            },
+            arg => CommandResult::line(LogLine::error(format!(
+                "unknown terminal action \"{arg}\" (try {})",
+                self.usage()
+            ))),
+        }
+    }
+
+    fn complete_args(&self, args: &str, _ctx: &CompletionContext) -> Vec<String> {
+        let (head, _) = arg_tokens(args);
+        if head.is_empty() {
+            ["open", "new"].iter().map(|s| s.to_string()).collect()
+        } else {
+            Vec::new()
         }
     }
 }

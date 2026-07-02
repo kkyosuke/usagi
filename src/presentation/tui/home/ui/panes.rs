@@ -1966,7 +1966,7 @@ fn menu_row(name: &str, desc: &str, selected: bool, width: usize) -> String {
 /// the description never shifts as the cursor moves on/off the row; with a
 /// single CLI (the chevron can never show) no slot is reserved.
 fn focus_agent_command_row(state: &HomeState, selected: bool, width: usize) -> String {
-    let chevron = if state.focus_menu_expanded() {
+    let chevron = if state.focus_menu_agent_cursor().is_some() {
         "▾ "
     } else if state.focus_menu_agent_can_expand() {
         "▸ "
@@ -1977,6 +1977,22 @@ fn focus_agent_command_row(state: &HomeState, selected: bool, width: usize) -> S
     };
     let desc = format!("{chevron}Launch {}", state.default_agent().display_name());
     menu_row("agent", &desc, selected, width)
+}
+
+/// The 在席 menu's `terminal` row: like a plain command row but it can expand
+/// into the `open` / `new` picker. `open` is the default and preserves the
+/// existing embedded-tab behaviour. The row always reserves the same 2-column
+/// chevron slot as `agent` and `close` so descriptions never shift (no CLS).
+fn focus_terminal_command_row(state: &HomeState, selected: bool, width: usize) -> String {
+    let chevron = if state.focus_menu_terminal_expanded() {
+        "▾ "
+    } else if state.focus_menu_terminal_can_expand() {
+        "▸ "
+    } else {
+        "  "
+    };
+    let desc = format!("{chevron}Open a shell");
+    menu_row("terminal", &desc, selected, width)
 }
 
 /// One agent-picker sub-row, indented under the expanded `agent` row: a `›`
@@ -2025,15 +2041,6 @@ fn focus_close_command_row(
     menu_row(info.name, &desc, selected, width)
 }
 
-/// The 在席 menu's `terminal` row: a plain command row that reserves the same
-/// 2-column chevron slot as the `agent` and `close` rows (always blank —
-/// `terminal` has no picker to expand) so its description lines up with theirs
-/// and never shifts as the cursor moves (no CLS).
-fn focus_terminal_command_row(info: &CommandInfo, selected: bool, width: usize) -> String {
-    let desc = format!("  {}", info.description);
-    menu_row(info.name, &desc, selected, width)
-}
-
 /// One close-picker sub-row, indented under the expanded `close` row: a `›`
 /// cursor on the highlighted option, the command label, and a dimmed hint.
 /// `force = false` → plain close; `force = true` → close --force.
@@ -2052,6 +2059,29 @@ fn focus_close_pick_row(force: bool, selected: bool, width: usize) -> String {
     };
     let hint = style(hint).dim();
     clip_to_width(&format!("      {marker} {name}{hint}"), width)
+}
+
+/// One terminal-picker sub-row, indented under the expanded `terminal` row:
+/// `open` adds an embedded usagi tab (the default), while `new` opens a native
+/// terminal app rooted at the same directory.
+fn focus_terminal_pick_row(action: &str, selected: bool, width: usize) -> String {
+    let marker = menu_marker(selected);
+    let name = if selected {
+        style(format!("{action:<10}")).cyan().bold().to_string()
+    } else {
+        style(format!("{action:<10}")).cyan().to_string()
+    };
+    let desc = if action == "new" {
+        "new terminal"
+    } else {
+        "add tab"
+    };
+    let tag = if action == "open" {
+        style("(default)").dim().to_string()
+    } else {
+        style(desc).dim().to_string()
+    };
+    clip_to_width(&format!("      {marker} {name}{tag}"), width)
 }
 
 /// The `session: <name>` header line shown above the 在席 (Focus) action surface
@@ -2079,7 +2109,7 @@ fn focus_menu_body(state: &HomeState, width: usize) -> Vec<String> {
             // The `agent` row names the default CLI; when expanded, its installed
             // alternatives follow as indented picker sub-rows (案A).
             lines.push(focus_agent_command_row(state, selected, width));
-            if expanded {
+            if state.focus_menu_agent_cursor().is_some() {
                 let agent_cursor = state.focus_menu_agent_cursor();
                 let default = state.default_agent();
                 for (j, &cli) in state.installed_agents().iter().enumerate() {
@@ -2102,9 +2132,17 @@ fn focus_menu_body(state: &HomeState, width: usize) -> Vec<String> {
                 }
             }
         } else if info.name == "terminal" {
-            // The `terminal` row reserves the same chevron slot as `agent`/`close`
-            // (always blank) so its description aligns with theirs and never shifts.
-            lines.push(focus_terminal_command_row(info, selected, width));
+            lines.push(focus_terminal_command_row(state, selected, width));
+            if state.focus_menu_terminal_expanded() {
+                let terminal_cursor = state.focus_menu_terminal_cursor();
+                for (j, &action) in state.focus_menu_terminal_actions().iter().enumerate() {
+                    lines.push(focus_terminal_pick_row(
+                        action,
+                        Some(j) == terminal_cursor,
+                        width,
+                    ));
+                }
+            }
         } else {
             lines.push(focus_menu_row(info, selected, width));
         }
@@ -2112,16 +2150,18 @@ fn focus_menu_body(state: &HomeState, width: usize) -> Vec<String> {
     lines.push(String::new());
     // The hint is contextual: picker-navigation keys while any picker is open,
     // a row-specific expand affordance while the cursor can open one, else base.
-    let hint = if expanded {
-        "↑↓ move   Enter launch   ← back".to_string()
-    } else if close_expanded {
-        "↑↓ move   Enter run   ← back".to_string()
+    let hint = if close_expanded {
+        "↑↓ move   Enter run   ← back"
+    } else if expanded {
+        "↑↓ move   Enter launch   ← back"
     } else if state.focus_menu_agent_can_expand() {
-        "↑↓ move   Enter run   → pick agent   t terminal   a agent".to_string()
+        "↑↓ move   Enter run   → pick agent   t terminal   a agent"
+    } else if state.focus_menu_terminal_can_expand() {
+        "↑↓ move   Enter run   → pick terminal   t terminal   a agent"
     } else if state.focus_close_can_expand() {
-        "↑↓ move   Enter run   → expand   t terminal   a agent".to_string()
+        "↑↓ move   Enter run   → expand   t terminal   a agent"
     } else {
-        "↑↓ move   Enter run   t terminal   a agent".to_string()
+        "↑↓ move   Enter run   t terminal   a agent"
     };
     lines.push(style(hint).dim().to_string());
     lines

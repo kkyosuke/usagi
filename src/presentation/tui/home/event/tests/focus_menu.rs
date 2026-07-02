@@ -770,3 +770,94 @@ fn cheatsheet_opens_from_the_focus_menu_and_dismisses() {
     ];
     assert!(matches!(run(keys, sample_state()).unwrap(), Outcome::Quit));
 }
+
+#[test]
+fn focus_menu_terminal_picker_open_adds_tab_and_new_opens_native_terminal() {
+    let opened = RefCell::new(Vec::new());
+    let external = RefCell::new(Vec::new());
+    let mut open = |_h: &mut HomeState, d: &Path, a: bool, n: bool| {
+        opened.borrow_mut().push((d.to_path_buf(), a, n));
+        Ok(PaneExit::Closed)
+    };
+    let mut open_external = |d: &Path| {
+        external.borrow_mut().push(d.to_path_buf());
+        Ok(())
+    };
+    let mut keys = cmd("session switch feat");
+    keys.push(Ok(Key::Enter)); // Focus feat (agent highlighted)
+    keys.push(Ok(Key::ArrowDown)); // agent -> terminal
+    keys.push(Ok(Key::ArrowRight)); // expand terminal picker, default open
+    keys.push(Ok(Key::Enter)); // open = embedded pane/tab
+    keys.push(Ok(Key::ArrowRight)); // expand terminal picker again
+    keys.push(Ok(Key::ArrowDown)); // open -> new
+    keys.push(Ok(Key::Enter)); // new = native terminal, stay in Focus
+    keys.push(Ok(Key::Escape)); // -> Switch
+    keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
+    assert!(matches!(
+        run_full_external(keys, sample_state(), &mut open, &mut open_external).unwrap(),
+        Outcome::Quit
+    ));
+    assert_eq!(
+        *opened.borrow(),
+        vec![(PathBuf::from("/r/feat"), false, true)]
+    );
+    assert_eq!(*external.borrow(), vec![PathBuf::from("/r/feat")]);
+}
+
+#[test]
+fn focus_prompt_terminal_new_opens_native_terminal() {
+    let opened = RefCell::new(Vec::new());
+    let external = RefCell::new(Vec::new());
+    let mut open = |_h: &mut HomeState, d: &Path, a: bool, n: bool| {
+        opened.borrow_mut().push((d.to_path_buf(), a, n));
+        Ok(PaneExit::Closed)
+    };
+    let mut open_external = |d: &Path| {
+        external.borrow_mut().push(d.to_path_buf());
+        Ok(())
+    };
+    let mut state = sample_state();
+    state.set_session_action_ui(SessionActionUi::Prompt);
+    let mut keys = cmd("session switch feat");
+    keys.push(Ok(Key::Enter)); // Focus feat
+    keys.extend(typed("terminal new"));
+    keys.push(Ok(Key::Enter));
+    keys.push(Ok(Key::Escape)); // -> Switch
+    keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
+    assert!(matches!(
+        run_full_external(keys, state, &mut open, &mut open_external).unwrap(),
+        Outcome::Quit
+    ));
+    assert!(opened.borrow().is_empty());
+    assert_eq!(*external.borrow(), vec![PathBuf::from("/r/feat")]);
+}
+
+#[test]
+fn focus_prompt_terminal_new_reports_native_terminal_errors() {
+    let mut open = |_h: &mut HomeState, _d: &Path, _a: bool, _n: bool| Ok(PaneExit::Closed);
+    let mut open_external = |_d: &Path| Err("no terminal app".to_string());
+    let mut state = sample_state();
+    state.set_session_action_ui(SessionActionUi::Prompt);
+    let mut keys = cmd("session switch feat");
+    keys.push(Ok(Key::Enter)); // Focus feat
+    keys.extend(typed("terminal new"));
+    keys.push(Ok(Key::Enter));
+    keys.push(Ok(Key::Escape)); // -> Switch
+    keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
+    assert!(matches!(
+        run_full_external(keys, state, &mut open, &mut open_external).unwrap(),
+        Outcome::Quit
+    ));
+}
+
+#[test]
+fn focus_menu_close_picker_runs_the_selected_close_action() {
+    let mut keys = cmd("session switch feat");
+    keys.push(Ok(Key::Enter)); // Focus feat (agent highlighted)
+    keys.push(Ok(Key::ArrowDown)); // agent -> close
+    keys.push(Ok(Key::ArrowRight)); // expand close picker (safe close selected)
+    keys.push(Ok(Key::ArrowDown)); // close -> close --force
+    keys.push(Ok(Key::Enter)); // run close --force -> Switch
+    keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
+    assert!(matches!(run(keys, sample_state()).unwrap(), Outcome::Quit));
+}

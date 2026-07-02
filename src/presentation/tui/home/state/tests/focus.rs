@@ -299,6 +299,49 @@ fn focus_menu_cursor_moves_and_wraps_and_selects() {
 }
 
 #[test]
+fn focus_menu_terminal_picker_expands_only_on_terminal_row() {
+    let mut state = state();
+    state.enter_focus(1);
+    // Starts on agent, so the terminal picker cannot open yet.
+    assert!(!state.focus_menu_terminal_can_expand());
+    state.focus_menu_expand_terminal();
+    assert!(!state.focus_menu_expanded());
+
+    // Move down from agent to terminal and open the terminal picker.
+    state.focus_menu_move_down();
+    assert_eq!(state.focus_selected_command().unwrap().name, "terminal");
+    assert!(state.focus_menu_terminal_can_expand());
+    state.focus_menu_expand_terminal();
+    assert!(state.focus_menu_expanded());
+    assert_eq!(state.focus_menu_terminal_cursor(), Some(0));
+    assert_eq!(state.focus_menu_selected_terminal_action(), Some("open"));
+    state.focus_menu_move_down();
+    assert_eq!(state.focus_menu_selected_terminal_action(), Some("new"));
+}
+
+#[test]
+fn focus_menu_close_picker_expands_only_on_close_row() {
+    let mut state = state();
+    state.enter_focus(1);
+    // Starts on agent, so the close picker cannot open yet.
+    assert!(!state.focus_close_can_expand());
+    state.focus_menu_expand_close();
+    assert!(!state.focus_menu_expanded());
+
+    state.focus_menu_move_down(); // agent -> terminal
+    state.focus_menu_move_down(); // terminal -> close
+    assert_eq!(state.focus_selected_command().unwrap().name, "close");
+    assert!(state.focus_close_can_expand());
+    state.focus_menu_expand_close();
+    assert!(state.focus_menu_expanded());
+    assert_eq!(state.focus_close_cursor(), Some(0));
+    assert!(!state.focus_menu_selected_close_force());
+    state.focus_menu_move_down();
+    assert_eq!(state.focus_close_cursor(), Some(1));
+    assert!(state.focus_menu_selected_close_force());
+}
+
+#[test]
 fn agent_choice_round_trips_and_is_consumed_once() {
     use crate::domain::settings::AgentCli;
     let mut state = state();

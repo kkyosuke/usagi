@@ -47,7 +47,12 @@ pub use modal::{
 pub use mode::{Mode, PaneExit, ResumeLevel, ReturnMode};
 
 use list::session_row;
-use modal::{FocusMenu, Overlay};
+use modal::{FocusMenu, FocusSubmenu, Overlay};
+
+/// The terminal row's inline choices, in display/default order. `open` preserves
+/// the existing fast path: add an embedded usagi pane/tab. `new` opens a native
+/// terminal application in the same directory.
+const TERMINAL_MENU_ACTIONS: [&str; 2] = ["open", "new"];
 
 /// The fixed 在席 (Focus) menu display order, independent of registry order and
 /// (unlike before) not alphabetical: the pane-launch actions first (`agent`,
@@ -2682,7 +2687,8 @@ impl HomeState {
         self.focus_menu.cursor()
     }
 
-    /// Whether the 在席 menu's `agent` row is expanded into the agent picker.
+    /// Whether any 在席 menu row is expanded into an inline picker (agent /
+    /// terminal / close).
     pub fn focus_menu_expanded(&self) -> bool {
         self.focus_menu.is_expanded()
     }
@@ -2695,6 +2701,18 @@ impl HomeState {
             .filter(|_| !self.installed_agents.is_empty())
     }
 
+    /// Whether the 在席 menu's `terminal` row is expanded into the open/new
+    /// picker.
+    pub fn focus_menu_terminal_expanded(&self) -> bool {
+        self.focus_menu.terminal_cursor().is_some()
+    }
+
+    /// The highlighted terminal action in the 在席 menu's terminal picker, or
+    /// `None` when the picker is collapsed.
+    pub fn focus_menu_terminal_cursor(&self) -> Option<usize> {
+        self.focus_menu.terminal_cursor()
+    }
+
     /// Whether the 在席 menu's `agent` row can expand into the picker: the cursor
     /// is on `agent` and more than one CLI is installed (so there is a choice).
     pub fn focus_menu_agent_can_expand(&self) -> bool {
@@ -2702,6 +2720,13 @@ impl HomeState {
             && self
                 .focus_selected_command()
                 .is_some_and(|info| info.name == "agent")
+    }
+
+    /// Whether the 在席 menu's `terminal` row can expand into the open/new
+    /// picker. It always has two choices; expansion is gated only by the cursor.
+    pub fn focus_menu_terminal_can_expand(&self) -> bool {
+        self.focus_selected_command()
+            .is_some_and(|info| info.name == "terminal")
     }
 
     /// Expand the 在席 menu's agent picker, highlighting the configured default
@@ -2718,10 +2743,19 @@ impl HomeState {
             .iter()
             .position(|&cli| cli == self.default_agent)
             .unwrap_or(0);
-        self.focus_menu.expand(default_index);
+        self.focus_menu.expand(FocusSubmenu::Agent, default_index);
     }
 
-    /// Collapse the 在席 menu's agent picker, returning whether it was expanded
+    /// Expand the 在席 menu's terminal picker, highlighting `open` (the default
+    /// embedded-pane action).
+    pub fn focus_menu_expand_terminal(&mut self) {
+        if !self.focus_menu_terminal_can_expand() {
+            return;
+        }
+        self.focus_menu.expand(FocusSubmenu::Terminal, 0);
+    }
+
+    /// Collapse the 在席 menu's inline picker, returning whether one was expanded
     /// (so the caller treats `←` / `Esc` as consumed only then).
     pub fn focus_menu_collapse_agent(&mut self) -> bool {
         self.focus_menu.collapse()
@@ -2776,8 +2810,25 @@ impl HomeState {
             .copied()
     }
 
+    /// The terminal action highlighted in the picker (`open` / `new`), or `None`
+    /// when the picker is collapsed.
+    pub fn focus_menu_selected_terminal_action(&self) -> Option<&'static str> {
+        self.focus_menu.terminal_cursor()?;
+        TERMINAL_MENU_ACTIONS
+            .get(
+                self.focus_menu
+                    .terminal_selected(TERMINAL_MENU_ACTIONS.len()),
+            )
+            .copied()
+    }
+
+    /// The terminal actions shown below the expanded terminal row.
+    pub fn focus_menu_terminal_actions(&self) -> &'static [&'static str] {
+        &TERMINAL_MENU_ACTIONS
+    }
+
     /// Move the 在席 menu cursor up one row, wrapping (delegated to [`FocusMenu`],
-    /// which keeps it underflow-safe). Acts on the agent picker while expanded.
+    /// which keeps it underflow-safe). Acts on the active picker while expanded.
     pub fn focus_menu_move_up(&mut self) {
         let count = self.focus_menu_nav_count();
         self.focus_menu.move_up(count);
@@ -2794,9 +2845,13 @@ impl HomeState {
     /// the Session-scope commands.
     fn focus_menu_nav_count(&self) -> usize {
         if self.focus_menu.is_expanded() {
-            self.installed_agents.len()
-        } else if self.focus_menu.is_close_expanded() {
-            2
+            if self.focus_menu_terminal_expanded() {
+                TERMINAL_MENU_ACTIONS.len()
+            } else if self.focus_menu.is_close_expanded() {
+                2
+            } else {
+                self.installed_agents.len()
+            }
         } else {
             self.focus_menu_commands().len()
         }
