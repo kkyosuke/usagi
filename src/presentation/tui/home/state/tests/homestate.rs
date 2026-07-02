@@ -623,7 +623,18 @@ fn submitting_a_command_echoes_and_runs_it() {
             size: ModalSize::Large,
         }
     );
-    assert_eq!(submission.recorded.as_deref(), Some("man"));
+    assert_eq!(
+        submission.recorded.as_ref().map(|e| e.command.as_str()),
+        Some("man")
+    );
+    assert_eq!(
+        submission
+            .recorded
+            .as_ref()
+            .and_then(|e| e.session.as_ref()),
+        None
+    );
+    assert!(submission.recorded.as_ref().is_some_and(|e| e.success));
     let echoed = state.log().iter().find(|l| l.kind == LineKind::Command);
     assert_eq!(echoed.unwrap().text, "man");
     let modal = state.text_modal().expect("man opens a text modal");
@@ -632,6 +643,20 @@ fn submitting_a_command_echoes_and_runs_it() {
     // The band shows none of the modal's output (its response is empty).
     assert!(state.response_lines().is_empty());
     assert_eq!(state.input(), "");
+}
+
+#[test]
+fn submitting_an_error_command_records_failure() {
+    let mut state = state();
+    for c in "nope".chars() {
+        state.push_char(c);
+    }
+    let submission = state.submit();
+    assert_eq!(
+        submission.recorded.as_ref().map(|e| e.command.as_str()),
+        Some("nope")
+    );
+    assert!(submission.recorded.as_ref().is_some_and(|e| !e.success));
 }
 
 #[test]

@@ -350,7 +350,7 @@ fn a_right_click_on_a_switch_tab_opens_a_menu_and_runs_the_selected_action() {
         Ok(Input::Key(Key::CtrlC)),
     ]);
     let monitor = MonitorHandle::with_live(vec![PathBuf::from("/r/feat")]);
-    let mut persist: fn(&str) = noop_persist;
+    let mut persist: fn(&crate::domain::history::HistoryEntry) = noop_persist_entry;
     let mut create: fn(&Path, &str, u64) = |_, _, _| {};
     let mut rename = |_: &Path, n: &str, l: &str| noop_rename(n, l);
     let mut note = |_: &Path, n: &str, v: &str| noop_set_note(n, v);
@@ -458,7 +458,7 @@ fn run_switch_tab_menu_inputs(after_open: Vec<io::Result<Input>>) -> Vec<TabMenu
     };
     let mut reader = InputReader::new(inputs);
     let monitor = MonitorHandle::with_live(vec![PathBuf::from("/r/feat")]);
-    let mut persist: fn(&str) = noop_persist;
+    let mut persist: fn(&crate::domain::history::HistoryEntry) = noop_persist_entry;
     let mut create: fn(&Path, &str, u64) = |_, _, _| {};
     let mut rename = |_: &Path, n: &str, l: &str| noop_rename(n, l);
     let mut note = |_: &Path, n: &str, v: &str| noop_set_note(n, v);
@@ -610,7 +610,7 @@ fn right_click_tab_paths_cover_focus_and_attached_modes() {
             Ok(Input::Key(Key::CtrlC)),
         ]);
         let monitor = MonitorHandle::detached();
-        let mut persist: fn(&str) = noop_persist;
+        let mut persist: fn(&crate::domain::history::HistoryEntry) = noop_persist_entry;
         let mut create: fn(&Path, &str, u64) = |_, _, _| {};
         let mut rename = |_: &Path, n: &str, l: &str| noop_rename(n, l);
         let mut note = |_: &Path, n: &str, v: &str| noop_set_note(n, v);

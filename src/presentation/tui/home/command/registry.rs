@@ -11,6 +11,7 @@ use super::{
     Command, CommandContext, CommandHint, CommandInfo, CommandResult, CommandScope, Completion,
     CompletionContext, Hint, LogLine, WorktreeRef,
 };
+use crate::domain::history::HistoryEntry;
 use crate::domain::issue::Issue;
 
 /// The set of commands available in command mode, dispatched and completed by
@@ -105,7 +106,7 @@ impl CommandRegistry {
     pub fn dispatch(
         &self,
         input: &str,
-        history: &[String],
+        history: &[HistoryEntry],
         worktrees: &[WorktreeRef],
     ) -> CommandResult {
         self.dispatch_with(input, history, worktrees, &[])
@@ -117,7 +118,7 @@ impl CommandRegistry {
     pub fn dispatch_with(
         &self,
         input: &str,
-        history: &[String],
+        history: &[HistoryEntry],
         worktrees: &[WorktreeRef],
         issues: &[Issue],
     ) -> CommandResult {
@@ -159,7 +160,7 @@ impl CommandRegistry {
         &self,
         input: &str,
         scope: CommandScope,
-        history: &[String],
+        history: &[HistoryEntry],
         worktrees: &[WorktreeRef],
         issues: &[Issue],
     ) -> CommandResult {

@@ -90,7 +90,7 @@ src/
 │   ├── repo_paths.rs           # リポジトリ内 usagi メタデータの配置（STATE_DIR=".usagi"）の正本。各ストア・session・gitignore が参照
 │   ├── storage.rs              # グローバル ~/.usagi/ の load/save（Storage）
 │   ├── workspace_store.rs      # <repo>/.usagi/ の state.json / settings.json（WorkspaceStore）
-│   ├── history_store.rs        # <repo>/.usagi/history.jsonl の load/append（HistoryStore）
+│   ├── history_store.rs        # <repo>/.usagi/history.json の load/append（HistoryStore）
 │   ├── open_panes_store.rs     # worktree 別に開いていたペイン（agent/terminal）を記録し restore_panes で復元（~/.usagi/open-panes/）
 │   ├── resume_focus_store.rs   # ワークスペース別に終了時のセッション・エンゲージメント段階を記録し起動時に復帰（~/.usagi/resume-focus/）
 │   ├── trace_log.rs            # 操作トレース logs/trace-YYYY-MM-DD.jsonl の記録（USAGI_TRACE。TraceLog）

@@ -114,17 +114,39 @@ impl Command for HistoryCommand {
         "Show the command history"
     }
 
-    fn run(&self, _args: &str, ctx: &CommandContext) -> CommandResult {
-        if ctx.history.is_empty() {
-            return CommandResult::line(LogLine::output("No commands in history yet."));
-        }
-        let lines = ctx
-            .history
-            .iter()
-            .enumerate()
-            .map(|(i, entry)| LogLine::output(format!("  {:>3}  {entry}", i + 1)))
+    fn usage(&self) -> &'static str {
+        "history [session]"
+    }
+
+    fn examples(&self) -> &'static [&'static str] {
+        &["history", "history my-feature"]
+    }
+
+    fn run(&self, args: &str, ctx: &CommandContext) -> CommandResult {
+        // An optional argument filters the listing to one session (worktree) by
+        // name; with none, every recorded command is shown chronologically.
+        let filter = args.trim();
+        let session = if filter.is_empty() {
+            None
+        } else {
+            Some(filter)
+        };
+        let lines = crate::usecase::history::view(ctx.history, session)
+            .into_iter()
+            .map(LogLine::output)
             .collect();
         CommandResult::modal("History", lines)
+    }
+
+    fn complete_args(&self, args: &str, ctx: &CompletionContext) -> Vec<String> {
+        // `history [session]` takes a single session-name argument, so completion
+        // offers the workspace's session names while the first token is typed.
+        let (head, _) = arg_tokens(args);
+        if head.is_empty() {
+            ctx.session_names.iter().map(|n| n.to_string()).collect()
+        } else {
+            Vec::new()
+        }
     }
 }
 

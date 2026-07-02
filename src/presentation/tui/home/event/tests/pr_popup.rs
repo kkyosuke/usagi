@@ -67,7 +67,7 @@ fn run_pr_clicks(inputs: Vec<io::Result<Input>>, state: HomeState) -> (Vec<Strin
         Ok(PaneExit::Closed)
     };
     let mut open_url = |u: &str| urls.borrow_mut().push(u.to_string());
-    let mut persist: fn(&str) = noop_persist;
+    let mut persist: fn(&crate::domain::history::HistoryEntry) = noop_persist_entry;
     let mut dispatch_create = |_: &Path, _: &str, _: u64| {};
     let mut rename = |_: &Path, n: &str, l: &str| noop_rename(n, l);
     let mut set_note_fake = |_: &Path, n: &str, t: &str| noop_set_note(n, t);

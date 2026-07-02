@@ -18,6 +18,7 @@ use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 
+use crate::domain::history::HistoryEntry;
 use crate::domain::issue::Issue;
 use crate::domain::resource::ResourceUsage;
 use crate::domain::settings::{AgentCli, KeyScheme, SessionActionUi, Sidebar};
@@ -95,8 +96,10 @@ pub struct GroupSource {
 #[derive(Debug)]
 pub struct Submission {
     pub effect: Effect,
-    /// The command that was run and added to history, or `None` for empty input.
-    pub recorded: Option<String>,
+    /// The history entry that was run and added to history, or `None` for empty
+    /// input. Carries the command, its outcome, and the session it targeted so
+    /// the event loop can persist the whole entry (not just the command text).
+    pub recorded: Option<HistoryEntry>,
 }
 
 /// The result of attempting to create a session, applied back to the screen by
@@ -320,11 +323,6 @@ impl CommandLine {
     /// The caret position as a byte offset into [`value`](Self::value).
     fn cursor(&self) -> usize {
         self.input.cursor()
-    }
-
-    /// The committed history, oldest first.
-    fn history(&self) -> &[String] {
-        &self.history
     }
 
     /// Replace the history wholesale (e.g. restored from disk), capped to the most
@@ -622,6 +620,11 @@ pub struct HomeState {
     /// The workspace's task issues, loaded from disk by `mod.rs` and read by the
     /// `issue` command. Empty until injected.
     issues: Vec<Issue>,
+    /// The recorded command history (oldest first), seeded from disk by `mod.rs`
+    /// and extended as commands run. Read by the `history` command for its
+    /// time-stamped, per-session listing; the ↑/↓ recall uses the separate
+    /// command-string buffer on [`CommandLine`].
+    history_entries: Vec<HistoryEntry>,
     /// The latest released version, set once the background update check finds a
     /// release newer than this build. While `None` (the check is pending, or the
     /// build is up to date) the sidebar mascot's "update available" notice is
@@ -787,6 +790,7 @@ impl HomeState {
             sort_waiting: false,
             response_start: 0,
             issues: Vec::new(),
+            history_entries: Vec::new(),
             update: None,
             loading: None,
             tasks: Vec::new(),
@@ -1063,8 +1067,15 @@ impl HomeState {
 
     /// Seed the command history with entries restored from disk (oldest first),
     /// so `history` and `↑`/`↓` recall reflect commands run in past sessions.
-    pub fn restore_history(&mut self, entries: Vec<String>) {
-        self.cmdline.set_history(entries);
+    pub fn restore_history<E: Into<HistoryEntry>>(&mut self, entries: Vec<E>) {
+        let mut entries: Vec<HistoryEntry> = entries.into_iter().map(Into::into).collect();
+        let overflow = entries.len().saturating_sub(MAX_COMMAND_HISTORY);
+        if overflow > 0 {
+            entries.drain(..overflow);
+        }
+        self.cmdline
+            .set_history(entries.iter().map(|e| e.command.clone()).collect());
+        self.history_entries = entries;
     }
 
     /// Seed the recorded sessions (from `state.json`), shown by `session list`,
@@ -2873,11 +2884,15 @@ impl HomeState {
         // command's response — the prompt has no echo line, so the response
         // starts at the current log end.
         self.response_start = self.log.len();
-        let result = self.dispatch_and_record(&entry, CommandScope::Session);
+        let session = match self.focused_session_name() {
+            name if name == ROOT_NAME => None,
+            name => Some(name),
+        };
+        let (result, recorded) = self.dispatch_and_record(&entry, CommandScope::Session, session);
         let effect = self.record_response(result);
         Submission {
             effect,
-            recorded: Some(entry),
+            recorded: Some(recorded),
         }
     }
 
@@ -2969,11 +2984,11 @@ impl HomeState {
         self.response_start = self.log.len();
         self.log.push(LogLine::command(entry.clone()));
         self.trim_log();
-        let result = self.dispatch_and_record(&entry, self.command_scope());
+        let (result, recorded) = self.dispatch_and_record(&entry, self.command_scope(), None);
         let effect = self.record_response(result);
         Submission {
             effect,
-            recorded: Some(entry),
+            recorded: Some(recorded),
         }
     }
 
@@ -2984,16 +2999,37 @@ impl HomeState {
     /// [`CommandScope::Session`]) so both record history identically and refuse
     /// commands outside their surface's scope; folding the result into the log is
     /// [`record_response`](Self::record_response).
-    fn dispatch_and_record(&mut self, entry: &str, scope: CommandScope) -> CommandResult {
+    fn dispatch_and_record(
+        &mut self,
+        entry: &str,
+        scope: CommandScope,
+        session: Option<String>,
+    ) -> (CommandResult, HistoryEntry) {
         let result = self.registry.dispatch_in_scope(
             entry,
             scope,
-            self.cmdline.history(),
+            &self.history_entries,
             &self.list.refs(),
             &self.issues,
         );
+        let success = !result.lines.iter().any(|line| line.kind == LineKind::Error);
         self.cmdline.push_history(entry.to_string());
-        result
+        let recorded = HistoryEntry::now(entry, session, success);
+        self.push_history_entry(recorded.clone());
+        (result, recorded)
+    }
+
+    /// Append one full history entry to the display history, capping it to the
+    /// same most-recent window used for command recall.
+    fn push_history_entry(&mut self, entry: HistoryEntry) {
+        self.history_entries.push(entry);
+        let overflow = self
+            .history_entries
+            .len()
+            .saturating_sub(MAX_COMMAND_HISTORY);
+        if overflow > 0 {
+            self.history_entries.drain(..overflow);
+        }
     }
 
     /// Fold a command `result` into the log and advance the results-band start,

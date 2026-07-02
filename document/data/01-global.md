@@ -324,7 +324,7 @@ JSON（JSONL）として追記します。
 - **オプトイン**: 既定では記録しません。環境変数 `USAGI_TRACE`（`trace_log::TRACE_ENV`）に空でも `0` でもない値を
   設定したときだけ有効になります。キー入力や MCP 呼び出しといったホットパス上にあるため、無効時は環境変数を
   1 度読むだけで何も書きません。
-- **追記専用 JSONL**: コマンド履歴（[02-workspace.md](02-workspace.md) の `history.jsonl`）と同じく、1 行 1 イベントを
+- **追記専用 JSONL**: コマンド履歴（[02-workspace.md](02-workspace.md) の `history.json`）と同じく、1 行 1 イベントを
   `O_APPEND` で書きます。複数プロセス（複数 TUI・セッションの `usagi mcp`）が同じファイルへ書いても各行が
   混ざりません。`jq` などで `category` / `action` 別に集計できます。
 - **日次ローテーション**: ファイル名は `trace-YYYY-MM-DD.jsonl`。その日のイベントは同じファイルへ追記します。
