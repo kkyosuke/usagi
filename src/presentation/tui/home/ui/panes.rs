@@ -2003,7 +2003,11 @@ fn focus_agent_pick_row(cli: AgentCli, selected: bool, is_default: bool, width: 
 }
 
 /// The 在席 menu's `close` row: like a plain command row but carries a `▾`/`▸`
-/// expand affordance to open the close picker (plain close vs. close --force).
+/// expand affordance to open the close picker (plain close vs. close --force) —
+/// `▾` while the picker is open, `▸` when the cursor is on this row (it can
+/// always expand). When the cursor is elsewhere the slot is held with blanks so
+/// the description never shifts as the cursor moves on/off the row (no CLS),
+/// mirroring the `agent` row.
 fn focus_close_command_row(
     state: &HomeState,
     info: &CommandInfo,
@@ -2015,9 +2019,18 @@ fn focus_close_command_row(
     } else if state.focus_close_can_expand() {
         "▸ "
     } else {
-        ""
+        "  "
     };
     let desc = format!("{chevron}{}", info.description);
+    menu_row(info.name, &desc, selected, width)
+}
+
+/// The 在席 menu's `terminal` row: a plain command row that reserves the same
+/// 2-column chevron slot as the `agent` and `close` rows (always blank —
+/// `terminal` has no picker to expand) so its description lines up with theirs
+/// and never shifts as the cursor moves (no CLS).
+fn focus_terminal_command_row(info: &CommandInfo, selected: bool, width: usize) -> String {
+    let desc = format!("  {}", info.description);
     menu_row(info.name, &desc, selected, width)
 }
 
@@ -2088,6 +2101,10 @@ fn focus_menu_body(state: &HomeState, width: usize) -> Vec<String> {
                     lines.push(focus_close_pick_row(j == 1, Some(j) == close_cursor, width));
                 }
             }
+        } else if info.name == "terminal" {
+            // The `terminal` row reserves the same chevron slot as `agent`/`close`
+            // (always blank) so its description aligns with theirs and never shifts.
+            lines.push(focus_terminal_command_row(info, selected, width));
         } else {
             lines.push(focus_menu_row(info, selected, width));
         }

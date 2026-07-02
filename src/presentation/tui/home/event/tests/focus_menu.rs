@@ -3,8 +3,8 @@ use super::*;
 #[test]
 fn focus_menu_moves_and_runs_terminal_via_enter() {
     // Switch -> focus "main" (idle, so just Focus). The menu lists its commands
-    // alphabetically and highlights "agent" by default; move down past "close" to
-    // "terminal", then Enter runs it (attaches).
+    // in the fixed order (agent, terminal, close) and highlights "agent" by
+    // default; move down once to "terminal", then Enter runs it (attaches).
     let opened = RefCell::new(Vec::new());
     let mut open = |_h: &mut HomeState, d: &Path, a: bool, _n: bool| {
         opened.borrow_mut().push((d.to_path_buf(), a));
@@ -16,8 +16,7 @@ fn focus_menu_moves_and_runs_terminal_via_enter() {
     keys.push(Ok(Key::Enter)); // Switch
     keys.push(Ok(Key::ArrowDown)); // cursor "main" (/r/main)
     keys.push(Ok(Key::Enter)); // focus main (idle)
-    keys.push(Ok(Key::Char('j'))); // agent -> close
-    keys.push(Ok(Key::ArrowDown)); // close -> terminal
+    keys.push(Ok(Key::Char('j'))); // agent -> terminal
     keys.push(Ok(Key::Enter)); // run terminal (attach) -> Closed -> Focus
     keys.push(Ok(Key::Escape)); // Focus -> Switch
     keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
@@ -218,18 +217,19 @@ fn typed_agent_name_allows_the_default_cli_even_when_not_probed_as_installed() {
 
 #[test]
 fn focus_menu_can_run_the_coming_soon_ai_command() {
-    // With the local LLM available the menu lists, alphabetically, agent (0,
-    // default), ai (1), close (2), terminal (3). ArrowUp from the top wraps to
-    // "terminal"; back down to "agent"; one more lands on "ai"; Enter on it just
+    // With the local LLM available the menu lists, in fixed order, agent (0,
+    // default), terminal (1), ai (2), close (3). ArrowUp from the top wraps to
+    // "close"; back down to "agent"; two more land on "ai"; Enter on it just
     // logs (no attach).
     let mut state = sample_state();
     state.set_ai_available(true);
     let mut keys = cmd("session switch feat");
     keys.push(Ok(Key::Enter)); // Focus ("agent" highlighted by default)
     keys.push(Ok(Key::Home)); // ignored in the menu
-    keys.push(Ok(Key::ArrowUp)); // agent wraps up to "terminal"
+    keys.push(Ok(Key::ArrowUp)); // agent wraps up to "close"
     keys.push(Ok(Key::ArrowDown)); // back to "agent"
-    keys.push(Ok(Key::ArrowDown)); // agent -> ai
+    keys.push(Ok(Key::ArrowDown)); // agent -> terminal
+    keys.push(Ok(Key::ArrowDown)); // terminal -> ai
     keys.push(Ok(Key::Enter)); // run ai (coming soon)
     keys.push(Ok(Key::Escape)); // -> Switch
     keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits

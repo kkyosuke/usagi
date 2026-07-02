@@ -303,17 +303,17 @@ fn focus_menu_agent_row_shows_the_default_and_expands_into_a_picker() {
     let base = stripped(&right_pane_contents(&state, 50, 16));
     assert!(base.contains("Launch Claude"));
     // The expand affordance (▸ / "→ pick agent") shows while the agent row is the
-    // highlighted one — and alphabetical order highlights `agent` on entry.
+    // highlighted one — and the fixed order highlights `agent` on entry.
     assert!(base.contains('▸'));
     assert!(base.contains("→ pick agent"));
     // Moving off the agent row hides the affordance.
-    state.focus_menu_move_down(); // agent -> close
+    state.focus_menu_move_down(); // agent -> terminal
     let off_agent = stripped(&right_pane_contents(&state, 50, 16));
     assert!(off_agent.contains("Launch Claude"));
     assert!(off_agent.contains("  Launch Claude"));
     assert!(!off_agent.contains("→ pick agent"));
     // Back onto the agent row, expanding lists the installed agents.
-    state.focus_menu_move_up(); // close -> agent
+    state.focus_menu_move_up(); // terminal -> agent
                                 // Expanding lists every installed agent (default tagged) and swaps the hint.
     state.focus_menu_expand_agent();
     let expanded = stripped(&right_pane_contents(&state, 50, 16));
@@ -327,8 +327,14 @@ fn focus_menu_agent_row_shows_the_default_and_expands_into_a_picker() {
 fn focus_close_row_shows_chevron_and_expands_into_a_picker() {
     let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
     state.enter_focus(1);
-    // Alphabetical order: agent is first; move down once to land on close.
-    state.focus_menu_move_down();
+    // On entry the cursor is on `agent`, so `close` (and `terminal`) reserve the
+    // 2-column chevron slot with blanks — their descriptions never shift as the
+    // cursor moves on/off them (no CLS), like the `agent` row.
+    let off_close = stripped(&right_pane_contents(&state, 60, 18));
+    assert!(off_close.contains("  Close the focused session"));
+    assert!(off_close.contains("  Open an interactive terminal"));
+    // Fixed order: agent is first and close is last; move up once (wraps) to close.
+    state.focus_menu_move_up();
     // The close row shows ▸ and "→ expand" in the hint while cursor is on it.
     let on_close = stripped(&right_pane_contents(&state, 60, 18));
     assert!(on_close.contains('▸'));

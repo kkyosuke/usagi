@@ -888,8 +888,8 @@ fn command_scope_visibility_is_same_scope_or_both() {
 #[test]
 fn commands_in_scope_lists_a_scopes_own_commands_in_order() {
     // `commands_in_scope` returns exactly the Session-scope commands, in
-    // registry order, excluding the shared utilities. (The 在席 menu sorts these
-    // alphabetically itself before displaying them.)
+    // registry order, excluding the shared utilities. (The 在席 menu reorders
+    // these into its own fixed display order before displaying them.)
     let session: Vec<&str> = registry()
         .commands_in_scope(CommandScope::Session)
         .iter()
