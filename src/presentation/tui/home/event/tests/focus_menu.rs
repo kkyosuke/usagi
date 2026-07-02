@@ -216,6 +216,74 @@ fn typed_agent_name_allows_the_default_cli_even_when_not_probed_as_installed() {
     assert_eq!(*opened.borrow(), vec![(true, Some(AgentCli::Claude))]);
 }
 
+/// A zero-argument Session-scope command with no `run_focus_command` arm, for
+/// proving the menu's dispatch fails loudly instead of falling back to an agent
+/// launch.
+struct MenuOnlyTestCommand;
+
+impl crate::presentation::tui::home::command::Command for MenuOnlyTestCommand {
+    fn name(&self) -> &'static str {
+        "zzz"
+    }
+
+    fn description(&self) -> &'static str {
+        "test-only zero-argument command"
+    }
+
+    fn scope(&self) -> crate::presentation::tui::home::command::CommandScope {
+        crate::presentation::tui::home::command::CommandScope::Session
+    }
+
+    fn run(
+        &self,
+        _args: &str,
+        _ctx: &crate::presentation::tui::home::command::CommandContext,
+    ) -> crate::presentation::tui::home::command::CommandResult {
+        crate::presentation::tui::home::command::CommandResult {
+            lines: Vec::new(),
+            effect: crate::presentation::tui::home::command::Effect::None,
+        }
+    }
+}
+
+#[test]
+fn focus_menu_refuses_a_session_command_without_a_menu_arm() {
+    // A future Session-scope command registered without a `run_focus_command`
+    // arm appears in the 在席 menu (alphabetically last here), but Enter on it
+    // must not silently launch the default agent — it logs an error and stays
+    // put. The menu lists agent (0), close (1), terminal (2), zzz (3); ArrowUp
+    // from the default "agent" wraps straight onto "zzz".
+    let opened = RefCell::new(Vec::new());
+    let mut open = |_h: &mut HomeState, _d: &Path, a: bool, _n: bool| {
+        opened.borrow_mut().push(a);
+        Ok(PaneExit::Closed)
+    };
+    let mut create: fn(&str) -> SessionOutcome = noop_create;
+    let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = noop_preview;
+    let mut state = sample_state();
+    state.register_command(Box::new(MenuOnlyTestCommand));
+    let mut keys = cmd("session switch feat");
+    keys.push(Ok(Key::Enter)); // Focus feat ("agent" highlighted by default)
+    keys.push(Ok(Key::Home)); // ignored in the menu (the key fallthrough arm)
+    keys.push(Ok(Key::ArrowUp)); // agent wraps up to "zzz"
+    keys.push(Ok(Key::Enter)); // run zzz -> refused with an error, no launch
+    keys.push(Ok(Key::Escape)); // -> Switch
+    keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
+    assert!(matches!(
+        run_full(
+            keys,
+            state,
+            &mut open,
+            &mut create,
+            &mut preview,
+            &mut noop_config
+        )
+        .unwrap(),
+        Outcome::Quit
+    ));
+    assert!(opened.borrow().is_empty());
+}
+
 #[test]
 fn focus_ctrl_o_o_opens_switch_then_esc_re_focuses() {
     // Under the prefix scheme `Ctrl-O` is the leader in 在席 too, so `Ctrl-O o`

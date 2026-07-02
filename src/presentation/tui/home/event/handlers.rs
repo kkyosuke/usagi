@@ -115,12 +115,14 @@ pub(super) fn palette_key(
                     // The user quit the app from the settings screen.
                     None => return Ok(Flow::Quit),
                     // Back to home: the config screen may have changed the Session
-                    // Action UI (在席 mode's surface) or the pane key scheme, so
-                    // apply the re-read settings — otherwise Focus / 没入 keep
-                    // rendering with the old settings.
+                    // Action UI (在席 mode's surface), the pane key scheme, or the
+                    // default Agent CLI, so apply the re-read settings — otherwise
+                    // Focus / 没入 keep rendering with the old settings and
+                    // `agent` / `ai` keep launching the old CLI.
                     Some(reload) => {
                         state.set_session_action_ui(reload.session_action_ui);
                         state.set_key_scheme(reload.key_scheme);
+                        state.set_default_agent(reload.agent_cli);
                         painter.reset();
                     }
                 },
@@ -1105,9 +1107,12 @@ fn run_focus_command(
         // `close --force` is exposed as `Shift`+`c` on the 在席 menu for the
         // explicit discard path.
         "close --force" => close_focused_session(state, wiring, true),
-        // `agent` (the menu row / `a` shortcut) launches the configured default;
-        // it is also the fallback for any other menu entry.
-        _ => launch_agent(term, state, painter, wiring, None),
+        // The menu's `agent` row / `a` shortcut launch the configured default.
+        "agent" => launch_agent(term, state, painter, wiring, None),
+        // Fail loudly for anything else: a Session-scope command registered
+        // without an arm here must not silently launch an agent (or anything
+        // side-effectful) when picked from the menu.
+        _ => state.log_error(format!("\"{name}\" cannot be run from the menu")),
     }
 }
 
@@ -1138,10 +1143,13 @@ fn launch_agent(
 ///
 /// The prompt belongs to the worktree currently focused in 在席. The terminal
 /// pool consumes it only for a fresh agent-pane spawn; when the session already
-/// has an agent pane, it is sent directly to that live pane as interactive input.
-/// If the configured Agent CLI has not been probed as installed, refuse the
-/// command with a clear Config-oriented hint rather than opening a terminal that
-/// immediately fails with `command not found`.
+/// has a live agent pane, it is sent directly to that pane as interactive input —
+/// whatever CLI that pane runs, so the installed-CLI gate is skipped (nothing is
+/// launched). Only a launch that would freshly spawn the configured default is
+/// refused when the PATH probe has landed and excludes it, with a Config-oriented
+/// hint rather than opening a terminal that immediately fails with
+/// `command not found`. Before the probe lands (or when it found no CLI at all)
+/// the launch proceeds, mirroring `agent`'s permissiveness for the default.
 fn launch_agent_with_prompt(
     term: &Term,
     state: &mut HomeState,
@@ -1150,7 +1158,10 @@ fn launch_agent_with_prompt(
     prompt: String,
 ) {
     let cli = state.default_agent();
-    if !state.installed_agents().is_empty() && !state.installed_agents().contains(&cli) {
+    if !state.agent_tab_open()
+        && !state.installed_agents().is_empty()
+        && !state.installed_agents().contains(&cli)
+    {
         state.log_error(format!(
             "Agent CLI is not configured or installed: {} (open config and choose an installed Agent CLI)",
             cli.display_name()

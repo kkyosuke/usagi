@@ -119,7 +119,7 @@ issue が 1 件も無いときは「No issues yet.」を 1 行だけログに出
 - 名前付き（Prompt の `agent codex` / `agent sakana.ai`、または在席 Menu の[エージェントピッカー](../design/home/02-layout.md#在席のアクション-uimenu--prompt)）: 指定した CLI を起動。名前は起動コマンド名（`claude` / `codex` / `codex-fugu` / `gemini`）と表示名（`sakana.ai`）を大文字小文字を問わず受け付ける。
 - 既定 CLI 以外でかつ**インストールされていない**（PATH に無い）名前を指定するとエラーになり起動しない。未知の名前も同様に拒否する。Menu のピッカーは**インストール済みの CLI だけ**を候補に出す。
 
-**1 セッションが持てる agent は 1 つだけ**です。すでに agent ペインがあるセッションでは、在席の **Menu から `agent` 行を外します**（切替プレビューも同様）。Prompt の `agent`・`a`・没入の agent-タブ追加キー `Ctrl-O g`／`Alt-g` から `agent` を実行しても 2 つ目を起動せず、**既存の agent タブへ移動**します（terminal タブは何枚でも追加できます）。
+**1 セッションが持てる agent は 1 つだけ**です。動作中の agent ペインがあるセッションでは、在席の **Menu から `agent` 行を外します**（切替プレビューも同様）。Prompt の `agent`・`a`・没入の agent-タブ追加キー `Ctrl-O g`／`Alt-g` から `agent` を実行しても 2 つ目を起動せず、**既存の agent タブへ移動**します（terminal タブは何枚でも追加できます）。CLI が終了したまま残っている agent ペインは「動作中」に数えず、次の `agent` / `ai` は新規起動になります。
 
 起動時に usagi 自身の issue MCP サーバ（[`usagi mcp`](03-mcp.md)）を Agent CLI に組み込むため、エージェントは起動直後から
 `issue_*` tool でタスクを操作できます。さらにローカル LLM が有効なら [`usagi llm-mcp`](04-llm-mcp.md) も組み込みます。
@@ -130,7 +130,9 @@ Agent CLI ごとの組み込み方法（Claude は `--mcp-config` / `--append-sy
 Codex は `codex resume --last`（`codex-fugu` も同様に `codex-fugu resume --last`）、Gemini は `gemini -r latest`。中断・離席後も文脈を引き継いで再開できます）。過去の会話が無ければ通常起動になります。判定は worktree ごとに行い、
 再開フラグは埋め込みシェルを**新規に起動するときだけ**付与されます（裏で動き続けるシェルへ再アタッチする場合は再起動しないため対象外）。
 なお Codex は、キュー済みプロンプト（`session_prompt`）がある起動では再開せず、そのプロンプトで新規セッションを開始します
-（Claude / Gemini は再開とプロンプトを併用でき、Gemini はプロンプトを `gemini -i <prompt>` で渡します）。
+（Claude / Gemini は再開とプロンプトを併用でき、Gemini はプロンプトを `gemini -i=<prompt>` で渡します）。
+キュー済みプロンプトはキューされた時点ではなく**配送された起動時**に在席のログへ 1 行表示されるため、あとから起動した agent が
+何に取り組み始めたかを画面で確認できます。
 
 入力待ちの検知・`◆ waiting` マーカー・デスクトップ通知の挙動は
 [design/home/04-keys.md](../design/home/04-keys.md#使用中-agent-の表示入力待ちの検知と通知) を参照してください。
@@ -140,10 +142,10 @@ Codex は `codex resume --last`（`codex-fugu` も同様に `codex-fugu resume -
 **在席の Prompt** から `ai <prompt>` と入力すると、設定中の**既定 Agent CLI**を選択中セッションの worktree で起動し、
 `<prompt>` を初期プロンプトとして渡します。起動先のディレクトリ・MCP 配線・会話再開の扱いは [`agent`](#agent) と同じです。
 
-- agent ペインがまだ無い場合: 既定 CLI を新規起動し、`<prompt>` を CLI の初期プロンプト引数として渡す。
-- agent ペインがすでにある場合: 既存の agent タブへ移動し、`<prompt>` をその対話入力へ送る。
+- 動作中の agent ペインが無い場合（未起動、または CLI が終了済み）: 既定 CLI を新規起動し、`<prompt>` を CLI の初期プロンプト引数として渡す。プロンプトは `--` 区切り（Gemini は `-i=<prompt>`）で渡すため、`-` で始まるテキストもフラグと誤解釈されない。
+- 動作中の agent ペインがある場合: そのペインのタブへ移動し、`<prompt>` を対話入力として送る（貼り付け＋Enter。bracketed paste 対応の CLI には 1 ブロックとして貼り付く）。送り先はそのペインで動いている CLI（`agent <名前>` で起動した既定以外の CLI でも同じ）で、新規起動はしないため次項のインストール判定も行わない。
 - `<prompt>` を省くと `usage: ai <prompt>` を表示して起動しない。
-- 既定 CLI がインストール済み候補から外れている場合は、Config でインストール済みの Agent CLI を選ぶよう案内して起動しない。
+- 新規起動になる場合で、インストール済み Agent CLI の検出結果（起動時にバックグラウンドで PATH を調べる）に既定 CLI が**含まれていない**ときは、Config でインストール済みの Agent CLI を選ぶよう案内して起動しない。検出が未完了、または 1 つも見つからなかったときは判定せず起動を試みる（`agent` と同じ寛容さ）。Config で既定 CLI を変更すると、Config を閉じた時点で `ai` / `agent` に反映される。
 
 在席の **Menu** は引数を入力できないため `ai` 行を出しません。`ai` を使うワークスペースでは
 [設定](../05-settings.md#設定項目)の `session_action_ui` を `prompt` にします。

@@ -582,25 +582,33 @@ impl TerminalPool {
             .is_some_and(|sp| sp.panes.iter().any(|p| p.pty.is_alive()))
     }
 
-    /// Whether `dir` already holds an agent pane. A session keeps at most one
-    /// agent, so a request to add a second (在席's `agent`, or `Ctrl-G`) reads
-    /// this to jump to the existing tab instead of spawning another (see
-    /// [`activate_agent`](Self::activate_agent)).
+    /// Whether `dir` already holds a **live** agent pane. A session keeps at
+    /// most one agent, so a request to add a second (在席's `agent`, or `Ctrl-G`)
+    /// reads this to jump to the existing tab instead of spawning another (see
+    /// [`activate_agent`](Self::activate_agent)). A dead agent pane — its CLI
+    /// exited while the session was detached, so it has not been reaped yet —
+    /// does not count: reusing it would type input into a defunct PTY, so the
+    /// caller must fall through to a fresh spawn instead.
     pub fn has_agent_pane(&self, dir: &Path) -> bool {
-        self.sessions
-            .get(dir)
-            .is_some_and(|sp| sp.panes.iter().any(|p| matches!(p.kind, PaneKind::Agent)))
+        self.sessions.get(dir).is_some_and(|sp| {
+            sp.panes
+                .iter()
+                .any(|p| matches!(p.kind, PaneKind::Agent) && p.pty.is_alive())
+        })
     }
 
-    /// Make `dir`'s agent pane the active tab, returning whether one was found.
-    /// Lets a request to add an agent reuse the existing one — a session holds
-    /// at most one agent — by activating its tab rather than spawning a second.
+    /// Make `dir`'s **live** agent pane the active tab, returning whether one was
+    /// found. Lets a request to add an agent reuse the existing one — a session
+    /// holds at most one live agent — by activating its tab rather than spawning
+    /// a second. Dead agent panes are skipped (mirroring
+    /// [`has_agent_pane`](Self::has_agent_pane)): an unreaped dead agent tab can
+    /// coexist with the live one spawned to replace it.
     pub fn activate_agent(&mut self, dir: &Path) -> bool {
         match self.sessions.get_mut(dir) {
             Some(sp) => match sp
                 .panes
                 .iter()
-                .position(|p| matches!(p.kind, PaneKind::Agent))
+                .position(|p| matches!(p.kind, PaneKind::Agent) && p.pty.is_alive())
             {
                 Some(idx) => {
                     sp.active = idx;

@@ -184,6 +184,53 @@ fn focus_prompt_ai_refuses_when_the_configured_agent_is_not_installed() {
 }
 
 #[test]
+fn focus_prompt_ai_skips_the_installed_gate_when_an_agent_pane_is_live() {
+    // The installed-CLI gate guards only a *fresh spawn* of the configured
+    // default. When the session already shows a live `agent` tab, `ai <prompt>`
+    // delivers the prompt to that pane (whatever CLI it runs) and launches
+    // nothing new — so an uninstalled default must not refuse the send.
+    use crate::domain::settings::AgentCli;
+    let opened = RefCell::new(Vec::new());
+    let mut open = |h: &mut HomeState, _d: &Path, a: bool, n: bool| {
+        let count = {
+            let mut o = opened.borrow_mut();
+            o.push((a, n, h.take_agent_initial_prompt()));
+            o.len()
+        };
+        if count == 1 {
+            // The first attach (Enter on the live session in 切替) zooms out to
+            // 在席, landing on the "+ new" action surface where `ai` is typed.
+            Ok(PaneExit::ToFocus)
+        } else {
+            Ok(PaneExit::Closed)
+        }
+    };
+    let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = live_preview;
+    // The focused session publishes a live `agent` tab each frame, as 在席 does
+    // for a session whose agent pane is running.
+    let mut tabs = |_: &Path, _: Option<TabNav>| (vec!["agent".to_string()], 0);
+    let mut state = prompt_state();
+    state.set_default_agent(AgentCli::Gemini);
+    state.set_installed_agents(vec![AgentCli::Claude]); // default not installed
+    let mut keys = cmd("session switch feat");
+    keys.push(Ok(Key::Enter)); // re-attach live feat; open #1 -> ToFocus (prompt)
+    keys.extend(typed("ai fix it"));
+    keys.push(Ok(Key::Enter)); // agent tab is live -> gate skipped -> launch #2
+    keys.push(Ok(Key::CtrlC)); // quit (nothing live in the monitor)
+    assert!(matches!(
+        run_full_tabs(keys, state, &mut open, &mut preview, &mut tabs).unwrap(),
+        Outcome::Quit
+    ));
+    assert_eq!(
+        *opened.borrow(),
+        vec![
+            (false, false, None),
+            (true, true, Some("fix it".to_string()))
+        ]
+    );
+}
+
+#[test]
 fn focus_prompt_agent_with_a_name_launches_that_cli() {
     use crate::domain::settings::AgentCli;
     let opened = RefCell::new(Vec::new());

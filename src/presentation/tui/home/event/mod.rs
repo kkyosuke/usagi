@@ -93,7 +93,7 @@ pub(super) type TabOp<'a> = dyn FnMut(&Path, Option<TabNav>) -> (Vec<String>, us
 
 /// The settings-derived values re-read when the config screen closes, so an
 /// edit takes effect without reopening the home screen: the 在席 (Focus)
-/// right-pane surface and the 没入 key scheme.
+/// right-pane surface, the 没入 key scheme, and the default Agent CLI.
 #[derive(Debug, Clone, Copy)]
 pub struct ConfigReload {
     /// The effective Session Action UI (在席 mode's surface).
@@ -101,6 +101,11 @@ pub struct ConfigReload {
     /// The effective 没入 key scheme (the `Ctrl-O` prefix or single `Alt`-chords),
     /// so the pane's key handling reflects the edit without reopening the screen.
     pub key_scheme: KeyScheme,
+    /// The effective default Agent CLI, so `agent` / `ai` (and the 在席 menu's
+    /// `Launch <名前>` row) pick up a CLI switched in Config without restarting —
+    /// in particular, `ai`'s "open config and choose an installed Agent CLI"
+    /// refusal hint actually works in-session.
+    pub agent_cli: AgentCli,
 }
 
 /// A `(session name, last_active)` pair — the freshness ("heat") timestamp

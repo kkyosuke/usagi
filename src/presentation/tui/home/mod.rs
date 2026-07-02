@@ -597,8 +597,11 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
             // Resolve which agent CLI this launch drives: the user's 在席 choice (menu
             // picker / `agent <name>`), consumed here so it applies once, falling back
             // to the configured default. `take` clears it whether or not a fresh agent
-            // spawn follows, so a stale choice never leaks into a later launch.
-            let cli = home.take_agent_choice().unwrap_or(default_cli);
+            // spawn follows, so a stale choice never leaks into a later launch. The
+            // default is read from the state (not captured at startup) so a CLI
+            // switched in Config takes effect on the next launch without restarting.
+            let choice = home.take_agent_choice();
+            let cli = choice.unwrap_or_else(|| home.default_agent());
             // `ai <prompt>` sets an opening prompt for this one configured-agent
             // launch. When a fresh agent pane is spawned it is passed as the agent
             // CLI's initial prompt; when an agent pane already exists we type it
@@ -633,9 +636,12 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
             let mut pool = pool.borrow_mut();
             let handle = pool.monitor();
             // A session holds at most one agent: a request to add an agent pane
-            // (在席's `agent`, or `Ctrl-G` routed through `new_pane`) when one already
-            // exists reuses it — activating its tab below — rather than spawning a
-            // second. This also keeps the queued prompt unconsumed (no fresh spawn).
+            // (在席's `agent`, or `Ctrl-G` routed through `new_pane`) when a live one
+            // already exists reuses it — activating its tab below — rather than
+            // spawning a second. This also keeps the queued prompt unconsumed (no
+            // fresh spawn). A dead agent pane (its CLI exited while detached, not
+            // yet reaped) is not reused: the launch falls through to a fresh spawn
+            // so an `ai <prompt>` reaches a living agent instead of a defunct PTY.
             let reuse_agent = run_agent && new_pane && pool.has_agent_pane(dir);
             // Deliver a prompt queued for this session (via MCP `session_prompt`) only
             // when this attach will *freshly spawn* its agent pane — `add_pane` always
@@ -650,6 +656,14 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
             } else {
                 None
             };
+            // Announce a queued prompt when it is actually delivered: it may have
+            // been sitting in the store since long before this launch (MCP
+            // `session_prompt`, or one parked while an `ai <prompt>` took
+            // precedence), so the log makes visible why the agent opens already
+            // working on something the user did not just type.
+            if let Some(prompt) = queued_prompt.as_deref() {
+                home.log_output(format!("queued prompt delivered to {label}: {prompt}"));
+            }
             // The command for this fresh spawn carries the opening prompt (direct
             // `ai` first, otherwise queued MCP prompt); the command reused for later
             // `Ctrl-O a` agent tabs never re-sends that one-shot prompt, so only the
@@ -716,12 +730,16 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
                     )?;
                 }
                 if let Some(prompt) = direct_prompt.as_deref().filter(|_| !fresh_agent_spawn) {
-                    let mut input = Vec::with_capacity(prompt.len() + 1);
-                    input.extend_from_slice(prompt.as_bytes());
+                    // Deliver the `ai <prompt>` to the reused live agent pane as
+                    // pasted text plus Enter. `encode_paste` (the same encoder the
+                    // pane's real paste path uses) wraps it in bracketed-paste
+                    // markers when the agent TUI enabled them, so a prompt starting
+                    // with `/`, `!` or other key-bound characters is inserted as
+                    // one text block instead of being interpreted as keystrokes.
+                    let pty = pool.active_pty(dir).context("agent pane is not active")?;
+                    let mut input = pane_input::encode_paste(prompt, pty.bracketed_paste());
                     input.push(b'\r');
-                    pool.active_pty(dir)
-                        .context("agent pane is not active")?
-                        .write(&input)?;
+                    pty.write(&input)?;
                 }
                 handle.set_attached(Some(dir.to_path_buf()));
                 loop {
@@ -938,14 +956,16 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
     let config_root = workspace.path.clone();
     let mut open_config = |t: &Term| -> Result<Option<event::ConfigReload>> {
         match crate::presentation::tui::config::run_in(t, Some(config_root.clone()))? {
-            // Back to home: re-read the (possibly changed) Session Action UI and
-            // 没入 key scheme so the 在席 surface and pane's key handling reflect
-            // the edit without reopening the home screen.
+            // Back to home: re-read the (possibly changed) Session Action UI,
+            // 没入 key scheme, and default Agent CLI so the 在席 surface, the
+            // pane's key handling, and the next `agent` / `ai` launch reflect the
+            // edit without reopening the home screen.
             crate::presentation::tui::config::Outcome::Back => {
                 let settings = effective_settings(&config_root);
                 Ok(Some(event::ConfigReload {
                     session_action_ui: settings.session_action_ui,
                     key_scheme: settings.key_scheme,
+                    agent_cli: settings.agent_cli,
                 }))
             }
             crate::presentation::tui::config::Outcome::Quit => Ok(None),

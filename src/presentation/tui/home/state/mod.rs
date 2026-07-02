@@ -1554,6 +1554,15 @@ impl HomeState {
         &self.log
     }
 
+    /// Test-only: register an extra command into the registry (re-deriving the
+    /// 在席 menu's static command list), so tests can exercise how the menu and
+    /// its dispatch treat a Session-scope entry the built-ins do not cover.
+    #[cfg(test)]
+    pub fn register_command(&mut self, command: Box<dyn super::command::Command>) {
+        self.registry.register(command);
+        self.session_menu_commands = sorted_session_menu_commands(&self.registry);
+    }
+
     /// The current embedded-terminal snapshot, when a session is 没入 (Attached)
     /// or previewed in 切替 (Switch).
     pub fn terminal_view(&self) -> Option<&TerminalView> {
@@ -2422,8 +2431,10 @@ impl HomeState {
 
     /// Whether the focused session already has a live `agent` pane — a tab the
     /// session's published [`TabStrip`] labels `agent` (or `agent N` when several
-    /// agents run). The 在席 menu hides the `agent` launch command in that case.
-    fn agent_tab_open(&self) -> bool {
+    /// agents run). The 在席 menu hides the `agent` launch command in that case,
+    /// and `ai <prompt>` skips its installed-CLI gate: the prompt is delivered to
+    /// that pane (whatever CLI it runs) rather than freshly spawning the default.
+    pub fn agent_tab_open(&self) -> bool {
         self.terminal.tabs.as_ref().is_some_and(|strip| {
             strip
                 .labels

@@ -18,6 +18,7 @@ fn reload(ui: SessionActionUi) -> ConfigReload {
     ConfigReload {
         session_action_ui: ui,
         key_scheme: crate::domain::settings::KeyScheme::default(),
+        agent_cli: AgentCli::default(),
     }
 }
 
