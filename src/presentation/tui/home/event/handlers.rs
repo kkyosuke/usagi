@@ -51,8 +51,8 @@ pub(super) fn palette_key(
     match key {
         Key::Enter => {
             let submission = state.submit();
-            if let Some(command) = submission.recorded.as_deref() {
-                (wiring.persist)(command);
+            if let Some(entry) = submission.recorded.as_ref() {
+                (wiring.persist)(entry);
             }
             // A transitioning effect closes the palette so it can take over the
             // screen; a non-transitioning one keeps it open so its response
@@ -1132,8 +1132,13 @@ fn focus_prompt_key(
         Key::Enter => {
             // `terminal` / `agent` attach the pane; `close` removes the session
             // and leaves 在席; `ai` (coming soon) and anything else only log,
-            // staying in Focus.
-            let effect = state.focus_prompt_submit().effect;
+            // staying in Focus. The command is persisted (with its session) so
+            // per-session history survives across launches, like the palette line.
+            let submission = state.focus_prompt_submit();
+            if let Some(entry) = submission.recorded.as_ref() {
+                (wiring.persist)(entry);
+            }
+            let effect = submission.effect;
             match effect {
                 Effect::OpenTerminal => launch_pane(term, state, painter, wiring, false),
                 Effect::OpenExternalTerminal => open_external_terminal(state, wiring),

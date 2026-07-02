@@ -1,7 +1,7 @@
 //! Persistence for a single repository's command history.
 //!
 //! Every command run in the workspace screen is appended to
-//! `<repo>/.usagi/history.jsonl`, next to the `state.json` that describes the
+//! `<repo>/.usagi/history.json`, next to the `state.json` that describes the
 //! same repository. The file is **append-only JSONL**: each line is one
 //! [`HistoryEntry`] serialized as JSON, written with
 //! `OpenOptions::append`. A read-modify-write of a single JSON document would
@@ -20,7 +20,10 @@ use anyhow::{Context, Result};
 use crate::domain::history::HistoryEntry;
 use crate::infrastructure::repo_paths::STATE_DIR;
 
-const HISTORY_FILE: &str = "history.jsonl";
+const HISTORY_FILE: &str = "history.json";
+/// File name used before the history command grew a full metadata display. Kept
+/// as a read-only fallback so existing workspaces still show their older history.
+const LEGACY_HISTORY_FILE: &str = "history.jsonl";
 
 /// The most entries [`HistoryStore::load`] returns — the newest ones. The file is
 /// append-only and grows over a repository's whole lifetime; loading only the tail
@@ -60,6 +63,10 @@ impl HistoryStore {
         self.dir.join(HISTORY_FILE)
     }
 
+    fn legacy_history_path(&self) -> PathBuf {
+        self.dir.join(LEGACY_HISTORY_FILE)
+    }
+
     /// Load the recorded history, oldest first. Returns an empty vector if the
     /// file has never been written.
     ///
@@ -70,7 +77,9 @@ impl HistoryStore {
     /// line that is not valid JSON is a real corruption and surfaces as an
     /// error.
     pub fn load(&self) -> Result<Vec<HistoryEntry>> {
-        let path = self.history_path();
+        let primary = self.history_path();
+        let legacy = self.legacy_history_path();
+        let path = if primary.exists() { primary } else { legacy };
         let text = match self.read_tail(&path) {
             Ok(Some(text)) => text,
             Ok(None) => return Ok(Vec::new()),
@@ -140,15 +149,14 @@ impl HistoryStore {
         Ok(Some(String::from_utf8_lossy(&bytes[start..]).into_owned()))
     }
 
-    /// Append a single executed `command` to the history, stamped with the
-    /// current time. Writes one JSON line with `O_APPEND`, so concurrent
-    /// appends each add their own line without a full-file read-modify-write
-    /// and never lose each other's entry.
-    pub fn append(&self, command: impl Into<String>) -> Result<()> {
+    /// Append a single already-built [`HistoryEntry`] to the history. Writes one
+    /// JSON line with `O_APPEND`, so concurrent appends each add their own line
+    /// without a full-file read-modify-write and never lose each other's entry.
+    pub fn append(&self, entry: &HistoryEntry) -> Result<()> {
         std::fs::create_dir_all(&self.dir)
             .context(format!("failed to create {}", self.dir.display()))?;
         let path = self.history_path();
-        let mut line = serde_json::to_string(&HistoryEntry::now(command))?;
+        let mut line = serde_json::to_string(entry)?;
         line.push('\n');
         let mut file = std::fs::OpenOptions::new()
             .create(true)
@@ -180,8 +188,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = HistoryStore::new(dir.path());
 
-        store.append("man").unwrap();
-        store.append("doctor").unwrap();
+        store.append(&HistoryEntry::now("man", None, true)).unwrap();
+        store
+            .append(&HistoryEntry::now("doctor", None, true))
+            .unwrap();
 
         let entries = store.load().unwrap();
         let commands: Vec<&str> = entries.iter().map(|e| e.command.as_str()).collect();
@@ -193,8 +203,10 @@ mod tests {
     fn saved_file_is_one_json_line_per_entry() {
         let dir = tempfile::tempdir().unwrap();
         let store = HistoryStore::new(dir.path());
-        store.append("man").unwrap();
-        store.append("doctor").unwrap();
+        store.append(&HistoryEntry::now("man", None, true)).unwrap();
+        store
+            .append(&HistoryEntry::now("doctor", None, true))
+            .unwrap();
 
         let text = fs::read_to_string(store.history_path()).unwrap();
         let lines: Vec<&str> = text.lines().collect();
@@ -219,7 +231,9 @@ mod tests {
             let store = Arc::clone(&store);
             handles.push(thread::spawn(move || {
                 for i in 0..per_thread {
-                    store.append(format!("cmd-{t}-{i}")).unwrap();
+                    store
+                        .append(&HistoryEntry::now(format!("cmd-{t}-{i}"), None, true))
+                        .unwrap();
                 }
             }));
         }
@@ -250,7 +264,8 @@ mod tests {
         let total = MAX_LOADED_ENTRIES + 5;
         let mut text = String::new();
         for i in 0..total {
-            let line = serde_json::to_string(&HistoryEntry::now(format!("cmd-{i}"))).unwrap();
+            let line =
+                serde_json::to_string(&HistoryEntry::now(format!("cmd-{i}"), None, true)).unwrap();
             text.push_str(&line);
             text.push('\n');
         }
@@ -277,7 +292,7 @@ mod tests {
         let mut text = String::new();
         for i in 0..total {
             let command = format!("cmd-{i:04}-{}", "x".repeat(2000));
-            text.push_str(&serde_json::to_string(&HistoryEntry::now(command)).unwrap());
+            text.push_str(&serde_json::to_string(&HistoryEntry::now(command, None, true)).unwrap());
             text.push('\n');
         }
         assert!(
@@ -335,7 +350,7 @@ mod tests {
         assert_eq!(store.dir(), Path::new("/repo/.usagi"));
         assert_eq!(
             store.history_path(),
-            PathBuf::from("/repo/.usagi/history.jsonl")
+            PathBuf::from("/repo/.usagi/history.json")
         );
     }
 
@@ -344,9 +359,22 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = HistoryStore::new(dir.path());
         fs::create_dir_all(store.dir()).unwrap();
-        let entry = serde_json::to_string(&HistoryEntry::now("man")).unwrap();
+        let entry = serde_json::to_string(&HistoryEntry::now("man", None, true)).unwrap();
         // Blank lines around a real entry are ignored.
         fs::write(store.history_path(), format!("\n{entry}\n\n")).unwrap();
+
+        let entries = store.load().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].command, "man");
+    }
+
+    #[test]
+    fn load_falls_back_to_legacy_jsonl_when_primary_is_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = HistoryStore::new(dir.path());
+        fs::create_dir_all(store.dir()).unwrap();
+        let entry = serde_json::to_string(&HistoryEntry::now("man", None, true)).unwrap();
+        fs::write(store.legacy_history_path(), format!("{entry}\n")).unwrap();
 
         let entries = store.load().unwrap();
         assert_eq!(entries.len(), 1);
@@ -358,7 +386,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = HistoryStore::new(dir.path());
         fs::create_dir_all(store.dir()).unwrap();
-        let good = serde_json::to_string(&HistoryEntry::now("man")).unwrap();
+        let good = serde_json::to_string(&HistoryEntry::now("man", None, true)).unwrap();
         // A complete first line, then a half-written second line with no
         // trailing newline (an append caught mid-flight). The partial line is
         // dropped rather than failing the read.
@@ -384,7 +412,7 @@ mod tests {
     fn load_errors_when_history_path_is_unreadable() {
         let dir = tempfile::tempdir().unwrap();
         let store = HistoryStore::new(dir.path());
-        // Make history.jsonl a directory so reading it fails with a non-NotFound error.
+        // Make history.json a directory so reading it fails with a non-NotFound error.
         fs::create_dir_all(store.history_path()).unwrap();
         assert!(store.load().is_err());
     }
@@ -407,15 +435,15 @@ mod tests {
         let blocker = dir.path().join("blocker");
         fs::write(&blocker, "not a directory").unwrap();
         let store = HistoryStore::new(&blocker);
-        assert!(store.append("man").is_err());
+        assert!(store.append(&HistoryEntry::now("man", None, true)).is_err());
     }
 
     #[test]
     fn append_errors_when_the_history_path_is_a_directory() {
         let dir = tempfile::tempdir().unwrap();
         let store = HistoryStore::new(dir.path());
-        // A directory at history.jsonl makes the append open() fail.
+        // A directory at history.json makes the append open() fail.
         fs::create_dir_all(store.history_path()).unwrap();
-        assert!(store.append("man").is_err());
+        assert!(store.append(&HistoryEntry::now("man", None, true)).is_err());
     }
 }
