@@ -663,9 +663,13 @@ fn pump_input(
                     KeyAction::BeginPrefix => *pending_prefix = Some(now),
                     // An unrecognised key right after the leader: drop it.
                     KeyAction::Swallow => *pending_prefix = None,
-                    // `Ctrl-B` / `Ctrl-O s` collapses or expands the sidebar in
-                    // place, without leaving 没入: the next loop pass re-lays out
-                    // the frame and resizes the PTY to the new pane width.
+                    // `Ctrl-O s` (prefix scheme) / `Alt-s` (alt scheme) collapses
+                    // or expands the sidebar in place, without leaving 没入: the
+                    // next loop pass re-lays out the frame and resizes the PTY to
+                    // the new pane width. Bare `Ctrl-B` never reaches here —
+                    // `classify` only maps the leader / `Alt` chords, so it is
+                    // forwarded to the shell; `Ctrl-B` toggles the sidebar on
+                    // usagi's own surfaces (切替 / 在席), not in 没入.
                     KeyAction::Reserved(Reserved::ToggleSidebar) => {
                         *pending_prefix = None;
                         state.toggle_sidebar();

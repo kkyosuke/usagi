@@ -396,9 +396,9 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
     // there while browsing.
 
     let (height, width) = widgets::normalize_size(raw_height, raw_width);
-    // The left sidebar honours the `Ctrl-B` toggle in every mode — 切替 (Switch)
-    // included, so the picker works collapsed to the rail (the cursor `>` and the
-    // dimming still render there). 切替's inline create / rename name input needs
+    // The left sidebar honours the `Ctrl-B` toggle on every usagi surface — 切替
+    // (Switch) included, so the picker works collapsed to the rail (the cursor `>`
+    // and the dimming still render there). 切替's inline create / rename name needs
     // room: at full width it rides the left pane inline (below), but collapsed to
     // the rail there is none, so it moves to the right pane instead (see
     // [`right_pane_contents`]). The pool sizes the 切替 preview to this same state,

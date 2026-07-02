@@ -78,7 +78,7 @@ pub fn cheatsheet(scheme: KeyScheme) -> Vec<LogLine> {
     let mut lines = vec![
         LogLine::output("Keybindings, by mode. ↑↓ scroll · Esc / q close.".to_string()),
         LogLine::output(String::new()),
-        cheatsheet_header("General (any mode)"),
+        cheatsheet_header("General — usagi surfaces (没入 has its own keys, below)"),
         key_row(":", "Open the command palette (run \"man\" for commands)"),
         key_row("?", "Show this cheat sheet"),
         key_row("Ctrl-B", "Toggle the session sidebar"),
