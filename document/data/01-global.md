@@ -159,9 +159,10 @@ usagi は GitHub に問い合わせず、ターミナル出力から `/pull/<N>`
 
 - ファイル名は worktree の正規化パスのハッシュ（16 桁 hex）。内容にも worktree パスを持ち、ハッシュ衝突や
   別マシン由来の古いファイルは読み捨てます（`agent-state/` と同じ方式）。
-- `{ "worktree": "<path>", "active": <usize>, "panes": [ { "kind": "agent" | "terminal", "cli": "claude" | null }, … ] }`。
+- `{ "worktree": "<path>", "active": <usize>, "panes": [ { "kind": "agent" | "terminal", "cli": "claude" | null, "label": "任意名" | null }, … ] }`。
   `panes` はタブ順、`active` は最後にアクティブだったタブの添字。`cli` は agent ペインのみ値を持ち（どの Agent CLI で
-  復旧するか）、terminal ペインは `null`。永続的な状態ではないため `version` は持ちません。
+  復旧するか）、terminal ペインは `null`。`label` はタブメニューの名前変更で設定した表示名で、`null` なら `agent` /
+  `terminal 2` などの自動ラベルを使います。永続的な状態ではないため `version` は持ちません。
 - 書き込みはペインを開閉して制御が戻るたび。ペインが 1 つも無くなると消去され、`session remove` でも
   当該 worktree 分が消えます。`infrastructure/open_panes_store.rs` が save/load/clear を担います。
 

@@ -925,6 +925,42 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
         pool.borrow_mut().close_active(dir, &label);
     };
 
+    let mut tab_action =
+        |home: &mut HomeState, dir: &Path, tab: usize, action: event::TabMenuAction| {
+            let label = home
+                .list()
+                .worktrees()
+                .iter()
+                .find(|w| w.path.as_path() == dir)
+                .map(state::worktree_name)
+                .map(str::to_string)
+                .unwrap_or_else(|| {
+                    dir.file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| dir.display().to_string())
+                });
+            let mut pool = pool.borrow_mut();
+            match action {
+                event::TabMenuAction::Move(swap) => {
+                    pool.move_tab_by(dir, tab, swap);
+                }
+                event::TabMenuAction::Rename(name) => {
+                    pool.rename_tab(dir, tab, &name);
+                }
+                event::TabMenuAction::Close => {
+                    pool.close_tab(dir, tab, &label);
+                }
+            }
+            if restore_panes_enabled {
+                match pool.snapshot_open_panes_for(dir) {
+                    Some((active, panes)) => {
+                        let _ = crate::infrastructure::open_panes_store::save(dir, active, &panes);
+                    }
+                    None => crate::infrastructure::open_panes_store::clear(dir),
+                }
+            }
+        };
+
     // Opening `config` hands off to the settings screen in its workspace scope,
     // editing only this workspace's local overrides
     // (`<workspace>/.usagi/settings.json`); the global settings are changed from
@@ -1055,6 +1091,7 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
         preview: &mut preview,
         tab_op: &mut tab_op,
         close_tab: &mut close_tab,
+        tab_action: &mut tab_action,
         save_resume: &mut save_resume,
         save_last_active: &mut save_last_active,
     };
@@ -1160,7 +1197,14 @@ fn restore_open_panes(
                 }
             };
             // A failed spawn just skips that pane; the rest still restore.
-            let _ = spawned;
+            if spawned.is_ok() {
+                if let Some(label) = pane.label.as_deref() {
+                    let (labels, _) = pool.borrow().tabs(&dir);
+                    if let Some(index) = labels.len().checked_sub(1) {
+                        let _ = pool.borrow_mut().rename_tab(&dir, index, label);
+                    }
+                }
+            }
         }
         // Re-select the tab that was active when the snapshot was taken.
         pool.borrow_mut().set_active(&dir, snapshot.active);

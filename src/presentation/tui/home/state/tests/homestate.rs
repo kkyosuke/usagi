@@ -883,3 +883,50 @@ fn set_pr_links_updates_the_sidebar_row_live() {
     // nothing.
     assert!(!state.set_pr_links(Path::new("/repo/nope"), vec![pr(1)]));
 }
+
+#[test]
+fn tab_menu_and_rename_overlay_lifecycle() {
+    let mut state = state();
+    state.open_tab_menu(PathBuf::from("/repo/main"), 1, "terminal", 42, 7);
+    let menu = state.tab_menu().expect("menu open");
+    assert_eq!(menu.dir(), PathBuf::from("/repo/main").as_path());
+    assert_eq!(menu.tab(), 1);
+    assert_eq!(menu.label(), "terminal");
+    assert_eq!(menu.col(), 42);
+    assert_eq!(menu.row(), 7);
+
+    state.tab_menu_mut().unwrap().move_down();
+    assert_eq!(state.tab_menu().unwrap().item(), TabMenuItem::MoveRight);
+    assert!(state.begin_tab_rename_from_menu().is_some());
+    assert!(state.tab_menu().is_none());
+    assert_eq!(state.tab_rename().unwrap().value(), "terminal");
+
+    let input = state.tab_rename_mut().unwrap();
+    input.move_end();
+    input.push_char('2');
+    let (dir, tab, label) = state.confirm_tab_rename().unwrap();
+    assert_eq!(dir, PathBuf::from("/repo/main"));
+    assert_eq!(tab, 1);
+    assert_eq!(label, "terminal2");
+    assert!(state.tab_rename().is_none());
+
+    assert!(state.tab_menu_mut().is_none());
+    assert!(state.tab_rename_mut().is_none());
+    assert!(state.begin_tab_rename_from_menu().is_none());
+    assert!(state.confirm_tab_rename().is_none());
+    state.cancel_tab_rename();
+    state.close_tab_menu();
+}
+
+#[test]
+fn tab_menu_and_rename_cancel_paths() {
+    let mut state = state();
+    state.open_tab_menu(PathBuf::from("/repo/main"), 0, "agent", 1, 2);
+    state.close_tab_menu();
+    assert!(state.tab_menu().is_none());
+
+    state.open_tab_menu(PathBuf::from("/repo/main"), 0, "agent", 1, 2);
+    assert!(state.begin_tab_rename_from_menu().is_some());
+    state.cancel_tab_rename();
+    assert!(state.tab_rename().is_none());
+}
