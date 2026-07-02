@@ -17,7 +17,7 @@ use crate::presentation::tui::io::screen::{self, FramePainter};
 use crate::domain::settings::{AgentCli, KeyScheme, SessionActionUi};
 
 use super::super::command::Effect;
-use super::super::pane_input::{is_double_click, DOUBLE_CLICK};
+use super::super::pane_input::{is_double_click, PointerShape, DOUBLE_CLICK};
 use super::super::state::{HomeState, ModalSize, PaneExit, ReturnMode, ROOT_NAME};
 use super::super::terminal::tabs::TabNav;
 use super::super::ui;
@@ -1256,6 +1256,14 @@ fn open_pane(
     // wheel-capture modes so the wheel can't scroll the host terminal once we are
     // back on the workspace screen.
     let _ = screen::write_input_modes(term);
+    // Leaving the embedded pane returns the pointer to management chrome. The
+    // pane itself keeps the last OSC 22 pointer shape across in-pane tab hops so
+    // a text caret does not flicker back to an arrow during `Ctrl-O ←/→`, so the
+    // boundary between 没入 and the home UI owns the reset instead. Emit this
+    // after re-entering the alternate screen so terminals that scope pointer
+    // shapes per screen also reset the visible management screen.
+    let _ = term.write_str(PointerShape::Default.osc22());
+    let _ = term.flush();
     // The embedded terminal drew over the whole screen, so the remembered frame
     // is stale: force a full repaint on the next pass.
     painter.reset();

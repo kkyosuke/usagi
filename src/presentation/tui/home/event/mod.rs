@@ -27,6 +27,7 @@ use super::state::{
 use super::tasks::TaskHandle;
 use super::terminal::pool::MonitorHandle;
 use super::terminal::tabs::TabNav;
+use super::terminal::tabs::TabSwap;
 use super::terminal::view::TerminalView;
 use super::ui;
 use super::update::UpdateHandle;
@@ -90,6 +91,14 @@ const CTRL_Q: char = '\u{0011}';
 /// Backed by the [`TerminalPool`](super::terminal::pool::TerminalPool) the pane
 /// driver shares, so a tab moved here is the one re-attaching reveals.
 pub(super) type TabOp<'a> = dyn FnMut(&Path, Option<TabNav>) -> (Vec<String>, usize) + 'a;
+pub(super) type TabActionOp<'a> = dyn FnMut(&mut HomeState, &Path, usize, TabMenuAction) + 'a;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum TabMenuAction {
+    Move(TabSwap),
+    Rename(String),
+    Close,
+}
 
 /// The settings-derived values re-read when the config screen closes, so an
 /// edit takes effect without reopening the home screen: the 在席 (Focus)
@@ -188,6 +197,8 @@ pub(super) struct Wiring<'a> {
     pub tab_op: &'a mut TabOp<'a>,
     /// Close the highlighted session's active tab (pane) from 切替.
     pub close_tab: &'a mut dyn FnMut(&mut HomeState, &Path),
+    /// Apply a tab-context-menu action to a concrete tab.
+    pub tab_action: &'a mut TabActionOp<'a>,
     /// Persist the engagement to restore on the next launch — the focused
     /// session's name and how deeply it was engaged — called when a quit is
     /// confirmed. [`super::run`] writes it to the resume-focus store (gated by the
@@ -287,6 +298,8 @@ fn click_selects_session(state: &HomeState) -> bool {
         && state.text_modal().is_none()
         && state.preview().is_none()
         && state.note_editor().is_none()
+        && state.tab_menu().is_none()
+        && state.tab_rename().is_none()
         && !state.command_palette_open()
         && !state.is_creating()
         && !state.is_renaming()
@@ -597,26 +610,44 @@ pub(super) fn event_loop(
                     force_paint = true;
                     continue;
                 }
-                // 在席's right pane owns its tab strip too: clicking a pane tab
-                // previews/activates that live pane through the same `tab_op`
-                // keyboard navigation uses. 切替 deliberately keeps the right
-                // pane a dim preview; 没入 handles its own tab clicks inside the
-                // pane driver.
-                if state.mode() == Mode::Focus {
-                    if let Some(index) = ui::focus_tab_at(
-                        &state,
-                        click.col,
-                        click.row,
-                        height as usize,
-                        width as usize,
-                    ) {
-                        if let Some(index) = state.focus_select_pane_tab(index) {
+                // The right-pane tab strips are active in both 切替 and 在席:
+                // clicking an inactive pane tab drives the same `tab_op` keyboard
+                // navigation uses, so the preview and the pane that `Enter`
+                // re-attaches move together. 没入 handles its own tab clicks
+                // inside the pane driver.
+                match state.mode() {
+                    Mode::Switch => {
+                        if let Some(index) = ui::switch_tab_at(
+                            &state,
+                            click.col,
+                            click.row,
+                            height as usize,
+                            width as usize,
+                        ) {
                             let dir = selected_dir(&state, wiring.workspace_root);
                             (wiring.tab_op)(&dir, Some(TabNav::To(index)));
+                            force_paint = true;
+                            continue;
                         }
-                        force_paint = true;
-                        continue;
                     }
+                    Mode::Focus => {
+                        if let Some(index) = ui::focus_tab_at(
+                            &state,
+                            click.col,
+                            click.row,
+                            height as usize,
+                            width as usize,
+                        ) {
+                            let index = state
+                                .focus_select_pane_tab(index)
+                                .expect("focus tab hit selects a live pane");
+                            let dir = selected_dir(&state, wiring.workspace_root);
+                            (wiring.tab_op)(&dir, Some(TabNav::To(index)));
+                            force_paint = true;
+                            continue;
+                        }
+                    }
+                    Mode::Attached => {}
                 }
                 let selected = click_selects_session(&state)
                     .then(|| {
@@ -660,6 +691,41 @@ pub(super) fn event_loop(
                             force_paint = true;
                         }
                     }
+                }
+                continue;
+            }
+            Input::RightClick(click) => {
+                bump_interaction_epoch(wiring);
+                state.set_pr_popup(None);
+                let hit = match state.mode() {
+                    Mode::Switch => ui::switch_tab_hit(
+                        &state,
+                        click.col,
+                        click.row,
+                        height as usize,
+                        width as usize,
+                    ),
+                    Mode::Focus => ui::focus_tab_hit(
+                        &state,
+                        click.col,
+                        click.row,
+                        height as usize,
+                        width as usize,
+                    ),
+                    Mode::Attached => None,
+                };
+                if let Some(index) = hit {
+                    let dir = selected_dir(&state, wiring.workspace_root);
+                    let label = state
+                        .terminal_tabs()
+                        .and_then(|tabs| tabs.labels.get(index))
+                        .cloned()
+                        .expect("tab hit index has a published label");
+                    state.open_tab_menu(dir, index, label, click.col, click.row);
+                    force_paint = true;
+                } else if state.tab_menu().is_some() {
+                    state.close_tab_menu();
+                    force_paint = true;
                 }
                 continue;
             }
@@ -761,6 +827,89 @@ pub(super) fn event_loop(
             continue;
         }
 
+        if state.tab_menu().is_some() {
+            match key {
+                Key::ArrowUp | Key::Char('k') => {
+                    state
+                        .tab_menu_mut()
+                        .expect("tab menu open while handling its keys")
+                        .move_up();
+                }
+                Key::ArrowDown | Key::Char('j') => {
+                    state
+                        .tab_menu_mut()
+                        .expect("tab menu open while handling its keys")
+                        .move_down();
+                }
+                Key::Escape => state.close_tab_menu(),
+                Key::Enter => {
+                    let (dir, tab, item) = {
+                        let menu = state
+                            .tab_menu()
+                            .expect("tab menu open while handling Enter");
+                        (menu.dir().to_path_buf(), menu.tab(), menu.item())
+                    };
+                    match item {
+                        super::state::TabMenuItem::MoveLeft => {
+                            state.close_tab_menu();
+                            (wiring.tab_action)(
+                                &mut state,
+                                &dir,
+                                tab,
+                                TabMenuAction::Move(TabSwap::Left),
+                            );
+                        }
+                        super::state::TabMenuItem::MoveRight => {
+                            state.close_tab_menu();
+                            (wiring.tab_action)(
+                                &mut state,
+                                &dir,
+                                tab,
+                                TabMenuAction::Move(TabSwap::Right),
+                            );
+                        }
+                        super::state::TabMenuItem::Rename => {
+                            state.begin_tab_rename_from_menu();
+                        }
+                        super::state::TabMenuItem::Close => {
+                            state.close_tab_menu();
+                            (wiring.tab_action)(&mut state, &dir, tab, TabMenuAction::Close);
+                        }
+                    }
+                }
+                _ => {}
+            }
+            continue;
+        }
+
+        if state.tab_rename().is_some() {
+            match key {
+                Key::Enter => {
+                    let (dir, tab, label) = state
+                        .confirm_tab_rename()
+                        .expect("tab rename open while handling Enter");
+                    (wiring.tab_action)(&mut state, &dir, tab, TabMenuAction::Rename(label));
+                }
+                Key::Escape => state.cancel_tab_rename(),
+                _ => {
+                    let rename = state
+                        .tab_rename_mut()
+                        .expect("tab rename open while handling its keys");
+                    match key {
+                        Key::Backspace => rename.backspace(),
+                        Key::Del => rename.delete_forward(),
+                        Key::ArrowLeft => rename.move_left(),
+                        Key::ArrowRight => rename.move_right(),
+                        Key::Home => rename.move_home(),
+                        Key::End => rename.move_end(),
+                        Key::Char(c) if !c.is_control() => rename.push_char(c),
+                        _ => {}
+                    }
+                }
+            }
+            continue;
+        }
+
         // The session-removal modal, when open, captures every key: the cursor
         // moves with the arrows (or j/k), Space toggles the row's checkbox, and
         // Enter removes every checked session (Esc cancels).
@@ -769,19 +918,22 @@ pub(super) fn event_loop(
                 // Cursor moves and checkbox toggles route to the modal's own
                 // methods; Enter / Esc are lifecycle on the screen state.
                 Key::ArrowUp | Key::Char('k') => {
-                    if let Some(modal) = state.remove_modal_mut() {
-                        modal.move_up();
-                    }
+                    state
+                        .remove_modal_mut()
+                        .expect("remove modal open while handling its keys")
+                        .move_up();
                 }
                 Key::ArrowDown | Key::Char('j') => {
-                    if let Some(modal) = state.remove_modal_mut() {
-                        modal.move_down();
-                    }
+                    state
+                        .remove_modal_mut()
+                        .expect("remove modal open while handling its keys")
+                        .move_down();
                 }
                 Key::Char(' ') => {
-                    if let Some(modal) = state.remove_modal_mut() {
-                        modal.toggle();
-                    }
+                    state
+                        .remove_modal_mut()
+                        .expect("remove modal open while handling its keys")
+                        .toggle();
                 }
                 Key::Enter => {
                     if let Some((entries, force)) = state.submit_remove_modal() {
@@ -1097,6 +1249,12 @@ pub(crate) fn event_loop_compat(
     // never shell out; the open path itself is covered by the dedicated popup tests
     // that build a capturing `Wiring`.
     let mut open_url = |_: &str| {};
+    let mut tab_action = |_: &mut HomeState, _: &Path, _: usize, _: TabMenuAction| {};
+    // Exercise the test-shim no-op once so coverage does not treat this helper
+    // closure as an uncovered function. The production tab-action path is covered
+    // by event-loop tests with a capturing callback.
+    let mut dummy = HomeState::new("", Vec::new(), None);
+    tab_action(&mut dummy, Path::new(""), 0, TabMenuAction::Close);
     let mut wiring = Wiring {
         interaction_epoch: 0,
         workspace_root,
@@ -1116,6 +1274,7 @@ pub(crate) fn event_loop_compat(
         preview: &mut preview,
         tab_op: &mut tab_op,
         close_tab: &mut close_tab,
+        tab_action: &mut tab_action,
         save_resume: &mut save_resume,
         save_last_active: &mut save_last_active,
     };

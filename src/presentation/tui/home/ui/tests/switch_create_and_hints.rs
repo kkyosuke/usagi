@@ -253,3 +253,23 @@ fn render_frame_shows_command_hints_in_the_palette_and_keeps_its_height() {
     assert!(joined.contains("matches"));
     assert!(joined.contains("session"));
 }
+
+#[test]
+fn tab_menu_box_and_rename_body_render_action_surface() {
+    let mut state = state_with(vec![]);
+    state.open_tab_menu(PathBuf::from("/repo/main"), 1, "terminal", 12, 3);
+    let menu = state.tab_menu().unwrap();
+    let menu_text = stripped(&tab_menu_box(menu));
+    assert!(menu_text.contains("tab 2"));
+    assert!(menu_text.contains("Move left"));
+    assert!(menu_text.contains("Move right"));
+    assert!(menu_text.contains("Rename"));
+    assert!(menu_text.contains("Close"));
+
+    let body = tab_rename_body("term", 2, 30);
+    let text = stripped(&body);
+    assert!(text.contains("Rename tab label"));
+    assert!(text.contains("label:"));
+    assert!(text.contains("term"));
+    assert!(text.contains("Enter save"));
+}

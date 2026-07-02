@@ -346,6 +346,7 @@ fn finished_create_does_not_auto_focus_after_another_operation() {
     let mut close: fn(&mut HomeState, &Path) = noop_close;
     let mut save_resume = |_: &str, _: ResumeLevel| {};
     let mut save_last_active = |_: &[(String, DateTime<Utc>)]| {};
+    let mut tab_action = |_: &mut HomeState, _: &Path, _: usize, _: TabMenuAction| {};
     let mut wiring = Wiring {
         interaction_epoch: 0,
         workspace_root: Path::new("/ws"),
@@ -365,6 +366,7 @@ fn finished_create_does_not_auto_focus_after_another_operation() {
         preview: &mut preview,
         tab_op: &mut tab_op,
         close_tab: &mut close,
+        tab_action: &mut tab_action,
         save_resume: &mut save_resume,
         save_last_active: &mut save_last_active,
     };
@@ -552,6 +554,7 @@ fn finished_close_does_not_auto_focus_after_another_operation() {
     let mut close: fn(&mut HomeState, &Path) = noop_close;
     let mut save_resume = |_: &str, _: ResumeLevel| {};
     let mut save_last_active = |_: &[(String, DateTime<Utc>)]| {};
+    let mut tab_action = |_: &mut HomeState, _: &Path, _: usize, _: TabMenuAction| {};
     let mut wiring = Wiring {
         interaction_epoch: 0,
         workspace_root: Path::new("/ws"),
@@ -571,6 +574,7 @@ fn finished_close_does_not_auto_focus_after_another_operation() {
         preview: &mut preview,
         tab_op: &mut tab_op,
         close_tab: &mut close,
+        tab_action: &mut tab_action,
         save_resume: &mut save_resume,
         save_last_active: &mut save_last_active,
     };
