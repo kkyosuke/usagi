@@ -1700,6 +1700,7 @@ mod tests {
             &[open_panes_store::StoredPane {
                 kind: open_panes_store::StoredPaneKind::Terminal,
                 cli: None,
+                label: None,
             }],
         )
         .unwrap();

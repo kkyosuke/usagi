@@ -28,6 +28,7 @@
 //! The geometry it spawns at ([`super::super::ui::terminal_geometry`]) is tested on its
 //! own.
 
+use std::collections::BTreeMap;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -260,6 +261,7 @@ struct Pane {
     id: u64,
     pty: PtySession,
     kind: PaneKind,
+    label_override: Option<String>,
     /// For an agent pane, which CLI it ran — recorded so the open-panes snapshot
     /// can restore the same agent (and resume it) on the next startup. `None` for
     /// a terminal pane.
@@ -298,8 +300,32 @@ impl SessionPanes {
                 id: p.id,
             })
             .collect();
-        self.tab_labels = tabs::tab_labels(&tabs);
+        // Start from the generated `agent` / `terminal N` labels, then let any
+        // per-pane rename override win (an empty override falls back to default).
+        self.tab_labels = tabs::tab_labels(&tabs)
+            .into_iter()
+            .zip(self.panes.iter())
+            .map(|(default, pane)| {
+                pane.label_override
+                    .as_deref()
+                    .filter(|label| !label.trim().is_empty())
+                    .unwrap_or(&default)
+                    .to_string()
+            })
+            .collect();
     }
+}
+
+/// The per-spawn inputs that travel together whenever the pool creates a pane.
+/// Bundling them keeps the public pool methods small while making it explicit
+/// that the launch command, agent CLI metadata, notification label, and child
+/// environment all describe the same pane spawn.
+#[derive(Clone, Copy)]
+pub struct PaneLaunch<'a> {
+    pub agent_command: Option<&'a str>,
+    pub cli: AgentCli,
+    pub label: &'a str,
+    pub env: &'a BTreeMap<String, String>,
 }
 
 /// The live shells embedded in the workspace screen, keyed by worktree path —
@@ -412,9 +438,7 @@ impl TerminalPool {
         term: &Term,
         dir: &Path,
         agent: bool,
-        agent_command: Option<&str>,
-        cli: AgentCli,
-        label: &str,
+        launch: PaneLaunch<'_>,
     ) -> Result<()> {
         let key = dir.to_path_buf();
         let alive = self
@@ -431,10 +455,10 @@ impl TerminalPool {
             // entry and spawn the first pane of the requested kind.
             self.sessions.remove(&key);
             let kind = tabs::pane_kind(agent);
-            let pane = self.spawn_pane(term, dir, kind, agent_command, cli)?;
+            let pane = self.spawn_pane(term, dir, kind, launch)?;
             self.sessions.insert(key, SessionPanes::new(vec![pane], 0));
         }
-        self.refresh_watched(dir, label);
+        self.refresh_watched(dir, launch.label);
         Ok(())
     }
 
@@ -447,11 +471,9 @@ impl TerminalPool {
         term: &Term,
         dir: &Path,
         kind: PaneKind,
-        agent_command: Option<&str>,
-        cli: AgentCli,
-        label: &str,
+        launch: PaneLaunch<'_>,
     ) -> Result<()> {
-        let pane = self.spawn_pane(term, dir, kind, agent_command, cli)?;
+        let pane = self.spawn_pane(term, dir, kind, launch)?;
         let sp = self
             .sessions
             .entry(dir.to_path_buf())
@@ -459,7 +481,7 @@ impl TerminalPool {
         sp.panes.push(pane);
         sp.active = sp.panes.len().saturating_sub(1);
         sp.rebuild_tab_labels();
-        self.refresh_watched(dir, label);
+        self.refresh_watched(dir, launch.label);
         Ok(())
     }
 
@@ -530,6 +552,71 @@ impl TerminalPool {
             },
             None => false,
         }
+    }
+
+    /// Move a concrete tab one slot left / right and keep that tab active.
+    pub fn move_tab_by(&mut self, dir: &Path, tab: usize, swap: TabSwap) -> bool {
+        match self.sessions.get_mut(dir) {
+            Some(sp) => match tabs::resolve_swap(tab, sp.panes.len(), swap) {
+                Some((from, to)) => {
+                    sp.panes.swap(from, to);
+                    sp.active = to;
+                    sp.rebuild_tab_labels();
+                    true
+                }
+                None => false,
+            },
+            None => false,
+        }
+    }
+
+    /// Rename a concrete tab. An empty `label` clears the override and falls back
+    /// to the generated `agent` / `terminal N` label.
+    pub fn rename_tab(&mut self, dir: &Path, tab: usize, label: &str) -> bool {
+        match self.sessions.get_mut(dir) {
+            Some(sp) if tab < sp.panes.len() => {
+                let trimmed = label.trim();
+                sp.panes[tab].label_override = (!trimmed.is_empty()).then(|| trimmed.to_string());
+                sp.rebuild_tab_labels();
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Close a concrete tab, killing its shell. Returns whether any pane remains.
+    pub fn close_tab(&mut self, dir: &Path, tab: usize, label: &str) -> bool {
+        let key = dir.to_path_buf();
+        let remains = match self.sessions.get_mut(&key) {
+            Some(sp) if tab < sp.panes.len() => {
+                let len_before = sp.panes.len();
+                sp.panes.remove(tab);
+                sp.rebuild_tab_labels();
+                match tabs::active_after_close(sp.active.min(len_before - 1), len_before) {
+                    Some(next) => {
+                        // If a tab before the active one closed, the same pane shifts
+                        // left; if the active tab closed, active_after_close picks the
+                        // nearest successor/predecessor. If a tab after it closed, the
+                        // active index stays put.
+                        sp.active = if tab < sp.active {
+                            sp.active.saturating_sub(1)
+                        } else if tab == sp.active {
+                            next
+                        } else {
+                            sp.active.min(sp.panes.len().saturating_sub(1))
+                        };
+                        true
+                    }
+                    None => false,
+                }
+            }
+            _ => false,
+        };
+        if !remains {
+            self.sessions.remove(&key);
+        }
+        self.refresh_watched(dir, label);
+        remains
     }
 
     /// Close `dir`'s active pane, killing its shell (its [`PtySession`] drops).
@@ -639,8 +726,7 @@ impl TerminalPool {
         term: &Term,
         dir: &Path,
         kind: PaneKind,
-        agent_command: Option<&str>,
-        cli: AgentCli,
+        launch: PaneLaunch<'_>,
     ) -> Result<Pane> {
         let (height, width) = term.size();
         // Sized to the full-sidebar pane: the 没入 `drive` loop resizes the pane to
@@ -650,7 +736,7 @@ impl TerminalPool {
         let (initial, cli) = match kind {
             // An agent pane sends its launch command and remembers its CLI (so the
             // open-panes snapshot can restore the same agent and resume it).
-            PaneKind::Agent => (agent_command, Some(cli)),
+            PaneKind::Agent => (launch.agent_command, Some(launch.cli)),
             // A terminal pane opens a plain shell and has no agent to record.
             PaneKind::Terminal => (None, None),
         };
@@ -658,9 +744,22 @@ impl TerminalPool {
             agent_state_store::clear(dir);
             self.lock().monitor.forget(dir);
         }
-        let pty = PtySession::spawn(dir, geo.rows, geo.cols, initial, self.scrollback_lines)?;
+        let pty = PtySession::spawn(
+            dir,
+            geo.rows,
+            geo.cols,
+            initial,
+            self.scrollback_lines,
+            launch.env,
+        )?;
         let id = self.allocate_pane_id();
-        Ok(Pane { id, pty, kind, cli })
+        Ok(Pane {
+            id,
+            pty,
+            kind,
+            label_override: None,
+            cli,
+        })
     }
 
     fn allocate_pane_id(&mut self) -> u64 {
@@ -763,6 +862,7 @@ impl TerminalPool {
                     PaneKind::Terminal => StoredPaneKind::Terminal,
                 },
                 cli: p.cli,
+                label: p.label_override.clone(),
             })
             .collect();
         let active = sp.active.min(sp.panes.len().saturating_sub(1));

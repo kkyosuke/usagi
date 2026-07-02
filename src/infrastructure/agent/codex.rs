@@ -19,6 +19,10 @@
 //!   are non-managed command hooks, the launch passes
 //!   `--dangerously-bypass-hook-trust` so they run without an interactive trust
 //!   prompt (usagi vets the hook command — it only ever runs usagi itself).
+//! - **Approval mode** — interactive Codex launches pass `--full-auto`, so tool
+//!   calls auto-run inside Codex's workspace sandbox without asking for approval
+//!   on every command or edit. Headless runs use Codex's stronger
+//!   `--dangerously-bypass-approvals-and-sandbox` because no user is present.
 //!
 //! When a worktree has a prior Codex conversation, the launch resumes it
 //! (`codex resume --last`, which Codex filters to the current directory) so
@@ -279,7 +283,11 @@ impl Agent for CodexAgent {
         // already working on it. The hooks are non-managed command hooks, so
         // Codex would otherwise prompt to trust each one; usagi vets them (they
         // only run usagi itself), so `--dangerously-bypass-hook-trust` lets them
-        // run unattended on both paths.
+        // run unattended on both paths. `--full-auto` runs the interactive session
+        // low-friction — sandboxed (workspace-write) auto-execution with no
+        // per-command approval prompts — so the attended agent stops asking to
+        // approve every edit and command while still being confined to the
+        // worktree sandbox (unlike the headless path's full bypass).
         let resuming = resume && initial_prompt.is_none();
         let mut parts = if resuming {
             vec![
@@ -287,11 +295,13 @@ impl Agent for CodexAgent {
                 "resume".to_string(),
                 "--last".to_string(),
                 "--dangerously-bypass-hook-trust".to_string(),
+                "--full-auto".to_string(),
             ]
         } else {
             vec![
                 self.program.to_string(),
                 "--dangerously-bypass-hook-trust".to_string(),
+                "--full-auto".to_string(),
             ]
         };
         parts.extend(overrides);
@@ -559,6 +569,20 @@ mod tests {
         assert!(launch.contains("-c 'mcp_servers.usagi.command=usagi'"));
         assert!(launch.contains("usagi agent-phase ready"));
         assert!(launch.contains("developer_instructions="));
+    }
+
+    #[test]
+    fn launch_command_runs_full_auto_so_the_attended_session_stops_prompting() {
+        // Both the fresh and resumed interactive launches carry `--full-auto`, so
+        // Codex auto-executes within the workspace sandbox instead of asking the
+        // user to approve every edit and command.
+        let fresh = CodexAgent::new().launch_command(&wiring("usagi", None), false, None);
+        assert!(fresh.contains(" --full-auto "));
+        assert!(fresh.starts_with("codex --dangerously-bypass-hook-trust --full-auto "));
+        let resumed = CodexAgent::new().launch_command(&wiring("usagi", None), true, None);
+        assert!(
+            resumed.starts_with("codex resume --last --dangerously-bypass-hook-trust --full-auto ")
+        );
     }
 
     #[test]

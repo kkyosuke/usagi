@@ -70,9 +70,12 @@ pub fn run(phase: Phase, mut input: impl Read) -> Result<()> {
     record(phase, &raw, &worktree)
 }
 
-/// Record `phase` for `worktree`, applying the `SessionStart` → `ready` guard so a
-/// mid-turn restart never strands a working session showing idle. The decision is
-/// [`agent_phase_policy::ready_overwrite_allowed`]'s; this wires it to the
+/// Record `phase` for `worktree`, applying two transition guards: the
+/// `SessionStart` → `ready` guard so a mid-turn restart never strands a working
+/// session showing idle, and the `Notification` → `waiting` guard so Claude's
+/// post-`Stop` idle notification never flips a finished session back to waiting.
+/// The decisions are [`agent_phase_policy::ready_overwrite_allowed`]'s and
+/// [`agent_phase_policy::waiting_overwrite_allowed`]'s; this wires them to the
 /// recorded phase and the hook `source` parsed from `raw`. Split from [`run`] so
 /// the transition logic is unit-tested without the stdin / `cwd` IO.
 fn record(phase: Phase, raw: &str, worktree: &Path) -> Result<()> {
@@ -81,6 +84,15 @@ fn record(phase: Phase, raw: &str, worktree: &Path) -> Result<()> {
             agent_state_store::read(worktree),
             agent_state_store::session_start_source_from_hook_json(raw).as_deref(),
         )
+    {
+        return Ok(());
+    }
+    // A `Notification` → `waiting` that lands on a finished (`Ended`) session is
+    // Claude's post-`Stop` idle notification; recording it would flip the ✓ back
+    // to waiting. Skip it, preserving the `ended` phase (see
+    // [`agent_phase_policy::waiting_overwrite_allowed`]).
+    if matches!(phase, Phase::Waiting)
+        && !agent_phase_policy::waiting_overwrite_allowed(agent_state_store::read(worktree))
     {
         return Ok(());
     }
@@ -161,6 +173,36 @@ mod tests {
             let payload = format!("{{\"cwd\":{cwd:?},\"source\":\"compact\"}}");
             run(Phase::Ready, Cursor::new(payload)).unwrap();
             assert_eq!(agent_state_store::read(wt.path()), None);
+        });
+    }
+
+    #[test]
+    fn run_skips_waiting_over_a_finished_session() {
+        with_data_dir(|_| {
+            let wt = tempfile::tempdir().unwrap();
+            let cwd = wt.path().to_str().unwrap();
+            let payload = format!("{{\"cwd\":{cwd:?}}}");
+            // A turn ended, then Claude's idle `Notification` → waiting fires:
+            // the finished (`Ended`) phase must survive rather than flip to waiting.
+            run(Phase::Ended, Cursor::new(payload.clone())).unwrap();
+            run(Phase::Waiting, Cursor::new(payload)).unwrap();
+            assert_eq!(agent_state_store::read(wt.path()), Some(AgentPhase::Ended));
+        });
+    }
+
+    #[test]
+    fn run_records_waiting_over_a_running_session() {
+        with_data_dir(|_| {
+            let wt = tempfile::tempdir().unwrap();
+            let cwd = wt.path().to_str().unwrap();
+            let payload = format!("{{\"cwd\":{cwd:?}}}");
+            // A genuine mid-turn pause: running → waiting is recorded.
+            run(Phase::Running, Cursor::new(payload.clone())).unwrap();
+            run(Phase::Waiting, Cursor::new(payload)).unwrap();
+            assert_eq!(
+                agent_state_store::read(wt.path()),
+                Some(AgentPhase::Waiting)
+            );
         });
     }
 

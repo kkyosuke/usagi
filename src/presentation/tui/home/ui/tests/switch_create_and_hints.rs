@@ -8,6 +8,10 @@ fn switch_create_rows_show_the_input_and_an_error() {
     assert_eq!(rows.len(), 1);
     let plain = console::strip_ansi_codes(&rows[0]).into_owned();
     assert!(plain.contains("+ new: wip"));
+    assert!(
+        plain.starts_with("  +"),
+        "input mode keeps the + aligned with the persistent create row: {plain:?}"
+    );
 
     // Caret in the middle: the block caret sits on a character, so the name reads
     // intact without an inserted glyph.
@@ -17,7 +21,9 @@ fn switch_create_rows_show_the_input_and_an_error() {
 
     let with_error = switch_create_rows("feature", 7, Some("\"feature\" already exists."), 40);
     assert_eq!(with_error.len(), 2);
-    assert!(console::strip_ansi_codes(&with_error[1]).contains("already exists"));
+    let err = console::strip_ansi_codes(&with_error[1]).into_owned();
+    assert!(err.contains("already exists"));
+    assert!(err.starts_with("  "));
 }
 
 #[test]
@@ -246,4 +252,24 @@ fn render_frame_shows_command_hints_in_the_palette_and_keeps_its_height() {
     let joined = console::strip_ansi_codes(&frame.join("\n")).into_owned();
     assert!(joined.contains("matches"));
     assert!(joined.contains("session"));
+}
+
+#[test]
+fn tab_menu_box_and_rename_body_render_action_surface() {
+    let mut state = state_with(vec![]);
+    state.open_tab_menu(PathBuf::from("/repo/main"), 1, "terminal", 12, 3);
+    let menu = state.tab_menu().unwrap();
+    let menu_text = stripped(&tab_menu_box(menu));
+    assert!(menu_text.contains("tab 2"));
+    assert!(menu_text.contains("Move left"));
+    assert!(menu_text.contains("Move right"));
+    assert!(menu_text.contains("Rename"));
+    assert!(menu_text.contains("Close"));
+
+    let body = tab_rename_body("term", 2, 30);
+    let text = stripped(&body);
+    assert!(text.contains("Rename tab label"));
+    assert!(text.contains("label:"));
+    assert!(text.contains("term"));
+    assert!(text.contains("Enter save"));
 }

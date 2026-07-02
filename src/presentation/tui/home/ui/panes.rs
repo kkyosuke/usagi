@@ -231,6 +231,11 @@ pub(super) const SESSION_ROWS: usize = 3;
 /// hit-tests skip over it.
 const UNITE_WORKSPACE_GAP_ROWS: usize = 2;
 
+/// The persistent row kept at the foot of the left pane to create a session
+/// without remembering the `c` shortcut. It is a navigation target, not a
+/// session, and turns into the inline `+ new: <name>` input when activated.
+const CREATE_ROW_LABEL: &str = "+ new session";
+
 /// The icon-led `<cpu> <pct>  <mem> <bytes>` resource label shared by a session's
 /// resource line and the workspace total beside the mascot. The CPU figure leads
 /// with [`CPU_ICON`] and the memory with [`MEM_ICON`] (in place of the words
@@ -750,6 +755,34 @@ fn rail_entry(
     (top, detail, resource)
 }
 
+/// The persistent create row in the full sidebar. It uses the same gutter grammar
+/// as real rows (`>` only in 切替 when selected) but has no heat/status/resource
+/// lines because it is an action target rather than a session. The row is still
+/// always present at the list foot so keyboard focus and mouse clicks can enter
+/// the create input from a visible affordance.
+fn create_row(selected: bool, in_switch: bool, width: usize) -> String {
+    let gutter = gutter_cell(selected, false, in_switch);
+    let label = if selected && in_switch {
+        style(CREATE_ROW_LABEL).green().bold().to_string()
+    } else {
+        style(CREATE_ROW_LABEL).green().to_string()
+    };
+    clip_to_width(&format!("{gutter} {label}"), width)
+}
+
+/// The rail twin of [`create_row`]: the `+` glyph in the same row position. The
+/// input itself moves to the right pane while the sidebar is collapsed, but the
+/// click / focus target remains visible at the rail's bottom.
+fn rail_create_row(selected: bool, in_switch: bool) -> String {
+    let gutter = gutter_cell(selected, false, in_switch);
+    let label = if selected && in_switch {
+        style("+").green().bold().to_string()
+    } else {
+        style("+").green().to_string()
+    };
+    pad_to_width(format!("{gutter} {label}"), RAIL_WIDTH)
+}
+
 fn push_unite_workspace_gap(lines: &mut Vec<String>, width: usize) {
     for _ in 0..UNITE_WORKSPACE_GAP_ROWS {
         lines.push(pad_to_width(String::new(), width));
@@ -871,6 +904,13 @@ fn rail_pane(
             flat_row += 1;
         }
     }
+    if lines.len() < rows {
+        let mut row = rail_create_row(list.create_row_selected(), in_switch);
+        if in_switch && !list.create_row_selected() {
+            row = dim_row(&row);
+        }
+        lines.push(row);
+    }
     lines.truncate(rows);
     lines
 }
@@ -935,6 +975,9 @@ fn sidebar_row_at_line_walk(list: &WorktreeList, line: usize, with_headers: bool
             cur += SESSION_ROWS;
             flat += 1;
         }
+    }
+    if line == cur {
+        return Some(list.create_row());
     }
     None
 }
@@ -1131,6 +1174,13 @@ pub(super) fn left_pane(
             lines.push(resource);
             flat_row += 1;
         }
+    }
+    if lines.len() < rows {
+        let mut row = create_row(list.create_row_selected(), in_switch, left_w);
+        if in_switch && !list.create_row_selected() {
+            row = dim_row(&row);
+        }
+        lines.push(row);
     }
     lines.truncate(rows);
     lines
@@ -1342,6 +1392,107 @@ pub(in crate::presentation::tui::home) fn focus_tab_at(
     // Clicking the active tab — including the appended `+ new` chip, which only
     // shows while selected — is a no-op; every other hit is a live pane chip.
     (target != combined.active).then_some(target)
+}
+
+pub(in crate::presentation::tui::home) fn focus_tab_hit(
+    state: &HomeState,
+    col: u16,
+    row: u16,
+    raw_height: usize,
+    raw_width: usize,
+) -> Option<usize> {
+    focus_tab_hit_inner(state, col, row, raw_height, raw_width)
+}
+
+fn focus_tab_hit_inner(
+    state: &HomeState,
+    col: u16,
+    row: u16,
+    raw_height: usize,
+    raw_width: usize,
+) -> Option<usize> {
+    let strip = state.terminal_tabs()?.clone();
+    if strip.labels.is_empty() {
+        return None;
+    }
+    let geo = super::terminal_geometry(raw_height, raw_width, state.sidebar());
+    if row < geo.origin_row || row >= geo.origin_row + super::TAB_BAR_ROWS as u16 {
+        return None;
+    }
+    let rel_col = col.checked_sub(geo.origin_col)? as usize;
+    let mut labels = strip.labels.clone();
+    let active = if state.focus_on_new_tab() {
+        labels.push(FOCUS_NEW_TAB_LABEL.to_string());
+        labels.len().saturating_sub(1)
+    } else {
+        strip.active
+    };
+    let combined = TabStrip { labels, active };
+    let header = active_session_header(state);
+    tab_chip_ranges(&header, &combined)
+        .into_iter()
+        .position(|range| range.contains(&rel_col))
+        .filter(|target| *target < strip.labels.len())
+}
+
+/// The live-pane tab (0-based, matching [`TabStrip::labels`]) a left click at the
+/// 0-based screen (`col`, `row`) lands on while 切替 (Switch), or `None` when the
+/// click is not on a changeable pane tab.
+///
+/// 切替's right pane draws the highlighted session's preview and exposes the
+/// same tab strip that `←`/`→` navigate by keyboard. This mirrors the renderer's
+/// header/geometry so a click on an inactive chip moves the preview — and the
+/// pane that `Enter` re-attaches — to that tab without entering 在席 first.
+pub(in crate::presentation::tui::home) fn switch_tab_at(
+    state: &HomeState,
+    col: u16,
+    row: u16,
+    raw_height: usize,
+    raw_width: usize,
+) -> Option<usize> {
+    let strip = state.terminal_tabs()?;
+    if strip.labels.is_empty() {
+        return None;
+    }
+    let (header, live) = switch_preview_header(state);
+    if !live {
+        return None;
+    }
+    let geo = super::terminal_geometry(raw_height, raw_width, state.sidebar());
+    if row < geo.origin_row || row >= geo.origin_row + super::TAB_BAR_ROWS as u16 {
+        return None;
+    }
+    let rel_col = col.checked_sub(geo.origin_col)? as usize;
+    let target = tab_chip_ranges(&header, strip)
+        .into_iter()
+        .position(|range| range.contains(&rel_col))?;
+    // Clicking the active tab is a no-op; inactive chips select that pane.
+    (target != strip.active).then_some(target)
+}
+
+pub(in crate::presentation::tui::home) fn switch_tab_hit(
+    state: &HomeState,
+    col: u16,
+    row: u16,
+    raw_height: usize,
+    raw_width: usize,
+) -> Option<usize> {
+    let strip = state.terminal_tabs()?;
+    if strip.labels.is_empty() {
+        return None;
+    }
+    let (header, live) = switch_preview_header(state);
+    if !live {
+        return None;
+    }
+    let geo = super::terminal_geometry(raw_height, raw_width, state.sidebar());
+    if row < geo.origin_row || row >= geo.origin_row + super::TAB_BAR_ROWS as u16 {
+        return None;
+    }
+    let rel_col = col.checked_sub(geo.origin_col)? as usize;
+    tab_chip_ranges(&header, strip)
+        .into_iter()
+        .position(|range| range.contains(&rel_col))
 }
 
 /// For the full sidebar, each worktree's global index (across every group, root
@@ -2260,42 +2411,39 @@ fn note_overlay(state: &HomeState, width: usize, rows: usize) -> Option<Vec<Stri
 /// highlighted session's note is drawn over the top by [`note_overlay`] (not
 /// inline), so it never pushes this preview around.
 pub(super) fn switch_preview(state: &HomeState, width: usize, rows: usize) -> Vec<String> {
-    let body_rows = rows;
-    // Identify the highlighted row. `selected()` is `Some` for a real session
-    // row and `None` on the root row (which carries no git status / tracked
-    // path), so the match doubles as the root/session split.
-    let (name, live, running, waiting, done, status) = match state.list().selected() {
-        Some(w) => (
-            w.branch.as_deref().unwrap_or(DETACHED).to_string(),
-            state.is_live(&w.path),
-            state.is_running(&w.path),
-            state.is_waiting(&w.path),
-            state.is_done(&w.path),
-            Some(w.status),
-        ),
-        None => {
-            // The root row carries no worktree, but its embedded session is
-            // keyed by the workspace root path, so match it against the same
-            // live / running / waiting / done sets — otherwise a running root
-            // agent never previews live here (it only re-appears once selected).
-            let root = state.root_path();
-            (
-                ROOT_NAME.to_string(),
-                state.is_live(root),
-                state.is_running(root),
-                state.is_waiting(root),
-                state.is_done(root),
-                None,
-            )
-        }
-    };
+    if state.list().create_row_selected() {
+        let mut lines = vec![
+            style(clip_to_width("+ new session", width))
+                .green()
+                .bold()
+                .to_string(),
+            style(clip_to_width(
+                "Type a name here, or press Enter, to create a session.",
+                width,
+            ))
+            .dim()
+            .to_string(),
+            style(clip_to_width(
+                "Esc cancels the input after it opens.",
+                width,
+            ))
+            .dim()
+            .to_string(),
+        ];
+        lines.truncate(rows);
+        return lines;
+    }
 
-    // Header: the name, then either the git status + agent state (a session) or
-    // the workspace-root note (the root row). A live session's tabs share the
-    // header's row (the `←`/`→` targets), so the identity and the tabs read
-    // together on one line; the preview below mirrors the active pane.
-    let agent = AgentState::from_flags(live, running, waiting, done).detail(HEADER_AGENT_COL);
-    let header = preview_header(&name, status, agent);
+    let body_rows = rows;
+    // The highlighted row's identity plus whether it has a live pane. The header
+    // and the `live` flag drive both this preview and the tab hit-test
+    // ([`switch_tab_at`]), so they are built once in [`switch_preview_header`]
+    // and shared — the strip a click lands on is exactly the one drawn here.
+    let (header, live) = switch_preview_header(state);
+
+    // A live session's tabs share the header's row (the `←`/`→` — and click —
+    // targets), so the identity and the tabs read together on one line; the
+    // preview below mirrors the active pane.
     let mut lines = header_tab_rows(
         header,
         if live { state.terminal_tabs() } else { None },
@@ -2344,6 +2492,42 @@ pub(super) fn switch_preview(state: &HomeState, width: usize, rows: usize) -> Ve
     lines.truncate(body_rows);
     lines.resize(body_rows, String::new());
     lines
+}
+
+/// Header text for 切替's right-pane preview, plus whether the highlighted row is
+/// live. `switch_preview` and `switch_tab_at` share this so tab chips are measured
+/// from the same header text the renderer puts beside them.
+fn switch_preview_header(state: &HomeState) -> (String, bool) {
+    // Identify the highlighted row. `selected()` is `Some` for a real session
+    // row and `None` on the root row (which carries no git status / tracked
+    // path), so the match doubles as the root/session split.
+    let (name, live, running, waiting, done, status) = match state.list().selected() {
+        Some(w) => (
+            w.branch.as_deref().unwrap_or(DETACHED).to_string(),
+            state.is_live(&w.path),
+            state.is_running(&w.path),
+            state.is_waiting(&w.path),
+            state.is_done(&w.path),
+            Some(w.status),
+        ),
+        None => {
+            // The root row carries no worktree, but its embedded session is
+            // keyed by the workspace root path, so match it against the same
+            // live / running / waiting / done sets — otherwise a running root
+            // agent never previews live here (it only re-appears once selected).
+            let root = state.root_path();
+            (
+                ROOT_NAME.to_string(),
+                state.is_live(root),
+                state.is_running(root),
+                state.is_waiting(root),
+                state.is_done(root),
+                None,
+            )
+        }
+    };
+    let agent = AgentState::from_flags(live, running, waiting, done).detail(HEADER_AGENT_COL);
+    (preview_header(&name, status, agent), live)
 }
 
 /// The right pane's contents, by mode. A preview of the would-be session screen

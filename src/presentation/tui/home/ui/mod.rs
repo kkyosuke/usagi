@@ -24,13 +24,15 @@ use crate::presentation::tui::widgets::{clip_to_width, clip_to_width_cow};
 
 use chrome::{
     command_palette_body, footer_line, input_line, mode_ladder, quit_confirm_frame,
-    remove_modal_body, switch_create_rows, switch_rename_rows, task_status_line, text_modal_body,
-    title_bar, update_confirm_frame, waiting_notice, PALETTE_INNER, REMOVE_MODAL_INNER,
-    TEXT_MODAL_INNER,
+    remove_modal_body, switch_create_rows, switch_rename_rows, tab_menu_box, tab_rename_body,
+    task_status_line, text_modal_body, title_bar, update_confirm_frame, waiting_notice,
+    PALETTE_INNER, REMOVE_MODAL_INNER, TEXT_MODAL_INNER,
 };
 use panes::{group_inline_insert_line, left_pane, right_pane_contents};
 // The right-pane tab strips map clicks to the tab under them through these.
-pub(super) use panes::{attached_tab_at, attached_tab_hit, focus_tab_at};
+pub(super) use panes::{
+    attached_tab_at, attached_tab_hit, focus_tab_at, focus_tab_hit, switch_tab_at, switch_tab_hit,
+};
 // …a click on a sidebar session's PR badge to that session (to pin its PR popup).
 pub(super) use panes::sidebar_pr_badge_at;
 // …and a click anywhere to the pinned PR popup: open a `#<number>`, or dismiss it.
@@ -474,6 +476,16 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
         widgets::overlay_at(&mut lines, width, top, left, &popup);
     }
 
+    if let Some(menu) = state.tab_menu() {
+        widgets::overlay_at(
+            &mut lines,
+            width,
+            menu.row() as usize,
+            menu.col() as usize,
+            &tab_menu_box(menu),
+        );
+    }
+
     lines.extend(input_lines);
     lines.push(footer_line(width, state));
 
@@ -545,6 +557,13 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
         widgets::overlay_modal(&mut lines, width, "Remove sessions", inner, &body);
     }
 
+    if let Some(input) = state.tab_rename() {
+        const TAB_RENAME_INNER: usize = 44;
+        let inner = widgets::modal_inner_width(width, TAB_RENAME_INNER);
+        let body = tab_rename_body(input.value(), input.cursor(), inner);
+        widgets::overlay_modal(&mut lines, width, "Rename tab", inner, &body);
+    }
+
     lines
 }
 
@@ -590,6 +609,16 @@ fn left_column(
         // the "+ new" input attached to the workspace that `c` targets, instead
         // of drifting to another workspace or to the whole column's foot.
         if let Some(create) = state.create() {
+            // `left_pane` always draws the persistent "+ new session" affordance at
+            // the list foot; while the input is open it *becomes* that input, so
+            // drop the affordance row first and let the input take its slot.
+            let persistent = group_inline_insert_line(
+                state.list(),
+                state.list().group_count().saturating_sub(1),
+            );
+            if persistent < left.len() {
+                left.remove(persistent);
+            }
             let rows = switch_create_rows(create.value(), create.cursor(), create.error(), left_w);
             place_create_rows(&mut left, state.list(), rows);
             left.truncate(body_rows);
@@ -628,7 +657,13 @@ fn splice_rows(column: &mut Vec<String>, line: usize, rows: Vec<String>) {
 /// line (no CLS). The last group has no lower workspace to protect, so it keeps
 /// the single-workspace behaviour and appends the input after that group.
 fn place_create_rows(column: &mut Vec<String>, list: &WorktreeList, rows: Vec<String>) {
-    let group = list.selected_group();
+    // The create row lives at the foot of the last group, so a cursor resting on
+    // it targets that group; every other cursor targets its own group.
+    let group = if list.create_row_selected() {
+        list.group_count().saturating_sub(1)
+    } else {
+        list.selected_group()
+    };
     let line = group_inline_insert_line(list, group);
     if group + 1 < list.group_count() {
         replace_rows(column, line, rows);

@@ -95,6 +95,7 @@
 | デフォルトブランチ基点 | `default_branch_source` | enum? | 既定（`remote`） |
 | ローカル LLM 有効化 | `local_llm_enabled` | bool? | グローバル設定（`local_llm.enabled`）にフォールバック |
 | 同梱スキル機能 | `skill_features` | map<string, bool> | 機能 ID 単位で上書き。未記載の機能はグローバル設定にフォールバック |
+| secret 環境変数 | `env` | map<string, string> | 空 map（注入しない） |
 | セットアップコマンド | `setup_commands` | string[] | 空配列（実行しない） |
 
 > **デフォルトブランチ（`default_branch`）**: `session create` でセッションを作るとき、各 git リポジトリの
@@ -110,6 +111,14 @@
 > いずれもワークスペースのローカル設定（`<workspace>/.usagi/settings.json`）に保存され、ホーム画面の
 > `config` から編集します。
 
+> **secret 環境変数（`env`）**: workspace ごとに `環境変数名 = op://vault/item/field` の map を保存します。
+> `agent` / `terminal` の embedded pane を新規起動するとき、usagi が `op read --no-newline <ref>` で値を解決し、
+> 子プロセス環境へ注入します。例: `{ "GH_TOKEN": "op://Private/GitHub/token" }`。値は secret 本体ではなく
+> 1Password reference だけを保存し、解決した secret は起動コマンド行には載せません。`usagi op login` で保存した
+> 1Password サービスアカウントトークンがあれば、解決時の `op` にも `OP_SERVICE_ACCOUNT_TOKEN` として渡します。
+> 解決に失敗した変数は注入せず、エラーログに記録して pane 起動は継続します。既に起動済みの pane には反映されないため、
+> 変更後は新しい agent / terminal pane を開き直してください。
+
 > **セットアップコマンド（`setup_commands`）**: `session create` でセッションを作成した直後に、そのセッション root
 > （`<workspace>/.usagi/sessions/<name>`）をカレントディレクトリとして上から順に実行する shell コマンド列です。
 > 1 行 = 1 コマンドとして保存し、空行は実行時に無視します。コマンドは各 OS の標準 shell（Unix 系は
@@ -122,7 +131,8 @@
   `Settings::with_local`、ユースケースは `usecase/settings.rs` の `effective(storage, repo_root)` が担います。
 - 読み書きロジック・永続化に加え、編集 UI も実装済みです。ホーム画面のコマンドモードで `config` を実行すると
   設定画面が**ワークスペーススコープ**で開き、「Agent CLI」「Notifications」「Restore Panes」「Default Branch」
-  「Branch Source」「Setup Commands」と、固定項目の下に並ぶ**同梱スキル機能**（`PR Skills` など）を編集できます。Agent CLI /
+  「Branch Source」「Setup Commands」と、固定項目の下に並ぶ**同梱スキル機能**（`PR Skills` など）を編集できます。`env` は
+  `<workspace>/.usagi/settings.json` を手編集して設定します。Agent CLI /
   Notifications / Restore Panes と各スキル機能は **「グローバルに従う / ローカルで上書き（On/Off）」**、Default
   Branch は **`auto`（検出済み既定）／ リポジトリの各ブランチ**、Branch Source は **`local` / `remote`** を
   切り替えられます。Setup Commands はモーダルで複数行を編集します。詳細は [design/04-config.md](design/04-config.md) を参照。
@@ -188,6 +198,7 @@ CLI からも設定を確認・編集できます（[3. コマンドリファレ
 | `terminal_scrollback_lines` | 埋め込み端末ペインが保持するスクロールバック行数。ライブなペインごとに確保されるため、多数のセッションを開いたときのメモリ使用量を左右する |
 | `local_llm.enabled` / `local_llm.model` | 有効時、`agent` 起動コマンドに `usagi-llm` MCP サーバを追加し、軽量タスクをローカル LLM に委譲する（[3.4 ローカル LLM MCP サーバ](03-commands/04-llm-mcp.md)） |
 | `op_mcp.enabled` | 有効時、`agent` 起動コマンドに `usagi-op` MCP サーバを追加し、エージェントが `op` 経由で secret を読み取れるようにする（[3.5 1Password MCP サーバ](03-commands/05-op-mcp.md)） |
+| ローカル設定 `env` | workspace の `agent` / `terminal` 起動時に `op://...` reference を解決し、`GH_TOKEN` などの環境変数として子プロセスへ注入する |
 | `skill_features` | `session create` 時に、機能が有効な[同梱スキル](04-orchestration.md#スキルの配布)だけを各 worktree の `.claude/skills/` へ symlink する。無効な機能のスキルは配布しない（`usagi-session` は常時配布） |
 
 > ホーム画面の `config` で `session_action_ui` や `key_scheme` を変更すると、設定画面を閉じて

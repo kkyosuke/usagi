@@ -41,7 +41,8 @@ mod mode;
 pub use list::{worktree_name, WorkspaceGroup, WorktreeList, ROOT_NAME};
 pub use log::{LineKind, LogLine};
 pub use modal::{
-    CreateInput, ModalSize, NoteEditor, Preview, RemoveEntry, RemoveModal, RenameInput, TextModal,
+    CreateInput, ModalSize, NoteEditor, Preview, RemoveEntry, RemoveModal, RenameInput, TabMenu,
+    TabMenuItem, TabRenameInput, TextModal,
 };
 pub use mode::{Mode, PaneExit, ResumeLevel, ReturnMode};
 
@@ -1134,9 +1135,14 @@ impl HomeState {
     /// `session` commands (create / remove / rename / note) run against this so a
     /// new session lands in the workspace the user is pointing at.
     pub fn selected_workspace_root(&self) -> PathBuf {
+        let selected_group = if self.list.create_row_selected() {
+            self.list.group_count().saturating_sub(1)
+        } else {
+            self.list.selected_group()
+        };
         // `selected_group()` is always a valid group index, so group 0 is the
         // primary and `i = g - 1` indexes the extra (unite) workspaces in step.
-        match self.list.selected_group().checked_sub(1) {
+        match selected_group.checked_sub(1) {
             None => self.root_path.clone(),
             Some(i) => self.extra_groups[i].root_path.clone(),
         }
@@ -1942,7 +1948,8 @@ impl HomeState {
     /// Focus the session at `row` (0 is the root row, `i` maps to worktree
     /// `i - 1`) in the list, so the embedded terminal re-roots there.
     pub fn focus_session(&mut self, row: usize) {
-        self.list.focus_index(row);
+        self.list
+            .focus_index(row.min(self.list.create_row().saturating_sub(1)));
     }
 
     // --- command palette (`:`) ---------------------------------------------
@@ -2092,6 +2099,79 @@ impl HomeState {
     /// Whether an inline rename input is open in 切替.
     pub fn is_renaming(&self) -> bool {
         matches!(self.overlay, Overlay::Rename(_))
+    }
+
+    pub fn open_tab_menu(
+        &mut self,
+        dir: PathBuf,
+        tab: usize,
+        label: impl Into<String>,
+        col: u16,
+        row: u16,
+    ) {
+        self.overlay = Overlay::TabMenu(TabMenu::new(dir, tab, label, col, row));
+    }
+
+    pub fn tab_menu(&self) -> Option<&TabMenu> {
+        match &self.overlay {
+            Overlay::TabMenu(menu) => Some(menu),
+            _ => None,
+        }
+    }
+
+    pub fn tab_menu_mut(&mut self) -> Option<&mut TabMenu> {
+        match &mut self.overlay {
+            Overlay::TabMenu(menu) => Some(menu),
+            _ => None,
+        }
+    }
+
+    pub fn close_tab_menu(&mut self) {
+        if matches!(self.overlay, Overlay::TabMenu(_)) {
+            self.overlay = Overlay::None;
+        }
+    }
+
+    pub fn begin_tab_rename_from_menu(&mut self) -> Option<()> {
+        let Overlay::TabMenu(menu) = std::mem::take(&mut self.overlay) else {
+            return None;
+        };
+        self.overlay = Overlay::TabRename(TabRenameInput::new(
+            menu.dir().to_path_buf(),
+            menu.tab(),
+            menu.label().to_string(),
+        ));
+        Some(())
+    }
+
+    pub fn tab_rename(&self) -> Option<&TabRenameInput> {
+        match &self.overlay {
+            Overlay::TabRename(input) => Some(input),
+            _ => None,
+        }
+    }
+
+    pub fn tab_rename_mut(&mut self) -> Option<&mut TabRenameInput> {
+        match &mut self.overlay {
+            Overlay::TabRename(input) => Some(input),
+            _ => None,
+        }
+    }
+
+    pub fn cancel_tab_rename(&mut self) {
+        if matches!(self.overlay, Overlay::TabRename(_)) {
+            self.overlay = Overlay::None;
+        }
+    }
+
+    pub fn confirm_tab_rename(&mut self) -> Option<(PathBuf, usize, String)> {
+        match std::mem::take(&mut self.overlay) {
+            Overlay::TabRename(input) => Some(input.confirm()),
+            other => {
+                self.overlay = other;
+                None
+            }
+        }
     }
 
     /// The inline rename input, when open — its target session and typed label

@@ -17,7 +17,7 @@ use crate::presentation::tui::io::screen::{self, FramePainter};
 use crate::domain::settings::{AgentCli, KeyScheme, SessionActionUi};
 
 use super::super::command::Effect;
-use super::super::pane_input::{is_double_click, DOUBLE_CLICK};
+use super::super::pane_input::{is_double_click, PointerShape, DOUBLE_CLICK};
 use super::super::state::{HomeState, ModalSize, PaneExit, ReturnMode, ROOT_NAME};
 use super::super::terminal::tabs::TabNav;
 use super::super::ui;
@@ -296,6 +296,25 @@ pub(super) fn switch_key(
         return Flow::Continue;
     }
 
+    if state.list().create_row_selected() {
+        match key {
+            // The visible "+ new session" row behaves like an input affordance:
+            // clicking it or pressing Enter starts the inline create editor, while
+            // typing a printable character starts the editor and inserts that
+            // character as the first byte of the session name.
+            Key::Enter | Key::Home => begin_switch_create(state, wiring, None),
+            Key::Char(c) if !c.is_control() => begin_switch_create(state, wiring, Some(c)),
+            // Keep keyboard escape hatches on the row: arrows still navigate away
+            // (the create row carries no session, so it needs no note / tab keys),
+            // and Esc backs out of Switch just as it does on real session rows.
+            Key::ArrowUp => state.switch_move_up(),
+            Key::ArrowDown => state.switch_move_down(),
+            Key::Escape => leave_switch(term, state, painter, wiring),
+            _ => {}
+        }
+        return Flow::Continue;
+    }
+
     match key {
         // ↑/↓ (k/j) move between sessions.
         Key::ArrowUp | Key::Char('k') => state.switch_move_up(),
@@ -349,8 +368,7 @@ pub(super) fn switch_key(
         // (the inline create / rename inputs consume `Home` earlier and return
         // before this match).
         Key::Char('c') | Key::Home => {
-            let branches = (wiring.existing_branches)();
-            state.switch_begin_create(branches);
+            begin_switch_create(state, wiring, None);
         }
         // `r` begins inline rename of the selected session's sidebar label
         // (a no-op on the root row, which is not a session).
@@ -396,6 +414,19 @@ pub(super) fn switch_key(
         _ => {}
     }
     Flow::Continue
+}
+
+/// Open 切替's inline create input, seeded with `first` when the visible
+/// `+ new session` affordance was typed into directly. The branch-name snapshot is
+/// taken exactly when the editor opens so validation sees the current workspace.
+fn begin_switch_create(state: &mut HomeState, wiring: &mut Wiring, first: Option<char>) {
+    let branches = (wiring.existing_branches)();
+    state.switch_begin_create(branches);
+    if let Some(c) = first {
+        if let Some(create) = state.create_mut() {
+            create.push_char(c);
+        }
+    }
 }
 
 /// Move the selected session one row up (`up`) or down in the list (`K` / `J` in
@@ -613,6 +644,10 @@ pub(super) fn switch_click(
     // Always land the cursor on the clicked row first, so a double click confirms
     // the row it lands on and a single click just leaves it selected.
     state.switch_select(row);
+    if state.list().create_row_selected() {
+        begin_switch_create(state, wiring, None);
+        return;
+    }
     if is_double_click(last_click, row, now, DOUBLE_CLICK) {
         focus_and_attach(term, state, painter, wiring, row);
     }
@@ -637,6 +672,14 @@ pub(super) fn focus_click(
     now: Instant,
     last_click: &mut Option<(usize, Instant)>,
 ) {
+    if row == state.list().create_row() {
+        // The create row lives in 切替: a click on it from 在席 zooms back to the
+        // picker and opens the same inline input a 切替 click would.
+        state.enter_switch(ReturnMode::Focus);
+        state.switch_select(row);
+        begin_switch_create(state, wiring, None);
+        return;
+    }
     if is_double_click(last_click, row, now, DOUBLE_CLICK) {
         // `focus_and_attach` re-enters 在席 on the row and attaches when live, so a
         // double click on a running session drops straight into 没入.
@@ -1171,6 +1214,14 @@ fn open_pane(
     // wheel-capture modes so the wheel can't scroll the host terminal once we are
     // back on the workspace screen.
     let _ = screen::write_input_modes(term);
+    // Leaving the embedded pane returns the pointer to management chrome. The
+    // pane itself keeps the last OSC 22 pointer shape across in-pane tab hops so
+    // a text caret does not flicker back to an arrow during `Ctrl-O ←/→`, so the
+    // boundary between 没入 and the home UI owns the reset instead. Emit this
+    // after re-entering the alternate screen so terminals that scope pointer
+    // shapes per screen also reset the visible management screen.
+    let _ = term.write_str(PointerShape::Default.osc22());
+    let _ = term.flush();
     // The embedded terminal drew over the whole screen, so the remembered frame
     // is stale: force a full repaint on the next pass.
     painter.reset();

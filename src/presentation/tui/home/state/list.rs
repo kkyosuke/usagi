@@ -348,6 +348,32 @@ impl WorktreeList {
             .sum()
     }
 
+    /// Total rows the 切替 cursor can rest on: every selectable session / root row
+    /// plus the trailing persistent **"+ new session"** row at the foot of the
+    /// list. Navigation ([`move_up`](Self::move_up) / [`move_down`](Self::move_down)
+    /// / [`focus_index`](Self::focus_index)) wraps over this range so the cursor can
+    /// land on the create row, while the session-facing accessors (`selected`,
+    /// `refs`, the title-bar [`session_count`](Self::session_count)) keep counting
+    /// only the real rows.
+    fn nav_rows(&self) -> usize {
+        self.selectable_rows() + 1
+    }
+
+    /// The flat index of the persistent **"+ new session"** row — the last one the
+    /// cursor can reach, sitting just past every group's rows. It belongs to no
+    /// session (so [`selected`](Self::selected) / [`root_selected`](Self::root_selected)
+    /// stay `false`/`None` on it); activating it opens the inline create input
+    /// instead of focusing a session.
+    pub fn create_row(&self) -> usize {
+        self.selectable_rows()
+    }
+
+    /// Whether the cursor rests on the persistent **"+ new session"** row (see
+    /// [`create_row`](Self::create_row)).
+    pub fn create_row_selected(&self) -> bool {
+        self.selected_index == self.create_row()
+    }
+
     /// Number of rows listed in the left pane (every group's root row plus its
     /// worktrees). The title bar reports this so the header count matches the rows
     /// the user actually sees.
@@ -434,7 +460,7 @@ impl WorktreeList {
 
     /// Whether the cursor is on a (any group's) root row.
     pub fn root_selected(&self) -> bool {
-        matches!(self.locate(self.selected_index), Some((_, None)))
+        !self.create_row_selected() && matches!(self.locate(self.selected_index), Some((_, None)))
     }
 
     /// Whether a root row is the active one.
@@ -562,7 +588,7 @@ impl WorktreeList {
     /// that exist. Used by the session picker (`Ctrl-O`) to jump straight to the
     /// chosen session.
     pub fn focus_index(&mut self, row: usize) {
-        self.selected_index = row.min(self.selectable_rows().saturating_sub(1));
+        self.selected_index = row.min(self.nav_rows().saturating_sub(1));
     }
 
     /// Move the cursor up one row, wrapping from the top to the bottom.
@@ -570,11 +596,11 @@ impl WorktreeList {
         self.selected_index = self
             .selected_index
             .checked_sub(1)
-            .unwrap_or(self.selectable_rows() - 1);
+            .unwrap_or(self.nav_rows() - 1);
     }
 
     /// Move the cursor down one row, wrapping from the bottom to the top.
     pub fn move_down(&mut self) {
-        self.selected_index = (self.selected_index + 1) % self.selectable_rows();
+        self.selected_index = (self.selected_index + 1) % self.nav_rows();
     }
 }

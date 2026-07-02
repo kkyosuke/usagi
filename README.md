@@ -151,7 +151,7 @@ cargo run -- hop  # TUI を起動
 
 | モード | 役割 | 主な操作 |
 |---|---|---|
-| **切替**（Switch） | 既定。セッションの選択・新規作成 | 左ペインで `↑↓` 選択・`←→`（または `Ctrl-N`/`Ctrl-P`）でタブ切替・`Enter` 確定・`c` で新規作成・`r` で表示名変更・`n` でメモ編集（選択中の行のメモ＝次回 TODO は右ペインに表示。ルート行はワークスペースルートのメモ） |
+| **切替**（Switch） | 既定。セッションの選択・新規作成 | 左ペインで `↑↓` 選択・`←→`（または `Ctrl-N`/`Ctrl-P`。右ペインのタブチップの左クリックも同じ）でタブ切替・右クリックでタブメニュー（左右移動・名前変更・削除）・`Enter` 確定・`c` で新規作成・`r` で表示名変更・`n` でメモ編集（選択中の行のメモ＝次回 TODO は右ペインに表示。ルート行はワークスペースルートのメモ） |
 | **在席**（Focus） | 選択中セッションのコマンド | 右ペインで `terminal` / `agent` を起動・`Ctrl-N`/`Ctrl-P` でタブ切替・`Ctrl-E` でメモ編集 |
 | **没入**（Attached） | 埋め込みシェル / Agent | ライブ端末を直接操作（予約キーは `Ctrl-O`・`Ctrl-N`/`Ctrl-P`・`Ctrl-E`（メモ編集）。`Ctrl-N`/`Ctrl-P` で没入のままタブを前後に切替）。マウス左ドラッグでテキストを選択し、離すとコピー。リンクを左クリックすると既定のブラウザで開く |
 | コマンドパレット（**統括** / Overview） | ワークスペース全体のコマンド（常駐モードではない） | `:` で開き、`session` / `unite` / `config` / `issue` などを実行。`Esc` で閉じて元のモードへ戻る |
@@ -165,6 +165,8 @@ agent                      # 選んだセッションで Agent CLI（既定 clau
 ```
 
 `agent` は選択中セッションの worktree でシェルを右ペインに埋め込み、設定中の Agent CLI（既定 `claude`、Config・ローカル設定で変更可）を起動します。このとき usagi の MCP サーバ（後述）を組み込むため、エージェントは起動直後から `issue_*` tool でタスクを、`memory_*` tool でメモリを操作できます（Claude は `--mcp-config`、Codex は `-c` 設定上書きで注入。Codex 互換の `codex-fugu` も同方式で組み込みます。Gemini はインライン注入フラグが無いため MCP は組み込まず、`-r latest` での会話再開と `-i` での初期プロンプトのみ配線します）。素のシェルだけ欲しいときは `terminal` を使います。
+
+workspace の `<repo>/.usagi/settings.json` に `env` map を設定すると、`agent` / `terminal` の新規 pane 起動時に `op://...` reference を `op read --no-newline` で解決して子プロセス環境へ注入できます。例えば `{"env":{"GH_TOKEN":"op://Private/GitHub/token"}}` とすると、その workspace で起動した agent や terminal 内の `gh` は `GH_TOKEN` を利用できます。secret 本体は設定ファイルや起動コマンド行には保存されません。
 
 各セッションのシェルは画面を開いている間プールに常駐するので、`Ctrl-O` で切替へズームアウトして別セッションへ移っても、裏で `claude` は動き続けます。usagi を終了して再び開いたときも、前回開いていたペイン（agent / terminal）を起動時にバックグラウンドで復旧し、agent は前回の会話の続きから再開します（設定 `restore_panes_enabled`、既定 ON。[document/04-orchestration.md#ペインの復旧](document/04-orchestration.md#ペインの復旧)）。左ペインは各セッションを 2 行で表示し、**稼働中は `▶ running`（緑）／入力待ちは `◆ waiting`（黄色）／アイドルは `⏸ idle`（シアン）** でひと目で状態がわかります。アタッチしていないセッションが入力待ちになるとデスクトップ通知（`🐰 <ブランチ名> が入力待ちです`）も出るため、複数セッションを並行で走らせ、入力が必要になったものだけに対応できます（通知は `notifications_enabled` が ON のとき。状態は `claude` / `codex` のライフサイクルフックで判定し、フックを持たない Agent ではターミナルベルで推定します。詳細は [document/04-orchestration.md#Agent フックによる状態報告](document/04-orchestration.md#agent-フックによる状態報告)）。
 

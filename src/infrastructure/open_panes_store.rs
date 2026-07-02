@@ -53,6 +53,10 @@ pub struct StoredPane {
     /// terminal pane, which has no agent to resume.
     #[serde(default)]
     pub cli: Option<AgentCli>,
+    /// Optional user-facing label override shown on the tab chip. `None` means
+    /// use the kind-derived default (`agent`, `terminal 2`, ...).
+    #[serde(default)]
+    pub label: Option<String>,
 }
 
 /// A session's open-pane snapshot: the panes in tab order plus which one was
@@ -141,6 +145,7 @@ mod tests {
         StoredPane {
             kind: StoredPaneKind::Agent,
             cli: Some(cli),
+            label: None,
         }
     }
 
@@ -148,6 +153,7 @@ mod tests {
         StoredPane {
             kind: StoredPaneKind::Terminal,
             cli: None,
+            label: None,
         }
     }
 
