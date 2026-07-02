@@ -35,6 +35,13 @@ pub trait Palette: Sized {
     fn info(self) -> Self;
 }
 
+/// ANSI-256 index for the `info` role: a soft sky-blue that reads as a hyperlink
+/// without the glare of the terminal's raw bright-blue. Chosen as the nearest
+/// 256-cube colour to [`LINK_RGB`] (95,175,255 ≈ 102,178,255) so console-rendered
+/// links (PR badges, `#123` popups, link spans, brand-new items) match the soft
+/// blue the embedded terminal paints its hyperlinks with.
+const INFO_256: u8 = 75;
+
 impl Palette for Style {
     fn accent(self) -> Self {
         self.cyan()
@@ -52,7 +59,7 @@ impl Palette for Style {
         self.magenta()
     }
     fn info(self) -> Self {
-        self.blue()
+        self.color256(INFO_256)
     }
 }
 
@@ -73,7 +80,7 @@ impl<D> Palette for StyledObject<D> {
         self.magenta()
     }
     fn info(self) -> Self {
-        self.blue()
+        self.color256(INFO_256)
     }
 }
 
@@ -86,7 +93,9 @@ pub const TITLE_FADE: [u8; 4] = [22, 28, 34, 40];
 /// Hyperlink colour (RGB) for text rendered inside the embedded terminal.
 ///
 /// Kept as a plain tuple so it stays independent of the `vt100` colour type the
-/// terminal renderer wraps it in.
+/// terminal renderer wraps it in. The console-side [`Palette::info`] role mirrors
+/// this shade via its nearest 256-cube index ([`INFO_256`]) so links look the
+/// same whether painted by `console` or the embedded terminal.
 pub const LINK_RGB: (u8, u8, u8) = (102, 178, 255);
 
 #[cfg(test)]
@@ -99,8 +108,9 @@ mod tests {
 
     #[test]
     fn roles_match_their_ansi_colours() {
-        // The palette is a thin semantic alias over console's colours; each role
-        // must render byte-for-byte identically to the colour it stands for.
+        // The palette is a thin semantic alias over console's colours; each base
+        // role must render byte-for-byte identically to the colour it stands for
+        // (`info` is the exception, checked separately below).
         assert_eq!(
             forced().accent().apply_to("x").to_string(),
             forced().cyan().apply_to("x").to_string()
@@ -121,9 +131,11 @@ mod tests {
             forced().feature().apply_to("x").to_string(),
             forced().magenta().apply_to("x").to_string()
         );
+        // `info` is the one role that is not a plain ANSI alias: it maps to a
+        // soft 256-cube sky-blue matching the embedded terminal's link colour.
         assert_eq!(
             forced().info().apply_to("x").to_string(),
-            forced().blue().apply_to("x").to_string()
+            forced().color256(INFO_256).apply_to("x").to_string()
         );
     }
 
