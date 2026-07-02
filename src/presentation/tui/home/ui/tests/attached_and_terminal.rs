@@ -148,6 +148,10 @@ fn focus_tab_at_switches_between_pane_tabs_while_off_the_new_tab() {
         focus_tab_at(&state, active_col, geo.origin_row, 24, 120),
         None
     );
+    assert_eq!(
+        focus_tab_hit(&state, active_col, geo.origin_row, 24, 120),
+        Some(0)
+    );
 }
 
 #[test]
@@ -213,6 +217,12 @@ fn switch_tab_at_ignores_the_active_tab_and_clicks_off_the_strip() {
         switch_tab_at(&state, col, geo.origin_row + TAB_BAR_ROWS as u16, 24, 120),
         None
     );
+    // The context-menu hit-test includes the active tab, unlike the left-click
+    // selection helper.
+    assert_eq!(
+        switch_tab_hit(&state, active_col, geo.origin_row, 24, 120),
+        Some(0)
+    );
 }
 
 #[test]
@@ -240,6 +250,52 @@ fn switch_tab_at_is_none_for_a_non_live_row_or_without_a_strip() {
     empty.set_terminal_tabs(Vec::new(), 0);
     assert_eq!(
         switch_tab_at(&empty, geo.origin_col, geo.origin_row, 24, 120),
+        None
+    );
+}
+
+#[test]
+fn tab_context_hit_tests_cover_empty_and_off_row_paths() {
+    let geo = terminal_geometry(24, 120, Sidebar::Full);
+
+    let mut focus = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
+    focus.enter_focus(1);
+    focus.set_terminal_tabs(Vec::new(), 0);
+    assert_eq!(
+        focus_tab_hit(&focus, geo.origin_col, geo.origin_row, 24, 120),
+        None
+    );
+    focus.set_terminal_tabs(vec!["agent".to_string()], 0);
+    assert_eq!(
+        focus_tab_hit(&focus, geo.origin_col, geo.origin_row - 1, 24, 120),
+        None
+    );
+    // While Focus is on "+ new", that chip is part of the rendered strip but not
+    // a live pane target for the context menu.
+    let new_col = chip_column(&focus, geo, "2 + new");
+    assert_eq!(
+        focus_tab_hit(&focus, new_col, geo.origin_row, 24, 120),
+        None
+    );
+
+    let mut switch = state_with(vec![worktree(Some("main"), false, BranchStatus::Local)]);
+    switch.enter_switch(super::super::super::state::ReturnMode::Base);
+    switch.switch_move_down();
+    switch.set_terminal_tabs(Vec::new(), 0);
+    assert_eq!(
+        switch_tab_hit(&switch, geo.origin_col, geo.origin_row, 24, 120),
+        None
+    );
+    switch.set_terminal_tabs(vec!["agent".to_string()], 0);
+    assert_eq!(
+        switch_tab_hit(&switch, geo.origin_col, geo.origin_row, 24, 120),
+        None
+    );
+
+    let live = switch_with_tabs(0);
+    let col = chip_column(&live, geo, "1 agent");
+    assert_eq!(
+        switch_tab_hit(&live, col, geo.origin_row - 1, 24, 120),
         None
     );
 }

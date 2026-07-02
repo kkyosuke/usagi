@@ -388,6 +388,273 @@ fn a_right_click_on_a_switch_tab_opens_a_menu_and_runs_the_selected_action() {
     );
 }
 
+fn run_switch_tab_menu_inputs(after_open: Vec<io::Result<Input>>) -> Vec<TabMenuAction> {
+    let term = Term::stdout();
+    let (height, width) = term.size();
+    let mut state = sample_state();
+    state.apply_badges(MonitorSnapshot {
+        live: [PathBuf::from("/r/feat")].into(),
+        ..Default::default()
+    });
+    state.switch_move_down();
+    state.switch_move_down(); // feat
+    state.set_terminal_tabs(vec!["a".to_string(), "b".to_string()], 1);
+    let geo = crate::presentation::tui::home::ui::terminal_geometry(
+        height as usize,
+        width as usize,
+        state.sidebar(),
+    );
+    let col = (geo.origin_col..geo.origin_col + geo.cols)
+        .find(|&col| {
+            crate::presentation::tui::home::ui::switch_tab_hit(
+                &state,
+                col,
+                geo.origin_row,
+                height as usize,
+                width as usize,
+            ) == Some(1)
+        })
+        .expect("switch preview tab chip is visible at the test terminal width");
+    let mut inputs = vec![right_click(col, geo.origin_row)];
+    inputs.extend(after_open);
+    inputs.extend([
+        Ok(Input::Key(Key::Char(CTRL_Q))),
+        Ok(Input::Key(Key::Char('y'))),
+    ]);
+
+    let actions = RefCell::new(Vec::new());
+    let mut tab_action = |_: &mut HomeState, _: &Path, _: usize, action: TabMenuAction| {
+        actions.borrow_mut().push(action);
+    };
+    let mut reader = InputReader::new(inputs);
+    let monitor = MonitorHandle::with_live(vec![PathBuf::from("/r/feat")]);
+    let mut persist: fn(&str) = noop_persist;
+    let mut create: fn(&Path, &str, u64) = |_, _, _| {};
+    let mut rename = |_: &Path, n: &str, l: &str| noop_rename(n, l);
+    let mut note = |_: &Path, n: &str, v: &str| noop_set_note(n, v);
+    let mut reorder: fn(&str, bool) -> SessionReorder = noop_reorder;
+    let mut remove: fn(&Path, &str, bool, Option<AutoFocus>) = |_, _, _, _| {};
+    let mut unite_resolve: fn(&str) -> std::result::Result<GroupSource, String> = no_unite_resolve;
+    let mut dispatch_update = || {};
+    let mut evict: fn(&Path) = |_| {};
+    let mut branches: fn() -> Vec<String> = no_branches;
+    let mut open: fn(&mut HomeState, &Path, bool, bool) -> Result<PaneExit> = noop_open;
+    let mut open_url: fn(&str) = noop_open_url;
+    let mut config: fn(&Term) -> Result<Option<ConfigReload>> = noop_config;
+    let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = live_preview;
+    let mut tab_op = |_: &Path, _: Option<TabNav>| -> (Vec<String>, usize) {
+        (vec!["a".to_string(), "b".to_string()], 1)
+    };
+    let mut close: fn(&mut HomeState, &Path) = noop_close;
+    let mut save_resume = |_: &str, _: ResumeLevel| {};
+    let mut save_last_active = |_: &[(String, DateTime<Utc>)]| {};
+    let mut wiring = Wiring {
+        interaction_epoch: 0,
+        workspace_root: Path::new("/ws"),
+        persist: &mut persist,
+        dispatch_create: &mut create,
+        rename_display: &mut rename,
+        set_note: &mut note,
+        reorder_session: &mut reorder,
+        dispatch_remove: &mut remove,
+        unite_resolve: &mut unite_resolve,
+        dispatch_update: &mut dispatch_update,
+        evict_pool: &mut evict,
+        existing_branches: &mut branches,
+        open_terminal: &mut open,
+        open_url: &mut open_url,
+        open_config: &mut config,
+        preview: &mut preview,
+        tab_op: &mut tab_op,
+        close_tab: &mut close,
+        tab_action: &mut tab_action,
+        save_resume: &mut save_resume,
+        save_last_active: &mut save_last_active,
+    };
+    let outcome = event_loop(
+        &term,
+        &mut reader,
+        state,
+        &monitor,
+        &UpdateHandle::new(),
+        &SessionsRefreshHandle::new(),
+        &OneShot::<bool>::new(),
+        &OneShot::<Vec<AgentCli>>::new(),
+        &TaskHandle::new(),
+        &mut wiring,
+    )
+    .unwrap();
+    assert!(matches!(outcome, Outcome::Quit));
+    actions.into_inner()
+}
+
+#[test]
+fn switch_tab_menu_runs_move_right_close_and_rename_actions() {
+    assert_eq!(
+        run_switch_tab_menu_inputs(vec![
+            Ok(Input::Key(Key::ArrowDown)),
+            Ok(Input::Key(Key::Enter)),
+        ]),
+        vec![TabMenuAction::Move(TabSwap::Right)]
+    );
+
+    assert_eq!(
+        run_switch_tab_menu_inputs(vec![
+            Ok(Input::Key(Key::ArrowUp)),
+            Ok(Input::Key(Key::Enter)),
+        ]),
+        vec![TabMenuAction::Close]
+    );
+
+    assert_eq!(
+        run_switch_tab_menu_inputs(vec![
+            Ok(Input::Key(Key::ArrowDown)),
+            Ok(Input::Key(Key::ArrowDown)),
+            Ok(Input::Key(Key::Enter)),
+            Ok(Input::Key(Key::Home)),
+            Ok(Input::Key(Key::ArrowRight)),
+            Ok(Input::Key(Key::Backspace)),
+            Ok(Input::Key(Key::Del)),
+            Ok(Input::Key(Key::Char('X'))),
+            Ok(Input::Key(Key::End)),
+            Ok(Input::Key(Key::Char('!'))),
+            Ok(Input::Key(Key::PageUp)),
+            Ok(Input::Key(Key::Enter)),
+        ]),
+        vec![TabMenuAction::Rename("X!".to_string())]
+    );
+}
+
+#[test]
+fn tab_menu_escape_and_right_click_miss_dismiss_the_menu() {
+    assert!(run_switch_tab_menu_inputs(vec![
+        Ok(Input::Key(Key::PageUp)),
+        Ok(Input::Key(Key::Escape)),
+    ])
+    .is_empty());
+    assert!(run_switch_tab_menu_inputs(vec![
+        Ok(Input::Key(Key::ArrowDown)),
+        Ok(Input::Key(Key::ArrowDown)),
+        Ok(Input::Key(Key::Enter)),
+        Ok(Input::Key(Key::ArrowLeft)),
+        Ok(Input::Key(Key::Escape)),
+    ])
+    .is_empty());
+    assert!(run_switch_tab_menu_inputs(vec![right_click(0, 0)]).is_empty());
+}
+
+#[test]
+fn right_click_tab_paths_cover_focus_and_attached_modes() {
+    let term = Term::stdout();
+    let (height, width) = term.size();
+    let mut focus = sample_state();
+    focus.enter_focus(2);
+    focus.set_terminal_tabs(vec!["a".to_string(), "b".to_string()], 0);
+    let geo = crate::presentation::tui::home::ui::terminal_geometry(
+        height as usize,
+        width as usize,
+        focus.sidebar(),
+    );
+    let col = (geo.origin_col..geo.origin_col + geo.cols)
+        .find(|&col| {
+            crate::presentation::tui::home::ui::focus_tab_hit(
+                &focus,
+                col,
+                geo.origin_row,
+                height as usize,
+                width as usize,
+            ) == Some(1)
+        })
+        .expect("focus tab chip is visible");
+    // In Focus, the right click opens the same tab menu, and Enter executes the
+    // default Move-left action for the clicked tab.
+    let actions = {
+        let actions = RefCell::new(Vec::new());
+        let mut tab_action = |_: &mut HomeState, _: &Path, _: usize, action: TabMenuAction| {
+            actions.borrow_mut().push(action);
+        };
+        let mut reader = InputReader::new(vec![
+            right_click(col, geo.origin_row),
+            Ok(Input::Key(Key::Enter)),
+            Ok(Input::Key(Key::CtrlC)),
+        ]);
+        let monitor = MonitorHandle::detached();
+        let mut persist: fn(&str) = noop_persist;
+        let mut create: fn(&Path, &str, u64) = |_, _, _| {};
+        let mut rename = |_: &Path, n: &str, l: &str| noop_rename(n, l);
+        let mut note = |_: &Path, n: &str, v: &str| noop_set_note(n, v);
+        let mut reorder: fn(&str, bool) -> SessionReorder = noop_reorder;
+        let mut remove: fn(&Path, &str, bool, Option<AutoFocus>) = |_, _, _, _| {};
+        let mut unite_resolve: fn(&str) -> std::result::Result<GroupSource, String> =
+            no_unite_resolve;
+        let mut dispatch_update = || {};
+        let mut evict: fn(&Path) = |_| {};
+        let mut branches: fn() -> Vec<String> = no_branches;
+        let mut open: fn(&mut HomeState, &Path, bool, bool) -> Result<PaneExit> = noop_open;
+        let mut open_url: fn(&str) = noop_open_url;
+        let mut config: fn(&Term) -> Result<Option<ConfigReload>> = noop_config;
+        let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = live_preview;
+        let mut tab_op = |_: &Path, _: Option<TabNav>| -> (Vec<String>, usize) {
+            (vec!["a".to_string(), "b".to_string()], 0)
+        };
+        let mut close: fn(&mut HomeState, &Path) = noop_close;
+        let mut save_resume = |_: &str, _: ResumeLevel| {};
+        let mut save_last_active = |_: &[(String, DateTime<Utc>)]| {};
+        let mut wiring = Wiring {
+            interaction_epoch: 0,
+            workspace_root: Path::new("/ws"),
+            persist: &mut persist,
+            dispatch_create: &mut create,
+            rename_display: &mut rename,
+            set_note: &mut note,
+            reorder_session: &mut reorder,
+            dispatch_remove: &mut remove,
+            unite_resolve: &mut unite_resolve,
+            dispatch_update: &mut dispatch_update,
+            evict_pool: &mut evict,
+            existing_branches: &mut branches,
+            open_terminal: &mut open,
+            open_url: &mut open_url,
+            open_config: &mut config,
+            preview: &mut preview,
+            tab_op: &mut tab_op,
+            close_tab: &mut close,
+            tab_action: &mut tab_action,
+            save_resume: &mut save_resume,
+            save_last_active: &mut save_last_active,
+        };
+        assert!(matches!(
+            event_loop(
+                &term,
+                &mut reader,
+                focus,
+                &monitor,
+                &UpdateHandle::new(),
+                &SessionsRefreshHandle::new(),
+                &OneShot::<bool>::new(),
+                &OneShot::<Vec<AgentCli>>::new(),
+                &TaskHandle::new(),
+                &mut wiring,
+            )
+            .unwrap(),
+            Outcome::Quit
+        ));
+        actions.into_inner()
+    };
+    assert_eq!(actions, vec![TabMenuAction::Move(TabSwap::Left)]);
+
+    // Attached mode is not driven by this event loop, but the defensive branch is
+    // still harmless: a right click does not open a home-level menu.
+    let mut attached = sample_state();
+    attached.enter_focus(2);
+    attached.show_attached();
+    let outcome = run_capturing_attached_dirs_for_inputs(
+        vec![click(col, geo.origin_row), right_click(col, geo.origin_row)],
+        attached,
+    );
+    assert!(outcome.is_empty());
+}
+
 #[test]
 fn a_scroll_is_ignored() {
     // The TUI itself never scrolls: a wheel turn is dropped without moving the

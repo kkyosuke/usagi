@@ -151,6 +151,61 @@ pub struct TabRenameInput {
     input: TextInput,
 }
 
+#[cfg(test)]
+mod tab_menu_tests {
+    use super::*;
+
+    #[test]
+    fn tab_menu_moves_wrap_and_exposes_target() {
+        let mut menu = TabMenu::new(PathBuf::from("/repo/wt"), 2, "agent", 10, 4);
+        assert_eq!(menu.dir(), Path::new("/repo/wt"));
+        assert_eq!(menu.tab(), 2);
+        assert_eq!(menu.label(), "agent");
+        assert_eq!(menu.col(), 10);
+        assert_eq!(menu.row(), 4);
+        assert_eq!(menu.cursor(), 0);
+        assert_eq!(menu.item(), TabMenuItem::MoveLeft);
+
+        menu.move_up();
+        assert_eq!(menu.cursor(), 3);
+        assert_eq!(menu.item(), TabMenuItem::Close);
+        menu.move_down();
+        assert_eq!(menu.item(), TabMenuItem::MoveLeft);
+        menu.move_down();
+        assert_eq!(menu.item(), TabMenuItem::MoveRight);
+        menu.move_up();
+        assert_eq!(menu.item(), TabMenuItem::MoveLeft);
+        menu.move_down();
+        menu.move_down();
+        assert_eq!(menu.item(), TabMenuItem::Rename);
+    }
+
+    #[test]
+    fn tab_rename_input_edits_and_confirms_trimmed_label() {
+        let mut input = TabRenameInput::new(PathBuf::from("/repo/wt"), 1, "terminal");
+        assert_eq!(input.dir(), Path::new("/repo/wt"));
+        assert_eq!(input.tab(), 1);
+        assert_eq!(input.value(), "terminal");
+        assert_eq!(input.cursor(), "terminal".len());
+
+        input.move_home();
+        assert_eq!(input.cursor(), 0);
+        input.push_char(' ');
+        input.move_end();
+        input.push_char('!');
+        input.move_left();
+        input.backspace();
+        input.delete_forward();
+        input.move_right();
+        input.push_char(' ');
+
+        let (dir, tab, label) = input.confirm();
+        assert_eq!(dir, PathBuf::from("/repo/wt"));
+        assert_eq!(tab, 1);
+        assert_eq!(label, "termina");
+    }
+}
+
 impl TabRenameInput {
     pub(super) fn new(dir: PathBuf, tab: usize, label: impl Into<String>) -> Self {
         Self {
