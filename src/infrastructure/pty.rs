@@ -109,12 +109,12 @@ pub struct PtySession {
 }
 
 /// The stack the PTY reader thread is given. The thread only loops over a
-/// blocking `read` into an 8 KiB buffer and hands the bytes to `vt100::Parser`
-/// (whose own grid lives on the heap), so it needs far less than a thread's
-/// 2 MiB default stack. One reader thread runs per live pane, so with many
-/// sessions and panes open at once the default stacks alone reserve tens of MiB
-/// of address space; a tighter stack keeps that footprint small. 256 KiB leaves
-/// ample headroom over the shallow read/parse call chain.
+/// blocking `read` into a heap-allocated buffer and hands the bytes to
+/// `vt100::Parser` (whose own grid lives on the heap), so it needs far less than a
+/// thread's 2 MiB default stack. One reader thread runs per live pane, so with
+/// many sessions and panes open at once the default stacks alone reserve tens of
+/// MiB of address space; a tighter stack keeps that footprint small. 256 KiB
+/// leaves ample headroom over the shallow read/parse call chain.
 const READER_STACK_BYTES: usize = 256 * 1024;
 
 /// Configure `cmd` to run `command` in `shell` and then exit, so the launch
@@ -251,7 +251,14 @@ impl PtySession {
                         alive,
                         generation: Arc::clone(&generation),
                     };
-                    let mut buf = [0u8; 8192];
+                    // A 64 KiB read buffer (heap, so the reader thread's stack is
+                    // untouched): during an output flood each `read` returns up to
+                    // this much at once, so a burst is drained in ~1/8 the read
+                    // syscalls, parser-lock acquisitions, and generation bumps that
+                    // an 8 KiB buffer took — cutting contention with the render loop
+                    // that locks the same parser. `parser.process` handles any chunk
+                    // size, so this only changes throughput, not correctness.
+                    let mut buf = vec![0u8; 64 * 1024];
                     loop {
                         match reader.read(&mut buf) {
                             Ok(0) | Err(_) => break,

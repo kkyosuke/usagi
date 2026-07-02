@@ -11,6 +11,10 @@
 pub struct Picker {
     /// Every entry, in their original order.
     entries: Vec<String>,
+    /// `entries` pre-lowercased and index-aligned, so [`refilter`](Self::refilter)
+    /// only lowercases the short query on each keystroke instead of every entry
+    /// (the match is a case-insensitive substring test).
+    lowercased: Vec<String>,
     /// The current search query.
     query: String,
     /// Indices into `entries` that match `query`, in order.
@@ -23,8 +27,10 @@ impl Picker {
     /// Builds a picker over `entries` with an empty query (so every entry
     /// matches) and the cursor at the top.
     pub fn new(entries: Vec<String>) -> Self {
+        let lowercased = entries.iter().map(|e| e.to_lowercase()).collect();
         let mut picker = Self {
             entries,
+            lowercased,
             query: String::new(),
             matches: Vec::new(),
             cursor: 0,
@@ -78,6 +84,7 @@ impl Picker {
     /// Replace the entries (e.g. after navigating elsewhere), clearing the query
     /// and resetting the cursor.
     pub fn set_entries(&mut self, entries: Vec<String>) {
+        self.lowercased = entries.iter().map(|e| e.to_lowercase()).collect();
         self.entries = entries;
         self.query.clear();
         self.refilter();
@@ -109,10 +116,10 @@ impl Picker {
     fn refilter(&mut self) {
         let needle = self.query.to_lowercase();
         self.matches = self
-            .entries
+            .lowercased
             .iter()
             .enumerate()
-            .filter(|(_, entry)| entry.to_lowercase().contains(&needle))
+            .filter(|(_, entry)| entry.contains(&needle))
             .map(|(i, _)| i)
             .collect();
         self.cursor = 0;
