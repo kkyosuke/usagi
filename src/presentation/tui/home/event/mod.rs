@@ -34,7 +34,9 @@ use super::update::UpdateHandle;
 
 mod handlers;
 
-use handlers::{focus_click, focus_key, note_editor_key, palette_key, switch_click, switch_key};
+use handlers::{
+    env_editor_key, focus_click, focus_key, note_editor_key, palette_key, switch_click, switch_key,
+};
 
 /// The byte `console` reports for `Ctrl-O` on the home screen: a bare control
 /// character (`0x0f`), since `console` only special-cases a handful of control
@@ -1019,6 +1021,15 @@ pub(super) fn event_loop(
         // which needs the terminal / wiring.
         if state.note_editor().is_some() {
             note_editor_key(term, &mut state, &mut painter, key, wiring);
+            continue;
+        }
+
+        // The workspace-env editor (`env`), when open, captures every key: it sits
+        // *over* the palette (which stays open beneath it), so `Ctrl-S` saves the
+        // bindings and `Esc` cancels — either way returning to the Overview. The
+        // editing keys edit the multi-line buffer.
+        if state.env_editor().is_some() {
+            env_editor_key(&mut state, key, wiring);
             continue;
         }
 

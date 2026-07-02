@@ -123,7 +123,9 @@ impl Config {
         // disjoint. Every other local field cycles a fixed set in place.
         match field {
             LocalField::DefaultBranch => self.cycle_default_branch(forward),
-            LocalField::SetupCommands => false,
+            // Action rows open an editor rather than cycling a value in place, so
+            // ←/→ have nothing to change.
+            LocalField::SetupCommands | LocalField::EnvVars => false,
             LocalField::AgentCli => {
                 // The override cycles "follow global" then each installed agent;
                 // an already-set override is kept selectable even if uninstalled.

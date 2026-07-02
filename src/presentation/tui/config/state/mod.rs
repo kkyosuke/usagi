@@ -16,7 +16,7 @@ use crate::domain::settings::{
 };
 
 mod modal;
-pub use modal::{InstallModal, ModelModal, ModelRow, SetupCommandsModal};
+pub use modal::{EnvModal, InstallModal, ModelModal, ModelRow, SetupCommandsModal};
 
 /// The themes in the order they cycle through.
 const THEMES: [Theme; 3] = [Theme::Light, Theme::Dark, Theme::System];
@@ -100,17 +100,21 @@ pub enum LocalField {
     BranchSource,
     /// Commands run in the session root after a new session is created.
     SetupCommands,
+    /// Environment variables resolved from 1Password references and injected into
+    /// panes launched in this workspace.
+    EnvVars,
 }
 
 impl LocalField {
     /// The local override fields shown on the screen, top to bottom.
-    pub const ALL: [LocalField; 6] = [
+    pub const ALL: [LocalField; 7] = [
         LocalField::AgentCli,
         LocalField::Notifications,
         LocalField::RestorePanes,
         LocalField::DefaultBranch,
         LocalField::BranchSource,
         LocalField::SetupCommands,
+        LocalField::EnvVars,
     ];
 
     /// The label shown beside the field's value.
@@ -122,6 +126,7 @@ impl LocalField {
             LocalField::DefaultBranch => "Default Branch",
             LocalField::BranchSource => "Branch Source",
             LocalField::SetupCommands => "Setup Commands",
+            LocalField::EnvVars => "Env Vars",
         }
     }
 }
@@ -209,6 +214,9 @@ pub struct Config {
     /// The open setup-commands editor, when the workspace-local Setup Commands
     /// row is being edited. While set it captures all keys.
     setup_modal: Option<SetupCommandsModal>,
+    /// The open workspace-env editor, when the workspace-local Env Vars row is
+    /// being edited. While set it captures all keys.
+    env_modal: Option<EnvModal>,
     /// The provisioning launched in the background and not yet reflected into the
     /// screen, if any. The install runs off-thread (see the global install task),
     /// so when it finishes this records what to apply: the runtime became present,
@@ -250,6 +258,7 @@ impl Config {
             install_modal: None,
             model_modal: None,
             setup_modal: None,
+            env_modal: None,
             pending_install: None,
             scope: Scope::Global,
             selected_index: 0,
@@ -279,6 +288,7 @@ impl Config {
             install_modal: None,
             model_modal: None,
             setup_modal: None,
+            env_modal: None,
             pending_install: None,
             scope: Scope::Local,
             selected_index: 0,
@@ -352,6 +362,11 @@ impl Config {
     /// Whether the focused row is the workspace-local Setup Commands action row.
     pub fn setup_row_active(&self) -> bool {
         matches!(self.selected_local_field(), Some(LocalField::SetupCommands))
+    }
+
+    /// Whether the focused row is the workspace-local Env Vars action row.
+    pub fn env_row_active(&self) -> bool {
+        matches!(self.selected_local_field(), Some(LocalField::EnvVars))
     }
 
     /// Adopt `model` as the one in use (an edit, saved with the rest). Used when
@@ -545,6 +560,7 @@ impl Config {
             LocalField::SetupCommands => {
                 local.settings.setup_commands != local.baseline.setup_commands
             }
+            LocalField::EnvVars => local.settings.env != local.baseline.env,
         }
     }
 
@@ -655,6 +671,16 @@ impl Config {
                     n => format!("Edit ({n} commands)"),
                 }
             }
+            // Count only the valid bindings (the same ones that will actually be
+            // resolved), so the summary matches what is injected at launch.
+            LocalField::EnvVars => {
+                let count = local.settings.env().count();
+                match count {
+                    0 => "Edit (none)".to_string(),
+                    1 => "Edit (1 var)".to_string(),
+                    n => format!("Edit ({n} vars)"),
+                }
+            }
         }
     }
 
@@ -723,7 +749,7 @@ impl Config {
                     label: field.label(),
                     value: self.value_of_local(field),
                     changed: self.is_local_changed(field),
-                    action: field == LocalField::SetupCommands,
+                    action: matches!(field, LocalField::SetupCommands | LocalField::EnvVars),
                     disabled: false,
                 })
                 .collect(),
