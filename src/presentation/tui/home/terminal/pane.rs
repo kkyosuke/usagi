@@ -374,6 +374,20 @@ fn drive(
             scrollback = pty.set_scrollback(scrollback);
             applied_scrollback = Some(scrollback);
             interactive = true;
+        } else if scrollback > 0 {
+            // No user scroll this pass, but output streaming in while scrolled
+            // back advances the parser's offset on its own to keep the viewed
+            // region pinned (the `scroll_up` patch in `third_party/vt100` bumps
+            // the offset as lines enter the scrollback). Adopt that advance so
+            // the next wheel / `Shift`+`PageUp` notch scrolls relative to where
+            // the view actually sits. Without it the tracked offset goes stale
+            // and a single notch snaps the view across every line that streamed
+            // in — the scroll jumps and older/newer content briefly overlap.
+            let actual = pty.scrollback();
+            if actual != scrollback {
+                scrollback = actual;
+                applied_scrollback = Some(actual);
+            }
         }
         // Fresh shell output (or the shell exiting) bumps the generation.
         let gen = pty.generation();

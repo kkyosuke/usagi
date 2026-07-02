@@ -386,6 +386,16 @@ impl PtySession {
         }
     }
 
+    /// The scroll offset currently applied to the buffered history (`0` is the
+    /// live screen). Output streaming in while the pane is scrolled back advances
+    /// this on its own — the vendored `vt100`'s `scroll_up` bumps the offset as
+    /// lines enter the scrollback so the viewed region stays pinned — so the
+    /// render loop reads it back to keep its tracked offset in step (otherwise a
+    /// later wheel notch would scroll relative to a stale value).
+    pub fn scrollback(&self) -> usize {
+        self.parser().screen().scrollback()
+    }
+
     /// Whether the shell is still running (the reader has not hit EOF).
     pub fn is_alive(&self) -> bool {
         self.alive.load(Ordering::SeqCst)
@@ -605,6 +615,34 @@ mod tests {
             screen.scrollback(),
             0,
             "an offset region must not feed the scrollback"
+        );
+    }
+
+    /// While the pane is scrolled back, output streaming in advances the parser's
+    /// own offset so the viewed region stays pinned to the same lines. The render
+    /// loop (`terminal/pane.rs`) relies on this to re-read the offset and keep its
+    /// tracked value in step — otherwise a later wheel notch scrolls relative to a
+    /// stale offset and the view jumps by however many lines streamed in. This
+    /// guards the offset auto-advance in the vendored `vt100` `scroll_up`.
+    #[test]
+    fn streaming_output_advances_the_offset_while_scrolled_back() {
+        let mut parser = vt100::Parser::new(6, 20, 1000);
+        for i in 0..50 {
+            parser.process(format!("line {i}\r\n").as_bytes());
+        }
+        // Scroll back a few lines into the history.
+        parser.screen_mut().set_scrollback(3);
+        assert_eq!(parser.screen().scrollback(), 3);
+        // Ten more lines stream in with no further scroll input.
+        for i in 50..60 {
+            parser.process(format!("line {i}\r\n").as_bytes());
+        }
+        // The offset advanced by the ten streamed lines so the same content stays
+        // in view — the value the render loop must adopt.
+        assert_eq!(
+            parser.screen().scrollback(),
+            13,
+            "the offset must track the lines that streamed in while scrolled back"
         );
     }
 }
