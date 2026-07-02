@@ -251,6 +251,7 @@ fn worktree_row_marks_the_cursor_in_switch_and_shows_detached() {
         false,
         false,
         false,
+        None,
     );
     assert!(top.contains('>'));
     assert!(top.contains('●'));
@@ -272,6 +273,7 @@ fn worktree_row_marks_the_cursor_in_switch_and_shows_detached() {
         false,
         false,
         false,
+        None,
     );
     assert!(!top_no_switch.contains('>'));
 
@@ -290,6 +292,7 @@ fn worktree_row_marks_the_cursor_in_switch_and_shows_detached() {
         false,
         false,
         false,
+        None,
     );
     assert!(!other_top.contains('>'));
     assert!(other_top.contains('●'));
@@ -310,6 +313,7 @@ fn worktree_row_marks_the_cursor_in_switch_and_shows_detached() {
         false,
         false,
         false,
+        None,
     );
     assert!(detached_top.contains("(detached)"));
 }
@@ -333,6 +337,7 @@ fn worktree_row_shows_a_memo_marker_only_when_the_session_has_a_note() {
         false,
         false,
         false,
+        None,
     )
     .0;
     let without_note = worktree_row(
@@ -350,6 +355,7 @@ fn worktree_row_shows_a_memo_marker_only_when_the_session_has_a_note() {
         false,
         false,
         false,
+        None,
     )
     .0;
     assert!(with_note.contains(NOTE_ICON));
@@ -388,6 +394,7 @@ fn worktree_row_heat_dot_fades_with_time_since_touched() {
             false,
             false,
             false,
+            None,
         );
         console::strip_ansi_codes(&top).into_owned()
     };
@@ -417,6 +424,7 @@ fn worktree_row_marks_the_active_worktree_with_a_gutter_bar_on_both_lines() {
         false,
         false,
         false,
+        None,
     );
     // The green `▎` accent bar runs down both lines of the active row (the
     // detail line carries it too, to the left of the agent state).
@@ -439,6 +447,7 @@ fn worktree_row_marks_the_active_worktree_with_a_gutter_bar_on_both_lines() {
         false,
         false,
         false,
+        None,
     );
     assert!(!idle_top.contains('▎'));
     assert!(!idle_detail.contains('▎'));
@@ -462,6 +471,7 @@ fn worktree_row_shows_the_agent_state_through_its_lifecycle() {
         false,
         false,
         false,
+        None,
     );
     assert!(ready_detail.contains('☾'));
     assert!(ready_detail.contains("ready"));
@@ -482,6 +492,7 @@ fn worktree_row_shows_the_agent_state_through_its_lifecycle() {
         true,
         false,
         false,
+        None,
     );
     assert!(running_detail.contains('▶'));
     assert!(running_detail.contains("running"));
@@ -502,6 +513,7 @@ fn worktree_row_shows_the_agent_state_through_its_lifecycle() {
         true,
         true,
         false,
+        None,
     );
     assert!(waiting_detail.contains('◆'));
     assert!(!waiting_detail.contains('▶'));
@@ -523,6 +535,7 @@ fn worktree_row_shows_the_agent_state_through_its_lifecycle() {
         true,
         false,
         true,
+        None,
     );
     assert!(done_detail.contains('✓'));
     assert!(done_detail.contains("done"));
@@ -544,6 +557,7 @@ fn worktree_row_shows_the_agent_state_through_its_lifecycle() {
         false,
         false,
         false,
+        None,
     );
     assert!(!absent_detail.contains('▶'));
     assert!(!absent_detail.contains('◆'));
@@ -587,6 +601,7 @@ fn worktree_row_truncates_a_long_branch() {
         false,
         false,
         false,
+        None,
     );
     assert!(top.contains('…'));
 }
@@ -608,6 +623,7 @@ fn worktree_row_shows_the_label_override_instead_of_the_branch() {
         false,
         false,
         false,
+        None,
     );
     assert!(top.contains("Login flow"));
     assert!(!top.contains("feat-login"));
@@ -669,6 +685,7 @@ fn left_pane_marks_the_root_row_when_it_carries_a_note() {
         false,
         Sidebar::Full,
         Utc::now(),
+        None,
     );
     // Line 0 is the root row; with the marker set it shows the memo glyph.
     assert!(lines[0].contains(NOTE_ICON));
@@ -688,6 +705,7 @@ fn left_pane_renders_the_root_entry_then_the_empty_message() {
         false,
         Sidebar::Full,
         Utc::now(),
+        None,
     );
     assert_eq!(lines.len(), 5);
     assert!(lines[0].contains(ROOT_NAME));
@@ -721,6 +739,7 @@ fn left_pane_shows_each_sessions_relative_update_time_on_the_detail_line() {
         false,
         Sidebar::Full,
         now,
+        None,
     );
     // Root (2 lines) + divider + the session's 2 lines: the freshness label sits
     // on the session's detail line (index 4).
@@ -750,6 +769,7 @@ fn left_pane_shows_the_ahead_behind_marker_on_the_detail_line() {
         false,
         Sidebar::Full,
         Utc::now(),
+        None,
     );
     // The session's detail line (index 4) carries the `↑N ↓M` commit marker.
     let detail = console::strip_ansi_codes(&lines[4]);
@@ -803,6 +823,7 @@ fn left_pane_lines_the_detail_fields_up_across_sessions_of_different_sizes() {
         false,
         Sidebar::Full,
         now,
+        None,
     );
     // Detail lines: small at index 4, big at index 7 (each entry spans three rows).
     let small_detail = console::strip_ansi_codes(&lines[4]);
@@ -841,6 +862,7 @@ fn left_pane_renders_the_root_entry_then_one_entry_per_worktree() {
         false,
         Sidebar::Full,
         Utc::now(),
+        None,
     );
     // Root (2 lines), a divider, then 3 lines per worktree (identity, detail,
     // resource).
@@ -877,6 +899,7 @@ fn left_pane_in_unite_mode_heads_each_workspace_with_its_name() {
         false,
         Sidebar::Full,
         Utc::now(),
+        None,
     );
     let rendered = stripped(&lines);
     // Both workspace names head their blocks (the unite header bar), and both
@@ -926,6 +949,7 @@ fn rail_pane_in_unite_mode_separates_each_workspace() {
         false,
         Sidebar::Rail,
         Utc::now(),
+        None,
     );
     let plain_lines: Vec<_> = lines
         .iter()
@@ -960,6 +984,7 @@ fn left_pane_in_unite_mode_shows_an_empty_workspaces_message() {
         false,
         Sidebar::Full,
         Utc::now(),
+        None,
     );
     let rendered = stripped(&full);
     assert!(rendered.contains("a1")); // wsA's session
@@ -991,6 +1016,7 @@ fn left_pane_stops_at_a_later_group_once_the_pane_is_full() {
         false,
         Sidebar::Full,
         Utc::now(),
+        None,
     );
     assert_eq!(lines.len(), 5);
     let rendered = stripped(&lines);
@@ -1021,6 +1047,7 @@ fn rail_pane_stops_at_a_later_group_once_the_rail_is_full() {
         false,
         Sidebar::Rail,
         Utc::now(),
+        None,
     );
     assert_eq!(lines.len(), 4);
     // The second group's blank gap was never built; only the first empty workspace
@@ -1282,6 +1309,7 @@ fn left_pane_stops_building_rows_once_the_pane_is_full() {
         false,
         Sidebar::Full,
         Utc::now(),
+        None,
     );
     assert_eq!(lines.len(), 5);
     // Root, divider, then only the first worktree made it in; the rest were never
@@ -1316,6 +1344,7 @@ fn rail_pane_stops_building_rows_once_the_rail_is_full() {
         false,
         Sidebar::Rail,
         Utc::now(),
+        None,
     );
     assert_eq!(lines.len(), 5);
 }
@@ -1339,6 +1368,7 @@ fn left_pane_marks_the_agent_state_through_its_lifecycle() {
         false,
         Sidebar::Full,
         Utc::now(),
+        None,
     );
     assert!(ready[4].contains('☾'));
     assert!(ready[4].contains("ready"));
@@ -1355,6 +1385,7 @@ fn left_pane_marks_the_agent_state_through_its_lifecycle() {
         false,
         Sidebar::Full,
         Utc::now(),
+        None,
     );
     assert!(running[4].contains('▶'));
     assert!(running[4].contains("running"));
@@ -1371,6 +1402,7 @@ fn left_pane_marks_the_agent_state_through_its_lifecycle() {
         false,
         Sidebar::Full,
         Utc::now(),
+        None,
     );
     assert!(waiting[4].contains('◆'));
     assert!(!waiting[4].contains('▶'));
@@ -1387,6 +1419,7 @@ fn left_pane_marks_the_agent_state_through_its_lifecycle() {
         false,
         Sidebar::Full,
         Utc::now(),
+        None,
     );
     assert!(!absent[4].contains('▶'));
     assert!(!absent[4].contains('◆'));
@@ -1422,6 +1455,7 @@ fn left_pane_always_draws_a_fixed_three_line_resource_row() {
         false,
         Sidebar::Full,
         Utc::now(),
+        None,
     );
     assert!(with_usage[4].contains("running"));
     // The resource line is icon-led (the CPU / memory glyphs in place of the words),
@@ -1446,6 +1480,7 @@ fn left_pane_always_draws_a_fixed_three_line_resource_row() {
         false,
         Sidebar::Full,
         Utc::now(),
+        None,
     );
     assert!(without[4].contains("running"));
     let idle_resource = console::strip_ansi_codes(&without[5]);
@@ -1466,6 +1501,7 @@ fn left_pane_always_draws_a_fixed_three_line_resource_row() {
         true,
         Sidebar::Full,
         Utc::now(),
+        None,
     );
     assert!(console::strip_ansi_codes(&in_switch[5]).contains("12%"));
 }
@@ -1489,6 +1525,7 @@ fn left_pane_is_trimmed_to_available_rows() {
         false,
         Sidebar::Full,
         Utc::now(),
+        None,
     );
     // 3 worktrees would be 2 (root) + 1 (divider) + 6 lines; trimmed to 4.
     assert_eq!(lines.len(), 4);
@@ -1516,6 +1553,7 @@ fn left_pane_marks_the_active_worktree_with_a_gutter_bar() {
         false,
         Sidebar::Full,
         Utc::now(),
+        None,
     );
     // The root is not active; the active "feature" row carries the green `▎`
     // accent bar down all three of its lines (identity + detail + resource).
@@ -1545,6 +1583,7 @@ fn rail_collapses_each_entry_to_three_rows_without_names_or_numbers() {
         false,
         Sidebar::Rail,
         Utc::now(),
+        None,
     );
     // Root (2 rows), a divider, then 3 rows per worktree — the same shape as the
     // full sidebar, so toggling never shifts an entry to a different row.
@@ -1594,6 +1633,7 @@ fn rail_keeps_the_same_row_count_as_the_full_sidebar() {
             false,
             sidebar,
             Utc::now(),
+            None,
         )
         .len()
     };
@@ -1613,6 +1653,7 @@ fn rail_keeps_the_same_row_count_as_the_full_sidebar() {
             false,
             sidebar,
             Utc::now(),
+            None,
         )
         .len()
     };
@@ -1643,6 +1684,7 @@ fn rail_shows_the_active_bar_down_all_rows_and_the_agent_glyph_on_row_two() {
         false,
         Sidebar::Rail,
         Utc::now(),
+        None,
     );
     // "feature" is the second worktree: root (2) + divider (1) + main (3) puts its
     // rows at indices 6,7,8.
@@ -1679,6 +1721,7 @@ fn rail_shows_each_agent_state_glyph_on_the_detail_row() {
             false,
             Sidebar::Rail,
             Utc::now(),
+            None,
         );
         // Rows: 0/1 root, 2 divider, 3 worktree kind, 4 worktree agent state.
         console::strip_ansi_codes(&lines[4]).into_owned()
@@ -1708,6 +1751,7 @@ fn rail_sidebar_marks_the_switch_cursor() {
             true,
             Sidebar::Rail,
             Utc::now(),
+            None,
         )
     };
     // In 切替 the cursor row shows the `>` marker; here the cursor is on the root.
@@ -1752,6 +1796,7 @@ fn left_pane_fades_every_row_but_the_cursor_when_asked() {
         true,
         Sidebar::Full,
         Utc::now(),
+        None,
     );
     assert_eq!(dimmed.len(), 9);
     assert!(console::strip_ansi_codes(&dimmed[0]).contains(ROOT_NAME));
@@ -1780,6 +1825,7 @@ fn left_pane_shows_the_pr_badge_for_a_session_that_has_one() {
         false,
         Sidebar::Full,
         Utc::now(),
+        None,
     );
     let rendered = stripped(&lines);
     // The first session (rows 3,4 after the root pair + divider) shows `<icon> 1`.
@@ -2067,6 +2113,7 @@ fn left_pane_draws_the_create_row_at_the_foot_and_marks_the_cursor() {
         true,
         Sidebar::Full,
         Utc::now(),
+        None,
     );
     // root(2) + divider(1) + session(3) = 6, so the create row is line 6.
     let create = console::strip_ansi_codes(&lines[6]).into_owned();
@@ -2090,6 +2137,7 @@ fn rail_pane_draws_the_create_row_glyph() {
         true,
         Sidebar::Rail,
         Utc::now(),
+        None,
     );
     let create = console::strip_ansi_codes(lines.last().unwrap()).into_owned();
     assert!(create.contains('+'));

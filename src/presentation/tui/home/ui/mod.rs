@@ -24,9 +24,9 @@ use crate::presentation::tui::widgets::{clip_to_width, clip_to_width_cow};
 
 use chrome::{
     command_palette_body, env_editor_body, footer_line, input_line, mode_ladder,
-    quit_confirm_frame, remove_modal_body, switch_create_rows, switch_rename_rows, tab_menu_box,
-    tab_rename_body, task_status_line, text_modal_body, title_bar, update_confirm_frame,
-    waiting_notice, ENV_MODAL_INNER, PALETTE_INNER, REMOVE_MODAL_INNER, TEXT_MODAL_INNER,
+    quit_confirm_frame, remove_modal_body, switch_create_rows, tab_menu_box, tab_rename_body,
+    task_status_line, text_modal_body, title_bar, update_confirm_frame, waiting_notice,
+    ENV_MODAL_INNER, PALETTE_INNER, REMOVE_MODAL_INNER, TEXT_MODAL_INNER,
 };
 use panes::{group_inline_insert_line, left_pane, right_pane_contents};
 // The right-pane tab strips map clicks to the tab under them through these.
@@ -610,6 +610,11 @@ fn left_column(
         state.mode() == Mode::Switch,
         sidebar,
         state.now(),
+        // While renaming, the selected session's name line is drawn as the inline
+        // editable label in place (full sidebar only; the rail uses the right pane).
+        state
+            .rename()
+            .map(|rename| (rename.value(), rename.cursor())),
     );
     if sidebar == Sidebar::Full {
         // While naming a new session in 切替, insert the inline create row(s) into
@@ -632,15 +637,9 @@ fn left_column(
             place_create_rows(&mut left, state.list(), rows);
             left.truncate(body_rows);
         }
-        // While renaming a session's sidebar label in 切替, append the inline rename
-        // row (trimmed back if it would overflow).
-        if let Some(rename) = state.rename() {
-            for row in switch_rename_rows(rename.target(), rename.value(), rename.cursor(), left_w)
-            {
-                left.push(row);
-            }
-            left.truncate(body_rows);
-        }
+        // The inline rename is not spliced here: unlike create (a *new* row), it
+        // edits the selected session's own name line, which `left_pane` renders in
+        // place from the `rename` argument above.
     }
     left
 }
