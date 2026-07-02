@@ -185,9 +185,18 @@ fn create_with_setup_runner(
     }
 
     let local_settings = crate::usecase::settings::load_local(workspace_root).unwrap_or_default();
-    run_setup_commands(&dest_root, name, &local_settings, setup_runner);
 
+    // Record the session *before* running setup, then release the store lock so
+    // the (arbitrary, possibly minutes-long) user setup commands do not hold it.
+    // Holding the lock across e.g. `npm ci` would make every concurrent
+    // create/remove and background `workspace_state::sync` fail on the
+    // lock-acquire timeout. Recording first keeps reconcile from mistaking this
+    // now-registered worktree for a stray while setup runs; a setup failure is
+    // logged, never rolled back (the worktree already exists for the user to fix).
     record(&store, name, &dest_root, &worktrees)?;
+    drop(_lock);
+
+    run_setup_commands(&dest_root, name, &local_settings, setup_runner);
 
     crate::infrastructure::trace_log::TraceLog::record(
         crate::domain::trace::TraceEvent::now(
