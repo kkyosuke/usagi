@@ -83,6 +83,7 @@ fn text_modal_scrolls_and_dismisses() {
     keys.push(Ok(Key::ArrowUp)); // scroll up a line
     keys.push(Ok(Key::Char('k')));
     keys.push(Ok(Key::PageDown)); // page down
+    keys.push(Ok(Key::Char(' '))); // Space also pages forward (pager convention)
     keys.push(Ok(Key::PageUp)); // page up
     keys.push(Ok(Key::Char('z'))); // ignored inside the modal
     keys.push(Ok(Key::Escape)); // dismiss the modal -> back on the palette
@@ -110,6 +111,7 @@ fn preview_command_opens_reads_scrolls_and_dismisses_the_markdown_pane() {
     keys.push(Ok(Key::ArrowUp)); // scroll up a line
     keys.push(Ok(Key::Char('k')));
     keys.push(Ok(Key::PageDown)); // page down
+    keys.push(Ok(Key::Char(' '))); // Space also pages forward (pager convention)
     keys.push(Ok(Key::PageUp)); // page up
     keys.push(Ok(Key::Char('z'))); // ignored inside the preview
     keys.push(Ok(Key::Escape)); // dismiss -> Switch
