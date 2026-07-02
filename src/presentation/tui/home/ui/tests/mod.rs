@@ -72,7 +72,12 @@ fn attached_with_tabs(active: usize) -> (HomeState, TerminalGeometry) {
 fn chip_column(state: &HomeState, geo: TerminalGeometry, needle: &str) -> u16 {
     let rows = right_pane_contents(state, geo.cols as usize, 8);
     let chips = console::strip_ansi_codes(&rows[0]).into_owned();
-    let rel = chips.find(needle).expect("chip present in the strip row");
+    let byte = chips.find(needle).expect("chip present in the strip row");
+    // `.find` yields a byte offset; the chip layout is in display columns. The
+    // header preceding the chips carries multibyte glyphs (name, status, the agent
+    // label with its AI/phase icons), so measure the prefix's display width rather
+    // than trust the byte index.
+    let rel = console::measure_text_width(&chips[..byte]);
     geo.origin_col + rel as u16
 }
 
