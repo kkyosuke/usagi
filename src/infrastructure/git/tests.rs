@@ -405,12 +405,20 @@ fn ensure_all_excluded_appends_every_missing_pattern_in_one_pass() {
     // Two of these are new; the middle one already present is left as-is.
     ensure_all_excluded(
         dir.path(),
-        &["/.claude/skills/a", "/.claude/skills/b", "/.claude/skills/c"],
+        &[
+            "/.claude/skills/a",
+            "/.claude/skills/b",
+            "/.claude/skills/c",
+        ],
     )
     .unwrap();
 
     let content = std::fs::read_to_string(&exclude).unwrap();
-    for pattern in ["/.claude/skills/a", "/.claude/skills/b", "/.claude/skills/c"] {
+    for pattern in [
+        "/.claude/skills/a",
+        "/.claude/skills/b",
+        "/.claude/skills/c",
+    ] {
         assert_eq!(content.lines().filter(|l| *l == pattern).count(), 1);
     }
     assert!(content.contains("# existing"));
