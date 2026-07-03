@@ -2639,8 +2639,16 @@ fn note_box(
                 .collect()
         }
     };
-    // `boxed` clips each line (and the block-caret one, ANSI included) to `inner`.
-    widgets::boxed("note", inner, &body)
+    // `boxed`/`boxed_styled` clip each line (and the block-caret one, ANSI
+    // included) to `inner`. While editing, paint the frame in the accent colour
+    // and mark the title so the open editor is unmistakable — visually distinct
+    // from the read-only note, which keeps the plain frame.
+    match caret {
+        Some(_) => {
+            widgets::boxed_styled("note (編集中)", inner, &body, &Style::new().accent().bold())
+        }
+        None => widgets::boxed("note", inner, &body),
+    }
 }
 
 /// The byte span `[start, end)` of `selection` that lies on line `row` (whose

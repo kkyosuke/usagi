@@ -704,6 +704,21 @@ pub fn block_selection(
 /// each side. The returned rows are not yet placed; [`render_modal`] centres
 /// them. A shared primitive so every modal dialog shares one frame.
 pub fn boxed(title: &str, inner_width: usize, lines: &[String]) -> Vec<String> {
+    // A plain frame: `Style::new()` carries no attributes, so `apply_to` emits no
+    // ANSI and the output is byte-for-byte the unstyled box.
+    boxed_styled(title, inner_width, lines, &Style::new())
+}
+
+/// Like [`boxed`] but paints the frame — the border glyphs and the embedded
+/// title — in `border`. The content lines keep whatever styling they already
+/// carry; only the box outline is recoloured. This lets a box signal state
+/// (e.g. an open editor) by its frame colour without touching the text inside.
+pub fn boxed_styled(
+    title: &str,
+    inner_width: usize,
+    lines: &[String],
+    border: &Style,
+) -> Vec<String> {
     // Columns between the two corner glyphs: the content area plus one space of
     // padding on each side.
     let span = inner_width + 2;
@@ -717,17 +732,19 @@ pub fn boxed(title: &str, inner_width: usize, lines: &[String]) -> Vec<String> {
     let label_width = console::measure_text_width(&label);
     let top = format!("┌{label}{}┐", "─".repeat(span.saturating_sub(label_width)));
     let bottom = format!("└{}┘", "─".repeat(span));
+    // The side border is one styled glyph reused on both edges of every row.
+    let edge = border.apply_to("│").to_string();
 
     let mut out = Vec::with_capacity(lines.len() + 2);
-    out.push(top);
+    out.push(border.apply_to(top).to_string());
     for line in lines {
         // Clip first so a line wider than the box can never push the right
         // border out; then pad short lines so every row is exactly `inner_width`.
         let line = clip_to_width(line, inner_width);
         let pad = inner_width.saturating_sub(console::measure_text_width(&line));
-        out.push(format!("│ {line}{} │", " ".repeat(pad)));
+        out.push(format!("{edge} {line}{} {edge}", " ".repeat(pad)));
     }
-    out.push(bottom);
+    out.push(border.apply_to(bottom).to_string());
     out
 }
 
@@ -1478,6 +1495,24 @@ mod tests {
             console::measure_text_width(&lines[1]),
             console::measure_text_width(&lines[2]),
         );
+    }
+
+    #[test]
+    fn boxed_styled_paints_the_frame_but_not_the_content() {
+        let border = Style::new().force_styling(true).cyan();
+        let lines = boxed_styled("Title", 10, &["hi".to_string()], &border);
+        // The border rows carry the colour; strip it and the plain box remains.
+        assert!(lines[0].contains("\u{1b}["), "the top border is coloured");
+        assert!(
+            lines.last().unwrap().contains("\u{1b}["),
+            "the bottom border is coloured"
+        );
+        assert!(console::strip_ansi_codes(&lines[0]).starts_with('┌'));
+        // The side glyphs are coloured but the content text between them is not.
+        assert!(lines[1].starts_with("\u{1b}["), "the left edge is coloured");
+        let plain = console::strip_ansi_codes(&lines[1]);
+        assert!(plain.starts_with("│ hi"), "content follows the left edge");
+        assert!(plain.ends_with("│"), "content is closed by the right edge");
     }
 
     #[test]

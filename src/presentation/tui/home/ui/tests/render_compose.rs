@@ -438,6 +438,10 @@ fn render_frame_edits_the_note_in_the_right_pane_not_a_full_screen_modal() {
     // the multi-line note.
     assert!(frame.contains("─ note"), "the box is titled `note`");
     assert!(
+        frame.contains("編集中"),
+        "the open editor is marked as editing, distinct from the read-only note"
+    );
+    assert!(
         frame.contains("alpha"),
         "the session is still named on screen"
     );
@@ -502,6 +506,10 @@ fn right_pane_overlays_the_read_only_note_in_switch() {
     // The selected session's note shows in the right pane (overlaid on top).
     let pane = stripped(&right_pane_contents(&state, 40, 12));
     assert!(pane.contains("─ note"), "the overlay is titled");
+    assert!(
+        !pane.contains("編集中"),
+        "the read-only note carries no editing marker"
+    );
     assert!(pane.contains("do X"));
     assert!(pane.contains("do Y"));
 
