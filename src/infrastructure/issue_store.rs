@@ -349,12 +349,13 @@ impl IssueStore {
     /// writes come only from usagi itself (which refreshes the cache as part of
     /// the same operation), not from the external tools this guards against.
     fn load_fresh_index(&self) -> Result<Option<IndexFile>> {
-        let Some(index) = self.load_index()? else {
+        // Stat the cache before reading it: a cache that cannot be dated cannot
+        // be freshness-checked, so there is no point parsing it. (A missing
+        // index lands here too, skipping the read that would find it gone.)
+        let Ok(index_mtime) = fs::metadata(self.index_path()).and_then(|m| m.modified()) else {
             return Ok(None);
         };
-        let Ok(index_mtime) = fs::metadata(self.index_path()).and_then(|m| m.modified()) else {
-            // The index parsed a moment ago; if its metadata is unreadable now,
-            // fall back to a rebuild rather than trusting a cache we can't date.
+        let Some(index) = self.load_index()? else {
             return Ok(None);
         };
         let files = self.issue_files()?;
