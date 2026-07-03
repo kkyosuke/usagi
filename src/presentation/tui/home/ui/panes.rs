@@ -197,23 +197,24 @@ fn gutter_cell(selected: bool, active: bool, in_switch: bool) -> String {
     }
 }
 
-/// The three-line gutter stack for a selected session row in 切替:
+/// The three-line gutter stack for a selected session row:
 ///
 /// ```text
 /// 󰤇
-/// │
-/// │
+/// ▎
+/// ▎
 /// ```
 ///
 /// Session entries occupy three fixed rows, so the marker can span the whole
-/// entry. The root and the "+ new session" action keep the compact `>` cursor
+/// entry and remain visible after the side menu has selected the session. The
+/// root and the "+ new session" action keep the compact `>` cursor in 切替
 /// because they are not sessions and do not have a three-row body.
 fn session_gutter_cell(selected: bool, active: bool, in_switch: bool, row: usize) -> String {
-    if in_switch && selected {
+    if selected {
         let mark = if row == 0 {
             SELECTED_SESSION_GLYPH.to_string()
         } else {
-            "│".to_string()
+            "▎".to_string()
         };
         style(mark).danger().bold().to_string()
     } else {
@@ -360,8 +361,8 @@ fn note_cell(has_note: bool) -> String {
 }
 
 /// Builds a worktree's first two lines. The far-left gutter carries the selected
-/// session's `󰤇` / `│` stack in 切替 (Switch) or a green `▎` accent bar down the
-/// active worktree's lines; line 1 then has the freshness ("heat") kind dot
+/// session's `󰤇` / `▎` stack, falling back to a green `▎` accent bar down the
+/// active worktree's lines when the session is not selected; line 1 then has the freshness ("heat") kind dot
 /// (`●`/`◐`/`○`, fading by time since the session was last touched, measured
 /// against `now`), the branch name, a memo marker (`NOTE_ICON`, when `has_note`),
 /// and the git `status` at the right edge. Line 2 is indented under the name and,
@@ -789,9 +790,9 @@ fn root_glyph() -> String {
 /// ```
 ///
 /// `git` is blank on the root (no git status); `agent` is blank when no agent is
-/// in use. The active `▎` bar runs down all three rows; a selected session in
-/// 切替 uses the same `󰤇` / `│` / `│` stack as the full sidebar, while the root
-/// keeps the compact `>` cursor.
+/// in use. The active `▎` bar runs down all three rows; a selected session uses
+/// the same `󰤇` / `▎` / `▎` stack as the full sidebar, while the root keeps the
+/// compact `>` cursor in 切替.
 fn rail_entry(
     selected: bool,
     session: bool,

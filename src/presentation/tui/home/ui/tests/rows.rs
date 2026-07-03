@@ -254,12 +254,13 @@ fn worktree_row_marks_the_selected_session_in_switch_and_shows_detached() {
         None,
     );
     assert!(top.contains('󰤇'));
-    assert!(detail.contains('│'));
+    assert!(detail.contains('▎'));
     assert!(!top.contains('>'));
     assert!(top.contains('●'));
     assert!(top.contains("main"));
 
-    // The same selected row outside Switch shows no selection marker.
+    // The same selected row outside Switch keeps the session marker so it remains
+    // visible after the side menu has selected the session.
     let (top_no_switch, _) = worktree_row(
         &worktree(Some("main"), true, BranchStatus::Pushed),
         "",
@@ -278,7 +279,7 @@ fn worktree_row_marks_the_selected_session_in_switch_and_shows_detached() {
         None,
     );
     assert!(!top_no_switch.contains('>'));
-    assert!(!top_no_switch.contains('󰤇'));
+    assert!(top_no_switch.contains('󰤇'));
 
     let (other_top, _) = worktree_row(
         &worktree(Some("feature"), false, BranchStatus::Local),
@@ -1595,8 +1596,8 @@ fn left_pane_marks_the_selected_session_with_a_rabbit_stack() {
         .collect();
     // root(2) + divider(1), then the selected session's three rows.
     assert!(plain[3].starts_with('󰤇'));
-    assert!(plain[4].starts_with('│'));
-    assert!(plain[5].starts_with('│'));
+    assert!(plain[4].starts_with('▎'));
+    assert!(plain[5].starts_with('▎'));
 }
 
 #[test]
@@ -1800,8 +1801,8 @@ fn rail_sidebar_marks_the_switch_cursor() {
     let on_session = rail(&list);
     assert!(!console::strip_ansi_codes(&on_session[0]).contains('>'));
     assert!(console::strip_ansi_codes(&on_session[3]).contains('󰤇'));
-    assert!(console::strip_ansi_codes(&on_session[4]).contains('│'));
-    assert!(console::strip_ansi_codes(&on_session[5]).contains('│'));
+    assert!(console::strip_ansi_codes(&on_session[4]).contains('▎'));
+    assert!(console::strip_ansi_codes(&on_session[5]).contains('▎'));
 }
 
 #[test]
