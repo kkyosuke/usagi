@@ -44,6 +44,34 @@ pub const TOOL_NAMES: [&str; 8] = [
     "session_note_update",
 ];
 
+/// Largest prompt (in bytes) accepted by `session_prompt` / `session_send`.
+///
+/// Both tools take arbitrary agent-authored text and hand it to a session's
+/// agent — `session_prompt` persists it to the launch-time queue, `session_send`
+/// appends it to the live queue the TUI types into a running pane. Neither has a
+/// natural bound, so without a cap one runaway call could persist an enormous
+/// file, or make the watcher paste a multi-megabyte blob into a pane in one go.
+/// The MCP transport already refuses a request *line* over 64 MiB
+/// (`MAX_REQUEST_LINE_BYTES` in the parent module); this is a much tighter
+/// per-prompt bound
+/// that still comfortably fits any real task description, applied before the
+/// prompt reaches the backend so an oversized one is rejected as a tool error
+/// rather than written to disk.
+const MAX_PROMPT_BYTES: usize = 128 * 1024;
+
+/// Reject a prompt argument that exceeds [`MAX_PROMPT_BYTES`], naming the tool in
+/// the error so the caller knows which argument to trim. Shared by
+/// `session_prompt` and `session_send`, whose prompts flow to a session's agent.
+fn check_prompt_len(tool: &str, prompt: &str) -> Result<(), String> {
+    if prompt.len() > MAX_PROMPT_BYTES {
+        return Err(format!(
+            "{tool} prompt is too large ({} bytes; limit is {MAX_PROMPT_BYTES})",
+            prompt.len()
+        ));
+    }
+    Ok(())
+}
+
 /// Drives the parts of session orchestration that touch a real agent or a real
 /// filesystem — handing a session's agent a launch-time prompt, live-sending a
 /// prompt, and removing a session (which discards that agent's conversation).
@@ -140,12 +168,14 @@ impl SessionMcpServer {
 
     fn tool_prompt(&self, arguments: Value) -> Result<String, String> {
         let args: PromptArgs = parse_args(arguments)?;
+        check_prompt_len("session_prompt", &args.prompt)?;
         let target = self.find_session(&args.name)?;
         self.backend.prompt(&target.root, &args.prompt)
     }
 
     fn tool_send(&self, arguments: Value) -> Result<String, String> {
         let args: SendArgs = parse_args(arguments)?;
+        check_prompt_len("session_send", &args.prompt)?;
         let target = self.find_session(&args.name)?;
         self.backend.send(&target.root, &args.prompt)
     }
@@ -793,6 +823,75 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("no such session"));
+    }
+
+    #[test]
+    fn send_rejects_an_oversized_prompt_before_reaching_the_backend() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        let backend = FakeBackend::ok("sent");
+        let calls = backend.calls.clone();
+        let server = server_at(root.path(), backend);
+        call(&server, "session_create", json!({"name":"w"}));
+        // One byte over the cap: rejected as a tool error naming the tool and limit.
+        let huge = "x".repeat(MAX_PROMPT_BYTES + 1);
+        let result = call(&server, "session_send", json!({"name":"w","prompt":huge}));
+        assert_eq!(result["isError"], true);
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("session_send prompt is too large"), "{text}");
+        // The backend was never invoked, so nothing was queued for delivery.
+        assert!(calls.borrow().is_empty());
+    }
+
+    #[test]
+    fn prompt_rejects_an_oversized_prompt_before_reaching_the_backend() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        let backend = FakeBackend::ok("queued");
+        let calls = backend.calls.clone();
+        let server = server_at(root.path(), backend);
+        call(&server, "session_create", json!({"name":"w"}));
+        let huge = "x".repeat(MAX_PROMPT_BYTES + 1);
+        let result = call(&server, "session_prompt", json!({"name":"w","prompt":huge}));
+        assert_eq!(result["isError"], true);
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.contains("session_prompt prompt is too large"),
+            "{text}"
+        );
+        // Rejected before the backend, so nothing was persisted to the launch queue.
+        assert!(calls.borrow().is_empty());
+    }
+
+    #[test]
+    fn a_prompt_exactly_at_the_cap_is_accepted() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        let backend = FakeBackend::ok("sent");
+        let calls = backend.calls.clone();
+        let server = server_at(root.path(), backend);
+        call(&server, "session_create", json!({"name":"w"}));
+        // Exactly at the limit is allowed (the check rejects only *over* it), so it
+        // reaches the backend verbatim.
+        let at_limit = "x".repeat(MAX_PROMPT_BYTES);
+        let result = call(
+            &server,
+            "session_send",
+            json!({"name":"w","prompt":at_limit}),
+        );
+        assert_eq!(result["isError"], false);
+        assert_eq!(calls.borrow().len(), 1);
+        assert_eq!(calls.borrow()[0].1.len(), MAX_PROMPT_BYTES);
+    }
+
+    #[test]
+    fn check_prompt_len_names_the_tool_and_limit() {
+        // A within-limit prompt passes; an over-limit one is rejected with a
+        // message naming the tool and the byte limit (covering the helper directly).
+        assert!(check_prompt_len("session_send", "ok").is_ok());
+        let err = check_prompt_len("session_send", &"x".repeat(MAX_PROMPT_BYTES + 1)).unwrap_err();
+        assert!(err.contains("session_send prompt is too large"), "{err}");
+        assert!(err.contains(&MAX_PROMPT_BYTES.to_string()), "{err}");
     }
 
     #[test]
