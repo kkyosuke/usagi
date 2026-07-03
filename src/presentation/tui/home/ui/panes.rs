@@ -2632,6 +2632,15 @@ fn switch_preview_header(state: &HomeState) -> (String, bool) {
 /// [`SessionActionUi`] — in 在席; and the live embedded terminal in 没入 (a
 /// starting hint until the first snapshot arrives).
 pub(super) fn right_pane_contents(state: &HomeState, right_w: usize, rows: usize) -> Vec<String> {
+    // A momentary launch (terminal / agent spawn) blanks the right pane so the
+    // centred loading rabbit (composited over the frame in [`super::frame`])
+    // reads as a dedicated loading screen. Without this the 在席 action menu
+    // (agent / terminal / … の選択肢) stays painted behind the rabbit, so the
+    // choices would show through while the spawn blocks. Return an empty pane of
+    // the right height and let the overlay own the whole surface.
+    if state.loading().is_some() {
+        return vec![String::new(); rows];
+    }
     // The Markdown preview, when open, takes over the right pane regardless of
     // mode (it is opened from the `:` palette and captures the keyboard while
     // shown).
