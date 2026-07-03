@@ -1255,13 +1255,9 @@ fn launch_loading_frame_count(min_visible: Duration, interval: Duration) -> usiz
         .max(1)
 }
 
-#[cfg(not(test))]
 fn wait_launch_loading_frame() {
     std::thread::sleep(LAUNCH_LOADING_FRAME_INTERVAL);
 }
-
-#[cfg(test)]
-fn wait_launch_loading_frame() {}
 
 /// Paint the launch loader for a short minimum window before entering a fresh
 /// pane. This guarantees the indicator is perceptible even when the PTY starts
