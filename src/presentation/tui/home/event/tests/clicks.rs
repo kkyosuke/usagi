@@ -367,6 +367,7 @@ fn a_right_click_on_a_switch_tab_opens_a_menu_and_runs_the_selected_action() {
     let mut create: fn(&Path, &str, u64) = |_, _, _| {};
     let mut rename = |_: &Path, n: &str, l: &str| noop_rename(n, l);
     let mut note = |_: &Path, n: &str, v: &str| noop_set_note(n, v);
+    let mut set_label_fake = |_: &Path, n: &str, id: Option<&str>| noop_set_label(n, id);
     let mut reorder: fn(&str, bool) -> SessionReorder = noop_reorder;
     let mut remove: fn(&Path, &str, bool, Option<AutoFocus>) = |_, _, _, _| {};
     let mut unite_resolve: fn(&str) -> std::result::Result<GroupSource, String> = no_unite_resolve;
@@ -392,6 +393,7 @@ fn a_right_click_on_a_switch_tab_opens_a_menu_and_runs_the_selected_action() {
         dispatch_create: &mut create,
         rename_display: &mut rename,
         set_note: &mut note,
+        set_label: &mut set_label_fake,
         reorder_session: &mut reorder,
         dispatch_remove: &mut remove,
         unite_resolve: &mut unite_resolve,
@@ -477,6 +479,7 @@ fn run_switch_tab_menu_inputs(after_open: Vec<io::Result<Input>>) -> Vec<TabMenu
     let mut create: fn(&Path, &str, u64) = |_, _, _| {};
     let mut rename = |_: &Path, n: &str, l: &str| noop_rename(n, l);
     let mut note = |_: &Path, n: &str, v: &str| noop_set_note(n, v);
+    let mut set_label_fake = |_: &Path, n: &str, id: Option<&str>| noop_set_label(n, id);
     let mut reorder: fn(&str, bool) -> SessionReorder = noop_reorder;
     let mut remove: fn(&Path, &str, bool, Option<AutoFocus>) = |_, _, _, _| {};
     let mut unite_resolve: fn(&str) -> std::result::Result<GroupSource, String> = no_unite_resolve;
@@ -502,6 +505,7 @@ fn run_switch_tab_menu_inputs(after_open: Vec<io::Result<Input>>) -> Vec<TabMenu
         dispatch_create: &mut create,
         rename_display: &mut rename,
         set_note: &mut note,
+        set_label: &mut set_label_fake,
         reorder_session: &mut reorder,
         dispatch_remove: &mut remove,
         unite_resolve: &mut unite_resolve,
@@ -631,6 +635,7 @@ fn right_click_tab_paths_cover_focus_and_attached_modes() {
         let mut create: fn(&Path, &str, u64) = |_, _, _| {};
         let mut rename = |_: &Path, n: &str, l: &str| noop_rename(n, l);
         let mut note = |_: &Path, n: &str, v: &str| noop_set_note(n, v);
+        let mut set_label_fake = |_: &Path, n: &str, id: Option<&str>| noop_set_label(n, id);
         let mut reorder: fn(&str, bool) -> SessionReorder = noop_reorder;
         let mut remove: fn(&Path, &str, bool, Option<AutoFocus>) = |_, _, _, _| {};
         let mut unite_resolve: fn(&str) -> std::result::Result<GroupSource, String> =
@@ -657,6 +662,7 @@ fn right_click_tab_paths_cover_focus_and_attached_modes() {
             dispatch_create: &mut create,
             rename_display: &mut rename,
             set_note: &mut note,
+            set_label: &mut set_label_fake,
             reorder_session: &mut reorder,
             dispatch_remove: &mut remove,
             unite_resolve: &mut unite_resolve,

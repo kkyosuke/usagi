@@ -49,6 +49,23 @@ fn switch_snapshots_the_highlighted_live_session_for_the_preview() {
 }
 
 #[test]
+fn switch_manual_status_keys_run_through_the_compat_loop() {
+    // Tab / Shift-Tab / digit / 0 on a session row drive the manual-status label
+    // through the compat-shim wiring (a no-op persist), covering the switch_key
+    // branches and the shim's `set_label` hook end to end. `sample_state` opens
+    // with the default (non-empty) label master, so the keys are live.
+    let mut keys = cmd("session switch");
+    keys.push(Ok(Key::Enter)); // -> Switch
+    keys.push(Ok(Key::ArrowDown)); // cursor onto a session row
+    keys.push(Ok(Key::Tab)); // cycle forward
+    keys.push(Ok(Key::BackTab)); // cycle backward
+    keys.push(Ok(Key::Char('1'))); // select the first label
+    keys.push(Ok(Key::Char('0'))); // clear
+    keys.push(Ok(Key::CtrlC));
+    assert!(matches!(run(keys, sample_state()).unwrap(), Outcome::Quit));
+}
+
+#[test]
 fn switch_ctrl_c_quits() {
     let mut keys = cmd("session switch");
     keys.push(Ok(Key::Enter));
@@ -462,6 +479,7 @@ fn switch_reorder_applies_a_moved_result_and_logs_a_failure() {
             name: "feat".to_string(),
             display_name: None,
             note: None,
+            label_id: None,
             root: PathBuf::from("/ws/.usagi/sessions/feat"),
             worktrees: vec![worktree(Some("feat"), "/ws/feat")],
             created_at: Utc::now(),
@@ -471,6 +489,7 @@ fn switch_reorder_applies_a_moved_result_and_logs_a_failure() {
             name: "main".to_string(),
             display_name: None,
             note: None,
+            label_id: None,
             root: PathBuf::from("/ws/.usagi/sessions/main"),
             worktrees: vec![worktree(Some("main"), "/ws/main")],
             created_at: Utc::now(),

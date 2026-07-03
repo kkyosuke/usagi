@@ -164,6 +164,10 @@ pub(super) struct Wiring<'a> {
     /// Save (or clear) a session's note in the given workspace, returning the
     /// outcome to apply inline.
     pub set_note: &'a mut dyn FnMut(&Path, &str, &str) -> SessionOutcome,
+    /// Set (`Some(id)`) or clear (`None`) a session's manual status label in the
+    /// given workspace, returning the outcome to apply inline. Stays synchronous
+    /// (no git work) like `rename_display` / `set_note`.
+    pub set_label: &'a mut dyn FnMut(&Path, &str, Option<&str>) -> SessionOutcome,
     /// Reorder the selected session one row up/down (`bool` = up), persisting the
     /// new order and returning the reloaded list to refresh. Stays synchronous
     /// (no git work) like `rename_display` / `set_note`.
@@ -1359,6 +1363,15 @@ pub(crate) fn event_loop_compat(
     // the production 3-arg shape, dropping the unite target root.
     let mut rename_display_w = |_root: &Path, name: &str, label: &str| rename_display(name, label);
     let mut set_note_w = |_root: &Path, name: &str, note: &str| set_note(name, note);
+    // The compat-shim loop tests do not drive manual-status labels; a no-op that
+    // reports no session change keeps the loop's apply path a no-op. The label flow
+    // is covered directly against `switch_key` with a capturing `Wiring`.
+    let mut set_label_w = |_root: &Path, _name: &str, _id: Option<&str>| SessionOutcome {
+        line: super::state::LogLine::output("label"),
+        sessions: None,
+        select: None,
+        root_note: None,
+    };
     // `unite add` is not exercised by the compat-shim loop tests; report no match.
     let mut unite_resolve =
         |name: &str| Err::<GroupSource, String>(format!("no workspace named \"{name}\""));
@@ -1386,6 +1399,7 @@ pub(crate) fn event_loop_compat(
         dispatch_create: &mut dispatch_create,
         rename_display: &mut rename_display_w,
         set_note: &mut set_note_w,
+        set_label: &mut set_label_w,
         reorder_session: &mut reorder_session,
         dispatch_remove: &mut dispatch_remove,
         unite_resolve: &mut unite_resolve,
