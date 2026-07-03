@@ -501,6 +501,29 @@ fn clicking_the_mascot_opens_the_update_modal_when_an_update_is_available() {
 }
 
 #[test]
+fn clicking_the_mascot_reacts_when_work_status_hides_the_update_notice() {
+    use crate::domain::version::Version;
+    use std::time::Instant;
+
+    let mut loading = state();
+    loading.set_update(Version::parse("9.9.9"));
+    loading.step_loading("エージェント起動中…");
+    loading.click_mascot(Instant::now());
+    assert!(!loading.update_confirm());
+    assert!(loading.mascot_reacting());
+
+    let mut tasking = state();
+    tasking.set_update(Version::parse("9.9.9"));
+    tasking.set_tasks(vec![crate::presentation::tui::home::tasks::TaskRow {
+        label: "作成中… main".to_string(),
+        mark: crate::presentation::tui::home::tasks::TaskMark::Running(0),
+    }]);
+    tasking.click_mascot(Instant::now());
+    assert!(!tasking.update_confirm());
+    assert!(tasking.mascot_reacting());
+}
+
+#[test]
 fn clicking_the_mascot_without_an_update_plays_a_reaction() {
     use std::time::Instant;
     let mut state = state();

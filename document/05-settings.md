@@ -106,7 +106,9 @@
 > 1Password reference だけを保存し、解決した secret は起動コマンド行には載せません。`op` の認証は、既存の
 > `op signin` セッションや外部から渡した `OP_SERVICE_ACCOUNT_TOKEN` など、1Password CLI 側の通常の仕組みに従います。
 > 解決に失敗した変数は注入せず、エラーログに記録して pane 起動は継続します。既に起動済みの pane には反映されないため、
-> 変更後は新しい agent / terminal pane を開き直してください。
+> 変更後は新しい agent / terminal pane を開き直してください。起動時のペイン復旧では、同じ workspace root に属する
+> root / session worktree の復旧ペインが同じ `env` を使うため、1Password reference の解決結果を workspace root 単位で
+> 共有し、同じ `op read` を重複実行しません。
 
 > **セットアップコマンド（`setup_commands`）**: `session create` でセッションを作成した直後に、そのセッション root
 > （`<workspace>/.usagi/sessions/<name>`）をカレントディレクトリとして上から順に実行する shell コマンド列です。

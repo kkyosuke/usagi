@@ -525,7 +525,9 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
     // waiting` notice appears while at least one session is waiting for the
     // user's input. The task status and waiting notice ride the header rows. The
     // "update available" notice is no longer a corner overlay — the sidebar
-    // mascot speaks it (above) instead.
+    // mascot speaks it (above) instead. The mascot also speaks the current
+    // loading / background-task label, so the left-bottom usagi explains what is
+    // happening even when the header is visually busy.
     if let Some(loading) = state.loading() {
         let loading_block = launch_loading_block(loading.frame(), right_w);
         // The transient terminal / agent launch indicator is deliberate and
@@ -775,11 +777,11 @@ fn place_mascot(
                 Some(reaction) => {
                     widgets::workspace_rabbit_reaction(reaction, state.mascot_reaction_phase())
                 }
-                None => match state.update() {
-                    Some(latest) => widgets::workspace_rabbit_speaking(
+                None => match mascot_speech(state) {
+                    Some(speech) => widgets::workspace_rabbit_speaking(
                         mood,
                         load,
-                        &["アップデートがあるぴょん".to_string(), format!("v{latest}")],
+                        &speech,
                         // Leave room for the indent so the bubble still fits the pane.
                         left_w - RABBIT_INDENT,
                         blinking,
@@ -827,6 +829,30 @@ fn place_mascot(
     } else {
         None
     }
+}
+
+/// The line(s) the left-bottom mascot should say this frame, in priority order.
+///
+/// Operational status wins over informational news: when a blocking action is in
+/// progress, the launch loader animates in the right pane while the mascot says
+/// the action's label; otherwise background session tasks (create / remove) are
+/// spoken from the same bubble that used to carry only update notices. Update
+/// availability remains the fallback when no active work needs explaining.
+fn mascot_speech(state: &HomeState) -> Option<Vec<String>> {
+    if let Some(loading) = state.loading() {
+        return Some(vec![loading.label().to_string()]);
+    }
+    if let Some(row) = state.tasks().first() {
+        let mut speech = vec![row.label.clone()];
+        let extra = state.tasks().len().saturating_sub(1);
+        if extra > 0 {
+            speech.push(format!("ほか {extra} 件"));
+        }
+        return Some(speech);
+    }
+    state
+        .update()
+        .map(|latest| vec!["アップデートがあるぴょん".to_string(), format!("v{latest}")])
 }
 
 /// The screen rectangle the sidebar mascot's clickable body occupies, in 0-based

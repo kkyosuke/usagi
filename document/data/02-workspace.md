@@ -275,7 +275,8 @@ session "login"  (/Users/me/git/usagi/.usagi/sessions/login)
 - `env` はローカル設定専用です。キーは環境変数名（英字または `_` で始まり、英数字と `_` のみ）、値は
   `op://vault/item/field` 形式など `op read` が解決できる 1Password reference です。embedded `agent` / `terminal` pane の
   新規起動時に `op read --no-newline` で解決し、成功した値だけを子プロセス環境へ注入します。secret 本体は
-  `settings.json` に保存しません。
+  `settings.json` に保存しません。起動時のペイン復旧では workspace root 単位で解決結果を共有し、同じ root に属する
+  root / session worktree の復旧ペインが同じ `op read` を繰り返さないようにします。
 - `setup_commands` はローカル設定専用です。各要素は 1 つの shell コマンド行で、`session create` 後に
   `<workspace>/.usagi/sessions/<name>` をカレントディレクトリとして保存順に実行されます。空白だけの要素は無視されます。
 - 全項目を未上書きに戻しても `settings.json` は残し（中身は実質空）、「グローバルに従う／既定に従う」を意味します。

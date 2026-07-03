@@ -1898,13 +1898,14 @@ impl HomeState {
         self.update_confirm = false;
     }
 
-    /// React to a click on the resting sidebar mascot: when it is announcing an
-    /// available update ([`update`](Self::update) is `Some`), raise the
-    /// update-confirmation modal; otherwise play a one-shot click reaction. The
-    /// event loop calls this on a hit so the rabbit either offers the update or
-    /// just does something cute back.
+    /// React to a click on the resting sidebar mascot: when it is visibly
+    /// announcing an available update ([`update`](Self::update) is `Some` and no
+    /// loading / background task is using the bubble), raise the update-confirm
+    /// modal; otherwise play a one-shot click reaction. The event loop calls this
+    /// on a hit so the rabbit either offers the update or just does something
+    /// cute back, matching what its bubble currently says.
     pub fn click_mascot(&mut self, now: Instant) {
-        if self.update.is_some() {
+        if self.update.is_some() && self.loading.is_none() && self.tasks.is_empty() {
             self.open_update_confirm();
         } else {
             self.kick_mascot_reaction(now);
