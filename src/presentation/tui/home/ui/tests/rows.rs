@@ -1,4 +1,6 @@
 use super::*;
+use crate::presentation::theme::Palette;
+use console::Style;
 
 #[test]
 fn text_modal_body_windows_a_long_dump_with_more_counts() {
@@ -280,6 +282,10 @@ fn worktree_row_marks_the_selected_session_in_switch_and_shows_detached() {
     );
     assert!(!top_no_switch.contains('>'));
     assert!(top_no_switch.contains('󰤇'));
+    assert!(
+        top_no_switch.starts_with(&Style::new().success().bold().apply_to("󰤇").to_string()),
+        "selected marker after side-menu selection should be green: {top_no_switch:?}"
+    );
 
     let (other_top, _) = worktree_row(
         &worktree(Some("feature"), false, BranchStatus::Local),

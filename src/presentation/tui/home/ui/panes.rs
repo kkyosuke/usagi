@@ -206,7 +206,8 @@ fn gutter_cell(selected: bool, active: bool, in_switch: bool) -> String {
 /// ```
 ///
 /// Session entries occupy three fixed rows, so the marker can span the whole
-/// entry and remain visible after the side menu has selected the session. The
+/// entry and remain visible after the side menu has selected the session. It is
+/// red while the cursor is in 切替, then green after the session is selected. The
 /// root and the "+ new session" action keep the compact `>` cursor in 切替
 /// because they are not sessions and do not have a three-row body.
 fn session_gutter_cell(selected: bool, active: bool, in_switch: bool, row: usize) -> String {
@@ -216,7 +217,12 @@ fn session_gutter_cell(selected: bool, active: bool, in_switch: bool, row: usize
         } else {
             "▎".to_string()
         };
-        style(mark).danger().bold().to_string()
+        let style = if in_switch {
+            Style::new().danger().bold()
+        } else {
+            Style::new().success().bold()
+        };
+        style.apply_to(mark).to_string()
     } else {
         gutter_cell(false, active, in_switch)
     }
