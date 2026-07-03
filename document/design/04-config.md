@@ -60,6 +60,7 @@
 │          Mascot Animation   < On >                    │  │  サイドバーうさぎの動き（On / Off）
 │          Local LLM            Install                 │  │  未導入は `Install`（緑・山かっこなし）、導入後は `< On >`/`< Off >`
 │          Local LLM Model      qwen2.5-coder:7b        │  │  導入後はアクション。Space/Enter でモデル選択モーダル
+│          Env Vars             Edit (none)             │  │  全 workspace に注入する secret 環境変数（アクション）
 │          PR Skills          < On >                    │  ┘  同梱スキル機能の ON/OFF（機能ごとに 1 行）
 │                                                       │
 │                           [ Save ]                    │  ← Save ボタン（変更時のみ緑で有効）
@@ -81,10 +82,11 @@
 | Mascot Animation | サイドバーのマスコットうさぎが操作に反応するか | `On` ⇄ `Off` をトグル。`Off` でうさぎは静止する（[home/02-layout.md](home/02-layout.md#レイアウト)） |
 | Local LLM | ローカル LLM 委譲の有効化（`ollama` ランタイムの導入と on/off） | 未導入時は値が `Install`（アクション）で、`Space` / `Enter` でランタイムのインストールモーダルを開く。導入後は `On` ⇄ `Off` をトグル |
 | Local LLM Model | 委譲先の Ollama モデル | ランタイム未導入のうちは操作不可（`—` を淡色表示）。導入後はアクション行になり、`Space` / `Enter` で**モデル選択モーダル**を開く。使用中モデルが未取得なら値に `(未導入)` を併記 |
+| Env Vars | 全 workspace の pane 起動時に 1Password から解決して注入する環境変数（`NAME = op://vault/item/field`） | 値は `Edit (none)` / `Edit (1 var)` / `Edit (N vars)`（有効な binding 数）。`Space` / `Enter` で複数行エディタを開く。workspace スコープの Env Vars はここへ追加・同名上書きする |
 | PR Skills | 同梱スキル機能 `pull-request`（PR 作成・更新・修正）の配布 ON/OFF | `On` ⇄ `Off` をトグル。固定項目の下に、トグル可能な[同梱スキル機能](../04-orchestration.md#スキルの配布)ごとに 1 行並ぶ（`usagi-session` は常時 ON で出ない） |
 
 > ほとんどの項目は共通の chooser widget で描画し、現在値を常に `< 値 >` の形で表示します。例外は `Local LLM` の
-> **インストールアクション**と `Local LLM Model` の**モデル選択アクション**で、これらは選択肢を循環するのではなく動作（モーダル）を
+> **インストールアクション**、`Local LLM Model` の**モデル選択アクション**、`Env Vars` の**複数行編集アクション**で、これらは選択肢を循環するのではなく動作（モーダル）を
 > 起動するため、山かっこなしの緑のラベルで表示します。ランタイム未導入のあいだ `Local LLM Model` は淡色の `—` で操作不可です。
 
 > **ローカル LLM の導入**: ローカル LLM の有効化は **2 段階**で、どちらの導入も**バックグラウンドで進みます**。
@@ -115,7 +117,7 @@
 
 ホーム画面のコマンドモードで `config` を実行したときのスコープ。起動中のワークスペース
 （`<workspace>/.usagi/settings.json`）だけに効く **ローカルの上書き**を編集します。グローバル設定は
-ここには表示されず、対象は次の固定 6 項目と、その下に並ぶ同梱スキル機能（`PR Skills` など）です。
+ここには表示されず、対象は次の固定 7 項目と、その下に並ぶ同梱スキル機能（`PR Skills` など）です。
 
 ```text
 ┌───────────────────────────────────────────────────────┐
@@ -148,7 +150,7 @@
 | Default Branch | `session create` で worktree を切る基点ブランチ | `Default (auto)` → リポジトリの各ブランチ名 の順に循環（実在ブランチを検出） |
 | Branch Source | 上のブランチをローカル形／リモート形のどちらで使うか | `Local` ⇄ `Remote` をトグル（未設定時は `Default (Remote)` を表示） |
 | Setup Commands | `session create` 後に session root で実行するコマンド列 | 値は `Edit (none)` / `Edit (1 command)` / `Edit (N commands)`。`Space` / `Enter` で複数行エディタを開く |
-| Env Vars | pane 起動時に 1Password から解決して注入する環境変数（`NAME = op://vault/item/field`） | 値は `Edit (none)` / `Edit (1 var)` / `Edit (N vars)`（有効な binding 数）。`Space` / `Enter` で複数行エディタを開く |
+| Env Vars | pane 起動時に 1Password から解決して注入する workspace 固有の環境変数（`NAME = op://vault/item/field`） | 値は `Edit (none)` / `Edit (1 var)` / `Edit (N vars)`（有効な binding 数）。`Space` / `Enter` で複数行エディタを開く。グローバル Env Vars へ追加し、同名は workspace 側が優先される |
 | PR Skills | 同梱スキル機能 `pull-request` のこのワークスペースでの上書き | `Global (実効値)` → `Override: On` → `Override: Off` の順に循環。固定項目の下に機能ごとに 1 行並ぶ |
 
 - Agent CLI と Notifications は **「グローバルに従う / ローカルで上書き」** を 1 つの chooser で切り替えます。
@@ -236,7 +238,8 @@
 
 `Env Vars` を起動すると複数行エディタが開き、開いている間はすべてのキーを受け取ります。各行は
 `NAME=op://vault/item/field` の 1 件で、pane 起動時に 1Password から解決して子プロセス環境へ注入されます。
-コマンドパレットの [`env`](../03-commands/02-tui.md#env) はこのエディタへ直接入ります。
+グローバルスコープでは全 workspace 向けの binding、ワークスペーススコープではその workspace 固有の追加・上書き
+binding を編集します。コマンドパレットの [`env`](../03-commands/02-tui.md#env) は workspace スコープのエディタへ直接入ります。
 
 | キー | 動作 |
 |---|---|
@@ -244,7 +247,7 @@
 | `Enter` | 行を分割して新しい binding 行を作成 |
 | `Backspace` / `Del` | キャレット前後の文字を削除（行頭では前行と結合） |
 | `←` / `→` / `↑` / `↓` / `Home` / `End` | キャレット移動 |
-| `Ctrl-S` | 有効な binding だけをメモリ上のローカル設定へ反映し、エディタを閉じる（`=` の無い行・不正名・空 reference は破棄、同名は後勝ち） |
+| `Ctrl-S` | 有効な binding だけをメモリ上の現在スコープの設定へ反映し、エディタを閉じる（`=` の無い行・不正名・空 reference は破棄、同名は後勝ち） |
 | `Esc` | 変更を破棄してエディタを閉じる |
 | `Ctrl+C` | アプリを終了 |
 

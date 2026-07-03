@@ -243,7 +243,7 @@ session "login"  (/Users/me/git/usagi/.usagi/sessions/login)
   "default_branch": "develop",       // 任意。未設定なら検出済み既定ブランチ（auto）
   "default_branch_source": "local",  // 任意。未設定なら remote
   "local_llm_enabled": true,         // 任意。未設定ならグローバル値（local_llm.enabled）
-  "env": {                           // 任意。agent / terminal 起動時に解決して注入
+  "env": {                           // 任意。グローバル env へ追加・同名上書きして注入
     "GH_TOKEN": "op://Private/GitHub/token"
   },
   "setup_commands": [                // 任意。新規セッション作成後に session root で実行
@@ -263,7 +263,7 @@ session "login"  (/Users/me/git/usagi/.usagi/sessions/login)
 | `default_branch` | string? | リポジトリの検出済み既定ブランチ（auto）。**リポジトリ単位**（グローバルに対応項目なし） |
 | `default_branch_source` | enum? | `remote`。**リポジトリ単位**（グローバルに対応項目なし） |
 | `local_llm_enabled` | bool? | グローバル `local_llm.enabled` にフォールバック |
-| `env` | map<string, string> | 空 map。agent / terminal 起動時に secret 環境変数を注入しない |
+| `env` | map<string, string> | 空 map。グローバル `env` だけを使い、workspace から追加・上書きしない |
 | `setup_commands` | string[] | 空配列。セッション作成後に実行するコマンドなし |
 | `skill_features` | map<string, bool> | 機能 ID 単位で上書き。未記載の機能はグローバル `skill_features` にフォールバック |
 
@@ -272,11 +272,12 @@ session "login"  (/Users/me/git/usagi/.usagi/sessions/login)
   新ブランチの基点解決は [4. オーケストレーション#新ブランチの基点local--remote](../04-orchestration.md#新ブランチの基点local--remote)、編集画面は
   [design/04-config.md](../design/04-config.md) が正本です。
 - **実効設定 = グローバル設定にローカルの上書きを適用した結果**。解決は `domain/settings.rs` の `Settings::with_local`、ユースケースは `usecase/settings.rs` の `effective(storage, repo_root)` が担います。
-- `env` はローカル設定専用です。キーは環境変数名（英字または `_` で始まり、英数字と `_` のみ）、値は
+- `env` はグローバル設定の `env` へ workspace 固有の binding を追加し、同じ環境変数名の binding がある場合は
+  workspace 側で上書きします。キーは環境変数名（英字または `_` で始まり、英数字と `_` のみ）、値は
   `op://vault/item/field` 形式など `op read` が解決できる 1Password reference です。embedded `agent` / `terminal` pane の
-  新規起動時に `op read --no-newline` で解決し、成功した値だけを子プロセス環境へ注入します。secret 本体は
-  `settings.json` に保存しません。起動時のペイン復旧では workspace root 単位で解決結果を共有し、同じ root に属する
-  root / session worktree の復旧ペインが同じ `op read` を繰り返さないようにします。
+  新規起動時に、マージ後の binding を `op read --no-newline` で解決し、成功した値だけを子プロセス環境へ注入します。
+  secret 本体は `settings.json` に保存しません。起動時のペイン復旧では workspace root 単位で解決結果を共有し、同じ root に
+  属する root / session worktree の復旧ペインが同じ `op read` を繰り返さないようにします。
 - `setup_commands` はローカル設定専用です。各要素は 1 つの shell コマンド行で、`session create` 後に
   `<workspace>/.usagi/sessions/<name>` をカレントディレクトリとして保存順に実行されます。空白だけの要素は無視されます。
 - 全項目を未上書きに戻しても `settings.json` は残し（中身は実質空）、「グローバルに従う／既定に従う」を意味します。

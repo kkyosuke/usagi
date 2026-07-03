@@ -154,9 +154,10 @@ impl PtySession {
     /// command does, so leaving the agent returns to 在席 (Focus) rather than
     /// dropping the user at a bare shell prompt.
     ///
-    /// `env` is a map of workspace-scoped secret environment variables already
-    /// resolved by the caller. The values are injected through the child process
-    /// environment, never through the launch command line.
+    /// `env` is a map of effective (global plus workspace-local) secret
+    /// environment variables already resolved by the caller. The values are
+    /// injected through the child process environment, never through the launch
+    /// command line.
     ///
     /// `scrollback` caps how many scrolled-off lines the embedded terminal keeps
     /// for the user to scroll back over (the `vt100` parser grows the buffer
