@@ -21,11 +21,13 @@ use console::{Style, StyledObject};
 /// `Style::new()`) and [`console::StyledObject`] (the result of `style(value)`),
 /// so either construction style can request a role the same way.
 pub trait Palette: Sized {
-    /// Primary accent: active/selected rows, headings, editable values, tabs.
+    /// Primary accent: active/selected row labels, headings, editable values, tabs.
     fn accent(self) -> Self;
     /// Positive/success: running agents, completed saves, "live" markers.
     fn success(self) -> Self;
-    /// Error/danger: failures, destructive prompts, the input caret.
+    /// Error/danger: failures, destructive prompts, the input caret, and the
+    /// selection cursor glyph (`>`) — the pointer is red across every screen even
+    /// though the selected row's label is `accent` (see [`crate::presentation::tui::widgets::cursor_marker`]).
     fn danger(self) -> Self;
     /// Warning/attention: notices, waiting states, transient hints.
     fn warning(self) -> Self;
