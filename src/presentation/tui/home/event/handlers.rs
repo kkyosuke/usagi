@@ -6,7 +6,7 @@
 //! terminal (没入). All are pure aside from the injected callbacks, which they
 //! reach through the shared [`Wiring`] bundle.
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use console::Key;
@@ -24,6 +24,16 @@ use super::super::ui;
 use super::{
     paint_now, selected_dir, Flow, Wiring, CTRL_CARET, CTRL_E, CTRL_N, CTRL_O, CTRL_P, CTRL_S,
 };
+
+/// Minimum time the launch loader stays visible before a fresh pane spawn begins.
+///
+/// The home loop is about to hand control to the embedded PTY driver, so a fast
+/// spawn can otherwise replace the frame before the user perceives it. Four
+/// frames at 60ms cover this minimum and reach frame `3`, where the `run 2`
+/// loader grows from three to four rabbits (`RUN2_LOADING_GROW = 3` in `ui`).
+const LAUNCH_LOADING_MIN_VISIBLE: Duration = Duration::from_millis(180);
+/// Frame cadence for the pre-spawn launch loader.
+const LAUNCH_LOADING_FRAME_INTERVAL: Duration = Duration::from_millis(60);
 
 /// Handle one key in the workspace command palette overlay (`:`): edit /
 /// complete / recall the workspace command line and run it on `Enter`,
@@ -1227,6 +1237,49 @@ fn launch_pane(
     open_pane(term, state, painter, wiring, agent, true, false);
 }
 
+/// Number of paint calls required to keep a transient loader visible for at
+/// least `min_visible`. The first frame is immediate; each additional frame is
+/// separated by `interval`, so `180ms / 60ms` needs four paints at
+/// 0/60/120/180ms.
+fn launch_loading_frame_count(min_visible: Duration, interval: Duration) -> usize {
+    if interval.is_zero() {
+        return 1;
+    }
+    let intervals = min_visible
+        .as_nanos()
+        .saturating_add(interval.as_nanos().saturating_sub(1))
+        / interval.as_nanos();
+    usize::try_from(intervals)
+        .unwrap_or(usize::MAX)
+        .saturating_add(1)
+        .max(1)
+}
+
+fn wait_launch_loading_frame() {
+    std::thread::sleep(LAUNCH_LOADING_FRAME_INTERVAL);
+}
+
+/// Paint the launch loader for a short minimum window before entering a fresh
+/// pane. This guarantees the indicator is perceptible even when the PTY starts
+/// quickly, while the already-painted final frame remains on screen during any
+/// subsequent blocking spawn work.
+fn paint_launch_loading(
+    term: &Term,
+    painter: &mut FramePainter,
+    state: &mut HomeState,
+    label: &str,
+) {
+    let frames =
+        launch_loading_frame_count(LAUNCH_LOADING_MIN_VISIBLE, LAUNCH_LOADING_FRAME_INTERVAL);
+    for frame in 0..frames {
+        state.step_loading(label);
+        let _ = paint_now(term, painter, state);
+        if frame + 1 < frames {
+            wait_launch_loading_frame();
+        }
+    }
+}
+
 /// Open the embedded terminal pane (没入) for the focused session and run it
 /// until the user leaves it, then act on the [`PaneExit`].
 ///
@@ -1279,14 +1332,15 @@ fn open_pane(
     let will_spawn = new_pane || (!known_live && (wiring.preview)(&dir, state.sidebar()).is_none());
     if will_spawn {
         // Spawning the PTY (and launching the agent CLI inside it) blocks for a
-        // beat; flash the right-pane-centred loading indicator so the wait reads
-        // as deliberate, until the pane itself paints over the screen.
-        state.step_loading(if agent {
+        // beat; keep the right-pane-centred loading indicator visible for a
+        // short minimum window so the wait reads as deliberate, until the pane
+        // itself paints over the screen.
+        let label = if agent {
             "エージェント起動中…"
         } else {
             "ターミナル起動中…"
-        });
-        let _ = paint_now(term, painter, state);
+        };
+        paint_launch_loading(term, painter, state, label);
         state.finish_loading();
     }
     state.show_attached();
@@ -1383,7 +1437,9 @@ fn open_pane(
 
 #[cfg(test)]
 mod tests {
-    use super::{shift_select, Select};
+    use std::time::Duration;
+
+    use super::{launch_loading_frame_count, shift_select, Select};
     use console::Key;
 
     /// Build the reassembled key for `CSI 1 ; <modifier> <letter>`.
@@ -1427,5 +1483,32 @@ mod tests {
         assert_eq!(shift_select(&seq("x", 'D')), None);
         // Shift held but the final byte is not a cursor key.
         assert_eq!(shift_select(&seq("2", 'Z')), None);
+    }
+
+    #[test]
+    fn launch_loading_frame_count_covers_the_minimum_visible_window() {
+        assert_eq!(
+            launch_loading_frame_count(Duration::from_millis(180), Duration::from_millis(60)),
+            4,
+            "frames paint at 0/60/120/180ms"
+        );
+        assert_eq!(
+            launch_loading_frame_count(Duration::from_millis(181), Duration::from_millis(60)),
+            5,
+            "round up so the elapsed window is never shorter than requested"
+        );
+        assert_eq!(
+            launch_loading_frame_count(Duration::ZERO, Duration::from_millis(60)),
+            1,
+            "even a zero-duration flash still paints once"
+        );
+    }
+
+    #[test]
+    fn launch_loading_frame_count_is_safe_with_a_zero_interval() {
+        assert_eq!(
+            launch_loading_frame_count(Duration::from_millis(180), Duration::ZERO),
+            1
+        );
     }
 }
