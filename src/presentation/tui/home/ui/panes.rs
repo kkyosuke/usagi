@@ -979,9 +979,9 @@ fn rail_create_row(selected: bool, in_switch: bool) -> String {
     pad_to_width(format!("{gutter} {label}"), RAIL_WIDTH)
 }
 
-fn push_unite_workspace_gap(lines: &mut Vec<String>, width: usize) {
+fn push_unite_workspace_gap(win: &mut LineWindow, width: usize) {
     for _ in 0..UNITE_WORKSPACE_GAP_ROWS {
-        lines.push(pad_to_width(String::new(), width));
+        win.push(pad_to_width(String::new(), width));
     }
 }
 
@@ -993,16 +993,157 @@ fn line_hits_unite_workspace_gap(line: usize, cur: &mut usize) -> bool {
     false
 }
 
-fn group_block_rows(list: &WorktreeList, group_index: usize, worktree_count: usize) -> usize {
+/// The number of body lines one workspace group occupies in the sidebar: the
+/// (統合(unite)) inter-workspace gap and group header, the two-row root entry, the
+/// one-row divider, then either the single empty-workspace message or
+/// [`SESSION_ROWS`] rows per session. `with_headers` matches the full sidebar,
+/// which heads each 統合 group with its name; the collapsed rail draws no header
+/// (but keeps the gap), so it passes `false`. Shared by the create/rename insert
+/// anchor ([`group_inline_insert_line`]) and the scroll maths
+/// ([`sidebar_total_lines`] / [`selected_row_span`]) so every caller walks the one
+/// layout [`left_pane`] / [`rail_pane`] draw.
+fn group_block_rows(
+    list: &WorktreeList,
+    group_index: usize,
+    worktree_count: usize,
+    with_headers: bool,
+) -> usize {
     let united = list.group_count() > 1;
     let gap = usize::from(united && group_index > 0) * UNITE_WORKSPACE_GAP_ROWS;
-    let header = usize::from(united);
+    let header = usize::from(united && with_headers);
     let body = if worktree_count == 0 {
         1
     } else {
         SESSION_ROWS * worktree_count
     };
     gap + header + 2 + 1 + body
+}
+
+/// The total body lines the sidebar draws for `list`: every group's block plus the
+/// trailing persistent "+ new session" row. `with_headers` matches the sidebar
+/// variant (full draws 統合 group headers, the rail does not). The scroll offset
+/// clamps against this so the window never runs past the list's foot.
+fn sidebar_total_lines(list: &WorktreeList, with_headers: bool) -> usize {
+    list.groups()
+        .iter()
+        .enumerate()
+        .map(|(i, g)| group_block_rows(list, i, g.worktrees().len(), with_headers))
+        .sum::<usize>()
+        + 1 // the "+ new session" row at the foot
+}
+
+/// The `(start line, height)` the selected row occupies in the full-column
+/// layout: the two-row root entry, one [`SESSION_ROWS`] block per session, or the
+/// single "+ new session" row at the foot. Walks the same layout as
+/// [`sidebar_row_at_line_walk`] so the scroll offset reveals exactly the row the
+/// renderer draws as selected.
+fn selected_row_span(list: &WorktreeList, with_headers: bool) -> (usize, usize) {
+    let united = list.group_count() > 1;
+    let sel = list.selected_index();
+    let mut cur = 0usize;
+    let mut flat = 0usize;
+    for (g, group) in list.groups().iter().enumerate() {
+        if united && g > 0 {
+            cur += UNITE_WORKSPACE_GAP_ROWS;
+        }
+        if with_headers && united {
+            cur += 1;
+        }
+        if flat == sel {
+            return (cur, 2); // the root entry (its divider is not part of the row)
+        }
+        cur += 2 + 1; // root entry + divider
+        flat += 1;
+        if group.worktrees().is_empty() {
+            cur += 1; // the empty-workspace message
+            continue;
+        }
+        for _ in group.worktrees() {
+            if flat == sel {
+                return (cur, SESSION_ROWS);
+            }
+            cur += SESSION_ROWS;
+            flat += 1;
+        }
+    }
+    (cur, 1) // the "+ new session" row
+}
+
+/// The body-line scroll offset for a sidebar taller than its `viewport_rows`,
+/// chosen so the selected row stays visible. Zero while the list fits (top
+/// pinned); once the selected row's foot drops below the fold it scrolls just far
+/// enough to reveal that row at the bottom, clamped so the window never runs past
+/// the list's end. A pure function of the list, the sidebar variant, and the
+/// viewport height, so the renderer ([`left_pane`] / [`rail_pane`]) and every
+/// hit-test compute the identical offset and never disagree on what is on screen.
+pub(super) fn sidebar_scroll(
+    list: &WorktreeList,
+    with_headers: bool,
+    viewport_rows: usize,
+) -> usize {
+    let total = sidebar_total_lines(list, with_headers);
+    if viewport_rows == 0 || total <= viewport_rows {
+        return 0;
+    }
+    let (start, len) = selected_row_span(list, with_headers);
+    let end = start + len;
+    let scroll = end.saturating_sub(viewport_rows);
+    scroll.min(total - viewport_rows)
+}
+
+/// Accumulates a scrolled window of body lines: only lines whose full-column
+/// index lands in `[scroll, scroll + cap)` are kept, so the sidebar can show a
+/// slice of a list taller than the pane while the builders still walk the whole
+/// layout — keeping every row's flat index (and therefore its selected / active
+/// styling) correct. Lines above the window are counted but not stored; a caller
+/// skips *building* an entire off-window entry via [`Self::above`] / [`Self::full`]
+/// so the per-frame styling cost stays bound to the visible rows even with many
+/// sessions open.
+struct LineWindow {
+    scroll: usize,
+    cap: usize,
+    seen: usize,
+    out: Vec<String>,
+}
+
+impl LineWindow {
+    fn new(scroll: usize, cap: usize) -> Self {
+        Self {
+            scroll,
+            cap,
+            seen: 0,
+            out: Vec::new(),
+        }
+    }
+
+    /// Record one built line, keeping it only when it falls inside the window.
+    fn push(&mut self, line: String) {
+        if self.seen >= self.scroll && self.out.len() < self.cap {
+            self.out.push(line);
+        }
+        self.seen += 1;
+    }
+
+    /// Advance past `n` lines without building them (they sit above the window).
+    fn skip(&mut self, n: usize) {
+        self.seen += n;
+    }
+
+    /// Whether the next `n` lines all sit above the window, so the caller can skip
+    /// building them and just [`Self::skip`] ahead.
+    fn above(&self, n: usize) -> bool {
+        self.seen + n <= self.scroll
+    }
+
+    /// Whether the window is already filled — every remaining line is below it, so
+    /// the caller can stop building entirely.
+    fn full(&self) -> bool {
+        self.seen >= self.scroll + self.cap
+    }
+
+    fn into_lines(self) -> Vec<String> {
+        self.out
+    }
 }
 
 /// Builds the collapsed-rail sidebar ([`Sidebar::Rail`]): the root entry first, a
@@ -1026,18 +1167,21 @@ fn rail_pane(
     now: DateTime<Utc>,
 ) -> Vec<String> {
     let root = root_glyph();
-    let mut lines: Vec<String> = Vec::new();
+    // Scroll so the selected entry stays on screen once the list outgrows the rail
+    // (the rail draws no 統合 group header, so `with_headers` is false).
+    let scroll = sidebar_scroll(list, false, rows);
+    let mut win = LineWindow::new(scroll, rows);
     // The flat selectable-row index, matching `WorktreeList`'s row space (the
     // 統合 group separators are pure decoration and do not advance it).
     let mut flat_row = 0usize;
     let united = list.group_count() > 1;
     'groups: for (g, group) in list.groups().iter().enumerate() {
-        if lines.len() >= rows {
+        if win.full() {
             break;
         }
         // In 統合(unite) mode two blank rows separate each workspace's block.
         if united && g > 0 {
-            push_unite_workspace_gap(&mut lines, RAIL_WIDTH);
+            push_unite_workspace_gap(&mut win, RAIL_WIDTH);
         }
         // The root entry is two rows (then a divider), matching the full sidebar's
         // [`root_row`]; only worktree entries carry the third resource row, so the
@@ -1056,22 +1200,28 @@ fn rail_pane(
             root_top = dim_row(&root_top);
             root_detail = dim_row(&root_detail);
         }
-        lines.push(root_top);
-        lines.push(root_detail);
+        win.push(root_top);
+        win.push(root_detail);
         flat_row += 1;
-        lines.push(style("─".repeat(RAIL_WIDTH)).dim().to_string());
+        win.push(style("─".repeat(RAIL_WIDTH)).dim().to_string());
         if group.worktrees().is_empty() {
             // Mirror the full sidebar's single empty-message row so the row count
             // matches and toggling never shifts the layout.
-            lines.push(pad_to_width(String::new(), RAIL_WIDTH));
+            win.push(pad_to_width(String::new(), RAIL_WIDTH));
             continue;
         }
         for (i, w) in group.worktrees().iter().enumerate() {
-            // Stop once the built rows fill the rail: the trailing `truncate(rows)`
-            // discards the rest, so building beyond the visible height is wasted
-            // work (same bound as the full sidebar above).
-            if lines.len() >= rows {
+            // Stop once the window is filled: everything past it is off screen, so
+            // building it is wasted work (same bound as the full sidebar).
+            if win.full() {
                 break 'groups;
+            }
+            // The whole entry sits above the scrolled window — skip building it and
+            // just advance the line / flat-row counters.
+            if win.above(SESSION_ROWS) {
+                win.skip(SESSION_ROWS);
+                flat_row += 1;
+                continue;
             }
             let selected = flat_row == list.selected_index();
             let active = flat_row == list.active_index();
@@ -1100,21 +1250,20 @@ fn rail_pane(
                 detail = dim_row(&detail);
                 resource = dim_row(&resource);
             }
-            lines.push(top);
-            lines.push(detail);
-            lines.push(resource);
+            win.push(top);
+            win.push(detail);
+            win.push(resource);
             flat_row += 1;
         }
     }
-    if lines.len() < rows {
+    if !win.full() {
         let mut row = rail_create_row(list.create_row_selected(), in_switch);
         if in_switch && !list.create_row_selected() {
             row = dim_row(&row);
         }
-        lines.push(row);
+        win.push(row);
     }
-    lines.truncate(rows);
-    lines
+    win.into_lines()
 }
 
 /// Re-renders an already-styled row uniformly dimmed: strips its colours and
@@ -1184,11 +1333,17 @@ fn sidebar_row_at_line_walk(list: &WorktreeList, line: usize, with_headers: bool
     None
 }
 
+/// The flat selectable row a 0-based *screen* body `line` maps to, given the
+/// sidebar's current `scroll` offset (see [`sidebar_scroll`]). The screen line is
+/// lifted back into the full-column layout by adding `scroll` before the walk, so a
+/// click resolves to the right row even when the list is scrolled.
 pub(super) fn sidebar_row_at_line_for_sidebar(
     list: &WorktreeList,
     line: usize,
     sidebar: Sidebar,
+    scroll: usize,
 ) -> Option<usize> {
+    let line = line + scroll;
     match sidebar {
         Sidebar::Full => sidebar_row_at_line_walk(list, line, true),
         Sidebar::Rail => sidebar_row_at_line_walk(list, line, false),
@@ -1208,7 +1363,7 @@ pub(super) fn group_inline_insert_line(list: &WorktreeList, group: usize) -> usi
         .iter()
         .enumerate()
         .take(group + 1)
-        .map(|(i, g)| group_block_rows(list, i, g.worktrees().len()))
+        .map(|(i, g)| group_block_rows(list, i, g.worktrees().len(), true))
         .sum()
 }
 
@@ -1310,19 +1465,23 @@ pub(super) fn left_pane(
     // In 統合(unite) mode each workspace's rows are headed by its name.
     let united = list.group_count() > 1;
 
-    let mut lines: Vec<String> = Vec::new();
+    // Scroll so the selected row stays on screen once the list outgrows the pane;
+    // the window keeps only the visible slice while the loop walks the whole layout
+    // so every flat index (and its selected / active styling) stays correct.
+    let scroll = sidebar_scroll(list, true, rows);
+    let mut win = LineWindow::new(scroll, rows);
     // The flat selectable-row index, matching `WorktreeList`'s row space (group
     // headers are pure decoration and do not advance it).
     let mut flat_row = 0usize;
     'groups: for (g, group) in list.groups().iter().enumerate() {
-        if lines.len() >= rows {
+        if win.full() {
             break;
         }
         if united && g > 0 {
-            push_unite_workspace_gap(&mut lines, left_w);
+            push_unite_workspace_gap(&mut win, left_w);
         }
         if united {
-            lines.push(group_header(group.name(), left_w));
+            win.push(group_header(group.name(), left_w));
         }
         let (mut root_top, mut root_detail) = root_row(
             name_width,
@@ -1337,10 +1496,10 @@ pub(super) fn left_pane(
             root_top = dim_row(&root_top);
             root_detail = dim_row(&root_detail);
         }
-        lines.push(root_top);
-        lines.push(root_detail);
+        win.push(root_top);
+        win.push(root_detail);
         flat_row += 1;
-        lines.push(
+        win.push(
             style(format!("{indent}{}", "─".repeat(inner_w)))
                 .dim()
                 .to_string(),
@@ -1348,7 +1507,7 @@ pub(super) fn left_pane(
         if group.worktrees().is_empty() {
             // No sessions yet in this workspace — show the empty message under the
             // divider.
-            lines.push(
+            win.push(
                 style(format!("{indent}{}", clip_to_width(EMPTY_MESSAGE, inner_w)))
                     .dim()
                     .to_string(),
@@ -1356,12 +1515,18 @@ pub(super) fn left_pane(
             continue;
         }
         for (i, w) in group.worktrees().iter().enumerate() {
-            // Stop once the rows built already fill the pane: the trailing
-            // `truncate(rows)` would discard anything past this, so building it is
-            // wasted work. With many sessions open this bounds the per-frame cost
-            // (styling, dimming, ANSI rewriting) to the visible rows.
-            if lines.len() >= rows {
+            // Stop once the window is filled: everything past it is off screen, so
+            // building it is wasted work. With many sessions open this bounds the
+            // per-frame cost (styling, dimming, ANSI rewriting) to the visible rows.
+            if win.full() {
                 break 'groups;
+            }
+            // The whole entry sits above the scrolled window — skip building it and
+            // just advance the line / flat-row counters.
+            if win.above(SESSION_ROWS) {
+                win.skip(SESSION_ROWS);
+                flat_row += 1;
+                continue;
             }
             let selected = flat_row == list.selected_index();
             let active = flat_row == list.active_index();
@@ -1398,21 +1563,20 @@ pub(super) fn left_pane(
                 detail = dim_row(&detail);
                 resource = dim_row(&resource);
             }
-            lines.push(top);
-            lines.push(detail);
-            lines.push(resource);
+            win.push(top);
+            win.push(detail);
+            win.push(resource);
             flat_row += 1;
         }
     }
-    if lines.len() < rows {
+    if !win.full() {
         let mut row = create_row(list.create_row_selected(), in_switch, left_w);
         if in_switch && !list.create_row_selected() {
             row = dim_row(&row);
         }
-        lines.push(row);
+        win.push(row);
     }
-    lines.truncate(rows);
-    lines
+    win.into_lines()
 }
 
 /// Renders one log line, coloured by kind. Command lines get a `❯` prompt.
@@ -1793,10 +1957,15 @@ pub(in crate::presentation::tui::home) fn sidebar_pr_badge_at(
     if col >= left_w || row < BODY_TOP {
         return None;
     }
-    let line = (row - BODY_TOP) as usize;
-    if line >= super::body_rows_for(height) {
+    let body_rows = super::body_rows_for(height);
+    let screen_line = (row - BODY_TOP) as usize;
+    if screen_line >= body_rows {
         return None;
     }
+    // Lift the screen line back into the full-column layout the entries are walked
+    // in, so the badge resolves correctly when the list is scrolled.
+    let scroll = sidebar_scroll(state.list(), true, body_rows);
+    let line = screen_line + scroll;
     // The badge only lives on each entry's detail line.
     let (idx, _) = full_sidebar_worktree_entries(state.list())
         .into_iter()
@@ -1942,11 +2111,17 @@ pub(in crate::presentation::tui::home) fn pr_popup_placement(
     let (_, entry_line) = full_sidebar_worktree_entries(state.list())
         .into_iter()
         .find(|&(global, _)| global == idx)?;
+    // Lift the entry into screen space by the sidebar's scroll offset; if the
+    // session's row has scrolled off the top of the pane, its badge is not on
+    // screen, so pin nothing rather than float the box over an unrelated row.
+    let body_rows = super::body_rows_for(height);
+    let scroll = sidebar_scroll(state.list(), true, body_rows);
+    let screen_line = entry_line.checked_sub(scroll).filter(|&l| l < body_rows)?;
     // `render_frame` overlays the box while `lines` holds only the chrome above the
     // body (`BODY_TOP` rows) and the body itself, so the anchor clamps against that
     // same length — and the left edge against the width — exactly as `overlay_at`.
-    let base_len = BODY_TOP as usize + super::body_rows_for(height);
-    let raw_top = BODY_TOP as usize + entry_line;
+    let base_len = BODY_TOP as usize + body_rows;
+    let raw_top = BODY_TOP as usize + screen_line;
     let top = raw_top.min(base_len.saturating_sub(popup.len()));
     let left = (left_w + super::SEP_WIDTH).min(width - block_w);
     Some((popup, top, left))
