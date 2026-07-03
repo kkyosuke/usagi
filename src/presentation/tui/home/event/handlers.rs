@@ -1244,8 +1244,9 @@ fn launch_pane(
 ///   action menu, leaving every pane alive in the pool.
 /// - [`PaneExit::ToPreviousSession`] — `Ctrl-^`: jump to the previously focused
 ///   session, re-attaching it when live (or 在席 when none was recorded).
-/// - [`PaneExit::ToSession`] — a double click on a sidebar session row: switch to
-///   that focus row, re-attaching it when live.
+/// - [`PaneExit::ToSession`] — a double click on a selectable sidebar row: switch
+///   to that focus row (re-attaching it when live) or open inline creation for
+///   the create row.
 /// - [`PaneExit::Quit`] — `Ctrl-Q`: leave the pane and raise the quit-confirmation
 ///   modal on the home screen (every pane stays alive in the pool until confirmed).
 ///
@@ -1340,11 +1341,22 @@ fn open_pane(
             }
         }
         Ok(PaneExit::ToSession(row)) => {
-            // A double click on a sidebar session row in 没入: switch to that focus
-            // row, re-attaching it when live (like `Enter` in 切替, via
-            // `focus_and_attach`) — focusing records the session being left, so
-            // `Ctrl-^` can toggle back.
-            focus_and_attach(term, state, painter, wiring, row);
+            if row == state.list().create_row() {
+                // A double click on the sidebar create row in 没入: leave the pane
+                // to the picker and open the same inline create editor that 切替 /
+                // 在席 expose. ReturnMode::Attached preserves the usual `Esc`
+                // path: if the user cancels creation and backs out of 切替, the
+                // live pane re-attaches.
+                state.enter_switch(ReturnMode::Attached);
+                state.switch_select(row);
+                begin_switch_create(state, wiring, None);
+            } else {
+                // A double click on a sidebar session row in 没入: switch to that
+                // focus row, re-attaching it when live (like `Enter` in 切替, via
+                // `focus_and_attach`) — focusing records the session being left,
+                // so `Ctrl-^` can toggle back.
+                focus_and_attach(term, state, painter, wiring, row);
+            }
         }
         Ok(PaneExit::Quit) => {
             // `Ctrl-Q` in 没入: leave the pane (every shell / agent stays alive in

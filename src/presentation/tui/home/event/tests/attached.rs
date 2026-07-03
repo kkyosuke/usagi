@@ -230,3 +230,43 @@ fn a_double_click_in_an_attached_pane_switches_to_the_clicked_session() {
         vec![PathBuf::from("/r/feat"), PathBuf::from("/r/main")],
     );
 }
+
+#[test]
+fn a_double_click_on_the_create_row_in_an_attached_pane_opens_inline_create() {
+    // From 没入, the pane reports a double click on the sidebar create row as
+    // PaneExit::ToSession(create_row). The event loop leaves the pane alive,
+    // opens the same inline create editor used by 切替 / 在席, and the typed name
+    // is dispatched through the normal create callback.
+    let state = sample_state();
+    let create_row = state.list().create_row();
+    let opened = RefCell::new(Vec::new());
+    let mut open = |_h: &mut HomeState, d: &Path, _a: bool, _n: bool| {
+        opened.borrow_mut().push(d.to_path_buf());
+        Ok(PaneExit::ToSession(create_row))
+    };
+    let created = RefCell::new(Vec::new());
+    let mut create = |name: &str| {
+        created.borrow_mut().push(name.to_string());
+        noop_create(name)
+    };
+    let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = live_preview;
+    let mut keys = cmd("session switch feat");
+    keys.push(Ok(Key::Enter)); // attach feat -> ToSession(create_row) -> inline create
+    keys.extend(typed("wip"));
+    keys.push(Ok(Key::Enter));
+    keys.push(Ok(Key::CtrlC));
+    assert!(matches!(
+        run_full(
+            keys,
+            state,
+            &mut open,
+            &mut create,
+            &mut preview,
+            &mut noop_config
+        )
+        .unwrap(),
+        Outcome::Quit
+    ));
+    assert_eq!(*opened.borrow(), vec![PathBuf::from("/r/feat")]);
+    assert_eq!(*created.borrow(), vec!["wip"]);
+}
