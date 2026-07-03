@@ -446,6 +446,59 @@ fn ensure_excluded_errors_outside_a_git_worktree() {
 }
 
 #[test]
+fn ensure_all_excluded_appends_every_missing_pattern_in_one_pass() {
+    let dir = tempfile::tempdir().unwrap();
+    init_repo(dir.path());
+    let exclude = dir.path().join(".git/info/exclude");
+    std::fs::write(&exclude, "# existing\n/.claude/skills/a\n").unwrap();
+
+    // Two of these are new; the middle one already present is left as-is.
+    ensure_all_excluded(
+        dir.path(),
+        &[
+            "/.claude/skills/a",
+            "/.claude/skills/b",
+            "/.claude/skills/c",
+        ],
+    )
+    .unwrap();
+
+    let content = std::fs::read_to_string(&exclude).unwrap();
+    for pattern in [
+        "/.claude/skills/a",
+        "/.claude/skills/b",
+        "/.claude/skills/c",
+    ] {
+        assert_eq!(content.lines().filter(|l| *l == pattern).count(), 1);
+    }
+    assert!(content.contains("# existing"));
+
+    // A repeat run with the same set is a no-op (nothing further appended).
+    let before = std::fs::read_to_string(&exclude).unwrap();
+    ensure_all_excluded(dir.path(), &["/.claude/skills/a", "/.claude/skills/b"]).unwrap();
+    assert_eq!(std::fs::read_to_string(&exclude).unwrap(), before);
+}
+
+#[test]
+fn ensure_all_excluded_is_a_noop_for_no_patterns() {
+    // No patterns means no work — and, notably, no git call, so this succeeds even
+    // outside a git worktree.
+    let plain = tempfile::tempdir().unwrap();
+    assert!(ensure_all_excluded(plain.path(), &[]).is_ok());
+}
+
+#[test]
+fn git_common_dir_resolves_inside_a_repo_and_is_none_outside() {
+    let dir = tempfile::tempdir().unwrap();
+    init_repo(dir.path());
+    let common = git_common_dir(dir.path()).expect("a repo has a common dir");
+    assert!(common.ends_with(".git"));
+
+    let plain = tempfile::tempdir().unwrap();
+    assert!(git_common_dir(plain.path()).is_none());
+}
+
+#[test]
 fn remove_worktree_deletes_a_clean_one_and_needs_force_when_dirty() {
     let dir = tempfile::tempdir().unwrap();
     init_repo(dir.path());

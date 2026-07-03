@@ -25,8 +25,9 @@ pub use branch::{
 pub use merge::{fetch, merge, MergeStatus};
 pub use repo::{clone, is_repository, short_hash};
 pub use worktree::{
-    add_worktree, ensure_excluded, init_submodules, list_worktrees, primary_worktree,
-    prune_worktrees, remove_worktree, worktree_status, WorktreeInfo, WorktreeStatus,
+    add_worktree, ensure_all_excluded, ensure_excluded, git_common_dir, init_submodules,
+    list_worktrees, primary_worktree, prune_worktrees, remove_worktree, worktree_status,
+    WorktreeInfo, WorktreeStatus,
 };
 
 /// A `git -C <repo>` command with repo-scoping env vars stripped, for tests.
