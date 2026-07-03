@@ -37,6 +37,56 @@ pub fn default_branch(repo: &Path) -> String {
         .unwrap_or_else(|| "main".to_string())
 }
 
+/// A repository's default branch and the ref its sessions are measured against.
+///
+/// Resolved once per repository (see [`integration_base`]) and shared by every
+/// worktree of it: `default` is the default branch's short name — used to ask
+/// "is this worktree on the default branch?", which suppresses its ahead/behind
+/// and diff — while `base` is the ref those counts and the `+N -M` diff are
+/// actually taken against.
+pub struct IntegrationBase {
+    /// The default branch's short name (e.g. `main`).
+    pub default: String,
+    /// The ref sessions are measured against: `origin/<default>` when the
+    /// repository publishes a remote default branch, else the local `<default>`.
+    pub base: String,
+}
+
+/// Resolve `repo`'s [`IntegrationBase`]: the default branch name and the ref its
+/// sessions' ahead/behind and diffs are measured against, in one place per
+/// repository so every worktree reuses the decision.
+///
+/// When the remote publishes a default branch (`origin/HEAD` resolves), sessions
+/// are measured against `origin/<default>`, so the status tracks what has landed
+/// on the integration branch even before a local fetch — the same preference
+/// [`ahead_behind`] and [`diff_stat`] apply per call. Without a remote default (a
+/// local-only repo, or one whose `origin/HEAD` is unset) there is no
+/// `origin/<default>` to prefer, so the local `<default>` — the primary
+/// worktree's current branch, else `main` — is used directly. Resolving this once
+/// lets [`crate::usecase::workspace_state`] skip the speculative `origin/<default>`
+/// probe that would otherwise miss (and cost an extra git process) on every
+/// worktree of a remote-less repository.
+pub fn integration_base(repo: &Path) -> IntegrationBase {
+    match remote_default_branch(repo) {
+        // `origin/HEAD` points at `origin/<name>`, so that ref is known to exist;
+        // measure against it directly without a fallback probe.
+        Some(name) => IntegrationBase {
+            base: format!("origin/{name}"),
+            default: name,
+        },
+        // No remote default: `origin/<default>` cannot exist, so use the local
+        // branch for both the name and the base rather than probing a ref that is
+        // guaranteed to miss.
+        None => {
+            let default = current_branch(repo).unwrap_or_else(|| "main".to_string());
+            IntegrationBase {
+                base: default.clone(),
+                default,
+            }
+        }
+    }
+}
+
 /// Resolve the base ref a new session worktree should branch from, honouring the
 /// project's [`BranchSource`] and chosen branch.
 ///
@@ -172,6 +222,17 @@ pub fn ahead_behind(repo: &Path, branch: &str, into: &str) -> Option<(usize, usi
         .or_else(|| count_ahead_behind(repo, into, branch))
 }
 
+/// Count `(ahead, behind)` of `branch` against an already-resolved integration
+/// `base` ref (an [`IntegrationBase::base`]).
+///
+/// Unlike [`ahead_behind`], `base` is used verbatim — the caller resolved
+/// `origin/<default>` versus the local `<default>` once for the whole repository
+/// (see [`integration_base`]), so this neither prepends `origin/` nor falls back,
+/// sparing the speculative probe on every worktree of a remote-less repository.
+pub fn ahead_behind_against(repo: &Path, branch: &str, base: &str) -> Option<(usize, usize)> {
+    count_ahead_behind(repo, base, branch)
+}
+
 /// The total added / removed line counts of the worktree's cumulative diff
 /// against the default branch, as `(added, removed)`, or `None` when it cannot
 /// be computed (e.g. an unrelated history or a ref that does not resolve).
@@ -191,7 +252,14 @@ pub fn diff_stat(repo: &Path, into: &str) -> Option<(usize, usize)> {
     diff_stat_against(repo, &format!("origin/{into}")).or_else(|| diff_stat_against(repo, into))
 }
 
-fn diff_stat_against(repo: &Path, base: &str) -> Option<(usize, usize)> {
+/// The `(added, removed)` line counts of the worktree's cumulative diff against
+/// an already-resolved `base` ref (an [`IntegrationBase::base`]).
+///
+/// Unlike [`diff_stat`], `base` is used verbatim — the caller resolved
+/// `origin/<default>` versus the local `<default>` once for the repository (see
+/// [`integration_base`]), so this skips the fallback probe [`diff_stat`] makes
+/// per call.
+pub fn diff_stat_against(repo: &Path, base: &str) -> Option<(usize, usize)> {
     let output = git_capture(repo, &["diff", "--numstat", "--merge-base", base])
         .ok()
         .flatten()?;

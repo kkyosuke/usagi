@@ -77,15 +77,19 @@ pub fn sync(cwd: &Path) -> Result<WorkspaceState> {
 }
 
 /// Inspect a list of worktree paths into [`WorktreeState`]s, resolving each
-/// worktree's repository default branch at most once.
+/// worktree's repository integration base at most once.
 ///
-/// The default branch is a per-repository property shared by every worktree of
-/// that repository, so it is resolved once per repository (keyed by the
-/// worktree's primary worktree) and reused — rather than shelling out for it
-/// inside every [`inspect_worktree`]. The worktrees are then inspected in
+/// The integration base — the default branch name and the ref sessions are
+/// measured against ([`git::IntegrationBase`]) — is a per-repository property
+/// shared by every worktree of that repository, so it is resolved once per
+/// repository (keyed by the worktree's git common dir) and reused, rather than
+/// shelling out for it inside every [`inspect_worktree`]. Resolving it here also
+/// picks `origin/<default>` versus the local `<default>` once, so a remote-less
+/// repository's worktrees skip the speculative `origin/<default>` probe that
+/// would otherwise miss on each of them. The worktrees are then inspected in
 /// parallel so a multi-repo, multi-session workspace is not bottlenecked on a
-/// long sequence of git subprocesses. Used by both [`sync`] and session
-/// recording so the two never drift into separate implementations.
+/// long sequence of git subprocesses. Used by both [`sync`] and session recording
+/// so the two never drift into separate implementations.
 pub fn inspect_worktrees(paths: &[PathBuf]) -> Vec<WorktreeState> {
     use rayon::prelude::*;
 
@@ -97,20 +101,20 @@ pub fn inspect_worktrees(paths: &[PathBuf]) -> Vec<WorktreeState> {
         .par_iter()
         .map(|path| git::git_common_dir(path).unwrap_or_else(|| path.clone()))
         .collect();
-    // Resolve each distinct repository's default branch once, keyed by its common
-    // dir. `default_branch` works from any worktree of the repository, so it is run
-    // against the first path that maps to each key.
-    let mut defaults: HashMap<&Path, String> = HashMap::new();
+    // Resolve each distinct repository's integration base once, keyed by its common
+    // dir. `integration_base` works from any worktree of the repository, so it is
+    // run against the first path that maps to each key.
+    let mut bases: HashMap<&Path, git::IntegrationBase> = HashMap::new();
     for (key, path) in repo_keys.iter().zip(paths.iter()) {
-        defaults
+        bases
             .entry(key.as_path())
-            .or_insert_with(|| git::default_branch(path));
+            .or_insert_with(|| git::integration_base(path));
     }
 
     paths
         .par_iter()
         .zip(repo_keys.par_iter())
-        .map(|(path, key)| inspect_worktree(path, &defaults[key.as_path()]))
+        .map(|(path, key)| inspect_worktree(path, &bases[key.as_path()]))
         .collect()
 }
 
@@ -177,14 +181,14 @@ pub fn recorded_root_note(root: &Path) -> Option<String> {
 }
 
 /// Build the [`WorktreeState`] of a single worktree at `path`, classifying its
-/// branch against `default` — the default branch of the worktree's repository,
+/// branch against `base` — the integration base of the worktree's repository,
 /// resolved once by the caller (a workspace may span repositories with differing
 /// defaults, so the caller passes the one that applies here).
 ///
 /// The branch, HEAD, upstream, and dirtiness are read in a single git call
 /// ([`git::worktree_status`]); a `None` (not a git worktree) yields an empty,
 /// branch-less state.
-pub fn inspect_worktree(path: &Path, default: &str) -> WorktreeState {
+pub fn inspect_worktree(path: &Path, base: &git::IntegrationBase) -> WorktreeState {
     let status = git::worktree_status(path).unwrap_or(git::WorktreeStatus {
         head: String::new(),
         branch: None,
@@ -193,13 +197,13 @@ pub fn inspect_worktree(path: &Path, default: &str) -> WorktreeState {
     });
     // The ahead/behind commit counts feed both the lifecycle status and the
     // `↑N ↓M` marker, so they are read once here and shared.
-    let counts = branch_counts(path, status.branch.as_deref(), default);
+    let counts = branch_counts(path, status.branch.as_deref(), base);
     let classification = BranchStatus::derive(status.dirty, counts, status.upstream.is_some());
     let ahead_behind = counts.and_then(|(ahead, behind)| {
         let ab = AheadBehind { ahead, behind };
         (!ab.is_empty()).then_some(ab)
     });
-    let diff = measure_diff(path, status.branch.as_deref(), default);
+    let diff = measure_diff(path, status.branch.as_deref(), base);
     WorktreeState {
         branch: status.branch,
         path: path.to_path_buf(),
@@ -216,17 +220,23 @@ pub fn inspect_worktree(path: &Path, default: &str) -> WorktreeState {
     }
 }
 
-/// Measure the worktree's cumulative diff against the default branch for the
+/// Measure the worktree's cumulative diff against the integration base for the
 /// sidebar `+N -M` badge, or `None` when there is nothing to show.
 ///
 /// Only a real branch other than the default is measured — the default branch
 /// itself and a detached HEAD report `None`, mirroring [`branch_counts`]'s commit
 /// counts. An empty diff (a session even with the default) also collapses to
-/// `None`, so the badge and the persisted state only carry an actual diff.
-fn measure_diff(repo: &Path, branch: Option<&str>, default: &str) -> Option<DiffStat> {
+/// `None`, so the badge and the persisted state only carry an actual diff. The
+/// base ref (`origin/<default>` or local `<default>`) was resolved once per
+/// repository by [`inspect_worktrees`], so this measures against it directly.
+fn measure_diff(
+    repo: &Path,
+    branch: Option<&str>,
+    base: &git::IntegrationBase,
+) -> Option<DiffStat> {
     match branch {
-        Some(branch) if branch != default => {
-            let (added, removed) = git::diff_stat(repo, default)?;
+        Some(branch) if branch != base.default => {
+            let (added, removed) = git::diff_stat_against(repo, &base.base)?;
             let stat = DiffStat { added, removed };
             (!stat.is_empty()).then_some(stat)
         }
@@ -234,18 +244,25 @@ fn measure_diff(repo: &Path, branch: Option<&str>, default: &str) -> Option<Diff
     }
 }
 
-/// The branch's ahead/behind commit counts against the default — the git facts
-/// the lifecycle status ([`BranchStatus::derive`]) and the `↑N ↓M` marker are both
-/// built from, read once per worktree and shared.
+/// The branch's ahead/behind commit counts against the integration base — the git
+/// facts the lifecycle status ([`BranchStatus::derive`]) and the `↑N ↓M` marker are
+/// both built from, read once per worktree and shared.
 ///
 /// Only a real branch other than the default is measured; the default branch and a
-/// detached HEAD report `None` (their ahead/behind is not meaningful). The default
-/// is resolved against the remote (`origin/<default>`) first inside
-/// [`git::ahead_behind`], so the counts reflect what has landed on the remote
-/// integration branch even before a local fetch.
-fn branch_counts(repo: &Path, branch: Option<&str>, default: &str) -> Option<(usize, usize)> {
+/// detached HEAD report `None` (their ahead/behind is not meaningful). The base ref
+/// (`origin/<default>` when the repository has a remote default, else local
+/// `<default>`) was resolved once per repository by [`inspect_worktrees`], so the
+/// counts reflect what has landed on the remote integration branch even before a
+/// local fetch, without re-probing the remote for each worktree.
+fn branch_counts(
+    repo: &Path,
+    branch: Option<&str>,
+    base: &git::IntegrationBase,
+) -> Option<(usize, usize)> {
     match branch {
-        Some(branch) if branch != default => git::ahead_behind(repo, branch, default),
+        Some(branch) if branch != base.default => {
+            git::ahead_behind_against(repo, branch, &base.base)
+        }
         _ => None,
     }
 }
@@ -254,6 +271,16 @@ fn branch_counts(repo: &Path, branch: Option<&str>, default: &str) -> Option<(us
 mod tests {
     use super::*;
     use crate::infrastructure::git::test_command as git;
+
+    /// A local (remote-less) integration base named `name`, as the test repos
+    /// below have — `origin/<name>` does not exist, so both the default name and
+    /// the base ref are the local branch.
+    fn base(name: &str) -> crate::infrastructure::git::IntegrationBase {
+        crate::infrastructure::git::IntegrationBase {
+            default: name.to_string(),
+            base: name.to_string(),
+        }
+    }
 
     /// Initialise a throwaway git repo with one commit on `main`.
     fn init_repo(dir: &Path) {
@@ -274,7 +301,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         init_repo(dir.path());
 
-        let wt = inspect_worktree(dir.path(), "main");
+        let wt = inspect_worktree(dir.path(), &base("main"));
         assert_eq!(wt.branch.as_deref(), Some("main"));
         // The worktree is on the repo's own default branch (clean, no upstream)
         // → local; the default is never measured against itself.
@@ -301,7 +328,7 @@ mod tests {
         run(&["commit", "-q", "-m", "work"]);
         std::fs::write(dir.path().join("new.txt"), "a\nb\nc\n").unwrap();
 
-        let wt = inspect_worktree(dir.path(), "main");
+        let wt = inspect_worktree(dir.path(), &base("main"));
         assert_eq!(
             wt.diff,
             Some(DiffStat {
@@ -314,7 +341,7 @@ mod tests {
         // to `None` rather than a `+0 -0`. Force past the uncommitted edit above.
         run(&["checkout", "-q", "-f", "main"]);
         run(&["checkout", "-q", "-b", "untouched"]);
-        let clean = inspect_worktree(dir.path(), "main");
+        let clean = inspect_worktree(dir.path(), &base("main"));
         assert_eq!(clean.diff, None);
     }
 
@@ -452,7 +479,7 @@ mod tests {
             note: None,
             label_id: None,
             root: wt_path.clone(),
-            worktrees: vec![inspect_worktree(&wt_path, "main")],
+            worktrees: vec![inspect_worktree(&wt_path, &base("main"))],
             created_at: Utc::now(),
             last_active: None,
         });
@@ -604,7 +631,7 @@ mod tests {
         up: bool,
         dirty: bool,
     ) -> BranchStatus {
-        BranchStatus::derive(dirty, branch_counts(repo, branch, default), up)
+        BranchStatus::derive(dirty, branch_counts(repo, branch, &base(default)), up)
     }
 
     #[test]
@@ -624,7 +651,7 @@ mod tests {
         );
         // The freshly-cut branch is even with the default → no `↑↓` marker.
         assert_eq!(
-            branch_counts(dir.path(), Some("feature"), "main"),
+            branch_counts(dir.path(), Some("feature"), &base("main")),
             Some((0, 0))
         );
     }
@@ -651,7 +678,7 @@ mod tests {
         );
         // Behind by the one commit main gained, ahead by none.
         assert_eq!(
-            branch_counts(dir.path(), Some("feature"), "main"),
+            branch_counts(dir.path(), Some("feature"), &base("main")),
             Some((0, 1))
         );
     }
@@ -715,8 +742,8 @@ mod tests {
             BranchStatus::Local
         );
         // Neither the detached HEAD nor the default branch yields ahead/behind.
-        assert_eq!(branch_counts(dir.path(), None, "main"), None);
-        assert_eq!(branch_counts(dir.path(), Some("main"), "main"), None);
+        assert_eq!(branch_counts(dir.path(), None, &base("main")), None);
+        assert_eq!(branch_counts(dir.path(), Some("main"), &base("main")), None);
     }
 
     #[test]
@@ -750,7 +777,7 @@ mod tests {
             .status()
             .unwrap();
 
-        let wt = inspect_worktree(dir.path(), "main");
+        let wt = inspect_worktree(dir.path(), &base("main"));
         assert_eq!(
             wt.ahead_behind,
             Some(AheadBehind {
@@ -760,7 +787,7 @@ mod tests {
         );
 
         // The default branch carries no `↑↓` marker (not measured against itself).
-        let main = inspect_worktree(dir.path(), "feature");
+        let main = inspect_worktree(dir.path(), &base("feature"));
         // Checked out on feature, so inspecting with default "feature" reads the
         // current branch as the default → no counts.
         assert_eq!(main.ahead_behind, None);
