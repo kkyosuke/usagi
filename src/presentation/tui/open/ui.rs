@@ -640,7 +640,7 @@ mod tests {
             24,
             80,
             &list,
-            Some("Opening \"alpha\" is coming soon 🐰"),
+            Some("Opening \"alpha\" is coming soon 󰤇"),
             now(),
         );
         assert_eq!(without.len(), with.len());

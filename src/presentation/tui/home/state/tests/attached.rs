@@ -232,7 +232,7 @@ fn apply_task_completion_logs_and_refreshes_keeping_the_cursor() {
     // A finished background create refreshes the list with a new session; the
     // cursor stays on "feature" rather than snapping back to the root row.
     state.apply_task_completion(
-        LogLine::output("Created session \"x\" 🐰"),
+        LogLine::output("Created session \"x\" 󰤇"),
         Some(vec![
             session_record("main", 1),
             session_record("feature", 1),
@@ -523,7 +523,7 @@ fn input_mistakes_are_shown_but_not_recorded() {
 fn applied_failure_lines_are_recorded_success_lines_are_not() {
     let (mut state, spy) = state_with_spy();
     // A background task / session outcome that succeeded only logs its line.
-    state.apply_task_completion(LogLine::output("Created session \"x\" 🐰"), None, None);
+    state.apply_task_completion(LogLine::output("Created session \"x\" 󰤇"), None, None);
     state.apply_session_outcome(SessionOutcome {
         line: LogLine::output("Renamed \"x\""),
         sessions: None,

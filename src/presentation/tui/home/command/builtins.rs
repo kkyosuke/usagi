@@ -790,7 +790,7 @@ impl Command for PreviewCommand {
         // it so the command reads coherently rather than trying to open `diff.md`.
         if target == "diff" {
             return CommandResult::line(LogLine::output(
-                "Diff preview is coming soon 🐰 (for now, preview a Markdown file)",
+                "Diff preview is coming soon 󰤇 (for now, preview a Markdown file)",
             ));
         }
         CommandResult {
@@ -892,7 +892,7 @@ impl Command for ComingSoonCommand {
 
     fn run(&self, _args: &str, _ctx: &CommandContext) -> CommandResult {
         CommandResult::line(LogLine::output(format!(
-            "\"{}\" is coming soon 🐰",
+            "\"{}\" is coming soon 󰤇",
             self.name
         )))
     }
