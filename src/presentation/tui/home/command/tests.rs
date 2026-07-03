@@ -710,6 +710,36 @@ fn complete_offers_session_names_for_switch_and_remove() {
 }
 
 #[test]
+fn complete_offers_session_names_for_history() {
+    // `history [session]` completes its single argument against the workspace's
+    // session names; once the session token is settled, nothing more is offered.
+    let names = ["feature-x", "feature-y", "main-fix"];
+
+    // While the first token is being typed, the session names are offered.
+    let first = registry().complete_with("history fea", CommandScope::Workspace, &names, &names);
+    assert!(first
+        .candidates
+        .iter()
+        .all(|c| c == "feature-x" || c == "feature-y"));
+    assert_eq!(first.input, "history feature-"); // longest common prefix
+
+    // A unique prefix fills straight in.
+    let unique = registry().complete_with("history main", CommandScope::Workspace, &names, &names);
+    assert_eq!(unique.input, "history main-fix");
+    assert!(unique.candidates.is_empty());
+
+    // Once the session token is settled, a second token offers nothing.
+    let after = registry().complete_with(
+        "history feature-x ",
+        CommandScope::Workspace,
+        &names,
+        &names,
+    );
+    assert_eq!(after.input, "history feature-x ");
+    assert!(after.candidates.is_empty());
+}
+
+#[test]
 fn complete_offers_qualified_names_for_remove_in_unite_mode() {
     // In 統合(unite) mode `session remove` completes against the qualified
     // `workspace:session` names (its own `removable_sessions` list), while

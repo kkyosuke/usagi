@@ -1074,12 +1074,15 @@ impl HomeState {
     /// so `history` and `↑`/`↓` recall reflect commands run in past sessions.
     pub fn restore_history<E: Into<HistoryEntry>>(&mut self, entries: Vec<E>) {
         let mut entries: Vec<HistoryEntry> = entries.into_iter().map(Into::into).collect();
+        // The command line caps its own recall buffer, so hand it the full command
+        // list rather than pre-capping here.
+        self.cmdline
+            .set_history(entries.iter().map(|e| e.command.clone()).collect());
+        // Cap the retained entries (read by the `history` command) to the same bound.
         let overflow = entries.len().saturating_sub(MAX_COMMAND_HISTORY);
         if overflow > 0 {
             entries.drain(..overflow);
         }
-        self.cmdline
-            .set_history(entries.iter().map(|e| e.command.clone()).collect());
         self.history_entries = entries;
     }
 
