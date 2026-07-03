@@ -164,7 +164,7 @@ session create feature-x   # .usagi/sessions/feature-x/ にセッション（wor
 agent                      # 選んだセッションで Agent CLI（既定 claude）を埋め込み起動 → 没入
 ```
 
-`agent` は選択中セッションの worktree でシェルを右ペインに埋め込み、設定中の Agent CLI（既定 `claude`、Config・ローカル設定で変更可）を起動します。このとき usagi の MCP サーバ（後述）を組み込むため、エージェントは起動直後から `issue_*` tool でタスクを、`memory_*` tool でメモリを操作できます（Claude は `--mcp-config`、Codex は `-c` 設定上書きで注入。Codex 互換の `codex-fugu` も同方式で組み込みます。Gemini はインライン注入フラグが無いため MCP は組み込まず、`-r latest` での会話再開と `-i` での初期プロンプトのみ配線します）。素のシェルだけ欲しいときは `terminal` を使います。`terminal` / `terminal open` は usagi 内の埋め込みタブを追加し、`terminal new` は同じディレクトリで OS ネイティブの新規ターミナルを開きます。
+`agent` は選択中セッションの worktree でシェルを右ペインに埋め込み、設定中の Agent CLI（既定 `claude`、Config・ローカル設定で変更可）を起動します。このとき usagi の MCP サーバ（後述）を組み込むため、エージェントは起動直後から `issue_*` tool でタスクを、`memory_*` tool でメモリを操作できます（Claude は `--mcp-config`、Codex は `-c` 設定上書きで注入。Codex 互換の `codex-fugu` も同方式で組み込み、usagi が注入する MCP サーバは tool 呼び出しごとの確認を省く設定にします。Gemini はインライン注入フラグが無いため MCP は組み込まず、`-r latest` での会話再開と `-i` での初期プロンプトのみ配線します）。素のシェルだけ欲しいときは `terminal` を使います。`terminal` / `terminal open` は usagi 内の埋め込みタブを追加し、`terminal new` は同じディレクトリで OS ネイティブの新規ターミナルを開きます。
 
 workspace の `<repo>/.usagi/settings.json` に `env` map を設定すると、`agent` / `terminal` の新規 pane 起動時に `op://...` reference を `op read --no-newline` で解決して子プロセス環境へ注入できます。例えば `{"env":{"GH_TOKEN":"op://Private/GitHub/token"}}` とすると、その workspace で起動した agent や terminal 内の `gh` は `GH_TOKEN` を利用できます。secret 本体は設定ファイルや起動コマンド行には保存されません。この `env` はコマンドパレットの `env`（または `config` → Env Vars 行）で `NAME=op://vault/item/field` を 1 行ずつ編集して設定できます。
 
