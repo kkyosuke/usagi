@@ -314,6 +314,7 @@ fn click_selects_session(state: &HomeState) -> bool {
         && state.remove_modal().is_none()
         && state.text_modal().is_none()
         && state.preview().is_none()
+        && state.diff_view().is_none()
         && state.note_editor().is_none()
         && state.tab_menu().is_none()
         && state.tab_rename().is_none()
@@ -1065,6 +1066,32 @@ pub(super) fn event_loop(
             continue;
         }
 
+        // The right-pane diff view, when open, captures every key: the arrows /
+        // `j`/`k` and PageUp/PageDown/Space scroll, `s` / `Tab` toggle the unified
+        // and side-by-side layouts, and `Esc` / `Enter` / `q` dismiss it. It shares
+        // the preview's one-row-header geometry, so it pages by the same measure.
+        if state.diff_view().is_some() {
+            let page = ui::preview_visible(height as usize, width as usize, &state);
+            match key {
+                Key::ArrowUp | Key::Char('k') => state.diff_scroll_up(),
+                Key::ArrowDown | Key::Char('j') => state.diff_scroll_down(page),
+                Key::PageUp => {
+                    for _ in 0..page {
+                        state.diff_scroll_up();
+                    }
+                }
+                Key::PageDown | Key::Char(' ') => {
+                    for _ in 0..page {
+                        state.diff_scroll_down(page);
+                    }
+                }
+                Key::Char('s') | Key::Tab => state.diff_toggle_split(),
+                Key::Escape | Key::Enter | Key::Char('q') => state.close_diff(),
+                _ => {}
+            }
+            continue;
+        }
+
         // The session-note editor, when open, captures every key: `Ctrl-S` saves,
         // `Esc` cancels, `Enter` inserts a newline, and the editing keys edit the
         // multi-line buffer. It is driven through a handler (not inline like the
@@ -1198,6 +1225,7 @@ fn mascot_clickable(state: &HomeState) -> bool {
         && state.remove_modal().is_none()
         && state.text_modal().is_none()
         && state.preview().is_none()
+        && state.diff_view().is_none()
         && state.note_editor().is_none()
         && !state.command_palette_open()
 }

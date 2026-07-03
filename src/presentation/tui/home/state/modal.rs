@@ -11,6 +11,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use super::LogLine;
+use crate::presentation::tui::diff::DiffDoc;
 use crate::presentation::tui::markdown::MarkdownLine;
 use crate::presentation::tui::widgets::text_area::TextArea;
 use crate::presentation::tui::widgets::text_input::TextInput;
@@ -45,6 +46,8 @@ pub(super) enum Overlay {
     Text(TextModal),
     /// The right-pane Markdown preview.
     Preview(Preview),
+    /// The right-pane diff view (the `diff` command).
+    Diff(DiffView),
     /// The session-note editor modal.
     Note(NoteEditor),
     /// The workspace-env editor modal (the `env` command), overlaying the palette.
@@ -594,6 +597,21 @@ pub struct Preview {
     pub title: String,
     pub lines: Vec<MarkdownLine>,
     pub scroll: usize,
+}
+
+/// The right-pane diff view, opened by the `diff` command. Like [`Preview`] it
+/// takes over the right pane, but it renders a parsed, syntax-highlighted
+/// [`DiffDoc`] (GitHub-style: line-number gutter, per-line add/del backgrounds,
+/// word-level emphasis) rather than Markdown. `title` names the diffed branch →
+/// base, `scroll` is the first visible row, and `split` toggles the unified
+/// layout (default) against the side-by-side one. While open it captures the keys
+/// (scroll / toggle layout / dismiss).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DiffView {
+    pub title: String,
+    pub doc: DiffDoc,
+    pub scroll: usize,
+    pub split: bool,
 }
 
 /// One row in the open session-removal checklist.

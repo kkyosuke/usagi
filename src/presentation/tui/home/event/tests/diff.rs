@@ -102,6 +102,15 @@ fn diff_command_opens_the_diff_view_for_a_real_repo() {
     let mut keys = cmd("diff");
     keys.push(Ok(Key::Enter)); // run `diff` -> gathers the patch, opens the pane
     keys.push(Ok(Key::ArrowDown)); // scroll down a line
+    keys.push(Ok(Key::Char('j'))); // scroll down (vi)
+    keys.push(Ok(Key::ArrowUp)); // scroll up a line
+    keys.push(Ok(Key::Char('k'))); // scroll up (vi)
+    keys.push(Ok(Key::PageDown)); // page down
+    keys.push(Ok(Key::Char(' '))); // Space also pages forward
+    keys.push(Ok(Key::PageUp)); // page up
+    keys.push(Ok(Key::Char('s'))); // toggle to the split layout
+    keys.push(Ok(Key::Tab)); // toggle back to unified
+    keys.push(Ok(Key::Char('z'))); // ignored inside the diff view
     keys.push(Ok(Key::Escape)); // dismiss -> Switch
     keys.push(Ok(Key::Escape)); // inert at the base Switch; fallback Ctrl-C quits
     assert!(matches!(run(keys, state).unwrap(), Outcome::Quit));

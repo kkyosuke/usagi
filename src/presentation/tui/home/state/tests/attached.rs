@@ -855,38 +855,59 @@ fn preview_scrolling_is_a_no_op_when_no_preview_is_open() {
 }
 
 #[test]
-fn open_diff_result_renders_the_patch_into_the_right_pane() {
+fn open_diff_result_parses_the_patch_into_the_diff_view() {
     let mut state = state();
-    assert!(state.preview().is_none());
+    assert!(state.diff_view().is_none());
     let patch = "diff --git a/f b/f\n@@ -1 +1 @@\n-old\n+new".to_string();
     state.open_diff_result(Ok(("feature → main".to_string(), patch)));
-    // The diff shares the right-pane preview surface, titled by branch → base.
-    let view = state.preview().expect("diff view is open");
+    // The diff view is titled by branch → base, starts unified at the top, and
+    // holds the parsed rows (file header + hunk + del + add).
+    let view = state.diff_view().expect("diff view is open");
     assert_eq!(view.title, "feature → main");
-    assert_eq!(view.lines.len(), 4);
-    assert_eq!(view.lines[2].plain_text(), "-old");
-    assert_eq!(view.lines[3].plain_text(), "+new");
+    assert!(!view.split);
     assert_eq!(view.scroll, 0);
+    assert_eq!(view.doc.rows.len(), 4);
+    assert!(!view.doc.is_empty());
+
+    // Scrolling and toggling the layout run through the view's own helpers.
+    state.diff_scroll_down(2);
+    assert_eq!(state.diff_view().unwrap().scroll, 1);
+    state.diff_scroll_up();
+    assert_eq!(state.diff_view().unwrap().scroll, 0);
+    state.diff_toggle_split();
+    assert!(state.diff_view().unwrap().split);
+    // Scrolling in the split layout clamps against the folded (split) row count.
+    state.diff_scroll_down(1);
+    state.close_diff();
+    assert!(state.diff_view().is_none());
 }
 
 #[test]
-fn open_diff_result_renders_a_no_changes_line_for_an_empty_patch() {
+fn open_diff_result_reports_an_empty_patch_as_no_changes() {
     let mut state = state();
     state.open_diff_result(Ok(("main → main".to_string(), String::new())));
-    let view = state.preview().expect("diff view is open");
-    assert_eq!(view.lines.len(), 1);
-    assert!(view.lines[0].plain_text().contains("No changes"));
+    let view = state.diff_view().expect("diff view is open");
+    assert!(view.doc.is_empty());
 }
 
 #[test]
 fn open_diff_result_logs_a_failure_and_opens_nothing() {
     let mut state = state();
     state.open_diff_result(Err(anyhow::anyhow!("highlight a session")));
-    assert!(state.preview().is_none());
+    assert!(state.diff_view().is_none());
     let last = state.log().last().unwrap();
     assert_eq!(last.kind, LineKind::Error);
     assert!(last.text.contains("diff failed"));
     assert!(last.text.contains("highlight a session"));
+}
+
+#[test]
+fn diff_scroll_and_toggle_are_no_ops_when_closed() {
+    let mut state = state();
+    state.diff_scroll_up();
+    state.diff_scroll_down(5);
+    state.diff_toggle_split();
+    assert!(state.diff_view().is_none());
 }
 
 // --- session freshness ("heat") dot --------------------------------------
