@@ -936,6 +936,7 @@ fn focus_menu_shift_c_cancelled_in_the_confirmation_leaves_the_session_untouched
     let mut keys = cmd("session switch feat");
     keys.push(Ok(Key::Enter)); // -> Focus (feat), menu UI
     keys.push(Ok(Key::Char('C'))); // Shift+c -> confirmation modal
+    keys.push(Ok(Key::Char('z'))); // unrelated key: ignored, modal stays open
     keys.push(Ok(Key::Char('n'))); // cancel the discard -> stay in 在席
     keys.push(Ok(Key::CtrlC)); // quit
     let term = Term::stdout();
