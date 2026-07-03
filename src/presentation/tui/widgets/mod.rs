@@ -1253,6 +1253,17 @@ mod tests {
     }
 
     #[test]
+    fn overlay_region_centered_is_skipped_when_centering_would_leave_the_frame() {
+        let mut base = vec!["keep".to_string(); 2];
+        // The region itself may extend beyond the frame even though its left/top
+        // edge is visible. In that case the centred block would spill, so it is
+        // skipped instead of clamped into a misleading position.
+        overlay_region_centered(&mut base, 10, 8, 10, 0, 1, &["XXXXXX".to_string()]);
+        overlay_region_centered(&mut base, 10, 0, 1, 1, 4, &["X".to_string()]);
+        assert_eq!(base, vec!["keep".to_string(); 2]);
+    }
+
+    #[test]
     fn overlay_at_anchors_a_box_at_the_given_cell_keeping_the_surrounding_content() {
         // The box is placed with its top-left at (1, 8): rows 1..4 carry it, and on
         // those rows the base columns to its left and right survive.
