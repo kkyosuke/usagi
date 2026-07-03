@@ -52,6 +52,8 @@ usagi op login
   トークン本体を書きません。
 - `op_mcp.enabled` が `true` のとき、Claude は `--mcp-config`、Codex は `-c mcp_servers.usagi-op.*` 設定上書きで
   `usagi-op` サーバ（`usagi op-mcp`）が起動コマンドに追加されます（Gemini はインライン注入に対応しないため wire されません）。
+  Codex / `codex-fugu` では `mcp_servers.usagi-op.default_tools_approval_mode = "approve"` も渡すため、`usagi-op`
+  の tool 呼び出しごとの確認は省かれます。
 - トークンは **`usagi op-mcp` プロセスが OS シークレットストアから読み取り**、`op` サブプロセスへ環境変数
   `OP_SERVICE_ACCOUNT_TOKEN` として渡します。**エージェントの起動コマンド行やプロセス一覧には出ません**。
 - `usagi config`（表示）は `op_mcp.enabled` だけを出力します。実際にトークンが保存されているかは

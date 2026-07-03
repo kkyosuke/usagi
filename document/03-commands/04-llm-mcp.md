@@ -91,11 +91,16 @@ usagi llm-mcp --model qwen2.5-coder:7b   # stdin から JSON-RPC を読み、std
 あわせて、軽量タスクをローカル LLM に委譲するよう促す一文がシステムプロンプトに追記されます（Claude は `--append-system-prompt`、Codex は `developer_instructions` で追記。Gemini は対応しません）。
 
 Codex は `--mcp-config` を持たないため、同じ内容を `-c` 設定上書きで注入します（`mcp_servers.usagi` と、有効時の `mcp_servers.usagi-llm`）。
+usagi が組み込む MCP サーバには `default_tools_approval_mode = "approve"` も渡し、`issue_*` / `memory_*` /
+`session_*` / `local_llm_ask` の呼び出しごとの確認を省きます。シェルコマンドの承認ポリシーは別で、Codex の
+`--ask-for-approval on-request` がそのまま効きます。
 
 ```bash
 codex -c 'mcp_servers.usagi.command=usagi' -c 'mcp_servers.usagi.args=["mcp"]' \
+      -c 'mcp_servers.usagi.default_tools_approval_mode="approve"' \
       -c 'mcp_servers.usagi-llm.command=usagi' \
-      -c 'mcp_servers.usagi-llm.args=["llm-mcp","--model","qwen2.5-coder:7b"]'
+      -c 'mcp_servers.usagi-llm.args=["llm-mcp","--model","qwen2.5-coder:7b"]' \
+      -c 'mcp_servers.usagi-llm.default_tools_approval_mode="approve"'
 ```
 
 ## 対応 tool 一覧
