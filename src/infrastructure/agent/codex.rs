@@ -4,8 +4,11 @@
 //! dotted-path overrides Codex would otherwise read from `~/.codex/config.toml`):
 //!
 //! - **MCP servers** — the unified `usagi` server, plus optional `usagi-llm`
-//!   and `usagi-op` servers when their settings are enabled
-//!   (`mcp_servers.<name>.command` / `.args`).
+//!   when the local-LLM setting is enabled
+//!   (`mcp_servers.<name>.command` / `.args`). Each usagi-owned server is marked
+//!   `default_tools_approval_mode = "approve"` so Codex does not ask before every
+//!   MCP tool call; shell command approvals remain governed by the launch
+//!   approval mode below.
 //! - **System prompt** — the session note (already in a worktree; delegate light
 //!   work to the local LLM when on) via `developer_instructions`, Codex's
 //!   additive instruction override.
@@ -70,6 +73,11 @@ const HOOK_PHASES: [(&str, &str); 6] = [
     ("Stop", "ended"),
 ];
 
+/// Codex MCP approval mode for usagi-owned MCP servers. `approve` skips the
+/// per-tool MCP confirmation prompt while leaving shell command approval policy
+/// untouched.
+const USAGI_MCP_APPROVAL_MODE: &str = "approve";
+
 /// Render `text` as a TOML basic string (double-quoted), escaping the backslash
 /// and double-quote that TOML treats specially. Used for the hook command and the
 /// system-prompt instruction, whose values may carry those characters; the
@@ -93,6 +101,24 @@ fn dash_c(assignment: &str) -> String {
 /// because it must parse as a list.
 fn config_override(key: &str, value: &str) -> String {
     dash_c(&format!("{key}={value}"))
+}
+
+/// The Codex config overrides for one usagi-owned MCP server. Besides transport
+/// wiring, mark the server's tools as pre-approved so `agent codex-fugu` does not
+/// stop for a confirmation before every `issue_*` / `memory_*` / `session_*`
+/// call.
+fn mcp_server_overrides(name: &str, bin: &str, args: &[&str]) -> Vec<String> {
+    vec![
+        config_override(&format!("mcp_servers.{name}.command"), bin),
+        config_override(
+            &format!("mcp_servers.{name}.args"),
+            &toml_string_array(args),
+        ),
+        config_override(
+            &format!("mcp_servers.{name}.default_tools_approval_mode"),
+            &toml_basic_string(USAGI_MCP_APPROVAL_MODE),
+        ),
+    ]
 }
 
 /// Render a Codex args array as a TOML inline array of basic strings, e.g.
@@ -122,23 +148,13 @@ fn wiring_overrides(wiring: &AgentWiring) -> Vec<String> {
     let bin = &wiring.usagi_bin;
     let local_llm_model = wiring.local_llm_model.as_deref();
     // The unified usagi MCP server is always wired in (issues, memories,
-    // sessions); optional servers join it when enabled.
-    let mut overrides = vec![
-        config_override("mcp_servers.usagi.command", bin),
-        config_override("mcp_servers.usagi.args", &toml_string_array(&["mcp"])),
-    ];
+    // sessions); the optional local-LLM server joins it when enabled.
+    let mut overrides = mcp_server_overrides("usagi", bin, &["mcp"]);
     if let Some(model) = local_llm_model {
-        overrides.push(config_override("mcp_servers.usagi-llm.command", bin));
-        overrides.push(config_override(
-            "mcp_servers.usagi-llm.args",
-            &toml_string_array(&["llm-mcp", "--model", model]),
-        ));
-    }
-    if wiring.op_mcp_enabled {
-        overrides.push(config_override("mcp_servers.usagi-op.command", bin));
-        overrides.push(config_override(
-            "mcp_servers.usagi-op.args",
-            &toml_string_array(&["op-mcp"]),
+        overrides.extend(mcp_server_overrides(
+            "usagi-llm",
+            bin,
+            &["llm-mcp", "--model", model],
         ));
     }
     // The system prompt rides along as Codex's additive `developer_instructions`.
@@ -340,21 +356,13 @@ impl Agent for CodexAgent {
             self.program.to_string(),
             "exec".to_string(),
             "--dangerously-bypass-approvals-and-sandbox".to_string(),
-            config_override("mcp_servers.usagi.command", bin),
-            config_override("mcp_servers.usagi.args", &toml_string_array(&["mcp"])),
         ];
+        parts.extend(mcp_server_overrides("usagi", bin, &["mcp"]));
         if let Some(model) = wiring.local_llm_model.as_deref() {
-            parts.push(config_override("mcp_servers.usagi-llm.command", bin));
-            parts.push(config_override(
-                "mcp_servers.usagi-llm.args",
-                &toml_string_array(&["llm-mcp", "--model", model]),
-            ));
-        }
-        if wiring.op_mcp_enabled {
-            parts.push(config_override("mcp_servers.usagi-op.command", bin));
-            parts.push(config_override(
-                "mcp_servers.usagi-op.args",
-                &toml_string_array(&["op-mcp"]),
+            parts.extend(mcp_server_overrides(
+                "usagi-llm",
+                bin,
+                &["llm-mcp", "--model", model],
             ));
         }
         parts.push(shell_single_quote(prompt));
@@ -383,18 +391,9 @@ mod tests {
     /// resolved binary path the caller passes, with the local LLM off unless a
     /// model is given.
     fn wiring(usagi_bin: &str, local_llm_model: Option<&str>) -> AgentWiring {
-        wiring_with_op(usagi_bin, local_llm_model, false)
-    }
-
-    fn wiring_with_op(
-        usagi_bin: &str,
-        local_llm_model: Option<&str>,
-        op_mcp_enabled: bool,
-    ) -> AgentWiring {
         AgentWiring {
             usagi_bin: usagi_bin.to_string(),
             local_llm_model: local_llm_model.map(str::to_string),
-            op_mcp_enabled,
         }
     }
 
@@ -419,29 +418,9 @@ mod tests {
         let launch = CodexAgent::new().launch_command(&wiring("usagi", None), false, None);
         assert!(launch.contains("-c 'mcp_servers.usagi.command=usagi'"));
         assert!(launch.contains("-c 'mcp_servers.usagi.args=[\"mcp\"]'"));
+        assert!(launch.contains("-c 'mcp_servers.usagi.default_tools_approval_mode=\"approve\"'"));
         // The local-LLM server is absent when no model is given.
         assert!(!launch.contains("usagi-llm"));
-    }
-
-    #[test]
-    fn launch_command_wires_in_the_op_server_only_when_enabled() {
-        // Off by default: no 1Password overrides appear.
-        let off = CodexAgent::new().launch_command(&wiring("usagi", None), false, None);
-        assert!(!off.contains("usagi-op"));
-        // Enabled: the `usagi-op` server is wired via `-c` overrides as `op-mcp`
-        // (no secret on the command line).
-        let on =
-            CodexAgent::new().launch_command(&wiring_with_op("usagi", None, true), false, None);
-        assert!(on.contains("-c 'mcp_servers.usagi-op.command=usagi'"));
-        assert!(on.contains("-c 'mcp_servers.usagi-op.args=[\"op-mcp\"]'"));
-    }
-
-    #[test]
-    fn headless_command_wires_in_the_op_server_when_enabled() {
-        let cmd =
-            CodexAgent::new().headless_command(&wiring_with_op("usagi", None, true), "clean up");
-        assert!(cmd.contains("-c 'mcp_servers.usagi-op.command=usagi'"));
-        assert!(cmd.contains("-c 'mcp_servers.usagi-op.args=[\"op-mcp\"]'"));
     }
 
     #[test]
@@ -457,6 +436,9 @@ mod tests {
         assert!(launch.contains(
             "-c 'mcp_servers.usagi-llm.args=[\"llm-mcp\",\"--model\",\"qwen2.5-coder:7b\"]'"
         ));
+        assert!(
+            launch.contains("-c 'mcp_servers.usagi-llm.default_tools_approval_mode=\"approve\"'")
+        );
     }
 
     #[test]
@@ -623,6 +605,7 @@ mod tests {
             "codex exec --dangerously-bypass-approvals-and-sandbox -c 'mcp_servers.usagi.command=usagi'"
         ));
         assert!(launch.contains("-c 'mcp_servers.usagi.args=[\"mcp\"]'"));
+        assert!(launch.contains("-c 'mcp_servers.usagi.default_tools_approval_mode=\"approve\"'"));
         assert!(launch.ends_with(" 'clean up'"));
         // The local-LLM server is absent when no model is given, and no hooks ride along.
         assert!(!launch.contains("usagi-llm"));
@@ -639,6 +622,9 @@ mod tests {
         assert!(launch.contains(
             "-c 'mcp_servers.usagi-llm.args=[\"llm-mcp\",\"--model\",\"qwen2.5-coder:7b\"]'"
         ));
+        assert!(
+            launch.contains("-c 'mcp_servers.usagi-llm.default_tools_approval_mode=\"approve\"'")
+        );
     }
 
     #[test]

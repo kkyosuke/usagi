@@ -110,7 +110,7 @@ src/
 │   └── memory_store.rs         # <repo>/.usagi/memory/ の markdown + MEMORY.md + index.json（MemoryStore）
 │
 └── presentation/               # CLI ルーティング・TUI・MCP
-    ├── cli/                    # サブコマンド（init / hop / status / clean / config / doctor / feature（Agent CLI の機能サポート表）/ icon / run / issue / memory / op / mcp / llm_mcp / op_mcp / agent_phase（隠し・フック用））
+    ├── cli/                    # サブコマンド（init / hop / status / clean / config / doctor / feature（Agent CLI の機能サポート表）/ icon / run / issue / memory / mcp / llm_mcp / agent_phase（隠し・フック用））
     ├── color.rs                # NO_COLOR / CLICOLOR_FORCE から terminal colour の有効/無効を判定
     ├── theme.rs                # CLI/TUI の色セット（Palette トレイト + 固定 RGB/ANSI-256 値）の正本
     ├── mcp/                    # MCP サーバ（JSON-RPC 2.0 フレーミングを共有）
@@ -119,7 +119,6 @@ src/
     │   ├── issue/             # issue 操作ツール（mod=McpServer・args / json=入力スキーマ）。JSON 出力は usecase/issue/view が正本。memory ツールもマージして公開
     │   ├── memory.rs           # メモリ操作ツール（スキーマ・引数・usecase/memory への委譲。issue サーバが呼ぶ）
     │   ├── llm.rs              # ローカル LLM 委譲ツール（LlmMcpServer / LlmBackend）
-    │   ├── op.rs               # 1Password 読み取りツール（OpMcpServer / OpBackend。op CLI へシェルアウト）
     │   └── session.rs          # セッション操作ツール（SessionMcpServer / AgentBackend）
     └── tui/                    # 自前レンダリングの TUI（console + crossterm、ratatui は不使用）
         ├── app/                # TUI オーケストレーター（画面グラフの遷移を管理 / event）

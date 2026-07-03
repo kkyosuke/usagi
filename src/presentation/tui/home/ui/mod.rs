@@ -311,6 +311,35 @@ fn body_rows_for(height: usize) -> usize {
     height.saturating_sub(5).max(1)
 }
 
+/// Frames each new rabbit takes to join the `usagi run 2`-style launch loader.
+const RUN2_LOADING_GROW: usize = 3;
+/// Keep the one-frame terminal / agent launch flash recognisably "run 2" even
+/// though the event loop paints it only once before spawning the PTY.
+const RUN2_LOADING_MIN_RABBITS: usize = 3;
+/// The gallery's `usagi run 2` animation tops out at eight rabbits.
+const RUN2_LOADING_MAX_RABBITS: usize = 8;
+
+/// The launch overlay body: the same multiplying-rabbit visual as
+/// `usagi run 2`, clamped to the right pane so narrow terminals degrade to fewer
+/// rabbits instead of dropping the indicator while at least one can fit.
+fn launch_loading_block(frame: usize, right_w: usize) -> Vec<String> {
+    let span = RUN2_LOADING_MAX_RABBITS - RUN2_LOADING_MIN_RABBITS + 1;
+    let mut count = RUN2_LOADING_MIN_RABBITS + (frame / RUN2_LOADING_GROW) % span;
+    while count > 0 {
+        let block = widgets::multiplying_rabbits(count);
+        let block_w = block
+            .iter()
+            .map(|line| console::measure_text_width(line))
+            .max()
+            .unwrap_or(0);
+        if block_w <= right_w {
+            return block;
+        }
+        count -= 1;
+    }
+    Vec::new()
+}
+
 /// How many Markdown lines the right-pane preview shows at once for a raw terminal
 /// size: the body rows less the preview's one-row header. Used by the event loop
 /// to clamp and page the preview's scroll so the last line stays in view.
@@ -489,23 +518,31 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
     lines.extend(input_lines);
     lines.push(footer_line(width, state));
 
-    // Overlay the top-right corner, in priority order: a momentary blocking
-    // action (terminal / agent launch) shows the loading rabbit; otherwise any
-    // in-flight background session work (create / remove) shows the task status
-    // line; otherwise a `◆ N waiting` notice appears while at least one session
-    // is waiting for the user's input. The loading rabbit anchors to the top of
-    // the right pane (the rows below the title bar and mode ladder); the task
-    // status and waiting notice ride the header rows. The "update available"
-    // notice is no longer a corner overlay — the sidebar mascot speaks it
-    // (above) instead.
+    // Overlay status affordances in priority order: a momentary blocking action
+    // (terminal / agent launch) shows the loading rabbit centred in the right
+    // pane; otherwise any in-flight background session work (create / remove)
+    // shows the task status line in the top-right corner; otherwise a `◆ N
+    // waiting` notice appears while at least one session is waiting for the
+    // user's input. The task status and waiting notice ride the header rows. The
+    // "update available" notice is no longer a corner overlay — the sidebar
+    // mascot speaks it (above) instead.
     if let Some(loading) = state.loading() {
-        // The transient launch indicator is deliberate and short-lived, so it
-        // takes the corner even over a live pane.
-        widgets::overlay_top_right(
+        let loading_block = launch_loading_block(loading.frame(), right_w);
+        // The transient terminal / agent launch indicator is deliberate and
+        // short-lived, so it shows even over a live pane. It uses the same
+        // multiplying-rabbit visual as `usagi run 2` and is floated in the
+        // **centre of the right pane** (the rows below the header, the columns
+        // right of the divider) rather than tucked into the top-right corner, so
+        // the multiplying usagi read as "this pane is coming up" right where the
+        // new terminal / agent is about to paint.
+        widgets::overlay_region_centered(
             &mut lines,
-            body_start,
             width,
-            &widgets::loading_rabbit(loading.frame(), loading.label()),
+            left_w + SEP_WIDTH,
+            right_w,
+            body_start,
+            body_rows,
+            &loading_block,
         );
     } else if !state.tasks().is_empty() {
         // Background session work (create / remove) running off the event-loop

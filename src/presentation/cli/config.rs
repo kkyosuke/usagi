@@ -164,7 +164,6 @@ fn render_settings(settings: &Settings) -> Vec<String> {
         ),
         format!("local_llm_enabled      {}", settings.local_llm.enabled),
         format!("local_llm_model        {}", settings.local_llm.model),
-        format!("op_mcp_enabled        {}", settings.op_mcp.enabled),
         format!("env                   {} vars", settings.env().count()),
         "workspace_env         (workspace override/addition)".to_string(),
     ];
@@ -268,7 +267,6 @@ mod tests {
                 enabled: true,
                 model: "qwen2.5-coder:3b".to_string(),
             },
-            op_mcp: crate::domain::settings::OpMcp { enabled: true },
             env: [(
                 "GH_TOKEN".to_string(),
                 "op://Private/GitHub/token".to_string(),
@@ -292,12 +290,11 @@ mod tests {
         assert!(lines[10].contains("1234")); // terminal_scrollback
         assert!(lines[11].contains("true"));
         assert!(lines[12].contains("qwen2.5-coder:3b"));
-        assert!(lines[13].contains("true"));
-        assert!(lines[14].contains("1 vars"));
-        assert!(lines[15].contains("workspace override"));
+        assert!(lines[13].contains("1 vars"));
+        assert!(lines[14].contains("workspace override"));
         // The shipped-skill feature line shows its id and effective state.
-        assert!(lines[16].contains("pull-request"));
-        assert!(lines[16].contains("false"));
+        assert!(lines[15].contains("pull-request"));
+        assert!(lines[15].contains("false"));
     }
 
     #[test]
@@ -305,9 +302,9 @@ mod tests {
         let lines = render_settings(&Settings::default());
         assert!(lines[1].contains("(none)"));
         assert!(lines[2].contains("(none)"));
-        assert!(lines[13].contains("false"));
-        assert!(lines[14].contains("0 vars"));
-        assert!(lines[15].contains("workspace override"));
+        assert!(lines[11].contains("false"));
+        assert!(lines[13].contains("0 vars"));
+        assert!(lines[14].contains("workspace override"));
     }
 
     #[test]
