@@ -2528,8 +2528,8 @@ fn selection_on_line(
 
 /// The floating note overlay for the right pane, or `None` when none applies. The
 /// **editor** (when open, in any mode) wins; otherwise the highlighted session's
-/// **read-only** note shows while browsing in 切替 (until `Esc` dismisses it, see
-/// [`HomeState::switch_note_visible`]). The box is a narrow top-right column (see
+/// **read-only** note shows while browsing in 切替 (see
+/// [`HomeState::visible_switch_note`]). The box is a narrow top-right column (see
 /// [`note_box_width`]) composited over the pane by [`right_pane_contents`], so
 /// the preview underneath — the session header, the live terminal — stays
 /// readable to its left and below it. `rows` caps the box height so the pane

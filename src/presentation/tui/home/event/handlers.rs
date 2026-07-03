@@ -421,16 +421,10 @@ pub(super) fn switch_key(
             ui::content::cheatsheet(state.key_scheme()),
             ModalSize::Large,
         ),
-        // Esc first dismisses the highlighted session's read-only note overlay
-        // (it auto-shows on selection); with no note showing it backs out to
-        // where Switch was opened from (inert at the base Switch).
-        Key::Escape => {
-            if state.switch_note_visible() {
-                state.hide_switch_note();
-            } else {
-                leave_switch(term, state, painter, wiring);
-            }
-        }
+        // Esc backs out to where Switch was opened from (inert at the base
+        // Switch). The highlighted session's read-only note overlay stays put —
+        // it follows the cursor, not a dismissal.
+        Key::Escape => leave_switch(term, state, painter, wiring),
         // Ctrl-^ jumps straight back to the previously focused session.
         Key::Char(CTRL_CARET) => jump_to_previous(term, state, painter, wiring),
         _ => {}
