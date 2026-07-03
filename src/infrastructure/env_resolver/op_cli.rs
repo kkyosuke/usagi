@@ -1,12 +1,11 @@
-//! Real 1Password `op` CLI subprocess and OS-keyring IO that backs
+//! Real 1Password `op` CLI subprocess that backs
 //! [`resolve_workspace_env`](super::resolve_workspace_env).
 //!
 //! Everything here is genuine external IO — spawning the `op` binary, streaming
-//! its stdout/stderr on worker threads, waiting with a timeout, and reading the
-//! service-account token from the OS keychain. The testable resolution logic is
-//! injected via [`SecretResolver`] and lives (with its unit tests) in the parent
-//! module; this file is the thin real-IO layer left after that extraction, so it
-//! is excluded from coverage (see `scripts/coverage.sh`).
+//! its stdout/stderr on worker threads, and waiting with a timeout. The testable
+//! resolution logic is injected via [`SecretResolver`] and lives (with its unit
+//! tests) in the parent module; this file is the thin real-IO layer left after
+//! that extraction, so it is excluded from coverage (see `scripts/coverage.sh`).
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -14,7 +13,6 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use super::{resolve_env, SecretResolver};
-use crate::infrastructure::secret_store::OP_SERVICE_ACCOUNT_TOKEN_KEY;
 use crate::presentation::mcp::child_io::{read_capped, wait_with_timeout, WaitableChild};
 
 const OP_TIMEOUT: Duration = Duration::from_secs(30);
@@ -50,9 +48,6 @@ fn op_read(reference: &str) -> Result<String, String> {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    if let Some(token) = op_service_account_token() {
-        command.env("OP_SERVICE_ACCOUNT_TOKEN", token);
-    }
     let mut child = command
         .spawn()
         .map_err(|e| format!("failed to start op: {e}"))?;
@@ -100,18 +95,6 @@ fn op_read(reference: &str) -> Result<String, String> {
         text.push_str(" …(truncated)");
     }
     Ok(text.trim_end_matches(['\n', '\r']).to_string())
-}
-
-/// The same OS-keychain entry `usagi op login` writes for op-mcp. Supplying it
-/// to `op read` preserves non-interactive service-account auth for env injection
-/// instead of requiring a separate ambient `op signin` session.
-fn op_service_account_token() -> Option<String> {
-    const KEYRING_SERVICE: &str = "usagi";
-    let entry = keyring::Entry::new(KEYRING_SERVICE, OP_SERVICE_ACCOUNT_TOKEN_KEY).ok()?;
-    match entry.get_password() {
-        Ok(password) if !password.trim().is_empty() => Some(password),
-        _ => None,
-    }
 }
 
 struct RealChild(std::process::Child);

@@ -11,7 +11,6 @@
 //!   server, its [`memory`] tools.
 //! - [`session`] exposes session orchestration (create / list / prompt) as tools.
 //! - [`llm`] exposes a locally-running model as a single delegation tool.
-//! - [`op`] exposes the 1Password CLI (`op`) as read-only secret tools.
 //!
 //! All speak JSON-RPC 2.0 with newline-delimited messages and implement the
 //! small subset MCP needs (`initialize`, `tools/list`, `tools/call`, `ping`)
@@ -24,7 +23,6 @@ pub mod child_io;
 pub mod issue;
 pub mod llm;
 pub mod memory;
-pub mod op;
 pub mod session;
 pub mod usagi;
 
