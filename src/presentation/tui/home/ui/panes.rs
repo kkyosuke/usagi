@@ -176,13 +176,17 @@ impl AgentState {
     }
 }
 
-/// The far-left gutter cell shared by both of a row's lines. In 切替 (Switch) the
-/// keyboard is on the list, so the selected row shows a red `>` cursor. The
-/// **active** session — the one subsequent commands operate on — is marked by a
-/// green `▎` accent bar that runs down both of its lines (this replaces the old
-/// `*` marker, whose meaning and mid-row position read poorly). Outside Switch
-/// there is no cursor, so the gutter only ever carries the active bar; when the
-/// cursor and the active row coincide in Switch, the cursor takes the column.
+/// The one-cell usagi glyph used as the first line of a selected session's
+/// gutter stack. It is in Nerd Font's PUA range, not an emoji, so it stays
+/// one-column wide in the sidebar when the user's terminal font supports it.
+const SELECTED_SESSION_GLYPH: char = '\u{f0907}';
+
+/// The far-left gutter cell used by root/action rows. In 切替 (Switch) the
+/// keyboard is on the list, so the selected non-session row shows a red `>`
+/// cursor. The **active** session — the one subsequent commands operate on — is
+/// marked by a green `▎` accent bar that runs down its row. Outside Switch there
+/// is no cursor, so the gutter only ever carries the active bar; when the cursor
+/// and the active row coincide in Switch, the cursor takes the column.
 fn gutter_cell(selected: bool, active: bool, in_switch: bool) -> String {
     if in_switch && selected {
         style(">").danger().bold().to_string()
@@ -190,6 +194,37 @@ fn gutter_cell(selected: bool, active: bool, in_switch: bool) -> String {
         style("▎").success().bold().to_string()
     } else {
         " ".to_string()
+    }
+}
+
+/// The three-line gutter stack for a selected session row:
+///
+/// ```text
+/// 󰤇
+/// ▎
+/// ▎
+/// ```
+///
+/// Session entries occupy three fixed rows, so the marker can span the whole
+/// entry and remain visible after the side menu has selected the session. It is
+/// red while the cursor is in 切替, then green after the session is selected. The
+/// root and the "+ new session" action keep the compact `>` cursor in 切替
+/// because they are not sessions and do not have a three-row body.
+fn session_gutter_cell(selected: bool, active: bool, in_switch: bool, row: usize) -> String {
+    if selected {
+        let mark = if row == 0 {
+            SELECTED_SESSION_GLYPH.to_string()
+        } else {
+            "▎".to_string()
+        };
+        let style = if in_switch {
+            Style::new().danger().bold()
+        } else {
+            Style::new().success().bold()
+        };
+        style.apply_to(mark).to_string()
+    } else {
+        gutter_cell(false, active, in_switch)
     }
 }
 
@@ -308,13 +343,14 @@ fn tint_by_load(field: String, load: Load) -> String {
 fn resource_line(
     usage: ResourceUsage,
     detail_width: usize,
+    selected: bool,
     active: bool,
     in_switch: bool,
 ) -> String {
     let detail = style(clip_to_width(&resource_inline_label(usage), detail_width))
         .dim()
         .to_string();
-    detail_line(&gutter_cell(false, active, in_switch), detail)
+    detail_line(&session_gutter_cell(selected, active, in_switch, 2), detail)
 }
 
 /// The line-1 cell between the session name and the right-edge git status: a
@@ -330,9 +366,9 @@ fn note_cell(has_note: bool) -> String {
     }
 }
 
-/// Builds a worktree's two lines. The far-left gutter carries a `>` cursor for
-/// the selected entry in 切替 (Switch) or a green `▎` accent bar down the active
-/// worktree's two lines; line 1 then has the freshness ("heat") kind dot
+/// Builds a worktree's first two lines. The far-left gutter carries the selected
+/// session's `󰤇` / `▎` stack, falling back to a green `▎` accent bar down the
+/// active worktree's lines when the session is not selected; line 1 then has the freshness ("heat") kind dot
 /// (`●`/`◐`/`○`, fading by time since the session was last touched, measured
 /// against `now`), the branch name, a memo marker (`NOTE_ICON`, when `has_note`),
 /// and the git `status` at the right edge. Line 2 is indented under the name and,
@@ -361,7 +397,7 @@ pub(super) fn worktree_row(
     rename: Option<(&str, usize)>,
 ) -> (String, String) {
     let kind = kind_dot(heat_of(worktree.updated_at, now));
-    let gutter = gutter_cell(selected, active, in_switch);
+    let gutter = session_gutter_cell(selected, active, in_switch, 0);
     let line1 = if let Some((value, cursor)) = rename {
         // Inline rename: the session's own name line turns into the editable label
         // with a block caret. The gutter cursor and kind dot stay put so the row
@@ -412,7 +448,7 @@ pub(super) fn worktree_row(
         cells.push(pr_cell(&worktree.pr, cols.pr));
     }
     let detail = detail_content(agent, &cells, detail_width);
-    let line2 = detail_line(&gutter_cell(false, active, in_switch), detail);
+    let line2 = detail_line(&session_gutter_cell(selected, active, in_switch, 1), detail);
     (line1, line2)
 }
 
@@ -760,28 +796,46 @@ fn root_glyph() -> String {
 /// ```
 ///
 /// `git` is blank on the root (no git status); `agent` is blank when no agent is
-/// in use. The active `▎` bar runs down all three rows; the 切替 `>` cursor stays
-/// a point on row 1, matching the full sidebar.
+/// in use. The active `▎` bar runs down all three rows; a selected session uses
+/// the same `󰤇` / `▎` / `▎` stack as the full sidebar, while the root keeps the
+/// compact `>` cursor in 切替.
 fn rail_entry(
     selected: bool,
+    session: bool,
     active: bool,
     in_switch: bool,
     kind: &str,
     git: Option<&str>,
     agent: Option<&str>,
 ) -> (String, String, String) {
-    let gutter = gutter_cell(selected, active, in_switch);
-    let bar = gutter_cell(false, active, in_switch);
+    let gutter = if session {
+        session_gutter_cell(selected, active, in_switch, 0)
+    } else {
+        gutter_cell(selected, active, in_switch)
+    };
+    let detail_gutter = if session {
+        session_gutter_cell(selected, active, in_switch, 1)
+    } else {
+        gutter_cell(false, active, in_switch)
+    };
+    let resource_gutter = if session {
+        session_gutter_cell(selected, active, in_switch, 2)
+    } else {
+        gutter_cell(false, active, in_switch)
+    };
     // Columns: gutter @0, kind @2, git/agent @4 — so the agent glyph sits under
     // the git glyph and the column under the kind dot stays blank.
     let top = pad_to_width(
         format!("{gutter} {kind} {}", git.unwrap_or(" ")),
         RAIL_WIDTH,
     );
-    let detail = pad_to_width(format!("{bar}   {}", agent.unwrap_or(" ")), RAIL_WIDTH);
+    let detail = pad_to_width(
+        format!("{detail_gutter}   {}", agent.unwrap_or(" ")),
+        RAIL_WIDTH,
+    );
     // The resource row's rail twin: the active bar runs down it, but the rail has
     // no room for the CPU / memory figure, so the rest is blank.
-    let resource = pad_to_width(bar, RAIL_WIDTH);
+    let resource = pad_to_width(resource_gutter, RAIL_WIDTH);
     (top, detail, resource)
 }
 
@@ -877,6 +931,7 @@ fn rail_pane(
         // root drops the rail entry's (blank) third line.
         let (mut root_top, mut root_detail, _) = rail_entry(
             flat_row == list.selected_index(),
+            false,
             flat_row == list.active_index(),
             in_switch,
             &root,
@@ -917,6 +972,7 @@ fn rail_pane(
             .rail_icon();
             let (mut top, mut detail, mut resource) = rail_entry(
                 selected,
+                true,
                 active,
                 in_switch,
                 &kind,
@@ -1201,7 +1257,7 @@ pub(super) fn left_pane(
             // session shows `CPU 0%  MEM 0MB` (a default usage) rather than dropping
             // the row.
             let usage = resources.get(&w.path).copied().unwrap_or_default();
-            let mut resource = resource_line(usage, detail_width, active, in_switch);
+            let mut resource = resource_line(usage, detail_width, selected, active, in_switch);
             if in_switch && !selected {
                 top = dim_row(&top);
                 detail = dim_row(&detail);
@@ -2632,6 +2688,15 @@ fn switch_preview_header(state: &HomeState) -> (String, bool) {
 /// [`SessionActionUi`] — in 在席; and the live embedded terminal in 没入 (a
 /// starting hint until the first snapshot arrives).
 pub(super) fn right_pane_contents(state: &HomeState, right_w: usize, rows: usize) -> Vec<String> {
+    // A momentary launch (terminal / agent spawn) blanks the right pane so the
+    // centred loading rabbit (composited over the frame in [`super::frame`])
+    // reads as a dedicated loading screen. Without this the 在席 action menu
+    // (agent / terminal / … の選択肢) stays painted behind the rabbit, so the
+    // choices would show through while the spawn blocks. Return an empty pane of
+    // the right height and let the overlay own the whole surface.
+    if state.loading().is_some() {
+        return vec![String::new(); rows];
+    }
     // The Markdown preview, when open, takes over the right pane regardless of
     // mode (it is opened from the `:` palette and captures the keyboard while
     // shown).

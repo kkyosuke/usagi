@@ -52,7 +52,7 @@ pub fn run(runner: &dyn CommandRunner, repo_url: &str) -> (bool, String) {
     match runner.run_quiet("bash", &["-c", &command]) {
         Ok(true) => (
             true,
-            "アップデートしたよ！反映するには usagi を再起動してね 🐰".to_string(),
+            "アップデートしたよ！反映するには usagi を再起動してね 󰤇".to_string(),
         ),
         Ok(false) | Err(_) => (
             false,

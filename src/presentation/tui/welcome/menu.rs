@@ -201,10 +201,10 @@ mod tests {
     fn movement_clears_an_existing_notice() {
         let mut menu = Menu::empty();
         // A notice left over from a returning sub-screen is cleared on movement.
-        menu.set_notice(Some("Saved 🐰".to_string()));
+        menu.set_notice(Some("Saved 󰤇".to_string()));
         menu.handle_key(Key::ArrowDown);
         assert_eq!(menu.notice(), None);
-        menu.set_notice(Some("Saved 🐰".to_string()));
+        menu.set_notice(Some("Saved 󰤇".to_string()));
         menu.handle_key(Key::ArrowUp);
         assert_eq!(menu.notice(), None);
     }

@@ -506,7 +506,7 @@ mod tests {
 
     #[test]
     fn notice_lines_render_text_when_present() {
-        let lines = notice_lines("", Some("Saved 🐰"));
+        let lines = notice_lines("", Some("Saved 󰤇"));
         assert_eq!(lines.len(), 2);
         assert!(lines[1].contains("Saved"));
     }
@@ -555,7 +555,7 @@ mod tests {
     #[test]
     fn render_frame_combines_all_sections() {
         let config = sample_config();
-        let frame = render_frame(0, 0, &config, Some("Saved 🐰"));
+        let frame = render_frame(0, 0, &config, Some("Saved 󰤇"));
         let joined = frame.join("\n");
         assert!(joined.contains("Config"));
         assert!(joined.contains("Theme"));
@@ -621,7 +621,7 @@ mod tests {
     fn notice_slot_keeps_layout_stable_across_toggling() {
         let config = sample_config();
         let without = render_frame(24, 80, &config, None);
-        let with = render_frame(24, 80, &config, Some("Saved 🐰"));
+        let with = render_frame(24, 80, &config, Some("Saved 󰤇"));
         assert_eq!(without.len(), with.len());
     }
 

@@ -7,7 +7,7 @@
               ┗━┛ ┗━┛ ╹ ╹ ┗━┛ ╹
 </pre>
 
-# usagi 🐰
+# usagi 󰤇
 
 **AI Agent のワークフローを管理する TUI / CLI ツール**
 
@@ -66,7 +66,7 @@
 </tr>
 </table>
 
-左ペインは各セッションを 2 行で表示し、稼働中は **`▶ running`（緑）**／入力待ちは **`◆ waiting`（黄）**／アイドルは **`⏸ idle`（シアン）** でひと目で状態がわかります。`Ctrl-O` で切替へズームアウト、`Esc` で一段戻り、`:` でコマンドパレット、`Ctrl+C` / `Ctrl+Q` で終了します（`Ctrl+Q` は没入中でも効き、終了前に必ず確認モーダルを出します）。画面・モード・キー操作の詳細は [document/design/home/README.md](document/design/home/README.md) を参照してください。
+左ペインは各セッションを 3 行で表示し、稼働中は **`▶ running`（緑）**／入力待ちは **`◆ waiting`（黄）**／アイドルは **`⏸ idle`（シアン）** でひと目で状態がわかります。`Ctrl-O` で切替へズームアウト、`Esc` で一段戻り、`:` でコマンドパレット、`Ctrl+C` / `Ctrl+Q` で終了します（`Ctrl+Q` は没入中でも効き、終了前に必ず確認モーダルを出します）。画面・モード・キー操作の詳細は [document/design/home/README.md](document/design/home/README.md) を参照してください。
 
 ## Prerequisites
 
@@ -168,7 +168,7 @@ agent                      # 選んだセッションで Agent CLI（既定 clau
 
 グローバル設定（`~/.usagi/settings.json`）または workspace の `<repo>/.usagi/settings.json` に `env` map を設定すると、`agent` / `terminal` の新規 pane 起動時に `op://...` reference を `op read --no-newline` で解決して子プロセス環境へ注入できます。グローバル `env` は全 workspace に適用され、workspace 側の `env` はそこへ追加されます。同じ環境変数名は workspace 側が優先されます。例えば `{"env":{"GH_TOKEN":"op://Private/GitHub/token"}}` とすると、対象スコープで起動した agent や terminal 内の `gh` は `GH_TOKEN` を利用できます。secret 本体は設定ファイルや起動コマンド行には保存されません。`op` の認証は既存の `op signin` セッションや外部から渡した `OP_SERVICE_ACCOUNT_TOKEN` など、1Password CLI 側の通常の仕組みを使います。グローバル `env` はグローバル Config の Env Vars 行、workspace 側の `env` はコマンドパレットの `env`（または workspace Config → Env Vars 行）で `NAME=op://vault/item/field` を 1 行ずつ編集して設定できます.
 
-各セッションのシェルは画面を開いている間プールに常駐するので、`Ctrl-O` で切替へズームアウトして別セッションへ移っても、裏で `claude` は動き続けます。usagi を終了して再び開いたときも、前回開いていたペイン（agent / terminal）を起動時にバックグラウンドで復旧し、agent は前回の会話の続きから再開します（設定 `restore_panes_enabled`、既定 ON。[document/04-orchestration.md#ペインの復旧](document/04-orchestration.md#ペインの復旧)）。左ペインは各セッションを 2 行で表示し、**稼働中は `▶ running`（緑）／入力待ちは `◆ waiting`（黄色）／アイドルは `⏸ idle`（シアン）** でひと目で状態がわかります。アタッチしていないセッションが入力待ちになるとデスクトップ通知（`🐰 <ブランチ名> が入力待ちです`）も出るため、複数セッションを並行で走らせ、入力が必要になったものだけに対応できます（通知は `notifications_enabled` が ON のとき。状態は `claude` / `codex` のライフサイクルフックで判定し、フックを持たない Agent ではターミナルベルで推定します。詳細は [document/04-orchestration.md#Agent フックによる状態報告](document/04-orchestration.md#agent-フックによる状態報告)）。
+各セッションのシェルは画面を開いている間プールに常駐するので、`Ctrl-O` で切替へズームアウトして別セッションへ移っても、裏で `claude` は動き続けます。usagi を終了して再び開いたときも、前回開いていたペイン（agent / terminal）を起動時にバックグラウンドで復旧し、agent は前回の会話の続きから再開します（設定 `restore_panes_enabled`、既定 ON。[document/04-orchestration.md#ペインの復旧](document/04-orchestration.md#ペインの復旧)）。左ペインは各セッションを 3 行で表示し、**稼働中は `▶ running`（緑）／入力待ちは `◆ waiting`（黄色）／アイドルは `⏸ idle`（シアン）** でひと目で状態がわかります。アタッチしていないセッションが入力待ちになるとデスクトップ通知（`󰤇 <ブランチ名> が入力待ちです`）も出るため、複数セッションを並行で走らせ、入力が必要になったものだけに対応できます（通知は `notifications_enabled` が ON のとき。状態は `claude` / `codex` のライフサイクルフックで判定し、フックを持たない Agent ではターミナルベルで推定します。詳細は [document/04-orchestration.md#Agent フックによる状態報告](document/04-orchestration.md#agent-フックによる状態報告)）。
 
 ホーム画面を開くと、実行中ビルドより新しいリリースが公開されていれば右上にうさぎのアスキーアートと「アップデートがあるぴょん v\<X.Y.Z\>」を表示します（GitHub のリリースタグをバックグラウンドで確認。差分が無い・オフライン時は何も出ません）。
 

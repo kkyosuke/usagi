@@ -79,11 +79,50 @@ impl vt100::Callbacks for ScreenCallbacks {
     }
 }
 
+/// Cloneable handle for injecting input into a live PTY from outside the render
+/// loop.
+///
+/// The home screen normally writes to a pane through `&mut PtySession` while the
+/// pane is focused. A live MCP send is different: the `usagi mcp` process can
+/// only leave a prompt on disk, and the terminal-pool watcher (a background
+/// thread in the TUI process) must pick it up and type it into the already-open
+/// agent pane even when that pane is detached. This handle shares the PTY input
+/// writer with the owner while also exposing the parser's bracketed-paste flag
+/// so the caller can encode multi-line prompts exactly as a terminal paste.
+#[derive(Clone)]
+pub struct PtyInputHandle {
+    writer: Arc<Mutex<Box<dyn Write + Send>>>,
+    parser: Arc<Mutex<vt100::Parser<ScreenCallbacks>>>,
+}
+
+impl PtyInputHandle {
+    /// Whether the running program has asked for bracketed paste mode
+    /// (DECSET 2004). See [`PtySession::bracketed_paste`].
+    pub fn bracketed_paste(&self) -> bool {
+        self.parser
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .screen()
+            .bracketed_paste()
+    }
+
+    /// Forward raw input bytes to the shell.
+    pub fn write(&self, bytes: &[u8]) -> Result<()> {
+        let mut writer = self
+            .writer
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        writer.write_all(bytes)?;
+        writer.flush()?;
+        Ok(())
+    }
+}
+
 /// A running shell attached to a pseudo-terminal, with its output parsed into a
 /// terminal screen grid.
 pub struct PtySession {
     master: Box<dyn MasterPty + Send>,
-    writer: Box<dyn Write + Send>,
+    writer: Arc<Mutex<Box<dyn Write + Send>>>,
     parser: Arc<Mutex<vt100::Parser<ScreenCallbacks>>>,
     alive: Arc<AtomicBool>,
     /// Bumped by the reader thread after every chunk it parses, so the render
@@ -208,6 +247,7 @@ impl PtySession {
             .master
             .take_writer()
             .context("failed to write to the pseudo-terminal")?;
+        let writer = Arc::new(Mutex::new(writer));
 
         let bell = Arc::new(AtomicU64::new(0));
         let cursor_shape = Arc::new(AtomicU16::new(0));
@@ -367,11 +407,19 @@ impl PtySession {
         Arc::clone(&self.alive)
     }
 
+    /// A cloneable handle that can write to this PTY without borrowing the
+    /// owning [`PtySession`]. Used by the terminal-pool watcher to inject
+    /// MCP-sent prompts into a backgrounded agent pane.
+    pub fn input_handle(&self) -> PtyInputHandle {
+        PtyInputHandle {
+            writer: Arc::clone(&self.writer),
+            parser: Arc::clone(&self.parser),
+        }
+    }
+
     /// Forward raw input bytes to the shell.
     pub fn write(&mut self, bytes: &[u8]) -> Result<()> {
-        self.writer.write_all(bytes)?;
-        self.writer.flush()?;
-        Ok(())
+        self.input_handle().write(bytes)
     }
 
     /// Resize the PTY (and its screen grid) to `rows`×`cols`. Best-effort: a
