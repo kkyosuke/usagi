@@ -149,6 +149,82 @@ fn default_branch_falls_back_to_main_when_detached() {
 }
 
 #[test]
+fn integration_base_prefers_the_remote_default() {
+    let (_tmp, work) = repo_with_remote();
+    let base = integration_base(&work);
+    assert_eq!(base.default, "main");
+    // origin/HEAD resolves, so sessions are measured against the remote ref.
+    assert_eq!(base.base, "origin/main");
+}
+
+#[test]
+fn integration_base_falls_back_to_the_local_branch_without_a_remote() {
+    let dir = tempfile::tempdir().unwrap();
+    init_repo(dir.path());
+    let base = integration_base(dir.path());
+    // No origin/HEAD: the checked-out branch is used for both, so no
+    // `origin/<default>` probe is ever attempted for this repo's worktrees.
+    assert_eq!(base.default, "main");
+    assert_eq!(base.base, "main");
+}
+
+#[test]
+fn integration_base_falls_back_to_main_when_detached_without_a_remote() {
+    let dir = tempfile::tempdir().unwrap();
+    init_repo(dir.path());
+    run(dir.path(), &["checkout", "-q", "--detach"]);
+    // Detached HEAD and no remote: the hard-coded `main` fallback applies to
+    // both the name and the base.
+    let base = integration_base(dir.path());
+    assert_eq!(base.default, "main");
+    assert_eq!(base.base, "main");
+}
+
+#[test]
+fn ahead_behind_against_uses_the_base_ref_verbatim() {
+    let (_tmp, work) = repo_with_remote();
+    // Given an already-resolved base, the count is taken against it directly —
+    // `origin/main` here, matching what `integration_base` resolves for a remote
+    // repo. main is even with itself.
+    assert_eq!(
+        ahead_behind_against(&work, "main", "origin/main"),
+        Some((0, 0))
+    );
+
+    // A local base is used as given, with no `origin/` prepended: a feature
+    // branch one commit ahead of the local `main`.
+    let local = tempfile::tempdir().unwrap();
+    init_repo(local.path());
+    run(local.path(), &["checkout", "-q", "-b", "feature"]);
+    std::fs::write(local.path().join("g"), "y").unwrap();
+    run(local.path(), &["add", "."]);
+    run(local.path(), &["commit", "-q", "-m", "ahead"]);
+    assert_eq!(
+        ahead_behind_against(local.path(), "feature", "main"),
+        Some((1, 0))
+    );
+    // A base that does not resolve yields None (no fallback probe).
+    assert_eq!(
+        ahead_behind_against(local.path(), "feature", "origin/main"),
+        None
+    );
+}
+
+#[test]
+fn diff_stat_against_measures_against_the_given_base() {
+    let dir = tempfile::tempdir().unwrap();
+    init_repo(dir.path());
+    run(dir.path(), &["checkout", "-q", "-b", "feature"]);
+    std::fs::write(dir.path().join("new.txt"), "a\nb\n").unwrap();
+    run(dir.path(), &["add", "."]);
+    run(dir.path(), &["commit", "-q", "-m", "work"]);
+    // The base is used verbatim: +2 against local `main`.
+    assert_eq!(diff_stat_against(dir.path(), "main"), Some((2, 0)));
+    // An unresolved base yields None rather than probing an alternative.
+    assert_eq!(diff_stat_against(dir.path(), "origin/main"), None);
+}
+
+#[test]
 fn ahead_behind_counts_against_local_and_remote() {
     let (_tmp, work) = repo_with_remote();
     // origin/main exists, so the remote ref is used as the target. main is

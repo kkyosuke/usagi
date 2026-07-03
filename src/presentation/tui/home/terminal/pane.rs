@@ -147,7 +147,7 @@ const QUIET_POLL_SLICE: Duration = Duration::from_millis(32);
 const IDLE_REEVAL: Duration = Duration::from_millis(200);
 
 /// The shortest gap between two repaints driven purely by fresh shell output.
-/// The reader thread bumps the generation once per 8 KiB chunk — roughly every
+/// The reader thread bumps the generation once per 64 KiB read — roughly every
 /// 4 ms while an agent streams — and each repaint locks the parser and
 /// re-stringifies the whole grid. Coalescing output-only frames to at most one
 /// per ~60 fps keeps a flood of output from pinning the CPU on redraws the eye
