@@ -19,9 +19,12 @@
 //!   are non-managed command hooks, the launch passes
 //!   `--dangerously-bypass-hook-trust` so they run without an interactive trust
 //!   prompt (usagi vets the hook command — it only ever runs usagi itself).
-//! - **Approval mode** — interactive Codex launches pass `--full-auto`, so tool
-//!   calls auto-run inside Codex's workspace sandbox without asking for approval
-//!   on every command or edit. Headless runs use Codex's stronger
+//! - **Approval mode** — interactive Codex launches pass
+//!   `--sandbox workspace-write --ask-for-approval on-request`, so tool calls
+//!   auto-run inside Codex's workspace sandbox and the model only escalates for
+//!   approval when it needs to step outside that sandbox, instead of prompting on
+//!   every command or edit. (Codex dropped the older `--full-auto` shorthand for
+//!   this pair.) Headless runs use Codex's stronger
 //!   `--dangerously-bypass-approvals-and-sandbox` because no user is present.
 //!
 //! When a worktree has a prior Codex conversation, the launch resumes it
@@ -283,11 +286,11 @@ impl Agent for CodexAgent {
         // already working on it. The hooks are non-managed command hooks, so
         // Codex would otherwise prompt to trust each one; usagi vets them (they
         // only run usagi itself), so `--dangerously-bypass-hook-trust` lets them
-        // run unattended on both paths. `--full-auto` runs the interactive session
-        // low-friction — sandboxed (workspace-write) auto-execution with no
-        // per-command approval prompts — so the attended agent stops asking to
-        // approve every edit and command while still being confined to the
-        // worktree sandbox (unlike the headless path's full bypass).
+        // run unattended on both paths. `--sandbox workspace-write` keeps the
+        // interactive session confined to the worktree while
+        // `--ask-for-approval on-request` avoids per-command prompts unless the
+        // model needs to escalate beyond that sandbox. This is the modern Codex
+        // spelling of the removed `--full-auto` shorthand.
         let resuming = resume && initial_prompt.is_none();
         let mut parts = if resuming {
             vec![
@@ -295,13 +298,19 @@ impl Agent for CodexAgent {
                 "resume".to_string(),
                 "--last".to_string(),
                 "--dangerously-bypass-hook-trust".to_string(),
-                "--full-auto".to_string(),
+                "--sandbox".to_string(),
+                "workspace-write".to_string(),
+                "--ask-for-approval".to_string(),
+                "on-request".to_string(),
             ]
         } else {
             vec![
                 self.program.to_string(),
                 "--dangerously-bypass-hook-trust".to_string(),
-                "--full-auto".to_string(),
+                "--sandbox".to_string(),
+                "workspace-write".to_string(),
+                "--ask-for-approval".to_string(),
+                "on-request".to_string(),
             ]
         };
         parts.extend(overrides);
@@ -572,17 +581,21 @@ mod tests {
     }
 
     #[test]
-    fn launch_command_runs_full_auto_so_the_attended_session_stops_prompting() {
-        // Both the fresh and resumed interactive launches carry `--full-auto`, so
-        // Codex auto-executes within the workspace sandbox instead of asking the
-        // user to approve every edit and command.
+    fn launch_command_uses_modern_approval_flags_for_attended_sessions() {
+        // Both the fresh and resumed interactive launches carry Codex's modern
+        // spelling of the old `--full-auto` shorthand: run inside the workspace
+        // sandbox, and ask only when the model requests escalation.
         let fresh = CodexAgent::new().launch_command(&wiring("usagi", None), false, None);
-        assert!(fresh.contains(" --full-auto "));
-        assert!(fresh.starts_with("codex --dangerously-bypass-hook-trust --full-auto "));
+        assert!(fresh.contains(" --sandbox workspace-write --ask-for-approval on-request "));
+        assert!(fresh.starts_with(
+            "codex --dangerously-bypass-hook-trust --sandbox workspace-write --ask-for-approval on-request "
+        ));
         let resumed = CodexAgent::new().launch_command(&wiring("usagi", None), true, None);
-        assert!(
-            resumed.starts_with("codex resume --last --dangerously-bypass-hook-trust --full-auto ")
-        );
+        assert!(resumed.starts_with(
+            "codex resume --last --dangerously-bypass-hook-trust --sandbox workspace-write --ask-for-approval on-request "
+        ));
+        assert!(!fresh.contains("--full-auto"));
+        assert!(!resumed.contains("--full-auto"));
     }
 
     #[test]
