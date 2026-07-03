@@ -4,9 +4,27 @@
 use super::*;
 
 /// Run a git command in `dir`, asserting it succeeds.
+///
+/// Strips git's repo-scoping env vars (the same set as
+/// `infrastructure::git::command::REPO_SCOPING_ENV`): when `cargo test` runs
+/// under a git hook (lefthook pre-push), git exports `GIT_DIR` etc., which
+/// would override `-C` and point these commands at the hook's repository
+/// instead of the temp repo under construction.
 fn git(dir: &Path, args: &[&str]) {
+    let mut command = std::process::Command::new("git");
+    for var in [
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_COMMON_DIR",
+        "GIT_PREFIX",
+        "GIT_NAMESPACE",
+    ] {
+        command.env_remove(var);
+    }
     assert!(
-        std::process::Command::new("git")
+        command
             .arg("-C")
             .arg(dir)
             .args(args)
