@@ -32,7 +32,7 @@ use std::collections::BTreeMap;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -41,8 +41,9 @@ use console::Term;
 
 use crate::domain::resource::{aggregate_by_root, ResourceUsage};
 use crate::domain::settings::{AgentCli, Sidebar};
+use crate::domain::workspace_state::PrLink;
 use crate::infrastructure::open_panes_store::{StoredPane, StoredPaneKind};
-use crate::infrastructure::pty::{PtyInputHandle, PtySession};
+use crate::infrastructure::pty::{PtyInputHandle, PtySession, ScreenCallbacks};
 use crate::infrastructure::resource::{ResourceSampler, SysinfoSampler};
 use crate::infrastructure::session_monitor::SessionMonitor;
 use crate::infrastructure::{
@@ -83,6 +84,12 @@ struct Watched {
     /// (portable-pty makes the shell a session leader), so the resource sampler
     /// totals each shell's whole subtree (the shell and any agent CLI beneath it).
     roots: Vec<u32>,
+    /// Every live pane's parser/generation handles, so the watcher can harvest
+    /// pull-request URLs from panes left running in the background. The render
+    /// loop already does this for the attached pane; keeping the handles here
+    /// makes detached panes update the sidebar without waiting for a later
+    /// workspace re-sync.
+    pr_panes: Vec<WatchedPrPane>,
     /// Input handle for the agent pane, when this session currently has one.
     /// The watcher drains MCP `session_send` prompts only for sessions with this
     /// handle, so prompts sent while no agent pane is live remain queued.
@@ -98,6 +105,20 @@ impl Watched {
     }
 }
 
+/// The cheap shared handles the watcher needs to harvest PR URLs from one pane.
+///
+/// `last_generation` and `last_prs` are watcher-owned cache fields: they avoid
+/// rescanning unchanged screens and avoid re-writing the same visible PR list to
+/// the store every tick. The pane `id` is stable across tab reorders, so a scan
+/// job can be matched back to its cache after it runs off-lock.
+struct WatchedPrPane {
+    id: u64,
+    parser: Arc<Mutex<vt100::Parser<ScreenCallbacks>>>,
+    generation: Arc<AtomicU64>,
+    last_generation: u64,
+    last_prs: Vec<PrLink>,
+}
+
 /// A live agent input target snapshotted out of [`Shared`] so the watcher can
 /// release the shared-state lock before it drains disk queues or writes to PTYs.
 struct LivePromptTarget {
@@ -110,6 +131,11 @@ struct LivePromptTarget {
 struct Shared {
     monitor: SessionMonitor,
     sessions: HashMap<PathBuf, Watched>,
+    /// PR lists the watcher has newly harvested from live panes, keyed by the
+    /// session/worktree root. The event loop drains this and calls
+    /// `HomeState::set_pr_links`, so background sessions get their sidebar `#N`
+    /// badges as soon as the URL appears in their output.
+    pr_link_updates: HashMap<PathBuf, Vec<PrLink>>,
     /// The CPU / memory each live session is using, keyed by worktree path, as of
     /// the watcher's last resource sample. Empty while nothing is live (the
     /// watcher skips sampling then), so an idle workspace carries no figures.
@@ -180,6 +206,7 @@ impl MonitorHandle {
                     bell: Arc::new(AtomicU64::new(0)),
                     alive: vec![Arc::new(AtomicBool::new(true))],
                     roots: Vec::new(),
+                    pr_panes: Vec::new(),
                     agent_input: None,
                     label: String::new(),
                 },
@@ -210,6 +237,20 @@ impl MonitorHandle {
         }
     }
 
+    /// A handle seeded with PR updates, for exercising the event-loop drain path
+    /// without spawning a real watcher thread.
+    #[cfg(test)]
+    pub fn with_pr_link_updates(updates: impl IntoIterator<Item = (PathBuf, Vec<PrLink>)>) -> Self {
+        let shared = Shared {
+            pr_link_updates: updates.into_iter().collect(),
+            ..Shared::default()
+        };
+        Self {
+            shared: Arc::new(Mutex::new(shared)),
+            version: Arc::new(AtomicU64::new(1)),
+        }
+    }
+
     /// Read every session-badge set the sidebar needs for one repaint under a
     /// single lock, instead of locking once per set. The render loops took four
     /// separate locks (`running`/`waiting`/`done`/`live`) each frame, contending
@@ -226,6 +267,13 @@ impl MonitorHandle {
     /// differs, skipping the per-frame clone of every badge set when nothing moved.
     pub fn badge_version(&self) -> u64 {
         self.version.load(Ordering::SeqCst)
+    }
+
+    /// Drain the PR-link updates harvested by the watcher since the previous
+    /// call. Each entry is the store's accumulated, de-duplicated list for a
+    /// session root, ready for `HomeState::set_pr_links`.
+    pub fn take_pr_link_updates(&self) -> HashMap<PathBuf, Vec<PrLink>> {
+        std::mem::take(&mut self.lock().pr_link_updates)
     }
 
     /// Declare the foreground (attached) session, or clear it with `None`. The
@@ -266,6 +314,114 @@ fn snapshot_locked(shared: &Shared) -> MonitorSnapshot {
         resources: shared.resources.clone(),
         resource_total: shared.resource_total,
     }
+}
+
+/// One off-lock PR scan the watcher should perform for a pane whose output
+/// generation advanced.
+struct PrScanJob {
+    path: PathBuf,
+    pane_id: u64,
+    parser: Arc<Mutex<vt100::Parser<ScreenCallbacks>>>,
+    previous: Vec<PrLink>,
+}
+
+/// The harvested result of one [`PrScanJob`].
+struct PrScanResult {
+    path: PathBuf,
+    pane_id: u64,
+    prs: Vec<PrLink>,
+}
+
+/// Collect the panes whose output changed since their last watcher scan, and
+/// mark their current generation as observed. The actual parser locks and disk
+/// writes happen after the shared watcher mutex is released.
+fn pending_pr_scans(shared: &mut Shared) -> Vec<PrScanJob> {
+    shared
+        .sessions
+        .iter_mut()
+        .flat_map(|(path, watched)| {
+            watched.pr_panes.iter_mut().filter_map(|pane| {
+                let generation = pane.generation.load(Ordering::SeqCst);
+                (pane.last_generation != generation).then(|| {
+                    pane.last_generation = generation;
+                    PrScanJob {
+                        path: path.clone(),
+                        pane_id: pane.id,
+                        parser: Arc::clone(&pane.parser),
+                        previous: pane.last_prs.clone(),
+                    }
+                })
+            })
+        })
+        .collect()
+}
+
+/// Run PR scans off the watcher mutex. A pane with no visible PRs, or the same
+/// visible PR list as its previous scan, yields no result.
+fn scan_pr_jobs(jobs: Vec<PrScanJob>) -> Vec<PrScanResult> {
+    jobs.into_iter()
+        .filter_map(|job| {
+            let prs = {
+                let parser = lock_parser(&job.parser);
+                super::link::pr_links(parser.screen())
+            };
+            (!prs.is_empty() && prs != job.previous).then_some(PrScanResult {
+                path: job.path,
+                pane_id: job.pane_id,
+                prs,
+            })
+        })
+        .collect()
+}
+
+fn lock_parser(
+    parser: &Arc<Mutex<vt100::Parser<ScreenCallbacks>>>,
+) -> MutexGuard<'_, vt100::Parser<ScreenCallbacks>> {
+    parser
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Persist newly harvested PRs and return the store's accumulated list for each
+/// session root whose visible PRs changed. Disk IO is kept out of the watcher
+/// mutex; failures are best-effort like the attached-pane harvest path.
+fn persist_pr_results(results: &[PrScanResult]) -> Vec<(PathBuf, Vec<PrLink>)> {
+    results
+        .iter()
+        .map(|result| {
+            let _ = crate::infrastructure::pr_link_store::add(&result.path, &result.prs);
+            let merged = crate::infrastructure::pr_link_store::get(&result.path);
+            (result.path.clone(), merged)
+        })
+        .collect()
+}
+
+/// Update the watcher's per-pane PR cache, queue sidebar updates for the event
+/// loop, and return whether any queued list changed.
+fn apply_pr_results(
+    shared: &mut Shared,
+    results: Vec<PrScanResult>,
+    merged: Vec<(PathBuf, Vec<PrLink>)>,
+) -> bool {
+    for result in results {
+        if let Some(pane) = shared.sessions.get_mut(&result.path).and_then(|watched| {
+            watched
+                .pr_panes
+                .iter_mut()
+                .find(|pane| pane.id == result.pane_id)
+        }) {
+            pane.last_prs = result.prs;
+        }
+    }
+
+    let mut changed = false;
+    for (path, prs) in merged {
+        if shared.pr_link_updates.get(&path) != Some(&prs) {
+            shared.pr_link_updates.insert(path, prs);
+            changed = true;
+        }
+    }
+    changed
 }
 
 /// One embedded pane: a live [`PtySession`] and what it runs (so the tab strip
@@ -801,6 +957,20 @@ impl TerminalPool {
             // each session's process tree from. A pane already reaped reports
             // none and is simply left out.
             let roots = sp.panes.iter().filter_map(|p| p.pty.process_id()).collect();
+            let pr_panes = sp
+                .panes
+                .iter()
+                .map(|p| WatchedPrPane {
+                    id: p.id,
+                    parser: p.pty.parser_handle(),
+                    generation: p.pty.generation_handle(),
+                    // Force the watcher to scan once after registration, so a
+                    // restored pane whose screen already contains a PR URL is
+                    // folded into the sidebar without requiring more output.
+                    last_generation: u64::MAX,
+                    last_prs: Vec::new(),
+                })
+                .collect();
             let agent_input = sp
                 .panes
                 .iter()
@@ -810,6 +980,7 @@ impl TerminalPool {
                 bell,
                 alive,
                 roots,
+                pr_panes,
                 agent_input,
                 label: label.to_string(),
             })
@@ -826,6 +997,7 @@ impl TerminalPool {
             }
             None => {
                 shared.sessions.remove(&key);
+                shared.pr_link_updates.remove(&key);
                 shared.monitor.forget(dir);
                 agent_state_store::clear(dir);
                 self.version.fetch_add(1, Ordering::SeqCst);
@@ -862,6 +1034,7 @@ impl TerminalPool {
         let mut shared = self.lock();
         for path in &removed {
             shared.sessions.remove(path);
+            shared.pr_link_updates.remove(path);
             shared.monitor.forget(path);
             agent_state_store::clear(path);
         }
@@ -1007,11 +1180,12 @@ fn spawn_watcher(
             continue;
         }
 
-        // Snapshot the bookkeeping under the lock: prune dead sessions and observe
-        // the phases/bells. Clone live-prompt input handles while locked, then
-        // drain disk queues and write to PTYs after releasing it.
-        let (notices, live_prompt_targets): (
+        // Snapshot the bookkeeping under the lock: prune dead sessions, observe
+        // the phases/bells, and clone the lightweight handles needed by the
+        // off-lock work below (PR scans and live-prompt delivery).
+        let (notices, pr_jobs, live_prompt_targets): (
             Vec<(String, session_monitor::NoticeKind)>,
+            Vec<PrScanJob>,
             Vec<LivePromptTarget>,
         ) = {
             let mut shared = match shared.lock() {
@@ -1045,14 +1219,14 @@ fn spawn_watcher(
                 shared.monitor.forget(&path);
                 agent_state_store::clear(&path);
             }
-            let notices = if shared.sessions.is_empty() {
+            let (notices, pr_jobs, live_prompt_targets) = if shared.sessions.is_empty() {
                 shared.resources.clear();
                 shared.resource_total = ResourceUsage::default();
                 // The authoritative empty observation happens while holding the
                 // lock. Future ticks can skip the lock until `refresh_watched`
                 // registers a session and flips this back to true.
                 has_sessions.store(false, Ordering::Release);
-                Vec::new()
+                (Vec::new(), Vec::new(), Vec::new())
             } else {
                 // Each session's reading pairs its bell count with the phase its
                 // agent's hooks last recorded (if any); the monitor prefers the phase
@@ -1068,7 +1242,7 @@ fn spawn_watcher(
                         )
                     })
                     .collect();
-                shared
+                let notices = shared
                     .monitor
                     .observe(&readings)
                     .into_iter()
@@ -1078,23 +1252,45 @@ fn spawn_watcher(
                             .get(&notice.path)
                             .map(|w| (w.label.clone(), notice.kind))
                     })
-                    .collect()
-            };
-            let live_prompt_targets = shared
-                .sessions
-                .iter()
-                .filter_map(|(path, watched)| {
-                    watched.agent_input.as_ref().map(|input| LivePromptTarget {
-                        path: path.clone(),
-                        input: input.clone(),
+                    .collect();
+                let pr_jobs = pending_pr_scans(&mut shared);
+                let live_prompt_targets = shared
+                    .sessions
+                    .iter()
+                    .filter_map(|(path, watched)| {
+                        watched.agent_input.as_ref().map(|input| LivePromptTarget {
+                            path: path.clone(),
+                            input: input.clone(),
+                        })
                     })
-                })
-                .collect();
+                    .collect();
+                (notices, pr_jobs, live_prompt_targets)
+            };
             if snapshot_locked(&shared) != before {
                 version.fetch_add(1, Ordering::SeqCst);
             }
-            (notices, live_prompt_targets)
+            (notices, pr_jobs, live_prompt_targets)
         };
+
+        let pr_results = scan_pr_jobs(pr_jobs);
+        let merged_prs = persist_pr_results(&pr_results);
+        if !pr_results.is_empty() {
+            let pr_changed = {
+                let mut shared = match shared.lock() {
+                    Ok(shared) => shared,
+                    Err(_) => {
+                        crate::infrastructure::error_log::ErrorLog::record(
+                            "terminal pool watcher stopped: shared state mutex poisoned",
+                        );
+                        break;
+                    }
+                };
+                apply_pr_results(&mut shared, pr_results, merged_prs)
+            };
+            if pr_changed {
+                version.fetch_add(1, Ordering::SeqCst);
+            }
+        }
 
         deliver_live_prompts(live_prompt_targets);
 

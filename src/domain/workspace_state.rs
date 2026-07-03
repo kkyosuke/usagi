@@ -204,8 +204,8 @@ impl AheadBehind {
 
 /// A pull request discovered for a worktree: its number and the URL to open.
 ///
-/// usagi does not query GitHub for this — it is harvested by scanning the
-/// embedded agent's terminal output for pull-request URLs of the form
+/// usagi does not query GitHub for this — it is harvested by scanning live
+/// embedded terminal output for pull-request URLs of the form
 /// `https://<host>/<owner>/<repo>/pull/<N>` (see
 /// [`crate::presentation::tui::home::terminal::link::pr_links`]). The sidebar
 /// shows `#<number>` and a click opens [`url`](Self::url) in the default browser.
@@ -277,11 +277,11 @@ pub struct WorktreeState {
     /// [`status`](Self::status) and [`diff`](Self::diff).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ahead_behind: Option<AheadBehind>,
-    /// The pull requests discovered for this worktree — one per `/pull/<N>` URL the
-    /// embedded agent has printed, in the order first seen (a session may open
-    /// several across the repositories it touches). Unlike the git-derived fields
-    /// above this is **not** re-read from git on refresh: it is harvested from the
-    /// agent's terminal output and persisted so the sidebar keeps showing the
+    /// The pull requests discovered for this worktree — one per `/pull/<N>` URL
+    /// printed in a live embedded pane, in the order first seen (a session may
+    /// open several across the repositories it touches). Unlike the git-derived
+    /// fields above this is **not** re-read from git on refresh: it is harvested
+    /// from terminal output and persisted so the sidebar keeps showing the
     /// `#<number>` badges across restarts. Empty (and omitted from the file) when
     /// none has been seen, and an older file without it loads empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
