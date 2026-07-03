@@ -8,6 +8,13 @@ fn config_with_workspaces(names: &[&str]) -> Config {
     )
 }
 
+/// Move the cursor onto the given global field.
+fn select_global(config: &mut Config, field: Field) {
+    while config.selected_field() != Some(field) {
+        config.move_down();
+    }
+}
+
 #[test]
 fn field_labels_are_distinct() {
     assert_eq!(Field::Theme.label(), "Theme");
@@ -18,9 +25,10 @@ fn field_labels_are_distinct() {
     assert_eq!(Field::KeyScheme.label(), "Terminal Keys");
     assert_eq!(Field::LocalLlm.label(), "Local LLM");
     assert_eq!(Field::LocalLlmModel.label(), "Local LLM Model");
+    assert_eq!(Field::EnvVars.label(), "Env Vars");
     assert_eq!(Field::RestorePanes.label(), "Restore Panes");
     assert_eq!(Field::MascotAnimation.label(), "Mascot Animation");
-    assert_eq!(Field::ALL.len(), 10);
+    assert_eq!(Field::ALL.len(), 11);
     assert_eq!(LocalField::AgentCli.label(), "Agent CLI");
     assert_eq!(LocalField::Notifications.label(), "Notifications");
     assert_eq!(LocalField::RestorePanes.label(), "Restore Panes");
@@ -43,9 +51,15 @@ fn new_config_starts_at_the_top() {
     assert!(!config.is_dirty());
     assert!(config.local().is_none());
     assert!(config.selected_local_field().is_none());
-    // Global scope: ten fixed field rows, then one shipped-skill feature row.
-    assert_eq!(config.rows().len(), 10 + SkillFeature::ALL.len());
-    assert_eq!(config.save_index(), 10 + SkillFeature::ALL.len());
+    // Global scope: fixed field rows, then one shipped-skill feature row.
+    assert_eq!(
+        config.rows().len(),
+        Field::ALL.len() + SkillFeature::ALL.len()
+    );
+    assert_eq!(
+        config.save_index(),
+        Field::ALL.len() + SkillFeature::ALL.len()
+    );
 }
 
 #[test]
@@ -69,6 +83,8 @@ fn move_down_advances_through_fields_then_the_save_button_and_wraps() {
     assert_eq!(config.selected_field(), Some(Field::LocalLlm));
     config.move_down();
     assert_eq!(config.selected_field(), Some(Field::LocalLlmModel));
+    config.move_down();
+    assert_eq!(config.selected_field(), Some(Field::EnvVars));
     // The shipped-skill feature row sits below the fixed fields (not the Save
     // button yet).
     config.move_down();
@@ -100,6 +116,8 @@ fn move_up_wraps_to_the_save_button() {
         config.selected_skill_feature(),
         Some(SkillFeature::PullRequest)
     );
+    config.move_up();
+    assert_eq!(config.selected_field(), Some(Field::EnvVars));
     config.move_up();
     assert_eq!(config.selected_field(), Some(Field::LocalLlmModel));
     config.move_up();
@@ -439,7 +457,7 @@ fn cycling_the_save_button_is_a_noop() {
 fn rows_render_global_field_values() {
     let config = config_with_workspaces(&["alpha"]);
     let rows = config.rows();
-    assert_eq!(rows.len(), 10 + SkillFeature::ALL.len());
+    assert_eq!(rows.len(), Field::ALL.len() + SkillFeature::ALL.len());
     assert_eq!(rows[0].label, "Theme");
     assert_eq!(rows[0].value, "System");
     assert_eq!(rows[3].label, "Restore Panes");
@@ -461,13 +479,73 @@ fn rows_render_global_field_values() {
     assert_eq!(rows[9].label, "Local LLM Model");
     assert_eq!(rows[9].value, "—");
     assert!(rows[9].disabled);
+    assert_eq!(rows[10].label, "Env Vars");
+    assert_eq!(rows[10].value, "Edit (none)");
+    assert!(rows[10].action);
+    assert!(!rows[10].disabled);
     // The shipped-skill feature row follows the fixed fields: a plain on/off
     // chooser, on by default and neither an action nor disabled.
-    assert_eq!(rows[10].label, "PR Skills");
-    assert_eq!(rows[10].value, "On");
-    assert!(!rows[10].action);
-    assert!(!rows[10].disabled);
+    assert_eq!(rows[11].label, "PR Skills");
+    assert_eq!(rows[11].value, "On");
+    assert!(!rows[11].action);
+    assert!(!rows[11].disabled);
     assert!(rows.iter().all(|r| !r.changed));
+}
+
+#[test]
+fn global_env_vars_row_opens_a_multiline_editor_and_applies_valid_bindings() {
+    let mut config = config_with_workspaces(&[]);
+    select_global(&mut config, Field::EnvVars);
+    assert!(config.env_row_active());
+    // The Env Vars row is an action row, so ←/→ have nothing to cycle.
+    assert!(!config.cycle_selected(true));
+    assert_eq!(config.value_of(Field::EnvVars), "Edit (none)");
+
+    config.open_env_modal();
+    assert_eq!(config.env_modal().unwrap().lines(), &["".to_string()]);
+    for c in "GH_TOKEN=op://Private/GH/token".chars() {
+        config.env_modal_insert(c);
+    }
+    config.apply_env_modal();
+
+    assert!(config.env_modal().is_none());
+    assert_eq!(
+        config.settings().env.get("GH_TOKEN").map(String::as_str),
+        Some("op://Private/GH/token")
+    );
+    assert_eq!(config.value_of(Field::EnvVars), "Edit (1 var)");
+    assert!(config.is_dirty());
+    let env_row = Field::ALL
+        .iter()
+        .position(|field| *field == Field::EnvVars)
+        .unwrap();
+    assert!(config.rows()[env_row].changed);
+}
+
+#[test]
+fn global_env_editor_seeds_from_existing_bindings_and_label_counts_them() {
+    let settings = Settings {
+        env: [
+            ("A_TOKEN".to_string(), "op://v/i/a".to_string()),
+            ("B_TOKEN".to_string(), "op://v/i/b".to_string()),
+        ]
+        .into_iter()
+        .collect(),
+        ..Default::default()
+    };
+    let mut config = Config::new(settings, Vec::new());
+    assert_eq!(config.value_of(Field::EnvVars), "Edit (2 vars)");
+
+    select_global(&mut config, Field::EnvVars);
+    config.open_env_modal();
+
+    assert_eq!(
+        config.env_modal().unwrap().lines(),
+        &[
+            "A_TOKEN=op://v/i/a".to_string(),
+            "B_TOKEN=op://v/i/b".to_string()
+        ]
+    );
 }
 
 // --- local LLM field ---------------------------------------------------

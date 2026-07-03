@@ -197,6 +197,7 @@ fn cycling_default_workspace_persists_when_saved() {
         Ok(Key::ArrowDown),  // Mascot Animation
         Ok(Key::ArrowDown),  // Local LLM
         Ok(Key::ArrowDown),  // Local LLM Model
+        Ok(Key::ArrowDown),  // Env Vars
         Ok(Key::ArrowDown),  // PR Skills
         Ok(Key::ArrowDown),  // Save button
         Ok(Key::Enter),      // saves
@@ -990,6 +991,7 @@ fn toggling_the_local_llm_after_install_persists_the_enabled_flag() {
         Ok(Key::ArrowDown),  // Local LLM
         Ok(Key::ArrowRight), // toggle On
         Ok(Key::ArrowDown),  // Local LLM Model
+        Ok(Key::ArrowDown),  // Env Vars
         Ok(Key::ArrowDown),  // PR Skills
         Ok(Key::ArrowDown),  // Save button
         Ok(Key::Enter),      // save

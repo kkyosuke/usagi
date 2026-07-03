@@ -411,14 +411,19 @@ impl Config {
     }
 
     /// Open the workspace-env editor on the Env Vars row. A no-op outside the
-    /// local scope or on any other row.
+    /// global/local Env Vars rows. In the global scope it edits
+    /// [`Settings::env`](crate::domain::settings::Settings::env); in the local
+    /// scope it edits [`LocalSettings::env`](crate::domain::settings::LocalSettings::env).
     pub fn open_env_modal(&mut self) {
         if !self.env_row_active() {
             return;
         }
-        if let Some(local) = &self.local {
-            self.env_modal = Some(EnvModal::new(&local.settings.env));
-        }
+        let env = self
+            .local
+            .as_ref()
+            .map(|local| &local.settings.env)
+            .unwrap_or(&self.settings.env);
+        self.env_modal = Some(EnvModal::new(env));
     }
 
     /// The open workspace-env editor, if any. While present the event loop routes
@@ -432,14 +437,16 @@ impl Config {
         self.env_modal = None;
     }
 
-    /// Apply the env editor's valid bindings into the local settings, then close
-    /// it. A no-op when no editor is open.
+    /// Apply the env editor's valid bindings into the current scope's settings,
+    /// then close it. A no-op when no editor is open.
     pub fn apply_env_modal(&mut self) {
         let Some(modal) = self.env_modal.take() else {
             return;
         };
         if let Some(local) = &mut self.local {
             local.settings.env = modal.bindings();
+        } else {
+            self.settings.env = modal.bindings();
         }
     }
 

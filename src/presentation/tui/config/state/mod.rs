@@ -51,11 +51,14 @@ pub enum Field {
     LocalLlm,
     /// Which local LLM model is used (and installed on selection).
     LocalLlmModel,
+    /// Application-wide environment variables resolved from 1Password
+    /// references and injected into panes launched in any workspace.
+    EnvVars,
 }
 
 impl Field {
     /// The fields shown on the screen, top to bottom.
-    pub const ALL: [Field; 10] = [
+    pub const ALL: [Field; 11] = [
         Field::Theme,
         Field::DefaultWorkspace,
         Field::Notifications,
@@ -66,6 +69,7 @@ impl Field {
         Field::MascotAnimation,
         Field::LocalLlm,
         Field::LocalLlmModel,
+        Field::EnvVars,
     ];
 
     /// The label shown beside the field's value.
@@ -81,6 +85,7 @@ impl Field {
             Field::MascotAnimation => "Mascot Animation",
             Field::LocalLlm => "Local LLM",
             Field::LocalLlmModel => "Local LLM Model",
+            Field::EnvVars => "Env Vars",
         }
     }
 }
@@ -364,9 +369,12 @@ impl Config {
         matches!(self.selected_local_field(), Some(LocalField::SetupCommands))
     }
 
-    /// Whether the focused row is the workspace-local Env Vars action row.
+    /// Whether the focused row is an Env Vars action row. In the global scope it
+    /// edits application-wide env; in the local scope it edits workspace
+    /// overrides.
     pub fn env_row_active(&self) -> bool {
-        matches!(self.selected_local_field(), Some(LocalField::EnvVars))
+        matches!(self.selected_field(), Some(Field::EnvVars))
+            || matches!(self.selected_local_field(), Some(LocalField::EnvVars))
     }
 
     /// Adopt `model` as the one in use (an edit, saved with the rest). Used when
@@ -535,6 +543,7 @@ impl Config {
             }
             Field::LocalLlm => self.settings.local_llm.enabled != self.baseline.local_llm.enabled,
             Field::LocalLlmModel => self.settings.local_llm.model != self.baseline.local_llm.model,
+            Field::EnvVars => self.settings.env != self.baseline.env,
         }
     }
 
@@ -626,6 +635,14 @@ impl Config {
                     self.settings.local_llm.model.clone()
                 } else {
                     format!("{} (未導入)", self.settings.local_llm.model)
+                }
+            }
+            Field::EnvVars => {
+                let count = self.settings.env().count();
+                match count {
+                    0 => "Edit (none)".to_string(),
+                    1 => "Edit (1 var)".to_string(),
+                    n => format!("Edit ({n} vars)"),
                 }
             }
         }
@@ -737,6 +754,7 @@ impl Config {
                     action: match field {
                         Field::LocalLlm => !self.ollama_installed,
                         Field::LocalLlmModel => self.ollama_installed,
+                        Field::EnvVars => true,
                         _ => false,
                     },
                     // The model row is inert until the runtime is installed.

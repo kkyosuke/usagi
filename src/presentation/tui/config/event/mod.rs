@@ -243,7 +243,7 @@ pub fn event_loop(
 /// and the active model row have no value to cycle (both are driven by their
 /// modals), so arrows are a no-op there; otherwise the field's value is cycled.
 fn activate_field(config: &mut Config, forward: bool) -> Option<String> {
-    if config.local_llm_needs_install() || config.model_row_active() {
+    if config.local_llm_needs_install() || config.model_row_active() || config.env_row_active() {
         None
     } else {
         change_field(config, forward)
