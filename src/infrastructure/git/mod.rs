@@ -19,7 +19,7 @@ mod repo;
 mod worktree;
 
 pub use branch::{
-    ahead_behind, branch_namespace_conflict, default_branch, delete_branch, diff_stat,
+    ahead_behind, branch_namespace_conflict, default_branch, delete_branch, diff_stat, diff_text,
     list_branches, local_branches, resolve_base_ref,
 };
 pub use merge::{fetch, merge, MergeStatus};

@@ -22,7 +22,8 @@ use super::super::state::{HomeState, ModalSize, PaneExit, ReturnMode, ROOT_NAME}
 use super::super::terminal::tabs::TabNav;
 use super::super::ui;
 use super::{
-    paint_now, selected_dir, Flow, Wiring, CTRL_CARET, CTRL_E, CTRL_N, CTRL_O, CTRL_P, CTRL_S,
+    paint_now, selected_diff, selected_dir, Flow, Wiring, CTRL_CARET, CTRL_E, CTRL_N, CTRL_O,
+    CTRL_P, CTRL_S,
 };
 
 /// Minimum time the launch loader stays visible before a fresh pane spawn begins.
@@ -147,6 +148,12 @@ pub(super) fn palette_key(
                         &target,
                     ))
                 }
+                // `diff` / `preview diff` opens the right-pane diff view of the
+                // highlighted session: resolve its worktree and shell out to git
+                // (the impure step), then render / store the patch (or log a
+                // failure). The git shell-out lives here; rendering and storing
+                // the result is pure state, so both outcomes are testable.
+                Effect::OpenDiff => state.open_diff_result(selected_diff(state)),
                 // `unite add <name>`: resolve and load the named workspace, then
                 // stack it into the view (refusing a duplicate or an unknown name).
                 Effect::UniteAdd(name) => match (wiring.unite_resolve)(&name) {

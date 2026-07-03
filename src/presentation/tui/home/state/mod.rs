@@ -1431,6 +1431,25 @@ impl HomeState {
         }
     }
 
+    /// Open the right-pane diff view from a load attempt: on success, show the
+    /// rendered patch (titled by the diffed branch → base) in the same scrollable
+    /// right pane the Markdown preview uses; on failure — no session highlighted,
+    /// or the base branch could not be resolved — log the error and open nothing.
+    /// The impure git shell-out is the caller's (the event loop); rendering the
+    /// patch and storing the result is pure, so both outcomes are testable.
+    pub fn open_diff_result(&mut self, loaded: anyhow::Result<(String, String)>) {
+        match loaded {
+            Ok((title, diff)) => {
+                self.overlay = Overlay::Preview(Preview {
+                    title,
+                    lines: crate::presentation::tui::markdown::render_diff(&diff),
+                    scroll: 0,
+                });
+            }
+            Err(e) => self.log_error(format!("diff failed: {e}")),
+        }
+    }
+
     /// The open right-pane preview, if any.
     pub fn preview(&self) -> Option<&Preview> {
         match &self.overlay {

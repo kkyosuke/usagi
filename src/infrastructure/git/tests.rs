@@ -231,6 +231,56 @@ fn diff_stat_measures_against_the_remote_default_and_returns_none_for_an_unknown
 }
 
 #[test]
+fn diff_text_returns_the_patch_against_the_merge_base() {
+    let dir = tempfile::tempdir().unwrap();
+    init_repo(dir.path());
+
+    // Cut feature off main, then advance main past the merge-base to prove the
+    // patch is taken against the merge-base (main's later work must not appear).
+    run(dir.path(), &["branch", "feature"]);
+    std::fs::write(dir.path().join("main-only.txt"), "x\n").unwrap();
+    run(dir.path(), &["add", "."]);
+    run(dir.path(), &["commit", "-q", "-m", "main moves on"]);
+
+    run(dir.path(), &["checkout", "-q", "feature"]);
+    std::fs::write(dir.path().join("a.txt"), "1\n2\n").unwrap();
+    run(dir.path(), &["add", "."]);
+    run(dir.path(), &["commit", "-q", "-m", "feature work"]);
+
+    let patch = diff_text(dir.path(), "main").unwrap();
+    // The feature's own file appears as an addition; main's later file does not.
+    assert!(patch.contains("a.txt"), "patch: {patch}");
+    assert!(patch.contains("+1"), "patch: {patch}");
+    assert!(!patch.contains("main-only.txt"), "patch: {patch}");
+}
+
+#[test]
+fn diff_text_is_empty_for_no_changes_and_none_for_an_unknown_base() {
+    let dir = tempfile::tempdir().unwrap();
+    init_repo(dir.path());
+
+    // On the default branch itself with a clean tree: the base resolves but the
+    // diff is empty — `Some("")`, distinct from a missing base.
+    assert_eq!(diff_text(dir.path(), "main").as_deref(), Some(""));
+
+    // A base that resolves to no ref at all → None (neither `origin/…` nor local).
+    assert_eq!(diff_text(dir.path(), "does-not-exist"), None);
+}
+
+#[test]
+fn diff_text_measures_against_the_remote_default() {
+    let (_tmp, work) = repo_with_remote();
+    // origin/main exists, so the diff is taken against the remote default (the
+    // first branch of `diff_text`'s `or_else`), matching `diff_stat`.
+    run(&work, &["checkout", "-q", "-b", "feature"]);
+    std::fs::write(work.join("n.txt"), "a\n").unwrap();
+    run(&work, &["add", "."]);
+    run(&work, &["commit", "-q", "-m", "one line"]);
+    let patch = diff_text(&work, "main").unwrap();
+    assert!(patch.contains("n.txt"), "patch: {patch}");
+}
+
+#[test]
 fn clone_copies_a_repository() {
     let tmp = tempfile::tempdir().unwrap();
     let src = tmp.path().join("src");

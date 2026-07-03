@@ -305,3 +305,78 @@ fn mixed_inline_styles_combine_in_order() {
         ]
     );
 }
+
+/// The single colour of a diff line's one span (diff lines carry exactly one).
+fn diff_color(line: &MarkdownLine) -> Option<Rgb> {
+    line.spans[0].color
+}
+
+#[test]
+fn render_diff_of_an_empty_patch_shows_a_no_changes_line() {
+    for src in ["", "   ", "\n\n"] {
+        let lines = render_diff(src);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].style, LineStyle::Text);
+        assert!(lines[0].plain_text().contains("No changes"));
+        assert_eq!(diff_color(&lines[0]), None);
+    }
+}
+
+#[test]
+fn render_diff_colours_each_line_by_its_kind() {
+    let patch = concat!(
+        "diff --git a/f b/f\n",
+        "index 111..222 100644\n",
+        "--- a/f\n",
+        "+++ b/f\n",
+        "@@ -1,2 +1,2 @@\n",
+        " context\n",
+        "-gone\n",
+        "+added\n",
+    );
+    let lines = render_diff(patch);
+    // One rendered line per source line (the trailing newline yields a final
+    // empty context line).
+    assert_eq!(lines.len(), 9);
+
+    // Headers (diff/index, and the ---/+++ file markers) are the muted colour.
+    assert_eq!(diff_color(&lines[0]), Some(DIFF_META)); // diff --git
+    assert_eq!(diff_color(&lines[1]), Some(DIFF_META)); // index
+    assert_eq!(diff_color(&lines[2]), Some(DIFF_META)); // --- a/f
+    assert_eq!(diff_color(&lines[3]), Some(DIFF_META)); // +++ b/f
+    assert_eq!(diff_color(&lines[4]), Some(DIFF_HUNK)); // @@ hunk header
+                                                        // A context line keeps the terminal default (no colour), styled as plain text.
+    assert_eq!(lines[5].style, LineStyle::Text);
+    assert_eq!(diff_color(&lines[5]), None);
+    assert_eq!(diff_color(&lines[6]), Some(DIFF_DEL)); // -gone
+    assert_eq!(diff_color(&lines[7]), Some(DIFF_ADD)); // +added
+                                                       // Every coloured line is a Code line so the pane draws its span colour.
+    assert_eq!(lines[6].style, LineStyle::Code);
+    assert_eq!(lines[7].style, LineStyle::Code);
+}
+
+#[test]
+fn render_diff_treats_rename_and_binary_notices_as_headers() {
+    let patch = concat!(
+        "diff --git a/old b/new\n",
+        "similarity index 100%\n",
+        "rename from old\n",
+        "rename to new\n",
+        "Binary files a/img and b/img differ",
+    );
+    for line in render_diff(patch) {
+        assert_eq!(
+            diff_color(&line),
+            Some(DIFF_META),
+            "line: {}",
+            line.plain_text()
+        );
+    }
+}
+
+#[test]
+fn render_diff_caps_a_pathological_patch() {
+    // A patch far longer than the cap renders at most `MAX_RENDER_LINES` lines.
+    let huge = "+x\n".repeat(MAX_RENDER_LINES + 500);
+    assert_eq!(render_diff(&huge).len(), MAX_RENDER_LINES);
+}

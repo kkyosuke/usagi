@@ -198,6 +198,29 @@ fn diff_stat_against(repo: &Path, base: &str) -> Option<(usize, usize)> {
     Some(sum_numstat(&output))
 }
 
+/// The full unified-diff text of what this session changed against `into` — the
+/// same cumulative, merge-base diff [`diff_stat`] measures (committed work plus
+/// the uncommitted working tree on the right-hand side), but the whole patch
+/// rather than just the line counts, for a scrollable diff view.
+///
+/// `into` is resolved against the remote (`origin/<into>`) first, like
+/// [`diff_stat`], falling back to the local branch. Returns `None` only when
+/// neither base ref resolves (e.g. an unknown default, or a repo with no commits);
+/// a session that changed nothing yields `Some("")` (the base resolved, the diff
+/// is empty), so the caller can tell "no changes" apart from "no base".
+pub fn diff_text(repo: &Path, into: &str) -> Option<String> {
+    diff_text_against(repo, &format!("origin/{into}")).or_else(|| diff_text_against(repo, into))
+}
+
+fn diff_text_against(repo: &Path, base: &str) -> Option<String> {
+    // `git diff --merge-base <base>` diffs the working tree against
+    // `$(git merge-base <base> HEAD)`, matching [`diff_stat`]'s range so the
+    // rendered patch and the sidebar `+N -M` badge always describe the same diff.
+    git_capture(repo, &["diff", "--merge-base", base])
+        .ok()
+        .flatten()
+}
+
 /// Sum the added / removed columns of `git diff --numstat` output as
 /// `(added, removed)`. Each line is `<added>\t<removed>\t<path>`; a binary file
 /// reports `-` for both counts, so that row parses as neither and contributes
