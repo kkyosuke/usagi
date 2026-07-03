@@ -44,6 +44,7 @@
 | 端末スクロールバック | `terminal_scrollback_lines` | usize | `2000` | 埋め込み端末ペインが保持するスクロールバック行数。**ライブなペインごとに 1 つ**確保されるため、セッション・ペインを多数開いたときの TUI メモリの主因。深い履歴が欲しければ上げ、メモリを抑えたければ下げる（上限 `50000`） |
 | ローカル LLM 有効化 | `local_llm.enabled` | bool | `false` | 有効にすると `agent` 起動時に [ローカル LLM MCP サーバ](03-commands/04-llm-mcp.md)（`usagi-llm`）を wire し、軽量タスクをローカル LLM に委譲できる |
 | ローカル LLM モデル | `local_llm.model` | string | `qwen2.5-coder:7b` | 委譲先の Ollama モデル名（`qwen2.5-coder:7b` / `:3b` / `:1.5b` / `qwen2.5:7b`） |
+| secret 環境変数 | `env` | map<string, string> | `{}` | 全 workspace の `agent` / `terminal` 起動時に解決・注入する環境変数。キーは環境変数名、値は `op://...` など `op read` が解決できる reference。workspace ローカル設定の `env` で追加・同名上書きできる |
 | 同梱スキル機能 | `skill_features` | map<string, bool> | `{}` | usagi が各セッションに配布する[同梱スキル](04-orchestration.md#スキルの配布)を**機能（feature）単位**で ON/OFF する。キーは機能 ID（現状 `pull-request`：PR 作成・更新・修正の 3 スキルをまとめたもの）、値が有効・無効。既定値（ON）と同じ機能はマップに残さない（未記載 = 既定）。`usagi-session` は usagi 固有の常時 ON スキルで、この設定の対象外 |
 
 > **同梱スキル機能（`skill_features`）**: usagi はビルド時に埋め込んだ Claude Code スキルを、起動する
@@ -84,7 +85,7 @@
 | デフォルトブランチ基点 | `default_branch_source` | enum? | 既定（`remote`） |
 | ローカル LLM 有効化 | `local_llm_enabled` | bool? | グローバル設定（`local_llm.enabled`）にフォールバック |
 | 同梱スキル機能 | `skill_features` | map<string, bool> | 機能 ID 単位で上書き。未記載の機能はグローバル設定にフォールバック |
-| secret 環境変数 | `env` | map<string, string> | 空 map（注入しない） |
+| secret 環境変数 | `env` | map<string, string> | 空 map（グローバル `env` だけを使い、workspace から追加・上書きしない） |
 | セットアップコマンド | `setup_commands` | string[] | 空配列（実行しない） |
 
 > **デフォルトブランチ（`default_branch`）**: `session create` でセッションを作るとき、各 git リポジトリの
@@ -100,13 +101,15 @@
 > いずれもワークスペースのローカル設定（`<workspace>/.usagi/settings.json`）に保存され、ホーム画面の
 > `config` から編集します。
 
-> **secret 環境変数（`env`）**: workspace ごとに `環境変数名 = op://vault/item/field` の map を保存します。
-> `agent` / `terminal` の embedded pane を新規起動するとき、usagi が `op read --no-newline <ref>` で値を解決し、
-> 子プロセス環境へ注入します。例: `{ "GH_TOKEN": "op://Private/GitHub/token" }`。値は secret 本体ではなく
-> 1Password reference だけを保存し、解決した secret は起動コマンド行には載せません。`op` の認証は、既存の
-> `op signin` セッションや外部から渡した `OP_SERVICE_ACCOUNT_TOKEN` など、1Password CLI 側の通常の仕組みに従います。
-> 解決に失敗した変数は注入せず、エラーログに記録して pane 起動は継続します。既に起動済みの pane には反映されないため、
-> 変更後は新しい agent / terminal pane を開き直してください。
+> **secret 環境変数（`env`）**: `環境変数名 = op://vault/item/field` の map を保存します。グローバル設定の
+> `env` は全 workspace に適用され、workspace ローカル設定の `env` はそこへ追加されます。同じ環境変数名が両方に
+> ある場合は workspace 側が優先されます。`agent` / `terminal` の embedded pane を新規起動するとき、usagi が
+> マージ後の reference を `op read --no-newline <ref>` で解決し、子プロセス環境へ注入します。例:
+> `{ "GH_TOKEN": "op://Private/GitHub/token" }`。値は secret 本体ではなく 1Password reference だけを保存し、
+> 解決した secret は起動コマンド行には載せません。`op` の認証は、既存の `op signin` セッションや外部から渡した
+> `OP_SERVICE_ACCOUNT_TOKEN` など、1Password CLI 側の通常の仕組みに従います。解決に失敗した変数は注入せず、
+> エラーログに記録して pane 起動は継続します。既に起動済みの pane には反映されないため、変更後は新しい agent /
+> terminal pane を開き直してください.
 
 > **セットアップコマンド（`setup_commands`）**: `session create` でセッションを作成した直後に、そのセッション root
 > （`<workspace>/.usagi/sessions/<name>`）をカレントディレクトリとして上から順に実行する shell コマンド列です。
@@ -151,9 +154,9 @@
 
 > グローバルスコープで編集できるのは Theme / Default Workspace / Notifications / Restore Panes /
 > Agent CLI / Session Action UI / Terminal Keys / Local LLM 系の各項目（`key_scheme` は
-> 「Session Action UI」と「Local LLM」の間の **Terminal Keys** 行）に加え、固定項目の下に並ぶ**同梱スキル機能**
-> （`PR Skills` など）。ワークスペーススコープで編集できるのは Agent CLI / Notifications / Restore Panes /
-> Default Branch / Branch Source / Setup Commands と、同じく**同梱スキル機能**です。
+> 「Session Action UI」と「Local LLM」の間の **Terminal Keys** 行）/ Env Vars に加え、固定項目の下に並ぶ
+> **同梱スキル機能**（`PR Skills` など）。ワークスペーススコープで編集できるのは Agent CLI / Notifications / Restore Panes /
+> Default Branch / Branch Source / Setup Commands / Env Vars と、同じく**同梱スキル機能**です。
 > `workspace_root` は `settings.json` に保存されますが、設定画面では編集せず、`usagi config --edit` で変更します。
 
 ### CLI
@@ -189,7 +192,7 @@ CLI からも設定を確認・編集できます（[3. コマンドリファレ
 | `key_scheme` | 埋め込み端末（[没入](design/home/02-layout.md#没入attached)）がナビゲーション用に予約するキー方式（`prefix` / `alt`）の選択 |
 | `terminal_scrollback_lines` | 埋め込み端末ペインが保持するスクロールバック行数。ライブなペインごとに確保されるため、多数のセッションを開いたときのメモリ使用量を左右する |
 | `local_llm.enabled` / `local_llm.model` | 有効時、`agent` 起動コマンドに `usagi-llm` MCP サーバを追加し、軽量タスクをローカル LLM に委譲する（[3.4 ローカル LLM MCP サーバ](03-commands/04-llm-mcp.md)） |
-| ローカル設定 `env` | workspace の `agent` / `terminal` 起動時に `op://...` reference を解決し、`GH_TOKEN` などの環境変数として子プロセスへ注入する |
+| `env` / ローカル設定 `env` | workspace の `agent` / `terminal` 起動時に、グローバル `env` と workspace ローカル `env`（同名はローカル優先）をマージして `op://...` reference を解決し、`GH_TOKEN` などの環境変数として子プロセスへ注入する |
 | `skill_features` | `session create` 時に、機能が有効な[同梱スキル](04-orchestration.md#スキルの配布)だけを各 worktree の `.claude/skills/` へ symlink する。無効な機能のスキルは配布しない（`usagi-session` は常時配布） |
 
 > ホーム画面の `config` で `session_action_ui` や `key_scheme` を変更すると、設定画面を閉じて

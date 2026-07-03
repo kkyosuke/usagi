@@ -110,7 +110,8 @@ impl Config {
             // The model is no longer cycled with ←/→: it is chosen from the
             // picker modal (which also pulls an uninstalled choice), so arrows
             // are a no-op here and the event layer opens the modal instead.
-            Field::LocalLlmModel => false,
+            // Env Vars likewise opens a text editor action rather than cycling.
+            Field::LocalLlmModel | Field::EnvVars => false,
         }
     }
 

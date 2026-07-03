@@ -159,6 +159,49 @@ mod tests {
     }
 
     #[test]
+    fn effective_merges_global_and_local_env_with_local_winning() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let storage = Storage::new(tmp.path().join("global"));
+        storage
+            .save_settings(&Settings {
+                env: [
+                    ("GLOBAL_ONLY".to_string(), "op://global/only".to_string()),
+                    ("SHARED".to_string(), "op://global/shared".to_string()),
+                ]
+                .into_iter()
+                .collect(),
+                ..Default::default()
+            })
+            .unwrap();
+        save_local(
+            &repo,
+            &LocalSettings {
+                env: [
+                    ("LOCAL_ONLY".to_string(), "op://local/only".to_string()),
+                    ("SHARED".to_string(), "op://local/shared".to_string()),
+                ]
+                .into_iter()
+                .collect(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let resolved = effective(&storage, &repo).unwrap();
+
+        assert_eq!(
+            resolved.env().collect::<Vec<_>>(),
+            vec![
+                ("GLOBAL_ONLY", "op://global/only"),
+                ("LOCAL_ONLY", "op://local/only"),
+                ("SHARED", "op://local/shared"),
+            ]
+        );
+    }
+
+    #[test]
     fn save_local_persists_to_the_repo_usagi_dir() {
         let tmp = tempfile::tempdir().unwrap();
         let repo = tmp.path();

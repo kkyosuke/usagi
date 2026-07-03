@@ -1,12 +1,13 @@
-//! Resolve workspace-scoped secret environment variables before launching a pane.
+//! Resolve effective secret environment variables before launching a pane.
 //!
-//! Workspaces store only `NAME = op://vault/item/field` references in
+//! usagi stores `NAME = op://vault/item/field` references either globally in
+//! [`Settings`](crate::domain::settings::Settings) or per workspace in
 //! [`LocalSettings`](crate::domain::settings::LocalSettings). This module turns
-//! those references into actual secret values just-in-time for an embedded agent
-//! or terminal process and returns a plain environment map the PTY layer can put
-//! on the child process. Failed reads are reported to the error log and omitted;
-//! a missing or locked 1Password account should not make the pane impossible to
-//! open.
+//! the already-merged effective settings into actual secret values just-in-time
+//! for an embedded agent or terminal process and returns a plain environment map
+//! the PTY layer can put on the child process. Failed reads are reported to the
+//! error log and omitted; a missing or locked 1Password account should not make
+//! the pane impossible to open.
 //!
 //! The pure resolution logic lives here behind the [`SecretResolver`] trait so it
 //! is unit-tested without shelling out; the real `op` CLI subprocess IO that
@@ -18,14 +19,11 @@ pub use op_cli::resolve_workspace_env;
 
 use std::collections::BTreeMap;
 
-use crate::domain::settings::LocalSettings;
+use crate::domain::settings::Settings;
 
 /// Resolve `settings.env` through `resolver`. Public so the behaviour is covered
 /// without shelling out to the real `op` CLI.
-pub fn resolve_env(
-    settings: &LocalSettings,
-    resolver: &dyn SecretResolver,
-) -> BTreeMap<String, String> {
+pub fn resolve_env(settings: &Settings, resolver: &dyn SecretResolver) -> BTreeMap<String, String> {
     let mut env = BTreeMap::new();
     for (name, reference) in settings.env() {
         match resolver.read(reference) {
@@ -77,7 +75,7 @@ mod tests {
 
     #[test]
     fn resolve_env_reads_valid_bindings_and_skips_invalid_or_failed_ones() {
-        let mut settings = LocalSettings::default();
+        let mut settings = Settings::default();
         settings.env.insert(
             "GH_TOKEN".to_string(),
             "op://Private/GitHub/token".to_string(),
