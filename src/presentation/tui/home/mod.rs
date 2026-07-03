@@ -40,6 +40,13 @@ use state::{
 /// sessions to show. `sync` rewrites each session worktree's status; for a
 /// non-git root it fails harmlessly, so we fall back to the saved sessions
 /// (via the usecase, which owns the store access).
+///
+/// Slow — a `git status` fan-out per worktree plus the cross-process state
+/// lock, proportional to the session count — so call it only off the event-loop
+/// thread (the detach refresh and the create / remove workers). Operations that
+/// only edit state.json metadata (rename / note / label / reorder) re-read via
+/// [`workspace_state::recorded_sessions`](crate::usecase::workspace_state::recorded_sessions)
+/// instead, which touches no git.
 fn reload_sessions(root: &Path) -> Option<Vec<SessionRecord>> {
     if let Ok(state) = crate::usecase::workspace_state::sync(root) {
         return Some(state.sessions);
@@ -405,7 +412,10 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
     // its row: `select` holds its name to keep the cursor on it after the rebuild.
     // Like rename / note it stays synchronous (no git work) but still
     // load-modify-saves state.json, so it takes the same op-lock to serialise
-    // against the background create / remove workers.
+    // against the background create / remove workers. The re-read is git-free
+    // (`recorded_sessions`): a label, like a note, touches only state.json, so a
+    // git fan-out on the UI thread would freeze the screen for nothing once many
+    // sessions are open — and `Tab` cycles, so it can fire in quick bursts.
     let label_lock = op_lock.clone();
     let mut set_label = |root: &Path, name: &str, id: Option<&str>| {
         let _guard = lock_session_ops(&label_lock);
@@ -415,7 +425,7 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
                     Some(id) => format!("Set status \"{id}\" for \"{name}\" 🏷"),
                     None => format!("Cleared status for \"{name}\" 🏷"),
                 }),
-                sessions: reload_sessions(root),
+                sessions: crate::usecase::workspace_state::recorded_sessions(root),
                 select: Some(name.to_string()),
                 root_note: None,
             },
