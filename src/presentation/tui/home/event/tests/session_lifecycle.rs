@@ -322,7 +322,7 @@ fn finished_create_does_not_auto_focus_after_another_operation() {
         opened.borrow_mut().push(dir.to_path_buf());
         Ok(PaneExit::Closed)
     };
-    let mut persist: fn(&str) = noop_persist;
+    let mut persist: fn(&crate::domain::history::HistoryEntry) = noop_persist_entry;
     let mut dispatch_create = |_: &Path, name: &str, interaction_epoch: u64| {
         let id = tasks.begin(TaskKind::CreateSession, name);
         *task_id.borrow_mut() = Some(id);
@@ -536,7 +536,7 @@ fn finished_close_does_not_auto_focus_after_another_operation() {
     };
     let term = Term::stdout();
     let monitor = MonitorHandle::detached();
-    let mut persist: fn(&str) = noop_persist;
+    let mut persist: fn(&crate::domain::history::HistoryEntry) = noop_persist_entry;
     let mut dispatch_create = |_: &Path, _: &str, _: u64| {};
     let mut rename = |_: &Path, n: &str, l: &str| noop_rename(n, l);
     let mut set_note_fake = |_: &Path, n: &str, t: &str| noop_set_note(n, t);

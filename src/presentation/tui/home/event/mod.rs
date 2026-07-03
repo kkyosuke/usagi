@@ -154,7 +154,7 @@ pub(super) struct Wiring<'a> {
     /// [`selected_dir`] falls back to when the cursor is on the root row.
     pub workspace_root: &'a Path,
     /// Append a run command to the workspace history (best-effort; tests no-op).
-    pub persist: &'a mut dyn FnMut(&str),
+    pub persist: &'a mut dyn FnMut(&crate::domain::history::HistoryEntry),
     /// Dispatch `session create <name>` to a background worker, in the workspace
     /// rooted at the given path (the cursor's group in 統合/unite mode).
     pub dispatch_create: &'a mut dyn FnMut(&Path, &str, u64),
@@ -1346,11 +1346,15 @@ pub(crate) fn event_loop_compat(
     let mut dummy = HomeState::new("", Vec::new(), None);
     tab_action(&mut dummy, Path::new(""), 0, TabMenuAction::Close);
     let _ = open_external_terminal(Path::new(""));
+    // The compat-shim tests hand in a `FnMut(&str)` persist (they only assert on
+    // the recorded command text); adapt it to the production entry-shaped hook so
+    // the loop's `Wiring` stays uniform.
+    let mut persist_entry = |entry: &crate::domain::history::HistoryEntry| persist(&entry.command);
     let mut wiring = Wiring {
         interaction_epoch: 0,
         watch_sessions: false,
         workspace_root,
-        persist: &mut persist,
+        persist: &mut persist_entry,
         dispatch_create: &mut dispatch_create,
         rename_display: &mut rename_display_w,
         set_note: &mut set_note_w,

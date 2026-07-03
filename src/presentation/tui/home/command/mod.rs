@@ -20,6 +20,7 @@ mod registry;
 pub use registry::CommandRegistry;
 
 use super::state::{LogLine, ModalSize};
+use crate::domain::history::HistoryEntry;
 use crate::domain::issue::Issue;
 use crate::domain::settings::AgentCli;
 
@@ -285,8 +286,9 @@ pub struct CompletionContext<'a> {
 
 /// Everything a command may read while running, beyond its own argument string.
 pub struct CommandContext<'a> {
-    /// Commands entered so far this session (oldest first), for `history`.
-    pub history: &'a [String],
+    /// Commands entered so far (oldest first), with persisted metadata, for
+    /// `history`.
+    pub history: &'a [HistoryEntry],
     /// Every registered command, in display order, for `man`.
     pub commands: &'a [CommandInfo],
     /// The workspace's worktrees, in display order, for `space`.

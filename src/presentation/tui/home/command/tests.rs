@@ -185,12 +185,30 @@ fn history_is_empty_when_nothing_was_entered() {
 
 #[test]
 fn history_numbers_previous_entries() {
-    let entries = vec!["man".to_string(), "doctor".to_string()];
+    let entries = vec![
+        crate::domain::history::HistoryEntry::from("man"),
+        crate::domain::history::HistoryEntry::now("doctor", Some("feature-x".to_string()), false),
+    ];
     let result = registry().dispatch("history", &entries, &[]);
     assert_eq!(result.lines.len(), 2);
-    assert!(result.lines[0].text.contains("1"));
+    assert!(result.lines[0].text.contains("✓"));
     assert!(result.lines[0].text.contains("man"));
     assert!(result.lines[1].text.contains("doctor"));
+    assert!(result.lines[1].text.contains("✗"));
+    assert!(result.lines[1].text.contains("[feature-x]"));
+}
+
+#[test]
+fn history_can_filter_by_session() {
+    let entries = vec![
+        crate::domain::history::HistoryEntry::now("terminal", Some("feature-x".to_string()), true),
+        crate::domain::history::HistoryEntry::now("agent", Some("other".to_string()), true),
+    ];
+    let result = registry().dispatch("history feature-x", &entries, &[]);
+    assert_eq!(result.lines.len(), 1);
+    assert!(result.lines[0].text.contains("terminal"));
+    assert!(!result.lines[0].text.contains("other"));
+    assert!(!result.lines[0].text.contains("[feature-x]"));
 }
 
 #[test]
@@ -689,6 +707,36 @@ fn complete_offers_session_names_for_switch_and_remove() {
     let bare = registry().complete("session remove ", CommandScope::Workspace);
     assert_eq!(bare.input, "session remove --force");
     assert!(bare.candidates.is_empty());
+}
+
+#[test]
+fn complete_offers_session_names_for_history() {
+    // `history [session]` completes its single argument against the workspace's
+    // session names; once the session token is settled, nothing more is offered.
+    let names = ["feature-x", "feature-y", "main-fix"];
+
+    // While the first token is being typed, the session names are offered.
+    let first = registry().complete_with("history fea", CommandScope::Workspace, &names, &names);
+    assert!(first
+        .candidates
+        .iter()
+        .all(|c| c == "feature-x" || c == "feature-y"));
+    assert_eq!(first.input, "history feature-"); // longest common prefix
+
+    // A unique prefix fills straight in.
+    let unique = registry().complete_with("history main", CommandScope::Workspace, &names, &names);
+    assert_eq!(unique.input, "history main-fix");
+    assert!(unique.candidates.is_empty());
+
+    // Once the session token is settled, a second token offers nothing.
+    let after = registry().complete_with(
+        "history feature-x ",
+        CommandScope::Workspace,
+        &names,
+        &names,
+    );
+    assert_eq!(after.input, "history feature-x ");
+    assert!(after.candidates.is_empty());
 }
 
 #[test]
