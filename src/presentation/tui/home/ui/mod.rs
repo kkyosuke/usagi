@@ -271,10 +271,12 @@ pub(super) fn left_pane_session_at(
     }
     // The body's 0-based line under the click; `None` for the chrome above it.
     let line = row.checked_sub(CHROME_TOP_ROWS)?;
-    if line >= body_rows_for(height) {
+    let body_rows = body_rows_for(height);
+    if line >= body_rows {
         return None;
     }
-    panes::sidebar_row_at_line_for_sidebar(state.list(), line, state.sidebar())
+    let scroll = panes::sidebar_scroll(state.list(), state.sidebar() == Sidebar::Full, body_rows);
+    panes::sidebar_row_at_line_for_sidebar(state.list(), line, state.sidebar(), scroll)
 }
 
 /// Rows the tab strip reserves at the top of the right pane in 没入 (Attached).
@@ -662,6 +664,10 @@ fn left_column(
         // session rows in the regular sidebar flow. In 統合(unite) mode this keeps
         // the "+ new" input attached to the workspace that `c` targets, instead
         // of drifting to another workspace or to the whole column's foot.
+        // The list may be scrolled when it outgrows the pane; the inline input's
+        // insert positions are full-column lines, so lift them into the windowed
+        // column `left_pane` returned by subtracting the same scroll offset.
+        let scroll = panes::sidebar_scroll(state.list(), true, body_rows);
         if let Some(create) = state.create() {
             // `left_pane` always draws the persistent "+ new session" affordance at
             // the list foot; while the input is open it *becomes* that input, so
@@ -669,12 +675,13 @@ fn left_column(
             let persistent = group_inline_insert_line(
                 state.list(),
                 state.list().group_count().saturating_sub(1),
-            );
-            if persistent < left.len() {
+            )
+            .checked_sub(scroll);
+            if let Some(persistent) = persistent.filter(|&p| p < left.len()) {
                 left.remove(persistent);
             }
             let rows = switch_create_rows(create.value(), create.cursor(), create.error(), left_w);
-            place_create_rows(&mut left, state.list(), rows);
+            place_create_rows(&mut left, state.list(), rows, scroll);
             left.truncate(body_rows);
         }
         // The inline rename is not spliced here: unlike create (a *new* row), it
@@ -704,7 +711,12 @@ fn splice_rows(column: &mut Vec<String>, line: usize, rows: Vec<String>) {
 /// inserting new rows. The follower's header therefore stays on the same screen
 /// line (no CLS). The last group has no lower workspace to protect, so it keeps
 /// the single-workspace behaviour and appends the input after that group.
-fn place_create_rows(column: &mut Vec<String>, list: &WorktreeList, rows: Vec<String>) {
+fn place_create_rows(
+    column: &mut Vec<String>,
+    list: &WorktreeList,
+    rows: Vec<String>,
+    scroll: usize,
+) {
     // The create row lives at the foot of the last group, so a cursor resting on
     // it targets that group; every other cursor targets its own group.
     let group = if list.create_row_selected() {
@@ -712,7 +724,9 @@ fn place_create_rows(column: &mut Vec<String>, list: &WorktreeList, rows: Vec<St
     } else {
         list.selected_group()
     };
-    let line = group_inline_insert_line(list, group);
+    // Insert positions are full-column lines; the window may be scrolled, so pull
+    // them back into the visible column the caller passed.
+    let line = group_inline_insert_line(list, group).saturating_sub(scroll);
     if group + 1 < list.group_count() {
         replace_rows(column, line, rows);
     } else {

@@ -1122,7 +1122,7 @@ fn sidebar_row_at_line_walks_a_single_group_layout() {
         worktree(Some("main"), true, BranchStatus::Pushed),
         worktree(Some("feature"), false, BranchStatus::Local),
     ]);
-    let at = |line| sidebar_row_at_line_for_sidebar(&list, line, Sidebar::Full);
+    let at = |line| sidebar_row_at_line_for_sidebar(&list, line, Sidebar::Full, 0);
     assert_eq!(at(0), Some(0)); // root id
     assert_eq!(at(1), Some(0)); // root detail
     assert_eq!(at(2), None); // divider
@@ -1148,7 +1148,7 @@ fn sidebar_row_at_line_walks_a_unite_layout_with_headers() {
             vec![worktree(Some("b1"), false, BranchStatus::Local)],
         ),
     ]);
-    let at = |line| sidebar_row_at_line_for_sidebar(&list, line, Sidebar::Full);
+    let at = |line| sidebar_row_at_line_for_sidebar(&list, line, Sidebar::Full, 0);
     assert_eq!(at(0), None); // wsA header
     assert_eq!(at(1), Some(0)); // wsA root
     assert_eq!(at(3), None); // wsA divider
@@ -1175,7 +1175,7 @@ fn sidebar_row_at_line_walks_a_unite_rail_layout_with_gaps() {
             vec![worktree(Some("b1"), false, BranchStatus::Local)],
         ),
     ]);
-    let at = |line| sidebar_row_at_line_for_sidebar(&list, line, Sidebar::Rail);
+    let at = |line| sidebar_row_at_line_for_sidebar(&list, line, Sidebar::Rail, 0);
     assert_eq!(at(0), Some(0)); // wsA root
     assert_eq!(at(2), None); // wsA divider
     assert_eq!(at(3), Some(1)); // a1
@@ -1197,7 +1197,7 @@ fn sidebar_row_at_line_skips_an_empty_workspaces_message() {
             vec![worktree(Some("b1"), false, BranchStatus::Local)],
         ),
     ]);
-    let at = |line| sidebar_row_at_line_for_sidebar(&list, line, Sidebar::Full);
+    let at = |line| sidebar_row_at_line_for_sidebar(&list, line, Sidebar::Full, 0);
     // wsA: 0 hdr, 1-2 root, 3 div, 4 empty message, 5-6 gap.
     assert_eq!(at(1), Some(0)); // wsA root
     assert_eq!(at(4), None); // empty-workspace message
@@ -2273,12 +2273,12 @@ fn sidebar_row_at_line_maps_the_create_row_after_the_sessions() {
     let list = list_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
     assert_eq!(list.create_row(), 2);
     assert_eq!(
-        sidebar_row_at_line_for_sidebar(&list, 6, Sidebar::Full),
+        sidebar_row_at_line_for_sidebar(&list, 6, Sidebar::Full, 0),
         Some(2)
     );
     // The rail keeps the same row layout, so the create row lands on the same line.
     assert_eq!(
-        sidebar_row_at_line_for_sidebar(&list, 6, Sidebar::Rail),
+        sidebar_row_at_line_for_sidebar(&list, 6, Sidebar::Rail, 0),
         Some(2)
     );
 }
@@ -2292,4 +2292,168 @@ fn switch_preview_prompts_to_create_when_the_create_row_is_selected() {
     let text = console::strip_ansi_codes(&lines.join("\n")).into_owned();
     assert!(text.contains("+ new session"));
     assert!(text.contains("Type a name"));
+}
+
+/// A single workspace with `n` sessions named `s0`..`s{n-1}`, for the overflow
+/// scroll tests. `s0` is the primary.
+fn sessions(n: usize) -> Vec<WorktreeState> {
+    (0..n)
+        .map(|i| worktree(Some(&format!("s{i}")), i == 0, BranchStatus::Local))
+        .collect()
+}
+
+fn full_pane(list: &WorktreeList, rows: usize) -> Vec<String> {
+    left_pane(
+        list,
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashMap::new(),
+        &crate::domain::settings::SessionLabelMaster::default(),
+        30,
+        rows,
+        false,
+        Sidebar::Full,
+        Utc::now(),
+        None,
+    )
+}
+
+#[test]
+fn sidebar_scroll_is_zero_while_the_list_fits_the_pane() {
+    let list = list_with(sessions(6));
+    // Fits (huge viewport) or a zero-height pane: nothing to scroll.
+    assert_eq!(sidebar_scroll(&list, true, 100), 0);
+    assert_eq!(sidebar_scroll(&list, true, 0), 0);
+    // The default cursor rests on the root row at the top, so even an overflowing
+    // list stays pinned to the top.
+    assert_eq!(sidebar_scroll(&list, true, 9), 0);
+}
+
+#[test]
+fn sidebar_scroll_reveals_a_selected_row_below_the_fold() {
+    let mut list = list_with(sessions(6));
+    // Root(2) + divider(1) + 6×3 sessions + create(1) = 22 lines; pane shows 9.
+    // Selecting the last session (flat row 6) scrolls just enough to seat its
+    // three-row block at the foot: its end line (21) minus the 9-row viewport.
+    list.focus_index(6);
+    assert_eq!(sidebar_scroll(&list, true, 9), 12);
+    // The create row is the very last line; scrolling for it clamps to the maximum
+    // (total 22 − viewport 9 = 13) rather than running past the list's foot.
+    list.focus_index(7);
+    assert_eq!(sidebar_scroll(&list, true, 9), 13);
+}
+
+#[test]
+fn left_pane_scrolls_the_selected_session_into_view() {
+    let mut list = list_with(sessions(6));
+    // Cursor on the root row: the window stays pinned to the top, so the first
+    // sessions show and the last is off screen.
+    let top = full_pane(&list, 9);
+    assert_eq!(top.len(), 9);
+    let top_txt = stripped(&top);
+    assert!(top_txt.contains("s0") && top_txt.contains("s1"));
+    assert!(!top_txt.contains("s5"));
+    // Selecting the last session scrolls it into view and pushes the first off the
+    // top — the whole off-window prefix is skipped, not merely truncated.
+    list.focus_index(6);
+    let scrolled = full_pane(&list, 9);
+    assert_eq!(scrolled.len(), 9);
+    let scrolled_txt = stripped(&scrolled);
+    assert!(scrolled_txt.contains("s5"));
+    assert!(!scrolled_txt.contains("s0"));
+}
+
+#[test]
+fn left_pane_keeps_the_create_row_visible_when_selected() {
+    let mut list = list_with(sessions(6));
+    list.focus_index(list.create_row());
+    let lines = full_pane(&list, 9);
+    assert_eq!(lines.len(), 9);
+    let text = stripped(&lines);
+    assert!(text.contains("+ new session"));
+    assert!(!text.contains("s0"));
+}
+
+#[test]
+fn rail_pane_scrolls_the_selected_session_into_view() {
+    let mut list = list_with(sessions(6));
+    list.focus_index(6);
+    let scrolled = left_pane(
+        &list,
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashMap::new(),
+        &crate::domain::settings::SessionLabelMaster::default(),
+        8,
+        9,
+        false,
+        Sidebar::Rail,
+        Utc::now(),
+        None,
+    );
+    assert_eq!(scrolled.len(), 9);
+    // The rail carries no branch text, but the selected entry's active gutter bar
+    // still rides the scrolled window: the top rows (root + first sessions) are
+    // gone, so the window is a pure slice of the tail.
+    let rail_scroll = sidebar_scroll(&list, false, 9);
+    assert!(rail_scroll > 0);
+}
+
+#[test]
+fn sidebar_row_click_maps_through_the_scroll_offset() {
+    let mut list = list_with(sessions(6));
+    list.focus_index(6);
+    let scroll = sidebar_scroll(&list, true, 9);
+    assert_eq!(scroll, 12);
+    // Screen line 6 sits at full-column line 18 — the last session's identity row
+    // (flat row 6) — so a click there selects it, not whatever the un-scrolled
+    // layout would have had at line 6.
+    assert_eq!(
+        sidebar_row_at_line_for_sidebar(&list, 6, Sidebar::Full, scroll),
+        Some(6)
+    );
+}
+
+#[test]
+fn sidebar_scroll_walks_past_an_empty_workspace_group() {
+    // Unite mode with an empty leading workspace forces the span walk through the
+    // empty-workspace message row before it reaches the selected session in the
+    // second group.
+    let mut list = WorktreeList::from_groups(vec![
+        WorkspaceGroup::new("wsA", Vec::new()),
+        WorkspaceGroup::new(
+            "wsB",
+            vec![
+                worktree(Some("b0"), true, BranchStatus::Pushed),
+                worktree(Some("b1"), false, BranchStatus::Local),
+            ],
+        ),
+    ]);
+    // Flat rows: wsA root 0, wsB root 1, b0 2, b1 3. Select b1.
+    list.focus_index(3);
+    // Group A block (header + root 2 + divider + empty 1 = 5) then group B (gap 2 +
+    // header 1 + root 2 + divider 1 + 2×3 = 12) = 17, plus the create row = 18.
+    // b1's block ends at line 17, so a 9-row pane scrolls by 8.
+    assert_eq!(sidebar_scroll(&list, true, 9), 8);
+}
+
+#[test]
+fn pr_popup_hides_when_the_pinned_session_scrolls_off_the_top() {
+    let mut first = worktree_with_pr(412);
+    first.primary = true;
+    let mut worktrees = vec![first];
+    worktrees.extend(sessions(5).into_iter().skip(1)); // s1..s5, plain
+    let mut state = state_with(worktrees);
+    state.set_pr_popup(Some(0));
+    // Height 14 → a 9-row body. With the cursor at the top, the PR session's row is
+    // on screen, so its popup floats.
+    assert!(pr_popup_placement(&state, 14, 120).is_some());
+    // Selecting the last session scrolls the PR session off the top; its badge is no
+    // longer drawn, so nothing is pinned over an unrelated row.
+    state.focus_session(state.list().create_row());
+    assert!(pr_popup_placement(&state, 14, 120).is_none());
 }
