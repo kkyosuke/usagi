@@ -3,18 +3,20 @@
 //! Where [`super::issue`] exposes a repository's issues and [`super::llm`]
 //! exposes a local model, this server lets an agent drive usagi's own session
 //! lifecycle: create a parallel worktree session, list the existing ones, hand a
-//! prompt to the agent of a specific session, list the pull requests discovered
-//! for a session, and remove a session it no longer needs. This turns a
+//! launch-time prompt or a live prompt to the agent of a specific session, list
+//! the pull requests discovered for a session, and remove a session it no longer
+//! needs. This turns a
 //! coordinating agent into an orchestrator that can spin up isolated worktrees,
 //! delegate work into them, and tear them down again.
 //!
 //! Session creation and listing delegate to [`crate::usecase::session`], so the
 //! MCP surface stays a thin protocol adapter over the same logic the CLI and
-//! TUI use. The two operations that need a real agent or real filesystem —
-//! handing a prompt to a session's agent, and removing a session (which discards
-//! that agent's conversation) — are abstracted behind [`AgentBackend`] so the
+//! TUI use. The operations that need a real agent or real filesystem — handing a
+//! prompt to a session's agent, live-sending a prompt, and removing a session
+//! (which discards that agent's conversation) — are abstracted behind
+//! [`AgentBackend`] so the
 //! dispatch logic is fully unit-tested without touching the filesystem; the
-//! production backend (which queues the prompt for the session's worktree and
+//! production backend (which queues the prompts for the session's worktree and
 //! resolves the configured agent for removal) lives in the thin stdio entry
 //! point (`presentation/cli/mcp.rs`). The JSON-RPC framing is shared with the
 //! other servers and lives in the parent [`super`] module.
@@ -31,10 +33,11 @@ use crate::usecase::session;
 /// Names of the session tools this server exposes. The unified `usagi` server
 /// ([`super::usagi`]) uses this to route `tools/call` for these names to the
 /// embedded session server.
-pub const TOOL_NAMES: [&str; 7] = [
+pub const TOOL_NAMES: [&str; 8] = [
     "session_create",
     "session_list",
     "session_prompt",
+    "session_send",
     "session_pr",
     "session_remove",
     "session_note_get",
@@ -42,8 +45,9 @@ pub const TOOL_NAMES: [&str; 7] = [
 ];
 
 /// Drives the parts of session orchestration that touch a real agent or a real
-/// filesystem — handing a session's agent a prompt, and removing a session
-/// (which discards that agent's conversation). Abstracted so the server's
+/// filesystem — handing a session's agent a launch-time prompt, live-sending a
+/// prompt, and removing a session (which discards that agent's conversation).
+/// Abstracted so the server's
 /// protocol handling can be tested with a fake backend that never touches the
 /// filesystem or a real agent.
 pub trait AgentBackend {
@@ -52,6 +56,12 @@ pub trait AgentBackend {
     /// confirmation message (`Ok`) or an error message to surface to the agent
     /// (`Err`).
     fn prompt(&self, worktree: &Path, prompt: &str) -> Result<String, String>;
+
+    /// Deliver `prompt` to the agent that is already running in the session
+    /// rooted at `worktree`. The production backend appends it to a live queue
+    /// that the running TUI drains into the existing agent pane; if no such pane
+    /// is open, it waits there until one is.
+    fn send(&self, worktree: &Path, prompt: &str) -> Result<String, String>;
 
     /// Remove session `name` under `workspace_root`, resolving the workspace's
     /// configured agent CLI so the session's persisted conversation is discarded
@@ -75,13 +85,14 @@ pub struct SessionMcpServer {
     /// The name of the session the MCP process is running inside, if any.
     /// `None` when the server runs from the workspace root (not inside a session).
     current_session: Option<String>,
-    /// Delegate that actually drives a session's agent for `session_prompt`.
+    /// Delegate that actually drives a session's agent for `session_prompt` /
+    /// `session_send`.
     backend: Box<dyn AgentBackend>,
 }
 
 impl SessionMcpServer {
     /// Build a server operating on the workspace at `workspace_root`, delegating
-    /// `session_prompt` to `backend`. The `worktree` is the agent's current
+    /// `session_prompt` / `session_send` to `backend`. The `worktree` is the agent's current
     /// working directory; when it sits under `.usagi/sessions/<name>/` the server
     /// derives the current session name from it, enabling the note self-access
     /// tools (`session_note_get` / `session_note_update`).
@@ -129,12 +140,14 @@ impl SessionMcpServer {
 
     fn tool_prompt(&self, arguments: Value) -> Result<String, String> {
         let args: PromptArgs = parse_args(arguments)?;
-        let sessions = session::list(&self.workspace_root).map_err(|e| e.to_string())?;
-        let target = sessions
-            .iter()
-            .find(|s| s.name == args.name)
-            .ok_or_else(|| format!("no such session: \"{}\"", args.name))?;
+        let target = self.find_session(&args.name)?;
         self.backend.prompt(&target.root, &args.prompt)
+    }
+
+    fn tool_send(&self, arguments: Value) -> Result<String, String> {
+        let args: SendArgs = parse_args(arguments)?;
+        let target = self.find_session(&args.name)?;
+        self.backend.send(&target.root, &args.prompt)
     }
 
     fn tool_pr(&self, arguments: Value) -> Result<String, String> {
@@ -185,6 +198,14 @@ impl SessionMcpServer {
             "note": stored,
         })))
     }
+
+    fn find_session(&self, name: &str) -> Result<SessionRecord, String> {
+        let sessions = session::list(&self.workspace_root).map_err(|e| e.to_string())?;
+        sessions
+            .into_iter()
+            .find(|s| s.name == name)
+            .ok_or_else(|| format!("no such session: \"{}\"", name))
+    }
 }
 
 impl McpService for SessionMcpServer {
@@ -201,6 +222,7 @@ impl McpService for SessionMcpServer {
             "session_create" => self.tool_create(arguments),
             "session_list" => self.tool_list(),
             "session_prompt" => self.tool_prompt(arguments),
+            "session_send" => self.tool_send(arguments),
             "session_pr" => self.tool_pr(arguments),
             "session_remove" => self.tool_remove(arguments),
             "session_note_get" => self.tool_note_get(),
@@ -219,6 +241,12 @@ struct CreateArgs {
 
 #[derive(Deserialize)]
 struct PromptArgs {
+    name: String,
+    prompt: String,
+}
+
+#[derive(Deserialize)]
+struct SendArgs {
     name: String,
     prompt: String,
 }
@@ -323,6 +351,23 @@ fn session_tool_schemas() -> Value {
                 "properties": {
                     "name": { "type": "string", "description": "Target session name" },
                     "prompt": { "type": "string", "description": "The task or question for the session's agent" }
+                },
+                "required": ["name", "prompt"]
+            }
+        },
+        {
+            "name": "session_send",
+            "description": "Send a prompt to the agent pane that is already \
+                running for a specific session. The prompt is appended to a live \
+                queue that the running usagi TUI drains into the existing agent \
+                pane as if the user pasted it and pressed Enter. It does not \
+                start a session or return the agent's response; if no live agent \
+                pane is open, the prompt waits until one is available.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Target session name" },
+                    "prompt": { "type": "string", "description": "The task or question to send to the live agent" }
                 },
                 "required": ["name", "prompt"]
             }
@@ -456,6 +501,13 @@ mod tests {
             self.result.clone()
         }
 
+        fn send(&self, worktree: &Path, prompt: &str) -> Result<String, String> {
+            self.calls
+                .borrow_mut()
+                .push((worktree.to_path_buf(), prompt.to_string()));
+            self.result.clone()
+        }
+
         fn remove(
             &self,
             workspace_root: &Path,
@@ -557,6 +609,7 @@ mod tests {
                 "session_create",
                 "session_list",
                 "session_prompt",
+                "session_send",
                 "session_pr",
                 "session_remove",
                 "session_note_get",
@@ -667,6 +720,62 @@ mod tests {
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].0, root.path().join(".usagi/sessions/work"));
         assert_eq!(calls[0].1, "add a test");
+    }
+
+    #[test]
+    fn send_resolves_the_session_and_forwards_to_the_backend() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        let backend = FakeBackend::ok("sent");
+        let calls = backend.calls.clone(); // inspect after the backend is moved in
+        let server = server_at(root.path(), backend);
+        call(&server, "session_create", json!({"name":"work"}));
+
+        let result = call(
+            &server,
+            "session_send",
+            json!({"name":"work","prompt":"continue here"}),
+        );
+        assert_eq!(result["isError"], false);
+        assert_eq!(result["content"][0]["text"], "sent");
+
+        // The backend was invoked once with the session's worktree root and the
+        // prompt text verbatim.
+        let calls = calls.borrow();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, root.path().join(".usagi/sessions/work"));
+        assert_eq!(calls[0].1, "continue here");
+    }
+
+    #[test]
+    fn send_for_an_unknown_session_is_a_tool_error() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        let server = server_at(root.path(), FakeBackend::ok("x"));
+        let result = call(
+            &server,
+            "session_send",
+            json!({"name":"ghost","prompt":"hi"}),
+        );
+        assert_eq!(result["isError"], true);
+        assert!(result["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("no such session"));
+    }
+
+    #[test]
+    fn send_surfaces_backend_errors_as_tool_errors() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        let server = server_at(root.path(), FakeBackend::err("agent not reachable"));
+        call(&server, "session_create", json!({"name":"w"}));
+        let result = call(&server, "session_send", json!({"name":"w","prompt":"hi"}));
+        assert_eq!(result["isError"], true);
+        assert!(result["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("agent not reachable"));
     }
 
     #[test]
@@ -850,6 +959,9 @@ mod tests {
             .contains("invalid arguments"));
         // session_prompt requires both name and prompt.
         let result = call(&server, "session_prompt", json!({"name":"w"}));
+        assert_eq!(result["isError"], true);
+        // session_send requires both name and prompt.
+        let result = call(&server, "session_send", json!({"name":"w"}));
         assert_eq!(result["isError"], true);
         // session_pr requires a name.
         let result = call(&server, "session_pr", json!({}));

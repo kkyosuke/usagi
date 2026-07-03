@@ -54,13 +54,13 @@ pub fn sync(cwd: &Path) -> Result<WorkspaceState> {
     let _lock = store.lock()?;
     let mut state = store.load()?.unwrap_or_default();
     for session in &mut state.sessions {
-        // The PRs a session's agent printed are harvested out-of-band into the
-        // PR-link store, keyed by the session root (the dir the agent runs in). Read
-        // them once per session and carry them on the session's first worktree, so
-        // the sidebar's per-session aggregate ([`session_row`]) surfaces them; the
-        // git refresh above never sets a PR, so this both shows them and persists
-        // them into state.json — the badges then survive a restart even though the
-        // agent only prints each URL once.
+        // The PRs printed in a session's live terminal panes are harvested
+        // out-of-band into the PR-link store, keyed by the session root (the dir
+        // the agent/shell runs in). Read them once per session and carry them on
+        // the session's first worktree, so the sidebar's per-session aggregate
+        // ([`session_row`]) surfaces them; the git refresh above never sets a PR,
+        // so this both shows them and persists them into state.json — the badges
+        // then survive a restart even though a command may print each URL once.
         //
         // [`session_row`]: crate::presentation::tui::home::state
         let prs = pr_link_store::get(&session.root);
@@ -204,7 +204,7 @@ pub fn inspect_worktree(path: &Path, default: &str) -> WorktreeState {
         status: classification,
         diff,
         ahead_behind,
-        // The git inspection never sets PRs — they are harvested from the agent's
+        // The git inspection never sets PRs — they are harvested from live
         // terminal output and folded in by [`sync`] from the PR-link store.
         pr: Vec::new(),
         updated_at: Utc::now(),

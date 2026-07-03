@@ -62,6 +62,10 @@ mod tests {
             Ok("queued".to_string())
         }
 
+        fn send(&self, _worktree: &Path, _prompt: &str) -> Result<String, String> {
+            Ok("sent".to_string())
+        }
+
         fn remove(
             &self,
             _workspace_root: &Path,
@@ -117,6 +121,16 @@ mod tests {
         assert_eq!(
             FakeBackend.prompt(Path::new("/tmp/wt"), "do it").unwrap(),
             "queued"
+        );
+    }
+
+    #[test]
+    fn fake_backend_send_returns_its_confirmation() {
+        // Like `session_prompt`, `session_send` only reaches the backend for an
+        // existing session, so cover the send delegate directly.
+        assert_eq!(
+            FakeBackend.send(Path::new("/tmp/wt"), "do it now").unwrap(),
+            "sent"
         );
     }
 }

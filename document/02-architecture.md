@@ -101,9 +101,10 @@ src/
 │   ├── resource.rs             # sysinfo による実プロセスの CPU/メモリ計測（ResourceSampler トレイト + SysinfoSampler。集計は domain/resource）
 │   ├── session_monitor.rs      # 入力待ち判定の純粋ロジック（phase 優先・ベル基準値・待ち集合・アタッチ）
 │   ├── skills.rs               # バイナリ同梱スキル（assets/skills/）を ~/.usagi/skills/ へ展開（materialize）し worktree の .claude/skills/<name> をスキルごとに symlink（link、プロジェクト独自スキルと共存）。配布の仕組みは 04-orchestration が正本
-│   ├── worktree_keyed_store.rs # worktree → ファイル名（canonical path のハッシュ）導出の正本。agent_state_store / agent_prompt_store / pr_link_store が共用
+│   ├── worktree_keyed_store.rs # worktree → ファイル名（canonical path のハッシュ）導出の正本。agent_state_store / agent_prompt_store / agent_live_prompt_store / pr_link_store が共用
 │   ├── agent_state_store.rs    # worktree 別の Agent phase の記録/読み出し・フック JSON のパース（~/.usagi/agent-state/。遷移ポリシーは usecase/agent_phase）
 │   ├── agent_prompt_store.rs   # worktree 別に session_prompt のプロンプトをキュー/取り出し（~/.usagi/agent-prompts/）
+│   ├── agent_live_prompt_store.rs # worktree 別に session_send の live プロンプトを追記/取り出し（~/.usagi/agent-live-prompts/）
 │   ├── pr_link_store.rs        # worktree 別に検出した PR 群（PrLink のリスト）を URL 単位で重複排除しつつ蓄積/読み出し（~/.usagi/pr-links/）。sync が state.json の pr へ畳み込む
 │   ├── agent/                  # Agent port のアダプタ（Claude は MCP・システムプロンプト・フックを serde_json で組み立てて launch コマンド生成 / Codex は MCP・システムプロンプト(developer_instructions)・フックを -c 設定上書きで注入し resume/forget も対応（Codex 互換の codex-fugu は同じ CodexAgent を起動プログラム名と rollout 保存先だけ変えて再利用）/ Gemini はインライン注入不可のため MCP/フック/system prompt は組み込まず resume(-r latest)/初期プロンプト(-i)/forget のみ配線）・session_system_prompt 共有・agent_for
 │   ├── issue_store.rs          # <repo>/.usagi/issues/ の markdown + index.json（IssueStore）
