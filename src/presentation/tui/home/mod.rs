@@ -735,9 +735,10 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
             };
             let initial = Some(spawn_command.as_str());
             let later_initial = Some(plain_command.as_str());
-            // Resolve workspace-scoped secret env only when this request will
-            // actually spawn a fresh shell. Re-attaching to an existing pane
-            // keeps the environment it was originally launched with.
+            // Resolve effective secret env (global plus workspace-local) only
+            // when this request will actually spawn a fresh shell. Re-attaching
+            // to an existing pane keeps the environment it was originally
+            // launched with.
             let will_spawn = (new_pane && !reuse_agent) || (!new_pane && !pool.has_live_pane(dir));
             let pane_env = if will_spawn {
                 crate::infrastructure::env_resolver::resolve_workspace_env(

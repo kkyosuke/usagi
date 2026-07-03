@@ -25,11 +25,11 @@ const MAX_OP_STDERR_BYTES: usize = 4 * 1024;
 /// Resolve the secret environment configured for `workspace_root`.
 ///
 /// The returned map contains only variables whose name/reference pass
-/// [`LocalSettings::env`](crate::domain::settings::LocalSettings::env) and whose
+/// [`Settings::env`](crate::domain::settings::Settings::env) and whose
 /// `op read --no-newline` call succeeds. Errors are logged with the variable name
 /// and reference but never the resolved secret.
 pub fn resolve_workspace_env(workspace_root: &Path) -> BTreeMap<String, String> {
-    let settings = crate::usecase::settings::load_local(workspace_root).unwrap_or_default();
+    let settings = crate::usecase::settings::effective_for(workspace_root).unwrap_or_default();
     resolve_env(&settings, &OpCliResolver)
 }
 

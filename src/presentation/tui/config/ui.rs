@@ -467,15 +467,19 @@ mod tests {
         assert!(lines[9].contains("Local LLM Model"));
         assert!(lines[9].contains('—'));
         assert!(!lines[9].contains('<'));
+        // Global Env Vars is an action row too: plain edit summary, no chevrons.
+        assert!(lines[10].contains("Env Vars"));
+        assert!(lines[10].contains("Edit (none)"));
+        assert!(!lines[10].contains('<'));
         // The shipped-skill feature rows follow the fixed fields: a chooser
         // showing the feature's on/off state (on by default).
-        assert!(lines[10].contains("PR Skills"));
-        assert!(lines[10].contains("On"));
+        assert!(lines[11].contains("PR Skills"));
+        assert!(lines[11].contains("On"));
         // Every other field is a chooser, so chevrons appear on those rows...
         assert!(lines
             .iter()
             .enumerate()
-            .filter(|(i, _)| *i != 8 && *i != 9)
+            .filter(|(i, _)| *i != 8 && *i != 9 && *i != 10)
             .all(|(_, l)| l.contains('<') && l.contains('>')));
         // ...but only the focused (first) row carries the cursor.
         assert!(has_cursor(&lines[0]));

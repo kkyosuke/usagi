@@ -165,7 +165,8 @@ fn render_settings(settings: &Settings) -> Vec<String> {
         format!("local_llm_enabled      {}", settings.local_llm.enabled),
         format!("local_llm_model        {}", settings.local_llm.model),
         format!("op_mcp_enabled        {}", settings.op_mcp.enabled),
-        "workspace_env         (local setting)".to_string(),
+        format!("env                   {} vars", settings.env().count()),
+        "workspace_env         (workspace override/addition)".to_string(),
     ];
     // One line per toggleable shipped-skill feature, keyed by its stable id.
     for feature in SkillFeature::ALL {
@@ -268,6 +269,12 @@ mod tests {
                 model: "qwen2.5-coder:3b".to_string(),
             },
             op_mcp: crate::domain::settings::OpMcp { enabled: true },
+            env: [(
+                "GH_TOKEN".to_string(),
+                "op://Private/GitHub/token".to_string(),
+            )]
+            .into_iter()
+            .collect(),
             // The PR-skills feature pinned off, to exercise the skill line.
             skill_features: [("pull-request".to_string(), false)].into_iter().collect(),
         };
@@ -286,10 +293,11 @@ mod tests {
         assert!(lines[11].contains("true"));
         assert!(lines[12].contains("qwen2.5-coder:3b"));
         assert!(lines[13].contains("true"));
-        assert!(lines[14].contains("local setting"));
+        assert!(lines[14].contains("1 vars"));
+        assert!(lines[15].contains("workspace override"));
         // The shipped-skill feature line shows its id and effective state.
-        assert!(lines[15].contains("pull-request"));
-        assert!(lines[15].contains("false"));
+        assert!(lines[16].contains("pull-request"));
+        assert!(lines[16].contains("false"));
     }
 
     #[test]
@@ -298,7 +306,8 @@ mod tests {
         assert!(lines[1].contains("(none)"));
         assert!(lines[2].contains("(none)"));
         assert!(lines[13].contains("false"));
-        assert!(lines[14].contains("local setting"));
+        assert!(lines[14].contains("0 vars"));
+        assert!(lines[15].contains("workspace override"));
     }
 
     #[test]

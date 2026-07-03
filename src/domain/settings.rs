@@ -402,6 +402,15 @@ pub struct Settings {
     /// dropped by [`sanitized`](Self::sanitized).
     #[serde(default)]
     pub skill_features: BTreeMap<String, bool>,
+    /// Application-wide secret environment variables resolved from 1Password
+    /// references when launching an embedded agent or terminal, keyed by the
+    /// environment variable name (for example `GH_TOKEN`) with an `op://...`
+    /// reference as the value. These apply to every workspace; a project can add
+    /// to or override them through [`LocalSettings::env`] (a workspace binding
+    /// for the same name wins). Only the reference is stored — never a resolved
+    /// secret. Read the valid bindings through [`env`](Self::env).
+    #[serde(default)]
+    pub env: SecretEnv,
 }
 
 impl Default for Settings {
@@ -426,6 +435,9 @@ impl Default for Settings {
             // No overrides recorded: every shipped-skill feature uses its own
             // default (see [`SkillFeature::default_enabled`]).
             skill_features: BTreeMap::new(),
+            // No application-wide secret env is injected unless explicitly
+            // configured.
+            env: SecretEnv::new(),
         }
     }
 }
@@ -470,6 +482,14 @@ impl Settings {
             .copied()
             .unwrap_or_else(|| feature.default_enabled())
     }
+
+    /// The non-empty, valid application-wide environment bindings to resolve
+    /// and inject when a process is launched. Blank names/references are
+    /// ignored, as are names that are not portable environment identifiers; the
+    /// remaining pairs keep the BTreeMap's stable sorted order.
+    pub fn env(&self) -> impl Iterator<Item = (&str, &str)> {
+        valid_env_bindings(&self.env)
+    }
 }
 
 impl Settings {
@@ -496,6 +516,12 @@ impl Settings {
         // value. The merged map is still read through `skill_feature_enabled`.
         for (id, enabled) in &local.skill_features {
             self.skill_features.insert(id.clone(), *enabled);
+        }
+        // Workspace env augments the global map, overriding same-named
+        // application-wide bindings so a project can pin a token/ref that is
+        // specific to that repository while inheriting the rest.
+        for (name, reference) in local.env() {
+            self.env.insert(name.to_string(), reference.to_string());
         }
         self
     }
@@ -615,15 +641,7 @@ impl LocalSettings {
     /// ignored, as are names that are not portable environment identifiers; the
     /// remaining pairs keep the BTreeMap's stable sorted order.
     pub fn env(&self) -> impl Iterator<Item = (&str, &str)> {
-        self.env.iter().filter_map(|(name, reference)| {
-            let name = name.trim();
-            let reference = reference.trim();
-            if is_valid_env_name(name) && !reference.is_empty() {
-                Some((name, reference))
-            } else {
-                None
-            }
-        })
+        valid_env_bindings(&self.env)
     }
 
     /// The non-empty setup command lines to run for newly-created sessions in
@@ -636,6 +654,18 @@ impl LocalSettings {
             .map(String::as_str)
             .filter(|command| !command.trim().is_empty())
     }
+}
+
+fn valid_env_bindings(env: &SecretEnv) -> impl Iterator<Item = (&str, &str)> {
+    env.iter().filter_map(|(name, reference)| {
+        let name = name.trim();
+        let reference = reference.trim();
+        if is_valid_env_name(name) && !reference.is_empty() {
+            Some((name, reference))
+        } else {
+            None
+        }
+    })
 }
 
 /// Whether `name` is a portable environment variable name. Keep this strict so
@@ -698,6 +728,65 @@ mod tests {
         assert_eq!(effective.agent_cli, AgentCli::Gemini);
         // ...while the unset field keeps the global value.
         assert!(effective.notifications_enabled);
+    }
+
+    #[test]
+    fn settings_env_filters_blank_and_invalid_bindings_but_keeps_valid_refs() {
+        let settings = Settings {
+            env: [
+                (
+                    "GLOBAL_TOKEN".to_string(),
+                    "op://Private/Global/token".to_string(),
+                ),
+                ("1BAD".to_string(), "op://Private/Bad/token".to_string()),
+                ("EMPTY".to_string(), "   ".to_string()),
+                ("_OK".to_string(), "op://Private/Ok/token".to_string()),
+            ]
+            .into_iter()
+            .collect(),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            settings.env().collect::<Vec<_>>(),
+            vec![
+                ("GLOBAL_TOKEN", "op://Private/Global/token"),
+                ("_OK", "op://Private/Ok/token"),
+            ]
+        );
+    }
+
+    #[test]
+    fn with_local_merges_env_with_workspace_winning_same_name() {
+        let global = Settings {
+            env: [
+                ("A_TOKEN".to_string(), "op://global/a".to_string()),
+                ("SHARED".to_string(), "op://global/shared".to_string()),
+            ]
+            .into_iter()
+            .collect(),
+            ..Default::default()
+        };
+        let local = LocalSettings {
+            env: [
+                ("B_TOKEN".to_string(), "op://local/b".to_string()),
+                ("SHARED".to_string(), "op://local/shared".to_string()),
+            ]
+            .into_iter()
+            .collect(),
+            ..Default::default()
+        };
+
+        let effective = global.with_local(&local);
+
+        assert_eq!(
+            effective.env().collect::<Vec<_>>(),
+            vec![
+                ("A_TOKEN", "op://global/a"),
+                ("B_TOKEN", "op://local/b"),
+                ("SHARED", "op://local/shared"),
+            ]
+        );
     }
 
     #[test]
