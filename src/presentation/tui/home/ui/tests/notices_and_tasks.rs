@@ -282,6 +282,29 @@ fn render_frame_shows_the_run2_loading_while_an_action_runs() {
 }
 
 #[test]
+fn run2_loading_blanks_the_focus_action_menu() {
+    let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Pushed)]);
+    state.enter_focus(1);
+
+    let idle = stripped(&right_pane_contents(&state, 60, 12));
+    assert!(idle.contains("Run a command:"));
+    assert!(idle.contains("Open a shell"));
+
+    state.step_loading("エージェント起動中…");
+    let pane = right_pane_contents(&state, 60, 12);
+    assert!(
+        pane.iter()
+            .all(|line| console::strip_ansi_codes(line).trim().is_empty()),
+        "loading should be a dedicated right-pane surface, not the focus menu"
+    );
+
+    let joined = stripped(&render_frame(24, 100, &state));
+    assert!(joined.contains("(｡･-･)"));
+    assert!(!joined.contains("Run a command:"));
+    assert!(!joined.contains("Open a shell"));
+}
+
+#[test]
 fn run2_loading_centers_in_the_right_pane_while_an_action_runs() {
     let mut state = state_with(Vec::new());
     state.step_loading("エージェント起動中…");
