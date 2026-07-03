@@ -9,8 +9,8 @@
 //! open.
 //!
 //! The pure resolution logic lives here behind the [`SecretResolver`] trait so it
-//! is unit-tested without shelling out; the real `op` CLI subprocess and keyring
-//! IO that back [`resolve_workspace_env`] live in [`op_cli`].
+//! is unit-tested without shelling out; the real `op` CLI subprocess IO that
+//! backs [`resolve_workspace_env`] lives in [`op_cli`].
 
 mod op_cli;
 

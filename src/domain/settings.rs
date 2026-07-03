@@ -148,33 +148,6 @@ impl Default for LocalLlm {
     }
 }
 
-/// Configuration for the optional 1Password MCP server the agent can read
-/// secrets through (`usagi op-mcp`).
-///
-/// Disabled by default: usagi never wires it automatically. The 1Password
-/// **service account token** is *not* stored here — it lives in the OS secret
-/// store (macOS Keychain and the Linux Secret Service / kernel keyring),
-/// managed by `usagi op login` / `logout`. This struct only records whether the
-/// server should be wired into launched agents, so the (synced, non-secret)
-/// settings file never contains a credential. When `enabled`, the 1Password MCP
-/// server is wired in and the `usagi op-mcp` process reads the token from the
-/// OS keychain to authenticate `op`.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(default)]
-pub struct OpMcp {
-    /// Whether the 1Password MCP server is wired into launched agents. Set by
-    /// `usagi op login` (which also stores the token in the OS keychain) and
-    /// cleared by `usagi op logout`.
-    pub enabled: bool,
-}
-
-impl OpMcp {
-    /// Whether the 1Password MCP server should be wired into launched agents.
-    pub fn enabled(&self) -> bool {
-        self.enabled
-    }
-}
-
 impl AgentCli {
     /// Every agent CLI variant, in the canonical order menus, the config-screen
     /// selector, and the `usagi feature` table list them.
@@ -391,8 +364,6 @@ pub struct Settings {
     pub terminal_scrollback_lines: usize,
     /// The optional local LLM the agent can offload light work to.
     pub local_llm: LocalLlm,
-    /// The optional 1Password MCP server the agent can read secrets through.
-    pub op_mcp: OpMcp,
     /// Which of usagi's optional shipped-skill features are enabled, keyed by
     /// [`SkillFeature::id`]. A feature absent from the map uses its
     /// [`default_enabled`](SkillFeature::default_enabled), so the map only ever
@@ -422,7 +393,6 @@ impl Default for Settings {
             mascot_animation_enabled: true,
             terminal_scrollback_lines: DEFAULT_TERMINAL_SCROLLBACK_LINES,
             local_llm: LocalLlm::default(),
-            op_mcp: OpMcp::default(),
             // No overrides recorded: every shipped-skill feature uses its own
             // default (see [`SkillFeature::default_enabled`]).
             skill_features: BTreeMap::new(),
@@ -515,7 +485,6 @@ impl Settings {
         AgentWiring {
             usagi_bin: usagi_bin.to_string(),
             local_llm_model: self.local_llm.enabled.then(|| self.local_llm.model.clone()),
-            op_mcp_enabled: self.op_mcp.enabled(),
         }
     }
 }
@@ -982,24 +951,6 @@ mod tests {
         settings.local_llm.model = "qwen2.5-coder:3b".to_string();
         let on = settings.agent_wiring("usagi");
         assert_eq!(on.local_llm_model.as_deref(), Some("qwen2.5-coder:3b"));
-    }
-
-    #[test]
-    fn agent_wiring_enables_op_mcp_only_when_enabled() {
-        // Disabled by default.
-        let mut settings = Settings::default();
-        assert!(!settings.agent_wiring("usagi").op_mcp_enabled);
-        // Enabled: the adapter wires the 1Password MCP server. The token itself
-        // is stored in the OS keychain, not in settings or the agent wiring.
-        settings.op_mcp.enabled = true;
-        assert!(settings.agent_wiring("usagi").op_mcp_enabled);
-    }
-
-    #[test]
-    fn op_mcp_defaults_to_off_and_reports_enabled_state() {
-        let default = OpMcp::default();
-        assert!(!default.enabled());
-        assert!(OpMcp { enabled: true }.enabled());
     }
 
     #[test]

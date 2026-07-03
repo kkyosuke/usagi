@@ -92,9 +92,4 @@ pub struct AgentWiring {
     /// The local-LLM model to expose for offloading light work, or `None` when
     /// the local LLM is disabled.
     pub local_llm_model: Option<String>,
-    /// Whether to wire the 1Password MCP server (`usagi op-mcp`) into launched
-    /// agents. This is true only when settings contain a non-blank 1Password
-    /// service account token; the token itself is kept out of the agent command
-    /// line and supplied by the `usagi op-mcp` process to the `op` subprocess.
-    pub op_mcp_enabled: bool,
 }
