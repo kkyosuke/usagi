@@ -42,8 +42,8 @@ mod mode;
 pub use list::{worktree_name, WorkspaceGroup, WorktreeList, ROOT_NAME};
 pub use log::{LineKind, LogLine};
 pub use modal::{
-    CreateInput, EnvEditor, ModalSize, NoteEditor, Preview, RemoveEntry, RemoveModal, RenameInput,
-    TabMenu, TabMenuItem, TabRenameInput, TextModal,
+    CreateInput, DiffView, EnvEditor, ModalSize, NoteEditor, Preview, RemoveEntry, RemoveModal,
+    RenameInput, TabMenu, TabMenuItem, TabRenameInput, TextModal,
 };
 pub use mode::{Mode, PaneExit, ResumeLevel, ReturnMode};
 
@@ -1445,22 +1445,69 @@ impl HomeState {
         }
     }
 
-    /// Open the right-pane diff view from a load attempt: on success, show the
-    /// rendered patch (titled by the diffed branch → base) in the same scrollable
-    /// right pane the Markdown preview uses; on failure — no session highlighted,
-    /// or the base branch could not be resolved — log the error and open nothing.
-    /// The impure git shell-out is the caller's (the event loop); rendering the
-    /// patch and storing the result is pure, so both outcomes are testable.
+    /// Open the right-pane diff view from a load attempt: on success, parse and
+    /// show the patch (titled by the diffed branch → base) in the scrollable right
+    /// pane; on failure — no session highlighted, or the base branch could not be
+    /// resolved — log the error and open nothing. The impure git shell-out is the
+    /// caller's (the event loop); parsing / highlighting the patch and storing the
+    /// result is pure, so both outcomes are testable.
     pub fn open_diff_result(&mut self, loaded: anyhow::Result<(String, String)>) {
         match loaded {
-            Ok((title, diff)) => {
-                self.overlay = Overlay::Preview(Preview {
+            Ok((title, patch)) => {
+                self.overlay = Overlay::Diff(DiffView {
                     title,
-                    lines: crate::presentation::tui::markdown::render_diff(&diff),
+                    doc: crate::presentation::tui::diff::render(&patch),
                     scroll: 0,
+                    split: false,
                 });
             }
             Err(e) => self.log_error(format!("diff failed: {e}")),
+        }
+    }
+
+    /// The open right-pane diff view, if any.
+    pub fn diff_view(&self) -> Option<&DiffView> {
+        match &self.overlay {
+            Overlay::Diff(diff) => Some(diff),
+            _ => None,
+        }
+    }
+
+    /// Close the diff view (the user dismissed it). Called only while the diff view
+    /// is the open overlay, so it clears the overlay outright.
+    pub fn close_diff(&mut self) {
+        self.overlay = Overlay::None;
+    }
+
+    /// Scroll the diff view up one line (no-op when closed or at the top).
+    pub fn diff_scroll_up(&mut self) {
+        if let Overlay::Diff(diff) = &mut self.overlay {
+            diff.scroll = diff.scroll.saturating_sub(1);
+        }
+    }
+
+    /// Scroll the diff view down one line, clamped so the last row stays in view
+    /// (no-op when closed). `visible` is the pane body height the view can show.
+    /// The row count is layout-aware: the split view folds paired add/del lines
+    /// into one visual row, so it clamps against fewer rows than the unified view.
+    pub fn diff_scroll_down(&mut self, visible: usize) {
+        if let Overlay::Diff(diff) = &mut self.overlay {
+            let total = if diff.split {
+                crate::presentation::tui::diff::split_rows(&diff.doc).len()
+            } else {
+                diff.doc.rows.len()
+            };
+            let max = total.saturating_sub(visible);
+            diff.scroll = (diff.scroll + 1).min(max);
+        }
+    }
+
+    /// Toggle the diff view between the unified and split (side-by-side) layouts
+    /// (no-op when closed), resetting the scroll so the switch lands at the top.
+    pub fn diff_toggle_split(&mut self) {
+        if let Overlay::Diff(diff) = &mut self.overlay {
+            diff.split = !diff.split;
+            diff.scroll = 0;
         }
     }
 

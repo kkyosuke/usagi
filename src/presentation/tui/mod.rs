@@ -1,6 +1,7 @@
 // Terminal UI screens shared by interactive commands live here.
 pub mod app;
 pub mod config;
+pub mod diff;
 pub mod gallery;
 pub mod home;
 pub mod install_task;
