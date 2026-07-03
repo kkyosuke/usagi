@@ -215,7 +215,7 @@ fn notice_lines(block_pad: &str, notice: Option<&str>) -> Vec<String> {
 /// Returns the footer text only; [`render_frame`] pins it to the bottom edge.
 fn footer_lines(width: usize, mode: Mode) -> Vec<String> {
     let help = match mode {
-        Mode::Single => "←→ tab / ↑↓ move / type,/: filter / Enter open / Esc back",
+        Mode::Single => "←→ tab / ↑↓ move / type filter / Enter open / Esc back",
         Mode::Unite => "←→ tab / ↑↓ move / Space toggle / Enter open checked / Esc single",
     };
     vec![widgets::dim_line(width, help)]
