@@ -1121,12 +1121,25 @@ fn preview_without_an_argument_reports_its_usage() {
 }
 
 #[test]
-fn preview_diff_reports_that_it_is_not_built_yet() {
+fn diff_requests_opening_the_diff_view() {
+    let result = registry().dispatch("diff", &[], &[]);
+    assert!(result.lines.is_empty());
+    assert_eq!(result.effect, Effect::OpenDiff);
+}
+
+#[test]
+fn preview_diff_is_an_alias_for_the_diff_view() {
+    // `preview diff` opens the diff view rather than trying to preview `diff.md`.
     let result = registry().dispatch("preview diff", &[], &[]);
-    // `diff` is recognised so the surface reads coherently, but opens nothing.
-    assert_eq!(result.effect, Effect::None);
-    assert_eq!(result.lines[0].kind, LineKind::Output);
-    assert!(joined(&result).contains("Diff preview"));
+    assert!(result.lines.is_empty());
+    assert_eq!(result.effect, Effect::OpenDiff);
+}
+
+#[test]
+fn open_diff_takes_over_the_pane_so_it_closes_the_palette() {
+    // Like `OpenPreview`, the diff view takes over the right pane, so dispatching
+    // it from the `:` palette closes the palette first.
+    assert!(Effect::OpenDiff.closes_palette());
 }
 
 #[test]

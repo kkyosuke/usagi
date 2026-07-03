@@ -3,9 +3,9 @@
 //! new commands can be added with [`CommandRegistry::register`].
 
 use super::builtins::{
-    AgentCommand, ClearCommand, CloseCommand, ComingSoonCommand, ConfigCommand, EnvCommand,
-    HistoryCommand, IssueCommand, ManCommand, PreviewCommand, QuitCommand, SessionCommand,
-    TerminalCommand, UniteCommand,
+    AgentCommand, ClearCommand, CloseCommand, ComingSoonCommand, ConfigCommand, DiffCommand,
+    EnvCommand, HistoryCommand, IssueCommand, ManCommand, PreviewCommand, QuitCommand,
+    SessionCommand, TerminalCommand, UniteCommand,
 };
 use super::{
     Command, CommandContext, CommandHint, CommandInfo, CommandResult, CommandScope, Completion,
@@ -43,6 +43,7 @@ impl CommandRegistry {
                 Box::new(EnvCommand),
                 Box::new(IssueCommand),
                 Box::new(PreviewCommand),
+                Box::new(DiffCommand),
                 Box::new(HistoryCommand),
                 Box::new(ComingSoonCommand {
                     name: "doctor",

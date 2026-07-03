@@ -101,7 +101,7 @@
 
 - **開く** — **切替（Switch）／在席（Focus）の両方**から `:` で開けます。没入（Attached）はキーがシェルへ
   流れるため対象外です（まず `Ctrl-O o`（既定）で切替へ抜けてから `:`）。
-- **実行できるコマンド** — `session` / `unite` / `config` / `env` / `issue` / `man` / `history` / `preview` / `terminal` / `agent` /
+- **実行できるコマンド** — `session` / `unite` / `config` / `env` / `issue` / `man` / `history` / `preview` / `diff` / `terminal` / `agent` /
   `close` / `doctor` / `quit` / `clear` など、ワークスペース全体（[コマンドスコープ](#コマンドスコープ)の Workspace ＋共通）の
   コマンドを実行します。構文と役割は [../03-commands/02-tui.md](../../03-commands/02-tui.md) が正本です。
 - **表示** — 入力欄 `❯ …`、入力中のコマンドに応じた[候補・ヒント](02-layout.md#入力候補ヒントコマンドライン)（コマンド一覧の絞り込み、または
@@ -115,7 +115,7 @@
   打って候補件数が増減しても、実行して結果が出ても、ボックスは一切動きません（レイアウトシフトが起きない）。
 - **閉じる** — `Esc` でパレットを閉じ、**開いた元のモードへ戻ります**。
 - **モード遷移を伴うコマンド** — `session switch <name>` ／ `terminal` ／ `agent` ／ `config` ／
-  `session create` ／ `session remove` ／ `close` ／ `preview` など遷移を伴うコマンドは、**パレットを閉じてから**
+  `session create` ／ `session remove` ／ `close` ／ `preview` ／ `diff` など遷移を伴うコマンドは、**パレットを閉じてから**
   目的のモード（在席・没入・設定画面など）へ遷移します。
 
 ```text

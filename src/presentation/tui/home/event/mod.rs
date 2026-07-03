@@ -1152,6 +1152,26 @@ fn selected_dir(state: &HomeState, workspace_root: &Path) -> PathBuf {
     }
 }
 
+/// Gather the highlighted session worktree's diff against its base branch for the
+/// right-pane diff view, as `(title, patch)`. The base is the worktree
+/// repository's default branch (resolved against `origin/<default>` first, like
+/// the sidebar `+N -M` badge), and the patch is its cumulative merge-base diff.
+///
+/// Fails — so [`HomeState::open_diff_result`] logs and opens nothing — when the
+/// cursor is on a root row (no session highlighted) or the base ref cannot be
+/// resolved (e.g. a repo with no commits). The git shell-out makes this the
+/// impure half of the `diff` command; the selection read is pure.
+fn selected_diff(state: &HomeState) -> Result<(String, String)> {
+    let Some(worktree) = state.list().selected() else {
+        anyhow::bail!("highlight a session to see its diff");
+    };
+    let base = crate::infrastructure::git::default_branch(&worktree.path);
+    let patch = crate::infrastructure::git::diff_text(&worktree.path, &base)
+        .ok_or_else(|| anyhow::anyhow!("could not resolve the base branch `{base}`"))?;
+    let branch = worktree.branch.as_deref().unwrap_or("(detached)");
+    Ok((format!("{branch} → {base}"), patch))
+}
+
 /// Whether a click is allowed to poke the sidebar mascot: only on the plain home
 /// view (切替 / 在席) with nothing floating over the panes. Anywhere an overlay
 /// sits — the quit-confirm / removal / text modals, the Markdown preview, the note

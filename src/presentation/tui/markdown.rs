@@ -174,6 +174,108 @@ pub fn render(source: &str) -> Vec<MarkdownLine> {
     out
 }
 
+/// Colours for the diff view, reusing the [`LineStyle::Code`] rendering path
+/// (a coloured span is drawn in its own foreground). Chosen to read against a
+/// dark terminal: green additions, red deletions, cyan hunk headers, and a muted
+/// blue-grey for the file / index headers.
+const DIFF_ADD: Rgb = Rgb {
+    r: 152,
+    g: 195,
+    b: 121,
+};
+const DIFF_DEL: Rgb = Rgb {
+    r: 224,
+    g: 108,
+    b: 117,
+};
+const DIFF_HUNK: Rgb = Rgb {
+    r: 86,
+    g: 182,
+    b: 194,
+};
+const DIFF_META: Rgb = Rgb {
+    r: 130,
+    g: 144,
+    b: 166,
+};
+
+/// Render a unified `diff` (as produced by `git diff`) into styled lines for the
+/// right-pane diff view, reusing [`MarkdownLine`] as the styled-line vocabulary
+/// the pane already knows how to draw. Each source line keeps its `+`/`-`/` `
+/// prefix and is coloured by kind: additions green, deletions red, hunk headers
+/// (`@@ … @@`) cyan, the file / index headers muted, and context lines the
+/// terminal's default foreground. An empty patch (a session that changed nothing)
+/// renders a single "no changes" line so the pane never looks broken. The result
+/// is **pure data** — colouring is the UI layer's job (see the home screen's
+/// `panes` module) — so the classification is directly testable.
+pub fn render_diff(diff: &str) -> Vec<MarkdownLine> {
+    if diff.trim().is_empty() {
+        return vec![MarkdownLine {
+            style: LineStyle::Text,
+            prefix: String::new(),
+            spans: vec![Span::new(
+                "No changes against the base branch 🐰",
+                SpanStyle::Plain,
+            )],
+        }];
+    }
+    diff.split('\n')
+        .take(MAX_RENDER_LINES)
+        .map(|raw| diff_line(raw.strip_suffix('\r').unwrap_or(raw)))
+        .collect()
+}
+
+/// Classify one unified-diff line into a styled [`MarkdownLine`]. The `+++`/`---`
+/// file markers are matched before the bare `+`/`-` add/remove lines so they are
+/// coloured as headers, not as a one-character addition/deletion.
+fn diff_line(line: &str) -> MarkdownLine {
+    let colored = |color: Rgb| MarkdownLine {
+        style: LineStyle::Code,
+        prefix: String::new(),
+        spans: vec![Span::colored(line, SpanStyle::Code, color)],
+    };
+    if line.starts_with("+++") || line.starts_with("---") {
+        colored(DIFF_META)
+    } else if line.starts_with("@@") {
+        colored(DIFF_HUNK)
+    } else if line.starts_with('+') {
+        colored(DIFF_ADD)
+    } else if line.starts_with('-') {
+        colored(DIFF_DEL)
+    } else if is_diff_header(line) {
+        colored(DIFF_META)
+    } else {
+        // A context line (leading space) or a blank line: the terminal default.
+        MarkdownLine {
+            style: LineStyle::Text,
+            prefix: String::new(),
+            spans: vec![Span::new(line, SpanStyle::Plain)],
+        }
+    }
+}
+
+/// Whether `line` is one of `git diff`'s per-file header lines (everything but the
+/// `+++`/`---` markers, which are handled first): the `diff --git` banner, the
+/// blob `index`, mode changes, rename/copy notes, and the binary-file notice.
+fn is_diff_header(line: &str) -> bool {
+    const PREFIXES: &[&str] = &[
+        "diff --git",
+        "index ",
+        "old mode",
+        "new mode",
+        "deleted file",
+        "new file",
+        "copy from",
+        "copy to",
+        "rename from",
+        "rename to",
+        "similarity index",
+        "dissimilarity index",
+        "Binary files",
+    ];
+    PREFIXES.iter().any(|p| line.starts_with(p))
+}
+
 /// Syntax-highlight `code_lines` (written in `lang`) and append one
 /// [`LineStyle::Code`] line per source line to `out`.
 fn flush_code_block(out: &mut Vec<MarkdownLine>, code_lines: &[&str], lang: &str) {

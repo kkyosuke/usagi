@@ -1216,6 +1216,7 @@ mod background_tasks;
 mod clicks;
 mod config_switch;
 mod ctrl_caret;
+mod diff;
 mod env_editor;
 mod focus_menu;
 mod focus_prompt;
