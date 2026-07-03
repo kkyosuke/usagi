@@ -1317,7 +1317,7 @@ fn run_create(root: &Path, name: &str, interaction_epoch: u64) -> (bool, tasks::
             true,
             tasks::Completion {
                 line: LogLine::output(format!(
-                    "Created session \"{}\" ({} worktree(s)) 🐰",
+                    "Created session \"{}\" ({} worktree(s)) 󰤇",
                     created.name,
                     created.worktrees.len()
                 )),

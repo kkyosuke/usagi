@@ -384,7 +384,7 @@ mod tests {
     fn notice_slot_keeps_layout_stable_across_toggling() {
         let items = sample_items();
         let without = render_frame(24, 80, &items, 0, &[], None);
-        let with = render_frame(24, 80, &items, 0, &[], Some("Config is coming soon 🐰"));
+        let with = render_frame(24, 80, &items, 0, &[], Some("Config is coming soon 󰤇"));
         // The frame height is identical whether or not a notice is shown, so
         // the menu and footer never move.
         assert_eq!(without.len(), with.len());
@@ -452,7 +452,7 @@ mod tests {
         let items = sample_items();
         assert_eq!(
             body_top_padding(40, &items, &[], None),
-            body_top_padding(40, &items, &[], Some("Saved 🐰")),
+            body_top_padding(40, &items, &[], Some("Saved 󰤇")),
         );
     }
 

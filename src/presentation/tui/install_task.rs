@@ -284,13 +284,13 @@ mod tests {
         let handle = InstallHandle::new();
         let t0 = Instant::now();
         handle.begin_at("m", t0);
-        handle.finish_at(true, "done 🐰".to_string(), t0);
+        handle.finish_at(true, "done 󰤇".to_string(), t0);
         // Within the dismiss window the message shows and the overlay is active.
         assert!(handle.is_active(t0 + Duration::from_secs(1)));
         assert_eq!(
             handle.view(t0 + Duration::from_secs(1)),
             Some(InstallView::Done {
-                message: "done 🐰".to_string(),
+                message: "done 󰤇".to_string(),
                 ok: true,
             })
         );

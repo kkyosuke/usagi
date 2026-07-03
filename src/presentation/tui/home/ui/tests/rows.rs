@@ -232,11 +232,11 @@ fn status_label_pairs_a_git_icon_with_each_word() {
 }
 
 #[test]
-fn worktree_row_marks_the_cursor_in_switch_and_shows_detached() {
-    // The `>` cursor only appears in 切替 (Switch): the selected row carries it
-    // when `in_switch` is set. (The kind dot reflects freshness — a just-built
-    // fixture is fresh `●`; heat fading is covered in its own test.)
-    let (top, _) = worktree_row(
+fn worktree_row_marks_the_selected_session_in_switch_and_shows_detached() {
+    // The selected session in 切替 (Switch) uses the one-line usagi glyph on line
+    // 1 and a vertical continuation on line 2. (The kind dot reflects freshness —
+    // a just-built fixture is fresh `●`; heat fading is covered in its own test.)
+    let (top, detail) = worktree_row(
         &worktree(Some("main"), true, BranchStatus::Pushed),
         "",
         10,
@@ -253,11 +253,13 @@ fn worktree_row_marks_the_cursor_in_switch_and_shows_detached() {
         false,
         None,
     );
-    assert!(top.contains('>'));
+    assert!(top.contains('󰤇'));
+    assert!(detail.contains('│'));
+    assert!(!top.contains('>'));
     assert!(top.contains('●'));
     assert!(top.contains("main"));
 
-    // The same selected row outside Switch shows no cursor.
+    // The same selected row outside Switch shows no selection marker.
     let (top_no_switch, _) = worktree_row(
         &worktree(Some("main"), true, BranchStatus::Pushed),
         "",
@@ -276,6 +278,7 @@ fn worktree_row_marks_the_cursor_in_switch_and_shows_detached() {
         None,
     );
     assert!(!top_no_switch.contains('>'));
+    assert!(!top_no_switch.contains('󰤇'));
 
     let (other_top, _) = worktree_row(
         &worktree(Some("feature"), false, BranchStatus::Local),
@@ -295,6 +298,7 @@ fn worktree_row_marks_the_cursor_in_switch_and_shows_detached() {
         None,
     );
     assert!(!other_top.contains('>'));
+    assert!(!other_top.contains('󰤇'));
     assert!(other_top.contains('●'));
     assert!(other_top.contains("feature"));
 
@@ -1565,6 +1569,37 @@ fn left_pane_marks_the_active_worktree_with_a_gutter_bar() {
 }
 
 #[test]
+fn left_pane_marks_the_selected_session_with_a_rabbit_stack() {
+    let mut list = list_with(vec![
+        worktree(Some("main"), true, BranchStatus::Pushed),
+        worktree(Some("feature"), false, BranchStatus::Local),
+    ]);
+    list.move_down(); // root -> main
+    let lines = left_pane(
+        &list,
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashMap::new(),
+        30,
+        9,
+        true,
+        Sidebar::Full,
+        Utc::now(),
+        None,
+    );
+    let plain: Vec<String> = lines
+        .iter()
+        .map(|l| console::strip_ansi_codes(l).into_owned())
+        .collect();
+    // root(2) + divider(1), then the selected session's three rows.
+    assert!(plain[3].starts_with('󰤇'));
+    assert!(plain[4].starts_with('│'));
+    assert!(plain[5].starts_with('│'));
+}
+
+#[test]
 fn rail_collapses_each_entry_to_three_rows_without_names_or_numbers() {
     let list = list_with(vec![
         worktree(Some("main"), true, BranchStatus::Pushed),
@@ -1754,15 +1789,19 @@ fn rail_sidebar_marks_the_switch_cursor() {
             None,
         )
     };
-    // In 切替 the cursor row shows the `>` marker; here the cursor is on the root.
+    // In 切替 the cursor row shows the `>` marker on non-session rows; here the
+    // cursor is on the root.
     let on_root = rail(&list);
     assert!(console::strip_ansi_codes(&on_root[0]).contains('>'));
-    // Moving the cursor onto the worktree marks its row 1 and fades the root entry
+    // Moving the cursor onto the worktree marks its three session rows with the
+    // one-line usagi glyph and vertical continuations, and fades the root entry
     // (the cursor leaves it), so the highlighted session still reads first.
     list.move_down();
     let on_session = rail(&list);
     assert!(!console::strip_ansi_codes(&on_session[0]).contains('>'));
-    assert!(console::strip_ansi_codes(&on_session[3]).contains('>'));
+    assert!(console::strip_ansi_codes(&on_session[3]).contains('󰤇'));
+    assert!(console::strip_ansi_codes(&on_session[4]).contains('│'));
+    assert!(console::strip_ansi_codes(&on_session[5]).contains('│'));
 }
 
 #[test]

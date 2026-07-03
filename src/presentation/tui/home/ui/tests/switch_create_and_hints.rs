@@ -137,11 +137,11 @@ fn render_frame_edits_the_selected_row_name_in_place_when_renaming_in_switch() {
         .map(|row| console::strip_ansi_codes(row).into_owned())
         .collect();
     // The selected session's own name line becomes the editable label in place:
-    // the `>` cursor and the typed "main 2" (prefilled "main", then edited) sit on
-    // the same row — the rename is not banished to a separate row at the list foot.
+    // the `󰤇` marker and the typed "main 2" (prefilled "main", then edited) sit
+    // on the same row — the rename is not banished to a separate row at the list foot.
     assert!(plain
         .iter()
-        .any(|line| line.contains('>') && line.contains("main 2")));
+        .any(|line| line.contains('󰤇') && line.contains("main 2")));
     // And the old foot-anchored `rename <target>:` affordance is gone.
     assert!(!plain.iter().any(|line| line.contains("rename main:")));
 }

@@ -581,7 +581,7 @@ pub(super) fn env_editor_key(state: &mut HomeState, key: Key, wiring: &mut Wirin
             let mut settings = crate::usecase::settings::load_local(root).unwrap_or_default();
             settings.env = env;
             match crate::usecase::settings::save_local(root, &settings) {
-                Ok(()) => state.log_output("Saved workspace env 🐰".to_string()),
+                Ok(()) => state.log_output("Saved workspace env 󰤇".to_string()),
                 Err(e) => state.log_error(format!("Failed to save env: {e}")),
             }
         }
@@ -1174,7 +1174,7 @@ fn run_focus_command(
         // explicit discard path.
         "close --force" => close_focused_session(state, wiring, true),
         // `ai` (and any future coming-soon command) just logs its line.
-        _ => state.log_output(format!("\"{name}\" is coming soon 🐰")),
+        _ => state.log_output(format!("\"{name}\" is coming soon 󰤇")),
     }
 }
 

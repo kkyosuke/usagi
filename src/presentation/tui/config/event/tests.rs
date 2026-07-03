@@ -908,10 +908,10 @@ fn reflect_install_flips_the_runtime_row_and_focuses_the_model_row() {
     assert!(!config.ollama_installed());
     let view = InstallView::Done {
         ok: true,
-        message: "ollama を導入しました 🐰".to_string(),
+        message: "ollama を導入しました 󰤇".to_string(),
     };
     let note = reflect_install(&mut config, Some(&view));
-    assert_eq!(note.as_deref(), Some("ollama を導入しました 🐰"));
+    assert_eq!(note.as_deref(), Some("ollama を導入しました 󰤇"));
     assert!(config.ollama_installed());
     assert_eq!(
         config.selected_field(),
@@ -926,10 +926,10 @@ fn reflect_install_records_a_pulled_model() {
     config.set_pending_install(PendingInstall::Model("qwen2.5-coder:3b".to_string()));
     let view = InstallView::Done {
         ok: true,
-        message: "qwen2.5-coder:3b を導入しました 🐰".to_string(),
+        message: "qwen2.5-coder:3b を導入しました 󰤇".to_string(),
     };
     let note = reflect_install(&mut config, Some(&view));
-    assert_eq!(note.as_deref(), Some("qwen2.5-coder:3b を導入しました 🐰"));
+    assert_eq!(note.as_deref(), Some("qwen2.5-coder:3b を導入しました 󰤇"));
     assert_eq!(config.local_llm_model(), "qwen2.5-coder:3b");
 }
 

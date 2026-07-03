@@ -260,7 +260,7 @@ fn change_field(config: &mut Config, forward: bool) -> Option<String> {
     if config.cycle_selected(forward) {
         None
     } else {
-        Some("Nothing to choose from 🐰".to_string())
+        Some("Nothing to choose from 󰤇".to_string())
     }
 }
 
@@ -276,7 +276,7 @@ fn run_install(config: &mut Config, install_runtime: &mut InstallRuntime) -> Opt
     Some(match result {
         Ok(()) => {
             config.set_pending_install(PendingInstall::Runtime);
-            "ランタイムのインストールを開始しました 🐰".to_string()
+            "ランタイムのインストールを開始しました 󰤇".to_string()
         }
         Err(e) => format!("Install failed: {e}"),
     })
@@ -291,14 +291,14 @@ fn run_model_select(config: &mut Config, pull_model: &mut PullModel) -> Option<S
     if config.model_modal_selection_installed() {
         config.select_model(&model);
         config.close_model_modal();
-        return Some(format!("Using {model} 🐰"));
+        return Some(format!("Using {model} 󰤇"));
     }
     let result = pull_model(&model);
     config.close_model_modal();
     Some(match result {
         Ok(()) => {
             config.set_pending_install(PendingInstall::Model(model.clone()));
-            format!("{model} のインストールを開始しました 🐰")
+            format!("{model} のインストールを開始しました 󰤇")
         }
         Err(e) => format!("Install failed: {e}"),
     })
@@ -338,12 +338,12 @@ fn reflect_install(config: &mut Config, view: Option<&InstallView>) -> Option<St
 /// confirmation, a save error, or a hint when there is nothing to save.
 fn save_changes(config: &mut Config, save: &mut Save) -> Option<String> {
     if !config.is_dirty() {
-        return Some("No changes to save 🐰".to_string());
+        return Some("No changes to save 󰤇".to_string());
     }
     Some(match save(config.settings(), config.local()) {
         Ok(()) => {
             config.mark_saved();
-            "Saved 🐰".to_string()
+            "Saved 󰤇".to_string()
         }
         Err(e) => format!("Failed to save: {e}"),
     })
