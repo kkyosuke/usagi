@@ -871,7 +871,8 @@ fn focus_menu_shift_c_force_closes_the_focused_session_then_enters_switch() {
     // beginning inline creation.
     let mut keys = cmd("session switch feat");
     keys.push(Ok(Key::Enter)); // -> Focus (feat), menu UI
-    keys.push(Ok(Key::Char('C'))); // run `close --force` -> 切替 (Switch)
+    keys.push(Ok(Key::Char('C'))); // Shift+c -> `close --force` confirmation modal
+    keys.push(Ok(Key::Char('y'))); // confirm the discard -> dispatch -> 切替 (Switch)
     keys.push(Ok(Key::Char('c'))); // Switch-only: begin inline create
     keys.push(Ok(Key::Escape)); // cancel create; reader then runs out -> quit
     let term = Term::stdout();
@@ -926,6 +927,55 @@ fn focus_menu_shift_c_force_closes_the_focused_session_then_enters_switch() {
         branches_called, 1,
         "`c` after Shift+c close began inline create, so the screen is in 切替 (Switch)"
     );
+}
+
+#[test]
+fn focus_menu_shift_c_cancelled_in_the_confirmation_leaves_the_session_untouched() {
+    // Shift+c raises the `close --force` confirmation; `n` cancels it, so the
+    // destructive removal never dispatches and the session stays alive.
+    let mut keys = cmd("session switch feat");
+    keys.push(Ok(Key::Enter)); // -> Focus (feat), menu UI
+    keys.push(Ok(Key::Char('C'))); // Shift+c -> confirmation modal
+    keys.push(Ok(Key::Char('n'))); // cancel the discard -> stay in 在席
+    keys.push(Ok(Key::CtrlC)); // quit
+    let term = Term::stdout();
+    let mut reader = ScriptedReader::new(keys);
+    let monitor = MonitorHandle::detached();
+    let mut persist: fn(&str) = noop_persist;
+    let mut create: fn(&str) -> SessionOutcome = noop_create;
+    let mut removed = Vec::new();
+    let mut remove = |name: &str, force: bool| {
+        removed.push((name.to_string(), force));
+        noop_remove(name, force)
+    };
+    let mut open: fn(&mut HomeState, &Path, bool, bool) -> Result<PaneExit> = noop_open;
+    let mut config: fn(&Term) -> Result<Option<ConfigReload>> = noop_config;
+    let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = noop_preview;
+    let outcome = event_loop_compat(
+        &term,
+        &mut reader,
+        sample_state(),
+        Path::new("/ws"),
+        &monitor,
+        &UpdateHandle::new(),
+        &OneShot::<bool>::new(),
+        &OneShot::<Vec<AgentCli>>::new(),
+        &mut persist,
+        &mut create,
+        &mut (noop_rename as fn(&str, &str) -> SessionOutcome),
+        &mut (noop_set_note as fn(&str, &str) -> SessionOutcome),
+        &mut remove,
+        &mut (no_branches as fn() -> Vec<String>),
+        &mut open,
+        &mut config,
+        &mut preview,
+        &mut (noop_tab_op as fn(&Path, Option<TabNav>) -> (Vec<String>, usize)),
+        &mut (noop_close as fn(&mut HomeState, &Path)),
+        &mut (noop_reorder as fn(&str, bool) -> SessionReorder),
+    )
+    .unwrap();
+    assert!(matches!(outcome, Outcome::Quit));
+    assert!(removed.is_empty(), "cancelled confirmation must not remove");
 }
 
 #[test]
@@ -997,7 +1047,8 @@ fn focus_menu_close_picker_enter_on_force_runs_force_close() {
     keys.push(Ok(Key::ArrowUp)); // agent wraps up to close (last)
     keys.push(Ok(Key::ArrowRight)); // open close picker
     keys.push(Ok(Key::ArrowDown)); // option 0 -> option 1 (close --force)
-    keys.push(Ok(Key::Enter)); // run `close --force` -> 切替
+    keys.push(Ok(Key::Enter)); // `close --force` -> confirmation modal
+    keys.push(Ok(Key::Char('y'))); // confirm the discard -> dispatch -> 切替
     keys.push(Ok(Key::Char('c'))); // Switch-only: begin inline create
     keys.push(Ok(Key::Escape)); // cancel; reader runs out -> quit
     let term = Term::stdout();
@@ -1123,7 +1174,8 @@ fn focus_menu_close_picker_up_wraps_to_force_and_runs_it() {
     // `↑` from option 0 (close) wraps to option 1 (close --force); `Enter` runs it.
     let (outcome, removed) = run_close_picker_keys(vec![
         Ok(Key::ArrowUp),   // 0 -> 1 (close --force), exercises move_up close_cursor path
-        Ok(Key::Enter),     // run close --force
+        Ok(Key::Enter),     // close --force -> confirmation modal
+        Ok(Key::Char('y')), // confirm the discard -> dispatch
         Ok(Key::Char('c')), // Switch-only: begin inline create -> proves 切替
         Ok(Key::Escape),    // cancel; reader runs out -> quit
     ]);

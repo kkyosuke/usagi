@@ -23,10 +23,10 @@ use crate::presentation::tui::widgets;
 use crate::presentation::tui::widgets::{clip_to_width, clip_to_width_cow};
 
 use chrome::{
-    command_palette_body, env_editor_body, footer_line, input_line, mode_ladder,
-    quit_confirm_frame, remove_modal_body, switch_create_rows, tab_menu_box, tab_rename_body,
-    task_status_line, text_modal_body, title_bar, update_confirm_frame, waiting_notice,
-    ENV_MODAL_INNER, PALETTE_INNER, REMOVE_MODAL_INNER, TEXT_MODAL_INNER,
+    close_confirm_frame, command_palette_body, env_editor_body, footer_line, input_line,
+    mode_ladder, quit_confirm_frame, remove_modal_body, switch_create_rows, tab_menu_box,
+    tab_rename_body, task_status_line, text_modal_body, title_bar, update_confirm_frame,
+    waiting_notice, ENV_MODAL_INNER, PALETTE_INNER, REMOVE_MODAL_INNER, TEXT_MODAL_INNER,
 };
 use panes::{group_inline_insert_line, left_pane, right_pane_contents};
 // The right-pane tab strips map clicks to the tab under them through these.
@@ -406,6 +406,12 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
         if let Some(latest) = state.update() {
             return update_confirm_frame(raw_height, raw_width, &latest);
         }
+    }
+    // The `close --force` confirmation likewise overlays everything: it guards the
+    // destructive discard (drop uncommitted work and delete the session) behind an
+    // explicit `y` so it never fires on a single keystroke.
+    if let Some(name) = state.close_confirm() {
+        return close_confirm_frame(raw_height, raw_width, name);
     }
     // The session-removal modal is *not* a full-screen overlay: like the `:`
     // command palette and the text modal it floats as a centred box over the live

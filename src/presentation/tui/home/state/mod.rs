@@ -549,6 +549,14 @@ pub struct HomeState {
     /// flag rather than an [`Overlay`], and the two never coexist (the mascot is
     /// not clickable while the quit modal is up).
     update_confirm: bool,
+    /// The session pending a `close --force` confirmation, if any. Every force
+    /// path (在席 menu `Shift`+`c`, the close picker's `close --force`, and the
+    /// prompt's `close --force`) routes here first so the destructive discard is
+    /// never a single keystroke: the name is held for the modal to name, and
+    /// confirming runs the discard while cancelling drops back into 在席. Like
+    /// [`quit_confirm`](Self::quit_confirm) it is a full-screen modal tracked as a
+    /// flag rather than an [`Overlay`].
+    close_confirm: Option<String>,
     /// The engagement to persist for restore when the next quit is confirmed,
     /// armed only when the live mode would otherwise be lost. A quit from 没入
     /// (Attached) drops to [`Mode::Focus`] on its way to the quit modal, so the
@@ -781,6 +789,7 @@ impl HomeState {
             overlay: Overlay::default(),
             quit_confirm: false,
             update_confirm: false,
+            close_confirm: None,
             pending_resume: None,
             resume_attach: false,
             command_open: false,
@@ -2062,6 +2071,23 @@ impl HomeState {
     pub fn cancel_quit_confirm(&mut self) {
         self.quit_confirm = false;
         self.pending_resume = None;
+    }
+
+    /// The session awaiting a `close --force` confirmation, if the modal is open.
+    pub fn close_confirm(&self) -> Option<&str> {
+        self.close_confirm.as_deref()
+    }
+
+    /// Open the `close --force` confirmation modal for `name`, so the destructive
+    /// discard is guarded by an explicit `y` rather than firing on one keystroke.
+    pub fn open_close_confirm(&mut self, name: String) {
+        self.close_confirm = Some(name);
+    }
+
+    /// Dismiss the `close --force` confirmation without discarding, returning the
+    /// name that was pending (so the caller can dispatch the discard on confirm).
+    pub fn take_close_confirm(&mut self) -> Option<String> {
+        self.close_confirm.take()
     }
 
     /// Whether the update-confirmation modal is open.

@@ -94,6 +94,43 @@ fn render_frame_overlays_the_quit_confirmation_modal() {
 }
 
 #[test]
+fn render_frame_overlays_the_close_confirmation_modal() {
+    let mut state = state_with_sessions(&["alpha", "beta"]);
+    state.open_close_confirm("beta".to_string());
+    let frame = render_frame(24, 80, &state);
+    let joined = console::strip_ansi_codes(&frame.join("\n")).into_owned();
+    assert!(joined.contains("Close (force)"));
+    assert!(joined.contains("Session \"beta\""));
+    assert!(joined.contains("Discard uncommitted changes and delete it?"));
+    assert!(joined.contains("y / Enter: discard"));
+    // Every bordered line shares the same width (no line overflows `INNER`).
+    let widths: Vec<usize> = joined
+        .lines()
+        .filter(|line| line.trim_start().starts_with('│'))
+        .map(|line| console::measure_text_width(line.trim()))
+        .collect();
+    assert!(widths.iter().all(|&w| w == widths[0]));
+}
+
+#[test]
+fn close_confirmation_modal_clips_a_long_session_name_to_the_box() {
+    let long = "a-very-long-session-branch-name-that-would-overflow-the-modal";
+    let mut state = state_with_sessions(&["alpha"]);
+    state.open_close_confirm(long.to_string());
+    let frame = render_frame(24, 80, &state);
+    let joined = console::strip_ansi_codes(&frame.join("\n")).into_owned();
+    // The name is clipped with an ellipsis rather than pushing the border out, so
+    // every bordered line still shares one width.
+    assert!(joined.contains('…'));
+    let widths: Vec<usize> = joined
+        .lines()
+        .filter(|line| line.trim_start().starts_with('│'))
+        .map(|line| console::measure_text_width(line.trim()))
+        .collect();
+    assert!(widths.iter().all(|&w| w == widths[0]));
+}
+
+#[test]
 fn render_frame_overlays_the_update_confirmation_modal() {
     let mut state = state_with_sessions(&["alpha"]);
     state.set_update(crate::domain::version::Version::parse("9.9.9"));
