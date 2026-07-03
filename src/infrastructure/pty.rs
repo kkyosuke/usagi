@@ -329,6 +329,22 @@ impl PtySession {
         Arc::clone(&self.bell)
     }
 
+    /// A shared handle to the screen-grid parser, so a background watcher can
+    /// scan the pane's output (e.g. for pull-request URLs) without owning — or
+    /// blocking the render loop that borrows — the session. The watcher locks it
+    /// only briefly and off its own state lock (see the terminal pool's watcher).
+    pub fn parser_handle(&self) -> Arc<Mutex<vt100::Parser<ScreenCallbacks>>> {
+        Arc::clone(&self.parser)
+    }
+
+    /// A shared handle to the output generation counter (see
+    /// [`generation`](Self::generation)), so a background watcher can tell whether
+    /// the pane produced new output since it last scanned it — and skip the
+    /// (whole-grid) scan when it did not — without owning the session.
+    pub fn generation_handle(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.generation)
+    }
+
     /// The shell's process id — also its process-group id, since portable-pty
     /// launches it as a session leader (`setsid`), so it is the root a resource
     /// sampler walks to total the session's whole process tree (the shell and any

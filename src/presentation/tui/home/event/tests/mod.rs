@@ -1211,6 +1211,23 @@ fn selected_dir_roots_at_the_cursor_groups_workspace() {
     );
 }
 
+#[test]
+fn pending_pr_link_updates_refresh_sidebar_rows() {
+    let pr = crate::domain::workspace_state::PrLink {
+        number: 412,
+        url: "https://github.com/o/r/pull/412".to_string(),
+    };
+    let monitor =
+        MonitorHandle::with_pr_link_updates(vec![(PathBuf::from("/r/feat"), vec![pr.clone()])]);
+    let mut state = sample_state();
+
+    assert!(apply_pending_pr_links(&mut state, &monitor));
+    assert_eq!(state.list().worktrees()[1].pr, vec![pr]);
+    // The drain is one-shot; a second pass has nothing to apply and should not
+    // force a repaint.
+    assert!(!apply_pending_pr_links(&mut state, &monitor));
+}
+
 mod attached;
 mod background_tasks;
 mod clicks;

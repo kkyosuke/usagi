@@ -332,6 +332,14 @@ fn apply_pending_refresh(state: &mut HomeState, refresh: &SessionsRefreshHandle)
     }
 }
 
+fn apply_pending_pr_links(state: &mut HomeState, monitor: &MonitorHandle) -> bool {
+    let mut changed = false;
+    for (root, prs) in monitor.take_pr_link_updates() {
+        changed |= state.set_pr_links(&root, prs);
+    }
+    changed
+}
+
 fn bump_interaction_epoch(wiring: &mut Wiring) {
     wiring.interaction_epoch = wiring.interaction_epoch.saturating_add(1);
 }
@@ -405,6 +413,11 @@ pub(super) fn event_loop(
         // (which the badge snapshot does not capture), so `refreshed` forces a
         // repaint below.
         let refreshed = apply_pending_refresh(&mut state, refresh);
+        // Apply PR URLs harvested from live background panes. Attached panes
+        // already update their own row directly from the pane driver; this drains
+        // the watcher path so detached/background sessions get the same immediate
+        // sidebar `#N` badges without waiting for a full git re-sync.
+        let pr_links_changed = apply_pending_pr_links(&mut state, monitor);
         // Flip the `ai` command on once the background local-LLM probe confirms it
         // is usable (drained once); until then the 在席 menu simply omits it. Force a
         // repaint so the change is reflected without waiting for the next keypress.
@@ -519,6 +532,7 @@ pub(super) fn event_loop(
             && !force_paint
             && !completed_any
             && !refreshed
+            && !pr_links_changed
             && !panel_animating
             && !badges_changed
             // A mascot blink (or the frame that ends one) is a moving part too, so

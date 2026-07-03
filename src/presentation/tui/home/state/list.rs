@@ -435,13 +435,13 @@ impl WorktreeList {
     /// Replaces the PR links of the row whose session root is `root`, returning
     /// whether the set changed.
     ///
-    /// Lets an attached pane reflect a freshly detected pull-request URL in the
-    /// sidebar `#N` badge immediately, instead of waiting for the next workspace
-    /// re-sync (a slow, per-worktree `git status`) to fold `pr-links/` into
-    /// `state.json`. The caller passes the store's accumulated, deduped set — the
-    /// same value the re-sync would compute — so the live badge matches what a
-    /// later sync produces. A `root` that matches no row (e.g. the workspace root,
-    /// which has no worktree) is a no-op.
+    /// Lets the attached pane or background watcher reflect a freshly detected
+    /// pull-request URL in the sidebar `#N` badge immediately, instead of waiting
+    /// for the next workspace re-sync (a slow, per-worktree `git status`) to fold
+    /// `pr-links/` into `state.json`. The caller passes the store's accumulated,
+    /// deduped set — the same value the re-sync would compute — so the live badge
+    /// matches what a later sync produces. A `root` that matches no row (e.g. the
+    /// workspace root, which has no worktree) is a no-op.
     pub fn set_pr_links(&mut self, root: &Path, prs: Vec<PrLink>) -> bool {
         let Some(wt) = self
             .groups
