@@ -146,11 +146,11 @@ pub enum SessionReorder {
     Failed(LogLine),
 }
 
-/// A transient "working…" indicator shown in the top-right corner while a
-/// blocking action runs (creating or bulk-removing sessions, launching a
-/// terminal / agent). It carries the `label` to show beside the loading rabbit
-/// and a `frame` tick that advances on each step, so painting it repeatedly
-/// animates the rabbit. Read by the renderer through [`HomeState::loading`].
+/// A transient "working…" indicator shown while a blocking action runs
+/// (creating or bulk-removing sessions, launching a terminal / agent). It
+/// carries a `label` describing the action and a `frame` tick that advances on
+/// each step, so painting it repeatedly animates the chosen loader. Read by the
+/// renderer through [`HomeState::loading`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoadingIndicator {
     label: String,
@@ -633,8 +633,8 @@ pub struct HomeState {
     /// hidden.
     update: Option<Version>,
     /// The transient "working…" indicator, set while a blocking action runs
-    /// (session create / bulk remove / terminal launch). While `Some` the
-    /// top-right corner shows the loading rabbit.
+    /// (session create / bulk remove / terminal launch). While `Some` the right
+    /// pane shows the launch loader.
     loading: Option<LoadingIndicator>,
     /// The rows of the background-task panel (session create / remove running off
     /// the event-loop thread), refreshed each frame from the shared task handle.
@@ -1781,9 +1781,8 @@ impl HomeState {
 
     /// Begin or advance the transient "working…" indicator with `label`, ticking
     /// its animation frame. Call it before each step of a blocking action (and
-    /// repaint) so the top-right loading rabbit appears and hops; a multi-step
-    /// action (e.g. a bulk removal) steps once per item so the rabbit animates as
-    /// it progresses.
+    /// repaint) so the loading indicator appears; a multi-step action (e.g. a
+    /// bulk removal) steps once per item so the loader animates as it progresses.
     pub fn step_loading(&mut self, label: impl Into<String>) {
         let frame = self.loading.as_ref().map_or(0, |l| l.frame + 1);
         self.loading = Some(LoadingIndicator {
@@ -1793,15 +1792,13 @@ impl HomeState {
     }
 
     /// Clear the "working…" indicator once the blocking action has finished, so
-    /// the top-right corner returns to its resting state (the update notice, or
-    /// nothing).
+    /// the screen returns to its resting state.
     pub fn finish_loading(&mut self) {
         self.loading = None;
     }
 
     /// The transient "working…" indicator, when an action is in flight — the
-    /// top-right loading rabbit is shown (taking the corner over the update
-    /// notice) only while this is `Some`.
+    /// launch loader is shown only while this is `Some`.
     pub fn loading(&self) -> Option<&LoadingIndicator> {
         self.loading.as_ref()
     }
@@ -2468,6 +2465,27 @@ impl HomeState {
         }
         self.touch_active(Utc::now());
         self.enter_focus_surface();
+        true
+    }
+
+    /// Enter 在席 (Focus) on the session named `name`, landing on its **existing**
+    /// live pane (whatever tab the pool has active) rather than the trailing
+    /// "+ new" action surface — the mirror of [`enter_focus_named`] used when the
+    /// user did not ask for a fresh tab. Falls back to the "+ new" surface for an
+    /// idle session (no live pane), where [`focus_on_new_tab`](Self::focus_on_new_tab)
+    /// is forced on anyway. Returns whether a session matched.
+    ///
+    /// Used by the auto-focus a finished `close` requests: the neighbouring
+    /// session opens in the state it was left in (its running agent/terminal),
+    /// not a new-tab prompt.
+    pub fn enter_focus_named_existing(&mut self, name: &str) -> bool {
+        if !self.enter_focus_named(name) {
+            return false;
+        }
+        // `enter_focus_surface` lands on the "+ new" tab; drop that so the
+        // session's existing pane shows (an idle one has no pane, so
+        // `focus_on_new_tab` stays true and the action surface shows regardless).
+        self.focus_new_tab = false;
         true
     }
 

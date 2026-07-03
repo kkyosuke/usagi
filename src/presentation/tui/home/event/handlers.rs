@@ -1271,15 +1271,15 @@ fn open_pane(
     // is already buffered, so the pane paints over the screen in the same beat.
     // Only a *fresh spawn* (a brand-new pane, or the session's first pane when
     // none is live yet) blocks while the PTY and agent CLI start up. Flashing the
-    // loading rabbit means painting the whole home frame for one tick; doing that
-    // on a re-attach is the visible flicker when switching sessions (the home
-    // screen blinks between the old pane and the new one), so restrict it to the
-    // spawning case where the wait is real.
+    // loading indicator means painting the whole home frame for one tick; doing
+    // that on a re-attach is the visible flicker when switching sessions (the
+    // home screen blinks between the old pane and the new one), so restrict it
+    // to the spawning case where the wait is real.
     let will_spawn = new_pane || (!known_live && (wiring.preview)(&dir, state.sidebar()).is_none());
     if will_spawn {
         // Spawning the PTY (and launching the agent CLI inside it) blocks for a
-        // beat; flash the loading rabbit in the top-right so the wait reads as
-        // deliberate, until the pane itself paints over the screen.
+        // beat; flash the right-pane-centred loading indicator so the wait reads
+        // as deliberate, until the pane itself paints over the screen.
         state.step_loading(if agent {
             "エージェント起動中…"
         } else {

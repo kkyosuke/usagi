@@ -444,9 +444,11 @@ pub(super) fn event_loop(
             // the list to match. Unlike that refresh — which deliberately keeps
             // the cursor put for background changes — this is the user's own
             // task landing, so moving the cursor onto it is the intended result.
+            // `close` auto-focuses a neighbouring *existing* session; land on its
+            // live pane when it has one instead of forcing the "+ new" tab.
             if let Some(focus) = focus {
                 if focus.interaction_epoch == wiring.interaction_epoch {
-                    state.enter_focus_named(&focus.name);
+                    state.enter_focus_named_existing(&focus.name);
                 }
             }
         }
