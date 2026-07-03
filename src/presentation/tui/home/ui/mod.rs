@@ -389,7 +389,10 @@ fn append_total_beside_mascot(rabbit: &mut [String], total: ResourceUsage, left_
     let needed =
         console::measure_text_width(&rabbit[feet]) + 2 + console::measure_text_width(&label);
     if needed <= left_w {
-        rabbit[feet].push_str(&format!("  {label}"));
+        // Append the gap and label in place; two `push_str`s avoid the throwaway
+        // `String` a `format!` would allocate on every paint that shows the total.
+        rabbit[feet].push_str("  ");
+        rabbit[feet].push_str(&label);
     }
 }
 
