@@ -131,6 +131,48 @@ fn drain(worktree: &Path) -> Option<Vec<String>> {
     })
 }
 
+/// Put `prompts` back at the **front** of the live queue for the session rooted
+/// at `worktree`, ahead of anything queued since they were taken.
+///
+/// [`take_all`] drains the whole queue in one shot before the caller delivers
+/// it; if delivery then fails partway (e.g. a PTY write to a wedged pane), the
+/// undelivered tail would otherwise be lost even though the caller was told the
+/// prompts were queued. This returns those prompts to the store in their
+/// original order so a later tick retries them. Because a concurrent [`append`]
+/// may have landed between the drain and here, the returned prompts are placed
+/// *before* the newer ones, preserving overall send order. An empty slice is a
+/// no-op (the file is left untouched). Best-effort like the rest of the store: a
+/// missing data dir or a contended lock drops the prompts rather than blocking
+/// the caller, matching [`take_all`]'s own "leave it for a later tick" stance.
+pub fn requeue(worktree: &Path, prompts: &[String]) -> Result<()> {
+    if prompts.is_empty() {
+        return Ok(());
+    }
+    let key = key(worktree);
+    let dir = dir(PROMPT_SUBDIR)?;
+    // Hold the store lock across the read-modify-write for the same reason
+    // [`append`] does: a concurrent append/drain must not race and drop a prompt.
+    let _lock = StoreLock::acquire(&dir)?;
+    let path = dir.join(file_name(&key));
+    // Anything appended since the drain (stamped as ours); a file for a different
+    // worktree or a corrupt one is treated as absent so we never adopt another
+    // session's prompts — the same stamp check `append` / `drain` apply.
+    let existing = match json_file::read::<LivePromptFile>(&path) {
+        Ok(Some(file)) if file.worktree.as_path() == key => file.prompts,
+        _ => Vec::new(),
+    };
+    let mut merged = prompts.to_vec();
+    merged.extend(existing);
+    json_file::write_atomic(
+        &dir,
+        &path,
+        &LivePromptFile {
+            worktree: key,
+            prompts: merged,
+        },
+    )
+}
+
 /// Discard any prompts queued for `worktree` (best-effort), so a session removed
 /// before its agent drained them — and later recreated at the same path — does
 /// not inherit prompts sent to the previous session. Called from session removal
@@ -284,6 +326,74 @@ mod tests {
             // Append treats the unreadable file as an empty queue and overwrites it.
             append(wt.path(), "recovered").unwrap();
             assert_eq!(take_all(wt.path()), vec!["recovered"]);
+        });
+    }
+
+    #[test]
+    fn requeue_restores_undelivered_prompts_for_a_later_take() {
+        with_data_dir(|_| {
+            let wt = tempfile::tempdir().unwrap();
+            // A batch is drained, but delivery fails after the first prompt, so the
+            // undelivered tail is put back — and a later drain hands it back in order.
+            append(wt.path(), "first").unwrap();
+            append(wt.path(), "second").unwrap();
+            append(wt.path(), "third").unwrap();
+            let taken = take_all(wt.path());
+            assert_eq!(taken, vec!["first", "second", "third"]);
+            // "first" delivered; "second"/"third" undelivered and returned.
+            requeue(wt.path(), &taken[1..]).unwrap();
+            assert_eq!(take_all(wt.path()), vec!["second", "third"]);
+        });
+    }
+
+    #[test]
+    fn requeue_places_undelivered_prompts_before_ones_appended_since() {
+        with_data_dir(|_| {
+            let wt = tempfile::tempdir().unwrap();
+            // A prompt is taken then fails to deliver; meanwhile a new send arrives.
+            append(wt.path(), "taken").unwrap();
+            let taken = take_all(wt.path());
+            assert_eq!(taken, vec!["taken"]);
+            append(wt.path(), "arrived-since").unwrap();
+            // Requeuing puts the retried prompt ahead of the newer one, so overall
+            // send order (taken before arrived-since) is preserved.
+            requeue(wt.path(), &taken).unwrap();
+            assert_eq!(take_all(wt.path()), vec!["taken", "arrived-since"]);
+        });
+    }
+
+    #[test]
+    fn requeue_of_nothing_is_a_no_op() {
+        with_data_dir(|_| {
+            let wt = tempfile::tempdir().unwrap();
+            append(wt.path(), "kept").unwrap();
+            // An empty requeue leaves the existing queue untouched and writes nothing.
+            requeue(wt.path(), &[]).unwrap();
+            assert_eq!(take_all(wt.path()), vec!["kept"]);
+        });
+    }
+
+    #[test]
+    fn requeue_does_not_adopt_another_worktrees_prompts() {
+        with_data_dir(|_| {
+            let wt = tempfile::tempdir().unwrap();
+            let other = tempfile::tempdir().unwrap();
+            // A colliding file stamped for another worktree sits at wt's name.
+            let dir = dir(PROMPT_SUBDIR).unwrap();
+            let path = dir.join(file_name(&key(wt.path())));
+            json_file::write_atomic(
+                &dir,
+                &path,
+                &LivePromptFile {
+                    worktree: key(other.path()),
+                    prompts: vec!["theirs".to_string()],
+                },
+            )
+            .unwrap();
+            // Requeuing as wt restamps the file as ours with only our prompt; the
+            // other worktree's prompt is never adopted.
+            requeue(wt.path(), &["ours".to_string()]).unwrap();
+            assert_eq!(take_all(wt.path()), vec!["ours"]);
         });
     }
 }

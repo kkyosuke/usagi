@@ -1340,16 +1340,34 @@ fn spawn_watcher(
 /// session's live agent pane. Only sessions that had a live agent pane when the
 /// watcher snapshotted them are passed here; sessions without one leave any
 /// queued prompts on disk for a later pane to drain. A failed PTY write leaves
-/// already drained prompts undelivered, so it is logged for diagnosis.
+/// the remaining (undelivered) prompts requeued for a later tick and stops the
+/// batch, so a wedged write never silently drops a prompt the sender was told
+/// was queued; the failure is also logged for diagnosis.
 fn deliver_live_prompts(targets: Vec<LivePromptTarget>) {
     for LivePromptTarget { path, input } in targets {
-        for prompt in agent_live_prompt_store::take_all(&path) {
-            let bytes = pane_input::encode_prompt_submit(&prompt, input.bracketed_paste());
+        let prompts = agent_live_prompt_store::take_all(&path);
+        for (index, prompt) in prompts.iter().enumerate() {
+            let bytes = pane_input::encode_prompt_submit(prompt, input.bracketed_paste());
             if let Err(err) = input.write(&bytes) {
+                // The write failed, so this prompt and every one after it in the
+                // batch are undelivered. Put them back at the front of the queue
+                // (ahead of anything appended since the drain) so a later tick
+                // retries them instead of losing prompts the sender was told were
+                // queued. Then stop this session's batch — a broken pipe will only
+                // fail the rest too.
+                let undelivered = &prompts[index..];
+                if let Err(requeue_err) = agent_live_prompt_store::requeue(&path, undelivered) {
+                    error_log::ErrorLog::record(&format!(
+                        "failed to requeue {} undelivered live prompt(s) for {}: {requeue_err:#}",
+                        undelivered.len(),
+                        path.display()
+                    ));
+                }
                 error_log::ErrorLog::record(&format!(
                     "failed to inject live prompt into {}: {err:#}",
                     path.display()
                 ));
+                break;
             }
         }
     }
