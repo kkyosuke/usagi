@@ -617,6 +617,13 @@ fn status_cell_right_aligns_the_status_and_blanks_the_root() {
     assert_eq!(local, format!(" {LOCAL_ICON} local"));
     // The root has no status: an all-blank field of the same width.
     assert_eq!(status_cell(None), " ".repeat(STATUS_COL));
+    // `New` (freshly cut) and `Dirty` (work in progress) are unbadged — the field
+    // is all blanks, the same as the root, so a fresh/dirty branch shows nothing.
+    assert_eq!(status_cell(Some(BranchStatus::New)), " ".repeat(STATUS_COL));
+    assert_eq!(
+        status_cell(Some(BranchStatus::Dirty)),
+        " ".repeat(STATUS_COL)
+    );
 }
 
 #[test]

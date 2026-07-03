@@ -63,9 +63,22 @@ pub(super) fn status_label(status: BranchStatus) -> String {
     status_style(status).apply_to(text).to_string()
 }
 
+/// Whether a branch lifecycle status is shown as a sidebar badge. `New` (freshly
+/// cut, no work yet) and `Dirty` (uncommitted work in progress) are deliberately
+/// **not** badged — they add noise without telling the user anything they don't
+/// already know — so only the settled states (`Local` / `Pushed` / `Synced`) get
+/// a badge on both the full sidebar and the rail.
+fn status_has_badge(status: BranchStatus) -> bool {
+    !matches!(status, BranchStatus::New | BranchStatus::Dirty)
+}
+
 /// The single colour-coded git-status glyph shown on the collapsed rail (the icon
-/// from [`status_label`] without the word), in the same colour.
+/// from [`status_label`] without the word), in the same colour — or a blank for an
+/// unbadged status (`New` / `Dirty`; see [`status_has_badge`]).
 fn rail_status_glyph(status: BranchStatus) -> String {
+    if !status_has_badge(status) {
+        return " ".to_string();
+    }
     status_style(status)
         .apply_to(status_icon(status))
         .to_string()
@@ -73,15 +86,16 @@ fn rail_status_glyph(status: BranchStatus) -> String {
 
 /// The line-1 right-edge status field: the colour-coded `<icon> <word>` label
 /// right-aligned within [`STATUS_COL`] columns, or all blanks when there is no
-/// status (the root row).
+/// badge — the root row (`None`) or an unbadged status (`New` / `Dirty`; see
+/// [`status_has_badge`]).
 pub(super) fn status_cell(status: Option<BranchStatus>) -> String {
     match status {
-        None => " ".repeat(STATUS_COL),
-        Some(status) => {
+        Some(status) if status_has_badge(status) => {
             let label = status_label(status);
             let pad = STATUS_COL.saturating_sub(console::measure_text_width(&label));
             format!("{}{label}", " ".repeat(pad))
         }
+        _ => " ".repeat(STATUS_COL),
     }
 }
 
@@ -3353,6 +3367,27 @@ mod tests {
             pr: Vec::new(),
             updated_at: Utc::now(),
         }
+    }
+
+    #[test]
+    fn rail_status_glyph_badges_settled_states_and_blanks_new_and_dirty() {
+        // `New` / `Dirty` are unbadged: a single blank so the rail's git column is
+        // empty for a fresh or work-in-progress branch.
+        assert_eq!(rail_status_glyph(BranchStatus::New), " ");
+        assert_eq!(rail_status_glyph(BranchStatus::Dirty), " ");
+        // The settled states still show their coloured glyph.
+        for status in [
+            BranchStatus::Local,
+            BranchStatus::Pushed,
+            BranchStatus::Synced,
+        ] {
+            let glyph = console::strip_ansi_codes(&rail_status_glyph(status)).into_owned();
+            assert_eq!(glyph, status_icon(status).to_string());
+        }
+        // The predicate itself: only new/dirty are unbadged.
+        assert!(!status_has_badge(BranchStatus::New));
+        assert!(!status_has_badge(BranchStatus::Dirty));
+        assert!(status_has_badge(BranchStatus::Synced));
     }
 
     #[test]
