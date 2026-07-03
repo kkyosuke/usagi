@@ -420,6 +420,48 @@ pub fn overlay_centered(base: &mut [String], width: usize, block: &[String]) {
     overlay_block(base, top, left, block_w, block);
 }
 
+/// Composites `block` centred inside a rectangular display region of `base`.
+///
+/// `region_left` / `region_width` bound the columns, and `region_top` /
+/// `region_height` bound the rows. The block is skipped when it cannot fit the
+/// region or when the region sits off-screen. As with [`overlay_centered`], rows
+/// are composited over the existing frame rather than blanking it, so the pane
+/// behind stays visible around the floating indicator.
+pub fn overlay_region_centered(
+    base: &mut [String],
+    width: usize,
+    region_left: usize,
+    region_width: usize,
+    region_top: usize,
+    region_height: usize,
+    block: &[String],
+) {
+    let block_w = block
+        .iter()
+        .map(|line| console::measure_text_width(line))
+        .max()
+        .unwrap_or(0);
+    let block_h = block.len();
+    if block_w == 0
+        || block_h == 0
+        || block_w > region_width
+        || block_h > region_height
+        || region_left >= width
+        || region_top >= base.len()
+    {
+        return;
+    }
+    let left = region_left + centered_padding(region_width, block_w);
+    if left + block_w > width {
+        return;
+    }
+    let top = region_top + region_height.saturating_sub(block_h) / 2;
+    if top >= base.len() {
+        return;
+    }
+    overlay_block(base, top, left, block_w, block);
+}
+
 /// Composites the pre-sized `block` onto `base` with its top-left at `(top,
 /// left)`, **clamped** so the whole block stays on screen: `left` is pulled back
 /// so the block's right edge fits `width`, and `top` is pulled up so its bottom
@@ -1166,6 +1208,59 @@ mod tests {
         );
         assert!(console::strip_ansi_codes(&base[0]).contains('A'));
         assert_eq!(base.len(), 1);
+    }
+
+    #[test]
+    fn overlay_region_centered_floats_inside_the_given_rectangle() {
+        // A 2×2 block centred inside the 10-column region starting at col 5 and
+        // the 4-row region starting at row 1 lands at col 9, row 2.
+        let mut base = vec![".".repeat(20); 6];
+        overlay_region_centered(
+            &mut base,
+            20,
+            5,
+            10,
+            1,
+            4,
+            &["XX".to_string(), "YY".to_string()],
+        );
+        assert_eq!(base[0], ".".repeat(20));
+        assert_eq!(base[1], ".".repeat(20));
+        assert_eq!(base[4], ".".repeat(20));
+        assert_eq!(base[5], ".".repeat(20));
+
+        let first = console::strip_ansi_codes(&base[2]).into_owned();
+        let second = console::strip_ansi_codes(&base[3]).into_owned();
+        assert_eq!(&first[9..11], "XX");
+        assert_eq!(&second[9..11], "YY");
+    }
+
+    #[test]
+    fn overlay_region_centered_is_skipped_when_it_cannot_fit_the_region() {
+        let mut base = vec!["keep".to_string(); 2];
+        overlay_region_centered(&mut base, 20, 5, 1, 0, 2, &["XX".to_string()]);
+        overlay_region_centered(
+            &mut base,
+            20,
+            5,
+            10,
+            0,
+            1,
+            &["X".to_string(), "Y".to_string()],
+        );
+        overlay_region_centered(&mut base, 20, 20, 10, 0, 2, &["X".to_string()]);
+        assert_eq!(base, vec!["keep".to_string(); 2]);
+    }
+
+    #[test]
+    fn overlay_region_centered_is_skipped_when_centering_would_leave_the_frame() {
+        let mut base = vec!["keep".to_string(); 2];
+        // The region itself may extend beyond the frame even though its left/top
+        // edge is visible. In that case the centred block would spill, so it is
+        // skipped instead of clamped into a misleading position.
+        overlay_region_centered(&mut base, 10, 8, 10, 0, 1, &["XXXXXX".to_string()]);
+        overlay_region_centered(&mut base, 10, 0, 1, 1, 4, &["X".to_string()]);
+        assert_eq!(base, vec!["keep".to_string(); 2]);
     }
 
     #[test]
