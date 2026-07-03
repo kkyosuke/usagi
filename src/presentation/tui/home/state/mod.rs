@@ -2471,6 +2471,27 @@ impl HomeState {
         true
     }
 
+    /// Enter 在席 (Focus) on the session named `name`, landing on its **existing**
+    /// live pane (whatever tab the pool has active) rather than the trailing
+    /// "+ new" action surface — the mirror of [`enter_focus_named`] used when the
+    /// user did not ask for a fresh tab. Falls back to the "+ new" surface for an
+    /// idle session (no live pane), where [`focus_on_new_tab`](Self::focus_on_new_tab)
+    /// is forced on anyway. Returns whether a session matched.
+    ///
+    /// Used by the auto-focus a finished `close` requests: the neighbouring
+    /// session opens in the state it was left in (its running agent/terminal),
+    /// not a new-tab prompt.
+    pub fn enter_focus_named_existing(&mut self, name: &str) -> bool {
+        if !self.enter_focus_named(name) {
+            return false;
+        }
+        // `enter_focus_surface` lands on the "+ new" tab; drop that so the
+        // session's existing pane shows (an idle one has no pane, so
+        // `focus_on_new_tab` stays true and the action surface shows regardless).
+        self.focus_new_tab = false;
+        true
+    }
+
     /// The row the previously focused session now sits at — the target `Ctrl-^`
     /// jumps to (vim's `Ctrl-^` / tmux's `last-window`) — or `None` when no other
     /// session has been focused yet or the previous one has since been removed.

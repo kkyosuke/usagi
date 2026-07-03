@@ -97,6 +97,22 @@ fn entering_focus_selects_the_new_tab() {
 }
 
 #[test]
+fn entering_focus_existing_selects_a_live_pane_instead_of_new_tab() {
+    // Close auto-focus lands on the neighbouring session's current live pane when
+    // one exists, rather than opening the "+ new" action surface.
+    let mut live = state();
+    assert!(live.enter_focus_named_existing("feature"));
+    live.set_terminal_tabs(vec!["agent".to_string(), "terminal".to_string()], 1);
+    assert!(!live.focus_on_new_tab());
+
+    // An idle session still falls back to "+ new" because there is no existing
+    // pane to show.
+    let mut idle = state();
+    assert!(idle.enter_focus_named_existing("feature"));
+    assert!(idle.focus_on_new_tab());
+}
+
+#[test]
 fn an_idle_session_is_always_on_the_new_tab() {
     // With no live panes published the "+ new" tab is the only one — navigation is
     // inert (no pane index to make active) and the selector never leaves it.
