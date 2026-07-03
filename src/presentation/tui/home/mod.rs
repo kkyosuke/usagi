@@ -1252,13 +1252,27 @@ fn restore_open_panes(
         dirs.push((wt.path.clone(), state::worktree_name(wt).to_string()));
     }
 
+    // Secret env is keyed by *workspace root*, and every session worktree of a
+    // workspace strips back to the same root (`session::workspace_root`), so a
+    // restore that spans the root plus N session worktrees would otherwise resolve
+    // the identical `op://` bindings N+1 times — each an `op read` subprocess with
+    // a multi-second timeout, run sequentially on the startup path. Memoize the
+    // resolution per workspace root so the `op` CLI is invoked once and reused,
+    // keeping startup from stalling on redundant 1Password reads.
+    let mut env_by_root: std::collections::HashMap<
+        PathBuf,
+        std::collections::BTreeMap<String, String>,
+    > = std::collections::HashMap::new();
+
     for (dir, label) in dirs {
         let Some(snapshot) = open_panes_store::load(&dir) else {
             continue;
         };
-        let pane_env = crate::infrastructure::env_resolver::resolve_workspace_env(
-            &crate::usecase::session::workspace_root(&dir),
-        );
+        let ws_root = crate::usecase::session::workspace_root(&dir);
+        let pane_env = env_by_root
+            .entry(ws_root.clone())
+            .or_insert_with(|| crate::infrastructure::env_resolver::resolve_workspace_env(&ws_root))
+            .clone();
         for pane in &snapshot.panes {
             let spawned = match pane.kind {
                 StoredPaneKind::Terminal => pool.borrow_mut().add_pane(

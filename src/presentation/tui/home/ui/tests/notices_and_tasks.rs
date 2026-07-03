@@ -189,11 +189,12 @@ fn task_status_line_is_empty_without_rows() {
 }
 
 #[test]
-fn render_frame_shows_the_task_status_alongside_the_spoken_update() {
+fn render_frame_speaks_task_status_before_the_update_notice() {
     use super::super::super::tasks::{TaskMark, TaskRow};
     let mut state = state_with(Vec::new());
-    // The task status (top-right corner) and the update notice (sidebar mascot)
-    // now live in different places, so both show at once.
+    // Operational status takes the mascot bubble first: an in-flight task should
+    // explain what usagi is doing now, while the update notice waits until the
+    // workspace is idle.
     state.set_update(crate::domain::version::Version::parse("9.9.9"));
     state.set_tasks(vec![TaskRow {
         label: "作成中… main".to_string(),
@@ -201,7 +202,27 @@ fn render_frame_shows_the_task_status_alongside_the_spoken_update() {
     }]);
     let joined = stripped(&render_frame(24, 100, &state));
     assert!(joined.contains("作成中… main"));
-    assert!(joined.contains("アップデートがあるぴょん"));
+    assert!(!joined.contains("アップデートがあるぴょん"));
+    assert!(joined.contains('┬'));
+}
+
+#[test]
+fn render_frame_summarises_multiple_task_rows_in_the_mascot_bubble() {
+    use super::super::super::tasks::{TaskMark, TaskRow};
+    let mut state = state_with(Vec::new());
+    state.set_tasks(vec![
+        TaskRow {
+            label: "作成中… main".to_string(),
+            mark: TaskMark::Running(0),
+        },
+        TaskRow {
+            label: "削除中… old".to_string(),
+            mark: TaskMark::Running(1),
+        },
+    ]);
+    let joined = stripped(&render_frame(24, 100, &state));
+    assert!(joined.contains("作成中… main"));
+    assert!(joined.contains("ほか 1 件"));
 }
 
 #[test]
@@ -313,10 +334,7 @@ fn run2_loading_centers_in_the_right_pane_while_an_action_runs() {
         .iter()
         .map(|line| console::strip_ansi_codes(line).into_owned())
         .collect();
-    assert!(
-        !plain.join("\n").contains("エージェント起動中…"),
-        "the old text label is replaced by the usagi run 2 loader",
-    );
+    assert!(plain.join("\n").contains("エージェント起動中…"));
     let row = plain
         .iter()
         .position(|line| line.contains("(｡･-･)"))
@@ -345,15 +363,17 @@ fn run2_loading_centers_in_the_right_pane_while_an_action_runs() {
 }
 
 #[test]
-fn run2_loading_has_priority_while_the_sidebar_speaks_the_update() {
+fn run2_loading_has_priority_in_the_sidebar_bubble() {
     // The run 2 loading block owns the right pane during a blocking action; the
-    // update notice lives on the sidebar mascot, so both show at once.
+    // sidebar mascot explains that action before showing informational update
+    // news.
     let mut state = state_with(Vec::new());
     state.set_update(crate::domain::version::Version::parse("9.9.9"));
     state.step_loading("作成中…");
     let joined = stripped(&render_frame(24, 100, &state));
     assert!(joined.contains("(｡･-･)"));
-    assert!(joined.contains("アップデートがあるぴょん"));
+    assert!(joined.contains("作成中…"));
+    assert!(!joined.contains("アップデートがあるぴょん"));
 }
 
 #[test]
