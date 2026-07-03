@@ -511,35 +511,6 @@ fn right_pane_overlays_the_read_only_note_in_switch() {
 }
 
 #[test]
-fn read_only_note_overlay_hides_on_dismiss_and_returns_on_move() {
-    let mut state = switch_state_with_note("do X\ndo Y");
-    assert!(
-        state.switch_note_visible(),
-        "the note auto-shows on selection"
-    );
-
-    // Dismissing it (the first `Esc`) hides the overlay without leaving 切替.
-    state.hide_switch_note();
-    assert!(!state.switch_note_visible(), "the dismissed note is hidden");
-    let hidden = stripped(&right_pane_contents(&state, 40, 12));
-    assert!(
-        !hidden.contains("do X"),
-        "the dismissed note does not render"
-    );
-
-    // Moving the cursor (here back onto the same session via a wrap) re-shows it:
-    // the dismissal belonged to the row just left.
-    state.switch_move_up(); // -> root
-    state.switch_move_down(); // -> alpha
-    assert!(state.switch_note_visible(), "moving re-shows the note");
-    let shown = stripped(&right_pane_contents(&state, 40, 12));
-    assert!(
-        shown.contains("do X"),
-        "the note renders again after moving"
-    );
-}
-
-#[test]
 fn read_only_note_overlay_elides_a_long_note() {
     let note = (0..8)
         .map(|i| format!("todo {i}"))

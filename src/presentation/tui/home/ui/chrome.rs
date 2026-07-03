@@ -438,13 +438,6 @@ pub(super) fn footer_line(width: usize, state: &HomeState) -> String {
     } else {
         match state.mode() {
         Mode::Switch => {
-            // While the highlighted session's note is showing, `Esc` first hides
-            // it (a second `Esc` then backs out), so the footer names that.
-            let esc = if state.switch_note_visible() {
-                "Esc close note"
-            } else {
-                "Esc back"
-            };
             // `s sort` names the waiting-first toggle and reflects its state.
             let sort = if state.sort_waiting() {
                 "s sort:on"
@@ -452,7 +445,7 @@ pub(super) fn footer_line(width: usize, state: &HomeState) -> String {
                 "s sort"
             };
             format!(
-                "[switch]  ↑↓ session / + row type/Enter new / K/J move / {sort} / ←→ tab / Enter focus / c new / r rename / n/Ctrl-E note / x close tab / : commands / ? keys / {esc}"
+                "[switch]  ↑↓ session / + row type/Enter new / K/J move / {sort} / ←→ tab / Enter focus / c new / r rename / n/Ctrl-E note / x close tab / : commands / ? keys / Esc back"
             )
         }
         // 在席 shares the 没入 prefix grammar under the prefix scheme: `Ctrl-O` is

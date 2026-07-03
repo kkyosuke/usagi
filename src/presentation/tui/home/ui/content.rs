@@ -102,7 +102,7 @@ pub fn cheatsheet(scheme: KeyScheme) -> Vec<LogLine> {
         key_row("r", "Rename the session"),
         key_row("n / Ctrl-E", "Edit the session note (Ctrl-E is IME-safe)"),
         key_row("Ctrl-^", "Jump to the previous session"),
-        key_row("Esc", "Close the note / back out"),
+        key_row("Esc", "Back out to where Switch was opened from"),
         LogLine::output(String::new()),
     ];
     lines.extend(focus_keys(scheme));
