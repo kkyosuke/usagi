@@ -97,6 +97,19 @@ fn a_click_on_the_create_row_from_focus_opens_the_inline_create_input() {
 }
 
 #[test]
+fn a_double_click_on_the_create_row_from_focus_opens_the_inline_create_input() {
+    // Users may naturally double-click the action row in 在席 as they do for
+    // confirming session rows. The first click opens the create input and the
+    // second click is swallowed by that overlay, so creation still proceeds.
+    let mut inputs = vec![click(0, CREATE_ROW), click(0, CREATE_ROW)];
+    inputs.extend(typed("focus").into_iter().map(|key| key.map(Input::Key)));
+    inputs.push(Ok(Input::Key(Key::Enter)));
+    inputs.push(Ok(Input::Key(Key::CtrlC)));
+    let created = run_capturing_creates_for_inputs(inputs, focused_state());
+    assert_eq!(created, vec!["focus"]);
+}
+
+#[test]
 fn a_click_while_the_command_palette_is_open_is_ignored() {
     // With the `:` palette open the click is swallowed, so closing it (`Esc`) and
     // pressing `Enter` focuses the still-selected root row, not the clicked `feat`.

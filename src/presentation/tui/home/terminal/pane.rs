@@ -110,9 +110,9 @@ pub enum PaneStep {
     /// `Ctrl-^` / tmux's `last-window`), attaching it when live. The caller
     /// re-roots the pane on that session.
     PrevSession,
-    /// A double click on a sidebar session row: leave 没入 to jump to that focus
-    /// row, attaching it when live — the confirm a double click does in 切替. The
-    /// caller re-roots the pane on it, like [`PrevSession`](Self::PrevSession).
+    /// A double click on a selectable sidebar row: leave 没入 to act on that row —
+    /// attaching a session when live, or opening inline creation when the row is
+    /// `+ new session`. The caller handles it like [`PrevSession`](Self::PrevSession).
     ToSession(usize),
     /// `Ctrl-Q`: leave 没入 to quit usagi. Every pane stays alive in the pool; the
     /// caller raises the quit-confirmation modal on the home screen rather than
@@ -637,8 +637,9 @@ fn wait(
 /// no drag opens the `#<number>` PR badge or terminal link under the pointer in the
 /// default browser (see [`ui::sidebar_pr_links_at`] / [`open_clicked_url`]), or —
 /// double-clicked on a sidebar session row — switches to that session
-/// ([`PaneStep::ToSession`], tracked across calls via `last_click`); a left click
-/// on a tab chip switches to that tab ([`PaneStep::ToTab`]; see
+/// ([`PaneStep::ToSession`], tracked across calls via `last_click`), or opens
+/// inline session creation when that row is `+ new session`; a left click on a
+/// tab chip switches to that tab ([`PaneStep::ToTab`]; see
 /// [`ui::attached_tab_at`]). Button-less motion updates
 /// `hover` so the link under the pointer lights up. The navigation keys are
 /// classified by the active `KeyScheme` (see
@@ -649,8 +650,9 @@ fn wait(
 /// tab in place ([`PaneStep::NextTab`] / [`PaneStep::PrevTab`]), zoom out to 在席
 /// ([`PaneStep::ToFocus`]), add an agent tab ([`PaneStep::NewAgentTab`]), open the
 /// note editor ([`PaneStep::OpenNote`]), jump to the previous session
-/// ([`PaneStep::PrevSession`]), or switch to a sidebar-clicked session
-/// ([`PaneStep::ToSession`]); toggling the sidebar stays in 没入. `Esc` and
+/// ([`PaneStep::PrevSession`]), switch to a sidebar-clicked session, or open
+/// creation from the sidebar create row ([`PaneStep::ToSession`]); toggling the
+/// sidebar stays in 没入. `Esc` and
 /// `Ctrl-W` always reach the shell; tabs are closed from 切替 (`x`). Other events
 /// are ignored so the next redraw picks up any new size.
 #[allow(clippy::too_many_arguments)]
@@ -887,11 +889,13 @@ fn pump_input(
                                 )
                             })
                             .flatten();
-                        // Otherwise a plain click on a sidebar session row arms a
-                        // double click; a second click on the same row within
+                        // Otherwise a plain click on a sidebar row arms a double
+                        // click; a second click on the same row within
                         // `DOUBLE_CLICK` switches to that session (attaching when
-                        // live) — the confirm 切替 does, so the list is navigable
-                        // without first zooming out. A single click only arms.
+                        // live), or opens inline creation when the row is the
+                        // persistent `+ new session` affordance — the same
+                        // confirm 切替 / 在席 expose without first zooming out. A
+                        // single click only arms.
                         let session = (badge.is_none() && !dragged)
                             .then(|| {
                                 ui::left_pane_session_at(
