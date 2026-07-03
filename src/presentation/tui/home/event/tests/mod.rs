@@ -165,6 +165,12 @@ fn noop_config(_: &Term) -> Result<Option<ConfigReload>> {
     Ok(Some(reload(SessionActionUi::Menu)))
 }
 
+/// A no-op `open_chat` hook: the chat screen is real terminal IO, so the loop
+/// tests never run it; they only assert the dispatch path reached it.
+fn noop_chat(_: &Term) -> Result<()> {
+    Ok(())
+}
+
 fn noop_preview(_: &Path, _: Sidebar) -> Option<TerminalView> {
     None
 }
@@ -769,6 +775,7 @@ fn run_with_tasks(
     let mut dispatch_remove_w = |_: &Path, name: &str, force: bool, _| dispatch_remove(name, force);
     let mut unite_resolve: fn(&str) -> std::result::Result<GroupSource, String> = no_unite_resolve;
     let mut tab_action = |_: &mut HomeState, _: &Path, _: usize, _: TabMenuAction| {};
+    let mut chat: fn(&Term) -> Result<()> = noop_chat;
     let mut wiring = Wiring {
         interaction_epoch: 0,
         workspace_root: Path::new("/ws"),
@@ -785,6 +792,7 @@ fn run_with_tasks(
         open_terminal: &mut open,
         open_url: &mut open_url,
         open_config: &mut config,
+        open_chat: &mut chat,
         preview: &mut preview,
         tab_op: &mut tab_op,
         close_tab: &mut close,
@@ -832,6 +840,7 @@ fn run_with_live_session(reader: &mut dyn KeyReader) -> Result<Outcome> {
     let mut dispatch_update = || {};
     let mut unite_resolve: fn(&str) -> std::result::Result<GroupSource, String> = no_unite_resolve;
     let mut tab_action = |_: &mut HomeState, _: &Path, _: usize, _: TabMenuAction| {};
+    let mut chat: fn(&Term) -> Result<()> = noop_chat;
     let mut wiring = Wiring {
         interaction_epoch: 0,
         workspace_root: Path::new("/ws"),
@@ -848,6 +857,7 @@ fn run_with_live_session(reader: &mut dyn KeyReader) -> Result<Outcome> {
         open_terminal: &mut open,
         open_url: &mut open_url,
         open_config: &mut config,
+        open_chat: &mut chat,
         preview: &mut preview,
         tab_op: &mut tab_op,
         close_tab: &mut close,
@@ -982,6 +992,7 @@ fn unite_add_and_remove_run_through_the_palette() {
     let mut open_url: fn(&str) = noop_open_url;
     let mut dispatch_update = || {};
     let mut tab_action = |_: &mut HomeState, _: &Path, _: usize, _: TabMenuAction| {};
+    let mut chat: fn(&Term) -> Result<()> = noop_chat;
     let mut wiring = Wiring {
         interaction_epoch: 0,
         workspace_root: Path::new("/ws"),
@@ -998,6 +1009,7 @@ fn unite_add_and_remove_run_through_the_palette() {
         open_terminal: &mut open,
         open_url: &mut open_url,
         open_config: &mut config,
+        open_chat: &mut chat,
         preview: &mut preview,
         tab_op: &mut tab_op,
         close_tab: &mut close,

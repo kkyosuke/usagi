@@ -15,7 +15,7 @@
 | 入力面 | スコープ | 出るコマンド |
 |---|---|---|
 | コマンドパレット（統括 / Overview。`:` で開く） | Workspace（全体） | `session` / `unite` / `issue` / `config` / `preview` |
-| 在席（Focus）の右ペイン | Session（個別） | `agent` / `ai` / `close` / `terminal`（Menu は引数不要の `agent` / `close` / `terminal` だけをコマンド名のアルファベット順に並べる。`ai <prompt>` は Prompt で入力する） |
+| 在席（Focus）の右ペイン | Session（個別） | `agent` / `ai` / `chat` / `close` / `terminal`（Menu は引数不要の `agent` / `chat` / `close` / `terminal` をコマンド名のアルファベット順に並べる。`ai <prompt>` は引数が要るので Prompt で入力する） |
 | 両方 | 共通 | `man` / `history` / `clear` / `quit` |
 
 ワークスペース全体のコマンドは、切替（Switch）・在席（Focus）から `:`（コロン）で開く**コマンドパレット**（中央オーバーレイ）で実行します。
@@ -38,6 +38,7 @@
 | `terminal` | 選択中セッションの worktree でシェルを右ペインに埋め込み起動（Session スコープ） |
 | `agent [名前]` | `terminal` ＋ Agent CLI を起動（Session スコープ）。引数なしは設定中の既定 CLI を起動。名前（`claude` / `codex` / `codex-fugu` / `sakana.ai` / `gemini`）を付けるとその CLI を起動する |
 | `ai <prompt>` | 設定中の既定 Agent CLI を選択中セッションの worktree で起動し、`<prompt>` を初期プロンプトとして渡す（Session スコープ。Prompt で入力する） |
+| `chat` | ローカル LLM（Ollama 経由）と対話する専用画面を開く（Session スコープ）。外部 Agent CLI ではなくローカルモデルに直接話しかけるため、クラウド Agent のトークンを消費しない |
 | `close [--force]` | 在席中のセッションを削除して切替へ移る（`session remove <名前>` と同じ。既定では未コミット変更があれば削除を拒否し `--force` の案内をログに出す。`--force` / `-f` で未コミット変更を破棄。Session スコープ） |
 | `config` | 現在のワークスペースのローカル設定を編集する Config 画面を開く（Workspace スコープ） |
 
@@ -149,6 +150,19 @@ Codex は `codex resume --last`（`codex-fugu` も同様に `codex-fugu resume -
 
 在席の **Menu** は引数を入力できないため `ai` 行を出しません。`ai` を使うワークスペースでは
 [設定](../05-settings.md#設定項目)の `session_action_ui` を `prompt` にします。
+
+## chat
+
+**在席の右ペイン**から実行します。ローカル LLM（[設定](../05-settings.md#設定項目)の `local_llm.model` が指すモデルを
+Ollama で提供）と対話する専用画面を全画面で開きます。`agent` / `ai` が外部 Agent CLI を worktree で起動するのに対し、`chat` は
+ローカルモデルに直接話しかけるので、ちょっとした質問にクラウド Agent のトークンを使いません。
+
+- 引数は取りません。在席の **Menu**（`agent` / `chat` / `close` / `terminal` をアルファベット順に並べる）でカーソル＋`Enter`、
+  または Prompt に `chat` と打つと開きます。
+- 画面では入力欄に書いて `Enter` で送信、`↑`/`↓` で履歴をスクロール、`Esc`（または `Ctrl-C`）で在席へ戻ります。応答を待つ間は
+  スピナーを表示し、入力は応答が届くまで読み取り専用になります。
+- モデル呼び出しはバックグラウンドスレッドで `ollama run` を実行します。Ollama サーバーが起動していなければ自動で立ち上げ、
+  失敗（未インストール等）は会話内にエラーとして表示します。対話は 1 ターンごとにそれまでの会話を丸ごとモデルへ渡して文脈を保ちます。
 
 ## close
 

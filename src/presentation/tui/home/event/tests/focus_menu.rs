@@ -3,8 +3,8 @@ use super::*;
 #[test]
 fn focus_menu_moves_and_runs_terminal_via_enter() {
     // Switch -> focus "main" (idle, so just Focus). The menu lists its commands
-    // alphabetically and highlights "agent" by default; move down past "close" to
-    // "terminal", then Enter runs it (attaches).
+    // alphabetically (agent, chat, close, terminal) and highlights "agent" by
+    // default; move down to "terminal", then Enter runs it (attaches).
     let opened = RefCell::new(Vec::new());
     let mut open = |_h: &mut HomeState, d: &Path, a: bool, _n: bool| {
         opened.borrow_mut().push((d.to_path_buf(), a));
@@ -16,7 +16,8 @@ fn focus_menu_moves_and_runs_terminal_via_enter() {
     keys.push(Ok(Key::Enter)); // Switch
     keys.push(Ok(Key::ArrowDown)); // cursor "main" (/r/main)
     keys.push(Ok(Key::Enter)); // focus main (idle)
-    keys.push(Ok(Key::Char('j'))); // agent -> close
+    keys.push(Ok(Key::Char('j'))); // agent -> chat
+    keys.push(Ok(Key::ArrowDown)); // chat -> close
     keys.push(Ok(Key::ArrowDown)); // close -> terminal
     keys.push(Ok(Key::Enter)); // run terminal (attach) -> Closed -> Focus
     keys.push(Ok(Key::Escape)); // Focus -> Switch
@@ -251,8 +252,8 @@ fn focus_menu_refuses_a_session_command_without_a_menu_arm() {
     // A future Session-scope command registered without a `run_focus_command`
     // arm appears in the 在席 menu (alphabetically last here), but Enter on it
     // must not silently launch the default agent — it logs an error and stays
-    // put. The menu lists agent (0), close (1), terminal (2), zzz (3); ArrowUp
-    // from the default "agent" wraps straight onto "zzz".
+    // put. The menu lists agent (0), chat (1), close (2), terminal (3), zzz (4);
+    // ArrowUp from the default "agent" wraps straight onto "zzz".
     let opened = RefCell::new(Vec::new());
     let mut open = |_h: &mut HomeState, _d: &Path, a: bool, _n: bool| {
         opened.borrow_mut().push(a);
@@ -788,6 +789,142 @@ fn focus_esc_on_the_new_tab_over_panes_steps_back_onto_the_pane() {
     // The `Esc` opened nothing (it stayed in Focus); the trailing `Enter`
     // re-attached the pane it stepped onto, both with `new_pane = false`.
     assert_eq!(*opens.borrow(), vec![(false, false), (false, false)]);
+}
+
+/// Drive the loop with a capturing `open_chat` hook, so the tests can assert the
+/// chat screen was reached (and exercise its error path) without taking over a
+/// real terminal. After the scripted keys drain, [`ScriptedReader`] falls back to
+/// `Ctrl-C`, quitting.
+fn run_with_chat(
+    keys: Vec<io::Result<Key>>,
+    state: HomeState,
+    open_chat: &mut dyn FnMut(&Term) -> Result<()>,
+) -> Outcome {
+    let term = Term::stdout();
+    let mut reader = ScriptedReader::new(keys);
+    let monitor = MonitorHandle::detached();
+    let tasks = TaskHandle::new();
+    let update = UpdateHandle::new();
+    let mut persist: fn(&str) = noop_persist;
+    let mut dispatch_create = |_: &Path, _: &str, _: u64| {};
+    let mut rename = |_: &Path, n: &str, l: &str| noop_rename(n, l);
+    let mut set_note_fake = |_: &Path, n: &str, t: &str| noop_set_note(n, t);
+    let mut reorder_fake: fn(&str, bool) -> SessionReorder = noop_reorder;
+    let mut dispatch_remove = |_: &Path, _: &str, _: bool, _| {};
+    let mut evict = |_: &Path| {};
+    let mut branches: fn() -> Vec<String> = no_branches;
+    let mut open: fn(&mut HomeState, &Path, bool, bool) -> Result<PaneExit> = noop_open;
+    let mut config: fn(&Term) -> Result<Option<ConfigReload>> = noop_config;
+    let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = noop_preview;
+    let mut tab_op: fn(&Path, Option<TabNav>) -> (Vec<String>, usize) = noop_tab_op;
+    let mut close: fn(&mut HomeState, &Path) = noop_close;
+    let mut save_resume = |_: &str, _: ResumeLevel| {};
+    let mut save_last_active = |_: &[(String, DateTime<Utc>)]| {};
+    let mut open_url: fn(&str) = noop_open_url;
+    let mut dispatch_update = || {};
+    let mut unite_resolve = no_unite_resolve;
+    let mut tab_action = |_: &mut HomeState, _: &Path, _: usize, _: TabMenuAction| {};
+    let mut wiring = Wiring {
+        interaction_epoch: 0,
+        workspace_root: Path::new("/ws"),
+        persist: &mut persist,
+        dispatch_create: &mut dispatch_create,
+        rename_display: &mut rename,
+        set_note: &mut set_note_fake,
+        reorder_session: &mut reorder_fake,
+        dispatch_remove: &mut dispatch_remove,
+        unite_resolve: &mut unite_resolve,
+        dispatch_update: &mut dispatch_update,
+        evict_pool: &mut evict,
+        existing_branches: &mut branches,
+        open_terminal: &mut open,
+        open_url: &mut open_url,
+        open_config: &mut config,
+        open_chat,
+        preview: &mut preview,
+        tab_op: &mut tab_op,
+        close_tab: &mut close,
+        tab_action: &mut tab_action,
+        save_resume: &mut save_resume,
+        save_last_active: &mut save_last_active,
+    };
+    event_loop(
+        &term,
+        &mut reader,
+        state,
+        &monitor,
+        &update,
+        &SessionsRefreshHandle::new(),
+        &OneShot::<Vec<AgentCli>>::new(),
+        &tasks,
+        &mut wiring,
+    )
+    .unwrap()
+}
+
+#[test]
+fn focus_menu_chat_row_reaches_the_default_wiring_hook() {
+    // Selecting `chat` from the menu reaches the `open_chat` hook through the
+    // default wiring (a no-op in the loop tests) and returns to Focus, from which
+    // Esc steps out to Switch.
+    let mut keys = cmd("session switch feat");
+    keys.push(Ok(Key::Enter)); // Focus feat
+    keys.push(Ok(Key::ArrowDown)); // agent -> chat
+    keys.push(Ok(Key::Enter)); // open chat (no-op) -> back to Focus
+    keys.push(Ok(Key::Escape)); // Focus -> Switch
+    keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
+    assert!(matches!(run(keys, sample_state()).unwrap(), Outcome::Quit));
+}
+
+#[test]
+fn focus_menu_chat_row_opens_the_chat_screen() {
+    // The 在席 menu lists `chat` (agent, chat, close, terminal); ArrowDown lands on
+    // it and Enter hands off to the chat screen, then returns to Focus.
+    let count = std::cell::Cell::new(0u32);
+    let mut open_chat = |_: &Term| {
+        count.set(count.get() + 1);
+        Ok(())
+    };
+    let mut keys = cmd("session switch feat");
+    keys.push(Ok(Key::Enter)); // Focus feat (menu, "agent" default)
+    keys.push(Ok(Key::ArrowDown)); // agent -> chat
+    keys.push(Ok(Key::Enter)); // open the chat screen -> back to Focus
+    keys.push(Ok(Key::Escape)); // Focus -> Switch
+    let outcome = run_with_chat(keys, sample_state(), &mut open_chat);
+    assert!(matches!(outcome, Outcome::Quit));
+    assert_eq!(count.get(), 1, "the menu's chat row opened the chat screen");
+}
+
+#[test]
+fn focus_prompt_chat_opens_the_chat_screen() {
+    // Typing `chat` in the 在席 prompt dispatches the same open-chat effect.
+    let count = std::cell::Cell::new(0u32);
+    let mut open_chat = |_: &Term| {
+        count.set(count.get() + 1);
+        Ok(())
+    };
+    let mut keys = cmd("session switch feat");
+    keys.push(Ok(Key::Enter)); // Focus feat (prompt UI)
+    keys.extend(typed("chat"));
+    keys.push(Ok(Key::Enter)); // run `chat` -> chat screen -> back to Focus
+    keys.push(Ok(Key::Escape)); // Focus -> Switch
+    let outcome = run_with_chat(keys, prompt_state(), &mut open_chat);
+    assert!(matches!(outcome, Outcome::Quit));
+    assert_eq!(count.get(), 1, "the prompt's `chat` opened the chat screen");
+}
+
+#[test]
+fn focus_menu_chat_logs_a_failure_without_leaving_focus() {
+    // A chat screen that fails to run is reported in the results band, not
+    // propagated — Focus survives it (the following Esc still steps out to Switch).
+    let mut open_chat = |_: &Term| Err(anyhow::anyhow!("no model"));
+    let mut keys = cmd("session switch feat");
+    keys.push(Ok(Key::Enter)); // Focus feat
+    keys.push(Ok(Key::ArrowDown)); // agent -> chat
+    keys.push(Ok(Key::Enter)); // open chat -> errors -> logged, stays in Focus
+    keys.push(Ok(Key::Escape)); // Focus -> Switch
+    let outcome = run_with_chat(keys, sample_state(), &mut open_chat);
+    assert!(matches!(outcome, Outcome::Quit));
 }
 
 #[test]

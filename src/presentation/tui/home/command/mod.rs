@@ -76,6 +76,12 @@ pub enum Effect {
     /// event loop resolves the directory and configured CLI, queues the prompt for
     /// the fresh agent spawn, and launches the pane.
     OpenAgentPrompt(String),
+    /// Open the local-LLM chat screen (the user ran `chat` in 在席, or picked its
+    /// menu row). Unlike [`OpenAgent`](Self::OpenAgent) / [`OpenAgentPrompt`](Self::OpenAgentPrompt),
+    /// which launch an external agent CLI in the worktree, this hands off to a
+    /// dedicated screen that converses with the workspace's configured local LLM
+    /// (via Ollama). The event loop owns the screen and repaints over it on return.
+    OpenChat,
     /// Close (remove) the focused session (the user ran `close` in 在席). It is the
     /// session equivalent of `session remove <name>`: a clean session's
     /// worktrees/branches are deleted. `force` mirrors `session remove`'s
@@ -132,6 +138,7 @@ impl Effect {
             | Effect::OpenTerminal
             | Effect::OpenAgent(_)
             | Effect::OpenAgentPrompt(_)
+            | Effect::OpenChat
             | Effect::OpenConfig
             | Effect::CloseSession { .. }
             | Effect::OpenPreview(_)

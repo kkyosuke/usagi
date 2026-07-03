@@ -2464,7 +2464,7 @@ impl HomeState {
     }
 
     /// The Session-scope commands the 在席 menu lists, in alphabetical order by
-    /// name (`agent`, `close`, `terminal`). Prompt-taking commands such as
+    /// name (`agent`, `chat`, `close`, `terminal`). Prompt-taking commands such as
     /// `ai <prompt>` are kept out of the pickable menu because they need typed
     /// arguments; they are available from the Prompt UI instead. `close` is
     /// filtered out on the root row, which belongs to no session and so cannot

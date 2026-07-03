@@ -1008,6 +1008,17 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
         }
     };
 
+    // Opening `chat` (在席's `chat` command / menu row) hands off to the local-LLM
+    // chat screen, talking to the workspace's configured local model (resolved
+    // from the effective settings each time it opens, so a model change in config
+    // takes effect without reopening home). It owns the terminal until dismissed;
+    // the event loop repaints over it on return.
+    let chat_root = workspace.path.clone();
+    let mut open_chat = |t: &Term| -> Result<()> {
+        let model = effective_settings(&chat_root).local_llm.model;
+        crate::presentation::tui::chat::run(t, &model)
+    };
+
     // Persist where the user is when they quit — the focused session and how
     // deeply they were engaged with it — so the next launch restores it alongside
     // the panes. Gated by the same setting as the pane restore (the two are one
@@ -1110,6 +1121,7 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
         open_terminal: &mut open_terminal,
         open_url: &mut open_url,
         open_config: &mut open_config,
+        open_chat: &mut open_chat,
         preview: &mut preview,
         tab_op: &mut tab_op,
         close_tab: &mut close_tab,

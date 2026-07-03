@@ -469,6 +469,17 @@ fn ai_requests_opening_the_configured_agent_with_a_prompt() {
 }
 
 #[test]
+fn chat_opens_the_local_llm_chat_screen() {
+    // `chat` takes no arguments and returns the open-chat side effect; any
+    // trailing text is ignored (the screen owns the conversation, not the line).
+    let result = registry().dispatch("chat", &[], &[]);
+    assert!(result.lines.is_empty());
+    assert_eq!(result.effect, Effect::OpenChat);
+    let result = registry().dispatch("chat ignored", &[], &[]);
+    assert_eq!(result.effect, Effect::OpenChat);
+}
+
+#[test]
 fn ai_requires_a_prompt() {
     let result = registry().dispatch("ai   ", &[], &[]);
     assert_eq!(result.effect, Effect::None);
@@ -904,7 +915,7 @@ fn commands_in_scope_lists_a_scopes_own_commands_in_order() {
         .iter()
         .map(|i| i.name)
         .collect();
-    assert_eq!(session, vec!["terminal", "agent", "ai", "close"]);
+    assert_eq!(session, vec!["terminal", "agent", "ai", "chat", "close"]);
     // Workspace scope lists its own commands and none of the session ones.
     let workspace: Vec<&str> = registry()
         .commands_in_scope(CommandScope::Workspace)

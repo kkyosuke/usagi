@@ -327,7 +327,9 @@ fn focus_menu_agent_row_shows_the_default_and_expands_into_a_picker() {
 fn focus_close_row_shows_chevron_and_expands_into_a_picker() {
     let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
     state.enter_focus(1);
-    // Alphabetical order: agent is first; move down once to land on close.
+    // Alphabetical order (agent, chat, close, terminal): move down twice to land
+    // on close.
+    state.focus_menu_move_down();
     state.focus_menu_move_down();
     // The close row shows ▸ and "→ expand" in the hint while cursor is on it.
     let on_close = stripped(&right_pane_contents(&state, 60, 18));

@@ -514,7 +514,8 @@ impl Command for AgentCommand {
 
 /// `ai <prompt>`: open the configured AI agent in the selected worktree and pass
 /// it an opening prompt. This is the direct "tell the session's agent to do this"
-/// command, distinct from `agent`, which only opens the agent shell.
+/// command, distinct from `agent`, which only opens the agent shell, and from
+/// `chat`, which converses with the local LLM instead of launching an agent CLI.
 ///
 /// The command itself only validates that a prompt was provided and returns a
 /// side effect. The event loop resolves the active worktree and configured
@@ -551,6 +552,36 @@ impl Command for AiCommand {
         CommandResult {
             lines: Vec::new(),
             effect: Effect::OpenAgentPrompt(prompt.to_string()),
+        }
+    }
+}
+
+/// `chat`: open the local-LLM chat screen in a session, to converse with the
+/// workspace's configured local model (served via Ollama) without leaving usagi.
+///
+/// Unlike `agent` / `ai`, which launch an external agent CLI in the worktree,
+/// this talks directly to the local model — a quick question costs no cloud-agent
+/// tokens. It takes no arguments; the command only returns the side effect the
+/// event loop turns into the dedicated chat screen.
+pub(super) struct ChatCommand;
+
+impl Command for ChatCommand {
+    fn name(&self) -> &'static str {
+        "chat"
+    }
+
+    fn description(&self) -> &'static str {
+        "Chat with the local LLM in a dedicated screen"
+    }
+
+    fn scope(&self) -> CommandScope {
+        CommandScope::Session
+    }
+
+    fn run(&self, _args: &str, _ctx: &CommandContext) -> CommandResult {
+        CommandResult {
+            lines: Vec::new(),
+            effect: Effect::OpenChat,
         }
     }
 }

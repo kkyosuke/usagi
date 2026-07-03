@@ -186,6 +186,11 @@ pub(super) struct Wiring<'a> {
     /// Open the settings screen, re-reading the affected settings on return
     /// (`None` when the user quit the app from it).
     pub open_config: &'a mut dyn FnMut(&Term) -> Result<Option<ConfigReload>>,
+    /// Open the local-LLM chat screen, returning when the user leaves it. Like
+    /// [`open_config`](Self::open_config) it owns the terminal until dismissed;
+    /// [`super::run`] wires it to the chat screen against the workspace's
+    /// configured local model, tests pass a no-op.
+    pub open_chat: &'a mut dyn FnMut(&Term) -> Result<()>,
     /// Snapshot a session's live terminal for the 切替 preview, or `None` when it
     /// has no running shell — also the live/idle test the focus handlers use. The
     /// snapshot is sized to the given sidebar state (the preview widens when the
@@ -1249,6 +1254,11 @@ pub(crate) fn event_loop_compat(
     // never shell out; the open path itself is covered by the dedicated popup tests
     // that build a capturing `Wiring`.
     let mut open_url = |_: &str| {};
+    // Opening the chat screen is real terminal IO wired in `super::run`; here it
+    // is a no-op, so the compat-shim loop tests never take over the terminal. The
+    // dispatch path is covered by the focus-handler tests that build a capturing
+    // `Wiring`.
+    let mut open_chat = |_: &Term| Ok(());
     let mut tab_action = |_: &mut HomeState, _: &Path, _: usize, _: TabMenuAction| {};
     // Exercise the test-shim no-op once so coverage does not treat this helper
     // closure as an uncovered function. The production tab-action path is covered
@@ -1271,6 +1281,7 @@ pub(crate) fn event_loop_compat(
         open_terminal: &mut open_terminal,
         open_url: &mut open_url,
         open_config: &mut open_config,
+        open_chat: &mut open_chat,
         preview: &mut preview,
         tab_op: &mut tab_op,
         close_tab: &mut close_tab,

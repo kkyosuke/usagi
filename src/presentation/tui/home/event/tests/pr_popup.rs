@@ -86,6 +86,7 @@ fn run_pr_clicks(inputs: Vec<io::Result<Input>>, state: HomeState) -> (Vec<Strin
     let mut dispatch_update = || {};
     let mut unite_resolve: fn(&str) -> std::result::Result<GroupSource, String> = no_unite_resolve;
     let mut tab_action = |_: &mut HomeState, _: &Path, _: usize, _: TabMenuAction| {};
+    let mut chat: fn(&Term) -> Result<()> = noop_chat;
     let mut wiring = Wiring {
         interaction_epoch: 0,
         workspace_root: Path::new("/ws"),
@@ -102,6 +103,7 @@ fn run_pr_clicks(inputs: Vec<io::Result<Input>>, state: HomeState) -> (Vec<Strin
         open_terminal: &mut open,
         open_url: &mut open_url,
         open_config: &mut config,
+        open_chat: &mut chat,
         preview: &mut preview,
         tab_op: &mut tab_op,
         close_tab: &mut close,

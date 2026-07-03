@@ -368,6 +368,7 @@ fn a_right_click_on_a_switch_tab_opens_a_menu_and_runs_the_selected_action() {
     let mut close: fn(&mut HomeState, &Path) = noop_close;
     let mut save_resume = |_: &str, _: ResumeLevel| {};
     let mut save_last_active = |_: &[(String, DateTime<Utc>)]| {};
+    let mut chat: fn(&Term) -> Result<()> = noop_chat;
     let mut wiring = Wiring {
         interaction_epoch: 0,
         workspace_root: Path::new("/ws"),
@@ -384,6 +385,7 @@ fn a_right_click_on_a_switch_tab_opens_a_menu_and_runs_the_selected_action() {
         open_terminal: &mut open,
         open_url: &mut open_url,
         open_config: &mut config,
+        open_chat: &mut chat,
         preview: &mut preview,
         tab_op: &mut tab_op,
         close_tab: &mut close,
@@ -474,6 +476,7 @@ fn run_switch_tab_menu_inputs(after_open: Vec<io::Result<Input>>) -> Vec<TabMenu
     let mut close: fn(&mut HomeState, &Path) = noop_close;
     let mut save_resume = |_: &str, _: ResumeLevel| {};
     let mut save_last_active = |_: &[(String, DateTime<Utc>)]| {};
+    let mut chat: fn(&Term) -> Result<()> = noop_chat;
     let mut wiring = Wiring {
         interaction_epoch: 0,
         workspace_root: Path::new("/ws"),
@@ -490,6 +493,7 @@ fn run_switch_tab_menu_inputs(after_open: Vec<io::Result<Input>>) -> Vec<TabMenu
         open_terminal: &mut open,
         open_url: &mut open_url,
         open_config: &mut config,
+        open_chat: &mut chat,
         preview: &mut preview,
         tab_op: &mut tab_op,
         close_tab: &mut close,
@@ -625,6 +629,7 @@ fn right_click_tab_paths_cover_focus_and_attached_modes() {
         let mut close: fn(&mut HomeState, &Path) = noop_close;
         let mut save_resume = |_: &str, _: ResumeLevel| {};
         let mut save_last_active = |_: &[(String, DateTime<Utc>)]| {};
+        let mut chat: fn(&Term) -> Result<()> = noop_chat;
         let mut wiring = Wiring {
             interaction_epoch: 0,
             workspace_root: Path::new("/ws"),
@@ -641,6 +646,7 @@ fn right_click_tab_paths_cover_focus_and_attached_modes() {
             open_terminal: &mut open,
             open_url: &mut open_url,
             open_config: &mut config,
+            open_chat: &mut chat,
             preview: &mut preview,
             tab_op: &mut tab_op,
             close_tab: &mut close,
