@@ -176,22 +176,33 @@ impl LoadingIndicator {
 /// (`interaction_epoch` unchanged), the same auto-focus rule background session
 /// create / close already use. Any interaction before it is ready cancels the
 /// move and leaves the new tab as an ordinary background pane.
+/// It advances through two phases the event loop drives (see
+/// [`HomeState::advance_pending_pane`]):
+///
+/// - **Resolving** — the launch's per-worktree environment (`op://` secrets) is
+///   being resolved on a background thread, so no pool pane exists yet. A
+///   placeholder chip (`placeholder`) is shown at the strip's end and animated,
+///   the same way the `+ new` chip is a synthetic, pool-less tab.
+/// - **Starting** — the environment arrived and the pane was spawned into the
+///   pool; `placeholder` is cleared and `tab` tracks the real chip until the
+///   shell paints and the loop moves to it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingPane {
-    /// The session (worktree) the pane was spawned in.
+    /// The session (worktree) the pane is being opened in.
     dir: PathBuf,
-    /// The pool's stable id for the spawned pane, so the poll tracks exactly it
-    /// even as tabs are added / closed around it.
-    pane_id: u64,
     /// The interaction counter captured at dispatch; the move happens only while
     /// it still matches [`Wiring`](super::event)'s live counter.
     interaction_epoch: u64,
     /// The animation tick for the loading chip, advanced on each poll.
     frame: usize,
-    /// The chip's current tab index, refreshed from the pool each poll (a
-    /// concurrent close can shift it). `None` until the first poll resolves it —
-    /// the renderer only animates a chip once its index is known.
+    /// The chip's current tab index, refreshed each poll (a concurrent close can
+    /// shift it). `None` until the first poll resolves it — the renderer only
+    /// animates a chip once its index is known.
     tab: Option<usize>,
+    /// The synthetic chip's label while resolving (before a pool pane exists);
+    /// `None` once the pane is spawned (Starting phase reads its label from the
+    /// pool tab strip instead).
+    placeholder: Option<String>,
 }
 
 impl PendingPane {
@@ -200,14 +211,16 @@ impl PendingPane {
         &self.dir
     }
 
-    /// The pool's stable id for the loading pane.
-    pub fn pane_id(&self) -> u64 {
-        self.pane_id
-    }
-
     /// The interaction counter captured when the pane was dispatched.
     pub fn interaction_epoch(&self) -> u64 {
         self.interaction_epoch
+    }
+
+    /// The placeholder chip label to draw at the strip's end while the launch's
+    /// environment is still resolving (no pool pane yet); `None` once the pane has
+    /// spawned and carries its own tab label.
+    pub fn placeholder(&self) -> Option<&str> {
+        self.placeholder.as_deref()
     }
 }
 
@@ -2245,28 +2258,40 @@ impl HomeState {
         self.loading.as_ref()
     }
 
-    /// Begin tracking a background pane whose tab loads in the strip: `dir` /
-    /// `pane_id` identify the spawned pane, `agent` records its kind, and
-    /// `interaction_epoch` is the counter captured at dispatch (the move to the
-    /// new tab happens only while it stays unchanged). The chip starts un-placed
-    /// (`tab: None`) and un-animated (`frame: 0`) until the first poll.
-    pub fn begin_pending_pane(&mut self, dir: PathBuf, pane_id: u64, interaction_epoch: u64) {
+    /// Begin tracking a background pane launch whose tab loads in the strip: `dir`
+    /// is the session and `interaction_epoch` is the counter captured at dispatch
+    /// (the move to the new tab happens only while it stays unchanged). It starts
+    /// in the **Resolving** phase — no pool pane exists yet while the launch's
+    /// environment resolves — so `placeholder` is the synthetic chip label to draw
+    /// at the strip's end. The chip starts un-placed (`tab: None`) and un-animated
+    /// (`frame: 0`) until the first poll.
+    pub fn begin_pending_pane(
+        &mut self,
+        dir: PathBuf,
+        interaction_epoch: u64,
+        placeholder: String,
+    ) {
         self.pending_pane = Some(PendingPane {
             dir,
-            pane_id,
             interaction_epoch,
             frame: 0,
             tab: None,
+            placeholder: Some(placeholder),
         });
     }
 
     /// Advance the pending pane's loading animation one tick and refresh the tab
-    /// index its chip sits at (from the pool, which the caller has just polled).
-    /// A no-op when nothing is pending.
-    pub fn step_pending_pane(&mut self, tab: usize) {
+    /// index its chip sits at. `resolving` distinguishes the phase: while `true`
+    /// the chip is the synthetic placeholder at the strip's end (the pane has not
+    /// spawned yet); once `false` the pane is in the pool, so its placeholder is
+    /// dropped and `tab` tracks the real chip. A no-op when nothing is pending.
+    pub fn advance_pending_pane(&mut self, tab: usize, resolving: bool) {
         if let Some(p) = self.pending_pane.as_mut() {
             p.frame += 1;
             p.tab = Some(tab);
+            if !resolving {
+                p.placeholder = None;
+            }
         }
     }
 

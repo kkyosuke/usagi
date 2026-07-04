@@ -3004,7 +3004,10 @@ fn focus_pane(state: &HomeState, width: usize, rows: usize) -> Vec<String> {
     };
     let combined = TabStrip { labels, active };
     let header = active_session_header(state);
-    let mut lines = header_tab_rows(header, Some(&combined), None, width);
+    // A background pane loading in this session animates its chip here (the
+    // resolving placeholder chip is appended to the published strip by the loop; a
+    // spawned pane's chip sits at its pool index).
+    let mut lines = header_tab_rows(header, Some(&combined), state.loading_tab(), width);
 
     // On the "+ new" tab the launch surface (Menu or Prompt) floats as an overlay
     // modal (see [`HomeState::focus_action_overlay`]), so only the tab strip shows

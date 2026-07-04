@@ -69,10 +69,11 @@ fn run_update(keys: Vec<Key>) -> (Outcome, u32) {
     let mut unite_resolve = no_unite_resolve;
     let mut tab_action = |_: &mut HomeState, _: &Path, _: usize, _: TabMenuAction| {};
     let mut chat_ask = ready_chat_ask;
-    let mut spawn_pane_bg: fn(&mut HomeState, &Path, bool) -> anyhow::Result<Option<u64>> =
-        noop_spawn_pane_bg;
-    let mut poll_pending: fn(&Path, u64) -> Option<(usize, bool)> = noop_poll_pending;
-    let mut activate_pane: fn(&Path, u64) -> bool = noop_activate_pane;
+    let mut start_pending_spawn: fn(&mut HomeState, &Path, bool) -> anyhow::Result<StartPending> =
+        noop_start_pending_spawn;
+    let mut poll_pending_spawn: fn(&Path) -> PendingPoll = noop_poll_pending_spawn;
+    let mut activate_pending: fn(&Path) -> bool = noop_activate_pending;
+    let mut clear_pending_spawn: fn() = noop_clear_pending_spawn;
     let mut wiring = Wiring {
         interaction_epoch: 0,
         watch_sessions: false,
@@ -89,9 +90,10 @@ fn run_update(keys: Vec<Key>) -> (Outcome, u32) {
         evict_pool: &mut evict,
         existing_branches: &mut branches,
         open_terminal: &mut open,
-        spawn_pane_bg: &mut spawn_pane_bg,
-        poll_pending: &mut poll_pending,
-        activate_pane: &mut activate_pane,
+        start_pending_spawn: &mut start_pending_spawn,
+        poll_pending_spawn: &mut poll_pending_spawn,
+        activate_pending: &mut activate_pending,
+        clear_pending_spawn: &mut clear_pending_spawn,
         open_url: &mut open_url,
         open_external_terminal: &mut open_external_terminal,
         open_config: &mut config,

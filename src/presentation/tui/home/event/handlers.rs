@@ -22,8 +22,8 @@ use super::super::state::{HomeState, ModalSize, PaneExit, ReturnMode, ROOT_NAME}
 use super::super::terminal::tabs::TabNav;
 use super::super::ui;
 use super::{
-    paint_now, selected_diff, selected_dir, Flow, Wiring, CTRL_CARET, CTRL_E, CTRL_N, CTRL_O,
-    CTRL_P, CTRL_S,
+    paint_now, selected_diff, selected_dir, Flow, StartPending, Wiring, CTRL_CARET, CTRL_E, CTRL_N,
+    CTRL_O, CTRL_P, CTRL_S,
 };
 
 /// Minimum time the launch loader stays visible before a fresh pane spawn begins.
@@ -1370,21 +1370,24 @@ fn launch_pane(
         open_pane(term, state, painter, wiring, agent, true, false);
         return;
     }
-    // The session already shows tabs: add the pane in the background so its tab
-    // appears in the strip and animates while its shell starts, instead of
-    // blocking on the spawn. The event loop moves to it once ready — unless the
-    // user acts first (see [`HomeState::begin_pending_pane`]). Reusing an existing
-    // agent tab opens no new pane, so attach it right away instead.
-    match (wiring.spawn_pane_bg)(state, &dir, agent) {
-        Ok(Some(id)) => {
+    // The session already shows tabs: dispatch the pane in the background so its
+    // tab appears in the strip and animates (including while its `op://` env
+    // resolves) instead of blocking on the spawn or painting a centre loader. The
+    // event loop moves to it once ready — unless the user acts first (see
+    // [`HomeState::begin_pending_pane`]). Reusing an existing agent tab opens no new
+    // pane, so attach it right away instead.
+    match (wiring.start_pending_spawn)(state, &dir, agent) {
+        Ok(StartPending::Pending { label }) => {
             let epoch = wiring.interaction_epoch;
-            state.begin_pending_pane(dir, id, epoch);
-            // Zoom out to 切替 on the same session to watch the tab load: its
-            // preview shows the current pane with the new tab animating above it,
-            // and any keypress there cancels the auto-move (it bumps the epoch).
-            state.enter_switch(ReturnMode::Focus);
+            state.begin_pending_pane(dir, epoch, label);
+            // Close the 在席 action surface and drop back onto the current pane's
+            // tab, so its preview stays on screen with the new tab loading in the
+            // strip above it. Any keypress here cancels the auto-move (it bumps the
+            // epoch); staying in 在席 keeps the loop monitoring the launch.
+            state.focus_discard_new_tab();
+            state.close_focus_action_over_pane();
         }
-        Ok(None) => reattach_pane(term, state, painter, wiring),
+        Ok(StartPending::Reused) => reattach_pane(term, state, painter, wiring),
         Err(e) => state.log_error(format!("failed to launch: {e}")),
     }
 }
